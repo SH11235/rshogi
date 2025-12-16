@@ -19,6 +19,8 @@ struct UsiEngine {
     child: Child,
     stdin: BufWriter<ChildStdin>,
     rx: Receiver<String>,
+    /// stdout 読み込みスレッドのハンドル
+    reader_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl Drop for UsiEngine {
@@ -30,8 +32,13 @@ impl Drop for UsiEngine {
         // プロセスが終了するまで少し待つ
         thread::sleep(Duration::from_millis(100));
 
-        // まだ終了していなければ強制終了
+        // まだ終了していなければ強制終了（これにより stdout が閉じられる）
         let _ = self.child.kill();
+
+        // リーダースレッドの終了を待つ（stdout が閉じられれば終了する）
+        if let Some(handle) = self.reader_handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -56,18 +63,26 @@ impl UsiEngine {
 
         let stdout = child.stdout.take().context("Failed to get engine stdout")?;
 
-        // 非同期読み込みスレッド
+        // 非同期読み込みスレッド（名前付きで管理しやすく）
         let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines().map_while(Result::ok) {
-                if tx.send(line).is_err() {
-                    break;
+        let reader_handle = thread::Builder::new()
+            .name("usi-reader".to_string())
+            .spawn(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines().map_while(Result::ok) {
+                    if tx.send(line).is_err() {
+                        break;
+                    }
                 }
-            }
-        });
+            })
+            .context("Failed to spawn reader thread")?;
 
-        let mut engine = UsiEngine { child, stdin, rx };
+        let mut engine = UsiEngine {
+            child,
+            stdin,
+            rx,
+            reader_handle: Some(reader_handle),
+        };
 
         // USI初期化
         engine.send("usi")?;
@@ -121,11 +136,25 @@ impl UsiEngine {
         let mut last_info = InfoSnapshot::default();
         let start = Instant::now();
 
+        // 制限タイプに応じた適切なタイムアウトを設定
+        let timeout = match limit_type {
+            LimitType::Movetime => {
+                // movetime の 2 倍 + 5 秒のマージン
+                Duration::from_millis(limit * 2 + 5000)
+            }
+            LimitType::Depth | LimitType::Nodes => {
+                // depth/nodes は時間予測が難しいため保守的に 5 分
+                Duration::from_secs(300)
+            }
+        };
+
         loop {
-            let line = self
-                .rx
-                .recv_timeout(Duration::from_secs(600))
-                .context("Timeout waiting for engine response")?;
+            let line = self.rx.recv_timeout(timeout).with_context(|| {
+                format!(
+                    "Timeout after {:?} waiting for engine response (limit_type={:?}, limit={})",
+                    timeout, limit_type, limit
+                )
+            })?;
 
             if line.starts_with("info") {
                 last_info.update_from_line(&line);
