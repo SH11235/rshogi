@@ -4,10 +4,11 @@
 
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
+use chrono::Local;
 use clap::{Parser, ValueEnum};
 
-use tools::{run_internal_benchmark, BenchmarkConfig, LimitType};
+use tools::{runner, BenchmarkConfig, LimitType};
 
 /// 将棋エンジン汎用ベンチマークツール
 #[derive(Parser, Debug)]
@@ -42,9 +43,9 @@ struct Cli {
     #[arg(long, default_value = "1")]
     iterations: u32,
 
-    /// JSON形式で結果を出力
-    #[arg(long)]
-    json: Option<PathBuf>,
+    /// 結果JSONの出力ディレクトリ（デフォルト: ./benchmark_results）
+    #[arg(long, default_value = "./benchmark_results")]
+    output_dir: PathBuf,
 
     /// 詳細なinfo行を標準出力に表示
     #[arg(long, short = 'v')]
@@ -92,25 +93,67 @@ impl Cli {
     }
 }
 
+/// 自動生成されるファイル名を作成
+/// 形式: YYYYMMDDhhmmss_enginename_threads.json
+fn generate_output_filename(engine_name: &str, threads: &[usize]) -> String {
+    let timestamp = Local::now().format("%Y%m%d%H%M%S");
+    let threads_str = threads.iter().map(|t| t.to_string()).collect::<Vec<_>>().join("-");
+
+    // ファイル名に使えない文字を除去
+    let safe_engine_name: String = engine_name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    format!("{timestamp}_{safe_engine_name}_{threads_str}.json")
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // 実行モード判定
-    let report = if cli.internal || cli.engine.is_none() {
-        println!("Running internal API mode...");
-        run_internal_benchmark(&cli.to_config())?
+    // エンジン名を取得（ファイル名生成用）
+    let engine_name = if cli.internal || cli.engine.is_none() {
+        "internal".to_string()
     } else {
-        return Err(anyhow!(
-            "USI mode not yet implemented. Use --internal flag or omit --engine option."
-        ));
+        cli.engine
+            .as_ref()
+            .unwrap()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string()
     };
 
-    // 結果出力
-    if let Some(json_path) = &cli.json {
-        report.save_json(json_path)?;
-        println!("\nResults saved to: {}", json_path.display());
+    // 実行モード判定
+    let report = if cli.internal || cli.engine.is_none() {
+        // 内部APIモード
+        println!("Running internal API mode...");
+        runner::internal::run_internal_benchmark(&cli.to_config())?
+    } else {
+        // USIモード
+        let engine_path = cli.engine.as_ref().unwrap();
+        println!("Running USI mode with engine: {}", engine_path.display());
+        runner::usi::run_usi_benchmark(&cli.to_config(), engine_path)?
+    };
+
+    // 出力ディレクトリを作成（存在しない場合）
+    if !cli.output_dir.exists() {
+        std::fs::create_dir_all(&cli.output_dir)?;
     }
 
+    // 結果を常にファイル出力
+    let output_filename = generate_output_filename(&engine_name, &cli.threads);
+    let output_path = cli.output_dir.join(&output_filename);
+    report.save_json(&output_path)?;
+    println!("\nResults saved to: {}", output_path.display());
+
+    // コンソール出力
     if cli.verbose {
         report.print_detailed();
     } else {
