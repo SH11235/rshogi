@@ -141,7 +141,7 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: packages/rust-core
+          workspaces: "packages/rust-core -> target"
           cache-on-failure: true
           shared-key: "rust-wasm-build"
           save-if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
