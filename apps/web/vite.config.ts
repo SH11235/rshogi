@@ -33,5 +33,9 @@ export default defineConfig(({ command }) => ({
                 replacement: path.resolve(rootDir, "../../packages/engine-wasm/src"),
             },
         ],
+        // React の重複インスタンスを防ぐ保険として dedupe を設定
+        // バージョンが統一されていれば影響はないが、将来の安全性のため明示的に指定
+        // ※ React バージョンを統一する場合: pnpm update react@X.X.X react-dom@X.X.X -r --filter "@shogi/*"
+        dedupe: ["react", "react-dom"],
     },
 }));
