@@ -1,10 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-    type BoardState,
-    type Hand,
-    type Hands,
-    type ParsedMove,
-    type PositionState,
     applyMove,
     applyMoveWithState,
     boardFromMoves,
@@ -13,6 +8,8 @@ import {
     createInitialBoard,
     createInitialPositionState,
     getAllSquares,
+    type Hands,
+    type PositionState,
     parseMove,
     replayMoves,
 } from "./board";
@@ -32,16 +29,16 @@ const createMockPositionService = (): PositionService => {
         async getInitialBoard() {
             return initialPosition;
         },
-        async parseSfen(sfen: string) {
+        async parseSfen(_sfen: string) {
             return initialPosition;
         },
-        async boardToSfen(position: PositionState) {
+        async boardToSfen(_position: PositionState) {
             return "startpos";
         },
-        async getLegalMoves(sfen: string, moves?: string[]) {
+        async getLegalMoves(_sfen: string, _moves?: string[]) {
             return [];
         },
-        async replayMovesStrict(sfen: string, moves: string[]) {
+        async replayMovesStrict(_sfen: string, moves: string[]) {
             return {
                 applied: moves,
                 lastPly: moves.length,

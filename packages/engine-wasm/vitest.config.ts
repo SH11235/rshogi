@@ -5,4 +5,10 @@ export default defineConfig({
         environment: "node",
         globals: true,
     },
+    resolve: {
+        alias: {
+            "../pkg/engine_wasm.js": new URL("./src/__mocks__/engine-wasm-pkg.ts", import.meta.url)
+                .pathname,
+        },
+    },
 });

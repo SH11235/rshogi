@@ -13,30 +13,30 @@ describe("position-service-registry", () => {
             const mockService: PositionService = {
                 async getInitialBoard() {
                     return {
-                        board: {} as any,
+                        board: {} as Record<string, never>,
                         hands: { sente: {}, gote: {} },
                         turn: "sente",
                     };
                 },
-                async parseSfen(sfen: string) {
+                async parseSfen(_sfen: string) {
                     return {
-                        board: {} as any,
+                        board: {} as Record<string, never>,
                         hands: { sente: {}, gote: {} },
                         turn: "sente",
                     };
                 },
-                async boardToSfen(position) {
+                async boardToSfen(_position) {
                     return "startpos";
                 },
-                async getLegalMoves(sfen: string, moves?: string[]) {
+                async getLegalMoves(_sfen: string, _moves?: string[]) {
                     return [];
                 },
-                async replayMovesStrict(sfen: string, moves: string[]) {
+                async replayMovesStrict(_sfen: string, moves: string[]) {
                     return {
                         applied: moves,
                         lastPly: moves.length,
                         position: {
-                            board: {} as any,
+                            board: {} as Record<string, never>,
                             hands: { sente: {}, gote: {} },
                             turn: "sente",
                         },
@@ -57,30 +57,30 @@ describe("position-service-registry", () => {
             const mockService: PositionService = {
                 async getInitialBoard() {
                     return {
-                        board: {} as any,
+                        board: {} as Record<string, never>,
                         hands: { sente: {}, gote: {} },
                         turn: "sente",
                     };
                 },
-                async parseSfen(sfen: string) {
+                async parseSfen(_sfen: string) {
                     return {
-                        board: {} as any,
+                        board: {} as Record<string, never>,
                         hands: { sente: {}, gote: {} },
                         turn: "sente",
                     };
                 },
-                async boardToSfen(position) {
+                async boardToSfen(_position) {
                     return "startpos";
                 },
-                async getLegalMoves(sfen: string, moves?: string[]) {
+                async getLegalMoves(_sfen: string, _moves?: string[]) {
                     return [];
                 },
-                async replayMovesStrict(sfen: string, moves: string[]) {
+                async replayMovesStrict(_sfen: string, moves: string[]) {
                     return {
                         applied: moves,
                         lastPly: moves.length,
                         position: {
-                            board: {} as any,
+                            board: {} as Record<string, never>,
                             hands: { sente: {}, gote: {} },
                             turn: "sente",
                         },
@@ -104,30 +104,30 @@ describe("position-service-registry", () => {
             const mockService1: PositionService = {
                 async getInitialBoard() {
                     return {
-                        board: {} as any,
+                        board: {} as Record<string, never>,
                         hands: { sente: {}, gote: {} },
                         turn: "sente",
                     };
                 },
-                async parseSfen(sfen: string) {
+                async parseSfen(_sfen: string) {
                     return {
-                        board: {} as any,
+                        board: {} as Record<string, never>,
                         hands: { sente: {}, gote: {} },
                         turn: "sente",
                     };
                 },
-                async boardToSfen(position) {
+                async boardToSfen(_position) {
                     return "startpos1";
                 },
-                async getLegalMoves(sfen: string, moves?: string[]) {
+                async getLegalMoves(_sfen: string, _moves?: string[]) {
                     return [];
                 },
-                async replayMovesStrict(sfen: string, moves: string[]) {
+                async replayMovesStrict(_sfen: string, moves: string[]) {
                     return {
                         applied: moves,
                         lastPly: moves.length,
                         position: {
-                            board: {} as any,
+                            board: {} as Record<string, never>,
                             hands: { sente: {}, gote: {} },
                             turn: "sente",
                         },
@@ -138,30 +138,30 @@ describe("position-service-registry", () => {
             const mockService2: PositionService = {
                 async getInitialBoard() {
                     return {
-                        board: {} as any,
+                        board: {} as Record<string, never>,
                         hands: { sente: {}, gote: {} },
                         turn: "sente",
                     };
                 },
-                async parseSfen(sfen: string) {
+                async parseSfen(_sfen: string) {
                     return {
-                        board: {} as any,
+                        board: {} as Record<string, never>,
                         hands: { sente: {}, gote: {} },
                         turn: "sente",
                     };
                 },
-                async boardToSfen(position) {
+                async boardToSfen(_position) {
                     return "startpos2";
                 },
-                async getLegalMoves(sfen: string, moves?: string[]) {
+                async getLegalMoves(_sfen: string, _moves?: string[]) {
                     return [];
                 },
-                async replayMovesStrict(sfen: string, moves: string[]) {
+                async replayMovesStrict(_sfen: string, moves: string[]) {
                     return {
                         applied: moves,
                         lastPly: moves.length,
                         position: {
-                            board: {} as any,
+                            board: {} as Record<string, never>,
                             hands: { sente: {}, gote: {} },
                             turn: "sente",
                         },
