@@ -1,32 +1,47 @@
-@import "@shogi/design-system/theme.css";
-
 /* Tailwind CSS 4.x の新記法: @import でインポート */
 /* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind CSS 4 import */
 @import "tailwindcss";
 
-:root {
-    font-family: var(--font-sans, "Inter", "Noto Sans JP", system-ui, sans-serif);
-    background-color: hsl(var(--background, 0 0% 98%));
-    color: hsl(var(--foreground, 222 47% 11%));
-}
+/* Tailwind v4: @config と @source は @import の後に配置 */
+/* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind CSS 4 config */
+@config "../tailwind.config.ts";
 
-*,
-*::before,
-*::after {
-    box-sizing: border-box;
-}
+/* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind CSS 4 source */
+@source "./**/*.{ts,tsx}";
+/* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind CSS 4 source */
+@source "../index.html";
+/* biome-ignore lint/suspicious/noUnknownAtRules: Tailwind CSS 4 source */
+@source "../../../packages/ui/src/**/*.{ts,tsx}";
 
-body {
-    margin: 0;
-    min-height: 100vh;
-    background:
-        radial-gradient(circle at 20% 20%, rgba(255, 214, 170, 0.26), transparent 32%),
-        radial-gradient(circle at 80% 0%, rgba(255, 155, 106, 0.18), transparent 28%),
-        hsl(var(--background, 0 0% 98%));
-    color: hsl(var(--foreground, 222 47% 11%));
-}
+/* theme.css は @import "tailwindcss" の後に読み込む（@layer base を使用するため） */
+@import "@shogi/design-system/theme.css";
 
-a {
-    color: inherit;
-    text-decoration: none;
+/* アプリ固有のベーススタイル */
+@layer base {
+    :root {
+        font-family: var(--font-sans, "Inter", "Noto Sans JP", system-ui, sans-serif);
+        background-color: hsl(var(--background, 0 0% 98%));
+        color: hsl(var(--foreground, 222 47% 11%));
+    }
+
+    *,
+    *::before,
+    *::after {
+        box-sizing: border-box;
+    }
+
+    body {
+        margin: 0;
+        min-height: 100vh;
+        background:
+            radial-gradient(circle at 20% 20%, rgba(255, 214, 170, 0.26), transparent 32%),
+            radial-gradient(circle at 80% 0%, rgba(255, 155, 106, 0.18), transparent 28%),
+            hsl(var(--background, 0 0% 98%));
+        color: hsl(var(--foreground, 222 47% 11%));
+    }
+
+    a {
+        color: inherit;
+        text-decoration: none;
+    }
 }

@@ -1,5 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
@@ -12,7 +13,7 @@ export default defineConfig(({ command }) => ({
     // - ビルド時 (pnpm build): "/shogi/" で GitHub Pages のリポジトリページに対応
     // command === "build" による判定は Vite 公式の推奨方法で、環境変数の追加設定は不要
     base: command === "build" ? "/shogi/" : "/",
-    plugins: [react()],
+    plugins: [tailwindcss(), react()],
     resolve: {
         alias: [
             {
