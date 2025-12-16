@@ -4,12 +4,15 @@ import { createWasmEngineClient } from "./index";
 
 describe("createWasmEngineClient", () => {
     let mockWorker: {
-        postMessage: ReturnType<typeof vi.fn>;
-        terminate: ReturnType<typeof vi.fn>;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        postMessage: any;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        terminate: any;
         onmessage: ((event: MessageEvent) => void) | null;
         onerror: ((error: ErrorEvent) => void) | null;
     };
-    let mockWorkerFactory: ReturnType<typeof vi.fn>;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let mockWorkerFactory: any;
 
     beforeEach(() => {
         mockWorker = {
@@ -236,8 +239,8 @@ describe("createWasmEngineClient", () => {
 
             // 複数イベントを発行
             const eventList: EngineEvent[] = [
-                { type: "info", depth: 1, score: 100 },
-                { type: "info", depth: 2, score: 150 },
+                { type: "info", depth: 1, scoreCp: 100 },
+                { type: "info", depth: 2, scoreCp: 150 },
             ];
             mockWorker.onmessage?.({
                 data: { type: "events", payload: eventList },

@@ -4,14 +4,21 @@
 import { vi } from "vitest";
 
 // Mock the WASM module initialization
-export default vi.fn().mockResolvedValue(undefined);
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const mockDefault: any = vi.fn().mockResolvedValue(undefined);
+export default mockDefault;
 
 // Mock WASM functions
-export const wasm_get_initial_board = vi.fn().mockReturnValue({});
-export const wasm_parse_sfen_to_board = vi.fn().mockReturnValue({});
-export const wasm_board_to_sfen = vi.fn().mockReturnValue("startpos");
-export const wasm_get_legal_moves = vi.fn().mockReturnValue([]);
-export const wasm_replay_moves_strict = vi.fn().mockReturnValue({
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export const wasm_get_initial_board: any = vi.fn().mockReturnValue({});
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export const wasm_parse_sfen_to_board: any = vi.fn().mockReturnValue({});
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export const wasm_board_to_sfen: any = vi.fn().mockReturnValue("startpos");
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export const wasm_get_legal_moves: any = vi.fn().mockReturnValue([]);
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export const wasm_replay_moves_strict: any = vi.fn().mockReturnValue({
     applied: [],
     last_ply: 0,
     board: {},

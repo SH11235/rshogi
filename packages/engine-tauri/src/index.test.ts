@@ -3,9 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTauriEngineClient, getLegalMoves } from "./index";
 
 describe("createTauriEngineClient", () => {
-    let mockInvoke: ReturnType<typeof vi.fn>;
-    let mockListen: ReturnType<typeof vi.fn>;
-    let mockUnlisten: ReturnType<typeof vi.fn>;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let mockInvoke: any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let mockListen: any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let mockUnlisten: any;
 
     beforeEach(() => {
         mockInvoke = vi.fn();
@@ -128,7 +131,8 @@ describe("createTauriEngineClient", () => {
             let eventCallback: ((evt: { payload: EngineEvent }) => void) | null = null;
 
             mockInvoke.mockResolvedValue(undefined);
-            mockListen.mockImplementation((_eventName, callback) => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            mockListen.mockImplementation((_eventName: any, callback: any) => {
                 eventCallback = callback;
                 return Promise.resolve(mockUnlisten);
             });
@@ -147,7 +151,9 @@ describe("createTauriEngineClient", () => {
                 type: "bestmove",
                 move: "7g7f",
             };
-            eventCallback?.({ payload: event });
+            if (eventCallback) {
+                (eventCallback as (evt: { payload: EngineEvent }) => void)({ payload: event });
+            }
 
             expect(handler).toHaveBeenCalledWith(event);
         });
@@ -156,7 +162,8 @@ describe("createTauriEngineClient", () => {
             let eventCallback: ((evt: { payload: EngineEvent }) => void) | null = null;
 
             mockInvoke.mockResolvedValue(undefined);
-            mockListen.mockImplementation((_eventName, callback) => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            mockListen.mockImplementation((_eventName: any, callback: any) => {
                 eventCallback = callback;
                 return Promise.resolve(mockUnlisten);
             });
@@ -178,7 +185,9 @@ describe("createTauriEngineClient", () => {
                 type: "bestmove",
                 move: "7g7f",
             };
-            eventCallback?.({ payload: event });
+            if (eventCallback) {
+                (eventCallback as (evt: { payload: EngineEvent }) => void)({ payload: event });
+            }
 
             // ハンドラは呼ばれない
             expect(handler).not.toHaveBeenCalled();
@@ -263,7 +272,8 @@ describe("createTauriEngineClient", () => {
 });
 
 describe("getLegalMoves", () => {
-    let mockInvoke: ReturnType<typeof vi.fn>;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let mockInvoke: any;
 
     beforeEach(() => {
         mockInvoke = vi.fn();
