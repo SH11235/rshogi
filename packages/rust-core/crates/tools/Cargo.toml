@@ -1,0 +1,26 @@
+[package]
+name = "tools"
+version = "0.1.0"
+edition = "2021"
+authors = ["sh11235"]
+description = "Performance benchmarking and analysis tools for shogi engine"
+license = "MIT"
+repository = "https://github.com/sh11235/shogi"
+
+[dependencies]
+# Workspace dependencies
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+
+# Local dependencies
+engine-core = { path = "../engine-core" }
+
+# Additional dependencies
+sysinfo = "0.33"
+
+[[bin]]
+name = "benchmark"
+path = "src/bin/benchmark.rs"
