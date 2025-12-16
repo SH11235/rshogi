@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 
 use crate::bitboard::{
@@ -8,7 +9,7 @@ use crate::position::Position;
 use crate::types::{Color, Piece, PieceType, Square, Value};
 
 /// Material評価の適用レベル（YaneuraOu MaterialLv に対応）
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaterialLevel {
     Lv1,
     Lv2,
@@ -19,12 +20,52 @@ pub enum MaterialLevel {
     Lv9,
 }
 
-impl MaterialLevel {}
+impl MaterialLevel {
+    /// レベル値から MaterialLevel を取得
+    pub fn from_value(v: u8) -> Option<Self> {
+        match v {
+            1 => Some(MaterialLevel::Lv1),
+            2 => Some(MaterialLevel::Lv2),
+            3 => Some(MaterialLevel::Lv3),
+            4 => Some(MaterialLevel::Lv4),
+            7 => Some(MaterialLevel::Lv7),
+            8 => Some(MaterialLevel::Lv8),
+            9 => Some(MaterialLevel::Lv9),
+            _ => None,
+        }
+    }
+
+    /// レベル値を取得
+    pub fn value(self) -> u8 {
+        match self {
+            MaterialLevel::Lv1 => 1,
+            MaterialLevel::Lv2 => 2,
+            MaterialLevel::Lv3 => 3,
+            MaterialLevel::Lv4 => 4,
+            MaterialLevel::Lv7 => 7,
+            MaterialLevel::Lv8 => 8,
+            MaterialLevel::Lv9 => 9,
+        }
+    }
+}
 
 /// デフォルトのMaterial評価レベル（YaneuraOu MaterialLv9 相当）
-///
-/// USIオプション等で切り替えたい場合は、この定数を参照するように分岐を追加する。
-pub const MATERIAL_LEVEL: MaterialLevel = MaterialLevel::Lv9;
+pub const DEFAULT_MATERIAL_LEVEL: MaterialLevel = MaterialLevel::Lv9;
+
+/// ランタイムで切り替え可能なMaterial評価レベル
+/// 値は MaterialLevel::value() の戻り値 (1, 2, 3, 4, 7, 8, 9)
+static MATERIAL_LEVEL: AtomicU8 = AtomicU8::new(9);
+
+/// 現在のMaterial評価レベルを取得
+pub fn get_material_level() -> MaterialLevel {
+    let v = MATERIAL_LEVEL.load(Ordering::Relaxed);
+    MaterialLevel::from_value(v).unwrap_or(DEFAULT_MATERIAL_LEVEL)
+}
+
+/// Material評価レベルを設定
+pub fn set_material_level(level: MaterialLevel) {
+    MATERIAL_LEVEL.store(level.value(), Ordering::Relaxed);
+}
 
 /// Apery(WCSC26)準拠の駒価値
 pub(crate) fn base_piece_value(pt: PieceType) -> i32 {
@@ -463,7 +504,8 @@ fn eval_lv7_like(
 
 /// Material評価（NNUE未初期化時のフォールバック）
 pub fn evaluate_material(pos: &Position) -> Value {
-    let raw = match MATERIAL_LEVEL {
+    let level = get_material_level();
+    let raw = match level {
         MaterialLevel::Lv1 => eval_lv1(pos),
         MaterialLevel::Lv2 => eval_lv2(pos),
         MaterialLevel::Lv3 => {

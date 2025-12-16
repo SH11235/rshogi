@@ -6,8 +6,31 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::config::EvalConfig;
 use crate::system::SystemInfo;
 use crate::utils::format_number;
+
+/// 評価関数情報（JSON出力用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalInfo {
+    /// NNUE評価が有効か
+    pub nnue_enabled: bool,
+    /// NNUEファイルパス（使用時のみ）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nnue_file: Option<String>,
+    /// Material評価レベル
+    pub material_level: u8,
+}
+
+impl From<&EvalConfig> for EvalInfo {
+    fn from(config: &EvalConfig) -> Self {
+        EvalInfo {
+            nnue_enabled: config.nnue_file.is_some(),
+            nnue_file: config.nnue_file.as_ref().map(|p| p.display().to_string()),
+            material_level: config.material_level,
+        }
+    }
+}
 
 /// 単一局面のベンチマーク結果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +128,9 @@ pub struct BenchmarkReport {
     /// エンジンの実行パス（USI モード時のみ設定）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub engine_path: Option<String>,
+    /// 評価関数情報
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eval_info: Option<EvalInfo>,
     /// スレッド数別の結果リスト
     pub results: Vec<ThreadResult>,
 }

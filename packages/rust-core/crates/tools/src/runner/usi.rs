@@ -293,6 +293,7 @@ pub fn run_usi_benchmark(config: &BenchmarkConfig, engine_path: &Path) -> Result
         system_info: collect_system_info(),
         engine_name,
         engine_path: Some(engine_path.display().to_string()),
+        eval_info: None, // USI経由では評価関数情報は外部エンジン依存
         results: all_results,
     })
 }

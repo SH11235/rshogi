@@ -8,7 +8,7 @@ use anyhow::Result;
 use chrono::Local;
 use clap::{Parser, ValueEnum};
 
-use tools::{runner, BenchmarkConfig, LimitType};
+use tools::{runner, BenchmarkConfig, EvalConfig, LimitType};
 
 /// 将棋エンジン汎用ベンチマークツール
 #[derive(Parser, Debug)]
@@ -58,6 +58,14 @@ struct Cli {
     /// 内部API直接呼び出しモード（デバッグ用）
     #[arg(long)]
     internal: bool,
+
+    /// NNUEファイルのパス（指定時はNNUE評価を使用）
+    #[arg(long)]
+    nnue_file: Option<PathBuf>,
+
+    /// Material評価レベル（1, 2, 3, 4, 7, 8, 9）
+    #[arg(long, default_value = "9")]
+    material_level: u8,
 }
 
 /// CLI用の制限タイプ（clap ValueEnum対応）
@@ -89,6 +97,10 @@ impl Cli {
             sfens: self.sfens.clone(),
             iterations: self.iterations,
             verbose: self.verbose,
+            eval_config: EvalConfig {
+                nnue_file: self.nnue_file.clone(),
+                material_level: self.material_level,
+            },
         }
     }
 }
