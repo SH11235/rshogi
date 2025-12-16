@@ -193,7 +193,15 @@ pub fn init_stack_array() -> StackArray {
 ///
 /// 目的は「そのノードで試した全手の保存」ではなく、
 /// 「統計更新のための代表集合」の保存。
-pub struct SmallMoveList<const N: usize> {
+/// 固定長の指し手リスト
+///
+/// YaneuraOu準拠のSEARCHEDLIST_CAPACITY（32手）をベースに設計。
+/// ヒープ割り当てを避け、探索ホットパスでの性能を向上させる。
+///
+/// 目的は「そのノードで試した全手の保存」ではなく、
+/// 「統計更新のための代表集合」の保存。
+/// 例: history テーブルやkillerムーブの更新に使用する手のリスト。
+/// 32手を超える場合は古い統計情報で十分と判断される。
     buf: [Move; N],
     len: usize,
 }
