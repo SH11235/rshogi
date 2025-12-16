@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::thread;
 
 use anyhow::Result;
+use engine_core::eval::{set_material_level, MaterialLevel};
 use engine_core::position::Position;
 use engine_core::search::{init_search_module, LimitsType, Search, SearchInfo, SearchResult};
 use engine_core::types::Move;
@@ -130,6 +131,7 @@ impl UsiEngine {
         println!("option name Skill Level type spin default 20 min 0 max 20");
         println!("option name UCI_LimitStrength type check default false");
         println!("option name UCI_Elo type spin default 0 min 0 max 4000");
+        println!("option name MaterialLevel type combo default 9 var 1 var 2 var 3 var 4 var 7 var 8 var 9");
         println!("usiok");
     }
 
@@ -280,6 +282,17 @@ impl UsiEngine {
             "MultiPV" => {
                 if let Ok(v) = value.parse::<usize>() {
                     self.multi_pv = v;
+                }
+            }
+            "MaterialLevel" => {
+                if let Ok(v) = value.parse::<u8>() {
+                    if let Some(level) = MaterialLevel::from_value(v) {
+                        set_material_level(level);
+                    } else {
+                        eprintln!("info string Warning: Invalid MaterialLevel value {v}, ignored");
+                    }
+                } else {
+                    eprintln!("info string Warning: MaterialLevel parse error for '{value}'");
                 }
             }
             _ => {

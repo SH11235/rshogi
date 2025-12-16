@@ -4,12 +4,14 @@ use std::thread;
 
 use anyhow::{Context, Result};
 
+use engine_core::eval::{set_material_level, MaterialLevel};
+use engine_core::nnue::init_nnue;
 use engine_core::position::Position;
 use engine_core::search::{init_search_module, LimitsType, Search, SearchInfo};
 
 use crate::config::{BenchmarkConfig, LimitType};
 use crate::positions::load_positions;
-use crate::report::{BenchResult, BenchmarkReport, ThreadResult};
+use crate::report::{BenchResult, BenchmarkReport, EvalInfo, ThreadResult};
 use crate::system::collect_system_info;
 use crate::utils::SEARCH_STACK_SIZE;
 
@@ -17,6 +19,38 @@ use crate::utils::SEARCH_STACK_SIZE;
 pub fn run_internal_benchmark(config: &BenchmarkConfig) -> Result<BenchmarkReport> {
     // 探索モジュール初期化
     init_search_module();
+
+    // 評価関数設定
+    // 注意: MaterialLevelはNNUE初期化前に設定する必要がある
+    //       （NNUE未使用時のフォールバックとして使用されるため）
+    if let Some(level) = MaterialLevel::from_value(config.eval_config.material_level) {
+        set_material_level(level);
+        println!("MaterialLevel set to: {}", config.eval_config.material_level);
+    } else {
+        eprintln!(
+            "Warning: Invalid MaterialLevel {}, using default",
+            config.eval_config.material_level
+        );
+    }
+
+    // NNUE初期化（指定時のみ）
+    if let Some(nnue_path) = &config.eval_config.nnue_file {
+        match init_nnue(nnue_path) {
+            Ok(()) => {
+                println!("NNUE initialized from: {}", nnue_path.display());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // 既に初期化済みの場合はスキップ（OnceLock）
+                println!("NNUE already initialized, skipping");
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Failed to initialize NNUE from '{}': {e}",
+                    nnue_path.display()
+                ));
+            }
+        }
+    }
 
     let positions = load_positions(config)?;
     let mut all_results = Vec::new();
@@ -126,6 +160,7 @@ pub fn run_internal_benchmark(config: &BenchmarkConfig) -> Result<BenchmarkRepor
         system_info: collect_system_info(),
         engine_name: Some("internal".to_string()),
         engine_path: None,
+        eval_info: Some(EvalInfo::from(&config.eval_config)),
         results: all_results,
     })
 }
@@ -133,6 +168,7 @@ pub fn run_internal_benchmark(config: &BenchmarkConfig) -> Result<BenchmarkRepor
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::EvalConfig;
 
     fn test_config(limit_type: LimitType, limit: u64) -> BenchmarkConfig {
         BenchmarkConfig {
@@ -143,6 +179,7 @@ mod tests {
             sfens: None,
             iterations: 1,
             verbose: false,
+            eval_config: EvalConfig::default(),
         }
     }
 
@@ -194,5 +231,28 @@ mod tests {
                 bench_result.nodes
             );
         }
+    }
+
+    #[test]
+    fn test_material_level_configuration() {
+        let mut config = test_config(LimitType::Nodes, 10000);
+        config.eval_config.material_level = 1;
+
+        let result = run_internal_benchmark(&config);
+        assert!(result.is_ok());
+
+        let report = result.unwrap();
+        assert!(report.eval_info.is_some());
+        assert_eq!(report.eval_info.unwrap().material_level, 1);
+    }
+
+    #[test]
+    fn test_invalid_material_level_uses_default() {
+        let mut config = test_config(LimitType::Nodes, 10000);
+        config.eval_config.material_level = 99; // 不正な値
+
+        // 不正な値でも実行は成功し、デフォルト値が使用されるべき
+        let result = run_internal_benchmark(&config);
+        assert!(result.is_ok());
     }
 }

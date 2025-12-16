@@ -11,7 +11,7 @@
 //! ## 使用例
 //!
 //! ```rust,no_run
-//! use tools::{BenchmarkConfig, LimitType, runner};
+//! use tools::{BenchmarkConfig, EvalConfig, LimitType, runner};
 //! use std::path::PathBuf;
 //!
 //! let config = BenchmarkConfig {
@@ -22,6 +22,7 @@
 //!     sfens: None,
 //!     iterations: 1,
 //!     verbose: false,
+//!     eval_config: EvalConfig::default(),
 //! };
 //!
 //! // 内部APIモード
@@ -42,7 +43,7 @@ pub mod system;
 mod utils;
 
 // 公開API
-pub use config::{BenchmarkConfig, LimitType};
+pub use config::{BenchmarkConfig, EvalConfig, LimitType};
 pub use positions::{load_positions, DEFAULT_POSITIONS};
-pub use report::{Aggregate, BenchResult, BenchmarkReport, ThreadResult};
+pub use report::{Aggregate, BenchResult, BenchmarkReport, EvalInfo, ThreadResult};
 pub use system::{collect_system_info, SystemInfo};
