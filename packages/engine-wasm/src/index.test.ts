@@ -4,6 +4,7 @@ import { createWasmEngineClient } from "./index";
 
 describe("createWasmEngineClient", () => {
     let mockWorker: {
+        // vitest 4.0のMock型の制限により、モック関数にはanyを使用
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         postMessage: any;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTauriEngineClient, getLegalMoves } from "./index";
 
 describe("createTauriEngineClient", () => {
+    // vitest 4.0のMock型はジェネリック関数のすべての型引数を保持できないため、
+    // モック変数にはanyを使用。実際の使用箇所では正しい型が推論される。
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let mockInvoke: any;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -272,6 +274,7 @@ describe("createTauriEngineClient", () => {
 });
 
 describe("getLegalMoves", () => {
+    // vitest 4.0のMock型の制限により、ジェネリック関数のモックにはanyを使用
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let mockInvoke: any;
 
