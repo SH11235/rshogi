@@ -4,12 +4,19 @@ use serde::{Deserialize, Serialize};
 use sysinfo::System;
 
 /// システム情報
+///
+/// ベンチマーク実行環境の情報を保持します。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemInfo {
+    /// ベンチマーク実行日時（RFC 3339 形式）
     pub timestamp: String,
+    /// CPU モデル名
     pub cpu_model: String,
+    /// CPU コア数（論理コア）
     pub cpu_cores: usize,
+    /// OS 名
     pub os: String,
+    /// CPU アーキテクチャ（例: `x86_64`, `aarch64`）
     pub arch: String,
 }
 

@@ -12,29 +12,47 @@ use crate::utils::format_number;
 /// 単一局面のベンチマーク結果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchResult {
+    /// 局面の SFEN 文字列
     pub sfen: String,
+    /// 到達した探索深さ
     pub depth: i32,
+    /// 探索したノード数
     pub nodes: u64,
+    /// 探索時間（ミリ秒）
     pub time_ms: u64,
+    /// ノード毎秒（Nodes Per Second）
     pub nps: u64,
+    /// 置換表使用率（パーミル: 0-1000）
     pub hashfull: u32,
+    /// 最善手（USI 形式）
     pub bestmove: String,
 }
 
 /// スレッド数別の結果
+///
+/// 特定のスレッド数で実行した全局面の結果をまとめて保持します。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadResult {
+    /// 使用したスレッド数
     pub threads: usize,
+    /// 各局面のベンチマーク結果
     pub results: Vec<BenchResult>,
 }
 
 /// 集計統計
+///
+/// [`ThreadResult`] の結果を集計した統計情報です。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Aggregate {
+    /// 合計ノード数
     pub total_nodes: u64,
+    /// 合計探索時間（ミリ秒）
     pub total_time_ms: u64,
+    /// 平均 NPS（合計ノード / 合計時間から算出）
     pub average_nps: u64,
+    /// 平均探索深さ
     pub average_depth: f64,
+    /// 平均置換表使用率
     pub average_hashfull: f64,
 }
 
@@ -74,15 +92,20 @@ impl ThreadResult {
 }
 
 /// ベンチマークレポート
+///
+/// 全ベンチマーク結果をまとめたトップレベル構造体です。
+/// JSON ファイルへのシリアライズ/デシリアライズに対応しています。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkReport {
+    /// システム情報（CPU、OS など）
     pub system_info: SystemInfo,
-    /// エンジン名（USIモード時のみ）
+    /// エンジン名（USI モード時のみ設定）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub engine_name: Option<String>,
-    /// エンジンパス（USIモード時のみ）
+    /// エンジンの実行パス（USI モード時のみ設定）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub engine_path: Option<String>,
+    /// スレッド数別の結果リスト
     pub results: Vec<ThreadResult>,
 }
 
