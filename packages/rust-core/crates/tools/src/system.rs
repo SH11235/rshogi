@@ -21,8 +21,12 @@ pub struct SystemInfo {
 }
 
 /// システム情報を収集
+///
+/// CPU とOS の情報のみを収集します。
+/// `System::new_all()` は全プロセス・ネットワーク・ディスク情報を含み重いため、
+/// 必要最小限の `System::new()` + `refresh_cpu_all()` を使用しています。
 pub fn collect_system_info() -> SystemInfo {
-    let mut sys = System::new_all();
+    let mut sys = System::new();
     sys.refresh_cpu_all();
 
     let cpu_model = sys.cpus().first().map(|cpu| cpu.brand()).unwrap_or("Unknown").to_string();

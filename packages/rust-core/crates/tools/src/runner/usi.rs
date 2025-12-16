@@ -16,9 +16,23 @@ use crate::system::collect_system_info;
 
 /// USIエンジンクライアント
 struct UsiEngine {
-    _child: Child,
+    child: Child,
     stdin: BufWriter<ChildStdin>,
     rx: Receiver<String>,
+}
+
+impl Drop for UsiEngine {
+    fn drop(&mut self) {
+        // ベストエフォートで quit コマンドを送信
+        let _ = writeln!(self.stdin, "quit");
+        let _ = self.stdin.flush();
+
+        // プロセスが終了するまで少し待つ
+        thread::sleep(Duration::from_millis(100));
+
+        // まだ終了していなければ強制終了
+        let _ = self.child.kill();
+    }
 }
 
 impl UsiEngine {
@@ -53,11 +67,7 @@ impl UsiEngine {
             }
         });
 
-        let mut engine = UsiEngine {
-            _child: child,
-            stdin,
-            rx,
-        };
+        let mut engine = UsiEngine { child, stdin, rx };
 
         // USI初期化
         engine.send("usi")?;
