@@ -92,8 +92,9 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
     /// AVX2/SSE2/WASMのSIMD最適化版。
     /// 密な行列積方式（YaneuraOuスタイル）で実装。
     ///
-    /// TODO: 入力密度を実測して効果を検証。密度が低い場合はスパース最適化を再検討。
-    #[allow(clippy::needless_range_loop)]
+    /// 入力密度実測結果（2025-12-18）: 約40%（39-42%）
+    /// → スパース最適化には高すぎるため、密な行列積方式が正しい選択。
+    /// 詳細は `network.rs` の diagnostics 計測コードを参照。
     pub fn propagate(&self, input: &[u8], output: &mut [i32; OUTPUT_DIM]) {
         // AVX2: 256bit = 32 x u8/i8
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
@@ -106,7 +107,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
 
                 let num_chunks = Self::PADDED_INPUT / 32;
 
-                for j in 0..OUTPUT_DIM {
+                for (j, (out, &bias)) in output.iter_mut().zip(&self.biases).enumerate() {
                     let mut acc = _mm256_setzero_si256();
                     let weight_row = &self.weights[j * Self::PADDED_INPUT..];
 
@@ -129,7 +130,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
                     }
 
                     // 水平加算してバイアスを加える
-                    output[j] = self.biases[j] + hsum_i32_avx2(acc);
+                    *out = bias + hsum_i32_avx2(acc);
                 }
             }
             return;
@@ -148,7 +149,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
 
                 let num_chunks = Self::PADDED_INPUT / 16;
 
-                for j in 0..OUTPUT_DIM {
+                for (j, (out, &bias)) in output.iter_mut().zip(&self.biases).enumerate() {
                     let mut acc = _mm_setzero_si128();
                     let weight_row = &self.weights[j * Self::PADDED_INPUT..];
 
@@ -190,7 +191,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
                     }
 
                     // 水平加算してバイアスを加える
-                    output[j] = self.biases[j] + hsum_i32_sse2(acc);
+                    *out = bias + hsum_i32_sse2(acc);
                 }
             }
             return;
@@ -205,7 +206,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
 
                 let num_chunks = Self::PADDED_INPUT / 16;
 
-                for j in 0..OUTPUT_DIM {
+                for (j, (out, &bias)) in output.iter_mut().zip(&self.biases).enumerate() {
                     let mut acc = i32x4_splat(0);
                     let weight_row = &self.weights[j * Self::PADDED_INPUT..];
 
@@ -244,7 +245,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
                         + i32x4_extract_lane::<2>(acc)
                         + i32x4_extract_lane::<3>(acc);
 
-                    output[j] = self.biases[j] + sum;
+                    *out = bias + sum;
                 }
             }
             return;

@@ -87,6 +87,41 @@ impl Network {
         let mut transformed = [0u8; TRANSFORMED_FEATURE_DIMENSIONS * 2];
         self.feature_transformer.transform(acc, pos.side_to_move(), &mut transformed);
 
+        // 入力密度の計測（diagnosticsフィーチャー有効時のみ）
+        //
+        // 計測結果（2025-12-18）:
+        //   - hidden1層への入力密度: 約39-42%（安定して~40%）
+        //   - サンプル数: 16,900,000+ evaluations
+        //   - 結論: 密度40%はスパース最適化には高すぎる。密な行列積方式が正しい選択。
+        //
+        // 計測コマンド:
+        //   RUSTFLAGS="-C target-cpu=native" cargo build -p tools --bin benchmark --release --features engine-core/diagnostics
+        //   ./target/release/benchmark --internal --threads 1 --limit-type movetime --limit 10000 --nnue-file path/to/nn.bin
+        #[cfg(feature = "diagnostics")]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static CALL_COUNT: AtomicU64 = AtomicU64::new(0);
+            static TOTAL_NONZERO: AtomicU64 = AtomicU64::new(0);
+            static TOTAL_ELEMENTS: AtomicU64 = AtomicU64::new(0);
+
+            let nonzero = transformed.iter().filter(|&&x| x != 0).count() as u64;
+            let elements = transformed.len() as u64;
+
+            TOTAL_NONZERO.fetch_add(nonzero, Ordering::Relaxed);
+            TOTAL_ELEMENTS.fetch_add(elements, Ordering::Relaxed);
+            let count = CALL_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+
+            // 100000回ごとにログ出力
+            if count % 100000 == 0 {
+                let total_nz = TOTAL_NONZERO.load(Ordering::Relaxed);
+                let total_el = TOTAL_ELEMENTS.load(Ordering::Relaxed);
+                let density = total_nz as f64 / total_el as f64 * 100.0;
+                eprintln!(
+                    "[NNUE density] hidden1 input: {total_nz}/{total_el} nonzero ({density:.1}%) over {count} evals"
+                );
+            }
+        }
+
         // 隠れ層1
         let mut hidden1_out = [0i32; HIDDEN1_DIMENSIONS];
         self.hidden1.propagate(&transformed, &mut hidden1_out);
