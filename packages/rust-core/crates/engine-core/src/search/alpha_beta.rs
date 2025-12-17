@@ -791,6 +791,7 @@ impl<'a> SearchWorker<'a> {
 
             pos.do_move(mv, pos.gives_check(mv));
             self.nodes += 1;
+            self.tt.prefetch(pos.key(), pos.side_to_move());
             let mut value = -self.qsearch::<{ NodeType::NonPV as u8 }>(
                 pos,
                 DEPTH_QS,
@@ -1119,6 +1120,7 @@ impl<'a> SearchWorker<'a> {
             // 探索
             pos.do_move(mv, gives_check);
             self.nodes += 1;
+            self.tt.prefetch(pos.key(), pos.side_to_move());
 
             // PVS
             let value = if rm_idx == 0 {
@@ -1248,6 +1250,7 @@ impl<'a> SearchWorker<'a> {
             // 探索
             pos.do_move(mv, gives_check);
             self.nodes += 1;
+            self.tt.prefetch(pos.key(), pos.side_to_move());
 
             // PVS: 最初の手（このPVラインの候補）はPV探索
             let value = if rm_idx == pv_idx {
@@ -1607,6 +1610,10 @@ impl<'a> SearchWorker<'a> {
 
             pos.do_move(mv, gives_check);
             self.nodes += 1;
+
+            // do_move直後に置換表をprefetch（YaneuraOu準拠）
+            // 評価計算などの間にメモリ待ちを隠蔽する
+            self.tt.prefetch(pos.key(), pos.side_to_move());
 
             // YaneuraOu方式: ContHistKeyを設定
             // ⚠ in_checkは親ノードの王手状態を使用（gives_checkではない）
@@ -2396,6 +2403,7 @@ impl<'a> SearchWorker<'a> {
 
             pos.do_move(mv, gives_check);
             self.nodes += 1;
+            self.tt.prefetch(pos.key(), pos.side_to_move());
 
             self.stack[ply as usize].cont_hist_key =
                 Some(ContHistKey::new(in_check, capture, cont_hist_pc, cont_hist_to));
