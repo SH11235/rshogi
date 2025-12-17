@@ -16,6 +16,10 @@ rand.workspace = true
 rand_xoshiro.workspace = true
 serde.workspace = true
 
+# getrandom for WebAssembly support (required by rand)
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true }
+
 [dev-dependencies]
 # Test dependencies
 
