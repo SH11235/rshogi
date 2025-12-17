@@ -214,7 +214,7 @@ impl Position {
         if mv.is_drop() {
             let pt = mv.drop_piece_type();
             if self.hand(self.side_to_move).has(pt) {
-                // 駒情報を付加（YaneuraOu準拠）
+                // 駒打ちの駒情報を付加（通常移動の moved_pc に相当、YaneuraOu準拠）
                 let dropped_pc = Piece::make(self.side_to_move, pt);
                 Some(mv.with_piece(dropped_pc))
             } else {
