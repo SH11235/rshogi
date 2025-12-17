@@ -523,7 +523,7 @@ impl Position {
             let old_hand = self.hand[us.index()];
             let old_count = old_hand.count(pt) as u8;
             let new_count = old_count.saturating_sub(1);
-            new_state.dirty_piece.hand_changes.push(super::state::HandChange {
+            new_state.dirty_piece.push_hand_change(super::state::HandChange {
                 owner: us,
                 piece_type: pt,
                 old_count,
@@ -543,7 +543,7 @@ impl Position {
             new_state.captured_piece = Piece::NONE;
 
             // DirtyPiece: 打ち駒（盤上に新しく現れる）
-            new_state.dirty_piece.pieces.push(ChangedPiece {
+            new_state.dirty_piece.push_piece(ChangedPiece {
                 color: us,
                 old_piece: Piece::NONE,
                 old_sq: None,
@@ -595,7 +595,7 @@ impl Position {
                     let old_hand = self.hand[us.index()];
                     let old_count = old_hand.count(captured_pt) as u8;
                     let new_count = old_count.saturating_add(1);
-                    new_state.dirty_piece.hand_changes.push(super::state::HandChange {
+                    new_state.dirty_piece.push_hand_change(super::state::HandChange {
                         owner: us,
                         piece_type: captured_pt,
                         old_count,
@@ -637,7 +637,7 @@ impl Position {
             }
 
             // DirtyPiece: 移動した駒
-            new_state.dirty_piece.pieces.push(ChangedPiece {
+            new_state.dirty_piece.push_piece(ChangedPiece {
                 color: us,
                 old_piece: pc,
                 old_sq: Some(from),
@@ -647,7 +647,7 @@ impl Position {
 
             // DirtyPiece: 取った駒（盤上から消える）
             if captured.is_some() {
-                new_state.dirty_piece.pieces.push(ChangedPiece {
+                new_state.dirty_piece.push_piece(ChangedPiece {
                     color: them,
                     old_piece: captured,
                     old_sq: Some(to),
