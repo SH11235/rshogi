@@ -123,15 +123,13 @@ impl DirtyPiece {
     /// 駒変化のスライスを取得
     #[inline]
     pub fn pieces(&self) -> &[ChangedPiece] {
-        // SAFETY: pieces_len <= MAX_PIECES は構造上保証される
-        unsafe { self.pieces.get_unchecked(..self.pieces_len as usize) }
+        &self.pieces[..self.pieces_len as usize]
     }
 
     /// 手駒変化のスライスを取得
     #[inline]
     pub fn hand_changes(&self) -> &[HandChange] {
-        // SAFETY: hand_changes_len <= MAX_HAND_CHANGES は構造上保証される
-        unsafe { self.hand_changes.get_unchecked(..self.hand_changes_len as usize) }
+        &self.hand_changes[..self.hand_changes_len as usize]
     }
 }
 
