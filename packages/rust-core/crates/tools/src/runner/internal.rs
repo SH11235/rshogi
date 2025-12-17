@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use engine_core::eval::{set_material_level, MaterialLevel};
 use engine_core::nnue::init_nnue;
 use engine_core::position::Position;
-use engine_core::search::{init_search_module, LimitsType, Search, SearchInfo};
+use engine_core::search::{LimitsType, Search, SearchInfo};
 
 use crate::config::{BenchmarkConfig, LimitType};
 use crate::positions::load_positions;
@@ -17,9 +17,6 @@ use crate::utils::SEARCH_STACK_SIZE;
 
 /// 内部API直接呼び出しモードでベンチマークを実行
 pub fn run_internal_benchmark(config: &BenchmarkConfig) -> Result<BenchmarkReport> {
-    // 探索モジュール初期化
-    init_search_module();
-
     // 評価関数設定
     // 注意: MaterialLevelはNNUE初期化前に設定する必要がある
     //       （NNUE未使用時のフォールバックとして使用されるため）

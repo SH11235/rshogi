@@ -10,7 +10,7 @@ use std::thread;
 use anyhow::Result;
 use engine_core::eval::{set_material_level, MaterialLevel};
 use engine_core::position::Position;
-use engine_core::search::{init_search_module, LimitsType, Search, SearchInfo, SearchResult};
+use engine_core::search::{LimitsType, Search, SearchInfo, SearchResult};
 use engine_core::types::Move;
 
 /// エンジン名
@@ -45,9 +45,6 @@ struct UsiEngine {
 impl UsiEngine {
     /// 新しいUSIエンジンを作成
     fn new() -> Self {
-        // 探索モジュールの初期化
-        init_search_module();
-
         let tt_size_mb = 256;
 
         Self {

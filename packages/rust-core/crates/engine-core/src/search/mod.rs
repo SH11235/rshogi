@@ -32,11 +32,3 @@ pub use time_manager::*;
 pub use time_options::*;
 pub use tt_history::*;
 pub use types::*;
-
-/// 探索モジュールの初期化
-///
-/// 現状は LMR 用の reduction テーブルを初期化するだけだが、
-/// 将来的に探索モジュール全体の初期化処理をまとめる窓口として使用する。
-pub fn init_search_module() {
-    alpha_beta::init_reductions();
-}
