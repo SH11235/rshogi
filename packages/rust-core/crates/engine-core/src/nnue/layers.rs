@@ -290,6 +290,7 @@ mod tests {
     #[test]
     fn test_affine_transform_propagate() {
         // 小さいテスト用の変換
+        // PADDED_INPUT = padded_input(4) = 32 なので、入力も32バイト必要
         let transform: AffineTransform<4, 2> = AffineTransform {
             biases: [10, 20],
             weights: vec![
@@ -300,7 +301,11 @@ mod tests {
             .into_boxed_slice(),
         };
 
-        let input = [1u8, 2, 0, 0];
+        // 入力はPADDED_INPUT（32バイト）にパディングする必要がある
+        // SIMD実装は32バイト単位で処理するため
+        let mut input = [0u8; 32];
+        input[0] = 1;
+        input[1] = 2;
         let mut output = [0i32; 2];
 
         transform.propagate(&input, &mut output);
