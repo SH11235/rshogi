@@ -354,16 +354,16 @@ mod tests {
         };
 
         let mut input = [0u8; 512];
-        for i in 0..32 {
-            input[i] = (i + 1) as u8; // 1, 2, 3, ..., 32
+        for (i, val) in input.iter_mut().take(32).enumerate() {
+            *val = (i + 1) as u8; // 1, 2, 3, ..., 32
         }
         let mut output = [0i32; 32];
 
         transform.propagate(&input, &mut output);
 
         // output[i] = 10 + input[i] * 1 = 10 + (i+1)
-        for i in 0..32 {
-            assert_eq!(output[i], 10 + (i + 1) as i32, "mismatch at index {i}");
+        for (i, &val) in output.iter().enumerate() {
+            assert_eq!(val, 10 + (i + 1) as i32, "mismatch at index {i}");
         }
     }
 }
