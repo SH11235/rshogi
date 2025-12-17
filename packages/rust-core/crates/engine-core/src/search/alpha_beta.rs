@@ -41,7 +41,7 @@ const IIR_PRIOR_REDUCTION_THRESHOLD_DEEP: i32 = 3;
 const IIR_DEPTH_BOUNDARY: Depth = 10;
 const IIR_EVAL_SUM_THRESHOLD: i32 = 177;
 
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
 /// 引き分けスコアに揺らぎを与える（YaneuraOu準拠）
 const DRAW_JITTER_MASK: u64 = 0x2;
@@ -79,25 +79,28 @@ const REDUCTION_NON_IMPROVING_MULT: i32 = 216;
 const REDUCTION_NON_IMPROVING_DIV: i32 = 512;
 const REDUCTION_BASE_OFFSET: i32 = 1089;
 
-/// Reduction配列（遅延初期化）
-static REDUCTIONS: OnceLock<Box<Reductions>> = OnceLock::new();
+/// Reduction配列（LazyLockによる遅延初期化）
+/// 初回アクセス時に自動初期化されるため、get()呼び出しが不要
+static REDUCTIONS: LazyLock<Reductions> = LazyLock::new(|| {
+    let mut table: Reductions = [0; 64];
+    // YaneuraOu: reductions[i] = int(2782 / 128.0 * log(i)) （yaneuraou-search.cpp:1818）
+    for (i, value) in table.iter_mut().enumerate().skip(1) {
+        *value = (2782.0 / 128.0 * (i as f64).ln()) as i32;
+    }
+    table
+});
 
-/// reduction配列を初期化
+/// reduction配列を初期化（後方互換性のために残す）
+/// LazyLockにより初回アクセス時に自動初期化されるため、明示的な呼び出しは不要だが、
+/// 既存のコードとの互換性のために残している。
 pub fn init_reductions() {
-    REDUCTIONS.get_or_init(|| {
-        let mut table: Box<Reductions> = Box::new([0; 64]);
-        for i in 1..64 {
-            // YaneuraOu: reductions[i] = int(2782 / 128.0 * log(i)) （yaneuraou-search.cpp:1818）
-            table[i] = (2782.0 / 128.0 * (i as f64).ln()) as i32;
-        }
-        table
-    });
+    // LazyLock::force で明示的に初期化を強制
+    LazyLock::force(&REDUCTIONS);
 }
 
 /// Reductionを取得
 ///
-/// # Panics
-/// `init_reductions()`が呼ばれていない場合にpanicする
+/// LazyLockにより初回アクセス時に自動初期化されるため、panicしない。
 #[inline]
 fn reduction(imp: bool, depth: i32, move_count: i32, delta: i32, root_delta: i32) -> i32 {
     if depth <= 0 || move_count <= 0 {
@@ -106,10 +109,8 @@ fn reduction(imp: bool, depth: i32, move_count: i32, delta: i32, root_delta: i32
 
     let d = depth.clamp(1, 63) as usize;
     let mc = move_count.clamp(1, 63) as usize;
-    let table = REDUCTIONS
-        .get()
-        .expect("REDUCTIONS not initialized. Call init_reductions() at startup.");
-    let reduction_scale = table[d] * table[mc];
+    // LazyLockにより直接アクセス可能（get()不要）
+    let reduction_scale = REDUCTIONS[d] * REDUCTIONS[mc];
     let root_delta = root_delta.max(1);
     let delta = delta.max(0);
 
@@ -121,9 +122,13 @@ fn reduction(imp: bool, depth: i32, move_count: i32, delta: i32, root_delta: i32
         + REDUCTION_BASE_OFFSET
 }
 
-/// Reductionテーブルが初期化済みかどうかを確認
+/// Reductionテーブルが初期化済みかどうかを確認（後方互換性のため残す）
+/// LazyLockにより常にtrue（初回アクセス時に自動初期化される）
 pub fn is_reductions_initialized() -> bool {
-    REDUCTIONS.get().is_some()
+    // LazyLockは初回アクセス時に初期化されるため、このチェックで初期化が行われる
+    // 後方互換性のためにtrueを返す
+    let _ = &*REDUCTIONS; // 初期化を強制
+    true
 }
 
 /// 置換表プローブの結果をまとめたコンテキスト
