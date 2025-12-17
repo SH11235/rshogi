@@ -514,6 +514,12 @@ impl RootMoves {
         self.moves.is_empty()
     }
 
+    /// 全ての手をクリア
+    #[inline]
+    pub fn clear(&mut self) {
+        self.moves.clear();
+    }
+
     /// イテレータ
     pub fn iter(&self) -> impl Iterator<Item = &RootMove> {
         self.moves.iter()

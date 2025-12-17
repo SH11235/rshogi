@@ -167,12 +167,11 @@ fn test_worker_best_move_changes_initial_value() {
         .spawn(|| {
             use crate::search::alpha_beta::SearchWorker;
             use crate::tt::TranspositionTable;
+            use std::sync::Arc;
 
-            let tt = TranspositionTable::new(16);
-            let limits = LimitsType::new();
-            let mut tm = create_time_manager();
+            let tt = Arc::new(TranspositionTable::new(16));
 
-            let worker = SearchWorker::new(&tt, &limits, &mut tm, DEFAULT_MAX_MOVES_TO_DRAW);
+            let worker = SearchWorker::new(tt, DEFAULT_MAX_MOVES_TO_DRAW);
 
             assert_eq!(worker.best_move_changes, 0.0, "初期値は0.0であるべき");
         })
@@ -190,12 +189,11 @@ fn test_worker_best_move_changes_decay() {
         .spawn(|| {
             use crate::search::alpha_beta::SearchWorker;
             use crate::tt::TranspositionTable;
+            use std::sync::Arc;
 
-            let tt = TranspositionTable::new(16);
-            let limits = LimitsType::new();
-            let mut tm = create_time_manager();
+            let tt = Arc::new(TranspositionTable::new(16));
 
-            let mut worker = SearchWorker::new(&tt, &limits, &mut tm, DEFAULT_MAX_MOVES_TO_DRAW);
+            let mut worker = SearchWorker::new(tt, DEFAULT_MAX_MOVES_TO_DRAW);
             worker.best_move_changes = 4.0;
             worker.decay_best_move_changes();
 

@@ -177,6 +177,10 @@ pub struct Search {
     /// Skill Level オプション
     skill_options: SkillOptions,
 
+    /// SearchWorker（YaneuraOu準拠: 長期保持して再利用）
+    /// 履歴統計を含み、usinewgameでクリア、goでは保持
+    worker: Option<Box<SearchWorker>>,
+
     /// 直前イテレーションのスコア（YaneuraOu準拠）
     best_previous_score: Option<Value>,
     /// 直前イテレーションの平均スコア（YaneuraOu準拠）
@@ -209,7 +213,7 @@ struct WorkerSummary {
     best_move_changes: f64,
 }
 
-impl From<&SearchWorker<'_>> for WorkerSummary {
+impl From<&SearchWorker> for WorkerSummary {
     fn from(w: &SearchWorker) -> Self {
         Self {
             best_move_changes: w.best_move_changes,
@@ -268,32 +272,28 @@ impl Search {
     ///
     /// YaneuraOu準拠の式を簡略化して single thread で適用する。
     fn compute_time_factors(
-        &mut self,
-        worker: &SearchWorker,
+        &self,
+        best_value: Value,
+        completed_depth: Depth,
         tot_best_move_changes: f64,
         thread_count: usize,
     ) -> (f64, f64, f64, usize) {
-        let best_value = if worker.root_moves.is_empty() {
-            Value::ZERO
-        } else {
-            worker.root_moves[0].score
-        };
-
         // fallingEval
         let prev_avg_raw = self.best_previous_average_score.unwrap_or(Value::INFINITE).raw();
         let iter_val = self.iter_value[self.iter_idx];
         let falling_eval = calculate_falling_eval(prev_avg_raw, iter_val.raw(), best_value.raw());
 
         // timeReduction
-        let time_reduction =
-            calculate_time_reduction(worker.completed_depth, self.last_best_move_depth);
+        let time_reduction = calculate_time_reduction(completed_depth, self.last_best_move_depth);
 
-        // 状態更新（iter_valueのみ）
+        (falling_eval, time_reduction, tot_best_move_changes, thread_count)
+    }
+
+    /// 時間要因計算後の状態更新
+    fn update_time_factor_state(&mut self, best_value: Value, tot_best_move_changes: f64) {
         self.iter_value[self.iter_idx] = best_value;
         self.iter_idx = (self.iter_idx + 1) % self.iter_value.len();
         self.tot_best_move_changes = tot_best_move_changes;
-
-        (falling_eval, time_reduction, tot_best_move_changes, thread_count)
     }
 
     /// 新しいSearchを作成
@@ -309,6 +309,8 @@ impl Search {
             start_time: None,
             time_options: super::TimeOptions::default(),
             skill_options: SkillOptions::default(),
+            // YaneuraOu準拠: workerは遅延初期化（最初のgoで作成）
+            worker: None,
             best_previous_score: Some(Value::INFINITE),
             best_previous_average_score: Some(Value::INFINITE),
             iter_value: [Value::ZERO; 4],
@@ -328,6 +330,10 @@ impl Search {
     pub fn resize_tt(&mut self, size_mb: usize) {
         self.tt = Arc::new(TranspositionTable::new(size_mb));
         self.tt_size_mb = size_mb;
+        // workerが存在する場合、TT参照を更新
+        if let Some(worker) = &mut self.worker {
+            worker.tt = Arc::clone(&self.tt);
+        }
     }
 
     /// 置換表をクリア
@@ -336,6 +342,19 @@ impl Search {
     pub fn clear_tt(&mut self) {
         // Arc経由では&mutが取れないので、同じサイズの新しいTTを作成して置き換える
         self.tt = Arc::new(TranspositionTable::new(self.tt_size_mb));
+        // workerが存在する場合、TT参照を更新
+        if let Some(worker) = &mut self.worker {
+            worker.tt = Arc::clone(&self.tt);
+        }
+    }
+
+    /// 履歴統計をクリア（usinewgame時に呼び出し）
+    ///
+    /// YaneuraOu準拠: Worker::clear()相当
+    pub fn clear_histories(&mut self) {
+        if let Some(worker) = &mut self.worker {
+            worker.clear();
+        }
     }
 
     /// 停止フラグを取得（探索スレッドに渡す用）
@@ -424,10 +443,13 @@ impl Search {
         // ply（現在の手数）は局面から取得、max_moves_to_drawはYaneuraOu準拠のデフォルトを使う
         time_manager.init(&limits, pos.side_to_move(), ply, self.max_moves_to_draw);
 
-        // 探索ワーカーを作成（ttの借用期間を限定するためArcをクローン）
-        let tt_owned = Arc::clone(&self.tt);
-        let mut worker =
-            SearchWorker::new(&tt_owned, &limits, &mut time_manager, self.max_moves_to_draw);
+        // YaneuraOu準拠: workerは遅延初期化、再利用する
+        let tt_clone = Arc::clone(&self.tt);
+        let max_moves = self.max_moves_to_draw;
+        let worker = self.worker.get_or_insert_with(|| SearchWorker::new(tt_clone, max_moves));
+
+        // 探索状態のリセット（履歴はクリアしない、YaneuraOu準拠）
+        worker.prepare_search();
 
         // 探索深さを決定
         let max_depth = if limits.depth > 0 {
@@ -442,14 +464,32 @@ impl Search {
 
         // 探索実行（コールバックなしの場合はダミーを渡す）
         let effective_multi_pv = match on_info {
-            Some(callback) => {
-                self.search_with_callback(pos, &mut worker, max_depth, callback, skill_enabled)
-            }
+            Some(callback) => self.search_with_callback(
+                pos,
+                &limits,
+                &mut time_manager,
+                max_depth,
+                callback,
+                skill_enabled,
+            ),
             None => {
                 let mut noop = |_info: &SearchInfo| {};
-                self.search_with_callback(pos, &mut worker, max_depth, &mut noop, skill_enabled)
+                self.search_with_callback(
+                    pos,
+                    &limits,
+                    &mut time_manager,
+                    max_depth,
+                    &mut noop,
+                    skill_enabled,
+                )
             }
         };
+
+        // workerへの参照を再取得（borrowck対応）
+        let worker = self
+            .worker
+            .as_mut()
+            .expect("worker should be initialized by search_with_callback");
 
         // Skill有効時は pick_best でbestmoveを差し替える
         if skill_enabled && !worker.root_moves.is_empty() && effective_multi_pv > 0 {
@@ -497,8 +537,6 @@ impl Search {
                 .unwrap_or(worker.root_moves[0].score)
         };
 
-        drop(worker);
-
         // 次の手番のために timeReduction を持ち回る
         self.previous_time_reduction = time_manager.previous_time_reduction();
 
@@ -520,7 +558,8 @@ impl Search {
     fn search_with_callback<F>(
         &mut self,
         pos: &mut Position,
-        worker: &mut SearchWorker,
+        limits: &LimitsType,
+        time_manager: &mut TimeManagement,
         max_depth: Depth,
         mut on_info: F,
         skill_enabled: bool,
@@ -532,17 +571,21 @@ impl Search {
         self.increase_depth = true;
         self.search_again_counter = 0;
 
+        // workerを一時的に取り出す（借用チェッカー対策）
+        let mut worker = self.worker.take().expect("worker should be available");
+
         // ルート手を初期化
-        worker.root_moves = super::RootMoves::from_legal_moves(pos, &worker.limits.search_moves);
+        worker.root_moves = super::RootMoves::from_legal_moves(pos, &limits.search_moves);
 
         if worker.root_moves.is_empty() {
             worker.best_move = Move::NONE;
             #[cfg(debug_assertions)]
             eprintln!(
                 "search_with_callback: root_moves is empty (search_moves_len={}, side_to_move={:?})",
-                worker.limits.search_moves.len(),
+                limits.search_moves.len(),
                 pos.side_to_move()
             );
+            self.worker = Some(worker);
             return 0;
         }
 
@@ -555,11 +598,11 @@ impl Search {
 
         // 合法手が1つの場合は500ms上限を適用（YaneuraOu準拠）
         if worker.root_moves.len() == 1 {
-            worker.time_manager.apply_single_move_limit();
+            time_manager.apply_single_move_limit();
         }
 
         let start = self.start_time.unwrap();
-        let mut effective_multi_pv = worker.limits.multi_pv;
+        let mut effective_multi_pv = limits.multi_pv;
         if skill_enabled {
             effective_multi_pv = effective_multi_pv.max(4);
         }
@@ -578,9 +621,9 @@ impl Search {
                     "search_with_callback: depth={} nodes={} search_end={} max_time={} stop_requested={}",
                     depth,
                     worker.nodes,
-                    worker.time_manager.search_end(),
-                    worker.time_manager.maximum(),
-                    worker.time_manager.stop_requested()
+                    time_manager.search_end(),
+                    time_manager.maximum(),
+                    time_manager.stop_requested()
                 );
             }
             // 前回のiterationで深さを伸ばせなかった場合のカウンター（YO準拠）
@@ -594,13 +637,13 @@ impl Search {
 
             // ponderhitを検出した場合、時間再計算のみ行い探索は継続
             if self.ponderhit_flag.swap(false, Ordering::Relaxed) {
-                worker.time_manager.on_ponderhit();
+                time_manager.on_ponderhit();
             }
 
             // YaneuraOu準拠: depth 2以降は、次の深さを探索する時間があるかチェック
             // depth 1は必ず探索する（合法手が1つもない場合のresignを防ぐため）
-            let is_pondering = worker.time_manager.is_pondering();
-            if depth > 1 && !is_pondering && worker.time_manager.should_stop(depth) {
+            let is_pondering = time_manager.is_pondering();
+            if depth > 1 && !is_pondering && time_manager.should_stop(depth) {
                 break;
             }
 
@@ -610,7 +653,7 @@ impl Search {
             if effective_multi_pv == 1 && depth > 1 && !worker.root_moves.is_empty() {
                 let best_value = worker.root_moves[0].score;
 
-                if worker.limits.mate == 0 {
+                if limits.mate == 0 {
                     if proven_mate_depth_exceeded(best_value, depth) {
                         break;
                     }
@@ -618,9 +661,9 @@ impl Search {
                     best_value,
                     worker.root_moves[0].score_lower_bound,
                     worker.root_moves[0].score_upper_bound,
-                    worker.limits.mate,
+                    limits.mate,
                 ) {
-                    worker.time_manager.request_stop();
+                    time_manager.request_stop();
                     break;
                 }
             }
@@ -648,9 +691,17 @@ impl Search {
                     // pv_idx=0の場合は従来のsearch_rootを使用（後方互換性）
                     // pv_idx>0の場合のみsearch_root_for_pvを使用
                     let score = if pv_idx == 0 {
-                        worker.search_root(pos, adjusted_depth, alpha, beta)
+                        worker.search_root(pos, adjusted_depth, alpha, beta, limits, time_manager)
                     } else {
-                        worker.search_root_for_pv(pos, depth, alpha, beta, pv_idx)
+                        worker.search_root_for_pv(
+                            pos,
+                            depth,
+                            alpha,
+                            beta,
+                            pv_idx,
+                            limits,
+                            time_manager,
+                        )
                     };
 
                     if worker.abort {
@@ -664,7 +715,7 @@ impl Search {
                             score.raw().saturating_sub(delta.raw()).max(-Value::INFINITE.raw()),
                         );
                         failed_high_cnt = 0;
-                        worker.time_manager.reset_stop_on_ponderhit();
+                        time_manager.reset_stop_on_ponderhit();
                     } else if score >= beta {
                         beta = Value::new(
                             score.raw().saturating_add(delta.raw()).min(Value::INFINITE.raw()),
@@ -732,17 +783,38 @@ impl Search {
                 }
 
                 // 評価変動・timeReduction・最善手不安定性をまとめて適用（YaneuraOu準拠）
+                // 借用チェッカー対策: workerから必要な値をすべてローカルにコピー
                 let summary = WorkerSummary::from(&*worker);
+                let best_value = if worker.root_moves.is_empty() {
+                    Value::ZERO
+                } else {
+                    worker.root_moves[0].score
+                };
+                let completed_depth = worker.completed_depth;
+                let effort = if worker.root_moves.is_empty() {
+                    0.0
+                } else {
+                    worker.root_moves[0].effort
+                };
+                let nodes = worker.nodes;
+                let root_moves_len = worker.root_moves.len();
+                worker.best_move_changes = 0.0; // 先にリセット
+
                 let (changes_sum, thread_count) =
                     aggregate_best_move_changes(&[summary.best_move_changes]);
                 let tot_best_move_changes = self.tot_best_move_changes / 2.0 + changes_sum;
-                if worker.limits.use_time_management()
-                    && !worker.time_manager.stop_on_ponderhit()
-                    && worker.time_manager.search_end() == 0
+                if limits.use_time_management()
+                    && !time_manager.stop_on_ponderhit()
+                    && time_manager.search_end() == 0
                 {
-                    let (falling_eval, time_reduction, tot_changes, threads) =
-                        self.compute_time_factors(worker, tot_best_move_changes, thread_count);
-                    let total_time = worker.time_manager.total_time_for_iteration(
+                    let (falling_eval, time_reduction, tot_changes, threads) = self
+                        .compute_time_factors(
+                            best_value,
+                            completed_depth,
+                            tot_best_move_changes,
+                            thread_count,
+                        );
+                    let total_time = time_manager.total_time_for_iteration(
                         falling_eval,
                         time_reduction,
                         tot_changes,
@@ -750,32 +822,31 @@ impl Search {
                     );
 
                     // 実測 effort を正規化
-                    let nodes_effort =
-                        normalize_nodes_effort(worker.root_moves[0].effort, worker.nodes);
+                    let nodes_effort = normalize_nodes_effort(effort, nodes);
 
                     // 合法手が1つの場合は使う時間そのものを500msに丸める（YaneuraOu準拠）
-                    let total_time = if worker.root_moves.len() == 1 {
+                    let total_time = if root_moves_len == 1 {
                         total_time.min(500.0)
                     } else {
                         total_time
                     };
-                    let elapsed_time = worker.time_manager.elapsed_from_ponderhit() as f64;
-                    worker.time_manager.apply_iteration_timing(
-                        worker.time_manager.elapsed(),
+                    let elapsed_time = time_manager.elapsed_from_ponderhit() as f64;
+                    time_manager.apply_iteration_timing(
+                        time_manager.elapsed(),
                         total_time,
                         nodes_effort,
-                        worker.completed_depth,
+                        completed_depth,
                     );
 
                     // YaneuraOu準拠: 次iterationで深さを伸ばすかの判定
                     self.increase_depth =
-                        worker.time_manager.is_pondering() || elapsed_time <= total_time * 0.5138;
+                        time_manager.is_pondering() || elapsed_time <= total_time * 0.5138;
+
+                    // 状態更新
+                    self.update_time_factor_state(best_value, tot_best_move_changes);
                 }
                 // tot_best_move_changes は decay 後の値を保持（時間管理を使わない場合も持ち回る）
                 self.tot_best_move_changes = tot_best_move_changes;
-
-                // best_move_changes は集約後リセット
-                worker.best_move_changes = 0.0;
 
                 // PVが変わったときのみ last_best_* を更新（YO準拠）
                 if !worker.root_moves[0].pv.is_empty()
@@ -791,7 +862,7 @@ impl Search {
                 if effective_multi_pv == 1 && depth > 1 && !worker.root_moves.is_empty() {
                     let best_value = worker.root_moves[0].score;
 
-                    if worker.limits.mate == 0 {
+                    if limits.mate == 0 {
                         if proven_mate_depth_exceeded(best_value, depth) {
                             break;
                         }
@@ -799,9 +870,9 @@ impl Search {
                         best_value,
                         worker.root_moves[0].score_lower_bound,
                         worker.root_moves[0].score_upper_bound,
-                        worker.limits.mate,
+                        limits.mate,
                     ) {
-                        worker.time_manager.request_stop();
+                        time_manager.request_stop();
                         break;
                     }
                 }
@@ -820,6 +891,9 @@ impl Search {
                 }
             }
         }
+
+        // workerを戻す
+        self.worker = Some(worker);
 
         effective_multi_pv
     }
@@ -856,18 +930,11 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(STACK_SIZE)
             .spawn(|| {
-                let mut tm = TimeManagement::new(
-                    Arc::new(AtomicBool::new(false)),
-                    Arc::new(AtomicBool::new(false)),
-                );
-                let mut limits = LimitsType::new();
-                limits.set_start_time();
-                let tt = TranspositionTable::new(16);
-                let mut worker =
-                    SearchWorker::new(&tt, &limits, &mut tm, DEFAULT_MAX_MOVES_TO_DRAW);
+                let tt = Arc::new(TranspositionTable::new(16));
+                let mut worker = SearchWorker::new(tt, DEFAULT_MAX_MOVES_TO_DRAW);
                 worker.best_move_changes = 3.5;
 
-                let summary = WorkerSummary::from(&worker);
+                let summary = WorkerSummary::from(&*worker);
                 assert!(
                     (summary.best_move_changes - 3.5).abs() < 1e-9,
                     "best_move_changes should match"
@@ -880,48 +947,69 @@ mod tests {
 
     #[test]
     fn test_prepare_time_metrics_resets_iter_state() {
-        let mut search = Search::new(16);
-        search.best_previous_score = Some(Value::new(200));
-        search.best_previous_average_score = Some(Value::new(123));
-        search.last_game_ply = Some(5);
-        search.iter_value = [Value::new(1), Value::new(2), Value::new(3), Value::new(4)];
-        search.iter_idx = 2;
-        search.last_best_move_depth = 5;
-        search.tot_best_move_changes = 7.5;
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let mut search = Search::new(16);
+                search.best_previous_score = Some(Value::new(200));
+                search.best_previous_average_score = Some(Value::new(123));
+                search.last_game_ply = Some(5);
+                search.iter_value = [Value::new(1), Value::new(2), Value::new(3), Value::new(4)];
+                search.iter_idx = 2;
+                search.last_best_move_depth = 5;
+                search.tot_best_move_changes = 7.5;
 
-        search.prepare_time_metrics(6);
+                search.prepare_time_metrics(6);
 
-        assert_eq!(search.best_previous_score, Some(Value::new(-200)));
-        assert_eq!(search.best_previous_average_score, Some(Value::new(-123)));
-        assert_eq!(search.iter_value, [Value::new(-200); 4]);
-        assert_eq!(search.iter_idx, 0);
-        assert_eq!(search.last_best_move_depth, 0);
-        assert_eq!(search.tot_best_move_changes, 0.0);
-        assert_eq!(search.last_game_ply, Some(6));
+                assert_eq!(search.best_previous_score, Some(Value::new(-200)));
+                assert_eq!(search.best_previous_average_score, Some(Value::new(-123)));
+                assert_eq!(search.iter_value, [Value::new(-200); 4]);
+                assert_eq!(search.iter_idx, 0);
+                assert_eq!(search.last_best_move_depth, 0);
+                assert_eq!(search.tot_best_move_changes, 0.0);
+                assert_eq!(search.last_game_ply, Some(6));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
     fn test_prepare_time_metrics_seeds_zero_for_infinite() {
-        let mut search = Search::new(16);
-        search.best_previous_score = Some(Value::INFINITE);
-        search.best_previous_average_score = Some(Value::INFINITE);
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let mut search = Search::new(16);
+                search.best_previous_score = Some(Value::INFINITE);
+                search.best_previous_average_score = Some(Value::INFINITE);
 
-        search.prepare_time_metrics(1);
+                search.prepare_time_metrics(1);
 
-        assert_eq!(search.iter_value, [Value::ZERO; 4]);
-        assert_eq!(search.iter_idx, 0);
-        assert_eq!(search.best_previous_score, Some(Value::INFINITE));
-        assert_eq!(search.best_previous_average_score, Some(Value::INFINITE));
+                assert_eq!(search.iter_value, [Value::ZERO; 4]);
+                assert_eq!(search.iter_idx, 0);
+                assert_eq!(search.best_previous_score, Some(Value::INFINITE));
+                assert_eq!(search.best_previous_average_score, Some(Value::INFINITE));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
     fn test_set_max_moves_to_draw_option() {
-        let mut search = Search::new(16);
-        search.set_max_moves_to_draw(512);
-        assert_eq!(search.max_moves_to_draw(), 512);
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let mut search = Search::new(16);
+                search.set_max_moves_to_draw(512);
+                assert_eq!(search.max_moves_to_draw(), 512);
 
-        search.set_max_moves_to_draw(0);
-        assert_eq!(search.max_moves_to_draw(), DEFAULT_MAX_MOVES_TO_DRAW);
+                search.set_max_moves_to_draw(0);
+                assert_eq!(search.max_moves_to_draw(), DEFAULT_MAX_MOVES_TO_DRAW);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

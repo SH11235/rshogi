@@ -53,6 +53,12 @@ pub struct BenchResult {
     pub hashfull: u32,
     /// 最善手（USI 形式）
     pub bestmove: String,
+    /// ウォームアップ実行かどうか（reuse_searchモード時のみ設定）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_warmup: Option<bool>,
+    /// Search再利用モードでの探索実行インデックス（0=初回、1=2回目...）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_run_index: Option<u32>,
 }
 
 /// スレッド数別の結果
@@ -249,6 +255,159 @@ pub fn calculate_efficiency(baseline_nps: u64, current_nps: u64, threads: usize)
     }
     let speedup = current_nps as f64 / baseline_nps as f64;
     (speedup / threads as f64) * 100.0
+}
+
+/// reuse_searchモード専用の集計統計
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReuseSearchStats {
+    /// 初回探索（Search::new()直後）の平均NPS
+    pub first_run_avg_nps: u64,
+    /// 2回目以降の平均NPS（履歴蓄積後）
+    pub subsequent_avg_nps: u64,
+    /// NPS改善率（%）
+    pub improvement_percent: f64,
+    /// 局面ごとの詳細
+    pub per_position: Vec<PositionReuseStats>,
+}
+
+/// 局面ごとのreuse_search統計
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PositionReuseStats {
+    /// 局面名（SFENの先頭部分）
+    pub position_name: String,
+    /// 初回NPS
+    pub first_nps: u64,
+    /// 2回目以降の平均NPS
+    pub subsequent_avg_nps: u64,
+    /// NPS改善率（%）
+    pub improvement_percent: f64,
+}
+
+impl BenchmarkReport {
+    /// reuse_searchモードの統計を計算
+    pub fn compute_reuse_stats(&self) -> Option<ReuseSearchStats> {
+        // search_run_indexが設定されている結果のみを対象
+        let thread_result = self.results.first()?;
+        let results: Vec<_> = thread_result
+            .results
+            .iter()
+            .filter(|r| r.search_run_index.is_some() && r.is_warmup != Some(true))
+            .collect();
+
+        if results.is_empty() {
+            return None;
+        }
+
+        // SFENごとにグループ化
+        let mut sfen_groups: std::collections::HashMap<String, Vec<&BenchResult>> =
+            std::collections::HashMap::new();
+        for r in &results {
+            sfen_groups.entry(r.sfen.clone()).or_default().push(r);
+        }
+
+        // 各SFENの初回と2回目以降を分離
+        let mut first_runs = Vec::new();
+        let mut subsequent_runs = Vec::new();
+        let mut per_position = Vec::new();
+
+        for (sfen, group) in &sfen_groups {
+            // search_run_indexでソート
+            let mut sorted: Vec<_> = group.iter().collect();
+            sorted.sort_by_key(|r| r.search_run_index.unwrap_or(0));
+
+            if let Some(first) = sorted.first() {
+                first_runs.push(first.nps);
+
+                let subsequent: Vec<u64> = sorted.iter().skip(1).map(|r| r.nps).collect();
+                if !subsequent.is_empty() {
+                    let subseq_avg = subsequent.iter().sum::<u64>() / subsequent.len() as u64;
+                    subsequent_runs.extend(subsequent.iter());
+
+                    let improvement = if first.nps > 0 {
+                        ((subseq_avg as f64 - first.nps as f64) / first.nps as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+
+                    per_position.push(PositionReuseStats {
+                        position_name: truncate_sfen(sfen),
+                        first_nps: first.nps,
+                        subsequent_avg_nps: subseq_avg,
+                        improvement_percent: improvement,
+                    });
+                }
+            }
+        }
+
+        if first_runs.is_empty() {
+            return None;
+        }
+
+        let first_avg = first_runs.iter().sum::<u64>() / first_runs.len() as u64;
+        let subsequent_avg = if subsequent_runs.is_empty() {
+            first_avg
+        } else {
+            subsequent_runs.iter().sum::<u64>() / subsequent_runs.len() as u64
+        };
+
+        let improvement = if first_avg > 0 {
+            ((subsequent_avg as f64 - first_avg as f64) / first_avg as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        Some(ReuseSearchStats {
+            first_run_avg_nps: first_avg,
+            subsequent_avg_nps: subsequent_avg,
+            improvement_percent: improvement,
+            per_position,
+        })
+    }
+
+    /// reuse_searchモード用のサマリーを出力
+    pub fn print_reuse_summary(&self) {
+        if let Some(stats) = self.compute_reuse_stats() {
+            println!("\n=== Reuse Search Analysis ===");
+            println!(
+                "First run (cold start): avg NPS = {}",
+                format_number(stats.first_run_avg_nps)
+            );
+            println!(
+                "Subsequent runs:        avg NPS = {}",
+                format_number(stats.subsequent_avg_nps)
+            );
+            println!("NPS Improvement:        {:+.1}%", stats.improvement_percent);
+
+            if !stats.per_position.is_empty() {
+                println!("\nPosition-by-position breakdown:");
+                println!(
+                    "  {:<20} | {:<12} | {:<12} | Improvement",
+                    "Position", "First NPS", "Subseq NPS"
+                );
+                println!("  {}", "-".repeat(60));
+
+                for pos in &stats.per_position {
+                    println!(
+                        "  {:<20} | {:<12} | {:<12} | {:+.1}%",
+                        pos.position_name,
+                        format_number(pos.first_nps),
+                        format_number(pos.subsequent_avg_nps),
+                        pos.improvement_percent
+                    );
+                }
+            }
+            println!();
+        }
+    }
+}
+
+/// SFENを短く表示用にトランケート
+fn truncate_sfen(sfen: &str) -> String {
+    if sfen.len() <= 20 {
+        sfen.to_string()
+    } else {
+        format!("{}...", &sfen[..17])
+    }
 }
 
 #[cfg(test)]

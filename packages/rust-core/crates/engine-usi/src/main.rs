@@ -304,6 +304,7 @@ impl UsiEngine {
 
         if let Some(search) = self.search.as_mut() {
             search.clear_tt();
+            search.clear_histories(); // YaneuraOu準拠：履歴統計もクリア
         }
         self.position = Position::new();
     }
@@ -591,31 +592,55 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
 
+    // 履歴統計の初期化がスタックを大量に消費するため、別スレッドで実行
+    const STACK_SIZE: usize = 64 * 1024 * 1024;
+
     #[test]
     fn parse_go_mate_sets_limits() {
-        let engine = UsiEngine::new();
-        let tokens = vec!["go", "mate", "5"];
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let engine = UsiEngine::new();
+                let tokens = vec!["go", "mate", "5"];
 
-        let limits = engine.parse_go_options(&tokens);
-        assert_eq!(limits.mate, 5);
-        assert!(!limits.use_time_management(), "mate search disables time management");
+                let limits = engine.parse_go_options(&tokens);
+                assert_eq!(limits.mate, 5);
+                assert!(!limits.use_time_management(), "mate search disables time management");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
     fn parse_go_mate_without_value_defaults_to_infinite() {
-        let engine = UsiEngine::new();
-        let tokens = vec!["go", "mate"];
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let engine = UsiEngine::new();
+                let tokens = vec!["go", "mate"];
 
-        let limits = engine.parse_go_options(&tokens);
-        assert_eq!(limits.mate, i32::MAX);
+                let limits = engine.parse_go_options(&tokens);
+                assert_eq!(limits.mate, i32::MAX);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
     fn parse_go_mate_infinite_defaults_to_max() {
-        let engine = UsiEngine::new();
-        let tokens = vec!["go", "mate", "infinite"];
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let engine = UsiEngine::new();
+                let tokens = vec!["go", "mate", "infinite"];
 
-        let limits = engine.parse_go_options(&tokens);
-        assert_eq!(limits.mate, i32::MAX);
+                let limits = engine.parse_go_options(&tokens);
+                assert_eq!(limits.mate, i32::MAX);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }
