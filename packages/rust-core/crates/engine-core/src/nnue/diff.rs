@@ -30,7 +30,7 @@ pub fn get_changed_features(pos: &Position, perspective: Color) -> (Vec<usize>, 
     let mut removed = Vec::new();
     let mut added = Vec::new();
 
-    for dp in &state.dirty_piece.pieces {
+    for dp in state.dirty_piece.pieces() {
         // 盤上から消える側（old）
         if dp.old_piece != Piece::NONE {
             if let Some(sq) = dp.old_sq {
@@ -53,7 +53,7 @@ pub fn get_changed_features(pos: &Position, perspective: Color) -> (Vec<usize>, 
     }
 
     // 手駒の変化を反映
-    for hc in &state.dirty_piece.hand_changes {
+    for hc in state.dirty_piece.hand_changes() {
         // やねうら王同様、手駒は種類×枚数の組み合わせで 1 つの BonaPiece を表現する。
         if hc.old_count != hc.new_count {
             // 旧カウント分の特徴量を削除
