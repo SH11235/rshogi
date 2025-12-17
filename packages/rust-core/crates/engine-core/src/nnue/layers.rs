@@ -92,10 +92,24 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
     /// AVX2/SSE2/WASMのSIMD最適化版。
     /// 密な行列積方式（YaneuraOuスタイル）で実装。
     ///
-    /// 入力密度実測結果（2025-12-18）: 約40%（39-42%）
+    /// # 入力サイズの契約
+    ///
+    /// 入力スライスは `PADDED_INPUT` バイト以上である必要がある。
+    /// SIMD実装は32バイト（AVX2）または16バイト（SSE2）単位で処理するため、
+    /// `INPUT_DIM` より小さい入力を渡すと境界外アクセスが発生する。
+    ///
+    /// # 入力密度
+    ///
+    /// 実測結果（2025-12-18）: 約40%（39-42%）
     /// → スパース最適化には高すぎるため、密な行列積方式が正しい選択。
     /// 詳細は `network.rs` の diagnostics 計測コードを参照。
     pub fn propagate(&self, input: &[u8], output: &mut [i32; OUTPUT_DIM]) {
+        debug_assert!(
+            input.len() >= Self::PADDED_INPUT,
+            "input length {} is less than PADDED_INPUT {}",
+            input.len(),
+            Self::PADDED_INPUT
+        );
         // AVX2: 256bit = 32 x u8/i8
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         {
