@@ -39,6 +39,8 @@ cargo run -p tools --bin benchmark --release -- \
 | `-v, --verbose` | 詳細なinfo行を表示 | false |
 | `--engine` | エンジンバイナリパス | なし（内部API） |
 | `--internal` | 内部API直接呼び出しモード | false |
+| `--reuse-search` | Searchインスタンス再利用モード | false |
+| `--warmup` | ウォームアップ回数 | 0 |
 
 ### カスタム局面ファイル
 
@@ -96,6 +98,42 @@ let config = BenchmarkConfig {
 let report = runner::internal::run_internal_benchmark(&config)?;
 report.print_summary();
 report.save_json(&output_path)?;
+```
+
+### Searchインスタンス再利用モード（--reuse-search）
+
+SearchWorker再利用による最適化効果を測定するためのモードです。
+
+通常モードでは各局面ごとに新しいSearchインスタンスを作成しますが、`--reuse-search`モードでは1つのSearchインスタンスを再利用します。これにより：
+
+- **初回（cold start）**: SearchWorkerを新規作成（履歴テーブル初期化あり）
+- **2回目以降**: SearchWorkerを再利用（履歴テーブル初期化なし）
+
+#### 使用例
+
+```bash
+# 基本（初回 vs 2回目以降の比較）
+cargo run --release -p tools --bin benchmark -- \
+  --internal --reuse-search --iterations 2
+
+# ウォームアップあり（履歴を蓄積してから測定）
+cargo run --release -p tools --bin benchmark -- \
+  --internal --reuse-search --warmup 1 --iterations 3 -v
+```
+
+#### 出力例
+
+```
+=== Reuse Search Analysis ===
+First run (cold start): avg NPS = 446,299
+Subsequent runs:        avg NPS = 467,615
+NPS Improvement:        +4.8%
+
+Position-by-position breakdown:
+  Position             | First NPS    | Subseq NPS   | Improvement
+  ------------------------------------------------------------
+  l4S2l/4g1gs1/5p1p... | 428,151      | 443,129      | +3.5%
+  lnsgkgsnl/1r7/p1p... | 533,913      | 570,428      | +6.8%
 ```
 
 ### トラブルシューティング

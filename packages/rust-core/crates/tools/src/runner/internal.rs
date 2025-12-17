@@ -1,5 +1,6 @@
 //! 内部API直接呼び出しモードでのベンチマーク実行
 
+use std::sync::mpsc;
 use std::thread;
 
 use anyhow::{Context, Result};
@@ -17,9 +18,19 @@ use crate::utils::SEARCH_STACK_SIZE;
 
 /// 内部API直接呼び出しモードでベンチマークを実行
 pub fn run_internal_benchmark(config: &BenchmarkConfig) -> Result<BenchmarkReport> {
-    // 評価関数設定
-    // 注意: MaterialLevelはNNUE初期化前に設定する必要がある
-    //       （NNUE未使用時のフォールバックとして使用されるため）
+    // 評価関数の共通設定
+    setup_eval(config)?;
+
+    if config.reuse_search {
+        run_internal_benchmark_reuse(config)
+    } else {
+        run_internal_benchmark_standard(config)
+    }
+}
+
+/// 評価関数の初期化
+fn setup_eval(config: &BenchmarkConfig) -> Result<()> {
+    // MaterialLevelはNNUE初期化前に設定する必要がある
     if let Some(level) = MaterialLevel::from_value(config.eval_config.material_level) {
         set_material_level(level);
         println!("MaterialLevel set to: {}", config.eval_config.material_level);
@@ -37,7 +48,6 @@ pub fn run_internal_benchmark(config: &BenchmarkConfig) -> Result<BenchmarkRepor
                 println!("NNUE initialized from: {}", nnue_path.display());
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // 既に初期化済みの場合はスキップ（OnceLock）
                 println!("NNUE already initialized, skipping");
             }
             Err(e) => {
@@ -48,7 +58,11 @@ pub fn run_internal_benchmark(config: &BenchmarkConfig) -> Result<BenchmarkRepor
             }
         }
     }
+    Ok(())
+}
 
+/// 標準モードでベンチマークを実行（各局面ごとに新しいSearchを作成）
+fn run_internal_benchmark_standard(config: &BenchmarkConfig) -> Result<BenchmarkReport> {
     let positions = load_positions(config)?;
     let mut all_results = Vec::new();
 
@@ -88,13 +102,11 @@ pub fn run_internal_benchmark(config: &BenchmarkConfig) -> Result<BenchmarkRepor
                 }
 
                 // 探索実行（専用スタックサイズのスレッドで実行）
-                // 各局面ごとに新しいSearchオブジェクトを作成
                 let verbose = config.verbose;
                 let sfen_clone = sfen.to_string();
                 let bench_result = thread::Builder::new()
                     .stack_size(SEARCH_STACK_SIZE)
                     .spawn(move || {
-                        // スレッド内でSearchエンジンを作成
                         let mut search = Search::new(tt_mb as usize);
 
                         let mut last_info: Option<SearchInfo> = None;
@@ -109,7 +121,6 @@ pub fn run_internal_benchmark(config: &BenchmarkConfig) -> Result<BenchmarkRepor
                             }),
                         );
 
-                        // 結果収集
                         BenchResult {
                             sfen: sfen_clone,
                             depth: result.depth,
@@ -118,6 +129,8 @@ pub fn run_internal_benchmark(config: &BenchmarkConfig) -> Result<BenchmarkRepor
                             nps: last_info.as_ref().map(|i| i.nps).unwrap_or(0),
                             hashfull: last_info.as_ref().map(|i| i.hashfull).unwrap_or(0),
                             bestmove: result.best_move.to_usi(),
+                            is_warmup: None,
+                            search_run_index: None,
                         }
                     })
                     .with_context(|| "Failed to spawn search thread")?
@@ -162,6 +175,173 @@ pub fn run_internal_benchmark(config: &BenchmarkConfig) -> Result<BenchmarkRepor
     })
 }
 
+/// Search再利用モードでベンチマークを実行（履歴統計の蓄積効果を測定）
+fn run_internal_benchmark_reuse(config: &BenchmarkConfig) -> Result<BenchmarkReport> {
+    let positions = load_positions(config)?;
+    let mut all_results = Vec::new();
+
+    for threads in &config.threads {
+        if *threads > 1 {
+            eprintln!("Warning: Multi-threading not yet implemented in internal API mode");
+            eprintln!("         Running with single thread instead.");
+        }
+
+        println!("=== Threads: {} (reuse_search mode) ===", threads);
+
+        // 設定値をキャプチャ
+        let tt_mb = config.tt_mb;
+        let positions_clone = positions.clone();
+        let iterations = config.iterations;
+        let warmup = config.warmup;
+        let verbose = config.verbose;
+        let limit_type = config.limit_type;
+        let limit = config.limit;
+
+        // チャネルで結果を受け取る
+        let (tx, rx) = mpsc::channel::<BenchResult>();
+
+        // 専用ワーカースレッドで全局面を探索
+        let handle = thread::Builder::new()
+            .stack_size(SEARCH_STACK_SIZE)
+            .spawn(move || {
+                // Searchインスタンスを1回だけ作成
+                let mut search = Search::new(tt_mb as usize);
+                let mut search_run_index: u32 = 0;
+
+                // ウォームアップフェーズ
+                for warmup_iter in 0..warmup {
+                    if verbose {
+                        println!("Warmup {}/{}", warmup_iter + 1, warmup);
+                    }
+                    for (name, sfen) in &positions_clone {
+                        if verbose {
+                            println!("  Position: {name} (warmup)");
+                        }
+                        let result = run_single_search(
+                            &mut search,
+                            sfen,
+                            limit_type,
+                            limit,
+                            verbose,
+                            true,
+                            search_run_index,
+                        );
+                        let _ = tx.send(result);
+                        search_run_index += 1;
+                    }
+                }
+
+                // 本番フェーズ
+                for iteration in 0..iterations {
+                    if iterations > 1 {
+                        println!("Iteration {}/{}", iteration + 1, iterations);
+                    }
+                    for (name, sfen) in &positions_clone {
+                        if verbose {
+                            println!("  Position: {name}");
+                        }
+                        let result = run_single_search(
+                            &mut search,
+                            sfen,
+                            limit_type,
+                            limit,
+                            verbose,
+                            false,
+                            search_run_index,
+                        );
+                        if verbose {
+                            println!(
+                                "    depth={} nodes={} time={}ms nps={}",
+                                result.depth, result.nodes, result.time_ms, result.nps
+                            );
+                        }
+                        let _ = tx.send(result);
+                        search_run_index += 1;
+                    }
+                }
+            })
+            .with_context(|| "Failed to spawn worker thread")?;
+
+        // スレッド終了を待機（tx はスレッド内でスコープ終了時にドロップされる）
+        handle.join().map_err(|_| anyhow::anyhow!("Worker thread panicked"))?;
+
+        // 結果を収集（スレッド終了後、チャネルは自動的にクローズされている）
+        let thread_results: Vec<BenchResult> = rx.into_iter().collect();
+
+        all_results.push(ThreadResult {
+            threads: *threads,
+            results: thread_results,
+        });
+    }
+
+    Ok(BenchmarkReport {
+        system_info: collect_system_info(),
+        engine_name: Some("internal (reuse_search)".to_string()),
+        engine_path: None,
+        eval_info: Some(EvalInfo::from(&config.eval_config)),
+        results: all_results,
+    })
+}
+
+/// 単一局面の探索を実行（ヘルパー関数）
+fn run_single_search(
+    search: &mut Search,
+    sfen: &str,
+    limit_type: LimitType,
+    limit: u64,
+    verbose: bool,
+    is_warmup: bool,
+    search_run_index: u32,
+) -> BenchResult {
+    let mut pos = Position::new();
+    if let Err(e) = pos.set_sfen(sfen) {
+        eprintln!("Error setting SFEN: {e}");
+        return BenchResult {
+            sfen: sfen.to_string(),
+            depth: 0,
+            nodes: 0,
+            time_ms: 0,
+            nps: 0,
+            hashfull: 0,
+            bestmove: "none".to_string(),
+            is_warmup: Some(is_warmup),
+            search_run_index: Some(search_run_index),
+        };
+    }
+
+    let mut limits = LimitsType::default();
+    limits.set_start_time();
+    match limit_type {
+        LimitType::Depth => limits.depth = limit as i32,
+        LimitType::Nodes => limits.nodes = limit,
+        LimitType::Movetime => limits.movetime = limit as i64,
+    }
+
+    let mut last_info: Option<SearchInfo> = None;
+    let result = search.go(
+        &mut pos,
+        limits,
+        Some(|info: &SearchInfo| {
+            last_info = Some(info.clone());
+            if verbose {
+                println!("    {}", info.to_usi_string());
+            }
+        }),
+    );
+
+    BenchResult {
+        sfen: sfen.to_string(),
+        depth: result.depth,
+        nodes: result.nodes,
+        time_ms: last_info.as_ref().map(|i| i.time_ms).unwrap_or(0),
+        nps: last_info.as_ref().map(|i| i.nps).unwrap_or(0),
+        hashfull: last_info.as_ref().map(|i| i.hashfull).unwrap_or(0),
+        bestmove: result.best_move.to_usi(),
+        is_warmup: Some(is_warmup),
+        search_run_index: Some(search_run_index),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,6 +357,8 @@ mod tests {
             iterations: 1,
             verbose: false,
             eval_config: EvalConfig::default(),
+            reuse_search: false,
+            warmup: 0,
         }
     }
 
@@ -251,5 +433,49 @@ mod tests {
         // 不正な値でも実行は成功し、デフォルト値が使用されるべき
         let result = run_internal_benchmark(&config);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_reuse_search_mode() {
+        let mut config = test_config(LimitType::Depth, 3);
+        config.reuse_search = true;
+        config.iterations = 2;
+
+        let result = run_internal_benchmark(&config);
+        assert!(result.is_ok(), "Reuse search benchmark failed: {:?}", result.err());
+
+        let report = result.unwrap();
+        // 2 iterations × 4 positions = 8 results
+        assert_eq!(report.results[0].results.len(), 8);
+
+        // search_run_indexが連番になっている
+        for (i, r) in report.results[0].results.iter().enumerate() {
+            assert_eq!(r.search_run_index, Some(i as u32));
+            assert_eq!(r.is_warmup, Some(false));
+        }
+    }
+
+    #[test]
+    fn test_reuse_search_with_warmup() {
+        let mut config = test_config(LimitType::Depth, 2);
+        config.reuse_search = true;
+        config.warmup = 1;
+        config.iterations = 1;
+
+        let result = run_internal_benchmark(&config);
+        assert!(result.is_ok());
+
+        let report = result.unwrap();
+        // 1 warmup × 4 positions + 1 iteration × 4 positions = 8 results
+        assert_eq!(report.results[0].results.len(), 8);
+
+        // 最初の4つはウォームアップ
+        for r in &report.results[0].results[..4] {
+            assert_eq!(r.is_warmup, Some(true));
+        }
+        // 残りは本番
+        for r in &report.results[0].results[4..] {
+            assert_eq!(r.is_warmup, Some(false));
+        }
     }
 }

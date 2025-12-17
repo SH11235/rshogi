@@ -23,6 +23,8 @@
 //!     iterations: 1,
 //!     verbose: false,
 //!     eval_config: EvalConfig::default(),
+//!     reuse_search: false,
+//!     warmup: 0,
 //! };
 //!
 //! // 内部APIモード

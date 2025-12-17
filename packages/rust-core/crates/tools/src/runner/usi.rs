@@ -198,6 +198,8 @@ impl UsiEngine {
                     nps: last_info.nps,
                     hashfull: last_info.hashfull,
                     bestmove,
+                    is_warmup: None,
+                    search_run_index: None,
                 });
             }
         }
