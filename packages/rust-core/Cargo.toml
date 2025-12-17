@@ -21,6 +21,8 @@ rand = "0.9"
 rand_xoshiro = "0.7"
 regex = "1.11.2"
 smallvec = "1.15"
+# getrandom with wasm_js feature for WebAssembly support
+getrandom = { version = "0.3", default-features = false, features = ["wasm_js"] }
 
 
 # Debug build optimizations for reasonable test performance
