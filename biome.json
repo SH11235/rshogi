@@ -6,7 +6,8 @@
         "useIgnoreFile": true
     },
     "files": {
-        "includes": ["**", "!**/packages/rust-core", "!**/src-tauri"]
+        "includes": ["**", "!**/packages/rust-core", "!**/src-tauri"],
+        "ignoreUnknown": true
     },
     "css": {
         "parser": {
