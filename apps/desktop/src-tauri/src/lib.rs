@@ -5,7 +5,7 @@ use std::thread;
 use engine_core::movegen::{generate_legal, MoveList};
 use engine_core::position::{Position, SFEN_HIRATE};
 use engine_core::search::{
-    init_search_module, LimitsType, Search, SearchInfo, SearchResult, SkillOptions, TimeOptions,
+    LimitsType, Search, SearchInfo, SearchResult, SkillOptions, TimeOptions,
     DEFAULT_MAX_MOVES_TO_DRAW,
 };
 use engine_core::types::json::{BoardStateJson, ReplayResultJson};
@@ -152,8 +152,6 @@ struct EngineStateInner {
 
 impl EngineStateInner {
     fn new() -> Self {
-        init_search_module();
-
         let options = EngineOptions::default();
         let mut search = Search::new(options.tt_size_mb);
         options.apply_to_search(&mut search);

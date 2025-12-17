@@ -90,14 +90,6 @@ static REDUCTIONS: LazyLock<Reductions> = LazyLock::new(|| {
     table
 });
 
-/// reduction配列を初期化（後方互換性のために残す）
-/// LazyLockにより初回アクセス時に自動初期化されるため、明示的な呼び出しは不要だが、
-/// 既存のコードとの互換性のために残している。
-pub fn init_reductions() {
-    // LazyLock::force で明示的に初期化を強制
-    LazyLock::force(&REDUCTIONS);
-}
-
 /// Reductionを取得
 ///
 /// LazyLockにより初回アクセス時に自動初期化されるため、panicしない。
@@ -120,15 +112,6 @@ fn reduction(imp: bool, depth: i32, move_count: i32, delta: i32, root_delta: i32
         + (!imp as i32) * reduction_scale * REDUCTION_NON_IMPROVING_MULT
             / REDUCTION_NON_IMPROVING_DIV
         + REDUCTION_BASE_OFFSET
-}
-
-/// Reductionテーブルが初期化済みかどうかを確認（後方互換性のため残す）
-/// LazyLockにより常にtrue（初回アクセス時に自動初期化される）
-pub fn is_reductions_initialized() -> bool {
-    // LazyLockは初回アクセス時に初期化されるため、このチェックで初期化が行われる
-    // 後方互換性のためにtrueを返す
-    let _ = &*REDUCTIONS; // 初期化を強制
-    true
 }
 
 /// 置換表プローブの結果をまとめたコンテキスト
@@ -282,8 +265,6 @@ impl<'a> SearchWorker<'a> {
         time_manager: &'a mut TimeManagement,
         max_moves_to_draw: i32,
     ) -> Self {
-        // 必要ならここで初期化（テスト並列実行でも安全に利用できるようにする）
-        init_reductions();
         Self {
             tt,
             limits,
@@ -2476,9 +2457,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_init_reductions() {
-        init_reductions();
+    fn test_reduction_values() {
         // reduction(true, 10, 5) などが正の値を返すことを確認
+        // LazyLockにより初回アクセス時に自動初期化される
         let root_delta = 64;
         let delta = 32;
         assert!(reduction(true, 10, 5, delta, root_delta) / 1024 >= 0);
@@ -2490,7 +2471,6 @@ mod tests {
 
     #[test]
     fn test_reduction_bounds() {
-        init_reductions();
         // 境界値テスト
         let root_delta = 64;
         let delta = 32;
@@ -2499,24 +2479,9 @@ mod tests {
         assert!(reduction(false, 63, 63, delta, root_delta) / 1024 < 64);
     }
 
-    /// LMRテーブルが初期化済みかどうかを確認できることをテスト
-    #[test]
-    fn test_is_reductions_initialized() {
-        // 他のテストで既に初期化されている可能性があるので、
-        // 初期化後に true を返すことを確認
-        init_reductions();
-        assert!(
-            is_reductions_initialized(),
-            "REDUCTIONS should be initialized after init_reductions()"
-        );
-    }
-
     /// depth/move_countが大きい場合にreductionが正の値を返すことを確認
-    /// バグ修正前: REDUCTIONSが初期化されずに常に0を返していた
     #[test]
     fn test_reduction_returns_nonzero_for_large_values() {
-        init_reductions();
-
         let root_delta = 64;
         let delta = 32;
         // 深い探索で多くの手を試した場合、reductionは正の値であるべき
@@ -2534,8 +2499,6 @@ mod tests {
     /// 境界ケース: depth=1, move_count=1でもreduction関数が動作することを確認
     #[test]
     fn test_reduction_small_values() {
-        init_reductions();
-
         let root_delta = 64;
         let delta = 32;
         // 小さな値でもpanicしないことを確認
@@ -2545,7 +2508,6 @@ mod tests {
 
     #[test]
     fn test_reduction_extremes_no_overflow() {
-        init_reductions();
         // 最大depth/mcでもオーバーフローせずに値が得られることを確認
         let delta = 0;
         let root_delta = 1;
@@ -2558,7 +2520,6 @@ mod tests {
 
     #[test]
     fn test_reduction_zero_root_delta_clamped() {
-        init_reductions();
         // root_delta=0 を渡しても内部で1にクランプされることを確認
         let r = reduction(false, 10, 10, 0, 0) / 1024;
         assert!(r >= 0, "reduction should clamp root_delta to >=1 even when 0 is passed");
