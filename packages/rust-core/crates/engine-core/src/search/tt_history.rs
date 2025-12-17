@@ -24,6 +24,13 @@ impl TTMoveHistory {
             self.table[ply].update(bonus);
         }
     }
+
+    /// クリア
+    pub fn clear(&mut self) {
+        for entry in self.table.iter_mut() {
+            entry.set(0);
+        }
+    }
 }
 
 impl Default for TTMoveHistory {

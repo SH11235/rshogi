@@ -5,6 +5,8 @@
 //! - 静止探索 (Quiescence Search)
 //! - 各種枝刈り: NMP, LMR, Futility, Razoring, SEE, Singular Extension
 
+use std::sync::Arc;
+
 use crate::nnue::evaluate;
 use crate::position::Position;
 use crate::search::PieceToHistory;
@@ -194,32 +196,57 @@ struct Step14Context<'a> {
 
 /// 探索用のワーカー状態
 ///
-/// # Arguments
-/// - 引数が多いのはYaneuraOu準拠のため。探索のコアロジックは状態を多く持つ必要がある。
-pub struct SearchWorker<'a> {
-    /// 置換表への参照
-    pub tt: &'a TranspositionTable,
+/// YaneuraOu準拠: Workerはゲーム全体で再利用される。
+/// 履歴統計は直接メンバとして保持し、usinewgameでクリア、goでは保持。
+pub struct SearchWorker {
+    /// 置換表への共有参照（Arc）
+    pub tt: Arc<TranspositionTable>,
 
-    /// 探索制限
-    pub limits: &'a LimitsType,
+    // =========================================================================
+    // 履歴統計（YaneuraOu準拠: 直接メンバとして保持）
+    // =========================================================================
+    // 注: YaneuraOuでは全履歴テーブルがWorker内に直接配列として配置されているが、
+    // Rustでは巨大な配列（数MB規模）の初期化でスタックオーバーフローが発生するため、
+    // 一部のテーブル（CapturePieceToHistory, ContinuationHistory, PawnHistory,
+    // CorrectionHistory）は内部でBox/Vecを使用してヒープに配置している。
+    //
+    // この間接参照（1回のポインタ追跡）によるパフォーマンス影響は軽微と考えられる：
+    // - 履歴テーブルは数MB規模でL1/L2キャッシュに収まらない
+    // - キャッシュミスのコスト（100-300サイクル）に比べ間接参照（1-3サイクル）は誤差レベル
+    //
+    // PERF: 将来の最適化候補
+    // - MaybeUninit + Box::new_zeroed()で直接ヒープ構築（間接参照を1段削減）
+    // - カスタムアロケータでメモリレイアウト最適化
+    // =========================================================================
+    /// 基本的な指し手の履歴（from-to）
+    pub main_history: ButterflyHistory,
 
-    /// 時間管理
-    pub time_manager: &'a mut TimeManagement,
+    /// 浅いply用の履歴
+    pub low_ply_history: LowPlyHistory,
 
+    /// 捕獲手の履歴
+    pub capture_history: CapturePieceToHistory,
+
+    /// 継続履歴 [inCheck][captureStage]
+    pub continuation_history: [[ContinuationHistory; 2]; 2],
+
+    /// 歩形状の履歴
+    pub pawn_history: PawnHistory,
+
+    /// 補正履歴
+    pub correction_history: CorrectionHistory,
+
+    /// TT手の履歴
+    pub tt_move_history: TTMoveHistory,
+
+    // =========================================================================
+    // 探索状態（毎回リセット）
+    // =========================================================================
     /// ルート手
     pub root_moves: RootMoves,
 
     /// 探索スタック
     pub stack: StackArray,
-
-    // History統計
-    pub main_history: ButterflyHistory,
-    pub pawn_history: PawnHistory,
-    pub capture_history: CapturePieceToHistory,
-    pub continuation_history: [[ContinuationHistory; 2]; 2],
-    pub low_ply_history: LowPlyHistory,
-    pub tt_move_history: TTMoveHistory,
-    pub correction_history: CorrectionHistory,
 
     /// 探索ノード数
     pub nodes: u64,
@@ -255,29 +282,24 @@ pub struct SearchWorker<'a> {
     pub max_moves_to_draw: i32,
 }
 
-impl<'a> SearchWorker<'a> {
-    /// 新しいSearchWorkerを作成
+impl SearchWorker {
+    /// 新しいSearchWorkerを作成（YaneuraOu準拠: isreadyまたは最初のgo時）
     ///
-    /// REDUCTIONSテーブルが初期化済みであることを前提にする。
-    pub fn new(
-        tt: &'a TranspositionTable,
-        limits: &'a LimitsType,
-        time_manager: &'a mut TimeManagement,
-        max_moves_to_draw: i32,
-    ) -> Self {
-        Self {
+    /// Box化してヒープに配置し、スタックオーバーフローを防ぐ。
+    pub fn new(tt: Arc<TranspositionTable>, max_moves_to_draw: i32) -> Box<Self> {
+        Box::new(Self {
             tt,
-            limits,
-            time_manager,
-            root_moves: RootMoves::new(),
-            stack: init_stack_array(),
+            // 履歴統計の初期化
             main_history: ButterflyHistory::new(),
-            pawn_history: PawnHistory::new(),
+            low_ply_history: LowPlyHistory::new(),
             capture_history: CapturePieceToHistory::new(),
             continuation_history: Default::default(),
-            low_ply_history: LowPlyHistory::new(),
-            tt_move_history: TTMoveHistory::new(),
+            pawn_history: PawnHistory::new(),
             correction_history: CorrectionHistory::new(),
+            tt_move_history: TTMoveHistory::new(),
+            // 探索状態の初期化
+            root_moves: RootMoves::new(),
+            stack: init_stack_array(),
             nodes: 0,
             sel_depth: 0,
             root_depth: 0,
@@ -288,7 +310,37 @@ impl<'a> SearchWorker<'a> {
             abort: false,
             best_move_changes: 0.0,
             max_moves_to_draw,
+        })
+    }
+
+    /// usinewgameで呼び出し：全履歴をクリア（YaneuraOu Worker::clear()相当）
+    pub fn clear(&mut self) {
+        self.main_history.clear();
+        self.low_ply_history.clear();
+        self.capture_history.clear();
+        for row in &mut self.continuation_history {
+            for ch in row {
+                ch.clear();
+            }
         }
+        self.pawn_history.clear();
+        self.correction_history.clear();
+        self.tt_move_history.clear();
+    }
+
+    /// goで呼び出し：探索状態のリセット（履歴はクリアしない、YaneuraOu準拠）
+    pub fn prepare_search(&mut self) {
+        self.nodes = 0;
+        self.sel_depth = 0;
+        self.root_depth = 0;
+        self.root_delta = 1;
+        self.completed_depth = 0;
+        self.best_move = Move::NONE;
+        self.abort = false;
+        self.best_move_changes = 0.0;
+        self.root_moves.clear();
+        // YaneuraOu準拠: low_ply_historyのみクリア
+        self.low_ply_history.clear();
     }
 
     /// best_move_changes を半減（世代減衰）
@@ -306,7 +358,7 @@ impl<'a> SearchWorker<'a> {
 
     /// 中断チェック
     #[inline]
-    fn check_abort(&mut self) -> bool {
+    fn check_abort(&mut self, limits: &LimitsType, time_manager: &mut TimeManagement) -> bool {
         if self.abort {
             #[cfg(debug_assertions)]
             eprintln!("check_abort: abort flag already set");
@@ -314,7 +366,7 @@ impl<'a> SearchWorker<'a> {
         }
 
         // 外部からの停止要求
-        if self.time_manager.stop_requested() {
+        if time_manager.stop_requested() {
             #[cfg(debug_assertions)]
             eprintln!("check_abort: stop requested");
             self.abort = true;
@@ -322,11 +374,11 @@ impl<'a> SearchWorker<'a> {
         }
 
         // ノード数制限チェック
-        if self.limits.nodes > 0 && self.nodes >= self.limits.nodes {
+        if limits.nodes > 0 && self.nodes >= limits.nodes {
             #[cfg(debug_assertions)]
             eprintln!(
                 "check_abort: node limit reached nodes={} limit={}",
-                self.nodes, self.limits.nodes
+                self.nodes, limits.nodes
             );
             self.abort = true;
             return true;
@@ -336,20 +388,20 @@ impl<'a> SearchWorker<'a> {
         // YaneuraOu準拠の2フェーズロジック
         if self.nodes & 1023 == 0 {
             // ponderhit フラグをポーリングし、検知したら通常探索へ切り替える
-            if self.time_manager.take_ponderhit() {
-                self.time_manager.on_ponderhit();
+            if time_manager.take_ponderhit() {
+                time_manager.on_ponderhit();
             }
 
-            let elapsed = self.time_manager.elapsed();
-            let elapsed_effective = self.time_manager.elapsed_from_ponderhit();
+            let elapsed = time_manager.elapsed();
+            let elapsed_effective = time_manager.elapsed_from_ponderhit();
 
             // フェーズ1: search_end 設定済み → 即座に停止
-            if self.time_manager.search_end() > 0 && elapsed >= self.time_manager.search_end() {
+            if time_manager.search_end() > 0 && elapsed >= time_manager.search_end() {
                 #[cfg(debug_assertions)]
                 eprintln!(
                     "check_abort: search_end reached elapsed={} search_end={}",
                     elapsed,
-                    self.time_manager.search_end()
+                    time_manager.search_end()
                 );
                 self.abort = true;
                 return true;
@@ -357,13 +409,12 @@ impl<'a> SearchWorker<'a> {
 
             // フェーズ2: search_end 未設定 → maximum超過 or stop_on_ponderhit で設定
             // ただし ponder 中は停止判定を行わない（YO準拠）
-            if !self.time_manager.is_pondering()
-                && self.time_manager.search_end() == 0
-                && self.limits.use_time_management()
-                && (elapsed_effective > self.time_manager.maximum()
-                    || self.time_manager.stop_on_ponderhit())
+            if !time_manager.is_pondering()
+                && time_manager.search_end() == 0
+                && limits.use_time_management()
+                && (elapsed_effective > time_manager.maximum() || time_manager.stop_on_ponderhit())
             {
-                self.time_manager.set_search_end(elapsed);
+                time_manager.set_search_end(elapsed);
                 // 注: ここでは停止せず、次のチェックで秒境界で停止
             }
         }
@@ -611,6 +662,7 @@ impl<'a> SearchWorker<'a> {
     }
 
     /// Razoring
+    #[allow(clippy::too_many_arguments)]
     fn try_razoring<const NT: u8>(
         &mut self,
         pos: &mut Position,
@@ -621,12 +673,21 @@ impl<'a> SearchWorker<'a> {
         pv_node: bool,
         in_check: bool,
         static_eval: Value,
+        limits: &LimitsType,
+        time_manager: &mut TimeManagement,
     ) -> Option<Value> {
         if !pv_node && !in_check && depth <= 3 {
             let razoring_threshold = alpha - Value::new(200 * depth);
             if static_eval < razoring_threshold {
-                let value =
-                    self.qsearch::<{ NodeType::NonPV as u8 }>(pos, DEPTH_QS, alpha, beta, ply);
+                let value = self.qsearch::<{ NodeType::NonPV as u8 }>(
+                    pos,
+                    DEPTH_QS,
+                    alpha,
+                    beta,
+                    ply,
+                    limits,
+                    time_manager,
+                );
                 if value <= alpha {
                     return Some(value);
                 }
@@ -659,6 +720,7 @@ impl<'a> SearchWorker<'a> {
     }
 
     /// Null move pruning（改善フラグ更新込み）
+    #[allow(clippy::too_many_arguments)]
     fn try_null_move_pruning<const NT: u8>(
         &mut self,
         pos: &mut Position,
@@ -669,6 +731,8 @@ impl<'a> SearchWorker<'a> {
         in_check: bool,
         static_eval: Value,
         mut improving: bool,
+        limits: &LimitsType,
+        time_manager: &mut TimeManagement,
     ) -> (Option<Value>, bool) {
         if !pv_node
             && !in_check
@@ -686,6 +750,8 @@ impl<'a> SearchWorker<'a> {
                 -beta + Value::new(1),
                 ply + 1,
                 true,
+                limits,
+                time_manager,
             );
             pos.undo_null_move();
 
@@ -709,6 +775,7 @@ impl<'a> SearchWorker<'a> {
     }
 
     /// ProbCut（YaneuraOu準拠）
+    #[allow(clippy::too_many_arguments)]
     fn try_probcut(
         &mut self,
         pos: &mut Position,
@@ -720,6 +787,8 @@ impl<'a> SearchWorker<'a> {
         static_eval: Value,
         unadjusted_static_eval: Value,
         in_check: bool,
+        limits: &LimitsType,
+        time_manager: &mut TimeManagement,
     ) -> Option<Value> {
         if in_check || depth < 3 || static_eval == Value::NONE {
             return None;
@@ -784,6 +853,8 @@ impl<'a> SearchWorker<'a> {
                 -prob_beta,
                 -prob_beta + Value::new(1),
                 ply + 1,
+                limits,
+                time_manager,
             );
 
             if value >= prob_beta && probcut_depth > 0 {
@@ -794,6 +865,8 @@ impl<'a> SearchWorker<'a> {
                     -prob_beta + Value::new(1),
                     ply + 1,
                     true,
+                    limits,
+                    time_manager,
                 );
             }
             pos.undo_move(mv);
@@ -1006,9 +1079,15 @@ impl<'a> SearchWorker<'a> {
     /// 探索のメインエントリーポイント
     ///
     /// 反復深化で指定された深さまで探索する。
-    pub fn search(&mut self, pos: &mut Position, depth: Depth) {
+    pub fn search(
+        &mut self,
+        pos: &mut Position,
+        depth: Depth,
+        limits: &LimitsType,
+        time_manager: &mut TimeManagement,
+    ) {
         // ルート手を初期化
-        self.root_moves = RootMoves::from_legal_moves(pos, &self.limits.search_moves);
+        self.root_moves = RootMoves::from_legal_moves(pos, &limits.search_moves);
 
         if self.root_moves.is_empty() {
             // 合法手がない場合
@@ -1050,7 +1129,7 @@ impl<'a> SearchWorker<'a> {
             };
 
             loop {
-                let score = self.search_root(pos, d, alpha, beta);
+                let score = self.search_root(pos, d, alpha, beta, limits, time_manager);
 
                 if self.abort {
                     break;
@@ -1083,6 +1162,8 @@ impl<'a> SearchWorker<'a> {
         depth: Depth,
         alpha: Value,
         beta: Value,
+        limits: &LimitsType,
+        time_manager: &mut TimeManagement,
     ) -> Value {
         self.root_delta = (beta.raw() - alpha.raw()).abs().max(1);
 
@@ -1091,7 +1172,7 @@ impl<'a> SearchWorker<'a> {
         let mut pv_idx = 0;
 
         for rm_idx in 0..self.root_moves.len() {
-            if self.check_abort() {
+            if self.check_abort(limits, time_manager) {
                 return Value::ZERO;
             }
 
@@ -1110,7 +1191,16 @@ impl<'a> SearchWorker<'a> {
 
             // PVS
             let value = if rm_idx == 0 {
-                -self.search_node::<{ NodeType::PV as u8 }>(pos, depth - 1, -beta, -alpha, 1, false)
+                -self.search_node::<{ NodeType::PV as u8 }>(
+                    pos,
+                    depth - 1,
+                    -beta,
+                    -alpha,
+                    1,
+                    false,
+                    limits,
+                    time_manager,
+                )
             } else {
                 // Zero Window Search
                 let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
@@ -1120,6 +1210,8 @@ impl<'a> SearchWorker<'a> {
                     -alpha,
                     1,
                     true,
+                    limits,
+                    time_manager,
                 );
 
                 // Re-search if needed
@@ -1131,6 +1223,8 @@ impl<'a> SearchWorker<'a> {
                         -alpha,
                         1,
                         false,
+                        limits,
+                        time_manager,
                     );
                 }
 
@@ -1205,6 +1299,8 @@ impl<'a> SearchWorker<'a> {
     /// * `alpha` - アルファ値
     /// * `beta` - ベータ値
     /// * `pv_idx` - 探索対象のPVインデックス（0-indexed）
+    /// * `limits` - 探索制限
+    /// * `time_manager` - 時間管理
     pub(crate) fn search_root_for_pv(
         &mut self,
         pos: &mut Position,
@@ -1212,6 +1308,8 @@ impl<'a> SearchWorker<'a> {
         alpha: Value,
         beta: Value,
         pv_idx: usize,
+        limits: &LimitsType,
+        time_manager: &mut TimeManagement,
     ) -> Value {
         self.root_delta = (beta.raw() - alpha.raw()).abs().max(1);
 
@@ -1221,7 +1319,7 @@ impl<'a> SearchWorker<'a> {
 
         // pv_idx以降の手のみを探索
         for rm_idx in pv_idx..self.root_moves.len() {
-            if self.check_abort() {
+            if self.check_abort(limits, time_manager) {
                 return Value::ZERO;
             }
 
@@ -1240,7 +1338,16 @@ impl<'a> SearchWorker<'a> {
 
             // PVS: 最初の手（このPVラインの候補）はPV探索
             let value = if rm_idx == pv_idx {
-                -self.search_node::<{ NodeType::PV as u8 }>(pos, depth - 1, -beta, -alpha, 1, false)
+                -self.search_node::<{ NodeType::PV as u8 }>(
+                    pos,
+                    depth - 1,
+                    -beta,
+                    -alpha,
+                    1,
+                    false,
+                    limits,
+                    time_manager,
+                )
             } else {
                 // それ以降はZero Window Search
                 let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
@@ -1250,6 +1357,8 @@ impl<'a> SearchWorker<'a> {
                     -alpha,
                     1,
                     true,
+                    limits,
+                    time_manager,
                 );
 
                 // Re-search if needed
@@ -1261,6 +1370,8 @@ impl<'a> SearchWorker<'a> {
                         -alpha,
                         1,
                         false,
+                        limits,
+                        time_manager,
                     );
                 }
 
@@ -1335,6 +1446,8 @@ impl<'a> SearchWorker<'a> {
         beta: Value,
         ply: i32,
         cut_node: bool,
+        limits: &LimitsType,
+        time_manager: &mut TimeManagement,
     ) -> Value {
         let pv_node = NT == NodeType::PV as u8 || NT == NodeType::Root as u8;
         let mut depth = depth;
@@ -1345,7 +1458,7 @@ impl<'a> SearchWorker<'a> {
 
         // 深さが0以下なら静止探索へ
         if depth <= DEPTH_QS {
-            return self.qsearch::<NT>(pos, depth, alpha, beta, ply);
+            return self.qsearch::<NT>(pos, depth, alpha, beta, ply, limits, time_manager);
         }
 
         // 最大深さチェック
@@ -1359,7 +1472,7 @@ impl<'a> SearchWorker<'a> {
         }
 
         // 中断チェック
-        if self.check_abort() {
+        if self.check_abort(limits, time_manager) {
             return Value::ZERO;
         }
 
@@ -1419,6 +1532,8 @@ impl<'a> SearchWorker<'a> {
             pv_node,
             in_check,
             eval_ctx.static_eval,
+            limits,
+            time_manager,
         ) {
             return v;
         }
@@ -1447,6 +1562,8 @@ impl<'a> SearchWorker<'a> {
             in_check,
             eval_ctx.static_eval,
             improving,
+            limits,
+            time_manager,
         );
         if let Some(v) = null_value {
             return v;
@@ -1470,6 +1587,8 @@ impl<'a> SearchWorker<'a> {
             eval_ctx.static_eval,
             eval_ctx.unadjusted_static_eval,
             in_check,
+            limits,
+            time_manager,
         ) {
             return v;
         }
@@ -1500,7 +1619,7 @@ impl<'a> SearchWorker<'a> {
             if !pos.is_legal(mv) {
                 continue;
             }
-            if self.check_abort() {
+            if self.check_abort(limits, time_manager) {
                 return Value::ZERO;
             }
 
@@ -1691,6 +1810,8 @@ impl<'a> SearchWorker<'a> {
                     -alpha,
                     ply + 1,
                     true,
+                    limits,
+                    time_manager,
                 );
                 self.stack[ply as usize].reduction = 0;
 
@@ -1708,6 +1829,8 @@ impl<'a> SearchWorker<'a> {
                             -alpha,
                             ply + 1,
                             !cut_node,
+                            limits,
+                            time_manager,
                         );
                     }
 
@@ -1755,6 +1878,8 @@ impl<'a> SearchWorker<'a> {
                         -alpha,
                         ply + 1,
                         false,
+                        limits,
+                        time_manager,
                     )
                 } else {
                     value
@@ -1769,6 +1894,8 @@ impl<'a> SearchWorker<'a> {
                     -alpha,
                     ply + 1,
                     !cut_node,
+                    limits,
+                    time_manager,
                 );
                 self.stack[ply as usize].reduction = 0;
 
@@ -1781,6 +1908,8 @@ impl<'a> SearchWorker<'a> {
                         -alpha,
                         ply + 1,
                         false,
+                        limits,
+                        time_manager,
                     );
                     self.stack[ply as usize].reduction = 0;
                 }
@@ -1796,6 +1925,8 @@ impl<'a> SearchWorker<'a> {
                     -alpha,
                     ply + 1,
                     false,
+                    limits,
+                    time_manager,
                 )
             };
             pos.undo_move(mv);
@@ -2094,6 +2225,8 @@ impl<'a> SearchWorker<'a> {
         alpha: Value,
         beta: Value,
         ply: i32,
+        limits: &LimitsType,
+        time_manager: &mut TimeManagement,
     ) -> Value {
         let pv_node = NT == NodeType::PV as u8;
         let in_check = pos.in_check();
@@ -2106,7 +2239,7 @@ impl<'a> SearchWorker<'a> {
             self.sel_depth = ply + 1;
         }
 
-        if self.check_abort() {
+        if self.check_abort(limits, time_manager) {
             return Value::ZERO;
         }
 
@@ -2394,7 +2527,8 @@ impl<'a> SearchWorker<'a> {
             self.stack[ply as usize].cont_hist_key =
                 Some(ContHistKey::new(in_check, capture, cont_hist_pc, cont_hist_to));
 
-            let value = -self.qsearch::<NT>(pos, depth - 1, -beta, -alpha, ply + 1);
+            let value =
+                -self.qsearch::<NT>(pos, depth - 1, -beta, -alpha, ply + 1, limits, time_manager);
 
             pos.undo_move(mv);
 

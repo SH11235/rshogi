@@ -64,7 +64,7 @@
   },
   "lint-staged": {
     "**/*.{ts,tsx,js,jsx,mjs,cjs,md,css}": [
-      "pnpm --workspace-root exec biome format --write --files-ignore-unknown=true"
+      "pnpm --workspace-root exec biome format --write --files-ignore-unknown=true --no-errors-on-unmatched"
     ]
   }
 }

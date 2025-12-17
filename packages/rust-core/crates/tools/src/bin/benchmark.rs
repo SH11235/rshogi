@@ -66,6 +66,14 @@ struct Cli {
     /// Material評価レベル（1, 2, 3, 4, 7, 8, 9）
     #[arg(long, default_value = "9", value_parser = validate_material_level)]
     material_level: u8,
+
+    /// Searchインスタンスを再利用し、履歴統計の蓄積効果を測定
+    #[arg(long)]
+    reuse_search: bool,
+
+    /// ウォームアップ実行回数（結果に含めないが履歴を蓄積）
+    #[arg(long, default_value = "0")]
+    warmup: u32,
 }
 
 /// Material評価レベルのバリデーション
@@ -112,6 +120,8 @@ impl Cli {
                 nnue_file: self.nnue_file.clone(),
                 material_level: self.material_level,
             },
+            reuse_search: self.reuse_search,
+            warmup: self.warmup,
         }
     }
 }
@@ -188,6 +198,11 @@ fn main() -> Result<()> {
         report.print_detailed();
     } else {
         report.print_summary();
+    }
+
+    // reuse_searchモード時は追加の比較レポートを出力
+    if cli.reuse_search {
+        report.print_reuse_summary();
     }
 
     Ok(())

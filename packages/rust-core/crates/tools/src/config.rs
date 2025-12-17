@@ -62,4 +62,8 @@ pub struct BenchmarkConfig {
     pub verbose: bool,
     /// 評価関数設定
     pub eval_config: EvalConfig,
+    /// Searchインスタンスを再利用するか（履歴統計の蓄積効果を測定）
+    pub reuse_search: bool,
+    /// ウォームアップ実行回数（結果に含めないが履歴を蓄積）
+    pub warmup: u32,
 }
