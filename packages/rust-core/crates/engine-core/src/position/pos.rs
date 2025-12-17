@@ -202,9 +202,10 @@ impl Position {
         self.side_to_move
     }
 
-    /// TT等に保存された16bit指し手を安全に取り出す
+    /// TT等に保存された16bit指し手を安全に取り出す（YaneuraOu準拠）
     /// - 無効な符号化や手番不一致の手はNone
     /// - 合法性までは保証しないが、明らかに不整合な手を弾く
+    /// - 駒情報（moved_piece_after）を上位16bitに付加して返す
     pub fn to_move(&self, mv: Move) -> Option<Move> {
         if mv.is_none() {
             return Some(Move::NONE);
@@ -213,7 +214,9 @@ impl Position {
         if mv.is_drop() {
             let pt = mv.drop_piece_type();
             if self.hand(self.side_to_move).has(pt) {
-                Some(mv)
+                // 駒打ちの駒情報を付加（通常移動の moved_pc に相当、YaneuraOu準拠）
+                let dropped_pc = Piece::make(self.side_to_move, pt);
+                Some(mv.with_piece(dropped_pc))
             } else {
                 None
             }
@@ -221,7 +224,19 @@ impl Position {
             let from = mv.from();
             let pc = self.piece_on(from);
             if pc.is_some() && pc.color() == self.side_to_move {
-                Some(mv)
+                // 成りフラグが立っている場合、その駒種が成れるかをチェック
+                // ハッシュ衝突等で不正な成りフラグを持つ指し手を弾く
+                if mv.is_promote() && !pc.piece_type().can_promote() {
+                    return None;
+                }
+                // 駒情報を付加（YaneuraOu準拠）
+                let moved_pc = if mv.is_promote() {
+                    // 229-231行目でcan_promote()を検証済みのため安全
+                    pc.promote().expect("already validated can_promote")
+                } else {
+                    pc
+                };
+                Some(mv.with_piece(moved_pc))
             } else {
                 None
             }
@@ -557,6 +572,20 @@ impl Position {
             moved_to = to;
             let pc = self.piece_on(from);
             let captured = self.piece_on(to);
+
+            // デバッグアサーション: 成りフラグが立っている場合、成れる駒種かをチェック
+            debug_assert!(
+                !m.is_promote() || pc.piece_type().can_promote(),
+                "Cannot promote piece {pc:?} (type={:?}) at {from:?} with move {} in position {}\n\
+                 move raw bits: 0x{:08x}, is_drop={}, is_promote={}",
+                pc.piece_type(),
+                m.to_usi(),
+                self.to_sfen(),
+                m.raw(),
+                m.is_drop(),
+                m.is_promote()
+            );
+
             moved_pt = if m.is_promote() {
                 pc.piece_type().promote().unwrap()
             } else {
@@ -1413,5 +1442,140 @@ mod tests {
         pos_black.update_check_squares();
         let king_move = Move::new_move(king_from, king_to, false);
         assert!(!pos_black.is_legal(king_move));
+    }
+
+    /// to_move が成れない駒（金）に成りフラグが立っている不正な指し手を弾くことを確認
+    #[test]
+    fn test_to_move_rejects_invalid_promote_flag_for_gold() {
+        let mut pos = Position::new();
+        let sq59 = Square::new(File::File5, Rank::Rank9);
+        let sq51 = Square::new(File::File5, Rank::Rank1);
+        let sq58 = Square::new(File::File5, Rank::Rank8);
+        let sq57 = Square::new(File::File5, Rank::Rank7);
+
+        pos.put_piece(Piece::B_KING, sq59);
+        pos.put_piece(Piece::W_KING, sq51);
+        pos.put_piece(Piece::B_GOLD, sq58);
+        pos.king_square[Color::Black.index()] = sq59;
+        pos.king_square[Color::White.index()] = sq51;
+
+        // 金は成れないが、成りフラグを立てた不正な指し手を作成（ハッシュ衝突を模擬）
+        let invalid_move = Move::new_move(sq58, sq57, true);
+        assert!(invalid_move.is_promote(), "テスト用の指し手は成りフラグが立っている必要がある");
+
+        // to_move は不正な成りフラグを持つ指し手を None で弾く
+        assert_eq!(
+            pos.to_move(invalid_move),
+            None,
+            "成れない駒（金）の成りフラグ付き指し手は弾かれるべき"
+        );
+    }
+
+    /// to_move が成れない駒（玉）に成りフラグが立っている不正な指し手を弾くことを確認
+    #[test]
+    fn test_to_move_rejects_invalid_promote_flag_for_king() {
+        let mut pos = Position::new();
+        let sq59 = Square::new(File::File5, Rank::Rank9);
+        let sq51 = Square::new(File::File5, Rank::Rank1);
+        let sq58 = Square::new(File::File5, Rank::Rank8);
+
+        pos.put_piece(Piece::B_KING, sq59);
+        pos.put_piece(Piece::W_KING, sq51);
+        pos.king_square[Color::Black.index()] = sq59;
+        pos.king_square[Color::White.index()] = sq51;
+
+        // 玉は成れないが、成りフラグを立てた不正な指し手を作成
+        let invalid_move = Move::new_move(sq59, sq58, true);
+
+        assert_eq!(
+            pos.to_move(invalid_move),
+            None,
+            "成れない駒（玉）の成りフラグ付き指し手は弾かれるべき"
+        );
+    }
+
+    /// to_move が既に成っている駒（と金）に成りフラグが立っている不正な指し手を弾くことを確認
+    #[test]
+    fn test_to_move_rejects_invalid_promote_flag_for_promoted_piece() {
+        let mut pos = Position::new();
+        let sq59 = Square::new(File::File5, Rank::Rank9);
+        let sq51 = Square::new(File::File5, Rank::Rank1);
+        let sq55 = Square::new(File::File5, Rank::Rank5);
+        let sq54 = Square::new(File::File5, Rank::Rank4);
+
+        pos.put_piece(Piece::B_KING, sq59);
+        pos.put_piece(Piece::W_KING, sq51);
+        pos.put_piece(Piece::B_PRO_PAWN, sq55); // と金
+        pos.king_square[Color::Black.index()] = sq59;
+        pos.king_square[Color::White.index()] = sq51;
+
+        // と金は既に成っているので成れないが、成りフラグを立てた不正な指し手を作成
+        let invalid_move = Move::new_move(sq55, sq54, true);
+
+        assert_eq!(
+            pos.to_move(invalid_move),
+            None,
+            "既に成っている駒（と金）の成りフラグ付き指し手は弾かれるべき"
+        );
+    }
+
+    /// to_move が正常な成り（歩成）を受け入れることを確認
+    #[test]
+    fn test_to_move_accepts_valid_pawn_promotion() {
+        let mut pos = Position::new();
+        let sq59 = Square::new(File::File5, Rank::Rank9);
+        let sq51 = Square::new(File::File5, Rank::Rank1);
+        let sq23 = Square::new(File::File2, Rank::Rank3);
+        let sq22 = Square::new(File::File2, Rank::Rank2);
+
+        pos.put_piece(Piece::B_KING, sq59);
+        pos.put_piece(Piece::W_KING, sq51);
+        pos.put_piece(Piece::B_PAWN, sq23);
+        pos.king_square[Color::Black.index()] = sq59;
+        pos.king_square[Color::White.index()] = sq51;
+
+        // 歩は成れるので、成りフラグを立てた正常な指し手
+        let valid_move = Move::new_move(sq23, sq22, true);
+
+        let result = pos.to_move(valid_move);
+        assert!(result.is_some(), "成れる駒（歩）の成りは受け入れられるべき");
+
+        // 返された指し手には駒情報（と金）が付加されている
+        let mv = result.unwrap();
+        assert_eq!(
+            mv.moved_piece_after(),
+            Piece::B_PRO_PAWN,
+            "成りの場合、moved_piece_after はと金であるべき"
+        );
+    }
+
+    /// to_move が正常な不成（歩不成）を受け入れることを確認
+    #[test]
+    fn test_to_move_accepts_valid_pawn_no_promotion() {
+        let mut pos = Position::new();
+        let sq59 = Square::new(File::File5, Rank::Rank9);
+        let sq51 = Square::new(File::File5, Rank::Rank1);
+        let sq24 = Square::new(File::File2, Rank::Rank4);
+        let sq23 = Square::new(File::File2, Rank::Rank3);
+
+        pos.put_piece(Piece::B_KING, sq59);
+        pos.put_piece(Piece::W_KING, sq51);
+        pos.put_piece(Piece::B_PAWN, sq24);
+        pos.king_square[Color::Black.index()] = sq59;
+        pos.king_square[Color::White.index()] = sq51;
+
+        // 歩の不成
+        let valid_move = Move::new_move(sq24, sq23, false);
+
+        let result = pos.to_move(valid_move);
+        assert!(result.is_some(), "不成の指し手は受け入れられるべき");
+
+        // 返された指し手には駒情報（歩）が付加されている
+        let mv = result.unwrap();
+        assert_eq!(
+            mv.moved_piece_after(),
+            Piece::B_PAWN,
+            "不成の場合、moved_piece_after は歩であるべき"
+        );
     }
 }

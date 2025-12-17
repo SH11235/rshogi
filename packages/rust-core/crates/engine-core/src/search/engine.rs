@@ -448,6 +448,9 @@ impl Search {
         let max_moves = self.max_moves_to_draw;
         let worker = self.worker.get_or_insert_with(|| SearchWorker::new(tt_clone, max_moves));
 
+        // setoptionで変更された可能性があるため、最新値を反映
+        worker.max_moves_to_draw = self.max_moves_to_draw;
+
         // 探索状態のリセット（履歴はクリアしない、YaneuraOu準拠）
         worker.prepare_search();
 
