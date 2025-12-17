@@ -1,17 +1,17 @@
 {
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "types": ["react", "react-dom"],
-    "noEmit": true,
-    "paths": {
-      "@shogi/design-system": ["packages/design-system/src"],
-      "@shogi/design-system/*": ["packages/design-system/src/*"],
-      "@shogi/ui": ["packages/ui/src"],
-      "@shogi/ui/*": ["packages/ui/src/*"],
-      "@shogi/engine-tauri": ["packages/engine-tauri/src"],
-      "@shogi/engine-tauri/*": ["packages/engine-tauri/src/*"]
-    }
-  },
-  "include": ["src"],
-  "references": [{ "path": "./tsconfig.node.json" }]
+    "extends": "../../tsconfig.base.json",
+    "compilerOptions": {
+        "types": ["react", "react-dom"],
+        "noEmit": true,
+        "paths": {
+            "@shogi/design-system": ["packages/design-system/src"],
+            "@shogi/design-system/*": ["packages/design-system/src/*"],
+            "@shogi/ui": ["packages/ui/src"],
+            "@shogi/ui/*": ["packages/ui/src/*"],
+            "@shogi/engine-tauri": ["packages/engine-tauri/src"],
+            "@shogi/engine-tauri/*": ["packages/engine-tauri/src/*"]
+        }
+    },
+    "include": ["src"],
+    "references": [{ "path": "./tsconfig.node.json" }]
 }

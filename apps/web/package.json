@@ -1,33 +1,33 @@
 {
-  "name": "web",
-  "private": true,
-  "version": "0.0.0",
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
-    "format": "pnpm --workspace-root exec biome format --write .",
-    "format:check": "pnpm --workspace-root exec biome format .",
-    "lint": "pnpm --workspace-root exec biome check .",
-    "lint:fix": "pnpm --workspace-root exec biome check --write --files-ignore-unknown=true",
-    "preview": "vite preview"
-  },
-  "dependencies": {
-    "@shogi/app-core": "workspace:*",
-    "@shogi/design-system": "workspace:*",
-    "@shogi/engine-wasm": "workspace:*",
-    "@shogi/ui": "workspace:*",
-    "react": "^19.2.3",
-    "react-dom": "^19.2.3"
-  },
-  "devDependencies": {
-    "@tailwindcss/vite": "^4.1.18",
-    "@types/node": "^24.10.1",
-    "@types/react": "^19.2.7",
-    "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^5.1.2",
-    "tailwindcss": "^4.1.18",
-    "typescript": "~5.9.3",
-    "vite": "^7.3.0"
-  }
+    "name": "web",
+    "private": true,
+    "version": "0.0.0",
+    "type": "module",
+    "scripts": {
+        "dev": "vite",
+        "build": "tsc -b && vite build",
+        "format": "pnpm --workspace-root exec biome format --write .",
+        "format:check": "pnpm --workspace-root exec biome format .",
+        "lint": "pnpm --workspace-root exec biome check .",
+        "lint:fix": "pnpm --workspace-root exec biome check --write --files-ignore-unknown=true",
+        "preview": "vite preview"
+    },
+    "dependencies": {
+        "@shogi/app-core": "workspace:*",
+        "@shogi/design-system": "workspace:*",
+        "@shogi/engine-wasm": "workspace:*",
+        "@shogi/ui": "workspace:*",
+        "react": "^19.2.3",
+        "react-dom": "^19.2.3"
+    },
+    "devDependencies": {
+        "@tailwindcss/vite": "^4.1.18",
+        "@types/node": "^24.10.1",
+        "@types/react": "^19.2.7",
+        "@types/react-dom": "^19.2.3",
+        "@vitejs/plugin-react": "^5.1.2",
+        "tailwindcss": "^4.1.18",
+        "typescript": "~5.9.3",
+        "vite": "^7.3.0"
+    }
 }

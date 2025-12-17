@@ -1,13 +1,13 @@
 {
-  "files": [],
-  "references": [
-    { "path": "./packages/app-core" },
-    { "path": "./packages/design-system" },
-    { "path": "./packages/ui" },
-    { "path": "./packages/engine-client" },
-    { "path": "./packages/engine-wasm" },
-    { "path": "./packages/engine-tauri" },
-    { "path": "./apps/web" },
-    { "path": "./apps/desktop" }
-  ]
+    "files": [],
+    "references": [
+        { "path": "./packages/app-core" },
+        { "path": "./packages/design-system" },
+        { "path": "./packages/ui" },
+        { "path": "./packages/engine-client" },
+        { "path": "./packages/engine-wasm" },
+        { "path": "./packages/engine-tauri" },
+        { "path": "./apps/web" },
+        { "path": "./apps/desktop" }
+    ]
 }

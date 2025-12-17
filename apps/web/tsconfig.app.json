@@ -1,21 +1,21 @@
 {
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
-    "types": ["vite/client", "react", "react-dom"],
-    "moduleDetection": "force",
-    "noEmit": true,
-    "paths": {
-      "@shogi/app-core": ["packages/app-core/src/index.ts"],
-      "@shogi/engine-client": ["packages/engine-client/src"],
-      "@shogi/engine-client/*": ["packages/engine-client/src/*"],
-      "@shogi/design-system": ["packages/design-system/src"],
-      "@shogi/design-system/*": ["packages/design-system/src/*"],
-      "@shogi/ui": ["packages/ui/src"],
-      "@shogi/ui/*": ["packages/ui/src/*"],
-      "@shogi/engine-wasm": ["packages/engine-wasm/src"],
-      "@shogi/engine-wasm/*": ["packages/engine-wasm/src/*"]
-    }
-  },
-  "include": ["src"]
+    "extends": "../../tsconfig.base.json",
+    "compilerOptions": {
+        "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+        "types": ["vite/client", "react", "react-dom"],
+        "moduleDetection": "force",
+        "noEmit": true,
+        "paths": {
+            "@shogi/app-core": ["packages/app-core/src/index.ts"],
+            "@shogi/engine-client": ["packages/engine-client/src"],
+            "@shogi/engine-client/*": ["packages/engine-client/src/*"],
+            "@shogi/design-system": ["packages/design-system/src"],
+            "@shogi/design-system/*": ["packages/design-system/src/*"],
+            "@shogi/ui": ["packages/ui/src"],
+            "@shogi/ui/*": ["packages/ui/src/*"],
+            "@shogi/engine-wasm": ["packages/engine-wasm/src"],
+            "@shogi/engine-wasm/*": ["packages/engine-wasm/src/*"]
+        }
+    },
+    "include": ["src"]
 }

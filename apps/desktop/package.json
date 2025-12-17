@@ -1,35 +1,35 @@
 {
-  "name": "desktop",
-  "private": true,
-  "version": "0.1.0",
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
-    "preview": "vite preview",
-    "format": "pnpm --workspace-root exec biome format --write .",
-    "format:check": "pnpm --workspace-root exec biome format .",
-    "lint": "pnpm --workspace-root exec biome check .",
-    "lint:fix": "pnpm --workspace-root exec biome check --write --files-ignore-unknown=true",
-    "tauri": "tauri"
-  },
-  "dependencies": {
-    "@shogi/app-core": "workspace:*",
-    "@shogi/design-system": "workspace:*",
-    "@shogi/engine-tauri": "workspace:*",
-    "@shogi/ui": "workspace:*",
-    "@tauri-apps/api": "^2",
-    "react": "^19.2.3",
-    "react-dom": "^19.2.3"
-  },
-  "devDependencies": {
-    "@tailwindcss/vite": "^4.1.18",
-    "@tauri-apps/cli": "^2",
-    "@types/react": "^19.2.7",
-    "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^5.1.2",
-    "tailwindcss": "^4.1.18",
-    "typescript": "~5.9.3",
-    "vite": "^7.3.0"
-  }
+    "name": "desktop",
+    "private": true,
+    "version": "0.1.0",
+    "type": "module",
+    "scripts": {
+        "dev": "vite",
+        "build": "tsc && vite build",
+        "preview": "vite preview",
+        "format": "pnpm --workspace-root exec biome format --write .",
+        "format:check": "pnpm --workspace-root exec biome format .",
+        "lint": "pnpm --workspace-root exec biome check .",
+        "lint:fix": "pnpm --workspace-root exec biome check --write --files-ignore-unknown=true",
+        "tauri": "tauri"
+    },
+    "dependencies": {
+        "@shogi/app-core": "workspace:*",
+        "@shogi/design-system": "workspace:*",
+        "@shogi/engine-tauri": "workspace:*",
+        "@shogi/ui": "workspace:*",
+        "@tauri-apps/api": "^2",
+        "react": "^19.2.3",
+        "react-dom": "^19.2.3"
+    },
+    "devDependencies": {
+        "@tailwindcss/vite": "^4.1.18",
+        "@tauri-apps/cli": "^2",
+        "@types/react": "^19.2.7",
+        "@types/react-dom": "^19.2.3",
+        "@vitejs/plugin-react": "^5.1.2",
+        "tailwindcss": "^4.1.18",
+        "typescript": "~5.9.3",
+        "vite": "^7.3.0"
+    }
 }
