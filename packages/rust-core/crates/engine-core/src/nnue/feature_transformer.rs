@@ -175,7 +175,7 @@ impl FeatureTransformer {
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         {
             // SAFETY:
-            // - accumulation は 64バイトアライメント保証（Aligned<T>経由）
+            // - loadu/storeu を使用しているためアライメント要件なし
             // - weights は上の境界チェック済み
             // - 256要素 = 16要素 × 16回のループで完全にカバー
             unsafe {
@@ -258,7 +258,7 @@ impl FeatureTransformer {
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         {
             // SAFETY:
-            // - accumulation は 64バイトアライメント保証（Aligned<T>経由）
+            // - loadu/storeu を使用しているためアライメント要件なし
             // - weights は上の境界チェック済み
             // - 256要素 = 16要素 × 16回のループで完全にカバー
             unsafe {
@@ -345,7 +345,7 @@ impl FeatureTransformer {
             #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
             {
                 // SAFETY:
-                // - accumulation は 64バイトアライメント保証
+                // - loadu/storeu を使用しているためアライメント要件なし
                 // - 256要素 = 32要素 × 8回のループで完全にカバー
                 unsafe {
                     use std::arch::x86_64::*;
@@ -472,6 +472,106 @@ mod tests {
         // 全て1が加算されているはず
         for &val in acc.iter() {
             assert_eq!(val, 1);
+        }
+    }
+
+    #[test]
+    fn test_sub_weights() {
+        // ダミーのFeatureTransformerを作成
+        let ft = FeatureTransformer {
+            biases: Aligned([0i16; TRANSFORMED_FEATURE_DIMENSIONS]),
+            weights: vec![1i16; HALFKP_DIMENSIONS * TRANSFORMED_FEATURE_DIMENSIONS]
+                .into_boxed_slice(),
+        };
+
+        // 初期値を10に設定
+        let mut acc = [10i16; TRANSFORMED_FEATURE_DIMENSIONS];
+        ft.sub_weights(&mut acc, 0);
+
+        // 全て10 - 1 = 9になっているはず
+        for &val in acc.iter() {
+            assert_eq!(val, 9);
+        }
+    }
+
+    #[test]
+    fn test_transform() {
+        use crate::nnue::accumulator::Accumulator;
+        use crate::types::Color;
+
+        // ダミーのFeatureTransformerを作成
+        let ft = FeatureTransformer {
+            biases: Aligned([0i16; TRANSFORMED_FEATURE_DIMENSIONS]),
+            weights: vec![0i16; HALFKP_DIMENSIONS * TRANSFORMED_FEATURE_DIMENSIONS]
+                .into_boxed_slice(),
+        };
+
+        // Accumulatorを設定（各視点で異なる値）
+        let mut acc = Accumulator::new();
+        // 先手視点: 64（ClippedReLU後も64、127以下なのでクランプされない）
+        for i in 0..TRANSFORMED_FEATURE_DIMENSIONS {
+            acc.accumulation[Color::Black.index()].0[i] = 64;
+        }
+        // 後手視点: 100（ClippedReLU後も100、127以下なのでクランプされない）
+        for i in 0..TRANSFORMED_FEATURE_DIMENSIONS {
+            acc.accumulation[Color::White.index()].0[i] = 100;
+        }
+        acc.computed_accumulation = true;
+
+        let mut output = [0u8; TRANSFORMED_FEATURE_DIMENSIONS * 2];
+
+        // 先手番での変換
+        ft.transform(&acc, Color::Black, &mut output);
+
+        // 前半256バイト: 先手視点 → 64 (i16→u8、クランプ0-127)
+        for &val in output[..TRANSFORMED_FEATURE_DIMENSIONS].iter() {
+            assert_eq!(val, 64, "Black perspective should be 64");
+        }
+        // 後半256バイト: 後手視点 → 100 (i16→u8、クランプ0-127)
+        for &val in output[TRANSFORMED_FEATURE_DIMENSIONS..].iter() {
+            assert_eq!(val, 100, "White perspective should be 100");
+        }
+    }
+
+    #[test]
+    fn test_transform_clipping() {
+        use crate::nnue::accumulator::Accumulator;
+        use crate::types::Color;
+
+        let ft = FeatureTransformer {
+            biases: Aligned([0i16; TRANSFORMED_FEATURE_DIMENSIONS]),
+            weights: vec![0i16; HALFKP_DIMENSIONS * TRANSFORMED_FEATURE_DIMENSIONS]
+                .into_boxed_slice(),
+        };
+
+        let mut acc = Accumulator::new();
+        // クリッピングテスト: 負の値→0、127超→127
+        for i in 0..TRANSFORMED_FEATURE_DIMENSIONS {
+            if i < 64 {
+                acc.accumulation[Color::Black.index()].0[i] = -100; // 負→0にクランプ
+            } else if i < 128 {
+                acc.accumulation[Color::Black.index()].0[i] = 200; // 127超→127にクランプ
+            } else {
+                acc.accumulation[Color::Black.index()].0[i] = 50; // 範囲内→そのまま
+            }
+            acc.accumulation[Color::White.index()].0[i] = 0;
+        }
+        acc.computed_accumulation = true;
+
+        let mut output = [0u8; TRANSFORMED_FEATURE_DIMENSIONS * 2];
+        ft.transform(&acc, Color::Black, &mut output);
+
+        // 負の値は0にクランプ
+        for &val in output[..64].iter() {
+            assert_eq!(val, 0, "Negative should be clamped to 0");
+        }
+        // 127超は127にクランプ
+        for &val in output[64..128].iter() {
+            assert_eq!(val, 127, "Values > 127 should be clamped to 127");
+        }
+        // 範囲内はそのまま
+        for &val in output[128..TRANSFORMED_FEATURE_DIMENSIONS].iter() {
+            assert_eq!(val, 50, "Values in range should pass through");
         }
     }
 }

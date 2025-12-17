@@ -330,4 +330,33 @@ mod tests {
         assert_eq!(output[3], 0); // -64 >> 6 = -1, clamped to 0
         assert_eq!(output[4], 4); // 256 >> 6 = 4
     }
+
+    #[test]
+    fn test_affine_transform_real_size() {
+        // 実際の使用サイズ（512入力→32出力）に近いテスト
+        // PADDED_INPUT = padded_input(512) = 512
+        let mut weights = vec![0i8; 32 * 512];
+        // 対角成分を1に設定（出力iに入力iが1:1で対応）
+        for i in 0..32 {
+            weights[i * 512 + i] = 1;
+        }
+
+        let transform: AffineTransform<512, 32> = AffineTransform {
+            biases: [10; 32],
+            weights: weights.into_boxed_slice(),
+        };
+
+        let mut input = [0u8; 512];
+        for i in 0..32 {
+            input[i] = (i + 1) as u8; // 1, 2, 3, ..., 32
+        }
+        let mut output = [0i32; 32];
+
+        transform.propagate(&input, &mut output);
+
+        // output[i] = 10 + input[i] * 1 = 10 + (i+1)
+        for i in 0..32 {
+            assert_eq!(output[i], 10 + (i + 1) as i32, "mismatch at index {i}");
+        }
+    }
 }
