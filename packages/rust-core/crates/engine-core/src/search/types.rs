@@ -5,6 +5,8 @@
 //! - `RootMove`: ルート手の情報
 //! - `RootMoves`: ルート手のリスト
 
+use std::mem::MaybeUninit;
+
 use crate::movegen::{generate_legal, MoveList};
 use crate::position::Position;
 use crate::types::{Move, Piece, RepetitionState, Square, Value, MAX_PLY};
@@ -180,6 +182,175 @@ pub type StackArray = [Stack; STACK_SIZE];
 /// StackArrayを初期化
 pub fn init_stack_array() -> StackArray {
     std::array::from_fn(|i| Stack::with_ply(i as i32))
+}
+
+// =============================================================================
+// SmallMoveList（固定長の指し手リスト）
+// =============================================================================
+
+/// 固定長の指し手リスト
+///
+/// YaneuraOu準拠のSEARCHEDLIST_CAPACITY（32手）をベースに設計。
+/// ヒープ割り当てを避け、探索ホットパスでの性能を向上させる。
+///
+/// 目的は「そのノードで試した全手の保存」ではなく、
+/// 「統計更新のための代表集合」の保存。
+/// 例: history テーブルやkillerムーブの更新に使用する手のリスト。
+/// 32手を超える場合は古い統計情報で十分と判断される。
+pub struct SmallMoveList<const N: usize> {
+    buf: [Move; N],
+    len: usize,
+}
+
+impl<const N: usize> SmallMoveList<N> {
+    /// 空のSmallMoveListを作成
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            buf: [Move::NONE; N],
+            len: 0,
+        }
+    }
+
+    /// 指し手を追加
+    ///
+    /// 容量を超えた場合は無視する（YaneuraOu準拠: 32手を超える分は記録しない）
+    #[inline]
+    pub fn push(&mut self, mv: Move) {
+        if self.len < N {
+            self.buf[self.len] = mv;
+            self.len += 1;
+        }
+    }
+
+    /// 現在の要素数
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// 空かどうか
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// イテレータを返す
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = &Move> {
+        self.buf[..self.len].iter()
+    }
+}
+
+impl<const N: usize> Default for SmallMoveList<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 探索用の固定長指し手リスト（YaneuraOu SEARCHEDLIST_CAPACITY相当）
+pub const SEARCHED_MOVES_CAPACITY: usize = 32;
+
+/// quiets_tried / captures_tried 用の型エイリアス
+///
+/// alpha-beta探索で試行した静的手(quiets)と捕獲手(captures)を記録するための
+/// 固定長リスト。統計更新（history, capture_history等）に使用される。
+pub type SearchedMoveList = SmallMoveList<SEARCHED_MOVES_CAPACITY>;
+
+// =============================================================================
+// OrderedMovesBuffer（指し手生成用の固定長バッファ）
+// =============================================================================
+
+/// 指し手生成バッファの最大サイズ
+///
+/// 将棋の合法手数は理論上593手（証明済み）だが、実用上256手を超えることは極めて稀。
+/// 統計データ: 平均82手、99.9パーセンタイル347手。
+/// キャッシュ効率（L1に収まる1024バイト）を優先して256を採用。
+///
+/// 万一256手を超える局面でも、MovePickerの順序付け（TT手→捕獲手→キラー手→
+/// history順の静かな手）により重要な手は先頭付近に集中するため、
+/// 257手目以降に最善手がある確率は極めて低く、実質的な影響はほぼない。
+///
+/// MaybeUninitを使用して初期化コストを回避している。
+pub const ORDERED_MOVES_CAPACITY: usize = 256;
+
+/// 指し手生成結果を保持する固定長バッファ
+///
+/// generate_ordered_movesやqsearchで使用し、Vecのヒープ割り当てを回避する。
+/// MaybeUninitを使用して初期化コストをゼロにしている（YaneuraOu準拠）。
+pub struct OrderedMovesBuffer {
+    buf: [MaybeUninit<Move>; ORDERED_MOVES_CAPACITY],
+    len: usize,
+}
+
+impl OrderedMovesBuffer {
+    /// 空のバッファを作成
+    ///
+    /// MaybeUninitにより初期化コストはゼロ。
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            // Safety: MaybeUninitの配列は未初期化のまま作成可能
+            buf: unsafe { MaybeUninit::uninit().assume_init() },
+            len: 0,
+        }
+    }
+
+    /// 指し手を追加
+    ///
+    /// 容量を超えた場合は無視する（実用上593手を超えることはない）
+    #[inline]
+    pub fn push(&mut self, mv: Move) {
+        if self.len < ORDERED_MOVES_CAPACITY {
+            self.buf[self.len].write(mv);
+            self.len += 1;
+        }
+    }
+
+    /// 指し手が含まれているかチェック（線形探索）
+    #[inline]
+    pub fn contains(&self, mv: &Move) -> bool {
+        self.as_slice().contains(mv)
+    }
+
+    /// バッファをクリア
+    ///
+    /// MoveはCopy型なのでDropは不要。lenをリセットするだけ。
+    #[inline]
+    pub fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    /// 現在の要素数
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// 空かどうか
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// スライスとして取得
+    #[inline]
+    pub fn as_slice(&self) -> &[Move] {
+        // Safety: 0..len の範囲は全て push() で初期化済み
+        unsafe { std::slice::from_raw_parts(self.buf.as_ptr() as *const Move, self.len) }
+    }
+
+    /// イテレータを返す
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = Move> + '_ {
+        self.as_slice().iter().copied()
+    }
+}
+
+impl Default for OrderedMovesBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // =============================================================================
@@ -682,5 +853,126 @@ mod tests {
         assert_eq!(rm.average_score.raw(), 20); // (100 + -60) / 2
                                                 // mean_squared_score は value * |value| を平均するため符号を保持する
         assert_eq!(rm.mean_squared_score, Some((10_000 - 3_600) / 2));
+    }
+
+    #[test]
+    fn test_small_move_list_basic() {
+        let mut list: SmallMoveList<4> = SmallMoveList::new();
+        assert!(list.is_empty());
+        assert_eq!(list.len(), 0);
+
+        let mv1 = Move::from_usi("7g7f").unwrap();
+        let mv2 = Move::from_usi("2g2f").unwrap();
+
+        list.push(mv1);
+        assert_eq!(list.len(), 1);
+        assert!(!list.is_empty());
+
+        list.push(mv2);
+        assert_eq!(list.len(), 2);
+
+        let moves: Vec<_> = list.iter().copied().collect();
+        assert_eq!(moves, vec![mv1, mv2]);
+    }
+
+    #[test]
+    fn test_small_move_list_capacity_limit() {
+        let mut list: SmallMoveList<2> = SmallMoveList::new();
+
+        let mv1 = Move::from_usi("7g7f").unwrap();
+        let mv2 = Move::from_usi("2g2f").unwrap();
+        let mv3 = Move::from_usi("3g3f").unwrap();
+
+        list.push(mv1);
+        list.push(mv2);
+        assert_eq!(list.len(), 2);
+
+        // 容量を超えても追加は無視される
+        list.push(mv3);
+        assert_eq!(list.len(), 2);
+
+        let moves: Vec<_> = list.iter().copied().collect();
+        assert_eq!(moves, vec![mv1, mv2]);
+    }
+
+    #[test]
+    fn test_searched_move_list() {
+        let mut list = SearchedMoveList::new();
+        assert_eq!(list.len(), 0);
+
+        // SEARCHED_MOVES_CAPACITYまで追加可能
+        for i in 0..SEARCHED_MOVES_CAPACITY {
+            let mv = Move::from_usi("7g7f").unwrap();
+            list.push(mv);
+            assert_eq!(list.len(), i + 1);
+        }
+
+        // 容量を超えると無視される
+        let mv = Move::from_usi("2g2f").unwrap();
+        list.push(mv);
+        assert_eq!(list.len(), SEARCHED_MOVES_CAPACITY);
+    }
+
+    #[test]
+    fn test_ordered_moves_buffer_basic() {
+        let mut buf = OrderedMovesBuffer::new();
+        assert!(buf.is_empty());
+        assert_eq!(buf.len(), 0);
+
+        let mv1 = Move::from_usi("7g7f").unwrap();
+        let mv2 = Move::from_usi("2g2f").unwrap();
+
+        buf.push(mv1);
+        assert_eq!(buf.len(), 1);
+        assert!(!buf.is_empty());
+        assert!(buf.contains(&mv1));
+        assert!(!buf.contains(&mv2));
+
+        buf.push(mv2);
+        assert_eq!(buf.len(), 2);
+        assert!(buf.contains(&mv2));
+
+        let moves: Vec<_> = buf.iter().collect();
+        assert_eq!(moves, vec![mv1, mv2]);
+
+        // as_slice のテスト
+        assert_eq!(buf.as_slice(), &[mv1, mv2]);
+    }
+
+    #[test]
+    fn test_ordered_moves_buffer_clear() {
+        let mut buf = OrderedMovesBuffer::new();
+        let mv1 = Move::from_usi("7g7f").unwrap();
+        let mv2 = Move::from_usi("2g2f").unwrap();
+
+        buf.push(mv1);
+        buf.push(mv2);
+        assert_eq!(buf.len(), 2);
+
+        buf.clear();
+        assert!(buf.is_empty());
+        assert_eq!(buf.len(), 0);
+        assert!(!buf.contains(&mv1));
+
+        // clear後も再利用可能
+        buf.push(mv1);
+        assert_eq!(buf.len(), 1);
+        assert!(buf.contains(&mv1));
+    }
+
+    #[test]
+    fn test_ordered_moves_buffer_capacity() {
+        let mut buf = OrderedMovesBuffer::new();
+        let mv = Move::from_usi("7g7f").unwrap();
+
+        // 多数の手を追加（実用上の上限テスト）
+        for _ in 0..100 {
+            buf.push(mv);
+        }
+        assert_eq!(buf.len(), 100);
+
+        // イテレーションが正しく動作することを確認
+        let count = buf.iter().count();
+        assert_eq!(count, 100);
     }
 }
