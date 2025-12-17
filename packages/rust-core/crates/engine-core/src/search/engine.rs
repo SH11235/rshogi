@@ -330,6 +330,10 @@ impl Search {
     pub fn resize_tt(&mut self, size_mb: usize) {
         self.tt = Arc::new(TranspositionTable::new(size_mb));
         self.tt_size_mb = size_mb;
+        // workerが存在する場合、TT参照を更新
+        if let Some(worker) = &mut self.worker {
+            worker.tt = Arc::clone(&self.tt);
+        }
     }
 
     /// 置換表をクリア
@@ -338,6 +342,10 @@ impl Search {
     pub fn clear_tt(&mut self) {
         // Arc経由では&mutが取れないので、同じサイズの新しいTTを作成して置き換える
         self.tt = Arc::new(TranspositionTable::new(self.tt_size_mb));
+        // workerが存在する場合、TT参照を更新
+        if let Some(worker) = &mut self.worker {
+            worker.tt = Arc::clone(&self.tt);
+        }
     }
 
     /// 履歴統計をクリア（usinewgame時に呼び出し）
