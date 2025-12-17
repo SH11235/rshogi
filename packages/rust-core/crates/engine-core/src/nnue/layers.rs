@@ -161,21 +161,14 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
                             _mm_loadu_si128(weight_row[offset..].as_ptr() as *const __m128i);
 
                         // SSE2にはmaddubs_epi16がないので、手動で実装
-                        // u8をi16に拡張
-                        let in_lo = _mm_unpacklo_epi8(in_vec, _mm_setzero_si128());
-                        let in_hi = _mm_unpackhi_epi8(in_vec, _mm_setzero_si128());
-                        // i8をi16に拡張（符号拡張）
-                        let w_lo = _mm_unpacklo_epi8(w_vec, _mm_setzero_si128());
-                        let w_hi = _mm_unpackhi_epi8(w_vec, _mm_setzero_si128());
-                        // 符号拡張を正しく行う
-                        let w_lo = _mm_sub_epi16(
-                            w_lo,
-                            _mm_and_si128(_mm_set1_epi16(256), _mm_srai_epi16(w_lo, 7)),
-                        );
-                        let w_hi = _mm_sub_epi16(
-                            w_hi,
-                            _mm_and_si128(_mm_set1_epi16(256), _mm_srai_epi16(w_hi, 7)),
-                        );
+                        // u8をi16にゼロ拡張
+                        let zero = _mm_setzero_si128();
+                        let in_lo = _mm_unpacklo_epi8(in_vec, zero);
+                        let in_hi = _mm_unpackhi_epi8(in_vec, zero);
+                        // i8をi16に符号拡張（cmpgtで符号ビットマスクを生成）
+                        let sign = _mm_cmpgt_epi8(zero, w_vec);
+                        let w_lo = _mm_unpacklo_epi8(w_vec, sign);
+                        let w_hi = _mm_unpackhi_epi8(w_vec, sign);
 
                         // i16乗算
                         let prod_lo = _mm_mullo_epi16(in_lo, w_lo);
@@ -198,7 +191,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
         }
 
         // WASM SIMD128
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
             // SAFETY: 同上
             unsafe {

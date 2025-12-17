@@ -217,7 +217,7 @@ impl FeatureTransformer {
         }
 
         // WASM SIMD128: 128bit = 8 x i16
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
             // SAFETY: 同上
             unsafe {
@@ -300,7 +300,7 @@ impl FeatureTransformer {
         }
 
         // WASM SIMD128: 128bit = 8 x i16
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
             // SAFETY: 同上
             unsafe {
@@ -399,8 +399,8 @@ impl FeatureTransformer {
                         let packed = _mm_packs_epi16(v0, v1);
 
                         // ClippedReLU: max(0, min(127, x))
-                        // SSE2には_mm_max_epi8がないので、別の方法を使う
-                        // 方法: 0x80を加算して符号なしmax/minを使い、戻す
+                        // SSE2には_mm_max_epi8がないため、符号付きi8を符号なしu8に変換:
+                        // [-128, 127] → [0, 255] に変換してから符号なしmax/minを適用し、最後に戻す
                         let offset_128 = _mm_set1_epi8(-128i8);
                         let packed_unsigned = _mm_add_epi8(packed, offset_128);
                         let zero_unsigned = _mm_add_epi8(zero, offset_128);
@@ -416,7 +416,7 @@ impl FeatureTransformer {
             }
 
             // WASM SIMD128: 128bit = 8 x i16 → 16 x i8
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
             {
                 // SAFETY: 同上
                 unsafe {
