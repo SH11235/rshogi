@@ -185,7 +185,13 @@ impl FeatureTransformer {
             let state = pos.state_at(idx);
             match state.previous {
                 Some(prev_idx) => idx = prev_idx,
-                None => return false, // パスが途切れた（エラー）
+                None => {
+                    debug_assert!(
+                        false,
+                        "Path broken: expected to reach source_idx={source_idx} but got None at idx={idx}"
+                    );
+                    return false;
+                }
             }
         }
 
@@ -205,10 +211,11 @@ impl FeatureTransformer {
             let dirty_piece = &state.dirty_piece;
 
             for perspective in [Color::Black, Color::White] {
-                // find_usable_accumulator で玉移動なしを確認済みだが、念のため
-                if dirty_piece.king_moved[perspective.index()] {
-                    return false;
-                }
+                // find_usable_accumulator() で玉移動がないことを確認済み
+                debug_assert!(
+                    !dirty_piece.king_moved[perspective.index()],
+                    "King moved between source and current - should have been caught by find_usable_accumulator"
+                );
 
                 // 現局面の玉位置を使用（玉移動なしなので祖先と同じ）
                 let king_sq = pos.king_square(perspective);
@@ -216,7 +223,7 @@ impl FeatureTransformer {
                     get_features_from_dirty_piece(dirty_piece, perspective, king_sq);
 
                 // 差分が空の場合はスキップ（何も変化なし）
-                // 注: 通常の駒移動では必ず差分が発生するが、念のため
+                // 注: 通常の駒移動では差分が発生するが、null move では空になる
                 let p = perspective as usize;
                 let accumulation = acc.get_mut(p);
 

@@ -248,10 +248,6 @@ pub fn evaluate(pos: &mut Position) -> Value {
                 // 3. それでも失敗なら全計算
                 if !updated {
                     network.feature_transformer.refresh_accumulator(pos, acc);
-                    #[cfg(feature = "diagnostics")]
-                    if diff_update_result == 1 || diff_update_result == 6 {
-                        diff_update_result = 5; // should not happen
-                    }
                 }
             }
             // else: cached (diff_update_result = 0)
@@ -309,9 +305,10 @@ pub fn evaluate(pos: &mut Position) -> Value {
                 } else {
                     0.0
                 };
+                // refresh = 全計算が必要だった回数 = 計算が必要な回数 - 差分更新成功回数
+                let refresh_count = need_compute - total_diff_ok;
                 let refresh_rate = if need_compute > 0 {
-                    (no_prev + prev_nc + upd_fail - ancestor_ok) as f64 / need_compute as f64
-                        * 100.0
+                    refresh_count as f64 / need_compute as f64 * 100.0
                 } else {
                     0.0
                 };
