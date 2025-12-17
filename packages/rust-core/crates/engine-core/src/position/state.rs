@@ -107,30 +107,16 @@ impl DirtyPiece {
     /// 駒変化を追加
     #[inline]
     pub fn push_piece(&mut self, piece: ChangedPiece) {
-        debug_assert!((self.pieces_len as usize) < Self::MAX_PIECES, "DirtyPiece: pieces overflow");
-        // SAFETY: pieces_len < MAX_PIECES (3) は do_move の構造上保証される
-        // - 通常移動: 移動駒(1) + 取り駒(0or1) = 最大2
-        // - 打ち駒: 1
-        unsafe {
-            *self.pieces.get_unchecked_mut(self.pieces_len as usize) = piece;
-        }
+        let idx = self.pieces_len as usize;
+        self.pieces[idx] = piece;
         self.pieces_len += 1;
     }
 
     /// 手駒変化を追加
     #[inline]
     pub fn push_hand_change(&mut self, change: HandChange) {
-        debug_assert!(
-            (self.hand_changes_len as usize) < Self::MAX_HAND_CHANGES,
-            "DirtyPiece: hand_changes overflow"
-        );
-        // SAFETY: hand_changes_len < MAX_HAND_CHANGES (2) は do_move の構造上保証される
-        // - 打ち駒: 手駒が1減る(1)
-        // - 取り駒: 手駒が1増える(1)
-        // - 最大: 打ち駒なし + 取り駒 = 1、または打ち駒のみ = 1
-        unsafe {
-            *self.hand_changes.get_unchecked_mut(self.hand_changes_len as usize) = change;
-        }
+        let idx = self.hand_changes_len as usize;
+        self.hand_changes[idx] = change;
         self.hand_changes_len += 1;
     }
 
