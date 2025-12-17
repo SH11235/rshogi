@@ -202,9 +202,10 @@ impl Position {
         self.side_to_move
     }
 
-    /// TT等に保存された16bit指し手を安全に取り出す
+    /// TT等に保存された16bit指し手を安全に取り出す（YaneuraOu準拠）
     /// - 無効な符号化や手番不一致の手はNone
     /// - 合法性までは保証しないが、明らかに不整合な手を弾く
+    /// - 駒情報（moved_piece_after）を上位16bitに付加して返す
     pub fn to_move(&self, mv: Move) -> Option<Move> {
         if mv.is_none() {
             return Some(Move::NONE);
@@ -213,7 +214,9 @@ impl Position {
         if mv.is_drop() {
             let pt = mv.drop_piece_type();
             if self.hand(self.side_to_move).has(pt) {
-                Some(mv)
+                // 駒情報を付加（YaneuraOu準拠）
+                let dropped_pc = Piece::make(self.side_to_move, pt);
+                Some(mv.with_piece(dropped_pc))
             } else {
                 None
             }
@@ -221,7 +224,18 @@ impl Position {
             let from = mv.from();
             let pc = self.piece_on(from);
             if pc.is_some() && pc.color() == self.side_to_move {
-                Some(mv)
+                // 成りフラグが立っている場合、その駒種が成れるかをチェック
+                // ハッシュ衝突等で不正な成りフラグを持つ指し手を弾く
+                if mv.is_promote() && !pc.piece_type().can_promote() {
+                    return None;
+                }
+                // 駒情報を付加（YaneuraOu準拠）
+                let moved_pc = if mv.is_promote() {
+                    pc.promote().unwrap()
+                } else {
+                    pc
+                };
+                Some(mv.with_piece(moved_pc))
             } else {
                 None
             }
@@ -557,6 +571,20 @@ impl Position {
             moved_to = to;
             let pc = self.piece_on(from);
             let captured = self.piece_on(to);
+
+            // デバッグアサーション: 成りフラグが立っている場合、成れる駒種かをチェック
+            debug_assert!(
+                !m.is_promote() || pc.piece_type().can_promote(),
+                "Cannot promote piece {pc:?} (type={:?}) at {from:?} with move {} in position {}\n\
+                 move raw bits: 0x{:08x}, is_drop={}, is_promote={}",
+                pc.piece_type(),
+                m.to_usi(),
+                self.to_sfen(),
+                m.raw(),
+                m.is_drop(),
+                m.is_promote()
+            );
+
             moved_pt = if m.is_promote() {
                 pc.piece_type().promote().unwrap()
             } else {
