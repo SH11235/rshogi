@@ -194,13 +194,16 @@ fn generate_knight_moves(
 
         for to in attacks.iter() {
             if promo_ranks.contains(to) {
-                // 成る手を生成
+                // 敵陣内：成る手を生成
                 let promoted_pc = moved_pc.promote().unwrap();
                 add_move(moves, idx, Move::new_move_with_piece(from, to, true, promoted_pc));
-            }
 
-            // 不成（1,2段目でないとき）
-            if include_non_promotions && !rank12.contains(to) {
+                // 敵陣内で不成も生成するか（行き所のない段でないとき）
+                if include_non_promotions && !rank12.contains(to) {
+                    add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
+                }
+            } else {
+                // 敵陣外：不成のみ（成りは不可能）
                 add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
             }
         }
@@ -1245,5 +1248,26 @@ mod tests {
 
         assert!(has_non_promo, "不成の静かな手は生成される");
         assert!(!has_promo, "QuietsProMinusでは歩の静かな成りは生成しないはず");
+    }
+
+    #[test]
+    fn test_knight_capture_3a4c_is_generated() {
+        // G*4c後の局面：後手番、3一の桂馬が4三の金を取る手が生成されるか
+        // この局面は王手がかかっており、3a4cは王手をかけている金を取る回避手
+        let mut pos = Position::new();
+        pos.set_sfen(
+            "6n1l/2+S1k4/2lp1G2p/1np1B2b1/3PP4/1N1S3rP/1P2+pPP+p1/1p1G5/3KG2r1 w SN2L4Pgs2p 2",
+        )
+        .unwrap();
+
+        assert!(pos.in_check(), "この局面は王手がかかっている");
+
+        let mut list = MoveList::new();
+        generate_legal(&pos, &mut list);
+
+        // 3a4c (3一桂→4三、金を取る) が含まれているか
+        let found = list.iter().any(|m| m.to_usi() == "3a4c");
+
+        assert!(found, "3a4c（桂馬で金を取る手）が生成されていない");
     }
 }
