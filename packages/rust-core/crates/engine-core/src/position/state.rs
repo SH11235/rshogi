@@ -63,33 +63,95 @@ pub struct StateInfo {
     pub dirty_piece: DirtyPiece,
 }
 
-/// 差分更新用の駒移動情報
-#[derive(Clone)]
+/// 差分更新用の駒移動情報（固定長バッファでヒープ確保を回避）
+#[derive(Clone, Copy)]
 pub struct DirtyPiece {
-    /// 変化した駒（最大3つ: 動いた駒 + 取られた駒 + 成り後の駒など）
-    pub pieces: Vec<ChangedPiece>,
-    /// 手駒の変化
-    pub hand_changes: Vec<HandChange>,
+    /// 変化した駒（最大3つ: 動いた駒 + 取られた駒）
+    pieces: [ChangedPiece; Self::MAX_PIECES],
+    /// 有効な pieces 要素数
+    pieces_len: u8,
+    /// 手駒の変化（最大2つ: 打ち駒 or 取り駒による変化）
+    hand_changes: [HandChange; Self::MAX_HAND_CHANGES],
+    /// 有効な hand_changes 要素数
+    hand_changes_len: u8,
     /// 玉が動いたかどうか [Color]
     pub king_moved: [bool; Color::NUM],
 }
 
-impl Default for DirtyPiece {
-    fn default() -> Self {
+impl DirtyPiece {
+    /// pieces の最大要素数
+    pub const MAX_PIECES: usize = 3;
+    /// hand_changes の最大要素数
+    pub const MAX_HAND_CHANGES: usize = 2;
+
+    /// 新しい DirtyPiece を作成
+    #[inline]
+    pub const fn new() -> Self {
         Self {
-            pieces: Vec::new(),
-            hand_changes: Vec::new(),
+            pieces: [ChangedPiece::EMPTY; Self::MAX_PIECES],
+            pieces_len: 0,
+            hand_changes: [HandChange::EMPTY; Self::MAX_HAND_CHANGES],
+            hand_changes_len: 0,
             king_moved: [false; Color::NUM],
         }
     }
+
+    /// 情報をクリア
+    #[inline]
+    pub fn clear(&mut self) {
+        self.pieces_len = 0;
+        self.hand_changes_len = 0;
+        self.king_moved = [false; Color::NUM];
+    }
+
+    /// 駒変化を追加
+    #[inline]
+    pub fn push_piece(&mut self, piece: ChangedPiece) {
+        debug_assert!((self.pieces_len as usize) < Self::MAX_PIECES, "DirtyPiece: pieces overflow");
+        // SAFETY: pieces_len < MAX_PIECES (3) は do_move の構造上保証される
+        // - 通常移動: 移動駒(1) + 取り駒(0or1) = 最大2
+        // - 打ち駒: 1
+        unsafe {
+            *self.pieces.get_unchecked_mut(self.pieces_len as usize) = piece;
+        }
+        self.pieces_len += 1;
+    }
+
+    /// 手駒変化を追加
+    #[inline]
+    pub fn push_hand_change(&mut self, change: HandChange) {
+        debug_assert!(
+            (self.hand_changes_len as usize) < Self::MAX_HAND_CHANGES,
+            "DirtyPiece: hand_changes overflow"
+        );
+        // SAFETY: hand_changes_len < MAX_HAND_CHANGES (2) は do_move の構造上保証される
+        // - 打ち駒: 手駒が1減る(1)
+        // - 取り駒: 手駒が1増える(1)
+        // - 最大: 打ち駒なし + 取り駒 = 1、または打ち駒のみ = 1
+        unsafe {
+            *self.hand_changes.get_unchecked_mut(self.hand_changes_len as usize) = change;
+        }
+        self.hand_changes_len += 1;
+    }
+
+    /// 駒変化のスライスを取得
+    #[inline]
+    pub fn pieces(&self) -> &[ChangedPiece] {
+        // SAFETY: pieces_len <= MAX_PIECES は構造上保証される
+        unsafe { self.pieces.get_unchecked(..self.pieces_len as usize) }
+    }
+
+    /// 手駒変化のスライスを取得
+    #[inline]
+    pub fn hand_changes(&self) -> &[HandChange] {
+        // SAFETY: hand_changes_len <= MAX_HAND_CHANGES は構造上保証される
+        unsafe { self.hand_changes.get_unchecked(..self.hand_changes_len as usize) }
+    }
 }
 
-impl DirtyPiece {
-    /// 情報をクリア
-    pub fn clear(&mut self) {
-        self.pieces.clear();
-        self.hand_changes.clear();
-        self.king_moved = [false; Color::NUM];
+impl Default for DirtyPiece {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -108,6 +170,17 @@ pub struct ChangedPiece {
     pub new_sq: Option<Square>,
 }
 
+impl ChangedPiece {
+    /// 空の ChangedPiece（固定長配列の初期化用）
+    pub const EMPTY: Self = Self {
+        color: Color::Black,
+        old_piece: Piece::NONE,
+        old_sq: None,
+        new_piece: Piece::NONE,
+        new_sq: None,
+    };
+}
+
 /// 手駒の変化情報
 #[derive(Clone, Copy)]
 pub struct HandChange {
@@ -115,6 +188,16 @@ pub struct HandChange {
     pub piece_type: PieceType,
     pub old_count: u8,
     pub new_count: u8,
+}
+
+impl HandChange {
+    /// 空の HandChange（固定長配列の初期化用）
+    pub const EMPTY: Self = Self {
+        owner: Color::Black,
+        piece_type: PieceType::Pawn,
+        old_count: 0,
+        new_count: 0,
+    };
 }
 
 impl StateInfo {
