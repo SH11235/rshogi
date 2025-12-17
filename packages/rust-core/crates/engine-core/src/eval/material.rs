@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
 use crate::bitboard::{
     bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect, knight_effect,
@@ -205,51 +205,46 @@ const LV4_THEIR_EFFECT_VALUE: [i32; 9] = make_effect_values(98);
 const LV7_OUR_EFFECT_VALUE: [i32; 9] = make_effect_values(83);
 const LV7_THEIR_EFFECT_VALUE: [i32; 9] = make_effect_values(92);
 
-fn multi_effect_value() -> &'static [i32; 11] {
-    static TABLE: OnceLock<[i32; 11]> = OnceLock::new();
-    TABLE.get_or_init(|| {
-        let mut arr = [0i32; 11];
-        // YaneuraOu の optimizer が出力した近似式
-        // 6365 - pow(0.8525, m-1) * 5341 (m=1..10)
-        // 利きが増えるほど逓減しつつ上限に漸近する特性を再現するための定数
-        for (m, value) in arr.iter_mut().enumerate().skip(1) {
-            *value = (6365.0 - 0.8525f64.powi((m as i32) - 1) * 5341.0) as i32;
-        }
-        arr
-    })
-}
+/// 利きの多重度に応じた評価値テーブル（LazyLockによる遅延初期化）
+static MULTI_EFFECT_VALUE: LazyLock<[i32; 11]> = LazyLock::new(|| {
+    let mut arr = [0i32; 11];
+    // YaneuraOu の optimizer が出力した近似式
+    // 6365 - pow(0.8525, m-1) * 5341 (m=1..10)
+    // 利きが増えるほど逓減しつつ上限に漸近する特性を再現するための定数
+    for (m, value) in arr.iter_mut().enumerate().skip(1) {
+        *value = (6365.0 - 0.8525f64.powi((m as i32) - 1) * 5341.0) as i32;
+    }
+    arr
+});
 
-#[derive(Clone)]
 struct Lv7Tables {
     our_effect_table: [[[i32; 3]; Square::NUM]; Square::NUM],
     their_effect_table: [[[i32; 3]; Square::NUM]; Square::NUM],
 }
 
-fn lv7_tables() -> &'static Lv7Tables {
-    static TABLES: OnceLock<Lv7Tables> = OnceLock::new();
-    TABLES.get_or_init(|| {
-        let mv = multi_effect_value();
-        let mut our_effect_table = [[[0i32; 3]; Square::NUM]; Square::NUM];
-        let mut their_effect_table = [[[0i32; 3]; Square::NUM]; Square::NUM];
+/// Lv7評価用のテーブル（LazyLockによる遅延初期化）
+static LV7_TABLES: LazyLock<Lv7Tables> = LazyLock::new(|| {
+    let mv = &*MULTI_EFFECT_VALUE;
+    let mut our_effect_table = [[[0i32; 3]; Square::NUM]; Square::NUM];
+    let mut their_effect_table = [[[0i32; 3]; Square::NUM]; Square::NUM];
 
-        for king_sq in Square::all() {
-            for sq in Square::all() {
-                let d = dist(sq, king_sq);
-                for m in 0..3 {
-                    our_effect_table[king_sq.index()][sq.index()][m] =
-                        mv[m] * LV7_OUR_EFFECT_VALUE[d] / (1024 * 1024);
-                    their_effect_table[king_sq.index()][sq.index()][m] =
-                        mv[m] * LV7_THEIR_EFFECT_VALUE[d] / (1024 * 1024);
-                }
+    for king_sq in Square::all() {
+        for sq in Square::all() {
+            let d = dist(sq, king_sq);
+            for m in 0..3 {
+                our_effect_table[king_sq.index()][sq.index()][m] =
+                    mv[m] * LV7_OUR_EFFECT_VALUE[d] / (1024 * 1024);
+                their_effect_table[king_sq.index()][sq.index()][m] =
+                    mv[m] * LV7_THEIR_EFFECT_VALUE[d] / (1024 * 1024);
             }
         }
+    }
 
-        Lv7Tables {
-            our_effect_table,
-            their_effect_table,
-        }
-    })
-}
+    Lv7Tables {
+        our_effect_table,
+        their_effect_table,
+    }
+});
 
 // 自駒への味方/敵の利きが 0/1/2 のときの補正係数（MaterialLv7-9）
 // 値は YaneuraOu から移植。後で 4096 で割って駒価値に掛ける。
@@ -383,7 +378,7 @@ fn eval_lv4(pos: &Position, effects: &BoardEffects) -> i32 {
     let mut score = pos.state().material_value.raw();
     let king_b = pos.king_square(Color::Black);
     let king_w = pos.king_square(Color::White);
-    let mv = multi_effect_value();
+    let mv = &*MULTI_EFFECT_VALUE;
 
     for sq in Square::all() {
         let e_b = clamp_effect(effects.effect(Color::Black, sq), 10);
@@ -431,7 +426,7 @@ fn eval_lv7_like(
     let king_b = pos.king_square(Color::Black);
     let king_w = pos.king_square(Color::White);
     let inv_king_w = king_w.inverse();
-    let tables = lv7_tables();
+    let tables = &*LV7_TABLES;
 
     for sq in Square::all() {
         let m1 = clamp_effect(effects.effect(Color::Black, sq), 2);

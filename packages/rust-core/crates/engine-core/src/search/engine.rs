@@ -10,7 +10,6 @@ use crate::position::Position;
 use crate::tt::TranspositionTable;
 use crate::types::{Depth, Move, Value, MAX_PLY};
 
-use super::alpha_beta::init_reductions;
 use super::time_manager::{
     calculate_falling_eval, calculate_time_reduction, normalize_nodes_effort,
     DEFAULT_MAX_MOVES_TO_DRAW,
@@ -302,9 +301,6 @@ impl Search {
     /// # Arguments
     /// * `tt_size_mb` - 置換表のサイズ（MB）
     pub fn new(tt_size_mb: usize) -> Self {
-        // LMRテーブルを初期化
-        init_reductions();
-
         Self {
             tt: Arc::new(TranspositionTable::new(tt_size_mb)),
             tt_size_mb,

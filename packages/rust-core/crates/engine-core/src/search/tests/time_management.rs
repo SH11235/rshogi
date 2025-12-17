@@ -165,10 +165,8 @@ fn test_worker_best_move_changes_initial_value() {
     std::thread::Builder::new()
         .stack_size(STACK_SIZE)
         .spawn(|| {
-            use crate::search::alpha_beta::{init_reductions, SearchWorker};
+            use crate::search::alpha_beta::SearchWorker;
             use crate::tt::TranspositionTable;
-
-            init_reductions();
 
             let tt = TranspositionTable::new(16);
             let limits = LimitsType::new();
@@ -190,10 +188,8 @@ fn test_worker_best_move_changes_decay() {
     std::thread::Builder::new()
         .stack_size(STACK_SIZE)
         .spawn(|| {
-            use crate::search::alpha_beta::{init_reductions, SearchWorker};
+            use crate::search::alpha_beta::SearchWorker;
             use crate::tt::TranspositionTable;
-
-            init_reductions();
 
             let tt = TranspositionTable::new(16);
             let limits = LimitsType::new();

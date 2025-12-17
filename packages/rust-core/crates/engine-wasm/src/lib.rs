@@ -4,9 +4,7 @@ use std::io::ErrorKind;
 use engine_core::movegen::{generate_legal, MoveList};
 use engine_core::nnue::init_nnue_from_bytes;
 use engine_core::position::{Position, SFEN_HIRATE};
-use engine_core::search::{
-    init_search_module, LimitsType, Search, SearchInfo, SearchResult, SkillOptions,
-};
+use engine_core::search::{LimitsType, Search, SearchInfo, SearchResult, SkillOptions};
 use engine_core::types::json::BoardStateJson;
 use engine_core::types::{Move, Value};
 use serde::{Deserialize, Serialize};
@@ -347,7 +345,6 @@ where
     F: FnOnce(&mut EngineState) -> Result<R, JsValue>,
 {
     install_panic_hook();
-    init_search_module();
     ENGINE.with(|cell| {
         let mut guard = cell.borrow_mut();
         if guard.is_none() {
@@ -438,7 +435,6 @@ pub fn wasm_replay_moves_strict(sfen: String, moves: JsValue) -> Result<JsValue,
 #[wasm_bindgen]
 pub fn init(opts: Option<JsValue>) -> Result<(), JsValue> {
     let opts = parse_init_options(opts)?;
-    init_search_module();
     install_panic_hook();
 
     ENGINE.with(|state| {
