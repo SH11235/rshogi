@@ -21,8 +21,8 @@ use super::history::{
 use super::movepicker::piece_value;
 use super::tt_history::TTMoveHistory;
 use super::types::{
-    draw_value, init_stack_array, value_from_tt, value_to_tt, ContHistKey, NodeType, RootMoves,
-    SearchedMoveList, StackArray,
+    draw_value, init_stack_array, value_from_tt, value_to_tt, ContHistKey, NodeType,
+    OrderedMovesBuffer, RootMoves, SearchedMoveList, StackArray,
 };
 use super::{LimitsType, MovePicker, TimeManagement};
 
@@ -854,6 +854,8 @@ impl<'a> SearchWorker<'a> {
     }
 
     /// 指し手生成（TT手優先、qsearch用チェック生成など含む）
+    ///
+    /// 固定長バッファを使用してヒープ割り当てを回避する。
     fn generate_ordered_moves(
         &self,
         pos: &mut Position,
@@ -861,8 +863,8 @@ impl<'a> SearchWorker<'a> {
         depth: Depth,
         in_check: bool,
         ply: i32,
-    ) -> (Vec<Move>, Move) {
-        let mut ordered_moves = Vec::new();
+    ) -> (OrderedMovesBuffer, Move) {
+        let mut ordered_moves = OrderedMovesBuffer::new();
         let mut tt_move = tt_move;
 
         // qsearch/ProbCut互換: 捕獲フェーズではTT手もcapture_stageで制約
@@ -887,7 +889,11 @@ impl<'a> SearchWorker<'a> {
             self.generate_all_legal_moves,
         );
 
-        ordered_moves.extend(mp.filter(|m| m.is_some()));
+        for mv in mp {
+            if mv.is_some() {
+                ordered_moves.push(mv);
+            }
+        }
 
         // qsearchでは捕獲以外のチェックも生成（YaneuraOu準拠）
         if !in_check && depth == DEPTH_QS {
@@ -1498,7 +1504,7 @@ impl<'a> SearchWorker<'a> {
 
         // TODO: singular extension（YaneuraOu準拠）は未実装。
         // 追加時は補正履歴の寄与（abs(correctionValue)/249096 を margin に加算）も含める。
-        for mv in ordered_moves {
+        for mv in ordered_moves.iter() {
             if !pos.pseudo_legal(mv) {
                 continue;
             }
@@ -2241,7 +2247,7 @@ impl<'a> SearchWorker<'a> {
 
         let ordered_moves = {
             let cont_tables = self.build_cont_tables(ply);
-            let mut buf_moves = Vec::new();
+            let mut buf_moves = OrderedMovesBuffer::new();
 
             {
                 let mp = if in_check {
@@ -2313,7 +2319,7 @@ impl<'a> SearchWorker<'a> {
 
         let mut move_count = 0;
 
-        for mv in ordered_moves {
+        for mv in ordered_moves.iter() {
             if !pos.is_legal(mv) {
                 continue;
             }
