@@ -478,7 +478,10 @@ impl Search {
         };
 
         // workerへの参照を再取得（borrowck対応）
-        let worker = self.worker.as_mut().expect("worker should be initialized by search_with_callback");
+        let worker = self
+            .worker
+            .as_mut()
+            .expect("worker should be initialized by search_with_callback");
 
         // Skill有効時は pick_best でbestmoveを差し替える
         if skill_enabled && !worker.root_moves.is_empty() && effective_multi_pv > 0 {
