@@ -112,7 +112,7 @@ impl Network {
             let count = CALL_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
 
             // 100000回ごとにログ出力
-            if count % 100000 == 0 {
+            if count.is_multiple_of(100000) {
                 let total_nz = TOTAL_NONZERO.load(Ordering::Relaxed);
                 let total_el = TOTAL_ELEMENTS.load(Ordering::Relaxed);
                 let density = total_nz as f64 / total_el as f64 * 100.0;
@@ -294,7 +294,7 @@ pub fn evaluate(pos: &mut Position) -> Value {
             let count = TOTAL_EVALS.fetch_add(1, Ordering::Relaxed) + 1;
 
             // 100000回ごとにログ出力
-            if count % 100000 == 0 {
+            if count.is_multiple_of(100000) {
                 let cached = CACHED.load(Ordering::Relaxed);
                 let diff_ok = DIFF_SUCCESS.load(Ordering::Relaxed);
                 let ancestor_ok = ANCESTOR_SUCCESS.load(Ordering::Relaxed);

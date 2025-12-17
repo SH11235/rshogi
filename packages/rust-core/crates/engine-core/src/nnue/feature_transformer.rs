@@ -19,6 +19,9 @@ use std::io::{self, Read};
 ///
 /// YaneuraOu方式: 玉移動がない限り、現局面の玉位置が祖先と同じなので、
 /// 現局面の玉位置を使って差分計算できる。
+///
+/// 注: HalfKP特徴量の構造的制約により、玉が動いた場合は差分更新不可。
+/// 調査結果（2025-12-18）: 祖先探索の失敗原因の98%以上が玉移動に起因。
 pub fn find_usable_accumulator(pos: &Position, current_idx: usize) -> Option<(usize, usize)> {
     const MAX_DEPTH: usize = 8;
 
