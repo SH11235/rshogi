@@ -1,5 +1,14 @@
 {
     "$schema": "https://biomejs.dev/schemas/2.3.9/schema.json",
+    "vcs": {
+        "enabled": true,
+        "clientKind": "git",
+        "useIgnoreFile": true
+    },
+    "files": {
+        "includes": ["**", "!**/packages/rust-core", "!**/src-tauri"],
+        "ignoreUnknown": true
+    },
     "css": {
         "parser": {
             "cssModules": true,
@@ -15,6 +24,7 @@
     "linter": {
         "enabled": true,
         "rules": {
+            "recommended": true,
             "style": {
                 "useImportType": "error"
             },
@@ -26,26 +36,12 @@
             }
         }
     },
-    "files": {
-        "includes": [
-            "**",
-            "!**/tsconfig*.json",
-            "!**/package.json",
-            "!**/package-lock.json",
-            "!**/pnpm-lock.yaml",
-            "!**/node_modules",
-            "!**/.git",
-            "!**/dist",
-            "!**/pkg",
-            "!**/.turbo",
-            "!**/.vscode",
-            "!**/test-results",
-            "!**/playwright-report",
-            "!**/coverage",
-            "!**/packages/rust-core",
-            "!**/packages/web/src/wasm",
-            "!**/src-tauri",
-            "!**/memo"
-        ]
+    "assist": {
+        "enabled": true,
+        "actions": {
+            "source": {
+                "organizeImports": "on"
+            }
+        }
     }
 }
