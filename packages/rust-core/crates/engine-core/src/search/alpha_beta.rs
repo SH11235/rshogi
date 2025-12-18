@@ -539,6 +539,8 @@ impl SearchWorker {
     }
 
     /// 置換表プローブと即時カットオフ（root以外のmate_1ply含む）
+    ///
+    /// `excluded_move`がある場合（Singular Extension中）は置換表カットオフを回避する。
     fn probe_transposition<const NT: u8>(
         &mut self,
         pos: &mut Position,
@@ -547,6 +549,7 @@ impl SearchWorker {
         ply: i32,
         pv_node: bool,
         in_check: bool,
+        excluded_move: Move,
     ) -> ProbeOutcome {
         let key = pos.key();
         let tt_result = self.tt.probe(key, pos);
@@ -554,7 +557,12 @@ impl SearchWorker {
         let tt_data = tt_result.data;
 
         self.stack[ply as usize].tt_hit = tt_hit;
-        self.stack[ply as usize].tt_pv = pv_node || (tt_hit && tt_data.is_pv);
+        // excludedMoveがある場合は前回のttPvを維持（YaneuraOu準拠）
+        self.stack[ply as usize].tt_pv = if excluded_move.is_some() {
+            self.stack[ply as usize].tt_pv
+        } else {
+            pv_node || (tt_hit && tt_data.is_pv)
+        };
 
         let tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
         let tt_value = if tt_hit {
@@ -564,7 +572,9 @@ impl SearchWorker {
         };
         let tt_capture = tt_move.is_some() && pos.is_capture(tt_move);
 
+        // excludedMoveがある場合はカットオフしない（YaneuraOu準拠）
         if !pv_node
+            && excluded_move.is_none()
             && tt_hit
             && tt_data.depth >= depth
             && tt_value != Value::NONE
@@ -574,7 +584,8 @@ impl SearchWorker {
         }
 
         // 1手詰め判定（置換表未ヒット時のみ、Rootでは実施しない）
-        if NT != NodeType::Root as u8 && !in_check && !tt_hit {
+        // excludedMoveがある場合も実施しない（詰みがあればsingular前にbeta cutするため）
+        if NT != NodeType::Root as u8 && !in_check && !tt_hit && excluded_move.is_none() {
             let mate_move = pos.mate_1ply();
             if mate_move.is_some() {
                 let value = Value::mate_in(ply + 1);
@@ -605,14 +616,41 @@ impl SearchWorker {
     }
 
     /// 静的評価と補正値の計算
+    ///
+    /// `excluded_move`がある場合（Singular Extension中）は既存のstatic_evalを維持する。
     fn compute_eval_context(
         &mut self,
         pos: &mut Position,
         ply: i32,
         in_check: bool,
         tt_ctx: &TTContext,
+        excluded_move: Move,
     ) -> EvalContext {
         let correction_value = self.correction_value(pos, ply);
+
+        // excludedMoveがある場合は、前回のstatic_evalをそのまま使用（YaneuraOu準拠）
+        if excluded_move.is_some() {
+            let static_eval = self.stack[ply as usize].static_eval;
+            let improving = if ply >= 2 && !in_check && static_eval != Value::NONE {
+                static_eval > self.stack[(ply - 2) as usize].static_eval
+            } else {
+                false
+            };
+            let opponent_worsening = if ply >= 1 && static_eval != Value::NONE {
+                let prev_eval = self.stack[(ply - 1) as usize].static_eval;
+                prev_eval != Value::NONE && static_eval > -prev_eval
+            } else {
+                false
+            };
+            return EvalContext {
+                static_eval,
+                unadjusted_static_eval: static_eval, // excludedMove時は未補正値も同じ
+                correction_value,
+                improving,
+                opponent_worsening,
+            };
+        }
+
         let mut unadjusted_static_eval = Value::NONE;
         let mut static_eval = if in_check {
             Value::NONE
@@ -1483,9 +1521,19 @@ impl SearchWorker {
         let prior_reduction = self.take_prior_reduction(ply);
         self.stack[ply as usize].reduction = 0;
 
+        // Singular Extension用の除外手を取得
+        let excluded_move = self.stack[ply as usize].excluded_move;
+
         // 置換表プローブ（即時カットオフ含む）
-        let tt_ctx = match self.probe_transposition::<NT>(pos, depth, beta, ply, pv_node, in_check)
-        {
+        let tt_ctx = match self.probe_transposition::<NT>(
+            pos,
+            depth,
+            beta,
+            ply,
+            pv_node,
+            in_check,
+            excluded_move,
+        ) {
             ProbeOutcome::Continue(ctx) => ctx,
             ProbeOutcome::Cutoff(value) => return value,
         };
@@ -1496,7 +1544,7 @@ impl SearchWorker {
         let tt_capture = tt_ctx.capture;
 
         // 静的評価
-        let eval_ctx = self.compute_eval_context(pos, ply, in_check, &tt_ctx);
+        let eval_ctx = self.compute_eval_context(pos, ply, in_check, &tt_ctx, excluded_move);
         let mut improving = eval_ctx.improving;
         let opponent_worsening = eval_ctx.opponent_worsening;
 
@@ -1610,9 +1658,15 @@ impl SearchWorker {
         let (ordered_moves, tt_move) =
             self.generate_ordered_moves(pos, tt_move, depth, in_check, ply);
 
-        // TODO: singular extension（YaneuraOu準拠）は未実装。
-        // 追加時は補正履歴の寄与（abs(correctionValue)/249096 を margin に加算）も含める。
+        // Singular Extension用の変数
+        let tt_pv = self.stack[ply as usize].tt_pv;
+        let root_node = NT == NodeType::Root as u8;
+
         for mv in ordered_moves.iter() {
+            // Singular Extension用の除外手をスキップ（YaneuraOu準拠）
+            if mv == excluded_move {
+                continue;
+            }
             if !pos.pseudo_legal(mv) {
                 continue;
             }
@@ -1637,6 +1691,78 @@ impl SearchWorker {
             };
 
             let mut new_depth = depth - 1;
+            let mut extension = 0i32;
+
+            // =============================================================
+            // Singular Extension（YaneuraOu準拠）
+            // =============================================================
+            // singular延長をするnodeであるか判定
+            // 条件: !rootNode && move == ttMove && !excludedMove && depth >= 6 + ttPv
+            //       && is_valid(ttValue) && !is_decisive(ttValue) && (ttBound & BOUND_LOWER)
+            //       && ttDepth >= depth - 3
+            if !root_node
+                && mv == tt_move
+                && excluded_move.is_none()
+                && depth >= 6 + tt_pv as i32
+                && tt_value != Value::NONE
+                && !tt_value.is_mate_score()
+                && tt_data.bound.is_lower_or_exact()
+                && tt_data.depth >= depth - 3
+            {
+                // singularBeta = ttValue - (56 + 79 * (ttPv && !PvNode)) * depth / 58
+                let singular_beta_margin = (56 + 79 * (tt_pv && !pv_node) as i32) * depth / 58;
+                let singular_beta = tt_value - Value::new(singular_beta_margin);
+                let singular_depth = new_depth / 2;
+
+                // ttMoveを除外して浅い探索を実行
+                // 注: YaneuraOu準拠で同じplyで再帰呼び出しを行う（do_moveせず同一局面で探索）
+                // これによりstack[ply]の一部フィールド（tt_hit, move_count等）が上書きされるが：
+                // - tt_pv: excludedMoveがある場合は保持される（probe_transposition内）
+                // - tt_hit: 同じ局面なので同じ値になる
+                // - move_count: ローカル変数で管理しているため影響なし
+                // - その他: ヒューリスティック用途のため多少の誤差は許容される
+                self.stack[ply as usize].excluded_move = mv;
+                let singular_value = self.search_node::<{ NodeType::NonPV as u8 }>(
+                    pos,
+                    singular_depth,
+                    singular_beta - Value::new(1),
+                    singular_beta,
+                    ply,
+                    cut_node,
+                    limits,
+                    time_manager,
+                );
+                self.stack[ply as usize].excluded_move = Move::NONE;
+
+                if singular_value < singular_beta {
+                    // Singular確定 → 延長量を計算
+                    // 補正履歴の寄与（abs(correctionValue)/249096）を margin に加算
+                    let corr_val_adj = eval_ctx.correction_value.abs() / 249_096;
+                    let double_margin =
+                        4 + 205 * pv_node as i32 - 223 * !tt_capture as i32 - corr_val_adj;
+                    let triple_margin = 80 + 276 * pv_node as i32 - 249 * !tt_capture as i32
+                        + 86 * tt_pv as i32
+                        - corr_val_adj;
+
+                    extension = 1
+                        + (singular_value < singular_beta - Value::new(double_margin)) as i32
+                        + (singular_value < singular_beta - Value::new(triple_margin)) as i32;
+
+                    // YaneuraOu準拠: singular確定時にdepthを+1（yaneuraou-search.cpp:3401）
+                    depth += 1;
+                } else if singular_value >= beta && !singular_value.is_mate_score() {
+                    // Multi-Cut: 他の手もfail highする場合は枝刈り
+                    return singular_value;
+                } else if tt_value >= beta {
+                    // Negative Extension: ttMoveが特別でない場合
+                    extension = -3;
+                } else if cut_node {
+                    extension = -2;
+                }
+            }
+
+            // 注: YaneuraOu準拠で、new_depth += extension はdo_moveの後で行う（3482行目）
+            // ここではextensionを保持しておき、枝刈りはextension反映前のnew_depthで判定
 
             // =============================================================
             // Reduction計算とStep14の枝刈り
@@ -1731,6 +1857,9 @@ impl SearchWorker {
             } else {
                 quiets_tried.push(mv);
             }
+
+            // 延長量をnew_depthに加算（YaneuraOu準拠: do_moveの後、yaneuraou-search.cpp:3482）
+            new_depth += extension;
 
             // =============================================================
             // Late Move Reduction (LMR)
@@ -1964,7 +2093,12 @@ impl SearchWorker {
         // =================================================================
         // 詰み/ステイルメイト判定
         // =================================================================
+        // YaneuraOu準拠: excludedMoveがある場合は、ttMoveが除外されているので
+        // 単にalphaを返す（詰みとは判定しない）
         if move_count == 0 {
+            if excluded_move.is_some() {
+                return alpha;
+            }
             // 合法手なし
             if in_check {
                 // 詰み
@@ -2195,24 +2329,28 @@ impl SearchWorker {
         // =================================================================
         // 置換表更新
         // =================================================================
-        let bound = if best_value >= beta {
-            Bound::Lower
-        } else if pv_node && best_move.is_some() {
-            Bound::Exact
-        } else {
-            Bound::Upper
-        };
+        // excludedMoveがある場合は置換表に書き込まない（YaneuraOu準拠）
+        // 同一局面で異なるexcludedMoveを持つ局面が同じhashkeyを持つため
+        if excluded_move.is_none() {
+            let bound = if best_value >= beta {
+                Bound::Lower
+            } else if pv_node && best_move.is_some() {
+                Bound::Exact
+            } else {
+                Bound::Upper
+            };
 
-        tt_ctx.result.write(
-            tt_ctx.key,
-            value_to_tt(best_value, ply),
-            pv_node,
-            bound,
-            depth,
-            best_move,
-            eval_ctx.unadjusted_static_eval,
-            self.tt.generation(),
-        );
+            tt_ctx.result.write(
+                tt_ctx.key,
+                value_to_tt(best_value, ply),
+                pv_node,
+                bound,
+                depth,
+                best_move,
+                eval_ctx.unadjusted_static_eval,
+                self.tt.generation(),
+            );
+        }
 
         best_value
     }

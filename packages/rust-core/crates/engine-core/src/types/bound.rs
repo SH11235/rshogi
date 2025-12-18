@@ -29,6 +29,14 @@ impl Bound {
         }
     }
 
+    /// 下界（Lower）または正確（Exact）か
+    ///
+    /// Singular Extension判定で使用。YaneuraOuの`(ttBound & BOUND_LOWER)`に相当。
+    #[inline]
+    pub const fn is_lower_or_exact(self) -> bool {
+        matches!(self, Bound::Lower | Bound::Exact)
+    }
+
     /// u8から変換
     #[inline]
     pub const fn from_u8(n: u8) -> Option<Bound> {
