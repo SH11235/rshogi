@@ -34,9 +34,8 @@ impl Bitboard256 {
         #[cfg(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2"))]
         unsafe {
             use std::arch::x86_64::*;
-            // SAFETY: Bitboardは16バイトアライン、[u64; 2]と__m128iは同一メモリレイアウト
-            let bb_arr = [bb.extract64::<0>(), bb.extract64::<1>()];
-            let bb_m = std::mem::transmute::<[u64; 2], __m128i>(bb_arr);
+            // _mm_set_epi64xでアライメント問題を回避（引数順序: 上位, 下位）
+            let bb_m = _mm_set_epi64x(bb.extract64::<1>() as i64, bb.extract64::<0>() as i64);
             let result_m = _mm256_broadcastsi128_si256(bb_m);
             let result_p: [u64; 4] = std::mem::transmute(result_m);
             Bitboard256 { p: result_p }
@@ -67,11 +66,9 @@ impl Bitboard256 {
         #[cfg(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2"))]
         unsafe {
             use std::arch::x86_64::*;
-            // SAFETY: Bitboardは16バイトアライン、[u64; 2]と__m128iは同一メモリレイアウト
-            let bb0_arr = [bb0.extract64::<0>(), bb0.extract64::<1>()];
-            let bb1_arr = [bb1.extract64::<0>(), bb1.extract64::<1>()];
-            let bb0_m = std::mem::transmute::<[u64; 2], __m128i>(bb0_arr);
-            let bb1_m = std::mem::transmute::<[u64; 2], __m128i>(bb1_arr);
+            // _mm_set_epi64xでアライメント問題を回避（引数順序: 上位, 下位）
+            let bb0_m = _mm_set_epi64x(bb0.extract64::<1>() as i64, bb0.extract64::<0>() as i64);
+            let bb1_m = _mm_set_epi64x(bb1.extract64::<1>() as i64, bb1.extract64::<0>() as i64);
             let result_m = _mm256_castsi128_si256(bb0_m);
             let result_m = _mm256_inserti128_si256::<1>(result_m, bb1_m);
             let result_p: [u64; 4] = std::mem::transmute(result_m);
