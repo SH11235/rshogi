@@ -804,10 +804,17 @@ impl SearchWorker {
         //     チェスでは Pawn endgame の Zugzwang 対策だが、
         //     将棋は持ち駒があるため Pawn だけの終盤は存在しない。
         //     将来検証する場合: && pos.non_pawn_material(pos.side_to_move())
+
+        // ply >= 1 のガード（防御的プログラミング）
+        // 実際には search_root から search_node を呼ぶ際に常に ply=1 から開始するため、
+        // ply=0 でこの関数が呼ばれることはないが、将来の変更に備えて明示的にガードする。
+        if ply < 1 {
+            return (None, improving);
+        }
+
         let margin = 18 * depth - 390;
         let prev_move = self.stack[(ply - 1) as usize].current_move;
-        if ply >= 1
-            && excluded_move.is_none()
+        if excluded_move.is_none()
             && cut_node
             && !in_check
             && static_eval >= beta - Value::new(margin)
