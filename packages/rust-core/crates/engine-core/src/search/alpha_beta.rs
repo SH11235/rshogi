@@ -1715,6 +1715,12 @@ impl SearchWorker {
                 let singular_depth = new_depth / 2;
 
                 // ttMoveを除外して浅い探索を実行
+                // 注: YaneuraOu準拠で同じplyで再帰呼び出しを行う（do_moveせず同一局面で探索）
+                // これによりstack[ply]の一部フィールド（tt_hit, move_count等）が上書きされるが：
+                // - tt_pv: excludedMoveがある場合は保持される（probe_transposition内）
+                // - tt_hit: 同じ局面なので同じ値になる
+                // - move_count: ローカル変数で管理しているため影響なし
+                // - その他: ヒューリスティック用途のため多少の誤差は許容される
                 self.stack[ply as usize].excluded_move = mv;
                 let singular_value = self.search_node::<{ NodeType::NonPV as u8 }>(
                     pos,
