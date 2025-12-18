@@ -270,6 +270,18 @@ impl Position {
         self.cur_state().previous.map(|idx| &self.state_stack[idx])
     }
 
+    /// 任意のインデックスのStateInfoを取得（NNUE祖先探索用）
+    #[inline]
+    pub fn state_at(&self, idx: usize) -> &StateInfo {
+        &self.state_stack[idx]
+    }
+
+    /// 現在のstate_indexを取得（NNUE祖先探索用）
+    #[inline]
+    pub fn state_index(&self) -> usize {
+        self.state_idx
+    }
+
     /// 現在の状態を可変で取得（NNUE差分更新など内部状態の更新用）
     #[inline]
     pub fn state_mut(&mut self) -> &mut StateInfo {

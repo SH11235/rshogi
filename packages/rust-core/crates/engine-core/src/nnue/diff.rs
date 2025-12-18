@@ -3,34 +3,26 @@
 //! `StateInfo::dirty_piece` に基づいて、HalfKP の active index の増減を計算する。
 
 use super::bona_piece::{halfkp_index, BonaPiece};
-use crate::position::Position;
-use crate::types::{Color, Piece};
+use crate::position::{DirtyPiece, Position};
+use crate::types::{Color, Piece, Square};
 
-/// 差分更新用: 変化した特徴量を取得
+/// DirtyPieceから変化した特徴量を計算（コア処理）
 ///
 /// - 戻り値:
 ///   - removed: 1→0 になった特徴量（削除）
 ///   - added:   0→1 になった特徴量（追加）
 ///
-/// 玉が動いた場合や判定ができない場合は（removed, added）とも空を返し、
-/// 呼び出し側で全計算にフォールバックする前提とする。
-pub fn get_changed_features(pos: &Position, perspective: Color) -> (Vec<usize>, Vec<usize>) {
-    let state = pos.state();
-    if pos.previous_state().is_none() {
-        // 前の局面が無い（初期状態など）
-        return (Vec::new(), Vec::new());
-    }
-
-    // 玉が動いた場合は全計算が必要（HalfKP は自玉位置×駒配置のため）
-    if state.dirty_piece.king_moved[perspective.index()] {
-        return (Vec::new(), Vec::new());
-    };
-
-    let king_sq = pos.king_square(perspective);
+/// 玉位置は呼び出し側で指定する。祖先探索で玉移動なしが確認済みの場合、
+/// 現局面の玉位置を使用できる。
+pub fn get_features_from_dirty_piece(
+    dirty_piece: &DirtyPiece,
+    perspective: Color,
+    king_sq: Square,
+) -> (Vec<usize>, Vec<usize>) {
     let mut removed = Vec::new();
     let mut added = Vec::new();
 
-    for dp in state.dirty_piece.pieces() {
+    for dp in dirty_piece.pieces() {
         // 盤上から消える側（old）
         if dp.old_piece != Piece::NONE {
             if let Some(sq) = dp.old_sq {
@@ -53,7 +45,7 @@ pub fn get_changed_features(pos: &Position, perspective: Color) -> (Vec<usize>, 
     }
 
     // 手駒の変化を反映
-    for hc in state.dirty_piece.hand_changes() {
+    for hc in dirty_piece.hand_changes() {
         // やねうら王同様、手駒は種類×枚数の組み合わせで 1 つの BonaPiece を表現する。
         if hc.old_count != hc.new_count {
             // 旧カウント分の特徴量を削除
@@ -76,4 +68,28 @@ pub fn get_changed_features(pos: &Position, perspective: Color) -> (Vec<usize>, 
     }
 
     (removed, added)
+}
+
+/// 差分更新用: 変化した特徴量を取得
+///
+/// - 戻り値:
+///   - removed: 1→0 になった特徴量（削除）
+///   - added:   0→1 になった特徴量（追加）
+///
+/// 玉が動いた場合や判定ができない場合は（removed, added）とも空を返し、
+/// 呼び出し側で全計算にフォールバックする前提とする。
+pub fn get_changed_features(pos: &Position, perspective: Color) -> (Vec<usize>, Vec<usize>) {
+    let state = pos.state();
+    if pos.previous_state().is_none() {
+        // 前の局面が無い（初期状態など）
+        return (Vec::new(), Vec::new());
+    }
+
+    // 玉が動いた場合は全計算が必要（HalfKP は自玉位置×駒配置のため）
+    if state.dirty_piece.king_moved[perspective.index()] {
+        return (Vec::new(), Vec::new());
+    };
+
+    let king_sq = pos.king_square(perspective);
+    get_features_from_dirty_piece(&state.dirty_piece, perspective, king_sq)
 }
