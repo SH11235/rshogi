@@ -2487,8 +2487,14 @@ impl SearchWorker {
                 } else {
                     // Prior capture countermove bonus
                     // YaneuraOu: yaneuraou-search.cpp:3972-3977
+                    // 注: prev_sq は cont_hist_key.to（do_move後に設定）なので prev_piece は有効
                     let prev_piece = pos.piece_on(prev_sq);
                     let captured_piece = pos.captured_piece();
+                    // YaneuraOu: assert(capturedPiece != NO_PIECE)
+                    debug_assert!(
+                        captured_piece != Piece::NONE,
+                        "prior_capture is true but captured_piece is NONE"
+                    );
                     if captured_piece != Piece::NONE {
                         self.capture_history.update(
                             prev_piece,
