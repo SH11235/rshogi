@@ -165,11 +165,68 @@ AMD Zen 3環境では効果なし。ただし、以下の理由でフィーチ�
 - Intel環境での将来の検証
 - マルチスレッド対応時にメモリ帯域幅がボトルネックになった場合の検証
 
+#### フィーチャーフラグについて
+
+**デフォルトでは `simd_avx2` は無効**です。有効にするには明示的に指定が必要です。
+
 ```bash
-# 使用方法
-cargo build --release                    # デフォルト: スカラー版
-cargo build --release --features simd_avx2  # AVX2版
+# デフォルト: スカラー版（simd_avx2 無効）
+cargo build --release
+
+# AVX2版を有効化
+cargo build --release --features simd_avx2
+
+# ベンチマーク実行時
+RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release \
+  --features simd_avx2 -- --internal --threads 1 ...
 ```
+
+#### 並列探索実装時の検証方法
+
+マルチスレッド環境ではメモリ帯域幅がボトルネックになる可能性があり、SIMD版の効果が出る可能性がある。以下の手順で検証を推奨:
+
+**1. スレッド数を変えた比較**
+
+```bash
+# スカラー版とAVX2版を各スレッド数で比較
+for threads in 1 2 4 8 16; do
+  echo "=== Threads: $threads (scalar) ==="
+  RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release -- \
+    --internal --threads $threads --limit-type movetime --limit 20000
+
+  echo "=== Threads: $threads (AVX2) ==="
+  RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release \
+    --features simd_avx2 -- \
+    --internal --threads $threads --limit-type movetime --limit 20000
+done
+```
+
+**2. 検証ポイント**
+
+| 項目 | 確認内容 |
+|------|---------|
+| NPS | スレッド数増加時にAVX2版の相対効率が向上するか |
+| bestmove | 同一入力で同一結果が得られるか（探索の非決定性による差異は許容） |
+| メモリ帯域 | `perf stat -e cache-misses` でキャッシュミス率を確認 |
+
+**3. perfプロファイル（マルチスレッド）**
+
+```bash
+# マルチスレッドでのホットスポット確認
+./scripts/perf_profile_nnue.sh --threads 4 --movetime 10000
+
+# キャッシュミス統計
+sudo perf stat -e cache-references,cache-misses,L1-dcache-load-misses \
+  ./target/release/engine-usi <<< "usi
+setoption name Threads value 8
+go movetime 10000
+quit"
+```
+
+**4. 期待される結果**
+
+- スレッド数が少ない場合: スカラー版とAVX2版でほぼ同等
+- スレッド数が多い場合: メモリ帯域幅がボトルネックになればAVX2版が有利になる可能性
 
 ---
 
@@ -230,3 +287,4 @@ RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release --
 | 2025-12-18 | Material評価時の計測をrelease buildに更新、シンボル解決修正 |
 | 2025-12-18 | 計測結果を再計測値で更新（NNUE: MovePicker 6.55%, refresh 6.40%, Material: eval_lv7_like 24.48%） |
 | 2025-12-19 | Bitboard256 AVX2 SIMD化調査完了（AMD Zen 3環境では効果なし、フィーチャーフラグで残す） |
+| 2025-12-19 | simd_avx2フィーチャーフラグの説明と並列探索時の検証方法を追加 |
