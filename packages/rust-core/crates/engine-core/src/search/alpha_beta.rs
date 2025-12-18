@@ -2425,6 +2425,8 @@ impl SearchWorker {
                             as i32;
                     bonus_scale = bonus_scale.max(0);
 
+                    // 値域: bonus_scale ∈ [0, ~913], min(...) ∈ [52, 1365] (depth>=1)
+                    // 最大値 1365 * 913 ≈ 1.2M << i32::MAX なのでオーバーフローなし
                     let scaled_bonus = (144 * depth - 92).min(1365) * bonus_scale;
 
                     // continuation history更新
