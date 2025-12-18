@@ -103,6 +103,133 @@ YaneuraOuの`movepick.cpp`より:
 
 ---
 
+### Bitboard256 AVX2 SIMD化 (調査完了)
+
+**調査日**: 2025-12-19
+**結論**: **AMD Zen 3環境では効果なし** - フィーチャーフラグで将来の検証用に残す
+
+#### 背景
+
+YaneuraOuではBitboard256（角の利き計算用256bit構造体）にAVX2 SIMD命令を使用している。本エンジンでも同様の最適化を検証。
+
+#### 実装内容
+
+| メソッド | AVX2命令 | 用途 |
+|---------|---------|------|
+| `BitAnd` | `_mm256_and_si256` | 論理AND |
+| `BitOr` | `_mm256_or_si256` | 論理OR |
+| `BitXor` | `_mm256_xor_si256` | 論理XOR |
+| `new()` | `_mm256_broadcastsi128_si256` | 128bit→256bit複製 |
+| `from_bitboards()` | `_mm256_inserti128_si256` | 2つの128bitを結合 |
+| `byte_reverse()` | `_mm256_shuffle_epi8` | バイト順反転 |
+| `merge()` | `_mm256_extracti128_si256` | 256bit→128bit統合 |
+
+#### ベンチマーク結果
+
+```
+計測条件: MaterialLevel=9, Threads=1, movetime=20000ms, target-cpu=native
+```
+
+| 構成 | 平均NPS | 変化 |
+|-----|--------|-----|
+| スカラー版（デフォルト） | 446,587 | ベースライン |
+| AVX2版（`--features simd_avx2`） | 442,411 | **-0.9%** |
+
+#### アセンブリ分析
+
+スカラー版とAVX2版で生成されるアセンブリを比較:
+
+- **AVX2版**: `vpand`, `vpor`, `vpxor`, `vinserti128` 等のAVX2命令を使用
+- **スカラー版**: `movq` を使用した64bit単位の処理（自動ベクトル化なし）
+
+手動SIMD化は確かに異なるコードを生成しているが、パフォーマンス向上には繋がらなかった。
+
+#### 効果がなかった理由の分析
+
+1. **AMD Zen 3のスカラー性能**: 64bit演算が非常に高速で、AVX2の相対的優位性が小さい
+2. **bishop_effectの寄与**: 探索全体に占める`attackers_to_occ`（bishop_effect含む）は3.58%のみ
+3. **LLVMの最適化**: スカラーコードでもコンパイラが効率的なコードを生成
+
+#### YaneuraOuとの違い
+
+YaneuraOuでは効果があるとされているが、以下の違いが考えられる:
+
+- **CPU環境**: Intel環境ではAVX2の相対効率が高い可能性
+- **コンパイラ**: GCC/MSVCとLLVMで最適化特性が異なる
+- **計測条件**: マイクロベンチマーク vs 探索全体のNPS
+
+#### 結論
+
+AMD Zen 3環境では効果なし。ただし、以下の理由でフィーチャーフラグ（`simd_avx2`）として残す:
+
+- Intel環境での将来の検証
+- マルチスレッド対応時にメモリ帯域幅がボトルネックになった場合の検証
+
+#### フィーチャーフラグについて
+
+**デフォルトでは `simd_avx2` は無効**です。有効にするには明示的に指定が必要です。
+
+```bash
+# デフォルト: スカラー版（simd_avx2 無効）
+cargo build --release
+
+# AVX2版を有効化
+cargo build --release --features simd_avx2
+
+# ベンチマーク実行時
+RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release \
+  --features simd_avx2 -- --internal --threads 1 ...
+```
+
+#### 並列探索実装時の検証方法
+
+マルチスレッド環境ではメモリ帯域幅がボトルネックになる可能性があり、SIMD版の効果が出る可能性がある。以下の手順で検証を推奨:
+
+**1. スレッド数を変えた比較**
+
+```bash
+# スカラー版とAVX2版を各スレッド数で比較
+for threads in 1 2 4 8 16; do
+  echo "=== Threads: $threads (scalar) ==="
+  RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release -- \
+    --internal --threads $threads --limit-type movetime --limit 20000
+
+  echo "=== Threads: $threads (AVX2) ==="
+  RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release \
+    --features simd_avx2 -- \
+    --internal --threads $threads --limit-type movetime --limit 20000
+done
+```
+
+**2. 検証ポイント**
+
+| 項目 | 確認内容 |
+|------|---------|
+| NPS | スレッド数増加時にAVX2版の相対効率が向上するか |
+| bestmove | 同一入力で同一結果が得られるか（探索の非決定性による差異は許容） |
+| メモリ帯域 | `perf stat -e cache-misses` でキャッシュミス率を確認 |
+
+**3. perfプロファイル（マルチスレッド）**
+
+```bash
+# マルチスレッドでのホットスポット確認
+./scripts/perf_profile_nnue.sh --threads 4 --movetime 10000
+
+# キャッシュミス統計
+sudo perf stat -e cache-references,cache-misses,L1-dcache-load-misses \
+  ./target/release/engine-usi <<< "usi
+setoption name Threads value 8
+go movetime 10000
+quit"
+```
+
+**4. 期待される結果**
+
+- スレッド数が少ない場合: スカラー版とAVX2版でほぼ同等
+- スレッド数が多い場合: メモリ帯域幅がボトルネックになればAVX2版が有利になる可能性
+
+---
+
 ## 計測方法
 
 ### 前提条件
@@ -159,3 +286,5 @@ RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release --
 | 2025-12-18 | ドキュメント作成 |
 | 2025-12-18 | Material評価時の計測をrelease buildに更新、シンボル解決修正 |
 | 2025-12-18 | 計測結果を再計測値で更新（NNUE: MovePicker 6.55%, refresh 6.40%, Material: eval_lv7_like 24.48%） |
+| 2025-12-19 | Bitboard256 AVX2 SIMD化調査完了（AMD Zen 3環境では効果なし、フィーチャーフラグで残す） |
+| 2025-12-19 | simd_avx2フィーチャーフラグの説明と並列探索時の検証方法を追加 |
