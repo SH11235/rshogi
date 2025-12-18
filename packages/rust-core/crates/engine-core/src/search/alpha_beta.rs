@@ -1741,6 +1741,9 @@ impl SearchWorker {
                     extension = 1
                         + (singular_value < singular_beta - Value::new(double_margin)) as i32
                         + (singular_value < singular_beta - Value::new(triple_margin)) as i32;
+
+                    // YaneuraOu準拠: singular確定時にdepthを+1（yaneuraou-search.cpp:3401）
+                    depth += 1;
                 } else if singular_value >= beta && !singular_value.is_mate_score() {
                     // Multi-Cut: 他の手もfail highする場合は枝刈り
                     return singular_value;
