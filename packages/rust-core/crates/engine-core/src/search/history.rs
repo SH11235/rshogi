@@ -74,7 +74,8 @@ pub const PAWN_HISTORY_NEG_MULTIPLIER: i32 = 439;
 pub const PAWN_HISTORY_OFFSET: i32 = 70;
 
 /// ContinuationHistory近接ply（1,2手前）へのオフセット
-pub const CONTINUATION_HISTORY_NEAR_PLY_OFFSET: i32 = 80;
+/// YaneuraOu: update_continuation_histories で (bonus * weight / 1024) + 88 * (i < 2)
+pub const CONTINUATION_HISTORY_NEAR_PLY_OFFSET: i32 = 88;
 
 // =============================================================================
 // StatsEntry

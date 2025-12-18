@@ -19,8 +19,8 @@ use super::history::{
     capture_malus, continuation_history_bonus_with_offset, low_ply_history_bonus,
     pawn_history_bonus, quiet_malus, stat_bonus, ButterflyHistory, CapturePieceToHistory,
     ContinuationHistory, CorrectionHistory, LowPlyHistory, PawnHistory,
-    CONTINUATION_HISTORY_WEIGHTS, CORRECTION_HISTORY_LIMIT, CORRECTION_HISTORY_SIZE,
-    LOW_PLY_HISTORY_SIZE, TT_MOVE_HISTORY_BONUS, TT_MOVE_HISTORY_MALUS,
+    CONTINUATION_HISTORY_NEAR_PLY_OFFSET, CONTINUATION_HISTORY_WEIGHTS, CORRECTION_HISTORY_LIMIT,
+    CORRECTION_HISTORY_SIZE, LOW_PLY_HISTORY_SIZE, TT_MOVE_HISTORY_BONUS, TT_MOVE_HISTORY_MALUS,
 };
 use super::movepicker::piece_value;
 use super::tt_history::TTMoveHistory;
@@ -2363,9 +2363,12 @@ impl SearchWorker {
                                 {
                                     let in_check_idx = target_key.in_check as usize;
                                     let capture_idx = target_key.capture as usize;
-                                    // YaneuraOu: (bonus * weight / 1024) + 80 * (i < 2)
                                     let weighted_penalty = penalty_base * weight / 1024
-                                        + if ply_back <= 2 { 80 } else { 0 };
+                                        + if ply_back <= 2 {
+                                            CONTINUATION_HISTORY_NEAR_PLY_OFFSET
+                                        } else {
+                                            0
+                                        };
                                     self.continuation_history[in_check_idx][capture_idx].update(
                                         target_key.piece,
                                         target_key.to,
@@ -2446,8 +2449,12 @@ impl SearchWorker {
                             {
                                 let in_check_idx = target_key.in_check as usize;
                                 let capture_idx = target_key.capture as usize;
-                                let weighted_bonus =
-                                    cont_bonus * weight / 1024 + if ply_back <= 2 { 88 } else { 0 };
+                                let weighted_bonus = cont_bonus * weight / 1024
+                                    + if ply_back <= 2 {
+                                        CONTINUATION_HISTORY_NEAR_PLY_OFFSET
+                                    } else {
+                                        0
+                                    };
                                 self.continuation_history[in_check_idx][capture_idx].update(
                                     target_key.piece,
                                     target_key.to,
