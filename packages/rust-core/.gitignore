@@ -24,6 +24,9 @@ flamegraph.svg
 see_profile.svg
 perf.data
 perf.data.old
+perf_*.data
+perf_*.data.old
+perf_results/
 
 # Benchmark artifacts
 /target/criterion/
@@ -51,3 +54,6 @@ sample_data/val.jsonl
 taikyoku-log/
 docs/reports
 scripts/analysis/__pycache__/
+
+# Perf script config (personal settings)
+scripts/perf.conf
