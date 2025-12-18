@@ -726,7 +726,9 @@ impl Position {
             }
         }
         // gives_check=false の場合は checkers=EMPTY のまま（YaneuraOu準拠）
-        // gives_check() の判定が正確であることが前提
+        // この最適化により、王手にならない手の場合に attackers_to_c() の呼び出しを回避できる
+        // 前提条件: 呼び出し側で gives_check() の判定が正確に行われていること
+        // デバッグビルドでは debug_assert で検証を実施
         debug_assert!(
             {
                 let expected = self.attackers_to_c(self.king_square[them.index()], us);
