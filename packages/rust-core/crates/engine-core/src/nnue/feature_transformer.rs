@@ -6,10 +6,66 @@
 
 use super::accumulator::{Accumulator, Aligned};
 use super::constants::{HALFKP_DIMENSIONS, TRANSFORMED_FEATURE_DIMENSIONS};
+use super::diff::get_features_from_dirty_piece;
 use super::get_changed_features;
 use crate::position::Position;
 use crate::types::Color;
 use std::io::{self, Read};
+
+/// 祖先を遡って計算済みアキュムレータを探す（遅延評価パターン）
+///
+/// 戻り値: Some((計算済みStateInfoのインデックス, 経由する局面数))
+///         両視点で玉移動がない範囲で計算済み祖先が見つかった場合
+///
+/// YaneuraOu方式: 玉移動がない限り、現局面の玉位置が祖先と同じなので、
+/// 現局面の玉位置を使って差分計算できる。
+///
+/// 注: HalfKP特徴量の構造的制約により、玉が動いた場合は差分更新不可。
+/// 調査結果（2025-12-18）: 祖先探索の失敗原因の98%以上が玉移動に起因。
+pub fn find_usable_accumulator(pos: &Position, current_idx: usize) -> Option<(usize, usize)> {
+    const MAX_DEPTH: usize = 8;
+
+    let current_state = pos.state_at(current_idx);
+
+    // 直前局面をチェック
+    let mut prev_idx = current_state.previous?;
+
+    // 現局面で玉が動いていたら差分更新不可
+    if current_state.dirty_piece.king_moved[Color::Black.index()]
+        || current_state.dirty_piece.king_moved[Color::White.index()]
+    {
+        return None;
+    }
+
+    let mut depth = 1;
+
+    loop {
+        let prev_state = pos.state_at(prev_idx);
+
+        // 計算済みなら成功
+        if prev_state.accumulator.computed_accumulation {
+            return Some((prev_idx, depth));
+        }
+
+        // 探索上限に達した
+        if depth >= MAX_DEPTH {
+            return None;
+        }
+
+        // さらに前の局面へ（ルートに達したらNone）
+        let next_prev_idx = prev_state.previous?;
+
+        // 玉が動いていたら打ち切り（差分更新不可）
+        if prev_state.dirty_piece.king_moved[Color::Black.index()]
+            || prev_state.dirty_piece.king_moved[Color::White.index()]
+        {
+            return None;
+        }
+
+        prev_idx = next_prev_idx;
+        depth += 1;
+    }
+}
 
 /// FeatureTransformerのパラメータ
 #[repr(C, align(64))]
@@ -99,6 +155,84 @@ impl FeatureTransformer {
             // 追加された特徴量の重みを加算
             for index in added {
                 self.add_weights(curr, index);
+            }
+        }
+
+        acc.computed_accumulation = true;
+        acc.computed_score = false;
+        true
+    }
+
+    /// 複数手分の差分を適用してアキュムレータを更新（遅延評価パターン）
+    ///
+    /// source_idx から current_idx までの差分を積み重ねてアキュムレータを構築する。
+    /// find_usable_accumulator() で玉移動がないことを確認済みの前提。
+    ///
+    /// 戻り値: true=成功、false=差分更新不可
+    pub fn forward_update_incremental(
+        &self,
+        pos: &Position,
+        acc: &mut Accumulator,
+        source_idx: usize,
+        current_idx: usize,
+    ) -> bool {
+        // 1. source → current のパスを収集
+        let mut path = Vec::with_capacity(8);
+        let mut idx = current_idx;
+
+        while idx != source_idx {
+            path.push(idx);
+            let state = pos.state_at(idx);
+            match state.previous {
+                Some(prev_idx) => idx = prev_idx,
+                None => {
+                    debug_assert!(
+                        false,
+                        "Path broken: expected to reach source_idx={source_idx} but got None at idx={idx}"
+                    );
+                    return false;
+                }
+            }
+        }
+
+        // 逆順に（source側から適用するため）
+        path.reverse();
+
+        // 2. ソースのアキュムレータをコピー
+        let source_acc = &pos.state_at(source_idx).accumulator;
+        for perspective in [Color::Black, Color::White] {
+            let p = perspective as usize;
+            acc.get_mut(p).copy_from_slice(source_acc.get(p));
+        }
+
+        // 3. 各手の差分を順番に適用
+        for state_idx in path {
+            let state = pos.state_at(state_idx);
+            let dirty_piece = &state.dirty_piece;
+
+            for perspective in [Color::Black, Color::White] {
+                // find_usable_accumulator() で玉移動がないことを確認済み
+                debug_assert!(
+                    !dirty_piece.king_moved[perspective.index()],
+                    "King moved between source and current - should have been caught by find_usable_accumulator"
+                );
+
+                // 現局面の玉位置を使用（玉移動なしなので祖先と同じ）
+                let king_sq = pos.king_square(perspective);
+                let (removed, added) =
+                    get_features_from_dirty_piece(dirty_piece, perspective, king_sq);
+
+                // 差分が空の場合はスキップ（何も変化なし）
+                // 注: 通常の駒移動では差分が発生するが、null move では空になる
+                let p = perspective as usize;
+                let accumulation = acc.get_mut(p);
+
+                for index in removed {
+                    self.sub_weights(accumulation, index);
+                }
+                for index in added {
+                    self.add_weights(accumulation, index);
+                }
             }
         }
 
