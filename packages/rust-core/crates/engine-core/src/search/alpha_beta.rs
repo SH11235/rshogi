@@ -280,6 +280,13 @@ pub struct SearchWorker {
 
     /// 引き分けまでの最大手数（YaneuraOu準拠）
     pub max_moves_to_draw: i32,
+
+    /// Null Move Pruning の Verification Search 用フラグ
+    ///
+    /// Stockfish/YaneuraOu準拠: Verification Search中は、
+    /// `ply >= nmp_min_ply` の条件でNMPを制限する。
+    /// 深い探索（depth >= 16）でZugzwangを検出して再探索する仕組み。
+    pub nmp_min_ply: i32,
 }
 
 impl SearchWorker {
@@ -310,6 +317,7 @@ impl SearchWorker {
             abort: false,
             best_move_changes: 0.0,
             max_moves_to_draw,
+            nmp_min_ply: 0,
         })
     }
 
@@ -338,6 +346,7 @@ impl SearchWorker {
         self.best_move = Move::NONE;
         self.abort = false;
         self.best_move_changes = 0.0;
+        self.nmp_min_ply = 0;
         self.root_moves.clear();
         // YaneuraOu準拠: low_ply_historyのみクリア
         self.low_ply_history.clear();
@@ -757,7 +766,14 @@ impl SearchWorker {
         None
     }
 
-    /// Null move pruning（改善フラグ更新込み）
+    /// Null move pruning with Verification Search（Stockfish/YaneuraOu準拠）
+    ///
+    /// NMPは、自分の手番で「何もしない（パス）」という仮想的な手を打ち、
+    /// それでも優勢なら探索を打ち切る枝刈り技術。
+    ///
+    /// Verification Search（深度 >= 16 の場合）:
+    /// - NMPの結果が正しいかを検証するため、NMPを無効化して再探索
+    /// - Zugzwang（動かなければならないこと自体が不利な局面）対策
     #[allow(clippy::too_many_arguments)]
     fn try_null_move_pruning<const NT: u8>(
         &mut self,
@@ -765,21 +781,42 @@ impl SearchWorker {
         depth: Depth,
         beta: Value,
         ply: i32,
-        pv_node: bool,
+        cut_node: bool,
         in_check: bool,
         static_eval: Value,
         mut improving: bool,
+        excluded_move: Move,
         limits: &LimitsType,
         time_manager: &mut TimeManagement,
     ) -> (Option<Value>, bool) {
-        if !pv_node
+        // Stockfish/YaneuraOu準拠のNMP条件:
+        // - ply >= 1（スタックアクセスの安全性）
+        // - Singular Extension中でない（excludedMoveが設定されていない）
+        // - cutNodeである（!pv_nodeではなく、より厳密な条件）
+        // - 王手されていない
+        // - 評価値がマージン付きでbetaを超える（beta - 19 * depth + 403）
+        // - ply >= nmp_min_ply（Verification Search中のNMP制限）
+        // - betaが負けスコアでない
+        // - 前回の手がNullMoveでない（連続NullMove禁止）
+        //
+        // 注: Stockfishでは non_pawn_material(us) チェックがあるが、
+        //     YaneuraOuでは将棋で使用していない（#if STOCKFISHで囲まれている）。
+        //     チェスでは Pawn endgame の Zugzwang 対策だが、
+        //     将棋は持ち駒があるため Pawn だけの終盤は存在しない。
+        //     将来検証する場合: && pos.non_pawn_material(pos.side_to_move())
+        let margin = 19 * depth - 403;
+        if ply >= 1
+            && excluded_move.is_none()
+            && cut_node
             && !in_check
-            && static_eval >= beta
-            && depth >= 3
-            && ply >= 1
+            && static_eval >= beta - Value::new(margin)
+            && ply >= self.nmp_min_ply
+            && !beta.is_loss()
             && !self.stack[(ply - 1) as usize].current_move.is_none()
         {
-            let r = 3 + depth / 3;
+            // Null move dynamic reduction based on depth（YaneuraOu準拠）
+            let r = 7 + depth / 3;
+
             pos.do_null_move();
             let null_value = -self.search_node::<{ NodeType::NonPV as u8 }>(
                 pos,
@@ -787,24 +824,43 @@ impl SearchWorker {
                 -beta,
                 -beta + Value::new(1),
                 ply + 1,
-                true,
+                false, // cutNode = false（NullMove後は相手番なので）
                 limits,
                 time_manager,
             );
             pos.undo_null_move();
 
-            if null_value >= beta {
-                return (
-                    Some(if null_value.is_win() {
-                        beta
-                    } else {
-                        null_value
-                    }),
-                    improving,
+            // Do not return unproven mate scores（勝ちスコアは信頼しない）
+            if null_value >= beta && !null_value.is_win() {
+                // 浅い探索 or 既にVerification Search中 → そのままreturn
+                if self.nmp_min_ply != 0 || depth < 16 {
+                    return (Some(null_value), improving);
+                }
+
+                // Verification Search: 深い探索でZugzwangを検出
+                // NMPを無効化（nmp_min_plyを設定）して再探索
+                self.nmp_min_ply = ply + 3 * (depth - r) / 4;
+
+                let v = self.search_node::<{ NodeType::NonPV as u8 }>(
+                    pos,
+                    depth - r,
+                    beta - Value::new(1),
+                    beta,
+                    ply,
+                    false, // cutNode = false（Verification SearchはcutNodeにしない）
+                    limits,
+                    time_manager,
                 );
+
+                self.nmp_min_ply = 0;
+
+                if v >= beta {
+                    return (Some(null_value), improving);
+                }
             }
         }
 
+        // improving の更新（Stockfish/YaneuraOu: NMPの後で更新）
         if !in_check && static_eval != Value::NONE {
             improving |= static_eval >= beta;
         }
@@ -1606,10 +1662,11 @@ impl SearchWorker {
             depth,
             beta,
             ply,
-            pv_node,
+            cut_node,
             in_check,
             eval_ctx.static_eval,
             improving,
+            excluded_move,
             limits,
             time_manager,
         );
