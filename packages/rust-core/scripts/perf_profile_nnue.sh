@@ -64,15 +64,27 @@ echo "Build mode: $BUILD_MODE"
 echo "Binary: $BINARY"
 
 # benchmarkツールをperf経由で実行
-sudo perf record -g --call-graph dwarf -o perf.data \
+sudo perf record -g --call-graph dwarf -o perf_nnue.data \
     "$BINARY" --internal --nnue-file "$NNUE_FILE" \
     --limit-type movetime --limit "$MOVETIME" --iterations 1
 
-echo ""
-echo "=== Top hotspots (NNUE enabled, $BUILD_MODE build) ==="
-sudo perf report --stdio --no-children -g caller --percent-limit 0.5 2>/dev/null | head -200
+# 結果をファイルに保存
+OUTPUT_DIR="./perf_results"
+mkdir -p "$OUTPUT_DIR"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+OUTPUT_FILE="$OUTPUT_DIR/${TIMESTAMP}_nnue_${BUILD_MODE}.txt"
+
+{
+    echo "=== NNUE Perf Profile ==="
+    echo "Timestamp: $(date -Iseconds)"
+    echo "Build mode: $BUILD_MODE"
+    echo "Movetime: ${MOVETIME}ms"
+    echo "NNUE file: $NNUE_FILE"
+    echo ""
+    echo "=== Top hotspots (NNUE enabled, $BUILD_MODE build) ==="
+    sudo perf report -i perf_nnue.data --stdio --no-children -g caller --percent-limit 0.5 2>/dev/null | head -200
+} | tee "$OUTPUT_FILE"
 
 echo ""
-echo "=== Full report saved to perf.data ==="
-echo ""
-echo "Interactive analysis: sudo perf report"
+echo "=== Report saved to: $OUTPUT_FILE ==="
+echo "=== perf_nnue.data saved for interactive analysis: sudo perf report -i perf_nnue.data ==="

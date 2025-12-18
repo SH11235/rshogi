@@ -24,6 +24,9 @@ flamegraph.svg
 see_profile.svg
 perf.data
 perf.data.old
+perf_*.data
+perf_*.data.old
+perf_results/
 
 # Benchmark artifacts
 /target/criterion/
