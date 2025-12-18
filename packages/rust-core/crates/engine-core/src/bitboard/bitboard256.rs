@@ -31,13 +31,27 @@ impl Bitboard256 {
     /// 結果: `[bb.p[0], bb.p[1], bb.p[0], bb.p[1]]`
     #[inline]
     pub fn new(bb: Bitboard) -> Bitboard256 {
-        Bitboard256 {
-            p: [
-                bb.extract64::<0>(),
-                bb.extract64::<1>(),
-                bb.extract64::<0>(),
-                bb.extract64::<1>(),
-            ],
+        #[cfg(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2"))]
+        unsafe {
+            use std::arch::x86_64::*;
+            // SAFETY: Bitboardは16バイトアライン、[u64; 2]と__m128iは同一メモリレイアウト
+            let bb_arr = [bb.extract64::<0>(), bb.extract64::<1>()];
+            let bb_m = std::mem::transmute::<[u64; 2], __m128i>(bb_arr);
+            let result_m = _mm256_broadcastsi128_si256(bb_m);
+            let result_p: [u64; 4] = std::mem::transmute(result_m);
+            Bitboard256 { p: result_p }
+        }
+
+        #[cfg(not(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2")))]
+        {
+            Bitboard256 {
+                p: [
+                    bb.extract64::<0>(),
+                    bb.extract64::<1>(),
+                    bb.extract64::<0>(),
+                    bb.extract64::<1>(),
+                ],
+            }
         }
     }
 
@@ -50,13 +64,30 @@ impl Bitboard256 {
     /// 結果: `[bb0.p[0], bb0.p[1], bb1.p[0], bb1.p[1]]`
     #[inline]
     pub fn from_bitboards(bb0: Bitboard, bb1: Bitboard) -> Bitboard256 {
-        Bitboard256 {
-            p: [
-                bb0.extract64::<0>(),
-                bb0.extract64::<1>(),
-                bb1.extract64::<0>(),
-                bb1.extract64::<1>(),
-            ],
+        #[cfg(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2"))]
+        unsafe {
+            use std::arch::x86_64::*;
+            // SAFETY: Bitboardは16バイトアライン、[u64; 2]と__m128iは同一メモリレイアウト
+            let bb0_arr = [bb0.extract64::<0>(), bb0.extract64::<1>()];
+            let bb1_arr = [bb1.extract64::<0>(), bb1.extract64::<1>()];
+            let bb0_m = std::mem::transmute::<[u64; 2], __m128i>(bb0_arr);
+            let bb1_m = std::mem::transmute::<[u64; 2], __m128i>(bb1_arr);
+            let result_m = _mm256_castsi128_si256(bb0_m);
+            let result_m = _mm256_inserti128_si256::<1>(result_m, bb1_m);
+            let result_p: [u64; 4] = std::mem::transmute(result_m);
+            Bitboard256 { p: result_p }
+        }
+
+        #[cfg(not(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2")))]
+        {
+            Bitboard256 {
+                p: [
+                    bb0.extract64::<0>(),
+                    bb0.extract64::<1>(),
+                    bb1.extract64::<0>(),
+                    bb1.extract64::<1>(),
+                ],
+            }
         }
     }
 
@@ -77,7 +108,25 @@ impl Bitboard256 {
     /// 角の利き計算の最終段階で使用。
     #[inline]
     pub fn merge(self) -> Bitboard {
-        Bitboard::from_u64_pair(self.p[0] | self.p[2], self.p[1] | self.p[3])
+        #[cfg(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2"))]
+        unsafe {
+            use std::arch::x86_64::*;
+            // SAFETY: Bitboard256は32バイトアライン、[u64; 4]と__m256iは同一メモリレイアウト
+            let m = std::mem::transmute::<[u64; 4], __m256i>(self.p);
+            // 上位128bitを抽出
+            let hi = _mm256_extracti128_si256::<1>(m);
+            // 下位128bitを取得
+            let lo = _mm256_castsi256_si128(m);
+            // OR演算
+            let result_m = _mm_or_si128(lo, hi);
+            let result_p: [u64; 2] = std::mem::transmute(result_m);
+            Bitboard::from_u64_pair(result_p[0], result_p[1])
+        }
+
+        #[cfg(not(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2")))]
+        {
+            Bitboard::from_u64_pair(self.p[0] | self.p[2], self.p[1] | self.p[3])
+        }
     }
 
     /// バイト順序を反転
@@ -85,9 +134,27 @@ impl Bitboard256 {
     /// 2つのBitboardを個別に反転。
     #[inline]
     pub fn byte_reverse(self) -> Bitboard256 {
-        let bb0 = Bitboard::from_u64_pair(self.p[0], self.p[1]);
-        let bb1 = Bitboard::from_u64_pair(self.p[2], self.p[3]);
-        Bitboard256::from_bitboards(bb0.byte_reverse(), bb1.byte_reverse())
+        #[cfg(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2"))]
+        unsafe {
+            use std::arch::x86_64::*;
+            // SAFETY: Bitboard256は32バイトアライン、[u64; 4]と__m256iは同一メモリレイアウト
+            let m = std::mem::transmute::<[u64; 4], __m256i>(self.p);
+            // 各128bitレーン内でバイト順を反転
+            let shuffle = _mm256_set_epi8(
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+                10, 11, 12, 13, 14, 15,
+            );
+            let result_m = _mm256_shuffle_epi8(m, shuffle);
+            let result_p: [u64; 4] = std::mem::transmute(result_m);
+            Bitboard256 { p: result_p }
+        }
+
+        #[cfg(not(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2")))]
+        {
+            let bb0 = Bitboard::from_u64_pair(self.p[0], self.p[1]);
+            let bb1 = Bitboard::from_u64_pair(self.p[2], self.p[3]);
+            Bitboard256::from_bitboards(bb0.byte_reverse(), bb1.byte_reverse())
+        }
     }
 
     /// 2組のBitboard256ペアで256bit減算（静的メソッド）
@@ -101,7 +168,7 @@ impl Bitboard256 {
     /// - Scalar: 各u64を個別に処理
     #[inline]
     pub fn decrement_pair(hi_in: Bitboard256, lo_in: Bitboard256) -> (Bitboard256, Bitboard256) {
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        #[cfg(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2"))]
         unsafe {
             use std::arch::x86_64::*;
             let hi_m = std::mem::transmute::<[u64; 4], __m256i>(hi_in.p);
@@ -113,7 +180,7 @@ impl Bitboard256 {
             (Bitboard256 { p: hi_out_p }, Bitboard256 { p: lo_out_p })
         }
 
-        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+        #[cfg(not(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2")))]
         {
             let mut hi_out_p = [0u64; 4];
             let mut lo_out_p = [0u64; 4];
@@ -140,7 +207,7 @@ impl Bitboard256 {
     /// - Scalar: 手動シャッフル
     #[inline]
     pub fn unpack(hi_in: Bitboard256, lo_in: Bitboard256) -> (Bitboard256, Bitboard256) {
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        #[cfg(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2"))]
         unsafe {
             use std::arch::x86_64::*;
             let hi_m = std::mem::transmute::<[u64; 4], __m256i>(hi_in.p);
@@ -155,7 +222,7 @@ impl Bitboard256 {
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "sse2",
-            not(target_feature = "avx2")
+            not(all(feature = "simd_avx2", target_feature = "avx2"))
         ))]
         unsafe {
             use std::arch::x86_64::*;
@@ -220,13 +287,27 @@ impl std::ops::BitAnd for Bitboard256 {
 
     #[inline]
     fn bitand(self, rhs: Bitboard256) -> Bitboard256 {
-        Bitboard256 {
-            p: [
-                self.p[0] & rhs.p[0],
-                self.p[1] & rhs.p[1],
-                self.p[2] & rhs.p[2],
-                self.p[3] & rhs.p[3],
-            ],
+        #[cfg(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2"))]
+        unsafe {
+            use std::arch::x86_64::*;
+            // SAFETY: Bitboard256は32バイトアライン、[u64; 4]と__m256iは同一メモリレイアウト
+            let lhs_m = std::mem::transmute::<[u64; 4], __m256i>(self.p);
+            let rhs_m = std::mem::transmute::<[u64; 4], __m256i>(rhs.p);
+            let result_m = _mm256_and_si256(lhs_m, rhs_m);
+            let result_p: [u64; 4] = std::mem::transmute(result_m);
+            Bitboard256 { p: result_p }
+        }
+
+        #[cfg(not(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2")))]
+        {
+            Bitboard256 {
+                p: [
+                    self.p[0] & rhs.p[0],
+                    self.p[1] & rhs.p[1],
+                    self.p[2] & rhs.p[2],
+                    self.p[3] & rhs.p[3],
+                ],
+            }
         }
     }
 }
@@ -236,13 +317,27 @@ impl std::ops::BitOr for Bitboard256 {
 
     #[inline]
     fn bitor(self, rhs: Bitboard256) -> Bitboard256 {
-        Bitboard256 {
-            p: [
-                self.p[0] | rhs.p[0],
-                self.p[1] | rhs.p[1],
-                self.p[2] | rhs.p[2],
-                self.p[3] | rhs.p[3],
-            ],
+        #[cfg(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2"))]
+        unsafe {
+            use std::arch::x86_64::*;
+            // SAFETY: Bitboard256は32バイトアライン、[u64; 4]と__m256iは同一メモリレイアウト
+            let lhs_m = std::mem::transmute::<[u64; 4], __m256i>(self.p);
+            let rhs_m = std::mem::transmute::<[u64; 4], __m256i>(rhs.p);
+            let result_m = _mm256_or_si256(lhs_m, rhs_m);
+            let result_p: [u64; 4] = std::mem::transmute(result_m);
+            Bitboard256 { p: result_p }
+        }
+
+        #[cfg(not(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2")))]
+        {
+            Bitboard256 {
+                p: [
+                    self.p[0] | rhs.p[0],
+                    self.p[1] | rhs.p[1],
+                    self.p[2] | rhs.p[2],
+                    self.p[3] | rhs.p[3],
+                ],
+            }
         }
     }
 }
@@ -252,13 +347,27 @@ impl std::ops::BitXor for Bitboard256 {
 
     #[inline]
     fn bitxor(self, rhs: Bitboard256) -> Bitboard256 {
-        Bitboard256 {
-            p: [
-                self.p[0] ^ rhs.p[0],
-                self.p[1] ^ rhs.p[1],
-                self.p[2] ^ rhs.p[2],
-                self.p[3] ^ rhs.p[3],
-            ],
+        #[cfg(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2"))]
+        unsafe {
+            use std::arch::x86_64::*;
+            // SAFETY: Bitboard256は32バイトアライン、[u64; 4]と__m256iは同一メモリレイアウト
+            let lhs_m = std::mem::transmute::<[u64; 4], __m256i>(self.p);
+            let rhs_m = std::mem::transmute::<[u64; 4], __m256i>(rhs.p);
+            let result_m = _mm256_xor_si256(lhs_m, rhs_m);
+            let result_p: [u64; 4] = std::mem::transmute(result_m);
+            Bitboard256 { p: result_p }
+        }
+
+        #[cfg(not(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2")))]
+        {
+            Bitboard256 {
+                p: [
+                    self.p[0] ^ rhs.p[0],
+                    self.p[1] ^ rhs.p[1],
+                    self.p[2] ^ rhs.p[2],
+                    self.p[3] ^ rhs.p[3],
+                ],
+            }
         }
     }
 }
@@ -365,5 +474,45 @@ mod tests {
         assert_eq!(result.p[1], 0x000F);
         assert_eq!(result.p[2], 0xF000);
         assert_eq!(result.p[3], 0x000F);
+    }
+
+    #[test]
+    fn test_bitboard256_bitor() {
+        let bb1 = Bitboard256::from_u64_array([0xFF00, 0x00FF, 0xF0F0, 0x0F0F]);
+        let bb2 = Bitboard256::from_u64_array([0x0F0F, 0xF0F0, 0x00FF, 0xFF00]);
+        let result = bb1 | bb2;
+        assert_eq!(result.p[0], 0xFF0F);
+        assert_eq!(result.p[1], 0xF0FF);
+        assert_eq!(result.p[2], 0xF0FF);
+        assert_eq!(result.p[3], 0xFF0F);
+    }
+
+    #[test]
+    fn test_bitboard256_bitxor() {
+        let bb1 = Bitboard256::from_u64_array([0xFF00, 0x00FF, 0xF0F0, 0x0F0F]);
+        let bb2 = Bitboard256::from_u64_array([0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF]);
+        let result = bb1 ^ bb2;
+        assert_eq!(result.p[0], 0x00FF);
+        assert_eq!(result.p[1], 0xFF00);
+        assert_eq!(result.p[2], 0x0F0F);
+        assert_eq!(result.p[3], 0xF0F0);
+    }
+
+    #[test]
+    fn test_bitboard256_byte_reverse() {
+        let bb = Bitboard256::from_u64_array([
+            0x0102030405060708,
+            0x090A0B0C0D0E0F10,
+            0x1112131415161718,
+            0x191A1B1C1D1E1F20,
+        ]);
+        let reversed = bb.byte_reverse();
+        // 各128bitレーン内でバイト反転
+        // 下位レーン: [p0, p1] -> byte_reverse -> [swap(p1), swap(p0)]
+        assert_eq!(reversed.p[0], 0x100F0E0D0C0B0A09);
+        assert_eq!(reversed.p[1], 0x0807060504030201);
+        // 上位レーン: [p2, p3] -> byte_reverse -> [swap(p3), swap(p2)]
+        assert_eq!(reversed.p[2], 0x201F1E1D1C1B1A19);
+        assert_eq!(reversed.p[3], 0x1817161514131211);
     }
 }
