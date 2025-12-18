@@ -814,13 +814,15 @@ impl SearchWorker {
 
         let margin = 18 * depth - 390;
         let prev_move = self.stack[(ply - 1) as usize].current_move;
+        // YaneuraOu準拠: prev_move != Move::null() のみをチェック
+        // Move::NONEのチェックは不要（root直下でNMPを無効化してしまう）
+        // YaneuraOuではASSERT_LV3で検証しているのみ
         if excluded_move.is_none()
             && cut_node
             && !in_check
             && static_eval >= beta - Value::new(margin)
             && ply >= self.nmp_min_ply
             && !beta.is_loss()
-            && !prev_move.is_none()
             && !prev_move.is_null()
         {
             // Null move dynamic reduction based on depth（YaneuraOu準拠）
