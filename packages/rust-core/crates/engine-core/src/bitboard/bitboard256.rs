@@ -2,6 +2,15 @@
 
 use super::Bitboard;
 
+/// byte_reverse用シャッフルマスク（各128bitレーン内でバイト順反転）
+#[cfg(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2"))]
+const BYTE_REVERSE_SHUFFLE: std::arch::x86_64::__m256i = unsafe {
+    std::mem::transmute::<[u8; 32], std::arch::x86_64::__m256i>([
+        15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, // 下位128bitレーン
+        15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, // 上位128bitレーン
+    ])
+};
+
 /// Bitboard256（256bit、32バイトアライン）
 ///
 /// 角の利き計算で4方向（左上・左下・右上・右下）を同時に計算するために使用。
@@ -136,12 +145,7 @@ impl Bitboard256 {
             use std::arch::x86_64::*;
             // SAFETY: Bitboard256は32バイトアライン、[u64; 4]と__m256iは同一メモリレイアウト
             let m = std::mem::transmute::<[u64; 4], __m256i>(self.p);
-            // 各128bitレーン内でバイト順を反転
-            let shuffle = _mm256_set_epi8(
-                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
-                10, 11, 12, 13, 14, 15,
-            );
-            let result_m = _mm256_shuffle_epi8(m, shuffle);
+            let result_m = _mm256_shuffle_epi8(m, BYTE_REVERSE_SHUFFLE);
             let result_p: [u64; 4] = std::mem::transmute(result_m);
             Bitboard256 { p: result_p }
         }
