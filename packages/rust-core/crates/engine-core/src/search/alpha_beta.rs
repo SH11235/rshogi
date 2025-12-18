@@ -11,7 +11,9 @@ use crate::nnue::evaluate;
 use crate::position::Position;
 use crate::search::PieceToHistory;
 use crate::tt::{ProbeResult, TTData, TranspositionTable};
-use crate::types::{Bound, Color, Depth, Move, Piece, Value, DEPTH_QS, DEPTH_UNSEARCHED, MAX_PLY};
+use crate::types::{
+    Bound, Color, Depth, Move, Piece, PieceType, Value, DEPTH_QS, DEPTH_UNSEARCHED, MAX_PLY,
+};
 
 use super::history::{
     capture_malus, continuation_history_bonus_with_offset, low_ply_history_bonus,
@@ -2384,6 +2386,105 @@ impl SearchWorker {
                     self.tt_move_history.update(ply as usize, TT_MOVE_HISTORY_BONUS);
                 } else {
                     self.tt_move_history.update(ply as usize, TT_MOVE_HISTORY_MALUS);
+                }
+            }
+        }
+        // =================================================================
+        // Prior Countermove Bonus（fail low時の前の手にボーナス）
+        // YaneuraOu準拠: yaneuraou-search.cpp:3936-3977
+        // =================================================================
+        else if ply >= 1 {
+            let prev_ply = (ply - 1) as usize;
+            if let Some(prev_key) = self.stack[prev_ply].cont_hist_key {
+                let prior_capture = prev_key.capture;
+                let prev_sq = prev_key.to;
+
+                if !prior_capture {
+                    // Prior quiet countermove bonus
+                    // YaneuraOu: yaneuraou-search.cpp:3945-3966
+                    let parent_stat_score = self.stack[prev_ply].stat_score;
+                    let parent_move_count = self.stack[prev_ply].move_count;
+                    let parent_in_check = self.stack[prev_ply].in_check;
+                    let parent_static_eval = self.stack[prev_ply].static_eval;
+                    let static_eval = self.stack[ply as usize].static_eval;
+
+                    // bonusScale計算（YaneuraOu準拠）
+                    let mut bonus_scale: i32 = -228;
+                    bonus_scale -= parent_stat_score / 104;
+                    bonus_scale += (63 * depth).min(508);
+                    bonus_scale += 184 * (parent_move_count > 8) as i32;
+                    bonus_scale += 143
+                        * (!in_check
+                            && static_eval != Value::NONE
+                            && best_value <= static_eval - Value::new(92))
+                            as i32;
+                    bonus_scale += 149
+                        * (!parent_in_check
+                            && parent_static_eval != Value::NONE
+                            && best_value <= -parent_static_eval - Value::new(70))
+                            as i32;
+                    bonus_scale = bonus_scale.max(0);
+
+                    let scaled_bonus = (144 * depth - 92).min(1365) * bonus_scale;
+
+                    // continuation history更新
+                    // YaneuraOu: update_continuation_histories(ss - 1, pos.piece_on(prevSq), prevSq, scaledBonus * 400 / 32768)
+                    let prev_piece = pos.piece_on(prev_sq);
+                    let prev_max_ply_back = if parent_in_check { 2 } else { 6 };
+                    let cont_bonus = scaled_bonus * 400 / 32768;
+
+                    for &(ply_back, weight) in CONTINUATION_HISTORY_WEIGHTS.iter() {
+                        if ply_back > prev_max_ply_back {
+                            continue;
+                        }
+                        // ss - 1 からさらに ply_back 手前 = ply - 1 - ply_back
+                        let target_ply = ply - 1 - ply_back as i32;
+                        if target_ply >= 0 {
+                            if let Some(target_key) = self.stack[target_ply as usize].cont_hist_key
+                            {
+                                let in_check_idx = target_key.in_check as usize;
+                                let capture_idx = target_key.capture as usize;
+                                let weighted_bonus =
+                                    cont_bonus * weight / 1024 + if ply_back <= 2 { 88 } else { 0 };
+                                self.continuation_history[in_check_idx][capture_idx].update(
+                                    target_key.piece,
+                                    target_key.to,
+                                    prev_piece,
+                                    prev_sq,
+                                    weighted_bonus,
+                                );
+                            }
+                        }
+                    }
+
+                    // main history更新
+                    // YaneuraOu: mainHistory[~us][((ss - 1)->currentMove).raw()] << scaledBonus * 220 / 32768
+                    let prev_move = self.stack[prev_ply].current_move;
+                    let main_bonus = scaled_bonus * 220 / 32768;
+                    // 注: 前の手なので手番は!pos.side_to_move()
+                    let opponent = !pos.side_to_move();
+                    self.main_history.update(opponent, prev_move, main_bonus);
+
+                    // pawn history更新（歩以外かつ成りでない場合）
+                    // YaneuraOu: if (type_of(pos.piece_on(prevSq)) != PAWN && ((ss - 1)->currentMove).type_of() != PROMOTION)
+                    if prev_piece.piece_type() != PieceType::Pawn && !prev_move.is_promotion() {
+                        let pawn_key_idx = pos.pawn_history_index();
+                        let pawn_bonus = scaled_bonus * 1164 / 32768;
+                        self.pawn_history.update(pawn_key_idx, prev_piece, prev_sq, pawn_bonus);
+                    }
+                } else {
+                    // Prior capture countermove bonus
+                    // YaneuraOu: yaneuraou-search.cpp:3972-3977
+                    let prev_piece = pos.piece_on(prev_sq);
+                    let captured_piece = pos.captured_piece();
+                    if captured_piece != Piece::NONE {
+                        self.capture_history.update(
+                            prev_piece,
+                            prev_sq,
+                            captured_piece.piece_type(),
+                            964,
+                        );
+                    }
                 }
             }
         }
