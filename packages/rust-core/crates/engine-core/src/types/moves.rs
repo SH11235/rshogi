@@ -149,6 +149,12 @@ impl Move {
         self.0 != 0
     }
 
+    /// Null move（パス）かどうか
+    #[inline]
+    pub const fn is_null(self) -> bool {
+        self.0 == Self::NULL.0
+    }
+
     /// History用インデックス（0〜(81+7)*81-1）
     /// 盤上のマスは 81 個（0〜80）
     /// 「駒種の種類」が 7 個（歩〜飛）

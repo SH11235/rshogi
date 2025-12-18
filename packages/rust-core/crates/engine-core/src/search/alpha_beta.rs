@@ -794,17 +794,18 @@ impl SearchWorker {
         // - Singular Extension中でない（excludedMoveが設定されていない）
         // - cutNodeである（!pv_nodeではなく、より厳密な条件）
         // - 王手されていない
-        // - 評価値がマージン付きでbetaを超える（beta - 19 * depth + 403）
+        // - 評価値がマージン付きでbetaを超える（beta - 18 * depth + 390）
         // - ply >= nmp_min_ply（Verification Search中のNMP制限）
         // - betaが負けスコアでない
-        // - 前回の手がNullMoveでない（連続NullMove禁止）
+        // - 前回の手が有効な手（NONE/NULLでない）（連続NullMove禁止）
         //
         // 注: Stockfishでは non_pawn_material(us) チェックがあるが、
         //     YaneuraOuでは将棋で使用していない（#if STOCKFISHで囲まれている）。
         //     チェスでは Pawn endgame の Zugzwang 対策だが、
         //     将棋は持ち駒があるため Pawn だけの終盤は存在しない。
         //     将来検証する場合: && pos.non_pawn_material(pos.side_to_move())
-        let margin = 19 * depth - 403;
+        let margin = 18 * depth - 390;
+        let prev_move = self.stack[(ply - 1) as usize].current_move;
         if ply >= 1
             && excluded_move.is_none()
             && cut_node
@@ -812,10 +813,17 @@ impl SearchWorker {
             && static_eval >= beta - Value::new(margin)
             && ply >= self.nmp_min_ply
             && !beta.is_loss()
-            && !self.stack[(ply - 1) as usize].current_move.is_none()
+            && !prev_move.is_none()
+            && !prev_move.is_null()
         {
             // Null move dynamic reduction based on depth（YaneuraOu準拠）
             let r = 7 + depth / 3;
+
+            // YaneuraOu準拠: NullMove探索前にcurrent_moveとcont_hist_keyを設定
+            // これにより再帰呼び出し先で連続NullMoveが禁止され、
+            // continuation historyの不正参照を防ぐ
+            self.stack[ply as usize].current_move = Move::NULL;
+            self.stack[ply as usize].cont_hist_key = None;
 
             pos.do_null_move();
             let null_value = -self.search_node::<{ NodeType::NonPV as u8 }>(
