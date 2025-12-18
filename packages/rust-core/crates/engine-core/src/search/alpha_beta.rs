@@ -1752,7 +1752,8 @@ impl SearchWorker {
                 }
             }
 
-            new_depth += extension;
+            // 注: YaneuraOu準拠で、new_depth += extension はdo_moveの後で行う（3482行目）
+            // ここではextensionを保持しておき、枝刈りはextension反映前のnew_depthで判定
 
             // =============================================================
             // Reduction計算とStep14の枝刈り
@@ -1847,6 +1848,9 @@ impl SearchWorker {
             } else {
                 quiets_tried.push(mv);
             }
+
+            // 延長量をnew_depthに加算（YaneuraOu準拠: do_moveの後、yaneuraou-search.cpp:3482）
+            new_depth += extension;
 
             // =============================================================
             // Late Move Reduction (LMR)
