@@ -730,14 +730,19 @@ impl Position {
         debug_assert!(
             {
                 let expected = self.attackers_to_c(self.king_square[them.index()], us);
-                if gives_check {
+                let result = if gives_check {
                     checkers == expected
                 } else {
                     expected.is_empty()
+                };
+                if !result {
+                    eprintln!(
+                        "gives_check mismatch: gives_check={gives_check}, checkers={checkers:?}, actual={expected:?}"
+                    );
                 }
+                result
             },
-            "gives_check mismatch: gives_check={gives_check}, checkers={checkers:?}, actual={:?}",
-            self.attackers_to_c(self.king_square[them.index()], us)
+            "gives_check mismatch detected"
         );
         let is_check = !checkers.is_empty();
         // 4. 連続王手カウンタの更新（YaneuraOu準拠）
