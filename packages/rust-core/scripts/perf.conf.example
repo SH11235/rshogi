@@ -1,0 +1,12 @@
+# perf.conf - パフォーマンス計測スクリプトの設定ファイル
+#
+# 使い方:
+#   1. このファイルを perf.conf にコピー
+#      cp scripts/perf.conf.example scripts/perf.conf
+#   2. 環境に合わせてパスを編集
+#
+# 注意: perf.conf は .gitignore に含まれているため、
+#       個人の環境設定をバージョン管理に含めずに済みます。
+
+# NNUEファイルのパス
+NNUE_FILE="./path/to/nn.bin"
