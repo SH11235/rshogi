@@ -162,12 +162,6 @@ pub fn init_nnue_from_bytes(bytes: &[u8]) -> io::Result<()> {
         .map_err(|_| io::Error::new(io::ErrorKind::AlreadyExists, "NNUE already initialized"))
 }
 
-/// NNUEが初期化されているか
-#[allow(dead_code)]
-pub fn is_nnue_initialized() -> bool {
-    NETWORK.get().is_some()
-}
-
 /// 局面を評価
 ///
 /// NNUEが初期化されていない場合は駒得評価にフォールバック。

@@ -100,15 +100,8 @@ impl EngineOptions {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 struct InitOptions {
-    backend: Option<String>,
-    threads: Option<u32>,
-    workers: Option<u32>,
     stop_mode: Option<EngineStopMode>,
-    nnue_path: Option<String>,
-    model_uri: Option<String>,
-    book_path: Option<String>,
     tt_size_mb: Option<usize>,
     multi_pv: Option<usize>,
 }
