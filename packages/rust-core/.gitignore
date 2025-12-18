@@ -54,3 +54,6 @@ sample_data/val.jsonl
 taikyoku-log/
 docs/reports
 scripts/analysis/__pycache__/
+
+# Perf script config (personal settings)
+scripts/perf.conf

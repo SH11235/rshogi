@@ -140,9 +140,11 @@ sudo perf report -i perf_nnue.data
 
 ```bash
 cd packages/rust-core
+# --nnue-file オプションはperf.confで指定で省略可能
+# --nnue-file オプションを指定したときはperf.conf の設定をオーバライド
 RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release -- \
   --internal --threads 1 --limit-type movetime --limit 20000 \
-  --nnue-file ./memo/YaneuraOu/eval/nn.bin \
+  --nnue-file ./path/to/nn.bin \
   --output-dir ./benchmark_results
 ```
 

@@ -23,6 +23,22 @@ cd packages/rust-core
 - `perf`コマンドがインストール済み（`sudo apt install linux-tools-generic`）
 - sudo権限
 
+## 設定ファイル
+
+NNUEファイルのパスなどの個人設定は `scripts/perf.conf` で管理します。
+
+```bash
+# 初回セットアップ
+cp scripts/perf.conf.example scripts/perf.conf
+
+# 環境に合わせて編集
+vim scripts/perf.conf
+```
+
+`perf.conf` は `.gitignore` に含まれているため、個人の環境設定をバージョン管理に含めずに済みます。
+
+設定ファイルがない場合は自動的に `perf.conf.example` からコピーされ、編集を促すエラーで終了します。
+
 ## スクリプト一覧
 
 ### 統合スクリプト
@@ -55,6 +71,10 @@ cd packages/rust-core
 ./scripts/perf_profile_nnue.sh
 ./scripts/perf_profile_nnue.sh --movetime 10000  # movetimeを10秒に設定
 ./scripts/perf_profile_nnue.sh --debug           # debug build
+./scripts/perf_profile_nnue.sh --nnue-file /path/to/nn.bin  # NNUEファイル指定
+
+# 全計測（NNUEファイル指定）
+./scripts/perf_all.sh --nnue-file /path/to/nn.bin
 
 # SearchWorker再利用効果の測定
 ./scripts/perf_reuse_search.sh

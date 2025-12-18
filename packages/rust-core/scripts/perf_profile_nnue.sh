@@ -5,6 +5,7 @@
 #   ./scripts/perf_profile_nnue.sh          # release build（推奨）
 #   ./scripts/perf_profile_nnue.sh --debug  # debug build（シンボル詳細）
 #   ./scripts/perf_profile_nnue.sh --movetime 10000  # movetimeを10秒に設定
+#   ./scripts/perf_profile_nnue.sh --nnue-file /path/to/nn.bin  # NNUEファイル指定
 #
 # release buildでもシンボル情報を保持するため、frame-pointersを有効化
 
@@ -12,11 +13,36 @@ set -e
 
 cd "$(dirname "$0")/.."
 
-NNUE_FILE="./memo/YaneuraOu/eval/nn.bin"
+SCRIPT_DIR="$(dirname "$0")"
+CONF_FILE="$SCRIPT_DIR/perf.conf"
+CONF_EXAMPLE="$SCRIPT_DIR/perf.conf.example"
+
+# デフォルト値（NNUE_FILE以外）
 BUILD_MODE="release"
 MOVETIME=5000
 
-# 引数解析
+# 設定ファイルの読み込み
+if [ ! -f "$CONF_FILE" ]; then
+    echo "設定ファイルが見つかりません。exampleからコピーします..."
+    cp "$CONF_EXAMPLE" "$CONF_FILE"
+    echo "作成しました: $CONF_FILE"
+    echo ""
+    echo "エラー: 設定ファイルを編集してください"
+    echo "       vim scripts/perf.conf"
+    echo "       NNUE_FILE のパスを環境に合わせて設定してください"
+    exit 1
+fi
+
+source "$CONF_FILE"
+
+# exampleのデフォルト値のままかチェック
+if [ "$NNUE_FILE" = "./path/to/nn.bin" ]; then
+    echo "エラー: NNUE_FILE が未設定です"
+    echo "       scripts/perf.conf を編集して、正しいパスを設定してください"
+    exit 1
+fi
+
+# 引数解析（設定ファイルの値をオーバーライド可能）
 while [[ $# -gt 0 ]]; do
     case $1 in
         --debug)
@@ -27,16 +53,30 @@ while [[ $# -gt 0 ]]; do
             MOVETIME="$2"
             shift 2
             ;;
+        --nnue-file)
+            NNUE_FILE="$2"
+            shift 2
+            ;;
+        -h|--help)
+            echo "Usage: $0 [--debug] [--movetime <ms>] [--nnue-file <path>]"
+            echo ""
+            echo "Options:"
+            echo "  --debug            debug buildでプロファイリング"
+            echo "  --movetime <ms>    探索時間 (default: 5000)"
+            echo "  --nnue-file <path> NNUEファイルのパス (default: perf.confの設定値)"
+            exit 0
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--debug] [--movetime <ms>]"
+            echo "Usage: $0 [--debug] [--movetime <ms>] [--nnue-file <path>]"
             exit 1
             ;;
     esac
 done
 
-if [ ! -f "$NNUE_FILE" ]; then
-    echo "Error: NNUE file not found: $NNUE_FILE"
+# NNUEファイルの存在確認（読み取り権限もチェック）
+if [ ! -f "$NNUE_FILE" ] || [ ! -r "$NNUE_FILE" ]; then
+    echo "Error: NNUE file not found or not readable: $NNUE_FILE"
     exit 1
 fi
 
