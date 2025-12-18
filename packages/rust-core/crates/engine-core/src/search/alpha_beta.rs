@@ -20,7 +20,8 @@ use super::history::{
     pawn_history_bonus, quiet_malus, stat_bonus, ButterflyHistory, CapturePieceToHistory,
     ContinuationHistory, CorrectionHistory, LowPlyHistory, PawnHistory,
     CONTINUATION_HISTORY_NEAR_PLY_OFFSET, CONTINUATION_HISTORY_WEIGHTS, CORRECTION_HISTORY_LIMIT,
-    CORRECTION_HISTORY_SIZE, LOW_PLY_HISTORY_SIZE, TT_MOVE_HISTORY_BONUS, TT_MOVE_HISTORY_MALUS,
+    CORRECTION_HISTORY_SIZE, LOW_PLY_HISTORY_SIZE, PRIOR_CAPTURE_COUNTERMOVE_BONUS,
+    TT_MOVE_HISTORY_BONUS, TT_MOVE_HISTORY_MALUS,
 };
 use super::movepicker::piece_value;
 use super::tt_history::TTMoveHistory;
@@ -2434,6 +2435,8 @@ impl SearchWorker {
 
                     // continuation history更新
                     // YaneuraOu: update_continuation_histories(ss - 1, pos.piece_on(prevSq), prevSq, scaledBonus * 400 / 32768)
+                    // 注: prev_sq は cont_hist_key.to（do_move後に設定）なので、
+                    //     この時点で prev_piece != NONE が保証される
                     let prev_piece = pos.piece_on(prev_sq);
                     let prev_max_ply_back = if parent_in_check { 2 } else { 6 };
                     let cont_bonus = scaled_bonus * 400 / 32768;
@@ -2491,7 +2494,7 @@ impl SearchWorker {
                             prev_piece,
                             prev_sq,
                             captured_piece.piece_type(),
-                            964,
+                            PRIOR_CAPTURE_COUNTERMOVE_BONUS,
                         );
                     }
                 }
