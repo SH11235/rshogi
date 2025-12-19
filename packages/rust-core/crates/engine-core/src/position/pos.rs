@@ -1005,8 +1005,15 @@ impl Position {
 
         if blockers.contains(from) {
             // fromが王との直線上にある場合、toも同じ直線上にないと開き王手
-            let line = crate::bitboard::line_bb(ksq, from);
-            if !line.contains(to) {
+            // line_bb()の動的計算を避け、direct_of()による方向一致判定に置き換え
+            let dir_from = crate::bitboard::direct_of(ksq, from);
+            // blockerは必ず玉との直線上にある（blockers_for_kingの仕様保証）
+            debug_assert!(
+                dir_from.is_some(),
+                "blocker at {from:?} must be on line with king at {ksq:?}"
+            );
+            let dir_to = crate::bitboard::direct_of(ksq, to);
+            if dir_from != dir_to {
                 return true;
             }
         }
