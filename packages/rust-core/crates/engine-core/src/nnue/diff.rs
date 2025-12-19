@@ -1,9 +1,10 @@
 //! NNUE 差分更新用のヘルパ
 //!
-//! `StateInfo::dirty_piece` に基づいて、HalfKP の active index の増減を計算する。
+//! `DirtyPiece` に基づいて、HalfKP の active index の増減を計算する。
 
+use super::accumulator::DirtyPiece;
 use super::bona_piece::{halfkp_index, BonaPiece};
-use crate::position::{DirtyPiece, Position};
+use crate::position::Position;
 use crate::types::{Color, Piece, Square};
 
 /// DirtyPieceから変化した特徴量を計算（コア処理）
@@ -78,18 +79,21 @@ pub fn get_features_from_dirty_piece(
 ///
 /// 玉が動いた場合や判定ができない場合は（removed, added）とも空を返し、
 /// 呼び出し側で全計算にフォールバックする前提とする。
-pub fn get_changed_features(pos: &Position, perspective: Color) -> (Vec<usize>, Vec<usize>) {
-    let state = pos.state();
+pub fn get_changed_features(
+    pos: &Position,
+    dirty_piece: &DirtyPiece,
+    perspective: Color,
+) -> (Vec<usize>, Vec<usize>) {
     if pos.previous_state().is_none() {
         // 前の局面が無い（初期状態など）
         return (Vec::new(), Vec::new());
     }
 
     // 玉が動いた場合は全計算が必要（HalfKP は自玉位置×駒配置のため）
-    if state.dirty_piece.king_moved[perspective.index()] {
+    if dirty_piece.king_moved[perspective.index()] {
         return (Vec::new(), Vec::new());
     };
 
     let king_sq = pos.king_square(perspective);
-    get_features_from_dirty_piece(&state.dirty_piece, perspective, king_sq)
+    get_features_from_dirty_piece(dirty_piece, perspective, king_sq)
 }
