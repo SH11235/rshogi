@@ -42,8 +42,8 @@ impl<const N: usize> IndexList<N> {
     #[inline]
     pub fn new() -> Self {
         Self {
-            // SAFETY: MaybeUninit<T> の配列は初期化不要
-            indices: unsafe { MaybeUninit::uninit().assume_init() },
+            // インラインconst ブロックで未初期化配列を安全に作成
+            indices: [const { MaybeUninit::uninit() }; N],
             len: 0,
         }
     }
