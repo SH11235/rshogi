@@ -17,7 +17,9 @@ mod feature_transformer;
 mod layers;
 mod network;
 
-pub use accumulator::Accumulator;
+pub use accumulator::{
+    Accumulator, AccumulatorStack, ChangedPiece, DirtyPiece, HandChange, StackEntry,
+};
 pub use bona_piece::{BonaPiece, FE_END};
 pub use constants::*;
 pub use diff::get_changed_features;
