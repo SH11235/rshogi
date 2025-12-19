@@ -724,10 +724,28 @@ impl Position {
                     checkers |= ray & self.pieces_c(us);
                 }
             }
-        } else {
-            // 安全のため盤面から再計算（gives_checkの取り違えがあっても整合性を保つ）
-            checkers = self.attackers_to_c(self.king_square[them.index()], us);
         }
+        // gives_check=false の場合は checkers=EMPTY のまま（YaneuraOu準拠）
+        // この最適化により、王手にならない手の場合に attackers_to_c() の呼び出しを回避できる
+        // 前提条件: 呼び出し側で gives_check() の判定が正確に行われていること
+        // デバッグビルドでは debug_assert で検証を実施
+        debug_assert!(
+            {
+                let expected = self.attackers_to_c(self.king_square[them.index()], us);
+                let result = if gives_check {
+                    checkers == expected
+                } else {
+                    expected.is_empty()
+                };
+                if !result {
+                    eprintln!(
+                        "gives_check mismatch: gives_check={gives_check}, checkers={checkers:?}, actual={expected:?}"
+                    );
+                }
+                result
+            },
+            "gives_check mismatch detected"
+        );
         let is_check = !checkers.is_empty();
         // 4. 連続王手カウンタの更新（YaneuraOu準拠）
         if is_check {
@@ -1111,19 +1129,26 @@ mod tests {
         pos.put_piece(Piece::B_KNIGHT, knight);
 
         pos.update_blockers_and_pinners();
+        pos.update_check_squares();
 
         let prev_blockers = pos.blockers_for_king(Color::Black);
         let prev_pinners = pos.cur_state().pinners[Color::White.index()];
 
         // 玉筋とは無関係の桂を動かしてもblockers/pinnersは変わらない
+        // 先手番で先手の桂を動かす（後手玉1一には王手にならない）
         let mv_offline = Move::new_move(knight, Square::new(File::File1, Rank::Rank2), false);
-        pos.do_move(mv_offline, false);
+        let gives_check = pos.gives_check(mv_offline);
+        pos.do_move(mv_offline, gives_check);
         assert_eq!(pos.blockers_for_king(Color::Black), prev_blockers);
         assert_eq!(pos.cur_state().pinners[Color::White.index()], prev_pinners);
 
         // 金を筋から外すとblockers/pinnersが更新される（再計算と一致）
+        // 手番を戻して先手が金を動かす（王手ではない）
+        pos.side_to_move = Color::Black;
+        pos.update_check_squares();
         let mv_unblock = Move::new_move(blocker, Square::new(File::File6, Rank::Rank8), false);
-        pos.do_move(mv_unblock, false);
+        let gives_check = pos.gives_check(mv_unblock);
+        pos.do_move(mv_unblock, gives_check);
         let (blockers_full, pinners_full) =
             pos.compute_blockers_and_pinners(Color::Black, pos.occupied(), Bitboard::EMPTY);
         assert_eq!(pos.blockers_for_king(Color::Black), blockers_full);
@@ -1146,17 +1171,44 @@ mod tests {
         pos.put_piece(Piece::W_PAWN, w_target);
         pos.side_to_move = Color::Black;
         pos.update_blockers_and_pinners();
+        pos.update_check_squares();
 
+        // 金で歩を取る（開き王手）
         let mv_capture = Move::new_move(b_blocker, w_target, false);
-        pos.do_move(mv_capture, false);
+        // 開き王手になるため gives_check は true であるべき
+        // blockers_for_king(White) に金(1七)が含まれていることを確認
+        assert!(
+            pos.blockers_for_king(Color::White).contains(b_blocker),
+            "Gold at 1七 should be a blocker for White king"
+        );
+        let gives_check = pos.gives_check(mv_capture);
+        assert!(gives_check, "Move should give check (discovered check)");
+        pos.do_move(mv_capture, gives_check);
         // checkersに飛車が含まれていれば開き王手が検出されている
         assert!(pos.cur_state().checkers.contains(br));
 
-        // 玉を動かした場合も再計算される
-        let king_from = pos.king_square(Color::Black);
+        // 玉を動かした場合の blockers/pinners 再計算をテスト（別の局面で）
+        // 先手玉5九、後手玉1一、後手飛5六（先手玉をpinする配置）
+        let mut pos = Position::new();
+        let bk = Square::new(File::File5, Rank::Rank9);
+        let wk = Square::new(File::File1, Rank::Rank1);
+        let wr = Square::new(File::File5, Rank::Rank6);
+        pos.put_piece(Piece::B_KING, bk);
+        pos.king_square[Color::Black.index()] = bk;
+        pos.put_piece(Piece::W_KING, wk);
+        pos.king_square[Color::White.index()] = wk;
+        pos.put_piece(Piece::W_ROOK, wr);
+        pos.side_to_move = Color::Black;
+        pos.update_blockers_and_pinners();
+        pos.update_check_squares();
+
+        // 先手玉を横に動かす（後手玉への王手ではない）
+        let king_from = bk;
         let king_to = Square::new(File::File6, Rank::Rank9);
         let king_move = Move::new_move(king_from, king_to, false);
-        pos.do_move(king_move, false);
+        let gives_check = pos.gives_check(king_move);
+        assert!(!gives_check, "King move should not give check");
+        pos.do_move(king_move, gives_check);
         let (blockers_full, pinners_full) =
             pos.compute_blockers_and_pinners(Color::Black, pos.occupied(), Bitboard::EMPTY);
         assert_eq!(pos.blockers_for_king(Color::Black), blockers_full);
@@ -1405,9 +1457,9 @@ mod tests {
     }
 
     #[test]
-    fn test_do_move_sets_checkers_from_board_state() {
+    fn test_do_move_sets_checkers_with_gives_check() {
         let mut pos = Position::new();
-        // 玉と持ち駒だけの簡単な局面を作り、わざとgives_check=falseで王手の手を指す。
+        // 玉と持ち駒だけの簡単な局面を作り、王手になる手を指す。
         let b_king = Square::new(File::File5, Rank::Rank9);
         let w_king = Square::new(File::File5, Rank::Rank1);
         pos.put_piece(Piece::B_KING, b_king);
@@ -1415,12 +1467,18 @@ mod tests {
         pos.king_square[Color::Black.index()] = b_king;
         pos.king_square[Color::White.index()] = w_king;
         pos.hand[Color::Black.index()] = pos.hand[Color::Black.index()].add(PieceType::Gold);
+        // check_squares の更新（gives_check() が正しく動作するために必要）
+        pos.update_check_squares();
 
         let drop_sq = Square::from_usi("4a").unwrap();
         let mv = Move::new_drop(PieceType::Gold, drop_sq);
 
-        // 王手になるにもかかわらず false を渡しても、盤面から正しくチェック状態が計算されることを確認。
-        pos.do_move(mv, false);
+        // gives_check() が正しく王手を検出することを確認
+        let gives_check = pos.gives_check(mv);
+        assert!(gives_check, "gives_check should detect the check");
+
+        // do_move に正しい gives_check を渡して、checkers が正しく設定されることを確認
+        pos.do_move(mv, gives_check);
         let expected_checkers = pos.attackers_to_c(pos.king_square(Color::White), Color::Black);
         assert!(!expected_checkers.is_empty(), "drop should give check");
         assert_eq!(pos.checkers(), expected_checkers);
