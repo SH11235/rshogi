@@ -10,7 +10,7 @@
 | コア数 | 32 |
 | OS | Ubuntu (Linux 6.8.0) |
 | アーキテクチャ | x86_64 |
-| 計測日 | 2025-12-18 |
+| 計測日 | 2025-12-20 |
 
 ---
 
@@ -22,22 +22,22 @@
 
 | 順位 | 関数 | CPU% | 状態 | 備考 |
 |------|------|------|------|------|
-| 1 | `MovePicker::next_move` | 6.55% | 調査完了 | [詳細](#movepicker-調査完了) |
-| 2 | `refresh_accumulator` | 6.40% | - | NNUE全計算 |
-| 3 | `AffineTransform::propagate` | 5.59% | - | NNUE推論（隠れ層） |
-| 4 | `attackers_to_occ` | 3.58% | - | 利き計算 |
-| - | `partial_insertion_sort` | 2.32% | 調査完了 | MovePicker内部 |
-| - | `score_quiets` | 1.07% | 調査完了 | MovePicker内部 |
+| 1 | `MovePicker::next_move` | 8.11% | 調査完了 | [詳細](#movepicker-調査完了) |
+| 2 | `Network::evaluate` | 5.86% | - | NNUE推論 |
+| 3 | `refresh_accumulator` | 5.70% | - | NNUE全計算 |
+| - | `partial_insertion_sort` | 3.53% | 調査完了 | MovePicker内部 |
+| - | `score_quiets` | 1.17% | 調査完了 | MovePicker内部 |
 
-**注**: kernelオーバーヘッド（`__fsnotify_parent` 4.41%, `dput` 3.46%）はNNUEファイル読み込み時のもので、実際の探索時間には影響しない。
+**注**: kernelオーバーヘッド（`__fsnotify_parent` 4.49%, `dput` 3.55%）はNNUEファイル読み込み時のもので、実際の探索時間には影響しない。
 
 #### NNUE関連の内訳
 
 | 関数 | CPU% | 説明 |
 |------|------|------|
-| `refresh_accumulator` | 6.40% | Accumulator全計算（差分更新失敗時） |
-| `AffineTransform::propagate` | 5.59% | 隠れ層の行列演算 |
-| `add_weights` | ~1.0% | 特徴量の重み加算（refresh内） |
+| `Network::evaluate` | 5.86% | NNUE推論全体 |
+| `refresh_accumulator` | 5.70% | Accumulator全計算（差分更新失敗時） |
+| `AffineTransform::propagate` | ~1.26% | 隠れ層の行列演算（Network::evaluate内） |
+| `add_weights` | ~1.42% | 特徴量の重み加算（refresh内） |
 
 ### Material評価時（NNUE無効、release build）
 
@@ -45,16 +45,16 @@
 
 | 順位 | 関数 | CPU% | 備考 |
 |------|------|------|------|
-| 1 | `eval_lv7_like` | 24.48% | Material評価のメイン関数 |
-| 2 | `direction_of` | 14.57% | 方向計算 |
-| 3 | `compute_board_effects` | 9.81% | 盤面効果計算 |
-| 4 | `MovePicker::next_move` | 7.96% | 指し手選択 |
-| 5 | `search_node` | 4.44% | 探索メインループ |
-| 6 | `check_move_mate` | 4.11% | 1手詰め判定 |
-| 7 | `do_move` | 3.44% | 指し手実行 |
-| 8 | `__memset_avx2` | 3.13% | メモリ初期化 |
-| 9 | `attackers_to_occ` | 2.87% | 利き計算 |
-| 10 | `build_cont_tables` | 2.25% | Continuation History構築 |
+| 1 | `eval_lv7_like` | 25.84% | Material評価のメイン関数 |
+| 2 | `direction_of` | 16.12% | 方向計算 |
+| 3 | `compute_board_effects` | 9.71% | 盤面効果計算 |
+| 4 | `MovePicker::next_move` | 7.11% | 指し手選択 |
+| 5 | `check_move_mate` | 4.71% | 1手詰め判定 |
+| 6 | `search_node` | 4.27% | 探索メインループ |
+| 7 | `__memset_avx2` | 3.18% | メモリ初期化 |
+| 8 | `do_move` | 2.74% | 指し手実行 |
+| 9 | `attackers_to_occ` | 2.19% | 利き計算 |
+| 10 | `build_cont_tables` | 2.14% | Continuation History構築 |
 
 **注**: Material評価は1回の評価計算は軽量だが、評価精度が低いため枝刈りの効率が悪く、NPSはNNUEと同等かそれ以下になることが多い。
 
@@ -288,3 +288,4 @@ RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release --
 | 2025-12-18 | 計測結果を再計測値で更新（NNUE: MovePicker 6.55%, refresh 6.40%, Material: eval_lv7_like 24.48%） |
 | 2025-12-19 | Bitboard256 AVX2 SIMD化調査完了（AMD Zen 3環境では効果なし、フィーチャーフラグで残す） |
 | 2025-12-19 | simd_avx2フィーチャーフラグの説明と並列探索時の検証方法を追加 |
+| 2025-12-20 | 計測結果更新（NNUE: MovePicker 8.11%, Network::evaluate 5.86%, refresh 5.70%、Material: eval_lv7_like 25.84%, direction_of 16.12%） |

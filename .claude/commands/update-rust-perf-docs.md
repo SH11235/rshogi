@@ -20,10 +20,20 @@ cd packages/rust-core
    - `packages/rust-core/benchmark_results/` ディレクトリの最新ファイルを確認
 
 2. **結果の読み取り**
-   - NNUE有効時のperf結果（`*_nnue_*.txt`）
-   - Material評価時のperf結果（`*_release.txt`）
+
+   **perfレポート（推奨: フラットレポートを優先）**
+   - `nnue_flat.txt` - NNUE有効時のフラットレポート（--no-children、自己時間のみ）**← 最も正確**
+   - `nnue_callers.txt` - NNUE有効時のコールグラフ（-g caller、呼び出し元情報付き）
+   - `*_nnue_release.txt` - NNUE有効時の詳細レポート（コールツリー付き）
+   - `*_release.txt` - Material評価時のレポート
+
+   **ベンチマーク結果**
    - NNUE有効時のbenchmark結果（`nnue_enabled: true`）
    - Material評価時のbenchmark結果（`nnue_enabled: false`）
+
+   **フラットレポート vs 詳細レポートの違い**
+   - `nnue_flat.txt`: 各関数の自己時間（self time）のみ。ホットスポット一覧の更新に最適
+   - `*_nnue_release.txt`: コールツリー付き。関数の内訳分析に有用
 
 3. **ドキュメント更新**
    - `packages/rust-core/docs/performance/README.md` のホットスポット一覧を更新
