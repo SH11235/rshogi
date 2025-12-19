@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::nnue::evaluate;
+use crate::nnue::{evaluate, AccumulatorStack, DirtyPiece};
 use crate::position::Position;
 use crate::search::PieceToHistory;
 use crate::tt::{ProbeResult, TTData, TranspositionTable};
@@ -290,6 +290,12 @@ pub struct SearchWorker {
     /// `ply >= nmp_min_ply` の条件でNMPを制限する。
     /// 深い探索（depth >= 16）でZugzwangを検出して再探索する仕組み。
     pub nmp_min_ply: i32,
+
+    /// NNUE Accumulator スタック
+    ///
+    /// 探索時のNNUE差分更新用。Position.do_move/undo_moveと同期してpush/popする。
+    /// StateInfoからAccumulatorを分離することで、do_moveでの初期化コストを削減。
+    pub nnue_stack: AccumulatorStack,
 }
 
 impl SearchWorker {
@@ -321,6 +327,7 @@ impl SearchWorker {
             best_move_changes: 0.0,
             max_moves_to_draw,
             nmp_min_ply: 0,
+            nnue_stack: AccumulatorStack::new(),
         })
     }
 
@@ -353,6 +360,8 @@ impl SearchWorker {
         self.root_moves.clear();
         // YaneuraOu準拠: low_ply_historyのみクリア
         self.low_ply_history.clear();
+        // NNUE AccumulatorStackをリセット
+        self.nnue_stack.reset();
     }
 
     /// best_move_changes を半減（世代減衰）
@@ -670,7 +679,7 @@ impl SearchWorker {
             unadjusted_static_eval = tt_ctx.data.eval;
             unadjusted_static_eval
         } else {
-            unadjusted_static_eval = evaluate(pos);
+            unadjusted_static_eval = evaluate(pos, &mut self.nnue_stack);
             unadjusted_static_eval
         };
 
@@ -838,6 +847,7 @@ impl SearchWorker {
             self.stack[ply as usize].cont_hist_key = None;
 
             pos.do_null_move();
+            self.nnue_stack.push(DirtyPiece::new()); // null moveでは駒の移動なし
             let null_value = -self.search_node::<{ NodeType::NonPV as u8 }>(
                 pos,
                 depth - r,
@@ -848,6 +858,7 @@ impl SearchWorker {
                 limits,
                 time_manager,
             );
+            self.nnue_stack.pop();
             pos.undo_null_move();
 
             // Do not return unproven mate scores（勝ちスコアは信頼しない）
@@ -958,7 +969,8 @@ impl SearchWorker {
                 continue;
             }
 
-            pos.do_move(mv, pos.gives_check(mv));
+            let dirty_piece = pos.do_move(mv, pos.gives_check(mv));
+            self.nnue_stack.push(dirty_piece);
             self.nodes += 1;
             self.tt.prefetch(pos.key(), pos.side_to_move());
             let mut value = -self.qsearch::<{ NodeType::NonPV as u8 }>(
@@ -983,6 +995,7 @@ impl SearchWorker {
                     time_manager,
                 );
             }
+            self.nnue_stack.pop();
             pos.undo_move(mv);
 
             if value >= prob_beta {
@@ -1299,7 +1312,8 @@ impl SearchWorker {
             let nodes_before = self.nodes;
 
             // 探索
-            pos.do_move(mv, gives_check);
+            let dirty_piece = pos.do_move(mv, gives_check);
+            self.nnue_stack.push(dirty_piece);
             self.nodes += 1;
             self.tt.prefetch(pos.key(), pos.side_to_move());
 
@@ -1345,6 +1359,7 @@ impl SearchWorker {
                 value
             };
 
+            self.nnue_stack.pop();
             pos.undo_move(mv);
 
             // この手に費やしたノード数をeffortに積算
@@ -1446,7 +1461,8 @@ impl SearchWorker {
             let nodes_before = self.nodes;
 
             // 探索
-            pos.do_move(mv, gives_check);
+            let dirty_piece = pos.do_move(mv, gives_check);
+            self.nnue_stack.push(dirty_piece);
             self.nodes += 1;
             self.tt.prefetch(pos.key(), pos.side_to_move());
 
@@ -1492,6 +1508,7 @@ impl SearchWorker {
                 value
             };
 
+            self.nnue_stack.pop();
             pos.undo_move(mv);
 
             // この手に費やしたノード数をeffortに積算
@@ -1577,7 +1594,11 @@ impl SearchWorker {
 
         // 最大深さチェック
         if ply >= MAX_PLY {
-            return if in_check { Value::ZERO } else { evaluate(pos) };
+            return if in_check {
+                Value::ZERO
+            } else {
+                evaluate(pos, &mut self.nnue_stack)
+            };
         }
 
         // 選択的深さを更新
@@ -1916,7 +1937,8 @@ impl SearchWorker {
             let cont_hist_piece = mv.moved_piece_after();
             let cont_hist_to = mv.to();
 
-            pos.do_move(mv, gives_check);
+            let dirty_piece = pos.do_move(mv, gives_check);
+            self.nnue_stack.push(dirty_piece);
             self.nodes += 1;
 
             // do_move直後に置換表をprefetch（YaneuraOu準拠）
@@ -2135,6 +2157,7 @@ impl SearchWorker {
                     time_manager,
                 )
             };
+            self.nnue_stack.pop();
             pos.undo_move(mv);
 
             if self.abort {
@@ -2563,7 +2586,11 @@ impl SearchWorker {
         let in_check = pos.in_check();
 
         if ply >= MAX_PLY {
-            return if in_check { Value::ZERO } else { evaluate(pos) };
+            return if in_check {
+                Value::ZERO
+            } else {
+                evaluate(pos, &mut self.nnue_stack)
+            };
         }
 
         if pv_node && self.sel_depth < ply + 1 {
@@ -2631,7 +2658,7 @@ impl SearchWorker {
                     return Value::mate_in(ply + 1);
                 }
             }
-            unadjusted_static_eval = evaluate(pos);
+            unadjusted_static_eval = evaluate(pos, &mut self.nnue_stack);
             unadjusted_static_eval
         };
 
@@ -2851,7 +2878,8 @@ impl SearchWorker {
             let cont_hist_pc = mv.moved_piece_after();
             let cont_hist_to = mv.to();
 
-            pos.do_move(mv, gives_check);
+            let dirty_piece = pos.do_move(mv, gives_check);
+            self.nnue_stack.push(dirty_piece);
             self.nodes += 1;
             self.tt.prefetch(pos.key(), pos.side_to_move());
 
@@ -2861,6 +2889,7 @@ impl SearchWorker {
             let value =
                 -self.qsearch::<NT>(pos, depth - 1, -beta, -alpha, ply + 1, limits, time_manager);
 
+            self.nnue_stack.pop();
             pos.undo_move(mv);
 
             if self.abort {

@@ -21,5 +21,5 @@ mod zobrist;
 
 pub use pos::Position;
 pub use sfen::{SfenError, SFEN_HIRATE};
-pub use state::{DirtyPiece, StateInfo};
+pub use state::StateInfo;
 pub use zobrist::{zobrist_hand, zobrist_no_pawns, zobrist_psq, zobrist_side, ZOBRIST};

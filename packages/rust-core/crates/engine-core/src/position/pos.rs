@@ -5,11 +5,12 @@ use crate::bitboard::{
     lance_effect, pawn_effect, rook_effect, silver_effect, Bitboard,
 };
 use crate::eval::material::{hand_piece_value, signed_piece_value};
+use crate::nnue::{ChangedPiece, DirtyPiece, HandChange};
 use crate::types::{
     Color, Hand, Move, Piece, PieceType, PieceTypeSet, RepetitionState, Square, Value,
 };
 
-use super::state::{ChangedPiece, StateInfo};
+use super::state::StateInfo;
 use super::zobrist::{zobrist_hand, zobrist_psq, zobrist_side};
 
 /// 小駒（香・桂・銀・金とその成り駒）かどうか
@@ -510,7 +511,10 @@ impl Position {
     // ========== 指し手実行 ==========
 
     /// 指し手を実行
-    pub fn do_move(&mut self, m: Move, gives_check: bool) {
+    ///
+    /// DirtyPieceを返す。探索時はAccumulatorStackと同期して使用する。
+    /// NNUE評価を使わない場合は無視して良い。
+    pub fn do_move(&mut self, m: Move, gives_check: bool) -> DirtyPiece {
         let us = self.side_to_move;
         let them = !us;
         let prev_continuous = self.cur_state().continuous_check;
@@ -520,11 +524,10 @@ impl Position {
         let prev_pinners = self.cur_state().pinners;
         let prev_king_sq = self.king_square;
 
-        // 1. 新しいStateInfoを作成
+        // 1. 新しいStateInfoを作成（NNUE関連はAccumulatorStackで管理）
         let mut new_state = self.cur_state().partial_clone();
-        // NNUE 関連は毎手リセットし、DirtyPiece はここで構築する。
-        new_state.accumulator.reset();
-        new_state.dirty_piece.clear();
+        // NNUE用のDirtyPieceはローカルで構築して返す
+        let mut dirty_piece = DirtyPiece::new();
         let mut material_value = new_state.material_value.raw();
 
         // 2. 局面情報の更新
@@ -550,7 +553,7 @@ impl Position {
             let old_hand = self.hand[us.index()];
             let old_count = old_hand.count(pt) as u8;
             let new_count = old_count.saturating_sub(1);
-            new_state.dirty_piece.push_hand_change(super::state::HandChange {
+            dirty_piece.push_hand_change(HandChange {
                 owner: us,
                 piece_type: pt,
                 old_count,
@@ -570,7 +573,7 @@ impl Position {
             new_state.captured_piece = Piece::NONE;
 
             // DirtyPiece: 打ち駒（盤上に新しく現れる）
-            new_state.dirty_piece.push_piece(ChangedPiece {
+            dirty_piece.push_piece(ChangedPiece {
                 color: us,
                 old_piece: Piece::NONE,
                 old_sq: None,
@@ -636,7 +639,7 @@ impl Position {
                     let old_hand = self.hand[us.index()];
                     let old_count = old_hand.count(captured_pt) as u8;
                     let new_count = old_count.saturating_add(1);
-                    new_state.dirty_piece.push_hand_change(super::state::HandChange {
+                    dirty_piece.push_hand_change(HandChange {
                         owner: us,
                         piece_type: captured_pt,
                         old_count,
@@ -674,11 +677,11 @@ impl Position {
             // 玉の移動
             if pc.piece_type() == PieceType::King {
                 self.king_square[us.index()] = to;
-                new_state.dirty_piece.king_moved[us.index()] = true;
+                dirty_piece.king_moved[us.index()] = true;
             }
 
             // DirtyPiece: 移動した駒
-            new_state.dirty_piece.push_piece(ChangedPiece {
+            dirty_piece.push_piece(ChangedPiece {
                 color: us,
                 old_piece: pc,
                 old_sq: Some(from),
@@ -688,7 +691,7 @@ impl Position {
 
             // DirtyPiece: 取った駒（盤上から消える）
             if captured.is_some() {
-                new_state.dirty_piece.push_piece(ChangedPiece {
+                dirty_piece.push_piece(ChangedPiece {
                     color: them,
                     old_piece: captured,
                     old_sq: Some(to),
@@ -706,22 +709,17 @@ impl Position {
                 self.cur_state().check_squares[moved_pt as usize] & Bitboard::from_square(moved_to);
 
             // 開き王手（動かした駒が遮断駒だった場合）
+            // YaneuraOu準拠: discovered(from, to, ksq, blockers) と同等の判定
+            // - fromがblockersに含まれている
+            // - from, to, ksq が同一直線上にない（aligned でない）場合のみ開き王手
             if let Some(from_sq) = moved_from {
                 let prev_blockers = self.cur_state().blockers_for_king[them.index()];
-                if prev_blockers.contains(from_sq) {
+                if prev_blockers.contains(from_sq) && !crate::mate::aligned(from_sq, moved_to, ksq)
+                {
                     if let Some(dir) = crate::bitboard::direct_of(ksq, from_sq) {
                         let ray = crate::bitboard::direct_effect(from_sq, dir, self.occupied());
                         checkers |= ray & self.pieces_c(us);
                     }
-                }
-            }
-
-            // 捕獲で遮断駒を取り除いた場合の開き王手
-            let prev_blockers = self.cur_state().blockers_for_king[them.index()];
-            if prev_blockers.contains(moved_to) {
-                if let Some(dir) = crate::bitboard::direct_of(ksq, moved_to) {
-                    let ray = crate::bitboard::direct_effect(moved_to, dir, self.occupied());
-                    checkers |= ray & self.pieces_c(us);
                 }
             }
         }
@@ -813,6 +811,8 @@ impl Position {
 
         // 11. 王手マスの更新
         self.update_check_squares();
+
+        dirty_piece
     }
 
     /// 指し手を戻す
@@ -868,8 +868,6 @@ impl Position {
     /// null moveを実行
     pub fn do_null_move(&mut self) {
         let mut new_state = self.cur_state().partial_clone();
-        new_state.accumulator.reset();
-        new_state.dirty_piece.clear();
 
         new_state.board_key ^= zobrist_side();
         new_state.plies_from_null = 0;
@@ -1002,7 +1000,8 @@ impl Position {
         // 開き王手：fromがblockerで、fromが王との直線上から外れるか
         let them = !us;
         let ksq = self.king_square[them.index()];
-        let blockers = self.blockers_for_king(them);
+        // YaneuraOu準拠: blockers_for_king には敵駒も含まれるため、自駒でフィルタ
+        let blockers = self.blockers_for_king(them) & self.pieces_c(us);
 
         if blockers.contains(from) {
             // fromが王との直線上にある場合、toも同じ直線上にないと開き王手

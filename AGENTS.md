@@ -19,4 +19,13 @@
 - Desktop (Tauri) UI rules: see `apps/desktop/AGENTS.md` (StrictMode impact, engine client handling).
 - Web (Wasm) UI rules: see `apps/web/AGENTS.md` (StrictMode impact, engine client handling).
 
+## Git操作に関する注意
+
+**重要**: ユーザーの明示的な指示なしに、以下の操作を行ってはいけない:
+- `git checkout` や `git restore` でファイルの変更を元に戻す
+- `git reset` でコミットを取り消す
+- その他、ユーザーの作業を勝手に変更・削除する操作
+
+ユーザーは別セッションで並行作業している可能性があるため、ビルドエラーやテスト失敗が発生しても、勝手にコードをリセットせず、まずユーザーに確認すること。
+
 ユーザーへの返答は日本語で行う事

@@ -6,12 +6,12 @@
 //! - 出力層（32→1）で整数スコアを得て `FV_SCALE` でスケーリングし `Value` に変換
 //! - グローバルな `NETWORK` にロードし、`evaluate` から利用する
 
-use super::accumulator::Accumulator;
+use super::accumulator::{Accumulator, AccumulatorStack};
 use super::constants::{
     FV_SCALE, HIDDEN1_DIMENSIONS, HIDDEN2_DIMENSIONS, NNUE_VERSION, OUTPUT_DIMENSIONS,
     TRANSFORMED_FEATURE_DIMENSIONS,
 };
-use super::feature_transformer::{find_usable_accumulator, FeatureTransformer};
+use super::feature_transformer::FeatureTransformer;
 use super::layers::{AffineTransform, ClippedReLU};
 use crate::eval::material;
 use crate::position::Position;
@@ -165,47 +165,43 @@ pub fn init_nnue_from_bytes(bytes: &[u8]) -> io::Result<()> {
 /// 局面を評価
 ///
 /// NNUEが初期化されていない場合は駒得評価にフォールバック。
-/// StateInfo に保持した Accumulator を差分更新し、計算済みなら再利用する。
+/// AccumulatorStack を使って差分更新し、計算済みなら再利用する。
 ///
 /// 遅延評価パターン:
 /// 1. 直前局面で差分更新を試行
 /// 2. 失敗なら祖先探索 + 複数手差分更新を試行
 /// 3. それでも失敗なら全計算
-pub fn evaluate(pos: &mut Position) -> Value {
+pub fn evaluate(pos: &Position, stack: &mut AccumulatorStack) -> Value {
     if let Some(network) = NETWORK.get() {
-        // 前局面の Accumulator を生ポインタで保持（借用競合を避けるため）
-        let prev_acc_ptr = { pos.previous_state().map(|s| &s.accumulator as *const Accumulator) };
-
-        // 現在のstate_indexを取得（祖先探索用）
-        let current_idx = pos.state_index();
-
         // 差分更新の成功率計測（diagnosticsフィーチャー有効時のみ）
         // 0=cached, 1=diff_success, 2=no_prev, 3=prev_not_computed, 4=update_failed,
         // 5=refresh, 6=ancestor_success
         #[cfg(feature = "diagnostics")]
         let mut diff_update_result: u8 = 0;
 
-        // StateInfo 上の Accumulator をインプレースで更新
+        // AccumulatorStack 上の Accumulator をインプレースで更新
         {
-            // 生ポインタ経由で可変参照を取得し、pos への借用衝突を回避
-            let acc_ptr = {
-                let state = pos.state_mut();
-                &mut state.accumulator as *mut Accumulator
-            };
-
-            // SAFETY: acc_ptr は state.accumulator の有効期間内でのみ使用する。
-            let acc = unsafe { &mut *acc_ptr };
-
-            if !acc.computed_accumulation {
+            let current_entry = stack.current();
+            if !current_entry.accumulator.computed_accumulation {
                 let mut updated = false;
 
                 // 1. 直前局面で差分更新を試行
-                if let Some(prev_acc_ptr) = prev_acc_ptr {
-                    // SAFETY: prev_acc_ptr は previous_state の有効期間内でのみ使用する読み取り専用ポインタ。
-                    let prev_acc = unsafe { &*prev_acc_ptr };
-                    if prev_acc.computed_accumulation {
-                        updated =
-                            network.feature_transformer.update_accumulator(pos, acc, prev_acc);
+                if let Some(prev_idx) = current_entry.previous {
+                    let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
+                    if prev_computed {
+                        // DirtyPieceをコピーして借用を解消
+                        let dirty_piece = stack.current().dirty_piece;
+                        // Note: clone() + copy_from_slice による二重コピーを避ける最適化を試みたが、
+                        // NPSに改善が見られなかった。YaneuraOu の C++ 実装でも同様のパターン
+                        // （値コピー + std::memcpy）を使用している。
+                        let prev_acc = stack.entry_at(prev_idx).accumulator.clone();
+                        let current_acc = &mut stack.current_mut().accumulator;
+                        updated = network.feature_transformer.update_accumulator(
+                            pos,
+                            &dirty_piece,
+                            current_acc,
+                            &prev_acc,
+                        );
                         #[cfg(feature = "diagnostics")]
                         {
                             diff_update_result = if updated { 1 } else { 4 };
@@ -225,13 +221,10 @@ pub fn evaluate(pos: &mut Position) -> Value {
 
                 // 2. 失敗なら祖先探索 + 複数手差分更新を試行
                 if !updated {
-                    if let Some((source_idx, _depth)) = find_usable_accumulator(pos, current_idx) {
-                        updated = network.feature_transformer.forward_update_incremental(
-                            pos,
-                            acc,
-                            source_idx,
-                            current_idx,
-                        );
+                    if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+                        updated = network
+                            .feature_transformer
+                            .forward_update_incremental(pos, stack, source_idx);
                         #[cfg(feature = "diagnostics")]
                         if updated {
                             diff_update_result = 6; // ancestor_success
@@ -241,6 +234,7 @@ pub fn evaluate(pos: &mut Position) -> Value {
 
                 // 3. それでも失敗なら全計算
                 if !updated {
+                    let acc = &mut stack.current_mut().accumulator;
                     network.feature_transformer.refresh_accumulator(pos, acc);
                 }
             }
@@ -314,10 +308,7 @@ pub fn evaluate(pos: &mut Position) -> Value {
         }
 
         // 不変借用で評価
-        let acc_ref = {
-            let state = pos.state();
-            &state.accumulator
-        };
+        let acc_ref = &stack.current().accumulator;
         network.evaluate(pos, acc_ref)
     } else {
         // フォールバック: Material評価
@@ -334,9 +325,10 @@ mod tests {
     fn test_evaluate_fallback() {
         let mut pos = Position::new();
         pos.set_sfen(SFEN_HIRATE).unwrap();
+        let mut stack = AccumulatorStack::new();
 
         // NNUEが初期化されていない場合はフォールバック
-        let value = evaluate(&mut pos);
+        let value = evaluate(&pos, &mut stack);
 
         // フォールバック評価が動作することを確認
         assert!(value.raw().abs() < 1000);
@@ -344,30 +336,24 @@ mod tests {
 
     #[test]
     fn test_accumulator_cached_after_evaluate() {
-        // ダミーNNUE（初期化済み）を前提とせず、FeatureTransformer の計算パスを直接確認する。
-        // 評価後に StateInfo の Accumulator が computed_accumulation = true で残り、
+        // AccumulatorStack を使った評価キャッシュのテスト。
+        // 評価後に AccumulatorStack の Accumulator が computed_accumulation = true で残り、
         // 再度 evaluate を呼んでもフラグが維持されることを確認する。
 
-        // NNUE が未初期化でも fallback に落ちないよう、最低限のネットワークを初期化する必要がある。
-        // ここでは実ファイルなしで行うため、先に初期化をスキップし、refresh_accumulator を直接呼ぶ。
         let mut pos = Position::new();
         pos.set_sfen(SFEN_HIRATE).unwrap();
+        let mut stack = AccumulatorStack::new();
 
-        // 手動で accumulator を全計算
-        let mut acc = Accumulator::new();
-        acc.computed_accumulation = true;
-        {
-            let state = pos.state_mut();
-            state.accumulator = acc;
-        }
+        // 手動で accumulator を計算済みにする
+        stack.current_mut().accumulator.computed_accumulation = true;
 
         // 1回目の evaluate: computed_accumulation が true のままならそのまま評価する
-        let value1 = evaluate(&mut pos);
-        assert!(pos.state().accumulator.computed_accumulation);
+        let value1 = evaluate(&pos, &mut stack);
+        assert!(stack.current().accumulator.computed_accumulation);
 
         // 2回目もフラグが維持されていることを確認
-        let value2 = evaluate(&mut pos);
-        assert!(pos.state().accumulator.computed_accumulation);
+        let value2 = evaluate(&pos, &mut stack);
+        assert!(stack.current().accumulator.computed_accumulation);
 
         // フォールバックの駒得評価は手番に依存して符号が変わる可能性があるが、
         // ここでは「計算が成功し、フラグが維持された」ことのみ検証する。

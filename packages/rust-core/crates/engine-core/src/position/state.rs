@@ -1,15 +1,16 @@
 //! 局面状態（StateInfo）
 //!
-//! Zobrist ハッシュや王手情報に加えて、NNUE 差分更新用の Accumulator/DirtyPiece を保持する。
+//! Zobrist ハッシュや王手情報を保持する。
+//! NNUE 差分更新用の Accumulator/DirtyPiece は AccumulatorStack に移動。
 
 use super::zobrist::zobrist_no_pawns;
 use crate::bitboard::Bitboard;
-use crate::nnue::Accumulator;
-use crate::types::{Color, Hand, Move, Piece, PieceType, RepetitionState, Square, Value};
+use crate::types::{Color, Hand, Move, Piece, PieceType, RepetitionState, Value};
 
 /// 局面状態
 ///
 /// do_move時に前の状態を保存し、undo_move時に復元するための情報を保持する。
+/// NNUE関連（Accumulator/DirtyPiece）はSearchWorkerのAccumulatorStackで管理。
 #[derive(Clone)]
 pub struct StateInfo {
     // === do_move時にコピーされる部分 ===
@@ -57,131 +58,6 @@ pub struct StateInfo {
     pub material_value: Value,
     /// 直前の指し手
     pub last_move: Move,
-    /// NNUE Accumulator（差分更新用の中間表現）
-    pub accumulator: Accumulator,
-    /// 差分更新用の駒移動情報
-    pub dirty_piece: DirtyPiece,
-}
-
-/// 差分更新用の駒移動情報（固定長バッファでヒープ確保を回避）
-#[derive(Clone, Copy)]
-pub struct DirtyPiece {
-    /// 変化した駒（最大3つ: 動いた駒 + 取られた駒）
-    pieces: [ChangedPiece; Self::MAX_PIECES],
-    /// 有効な pieces 要素数
-    pieces_len: u8,
-    /// 手駒の変化（最大2つ: 打ち駒 or 取り駒による変化）
-    hand_changes: [HandChange; Self::MAX_HAND_CHANGES],
-    /// 有効な hand_changes 要素数
-    hand_changes_len: u8,
-    /// 玉が動いたかどうか [Color]
-    pub king_moved: [bool; Color::NUM],
-}
-
-impl DirtyPiece {
-    /// pieces の最大要素数
-    pub const MAX_PIECES: usize = 3;
-    /// hand_changes の最大要素数
-    pub const MAX_HAND_CHANGES: usize = 2;
-
-    /// 新しい DirtyPiece を作成
-    #[inline]
-    pub const fn new() -> Self {
-        Self {
-            pieces: [ChangedPiece::EMPTY; Self::MAX_PIECES],
-            pieces_len: 0,
-            hand_changes: [HandChange::EMPTY; Self::MAX_HAND_CHANGES],
-            hand_changes_len: 0,
-            king_moved: [false; Color::NUM],
-        }
-    }
-
-    /// 情報をクリア
-    #[inline]
-    pub fn clear(&mut self) {
-        self.pieces_len = 0;
-        self.hand_changes_len = 0;
-        self.king_moved = [false; Color::NUM];
-    }
-
-    /// 駒変化を追加
-    #[inline]
-    pub fn push_piece(&mut self, piece: ChangedPiece) {
-        let idx = self.pieces_len as usize;
-        self.pieces[idx] = piece;
-        self.pieces_len += 1;
-    }
-
-    /// 手駒変化を追加
-    #[inline]
-    pub fn push_hand_change(&mut self, change: HandChange) {
-        let idx = self.hand_changes_len as usize;
-        self.hand_changes[idx] = change;
-        self.hand_changes_len += 1;
-    }
-
-    /// 駒変化のスライスを取得
-    #[inline]
-    pub fn pieces(&self) -> &[ChangedPiece] {
-        &self.pieces[..self.pieces_len as usize]
-    }
-
-    /// 手駒変化のスライスを取得
-    #[inline]
-    pub fn hand_changes(&self) -> &[HandChange] {
-        &self.hand_changes[..self.hand_changes_len as usize]
-    }
-}
-
-impl Default for DirtyPiece {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// 1 駒分の変更情報
-#[derive(Clone, Copy)]
-pub struct ChangedPiece {
-    /// 駒の色
-    pub color: Color,
-    /// 変更前の駒（盤上に無ければ Piece::NONE）
-    pub old_piece: Piece,
-    /// 変更前の位置（盤上に無ければ None）
-    pub old_sq: Option<Square>,
-    /// 変更後の駒（盤上に無ければ Piece::NONE）
-    pub new_piece: Piece,
-    /// 変更後の位置（盤上に無ければ None）
-    pub new_sq: Option<Square>,
-}
-
-impl ChangedPiece {
-    /// 空の ChangedPiece（固定長配列の初期化用）
-    pub const EMPTY: Self = Self {
-        color: Color::Black,
-        old_piece: Piece::NONE,
-        old_sq: None,
-        new_piece: Piece::NONE,
-        new_sq: None,
-    };
-}
-
-/// 手駒の変化情報
-#[derive(Clone, Copy)]
-pub struct HandChange {
-    pub owner: Color,
-    pub piece_type: PieceType,
-    pub old_count: u8,
-    pub new_count: u8,
-}
-
-impl HandChange {
-    /// 空の HandChange（固定長配列の初期化用）
-    pub const EMPTY: Self = Self {
-        owner: Color::Black,
-        piece_type: PieceType::Pawn,
-        old_count: 0,
-        new_count: 0,
-    };
 }
 
 impl StateInfo {
@@ -209,8 +85,6 @@ impl StateInfo {
             repetition_type: RepetitionState::None,
             material_value: Value::ZERO,
             last_move: Move::NONE,
-            accumulator: Accumulator::new(),
-            dirty_piece: DirtyPiece::default(),
         }
     }
 
@@ -221,6 +95,9 @@ impl StateInfo {
     }
 
     /// do_move用に部分コピー
+    ///
+    /// NNUE関連（Accumulator/DirtyPiece）はAccumulatorStack側で管理するため、
+    /// ここでは初期化しない。do_moveの主なコストはBitboard/ハッシュ更新のみになる。
     pub fn partial_clone(&self) -> Self {
         StateInfo {
             material_key: self.material_key,
@@ -245,8 +122,6 @@ impl StateInfo {
             repetition_type: RepetitionState::None,
             material_value: self.material_value,
             last_move: Move::NONE,
-            accumulator: Accumulator::new(),
-            dirty_piece: DirtyPiece::default(),
         }
     }
 }
