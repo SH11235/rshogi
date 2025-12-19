@@ -127,6 +127,8 @@ impl FeatureTransformer {
         }
 
         // 2. ソースのアキュムレータをコピー
+        // Note: clone() + copy_from_slice による二重コピーを避ける最適化を試みたが、
+        // NPSに改善が見られなかった。YaneuraOu の C++ 実装でも同様のパターンを使用。
         let source_acc = stack.entry_at(source_idx).accumulator.clone();
         {
             let current_acc = &mut stack.current_mut().accumulator;

@@ -191,6 +191,9 @@ pub fn evaluate(pos: &Position, stack: &mut AccumulatorStack) -> Value {
                     if prev_computed {
                         // DirtyPieceをコピーして借用を解消
                         let dirty_piece = stack.current().dirty_piece;
+                        // Note: clone() + copy_from_slice による二重コピーを避ける最適化を試みたが、
+                        // NPSに改善が見られなかった。YaneuraOu の C++ 実装でも同様のパターン
+                        // （値コピー + std::memcpy）を使用している。
                         let prev_acc = stack.entry_at(prev_idx).accumulator.clone();
                         let current_acc = &mut stack.current_mut().accumulator;
                         updated = network.feature_transformer.update_accumulator(
