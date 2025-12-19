@@ -1,78 +1,15 @@
 //! NNUE 差分更新用のヘルパ
 //!
 //! `DirtyPiece` に基づいて、HalfKP の active index の増減を計算する。
+//! FeatureSet を経由して特徴量の変化を取得する。
 
 use super::accumulator::{DirtyPiece, IndexList, MAX_CHANGED_FEATURES};
-use super::bona_piece::{halfkp_index, BonaPiece};
+use super::features::{FeatureSet, HalfKPFeatureSet};
 use crate::position::Position;
-use crate::types::{Color, Piece, Square};
+use crate::types::Color;
 
 /// 変更された特徴量のペア（removed, added）
 pub type ChangedFeatures = (IndexList<MAX_CHANGED_FEATURES>, IndexList<MAX_CHANGED_FEATURES>);
-
-/// DirtyPieceから変化した特徴量を計算（コア処理）
-///
-/// - 戻り値:
-///   - removed: 1→0 になった特徴量（削除）
-///   - added:   0→1 になった特徴量（追加）
-///
-/// 玉位置は呼び出し側で指定する。祖先探索で玉移動なしが確認済みの場合、
-/// 現局面の玉位置を使用できる。
-pub fn get_features_from_dirty_piece(
-    dirty_piece: &DirtyPiece,
-    perspective: Color,
-    king_sq: Square,
-) -> ChangedFeatures {
-    let mut removed = IndexList::new();
-    let mut added = IndexList::new();
-
-    for dp in dirty_piece.pieces() {
-        // 盤上から消える側（old）
-        if dp.old_piece != Piece::NONE {
-            if let Some(sq) = dp.old_sq {
-                let bp = BonaPiece::from_piece_square(dp.old_piece, sq, perspective);
-                if bp != BonaPiece::ZERO {
-                    removed.push(halfkp_index(king_sq, bp));
-                }
-            }
-        }
-
-        // 盤上に現れる側（new）
-        if dp.new_piece != Piece::NONE {
-            if let Some(sq) = dp.new_sq {
-                let bp = BonaPiece::from_piece_square(dp.new_piece, sq, perspective);
-                if bp != BonaPiece::ZERO {
-                    added.push(halfkp_index(king_sq, bp));
-                }
-            }
-        }
-    }
-
-    // 手駒の変化を反映
-    for hc in dirty_piece.hand_changes() {
-        // やねうら王同様、手駒は種類×枚数の組み合わせで 1 つの BonaPiece を表現する。
-        if hc.old_count != hc.new_count {
-            // 旧カウント分の特徴量を削除
-            if hc.old_count > 0 {
-                let bp_old =
-                    BonaPiece::from_hand_piece(perspective, hc.owner, hc.piece_type, hc.old_count);
-                if bp_old != BonaPiece::ZERO {
-                    removed.push(halfkp_index(king_sq, bp_old));
-                }
-            }
-            // 新カウント分の特徴量を追加
-            if hc.new_count > 0 {
-                let bp_new =
-                    BonaPiece::from_hand_piece(perspective, hc.owner, hc.piece_type, hc.new_count);
-                if bp_new != BonaPiece::ZERO {
-                    added.push(halfkp_index(king_sq, bp_new));
-                }
-            }
-        }
-    }
-
-    (removed, added)
-}
 
 /// 差分更新用: 変化した特徴量を取得
 ///
@@ -92,11 +29,30 @@ pub fn get_changed_features(
         return (IndexList::new(), IndexList::new());
     }
 
-    // 玉が動いた場合は全計算が必要（HalfKP は自玉位置×駒配置のため）
-    if dirty_piece.king_moved[perspective.index()] {
+    // リフレッシュが必要な場合は空を返す（全計算にフォールバック）
+    if HalfKPFeatureSet::needs_refresh(dirty_piece, perspective) {
         return (IndexList::new(), IndexList::new());
-    };
+    }
 
     let king_sq = pos.king_square(perspective);
-    get_features_from_dirty_piece(dirty_piece, perspective, king_sq)
+    HalfKPFeatureSet::collect_changed_indices(dirty_piece, perspective, king_sq)
+}
+
+/// DirtyPieceから変化した特徴量を計算（コア処理）
+///
+/// `forward_update_incremental` など、玉移動がないことが確認済みの場合に使用。
+///
+/// - 戻り値:
+///   - removed: 1→0 になった特徴量（削除）
+///   - added:   0→1 になった特徴量（追加）
+///
+/// 玉位置は呼び出し側で指定する。祖先探索で玉移動なしが確認済みの場合、
+/// 現局面の玉位置を使用できる。
+#[inline]
+pub fn get_features_from_dirty_piece(
+    dirty_piece: &DirtyPiece,
+    perspective: Color,
+    king_sq: crate::types::Square,
+) -> ChangedFeatures {
+    HalfKPFeatureSet::collect_changed_indices(dirty_piece, perspective, king_sq)
 }

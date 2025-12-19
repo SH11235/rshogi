@@ -9,6 +9,7 @@ use super::accumulator::{
 };
 use super::constants::{HALFKP_DIMENSIONS, TRANSFORMED_FEATURE_DIMENSIONS};
 use super::diff::{get_changed_features, get_features_from_dirty_piece};
+use super::features::{FeatureSet, HalfKPFeatureSet};
 use crate::position::Position;
 use crate::types::Color;
 use std::io::{self, Read};
@@ -178,57 +179,14 @@ impl FeatureTransformer {
     /// アクティブな特徴量のインデックスリストを取得
     ///
     /// 盤上駒および手駒を HalfKP 特徴量に写像する。
+    /// FeatureSet 経由で特徴量を取得する。
+    #[inline]
     fn get_active_features(
         &self,
         pos: &Position,
         perspective: Color,
     ) -> IndexList<MAX_ACTIVE_FEATURES> {
-        let king_sq = pos.king_square(perspective);
-        let mut features = IndexList::new();
-
-        // 盤上の駒
-        for sq in pos.occupied().iter() {
-            let pc = pos.piece_on(sq);
-            if pc.is_none() {
-                continue;
-            }
-            // 玉は特徴量に含めない
-            if pc.piece_type() == crate::types::PieceType::King {
-                continue;
-            }
-
-            let bp = super::bona_piece::BonaPiece::from_piece_square(pc, sq, perspective);
-            if bp != super::bona_piece::BonaPiece::ZERO {
-                let index = super::bona_piece::halfkp_index(king_sq, bp);
-                features.push(index);
-            }
-        }
-
-        // 手駒の特徴量
-        for owner in [Color::Black, Color::White] {
-            for pt in [
-                crate::types::PieceType::Pawn,
-                crate::types::PieceType::Lance,
-                crate::types::PieceType::Knight,
-                crate::types::PieceType::Silver,
-                crate::types::PieceType::Gold,
-                crate::types::PieceType::Bishop,
-                crate::types::PieceType::Rook,
-            ] {
-                let count = pos.hand(owner).count(pt) as u8;
-                if count == 0 {
-                    continue;
-                }
-                let bp =
-                    super::bona_piece::BonaPiece::from_hand_piece(perspective, owner, pt, count);
-                if bp != super::bona_piece::BonaPiece::ZERO {
-                    let index = super::bona_piece::halfkp_index(king_sq, bp);
-                    features.push(index);
-                }
-            }
-        }
-
-        features
+        HalfKPFeatureSet::collect_active_indices(pos, perspective)
     }
 
     /// 重みを累積値に加算
