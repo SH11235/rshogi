@@ -2,10 +2,13 @@
 //!
 //! `DirtyPiece` に基づいて、HalfKP の active index の増減を計算する。
 
-use super::accumulator::DirtyPiece;
+use super::accumulator::{DirtyPiece, IndexList, MAX_CHANGED_FEATURES};
 use super::bona_piece::{halfkp_index, BonaPiece};
 use crate::position::Position;
 use crate::types::{Color, Piece, Square};
+
+/// 変更された特徴量のペア（removed, added）
+pub type ChangedFeatures = (IndexList<MAX_CHANGED_FEATURES>, IndexList<MAX_CHANGED_FEATURES>);
 
 /// DirtyPieceから変化した特徴量を計算（コア処理）
 ///
@@ -19,9 +22,9 @@ pub fn get_features_from_dirty_piece(
     dirty_piece: &DirtyPiece,
     perspective: Color,
     king_sq: Square,
-) -> (Vec<usize>, Vec<usize>) {
-    let mut removed = Vec::new();
-    let mut added = Vec::new();
+) -> ChangedFeatures {
+    let mut removed = IndexList::new();
+    let mut added = IndexList::new();
 
     for dp in dirty_piece.pieces() {
         // 盤上から消える側（old）
@@ -83,15 +86,15 @@ pub fn get_changed_features(
     pos: &Position,
     dirty_piece: &DirtyPiece,
     perspective: Color,
-) -> (Vec<usize>, Vec<usize>) {
+) -> ChangedFeatures {
     if pos.previous_state().is_none() {
         // 前の局面が無い（初期状態など）
-        return (Vec::new(), Vec::new());
+        return (IndexList::new(), IndexList::new());
     }
 
     // 玉が動いた場合は全計算が必要（HalfKP は自玉位置×駒配置のため）
     if dirty_piece.king_moved[perspective.index()] {
-        return (Vec::new(), Vec::new());
+        return (IndexList::new(), IndexList::new());
     };
 
     let king_sq = pos.king_square(perspective);

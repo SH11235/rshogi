@@ -4,7 +4,9 @@
 //! 片側 256 次元×両視点 = 512 次元の中間表現を生成する。
 //! 盤上駒および手駒を特徴量として扱い、`DirtyPiece` に基づく差分更新にも対応する。
 
-use super::accumulator::{Accumulator, AccumulatorStack, Aligned, DirtyPiece};
+use super::accumulator::{
+    Accumulator, AccumulatorStack, Aligned, DirtyPiece, IndexList, MAX_ACTIVE_FEATURES,
+};
 use super::constants::{HALFKP_DIMENSIONS, TRANSFORMED_FEATURE_DIMENSIONS};
 use super::diff::{get_changed_features, get_features_from_dirty_piece};
 use crate::position::Position;
@@ -58,7 +60,7 @@ impl FeatureTransformer {
 
             // アクティブな特徴量の重みを加算
             let active_indices = self.get_active_features(pos, perspective);
-            for index in active_indices {
+            for &index in active_indices.iter() {
                 self.add_weights(accumulation, index);
             }
         }
@@ -93,12 +95,12 @@ impl FeatureTransformer {
             curr.copy_from_slice(prev);
 
             // 削除された特徴量の重みを減算
-            for index in removed {
+            for &index in removed.iter() {
                 self.sub_weights(curr, index);
             }
 
             // 追加された特徴量の重みを加算
-            for index in added {
+            for &index in added.iter() {
                 self.add_weights(curr, index);
             }
         }
@@ -139,7 +141,7 @@ impl FeatureTransformer {
         }
 
         // 3. 各手の差分を順番に適用
-        for entry_idx in path {
+        for &entry_idx in path.iter() {
             let dirty_piece = stack.entry_at(entry_idx).dirty_piece;
 
             for perspective in [Color::Black, Color::White] {
@@ -159,10 +161,10 @@ impl FeatureTransformer {
                 let p = perspective as usize;
                 let accumulation = stack.current_mut().accumulator.get_mut(p);
 
-                for index in removed {
+                for &index in removed.iter() {
                     self.sub_weights(accumulation, index);
                 }
-                for index in added {
+                for &index in added.iter() {
                     self.add_weights(accumulation, index);
                 }
             }
@@ -176,9 +178,13 @@ impl FeatureTransformer {
     /// アクティブな特徴量のインデックスリストを取得
     ///
     /// 盤上駒および手駒を HalfKP 特徴量に写像する。
-    fn get_active_features(&self, pos: &Position, perspective: Color) -> Vec<usize> {
+    fn get_active_features(
+        &self,
+        pos: &Position,
+        perspective: Color,
+    ) -> IndexList<MAX_ACTIVE_FEATURES> {
         let king_sq = pos.king_square(perspective);
-        let mut features = Vec::with_capacity(38); // 最大38駒（玉2つ以外）
+        let mut features = IndexList::new();
 
         // 盤上の駒
         for sq in pos.occupied().iter() {

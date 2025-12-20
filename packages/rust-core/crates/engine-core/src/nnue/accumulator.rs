@@ -10,6 +10,86 @@
 
 use super::constants::TRANSFORMED_FEATURE_DIMENSIONS;
 use crate::types::{Color, Piece, PieceType, Square, Value, MAX_PLY};
+use std::mem::MaybeUninit;
+
+// =============================================================================
+// IndexList - 固定長の特徴量インデックスリスト
+// =============================================================================
+
+/// 差分更新での最大変化特徴量数（駒3 + 手駒2 + 余裕）
+pub const MAX_CHANGED_FEATURES: usize = 8;
+
+/// 全特徴量取得での最大数（盤上38 + 手駒14 = 52）
+pub const MAX_ACTIVE_FEATURES: usize = 52;
+
+/// collect_path での最大パス長（find_usable_accumulator の MAX_DEPTH と同じ）
+pub const MAX_PATH_LENGTH: usize = 8;
+
+/// 固定長の特徴量インデックスリスト
+///
+/// Vec の代わりにスタック上の固定長配列を使用し、ヒープ割り当てを回避する。
+/// MaybeUninit を使用して初期化コストをゼロにする。
+#[derive(Clone, Copy)]
+pub struct IndexList<const N: usize> {
+    /// 未初期化領域を許容する配列
+    indices: [MaybeUninit<usize>; N],
+    /// 有効な要素数
+    len: u8,
+}
+
+impl<const N: usize> IndexList<N> {
+    /// 空のリストを作成（初期化コストゼロ）
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            // SAFETY: MaybeUninit<T> の配列は初期化不要
+            indices: unsafe { MaybeUninit::uninit().assume_init() },
+            len: 0,
+        }
+    }
+
+    /// 要素を追加
+    #[inline]
+    pub fn push(&mut self, index: usize) {
+        debug_assert!((self.len as usize) < N, "IndexList overflow");
+        // SAFETY: len < N なので範囲内。MaybeUninit への書き込みは常に安全
+        self.indices[self.len as usize].write(index);
+        self.len += 1;
+    }
+
+    /// イテレータを返す
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = &usize> {
+        // SAFETY: 0..len の範囲は全て初期化済み
+        self.indices[..self.len as usize].iter().map(|v| unsafe { v.assume_init_ref() })
+    }
+
+    /// 空かどうか
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// 要素数
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// 要素を逆順に並べ替え
+    #[inline]
+    pub fn reverse(&mut self) {
+        // SAFETY: 0..len の範囲は全て初期化済み
+        let slice = &mut self.indices[..self.len as usize];
+        slice.reverse();
+    }
+}
+
+impl<const N: usize> Default for IndexList<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// アライメントを保証するラッパー（64バイト = キャッシュライン）
 #[repr(C, align(64))]
@@ -364,8 +444,8 @@ impl AccumulatorStack {
     /// source_idxからcurrent_idxまでのパスを収集
     ///
     /// 戻り値: source側から適用する順のインデックス列
-    pub fn collect_path(&self, source_idx: usize) -> Vec<usize> {
-        let mut path = Vec::with_capacity(8);
+    pub fn collect_path(&self, source_idx: usize) -> IndexList<MAX_PATH_LENGTH> {
+        let mut path = IndexList::new();
         let mut idx = self.current_idx;
 
         while idx != source_idx {
@@ -378,7 +458,7 @@ impl AccumulatorStack {
                         false,
                         "Path broken: expected to reach source_idx={source_idx} but got None at idx={idx}"
                     );
-                    return vec![];
+                    return IndexList::new();
                 }
             }
         }
