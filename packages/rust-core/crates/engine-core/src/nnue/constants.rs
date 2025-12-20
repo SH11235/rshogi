@@ -28,6 +28,15 @@ pub const SIMD_WIDTH: usize = 8;
 /// 変換後の次元数（片方の視点）
 pub const TRANSFORMED_FEATURE_DIMENSIONS: usize = 256;
 
+/// リフレッシュトリガーの数（YO kRefreshTriggers.size() 相当）
+/// HalfKP の場合は FriendKingMoved のみで 1
+///
+/// 注意: この値を変更する場合、以下の箇所も更新が必要:
+/// - `Accumulator` の `accumulation` 配列サイズ
+/// - `FeatureTransformer` の `refresh_accumulator` / `update_accumulator` / `transform`
+/// - `HalfKPFeatureSet::REFRESH_TRIGGERS`
+pub const NUM_REFRESH_TRIGGERS: usize = 1;
+
 /// HalfKP特徴量の次元数
 /// 81（玉の位置）× FE_END（BonaPiece数）
 pub const HALFKP_DIMENSIONS: usize = 81 * super::bona_piece::FE_END;

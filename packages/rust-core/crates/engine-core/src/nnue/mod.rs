@@ -14,6 +14,7 @@ mod bona_piece;
 mod constants;
 mod diff;
 mod feature_transformer;
+pub mod features;
 mod layers;
 mod network;
 
@@ -24,5 +25,6 @@ pub use bona_piece::{BonaPiece, FE_END};
 pub use constants::*;
 pub use diff::get_changed_features;
 pub use feature_transformer::FeatureTransformer;
+pub use features::{Feature, FeatureSet, HalfKP, HalfKPFeatureSet, TriggerEvent};
 pub use layers::{AffineTransform, ClippedReLU};
 pub use network::{evaluate, init_nnue, init_nnue_from_bytes, Network};
