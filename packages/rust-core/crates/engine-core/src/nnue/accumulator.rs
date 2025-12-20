@@ -33,7 +33,7 @@ pub const MAX_PATH_LENGTH: usize = 8;
 pub struct IndexList<const N: usize> {
     /// 未初期化領域を許容する配列
     indices: [MaybeUninit<usize>; N],
-    /// 有効な要素数
+    /// 有効な要素数（N ≤ 255 の前提）
     len: u8,
 }
 
@@ -49,6 +49,11 @@ impl<const N: usize> IndexList<N> {
     }
 
     /// 要素を追加
+    ///
+    /// # Safety Contract
+    /// 呼び出し側が容量（N）を超えないことを保証する責任がある。
+    /// release ビルドでは境界チェックが行われないため、
+    /// 容量オーバー時の動作は未定義。
     #[inline]
     pub fn push(&mut self, index: usize) {
         debug_assert!((self.len as usize) < N, "IndexList overflow");
@@ -59,7 +64,7 @@ impl<const N: usize> IndexList<N> {
 
     /// イテレータを返す
     #[inline]
-    pub fn iter(&self) -> impl Iterator<Item = &usize> {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &usize> + '_ {
         // SAFETY: 0..len の範囲は全て初期化済み
         self.indices[..self.len as usize].iter().map(|v| unsafe { v.assume_init_ref() })
     }
