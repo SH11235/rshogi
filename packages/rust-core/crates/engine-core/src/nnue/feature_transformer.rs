@@ -7,7 +7,7 @@
 use super::accumulator::{
     Accumulator, AccumulatorStack, Aligned, DirtyPiece, IndexList, MAX_ACTIVE_FEATURES,
 };
-use super::constants::{HALFKP_DIMENSIONS, TRANSFORMED_FEATURE_DIMENSIONS};
+use super::constants::{HALFKP_DIMENSIONS, NUM_REFRESH_TRIGGERS, TRANSFORMED_FEATURE_DIMENSIONS};
 use super::diff::{get_changed_features, get_features_from_dirty_piece};
 use super::features::{FeatureSet, HalfKPFeatureSet};
 use crate::position::Position;
@@ -51,18 +51,28 @@ impl FeatureTransformer {
     }
 
     /// 差分計算を使わずにAccumulatorを計算
+    ///
+    /// YaneuraOu の classic NNUE と同様に、トリガーごとにアキュムレータを計算する。
+    /// 現在は NUM_REFRESH_TRIGGERS=1 なので trigger=0 のみ処理。
     pub fn refresh_accumulator(&self, pos: &Position, acc: &mut Accumulator) {
-        for perspective in [Color::Black, Color::White] {
-            let p = perspective as usize;
-            let accumulation = acc.get_mut(p);
+        // トリガーごとにループ（現在は trigger=0 のみ）
+        for trigger in 0..NUM_REFRESH_TRIGGERS {
+            for perspective in [Color::Black, Color::White] {
+                let p = perspective as usize;
+                let accumulation = acc.get_mut(p, trigger);
 
-            // バイアスで初期化
-            accumulation.copy_from_slice(&self.biases.0);
+                // trigger=0 はバイアスで初期化、それ以外はゼロ初期化
+                if trigger == 0 {
+                    accumulation.copy_from_slice(&self.biases.0);
+                } else {
+                    accumulation.fill(0);
+                }
 
-            // アクティブな特徴量の重みを加算
-            let active_indices = self.get_active_features(pos, perspective);
-            for &index in active_indices.iter() {
-                self.add_weights(accumulation, index);
+                // アクティブな特徴量の重みを加算
+                let active_indices = self.get_active_features(pos, perspective);
+                for &index in active_indices.iter() {
+                    self.add_weights(accumulation, index);
+                }
             }
         }
 
@@ -80,29 +90,32 @@ impl FeatureTransformer {
         acc: &mut Accumulator,
         prev_acc: &Accumulator,
     ) -> bool {
-        for perspective in [Color::Black, Color::White] {
-            let p = perspective as usize;
+        // トリガーごとにループ（現在は trigger=0 のみ）
+        for trigger in 0..NUM_REFRESH_TRIGGERS {
+            for perspective in [Color::Black, Color::White] {
+                let p = perspective as usize;
 
-            let (removed, added) = get_changed_features(pos, dirty_piece, perspective);
+                let (removed, added) = get_changed_features(pos, dirty_piece, perspective);
 
-            // 差分が取れない場合は全計算が必要
-            if removed.is_empty() && added.is_empty() {
-                return false;
-            }
+                // 差分が取れない場合は全計算が必要
+                if removed.is_empty() && added.is_empty() {
+                    return false;
+                }
 
-            // 前の値をコピー
-            let prev = prev_acc.get(p);
-            let curr = acc.get_mut(p);
-            curr.copy_from_slice(prev);
+                // 前の値をコピー
+                let prev = prev_acc.get(p, trigger);
+                let curr = acc.get_mut(p, trigger);
+                curr.copy_from_slice(prev);
 
-            // 削除された特徴量の重みを減算
-            for &index in removed.iter() {
-                self.sub_weights(curr, index);
-            }
+                // 削除された特徴量の重みを減算
+                for &index in removed.iter() {
+                    self.sub_weights(curr, index);
+                }
 
-            // 追加された特徴量の重みを加算
-            for &index in added.iter() {
-                self.add_weights(curr, index);
+                // 追加された特徴量の重みを加算
+                for &index in added.iter() {
+                    self.add_weights(curr, index);
+                }
             }
         }
 
@@ -135,9 +148,12 @@ impl FeatureTransformer {
         let source_acc = stack.entry_at(source_idx).accumulator.clone();
         {
             let current_acc = &mut stack.current_mut().accumulator;
-            for perspective in [Color::Black, Color::White] {
-                let p = perspective as usize;
-                current_acc.get_mut(p).copy_from_slice(source_acc.get(p));
+            // トリガーごとにコピー
+            for trigger in 0..NUM_REFRESH_TRIGGERS {
+                for perspective in [Color::Black, Color::White] {
+                    let p = perspective as usize;
+                    current_acc.get_mut(p, trigger).copy_from_slice(source_acc.get(p, trigger));
+                }
             }
         }
 
@@ -145,28 +161,31 @@ impl FeatureTransformer {
         for &entry_idx in path.iter() {
             let dirty_piece = stack.entry_at(entry_idx).dirty_piece;
 
-            for perspective in [Color::Black, Color::White] {
-                // find_usable_accumulator() で玉移動がないことを確認済み
-                debug_assert!(
-                    !dirty_piece.king_moved[perspective.index()],
-                    "King moved between source and current - should have been caught by find_usable_accumulator"
-                );
+            // トリガーごとにループ（現在は trigger=0 のみ）
+            for trigger in 0..NUM_REFRESH_TRIGGERS {
+                for perspective in [Color::Black, Color::White] {
+                    // find_usable_accumulator() で玉移動がないことを確認済み
+                    debug_assert!(
+                        !dirty_piece.king_moved[perspective.index()],
+                        "King moved between source and current - should have been caught by find_usable_accumulator"
+                    );
 
-                // 現局面の玉位置を使用（玉移動なしなので祖先と同じ）
-                let king_sq = pos.king_square(perspective);
-                let (removed, added) =
-                    get_features_from_dirty_piece(&dirty_piece, perspective, king_sq);
+                    // 現局面の玉位置を使用（玉移動なしなので祖先と同じ）
+                    let king_sq = pos.king_square(perspective);
+                    let (removed, added) =
+                        get_features_from_dirty_piece(&dirty_piece, perspective, king_sq);
 
-                // 差分が空の場合はスキップ（何も変化なし）
-                // 注: 通常の駒移動では差分が発生するが、null move では空になる
-                let p = perspective as usize;
-                let accumulation = stack.current_mut().accumulator.get_mut(p);
+                    // 差分が空の場合はスキップ（何も変化なし）
+                    // 注: 通常の駒移動では差分が発生するが、null move では空になる
+                    let p = perspective as usize;
+                    let accumulation = stack.current_mut().accumulator.get_mut(p, trigger);
 
-                for &index in removed.iter() {
-                    self.sub_weights(accumulation, index);
-                }
-                for &index in added.iter() {
-                    self.add_weights(accumulation, index);
+                    for &index in removed.iter() {
+                        self.sub_weights(accumulation, index);
+                    }
+                    for &index in added.iter() {
+                        self.add_weights(accumulation, index);
+                    }
                 }
             }
         }
@@ -358,6 +377,9 @@ impl FeatureTransformer {
     /// Accumulatorの値を変換して出力
     /// ClippedReLU(clamp(0, 127))を適用し、両視点を結合
     ///
+    /// YaneuraOu の classic NNUE と同様に、トリガーごとの accumulation を合算して
+    /// ClippedReLU を適用する。現在は NUM_REFRESH_TRIGGERS=1 なので trigger=0 のみ使用。
+    ///
     /// AVX2/SSE2/WASMのSIMD最適化版。
     pub fn transform(
         &self,
@@ -369,7 +391,8 @@ impl FeatureTransformer {
 
         for (p, &perspective) in perspectives.iter().enumerate() {
             let out_offset = TRANSFORMED_FEATURE_DIMENSIONS * p;
-            let accumulation = acc.get(perspective as usize);
+            // NUM_TRIGGERS=1 の場合は trigger=0 のみ、将来 trigger が増えた場合は合算が必要
+            let accumulation = acc.get(perspective as usize, 0);
 
             // AVX2: 256bit = 16 x i16 → 32 x i8（パック後）
             #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
@@ -537,14 +560,15 @@ mod tests {
         };
 
         // Accumulatorを設定（各視点で異なる値）
+        // [perspective][trigger][dimension] 構造
         let mut acc = Accumulator::new();
         // 先手視点: 64（ClippedReLU後も64、127以下なのでクランプされない）
         for i in 0..TRANSFORMED_FEATURE_DIMENSIONS {
-            acc.accumulation[Color::Black.index()].0[i] = 64;
+            acc.accumulation[Color::Black.index()][0].0[i] = 64;
         }
         // 後手視点: 100（ClippedReLU後も100、127以下なのでクランプされない）
         for i in 0..TRANSFORMED_FEATURE_DIMENSIONS {
-            acc.accumulation[Color::White.index()].0[i] = 100;
+            acc.accumulation[Color::White.index()][0].0[i] = 100;
         }
         acc.computed_accumulation = true;
 
@@ -576,15 +600,16 @@ mod tests {
 
         let mut acc = Accumulator::new();
         // クリッピングテスト: 負の値→0、127超→127
+        // [perspective][trigger][dimension] 構造
         for i in 0..TRANSFORMED_FEATURE_DIMENSIONS {
             if i < 64 {
-                acc.accumulation[Color::Black.index()].0[i] = -100; // 負→0にクランプ
+                acc.accumulation[Color::Black.index()][0].0[i] = -100; // 負→0にクランプ
             } else if i < 128 {
-                acc.accumulation[Color::Black.index()].0[i] = 200; // 127超→127にクランプ
+                acc.accumulation[Color::Black.index()][0].0[i] = 200; // 127超→127にクランプ
             } else {
-                acc.accumulation[Color::Black.index()].0[i] = 50; // 範囲内→そのまま
+                acc.accumulation[Color::Black.index()][0].0[i] = 50; // 範囲内→そのまま
             }
-            acc.accumulation[Color::White.index()].0[i] = 0;
+            acc.accumulation[Color::White.index()][0].0[i] = 0;
         }
         acc.computed_accumulation = true;
 

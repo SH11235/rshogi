@@ -136,4 +136,33 @@ impl FeatureSet for HalfKPFeatureSet {
     }
 }
 
-pub use HalfKPFeatureSet as RawFeatures;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_needs_refresh_black_king_moved() {
+        let mut dirty_piece = DirtyPiece::new();
+        dirty_piece.king_moved[Color::Black.index()] = true;
+
+        assert!(HalfKPFeatureSet::needs_refresh(&dirty_piece, Color::Black));
+        assert!(!HalfKPFeatureSet::needs_refresh(&dirty_piece, Color::White));
+    }
+
+    #[test]
+    fn test_needs_refresh_white_king_moved() {
+        let mut dirty_piece = DirtyPiece::new();
+        dirty_piece.king_moved[Color::White.index()] = true;
+
+        assert!(!HalfKPFeatureSet::needs_refresh(&dirty_piece, Color::Black));
+        assert!(HalfKPFeatureSet::needs_refresh(&dirty_piece, Color::White));
+    }
+
+    #[test]
+    fn test_needs_refresh_no_king_moved() {
+        let dirty_piece = DirtyPiece::new();
+
+        assert!(!HalfKPFeatureSet::needs_refresh(&dirty_piece, Color::Black));
+        assert!(!HalfKPFeatureSet::needs_refresh(&dirty_piece, Color::White));
+    }
+}

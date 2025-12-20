@@ -8,7 +8,7 @@
 //! AccumulatorStack は探索時の Accumulator と DirtyPiece を管理するスタック。
 //! StateInfo から Accumulator を分離し、do_move での初期化コストを削減する。
 
-use super::constants::TRANSFORMED_FEATURE_DIMENSIONS;
+use super::constants::{NUM_REFRESH_TRIGGERS, TRANSFORMED_FEATURE_DIMENSIONS};
 use crate::types::{Color, Piece, PieceType, Square, Value, MAX_PLY};
 use std::mem::MaybeUninit;
 
@@ -33,7 +33,7 @@ pub const MAX_PATH_LENGTH: usize = 8;
 pub struct IndexList<const N: usize> {
     /// 未初期化領域を許容する配列
     indices: [MaybeUninit<usize>; N],
-    /// 有効な要素数
+    /// 有効な要素数（N ≤ 255 の前提）
     len: u8,
 }
 
@@ -49,6 +49,11 @@ impl<const N: usize> IndexList<N> {
     }
 
     /// 要素を追加
+    ///
+    /// # Safety Contract
+    /// 呼び出し側が容量（N）を超えないことを保証する責任がある。
+    /// release ビルドでは境界チェックが行われないため、
+    /// 容量オーバー時の動作は未定義。
     #[inline]
     pub fn push(&mut self, index: usize) {
         debug_assert!((self.len as usize) < N, "IndexList overflow");
@@ -59,7 +64,7 @@ impl<const N: usize> IndexList<N> {
 
     /// イテレータを返す
     #[inline]
-    pub fn iter(&self) -> impl Iterator<Item = &usize> {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &usize> + '_ {
         // SAFETY: 0..len の範囲は全て初期化済み
         self.indices[..self.len as usize].iter().map(|v| unsafe { v.assume_init_ref() })
     }
@@ -93,10 +98,10 @@ impl<const N: usize> Default for IndexList<N> {
 
 /// アライメントを保証するラッパー（64バイト = キャッシュライン）
 #[repr(C, align(64))]
-#[derive(Clone)]
-pub struct Aligned<T>(pub T);
+#[derive(Clone, Copy)]
+pub struct Aligned<T: Copy>(pub T);
 
-impl<T: Default> Default for Aligned<T> {
+impl<T: Default + Copy> Default for Aligned<T> {
     fn default() -> Self {
         Self(T::default())
     }
@@ -104,12 +109,18 @@ impl<T: Default> Default for Aligned<T> {
 
 /// Accumulatorの構造
 /// 入力特徴量をアフィン変換した結果を保持
+///
+/// YaneuraOu の classic NNUE と同様に、トリガーごとに accumulation を分離。
+/// `accumulation[perspective][trigger][dimension]` の構造で、
+/// transform 時にトリガーごとの値を合算する。
+/// 現在は NUM_REFRESH_TRIGGERS=1 なので従来と同等の動作。
 #[repr(C, align(64))]
 #[derive(Clone)]
 pub struct Accumulator {
-    /// 累積値 [perspective][dimension]
+    /// 累積値 [perspective][trigger][dimension]
     /// - perspective: BLACK=0, WHITE=1
-    pub accumulation: [Aligned<[i16; TRANSFORMED_FEATURE_DIMENSIONS]>; 2],
+    /// - trigger: 0..NUM_REFRESH_TRIGGERS
+    pub accumulation: [[Aligned<[i16; TRANSFORMED_FEATURE_DIMENSIONS]>; NUM_REFRESH_TRIGGERS]; 2],
 
     /// 計算済みの評価値（キャッシュ）
     pub score: Value,
@@ -124,10 +135,8 @@ pub struct Accumulator {
 impl Default for Accumulator {
     fn default() -> Self {
         Self {
-            accumulation: [
-                Aligned([0i16; TRANSFORMED_FEATURE_DIMENSIONS]),
-                Aligned([0i16; TRANSFORMED_FEATURE_DIMENSIONS]),
-            ],
+            accumulation: [[Aligned([0i16; TRANSFORMED_FEATURE_DIMENSIONS]); NUM_REFRESH_TRIGGERS];
+                2],
             score: Value::ZERO,
             computed_accumulation: false,
             computed_score: false,
@@ -149,16 +158,24 @@ impl Accumulator {
         self.computed_score = false;
     }
 
-    /// 視点ごとの累積値への参照を取得
+    /// 視点・トリガーごとの累積値への参照を取得
     #[inline]
-    pub fn get(&self, perspective: usize) -> &[i16; TRANSFORMED_FEATURE_DIMENSIONS] {
-        &self.accumulation[perspective].0
+    pub fn get(
+        &self,
+        perspective: usize,
+        trigger: usize,
+    ) -> &[i16; TRANSFORMED_FEATURE_DIMENSIONS] {
+        &self.accumulation[perspective][trigger].0
     }
 
-    /// 視点ごとの累積値への可変参照を取得
+    /// 視点・トリガーごとの累積値への可変参照を取得
     #[inline]
-    pub fn get_mut(&mut self, perspective: usize) -> &mut [i16; TRANSFORMED_FEATURE_DIMENSIONS] {
-        &mut self.accumulation[perspective].0
+    pub fn get_mut(
+        &mut self,
+        perspective: usize,
+        trigger: usize,
+    ) -> &mut [i16; TRANSFORMED_FEATURE_DIMENSIONS] {
+        &mut self.accumulation[perspective][trigger].0
     }
 }
 
@@ -501,11 +518,12 @@ mod tests {
     #[test]
     fn test_accumulator_get() {
         let mut acc = Accumulator::new();
-        acc.accumulation[0].0[0] = 100;
-        acc.accumulation[1].0[0] = 200;
+        // [perspective][trigger][dimension] 構造
+        acc.accumulation[0][0].0[0] = 100;
+        acc.accumulation[1][0].0[0] = 200;
 
-        assert_eq!(acc.get(0)[0], 100);
-        assert_eq!(acc.get(1)[0], 200);
+        assert_eq!(acc.get(0, 0)[0], 100);
+        assert_eq!(acc.get(1, 0)[0], 200);
     }
 
     #[test]
