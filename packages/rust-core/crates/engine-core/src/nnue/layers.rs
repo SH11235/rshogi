@@ -34,8 +34,33 @@ unsafe fn hsum_i32_avx2(v: std::arch::x86_64::__m256i) -> i32 {
     _mm_cvtsi128_si32(sum32)
 }
 
+/// AVX512-VNNI用 DPBUSD（1命令版）
+///
+/// Intel Ice Lake以降/AMD Zen 4以降で利用可能。
+/// `vpdpbusd` 命令で u8×i8→i32 積和演算を1命令で実行。
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx512vnni",
+    target_feature = "avx512vl"
+))]
+#[inline]
+unsafe fn m256_add_dpbusd_epi32(
+    acc: &mut std::arch::x86_64::__m256i,
+    a: std::arch::x86_64::__m256i,
+    b: std::arch::x86_64::__m256i,
+) {
+    use std::arch::x86_64::*;
+    *acc = _mm256_dpbusd_epi32(*acc, a, b);
+}
+
 /// AVX2用 DPBUSD エミュレーション（u8×i8→i32積和演算）
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+///
+/// VNNI非対応CPU向け。`maddubs` + `madd` の2命令で積和演算を実行。
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
+    not(all(target_feature = "avx512vnni", target_feature = "avx512vl"))
+))]
 #[inline]
 unsafe fn m256_add_dpbusd_epi32(
     acc: &mut std::arch::x86_64::__m256i,
