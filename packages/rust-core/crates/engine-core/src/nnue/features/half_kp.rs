@@ -9,6 +9,24 @@ use crate::nnue::bona_piece::{bona_piece_from_base, halfkp_index, BonaPiece, FE_
 use crate::position::Position;
 use crate::types::{Color, PieceType, Square};
 
+/// 盤上の駒種（King除外）
+/// append_active_indices で使用する定数配列
+const BOARD_PIECE_TYPES: [PieceType; 13] = [
+    PieceType::Pawn,
+    PieceType::Lance,
+    PieceType::Knight,
+    PieceType::Silver,
+    PieceType::Gold,
+    PieceType::Bishop,
+    PieceType::Rook,
+    PieceType::ProPawn,
+    PieceType::ProLance,
+    PieceType::ProKnight,
+    PieceType::ProSilver,
+    PieceType::Horse,
+    PieceType::Dragon,
+];
+
 /// HalfKP<Friend> 特徴量
 ///
 /// 自玉位置×駒配置（BonaPiece）の組み合わせで特徴量を表現する。
@@ -38,23 +56,6 @@ impl Feature for HalfKP {
         let king_sq = pos.king_square(perspective);
 
         // 盤上の駒（駒種・色ごとにループ）
-        // King は特徴量に含めないので除外
-        const BOARD_PIECE_TYPES: [PieceType; 13] = [
-            PieceType::Pawn,
-            PieceType::Lance,
-            PieceType::Knight,
-            PieceType::Silver,
-            PieceType::Gold,
-            PieceType::Bishop,
-            PieceType::Rook,
-            PieceType::ProPawn,
-            PieceType::ProLance,
-            PieceType::ProKnight,
-            PieceType::ProSilver,
-            PieceType::Horse,
-            PieceType::Dragon,
-        ];
-
         for color in [Color::Black, Color::White] {
             let is_friend = (color == perspective) as usize;
 

@@ -47,8 +47,14 @@ pub const PIECE_BASE: [[u16; 2]; 15] = [
 ];
 
 /// base offset から直接 BonaPiece を生成（高速パス用）
+///
+/// # Safety
+/// - `sq_index` は 0..=80 の範囲内であること
+/// - `base` は PIECE_BASE テーブルから取得した有効な値であること
 #[inline]
 pub fn bona_piece_from_base(sq_index: usize, base: u16) -> BonaPiece {
+    debug_assert!(sq_index <= 80, "sq_index out of range: {sq_index}");
+    debug_assert!(base <= 1378, "base out of range: {base}");
     BonaPiece::new(base + sq_index as u16)
 }
 
@@ -298,5 +304,48 @@ mod tests {
 
         let index = halfkp_index(king_sq, bp);
         assert_eq!(index, king_sq.index() * FE_END + 100);
+    }
+
+    #[test]
+    fn test_piece_base_table_consistency() {
+        // 全駒種について、PIECE_BASEテーブルとfrom_piece_square()の結果が一致することを確認
+        let all_piece_types = [
+            PieceType::Pawn,
+            PieceType::Lance,
+            PieceType::Knight,
+            PieceType::Silver,
+            PieceType::Gold,
+            PieceType::Bishop,
+            PieceType::Rook,
+            PieceType::ProPawn,
+            PieceType::ProLance,
+            PieceType::ProKnight,
+            PieceType::ProSilver,
+            PieceType::Horse,
+            PieceType::Dragon,
+        ];
+
+        let sq = Square::from_u8(0).unwrap();
+        let perspective = Color::Black;
+
+        for pt in all_piece_types {
+            for &color in &[Color::Black, Color::White] {
+                let is_friend = color == perspective;
+                let piece = Piece::new(color, pt);
+
+                // from_piece_square() の結果
+                let bp_old = BonaPiece::from_piece_square(piece, sq, perspective);
+
+                // PIECE_BASE テーブルからの結果
+                let base = PIECE_BASE[pt as usize][is_friend as usize];
+                let bp_new = bona_piece_from_base(0, base);
+
+                assert_eq!(
+                    bp_old, bp_new,
+                    "Mismatch for {:?}, color={:?}, is_friend={}",
+                    pt, color, is_friend
+                );
+            }
+        }
     }
 }
