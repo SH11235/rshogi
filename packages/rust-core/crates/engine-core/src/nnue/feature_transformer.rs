@@ -8,7 +8,7 @@ use super::accumulator::{
     Accumulator, AccumulatorStack, Aligned, DirtyPiece, IndexList, MAX_ACTIVE_FEATURES,
 };
 use super::constants::{HALFKP_DIMENSIONS, NUM_REFRESH_TRIGGERS, TRANSFORMED_FEATURE_DIMENSIONS};
-use super::diff::{get_changed_features, get_features_from_dirty_piece};
+use super::diff::get_features_from_dirty_piece;
 use super::features::{FeatureSet, HalfKPFeatureSet};
 use crate::position::Position;
 use crate::types::Color;
@@ -82,46 +82,63 @@ impl FeatureTransformer {
 
     /// 差分計算でAccumulatorを更新
     ///
-    /// 戻り値: 差分更新が成功したらtrue、全計算が必要ならfalse。
+    /// YaneuraOu classic と同様に、視点ごとに reset 判定を行う。
+    /// reset が必要な視点は biases から再構築、それ以外は差分更新。
     pub fn update_accumulator(
         &self,
         pos: &Position,
         dirty_piece: &DirtyPiece,
         acc: &mut Accumulator,
         prev_acc: &Accumulator,
-    ) -> bool {
+    ) {
         // トリガーごとにループ（現在は trigger=0 のみ）
         for trigger in 0..NUM_REFRESH_TRIGGERS {
             for perspective in [Color::Black, Color::White] {
                 let p = perspective as usize;
+                let reset = HalfKPFeatureSet::needs_refresh(dirty_piece, perspective);
 
-                let (removed, added) = get_changed_features(pos, dirty_piece, perspective);
+                if reset {
+                    // reset が必要な場合: biases で初期化してアクティブ特徴量を加算
+                    let accumulation = acc.get_mut(p, trigger);
+                    if trigger == 0 {
+                        accumulation.copy_from_slice(&self.biases.0);
+                    } else {
+                        accumulation.fill(0);
+                    }
 
-                // 差分が取れない場合は全計算が必要
-                if removed.is_empty() && added.is_empty() {
-                    return false;
-                }
+                    // アクティブな特徴量の重みを加算
+                    let active_indices = self.get_active_features(pos, perspective);
+                    for &index in active_indices.iter() {
+                        self.add_weights(accumulation, index);
+                    }
+                } else {
+                    // 差分更新
+                    let (removed, added) = get_features_from_dirty_piece(
+                        dirty_piece,
+                        perspective,
+                        pos.king_square(perspective),
+                    );
 
-                // 前の値をコピー
-                let prev = prev_acc.get(p, trigger);
-                let curr = acc.get_mut(p, trigger);
-                curr.copy_from_slice(prev);
+                    // 前の値をコピー
+                    let prev = prev_acc.get(p, trigger);
+                    let curr = acc.get_mut(p, trigger);
+                    curr.copy_from_slice(prev);
 
-                // 削除された特徴量の重みを減算
-                for &index in removed.iter() {
-                    self.sub_weights(curr, index);
-                }
+                    // 削除された特徴量の重みを減算
+                    for &index in removed.iter() {
+                        self.sub_weights(curr, index);
+                    }
 
-                // 追加された特徴量の重みを加算
-                for &index in added.iter() {
-                    self.add_weights(curr, index);
+                    // 追加された特徴量の重みを加算
+                    for &index in added.iter() {
+                        self.add_weights(curr, index);
+                    }
                 }
             }
         }
 
         acc.computed_accumulation = true;
         acc.computed_score = false;
-        true
     }
 
     /// 複数手分の差分を適用してアキュムレータを更新（遅延評価パターン）
@@ -211,6 +228,7 @@ impl FeatureTransformer {
     /// 重みを累積値に加算
     ///
     /// AVX2/SSE2/WASMのSIMD最適化版。256要素を一度に処理。
+    /// YaneuraOu classic と同様に非飽和演算を使用する。
     #[inline]
     fn add_weights(&self, accumulation: &mut [i16; TRANSFORMED_FEATURE_DIMENSIONS], index: usize) {
         let offset = index * TRANSFORMED_FEATURE_DIMENSIONS;
@@ -235,7 +253,7 @@ impl FeatureTransformer {
                 for i in 0..16 {
                     let acc_vec = _mm256_loadu_si256(acc_ptr.add(i * 16) as *const __m256i);
                     let weight_vec = _mm256_loadu_si256(weight_ptr.add(i * 16) as *const __m256i);
-                    let result = _mm256_adds_epi16(acc_vec, weight_vec);
+                    let result = _mm256_add_epi16(acc_vec, weight_vec);
                     _mm256_storeu_si256(acc_ptr.add(i * 16) as *mut __m256i, result);
                 }
             }
@@ -258,7 +276,7 @@ impl FeatureTransformer {
                 for i in 0..32 {
                     let acc_vec = _mm_loadu_si128(acc_ptr.add(i * 8) as *const __m128i);
                     let weight_vec = _mm_loadu_si128(weight_ptr.add(i * 8) as *const __m128i);
-                    let result = _mm_adds_epi16(acc_vec, weight_vec);
+                    let result = _mm_add_epi16(acc_vec, weight_vec);
                     _mm_storeu_si128(acc_ptr.add(i * 8) as *mut __m128i, result);
                 }
             }
@@ -277,23 +295,24 @@ impl FeatureTransformer {
                 for i in 0..32 {
                     let acc_vec = v128_load(acc_ptr.add(i * 8) as *const v128);
                     let weight_vec = v128_load(weight_ptr.add(i * 8) as *const v128);
-                    let result = i16x8_add_sat(acc_vec, weight_vec);
+                    let result = i16x8_add(acc_vec, weight_vec);
                     v128_store(acc_ptr.add(i * 8) as *mut v128, result);
                 }
             }
             return;
         }
 
-        // スカラーフォールバック
+        // スカラーフォールバック（非飽和演算 - YO classic と同等）
         #[allow(unreachable_code)]
         for (acc, &weight) in accumulation.iter_mut().zip(weights) {
-            *acc = acc.saturating_add(weight);
+            *acc = acc.wrapping_add(weight);
         }
     }
 
     /// 重みを累積値から減算
     ///
     /// AVX2/SSE2/WASMのSIMD最適化版。256要素を一度に処理。
+    /// YaneuraOu classic と同様に非飽和演算を使用する。
     #[inline]
     fn sub_weights(&self, accumulation: &mut [i16; TRANSFORMED_FEATURE_DIMENSIONS], index: usize) {
         let offset = index * TRANSFORMED_FEATURE_DIMENSIONS;
@@ -318,7 +337,7 @@ impl FeatureTransformer {
                 for i in 0..16 {
                     let acc_vec = _mm256_loadu_si256(acc_ptr.add(i * 16) as *const __m256i);
                     let weight_vec = _mm256_loadu_si256(weight_ptr.add(i * 16) as *const __m256i);
-                    let result = _mm256_subs_epi16(acc_vec, weight_vec);
+                    let result = _mm256_sub_epi16(acc_vec, weight_vec);
                     _mm256_storeu_si256(acc_ptr.add(i * 16) as *mut __m256i, result);
                 }
             }
@@ -341,7 +360,7 @@ impl FeatureTransformer {
                 for i in 0..32 {
                     let acc_vec = _mm_loadu_si128(acc_ptr.add(i * 8) as *const __m128i);
                     let weight_vec = _mm_loadu_si128(weight_ptr.add(i * 8) as *const __m128i);
-                    let result = _mm_subs_epi16(acc_vec, weight_vec);
+                    let result = _mm_sub_epi16(acc_vec, weight_vec);
                     _mm_storeu_si128(acc_ptr.add(i * 8) as *mut __m128i, result);
                 }
             }
@@ -360,17 +379,17 @@ impl FeatureTransformer {
                 for i in 0..32 {
                     let acc_vec = v128_load(acc_ptr.add(i * 8) as *const v128);
                     let weight_vec = v128_load(weight_ptr.add(i * 8) as *const v128);
-                    let result = i16x8_sub_sat(acc_vec, weight_vec);
+                    let result = i16x8_sub(acc_vec, weight_vec);
                     v128_store(acc_ptr.add(i * 8) as *mut v128, result);
                 }
             }
             return;
         }
 
-        // スカラーフォールバック
+        // スカラーフォールバック（非飽和演算 - YO classic と同等）
         #[allow(unreachable_code)]
         for (acc, &weight) in accumulation.iter_mut().zip(weights) {
-            *acc = acc.saturating_sub(weight);
+            *acc = acc.wrapping_sub(weight);
         }
     }
 
