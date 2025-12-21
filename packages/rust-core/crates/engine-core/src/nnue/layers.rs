@@ -93,6 +93,29 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
     /// AVX2/SSE2/WASMのSIMD最適化版。
     /// 密な行列積方式（YaneuraOuスタイル）で実装。
     ///
+    /// # アライメント要件
+    ///
+    /// **重要**: 入力スライスは64バイトアライメントが必要です。
+    ///
+    /// | ターゲット | 必要アライメント | 使用命令 |
+    /// |-----------|-----------------|----------|
+    /// | AVX2 (`x86_64`) | 32バイト以上 | `_mm256_load_si256` |
+    /// | SSE2 (`x86_64`) | 16バイト以上 | `_mm_load_si128` |
+    /// | WASM SIMD128 | 不要 | `v128_load`（任意アドレス対応） |
+    /// | スカラー | 不要 | - |
+    ///
+    /// アライメントを保証するには、[`Aligned`](super::accumulator::Aligned) ラッパーを使用してください:
+    ///
+    /// ```ignore
+    /// use crate::nnue::accumulator::Aligned;
+    ///
+    /// let mut input = Aligned([0u8; 512]);  // 64バイトアライン
+    /// transform.propagate(&input.0, &mut output);
+    /// ```
+    ///
+    /// **警告**: アライメントされていない入力を渡すと、AVX2/SSE2環境で
+    /// 未定義動作（SIGSEGV等）が発生します。
+    ///
     /// # 入力サイズの契約
     ///
     /// 入力スライスは `PADDED_INPUT` バイト以上である必要がある。
