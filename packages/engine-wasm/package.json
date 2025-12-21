@@ -20,6 +20,7 @@
     "scripts": {
         "build": "pnpm run build:wasm && tsc -p tsconfig.build.json",
         "build:wasm": "node ./scripts/build-wasm.mjs",
+        "bench:wasm": "node ./scripts/bench-wasm.mjs",
         "dev": "tsc -p tsconfig.build.json --watch",
         "format": "pnpm --workspace-root exec biome format --write .",
         "format:check": "pnpm --workspace-root exec biome format .",
