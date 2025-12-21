@@ -861,6 +861,16 @@ export function ShogiMatch({
                                     flexDirection: "column",
                                 }}
                             >
+                                <div
+                                    style={{
+                                        textAlign: "center",
+                                        fontSize: "14px",
+                                        fontWeight: 600,
+                                        color: "hsl(var(--foreground, 0 0% 10%))",
+                                    }}
+                                >
+                                    {moves.length}手目
+                                </div>
                                 <ShogiBoard
                                     grid={grid}
                                     selectedSquare={
