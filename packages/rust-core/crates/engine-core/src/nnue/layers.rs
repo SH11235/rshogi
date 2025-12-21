@@ -69,6 +69,25 @@ unsafe fn hsum_i32_sse2(v: std::arch::x86_64::__m128i) -> i32 {
     _mm_cvtsi128_si32(sum32)
 }
 
+/// SSSE3用 DPBUSD エミュレーション（u8×i8→i32積和演算）
+/// _mm_maddubs_epi16 を使用（SSSE3命令）
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "ssse3",
+    not(target_feature = "avx2")
+))]
+#[inline]
+unsafe fn m128_add_dpbusd_epi32(
+    acc: &mut std::arch::x86_64::__m128i,
+    a: std::arch::x86_64::__m128i,
+    b: std::arch::x86_64::__m128i,
+) {
+    use std::arch::x86_64::*;
+    let product = _mm_maddubs_epi16(a, b); // SSSE3命令
+    let product32 = _mm_madd_epi16(product, _mm_set1_epi16(1));
+    *acc = _mm_add_epi32(*acc, product32);
+}
+
 /// アフィン変換層
 pub struct AffineTransform<const INPUT_DIM: usize, const OUTPUT_DIM: usize> {
     /// バイアス
@@ -82,19 +101,44 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
 
     /// チャンクサイズ（u8×4 = i32として読む単位）
     /// スクランブル形式重みとループ逆転最適化用
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[cfg(any(
+        all(target_arch = "x86_64", target_feature = "avx2"),
+        all(
+            target_arch = "x86_64",
+            target_feature = "ssse3",
+            not(target_feature = "avx2")
+        )
+    ))]
     const CHUNK_SIZE: usize = 4;
 
     /// 入力チャンク数（ループ逆転最適化用）
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[cfg(any(
+        all(target_arch = "x86_64", target_feature = "avx2"),
+        all(
+            target_arch = "x86_64",
+            target_feature = "ssse3",
+            not(target_feature = "avx2")
+        )
+    ))]
     const NUM_INPUT_CHUNKS: usize = Self::PADDED_INPUT / Self::CHUNK_SIZE;
 
     /// スクランブル形式のウェイトを使用するかどうか
-    /// OUTPUT_DIM % 8 == 0 の場合のみスクランブル形式を使用
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    /// AVX2: OUTPUT_DIM % 8 == 0、SSSE3: OUTPUT_DIM % 4 == 0 の場合に使用
+    #[cfg(any(
+        all(target_arch = "x86_64", target_feature = "avx2"),
+        all(
+            target_arch = "x86_64",
+            target_feature = "ssse3",
+            not(target_feature = "avx2")
+        )
+    ))]
     #[inline]
     const fn should_use_scrambled_weights() -> bool {
-        OUTPUT_DIM.is_multiple_of(8) && OUTPUT_DIM > 0
+        if cfg!(all(target_arch = "x86_64", target_feature = "avx2")) {
+            OUTPUT_DIM.is_multiple_of(8) && OUTPUT_DIM > 0
+        } else {
+            OUTPUT_DIM.is_multiple_of(4) && OUTPUT_DIM > 0
+        }
     }
 
     /// 重みインデックスのスクランブル変換
@@ -105,7 +149,14 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
     ///
     /// i = output * PADDED_INPUT + input の元インデックスに対して
     /// スクランブル後のインデックスを返す
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[cfg(any(
+        all(target_arch = "x86_64", target_feature = "avx2"),
+        all(
+            target_arch = "x86_64",
+            target_feature = "ssse3",
+            not(target_feature = "avx2")
+        )
+    ))]
     #[inline]
     const fn get_weight_index_scrambled(i: usize) -> usize {
         // i = output * PADDED_INPUT + input
@@ -137,8 +188,15 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
         let mut weights = AlignedBox::new_zeroed(weight_size);
         let mut buf1 = [0u8; 1];
 
-        // AVX2環境: OUTPUT_DIM % 8 == 0 の場合はスクランブル形式で格納
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        // AVX2: OUTPUT_DIM % 8 == 0、SSSE3: OUTPUT_DIM % 4 == 0 の場合はスクランブル形式で格納
+        #[cfg(any(
+            all(target_arch = "x86_64", target_feature = "avx2"),
+            all(
+                target_arch = "x86_64",
+                target_feature = "ssse3",
+                not(target_feature = "avx2")
+            )
+        ))]
         {
             for i in 0..weight_size {
                 reader.read_exact(&mut buf1)?;
@@ -151,8 +209,15 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
             }
         }
 
-        // 非AVX2環境: 元の順序で格納
-        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+        // 非AVX2/非SSSE3環境: 元の順序で格納
+        #[cfg(not(any(
+            all(target_arch = "x86_64", target_feature = "avx2"),
+            all(
+                target_arch = "x86_64",
+                target_feature = "ssse3",
+                not(target_feature = "avx2")
+            )
+        )))]
         {
             for i in 0..weight_size {
                 reader.read_exact(&mut buf1)?;
@@ -218,7 +283,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
             // - input は Aligned<[u8; N]> で64バイトアライン
             // - weights は AlignedBox<i8> で64バイトアライン（スクランブル形式）
             // - PADDED_INPUT は32の倍数なのでオフセットは常に32バイト境界
-            // - biases は i32 配列で32バイトアライン（OUTPUT_DIM % 8 == 0 の場合）
+            // - biases/output はアライン未保証だが、unaligned load/store を使用
             unsafe {
                 use std::arch::x86_64::*;
 
@@ -235,7 +300,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
                     let mut acc = [_mm256_setzero_si256(); MAX_REGS];
                     let bias_ptr = self.biases.as_ptr() as *const __m256i;
                     for k in 0..num_regs {
-                        acc[k] = _mm256_load_si256(bias_ptr.add(k));
+                        acc[k] = _mm256_loadu_si256(bias_ptr.add(k));
                     }
 
                     let input32 = input.as_ptr() as *const i32;
@@ -264,7 +329,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
                     // 結果を出力
                     let out_ptr = output.as_mut_ptr() as *mut __m256i;
                     for k in 0..num_regs {
-                        _mm256_store_si256(out_ptr.add(k), acc[k]);
+                        _mm256_storeu_si256(out_ptr.add(k), acc[k]);
                     }
                     return;
                 }
@@ -296,11 +361,99 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
             return;
         }
 
-        // SSE2: 128bit = 16 x u8/i8
+        // SSSE3: 128bit = 16 x u8/i8 (ループ逆転最適化版)
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "ssse3",
+            not(target_feature = "avx2")
+        ))]
+        {
+            // SAFETY:
+            // - input.len() >= PADDED_INPUT (debug_assert で検証済み)
+            // - weights.len() >= OUTPUT_DIM * PADDED_INPUT (構造上保証)
+            // - input は Aligned<[u8; N]> で64バイトアライン（16バイト境界も満たす）
+            // - weights は AlignedBox<i8> で64バイトアライン（スクランブル形式）
+            // - PADDED_INPUT は32の倍数なのでオフセットは常に16バイト境界
+            // - biases/output はアライン未保証だが、unaligned load/store を使用
+            unsafe {
+                use std::arch::x86_64::*;
+
+                // OUTPUT_DIM % 4 == 0 の場合: ループ逆転最適化版
+                // 入力をブロードキャストして全出力に同時適用
+                #[allow(clippy::needless_range_loop)]
+                if OUTPUT_DIM.is_multiple_of(4) && OUTPUT_DIM > 0 {
+                    // 出力レジスタ数（4出力/レジスタ）
+                    const MAX_REGS: usize = 256; // 最大1024出力まで対応
+                    let num_regs = OUTPUT_DIM / 4;
+                    debug_assert!(num_regs <= MAX_REGS);
+
+                    // アキュムレータをバイアスで初期化
+                    let mut acc = [_mm_setzero_si128(); MAX_REGS];
+                    let bias_ptr = self.biases.as_ptr() as *const __m128i;
+                    for k in 0..num_regs {
+                        acc[k] = _mm_loadu_si128(bias_ptr.add(k));
+                    }
+
+                    let input32 = input.as_ptr() as *const i32;
+                    let weights_ptr = self.weights.as_ptr();
+
+                    // 外側: 入力チャンク（入力4バイト = 1 i32）
+                    for i in 0..Self::NUM_INPUT_CHUNKS {
+                        // 入力4バイトを全レーンにブロードキャスト
+                        let in_val = _mm_set1_epi32(*input32.add(i));
+
+                        // この入力チャンクに対応する重みの開始位置
+                        // スクランブル形式: weights[input_chunk][output][4]
+                        let col =
+                            weights_ptr.add(i * OUTPUT_DIM * Self::CHUNK_SIZE) as *const __m128i;
+
+                        // 内側: 全出力レジスタに積和演算
+                        for k in 0..num_regs {
+                            m128_add_dpbusd_epi32(&mut acc[k], in_val, _mm_load_si128(col.add(k)));
+                        }
+                    }
+
+                    // 結果を出力
+                    let out_ptr = output.as_mut_ptr() as *mut __m128i;
+                    for k in 0..num_regs {
+                        _mm_storeu_si128(out_ptr.add(k), acc[k]);
+                    }
+                    return;
+                }
+
+                // OUTPUT_DIM % 4 != 0 の場合: SSSE3の_mm_maddubs_epi16を使う通常版
+                let num_chunks = Self::PADDED_INPUT / 16;
+                let one = _mm_set1_epi16(1);
+                let input_ptr = input.as_ptr();
+                let weights_ptr = self.weights.as_ptr();
+
+                for (j, (out, &bias)) in output.iter_mut().zip(&self.biases).enumerate() {
+                    let mut acc = _mm_setzero_si128();
+                    let weight_row_offset = j * Self::PADDED_INPUT;
+
+                    for k in 0..num_chunks {
+                        let offset = k * 16;
+                        let in_vec = _mm_load_si128(input_ptr.add(offset) as *const __m128i);
+                        let w_vec = _mm_load_si128(
+                            weights_ptr.add(weight_row_offset + offset) as *const __m128i
+                        );
+                        // SSSE3: _mm_maddubs_epi16
+                        let prod16 = _mm_maddubs_epi16(in_vec, w_vec);
+                        let prod32 = _mm_madd_epi16(prod16, one);
+                        acc = _mm_add_epi32(acc, prod32);
+                    }
+
+                    *out = bias + hsum_i32_sse2(acc);
+                }
+            }
+            return;
+        }
+
+        // SSE2: 128bit = 16 x u8/i8 (SSSE3非対応環境のフォールバック)
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "sse2",
-            not(target_feature = "avx2")
+            not(target_feature = "ssse3")
         ))]
         {
             // SAFETY:
@@ -516,13 +669,27 @@ mod tests {
         // スクランブル形式が有効な場合は変換して設定
         for i in 0..32 {
             let raw_idx = i * 512 + i; // 元のインデックス: weights[output][input]
-            #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+            #[cfg(any(
+                all(target_arch = "x86_64", target_feature = "avx2"),
+                all(
+                    target_arch = "x86_64",
+                    target_feature = "ssse3",
+                    not(target_feature = "avx2")
+                )
+            ))]
             let idx = if AffineTransform::<512, 32>::should_use_scrambled_weights() {
                 AffineTransform::<512, 32>::get_weight_index_scrambled(raw_idx)
             } else {
                 raw_idx
             };
-            #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+            #[cfg(not(any(
+                all(target_arch = "x86_64", target_feature = "avx2"),
+                all(
+                    target_arch = "x86_64",
+                    target_feature = "ssse3",
+                    not(target_feature = "avx2")
+                )
+            )))]
             let idx = raw_idx;
             weights[idx] = 1;
         }
