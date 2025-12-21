@@ -170,7 +170,11 @@ impl<T> DerefMut for AlignedBox<T> {
 
 impl<T> Drop for AlignedBox<T> {
     fn drop(&mut self) {
-        // SAFETY: ptr は alloc_zeroed で確保したポインタ、layout は同じもの
+        // SAFETY:
+        // - ptr は alloc_zeroed で確保したポインタ、layout は同じもの
+        // - AlignedBox::new_zeroed は T: Copy + Default を要求する
+        // - Copy トレイトは Drop と排他的なので、T は Drop を実装できない
+        // - したがって drop_in_place は不要で、dealloc のみで安全
         unsafe {
             dealloc(self.ptr as *mut u8, self.layout);
         }
