@@ -927,6 +927,11 @@ export function ShogiMatch({
                                     flexDirection: "column",
                                 }}
                             >
+                                {/* 手数表示 */}
+                                <output style={TEXT_STYLES.moveCount}>
+                                    {moves.length === 0 ? "開始局面" : `${moves.length}手目`}
+                                </output>
+
                                 {/* 後手の持ち駒（盤の上） */}
                                 <PlayerHandSection
                                     owner="gote"
@@ -943,9 +948,6 @@ export function ShogiMatch({
                                     onHandSelect={handleHandSelect}
                                 />
 
-                                <output style={TEXT_STYLES.moveCount}>
-                                    {moves.length === 0 ? "開始局面" : `${moves.length}手目`}
-                                </output>
                                 <ShogiBoard
                                     grid={grid}
                                     selectedSquare={
