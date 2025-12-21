@@ -78,6 +78,11 @@ const parseArgs = (argv) => {
         moves: [],
     };
 
+    if (argv.includes("--help") || argv.includes("-h")) {
+        console.log(usage());
+        process.exit(0);
+    }
+
     for (let i = 0; i < argv.length; i += 1) {
         const arg = argv[i];
         if (arg === "--") {
@@ -121,9 +126,6 @@ const parseArgs = (argv) => {
             case "--multi-pv":
                 args.multiPv = parseIntArg(argv[++i], "multi-pv");
                 break;
-            case "--help":
-                console.log(usage());
-                process.exit(0);
             default:
                 throw new Error(`Unknown arg: ${arg}`);
         }
