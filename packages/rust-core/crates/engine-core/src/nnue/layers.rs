@@ -79,23 +79,22 @@ pub struct AffineTransform<const INPUT_DIM: usize, const OUTPUT_DIM: usize> {
 
 impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM, OUTPUT_DIM> {
     const PADDED_INPUT: usize = padded_input(INPUT_DIM);
+
     /// チャンクサイズ（u8×4 = i32として読む単位）
+    /// スクランブル形式重みとループ逆転最適化用
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     const CHUNK_SIZE: usize = 4;
-    /// 入力チャンク数
+
+    /// 入力チャンク数（ループ逆転最適化用）
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     const NUM_INPUT_CHUNKS: usize = Self::PADDED_INPUT / Self::CHUNK_SIZE;
 
     /// スクランブル形式のウェイトを使用するかどうか
-    /// AVX2環境で OUTPUT_DIM % 8 == 0 の場合のみスクランブル形式を使用
+    /// OUTPUT_DIM % 8 == 0 の場合のみスクランブル形式を使用
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     #[inline]
     const fn should_use_scrambled_weights() -> bool {
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-        {
-            OUTPUT_DIM.is_multiple_of(8) && OUTPUT_DIM > 0
-        }
-        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-        {
-            false
-        }
+        OUTPUT_DIM.is_multiple_of(8) && OUTPUT_DIM > 0
     }
 
     /// 重みインデックスのスクランブル変換
@@ -106,6 +105,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
     ///
     /// i = output * PADDED_INPUT + input の元インデックスに対して
     /// スクランブル後のインデックスを返す
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     #[inline]
     const fn get_weight_index_scrambled(i: usize) -> usize {
         // i = output * PADDED_INPUT + input
@@ -133,18 +133,31 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
         }
 
         // 重みを読み込み（64バイトアラインで確保）
-        // OUTPUT_DIM % 4 == 0 の場合はスクランブル形式で格納
         let weight_size = OUTPUT_DIM * Self::PADDED_INPUT;
         let mut weights = AlignedBox::new_zeroed(weight_size);
         let mut buf1 = [0u8; 1];
-        for i in 0..weight_size {
-            reader.read_exact(&mut buf1)?;
-            let idx = if Self::should_use_scrambled_weights() {
-                Self::get_weight_index_scrambled(i)
-            } else {
-                i
-            };
-            weights[idx] = buf1[0] as i8;
+
+        // AVX2環境: OUTPUT_DIM % 8 == 0 の場合はスクランブル形式で格納
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        {
+            for i in 0..weight_size {
+                reader.read_exact(&mut buf1)?;
+                let idx = if Self::should_use_scrambled_weights() {
+                    Self::get_weight_index_scrambled(i)
+                } else {
+                    i
+                };
+                weights[idx] = buf1[0] as i8;
+            }
+        }
+
+        // 非AVX2環境: 元の順序で格納
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+        {
+            for i in 0..weight_size {
+                reader.read_exact(&mut buf1)?;
+                weights[i] = buf1[0] as i8;
+            }
         }
 
         Ok(Self { biases, weights })
@@ -503,11 +516,14 @@ mod tests {
         // スクランブル形式が有効な場合は変換して設定
         for i in 0..32 {
             let raw_idx = i * 512 + i; // 元のインデックス: weights[output][input]
+            #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
             let idx = if AffineTransform::<512, 32>::should_use_scrambled_weights() {
                 AffineTransform::<512, 32>::get_weight_index_scrambled(raw_idx)
             } else {
                 raw_idx
             };
+            #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+            let idx = raw_idx;
             weights[idx] = 1;
         }
 
