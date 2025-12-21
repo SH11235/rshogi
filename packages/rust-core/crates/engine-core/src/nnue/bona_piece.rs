@@ -7,6 +7,51 @@
 
 use crate::types::{Color, Piece, PieceType, Square};
 
+/// 駒種・is_friend に対する base offset テーブル
+/// `[piece_type as usize][is_friend as usize]` -> base offset
+/// is_friend: 0=enemy, 1=friend
+///
+/// 値は `from_piece_square()` の実装から抽出。
+/// PieceType は 1 始まり（Pawn=1, ..., Dragon=14）なので index 0 はダミー。
+pub const PIECE_BASE: [[u16; 2]; 15] = [
+    // index 0: 未使用（ダミー）
+    [0, 0],
+    // PieceType::Pawn = 1
+    [82, 1], // [enemy, friend]
+    // PieceType::Lance = 2
+    [244, 163],
+    // PieceType::Knight = 3
+    [406, 325],
+    // PieceType::Silver = 4
+    [568, 487],
+    // PieceType::Bishop = 5
+    [892, 811],
+    // PieceType::Rook = 6
+    [1054, 973],
+    // PieceType::Gold = 7 (成駒と同じ)
+    [730, 649],
+    // PieceType::King = 8 (使用しない、0埋め)
+    [0, 0],
+    // PieceType::ProPawn = 9 (Gold と同じ)
+    [730, 649],
+    // PieceType::ProLance = 10 (Gold と同じ)
+    [730, 649],
+    // PieceType::ProKnight = 11 (Gold と同じ)
+    [730, 649],
+    // PieceType::ProSilver = 12 (Gold と同じ)
+    [730, 649],
+    // PieceType::Horse = 13
+    [1216, 1135],
+    // PieceType::Dragon = 14
+    [1378, 1297],
+];
+
+/// base offset から直接 BonaPiece を生成（高速パス用）
+#[inline]
+pub fn bona_piece_from_base(sq_index: usize, base: u16) -> BonaPiece {
+    BonaPiece::new(base + sq_index as u16)
+}
+
 /// fe_end: BonaPieceの最大値
 ///
 /// YaneuraOu の HalfKP 用定義に基づく概算値。
