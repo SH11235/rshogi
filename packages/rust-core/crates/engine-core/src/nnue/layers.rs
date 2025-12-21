@@ -593,7 +593,9 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
             // SAFETY:
             // - input.len() >= PADDED_INPUT (debug_assert で検証済み)
             // - weights.len() >= OUTPUT_DIM * PADDED_INPUT (構造上保証)
-            // - WASM SIMD128 はアライメント不要（v128_load は任意のアドレスで動作）
+            // - WASM SIMD128 はアライメント不要（v128_load/v128_store は任意のアドレスで動作）
+            // - biases/output は4出力ずつ（j += 4）でアクセスし、i32配列なので
+            //   オフセットは 4 * sizeof(i32) = 16バイトの倍数となり16バイト境界
             unsafe {
                 use std::arch::wasm32::*;
 
@@ -603,7 +605,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
                 let input_ptr = input.as_ptr();
                 let weights_ptr = self.weights.as_ptr();
 
-                // 4出力同時処理: 入力ロードを再利用してループを逆転
+                // 4出力同時処理: 入力ロードを再利用（YaneuraOu dot4方式）
                 if OUTPUT_DIM.is_multiple_of(4) && OUTPUT_DIM > 0 {
                     let mut j = 0;
                     while j < OUTPUT_DIM {
