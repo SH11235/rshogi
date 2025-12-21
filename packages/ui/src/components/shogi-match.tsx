@@ -915,13 +915,9 @@ export function ShogiMatch({
                                 <h3 style={{ fontWeight: 700, margin: 0, fontSize: "inherit" }}>
                                     盤面
                                 </h3>
-                                <div
-                                    style={TEXT_STYLES.mutedSecondary}
-                                    role="status"
-                                    aria-live="polite"
-                                >
+                                <output style={TEXT_STYLES.mutedSecondary}>
                                     手番: {position.turn === "sente" ? "先手" : "後手"}
-                                </div>
+                                </output>
                             </div>
                             <div
                                 style={{
@@ -947,9 +943,9 @@ export function ShogiMatch({
                                     onHandSelect={handleHandSelect}
                                 />
 
-                                <div style={TEXT_STYLES.moveCount} role="status">
+                                <output style={TEXT_STYLES.moveCount}>
                                     {moves.length === 0 ? "開始局面" : `${moves.length}手目`}
-                                </div>
+                                </output>
                                 <ShogiBoard
                                     grid={grid}
                                     selectedSquare={
