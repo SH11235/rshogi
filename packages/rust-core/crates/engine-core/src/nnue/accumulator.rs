@@ -128,8 +128,15 @@ pub struct AlignedBox<T> {
 
 impl<T: Copy + Default> AlignedBox<T> {
     /// 指定された長さの配列をゼロ初期化して確保
+    ///
+    /// # Panics
+    /// - `len * size_of::<T>()` がオーバーフローする場合
+    /// - レイアウトが無効な場合
+    /// - メモリ確保に失敗した場合
     pub fn new_zeroed(len: usize) -> Self {
-        let size = std::mem::size_of::<T>() * len;
+        let size = std::mem::size_of::<T>()
+            .checked_mul(len)
+            .expect("AlignedBox::new_zeroed: size overflow");
         let align = CACHE_LINE_SIZE.max(std::mem::align_of::<T>());
 
         // SAFETY: align は 2 のべき乗で、size は align の倍数に切り上げられる

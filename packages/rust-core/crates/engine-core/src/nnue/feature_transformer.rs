@@ -253,8 +253,8 @@ impl FeatureTransformer {
 
                 #[allow(clippy::manual_is_multiple_of)]
                 {
-                    debug_assert!(acc_ptr as usize % 32 == 0, "accumulation not 32-byte aligned");
-                    debug_assert!(weight_ptr as usize % 32 == 0, "weights not 32-byte aligned");
+                    debug_assert!(acc_ptr as usize % 64 == 0, "accumulation not 64-byte aligned");
+                    debug_assert!(weight_ptr as usize % 64 == 0, "weights not 64-byte aligned");
                 }
 
                 for i in 0..16 {
@@ -282,8 +282,8 @@ impl FeatureTransformer {
 
                 #[allow(clippy::manual_is_multiple_of)]
                 {
-                    debug_assert!(acc_ptr as usize % 16 == 0, "accumulation not 16-byte aligned");
-                    debug_assert!(weight_ptr as usize % 16 == 0, "weights not 16-byte aligned");
+                    debug_assert!(acc_ptr as usize % 64 == 0, "accumulation not 64-byte aligned");
+                    debug_assert!(weight_ptr as usize % 64 == 0, "weights not 64-byte aligned");
                 }
 
                 for i in 0..32 {
@@ -350,8 +350,8 @@ impl FeatureTransformer {
 
                 #[allow(clippy::manual_is_multiple_of)]
                 {
-                    debug_assert!(acc_ptr as usize % 32 == 0, "accumulation not 32-byte aligned");
-                    debug_assert!(weight_ptr as usize % 32 == 0, "weights not 32-byte aligned");
+                    debug_assert!(acc_ptr as usize % 64 == 0, "accumulation not 64-byte aligned");
+                    debug_assert!(weight_ptr as usize % 64 == 0, "weights not 64-byte aligned");
                 }
 
                 for i in 0..16 {
@@ -379,8 +379,8 @@ impl FeatureTransformer {
 
                 #[allow(clippy::manual_is_multiple_of)]
                 {
-                    debug_assert!(acc_ptr as usize % 16 == 0, "accumulation not 16-byte aligned");
-                    debug_assert!(weight_ptr as usize % 16 == 0, "weights not 16-byte aligned");
+                    debug_assert!(acc_ptr as usize % 64 == 0, "accumulation not 64-byte aligned");
+                    debug_assert!(weight_ptr as usize % 64 == 0, "weights not 64-byte aligned");
                 }
 
                 for i in 0..32 {
