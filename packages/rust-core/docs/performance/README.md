@@ -22,26 +22,26 @@
 
 | 順位 | 関数 | CPU% | 状態 | 備考 |
 |------|------|------|------|------|
-| 1 | `MovePicker::next_move` | 8.76% | 調査完了 | [詳細](#movepicker-調査完了) |
-| 2 | `AffineTransform::propagate` | 4.68% | - | NNUE推論（隠れ層演算） |
-| 3 | `attackers_to_occ` | 3.16% | - | 利き計算 |
-| 4 | `search_node` | 2.57% | - | 探索メインループ |
-| 5 | `refresh_accumulator` | 2.44% | - | NNUE全計算 |
-| 6 | `__memset_avx2` | 1.91% | - | メモリ初期化 |
-| - | `partial_insertion_sort` | 4.99% | 調査完了 | MovePicker内部 |
+| 1 | `MovePicker::next_move` | 8.86% | 調査完了 | [詳細](#movepicker-調査完了) |
+| 2 | `AffineTransform::propagate` | 4.74% | - | NNUE推論（隠れ層演算） |
+| 3 | `attackers_to_occ` | 3.23% | - | 利き計算 |
+| 4 | `search_node` | 2.54% | - | 探索メインループ |
+| 5 | `refresh_accumulator` | 2.40% | - | NNUE全計算 |
+| 6 | `__memset_avx2` | 1.94% | - | メモリ初期化 |
+| - | `partial_insertion_sort` | 5.00% | 調査完了 | MovePicker内部 |
 
-**注**: kernelオーバーヘッド（`__fsnotify_parent` 4.53%, `dput` 3.59%）はNNUEファイル読み込み時のもので、実際の探索時間には影響しない。
+**注**: kernelオーバーヘッド（`__fsnotify_parent` 4.43%, `dput` 3.63%）はNNUEファイル読み込み時のもので、実際の探索時間には影響しない。
 
 #### NNUE関連の内訳
 
 | 関数 | CPU% | 説明 |
 |------|------|------|
-| `AffineTransform::propagate` | 4.68% | NNUE推論（隠れ層演算） |
-| `refresh_accumulator` | 2.44% | Accumulator全計算（差分更新失敗時） |
-| `Network::evaluate` | 1.67% | NNUE推論メイン |
-| `check_move_mate` | 1.96% | 1手詰め判定 |
-| `update_accumulator` | 1.36% | Accumulator差分更新 |
-| `append_active_indices` | 1.32% | 特徴量インデックス取得 |
+| `AffineTransform::propagate` | 4.74% | NNUE推論（隠れ層演算） |
+| `refresh_accumulator` | 2.40% | Accumulator全計算（差分更新失敗時） |
+| `check_move_mate` | 2.02% | 1手詰め判定 |
+| `Network::evaluate` | 1.64% | NNUE推論メイン |
+| `update_accumulator` | 1.32% | Accumulator差分更新 |
+| `append_active_indices` | 1.11% | 特徴量インデックス取得 |
 
 ### Material評価時（NNUE無効、release build）
 
@@ -49,16 +49,16 @@
 
 | 順位 | 関数 | CPU% | 備考 |
 |------|------|------|------|
-| 1 | `eval_lv7_like` | 26.25% | Material評価のメイン関数 |
-| 2 | `direction_of` | 16.16% | 方向計算 |
-| 3 | `compute_board_effects` | 9.02% | 盤面効果計算 |
-| 4 | `MovePicker::next_move` | 7.53% | 指し手選択 |
-| 5 | `search_node` | 4.75% | 探索メインループ |
-| 6 | `check_move_mate` | 4.18% | 1手詰め判定 |
-| 7 | `do_move` | 2.83% | 指し手実行 |
-| 8 | `build_cont_tables` | 2.51% | Continuation History構築 |
-| 9 | `attackers_to_occ` | 1.91% | 利き計算 |
-| 10 | `__memmove_avx` | 1.76% | メモリコピー |
+| 1 | `eval_lv7_like` | 26.22% | Material評価のメイン関数 |
+| 2 | `direction_of` | 16.85% | 方向計算 |
+| 3 | `compute_board_effects` | 10.43% | 盤面効果計算 |
+| 4 | `MovePicker::next_move` | 7.44% | 指し手選択 |
+| 5 | `search_node` | 4.40% | 探索メインループ |
+| 6 | `check_move_mate` | 4.32% | 1手詰め判定 |
+| 7 | `do_move` | 2.90% | 指し手実行 |
+| 8 | `build_cont_tables` | 2.23% | Continuation History構築 |
+| 9 | `__memmove_avx` | 1.94% | メモリコピー |
+| 10 | `attackers_to_occ` | 1.84% | 利き計算 |
 
 **注**: Material評価は1回の評価計算は軽量だが、評価精度が低いため枝刈りの効率が悪く、NPSはNNUEと同等かそれ以下になることが多い。
 
@@ -296,3 +296,4 @@ RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release --
 | 2025-12-21 | 計測結果更新（NNUE: MovePicker 8.83%, AffineTransform 5.93%, refresh 2.27%、Material: eval_lv7_like 26.38%, direction_of 15.88%）。refresh_accumulatorが5.70%→2.27%に大幅改善（AccumulatorとFeatureTransformerへのAlignedBox導入によるメモリアラインメント最適化の効果） |
 | 2025-12-21 | 計測結果更新（NNUE: MovePicker 9.07%, Network::evaluate 5.93%, refresh 2.38%、Material: eval_lv7_like 25.51%, direction_of 15.85%）。フラットレポート（nnue_flat.txt）を使用した正確な自己時間計測に基づく更新 |
 | 2025-12-22 | 計測結果更新（NNUE: MovePicker 8.76%, AffineTransform 4.68%, refresh 2.44%、Material: eval_lv7_like 26.25%, direction_of 16.16%）。NNUE関連の内訳をフラットレポートに基づき修正（AffineTransform::propagateが主要な処理として明確化）。**改善点**: `__memset_avx2`が2.82%→1.91%に約32%減少（MoveBuffer関連のmemset削減最適化の効果） |
+| 2025-12-22 | 計測結果更新（NNUE: MovePicker 8.86%, AffineTransform 4.74%, refresh 2.40%、Material: eval_lv7_like 26.22%, direction_of 16.85%）。Material評価時の順位変動: `__memmove_avx`が9位に上昇、`attackers_to_occ`が10位に |

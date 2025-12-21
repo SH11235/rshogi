@@ -5,9 +5,27 @@
 
 use super::{Feature, TriggerEvent};
 use crate::nnue::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES};
-use crate::nnue::bona_piece::{halfkp_index, BonaPiece, FE_END};
+use crate::nnue::bona_piece::{bona_piece_from_base, halfkp_index, BonaPiece, FE_END, PIECE_BASE};
 use crate::position::Position;
 use crate::types::{Color, PieceType, Square};
+
+/// 盤上の駒種（King除外）
+/// append_active_indices で使用する定数配列
+const BOARD_PIECE_TYPES: [PieceType; 13] = [
+    PieceType::Pawn,
+    PieceType::Lance,
+    PieceType::Knight,
+    PieceType::Silver,
+    PieceType::Gold,
+    PieceType::Bishop,
+    PieceType::Rook,
+    PieceType::ProPawn,
+    PieceType::ProLance,
+    PieceType::ProKnight,
+    PieceType::ProSilver,
+    PieceType::Horse,
+    PieceType::Dragon,
+];
 
 /// HalfKP<Friend> 特徴量
 ///
@@ -28,6 +46,7 @@ impl Feature for HalfKP {
     /// アクティブな特徴量インデックスを追記
     ///
     /// 盤上駒および手駒を HalfKP 特徴量に写像する。
+    /// bitboard 型別ループで高速化: piece_on() 呼び出しと match 分岐を削減。
     #[inline]
     fn append_active_indices(
         pos: &Position,
@@ -36,21 +55,24 @@ impl Feature for HalfKP {
     ) {
         let king_sq = pos.king_square(perspective);
 
-        // 盤上の駒
-        for sq in pos.occupied().iter() {
-            let pc = pos.piece_on(sq);
-            if pc.is_none() {
-                continue;
-            }
-            // 玉は特徴量に含めない
-            if pc.piece_type() == PieceType::King {
-                continue;
-            }
+        // 盤上の駒（駒種・色ごとにループ）
+        for color in [Color::Black, Color::White] {
+            let is_friend = (color == perspective) as usize;
 
-            let bp = BonaPiece::from_piece_square(pc, sq, perspective);
-            if bp != BonaPiece::ZERO {
-                let index = halfkp_index(king_sq, bp);
-                active.push(index);
+            for &pt in &BOARD_PIECE_TYPES {
+                let base = PIECE_BASE[pt as usize][is_friend];
+                let bb = pos.pieces(color, pt);
+
+                for sq in bb.iter() {
+                    let sq_index = if perspective == Color::Black {
+                        sq.index()
+                    } else {
+                        sq.inverse().index()
+                    };
+                    let bp = bona_piece_from_base(sq_index, base);
+                    let index = halfkp_index(king_sq, bp);
+                    active.push(index);
+                }
             }
         }
 
