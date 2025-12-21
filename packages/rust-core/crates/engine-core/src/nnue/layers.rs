@@ -137,6 +137,17 @@ unsafe fn hsum_i32x4(v: std::arch::wasm32::v128) -> i32 {
         + i32x4_extract_lane::<3>(v)
 }
 
+/// WASM SIMD128: 2本のi32x4を水平加算（シャッフル + 加算）
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+unsafe fn hadd_i32x4(
+    x0: std::arch::wasm32::v128,
+    x1: std::arch::wasm32::v128,
+) -> std::arch::wasm32::v128 {
+    use std::arch::wasm32::*;
+    i32x4_add(i32x4_shuffle::<0, 2, 4, 6>(x0, x1), i32x4_shuffle::<1, 3, 5, 7>(x0, x1))
+}
+
 /// WASM SIMD128: 4本のi32x4を水平加算して1本のi32x4に詰める
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline]
@@ -146,11 +157,7 @@ unsafe fn haddx4(
     z2: std::arch::wasm32::v128,
     z3: std::arch::wasm32::v128,
 ) -> std::arch::wasm32::v128 {
-    use std::arch::wasm32::*;
-    let mut out = i32x4_splat(hsum_i32x4(z0));
-    out = i32x4_replace_lane::<1>(out, hsum_i32x4(z1));
-    out = i32x4_replace_lane::<2>(out, hsum_i32x4(z2));
-    i32x4_replace_lane::<3>(out, hsum_i32x4(z3))
+    hadd_i32x4(hadd_i32x4(z0, z1), hadd_i32x4(z2, z3))
 }
 
 /// アフィン変換層
