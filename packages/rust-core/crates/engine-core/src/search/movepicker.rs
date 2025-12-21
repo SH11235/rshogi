@@ -30,7 +30,7 @@ use super::{
     ButterflyHistory, CapturePieceToHistory, LowPlyHistory, PawnHistory, PieceToHistory,
     LOW_PLY_HISTORY_SIZE,
 };
-use crate::movegen::{ExtMove, MAX_MOVES};
+use crate::movegen::{ExtMove, ExtMoveBuffer};
 use crate::position::Position;
 use crate::types::{Depth, Move, Piece, PieceType, Value, DEPTH_QS};
 
@@ -136,8 +136,8 @@ pub struct MovePicker<'a> {
     skip_quiets: bool,
     generate_all_legal_moves: bool,
 
-    // 指し手バッファ
-    moves: [ExtMove; MAX_MOVES],
+    // 指し手バッファ（MaybeUninitにより初期化コストゼロ）
+    moves: ExtMoveBuffer,
     cur: usize,
     end_cur: usize,
     end_bad_captures: usize,
@@ -196,7 +196,7 @@ impl<'a> MovePicker<'a> {
             ply,
             skip_quiets: false,
             generate_all_legal_moves,
-            moves: [ExtMove::new(Move::NONE, 0); MAX_MOVES],
+            moves: ExtMoveBuffer::new(),
             cur: 0,
             end_cur: 0,
             end_bad_captures: 0,
@@ -240,7 +240,7 @@ impl<'a> MovePicker<'a> {
             ply,
             skip_quiets: false,
             generate_all_legal_moves,
-            moves: [ExtMove::new(Move::NONE, 0); MAX_MOVES],
+            moves: ExtMoveBuffer::new(),
             cur: 0,
             end_cur: 0,
             end_bad_captures: 0,
@@ -288,7 +288,7 @@ impl<'a> MovePicker<'a> {
             ply,
             skip_quiets: false,
             generate_all_legal_moves,
-            moves: [ExtMove::new(Move::NONE, 0); MAX_MOVES],
+            moves: ExtMoveBuffer::new(),
             cur: 0,
             end_cur: 0,
             end_bad_captures: 0,
@@ -326,49 +326,40 @@ impl<'a> MovePicker<'a> {
                     // 捕獲手を生成
                     let count = if self.generate_all_legal_moves {
                         // All指定時は生成タイプを切り替え
-                        let mut buf = [Move::NONE; MAX_MOVES];
-                        let gen_count = crate::movegen::generate_with_type(
-                            self.pos,
-                            crate::movegen::GenType::CapturesProPlusAll,
-                            &mut buf,
-                            None,
-                        );
+                        let gen_type = if matches!(self.stage, Stage::ProbCutInit) {
+                            crate::movegen::GenType::CapturesAll
+                        } else {
+                            crate::movegen::GenType::CapturesProPlusAll
+                        };
+                        let mut buf = ExtMoveBuffer::new();
+                        crate::movegen::generate_with_type(self.pos, gen_type, &mut buf, None);
                         let mut c = 0;
-                        for mv in buf.iter().take(gen_count) {
-                            if self.pos.is_capture(*mv) {
-                                self.moves[c] = ExtMove::new(*mv, 0);
+                        for ext in buf.iter() {
+                            if self.pos.is_capture(ext.mv) {
+                                self.moves.set(c, ExtMove::new(ext.mv, 0));
                                 c += 1;
                             }
                         }
+                        self.moves.set_len(c);
                         c
                     } else if matches!(self.stage, Stage::ProbCutInit) {
-                        // ProbCut: 捕獲手生成（All切替はgenerate_all_legal_movesフラグで）
-                        let mut buf = [ExtMove::new(Move::NONE, 0); MAX_MOVES];
-                        let mut tmp_count = 0usize;
-                        let mut moves_raw = [Move::NONE; MAX_MOVES];
-                        let gen_count = if self.generate_all_legal_moves {
-                            crate::movegen::generate_with_type(
-                                self.pos,
-                                crate::movegen::GenType::CapturesAll,
-                                &mut moves_raw,
-                                None,
-                            )
-                        } else {
-                            crate::movegen::generate_with_type(
-                                self.pos,
-                                crate::movegen::GenType::CapturesProPlus,
-                                &mut moves_raw,
-                                None,
-                            )
-                        };
+                        // ProbCut: 捕獲手生成
+                        let mut buf = ExtMoveBuffer::new();
+                        crate::movegen::generate_with_type(
+                            self.pos,
+                            crate::movegen::GenType::CapturesProPlus,
+                            &mut buf,
+                            None,
+                        );
                         // 捕獲手のみフィルタ
-                        for mv in moves_raw.iter().take(gen_count) {
-                            if self.pos.is_capture(*mv) {
-                                buf[tmp_count] = ExtMove::new(*mv, 0);
+                        let mut tmp_count = 0usize;
+                        for ext in buf.iter() {
+                            if self.pos.is_capture(ext.mv) {
+                                self.moves.set(tmp_count, ExtMove::new(ext.mv, 0));
                                 tmp_count += 1;
                             }
                         }
-                        self.moves[..tmp_count].copy_from_slice(&buf[..tmp_count]);
+                        self.moves.set_len(tmp_count);
                         tmp_count
                     } else {
                         self.pos.generate_captures(&mut self.moves)
@@ -377,7 +368,7 @@ impl<'a> MovePicker<'a> {
                     self.end_captures = count;
 
                     self.score_captures();
-                    partial_insertion_sort(&mut self.moves[..self.end_cur], i32::MIN);
+                    partial_insertion_sort(self.moves.as_mut_slice(), self.end_cur, i32::MIN);
 
                     self.stage = self.stage.next();
                 }
@@ -399,35 +390,39 @@ impl<'a> MovePicker<'a> {
                     if !self.skip_quiets {
                         // 静かな手を生成
                         let count = if self.generate_all_legal_moves {
-                            let mut buf = [Move::NONE; MAX_MOVES];
-                            let gen_count = crate::movegen::generate_with_type(
+                            let mut buf = ExtMoveBuffer::new();
+                            crate::movegen::generate_with_type(
                                 self.pos,
                                 crate::movegen::GenType::QuietsAll,
                                 &mut buf,
                                 None,
                             );
                             let mut c = 0;
-                            for mv in buf.iter().take(gen_count) {
-                                if !self.pos.is_capture(*mv)
-                                    && self.end_captures + c < self.moves.len()
-                                {
-                                    self.moves[self.end_captures + c] = ExtMove::new(*mv, 0);
+                            for ext in buf.iter() {
+                                if !self.pos.is_capture(ext.mv) {
+                                    self.moves.set(self.end_captures + c, ExtMove::new(ext.mv, 0));
                                     c += 1;
                                 }
                             }
                             c
                         } else {
-                            self.pos.generate_quiets(&mut self.moves[self.end_captures..])
+                            self.pos.generate_quiets(&mut self.moves, self.end_captures)
                         };
                         self.end_cur = self.end_captures + count;
                         self.end_generated = self.end_cur;
+                        self.moves.set_len(self.end_cur);
 
                         self.cur = self.end_captures;
                         self.score_quiets();
 
                         // depth依存の閾値でソート
                         let threshold = -3560 * self.depth;
-                        partial_insertion_sort(&mut self.moves[self.cur..self.end_cur], threshold);
+                        partial_insertion_sort_range(
+                            self.moves.as_mut_slice(),
+                            self.cur,
+                            self.end_cur,
+                            threshold,
+                        );
                     }
                     self.stage = Stage::GoodQuiet;
                 }
@@ -480,16 +475,18 @@ impl<'a> MovePicker<'a> {
                 Stage::EvasionInit => {
                     // 回避手を生成
                     let count = if self.generate_all_legal_moves {
-                        let mut buf = [Move::NONE; MAX_MOVES];
-                        let gen_count = crate::movegen::generate_with_type(
+                        let mut buf = ExtMoveBuffer::new();
+                        crate::movegen::generate_with_type(
                             self.pos,
                             crate::movegen::GenType::EvasionsAll,
                             &mut buf,
                             None,
                         );
-                        for (i, mv) in buf.iter().take(gen_count).enumerate() {
-                            self.moves[i] = ExtMove::new(*mv, 0);
+                        let gen_count = buf.len();
+                        for (i, ext) in buf.iter().enumerate() {
+                            self.moves.set(i, ExtMove::new(ext.mv, 0));
                         }
+                        self.moves.set_len(gen_count);
                         gen_count
                     } else {
                         self.pos.generate_evasions_ext(&mut self.moves)
@@ -499,7 +496,7 @@ impl<'a> MovePicker<'a> {
                     self.end_generated = count;
 
                     self.score_evasions();
-                    partial_insertion_sort(&mut self.moves[..self.end_cur], i32::MIN);
+                    partial_insertion_sort(self.moves.as_mut_slice(), self.end_cur, i32::MIN);
 
                     self.stage = Stage::Evasion;
                 }
@@ -540,7 +537,8 @@ impl<'a> MovePicker<'a> {
     /// 捕獲手のスコアを計算
     fn score_captures(&mut self) {
         for i in self.cur..self.end_cur {
-            let m = self.moves[i].mv;
+            let ext = self.moves.get(i);
+            let m = ext.mv;
             let to = m.to();
             let pc = self.pos.moved_piece_after_move(m);
             let pt = pc.piece_type();
@@ -556,7 +554,7 @@ impl<'a> MovePicker<'a> {
                 value += 1024;
             }
 
-            self.moves[i].value = value;
+            self.moves.set_value(i, value);
         }
     }
 
@@ -566,7 +564,8 @@ impl<'a> MovePicker<'a> {
         let pawn_idx = self.pos.pawn_history_index();
 
         for i in self.cur..self.end_cur {
-            let m = self.moves[i].mv;
+            let ext = self.moves.get(i);
+            let m = ext.mv;
             let to = m.to();
             let pc = self.pos.moved_piece_after_move(m);
             let pt = pc.piece_type();
@@ -596,7 +595,7 @@ impl<'a> MovePicker<'a> {
                 value += 8 * self.low_ply_history.get(ply_idx, m) as i32 / (1 + self.ply);
             }
 
-            self.moves[i].value = value;
+            self.moves.set_value(i, value);
         }
     }
 
@@ -605,14 +604,15 @@ impl<'a> MovePicker<'a> {
         let us = self.pos.side_to_move();
 
         for i in self.cur..self.end_cur {
-            let m = self.moves[i].mv;
+            let ext = self.moves.get(i);
+            let m = ext.mv;
             let to = m.to();
             let pc = self.pos.moved_piece_after_move(m);
 
             if self.pos.is_capture(m) {
                 // 捕獲手は駒価値 + 大きなボーナス
                 let captured = self.pos.piece_on(to);
-                self.moves[i].value = piece_value(captured) + (1 << 28);
+                self.moves.set_value(i, piece_value(captured) + (1 << 28));
             } else {
                 // 静かな手はHistory
                 let mut value = self.main_history.get(us, m) as i32;
@@ -626,7 +626,7 @@ impl<'a> MovePicker<'a> {
                     value += 2 * self.low_ply_history.get(ply_idx, m) as i32 / (1 + self.ply);
                 }
 
-                self.moves[i].value = value;
+                self.moves.set_value(i, value);
             }
         }
     }
@@ -638,7 +638,7 @@ impl<'a> MovePicker<'a> {
     /// 良い捕獲手を選択（SEE >= threshold）
     fn select_good_capture(&mut self) -> Option<Move> {
         while self.cur < self.end_cur {
-            let ext = self.moves[self.cur];
+            let ext = self.moves.get(self.cur);
             self.cur += 1;
 
             // TT手は既に返したのでスキップ
@@ -665,7 +665,7 @@ impl<'a> MovePicker<'a> {
         F: Fn(&Self, &ExtMove) -> bool,
     {
         while self.cur < self.end_cur {
-            let ext = self.moves[self.cur];
+            let ext = self.moves.get(self.cur);
             self.cur += 1;
 
             // TT手は既に返したのでスキップ
@@ -699,13 +699,16 @@ impl Iterator for MovePicker<'_> {
 // ユーティリティ関数
 // =============================================================================
 
-/// 部分挿入ソート
+/// 部分挿入ソート（配列の先頭からend まで）
 ///
 /// `limit` より大きいスコアの手だけを降順でソートする。
-fn partial_insertion_sort(moves: &mut [ExtMove], limit: i32) {
+fn partial_insertion_sort(moves: &mut [ExtMove], end: usize, limit: i32) {
+    if end <= 1 {
+        return;
+    }
     let mut sorted_end = 0;
 
-    for p in 1..moves.len() {
+    for p in 1..end {
         if moves[p].value >= limit {
             let tmp = moves[p];
             moves[p] = moves[sorted_end + 1];
@@ -718,6 +721,33 @@ fn partial_insertion_sort(moves: &mut [ExtMove], limit: i32) {
                 q -= 1;
             }
             moves[q] = tmp;
+        }
+    }
+}
+
+/// 部分挿入ソート（配列の start から end までの範囲）
+///
+/// `limit` より大きいスコアの手だけを降順でソートする。
+fn partial_insertion_sort_range(moves: &mut [ExtMove], start: usize, end: usize, limit: i32) {
+    if end <= start + 1 {
+        return;
+    }
+    let slice = &mut moves[start..end];
+    let mut sorted_end = 0;
+
+    for p in 1..slice.len() {
+        if slice[p].value >= limit {
+            let tmp = slice[p];
+            slice[p] = slice[sorted_end + 1];
+            sorted_end += 1;
+
+            // 挿入位置を探す
+            let mut q = sorted_end;
+            while q > 0 && slice[q - 1].value < tmp.value {
+                slice[q] = slice[q - 1];
+                q -= 1;
+            }
+            slice[q] = tmp;
         }
     }
 }
@@ -780,7 +810,8 @@ mod tests {
         ];
 
         // limit=100でソート
-        partial_insertion_sort(&mut moves, 100);
+        let len = moves.len();
+        partial_insertion_sort(&mut moves, len, 100);
 
         // 100以上の手が先頭にソートされている
         assert_eq!(moves[0].value, 200);
