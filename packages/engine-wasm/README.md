@@ -28,6 +28,20 @@ pnpm build
 1. `build:wasm`: RustコードをWASMにコンパイル
 2. `tsc`: TypeScriptのビルド
 
+## ベンチマーク
+
+WASMビルド済みの状態で、NNUEモデルを指定してベンチを実行できます。
+
+```bash
+pnpm --filter @shogi/engine-wasm build:wasm
+pnpm --filter @shogi/engine-wasm bench:wasm -- --nnue-file /path/to/nn.bin > wasm_bench.json
+```
+
+デフォルトはYaneuraOu準拠の4局面を使用します。任意の局面を使う場合は
+`--sfens` で SFEN リストファイルを指定してください。
+
+Material評価のみを計測する場合は `--material` を指定します。
+
 ## 使用方法
 
 ```typescript
