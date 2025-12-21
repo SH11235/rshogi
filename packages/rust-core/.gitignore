@@ -32,6 +32,7 @@ perf_results/
 /target/criterion/
 target/criterion/
 benchmark_results/
+pr_summaries/
 
 # Benchmark result files (temporary)
 benchmark-result.json
