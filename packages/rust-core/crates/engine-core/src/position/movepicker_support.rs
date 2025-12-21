@@ -7,7 +7,7 @@ use crate::bitboard::{
     bishop_effect, direct_of, gold_effect, king_effect, knight_effect, lance_effect, pawn_effect,
     ray_effect, rook_effect, silver_effect, Bitboard, Direct,
 };
-use crate::movegen::{generate_evasions, generate_with_type, ExtMove, GenType, MAX_MOVES};
+use crate::movegen::{generate_evasions, generate_with_type, ExtMoveBuffer, GenType};
 use crate::types::{Color, Move, Piece, PieceType, Square, Value};
 
 impl Position {
@@ -171,56 +171,49 @@ impl Position {
     // 指し手生成（MovePicker用）
     // =========================================================================
 
-    /// 捕獲手を生成（ExtMove配列に直接書き込み）
-    pub fn generate_captures(&self, moves: &mut [ExtMove; MAX_MOVES]) -> usize {
-        let mut buffer = [Move::NONE; MAX_MOVES];
-        let count = if self.in_check() {
-            generate_evasions(self, &mut buffer)
+    /// 捕獲手を生成（ExtMoveBufferに直接書き込み）
+    ///
+    /// generate関数がExtMoveBufferに直接書き込むため、中間バッファ不要。
+    pub fn generate_captures(&self, moves: &mut ExtMoveBuffer) -> usize {
+        if self.in_check() {
+            // 王手回避手を生成してから捕獲手のみフィルタ
+            generate_evasions(self, moves);
+            moves.retain(|m| self.is_capture(m));
         } else {
-            generate_with_type(self, GenType::CapturesProPlus, &mut buffer, None)
-        };
-
-        let mut capture_count = 0;
-        for m in buffer.iter().take(count) {
-            if self.is_capture(*m) {
-                moves[capture_count] = ExtMove::new(*m, 0);
-                capture_count += 1;
-            }
+            generate_with_type(self, GenType::CapturesProPlus, moves, None);
         }
-        capture_count
+        moves.len()
     }
 
-    /// 静かな手を生成（ExtMove配列に直接書き込み）
-    pub fn generate_quiets(&self, moves: &mut [ExtMove]) -> usize {
-        let mut buffer = [Move::NONE; MAX_MOVES];
-        let count = if self.in_check() {
+    /// 静かな手を生成（ExtMoveBufferに直接書き込み、既存の要素の後に追加）
+    ///
+    /// generate関数がExtMoveBufferに直接書き込むため、中間バッファ不要。
+    /// offset は互換性のために維持するが、moves.len() と等しい必要がある。
+    pub fn generate_quiets(&self, moves: &mut ExtMoveBuffer, offset: usize) -> usize {
+        if self.in_check() {
             return 0;
-        } else {
-            // YaneuraOu標準のQUIETS相当: 成りも含む静かな手を生成する
-            generate_with_type(self, GenType::Quiets, &mut buffer, None)
-        };
-
-        let mut quiet_count = 0;
-        for m in buffer.iter().take(count) {
-            if !self.is_capture(*m) && quiet_count < moves.len() {
-                moves[quiet_count] = ExtMove::new(*m, 0);
-                quiet_count += 1;
-            }
         }
-        quiet_count
+
+        debug_assert_eq!(
+            offset,
+            moves.len(),
+            "offset should equal buffer length: offset={offset}, len={}",
+            moves.len()
+        );
+
+        let start_len = moves.len();
+        // YaneuraOu標準のQUIETS相当: 成りも含む静かな手を生成する
+        generate_with_type(self, GenType::Quiets, moves, None);
+        moves.len() - start_len
     }
 
-    /// 回避手を生成（ExtMove配列に直接書き込み）
-    pub fn generate_evasions_ext(&self, moves: &mut [ExtMove; MAX_MOVES]) -> usize {
+    /// 回避手を生成（ExtMoveBufferに直接書き込み）
+    ///
+    /// generate関数がExtMoveBufferに直接書き込むため、中間バッファ不要。
+    pub fn generate_evasions_ext(&self, moves: &mut ExtMoveBuffer) -> usize {
         debug_assert!(self.in_check());
-
-        let mut buffer = [Move::NONE; MAX_MOVES];
-        let count = generate_with_type(self, GenType::Evasions, &mut buffer, None);
-
-        for i in 0..count {
-            moves[i] = ExtMove::new(buffer[i], 0);
-        }
-        count
+        generate_with_type(self, GenType::Evasions, moves, None);
+        moves.len()
     }
 
     // =========================================================================

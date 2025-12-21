@@ -9,6 +9,7 @@ use crate::position::Position;
 use crate::types::{Color, Move, PieceType, Square};
 
 use super::movelist::MoveList;
+use super::types::ExtMoveBuffer;
 
 #[derive(Clone, Copy)]
 struct GenerateTargets {
@@ -64,9 +65,8 @@ fn rank12_bb(us: Color) -> Bitboard {
 
 /// 指し手を追加
 #[inline]
-fn add_move(moves: &mut [Move], idx: &mut usize, mv: Move) {
-    moves[*idx] = mv;
-    *idx += 1;
+fn add_move(buffer: &mut ExtMoveBuffer, mv: Move) {
+    buffer.push_move(mv);
 }
 
 /// 成り生成モード
@@ -86,8 +86,7 @@ enum PromotionMode {
 fn generate_pawn_moves(
     pos: &Position,
     target: Bitboard,
-    moves: &mut [Move],
-    idx: &mut usize,
+    buffer: &mut ExtMoveBuffer,
     promo_mode: PromotionMode,
 ) {
     let us = pos.side_to_move();
@@ -112,17 +111,17 @@ fn generate_pawn_moves(
             match (in_promo, promo_mode) {
                 (true, PromotionMode::PromoteOnly) => {
                     let promoted_pc = moved_pc.promote().unwrap();
-                    add_move(moves, idx, Move::new_move_with_piece(from, to, true, promoted_pc));
+                    add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
                 }
                 (true, PromotionMode::Both) => {
                     let promoted_pc = moved_pc.promote().unwrap();
-                    add_move(moves, idx, Move::new_move_with_piece(from, to, true, promoted_pc));
+                    add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
                     if !to_is_rank1 {
-                        add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
+                        add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
                     }
                 }
                 (false, _) => {
-                    add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc))
+                    add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc))
                 }
             }
         }
@@ -133,8 +132,7 @@ fn generate_pawn_moves(
 fn generate_lance_moves(
     pos: &Position,
     target: Bitboard,
-    moves: &mut [Move],
-    idx: &mut usize,
+    buffer: &mut ExtMoveBuffer,
     include_non_promotions: bool,
 ) {
     let us = pos.side_to_move();
@@ -156,15 +154,15 @@ fn generate_lance_moves(
             if promo_ranks.contains(to) {
                 // 成る手を生成
                 let promoted_pc = moved_pc.promote().unwrap();
-                add_move(moves, idx, Move::new_move_with_piece(from, to, true, promoted_pc));
+                add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
 
                 // 不成（1段目でないとき）
                 if include_non_promotions && !rank1.contains(to) {
-                    add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
+                    add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
                 }
             } else {
                 // 敵陣外 → 不成のみ
-                add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
+                add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
             }
         }
     }
@@ -174,8 +172,7 @@ fn generate_lance_moves(
 fn generate_knight_moves(
     pos: &Position,
     target: Bitboard,
-    moves: &mut [Move],
-    idx: &mut usize,
+    buffer: &mut ExtMoveBuffer,
     include_non_promotions: bool,
 ) {
     let us = pos.side_to_move();
@@ -196,22 +193,22 @@ fn generate_knight_moves(
             if promo_ranks.contains(to) {
                 // 敵陣内：成る手を生成
                 let promoted_pc = moved_pc.promote().unwrap();
-                add_move(moves, idx, Move::new_move_with_piece(from, to, true, promoted_pc));
+                add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
 
                 // 敵陣内で不成も生成するか（行き所のない段でないとき）
                 if include_non_promotions && !rank12.contains(to) {
-                    add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
+                    add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
                 }
             } else {
                 // 敵陣外：不成のみ（成りは不可能）
-                add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
+                add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
             }
         }
     }
 }
 
 /// 銀の移動による指し手を生成
-fn generate_silver_moves(pos: &Position, target: Bitboard, moves: &mut [Move], idx: &mut usize) {
+fn generate_silver_moves(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuffer) {
     let us = pos.side_to_move();
     let silvers = pos.pieces(us, PieceType::Silver);
 
@@ -232,11 +229,11 @@ fn generate_silver_moves(pos: &Position, target: Bitboard, moves: &mut [Move], i
             // 成る手（移動元または移動先が敵陣）
             if from_in_promo || to_in_promo {
                 let promoted_pc = moved_pc.promote().unwrap();
-                add_move(moves, idx, Move::new_move_with_piece(from, to, true, promoted_pc));
+                add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
             }
 
             // 不成
-            add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
+            add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
         }
     }
 }
@@ -245,8 +242,7 @@ fn generate_silver_moves(pos: &Position, target: Bitboard, moves: &mut [Move], i
 fn generate_bishop_moves(
     pos: &Position,
     target: Bitboard,
-    moves: &mut [Move],
-    idx: &mut usize,
+    buffer: &mut ExtMoveBuffer,
     include_non_promotions: bool,
 ) {
     let us = pos.side_to_move();
@@ -270,13 +266,13 @@ fn generate_bishop_moves(
             if from_in_promo || to_in_promo {
                 // 成る手を生成
                 let promoted_pc = moved_pc.promote().unwrap();
-                add_move(moves, idx, Move::new_move_with_piece(from, to, true, promoted_pc));
+                add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
                 if include_non_promotions {
-                    add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
+                    add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
                 }
             } else {
                 // 敵陣に関係ない → 不成のみ
-                add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
+                add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
             }
         }
     }
@@ -286,8 +282,7 @@ fn generate_bishop_moves(
 fn generate_rook_moves(
     pos: &Position,
     target: Bitboard,
-    moves: &mut [Move],
-    idx: &mut usize,
+    buffer: &mut ExtMoveBuffer,
     include_non_promotions: bool,
 ) {
     let us = pos.side_to_move();
@@ -311,20 +306,20 @@ fn generate_rook_moves(
             if from_in_promo || to_in_promo {
                 // 成る手を生成
                 let promoted_pc = moved_pc.promote().unwrap();
-                add_move(moves, idx, Move::new_move_with_piece(from, to, true, promoted_pc));
+                add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
                 if include_non_promotions {
-                    add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
+                    add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
                 }
             } else {
                 // 敵陣に関係ない → 不成のみ
-                add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
+                add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
             }
         }
     }
 }
 
 /// 金相当の駒の移動を生成
-fn generate_gold_moves(pos: &Position, target: Bitboard, moves: &mut [Move], idx: &mut usize) {
+fn generate_gold_moves(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuffer) {
     let us = pos.side_to_move();
 
     // 金相当の駒（金、と、成香、成桂、成銀）
@@ -338,13 +333,13 @@ fn generate_gold_moves(pos: &Position, target: Bitboard, moves: &mut [Move], idx
         let attacks = gold_effect(us, from) & target;
         let moved_pc = pos.piece_on(from);
         for to in attacks.iter() {
-            add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
+            add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
         }
     }
 }
 
 /// 馬の移動を生成
-fn generate_horse_moves(pos: &Position, target: Bitboard, moves: &mut [Move], idx: &mut usize) {
+fn generate_horse_moves(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuffer) {
     let us = pos.side_to_move();
     let horses = pos.pieces(us, PieceType::Horse);
     let occupied = pos.occupied();
@@ -353,13 +348,13 @@ fn generate_horse_moves(pos: &Position, target: Bitboard, moves: &mut [Move], id
         let attacks = horse_effect(from, occupied) & target;
         let moved_pc = pos.piece_on(from);
         for to in attacks.iter() {
-            add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
+            add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
         }
     }
 }
 
 /// 龍の移動を生成
-fn generate_dragon_moves(pos: &Position, target: Bitboard, moves: &mut [Move], idx: &mut usize) {
+fn generate_dragon_moves(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuffer) {
     let us = pos.side_to_move();
     let dragons = pos.pieces(us, PieceType::Dragon);
     let occupied = pos.occupied();
@@ -368,20 +363,20 @@ fn generate_dragon_moves(pos: &Position, target: Bitboard, moves: &mut [Move], i
         let attacks = dragon_effect(from, occupied) & target;
         let moved_pc = pos.piece_on(from);
         for to in attacks.iter() {
-            add_move(moves, idx, Move::new_move_with_piece(from, to, false, moved_pc));
+            add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
         }
     }
 }
 
 /// 玉の移動を生成
-fn generate_king_moves(pos: &Position, target: Bitboard, moves: &mut [Move], idx: &mut usize) {
+fn generate_king_moves(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuffer) {
     let us = pos.side_to_move();
     let king_sq = pos.king_square(us);
 
     let attacks = king_effect(king_sq) & target;
     let moved_pc = pos.piece_on(king_sq);
     for to in attacks.iter() {
-        add_move(moves, idx, Move::new_move_with_piece(king_sq, to, false, moved_pc));
+        add_move(buffer, Move::new_move_with_piece(king_sq, to, false, moved_pc));
     }
 }
 
@@ -409,7 +404,7 @@ fn pawn_drop_mask(us: Color, our_pawns: Bitboard) -> Bitboard {
 }
 
 /// 歩の駒打ちを生成
-fn generate_pawn_drops(pos: &Position, target: Bitboard, moves: &mut [Move], idx: &mut usize) {
+fn generate_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuffer) {
     let us = pos.side_to_move();
 
     // 手駒に歩がなければ終了
@@ -430,12 +425,12 @@ fn generate_pawn_drops(pos: &Position, target: Bitboard, moves: &mut [Move], idx
     // 打ち歩詰めチェックは後でis_legalで行う
     let dropped_pc = crate::types::Piece::make(us, PieceType::Pawn);
     for to in valid_targets.iter() {
-        add_move(moves, idx, Move::new_drop_with_piece(PieceType::Pawn, to, dropped_pc));
+        add_move(buffer, Move::new_drop_with_piece(PieceType::Pawn, to, dropped_pc));
     }
 }
 
 /// 歩以外の駒打ちを生成
-fn generate_non_pawn_drops(pos: &Position, target: Bitboard, moves: &mut [Move], idx: &mut usize) {
+fn generate_non_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuffer) {
     let us = pos.side_to_move();
     let hand = pos.hand(us);
 
@@ -448,7 +443,7 @@ fn generate_non_pawn_drops(pos: &Position, target: Bitboard, moves: &mut [Move],
     if hand.has(PieceType::Lance) {
         let dropped_pc = crate::types::Piece::make(us, PieceType::Lance);
         for to in (target & empties & !rank1).iter() {
-            add_move(moves, idx, Move::new_drop_with_piece(PieceType::Lance, to, dropped_pc));
+            add_move(buffer, Move::new_drop_with_piece(PieceType::Lance, to, dropped_pc));
         }
     }
 
@@ -456,7 +451,7 @@ fn generate_non_pawn_drops(pos: &Position, target: Bitboard, moves: &mut [Move],
     if hand.has(PieceType::Knight) {
         let dropped_pc = crate::types::Piece::make(us, PieceType::Knight);
         for to in (target & empties & !rank12).iter() {
-            add_move(moves, idx, Move::new_drop_with_piece(PieceType::Knight, to, dropped_pc));
+            add_move(buffer, Move::new_drop_with_piece(PieceType::Knight, to, dropped_pc));
         }
     }
 
@@ -470,7 +465,7 @@ fn generate_non_pawn_drops(pos: &Position, target: Bitboard, moves: &mut [Move],
         if hand.has(pt) {
             let dropped_pc = crate::types::Piece::make(us, pt);
             for to in (target & empties).iter() {
-                add_move(moves, idx, Move::new_drop_with_piece(pt, to, dropped_pc));
+                add_move(buffer, Move::new_drop_with_piece(pt, to, dropped_pc));
             }
         }
     }
@@ -483,49 +478,46 @@ fn generate_non_pawn_drops(pos: &Position, target: Bitboard, moves: &mut [Move],
 /// 王手がかかっていないときの全ての指し手を生成（pseudo-legal）
 fn generate_non_evasions_core(
     pos: &Position,
-    moves: &mut [Move],
+    buffer: &mut ExtMoveBuffer,
     targets: GenerateTargets,
     include_non_promotions: bool,
     pawn_promo_mode: PromotionMode,
     include_drops: bool,
-) -> usize {
-    let mut idx = 0;
-
+) {
     // 駒の移動
-    generate_pawn_moves(pos, targets.pawn, moves, &mut idx, pawn_promo_mode);
-    generate_lance_moves(pos, targets.general, moves, &mut idx, include_non_promotions);
-    generate_knight_moves(pos, targets.general, moves, &mut idx, include_non_promotions);
-    generate_silver_moves(pos, targets.general, moves, &mut idx);
-    generate_bishop_moves(pos, targets.general, moves, &mut idx, include_non_promotions);
-    generate_rook_moves(pos, targets.general, moves, &mut idx, include_non_promotions);
-    generate_gold_moves(pos, targets.general, moves, &mut idx);
-    generate_horse_moves(pos, targets.general, moves, &mut idx);
-    generate_dragon_moves(pos, targets.general, moves, &mut idx);
-    generate_king_moves(pos, targets.general, moves, &mut idx);
+    generate_pawn_moves(pos, targets.pawn, buffer, pawn_promo_mode);
+    generate_lance_moves(pos, targets.general, buffer, include_non_promotions);
+    generate_knight_moves(pos, targets.general, buffer, include_non_promotions);
+    generate_silver_moves(pos, targets.general, buffer);
+    generate_bishop_moves(pos, targets.general, buffer, include_non_promotions);
+    generate_rook_moves(pos, targets.general, buffer, include_non_promotions);
+    generate_gold_moves(pos, targets.general, buffer);
+    generate_horse_moves(pos, targets.general, buffer);
+    generate_dragon_moves(pos, targets.general, buffer);
+    generate_king_moves(pos, targets.general, buffer);
 
     if include_drops {
         let drop_target = targets.drop & !pos.occupied();
-        generate_pawn_drops(pos, drop_target, moves, &mut idx);
-        generate_non_pawn_drops(pos, drop_target, moves, &mut idx);
+        generate_pawn_drops(pos, drop_target, buffer);
+        generate_non_pawn_drops(pos, drop_target, buffer);
     }
-
-    idx
 }
 
 /// 王手がかかっていないときの全ての指し手を生成（pseudo-legal）
-pub fn generate_non_evasions(pos: &Position, moves: &mut [Move]) -> usize {
+pub fn generate_non_evasions(pos: &Position, buffer: &mut ExtMoveBuffer) -> usize {
     let us = pos.side_to_move();
     let targets = GenerateTargets::with_drop(!pos.pieces_c(us), !pos.occupied());
-    generate_non_evasions_core(pos, moves, targets, false, PromotionMode::PromoteOnly, true)
+    generate_non_evasions_core(pos, buffer, targets, false, PromotionMode::PromoteOnly, true);
+    buffer.len()
 }
 
 /// 王手回避手を生成（pseudo-legal）
 fn generate_evasions_with_promos(
     pos: &Position,
-    moves: &mut [Move],
+    buffer: &mut ExtMoveBuffer,
     include_non_promotions: bool,
     pawn_promo_mode: PromotionMode,
-) -> usize {
+) {
     debug_assert!(pos.in_check());
 
     let us = pos.side_to_move();
@@ -533,8 +525,6 @@ fn generate_evasions_with_promos(
     let king_sq = pos.king_square(us);
     let checkers = pos.checkers();
     let occupied = pos.occupied();
-
-    let mut idx = 0;
 
     // 王手している駒の利きを集める（玉を除いた盤面で計算）
     let occ_without_king = occupied & !Bitboard::from_square(king_sq);
@@ -574,12 +564,12 @@ fn generate_evasions_with_promos(
 
     for to in king_targets.iter() {
         // 移動先に敵の利きがないかは後でis_legalでチェック
-        add_move(moves, &mut idx, Move::new_move(king_sq, to, false));
+        add_move(buffer, Move::new_move(king_sq, to, false));
     }
 
     // 両王手なら玉移動のみ
     if checker_count >= 2 {
-        return idx;
+        return;
     }
 
     // 単王手の場合：合駒・取り返しを生成
@@ -589,37 +579,36 @@ fn generate_evasions_with_promos(
     let move_target = between | Bitboard::from_square(checker_sq); // 移動は間 + 王手駒
 
     // 玉以外の駒による移動（targetを制限）
-    generate_pawn_moves(pos, move_target, moves, &mut idx, pawn_promo_mode);
-    generate_lance_moves(pos, move_target, moves, &mut idx, include_non_promotions);
-    generate_knight_moves(pos, move_target, moves, &mut idx, include_non_promotions);
-    generate_silver_moves(pos, move_target, moves, &mut idx);
-    generate_bishop_moves(pos, move_target, moves, &mut idx, include_non_promotions);
-    generate_rook_moves(pos, move_target, moves, &mut idx, include_non_promotions);
-    generate_gold_moves(pos, move_target, moves, &mut idx);
-    generate_horse_moves(pos, move_target, moves, &mut idx);
-    generate_dragon_moves(pos, move_target, moves, &mut idx);
+    generate_pawn_moves(pos, move_target, buffer, pawn_promo_mode);
+    generate_lance_moves(pos, move_target, buffer, include_non_promotions);
+    generate_knight_moves(pos, move_target, buffer, include_non_promotions);
+    generate_silver_moves(pos, move_target, buffer);
+    generate_bishop_moves(pos, move_target, buffer, include_non_promotions);
+    generate_rook_moves(pos, move_target, buffer, include_non_promotions);
+    generate_gold_moves(pos, move_target, buffer);
+    generate_horse_moves(pos, move_target, buffer);
+    generate_dragon_moves(pos, move_target, buffer);
 
     // 駒打ち（合駒のみ）
     if !drop_target.is_empty() {
-        generate_pawn_drops(pos, drop_target, moves, &mut idx);
-        generate_non_pawn_drops(pos, drop_target, moves, &mut idx);
+        generate_pawn_drops(pos, drop_target, buffer);
+        generate_non_pawn_drops(pos, drop_target, buffer);
     }
-
-    idx
 }
 
 /// 王手回避手を生成（pseudo-legal）
-pub fn generate_evasions(pos: &Position, moves: &mut [Move]) -> usize {
-    generate_evasions_with_promos(pos, moves, false, PromotionMode::PromoteOnly)
+pub fn generate_evasions(pos: &Position, buffer: &mut ExtMoveBuffer) -> usize {
+    generate_evasions_with_promos(pos, buffer, false, PromotionMode::PromoteOnly);
+    buffer.len()
 }
 
 fn generate_checks(
     pos: &Position,
-    moves: &mut [Move],
+    buffer: &mut ExtMoveBuffer,
     include_non_promotions: bool,
     pawn_promo_mode: PromotionMode,
     quiet_only: bool,
-) -> usize {
+) {
     let us = pos.side_to_move();
     let empties = !pos.occupied();
     let targets = if quiet_only {
@@ -628,47 +617,51 @@ fn generate_checks(
         GenerateTargets::with_drop(!pos.pieces_c(us), empties)
     };
 
-    let mut buffer = [Move::NONE; super::types::MAX_MOVES];
-    let count = generate_non_evasions_core(
+    let mut temp_buffer = ExtMoveBuffer::new();
+    generate_non_evasions_core(
         pos,
-        &mut buffer,
+        &mut temp_buffer,
         targets,
         include_non_promotions,
         pawn_promo_mode,
         true,
     );
 
-    let mut idx = 0;
-    for mv in buffer.iter().take(count) {
-        if quiet_only && pos.is_capture(*mv) {
+    for ext in temp_buffer.iter() {
+        if quiet_only && pos.is_capture(ext.mv) {
             continue;
         }
-        if pos.gives_check(*mv) {
-            moves[idx] = *mv;
-            idx += 1;
+        if pos.gives_check(ext.mv) {
+            buffer.push_move(ext.mv);
         }
     }
-    idx
 }
 
 fn generate_recaptures(
     pos: &Position,
-    moves: &mut [Move],
+    buffer: &mut ExtMoveBuffer,
     sq: Square,
     include_non_promotions: bool,
     pawn_promo_mode: PromotionMode,
-) -> usize {
+) {
     let target = Bitboard::from_square(sq);
     // YaneuraOuのRECAPTURESは移動のみ（駒打ちは含めない）
     let targets = GenerateTargets::new(target);
-    generate_non_evasions_core(pos, moves, targets, include_non_promotions, pawn_promo_mode, false)
+    generate_non_evasions_core(
+        pos,
+        buffer,
+        targets,
+        include_non_promotions,
+        pawn_promo_mode,
+        false,
+    );
 }
 
 /// GenType に応じた指し手生成（pseudo-legal）
 pub fn generate_with_type(
     pos: &Position,
     gen_type: crate::movegen::GenType,
-    moves: &mut [Move],
+    buffer: &mut ExtMoveBuffer,
     recapture_sq: Option<Square>,
 ) -> usize {
     use crate::movegen::GenType::*;
@@ -681,26 +674,41 @@ pub fn generate_with_type(
         // 通常局面
         NonEvasions => {
             let targets = GenerateTargets::with_drop(!pos.pieces_c(us), empties);
-            generate_non_evasions_core(pos, moves, targets, false, PromotionMode::PromoteOnly, true)
+            generate_non_evasions_core(
+                pos,
+                buffer,
+                targets,
+                false,
+                PromotionMode::PromoteOnly,
+                true,
+            );
         }
         NonEvasionsAll => {
             let targets = GenerateTargets::with_drop(!pos.pieces_c(us), empties);
-            generate_non_evasions_core(pos, moves, targets, true, PromotionMode::Both, true)
+            generate_non_evasions_core(pos, buffer, targets, true, PromotionMode::Both, true);
         }
         Quiets => {
             let targets = GenerateTargets::with_drop(empties, empties);
-            generate_non_evasions_core(pos, moves, targets, false, PromotionMode::PromoteOnly, true)
+            generate_non_evasions_core(
+                pos,
+                buffer,
+                targets,
+                false,
+                PromotionMode::PromoteOnly,
+                true,
+            );
         }
         QuietsAll => {
             let targets = GenerateTargets::with_drop(empties, empties);
-            generate_non_evasions_core(pos, moves, targets, true, PromotionMode::Both, true)
+            generate_non_evasions_core(pos, buffer, targets, true, PromotionMode::Both, true);
         }
         QuietsProMinus => {
             let targets = GenerateTargets::with_drop(empties, empties);
             // QUIETS_PRO_MINUS は「歩の静かな成りを含めない」以外は通常のQUIETSと同じ。
-            let mut idx = generate_non_evasions_core(
+            let mut temp_buffer = ExtMoveBuffer::new();
+            generate_non_evasions_core(
                 pos,
-                moves,
+                &mut temp_buffer,
                 targets,
                 false,
                 PromotionMode::PromoteOnly,
@@ -708,143 +716,141 @@ pub fn generate_with_type(
             );
 
             // 歩の静かな成りを除外するためフィルタ
-            let filtered: Vec<_> = moves
-                .iter()
-                .take(idx)
-                .copied()
-                .filter(|m| {
-                    if pos.is_capture(*m) {
-                        return true;
-                    }
-                    let from = m.from();
-                    let to = m.to();
-                    let pt = pos.piece_on(from).piece_type();
-                    !(pt == PieceType::Pawn
-                        && m.is_promotion()
-                        && enemy_field(pos.side_to_move()).contains(to))
-                })
-                .collect();
-            idx = filtered.len();
-            for (i, mv) in filtered.into_iter().enumerate() {
-                moves[i] = mv;
+            for ext in temp_buffer.iter() {
+                if pos.is_capture(ext.mv) {
+                    buffer.push_move(ext.mv);
+                    continue;
+                }
+                let from = ext.mv.from();
+                let to = ext.mv.to();
+                let pt = pos.piece_on(from).piece_type();
+                if !(pt == PieceType::Pawn
+                    && ext.mv.is_promotion()
+                    && enemy_field(pos.side_to_move()).contains(to))
+                {
+                    buffer.push_move(ext.mv);
+                }
             }
-            idx
         }
         QuietsProMinusAll => {
             let targets = GenerateTargets::with_drop(empties, empties);
             // QUIETS_PRO_MINUS_ALL も歩の静かな成りのみ除外（不成生成は許容）
-            let mut idx =
-                generate_non_evasions_core(pos, moves, targets, true, PromotionMode::Both, true);
+            let mut temp_buffer = ExtMoveBuffer::new();
+            generate_non_evasions_core(
+                pos,
+                &mut temp_buffer,
+                targets,
+                true,
+                PromotionMode::Both,
+                true,
+            );
 
-            let filtered: Vec<_> = moves
-                .iter()
-                .take(idx)
-                .copied()
-                .filter(|m| {
-                    if pos.is_capture(*m) {
-                        return true;
-                    }
-                    let from = m.from();
-                    let to = m.to();
-                    let pt = pos.piece_on(from).piece_type();
-                    !(pt == PieceType::Pawn
-                        && m.is_promotion()
-                        && enemy_field(pos.side_to_move()).contains(to))
-                })
-                .collect();
-            idx = filtered.len();
-            for (i, mv) in filtered.into_iter().enumerate() {
-                moves[i] = mv;
+            for ext in temp_buffer.iter() {
+                if pos.is_capture(ext.mv) {
+                    buffer.push_move(ext.mv);
+                    continue;
+                }
+                let from = ext.mv.from();
+                let to = ext.mv.to();
+                let pt = pos.piece_on(from).piece_type();
+                if !(pt == PieceType::Pawn
+                    && ext.mv.is_promotion()
+                    && enemy_field(pos.side_to_move()).contains(to))
+                {
+                    buffer.push_move(ext.mv);
+                }
             }
-            idx
         }
         Captures => {
             let targets = GenerateTargets::new(enemy);
             generate_non_evasions_core(
                 pos,
-                moves,
+                buffer,
                 targets,
                 false,
                 PromotionMode::PromoteOnly,
                 false,
-            )
+            );
         }
         CapturesAll => {
             let targets = GenerateTargets::new(enemy);
-            generate_non_evasions_core(pos, moves, targets, true, PromotionMode::Both, false)
+            generate_non_evasions_core(pos, buffer, targets, true, PromotionMode::Both, false);
         }
         CapturesProPlus => {
             let targets = GenerateTargets::new(enemy);
             generate_non_evasions_core(
                 pos,
-                moves,
+                buffer,
                 targets,
                 false,
                 PromotionMode::PromoteOnly,
                 false,
-            )
+            );
         }
         CapturesProPlusAll => {
             let targets = GenerateTargets::new(enemy);
-            generate_non_evasions_core(pos, moves, targets, true, PromotionMode::Both, false)
+            generate_non_evasions_core(pos, buffer, targets, true, PromotionMode::Both, false);
         }
         Recaptures => {
             let sq = recapture_sq.expect("Recaptures requires a target square");
-            generate_recaptures(pos, moves, sq, false, PromotionMode::PromoteOnly)
+            generate_recaptures(pos, buffer, sq, false, PromotionMode::PromoteOnly);
         }
         RecapturesAll => {
             let sq = recapture_sq.expect("RecapturesAll requires a target square");
-            generate_recaptures(pos, moves, sq, true, PromotionMode::Both)
+            generate_recaptures(pos, buffer, sq, true, PromotionMode::Both);
         }
-        Evasions => generate_evasions_with_promos(pos, moves, false, PromotionMode::PromoteOnly),
-        EvasionsAll => generate_evasions_with_promos(pos, moves, true, PromotionMode::Both),
+        Evasions => {
+            generate_evasions_with_promos(pos, buffer, false, PromotionMode::PromoteOnly);
+        }
+        EvasionsAll => {
+            generate_evasions_with_promos(pos, buffer, true, PromotionMode::Both);
+        }
         Legal => {
-            let mut buffer = [Move::NONE; super::types::MAX_MOVES];
-            let count = if pos.in_check() {
-                generate_evasions_with_promos(pos, &mut buffer, false, PromotionMode::PromoteOnly)
+            let mut temp_buffer = ExtMoveBuffer::new();
+            if pos.in_check() {
+                generate_evasions_with_promos(
+                    pos,
+                    &mut temp_buffer,
+                    false,
+                    PromotionMode::PromoteOnly,
+                );
             } else {
                 let targets = GenerateTargets::with_drop(!pos.pieces_c(us), empties);
                 generate_non_evasions_core(
                     pos,
-                    &mut buffer,
+                    &mut temp_buffer,
                     targets,
                     false,
                     PromotionMode::PromoteOnly,
                     true,
-                )
+                );
             };
-            let mut idx = 0;
-            for mv in buffer.iter().take(count) {
-                if pos.is_legal(*mv) {
-                    moves[idx] = *mv;
-                    idx += 1;
+            for ext in temp_buffer.iter() {
+                if pos.is_legal(ext.mv) {
+                    buffer.push_move(ext.mv);
                 }
             }
-            idx
         }
         LegalAll => {
-            let mut buffer = [Move::NONE; super::types::MAX_MOVES];
-            let count = if pos.in_check() {
-                generate_evasions_with_promos(pos, &mut buffer, true, PromotionMode::Both)
+            let mut temp_buffer = ExtMoveBuffer::new();
+            if pos.in_check() {
+                generate_evasions_with_promos(pos, &mut temp_buffer, true, PromotionMode::Both);
             } else {
                 let targets = GenerateTargets::with_drop(!pos.pieces_c(us), empties);
                 generate_non_evasions_core(
                     pos,
-                    &mut buffer,
+                    &mut temp_buffer,
                     targets,
                     true,
                     PromotionMode::Both,
                     true,
-                )
+                );
             };
-            let mut idx = 0;
-            for mv in buffer.iter().take(count) {
-                if pos.is_legal(*mv) {
-                    moves[idx] = *mv;
-                    idx += 1;
+            for ext in temp_buffer.iter() {
+                if pos.is_legal(ext.mv) {
+                    buffer.push_move(ext.mv);
                 }
             }
-            idx
         }
         Checks | ChecksAll | QuietChecks | QuietChecksAll => {
             let include_non_promotions = matches!(gen_type, ChecksAll | QuietChecksAll);
@@ -855,28 +861,29 @@ pub fn generate_with_type(
             };
             let quiet_only = matches!(gen_type, QuietChecks | QuietChecksAll);
 
-            generate_checks(pos, moves, include_non_promotions, pawn_mode, quiet_only)
+            generate_checks(pos, buffer, include_non_promotions, pawn_mode, quiet_only);
         }
     }
+    buffer.len()
 }
 
 /// 全ての指し手を生成（王手の有無で分岐）
-pub fn generate_all(pos: &Position, moves: &mut [Move]) -> usize {
+pub fn generate_all(pos: &Position, buffer: &mut ExtMoveBuffer) -> usize {
     if pos.in_check() {
-        generate_evasions(pos, moves)
+        generate_evasions(pos, buffer)
     } else {
-        generate_non_evasions(pos, moves)
+        generate_non_evasions(pos, buffer)
     }
 }
 
 /// 合法手を生成
 pub fn generate_legal(pos: &Position, list: &mut MoveList) {
-    let mut moves = [Move::NONE; super::types::MAX_MOVES];
-    let count = generate_all(pos, &mut moves);
+    let mut buffer = ExtMoveBuffer::new();
+    generate_all(pos, &mut buffer);
 
-    for mv in moves.iter().take(count) {
-        if pos.is_legal(*mv) {
-            list.push(*mv);
+    for ext in buffer.iter() {
+        if pos.is_legal(ext.mv) {
+            list.push(ext.mv);
         }
     }
 }
@@ -1031,12 +1038,12 @@ mod tests {
         let mut pos = Position::new();
         pos.set_hirate();
 
-        let mut moves = [Move::NONE; super::super::types::MAX_MOVES];
-        let count = generate_non_evasions(&pos, &mut moves);
+        let mut buffer = ExtMoveBuffer::new();
+        let count = generate_non_evasions(&pos, &mut buffer);
 
         // 初期局面の合法手は30手
         // ただしpseudo-legalなので多めに生成される可能性あり
-        assert!(count >= 30, "Generated {} moves", count);
+        assert!(count >= 30, "Generated {count} moves");
     }
 
     #[test]
@@ -1125,11 +1132,11 @@ mod tests {
         pos.set_sfen("9/9/9/4g4/4K4/9/9/9/9 b - 1").unwrap();
         assert!(pos.in_check());
 
-        let mut buffer = [Move::NONE; super::super::types::MAX_MOVES];
+        let mut buffer = ExtMoveBuffer::new();
         let count = generate_evasions(&pos, &mut buffer);
 
-        for mv in buffer.iter().take(count) {
-            assert!(pos.is_legal(*mv), "王手回避の生成には自殺手を含めない: {mv:?}");
+        for ext in buffer.as_slice().iter().take(count) {
+            assert!(pos.is_legal(ext.mv), "王手回避の生成には自殺手を含めない: {:?}", ext.mv);
         }
     }
 
@@ -1144,14 +1151,14 @@ mod tests {
             .next()
             .expect("先手飛が存在しない");
 
-        let mut buf = [Move::NONE; super::super::types::MAX_MOVES];
+        let mut buf = ExtMoveBuffer::new();
 
         let count = generate_with_type(&pos, crate::movegen::GenType::ChecksAll, &mut buf, None);
         assert!(count > 0);
 
-        for mv in buf.iter().take(count) {
-            assert_eq!(mv.from(), from);
-            assert!(pos.gives_check(*mv), "非チェック手が混入: {mv:?}");
+        for ext in buf.iter() {
+            assert_eq!(ext.mv.from(), from);
+            assert!(pos.gives_check(ext.mv), "非チェック手が混入: {:?}", ext.mv);
         }
     }
 
@@ -1168,7 +1175,7 @@ mod tests {
             "取り返せる先手駒がない"
         );
 
-        let mut buf = [Move::NONE; super::super::types::MAX_MOVES];
+        let mut buf = ExtMoveBuffer::new();
         let count = generate_with_type(
             &pos,
             crate::movegen::GenType::Recaptures,
@@ -1176,8 +1183,8 @@ mod tests {
             Some(recapture_sq),
         );
         assert!(count > 0);
-        for mv in buf.iter().take(count) {
-            assert_eq!(mv.to(), recapture_sq, "他升への手が混入: {mv:?}");
+        for ext in buf.iter() {
+            assert_eq!(ext.mv.to(), recapture_sq, "他升への手が混入: {:?}", ext.mv);
         }
     }
 
@@ -1187,7 +1194,7 @@ mod tests {
         let mut pos = Position::new();
         pos.set_sfen("4k4/9/9/9/9/9/9/4B4/4K4 b - 1").unwrap();
 
-        let mut buf = [Move::NONE; super::super::types::MAX_MOVES];
+        let mut buf = ExtMoveBuffer::new();
         let count = generate_with_type(&pos, crate::movegen::GenType::NonEvasions, &mut buf, None);
         let from = pos
             .pieces(Color::Black, PieceType::Bishop)
@@ -1196,9 +1203,9 @@ mod tests {
             .expect("角が存在しない");
         let enemy = enemy_field(pos.side_to_move());
 
-        let has_non_promo = buf[..count]
-            .iter()
-            .any(|m| m.from() == from && enemy.contains(m.to()) && !m.is_promotion());
+        let has_non_promo = buf.as_slice()[..count].iter().any(|ext| {
+            ext.mv.from() == from && enemy.contains(ext.mv.to()) && !ext.mv.is_promotion()
+        });
         assert!(!has_non_promo, "通常モードでは敵陣への角移動は成りのみのはず");
     }
 
@@ -1207,7 +1214,7 @@ mod tests {
         let mut pos = Position::new();
         pos.set_sfen("4k4/9/9/9/9/9/9/4B4/4K4 b - 1").unwrap();
 
-        let mut buf = [Move::NONE; super::super::types::MAX_MOVES];
+        let mut buf = ExtMoveBuffer::new();
         let count =
             generate_with_type(&pos, crate::movegen::GenType::NonEvasionsAll, &mut buf, None);
         let from = pos
@@ -1216,7 +1223,9 @@ mod tests {
             .next()
             .expect("角が存在しない");
 
-        let has_non_promo = buf[..count].iter().any(|m| m.from() == from && !m.is_promotion());
+        let has_non_promo = buf.as_slice()[..count]
+            .iter()
+            .any(|ext| ext.mv.from() == from && !ext.mv.is_promotion());
         assert!(has_non_promo, "All モードでは不成も生成する");
     }
 
@@ -1226,25 +1235,25 @@ mod tests {
         let mut pos = Position::new();
         pos.set_sfen("4k4/9/9/9/9/4P4/9/9/4K4 b - 1").unwrap();
 
-        let mut buf = [Move::NONE; super::super::types::MAX_MOVES];
+        let mut buf = ExtMoveBuffer::new();
         let count =
             generate_with_type(&pos, crate::movegen::GenType::QuietsProMinus, &mut buf, None);
         let from = pos.pieces(Color::Black, PieceType::Pawn).iter().next().expect("歩が存在しない");
         let to = pawn_effect(Color::Black, from).iter().next().expect("歩の利きがない");
 
-        let moves_from: Vec<Move> = buf[..count]
+        let moves_from: Vec<Move> = buf.as_slice()[..count]
             .iter()
-            .copied()
+            .map(|ext| ext.mv)
             .filter(|m| m.from() == from && m.to() == to)
             .collect();
-        assert!(!moves_from.is_empty(), "対象の手が生成されていない: {:?}", moves_from);
+        assert!(!moves_from.is_empty(), "対象の手が生成されていない: {moves_from:?}");
 
-        let has_non_promo = buf[..count]
+        let has_non_promo = buf.as_slice()[..count]
             .iter()
-            .any(|m| m.from() == from && m.to() == to && !m.is_promotion());
-        let has_promo = buf[..count]
+            .any(|ext| ext.mv.from() == from && ext.mv.to() == to && !ext.mv.is_promotion());
+        let has_promo = buf.as_slice()[..count]
             .iter()
-            .any(|m| m.from() == from && m.to() == to && m.is_promotion());
+            .any(|ext| ext.mv.from() == from && ext.mv.to() == to && ext.mv.is_promotion());
 
         assert!(has_non_promo, "不成の静かな手は生成される");
         assert!(!has_promo, "QuietsProMinusでは歩の静かな成りは生成しないはず");
