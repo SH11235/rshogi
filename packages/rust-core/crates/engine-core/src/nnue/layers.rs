@@ -3,6 +3,7 @@
 //! - `AffineTransform`: 全結合アフィン変換層（入力×重み + バイアス）
 //! - `ClippedReLU`: 整数スケーリング付きのクリップ付き ReLU 層
 
+use super::accumulator::AlignedBox;
 use super::constants::WEIGHT_SCALE_BITS;
 use std::io::{self, Read};
 
@@ -58,8 +59,8 @@ unsafe fn hsum_i32_sse2(v: std::arch::x86_64::__m128i) -> i32 {
 pub struct AffineTransform<const INPUT_DIM: usize, const OUTPUT_DIM: usize> {
     /// バイアス
     pub biases: [i32; OUTPUT_DIM],
-    /// 重み（転置形式で保持）
-    pub weights: Box<[i8]>,
+    /// 重み（転置形式で保持、64バイトアライン）
+    pub weights: AlignedBox<i8>,
 }
 
 impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM, OUTPUT_DIM> {
@@ -75,9 +76,9 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
             *bias = i32::from_le_bytes(buf4);
         }
 
-        // 重みを読み込み
+        // 重みを読み込み（64バイトアラインで確保）
         let weight_size = OUTPUT_DIM * Self::PADDED_INPUT;
-        let mut weights = vec![0i8; weight_size].into_boxed_slice();
+        let mut weights = AlignedBox::new_zeroed(weight_size);
         let mut buf1 = [0u8; 1];
         for weight in weights.iter_mut() {
             reader.read_exact(&mut buf1)?;
@@ -114,30 +115,39 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         {
             // SAFETY:
-            // - 入力とウェイトは適切なサイズが保証されている
-            // - PADDED_INPUTは32の倍数
+            // - input.len() >= PADDED_INPUT (debug_assert で検証済み)
+            // - weights.len() >= OUTPUT_DIM * PADDED_INPUT (構造上保証)
+            // - input は Aligned<[u8; N]> で64バイトアライン
+            // - weights は AlignedBox<i8> で64バイトアライン
+            // - PADDED_INPUT は32の倍数なのでオフセットは常に32バイト境界
             unsafe {
                 use std::arch::x86_64::*;
 
                 let num_chunks = Self::PADDED_INPUT / 32;
 
+                // 定数をループ外でホイスト
+                let one = _mm256_set1_epi16(1);
+
+                // ポインタを事前に取得（境界チェック排除）
+                let input_ptr = input.as_ptr();
+                let weights_ptr = self.weights.as_ptr();
+
                 for (j, (out, &bias)) in output.iter_mut().zip(&self.biases).enumerate() {
                     let mut acc = _mm256_setzero_si256();
-                    let weight_row = &self.weights[j * Self::PADDED_INPUT..];
+                    let weight_row_offset = j * Self::PADDED_INPUT;
 
                     // 入力を32バイトずつ処理
                     for k in 0..num_chunks {
                         let offset = k * 32;
-                        let in_vec = _mm256_loadu_si256(input[offset..].as_ptr() as *const __m256i);
-                        let w_vec =
-                            _mm256_loadu_si256(weight_row[offset..].as_ptr() as *const __m256i);
+                        let in_vec = _mm256_load_si256(input_ptr.add(offset) as *const __m256i);
+                        let w_vec = _mm256_load_si256(
+                            weights_ptr.add(weight_row_offset + offset) as *const __m256i
+                        );
 
                         // u8 × i8 → i16 (隣接2ペアの積和、16個のi16)
                         let prod16 = _mm256_maddubs_epi16(in_vec, w_vec);
 
                         // i16 → i32 にワイドニング加算
-                        // _mm256_madd_epi16(a, 1) で隣接2個のi16を加算してi32に
-                        let one = _mm256_set1_epi16(1);
                         let prod32 = _mm256_madd_epi16(prod16, one);
 
                         acc = _mm256_add_epi32(acc, prod32);
@@ -157,26 +167,39 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
             not(target_feature = "avx2")
         ))]
         {
-            // SAFETY: 同上
+            // SAFETY:
+            // - input.len() >= PADDED_INPUT (debug_assert で検証済み)
+            // - weights.len() >= OUTPUT_DIM * PADDED_INPUT (構造上保証)
+            // - input は Aligned<[u8; N]> で64バイトアライン（16バイト境界も満たす）
+            // - weights は AlignedBox<i8> で64バイトアライン
+            // - PADDED_INPUT は32の倍数なのでオフセットは常に16バイト境界
             unsafe {
                 use std::arch::x86_64::*;
 
                 let num_chunks = Self::PADDED_INPUT / 16;
 
+                // 定数をループ外でホイスト
+                let one = _mm_set1_epi16(1);
+                let zero = _mm_setzero_si128();
+
+                // ポインタを事前に取得（境界チェック排除）
+                let input_ptr = input.as_ptr();
+                let weights_ptr = self.weights.as_ptr();
+
                 for (j, (out, &bias)) in output.iter_mut().zip(&self.biases).enumerate() {
                     let mut acc = _mm_setzero_si128();
-                    let weight_row = &self.weights[j * Self::PADDED_INPUT..];
+                    let weight_row_offset = j * Self::PADDED_INPUT;
 
                     // 入力を16バイトずつ処理
                     for k in 0..num_chunks {
                         let offset = k * 16;
-                        let in_vec = _mm_loadu_si128(input[offset..].as_ptr() as *const __m128i);
-                        let w_vec =
-                            _mm_loadu_si128(weight_row[offset..].as_ptr() as *const __m128i);
+                        let in_vec = _mm_load_si128(input_ptr.add(offset) as *const __m128i);
+                        let w_vec = _mm_load_si128(
+                            weights_ptr.add(weight_row_offset + offset) as *const __m128i
+                        );
 
                         // SSE2にはmaddubs_epi16がないので、手動で実装
                         // u8をi16にゼロ拡張
-                        let zero = _mm_setzero_si128();
                         let in_lo = _mm_unpacklo_epi8(in_vec, zero);
                         let in_hi = _mm_unpackhi_epi8(in_vec, zero);
                         // i8をi16に符号拡張（cmpgtで符号ビットマスクを生成）
@@ -189,7 +212,6 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
                         let prod_hi = _mm_mullo_epi16(in_hi, w_hi);
 
                         // i16 → i32 にワイドニング加算
-                        let one = _mm_set1_epi16(1);
                         let sum32_lo = _mm_madd_epi16(prod_lo, one);
                         let sum32_hi = _mm_madd_epi16(prod_hi, one);
 
@@ -207,21 +229,29 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
         // WASM SIMD128
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
-            // SAFETY: 同上
+            // SAFETY:
+            // - input.len() >= PADDED_INPUT (debug_assert で検証済み)
+            // - weights.len() >= OUTPUT_DIM * PADDED_INPUT (構造上保証)
+            // - WASM SIMD128 はアライメント不要（v128_load は任意のアドレスで動作）
             unsafe {
                 use std::arch::wasm32::*;
 
                 let num_chunks = Self::PADDED_INPUT / 16;
 
+                // ポインタを事前に取得（境界チェック排除）
+                let input_ptr = input.as_ptr();
+                let weights_ptr = self.weights.as_ptr();
+
                 for (j, (out, &bias)) in output.iter_mut().zip(&self.biases).enumerate() {
                     let mut acc = i32x4_splat(0);
-                    let weight_row = &self.weights[j * Self::PADDED_INPUT..];
+                    let weight_row_offset = j * Self::PADDED_INPUT;
 
                     // 入力を16バイトずつ処理
                     for k in 0..num_chunks {
                         let offset = k * 16;
-                        let in_vec = v128_load(input[offset..].as_ptr() as *const v128);
-                        let w_vec = v128_load(weight_row[offset..].as_ptr() as *const v128);
+                        let in_vec = v128_load(input_ptr.add(offset) as *const v128);
+                        let w_vec =
+                            v128_load(weights_ptr.add(weight_row_offset + offset) as *const v128);
 
                         // u8をi16に拡張
                         let in_lo = i16x8_extend_low_u8x16(in_vec);
@@ -293,29 +323,31 @@ impl<const DIM: usize> ClippedReLU<DIM> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nnue::accumulator::Aligned;
 
     #[test]
     fn test_affine_transform_propagate() {
         // 小さいテスト用の変換
         // PADDED_INPUT = padded_input(4) = 32 なので、入力も32バイト必要
+        let mut weights = AlignedBox::new_zeroed(64); // 2行 × 32バイト
+        weights[0] = 1;
+        weights[1] = 2; // 行0: [1, 2, 0, ...]
+        weights[32] = 3;
+        weights[33] = 4; // 行1: [3, 4, 0, ...]
+
         let transform: AffineTransform<4, 2> = AffineTransform {
             biases: [10, 20],
-            weights: vec![
-                1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0,
-            ]
-            .into_boxed_slice(),
+            weights,
         };
 
         // 入力はPADDED_INPUT（32バイト）にパディングする必要がある
-        // SIMD実装は32バイト単位で処理するため
-        let mut input = [0u8; 32];
-        input[0] = 1;
-        input[1] = 2;
+        // SIMD実装は32バイト単位で処理するため、64バイトアライン必須
+        let mut input = Aligned([0u8; 32]);
+        input.0[0] = 1;
+        input.0[1] = 2;
         let mut output = [0i32; 2];
 
-        transform.propagate(&input, &mut output);
+        transform.propagate(&input.0, &mut output);
 
         // output[0] = 10 + 1*1 + 2*2 = 15
         // output[1] = 20 + 1*3 + 2*4 = 31
@@ -342,7 +374,7 @@ mod tests {
     fn test_affine_transform_real_size() {
         // 実際の使用サイズ（512入力→32出力）に近いテスト
         // PADDED_INPUT = padded_input(512) = 512
-        let mut weights = vec![0i8; 32 * 512];
+        let mut weights = AlignedBox::new_zeroed(32 * 512);
         // 対角成分を1に設定（出力iに入力iが1:1で対応）
         for i in 0..32 {
             weights[i * 512 + i] = 1;
@@ -350,16 +382,17 @@ mod tests {
 
         let transform: AffineTransform<512, 32> = AffineTransform {
             biases: [10; 32],
-            weights: weights.into_boxed_slice(),
+            weights,
         };
 
-        let mut input = [0u8; 512];
-        for (i, val) in input.iter_mut().take(32).enumerate() {
+        // 入力は64バイトアライン必須
+        let mut input = Aligned([0u8; 512]);
+        for (i, val) in input.0.iter_mut().take(32).enumerate() {
             *val = (i + 1) as u8; // 1, 2, 3, ..., 32
         }
         let mut output = [0i32; 32];
 
-        transform.propagate(&input, &mut output);
+        transform.propagate(&input.0, &mut output);
 
         // output[i] = 10 + input[i] * 1 = 10 + (i+1)
         for (i, &val) in output.iter().enumerate() {

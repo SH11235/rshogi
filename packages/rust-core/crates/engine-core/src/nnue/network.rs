@@ -6,7 +6,7 @@
 //! - 出力層（32→1）で整数スコアを得て `FV_SCALE` でスケーリングし `Value` に変換
 //! - グローバルな `NETWORK` にロードし、`evaluate` から利用する
 
-use super::accumulator::{Accumulator, AccumulatorStack};
+use super::accumulator::{Accumulator, AccumulatorStack, Aligned};
 use super::constants::{
     FV_SCALE, HIDDEN1_DIMENSIONS, HIDDEN2_DIMENSIONS, NNUE_VERSION, OUTPUT_DIMENSIONS,
     TRANSFORMED_FEATURE_DIMENSIONS,
@@ -83,9 +83,9 @@ impl Network {
 
     /// 評価値を計算
     pub fn evaluate(&self, pos: &Position, acc: &Accumulator) -> Value {
-        // 変換済み特徴量
-        let mut transformed = [0u8; TRANSFORMED_FEATURE_DIMENSIONS * 2];
-        self.feature_transformer.transform(acc, pos.side_to_move(), &mut transformed);
+        // 変換済み特徴量（64バイトアラインで SIMD アラインロードを有効化）
+        let mut transformed = Aligned([0u8; TRANSFORMED_FEATURE_DIMENSIONS * 2]);
+        self.feature_transformer.transform(acc, pos.side_to_move(), &mut transformed.0);
 
         // 入力密度の計測（diagnosticsフィーチャー有効時のみ）
         //
@@ -104,8 +104,8 @@ impl Network {
             static TOTAL_NONZERO: AtomicU64 = AtomicU64::new(0);
             static TOTAL_ELEMENTS: AtomicU64 = AtomicU64::new(0);
 
-            let nonzero = transformed.iter().filter(|&&x| x != 0).count() as u64;
-            let elements = transformed.len() as u64;
+            let nonzero = transformed.0.iter().filter(|&&x| x != 0).count() as u64;
+            let elements = transformed.0.len() as u64;
 
             TOTAL_NONZERO.fetch_add(nonzero, Ordering::Relaxed);
             TOTAL_ELEMENTS.fetch_add(elements, Ordering::Relaxed);
@@ -122,26 +122,26 @@ impl Network {
             }
         }
 
-        // 隠れ層1
-        let mut hidden1_out = [0i32; HIDDEN1_DIMENSIONS];
-        self.hidden1.propagate(&transformed, &mut hidden1_out);
+        // 隠れ層1（64バイトアラインバッファ使用）
+        let mut hidden1_out = Aligned([0i32; HIDDEN1_DIMENSIONS]);
+        self.hidden1.propagate(&transformed.0, &mut hidden1_out.0);
 
-        let mut hidden1_relu = [0u8; HIDDEN1_DIMENSIONS];
-        ClippedReLU::propagate(&hidden1_out, &mut hidden1_relu);
+        let mut hidden1_relu = Aligned([0u8; HIDDEN1_DIMENSIONS]);
+        ClippedReLU::propagate(&hidden1_out.0, &mut hidden1_relu.0);
 
-        // 隠れ層2
-        let mut hidden2_out = [0i32; HIDDEN2_DIMENSIONS];
-        self.hidden2.propagate(&hidden1_relu, &mut hidden2_out);
+        // 隠れ層2（64バイトアラインバッファ使用）
+        let mut hidden2_out = Aligned([0i32; HIDDEN2_DIMENSIONS]);
+        self.hidden2.propagate(&hidden1_relu.0, &mut hidden2_out.0);
 
-        let mut hidden2_relu = [0u8; HIDDEN2_DIMENSIONS];
-        ClippedReLU::propagate(&hidden2_out, &mut hidden2_relu);
+        let mut hidden2_relu = Aligned([0u8; HIDDEN2_DIMENSIONS]);
+        ClippedReLU::propagate(&hidden2_out.0, &mut hidden2_relu.0);
 
-        // 出力層
-        let mut output = [0i32; OUTPUT_DIMENSIONS];
-        self.output.propagate(&hidden2_relu, &mut output);
+        // 出力層（64バイトアラインバッファ使用）
+        let mut output = Aligned([0i32; OUTPUT_DIMENSIONS]);
+        self.output.propagate(&hidden2_relu.0, &mut output.0);
 
         // スケーリング
-        Value::new(output[0] / FV_SCALE)
+        Value::new(output.0[0] / FV_SCALE)
     }
 }
 
