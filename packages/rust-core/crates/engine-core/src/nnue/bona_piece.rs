@@ -7,6 +7,57 @@
 
 use crate::types::{Color, Piece, PieceType, Square};
 
+/// 駒種・is_friend に対する base offset テーブル
+/// `[piece_type as usize][is_friend as usize]` -> base offset
+/// is_friend: 0=enemy, 1=friend
+///
+/// 値は `from_piece_square()` の実装から抽出。
+/// PieceType は 1 始まり（Pawn=1, ..., Dragon=14）なので index 0 はダミー。
+pub const PIECE_BASE: [[u16; 2]; 15] = [
+    // index 0: 未使用（ダミー）
+    [0, 0],
+    // PieceType::Pawn = 1
+    [82, 1], // [enemy, friend]
+    // PieceType::Lance = 2
+    [244, 163],
+    // PieceType::Knight = 3
+    [406, 325],
+    // PieceType::Silver = 4
+    [568, 487],
+    // PieceType::Bishop = 5
+    [892, 811],
+    // PieceType::Rook = 6
+    [1054, 973],
+    // PieceType::Gold = 7 (成駒と同じ)
+    [730, 649],
+    // PieceType::King = 8 (使用しない、0埋め)
+    [0, 0],
+    // PieceType::ProPawn = 9 (Gold と同じ)
+    [730, 649],
+    // PieceType::ProLance = 10 (Gold と同じ)
+    [730, 649],
+    // PieceType::ProKnight = 11 (Gold と同じ)
+    [730, 649],
+    // PieceType::ProSilver = 12 (Gold と同じ)
+    [730, 649],
+    // PieceType::Horse = 13
+    [1216, 1135],
+    // PieceType::Dragon = 14
+    [1378, 1297],
+];
+
+/// base offset から直接 BonaPiece を生成（高速パス用）
+///
+/// # Safety
+/// - `sq_index` は 0..=80 の範囲内であること
+/// - `base` は PIECE_BASE テーブルから取得した有効な値であること
+#[inline]
+pub fn bona_piece_from_base(sq_index: usize, base: u16) -> BonaPiece {
+    debug_assert!(sq_index <= 80, "sq_index out of range: {sq_index}");
+    debug_assert!(base <= 1378, "base out of range: {base}");
+    BonaPiece::new(base + sq_index as u16)
+}
+
 /// fe_end: BonaPieceの最大値
 ///
 /// YaneuraOu の HalfKP 用定義に基づく概算値。
@@ -253,5 +304,48 @@ mod tests {
 
         let index = halfkp_index(king_sq, bp);
         assert_eq!(index, king_sq.index() * FE_END + 100);
+    }
+
+    #[test]
+    fn test_piece_base_table_consistency() {
+        // 全駒種について、PIECE_BASEテーブルとfrom_piece_square()の結果が一致することを確認
+        let all_piece_types = [
+            PieceType::Pawn,
+            PieceType::Lance,
+            PieceType::Knight,
+            PieceType::Silver,
+            PieceType::Gold,
+            PieceType::Bishop,
+            PieceType::Rook,
+            PieceType::ProPawn,
+            PieceType::ProLance,
+            PieceType::ProKnight,
+            PieceType::ProSilver,
+            PieceType::Horse,
+            PieceType::Dragon,
+        ];
+
+        let sq = Square::from_u8(0).unwrap();
+        let perspective = Color::Black;
+
+        for pt in all_piece_types {
+            for &color in &[Color::Black, Color::White] {
+                let is_friend = color == perspective;
+                let piece = Piece::new(color, pt);
+
+                // from_piece_square() の結果
+                let bp_old = BonaPiece::from_piece_square(piece, sq, perspective);
+
+                // PIECE_BASE テーブルからの結果
+                let base = PIECE_BASE[pt as usize][is_friend as usize];
+                let bp_new = bona_piece_from_base(0, base);
+
+                assert_eq!(
+                    bp_old, bp_new,
+                    "Mismatch for {:?}, color={:?}, is_friend={}",
+                    pt, color, is_friend
+                );
+            }
+        }
     }
 }
