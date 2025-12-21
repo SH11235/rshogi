@@ -74,6 +74,58 @@ const baseCard: CSSProperties = {
     boxShadow: "0 14px 28px rgba(0,0,0,0.12)",
 };
 
+// スタイル定数（保守性・一貫性のため）
+const TEXT_STYLES = {
+    mutedSecondary: {
+        fontSize: "12px",
+        color: "hsl(var(--muted-foreground, 0 0% 48%))",
+    } as CSSProperties,
+    handLabel: {
+        fontSize: "12px",
+        fontWeight: 600,
+        marginBottom: "4px",
+    } as CSSProperties,
+    moveCount: {
+        textAlign: "center",
+        fontSize: "14px",
+        fontWeight: 600,
+        color: "hsl(var(--foreground, 0 0% 10%))",
+        margin: "8px 0",
+    } as CSSProperties,
+} as const;
+
+// 持ち駒表示セクションコンポーネント（DRY原則）
+interface PlayerHandSectionProps {
+    owner: Player;
+    label: string;
+    hand: PositionState["hands"]["sente"] | PositionState["hands"]["gote"];
+    selectedPiece: PieceType | null;
+    isActive: boolean;
+    onHandSelect: (piece: PieceType) => void;
+}
+
+function PlayerHandSection({
+    owner,
+    label,
+    hand,
+    selectedPiece,
+    isActive,
+    onHandSelect,
+}: PlayerHandSectionProps): ReactElement {
+    return (
+        <div>
+            <div style={TEXT_STYLES.handLabel}>{label}</div>
+            <HandPiecesDisplay
+                owner={owner}
+                hand={hand}
+                selectedPiece={selectedPiece}
+                isActive={isActive}
+                onHandSelect={onHandSelect}
+            />
+        </div>
+    );
+}
+
 const clonePositionState = (pos: PositionState): PositionState => ({
     board: cloneBoard(pos.board),
     hands: cloneHandsState(pos.hands),
@@ -860,12 +912,13 @@ export function ShogiMatch({
                                     marginBottom: "8px",
                                 }}
                             >
-                                <div style={{ fontWeight: 700 }}>盤面</div>
+                                <h3 style={{ fontWeight: 700, margin: 0, fontSize: "inherit" }}>
+                                    盤面
+                                </h3>
                                 <div
-                                    style={{
-                                        fontSize: "12px",
-                                        color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                                    }}
+                                    style={TEXT_STYLES.mutedSecondary}
+                                    role="status"
+                                    aria-live="polite"
                                 >
                                     手番: {position.turn === "sente" ? "先手" : "後手"}
                                 </div>
@@ -879,40 +932,23 @@ export function ShogiMatch({
                                 }}
                             >
                                 {/* 後手の持ち駒（盤の上） */}
-                                <div>
-                                    <div
-                                        style={{
-                                            fontSize: "12px",
-                                            fontWeight: 600,
-                                            marginBottom: "4px",
-                                        }}
-                                    >
-                                        後手の持ち駒
-                                    </div>
-                                    <HandPiecesDisplay
-                                        owner="gote"
-                                        hand={position.hands.gote}
-                                        selectedPiece={
-                                            selection?.kind === "hand" ? selection.piece : null
-                                        }
-                                        isActive={
-                                            !isEditMode &&
-                                            position.turn === "gote" &&
-                                            sides.gote.role === "human"
-                                        }
-                                        onHandSelect={handleHandSelect}
-                                    />
-                                </div>
+                                <PlayerHandSection
+                                    owner="gote"
+                                    label="後手の持ち駒"
+                                    hand={position.hands.gote}
+                                    selectedPiece={
+                                        selection?.kind === "hand" ? selection.piece : null
+                                    }
+                                    isActive={
+                                        !isEditMode &&
+                                        position.turn === "gote" &&
+                                        sides.gote.role === "human"
+                                    }
+                                    onHandSelect={handleHandSelect}
+                                />
 
-                                <div
-                                    style={{
-                                        textAlign: "center",
-                                        fontSize: "14px",
-                                        fontWeight: 600,
-                                        color: "hsl(var(--foreground, 0 0% 10%))",
-                                    }}
-                                >
-                                    {moves.length}手目
+                                <div style={TEXT_STYLES.moveCount} role="status">
+                                    {moves.length === 0 ? "開始局面" : `${moves.length}手目`}
                                 </div>
                                 <ShogiBoard
                                     grid={grid}
@@ -935,41 +971,24 @@ export function ShogiMatch({
                                     onPromotionChoice={handlePromotionChoice}
                                 />
                                 {candidateNote ? (
-                                    <div
-                                        style={{
-                                            fontSize: "12px",
-                                            color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                                        }}
-                                    >
-                                        {candidateNote}
-                                    </div>
+                                    <div style={TEXT_STYLES.mutedSecondary}>{candidateNote}</div>
                                 ) : null}
 
                                 {/* 先手の持ち駒（盤の下） */}
-                                <div>
-                                    <div
-                                        style={{
-                                            fontSize: "12px",
-                                            fontWeight: 600,
-                                            marginBottom: "4px",
-                                        }}
-                                    >
-                                        先手の持ち駒
-                                    </div>
-                                    <HandPiecesDisplay
-                                        owner="sente"
-                                        hand={position.hands.sente}
-                                        selectedPiece={
-                                            selection?.kind === "hand" ? selection.piece : null
-                                        }
-                                        isActive={
-                                            !isEditMode &&
-                                            position.turn === "sente" &&
-                                            sides.sente.role === "human"
-                                        }
-                                        onHandSelect={handleHandSelect}
-                                    />
-                                </div>
+                                <PlayerHandSection
+                                    owner="sente"
+                                    label="先手の持ち駒"
+                                    hand={position.hands.sente}
+                                    selectedPiece={
+                                        selection?.kind === "hand" ? selection.piece : null
+                                    }
+                                    isActive={
+                                        !isEditMode &&
+                                        position.turn === "sente" &&
+                                        sides.sente.role === "human"
+                                    }
+                                    onHandSelect={handleHandSelect}
+                                />
                             </div>
                         </div>
                     </div>
