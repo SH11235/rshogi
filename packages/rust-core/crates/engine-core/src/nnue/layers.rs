@@ -88,6 +88,78 @@ unsafe fn m128_add_dpbusd_epi32(
     *acc = _mm_add_epi32(*acc, product32);
 }
 
+/// WASM SIMD128: u8×i8 の16要素内積を i32x4 に集約
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+unsafe fn dot_i8x16_u8i8_preexpanded(
+    in_lo: std::arch::wasm32::v128,
+    in_hi: std::arch::wasm32::v128,
+    w_vec: std::arch::wasm32::v128,
+) -> std::arch::wasm32::v128 {
+    use std::arch::wasm32::*;
+    let w_lo = i16x8_extend_low_i8x16(w_vec);
+    let w_hi = i16x8_extend_high_i8x16(w_vec);
+
+    let prod_lo = i16x8_mul(in_lo, w_lo);
+    let prod_hi = i16x8_mul(in_hi, w_hi);
+
+    let sum32_lo_lo = i32x4_extend_low_i16x8(prod_lo);
+    let sum32_lo_hi = i32x4_extend_high_i16x8(prod_lo);
+    let sum32_hi_lo = i32x4_extend_low_i16x8(prod_hi);
+    let sum32_hi_hi = i32x4_extend_high_i16x8(prod_hi);
+
+    let mut acc = i32x4_add(sum32_lo_lo, sum32_lo_hi);
+    acc = i32x4_add(acc, sum32_hi_lo);
+    i32x4_add(acc, sum32_hi_hi)
+}
+
+/// WASM SIMD128: 入力ベクトルをu16拡張して内積を計算
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+unsafe fn dot_i8x16_u8i8(
+    in_vec: std::arch::wasm32::v128,
+    w_vec: std::arch::wasm32::v128,
+) -> std::arch::wasm32::v128 {
+    use std::arch::wasm32::*;
+    let in_lo = i16x8_extend_low_u8x16(in_vec);
+    let in_hi = i16x8_extend_high_u8x16(in_vec);
+    dot_i8x16_u8i8_preexpanded(in_lo, in_hi, w_vec)
+}
+
+/// WASM SIMD128: i32x4 の水平加算
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+unsafe fn hsum_i32x4(v: std::arch::wasm32::v128) -> i32 {
+    use std::arch::wasm32::*;
+    i32x4_extract_lane::<0>(v)
+        + i32x4_extract_lane::<1>(v)
+        + i32x4_extract_lane::<2>(v)
+        + i32x4_extract_lane::<3>(v)
+}
+
+/// WASM SIMD128: 2本のi32x4を水平加算（シャッフル + 加算）
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+unsafe fn hadd_i32x4(
+    x0: std::arch::wasm32::v128,
+    x1: std::arch::wasm32::v128,
+) -> std::arch::wasm32::v128 {
+    use std::arch::wasm32::*;
+    i32x4_add(i32x4_shuffle::<0, 2, 4, 6>(x0, x1), i32x4_shuffle::<1, 3, 5, 7>(x0, x1))
+}
+
+/// WASM SIMD128: 4本のi32x4を水平加算して1本のi32x4に詰める
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+unsafe fn haddx4(
+    z0: std::arch::wasm32::v128,
+    z1: std::arch::wasm32::v128,
+    z2: std::arch::wasm32::v128,
+    z3: std::arch::wasm32::v128,
+) -> std::arch::wasm32::v128 {
+    hadd_i32x4(hadd_i32x4(z0, z1), hadd_i32x4(z2, z3))
+}
+
 /// アフィン変換層
 pub struct AffineTransform<const INPUT_DIM: usize, const OUTPUT_DIM: usize> {
     /// バイアス
@@ -521,7 +593,9 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
             // SAFETY:
             // - input.len() >= PADDED_INPUT (debug_assert で検証済み)
             // - weights.len() >= OUTPUT_DIM * PADDED_INPUT (構造上保証)
-            // - WASM SIMD128 はアライメント不要（v128_load は任意のアドレスで動作）
+            // - WASM SIMD128 はアライメント不要（v128_load/v128_store は任意のアドレスで動作）
+            // - biases/output は4出力ずつ（j += 4）でアクセスし、i32配列なので
+            //   オフセットは 4 * sizeof(i32) = 16バイトの倍数となり16バイト境界
             unsafe {
                 use std::arch::wasm32::*;
 
@@ -530,6 +604,47 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
                 // ポインタを事前に取得（境界チェック排除）
                 let input_ptr = input.as_ptr();
                 let weights_ptr = self.weights.as_ptr();
+
+                // 4出力同時処理: 入力ロードを再利用（YaneuraOu dot4方式）
+                if OUTPUT_DIM.is_multiple_of(4) && OUTPUT_DIM > 0 {
+                    let mut j = 0;
+                    while j < OUTPUT_DIM {
+                        let mut acc0 = i32x4_splat(0);
+                        let mut acc1 = i32x4_splat(0);
+                        let mut acc2 = i32x4_splat(0);
+                        let mut acc3 = i32x4_splat(0);
+
+                        let row0 = weights_ptr.add((j + 0) * Self::PADDED_INPUT);
+                        let row1 = weights_ptr.add((j + 1) * Self::PADDED_INPUT);
+                        let row2 = weights_ptr.add((j + 2) * Self::PADDED_INPUT);
+                        let row3 = weights_ptr.add((j + 3) * Self::PADDED_INPUT);
+
+                        // 入力を16バイトずつ処理
+                        for k in 0..num_chunks {
+                            let offset = k * 16;
+                            let in_vec = v128_load(input_ptr.add(offset) as *const v128);
+                            let in_lo = i16x8_extend_low_u8x16(in_vec);
+                            let in_hi = i16x8_extend_high_u8x16(in_vec);
+
+                            let w0 = v128_load(row0.add(offset) as *const v128);
+                            let w1 = v128_load(row1.add(offset) as *const v128);
+                            let w2 = v128_load(row2.add(offset) as *const v128);
+                            let w3 = v128_load(row3.add(offset) as *const v128);
+
+                            acc0 = i32x4_add(acc0, dot_i8x16_u8i8_preexpanded(in_lo, in_hi, w0));
+                            acc1 = i32x4_add(acc1, dot_i8x16_u8i8_preexpanded(in_lo, in_hi, w1));
+                            acc2 = i32x4_add(acc2, dot_i8x16_u8i8_preexpanded(in_lo, in_hi, w2));
+                            acc3 = i32x4_add(acc3, dot_i8x16_u8i8_preexpanded(in_lo, in_hi, w3));
+                        }
+
+                        let sum_vec = haddx4(acc0, acc1, acc2, acc3);
+                        let bias_vec = v128_load(self.biases.as_ptr().add(j) as *const v128);
+                        let out_vec = i32x4_add(bias_vec, sum_vec);
+                        v128_store(output.as_mut_ptr().add(j) as *mut v128, out_vec);
+                        j += 4;
+                    }
+                    return;
+                }
 
                 for (j, (out, &bias)) in output.iter_mut().zip(&self.biases).enumerate() {
                     let mut acc = i32x4_splat(0);
@@ -542,34 +657,11 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
                         let w_vec =
                             v128_load(weights_ptr.add(weight_row_offset + offset) as *const v128);
 
-                        // u8をi16に拡張
-                        let in_lo = i16x8_extend_low_u8x16(in_vec);
-                        let in_hi = i16x8_extend_high_u8x16(in_vec);
-                        // i8をi16に拡張
-                        let w_lo = i16x8_extend_low_i8x16(w_vec);
-                        let w_hi = i16x8_extend_high_i8x16(w_vec);
-
-                        // i16乗算
-                        let prod_lo = i16x8_mul(in_lo, w_lo);
-                        let prod_hi = i16x8_mul(in_hi, w_hi);
-
-                        // i16 → i32 に拡張して加算
-                        let sum32_lo_lo = i32x4_extend_low_i16x8(prod_lo);
-                        let sum32_lo_hi = i32x4_extend_high_i16x8(prod_lo);
-                        let sum32_hi_lo = i32x4_extend_low_i16x8(prod_hi);
-                        let sum32_hi_hi = i32x4_extend_high_i16x8(prod_hi);
-
-                        acc = i32x4_add(acc, sum32_lo_lo);
-                        acc = i32x4_add(acc, sum32_lo_hi);
-                        acc = i32x4_add(acc, sum32_hi_lo);
-                        acc = i32x4_add(acc, sum32_hi_hi);
+                        acc = i32x4_add(acc, dot_i8x16_u8i8(in_vec, w_vec));
                     }
 
                     // 水平加算
-                    let sum = i32x4_extract_lane::<0>(acc)
-                        + i32x4_extract_lane::<1>(acc)
-                        + i32x4_extract_lane::<2>(acc)
-                        + i32x4_extract_lane::<3>(acc);
+                    let sum = hsum_i32x4(acc);
 
                     *out = bias + sum;
                 }
