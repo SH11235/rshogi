@@ -10,7 +10,9 @@
 
 use super::constants::{NUM_REFRESH_TRIGGERS, TRANSFORMED_FEATURE_DIMENSIONS};
 use crate::types::{Color, Piece, PieceType, Square, Value, MAX_PLY};
+use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::mem::MaybeUninit;
+use std::ops::{Deref, DerefMut};
 
 // =============================================================================
 // IndexList - 固定長の特徴量インデックスリスト
@@ -106,6 +108,72 @@ impl<T: Default + Copy> Default for Aligned<T> {
         Self(T::default())
     }
 }
+
+// =============================================================================
+// AlignedBox - 64バイトアラインメントのヒープ確保スライス
+// =============================================================================
+
+/// キャッシュラインサイズ（64バイト）
+pub const CACHE_LINE_SIZE: usize = 64;
+
+/// 64バイトアラインメントでヒープに確保されたスライス
+///
+/// FeatureTransformerのweightsなど、大きな配列をアラインして確保するために使用。
+/// aligned load/store命令を使うためにはデータが64バイト境界に配置されている必要がある。
+pub struct AlignedBox<T> {
+    ptr: *mut T,
+    len: usize,
+    layout: Layout,
+}
+
+impl<T: Copy + Default> AlignedBox<T> {
+    /// 指定された長さの配列をゼロ初期化して確保
+    pub fn new_zeroed(len: usize) -> Self {
+        let size = std::mem::size_of::<T>() * len;
+        let align = CACHE_LINE_SIZE.max(std::mem::align_of::<T>());
+
+        // SAFETY: align は 2 のべき乗で、size は align の倍数に切り上げられる
+        let layout = Layout::from_size_align(size, align).expect("Invalid layout").pad_to_align();
+
+        // SAFETY: layout は有効、alloc_zeroed は失敗時に null を返す
+        let ptr = unsafe { alloc_zeroed(layout) as *mut T };
+        if ptr.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+
+        Self { ptr, len, layout }
+    }
+}
+
+impl<T> Deref for AlignedBox<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: ptr は有効で、len 要素分のメモリが確保されている
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl<T> DerefMut for AlignedBox<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: ptr は有効で、len 要素分のメモリが確保されている
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
+impl<T> Drop for AlignedBox<T> {
+    fn drop(&mut self) {
+        // SAFETY: ptr は alloc_zeroed で確保したポインタ、layout は同じもの
+        unsafe {
+            dealloc(self.ptr as *mut u8, self.layout);
+        }
+    }
+}
+
+// SAFETY: T が Send なら AlignedBox<T> も Send
+unsafe impl<T: Send> Send for AlignedBox<T> {}
+// SAFETY: T が Sync なら AlignedBox<T> も Sync
+unsafe impl<T: Sync> Sync for AlignedBox<T> {}
 
 /// Accumulatorの構造
 /// 入力特徴量をアフィン変換した結果を保持

@@ -149,15 +149,15 @@ ls -1t ./benchmark_results/ | head -4 | sed 's/^/    /'
 echo ""
 
 echo "perfレポートの生成中..."
-sudo perf report -i packages/rust-core/perf_nnue.data --stdio --no-children --percent-limit 0.5 \
-    > packages/rust-core/perf_results/nnue_flat.txt
-echo "  -> packages/rust-core/perf_results/nnue_flat.txt"
+sudo perf report -i perf_nnue.data --stdio --no-children --percent-limit 0.5 \
+> perf_results/nnue_flat.txt
+echo "  -> perf_results/nnue_flat.txt"
 
 echo ""
 echo "コールグラフレポートの生成中..."
-sudo perf report -i packages/rust-core/perf_nnue.data --stdio -g caller --percent-limit 0.5 \
-    > packages/rust-core/perf_results/nnue_callers.txt
-echo "  -> packages/rust-core/perf_results/nnue_callers.txt"
+sudo perf report -i perf_nnue.data --stdio -g caller --percent-limit 0.5 \
+    > perf_results/nnue_callers.txt
+echo "  -> perf_results/nnue_callers.txt"
 
 
 echo "ドキュメント更新: Claude Codeで /update-rust-perf-docs を実行してください"
