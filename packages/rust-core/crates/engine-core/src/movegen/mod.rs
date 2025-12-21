@@ -18,4 +18,4 @@ pub use generator::{
     generate_all, generate_evasions, generate_legal, generate_non_evasions, generate_with_type,
 };
 pub use movelist::MoveList;
-pub use types::{ExtMove, GenType, MAX_MOVES};
+pub use types::{ExtMove, ExtMoveBuffer, GenType, MAX_MOVES};

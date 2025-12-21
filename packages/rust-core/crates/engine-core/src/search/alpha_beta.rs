@@ -1084,34 +1084,34 @@ impl SearchWorker {
 
         // qsearchでは捕獲以外のチェックも生成（YaneuraOu準拠）
         if !in_check && depth == DEPTH_QS {
-            let mut buf = [Move::NONE; crate::movegen::MAX_MOVES];
+            let mut buf = crate::movegen::ExtMoveBuffer::new();
             let gen_type = if self.generate_all_legal_moves {
                 crate::movegen::GenType::QuietChecksAll
             } else {
                 crate::movegen::GenType::QuietChecks
             };
-            let count = crate::movegen::generate_with_type(pos, gen_type, &mut buf, None);
-            for mv in buf.iter().take(count) {
-                if ordered_moves.contains(mv) {
+            crate::movegen::generate_with_type(pos, gen_type, &mut buf, None);
+            for ext in buf.iter() {
+                if ordered_moves.contains(&ext.mv) {
                     continue;
                 }
-                ordered_moves.push(*mv);
+                ordered_moves.push(ext.mv);
             }
         }
 
         // depth <= -5 なら recaptures のみに絞る
         if depth <= -5 && ply >= 1 {
-            let mut buf = [Move::NONE; crate::movegen::MAX_MOVES];
+            let mut buf = crate::movegen::ExtMoveBuffer::new();
             let rec_sq = self.stack[(ply - 1) as usize].current_move.to();
             let gen_type = if self.generate_all_legal_moves {
                 crate::movegen::GenType::RecapturesAll
             } else {
                 crate::movegen::GenType::Recaptures
             };
-            let count = crate::movegen::generate_with_type(pos, gen_type, &mut buf, Some(rec_sq));
+            crate::movegen::generate_with_type(pos, gen_type, &mut buf, Some(rec_sq));
             ordered_moves.clear();
-            for mv in buf.iter().take(count) {
-                ordered_moves.push(*mv);
+            for ext in buf.iter() {
+                ordered_moves.push(ext.mv);
             }
         }
 
@@ -2767,34 +2767,33 @@ impl SearchWorker {
             }
 
             if !in_check && depth == DEPTH_QS {
-                let mut buf = [Move::NONE; crate::movegen::MAX_MOVES];
+                let mut buf = crate::movegen::ExtMoveBuffer::new();
                 let gen_type = if self.generate_all_legal_moves {
                     crate::movegen::GenType::QuietChecksAll
                 } else {
                     crate::movegen::GenType::QuietChecks
                 };
-                let count = crate::movegen::generate_with_type(pos, gen_type, &mut buf, None);
-                for mv in buf.iter().take(count) {
-                    if buf_moves.contains(mv) {
+                crate::movegen::generate_with_type(pos, gen_type, &mut buf, None);
+                for ext in buf.iter() {
+                    if buf_moves.contains(&ext.mv) {
                         continue;
                     }
-                    buf_moves.push(*mv);
+                    buf_moves.push(ext.mv);
                 }
             }
 
             if !in_check && depth <= -5 && ply >= 1 && !prev_move.is_none() {
-                let mut buf = [Move::NONE; crate::movegen::MAX_MOVES];
+                let mut buf = crate::movegen::ExtMoveBuffer::new();
                 let rec_sq = prev_move.to();
                 let gen_type = if self.generate_all_legal_moves {
                     crate::movegen::GenType::RecapturesAll
                 } else {
                     crate::movegen::GenType::Recaptures
                 };
-                let count =
-                    crate::movegen::generate_with_type(pos, gen_type, &mut buf, Some(rec_sq));
+                crate::movegen::generate_with_type(pos, gen_type, &mut buf, Some(rec_sq));
                 buf_moves.clear();
-                for mv in buf.iter().take(count) {
-                    buf_moves.push(*mv);
+                for ext in buf.iter() {
+                    buf_moves.push(ext.mv);
                 }
             }
 
