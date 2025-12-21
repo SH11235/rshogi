@@ -186,6 +186,8 @@ pub fn evaluate(pos: &Position, stack: &mut AccumulatorStack) -> Value {
                 let mut updated = false;
 
                 // 1. 直前局面で差分更新を試行
+                // YaneuraOu classic と同様に、update_accumulator は視点ごとに reset を判定し、
+                // 常に成功する（玉移動した視点は再構築、それ以外は差分更新）。
                 if let Some(prev_idx) = current_entry.previous {
                     let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
                     if prev_computed {
@@ -196,15 +198,16 @@ pub fn evaluate(pos: &Position, stack: &mut AccumulatorStack) -> Value {
                         // （値コピー + std::memcpy）を使用している。
                         let prev_acc = stack.entry_at(prev_idx).accumulator.clone();
                         let current_acc = &mut stack.current_mut().accumulator;
-                        updated = network.feature_transformer.update_accumulator(
+                        network.feature_transformer.update_accumulator(
                             pos,
                             &dirty_piece,
                             current_acc,
                             &prev_acc,
                         );
+                        updated = true;
                         #[cfg(feature = "diagnostics")]
                         {
-                            diff_update_result = if updated { 1 } else { 4 };
+                            diff_update_result = 1; // diff_success
                         }
                     } else {
                         #[cfg(feature = "diagnostics")]
