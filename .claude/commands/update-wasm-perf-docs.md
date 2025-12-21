@@ -6,16 +6,14 @@
 
 1. **ベンチマークの実行**
 
-   以下のコマンドでベンチマークを実行し、結果を取得します。
+   モノレポのルートディレクトリから以下のコマンドを実行します。
 
    ```bash
-   cd packages/engine-wasm
-
    # NNUE有効時
-   pnpm bench:wasm -- --nnue-file ../rust-core/memo/YaneuraOu/eval/nn.bin
+   pnpm --filter @shogi/engine-wasm bench:wasm -- --nnue-file packages/rust-core/memo/YaneuraOu/eval/nn.bin
 
    # Material評価時
-   pnpm bench:wasm -- --material
+   pnpm --filter @shogi/engine-wasm bench:wasm -- --material
    ```
 
    出力はJSON形式です。

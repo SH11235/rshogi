@@ -67,6 +67,13 @@ const parseMoves = (value) =>
         .map((v) => v.trim())
         .filter(Boolean);
 
+const requireArg = (argv, index, optionName) => {
+    if (index >= argv.length || argv[index] === undefined) {
+        throw new Error(`${optionName} requires an argument`);
+    }
+    return argv[index];
+};
+
 const parseArgs = (argv) => {
     const args = {
         useNnue: true,
@@ -90,41 +97,44 @@ const parseArgs = (argv) => {
         }
         switch (arg) {
             case "--nnue-file":
-                args.nnueFile = argv[++i];
+                args.nnueFile = requireArg(argv, ++i, "--nnue-file");
                 break;
             case "--material":
                 args.useNnue = false;
                 break;
             case "--wasm":
-                args.wasmPath = argv[++i];
+                args.wasmPath = requireArg(argv, ++i, "--wasm");
                 break;
             case "--sfens":
-                args.sfensPath = argv[++i];
+                args.sfensPath = requireArg(argv, ++i, "--sfens");
                 break;
             case "--sfen":
-                args.sfen = argv[++i];
+                args.sfen = requireArg(argv, ++i, "--sfen");
                 break;
             case "--moves":
-                args.moves = parseMoves(argv[++i] ?? "");
+                args.moves = parseMoves(requireArg(argv, ++i, "--moves"));
                 break;
             case "--nodes":
-                args.nodes = parseIntArg(argv[++i], "nodes");
+                args.nodes = parseIntArg(requireArg(argv, ++i, "--nodes"), "nodes");
                 break;
             case "--movetime-ms":
-                args.movetimeMs = parseIntArg(argv[++i], "movetime-ms");
+                args.movetimeMs = parseIntArg(
+                    requireArg(argv, ++i, "--movetime-ms"),
+                    "movetime-ms",
+                );
                 break;
             case "--iterations":
             case "--runs":
-                args.iterations = parseIntArg(argv[++i], "iterations");
+                args.iterations = parseIntArg(requireArg(argv, ++i, "--iterations"), "iterations");
                 break;
             case "--warmup":
-                args.warmup = parseIntArg(argv[++i], "warmup");
+                args.warmup = parseIntArg(requireArg(argv, ++i, "--warmup"), "warmup");
                 break;
             case "--tt-size-mb":
-                args.ttSizeMb = parseIntArg(argv[++i], "tt-size-mb");
+                args.ttSizeMb = parseIntArg(requireArg(argv, ++i, "--tt-size-mb"), "tt-size-mb");
                 break;
             case "--multi-pv":
-                args.multiPv = parseIntArg(argv[++i], "multi-pv");
+                args.multiPv = parseIntArg(requireArg(argv, ++i, "--multi-pv"), "multi-pv");
                 break;
             default:
                 throw new Error(`Unknown arg: ${arg}`);
@@ -152,6 +162,7 @@ const readBytes = (label, filePath) => {
 };
 
 const parsePositionsFile = (filePath) => {
+    const MAX_LINE_LENGTH = 10000;
     const text = readFileSync(filePath, "utf-8");
     const lines = text.split(/\r?\n/);
     const positions = [];
@@ -160,11 +171,19 @@ const parsePositionsFile = (filePath) => {
         const raw = lines[idx].trim();
         if (!raw || raw.startsWith("#")) continue;
 
+        if (raw.length > MAX_LINE_LENGTH) {
+            throw new Error(`Line ${idx + 1} exceeds maximum length (${MAX_LINE_LENGTH})`);
+        }
+
         const sep = raw.indexOf("|");
         if (sep >= 0) {
+            const sfen = raw.slice(sep + 1).trim();
+            if (!sfen) {
+                throw new Error(`Empty SFEN at line ${idx + 1}`);
+            }
             positions.push({
                 name: raw.slice(0, sep).trim() || `position_${idx + 1}`,
-                sfen: raw.slice(sep + 1).trim(),
+                sfen,
             });
         } else {
             positions.push({ name: `position_${idx + 1}`, sfen: raw });
