@@ -5,7 +5,7 @@
 //! 盤上駒および手駒を特徴量として扱い、`DirtyPiece` に基づく差分更新にも対応する。
 
 use super::accumulator::{
-    Accumulator, AccumulatorStack, Aligned, DirtyPiece, IndexList, MAX_ACTIVE_FEATURES,
+    Accumulator, AccumulatorStack, Aligned, AlignedBox, DirtyPiece, IndexList, MAX_ACTIVE_FEATURES,
 };
 use super::constants::{HALFKP_DIMENSIONS, NUM_REFRESH_TRIGGERS, TRANSFORMED_FEATURE_DIMENSIONS};
 use super::diff::get_features_from_dirty_piece;
@@ -21,8 +21,8 @@ pub struct FeatureTransformer {
     pub biases: Aligned<[i16; TRANSFORMED_FEATURE_DIMENSIONS]>,
 
     /// 重み [input_dimensions][half_dimensions]
-    /// 大きいのでBox化
-    pub weights: Box<[i16]>,
+    /// 64バイトアラインメントで確保（aligned load/store用）
+    pub weights: AlignedBox<i16>,
 }
 
 impl FeatureTransformer {
@@ -36,9 +36,9 @@ impl FeatureTransformer {
             *bias = i16::from_le_bytes(buf);
         }
 
-        // 重みを読み込み
+        // 重みを読み込み（64バイトアラインメント）
         let weight_size = HALFKP_DIMENSIONS * TRANSFORMED_FEATURE_DIMENSIONS;
-        let mut weights = vec![0i16; weight_size].into_boxed_slice();
+        let mut weights = AlignedBox::new_zeroed(weight_size);
         for weight in weights.iter_mut() {
             reader.read_exact(&mut buf)?;
             *weight = i16::from_le_bytes(buf);
@@ -229,6 +229,7 @@ impl FeatureTransformer {
     ///
     /// AVX2/SSE2/WASMのSIMD最適化版。256要素を一度に処理。
     /// YaneuraOu classic と同様に非飽和演算を使用する。
+    /// weightsとaccumulationは64バイトアラインされている前提でaligned load/storeを使用。
     #[inline]
     fn add_weights(&self, accumulation: &mut [i16; TRANSFORMED_FEATURE_DIMENSIONS], index: usize) {
         let offset = index * TRANSFORMED_FEATURE_DIMENSIONS;
@@ -242,19 +243,25 @@ impl FeatureTransformer {
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         {
             // SAFETY:
-            // - loadu/storeu を使用しているためアライメント要件なし
-            // - weights は上の境界チェック済み
+            // - weights: AlignedBoxで64バイトアライン、各行は512バイト(64の倍数)
+            // - accumulation: Aligned<[i16; 256]>で64バイトアライン
             // - 256要素 = 16要素 × 16回のループで完全にカバー
             unsafe {
                 use std::arch::x86_64::*;
                 let acc_ptr = accumulation.as_mut_ptr();
                 let weight_ptr = weights.as_ptr();
 
+                #[allow(clippy::manual_is_multiple_of)]
+                {
+                    debug_assert!(acc_ptr as usize % 64 == 0, "accumulation not 64-byte aligned");
+                    debug_assert!(weight_ptr as usize % 64 == 0, "weights not 64-byte aligned");
+                }
+
                 for i in 0..16 {
-                    let acc_vec = _mm256_loadu_si256(acc_ptr.add(i * 16) as *const __m256i);
-                    let weight_vec = _mm256_loadu_si256(weight_ptr.add(i * 16) as *const __m256i);
+                    let acc_vec = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
+                    let weight_vec = _mm256_load_si256(weight_ptr.add(i * 16) as *const __m256i);
                     let result = _mm256_add_epi16(acc_vec, weight_vec);
-                    _mm256_storeu_si256(acc_ptr.add(i * 16) as *mut __m256i, result);
+                    _mm256_store_si256(acc_ptr.add(i * 16) as *mut __m256i, result);
                 }
             }
             return;
@@ -267,17 +274,23 @@ impl FeatureTransformer {
             not(target_feature = "avx2")
         ))]
         {
-            // SAFETY: 同上
+            // SAFETY: 同上（16バイトアライン）
             unsafe {
                 use std::arch::x86_64::*;
                 let acc_ptr = accumulation.as_mut_ptr();
                 let weight_ptr = weights.as_ptr();
 
+                #[allow(clippy::manual_is_multiple_of)]
+                {
+                    debug_assert!(acc_ptr as usize % 64 == 0, "accumulation not 64-byte aligned");
+                    debug_assert!(weight_ptr as usize % 64 == 0, "weights not 64-byte aligned");
+                }
+
                 for i in 0..32 {
-                    let acc_vec = _mm_loadu_si128(acc_ptr.add(i * 8) as *const __m128i);
-                    let weight_vec = _mm_loadu_si128(weight_ptr.add(i * 8) as *const __m128i);
+                    let acc_vec = _mm_load_si128(acc_ptr.add(i * 8) as *const __m128i);
+                    let weight_vec = _mm_load_si128(weight_ptr.add(i * 8) as *const __m128i);
                     let result = _mm_add_epi16(acc_vec, weight_vec);
-                    _mm_storeu_si128(acc_ptr.add(i * 8) as *mut __m128i, result);
+                    _mm_store_si128(acc_ptr.add(i * 8) as *mut __m128i, result);
                 }
             }
             return;
@@ -313,6 +326,7 @@ impl FeatureTransformer {
     ///
     /// AVX2/SSE2/WASMのSIMD最適化版。256要素を一度に処理。
     /// YaneuraOu classic と同様に非飽和演算を使用する。
+    /// weightsとaccumulationは64バイトアラインされている前提でaligned load/storeを使用。
     #[inline]
     fn sub_weights(&self, accumulation: &mut [i16; TRANSFORMED_FEATURE_DIMENSIONS], index: usize) {
         let offset = index * TRANSFORMED_FEATURE_DIMENSIONS;
@@ -326,19 +340,25 @@ impl FeatureTransformer {
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         {
             // SAFETY:
-            // - loadu/storeu を使用しているためアライメント要件なし
-            // - weights は上の境界チェック済み
+            // - weights: AlignedBoxで64バイトアライン、各行は512バイト(64の倍数)
+            // - accumulation: Aligned<[i16; 256]>で64バイトアライン
             // - 256要素 = 16要素 × 16回のループで完全にカバー
             unsafe {
                 use std::arch::x86_64::*;
                 let acc_ptr = accumulation.as_mut_ptr();
                 let weight_ptr = weights.as_ptr();
 
+                #[allow(clippy::manual_is_multiple_of)]
+                {
+                    debug_assert!(acc_ptr as usize % 64 == 0, "accumulation not 64-byte aligned");
+                    debug_assert!(weight_ptr as usize % 64 == 0, "weights not 64-byte aligned");
+                }
+
                 for i in 0..16 {
-                    let acc_vec = _mm256_loadu_si256(acc_ptr.add(i * 16) as *const __m256i);
-                    let weight_vec = _mm256_loadu_si256(weight_ptr.add(i * 16) as *const __m256i);
+                    let acc_vec = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
+                    let weight_vec = _mm256_load_si256(weight_ptr.add(i * 16) as *const __m256i);
                     let result = _mm256_sub_epi16(acc_vec, weight_vec);
-                    _mm256_storeu_si256(acc_ptr.add(i * 16) as *mut __m256i, result);
+                    _mm256_store_si256(acc_ptr.add(i * 16) as *mut __m256i, result);
                 }
             }
             return;
@@ -351,17 +371,23 @@ impl FeatureTransformer {
             not(target_feature = "avx2")
         ))]
         {
-            // SAFETY: 同上
+            // SAFETY: 同上（16バイトアライン）
             unsafe {
                 use std::arch::x86_64::*;
                 let acc_ptr = accumulation.as_mut_ptr();
                 let weight_ptr = weights.as_ptr();
 
+                #[allow(clippy::manual_is_multiple_of)]
+                {
+                    debug_assert!(acc_ptr as usize % 64 == 0, "accumulation not 64-byte aligned");
+                    debug_assert!(weight_ptr as usize % 64 == 0, "weights not 64-byte aligned");
+                }
+
                 for i in 0..32 {
-                    let acc_vec = _mm_loadu_si128(acc_ptr.add(i * 8) as *const __m128i);
-                    let weight_vec = _mm_loadu_si128(weight_ptr.add(i * 8) as *const __m128i);
+                    let acc_vec = _mm_load_si128(acc_ptr.add(i * 8) as *const __m128i);
+                    let weight_vec = _mm_load_si128(weight_ptr.add(i * 8) as *const __m128i);
                     let result = _mm_sub_epi16(acc_vec, weight_vec);
-                    _mm_storeu_si128(acc_ptr.add(i * 8) as *mut __m128i, result);
+                    _mm_store_si128(acc_ptr.add(i * 8) as *mut __m128i, result);
                 }
             }
             return;
@@ -529,17 +555,28 @@ impl FeatureTransformer {
 mod tests {
     use super::*;
 
+    /// テスト用にAlignedBoxを作成し、値を設定するヘルパー
+    fn create_weights_with_value(value: i16) -> AlignedBox<i16> {
+        let mut weights =
+            AlignedBox::new_zeroed(HALFKP_DIMENSIONS * TRANSFORMED_FEATURE_DIMENSIONS);
+        for w in weights.iter_mut() {
+            *w = value;
+        }
+        weights
+    }
+
     #[test]
     fn test_add_weights() {
-        // ダミーのFeatureTransformerを作成
+        // ダミーのFeatureTransformerを作成（AlignedBox使用）
         let ft = FeatureTransformer {
             biases: Aligned([0i16; TRANSFORMED_FEATURE_DIMENSIONS]),
-            weights: vec![1i16; HALFKP_DIMENSIONS * TRANSFORMED_FEATURE_DIMENSIONS]
-                .into_boxed_slice(),
+            weights: create_weights_with_value(1),
         };
 
-        let mut acc = [0i16; TRANSFORMED_FEATURE_DIMENSIONS];
-        ft.add_weights(&mut acc, 0);
+        // Accumulator経由でアラインされた配列を使用
+        let mut acc_storage = Accumulator::new();
+        let acc = acc_storage.get_mut(0, 0);
+        ft.add_weights(acc, 0);
 
         // 全て1が加算されているはず
         for &val in acc.iter() {
@@ -549,16 +586,20 @@ mod tests {
 
     #[test]
     fn test_sub_weights() {
-        // ダミーのFeatureTransformerを作成
+        // ダミーのFeatureTransformerを作成（AlignedBox使用）
         let ft = FeatureTransformer {
             biases: Aligned([0i16; TRANSFORMED_FEATURE_DIMENSIONS]),
-            weights: vec![1i16; HALFKP_DIMENSIONS * TRANSFORMED_FEATURE_DIMENSIONS]
-                .into_boxed_slice(),
+            weights: create_weights_with_value(1),
         };
 
+        // Accumulator経由でアラインされた配列を使用
+        let mut acc_storage = Accumulator::new();
+        let acc = acc_storage.get_mut(0, 0);
         // 初期値を10に設定
-        let mut acc = [10i16; TRANSFORMED_FEATURE_DIMENSIONS];
-        ft.sub_weights(&mut acc, 0);
+        for v in acc.iter_mut() {
+            *v = 10;
+        }
+        ft.sub_weights(acc, 0);
 
         // 全て10 - 1 = 9になっているはず
         for &val in acc.iter() {
@@ -571,11 +612,10 @@ mod tests {
         use crate::nnue::accumulator::Accumulator;
         use crate::types::Color;
 
-        // ダミーのFeatureTransformerを作成
+        // ダミーのFeatureTransformerを作成（AlignedBox使用）
         let ft = FeatureTransformer {
             biases: Aligned([0i16; TRANSFORMED_FEATURE_DIMENSIONS]),
-            weights: vec![0i16; HALFKP_DIMENSIONS * TRANSFORMED_FEATURE_DIMENSIONS]
-                .into_boxed_slice(),
+            weights: create_weights_with_value(0),
         };
 
         // Accumulatorを設定（各視点で異なる値）
@@ -611,10 +651,10 @@ mod tests {
         use crate::nnue::accumulator::Accumulator;
         use crate::types::Color;
 
+        // ダミーのFeatureTransformerを作成（AlignedBox使用）
         let ft = FeatureTransformer {
             biases: Aligned([0i16; TRANSFORMED_FEATURE_DIMENSIONS]),
-            weights: vec![0i16; HALFKP_DIMENSIONS * TRANSFORMED_FEATURE_DIMENSIONS]
-                .into_boxed_slice(),
+            weights: create_weights_with_value(0),
         };
 
         let mut acc = Accumulator::new();
