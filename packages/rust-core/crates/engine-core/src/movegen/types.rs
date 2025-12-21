@@ -148,6 +148,11 @@ impl ExtMoveBuffer {
         if self.len < MAX_MOVES {
             self.buf[self.len].write(ext);
             self.len += 1;
+        } else {
+            debug_assert!(
+                false,
+                "ExtMoveBuffer overflow: tried to add move beyond MAX_MOVES ({MAX_MOVES})"
+            );
         }
     }
 
@@ -160,6 +165,12 @@ impl ExtMoveBuffer {
         if self.len < MAX_MOVES {
             self.buf[self.len].write(ExtMove { mv, value: 0 });
             self.len += 1;
+        } else {
+            debug_assert!(
+                false,
+                "ExtMoveBuffer overflow: tried to add move beyond MAX_MOVES ({})",
+                MAX_MOVES
+            );
         }
     }
 
@@ -255,6 +266,14 @@ impl ExtMoveBuffer {
     ///
     /// 捕獲手のみフィルタする際などに使用。
     /// O(n)でフィルタリングを行う。
+    ///
+    /// # Safety guarantees
+    ///
+    /// この関数は内部でunsafeを使用するが、以下の不変条件により安全性が保証される:
+    /// - `self.len`は常に初期化済み要素数を正確に追跡
+    /// - `read_idx < self.len`の範囲のみアクセスするため、未初期化メモリは読み込まない
+    /// - `write_idx <= read_idx`が常に成立するため、書き込み先は既に読み込み済みか同一位置
+    /// - ExtMoveはCopyトレイトを実装しており、assume_init()後の再writeは安全
     #[inline]
     pub fn retain<F>(&mut self, mut f: F)
     where
@@ -262,15 +281,23 @@ impl ExtMoveBuffer {
     {
         let mut write_idx = 0;
         for read_idx in 0..self.len {
-            // SAFETY: read_idx < self.len なので初期化済み
+            // SAFETY: read_idx < self.len であり、0..self.len の範囲は
+            // push()/push_move()/set() により全て初期化済み。
+            // したがって assume_init() は未初期化メモリにアクセスしない。
             let ext = unsafe { self.buf[read_idx].assume_init() };
             if f(ext.mv) {
+                // SAFETY: write_idx <= read_idx が常に成立。
+                // write_idx < read_idx の場合、write_idx位置は既に読み込み済みなので
+                // 上書きしても問題ない。write_idx == read_idx の場合はスキップ。
                 if write_idx != read_idx {
                     self.buf[write_idx].write(ext);
                 }
                 write_idx += 1;
             }
         }
+        // write_idx は条件を満たした要素数。
+        // 新しいlenより後ろの要素は論理的に無効となるが、
+        // MaybeUninitなのでドロップ処理は不要。
         self.len = write_idx;
     }
 }
