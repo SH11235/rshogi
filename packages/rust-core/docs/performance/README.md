@@ -51,11 +51,42 @@
 
 ### YaneuraOu比較（主開発環境）
 
+#### 通常ビルド（開発時）
+
 | エンジン | NNUE NPS | Material NPS | 備考 |
 |---------|--------:|-------------:|------|
-| 本エンジン | 681,366 | 435,547 | - |
+| 本エンジン | 681,366 | 435,547 | `cargo build --release` |
 | YaneuraOu | 1,118,219 | 1,545,172 | 参考値 |
 | **対YaneuraOu比** | **61%** | **28%** | - |
+
+#### PGOビルド（本番用）
+
+| エンジン | Material NPS | 対YO比 | 備考 |
+|---------|-------------:|-------:|------|
+| 本エンジン（PGO前） | 435,290 | 28% | ベースライン |
+| **本エンジン（PGO後）** | **497,643** | **32%** | **+14.3%向上** |
+| YaneuraOu | 1,545,172 | 100% | 参考値 |
+
+※ PGOビルド: `./scripts/build_pgo.sh`
+
+### PGO (Profile-Guided Optimization) 効果
+
+計測条件: `./target/release/benchmark` (Material評価、3回実行の平均)
+
+| 状態 | Run 1 | Run 2 | Run 3 | 平均NPS |
+|------|------:|------:|------:|--------:|
+| PGO前 | 435,567 | 434,590 | 435,712 | 435,290 |
+| **PGO後** | 494,473 | 500,417 | 498,039 | **497,643** |
+
+| 指標 | 値 |
+|------|-----|
+| **NPS向上率** | **+14.3%** |
+| 絶対値向上 | +62,353 NPS |
+
+PGOの最適化内容:
+- 分岐予測最適化（頻繁に取られる分岐を優先配置）
+- コードレイアウト最適化（ホットパスを連続メモリに配置）
+- インライン判断の改善（実行頻度に基づく）
 
 ---
 
@@ -297,6 +328,7 @@ quit"
 | `perf_profile_debug.sh` | debug buildでシンボル詳細解決 | Material評価時、関数名特定 |
 | `perf_profile.sh` | 基本的なホットスポット特定 | 簡易計測 |
 | `perf_reuse_search.sh` | SearchWorker再利用効果の測定 | 特定調査用 |
+| **`build_pgo.sh`** | **PGO最適化ビルド** | **本番デプロイ用（+14% NPS）** |
 
 ### 使用例
 
@@ -326,6 +358,29 @@ RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release --
   --output-dir ./benchmark_results
 ```
 
+### PGOビルド（本番デプロイ用）
+
+```bash
+cd packages/rust-core
+
+# PGOビルド実行（約3分）
+./scripts/build_pgo.sh
+
+# 効果確認付き
+./scripts/build_pgo.sh --verify
+
+# プロファイルデータ削除
+./scripts/build_pgo.sh --clean
+```
+
+PGOビルドの処理フロー:
+1. プロファイル収集用ビルド (`-C profile-generate`)
+2. ベンチマーク実行でプロファイル収集
+3. `llvm-profdata merge` でマージ
+4. PGO適用ビルド (`-C profile-use`)
+
+**注意**: 開発中の反復作業には通常ビルドを推奨（高速なイテレーション）。PGOビルドはリリース前の最終計測・本番デプロイ時に使用。
+
 ---
 
 ## 変更履歴
@@ -347,3 +402,5 @@ RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release --
 | 2025-12-22 | 計測結果更新（NNUE: MovePicker 9.52%, network::evaluate 3.74%, refresh 2.49%、Material: eval_lv7_like 25.95%, direction_of 16.25%）。**改善点**: AffineTransformのループ逆転最適化により `network::evaluate` が4.74%→3.74%に約21%減少（外側ループを入力チャンク、内側を出力に変更し、入力ブロードキャストと重みアクセスの連続性を改善）。NNUE推論高速化の結果、`MovePicker` が8.86%→9.52%、`check_move_mate` が2.17%でホットスポット6位に浮上するなど、相対比率が変動 |
 | 2025-12-22 | **NPS計測結果セクション追加**。NNUE/Material両方の局面別NPS、YaneuraOu比較表を追加。**VNNI dpbusd命令対応**: AVX512-VNNI対応CPUでNNUE積和演算を1命令化（`_mm256_dpbusd_epi32`）。別端末（Intel Cascade Lake-X）での計測で**+13% NPS向上**を確認 |
 | 2025-12-22 | 計測結果更新（NNUE: MovePicker 9.36%, network::evaluate 3.73%, refresh 2.45%、Material: eval_lv7_like 25.78%, direction_of 16.39%）。NPS: NNUE平均 681,366（+1.5%）、Material平均 435,547。YaneuraOu比が60%→61%に微増 |
+| 2025-12-22 | **PGO (Profile-Guided Optimization) 導入**: `scripts/build_pgo.sh`追加。Material NPS **+14.3%向上**（435,290→497,643）。YaneuraOu比が28%→32%に改善。PGO効果の詳細計測結果を追加 |
+| 2025-12-22 | **本番ビルドプロファイル追加**: `[profile.production]`をCargo.tomlに追加。Full LTO、codegen-units=1、overflow-checks無効化。WASMビルドで-4.2%サイズ削減（865KB→829KB）。CIデプロイがproductionプロファイルを使用するよう更新 |
