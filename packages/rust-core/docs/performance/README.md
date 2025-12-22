@@ -10,7 +10,7 @@
 | コア数 | 32 |
 | OS | Ubuntu (Linux 6.8.0) |
 | アーキテクチャ | x86_64 |
-| 計測日 | 2025-12-22 |
+| 計測日 | 2025-12-23 |
 
 ---
 
@@ -24,21 +24,21 @@
 
 | 局面 | 説明 | Depth | NPS | bestmove |
 |:----:|------|:-----:|----:|----------|
-| 1 | 序盤（9手目） | 14 | 1,086,258 | 1g1f |
-| 2 | 中盤（詰将棋風） | 24 | 569,345 | 8d8f |
-| 3 | 終盤（王手飛車） | 16 | 569,931 | 5d6c+ |
-| 4 | 終盤（詰み筋） | 23 | 499,931 | S*2h |
-| **平均** | - | - | **681,366** | - |
+| 1 | 序盤（9手目） | 14 | 1,062,468 | 1g1f |
+| 2 | 中盤（詰将棋風） | 24 | 559,325 | 8d8f |
+| 3 | 終盤（王手飛車） | 16 | 596,815 | 5d6c+ |
+| 4 | 終盤（詰み筋） | 23 | 512,500 | S*2h |
+| **平均** | - | - | **682,777** | - |
 
 #### Material評価時（NNUE無効、MaterialLevel=9）
 
 | 局面 | 説明 | Depth | NPS | bestmove |
 |:----:|------|:-----:|----:|----------|
-| 1 | 序盤（9手目） | 17 | 511,051 | 2h2f |
-| 2 | 中盤（詰将棋風） | 18 | 398,359 | 8d7d |
-| 3 | 終盤（王手飛車） | 17 | 423,029 | G*6b |
-| 4 | 終盤（詰み筋） | 18 | 409,747 | G*3c |
-| **平均** | - | - | **435,547** | - |
+| 1 | 序盤（9手目） | 17 | 511,920 | 2h2f |
+| 2 | 中盤（詰将棋風） | 19 | 425,288 | 8d7d |
+| 3 | 終盤（王手飛車） | 18 | 426,214 | S*6a |
+| 4 | 終盤（詰み筋） | 18 | 434,333 | G*3c |
+| **平均** | - | - | **449,439** | - |
 
 ### VNNI効果測定（別端末: Intel Cascade Lake-X）
 
@@ -55,9 +55,9 @@
 
 | エンジン | NNUE NPS | Material NPS | 備考 |
 |---------|--------:|-------------:|------|
-| 本エンジン | 681,366 | 435,547 | `cargo build --release` |
+| 本エンジン | 682,777 | 449,439 | `cargo build --release` |
 | YaneuraOu | 1,118,219 | 1,545,172 | 参考値 |
-| **対YaneuraOu比** | **61%** | **28%** | - |
+| **対YaneuraOu比** | **61%** | **29%** | - |
 
 #### PGOビルド（本番用）
 
@@ -132,28 +132,28 @@
 
 | 順位 | 関数 | CPU% | 状態 | 備考 |
 |------|------|------|------|------|
-| 1 | `MovePicker::next_move` | 9.36% | 調査完了 | [詳細](#movepicker-調査完了) |
-| 2 | `network::evaluate` | 3.73% | - | NNUE推論メイン |
-| 3 | `attackers_to_occ` | 3.32% | - | 利き計算 |
-| 4 | `search_node` | 2.73% | - | 探索メインループ |
-| 5 | `refresh_accumulator` | 2.45% | - | NNUE全計算 |
-| 6 | `check_move_mate` | 2.08% | - | 1手詰め判定 |
-| 7 | `__memset_avx2` | 1.94% | - | メモリ初期化 |
+| 1 | `MovePicker::next_move` | 9.05% | 調査完了 | [詳細](#movepicker-調査完了) |
+| 2 | `network::evaluate` | 3.98% | - | NNUE推論メイン |
+| 3 | `attackers_to_occ` | 3.18% | - | 利き計算 |
+| 4 | `search_node` | 2.71% | - | 探索メインループ |
+| 5 | `refresh_accumulator` | 2.59% | - | NNUE全計算 |
+| 6 | `check_move_mate` | 2.24% | - | 1手詰め判定 |
+| 7 | `__memset_avx2` | 1.92% | - | メモリ初期化 |
 | - | `partial_insertion_sort` | 5.26% | 調査完了 | MovePicker内部 |
 
-**注**: kernelオーバーヘッド（`__fsnotify_parent` 4.52%, `dput` 3.64%）はNNUEファイル読み込み時のもので、実際の探索時間には影響しない。
+**注**: kernelオーバーヘッド（`__fsnotify_parent` 4.34%, `dput` 3.55%）はNNUEファイル読み込み時のもので、実際の探索時間には影響しない。
 
 #### NNUE関連の内訳
 
 | 関数 | CPU% | 説明 |
 |------|------|------|
-| `network::evaluate` | 3.73% | NNUE推論メイン |
-| `refresh_accumulator` | 2.45% | Accumulator全計算（差分更新失敗時） |
-| `check_move_mate` | 2.08% | 1手詰め判定 |
-| `do_move` | 1.71% | 指し手実行 |
-| `build_cont_tables` | 1.53% | Continuation History構築 |
-| `update_accumulator` | 1.39% | Accumulator差分更新 |
-| `append_active_indices` | 1.15% | 特徴量インデックス取得 |
+| `network::evaluate` | 3.98% | NNUE推論メイン |
+| `refresh_accumulator` | 2.59% | Accumulator全計算（差分更新失敗時） |
+| `check_move_mate` | 2.24% | 1手詰め判定 |
+| `do_move` | 1.67% | 指し手実行 |
+| `build_cont_tables` | 1.56% | Continuation History構築 |
+| `update_accumulator` | 1.49% | Accumulator差分更新 |
+| `append_active_indices` | 1.22% | 特徴量インデックス取得 |
 
 ### Material評価時（NNUE無効、release build）
 
@@ -161,16 +161,16 @@
 
 | 順位 | 関数 | CPU% | 備考 |
 |------|------|------|------|
-| 1 | `eval_lv7_like` | 25.78% | Material評価のメイン関数 |
-| 2 | `direction_of` | 16.39% | 方向計算 |
-| 3 | `compute_board_effects` | 10.32% | 盤面効果計算 |
-| 4 | `MovePicker::next_move` | 7.34% | 指し手選択 |
-| 5 | `search_node` | 4.49% | 探索メインループ |
-| 6 | `check_move_mate` | 4.42% | 1手詰め判定 |
-| 7 | `do_move` | 2.68% | 指し手実行 |
-| 8 | `build_cont_tables` | 2.11% | Continuation History構築 |
-| 9 | `__memmove_avx` | 1.80% | メモリコピー |
-| 10 | `attackers_to_occ` | 1.63% | 利き計算 |
+| 1 | `eval_lv7_like` | 26.34% | Material評価のメイン関数 |
+| 2 | `direction_of` | 16.11% | 方向計算 |
+| 3 | `compute_board_effects` | 9.41% | 盤面効果計算 |
+| 4 | `MovePicker::next_move` | 7.44% | 指し手選択 |
+| 5 | `search_node` | 4.56% | 探索メインループ |
+| 6 | `check_move_mate` | 4.27% | 1手詰め判定 |
+| 7 | `do_move` | 3.17% | 指し手実行 |
+| 8 | `build_cont_tables` | 1.91% | Continuation History構築 |
+| 9 | `attackers_to_occ` | 1.67% | 利き計算 |
+| 10 | `__memmove_avx` | 1.65% | メモリコピー |
 
 **注**: Material評価は1回の評価計算は軽量だが、評価精度が低いため枝刈りの効率が悪く、NPSはNNUEと同等かそれ以下になることが多い。
 
@@ -392,6 +392,11 @@ RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release --
   --output-dir ./benchmark_results
 ```
 
+### 計測時のビルドプロファイル
+
+- **差分追跡の基準**: `--release` を使用（本ドキュメントのNPS/perfはここを基準に記録）
+- **最高最適化の計測**: `build_pgo.sh`（`--profile production` 相当 / Full LTO + PGO）
+
 ### PGOビルド（本番デプロイ用）
 
 ```bash
@@ -442,3 +447,4 @@ PGOビルドの処理フロー:
 | 2025-12-22 | **本番ビルドプロファイル追加**: `[profile.production]`をCargo.tomlに追加。Full LTO、codegen-units=1、overflow-checks無効化。WASMビルドで-4.2%サイズ削減（865KB→829KB）。CIデプロイがproductionプロファイルを使用するよう更新 |
 | 2025-12-22 | **LTO・PGO組み合わせ効果計測**: Full LTO単体+1.6%、Thin LTO+PGO +6.2%、Full LTO+PGO +6.8%。PGO効果が大きく、Full LTOの追加効果は限定的（+0.6%）。通常はThin LTO+PGOを推奨 |
 | 2025-12-22 | **build_pgo.sh を Full LTO + PGO に変更**: 本番リリースでは最大性能を優先し、`--profile production`（Full LTO）を使用するよう変更。出力先は `./target/production/` |
+| 2025-12-23 | 計測結果更新（NNUE: MovePicker 9.05%, network::evaluate 3.98%, refresh 2.59%、Material: eval_lv7_like 26.34%, direction_of 16.11%）。NPS: NNUE平均 682,777、Material平均 449,439（+3.2%向上）。Material評価時の順位変動: `do_move`が7位に上昇（3.17%）、`attackers_to_occ`が9位、`__memmove_avx`が10位に。**perfスクリプト修正**: `--call-graph dwarf`を`--call-graph fp`に変更（大規模ネスト配列のDWARF解析によるハング回避） |

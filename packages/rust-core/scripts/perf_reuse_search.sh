@@ -14,7 +14,7 @@ CARGO_PROFILE_RELEASE_DEBUG=2 \
 
 echo ""
 echo "=== Running perf record with --reuse-search (iterations=4) ==="
-sudo perf record -g --call-graph dwarf -F 999 -o perf_reuse.data -- \
+sudo perf record -g --call-graph fp -F 999 -o perf_reuse.data -- \
     ./target/release/benchmark \
     --internal --reuse-search --iterations 4 --limit-type movetime --limit 5000
 
