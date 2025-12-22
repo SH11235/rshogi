@@ -27,9 +27,11 @@ cd packages/rust-core
    - `*_nnue_release.txt` - NNUE有効時の詳細レポート（コールツリー付き）
    - `*_release.txt` - Material評価時のレポート
 
-   **ベンチマーク結果**
-   - NNUE有効時のbenchmark結果（`nnue_enabled: true`）
-   - Material評価時のbenchmark結果（`nnue_enabled: false`）
+   **ベンチマーク結果（NPS計測）**
+   - NNUE有効時: `nnue_enabled: true` のJSONファイル
+   - Material評価時: `nnue_enabled: false` のJSONファイル
+   - 各局面のNPS、depth、bestmoveを記録
+   - 平均NPSを計算（4局面の単純平均）
 
    **フラットレポート vs 詳細レポートの違い**
    - `nnue_flat.txt`: 各関数の自己時間（self time）のみ。ホットスポット一覧の更新に最適
@@ -54,6 +56,7 @@ cd packages/rust-core
 最新の計測結果ファイルを読み込み、`packages/rust-core/docs/performance/README.md` を更新してください。
 
 主な更新項目:
+- 「NPS計測結果」セクション（NNUE/Material両方の局面別NPS、平均NPS）
 - 「ホットスポット一覧」セクションのCPU%
 - 計測環境の「計測日」
 - 「変更履歴」に新しいエントリを追加
@@ -62,6 +65,7 @@ cd packages/rust-core
 - 調査完了項目（MovePicker等）の内容は変更しないこと
   - `### MovePicker (調査完了)` セクション内の計測値（CPU%等）は当時の調査時の値のまま残し、更新しない
 - CPU%の値は小数点2桁まで記載
+- NPSの値はカンマ区切りで記載（例: 1,055,823）
 - 関数名が変わっている場合は適切に更新
 
 ## 変更履歴の書き方

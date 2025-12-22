@@ -14,6 +14,51 @@
 
 ---
 
+## NPS計測結果
+
+### 最新ベンチマーク（主開発環境: AMD Ryzen 9 5950X）
+
+計測条件: `--threads 1 --tt-mb 1024 --limit-type movetime --limit 20000`
+
+#### NNUE評価時
+
+| 局面 | 説明 | Depth | NPS | bestmove |
+|:----:|------|:-----:|----:|----------|
+| 1 | 序盤（9手目） | 14 | 1,055,823 | 1g1f |
+| 2 | 中盤（詰将棋風） | 24 | 536,380 | 8d8f |
+| 3 | 終盤（王手飛車） | 16 | 581,797 | 5d6c+ |
+| 4 | 終盤（詰み筋） | 23 | 510,682 | S*2h |
+| **平均** | - | - | **671,171** | - |
+
+#### Material評価時（NNUE無効、MaterialLevel=9）
+
+| 局面 | 説明 | Depth | NPS | bestmove |
+|:----:|------|:-----:|----:|----------|
+| 1 | 序盤（9手目） | 17 | 507,835 | 2h2f |
+| 2 | 中盤（詰将棋風） | 18 | 404,953 | 8d7d |
+| 3 | 終盤（王手飛車） | 17 | 423,171 | G*6b |
+| 4 | 終盤（詰み筋） | 18 | 418,186 | G*3c |
+| **平均** | - | - | **438,536** | - |
+
+### VNNI効果測定（別端末: Intel Cascade Lake-X）
+
+| 構成 | NNUE平均NPS | 変化 |
+|------|----------:|-----:|
+| AVX2（VNNI無効） | - | ベースライン |
+| AVX512-VNNI | - | **+13%** |
+
+※ VNNI対応CPUでのみ効果あり（Intel Ice Lake以降、AMD Zen 4以降）
+
+### YaneuraOu比較（主開発環境）
+
+| エンジン | NNUE NPS | Material NPS | 備考 |
+|---------|--------:|-------------:|------|
+| 本エンジン | 671,171 | 438,536 | - |
+| YaneuraOu | 1,118,219 | 1,545,172 | 参考値 |
+| **対YaneuraOu比** | **60%** | **28%** | - |
+
+---
+
 ## ホットスポット一覧
 
 ### NNUE有効時（本番相当）
@@ -300,3 +345,4 @@ RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release --
 | 2025-12-22 | 計測結果更新（NNUE: MovePicker 8.76%, AffineTransform 4.68%, refresh 2.44%、Material: eval_lv7_like 26.25%, direction_of 16.16%）。NNUE関連の内訳をフラットレポートに基づき修正（AffineTransform::propagateが主要な処理として明確化）。**改善点**: `__memset_avx2`が2.82%→1.91%に約32%減少（MoveBuffer関連のmemset削減最適化の効果） |
 | 2025-12-22 | 計測結果更新（NNUE: MovePicker 8.86%, AffineTransform 4.74%, refresh 2.40%、Material: eval_lv7_like 26.22%, direction_of 16.85%）。Material評価時の順位変動: `__memmove_avx`が9位に上昇、`attackers_to_occ`が10位に |
 | 2025-12-22 | 計測結果更新（NNUE: MovePicker 9.52%, network::evaluate 3.74%, refresh 2.49%、Material: eval_lv7_like 25.95%, direction_of 16.25%）。**改善点**: AffineTransformのループ逆転最適化により `network::evaluate` が4.74%→3.74%に約21%減少（外側ループを入力チャンク、内側を出力に変更し、入力ブロードキャストと重みアクセスの連続性を改善）。NNUE推論高速化の結果、`MovePicker` が8.86%→9.52%、`check_move_mate` が2.17%でホットスポット6位に浮上するなど、相対比率が変動 |
+| 2025-12-22 | **NPS計測結果セクション追加**。NNUE/Material両方の局面別NPS、YaneuraOu比較表を追加。**VNNI dpbusd命令対応**: AVX512-VNNI対応CPUでNNUE積和演算を1命令化（`_mm256_dpbusd_epi32`）。別端末（Intel Cascade Lake-X）での計測で**+13% NPS向上**を確認 |
