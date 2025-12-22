@@ -140,7 +140,7 @@ fn tt_move_history_constants_are_correct() {
 #[test]
 fn continuation_history_basic_update() {
     // ContinuationHistoryは大きいのでBoxで作成（スタックオーバーフロー防止）
-    let mut cont_hist = Box::new(ContinuationHistory::new());
+    let mut cont_hist = ContinuationHistory::new_boxed();
     let prev_pc = Piece::B_PAWN;
     // SAFETY: 60は有効なSquareインデックス
     let prev_to = unsafe { Square::from_u8_unchecked(60) }; // 7六相当
@@ -176,7 +176,7 @@ fn continuation_history_weights_are_correct() {
 #[test]
 fn continuation_history_weighted_updates() {
     // ContinuationHistoryは大きいのでBoxで作成（スタックオーバーフロー防止）
-    let mut cont_hist = Box::new(ContinuationHistory::new());
+    let mut cont_hist = ContinuationHistory::new_boxed();
 
     let base_bonus = 1000;
     let pc = Piece::B_PAWN;
@@ -250,7 +250,7 @@ fn stack_cont_hist_key_option() {
 /// PawnHistory: 基本的な更新が機能することを確認
 #[test]
 fn pawn_history_basic_update() {
-    let mut history = PawnHistory::new();
+    let mut history = PawnHistory::new_boxed();
     let pawn_idx = 42; // 任意のインデックス
     let pc = Piece::B_PAWN;
     // SAFETY: 60は有効なSquareインデックス

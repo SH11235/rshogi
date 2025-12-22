@@ -13,6 +13,8 @@
 
 use crate::types::{Color, Move, Piece, PieceType, Square};
 
+use super::tt_history::TTMoveHistory;
+
 // =============================================================================
 // 定数
 // =============================================================================
@@ -244,19 +246,25 @@ impl Default for LowPlyHistory {
 ///
 /// 捕獲する手の履歴。
 ///
-/// PERF: 約3.5MBのサイズがあるためBoxでヒープに配置。
-/// YaneuraOuでは直接配列だが、Rustではスタックオーバーフロー回避のため必要。
-/// 間接参照のコストは軽微（詳細はSearchWorkerのコメント参照）。
+/// PERF: 約3.5MB。HistoryTables内の連続領域に配置するため配列で保持する。
 pub struct CapturePieceToHistory {
-    table: Box<[[[StatsEntry<10692>; PIECE_TYPE_NUM]; Square::NUM]; PIECE_NUM]>,
+    table: [[[StatsEntry<10692>; PIECE_TYPE_NUM]; Square::NUM]; PIECE_NUM],
 }
 
 impl CapturePieceToHistory {
     /// 新しいCapturePieceToHistoryを作成
     pub fn new() -> Self {
         Self {
-            table: Box::new([[[StatsEntry::default(); PIECE_TYPE_NUM]; Square::NUM]; PIECE_NUM]),
+            table: [[[StatsEntry::default(); PIECE_TYPE_NUM]; Square::NUM]; PIECE_NUM],
         }
+    }
+
+    /// 新しいCapturePieceToHistoryを作成（ヒープ確保）
+    ///
+    /// 大きな配列のスタック確保を避けるために `Box::new_zeroed` を使う。
+    pub fn new_boxed() -> Box<Self> {
+        // SAFETY: StatsEntryはi16のみで構成され、ゼロ初期化は常に有効。
+        unsafe { Box::<Self>::new_zeroed().assume_init() }
     }
 
     /// YaneuraOu の `type_of(capturedPiece)` 相当。
@@ -364,36 +372,35 @@ impl Default for PieceToHistory {
 /// 1手前の駒と移動先から、現在の駒と移動先へのスコア。
 ///
 /// PERF: 約1.3MBのサイズがあり、SearchWorkerでは[2][2]で4つ保持（計約5.2MB）。
-/// Vecでヒープに配置。YaneuraOuでは直接配列だが、Rustではスタックオーバーフロー回避のため必要。
-/// 間接参照のコストは軽微（詳細はSearchWorkerのコメント参照）。
+/// HistoryTables内の連続領域に配置するため配列で保持する。
 pub struct ContinuationHistory {
-    table: Vec<PieceToHistory>,
+    table: [[PieceToHistory; Square::NUM]; PIECE_NUM],
 }
 
 impl ContinuationHistory {
     /// 新しいContinuationHistoryを作成
     pub fn new() -> Self {
-        Self {
-            table: vec![PieceToHistory::new(); PIECE_NUM * Square::NUM],
-        }
+        let table = std::array::from_fn(|_| std::array::from_fn(|_| PieceToHistory::new()));
+        Self { table }
     }
 
-    #[inline]
-    fn index(prev_pc: Piece, prev_to: Square) -> usize {
-        prev_pc.index() * Square::NUM + prev_to.index()
-    }
-
-    /// 内部テーブルへの参照を取得
     #[inline]
     pub fn get_table(&self, prev_pc: Piece, prev_to: Square) -> &PieceToHistory {
-        &self.table[Self::index(prev_pc, prev_to)]
+        &self.table[prev_pc.index()][prev_to.index()]
     }
 
     /// 内部テーブルへの可変参照を取得
     #[inline]
     pub fn get_table_mut(&mut self, prev_pc: Piece, prev_to: Square) -> &mut PieceToHistory {
-        let idx = Self::index(prev_pc, prev_to);
-        &mut self.table[idx]
+        &mut self.table[prev_pc.index()][prev_to.index()]
+    }
+
+    /// 新しいContinuationHistoryを作成（ヒープ確保）
+    ///
+    /// 大きな配列のスタック確保を避けるために `Box::new_zeroed` を使う。
+    pub fn new_boxed() -> Box<Self> {
+        // SAFETY: PieceToHistoryはStatsEntry(i16)のみで構成され、ゼロ初期化は有効。
+        unsafe { Box::<Self>::new_zeroed().assume_init() }
     }
 
     /// 1手前・2手前などの継続手を更新
@@ -422,8 +429,10 @@ impl ContinuationHistory {
 
     /// クリア
     pub fn clear(&mut self) {
-        for entry in self.table.iter_mut() {
-            entry.clear();
+        for row in self.table.iter_mut() {
+            for entry in row.iter_mut() {
+                entry.clear();
+            }
         }
     }
 }
@@ -442,11 +451,9 @@ impl Default for ContinuationHistory {
 ///
 /// 歩の陣形に対する履歴。
 ///
-/// PERF: 約2.3MBのサイズがあるためVecでヒープに配置。
-/// YaneuraOuでは直接配列だが、Rustではスタックオーバーフロー回避のため必要。
-/// 間接参照のコストは軽微（詳細はSearchWorkerのコメント参照）。
+/// PERF: 約2.3MB。HistoryTables内の連続領域に配置するため配列で保持する。
 pub struct PawnHistory {
-    table: Vec<[[StatsEntry<8192>; Square::NUM]; PIECE_NUM]>,
+    table: [[[StatsEntry<8192>; Square::NUM]; PIECE_NUM]; PAWN_HISTORY_SIZE],
 }
 
 impl PawnHistory {
@@ -454,8 +461,16 @@ impl PawnHistory {
     pub fn new() -> Self {
         let row = [[StatsEntry::default(); Square::NUM]; PIECE_NUM];
         Self {
-            table: vec![row; PAWN_HISTORY_SIZE],
+            table: [row; PAWN_HISTORY_SIZE],
         }
+    }
+
+    /// 新しいPawnHistoryを作成（ヒープ確保）
+    ///
+    /// 大きな配列のスタック確保を避けるために `Box::new_zeroed` を使う。
+    pub fn new_boxed() -> Box<Self> {
+        // SAFETY: StatsEntryはi16のみで構成され、ゼロ初期化は常に有効。
+        unsafe { Box::<Self>::new_zeroed().assume_init() }
     }
 
     /// 値を取得
@@ -545,34 +560,36 @@ impl Default for CounterMoveHistory {
 /// - NonPawn: [key_index][side_to_move][piece_color] -> correction
 /// - Continuation: [prev_pc][prev_to][pc][to] -> correction
 ///
-/// PERF: 約4.5MBのサイズがあるため各フィールドをBoxでヒープに配置。
-/// YaneuraOuでは直接配列だが、Rustではスタックオーバーフロー回避のため必要。
-/// 間接参照のコストは軽微（詳細はSearchWorkerのコメント参照）。
+/// PERF: 約4.5MB。HistoryTables内の連続領域に配置するため配列で保持する。
 pub struct CorrectionHistory {
-    pawn: Box<[[StatsEntry<CORRECTION_HISTORY_LIMIT>; Color::NUM]; CORRECTION_HISTORY_SIZE]>,
-    minor: Box<[[StatsEntry<CORRECTION_HISTORY_LIMIT>; Color::NUM]; CORRECTION_HISTORY_SIZE]>,
-    non_pawn: Box<
+    pawn: [[StatsEntry<CORRECTION_HISTORY_LIMIT>; Color::NUM]; CORRECTION_HISTORY_SIZE],
+    minor: [[StatsEntry<CORRECTION_HISTORY_LIMIT>; Color::NUM]; CORRECTION_HISTORY_SIZE],
+    non_pawn:
         [[[StatsEntry<CORRECTION_HISTORY_LIMIT>; Color::NUM]; Color::NUM]; CORRECTION_HISTORY_SIZE],
-    >,
-    continuation: Box<
-        [[[[StatsEntry<CORRECTION_HISTORY_LIMIT>; Square::NUM]; Piece::NUM]; Square::NUM];
-            Piece::NUM],
-    >,
+    continuation: [[[[StatsEntry<CORRECTION_HISTORY_LIMIT>; Square::NUM]; Piece::NUM]; Square::NUM];
+        Piece::NUM],
 }
 
 impl CorrectionHistory {
     /// 新しいCorrectionHistoryを作成（初期値込み）
     pub fn new() -> Self {
         let mut history = Self {
-            pawn: Box::new([[StatsEntry::default(); Color::NUM]; CORRECTION_HISTORY_SIZE]),
-            minor: Box::new([[StatsEntry::default(); Color::NUM]; CORRECTION_HISTORY_SIZE]),
-            non_pawn: Box::new(
-                [[[StatsEntry::default(); Color::NUM]; Color::NUM]; CORRECTION_HISTORY_SIZE],
-            ),
-            continuation: Box::new(
-                [[[[StatsEntry::default(); Square::NUM]; Piece::NUM]; Square::NUM]; Piece::NUM],
-            ),
+            pawn: [[StatsEntry::default(); Color::NUM]; CORRECTION_HISTORY_SIZE],
+            minor: [[StatsEntry::default(); Color::NUM]; CORRECTION_HISTORY_SIZE],
+            non_pawn: [[[StatsEntry::default(); Color::NUM]; Color::NUM]; CORRECTION_HISTORY_SIZE],
+            continuation: [[[[StatsEntry::default(); Square::NUM]; Piece::NUM]; Square::NUM];
+                Piece::NUM],
         };
+        history.fill_initial_values();
+        history
+    }
+
+    /// 新しいCorrectionHistoryを作成（ヒープ確保）
+    ///
+    /// 大きな配列のスタック確保を避けるために `Box::new_zeroed` を使う。
+    pub fn new_boxed() -> Box<Self> {
+        // SAFETY: StatsEntryはi16のみで構成され、ゼロ初期化は常に有効。
+        let mut history = unsafe { Box::<Self>::new_zeroed().assume_init() };
         history.fill_initial_values();
         history
     }
@@ -659,6 +676,50 @@ impl CorrectionHistory {
 impl Default for CorrectionHistory {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// =============================================================================
+// HistoryTables
+// =============================================================================
+
+/// 履歴/統計テーブルをまとめて保持するコンテナ
+///
+/// 大きな配列を単一のヒープ領域に配置し、MovePickerの参照経路を短縮する。
+pub struct HistoryTables {
+    pub main_history: ButterflyHistory,
+    pub low_ply_history: LowPlyHistory,
+    pub capture_history: CapturePieceToHistory,
+    pub continuation_history: [[ContinuationHistory; 2]; 2],
+    pub pawn_history: PawnHistory,
+    pub correction_history: CorrectionHistory,
+    pub tt_move_history: TTMoveHistory,
+}
+
+impl HistoryTables {
+    /// 新しいHistoryTablesを作成（ヒープ確保）
+    ///
+    /// `Box::new_zeroed` で一括確保し、CorrectionHistoryのみ初期値を設定する。
+    pub fn new_boxed() -> Box<Self> {
+        // SAFETY: 各テーブルは数値型のみで構成され、ゼロ初期化は常に有効。
+        let mut history = unsafe { Box::<Self>::new_zeroed().assume_init() };
+        history.correction_history.fill_initial_values();
+        history
+    }
+
+    /// すべての履歴テーブルをクリア
+    pub fn clear(&mut self) {
+        self.main_history.clear();
+        self.low_ply_history.clear();
+        self.capture_history.clear();
+        for row in &mut self.continuation_history {
+            for ch in row {
+                ch.clear();
+            }
+        }
+        self.pawn_history.clear();
+        self.correction_history.clear();
+        self.tt_move_history.clear();
     }
 }
 
@@ -907,7 +968,7 @@ mod tests {
 
     #[test]
     fn test_capture_piece_to_history_with_captured_piece() {
-        let mut history = CapturePieceToHistory::new();
+        let mut history = CapturePieceToHistory::new_boxed();
         let pc = Piece::B_GOLD;
         let to = Square::SQ_55;
         let captured = Piece::W_SILVER;
