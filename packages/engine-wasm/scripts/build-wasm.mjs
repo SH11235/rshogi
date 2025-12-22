@@ -81,7 +81,8 @@ function ensureWasmBindgen() {
 try {
     ensureWasmBindgen();
 
-    console.log(`Building with profile: ${profile}`);
+    console.log(`Building ${crateName} with profile: ${profile}`);
+    console.log(`Expected output: ${targetWasm}`);
     run(
         "cargo",
         ["build", "--profile", profile, "--target", "wasm32-unknown-unknown", "-p", crateName],

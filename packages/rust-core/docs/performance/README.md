@@ -107,6 +107,21 @@
 
 **注**: NNUE評価はMaterial評価より計算負荷が高いため、PGO効果が相対的に小さくなる（+6.2% vs +14.3%）
 
+### LTO・PGO組み合わせ効果（NNUE、参考値）
+
+| 構成 | 平均NPS | 対ベースライン | 備考 |
+|------|--------:|---------------:|------|
+| Thin LTO（ベースライン） | 681,366 | - | `lto = "thin"` |
+| Full LTO | 692,132 | +1.6% | `lto = "fat"` |
+| Thin LTO + PGO | 723,855 | +6.2% | - |
+| **Full LTO + PGO** | **728,017** | **+6.8%** | **本番用（推奨）** |
+
+- Full LTO単体: +1.6%
+- PGO単体: +6.2%
+- Full LTO + PGO: +6.8%（PGOに対して+0.6%の追加効果）
+
+**結論**: 本番リリースでは最大性能を優先し、**Full LTO + PGO**（`--profile production`）を使用。`build_pgo.sh` はこの構成でビルドする
+
 ---
 
 ## ホットスポット一覧
@@ -382,7 +397,7 @@ RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release --
 ```bash
 cd packages/rust-core
 
-# PGOビルド実行（約3分）
+# PGOビルド実行（約3分）- Full LTO + PGOで最大性能
 ./scripts/build_pgo.sh
 
 # 効果確認付き
@@ -393,10 +408,12 @@ cd packages/rust-core
 ```
 
 PGOビルドの処理フロー:
-1. プロファイル収集用ビルド (`-C profile-generate`)
+1. プロファイル収集用ビルド (`--profile production -C profile-generate`)
 2. ベンチマーク実行でプロファイル収集
 3. `llvm-profdata merge` でマージ
-4. PGO適用ビルド (`-C profile-use`)
+4. PGO適用ビルド (`--profile production -C profile-use`)
+
+**出力先**: `./target/production/` ディレクトリ
 
 **注意**: 開発中の反復作業には通常ビルドを推奨（高速なイテレーション）。PGOビルドはリリース前の最終計測・本番デプロイ時に使用。
 
@@ -423,3 +440,5 @@ PGOビルドの処理フロー:
 | 2025-12-22 | 計測結果更新（NNUE: MovePicker 9.36%, network::evaluate 3.73%, refresh 2.45%、Material: eval_lv7_like 25.78%, direction_of 16.39%）。NPS: NNUE平均 681,366（+1.5%）、Material平均 435,547。YaneuraOu比が60%→61%に微増 |
 | 2025-12-22 | **PGO (Profile-Guided Optimization) 導入**: `scripts/build_pgo.sh`追加。NNUE NPS **+6.2%向上**（681,366→723,855）、Material NPS **+14.3%向上**（435,290→497,643）。YaneuraOu比がNNUE 61%→65%に改善。PGO効果の詳細計測結果を追加 |
 | 2025-12-22 | **本番ビルドプロファイル追加**: `[profile.production]`をCargo.tomlに追加。Full LTO、codegen-units=1、overflow-checks無効化。WASMビルドで-4.2%サイズ削減（865KB→829KB）。CIデプロイがproductionプロファイルを使用するよう更新 |
+| 2025-12-22 | **LTO・PGO組み合わせ効果計測**: Full LTO単体+1.6%、Thin LTO+PGO +6.2%、Full LTO+PGO +6.8%。PGO効果が大きく、Full LTOの追加効果は限定的（+0.6%）。通常はThin LTO+PGOを推奨 |
+| 2025-12-22 | **build_pgo.sh を Full LTO + PGO に変更**: 本番リリースでは最大性能を優先し、`--profile production`（Full LTO）を使用するよう変更。出力先は `./target/production/` |

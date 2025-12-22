@@ -12,7 +12,8 @@
 #   3. プロファイルデータのマージ
 #   4. PGO適用ビルド (profile-use)
 #
-# 期待される効果: NPS +10-15%
+# 期待される効果: NPS +6-7% (NNUE), +14% (Material)
+# 使用プロファイル: production (Full LTO + PGO)
 
 set -euo pipefail
 
@@ -115,9 +116,9 @@ if ! cargo clean 2>&1; then
     echo "Warning: cargo clean failed, but continuing..."
 fi
 
-echo "Building with profile generation..."
+echo "Building with profile generation (production profile)..."
 if ! RUSTFLAGS="-C target-cpu=native -C profile-generate=$PGO_DATA_DIR" \
-    cargo build --release 2>&1 | tail -5; then
+    cargo build --profile production 2>&1 | tail -5; then
     echo "Error: Profile generation build failed"
     exit 1
 fi
@@ -128,13 +129,13 @@ echo ""
 echo "=== Step 2/4: Collecting profile data ==="
 
 # ベンチマークバイナリの存在確認
-if [ ! -x ./target/release/benchmark ]; then
+if [ ! -x ./target/production/benchmark ]; then
     echo "Error: Benchmark binary not found or not executable"
     exit 1
 fi
 
 echo "Running benchmark to collect profile..."
-if ! ./target/release/benchmark 2>&1 | grep -E "(Threads|Avg NPS|---|^[0-9])"; then
+if ! ./target/production/benchmark 2>&1 | grep -E "(Threads|Avg NPS|---|^[0-9])"; then
     echo "Error: Benchmark execution failed"
     echo "Profile data may be incomplete. Aborting PGO build."
     exit 1
@@ -167,9 +168,9 @@ if ! cargo clean 2>&1; then
     echo "Warning: cargo clean failed, but continuing..."
 fi
 
-echo "Building with PGO profile..."
+echo "Building with PGO profile (production profile)..."
 if ! RUSTFLAGS="-C target-cpu=native -C profile-use=$PROFILE_FILE" \
-    cargo build --release 2>&1 | tail -5; then
+    cargo build --profile production 2>&1 | tail -5; then
     echo "Error: PGO build failed"
     exit 1
 fi
@@ -180,17 +181,17 @@ echo "  PGO Build Complete"
 echo "=============================================="
 echo ""
 echo "Binaries:"
-ls -lh ./target/release/engine-usi ./target/release/benchmark 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
+ls -lh ./target/production/engine-usi ./target/production/benchmark 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
 echo ""
 
 # 効果確認（オプション）
 if [ "$VERIFY" = true ]; then
     echo "=== Verification Benchmark ==="
-    ./target/release/benchmark 2>&1 | grep -E "(Threads|Avg NPS|---|^[0-9])"
+    ./target/production/benchmark 2>&1 | grep -E "(Threads|Avg NPS|---|^[0-9])"
     echo ""
 fi
 
 echo "Done. Profile data saved in: $PGO_DATA_DIR"
 echo ""
 echo "To rebuild with same profile:"
-echo "  RUSTFLAGS=\"-C target-cpu=native -C profile-use=$PROFILE_FILE\" cargo build --release"
+echo "  RUSTFLAGS=\"-C target-cpu=native -C profile-use=$PROFILE_FILE\" cargo build --profile production"
