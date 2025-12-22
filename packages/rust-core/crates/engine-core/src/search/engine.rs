@@ -348,6 +348,11 @@ impl Search {
         }
     }
 
+    /// Large Pagesで確保されているかを返す
+    pub fn tt_uses_large_pages(&self) -> bool {
+        self.tt.uses_large_pages()
+    }
+
     /// 履歴統計をクリア（usinewgame時に呼び出し）
     ///
     /// YaneuraOu準拠: Worker::clear()相当

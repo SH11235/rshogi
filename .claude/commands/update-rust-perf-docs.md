@@ -8,10 +8,13 @@
 
 ```bash
 cd packages/rust-core
-./scripts/perf_all.sh
+./scripts/perf_all.sh                # 基本計測（perfプロファイリング + benchmark）
+./scripts/perf_all.sh --perf-stat    # perf stat計測も含む場合
 ```
 
 このスクリプトは内部でsudoを使用するため、ユーザーが実行する必要があります。
+
+**注意**: `--perf-stat` オプションを指定した場合のみ perf stat（dTLB-load-misses, cache-misses, branch-misses）が計測されます。
 
 ## 手順
 
@@ -32,6 +35,11 @@ cd packages/rust-core
    - Material評価時: `nnue_enabled: false` のJSONファイル
    - 各局面のNPS、depth、bestmoveを記録
    - 平均NPSを計算（4局面の単純平均）
+
+   **perf stat 結果（`--perf-stat` 指定時のみ）**
+   - `*_perfstat_nnue.txt` - NNUE有効時の perf stat
+   - `*_perfstat_material.txt` - Material評価時の perf stat
+   - 計測項目: dTLB-load-misses, cache-misses, branch-misses
 
    **フラットレポート vs 詳細レポートの違い**
    - `nnue_flat.txt`: 各関数の自己時間（self time）のみ。ホットスポット一覧の更新に最適
@@ -68,6 +76,9 @@ cd packages/rust-core
   - `### PGO (Profile-Guided Optimization) 効果` セクションは当時のPGOビルド計測値を記録したもの
   - `### LTO・PGO組み合わせ効果` セクションも同様
   - これらは `build_pgo.sh` を実行して再計測した場合のみ更新する
+- **perf stat 結果について**
+  - `--perf-stat` オプションを指定して計測した場合のみ、perf stat 関連のセクションを更新する
+  - `--perf-stat` を指定せずに計測した場合は、perf stat の箇所（dTLB-load-misses, cache-misses, branch-misses等）はそのまま維持する
 - CPU%の値は小数点2桁まで記載
 - NPSの値はカンマ区切りで記載（例: 1,055,823）
 - 関数名が変わっている場合は適切に更新

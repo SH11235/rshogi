@@ -12,6 +12,7 @@ use engine_core::eval::{set_material_level, MaterialLevel};
 use engine_core::position::Position;
 use engine_core::search::{LimitsType, Search, SearchInfo, SearchResult};
 use engine_core::types::Move;
+use serde_json::json;
 
 /// エンジン名
 const ENGINE_NAME: &str = "Shogi Engine";
@@ -40,6 +41,8 @@ struct UsiEngine {
     stop_flag: Option<Arc<AtomicBool>>,
     /// ponderhit通知フラグ
     ponderhit_flag: Option<Arc<AtomicBool>>,
+    /// Large Pages使用メッセージの出力済みフラグ
+    large_pages_reported: bool,
 }
 
 impl UsiEngine {
@@ -56,6 +59,7 @@ impl UsiEngine {
             search_thread: None,
             stop_flag: None,
             ponderhit_flag: None,
+            large_pages_reported: false,
         }
     }
 
@@ -133,9 +137,30 @@ impl UsiEngine {
     }
 
     /// isreadyコマンド: 準備完了を通知
-    fn cmd_isready(&self) {
+    fn cmd_isready(&mut self) {
         // 必要な初期化があればここで行う
+        self.maybe_report_large_pages();
         println!("readyok");
+    }
+
+    fn maybe_report_large_pages(&mut self) {
+        if self.large_pages_reported || !cfg!(windows) {
+            return;
+        }
+
+        let Some(search) = self.search.as_ref() else {
+            return;
+        };
+        if !search.tt_uses_large_pages() {
+            return;
+        }
+
+        let payload = json!({
+            "type": "info",
+            "message": "Large Pages are used.",
+        });
+        println!("info string {}", payload);
+        self.large_pages_reported = true;
     }
 
     /// setoptionコマンド: オプション設定
@@ -183,6 +208,7 @@ impl UsiEngine {
                         search.resize_tt(size);
                         self.tt_size_mb = size;
                     }
+                    self.maybe_report_large_pages();
                 }
             }
             "NetworkDelay" => {

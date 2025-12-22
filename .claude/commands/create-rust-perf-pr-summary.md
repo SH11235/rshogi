@@ -6,8 +6,10 @@
 
 以下が完了していること:
 
-1. `packages/rust-core/scripts/perf_all.sh` を実行済み
+1. `packages/rust-core/scripts/perf_all.sh` を実行済み（必要に応じて `--perf-stat` オプション付き）
 2. `packages/rust-core/docs/performance/README.md` を更新済み
+
+**注意**: `--perf-stat` オプションを指定した場合のみ perf stat 結果が計測されます。
 
 ## 手順
 

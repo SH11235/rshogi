@@ -849,7 +849,7 @@ impl SearchWorker {
             self.stack[ply as usize].current_move = Move::NULL;
             self.clear_cont_history_for_null(ply);
 
-            pos.do_null_move();
+            pos.do_null_move_with_prefetch(self.tt.as_ref());
             self.nnue_stack.push(DirtyPiece::new()); // null moveでは駒の移動なし
             let null_value = -self.search_node::<{ NodeType::NonPV as u8 }>(
                 pos,
@@ -978,10 +978,9 @@ impl SearchWorker {
             let cont_hist_to = mv.to();
 
             self.stack[ply as usize].current_move = mv;
-            let dirty_piece = pos.do_move(mv, gives_check);
+            let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, self.tt.as_ref());
             self.nnue_stack.push(dirty_piece);
             self.nodes += 1;
-            self.tt.prefetch(pos.key(), pos.side_to_move());
             self.set_cont_history_for_move(
                 ply,
                 in_check,
@@ -1332,10 +1331,9 @@ impl SearchWorker {
             let nodes_before = self.nodes;
 
             // 探索
-            let dirty_piece = pos.do_move(mv, gives_check);
+            let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, self.tt.as_ref());
             self.nnue_stack.push(dirty_piece);
             self.nodes += 1;
-            self.tt.prefetch(pos.key(), pos.side_to_move());
             self.stack[0].current_move = mv;
             self.set_cont_history_for_move(
                 0,
@@ -1497,10 +1495,9 @@ impl SearchWorker {
             let nodes_before = self.nodes;
 
             // 探索
-            let dirty_piece = pos.do_move(mv, gives_check);
+            let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, self.tt.as_ref());
             self.nnue_stack.push(dirty_piece);
             self.nodes += 1;
-            self.tt.prefetch(pos.key(), pos.side_to_move());
             self.stack[0].current_move = mv;
             self.set_cont_history_for_move(
                 0,
@@ -1981,13 +1978,9 @@ impl SearchWorker {
             let cont_hist_piece = mv.moved_piece_after();
             let cont_hist_to = mv.to();
 
-            let dirty_piece = pos.do_move(mv, gives_check);
+            let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, self.tt.as_ref());
             self.nnue_stack.push(dirty_piece);
             self.nodes += 1;
-
-            // do_move直後に置換表をprefetch（YaneuraOu準拠）
-            // 評価計算などの間にメモリ待ちを隠蔽する
-            self.tt.prefetch(pos.key(), pos.side_to_move());
 
             // YaneuraOu方式: ContHistKey/ContinuationHistoryを設定
             // ⚠ in_checkは親ノードの王手状態を使用（gives_checkではない）
@@ -2917,10 +2910,9 @@ impl SearchWorker {
             let cont_hist_pc = mv.moved_piece_after();
             let cont_hist_to = mv.to();
 
-            let dirty_piece = pos.do_move(mv, gives_check);
+            let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, self.tt.as_ref());
             self.nnue_stack.push(dirty_piece);
             self.nodes += 1;
-            self.tt.prefetch(pos.key(), pos.side_to_move());
 
             self.set_cont_history_for_move(ply, in_check, capture, cont_hist_pc, cont_hist_to);
 

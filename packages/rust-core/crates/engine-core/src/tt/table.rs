@@ -4,10 +4,13 @@
 //! - TranspositionTable: テーブル本体
 //! - probe/write操作
 
+use super::alloc::{AllocKind, Allocation};
 use super::entry::{TTData, TTEntry};
 use super::{CLUSTER_SIZE, GENERATION_DELTA};
 use crate::position::Position;
+use crate::prefetch::TtPrefetch;
 use crate::types::{Bound, Color, Move, Value};
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 /// クラスター構造
@@ -46,10 +49,47 @@ impl Clone for Cluster {
 // クラスターは32バイトであることを保証
 const _: () = assert!(std::mem::size_of::<Cluster>() == 32);
 
+struct ClusterTable {
+    alloc: Allocation,
+    len: usize,
+}
+
+impl ClusterTable {
+    fn new(len: usize) -> Self {
+        let bytes = len * std::mem::size_of::<Cluster>();
+        let alloc = Allocation::allocate(bytes, std::mem::align_of::<Cluster>());
+        let ptr = alloc.ptr().as_ptr() as *mut Cluster;
+        unsafe {
+            std::ptr::write_bytes(ptr, 0, len);
+        }
+        Self { alloc, len }
+    }
+
+    fn uses_large_pages(&self) -> bool {
+        self.alloc.kind() == AllocKind::LargePages
+    }
+}
+
+impl Deref for ClusterTable {
+    type Target = [Cluster];
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { std::slice::from_raw_parts(self.alloc.ptr().as_ptr() as *const Cluster, self.len) }
+    }
+}
+
+impl DerefMut for ClusterTable {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe {
+            std::slice::from_raw_parts_mut(self.alloc.ptr().as_ptr() as *mut Cluster, self.len)
+        }
+    }
+}
+
 /// 置換表
 pub struct TranspositionTable {
     /// クラスターの配列
-    table: Box<[Cluster]>,
+    table: ClusterTable,
     /// クラスター数
     cluster_count: usize,
     /// 世代カウンター（下位3bitは使用しない）
@@ -62,7 +102,7 @@ impl TranspositionTable {
         let cluster_count = (mb_size * 1024 * 1024 / std::mem::size_of::<Cluster>()) & !1;
         let cluster_count = cluster_count.max(2); // 最小2クラスター
 
-        let table = vec![Cluster::new(); cluster_count].into_boxed_slice();
+        let table = ClusterTable::new(cluster_count);
 
         Self {
             table,
@@ -77,7 +117,7 @@ impl TranspositionTable {
         let new_count = new_count.max(2);
 
         if new_count != self.cluster_count {
-            self.table = vec![Cluster::new(); new_count].into_boxed_slice();
+            self.table = ClusterTable::new(new_count);
             self.cluster_count = new_count;
         }
     }
@@ -198,6 +238,11 @@ impl TranspositionTable {
         count / CLUSTER_SIZE as i32
     }
 
+    /// Large Pagesを使って確保されたかを返す
+    pub fn uses_large_pages(&self) -> bool {
+        self.table.uses_large_pages()
+    }
+
     /// クラスターインデックスを計算
     #[inline]
     fn cluster_index(&self, key: u64, side_to_move: Color) -> usize {
@@ -268,6 +313,13 @@ impl ProbeResult {
         unsafe {
             (*self.writer).save(self.key16, value, is_pv, bound, depth, mv, eval, generation8);
         }
+    }
+}
+
+impl TtPrefetch for TranspositionTable {
+    #[inline]
+    fn prefetch(&self, key: u64, side_to_move: Color) {
+        TranspositionTable::prefetch(self, key, side_to_move);
     }
 }
 
