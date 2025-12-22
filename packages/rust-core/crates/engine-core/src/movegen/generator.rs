@@ -370,6 +370,7 @@ fn generate_king_moves(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuf
     let king_sq = pos.king_square(us);
 
     let attacks = king_effect(king_sq) & target;
+    // 玉の駒情報（指し手に付加するため）
     let moved_pc = pos.piece_on(king_sq);
     for to in attacks.iter() {
         add_move(buffer, Move::new_move_with_piece(king_sq, to, false, moved_pc));
@@ -558,6 +559,7 @@ fn generate_evasions_with_promos(
     // 玉の移動先（自駒でなく、王手駒の利きでもない場所）
     let king_targets = king_effect(king_sq) & !pos.pieces_c(us) & !checker_attacks;
 
+    // 玉の駒情報（王手回避手に付加するため）
     let moved_pc = pos.piece_on(king_sq);
     for to in king_targets.iter() {
         // 移動先に敵の利きがないかは後でis_legalでチェック

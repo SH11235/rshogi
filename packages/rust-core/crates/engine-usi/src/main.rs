@@ -511,6 +511,8 @@ impl UsiEngine {
                         if let Some(mv) = Move::from_usi(tokens[idx]) {
                             if let Some(normalized) = self.position.to_move(mv) {
                                 limits.search_moves.push(normalized);
+                            } else {
+                                eprintln!("warning: invalid searchmoves: {}", tokens[idx]);
                             }
                         }
                         idx += 1;
