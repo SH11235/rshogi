@@ -976,6 +976,7 @@ export function ShogiMatch({
                                         void handleSquareSelect(sq, shiftKey);
                                     }}
                                     onPromotionChoice={handlePromotionChoice}
+                                    flipBoard={flipBoard}
                                 />
                                 {candidateNote ? (
                                     <div style={TEXT_STYLES.mutedSecondary}>{candidateNote}</div>
