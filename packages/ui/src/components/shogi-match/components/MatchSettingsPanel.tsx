@@ -52,6 +52,12 @@ export function MatchSettingsPanel({
     uiEngineOptions,
     settingsLocked,
 }: MatchSettingsPanelProps): ReactElement {
+    // 折りたたみ時に表示するサマリー
+    const getSideLabel = (setting: SideSetting): string => {
+        return setting.role === "human" ? "人" : "AI";
+    };
+    const summary = `☗${getSideLabel(sides.sente)} vs ☖${getSideLabel(sides.gote)}`;
+
     const sideSelector = (side: Player) => {
         const setting = sides[side];
         const hasEngineOptions = uiEngineOptions.length > 0;
@@ -179,23 +185,36 @@ export function MatchSettingsPanel({
                     aria-label="対局設定パネルを開閉"
                     style={{
                         width: "100%",
-                        padding: "8px",
+                        padding: "8px 12px",
                         background: "hsl(var(--secondary))",
                         border: "1px solid hsl(var(--border, 0 0% 86%))",
                         borderRadius: "8px",
                         display: "flex",
                         alignItems: "center",
                         justifyContent: "space-between",
+                        gap: "8px",
                         cursor: "pointer",
                         fontSize: "14px",
                         fontWeight: 600,
                     }}
                 >
-                    <span>対局設定</span>
+                    <span style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                        <span>対局設定</span>
+                        <span
+                            style={{
+                                fontSize: "13px",
+                                fontWeight: 500,
+                                color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                            }}
+                        >
+                            {summary}
+                        </span>
+                    </span>
                     <span
                         style={{
                             transform: isOpen ? "rotate(180deg)" : "rotate(0deg)",
                             transition: "transform 0.2s ease",
+                            flexShrink: 0,
                         }}
                     >
                         ▼

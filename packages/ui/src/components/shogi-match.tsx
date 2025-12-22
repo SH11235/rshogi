@@ -195,6 +195,15 @@ export function ShogiMatch({
     const [isEditPanelOpen, setIsEditPanelOpen] = useState(false);
     const [isSettingsPanelOpen, setIsSettingsPanelOpen] = useState(false);
 
+    // 後手が人間の場合は盤面を反転して手前側に表示
+    useEffect(() => {
+        const goteIsHuman = sides.gote.role === "human";
+        const senteIsHuman = sides.sente.role === "human";
+        // 後手のみ人間、または両方人間で後手優先の場合は反転
+        // （後手が人間かつ先手がエンジンの場合に反転）
+        setFlipBoard(goteIsHuman && !senteIsHuman);
+    }, [sides.sente.role, sides.gote.role]);
+
     const positionRef = useRef<PositionState>(position);
     const movesRef = useRef<string[]>(moves);
     const legalCache = useMemo(() => new LegalMoveCache(), []);
@@ -932,18 +941,18 @@ export function ShogiMatch({
                                     {moves.length === 0 ? "開始局面" : `${moves.length}手目`}
                                 </output>
 
-                                {/* 後手の持ち駒（盤の上） */}
+                                {/* 盤の上側の持ち駒（通常:後手、反転時:先手） */}
                                 <PlayerHandSection
-                                    owner="gote"
-                                    label="後手の持ち駒"
-                                    hand={position.hands.gote}
+                                    owner={flipBoard ? "sente" : "gote"}
+                                    label={flipBoard ? "先手の持ち駒" : "後手の持ち駒"}
+                                    hand={flipBoard ? position.hands.sente : position.hands.gote}
                                     selectedPiece={
                                         selection?.kind === "hand" ? selection.piece : null
                                     }
                                     isActive={
                                         !isEditMode &&
-                                        position.turn === "gote" &&
-                                        sides.gote.role === "human"
+                                        position.turn === (flipBoard ? "sente" : "gote") &&
+                                        sides[flipBoard ? "sente" : "gote"].role === "human"
                                     }
                                     onHandSelect={handleHandSelect}
                                 />
@@ -972,18 +981,18 @@ export function ShogiMatch({
                                     <div style={TEXT_STYLES.mutedSecondary}>{candidateNote}</div>
                                 ) : null}
 
-                                {/* 先手の持ち駒（盤の下） */}
+                                {/* 盤の下側の持ち駒（通常:先手、反転時:後手） */}
                                 <PlayerHandSection
-                                    owner="sente"
-                                    label="先手の持ち駒"
-                                    hand={position.hands.sente}
+                                    owner={flipBoard ? "gote" : "sente"}
+                                    label={flipBoard ? "後手の持ち駒" : "先手の持ち駒"}
+                                    hand={flipBoard ? position.hands.gote : position.hands.sente}
                                     selectedPiece={
                                         selection?.kind === "hand" ? selection.piece : null
                                     }
                                     isActive={
                                         !isEditMode &&
-                                        position.turn === "sente" &&
-                                        sides.sente.role === "human"
+                                        position.turn === (flipBoard ? "gote" : "sente") &&
+                                        sides[flipBoard ? "gote" : "sente"].role === "human"
                                     }
                                     onHandSelect={handleHandSelect}
                                 />
