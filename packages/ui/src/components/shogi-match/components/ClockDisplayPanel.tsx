@@ -1,8 +1,8 @@
 import type { Player } from "@shogi/app-core";
 import type { ReactElement } from "react";
 import type { TickState } from "../hooks/useClockManager";
-import type { SideSetting } from "./MatchSettingsPanel";
 import { formatTime } from "../utils/timeFormat";
+import type { SideSetting } from "./MatchSettingsPanel";
 
 const baseCard = {
     background: "hsl(var(--card, 0 0% 100%))",
