@@ -26,7 +26,7 @@ use super::history::{
 use super::movepicker::piece_value;
 use super::types::{
     draw_value, init_stack_array, value_from_tt, value_to_tt, ContHistKey, NodeType,
-    OrderedMovesBuffer, RootMoves, SearchedMoveList, StackArray,
+    OrderedMovesBuffer, RootMoves, SearchedMoveList, StackArray, STACK_SIZE,
 };
 use super::{LimitsType, MovePicker, TimeManagement};
 
@@ -309,6 +309,8 @@ impl SearchWorker {
 
     #[inline]
     fn cont_history_ptr(&self, ply: i32, back: i32) -> NonNull<PieceToHistory> {
+        debug_assert!(ply >= 0 && (ply as usize) < STACK_SIZE, "ply out of bounds: {ply}");
+        debug_assert!(back >= 0, "back must be non-negative: {back}");
         if ply >= back {
             self.stack[(ply - back) as usize].cont_history_ptr
         } else {
@@ -350,6 +352,7 @@ impl SearchWorker {
         piece: Piece,
         to: Square,
     ) {
+        debug_assert!(ply >= 0 && (ply as usize) < STACK_SIZE, "ply out of bounds: {ply}");
         let in_check_idx = in_check as usize;
         let capture_idx = capture as usize;
         let table =
@@ -2980,8 +2983,11 @@ impl SearchWorker {
     }
 }
 
-// SearchWorkerは専用スレッドへmoveして使う前提。
-// cont_history_ptrはself.history内への参照で、move後も参照先は不変なためSendとして安全。
+// SAFETY: SearchWorkerは単一スレッドで使用される前提。
+// StackArray内の各Stackが持つ `cont_history_ptr: NonNull<PieceToHistory>` は
+// `self.history.continuation_history` 内のテーブルへの参照である。
+// SearchWorkerがスレッド間でmoveされても、history フィールドも一緒にmoveされるため、
+// ポインタの参照先は常に有効であり、データ競合も発生しない。
 unsafe impl Send for SearchWorker {}
 
 // =============================================================================
@@ -3059,5 +3065,49 @@ mod tests {
         // root_delta=0 を渡しても内部で1にクランプされることを確認
         let r = reduction(false, 10, 10, 0, 0) / 1024;
         assert!(r >= 0, "reduction should clamp root_delta to >=1 even when 0 is passed");
+    }
+
+    #[test]
+    fn test_sentinel_initialization() {
+        use std::sync::Arc;
+
+        // SearchWorker作成時にsentinelが正しく初期化されることを確認
+        let tt = Arc::new(TranspositionTable::new(16));
+        let worker = SearchWorker::new(tt, 0);
+
+        // sentinelポインタがdanglingではなく、実際のテーブルを指していることを確認
+        let sentinel = worker.cont_history_sentinel;
+        // NonNullはnullにならないことが保証されているので、
+        // 代わりにsafeにderefできることを確認（ポインタが有効なメモリを指していること）
+        let sentinel_ref = unsafe { sentinel.as_ref() };
+        // PieceToHistoryテーブルはゼロ初期化されているはず
+        assert_eq!(
+            sentinel_ref.get(crate::types::Piece::B_PAWN, crate::types::Square::SQ_11),
+            0,
+            "sentinel table should be zero-initialized"
+        );
+
+        // 全てのスタックエントリがsentinelで初期化されていることを確認
+        for (i, stack) in worker.stack.iter().enumerate() {
+            assert_eq!(
+                stack.cont_history_ptr, sentinel,
+                "stack[{i}].cont_history_ptr should be initialized to sentinel"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cont_history_ptr_returns_sentinel_for_negative_offset() {
+        use std::sync::Arc;
+
+        let tt = Arc::new(TranspositionTable::new(16));
+        let worker = SearchWorker::new(tt, 0);
+
+        // ply < back の場合はsentinelを返すことを確認
+        let ptr = worker.cont_history_ptr(0, 1);
+        assert_eq!(ptr, worker.cont_history_sentinel);
+
+        let ptr = worker.cont_history_ptr(3, 5);
+        assert_eq!(ptr, worker.cont_history_sentinel);
     }
 }

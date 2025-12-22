@@ -92,6 +92,14 @@ pub struct Stack {
     /// ContinuationHistoryへの参照（YaneuraOu方式、MovePicker直結）
     ///
     /// sentinelをセットする前提のためOptionではなく生ポインタで保持する。
+    ///
+    /// # Safety
+    ///
+    /// このポインタは以下の不変条件を満たす：
+    /// - 常に有効な `PieceToHistory` テーブルを指す（`dangling()` は初期値のみ）
+    /// - `SearchWorker::reset_cont_history_ptrs()` でsentinelに初期化される
+    /// - `SearchWorker::set_cont_history_for_move()` で `continuation_history` 内のテーブルを指すよう更新される
+    /// - 参照先は `SearchWorker::history` フィールドが所有しており、`SearchWorker` の生存期間中は有効
     pub cont_history_ptr: NonNull<PieceToHistory>,
 
     /// ContinuationHistoryキー（YaneuraOu方式）

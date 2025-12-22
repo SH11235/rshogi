@@ -577,7 +577,9 @@ impl<'a> MovePicker<'a> {
             // PawnHistory (×2)
             value += 2 * self.pawn_history.get(pawn_idx, pc, to) as i32;
 
-            // ContinuationHistory (6個)
+            // ContinuationHistory (6個のうち5個を使用)
+            // インデックス4 (ply-5) はスキップ: YaneuraOu準拠で、ply-5は統計的に有効性が低いため除外
+            // 参照: yaneuraou-search.cpp の continuationHistory 配列の使用箇所
             for (idx, weight) in [(0, 1), (1, 1), (2, 1), (3, 1), (5, 1)] {
                 let ch = self.continuation_history[idx];
                 value += weight * ch.get(pc, to) as i32;
