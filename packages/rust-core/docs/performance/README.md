@@ -61,17 +61,33 @@
 
 #### PGOビルド（本番用）
 
-| エンジン | Material NPS | 対YO比 | 備考 |
-|---------|-------------:|-------:|------|
-| 本エンジン（PGO前） | 435,290 | 28% | ベースライン |
-| **本エンジン（PGO後）** | **497,643** | **32%** | **+14.3%向上** |
-| YaneuraOu | 1,545,172 | 100% | 参考値 |
+| エンジン | NNUE NPS | 対YO比 | 備考 |
+|---------|--------:|-------:|------|
+| 本エンジン（PGO前） | 681,366 | 61% | ベースライン |
+| **本エンジン（PGO後）** | **723,855** | **65%** | **+6.2%向上** |
+| YaneuraOu | 1,118,219 | 100% | 参考値 |
 
 ※ PGOビルド: `./scripts/build_pgo.sh`
 
 ### PGO (Profile-Guided Optimization) 効果
 
-計測条件: `./target/release/benchmark` (Material評価、3回実行の平均)
+#### NNUE評価時（本番相当）
+
+計測条件: `./target/release/benchmark --nnue-file ...` (3回実行の平均)
+
+| 状態 | Run 1 | Run 2 | Run 3 | 平均NPS |
+|------|------:|------:|------:|--------:|
+| PGO前 | - | - | - | 681,366 |
+| **PGO後** | 722,809 | 725,249 | 723,507 | **723,855** |
+
+| 指標 | 値 |
+|------|-----|
+| **NPS向上率** | **+6.2%** |
+| 絶対値向上 | +42,489 NPS |
+
+#### Material評価時
+
+計測条件: `./target/release/benchmark` (3回実行の平均)
 
 | 状態 | Run 1 | Run 2 | Run 3 | 平均NPS |
 |------|------:|------:|------:|--------:|
@@ -83,10 +99,13 @@
 | **NPS向上率** | **+14.3%** |
 | 絶対値向上 | +62,353 NPS |
 
-PGOの最適化内容:
+#### PGOの最適化内容
+
 - 分岐予測最適化（頻繁に取られる分岐を優先配置）
 - コードレイアウト最適化（ホットパスを連続メモリに配置）
 - インライン判断の改善（実行頻度に基づく）
+
+**注**: NNUE評価はMaterial評価より計算負荷が高いため、PGO効果が相対的に小さくなる（+6.2% vs +14.3%）
 
 ---
 
@@ -402,5 +421,5 @@ PGOビルドの処理フロー:
 | 2025-12-22 | 計測結果更新（NNUE: MovePicker 9.52%, network::evaluate 3.74%, refresh 2.49%、Material: eval_lv7_like 25.95%, direction_of 16.25%）。**改善点**: AffineTransformのループ逆転最適化により `network::evaluate` が4.74%→3.74%に約21%減少（外側ループを入力チャンク、内側を出力に変更し、入力ブロードキャストと重みアクセスの連続性を改善）。NNUE推論高速化の結果、`MovePicker` が8.86%→9.52%、`check_move_mate` が2.17%でホットスポット6位に浮上するなど、相対比率が変動 |
 | 2025-12-22 | **NPS計測結果セクション追加**。NNUE/Material両方の局面別NPS、YaneuraOu比較表を追加。**VNNI dpbusd命令対応**: AVX512-VNNI対応CPUでNNUE積和演算を1命令化（`_mm256_dpbusd_epi32`）。別端末（Intel Cascade Lake-X）での計測で**+13% NPS向上**を確認 |
 | 2025-12-22 | 計測結果更新（NNUE: MovePicker 9.36%, network::evaluate 3.73%, refresh 2.45%、Material: eval_lv7_like 25.78%, direction_of 16.39%）。NPS: NNUE平均 681,366（+1.5%）、Material平均 435,547。YaneuraOu比が60%→61%に微増 |
-| 2025-12-22 | **PGO (Profile-Guided Optimization) 導入**: `scripts/build_pgo.sh`追加。Material NPS **+14.3%向上**（435,290→497,643）。YaneuraOu比が28%→32%に改善。PGO効果の詳細計測結果を追加 |
+| 2025-12-22 | **PGO (Profile-Guided Optimization) 導入**: `scripts/build_pgo.sh`追加。NNUE NPS **+6.2%向上**（681,366→723,855）、Material NPS **+14.3%向上**（435,290→497,643）。YaneuraOu比がNNUE 61%→65%に改善。PGO効果の詳細計測結果を追加 |
 | 2025-12-22 | **本番ビルドプロファイル追加**: `[profile.production]`をCargo.tomlに追加。Full LTO、codegen-units=1、overflow-checks無効化。WASMビルドで-4.2%サイズ削減（865KB→829KB）。CIデプロイがproductionプロファイルを使用するよう更新 |
