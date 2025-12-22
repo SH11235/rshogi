@@ -401,11 +401,9 @@ impl Position {
         let w_silver =
             silver_effect(Color::Black, sq) & self.pieces(Color::White, PieceType::Silver);
 
-        // 金の動きをする駒 - 事前計算済みのgolds_bbを使用
-        let b_gold =
-            gold_effect(Color::White, sq) & self.golds_bb & self.by_color[Color::Black.index()];
-        let w_gold =
-            gold_effect(Color::Black, sq) & self.golds_bb & self.by_color[Color::White.index()];
+        // 金の動きをする駒 - 事前計算済みのgolds_c()を使用
+        let b_gold = gold_effect(Color::White, sq) & self.golds_c(Color::Black);
+        let w_gold = gold_effect(Color::Black, sq) & self.golds_c(Color::White);
 
         let king = king_effect(sq)
             & (self.pieces(Color::Black, PieceType::King)
@@ -1826,5 +1824,133 @@ mod tests {
 
         pos.undo_move(mv);
         assert!(!pos.golds().contains(to), "undo後にと金がgolds_bbに残っている");
+    }
+
+    /// 飛車成で rook_dragon_bb の整合性を確認
+    #[test]
+    fn test_composite_bitboard_rook_promotion() {
+        let mut pos = Position::new();
+        // 飛車を3段目に配置
+        pos.set_sfen("4k4/9/9/9/9/9/4R4/9/4K4 b - 1").unwrap();
+
+        let to = Square::from_usi("5b").unwrap();
+
+        // 飛車成で龍になる
+        let mv = Move::from_usi("5g5b+").unwrap();
+        let gives_check = pos.gives_check(mv);
+        pos.do_move(mv, gives_check);
+
+        // rook_dragon_bbに龍が含まれているはず
+        assert!(pos.rook_dragon().contains(to), "龍がrook_dragon_bbに含まれていない");
+
+        // 整合性チェック
+        let expected_rd = pos.pieces_pt(PieceType::Rook) | pos.pieces_pt(PieceType::Dragon);
+        assert_eq!(pos.rook_dragon(), expected_rd, "rook_dragon_bb mismatch");
+
+        pos.undo_move(mv);
+        assert!(!pos.rook_dragon().contains(to), "undo後に龍がrook_dragon_bbに残っている");
+    }
+
+    /// 香・桂・銀の成りで golds_bb の整合性を確認
+    #[test]
+    fn test_composite_bitboard_lance_knight_silver_promotions() {
+        // 香成のテスト
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/4L4/9/9/9/9/4K4 b - 1").unwrap();
+        let mv = Move::from_usi("5d5c+").unwrap();
+        let to = Square::from_usi("5c").unwrap();
+        let gives_check = pos.gives_check(mv);
+        pos.do_move(mv, gives_check);
+        assert!(pos.golds().contains(to), "成香がgolds_bbに含まれていない");
+        let expected_golds = pos.pieces_pt(PieceType::Gold)
+            | pos.pieces_pt(PieceType::ProPawn)
+            | pos.pieces_pt(PieceType::ProLance)
+            | pos.pieces_pt(PieceType::ProKnight)
+            | pos.pieces_pt(PieceType::ProSilver);
+        assert_eq!(pos.golds(), expected_golds, "golds_bb mismatch after 香成");
+        pos.undo_move(mv);
+
+        // 桂成のテスト
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/9/4N4/9/9/9/4K4 b - 1").unwrap();
+        let mv = Move::from_usi("5e6c+").unwrap();
+        let to = Square::from_usi("6c").unwrap();
+        let gives_check = pos.gives_check(mv);
+        pos.do_move(mv, gives_check);
+        assert!(pos.golds().contains(to), "成桂がgolds_bbに含まれていない");
+        let expected_golds = pos.pieces_pt(PieceType::Gold)
+            | pos.pieces_pt(PieceType::ProPawn)
+            | pos.pieces_pt(PieceType::ProLance)
+            | pos.pieces_pt(PieceType::ProKnight)
+            | pos.pieces_pt(PieceType::ProSilver);
+        assert_eq!(pos.golds(), expected_golds, "golds_bb mismatch after 桂成");
+        pos.undo_move(mv);
+
+        // 銀成のテスト
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/9/4S4/9/9/9/4K4 b - 1").unwrap();
+        let mv = Move::from_usi("5e5d+").unwrap();
+        let to = Square::from_usi("5d").unwrap();
+        let gives_check = pos.gives_check(mv);
+        pos.do_move(mv, gives_check);
+        assert!(pos.golds().contains(to), "成銀がgolds_bbに含まれていない");
+        let expected_golds = pos.pieces_pt(PieceType::Gold)
+            | pos.pieces_pt(PieceType::ProPawn)
+            | pos.pieces_pt(PieceType::ProLance)
+            | pos.pieces_pt(PieceType::ProKnight)
+            | pos.pieces_pt(PieceType::ProSilver);
+        assert_eq!(pos.golds(), expected_golds, "golds_bb mismatch after 銀成");
+        pos.undo_move(mv);
+    }
+
+    /// 駒を取りながら成る場合の整合性を確認
+    #[test]
+    fn test_composite_bitboard_capture_and_promote() {
+        let mut pos = Position::new();
+        // 相手の歩を取りながら成る局面
+        pos.set_sfen("4k4/9/9/4p4/4P4/9/9/9/4K4 b - 1").unwrap();
+
+        let mv = Move::from_usi("5e5d+").unwrap();
+        let to = Square::from_usi("5d").unwrap();
+        let gives_check = pos.gives_check(mv);
+        pos.do_move(mv, gives_check);
+
+        // golds_bbにと金が含まれているはず
+        assert!(pos.golds().contains(to), "駒を取って成った後、と金がgolds_bbに含まれていない");
+
+        // 整合性チェック
+        let expected_golds = pos.pieces_pt(PieceType::Gold)
+            | pos.pieces_pt(PieceType::ProPawn)
+            | pos.pieces_pt(PieceType::ProLance)
+            | pos.pieces_pt(PieceType::ProKnight)
+            | pos.pieces_pt(PieceType::ProSilver);
+        assert_eq!(pos.golds(), expected_golds, "golds_bb mismatch after capture and promote");
+
+        pos.undo_move(mv);
+        assert!(!pos.golds().contains(to), "undo後にと金がgolds_bbに残っている");
+    }
+
+    /// 角成で bishop_horse_bb の整合性を確認
+    #[test]
+    fn test_composite_bitboard_bishop_promotion() {
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/9/9/9/9/4B4/4K4 b - 1").unwrap();
+
+        let to = Square::from_usi("2b").unwrap();
+
+        // 角成で馬になる
+        let mv = Move::from_usi("5h2b+").unwrap();
+        let gives_check = pos.gives_check(mv);
+        pos.do_move(mv, gives_check);
+
+        // bishop_horse_bbに馬が含まれているはず
+        assert!(pos.bishop_horse().contains(to), "馬がbishop_horse_bbに含まれていない");
+
+        // 整合性チェック
+        let expected_bh = pos.pieces_pt(PieceType::Bishop) | pos.pieces_pt(PieceType::Horse);
+        assert_eq!(pos.bishop_horse(), expected_bh, "bishop_horse_bb mismatch");
+
+        pos.undo_move(mv);
+        assert!(!pos.bishop_horse().contains(to), "undo後に馬がbishop_horse_bbに残っている");
     }
 }
