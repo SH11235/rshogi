@@ -10,6 +10,15 @@ description = "Wasm bindings for the shogi engine core"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+# TODO: NNUEファイルの準備が整ったら、tournamentフィーチャーを有効化
+#
+# 実装手順:
+# 1. NNUEバイナリの組み込み方法を決定（埋め込み or 動的ロード）
+# 2. Wasm初期化時のNNUEロード処理を実装
+# 3. エラーハンドリングの実装（Wasmではpanicを避ける）
+# 4. バイナリサイズの計測（Material評価削除による削減効果）
+#
+# engine-core = { path = "../engine-core", features = ["tournament"] }
 engine-core = { path = "../engine-core" }
 wasm-bindgen = { version = "0.2.106", features = ["serde-serialize"] }
 js-sys = "0.3.83"

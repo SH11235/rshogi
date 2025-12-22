@@ -13,6 +13,7 @@ use super::constants::{
 };
 use super::feature_transformer::FeatureTransformer;
 use super::layers::{AffineTransform, ClippedReLU};
+#[cfg(not(feature = "tournament"))]
 use crate::eval::material;
 use crate::position::Position;
 use crate::types::Value;
@@ -164,159 +165,171 @@ pub fn init_nnue_from_bytes(bytes: &[u8]) -> io::Result<()> {
 
 /// 局面を評価
 ///
-/// NNUEが初期化されていない場合は駒得評価にフォールバック。
 /// AccumulatorStack を使って差分更新し、計算済みなら再利用する。
 ///
-/// 遅延評価パターン:
+/// # フォールバック動作
+/// - 通常ビルド: NNUEが初期化されていない場合は駒得評価にフォールバック
+/// - tournamentビルド: NNUEが初期化されていない場合はパニック
+///
+/// # 遅延評価パターン
 /// 1. 直前局面で差分更新を試行
 /// 2. 失敗なら祖先探索 + 複数手差分更新を試行
 /// 3. それでも失敗なら全計算
 pub fn evaluate(pos: &Position, stack: &mut AccumulatorStack) -> Value {
-    if let Some(network) = NETWORK.get() {
-        // 差分更新の成功率計測（diagnosticsフィーチャー有効時のみ）
-        // 0=cached, 1=diff_success, 2=no_prev, 3=prev_not_computed, 4=update_failed,
-        // 5=refresh, 6=ancestor_success
-        #[cfg(feature = "diagnostics")]
-        let mut diff_update_result: u8 = 0;
+    // tournamentビルド: NNUEが必須（フォールバックなし）
+    #[cfg(feature = "tournament")]
+    let network = NETWORK.get().expect(
+        "NNUE network is not initialized. \
+         Tournament build requires NNUE to be loaded before evaluation. \
+         Call init_nnue() or init_nnue_from_bytes() first.",
+    );
 
-        // AccumulatorStack 上の Accumulator をインプレースで更新
-        {
-            let current_entry = stack.current();
-            if !current_entry.accumulator.computed_accumulation {
-                let mut updated = false;
+    // 通常ビルド: NNUEがなければMaterial評価にフォールバック
+    #[cfg(not(feature = "tournament"))]
+    let Some(network) = NETWORK.get() else {
+        return material::evaluate_material(pos);
+    };
 
-                // 1. 直前局面で差分更新を試行
-                // YaneuraOu classic と同様に、update_accumulator は視点ごとに reset を判定し、
-                // 常に成功する（玉移動した視点は再構築、それ以外は差分更新）。
-                if let Some(prev_idx) = current_entry.previous {
-                    let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
-                    if prev_computed {
-                        // DirtyPieceをコピーして借用を解消
-                        let dirty_piece = stack.current().dirty_piece;
-                        // Note: clone() + copy_from_slice による二重コピーを避ける最適化を試みたが、
-                        // NPSに改善が見られなかった。YaneuraOu の C++ 実装でも同様のパターン
-                        // （値コピー + std::memcpy）を使用している。
-                        let prev_acc = stack.entry_at(prev_idx).accumulator.clone();
-                        let current_acc = &mut stack.current_mut().accumulator;
-                        network.feature_transformer.update_accumulator(
-                            pos,
-                            &dirty_piece,
-                            current_acc,
-                            &prev_acc,
-                        );
-                        updated = true;
-                        #[cfg(feature = "diagnostics")]
-                        {
-                            diff_update_result = 1; // diff_success
-                        }
-                    } else {
-                        #[cfg(feature = "diagnostics")]
-                        {
-                            diff_update_result = 3; // prev_not_computed
-                        }
+    // 差分更新の成功率計測（diagnosticsフィーチャー有効時のみ）
+    // 0=cached, 1=diff_success, 2=no_prev, 3=prev_not_computed, 4=update_failed,
+    // 5=refresh, 6=ancestor_success
+    #[cfg(feature = "diagnostics")]
+    let mut diff_update_result: u8 = 0;
+
+    // AccumulatorStack 上の Accumulator をインプレースで更新
+    {
+        let current_entry = stack.current();
+        if !current_entry.accumulator.computed_accumulation {
+            let mut updated = false;
+
+            // 1. 直前局面で差分更新を試行
+            // YaneuraOu classic と同様に、update_accumulator は視点ごとに reset を判定し、
+            // 常に成功する（玉移動した視点は再構築、それ以外は差分更新）。
+            if let Some(prev_idx) = current_entry.previous {
+                let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
+                if prev_computed {
+                    // DirtyPieceをコピーして借用を解消
+                    let dirty_piece = stack.current().dirty_piece;
+                    // Note: clone() + copy_from_slice による二重コピーを避ける最適化を試みたが、
+                    // NPSに改善が見られなかった。YaneuraOu の C++ 実装でも同様のパターン
+                    // （値コピー + std::memcpy）を使用している。
+                    let prev_acc = stack.entry_at(prev_idx).accumulator.clone();
+                    let current_acc = &mut stack.current_mut().accumulator;
+                    network.feature_transformer.update_accumulator(
+                        pos,
+                        &dirty_piece,
+                        current_acc,
+                        &prev_acc,
+                    );
+                    updated = true;
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        diff_update_result = 1; // diff_success
                     }
                 } else {
                     #[cfg(feature = "diagnostics")]
                     {
-                        diff_update_result = 2; // no_prev
+                        diff_update_result = 3; // prev_not_computed
                     }
                 }
-
-                // 2. 失敗なら祖先探索 + 複数手差分更新を試行
-                if !updated {
-                    if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
-                        updated = network
-                            .feature_transformer
-                            .forward_update_incremental(pos, stack, source_idx);
-                        #[cfg(feature = "diagnostics")]
-                        if updated {
-                            diff_update_result = 6; // ancestor_success
-                        }
-                    }
-                }
-
-                // 3. それでも失敗なら全計算
-                if !updated {
-                    let acc = &mut stack.current_mut().accumulator;
-                    network.feature_transformer.refresh_accumulator(pos, acc);
+            } else {
+                #[cfg(feature = "diagnostics")]
+                {
+                    diff_update_result = 2; // no_prev
                 }
             }
-            // else: cached (diff_update_result = 0)
+
+            // 2. 失敗なら祖先探索 + 複数手差分更新を試行
+            if !updated {
+                if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+                    updated = network
+                        .feature_transformer
+                        .forward_update_incremental(pos, stack, source_idx);
+                    #[cfg(feature = "diagnostics")]
+                    if updated {
+                        diff_update_result = 6; // ancestor_success
+                    }
+                }
+            }
+
+            // 3. それでも失敗なら全計算
+            if !updated {
+                let acc = &mut stack.current_mut().accumulator;
+                network.feature_transformer.refresh_accumulator(pos, acc);
+            }
+        }
+        // else: cached (diff_update_result = 0)
+    }
+
+    // 差分更新の成功率をログ出力（diagnosticsフィーチャー有効時のみ）
+    #[cfg(feature = "diagnostics")]
+    {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static TOTAL_EVALS: AtomicU64 = AtomicU64::new(0);
+        static CACHED: AtomicU64 = AtomicU64::new(0);
+        static DIFF_SUCCESS: AtomicU64 = AtomicU64::new(0);
+        static ANCESTOR_SUCCESS: AtomicU64 = AtomicU64::new(0);
+        static NO_PREV: AtomicU64 = AtomicU64::new(0);
+        static PREV_NOT_COMPUTED: AtomicU64 = AtomicU64::new(0);
+        static UPDATE_FAILED: AtomicU64 = AtomicU64::new(0);
+
+        match diff_update_result {
+            0 => {
+                CACHED.fetch_add(1, Ordering::Relaxed);
+            }
+            1 => {
+                DIFF_SUCCESS.fetch_add(1, Ordering::Relaxed);
+            }
+            2 => {
+                NO_PREV.fetch_add(1, Ordering::Relaxed);
+            }
+            3 => {
+                PREV_NOT_COMPUTED.fetch_add(1, Ordering::Relaxed);
+            }
+            4 | 5 => {
+                UPDATE_FAILED.fetch_add(1, Ordering::Relaxed);
+            }
+            6 => {
+                ANCESTOR_SUCCESS.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
         }
 
-        // 差分更新の成功率をログ出力（diagnosticsフィーチャー有効時のみ）
-        #[cfg(feature = "diagnostics")]
-        {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static TOTAL_EVALS: AtomicU64 = AtomicU64::new(0);
-            static CACHED: AtomicU64 = AtomicU64::new(0);
-            static DIFF_SUCCESS: AtomicU64 = AtomicU64::new(0);
-            static ANCESTOR_SUCCESS: AtomicU64 = AtomicU64::new(0);
-            static NO_PREV: AtomicU64 = AtomicU64::new(0);
-            static PREV_NOT_COMPUTED: AtomicU64 = AtomicU64::new(0);
-            static UPDATE_FAILED: AtomicU64 = AtomicU64::new(0);
+        let count = TOTAL_EVALS.fetch_add(1, Ordering::Relaxed) + 1;
 
-            match diff_update_result {
-                0 => {
-                    CACHED.fetch_add(1, Ordering::Relaxed);
-                }
-                1 => {
-                    DIFF_SUCCESS.fetch_add(1, Ordering::Relaxed);
-                }
-                2 => {
-                    NO_PREV.fetch_add(1, Ordering::Relaxed);
-                }
-                3 => {
-                    PREV_NOT_COMPUTED.fetch_add(1, Ordering::Relaxed);
-                }
-                4 | 5 => {
-                    UPDATE_FAILED.fetch_add(1, Ordering::Relaxed);
-                }
-                6 => {
-                    ANCESTOR_SUCCESS.fetch_add(1, Ordering::Relaxed);
-                }
-                _ => {}
-            }
+        // 100000回ごとにログ出力
+        if count.is_multiple_of(100000) {
+            let cached = CACHED.load(Ordering::Relaxed);
+            let diff_ok = DIFF_SUCCESS.load(Ordering::Relaxed);
+            let ancestor_ok = ANCESTOR_SUCCESS.load(Ordering::Relaxed);
+            let no_prev = NO_PREV.load(Ordering::Relaxed);
+            let prev_nc = PREV_NOT_COMPUTED.load(Ordering::Relaxed);
+            let upd_fail = UPDATE_FAILED.load(Ordering::Relaxed);
 
-            let count = TOTAL_EVALS.fetch_add(1, Ordering::Relaxed) + 1;
+            let need_compute = count - cached;
+            let total_diff_ok = diff_ok + ancestor_ok;
+            let diff_rate = if need_compute > 0 {
+                total_diff_ok as f64 / need_compute as f64 * 100.0
+            } else {
+                0.0
+            };
+            // refresh = 全計算が必要だった回数 = 計算が必要な回数 - 差分更新成功回数
+            let refresh_count = need_compute - total_diff_ok;
+            let refresh_rate = if need_compute > 0 {
+                refresh_count as f64 / need_compute as f64 * 100.0
+            } else {
+                0.0
+            };
 
-            // 100000回ごとにログ出力
-            if count.is_multiple_of(100000) {
-                let cached = CACHED.load(Ordering::Relaxed);
-                let diff_ok = DIFF_SUCCESS.load(Ordering::Relaxed);
-                let ancestor_ok = ANCESTOR_SUCCESS.load(Ordering::Relaxed);
-                let no_prev = NO_PREV.load(Ordering::Relaxed);
-                let prev_nc = PREV_NOT_COMPUTED.load(Ordering::Relaxed);
-                let upd_fail = UPDATE_FAILED.load(Ordering::Relaxed);
-
-                let need_compute = count - cached;
-                let total_diff_ok = diff_ok + ancestor_ok;
-                let diff_rate = if need_compute > 0 {
-                    total_diff_ok as f64 / need_compute as f64 * 100.0
-                } else {
-                    0.0
-                };
-                // refresh = 全計算が必要だった回数 = 計算が必要な回数 - 差分更新成功回数
-                let refresh_count = need_compute - total_diff_ok;
-                let refresh_rate = if need_compute > 0 {
-                    refresh_count as f64 / need_compute as f64 * 100.0
-                } else {
-                    0.0
-                };
-
-                eprintln!(
+            eprintln!(
                     "[NNUE diff] total={count} cached={cached} | need_compute={need_compute} diff_ok={total_diff_ok}({diff_rate:.1}%) refresh={refresh_rate:.1}% | direct={diff_ok} ancestor={ancestor_ok} no_prev={no_prev} prev_nc={prev_nc} upd_fail={upd_fail}"
                 );
-            }
         }
-
-        // 不変借用で評価
-        let acc_ref = &stack.current().accumulator;
-        network.evaluate(pos, acc_ref)
-    } else {
-        // フォールバック: Material評価
-        material::evaluate_material(pos)
     }
+
+    // 不変借用で評価
+    let acc_ref = &stack.current().accumulator;
+    network.evaluate(pos, acc_ref)
 }
 
 #[cfg(test)]
@@ -324,7 +337,10 @@ mod tests {
     use super::*;
     use crate::position::SFEN_HIRATE;
 
+    /// NNUEが初期化されていない場合のフォールバック動作をテスト
+    /// tournamentビルドではフォールバックがないため、このテストはスキップ
     #[test]
+    #[cfg(not(feature = "tournament"))]
     fn test_evaluate_fallback() {
         let mut pos = Position::new();
         pos.set_sfen(SFEN_HIRATE).unwrap();
