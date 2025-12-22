@@ -5,17 +5,19 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../../colla
 import { Input } from "../../input";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../tooltip";
 import type { ClockSettings } from "../hooks/useClockManager";
+import { formatTime } from "../utils/timeFormat";
 
-const selectStyle: CSSProperties = {
-    padding: "8px",
-    borderRadius: "8px",
-    border: "1px solid hsl(var(--wafuu-border))",
-    background: "hsl(var(--card, 0 0% 100%))",
-};
-
-const inputStyle: CSSProperties = {
-    border: "1px solid hsl(var(--wafuu-border))",
-    background: "hsl(var(--card, 0 0% 100%))",
+const PANEL_STYLES = {
+    select: {
+        padding: "8px",
+        borderRadius: "8px",
+        border: "1px solid hsl(var(--wafuu-border))",
+        background: "hsl(var(--card, 0 0% 100%))",
+    } as CSSProperties,
+    input: {
+        border: "1px solid hsl(var(--wafuu-border))",
+        background: "hsl(var(--card, 0 0% 100%))",
+    } as CSSProperties,
 };
 
 type SideRole = "human" | "engine";
@@ -68,7 +70,13 @@ export function MatchSettingsPanel({
     const getSideLabel = (setting: SideSetting): string => {
         return setting.role === "human" ? "人" : "AI";
     };
-    const summary = `☗${getSideLabel(sides.sente)} vs ☖${getSideLabel(sides.gote)}`;
+    const getTimeSummary = (): string => {
+        // 先手の設定を代表として表示（通常は先後同じ）
+        const main = formatTime(timeSettings.sente.mainMs);
+        const byoyomi = formatTime(timeSettings.sente.byoyomiMs);
+        return `${main}+${byoyomi}`;
+    };
+    const summary = `☗${getSideLabel(sides.sente)} vs ☖${getSideLabel(sides.gote)} | ${getTimeSummary()}`;
 
     const sideSelector = (side: Player) => {
         const setting = sides[side];
@@ -108,7 +116,7 @@ export function MatchSettingsPanel({
                             });
                         }}
                         disabled={settingsLocked}
-                        style={selectStyle}
+                        style={PANEL_STYLES.select}
                     >
                         <option value="human">人間</option>
                         <option value="engine">エンジン</option>
@@ -162,7 +170,7 @@ export function MatchSettingsPanel({
                             })
                         }
                         disabled={settingsLocked || setting.role !== "engine" || !hasEngineOptions}
-                        style={selectStyle}
+                        style={PANEL_STYLES.select}
                     >
                         {engineList}
                     </select>
@@ -277,7 +285,7 @@ export function MatchSettingsPanel({
                                 value={currentTurn}
                                 onChange={(e) => onTurnChange(e.target.value as Player)}
                                 disabled={settingsLocked}
-                                style={selectStyle}
+                                style={PANEL_STYLES.select}
                             >
                                 <option value="sente">先手</option>
                                 <option value="gote">後手</option>
@@ -308,7 +316,7 @@ export function MatchSettingsPanel({
                                     type="number"
                                     value={timeSettings.sente.mainMs}
                                     disabled={settingsLocked}
-                                    style={inputStyle}
+                                    style={PANEL_STYLES.input}
                                     onChange={(e) =>
                                         onTimeSettingsChange({
                                             ...timeSettings,
@@ -335,7 +343,7 @@ export function MatchSettingsPanel({
                                     type="number"
                                     value={timeSettings.sente.byoyomiMs}
                                     disabled={settingsLocked}
-                                    style={inputStyle}
+                                    style={PANEL_STYLES.input}
                                     onChange={(e) =>
                                         onTimeSettingsChange({
                                             ...timeSettings,
@@ -362,7 +370,7 @@ export function MatchSettingsPanel({
                                     type="number"
                                     value={timeSettings.gote.mainMs}
                                     disabled={settingsLocked}
-                                    style={inputStyle}
+                                    style={PANEL_STYLES.input}
                                     onChange={(e) =>
                                         onTimeSettingsChange({
                                             ...timeSettings,
@@ -389,7 +397,7 @@ export function MatchSettingsPanel({
                                     type="number"
                                     value={timeSettings.gote.byoyomiMs}
                                     disabled={settingsLocked}
-                                    style={inputStyle}
+                                    style={PANEL_STYLES.input}
                                     onChange={(e) =>
                                         onTimeSettingsChange({
                                             ...timeSettings,

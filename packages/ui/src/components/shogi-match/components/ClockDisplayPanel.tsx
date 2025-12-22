@@ -12,6 +12,11 @@ const baseCard = {
     boxShadow: "0 14px 28px rgba(0,0,0,0.12)",
 };
 
+const ROLE_LABELS: Record<SideSetting["role"], string> = {
+    human: "人",
+    engine: "AI",
+};
+
 interface ClockDisplayPanelProps {
     /** 時計の状態 */
     clocks: TickState;
@@ -20,9 +25,7 @@ interface ClockDisplayPanelProps {
 }
 
 export function ClockDisplayPanel({ clocks, sides }: ClockDisplayPanelProps): ReactElement {
-    const getRoleLabel = (side: Player): string => {
-        return sides[side].role === "human" ? "人" : "AI";
-    };
+    const getRoleLabel = (side: Player): string => ROLE_LABELS[sides[side].role];
 
     const renderClock = (side: Player) => {
         const clock = clocks[side];

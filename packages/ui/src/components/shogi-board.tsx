@@ -98,10 +98,9 @@ export function ShogiBoard({
                                         <span
                                             className={cn(
                                                 "relative flex h-full w-full items-center justify-center text-[18px] leading-none tracking-tight text-[#3a2a16]",
-                                                // 通常:後手が回転、反転時:先手が回転
-                                                (cell.piece.owner === "gote") !== flipBoard
-                                                    ? "-rotate-180"
-                                                    : "",
+                                                flipBoard
+                                                    ? cell.piece.owner === "sente" && "-rotate-180"
+                                                    : cell.piece.owner === "gote" && "-rotate-180",
                                             )}
                                         >
                                             <span className="rounded-[10px] bg-[#fdf6ec]/90 px-2 py-[6px] shadow-[0_4px_8px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)]">

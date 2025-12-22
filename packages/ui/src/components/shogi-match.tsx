@@ -204,6 +204,18 @@ export function ShogiMatch({
         setFlipBoard(goteIsHuman && !senteIsHuman);
     }, [sides.sente.role, sides.gote.role]);
 
+    // 持ち駒表示用のヘルパー関数
+    const getHandInfo = (pos: "top" | "bottom") => {
+        const owner: Player =
+            pos === "top" ? (flipBoard ? "sente" : "gote") : flipBoard ? "gote" : "sente";
+        return {
+            owner,
+            label: owner === "sente" ? "先手の持ち駒" : "後手の持ち駒",
+            hand: owner === "sente" ? position.hands.sente : position.hands.gote,
+            isActive: !isEditMode && position.turn === owner && sides[owner].role === "human",
+        };
+    };
+
     const positionRef = useRef<PositionState>(position);
     const movesRef = useRef<string[]>(moves);
     const legalCache = useMemo(() => new LegalMoveCache(), []);
@@ -942,20 +954,21 @@ export function ShogiMatch({
                                 </output>
 
                                 {/* 盤の上側の持ち駒（通常:後手、反転時:先手） */}
-                                <PlayerHandSection
-                                    owner={flipBoard ? "sente" : "gote"}
-                                    label={flipBoard ? "先手の持ち駒" : "後手の持ち駒"}
-                                    hand={flipBoard ? position.hands.sente : position.hands.gote}
-                                    selectedPiece={
-                                        selection?.kind === "hand" ? selection.piece : null
-                                    }
-                                    isActive={
-                                        !isEditMode &&
-                                        position.turn === (flipBoard ? "sente" : "gote") &&
-                                        sides[flipBoard ? "sente" : "gote"].role === "human"
-                                    }
-                                    onHandSelect={handleHandSelect}
-                                />
+                                {(() => {
+                                    const info = getHandInfo("top");
+                                    return (
+                                        <PlayerHandSection
+                                            owner={info.owner}
+                                            label={info.label}
+                                            hand={info.hand}
+                                            selectedPiece={
+                                                selection?.kind === "hand" ? selection.piece : null
+                                            }
+                                            isActive={info.isActive}
+                                            onHandSelect={handleHandSelect}
+                                        />
+                                    );
+                                })()}
 
                                 <ShogiBoard
                                     grid={grid}
@@ -983,20 +996,21 @@ export function ShogiMatch({
                                 ) : null}
 
                                 {/* 盤の下側の持ち駒（通常:先手、反転時:後手） */}
-                                <PlayerHandSection
-                                    owner={flipBoard ? "gote" : "sente"}
-                                    label={flipBoard ? "後手の持ち駒" : "先手の持ち駒"}
-                                    hand={flipBoard ? position.hands.gote : position.hands.sente}
-                                    selectedPiece={
-                                        selection?.kind === "hand" ? selection.piece : null
-                                    }
-                                    isActive={
-                                        !isEditMode &&
-                                        position.turn === (flipBoard ? "gote" : "sente") &&
-                                        sides[flipBoard ? "gote" : "sente"].role === "human"
-                                    }
-                                    onHandSelect={handleHandSelect}
-                                />
+                                {(() => {
+                                    const info = getHandInfo("bottom");
+                                    return (
+                                        <PlayerHandSection
+                                            owner={info.owner}
+                                            label={info.label}
+                                            hand={info.hand}
+                                            selectedPiece={
+                                                selection?.kind === "hand" ? selection.piece : null
+                                            }
+                                            isActive={info.isActive}
+                                            onHandSelect={handleHandSelect}
+                                        />
+                                    );
+                                })()}
                             </div>
                         </div>
                     </div>
