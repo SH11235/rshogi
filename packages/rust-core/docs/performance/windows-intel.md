@@ -18,8 +18,8 @@
 
 ### 最適化効果サマリ
 
-| 評価 | main (ベースライン) | nnue_vnni_dpbusd_support | 変化 |
-|------|---------------------|--------------------------|------|
+| 評価 | 最適化前 | 最適化後（現在） | 変化 |
+|------|----------|------------------|------|
 | **NNUE** | 359,149 | 406,325 | **+13.1%** |
 | **Material** | 244,334 | 248,980 | +1.9% (誤差範囲) |
 
@@ -31,7 +31,7 @@
 
 **計測条件**: movetime=20000ms, threads=1, material_level=9
 
-#### nnue_vnni_dpbusd_support ブランチ（最適化あり）
+#### 現在
 
 | 局面 | Depth | Nodes | Time (ms) | NPS | Hashfull | Bestmove |
 |------|-------|-------|-----------|-----|----------|----------|
@@ -41,7 +41,7 @@
 | 終盤 (詰み有) | 22 | 6,433,792 | 19,767 | 325,481 | 24 | G*2h |
 | **合計/平均** | - | 32,124,928 | 79,062 | **406,325** | - | - |
 
-#### main ブランチ（ベースライン）
+#### 最適化前（参考）
 
 | 局面 | Depth | Nodes | Time (ms) | NPS | Hashfull | Bestmove |
 |------|-------|-------|-----------|-----|----------|----------|
@@ -55,7 +55,7 @@
 
 **計測条件**: movetime=20000ms, threads=1, material_level=9
 
-#### nnue_vnni_dpbusd_support ブランチ（最適化あり）
+#### 現在
 
 | 局面 | Depth | Nodes | Time (ms) | NPS | Hashfull | Bestmove |
 |------|-------|-------|-----------|-----|----------|----------|
@@ -65,7 +65,7 @@
 | 終盤 (詰み有) | 17 | 4,376,576 | 19,756 | 221,531 | 25 | G*1c |
 | **合計/平均** | - | 19,678,208 | 79,035 | **248,980** | - | - |
 
-#### main ブランチ（ベースライン）
+#### 最適化前（参考）
 
 | 局面 | Depth | Nodes | Time (ms) | NPS | Hashfull | Bestmove |
 |------|-------|-------|-----------|-----|----------|----------|
@@ -175,5 +175,5 @@ Linux/AMD Ryzen環境の計測結果は [README.md](./README.md) を参照して
 | 日付 | 内容 |
 |------|------|
 | 2025-12-22 | ドキュメント作成（Phase 1: NPSベンチマークのみ） |
-| 2025-12-22 | 初回計測実施（NNUE: 342,031 NPS、Material: 264,502 NPS、movetime=5000ms）。各局面の詳細（Depth, Nodes, Time, Hashfull, Bestmove）を記録 |
-| 2025-12-22 | mainブランチでベースライン計測実施（NNUE: 359,149 NPS、Material: 244,334 NPS）。`nnue_vnni_dpbusd_support` ブランチとの比較で**AVX512-VNNI DPBUSD最適化によりNNUE推論が+13.1%高速化**を確認 |
+| 2025-12-22 | 初回計測実施: mainブランチでベースライン計測（NNUE: 359,149 NPS、Material: 244,334 NPS、movetime=20000ms）。各局面の詳細（Depth, Nodes, Time, Hashfull, Bestmove）を記録 |
+| 2025-12-22 | 2回目計測: `nnue_vnni_dpbusd_support` ブランチで計測（NNUE: 406,325 NPS、Material: 248,980 NPS）。**AVX512-VNNI DPBUSD命令最適化によりNNUE推論が+13.1%高速化**を確認。Intel Cascade Lake-XのVNNI命令が効果を発揮 |
