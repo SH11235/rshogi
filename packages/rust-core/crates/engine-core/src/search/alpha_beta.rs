@@ -5,6 +5,7 @@
 //! - 静止探索 (Quiescence Search)
 //! - 各種枝刈り: NMP, LMR, Futility, Razoring, SEE, Singular Extension
 
+use std::ptr::NonNull;
 use std::sync::Arc;
 
 use crate::nnue::{evaluate, AccumulatorStack, DirtyPiece};
@@ -12,7 +13,7 @@ use crate::position::Position;
 use crate::search::PieceToHistory;
 use crate::tt::{ProbeResult, TTData, TranspositionTable};
 use crate::types::{
-    Bound, Color, Depth, Move, Piece, PieceType, Value, DEPTH_QS, DEPTH_UNSEARCHED, MAX_PLY,
+    Bound, Color, Depth, Move, Piece, PieceType, Square, Value, DEPTH_QS, DEPTH_UNSEARCHED, MAX_PLY,
 };
 
 use super::history::{
@@ -188,7 +189,8 @@ struct Step14Context<'a> {
     lmr_depth: i32,
     mover: Color,
     move_count: i32,
-    cont_tables: &'a [Option<&'a PieceToHistory>; 6],
+    cont_history_1: &'a PieceToHistory,
+    cont_history_2: &'a PieceToHistory,
 }
 
 // =============================================================================
@@ -211,6 +213,9 @@ pub struct SearchWorker {
     // =========================================================================
     /// 履歴/統計テーブル群
     pub history: Box<HistoryTables>,
+
+    /// ContinuationHistoryのsentinel（YaneuraOu方式）
+    pub cont_history_sentinel: NonNull<PieceToHistory>,
 
     // =========================================================================
     // 探索状態（毎回リセット）
@@ -273,10 +278,15 @@ impl SearchWorker {
     ///
     /// Box化してヒープに配置し、スタックオーバーフローを防ぐ。
     pub fn new(tt: Arc<TranspositionTable>, max_moves_to_draw: i32) -> Box<Self> {
-        Box::new(Self {
+        let history = HistoryTables::new_boxed();
+        let cont_history_sentinel =
+            NonNull::from(history.continuation_history[0][0].get_table(Piece::NONE, Square::SQ_11));
+
+        let mut worker = Box::new(Self {
             tt,
             // 履歴統計の初期化
-            history: HistoryTables::new_boxed(),
+            history,
+            cont_history_sentinel,
             // 探索状態の初期化
             root_moves: RootMoves::new(),
             stack: init_stack_array(),
@@ -292,7 +302,67 @@ impl SearchWorker {
             max_moves_to_draw,
             nmp_min_ply: 0,
             nnue_stack: AccumulatorStack::new(),
-        })
+        });
+        worker.reset_cont_history_ptrs();
+        worker
+    }
+
+    #[inline]
+    fn cont_history_ptr(&self, ply: i32, back: i32) -> NonNull<PieceToHistory> {
+        if ply >= back {
+            self.stack[(ply - back) as usize].cont_history_ptr
+        } else {
+            self.cont_history_sentinel
+        }
+    }
+
+    #[inline]
+    fn cont_history_ref(&self, ply: i32, back: i32) -> &PieceToHistory {
+        let ptr = self.cont_history_ptr(ply, back);
+        unsafe { ptr.as_ref() }
+    }
+
+    #[inline]
+    fn cont_history_tables(&self, ply: i32) -> [&PieceToHistory; 6] {
+        [
+            self.cont_history_ref(ply, 1),
+            self.cont_history_ref(ply, 2),
+            self.cont_history_ref(ply, 3),
+            self.cont_history_ref(ply, 4),
+            self.cont_history_ref(ply, 5),
+            self.cont_history_ref(ply, 6),
+        ]
+    }
+
+    fn reset_cont_history_ptrs(&mut self) {
+        let sentinel = self.cont_history_sentinel;
+        for stack in self.stack.iter_mut() {
+            stack.cont_history_ptr = sentinel;
+        }
+    }
+
+    #[inline]
+    fn set_cont_history_for_move(
+        &mut self,
+        ply: i32,
+        in_check: bool,
+        capture: bool,
+        piece: Piece,
+        to: Square,
+    ) {
+        let in_check_idx = in_check as usize;
+        let capture_idx = capture as usize;
+        let table =
+            self.history.continuation_history[in_check_idx][capture_idx].get_table(piece, to);
+        self.stack[ply as usize].cont_history_ptr = NonNull::from(table);
+        self.stack[ply as usize].cont_hist_key =
+            Some(ContHistKey::new(in_check, capture, piece, to));
+    }
+
+    #[inline]
+    fn clear_cont_history_for_null(&mut self, ply: i32) {
+        self.stack[ply as usize].cont_history_ptr = self.cont_history_sentinel;
+        self.stack[ply as usize].cont_hist_key = None;
     }
 
     /// usinewgameで呼び出し：全履歴をクリア（YaneuraOu Worker::clear()相当）
@@ -395,29 +465,6 @@ impl SearchWorker {
         }
 
         false
-    }
-
-    /// ContHistKeyからContinuationHistoryテーブルへの参照を構築（YaneuraOu方式）
-    ///
-    /// 過去1,2,3,4,5,6手分のContinuationHistoryテーブルへの参照を配列で返す。
-    /// plyが足りない場合やContHistKeyがない場合はNoneになる。
-    #[inline]
-    fn build_cont_tables(&self, ply: i32) -> [Option<&PieceToHistory>; 6] {
-        let mut tables: [Option<&PieceToHistory>; 6] = [None; 6];
-        for (idx, ply_back) in [1, 2, 3, 4, 5, 6].iter().enumerate() {
-            if ply >= *ply_back {
-                let prev_ply = (ply - *ply_back) as usize;
-                if let Some(key) = self.stack[prev_ply].cont_hist_key {
-                    let in_check_idx = key.in_check as usize;
-                    let capture_idx = key.capture as usize;
-                    tables[idx] = Some(
-                        self.history.continuation_history[in_check_idx][capture_idx]
-                            .get_table(key.piece, key.to),
-                    );
-                }
-            }
-        }
-        tables
     }
 
     /// 補正履歴から静的評価の補正値を算出（YaneuraOu準拠）
@@ -800,7 +847,7 @@ impl SearchWorker {
             // これにより再帰呼び出し先で連続NullMoveが禁止され、
             // continuation historyの不正参照を防ぐ
             self.stack[ply as usize].current_move = Move::NULL;
-            self.stack[ply as usize].cont_hist_key = None;
+            self.clear_cont_history_for_null(ply);
 
             pos.do_null_move();
             self.nnue_stack.push(DirtyPiece::new()); // null moveでは駒の移動なし
@@ -895,7 +942,7 @@ impl SearchWorker {
 
         // 固定長バッファに収集（借用チェッカーの制約回避）
         let probcut_moves = {
-            let cont_tables = self.build_cont_tables(ply);
+            let cont_tables = self.cont_history_tables(ply);
             let mp = MovePicker::new_probcut(
                 pos,
                 tt_ctx.mv,
@@ -925,10 +972,23 @@ impl SearchWorker {
                 continue;
             }
 
-            let dirty_piece = pos.do_move(mv, pos.gives_check(mv));
+            let gives_check = pos.gives_check(mv);
+            let is_capture = pos.is_capture(mv);
+            let cont_hist_piece = mv.moved_piece_after();
+            let cont_hist_to = mv.to();
+
+            self.stack[ply as usize].current_move = mv;
+            let dirty_piece = pos.do_move(mv, gives_check);
             self.nnue_stack.push(dirty_piece);
             self.nodes += 1;
             self.tt.prefetch(pos.key(), pos.side_to_move());
+            self.set_cont_history_for_move(
+                ply,
+                in_check,
+                is_capture,
+                cont_hist_piece,
+                cont_hist_to,
+            );
             let mut value = -self.qsearch::<{ NodeType::NonPV as u8 }>(
                 pos,
                 DEPTH_QS,
@@ -1018,7 +1078,7 @@ impl SearchWorker {
             tt_move = Move::NONE;
         }
 
-        let cont_tables = self.build_cont_tables(ply);
+        let cont_tables = self.cont_history_tables(ply);
         let mp = MovePicker::new(
             pos,
             tt_move,
@@ -1110,12 +1170,8 @@ impl SearchWorker {
                 }
             } else {
                 let mut history = 0;
-                if let Some(t0) = ctx.cont_tables[0] {
-                    history += t0.get(ctx.mv.moved_piece_after(), ctx.mv.to()) as i32;
-                }
-                if let Some(t1) = ctx.cont_tables[1] {
-                    history += t1.get(ctx.mv.moved_piece_after(), ctx.mv.to()) as i32;
-                }
+                history += ctx.cont_history_1.get(ctx.mv.moved_piece_after(), ctx.mv.to()) as i32;
+                history += ctx.cont_history_2.get(ctx.mv.moved_piece_after(), ctx.mv.to()) as i32;
                 history += self.history.pawn_history.get(
                     ctx.pos.pawn_history_index(),
                     ctx.mv.moved_piece_after(),
@@ -1253,6 +1309,11 @@ impl SearchWorker {
         let mut alpha = alpha;
         let mut best_value = Value::new(-32001);
         let mut pv_idx = 0;
+        let root_in_check = pos.in_check();
+
+        self.stack[0].in_check = root_in_check;
+        self.stack[0].cont_history_ptr = self.cont_history_sentinel;
+        self.stack[0].cont_hist_key = None;
 
         for rm_idx in 0..self.root_moves.len() {
             if self.check_abort(limits, time_manager) {
@@ -1264,6 +1325,9 @@ impl SearchWorker {
 
             let mv = self.root_moves[rm_idx].mv();
             let gives_check = pos.gives_check(mv);
+            let is_capture = pos.is_capture(mv);
+            let cont_hist_piece = mv.moved_piece_after();
+            let cont_hist_to = mv.to();
 
             let nodes_before = self.nodes;
 
@@ -1272,6 +1336,14 @@ impl SearchWorker {
             self.nnue_stack.push(dirty_piece);
             self.nodes += 1;
             self.tt.prefetch(pos.key(), pos.side_to_move());
+            self.stack[0].current_move = mv;
+            self.set_cont_history_for_move(
+                0,
+                root_in_check,
+                is_capture,
+                cont_hist_piece,
+                cont_hist_to,
+            );
 
             // PVS
             let value = if rm_idx == 0 {
@@ -1401,6 +1473,11 @@ impl SearchWorker {
         let mut alpha = alpha;
         let mut best_value = Value::new(-32001);
         let mut best_rm_idx = pv_idx;
+        let root_in_check = pos.in_check();
+
+        self.stack[0].in_check = root_in_check;
+        self.stack[0].cont_history_ptr = self.cont_history_sentinel;
+        self.stack[0].cont_hist_key = None;
 
         // pv_idx以降の手のみを探索
         for rm_idx in pv_idx..self.root_moves.len() {
@@ -1413,6 +1490,9 @@ impl SearchWorker {
 
             let mv = self.root_moves[rm_idx].mv();
             let gives_check = pos.gives_check(mv);
+            let is_capture = pos.is_capture(mv);
+            let cont_hist_piece = mv.moved_piece_after();
+            let cont_hist_to = mv.to();
 
             let nodes_before = self.nodes;
 
@@ -1421,6 +1501,14 @@ impl SearchWorker {
             self.nnue_stack.push(dirty_piece);
             self.nodes += 1;
             self.tt.prefetch(pos.key(), pos.side_to_move());
+            self.stack[0].current_move = mv;
+            self.set_cont_history_for_move(
+                0,
+                root_in_check,
+                is_capture,
+                cont_hist_piece,
+                cont_hist_to,
+            );
 
             // PVS: 最初の手（このPVラインの候補）はPV探索
             let value = if rm_idx == pv_idx {
@@ -1829,7 +1917,6 @@ impl SearchWorker {
                 r += 931;
             }
 
-            let cont_tables = self.build_cont_tables(ply);
             let lmr_depth = new_depth - r / 1024;
 
             let step14_ctx = Step14Context {
@@ -1847,7 +1934,8 @@ impl SearchWorker {
                 lmr_depth,
                 mover,
                 move_count,
-                cont_tables: &cont_tables,
+                cont_history_1: self.cont_history_ref(ply, 1),
+                cont_history_2: self.cont_history_ref(ply, 2),
             };
 
             match self.step14_pruning(step14_ctx) {
@@ -1901,10 +1989,15 @@ impl SearchWorker {
             // 評価計算などの間にメモリ待ちを隠蔽する
             self.tt.prefetch(pos.key(), pos.side_to_move());
 
-            // YaneuraOu方式: ContHistKeyを設定
+            // YaneuraOu方式: ContHistKey/ContinuationHistoryを設定
             // ⚠ in_checkは親ノードの王手状態を使用（gives_checkではない）
-            self.stack[ply as usize].cont_hist_key =
-                Some(ContHistKey::new(in_check, is_capture, cont_hist_piece, cont_hist_to));
+            self.set_cont_history_for_move(
+                ply,
+                in_check,
+                is_capture,
+                cont_hist_piece,
+                cont_hist_to,
+            );
 
             // 手の記録（YaneuraOu準拠: quietsSearched, capturesSearched）
             if is_capture {
@@ -1964,13 +2057,8 @@ impl SearchWorker {
             } else {
                 let moved_piece = mv.moved_piece_after();
                 let main_hist = self.history.main_history.get(mover, mv) as i32;
-                let cont_tables_for_stat = self.build_cont_tables(ply);
-                let cont0 = cont_tables_for_stat[0]
-                    .map(|t| t.get(moved_piece, mv.to()) as i32)
-                    .unwrap_or(0);
-                let cont1 = cont_tables_for_stat[1]
-                    .map(|t| t.get(moved_piece, mv.to()) as i32)
-                    .unwrap_or(0);
+                let cont0 = self.cont_history_ref(ply, 1).get(moved_piece, mv.to()) as i32;
+                let cont1 = self.cont_history_ref(ply, 2).get(moved_piece, mv.to()) as i32;
                 2 * main_hist + cont0 + cont1
             };
             self.stack[ply as usize].stat_score = stat_score;
@@ -2692,7 +2780,7 @@ impl SearchWorker {
         };
 
         let ordered_moves = {
-            let cont_tables = self.build_cont_tables(ply);
+            let cont_tables = self.cont_history_tables(ply);
             let mut buf_moves = OrderedMovesBuffer::new();
 
             {
@@ -2804,21 +2892,12 @@ impl SearchWorker {
                         continue;
                     }
                 }
-
                 if !capture {
                     let mut cont_score = 0;
 
-                    // ss-1の参照
-                    if ply >= 1 {
-                        if let Some(key) = self.stack[(ply - 1) as usize].cont_hist_key {
-                            let in_check_idx = key.in_check as usize;
-                            let capture_idx = key.capture as usize;
-                            cont_score += self.history.continuation_history[in_check_idx]
-                                [capture_idx]
-                                .get(key.piece, key.to, mv.moved_piece_after(), mv.to())
-                                as i32;
-                        }
-                    }
+                    // ss-1の参照（ContinuationHistory直結）
+                    cont_score +=
+                        self.cont_history_ref(ply, 1).get(mv.moved_piece_after(), mv.to()) as i32;
 
                     let pawn_idx = pos.pawn_history_index();
                     cont_score +=
@@ -2843,8 +2922,7 @@ impl SearchWorker {
             self.nodes += 1;
             self.tt.prefetch(pos.key(), pos.side_to_move());
 
-            self.stack[ply as usize].cont_hist_key =
-                Some(ContHistKey::new(in_check, capture, cont_hist_pc, cont_hist_to));
+            self.set_cont_history_for_move(ply, in_check, capture, cont_hist_pc, cont_hist_to);
 
             let value =
                 -self.qsearch::<NT>(pos, depth - 1, -beta, -alpha, ply + 1, limits, time_manager);
@@ -2901,6 +2979,10 @@ impl SearchWorker {
         best_value
     }
 }
+
+// SearchWorkerは専用スレッドへmoveして使う前提。
+// cont_history_ptrはself.history内への参照で、move後も参照先は不変なためSendとして安全。
+unsafe impl Send for SearchWorker {}
 
 // =============================================================================
 // テスト
