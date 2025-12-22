@@ -1,6 +1,6 @@
 import { createWasmEngineClient } from "@shogi/engine-wasm";
 import type { EngineOption } from "@shogi/ui";
-import { EngineControlPanel, PlaygroundPage, ShogiMatch } from "@shogi/ui";
+import { EngineControlPanel, ShogiMatch } from "@shogi/ui";
 
 const createEngineClient = () =>
     createWasmEngineClient({
@@ -15,14 +15,10 @@ const panelEngine = createEngineClient();
 
 function App() {
     return (
-        <PlaygroundPage
-            eyebrow="Web / Wasm"
-            summary="盤 UI とエンジン操作をひとまとめにしたデバッグページ。Wasm エンジンを startpos から動かしつつ、手入力や棋譜入出力を試せます。"
-            note="同じ UI を Desktop でも再利用できるよう構成しています。"
-        >
+        <main className="mx-auto flex max-w-[1100px] flex-col gap-[14px] px-5 pb-[72px] pt-6">
             <ShogiMatch engineOptions={engineOptions} />
             <EngineControlPanel engine={panelEngine} />
-        </PlaygroundPage>
+        </main>
     );
 }
 
