@@ -37,6 +37,11 @@ diagnostics = []
 # YaneuraOu DEEP相当のデフォルト遅延設定を使う
 # GPU/ネットワーク待ちが長い環境向けの遅延マージン(400/1400ms)プリセットを有効化する
 deep = []
+# 大会用ビルド: Material評価を削除し、NNUEを必須とする
+# - Material評価コードを完全に削除（バイナリサイズ削減）
+# - NNUEがロードされていない場合はパニック
+# - Wasm buildでも使用可能
+tournament = []
 
 [lib]
 name = "engine_core"

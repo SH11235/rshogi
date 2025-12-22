@@ -10,6 +10,9 @@ description = "Wasm bindings for the shogi engine core"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+# TODO: NNUEファイルの準備が整ったら、tournamentフィーチャーを有効化して
+#       Material評価コードを削除し、バイナリサイズを削減する
+#       engine-core = { path = "../engine-core", features = ["tournament"] }
 engine-core = { path = "../engine-core" }
 wasm-bindgen = { version = "0.2.106", features = ["serde-serialize"] }
 js-sys = "0.3.83"

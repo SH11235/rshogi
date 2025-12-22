@@ -508,6 +508,9 @@ fn eval_lv7_like(
 }
 
 /// Material評価（NNUE未初期化時のフォールバック）
+///
+/// tournamentビルドではこの関数は削除される（NNUEが必須）
+#[cfg(not(feature = "tournament"))]
 pub fn evaluate_material(pos: &Position) -> Value {
     let level = get_material_level();
     let raw = match level {
@@ -548,6 +551,7 @@ mod tests {
     use crate::position::SFEN_HIRATE;
 
     #[test]
+    #[cfg(not(feature = "tournament"))]
     fn test_material_eval_hirate() {
         let mut pos = Position::new();
         pos.set_sfen(SFEN_HIRATE).unwrap();
