@@ -91,6 +91,9 @@
 - Rust toolchain (`rustup` でインストール)
 - NNUEファイル（`.bin`形式）
 
+> **注意**: `--nnue-file` にはNNUEファイルのパスを指定してください。
+> ファイルの配置場所は環境によって異なります（例: `./memo/nn.bin`）。
+
 ### ベンチマーク実行（NPS計測）
 
 PowerShellまたはコマンドプロンプトで実行:
@@ -158,7 +161,7 @@ vtune -report hotspots -result-dir vtune_results -format text -report-output hot
 
 ## Linux/AMD環境との比較
 
-Linux/AMD Ryzen環境の計測結果は [README.md](./README.md) を参照してください。
+Linux/AMD Ryzen環境の計測結果（ベンチマーク結果とホットスポット分析）は [README.md](./README.md) を参照してください。
 
 ### アーキテクチャ間で注目すべき差異
 
