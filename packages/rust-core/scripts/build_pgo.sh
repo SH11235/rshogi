@@ -14,14 +14,29 @@
 #
 # 期待される効果: NPS +10-15%
 
-set -e
+set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# 設定
-PGO_DATA_DIR="/tmp/pgo-data"
+# 設定（ユーザー固有のディレクトリを使用）
+PGO_DATA_DIR="${TMPDIR:-/tmp}/pgo-data-${USER:-$(id -un)}"
 PROFILE_FILE="$PGO_DATA_DIR/merged.profdata"
 VERIFY=false
+
+# 安全なディレクトリ削除
+safe_rm_dir() {
+    local dir="$1"
+    if [ -z "$dir" ] || [ "$dir" = "/" ] || [ "$dir" = "$HOME" ]; then
+        echo "Error: Invalid directory path: $dir"
+        exit 1
+    fi
+    if [ -d "$dir" ]; then
+        rm -rf "$dir"
+        echo "Removed: $dir"
+    else
+        echo "Directory does not exist: $dir"
+    fi
+}
 
 # 引数解析
 while [[ $# -gt 0 ]]; do
@@ -32,8 +47,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --clean)
             echo "=== Cleaning PGO data ==="
-            rm -rf "$PGO_DATA_DIR"
-            echo "Removed: $PGO_DATA_DIR"
+            safe_rm_dir "$PGO_DATA_DIR"
             exit 0
             ;;
         -h|--help)
@@ -55,8 +69,8 @@ done
 find_llvm_profdata() {
     # Rust toolchain内のllvm-profdataを探す
     local profdata
-    profdata=$(find ~/.rustup -name "llvm-profdata" 2>/dev/null | head -1)
-    if [ -n "$profdata" ] && [ -x "$profdata" ]; then
+    profdata=$(find "$HOME/.rustup" -name "llvm-profdata" -type f -executable 2>/dev/null | head -1)
+    if [ -n "$profdata" ]; then
         echo "$profdata"
         return 0
     fi
@@ -93,26 +107,51 @@ echo ""
 
 # Step 1: プロファイル収集用ビルド
 echo "=== Step 1/4: Building with profile generation ==="
-rm -rf "$PGO_DATA_DIR"
+safe_rm_dir "$PGO_DATA_DIR"
 mkdir -p "$PGO_DATA_DIR"
-cargo clean
 
-RUSTFLAGS="-C target-cpu=native -C profile-generate=$PGO_DATA_DIR" \
-    cargo build --release 2>&1 | tail -5
+echo "Cleaning previous build artifacts..."
+if ! cargo clean 2>&1; then
+    echo "Warning: cargo clean failed, but continuing..."
+fi
+
+echo "Building with profile generation..."
+if ! RUSTFLAGS="-C target-cpu=native -C profile-generate=$PGO_DATA_DIR" \
+    cargo build --release 2>&1 | tail -5; then
+    echo "Error: Profile generation build failed"
+    exit 1
+fi
 
 echo ""
 
 # Step 2: プロファイル収集
 echo "=== Step 2/4: Collecting profile data ==="
+
+# ベンチマークバイナリの存在確認
+if [ ! -x ./target/release/benchmark ]; then
+    echo "Error: Benchmark binary not found or not executable"
+    exit 1
+fi
+
 echo "Running benchmark to collect profile..."
-./target/release/benchmark 2>&1 | grep -E "(Threads|Avg NPS|---|^[0-9])"
+if ! ./target/release/benchmark 2>&1 | grep -E "(Threads|Avg NPS|---|^[0-9])"; then
+    echo "Error: Benchmark execution failed"
+    echo "Profile data may be incomplete. Aborting PGO build."
+    exit 1
+fi
 
 echo ""
 
 # Step 3: プロファイルマージ
 echo "=== Step 3/4: Merging profile data ==="
-PROFRAW_COUNT=$(ls -1 "$PGO_DATA_DIR"/*.profraw 2>/dev/null | wc -l)
+PROFRAW_COUNT=$(find "$PGO_DATA_DIR" -name "*.profraw" 2>/dev/null | wc -l)
 echo "Found $PROFRAW_COUNT profile files"
+
+if [ "$PROFRAW_COUNT" -eq 0 ]; then
+    echo "Error: No profile data collected (.profraw files not found)"
+    echo "This may indicate that the benchmark did not run successfully."
+    exit 1
+fi
 
 "$LLVM_PROFDATA" merge -o "$PROFILE_FILE" "$PGO_DATA_DIR"/*.profraw
 PROFILE_SIZE=$(ls -lh "$PROFILE_FILE" | awk '{print $5}')
@@ -122,10 +161,18 @@ echo ""
 
 # Step 4: PGO適用ビルド
 echo "=== Step 4/4: Building with PGO ==="
-cargo clean
 
-RUSTFLAGS="-C target-cpu=native -C profile-use=$PROFILE_FILE" \
-    cargo build --release 2>&1 | tail -5
+echo "Cleaning for PGO build..."
+if ! cargo clean 2>&1; then
+    echo "Warning: cargo clean failed, but continuing..."
+fi
+
+echo "Building with PGO profile..."
+if ! RUSTFLAGS="-C target-cpu=native -C profile-use=$PROFILE_FILE" \
+    cargo build --release 2>&1 | tail -5; then
+    echo "Error: PGO build failed"
+    exit 1
+fi
 
 echo ""
 echo "=============================================="
