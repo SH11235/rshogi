@@ -73,7 +73,24 @@ export function ClockDisplayPanel({ clocks, sides }: ClockDisplayPanelProps): Re
 
     return (
         <div style={baseCard}>
-            <div style={{ fontWeight: 700, marginBottom: "6px" }}>時計</div>
+            <div
+                style={{
+                    display: "flex",
+                    alignItems: "baseline",
+                    gap: "8px",
+                    marginBottom: "6px",
+                }}
+            >
+                <span style={{ fontWeight: 700 }}>持時間</span>
+                <span
+                    style={{
+                        fontSize: "11px",
+                        color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                    }}
+                >
+                    持ち時間 + 秒読み
+                </span>
+            </div>
             <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                 {renderClock("sente")}
                 {renderClock("gote")}
