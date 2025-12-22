@@ -135,11 +135,8 @@ impl Position {
     /// 指し手で動いた後の駒（成り後・打ち駒を含む）を取得
     #[inline]
     pub fn moved_piece_after_move(&self, m: Move) -> Piece {
-        if m.has_piece_info() {
-            m.moved_piece_after()
-        } else {
-            self.moved_piece(m)
-        }
+        debug_assert!(m.has_piece_info(), "Move must carry piece info");
+        m.moved_piece_after()
     }
 
     /// 取る手または成る手かどうか

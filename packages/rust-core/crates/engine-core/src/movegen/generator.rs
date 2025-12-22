@@ -370,6 +370,7 @@ fn generate_king_moves(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuf
     let king_sq = pos.king_square(us);
 
     let attacks = king_effect(king_sq) & target;
+    // 玉の駒情報（指し手に付加するため）
     let moved_pc = pos.piece_on(king_sq);
     for to in attacks.iter() {
         add_move(buffer, Move::new_move_with_piece(king_sq, to, false, moved_pc));
@@ -558,9 +559,11 @@ fn generate_evasions_with_promos(
     // 玉の移動先（自駒でなく、王手駒の利きでもない場所）
     let king_targets = king_effect(king_sq) & !pos.pieces_c(us) & !checker_attacks;
 
+    // 玉の駒情報（王手回避手に付加するため）
+    let moved_pc = pos.piece_on(king_sq);
     for to in king_targets.iter() {
         // 移動先に敵の利きがないかは後でis_legalでチェック
-        add_move(buffer, Move::new_move(king_sq, to, false));
+        add_move(buffer, Move::new_move_with_piece(king_sq, to, false, moved_pc));
     }
 
     // 両王手なら玉移動のみ
@@ -1040,6 +1043,11 @@ mod tests {
         // 初期局面の合法手は30手
         // ただしpseudo-legalなので多めに生成される可能性あり
         assert!(count >= 30, "Generated {count} moves");
+
+        // すべての生成手がpiece情報を持つことを検証
+        for ext in buffer.as_slice().iter().take(count) {
+            assert!(ext.mv.has_piece_info(), "生成手はpiece情報を持つ必要がある: {:?}", ext.mv);
+        }
     }
 
     #[test]
@@ -1052,6 +1060,11 @@ mod tests {
 
         // 初期局面の合法手は30手
         assert_eq!(list.len(), 30, "Generated {} legal moves", list.len());
+
+        // すべての合法手がpiece情報を持つことを検証
+        for mv in list.iter() {
+            assert!(mv.has_piece_info(), "合法手はpiece情報を持つ必要がある: {:?}", mv);
+        }
     }
 
     #[test]
@@ -1133,6 +1146,7 @@ mod tests {
 
         for ext in buffer.as_slice().iter().take(count) {
             assert!(pos.is_legal(ext.mv), "王手回避の生成には自殺手を含めない: {:?}", ext.mv);
+            assert!(ext.mv.has_piece_info(), "王手回避手はpiece情報を持つ必要がある: {:?}", ext.mv);
         }
     }
 
@@ -1155,6 +1169,7 @@ mod tests {
         for ext in buf.iter() {
             assert_eq!(ext.mv.from(), from);
             assert!(pos.gives_check(ext.mv), "非チェック手が混入: {:?}", ext.mv);
+            assert!(ext.mv.has_piece_info(), "王手生成手はpiece情報を持つ必要がある: {:?}", ext.mv);
         }
     }
 
