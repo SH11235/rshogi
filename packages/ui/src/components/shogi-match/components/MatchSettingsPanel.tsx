@@ -179,102 +179,88 @@ export function MatchSettingsPanel({
 
     return (
         <Collapsible open={isOpen} onOpenChange={onOpenChange}>
-            <CollapsibleTrigger asChild>
-                <button
-                    type="button"
-                    aria-label="対局設定パネルを開閉"
-                    style={{
-                        width: "100%",
-                        padding: "8px 12px",
-                        background: "hsl(var(--secondary))",
-                        border: "1px solid hsl(var(--border, 0 0% 86%))",
-                        borderRadius: "8px",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        gap: "8px",
-                        cursor: "pointer",
-                        fontSize: "14px",
-                        fontWeight: 600,
-                    }}
-                >
-                    <span style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                        <span>対局設定</span>
+            <div
+                style={{
+                    background: "hsl(var(--wafuu-washi-warm))",
+                    border: "2px solid hsl(var(--wafuu-border))",
+                    borderRadius: "12px",
+                    overflow: "hidden",
+                    boxShadow: "0 8px 20px rgba(0,0,0,0.08)",
+                }}
+            >
+                <CollapsibleTrigger asChild>
+                    <button
+                        type="button"
+                        aria-label="対局設定パネルを開閉"
+                        style={{
+                            width: "100%",
+                            padding: "14px 16px",
+                            background:
+                                "linear-gradient(135deg, hsl(var(--wafuu-washi)) 0%, hsl(var(--wafuu-washi-warm)) 100%)",
+                            border: "none",
+                            borderBottom: isOpen ? "1px solid hsl(var(--wafuu-border))" : "none",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: "12px",
+                            cursor: "pointer",
+                            transition: "all 0.2s ease",
+                        }}
+                    >
+                        <span style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                            <span
+                                style={{
+                                    fontSize: "18px",
+                                    fontWeight: 700,
+                                    color: "hsl(var(--wafuu-sumi))",
+                                    letterSpacing: "0.05em",
+                                }}
+                            >
+                                対局設定
+                            </span>
+                            <span
+                                style={{
+                                    fontSize: "14px",
+                                    fontWeight: 600,
+                                    color: "hsl(var(--wafuu-kincha))",
+                                }}
+                            >
+                                {summary}
+                            </span>
+                        </span>
                         <span
                             style={{
-                                fontSize: "13px",
-                                fontWeight: 500,
-                                color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                                fontSize: "20px",
+                                color: "hsl(var(--wafuu-kincha))",
+                                transform: isOpen ? "rotate(180deg)" : "rotate(0deg)",
+                                transition: "transform 0.2s ease",
+                                flexShrink: 0,
                             }}
                         >
-                            {summary}
+                            ▼
                         </span>
-                    </span>
-                    <span
-                        style={{
-                            transform: isOpen ? "rotate(180deg)" : "rotate(0deg)",
-                            transition: "transform 0.2s ease",
-                            flexShrink: 0,
-                        }}
-                    >
-                        ▼
-                    </span>
-                </button>
-            </CollapsibleTrigger>
-            <CollapsibleContent>
-                <div
-                    style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: "10px",
-                        paddingTop: "10px",
-                    }}
-                >
-                    {settingsLocked ? (
-                        <div
-                            style={{
-                                fontSize: "12px",
-                                color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                            }}
-                        >
-                            対局中は設定を変更できません。停止すると編集できます。
-                        </div>
-                    ) : null}
-                    <label
-                        style={{
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: "4px",
-                            fontSize: "13px",
-                        }}
-                    >
-                        手番（開始時にどちらが指すか）
-                        <select
-                            value={currentTurn}
-                            onChange={(e) => onTurnChange(e.target.value as Player)}
-                            disabled={settingsLocked}
-                            style={{
-                                padding: "8px",
-                                borderRadius: "8px",
-                                border: "1px solid hsl(var(--border, 0 0% 86%))",
-                            }}
-                        >
-                            <option value="sente">先手</option>
-                            <option value="gote">後手</option>
-                        </select>
-                    </label>
-                    {sideSelector("sente")}
-                    {sideSelector("gote")}
-
+                    </button>
+                </CollapsibleTrigger>
+                <CollapsibleContent>
                     <div
                         style={{
-                            display: "grid",
-                            gridTemplateColumns: "1fr 1fr",
-                            gap: "8px",
+                            padding: "16px",
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "14px",
                         }}
                     >
+                        {settingsLocked ? (
+                            <div
+                                style={{
+                                    fontSize: "12px",
+                                    color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                                }}
+                            >
+                                対局中は設定を変更できません。停止すると編集できます。
+                            </div>
+                        ) : null}
                         <label
-                            htmlFor="sente-main"
                             style={{
                                 display: "flex",
                                 flexDirection: "column",
@@ -282,104 +268,139 @@ export function MatchSettingsPanel({
                                 fontSize: "13px",
                             }}
                         >
-                            先手 持ち時間 (ms)
-                            <Input
-                                id="sente-main"
-                                type="number"
-                                value={timeSettings.sente.mainMs}
+                            手番（開始時にどちらが指すか）
+                            <select
+                                value={currentTurn}
+                                onChange={(e) => onTurnChange(e.target.value as Player)}
                                 disabled={settingsLocked}
-                                onChange={(e) =>
-                                    onTimeSettingsChange({
-                                        ...timeSettings,
-                                        sente: {
-                                            ...timeSettings.sente,
-                                            mainMs: Number(e.target.value),
-                                        },
-                                    })
-                                }
-                            />
+                                style={{
+                                    padding: "8px",
+                                    borderRadius: "8px",
+                                    border: "1px solid hsl(var(--border, 0 0% 86%))",
+                                }}
+                            >
+                                <option value="sente">先手</option>
+                                <option value="gote">後手</option>
+                            </select>
                         </label>
-                        <label
-                            htmlFor="sente-byoyomi"
+                        {sideSelector("sente")}
+                        {sideSelector("gote")}
+
+                        <div
                             style={{
-                                display: "flex",
-                                flexDirection: "column",
-                                gap: "4px",
-                                fontSize: "13px",
+                                display: "grid",
+                                gridTemplateColumns: "1fr 1fr",
+                                gap: "8px",
                             }}
                         >
-                            先手 秒読み (ms)
-                            <Input
-                                id="sente-byoyomi"
-                                type="number"
-                                value={timeSettings.sente.byoyomiMs}
-                                disabled={settingsLocked}
-                                onChange={(e) =>
-                                    onTimeSettingsChange({
-                                        ...timeSettings,
-                                        sente: {
-                                            ...timeSettings.sente,
-                                            byoyomiMs: Number(e.target.value),
-                                        },
-                                    })
-                                }
-                            />
-                        </label>
-                        <label
-                            htmlFor="gote-main"
-                            style={{
-                                display: "flex",
-                                flexDirection: "column",
-                                gap: "4px",
-                                fontSize: "13px",
-                            }}
-                        >
-                            後手 持ち時間 (ms)
-                            <Input
-                                id="gote-main"
-                                type="number"
-                                value={timeSettings.gote.mainMs}
-                                disabled={settingsLocked}
-                                onChange={(e) =>
-                                    onTimeSettingsChange({
-                                        ...timeSettings,
-                                        gote: {
-                                            ...timeSettings.gote,
-                                            mainMs: Number(e.target.value),
-                                        },
-                                    })
-                                }
-                            />
-                        </label>
-                        <label
-                            htmlFor="gote-byoyomi"
-                            style={{
-                                display: "flex",
-                                flexDirection: "column",
-                                gap: "4px",
-                                fontSize: "13px",
-                            }}
-                        >
-                            後手 秒読み (ms)
-                            <Input
-                                id="gote-byoyomi"
-                                type="number"
-                                value={timeSettings.gote.byoyomiMs}
-                                disabled={settingsLocked}
-                                onChange={(e) =>
-                                    onTimeSettingsChange({
-                                        ...timeSettings,
-                                        gote: {
-                                            ...timeSettings.gote,
-                                            byoyomiMs: Number(e.target.value),
-                                        },
-                                    })
-                                }
-                            />
-                        </label>
+                            <label
+                                htmlFor="sente-main"
+                                style={{
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    gap: "4px",
+                                    fontSize: "13px",
+                                }}
+                            >
+                                先手 持ち時間 (ms)
+                                <Input
+                                    id="sente-main"
+                                    type="number"
+                                    value={timeSettings.sente.mainMs}
+                                    disabled={settingsLocked}
+                                    onChange={(e) =>
+                                        onTimeSettingsChange({
+                                            ...timeSettings,
+                                            sente: {
+                                                ...timeSettings.sente,
+                                                mainMs: Number(e.target.value),
+                                            },
+                                        })
+                                    }
+                                />
+                            </label>
+                            <label
+                                htmlFor="sente-byoyomi"
+                                style={{
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    gap: "4px",
+                                    fontSize: "13px",
+                                }}
+                            >
+                                先手 秒読み (ms)
+                                <Input
+                                    id="sente-byoyomi"
+                                    type="number"
+                                    value={timeSettings.sente.byoyomiMs}
+                                    disabled={settingsLocked}
+                                    onChange={(e) =>
+                                        onTimeSettingsChange({
+                                            ...timeSettings,
+                                            sente: {
+                                                ...timeSettings.sente,
+                                                byoyomiMs: Number(e.target.value),
+                                            },
+                                        })
+                                    }
+                                />
+                            </label>
+                            <label
+                                htmlFor="gote-main"
+                                style={{
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    gap: "4px",
+                                    fontSize: "13px",
+                                }}
+                            >
+                                後手 持ち時間 (ms)
+                                <Input
+                                    id="gote-main"
+                                    type="number"
+                                    value={timeSettings.gote.mainMs}
+                                    disabled={settingsLocked}
+                                    onChange={(e) =>
+                                        onTimeSettingsChange({
+                                            ...timeSettings,
+                                            gote: {
+                                                ...timeSettings.gote,
+                                                mainMs: Number(e.target.value),
+                                            },
+                                        })
+                                    }
+                                />
+                            </label>
+                            <label
+                                htmlFor="gote-byoyomi"
+                                style={{
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    gap: "4px",
+                                    fontSize: "13px",
+                                }}
+                            >
+                                後手 秒読み (ms)
+                                <Input
+                                    id="gote-byoyomi"
+                                    type="number"
+                                    value={timeSettings.gote.byoyomiMs}
+                                    disabled={settingsLocked}
+                                    onChange={(e) =>
+                                        onTimeSettingsChange({
+                                            ...timeSettings,
+                                            gote: {
+                                                ...timeSettings.gote,
+                                                byoyomiMs: Number(e.target.value),
+                                            },
+                                        })
+                                    }
+                                />
+                            </label>
+                        </div>
                     </div>
-                </div>
-            </CollapsibleContent>
+                </CollapsibleContent>
+            </div>
         </Collapsible>
     );
 }
