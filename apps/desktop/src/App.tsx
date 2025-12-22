@@ -1,6 +1,6 @@
 import { createTauriEngineClient, getLegalMoves } from "@shogi/engine-tauri";
 import type { EngineOption } from "@shogi/ui";
-import { EngineControlPanel, PlaygroundPage, ShogiMatch } from "@shogi/ui";
+import { EngineControlPanel, ShogiMatch } from "@shogi/ui";
 
 const createEngineClient = () =>
     createTauriEngineClient({
@@ -17,16 +17,13 @@ const panelEngine = createEngineClient();
 
 function App() {
     return (
-        <PlaygroundPage
-            eyebrow="Desktop / Tauri"
-            summary="Tauri で内蔵エンジンと盤 UI の動作を確認する画面です。"
-        >
+        <main className="mx-auto flex max-w-[1100px] flex-col gap-[14px] px-5 pb-[72px] pt-6">
             <ShogiMatch
                 engineOptions={engineOptions}
                 fetchLegalMoves={(sfen, moves) => getLegalMoves({ sfen, moves })}
             />
             <EngineControlPanel engine={panelEngine} />
-        </PlaygroundPage>
+        </main>
     );
 }
 
