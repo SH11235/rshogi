@@ -12,7 +12,7 @@ cargo build -p engine-usi
 echo ""
 echo "=== Running perf record (3 seconds, debug build is slower) ==="
 echo -e "isready\nposition startpos\ngo movetime 3000\nquit" | \
-    sudo perf record -g --call-graph dwarf -o perf_debug.data ./target/debug/engine-usi
+    sudo perf record -g --call-graph fp -o perf_debug.data ./target/debug/engine-usi
 
 # 結果をファイルに保存
 OUTPUT_DIR="./perf_results"

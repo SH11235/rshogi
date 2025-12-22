@@ -17,14 +17,12 @@ use crate::types::{
 
 use super::history::{
     capture_malus, continuation_history_bonus_with_offset, low_ply_history_bonus,
-    pawn_history_bonus, quiet_malus, stat_bonus, ButterflyHistory, CapturePieceToHistory,
-    ContinuationHistory, CorrectionHistory, LowPlyHistory, PawnHistory,
+    pawn_history_bonus, quiet_malus, stat_bonus, HistoryTables,
     CONTINUATION_HISTORY_NEAR_PLY_OFFSET, CONTINUATION_HISTORY_WEIGHTS, CORRECTION_HISTORY_LIMIT,
     CORRECTION_HISTORY_SIZE, LOW_PLY_HISTORY_SIZE, PRIOR_CAPTURE_COUNTERMOVE_BONUS,
     TT_MOVE_HISTORY_BONUS, TT_MOVE_HISTORY_MALUS,
 };
 use super::movepicker::piece_value;
-use super::tt_history::TTMoveHistory;
 use super::types::{
     draw_value, init_stack_array, value_from_tt, value_to_tt, ContHistKey, NodeType,
     OrderedMovesBuffer, RootMoves, SearchedMoveList, StackArray,
@@ -208,39 +206,11 @@ pub struct SearchWorker {
     // =========================================================================
     // 履歴統計（YaneuraOu準拠: 直接メンバとして保持）
     // =========================================================================
-    // 注: YaneuraOuでは全履歴テーブルがWorker内に直接配列として配置されているが、
-    // Rustでは巨大な配列（数MB規模）の初期化でスタックオーバーフローが発生するため、
-    // 一部のテーブル（CapturePieceToHistory, ContinuationHistory, PawnHistory,
-    // CorrectionHistory）は内部でBox/Vecを使用してヒープに配置している。
-    //
-    // この間接参照（1回のポインタ追跡）によるパフォーマンス影響は軽微と考えられる：
-    // - 履歴テーブルは数MB規模でL1/L2キャッシュに収まらない
-    // - キャッシュミスのコスト（100-300サイクル）に比べ間接参照（1-3サイクル）は誤差レベル
-    //
-    // PERF: 将来の最適化候補
-    // - MaybeUninit + Box::new_zeroed()で直接ヒープ構築（間接参照を1段削減）
-    // - カスタムアロケータでメモリレイアウト最適化
+    // HistoryTablesを単一のヒープ領域として確保し、履歴テーブルを連続配置する。
+    // `Box::new_zeroed` で一括確保することで、巨大配列のスタック確保を避ける。
     // =========================================================================
-    /// 基本的な指し手の履歴（from-to）
-    pub main_history: ButterflyHistory,
-
-    /// 浅いply用の履歴
-    pub low_ply_history: LowPlyHistory,
-
-    /// 捕獲手の履歴
-    pub capture_history: CapturePieceToHistory,
-
-    /// 継続履歴 [inCheck][captureStage]
-    pub continuation_history: [[ContinuationHistory; 2]; 2],
-
-    /// 歩形状の履歴
-    pub pawn_history: PawnHistory,
-
-    /// 補正履歴
-    pub correction_history: CorrectionHistory,
-
-    /// TT手の履歴
-    pub tt_move_history: TTMoveHistory,
+    /// 履歴/統計テーブル群
+    pub history: Box<HistoryTables>,
 
     // =========================================================================
     // 探索状態（毎回リセット）
@@ -306,13 +276,7 @@ impl SearchWorker {
         Box::new(Self {
             tt,
             // 履歴統計の初期化
-            main_history: ButterflyHistory::new(),
-            low_ply_history: LowPlyHistory::new(),
-            capture_history: CapturePieceToHistory::new(),
-            continuation_history: Default::default(),
-            pawn_history: PawnHistory::new(),
-            correction_history: CorrectionHistory::new(),
-            tt_move_history: TTMoveHistory::new(),
+            history: HistoryTables::new_boxed(),
             // 探索状態の初期化
             root_moves: RootMoves::new(),
             stack: init_stack_array(),
@@ -333,17 +297,7 @@ impl SearchWorker {
 
     /// usinewgameで呼び出し：全履歴をクリア（YaneuraOu Worker::clear()相当）
     pub fn clear(&mut self) {
-        self.main_history.clear();
-        self.low_ply_history.clear();
-        self.capture_history.clear();
-        for row in &mut self.continuation_history {
-            for ch in row {
-                ch.clear();
-            }
-        }
-        self.pawn_history.clear();
-        self.correction_history.clear();
-        self.tt_move_history.clear();
+        self.history.clear();
     }
 
     /// goで呼び出し：探索状態のリセット（履歴はクリアしない、YaneuraOu準拠）
@@ -359,7 +313,7 @@ impl SearchWorker {
         self.nmp_min_ply = 0;
         self.root_moves.clear();
         // YaneuraOu準拠: low_ply_historyのみクリア
-        self.low_ply_history.clear();
+        self.history.low_ply_history.clear();
         // NNUE AccumulatorStackをリセット
         self.nnue_stack.reset();
     }
@@ -457,7 +411,7 @@ impl SearchWorker {
                     let in_check_idx = key.in_check as usize;
                     let capture_idx = key.capture as usize;
                     tables[idx] = Some(
-                        self.continuation_history[in_check_idx][capture_idx]
+                        self.history.continuation_history[in_check_idx][capture_idx]
                             .get_table(key.piece, key.to),
                     );
                 }
@@ -477,10 +431,12 @@ impl SearchWorker {
         let non_pawn_idx_b =
             (pos.non_pawn_key(Color::Black) as usize) & (CORRECTION_HISTORY_SIZE - 1);
 
-        let pcv = self.correction_history.pawn_value(pawn_idx, us) as i32;
-        let micv = self.correction_history.minor_value(minor_idx, us) as i32;
-        let wnpcv = self.correction_history.non_pawn_value(non_pawn_idx_w, Color::White, us) as i32;
-        let bnpcv = self.correction_history.non_pawn_value(non_pawn_idx_b, Color::Black, us) as i32;
+        let pcv = self.history.correction_history.pawn_value(pawn_idx, us) as i32;
+        let micv = self.history.correction_history.minor_value(minor_idx, us) as i32;
+        let wnpcv =
+            self.history.correction_history.non_pawn_value(non_pawn_idx_w, Color::White, us) as i32;
+        let bnpcv =
+            self.history.correction_history.non_pawn_value(non_pawn_idx_b, Color::Black, us) as i32;
 
         let mut cntcv = 0;
         if ply >= 2 {
@@ -488,7 +444,7 @@ impl SearchWorker {
             if prev_move.is_some() {
                 if let Some(prev2_key) = self.stack[(ply - 2) as usize].cont_hist_key {
                     let pc = pos.piece_on(prev_move.to());
-                    cntcv = self.correction_history.continuation_value(
+                    cntcv = self.history.correction_history.continuation_value(
                         prev2_key.piece,
                         prev2_key.to,
                         pc,
@@ -514,15 +470,15 @@ impl SearchWorker {
 
         const NON_PAWN_WEIGHT: i32 = 165;
 
-        self.correction_history.update_pawn(pawn_idx, us, bonus);
-        self.correction_history.update_minor(minor_idx, us, bonus * 153 / 128);
-        self.correction_history.update_non_pawn(
+        self.history.correction_history.update_pawn(pawn_idx, us, bonus);
+        self.history.correction_history.update_minor(minor_idx, us, bonus * 153 / 128);
+        self.history.correction_history.update_non_pawn(
             non_pawn_idx_w,
             Color::White,
             us,
             bonus * NON_PAWN_WEIGHT / 128,
         );
-        self.correction_history.update_non_pawn(
+        self.history.correction_history.update_non_pawn(
             non_pawn_idx_b,
             Color::Black,
             us,
@@ -534,7 +490,7 @@ impl SearchWorker {
             if prev_move.is_some() {
                 if let Some(prev2_key) = self.stack[(ply - 2) as usize].cont_hist_key {
                     let pc = pos.piece_on(prev_move.to());
-                    self.correction_history.update_continuation(
+                    self.history.correction_history.update_continuation(
                         prev2_key.piece,
                         prev2_key.to,
                         pc,
@@ -944,11 +900,11 @@ impl SearchWorker {
                 pos,
                 tt_ctx.mv,
                 threshold,
-                &self.main_history,
-                &self.low_ply_history,
-                &self.capture_history,
+                &self.history.main_history,
+                &self.history.low_ply_history,
+                &self.history.capture_history,
                 cont_tables,
-                &self.pawn_history,
+                &self.history.pawn_history,
                 ply,
                 self.generate_all_legal_moves,
             );
@@ -1067,11 +1023,11 @@ impl SearchWorker {
             pos,
             tt_move,
             depth,
-            &self.main_history,
-            &self.low_ply_history,
-            &self.capture_history,
+            &self.history.main_history,
+            &self.history.low_ply_history,
+            &self.history.capture_history,
             cont_tables,
-            &self.pawn_history,
+            &self.history.pawn_history,
             ply,
             self.generate_all_legal_moves,
         );
@@ -1132,7 +1088,7 @@ impl SearchWorker {
 
             if ctx.is_capture || ctx.gives_check {
                 let captured = ctx.pos.piece_on(ctx.mv.to());
-                let capt_hist = self.capture_history.get_with_captured_piece(
+                let capt_hist = self.history.capture_history.get_with_captured_piece(
                     ctx.mv.moved_piece_after(),
                     ctx.mv.to(),
                     captured,
@@ -1160,7 +1116,7 @@ impl SearchWorker {
                 if let Some(t1) = ctx.cont_tables[1] {
                     history += t1.get(ctx.mv.moved_piece_after(), ctx.mv.to()) as i32;
                 }
-                history += self.pawn_history.get(
+                history += self.history.pawn_history.get(
                     ctx.pos.pawn_history_index(),
                     ctx.mv.moved_piece_after(),
                     ctx.mv.to(),
@@ -1170,7 +1126,7 @@ impl SearchWorker {
                     return Step14Outcome::Skip { best_value: None };
                 }
 
-                history += 71 * self.main_history.get(ctx.mover, ctx.mv) as i32 / 32;
+                history += 71 * self.history.main_history.get(ctx.mover, ctx.mv) as i32 / 32;
                 lmr_depth += history / 3233;
 
                 let base_futility = if ctx.best_move.is_some() { 46 } else { 230 };
@@ -2002,11 +1958,12 @@ impl SearchWorker {
                 let captured = pos.captured_piece();
                 let captured_pt = captured.piece_type();
                 let moved_piece = mv.moved_piece_after();
-                let hist = self.capture_history.get(moved_piece, mv.to(), captured_pt) as i32;
+                let hist =
+                    self.history.capture_history.get(moved_piece, mv.to(), captured_pt) as i32;
                 782 * piece_value(captured) / 128 + hist
             } else {
                 let moved_piece = mv.moved_piece_after();
-                let main_hist = self.main_history.get(mover, mv) as i32;
+                let main_hist = self.history.main_history.get(mover, mv) as i32;
                 let cont_tables_for_stat = self.build_cont_tables(ply);
                 let cont0 = cont_tables_for_stat[0]
                     .map(|t| t.get(moved_piece, mv.to()) as i32)
@@ -2022,82 +1979,125 @@ impl SearchWorker {
             // =============================================================
             // 探索
             // =============================================================
-            let value = if depth >= 2 && move_count > 1 {
-                let d = (std::cmp::max(
-                    1,
-                    std::cmp::min(new_depth - r / 1024, new_depth + 1 + pv_node as i32),
-                ) + pv_node as i32)
-                    .max(1);
+            let value =
+                if depth >= 2 && move_count > 1 {
+                    let d = (std::cmp::max(
+                        1,
+                        std::cmp::min(new_depth - r / 1024, new_depth + 1 + pv_node as i32),
+                    ) + pv_node as i32)
+                        .max(1);
 
-                let reduction_from_parent = (depth - 1) - d;
-                self.stack[ply as usize].reduction = reduction_from_parent;
-                let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
-                    pos,
-                    d,
-                    -alpha - Value::new(1),
-                    -alpha,
-                    ply + 1,
-                    true,
-                    limits,
-                    time_manager,
-                );
-                self.stack[ply as usize].reduction = 0;
+                    let reduction_from_parent = (depth - 1) - d;
+                    self.stack[ply as usize].reduction = reduction_from_parent;
+                    let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
+                        pos,
+                        d,
+                        -alpha - Value::new(1),
+                        -alpha,
+                        ply + 1,
+                        true,
+                        limits,
+                        time_manager,
+                    );
+                    self.stack[ply as usize].reduction = 0;
 
-                if value > alpha {
-                    let do_deeper =
-                        d < new_depth && value > (best_value + Value::new(43 + 2 * new_depth));
-                    let do_shallower = value < best_value + Value::new(9);
-                    new_depth += do_deeper as i32 - do_shallower as i32;
+                    if value > alpha {
+                        let do_deeper =
+                            d < new_depth && value > (best_value + Value::new(43 + 2 * new_depth));
+                        let do_shallower = value < best_value + Value::new(9);
+                        new_depth += do_deeper as i32 - do_shallower as i32;
 
-                    if new_depth > d {
-                        value = -self.search_node::<{ NodeType::NonPV as u8 }>(
+                        if new_depth > d {
+                            value = -self.search_node::<{ NodeType::NonPV as u8 }>(
+                                pos,
+                                new_depth,
+                                -alpha - Value::new(1),
+                                -alpha,
+                                ply + 1,
+                                !cut_node,
+                                limits,
+                                time_manager,
+                            );
+                        }
+
+                        // YaneuraOu: fail high後にcontHistを更新 (yaneuraou-search.cpp:3614-3618)
+                        let moved_piece = mv.moved_piece_after();
+                        let to_sq = mv.to();
+                        const CONTHIST_BONUSES: &[(i32, i32)] =
+                            &[(1, 1108), (2, 652), (3, 273), (4, 572), (5, 126), (6, 449)];
+                        for &(offset, weight) in CONTHIST_BONUSES {
+                            if self.stack[ply as usize].in_check && offset > 2 {
+                                break;
+                            }
+                            let idx = ply - offset;
+                            if idx < 0 {
+                                break;
+                            }
+                            if let Some(key) = self.stack[idx as usize].cont_hist_key {
+                                let in_check_idx = key.in_check as usize;
+                                let capture_idx = key.capture as usize;
+                                let bonus = 1412 * weight / 1024 + if offset < 2 { 80 } else { 0 };
+                                self.history.continuation_history[in_check_idx][capture_idx]
+                                    .update(key.piece, key.to, moved_piece, to_sq, bonus);
+                            }
+                        }
+                        // cutoffCntインクリメント条件 (extension<2 || PvNode) をベータカット時に加算で近似。
+                        // ※ Extension導入後は extension<2 を実際の延長量で判定する形に差し替えること。
+                    } else if value > alpha && value < best_value + Value::new(9) {
+                        #[allow(unused_assignments)]
+                        {
+                            new_depth -= 1;
+                        }
+                    }
+
+                    if pv_node && (move_count == 1 || value > alpha) {
+                        self.stack[ply as usize].reduction = 0;
+                        -self.search_node::<{ NodeType::PV as u8 }>(
                             pos,
-                            new_depth,
-                            -alpha - Value::new(1),
+                            depth - 1,
+                            -beta,
                             -alpha,
                             ply + 1,
-                            !cut_node,
+                            false,
+                            limits,
+                            time_manager,
+                        )
+                    } else {
+                        value
+                    }
+                } else if !pv_node || move_count > 1 {
+                    // Zero window search
+                    self.stack[ply as usize].reduction = 0;
+                    let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
+                        pos,
+                        depth - 1,
+                        -alpha - Value::new(1),
+                        -alpha,
+                        ply + 1,
+                        !cut_node,
+                        limits,
+                        time_manager,
+                    );
+                    self.stack[ply as usize].reduction = 0;
+
+                    if pv_node && value > alpha && value < beta {
+                        self.stack[ply as usize].reduction = 0;
+                        value = -self.search_node::<{ NodeType::PV as u8 }>(
+                            pos,
+                            depth - 1,
+                            -beta,
+                            -alpha,
+                            ply + 1,
+                            false,
                             limits,
                             time_manager,
                         );
+                        self.stack[ply as usize].reduction = 0;
                     }
 
-                    // YaneuraOu: fail high後にcontHistを更新 (yaneuraou-search.cpp:3614-3618)
-                    let moved_piece = mv.moved_piece_after();
-                    let to_sq = mv.to();
-                    const CONTHIST_BONUSES: &[(i32, i32)] =
-                        &[(1, 1108), (2, 652), (3, 273), (4, 572), (5, 126), (6, 449)];
-                    for &(offset, weight) in CONTHIST_BONUSES {
-                        if self.stack[ply as usize].in_check && offset > 2 {
-                            break;
-                        }
-                        let idx = ply - offset;
-                        if idx < 0 {
-                            break;
-                        }
-                        if let Some(key) = self.stack[idx as usize].cont_hist_key {
-                            let in_check_idx = key.in_check as usize;
-                            let capture_idx = key.capture as usize;
-                            let bonus = 1412 * weight / 1024 + if offset < 2 { 80 } else { 0 };
-                            self.continuation_history[in_check_idx][capture_idx].update(
-                                key.piece,
-                                key.to,
-                                moved_piece,
-                                to_sq,
-                                bonus,
-                            );
-                        }
-                    }
-                    // cutoffCntインクリメント条件 (extension<2 || PvNode) をベータカット時に加算で近似。
-                    // ※ Extension導入後は extension<2 を実際の延長量で判定する形に差し替えること。
-                } else if value > alpha && value < best_value + Value::new(9) {
-                    #[allow(unused_assignments)]
-                    {
-                        new_depth -= 1;
-                    }
-                }
-
-                if pv_node && (move_count == 1 || value > alpha) {
+                    value
+                } else {
+                    // Full window search
                     self.stack[ply as usize].reduction = 0;
                     -self.search_node::<{ NodeType::PV as u8 }>(
                         pos,
@@ -2109,54 +2109,7 @@ impl SearchWorker {
                         limits,
                         time_manager,
                     )
-                } else {
-                    value
-                }
-            } else if !pv_node || move_count > 1 {
-                // Zero window search
-                self.stack[ply as usize].reduction = 0;
-                let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
-                    pos,
-                    depth - 1,
-                    -alpha - Value::new(1),
-                    -alpha,
-                    ply + 1,
-                    !cut_node,
-                    limits,
-                    time_manager,
-                );
-                self.stack[ply as usize].reduction = 0;
-
-                if pv_node && value > alpha && value < beta {
-                    self.stack[ply as usize].reduction = 0;
-                    value = -self.search_node::<{ NodeType::PV as u8 }>(
-                        pos,
-                        depth - 1,
-                        -beta,
-                        -alpha,
-                        ply + 1,
-                        false,
-                        limits,
-                        time_manager,
-                    );
-                    self.stack[ply as usize].reduction = 0;
-                }
-
-                value
-            } else {
-                // Full window search
-                self.stack[ply as usize].reduction = 0;
-                -self.search_node::<{ NodeType::PV as u8 }>(
-                    pos,
-                    depth - 1,
-                    -beta,
-                    -alpha,
-                    ply + 1,
-                    false,
-                    limits,
-                    time_manager,
-                )
-            };
+                };
             self.nnue_stack.pop();
             pos.undo_move(mv);
 
@@ -2241,12 +2194,12 @@ impl SearchWorker {
                 let scaled_bonus = bonus * 978 / 1024;
 
                 // MainHistory: そのまま渡す
-                self.main_history.update(us, best_move, scaled_bonus);
+                self.history.main_history.update(us, best_move, scaled_bonus);
 
                 // LowPlyHistory: bonus * 771 / 1024 + 40
                 if ply < LOW_PLY_HISTORY_SIZE as i32 {
                     let low_ply_bonus = low_ply_history_bonus(scaled_bonus);
-                    self.low_ply_history.update(ply as usize, best_move, low_ply_bonus);
+                    self.history.low_ply_history.update(ply as usize, best_move, low_ply_bonus);
                 }
 
                 // ContinuationHistory: bonus * (bonus > 0 ? 979 : 842) / 1024 + weight + 80*(i<2)
@@ -2263,7 +2216,7 @@ impl SearchWorker {
                                 scaled_bonus * weight / 1024,
                                 ply_back,
                             );
-                            self.continuation_history[in_check_idx][capture_idx].update(
+                            self.history.continuation_history[in_check_idx][capture_idx].update(
                                 key.piece,
                                 key.to,
                                 best_cont_pc,
@@ -2276,7 +2229,9 @@ impl SearchWorker {
 
                 // PawnHistory: bonus * 704 / 1024 + 70
                 let pawn_bonus = pawn_history_bonus(scaled_bonus);
-                self.pawn_history.update(pawn_key_idx, best_cont_pc, best_to, pawn_bonus);
+                self.history
+                    .pawn_history
+                    .update(pawn_key_idx, best_cont_pc, best_to, pawn_bonus);
 
                 // 他のquiet手にはペナルティ
                 // YaneuraOu: update_quiet_histories(move, -quietMalus * 1115 / 1024)
@@ -2284,12 +2239,12 @@ impl SearchWorker {
                 for &m in quiets_tried.iter() {
                     if m != best_move {
                         // MainHistory
-                        self.main_history.update(us, m, -scaled_malus);
+                        self.history.main_history.update(us, m, -scaled_malus);
 
                         // LowPlyHistory（現行欠落していたので追加）
                         if ply < LOW_PLY_HISTORY_SIZE as i32 {
                             let low_ply_malus = low_ply_history_bonus(-scaled_malus);
-                            self.low_ply_history.update(ply as usize, m, low_ply_malus);
+                            self.history.low_ply_history.update(ply as usize, m, low_ply_malus);
                         }
 
                         // ContinuationHistoryへのペナルティ
@@ -2314,26 +2269,21 @@ impl SearchWorker {
                                         -scaled_malus * weight / 1024,
                                         ply_back,
                                     );
-                                    self.continuation_history[in_check_idx][capture_idx].update(
-                                        key.piece,
-                                        key.to,
-                                        cont_pc,
-                                        to,
-                                        weighted_malus,
-                                    );
+                                    self.history.continuation_history[in_check_idx][capture_idx]
+                                        .update(key.piece, key.to, cont_pc, to, weighted_malus);
                                 }
                             }
                         }
 
                         // PawnHistoryへのペナルティ
                         let pawn_malus = pawn_history_bonus(-scaled_malus);
-                        self.pawn_history.update(pawn_key_idx, cont_pc, to, pawn_malus);
+                        self.history.pawn_history.update(pawn_key_idx, cont_pc, to, pawn_malus);
                     }
                 }
             } else {
                 // 捕獲手がbest: captureHistoryを更新
                 let captured_pt = pos.piece_on(best_to).piece_type();
-                self.capture_history.update(best_cont_pc, best_to, captured_pt, bonus);
+                self.history.capture_history.update(best_cont_pc, best_to, captured_pt, bonus);
             }
 
             // YaneuraOu: 他の捕獲手へのペナルティ（capture best以外の全捕獲手）
@@ -2350,7 +2300,12 @@ impl SearchWorker {
                     let to = m.to();
                     let captured_pt = pos.piece_on(to).piece_type();
                     // YaneuraOu: captureHistory << -captureMalus * 1431 / 1024
-                    self.capture_history.update(cont_pc, to, captured_pt, -cap_malus * 1431 / 1024);
+                    self.history.capture_history.update(
+                        cont_pc,
+                        to,
+                        captured_pt,
+                        -cap_malus * 1431 / 1024,
+                    );
                 }
             }
 
@@ -2393,13 +2348,14 @@ impl SearchWorker {
                                         } else {
                                             0
                                         };
-                                    self.continuation_history[in_check_idx][capture_idx].update(
-                                        target_key.piece,
-                                        target_key.to,
-                                        prev_piece,
-                                        prev_sq,
-                                        weighted_penalty,
-                                    );
+                                    self.history.continuation_history[in_check_idx][capture_idx]
+                                        .update(
+                                            target_key.piece,
+                                            target_key.to,
+                                            prev_piece,
+                                            prev_sq,
+                                            weighted_penalty,
+                                        );
                                 }
                             }
                         }
@@ -2410,9 +2366,9 @@ impl SearchWorker {
             // TTMoveHistory更新（非PVノードのみ）
             if !pv_node && tt_move.is_some() {
                 if best_move == tt_move {
-                    self.tt_move_history.update(ply as usize, TT_MOVE_HISTORY_BONUS);
+                    self.history.tt_move_history.update(ply as usize, TT_MOVE_HISTORY_BONUS);
                 } else {
-                    self.tt_move_history.update(ply as usize, TT_MOVE_HISTORY_MALUS);
+                    self.history.tt_move_history.update(ply as usize, TT_MOVE_HISTORY_MALUS);
                 }
             }
         }
@@ -2481,13 +2437,14 @@ impl SearchWorker {
                                     } else {
                                         0
                                     };
-                                self.continuation_history[in_check_idx][capture_idx].update(
-                                    target_key.piece,
-                                    target_key.to,
-                                    prev_piece,
-                                    prev_sq,
-                                    weighted_bonus,
-                                );
+                                self.history.continuation_history[in_check_idx][capture_idx]
+                                    .update(
+                                        target_key.piece,
+                                        target_key.to,
+                                        prev_piece,
+                                        prev_sq,
+                                        weighted_bonus,
+                                    );
                             }
                         }
                     }
@@ -2498,14 +2455,19 @@ impl SearchWorker {
                     let main_bonus = scaled_bonus * 220 / 32768;
                     // 注: 前の手なので手番は!pos.side_to_move()
                     let opponent = !pos.side_to_move();
-                    self.main_history.update(opponent, prev_move, main_bonus);
+                    self.history.main_history.update(opponent, prev_move, main_bonus);
 
                     // pawn history更新（歩以外かつ成りでない場合）
                     // YaneuraOu: if (type_of(pos.piece_on(prevSq)) != PAWN && ((ss - 1)->currentMove).type_of() != PROMOTION)
                     if prev_piece.piece_type() != PieceType::Pawn && !prev_move.is_promotion() {
                         let pawn_key_idx = pos.pawn_history_index();
                         let pawn_bonus = scaled_bonus * 1164 / 32768;
-                        self.pawn_history.update(pawn_key_idx, prev_piece, prev_sq, pawn_bonus);
+                        self.history.pawn_history.update(
+                            pawn_key_idx,
+                            prev_piece,
+                            prev_sq,
+                            pawn_bonus,
+                        );
                     }
                 } else {
                     // Prior capture countermove bonus
@@ -2519,7 +2481,7 @@ impl SearchWorker {
                         "prior_capture is true but captured_piece is NONE"
                     );
                     if captured_piece != Piece::NONE {
-                        self.capture_history.update(
+                        self.history.capture_history.update(
                             prev_piece,
                             prev_sq,
                             captured_piece.piece_type(),
@@ -2738,11 +2700,11 @@ impl SearchWorker {
                     MovePicker::new_evasions(
                         pos,
                         tt_move,
-                        &self.main_history,
-                        &self.low_ply_history,
-                        &self.capture_history,
+                        &self.history.main_history,
+                        &self.history.low_ply_history,
+                        &self.history.capture_history,
                         cont_tables,
-                        &self.pawn_history,
+                        &self.history.pawn_history,
                         ply,
                         self.generate_all_legal_moves,
                     )
@@ -2751,11 +2713,11 @@ impl SearchWorker {
                         pos,
                         tt_move,
                         DEPTH_QS,
-                        &self.main_history,
-                        &self.low_ply_history,
-                        &self.capture_history,
+                        &self.history.main_history,
+                        &self.history.low_ply_history,
+                        &self.history.capture_history,
                         cont_tables,
-                        &self.pawn_history,
+                        &self.history.pawn_history,
                         ply,
                         self.generate_all_legal_moves,
                     )
@@ -2851,18 +2813,17 @@ impl SearchWorker {
                         if let Some(key) = self.stack[(ply - 1) as usize].cont_hist_key {
                             let in_check_idx = key.in_check as usize;
                             let capture_idx = key.capture as usize;
-                            cont_score += self.continuation_history[in_check_idx][capture_idx].get(
-                                key.piece,
-                                key.to,
-                                mv.moved_piece_after(),
-                                mv.to(),
-                            ) as i32;
+                            cont_score += self.history.continuation_history[in_check_idx]
+                                [capture_idx]
+                                .get(key.piece, key.to, mv.moved_piece_after(), mv.to())
+                                as i32;
                         }
                     }
 
                     let pawn_idx = pos.pawn_history_index();
                     cont_score +=
-                        self.pawn_history.get(pawn_idx, pos.moved_piece(mv), mv.to()) as i32;
+                        self.history.pawn_history.get(pawn_idx, pos.moved_piece(mv), mv.to())
+                            as i32;
                     if cont_score <= 5868 {
                         continue;
                     }

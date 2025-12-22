@@ -104,7 +104,7 @@ echo "Build mode: $BUILD_MODE"
 echo "Binary: $BINARY"
 
 # benchmarkツールをperf経由で実行
-sudo perf record -g --call-graph dwarf -o perf_nnue.data \
+sudo perf record -g --call-graph fp -o perf_nnue.data \
     "$BINARY" --internal --nnue-file "$NNUE_FILE" \
     --limit-type movetime --limit "$MOVETIME" --iterations 1
 
