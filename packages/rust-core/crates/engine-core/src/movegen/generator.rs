@@ -1043,6 +1043,11 @@ mod tests {
         // 初期局面の合法手は30手
         // ただしpseudo-legalなので多めに生成される可能性あり
         assert!(count >= 30, "Generated {count} moves");
+
+        // すべての生成手がpiece情報を持つことを検証
+        for ext in buffer.as_slice().iter().take(count) {
+            assert!(ext.mv.has_piece_info(), "生成手はpiece情報を持つ必要がある: {:?}", ext.mv);
+        }
     }
 
     #[test]
@@ -1055,6 +1060,11 @@ mod tests {
 
         // 初期局面の合法手は30手
         assert_eq!(list.len(), 30, "Generated {} legal moves", list.len());
+
+        // すべての合法手がpiece情報を持つことを検証
+        for mv in list.iter() {
+            assert!(mv.has_piece_info(), "合法手はpiece情報を持つ必要がある: {:?}", mv);
+        }
     }
 
     #[test]
@@ -1159,6 +1169,7 @@ mod tests {
         for ext in buf.iter() {
             assert_eq!(ext.mv.from(), from);
             assert!(pos.gives_check(ext.mv), "非チェック手が混入: {:?}", ext.mv);
+            assert!(ext.mv.has_piece_info(), "王手生成手はpiece情報を持つ必要がある: {:?}", ext.mv);
         }
     }
 
