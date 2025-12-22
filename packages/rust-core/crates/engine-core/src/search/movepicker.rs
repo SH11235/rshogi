@@ -540,7 +540,7 @@ impl<'a> MovePicker<'a> {
             let ext = self.moves.get(i);
             let m = ext.mv;
             let to = m.to();
-            let pc = self.pos.moved_piece_after_move(m);
+            let pc = m.moved_piece_after();
             let pt = pc.piece_type();
             let captured = self.pos.piece_on(to);
             let captured_pt = captured.piece_type();
@@ -567,7 +567,7 @@ impl<'a> MovePicker<'a> {
             let ext = self.moves.get(i);
             let m = ext.mv;
             let to = m.to();
-            let pc = self.pos.moved_piece_after_move(m);
+            let pc = m.moved_piece_after();
             let pt = pc.piece_type();
             let mut value = 0i32;
 
@@ -607,7 +607,7 @@ impl<'a> MovePicker<'a> {
             let ext = self.moves.get(i);
             let m = ext.mv;
             let to = m.to();
-            let pc = self.pos.moved_piece_after_move(m);
+            let pc = m.moved_piece_after();
 
             if self.pos.is_capture(m) {
                 // 捕獲手は駒価値 + 大きなボーナス
