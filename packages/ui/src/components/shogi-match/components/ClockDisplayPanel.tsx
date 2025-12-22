@@ -1,6 +1,7 @@
 import type { Player } from "@shogi/app-core";
 import type { ReactElement } from "react";
 import type { TickState } from "../hooks/useClockManager";
+import type { SideSetting } from "./MatchSettingsPanel";
 import { formatTime } from "../utils/timeFormat";
 
 const baseCard = {
@@ -14,12 +15,20 @@ const baseCard = {
 interface ClockDisplayPanelProps {
     /** 時計の状態 */
     clocks: TickState;
+    /** 先手・後手の設定 */
+    sides: { sente: SideSetting; gote: SideSetting };
 }
 
-export function ClockDisplayPanel({ clocks }: ClockDisplayPanelProps): ReactElement {
+export function ClockDisplayPanel({ clocks, sides }: ClockDisplayPanelProps): ReactElement {
+    const getRoleLabel = (side: Player): string => {
+        return sides[side].role === "human" ? "人" : "AI";
+    };
+
     const renderClock = (side: Player) => {
         const clock = clocks[side];
         const ticking = clocks.ticking === side;
+        const sideLabel = side === "sente" ? "☗先手" : "☖後手";
+        const roleLabel = getRoleLabel(side);
         return (
             <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                 <span
@@ -31,7 +40,18 @@ export function ClockDisplayPanel({ clocks }: ClockDisplayPanelProps): ReactElem
                                 : "hsl(var(--accent, 37 94% 50%))",
                     }}
                 >
-                    {side === "sente" ? "先手" : "後手"}
+                    {sideLabel}
+                </span>
+                <span
+                    style={{
+                        fontSize: "12px",
+                        padding: "2px 6px",
+                        borderRadius: "4px",
+                        background: "hsl(var(--muted, 210 40% 96%))",
+                        color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                    }}
+                >
+                    {roleLabel}
                 </span>
                 <span style={{ fontVariantNumeric: "tabular-nums", fontSize: "16px" }}>
                     {formatTime(clock.mainMs)} + {formatTime(clock.byoyomiMs)}

@@ -1045,7 +1045,7 @@ export function ShogiMatch({
                             settingsLocked={settingsLocked}
                         />
 
-                        <ClockDisplayPanel clocks={clocks} />
+                        <ClockDisplayPanel clocks={clocks} sides={sides} />
 
                         <KifuIOPanel
                             moves={moves}
