@@ -322,12 +322,8 @@ fn generate_rook_moves(
 fn generate_gold_moves(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuffer) {
     let us = pos.side_to_move();
 
-    // 金相当の駒（金、と、成香、成桂、成銀）
-    let golds = pos.pieces(us, PieceType::Gold)
-        | pos.pieces(us, PieceType::ProPawn)
-        | pos.pieces(us, PieceType::ProLance)
-        | pos.pieces(us, PieceType::ProKnight)
-        | pos.pieces(us, PieceType::ProSilver);
+    // 金相当の駒（金、と、成香、成桂、成銀）- 事前計算済みのgolds_c()を使用
+    let golds = pos.golds_c(us);
 
     for from in golds.iter() {
         let attacks = gold_effect(us, from) & target;
