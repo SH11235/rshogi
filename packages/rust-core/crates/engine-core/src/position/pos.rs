@@ -40,6 +40,14 @@ pub struct Position {
     /// 先後別Bitboard
     pub(super) by_color: [Bitboard; Color::NUM],
 
+    // === 合成Bitboard（attackers_to_occ最適化用）===
+    /// 金相当の駒（Gold | ProPawn | ProLance | ProKnight | ProSilver）
+    golds_bb: Bitboard,
+    /// 角・馬（Bishop | Horse）
+    bishop_horse_bb: Bitboard,
+    /// 飛・龍（Rook | Dragon）
+    rook_dragon_bb: Bitboard,
+
     // === 手駒 ===
     /// 手駒 [Color]
     pub(super) hand: [Hand; Color::NUM],
@@ -102,6 +110,9 @@ impl Position {
             board: [Piece::NONE; Square::NUM],
             by_type: [Bitboard::EMPTY; PieceType::NUM + 1],
             by_color: [Bitboard::EMPTY; Color::NUM],
+            golds_bb: Bitboard::EMPTY,
+            bishop_horse_bb: Bitboard::EMPTY,
+            rook_dragon_bb: Bitboard::EMPTY,
             hand: [Hand::EMPTY; Color::NUM],
             state_stack: vec![StateInfo::new()],
             state_idx: 0,
@@ -183,6 +194,57 @@ impl Position {
             bb |= self.by_type[pt as usize] & self.by_color[c.index()];
         }
         bb
+    }
+
+    // ========== 合成Bitboardアクセサ ==========
+
+    /// 駒種が金相当（金、と、成香、成桂、成銀）かどうか
+    #[inline]
+    const fn is_gold_like(pt: PieceType) -> bool {
+        matches!(
+            pt,
+            PieceType::Gold
+                | PieceType::ProPawn
+                | PieceType::ProLance
+                | PieceType::ProKnight
+                | PieceType::ProSilver
+        )
+    }
+
+    /// 駒種が角・馬かどうか
+    #[inline]
+    const fn is_bishop_like(pt: PieceType) -> bool {
+        matches!(pt, PieceType::Bishop | PieceType::Horse)
+    }
+
+    /// 駒種が飛・龍かどうか
+    #[inline]
+    const fn is_rook_like(pt: PieceType) -> bool {
+        matches!(pt, PieceType::Rook | PieceType::Dragon)
+    }
+
+    /// 金相当の駒のBitboard（先後両方）
+    #[inline]
+    pub fn golds(&self) -> Bitboard {
+        self.golds_bb
+    }
+
+    /// 金相当の駒のBitboard（手番指定）
+    #[inline]
+    pub fn golds_c(&self, c: Color) -> Bitboard {
+        self.golds_bb & self.by_color[c.index()]
+    }
+
+    /// 角・馬のBitboard
+    #[inline]
+    pub fn bishop_horse(&self) -> Bitboard {
+        self.bishop_horse_bb
+    }
+
+    /// 飛・龍のBitboard
+    #[inline]
+    pub fn rook_dragon(&self) -> Bitboard {
+        self.rook_dragon_bb
     }
 
     /// 手駒を取得
@@ -339,20 +401,11 @@ impl Position {
         let w_silver =
             silver_effect(Color::Black, sq) & self.pieces(Color::White, PieceType::Silver);
 
-        // 金の動きをする駒（金、と、成香、成桂、成銀）
-        let gold_movers_b = self.pieces(Color::Black, PieceType::Gold)
-            | self.pieces(Color::Black, PieceType::ProPawn)
-            | self.pieces(Color::Black, PieceType::ProLance)
-            | self.pieces(Color::Black, PieceType::ProKnight)
-            | self.pieces(Color::Black, PieceType::ProSilver);
-        let gold_movers_w = self.pieces(Color::White, PieceType::Gold)
-            | self.pieces(Color::White, PieceType::ProPawn)
-            | self.pieces(Color::White, PieceType::ProLance)
-            | self.pieces(Color::White, PieceType::ProKnight)
-            | self.pieces(Color::White, PieceType::ProSilver);
-
-        let b_gold = gold_effect(Color::White, sq) & gold_movers_b;
-        let w_gold = gold_effect(Color::Black, sq) & gold_movers_w;
+        // 金の動きをする駒 - 事前計算済みのgolds_bbを使用
+        let b_gold =
+            gold_effect(Color::White, sq) & self.golds_bb & self.by_color[Color::Black.index()];
+        let w_gold =
+            gold_effect(Color::Black, sq) & self.golds_bb & self.by_color[Color::White.index()];
 
         let king = king_effect(sq)
             & (self.pieces(Color::Black, PieceType::King)
@@ -364,11 +417,11 @@ impl Position {
         let w_lance =
             lance_effect(Color::Black, sq, occupied) & self.pieces(Color::White, PieceType::Lance);
 
-        let bishop_bb = self.pieces_pt(PieceType::Bishop) | self.pieces_pt(PieceType::Horse);
-        let bishop = bishop_effect(sq, occupied) & bishop_bb;
+        // 角・馬 - 事前計算済みのbishop_horse_bbを使用
+        let bishop = bishop_effect(sq, occupied) & self.bishop_horse_bb;
 
-        let rook_bb = self.pieces_pt(PieceType::Rook) | self.pieces_pt(PieceType::Dragon);
-        let rook = rook_effect(sq, occupied) & rook_bb;
+        // 飛・龍 - 事前計算済みのrook_dragon_bbを使用
+        let rook = rook_effect(sq, occupied) & self.rook_dragon_bb;
 
         // 馬・龍の近接利き
         let horse = king_effect(sq) & self.pieces_pt(PieceType::Horse);
@@ -457,18 +510,40 @@ impl Position {
     /// 盤面に駒を置く
     pub(super) fn put_piece(&mut self, pc: Piece, sq: Square) {
         debug_assert!(self.board[sq.index()].is_none());
+        let pt = pc.piece_type();
+
         self.board[sq.index()] = pc;
-        self.by_type[pc.piece_type() as usize].set(sq);
+        self.by_type[pt as usize].set(sq);
         self.by_color[pc.color().index()].set(sq);
+
+        // 合成Bitboardの差分更新
+        if Self::is_gold_like(pt) {
+            self.golds_bb.set(sq);
+        } else if Self::is_bishop_like(pt) {
+            self.bishop_horse_bb.set(sq);
+        } else if Self::is_rook_like(pt) {
+            self.rook_dragon_bb.set(sq);
+        }
     }
 
     /// 盤面から駒を取り除く
     fn remove_piece(&mut self, sq: Square) {
         let pc = self.board[sq.index()];
         debug_assert!(pc.is_some());
+        let pt = pc.piece_type();
+
         self.board[sq.index()] = Piece::NONE;
-        self.by_type[pc.piece_type() as usize].clear(sq);
+        self.by_type[pt as usize].clear(sq);
         self.by_color[pc.color().index()].clear(sq);
+
+        // 合成Bitboardの差分更新
+        if Self::is_gold_like(pt) {
+            self.golds_bb.clear(sq);
+        } else if Self::is_bishop_like(pt) {
+            self.bishop_horse_bb.clear(sq);
+        } else if Self::is_rook_like(pt) {
+            self.rook_dragon_bb.clear(sq);
+        }
     }
 
     /// pin駒とpinしている駒を更新
@@ -1058,11 +1133,9 @@ impl Position {
         let enemy = !king_color;
 
         let lance_bb = self.pieces(enemy, PieceType::Lance) & !enemy_removed;
-        let bishop_bb = (self.pieces(enemy, PieceType::Bishop)
-            | self.pieces(enemy, PieceType::Horse))
-            & !enemy_removed;
-        let rook_bb = (self.pieces(enemy, PieceType::Rook) | self.pieces(enemy, PieceType::Dragon))
-            & !enemy_removed;
+        // 事前計算済みのbishop_horse_bb/rook_dragon_bbを使用
+        let bishop_bb = (self.bishop_horse_bb & self.by_color[enemy.index()]) & !enemy_removed;
+        let rook_bb = (self.rook_dragon_bb & self.by_color[enemy.index()]) & !enemy_removed;
 
         let snipers = (lance_effect(king_color, ksq, Bitboard::EMPTY) & lance_bb)
             | (bishop_effect(ksq, Bitboard::EMPTY) & bishop_bb)
@@ -1653,5 +1726,105 @@ mod tests {
             Piece::B_PAWN,
             "不成の場合、moved_piece_after は歩であるべき"
         );
+    }
+
+    /// 合成Bitboard（golds_bb, bishop_horse_bb, rook_dragon_bb）の整合性を確認
+    #[test]
+    fn test_composite_bitboard_consistency() {
+        let mut pos = Position::new();
+        pos.set_hirate();
+
+        // golds_bbの整合性チェック
+        let expected_golds = pos.pieces_pt(PieceType::Gold)
+            | pos.pieces_pt(PieceType::ProPawn)
+            | pos.pieces_pt(PieceType::ProLance)
+            | pos.pieces_pt(PieceType::ProKnight)
+            | pos.pieces_pt(PieceType::ProSilver);
+        assert_eq!(pos.golds(), expected_golds, "golds_bb mismatch");
+
+        // bishop_horse_bbの整合性チェック
+        let expected_bh = pos.pieces_pt(PieceType::Bishop) | pos.pieces_pt(PieceType::Horse);
+        assert_eq!(pos.bishop_horse(), expected_bh, "bishop_horse_bb mismatch");
+
+        // rook_dragon_bbの整合性チェック
+        let expected_rd = pos.pieces_pt(PieceType::Rook) | pos.pieces_pt(PieceType::Dragon);
+        assert_eq!(pos.rook_dragon(), expected_rd, "rook_dragon_bb mismatch");
+    }
+
+    /// 指し手実行・取り消し後も合成Bitboardの整合性が維持されることを確認
+    #[test]
+    fn test_composite_bitboard_after_moves() {
+        let mut pos = Position::new();
+        pos.set_hirate();
+
+        // 何手か指して整合性を確認（角成を含む）
+        let moves = ["7g7f", "3c3d", "8h2b+", "3a2b"];
+        for mv_str in moves {
+            let mv = Move::from_usi(mv_str).unwrap();
+            let gives_check = pos.gives_check(mv);
+            pos.do_move(mv, gives_check);
+
+            // 毎手後に整合性チェック
+            let expected_golds = pos.pieces_pt(PieceType::Gold)
+                | pos.pieces_pt(PieceType::ProPawn)
+                | pos.pieces_pt(PieceType::ProLance)
+                | pos.pieces_pt(PieceType::ProKnight)
+                | pos.pieces_pt(PieceType::ProSilver);
+            assert_eq!(pos.golds(), expected_golds, "golds_bb mismatch after {mv_str}");
+
+            let expected_bh = pos.pieces_pt(PieceType::Bishop) | pos.pieces_pt(PieceType::Horse);
+            assert_eq!(pos.bishop_horse(), expected_bh, "bishop_horse_bb mismatch after {mv_str}");
+
+            let expected_rd = pos.pieces_pt(PieceType::Rook) | pos.pieces_pt(PieceType::Dragon);
+            assert_eq!(pos.rook_dragon(), expected_rd, "rook_dragon_bb mismatch after {mv_str}");
+        }
+
+        // undo_moveでも整合性維持を確認
+        for mv_str in moves.iter().rev() {
+            let mv = Move::from_usi(mv_str).unwrap();
+            pos.undo_move(mv);
+
+            let expected_golds = pos.pieces_pt(PieceType::Gold)
+                | pos.pieces_pt(PieceType::ProPawn)
+                | pos.pieces_pt(PieceType::ProLance)
+                | pos.pieces_pt(PieceType::ProKnight)
+                | pos.pieces_pt(PieceType::ProSilver);
+            assert_eq!(pos.golds(), expected_golds, "golds_bb mismatch after undo {mv_str}");
+
+            let expected_bh = pos.pieces_pt(PieceType::Bishop) | pos.pieces_pt(PieceType::Horse);
+            assert_eq!(
+                pos.bishop_horse(),
+                expected_bh,
+                "bishop_horse_bb mismatch after undo {mv_str}"
+            );
+
+            let expected_rd = pos.pieces_pt(PieceType::Rook) | pos.pieces_pt(PieceType::Dragon);
+            assert_eq!(
+                pos.rook_dragon(),
+                expected_rd,
+                "rook_dragon_bb mismatch after undo {mv_str}"
+            );
+        }
+    }
+
+    /// 成り駒が golds_bb に含まれることを確認
+    #[test]
+    fn test_composite_bitboard_with_promotions() {
+        let mut pos = Position::new();
+        // 5段目に歩、玉を配置
+        pos.set_sfen("4k4/9/9/9/4P4/9/9/9/4K4 b - 1").unwrap();
+
+        let to = Square::from_usi("5d").unwrap();
+
+        // 歩成でと金になる
+        let mv = Move::from_usi("5e5d+").unwrap();
+        let gives_check = pos.gives_check(mv);
+        pos.do_move(mv, gives_check);
+
+        // golds_bbにと金が含まれているはず
+        assert!(pos.golds().contains(to), "と金がgolds_bbに含まれていない");
+
+        pos.undo_move(mv);
+        assert!(!pos.golds().contains(to), "undo後にと金がgolds_bbに残っている");
     }
 }

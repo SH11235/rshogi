@@ -24,21 +24,21 @@
 
 | 局面 | 説明 | Depth | NPS | bestmove |
 |:----:|------|:-----:|----:|----------|
-| 1 | 序盤（9手目） | 14 | 1,055,823 | 1g1f |
-| 2 | 中盤（詰将棋風） | 24 | 536,380 | 8d8f |
-| 3 | 終盤（王手飛車） | 16 | 581,797 | 5d6c+ |
-| 4 | 終盤（詰み筋） | 23 | 510,682 | S*2h |
-| **平均** | - | - | **671,171** | - |
+| 1 | 序盤（9手目） | 14 | 1,086,258 | 1g1f |
+| 2 | 中盤（詰将棋風） | 24 | 569,345 | 8d8f |
+| 3 | 終盤（王手飛車） | 16 | 569,931 | 5d6c+ |
+| 4 | 終盤（詰み筋） | 23 | 499,931 | S*2h |
+| **平均** | - | - | **681,366** | - |
 
 #### Material評価時（NNUE無効、MaterialLevel=9）
 
 | 局面 | 説明 | Depth | NPS | bestmove |
 |:----:|------|:-----:|----:|----------|
-| 1 | 序盤（9手目） | 17 | 507,835 | 2h2f |
-| 2 | 中盤（詰将棋風） | 18 | 404,953 | 8d7d |
-| 3 | 終盤（王手飛車） | 17 | 423,171 | G*6b |
-| 4 | 終盤（詰み筋） | 18 | 418,186 | G*3c |
-| **平均** | - | - | **438,536** | - |
+| 1 | 序盤（9手目） | 17 | 511,051 | 2h2f |
+| 2 | 中盤（詰将棋風） | 18 | 398,359 | 8d7d |
+| 3 | 終盤（王手飛車） | 17 | 423,029 | G*6b |
+| 4 | 終盤（詰み筋） | 18 | 409,747 | G*3c |
+| **平均** | - | - | **435,547** | - |
 
 ### VNNI効果測定（別端末: Intel Cascade Lake-X）
 
@@ -53,9 +53,9 @@
 
 | エンジン | NNUE NPS | Material NPS | 備考 |
 |---------|--------:|-------------:|------|
-| 本エンジン | 671,171 | 438,536 | - |
+| 本エンジン | 681,366 | 435,547 | - |
 | YaneuraOu | 1,118,219 | 1,545,172 | 参考値 |
-| **対YaneuraOu比** | **60%** | **28%** | - |
+| **対YaneuraOu比** | **61%** | **28%** | - |
 
 ---
 
@@ -67,28 +67,28 @@
 
 | 順位 | 関数 | CPU% | 状態 | 備考 |
 |------|------|------|------|------|
-| 1 | `MovePicker::next_move` | 9.52% | 調査完了 | [詳細](#movepicker-調査完了) |
-| 2 | `network::evaluate` | 3.74% | - | NNUE推論メイン |
-| 3 | `attackers_to_occ` | 3.37% | - | 利き計算 |
-| 4 | `search_node` | 2.75% | - | 探索メインループ |
-| 5 | `refresh_accumulator` | 2.49% | - | NNUE全計算 |
-| 6 | `check_move_mate` | 2.17% | - | 1手詰め判定 |
-| 7 | `__memset_avx2` | 2.01% | - | メモリ初期化 |
-| - | `partial_insertion_sort` | 5.31% | 調査完了 | MovePicker内部 |
+| 1 | `MovePicker::next_move` | 9.36% | 調査完了 | [詳細](#movepicker-調査完了) |
+| 2 | `network::evaluate` | 3.73% | - | NNUE推論メイン |
+| 3 | `attackers_to_occ` | 3.32% | - | 利き計算 |
+| 4 | `search_node` | 2.73% | - | 探索メインループ |
+| 5 | `refresh_accumulator` | 2.45% | - | NNUE全計算 |
+| 6 | `check_move_mate` | 2.08% | - | 1手詰め判定 |
+| 7 | `__memset_avx2` | 1.94% | - | メモリ初期化 |
+| - | `partial_insertion_sort` | 5.26% | 調査完了 | MovePicker内部 |
 
-**注**: kernelオーバーヘッド（`__fsnotify_parent` 4.38%, `dput` 3.47%）はNNUEファイル読み込み時のもので、実際の探索時間には影響しない。
+**注**: kernelオーバーヘッド（`__fsnotify_parent` 4.52%, `dput` 3.64%）はNNUEファイル読み込み時のもので、実際の探索時間には影響しない。
 
 #### NNUE関連の内訳
 
 | 関数 | CPU% | 説明 |
 |------|------|------|
-| `network::evaluate` | 3.74% | NNUE推論メイン |
-| `refresh_accumulator` | 2.49% | Accumulator全計算（差分更新失敗時） |
-| `check_move_mate` | 2.17% | 1手詰め判定 |
-| `do_move` | 1.74% | 指し手実行 |
-| `build_cont_tables` | 1.72% | Continuation History構築 |
-| `update_accumulator` | 1.52% | Accumulator差分更新 |
-| `append_active_indices` | 1.19% | 特徴量インデックス取得 |
+| `network::evaluate` | 3.73% | NNUE推論メイン |
+| `refresh_accumulator` | 2.45% | Accumulator全計算（差分更新失敗時） |
+| `check_move_mate` | 2.08% | 1手詰め判定 |
+| `do_move` | 1.71% | 指し手実行 |
+| `build_cont_tables` | 1.53% | Continuation History構築 |
+| `update_accumulator` | 1.39% | Accumulator差分更新 |
+| `append_active_indices` | 1.15% | 特徴量インデックス取得 |
 
 ### Material評価時（NNUE無効、release build）
 
@@ -96,16 +96,16 @@
 
 | 順位 | 関数 | CPU% | 備考 |
 |------|------|------|------|
-| 1 | `eval_lv7_like` | 25.95% | Material評価のメイン関数 |
-| 2 | `direction_of` | 16.25% | 方向計算 |
-| 3 | `compute_board_effects` | 9.91% | 盤面効果計算 |
-| 4 | `MovePicker::next_move` | 7.64% | 指し手選択 |
-| 5 | `search_node` | 4.60% | 探索メインループ |
-| 6 | `check_move_mate` | 4.18% | 1手詰め判定 |
-| 7 | `do_move` | 3.03% | 指し手実行 |
-| 8 | `build_cont_tables` | 2.67% | Continuation History構築 |
-| 9 | `attackers_to_occ` | 1.84% | 利き計算 |
-| 10 | `__memmove_avx` | 1.67% | メモリコピー |
+| 1 | `eval_lv7_like` | 25.78% | Material評価のメイン関数 |
+| 2 | `direction_of` | 16.39% | 方向計算 |
+| 3 | `compute_board_effects` | 10.32% | 盤面効果計算 |
+| 4 | `MovePicker::next_move` | 7.34% | 指し手選択 |
+| 5 | `search_node` | 4.49% | 探索メインループ |
+| 6 | `check_move_mate` | 4.42% | 1手詰め判定 |
+| 7 | `do_move` | 2.68% | 指し手実行 |
+| 8 | `build_cont_tables` | 2.11% | Continuation History構築 |
+| 9 | `__memmove_avx` | 1.80% | メモリコピー |
+| 10 | `attackers_to_occ` | 1.63% | 利き計算 |
 
 **注**: Material評価は1回の評価計算は軽量だが、評価精度が低いため枝刈りの効率が悪く、NPSはNNUEと同等かそれ以下になることが多い。
 
@@ -346,3 +346,4 @@ RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release --
 | 2025-12-22 | 計測結果更新（NNUE: MovePicker 8.86%, AffineTransform 4.74%, refresh 2.40%、Material: eval_lv7_like 26.22%, direction_of 16.85%）。Material評価時の順位変動: `__memmove_avx`が9位に上昇、`attackers_to_occ`が10位に |
 | 2025-12-22 | 計測結果更新（NNUE: MovePicker 9.52%, network::evaluate 3.74%, refresh 2.49%、Material: eval_lv7_like 25.95%, direction_of 16.25%）。**改善点**: AffineTransformのループ逆転最適化により `network::evaluate` が4.74%→3.74%に約21%減少（外側ループを入力チャンク、内側を出力に変更し、入力ブロードキャストと重みアクセスの連続性を改善）。NNUE推論高速化の結果、`MovePicker` が8.86%→9.52%、`check_move_mate` が2.17%でホットスポット6位に浮上するなど、相対比率が変動 |
 | 2025-12-22 | **NPS計測結果セクション追加**。NNUE/Material両方の局面別NPS、YaneuraOu比較表を追加。**VNNI dpbusd命令対応**: AVX512-VNNI対応CPUでNNUE積和演算を1命令化（`_mm256_dpbusd_epi32`）。別端末（Intel Cascade Lake-X）での計測で**+13% NPS向上**を確認 |
+| 2025-12-22 | 計測結果更新（NNUE: MovePicker 9.36%, network::evaluate 3.73%, refresh 2.45%、Material: eval_lv7_like 25.78%, direction_of 16.39%）。NPS: NNUE平均 681,366（+1.5%）、Material平均 435,547。YaneuraOu比が60%→61%に微増 |
