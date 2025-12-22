@@ -6,18 +6,21 @@
 
 1. **ベンチマーク実行**
 
-   以下の2つのベンチマークを実行する（合計約3分）:
+   以下の2つのベンチマークを実行する:
+
+   - **所要時間**: 約3分（20秒 × 4局面 × 2モード = 160秒）
+   - 初回はビルド時間が追加で必要
 
    ```bash
    cd packages/rust-core
 
-   # NNUE有効時（約1.5分）
+   # NNUE有効時（20秒 × 4局面 = 約80秒）
    RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release -- \
      --internal --threads 1 --limit-type movetime --limit 20000 \
      --nnue-file ./memo/nn.bin \
      --output-dir ./benchmark_results
 
-   # Material評価時（約1.5分）
+   # Material評価時（20秒 × 4局面 = 約80秒）
    RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release -- \
      --internal --threads 1 --limit-type movetime --limit 20000 \
      --output-dir ./benchmark_results
