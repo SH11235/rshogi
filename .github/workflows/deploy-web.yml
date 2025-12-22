@@ -149,15 +149,15 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build Rust WASM
+      - name: Build Rust WASM (Production)
         timeout-minutes: 15
         run: |
-          echo "Building Rust WASM..."
-          if ! pnpm --filter @shogi/engine-wasm build:wasm; then
+          echo "Building Rust WASM with production profile (full LTO)..."
+          if ! pnpm --filter @shogi/engine-wasm build:wasm:production; then
             echo "Error: WASM build failed"
             exit 1
           fi
-          echo "WASM build completed successfully"
+          echo "WASM production build completed successfully"
 
       - name: sccache stats
         if: always()

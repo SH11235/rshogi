@@ -31,8 +31,20 @@ getrandom = { version = "0.3", default-features = false, features = ["wasm_js"] 
 opt-level = 1  # Basic optimizations for debug builds
 panic = "unwind"
 
-# Release build with debug assertions for catching bugs
+# Release build - 開発時用（高速ビルド）
 [profile.release]
-overflow-checks = true    # オーバーフロー検出
-lto = "thin"             # 最適化は維持
+opt-level = 3
+overflow-checks = true    # オーバーフロー検出（安全性重視）
+lto = "thin"              # 高速なLTO
+codegen-units = 4         # 並列ビルド
 panic = "unwind"
+strip = "symbols"
+
+# Production build - 本番デプロイ用（最大最適化）
+# 使用方法: cargo build --profile production
+[profile.production]
+inherits = "release"
+overflow-checks = false   # 本番では無効化（速度優先）
+lto = "fat"               # 最大LTO
+codegen-units = 1         # 最適化優先
+panic = "abort"           # 小さいバイナリ

@@ -9,11 +9,17 @@ const __dirname = path.dirname(__filename);
 const crateName = "engine-wasm";
 const artifactName = crateName.replace(/-/g, "_");
 const rustRoot = path.resolve(__dirname, "../../rust-core");
+
+// --production フラグで本番ビルド（最大最適化）
+const isProduction = process.argv.includes("--production");
+const profile = isProduction ? "production" : "release";
+const targetDir = isProduction ? "production" : "release";
+
 const targetWasm = path.join(
     rustRoot,
     "target",
     "wasm32-unknown-unknown",
-    "release",
+    targetDir,
     `${artifactName}.wasm`,
 );
 const outDir = path.resolve(__dirname, "../pkg");
@@ -75,9 +81,11 @@ function ensureWasmBindgen() {
 try {
     ensureWasmBindgen();
 
+    console.log(`Building ${crateName} with profile: ${profile}`);
+    console.log(`Expected output: ${targetWasm}`);
     run(
         "cargo",
-        ["build", "--release", "--target", "wasm32-unknown-unknown", "-p", crateName],
+        ["build", "--profile", profile, "--target", "wasm32-unknown-unknown", "-p", crateName],
         rustRoot,
     );
 
