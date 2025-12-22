@@ -297,17 +297,7 @@ impl SearchWorker {
 
     /// usinewgameで呼び出し：全履歴をクリア（YaneuraOu Worker::clear()相当）
     pub fn clear(&mut self) {
-        self.history.main_history.clear();
-        self.history.low_ply_history.clear();
-        self.history.capture_history.clear();
-        for row in &mut self.history.continuation_history {
-            for ch in row {
-                ch.clear();
-            }
-        }
-        self.history.pawn_history.clear();
-        self.history.correction_history.clear();
-        self.history.tt_move_history.clear();
+        self.history.clear();
     }
 
     /// goで呼び出し：探索状態のリセット（履歴はクリアしない、YaneuraOu準拠）

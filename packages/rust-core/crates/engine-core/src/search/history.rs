@@ -706,6 +706,21 @@ impl HistoryTables {
         history.correction_history.fill_initial_values();
         history
     }
+
+    /// すべての履歴テーブルをクリア
+    pub fn clear(&mut self) {
+        self.main_history.clear();
+        self.low_ply_history.clear();
+        self.capture_history.clear();
+        for row in &mut self.continuation_history {
+            for ch in row {
+                ch.clear();
+            }
+        }
+        self.pawn_history.clear();
+        self.correction_history.clear();
+        self.tt_move_history.clear();
+    }
 }
 
 // =============================================================================
