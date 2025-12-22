@@ -41,6 +41,13 @@ deep = []
 # - Material評価コードを完全に削除（バイナリサイズ削減）
 # - NNUEがロードされていない場合はパニック
 # - Wasm buildでも使用可能
+# - デスクトップ配布用リリースビルドで推奨
+#
+# 注意: tournamentフィーチャーを有効にする場合、
+# アプリケーション起動時にNNUEの初期化が必須。
+# 初期化忘れはpanicを引き起こす。
+#
+# 使用例: cargo build --release --features tournament
 tournament = []
 
 [lib]

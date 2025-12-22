@@ -509,7 +509,22 @@ fn eval_lv7_like(
 
 /// Material評価（NNUE未初期化時のフォールバック）
 ///
-/// tournamentビルドではこの関数は削除される（NNUEが必須）
+/// # Tournament Build
+///
+/// `tournament` フィーチャーが有効な場合、この関数は完全に削除される。
+/// - バイナリサイズの削減
+/// - NNUEが必須となり、未初期化の場合はパニック
+///
+/// # 通常ビルド
+///
+/// NNUEが初期化されていない場合の代替評価関数として使用される。
+/// MaterialLevelに応じた評価を実行する。
+///
+/// # パフォーマンス特性
+///
+/// - Level 1-2: 駒の価値のみ（高速）
+/// - Level 3-4: 利きの計算を含む（中速）
+/// - Level 7-9: より複雑な評価（低速だがNNUEより高速）
 #[cfg(not(feature = "tournament"))]
 pub fn evaluate_material(pos: &Position) -> Value {
     let level = get_material_level();

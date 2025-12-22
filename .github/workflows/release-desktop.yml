@@ -46,7 +46,8 @@ jobs:
             cpu_target: apple-m1
 
     runs-on: ${{ matrix.platform }}
-    timeout-minutes: 90
+    # PGOビルドは2回ビルドするため90分、skip_pgo時は45分
+    timeout-minutes: ${{ inputs.skip_pgo == true && 45 || 90 }}
 
     steps:
       - name: Checkout
@@ -172,13 +173,17 @@ jobs:
         working-directory: packages/rust-core
         run: |
           echo "=== PGO Step 2: Collecting Profile Data ==="
-          ./target/production/benchmark 2>&1 | head -30 || true
+
+          # ベンチマーク実行（ログを保存しつつ出力）
+          if ! ./target/production/benchmark 2>&1 | tee "${{ env.PGO_DIR }}/benchmark.log" | head -30; then
+            echo "::warning::Benchmark execution failed, checking for partial profile data"
+          fi
 
           PROFRAW_COUNT=$(find "${{ env.PGO_DIR }}" -name "*.profraw" 2>/dev/null | wc -l)
           echo "Collected $PROFRAW_COUNT profile files"
 
           if [ "$PROFRAW_COUNT" -eq 0 ]; then
-            echo "Warning: No profile data collected, continuing without PGO"
+            echo "::warning::No profile data collected, continuing without PGO"
             echo "PGO_AVAILABLE=false" >> $GITHUB_ENV
           else
             echo "PGO_AVAILABLE=true" >> $GITHUB_ENV

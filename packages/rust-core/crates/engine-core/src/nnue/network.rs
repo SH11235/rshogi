@@ -178,7 +178,11 @@ pub fn init_nnue_from_bytes(bytes: &[u8]) -> io::Result<()> {
 pub fn evaluate(pos: &Position, stack: &mut AccumulatorStack) -> Value {
     // tournamentビルド: NNUEが必須（フォールバックなし）
     #[cfg(feature = "tournament")]
-    let network = NETWORK.get().expect("NNUE network must be initialized for tournament build");
+    let network = NETWORK.get().expect(
+        "NNUE network is not initialized. \
+         Tournament build requires NNUE to be loaded before evaluation. \
+         Call init_nnue() or init_nnue_from_bytes() first.",
+    );
 
     // 通常ビルド: NNUEがなければMaterial評価にフォールバック
     #[cfg(not(feature = "tournament"))]
