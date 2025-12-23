@@ -88,18 +88,6 @@ export interface DndState {
 }
 
 /**
- * ドラッグ開始イベントの型
- */
-interface DragStartEvent {
-    origin: DragOrigin;
-    payload: DragPayload;
-    clientX: number;
-    clientY: number;
-    pointerId: number;
-    pointerType: "mouse" | "touch" | "pen";
-}
-
-/**
  * ドロップ結果
  */
 export interface DropResult {
