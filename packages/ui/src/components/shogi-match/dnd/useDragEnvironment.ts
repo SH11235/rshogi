@@ -29,7 +29,7 @@ export interface DragEnvironment {
     measure: () => { board: BoardMetrics | null; zones: Zones };
 }
 
-export interface UseDragEnvironmentOptions {
+interface UseDragEnvironmentOptions {
     /** 盤の向き（後手視点なら 'gote'） */
     orientation?: "sente" | "gote";
 }

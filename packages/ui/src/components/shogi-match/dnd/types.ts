@@ -90,7 +90,7 @@ export interface DndState {
 /**
  * ドラッグ開始イベントの型
  */
-export interface DragStartEvent {
+interface DragStartEvent {
     origin: DragOrigin;
     payload: DragPayload;
     clientX: number;

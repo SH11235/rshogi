@@ -21,7 +21,7 @@ import type {
 import { DEFAULT_DND_CONFIG } from "./types";
 import type { DragEnvironment } from "./useDragEnvironment";
 
-export interface UsePieceDndOptions {
+interface UsePieceDndOptions {
     /** DnD 環境 */
     env: DragEnvironment;
     /** ドロップ時のコールバック */

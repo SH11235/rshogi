@@ -9,7 +9,7 @@ import { cn } from "@shogi/design-system";
 import { forwardRef } from "react";
 import type { DndState } from "./types";
 
-export interface DeleteZoneProps {
+interface DeleteZoneProps {
     /** DnD 状態 */
     dndState: DndState;
     /** クラス名 */

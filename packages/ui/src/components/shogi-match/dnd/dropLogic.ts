@@ -14,7 +14,7 @@ import type { DragOrigin, DragPayload, DropResult, DropTarget } from "./types";
 /**
  * ドロップ検証結果
  */
-export interface ValidateDropResult {
+interface ValidateDropResult {
     ok: boolean;
     error?: string;
     /** 成りを強制解除する場合（行き場のない駒など） */
@@ -24,7 +24,7 @@ export interface ValidateDropResult {
 /**
  * ドロップ適用結果
  */
-export interface ApplyDropResult {
+interface ApplyDropResult {
     ok: boolean;
     next: PositionState;
     error?: string;

@@ -13,7 +13,7 @@ import { type PieceDndController, usePieceDnd } from "./usePieceDnd";
 /**
  * DnD コンテキストの型
  */
-export interface EditDndContextValue {
+interface EditDndContextValue {
     /** DnD 環境（ref 群） */
     env: DragEnvironment;
     /** DnD コントローラー */
@@ -37,7 +37,7 @@ export interface EditDndContextValue {
 
 const EditDndContext = createContext<EditDndContextValue | null>(null);
 
-export interface EditDndProviderProps {
+interface EditDndProviderProps {
     children: ReactNode;
     /** 編集モードかどうか */
     isEditMode: boolean;
@@ -51,7 +51,7 @@ export interface EditDndProviderProps {
     config?: Partial<DndConfig>;
 }
 
-export function EditDndProvider({
+function EditDndProvider({
     children,
     isEditMode,
     orientation = "sente",
@@ -145,7 +145,7 @@ export function EditDndProvider({
 /**
  * DnD コンテキストを使用
  */
-export function useEditDnd(): EditDndContextValue {
+function useEditDnd(): EditDndContextValue {
     const context = useContext(EditDndContext);
     if (!context) {
         throw new Error("useEditDnd must be used within EditDndProvider");
@@ -157,6 +157,6 @@ export function useEditDnd(): EditDndContextValue {
  * DnD コンテキストを使用（オプショナル）
  * Provider がない場合は null を返す
  */
-export function useEditDndOptional(): EditDndContextValue | null {
+function useEditDndOptional(): EditDndContextValue | null {
     return useContext(EditDndContext);
 }

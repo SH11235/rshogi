@@ -22,7 +22,7 @@ const PIECE_LABELS: Record<PieceType, string> = {
     P: "歩",
 };
 
-export interface DragGhostProps {
+interface DragGhostProps {
     /** DnD 状態 */
     dndState: DndState;
     /** オーナーの向き */
