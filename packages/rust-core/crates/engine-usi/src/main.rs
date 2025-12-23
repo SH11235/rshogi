@@ -144,7 +144,7 @@ impl UsiEngine {
     }
 
     fn maybe_report_large_pages(&mut self) {
-        if self.large_pages_reported || !cfg!(windows) {
+        if self.large_pages_reported {
             return;
         }
 
@@ -155,6 +155,8 @@ impl UsiEngine {
             return;
         }
 
+        // Windows: VirtualAlloc with MEM_LARGE_PAGES
+        // Linux: madvise(MADV_HUGEPAGE) によるhugepageヒント
         let payload = json!({
             "type": "info",
             "message": "Large Pages are used.",
