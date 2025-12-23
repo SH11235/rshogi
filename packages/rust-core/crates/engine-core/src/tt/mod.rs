@@ -8,6 +8,7 @@
 //! - 世代管理
 //! - prefetch
 
+mod alloc;
 mod entry;
 mod table;
 
