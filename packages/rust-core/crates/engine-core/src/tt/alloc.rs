@@ -49,7 +49,7 @@ impl Allocation {
 
         #[cfg(not(windows))]
         {
-            return alloc_unix(size, alignment);
+            alloc_unix(size, alignment)
         }
     }
 
