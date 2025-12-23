@@ -27,4 +27,4 @@ pub use diff::get_changed_features;
 pub use feature_transformer::FeatureTransformer;
 pub use features::{Feature, FeatureSet, HalfKP, HalfKPFeatureSet, TriggerEvent};
 pub use layers::{AffineTransform, ClippedReLU};
-pub use network::{evaluate, init_nnue, init_nnue_from_bytes, Network};
+pub use network::{evaluate, init_nnue, init_nnue_from_bytes, is_nnue_initialized, Network};
