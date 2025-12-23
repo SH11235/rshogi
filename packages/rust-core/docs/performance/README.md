@@ -415,6 +415,55 @@ quit"
 
 ---
 
+### NNUE Accumulator差分更新 (調査完了)
+
+**調査日**: 2025-12-23
+**結論**: **最適化余地なし** - YaneuraOuより高度な実装済みで、これ以上の改善は困難
+
+#### 背景
+
+NNUE評価の高速化のため、Accumulator（特徴量ベクトル）の差分更新効率を調査。`refresh_accumulator`（全計算）が3.33%のオーバーヘッドを占めており、差分更新の成功率向上で削減可能かを検証。
+
+#### 診断結果
+
+`--features engine-core/diagnostics` で差分更新成功率を計測:
+
+```
+diff_ok=76.0% | refresh=24.0%
+direct=66.5% | ancestor=9.4% | prev_nc=24.0%
+```
+
+| 指標 | 値 | 説明 |
+|------|---:|------|
+| diff_ok | 76.0% | 差分更新成功率 |
+| direct | 66.5% | 直前局面から差分更新 |
+| ancestor | 9.4% | 祖先探索で差分更新 |
+| prev_nc | 24.0% | 直前が未計算（祖先探索を試行） |
+| refresh | 24.0% | 全計算にフォールバック |
+
+#### 本実装 vs YaneuraOu
+
+| 項目 | YaneuraOu | 本実装 |
+|------|:--------:|:------:|
+| 直前局面チェック | ✅ | ✅ |
+| 祖先探索 | ❌ なし | ✅ 最大8手前 |
+| 複数手差分適用 | ❌ | ✅ `forward_update_incremental` |
+
+#### 祖先探索の効果
+
+- `prev_nc`（直前が未計算）のうち39%を祖先探索で救済
+- 約187万回/2000万評価のrefreshを回避
+
+#### `prev_nc`が24%発生する原因
+
+探索の特性（null move、LMRなど）で局面をスキップするため。Accumulator更新ロジックではなく**探索アルゴリズム側の問題**であり、Accumulator差分更新の最適化では解決できない。
+
+#### 結論
+
+本実装はYaneuraOuより高度な差分更新機構（祖先探索、複数手差分適用）を持っており、これ以上の改善余地はない。24%のrefreshは探索アルゴリズムの特性に起因する。
+
+---
+
 ## 計測方法
 
 ### 前提条件
@@ -524,3 +573,4 @@ PGOビルドの処理フロー:
 | 2025-12-23 | 計測結果更新（NNUE: MovePicker 11.46%, update_xray_for_square 4.43%, network::evaluate 3.49%、Material: eval_lv7_like 28.53%, direction_of 16.78%）。**NPS低下**: NNUE平均 544,882（-21%、690,008→544,882）、Material平均 443,925（-5%）。YaneuraOu比: NNUE 62%→49%、Material 30%→29%に低下。**ホットスポット変動**: `update_xray_for_square`がNNUE 2位（4.43%）、Material 3位（8.88%）に浮上。board_effect機能追加（fix-material-board_effectブランチ）によるオーバーヘッドと推測される |
 | 2025-12-23 | 計測結果更新（NNUE: MovePicker 12.37%, Network::evaluate 4.10%, search_node 2.98%、Material: eval_lv7_like 31.01%, direction_of 18.08%）。**NPS大幅回復**: NNUE平均 616,051（+13%、544,882→616,051）、Material平均 476,296（+7%、443,925→476,296）。YaneuraOu比: NNUE 49%→55%、Material 29%→31%に回復。**ホットスポット変動**: `update_xray_for_square`がランク外に（board_effect最適化の効果）、代わりに`update_long_effect_from`がNNUE 10位（1.25%）、Material 5位（3.23%）に。Material評価の`eval_lv7_like`が28.53%→31.01%、`direction_of`が16.78%→18.08%に相対上昇（他の処理が高速化した結果） |
 | 2025-12-23 | 計測結果更新（NNUE: MovePicker 10.84%, Network::evaluate 4.35%, refresh 3.33%、Material: eval_lv7_like 28.84%, direction_of 19.24%）。**NPS継続回復**: NNUE平均 679,895（+10%、616,051→679,895）、Material平均 467,583（-2%）。YaneuraOu比: NNUE 55%→61%に大幅回復。**ホットスポット変動**: `update_long_effect_from`がNNUEランク外に（board_effect計算の更なる最適化）。NNUE評価時の`MovePicker`が12.37%→10.84%に減少、`refresh_accumulator`が2.56%→3.33%に相対上昇。Material評価時は`eval_lv7_like`が31.01%→28.84%に減少、`direction_of`が18.08%→19.24%に微増 |
+| 2025-12-23 | **NNUE Accumulator差分更新調査完了**（最適化余地なし）。YaneuraOuより高度な実装（祖先探索、複数手差分適用）済み。診断結果: diff_ok=76.0%, refresh=24.0%。24%のrefreshは探索アルゴリズムの特性（null move, LMRなど）に起因 |
