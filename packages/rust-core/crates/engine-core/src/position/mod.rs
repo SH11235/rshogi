@@ -12,6 +12,7 @@
 //! （`put_piece` / `remove_piece` / `do_move` 系）を通じて更新されることを前提とし、
 //! 常に互いに整合しているように保つ。
 
+mod board_effect;
 pub mod json_conversion;
 mod movepicker_support;
 mod pos;
@@ -19,6 +20,7 @@ mod sfen;
 mod state;
 mod zobrist;
 
+pub(crate) use board_effect::BoardEffects;
 pub use pos::Position;
 pub use sfen::{SfenError, SFEN_HIRATE};
 pub use state::StateInfo;

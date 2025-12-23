@@ -10,7 +10,7 @@
 | コア数 | 32 |
 | OS | Ubuntu (Linux 6.8.0) |
 | アーキテクチャ | x86_64 |
-| 計測日 | 2025-12-23 (08:15更新) |
+| 計測日 | 2025-12-23 (11:27更新) |
 
 ---
 
@@ -24,21 +24,21 @@
 
 | 局面 | 説明 | Depth | NPS | bestmove |
 |:----:|------|:-----:|----:|----------|
-| 1 | 序盤（9手目） | 17 | 1,220,887 | 2e2d |
-| 2 | 中盤（詰将棋風） | 20 | 493,770 | 8d8f |
-| 3 | 終盤（王手飛車） | 15 | 612,543 | 5d6c+ |
-| 4 | 終盤（詰み筋） | 17 | 432,832 | S*2h |
-| **平均** | - | - | **690,008** | - |
+| 1 | 序盤（9手目） | 17 | 851,132 | 2e2d |
+| 2 | 中盤（詰将棋風） | 20 | 431,160 | 8d8f |
+| 3 | 終盤（王手飛車） | 15 | 523,240 | 5d6c+ |
+| 4 | 終盤（詰み筋） | 17 | 373,995 | S*2h |
+| **平均** | - | - | **544,882** | - |
 
 #### Material評価時（NNUE無効、MaterialLevel=9）
 
 | 局面 | 説明 | Depth | NPS | bestmove |
 |:----:|------|:-----:|----:|----------|
-| 1 | 序盤（9手目） | 17 | 549,841 | 5i6h |
-| 2 | 中盤（詰将棋風） | 18 | 432,034 | 8d7d |
-| 3 | 終盤（王手飛車） | 18 | 450,176 | N*4d |
-| 4 | 終盤（詰み筋） | 17 | 433,655 | G*1c |
-| **平均** | - | - | **466,427** | - |
+| 1 | 序盤（9手目） | 17 | 525,429 | 5i6h |
+| 2 | 中盤（詰将棋風） | 18 | 408,568 | 8d7d |
+| 3 | 終盤（王手飛車） | 17 | 431,195 | G*6b |
+| 4 | 終盤（詰み筋） | 17 | 410,507 | G*1c |
+| **平均** | - | - | **443,925** | - |
 
 ### VNNI効果測定（別端末: Intel Cascade Lake-X）
 
@@ -55,9 +55,9 @@
 
 | エンジン | NNUE NPS | Material NPS | 備考 |
 |---------|--------:|-------------:|------|
-| 本エンジン | 690,008 | 466,427 | `cargo build --release` |
+| 本エンジン | 544,882 | 443,925 | `cargo build --release` |
 | YaneuraOu | 1,118,219 | 1,545,172 | 参考値 |
-| **対YaneuraOu比** | **62%** | **30%** | - |
+| **対YaneuraOu比** | **49%** | **29%** | - |
 
 #### PGOビルド（本番用）
 
@@ -132,29 +132,30 @@
 
 | 順位 | 関数 | CPU% | 状態 | 備考 |
 |------|------|------|------|------|
-| 1 | `MovePicker::next_move` | 12.78% | 調査完了 | [詳細](#movepicker-調査完了) |
-| 2 | `network::evaluate` | 4.31% | - | NNUE推論メイン |
-| 3 | `search_node` | 3.00% | - | 探索メインループ |
-| 4 | `refresh_accumulator` | 2.78% | - | NNUE全計算 |
-| 5 | `attackers_to_occ` | 2.77% | - | 利き計算 |
-| 6 | `do_move_with_prefetch` | 2.07% | - | 指し手実行 |
-| 7 | `update_accumulator` | 1.69% | - | Accumulator差分更新 |
-| 8 | `__memmove_avx` | 1.59% | - | メモリコピー |
-| 9 | `check_move_mate` | 1.57% | - | 1手詰め判定 |
+| 1 | `MovePicker::next_move` | 11.46% | 調査完了 | [詳細](#movepicker-調査完了) |
+| 2 | `update_xray_for_square` | 4.43% | - | X線利き更新 |
+| 3 | `network::evaluate` | 3.49% | - | NNUE推論メイン |
+| 4 | `search_node` | 2.65% | - | 探索メインループ |
+| 5 | `attackers_to_occ` | 2.49% | - | 利き計算 |
+| 6 | `refresh_accumulator` | 2.45% | - | NNUE全計算 |
+| 7 | `do_move_with_prefetch` | 2.26% | - | 指し手実行 |
+| 8 | `update_accumulator` | 1.36% | - | Accumulator差分更新 |
+| 9 | `check_move_mate` | 1.33% | - | 1手詰め判定 |
+| 10 | `__memmove_avx` | 1.31% | - | メモリコピー |
 | - | `partial_insertion_sort` | - | 調査完了 | MovePicker内部 |
 
-**注**: kernelオーバーヘッド（`__fsnotify_parent` 4.41%, `dput` 3.64%）はNNUEファイル読み込み時のもので、実際の探索時間には影響しない。
+**注**: kernelオーバーヘッド（`__fsnotify_parent` 4.47%, `dput` 3.72%）はNNUEファイル読み込み時のもので、実際の探索時間には影響しない。
 
 #### NNUE関連の内訳
 
 | 関数 | CPU% | 説明 |
 |------|------|------|
-| `network::evaluate` | 4.31% | NNUE推論メイン |
-| `refresh_accumulator` | 2.78% | Accumulator全計算（差分更新失敗時） |
-| `do_move_with_prefetch` | 2.07% | 指し手実行 |
-| `update_accumulator` | 1.69% | Accumulator差分更新 |
-| `check_move_mate` | 1.57% | 1手詰め判定 |
-| `append_active_indices` | 1.30% | 特徴量インデックス取得 |
+| `network::evaluate` | 3.49% | NNUE推論メイン |
+| `refresh_accumulator` | 2.45% | Accumulator全計算（差分更新失敗時） |
+| `do_move_with_prefetch` | 2.26% | 指し手実行 |
+| `update_accumulator` | 1.36% | Accumulator差分更新 |
+| `check_move_mate` | 1.33% | 1手詰め判定 |
+| `append_active_indices` | 1.16% | 特徴量インデックス取得 |
 
 ### Material評価時（NNUE無効、release build）
 
@@ -162,16 +163,16 @@
 
 | 順位 | 関数 | CPU% | 備考 |
 |------|------|------|------|
-| 1 | `eval_lv7_like` | 28.84% | Material評価のメイン関数 |
-| 2 | `direction_of` | 17.51% | 方向計算 |
-| 3 | `compute_board_effects` | 9.33% | 盤面効果計算 |
-| 4 | `MovePicker::next_move` | 8.34% | 指し手選択 |
-| 5 | `search_node` | 4.77% | 探索メインループ |
-| 6 | `check_move_mate` | 2.64% | 1手詰め判定 |
-| 7 | `do_move` | 2.09% | 指し手実行 |
-| 8 | `__memmove_avx` | 2.02% | メモリコピー |
-| 9 | `attackers_to_occ` | 1.79% | 利き計算 |
-| 10 | `see_ge` | 1.30% | SEE計算 |
+| 1 | `eval_lv7_like` | 28.53% | Material評価のメイン関数 |
+| 2 | `direction_of` | 16.78% | 方向計算 |
+| 3 | `update_xray_for_square` | 8.88% | X線利き更新 |
+| 4 | `MovePicker::next_move` | 7.67% | 指し手選択 |
+| 5 | `search_node` | 4.39% | 探索メインループ |
+| 6 | `do_move_with_prefetch` | 3.22% | 指し手実行 |
+| 7 | `check_move_mate` | 2.45% | 1手詰め判定 |
+| 8 | `attackers_to_occ` | 1.94% | 利き計算 |
+| 9 | `__memmove_avx` | 1.76% | メモリコピー |
+| 10 | `see_ge` | 1.42% | SEE計算 |
 
 **注**: Material評価は1回の評価計算は軽量だが、評価精度が低いため枝刈りの効率が悪く、NPSはNNUEと同等かそれ以下になることが多い。
 
@@ -520,3 +521,4 @@ PGOビルドの処理フロー:
 | 2025-12-23 | 計測結果更新（NNUE: MovePicker 11.10%, network::evaluate 3.74%, attackers_to_occ 3.05%、Material: eval_lv7_like 27.39%, direction_of 15.59%）。NPS: NNUE平均 665,521、Material平均 454,422。計測誤差の範囲内。Material評価時の順位変動: `direction_of`が17.23%→15.59%に減少、`see_ge`が9位に新登場（1.58%） |
 | 2025-12-23 | 計測結果更新（NNUE: MovePicker 12.78%, network::evaluate 4.31%, search_node 3.00%、Material: eval_lv7_like 28.84%, direction_of 17.51%）。**NPS向上**: NNUE平均 690,008（+3.7%、665,521→690,008）、Material平均 466,427（+2.6%）。YaneuraOu比: NNUE 59%→62%、Material 29%→30%に改善。NNUE順位変動: `do_move_with_prefetch`が6位（2.07%）、`update_accumulator`が7位（1.69%）に浮上。`check_move_mate`が2.03%→1.57%に約23%減少。**perf stat セクション新設**: ハードウェアカウンタ計測結果を追加。**Large Pages + Prefetch最適化効果**: mainブランチとの比較でdTLB-load-missesがNNUE -60%、Material -88%と大幅減少（TTにLarge Pages導入の効果）。cache-missesは微増（+9〜12%）だがTLBミス減少で相殺される可能性 |
 | 2025-12-23 | **コード品質改善**: `cont_history_ptr()`と`set_cont_history_for_move()`に`debug_assert!`境界チェック追加、`NonNull<PieceToHistory>`のSAFETYドキュメント追加、`unsafe impl Send`のSAFETYコメント詳細化、MovePicker内のContinuationHistoryインデックス4スキップの理由コメント追加、Sentinel初期化テスト追加 |
+| 2025-12-23 | 計測結果更新（NNUE: MovePicker 11.46%, update_xray_for_square 4.43%, network::evaluate 3.49%、Material: eval_lv7_like 28.53%, direction_of 16.78%）。**NPS低下**: NNUE平均 544,882（-21%、690,008→544,882）、Material平均 443,925（-5%）。YaneuraOu比: NNUE 62%→49%、Material 30%→29%に低下。**ホットスポット変動**: `update_xray_for_square`がNNUE 2位（4.43%）、Material 3位（8.88%）に浮上。board_effect機能追加（fix-material-board_effectブランチ）によるオーバーヘッドと推測される |
