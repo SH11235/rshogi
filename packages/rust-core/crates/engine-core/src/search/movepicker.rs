@@ -124,7 +124,7 @@ pub struct MovePicker<'a> {
     main_history: &'a ButterflyHistory,
     low_ply_history: &'a LowPlyHistory,
     capture_history: &'a CapturePieceToHistory,
-    continuation_history: [Option<&'a PieceToHistory>; 6],
+    continuation_history: [&'a PieceToHistory; 6],
     pawn_history: &'a PawnHistory,
 
     // 状態
@@ -154,7 +154,7 @@ impl<'a> MovePicker<'a> {
         main_history: &'a ButterflyHistory,
         low_ply_history: &'a LowPlyHistory,
         capture_history: &'a CapturePieceToHistory,
-        continuation_history: [Option<&'a PieceToHistory>; 6],
+        continuation_history: [&'a PieceToHistory; 6],
         pawn_history: &'a PawnHistory,
         ply: i32,
         generate_all_legal_moves: bool,
@@ -212,7 +212,7 @@ impl<'a> MovePicker<'a> {
         main_history: &'a ButterflyHistory,
         low_ply_history: &'a LowPlyHistory,
         capture_history: &'a CapturePieceToHistory,
-        continuation_history: [Option<&'a PieceToHistory>; 6],
+        continuation_history: [&'a PieceToHistory; 6],
         pawn_history: &'a PawnHistory,
         ply: i32,
         generate_all_legal_moves: bool,
@@ -257,7 +257,7 @@ impl<'a> MovePicker<'a> {
         main_history: &'a ButterflyHistory,
         low_ply_history: &'a LowPlyHistory,
         capture_history: &'a CapturePieceToHistory,
-        continuation_history: [Option<&'a PieceToHistory>; 6],
+        continuation_history: [&'a PieceToHistory; 6],
         pawn_history: &'a PawnHistory,
         ply: i32,
         generate_all_legal_moves: bool,
@@ -577,11 +577,12 @@ impl<'a> MovePicker<'a> {
             // PawnHistory (×2)
             value += 2 * self.pawn_history.get(pawn_idx, pc, to) as i32;
 
-            // ContinuationHistory (6個)
+            // ContinuationHistory (6個のうち5個を使用)
+            // インデックス4 (ply-5) はスキップ: YaneuraOu準拠で、ply-5は統計的に有効性が低いため除外
+            // 参照: yaneuraou-search.cpp の continuationHistory 配列の使用箇所
             for (idx, weight) in [(0, 1), (1, 1), (2, 1), (3, 1), (5, 1)] {
-                if let Some(ch) = self.continuation_history[idx] {
-                    value += weight * ch.get(pc, to) as i32;
-                }
+                let ch = self.continuation_history[idx];
+                value += weight * ch.get(pc, to) as i32;
             }
 
             // 王手ボーナス
@@ -617,9 +618,8 @@ impl<'a> MovePicker<'a> {
                 // 静かな手はHistory
                 let mut value = self.main_history.get(us, m) as i32;
 
-                if let Some(ch) = self.continuation_history[0] {
-                    value += ch.get(pc, to) as i32;
-                }
+                let ch = self.continuation_history[0];
+                value += ch.get(pc, to) as i32;
 
                 if self.ply < LOW_PLY_HISTORY_SIZE as i32 {
                     let ply_idx = self.ply as usize;

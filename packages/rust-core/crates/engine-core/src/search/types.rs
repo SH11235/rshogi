@@ -11,6 +11,9 @@ use crate::movegen::{generate_legal, MoveList};
 use crate::position::Position;
 use crate::types::{Move, Piece, RepetitionState, Square, Value, MAX_PLY};
 
+use super::history::PieceToHistory;
+use std::ptr::NonNull;
+
 // =============================================================================
 // 定数
 // =============================================================================
@@ -86,6 +89,19 @@ pub struct Stack {
     /// ContinuationHistoryへの参照インデックス（旧方式、互換性のため残す）
     pub cont_history_idx: usize,
 
+    /// ContinuationHistoryへの参照（YaneuraOu方式、MovePicker直結）
+    ///
+    /// sentinelをセットする前提のためOptionではなく生ポインタで保持する。
+    ///
+    /// # Safety
+    ///
+    /// このポインタは以下の不変条件を満たす：
+    /// - 常に有効な `PieceToHistory` テーブルを指す（`dangling()` は初期値のみ）
+    /// - `SearchWorker::reset_cont_history_ptrs()` でsentinelに初期化される
+    /// - `SearchWorker::set_cont_history_for_move()` で `continuation_history` 内のテーブルを指すよう更新される
+    /// - 参照先は `SearchWorker::history` フィールドが所有しており、`SearchWorker` の生存期間中は有効
+    pub cont_history_ptr: NonNull<PieceToHistory>,
+
     /// ContinuationHistoryキー（YaneuraOu方式）
     /// do_move後に設定し、後続ノードでContinuationHistory参照に使用
     pub cont_hist_key: Option<ContHistKey>,
@@ -132,6 +148,7 @@ impl Default for Stack {
         Self {
             pv: Vec::new(),
             cont_history_idx: 0,
+            cont_history_ptr: NonNull::dangling(),
             cont_hist_key: None,
             ply: 0,
             current_move: Move::NONE,
