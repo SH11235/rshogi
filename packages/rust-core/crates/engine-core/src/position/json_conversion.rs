@@ -90,6 +90,7 @@ impl Position {
         position.compute_hash();
         position.update_blockers_and_pinners();
         position.update_check_squares();
+        position.recompute_board_effects();
 
         let them = !position.side_to_move;
         position.state_mut().checkers =

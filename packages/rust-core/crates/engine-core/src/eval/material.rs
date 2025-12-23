@@ -1,11 +1,7 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::LazyLock;
 
-use crate::bitboard::{
-    bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect, knight_effect,
-    lance_effect, pawn_effect, rook_effect, silver_effect,
-};
-use crate::position::Position;
+use crate::position::{BoardEffects, Position};
 use crate::types::{Color, Piece, PieceType, Square, Value};
 
 /// Material評価の適用レベル（YaneuraOu MaterialLv に対応）
@@ -77,6 +73,18 @@ pub fn set_material_level(level: MaterialLevel) {
     MATERIAL_LEVEL.store(level.value(), Ordering::Relaxed);
 }
 
+/// Material評価で盤面の利きを使うか
+pub fn material_needs_board_effects() -> bool {
+    matches!(
+        get_material_level(),
+        MaterialLevel::Lv3
+            | MaterialLevel::Lv4
+            | MaterialLevel::Lv7
+            | MaterialLevel::Lv8
+            | MaterialLevel::Lv9
+    )
+}
+
 /// Apery(WCSC26)準拠の駒価値
 pub(crate) fn base_piece_value(pt: PieceType) -> i32 {
     match pt {
@@ -128,56 +136,6 @@ pub fn compute_material_value(pos: &Position) -> Value {
     }
 
     Value::new(score)
-}
-
-/// 駒の利き数マップ
-#[derive(Clone)]
-struct BoardEffects {
-    counts: [[u8; Square::NUM]; Color::NUM],
-}
-
-impl BoardEffects {
-    #[inline]
-    fn effect(&self, color: Color, sq: Square) -> u8 {
-        self.counts[color.index()][sq.index()]
-    }
-}
-
-fn compute_board_effects(pos: &Position) -> BoardEffects {
-    let mut counts = [[0u8; Square::NUM]; Color::NUM];
-    let occupied = pos.occupied();
-
-    for color in [Color::Black, Color::White] {
-        let bb = pos.pieces_c(color);
-        for sq in bb.iter() {
-            let pc = pos.piece_on(sq);
-            let pt = pc.piece_type();
-            let effect_bb = match pt {
-                PieceType::Pawn => pawn_effect(color, sq),
-                PieceType::Lance => lance_effect(color, sq, occupied),
-                PieceType::Knight => knight_effect(color, sq),
-                PieceType::Silver => silver_effect(color, sq),
-                PieceType::Gold
-                | PieceType::ProPawn
-                | PieceType::ProLance
-                | PieceType::ProKnight
-                | PieceType::ProSilver => gold_effect(color, sq),
-                PieceType::Bishop => bishop_effect(sq, occupied),
-                PieceType::Rook => rook_effect(sq, occupied),
-                PieceType::Horse => horse_effect(sq, occupied),
-                PieceType::Dragon => dragon_effect(sq, occupied),
-                PieceType::King => king_effect(sq),
-            };
-
-            for target in effect_bb.iter() {
-                let entry = &mut counts[color.index()][target.index()];
-                // 利きが多くても評価式側でmin()するので飽和で十分
-                *entry = entry.saturating_add(1);
-            }
-        }
-    }
-
-    BoardEffects { counts }
 }
 
 #[inline]
@@ -532,24 +490,24 @@ pub fn evaluate_material(pos: &Position) -> Value {
         MaterialLevel::Lv1 => eval_lv1(pos),
         MaterialLevel::Lv2 => eval_lv2(pos),
         MaterialLevel::Lv3 => {
-            let effects = compute_board_effects(pos);
-            eval_lv3(pos, &effects)
+            let effects = pos.board_effects();
+            eval_lv3(pos, effects)
         }
         MaterialLevel::Lv4 => {
-            let effects = compute_board_effects(pos);
-            eval_lv4(pos, &effects)
+            let effects = pos.board_effects();
+            eval_lv4(pos, effects)
         }
         MaterialLevel::Lv7 => {
-            let effects = compute_board_effects(pos);
-            eval_lv7(pos, &effects)
+            let effects = pos.board_effects();
+            eval_lv7(pos, effects)
         }
         MaterialLevel::Lv8 => {
-            let effects = compute_board_effects(pos);
-            eval_lv8(pos, &effects)
+            let effects = pos.board_effects();
+            eval_lv8(pos, effects)
         }
         MaterialLevel::Lv9 => {
-            let effects = compute_board_effects(pos);
-            eval_lv9(pos, &effects)
+            let effects = pos.board_effects();
+            eval_lv9(pos, effects)
         }
     };
 

@@ -1,18 +1,22 @@
 //! 局面（Position）
 
+use super::board_effect::{
+    compute_board_effects_and_long_effects, rewind_by_capturing_piece, rewind_by_dropping_piece,
+    rewind_by_no_capturing_piece, update_by_capturing_piece, update_by_dropping_piece,
+    update_by_no_capturing_piece, BoardEffects, LongEffects,
+};
+use super::state::StateInfo;
+use super::zobrist::{zobrist_hand, zobrist_psq, zobrist_side};
 use crate::bitboard::{
     bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect, knight_effect,
     lance_effect, pawn_effect, rook_effect, silver_effect, Bitboard,
 };
-use crate::eval::material::{hand_piece_value, signed_piece_value};
+use crate::eval::material::{hand_piece_value, material_needs_board_effects, signed_piece_value};
 use crate::nnue::{ChangedPiece, DirtyPiece, HandChange};
 use crate::prefetch::{NoPrefetch, TtPrefetch};
 use crate::types::{
     Color, Hand, Move, Piece, PieceType, PieceTypeSet, RepetitionState, Square, Value,
 };
-
-use super::state::StateInfo;
-use super::zobrist::{zobrist_hand, zobrist_psq, zobrist_side};
 
 /// 小駒（香・桂・銀・金とその成り駒）かどうか
 #[inline]
@@ -40,6 +44,14 @@ pub struct Position {
     pub(super) by_type: [Bitboard; PieceType::NUM + 1],
     /// 先後別Bitboard
     pub(super) by_color: [Bitboard; Color::NUM],
+
+    // === 盤面効果 ===
+    /// 各升の利き数 [Color][Square]
+    board_effects: BoardEffects,
+    /// 長い利きの方向（盤面効果の差分更新用）
+    long_effects: LongEffects,
+    /// board_effectsが最新かどうか（手動配置時の整合性維持用）
+    board_effects_dirty: bool,
 
     // === 合成Bitboard（attackers_to_occ最適化用）===
     /// 金相当の駒（Gold | ProPawn | ProLance | ProKnight | ProSilver）
@@ -111,6 +123,9 @@ impl Position {
             board: [Piece::NONE; Square::NUM],
             by_type: [Bitboard::EMPTY; PieceType::NUM + 1],
             by_color: [Bitboard::EMPTY; Color::NUM],
+            board_effects: BoardEffects::new(),
+            long_effects: LongEffects::new(),
+            board_effects_dirty: false,
             golds_bb: Bitboard::EMPTY,
             bishop_horse_bb: Bitboard::EMPTY,
             rook_dragon_bb: Bitboard::EMPTY,
@@ -358,6 +373,77 @@ impl Position {
         self.cur_state().key()
     }
 
+    /// 盤面の利き数を取得
+    #[inline]
+    pub fn board_effect(&self, color: Color, sq: Square) -> u8 {
+        debug_assert!(!self.board_effects_dirty, "board_effects is dirty");
+        self.board_effects.effect(color, sq)
+    }
+
+    /// 盤面の利き数マップを取得
+    #[inline]
+    pub(crate) fn board_effects(&self) -> &BoardEffects {
+        debug_assert!(!self.board_effects_dirty, "board_effects is dirty");
+        &self.board_effects
+    }
+
+    #[inline]
+    fn should_update_board_effects() -> bool {
+        if crate::nnue::is_nnue_initialized() {
+            return false;
+        }
+        material_needs_board_effects()
+    }
+
+    #[inline]
+    fn ensure_board_effects(&mut self) {
+        if self.board_effects_dirty {
+            self.recompute_board_effects();
+        }
+    }
+
+    pub(crate) fn recompute_board_effects(&mut self) {
+        let (effects, long_effects) = compute_board_effects_and_long_effects(self);
+        self.board_effects = effects;
+        self.long_effects = long_effects;
+        self.board_effects_dirty = false;
+    }
+
+    #[cfg(debug_assertions)]
+    fn debug_verify_board_effects(&self) {
+        let (expected, expected_long) = compute_board_effects_and_long_effects(self);
+        if expected != self.board_effects {
+            for color in [Color::Black, Color::White] {
+                for sq in Square::all() {
+                    let actual = self.board_effects.effect(color, sq);
+                    let want = expected.effect(color, sq);
+                    if actual != want {
+                        eprintln!(
+                            "board_effect mismatch: color={color:?}, sq={sq:?}, actual={actual}, expected={want}, sfen={}",
+                            self.to_sfen()
+                        );
+                        break;
+                    }
+                }
+            }
+            panic!("board_effect mismatch");
+        }
+        if expected_long != self.long_effects {
+            for sq in Square::all() {
+                let actual = self.long_effects.long_effect16(sq);
+                let want = expected_long.long_effect16(sq);
+                if actual != want {
+                    eprintln!(
+                        "long_effect mismatch: sq={sq:?}, actual=0x{actual:04x}, expected=0x{want:04x}, sfen={}",
+                        self.to_sfen()
+                    );
+                    break;
+                }
+            }
+            panic!("long_effect mismatch");
+        }
+    }
+
     /// 歩ハッシュ
     #[inline]
     pub fn pawn_key(&self) -> u64 {
@@ -508,6 +594,11 @@ impl Position {
 
     /// 盤面に駒を置く
     pub(super) fn put_piece(&mut self, pc: Piece, sq: Square) {
+        self.put_piece_internal(pc, sq);
+        self.board_effects_dirty = true;
+    }
+
+    fn put_piece_internal(&mut self, pc: Piece, sq: Square) {
         debug_assert!(self.board[sq.index()].is_none());
         let pt = pc.piece_type();
 
@@ -526,7 +617,13 @@ impl Position {
     }
 
     /// 盤面から駒を取り除く
+    #[cfg(test)]
     fn remove_piece(&mut self, sq: Square) {
+        self.remove_piece_internal(sq);
+        self.board_effects_dirty = true;
+    }
+
+    fn remove_piece_internal(&mut self, sq: Square) {
         let pc = self.board[sq.index()];
         debug_assert!(pc.is_some());
         let pt = pc.piece_type();
@@ -602,6 +699,7 @@ impl Position {
         let us = self.side_to_move;
         let them = !us;
         let prev_continuous = self.cur_state().continuous_check;
+        let update_board_effects = Self::should_update_board_effects();
 
         // 現在の占有とblockers/pinners、玉位置を退避（差分更新で利用）
         let prev_blockers = self.cur_state().blockers_for_king;
@@ -626,12 +724,29 @@ impl Position {
         let moved_to: Square;
         let moved_pt: PieceType;
 
+        if update_board_effects {
+            self.ensure_board_effects();
+        } else {
+            self.board_effects_dirty = true;
+        }
+
         if m.is_drop() {
             let pt = m.drop_piece_type();
             let to = m.to();
             let pc = Piece::new(us, pt);
             moved_to = to;
             moved_pt = pt;
+
+            if update_board_effects {
+                let occupied_before = self.occupied();
+                update_by_dropping_piece(
+                    &mut self.board_effects,
+                    &mut self.long_effects,
+                    occupied_before,
+                    to,
+                    pc,
+                );
+            }
 
             // DirtyPiece: 手駒の変化（us の pt が 1 減る）
             let old_hand = self.hand[us.index()];
@@ -650,7 +765,7 @@ impl Position {
             // material_value: 打ち駒では手駒→盤上で価値は変化しない
 
             // 盤上に配置
-            self.put_piece(pc, to);
+            self.put_piece_internal(pc, to);
             new_state.board_key ^= zobrist_psq(pc, to);
             self.xor_partial_keys(&mut new_state, pc, to);
 
@@ -690,6 +805,36 @@ impl Position {
             } else {
                 pc.piece_type()
             };
+            let moved_after_pc = if m.is_promote() {
+                pc.promote().unwrap()
+            } else {
+                pc
+            };
+            if update_board_effects {
+                let occupied_before = self.occupied();
+                if captured.is_some() {
+                    update_by_capturing_piece(
+                        &mut self.board_effects,
+                        &mut self.long_effects,
+                        occupied_before,
+                        from,
+                        to,
+                        pc,
+                        moved_after_pc,
+                        captured,
+                    );
+                } else {
+                    update_by_no_capturing_piece(
+                        &mut self.board_effects,
+                        &mut self.long_effects,
+                        occupied_before,
+                        from,
+                        to,
+                        pc,
+                        moved_after_pc,
+                    );
+                }
+            }
 
             // 駒を取る場合
             if captured.is_some() {
@@ -701,7 +846,7 @@ impl Position {
                     m.to_usi(),
                     self.to_sfen()
                 );
-                self.remove_piece(to);
+                self.remove_piece_internal(to);
                 new_state.board_key ^= zobrist_psq(captured, to);
                 self.xor_partial_keys(&mut new_state, captured, to);
 
@@ -740,22 +885,17 @@ impl Position {
             new_state.captured_piece = captured;
 
             // 駒を移動
-            self.remove_piece(from);
+            self.remove_piece_internal(from);
             new_state.board_key ^= zobrist_psq(pc, from);
             self.xor_partial_keys(&mut new_state, pc, from);
 
-            let moved_pc = if m.is_promote() {
-                pc.promote().unwrap()
-            } else {
-                pc
-            };
-            self.put_piece(moved_pc, to);
-            new_state.board_key ^= zobrist_psq(moved_pc, to);
-            self.xor_partial_keys(&mut new_state, moved_pc, to);
+            self.put_piece_internal(moved_after_pc, to);
+            new_state.board_key ^= zobrist_psq(moved_after_pc, to);
+            self.xor_partial_keys(&mut new_state, moved_after_pc, to);
 
             // 成りによるmaterial差分
-            if moved_pc != pc {
-                material_value += signed_piece_value(moved_pc) - signed_piece_value(pc);
+            if moved_after_pc != pc {
+                material_value += signed_piece_value(moved_after_pc) - signed_piece_value(pc);
             }
 
             // 玉の移動
@@ -769,7 +909,7 @@ impl Position {
                 color: us,
                 old_piece: pc,
                 old_sq: Some(from),
-                new_piece: moved_pc,
+                new_piece: moved_after_pc,
                 new_sq: Some(to),
             });
 
@@ -900,6 +1040,11 @@ impl Position {
         // 11. 王手マスの更新
         self.update_check_squares();
 
+        #[cfg(debug_assertions)]
+        if update_board_effects {
+            self.debug_verify_board_effects();
+        }
+
         dirty_piece
     }
 
@@ -911,16 +1056,34 @@ impl Position {
         let us = self.side_to_move;
         let captured = self.cur_state().captured_piece;
         let prev_idx = self.cur_state().previous.expect("No previous state for undo");
+        let update_board_effects = Self::should_update_board_effects();
+        if update_board_effects {
+            self.ensure_board_effects();
+        } else {
+            self.board_effects_dirty = true;
+        }
 
         // 2. 駒の移動を戻す
         if m.is_drop() {
             let pt = m.drop_piece_type();
             let to = m.to();
+            let moved_pc = self.piece_on(to);
 
             // 盤上から除去
-            self.remove_piece(to);
+            self.remove_piece_internal(to);
             // 手駒に戻す
             self.hand[us.index()] = self.hand[us.index()].add(pt);
+
+            if update_board_effects {
+                let occupied_after = self.occupied();
+                rewind_by_dropping_piece(
+                    &mut self.board_effects,
+                    &mut self.long_effects,
+                    occupied_after,
+                    to,
+                    moved_pc,
+                );
+            }
         } else {
             let from = m.from();
             let to = m.to();
@@ -931,26 +1094,66 @@ impl Position {
                 moved_pc
             };
 
-            // 駒を元の位置に戻す
-            self.remove_piece(to);
-            self.put_piece(original_pc, from);
-
-            // 玉の移動を戻す
-            if original_pc.piece_type() == PieceType::King {
-                self.king_square[us.index()] = from;
-            }
-
-            // 取った駒を復元
             if captured.is_some() {
-                self.put_piece(captured, to);
+                // 駒を元の位置に戻す
+                self.remove_piece_internal(to);
+                self.put_piece_internal(captured, to);
                 // 手駒から除去
                 let cap_pt = captured.piece_type().unpromote();
                 self.hand[us.index()] = self.hand[us.index()].sub(cap_pt);
+
+                self.put_piece_internal(original_pc, from);
+
+                // 玉の移動を戻す
+                if original_pc.piece_type() == PieceType::King {
+                    self.king_square[us.index()] = from;
+                }
+
+                if update_board_effects {
+                    let occupied_after = self.occupied();
+                    rewind_by_capturing_piece(
+                        &mut self.board_effects,
+                        &mut self.long_effects,
+                        occupied_after,
+                        from,
+                        to,
+                        original_pc,
+                        moved_pc,
+                        captured,
+                    );
+                }
+            } else {
+                // 駒を元の位置に戻す
+                self.remove_piece_internal(to);
+                self.put_piece_internal(original_pc, from);
+
+                // 玉の移動を戻す
+                if original_pc.piece_type() == PieceType::King {
+                    self.king_square[us.index()] = from;
+                }
+
+                if update_board_effects {
+                    let occupied_after = self.occupied();
+                    rewind_by_no_capturing_piece(
+                        &mut self.board_effects,
+                        &mut self.long_effects,
+                        occupied_after,
+                        from,
+                        to,
+                        original_pc,
+                        moved_pc,
+                    );
+                }
             }
         }
 
         // 3. StateInfoを戻す
         self.state_idx = prev_idx;
+
+        #[cfg(debug_assertions)]
+        if update_board_effects {
+            self.debug_verify_board_effects();
+        }
     }
 
     /// null moveを実行

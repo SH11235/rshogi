@@ -163,6 +163,11 @@ pub fn init_nnue_from_bytes(bytes: &[u8]) -> io::Result<()> {
         .map_err(|_| io::Error::new(io::ErrorKind::AlreadyExists, "NNUE already initialized"))
 }
 
+/// NNUEが初期化済みかどうか
+pub fn is_nnue_initialized() -> bool {
+    NETWORK.get().is_some()
+}
+
 /// 局面を評価
 ///
 /// AccumulatorStack を使って差分更新し、計算済みなら再利用する。

@@ -83,6 +83,9 @@ impl Position {
         self.update_blockers_and_pinners();
         self.update_check_squares();
 
+        // 盤面の利き数を再計算
+        self.recompute_board_effects();
+
         // 王手駒の計算
         let them = !self.side_to_move;
         self.state_mut().checkers =
