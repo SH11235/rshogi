@@ -31,6 +31,14 @@ import {
     MatchSettingsPanel,
     type SideSetting,
 } from "./shogi-match/components/MatchSettingsPanel";
+import {
+    applyDropResult,
+    DeleteZone,
+    DragGhost,
+    useDragEnvironment,
+    usePieceDnd,
+    type DropResult,
+} from "./shogi-match/dnd";
 
 // EngineOption 型を外部に再エクスポート
 export type { EngineOption };
@@ -102,6 +110,10 @@ interface PlayerHandSectionProps {
     selectedPiece: PieceType | null;
     isActive: boolean;
     onHandSelect: (piece: PieceType) => void;
+    /** DnD 用 PointerDown ハンドラ */
+    onPiecePointerDown?: (owner: Player, pieceType: PieceType, e: React.PointerEvent) => void;
+    /** DnD ヒットテスト用の ref */
+    handRef?: React.RefObject<HTMLDivElement | null>;
 }
 
 function PlayerHandSection({
@@ -111,9 +123,11 @@ function PlayerHandSection({
     selectedPiece,
     isActive,
     onHandSelect,
+    onPiecePointerDown,
+    handRef,
 }: PlayerHandSectionProps): ReactElement {
     return (
-        <div>
+        <div ref={handRef}>
             <div style={TEXT_STYLES.handLabel}>{label}</div>
             <HandPiecesDisplay
                 owner={owner}
@@ -121,6 +135,7 @@ function PlayerHandSection({
                 selectedPiece={selectedPiece}
                 isActive={isActive}
                 onHandSelect={onHandSelect}
+                onPiecePointerDown={onPiecePointerDown}
             />
         </div>
     );
@@ -215,6 +230,11 @@ export function ShogiMatch({
             isActive: !isEditMode && position.turn === owner && sides[owner].role === "human",
         };
     };
+
+    // DnD 環境（ref 管理）
+    const dndEnv = useDragEnvironment({
+        orientation: flipBoard ? "gote" : "sente",
+    });
 
     const positionRef = useRef<PositionState>(position);
     const movesRef = useRef<string[]>(moves);
@@ -512,6 +532,67 @@ export function ShogiMatch({
         setIsMatchRunning(false);
         void refreshStartSfen(nextPosition);
     };
+
+    // DnD ドロップハンドラ
+    const handleDndDrop = useCallback(
+        (result: DropResult) => {
+            if (!isEditMode) return;
+
+            const applied = applyDropResult(result, positionRef.current);
+            if (!applied.ok) {
+                setMessage(applied.error ?? "ドロップに失敗しました");
+                return;
+            }
+
+            applyEditedPosition(applied.next);
+        },
+        [isEditMode],
+    );
+
+    // DnD コントローラー
+    const dndController = usePieceDnd({
+        env: dndEnv,
+        onDrop: handleDndDrop,
+        disabled: !isEditMode,
+    });
+
+    // DnD ドラッグ開始ハンドラ（盤上の駒）
+    const handlePiecePointerDown = useCallback(
+        (
+            square: string,
+            piece: { owner: "sente" | "gote"; type: string; promoted?: boolean },
+            e: React.PointerEvent,
+        ) => {
+            if (!isEditMode) return;
+
+            const origin = { type: "board" as const, square: square as Square };
+            const payload = {
+                owner: piece.owner as Player,
+                pieceType: piece.type as PieceType,
+                isPromoted: piece.promoted ?? false,
+            };
+
+            dndController.startDrag(origin, payload, e);
+        },
+        [isEditMode, dndController],
+    );
+
+    // DnD ドラッグ開始ハンドラ（持ち駒）
+    const handleHandPiecePointerDown = useCallback(
+        (owner: Player, pieceType: PieceType, e: React.PointerEvent) => {
+            if (!isEditMode) return;
+
+            const origin = { type: "hand" as const, owner, pieceType };
+            const payload = {
+                owner,
+                pieceType,
+                isPromoted: false,
+            };
+
+            dndController.startDrag(origin, payload, e);
+        },
+        [isEditMode, dndController],
+    );
 
     const clearBoardForEdit = () => {
         if (isMatchRunning) return;
@@ -867,6 +948,13 @@ export function ShogiMatch({
 
     return (
         <TooltipProvider delayDuration={TOOLTIP_DELAY_DURATION_MS}>
+            {/* DnD ゴースト */}
+            <DragGhost
+                ref={dndController.ghostRef as React.RefObject<HTMLDivElement>}
+                dndState={dndController.state}
+                ownerOrientation={flipBoard ? "gote" : "sente"}
+            />
+
             <section
                 style={{
                     ...baseCard,
@@ -956,6 +1044,10 @@ export function ShogiMatch({
                                 {/* 盤の上側の持ち駒（通常:後手、反転時:先手） */}
                                 {(() => {
                                     const info = getHandInfo("top");
+                                    const handRef =
+                                        info.owner === "sente"
+                                            ? (dndEnv.senteHandRef as React.RefObject<HTMLDivElement>)
+                                            : (dndEnv.goteHandRef as React.RefObject<HTMLDivElement>);
                                     return (
                                         <PlayerHandSection
                                             owner={info.owner}
@@ -966,31 +1058,44 @@ export function ShogiMatch({
                                             }
                                             isActive={info.isActive}
                                             onHandSelect={handleHandSelect}
+                                            onPiecePointerDown={
+                                                isEditMode ? handleHandPiecePointerDown : undefined
+                                            }
+                                            handRef={handRef}
                                         />
                                     );
                                 })()}
 
-                                <ShogiBoard
-                                    grid={grid}
-                                    selectedSquare={
-                                        isEditMode && editFromSquare
-                                            ? editFromSquare
-                                            : selection?.kind === "square"
-                                              ? selection.square
-                                              : null
-                                    }
-                                    lastMove={
-                                        lastMove
-                                            ? { from: lastMove.from ?? undefined, to: lastMove.to }
-                                            : undefined
-                                    }
-                                    promotionSquare={promotionSelection?.to ?? null}
-                                    onSelect={(sq, shiftKey) => {
-                                        void handleSquareSelect(sq, shiftKey);
-                                    }}
-                                    onPromotionChoice={handlePromotionChoice}
-                                    flipBoard={flipBoard}
-                                />
+                                {/* 盤面コンテナ（DnD ヒットテスト用） */}
+                                <div ref={dndEnv.boardRef as React.RefObject<HTMLDivElement>}>
+                                    <ShogiBoard
+                                        grid={grid}
+                                        selectedSquare={
+                                            isEditMode && editFromSquare
+                                                ? editFromSquare
+                                                : selection?.kind === "square"
+                                                  ? selection.square
+                                                  : null
+                                        }
+                                        lastMove={
+                                            lastMove
+                                                ? {
+                                                      from: lastMove.from ?? undefined,
+                                                      to: lastMove.to,
+                                                  }
+                                                : undefined
+                                        }
+                                        promotionSquare={promotionSelection?.to ?? null}
+                                        onSelect={(sq, shiftKey) => {
+                                            void handleSquareSelect(sq, shiftKey);
+                                        }}
+                                        onPromotionChoice={handlePromotionChoice}
+                                        flipBoard={flipBoard}
+                                        onPiecePointerDown={
+                                            isEditMode ? handlePiecePointerDown : undefined
+                                        }
+                                    />
+                                </div>
                                 {candidateNote ? (
                                     <div style={TEXT_STYLES.mutedSecondary}>{candidateNote}</div>
                                 ) : null}
@@ -998,6 +1103,10 @@ export function ShogiMatch({
                                 {/* 盤の下側の持ち駒（通常:先手、反転時:後手） */}
                                 {(() => {
                                     const info = getHandInfo("bottom");
+                                    const handRef =
+                                        info.owner === "sente"
+                                            ? (dndEnv.senteHandRef as React.RefObject<HTMLDivElement>)
+                                            : (dndEnv.goteHandRef as React.RefObject<HTMLDivElement>);
                                     return (
                                         <PlayerHandSection
                                             owner={info.owner}
@@ -1008,9 +1117,28 @@ export function ShogiMatch({
                                             }
                                             isActive={info.isActive}
                                             onHandSelect={handleHandSelect}
+                                            onPiecePointerDown={
+                                                isEditMode ? handleHandPiecePointerDown : undefined
+                                            }
+                                            handRef={handRef}
                                         />
                                     );
                                 })()}
+
+                                {/* DnD 削除ゾーン（編集モード時のみ表示） */}
+                                {isEditMode && (
+                                    <div
+                                        ref={
+                                            dndEnv.deleteZoneRef as React.RefObject<HTMLDivElement>
+                                        }
+                                        style={{ marginTop: "8px" }}
+                                    >
+                                        <DeleteZone
+                                            dndState={dndController.state}
+                                            className="h-14 w-full"
+                                        />
+                                    </div>
+                                )}
                             </div>
                         </div>
                     </div>

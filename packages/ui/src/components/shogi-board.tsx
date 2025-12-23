@@ -23,6 +23,12 @@ export interface ShogiBoardProps {
     onPromotionChoice?: (promote: boolean) => void;
     /** 盤面を反転表示するか（後手視点） */
     flipBoard?: boolean;
+    /** 駒の PointerDown イベント（DnD 用） */
+    onPiecePointerDown?: (
+        square: string,
+        piece: ShogiBoardPiece,
+        event: React.PointerEvent,
+    ) => void;
 }
 
 const PIECE_LABELS: Record<string, string> = {
@@ -44,6 +50,7 @@ export function ShogiBoard({
     onSelect,
     onPromotionChoice,
     flipBoard = false,
+    onPiecePointerDown,
 }: ShogiBoardProps): ReactElement {
     return (
         <div className="relative inline-block w-full max-w-[560px] rounded-2xl border border-[#c08a3d] bg-[radial-gradient(circle_at_30%_20%,#f9e7c9,#e1c08d)] p-3 shadow-[0_10px_30px_rgba(0,0,0,0.18)]">
@@ -68,6 +75,11 @@ export function ShogiBoard({
                             >
                                 <button
                                     type="button"
+                                    onPointerDown={(e) => {
+                                        if (cell.piece && onPiecePointerDown) {
+                                            onPiecePointerDown(cell.id, cell.piece, e);
+                                        }
+                                    }}
                                     onClick={(e) => onSelect?.(cell.id, e.shiftKey)}
                                     onKeyDown={(e) => {
                                         if (e.key === "Enter" && e.shiftKey) {
