@@ -86,6 +86,12 @@ export function usePieceDnd(options: UsePieceDndOptions): PieceDndController {
     const runtimeRef = useRef<DragRuntime>(createInitialRuntime());
     const ghostRef = useRef<HTMLElement | null>(null);
 
+    // タッチ操作時のイベントリスナー参照（メモリリーク防止）
+    const touchListenersRef = useRef<{
+        checkSlop: ((e: PointerEvent) => void) | null;
+        cancelOnUp: ((e: PointerEvent) => void) | null;
+    }>({ checkSlop: null, cancelOnUp: null });
+
     // クリーンアップ関数
     const cleanup = useCallback(() => {
         const rt = runtimeRef.current;
@@ -98,6 +104,18 @@ export function usePieceDnd(options: UsePieceDndOptions): PieceDndController {
         // rAF 解除
         if (rt.raf !== null) {
             cancelAnimationFrame(rt.raf);
+        }
+
+        // タッチリスナーのクリーンアップ（メモリリーク防止）
+        const tl = touchListenersRef.current;
+        if (tl.checkSlop) {
+            document.removeEventListener("pointermove", tl.checkSlop);
+            tl.checkSlop = null;
+        }
+        if (tl.cancelOnUp) {
+            document.removeEventListener("pointerup", tl.cancelOnUp);
+            document.removeEventListener("pointercancel", tl.cancelOnUp);
+            tl.cancelOnUp = null;
         }
 
         // ゴースト非表示
@@ -357,6 +375,20 @@ export function usePieceDnd(options: UsePieceDndOptions): PieceDndController {
                 // タッチ: ロングプレス + スロップ判定
                 rt.startClient = { x: clientX, y: clientY };
 
+                // リスナークリーンアップ用のヘルパー
+                const cleanupTouchListeners = () => {
+                    const tl = touchListenersRef.current;
+                    if (tl.checkSlop) {
+                        document.removeEventListener("pointermove", tl.checkSlop);
+                        tl.checkSlop = null;
+                    }
+                    if (tl.cancelOnUp) {
+                        document.removeEventListener("pointerup", tl.cancelOnUp);
+                        document.removeEventListener("pointercancel", tl.cancelOnUp);
+                        tl.cancelOnUp = null;
+                    }
+                };
+
                 const checkSlop = (moveEvent: PointerEvent) => {
                     if (moveEvent.pointerId !== pointerId) return;
                     const dx = moveEvent.clientX - rt.startClient.x;
@@ -369,9 +401,7 @@ export function usePieceDnd(options: UsePieceDndOptions): PieceDndController {
                             clearTimeout(rt.longPressTimer);
                             rt.longPressTimer = null;
                         }
-                        document.removeEventListener("pointermove", checkSlop);
-                        document.removeEventListener("pointerup", cancelOnUp);
-                        document.removeEventListener("pointercancel", cancelOnUp);
+                        cleanupTouchListeners();
                     }
                 };
 
@@ -381,10 +411,12 @@ export function usePieceDnd(options: UsePieceDndOptions): PieceDndController {
                         clearTimeout(rt.longPressTimer);
                         rt.longPressTimer = null;
                     }
-                    document.removeEventListener("pointermove", checkSlop);
-                    document.removeEventListener("pointerup", cancelOnUp);
-                    document.removeEventListener("pointercancel", cancelOnUp);
+                    cleanupTouchListeners();
                 };
+
+                // ref に保存してクリーンアップ時にアクセス可能にする
+                touchListenersRef.current.checkSlop = checkSlop;
+                touchListenersRef.current.cancelOnUp = cancelOnUp;
 
                 document.addEventListener("pointermove", checkSlop);
                 document.addEventListener("pointerup", cancelOnUp);
@@ -392,9 +424,7 @@ export function usePieceDnd(options: UsePieceDndOptions): PieceDndController {
 
                 rt.longPressTimer = setTimeout(() => {
                     rt.longPressTimer = null;
-                    document.removeEventListener("pointermove", checkSlop);
-                    document.removeEventListener("pointerup", cancelOnUp);
-                    document.removeEventListener("pointercancel", cancelOnUp);
+                    cleanupTouchListeners();
                     activateDrag();
                 }, config.longPressMs);
             } else {

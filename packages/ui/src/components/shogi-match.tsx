@@ -560,14 +560,14 @@ export function ShogiMatch({
     });
 
     // DnD ドラッグ開始ハンドラ（盤上の駒）
+    // 注: isEditMode チェックは usePieceDnd の disabled オプションと
+    //     JSX での条件付き props 渡しで行うため、ここでは不要
     const handlePiecePointerDown = useCallback(
         (
             square: string,
             piece: { owner: "sente" | "gote"; type: string; promoted?: boolean },
             e: React.PointerEvent,
         ) => {
-            if (!isEditMode) return;
-
             const origin = { type: "board" as const, square: square as Square };
             const payload = {
                 owner: piece.owner as Player,
@@ -577,14 +577,12 @@ export function ShogiMatch({
 
             dndController.startDrag(origin, payload, e);
         },
-        [isEditMode, dndController],
+        [dndController],
     );
 
     // DnD ドラッグ開始ハンドラ（持ち駒）
     const handleHandPiecePointerDown = useCallback(
         (owner: Player, pieceType: PieceType, e: React.PointerEvent) => {
-            if (!isEditMode) return;
-
             const origin = { type: "hand" as const, owner, pieceType };
             const payload = {
                 owner,
@@ -594,7 +592,7 @@ export function ShogiMatch({
 
             dndController.startDrag(origin, payload, e);
         },
-        [isEditMode, dndController],
+        [dndController],
     );
 
     const clearBoardForEdit = () => {
