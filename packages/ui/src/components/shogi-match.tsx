@@ -515,23 +515,26 @@ export function ShogiMatch({
         return legalCache.getOrResolve(ply, resolver);
     };
 
-    const applyEditedPosition = (nextPosition: PositionState) => {
-        setPosition(nextPosition);
-        positionRef.current = nextPosition;
-        setInitialBoard(cloneBoard(nextPosition.board));
-        setMoves([]);
-        movesRef.current = [];
-        setLastMove(undefined);
-        setSelection(null);
-        setMessage(null);
-        setEditFromSquare(null);
+    const applyEditedPosition = useCallback(
+        (nextPosition: PositionState) => {
+            setPosition(nextPosition);
+            positionRef.current = nextPosition;
+            setInitialBoard(cloneBoard(nextPosition.board));
+            setMoves([]);
+            movesRef.current = [];
+            setLastMove(undefined);
+            setSelection(null);
+            setMessage(null);
+            setEditFromSquare(null);
 
-        legalCache.clear();
-        stopTicking();
-        matchEndedRef.current = false;
-        setIsMatchRunning(false);
-        void refreshStartSfen(nextPosition);
-    };
+            legalCache.clear();
+            stopTicking();
+            matchEndedRef.current = false;
+            setIsMatchRunning(false);
+            void refreshStartSfen(nextPosition);
+        },
+        [legalCache, stopTicking, refreshStartSfen],
+    );
 
     // DnD ドロップハンドラ
     const handleDndDrop = useCallback(
@@ -546,7 +549,7 @@ export function ShogiMatch({
 
             applyEditedPosition(applied.next);
         },
-        [isEditMode],
+        [isEditMode, applyEditedPosition],
     );
 
     // DnD コントローラー

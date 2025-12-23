@@ -24,7 +24,7 @@ export interface DeleteZoneProps {
  * - ホバー時は赤くハイライト
  * - ゴミ箱アイコンではなく和風の「×」マーク
  */
-export const DeleteZone = forwardRef<HTMLDivElement, DeleteZoneProps>(function DeleteZone(
+export const DeleteZone = forwardRef<HTMLElement, DeleteZoneProps>(function DeleteZone(
     { dndState, className },
     ref,
 ) {
@@ -32,7 +32,7 @@ export const DeleteZone = forwardRef<HTMLDivElement, DeleteZoneProps>(function D
     const isHovering = mode === "delete";
 
     return (
-        <div
+        <section
             ref={ref}
             className={cn(
                 "relative overflow-hidden",
@@ -56,7 +56,6 @@ export const DeleteZone = forwardRef<HTMLDivElement, DeleteZoneProps>(function D
                 className,
             )}
             aria-label="駒を削除"
-            role="region"
         >
             {/* 和風の×マーク */}
             <div
@@ -143,6 +142,6 @@ export const DeleteZone = forwardRef<HTMLDivElement, DeleteZoneProps>(function D
                     "transition-colors duration-200",
                 )}
             />
-        </div>
+        </section>
     );
 });
