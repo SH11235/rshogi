@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dropTargetEquals, getDropTarget, hitTestBoard, hitTestZones } from "./hit-test";
+import { dropTargetEquals, getDropTarget, hitTestBoard, hitTestZones } from "./hitDetection";
 import type { BoardMetrics, DropTarget, Zones } from "./types";
 
 describe("hit-test", () => {

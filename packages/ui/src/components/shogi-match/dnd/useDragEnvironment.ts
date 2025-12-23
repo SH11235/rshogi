@@ -6,7 +6,7 @@
  */
 
 import { useCallback, useRef } from "react";
-import { measureBoard, measureZones } from "./hit-test";
+import { measureBoard, measureZones } from "./hitDetection";
 import type { BoardMetrics, Zones } from "./types";
 
 export interface DragEnvironment {

@@ -8,7 +8,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { dropTargetEquals, getDropTarget } from "./hit-test";
+import { dropTargetEquals, getDropTarget } from "./hitDetection";
 import type {
     DndConfig,
     DndState,
