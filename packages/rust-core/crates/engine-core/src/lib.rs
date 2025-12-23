@@ -35,6 +35,8 @@ pub mod tt;
 //  探索
 pub mod search;
 
+pub(crate) mod prefetch;
+
 // 時刻（Instant）抽象化
 pub(crate) mod time;
 

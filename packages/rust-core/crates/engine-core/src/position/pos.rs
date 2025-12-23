@@ -6,6 +6,7 @@ use crate::bitboard::{
 };
 use crate::eval::material::{hand_piece_value, signed_piece_value};
 use crate::nnue::{ChangedPiece, DirtyPiece, HandChange};
+use crate::prefetch::{NoPrefetch, TtPrefetch};
 use crate::types::{
     Color, Hand, Move, Piece, PieceType, PieceTypeSet, RepetitionState, Square, Value,
 };
@@ -588,6 +589,16 @@ impl Position {
     /// DirtyPieceを返す。探索時はAccumulatorStackと同期して使用する。
     /// NNUE評価を使わない場合は無視して良い。
     pub fn do_move(&mut self, m: Move, gives_check: bool) -> DirtyPiece {
+        let noop = NoPrefetch;
+        self.do_move_with_prefetch(m, gives_check, &noop)
+    }
+
+    pub(crate) fn do_move_with_prefetch<P: TtPrefetch>(
+        &mut self,
+        m: Move,
+        gives_check: bool,
+        prefetcher: &P,
+    ) -> DirtyPiece {
         let us = self.side_to_move;
         let them = !us;
         let prev_continuous = self.cur_state().continuous_check;
@@ -773,6 +784,10 @@ impl Position {
                 });
             }
         }
+
+        // do_move直後にTTをprefetch（YaneuraOu準拠）
+        prefetcher.prefetch(new_state.key(), them);
+
         // 6. 王手情報の更新（diffベース）
         let mut checkers = Bitboard::EMPTY;
         if gives_check {
@@ -940,6 +955,11 @@ impl Position {
 
     /// null moveを実行
     pub fn do_null_move(&mut self) {
+        let noop = NoPrefetch;
+        self.do_null_move_with_prefetch(&noop);
+    }
+
+    pub(crate) fn do_null_move_with_prefetch<P: TtPrefetch>(&mut self, prefetcher: &P) {
         let mut new_state = self.cur_state().partial_clone();
 
         new_state.board_key ^= zobrist_side();
@@ -948,7 +968,10 @@ impl Position {
         new_state.last_move = Move::NULL;
         new_state.hand_snapshot = self.hand;
 
-        self.side_to_move = !self.side_to_move;
+        let next_side = !self.side_to_move;
+        prefetcher.prefetch(new_state.key(), next_side);
+
+        self.side_to_move = next_side;
 
         self.push_state(new_state);
 

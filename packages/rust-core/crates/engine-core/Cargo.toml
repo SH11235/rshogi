@@ -16,6 +16,18 @@ rand.workspace = true
 rand_xoshiro.workspace = true
 serde.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# Keep in sync with clap's transitive windows-sys (0.60.x) to avoid duplicate versions on Windows.
+windows-sys = { version = "0.60.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Memory",
+  "Win32_System_Threading",
+] }
+
 # getrandom for WebAssembly support (required by rand)
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { workspace = true }
