@@ -4,14 +4,18 @@
 # 使い方:
 #   ./scripts/perf_all.sh
 #   ./scripts/perf_all.sh --nnue-file /path/to/nn.bin
+#   ./scripts/perf_all.sh --perf-stat
+#   ./scripts/perf_all.sh --nnue-file /path/to/nn.bin --perf-stat
 #
 # 注意: 内部でsudoを使用するため、パスワード入力が必要です
 #
 # 実行される計測:
 #   1. perf_profile_nnue.sh - NNUE有効時のホットスポット
 #   2. perf_profile.sh      - Material評価時のホットスポット
-#   3. benchmark (NNUE)     - NNUE有効時のNPS
-#   4. benchmark (Material) - Material評価時のNPS
+#   3. perf stat (NNUE)     - NNUE有効時のperf stat (--perf-stat指定時のみ)
+#   4. perf stat (Material) - Material評価時のperf stat (--perf-stat指定時のみ)
+#   5. benchmark (NNUE)     - NNUE有効時のNPS
+#   6. benchmark (Material) - Material評価時のNPS
 
 set -e
 
@@ -42,6 +46,9 @@ if [ "$NNUE_FILE" = "./path/to/nn.bin" ]; then
     exit 1
 fi
 
+# 実行フラグ
+RUN_PERF_STAT=false
+
 # 引数解析（設定ファイルの値をオーバーライド可能）
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -49,16 +56,21 @@ while [[ $# -gt 0 ]]; do
             NNUE_FILE="$2"
             shift 2
             ;;
+        --perf-stat)
+            RUN_PERF_STAT=true
+            shift
+            ;;
         -h|--help)
-            echo "Usage: $0 [--nnue-file <path>]"
+            echo "Usage: $0 [--nnue-file <path>] [--perf-stat]"
             echo ""
             echo "Options:"
             echo "  --nnue-file <path>  NNUEファイルのパス (default: perf.confの設定値)"
+            echo "  --perf-stat         perf stat を実行する (default: off)"
             exit 0
             ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--nnue-file <path>]"
+            echo "Usage: $0 [--nnue-file <path>] [--perf-stat]"
             exit 1
             ;;
     esac
@@ -74,8 +86,16 @@ echo ""
 echo "実行される計測:"
 echo "  1. perf (NNUE有効)    - ホットスポット分析"
 echo "  2. perf (Material)    - ホットスポット分析"
-echo "  3. benchmark (NNUE)   - NPS計測"
-echo "  4. benchmark (Material) - NPS計測"
+if [ "$RUN_PERF_STAT" = true ]; then
+    echo "  3. perf stat (NNUE)   - perf stat計測"
+    echo "  4. perf stat (Material) - perf stat計測"
+    echo "  5. benchmark (NNUE)   - NPS計測"
+    echo "  6. benchmark (Material) - NPS計測"
+else
+    echo "  3. benchmark (NNUE)   - NPS計測"
+    echo "  4. benchmark (Material) - NPS計測"
+    echo "  * perf stat は --perf-stat 指定時のみ実行"
+fi
 echo ""
 read -p "続行しますか? [y/N] " -n 1 -r
 echo ""
@@ -100,23 +120,63 @@ fi
 
 echo ""
 echo "=============================================="
-echo "  1/4: perf (NNUE有効)"
+TOTAL_STEPS=4
+if [ "$RUN_PERF_STAT" = true ]; then
+    TOTAL_STEPS=6
+fi
+STEP=1
+
+echo "  ${STEP}/${TOTAL_STEPS}: perf (NNUE有効)"
 echo "=============================================="
 if [ "$SKIP_NNUE" = false ]; then
     ./scripts/perf_profile_nnue.sh --movetime 5000 --nnue-file "$NNUE_FILE"
 else
     echo "スキップ: NNUEファイルがありません"
 fi
+STEP=$((STEP + 1))
 
 echo ""
 echo "=============================================="
-echo "  2/4: perf (Material評価)"
+echo "  ${STEP}/${TOTAL_STEPS}: perf (Material評価)"
 echo "=============================================="
 ./scripts/perf_profile.sh
+STEP=$((STEP + 1))
+
+if [ "$RUN_PERF_STAT" = true ]; then
+    echo ""
+    echo "=============================================="
+    echo "  ${STEP}/${TOTAL_STEPS}: perf stat (NNUE有効)"
+    echo "=============================================="
+    if [ "$SKIP_NNUE" = false ]; then
+        echo "perf stat results will be saved under ./perf_results"
+        RUSTFLAGS="-C target-cpu=native" cargo build -p tools --bin benchmark --release
+        STAT_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+        STAT_FILE="./perf_results/${STAT_TIMESTAMP}_perfstat_nnue.txt"
+        sudo perf stat -e dTLB-load-misses,cache-misses,branch-misses \
+            ./target/release/benchmark --internal --nnue-file "$NNUE_FILE" \
+            --limit-type movetime --limit 5000 --iterations 1 2>&1 | tee "$STAT_FILE"
+    else
+        echo "スキップ: NNUEファイルがありません"
+    fi
+    STEP=$((STEP + 1))
+
+    echo ""
+    echo "=============================================="
+    echo "  ${STEP}/${TOTAL_STEPS}: perf stat (Material評価)"
+    echo "=============================================="
+    echo "perf stat results will be saved under ./perf_results"
+    RUSTFLAGS="-C target-cpu=native" cargo build -p tools --bin benchmark --release
+    STAT_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    STAT_FILE="./perf_results/${STAT_TIMESTAMP}_perfstat_material.txt"
+    sudo perf stat -e dTLB-load-misses,cache-misses,branch-misses \
+        ./target/release/benchmark --internal \
+        --limit-type movetime --limit 5000 --iterations 1 2>&1 | tee "$STAT_FILE"
+    STEP=$((STEP + 1))
+fi
 
 echo ""
 echo "=============================================="
-echo "  3/4: benchmark (NNUE有効)"
+echo "  ${STEP}/${TOTAL_STEPS}: benchmark (NNUE有効)"
 echo "=============================================="
 if [ "$SKIP_NNUE" = false ]; then
     RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release -- \
@@ -126,10 +186,11 @@ if [ "$SKIP_NNUE" = false ]; then
 else
     echo "スキップ: NNUEファイルがありません"
 fi
+STEP=$((STEP + 1))
 
 echo ""
 echo "=============================================="
-echo "  4/4: benchmark (Material評価)"
+echo "  ${STEP}/${TOTAL_STEPS}: benchmark (Material評価)"
 echo "=============================================="
 RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release -- \
     --internal --threads 1 --limit-type movetime --limit 20000 \

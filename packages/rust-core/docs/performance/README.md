@@ -181,7 +181,46 @@
 
 計測コマンド: `./scripts/perf_all.sh --perf-stat`
 
-### NNUE有効時
+### Large Pages + Prefetch最適化の効果（2025-12-23）
+
+TTにLarge Pages（2MB HugePages）を導入し、prefetchタイミングを前倒しした最適化の効果測定。
+
+#### NNUE有効時
+
+| カウンタ | main (最適化前) | 最適化後 | 変化 |
+|---------|---------------:|--------:|-----:|
+| dTLB-load-misses | 27,511,878 | 11,048,517 | **-60%** |
+| cache-misses | 1,003,669,751 | 1,121,953,415 | +12% |
+| branch-misses | 2,648,759,117 | 2,568,873,648 | -3% |
+
+#### Material評価時
+
+| カウンタ | main (最適化前) | 最適化後 | 変化 |
+|---------|---------------:|--------:|-----:|
+| dTLB-load-misses | 14,818,930 | 1,800,779 | **-88%** |
+| cache-misses | 172,032,243 | 187,274,719 | +9% |
+| branch-misses | 577,482,490 | 513,059,329 | -11% |
+
+#### 考察
+
+**dTLB-load-missesが大幅減少**:
+- NNUE: -60%（27.5M → 11.0M）
+- Material: -88%（14.8M → 1.8M）
+- Large Pages（2MB）により、TLBエントリあたりのカバー範囲が512倍に拡大（4KB→2MB）
+- TTアクセス時のTLBミスが劇的に減少
+
+**cache-missesが微増**:
+- NNUE: +12%、Material: +9%
+- prefetch前倒しによる投機的プリフェッチが増加した可能性
+- ただしdTLBミス減少によるレイテンシ改善で相殺される可能性あり
+
+**branch-missesが減少**:
+- NNUE: -3%、Material: -11%
+- コード変更による間接的な効果
+
+### 最新計測値
+
+#### NNUE有効時
 
 | カウンタ | 値 | 備考 |
 |---------|---:|------|
@@ -193,7 +232,7 @@
 
 **注**: sys時間が大きいのはNNUEファイル読み込み時のI/Oオーバーヘッド。
 
-### Material評価時
+#### Material評価時
 
 | カウンタ | 値 | 備考 |
 |---------|---:|------|
@@ -202,19 +241,6 @@
 | branch-misses | 513,059,329 | 分岐予測ミス |
 
 計測時間: 20.03秒（user: 19.70秒、sys: 0.33秒）
-
-### 比較分析
-
-| 項目 | NNUE | Material | 比率 (NNUE/Material) |
-|------|-----:|--------:|---------------------:|
-| dTLB-load-misses | 11.0M | 1.8M | 6.1x |
-| cache-misses | 1,122M | 187M | 6.0x |
-| branch-misses | 2,569M | 513M | 5.0x |
-
-**考察**:
-- NNUEはMaterialに比べてキャッシュミスが約6倍多い（大規模なネットワーク重みへのアクセスが原因）
-- dTLBミスも6倍程度多く、ワーキングセットが大きいことを示唆
-- branch-missesは5倍程度で、NNUE評価関数内の条件分岐が影響
 
 ---
 
@@ -492,4 +518,4 @@ PGOビルドの処理フロー:
 | 2025-12-23 | 計測結果更新（NNUE: MovePicker 9.05%, network::evaluate 3.98%, refresh 2.59%、Material: eval_lv7_like 26.34%, direction_of 16.11%）。NPS: NNUE平均 682,777、Material平均 449,439（+3.2%向上）。Material評価時の順位変動: `do_move`が7位に上昇（3.17%）、`attackers_to_occ`が9位、`__memmove_avx`が10位に。**perfスクリプト修正**: `--call-graph dwarf`を`--call-graph fp`に変更（大規模ネスト配列のDWARF解析によるハング回避） |
 | 2025-12-23 | 計測結果更新（NNUE: MovePicker 10.46%, network::evaluate 3.75%, refresh 2.37%、Material: eval_lv7_like 26.07%, direction_of 17.23%）。NPS: NNUE平均 668,968、Material平均 451,135。計測誤差の範囲内で大きな変動なし。Material評価時の`direction_of`が16.11%→17.23%に微増 |
 | 2025-12-23 | 計測結果更新（NNUE: MovePicker 11.10%, network::evaluate 3.74%, attackers_to_occ 3.05%、Material: eval_lv7_like 27.39%, direction_of 15.59%）。NPS: NNUE平均 665,521、Material平均 454,422。計測誤差の範囲内。Material評価時の順位変動: `direction_of`が17.23%→15.59%に減少、`see_ge`が9位に新登場（1.58%） |
-| 2025-12-23 | 計測結果更新（NNUE: MovePicker 12.78%, network::evaluate 4.31%, search_node 3.00%、Material: eval_lv7_like 28.84%, direction_of 17.51%）。**NPS向上**: NNUE平均 690,008（+3.7%、665,521→690,008）、Material平均 466,427（+2.6%）。YaneuraOu比: NNUE 59%→62%、Material 29%→30%に改善。NNUE順位変動: `do_move_with_prefetch`が6位（2.07%）、`update_accumulator`が7位（1.69%）に浮上。`check_move_mate`が2.03%→1.57%に約23%減少。**perf stat セクション新設**: ハードウェアカウンタ計測結果を追加（dTLB-load-misses, cache-misses, branch-misses）。NNUEはMaterialに比べてキャッシュミスが約6倍多いことを確認 |
+| 2025-12-23 | 計測結果更新（NNUE: MovePicker 12.78%, network::evaluate 4.31%, search_node 3.00%、Material: eval_lv7_like 28.84%, direction_of 17.51%）。**NPS向上**: NNUE平均 690,008（+3.7%、665,521→690,008）、Material平均 466,427（+2.6%）。YaneuraOu比: NNUE 59%→62%、Material 29%→30%に改善。NNUE順位変動: `do_move_with_prefetch`が6位（2.07%）、`update_accumulator`が7位（1.69%）に浮上。`check_move_mate`が2.03%→1.57%に約23%減少。**perf stat セクション新設**: ハードウェアカウンタ計測結果を追加。**Large Pages + Prefetch最適化効果**: mainブランチとの比較でdTLB-load-missesがNNUE -60%、Material -88%と大幅減少（TTにLarge Pages導入の効果）。cache-missesは微増（+9〜12%）だがTLBミス減少で相殺される可能性 |
