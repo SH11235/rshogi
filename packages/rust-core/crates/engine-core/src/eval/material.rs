@@ -73,6 +73,18 @@ pub fn set_material_level(level: MaterialLevel) {
     MATERIAL_LEVEL.store(level.value(), Ordering::Relaxed);
 }
 
+/// Material評価で盤面の利きを使うか
+pub fn material_needs_board_effects() -> bool {
+    matches!(
+        get_material_level(),
+        MaterialLevel::Lv3
+            | MaterialLevel::Lv4
+            | MaterialLevel::Lv7
+            | MaterialLevel::Lv8
+            | MaterialLevel::Lv9
+    )
+}
+
 /// Apery(WCSC26)準拠の駒価値
 pub(crate) fn base_piece_value(pt: PieceType) -> i32 {
     match pt {

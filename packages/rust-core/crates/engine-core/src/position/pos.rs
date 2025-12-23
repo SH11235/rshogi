@@ -1,21 +1,22 @@
 //! 局面（Position）
 
+use super::board_effect::{
+    compute_board_effects_and_long_effects, rewind_by_capturing_piece, rewind_by_dropping_piece,
+    rewind_by_no_capturing_piece, update_by_capturing_piece, update_by_dropping_piece,
+    update_by_no_capturing_piece, BoardEffects, LongEffects,
+};
+use super::state::StateInfo;
+use super::zobrist::{zobrist_hand, zobrist_psq, zobrist_side};
 use crate::bitboard::{
     bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect, knight_effect,
     lance_effect, pawn_effect, rook_effect, silver_effect, Bitboard,
 };
-use crate::eval::material::{hand_piece_value, signed_piece_value};
+use crate::eval::material::{hand_piece_value, material_needs_board_effects, signed_piece_value};
 use crate::nnue::{ChangedPiece, DirtyPiece, HandChange};
 use crate::prefetch::{NoPrefetch, TtPrefetch};
 use crate::types::{
     Color, Hand, Move, Piece, PieceType, PieceTypeSet, RepetitionState, Square, Value,
 };
-
-use super::board_effect::{
-    add_piece_effect, compute_board_effects, update_xray_for_square, BoardEffects,
-};
-use super::state::StateInfo;
-use super::zobrist::{zobrist_hand, zobrist_psq, zobrist_side};
 
 /// 小駒（香・桂・銀・金とその成り駒）かどうか
 #[inline]
@@ -47,6 +48,8 @@ pub struct Position {
     // === 盤面効果 ===
     /// 各升の利き数 [Color][Square]
     board_effects: BoardEffects,
+    /// 長い利きの方向（盤面効果の差分更新用）
+    long_effects: LongEffects,
     /// board_effectsが最新かどうか（手動配置時の整合性維持用）
     board_effects_dirty: bool,
 
@@ -121,6 +124,7 @@ impl Position {
             by_type: [Bitboard::EMPTY; PieceType::NUM + 1],
             by_color: [Bitboard::EMPTY; Color::NUM],
             board_effects: BoardEffects::new(),
+            long_effects: LongEffects::new(),
             board_effects_dirty: false,
             golds_bb: Bitboard::EMPTY,
             bishop_horse_bb: Bitboard::EMPTY,
@@ -384,6 +388,14 @@ impl Position {
     }
 
     #[inline]
+    fn should_update_board_effects() -> bool {
+        if crate::nnue::is_nnue_initialized() {
+            return false;
+        }
+        material_needs_board_effects()
+    }
+
+    #[inline]
     fn ensure_board_effects(&mut self) {
         if self.board_effects_dirty {
             self.recompute_board_effects();
@@ -391,13 +403,15 @@ impl Position {
     }
 
     pub(crate) fn recompute_board_effects(&mut self) {
-        self.board_effects = compute_board_effects(self);
+        let (effects, long_effects) = compute_board_effects_and_long_effects(self);
+        self.board_effects = effects;
+        self.long_effects = long_effects;
         self.board_effects_dirty = false;
     }
 
     #[cfg(debug_assertions)]
     fn debug_verify_board_effects(&self) {
-        let expected = compute_board_effects(self);
+        let (expected, expected_long) = compute_board_effects_and_long_effects(self);
         if expected != self.board_effects {
             for color in [Color::Black, Color::White] {
                 for sq in Square::all() {
@@ -413,6 +427,20 @@ impl Position {
                 }
             }
             panic!("board_effect mismatch");
+        }
+        if expected_long != self.long_effects {
+            for sq in Square::all() {
+                let actual = self.long_effects.long_effect16(sq);
+                let want = expected_long.long_effect16(sq);
+                if actual != want {
+                    eprintln!(
+                        "long_effect mismatch: sq={sq:?}, actual=0x{actual:04x}, expected=0x{want:04x}, sfen={}",
+                        self.to_sfen()
+                    );
+                    break;
+                }
+            }
+            panic!("long_effect mismatch");
         }
     }
 
@@ -671,6 +699,7 @@ impl Position {
         let us = self.side_to_move;
         let them = !us;
         let prev_continuous = self.cur_state().continuous_check;
+        let update_board_effects = Self::should_update_board_effects();
 
         // 現在の占有とblockers/pinners、玉位置を退避（差分更新で利用）
         let prev_blockers = self.cur_state().blockers_for_king;
@@ -695,7 +724,11 @@ impl Position {
         let moved_to: Square;
         let moved_pt: PieceType;
 
-        self.ensure_board_effects();
+        if update_board_effects {
+            self.ensure_board_effects();
+        } else {
+            self.board_effects_dirty = true;
+        }
 
         if m.is_drop() {
             let pt = m.drop_piece_type();
@@ -703,19 +736,17 @@ impl Position {
             let pc = Piece::new(us, pt);
             moved_to = to;
             moved_pt = pt;
-            let occupied_before = self.occupied();
-            let occupied_after = occupied_before | Bitboard::from_square(to);
 
-            add_piece_effect(&mut self.board_effects, pc, to, occupied_after, 1);
-            update_xray_for_square(
-                &self.board,
-                &mut self.board_effects,
-                to,
-                occupied_before,
-                occupied_after,
-                None,
-                None,
-            );
+            if update_board_effects {
+                let occupied_before = self.occupied();
+                update_by_dropping_piece(
+                    &mut self.board_effects,
+                    &mut self.long_effects,
+                    occupied_before,
+                    to,
+                    pc,
+                );
+            }
 
             // DirtyPiece: 手駒の変化（us の pt が 1 減る）
             let old_hand = self.hand[us.index()];
@@ -779,33 +810,31 @@ impl Position {
             } else {
                 pc
             };
-            let occupied_before = self.occupied();
-            let occupied_mid = occupied_before ^ Bitboard::from_square(from);
-            let occupied_after = occupied_mid | Bitboard::from_square(to);
-
-            add_piece_effect(&mut self.board_effects, pc, from, occupied_before, -1);
-            if captured.is_some() {
-                add_piece_effect(&mut self.board_effects, captured, to, occupied_before, -1);
+            if update_board_effects {
+                let occupied_before = self.occupied();
+                if captured.is_some() {
+                    update_by_capturing_piece(
+                        &mut self.board_effects,
+                        &mut self.long_effects,
+                        occupied_before,
+                        from,
+                        to,
+                        pc,
+                        moved_after_pc,
+                        captured,
+                    );
+                } else {
+                    update_by_no_capturing_piece(
+                        &mut self.board_effects,
+                        &mut self.long_effects,
+                        occupied_before,
+                        from,
+                        to,
+                        pc,
+                        moved_after_pc,
+                    );
+                }
             }
-            update_xray_for_square(
-                &self.board,
-                &mut self.board_effects,
-                from,
-                occupied_before,
-                occupied_mid,
-                Some(from),
-                captured.is_some().then_some(to),
-            );
-            update_xray_for_square(
-                &self.board,
-                &mut self.board_effects,
-                to,
-                occupied_mid,
-                occupied_after,
-                Some(from),
-                None,
-            );
-            add_piece_effect(&mut self.board_effects, moved_after_pc, to, occupied_after, 1);
 
             // 駒を取る場合
             if captured.is_some() {
@@ -1012,7 +1041,9 @@ impl Position {
         self.update_check_squares();
 
         #[cfg(debug_assertions)]
-        self.debug_verify_board_effects();
+        if update_board_effects {
+            self.debug_verify_board_effects();
+        }
 
         dirty_piece
     }
@@ -1025,31 +1056,34 @@ impl Position {
         let us = self.side_to_move;
         let captured = self.cur_state().captured_piece;
         let prev_idx = self.cur_state().previous.expect("No previous state for undo");
-        self.ensure_board_effects();
-        let occupied_before = self.occupied();
+        let update_board_effects = Self::should_update_board_effects();
+        if update_board_effects {
+            self.ensure_board_effects();
+        } else {
+            self.board_effects_dirty = true;
+        }
 
         // 2. 駒の移動を戻す
         if m.is_drop() {
             let pt = m.drop_piece_type();
             let to = m.to();
             let moved_pc = self.piece_on(to);
-            let occupied_after = occupied_before ^ Bitboard::from_square(to);
-
-            add_piece_effect(&mut self.board_effects, moved_pc, to, occupied_before, -1);
-            update_xray_for_square(
-                &self.board,
-                &mut self.board_effects,
-                to,
-                occupied_before,
-                occupied_after,
-                Some(to),
-                None,
-            );
 
             // 盤上から除去
             self.remove_piece_internal(to);
             // 手駒に戻す
             self.hand[us.index()] = self.hand[us.index()].add(pt);
+
+            if update_board_effects {
+                let occupied_after = self.occupied();
+                rewind_by_dropping_piece(
+                    &mut self.board_effects,
+                    &mut self.long_effects,
+                    occupied_after,
+                    to,
+                    moved_pc,
+                );
+            }
         } else {
             let from = m.from();
             let to = m.to();
@@ -1059,63 +1093,57 @@ impl Position {
             } else {
                 moved_pc
             };
-            let occupied_mid = occupied_before ^ Bitboard::from_square(to);
-            let mut occupied_after = occupied_mid | Bitboard::from_square(from);
-            if captured.is_some() {
-                occupied_after |= Bitboard::from_square(to);
-            }
 
-            add_piece_effect(&mut self.board_effects, moved_pc, to, occupied_before, -1);
-            add_piece_effect(&mut self.board_effects, original_pc, from, occupied_after, 1);
             if captured.is_some() {
-                add_piece_effect(&mut self.board_effects, captured, to, occupied_after, 1);
-            }
-            if captured.is_some() {
-                update_xray_for_square(
-                    &self.board,
-                    &mut self.board_effects,
-                    from,
-                    occupied_before,
-                    occupied_after,
-                    Some(to),
-                    None,
-                );
-            } else {
-                update_xray_for_square(
-                    &self.board,
-                    &mut self.board_effects,
-                    to,
-                    occupied_before,
-                    occupied_mid,
-                    Some(to),
-                    None,
-                );
-                update_xray_for_square(
-                    &self.board,
-                    &mut self.board_effects,
-                    from,
-                    occupied_mid,
-                    occupied_after,
-                    Some(to),
-                    None,
-                );
-            }
-
-            // 駒を元の位置に戻す
-            self.remove_piece_internal(to);
-            self.put_piece_internal(original_pc, from);
-
-            // 玉の移動を戻す
-            if original_pc.piece_type() == PieceType::King {
-                self.king_square[us.index()] = from;
-            }
-
-            // 取った駒を復元
-            if captured.is_some() {
+                // 駒を元の位置に戻す
+                self.remove_piece_internal(to);
                 self.put_piece_internal(captured, to);
                 // 手駒から除去
                 let cap_pt = captured.piece_type().unpromote();
                 self.hand[us.index()] = self.hand[us.index()].sub(cap_pt);
+
+                self.put_piece_internal(original_pc, from);
+
+                // 玉の移動を戻す
+                if original_pc.piece_type() == PieceType::King {
+                    self.king_square[us.index()] = from;
+                }
+
+                if update_board_effects {
+                    let occupied_after = self.occupied();
+                    rewind_by_capturing_piece(
+                        &mut self.board_effects,
+                        &mut self.long_effects,
+                        occupied_after,
+                        from,
+                        to,
+                        original_pc,
+                        moved_pc,
+                        captured,
+                    );
+                }
+            } else {
+                // 駒を元の位置に戻す
+                self.remove_piece_internal(to);
+                self.put_piece_internal(original_pc, from);
+
+                // 玉の移動を戻す
+                if original_pc.piece_type() == PieceType::King {
+                    self.king_square[us.index()] = from;
+                }
+
+                if update_board_effects {
+                    let occupied_after = self.occupied();
+                    rewind_by_no_capturing_piece(
+                        &mut self.board_effects,
+                        &mut self.long_effects,
+                        occupied_after,
+                        from,
+                        to,
+                        original_pc,
+                        moved_pc,
+                    );
+                }
             }
         }
 
@@ -1123,7 +1151,9 @@ impl Position {
         self.state_idx = prev_idx;
 
         #[cfg(debug_assertions)]
-        self.debug_verify_board_effects();
+        if update_board_effects {
+            self.debug_verify_board_effects();
+        }
     }
 
     /// null moveを実行

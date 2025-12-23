@@ -1,7 +1,6 @@
-use crate::bitboard::Direct;
 use crate::bitboard::{
-    bishop_effect, direct_effect, dragon_effect, gold_effect, horse_effect, king_effect,
-    knight_effect, lance_effect, pawn_effect, rook_effect, silver_effect, Bitboard,
+    bishop_effect, direct_effect, direct_of, dragon_effect, gold_effect, horse_effect, king_effect,
+    knight_effect, lance_effect, pawn_effect, rook_effect, silver_effect, Bitboard, Direct,
 };
 use crate::types::{Color, Piece, PieceType, Square};
 
@@ -17,6 +16,15 @@ const DIRECTS: [Direct; 8] = [
     Direct::L,
     Direct::LD,
 ];
+
+const BISHOP_DIR: u8 = (1u8 << Direct::RU as u8)
+    | (1u8 << Direct::RD as u8)
+    | (1u8 << Direct::LU as u8)
+    | (1u8 << Direct::LD as u8);
+const ROOK_DIR: u8 = (1u8 << Direct::R as u8)
+    | (1u8 << Direct::L as u8)
+    | (1u8 << Direct::U as u8)
+    | (1u8 << Direct::D as u8);
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct BoardEffects {
@@ -57,8 +65,34 @@ impl BoardEffects {
     }
 }
 
-pub(crate) fn compute_board_effects(pos: &Position) -> BoardEffects {
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct LongEffects {
+    dirs: [u16; Square::NUM],
+}
+
+impl LongEffects {
+    pub(crate) fn new() -> Self {
+        LongEffects {
+            dirs: [0u16; Square::NUM],
+        }
+    }
+
+    #[inline]
+    pub(crate) fn long_effect16(&self, sq: Square) -> u16 {
+        self.dirs[sq.index()]
+    }
+
+    #[inline]
+    fn toggle(&mut self, sq: Square, value: u16) {
+        self.dirs[sq.index()] ^= value;
+    }
+}
+
+pub(crate) fn compute_board_effects_and_long_effects(
+    pos: &Position,
+) -> (BoardEffects, LongEffects) {
     let mut effects = BoardEffects::new();
+    let mut long_effects = LongEffects::new();
     let occupied = pos.occupied();
 
     for color in [Color::Black, Color::White] {
@@ -67,65 +101,311 @@ pub(crate) fn compute_board_effects(pos: &Position) -> BoardEffects {
             let pc = pos.piece_on(sq);
             let effect_bb = attacks_from(pc, sq, occupied);
             effects.apply_bitboard(color, effect_bb, 1);
+
+            if has_long_effect(pc) {
+                let long_pc = pc.unpromote();
+                let long_bb = attacks_from(long_pc, sq, occupied);
+                let shift = if pc.color() == Color::Black { 0 } else { 8 };
+                for to in long_bb.iter() {
+                    let Some(dir) = direct_of(sq, to) else {
+                        continue;
+                    };
+                    let bit = 1u16 << (dir as u8);
+                    long_effects.toggle(to, bit << shift);
+                }
+            }
         }
     }
 
-    effects
+    (effects, long_effects)
 }
 
-pub(crate) fn add_piece_effect(
+pub(crate) fn update_by_dropping_piece(
     effects: &mut BoardEffects,
-    pc: Piece,
-    sq: Square,
+    long_effects: &mut LongEffects,
     occupied: Bitboard,
-    delta: i8,
+    to: Square,
+    dropped_pc: Piece,
 ) {
-    let bb = attacks_from(pc, sq, occupied);
-    effects.apply_bitboard(pc.color(), bb, delta);
+    let us = dropped_pc.color();
+    let inc_target = short_effects_from(dropped_pc, to);
+    effects.apply_bitboard(us, inc_target, 1);
+
+    let dir_bw_us = long_effect16_of(dropped_pc);
+    let dir_bw_others = long_effects.long_effect16(to);
+    update_long_effect_from(effects, long_effects, occupied, to, dir_bw_us, dir_bw_others, 1, us);
 }
 
-pub(crate) fn update_xray_for_square(
-    board: &[Piece; Square::NUM],
+pub(crate) fn update_by_no_capturing_piece(
     effects: &mut BoardEffects,
-    sq: Square,
-    occupied_before: Bitboard,
-    occupied_after: Bitboard,
-    skip_moved: Option<Square>,
-    skip_captured: Option<Square>,
+    long_effects: &mut LongEffects,
+    occupied: Bitboard,
+    from: Square,
+    to: Square,
+    moved_pc: Piece,
+    moved_after_pc: Piece,
 ) {
-    let before_occ = occupied_before.contains(sq);
-    let after_occ = occupied_after.contains(sq);
-    if before_occ == after_occ {
-        return;
-    }
+    let us = moved_pc.color();
+    let mut dec_target = short_effects_from(moved_pc, from);
+    let mut inc_target = short_effects_from(moved_after_pc, to);
 
-    let (delta, ray_occupied) = if before_occ {
-        (1, occupied_after) // occupied -> empty
-    } else {
-        (-1, occupied_before) // empty -> occupied
-    };
+    let and_target = inc_target & dec_target;
+    inc_target ^= and_target;
+    dec_target ^= and_target;
 
-    for dir in DIRECTS {
-        let Some(blocker_sq) = first_piece_in_direction(occupied_before, sq, dir) else {
-            continue;
+    effects.apply_bitboard(us, inc_target, 1);
+    effects.apply_bitboard(us, dec_target, -1);
+
+    let dir_mask = dir_mask_for_move(from, to);
+    let dir_bw_us = long_effect16_of(moved_pc) & dir_mask;
+    let dir_bw_others = long_effects.long_effect16(from) & dir_mask;
+    update_long_effect_from(
+        effects,
+        long_effects,
+        occupied,
+        from,
+        dir_bw_us,
+        dir_bw_others,
+        -1,
+        us,
+    );
+
+    let dir_bw_us = long_effect16_of(moved_after_pc);
+    let dir_bw_others = long_effects.long_effect16(to);
+    update_long_effect_from(effects, long_effects, occupied, to, dir_bw_us, dir_bw_others, 1, us);
+}
+
+pub(crate) fn update_by_capturing_piece(
+    effects: &mut BoardEffects,
+    long_effects: &mut LongEffects,
+    occupied: Bitboard,
+    from: Square,
+    to: Square,
+    moved_pc: Piece,
+    moved_after_pc: Piece,
+    captured_pc: Piece,
+) {
+    let us = moved_pc.color();
+    let mut dec_target = short_effects_from(moved_pc, from);
+    let mut inc_target = short_effects_from(moved_after_pc, to);
+
+    let and_target = inc_target & dec_target;
+    inc_target ^= and_target;
+    dec_target ^= and_target;
+
+    effects.apply_bitboard(us, inc_target, 1);
+    effects.apply_bitboard(us, dec_target, -1);
+
+    let dec_target = short_effects_from(captured_pc, to);
+    effects.apply_bitboard(captured_pc.color(), dec_target, -1);
+
+    let dir_mask = dir_mask_for_move(from, to);
+    let dir_bw_us = long_effect16_of(moved_pc) & dir_mask;
+    let dir_bw_others = long_effects.long_effect16(from) & dir_mask;
+    update_long_effect_from(
+        effects,
+        long_effects,
+        occupied,
+        from,
+        dir_bw_us,
+        dir_bw_others,
+        -1,
+        us,
+    );
+
+    let dir_bw_us = long_effect16_of(moved_after_pc);
+    let dir_bw_others = long_effect16_of(captured_pc);
+    update_long_effect_from(effects, long_effects, occupied, to, dir_bw_us, dir_bw_others, 1, us);
+}
+
+pub(crate) fn rewind_by_dropping_piece(
+    effects: &mut BoardEffects,
+    long_effects: &mut LongEffects,
+    occupied: Bitboard,
+    to: Square,
+    dropped_pc: Piece,
+) {
+    let us = dropped_pc.color();
+    let dec_target = short_effects_from(dropped_pc, to);
+    effects.apply_bitboard(us, dec_target, -1);
+
+    let dir_bw_us = long_effect16_of(dropped_pc);
+    let dir_bw_others = long_effects.long_effect16(to);
+    update_long_effect_from(effects, long_effects, occupied, to, dir_bw_us, dir_bw_others, -1, us);
+}
+
+pub(crate) fn rewind_by_no_capturing_piece(
+    effects: &mut BoardEffects,
+    long_effects: &mut LongEffects,
+    occupied: Bitboard,
+    from: Square,
+    to: Square,
+    moved_pc: Piece,
+    moved_after_pc: Piece,
+) {
+    let us = moved_pc.color();
+    let mut inc_target = short_effects_from(moved_pc, from);
+    let mut dec_target = short_effects_from(moved_after_pc, to);
+
+    let and_target = inc_target & dec_target;
+    inc_target ^= and_target;
+    dec_target ^= and_target;
+
+    effects.apply_bitboard(us, inc_target, 1);
+    effects.apply_bitboard(us, dec_target, -1);
+
+    let dir_bw_us = long_effect16_of(moved_after_pc);
+    let dir_bw_others = long_effects.long_effect16(to);
+    update_long_effect_from(effects, long_effects, occupied, to, dir_bw_us, dir_bw_others, -1, us);
+
+    let dir_mask = dir_mask_for_move(from, to);
+    let dir_bw_us = long_effect16_of(moved_pc) & dir_mask;
+    let dir_bw_others = long_effects.long_effect16(from) & dir_mask;
+    update_long_effect_from(effects, long_effects, occupied, from, dir_bw_us, dir_bw_others, 1, us);
+}
+
+pub(crate) fn rewind_by_capturing_piece(
+    effects: &mut BoardEffects,
+    long_effects: &mut LongEffects,
+    occupied: Bitboard,
+    from: Square,
+    to: Square,
+    moved_pc: Piece,
+    moved_after_pc: Piece,
+    captured_pc: Piece,
+) {
+    let us = moved_pc.color();
+    let mut inc_target = short_effects_from(moved_pc, from);
+    let mut dec_target = short_effects_from(moved_after_pc, to);
+
+    let and_target = inc_target & dec_target;
+    inc_target ^= and_target;
+    dec_target ^= and_target;
+
+    effects.apply_bitboard(us, inc_target, 1);
+    effects.apply_bitboard(us, dec_target, -1);
+
+    let inc_target = short_effects_from(captured_pc, to);
+    effects.apply_bitboard(captured_pc.color(), inc_target, 1);
+
+    let dir_bw_us = long_effect16_of(moved_after_pc);
+    let dir_bw_others = long_effect16_of(captured_pc);
+    update_long_effect_from(effects, long_effects, occupied, to, dir_bw_us, dir_bw_others, -1, us);
+
+    let dir_mask = dir_mask_for_move(from, to);
+    let dir_bw_us = long_effect16_of(moved_pc) & dir_mask;
+    let dir_bw_others = long_effects.long_effect16(from) & dir_mask;
+    update_long_effect_from(effects, long_effects, occupied, from, dir_bw_us, dir_bw_others, 1, us);
+}
+
+fn update_long_effect_from(
+    effects: &mut BoardEffects,
+    long_effects: &mut LongEffects,
+    occupied: Bitboard,
+    from: Square,
+    dir_bw_us: u16,
+    dir_bw_others: u16,
+    p: i8,
+    us: Color,
+) {
+    let mut dir_bw = dir_bw_us ^ dir_bw_others;
+    let us_is_black = us == Color::Black;
+
+    while dir_bw != 0 {
+        let lsb = dir_bw.trailing_zeros() as u8;
+        let dir_index = (lsb & 7) as usize;
+        let mut value = (1u16 << dir_index) | (1u16 << (dir_index + 8));
+        value &= dir_bw;
+        dir_bw &= !value;
+
+        let same_color = if us_is_black {
+            (value & 0x00ff) != 0
+        } else {
+            (value & 0xff00) != 0
         };
-        if Some(blocker_sq) == skip_moved || Some(blocker_sq) == skip_captured {
+        let e1 = if (dir_bw_us & value) != 0 {
+            p
+        } else if same_color {
+            -p
+        } else {
+            0
+        };
+
+        let other_color = if us_is_black {
+            (value & 0xff00) != 0
+        } else {
+            (value & 0x00ff) != 0
+        };
+        let e2 = if other_color { -p } else { 0 };
+
+        if e1 == 0 && e2 == 0 {
             continue;
         }
 
-        let pc = board[blocker_sq.index()];
-        if pc.is_none() {
-            continue;
+        let dir = DIRECTS[dir_index];
+        let ray = direct_effect(from, dir, occupied);
+        for sq in ray.iter() {
+            long_effects.toggle(sq, value);
+            if e1 != 0 {
+                effects.add_delta(us, sq, e1);
+            }
+            if e2 != 0 {
+                effects.add_delta(!us, sq, e2);
+            }
         }
-
-        let opposite = opposite_dir(dir);
-        if !piece_attacks_dir(pc, opposite) {
-            continue;
-        }
-
-        let ray = direct_effect(sq, opposite, ray_occupied);
-        effects.apply_bitboard(pc.color(), ray, delta);
     }
+}
+
+fn short_effects_from(pc: Piece, sq: Square) -> Bitboard {
+    let color = pc.color();
+    match pc.piece_type() {
+        PieceType::Pawn => pawn_effect(color, sq),
+        PieceType::Knight => knight_effect(color, sq),
+        PieceType::Silver => silver_effect(color, sq),
+        PieceType::Gold
+        | PieceType::ProPawn
+        | PieceType::ProLance
+        | PieceType::ProKnight
+        | PieceType::ProSilver => gold_effect(color, sq),
+        PieceType::Horse => orthogonal_step_effect(sq),
+        PieceType::Dragon => diagonal_step_effect(sq),
+        PieceType::King => king_effect(sq),
+        _ => Bitboard::EMPTY,
+    }
+}
+
+fn orthogonal_step_effect(sq: Square) -> Bitboard {
+    let mut bb = Bitboard::EMPTY;
+    if let Some(next) = sq.offset(Square::DELTA_U) {
+        bb.set(next);
+    }
+    if let Some(next) = sq.offset(Square::DELTA_D) {
+        bb.set(next);
+    }
+    if let Some(next) = sq.offset(Square::DELTA_L) {
+        bb.set(next);
+    }
+    if let Some(next) = sq.offset(Square::DELTA_R) {
+        bb.set(next);
+    }
+    bb
+}
+
+fn diagonal_step_effect(sq: Square) -> Bitboard {
+    let mut bb = Bitboard::EMPTY;
+    if let Some(next) = sq.offset(Square::DELTA_RU) {
+        bb.set(next);
+    }
+    if let Some(next) = sq.offset(Square::DELTA_RD) {
+        bb.set(next);
+    }
+    if let Some(next) = sq.offset(Square::DELTA_LU) {
+        bb.set(next);
+    }
+    if let Some(next) = sq.offset(Square::DELTA_LD) {
+        bb.set(next);
+    }
+    bb
 }
 
 fn attacks_from(pc: Piece, sq: Square, occupied: Bitboard) -> Bitboard {
@@ -148,20 +428,36 @@ fn attacks_from(pc: Piece, sq: Square, occupied: Bitboard) -> Bitboard {
     }
 }
 
-fn piece_attacks_dir(pc: Piece, dir: Direct) -> bool {
+fn has_long_effect(pc: Piece) -> bool {
+    matches!(
+        pc.piece_type(),
+        PieceType::Lance
+            | PieceType::Bishop
+            | PieceType::Rook
+            | PieceType::Horse
+            | PieceType::Dragon
+    )
+}
+
+fn long_effect8_of(pc: Piece) -> u8 {
     match pc.piece_type() {
         PieceType::Lance => match pc.color() {
-            Color::Black => matches!(dir, Direct::U),
-            Color::White => matches!(dir, Direct::D),
+            Color::Black => 1u8 << Direct::U as u8,
+            Color::White => 1u8 << Direct::D as u8,
         },
-        PieceType::Bishop | PieceType::Horse => {
-            matches!(dir, Direct::RU | Direct::RD | Direct::LU | Direct::LD)
-        }
-        PieceType::Rook | PieceType::Dragon => {
-            matches!(dir, Direct::U | Direct::D | Direct::L | Direct::R)
-        }
-        _ => false,
+        PieceType::Bishop | PieceType::Horse => BISHOP_DIR,
+        PieceType::Rook | PieceType::Dragon => ROOK_DIR,
+        _ => 0,
     }
+}
+
+fn long_effect16_of(pc: Piece) -> u16 {
+    let dir8 = long_effect8_of(pc);
+    if dir8 == 0 {
+        return 0;
+    }
+    let shift = if pc.color() == Color::Black { 0 } else { 8 };
+    (dir8 as u16) << shift
 }
 
 fn opposite_dir(dir: Direct) -> Direct {
@@ -177,27 +473,12 @@ fn opposite_dir(dir: Direct) -> Direct {
     }
 }
 
-fn direct_delta(dir: Direct) -> i8 {
-    match dir {
-        Direct::RU => Square::DELTA_RU,
-        Direct::R => Square::DELTA_R,
-        Direct::RD => Square::DELTA_RD,
-        Direct::U => Square::DELTA_U,
-        Direct::D => Square::DELTA_D,
-        Direct::LU => Square::DELTA_LU,
-        Direct::L => Square::DELTA_L,
-        Direct::LD => Square::DELTA_LD,
+fn dir_mask_for_move(from: Square, to: Square) -> u16 {
+    if let Some(dir) = direct_of(from, to) {
+        let opposite = opposite_dir(dir);
+        let bit = 1u16 << (opposite as u8);
+        !(bit | (bit << 8))
+    } else {
+        0xffff
     }
-}
-
-fn first_piece_in_direction(occupied: Bitboard, start: Square, dir: Direct) -> Option<Square> {
-    let delta = direct_delta(dir);
-    let mut cur = start;
-    while let Some(next) = cur.offset(delta) {
-        if occupied.contains(next) {
-            return Some(next);
-        }
-        cur = next;
-    }
-    None
 }
