@@ -52,6 +52,7 @@ impl BoardEffects {
             color,
             sq
         );
+        // 利き数は最大でも片側20枚分でu8に収まる前提のため、リリースではキャストのみ。
         self.counts[color.index()][sq.index()] = next as u8;
     }
 
@@ -103,6 +104,7 @@ pub(crate) fn compute_board_effects_and_long_effects(
             effects.apply_bitboard(color, effect_bb, 1);
 
             if has_long_effect(pc) {
+                // 長い利きは馬/龍の追加1マス利きを含めない（YaneuraOuのlong_effect定義に合わせる）。
                 let long_pc = pc.unpromote();
                 let long_bb = attacks_from(long_pc, sq, occupied);
                 let shift = if pc.color() == Color::Black { 0 } else { 8 };
@@ -298,6 +300,16 @@ pub(crate) fn rewind_by_capturing_piece(
     update_long_effect_from(effects, long_effects, occupied, from, dir_bw_us, dir_bw_others, 1, us);
 }
 
+/// 長い利きの差分更新を行う。
+///
+/// - `dir_bw_us`: 自分の駒の長い利き方向（下位8bit: 先手、上位8bit: 後手）
+/// - `dir_bw_others`: 相手の長い利き方向（同上）
+/// - `p`: 増減量（1: 追加、-1: 削除）
+///
+/// ロジック:
+/// 1. XORで変化した方向のみ抽出
+/// 2. 方向ごとに味方/相手の利きを分離
+/// 3. 直線上の升に対して利きカウントと長い利きを更新
 fn update_long_effect_from(
     effects: &mut BoardEffects,
     long_effects: &mut LongEffects,
