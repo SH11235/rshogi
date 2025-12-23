@@ -82,3 +82,12 @@ pnpm --filter @shogi/engine-wasm bench:wasm -- --material
 | complex-middle | 16 | 1,000,000 | 3,436 | 291,036 | 133 | 8d7d |
 | tactical | 15 | 1,000,000 | 3,273 | 305,530 | 227 | S*6a |
 | movegen-heavy | 15 | 1,000,000 | 3,356 | 297,973 | 303 | G*3c |
+
+---
+
+## 変更履歴
+
+| 日付 | NNUE平均NPS | Material平均NPS | 内容 |
+|------|----------:|---------------:|------|
+| 2025-12-21 | 310,824 | 314,712 | 初回計測 |
+| 2025-12-23 | 309,932 | 312,866 | **board_effect機能追加**（fix-material-board_effectブランチ）。Material評価で利きの情報を使用する機能を追加。NNUE評価時はboard_effectを使わない設計により、NPSへの影響は誤差範囲（NNUE: -0.3%、Material: -0.6%）に抑制。評価精度向上とパフォーマンス維持を両立 |
