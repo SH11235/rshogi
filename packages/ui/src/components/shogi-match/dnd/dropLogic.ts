@@ -112,7 +112,7 @@ export function applyDrop(
         return { ok: false, next: position, error: validation.error };
     }
 
-    let nextBoard = cloneBoard(position.board);
+    const nextBoard = cloneBoard(position.board);
     let nextHands = cloneHandsState(position.hands);
 
     // 元の場所から駒を除去

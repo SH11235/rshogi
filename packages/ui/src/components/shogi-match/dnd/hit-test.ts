@@ -5,8 +5,8 @@
  * 設計書: docs/edit-mode-dnd-design-refined.md Section 3
  */
 
-import { BOARD_FILES, BOARD_RANKS } from "@shogi/app-core";
 import type { Square } from "@shogi/app-core";
+import { BOARD_FILES, BOARD_RANKS } from "@shogi/app-core";
 import type { BoardMetrics, DropTarget, Zones } from "./types";
 
 /**

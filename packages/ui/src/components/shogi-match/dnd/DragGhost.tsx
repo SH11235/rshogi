@@ -5,8 +5,8 @@
  * pointer-events: none でクリックを透過
  */
 
-import { cn } from "@shogi/design-system";
 import type { PieceType } from "@shogi/app-core";
+import { cn } from "@shogi/design-system";
 import { forwardRef } from "react";
 import { createPortal } from "react-dom";
 import type { DndState } from "./types";

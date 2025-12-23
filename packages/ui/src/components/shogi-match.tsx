@@ -35,9 +35,9 @@ import {
     applyDropResult,
     DeleteZone,
     DragGhost,
+    type DropResult,
     useDragEnvironment,
     usePieceDnd,
-    type DropResult,
 } from "./shogi-match/dnd";
 
 // EngineOption 型を外部に再エクスポート
