@@ -15,6 +15,8 @@ interface HandPiecesDisplayProps {
     isActive: boolean;
     /** 持ち駒クリック時のコールバック */
     onHandSelect: (piece: PieceType) => void;
+    /** DnD 用 PointerDown ハンドラ（編集モード時） */
+    onPiecePointerDown?: (owner: Player, pieceType: PieceType, e: React.PointerEvent) => void;
 }
 
 export function HandPiecesDisplay({
@@ -23,6 +25,7 @@ export function HandPiecesDisplay({
     selectedPiece,
     isActive,
     onHandSelect,
+    onPiecePointerDown,
 }: HandPiecesDisplayProps): ReactElement {
     return (
         <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
@@ -33,6 +36,11 @@ export function HandPiecesDisplay({
                     <button
                         key={`${owner}-${piece}`}
                         type="button"
+                        onPointerDown={(e) => {
+                            if (count > 0 && onPiecePointerDown) {
+                                onPiecePointerDown(owner, piece, e);
+                            }
+                        }}
                         onClick={() => onHandSelect(piece)}
                         disabled={count <= 0 || !isActive}
                         style={{

@@ -1,0 +1,19 @@
+/**
+ * 将棋盤 編集モード DnD モジュール
+ *
+ * ref + rAF 方式でパフォーマンス最適化された DnD 実装
+ * 設計書: docs/edit-mode-dnd-design-refined.md
+ */
+
+// コンポーネント
+export { DeleteZone } from "./DeleteZone";
+// コンテキスト
+export { DragGhost } from "./DragGhost";
+// ドロップロジック
+export { applyDropResult } from "./dropLogic";
+// ヒットテスト
+// 型定義
+export type { DropResult } from "./types";
+// Hooks
+export { useDragEnvironment } from "./useDragEnvironment";
+export { usePieceDnd } from "./usePieceDnd";
