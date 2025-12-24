@@ -50,6 +50,7 @@ export interface DragRuntime {
 
     origin: DragOrigin | null;
     payload: DragPayload | null;
+    basePromoted: boolean;
     hover: DropTarget | null;
 }
 

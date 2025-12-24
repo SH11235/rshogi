@@ -17,6 +17,7 @@ import type {
     DropTarget,
 } from "./types";
 import { DEFAULT_DND_CONFIG } from "./types";
+import { isPromotable } from "../utils/constants";
 
 /** ゴーストのサイズ (px) - DragGhost.tsx の h-12 w-12 と同期 */
 const GHOST_SIZE = 48;
@@ -63,6 +64,7 @@ function createInitialRuntime(): DragRuntime {
         raf: null,
         origin: null,
         payload: null,
+        basePromoted: false,
         hover: null,
     };
 }
@@ -169,6 +171,25 @@ export function usePieceDnd(options: UsePieceDndOptions): PieceDndController {
         }
     }, []);
 
+    const updatePayloadPromotion = useCallback((nextPromoted: boolean) => {
+        const rt = runtimeRef.current;
+        if (!rt.payload) return;
+        if (rt.payload.isPromoted === nextPromoted) return;
+
+        rt.payload = { ...rt.payload, isPromoted: nextPromoted };
+        setState((prev) => (prev.payload ? { ...prev, payload: rt.payload } : prev));
+    }, []);
+
+    const resolvePromotedByShift = useCallback(
+        (payload: DragPayload, shiftKey: boolean, basePromoted: boolean) => {
+            if (!isPromotable(payload.pieceType)) {
+                return basePromoted;
+            }
+            return basePromoted || shiftKey;
+        },
+        [],
+    );
+
     // PointerMove ハンドラ
     const handlePointerMove = useCallback(
         (e: PointerEvent) => {
@@ -189,10 +210,25 @@ export function usePieceDnd(options: UsePieceDndOptions): PieceDndController {
                     // ヒットテスト（DOM の data 属性から直接判定）
                     const target = getDropTarget(x, y, config.outsideAreaBehavior);
                     updateHoverTarget(target);
+
+                    if (rt.payload) {
+                        const promoted = resolvePromotedByShift(
+                            rt.payload,
+                            e.shiftKey,
+                            rt.basePromoted,
+                        );
+                        updatePayloadPromotion(promoted);
+                    }
                 });
             }
         },
-        [config.outsideAreaBehavior, updateGhostPosition, updateHoverTarget],
+        [
+            config.outsideAreaBehavior,
+            updateGhostPosition,
+            updateHoverTarget,
+            resolvePromotedByShift,
+            updatePayloadPromotion,
+        ],
     );
 
     // PointerUp ハンドラ（ドロップ）
@@ -306,12 +342,17 @@ export function usePieceDnd(options: UsePieceDndOptions): PieceDndController {
             const clientX = e.clientX;
             const clientY = e.clientY;
 
-            const activateDrag = () => {
+            const activateDrag = (shiftKey = false) => {
+                const basePromoted = payload.isPromoted;
+                const resolvedPromoted = resolvePromotedByShift(payload, shiftKey, basePromoted);
+                const resolvedPayload = { ...payload, isPromoted: resolvedPromoted };
+
                 rt.active = true;
                 rt.pointerId = pointerId;
                 rt.pointerType = pointerType;
                 rt.origin = origin;
-                rt.payload = payload;
+                rt.payload = resolvedPayload;
+                rt.basePromoted = basePromoted;
                 rt.startClient = { x: clientX, y: clientY };
                 rt.lastClient = { x: clientX, y: clientY };
 
@@ -338,7 +379,7 @@ export function usePieceDnd(options: UsePieceDndOptions): PieceDndController {
                 // React state 更新
                 setState({
                     isDragging: true,
-                    payload,
+                    payload: resolvedPayload,
                     hoverTarget: rt.hover,
                     mode: rt.hover?.type === "delete" ? "delete" : "valid",
                 });
@@ -398,7 +439,7 @@ export function usePieceDnd(options: UsePieceDndOptions): PieceDndController {
                 rt.longPressTimer = setTimeout(() => {
                     rt.longPressTimer = null;
                     cleanupTouchListeners();
-                    activateDrag();
+                    activateDrag(false);
                 }, config.longPressMs);
             } else {
                 // マウス/ペン: スロップ判定後に開始（クリックとドラッグを区別）
@@ -418,7 +459,7 @@ export function usePieceDnd(options: UsePieceDndOptions): PieceDndController {
                         // スロップ超過 → DnD開始
                         document.removeEventListener("pointermove", checkMouseSlop);
                         document.removeEventListener("pointerup", cancelMouseOnUp);
-                        activateDrag();
+                        activateDrag(moveEvent.shiftKey);
                     }
                 };
 
@@ -444,6 +485,7 @@ export function usePieceDnd(options: UsePieceDndOptions): PieceDndController {
             config.slopPx,
             config.outsideAreaBehavior,
             updateGhostPosition,
+            resolvePromotedByShift,
         ],
     );
 

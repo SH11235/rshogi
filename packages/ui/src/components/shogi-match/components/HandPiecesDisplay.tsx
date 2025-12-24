@@ -30,14 +30,14 @@ function PieceToken({
             <span className="rounded-[8px] bg-[#fdf6ec]/90 px-2 py-[5px] shadow-[0_3px_6px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)]">
                 {PIECE_LABELS[pieceType]}
             </span>
-            {/* 個数を添え字として表示 */}
+            {/* 個数を添え字として表示（親が回転しても常に右下に表示） */}
             <span
                 className={cn(
-                    "absolute -bottom-1 -right-1 min-w-[14px] text-center text-[11px] font-bold leading-none",
+                    "absolute min-w-[14px] text-center text-[11px] font-bold leading-none",
+                    shouldRotate ? "-left-1 -top-1 rotate-180" : "-bottom-1 -right-1",
                     count > 0
                         ? "text-[hsl(var(--wafuu-sumi))]"
                         : "text-[hsl(var(--muted-foreground))]",
-                    shouldRotate && "rotate-180",
                 )}
             >
                 {count}

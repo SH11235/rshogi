@@ -51,7 +51,7 @@ import {
     consumeFromHand,
     countPieces,
 } from "./shogi-match/utils/boardUtils";
-import { PIECE_CAP, PIECE_LABELS } from "./shogi-match/utils/constants";
+import { isPromotable, PIECE_CAP, PIECE_LABELS } from "./shogi-match/utils/constants";
 import { parseUsiInput } from "./shogi-match/utils/kifuUtils";
 import { LegalMoveCache } from "./shogi-match/utils/legalMoveCache";
 import { determinePromotion } from "./shogi-match/utils/promotionLogic";
@@ -539,6 +539,26 @@ export function ShogiMatch({
         [legalCache, stopTicking, refreshStartSfen],
     );
 
+    const setPiecePromotion = useCallback(
+        (square: Square, promote: boolean) => {
+            if (!isEditMode) return;
+            const current = positionRef.current;
+            const piece = current.board[square];
+            if (!piece) return;
+            if (!isPromotable(piece.type)) {
+                setEditMessage(`${PIECE_LABELS[piece.type]}は成れません。`);
+                return;
+            }
+
+            const nextBoard = cloneBoard(current.board);
+            nextBoard[square] = promote
+                ? { ...piece, promoted: true }
+                : { ...piece, promoted: undefined };
+            applyEditedPosition({ ...current, board: nextBoard });
+        },
+        [applyEditedPosition, isEditMode],
+    );
+
     // DnD ドロップハンドラ
     const handleDndDrop = useCallback(
         (result: DropResult) => {
@@ -610,6 +630,19 @@ export function ShogiMatch({
             dndController.startDrag(origin, payload, e);
         },
         [dndController, position, isEditPanelOpen],
+    );
+
+    const handlePieceTogglePromote = useCallback(
+        (
+            square: string,
+            piece: { owner: "sente" | "gote"; type: string; promoted?: boolean },
+            _event: React.MouseEvent<HTMLButtonElement>,
+        ) => {
+            if (!isEditMode) return;
+            const sq = square as Square;
+            setPiecePromotion(sq, !piece.promoted);
+        },
+        [isEditMode, setPiecePromotion],
     );
 
     // 持ち駒増加ハンドラ（編集モード用）
@@ -1089,6 +1122,10 @@ export function ShogiMatch({
                                     gap: "8px",
                                     flexDirection: "column",
                                     alignItems: "center",
+                                    touchAction:
+                                        isEditMode && dndController.state.isDragging
+                                            ? "none"
+                                            : "auto",
                                 }}
                             >
                                 {/* 手数表示 */}
@@ -1149,6 +1186,9 @@ export function ShogiMatch({
                                     flipBoard={flipBoard}
                                     onPiecePointerDown={
                                         isEditMode ? handlePiecePointerDown : undefined
+                                    }
+                                    onPieceTogglePromote={
+                                        isEditMode ? handlePieceTogglePromote : undefined
                                     }
                                 />
                                 {candidateNote ? (

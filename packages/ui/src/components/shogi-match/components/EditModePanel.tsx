@@ -179,6 +179,13 @@ export function EditModePanel({
                                 <li>
                                     <strong>駒を削除:</strong> 盤外にドラッグ
                                 </li>
+                                <li>
+                                    <strong>成/不成切替:</strong> 盤上の駒を右クリック or
+                                    ダブルクリック
+                                </li>
+                                <li>
+                                    <strong>成り付与:</strong> Shift を押しながらドラッグ
+                                </li>
                             </ul>
                         </div>
                     </div>

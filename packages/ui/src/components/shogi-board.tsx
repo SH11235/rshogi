@@ -1,5 +1,5 @@
 import { cn } from "@shogi/design-system";
-import type { ReactElement } from "react";
+import { useRef, type ReactElement } from "react";
 
 export type ShogiBoardOwner = "sente" | "gote";
 
@@ -29,6 +29,12 @@ export interface ShogiBoardProps {
         piece: ShogiBoardPiece,
         event: React.PointerEvent,
     ) => void;
+    /** 盤上の成/不成トグル（編集モード用） */
+    onPieceTogglePromote?: (
+        square: string,
+        piece: ShogiBoardPiece,
+        event: React.MouseEvent<HTMLButtonElement>,
+    ) => void;
 }
 
 const PIECE_LABELS: Record<string, string> = {
@@ -54,7 +60,10 @@ export function ShogiBoard({
     onPromotionChoice,
     flipBoard = false,
     onPiecePointerDown,
+    onPieceTogglePromote,
 }: ShogiBoardProps): ReactElement {
+    const lastPointerTypeRef = useRef<"mouse" | "touch" | "pen" | null>(null);
+
     return (
         <div className="relative inline-block w-full max-w-[560px] rounded-2xl border border-[hsl(var(--shogi-outer-border))] bg-[radial-gradient(circle_at_30%_20%,#f9e7c9,#e1c08d)] p-3 shadow-[0_10px_30px_rgba(0,0,0,0.18)]">
             <div className="pointer-events-none absolute inset-3 rounded-xl border border-white/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]" />
@@ -79,9 +88,24 @@ export function ShogiBoard({
                                     type="button"
                                     data-square={cell.id}
                                     onPointerDown={(e) => {
+                                        lastPointerTypeRef.current = e.pointerType;
                                         if (cell.piece && onPiecePointerDown) {
                                             onPiecePointerDown(cell.id, cell.piece, e);
                                         }
+                                    }}
+                                    onDoubleClick={(e) => {
+                                        if (cell.piece && onPieceTogglePromote) {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            onPieceTogglePromote(cell.id, cell.piece, e);
+                                        }
+                                    }}
+                                    onContextMenu={(e) => {
+                                        if (!cell.piece || !onPieceTogglePromote) return;
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        if (lastPointerTypeRef.current === "touch") return;
+                                        onPieceTogglePromote(cell.id, cell.piece, e);
                                     }}
                                     onClick={(e) => onSelect?.(cell.id, e.shiftKey)}
                                     onKeyDown={(e) => {
