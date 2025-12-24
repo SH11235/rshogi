@@ -1,8 +1,43 @@
+import { cn } from "@shogi/design-system";
 import type { PieceType, Player, PositionState } from "@shogi/app-core";
 import type { ReactElement } from "react";
 import { PIECE_CAP, PIECE_LABELS } from "../utils/constants";
 
 const HAND_ORDER: PieceType[] = ["R", "B", "G", "S", "N", "L", "P"];
+
+/** 盤上の駒と同じスタイルの駒表示 */
+function PieceToken({
+    pieceType,
+    owner,
+    count,
+}: {
+    pieceType: PieceType;
+    owner: Player;
+    count: number;
+}): ReactElement {
+    return (
+        <span
+            className={cn(
+                "relative inline-flex items-center justify-center text-[16px] leading-none tracking-tight text-[#3a2a16]",
+                owner === "gote" && "-rotate-180",
+            )}
+        >
+            <span className="rounded-[8px] bg-[#fdf6ec]/90 px-2 py-[5px] shadow-[0_3px_6px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)]">
+                {PIECE_LABELS[pieceType]}
+            </span>
+            {count > 1 && (
+                <span
+                    className={cn(
+                        "absolute -right-1 -top-1 min-w-[16px] rounded-full bg-[hsl(var(--wafuu-kincha))] px-1 text-[10px] font-bold text-white shadow-sm",
+                        owner === "gote" && "rotate-180",
+                    )}
+                >
+                    {count}
+                </span>
+            )}
+        </span>
+    );
+}
 
 interface HandPiecesDisplayProps {
     /** 持ち駒を持つプレイヤー */
@@ -72,22 +107,17 @@ export function HandPiecesDisplay({
                                 onHandSelect(piece);
                             }}
                             disabled={isDisabled}
-                            style={{
-                                minWidth: "52px",
-                                padding: "6px 10px",
-                                borderRadius: "10px",
-                                border: selected
-                                    ? "2px solid hsl(var(--primary, 15 86% 55%))"
-                                    : "1px solid hsl(var(--border, 0 0% 86%))",
-                                background:
-                                    count > 0 || isEditMode
-                                        ? "hsl(var(--secondary, 210 40% 96%))"
-                                        : "transparent",
-                                color: "hsl(var(--foreground, 222 47% 11%))",
-                                cursor: canDrag || canSelect ? "pointer" : "default",
-                            }}
+                            className={cn(
+                                "relative rounded-lg border-2 p-1 transition-all",
+                                selected
+                                    ? "border-[hsl(var(--wafuu-shu))] bg-[hsl(var(--wafuu-kin)/0.2)]"
+                                    : "border-transparent",
+                                count > 0 || isEditMode ? "opacity-100" : "opacity-40",
+                                (canDrag || canSelect) &&
+                                    "cursor-pointer hover:bg-[hsl(var(--wafuu-kin)/0.1)]",
+                            )}
                         >
-                            {PIECE_LABELS[piece]} × {count}
+                            <PieceToken pieceType={piece} owner={owner} count={count} />
                         </button>
 
                         {/* 編集モード: ±ボタン（縦並び） */}
