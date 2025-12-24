@@ -14,6 +14,9 @@ interface EditModePanelProps {
     // 制約
     isMatchRunning: boolean;
     positionReady: boolean;
+
+    // メッセージ
+    message: string | null;
 }
 
 export function EditModePanel({
@@ -23,6 +26,7 @@ export function EditModePanel({
     onClearBoard,
     isMatchRunning,
     positionReady,
+    message,
 }: EditModePanelProps): ReactElement {
     return (
         <Collapsible open={isOpen} onOpenChange={onOpenChange}>
@@ -126,6 +130,20 @@ export function EditModePanel({
                                 盤面をクリア
                             </Button>
                         </div>
+                        {message && (
+                            <div
+                                style={{
+                                    fontSize: "13px",
+                                    color: "hsl(var(--wafuu-shu))",
+                                    padding: "10px",
+                                    background: "hsl(var(--wafuu-washi))",
+                                    borderRadius: "8px",
+                                    borderLeft: "3px solid hsl(var(--wafuu-shu))",
+                                }}
+                            >
+                                {message}
+                            </div>
+                        )}
                         <div
                             style={{
                                 fontSize: "12px",

@@ -116,6 +116,8 @@ interface PlayerHandSectionProps {
     onIncrement?: (piece: PieceType) => void;
     /** 持ち駒を減らす（編集モード用） */
     onDecrement?: (piece: PieceType) => void;
+    /** 盤面反転状態 */
+    flipBoard?: boolean;
 }
 
 function PlayerHandSection({
@@ -128,6 +130,7 @@ function PlayerHandSection({
     isEditMode,
     onIncrement,
     onDecrement,
+    flipBoard,
 }: PlayerHandSectionProps): ReactElement {
     const labelColor = owner === "sente" ? "hsl(var(--wafuu-shu))" : "hsl(210 70% 45%)";
     const ownerText = owner === "sente" ? "先手" : "後手";
@@ -147,6 +150,7 @@ function PlayerHandSection({
                 isEditMode={isEditMode}
                 onIncrement={onIncrement}
                 onDecrement={onDecrement}
+                flipBoard={flipBoard}
             />
         </div>
     );
@@ -204,6 +208,7 @@ export function ShogiMatch({
     const [selection, setSelection] = useState<Selection | null>(null);
     const [promotionSelection, setPromotionSelection] = useState<PromotionSelection | null>(null);
     const [message, setMessage] = useState<string | null>(null);
+    const [editMessage, setEditMessage] = useState<string | null>(null);
     const [flipBoard, setFlipBoard] = useState(false);
     const [timeSettings, setTimeSettings] = useState<ClockSettings>({
         sente: { mainMs: initialMainTimeMs, byoyomiMs: initialByoyomiMs },
@@ -301,28 +306,21 @@ export function ShogiMatch({
     const handleMoveFromEngineRef = useRef<(move: string) => void>(() => {});
 
     // エンジン管理フックを使用
-    const {
-        engineReady,
-        engineStatus,
-        eventLogs,
-        errorLogs,
-        stopAllEngines,
-        getEngineForSide,
-        isEngineTurn,
-        logEngineError,
-    } = useEngineManager({
-        sides,
-        engineOptions,
-        timeSettings,
-        startSfen,
-        movesRef,
-        positionRef,
-        isMatchRunning,
-        positionReady,
-        onMoveFromEngine: (move) => handleMoveFromEngineRef.current(move),
-        onMatchEnd: endMatch,
-        maxLogs,
-    });
+    const { eventLogs, errorLogs, stopAllEngines, isEngineTurn, logEngineError } = useEngineManager(
+        {
+            sides,
+            engineOptions,
+            timeSettings,
+            startSfen,
+            movesRef,
+            positionRef,
+            isMatchRunning,
+            positionReady,
+            onMoveFromEngine: (move) => handleMoveFromEngineRef.current(move),
+            onMatchEnd: endMatch,
+            maxLogs,
+        },
+    );
     stopAllEnginesRef.current = stopAllEngines;
 
     // エンジンからの手を受け取って適用するコールバック
@@ -444,7 +442,7 @@ export function ShogiMatch({
         await refreshStartSfen(current);
         legalCache.clear();
         setIsEditMode(false);
-        setMessage("局面を確定しました。対局開始でこの局面から進行します。");
+        setEditMessage("局面を確定しました。対局開始でこの局面から進行します。");
     };
 
     const resetToBasePosition = useCallback(async () => {
@@ -661,7 +659,7 @@ export function ShogiMatch({
             ply: 1,
         };
         applyEditedPosition(next);
-        setMessage("盤面をクリアしました。");
+        setEditMessage("盤面をクリアしました。");
     };
 
     const resetToStartposForEdit = async () => {
@@ -671,7 +669,7 @@ export function ShogiMatch({
             const pos = await service.getInitialBoard();
             applyEditedPosition(clonePositionState(pos));
             setInitialBoard(cloneBoard(pos.board));
-            setMessage("平手初期化しました。");
+            setEditMessage("平手初期化しました。");
         } catch (error) {
             setMessage(`平手初期化に失敗しました: ${String(error)}`);
         }
@@ -723,13 +721,13 @@ export function ShogiMatch({
         });
         const nextCount = countsBefore[piece.owner][baseType] + 1;
         if (nextCount > PIECE_CAP[baseType]) {
-            setMessage(
+            setEditMessage(
                 `${piece.owner === "sente" ? "先手" : "後手"}の${PIECE_LABELS[baseType]}は最大${PIECE_CAP[baseType]}枚までです`,
             );
             return false;
         }
         if (piece.type === "K" && countsBefore[piece.owner][baseType] >= PIECE_CAP.K) {
-            setMessage("玉はそれぞれ1枚まで配置できます。");
+            setEditMessage("玉はそれぞれ1枚まで配置できます。");
             return false;
         }
 
@@ -802,7 +800,7 @@ export function ShogiMatch({
             }
 
             // 空マスをクリックした場合
-            setMessage("配置する駒を選ぶか、移動する駒をクリックしてください。");
+            setEditMessage("配置する駒を選ぶか、移動する駒をクリックしてください。");
             return;
         }
         if (!positionReady) {
@@ -1120,6 +1118,7 @@ export function ShogiMatch({
                                             onDecrement={(piece) =>
                                                 handleDecrementHand(info.owner, piece)
                                             }
+                                            flipBoard={flipBoard}
                                         />
                                     );
                                 })()}
@@ -1178,6 +1177,7 @@ export function ShogiMatch({
                                             onDecrement={(piece) =>
                                                 handleDecrementHand(info.owner, piece)
                                             }
+                                            flipBoard={flipBoard}
                                         />
                                     );
                                 })()}
@@ -1201,18 +1201,14 @@ export function ShogiMatch({
                             onClearBoard={clearBoardForEdit}
                             isMatchRunning={isMatchRunning}
                             positionReady={positionReady}
+                            message={editMessage}
                         />
 
                         <MatchControls
                             onNewGame={handleNewGame}
                             onPause={pauseAutoPlay}
                             onResume={resumeAutoPlay}
-                            sides={sides}
-                            engineReady={engineReady}
-                            engineStatus={engineStatus}
-                            isMatchRunning={isMatchRunning}
                             message={message}
-                            getEngineForSide={getEngineForSide}
                         />
 
                         <MatchSettingsPanel

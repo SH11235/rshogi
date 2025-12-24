@@ -10,16 +10,21 @@ function PieceToken({
     pieceType,
     owner,
     count,
+    flipBoard = false,
 }: {
     pieceType: PieceType;
     owner: Player;
     count: number;
+    flipBoard?: boolean;
 }): ReactElement {
+    // 盤面と同じ回転ロジック: 反転時は先手が逆さ、通常時は後手が逆さ
+    const shouldRotate = flipBoard ? owner === "sente" : owner === "gote";
+
     return (
         <span
             className={cn(
                 "relative inline-flex items-center justify-center text-[16px] leading-none tracking-tight text-[#3a2a16]",
-                owner === "gote" && "-rotate-180",
+                shouldRotate && "-rotate-180",
             )}
         >
             <span className="rounded-[8px] bg-[#fdf6ec]/90 px-2 py-[5px] shadow-[0_3px_6px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)]">
@@ -32,7 +37,7 @@ function PieceToken({
                     count > 0
                         ? "text-[hsl(var(--wafuu-sumi))]"
                         : "text-[hsl(var(--muted-foreground))]",
-                    owner === "gote" && "rotate-180",
+                    shouldRotate && "rotate-180",
                 )}
             >
                 {count}
@@ -60,6 +65,8 @@ interface HandPiecesDisplayProps {
     onIncrement?: (piece: PieceType) => void;
     /** 持ち駒を減らす（編集モード用） */
     onDecrement?: (piece: PieceType) => void;
+    /** 盤面反転状態 */
+    flipBoard?: boolean;
 }
 
 export function HandPiecesDisplay({
@@ -72,6 +79,7 @@ export function HandPiecesDisplay({
     isEditMode = false,
     onIncrement,
     onDecrement,
+    flipBoard = false,
 }: HandPiecesDisplayProps): ReactElement {
     return (
         <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
@@ -125,7 +133,12 @@ export function HandPiecesDisplay({
                                     "cursor-pointer hover:bg-[hsl(var(--wafuu-kin)/0.1)]",
                             )}
                         >
-                            <PieceToken pieceType={piece} owner={owner} count={count} />
+                            <PieceToken
+                                pieceType={piece}
+                                owner={owner}
+                                count={count}
+                                flipBoard={flipBoard}
+                            />
                         </button>
 
                         {/* 編集モード: ±ボタン（縦並び） */}
