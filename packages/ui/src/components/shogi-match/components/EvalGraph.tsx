@@ -189,7 +189,7 @@ export function EvalGraph({
             { value: `-${halfValue.toFixed(0)}`, position: padding.top + (graphHeight * 3) / 4 },
             { value: `-${displayMax}`, position: padding.top + graphHeight },
         ];
-    }, [scaleMax, graphHeight, padding.top]);
+    }, [scaleMax, graphHeight]);
 
     // X軸の目盛り（手数）
     const xAxisLabels = useMemo(() => {

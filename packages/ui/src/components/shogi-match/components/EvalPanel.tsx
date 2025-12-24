@@ -97,17 +97,10 @@ export function EvalPanel({
 
     return (
         <div style={panelStyle}>
-            <div
+            <button
+                type="button"
                 style={isOpen ? headerStyle : headerCollapsedStyle}
                 onClick={handleToggle}
-                onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        handleToggle();
-                    }
-                }}
-                role="button"
-                tabIndex={0}
                 aria-expanded={isOpen}
             >
                 <div style={titleStyle}>
@@ -122,7 +115,7 @@ export function EvalPanel({
                 >
                     ▼
                 </span>
-            </div>
+            </button>
 
             {isOpen && (
                 <div style={contentStyle}>

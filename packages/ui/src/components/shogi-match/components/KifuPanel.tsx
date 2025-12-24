@@ -46,32 +46,33 @@ export function KifuPanel({
     onCopyKif,
 }: KifuPanelProps): ReactElement {
     const listRef = useRef<HTMLDivElement>(null);
-    const currentRowRef = useRef<HTMLDivElement>(null);
+    const currentRowRef = useRef<HTMLElement>(null);
     const [copySuccess, setCopySuccess] = useState(false);
 
     // 現在の手数が変わったら自動スクロール（コンテナ内のみ）
-    // biome-ignore lint/correctness/useExhaustiveDependencies: currentPlyの変更時にスクロールを実行する必要がある
     useEffect(() => {
-        if (currentRowRef.current && listRef.current) {
-            const container = listRef.current;
-            const row = currentRowRef.current;
+        // currentPlyが範囲外の場合はスクロールしない
+        if (currentPly < 1 || currentPly > kifMoves.length) return;
 
-            // コンテナ内での相対位置を計算
-            const rowTop = row.offsetTop - container.offsetTop;
-            const rowBottom = rowTop + row.offsetHeight;
-            const containerScrollTop = container.scrollTop;
-            const containerHeight = container.clientHeight;
+        const container = listRef.current;
+        const row = currentRowRef.current;
+        if (!container || !row) return;
 
-            // 行が表示範囲外にある場合のみスクロール（コンテナ内で）
-            if (rowBottom > containerScrollTop + containerHeight) {
-                // 行が下にはみ出ている
-                container.scrollTop = rowBottom - containerHeight + 8;
-            } else if (rowTop < containerScrollTop) {
-                // 行が上にはみ出ている
-                container.scrollTop = rowTop - 8;
-            }
+        // コンテナ内での相対位置を計算
+        const rowTop = row.offsetTop - container.offsetTop;
+        const rowBottom = rowTop + row.offsetHeight;
+        const containerScrollTop = container.scrollTop;
+        const containerHeight = container.clientHeight;
+
+        // 行が表示範囲外にある場合のみスクロール（コンテナ内で）
+        if (rowBottom > containerScrollTop + containerHeight) {
+            // 行が下にはみ出ている
+            container.scrollTop = rowBottom - containerHeight + 8;
+        } else if (rowTop < containerScrollTop) {
+            // 行が上にはみ出ている
+            container.scrollTop = rowTop - 8;
         }
-    }, [currentPly]);
+    }, [currentPly, kifMoves.length]);
 
     // コピーボタンのハンドラ
     const handleCopy = useCallback(async () => {
@@ -122,28 +123,8 @@ export function KifuPanel({
                         const isCurrent = move.ply === currentPly;
                         const evalText = showEval ? formatEval(move.evalCp, move.evalMate) : "";
 
-                        return (
-                            // biome-ignore lint/a11y/noStaticElementInteractions: onPlySelectがある場合のみroleとイベントハンドラを設定
-                            <div
-                                key={move.ply}
-                                ref={isCurrent ? currentRowRef : undefined}
-                                className={`grid grid-cols-[32px_1fr_auto] gap-1 items-center px-1 py-0.5 text-[13px] font-mono rounded ${
-                                    isCurrent ? "bg-accent" : ""
-                                }`}
-                                onClick={() => onPlySelect?.(move.ply)}
-                                role={onPlySelect ? "button" : undefined}
-                                tabIndex={onPlySelect ? 0 : undefined}
-                                onKeyDown={
-                                    onPlySelect
-                                        ? (e) => {
-                                              if (e.key === "Enter" || e.key === " ") {
-                                                  e.preventDefault();
-                                                  onPlySelect(move.ply);
-                                              }
-                                          }
-                                        : undefined
-                                }
-                            >
+                        const content = (
+                            <>
                                 <span className="text-right text-muted-foreground text-xs">
                                     {move.ply}
                                 </span>
@@ -153,6 +134,42 @@ export function KifuPanel({
                                         {evalText}
                                     </span>
                                 )}
+                            </>
+                        );
+
+                        const rowClassName = `grid grid-cols-[32px_1fr_auto] gap-1 items-center px-1 py-0.5 text-[13px] font-mono rounded ${
+                            isCurrent ? "bg-accent" : ""
+                        }`;
+
+                        if (onPlySelect) {
+                            return (
+                                <button
+                                    type="button"
+                                    key={move.ply}
+                                    ref={
+                                        isCurrent
+                                            ? (currentRowRef as React.RefObject<HTMLButtonElement>)
+                                            : undefined
+                                    }
+                                    className={`${rowClassName} w-full text-left bg-transparent border-none cursor-pointer hover:bg-accent/50`}
+                                    onClick={() => onPlySelect(move.ply)}
+                                >
+                                    {content}
+                                </button>
+                            );
+                        }
+
+                        return (
+                            <div
+                                key={move.ply}
+                                ref={
+                                    isCurrent
+                                        ? (currentRowRef as React.RefObject<HTMLDivElement>)
+                                        : undefined
+                                }
+                                className={rowClassName}
+                            >
+                                {content}
                             </div>
                         );
                     })

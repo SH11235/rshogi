@@ -7,7 +7,7 @@
 
 import type { BoardState } from "@shogi/app-core";
 import type { EngineInfoEvent } from "@shogi/engine-client";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type { EvalHistory, KifMove } from "../utils/kifFormat";
 import { convertMovesToKif } from "../utils/kifFormat";
 
@@ -40,53 +40,48 @@ interface UseKifuWithEvalResult {
  */
 export function useKifuWithEval(moves: string[]): UseKifuWithEvalResult {
     // 盤面履歴（各手を適用する直前の盤面状態）
-    const boardHistoryRef = useRef<BoardState[]>([]);
+    const [boardHistory, setBoardHistory] = useState<BoardState[]>([]);
 
     // 評価値マップ（ply → 評価値）
-    const evalMapRef = useRef<Map<number, EvalEntry>>(new Map());
-
-    // 更新トリガー用カウンター（useMemoの依存配列用）
-    const [updateCounter, setUpdateCounter] = useState(0);
+    const [evalMap, setEvalMap] = useState<Map<number, EvalEntry>>(new Map());
 
     /**
      * 盤面状態を記録（指し手適用前に呼ぶ）
      */
     const recordBoardState = useCallback((board: BoardState) => {
-        boardHistoryRef.current = [...boardHistoryRef.current, board];
-        setUpdateCounter((c) => c + 1);
+        setBoardHistory((prev) => [...prev, board]);
     }, []);
 
     /**
      * 評価値を記録
      */
     const recordEval = useCallback((ply: number, event: EngineInfoEvent) => {
-        const existing = evalMapRef.current.get(ply);
-        // より深い探索深さの評価値で更新
-        if (!existing || (event.depth !== undefined && (existing.depth ?? 0) < event.depth)) {
-            evalMapRef.current.set(ply, {
-                scoreCp: event.scoreCp,
-                scoreMate: event.scoreMate,
-                depth: event.depth,
-            });
-            setUpdateCounter((c) => c + 1);
-        }
+        setEvalMap((prev) => {
+            const existing = prev.get(ply);
+            // より深い探索深さの評価値で更新
+            if (!existing || (event.depth !== undefined && (existing.depth ?? 0) < event.depth)) {
+                const newMap = new Map(prev);
+                newMap.set(ply, {
+                    scoreCp: event.scoreCp,
+                    scoreMate: event.scoreMate,
+                    depth: event.depth,
+                });
+                return newMap;
+            }
+            return prev;
+        });
     }, []);
 
     /**
      * 履歴をクリア
      */
     const clearHistory = useCallback(() => {
-        boardHistoryRef.current = [];
-        evalMapRef.current.clear();
-        setUpdateCounter((c) => c + 1);
+        setBoardHistory([]);
+        setEvalMap(new Map());
     }, []);
 
     // KIF形式の棋譜を生成
-    // biome-ignore lint/correctness/useExhaustiveDependencies: updateCounterは盤面履歴・評価値の更新を検知するためのトリガー
     const kifMoves = useMemo(() => {
-        const boardHistory = boardHistoryRef.current;
-        const evalMap = evalMapRef.current;
-
         // 盤面履歴がない場合は空配列
         if (boardHistory.length === 0 || moves.length === 0) {
             return [];
@@ -96,10 +91,9 @@ export function useKifuWithEval(moves: string[]): UseKifuWithEvalResult {
         const validMoves = moves.slice(0, boardHistory.length);
 
         return convertMovesToKif(validMoves, boardHistory, evalMap);
-    }, [moves, updateCounter]);
+    }, [moves, boardHistory, evalMap]);
 
     // 評価値履歴を生成（グラフ用）
-    // biome-ignore lint/correctness/useExhaustiveDependencies: updateCounterは評価値の更新を検知するためのトリガー
     const evalHistory = useMemo((): EvalHistory[] => {
         const history: EvalHistory[] = [
             { ply: 0, evalCp: 0, evalMate: null }, // 開始局面
@@ -107,7 +101,7 @@ export function useKifuWithEval(moves: string[]): UseKifuWithEvalResult {
 
         for (let i = 0; i < moves.length; i++) {
             const ply = i + 1;
-            const evalEntry = evalMapRef.current.get(ply);
+            const evalEntry = evalMap.get(ply);
 
             history.push({
                 ply,
@@ -117,12 +111,12 @@ export function useKifuWithEval(moves: string[]): UseKifuWithEvalResult {
         }
 
         return history;
-    }, [moves, updateCounter]);
+    }, [moves, evalMap]);
 
     return {
         kifMoves,
         evalHistory,
-        boardHistory: boardHistoryRef.current,
+        boardHistory,
         recordBoardState,
         recordEval,
         clearHistory,
