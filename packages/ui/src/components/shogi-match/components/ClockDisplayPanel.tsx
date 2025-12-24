@@ -10,6 +10,7 @@ const baseCard = {
     borderRadius: "12px",
     padding: "12px",
     boxShadow: "0 14px 28px rgba(0,0,0,0.12)",
+    width: "var(--panel-width)",
 };
 
 const ROLE_LABELS: Record<SideSetting["role"], string> = {
