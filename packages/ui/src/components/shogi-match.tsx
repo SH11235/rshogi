@@ -127,7 +127,7 @@ function PlayerHandSection({
     handRef,
 }: PlayerHandSectionProps): ReactElement {
     return (
-        <div ref={handRef}>
+        <div ref={handRef} data-zone={`hand-${owner}`}>
             <div style={TEXT_STYLES.handLabel}>{label}</div>
             <HandPiecesDisplay
                 owner={owner}
@@ -554,7 +554,6 @@ export function ShogiMatch({
 
     // DnD コントローラー
     const dndController = usePieceDnd({
-        env: dndEnv,
         onDrop: handleDndDrop,
         disabled: !isEditMode,
     });
@@ -1067,36 +1066,35 @@ export function ShogiMatch({
                                     );
                                 })()}
 
-                                {/* 盤面コンテナ（DnD ヒットテスト用） */}
-                                <div ref={dndEnv.boardRef as React.RefObject<HTMLDivElement>}>
-                                    <ShogiBoard
-                                        grid={grid}
-                                        selectedSquare={
-                                            isEditMode && editFromSquare
-                                                ? editFromSquare
-                                                : selection?.kind === "square"
-                                                  ? selection.square
-                                                  : null
-                                        }
-                                        lastMove={
-                                            lastMove
-                                                ? {
-                                                      from: lastMove.from ?? undefined,
-                                                      to: lastMove.to,
-                                                  }
-                                                : undefined
-                                        }
-                                        promotionSquare={promotionSelection?.to ?? null}
-                                        onSelect={(sq, shiftKey) => {
-                                            void handleSquareSelect(sq, shiftKey);
-                                        }}
-                                        onPromotionChoice={handlePromotionChoice}
-                                        flipBoard={flipBoard}
-                                        onPiecePointerDown={
-                                            isEditMode ? handlePiecePointerDown : undefined
-                                        }
-                                    />
-                                </div>
+                                {/* 盤面（ref は ShogiBoard 内部のグリッドに設定される） */}
+                                <ShogiBoard
+                                    ref={dndEnv.boardRef as React.RefObject<HTMLDivElement>}
+                                    grid={grid}
+                                    selectedSquare={
+                                        isEditMode && editFromSquare
+                                            ? editFromSquare
+                                            : selection?.kind === "square"
+                                              ? selection.square
+                                              : null
+                                    }
+                                    lastMove={
+                                        lastMove
+                                            ? {
+                                                  from: lastMove.from ?? undefined,
+                                                  to: lastMove.to,
+                                              }
+                                            : undefined
+                                    }
+                                    promotionSquare={promotionSelection?.to ?? null}
+                                    onSelect={(sq, shiftKey) => {
+                                        void handleSquareSelect(sq, shiftKey);
+                                    }}
+                                    onPromotionChoice={handlePromotionChoice}
+                                    flipBoard={flipBoard}
+                                    onPiecePointerDown={
+                                        isEditMode ? handlePiecePointerDown : undefined
+                                    }
+                                />
                                 {candidateNote ? (
                                     <div style={TEXT_STYLES.mutedSecondary}>{candidateNote}</div>
                                 ) : null}

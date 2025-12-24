@@ -19,11 +19,8 @@ import type {
     DropTarget,
 } from "./types";
 import { DEFAULT_DND_CONFIG } from "./types";
-import type { DragEnvironment } from "./useDragEnvironment";
 
 interface UsePieceDndOptions {
-    /** DnD 環境 */
-    env: DragEnvironment;
     /** ドロップ時のコールバック */
     onDrop?: (result: DropResult) => void;
     /** キャンセル時のコールバック */
@@ -64,13 +61,11 @@ function createInitialRuntime(): DragRuntime {
         origin: null,
         payload: null,
         hover: null,
-        boardMetrics: null,
-        zones: null,
     };
 }
 
 export function usePieceDnd(options: UsePieceDndOptions): PieceDndController {
-    const { env, onDrop, onCancel, config: configOverrides, disabled = false } = options;
+    const { onDrop, onCancel, config: configOverrides, disabled = false } = options;
 
     const config: DndConfig = { ...DEFAULT_DND_CONFIG, ...configOverrides };
 
@@ -188,21 +183,9 @@ export function usePieceDnd(options: UsePieceDndOptions): PieceDndController {
                     // ゴースト位置更新（中心に配置するため調整）
                     updateGhostPosition(x - 24, y - 24);
 
-                    // ヒットテスト
-                    if (rt.boardMetrics) {
-                        const target = getDropTarget(
-                            x,
-                            y,
-                            rt.boardMetrics,
-                            rt.zones ?? {
-                                senteHandRect: null,
-                                goteHandRect: null,
-                                deleteRect: null,
-                            },
-                            config.outsideAreaBehavior,
-                        );
-                        updateHoverTarget(target);
-                    }
+                    // ヒットテスト（DOM の data 属性から直接判定）
+                    const target = getDropTarget(x, y, config.outsideAreaBehavior);
+                    updateHoverTarget(target);
                 });
             }
         },
@@ -320,25 +303,20 @@ export function usePieceDnd(options: UsePieceDndOptions): PieceDndController {
             const clientX = e.clientX;
             const clientY = e.clientY;
 
-            // 計測
-            const { board, zones } = env.measure();
-
             const activateDrag = () => {
                 rt.active = true;
                 rt.pointerId = pointerId;
                 rt.pointerType = pointerType;
                 rt.origin = origin;
                 rt.payload = payload;
-                rt.boardMetrics = board;
-                rt.zones = zones;
                 rt.startClient = { x: clientX, y: clientY };
                 rt.lastClient = { x: clientX, y: clientY };
 
                 // Pointer capture
-                const target = e.target as Element;
+                const captureEl = e.target as Element;
                 try {
-                    target.setPointerCapture(pointerId);
-                    rt.captureTarget = target;
+                    captureEl.setPointerCapture(pointerId);
+                    rt.captureTarget = captureEl;
                 } catch {
                     // 失敗しても続行
                     rt.captureTarget = null;
@@ -350,17 +328,9 @@ export function usePieceDnd(options: UsePieceDndOptions): PieceDndController {
                     updateGhostPosition(clientX - 24, clientY - 24);
                 }
 
-                // 初期ヒットテスト
-                if (board) {
-                    const target = getDropTarget(
-                        clientX,
-                        clientY,
-                        board,
-                        zones,
-                        config.outsideAreaBehavior,
-                    );
-                    rt.hover = target;
-                }
+                // 初期ヒットテスト（DOM の data 属性から直接判定）
+                const dropTarget = getDropTarget(clientX, clientY, config.outsideAreaBehavior);
+                rt.hover = dropTarget;
 
                 // React state 更新
                 setState({
@@ -434,7 +404,6 @@ export function usePieceDnd(options: UsePieceDndOptions): PieceDndController {
         },
         [
             disabled,
-            env,
             config.longPressMs,
             config.slopPx,
             config.outsideAreaBehavior,

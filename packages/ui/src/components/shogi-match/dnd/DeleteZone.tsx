@@ -34,6 +34,7 @@ export const DeleteZone = forwardRef<HTMLElement, DeleteZoneProps>(function Dele
     return (
         <section
             ref={ref}
+            data-zone="delete"
             className={cn(
                 "relative overflow-hidden",
                 "rounded-xl border-2 border-dashed",
