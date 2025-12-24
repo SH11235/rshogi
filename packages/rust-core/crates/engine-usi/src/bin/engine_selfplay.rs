@@ -96,9 +96,17 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     ponder: bool,
 
-    /// Threads USI option
+    /// Threads USI option (default for both sides)
     #[arg(long, default_value_t = 1)]
     threads: usize,
+
+    /// Threads for Black (overrides --threads)
+    #[arg(long)]
+    threads_black: Option<usize>,
+
+    /// Threads for White (overrides --threads)
+    #[arg(long)]
+    threads_white: Option<usize>,
 
     /// Hash/USI_Hash size (MiB)
     #[arg(long, default_value_t = 1024)]
@@ -180,6 +188,8 @@ struct MetaSettings {
     byoyomi: u64,
     timeout_margin_ms: u64,
     threads: usize,
+    threads_black: usize,
+    threads_white: usize,
     hash_mb: u32,
     network_delay: Option<i64>,
     network_delay2: Option<i64>,
@@ -935,6 +945,9 @@ fn main() -> Result<()> {
     };
 
     let engine_paths = resolve_engine_paths(&cli);
+    let threads_black = cli.threads_black.unwrap_or(cli.threads);
+    let threads_white = cli.threads_white.unwrap_or(cli.threads);
+
     if engine_paths.black.path == engine_paths.white.path
         && engine_paths.black.source == engine_paths.white.source
     {
@@ -950,6 +963,11 @@ fn main() -> Result<()> {
             engine_paths.white.source
         );
     }
+    if threads_black == threads_white {
+        println!("threads: {threads_black}");
+    } else {
+        println!("threads: black={threads_black}, white={threads_white}");
+    }
     let common_args = cli.engine_args.clone().unwrap_or_default();
     let black_args = cli.engine_args_black.clone().unwrap_or_else(|| common_args.clone());
     let white_args = cli.engine_args_white.clone().unwrap_or(common_args.clone());
@@ -958,7 +976,7 @@ fn main() -> Result<()> {
         &EngineConfig {
             path: engine_paths.black.path.clone(),
             args: black_args.clone(),
-            threads: cli.threads,
+            threads: threads_black,
             hash_mb: cli.hash_mb,
             network_delay: cli.network_delay,
             network_delay2: cli.network_delay2,
@@ -972,7 +990,7 @@ fn main() -> Result<()> {
         &EngineConfig {
             path: engine_paths.white.path.clone(),
             args: white_args.clone(),
-            threads: cli.threads,
+            threads: threads_white,
             hash_mb: cli.hash_mb,
             network_delay: cli.network_delay,
             network_delay2: cli.network_delay2,
@@ -996,6 +1014,8 @@ fn main() -> Result<()> {
             byoyomi: cli.byoyomi,
             timeout_margin_ms: cli.timeout_margin_ms,
             threads: cli.threads,
+            threads_black,
+            threads_white,
             hash_mb: cli.hash_mb,
             network_delay: cli.network_delay,
             network_delay2: cli.network_delay2,
