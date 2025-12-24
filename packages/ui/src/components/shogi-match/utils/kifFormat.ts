@@ -10,8 +10,10 @@ import type { BoardState, Piece, PieceType, Player, Square } from "@shogi/app-co
 export interface KifMove {
     /** 手数（1始まり） */
     ply: number;
-    /** KIF形式の指し手文字列（例: "▲７六歩"） */
+    /** KIF形式の指し手文字列（例: "▲７六歩(77)"）- エクスポート用 */
     kifText: string;
+    /** 簡易表示用文字列（例: "☗7六歩(77)"）- UI表示用 */
+    displayText: string;
     /** USI形式の指し手（内部保持用） */
     usiMove: string;
     /** 評価値（センチポーン） */
@@ -186,6 +188,83 @@ export function formatMoveToKif(
 }
 
 /**
+ * USI形式の指し手を簡易表示形式に変換（UI表示用）
+ *
+ * 正式KIF形式との違い:
+ * - 先手後手: ▲△ → ☗☖（Unicode駒記号）
+ * - 筋: 全角（７）→ 半角（7）
+ *
+ * @param usiMove USI形式の指し手（例: "7g7f", "P*5e", "7g7f+"）
+ * @param turn 手番
+ * @param board 現在の盤面状態（指し手適用前）
+ * @param prevTo 直前の移動先マス（「同」表記判定用）
+ * @returns 簡易表示形式の指し手文字列（例: "☗7六歩(77)"）
+ */
+export function formatMoveSimple(
+    usiMove: string,
+    turn: Player,
+    board: BoardState,
+    prevTo?: Square,
+): string {
+    const mark = turn === "sente" ? "☗" : "☖";
+
+    if (!usiMove || usiMove.length < 4) {
+        return `${mark}${usiMove}`; // フォールバック
+    }
+
+    // 駒打ち: "P*5e"
+    if (usiMove[1] === "*") {
+        const pieceChar = usiMove[0].toUpperCase() as PieceType;
+        const to = usiMove.slice(2, 4);
+        const toSimple = squareToSimple(to);
+        const pieceName = PIECE_NAMES[pieceChar] ?? pieceChar;
+        return `${mark}${toSimple}${pieceName}打`;
+    }
+
+    // 通常移動: "7g7f" or "7g7f+"
+    const from = usiMove.slice(0, 2) as Square;
+    const to = usiMove.slice(2, 4) as Square;
+    const promotes = usiMove.endsWith("+");
+    const piece: Piece | null = board[from];
+
+    if (!piece) {
+        // 盤面に駒がない場合（エラーケース）はUSI形式をそのまま返す
+        return `${mark}${usiMove}`;
+    }
+
+    // 「同」表記判定：直前の移動先と今回の移動先が同じ場合
+    const toSimple = prevTo === to ? "同　" : squareToSimple(to);
+
+    // 駒名を取得（移動前の状態で判定）
+    const pieceName = getPieceName(piece.type, piece.promoted ?? false);
+
+    // 成り表記
+    const promoteText = promotes ? "成" : "";
+
+    // 移動元座標
+    const fromDigits = squareToDigitsForDisplay(from);
+
+    return `${mark}${toSimple}${pieceName}${promoteText}(${fromDigits})`;
+}
+
+/**
+ * USI形式のマス座標を簡易表示形式に変換
+ * @param sq "5e" のようなUSI形式マス座標
+ * @returns "5五" のような半角数字+漢数字表記
+ */
+function squareToSimple(sq: string): string {
+    const file = sq[0]; // 半角数字のまま
+    const rankChar = sq[1]; // 'a'-'i'
+    const rank = rankChar.charCodeAt(0) - 96; // a=1, b=2, ..., i=9
+
+    if (rank < 1 || rank > 9) {
+        return sq; // フォールバック
+    }
+
+    return `${file}${RANK_KANJI[rank]}`;
+}
+
+/**
  * 評価値を表示用文字列にフォーマット
  * @param evalCp 評価値（センチポーン）
  * @param evalMate 詰み手数
@@ -271,10 +350,12 @@ export function convertMovesToKif(
         }
 
         const kifText = formatMoveToKif(moves[i], turn, board, prevTo);
+        const displayText = formatMoveSimple(moves[i], turn, board, prevTo);
 
         kifMoves.push({
             ply,
             kifText,
+            displayText,
             usiMove: moves[i],
             evalCp: evalEvent?.scoreCp,
             evalMate: evalEvent?.scoreMate,

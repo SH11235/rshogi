@@ -147,7 +147,7 @@ export function KifuPanel({
                                 <span className="text-right text-muted-foreground text-xs">
                                     {move.ply}
                                 </span>
-                                <span className="font-medium">{move.kifText}</span>
+                                <span className="font-medium">{move.displayText}</span>
                                 {showEval && evalText && (
                                     <span className={getEvalClassName(move.evalCp, move.evalMate)}>
                                         {evalText}
