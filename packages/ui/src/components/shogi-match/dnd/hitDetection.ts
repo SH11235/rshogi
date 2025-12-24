@@ -3,6 +3,11 @@
  *
  * document.elementFromPoint() を使用して DOM 要素から直接判定
  * data-square 属性（盤面マス）と data-zone 属性（持ち駒・削除）を使用
+ *
+ * 注意: この方式はゴーストやオーバーレイに pointer-events: none が
+ * 設定されていることを前提とする。pointer-events を持つオーバーレイ
+ * （クリック可能な矢印等）を追加する場合は elementsFromPoint への
+ * 変更を検討すること。
  */
 
 import type { Square } from "@shogi/app-core";
