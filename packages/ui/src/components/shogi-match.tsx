@@ -23,10 +23,9 @@ import { ShogiBoard } from "./shogi-board";
 import { ClockDisplayPanel } from "./shogi-match/components/ClockDisplayPanel";
 import { EditModePanel } from "./shogi-match/components/EditModePanel";
 import { EngineLogsPanel } from "./shogi-match/components/EngineLogsPanel";
-import { EvalGraph } from "./shogi-match/components/EvalGraph";
+import { EvalPanel } from "./shogi-match/components/EvalPanel";
 import { HandPiecesDisplay } from "./shogi-match/components/HandPiecesDisplay";
 import { KifuIOPanel } from "./shogi-match/components/KifuIOPanel";
-import { KifuPanel } from "./shogi-match/components/KifuPanel";
 import { MatchControls } from "./shogi-match/components/MatchControls";
 import {
     type EngineOption,
@@ -1359,18 +1358,12 @@ export function ShogiMatch({
 
                         <ClockDisplayPanel clocks={clocks} sides={sides} />
 
-                        <EvalGraph
+                        <EvalPanel
                             evalHistory={evalHistory}
-                            currentPly={moves.length}
-                            compact={true}
-                            height={60}
-                        />
-
-                        <KifuPanel
                             kifMoves={kifMoves}
                             currentPly={moves.length}
-                            showEval={true}
                             onCopyKif={handleCopyKif}
+                            defaultOpen={false}
                         />
 
                         <KifuIOPanel

@@ -118,13 +118,25 @@ export function getPieceName(pieceType: PieceType, promoted: boolean): string {
 }
 
 /**
+ * USI形式のマス座標を数字形式に変換（移動元表示用）
+ * @param sq "7g" のようなUSI形式マス座標
+ * @returns "77" のような数字表記
+ */
+function squareToDigitsForDisplay(sq: string): string {
+    const file = sq[0]; // 1-9
+    const rankChar = sq[1]; // 'a'-'i'
+    const rank = rankChar.charCodeAt(0) - 96; // a=1, b=2, ..., i=9
+    return `${file}${rank}`;
+}
+
+/**
  * USI形式の指し手をKIF形式に変換
  *
  * @param usiMove USI形式の指し手（例: "7g7f", "P*5e", "7g7f+"）
  * @param turn 手番
  * @param board 現在の盤面状態（指し手適用前）
  * @param prevTo 直前の移動先マス（「同」表記判定用）
- * @returns KIF形式の指し手文字列（例: "▲７六歩"）
+ * @returns KIF形式の指し手文字列（例: "▲７六歩(77)"）
  */
 export function formatMoveToKif(
     usiMove: string,
@@ -167,10 +179,10 @@ export function formatMoveToKif(
     // 成り表記
     const promoteText = promotes ? "成" : "";
 
-    // 不成表記：成れる状況で成らなかった場合に「不成」を付ける
-    // （ここでは簡易実装として成り判定は省略）
+    // 移動元座標
+    const fromDigits = squareToDigitsForDisplay(from);
 
-    return `${mark}${toKanji}${pieceName}${promoteText}`;
+    return `${mark}${toKanji}${pieceName}${promoteText}(${fromDigits})`;
 }
 
 /**

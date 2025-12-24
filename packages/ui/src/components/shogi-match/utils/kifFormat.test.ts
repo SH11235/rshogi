@@ -121,17 +121,17 @@ describe("getPieceName", () => {
 describe("formatMoveToKif", () => {
     it("先手の歩の移動を変換する", () => {
         const board = placePiece(createEmptyBoard(), "7g", "sente", "P");
-        expect(formatMoveToKif("7g7f", "sente", board)).toBe("▲７六歩");
+        expect(formatMoveToKif("7g7f", "sente", board)).toBe("▲７六歩(77)");
     });
 
     it("後手の歩の移動を変換する", () => {
         const board = placePiece(createEmptyBoard(), "3c", "gote", "P");
-        expect(formatMoveToKif("3c3d", "gote", board)).toBe("△３四歩");
+        expect(formatMoveToKif("3c3d", "gote", board)).toBe("△３四歩(33)");
     });
 
     it("成り移動を変換する", () => {
         const board = placePiece(createEmptyBoard(), "8h", "sente", "B");
-        expect(formatMoveToKif("8h2b+", "sente", board)).toBe("▲２二角成");
+        expect(formatMoveToKif("8h2b+", "sente", board)).toBe("▲２二角成(88)");
     });
 
     it("駒打ちを変換する", () => {
@@ -144,12 +144,12 @@ describe("formatMoveToKif", () => {
         // 直前の手が7fへの移動で、今回も7fへ移動する場合（駒を取る）
         const board = placePiece(createEmptyBoard(), "8f", "gote", "P");
         // 直前の手が7fへの移動だった場合、今回7fへ移動すると「同」になる
-        expect(formatMoveToKif("8f7f", "gote", board, "7f" as Square)).toBe("△同　歩");
+        expect(formatMoveToKif("8f7f", "gote", board, "7f" as Square)).toBe("△同　歩(86)");
     });
 
     it("成り駒の移動を変換する", () => {
         const board = placePiece(createEmptyBoard(), "5e", "sente", "B", true);
-        expect(formatMoveToKif("5e4d", "sente", board)).toBe("▲４四馬");
+        expect(formatMoveToKif("5e4d", "sente", board)).toBe("▲４四馬(55)");
     });
 
     it("盤面に駒がない場合はUSI形式をそのまま返す", () => {
@@ -253,17 +253,17 @@ describe("convertMovesToKif", () => {
         expect(result).toHaveLength(3);
         expect(result[0]).toMatchObject({
             ply: 1,
-            kifText: "▲７六歩",
+            kifText: "▲７六歩(77)",
             usiMove: "7g7f",
         });
         expect(result[1]).toMatchObject({
             ply: 2,
-            kifText: "△３四歩",
+            kifText: "△３四歩(33)",
             usiMove: "3c3d",
         });
         expect(result[2]).toMatchObject({
             ply: 3,
-            kifText: "▲２六歩",
+            kifText: "▲２六歩(27)",
             usiMove: "2g2f",
         });
     });
@@ -279,7 +279,7 @@ describe("convertMovesToKif", () => {
 
         expect(result[0]).toMatchObject({
             ply: 1,
-            kifText: "▲７六歩",
+            kifText: "▲７六歩(77)",
             evalCp: 50,
             depth: 20,
         });
@@ -295,9 +295,9 @@ describe("convertMovesToKif", () => {
 
         const result = convertMovesToKif(moves, boardHistory);
 
-        expect(result[0].kifText).toBe("▲７六歩");
+        expect(result[0].kifText).toBe("▲７六歩(77)");
         // 直前の移動先は7fなので、7f からの移動は「同」にならない
         // （移動先が同じ場合のみ「同」になる）
-        expect(result[1].kifText).toBe("△７五歩");
+        expect(result[1].kifText).toBe("△７五歩(76)");
     });
 });
