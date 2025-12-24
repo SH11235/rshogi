@@ -9,12 +9,13 @@ use std::sync::Arc;
 use crate::position::Position;
 use crate::tt::TranspositionTable;
 use crate::types::{Depth, Move, Value, MAX_PLY};
+use std::sync::atomic::AtomicU64;
 
 use super::time_manager::{
     calculate_falling_eval, calculate_time_reduction, normalize_nodes_effort,
     DEFAULT_MAX_MOVES_TO_DRAW,
 };
-use super::{LimitsType, RootMove, SearchWorker, Skill, SkillOptions, TimeManagement};
+use super::{LimitsType, RootMove, SearchWorker, Skill, SkillOptions, ThreadPool, TimeManagement};
 
 // =============================================================================
 // SearchInfo - 探索情報（USI info出力用）
@@ -85,7 +86,7 @@ impl SearchInfo {
 }
 
 /// YaneuraOu準拠のaspiration windowを計算
-pub(crate) fn compute_aspiration_window(rm: &RootMove) -> (Value, Value, Value) {
+pub(crate) fn compute_aspiration_window(rm: &RootMove, thread_id: usize) -> (Value, Value, Value) {
     // mean_squared_score がない場合は巨大なdeltaでフルウィンドウにする
     let fallback = {
         let inf = Value::INFINITE.raw() as i64;
@@ -94,7 +95,10 @@ pub(crate) fn compute_aspiration_window(rm: &RootMove) -> (Value, Value, Value) 
     let mean_sq = rm.mean_squared_score.unwrap_or(fallback).abs();
     let mean_sq = mean_sq.min((Value::INFINITE.raw() as i64) * (Value::INFINITE.raw() as i64));
 
-    let delta_raw = 5 + (mean_sq / 11131).min(i32::MAX as i64) as i32;
+    let thread_offset = (thread_id % 8) as i32;
+    let score_factor = rm.average_score.raw().abs() / 9000;
+    let delta_raw =
+        5 + thread_offset + score_factor + (mean_sq / 11131).min(i32::MAX as i64) as i32;
     let delta = Value::new(delta_raw);
     let alpha_raw = (rm.average_score.raw() - delta.raw()).max(-Value::INFINITE.raw());
     let beta_raw = (rm.average_score.raw() + delta.raw()).min(Value::INFINITE.raw());
@@ -177,6 +181,11 @@ pub struct Search {
     /// Skill Level オプション
     skill_options: SkillOptions,
 
+    /// 探索スレッド数
+    num_threads: usize,
+    /// 探索スレッドプール（helper threads）
+    thread_pool: ThreadPool,
+
     /// SearchWorker（YaneuraOu準拠: 長期保持して再利用）
     /// 履歴統計を含み、usinewgameでクリア、goでは保持
     worker: Option<Box<SearchWorker>>,
@@ -231,6 +240,178 @@ fn aggregate_best_move_changes(changes: &[f64]) -> (f64, usize) {
     }
     let sum: f64 = changes.iter().copied().sum();
     (sum, changes.len())
+}
+
+pub(crate) struct SearchProgress {
+    nodes: AtomicU64,
+    best_move_changes_bits: AtomicU64,
+}
+
+impl SearchProgress {
+    pub(crate) fn new() -> Self {
+        Self {
+            nodes: AtomicU64::new(0),
+            best_move_changes_bits: AtomicU64::new(0.0f64.to_bits()),
+        }
+    }
+
+    pub(crate) fn reset(&self) {
+        self.nodes.store(0, Ordering::Relaxed);
+        self.best_move_changes_bits.store(0.0f64.to_bits(), Ordering::Relaxed);
+    }
+
+    pub(crate) fn update(&self, nodes: u64, best_move_changes: f64) {
+        self.nodes.store(nodes, Ordering::Relaxed);
+        self.best_move_changes_bits
+            .store(best_move_changes.to_bits(), Ordering::Relaxed);
+    }
+
+    pub(crate) fn nodes(&self) -> u64 {
+        self.nodes.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn best_move_changes(&self) -> f64 {
+        f64::from_bits(self.best_move_changes_bits.load(Ordering::Relaxed))
+    }
+}
+
+struct ThreadSummary {
+    id: usize,
+    score: Value,
+    completed_depth: Depth,
+}
+
+impl ThreadSummary {
+    fn from_worker(id: usize, worker: &SearchWorker) -> Option<Self> {
+        worker.root_moves.get(0).map(|rm| Self {
+            id,
+            score: rm.score,
+            completed_depth: worker.completed_depth,
+        })
+    }
+}
+
+fn get_best_thread_id(main_worker: &SearchWorker, thread_pool: &ThreadPool) -> usize {
+    let mut summaries = Vec::new();
+    if let Some(summary) = ThreadSummary::from_worker(0, main_worker) {
+        summaries.push(summary);
+    }
+
+    for thread in thread_pool.helper_threads() {
+        if let Some(summary) = thread.with_worker(|worker: &mut SearchWorker| {
+            ThreadSummary::from_worker(thread.id(), worker)
+        }) {
+            summaries.push(summary);
+        }
+    }
+
+    if summaries.is_empty() {
+        return 0;
+    }
+
+    if let Some(win) = summaries.iter().find(|s| s.score.is_win()) {
+        return win.id;
+    }
+
+    let min_score = summaries.iter().map(|s| s.score.raw()).min().unwrap_or(0);
+
+    let mut best_id = summaries[0].id;
+    let mut best_value = i64::MIN;
+    for summary in summaries {
+        let vote_value =
+            (summary.score.raw() - min_score + 14) as i64 * summary.completed_depth as i64;
+        if vote_value > best_value {
+            best_value = vote_value;
+            best_id = summary.id;
+        }
+    }
+
+    best_id
+}
+
+struct BestThreadResult {
+    best_move: Move,
+    ponder_move: Move,
+    score: Value,
+    completed_depth: Depth,
+    nodes: u64,
+    best_previous_score: Option<Value>,
+    best_previous_average_score: Option<Value>,
+}
+
+fn collect_best_thread_result(
+    worker: &SearchWorker,
+    limits: &LimitsType,
+    skill_enabled: bool,
+    skill: &mut Skill,
+) -> BestThreadResult {
+    let completed_depth = worker.completed_depth;
+    let nodes = worker.nodes;
+    let best_previous_score = worker.root_moves.get(0).map(|rm| rm.score);
+    let best_previous_average_score = worker.root_moves.get(0).map(|rm| {
+        if rm.average_score.raw() == -Value::INFINITE.raw() {
+            rm.score
+        } else {
+            rm.average_score
+        }
+    });
+
+    if worker.root_moves.is_empty() {
+        return BestThreadResult {
+            best_move: Move::NONE,
+            ponder_move: Move::NONE,
+            score: Value::ZERO,
+            completed_depth,
+            nodes,
+            best_previous_score,
+            best_previous_average_score,
+        };
+    }
+
+    let mut effective_multi_pv = limits.multi_pv;
+    if skill_enabled {
+        effective_multi_pv = effective_multi_pv.max(4);
+    }
+    effective_multi_pv = effective_multi_pv.min(worker.root_moves.len());
+
+    let mut best_move = worker.best_move;
+    if skill_enabled && effective_multi_pv > 0 {
+        let mut rng = rand::rng();
+        let best = skill.pick_best(&worker.root_moves, effective_multi_pv, &mut rng);
+        if best != Move::NONE {
+            best_move = best;
+        }
+    }
+
+    let ponder_move = worker
+        .root_moves
+        .iter()
+        .find(|rm| rm.mv() == best_move)
+        .and_then(|rm| {
+            if rm.pv.len() > 1 {
+                Some(rm.pv[1])
+            } else {
+                None
+            }
+        })
+        .unwrap_or(Move::NONE);
+
+    let score = worker
+        .root_moves
+        .iter()
+        .find(|rm| rm.mv() == best_move)
+        .map(|rm| rm.score)
+        .unwrap_or(worker.root_moves.get(0).map(|rm| rm.score).unwrap_or(Value::ZERO));
+
+    BestThreadResult {
+        best_move,
+        ponder_move,
+        score,
+        completed_depth,
+        nodes,
+        best_previous_score,
+        best_previous_average_score,
+    }
 }
 
 impl Search {
@@ -301,14 +482,28 @@ impl Search {
     /// # Arguments
     /// * `tt_size_mb` - 置換表のサイズ（MB）
     pub fn new(tt_size_mb: usize) -> Self {
+        let tt = Arc::new(TranspositionTable::new(tt_size_mb));
+        let stop = Arc::new(AtomicBool::new(false));
+        let ponderhit_flag = Arc::new(AtomicBool::new(false));
+        let max_moves_to_draw = DEFAULT_MAX_MOVES_TO_DRAW;
+        let thread_pool = ThreadPool::new(
+            1,
+            Arc::clone(&tt),
+            Arc::clone(&stop),
+            Arc::clone(&ponderhit_flag),
+            max_moves_to_draw,
+        );
+
         Self {
-            tt: Arc::new(TranspositionTable::new(tt_size_mb)),
+            tt,
             tt_size_mb,
-            stop: Arc::new(AtomicBool::new(false)),
-            ponderhit_flag: Arc::new(AtomicBool::new(false)),
+            stop,
+            ponderhit_flag,
             start_time: None,
             time_options: super::TimeOptions::default(),
             skill_options: SkillOptions::default(),
+            num_threads: 1,
+            thread_pool,
             // YaneuraOu準拠: workerは遅延初期化（最初のgoで作成）
             worker: None,
             best_previous_score: Some(Value::INFINITE),
@@ -322,7 +517,7 @@ impl Search {
             last_game_ply: None,
             increase_depth: true,
             search_again_counter: 0,
-            max_moves_to_draw: DEFAULT_MAX_MOVES_TO_DRAW,
+            max_moves_to_draw,
         }
     }
 
@@ -334,6 +529,7 @@ impl Search {
         if let Some(worker) = &mut self.worker {
             worker.tt = Arc::clone(&self.tt);
         }
+        self.thread_pool.update_tt(Arc::clone(&self.tt));
     }
 
     /// 置換表をクリア
@@ -346,6 +542,7 @@ impl Search {
         if let Some(worker) = &mut self.worker {
             worker.tt = Arc::clone(&self.tt);
         }
+        self.thread_pool.update_tt(Arc::clone(&self.tt));
     }
 
     /// Large Pagesで確保されているかを返す
@@ -360,6 +557,7 @@ impl Search {
         if let Some(worker) = &mut self.worker {
             worker.clear();
         }
+        self.thread_pool.clear_histories();
     }
 
     /// 停止フラグを取得（探索スレッドに渡す用）
@@ -412,6 +610,21 @@ impl Search {
         self.max_moves_to_draw
     }
 
+    /// 探索スレッド数を設定
+    pub fn set_num_threads(&mut self, num: usize) {
+        let num = num.clamp(1, 512);
+        #[cfg(target_arch = "wasm32")]
+        let num = 1;
+        self.num_threads = num;
+        self.thread_pool
+            .set_num_threads(num, Arc::clone(&self.tt), self.max_moves_to_draw);
+    }
+
+    /// 探索スレッド数を取得
+    pub fn num_threads(&self) -> usize {
+        self.num_threads
+    }
+
     /// 探索を実行
     ///
     /// # Arguments
@@ -451,7 +664,7 @@ impl Search {
         // YaneuraOu準拠: workerは遅延初期化、再利用する
         let tt_clone = Arc::clone(&self.tt);
         let max_moves = self.max_moves_to_draw;
-        let worker = self.worker.get_or_insert_with(|| SearchWorker::new(tt_clone, max_moves));
+        let worker = self.worker.get_or_insert_with(|| SearchWorker::new(tt_clone, max_moves, 0));
 
         // setoptionで変更された可能性があるため、最新値を反映
         worker.max_moves_to_draw = self.max_moves_to_draw;
@@ -470,8 +683,19 @@ impl Search {
         let mut skill = Skill::from_options(&self.skill_options);
         let skill_enabled = skill.enabled();
 
+        if self.num_threads > 1 {
+            self.thread_pool.start_thinking(
+                pos,
+                limits.clone(),
+                max_depth,
+                self.time_options,
+                self.max_moves_to_draw,
+                skill_enabled,
+            );
+        }
+
         // 探索実行（コールバックなしの場合はダミーを渡す）
-        let effective_multi_pv = match on_info {
+        let _effective_multi_pv = match on_info {
             Some(callback) => self.search_with_callback(
                 pos,
                 &limits,
@@ -493,56 +717,60 @@ impl Search {
             }
         };
 
-        // workerへの参照を再取得（borrowck対応）
-        let worker = self
-            .worker
-            .as_mut()
-            .expect("worker should be initialized by search_with_callback");
-
-        // Skill有効時は pick_best でbestmoveを差し替える
-        if skill_enabled && !worker.root_moves.is_empty() && effective_multi_pv > 0 {
-            let mut rng = rand::rng();
-            let best = skill.pick_best(&worker.root_moves, effective_multi_pv, &mut rng);
-            if best != Move::NONE {
-                worker.best_move = best;
-            }
+        if self.num_threads > 1 {
+            self.stop.store(true, Ordering::SeqCst);
+            self.thread_pool.wait_for_search_finished();
         }
 
-        // 結果を収集
-        let best_move = worker.best_move;
-        let ponder_move = worker
-            .root_moves
-            .iter()
-            .find(|rm| rm.mv() == best_move)
-            .and_then(|rm| {
-                if rm.pv.len() > 1 {
-                    Some(rm.pv[1])
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(Move::NONE);
+        let best_thread_id = {
+            let worker = self
+                .worker
+                .as_ref()
+                .expect("worker should be initialized by search_with_callback");
+            get_best_thread_id(worker, &self.thread_pool)
+        };
 
-        let best_previous_score = worker.root_moves.get(0).map(|rm| rm.score);
-        let best_previous_average_score = worker.root_moves.get(0).map(|rm| {
-            if rm.average_score.raw() == -Value::INFINITE.raw() {
-                rm.score
-            } else {
-                rm.average_score
-            }
-        });
-
-        let completed_depth = worker.completed_depth;
-        let nodes = worker.nodes;
-        let score = if worker.root_moves.is_empty() {
-            Value::ZERO
+        let best_result = if best_thread_id == 0 {
+            let worker = self
+                .worker
+                .as_ref()
+                .expect("worker should be initialized by search_with_callback");
+            collect_best_thread_result(worker, &limits, skill_enabled, &mut skill)
         } else {
-            worker
-                .root_moves
-                .iter()
-                .find(|rm| rm.mv() == best_move)
-                .map(|rm| rm.score)
-                .unwrap_or(worker.root_moves[0].score)
+            let mut result = None;
+            for thread in self.thread_pool.helper_threads() {
+                if thread.id() == best_thread_id {
+                    result = Some(thread.with_worker(|worker: &mut SearchWorker| {
+                        collect_best_thread_result(worker, &limits, skill_enabled, &mut skill)
+                    }));
+                    break;
+                }
+            }
+            result.unwrap_or_else(|| {
+                let worker = self
+                    .worker
+                    .as_ref()
+                    .expect("worker should be initialized by search_with_callback");
+                collect_best_thread_result(worker, &limits, skill_enabled, &mut skill)
+            })
+        };
+
+        let BestThreadResult {
+            best_move,
+            ponder_move,
+            score,
+            completed_depth,
+            nodes: _best_nodes,
+            best_previous_score,
+            best_previous_average_score,
+        } = best_result;
+        let total_nodes = {
+            let main_nodes = self.worker.as_ref().map(|w| w.nodes).unwrap_or(0);
+            let helper_nodes =
+                self.thread_pool.helper_threads().iter().fold(0u64, |acc, thread| {
+                    acc.saturating_add(thread.with_worker(|worker| worker.nodes))
+                });
+            main_nodes.saturating_add(helper_nodes)
         };
 
         // 次の手番のために timeReduction を持ち回る
@@ -558,7 +786,7 @@ impl Search {
             ponder_move,
             score,
             depth: completed_depth,
-            nodes,
+            nodes: total_nodes,
         }
     }
 
@@ -676,7 +904,12 @@ impl Search {
                 }
             }
 
-            worker.root_depth = depth;
+            let search_depth = worker.adjusted_depth(depth);
+            if search_depth < 1 {
+                continue;
+            }
+
+            worker.root_depth = search_depth;
             worker.sel_depth = 0;
 
             // MultiPVループ（YaneuraOu準拠）
@@ -688,14 +921,15 @@ impl Search {
 
                 // Aspiration Window（average/mean_squaredベース）
                 let (mut alpha, mut beta, mut delta) =
-                    compute_aspiration_window(&worker.root_moves[pv_idx]);
+                    compute_aspiration_window(&worker.root_moves[pv_idx], worker.thread_id);
                 let mut failed_high_cnt = 0;
 
                 // Aspiration Windowループ
                 loop {
-                    let adjusted_depth =
-                        (depth - failed_high_cnt - (3 * (self.search_again_counter + 1) / 4))
-                            .max(1);
+                    let adjusted_depth = (search_depth
+                        - failed_high_cnt
+                        - (3 * (self.search_again_counter + 1) / 4))
+                        .max(1);
                     // pv_idx=0の場合は従来のsearch_rootを使用（後方互換性）
                     // pv_idx>0の場合のみsearch_root_for_pvを使用
                     let score = if pv_idx == 0 {
@@ -703,7 +937,7 @@ impl Search {
                     } else {
                         worker.search_root_for_pv(
                             pos,
-                            depth,
+                            search_depth,
                             alpha,
                             beta,
                             pv_idx,
@@ -752,8 +986,14 @@ impl Search {
             if processed_pv > 0 {
                 let elapsed = start.elapsed();
                 let time_ms = elapsed.as_millis() as u64;
+                let helper_nodes = self
+                    .thread_pool
+                    .helper_threads()
+                    .iter()
+                    .fold(0u64, |acc, thread| acc.saturating_add(thread.nodes()));
+                let total_nodes = worker.nodes.saturating_add(helper_nodes);
                 let nps = if time_ms > 0 {
-                    worker.nodes.saturating_mul(1000) / time_ms
+                    total_nodes.saturating_mul(1000) / time_ms
                 } else {
                     0
                 };
@@ -763,7 +1003,7 @@ impl Search {
                         depth,
                         sel_depth: worker.root_moves[pv_idx].sel_depth,
                         score: worker.root_moves[pv_idx].score,
-                        nodes: worker.nodes,
+                        nodes: total_nodes,
                         time_ms,
                         nps,
                         hashfull: self.tt.hashfull(3) as u32,
@@ -777,7 +1017,7 @@ impl Search {
 
             // Depth完了後の処理
             if !worker.abort {
-                worker.completed_depth = depth;
+                worker.completed_depth = search_depth;
                 worker.best_move = worker.root_moves[0].mv();
                 if worker.best_move != self.last_best_move {
                     self.last_best_move = worker.best_move;
@@ -806,10 +1046,18 @@ impl Search {
                 };
                 let nodes = worker.nodes;
                 let root_moves_len = worker.root_moves.len();
+                let best_move_changes = summary.best_move_changes;
                 worker.best_move_changes = 0.0; // 先にリセット
 
-                let (changes_sum, thread_count) =
-                    aggregate_best_move_changes(&[summary.best_move_changes]);
+                let (changes_sum, thread_count) = {
+                    let helper_threads = self.thread_pool.helper_threads();
+                    let mut changes = Vec::with_capacity(helper_threads.len() + 1);
+                    changes.push(best_move_changes);
+                    for thread in helper_threads {
+                        changes.push(thread.best_move_changes());
+                    }
+                    aggregate_best_move_changes(&changes)
+                };
                 let tot_best_move_changes = self.tot_best_move_changes / 2.0 + changes_sum;
                 if limits.use_time_management()
                     && !time_manager.stop_on_ponderhit()
@@ -907,6 +1155,184 @@ impl Search {
     }
 }
 
+pub(crate) fn search_helper(
+    worker: &mut SearchWorker,
+    pos: &mut Position,
+    limits: &LimitsType,
+    time_manager: &mut TimeManagement,
+    max_depth: Depth,
+    skill_enabled: bool,
+    progress: Option<&SearchProgress>,
+) -> usize {
+    if let Some(progress) = progress {
+        progress.reset();
+    }
+
+    worker.root_moves = super::RootMoves::from_legal_moves(pos, &limits.search_moves);
+
+    if worker.root_moves.is_empty() {
+        worker.best_move = Move::NONE;
+        return 0;
+    }
+
+    // 合法手が1つの場合は500ms上限を適用（YaneuraOu準拠）
+    if worker.root_moves.len() == 1 {
+        time_manager.apply_single_move_limit();
+    }
+
+    let mut effective_multi_pv = limits.multi_pv;
+    if skill_enabled {
+        effective_multi_pv = effective_multi_pv.max(4);
+    }
+    effective_multi_pv = effective_multi_pv.min(worker.root_moves.len());
+
+    let mut last_best_pv = vec![Move::NONE];
+    let mut last_best_score = Value::new(-Value::INFINITE.raw());
+    let mut last_best_move_depth = 0;
+
+    let search_again_counter = 0;
+
+    for depth in 1..=max_depth {
+        if worker.abort {
+            break;
+        }
+
+        if effective_multi_pv == 1 && depth > 1 && !worker.root_moves.is_empty() {
+            let best_value = worker.root_moves[0].score;
+
+            if limits.mate == 0 {
+                if proven_mate_depth_exceeded(best_value, depth) {
+                    break;
+                }
+            } else if mate_within_limit(
+                best_value,
+                worker.root_moves[0].score_lower_bound,
+                worker.root_moves[0].score_upper_bound,
+                limits.mate,
+            ) {
+                break;
+            }
+        }
+
+        let search_depth = worker.adjusted_depth(depth);
+        if search_depth < 1 {
+            continue;
+        }
+
+        worker.root_depth = search_depth;
+        worker.sel_depth = 0;
+
+        for pv_idx in 0..effective_multi_pv {
+            if worker.abort {
+                break;
+            }
+
+            let (mut alpha, mut beta, mut delta) =
+                compute_aspiration_window(&worker.root_moves[pv_idx], worker.thread_id);
+            let mut failed_high_cnt = 0;
+
+            loop {
+                let adjusted_depth =
+                    (search_depth - failed_high_cnt - (3 * (search_again_counter + 1) / 4)).max(1);
+                let score = if pv_idx == 0 {
+                    worker.search_root(pos, adjusted_depth, alpha, beta, limits, time_manager)
+                } else {
+                    worker.search_root_for_pv(
+                        pos,
+                        search_depth,
+                        alpha,
+                        beta,
+                        pv_idx,
+                        limits,
+                        time_manager,
+                    )
+                };
+
+                if worker.abort {
+                    break;
+                }
+
+                if score <= alpha {
+                    beta = alpha;
+                    alpha = Value::new(
+                        score.raw().saturating_sub(delta.raw()).max(-Value::INFINITE.raw()),
+                    );
+                    failed_high_cnt = 0;
+                } else if score >= beta {
+                    beta = Value::new(
+                        score.raw().saturating_add(delta.raw()).min(Value::INFINITE.raw()),
+                    );
+                    failed_high_cnt += 1;
+                } else {
+                    break;
+                }
+
+                delta = Value::new(delta.raw() + delta.raw() / 3);
+            }
+
+            worker.root_moves.stable_sort_range(pv_idx, worker.root_moves.len());
+            worker.root_moves.stable_sort_range(0, pv_idx + 1);
+        }
+
+        if !worker.abort && effective_multi_pv > 1 {
+            worker.root_moves.stable_sort_range(0, effective_multi_pv);
+        }
+
+        if !worker.abort {
+            worker.completed_depth = search_depth;
+            worker.best_move = worker.root_moves[0].mv();
+
+            for rm in worker.root_moves.iter_mut() {
+                rm.previous_score = rm.score;
+            }
+
+            let best_move_changes = worker.best_move_changes;
+            worker.best_move_changes = 0.0;
+            if let Some(progress) = progress {
+                progress.update(worker.nodes, best_move_changes);
+            }
+
+            if !worker.root_moves[0].pv.is_empty() && worker.root_moves[0].pv[0] != last_best_pv[0]
+            {
+                last_best_pv = worker.root_moves[0].pv.clone();
+                last_best_score = worker.root_moves[0].score;
+                last_best_move_depth = search_depth;
+            }
+
+            if effective_multi_pv == 1 && depth > 1 && !worker.root_moves.is_empty() {
+                let best_value = worker.root_moves[0].score;
+
+                if limits.mate == 0 {
+                    if proven_mate_depth_exceeded(best_value, depth) {
+                        break;
+                    }
+                } else if mate_within_limit(
+                    best_value,
+                    worker.root_moves[0].score_lower_bound,
+                    worker.root_moves[0].score_upper_bound,
+                    limits.mate,
+                ) {
+                    break;
+                }
+            }
+        }
+    }
+
+    if worker.abort && !worker.root_moves.is_empty() && worker.root_moves[0].score.is_loss() {
+        let head = last_best_pv.first().copied().unwrap_or(Move::NONE);
+        if head != Move::NONE {
+            if let Some(idx) = worker.root_moves.find(head) {
+                worker.root_moves.move_to_front(idx);
+                worker.root_moves[0].pv = last_best_pv;
+                worker.root_moves[0].score = last_best_score;
+                worker.completed_depth = last_best_move_depth;
+            }
+        }
+    }
+
+    effective_multi_pv
+}
+
 // =============================================================================
 // テスト
 // =============================================================================
@@ -939,7 +1365,7 @@ mod tests {
             .stack_size(STACK_SIZE)
             .spawn(|| {
                 let tt = Arc::new(TranspositionTable::new(16));
-                let mut worker = SearchWorker::new(tt, DEFAULT_MAX_MOVES_TO_DRAW);
+                let mut worker = SearchWorker::new(tt, DEFAULT_MAX_MOVES_TO_DRAW, 0);
                 worker.best_move_changes = 3.5;
 
                 let summary = WorkerSummary::from(&*worker);
