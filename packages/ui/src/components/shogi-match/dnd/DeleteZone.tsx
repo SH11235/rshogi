@@ -6,7 +6,6 @@
  */
 
 import { cn } from "@shogi/design-system";
-import { forwardRef } from "react";
 import type { DndState } from "./types";
 
 interface DeleteZoneProps {
@@ -24,16 +23,12 @@ interface DeleteZoneProps {
  * - ホバー時は赤くハイライト
  * - ゴミ箱アイコンではなく和風の「×」マーク
  */
-export const DeleteZone = forwardRef<HTMLElement, DeleteZoneProps>(function DeleteZone(
-    { dndState, className },
-    ref,
-) {
+export function DeleteZone({ dndState, className }: DeleteZoneProps) {
     const { isDragging, mode } = dndState;
     const isHovering = mode === "delete";
 
     return (
         <section
-            ref={ref}
             data-zone="delete"
             className={cn(
                 "relative overflow-hidden",
@@ -145,4 +140,4 @@ export const DeleteZone = forwardRef<HTMLElement, DeleteZoneProps>(function Dele
             />
         </section>
     );
-});
+}

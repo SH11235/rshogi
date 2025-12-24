@@ -2,7 +2,6 @@
  * ドロップ適用ロジック（純関数コア）
  *
  * DnD のドロップ結果を局面に適用する
- * 設計書: docs/edit-mode-dnd-design-refined.md Section 7
  */
 
 import type { Piece, PositionState } from "@shogi/app-core";

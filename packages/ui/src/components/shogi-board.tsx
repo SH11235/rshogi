@@ -1,5 +1,5 @@
 import { cn } from "@shogi/design-system";
-import { forwardRef, type ReactElement } from "react";
+import type { ReactElement } from "react";
 
 export type ShogiBoardOwner = "sente" | "gote";
 
@@ -44,29 +44,21 @@ const PIECE_LABELS: Record<string, string> = {
 
 /**
  * 将棋盤コンポーネント
- *
- * ref を渡すと内側のグリッドコンテナに設定される（DnD ヒットテスト用）
  */
-export const ShogiBoard = forwardRef<HTMLDivElement, ShogiBoardProps>(function ShogiBoard(
-    {
-        grid,
-        selectedSquare,
-        lastMove,
-        promotionSquare,
-        onSelect,
-        onPromotionChoice,
-        flipBoard = false,
-        onPiecePointerDown,
-    },
-    ref,
-): ReactElement {
+export function ShogiBoard({
+    grid,
+    selectedSquare,
+    lastMove,
+    promotionSquare,
+    onSelect,
+    onPromotionChoice,
+    flipBoard = false,
+    onPiecePointerDown,
+}: ShogiBoardProps): ReactElement {
     return (
         <div className="relative inline-block w-full max-w-[560px] rounded-2xl border border-[#c08a3d] bg-[radial-gradient(circle_at_30%_20%,#f9e7c9,#e1c08d)] p-3 shadow-[0_10px_30px_rgba(0,0,0,0.18)]">
             <div className="pointer-events-none absolute inset-3 rounded-xl border border-white/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]" />
-            <div
-                ref={ref}
-                className="grid grid-cols-9 gap-[4px] rounded-xl border border-[#c08a3d]/70 bg-[#c08a3d]/30 p-[6px] backdrop-blur-[1px]"
-            >
+            <div className="grid grid-cols-9 gap-[4px] rounded-xl border border-[#c08a3d]/70 bg-[#c08a3d]/30 p-[6px] backdrop-blur-[1px]">
                 {grid.map((row, rowIndex) =>
                     row.map((cell, columnIndex) => {
                         const isSelected = selectedSquare === cell.id;
@@ -201,4 +193,4 @@ export const ShogiBoard = forwardRef<HTMLDivElement, ShogiBoardProps>(function S
             </div>
         </div>
     );
-});
+}

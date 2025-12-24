@@ -3,8 +3,6 @@
  *
  * document.elementFromPoint() を使用して DOM 要素から直接判定
  * data-square 属性（盤面マス）と data-zone 属性（持ち駒・削除）を使用
- *
- * 設計書: docs/edit-mode-dnd-design-refined.md Section 3
  */
 
 import type { Square } from "@shogi/app-core";

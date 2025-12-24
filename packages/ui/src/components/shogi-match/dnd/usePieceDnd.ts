@@ -3,8 +3,6 @@
  *
  * ref + rAF でパフォーマンス最適化
  * PointerEvents を使用し、タッチ・マウス両対応
- *
- * 設計書: docs/edit-mode-dnd-design-refined.md
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";

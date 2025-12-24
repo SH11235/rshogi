@@ -1,7 +1,5 @@
 /**
  * 将棋盤 編集モード DnD 型定義
- *
- * 設計書: docs/edit-mode-dnd-design-refined.md
  */
 
 import type { PieceType, Player, Square } from "@shogi/app-core";
