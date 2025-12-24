@@ -7,11 +7,6 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { dropTargetEquals, getDropTarget } from "./hitDetection";
-
-/** ゴーストのサイズ (px) - DragGhost.tsx の h-12 w-12 と同期 */
-const GHOST_SIZE = 48;
-/** ゴースト位置オフセット（中心に配置するため） */
-const GHOST_OFFSET = GHOST_SIZE / 2;
 import type {
     DndConfig,
     DndState,
@@ -22,6 +17,11 @@ import type {
     DropTarget,
 } from "./types";
 import { DEFAULT_DND_CONFIG } from "./types";
+
+/** ゴーストのサイズ (px) - DragGhost.tsx の h-12 w-12 と同期 */
+const GHOST_SIZE = 48;
+/** ゴースト位置オフセット（中心に配置するため） */
+const GHOST_OFFSET = GHOST_SIZE / 2;
 
 interface UsePieceDndOptions {
     /** ドロップ時のコールバック */

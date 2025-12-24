@@ -48,13 +48,13 @@ export function getDropTarget(
         return outsideAreaBehavior === "delete" ? { type: "delete" } : null;
     }
 
-    // 削除ゾーンを最優先
+    // ゾーン要素を一度だけ検索
     const zoneEl = el.closest("[data-zone]");
-    if (zoneEl) {
-        const zone = zoneEl.getAttribute("data-zone");
-        if (zone === "delete") {
-            return { type: "delete" };
-        }
+    const zone = zoneEl?.getAttribute("data-zone") ?? null;
+
+    // 削除ゾーンを最優先
+    if (zone === "delete") {
+        return { type: "delete" };
     }
 
     // 盤上のマス
@@ -64,17 +64,15 @@ export function getDropTarget(
         if (square) {
             return { type: "board", square };
         }
+        // 不正な data-square 値の場合は次の判定へフォールスルー
     }
 
     // 持ち駒エリア
-    if (zoneEl) {
-        const zone = zoneEl.getAttribute("data-zone");
-        if (zone === "hand-sente") {
-            return { type: "hand", owner: "sente" };
-        }
-        if (zone === "hand-gote") {
-            return { type: "hand", owner: "gote" };
-        }
+    if (zone === "hand-sente") {
+        return { type: "hand", owner: "sente" };
+    }
+    if (zone === "hand-gote") {
+        return { type: "hand", owner: "gote" };
     }
 
     // エリア外
