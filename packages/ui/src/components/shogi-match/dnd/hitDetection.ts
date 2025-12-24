@@ -11,55 +11,6 @@ import type { Square } from "@shogi/app-core";
 import type { DropTarget } from "./types";
 
 /**
- * スクリーン座標から盤上のマスを取得
- *
- * DOM の data-square 属性を持つ要素を探して Square を返す
- *
- * @param x - スクリーンX座標
- * @param y - スクリーンY座標
- * @returns マス、または該当なしなら null
- */
-export function hitTestBoard(x: number, y: number): Square | null {
-    const el = document.elementFromPoint(x, y);
-    if (!el) return null;
-
-    const squareEl = el.closest("[data-square]");
-    if (!squareEl) return null;
-
-    const square = squareEl.getAttribute("data-square");
-    return square as Square | null;
-}
-
-/**
- * スクリーン座標からゾーン（持ち駒エリア/削除ゾーン）を取得
- *
- * DOM の data-zone 属性を持つ要素を探して DropTarget を返す
- * - data-zone="delete" → 削除ゾーン
- * - data-zone="hand-sente" → 先手持ち駒エリア
- * - data-zone="hand-gote" → 後手持ち駒エリア
- */
-export function hitTestZones(x: number, y: number): DropTarget | null {
-    const el = document.elementFromPoint(x, y);
-    if (!el) return null;
-
-    const zoneEl = el.closest("[data-zone]");
-    if (!zoneEl) return null;
-
-    const zone = zoneEl.getAttribute("data-zone");
-    if (zone === "delete") {
-        return { type: "delete" };
-    }
-    if (zone === "hand-sente") {
-        return { type: "hand", owner: "sente" };
-    }
-    if (zone === "hand-gote") {
-        return { type: "hand", owner: "gote" };
-    }
-
-    return null;
-}
-
-/**
  * 最終的なドロップターゲットを決定
  *
  * document.elementFromPoint() を使用して DOM から直接判定

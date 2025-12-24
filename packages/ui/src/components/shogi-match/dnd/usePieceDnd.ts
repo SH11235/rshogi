@@ -9,6 +9,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { dropTargetEquals, getDropTarget } from "./hitDetection";
+
+/** ゴーストのサイズ (px) - DragGhost.tsx の h-12 w-12 と同期 */
+const GHOST_SIZE = 48;
+/** ゴースト位置オフセット（中心に配置するため） */
+const GHOST_OFFSET = GHOST_SIZE / 2;
 import type {
     DndConfig,
     DndState,
@@ -180,8 +185,8 @@ export function usePieceDnd(options: UsePieceDndOptions): PieceDndController {
                     rt.raf = null;
                     const { x, y } = rt.lastClient;
 
-                    // ゴースト位置更新（中心に配置するため調整）
-                    updateGhostPosition(x - 24, y - 24);
+                    // ゴースト位置更新（中心に配置）
+                    updateGhostPosition(x - GHOST_OFFSET, y - GHOST_OFFSET);
 
                     // ヒットテスト（DOM の data 属性から直接判定）
                     const target = getDropTarget(x, y, config.outsideAreaBehavior);
@@ -325,7 +330,7 @@ export function usePieceDnd(options: UsePieceDndOptions): PieceDndController {
                 // ゴースト表示
                 if (ghostRef.current) {
                     ghostRef.current.style.display = "block";
-                    updateGhostPosition(clientX - 24, clientY - 24);
+                    updateGhostPosition(clientX - GHOST_OFFSET, clientY - GHOST_OFFSET);
                 }
 
                 // 初期ヒットテスト（DOM の data 属性から直接判定）

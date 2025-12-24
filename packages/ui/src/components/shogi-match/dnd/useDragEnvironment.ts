@@ -9,7 +9,7 @@
 
 import { useRef } from "react";
 
-export interface DragEnvironment {
+interface DragEnvironment {
     /** 盤面要素の ref */
     boardRef: React.RefObject<HTMLElement | null>;
     /** 先手持ち駒エリアの ref */
