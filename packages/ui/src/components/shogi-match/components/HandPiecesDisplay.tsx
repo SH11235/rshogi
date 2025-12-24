@@ -1,6 +1,6 @@
 import type { PieceType, Player, PositionState } from "@shogi/app-core";
 import type { ReactElement } from "react";
-import { PIECE_LABELS } from "../utils/constants";
+import { PIECE_CAP, PIECE_LABELS } from "../utils/constants";
 
 const HAND_ORDER: PieceType[] = ["R", "B", "G", "S", "N", "L", "P"];
 
@@ -17,6 +17,12 @@ interface HandPiecesDisplayProps {
     onHandSelect: (piece: PieceType) => void;
     /** DnD 用 PointerDown ハンドラ（編集モード時） */
     onPiecePointerDown?: (owner: Player, pieceType: PieceType, e: React.PointerEvent) => void;
+    /** 編集モードかどうか */
+    isEditMode?: boolean;
+    /** 持ち駒を増やす（編集モード用） */
+    onIncrement?: (piece: PieceType) => void;
+    /** 持ち駒を減らす（編集モード用） */
+    onDecrement?: (piece: PieceType) => void;
 }
 
 export function HandPiecesDisplay({
@@ -26,38 +32,122 @@ export function HandPiecesDisplay({
     isActive,
     onHandSelect,
     onPiecePointerDown,
+    isEditMode = false,
+    onIncrement,
+    onDecrement,
 }: HandPiecesDisplayProps): ReactElement {
     return (
         <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
             {HAND_ORDER.map((piece) => {
                 const count = hand[piece] ?? 0;
                 const selected = selectedPiece === piece;
+                // 編集モード時は0個でもドラッグ可能（ストックとして機能）
+                const canDrag = (count > 0 || isEditMode) && Boolean(onPiecePointerDown);
+                const canSelect = count > 0 && isActive;
+                const isDisabled = !canDrag && !canSelect && !isEditMode;
+                const maxCount = PIECE_CAP[piece];
+
                 return (
-                    <button
+                    <div
                         key={`${owner}-${piece}`}
-                        type="button"
-                        onPointerDown={(e) => {
-                            if (count > 0 && onPiecePointerDown) {
-                                onPiecePointerDown(owner, piece, e);
-                            }
-                        }}
-                        onClick={() => onHandSelect(piece)}
-                        disabled={count <= 0 || !isActive}
                         style={{
-                            minWidth: "52px",
-                            padding: "6px 10px",
-                            borderRadius: "10px",
-                            border: selected
-                                ? "2px solid hsl(var(--primary, 15 86% 55%))"
-                                : "1px solid hsl(var(--border, 0 0% 86%))",
-                            background:
-                                count > 0 ? "hsl(var(--secondary, 210 40% 96%))" : "transparent",
-                            color: "hsl(var(--foreground, 222 47% 11%))",
-                            cursor: count > 0 && isActive ? "pointer" : "not-allowed",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "2px",
                         }}
                     >
-                        {PIECE_LABELS[piece]} × {count}
-                    </button>
+                        {/* 編集モード: マイナスボタン */}
+                        {isEditMode && (
+                            <button
+                                type="button"
+                                onClick={() => onDecrement?.(piece)}
+                                disabled={count <= 0}
+                                aria-label={`${PIECE_LABELS[piece]}を減らす`}
+                                style={{
+                                    width: "24px",
+                                    height: "24px",
+                                    borderRadius: "6px",
+                                    border: "1px solid hsl(var(--border, 0 0% 86%))",
+                                    background:
+                                        count > 0
+                                            ? "hsl(var(--secondary, 210 40% 96%))"
+                                            : "transparent",
+                                    color: "hsl(var(--foreground, 222 47% 11%))",
+                                    cursor: count > 0 ? "pointer" : "not-allowed",
+                                    fontSize: "16px",
+                                    fontWeight: "bold",
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                }}
+                            >
+                                −
+                            </button>
+                        )}
+
+                        {/* 駒ボタン */}
+                        <button
+                            type="button"
+                            onPointerDown={(e) => {
+                                if (canDrag && onPiecePointerDown) {
+                                    onPiecePointerDown(owner, piece, e);
+                                }
+                            }}
+                            onClick={(e) => {
+                                if (!canSelect) {
+                                    e.preventDefault();
+                                    return;
+                                }
+                                onHandSelect(piece);
+                            }}
+                            disabled={isDisabled}
+                            style={{
+                                minWidth: "52px",
+                                padding: "6px 10px",
+                                borderRadius: "10px",
+                                border: selected
+                                    ? "2px solid hsl(var(--primary, 15 86% 55%))"
+                                    : "1px solid hsl(var(--border, 0 0% 86%))",
+                                background:
+                                    count > 0 || isEditMode
+                                        ? "hsl(var(--secondary, 210 40% 96%))"
+                                        : "transparent",
+                                color: "hsl(var(--foreground, 222 47% 11%))",
+                                cursor: canDrag || canSelect ? "pointer" : "default",
+                            }}
+                        >
+                            {PIECE_LABELS[piece]} × {count}
+                        </button>
+
+                        {/* 編集モード: プラスボタン */}
+                        {isEditMode && (
+                            <button
+                                type="button"
+                                onClick={() => onIncrement?.(piece)}
+                                disabled={count >= maxCount}
+                                aria-label={`${PIECE_LABELS[piece]}を増やす`}
+                                style={{
+                                    width: "24px",
+                                    height: "24px",
+                                    borderRadius: "6px",
+                                    border: "1px solid hsl(var(--border, 0 0% 86%))",
+                                    background:
+                                        count < maxCount
+                                            ? "hsl(var(--secondary, 210 40% 96%))"
+                                            : "transparent",
+                                    color: "hsl(var(--foreground, 222 47% 11%))",
+                                    cursor: count < maxCount ? "pointer" : "not-allowed",
+                                    fontSize: "16px",
+                                    fontWeight: "bold",
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                }}
+                            >
+                                +
+                            </button>
+                        )}
+                    </div>
                 );
             })}
         </div>

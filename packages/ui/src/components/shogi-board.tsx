@@ -105,7 +105,7 @@ export function ShogiBoard({
                                         "bg-[radial-gradient(circle_at_20%_20%,rgba(255,255,255,0.3),transparent_38%),radial-gradient(circle_at_80%_80%,rgba(255,255,255,0.18),transparent_40%)] shadow-[inset_0_1px_0_rgba(255,255,255,0.5)] hover:ring-2 hover:ring-inset hover:ring-[hsl(var(--shogi-border))]",
                                         tone,
                                         isSelected &&
-                                            "ring-2 ring-[hsl(var(--wafuu-shu))]/70 ring-offset-1 shadow-[0_0_12px_hsl(var(--wafuu-kin)/0.4)]",
+                                            "ring-[3px] ring-inset ring-[hsl(var(--wafuu-shu))] bg-[hsl(var(--wafuu-kin)/0.2)]",
                                         isLastMove &&
                                             "outline outline-2 outline-[hsl(var(--wafuu-kin))]/80",
                                     )}

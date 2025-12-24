@@ -111,6 +111,12 @@ interface PlayerHandSectionProps {
     onHandSelect: (piece: PieceType) => void;
     /** DnD 用 PointerDown ハンドラ */
     onPiecePointerDown?: (owner: Player, pieceType: PieceType, e: React.PointerEvent) => void;
+    /** 編集モードかどうか */
+    isEditMode?: boolean;
+    /** 持ち駒を増やす（編集モード用） */
+    onIncrement?: (piece: PieceType) => void;
+    /** 持ち駒を減らす（編集モード用） */
+    onDecrement?: (piece: PieceType) => void;
 }
 
 function PlayerHandSection({
@@ -121,10 +127,18 @@ function PlayerHandSection({
     isActive,
     onHandSelect,
     onPiecePointerDown,
+    isEditMode,
+    onIncrement,
+    onDecrement,
 }: PlayerHandSectionProps): ReactElement {
+    const labelColor = owner === "sente" ? "hsl(var(--wafuu-shu))" : "hsl(210 70% 45%)";
+    const ownerText = owner === "sente" ? "先手" : "後手";
     return (
         <div data-zone={`hand-${owner}`}>
-            <div style={TEXT_STYLES.handLabel}>{label}</div>
+            <div style={TEXT_STYLES.handLabel}>
+                <span style={{ color: labelColor, fontSize: "15px" }}>{ownerText}</span>
+                <span>の持ち駒</span>
+            </div>
             <HandPiecesDisplay
                 owner={owner}
                 hand={hand}
@@ -132,6 +146,9 @@ function PlayerHandSection({
                 isActive={isActive}
                 onHandSelect={onHandSelect}
                 onPiecePointerDown={onPiecePointerDown}
+                isEditMode={isEditMode}
+                onIncrement={onIncrement}
+                onDecrement={onDecrement}
             />
         </div>
     );
@@ -558,6 +575,11 @@ export function ShogiMatch({
             piece: { owner: "sente" | "gote"; type: string; promoted?: boolean },
             e: React.PointerEvent,
         ) => {
+            // 編集パネルが閉じていたら自動的に開く
+            if (!isEditPanelOpen) {
+                setIsEditPanelOpen(true);
+            }
+
             const origin = { type: "board" as const, square: square as Square };
             const payload = {
                 owner: piece.owner as Player,
@@ -567,13 +589,23 @@ export function ShogiMatch({
 
             dndController.startDrag(origin, payload, e);
         },
-        [dndController],
+        [dndController, isEditPanelOpen],
     );
 
     // DnD ドラッグ開始ハンドラ（持ち駒）
     const handleHandPiecePointerDown = useCallback(
         (owner: Player, pieceType: PieceType, e: React.PointerEvent) => {
-            const origin = { type: "hand" as const, owner, pieceType };
+            // 編集パネルが閉じていたら自動的に開く
+            if (!isEditPanelOpen) {
+                setIsEditPanelOpen(true);
+            }
+
+            // 持ち駒が0個の場合はストック扱い（編集モード時、無限供給）
+            const count = position?.hands[owner][pieceType] ?? 0;
+            const origin =
+                count > 0
+                    ? { type: "hand" as const, owner, pieceType }
+                    : { type: "stock" as const, owner, pieceType };
             const payload = {
                 owner,
                 pieceType,
@@ -582,7 +614,42 @@ export function ShogiMatch({
 
             dndController.startDrag(origin, payload, e);
         },
-        [dndController],
+        [dndController, position, isEditPanelOpen],
+    );
+
+    // 持ち駒増加ハンドラ（編集モード用）
+    const handleIncrementHand = useCallback(
+        (owner: Player, pieceType: PieceType) => {
+            if (isMatchRunning || !position) return;
+            const counts = countPieces(position);
+            const currentCount = counts[owner][pieceType];
+            if (currentCount >= PIECE_CAP[pieceType]) return;
+
+            const nextHands = addToHand(cloneHandsState(position.hands), owner, pieceType);
+            setPosition({
+                ...position,
+                hands: nextHands,
+            });
+        },
+        [isMatchRunning, position],
+    );
+
+    // 持ち駒減少ハンドラ（編集モード用）
+    const handleDecrementHand = useCallback(
+        (owner: Player, pieceType: PieceType) => {
+            if (isMatchRunning || !position) return;
+            const count = position.hands[owner][pieceType] ?? 0;
+            if (count <= 0) return;
+
+            const nextHands = consumeFromHand(cloneHandsState(position.hands), owner, pieceType);
+            if (nextHands) {
+                setPosition({
+                    ...position,
+                    hands: nextHands,
+                });
+            }
+        },
+        [isMatchRunning, position],
     );
 
     const clearBoardForEdit = () => {
@@ -957,53 +1024,24 @@ export function ShogiMatch({
             >
                 <div
                     style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                        gap: "12px",
-                    }}
-                >
-                    <div>
-                        <div style={{ fontWeight: 700 }}>盤 UI + 対局</div>
-                        <div
-                            style={{
-                                color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                                fontSize: "13px",
-                            }}
-                        >
-                            先手・後手それぞれに「人間 /
-                            エンジン」を割り当てて試せます。クリック2回で移動、持ち駒はボタン→マスで打ち込み。
-                        </div>
-                    </div>
-                    <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-                        <label
-                            style={{
-                                display: "flex",
-                                alignItems: "center",
-                                gap: "6px",
-                                fontSize: "13px",
-                            }}
-                        >
-                            <input
-                                type="checkbox"
-                                checked={flipBoard}
-                                onChange={(e) => setFlipBoard(e.target.checked)}
-                            />
-                            盤面を反転
-                        </label>
-                    </div>
-                </div>
-
-                <div
-                    style={{
                         display: "grid",
                         gridTemplateColumns: "minmax(320px, 1fr) 360px",
                         gap: "12px",
                         alignItems: "flex-start",
                     }}
                 >
-                    <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-                        <div ref={boardSectionRef} style={{ ...baseCard, padding: "12px" }}>
+                    <div
+                        style={{
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "12px",
+                            alignItems: "center",
+                        }}
+                    >
+                        <div
+                            ref={boardSectionRef}
+                            style={{ ...baseCard, padding: "12px", width: "fit-content" }}
+                        >
                             <div
                                 style={{
                                     display: "flex",
@@ -1012,11 +1050,42 @@ export function ShogiMatch({
                                     marginBottom: "8px",
                                 }}
                             >
-                                <h3 style={{ fontWeight: 700, margin: 0, fontSize: "inherit" }}>
-                                    盤面
-                                </h3>
+                                <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                                    <h3 style={{ fontWeight: 700, margin: 0, fontSize: "inherit" }}>
+                                        盤面
+                                    </h3>
+                                    <label
+                                        style={{
+                                            display: "flex",
+                                            alignItems: "center",
+                                            gap: "4px",
+                                            fontSize: "12px",
+                                            color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                                            cursor: "pointer",
+                                        }}
+                                    >
+                                        <input
+                                            type="checkbox"
+                                            checked={flipBoard}
+                                            onChange={(e) => setFlipBoard(e.target.checked)}
+                                        />
+                                        反転
+                                    </label>
+                                </div>
                                 <output style={TEXT_STYLES.mutedSecondary}>
-                                    手番: {position.turn === "sente" ? "先手" : "後手"}
+                                    手番:{" "}
+                                    <span
+                                        style={{
+                                            fontWeight: 600,
+                                            fontSize: "15px",
+                                            color:
+                                                position.turn === "sente"
+                                                    ? "hsl(var(--wafuu-shu))"
+                                                    : "hsl(210 70% 45%)",
+                                        }}
+                                    >
+                                        {position.turn === "sente" ? "先手" : "後手"}
+                                    </span>
                                 </output>
                             </div>
                             <div
@@ -1047,6 +1116,13 @@ export function ShogiMatch({
                                             onHandSelect={handleHandSelect}
                                             onPiecePointerDown={
                                                 isEditMode ? handleHandPiecePointerDown : undefined
+                                            }
+                                            isEditMode={isEditMode && !isMatchRunning}
+                                            onIncrement={(piece) =>
+                                                handleIncrementHand(info.owner, piece)
+                                            }
+                                            onDecrement={(piece) =>
+                                                handleDecrementHand(info.owner, piece)
                                             }
                                         />
                                     );
@@ -1100,6 +1176,13 @@ export function ShogiMatch({
                                             onPiecePointerDown={
                                                 isEditMode ? handleHandPiecePointerDown : undefined
                                             }
+                                            isEditMode={isEditMode && !isMatchRunning}
+                                            onIncrement={(piece) =>
+                                                handleIncrementHand(info.owner, piece)
+                                            }
+                                            onDecrement={(piece) =>
+                                                handleDecrementHand(info.owner, piece)
+                                            }
                                         />
                                     );
                                 })()}
@@ -1119,15 +1202,6 @@ export function ShogiMatch({
                         <EditModePanel
                             isOpen={isEditPanelOpen}
                             onOpenChange={setIsEditPanelOpen}
-                            editOwner={editOwner}
-                            editPieceType={editPieceType}
-                            editPromoted={editPromoted}
-                            editFromSquare={editFromSquare}
-                            editTool={editTool}
-                            setEditOwner={setEditOwner}
-                            setEditPieceType={setEditPieceType}
-                            setEditPromoted={setEditPromoted}
-                            setEditTool={setEditTool}
                             onResetToStartpos={resetToStartposForEdit}
                             onClearBoard={clearBoardForEdit}
                             isMatchRunning={isMatchRunning}

@@ -401,8 +401,41 @@ export function usePieceDnd(options: UsePieceDndOptions): PieceDndController {
                     activateDrag();
                 }, config.longPressMs);
             } else {
-                // マウス/ペン: 即開始
-                activateDrag();
+                // マウス/ペン: スロップ判定後に開始（クリックとドラッグを区別）
+                rt.startClient = { x: clientX, y: clientY };
+                rt.pointerId = pointerId;
+                rt.pointerType = pointerType;
+                rt.origin = origin;
+                rt.payload = payload;
+
+                const checkMouseSlop = (moveEvent: PointerEvent) => {
+                    if (moveEvent.pointerId !== pointerId) return;
+                    const dx = moveEvent.clientX - rt.startClient.x;
+                    const dy = moveEvent.clientY - rt.startClient.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+
+                    if (distance > config.slopPx) {
+                        // スロップ超過 → DnD開始
+                        document.removeEventListener("pointermove", checkMouseSlop);
+                        document.removeEventListener("pointerup", cancelMouseOnUp);
+                        activateDrag();
+                    }
+                };
+
+                const cancelMouseOnUp = (upEvent: PointerEvent) => {
+                    if (upEvent.pointerId !== pointerId) return;
+                    // クリック扱い（DnD開始せずに終了）
+                    document.removeEventListener("pointermove", checkMouseSlop);
+                    document.removeEventListener("pointerup", cancelMouseOnUp);
+                    // runtimeをリセット
+                    rt.pointerId = null;
+                    rt.pointerType = null;
+                    rt.origin = null;
+                    rt.payload = null;
+                };
+
+                document.addEventListener("pointermove", checkMouseSlop);
+                document.addEventListener("pointerup", cancelMouseOnUp);
             }
         },
         [
