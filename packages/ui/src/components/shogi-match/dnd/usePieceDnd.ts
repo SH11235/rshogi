@@ -6,6 +6,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { isPromotable } from "../utils/constants";
 import { dropTargetEquals, getDropTarget } from "./hitDetection";
 import type {
     DndConfig,
@@ -17,7 +18,6 @@ import type {
     DropTarget,
 } from "./types";
 import { DEFAULT_DND_CONFIG } from "./types";
-import { isPromotable } from "../utils/constants";
 
 /** ゴーストのサイズ (px) - DragGhost.tsx の h-12 w-12 と同期 */
 const GHOST_SIZE = 48;

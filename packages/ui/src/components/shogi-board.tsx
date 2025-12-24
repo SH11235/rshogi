@@ -1,5 +1,5 @@
 import { cn } from "@shogi/design-system";
-import { useRef, type ReactElement } from "react";
+import { type ReactElement, useRef } from "react";
 
 export type ShogiBoardOwner = "sente" | "gote";
 

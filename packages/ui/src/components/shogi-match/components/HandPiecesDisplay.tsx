@@ -1,5 +1,5 @@
-import { cn } from "@shogi/design-system";
 import type { PieceType, Player, PositionState } from "@shogi/app-core";
+import { cn } from "@shogi/design-system";
 import type { ReactElement } from "react";
 import { PIECE_CAP, PIECE_LABELS } from "../utils/constants";
 
