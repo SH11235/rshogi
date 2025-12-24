@@ -8,6 +8,20 @@
 import type { Square } from "@shogi/app-core";
 import type { DropTarget } from "./types";
 
+/** Square 形式の正規表現: File(1-9) + Rank(a-i) */
+const SQUARE_PATTERN = /^[1-9][a-i]$/;
+
+/**
+ * 文字列を Square として検証・パース
+ * 不正な形式の場合は null を返す
+ */
+function parseSquare(value: string | null): Square | null {
+    if (!value || !SQUARE_PATTERN.test(value)) {
+        return null;
+    }
+    return value as Square;
+}
+
 /**
  * 最終的なドロップターゲットを決定
  *
@@ -41,9 +55,9 @@ export function getDropTarget(
     // 盤上のマス
     const squareEl = el.closest("[data-square]");
     if (squareEl) {
-        const square = squareEl.getAttribute("data-square");
+        const square = parseSquare(squareEl.getAttribute("data-square"));
         if (square) {
-            return { type: "board", square: square as Square };
+            return { type: "board", square };
         }
     }
 
