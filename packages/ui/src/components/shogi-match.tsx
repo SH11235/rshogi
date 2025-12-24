@@ -42,9 +42,15 @@ import {
 // EngineOption 型を外部に再エクスポート
 export type { EngineOption };
 
+import { BoardToolbar } from "./shogi-match/components/BoardToolbar";
+import { DisplaySettingsPanel } from "./shogi-match/components/DisplaySettingsPanel";
 import { type ClockSettings, useClockManager } from "./shogi-match/hooks/useClockManager";
 import { useEngineManager } from "./shogi-match/hooks/useEngineManager";
-import type { PromotionSelection } from "./shogi-match/types";
+import {
+    DEFAULT_DISPLAY_SETTINGS,
+    type DisplaySettings,
+    type PromotionSelection,
+} from "./shogi-match/types";
 import {
     addToHand,
     cloneHandsState,
@@ -225,6 +231,9 @@ export function ShogiMatch({
     const [basePosition, setBasePosition] = useState<PositionState | null>(null);
     const [isEditPanelOpen, setIsEditPanelOpen] = useState(false);
     const [isSettingsPanelOpen, setIsSettingsPanelOpen] = useState(false);
+    const [isDisplaySettingsPanelOpen, setIsDisplaySettingsPanelOpen] = useState(false);
+    const [displaySettings, setDisplaySettings] =
+        useState<DisplaySettings>(DEFAULT_DISPLAY_SETTINGS);
 
     // 後手が人間の場合は盤面を反転して手前側に表示
     useEffect(() => {
@@ -1081,24 +1090,13 @@ export function ShogiMatch({
                                     <h3 style={{ fontWeight: 700, margin: 0, fontSize: "inherit" }}>
                                         盤面
                                     </h3>
-                                    <label
-                                        style={{
-                                            display: "flex",
-                                            alignItems: "center",
-                                            gap: "4px",
-                                            fontSize: "12px",
-                                            color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                                            cursor: "pointer",
-                                        }}
-                                    >
-                                        <input
-                                            type="checkbox"
-                                            checked={flipBoard}
-                                            onChange={(e) => setFlipBoard(e.target.checked)}
-                                        />
-                                        反転
-                                    </label>
                                 </div>
+                                <BoardToolbar
+                                    flipBoard={flipBoard}
+                                    onFlipBoardChange={setFlipBoard}
+                                    displaySettings={displaySettings}
+                                    onDisplaySettingsChange={setDisplaySettings}
+                                />
                                 <output style={TEXT_STYLES.mutedSecondary}>
                                     手番:{" "}
                                     <span
@@ -1171,7 +1169,7 @@ export function ShogiMatch({
                                               : null
                                     }
                                     lastMove={
-                                        lastMove
+                                        displaySettings.highlightLastMove && lastMove
                                             ? {
                                                   from: lastMove.from ?? undefined,
                                                   to: lastMove.to,
@@ -1190,6 +1188,8 @@ export function ShogiMatch({
                                     onPieceTogglePromote={
                                         isEditMode ? handlePieceTogglePromote : undefined
                                     }
+                                    squareNotation={displaySettings.squareNotation}
+                                    showBoardLabels={displaySettings.showBoardLabels}
                                 />
                                 {candidateNote ? (
                                     <div style={TEXT_STYLES.mutedSecondary}>{candidateNote}</div>
@@ -1273,6 +1273,13 @@ export function ShogiMatch({
                             onImportUsi={importUsi}
                             onImportCsa={importCsa}
                             positionReady={positionReady}
+                        />
+
+                        <DisplaySettingsPanel
+                            isOpen={isDisplaySettingsPanelOpen}
+                            onOpenChange={setIsDisplaySettingsPanelOpen}
+                            settings={displaySettings}
+                            onSettingsChange={setDisplaySettings}
                         />
 
                         <EngineLogsPanel eventLogs={eventLogs} errorLogs={errorLogs} />
