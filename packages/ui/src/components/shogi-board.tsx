@@ -58,7 +58,7 @@ export function ShogiBoard({
     return (
         <div className="relative inline-block w-full max-w-[560px] rounded-2xl border border-[#c08a3d] bg-[radial-gradient(circle_at_30%_20%,#f9e7c9,#e1c08d)] p-3 shadow-[0_10px_30px_rgba(0,0,0,0.18)]">
             <div className="pointer-events-none absolute inset-3 rounded-xl border border-white/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]" />
-            <div className="grid grid-cols-9 gap-[1px] rounded-xl border border-[#c7a165] bg-[#c7a165] p-[1px]">
+            <div className="grid grid-cols-9 rounded-xl border-l border-t border-[#c7a165]">
                 {grid.map((row, rowIndex) =>
                     row.map((cell, columnIndex) => {
                         const isSelected = selectedSquare === cell.id;
@@ -74,7 +74,7 @@ export function ShogiBoard({
                         return (
                             <div
                                 key={`${rowIndex}-${columnIndex}-${cell.id}`}
-                                className="relative aspect-square min-w-12"
+                                className="relative aspect-square min-w-12 border-b border-r border-[#c7a165]"
                             >
                                 <button
                                     type="button"
@@ -102,8 +102,8 @@ export function ShogiBoard({
                                             : `${cell.id} 空マス`
                                     }
                                     className={cn(
-                                        "relative h-full w-full overflow-hidden text-base font-semibold transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-[#f06c3c]/70 focus-visible:ring-offset-transparent",
-                                        "bg-[radial-gradient(circle_at_20%_20%,rgba(255,255,255,0.3),transparent_38%),radial-gradient(circle_at_80%_80%,rgba(255,255,255,0.18),transparent_40%)] shadow-[inset_0_1px_0_rgba(255,255,255,0.5),0_6px_12px_rgba(0,0,0,0.15)] hover:-translate-y-[1px]",
+                                        "absolute inset-0 overflow-hidden text-base font-semibold transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-[#f06c3c]/70 focus-visible:ring-offset-transparent",
+                                        "bg-[radial-gradient(circle_at_20%_20%,rgba(255,255,255,0.3),transparent_38%),radial-gradient(circle_at_80%_80%,rgba(255,255,255,0.18),transparent_40%)] shadow-[inset_0_1px_0_rgba(255,255,255,0.5)] hover:-translate-y-[1px]",
                                         tone,
                                         isSelected &&
                                             "ring-2 ring-[hsl(var(--wafuu-shu))]/70 ring-offset-1 shadow-[0_0_12px_hsl(var(--wafuu-kin)/0.4)]",
