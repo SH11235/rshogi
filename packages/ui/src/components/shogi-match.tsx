@@ -101,10 +101,9 @@ const TEXT_STYLES = {
     } as CSSProperties,
 } as const;
 
-// 持ち駒表示セクションコンポーネント（DRY原則）
+// 持ち駒表示セクションコンポーネント
 interface PlayerHandSectionProps {
     owner: Player;
-    label: string;
     hand: PositionState["hands"]["sente"] | PositionState["hands"]["gote"];
     selectedPiece: PieceType | null;
     isActive: boolean;
@@ -121,7 +120,6 @@ interface PlayerHandSectionProps {
 
 function PlayerHandSection({
     owner,
-    label,
     hand,
     selectedPiece,
     isActive,
@@ -238,7 +236,6 @@ export function ShogiMatch({
             pos === "top" ? (flipBoard ? "sente" : "gote") : flipBoard ? "gote" : "sente";
         return {
             owner,
-            label: owner === "sente" ? "先手の持ち駒" : "後手の持ち駒",
             hand: owner === "sente" ? position.hands.sente : position.hands.gote,
             isActive: !isEditMode && position.turn === owner && sides[owner].role === "human",
         };
@@ -1020,13 +1017,13 @@ export function ShogiMatch({
                     display: "flex",
                     flexDirection: "column",
                     gap: "12px",
+                    alignItems: "center",
                 }}
             >
                 <div
                     style={{
-                        display: "grid",
-                        gridTemplateColumns: "minmax(320px, 1fr) 360px",
-                        gap: "12px",
+                        display: "flex",
+                        gap: "24px",
                         alignItems: "flex-start",
                     }}
                 >
@@ -1094,6 +1091,7 @@ export function ShogiMatch({
                                     display: "flex",
                                     gap: "8px",
                                     flexDirection: "column",
+                                    alignItems: "center",
                                 }}
                             >
                                 {/* 手数表示 */}
@@ -1107,7 +1105,6 @@ export function ShogiMatch({
                                     return (
                                         <PlayerHandSection
                                             owner={info.owner}
-                                            label={info.label}
                                             hand={info.hand}
                                             selectedPiece={
                                                 selection?.kind === "hand" ? selection.piece : null
@@ -1166,7 +1163,6 @@ export function ShogiMatch({
                                     return (
                                         <PlayerHandSection
                                             owner={info.owner}
-                                            label={info.label}
                                             hand={info.hand}
                                             selectedPiece={
                                                 selection?.kind === "hand" ? selection.piece : null
