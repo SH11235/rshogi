@@ -1,6 +1,6 @@
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { cn } from "@shogi/design-system";
-import type { ComponentPropsWithoutRef, CSSProperties, ElementRef, ReactElement } from "react";
+import type { ComponentPropsWithoutRef, ComponentRef, CSSProperties, ReactElement } from "react";
 import { forwardRef } from "react";
 
 export const Dialog = DialogPrimitive.Root;
@@ -9,7 +9,7 @@ export const DialogPortal = DialogPrimitive.Portal;
 export const DialogClose = DialogPrimitive.Close;
 
 export const DialogOverlay = forwardRef<
-    ElementRef<typeof DialogPrimitive.Overlay>,
+    ComponentRef<typeof DialogPrimitive.Overlay>,
     ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
 >(function DialogOverlay({ className, style, ...props }, ref): ReactElement {
     return (
@@ -33,7 +33,7 @@ export const DialogOverlay = forwardRef<
 });
 
 export const DialogContent = forwardRef<
-    ElementRef<typeof DialogPrimitive.Content>,
+    ComponentRef<typeof DialogPrimitive.Content>,
     ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
         overlayClassName?: string;
         overlayStyle?: CSSProperties;
@@ -101,7 +101,7 @@ export function DialogFooter({
 }
 
 export const DialogTitle = forwardRef<
-    ElementRef<typeof DialogPrimitive.Title>,
+    ComponentRef<typeof DialogPrimitive.Title>,
     ComponentPropsWithoutRef<typeof DialogPrimitive.Title>
 >(function DialogTitle({ className, ...props }, ref): ReactElement {
     return (
@@ -117,7 +117,7 @@ export const DialogTitle = forwardRef<
 });
 
 export const DialogDescription = forwardRef<
-    ElementRef<typeof DialogPrimitive.Description>,
+    ComponentRef<typeof DialogPrimitive.Description>,
     ComponentPropsWithoutRef<typeof DialogPrimitive.Description>
 >(function DialogDescription({ className, ...props }, ref): ReactElement {
     return (
