@@ -38,6 +38,15 @@
         --wafuu-washi: 40 50% 96%; /* 和紙 - 背景 */
         --wafuu-washi-warm: 35 45% 92%; /* 温かい和紙 - カード背景 */
         --wafuu-border: 35 20% 80%; /* 和風ボーダー */
+
+        /* 将棋盤配色 */
+        --shogi-border: 37 43% 58%; /* 枠線 #c7a165 */
+        --shogi-outer-border: 32 53% 49%; /* 外枠 #c08a3d */
+        --shogi-cell-light: 34 56% 87%; /* マス目（明） #f3e1c7 */
+        --shogi-cell-dark: 35 49% 80%; /* マス目（暗） #ead2ac */
+
+        /* レイアウト */
+        --panel-width: 340px; /* 右サイドパネルの幅 */
     }
 
     .dark {

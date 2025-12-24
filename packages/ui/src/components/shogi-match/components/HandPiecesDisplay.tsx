@@ -1,8 +1,50 @@
 import type { PieceType, Player, PositionState } from "@shogi/app-core";
+import { cn } from "@shogi/design-system";
 import type { ReactElement } from "react";
-import { PIECE_LABELS } from "../utils/constants";
+import { PIECE_CAP, PIECE_LABELS } from "../utils/constants";
 
 const HAND_ORDER: PieceType[] = ["R", "B", "G", "S", "N", "L", "P"];
+
+/** 盤上の駒と同じスタイルの駒表示 */
+function PieceToken({
+    pieceType,
+    owner,
+    count,
+    flipBoard = false,
+}: {
+    pieceType: PieceType;
+    owner: Player;
+    count: number;
+    flipBoard?: boolean;
+}): ReactElement {
+    // 盤面と同じ回転ロジック: 反転時は先手が逆さ、通常時は後手が逆さ
+    const shouldRotate = flipBoard ? owner === "sente" : owner === "gote";
+
+    return (
+        <span
+            className={cn(
+                "relative inline-flex items-center justify-center text-[16px] leading-none tracking-tight text-[#3a2a16]",
+                shouldRotate && "-rotate-180",
+            )}
+        >
+            <span className="rounded-[8px] bg-[#fdf6ec]/90 px-2 py-[5px] shadow-[0_3px_6px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)]">
+                {PIECE_LABELS[pieceType]}
+            </span>
+            {/* 個数を添え字として表示（親が回転しても常に右下に表示） */}
+            <span
+                className={cn(
+                    "absolute min-w-[14px] text-center text-[11px] font-bold leading-none",
+                    shouldRotate ? "-left-1 -top-1 rotate-180" : "-bottom-1 -right-1",
+                    count > 0
+                        ? "text-[hsl(var(--wafuu-sumi))]"
+                        : "text-[hsl(var(--muted-foreground))]",
+                )}
+            >
+                {count}
+            </span>
+        </span>
+    );
+}
 
 interface HandPiecesDisplayProps {
     /** 持ち駒を持つプレイヤー */
@@ -17,6 +59,14 @@ interface HandPiecesDisplayProps {
     onHandSelect: (piece: PieceType) => void;
     /** DnD 用 PointerDown ハンドラ（編集モード時） */
     onPiecePointerDown?: (owner: Player, pieceType: PieceType, e: React.PointerEvent) => void;
+    /** 編集モードかどうか */
+    isEditMode?: boolean;
+    /** 持ち駒を増やす（編集モード用） */
+    onIncrement?: (piece: PieceType) => void;
+    /** 持ち駒を減らす（編集モード用） */
+    onDecrement?: (piece: PieceType) => void;
+    /** 盤面反転状態 */
+    flipBoard?: boolean;
 }
 
 export function HandPiecesDisplay({
@@ -26,38 +76,144 @@ export function HandPiecesDisplay({
     isActive,
     onHandSelect,
     onPiecePointerDown,
+    isEditMode = false,
+    onIncrement,
+    onDecrement,
+    flipBoard = false,
 }: HandPiecesDisplayProps): ReactElement {
     return (
         <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
             {HAND_ORDER.map((piece) => {
                 const count = hand[piece] ?? 0;
+
+                // 対局時は0個の駒を非表示
+                if (!isEditMode && count === 0) {
+                    return null;
+                }
+
                 const selected = selectedPiece === piece;
+                // 編集モード時は0個でもドラッグ可能（ストックとして機能）
+                const canDrag = (count > 0 || isEditMode) && Boolean(onPiecePointerDown);
+                const canSelect = count > 0 && isActive;
+                const isDisabled = !canDrag && !canSelect && !isEditMode;
+                const maxCount = PIECE_CAP[piece];
+
                 return (
-                    <button
+                    <div
                         key={`${owner}-${piece}`}
-                        type="button"
-                        onPointerDown={(e) => {
-                            if (count > 0 && onPiecePointerDown) {
-                                onPiecePointerDown(owner, piece, e);
-                            }
-                        }}
-                        onClick={() => onHandSelect(piece)}
-                        disabled={count <= 0 || !isActive}
                         style={{
-                            minWidth: "52px",
-                            padding: "6px 10px",
-                            borderRadius: "10px",
-                            border: selected
-                                ? "2px solid hsl(var(--primary, 15 86% 55%))"
-                                : "1px solid hsl(var(--border, 0 0% 86%))",
-                            background:
-                                count > 0 ? "hsl(var(--secondary, 210 40% 96%))" : "transparent",
-                            color: "hsl(var(--foreground, 222 47% 11%))",
-                            cursor: count > 0 && isActive ? "pointer" : "not-allowed",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "2px",
                         }}
                     >
-                        {PIECE_LABELS[piece]} × {count}
-                    </button>
+                        {/* 駒ボタン */}
+                        <button
+                            type="button"
+                            onPointerDown={(e) => {
+                                if (canDrag && onPiecePointerDown) {
+                                    onPiecePointerDown(owner, piece, e);
+                                }
+                            }}
+                            onClick={(e) => {
+                                if (!canSelect) {
+                                    e.preventDefault();
+                                    return;
+                                }
+                                onHandSelect(piece);
+                            }}
+                            disabled={isDisabled}
+                            className={cn(
+                                "relative rounded-lg border-2 p-1 transition-all",
+                                selected
+                                    ? "border-[hsl(var(--wafuu-shu))] bg-[hsl(var(--wafuu-kin)/0.2)]"
+                                    : "border-transparent",
+                                count > 0 || isEditMode ? "opacity-100" : "opacity-40",
+                                (canDrag || canSelect) &&
+                                    "cursor-pointer hover:bg-[hsl(var(--wafuu-kin)/0.1)]",
+                            )}
+                        >
+                            <PieceToken
+                                pieceType={piece}
+                                owner={owner}
+                                count={count}
+                                flipBoard={flipBoard}
+                            />
+                        </button>
+
+                        {/* 編集モード: ±ボタン（縦並び） */}
+                        {isEditMode && (
+                            <div
+                                style={{
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    gap: "1px",
+                                }}
+                            >
+                                <button
+                                    type="button"
+                                    onClick={() => onIncrement?.(piece)}
+                                    disabled={count >= maxCount}
+                                    aria-label={`${PIECE_LABELS[piece]}を増やす`}
+                                    style={{
+                                        width: "20px",
+                                        height: "16px",
+                                        borderRadius: "4px 4px 0 0",
+                                        border: "1px solid hsl(var(--border, 0 0% 86%))",
+                                        borderBottom: "none",
+                                        background:
+                                            count < maxCount
+                                                ? "hsl(var(--wafuu-washi))"
+                                                : "hsl(var(--muted, 210 40% 96%))",
+                                        color:
+                                            count < maxCount
+                                                ? "hsl(var(--wafuu-sumi))"
+                                                : "hsl(var(--muted-foreground, 0 0% 70%))",
+                                        cursor: count < maxCount ? "pointer" : "not-allowed",
+                                        fontSize: "12px",
+                                        fontWeight: "bold",
+                                        display: "flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                        lineHeight: 1,
+                                        opacity: count < maxCount ? 1 : 0.4,
+                                    }}
+                                >
+                                    +
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => onDecrement?.(piece)}
+                                    disabled={count <= 0}
+                                    aria-label={`${PIECE_LABELS[piece]}を減らす`}
+                                    style={{
+                                        width: "20px",
+                                        height: "16px",
+                                        borderRadius: "0 0 4px 4px",
+                                        border: "1px solid hsl(var(--border, 0 0% 86%))",
+                                        background:
+                                            count > 0
+                                                ? "hsl(var(--wafuu-washi))"
+                                                : "hsl(var(--muted, 210 40% 96%))",
+                                        color:
+                                            count > 0
+                                                ? "hsl(var(--wafuu-sumi))"
+                                                : "hsl(var(--muted-foreground, 0 0% 70%))",
+                                        cursor: count > 0 ? "pointer" : "not-allowed",
+                                        fontSize: "12px",
+                                        fontWeight: "bold",
+                                        display: "flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                        lineHeight: 1,
+                                        opacity: count > 0 ? 1 : 0.4,
+                                    }}
+                                >
+                                    −
+                                </button>
+                            </div>
+                        )}
+                    </div>
                 );
             })}
         </div>

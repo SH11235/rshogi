@@ -1,7 +1,5 @@
 /**
  * 将棋盤 編集モード DnD 型定義
- *
- * 設計書: docs/edit-mode-dnd-design-refined.md
  */
 
 import type { PieceType, Player, Square } from "@shogi/app-core";
@@ -38,25 +36,6 @@ export type DropTarget =
     | { type: "delete" };
 
 /**
- * 盤面の計測情報
- */
-export interface BoardMetrics {
-    rect: DOMRect;
-    cellW: number;
-    cellH: number;
-    orientation: "sente" | "gote";
-}
-
-/**
- * 各エリアの rect
- */
-export interface Zones {
-    senteHandRect: DOMRect | null;
-    goteHandRect: DOMRect | null;
-    deleteRect: DOMRect | null;
-}
-
-/**
  * DnD ランタイム状態（ref で管理、React state ではない）
  */
 export interface DragRuntime {
@@ -71,10 +50,8 @@ export interface DragRuntime {
 
     origin: DragOrigin | null;
     payload: DragPayload | null;
+    basePromoted: boolean;
     hover: DropTarget | null;
-
-    boardMetrics: BoardMetrics | null;
-    zones: Zones | null;
 }
 
 /**

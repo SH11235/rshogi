@@ -36,7 +36,6 @@ import {
     DeleteZone,
     DragGhost,
     type DropResult,
-    useDragEnvironment,
     usePieceDnd,
 } from "./shogi-match/dnd";
 
@@ -52,7 +51,7 @@ import {
     consumeFromHand,
     countPieces,
 } from "./shogi-match/utils/boardUtils";
-import { PIECE_CAP, PIECE_LABELS } from "./shogi-match/utils/constants";
+import { isPromotable, PIECE_CAP, PIECE_LABELS } from "./shogi-match/utils/constants";
 import { parseUsiInput } from "./shogi-match/utils/kifuUtils";
 import { LegalMoveCache } from "./shogi-match/utils/legalMoveCache";
 import { determinePromotion } from "./shogi-match/utils/promotionLogic";
@@ -102,33 +101,45 @@ const TEXT_STYLES = {
     } as CSSProperties,
 } as const;
 
-// 持ち駒表示セクションコンポーネント（DRY原則）
+// 持ち駒表示セクションコンポーネント
 interface PlayerHandSectionProps {
     owner: Player;
-    label: string;
     hand: PositionState["hands"]["sente"] | PositionState["hands"]["gote"];
     selectedPiece: PieceType | null;
     isActive: boolean;
     onHandSelect: (piece: PieceType) => void;
     /** DnD 用 PointerDown ハンドラ */
     onPiecePointerDown?: (owner: Player, pieceType: PieceType, e: React.PointerEvent) => void;
-    /** DnD ヒットテスト用の ref */
-    handRef?: React.RefObject<HTMLDivElement | null>;
+    /** 編集モードかどうか */
+    isEditMode?: boolean;
+    /** 持ち駒を増やす（編集モード用） */
+    onIncrement?: (piece: PieceType) => void;
+    /** 持ち駒を減らす（編集モード用） */
+    onDecrement?: (piece: PieceType) => void;
+    /** 盤面反転状態 */
+    flipBoard?: boolean;
 }
 
 function PlayerHandSection({
     owner,
-    label,
     hand,
     selectedPiece,
     isActive,
     onHandSelect,
     onPiecePointerDown,
-    handRef,
+    isEditMode,
+    onIncrement,
+    onDecrement,
+    flipBoard,
 }: PlayerHandSectionProps): ReactElement {
+    const labelColor = owner === "sente" ? "hsl(var(--wafuu-shu))" : "hsl(210 70% 45%)";
+    const ownerText = owner === "sente" ? "先手" : "後手";
     return (
-        <div ref={handRef}>
-            <div style={TEXT_STYLES.handLabel}>{label}</div>
+        <div data-zone={`hand-${owner}`}>
+            <div style={TEXT_STYLES.handLabel}>
+                <span style={{ color: labelColor, fontSize: "15px" }}>{ownerText}</span>
+                <span>の持ち駒</span>
+            </div>
             <HandPiecesDisplay
                 owner={owner}
                 hand={hand}
@@ -136,6 +147,10 @@ function PlayerHandSection({
                 isActive={isActive}
                 onHandSelect={onHandSelect}
                 onPiecePointerDown={onPiecePointerDown}
+                isEditMode={isEditMode}
+                onIncrement={onIncrement}
+                onDecrement={onDecrement}
+                flipBoard={flipBoard}
             />
         </div>
     );
@@ -193,6 +208,7 @@ export function ShogiMatch({
     const [selection, setSelection] = useState<Selection | null>(null);
     const [promotionSelection, setPromotionSelection] = useState<PromotionSelection | null>(null);
     const [message, setMessage] = useState<string | null>(null);
+    const [editMessage, setEditMessage] = useState<string | null>(null);
     const [flipBoard, setFlipBoard] = useState(false);
     const [timeSettings, setTimeSettings] = useState<ClockSettings>({
         sente: { mainMs: initialMainTimeMs, byoyomiMs: initialByoyomiMs },
@@ -225,16 +241,10 @@ export function ShogiMatch({
             pos === "top" ? (flipBoard ? "sente" : "gote") : flipBoard ? "gote" : "sente";
         return {
             owner,
-            label: owner === "sente" ? "先手の持ち駒" : "後手の持ち駒",
             hand: owner === "sente" ? position.hands.sente : position.hands.gote,
             isActive: !isEditMode && position.turn === owner && sides[owner].role === "human",
         };
     };
-
-    // DnD 環境（ref 管理）
-    const dndEnv = useDragEnvironment({
-        orientation: flipBoard ? "gote" : "sente",
-    });
 
     const positionRef = useRef<PositionState>(position);
     const movesRef = useRef<string[]>(moves);
@@ -296,28 +306,21 @@ export function ShogiMatch({
     const handleMoveFromEngineRef = useRef<(move: string) => void>(() => {});
 
     // エンジン管理フックを使用
-    const {
-        engineReady,
-        engineStatus,
-        eventLogs,
-        errorLogs,
-        stopAllEngines,
-        getEngineForSide,
-        isEngineTurn,
-        logEngineError,
-    } = useEngineManager({
-        sides,
-        engineOptions,
-        timeSettings,
-        startSfen,
-        movesRef,
-        positionRef,
-        isMatchRunning,
-        positionReady,
-        onMoveFromEngine: (move) => handleMoveFromEngineRef.current(move),
-        onMatchEnd: endMatch,
-        maxLogs,
-    });
+    const { eventLogs, errorLogs, stopAllEngines, isEngineTurn, logEngineError } = useEngineManager(
+        {
+            sides,
+            engineOptions,
+            timeSettings,
+            startSfen,
+            movesRef,
+            positionRef,
+            isMatchRunning,
+            positionReady,
+            onMoveFromEngine: (move) => handleMoveFromEngineRef.current(move),
+            onMatchEnd: endMatch,
+            maxLogs,
+        },
+    );
     stopAllEnginesRef.current = stopAllEngines;
 
     // エンジンからの手を受け取って適用するコールバック
@@ -439,7 +442,7 @@ export function ShogiMatch({
         await refreshStartSfen(current);
         legalCache.clear();
         setIsEditMode(false);
-        setMessage("局面を確定しました。対局開始でこの局面から進行します。");
+        setEditMessage("局面を確定しました。対局開始でこの局面から進行します。");
     };
 
     const resetToBasePosition = useCallback(async () => {
@@ -536,6 +539,26 @@ export function ShogiMatch({
         [legalCache, stopTicking, refreshStartSfen],
     );
 
+    const setPiecePromotion = useCallback(
+        (square: Square, promote: boolean) => {
+            if (!isEditMode) return;
+            const current = positionRef.current;
+            const piece = current.board[square];
+            if (!piece) return;
+            if (!isPromotable(piece.type)) {
+                setEditMessage(`${PIECE_LABELS[piece.type]}は成れません。`);
+                return;
+            }
+
+            const nextBoard = cloneBoard(current.board);
+            nextBoard[square] = promote
+                ? { ...piece, promoted: true }
+                : { ...piece, promoted: undefined };
+            applyEditedPosition({ ...current, board: nextBoard });
+        },
+        [applyEditedPosition, isEditMode],
+    );
+
     // DnD ドロップハンドラ
     const handleDndDrop = useCallback(
         (result: DropResult) => {
@@ -554,7 +577,6 @@ export function ShogiMatch({
 
     // DnD コントローラー
     const dndController = usePieceDnd({
-        env: dndEnv,
         onDrop: handleDndDrop,
         disabled: !isEditMode,
     });
@@ -568,6 +590,11 @@ export function ShogiMatch({
             piece: { owner: "sente" | "gote"; type: string; promoted?: boolean },
             e: React.PointerEvent,
         ) => {
+            // 編集パネルが閉じていたら自動的に開く
+            if (!isEditPanelOpen) {
+                setIsEditPanelOpen(true);
+            }
+
             const origin = { type: "board" as const, square: square as Square };
             const payload = {
                 owner: piece.owner as Player,
@@ -577,13 +604,23 @@ export function ShogiMatch({
 
             dndController.startDrag(origin, payload, e);
         },
-        [dndController],
+        [dndController, isEditPanelOpen],
     );
 
     // DnD ドラッグ開始ハンドラ（持ち駒）
     const handleHandPiecePointerDown = useCallback(
         (owner: Player, pieceType: PieceType, e: React.PointerEvent) => {
-            const origin = { type: "hand" as const, owner, pieceType };
+            // 編集パネルが閉じていたら自動的に開く
+            if (!isEditPanelOpen) {
+                setIsEditPanelOpen(true);
+            }
+
+            // 持ち駒が0個の場合はストック扱い（編集モード時、無限供給）
+            const count = position?.hands[owner][pieceType] ?? 0;
+            const origin =
+                count > 0
+                    ? { type: "hand" as const, owner, pieceType }
+                    : { type: "stock" as const, owner, pieceType };
             const payload = {
                 owner,
                 pieceType,
@@ -592,7 +629,55 @@ export function ShogiMatch({
 
             dndController.startDrag(origin, payload, e);
         },
-        [dndController],
+        [dndController, position, isEditPanelOpen],
+    );
+
+    const handlePieceTogglePromote = useCallback(
+        (
+            square: string,
+            piece: { owner: "sente" | "gote"; type: string; promoted?: boolean },
+            _event: React.MouseEvent<HTMLButtonElement>,
+        ) => {
+            if (!isEditMode) return;
+            const sq = square as Square;
+            setPiecePromotion(sq, !piece.promoted);
+        },
+        [isEditMode, setPiecePromotion],
+    );
+
+    // 持ち駒増加ハンドラ（編集モード用）
+    const handleIncrementHand = useCallback(
+        (owner: Player, pieceType: PieceType) => {
+            if (isMatchRunning || !position) return;
+            const counts = countPieces(position);
+            const currentCount = counts[owner][pieceType];
+            if (currentCount >= PIECE_CAP[pieceType]) return;
+
+            const nextHands = addToHand(cloneHandsState(position.hands), owner, pieceType);
+            setPosition({
+                ...position,
+                hands: nextHands,
+            });
+        },
+        [isMatchRunning, position],
+    );
+
+    // 持ち駒減少ハンドラ（編集モード用）
+    const handleDecrementHand = useCallback(
+        (owner: Player, pieceType: PieceType) => {
+            if (isMatchRunning || !position) return;
+            const count = position.hands[owner][pieceType] ?? 0;
+            if (count <= 0) return;
+
+            const nextHands = consumeFromHand(cloneHandsState(position.hands), owner, pieceType);
+            if (nextHands) {
+                setPosition({
+                    ...position,
+                    hands: nextHands,
+                });
+            }
+        },
+        [isMatchRunning, position],
     );
 
     const clearBoardForEdit = () => {
@@ -607,7 +692,7 @@ export function ShogiMatch({
             ply: 1,
         };
         applyEditedPosition(next);
-        setMessage("盤面をクリアしました。");
+        setEditMessage("盤面をクリアしました。");
     };
 
     const resetToStartposForEdit = async () => {
@@ -617,7 +702,7 @@ export function ShogiMatch({
             const pos = await service.getInitialBoard();
             applyEditedPosition(clonePositionState(pos));
             setInitialBoard(cloneBoard(pos.board));
-            setMessage("平手初期化しました。");
+            setEditMessage("平手初期化しました。");
         } catch (error) {
             setMessage(`平手初期化に失敗しました: ${String(error)}`);
         }
@@ -669,13 +754,13 @@ export function ShogiMatch({
         });
         const nextCount = countsBefore[piece.owner][baseType] + 1;
         if (nextCount > PIECE_CAP[baseType]) {
-            setMessage(
+            setEditMessage(
                 `${piece.owner === "sente" ? "先手" : "後手"}の${PIECE_LABELS[baseType]}は最大${PIECE_CAP[baseType]}枚までです`,
             );
             return false;
         }
         if (piece.type === "K" && countsBefore[piece.owner][baseType] >= PIECE_CAP.K) {
-            setMessage("玉はそれぞれ1枚まで配置できます。");
+            setEditMessage("玉はそれぞれ1枚まで配置できます。");
             return false;
         }
 
@@ -748,7 +833,7 @@ export function ShogiMatch({
             }
 
             // 空マスをクリックした場合
-            setMessage("配置する駒を選ぶか、移動する駒をクリックしてください。");
+            setEditMessage("配置する駒を選ぶか、移動する駒をクリックしてください。");
             return;
         }
         if (!positionReady) {
@@ -958,62 +1043,32 @@ export function ShogiMatch({
 
             <section
                 style={{
-                    ...baseCard,
-                    padding: "16px",
                     display: "flex",
                     flexDirection: "column",
                     gap: "12px",
+                    alignItems: "center",
+                    padding: "16px 0",
                 }}
             >
                 <div
                     style={{
                         display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                        gap: "12px",
-                    }}
-                >
-                    <div>
-                        <div style={{ fontWeight: 700 }}>盤 UI + 対局</div>
-                        <div
-                            style={{
-                                color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                                fontSize: "13px",
-                            }}
-                        >
-                            先手・後手それぞれに「人間 /
-                            エンジン」を割り当てて試せます。クリック2回で移動、持ち駒はボタン→マスで打ち込み。
-                        </div>
-                    </div>
-                    <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-                        <label
-                            style={{
-                                display: "flex",
-                                alignItems: "center",
-                                gap: "6px",
-                                fontSize: "13px",
-                            }}
-                        >
-                            <input
-                                type="checkbox"
-                                checked={flipBoard}
-                                onChange={(e) => setFlipBoard(e.target.checked)}
-                            />
-                            盤面を反転
-                        </label>
-                    </div>
-                </div>
-
-                <div
-                    style={{
-                        display: "grid",
-                        gridTemplateColumns: "minmax(320px, 1fr) 360px",
-                        gap: "12px",
+                        gap: "24px",
                         alignItems: "flex-start",
                     }}
                 >
-                    <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-                        <div ref={boardSectionRef} style={{ ...baseCard, padding: "12px" }}>
+                    <div
+                        style={{
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "12px",
+                            alignItems: "center",
+                        }}
+                    >
+                        <div
+                            ref={boardSectionRef}
+                            style={{ ...baseCard, padding: "12px", width: "fit-content" }}
+                        >
                             <div
                                 style={{
                                     display: "flex",
@@ -1022,11 +1077,42 @@ export function ShogiMatch({
                                     marginBottom: "8px",
                                 }}
                             >
-                                <h3 style={{ fontWeight: 700, margin: 0, fontSize: "inherit" }}>
-                                    盤面
-                                </h3>
+                                <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                                    <h3 style={{ fontWeight: 700, margin: 0, fontSize: "inherit" }}>
+                                        盤面
+                                    </h3>
+                                    <label
+                                        style={{
+                                            display: "flex",
+                                            alignItems: "center",
+                                            gap: "4px",
+                                            fontSize: "12px",
+                                            color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                                            cursor: "pointer",
+                                        }}
+                                    >
+                                        <input
+                                            type="checkbox"
+                                            checked={flipBoard}
+                                            onChange={(e) => setFlipBoard(e.target.checked)}
+                                        />
+                                        反転
+                                    </label>
+                                </div>
                                 <output style={TEXT_STYLES.mutedSecondary}>
-                                    手番: {position.turn === "sente" ? "先手" : "後手"}
+                                    手番:{" "}
+                                    <span
+                                        style={{
+                                            fontWeight: 600,
+                                            fontSize: "15px",
+                                            color:
+                                                position.turn === "sente"
+                                                    ? "hsl(var(--wafuu-shu))"
+                                                    : "hsl(210 70% 45%)",
+                                        }}
+                                    >
+                                        {position.turn === "sente" ? "先手" : "後手"}
+                                    </span>
                                 </output>
                             </div>
                             <div
@@ -1035,6 +1121,11 @@ export function ShogiMatch({
                                     display: "flex",
                                     gap: "8px",
                                     flexDirection: "column",
+                                    alignItems: "center",
+                                    touchAction:
+                                        isEditMode && dndController.state.isDragging
+                                            ? "none"
+                                            : "auto",
                                 }}
                             >
                                 {/* 手数表示 */}
@@ -1045,14 +1136,9 @@ export function ShogiMatch({
                                 {/* 盤の上側の持ち駒（通常:後手、反転時:先手） */}
                                 {(() => {
                                     const info = getHandInfo("top");
-                                    const handRef =
-                                        info.owner === "sente"
-                                            ? (dndEnv.senteHandRef as React.RefObject<HTMLDivElement>)
-                                            : (dndEnv.goteHandRef as React.RefObject<HTMLDivElement>);
                                     return (
                                         <PlayerHandSection
                                             owner={info.owner}
-                                            label={info.label}
                                             hand={info.hand}
                                             selectedPiece={
                                                 selection?.kind === "hand" ? selection.piece : null
@@ -1062,41 +1148,49 @@ export function ShogiMatch({
                                             onPiecePointerDown={
                                                 isEditMode ? handleHandPiecePointerDown : undefined
                                             }
-                                            handRef={handRef}
+                                            isEditMode={isEditMode && !isMatchRunning}
+                                            onIncrement={(piece) =>
+                                                handleIncrementHand(info.owner, piece)
+                                            }
+                                            onDecrement={(piece) =>
+                                                handleDecrementHand(info.owner, piece)
+                                            }
+                                            flipBoard={flipBoard}
                                         />
                                     );
                                 })()}
 
-                                {/* 盤面コンテナ（DnD ヒットテスト用） */}
-                                <div ref={dndEnv.boardRef as React.RefObject<HTMLDivElement>}>
-                                    <ShogiBoard
-                                        grid={grid}
-                                        selectedSquare={
-                                            isEditMode && editFromSquare
-                                                ? editFromSquare
-                                                : selection?.kind === "square"
-                                                  ? selection.square
-                                                  : null
-                                        }
-                                        lastMove={
-                                            lastMove
-                                                ? {
-                                                      from: lastMove.from ?? undefined,
-                                                      to: lastMove.to,
-                                                  }
-                                                : undefined
-                                        }
-                                        promotionSquare={promotionSelection?.to ?? null}
-                                        onSelect={(sq, shiftKey) => {
-                                            void handleSquareSelect(sq, shiftKey);
-                                        }}
-                                        onPromotionChoice={handlePromotionChoice}
-                                        flipBoard={flipBoard}
-                                        onPiecePointerDown={
-                                            isEditMode ? handlePiecePointerDown : undefined
-                                        }
-                                    />
-                                </div>
+                                {/* 盤面 */}
+                                <ShogiBoard
+                                    grid={grid}
+                                    selectedSquare={
+                                        isEditMode && editFromSquare
+                                            ? editFromSquare
+                                            : selection?.kind === "square"
+                                              ? selection.square
+                                              : null
+                                    }
+                                    lastMove={
+                                        lastMove
+                                            ? {
+                                                  from: lastMove.from ?? undefined,
+                                                  to: lastMove.to,
+                                              }
+                                            : undefined
+                                    }
+                                    promotionSquare={promotionSelection?.to ?? null}
+                                    onSelect={(sq, shiftKey) => {
+                                        void handleSquareSelect(sq, shiftKey);
+                                    }}
+                                    onPromotionChoice={handlePromotionChoice}
+                                    flipBoard={flipBoard}
+                                    onPiecePointerDown={
+                                        isEditMode ? handlePiecePointerDown : undefined
+                                    }
+                                    onPieceTogglePromote={
+                                        isEditMode ? handlePieceTogglePromote : undefined
+                                    }
+                                />
                                 {candidateNote ? (
                                     <div style={TEXT_STYLES.mutedSecondary}>{candidateNote}</div>
                                 ) : null}
@@ -1104,14 +1198,9 @@ export function ShogiMatch({
                                 {/* 盤の下側の持ち駒（通常:先手、反転時:後手） */}
                                 {(() => {
                                     const info = getHandInfo("bottom");
-                                    const handRef =
-                                        info.owner === "sente"
-                                            ? (dndEnv.senteHandRef as React.RefObject<HTMLDivElement>)
-                                            : (dndEnv.goteHandRef as React.RefObject<HTMLDivElement>);
                                     return (
                                         <PlayerHandSection
                                             owner={info.owner}
-                                            label={info.label}
                                             hand={info.hand}
                                             selectedPiece={
                                                 selection?.kind === "hand" ? selection.piece : null
@@ -1121,24 +1210,24 @@ export function ShogiMatch({
                                             onPiecePointerDown={
                                                 isEditMode ? handleHandPiecePointerDown : undefined
                                             }
-                                            handRef={handRef}
+                                            isEditMode={isEditMode && !isMatchRunning}
+                                            onIncrement={(piece) =>
+                                                handleIncrementHand(info.owner, piece)
+                                            }
+                                            onDecrement={(piece) =>
+                                                handleDecrementHand(info.owner, piece)
+                                            }
+                                            flipBoard={flipBoard}
                                         />
                                     );
                                 })()}
 
                                 {/* DnD 削除ゾーン（編集モード時のみ表示） */}
                                 {isEditMode && (
-                                    <div
-                                        ref={
-                                            dndEnv.deleteZoneRef as React.RefObject<HTMLDivElement>
-                                        }
-                                        style={{ marginTop: "8px" }}
-                                    >
-                                        <DeleteZone
-                                            dndState={dndController.state}
-                                            className="h-14 w-full"
-                                        />
-                                    </div>
+                                    <DeleteZone
+                                        dndState={dndController.state}
+                                        className="mt-2 h-14 w-full"
+                                    />
                                 )}
                             </div>
                         </div>
@@ -1148,31 +1237,18 @@ export function ShogiMatch({
                         <EditModePanel
                             isOpen={isEditPanelOpen}
                             onOpenChange={setIsEditPanelOpen}
-                            editOwner={editOwner}
-                            editPieceType={editPieceType}
-                            editPromoted={editPromoted}
-                            editFromSquare={editFromSquare}
-                            editTool={editTool}
-                            setEditOwner={setEditOwner}
-                            setEditPieceType={setEditPieceType}
-                            setEditPromoted={setEditPromoted}
-                            setEditTool={setEditTool}
                             onResetToStartpos={resetToStartposForEdit}
                             onClearBoard={clearBoardForEdit}
                             isMatchRunning={isMatchRunning}
                             positionReady={positionReady}
+                            message={editMessage}
                         />
 
                         <MatchControls
                             onNewGame={handleNewGame}
                             onPause={pauseAutoPlay}
                             onResume={resumeAutoPlay}
-                            sides={sides}
-                            engineReady={engineReady}
-                            engineStatus={engineStatus}
-                            isMatchRunning={isMatchRunning}
                             message={message}
-                            getEngineForSide={getEngineForSide}
                         />
 
                         <MatchSettingsPanel

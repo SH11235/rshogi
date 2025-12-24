@@ -1,28 +1,11 @@
-import type { PieceType, Player, Square } from "@shogi/app-core";
 import type { ReactElement } from "react";
 import { Button } from "../../button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../../collapsible";
-import { isPromotable, PIECE_LABELS } from "../utils/constants";
-
-const PIECE_SELECT_ORDER: PieceType[] = ["K", "R", "B", "G", "S", "N", "L", "P"];
 
 interface EditModePanelProps {
     // パネル表示状態
     isOpen: boolean;
     onOpenChange: (open: boolean) => void;
-
-    // 編集状態
-    editOwner: Player;
-    editPieceType: PieceType | null;
-    editPromoted: boolean;
-    editFromSquare: Square | null;
-    editTool: "place" | "erase";
-
-    // 状態更新関数
-    setEditOwner: (owner: Player) => void;
-    setEditPieceType: (type: PieceType | null) => void;
-    setEditPromoted: (promoted: boolean) => void;
-    setEditTool: (tool: "place" | "erase") => void;
 
     // アクション
     onResetToStartpos: () => Promise<void>;
@@ -31,24 +14,19 @@ interface EditModePanelProps {
     // 制約
     isMatchRunning: boolean;
     positionReady: boolean;
+
+    // メッセージ
+    message: string | null;
 }
 
 export function EditModePanel({
     isOpen,
     onOpenChange,
-    editOwner,
-    editPieceType,
-    editPromoted,
-    editFromSquare,
-    editTool,
-    setEditOwner,
-    setEditPieceType,
-    setEditPromoted,
-    setEditTool,
     onResetToStartpos,
     onClearBoard,
     isMatchRunning,
     positionReady,
+    message,
 }: EditModePanelProps): ReactElement {
     return (
         <Collapsible open={isOpen} onOpenChange={onOpenChange}>
@@ -59,6 +37,7 @@ export function EditModePanel({
                     borderRadius: "12px",
                     overflow: "hidden",
                     boxShadow: "0 8px 20px rgba(0,0,0,0.08)",
+                    width: "var(--panel-width)",
                 }}
             >
                 <CollapsibleTrigger asChild>
@@ -85,11 +64,12 @@ export function EditModePanel({
                             style={{
                                 fontSize: "18px",
                                 fontWeight: 700,
-                                color: "hsl(var(--wafuu-sumi))",
+                                color: isOpen ? "hsl(var(--wafuu-shu))" : "hsl(var(--wafuu-sumi))",
                                 letterSpacing: "0.05em",
+                                transition: "color 0.2s ease",
                             }}
                         >
-                            局面編集
+                            {isOpen ? "局面編集中" : "局面編集"}
                         </span>
                         <span
                             style={{
@@ -122,7 +102,7 @@ export function EditModePanel({
                                 borderLeft: "3px solid hsl(var(--wafuu-kin))",
                             }}
                         >
-                            盤面をクリックして局面を編集できます。対局開始前のみ有効です。王は重複不可、各駒は上限枚数まで配置できます。
+                            駒をドラッグして盤面を編集できます。持ち駒の±ボタンで駒数を調整できます。
                         </div>
                         <div
                             style={{
@@ -150,137 +130,20 @@ export function EditModePanel({
                                 盤面をクリア
                             </Button>
                         </div>
-                        <div
-                            style={{
-                                display: "flex",
-                                gap: "6px",
-                                alignItems: "center",
-                            }}
-                        >
-                            <span
-                                style={{
-                                    fontSize: "12px",
-                                    color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                                }}
-                            >
-                                配置する先後
-                            </span>
-                            <label
-                                style={{
-                                    display: "flex",
-                                    gap: "4px",
-                                    fontSize: "13px",
-                                }}
-                            >
-                                <input
-                                    type="radio"
-                                    name="edit-owner"
-                                    value="sente"
-                                    checked={editOwner === "sente"}
-                                    disabled={isMatchRunning}
-                                    onChange={() => setEditOwner("sente")}
-                                />
-                                先手
-                            </label>
-                            <label
-                                style={{
-                                    display: "flex",
-                                    gap: "4px",
-                                    fontSize: "13px",
-                                }}
-                            >
-                                <input
-                                    type="radio"
-                                    name="edit-owner"
-                                    value="gote"
-                                    checked={editOwner === "gote"}
-                                    disabled={isMatchRunning}
-                                    onChange={() => setEditOwner("gote")}
-                                />
-                                後手
-                            </label>
-                        </div>
-                        <div
-                            style={{
-                                display: "flex",
-                                gap: "8px",
-                                flexWrap: "wrap",
-                                alignItems: "center",
-                            }}
-                        >
+                        {message && (
                             <div
                                 style={{
-                                    display: "flex",
-                                    gap: "6px",
-                                    flexWrap: "wrap",
-                                }}
-                            >
-                                {PIECE_SELECT_ORDER.map((type) => {
-                                    const selected = editPieceType === type && editTool === "place";
-                                    return (
-                                        <Button
-                                            key={type}
-                                            type="button"
-                                            variant={selected ? "secondary" : "outline"}
-                                            onClick={() => {
-                                                if (selected) {
-                                                    // 選択中の駒を再度クリック：選択解除
-                                                    setEditPieceType(null);
-                                                } else {
-                                                    setEditTool("place");
-                                                    setEditPieceType(type);
-                                                    if (!isPromotable(type)) {
-                                                        setEditPromoted(false);
-                                                    }
-                                                }
-                                            }}
-                                            disabled={isMatchRunning}
-                                            style={{ paddingInline: "10px" }}
-                                        >
-                                            {PIECE_LABELS[type]}
-                                        </Button>
-                                    );
-                                })}
-                            </div>
-                            <Button
-                                type="button"
-                                variant={editTool === "erase" ? "secondary" : "outline"}
-                                onClick={() => {
-                                    if (editTool === "erase") {
-                                        // 削除モードを解除
-                                        setEditTool("place");
-                                    } else {
-                                        // 削除モードに切り替え
-                                        setEditTool("erase");
-                                        setEditPieceType(null);
-                                    }
-                                }}
-                                disabled={isMatchRunning}
-                                style={{ paddingInline: "10px" }}
-                            >
-                                削除モード
-                            </Button>
-                            <label
-                                style={{
-                                    display: "flex",
-                                    alignItems: "center",
-                                    gap: "6px",
                                     fontSize: "13px",
+                                    color: "hsl(var(--wafuu-shu))",
+                                    padding: "10px",
+                                    background: "hsl(var(--wafuu-washi))",
+                                    borderRadius: "8px",
+                                    borderLeft: "3px solid hsl(var(--wafuu-shu))",
                                 }}
                             >
-                                <input
-                                    type="checkbox"
-                                    checked={editPromoted}
-                                    disabled={
-                                        isMatchRunning ||
-                                        !editPieceType ||
-                                        !isPromotable(editPieceType)
-                                    }
-                                    onChange={(e) => setEditPromoted(e.target.checked)}
-                                />
-                                成りで配置
-                            </label>
-                        </div>
+                                {message}
+                            </div>
+                        )}
                         <div
                             style={{
                                 fontSize: "12px",
@@ -308,36 +171,22 @@ export function EditModePanel({
                                 }}
                             >
                                 <li>
-                                    <strong>駒を配置:</strong> 駒ボタンを選択 → 盤面をクリック
+                                    <strong>駒を配置:</strong> 持ち駒から盤面にドラッグ
                                 </li>
                                 <li>
-                                    <strong>駒を移動:</strong>{" "}
-                                    駒ボタン未選択の状態で盤面の駒をクリック → 移動先をクリック
+                                    <strong>駒を移動:</strong> 盤面の駒をドラッグして移動
                                 </li>
                                 <li>
-                                    <strong>駒を削除:</strong>{" "}
-                                    削除モードボタンを押して盤面をクリック（手駒に戻ります）
+                                    <strong>駒を削除:</strong> 盤外にドラッグ
                                 </li>
                                 <li>
-                                    <strong>選択解除:</strong>{" "}
-                                    駒ボタンや削除モードボタンを再度クリック、または同じマスを再度クリック
+                                    <strong>成/不成切替:</strong> 盤上の駒を右クリック or
+                                    ダブルクリック
+                                </li>
+                                <li>
+                                    <strong>成り付与:</strong> Shift を押しながらドラッグ
                                 </li>
                             </ul>
-                            {editFromSquare && (
-                                <div
-                                    style={{
-                                        marginTop: "8px",
-                                        padding: "6px 10px",
-                                        background: "hsl(var(--wafuu-kin) / 0.15)",
-                                        borderRadius: "6px",
-                                        color: "hsl(var(--wafuu-sumi))",
-                                        fontSize: "11px",
-                                        fontWeight: 600,
-                                    }}
-                                >
-                                    移動元: {editFromSquare} → 移動先を選択してください
-                                </div>
-                            )}
                         </div>
                     </div>
                 </CollapsibleContent>
