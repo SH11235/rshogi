@@ -7,7 +7,7 @@
 
 import type { BoardState } from "@shogi/app-core";
 import type { EngineInfoEvent } from "@shogi/engine-client";
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import type { EvalHistory, KifMove } from "../utils/kifFormat";
 import { convertMovesToKif } from "../utils/kifFormat";
 
@@ -46,14 +46,14 @@ export function useKifuWithEval(moves: string[]): UseKifuWithEvalResult {
     const evalMapRef = useRef<Map<number, EvalEntry>>(new Map());
 
     // 更新トリガー用カウンター（useMemoの依存配列用）
-    const updateCounterRef = useRef(0);
+    const [updateCounter, setUpdateCounter] = useState(0);
 
     /**
      * 盤面状態を記録（指し手適用前に呼ぶ）
      */
     const recordBoardState = useCallback((board: BoardState) => {
         boardHistoryRef.current = [...boardHistoryRef.current, board];
-        updateCounterRef.current += 1;
+        setUpdateCounter((c) => c + 1);
     }, []);
 
     /**
@@ -68,7 +68,7 @@ export function useKifuWithEval(moves: string[]): UseKifuWithEvalResult {
                 scoreMate: event.scoreMate,
                 depth: event.depth,
             });
-            updateCounterRef.current += 1;
+            setUpdateCounter((c) => c + 1);
         }
     }, []);
 
@@ -78,14 +78,12 @@ export function useKifuWithEval(moves: string[]): UseKifuWithEvalResult {
     const clearHistory = useCallback(() => {
         boardHistoryRef.current = [];
         evalMapRef.current.clear();
-        updateCounterRef.current += 1;
+        setUpdateCounter((c) => c + 1);
     }, []);
 
     // KIF形式の棋譜を生成
+    // biome-ignore lint/correctness/useExhaustiveDependencies: updateCounterは盤面履歴・評価値の更新を検知するためのトリガー
     const kifMoves = useMemo(() => {
-        // updateCounterを依存に含めて再計算をトリガー
-        void updateCounterRef.current;
-
         const boardHistory = boardHistoryRef.current;
         const evalMap = evalMapRef.current;
 
@@ -98,12 +96,11 @@ export function useKifuWithEval(moves: string[]): UseKifuWithEvalResult {
         const validMoves = moves.slice(0, boardHistory.length);
 
         return convertMovesToKif(validMoves, boardHistory, evalMap);
-    }, [moves, updateCounterRef.current]);
+    }, [moves, updateCounter]);
 
     // 評価値履歴を生成（グラフ用）
+    // biome-ignore lint/correctness/useExhaustiveDependencies: updateCounterは評価値の更新を検知するためのトリガー
     const evalHistory = useMemo((): EvalHistory[] => {
-        void updateCounterRef.current;
-
         const history: EvalHistory[] = [
             { ply: 0, evalCp: 0, evalMate: null }, // 開始局面
         ];
@@ -120,7 +117,7 @@ export function useKifuWithEval(moves: string[]): UseKifuWithEvalResult {
         }
 
         return history;
-    }, [moves, updateCounterRef.current]);
+    }, [moves, updateCounter]);
 
     return {
         kifMoves,

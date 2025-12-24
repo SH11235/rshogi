@@ -4,36 +4,10 @@
  * 横軸に手数、縦軸に評価値を表示する折れ線グラフ
  */
 
-import type { CSSProperties, ReactElement } from "react";
+import type { ReactElement } from "react";
 import { useMemo } from "react";
 import type { EvalHistory } from "../utils/kifFormat";
 import { evalToY } from "../utils/kifFormat";
-
-const baseCard: CSSProperties = {
-    background: "hsl(var(--card, 0 0% 100%))",
-    border: "1px solid hsl(var(--border, 0 0% 86%))",
-    borderRadius: "12px",
-    padding: "12px",
-    boxShadow: "0 14px 28px rgba(0,0,0,0.12)",
-    width: "var(--panel-width)",
-};
-
-const headerStyle: CSSProperties = {
-    fontWeight: 700,
-    marginBottom: "6px",
-    fontSize: "14px",
-};
-
-const graphContainerStyle: CSSProperties = {
-    position: "relative",
-    width: "100%",
-};
-
-const labelStyle: CSSProperties = {
-    position: "absolute",
-    fontSize: "10px",
-    color: "hsl(var(--muted-foreground, 0 0% 48%))",
-};
 
 interface EvalGraphProps {
     /** 評価値の履歴 */
@@ -76,7 +50,7 @@ export function EvalGraph({
                 return `${x}%,${y}`;
             })
             .join(" ");
-    }, [evalHistory, graphHeight, clampValue, padding.top]);
+    }, [evalHistory, graphHeight, clampValue]);
 
     // 現在位置のマーカー
     const currentMarker = useMemo(() => {
@@ -88,7 +62,7 @@ export function EvalGraph({
         const y = padding.top + evalToY(entry?.evalCp, entry?.evalMate, graphHeight, clampValue);
 
         return { x: `${x}%`, y };
-    }, [currentPly, evalHistory, graphHeight, clampValue, padding.top]);
+    }, [currentPly, evalHistory, graphHeight, clampValue]);
 
     // 塗りつぶし領域のパス
     const fillPath = useMemo(() => {
@@ -114,16 +88,16 @@ export function EvalGraph({
         const upperClose = `L ${100}% ${centerY} L 0% ${centerY} Z`;
 
         return upperPath + upperClose;
-    }, [evalHistory, graphHeight, clampValue, padding.top]);
+    }, [evalHistory, graphHeight, clampValue]);
 
     if (compact) {
         // コンパクト表示（ヘッダーなし）
         return (
-            <div style={{ ...graphContainerStyle, height }}>
+            <div className="relative w-full" style={{ height }}>
                 <svg
                     width="100%"
                     height={height}
-                    style={{ display: "block" }}
+                    className="block"
                     viewBox={`0 0 100 ${height}`}
                     preserveAspectRatio="none"
                     role="img"
@@ -135,18 +109,14 @@ export function EvalGraph({
                         y1={padding.top + graphHeight / 2}
                         x2="100%"
                         y2={padding.top + graphHeight / 2}
-                        stroke="hsl(var(--border, 0 0% 86%))"
+                        stroke="hsl(var(--border))"
                         strokeWidth="1"
                         vectorEffect="non-scaling-stroke"
                     />
 
                     {/* 塗りつぶし領域（先手有利部分） */}
                     {fillPath && (
-                        <path
-                            d={fillPath}
-                            fill="hsla(var(--wafuu-shu, 350 80% 45%), 0.15)"
-                            stroke="none"
-                        />
+                        <path d={fillPath} fill="hsl(var(--wafuu-shu) / 0.15)" stroke="none" />
                     )}
 
                     {/* 評価値ライン */}
@@ -154,7 +124,7 @@ export function EvalGraph({
                         <polyline
                             points={points}
                             fill="none"
-                            stroke="hsl(var(--wafuu-shu, 350 80% 45%))"
+                            stroke="hsl(var(--wafuu-shu))"
                             strokeWidth="2"
                             vectorEffect="non-scaling-stroke"
                         />
@@ -166,7 +136,7 @@ export function EvalGraph({
                             cx={currentMarker.x}
                             cy={currentMarker.y}
                             r="4"
-                            fill="hsl(var(--primary, 210 100% 50%))"
+                            fill="hsl(var(--primary))"
                         />
                     )}
                 </svg>
@@ -176,37 +146,25 @@ export function EvalGraph({
 
     // 通常表示
     return (
-        <div style={baseCard}>
-            <div style={headerStyle}>評価値推移</div>
-            <div style={{ ...graphContainerStyle, height }}>
+        <div className="bg-card border border-border rounded-xl p-3 shadow-lg w-[var(--panel-width)]">
+            <div className="font-bold mb-1.5 text-sm">評価値推移</div>
+            <div className="relative w-full" style={{ height }}>
                 {/* 左側ラベル */}
                 <span
-                    style={{
-                        ...labelStyle,
-                        top: padding.top,
-                        left: 0,
-                        transform: "translateY(-50%)",
-                    }}
+                    className="absolute text-[10px] text-muted-foreground left-0 -translate-y-1/2"
+                    style={{ top: padding.top }}
                 >
                     +{clampValue / 100}
                 </span>
                 <span
-                    style={{
-                        ...labelStyle,
-                        top: padding.top + graphHeight / 2,
-                        left: 0,
-                        transform: "translateY(-50%)",
-                    }}
+                    className="absolute text-[10px] text-muted-foreground left-0 -translate-y-1/2"
+                    style={{ top: padding.top + graphHeight / 2 }}
                 >
                     0
                 </span>
                 <span
-                    style={{
-                        ...labelStyle,
-                        bottom: padding.bottom,
-                        left: 0,
-                        transform: "translateY(50%)",
-                    }}
+                    className="absolute text-[10px] text-muted-foreground left-0 translate-y-1/2"
+                    style={{ bottom: padding.bottom }}
                 >
                     -{clampValue / 100}
                 </span>
@@ -214,7 +172,8 @@ export function EvalGraph({
                 <svg
                     width="100%"
                     height={height}
-                    style={{ display: "block", marginLeft: "20px", width: "calc(100% - 20px)" }}
+                    className="block ml-5"
+                    style={{ width: "calc(100% - 20px)" }}
                     viewBox={`0 0 100 ${height}`}
                     preserveAspectRatio="none"
                     role="img"
@@ -226,7 +185,7 @@ export function EvalGraph({
                         y1={padding.top}
                         x2="100%"
                         y2={padding.top}
-                        stroke="hsl(var(--border, 0 0% 86%))"
+                        stroke="hsl(var(--border))"
                         strokeWidth="0.5"
                         vectorEffect="non-scaling-stroke"
                         strokeDasharray="2,2"
@@ -236,7 +195,7 @@ export function EvalGraph({
                         y1={padding.top + graphHeight}
                         x2="100%"
                         y2={padding.top + graphHeight}
-                        stroke="hsl(var(--border, 0 0% 86%))"
+                        stroke="hsl(var(--border))"
                         strokeWidth="0.5"
                         vectorEffect="non-scaling-stroke"
                         strokeDasharray="2,2"
@@ -248,18 +207,14 @@ export function EvalGraph({
                         y1={padding.top + graphHeight / 2}
                         x2="100%"
                         y2={padding.top + graphHeight / 2}
-                        stroke="hsl(var(--border, 0 0% 70%))"
+                        stroke="hsl(var(--border))"
                         strokeWidth="1"
                         vectorEffect="non-scaling-stroke"
                     />
 
                     {/* 塗りつぶし領域（先手有利部分） */}
                     {fillPath && (
-                        <path
-                            d={fillPath}
-                            fill="hsla(var(--wafuu-shu, 350 80% 45%), 0.15)"
-                            stroke="none"
-                        />
+                        <path d={fillPath} fill="hsl(var(--wafuu-shu) / 0.15)" stroke="none" />
                     )}
 
                     {/* 評価値ライン */}
@@ -267,7 +222,7 @@ export function EvalGraph({
                         <polyline
                             points={points}
                             fill="none"
-                            stroke="hsl(var(--wafuu-shu, 350 80% 45%))"
+                            stroke="hsl(var(--wafuu-shu))"
                             strokeWidth="2"
                             vectorEffect="non-scaling-stroke"
                         />
@@ -279,23 +234,16 @@ export function EvalGraph({
                             cx={currentMarker.x}
                             cy={currentMarker.y}
                             r="4"
-                            fill="hsl(var(--primary, 210 100% 50%))"
+                            fill="hsl(var(--primary))"
                         />
                     )}
                 </svg>
             </div>
 
             {/* 手数表示 */}
-            <div
-                style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    marginTop: "4px",
-                    marginLeft: "20px",
-                }}
-            >
-                <span style={{ ...labelStyle, position: "static" }}>0</span>
-                <span style={{ ...labelStyle, position: "static" }}>
+            <div className="flex justify-between mt-1 ml-5">
+                <span className="text-[10px] text-muted-foreground">0</span>
+                <span className="text-[10px] text-muted-foreground">
                     {Math.max(evalHistory.length - 1, 0)}手
                 </span>
             </div>

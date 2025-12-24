@@ -4,114 +4,10 @@
  * 棋譜をKIF形式（日本語表記）で表示し、評価値も合わせて表示する
  */
 
-import type { CSSProperties, ReactElement } from "react";
+import type { ReactElement } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { KifMove } from "../utils/kifFormat";
 import { formatEval } from "../utils/kifFormat";
-
-const baseCard: CSSProperties = {
-    background: "hsl(var(--card, 0 0% 100%))",
-    border: "1px solid hsl(var(--border, 0 0% 86%))",
-    borderRadius: "12px",
-    padding: "12px",
-    boxShadow: "0 14px 28px rgba(0,0,0,0.12)",
-    width: "var(--panel-width)",
-};
-
-const headerStyle: CSSProperties = {
-    fontWeight: 700,
-    marginBottom: "6px",
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: "8px",
-};
-
-const headerLeftStyle: CSSProperties = {
-    display: "flex",
-    alignItems: "center",
-    gap: "8px",
-};
-
-const copyButtonStyle: CSSProperties = {
-    padding: "4px 8px",
-    fontSize: "11px",
-    borderRadius: "4px",
-    border: "1px solid hsl(var(--border, 0 0% 86%))",
-    background: "hsl(var(--background, 0 0% 100%))",
-    cursor: "pointer",
-    color: "hsl(var(--foreground, 0 0% 10%))",
-    transition: "background 0.15s",
-};
-
-const copyButtonSuccessStyle: CSSProperties = {
-    ...copyButtonStyle,
-    background: "hsl(var(--success, 142 76% 36%))",
-    color: "white",
-    borderColor: "hsl(var(--success, 142 76% 36%))",
-};
-
-const moveCountStyle: CSSProperties = {
-    fontSize: "13px",
-    color: "hsl(var(--muted-foreground, 0 0% 48%))",
-};
-
-const moveListStyle: CSSProperties = {
-    maxHeight: "240px",
-    overflow: "auto",
-    margin: "8px 0",
-    padding: 0,
-};
-
-const moveRowStyle: CSSProperties = {
-    display: "grid",
-    gridTemplateColumns: "32px 1fr auto",
-    gap: "4px",
-    alignItems: "center",
-    padding: "2px 4px",
-    fontSize: "13px",
-    fontFamily: "ui-monospace, monospace",
-    borderRadius: "4px",
-};
-
-const moveRowCurrentStyle: CSSProperties = {
-    ...moveRowStyle,
-    background: "hsl(var(--accent, 210 40% 96%))",
-};
-
-const plyStyle: CSSProperties = {
-    textAlign: "right",
-    color: "hsl(var(--muted-foreground, 0 0% 48%))",
-    fontSize: "12px",
-};
-
-const kifTextStyle: CSSProperties = {
-    fontWeight: 500,
-};
-
-const evalStyle: CSSProperties = {
-    fontSize: "11px",
-    color: "hsl(var(--muted-foreground, 0 0% 48%))",
-    textAlign: "right",
-    minWidth: "48px",
-};
-
-const evalPositiveStyle: CSSProperties = {
-    ...evalStyle,
-    color: "hsl(var(--wafuu-shu, 350 80% 45%))",
-};
-
-const evalNegativeStyle: CSSProperties = {
-    ...evalStyle,
-    color: "hsl(210 70% 45%)",
-};
-
-const emptyMessageStyle: CSSProperties = {
-    fontSize: "13px",
-    color: "hsl(var(--muted-foreground, 0 0% 48%))",
-    textAlign: "center",
-    padding: "16px 0",
-};
 
 interface KifuPanelProps {
     /** KIF形式の指し手リスト */
@@ -127,16 +23,19 @@ interface KifuPanelProps {
 }
 
 /**
- * 評価値のスタイルを決定
+ * 評価値のスタイルクラスを決定
  */
-function getEvalStyle(evalCp?: number, evalMate?: number): CSSProperties {
+function getEvalClassName(evalCp?: number, evalMate?: number): string {
+    const baseClass = "text-[11px] text-right min-w-12";
     if (evalMate !== undefined && evalMate !== null) {
-        return evalMate > 0 ? evalPositiveStyle : evalNegativeStyle;
+        return evalMate > 0
+            ? `${baseClass} text-wafuu-shu`
+            : `${baseClass} text-[hsl(210_70%_45%)]`;
     }
     if (evalCp !== undefined && evalCp !== null) {
-        return evalCp >= 0 ? evalPositiveStyle : evalNegativeStyle;
+        return evalCp >= 0 ? `${baseClass} text-wafuu-shu` : `${baseClass} text-[hsl(210_70%_45%)]`;
     }
-    return evalStyle;
+    return `${baseClass} text-muted-foreground`;
 }
 
 export function KifuPanel({
@@ -151,6 +50,7 @@ export function KifuPanel({
     const [copySuccess, setCopySuccess] = useState(false);
 
     // 現在の手数が変わったら自動スクロール（コンテナ内のみ）
+    // biome-ignore lint/correctness/useExhaustiveDependencies: currentPlyの変更時にスクロールを実行する必要がある
     useEffect(() => {
         if (currentRowRef.current && listRef.current) {
             const container = listRef.current;
@@ -188,18 +88,22 @@ export function KifuPanel({
     }, [onCopyKif]);
 
     return (
-        <div style={baseCard}>
-            <div style={headerStyle}>
-                <div style={headerLeftStyle}>
+        <div className="bg-card border border-border rounded-xl p-3 shadow-lg w-[var(--panel-width)]">
+            <div className="font-bold mb-1.5 flex justify-between items-center gap-2">
+                <div className="flex items-center gap-2">
                     <span>棋譜</span>
-                    <span style={moveCountStyle}>
+                    <span className="text-[13px] text-muted-foreground">
                         {kifMoves.length === 0 ? "開始局面" : `${kifMoves.length}手`}
                     </span>
                 </div>
                 {onCopyKif && kifMoves.length > 0 && (
                     <button
                         type="button"
-                        style={copySuccess ? copyButtonSuccessStyle : copyButtonStyle}
+                        className={`px-2 py-1 text-[11px] rounded border cursor-pointer transition-colors duration-150 ${
+                            copySuccess
+                                ? "bg-green-600 text-white border-green-600"
+                                : "bg-background text-foreground border-border"
+                        }`}
                         onClick={handleCopy}
                         title="KIF形式でクリップボードにコピー"
                     >
@@ -208,19 +112,24 @@ export function KifuPanel({
                 )}
             </div>
 
-            <div ref={listRef} style={moveListStyle}>
+            <div ref={listRef} className="max-h-60 overflow-auto my-2">
                 {kifMoves.length === 0 ? (
-                    <div style={emptyMessageStyle}>まだ指し手がありません</div>
+                    <div className="text-[13px] text-muted-foreground text-center py-4">
+                        まだ指し手がありません
+                    </div>
                 ) : (
                     kifMoves.map((move) => {
                         const isCurrent = move.ply === currentPly;
                         const evalText = showEval ? formatEval(move.evalCp, move.evalMate) : "";
 
                         return (
+                            // biome-ignore lint/a11y/noStaticElementInteractions: onPlySelectがある場合のみroleとイベントハンドラを設定
                             <div
                                 key={move.ply}
                                 ref={isCurrent ? currentRowRef : undefined}
-                                style={isCurrent ? moveRowCurrentStyle : moveRowStyle}
+                                className={`grid grid-cols-[32px_1fr_auto] gap-1 items-center px-1 py-0.5 text-[13px] font-mono rounded ${
+                                    isCurrent ? "bg-accent" : ""
+                                }`}
                                 onClick={() => onPlySelect?.(move.ply)}
                                 role={onPlySelect ? "button" : undefined}
                                 tabIndex={onPlySelect ? 0 : undefined}
@@ -235,10 +144,12 @@ export function KifuPanel({
                                         : undefined
                                 }
                             >
-                                <span style={plyStyle}>{move.ply}</span>
-                                <span style={kifTextStyle}>{move.kifText}</span>
+                                <span className="text-right text-muted-foreground text-xs">
+                                    {move.ply}
+                                </span>
+                                <span className="font-medium">{move.kifText}</span>
                                 {showEval && evalText && (
-                                    <span style={getEvalStyle(move.evalCp, move.evalMate)}>
+                                    <span className={getEvalClassName(move.evalCp, move.evalMate)}>
                                         {evalText}
                                     </span>
                                 )}
