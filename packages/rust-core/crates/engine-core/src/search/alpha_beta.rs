@@ -205,6 +205,13 @@ pub struct SearchWorker {
     /// 置換表への共有参照（Arc）
     pub tt: Arc<TranspositionTable>,
 
+    /// スレッドID（0=main）
+    pub thread_id: usize,
+
+    /// スレッドごとの探索スキップ設定（Lazy SMP用）
+    skip_size: usize,
+    skip_phase: usize,
+
     // =========================================================================
     // 履歴統計（YaneuraOu準拠: 直接メンバとして保持）
     // =========================================================================
@@ -274,16 +281,39 @@ pub struct SearchWorker {
 }
 
 impl SearchWorker {
+    fn skip_params(thread_id: usize) -> (usize, usize) {
+        if thread_id == 0 {
+            return (0, 0);
+        }
+
+        let idx = thread_id - 1;
+        let mut size = 1;
+        let mut base = 0;
+
+        loop {
+            let block = size * 2;
+            if idx < base + block {
+                return (size, idx - base);
+            }
+            base += block;
+            size += 1;
+        }
+    }
+
     /// 新しいSearchWorkerを作成（YaneuraOu準拠: isreadyまたは最初のgo時）
     ///
     /// Box化してヒープに配置し、スタックオーバーフローを防ぐ。
-    pub fn new(tt: Arc<TranspositionTable>, max_moves_to_draw: i32) -> Box<Self> {
+    pub fn new(tt: Arc<TranspositionTable>, max_moves_to_draw: i32, thread_id: usize) -> Box<Self> {
+        let (skip_size, skip_phase) = Self::skip_params(thread_id);
         let history = HistoryTables::new_boxed();
         let cont_history_sentinel =
             NonNull::from(history.continuation_history[0][0].get_table(Piece::NONE, Square::SQ_11));
 
         let mut worker = Box::new(Self {
             tt,
+            thread_id,
+            skip_size,
+            skip_phase,
             // 履歴統計の初期化
             history,
             cont_history_sentinel,
@@ -399,6 +429,21 @@ impl SearchWorker {
         self.best_move_changes /= 2.0;
     }
 
+    /// スレッドIDに基づいて探索深さを調整
+    pub fn adjusted_depth(&self, base_depth: Depth) -> Depth {
+        if self.thread_id == 0 || self.skip_size == 0 {
+            return base_depth;
+        }
+
+        let skip = (self.skip_size + 1) as i32;
+        let phase = self.skip_phase as i32;
+        if (base_depth + phase) % skip != 0 {
+            return (base_depth - 1).max(1);
+        }
+
+        base_depth
+    }
+
     /// 全合法手生成モードの設定（YaneuraOu互換）
     pub fn set_generate_all_legal_moves(&mut self, flag: bool) {
         self.generate_all_legal_moves = flag;
@@ -433,8 +478,8 @@ impl SearchWorker {
         }
 
         // 時間制限チェック（1024ノードごと）
-        // YaneuraOu準拠の2フェーズロジック
-        if self.nodes & 1023 == 0 {
+        // YaneuraOu準拠の2フェーズロジック（main threadのみ）
+        if self.thread_id == 0 && self.nodes & 1023 == 0 {
             // ponderhit フラグをポーリングし、検知したら通常探索へ切り替える
             if time_manager.take_ponderhit() {
                 time_manager.on_ponderhit();
@@ -3064,7 +3109,7 @@ mod tests {
 
         // SearchWorker作成時にsentinelが正しく初期化されることを確認
         let tt = Arc::new(TranspositionTable::new(16));
-        let worker = SearchWorker::new(tt, 0);
+        let worker = SearchWorker::new(tt, 0, 0);
 
         // sentinelポインタがdanglingではなく、実際のテーブルを指していることを確認
         let sentinel = worker.cont_history_sentinel;
@@ -3092,7 +3137,7 @@ mod tests {
         use std::sync::Arc;
 
         let tt = Arc::new(TranspositionTable::new(16));
-        let worker = SearchWorker::new(tt, 0);
+        let worker = SearchWorker::new(tt, 0, 0);
 
         // ply < back の場合はsentinelを返すことを確認
         let ptr = worker.cont_history_ptr(0, 1);
@@ -3100,5 +3145,25 @@ mod tests {
 
         let ptr = worker.cont_history_ptr(3, 5);
         assert_eq!(ptr, worker.cont_history_sentinel);
+    }
+
+    #[test]
+    fn test_skip_params_matches_legacy_pattern() {
+        let expected_sizes = [
+            1usize, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4,
+        ];
+        let expected_phases = [
+            0usize, 1, 0, 1, 2, 3, 0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5, 6, 7,
+        ];
+
+        assert_eq!(SearchWorker::skip_params(0), (0, 0));
+
+        for (idx, (&size, &phase)) in expected_sizes.iter().zip(expected_phases.iter()).enumerate()
+        {
+            let thread_id = idx + 1;
+            let (skip_size, skip_phase) = SearchWorker::skip_params(thread_id);
+            assert_eq!(skip_size, size, "thread_id={thread_id} skip_size mismatch");
+            assert_eq!(skip_phase, phase, "thread_id={thread_id} skip_phase mismatch");
+        }
     }
 }

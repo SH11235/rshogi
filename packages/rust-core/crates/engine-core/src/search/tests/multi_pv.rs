@@ -460,7 +460,7 @@ fn test_aspiration_window_uses_average_and_mean_squared() {
     rm.average_score = Value::new(120);
     rm.mean_squared_score = Some(11131 * 10); // delta=5+10=15
 
-    let (alpha, beta, delta) = compute_aspiration_window(&rm);
+    let (alpha, beta, delta) = compute_aspiration_window(&rm, 0);
     assert_eq!(delta.raw(), 15);
     assert_eq!(alpha.raw(), 105);
     assert_eq!(beta.raw(), 135);
@@ -470,7 +470,7 @@ fn test_aspiration_window_uses_average_and_mean_squared() {
 #[test]
 fn test_aspiration_window_defaults_to_full_window_when_unseeded() {
     let rm = RootMove::new(Move::from_usi("7g7f").unwrap());
-    let (alpha, beta, _) = compute_aspiration_window(&rm);
+    let (alpha, beta, _) = compute_aspiration_window(&rm, 0);
 
     assert_eq!(alpha.raw(), -Value::INFINITE.raw());
     assert_eq!(beta, Value::INFINITE);

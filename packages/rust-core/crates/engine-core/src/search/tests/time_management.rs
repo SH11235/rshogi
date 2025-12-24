@@ -171,7 +171,7 @@ fn test_worker_best_move_changes_initial_value() {
 
             let tt = Arc::new(TranspositionTable::new(16));
 
-            let worker = SearchWorker::new(tt, DEFAULT_MAX_MOVES_TO_DRAW);
+            let worker = SearchWorker::new(tt, DEFAULT_MAX_MOVES_TO_DRAW, 0);
 
             assert_eq!(worker.best_move_changes, 0.0, "初期値は0.0であるべき");
         })
@@ -193,7 +193,7 @@ fn test_worker_best_move_changes_decay() {
 
             let tt = Arc::new(TranspositionTable::new(16));
 
-            let mut worker = SearchWorker::new(tt, DEFAULT_MAX_MOVES_TO_DRAW);
+            let mut worker = SearchWorker::new(tt, DEFAULT_MAX_MOVES_TO_DRAW, 0);
             worker.best_move_changes = 4.0;
             worker.decay_best_move_changes();
 

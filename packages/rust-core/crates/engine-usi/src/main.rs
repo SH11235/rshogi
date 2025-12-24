@@ -121,6 +121,7 @@ impl UsiEngine {
         println!();
         // オプション（将来的に追加）
         println!("option name USI_Hash type spin default 256 min 1 max 4096");
+        println!("option name Threads type spin default 1 min 1 max 512");
         println!("option name USI_Ponder type check default false");
         println!("option name Stochastic_Ponder type check default false");
         println!("option name MultiPV type spin default 1 min 1 max 500");
@@ -211,6 +212,13 @@ impl UsiEngine {
                         self.tt_size_mb = size;
                     }
                     self.maybe_report_large_pages();
+                }
+            }
+            "Threads" => {
+                if let Ok(num) = value.parse::<usize>() {
+                    if let Some(search) = self.search.as_mut() {
+                        search.set_num_threads(num);
+                    }
                 }
             }
             "NetworkDelay" => {
