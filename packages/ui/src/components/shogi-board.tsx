@@ -163,7 +163,7 @@ export function ShogiBoard({
                                             isSelected &&
                                                 "ring-[3px] ring-inset ring-[hsl(var(--wafuu-shu))] bg-[hsl(var(--wafuu-kin)/0.2)]",
                                             isLastMove &&
-                                                "outline outline-2 outline-[hsl(var(--wafuu-kin))]/80",
+                                                "outline outline-[3px] outline-[hsl(var(--wafuu-kin))] bg-[hsl(var(--wafuu-kin)/0.25)]",
                                         )}
                                     >
                                         {cell.piece ? (

@@ -23,8 +23,10 @@ import { ShogiBoard } from "./shogi-board";
 import { ClockDisplayPanel } from "./shogi-match/components/ClockDisplayPanel";
 import { EditModePanel } from "./shogi-match/components/EditModePanel";
 import { EngineLogsPanel } from "./shogi-match/components/EngineLogsPanel";
+import { EvalGraph } from "./shogi-match/components/EvalGraph";
 import { HandPiecesDisplay } from "./shogi-match/components/HandPiecesDisplay";
 import { KifuIOPanel } from "./shogi-match/components/KifuIOPanel";
+import { KifuPanel } from "./shogi-match/components/KifuPanel";
 import { MatchControls } from "./shogi-match/components/MatchControls";
 import {
     type EngineOption,
@@ -46,6 +48,7 @@ import { BoardToolbar } from "./shogi-match/components/BoardToolbar";
 import { DisplaySettingsPanel } from "./shogi-match/components/DisplaySettingsPanel";
 import { type ClockSettings, useClockManager } from "./shogi-match/hooks/useClockManager";
 import { useEngineManager } from "./shogi-match/hooks/useEngineManager";
+import { useKifuWithEval } from "./shogi-match/hooks/useKifuWithEval";
 import {
     DEFAULT_DISPLAY_SETTINGS,
     type DisplaySettings,
@@ -58,6 +61,7 @@ import {
     countPieces,
 } from "./shogi-match/utils/boardUtils";
 import { isPromotable, PIECE_CAP, PIECE_LABELS } from "./shogi-match/utils/constants";
+import { exportToKifString } from "./shogi-match/utils/kifFormat";
 import { parseUsiInput } from "./shogi-match/utils/kifuUtils";
 import { LegalMoveCache } from "./shogi-match/utils/legalMoveCache";
 import { determinePromotion } from "./shogi-match/utils/promotionLogic";
@@ -235,6 +239,10 @@ export function ShogiMatch({
     const [displaySettings, setDisplaySettings] =
         useState<DisplaySettings>(DEFAULT_DISPLAY_SETTINGS);
 
+    // KIF形式棋譜＋評価値管理フック
+    const { kifMoves, evalHistory, boardHistory, recordBoardState, recordEval, clearHistory } =
+        useKifuWithEval(moves);
+
     // 後手が人間の場合は盤面を反転して手前側に表示
     useEffect(() => {
         const goteIsHuman = sides.gote.role === "human";
@@ -327,6 +335,7 @@ export function ShogiMatch({
             positionReady,
             onMoveFromEngine: (move) => handleMoveFromEngineRef.current(move),
             onMatchEnd: endMatch,
+            onEvalUpdate: recordEval,
             maxLogs,
         },
     );
@@ -336,6 +345,7 @@ export function ShogiMatch({
     const handleMoveFromEngine = useCallback(
         (move: string) => {
             if (matchEndedRef.current) return;
+            const prevBoard = positionRef.current.board;
             const result = applyMoveWithState(positionRef.current, move, {
                 validateTurn: false,
             });
@@ -345,6 +355,8 @@ export function ShogiMatch({
                 );
                 return;
             }
+            // 盤面履歴を記録（指し手適用前の盤面）
+            recordBoardState(prevBoard);
             // 局面を更新
             setPosition(result.next);
             positionRef.current = result.next;
@@ -356,7 +368,7 @@ export function ShogiMatch({
             legalCache.clear();
             updateClocksForNextTurn(result.next.turn);
         },
-        [legalCache, logEngineError, updateClocksForNextTurn],
+        [legalCache, logEngineError, recordBoardState, updateClocksForNextTurn],
     );
     handleMoveFromEngineRef.current = handleMoveFromEngine;
 
@@ -480,6 +492,7 @@ export function ShogiMatch({
         setInitialBoard(cloneBoard(next.board));
         setPositionReady(true);
         setMoves([]);
+        clearHistory();
         setLastMove(undefined);
         setSelection(null);
         setMessage(null);
@@ -494,10 +507,21 @@ export function ShogiMatch({
         setEditPieceType(null);
         legalCache.clear();
         void refreshStartSfen(next);
-    }, [basePosition, refreshStartSfen, resetClocks, stopAllEngines, legalCache.clear]);
+    }, [
+        basePosition,
+        clearHistory,
+        refreshStartSfen,
+        resetClocks,
+        stopAllEngines,
+        legalCache.clear,
+    ]);
 
     const applyMoveCommon = useCallback(
-        (nextPosition: PositionState, mv: string, last?: LastMove) => {
+        (nextPosition: PositionState, mv: string, last?: LastMove, prevBoard?: BoardState) => {
+            // 盤面履歴を記録（指し手適用前の盤面）
+            if (prevBoard) {
+                recordBoardState(prevBoard);
+            }
             setPosition(nextPosition);
             positionRef.current = nextPosition;
             setMoves((prev) => [...prev, mv]);
@@ -508,7 +532,7 @@ export function ShogiMatch({
             legalCache.clear();
             updateClocksForNextTurn(nextPosition.turn);
         },
-        [legalCache, updateClocksForNextTurn],
+        [legalCache, recordBoardState, updateClocksForNextTurn],
     );
 
     const handleNewGame = async () => {
@@ -533,6 +557,7 @@ export function ShogiMatch({
             positionRef.current = nextPosition;
             setInitialBoard(cloneBoard(nextPosition.board));
             setMoves([]);
+            clearHistory();
             movesRef.current = [];
             setLastMove(undefined);
             setSelection(null);
@@ -545,7 +570,7 @@ export function ShogiMatch({
             setIsMatchRunning(false);
             void refreshStartSfen(nextPosition);
         },
-        [legalCache, stopTicking, refreshStartSfen],
+        [clearHistory, legalCache, stopTicking, refreshStartSfen],
     );
 
     const setPiecePromotion = useCallback(
@@ -894,24 +919,26 @@ export function ShogiMatch({
                     setMessage("合法手ではありません");
                     return;
                 }
+                const prevBoard = position.board;
                 const result = applyMoveWithState(position, moveStr, { validateTurn: true });
                 if (!result.ok) {
                     setMessage(result.error ?? "指し手を適用できませんでした");
                     return;
                 }
-                applyMoveCommon(result.next, moveStr, result.lastMove);
+                applyMoveCommon(result.next, moveStr, result.lastMove, prevBoard);
                 return;
             }
 
             // 【ケース2】強制成り → 自動的に成って移動（ダイアログなし）
             if (promotion === "forced") {
                 const moveStr = `${from}${to}+`;
+                const prevBoard = position.board;
                 const result = applyMoveWithState(position, moveStr, { validateTurn: true });
                 if (!result.ok) {
                     setMessage(result.error ?? "指し手を適用できませんでした");
                     return;
                 }
-                applyMoveCommon(result.next, moveStr, result.lastMove);
+                applyMoveCommon(result.next, moveStr, result.lastMove, prevBoard);
                 return;
             }
 
@@ -919,12 +946,13 @@ export function ShogiMatch({
             // Shift+クリック：即座に成って移動
             if (shiftKey) {
                 const moveStr = `${from}${to}+`;
+                const prevBoard = position.board;
                 const result = applyMoveWithState(position, moveStr, { validateTurn: true });
                 if (!result.ok) {
                     setMessage(result.error ?? "指し手を適用できませんでした");
                     return;
                 }
-                applyMoveCommon(result.next, moveStr, result.lastMove);
+                applyMoveCommon(result.next, moveStr, result.lastMove, prevBoard);
                 return;
             }
 
@@ -944,18 +972,20 @@ export function ShogiMatch({
             setMessage("合法手ではありません");
             return;
         }
+        const prevBoard = position.board;
         const result = applyMoveWithState(position, moveStr, { validateTurn: true });
         if (!result.ok) {
             setMessage(result.error ?? "持ち駒を打てませんでした");
             return;
         }
-        applyMoveCommon(result.next, moveStr, result.lastMove);
+        applyMoveCommon(result.next, moveStr, result.lastMove, prevBoard);
     };
 
     const handlePromotionChoice = (promote: boolean) => {
         if (!promotionSelection) return;
         const { from, to } = promotionSelection;
         const moveStr = `${from}${to}${promote ? "+" : ""}`;
+        const prevBoard = position.board;
         const result = applyMoveWithState(position, moveStr, { validateTurn: true });
         if (!result.ok) {
             setMessage(result.error ?? "指し手を適用できませんでした");
@@ -963,7 +993,7 @@ export function ShogiMatch({
             setSelection(null);
             return;
         }
-        applyMoveCommon(result.next, moveStr, result.lastMove);
+        applyMoveCommon(result.next, moveStr, result.lastMove, prevBoard);
         setPromotionSelection(null);
     };
 
@@ -1025,6 +1055,15 @@ export function ShogiMatch({
         [initialBoard, moves, positionReady],
     );
 
+    // KIFコピー用コールバック
+    const handleCopyKif = useCallback((): string => {
+        return exportToKifString(moves, boardHistory, {
+            startTime: new Date(),
+            senteName: sides.sente.role === "engine" ? "エンジン" : "人間",
+            goteName: sides.gote.role === "engine" ? "エンジン" : "人間",
+        });
+    }, [moves, boardHistory, sides.sente.role, sides.gote.role]);
+
     const importCsa = async (csa: string) => {
         if (!positionReady) return;
         await loadMoves(parseCsaMoves(csa, initialBoard ?? undefined));
@@ -1081,37 +1120,17 @@ export function ShogiMatch({
                             <div
                                 style={{
                                     display: "flex",
-                                    justifyContent: "space-between",
+                                    justifyContent: "flex-start",
                                     alignItems: "center",
                                     marginBottom: "8px",
                                 }}
                             >
-                                <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                                    <h3 style={{ fontWeight: 700, margin: 0, fontSize: "inherit" }}>
-                                        盤面
-                                    </h3>
-                                </div>
                                 <BoardToolbar
                                     flipBoard={flipBoard}
                                     onFlipBoardChange={setFlipBoard}
                                     displaySettings={displaySettings}
                                     onDisplaySettingsChange={setDisplaySettings}
                                 />
-                                <output style={TEXT_STYLES.mutedSecondary}>
-                                    手番:{" "}
-                                    <span
-                                        style={{
-                                            fontWeight: 600,
-                                            fontSize: "15px",
-                                            color:
-                                                position.turn === "sente"
-                                                    ? "hsl(var(--wafuu-shu))"
-                                                    : "hsl(210 70% 45%)",
-                                        }}
-                                    >
-                                        {position.turn === "sente" ? "先手" : "後手"}
-                                    </span>
-                                </output>
                             </div>
                             <div
                                 style={{
@@ -1126,35 +1145,109 @@ export function ShogiMatch({
                                             : "auto",
                                 }}
                             >
-                                {/* 手数表示 */}
-                                <output style={TEXT_STYLES.moveCount}>
-                                    {moves.length === 0 ? "開始局面" : `${moves.length}手目`}
-                                </output>
-
                                 {/* 盤の上側の持ち駒（通常:後手、反転時:先手） */}
                                 {(() => {
                                     const info = getHandInfo("top");
+                                    const labelColor =
+                                        info.owner === "sente"
+                                            ? "hsl(var(--wafuu-shu))"
+                                            : "hsl(210 70% 45%)";
+                                    const ownerText = info.owner === "sente" ? "先手" : "後手";
                                     return (
-                                        <PlayerHandSection
-                                            owner={info.owner}
-                                            hand={info.hand}
-                                            selectedPiece={
-                                                selection?.kind === "hand" ? selection.piece : null
-                                            }
-                                            isActive={info.isActive}
-                                            onHandSelect={handleHandSelect}
-                                            onPiecePointerDown={
-                                                isEditMode ? handleHandPiecePointerDown : undefined
-                                            }
-                                            isEditMode={isEditMode && !isMatchRunning}
-                                            onIncrement={(piece) =>
-                                                handleIncrementHand(info.owner, piece)
-                                            }
-                                            onDecrement={(piece) =>
-                                                handleDecrementHand(info.owner, piece)
-                                            }
-                                            flipBoard={flipBoard}
-                                        />
+                                        <div data-zone={`hand-${info.owner}`}>
+                                            {/* ラベル行: [持ち駒ラベル] [手数] [手番] */}
+                                            <div
+                                                style={{
+                                                    display: "flex",
+                                                    alignItems: "center",
+                                                    justifyContent: "space-between",
+                                                    marginBottom: "4px",
+                                                    gap: "16px",
+                                                }}
+                                            >
+                                                {/* 持ち駒ラベル（左） */}
+                                                <div
+                                                    style={{
+                                                        ...TEXT_STYLES.handLabel,
+                                                        marginBottom: 0,
+                                                        whiteSpace: "nowrap",
+                                                    }}
+                                                >
+                                                    <span
+                                                        style={{
+                                                            color: labelColor,
+                                                            fontSize: "15px",
+                                                        }}
+                                                    >
+                                                        {ownerText}
+                                                    </span>
+                                                    <span>の持ち駒</span>
+                                                </div>
+
+                                                {/* 手数表示（中央） */}
+                                                <output
+                                                    style={{
+                                                        ...TEXT_STYLES.moveCount,
+                                                        margin: 0,
+                                                        whiteSpace: "nowrap",
+                                                    }}
+                                                >
+                                                    {moves.length === 0
+                                                        ? "開始局面"
+                                                        : `${moves.length}手目`}
+                                                </output>
+
+                                                {/* 手番表示（右） */}
+                                                <output
+                                                    style={{
+                                                        ...TEXT_STYLES.mutedSecondary,
+                                                        whiteSpace: "nowrap",
+                                                    }}
+                                                >
+                                                    手番:{" "}
+                                                    <span
+                                                        style={{
+                                                            fontWeight: 600,
+                                                            fontSize: "15px",
+                                                            color:
+                                                                position.turn === "sente"
+                                                                    ? "hsl(var(--wafuu-shu))"
+                                                                    : "hsl(210 70% 45%)",
+                                                        }}
+                                                    >
+                                                        {position.turn === "sente"
+                                                            ? "先手"
+                                                            : "後手"}
+                                                    </span>
+                                                </output>
+                                            </div>
+
+                                            {/* 持ち駒表示 */}
+                                            <HandPiecesDisplay
+                                                owner={info.owner}
+                                                hand={info.hand}
+                                                selectedPiece={
+                                                    selection?.kind === "hand"
+                                                        ? selection.piece
+                                                        : null
+                                                }
+                                                isActive={info.isActive}
+                                                onHandSelect={handleHandSelect}
+                                                onPiecePointerDown={
+                                                    isEditMode
+                                                        ? handleHandPiecePointerDown
+                                                        : undefined
+                                                }
+                                                isEditMode={isEditMode && !isMatchRunning}
+                                                onIncrement={(piece) =>
+                                                    handleIncrementHand(info.owner, piece)
+                                                }
+                                                onDecrement={(piece) =>
+                                                    handleDecrementHand(info.owner, piece)
+                                                }
+                                                flipBoard={flipBoard}
+                                            />
+                                        </div>
                                     );
                                 })()}
 
@@ -1265,6 +1358,20 @@ export function ShogiMatch({
                         />
 
                         <ClockDisplayPanel clocks={clocks} sides={sides} />
+
+                        <EvalGraph
+                            evalHistory={evalHistory}
+                            currentPly={moves.length}
+                            compact={true}
+                            height={60}
+                        />
+
+                        <KifuPanel
+                            kifMoves={kifMoves}
+                            currentPly={moves.length}
+                            showEval={true}
+                            onCopyKif={handleCopyKif}
+                        />
 
                         <KifuIOPanel
                             moves={moves}

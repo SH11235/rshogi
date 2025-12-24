@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { EngineEvent } from "./index";
+import type { EngineEvent, EngineInfoEvent } from "./index";
 import { createMockEngineClient } from "./index";
 
 describe("createMockEngineClient", () => {
@@ -188,30 +188,26 @@ describe("createMockEngineClient", () => {
     describe("info イベントの内容", () => {
         it("info イベントに正しいデータが含まれる", async () => {
             const client = createMockEngineClient();
-            let infoEvent: EngineEvent | null = null;
+            const infoEvents: EngineInfoEvent[] = [];
 
             client.subscribe((event) => {
                 if (event.type === "info") {
-                    infoEvent = event;
+                    infoEvents.push(event);
                 }
             });
 
             await client.search({});
             vi.advanceTimersByTime(10);
 
-            expect(infoEvent).not.toBeNull();
+            expect(infoEvents).toHaveLength(1);
 
-            // TypeScript の型ガードで適切に絞り込む
-            if (infoEvent !== null) {
-                expect(infoEvent.type).toBe("info");
-                if (infoEvent.type === "info") {
-                    expect(infoEvent.depth).toBe(1);
-                    expect(infoEvent.scoreCp).toBe(0);
-                    expect(infoEvent.nodes).toBe(128);
-                    expect(infoEvent.nps).toBe(1024);
-                    expect(infoEvent.pv).toEqual([]);
-                }
-            }
+            const infoEvent = infoEvents[0];
+            expect(infoEvent.type).toBe("info");
+            expect(infoEvent.depth).toBe(1);
+            expect(infoEvent.scoreCp).toBe(0);
+            expect(infoEvent.nodes).toBe(128);
+            expect(infoEvent.nps).toBe(1024);
+            expect(infoEvent.pv).toEqual([]);
         });
     });
 });

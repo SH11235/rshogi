@@ -98,7 +98,9 @@ export function BoardToolbar({
                 aria-pressed={flipBoard}
                 title="盤面を反転"
             >
-                <span style={{ fontSize: "14px" }}>🔄</span>
+                <span aria-hidden="true" style={{ fontSize: "14px" }}>
+                    🔄
+                </span>
                 <span>反転</span>
             </button>
 

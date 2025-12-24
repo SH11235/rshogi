@@ -146,6 +146,7 @@ export function DisplaySettingsPanel({
                             </span>
                         </span>
                         <span
+                            aria-hidden="true"
                             style={{
                                 fontSize: "20px",
                                 color: "hsl(var(--wafuu-kincha))",
