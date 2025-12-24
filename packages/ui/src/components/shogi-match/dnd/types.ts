@@ -87,5 +87,5 @@ export interface DndConfig {
 export const DEFAULT_DND_CONFIG: DndConfig = {
     longPressMs: 280,
     slopPx: 10,
-    outsideAreaBehavior: "delete",
+    outsideAreaBehavior: "cancel",
 };
