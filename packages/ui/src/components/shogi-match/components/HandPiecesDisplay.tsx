@@ -25,16 +25,18 @@ function PieceToken({
             <span className="rounded-[8px] bg-[#fdf6ec]/90 px-2 py-[5px] shadow-[0_3px_6px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)]">
                 {PIECE_LABELS[pieceType]}
             </span>
-            {count > 1 && (
-                <span
-                    className={cn(
-                        "absolute -right-1 -top-1 min-w-[16px] rounded-full bg-[hsl(var(--wafuu-kincha))] px-1 text-[10px] font-bold text-white shadow-sm",
-                        owner === "gote" && "rotate-180",
-                    )}
-                >
-                    {count}
-                </span>
-            )}
+            {/* 個数を添え字として表示 */}
+            <span
+                className={cn(
+                    "absolute -bottom-1 -right-1 min-w-[14px] text-center text-[11px] font-bold leading-none",
+                    count > 0
+                        ? "text-[hsl(var(--wafuu-sumi))]"
+                        : "text-[hsl(var(--muted-foreground))]",
+                    owner === "gote" && "rotate-180",
+                )}
+            >
+                {count}
+            </span>
         </span>
     );
 }
@@ -75,6 +77,12 @@ export function HandPiecesDisplay({
         <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
             {HAND_ORDER.map((piece) => {
                 const count = hand[piece] ?? 0;
+
+                // 対局時は0個の駒を非表示
+                if (!isEditMode && count === 0) {
+                    return null;
+                }
+
                 const selected = selectedPiece === piece;
                 // 編集モード時は0個でもドラッグ可能（ストックとして機能）
                 const canDrag = (count > 0 || isEditMode) && Boolean(onPiecePointerDown);
@@ -142,9 +150,12 @@ export function HandPiecesDisplay({
                                         borderBottom: "none",
                                         background:
                                             count < maxCount
-                                                ? "hsl(var(--secondary, 210 40% 96%))"
-                                                : "transparent",
-                                        color: "hsl(var(--foreground, 222 47% 11%))",
+                                                ? "hsl(var(--wafuu-washi))"
+                                                : "hsl(var(--muted, 210 40% 96%))",
+                                        color:
+                                            count < maxCount
+                                                ? "hsl(var(--wafuu-sumi))"
+                                                : "hsl(var(--muted-foreground, 0 0% 70%))",
                                         cursor: count < maxCount ? "pointer" : "not-allowed",
                                         fontSize: "12px",
                                         fontWeight: "bold",
@@ -152,6 +163,7 @@ export function HandPiecesDisplay({
                                         alignItems: "center",
                                         justifyContent: "center",
                                         lineHeight: 1,
+                                        opacity: count < maxCount ? 1 : 0.4,
                                     }}
                                 >
                                     +
@@ -168,9 +180,12 @@ export function HandPiecesDisplay({
                                         border: "1px solid hsl(var(--border, 0 0% 86%))",
                                         background:
                                             count > 0
-                                                ? "hsl(var(--secondary, 210 40% 96%))"
-                                                : "transparent",
-                                        color: "hsl(var(--foreground, 222 47% 11%))",
+                                                ? "hsl(var(--wafuu-washi))"
+                                                : "hsl(var(--muted, 210 40% 96%))",
+                                        color:
+                                            count > 0
+                                                ? "hsl(var(--wafuu-sumi))"
+                                                : "hsl(var(--muted-foreground, 0 0% 70%))",
                                         cursor: count > 0 ? "pointer" : "not-allowed",
                                         fontSize: "12px",
                                         fontWeight: "bold",
@@ -178,6 +193,7 @@ export function HandPiecesDisplay({
                                         alignItems: "center",
                                         justifyContent: "center",
                                         lineHeight: 1,
+                                        opacity: count > 0 ? 1 : 0.4,
                                     }}
                                 >
                                     −

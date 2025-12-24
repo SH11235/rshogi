@@ -1012,12 +1012,11 @@ export function ShogiMatch({
 
             <section
                 style={{
-                    ...baseCard,
-                    padding: "16px",
                     display: "flex",
                     flexDirection: "column",
                     gap: "12px",
                     alignItems: "center",
+                    padding: "16px 0",
                 }}
             >
                 <div
