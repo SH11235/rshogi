@@ -6,6 +6,7 @@
 #   ./scripts/perf_all.sh --nnue-file /path/to/nn.bin
 #   ./scripts/perf_all.sh --perf-stat
 #   ./scripts/perf_all.sh --nnue-file /path/to/nn.bin --perf-stat
+#   ./scripts/perf_all.sh --threads 1,8   # スレッド数を指定
 #
 # 注意: 内部でsudoを使用するため、パスワード入力が必要です
 #
@@ -14,8 +15,8 @@
 #   2. perf_profile.sh      - Material評価時のホットスポット
 #   3. perf stat (NNUE)     - NNUE有効時のperf stat (--perf-stat指定時のみ)
 #   4. perf stat (Material) - Material評価時のperf stat (--perf-stat指定時のみ)
-#   5. benchmark (NNUE)     - NNUE有効時のNPS
-#   6. benchmark (Material) - Material評価時のNPS
+#   5. benchmark (NNUE)     - NNUE有効時のNPS（1T/8T + 並列効率）
+#   6. benchmark (Material) - Material評価時のNPS（1T/8T + 並列効率）
 
 set -e
 
@@ -48,6 +49,8 @@ fi
 
 # 実行フラグ
 RUN_PERF_STAT=false
+THREADS="1,8"
+BENCH_TIME=20000
 
 # 引数解析（設定ファイルの値をオーバーライド可能）
 while [[ $# -gt 0 ]]; do
@@ -60,21 +63,34 @@ while [[ $# -gt 0 ]]; do
             RUN_PERF_STAT=true
             shift
             ;;
+        --threads)
+            THREADS="$2"
+            shift 2
+            ;;
+        --bench-time)
+            BENCH_TIME="$2"
+            shift 2
+            ;;
         -h|--help)
-            echo "Usage: $0 [--nnue-file <path>] [--perf-stat]"
+            echo "Usage: $0 [--nnue-file <path>] [--perf-stat] [--threads <list>]"
             echo ""
             echo "Options:"
             echo "  --nnue-file <path>  NNUEファイルのパス (default: perf.confの設定値)"
             echo "  --perf-stat         perf stat を実行する (default: off)"
+            echo "  --threads <list>    ベンチマーク用スレッド数 (default: 1,8)"
+            echo "  --bench-time <ms>   ベンチマーク探索時間 (default: 20000)"
             exit 0
             ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--nnue-file <path>] [--perf-stat]"
+            echo "Usage: $0 [--nnue-file <path>] [--perf-stat] [--threads <list>]"
             exit 1
             ;;
     esac
 done
+
+# スレッドリストをパース
+IFS=',' read -r -a THREAD_LIST <<< "$THREADS"
 
 echo "=============================================="
 echo "  パフォーマンス計測スクリプト"
@@ -83,17 +99,21 @@ echo ""
 echo "注意: このスクリプトは内部でsudoを使用します"
 echo "      パスワード入力が求められる場合があります"
 echo ""
+echo "設定:"
+echo "  スレッド: $THREADS"
+echo "  探索時間: ${BENCH_TIME}ms"
+echo ""
 echo "実行される計測:"
 echo "  1. perf (NNUE有効)    - ホットスポット分析"
 echo "  2. perf (Material)    - ホットスポット分析"
 if [ "$RUN_PERF_STAT" = true ]; then
     echo "  3. perf stat (NNUE)   - perf stat計測"
     echo "  4. perf stat (Material) - perf stat計測"
-    echo "  5. benchmark (NNUE)   - NPS計測"
-    echo "  6. benchmark (Material) - NPS計測"
+    echo "  5. benchmark (NNUE)   - NPS計測 (${THREADS}T + 並列効率)"
+    echo "  6. benchmark (Material) - NPS計測 (${THREADS}T + 並列効率)"
 else
-    echo "  3. benchmark (NNUE)   - NPS計測"
-    echo "  4. benchmark (Material) - NPS計測"
+    echo "  3. benchmark (NNUE)   - NPS計測 (${THREADS}T + 並列効率)"
+    echo "  4. benchmark (Material) - NPS計測 (${THREADS}T + 並列効率)"
     echo "  * perf stat は --perf-stat 指定時のみ実行"
 fi
 echo ""
@@ -174,15 +194,35 @@ if [ "$RUN_PERF_STAT" = true ]; then
     STEP=$((STEP + 1))
 fi
 
+# NPS結果を保存する連想配列
+declare -A NNUE_NPS
+declare -A MATERIAL_NPS
+
+# ビルド（ベンチマーク用）
+echo ""
+echo "=============================================="
+echo "  ベンチマーク用バイナリのビルド"
+echo "=============================================="
+RUSTFLAGS="-C target-cpu=native" cargo build -p tools --bin benchmark --release
+
 echo ""
 echo "=============================================="
 echo "  ${STEP}/${TOTAL_STEPS}: benchmark (NNUE有効)"
 echo "=============================================="
 if [ "$SKIP_NNUE" = false ]; then
-    RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release -- \
-        --internal --threads 1 --limit-type movetime --limit 20000 \
-        --nnue-file "$NNUE_FILE" \
-        --output-dir ./benchmark_results
+    for t in "${THREAD_LIST[@]}"; do
+        echo "--- スレッド: $t ---"
+        OUTPUT=$(./target/release/benchmark \
+            --internal --threads "$t" --limit-type movetime --limit "$BENCH_TIME" \
+            --nnue-file "$NNUE_FILE" \
+            --output-dir ./benchmark_results 2>&1)
+        echo "$OUTPUT"
+        # NPSを抽出（"1    4    609551    ..." 形式から4列目を取得）
+        NPS=$(echo "$OUTPUT" | grep -E "^$t\s+" | awk '{print $4}' | tr -d ',')
+        if [ -n "$NPS" ]; then
+            NNUE_NPS[$t]="$NPS"
+        fi
+    done
 else
     echo "スキップ: NNUEファイルがありません"
 fi
@@ -192,14 +232,87 @@ echo ""
 echo "=============================================="
 echo "  ${STEP}/${TOTAL_STEPS}: benchmark (Material評価)"
 echo "=============================================="
-RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release -- \
-    --internal --threads 1 --limit-type movetime --limit 20000 \
-    --output-dir ./benchmark_results
+for t in "${THREAD_LIST[@]}"; do
+    echo "--- スレッド: $t ---"
+    OUTPUT=$(./target/release/benchmark \
+        --internal --threads "$t" --limit-type movetime --limit "$BENCH_TIME" \
+        --output-dir ./benchmark_results 2>&1)
+    echo "$OUTPUT"
+    # NPSを抽出
+    NPS=$(echo "$OUTPUT" | grep -E "^$t\s+" | awk '{print $4}' | tr -d ',')
+    if [ -n "$NPS" ]; then
+        MATERIAL_NPS[$t]="$NPS"
+    fi
+done
 
 echo ""
 echo "=============================================="
 echo "  計測完了"
 echo "=============================================="
+echo ""
+
+# 並列効率サマリを出力
+SUMMARY_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+SUMMARY_FILE="./benchmark_results/${SUMMARY_TIMESTAMP}_parallel_summary.txt"
+
+{
+    echo "=============================================="
+    echo "  並列探索パフォーマンスサマリ"
+    echo "=============================================="
+    echo "日時: $(date -Iseconds)"
+    echo "探索時間: ${BENCH_TIME}ms × 4局面"
+    echo ""
+
+    # Material評価の結果
+    if [ ${#MATERIAL_NPS[@]} -gt 0 ]; then
+        echo "=== Material評価 ==="
+        printf "%-10s %15s %10s %10s\n" "Threads" "NPS" "Scale" "Efficiency"
+        printf "%-10s %15s %10s %10s\n" "-------" "---" "-----" "----------"
+        FIRST_NPS=""
+        for t in "${THREAD_LIST[@]}"; do
+            nps="${MATERIAL_NPS[$t]:-}"
+            if [ -n "$nps" ]; then
+                if [ -z "$FIRST_NPS" ]; then
+                    FIRST_NPS="$nps"
+                fi
+                if [ -n "$FIRST_NPS" ] && [ "$FIRST_NPS" -gt 0 ]; then
+                    scale=$(echo "scale=2; $nps / $FIRST_NPS" | bc)
+                    eff=$(echo "scale=1; 100 * $nps / ($FIRST_NPS * $t)" | bc)
+                    printf "%-10s %15s %10sx %9s%%\n" "$t" "$nps" "$scale" "$eff"
+                else
+                    printf "%-10s %15s %10s %10s\n" "$t" "$nps" "-" "-"
+                fi
+            fi
+        done
+        echo ""
+    fi
+
+    # NNUE評価の結果
+    if [ ${#NNUE_NPS[@]} -gt 0 ]; then
+        echo "=== NNUE評価 ==="
+        printf "%-10s %15s %10s %10s\n" "Threads" "NPS" "Scale" "Efficiency"
+        printf "%-10s %15s %10s %10s\n" "-------" "---" "-----" "----------"
+        FIRST_NPS=""
+        for t in "${THREAD_LIST[@]}"; do
+            nps="${NNUE_NPS[$t]:-}"
+            if [ -n "$nps" ]; then
+                if [ -z "$FIRST_NPS" ]; then
+                    FIRST_NPS="$nps"
+                fi
+                if [ -n "$FIRST_NPS" ] && [ "$FIRST_NPS" -gt 0 ]; then
+                    scale=$(echo "scale=2; $nps / $FIRST_NPS" | bc)
+                    eff=$(echo "scale=1; 100 * $nps / ($FIRST_NPS * $t)" | bc)
+                    printf "%-10s %15s %10sx %9s%%\n" "$t" "$nps" "$scale" "$eff"
+                else
+                    printf "%-10s %15s %10s %10s\n" "$t" "$nps" "-" "-"
+                fi
+            fi
+        done
+    fi
+} | tee "$SUMMARY_FILE"
+
+echo ""
+echo "=== サマリ保存: $SUMMARY_FILE ==="
 echo ""
 echo "結果ファイル:"
 echo "  perf結果:      ./perf_results/"
