@@ -6,9 +6,10 @@
  */
 
 import type { CSSProperties, ReactElement } from "react";
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import type { EvalHistory, KifMove } from "../utils/kifFormat";
 import { EvalGraph } from "./EvalGraph";
+import { EvalGraphModal } from "./EvalGraphModal";
 import { KifuPanel } from "./KifuPanel";
 
 interface EvalPanelProps {
@@ -90,10 +91,19 @@ export function EvalPanel({
     defaultOpen = false,
 }: EvalPanelProps): ReactElement {
     const [isOpen, setIsOpen] = useState(defaultOpen);
+    const [showEvalModal, setShowEvalModal] = useState(false);
 
     const handleToggle = () => {
         setIsOpen(!isOpen);
     };
+
+    const handleGraphClick = useCallback(() => {
+        setShowEvalModal(true);
+    }, []);
+
+    const handleModalClose = useCallback(() => {
+        setShowEvalModal(false);
+    }, []);
 
     return (
         <div style={panelStyle}>
@@ -119,12 +129,13 @@ export function EvalPanel({
 
             {isOpen && (
                 <div style={contentStyle}>
-                    {/* 評価値グラフ */}
+                    {/* 評価値グラフ（クリックで拡大モーダル表示） */}
                     <EvalGraph
                         evalHistory={evalHistory}
                         currentPly={currentPly}
                         compact={true}
                         height={80}
+                        onClick={handleGraphClick}
                     />
 
                     {/* 棋譜パネル（評価値付き） */}
@@ -137,6 +148,14 @@ export function EvalPanel({
                     />
                 </div>
             )}
+
+            {/* 評価値グラフ拡大モーダル */}
+            <EvalGraphModal
+                evalHistory={evalHistory}
+                currentPly={currentPly}
+                open={showEvalModal}
+                onClose={handleModalClose}
+            />
         </div>
     );
 }

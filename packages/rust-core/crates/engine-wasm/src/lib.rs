@@ -331,7 +331,10 @@ fn emit_bestmove(result: SearchResult) {
 }
 
 fn score_fields(value: Value) -> (Option<i32>, Option<i32>) {
-    if value.is_mate_score() {
+    // Match the logic in SearchInfo::to_usi_string:
+    // Only treat as mate score if it's a true mate score AND within valid range
+    // Boundary values like ±INFINITE should be treated as CP scores
+    if value.is_mate_score() && value.raw().abs() < Value::INFINITE.raw() {
         let mate_ply = value.mate_ply();
         let signed = if value.is_loss() { -mate_ply } else { mate_ply };
         (None, Some(signed))

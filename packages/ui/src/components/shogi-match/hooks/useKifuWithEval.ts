@@ -94,6 +94,7 @@ export function useKifuWithEval(moves: string[]): UseKifuWithEvalResult {
     }, [moves, boardHistory, evalMap]);
 
     // 評価値履歴を生成（グラフ用）
+    // 評価値は先手視点に正規化（プラス=先手有利、マイナス=後手有利）
     const evalHistory = useMemo((): EvalHistory[] => {
         const history: EvalHistory[] = [
             { ply: 0, evalCp: 0, evalMate: null }, // 開始局面
@@ -103,10 +104,15 @@ export function useKifuWithEval(moves: string[]): UseKifuWithEvalResult {
             const ply = i + 1;
             const evalEntry = evalMap.get(ply);
 
+            // エンジンの評価値は「指した側から見た値」なので、
+            // 後手の手（偶数手）は符号を反転して先手視点に正規化
+            const isGoteMove = ply % 2 === 0;
+            const sign = isGoteMove ? -1 : 1;
+
             history.push({
                 ply,
-                evalCp: evalEntry?.scoreCp ?? null,
-                evalMate: evalEntry?.scoreMate ?? null,
+                evalCp: evalEntry?.scoreCp != null ? evalEntry.scoreCp * sign : null,
+                evalMate: evalEntry?.scoreMate != null ? evalEntry.scoreMate * sign : null,
             });
         }
 
