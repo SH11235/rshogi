@@ -199,6 +199,82 @@ describe("kifu-tree", () => {
             tree = goToPly(tree, 100);
             expect(getCurrentNode(tree).ply).toBe(2);
         });
+
+        it("goToPly: 進む場合はchildren[0]を辿る（メインラインに戻る）", () => {
+            const startPosition = createTestPosition(0);
+            let tree = createKifuTree(startPosition, "startpos");
+            // メインライン: 7g7f -> 3c3d
+            tree = addMove(tree, "7g7f", createTestPosition(1));
+            tree = addMove(tree, "3c3d", createTestPosition(2));
+            // 分岐作成: 開始位置に戻って 2g2f -> 8c8d を追加
+            tree = goToStart(tree);
+            tree = addMove(tree, "2g2f", createTestPosition(1));
+            tree = addMove(tree, "8c8d", createTestPosition(2));
+
+            // 現在は分岐上の ply=2 (8c8d)
+            expect(getCurrentNode(tree).usiMove).toBe("8c8d");
+
+            // ply=0 に戻る
+            tree = goToPly(tree, 0);
+            expect(getCurrentNode(tree).ply).toBe(0);
+
+            // ply=2 に進む -> children[0]を辿るのでメインライン(7g7f -> 3c3d)に行く
+            tree = goToPly(tree, 2);
+            expect(getCurrentNode(tree).ply).toBe(2);
+            expect(getCurrentNode(tree).usiMove).toBe("3c3d");
+        });
+
+        it("goToPly: 分岐の途中から進む場合は現在ラインのchildren[0]を辿る", () => {
+            const startPosition = createTestPosition(0);
+            let tree = createKifuTree(startPosition, "startpos");
+            // メインライン: 7g7f -> 3c3d -> 2g2f
+            tree = addMove(tree, "7g7f", createTestPosition(1));
+            tree = addMove(tree, "3c3d", createTestPosition(2));
+            tree = addMove(tree, "2g2f", createTestPosition(3));
+            // 分岐作成: 7g7f に戻って 8c8d -> 6g6f を追加
+            tree = goToPly(tree, 1);
+            tree = addMove(tree, "8c8d", createTestPosition(2));
+            tree = addMove(tree, "6g6f", createTestPosition(3));
+
+            // 現在は分岐上の ply=3 (6g6f)
+            expect(getCurrentNode(tree).usiMove).toBe("6g6f");
+
+            // ply=1 に戻る
+            tree = goToPly(tree, 1);
+            expect(getCurrentNode(tree).ply).toBe(1);
+            expect(getCurrentNode(tree).usiMove).toBe("7g7f");
+
+            // ply=3 に進む -> children[0]を辿るのでメインライン(3c3d -> 2g2f)に行く
+            tree = goToPly(tree, 3);
+            expect(getCurrentNode(tree).ply).toBe(3);
+            expect(getCurrentNode(tree).usiMove).toBe("2g2f");
+        });
+
+        it("goToPly: 分岐上で戻る場合、現在ラインの親を辿る", () => {
+            const startPosition = createTestPosition(0);
+            let tree = createKifuTree(startPosition, "startpos");
+            // メインライン: 7g7f -> 3c3d -> 2g2f
+            tree = addMove(tree, "7g7f", createTestPosition(1));
+            tree = addMove(tree, "3c3d", createTestPosition(2));
+            tree = addMove(tree, "2g2f", createTestPosition(3));
+            // 分岐作成: 7g7f に戻って 8c8d -> 6g6f を追加
+            tree = goToPly(tree, 1);
+            tree = addMove(tree, "8c8d", createTestPosition(2));
+            tree = addMove(tree, "6g6f", createTestPosition(3));
+
+            // 現在は分岐上の ply=3 (6g6f)
+            expect(getCurrentNode(tree).usiMove).toBe("6g6f");
+
+            // ply=2 に戻る -> 分岐上の 8c8d に行くべき（メインラインの 3c3d ではない）
+            tree = goToPly(tree, 2);
+            expect(getCurrentNode(tree).ply).toBe(2);
+            expect(getCurrentNode(tree).usiMove).toBe("8c8d");
+
+            // ply=1 に戻る -> 共通の 7g7f
+            tree = goToPly(tree, 1);
+            expect(getCurrentNode(tree).ply).toBe(1);
+            expect(getCurrentNode(tree).usiMove).toBe("7g7f");
+        });
     });
 
     describe("branch management", () => {

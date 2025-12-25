@@ -346,6 +346,30 @@ export function EvalGraph({
                         </span>
                     ))}
 
+                {/* 拡大ボタン（onPlySelectとonClickの両方がある場合） */}
+                {onPlySelect && onClick && (
+                    <button
+                        type="button"
+                        className="absolute top-0 right-0 z-10 p-1 text-muted-foreground hover:text-foreground hover:bg-accent/50 rounded transition-colors"
+                        onClick={onClick}
+                        aria-label="評価値グラフを拡大表示"
+                        title="拡大表示"
+                    >
+                        <svg
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                        >
+                            <path d="M15 3h6v6M14 10l6.1-6.1M9 21H3v-6M10 14l-6.1 6.1" />
+                        </svg>
+                    </button>
+                )}
+
                 {/* グラフ本体 */}
                 {onPlySelect ? (
                     <button
@@ -496,7 +520,32 @@ export function EvalGraph({
     // 外側のコンテナ（onClick用）
     const outerContent = (
         <>
-            <div className="font-bold mb-1.5 text-sm">評価値推移</div>
+            <div className="flex justify-between items-center mb-1.5">
+                <span className="font-bold text-sm">評価値推移</span>
+                {/* 拡大ボタン（onPlySelectとonClickの両方がある場合） */}
+                {onPlySelect && onClick && (
+                    <button
+                        type="button"
+                        className="p-1 text-muted-foreground hover:text-foreground hover:bg-accent/50 rounded transition-colors"
+                        onClick={onClick}
+                        aria-label="評価値グラフを拡大表示"
+                        title="拡大表示"
+                    >
+                        <svg
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                        >
+                            <path d="M15 3h6v6M14 10l6.1-6.1M9 21H3v-6M10 14l-6.1 6.1" />
+                        </svg>
+                    </button>
+                )}
+            </div>
             <div className="relative w-full" style={{ height }}>
                 {/* 左側ラベル */}
                 <span

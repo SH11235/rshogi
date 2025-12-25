@@ -12,7 +12,6 @@ import {
     getBranchInfo,
     getCurrentNode,
     getMainLineMoves,
-    getMainLineTotalPly,
     getMovesToCurrent,
     goBack as goBackTree,
     goForward as goForwardTree,
@@ -333,11 +332,19 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
         const currentNode = getCurrentNode(tree);
         const branchInfo = getBranchInfo(tree);
 
+        // 現在ラインの終端plyを計算（children[0]を辿る）
+        let endNode = currentNode;
+        while (endNode.children.length > 0) {
+            const nextNode = tree.nodes.get(endNode.children[0]);
+            if (!nextNode) break;
+            endNode = nextNode;
+        }
+
         return {
             currentPly: currentNode.ply,
             currentNodeId: tree.currentNodeId,
             displayPosition: currentNode.positionAfter,
-            totalPly: getMainLineTotalPly(tree),
+            totalPly: endNode.ply,
             hasBranches: branchInfo.hasBranches,
             currentBranchIndex: branchInfo.currentIndex,
             branchCount: branchInfo.count,
