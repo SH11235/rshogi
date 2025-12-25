@@ -23,7 +23,8 @@ export function GameResultBanner({
     const reasonText = getReasonText(result.reason);
 
     return (
-        <div
+        <output
+            aria-live="polite"
             style={{
                 display: "flex",
                 alignItems: "center",
@@ -101,6 +102,6 @@ export function GameResultBanner({
             >
                 ×
             </button>
-        </div>
+        </output>
     );
 }

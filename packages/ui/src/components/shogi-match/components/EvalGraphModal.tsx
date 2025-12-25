@@ -95,6 +95,20 @@ export function EvalGraphModal({
         [position, size],
     );
 
+    // Escキーでウィンドウを閉じる
+    useEffect(() => {
+        if (!open) return;
+
+        const handleEscape = (e: KeyboardEvent) => {
+            if (e.key === "Escape") {
+                onClose();
+            }
+        };
+
+        document.addEventListener("keydown", handleEscape);
+        return () => document.removeEventListener("keydown", handleEscape);
+    }, [open, onClose]);
+
     // マウス移動・終了のグローバルハンドラ
     useEffect(() => {
         const handleMouseMove = (e: MouseEvent) => {
