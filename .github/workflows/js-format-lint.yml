@@ -94,7 +94,8 @@ jobs:
           node-version: ${{ steps.versions.outputs.node }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm typecheck
+      # engine-wasm は Wasm ビルド成果物 (pkg/) に依存するため、build ジョブで typecheck を実行
+      - run: pnpm turbo typecheck --filter="!@shogi/engine-wasm"
 
   build:
     runs-on: ubuntu-latest
@@ -140,6 +141,8 @@ jobs:
           cache-on-failure: true
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+      # engine-wasm は Wasm ビルド成果物 (pkg/) を参照するため、ビルド後に typecheck を実行
+      - run: pnpm turbo typecheck --filter="@shogi/engine-wasm"
       - name: sccache stats
         if: always()
         run: sccache --show-stats || true
