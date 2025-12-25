@@ -3,3 +3,4 @@ export * from "./board";
 export * from "./csa";
 export * from "./position-service";
 export { getPositionService, setPositionServiceFactory } from "./position-service-registry";
+export * from "./result";

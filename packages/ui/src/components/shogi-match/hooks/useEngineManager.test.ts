@@ -1,4 +1,4 @@
-import type { PositionState } from "@shogi/app-core";
+import type { GameResult, PositionState } from "@shogi/app-core";
 import type { EngineEvent } from "@shogi/engine-client";
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -133,7 +133,7 @@ describe("useEngineManager", () => {
         positionRef: { current: PositionState };
         movesRef: { current: string[] };
         onMoveFromEngine: (move: string) => void;
-        onMatchEnd: (message: string) => Promise<void>;
+        onMatchEnd: (result: GameResult) => Promise<void>;
         sides: {
             sente: { role: "human" | "engine"; engineId?: string };
             gote: { role: "human" | "engine"; engineId?: string };
@@ -248,8 +248,8 @@ describe("useEngineManager", () => {
         });
 
         expect(onMatchEnd).toHaveBeenCalledTimes(1);
-        const message = onMatchEnd.mock.calls[0][0] as string;
-        expect(message).toContain("投了しました");
+        const gameResult = onMatchEnd.mock.calls[0][0] as GameResult;
+        expect(gameResult.reason.kind).toBe("resignation");
     });
 });
 
@@ -279,7 +279,7 @@ describe("determineBestmoveAction", () => {
         });
 
         expect(result.action).toBe("end_match");
-        expect(result.message).toContain("勝利宣言");
+        expect(result.gameResult?.reason.kind).toBe("win_declaration");
         expect(result.shouldClearActive).toBe(true);
         expect(result.shouldUpdateRequestPly).toBe(true);
     });
@@ -294,7 +294,7 @@ describe("determineBestmoveAction", () => {
         });
 
         expect(result.action).toBe("end_match");
-        expect(result.message).toContain("投了しました");
+        expect(result.gameResult?.reason.kind).toBe("resignation");
         expect(result.shouldClearActive).toBe(true);
     });
 
@@ -308,7 +308,7 @@ describe("determineBestmoveAction", () => {
         });
 
         expect(result.action).toBe("end_match");
-        expect(result.message).toContain("合法手なし");
+        expect(result.gameResult?.reason.kind).toBe("checkmate");
         expect(result.shouldClearActive).toBe(true);
     });
 
@@ -362,7 +362,7 @@ describe("determineBestmoveAction", () => {
         });
 
         expect(resultWin.action).toBe("end_match");
-        expect(resultWin.message).toContain("勝利宣言");
+        expect(resultWin.gameResult?.reason.kind).toBe("win_declaration");
 
         const resultResign = determineBestmoveAction({
             move: "RESIGN",
@@ -373,7 +373,7 @@ describe("determineBestmoveAction", () => {
         });
 
         expect(resultResign.action).toBe("end_match");
-        expect(resultResign.message).toContain("投了しました");
+        expect(resultResign.gameResult?.reason.kind).toBe("resignation");
     });
 
     it("空白を含む手をトリムする", () => {
