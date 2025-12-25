@@ -50,6 +50,7 @@ import { BoardToolbar } from "./shogi-match/components/BoardToolbar";
 import { DisplaySettingsPanel } from "./shogi-match/components/DisplaySettingsPanel";
 import { type ClockSettings, useClockManager } from "./shogi-match/hooks/useClockManager";
 import { useEngineManager } from "./shogi-match/hooks/useEngineManager";
+import { useKifuKeyboardNavigation } from "./shogi-match/hooks/useKifuKeyboardNavigation";
 import { useKifuNavigation } from "./shogi-match/hooks/useKifuNavigation";
 import {
     DEFAULT_DISPLAY_SETTINGS,
@@ -392,6 +393,16 @@ export function ShogiMatch({
         },
     );
     stopAllEnginesRef.current = stopAllEngines;
+
+    // キーボード・ホイールナビゲーション（対局中は無効）
+    useKifuKeyboardNavigation({
+        onForward: navigation.goForward,
+        onBack: navigation.goBack,
+        onToStart: navigation.goToStart,
+        onToEnd: navigation.goToEnd,
+        disabled: isMatchRunning,
+        containerRef: boardSectionRef,
+    });
 
     // エンジンからの手を受け取って適用するコールバック
     const handleMoveFromEngine = useCallback(
