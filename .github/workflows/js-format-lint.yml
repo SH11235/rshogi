@@ -41,11 +41,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10.24.0
       - id: versions
         run: |
-          echo "pnpm=$(node -p "require('./package.json').packageManager.split('@')[1]")" >> "$GITHUB_OUTPUT"
           echo "node=$(node -p "require('./package.json').volta.node")" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v6
         with:
@@ -55,16 +52,12 @@ jobs:
       - run: pnpm format:ci
 
   lint:
-    needs: format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10.24.0
       - id: versions
         run: |
-          echo "pnpm=$(node -p "require('./package.json').packageManager.split('@')[1]")" >> "$GITHUB_OUTPUT"
           echo "node=$(node -p "require('./package.json').volta.node")" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v6
         with:
@@ -74,16 +67,12 @@ jobs:
       - run: pnpm lint
 
   knip:
-    needs: format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10.24.0
       - id: versions
         run: |
-          echo "pnpm=$(node -p "require('./package.json').packageManager.split('@')[1]")" >> "$GITHUB_OUTPUT"
           echo "node=$(node -p "require('./package.json').volta.node")" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v6
         with:
@@ -93,16 +82,12 @@ jobs:
       - run: pnpm knip:ci
 
   typecheck:
-    needs: format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10.24.0
       - id: versions
         run: |
-          echo "pnpm=$(node -p "require('./package.json').packageManager.split('@')[1]")" >> "$GITHUB_OUTPUT"
           echo "node=$(node -p "require('./package.json').volta.node")" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v6
         with:
@@ -112,16 +97,12 @@ jobs:
       - run: pnpm typecheck
 
   build:
-    needs: format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10.24.0
       - id: versions
         run: |
-          echo "pnpm=$(node -p "require('./package.json').packageManager.split('@')[1]")" >> "$GITHUB_OUTPUT"
           echo "node=$(node -p "require('./package.json').volta.node")" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v6
         with:
