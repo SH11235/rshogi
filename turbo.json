@@ -38,6 +38,11 @@
             "inputs": ["src/**/*.{ts,tsx}", "*.{ts,tsx}", "tsconfig*.json"],
             "outputs": []
         },
+        "@shogi/engine-wasm#typecheck": {
+            "dependsOn": ["build"],
+            "inputs": ["src/**/*.{ts,tsx}", "*.{ts,tsx}", "tsconfig*.json"],
+            "outputs": []
+        },
         "format": {
             "inputs": [
                 "**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,css,yml,yaml,rs,toml}",
