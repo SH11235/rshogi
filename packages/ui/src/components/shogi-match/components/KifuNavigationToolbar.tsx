@@ -157,23 +157,26 @@ export function KifuNavigationToolbar({
                     {/* 分岐メニュー */}
                     {showBranchMenu && (
                         <div className="absolute top-full right-0 mt-1 z-50 bg-card border border-border rounded shadow-lg min-w-[100px]">
-                            {Array.from({ length: branchInfo.count }, (_, i) => (
+                            {Array.from({ length: branchInfo.count }, (_, i) => ({
+                                id: `branch-${i}`,
+                                index: i,
+                            })).map((item) => (
                                 <button
                                     type="button"
-                                    key={i}
-                                    onClick={() => handleBranchSelect(i)}
+                                    key={item.id}
+                                    onClick={() => handleBranchSelect(item.index)}
                                     className={`
                                         w-full px-3 py-1.5 text-left text-[12px]
                                         transition-colors duration-150
                                         ${
-                                            i === branchInfo.currentIndex
+                                            item.index === branchInfo.currentIndex
                                                 ? "bg-accent font-medium"
                                                 : "hover:bg-accent/50"
                                         }
                                     `}
                                 >
-                                    変化 {i + 1}
-                                    {i === 0 && (
+                                    変化 {item.index + 1}
+                                    {item.index === 0 && (
                                         <span className="ml-1 text-[10px] text-muted-foreground">
                                             (メイン)
                                         </span>

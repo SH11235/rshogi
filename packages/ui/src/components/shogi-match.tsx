@@ -191,6 +191,18 @@ function boardToGrid(board: BoardState): ShogiBoardCell[][] {
     );
 }
 
+/**
+ * USI形式の指し手文字列から最終手情報を導出
+ */
+function deriveLastMove(move: string | undefined): LastMove | undefined {
+    const parsed = move ? parseMove(move) : null;
+    if (!parsed) return undefined;
+    if (parsed.kind === "drop") {
+        return { from: null, to: parsed.to, dropPiece: parsed.piece, promotes: false };
+    }
+    return { from: parsed.from, to: parsed.to, promotes: parsed.promote };
+}
+
 export function ShogiMatch({
     engineOptions,
     defaultSides = {
@@ -1025,15 +1037,6 @@ export function ShogiMatch({
         }
         setSelection({ kind: "hand", piece });
         setMessage(null);
-    };
-
-    const deriveLastMove = (move: string | undefined): LastMove | undefined => {
-        const parsed = move ? parseMove(move) : null;
-        if (!parsed) return undefined;
-        if (parsed.kind === "drop") {
-            return { from: null, to: parsed.to, dropPiece: parsed.piece, promotes: false };
-        }
-        return { from: parsed.from, to: parsed.to, promotes: parsed.promote };
     };
 
     const importUsi = async (raw: string) => {

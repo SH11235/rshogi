@@ -111,11 +111,11 @@ export function EvalGraph({
     const height = customHeight ?? (compact ? 60 : 80);
     const padding = { top: 4, bottom: 4, left: 0, right: 0 };
     const graphHeight = height - padding.top - padding.bottom;
-    const graphContainerRef = useRef<HTMLDivElement>(null);
+    const graphContainerRef = useRef<HTMLElement>(null);
 
     // グラフクリック時に手数を計算
     const handleGraphClick = useCallback(
-        (e: MouseEvent<HTMLDivElement>) => {
+        (e: MouseEvent<HTMLDivElement | HTMLButtonElement>) => {
             if (!onPlySelect || evalHistory.length <= 1) return;
 
             const container = graphContainerRef.current;
@@ -285,16 +285,79 @@ export function EvalGraph({
     }, [evalHistory.length]);
 
     if (compact) {
-        // コンパクト表示（目盛り付き）
-        return (
-            // biome-ignore lint/a11y/noStaticElementInteractions: role/tabIndex are conditionally set when onClick is provided
-            <div
-                style={{ ...containerStyle, cursor: onClick ? "pointer" : undefined }}
-                onClick={onClick}
-                onKeyDown={onClick ? (e) => e.key === "Enter" && onClick() : undefined}
-                role={onClick ? "button" : undefined}
-                tabIndex={onClick ? 0 : undefined}
+        // コンパクト表示用のSVGコンテンツ
+        const compactSvg = (
+            <svg
+                width="100%"
+                height={height}
+                style={{ display: "block" }}
+                viewBox={`0 0 100 ${height}`}
+                preserveAspectRatio="none"
+                role="img"
+                aria-label="評価値推移グラフ"
             >
+                {/* 水平グリッド線 */}
+                {yAxisLabels.map((label) => (
+                    <line
+                        key={`grid-${label.value}`}
+                        x1="0%"
+                        y1={label.position}
+                        x2="100%"
+                        y2={label.position}
+                        stroke="hsl(var(--border, 0 0% 86%))"
+                        strokeWidth={label.value === "0" ? "1" : "0.5"}
+                        vectorEffect="non-scaling-stroke"
+                        strokeDasharray={label.value === "0" ? "none" : "2,2"}
+                    />
+                ))}
+
+                {/* 塗りつぶし領域（先手有利部分） */}
+                {fillPath && (
+                    <path
+                        d={fillPath}
+                        fill="hsl(var(--wafuu-shu, 350 80% 45%) / 0.15)"
+                        stroke="none"
+                    />
+                )}
+
+                {/* 評価値ライン（連続した区間ごとに描画） */}
+                {lineSegments.map((segment) => (
+                    <polyline
+                        key={`seg-${segment[0]}`}
+                        points={segment.join(" ")}
+                        fill="none"
+                        stroke="hsl(var(--wafuu-shu, 350 80% 45%))"
+                        strokeWidth="2"
+                        vectorEffect="non-scaling-stroke"
+                    />
+                ))}
+
+                {/* 各ポイントにドット表示 */}
+                {dots.map((dot) => (
+                    <circle
+                        key={`dot-${dot.index}`}
+                        cx={dot.x}
+                        cy={dot.y}
+                        r="1.5"
+                        fill="hsl(var(--wafuu-shu, 350 80% 45%))"
+                    />
+                ))}
+
+                {/* 現在位置マーカー */}
+                {currentMarker && (
+                    <circle
+                        cx={currentMarker.x}
+                        cy={currentMarker.y}
+                        r="4"
+                        fill="hsl(var(--primary, 210 100% 50%))"
+                    />
+                )}
+            </svg>
+        );
+
+        // コンパクト表示の内部コンテンツ
+        const compactContent = (
+            <>
                 {/* Y軸ラベル */}
                 {yAxisLabels
                     .filter((_, i) => i % 2 === 0) // 上・中・下の3つだけ表示
@@ -305,89 +368,45 @@ export function EvalGraph({
                     ))}
 
                 {/* グラフ本体 */}
-                <div
-                    ref={graphContainerRef}
-                    style={{
-                        marginLeft: "32px",
-                        height,
-                        cursor: onPlySelect ? "crosshair" : undefined,
-                    }}
-                    onClick={onPlySelect ? handleGraphClick : undefined}
-                    onKeyDown={onPlySelect ? (e) => e.key === "Enter" && onClick?.() : undefined}
-                    role={onPlySelect ? "slider" : undefined}
-                    tabIndex={onPlySelect ? 0 : undefined}
-                    aria-label={onPlySelect ? "グラフをクリックして手数を選択" : undefined}
-                    aria-valuenow={onPlySelect ? currentPly : undefined}
-                    aria-valuemin={onPlySelect ? 0 : undefined}
-                    aria-valuemax={onPlySelect ? evalHistory.length - 1 : undefined}
-                >
-                    <svg
-                        width="100%"
-                        height={height}
-                        style={{ display: "block" }}
-                        viewBox={`0 0 100 ${height}`}
-                        preserveAspectRatio="none"
-                        role="img"
-                        aria-label="評価値推移グラフ"
+                {onPlySelect ? (
+                    <button
+                        ref={(el) => {
+                            (
+                                graphContainerRef as React.MutableRefObject<HTMLElement | null>
+                            ).current = el;
+                        }}
+                        type="button"
+                        style={{
+                            marginLeft: "32px",
+                            height,
+                            cursor: "crosshair",
+                            background: "transparent",
+                            border: "none",
+                            padding: 0,
+                            display: "block",
+                            width: "calc(100% - 32px)",
+                            textAlign: "left",
+                        }}
+                        onClick={handleGraphClick}
+                        aria-label="グラフをクリックして手数を選択"
                     >
-                        {/* 水平グリッド線 */}
-                        {yAxisLabels.map((label) => (
-                            <line
-                                key={`grid-${label.value}`}
-                                x1="0%"
-                                y1={label.position}
-                                x2="100%"
-                                y2={label.position}
-                                stroke="hsl(var(--border, 0 0% 86%))"
-                                strokeWidth={label.value === "0" ? "1" : "0.5"}
-                                vectorEffect="non-scaling-stroke"
-                                strokeDasharray={label.value === "0" ? "none" : "2,2"}
-                            />
-                        ))}
-
-                        {/* 塗りつぶし領域（先手有利部分） */}
-                        {fillPath && (
-                            <path
-                                d={fillPath}
-                                fill="hsl(var(--wafuu-shu, 350 80% 45%) / 0.15)"
-                                stroke="none"
-                            />
-                        )}
-
-                        {/* 評価値ライン（連続した区間ごとに描画） */}
-                        {lineSegments.map((segment) => (
-                            <polyline
-                                key={`seg-${segment[0]}`}
-                                points={segment.join(" ")}
-                                fill="none"
-                                stroke="hsl(var(--wafuu-shu, 350 80% 45%))"
-                                strokeWidth="2"
-                                vectorEffect="non-scaling-stroke"
-                            />
-                        ))}
-
-                        {/* 各ポイントにドット表示 */}
-                        {dots.map((dot) => (
-                            <circle
-                                key={`dot-${dot.index}`}
-                                cx={dot.x}
-                                cy={dot.y}
-                                r="1.5"
-                                fill="hsl(var(--wafuu-shu, 350 80% 45%))"
-                            />
-                        ))}
-
-                        {/* 現在位置マーカー */}
-                        {currentMarker && (
-                            <circle
-                                cx={currentMarker.x}
-                                cy={currentMarker.y}
-                                r="4"
-                                fill="hsl(var(--primary, 210 100% 50%))"
-                            />
-                        )}
-                    </svg>
-                </div>
+                        {compactSvg}
+                    </button>
+                ) : (
+                    <div
+                        ref={(el) => {
+                            (
+                                graphContainerRef as React.MutableRefObject<HTMLElement | null>
+                            ).current = el;
+                        }}
+                        style={{
+                            marginLeft: "32px",
+                            height,
+                        }}
+                    >
+                        {compactSvg}
+                    </div>
+                )}
 
                 {/* X軸ラベル（手数） */}
                 <div style={xAxisContainerStyle}>
@@ -395,22 +414,121 @@ export function EvalGraph({
                         <span key={ply}>{ply}手</span>
                     ))}
                 </div>
-            </div>
+            </>
         );
+
+        // onClickがある場合はbutton、ない場合はdiv
+        if (onClick) {
+            return (
+                <button
+                    type="button"
+                    style={{
+                        ...containerStyle,
+                        cursor: "pointer",
+                        background: "transparent",
+                        border: "none",
+                        padding: 0,
+                        textAlign: "left",
+                    }}
+                    onClick={onClick}
+                    aria-label="評価値グラフを拡大表示"
+                >
+                    {compactContent}
+                </button>
+            );
+        }
+
+        return <div style={containerStyle}>{compactContent}</div>;
     }
 
     // 通常表示
     const displayMax = scaleMax / 100;
-    return (
-        // biome-ignore lint/a11y/noStaticElementInteractions: role/tabIndex are conditionally set when onClick is provided
-        <div
-            className="bg-card border border-border rounded-xl p-3 shadow-lg w-[var(--panel-width)]"
-            style={{ cursor: onClick ? "pointer" : undefined }}
-            onClick={onClick}
-            onKeyDown={onClick ? (e) => e.key === "Enter" && onClick() : undefined}
-            role={onClick ? "button" : undefined}
-            tabIndex={onClick ? 0 : undefined}
+
+    // SVGグラフコンテンツ
+    const graphSvg = (
+        <svg
+            width="100%"
+            height={height}
+            className="block"
+            viewBox={`0 0 100 ${height}`}
+            preserveAspectRatio="none"
+            role="img"
+            aria-label="評価値推移グラフ"
         >
+            {/* 背景グリッド */}
+            <line
+                x1="0%"
+                y1={padding.top}
+                x2="100%"
+                y2={padding.top}
+                stroke="hsl(var(--border))"
+                strokeWidth="0.5"
+                vectorEffect="non-scaling-stroke"
+                strokeDasharray="2,2"
+            />
+            <line
+                x1="0%"
+                y1={padding.top + graphHeight}
+                x2="100%"
+                y2={padding.top + graphHeight}
+                stroke="hsl(var(--border))"
+                strokeWidth="0.5"
+                vectorEffect="non-scaling-stroke"
+                strokeDasharray="2,2"
+            />
+
+            {/* 中央線（0評価） */}
+            <line
+                x1="0%"
+                y1={padding.top + graphHeight / 2}
+                x2="100%"
+                y2={padding.top + graphHeight / 2}
+                stroke="hsl(var(--border))"
+                strokeWidth="1"
+                vectorEffect="non-scaling-stroke"
+            />
+
+            {/* 塗りつぶし領域（先手有利部分） */}
+            {fillPath && <path d={fillPath} fill="hsl(var(--wafuu-shu) / 0.15)" stroke="none" />}
+
+            {/* 評価値ライン（連続した区間ごとに描画） */}
+            {lineSegments.map((segment) => (
+                <polyline
+                    key={`seg-${segment[0]}`}
+                    points={segment.join(" ")}
+                    fill="none"
+                    stroke="hsl(var(--wafuu-shu))"
+                    strokeWidth="2"
+                    vectorEffect="non-scaling-stroke"
+                />
+            ))}
+
+            {/* 各ポイントにドット表示 */}
+            {dots.map((dot) => (
+                <circle
+                    key={`dot-${dot.index}`}
+                    cx={dot.x}
+                    cy={dot.y}
+                    r="1.5"
+                    fill="hsl(var(--wafuu-shu))"
+                />
+            ))}
+
+            {/* 現在位置マーカー */}
+            {currentMarker && (
+                <circle
+                    cx={currentMarker.x}
+                    cy={currentMarker.y}
+                    r="4"
+                    fill="hsl(var(--primary))"
+                />
+            )}
+        </svg>
+    );
+
+    // 外側のコンテナ（onClick用）
+    const outerContent = (
+        <>
             <div className="font-bold mb-1.5 text-sm">評価値推移</div>
             <div className="relative w-full" style={{ height }}>
                 {/* 左側ラベル */}
@@ -434,104 +552,41 @@ export function EvalGraph({
                 </span>
 
                 {/* グラフ本体（クリック可能領域） */}
-                <div
-                    ref={graphContainerRef}
-                    className="ml-5"
-                    style={{
-                        width: "calc(100% - 20px)",
-                        height,
-                        cursor: onPlySelect ? "crosshair" : undefined,
-                    }}
-                    onClick={onPlySelect ? handleGraphClick : undefined}
-                    onKeyDown={onPlySelect ? (e) => e.key === "Enter" && onClick?.() : undefined}
-                    role={onPlySelect ? "slider" : undefined}
-                    tabIndex={onPlySelect ? 0 : undefined}
-                    aria-label={onPlySelect ? "グラフをクリックして手数を選択" : undefined}
-                    aria-valuenow={onPlySelect ? currentPly : undefined}
-                    aria-valuemin={onPlySelect ? 0 : undefined}
-                    aria-valuemax={onPlySelect ? evalHistory.length - 1 : undefined}
-                >
-                    <svg
-                        width="100%"
-                        height={height}
-                        className="block"
-                        viewBox={`0 0 100 ${height}`}
-                        preserveAspectRatio="none"
-                        role="img"
-                        aria-label="評価値推移グラフ"
+                {onPlySelect ? (
+                    <button
+                        ref={(el) => {
+                            (
+                                graphContainerRef as React.MutableRefObject<HTMLElement | null>
+                            ).current = el;
+                        }}
+                        type="button"
+                        className="ml-5 bg-transparent border-none p-0 block text-left"
+                        style={{
+                            width: "calc(100% - 20px)",
+                            height,
+                            cursor: "crosshair",
+                        }}
+                        onClick={handleGraphClick}
+                        aria-label="グラフをクリックして手数を選択"
                     >
-                        {/* 背景グリッド */}
-                        <line
-                            x1="0%"
-                            y1={padding.top}
-                            x2="100%"
-                            y2={padding.top}
-                            stroke="hsl(var(--border))"
-                            strokeWidth="0.5"
-                            vectorEffect="non-scaling-stroke"
-                            strokeDasharray="2,2"
-                        />
-                        <line
-                            x1="0%"
-                            y1={padding.top + graphHeight}
-                            x2="100%"
-                            y2={padding.top + graphHeight}
-                            stroke="hsl(var(--border))"
-                            strokeWidth="0.5"
-                            vectorEffect="non-scaling-stroke"
-                            strokeDasharray="2,2"
-                        />
-
-                        {/* 中央線（0評価） */}
-                        <line
-                            x1="0%"
-                            y1={padding.top + graphHeight / 2}
-                            x2="100%"
-                            y2={padding.top + graphHeight / 2}
-                            stroke="hsl(var(--border))"
-                            strokeWidth="1"
-                            vectorEffect="non-scaling-stroke"
-                        />
-
-                        {/* 塗りつぶし領域（先手有利部分） */}
-                        {fillPath && (
-                            <path d={fillPath} fill="hsl(var(--wafuu-shu) / 0.15)" stroke="none" />
-                        )}
-
-                        {/* 評価値ライン（連続した区間ごとに描画） */}
-                        {lineSegments.map((segment) => (
-                            <polyline
-                                key={`seg-${segment[0]}`}
-                                points={segment.join(" ")}
-                                fill="none"
-                                stroke="hsl(var(--wafuu-shu))"
-                                strokeWidth="2"
-                                vectorEffect="non-scaling-stroke"
-                            />
-                        ))}
-
-                        {/* 各ポイントにドット表示 */}
-                        {dots.map((dot) => (
-                            <circle
-                                key={`dot-${dot.index}`}
-                                cx={dot.x}
-                                cy={dot.y}
-                                r="1.5"
-                                fill="hsl(var(--wafuu-shu))"
-                            />
-                        ))}
-
-                        {/* 現在位置マーカー */}
-                        {currentMarker && (
-                            <circle
-                                cx={currentMarker.x}
-                                cy={currentMarker.y}
-                                r="4"
-                                fill="hsl(var(--primary))"
-                            />
-                        )}
-                    </svg>
-                </div>
+                        {graphSvg}
+                    </button>
+                ) : (
+                    <div
+                        ref={(el) => {
+                            (
+                                graphContainerRef as React.MutableRefObject<HTMLElement | null>
+                            ).current = el;
+                        }}
+                        className="ml-5"
+                        style={{
+                            width: "calc(100% - 20px)",
+                            height,
+                        }}
+                    >
+                        {graphSvg}
+                    </div>
+                )}
             </div>
 
             {/* 手数表示 */}
@@ -541,6 +596,26 @@ export function EvalGraph({
                     {Math.max(evalHistory.length - 1, 0)}手
                 </span>
             </div>
+        </>
+    );
+
+    // onClickがある場合はbutton、ない場合はdiv
+    if (onClick) {
+        return (
+            <button
+                type="button"
+                className="bg-card border border-border rounded-xl p-3 shadow-lg w-[var(--panel-width)] text-left cursor-pointer"
+                onClick={onClick}
+                aria-label="評価値グラフを拡大表示"
+            >
+                {outerContent}
+            </button>
+        );
+    }
+
+    return (
+        <div className="bg-card border border-border rounded-xl p-3 shadow-lg w-[var(--panel-width)]">
+            {outerContent}
         </div>
     );
 }

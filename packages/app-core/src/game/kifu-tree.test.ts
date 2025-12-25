@@ -99,8 +99,8 @@ describe("kifu-tree", () => {
 
             expect(tree.nodes.size).toBe(3); // ルート + 2つの分岐
 
-            const rootNode = tree.nodes.get(tree.rootId)!;
-            expect(rootNode.children).toHaveLength(2);
+            const rootNode = tree.nodes.get(tree.rootId);
+            expect(rootNode?.children).toHaveLength(2);
         });
     });
 
@@ -256,9 +256,9 @@ describe("kifu-tree", () => {
             // 2g2fをメインに昇格
             tree = promoteToMainLine(tree);
 
-            const rootNode = tree.nodes.get(tree.rootId)!;
-            const firstChild = tree.nodes.get(rootNode.children[0])!;
-            expect(firstChild.usiMove).toBe("2g2f");
+            const rootNode = tree.nodes.get(tree.rootId);
+            const firstChild = rootNode ? tree.nodes.get(rootNode.children[0]) : undefined;
+            expect(firstChild?.usiMove).toBe("2g2f");
         });
     });
 
