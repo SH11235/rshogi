@@ -1,3 +1,8 @@
+#![cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm-threads"),
+    feature(thread_local)
+)]
+
 use std::cell::RefCell;
 use std::io::ErrorKind;
 
@@ -19,11 +24,18 @@ thread_local! {
     static EVENT_CALLBACK: RefCell<Option<js_sys::Function>> = const { RefCell::new(None) };
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+#[allow(dead_code)]
+#[used]
+#[thread_local]
+static TLS_DUMMY: u8 = 0;
+
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct InitOptions {
     tt_size_mb: Option<usize>,
     multi_pv: Option<usize>,
+    threads: Option<usize>,
 }
 
 #[derive(Default, Deserialize)]
@@ -179,6 +191,7 @@ fn parse_init_options(opts: Option<JsValue>) -> Result<InitOptions, JsValue> {
     Ok(InitOptions {
         tt_size_mb: get_optional_usize(&opts, "ttSizeMb")?,
         multi_pv: get_optional_usize(&opts, "multiPv")?,
+        threads: get_optional_usize(&opts, "threads")?,
     })
 }
 
@@ -445,9 +458,19 @@ pub fn init(opts: Option<JsValue>) -> Result<(), JsValue> {
         if let Some(mpv) = opts.multi_pv {
             engine.default_multi_pv = mpv.max(1);
         }
+        if let Some(threads) = opts.threads {
+            engine.search.set_num_threads(threads);
+        }
         *state.borrow_mut() = Some(engine);
     });
 
+    Ok(())
+}
+
+#[cfg(feature = "wasm-threads")]
+#[wasm_bindgen(js_name = initThreadPool)]
+pub fn init_thread_pool(_pool_size: usize) -> Result<(), JsValue> {
+    // std::thread が必要なタイミングでワーカを生成するため、ここでは何もしない。
     Ok(())
 }
 

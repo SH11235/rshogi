@@ -620,7 +620,7 @@ impl Search {
     /// 探索スレッド数を設定
     pub fn set_num_threads(&mut self, num: usize) {
         let num = num.clamp(1, 512);
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
         let num = 1;
         self.num_threads = num;
         self.thread_pool

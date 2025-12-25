@@ -5,7 +5,7 @@ export type EngineStopMode = "terminate" | "cooperative";
 export interface EngineInitOptions {
     /** バックエンドの種類 (native/wasm/external-usi) */
     backend?: EngineBackend;
-    /** 並列設定 (native で使用、wasm では無効) */
+    /** 並列設定 (native / wasm の threaded build で使用) */
     threads?: number;
     /** Worker 数 (将来の並列用) */
     workers?: number;
@@ -65,6 +65,8 @@ export interface EngineBestMoveEvent {
 export interface EngineErrorEvent {
     type: "error";
     message: string;
+    severity?: "warning" | "error";
+    code?: string;
 }
 
 export type EngineEvent = EngineInfoEvent | EngineBestMoveEvent | EngineErrorEvent;

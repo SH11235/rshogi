@@ -15,6 +15,9 @@
         },
         "./pkg/*": {
             "default": "./pkg/*"
+        },
+        "./pkg-threaded/*": {
+            "default": "./pkg-threaded/*"
         }
     },
     "scripts": {

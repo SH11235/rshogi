@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -23,14 +23,16 @@ const targetWasm = path.join(
     `${artifactName}.wasm`,
 );
 const outDir = path.resolve(__dirname, "../pkg");
+const threadedOutDir = path.resolve(__dirname, "../pkg-threaded");
 
-function run(cmd, args, cwd = process.cwd()) {
+function run(cmd, args, cwd = process.cwd(), extraEnv = {}) {
     // Use shell string to properly inherit environment on Windows
     const fullCommand = `${cmd} ${args.join(" ")}`;
 
     // Ensure Rust environment variables are properly set
     const rustEnv = {
         ...process.env,
+        ...extraEnv,
     };
 
     // Set default toolchain if not already set (Windows-specific issue workaround)
@@ -78,31 +80,104 @@ function ensureWasmBindgen() {
     }
 }
 
-try {
-    ensureWasmBindgen();
-
-    console.log(`Building ${crateName} with profile: ${profile}`);
+function buildWasm({
+    label,
+    cargoArgs,
+    outDir: outputDir,
+    rustflags,
+    toolchain,
+    cargoZArgs,
+    emitThreadWorker,
+}) {
+    console.log(`Building ${crateName}${label ? ` (${label})` : ""} with profile: ${profile}`);
     console.log(`Expected output: ${targetWasm}`);
-    run(
-        "cargo",
-        ["build", "--profile", profile, "--target", "wasm32-unknown-unknown", "-p", crateName],
-        rustRoot,
-    );
+
+    const extraEnv = rustflags
+        ? { RUSTFLAGS: [process.env.RUSTFLAGS, rustflags].filter(Boolean).join(" ") }
+        : {};
+
+    const args = [
+        ...(toolchain ? [`+${toolchain}`] : []),
+        "build",
+        "--profile",
+        profile,
+        "--target",
+        "wasm32-unknown-unknown",
+        "-p",
+        crateName,
+        ...cargoArgs,
+        ...(cargoZArgs ?? []),
+    ];
+
+    run("cargo", args, rustRoot, extraEnv);
 
     if (!existsSync(targetWasm)) {
         throw new Error(`Built wasm not found at ${targetWasm}`);
     }
 
-    rmSync(outDir, { recursive: true, force: true });
-    mkdirSync(outDir, { recursive: true });
+    rmSync(outputDir, { recursive: true, force: true });
+    mkdirSync(outputDir, { recursive: true });
 
     run(
         "wasm-bindgen",
-        ["--target", "web", "--typescript", "--out-dir", outDir, targetWasm],
+        ["--target", "web", "--typescript", "--out-dir", outputDir, targetWasm],
         rustRoot,
     );
 
-    console.log(`Wrote wasm bindings to ${outDir}`);
+    if (emitThreadWorker) {
+        const workerPath = path.join(outputDir, `${artifactName}_worker.js`);
+        const workerSource = [
+            `import { initSync } from "./${artifactName}.js";`,
+            "",
+            "self.onmessage = (event) => {",
+            "    const { module, memory, thread_stack_size: threadStackSize } = event.data ?? {};",
+            "    if (!module || !memory) return;",
+            "    initSync({ module, memory, thread_stack_size: threadStackSize });",
+            '    self.postMessage({ type: "ready" });',
+            "};",
+            "",
+        ].join("\n");
+        writeFileSync(workerPath, workerSource, "utf8");
+    }
+
+    console.log(`Wrote wasm bindings to ${outputDir}`);
+}
+
+function verifyThreadedOutput(outputDir) {
+    const jsPath = path.join(outputDir, `${artifactName}.js`);
+    const workerPath = path.join(outputDir, `${artifactName}_worker.js`);
+
+    if (!existsSync(workerPath)) {
+        throw new Error(`Threaded worker script not found at ${workerPath}`);
+    }
+
+    if (!existsSync(jsPath)) {
+        throw new Error(`Threaded JS output not found at ${jsPath}`);
+    }
+
+    const jsSource = readFileSync(jsPath, "utf8");
+    if (!jsSource.includes("initThreadPool")) {
+        throw new Error("initThreadPool export missing in threaded wasm output");
+    }
+}
+
+try {
+    ensureWasmBindgen();
+
+    buildWasm({ label: "single", cargoArgs: [], outDir });
+
+    buildWasm({
+        label: "threaded",
+        cargoArgs: ["--features", "wasm-threads"],
+        outDir: threadedOutDir,
+        rustflags:
+            "-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--shared-memory -C link-arg=--import-memory -C link-arg=--max-memory=2147483648 -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_base -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align",
+        toolchain: "nightly",
+        cargoZArgs: ["-Z", "build-std=std,panic_abort"],
+        emitThreadWorker: true,
+    });
+
+    verifyThreadedOutput(threadedOutDir);
 } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

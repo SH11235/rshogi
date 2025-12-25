@@ -13,6 +13,18 @@ export default defineConfig(({ command }) => ({
     // - ビルド時 (pnpm build): "/shogi/" で GitHub Pages のリポジトリページに対応
     // command === "build" による判定は Vite 公式の推奨方法で、環境変数の追加設定は不要
     base: command === "build" ? "/shogi/" : "/",
+    server: {
+        headers: {
+            "Cross-Origin-Opener-Policy": "same-origin",
+            "Cross-Origin-Embedder-Policy": "require-corp",
+        },
+    },
+    preview: {
+        headers: {
+            "Cross-Origin-Opener-Policy": "same-origin",
+            "Cross-Origin-Embedder-Policy": "require-corp",
+        },
+    },
     plugins: [tailwindcss(), react()],
     resolve: {
         alias: [

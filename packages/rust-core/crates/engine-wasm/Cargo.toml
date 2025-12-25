@@ -26,6 +26,10 @@ serde-wasm-bindgen = "0.6"
 serde.workspace = true
 serde_json.workspace = true
 
+[features]
+default = []
+wasm-threads = ["engine-core/wasm-threads"]
+
 [target.wasm32-unknown-unknown.dependencies]
 getrandom = { workspace = true }
 console_error_panic_hook = "0.1"
