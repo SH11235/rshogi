@@ -259,9 +259,19 @@ export function ShogiMatch({
     const navigation = useKifuNavigation({
         initialPosition: position,
         initialSfen: startSfen,
-        onPositionChange: (newPosition) => {
+        onPositionChange: (newPosition, lastMoveInfo) => {
             setPosition(newPosition);
             positionRef.current = newPosition;
+            // ナビゲーションからのlastMove情報を反映
+            if (lastMoveInfo) {
+                setLastMove({
+                    from: (lastMoveInfo.from ?? null) as Square | null,
+                    to: lastMoveInfo.to as Square,
+                    promotes: false, // ナビゲーションでは成り情報を追跡しない
+                });
+            } else {
+                setLastMove(undefined);
+            }
         },
     });
 
@@ -269,7 +279,7 @@ export function ShogiMatch({
     const moves = navigation.getMovesArray();
 
     // 棋譜＋評価値データ
-    const { kifMoves, evalHistory, boardHistory, recordEval } = navigation;
+    const { kifMoves, evalHistory, boardHistory, branchMarkers, recordEval } = navigation;
 
     // 後手が人間の場合は盤面を反転して手前側に表示
     useEffect(() => {
@@ -293,6 +303,10 @@ export function ShogiMatch({
 
     const positionRef = useRef<PositionState>(position);
     const movesRef = useRef<string[]>(moves);
+    // movesRefをnavigationの変更に同期
+    useEffect(() => {
+        movesRef.current = moves;
+    }, [moves]);
     const legalCache = useMemo(() => new LegalMoveCache(), []);
     const matchEndedRef = useRef(false);
     const boardSectionRef = useRef<HTMLDivElement>(null);
@@ -409,8 +423,9 @@ export function ShogiMatch({
                 positionRef.current = pos;
                 setInitialBoard(cloneBoard(pos.board));
                 setBasePosition(clonePositionState(pos));
+                let sfen = "startpos";
                 try {
-                    const sfen = await service.boardToSfen(pos);
+                    sfen = await service.boardToSfen(pos);
                     if (!cancelled) {
                         setStartSfen(sfen);
                     }
@@ -419,7 +434,9 @@ export function ShogiMatch({
                         setMessage(`局面のSFEN変換に失敗しました: ${String(error)}`);
                     }
                 }
+                // 棋譜ナビゲーションを正しい初期局面でリセット
                 if (!cancelled) {
+                    navigation.reset(pos, sfen);
                     setPositionReady(true);
                 }
             } catch (error) {
@@ -433,7 +450,8 @@ export function ShogiMatch({
         return () => {
             cancelled = true;
         };
-    }, []);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- navigation.resetは初回のみ使用
+    }, [navigation.reset]);
 
     const grid = useMemo(() => {
         const g = boardToGrid(position.board);
@@ -1104,16 +1122,8 @@ export function ShogiMatch({
                 stopTicking();
                 void stopAllEngines();
             }
-            // 指定手数に移動
+            // 指定手数に移動（lastMoveはonPositionChangeで自動設定される）
             navigation.goToPly(ply);
-            // lastMoveを更新
-            if (ply > 0) {
-                const currentMoves = navigation.getMovesArray();
-                const move = currentMoves[ply - 1];
-                setLastMove(deriveLastMove(move));
-            } else {
-                setLastMove(undefined);
-            }
         },
         [isMatchRunning, navigation, stopTicking, stopAllEngines],
     );
@@ -1449,6 +1459,7 @@ export function ShogiMatch({
                                 onToStart: navigation.goToStart,
                                 onToEnd: navigation.goToEnd,
                                 isRewound: navigation.state.isRewound,
+                                canGoForward: navigation.state.canGoForward,
                                 branchInfo: navigation.state.hasBranches
                                     ? {
                                           hasBranches: true,
@@ -1460,6 +1471,7 @@ export function ShogiMatch({
                                     : undefined,
                             }}
                             navigationDisabled={isMatchRunning}
+                            branchMarkers={branchMarkers}
                         />
 
                         <KifuIOPanel

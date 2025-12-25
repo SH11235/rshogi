@@ -23,7 +23,7 @@ interface BranchInfo {
 interface NavigationProps {
     /** 現在の手数（ナビゲーション用） */
     currentPly: number;
-    /** 最大手数 */
+    /** 最大手数（メインライン） */
     totalPly: number;
     /** 1手戻る */
     onBack: () => void;
@@ -37,6 +37,8 @@ interface NavigationProps {
     isRewound?: boolean;
     /** 分岐情報 */
     branchInfo?: BranchInfo;
+    /** 進む操作が可能か（現在ノードに子がある） */
+    canGoForward?: boolean;
 }
 
 interface EvalPanelProps {

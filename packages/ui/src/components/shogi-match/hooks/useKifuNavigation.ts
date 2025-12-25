@@ -32,6 +32,23 @@ import { useCallback, useMemo, useState } from "react";
 import type { EvalHistory, KifMove } from "../utils/kifFormat";
 import { convertMovesToKif } from "../utils/kifFormat";
 
+/** USI形式の指し手からlastMove情報を導出 */
+function deriveLastMoveFromUsi(usiMove: string | null): { from?: string; to: string } | undefined {
+    if (!usiMove) return undefined;
+    // 駒打ち: "P*5e" のような形式
+    if (usiMove.includes("*")) {
+        const to = usiMove.slice(-2);
+        return { to };
+    }
+    // 通常の移動: "7g7f" のような形式
+    if (usiMove.length >= 4) {
+        const from = usiMove.slice(0, 2);
+        const to = usiMove.slice(2, 4);
+        return { from, to };
+    }
+    return undefined;
+}
+
 /** ナビゲーション状態 */
 export interface KifuNavigationState {
     /** 現在の手数（0=開始局面） */
@@ -50,6 +67,8 @@ export interface KifuNavigationState {
     branchCount: number;
     /** 巻き戻し中か（currentPly < totalPly） */
     isRewound: boolean;
+    /** 進む操作が可能か（現在ノードに子がある） */
+    canGoForward: boolean;
 }
 
 /** フックの初期化オプション */
@@ -98,6 +117,8 @@ export interface UseKifuNavigationResult {
     evalHistory: EvalHistory[];
     /** 盤面履歴を取得 */
     boardHistory: BoardState[];
+    /** 分岐マーカー（ply -> 分岐数） */
+    branchMarkers: Map<number, number>;
     /** 棋譜ツリー（高度な操作用） */
     tree: KifuTree;
 }
@@ -119,7 +140,8 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
             const newTree = goForwardTree(prev);
             if (newTree !== prev) {
                 const node = getCurrentNode(newTree);
-                onPositionChange?.(node.positionAfter);
+                const lastMove = deriveLastMoveFromUsi(node.usiMove);
+                onPositionChange?.(node.positionAfter, lastMove);
             }
             return newTree;
         });
@@ -133,7 +155,8 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
             const newTree = goBackTree(prev);
             if (newTree !== prev) {
                 const node = getCurrentNode(newTree);
-                onPositionChange?.(node.positionAfter);
+                const lastMove = deriveLastMoveFromUsi(node.usiMove);
+                onPositionChange?.(node.positionAfter, lastMove);
             }
             return newTree;
         });
@@ -147,7 +170,8 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
             const newTree = goToStartTree(prev);
             if (newTree !== prev) {
                 const node = getCurrentNode(newTree);
-                onPositionChange?.(node.positionAfter);
+                const lastMove = deriveLastMoveFromUsi(node.usiMove);
+                onPositionChange?.(node.positionAfter, lastMove);
             }
             return newTree;
         });
@@ -161,7 +185,8 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
             const newTree = goToEndTree(prev);
             if (newTree !== prev) {
                 const node = getCurrentNode(newTree);
-                onPositionChange?.(node.positionAfter);
+                const lastMove = deriveLastMoveFromUsi(node.usiMove);
+                onPositionChange?.(node.positionAfter, lastMove);
             }
             return newTree;
         });
@@ -176,7 +201,8 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
                 const newTree = goToPlyTree(prev, ply);
                 if (newTree !== prev) {
                     const node = getCurrentNode(newTree);
-                    onPositionChange?.(node.positionAfter);
+                    const lastMove = deriveLastMoveFromUsi(node.usiMove);
+                    onPositionChange?.(node.positionAfter, lastMove);
                 }
                 return newTree;
             });
@@ -193,7 +219,8 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
                 const newTree = switchBranchTree(prev, index);
                 if (newTree !== prev) {
                     const node = getCurrentNode(newTree);
-                    onPositionChange?.(node.positionAfter);
+                    const lastMove = deriveLastMoveFromUsi(node.usiMove);
+                    onPositionChange?.(node.positionAfter, lastMove);
                 }
                 return newTree;
             });
@@ -306,90 +333,102 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
             currentBranchIndex: branchInfo.currentIndex,
             branchCount: branchInfo.count,
             isRewound: isRewoundTree(tree),
+            canGoForward: currentNode.children.length > 0,
         };
     }, [tree]);
 
-    // 盤面履歴を計算（メインラインのノードから抽出）
+    // 現在位置までのノードパスを計算
+    const currentLinePath = useMemo(() => {
+        const path: typeof tree.nodes extends Map<string, infer N> ? N[] : never[] = [];
+        let nodeId: string | null = tree.currentNodeId;
+
+        // 現在位置からルートまで遡る
+        while (nodeId !== null) {
+            const node = tree.nodes.get(nodeId);
+            if (!node) break;
+            path.unshift(node);
+            nodeId = node.parentId;
+        }
+
+        return path;
+    }, [tree]);
+
+    // 盤面履歴を計算（現在のラインから抽出）
     const boardHistory = useMemo((): BoardState[] => {
         const history: BoardState[] = [];
-        let nodeId = tree.rootId;
-        let node = tree.nodes.get(nodeId);
 
-        while (node) {
+        for (const node of currentLinePath) {
             // ルート以外のノードについて、適用前の盤面を記録
             if (node.ply > 0) {
                 history.push(node.boardBefore);
             }
-
-            if (node.children.length > 0) {
-                nodeId = node.children[0];
-                node = tree.nodes.get(nodeId);
-            } else {
-                break;
-            }
         }
 
         return history;
-    }, [tree]);
+    }, [currentLinePath]);
 
-    // KIF形式の棋譜を生成
+    // KIF形式の棋譜を生成（現在のラインに対応）
     const kifMoves = useMemo((): KifMove[] => {
-        const moves = getMainLineMoves(tree);
+        // 現在のラインから指し手を抽出
+        const moves: string[] = [];
+        const evalMap = new Map<number, { scoreCp?: number; scoreMate?: number; depth?: number }>();
+
+        for (const node of currentLinePath) {
+            if (node.usiMove !== null) {
+                moves.push(node.usiMove);
+            }
+            if (node.eval) {
+                evalMap.set(node.ply, node.eval);
+            }
+        }
+
         if (moves.length === 0 || boardHistory.length === 0) {
             return [];
         }
 
-        // 評価値マップを生成
-        const evalMap = new Map<number, { scoreCp?: number; scoreMate?: number; depth?: number }>();
-        let nodeId = tree.rootId;
-        let node = tree.nodes.get(nodeId);
-
-        while (node) {
-            if (node.eval) {
-                evalMap.set(node.ply, node.eval);
-            }
-            if (node.children.length > 0) {
-                nodeId = node.children[0];
-                node = tree.nodes.get(nodeId);
-            } else {
-                break;
-            }
-        }
-
         const validMoves = moves.slice(0, boardHistory.length);
         return convertMovesToKif(validMoves, boardHistory, evalMap);
-    }, [tree, boardHistory]);
+    }, [currentLinePath, boardHistory]);
 
-    // 評価値履歴を生成（グラフ用）
+    // 評価値履歴を生成（グラフ用、現在のラインに対応）
     const evalHistory = useMemo((): EvalHistory[] => {
         const history: EvalHistory[] = [{ ply: 0, evalCp: 0, evalMate: null }];
 
-        let nodeId = tree.rootId;
-        let node = tree.nodes.get(nodeId);
+        for (const node of currentLinePath) {
+            // ルートはスキップ（ply: 0はすでに追加済み）
+            if (node.ply === 0) continue;
 
-        while (node && node.children.length > 0) {
-            nodeId = node.children[0];
-            node = tree.nodes.get(nodeId);
+            const ply = node.ply;
+            const evalData = node.eval;
 
-            if (node) {
-                const ply = node.ply;
-                const evalData = node.eval;
+            // エンジンの評価値は「指した側から見た値」なので、
+            // 後手の手（偶数手）は符号を反転して先手視点に正規化
+            const isGoteMove = ply % 2 === 0;
+            const sign = isGoteMove ? -1 : 1;
 
-                // エンジンの評価値は「指した側から見た値」なので、
-                // 後手の手（偶数手）は符号を反転して先手視点に正規化
-                const isGoteMove = ply % 2 === 0;
-                const sign = isGoteMove ? -1 : 1;
-
-                history.push({
-                    ply,
-                    evalCp: evalData?.scoreCp != null ? evalData.scoreCp * sign : null,
-                    evalMate: evalData?.scoreMate != null ? evalData.scoreMate * sign : null,
-                });
-            }
+            history.push({
+                ply,
+                evalCp: evalData?.scoreCp != null ? evalData.scoreCp * sign : null,
+                evalMate: evalData?.scoreMate != null ? evalData.scoreMate * sign : null,
+            });
         }
 
         return history;
-    }, [tree]);
+    }, [currentLinePath]);
+
+    // 分岐マーカーを計算（現在のラインで分岐がある手数とその分岐数）
+    const branchMarkers = useMemo((): Map<number, number> => {
+        const markers = new Map<number, number>();
+
+        for (const node of currentLinePath) {
+            // 子が2つ以上あれば分岐が存在
+            if (node.children.length > 1) {
+                markers.set(node.ply, node.children.length);
+            }
+        }
+
+        return markers;
+    }, [currentLinePath]);
 
     return {
         state,
@@ -409,6 +448,7 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
         kifMoves,
         evalHistory,
         boardHistory,
+        branchMarkers,
         tree,
     };
 }

@@ -20,7 +20,7 @@ interface BranchInfo {
 interface KifuNavigationToolbarProps {
     /** 現在の手数 */
     currentPly: number;
-    /** 最大手数 */
+    /** 最大手数（メインライン） */
     totalPly: number;
     /** 1手戻る */
     onBack: () => void;
@@ -36,6 +36,8 @@ interface KifuNavigationToolbarProps {
     branchInfo?: BranchInfo;
     /** 巻き戻し中か */
     isRewound?: boolean;
+    /** 進む操作が可能か（現在ノードに子がある） */
+    canGoForward?: boolean;
 }
 
 /**
@@ -85,11 +87,13 @@ export function KifuNavigationToolbar({
     disabled = false,
     branchInfo,
     isRewound = false,
+    canGoForward: canGoForwardProp,
 }: KifuNavigationToolbarProps): ReactElement {
     const [showBranchMenu, setShowBranchMenu] = useState(false);
 
     const canGoBack = currentPly > 0;
-    const canGoForward = currentPly < totalPly;
+    // canGoForward: propsで明示されていればそれを使用、そうでなければ従来の計算
+    const canGoForward = canGoForwardProp ?? currentPly < totalPly;
 
     const handleBranchSelect = useCallback(
         (index: number) => {
@@ -132,7 +136,7 @@ export function KifuNavigationToolbar({
             </NavButton>
 
             {/* 分岐切替（分岐がある場合のみ表示） */}
-            {branchInfo && branchInfo.hasBranches && (
+            {branchInfo?.hasBranches && (
                 <div className="relative">
                     <button
                         type="button"
