@@ -8,18 +8,52 @@ import type { ReactElement } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { KifMove } from "../utils/kifFormat";
 import { formatEval } from "../utils/kifFormat";
+import { KifuNavigationToolbar } from "./KifuNavigationToolbar";
+
+interface BranchInfo {
+    hasBranches: boolean;
+    currentIndex: number;
+    count: number;
+    onSwitch: (index: number) => void;
+    onPromoteToMain?: () => void;
+}
+
+interface NavigationProps {
+    /** 現在の手数 */
+    currentPly: number;
+    /** 最大手数 */
+    totalPly: number;
+    /** 1手戻る */
+    onBack: () => void;
+    /** 1手進む */
+    onForward: () => void;
+    /** 最初へ */
+    onToStart: () => void;
+    /** 最後へ */
+    onToEnd: () => void;
+    /** 巻き戻し中か */
+    isRewound?: boolean;
+    /** 分岐情報 */
+    branchInfo?: BranchInfo;
+}
 
 interface KifuPanelProps {
     /** KIF形式の指し手リスト */
     kifMoves: KifMove[];
     /** 現在の手数（ハイライト用） */
     currentPly: number;
-    /** 手数クリック時のコールバック（将来：局面ジャンプ用） */
+    /** 手数クリック時のコールバック（局面ジャンプ用） */
     onPlySelect?: (ply: number) => void;
     /** 評価値を表示するか */
     showEval?: boolean;
     /** KIF形式でコピーするときのコールバック（KIF文字列を返す） */
     onCopyKif?: () => string;
+    /** ナビゲーション機能（提供された場合はツールバーを表示） */
+    navigation?: NavigationProps;
+    /** ナビゲーション無効化（対局中など） */
+    navigationDisabled?: boolean;
+    /** 分岐マーカー（ply -> 分岐数） */
+    branchMarkers?: Map<number, number>;
 }
 
 /**
@@ -44,6 +78,9 @@ export function KifuPanel({
     onPlySelect,
     showEval = true,
     onCopyKif,
+    navigation,
+    navigationDisabled = false,
+    branchMarkers,
 }: KifuPanelProps): ReactElement {
     const listRef = useRef<HTMLDivElement>(null);
     const currentRowRef = useRef<HTMLElement>(null);
@@ -113,6 +150,21 @@ export function KifuPanel({
                 )}
             </div>
 
+            {/* ナビゲーションツールバー */}
+            {navigation && (
+                <KifuNavigationToolbar
+                    currentPly={navigation.currentPly}
+                    totalPly={navigation.totalPly}
+                    onBack={navigation.onBack}
+                    onForward={navigation.onForward}
+                    onToStart={navigation.onToStart}
+                    onToEnd={navigation.onToEnd}
+                    disabled={navigationDisabled}
+                    branchInfo={navigation.branchInfo}
+                    isRewound={navigation.isRewound}
+                />
+            )}
+
             <div ref={listRef} className="max-h-60 overflow-auto my-2">
                 {kifMoves.length === 0 ? (
                     <div className="text-[13px] text-muted-foreground text-center py-4">
@@ -121,16 +173,35 @@ export function KifuPanel({
                 ) : (
                     kifMoves.map((move) => {
                         const isCurrent = move.ply === currentPly;
+                        const isPastCurrent = navigation?.isRewound && move.ply > currentPly;
                         const evalText = showEval ? formatEval(move.evalCp, move.evalMate) : "";
+                        const hasBranch = branchMarkers?.has(move.ply);
+                        const branchCount = branchMarkers?.get(move.ply);
 
                         const content = (
                             <>
-                                <span className="text-right text-muted-foreground text-xs">
+                                <span
+                                    className={`text-right text-xs ${isPastCurrent ? "text-muted-foreground/50" : "text-muted-foreground"}`}
+                                >
                                     {move.ply}
+                                    {hasBranch && (
+                                        <span
+                                            className="ml-0.5 text-wafuu-shu"
+                                            title={`${branchCount}つの分岐`}
+                                        >
+                                            ◆
+                                        </span>
+                                    )}
                                 </span>
-                                <span className="font-medium">{move.displayText}</span>
+                                <span
+                                    className={`font-medium ${isPastCurrent ? "text-muted-foreground/50" : ""}`}
+                                >
+                                    {move.displayText}
+                                </span>
                                 {showEval && evalText && (
-                                    <span className={getEvalClassName(move.evalCp, move.evalMate)}>
+                                    <span
+                                        className={`${getEvalClassName(move.evalCp, move.evalMate)} ${isPastCurrent ? "opacity-50" : ""}`}
+                                    >
                                         {evalText}
                                     </span>
                                 )}
