@@ -699,13 +699,36 @@ impl Iterator for MovePicker<'_> {
 // ユーティリティ関数
 // =============================================================================
 
+/// 挿入ソートからPDQSortに切り替えるしきい値
+///
+/// 小さい配列では挿入ソートが高速だが、大きい配列ではPDQSort（O(n log n)）が
+/// 挿入ソート（O(n²)）より高速。将棋の平均合法手数は約100手のため、
+/// 大半のケースでPDQSortが適用される。
+///
+/// 16という値は、一般的なソートアルゴリズムの実装（std::sort等）で
+/// 挿入ソートへのフォールバック閾値として広く使われている値。
+/// Rust標準ライブラリのPDQSortも内部で同様の閾値を使用している。
+const SORT_SWITCH_THRESHOLD: usize = 16;
+
 /// 部分挿入ソート（配列の先頭からend まで）
 ///
 /// `limit` より大きいスコアの手だけを降順でソートする。
+/// `limit = i32::MIN`の場合は全要素をソートする（この場合、大きい配列ではPDQSortを使用）。
 fn partial_insertion_sort(moves: &mut [ExtMove], end: usize, limit: i32) {
     if end <= 1 {
         return;
     }
+
+    // limit = i32::MIN の場合は全要素ソート
+    // 大きい配列では標準ライブラリのPDQSortを使用（O(n log n)）
+    if limit == i32::MIN && end > SORT_SWITCH_THRESHOLD {
+        let slice = &mut moves[..end];
+        // 降順ソート
+        slice.sort_unstable_by(|a, b| b.value.cmp(&a.value));
+        return;
+    }
+
+    // 小さい配列または部分ソートの場合は挿入ソート
     let mut sorted_end = 0;
 
     for p in 1..end {

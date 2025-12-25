@@ -5,6 +5,7 @@
 #   ./scripts/perf_profile_nnue.sh          # release build（推奨）
 #   ./scripts/perf_profile_nnue.sh --debug  # debug build（シンボル詳細）
 #   ./scripts/perf_profile_nnue.sh --movetime 10000  # movetimeを10秒に設定
+#   ./scripts/perf_profile_nnue.sh --threads 8       # 8スレッドでプロファイル
 #   ./scripts/perf_profile_nnue.sh --nnue-file /path/to/nn.bin  # NNUEファイル指定
 #
 # release buildでもシンボル情報を保持するため、frame-pointersを有効化
@@ -20,6 +21,7 @@ CONF_EXAMPLE="$SCRIPT_DIR/perf.conf.example"
 # デフォルト値（NNUE_FILE以外）
 BUILD_MODE="release"
 MOVETIME=5000
+THREADS=1
 
 # 設定ファイルの読み込み
 if [ ! -f "$CONF_FILE" ]; then
@@ -53,22 +55,27 @@ while [[ $# -gt 0 ]]; do
             MOVETIME="$2"
             shift 2
             ;;
+        --threads|-t)
+            THREADS="$2"
+            shift 2
+            ;;
         --nnue-file)
             NNUE_FILE="$2"
             shift 2
             ;;
         -h|--help)
-            echo "Usage: $0 [--debug] [--movetime <ms>] [--nnue-file <path>]"
+            echo "Usage: $0 [--debug] [--movetime <ms>] [--threads <n>] [--nnue-file <path>]"
             echo ""
             echo "Options:"
             echo "  --debug            debug buildでプロファイリング"
             echo "  --movetime <ms>    探索時間 (default: 5000)"
+            echo "  --threads <n>      スレッド数 (default: 1)"
             echo "  --nnue-file <path> NNUEファイルのパス (default: perf.confの設定値)"
             exit 0
             ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--debug] [--movetime <ms>] [--nnue-file <path>]"
+            echo "Usage: $0 [--debug] [--movetime <ms>] [--threads <n>] [--nnue-file <path>]"
             exit 1
             ;;
     esac
@@ -99,29 +106,31 @@ else
 fi
 
 echo ""
-echo "=== Running perf record with NNUE (${MOVETIME}ms × 4 positions) ==="
+echo "=== Running perf record with NNUE (${MOVETIME}ms × 4 positions, ${THREADS} threads) ==="
 echo "Build mode: $BUILD_MODE"
 echo "Binary: $BINARY"
+echo "Threads: $THREADS"
 
 # benchmarkツールをperf経由で実行
 sudo perf record -g --call-graph fp -o perf_nnue.data \
     "$BINARY" --internal --nnue-file "$NNUE_FILE" \
-    --limit-type movetime --limit "$MOVETIME" --iterations 1
+    --limit-type movetime --limit "$MOVETIME" --iterations 1 --threads "$THREADS"
 
 # 結果をファイルに保存
 OUTPUT_DIR="./perf_results"
 mkdir -p "$OUTPUT_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-OUTPUT_FILE="$OUTPUT_DIR/${TIMESTAMP}_nnue_${BUILD_MODE}.txt"
+OUTPUT_FILE="$OUTPUT_DIR/${TIMESTAMP}_nnue_${BUILD_MODE}_${THREADS}t.txt"
 
 {
     echo "=== NNUE Perf Profile ==="
     echo "Timestamp: $(date -Iseconds)"
     echo "Build mode: $BUILD_MODE"
+    echo "Threads: $THREADS"
     echo "Movetime: ${MOVETIME}ms"
     echo "NNUE file: $NNUE_FILE"
     echo ""
-    echo "=== Top hotspots (NNUE enabled, $BUILD_MODE build) ==="
+    echo "=== Top hotspots (NNUE enabled, $BUILD_MODE build, ${THREADS} threads) ==="
     sudo perf report -i perf_nnue.data --stdio --no-children -g caller --percent-limit 0.5 2>/dev/null | head -200
 } | tee "$OUTPUT_FILE"
 
