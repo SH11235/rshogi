@@ -1,4 +1,4 @@
-import type { Player, PositionState } from "@shogi/app-core";
+import type { GameResult, Player, PositionState } from "@shogi/app-core";
 import type {
     EngineClient,
     EngineEvent,
@@ -39,7 +39,7 @@ interface BestmoveHandlerParams {
 interface BestmoveHandlerResult {
     action: "apply_move" | "end_match" | "skip";
     move?: string;
-    message?: string;
+    gameResult?: GameResult;
     shouldClearActive: boolean;
     shouldUpdateRequestPly: boolean;
 }
@@ -78,7 +78,7 @@ interface UseEngineManagerProps {
     /** エンジンからの手を適用するコールバック */
     onMoveFromEngine: (move: string) => void;
     /** 対局終了時のコールバック */
-    onMatchEnd: (message: string) => Promise<void>;
+    onMatchEnd: (result: GameResult) => Promise<void>;
     /** 評価値更新時のコールバック */
     onEvalUpdate?: (ply: number, event: EngineInfoEvent) => void;
     /** ログの最大件数 */
@@ -125,7 +125,7 @@ export function formatEvent(event: EngineEvent, label: string): string {
 }
 
 export function determineBestmoveAction(params: BestmoveHandlerParams): BestmoveHandlerResult {
-    const { move, side, engineId, activeSearch } = params;
+    const { move, side, engineId, activeSearch, movesCount } = params;
 
     // Active Searchのマッチング確認
     if (!activeSearch || activeSearch.engineId !== engineId || activeSearch.side !== side) {
@@ -140,29 +140,40 @@ export function determineBestmoveAction(params: BestmoveHandlerParams): Bestmove
     const trimmed = move.trim();
     const token = trimmed.toLowerCase();
 
-    // 特殊メッセージの確認
-    const sideLabel = side === "sente" ? "先手" : "後手";
-    const opponentLabel = side === "sente" ? "後手" : "先手";
+    // 勝者の計算
+    const winner: Player = side === "sente" ? "gote" : "sente";
 
     switch (token) {
         case "win":
             return {
                 action: "end_match",
-                message: `対局終了: ${sideLabel}が勝利宣言しました（win）。`,
+                gameResult: {
+                    winner: side,
+                    reason: { kind: "win_declaration", winner: side },
+                    totalMoves: movesCount,
+                },
                 shouldClearActive: true,
                 shouldUpdateRequestPly: true,
             };
         case "resign":
             return {
                 action: "end_match",
-                message: `対局終了: ${sideLabel}が投了しました（resign）。${opponentLabel}の勝ち。`,
+                gameResult: {
+                    winner,
+                    reason: { kind: "resignation", loser: side },
+                    totalMoves: movesCount,
+                },
                 shouldClearActive: true,
                 shouldUpdateRequestPly: true,
             };
         case "none":
             return {
                 action: "end_match",
-                message: `対局終了: ${sideLabel}が合法手なし（bestmove none）。${opponentLabel}の勝ち。`,
+                gameResult: {
+                    winner,
+                    reason: { kind: "checkmate", loser: side },
+                    totalMoves: movesCount,
+                },
                 shouldClearActive: true,
                 shouldUpdateRequestPly: true,
             };
@@ -377,8 +388,8 @@ export function useEngineManager({
 
                     switch (result.action) {
                         case "end_match":
-                            if (result.message) {
-                                onMatchEnd(result.message).catch((err) => {
+                            if (result.gameResult) {
+                                onMatchEnd(result.gameResult).catch((err) => {
                                     addErrorLog(`対局終了処理でエラー: ${String(err)}`);
                                 });
                             }

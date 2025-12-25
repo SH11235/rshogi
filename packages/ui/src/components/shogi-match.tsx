@@ -4,6 +4,7 @@ import {
     boardToMatrix,
     cloneBoard,
     createEmptyHands,
+    type GameResult,
     getAllSquares,
     getPositionService,
     type LastMove,
@@ -24,6 +25,8 @@ import { ClockDisplayPanel } from "./shogi-match/components/ClockDisplayPanel";
 import { EditModePanel } from "./shogi-match/components/EditModePanel";
 import { EngineLogsPanel } from "./shogi-match/components/EngineLogsPanel";
 import { EvalPanel } from "./shogi-match/components/EvalPanel";
+import { GameResultBanner } from "./shogi-match/components/GameResultBanner";
+import { GameResultDialog } from "./shogi-match/components/GameResultDialog";
 import { HandPiecesDisplay } from "./shogi-match/components/HandPiecesDisplay";
 import { KifuIOPanel } from "./shogi-match/components/KifuIOPanel";
 import { MatchControls } from "./shogi-match/components/MatchControls";
@@ -217,6 +220,9 @@ export function ShogiMatch({
     const [selection, setSelection] = useState<Selection | null>(null);
     const [promotionSelection, setPromotionSelection] = useState<PromotionSelection | null>(null);
     const [message, setMessage] = useState<string | null>(null);
+    const [gameResult, setGameResult] = useState<GameResult | null>(null);
+    const [showResultDialog, setShowResultDialog] = useState(false);
+    const [showResultBanner, setShowResultBanner] = useState(false);
     const [editMessage, setEditMessage] = useState<string | null>(null);
     const [flipBoard, setFlipBoard] = useState(false);
     const [timeSettings, setTimeSettings] = useState<ClockSettings>({
@@ -270,7 +276,7 @@ export function ShogiMatch({
     const settingsLocked = isMatchRunning;
 
     // endMatch のための ref（循環依存を回避）
-    const endMatchRef = useRef<((message: string) => Promise<void>) | null>(null);
+    const endMatchRef = useRef<((result: GameResult) => Promise<void>) | null>(null);
 
     const handleClockError = useCallback((message: string) => {
         setMessage(message);
@@ -284,11 +290,13 @@ export function ShogiMatch({
             timeSettings,
             isMatchRunning,
             onTimeExpired: async (side) => {
-                const loserLabel = side === "sente" ? "先手" : "後手";
-                const winnerLabel = side === "sente" ? "後手" : "先手";
-                await endMatchRef.current?.(
-                    `対局終了: ${loserLabel}が時間切れ。${winnerLabel}の勝ち。`,
-                );
+                const winner: Player = side === "sente" ? "gote" : "sente";
+                const result: GameResult = {
+                    winner,
+                    reason: { kind: "time_expired", loser: side },
+                    totalMoves: movesRef.current.length,
+                };
+                await endMatchRef.current?.(result);
             },
             matchEndedRef,
             onClockError: handleClockError,
@@ -296,10 +304,12 @@ export function ShogiMatch({
 
     // 対局終了処理（エンジン管理フックから呼ばれる）
     const endMatch = useCallback(
-        async (nextMessage: string) => {
+        async (result: GameResult) => {
             if (matchEndedRef.current) return;
             matchEndedRef.current = true;
-            setMessage(nextMessage);
+            setGameResult(result);
+            setShowResultDialog(true);
+            setShowResultBanner(false);
             setIsMatchRunning(false);
             stopTicking();
             try {
@@ -307,9 +317,7 @@ export function ShogiMatch({
             } catch (error) {
                 console.error("エンジン停止に失敗しました:", error);
                 setMessage(
-                    (prev) =>
-                        prev ??
-                        `対局終了処理でエンジン停止に失敗しました: ${String(error ?? "unknown")}`,
+                    `対局終了処理でエンジン停止に失敗しました: ${String(error ?? "unknown")}`,
                 );
             }
         },
@@ -467,6 +475,9 @@ export function ShogiMatch({
 
     const resetToBasePosition = useCallback(async () => {
         matchEndedRef.current = false;
+        setGameResult(null);
+        setShowResultDialog(false);
+        setShowResultBanner(false);
         await stopAllEngines();
         const service = getPositionService();
         let next = basePosition ? clonePositionState(basePosition) : null;
@@ -1088,6 +1099,16 @@ export function ShogiMatch({
                 ownerOrientation={flipBoard ? "gote" : "sente"}
             />
 
+            {/* 勝敗表示ダイアログ */}
+            <GameResultDialog
+                result={gameResult}
+                open={showResultDialog}
+                onClose={() => {
+                    setShowResultDialog(false);
+                    setShowResultBanner(true);
+                }}
+            />
+
             <section
                 style={{
                     display: "flex",
@@ -1097,6 +1118,17 @@ export function ShogiMatch({
                     padding: "16px 0",
                 }}
             >
+                {/* 勝敗表示バナー */}
+                <GameResultBanner
+                    result={gameResult}
+                    visible={showResultBanner}
+                    onShowDetail={() => {
+                        setShowResultDialog(true);
+                        setShowResultBanner(false);
+                    }}
+                    onClose={() => setShowResultBanner(false)}
+                />
+
                 <div
                     style={{
                         display: "flex",

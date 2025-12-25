@@ -20,6 +20,8 @@ interface EvalGraphProps {
     height?: number;
     /** 最小スケール範囲（センチポーン、デフォルト: 500 = ±5歩） */
     minScale?: number;
+    /** クリック時のコールバック */
+    onClick?: () => void;
 }
 
 /**
@@ -101,6 +103,7 @@ export function EvalGraph({
     compact = false,
     height: customHeight,
     minScale = 500,
+    onClick,
 }: EvalGraphProps): ReactElement {
     const height = customHeight ?? (compact ? 60 : 80);
     const padding = { top: 4, bottom: 4, left: 0, right: 0 };
@@ -121,21 +124,58 @@ export function EvalGraph({
         return computeNiceScale(maxAbs, minScale);
     }, [evalHistory, minScale]);
 
-    // ポイントの計算
-    const points = useMemo(() => {
-        if (evalHistory.length === 0) return "";
+    // ポイントの計算（null値を除外して連続した区間ごとにセグメントを生成）
+    // viewBox="0 0 100 height" なので x は 0-100 の数値、y はピクセル値
+    const lineSegments = useMemo(() => {
+        if (evalHistory.length === 0) return [];
+
+        const maxPly = Math.max(evalHistory.length - 1, 1);
+        const segments: string[][] = [];
+        let currentSegment: string[] = [];
+
+        evalHistory.forEach((entry, index) => {
+            const hasValue = entry.evalCp !== null || entry.evalMate !== null;
+            if (hasValue) {
+                const x = (index / maxPly) * 100;
+                const y =
+                    padding.top +
+                    evalToYWithScale(entry.evalCp, entry.evalMate, graphHeight, scaleMax);
+                currentSegment.push(`${x},${y}`);
+            } else {
+                // null値で区切り
+                if (currentSegment.length > 0) {
+                    segments.push(currentSegment);
+                    currentSegment = [];
+                }
+            }
+        });
+
+        // 最後のセグメントを追加
+        if (currentSegment.length > 0) {
+            segments.push(currentSegment);
+        }
+
+        return segments;
+    }, [evalHistory, graphHeight, scaleMax]);
+
+    // ドット表示用のポイント（評価値がある手のみ）
+    const dots = useMemo(() => {
+        if (evalHistory.length === 0) return [];
 
         const maxPly = Math.max(evalHistory.length - 1, 1);
 
         return evalHistory
             .map((entry, index) => {
+                const hasValue = entry.evalCp !== null || entry.evalMate !== null;
+                if (!hasValue) return null;
+
                 const x = (index / maxPly) * 100;
                 const y =
                     padding.top +
                     evalToYWithScale(entry.evalCp, entry.evalMate, graphHeight, scaleMax);
-                return `${x}%,${y}`;
+                return { x, y, index };
             })
-            .join(" ");
+            .filter((dot): dot is { x: number; y: number; index: number } => dot !== null);
     }, [evalHistory, graphHeight, scaleMax]);
 
     // 現在位置のマーカー
@@ -148,32 +188,44 @@ export function EvalGraph({
         const y =
             padding.top + evalToYWithScale(entry?.evalCp, entry?.evalMate, graphHeight, scaleMax);
 
-        return { x: `${x}%`, y };
+        return { x, y };
     }, [currentPly, evalHistory, graphHeight, scaleMax]);
 
-    // 塗りつぶし領域のパス
+    // 塗りつぶし領域のパス（null値を除外）
     const fillPath = useMemo(() => {
         if (evalHistory.length === 0) return "";
 
         const maxPly = Math.max(evalHistory.length - 1, 1);
         const centerY = padding.top + graphHeight / 2;
 
-        const pathPoints = evalHistory.map((entry, index) => {
-            const x = (index / maxPly) * 100;
-            const y =
-                padding.top + evalToYWithScale(entry.evalCp, entry.evalMate, graphHeight, scaleMax);
-            return { x, y };
-        });
+        // 有効な値のみを抽出
+        const validPoints = evalHistory
+            .map((entry, index) => {
+                const hasValue = entry.evalCp !== null || entry.evalMate !== null;
+                if (!hasValue) return null;
+
+                const x = (index / maxPly) * 100;
+                const y =
+                    padding.top +
+                    evalToYWithScale(entry.evalCp, entry.evalMate, graphHeight, scaleMax);
+                return { x, y };
+            })
+            .filter((p): p is { x: number; y: number } => p !== null);
+
+        if (validPoints.length === 0) return "";
 
         // 上半分（先手有利）のパス
-        const upperPath = pathPoints
+        const upperPath = validPoints
             .map((p, i) => {
                 const y = Math.min(p.y, centerY);
-                return `${i === 0 ? "M" : "L"} ${p.x}% ${y}`;
+                return `${i === 0 ? "M" : "L"} ${p.x} ${y}`;
             })
             .join(" ");
 
-        const upperClose = `L ${100}% ${centerY} L 0% ${centerY} Z`;
+        // 最後の点から中央線へ、そして最初の点まで戻る
+        const lastPoint = validPoints[validPoints.length - 1];
+        const firstPoint = validPoints[0];
+        const upperClose = `L ${lastPoint.x} ${centerY} L ${firstPoint.x} ${centerY} Z`;
 
         return upperPath + upperClose;
     }, [evalHistory, graphHeight, scaleMax]);
@@ -209,7 +261,14 @@ export function EvalGraph({
     if (compact) {
         // コンパクト表示（目盛り付き）
         return (
-            <div style={containerStyle}>
+            // biome-ignore lint/a11y/noStaticElementInteractions: role/tabIndex are conditionally set when onClick is provided
+            <div
+                style={{ ...containerStyle, cursor: onClick ? "pointer" : undefined }}
+                onClick={onClick}
+                onKeyDown={onClick ? (e) => e.key === "Enter" && onClick() : undefined}
+                role={onClick ? "button" : undefined}
+                tabIndex={onClick ? 0 : undefined}
+            >
                 {/* Y軸ラベル */}
                 {yAxisLabels
                     .filter((_, i) => i % 2 === 0) // 上・中・下の3つだけ表示
@@ -254,16 +313,28 @@ export function EvalGraph({
                             />
                         )}
 
-                        {/* 評価値ライン */}
-                        {points && (
+                        {/* 評価値ライン（連続した区間ごとに描画） */}
+                        {lineSegments.map((segment) => (
                             <polyline
-                                points={points}
+                                key={`seg-${segment[0]}`}
+                                points={segment.join(" ")}
                                 fill="none"
                                 stroke="hsl(var(--wafuu-shu, 350 80% 45%))"
                                 strokeWidth="2"
                                 vectorEffect="non-scaling-stroke"
                             />
-                        )}
+                        ))}
+
+                        {/* 各ポイントにドット表示 */}
+                        {dots.map((dot) => (
+                            <circle
+                                key={`dot-${dot.index}`}
+                                cx={dot.x}
+                                cy={dot.y}
+                                r="1.5"
+                                fill="hsl(var(--wafuu-shu, 350 80% 45%))"
+                            />
+                        ))}
 
                         {/* 現在位置マーカー */}
                         {currentMarker && (
@@ -290,7 +361,15 @@ export function EvalGraph({
     // 通常表示
     const displayMax = scaleMax / 100;
     return (
-        <div className="bg-card border border-border rounded-xl p-3 shadow-lg w-[var(--panel-width)]">
+        // biome-ignore lint/a11y/noStaticElementInteractions: role/tabIndex are conditionally set when onClick is provided
+        <div
+            className="bg-card border border-border rounded-xl p-3 shadow-lg w-[var(--panel-width)]"
+            style={{ cursor: onClick ? "pointer" : undefined }}
+            onClick={onClick}
+            onKeyDown={onClick ? (e) => e.key === "Enter" && onClick() : undefined}
+            role={onClick ? "button" : undefined}
+            tabIndex={onClick ? 0 : undefined}
+        >
             <div className="font-bold mb-1.5 text-sm">評価値推移</div>
             <div className="relative w-full" style={{ height }}>
                 {/* 左側ラベル */}
@@ -361,16 +440,28 @@ export function EvalGraph({
                         <path d={fillPath} fill="hsl(var(--wafuu-shu) / 0.15)" stroke="none" />
                     )}
 
-                    {/* 評価値ライン */}
-                    {points && (
+                    {/* 評価値ライン（連続した区間ごとに描画） */}
+                    {lineSegments.map((segment) => (
                         <polyline
-                            points={points}
+                            key={`seg-${segment[0]}`}
+                            points={segment.join(" ")}
                             fill="none"
                             stroke="hsl(var(--wafuu-shu))"
                             strokeWidth="2"
                             vectorEffect="non-scaling-stroke"
                         />
-                    )}
+                    ))}
+
+                    {/* 各ポイントにドット表示 */}
+                    {dots.map((dot) => (
+                        <circle
+                            key={`dot-${dot.index}`}
+                            cx={dot.x}
+                            cy={dot.y}
+                            r="1.5"
+                            fill="hsl(var(--wafuu-shu))"
+                        />
+                    ))}
 
                     {/* 現在位置マーカー */}
                     {currentMarker && (
