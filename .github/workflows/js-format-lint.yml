@@ -41,11 +41,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10.24.0
       - id: versions
         run: |
-          echo "pnpm=$(node -p "require('./package.json').packageManager.split('@')[1]")" >> "$GITHUB_OUTPUT"
           echo "node=$(node -p "require('./package.json').volta.node")" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v6
         with:
@@ -55,16 +52,12 @@ jobs:
       - run: pnpm format:ci
 
   lint:
-    needs: format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10.24.0
       - id: versions
         run: |
-          echo "pnpm=$(node -p "require('./package.json').packageManager.split('@')[1]")" >> "$GITHUB_OUTPUT"
           echo "node=$(node -p "require('./package.json').volta.node")" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v6
         with:
@@ -74,16 +67,12 @@ jobs:
       - run: pnpm lint
 
   knip:
-    needs: format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10.24.0
       - id: versions
         run: |
-          echo "pnpm=$(node -p "require('./package.json').packageManager.split('@')[1]")" >> "$GITHUB_OUTPUT"
           echo "node=$(node -p "require('./package.json').volta.node")" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v6
         with:
@@ -92,17 +81,29 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm knip:ci
 
-  build:
-    needs: format
+  typecheck:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10.24.0
       - id: versions
         run: |
-          echo "pnpm=$(node -p "require('./package.json').packageManager.split('@')[1]")" >> "$GITHUB_OUTPUT"
+          echo "node=$(node -p "require('./package.json').volta.node")" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ steps.versions.outputs.node }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # engine-wasm は Wasm ビルド成果物 (pkg/) に依存するため、build ジョブで typecheck を実行
+      - run: pnpm turbo typecheck --filter="!@shogi/engine-wasm"
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - id: versions
+        run: |
           echo "node=$(node -p "require('./package.json').volta.node")" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v6
         with:
@@ -140,6 +141,8 @@ jobs:
           cache-on-failure: true
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+      # engine-wasm は Wasm ビルド成果物 (pkg/) を参照するため、ビルド後に typecheck を実行
+      - run: pnpm turbo typecheck --filter="@shogi/engine-wasm"
       - name: sccache stats
         if: always()
         run: sccache --show-stats || true
