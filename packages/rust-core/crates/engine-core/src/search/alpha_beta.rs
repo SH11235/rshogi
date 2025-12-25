@@ -278,6 +278,12 @@ pub struct SearchWorker {
     /// 探索時のNNUE差分更新用。Position.do_move/undo_moveと同期してpush/popする。
     /// StateInfoからAccumulatorを分離することで、do_moveでの初期化コストを削減。
     pub nnue_stack: AccumulatorStack,
+
+    // =========================================================================
+    // 頻度制御（YaneuraOu準拠）
+    // =========================================================================
+    /// check_abort呼び出しカウンター（512回に1回チェック）
+    calls_cnt: i32,
 }
 
 impl SearchWorker {
@@ -332,6 +338,8 @@ impl SearchWorker {
             max_moves_to_draw,
             nmp_min_ply: 0,
             nnue_stack: AccumulatorStack::new(),
+            // 頻度制御
+            calls_cnt: 0,
         });
         worker.reset_cont_history_ptrs();
         worker
@@ -450,13 +458,27 @@ impl SearchWorker {
     }
 
     /// 中断チェック
+    /// YaneuraOu準拠: 512回に1回だけ実際のチェックを行う
     #[inline]
     fn check_abort(&mut self, limits: &LimitsType, time_manager: &mut TimeManagement) -> bool {
+        // すでにabortフラグが立っている場合は即座に返す
         if self.abort {
             #[cfg(debug_assertions)]
             eprintln!("check_abort: abort flag already set");
             return true;
         }
+
+        // 頻度制御：512回に1回だけ実際のチェックを行う（YaneuraOu準拠）
+        self.calls_cnt -= 1;
+        if self.calls_cnt > 0 {
+            return false;
+        }
+        // カウンターをリセット
+        self.calls_cnt = if limits.nodes > 0 {
+            std::cmp::min(512, (limits.nodes / 1024) as i32).max(1)
+        } else {
+            512
+        };
 
         // 外部からの停止要求
         if time_manager.stop_requested() {
@@ -477,9 +499,9 @@ impl SearchWorker {
             return true;
         }
 
-        // 時間制限チェック（1024ノードごと）
-        // YaneuraOu準拠の2フェーズロジック（main threadのみ）
-        if self.thread_id == 0 && self.nodes & 1023 == 0 {
+        // 時間制限チェック（main threadのみ）
+        // YaneuraOu準拠の2フェーズロジック
+        if self.thread_id == 0 {
             // ponderhit フラグをポーリングし、検知したら通常探索へ切り替える
             if time_manager.take_ponderhit() {
                 time_manager.on_ponderhit();
@@ -2375,7 +2397,7 @@ impl SearchWorker {
                             self.history.low_ply_history.update(ply as usize, m, low_ply_malus);
                         }
 
-                        // ContinuationHistoryへのペナルティ
+                        // ContinuationHistory/PawnHistoryへのペナルティで必要な情報
                         let moved_pc = pos.moved_piece(m);
                         let cont_pc = if m.is_promotion() {
                             moved_pc.promote().unwrap_or(moved_pc)
@@ -2384,6 +2406,7 @@ impl SearchWorker {
                         };
                         let to = m.to();
 
+                        // ContinuationHistoryへのペナルティ
                         for &(ply_back, weight) in CONTINUATION_HISTORY_WEIGHTS.iter() {
                             if ply_back > max_ply_back {
                                 continue;
