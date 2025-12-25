@@ -5,7 +5,7 @@
  * 評価値の範囲に応じて自動スケール
  */
 
-import type { CSSProperties, MouseEvent, ReactElement } from "react";
+import type { MouseEvent, ReactElement } from "react";
 import { useCallback, useMemo, useRef } from "react";
 import type { EvalHistory } from "../utils/kifFormat";
 
@@ -70,31 +70,6 @@ function computeNiceScale(maxAbsValue: number, minScale: number): number {
     }
     return Math.ceil(target / 10000) * 10000;
 }
-
-const containerStyle: CSSProperties = {
-    position: "relative",
-    width: "100%",
-};
-
-const yAxisLabelStyle: CSSProperties = {
-    position: "absolute",
-    left: 0,
-    fontSize: "10px",
-    color: "hsl(var(--muted-foreground, 0 0% 48%))",
-    transform: "translateY(-50%)",
-    width: "28px",
-    textAlign: "right",
-    paddingRight: "4px",
-};
-
-const xAxisContainerStyle: CSSProperties = {
-    display: "flex",
-    justifyContent: "space-between",
-    marginLeft: "32px",
-    marginTop: "2px",
-    fontSize: "10px",
-    color: "hsl(var(--muted-foreground, 0 0% 48%))",
-};
 
 /**
  * 評価値グラフ
@@ -290,7 +265,7 @@ export function EvalGraph({
             <svg
                 width="100%"
                 height={height}
-                style={{ display: "block" }}
+                className="block"
                 viewBox={`0 0 100 ${height}`}
                 preserveAspectRatio="none"
                 role="img"
@@ -362,7 +337,11 @@ export function EvalGraph({
                 {yAxisLabels
                     .filter((_, i) => i % 2 === 0) // 上・中・下の3つだけ表示
                     .map((label) => (
-                        <span key={label.value} style={{ ...yAxisLabelStyle, top: label.position }}>
+                        <span
+                            key={label.value}
+                            className="absolute left-0 text-[10px] text-muted-foreground -translate-y-1/2 w-7 text-right pr-1"
+                            style={{ top: label.position }}
+                        >
                             {label.value}
                         </span>
                     ))}
@@ -376,17 +355,8 @@ export function EvalGraph({
                             ).current = el;
                         }}
                         type="button"
-                        style={{
-                            marginLeft: "32px",
-                            height,
-                            cursor: "crosshair",
-                            background: "transparent",
-                            border: "none",
-                            padding: 0,
-                            display: "block",
-                            width: "calc(100% - 32px)",
-                            textAlign: "left",
-                        }}
+                        className="ml-8 bg-transparent border-0 p-0 block text-left w-[calc(100%-32px)] cursor-crosshair"
+                        style={{ height }}
                         onClick={handleGraphClick}
                         aria-label="グラフをクリックして手数を選択"
                     >
@@ -399,17 +369,15 @@ export function EvalGraph({
                                 graphContainerRef as React.MutableRefObject<HTMLElement | null>
                             ).current = el;
                         }}
-                        style={{
-                            marginLeft: "32px",
-                            height,
-                        }}
+                        className="ml-8"
+                        style={{ height }}
                     >
                         {compactSvg}
                     </div>
                 )}
 
                 {/* X軸ラベル（手数） */}
-                <div style={xAxisContainerStyle}>
+                <div className="flex justify-between ml-8 mt-0.5 text-[10px] text-muted-foreground">
                     {xAxisLabels.map((ply) => (
                         <span key={ply}>{ply}手</span>
                     ))}
@@ -417,19 +385,18 @@ export function EvalGraph({
             </>
         );
 
-        // onClickがある場合はbutton、ない場合はdiv
+        // onPlySelectがある場合は内部にボタンがあるため、外側はdivにする
+        // onPlySelectがなくonClickのみの場合は外側をボタンにする
+        if (onPlySelect) {
+            // 内部にボタンがあるので外側はdiv
+            return <div className="relative w-full">{compactContent}</div>;
+        }
+
         if (onClick) {
             return (
                 <button
                     type="button"
-                    style={{
-                        ...containerStyle,
-                        cursor: "pointer",
-                        background: "transparent",
-                        border: "none",
-                        padding: 0,
-                        textAlign: "left",
-                    }}
+                    className="relative w-full cursor-pointer bg-transparent border-0 p-0 text-left"
                     onClick={onClick}
                     aria-label="評価値グラフを拡大表示"
                 >
@@ -438,7 +405,7 @@ export function EvalGraph({
             );
         }
 
-        return <div style={containerStyle}>{compactContent}</div>;
+        return <div className="relative w-full">{compactContent}</div>;
     }
 
     // 通常表示
@@ -560,12 +527,8 @@ export function EvalGraph({
                             ).current = el;
                         }}
                         type="button"
-                        className="ml-5 bg-transparent border-none p-0 block text-left"
-                        style={{
-                            width: "calc(100% - 20px)",
-                            height,
-                            cursor: "crosshair",
-                        }}
+                        className="ml-5 bg-transparent border-0 p-0 block text-left w-[calc(100%-20px)] cursor-crosshair"
+                        style={{ height }}
                         onClick={handleGraphClick}
                         aria-label="グラフをクリックして手数を選択"
                     >
@@ -578,11 +541,8 @@ export function EvalGraph({
                                 graphContainerRef as React.MutableRefObject<HTMLElement | null>
                             ).current = el;
                         }}
-                        className="ml-5"
-                        style={{
-                            width: "calc(100% - 20px)",
-                            height,
-                        }}
+                        className="ml-5 w-[calc(100%-20px)]"
+                        style={{ height }}
                     >
                         {graphSvg}
                     </div>
@@ -599,7 +559,17 @@ export function EvalGraph({
         </>
     );
 
-    // onClickがある場合はbutton、ない場合はdiv
+    // onPlySelectがある場合は内部にボタンがあるため、外側はdivにする
+    // onPlySelectがなくonClickのみの場合は外側をボタンにする
+    if (onPlySelect) {
+        // 内部にボタンがあるので外側はdiv
+        return (
+            <div className="bg-card border border-border rounded-xl p-3 shadow-lg w-[var(--panel-width)]">
+                {outerContent}
+            </div>
+        );
+    }
+
     if (onClick) {
         return (
             <button

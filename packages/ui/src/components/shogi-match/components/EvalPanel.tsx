@@ -5,7 +5,7 @@
  * 対局中のチート防止のためデフォルトで折りたたまれている
  */
 
-import type { CSSProperties, ReactElement } from "react";
+import type { ReactElement } from "react";
 import { useCallback, useState } from "react";
 import type { EvalHistory, KifMove } from "../utils/kifFormat";
 import { EvalGraph } from "./EvalGraph";
@@ -62,57 +62,6 @@ interface EvalPanelProps {
     branchMarkers?: Map<number, number>;
 }
 
-const panelStyle: CSSProperties = {
-    background: "hsl(var(--card, 0 0% 100%))",
-    border: "1px solid hsl(var(--border, 0 0% 86%))",
-    borderRadius: "12px",
-    boxShadow: "0 14px 28px rgba(0,0,0,0.12)",
-    width: "var(--panel-width)",
-    overflow: "hidden",
-};
-
-const headerStyle: CSSProperties = {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    padding: "10px 12px",
-    cursor: "pointer",
-    userSelect: "none",
-    borderBottom: "1px solid hsl(var(--border, 0 0% 86%))",
-};
-
-const headerCollapsedStyle: CSSProperties = {
-    ...headerStyle,
-    borderBottom: "none",
-};
-
-const titleStyle: CSSProperties = {
-    fontWeight: 700,
-    fontSize: "14px",
-    display: "flex",
-    alignItems: "center",
-    gap: "8px",
-};
-
-const warningStyle: CSSProperties = {
-    fontSize: "11px",
-    color: "hsl(var(--muted-foreground, 0 0% 48%))",
-    fontWeight: 400,
-};
-
-const toggleIconStyle: CSSProperties = {
-    fontSize: "12px",
-    color: "hsl(var(--muted-foreground, 0 0% 48%))",
-    transition: "transform 0.2s ease",
-};
-
-const contentStyle: CSSProperties = {
-    padding: "12px",
-    display: "flex",
-    flexDirection: "column",
-    gap: "12px",
-};
-
 /**
  * 評価値パネル
  * 評価値グラフと棋譜を折りたたみ可能な形で表示
@@ -144,29 +93,34 @@ export function EvalPanel({
     }, []);
 
     return (
-        <div style={panelStyle}>
+        <div className="bg-card border border-border rounded-xl shadow-lg w-[var(--panel-width)] overflow-hidden">
             <button
                 type="button"
-                style={isOpen ? headerStyle : headerCollapsedStyle}
+                className={`flex justify-between items-center px-3 py-2.5 cursor-pointer select-none w-full bg-transparent border-0 text-left font-[inherit] text-[inherit] ${
+                    isOpen ? "border-b border-border" : ""
+                }`}
                 onClick={handleToggle}
                 aria-expanded={isOpen}
             >
-                <div style={titleStyle}>
+                <div className="font-bold text-sm flex items-center gap-2">
                     <span>📊 評価値・解析</span>
-                    {!isOpen && <span style={warningStyle}>（クリックで展開）</span>}
+                    {!isOpen && (
+                        <span className="text-[11px] text-muted-foreground font-normal">
+                            （クリックで展開）
+                        </span>
+                    )}
                 </div>
                 <span
-                    style={{
-                        ...toggleIconStyle,
-                        transform: isOpen ? "rotate(180deg)" : "rotate(0deg)",
-                    }}
+                    className={`text-xs text-muted-foreground transition-transform duration-200 ${
+                        isOpen ? "rotate-180" : "rotate-0"
+                    }`}
                 >
                     ▼
                 </span>
             </button>
 
             {isOpen && (
-                <div style={contentStyle}>
+                <div className="p-3 flex flex-col gap-3">
                     {/* 評価値グラフ（クリックで拡大モーダル表示、手数選択対応） */}
                     <EvalGraph
                         evalHistory={evalHistory}

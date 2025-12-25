@@ -218,30 +218,53 @@ export function goToEnd(tree: KifuTree): KifuTree {
 }
 
 /**
- * 指定手数に移動（メインラインを基準）
+ * 指定手数に移動（現在のラインを基準）
+ *
+ * - targetPly < currentPly: 親を辿って戻る
+ * - targetPly > currentPly: 子を辿って進む（最初の子を選択）
+ * - targetPly == currentPly: 変更なし
  */
 export function goToPly(tree: KifuTree, targetPly: number): KifuTree {
     if (targetPly < 0) {
         return tree;
     }
 
-    // まずルートに戻る
-    let currentId = tree.rootId;
-    let node = tree.nodes.get(currentId);
-    let currentPly = 0;
+    const currentNode = getCurrentNode(tree);
+    const currentPly = currentNode.ply;
 
-    // 目標手数まで進む
-    while (node && currentPly < targetPly && node.children.length > 0) {
-        currentId = node.children[0]; // メインラインを辿る
-        node = tree.nodes.get(currentId);
-        if (node) {
-            currentPly = node.ply;
+    if (targetPly === currentPly) {
+        return tree;
+    }
+
+    if (targetPly < currentPly) {
+        // 戻る: 親を辿る
+        let nodeId = tree.currentNodeId;
+        let node = tree.nodes.get(nodeId);
+
+        while (node && node.ply > targetPly) {
+            if (node.parentId === null) break;
+            nodeId = node.parentId;
+            node = tree.nodes.get(nodeId);
         }
+
+        return {
+            ...tree,
+            currentNodeId: nodeId,
+        };
+    }
+
+    // 進む: 子を辿る（現在のラインに沿って）
+    let nodeId = tree.currentNodeId;
+    let node = tree.nodes.get(nodeId);
+
+    while (node && node.ply < targetPly && node.children.length > 0) {
+        nodeId = node.children[0]; // 現在のラインの最初の子を辿る
+        node = tree.nodes.get(nodeId);
     }
 
     return {
         ...tree,
-        currentNodeId: currentId,
+        currentNodeId: nodeId,
     };
 }
 
@@ -512,12 +535,11 @@ export function getMainLineTotalPly(tree: KifuTree): number {
 
 /**
  * 現在位置が巻き戻し中かどうか
- * メインラインの末端より前にいる場合true
+ * 現在のラインで進める手がある場合true（現在ノードに子がある）
  */
 export function isRewound(tree: KifuTree): boolean {
     const currentNode = getCurrentNode(tree);
-    const totalPly = getMainLineTotalPly(tree);
-    return currentNode.ply < totalPly;
+    return currentNode.children.length > 0;
 }
 
 /**

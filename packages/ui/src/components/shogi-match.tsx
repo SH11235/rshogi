@@ -255,11 +255,12 @@ export function ShogiMatch({
     const [displaySettings, setDisplaySettings] =
         useState<DisplaySettings>(DEFAULT_DISPLAY_SETTINGS);
 
-    // 棋譜ナビゲーション管理フック
-    const navigation = useKifuNavigation({
-        initialPosition: position,
-        initialSfen: startSfen,
-        onPositionChange: (newPosition, lastMoveInfo) => {
+    // positionRef を先に定義（コールバックで使用するため）
+    const positionRef = useRef<PositionState>(position);
+
+    // ナビゲーションからの局面変更コールバック（メモ化して安定した参照を維持）
+    const handleNavigationPositionChange = useCallback(
+        (newPosition: PositionState, lastMoveInfo?: { from?: string; to: string }) => {
             setPosition(newPosition);
             positionRef.current = newPosition;
             // ナビゲーションからのlastMove情報を反映
@@ -273,6 +274,14 @@ export function ShogiMatch({
                 setLastMove(undefined);
             }
         },
+        [],
+    );
+
+    // 棋譜ナビゲーション管理フック
+    const navigation = useKifuNavigation({
+        initialPosition: position,
+        initialSfen: startSfen,
+        onPositionChange: handleNavigationPositionChange,
     });
 
     // 互換性用のmoves配列
@@ -301,7 +310,6 @@ export function ShogiMatch({
         };
     };
 
-    const positionRef = useRef<PositionState>(position);
     const movesRef = useRef<string[]>(moves);
     // movesRefをnavigationの変更に同期
     useEffect(() => {

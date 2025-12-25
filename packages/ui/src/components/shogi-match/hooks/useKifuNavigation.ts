@@ -263,29 +263,38 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
     const recordEval = useCallback((ply: number, event: EngineInfoEvent) => {
         setTree((prev) => {
             // plyに対応するノードを見つける
-            // メインラインを辿ってplyに一致するノードを探す
-            let nodeId = prev.rootId;
-            let node = prev.nodes.get(nodeId);
+            // 現在のラインを辿ってplyに一致するノードを探す
+            // （現在位置からルートまで遡り、パスを構築してからply一致を探す）
+            const path: string[] = [];
+            let nodeId: string | null = prev.currentNodeId;
 
-            while (node && node.ply < ply && node.children.length > 0) {
-                nodeId = node.children[0];
-                node = prev.nodes.get(nodeId);
+            // 現在位置からルートまで遡ってパスを構築
+            while (nodeId !== null) {
+                path.unshift(nodeId);
+                const node = prev.nodes.get(nodeId);
+                if (!node) break;
+                nodeId = node.parentId;
             }
 
-            if (node && node.ply === ply) {
-                const evalData: KifuEval = {
-                    scoreCp: event.scoreCp,
-                    scoreMate: event.scoreMate,
-                    depth: event.depth,
-                };
+            // パス内でplyに一致するノードを探す
+            for (const id of path) {
+                const node = prev.nodes.get(id);
+                if (node && node.ply === ply) {
+                    const evalData: KifuEval = {
+                        scoreCp: event.scoreCp,
+                        scoreMate: event.scoreMate,
+                        depth: event.depth,
+                    };
 
-                // より深い探索深さの評価値で更新
-                const existing = node.eval;
-                if (
-                    !existing ||
-                    (event.depth !== undefined && (existing.depth ?? 0) < event.depth)
-                ) {
-                    return setNodeEval(prev, nodeId, evalData);
+                    // より深い探索深さの評価値で更新
+                    const existing = node.eval;
+                    if (
+                        !existing ||
+                        (event.depth !== undefined && (existing.depth ?? 0) < event.depth)
+                    ) {
+                        return setNodeEval(prev, id, evalData);
+                    }
+                    break;
                 }
             }
 
@@ -353,11 +362,31 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
         return path;
     }, [tree]);
 
-    // 盤面履歴を計算（現在のラインから抽出）
+    // 現在位置からライン終端までのフルパスを計算（巻き戻し時の未来の手も含む）
+    const fullLinePath = useMemo(() => {
+        // まず現在位置までのパスを取得
+        const path = [...currentLinePath];
+
+        // 現在位置から先（children[0]を辿る）を追加
+        const currentNode = tree.nodes.get(tree.currentNodeId);
+        if (currentNode && currentNode.children.length > 0) {
+            let nodeId: string | null = currentNode.children[0];
+            while (nodeId !== null) {
+                const node = tree.nodes.get(nodeId);
+                if (!node) break;
+                path.push(node);
+                nodeId = node.children.length > 0 ? node.children[0] : null;
+            }
+        }
+
+        return path;
+    }, [tree, currentLinePath]);
+
+    // 盤面履歴を計算（フルラインから抽出、未来の手も含む）
     const boardHistory = useMemo((): BoardState[] => {
         const history: BoardState[] = [];
 
-        for (const node of currentLinePath) {
+        for (const node of fullLinePath) {
             // ルート以外のノードについて、適用前の盤面を記録
             if (node.ply > 0) {
                 history.push(node.boardBefore);
@@ -365,15 +394,15 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
         }
 
         return history;
-    }, [currentLinePath]);
+    }, [fullLinePath]);
 
-    // KIF形式の棋譜を生成（現在のラインに対応）
+    // KIF形式の棋譜を生成（フルラインに対応、未来の手も含む）
     const kifMoves = useMemo((): KifMove[] => {
-        // 現在のラインから指し手を抽出
+        // フルラインから指し手を抽出
         const moves: string[] = [];
         const evalMap = new Map<number, { scoreCp?: number; scoreMate?: number; depth?: number }>();
 
-        for (const node of currentLinePath) {
+        for (const node of fullLinePath) {
             if (node.usiMove !== null) {
                 moves.push(node.usiMove);
             }
@@ -388,13 +417,13 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
 
         const validMoves = moves.slice(0, boardHistory.length);
         return convertMovesToKif(validMoves, boardHistory, evalMap);
-    }, [currentLinePath, boardHistory]);
+    }, [fullLinePath, boardHistory]);
 
-    // 評価値履歴を生成（グラフ用、現在のラインに対応）
+    // 評価値履歴を生成（グラフ用、フルラインに対応、未来の手も含む）
     const evalHistory = useMemo((): EvalHistory[] => {
         const history: EvalHistory[] = [{ ply: 0, evalCp: 0, evalMate: null }];
 
-        for (const node of currentLinePath) {
+        for (const node of fullLinePath) {
             // ルートはスキップ（ply: 0はすでに追加済み）
             if (node.ply === 0) continue;
 
@@ -414,13 +443,13 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
         }
 
         return history;
-    }, [currentLinePath]);
+    }, [fullLinePath]);
 
-    // 分岐マーカーを計算（現在のラインで分岐がある手数とその分岐数）
+    // 分岐マーカーを計算（フルラインで分岐がある手数とその分岐数）
     const branchMarkers = useMemo((): Map<number, number> => {
         const markers = new Map<number, number>();
 
-        for (const node of currentLinePath) {
+        for (const node of fullLinePath) {
             // 子が2つ以上あれば分岐が存在
             if (node.children.length > 1) {
                 markers.set(node.ply, node.children.length);
@@ -428,7 +457,7 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
         }
 
         return markers;
-    }, [currentLinePath]);
+    }, [fullLinePath]);
 
     return {
         state,
