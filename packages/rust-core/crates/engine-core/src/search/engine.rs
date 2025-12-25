@@ -242,16 +242,23 @@ fn aggregate_best_move_changes(changes: &[f64]) -> (f64, usize) {
     (sum, changes.len())
 }
 
+/// SearchProgress はヘルパースレッドの進捗を追跡する。
+/// False Sharing を防ぐため、各フィールドを別々のキャッシュラインに配置する。
+#[repr(C, align(64))]
 pub(crate) struct SearchProgress {
     nodes: AtomicU64,
+    _pad1: [u8; 56], // 64バイト境界までパディング
     best_move_changes_bits: AtomicU64,
+    _pad2: [u8; 56], // 64バイト境界までパディング
 }
 
 impl SearchProgress {
     pub(crate) fn new() -> Self {
         Self {
             nodes: AtomicU64::new(0),
+            _pad1: [0; 56],
             best_move_changes_bits: AtomicU64::new(0.0f64.to_bits()),
+            _pad2: [0; 56],
         }
     }
 

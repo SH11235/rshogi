@@ -67,15 +67,11 @@ fn run_internal_benchmark_standard(config: &BenchmarkConfig) -> Result<Benchmark
     let mut all_results = Vec::new();
 
     for threads in &config.threads {
-        if *threads > 1 {
-            eprintln!("Warning: Multi-threading not yet implemented in internal API mode");
-            eprintln!("         Running with single thread instead.");
-        }
-
         println!("=== Threads: {} ===", threads);
 
         let mut thread_results = Vec::new();
         let tt_mb = config.tt_mb;
+        let num_threads = *threads;
 
         for iteration in 0..config.iterations {
             if config.iterations > 1 {
@@ -108,6 +104,7 @@ fn run_internal_benchmark_standard(config: &BenchmarkConfig) -> Result<Benchmark
                     .stack_size(SEARCH_STACK_SIZE)
                     .spawn(move || {
                         let mut search = Search::new(tt_mb as usize);
+                        search.set_num_threads(num_threads);
 
                         let mut last_info: Option<SearchInfo> = None;
                         let result = search.go(
@@ -181,15 +178,11 @@ fn run_internal_benchmark_reuse(config: &BenchmarkConfig) -> Result<BenchmarkRep
     let mut all_results = Vec::new();
 
     for threads in &config.threads {
-        if *threads > 1 {
-            eprintln!("Warning: Multi-threading not yet implemented in internal API mode");
-            eprintln!("         Running with single thread instead.");
-        }
-
         println!("=== Threads: {} (reuse_search mode) ===", threads);
 
         // 設定値をキャプチャ
         let tt_mb = config.tt_mb;
+        let num_threads = *threads;
         let positions_clone = positions.clone();
         let iterations = config.iterations;
         let warmup = config.warmup;
@@ -206,6 +199,7 @@ fn run_internal_benchmark_reuse(config: &BenchmarkConfig) -> Result<BenchmarkRep
             .spawn(move || {
                 // Searchインスタンスを1回だけ作成
                 let mut search = Search::new(tt_mb as usize);
+                search.set_num_threads(num_threads);
                 let mut search_run_index: u32 = 0;
 
                 // ウォームアップフェーズ
