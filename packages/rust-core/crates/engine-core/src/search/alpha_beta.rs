@@ -427,6 +427,9 @@ impl SearchWorker {
         self.history.low_ply_history.clear();
         // NNUE AccumulatorStackをリセット
         self.nnue_stack.reset();
+        // check_abort頻度制御カウンターをリセット
+        // これにより新しい探索開始時に即座に停止チェックが行われる
+        self.calls_cnt = 0;
     }
 
     /// best_move_changes を半減（世代減衰）
