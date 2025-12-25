@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactElement } from "react";
+import type { ReactElement } from "react";
 import type { DisplaySettings, SquareNotation } from "../types";
 
 interface BoardToolbarProps {
@@ -17,47 +17,6 @@ const NOTATION_OPTIONS: { value: SquareNotation; label: string }[] = [
     { value: "sfen", label: "SFEN" },
     { value: "japanese", label: "日本式" },
 ];
-
-const toolbarStyle: CSSProperties = {
-    display: "flex",
-    alignItems: "center",
-    gap: "12px",
-    padding: "8px 12px",
-    background: "hsl(var(--wafuu-washi-warm))",
-    border: "1px solid hsl(var(--wafuu-border))",
-    borderRadius: "8px",
-    fontSize: "13px",
-};
-
-const buttonStyle: CSSProperties = {
-    display: "flex",
-    alignItems: "center",
-    gap: "4px",
-    padding: "4px 8px",
-    borderRadius: "6px",
-    border: "1px solid hsl(var(--wafuu-border))",
-    background: "hsl(var(--card, 0 0% 100%))",
-    cursor: "pointer",
-    fontSize: "13px",
-    transition: "all 0.15s ease",
-};
-
-const selectStyle: CSSProperties = {
-    padding: "4px 8px",
-    borderRadius: "6px",
-    border: "1px solid hsl(var(--wafuu-border))",
-    background: "hsl(var(--card, 0 0% 100%))",
-    fontSize: "13px",
-    cursor: "pointer",
-};
-
-const checkboxLabelStyle: CSSProperties = {
-    display: "flex",
-    alignItems: "center",
-    gap: "4px",
-    cursor: "pointer",
-    fontSize: "13px",
-};
 
 /**
  * 盤面ツールバーコンポーネント
@@ -84,31 +43,30 @@ export function BoardToolbar({
     };
 
     return (
-        <div style={toolbarStyle}>
+        <div className="flex items-center gap-3 px-3 py-2 bg-wafuu-washi-warm border border-wafuu-border rounded-lg text-[13px]">
             {/* 反転ボタン */}
             <button
                 type="button"
                 onClick={() => onFlipBoardChange(!flipBoard)}
-                style={{
-                    ...buttonStyle,
-                    background: flipBoard
-                        ? "hsl(var(--wafuu-kin) / 0.2)"
-                        : "hsl(var(--card, 0 0% 100%))",
-                }}
+                className={`flex items-center gap-1 px-2 py-1 rounded-md border border-wafuu-border cursor-pointer text-[13px] transition-all duration-150 ${
+                    flipBoard ? "bg-wafuu-kin/20" : "bg-card"
+                }`}
                 aria-pressed={flipBoard}
                 title="盤面を反転"
             >
-                <span style={{ fontSize: "14px" }}>🔄</span>
+                <span aria-hidden="true" className="text-sm">
+                    🔄
+                </span>
                 <span>反転</span>
             </button>
 
             {/* 座標表示セレクト */}
-            <label style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                <span style={{ color: "hsl(var(--muted-foreground))" }}>座標:</span>
+            <label className="flex items-center gap-1.5">
+                <span className="text-muted-foreground">座標:</span>
                 <select
                     value={displaySettings.squareNotation}
                     onChange={(e) => handleNotationChange(e.target.value as SquareNotation)}
-                    style={selectStyle}
+                    className="px-2 py-1 rounded-md border border-wafuu-border bg-card text-[13px] cursor-pointer"
                 >
                     {NOTATION_OPTIONS.map((opt) => (
                         <option key={opt.value} value={opt.value}>
@@ -119,7 +77,7 @@ export function BoardToolbar({
             </label>
 
             {/* 盤外ラベルチェック */}
-            <label style={checkboxLabelStyle}>
+            <label className="flex items-center gap-1 cursor-pointer text-[13px]">
                 <input
                     type="checkbox"
                     checked={displaySettings.showBoardLabels}

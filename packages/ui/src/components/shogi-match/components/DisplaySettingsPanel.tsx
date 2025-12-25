@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactElement } from "react";
+import type { ReactElement } from "react";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../../collapsible";
 import { RadioGroup, RadioGroupItem } from "../../radio-group";
 import type { DisplaySettings, SquareNotation } from "../types";
@@ -19,43 +19,6 @@ const NOTATION_OPTIONS: { value: SquareNotation; label: string; example: string 
     { value: "sfen", label: "SFEN形式", example: "5e" },
     { value: "japanese", label: "日本式", example: "５五" },
 ];
-
-const sectionStyle: CSSProperties = {
-    display: "flex",
-    flexDirection: "column",
-    gap: "8px",
-};
-
-const sectionTitleStyle: CSSProperties = {
-    fontSize: "13px",
-    fontWeight: 600,
-    color: "hsl(var(--wafuu-sumi))",
-    marginBottom: "4px",
-};
-
-const radioLabelStyle: CSSProperties = {
-    display: "flex",
-    alignItems: "center",
-    gap: "8px",
-    fontSize: "13px",
-    cursor: "pointer",
-    padding: "4px 0",
-};
-
-const checkboxLabelStyle: CSSProperties = {
-    display: "flex",
-    alignItems: "center",
-    gap: "8px",
-    fontSize: "13px",
-    cursor: "pointer",
-    padding: "4px 0",
-};
-
-const exampleStyle: CSSProperties = {
-    fontSize: "12px",
-    color: "hsl(var(--muted-foreground))",
-    marginLeft: "4px",
-};
 
 /**
  * 表示設定パネルコンポーネント
@@ -95,94 +58,58 @@ export function DisplaySettingsPanel({
 
     return (
         <Collapsible open={isOpen} onOpenChange={onOpenChange}>
-            <div
-                style={{
-                    background: "hsl(var(--wafuu-washi-warm))",
-                    border: "2px solid hsl(var(--wafuu-border))",
-                    borderRadius: "12px",
-                    overflow: "hidden",
-                    boxShadow: "0 8px 20px rgba(0,0,0,0.08)",
-                    width: "var(--panel-width)",
-                }}
-            >
+            <div className="bg-wafuu-washi-warm border-2 border-wafuu-border rounded-xl overflow-hidden shadow-lg w-[var(--panel-width)]">
                 <CollapsibleTrigger asChild>
                     <button
                         type="button"
                         aria-label="表示設定パネルを開閉"
-                        style={{
-                            width: "100%",
-                            padding: "14px 16px",
-                            background:
-                                "linear-gradient(135deg, hsl(var(--wafuu-washi)) 0%, hsl(var(--wafuu-washi-warm)) 100%)",
-                            border: "none",
-                            borderBottom: isOpen ? "1px solid hsl(var(--wafuu-border))" : "none",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "space-between",
-                            gap: "12px",
-                            cursor: "pointer",
-                            transition: "all 0.2s ease",
-                        }}
+                        className={`w-full px-4 py-3.5 bg-gradient-to-br from-wafuu-washi to-wafuu-washi-warm border-none flex items-center justify-between gap-3 cursor-pointer transition-all duration-200 ${
+                            isOpen ? "border-b border-wafuu-border" : ""
+                        }`}
                     >
-                        <span style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                            <span
-                                style={{
-                                    fontSize: "18px",
-                                    fontWeight: 700,
-                                    color: "hsl(var(--wafuu-sumi))",
-                                    letterSpacing: "0.05em",
-                                }}
-                            >
+                        <span className="flex items-center gap-3">
+                            <span className="text-lg font-bold text-wafuu-sumi tracking-wide">
                                 表示設定
                             </span>
-                            <span
-                                style={{
-                                    fontSize: "14px",
-                                    fontWeight: 600,
-                                    color: "hsl(var(--wafuu-kincha))",
-                                }}
-                            >
+                            <span className="text-sm font-semibold text-wafuu-kincha">
                                 {summary}
                             </span>
                         </span>
                         <span
-                            style={{
-                                fontSize: "20px",
-                                color: "hsl(var(--wafuu-kincha))",
-                                transform: isOpen ? "rotate(180deg)" : "rotate(0deg)",
-                                transition: "transform 0.2s ease",
-                                flexShrink: 0,
-                            }}
+                            aria-hidden="true"
+                            className={`text-xl text-wafuu-kincha shrink-0 transition-transform duration-200 ${
+                                isOpen ? "rotate-180" : "rotate-0"
+                            }`}
                         >
                             ▼
                         </span>
                     </button>
                 </CollapsibleTrigger>
                 <CollapsibleContent>
-                    <div
-                        style={{
-                            padding: "16px",
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: "16px",
-                        }}
-                    >
+                    <div className="p-4 flex flex-col gap-4">
                         {/* 座標表示 */}
-                        <div style={sectionStyle}>
-                            <div style={sectionTitleStyle}>座標表示</div>
+                        <div className="flex flex-col gap-2">
+                            <div className="text-[13px] font-semibold text-wafuu-sumi mb-1">
+                                座標表示
+                            </div>
                             <RadioGroup
                                 value={settings.squareNotation}
                                 onValueChange={(v) => handleNotationChange(v as SquareNotation)}
                             >
                                 {NOTATION_OPTIONS.map((opt) => (
-                                    <div key={opt.value} style={radioLabelStyle}>
+                                    <div
+                                        key={opt.value}
+                                        className="flex items-center gap-2 text-[13px] cursor-pointer py-1"
+                                    >
                                         <RadioGroupItem
                                             value={opt.value}
                                             id={`notation-${opt.value}`}
                                         />
                                         <label htmlFor={`notation-${opt.value}`}>{opt.label}</label>
                                         {opt.example && (
-                                            <span style={exampleStyle}>({opt.example})</span>
+                                            <span className="text-xs text-muted-foreground ml-1">
+                                                ({opt.example})
+                                            </span>
                                         )}
                                     </div>
                                 ))}
@@ -190,9 +117,11 @@ export function DisplaySettingsPanel({
                         </div>
 
                         {/* 盤外ラベル */}
-                        <div style={sectionStyle}>
-                            <div style={sectionTitleStyle}>盤外ラベル</div>
-                            <label style={checkboxLabelStyle}>
+                        <div className="flex flex-col gap-2">
+                            <div className="text-[13px] font-semibold text-wafuu-sumi mb-1">
+                                盤外ラベル
+                            </div>
+                            <label className="flex items-center gap-2 text-[13px] cursor-pointer py-1">
                                 <input
                                     type="checkbox"
                                     checked={settings.showBoardLabels}
@@ -203,9 +132,11 @@ export function DisplaySettingsPanel({
                         </div>
 
                         {/* ハイライト */}
-                        <div style={sectionStyle}>
-                            <div style={sectionTitleStyle}>ハイライト</div>
-                            <label style={checkboxLabelStyle}>
+                        <div className="flex flex-col gap-2">
+                            <div className="text-[13px] font-semibold text-wafuu-sumi mb-1">
+                                ハイライト
+                            </div>
+                            <label className="flex items-center gap-2 text-[13px] cursor-pointer py-1">
                                 <input
                                     type="checkbox"
                                     checked={settings.highlightLastMove}

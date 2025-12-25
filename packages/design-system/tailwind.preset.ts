@@ -47,6 +47,25 @@ const preset: Omit<Config, "content"> = {
                     DEFAULT: "hsl(var(--card))",
                     foreground: "hsl(var(--card-foreground))",
                 },
+                // 和モダン配色
+                wafuu: {
+                    sumi: "hsl(var(--wafuu-sumi))",
+                    "sumi-light": "hsl(var(--wafuu-sumi-light))",
+                    shu: "hsl(var(--wafuu-shu))",
+                    "shu-light": "hsl(var(--wafuu-shu-light))",
+                    kin: "hsl(var(--wafuu-kin))",
+                    kincha: "hsl(var(--wafuu-kincha))",
+                    washi: "hsl(var(--wafuu-washi))",
+                    "washi-warm": "hsl(var(--wafuu-washi-warm))",
+                    border: "hsl(var(--wafuu-border))",
+                },
+                // 将棋盤配色
+                shogi: {
+                    border: "hsl(var(--shogi-border))",
+                    "outer-border": "hsl(var(--shogi-outer-border))",
+                    "cell-light": "hsl(var(--shogi-cell-light))",
+                    "cell-dark": "hsl(var(--shogi-cell-dark))",
+                },
             },
             borderRadius: {
                 lg: "calc(var(--radius))",

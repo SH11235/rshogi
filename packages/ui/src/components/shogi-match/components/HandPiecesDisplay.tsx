@@ -82,14 +82,12 @@ export function HandPiecesDisplay({
     flipBoard = false,
 }: HandPiecesDisplayProps): ReactElement {
     return (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", minHeight: "44px" }}>
             {HAND_ORDER.map((piece) => {
                 const count = hand[piece] ?? 0;
 
-                // 対局時は0個の駒を非表示
-                if (!isEditMode && count === 0) {
-                    return null;
-                }
+                // 対局時は0個の駒を非表示（ただしvisibilityで隠してスペースは確保）
+                const isHidden = !isEditMode && count === 0;
 
                 const selected = selectedPiece === piece;
                 // 編集モード時は0個でもドラッグ可能（ストックとして機能）
@@ -105,6 +103,7 @@ export function HandPiecesDisplay({
                             display: "flex",
                             alignItems: "center",
                             gap: "2px",
+                            visibility: isHidden ? "hidden" : "visible",
                         }}
                     >
                         {/* 駒ボタン */}

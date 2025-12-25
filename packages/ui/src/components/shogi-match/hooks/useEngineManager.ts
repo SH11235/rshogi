@@ -1,5 +1,10 @@
 import type { Player, PositionState } from "@shogi/app-core";
-import type { EngineClient, EngineEvent, SearchHandle } from "@shogi/engine-client";
+import type {
+    EngineClient,
+    EngineEvent,
+    EngineInfoEvent,
+    SearchHandle,
+} from "@shogi/engine-client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ClockSettings } from "./useClockManager";
 
@@ -74,6 +79,8 @@ interface UseEngineManagerProps {
     onMoveFromEngine: (move: string) => void;
     /** 対局終了時のコールバック */
     onMatchEnd: (message: string) => Promise<void>;
+    /** 評価値更新時のコールバック */
+    onEvalUpdate?: (ply: number, event: EngineInfoEvent) => void;
     /** ログの最大件数 */
     maxLogs?: number;
 }
@@ -180,6 +187,7 @@ export function useEngineManager({
     positionReady,
     onMoveFromEngine,
     onMatchEnd,
+    onEvalUpdate,
     maxLogs = 80,
 }: UseEngineManagerProps): UseEngineManagerReturn {
     const [engineReady, setEngineReady] = useState<Record<Player, boolean>>({
@@ -385,6 +393,17 @@ export function useEngineManager({
                             break;
                     }
                 }
+                if (event.type === "info") {
+                    // 評価値が含まれている場合はコールバックを呼ぶ
+                    if (
+                        onEvalUpdate &&
+                        (event.scoreCp !== undefined || event.scoreMate !== undefined)
+                    ) {
+                        // 現在の手数+1（次の手の評価値として記録）
+                        const ply = movesRef.current.length + 1;
+                        onEvalUpdate(ply, event);
+                    }
+                }
                 if (event.type === "error") {
                     const searchState = searchStatesRef.current[side];
 
@@ -402,7 +421,7 @@ export function useEngineManager({
 
             engineState.subscription = unsub;
         },
-        [addErrorLog, applyMoveFromEngine, maxLogs, movesRef, onMatchEnd],
+        [addErrorLog, applyMoveFromEngine, maxLogs, movesRef, onEvalUpdate, onMatchEnd],
     );
 
     const ensureEngineReady = useCallback(
