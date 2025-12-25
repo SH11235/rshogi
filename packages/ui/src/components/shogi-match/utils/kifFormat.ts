@@ -43,6 +43,9 @@ const FILE_KANJI: readonly string[] = ["", "１", "２", "３", "４", "５", "�
 /** 段（ランク）の漢数字：1〜9 (a=1, b=2, ..., i=9) */
 const RANK_KANJI: readonly string[] = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
 
+/** 同一マスへの移動を表す表記（全角スペースを含む） */
+const SAME_SQUARE_TEXT = "同　";
+
 // ============================================================
 // 駒名テーブル
 // ============================================================
@@ -124,7 +127,10 @@ export function getPieceName(pieceType: PieceType, promoted: boolean): string {
  * @param sq "7g" のようなUSI形式マス座標
  * @returns "77" のような数字表記
  */
-function squareToDigitsForDisplay(sq: string): string {
+function squareToDigits(sq: string): string {
+    if (!sq || sq.length < 2) {
+        return sq ?? ""; // フォールバック
+    }
     const file = sq[0]; // 1-9
     const rankChar = sq[1]; // 'a'-'i'
     const rank = rankChar.charCodeAt(0) - 96; // a=1, b=2, ..., i=9
@@ -173,7 +179,7 @@ export function formatMoveToKif(
     }
 
     // 「同」表記判定：直前の移動先と今回の移動先が同じ場合
-    const toKanji = prevTo === to ? "同　" : squareToKanji(to);
+    const toKanji = prevTo === to ? SAME_SQUARE_TEXT : squareToKanji(to);
 
     // 駒名を取得（移動前の状態で判定）
     const pieceName = getPieceName(piece.type, piece.promoted ?? false);
@@ -182,7 +188,7 @@ export function formatMoveToKif(
     const promoteText = promotes ? "成" : "";
 
     // 移動元座標
-    const fromDigits = squareToDigitsForDisplay(from);
+    const fromDigits = squareToDigits(from);
 
     return `${mark}${toKanji}${pieceName}${promoteText}(${fromDigits})`;
 }
@@ -233,7 +239,7 @@ export function formatMoveSimple(
     }
 
     // 「同」表記判定：直前の移動先と今回の移動先が同じ場合
-    const toSimple = prevTo === to ? "同　" : squareToSimple(to);
+    const toSimple = prevTo === to ? SAME_SQUARE_TEXT : squareToSimple(to);
 
     // 駒名を取得（移動前の状態で判定）
     const pieceName = getPieceName(piece.type, piece.promoted ?? false);
@@ -242,7 +248,7 @@ export function formatMoveSimple(
     const promoteText = promotes ? "成" : "";
 
     // 移動元座標
-    const fromDigits = squareToDigitsForDisplay(from);
+    const fromDigits = squareToDigits(from);
 
     return `${mark}${toSimple}${pieceName}${promoteText}(${fromDigits})`;
 }
@@ -253,6 +259,9 @@ export function formatMoveSimple(
  * @returns "5五" のような半角数字+漢数字表記
  */
 function squareToSimple(sq: string): string {
+    if (!sq || sq.length < 2) {
+        return sq ?? ""; // フォールバック
+    }
     const file = sq[0]; // 半角数字のまま
     const rankChar = sq[1]; // 'a'-'i'
     const rank = rankChar.charCodeAt(0) - 96; // a=1, b=2, ..., i=9
@@ -394,18 +403,6 @@ interface KifExportOptions {
 }
 
 /**
- * USI形式のマス座標を数字形式に変換（移動元表示用）
- * @param sq "7g" のようなUSI形式マス座標
- * @returns "77" のような数字表記
- */
-function squareToDigits(sq: string): string {
-    const file = sq[0]; // 1-9
-    const rankChar = sq[1]; // 'a'-'i'
-    const rank = rankChar.charCodeAt(0) - 96; // a=1, b=2, ..., i=9
-    return `${file}${rank}`;
-}
-
-/**
  * 1手をKIFファイル形式でフォーマット
  *
  * @param ply 手数
@@ -447,7 +444,7 @@ function formatMoveForKifFile(
     }
 
     // 「同」表記判定
-    const toKanji = prevTo === to ? "同　" : squareToKanji(to);
+    const toKanji = prevTo === to ? SAME_SQUARE_TEXT : squareToKanji(to);
 
     // 駒名を取得
     const pieceName = getPieceName(piece.type, piece.promoted ?? false);
