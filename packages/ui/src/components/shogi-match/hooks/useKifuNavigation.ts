@@ -9,6 +9,7 @@ import type { BoardState, PositionState } from "@shogi/app-core";
 import {
     addMove as addMoveToTree,
     createKifuTree,
+    findNodeByPlyInCurrentPath,
     getBranchInfo,
     getCurrentNode,
     getMainLineMoves,
@@ -258,27 +259,15 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
 
     /**
      * 評価値を記録
+     * findNodeByPlyInCurrentPathを使用してO(depth)で効率的に検索
      */
     const recordEval = useCallback((ply: number, event: EngineInfoEvent) => {
         setTree((prev) => {
-            // plyに対応するノードを見つける
-            // 現在のラインを辿ってplyに一致するノードを探す
-            // （現在位置からルートまで遡り、パスを構築してからply一致を探す）
-            const path: string[] = [];
-            let nodeId: string | null = prev.currentNodeId;
-
-            // 現在位置からルートまで遡ってパスを構築
-            while (nodeId !== null) {
-                path.unshift(nodeId);
+            // 最適化: 現在位置からルートまで遡りながらplyに一致するノードを探す
+            const nodeId = findNodeByPlyInCurrentPath(prev, ply);
+            if (nodeId) {
                 const node = prev.nodes.get(nodeId);
-                if (!node) break;
-                nodeId = node.parentId;
-            }
-
-            // パス内でplyに一致するノードを探す
-            for (const id of path) {
-                const node = prev.nodes.get(id);
-                if (node && node.ply === ply) {
+                if (node) {
                     const evalData: KifuEval = {
                         scoreCp: event.scoreCp,
                         scoreMate: event.scoreMate,
@@ -291,9 +280,8 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
                         !existing ||
                         (event.depth !== undefined && (existing.depth ?? 0) < event.depth)
                     ) {
-                        return setNodeEval(prev, id, evalData);
+                        return setNodeEval(prev, nodeId, evalData);
                     }
-                    break;
                 }
             }
 
@@ -414,7 +402,15 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
                 moves.push(node.usiMove);
             }
             if (node.eval) {
-                evalMap.set(node.ply, node.eval);
+                // エンジンの評価値は「手番側（次に指す側）から見た値」なので、
+                // 先手の手の後（奇数手）は後手視点のため反転して先手視点に正規化
+                const isSenteMove = node.ply % 2 !== 0;
+                const sign = isSenteMove ? -1 : 1;
+                evalMap.set(node.ply, {
+                    scoreCp: node.eval.scoreCp != null ? node.eval.scoreCp * sign : undefined,
+                    scoreMate: node.eval.scoreMate != null ? node.eval.scoreMate * sign : undefined,
+                    depth: node.eval.depth,
+                });
             }
         }
 
@@ -437,10 +433,11 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
             const ply = node.ply;
             const evalData = node.eval;
 
-            // エンジンの評価値は「指した側から見た値」なので、
-            // 後手の手（偶数手）は符号を反転して先手視点に正規化
-            const isGoteMove = ply % 2 === 0;
-            const sign = isGoteMove ? -1 : 1;
+            // エンジンの評価値は「手番側（次に指す側）から見た値」なので、
+            // 先手の手の後（奇数手）は後手視点のため反転して先手視点に正規化
+            // 後手の手の後（偶数手）は先手視点のためそのまま
+            const isSenteMove = ply % 2 !== 0;
+            const sign = isSenteMove ? -1 : 1;
 
             history.push({
                 ply,

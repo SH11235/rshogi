@@ -110,6 +110,8 @@ export function useKifuKeyboardNavigation({
     }, [handleKeyDown]);
 
     // ホイールイベントの登録（コンテナ要素）
+    // passive: false を指定してpreventDefaultを有効化
+    // スクロール動作を棋譜ナビゲーションに置き換えるため
     useEffect(() => {
         const container = containerRef?.current;
         if (!container) return;

@@ -346,32 +346,26 @@ export function EvalGraph({
                         </span>
                     ))}
 
-                {/* 拡大ボタン（onPlySelectとonClickの両方がある場合） */}
-                {onPlySelect && onClick && (
+                {/* グラフ本体 */}
+                {/* onClickがある場合は拡大を優先（手数選択は拡大後のモーダルで） */}
+                {/* onPlySelectのみの場合は手数選択 */}
+                {onClick ? (
                     <button
+                        ref={(el) => {
+                            (
+                                graphContainerRef as React.MutableRefObject<HTMLElement | null>
+                            ).current = el;
+                        }}
                         type="button"
-                        className="absolute top-0 right-0 z-10 p-1 text-muted-foreground hover:text-foreground hover:bg-accent/50 rounded transition-colors"
+                        className="ml-8 bg-transparent border-0 p-0 block text-left w-[calc(100%-32px)] cursor-pointer"
+                        style={{ height }}
                         onClick={onClick}
                         aria-label="評価値グラフを拡大表示"
-                        title="拡大表示"
+                        title="クリックで拡大"
                     >
-                        <svg
-                            width="14"
-                            height="14"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                        >
-                            <path d="M15 3h6v6M14 10l6.1-6.1M9 21H3v-6M10 14l-6.1 6.1" />
-                        </svg>
+                        {compactSvg}
                     </button>
-                )}
-
-                {/* グラフ本体 */}
-                {onPlySelect ? (
+                ) : onPlySelect ? (
                     <button
                         ref={(el) => {
                             (
@@ -409,26 +403,7 @@ export function EvalGraph({
             </>
         );
 
-        // onPlySelectがある場合は内部にボタンがあるため、外側はdivにする
-        // onPlySelectがなくonClickのみの場合は外側をボタンにする
-        if (onPlySelect) {
-            // 内部にボタンがあるので外側はdiv
-            return <div className="relative w-full">{compactContent}</div>;
-        }
-
-        if (onClick) {
-            return (
-                <button
-                    type="button"
-                    className="relative w-full cursor-pointer bg-transparent border-0 p-0 text-left"
-                    onClick={onClick}
-                    aria-label="評価値グラフを拡大表示"
-                >
-                    {compactContent}
-                </button>
-            );
-        }
-
+        // グラフ本体にボタンがあるので、外側は常にdiv
         return <div className="relative w-full">{compactContent}</div>;
     }
 
@@ -540,6 +515,7 @@ export function EvalGraph({
                             strokeWidth="2"
                             strokeLinecap="round"
                             strokeLinejoin="round"
+                            aria-hidden="true"
                         >
                             <path d="M15 3h6v6M14 10l6.1-6.1M9 21H3v-6M10 14l-6.1 6.1" />
                         </svg>

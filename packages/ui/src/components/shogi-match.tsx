@@ -207,7 +207,7 @@ function deriveLastMove(move: string | undefined): LastMove | undefined {
 export function ShogiMatch({
     engineOptions,
     defaultSides = {
-        sente: { role: "human" },
+        sente: { role: "engine", engineId: engineOptions[0]?.id },
         gote: { role: "engine", engineId: engineOptions[0]?.id },
     },
     initialMainTimeMs = 0,

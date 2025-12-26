@@ -48,9 +48,9 @@ export interface KifuTree {
     startSfen: string;
 }
 
-/** UUID生成（簡易版） */
+/** UUID生成 */
 function generateId(): string {
-    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 11)}`;
+    return crypto.randomUUID();
 }
 
 /**
@@ -560,34 +560,74 @@ export function getPathToNode(tree: KifuTree, nodeId: string): string[] {
 }
 
 /**
+ * 現在位置からルートまでのパスを辿り、指定plyに一致するノードIDを探す
+ * O(depth)で効率的に検索
+ */
+export function findNodeByPlyInCurrentPath(tree: KifuTree, ply: number): string | null {
+    let nodeId: string | null = tree.currentNodeId;
+
+    // 現在位置からルートまで遡りながらplyに一致するノードを探す
+    while (nodeId !== null) {
+        const node = tree.nodes.get(nodeId);
+        if (!node) break;
+
+        if (node.ply === ply) {
+            return nodeId;
+        }
+
+        // 目的のplyより小さくなったら、見つからない
+        if (node.ply < ply) {
+            break;
+        }
+
+        nodeId = node.parentId;
+    }
+
+    return null;
+}
+
+/** addMovesSilentlyの結果型 */
+export interface AddMovesSilentlyResult {
+    tree: KifuTree;
+    success: boolean;
+    failedAt?: number;
+}
+
+/**
  * 複数の指し手を一括で追加（既存の棋譜をインポートする場合など）
  */
 export function addMovesSilently(
     tree: KifuTree,
     moves: string[],
     initialPosition: PositionState,
-): KifuTree {
+): AddMovesSilentlyResult {
     let currentTree = tree;
     let position = initialPosition;
 
-    for (const move of moves) {
+    for (let i = 0; i < moves.length; i++) {
+        const move = moves[i];
         const result = applyMoveWithState(position, move, { validateTurn: false });
         if (!result.ok) {
-            break; // エラーが発生したら中断
+            return { tree: currentTree, success: false, failedAt: i };
         }
         currentTree = addMove(currentTree, move, result.next);
         position = result.next;
     }
 
-    return currentTree;
+    return { tree: currentTree, success: true };
 }
 
 /**
- * ツリーのクローンを作成
+ * ツリーのクローンを作成（ディープコピー）
+ * ノードオブジェクトも複製し、元ツリーとの参照共有を防ぐ
  */
 export function cloneKifuTree(tree: KifuTree): KifuTree {
+    const newNodes = new Map<string, KifuNode>();
+    for (const [id, node] of tree.nodes) {
+        newNodes.set(id, { ...node, children: [...node.children] });
+    }
     return {
         ...tree,
-        nodes: new Map(tree.nodes),
+        nodes: newNodes,
     };
 }

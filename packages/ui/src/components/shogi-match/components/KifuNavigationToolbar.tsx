@@ -6,7 +6,7 @@
  */
 
 import type { ReactElement } from "react";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 interface BranchInfo {
     hasBranches: boolean;
@@ -90,6 +90,21 @@ export function KifuNavigationToolbar({
     canGoForward: canGoForwardProp,
 }: KifuNavigationToolbarProps): ReactElement {
     const [showBranchMenu, setShowBranchMenu] = useState(false);
+    const branchMenuRef = useRef<HTMLDivElement>(null);
+
+    // メニュー外クリックで閉じる
+    useEffect(() => {
+        if (!showBranchMenu) return;
+
+        const handleClickOutside = (e: MouseEvent) => {
+            if (branchMenuRef.current && !branchMenuRef.current.contains(e.target as Node)) {
+                setShowBranchMenu(false);
+            }
+        };
+
+        document.addEventListener("mousedown", handleClickOutside);
+        return () => document.removeEventListener("mousedown", handleClickOutside);
+    }, [showBranchMenu]);
 
     const canGoBack = currentPly > 0;
     // canGoForward: propsで明示されていればそれを使用、そうでなければ従来の計算
@@ -137,12 +152,14 @@ export function KifuNavigationToolbar({
 
             {/* 分岐切替（分岐がある場合のみ表示） */}
             {branchInfo?.hasBranches && (
-                <div className="relative">
+                <div className="relative" ref={branchMenuRef}>
                     <button
                         type="button"
                         onClick={() => setShowBranchMenu(!showBranchMenu)}
                         disabled={disabled}
                         title={`分岐 ${branchInfo.currentIndex + 1}/${branchInfo.count}`}
+                        aria-expanded={showBranchMenu}
+                        aria-haspopup="menu"
                         className={`
                             px-2 h-8 flex items-center gap-1
                             rounded border border-border bg-background
@@ -160,7 +177,11 @@ export function KifuNavigationToolbar({
 
                     {/* 分岐メニュー */}
                     {showBranchMenu && (
-                        <div className="absolute top-full right-0 mt-1 z-50 bg-card border border-border rounded shadow-lg min-w-[100px]">
+                        <div
+                            className="absolute top-full right-0 mt-1 z-50 bg-card border border-border rounded shadow-lg min-w-[100px]"
+                            role="menu"
+                            aria-label="分岐選択"
+                        >
                             {Array.from({ length: branchInfo.count }, (_, i) => ({
                                 id: `branch-${i}`,
                                 index: i,
@@ -169,6 +190,10 @@ export function KifuNavigationToolbar({
                                     type="button"
                                     key={item.id}
                                     onClick={() => handleBranchSelect(item.index)}
+                                    role="menuitem"
+                                    aria-current={
+                                        item.index === branchInfo.currentIndex ? "true" : undefined
+                                    }
                                     className={`
                                         w-full px-3 py-1.5 text-left text-[12px]
                                         transition-colors duration-150
@@ -190,13 +215,17 @@ export function KifuNavigationToolbar({
                             {/* メインに昇格ボタン（メイン以外の分岐を選択中の場合） */}
                             {branchInfo.currentIndex > 0 && branchInfo.onPromoteToMain && (
                                 <>
-                                    <div className="border-t border-border my-1" />
+                                    <div
+                                        className="border-t border-border my-1"
+                                        aria-hidden="true"
+                                    />
                                     <button
                                         type="button"
                                         onClick={() => {
                                             branchInfo.onPromoteToMain?.();
                                             setShowBranchMenu(false);
                                         }}
+                                        role="menuitem"
                                         className="w-full px-3 py-1.5 text-left text-[12px] text-wafuu-shu hover:bg-accent/50 transition-colors duration-150"
                                     >
                                         ★ メインに昇格
