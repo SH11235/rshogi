@@ -523,7 +523,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
                 const fallbackModule = getInitWasmModule();
                 try {
                     await initWorkerWithKind("single", fallbackPayload, fallbackModule);
-                } catch (fallbackError) {
+                } catch (_fallbackError) {
                     fallbackToMock("Wasm engine initialization failed", "WASM_INIT_FAILED");
                 }
                 return;
