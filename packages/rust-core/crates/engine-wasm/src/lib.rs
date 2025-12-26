@@ -471,13 +471,6 @@ pub fn init(opts: Option<JsValue>) -> Result<(), JsValue> {
 #[cfg(feature = "wasm-threads")]
 pub use wasm_bindgen_rayon::init_thread_pool;
 
-// For non-threaded builds, provide a no-op fallback
-#[cfg(not(feature = "wasm-threads"))]
-#[wasm_bindgen(js_name = initThreadPool)]
-pub fn init_thread_pool(_pool_size: usize) -> Result<(), JsValue> {
-    Ok(())
-}
-
 #[wasm_bindgen]
 pub fn load_model(bytes: &[u8]) -> Result<(), JsValue> {
     init_nnue_from_bytes(bytes)
