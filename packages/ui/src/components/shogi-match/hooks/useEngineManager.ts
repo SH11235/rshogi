@@ -85,6 +85,17 @@ interface UseEngineManagerProps {
     maxLogs?: number;
 }
 
+/** 解析リクエストパラメータ */
+export interface AnalysisRequest {
+    sfen: string;
+    moves: string[];
+    ply: number;
+    /** 解析深さ（省略時はデフォルト15） */
+    depth?: number;
+    /** 解析時間制限（省略時は3秒） */
+    timeMs?: number;
+}
+
 interface UseEngineManagerReturn {
     /** エンジンの準備状態 */
     engineReady: Record<Player, boolean>;
@@ -102,6 +113,12 @@ interface UseEngineManagerReturn {
     isEngineTurn: (turn: Player) => boolean;
     /** エンジンエラーログを追加する（親でバリデーションした結果の通知用） */
     logEngineError: (message: string) => void;
+    /** 解析中かどうか */
+    isAnalyzing: boolean;
+    /** 局面を解析する（対局中でないときのみ利用可能） */
+    analyzePosition: (request: AnalysisRequest) => Promise<void>;
+    /** 解析をキャンセルする */
+    cancelAnalysis: () => Promise<void>;
 }
 
 export function formatEvent(event: EngineEvent, label: string): string {
@@ -211,6 +228,7 @@ export function useEngineManager({
     });
     const [eventLogs, setEventLogs] = useState<string[]>([]);
     const [errorLogs, setErrorLogs] = useState<string[]>([]);
+    const [isAnalyzing, setIsAnalyzing] = useState(false);
 
     const addErrorLog = useCallback(
         (message: string) => {
@@ -234,6 +252,19 @@ export function useEngineManager({
     const initializingRef = useRef<Record<Player, boolean>>({
         sente: false,
         gote: false,
+    });
+
+    // 解析用エンジン状態
+    const analysisEngineRef = useRef<{
+        client: EngineClient | null;
+        subscription: (() => void) | null;
+        handle: SearchHandle | null;
+        ply: number | null;
+    }>({
+        client: null,
+        subscription: null,
+        handle: null,
+        ply: null,
     });
 
     const engineMap = useMemo(() => {
@@ -590,6 +621,165 @@ export function useEngineManager({
         startEngineTurn,
     ]);
 
+    // 解析をキャンセルする
+    const cancelAnalysis = useCallback(async () => {
+        const analysisState = analysisEngineRef.current;
+        try {
+            if (analysisState.handle) {
+                await analysisState.handle.cancel();
+            }
+        } catch (error) {
+            console.error("Failed to cancel analysis:", error);
+        } finally {
+            analysisState.handle = null;
+            analysisState.ply = null;
+            setIsAnalyzing(false);
+        }
+    }, []);
+
+    // 解析用エンジンを破棄する
+    const disposeAnalysisEngine = useCallback(async () => {
+        const analysisState = analysisEngineRef.current;
+
+        // まず解析をキャンセル
+        await cancelAnalysis();
+
+        // サブスクリプションを解除
+        if (analysisState.subscription) {
+            analysisState.subscription();
+            analysisState.subscription = null;
+        }
+
+        // エンジンを停止・破棄
+        if (analysisState.client) {
+            try {
+                await analysisState.client.stop();
+                if (typeof analysisState.client.dispose === "function") {
+                    await analysisState.client.dispose();
+                }
+            } catch (error) {
+                console.error("Failed to dispose analysis engine:", error);
+            }
+            analysisState.client = null;
+        }
+    }, [cancelAnalysis]);
+
+    // 局面を解析する
+    const analyzePosition = useCallback(
+        async (request: AnalysisRequest) => {
+            // 対局中は解析不可
+            if (isMatchRunning) {
+                addErrorLog("対局中は解析できません");
+                return;
+            }
+
+            // 既に解析中の場合はキャンセル
+            if (isAnalyzing) {
+                await cancelAnalysis();
+            }
+
+            // 使用するエンジンを決定（最初に見つかったエンジンを使用）
+            const engineOpt = engineOptions[0];
+            if (!engineOpt) {
+                addErrorLog("利用可能なエンジンがありません");
+                return;
+            }
+
+            const analysisState = analysisEngineRef.current;
+
+            try {
+                setIsAnalyzing(true);
+                analysisState.ply = request.ply;
+
+                // エンジンクライアントを作成または再利用
+                let client = analysisState.client;
+                if (!client) {
+                    client = engineOpt.createClient();
+                    analysisState.client = client;
+                    await client.init();
+                }
+
+                // イベントサブスクリプションをセットアップ
+                if (!analysisState.subscription) {
+                    const unsub = client.subscribe((event) => {
+                        const label = "Analysis";
+                        setEventLogs((prev) => {
+                            const next = [formatEvent(event, label), ...prev];
+                            return next.length > maxLogs ? next.slice(0, maxLogs) : next;
+                        });
+
+                        if (event.type === "info") {
+                            // 評価値が含まれている場合はコールバックを呼ぶ
+                            if (
+                                onEvalUpdate &&
+                                (event.scoreCp !== undefined || event.scoreMate !== undefined)
+                            ) {
+                                const ply = analysisEngineRef.current.ply;
+                                if (ply !== null) {
+                                    onEvalUpdate(ply, event);
+                                }
+                            }
+                        }
+
+                        if (event.type === "bestmove") {
+                            // 解析完了
+                            analysisEngineRef.current.handle = null;
+                            analysisEngineRef.current.ply = null;
+                            setIsAnalyzing(false);
+                        }
+
+                        if (event.type === "error") {
+                            addErrorLog(event.message);
+                            analysisEngineRef.current.handle = null;
+                            analysisEngineRef.current.ply = null;
+                            setIsAnalyzing(false);
+                        }
+                    });
+                    analysisState.subscription = unsub;
+                }
+
+                // 局面を読み込み
+                await client.loadPosition(request.sfen, request.moves);
+
+                // 探索開始
+                const timeMs = request.timeMs ?? 3000;
+                const depth = request.depth ?? 15;
+                const handle = await client.search({
+                    limits: {
+                        movetimeMs: timeMs,
+                        maxDepth: depth,
+                    },
+                    ponder: false,
+                });
+
+                analysisState.handle = handle;
+            } catch (error) {
+                addErrorLog(`解析エラー: ${String(error)}`);
+                analysisState.handle = null;
+                analysisState.ply = null;
+                setIsAnalyzing(false);
+            }
+        },
+        [
+            addErrorLog,
+            cancelAnalysis,
+            engineOptions,
+            isAnalyzing,
+            isMatchRunning,
+            maxLogs,
+            onEvalUpdate,
+        ],
+    );
+
+    // アンマウント時に解析エンジンも破棄
+    useEffect(() => {
+        return () => {
+            disposeAnalysisEngine().catch((error) => {
+                console.error("Failed to dispose analysis engine on unmount:", error);
+            });
+        };
+    }, [disposeAnalysisEngine]);
+
     return {
         engineReady,
         engineStatus,
@@ -599,5 +789,8 @@ export function useEngineManager({
         getEngineForSide,
         isEngineTurn,
         logEngineError: addErrorLog,
+        isAnalyzing,
+        analyzePosition,
+        cancelAnalysis,
     };
 }

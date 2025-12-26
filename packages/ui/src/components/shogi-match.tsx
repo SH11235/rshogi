@@ -394,22 +394,29 @@ export function ShogiMatch({
     const handleMoveFromEngineRef = useRef<(move: string) => void>(() => {});
 
     // エンジン管理フックを使用
-    const { eventLogs, errorLogs, stopAllEngines, isEngineTurn, logEngineError } = useEngineManager(
-        {
-            sides,
-            engineOptions,
-            timeSettings,
-            startSfen,
-            movesRef,
-            positionRef,
-            isMatchRunning,
-            positionReady,
-            onMoveFromEngine: (move) => handleMoveFromEngineRef.current(move),
-            onMatchEnd: endMatch,
-            onEvalUpdate: recordEval,
-            maxLogs,
-        },
-    );
+    const {
+        eventLogs,
+        errorLogs,
+        stopAllEngines,
+        isEngineTurn,
+        logEngineError,
+        isAnalyzing,
+        analyzePosition,
+        cancelAnalysis,
+    } = useEngineManager({
+        sides,
+        engineOptions,
+        timeSettings,
+        startSfen,
+        movesRef,
+        positionRef,
+        isMatchRunning,
+        positionReady,
+        onMoveFromEngine: (move) => handleMoveFromEngineRef.current(move),
+        onMatchEnd: endMatch,
+        onEvalUpdate: recordEval,
+        maxLogs,
+    });
     stopAllEnginesRef.current = stopAllEngines;
 
     // キーボード・ホイールナビゲーション（対局中は無効）
@@ -1186,6 +1193,27 @@ export function ShogiMatch({
         [isMatchRunning, navigation, stopTicking, stopAllEngines],
     );
 
+    // 現在局面の解析コールバック
+    const handleAnalyze = useCallback(() => {
+        // 現在の局面までの指し手を取得
+        const currentMoves = navigation.getMovesArray();
+        const currentPly = navigation.state.currentPly;
+
+        // 解析リクエストを送信
+        void analyzePosition({
+            sfen: startSfen,
+            moves: currentMoves,
+            ply: currentPly,
+            timeMs: 3000, // 3秒間解析
+            depth: 20, // 最大深さ20
+        });
+    }, [navigation, analyzePosition, startSfen]);
+
+    // 解析キャンセルコールバック
+    const handleCancelAnalysis = useCallback(() => {
+        void cancelAnalysis();
+    }, [cancelAnalysis]);
+
     // SFENインポート（局面 + 指し手）
     const importSfen = useCallback(
         async (sfen: string, movesToLoad: string[]) => {
@@ -1590,6 +1618,10 @@ export function ShogiMatch({
                             currentPly={navigation.state.currentPly}
                             onPlySelect={handlePlySelect}
                             defaultOpen={false}
+                            isMatchRunning={isMatchRunning}
+                            isAnalyzing={isAnalyzing}
+                            onAnalyze={handleAnalyze}
+                            onCancelAnalysis={handleCancelAnalysis}
                         />
 
                         {/* インポートパネル */}
