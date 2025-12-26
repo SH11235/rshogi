@@ -23,6 +23,13 @@ export default defineConfig(({ command }) => ({
             "Cross-Origin-Embedder-Policy": "require-corp",
         },
     },
+    worker: {
+        format: "es",
+    },
+    optimizeDeps: {
+        // pkg-threaded内のwasm-bindgen生成ファイルをpre-bundleから除外
+        exclude: ["@shogi/engine-wasm"],
+    },
     preview: {
         headers: {
             "Cross-Origin-Opener-Policy": "same-origin",
