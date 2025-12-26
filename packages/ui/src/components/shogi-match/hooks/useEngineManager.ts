@@ -113,6 +113,8 @@ interface UseEngineManagerReturn {
     engineErrorDetails: Record<Player, EngineErrorDetails | null>;
     /** エンジンをリトライする */
     retryEngine: (side: Player) => Promise<void>;
+    /** リトライ中かどうか */
+    isRetrying: Record<Player, boolean>;
 }
 
 export function formatEvent(event: EngineEvent, label: string): string {
@@ -227,6 +229,10 @@ export function useEngineManager({
     >({
         sente: null,
         gote: null,
+    });
+    const [isRetrying, setIsRetrying] = useState<Record<Player, boolean>>({
+        sente: false,
+        gote: false,
     });
 
     const addErrorLog = useCallback(
@@ -348,32 +354,59 @@ export function useEngineManager({
             const engineState = engineStatesRef.current[side];
             if (!engineState.client) return;
 
-            // Call reset() if the client supports it
-            const client = engineState.client;
-            if ("reset" in client && typeof client.reset === "function") {
-                try {
-                    await client.reset();
-                } catch (error) {
-                    addErrorLog(`リセット失敗 (${side}): ${String(error)}`);
+            // Prevent concurrent retry attempts using React state
+            setIsRetrying((prev) => {
+                if (prev[side]) {
+                    addErrorLog(`リトライ中です (${side})`);
+                    return prev;
                 }
+                return { ...prev, [side]: true };
+            });
+
+            // Check if already retrying (state might not have updated yet)
+            const searchState = searchStatesRef.current[side];
+            if (searchState.pending) {
+                return;
             }
+            searchState.pending = true;
 
-            // Clear error state
-            setEngineErrorDetails((prev) => ({
-                ...prev,
-                [side]: null,
-            }));
-            setEngineStatus((prev) => ({ ...prev, [side]: "idle" }));
-            engineState.ready = false;
-
-            // Retry initialization
             try {
+                // Call reset() if the client supports it
+                const client = engineState.client;
+                if ("reset" in client && typeof client.reset === "function") {
+                    await client.reset();
+                }
+
+                // Clear error state before retry
+                setEngineErrorDetails((prev) => ({
+                    ...prev,
+                    [side]: null,
+                }));
+                setEngineStatus((prev) => ({ ...prev, [side]: "idle" }));
+                engineState.ready = false;
+
+                // Retry initialization
                 await client.init();
                 engineState.ready = true;
                 setEngineReady((prev) => ({ ...prev, [side]: true }));
             } catch (error) {
-                addErrorLog(`リトライ失敗 (${side}): ${String(error)}`);
+                const errorMsg = error instanceof Error ? error.message : String(error);
+                addErrorLog(`リトライ失敗 (${side}): ${errorMsg}`);
                 setEngineStatus((prev) => ({ ...prev, [side]: "error" }));
+
+                // Update error details on retry failure
+                setEngineErrorDetails((prev) => ({
+                    ...prev,
+                    [side]: {
+                        hasError: true,
+                        errorCode: "WASM_INIT_FAILED",
+                        errorMessage: errorMsg,
+                        canRetry: true,
+                    },
+                }));
+            } finally {
+                searchState.pending = false;
+                setIsRetrying((prev) => ({ ...prev, [side]: false }));
             }
         },
         [addErrorLog],
@@ -667,5 +700,6 @@ export function useEngineManager({
         logEngineError: addErrorLog,
         engineErrorDetails,
         retryEngine,
+        isRetrying,
     };
 }

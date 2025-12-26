@@ -370,7 +370,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
         rejectAllPending(new Error(reason));
     };
 
-    const fallbackToError = (message: string, code: ErrorCode) => {
+    const enterErrorState = (message: string, code: ErrorCode) => {
         replaceWorker("engine worker is unavailable");
         initInFlight = null;
         backend = "error";
@@ -394,7 +394,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
                 : defaultWorkerFactory(kind);
         } catch (error) {
             const message = error instanceof Error ? error.message : "engine worker spawn failed";
-            fallbackToError(message, "WASM_INIT_FAILED");
+            enterErrorState(message, "WASM_INIT_FAILED");
             return;
         }
 
@@ -431,7 +431,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
                 void recoverWorker("single");
                 return;
             }
-            fallbackToError("Engine worker encountered an error", "WASM_INIT_FAILED");
+            enterErrorState("Engine worker encountered an error", "WASM_INIT_FAILED");
             if (typeof console !== "undefined") console.error("engine worker error", err);
         };
     };
@@ -491,7 +491,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
         try {
             await initWorkerWithKind(kind, payload, module, true);
         } catch {
-            fallbackToError("Wasm engine initialization failed", "WASM_INIT_FAILED");
+            enterErrorState("Wasm engine initialization failed", "WASM_INIT_FAILED");
         }
     };
 
@@ -535,7 +535,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
                 try {
                     await initWorkerWithKind("single", fallbackPayload, fallbackModule);
                 } catch (_fallbackError) {
-                    fallbackToError("Wasm engine initialization failed", "WASM_INIT_FAILED");
+                    enterErrorState("Wasm engine initialization failed", "WASM_INIT_FAILED");
                 }
                 return;
             }
@@ -563,7 +563,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
         replaceWorker("engine worker terminated");
         initInFlight = null;
         void ensureReady().catch(() => {
-            fallbackToError("Wasm engine initialization failed", "WASM_INIT_FAILED");
+            enterErrorState("Wasm engine initialization failed", "WASM_INIT_FAILED");
         });
     };
 
@@ -575,10 +575,16 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
             }
             // Allow retry from error state
             if (backend === "error") {
-                backend = "single"; // Reset to default worker kind
+                // Preserve previous worker kind preference if available
+                const preferredKind: WorkerKind = threadedDisabled
+                    ? "single"
+                    : cachedStaticThreadInfo?.threadedAvailable
+                      ? "threaded"
+                      : "single";
+                backend = preferredKind;
                 initialized = false;
                 warnedReasons.clear();
-                cachedStaticThreadInfo = null;
+                // Keep cachedStaticThreadInfo as it's still valid
             }
             lastPosition = null;
             if (initInFlight) {
@@ -596,7 +602,9 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
                 return mock.loadPosition(sfen, moves);
             }
             if (backend === "error") {
-                throw new Error("Engine is in error state. Call init() to retry.");
+                throw new Error(
+                    "エンジンはエラー状態です。init()を呼び出してリトライしてください。",
+                );
             }
             await ensureReady();
             if (!worker) {
@@ -624,7 +632,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
             if (backend === "error") {
                 emit({
                     type: "error",
-                    message: "Engine is in error state. Call init() to retry.",
+                    message: "エンジンはエラー状態です。init()を呼び出してリトライしてください。",
                     severity: "error",
                     code: "ENGINE_ERROR_STATE",
                 });
@@ -731,22 +739,33 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
             initInFlight = null;
         },
         async reset(): Promise<void> {
-            // Clear error state to allow retry
-            if (backend === "error") {
-                backend = "single";
-                initialized = false;
+            // Cancel any in-flight operations
+            if (initInFlight) {
                 initInFlight = null;
-                threadedDisabled = false;
-                warnedReasons.clear();
-                cachedStaticThreadInfo = null;
             }
+            rejectAllPending(new Error("Engine reset requested"));
+
+            // Terminate existing worker
+            if (worker) {
+                replaceWorker("reset requested");
+            }
+
+            // Clear error or mock state
+            if (backend === "error" || backend === "mock") {
+                backend = "single";
+            }
+
+            initialized = false;
+            threadedDisabled = false;
+            warnedReasons.clear();
+            // Keep cachedStaticThreadInfo as hardware capabilities don't change
             // Note: Does not call init() - caller should explicitly call init() after reset()
         },
         getBackendStatus(): EngineBackendStatus {
             if (backend === "error") return "error";
             if (backend === "mock") return "mock";
-            if (initialized) return "ready";
-            return "error"; // Treat uninitialized as error
+            // Return "ready" for both initialized and uninitialized normal states
+            return "ready";
         },
         getThreadInfo(): ThreadInfo {
             // Error state: return minimal thread info

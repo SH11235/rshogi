@@ -402,6 +402,7 @@ export function ShogiMatch({
         logEngineError,
         engineErrorDetails,
         retryEngine,
+        isRetrying,
     } = useEngineManager({
         sides,
         engineOptions,
@@ -1617,6 +1618,7 @@ export function ShogiMatch({
                             errorLogs={errorLogs}
                             engineErrorDetails={engineErrorDetails}
                             onRetry={retryEngine}
+                            isRetrying={isRetrying}
                         />
                     </div>
                 </div>

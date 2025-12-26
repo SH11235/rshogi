@@ -26,6 +26,8 @@ interface EngineLogsPanelProps {
     engineErrorDetails?: Record<Player, EngineErrorDetails | null>;
     /** リトライコールバック */
     onRetry?: (side: Player) => void;
+    /** リトライ中かどうか */
+    isRetrying?: Record<Player, boolean>;
 }
 
 export function EngineLogsPanel({
@@ -33,6 +35,7 @@ export function EngineLogsPanel({
     errorLogs,
     engineErrorDetails,
     onRetry,
+    isRetrying,
 }: EngineLogsPanelProps): ReactElement {
     const hasActiveError =
         engineErrorDetails?.sente?.hasError || engineErrorDetails?.gote?.hasError;
@@ -80,17 +83,21 @@ export function EngineLogsPanel({
                                     <button
                                         type="button"
                                         onClick={() => onRetry(side)}
+                                        disabled={isRetrying?.[side]}
                                         style={{
                                             padding: "6px 12px",
                                             borderRadius: "6px",
-                                            background: "hsl(var(--primary, 15 86% 55%))",
+                                            background: isRetrying?.[side]
+                                                ? "hsl(var(--muted, 0 0% 80%))"
+                                                : "hsl(var(--primary, 15 86% 55%))",
                                             color: "white",
                                             border: "none",
-                                            cursor: "pointer",
+                                            cursor: isRetrying?.[side] ? "not-allowed" : "pointer",
                                             fontSize: "12px",
+                                            opacity: isRetrying?.[side] ? 0.6 : 1,
                                         }}
                                     >
-                                        リトライ
+                                        {isRetrying?.[side] ? "リトライ中..." : "リトライ"}
                                     </button>
                                 )}
                             </div>
