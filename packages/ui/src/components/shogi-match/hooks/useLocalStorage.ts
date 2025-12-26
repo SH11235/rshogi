@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
 /**
  * localStorage と同期する useState フック
@@ -36,14 +36,17 @@ export function useLocalStorage<T>(
         try {
             localStorage.setItem(key, JSON.stringify(value));
         } catch (error) {
-            console.warn(`Failed to save to localStorage key "${key}":`, error);
+            // LocalStorage容量制限（通常5-10MB）に達した場合のハンドリング
+            if (error instanceof DOMException && error.name === "QuotaExceededError") {
+                console.error(
+                    `LocalStorage quota exceeded for key "${key}". Consider clearing old data.`,
+                );
+            } else {
+                console.warn(`Failed to save to localStorage key "${key}":`, error);
+            }
         }
     }, [key, value]);
 
-    // setValue をラップして型安全性を保つ
-    const setStoredValue = useCallback((newValue: T | ((prev: T) => T)) => {
-        setValue(newValue);
-    }, []);
-
-    return [value, setStoredValue];
+    // useStateのsetValueは安定した参照なので直接返す
+    return [value, setValue];
 }
