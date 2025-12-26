@@ -50,7 +50,7 @@ function deriveLastMoveFromUsi(usiMove: string | null): { from?: string; to: str
 }
 
 /** ナビゲーション状態 */
-export interface KifuNavigationState {
+interface KifuNavigationState {
     /** 現在の手数（0=開始局面） */
     currentPly: number;
     /** 現在のノードID */
@@ -72,7 +72,7 @@ export interface KifuNavigationState {
 }
 
 /** フックの初期化オプション */
-export interface UseKifuNavigationOptions {
+interface UseKifuNavigationOptions {
     /** 開始局面 */
     initialPosition: PositionState;
     /** 開始局面のSFEN */
@@ -82,7 +82,7 @@ export interface UseKifuNavigationOptions {
 }
 
 /** フックの戻り値 */
-export interface UseKifuNavigationResult {
+interface UseKifuNavigationResult {
     /** ナビゲーション状態 */
     state: KifuNavigationState;
     /** 1手進む */
