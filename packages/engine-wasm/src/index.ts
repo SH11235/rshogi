@@ -89,15 +89,19 @@ type WorkerMessage =
     | { type: "events"; payload: EngineEvent[] }
     | WorkerAck;
 
-function defaultWorkerFactory(_kind: WorkerKind): Worker {
-    // Currently only single-threaded mode is supported.
-    // Multi-threaded mode (pkg-threaded) has known issues with GitHub Pages deployment
-    // due to missing COOP/COEP headers required for SharedArrayBuffer.
-    // When threaded mode is requested, we fall back to single-threaded mode.
-    //
+function defaultWorkerFactory(kind: WorkerKind): Worker {
     // IMPORTANT: Vite requires `new URL(..., import.meta.url)` to be used directly
     // inside `new Worker()` call for proper bundling. Pre-generating the URL
     // as a variable prevents Vite from recognizing it as a Worker entry point.
+    //
+    // Worker selection is based on crossOriginIsolated availability:
+    // - GH Pages (no COOP/COEP headers): crossOriginIsolated=false → kind="single"
+    // - Local dev with headers: crossOriginIsolated=true → kind="threaded" (if threads>1)
+    if (kind === "threaded") {
+        return new Worker(new URL("./engine.worker.threaded.js", import.meta.url), {
+            type: "module",
+        });
+    }
     return new Worker(new URL("./engine.worker.single.js", import.meta.url), { type: "module" });
 }
 
