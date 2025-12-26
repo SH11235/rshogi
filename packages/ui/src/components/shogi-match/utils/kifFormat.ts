@@ -334,7 +334,7 @@ export function evalToY(
 }
 
 /** 評価値と消費時間を含むノードデータ */
-export interface NodeData {
+interface NodeData {
     scoreCp?: number;
     scoreMate?: number;
     depth?: number;

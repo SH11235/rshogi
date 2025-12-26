@@ -5,7 +5,7 @@
  */
 
 import type { ReactElement } from "react";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { type KifMoveData, parseKif, parseSfen } from "../utils/kifParser";
 
 type ImportTab = "sfen" | "kif";
@@ -28,6 +28,17 @@ export function KifuImportPanel({
     const [inputValue, setInputValue] = useState("");
     const [error, setError] = useState<string | null>(null);
     const [success, setSuccess] = useState(false);
+    // タイマーIDを保持してクリーンアップに使用
+    const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    // コンポーネントアンマウント時にタイマーをクリーンアップ
+    useEffect(() => {
+        return () => {
+            if (successTimerRef.current) {
+                clearTimeout(successTimerRef.current);
+            }
+        };
+    }, []);
 
     const handleImport = useCallback(async () => {
         if (!inputValue.trim()) {
@@ -37,6 +48,11 @@ export function KifuImportPanel({
 
         setError(null);
         setSuccess(false);
+        // 既存のタイマーをクリア
+        if (successTimerRef.current) {
+            clearTimeout(successTimerRef.current);
+            successTimerRef.current = null;
+        }
 
         try {
             if (activeTab === "sfen") {
@@ -48,7 +64,7 @@ export function KifuImportPanel({
                 await onImportSfen(sfen, moves);
                 setSuccess(true);
                 setInputValue("");
-                setTimeout(() => setSuccess(false), 2000);
+                successTimerRef.current = setTimeout(() => setSuccess(false), 2000);
             } else {
                 const result = parseKif(inputValue);
                 if (!result.success) {
@@ -58,7 +74,7 @@ export function KifuImportPanel({
                 await onImportKif(result.moves, result.moveData);
                 setSuccess(true);
                 setInputValue("");
-                setTimeout(() => setSuccess(false), 2000);
+                successTimerRef.current = setTimeout(() => setSuccess(false), 2000);
             }
         } catch (e) {
             setError(e instanceof Error ? e.message : "インポートに失敗しました");

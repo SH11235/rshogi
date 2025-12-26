@@ -83,7 +83,7 @@ export interface KifMoveData {
     depth?: number;
 }
 
-export interface KifParseResult {
+interface KifParseResult {
     /** 成功したか */
     success: boolean;
     /** USI形式の指し手配列 */
@@ -192,8 +192,9 @@ function parseEvalComment(
     const evalMatch = content.match(/^([+-]?\d+\.?\d*)/);
     if (evalMatch) {
         const evalValue = parseFloat(evalMatch[1]);
-        // センチポーンに変換（100倍）
-        const evalCp = Math.round(evalValue * 100);
+        // センチポーンに変換（100倍）、極端な値はクランプ（±100000cp = ±1000）
+        const rawCp = Math.round(evalValue * 100);
+        const evalCp = Math.max(-10000000, Math.min(10000000, rawCp));
         return { evalCp, depth };
     }
 
@@ -272,8 +273,11 @@ function parseKifLine(line: string, prevTo: string | null): ParsedMoveLine | nul
 
     // ============================================================
     // 駒打ちのパース: "５五角打"
+    // 駒名を明示的に列挙して早期にエラー検出
     // ============================================================
-    const dropMatch = moveStr.match(/^([１２３４５６７８９1-9])([一二三四五六七八九])(.+)打$/);
+    const dropMatch = moveStr.match(
+        /^([１２３４５６７８９1-9])([一二三四五六七八九])(歩|香|桂|銀|金|角|飛)打$/,
+    );
     if (dropMatch) {
         const [, fileChar, rankChar, pieceName] = dropMatch;
         const to = kanjiToUsi(fileChar, rankChar);
@@ -287,10 +291,11 @@ function parseKifLine(line: string, prevTo: string | null): ParsedMoveLine | nul
 
     // ============================================================
     // 「同」表記のパース: "同　歩(66)" or "同歩(66)"
+    // 駒名部分は検証不要（後続の PIECE_NAME_TO_USI で検証）、移動元座標のみ抽出
     // ============================================================
-    const sameMatch = moveStr.match(/^同[　\s]*(.+?)(?:成)?(?:\((\d{2})\))?$/);
+    const sameMatch = moveStr.match(/^同[　\s]*(?:.+?)(?:成)?(?:\((\d{2})\))?$/);
     if (sameMatch && prevTo) {
-        const [, , fromDigits] = sameMatch;
+        const [, fromDigits] = sameMatch;
         const promotes =
             moveStr.includes("成") &&
             !moveStr.includes("成香") &&

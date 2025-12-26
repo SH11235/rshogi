@@ -12,6 +12,12 @@ export interface KifuEval {
     scoreCp?: number;
     scoreMate?: number;
     depth?: number;
+    /**
+     * 既に先手視点に正規化済みかどうか
+     * - true: KIFインポートなど、既に先手視点の評価値
+     * - false/undefined: エンジン出力（手番側視点）、符号反転が必要
+     */
+    normalized?: boolean;
 }
 
 /** 棋譜ノード */

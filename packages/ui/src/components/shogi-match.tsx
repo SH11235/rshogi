@@ -1126,6 +1126,7 @@ export function ShogiMatch({
                 const applyResult = applyMoveWithState(currentPos, move, { validateTurn: false });
                 if (applyResult.ok) {
                     // 消費時間と評価値を渡す
+                    // KIFインポートの評価値は既に先手視点なので normalized: true
                     navigation.addMove(move, applyResult.next, {
                         elapsedMs: data?.elapsedMs,
                         eval:
@@ -1134,6 +1135,7 @@ export function ShogiMatch({
                                       scoreCp: data.evalCp,
                                       scoreMate: data.evalMate,
                                       depth: data.depth,
+                                      normalized: true,
                                   }
                                 : undefined,
                     });

@@ -409,10 +409,11 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
             const hasEval = node.eval != null;
             const hasElapsed = node.elapsedMs != null;
             if (hasEval || hasElapsed) {
-                // エンジンの評価値は「手番側（次に指す側）から見た値」なので、
-                // 先手の手の後（奇数手）は後手視点のため反転して先手視点に正規化
+                // normalized=true の場合は既に先手視点なので符号反転不要
+                // それ以外（エンジン出力）は「手番側から見た値」なので反転して先手視点に正規化
+                const needsSignFlip = !node.eval?.normalized;
                 const isSenteMove = node.ply % 2 !== 0;
-                const sign = isSenteMove ? -1 : 1;
+                const sign = needsSignFlip && isSenteMove ? -1 : 1;
                 nodeDataMap.set(node.ply, {
                     scoreCp: node.eval?.scoreCp != null ? node.eval.scoreCp * sign : undefined,
                     scoreMate:
@@ -442,11 +443,11 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
             const ply = node.ply;
             const evalData = node.eval;
 
-            // エンジンの評価値は「手番側（次に指す側）から見た値」なので、
-            // 先手の手の後（奇数手）は後手視点のため反転して先手視点に正規化
-            // 後手の手の後（偶数手）は先手視点のためそのまま
+            // normalized=true の場合は既に先手視点なので符号反転不要
+            // それ以外（エンジン出力）は「手番側から見た値」なので反転して先手視点に正規化
+            const needsSignFlip = !evalData?.normalized;
             const isSenteMove = ply % 2 !== 0;
-            const sign = isSenteMove ? -1 : 1;
+            const sign = needsSignFlip && isSenteMove ? -1 : 1;
 
             history.push({
                 ply,
