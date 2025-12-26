@@ -1,24 +1,9 @@
 import type { Player } from "@shogi/app-core";
 import type { EngineClient } from "@shogi/engine-client";
-import type { CSSProperties, ReactElement } from "react";
+import type { ReactElement } from "react";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../../collapsible";
 import { Input } from "../../input";
-import { Tooltip, TooltipContent, TooltipTrigger } from "../../tooltip";
 import type { ClockSettings } from "../hooks/useClockManager";
-import { formatTime } from "../utils/timeFormat";
-
-const PANEL_STYLES = {
-    select: {
-        padding: "8px",
-        borderRadius: "8px",
-        border: "1px solid hsl(var(--wafuu-border))",
-        background: "hsl(var(--card, 0 0% 100%))",
-    } as CSSProperties,
-    input: {
-        border: "1px solid hsl(var(--wafuu-border))",
-        background: "hsl(var(--card, 0 0% 100%))",
-    } as CSSProperties,
-};
 
 type SideRole = "human" | "engine";
 
@@ -54,6 +39,11 @@ interface MatchSettingsPanelProps {
     settingsLocked: boolean;
 }
 
+const selectClassName =
+    "p-2 rounded-lg border border-[hsl(var(--wafuu-border))] bg-[hsl(var(--card,0_0%_100%))]";
+const inputClassName = "border border-[hsl(var(--wafuu-border))] bg-[hsl(var(--card,0_0%_100%))]";
+const labelClassName = "flex flex-col gap-1 text-[13px]";
+
 export function MatchSettingsPanel({
     isOpen,
     onOpenChange,
@@ -66,345 +56,199 @@ export function MatchSettingsPanel({
     uiEngineOptions,
     settingsLocked,
 }: MatchSettingsPanelProps): ReactElement {
-    // 折りたたみ時に表示するサマリー
+    // 折りたたみ時に表示するサマリー（短いラベル）
     const getSideLabel = (setting: SideSetting): string => {
         return setting.role === "human" ? "人" : "AI";
     };
-    const getTimeSummary = (): string => {
-        // 先手の設定を代表として表示（通常は先後同じ）
-        const main = formatTime(timeSettings.sente.mainMs);
-        const byoyomi = formatTime(timeSettings.sente.byoyomiMs);
-        return `${main}+${byoyomi}`;
+    const summary = `☗${getSideLabel(sides.sente)} vs ☖${getSideLabel(sides.gote)}`;
+
+    // 選択肢の値を生成: "human" または "engine:{engineId}"
+    const getSelectorValue = (setting: SideSetting): string => {
+        if (setting.role === "human") return "human";
+        return `engine:${setting.engineId ?? uiEngineOptions[0]?.id ?? ""}`;
     };
-    const summary = `☗${getSideLabel(sides.sente)} vs ☖${getSideLabel(sides.gote)} | ${getTimeSummary()}`;
+
+    const handleSelectorChange = (side: Player, value: string) => {
+        if (value === "human") {
+            onSidesChange({
+                ...sides,
+                [side]: { role: "human", engineId: undefined },
+            });
+        } else if (value.startsWith("engine:")) {
+            const engineId = value.slice("engine:".length);
+            onSidesChange({
+                ...sides,
+                [side]: { role: "engine", engineId },
+            });
+        }
+    };
 
     const sideSelector = (side: Player) => {
         const setting = sides[side];
-        const hasEngineOptions = uiEngineOptions.length > 0;
-        const engineList = uiEngineOptions.map((opt) => (
-            <option key={opt.id} value={opt.id}>
-                {opt.label}
-            </option>
-        ));
-        const resolvedEngineId = setting.engineId ?? uiEngineOptions[0]?.id ?? "";
+        const selectorValue = getSelectorValue(setting);
+
         return (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
-                <label
-                    style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: "4px",
-                        fontSize: "13px",
-                    }}
+            <label className={labelClassName}>
+                {side === "sente" ? "先手" : "後手"}
+                <select
+                    value={selectorValue}
+                    onChange={(e) => handleSelectorChange(side, e.target.value)}
+                    disabled={settingsLocked}
+                    className={selectClassName}
                 >
-                    {side === "sente" ? "先手" : "後手"} の操作
-                    <select
-                        value={setting.role}
-                        onChange={(e) => {
-                            const nextRole = e.target.value as SideRole;
-                            const fallbackEngineId = uiEngineOptions[0]?.id;
-                            onSidesChange({
-                                ...sides,
-                                [side]: {
-                                    ...sides[side],
-                                    role: nextRole,
-                                    engineId:
-                                        nextRole === "engine"
-                                            ? (sides[side].engineId ?? fallbackEngineId)
-                                            : undefined,
-                                },
-                            });
-                        }}
-                        disabled={settingsLocked}
-                        style={PANEL_STYLES.select}
-                    >
-                        <option value="human">人間</option>
-                        <option value="engine">エンジン</option>
-                    </select>
-                </label>
-                <label
-                    style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: "4px",
-                        fontSize: "13px",
-                    }}
-                >
-                    <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                        <span>使用するエンジン</span>
-                        <Tooltip>
-                            <TooltipTrigger asChild>
-                                <span
-                                    role="img"
-                                    aria-label="内蔵エンジンの補足"
-                                    style={{
-                                        display: "inline-flex",
-                                        alignItems: "center",
-                                        justifyContent: "center",
-                                        width: "18px",
-                                        height: "18px",
-                                        borderRadius: "999px",
-                                        border: "1px solid hsl(var(--border, 0 0% 86%))",
-                                        background: "hsl(var(--card, 0 0% 100%))",
-                                        color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                                        fontSize: "11px",
-                                        cursor: "default",
-                                        lineHeight: 1,
-                                    }}
-                                >
-                                    i
-                                </span>
-                            </TooltipTrigger>
-                            <TooltipContent side="top">
-                                内蔵エンジンは選択肢を1つにまとめています。先手/後手が両方エンジンの場合も内部で必要なクライアント数を起動します。
-                                将来の外部USI/NNUEエンジンを追加するときはここに選択肢が増えます。
-                            </TooltipContent>
-                        </Tooltip>
-                    </div>
-                    <select
-                        value={resolvedEngineId}
-                        onChange={(e) =>
-                            onSidesChange({
-                                ...sides,
-                                [side]: { ...sides[side], engineId: e.target.value },
-                            })
-                        }
-                        disabled={settingsLocked || setting.role !== "engine" || !hasEngineOptions}
-                        style={PANEL_STYLES.select}
-                    >
-                        {engineList}
-                    </select>
-                    {!hasEngineOptions ? (
-                        <span
-                            style={{
-                                fontSize: "12px",
-                                color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                            }}
-                        >
-                            利用可能なエンジンがありません
-                        </span>
-                    ) : null}
-                </label>
-            </div>
+                    <option value="human">人間</option>
+                    {uiEngineOptions.map((opt) => (
+                        <option key={opt.id} value={`engine:${opt.id}`}>
+                            {opt.label}
+                        </option>
+                    ))}
+                </select>
+            </label>
         );
     };
 
     return (
         <Collapsible open={isOpen} onOpenChange={onOpenChange}>
-            <div
-                style={{
-                    background: "hsl(var(--wafuu-washi-warm))",
-                    border: "2px solid hsl(var(--wafuu-border))",
-                    borderRadius: "12px",
-                    overflow: "hidden",
-                    boxShadow: "0 8px 20px rgba(0,0,0,0.08)",
-                    width: "var(--panel-width)",
-                }}
-            >
+            <div className="w-[var(--panel-width)] overflow-hidden rounded-xl border-2 border-[hsl(var(--wafuu-border))] bg-[hsl(var(--wafuu-washi-warm))] shadow-lg">
                 <CollapsibleTrigger asChild>
                     <button
                         type="button"
                         aria-label="対局設定パネルを開閉"
-                        style={{
-                            width: "100%",
-                            padding: "14px 16px",
-                            background:
-                                "linear-gradient(135deg, hsl(var(--wafuu-washi)) 0%, hsl(var(--wafuu-washi-warm)) 100%)",
-                            border: "none",
-                            borderBottom: isOpen ? "1px solid hsl(var(--wafuu-border))" : "none",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "space-between",
-                            gap: "12px",
-                            cursor: "pointer",
-                            transition: "all 0.2s ease",
-                        }}
+                        className={`flex w-full cursor-pointer items-center justify-between gap-3 border-none bg-gradient-to-br from-[hsl(var(--wafuu-washi))] to-[hsl(var(--wafuu-washi-warm))] px-4 py-3.5 transition-all duration-200 ${
+                            isOpen ? "border-b border-[hsl(var(--wafuu-border))]" : ""
+                        }`}
                     >
-                        <span style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                            <span
-                                style={{
-                                    fontSize: "18px",
-                                    fontWeight: 700,
-                                    color: "hsl(var(--wafuu-sumi))",
-                                    letterSpacing: "0.05em",
-                                }}
-                            >
+                        <span className="flex items-center gap-3">
+                            <span className="text-lg font-bold tracking-wide text-[hsl(var(--wafuu-sumi))]">
                                 対局設定
                             </span>
-                            <span
-                                style={{
-                                    fontSize: "14px",
-                                    fontWeight: 600,
-                                    color: "hsl(var(--wafuu-kincha))",
-                                }}
-                            >
+                            {settingsLocked && (
+                                <span
+                                    title="対局中は変更できません"
+                                    className="text-base text-[hsl(var(--wafuu-shu))]"
+                                >
+                                    🚫
+                                </span>
+                            )}
+                            <span className="text-sm font-semibold text-[hsl(var(--wafuu-kincha))]">
                                 {summary}
                             </span>
                         </span>
                         <span
-                            style={{
-                                fontSize: "20px",
-                                color: "hsl(var(--wafuu-kincha))",
-                                transform: isOpen ? "rotate(180deg)" : "rotate(0deg)",
-                                transition: "transform 0.2s ease",
-                                flexShrink: 0,
-                            }}
+                            className={`shrink-0 text-xl text-[hsl(var(--wafuu-kincha))] transition-transform duration-200 ${
+                                isOpen ? "rotate-180" : "rotate-0"
+                            }`}
                         >
                             ▼
                         </span>
                     </button>
                 </CollapsibleTrigger>
                 <CollapsibleContent>
-                    <div
-                        style={{
-                            padding: "16px",
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: "14px",
-                        }}
-                    >
-                        {settingsLocked ? (
-                            <div
-                                style={{
-                                    fontSize: "12px",
-                                    color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                                }}
-                            >
-                                対局中は設定を変更できません。停止すると編集できます。
+                    <div className="relative flex flex-col gap-3.5 p-4">
+                        {/* 対局中のロックオーバーレイ */}
+                        {settingsLocked && (
+                            <div className="absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-[hsl(var(--wafuu-washi-warm)/0.7)]">
+                                <div className="flex items-center gap-2 rounded-lg bg-[hsl(var(--wafuu-sumi)/0.9)] px-4 py-2 text-sm font-semibold text-white">
+                                    <span>🚫</span>
+                                    <span>対局中は変更不可</span>
+                                </div>
                             </div>
-                        ) : null}
-                        <label
-                            style={{
-                                display: "flex",
-                                flexDirection: "column",
-                                gap: "4px",
-                                fontSize: "13px",
-                            }}
-                        >
+                        )}
+
+                        <label className={labelClassName}>
                             手番（開始時にどちらが指すか）
                             <select
                                 value={currentTurn}
                                 onChange={(e) => onTurnChange(e.target.value as Player)}
                                 disabled={settingsLocked}
-                                style={PANEL_STYLES.select}
+                                className={selectClassName}
                             >
                                 <option value="sente">先手</option>
                                 <option value="gote">後手</option>
                             </select>
                         </label>
-                        {sideSelector("sente")}
-                        {sideSelector("gote")}
 
-                        <div
-                            style={{
-                                display: "grid",
-                                gridTemplateColumns: "1fr 1fr",
-                                gap: "8px",
-                            }}
-                        >
-                            <label
-                                htmlFor="sente-main"
-                                style={{
-                                    display: "flex",
-                                    flexDirection: "column",
-                                    gap: "4px",
-                                    fontSize: "13px",
-                                }}
-                            >
-                                先手 持ち時間 (ms)
+                        <div className="grid grid-cols-2 gap-3">
+                            {sideSelector("sente")}
+                            {sideSelector("gote")}
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                            <label htmlFor="sente-main" className={labelClassName}>
+                                先手 持ち時間 (秒)
                                 <Input
                                     id="sente-main"
                                     type="number"
-                                    value={timeSettings.sente.mainMs}
+                                    min={0}
+                                    value={Math.floor(timeSettings.sente.mainMs / 1000)}
                                     disabled={settingsLocked}
-                                    style={PANEL_STYLES.input}
+                                    className={inputClassName}
                                     onChange={(e) =>
                                         onTimeSettingsChange({
                                             ...timeSettings,
                                             sente: {
                                                 ...timeSettings.sente,
-                                                mainMs: Number(e.target.value),
+                                                mainMs: Number(e.target.value) * 1000,
                                             },
                                         })
                                     }
                                 />
                             </label>
-                            <label
-                                htmlFor="sente-byoyomi"
-                                style={{
-                                    display: "flex",
-                                    flexDirection: "column",
-                                    gap: "4px",
-                                    fontSize: "13px",
-                                }}
-                            >
-                                先手 秒読み (ms)
+                            <label htmlFor="sente-byoyomi" className={labelClassName}>
+                                先手 秒読み (秒)
                                 <Input
                                     id="sente-byoyomi"
                                     type="number"
-                                    value={timeSettings.sente.byoyomiMs}
+                                    min={0}
+                                    value={Math.floor(timeSettings.sente.byoyomiMs / 1000)}
                                     disabled={settingsLocked}
-                                    style={PANEL_STYLES.input}
+                                    className={inputClassName}
                                     onChange={(e) =>
                                         onTimeSettingsChange({
                                             ...timeSettings,
                                             sente: {
                                                 ...timeSettings.sente,
-                                                byoyomiMs: Number(e.target.value),
+                                                byoyomiMs: Number(e.target.value) * 1000,
                                             },
                                         })
                                     }
                                 />
                             </label>
-                            <label
-                                htmlFor="gote-main"
-                                style={{
-                                    display: "flex",
-                                    flexDirection: "column",
-                                    gap: "4px",
-                                    fontSize: "13px",
-                                }}
-                            >
-                                後手 持ち時間 (ms)
+                            <label htmlFor="gote-main" className={labelClassName}>
+                                後手 持ち時間 (秒)
                                 <Input
                                     id="gote-main"
                                     type="number"
-                                    value={timeSettings.gote.mainMs}
+                                    min={0}
+                                    value={Math.floor(timeSettings.gote.mainMs / 1000)}
                                     disabled={settingsLocked}
-                                    style={PANEL_STYLES.input}
+                                    className={inputClassName}
                                     onChange={(e) =>
                                         onTimeSettingsChange({
                                             ...timeSettings,
                                             gote: {
                                                 ...timeSettings.gote,
-                                                mainMs: Number(e.target.value),
+                                                mainMs: Number(e.target.value) * 1000,
                                             },
                                         })
                                     }
                                 />
                             </label>
-                            <label
-                                htmlFor="gote-byoyomi"
-                                style={{
-                                    display: "flex",
-                                    flexDirection: "column",
-                                    gap: "4px",
-                                    fontSize: "13px",
-                                }}
-                            >
-                                後手 秒読み (ms)
+                            <label htmlFor="gote-byoyomi" className={labelClassName}>
+                                後手 秒読み (秒)
                                 <Input
                                     id="gote-byoyomi"
                                     type="number"
-                                    value={timeSettings.gote.byoyomiMs}
+                                    min={0}
+                                    value={Math.floor(timeSettings.gote.byoyomiMs / 1000)}
                                     disabled={settingsLocked}
-                                    style={PANEL_STYLES.input}
+                                    className={inputClassName}
                                     onChange={(e) =>
                                         onTimeSettingsChange({
                                             ...timeSettings,
                                             gote: {
                                                 ...timeSettings.gote,
-                                                byoyomiMs: Number(e.target.value),
+                                                byoyomiMs: Number(e.target.value) * 1000,
                                             },
                                         })
                                     }

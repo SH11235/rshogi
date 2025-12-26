@@ -52,6 +52,7 @@ import { type ClockSettings, useClockManager } from "./shogi-match/hooks/useCloc
 import { useEngineManager } from "./shogi-match/hooks/useEngineManager";
 import { useKifuKeyboardNavigation } from "./shogi-match/hooks/useKifuKeyboardNavigation";
 import { useKifuNavigation } from "./shogi-match/hooks/useKifuNavigation";
+import { useLocalStorage } from "./shogi-match/hooks/useLocalStorage";
 import {
     DEFAULT_DISPLAY_SETTINGS,
     type DisplaySettings,
@@ -219,7 +220,10 @@ export function ShogiMatch({
         () => Object.fromEntries(getAllSquares().map((sq) => [sq, null])) as BoardState,
         [],
     );
-    const [sides, setSides] = useState<{ sente: SideSetting; gote: SideSetting }>(defaultSides);
+    const [sides, setSides] = useLocalStorage<{ sente: SideSetting; gote: SideSetting }>(
+        "shogi-match-sides",
+        defaultSides,
+    );
     const [position, setPosition] = useState<PositionState>({
         board: emptyBoard,
         hands: createEmptyHands(),
@@ -237,10 +241,13 @@ export function ShogiMatch({
     const [showResultBanner, setShowResultBanner] = useState(false);
     const [editMessage, setEditMessage] = useState<string | null>(null);
     const [flipBoard, setFlipBoard] = useState(false);
-    const [timeSettings, setTimeSettings] = useState<ClockSettings>({
-        sente: { mainMs: initialMainTimeMs, byoyomiMs: initialByoyomiMs },
-        gote: { mainMs: initialMainTimeMs, byoyomiMs: initialByoyomiMs },
-    });
+    const [timeSettings, setTimeSettings] = useLocalStorage<ClockSettings>(
+        "shogi-match-time-settings",
+        {
+            sente: { mainMs: initialMainTimeMs, byoyomiMs: initialByoyomiMs },
+            gote: { mainMs: initialMainTimeMs, byoyomiMs: initialByoyomiMs },
+        },
+    );
     const [isMatchRunning, setIsMatchRunning] = useState(false);
     const [isEditMode, setIsEditMode] = useState(true);
     const [editOwner, setEditOwner] = useState<Player>("sente");
@@ -253,8 +260,10 @@ export function ShogiMatch({
     const [isEditPanelOpen, setIsEditPanelOpen] = useState(false);
     const [isSettingsPanelOpen, setIsSettingsPanelOpen] = useState(false);
     const [isDisplaySettingsPanelOpen, setIsDisplaySettingsPanelOpen] = useState(false);
-    const [displaySettings, setDisplaySettings] =
-        useState<DisplaySettings>(DEFAULT_DISPLAY_SETTINGS);
+    const [displaySettings, setDisplaySettings] = useLocalStorage<DisplaySettings>(
+        "shogi-display-settings",
+        DEFAULT_DISPLAY_SETTINGS,
+    );
 
     // positionRef を先に定義（コールバックで使用するため）
     const positionRef = useRef<PositionState>(position);
@@ -347,6 +356,14 @@ export function ShogiMatch({
             matchEndedRef,
             onClockError: handleClockError,
         });
+
+    // 対局前に timeSettings が変更されたら clocks を同期
+    // （resetClocks は timeSettings に依存しているため、resetClocks の変更で検知可能）
+    useEffect(() => {
+        if (!isMatchRunning) {
+            resetClocks(false);
+        }
+    }, [isMatchRunning, resetClocks]);
 
     // 対局終了処理（エンジン管理フックから呼ばれる）
     const endMatch = useCallback(

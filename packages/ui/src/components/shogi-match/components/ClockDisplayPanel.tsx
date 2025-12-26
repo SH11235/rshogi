@@ -85,7 +85,7 @@ export function ClockDisplayPanel({ clocks, sides }: ClockDisplayPanelProps): Re
                     marginBottom: "6px",
                 }}
             >
-                <span style={{ fontWeight: 700 }}>持時間</span>
+                <span style={{ fontWeight: 700 }}>時間管理</span>
                 <span
                     style={{
                         fontSize: "11px",

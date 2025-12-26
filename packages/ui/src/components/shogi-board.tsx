@@ -105,10 +105,11 @@ export function ShogiBoard({
                             const isLastMoveTo = cell.id === lastMove?.to;
                             const isLastMoveFrom =
                                 cell.id === lastMove?.from && lastMove?.from !== null;
-                            const isDrop = lastMove?.from === undefined || lastMove?.from === null;
                             const isPromotionSquare = promotionSquare === cell.id;
 
-                            const tone =
+                            // 背景色: ハイライト時は上書き、通常時はチェッカーパターン
+                            const isHighlighted = isLastMoveTo || isLastMoveFrom || isSelected;
+                            const baseTone =
                                 (rowIndex + columnIndex) % 2 === 0
                                     ? "bg-[hsl(var(--shogi-cell-light))]"
                                     : "bg-[hsl(var(--shogi-cell-dark))]";
@@ -160,38 +161,24 @@ export function ShogiBoard({
                                         }
                                         className={cn(
                                             "absolute inset-0 overflow-hidden text-base font-semibold transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-[hsl(var(--wafuu-shu))]/70 focus-visible:ring-offset-transparent",
-                                            "bg-[radial-gradient(circle_at_20%_20%,rgba(255,255,255,0.3),transparent_38%),radial-gradient(circle_at_80%_80%,rgba(255,255,255,0.18),transparent_40%)] shadow-[inset_0_1px_0_rgba(255,255,255,0.5)] hover:ring-2 hover:ring-inset hover:ring-[hsl(var(--shogi-border))]",
-                                            tone,
-                                            // 選択中のマス - リングのみ（背景はオーバーレイで）
+                                            "shadow-[inset_0_1px_0_rgba(255,255,255,0.5)] hover:ring-2 hover:ring-inset hover:ring-[hsl(var(--shogi-border))]",
+                                            // 背景色: ハイライト時は専用色、通常時はチェッカーパターン
+                                            !isHighlighted && baseTone,
+                                            !isHighlighted &&
+                                                "bg-[radial-gradient(circle_at_20%_20%,rgba(255,255,255,0.3),transparent_38%),radial-gradient(circle_at_80%_80%,rgba(255,255,255,0.18),transparent_40%)]",
+                                            // 移動先ハイライト - 濃い金色
+                                            isLastMoveTo &&
+                                                !isSelected &&
+                                                "bg-[hsl(45_85%_62%)] ring-2 ring-inset ring-[hsl(45_90%_40%)]",
+                                            // 移動元ハイライト - 薄い金色（痕跡）
+                                            isLastMoveFrom &&
+                                                !isSelected &&
+                                                "bg-[hsl(45_60%_78%)] ring-1 ring-inset ring-[hsl(45_50%_55%)]",
+                                            // 選択中 - リング + 薄い金色背景
                                             isSelected &&
-                                                "ring-[3px] ring-inset ring-[hsl(var(--wafuu-shu))]",
+                                                "bg-[hsl(var(--wafuu-kin))] ring-[3px] ring-inset ring-[hsl(var(--wafuu-shu))]",
                                         )}
                                     >
-                                        {/* ハイライトオーバーレイ（選択・直前手） */}
-                                        {(isSelected || isLastMoveTo || isLastMoveFrom) && (
-                                            <span
-                                                className={cn(
-                                                    "pointer-events-none absolute inset-0 transition-all duration-200",
-                                                    // 選択中
-                                                    isSelected && "bg-[hsl(var(--wafuu-kin)/0.25)]",
-                                                    // 移動先（通常移動）- 金色のグロー
-                                                    isLastMoveTo &&
-                                                        !isDrop &&
-                                                        !isSelected &&
-                                                        "bg-[hsl(45_90%_55%/0.4)] shadow-[inset_0_0_16px_hsl(45_95%_50%/0.6)] ring-2 ring-inset ring-[hsl(45_85%_45%/0.8)]",
-                                                    // 移動先（駒打ち）- やや落ち着いた金色
-                                                    isLastMoveTo &&
-                                                        isDrop &&
-                                                        !isSelected &&
-                                                        "bg-[hsl(40_80%_58%/0.35)] shadow-[inset_0_0_14px_hsl(40_85%_52%/0.5)] ring-2 ring-inset ring-[hsl(40_75%_48%/0.7)]",
-                                                    // 移動元（痕跡）- 薄い墨色
-                                                    isLastMoveFrom &&
-                                                        !isSelected &&
-                                                        "bg-[hsl(35_25%_50%/0.25)] shadow-[inset_0_0_10px_hsl(35_20%_40%/0.3)] ring-1 ring-inset ring-[hsl(35_30%_45%/0.5)]",
-                                                )}
-                                                aria-hidden="true"
-                                            />
-                                        )}
                                         {cell.piece ? (
                                             <span
                                                 className={cn(
