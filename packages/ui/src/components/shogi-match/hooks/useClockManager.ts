@@ -202,9 +202,7 @@ export function useClockManager({
             setClocks(nextState);
 
             if (expiredSide && isMatchRunning && !matchEndedRef.current) {
-                // 重複実行を防止するため、即座にフラグを立てる
-                matchEndedRef.current = true;
-
+                // 注: matchEndedRef.current は endMatch 内で設定されるため、ここでは設定しない
                 try {
                     const result = onTimeExpiredRef.current(expiredSide);
                     Promise.resolve(result).catch((err) => {
