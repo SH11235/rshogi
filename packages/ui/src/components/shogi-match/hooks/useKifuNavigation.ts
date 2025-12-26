@@ -5,7 +5,7 @@
  * 局面間のナビゲーション機能を提供する
  */
 
-import type { BoardState, PositionState } from "@shogi/app-core";
+import type { AddMoveOptions, BoardState, PositionState } from "@shogi/app-core";
 import {
     addMove as addMoveToTree,
     createKifuTree,
@@ -102,7 +102,7 @@ interface UseKifuNavigationResult {
     /** 現在位置以降の手を削除 */
     truncate: () => void;
     /** 指し手を追加（分岐生成含む） */
-    addMove: (usiMove: string, positionAfter: PositionState) => void;
+    addMove: (usiMove: string, positionAfter: PositionState, options?: AddMoveOptions) => void;
     /** 評価値を記録 */
     recordEval: (ply: number, event: EngineInfoEvent) => void;
     /** 新規対局でリセット */
@@ -246,9 +246,9 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
      * 指し手を追加
      */
     const addMove = useCallback(
-        (usiMove: string, positionAfter: PositionState) => {
+        (usiMove: string, positionAfter: PositionState, options?: AddMoveOptions) => {
             setTree((prev) => {
-                const newTree = addMoveToTree(prev, usiMove, positionAfter);
+                const newTree = addMoveToTree(prev, usiMove, positionAfter, options);
                 // 新しいノードに移動したので、コールバックを呼ぶ
                 const lastMove = deriveLastMoveFromUsi(usiMove);
                 onPositionChange?.(positionAfter, lastMove);
@@ -396,21 +396,29 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
     const kifMoves = useMemo((): KifMove[] => {
         // フルラインから指し手を抽出
         const moves: string[] = [];
-        const evalMap = new Map<number, { scoreCp?: number; scoreMate?: number; depth?: number }>();
+        const nodeDataMap = new Map<
+            number,
+            { scoreCp?: number; scoreMate?: number; depth?: number; elapsedMs?: number }
+        >();
 
         for (const node of fullLinePath) {
             if (node.usiMove !== null) {
                 moves.push(node.usiMove);
             }
-            if (node.eval) {
+            // 評価値と消費時間をまとめてマップに格納
+            const hasEval = node.eval != null;
+            const hasElapsed = node.elapsedMs != null;
+            if (hasEval || hasElapsed) {
                 // エンジンの評価値は「手番側（次に指す側）から見た値」なので、
                 // 先手の手の後（奇数手）は後手視点のため反転して先手視点に正規化
                 const isSenteMove = node.ply % 2 !== 0;
                 const sign = isSenteMove ? -1 : 1;
-                evalMap.set(node.ply, {
-                    scoreCp: node.eval.scoreCp != null ? node.eval.scoreCp * sign : undefined,
-                    scoreMate: node.eval.scoreMate != null ? node.eval.scoreMate * sign : undefined,
-                    depth: node.eval.depth,
+                nodeDataMap.set(node.ply, {
+                    scoreCp: node.eval?.scoreCp != null ? node.eval.scoreCp * sign : undefined,
+                    scoreMate:
+                        node.eval?.scoreMate != null ? node.eval.scoreMate * sign : undefined,
+                    depth: node.eval?.depth,
+                    elapsedMs: node.elapsedMs,
                 });
             }
         }
@@ -420,7 +428,7 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
         }
 
         const validMoves = moves.slice(0, boardHistory.length);
-        return convertMovesToKif(validMoves, boardHistory, evalMap);
+        return convertMovesToKif(validMoves, boardHistory, nodeDataMap);
     }, [fullLinePath, boardHistory]);
 
     // 評価値履歴を生成（グラフ用、フルラインに対応、未来の手も含む）

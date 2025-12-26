@@ -22,6 +22,8 @@ export interface KifMove {
     evalMate?: number;
     /** 探索深さ */
     depth?: number;
+    /** 消費時間（ミリ秒） */
+    elapsedMs?: number;
 }
 
 /** 評価値の履歴（グラフ用） */
@@ -331,18 +333,26 @@ export function evalToY(
     return center + normalized * (center - 4); // マージン考慮
 }
 
+/** 評価値と消費時間を含むノードデータ */
+export interface NodeData {
+    scoreCp?: number;
+    scoreMate?: number;
+    depth?: number;
+    elapsedMs?: number;
+}
+
 /**
  * 複数の指し手をKIF形式に一括変換
  *
  * @param moves USI形式の指し手配列
  * @param boardHistory 各手直前の盤面状態の配列（moves と同じ長さ）
- * @param evalMap 手数 → 評価値イベントのマップ（オプション）
+ * @param nodeDataMap 手数 → 評価値・消費時間のマップ（オプション）
  * @returns KifMove の配列
  */
 export function convertMovesToKif(
     moves: string[],
     boardHistory: BoardState[],
-    evalMap?: Map<number, { scoreCp?: number; scoreMate?: number; depth?: number }>,
+    nodeDataMap?: Map<number, NodeData>,
 ): KifMove[] {
     const kifMoves: KifMove[] = [];
     let prevTo: Square | undefined;
@@ -351,7 +361,7 @@ export function convertMovesToKif(
         const ply = i + 1;
         const turn: Player = i % 2 === 0 ? "sente" : "gote";
         const board = boardHistory[i];
-        const evalEvent = evalMap?.get(ply);
+        const nodeData = nodeDataMap?.get(ply);
 
         if (!board) {
             // 盤面履歴がない場合はスキップ
@@ -366,9 +376,10 @@ export function convertMovesToKif(
             kifText,
             displayText,
             usiMove: moves[i],
-            evalCp: evalEvent?.scoreCp,
-            evalMate: evalEvent?.scoreMate,
-            depth: evalEvent?.depth,
+            evalCp: nodeData?.scoreCp,
+            evalMate: nodeData?.scoreMate,
+            depth: nodeData?.depth,
+            elapsedMs: nodeData?.elapsedMs,
         });
 
         // 次の「同」判定用に移動先を記録
@@ -400,6 +411,33 @@ interface KifExportOptions {
     timeLimit?: number;
     /** 秒読み（秒） */
     byoyomi?: number;
+    /** 評価値をコメントとして出力するか */
+    includeEval?: boolean;
+}
+
+/**
+ * ミリ秒を KIF 形式の時間表記に変換
+ * @param ms ミリ秒
+ * @returns "m:ss" 形式（例: "0:05", "1:30"）
+ */
+function formatMoveTime(ms: number): string {
+    const totalSeconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
+/**
+ * ミリ秒を累計時間表記に変換
+ * @param ms ミリ秒
+ * @returns "hh:mm:ss" 形式（例: "00:00:05", "01:30:00"）
+ */
+function formatCumulativeTime(ms: number): string {
+    const totalSeconds = Math.floor(ms / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    return `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
 }
 
 /**
@@ -409,15 +447,22 @@ interface KifExportOptions {
  * @param usiMove USI形式の指し手
  * @param board 指し手適用前の盤面
  * @param prevTo 直前の移動先マス（「同」表記判定用）
- * @returns KIFファイル形式の1行（例: "   1 ２六歩(27)   ( 0:00/00:00:00)"）
+ * @param elapsedMs 消費時間（ミリ秒）
+ * @param cumulativeMs 累計時間（ミリ秒）
+ * @returns KIFファイル形式の1行（例: "   1 ２六歩(27)   ( 0:05/00:00:05)"）
  */
 function formatMoveForKifFile(
     ply: number,
     usiMove: string,
     board: BoardState,
     prevTo?: Square,
+    elapsedMs?: number,
+    cumulativeMs?: number,
 ): string {
     const plyStr = ply.toString().padStart(4, " ");
+    const moveTime = formatMoveTime(elapsedMs ?? 0);
+    const cumTime = formatCumulativeTime(cumulativeMs ?? 0);
+    const timeStr = `(${moveTime.padStart(5, " ")}/${cumTime})`;
 
     if (!usiMove || usiMove.length < 4) {
         return `${plyStr} ${usiMove}`;
@@ -430,7 +475,7 @@ function formatMoveForKifFile(
         const toKanji = squareToKanji(to);
         const pieceName = PIECE_NAMES[pieceChar] ?? pieceChar;
         // 駒打ちの場合は「打」を付ける
-        return `${plyStr} ${toKanji}${pieceName}打     ( 0:00/00:00:00)`;
+        return `${plyStr} ${toKanji}${pieceName}打     ${timeStr}`;
     }
 
     // 通常移動: "7g7f" or "7g7f+"
@@ -455,19 +500,49 @@ function formatMoveForKifFile(
     // 移動元を数字で表示
     const fromDigits = squareToDigits(from);
 
-    return `${plyStr} ${toKanji}${pieceName}${promoteText}(${fromDigits})   ( 0:00/00:00:00)`;
+    return `${plyStr} ${toKanji}${pieceName}${promoteText}(${fromDigits})   ${timeStr}`;
+}
+
+/**
+ * 評価値をコメント形式でフォーマット
+ * @param evalCp 評価値（センチポーン）
+ * @param evalMate 詰み手数
+ * @param depth 探索深さ
+ * @returns コメント文字列（例: "*評価値=+50 (深さ20)"）
+ */
+function formatEvalComment(evalCp?: number, evalMate?: number, depth?: number): string | null {
+    if (evalCp === undefined && evalMate === undefined) {
+        return null;
+    }
+
+    let evalStr: string;
+    if (evalMate !== undefined && evalMate !== null) {
+        if (evalMate > 0) {
+            evalStr = `詰${evalMate}手`;
+        } else {
+            evalStr = `被詰${Math.abs(evalMate)}手`;
+        }
+    } else if (evalCp !== undefined && evalCp !== null) {
+        const value = evalCp / 100;
+        evalStr = value >= 0 ? `+${value.toFixed(1)}` : value.toFixed(1);
+    } else {
+        return null;
+    }
+
+    const depthStr = depth !== undefined ? ` (深さ${depth})` : "";
+    return `*評価値=${evalStr}${depthStr}`;
 }
 
 /**
  * 完全なKIF形式の文字列を生成（クリップボードコピー用）
  *
- * @param moves USI形式の指し手配列
+ * @param kifMoves KIF形式の指し手配列（評価値・消費時間含む）
  * @param boardHistory 各手直前の盤面状態の配列
  * @param options エクスポートオプション
  * @returns KIF形式の完全な文字列
  */
 export function exportToKifString(
-    moves: string[],
+    kifMoves: KifMove[],
     boardHistory: BoardState[],
     options: KifExportOptions = {},
 ): string {
@@ -512,22 +587,50 @@ export function exportToKifString(
 
     // 各手
     let prevTo: Square | undefined;
-    const validMoves = moves.slice(0, boardHistory.length);
+    // 先手・後手の累計時間を追跡
+    let senteCumulativeMs = 0;
+    let goteCumulativeMs = 0;
 
-    for (let i = 0; i < validMoves.length; i++) {
-        const ply = i + 1;
+    for (let i = 0; i < kifMoves.length; i++) {
+        const move = kifMoves[i];
+        const ply = move.ply;
         const board = boardHistory[i];
 
         if (!board) continue;
 
-        const moveLine = formatMoveForKifFile(ply, validMoves[i], board, prevTo);
+        // 累計時間を計算（奇数手=先手、偶数手=後手）
+        const isSenteMove = ply % 2 !== 0;
+        const elapsedMs = move.elapsedMs ?? 0;
+        if (isSenteMove) {
+            senteCumulativeMs += elapsedMs;
+        } else {
+            goteCumulativeMs += elapsedMs;
+        }
+        const cumulativeMs = isSenteMove ? senteCumulativeMs : goteCumulativeMs;
+
+        const moveLine = formatMoveForKifFile(
+            ply,
+            move.usiMove,
+            board,
+            prevTo,
+            elapsedMs,
+            cumulativeMs,
+        );
         lines.push(moveLine);
 
-        prevTo = parseToSquare(validMoves[i]);
+        // 評価値コメント（オプションで有効な場合）
+        if (options.includeEval) {
+            const evalComment = formatEvalComment(move.evalCp, move.evalMate, move.depth);
+            if (evalComment) {
+                lines.push(evalComment);
+            }
+        }
+
+        prevTo = parseToSquare(move.usiMove);
     }
 
     // 終局表示（手数がある場合）
-    if (validMoves.length > 0) {
+    if (kifMoves.length > 0) {
         lines.push("");
     }
 

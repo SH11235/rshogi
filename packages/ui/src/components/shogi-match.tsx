@@ -327,6 +327,8 @@ export function ShogiMatch({
     const matchEndedRef = useRef(false);
     const boardSectionRef = useRef<HTMLDivElement>(null);
     const settingsLocked = isMatchRunning;
+    // 現在のターン開始時刻（消費時間計算用）
+    const turnStartTimeRef = useRef<number>(Date.now());
 
     // endMatch のための ref（循環依存を回避）
     const endMatchRef = useRef<((result: GameResult) => Promise<void>) | null>(null);
@@ -432,13 +434,17 @@ export function ShogiMatch({
                 );
                 return;
             }
+            // 消費時間を計算
+            const elapsedMs = Date.now() - turnStartTimeRef.current;
             // 棋譜ナビゲーションに手を追加（局面更新はonPositionChangeで自動実行）
-            navigation.addMove(move, result.next);
+            navigation.addMove(move, result.next, { elapsedMs });
             movesRef.current = [...movesRef.current, move];
             setLastMove(result.lastMove);
             setSelection(null);
             setMessage(null);
             legalCache.clear();
+            // ターン開始時刻をリセット
+            turnStartTimeRef.current = Date.now();
             updateClocksForNextTurn(result.next.turn);
         },
         [legalCache, logEngineError, navigation, updateClocksForNextTurn],
@@ -529,6 +535,8 @@ export function ShogiMatch({
 
         // エンジン管理は useEngineManager フックが自動的に処理する
         setIsMatchRunning(true);
+        // ターン開始時刻をリセット
+        turnStartTimeRef.current = Date.now();
         startTicking(position.turn);
     };
 
@@ -587,6 +595,8 @@ export function ShogiMatch({
         setEditOwner("sente");
         setEditPieceType(null);
         legalCache.clear();
+        // ターン開始時刻をリセット
+        turnStartTimeRef.current = Date.now();
         void refreshStartSfen(next);
     }, [
         basePosition,
@@ -600,13 +610,17 @@ export function ShogiMatch({
 
     const applyMoveCommon = useCallback(
         (nextPosition: PositionState, mv: string, last?: LastMove, _prevBoard?: BoardState) => {
+            // 消費時間を計算
+            const elapsedMs = Date.now() - turnStartTimeRef.current;
             // 棋譜ナビゲーションに手を追加（局面更新はonPositionChangeで自動実行）
-            navigation.addMove(mv, nextPosition);
+            navigation.addMove(mv, nextPosition, { elapsedMs });
             movesRef.current = [...movesRef.current, mv];
             setLastMove(last);
             setSelection(null);
             setMessage(null);
             legalCache.clear();
+            // ターン開始時刻をリセット
+            turnStartTimeRef.current = Date.now();
             updateClocksForNextTurn(nextPosition.turn);
         },
         [legalCache, navigation, updateClocksForNextTurn],
@@ -1128,12 +1142,13 @@ export function ShogiMatch({
 
     // KIFコピー用コールバック
     const handleCopyKif = useCallback((): string => {
-        return exportToKifString(moves, boardHistory, {
+        return exportToKifString(kifMoves, boardHistory, {
             startTime: new Date(),
             senteName: sides.sente.role === "engine" ? "エンジン" : "人間",
             goteName: sides.gote.role === "engine" ? "エンジン" : "人間",
+            includeEval: true, // 評価値もコメントとして出力
         });
-    }, [moves, boardHistory, sides.sente.role, sides.gote.role]);
+    }, [kifMoves, boardHistory, sides.sente.role, sides.gote.role]);
 
     // 棋譜の手数選択コールバック（巻き戻し・リプレイ用）
     const handlePlySelect = useCallback(
@@ -1522,7 +1537,7 @@ export function ShogiMatch({
                         <KifuPanel
                             kifMoves={kifMoves}
                             currentPly={navigation.state.currentPly}
-                            showEval={true}
+                            showEval={false}
                             onPlySelect={handlePlySelect}
                             onCopyKif={handleCopyKif}
                             navigation={{

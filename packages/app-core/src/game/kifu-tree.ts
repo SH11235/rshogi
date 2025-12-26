@@ -34,6 +34,8 @@ export interface KifuNode {
     eval?: KifuEval;
     /** コメント（オプション） */
     comment?: string;
+    /** 消費時間（ミリ秒） */
+    elapsedMs?: number;
 }
 
 /** 棋譜ツリー */
@@ -102,7 +104,18 @@ export function getCurrentNode(tree: KifuTree): KifuNode {
  * 既に同じ手が子として存在する場合はそのノードに移動
  * 新しい手の場合は分岐として追加
  */
-export function addMove(tree: KifuTree, usiMove: string, positionAfter: PositionState): KifuTree {
+/** addMoveのオプション */
+export interface AddMoveOptions {
+    /** 消費時間（ミリ秒） */
+    elapsedMs?: number;
+}
+
+export function addMove(
+    tree: KifuTree,
+    usiMove: string,
+    positionAfter: PositionState,
+    options?: AddMoveOptions,
+): KifuTree {
     const currentNode = getCurrentNode(tree);
 
     // 既存の子ノードに同じ手がないか確認
@@ -128,6 +141,7 @@ export function addMove(tree: KifuTree, usiMove: string, positionAfter: Position
         ply: currentNode.ply + 1,
         positionAfter,
         boardBefore: cloneBoard(currentNode.positionAfter.board),
+        elapsedMs: options?.elapsedMs,
     };
 
     // ノードマップを更新
