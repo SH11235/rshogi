@@ -15,15 +15,9 @@ const isProduction = process.argv.includes("--production");
 const profile = isProduction ? "production" : "release";
 const targetDir = isProduction ? "production" : "release";
 
-const targetWasm = path.join(
-    rustRoot,
-    "target",
-    "wasm32-unknown-unknown",
-    targetDir,
-    `${artifactName}.wasm`,
-);
 const outDir = path.resolve(__dirname, "../pkg");
 const threadedOutDir = path.resolve(__dirname, "../pkg-threaded");
+const threadedTarget = path.resolve(rustRoot, "targets", "wasm32-unknown-unknown.json");
 
 function run(cmd, args, cwd = process.cwd(), extraEnv = {}) {
     // Use shell string to properly inherit environment on Windows
@@ -88,7 +82,12 @@ function buildWasm({
     toolchain,
     cargoZArgs,
     emitThreadWorker,
+    target,
 }) {
+    const targetArg = target ?? "wasm32-unknown-unknown";
+    const targetName = targetArg.endsWith(".json") ? path.basename(targetArg, ".json") : targetArg;
+    const targetWasm = path.join(rustRoot, "target", targetName, targetDir, `${artifactName}.wasm`);
+
     console.log(`Building ${crateName}${label ? ` (${label})` : ""} with profile: ${profile}`);
     console.log(`Expected output: ${targetWasm}`);
 
@@ -102,7 +101,7 @@ function buildWasm({
         "--profile",
         profile,
         "--target",
-        "wasm32-unknown-unknown",
+        targetArg,
         "-p",
         crateName,
         ...cargoArgs,
@@ -171,10 +170,11 @@ try {
         cargoArgs: ["--features", "wasm-threads"],
         outDir: threadedOutDir,
         rustflags:
-            "-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--shared-memory -C link-arg=--import-memory -C link-arg=--max-memory=2147483648 -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_base -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align",
+            "-C link-arg=--shared-memory -C link-arg=--import-memory -C link-arg=--max-memory=2147483648 -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_base -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align",
         toolchain: "nightly",
         cargoZArgs: ["-Z", "build-std=std,panic_abort"],
         emitThreadWorker: true,
+        target: threadedTarget,
     });
 
     verifyThreadedOutput(threadedOutDir);

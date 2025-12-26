@@ -25,7 +25,6 @@ thread_local! {
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
-#[allow(dead_code)]
 #[used]
 #[thread_local]
 static TLS_DUMMY: u8 = 0;
@@ -470,6 +469,7 @@ pub fn init(opts: Option<JsValue>) -> Result<(), JsValue> {
 #[cfg(feature = "wasm-threads")]
 #[wasm_bindgen(js_name = initThreadPool)]
 pub fn init_thread_pool(_pool_size: usize) -> Result<(), JsValue> {
+    let _ = TLS_DUMMY;
     // std::thread が必要なタイミングでワーカを生成するため、ここでは何もしない。
     Ok(())
 }

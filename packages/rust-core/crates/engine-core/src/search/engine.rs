@@ -3,19 +3,19 @@
 //! USIプロトコルから呼び出すためのハイレベルインターフェース。
 
 use crate::time::Instant;
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-
-use crate::position::Position;
-use crate::tt::TranspositionTable;
-use crate::types::{Depth, Move, Value, MAX_PLY};
-use std::sync::atomic::AtomicU64;
 
 use super::time_manager::{
     calculate_falling_eval, calculate_time_reduction, normalize_nodes_effort,
     DEFAULT_MAX_MOVES_TO_DRAW,
 };
 use super::{LimitsType, RootMove, SearchWorker, Skill, SkillOptions, ThreadPool, TimeManagement};
+use crate::position::Position;
+use crate::tt::TranspositionTable;
+use crate::types::{Depth, Move, Value, MAX_PLY};
 
 // =============================================================================
 // SearchInfo - 探索情報（USI info出力用）
@@ -242,6 +242,7 @@ fn aggregate_best_move_changes(changes: &[f64]) -> (f64, usize) {
     (sum, changes.len())
 }
 
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 /// SearchProgress はヘルパースレッドの進捗を追跡する。
 /// False Sharing を防ぐため、各フィールドを別々のキャッシュラインに配置する。
 #[repr(C, align(64))]
@@ -252,6 +253,7 @@ pub(crate) struct SearchProgress {
     _pad2: [u8; 56], // 64バイト境界までパディング
 }
 
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 impl SearchProgress {
     pub(crate) fn new() -> Self {
         Self {
@@ -620,8 +622,11 @@ impl Search {
     /// 探索スレッド数を設定
     pub fn set_num_threads(&mut self, num: usize) {
         let num = num.clamp(1, 512);
-        #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
-        let num = 1;
+        let num = if cfg!(all(target_arch = "wasm32", not(feature = "wasm-threads"))) {
+            1
+        } else {
+            num
+        };
         self.num_threads = num;
         self.thread_pool
             .set_num_threads(num, Arc::clone(&self.tt), self.max_moves_to_draw);
@@ -1162,6 +1167,7 @@ impl Search {
     }
 }
 
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 pub(crate) fn search_helper(
     worker: &mut SearchWorker,
     pos: &mut Position,
