@@ -2,5 +2,6 @@ packages:
   - apps/*
   - packages/*
 
-ignoredBuiltDependencies:
+onlyBuiltDependencies:
+  - wasm-opt
   - esbuild
