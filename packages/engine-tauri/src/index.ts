@@ -87,7 +87,10 @@ export function createTauriEngineClient(options: TauriEngineClientOptions = {}):
                 threadedAvailable: response.threadedAvailable,
                 hardwareConcurrency: response.hardwareConcurrency,
             };
-        } catch {
+        } catch (error) {
+            if (debug) {
+                console.warn("[engine-tauri] Failed to fetch thread info, using defaults:", error);
+            }
             return defaultThreadInfo;
         }
     };
@@ -207,7 +210,13 @@ export function createTauriEngineClient(options: TauriEngineClientOptions = {}):
         },
         async setOption(name, value) {
             return runOrMock(
-                () => ipc.invoke("engine_option", { name, value }),
+                async () => {
+                    await ipc.invoke("engine_option", { name, value });
+                    // Update cache if Threads option was changed
+                    if (name === "Threads") {
+                        cachedThreadInfo = await fetchThreadInfo();
+                    }
+                },
                 () => mock.setOption(name, value),
             );
         },

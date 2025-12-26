@@ -89,10 +89,10 @@ type WorkerMessage =
     | WorkerAck;
 
 function defaultWorkerFactory(kind: WorkerKind): Worker {
-    // Vite handles .ts files in dev mode and transforms them during build.
-    // Using .ts extension works for both development (Vite dev server) and
-    // production (after tsc compilation to .js).
-    const entry = kind === "threaded" ? "./engine.worker.threaded.ts" : "./engine.worker.single.ts";
+    // Use .js extension for compatibility with built artifacts.
+    // In dev mode, bundlers like Vite resolve .js to .ts source files.
+    // In production, tsc outputs .js files directly.
+    const entry = kind === "threaded" ? "./engine.worker.threaded.js" : "./engine.worker.single.js";
     return new Worker(new URL(entry, import.meta.url), { type: "module" });
 }
 
