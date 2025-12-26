@@ -88,7 +88,7 @@ export function KifuPanel({
     const currentRowRef = useRef<HTMLElement>(null);
     const [copySuccess, setCopySuccess] = useState(false);
 
-    // 現在の手数が変わったら自動スクロール（コンテナ内のみ）
+    // 現在の手数が変わったら自動スクロール（現在の手を中央に配置）
     useEffect(() => {
         // currentPlyが範囲外の場合はスクロールしない
         if (currentPly < 1 || currentPly > kifMoves.length) return;
@@ -99,18 +99,14 @@ export function KifuPanel({
 
         // コンテナ内での相対位置を計算
         const rowTop = row.offsetTop - container.offsetTop;
-        const rowBottom = rowTop + row.offsetHeight;
-        const containerScrollTop = container.scrollTop;
+        const rowHeight = row.offsetHeight;
         const containerHeight = container.clientHeight;
 
-        // 行が表示範囲外にある場合のみスクロール（コンテナ内で）
-        if (rowBottom > containerScrollTop + containerHeight) {
-            // 行が下にはみ出ている
-            container.scrollTop = rowBottom - containerHeight + 8;
-        } else if (rowTop < containerScrollTop) {
-            // 行が上にはみ出ている
-            container.scrollTop = rowTop - 8;
-        }
+        // 現在の手をコンテナの中央に配置するスクロール位置を計算
+        const targetScrollTop = rowTop - containerHeight / 2 + rowHeight / 2;
+
+        // スクロール位置を設定（0未満にならないよう制限）
+        container.scrollTop = Math.max(0, targetScrollTop);
     }, [currentPly, kifMoves.length]);
 
     // コピーボタンのハンドラ

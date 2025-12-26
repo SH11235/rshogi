@@ -8,12 +8,10 @@ import {
     getAllSquares,
     getPositionService,
     type LastMove,
-    movesToCsa,
     type Piece,
     type PieceType,
     type Player,
     type PositionState,
-    parseCsaMoves,
     parseMove,
     type Square,
 } from "@shogi/app-core";
@@ -28,7 +26,8 @@ import { EvalPanel } from "./shogi-match/components/EvalPanel";
 import { GameResultBanner } from "./shogi-match/components/GameResultBanner";
 import { GameResultDialog } from "./shogi-match/components/GameResultDialog";
 import { HandPiecesDisplay } from "./shogi-match/components/HandPiecesDisplay";
-import { KifuIOPanel } from "./shogi-match/components/KifuIOPanel";
+import { KifuImportPanel } from "./shogi-match/components/KifuImportPanel";
+import { KifuPanel } from "./shogi-match/components/KifuPanel";
 import { MatchControls } from "./shogi-match/components/MatchControls";
 import {
     type EngineOption,
@@ -66,7 +65,6 @@ import {
 } from "./shogi-match/utils/boardUtils";
 import { isPromotable, PIECE_CAP, PIECE_LABELS } from "./shogi-match/utils/constants";
 import { exportToKifString } from "./shogi-match/utils/kifFormat";
-import { parseUsiInput } from "./shogi-match/utils/kifuUtils";
 import { LegalMoveCache } from "./shogi-match/utils/legalMoveCache";
 import { determinePromotion } from "./shogi-match/utils/promotionLogic";
 import { TooltipProvider } from "./tooltip";
@@ -230,7 +228,7 @@ export function ShogiMatch({
         turn: "sente",
         ply: 1,
     });
-    const [initialBoard, setInitialBoard] = useState<BoardState | null>(null);
+    const [, setInitialBoard] = useState<BoardState | null>(null);
     const [positionReady, setPositionReady] = useState(false);
     const [lastMove, setLastMove] = useState<LastMove | undefined>(undefined);
     const [selection, setSelection] = useState<Selection | null>(null);
@@ -1093,12 +1091,6 @@ export function ShogiMatch({
         setMessage(null);
     };
 
-    const importUsi = async (raw: string) => {
-        const tokens = parseUsiInput(raw);
-        if (tokens.length === 0) return;
-        await loadMoves(tokens);
-    };
-
     const loadMoves = async (list: string[]) => {
         const filtered = list.filter(Boolean);
         const service = getPositionService();
@@ -1134,12 +1126,6 @@ export function ShogiMatch({
         }
     };
 
-    const exportUsi = moves.length ? `${startSfen} moves ${moves.join(" ")}` : startSfen;
-    const exportCsa = useMemo(
-        () => (positionReady && initialBoard ? movesToCsa(moves, {}, initialBoard) : ""),
-        [initialBoard, moves, positionReady],
-    );
-
     // KIFコピー用コールバック
     const handleCopyKif = useCallback((): string => {
         return exportToKifString(moves, boardHistory, {
@@ -1164,10 +1150,62 @@ export function ShogiMatch({
         [isMatchRunning, navigation, stopTicking, stopAllEngines],
     );
 
-    const importCsa = async (csa: string) => {
-        if (!positionReady) return;
-        await loadMoves(parseCsaMoves(csa, initialBoard ?? undefined));
-    };
+    // SFENインポート（局面 + 指し手）
+    const importSfen = useCallback(
+        async (sfen: string, movesToLoad: string[]) => {
+            const service = getPositionService();
+            try {
+                // 新しい開始局面を設定
+                const newPosition = await service.parseSfen(sfen);
+                setBasePosition(newPosition);
+                setStartSfen(sfen);
+                setInitialBoard(newPosition.board);
+
+                // 棋譜ナビゲーションをリセット
+                navigation.reset(newPosition, sfen);
+
+                // 指し手がある場合は適用
+                if (movesToLoad.length > 0) {
+                    let currentPos = newPosition;
+                    const appliedMoves: string[] = [];
+                    for (const move of movesToLoad) {
+                        const applyResult = applyMoveWithState(currentPos, move, {
+                            validateTurn: false,
+                        });
+                        if (applyResult.ok) {
+                            navigation.addMove(move, applyResult.next);
+                            currentPos = applyResult.next;
+                            appliedMoves.push(move);
+                        } else {
+                            break;
+                        }
+                    }
+                    movesRef.current = appliedMoves;
+                    setLastMove(deriveLastMove(appliedMoves.at(-1)));
+                } else {
+                    movesRef.current = [];
+                    setLastMove(undefined);
+                }
+
+                setSelection(null);
+                setMessage(null);
+                resetClocks(false);
+                legalCache.clear();
+                setPositionReady(true);
+            } catch (error) {
+                setMessage(`SFENの適用に失敗しました: ${String(error)}`);
+            }
+        },
+        [navigation, resetClocks, legalCache],
+    );
+
+    // KIFインポート（指し手のみ、平手初期局面から）
+    const importKif = useCallback(
+        async (movesToLoad: string[]) => {
+            await loadMoves(movesToLoad);
+        },
+        [loadMoves],
+    );
 
     const candidateNote = positionReady ? null : "局面を読み込み中です。";
 
@@ -1480,13 +1518,13 @@ export function ShogiMatch({
 
                         <ClockDisplayPanel clocks={clocks} sides={sides} />
 
-                        <EvalPanel
-                            evalHistory={evalHistory}
+                        {/* 棋譜パネル（常時表示） */}
+                        <KifuPanel
                             kifMoves={kifMoves}
                             currentPly={navigation.state.currentPly}
+                            showEval={true}
                             onPlySelect={handlePlySelect}
                             onCopyKif={handleCopyKif}
-                            defaultOpen={false}
                             navigation={{
                                 currentPly: navigation.state.currentPly,
                                 totalPly: navigation.state.totalPly,
@@ -1510,12 +1548,18 @@ export function ShogiMatch({
                             branchMarkers={branchMarkers}
                         />
 
-                        <KifuIOPanel
-                            moves={moves}
-                            exportUsi={exportUsi}
-                            exportCsa={exportCsa}
-                            onImportUsi={importUsi}
-                            onImportCsa={importCsa}
+                        {/* 評価値グラフパネル（折りたたみ） */}
+                        <EvalPanel
+                            evalHistory={evalHistory}
+                            currentPly={navigation.state.currentPly}
+                            onPlySelect={handlePlySelect}
+                            defaultOpen={false}
+                        />
+
+                        {/* インポートパネル */}
+                        <KifuImportPanel
+                            onImportSfen={importSfen}
+                            onImportKif={importKif}
                             positionReady={positionReady}
                         />
 
