@@ -2,9 +2,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
+import { visualizer } from "rollup-plugin-visualizer";
 import { defineConfig } from "vite";
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
+
+// ANALYZE=true でバンドル分析レポートを生成
+const isAnalyze = process.env.ANALYZE === "true";
 
 // https://vite.dev/config/
 export default defineConfig(({ command }) => ({
@@ -13,7 +17,17 @@ export default defineConfig(({ command }) => ({
     // - ビルド時 (pnpm build): "/shogi/" で GitHub Pages のリポジトリページに対応
     // command === "build" による判定は Vite 公式の推奨方法で、環境変数の追加設定は不要
     base: command === "build" ? "/shogi/" : "/",
-    plugins: [tailwindcss(), react()],
+    plugins: [
+        tailwindcss(),
+        react(),
+        isAnalyze &&
+            visualizer({
+                filename: "dist/stats.html",
+                open: true,
+                gzipSize: true,
+                brotliSize: true,
+            }),
+    ].filter(Boolean),
     resolve: {
         alias: [
             {
