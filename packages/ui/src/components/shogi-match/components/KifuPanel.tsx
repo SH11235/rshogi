@@ -7,8 +7,9 @@
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Switch } from "../../switch";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../../tooltip";
 import type { KifMove } from "../utils/kifFormat";
-import { formatEval } from "../utils/kifFormat";
+import { formatEval, getEvalTooltipInfo } from "../utils/kifFormat";
 import { KifuNavigationToolbar } from "./KifuNavigationToolbar";
 
 /**
@@ -142,6 +143,43 @@ function EvalHintBanner({
 }
 
 /**
+ * 評価値ツールチップの内容
+ */
+function EvalTooltipContent({
+    evalCp,
+    evalMate,
+    ply,
+    depth,
+}: {
+    evalCp?: number;
+    evalMate?: number;
+    ply: number;
+    depth?: number;
+}): ReactElement {
+    const info = getEvalTooltipInfo(evalCp, evalMate, ply, depth);
+
+    return (
+        <div className="space-y-1">
+            <div
+                className={`font-medium ${
+                    info.advantage === "sente"
+                        ? "text-wafuu-shu"
+                        : info.advantage === "gote"
+                          ? "text-[hsl(210_70%_45%)]"
+                          : ""
+                }`}
+            >
+                {info.description}
+            </div>
+            <div className="text-muted-foreground text-[10px] space-x-2">
+                {info.detail && <span>{info.detail}</span>}
+                {info.depthText && <span>{info.depthText}</span>}
+            </div>
+        </div>
+    );
+}
+
+/**
  * 評価値のスタイルクラスを決定
  */
 function getEvalClassName(evalCp?: number, evalMate?: number): string {
@@ -215,20 +253,21 @@ export function KifuPanel({
     }, [onCopyKif]);
 
     return (
-        <div className="bg-card border border-border rounded-xl p-3 shadow-lg w-[var(--panel-width)]">
-            <div className="font-bold mb-1.5 flex justify-between items-center gap-2">
-                <div className="flex items-center gap-2">
-                    <span>棋譜</span>
-                    <span className="text-[13px] text-muted-foreground">
-                        {kifMoves.length === 0 ? "開始局面" : `${kifMoves.length}手`}
-                    </span>
-                </div>
-                <div className="flex items-center gap-2">
-                    {/* 評価値表示トグル（強調版） */}
-                    {onShowEvalChange && (
-                        <label
-                            htmlFor="kifu-eval-toggle"
-                            className={`
+        <TooltipProvider delayDuration={300}>
+            <div className="bg-card border border-border rounded-xl p-3 shadow-lg w-[var(--panel-width)]">
+                <div className="font-bold mb-1.5 flex justify-between items-center gap-2">
+                    <div className="flex items-center gap-2">
+                        <span>棋譜</span>
+                        <span className="text-[13px] text-muted-foreground">
+                            {kifMoves.length === 0 ? "開始局面" : `${kifMoves.length}手`}
+                        </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        {/* 評価値表示トグル（強調版） */}
+                        {onShowEvalChange && (
+                            <label
+                                htmlFor="kifu-eval-toggle"
+                                className={`
                                 relative flex items-center gap-1.5 cursor-pointer
                                 px-2 py-1 rounded-md transition-all duration-200
                                 ${
@@ -237,22 +276,22 @@ export function KifuPanel({
                                         : "hover:bg-muted/50"
                                 }
                             `}
-                        >
-                            {/* 評価値データ存在インジケーター */}
-                            {evalDataExists && !showEval && (
-                                <span
-                                    className="
+                            >
+                                {/* 評価値データ存在インジケーター */}
+                                {evalDataExists && !showEval && (
+                                    <span
+                                        className="
                                         absolute -top-1 -right-1
                                         w-2.5 h-2.5 rounded-full
                                         bg-[hsl(var(--wafuu-kin))]
                                         animate-[pulse_2s_ease-in-out_infinite]
                                         shadow-[0_0_6px_hsl(var(--wafuu-kin)/0.6)]
                                     "
-                                    aria-hidden="true"
-                                />
-                            )}
-                            <span
-                                className={`
+                                        aria-hidden="true"
+                                    />
+                                )}
+                                <span
+                                    className={`
                                     text-[12px] font-medium transition-colors
                                     ${
                                         evalDataExists && !showEval
@@ -262,141 +301,198 @@ export function KifuPanel({
                                               : "text-muted-foreground"
                                     }
                                 `}
-                            >
-                                評価値
-                            </span>
-                            <Switch
-                                id="kifu-eval-toggle"
-                                checked={showEval}
-                                onCheckedChange={onShowEvalChange}
-                                aria-label="評価値を表示"
-                            />
-                        </label>
-                    )}
-                    {onCopyKif && kifMoves.length > 0 && (
-                        <button
-                            type="button"
-                            className={`px-2 py-1 text-[11px] rounded border cursor-pointer transition-colors duration-150 ${
-                                copySuccess
-                                    ? "bg-green-600 text-white border-green-600"
-                                    : "bg-background text-foreground border-border"
-                            }`}
-                            onClick={handleCopy}
-                            title="KIF形式でクリップボードにコピー"
-                        >
-                            {copySuccess ? "コピー完了" : "KIFコピー"}
-                        </button>
-                    )}
-                </div>
-            </div>
-
-            {/* ナビゲーションツールバー */}
-            {navigation && (
-                <KifuNavigationToolbar
-                    currentPly={navigation.currentPly}
-                    totalPly={navigation.totalPly}
-                    onBack={navigation.onBack}
-                    onForward={navigation.onForward}
-                    onToStart={navigation.onToStart}
-                    onToEnd={navigation.onToEnd}
-                    disabled={navigationDisabled}
-                    branchInfo={navigation.branchInfo}
-                    isRewound={navigation.isRewound}
-                    canGoForward={navigation.canGoForward}
-                />
-            )}
-
-            {/* 評価値ヒントバナー */}
-            {showHintBanner && (
-                <EvalHintBanner
-                    onEnable={() => onShowEvalChange(true)}
-                    onDismiss={() => setHintDismissed(true)}
-                />
-            )}
-
-            <div ref={listRef} className="max-h-60 overflow-auto my-2">
-                {kifMoves.length === 0 ? (
-                    <div className="text-[13px] text-muted-foreground text-center py-4">
-                        まだ指し手がありません
-                    </div>
-                ) : (
-                    kifMoves.map((move) => {
-                        const isCurrent = move.ply === currentPly;
-                        const isPastCurrent = navigation?.isRewound && move.ply > currentPly;
-                        const evalText = showEval
-                            ? formatEval(move.evalCp, move.evalMate, move.ply)
-                            : "";
-                        const hasBranch = branchMarkers?.has(move.ply);
-                        const branchCount = branchMarkers?.get(move.ply);
-
-                        const content = (
-                            <>
-                                <span
-                                    className={`text-right text-xs ${isPastCurrent ? "text-muted-foreground/50" : "text-muted-foreground"}`}
                                 >
-                                    {move.ply}
-                                    {hasBranch && (
-                                        <span
-                                            className="ml-0.5 text-wafuu-shu"
-                                            title={`${branchCount}つの分岐`}
+                                    評価値
+                                </span>
+                                <Switch
+                                    id="kifu-eval-toggle"
+                                    checked={showEval}
+                                    onCheckedChange={onShowEvalChange}
+                                    aria-label="評価値を表示"
+                                />
+                                {/* 評価値の凡例インフォアイコン */}
+                                <Tooltip>
+                                    <TooltipTrigger asChild>
+                                        <button
+                                            type="button"
+                                            className="
+                                                inline-flex items-center justify-center
+                                                w-4 h-4 rounded-full
+                                                text-[10px] text-muted-foreground
+                                                border border-muted-foreground/30
+                                                hover:bg-muted hover:text-foreground
+                                                cursor-help transition-colors
+                                                bg-transparent
+                                            "
+                                            aria-label="評価値の見方"
                                         >
-                                            ◆
-                                        </span>
-                                    )}
-                                </span>
-                                <span
-                                    className={`font-medium ${isPastCurrent ? "text-muted-foreground/50" : ""}`}
-                                >
-                                    {move.displayText}
-                                </span>
-                                {showEval && evalText && (
+                                            ?
+                                        </button>
+                                    </TooltipTrigger>
+                                    <TooltipContent side="bottom" className="max-w-[220px]">
+                                        <div className="space-y-1.5 text-[11px]">
+                                            <div className="font-medium">評価値の見方</div>
+                                            <div className="space-y-0.5">
+                                                <div>
+                                                    <span className="text-wafuu-shu">+値</span>
+                                                    <span className="text-muted-foreground ml-1">
+                                                        ☗先手有利
+                                                    </span>
+                                                </div>
+                                                <div>
+                                                    <span className="text-[hsl(210_70%_45%)]">
+                                                        -値
+                                                    </span>
+                                                    <span className="text-muted-foreground ml-1">
+                                                        ☖後手有利
+                                                    </span>
+                                                </div>
+                                            </div>
+                                            <div className="text-muted-foreground text-[10px] pt-1 border-t border-border">
+                                                値をクリックで詳細表示
+                                            </div>
+                                        </div>
+                                    </TooltipContent>
+                                </Tooltip>
+                            </label>
+                        )}
+                        {onCopyKif && kifMoves.length > 0 && (
+                            <button
+                                type="button"
+                                className={`px-2 py-1 text-[11px] rounded border cursor-pointer transition-colors duration-150 ${
+                                    copySuccess
+                                        ? "bg-green-600 text-white border-green-600"
+                                        : "bg-background text-foreground border-border"
+                                }`}
+                                onClick={handleCopy}
+                                title="KIF形式でクリップボードにコピー"
+                            >
+                                {copySuccess ? "コピー完了" : "KIFコピー"}
+                            </button>
+                        )}
+                    </div>
+                </div>
+
+                {/* ナビゲーションツールバー */}
+                {navigation && (
+                    <KifuNavigationToolbar
+                        currentPly={navigation.currentPly}
+                        totalPly={navigation.totalPly}
+                        onBack={navigation.onBack}
+                        onForward={navigation.onForward}
+                        onToStart={navigation.onToStart}
+                        onToEnd={navigation.onToEnd}
+                        disabled={navigationDisabled}
+                        branchInfo={navigation.branchInfo}
+                        isRewound={navigation.isRewound}
+                        canGoForward={navigation.canGoForward}
+                    />
+                )}
+
+                {/* 評価値ヒントバナー */}
+                {showHintBanner && (
+                    <EvalHintBanner
+                        onEnable={() => onShowEvalChange(true)}
+                        onDismiss={() => setHintDismissed(true)}
+                    />
+                )}
+
+                <div ref={listRef} className="max-h-60 overflow-auto my-2">
+                    {kifMoves.length === 0 ? (
+                        <div className="text-[13px] text-muted-foreground text-center py-4">
+                            まだ指し手がありません
+                        </div>
+                    ) : (
+                        kifMoves.map((move) => {
+                            const isCurrent = move.ply === currentPly;
+                            const isPastCurrent = navigation?.isRewound && move.ply > currentPly;
+                            const evalText = showEval
+                                ? formatEval(move.evalCp, move.evalMate, move.ply)
+                                : "";
+                            const hasBranch = branchMarkers?.has(move.ply);
+                            const branchCount = branchMarkers?.get(move.ply);
+
+                            const content = (
+                                <>
                                     <span
-                                        className={`${getEvalClassName(move.evalCp, move.evalMate)} ${isPastCurrent ? "opacity-50" : ""}`}
+                                        className={`text-right text-xs ${isPastCurrent ? "text-muted-foreground/50" : "text-muted-foreground"}`}
                                     >
-                                        {evalText}
+                                        {move.ply}
+                                        {hasBranch && (
+                                            <span
+                                                className="ml-0.5 text-wafuu-shu"
+                                                title={`${branchCount}つの分岐`}
+                                            >
+                                                ◆
+                                            </span>
+                                        )}
                                     </span>
-                                )}
-                            </>
-                        );
+                                    <span
+                                        className={`font-medium ${isPastCurrent ? "text-muted-foreground/50" : ""}`}
+                                    >
+                                        {move.displayText}
+                                    </span>
+                                    {showEval && evalText && (
+                                        <Tooltip>
+                                            <TooltipTrigger asChild>
+                                                <span
+                                                    className={`${getEvalClassName(move.evalCp, move.evalMate)} ${isPastCurrent ? "opacity-50" : ""} cursor-help`}
+                                                >
+                                                    {evalText}
+                                                </span>
+                                            </TooltipTrigger>
+                                            <TooltipContent side="left" className="max-w-[200px]">
+                                                <EvalTooltipContent
+                                                    evalCp={move.evalCp}
+                                                    evalMate={move.evalMate}
+                                                    ply={move.ply}
+                                                    depth={move.depth}
+                                                />
+                                            </TooltipContent>
+                                        </Tooltip>
+                                    )}
+                                </>
+                            );
 
-                        const rowClassName = `grid grid-cols-[32px_1fr_auto] gap-1 items-center px-1 py-0.5 text-[13px] font-mono rounded ${
-                            isCurrent ? "bg-accent" : ""
-                        }`;
+                            const rowClassName = `grid grid-cols-[32px_1fr_auto] gap-1 items-center px-1 py-0.5 text-[13px] font-mono rounded ${
+                                isCurrent ? "bg-accent" : ""
+                            }`;
 
-                        if (onPlySelect) {
+                            if (onPlySelect) {
+                                return (
+                                    <button
+                                        type="button"
+                                        key={move.ply}
+                                        ref={
+                                            isCurrent
+                                                ? (currentRowRef as React.RefObject<HTMLButtonElement>)
+                                                : undefined
+                                        }
+                                        className={`${rowClassName} w-full text-left bg-transparent border-none cursor-pointer hover:bg-accent/50`}
+                                        onClick={() => onPlySelect(move.ply)}
+                                    >
+                                        {content}
+                                    </button>
+                                );
+                            }
+
                             return (
-                                <button
-                                    type="button"
+                                <div
                                     key={move.ply}
                                     ref={
                                         isCurrent
-                                            ? (currentRowRef as React.RefObject<HTMLButtonElement>)
+                                            ? (currentRowRef as React.RefObject<HTMLDivElement>)
                                             : undefined
                                     }
-                                    className={`${rowClassName} w-full text-left bg-transparent border-none cursor-pointer hover:bg-accent/50`}
-                                    onClick={() => onPlySelect(move.ply)}
+                                    className={rowClassName}
                                 >
                                     {content}
-                                </button>
+                                </div>
                             );
-                        }
-
-                        return (
-                            <div
-                                key={move.ply}
-                                ref={
-                                    isCurrent
-                                        ? (currentRowRef as React.RefObject<HTMLDivElement>)
-                                        : undefined
-                                }
-                                className={rowClassName}
-                            >
-                                {content}
-                            </div>
-                        );
-                    })
-                )}
+                        })
+                    )}
+                </div>
             </div>
-        </div>
+        </TooltipProvider>
     );
 }

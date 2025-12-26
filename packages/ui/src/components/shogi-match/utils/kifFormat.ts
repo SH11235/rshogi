@@ -325,6 +325,84 @@ export function formatEval(evalCp?: number, evalMate?: number, ply?: number): st
 }
 
 /**
+ * 評価値のツールチップ用の詳細情報を生成
+ *
+ * @param evalCp 評価値（センチポーン）
+ * @param evalMate 詰み手数
+ * @param ply 手数
+ * @param depth 探索深さ
+ * @returns ツールチップ用の情報オブジェクト
+ */
+export function getEvalTooltipInfo(
+    evalCp?: number,
+    evalMate?: number,
+    ply?: number,
+    depth?: number,
+): {
+    /** メイン説明（例: "☗先手有利"） */
+    description: string;
+    /** 詳細値（例: "+150cp"） */
+    detail: string;
+    /** 探索深さ（例: "深さ20"） */
+    depthText: string | null;
+    /** 有利な側（"sente" | "gote" | null） */
+    advantage: "sente" | "gote" | null;
+} {
+    // 詰みの場合
+    if (evalMate !== undefined && evalMate !== null) {
+        const movingSide = ply !== undefined && ply % 2 === 0 ? "gote" : "sente";
+        const winningSide = evalMate > 0 ? movingSide : movingSide === "sente" ? "gote" : "sente";
+        const winnerMark = winningSide === "sente" ? "☗" : "☖";
+        const winnerName = winningSide === "sente" ? "先手" : "後手";
+
+        return {
+            description: `${winnerMark}${winnerName}の勝ち`,
+            detail: `${Math.abs(evalMate)}手詰み`,
+            depthText: depth !== undefined ? `深さ${depth}` : null,
+            advantage: winningSide,
+        };
+    }
+
+    // 通常の評価値
+    if (evalCp !== undefined && evalCp !== null) {
+        const absValue = Math.abs(evalCp);
+        const isSenteAdvantage = evalCp >= 0;
+        const mark = isSenteAdvantage ? "☗" : "☖";
+        const sideName = isSenteAdvantage ? "先手" : "後手";
+
+        // 優勢度の表現
+        let levelText: string;
+        if (absValue < 100) {
+            levelText = "互角";
+        } else if (absValue < 300) {
+            levelText = `${sideName}やや有利`;
+        } else if (absValue < 600) {
+            levelText = `${sideName}有利`;
+        } else if (absValue < 1000) {
+            levelText = `${sideName}優勢`;
+        } else {
+            levelText = `${sideName}勝勢`;
+        }
+
+        const description = absValue < 100 ? levelText : `${mark}${levelText}`;
+
+        return {
+            description,
+            detail: `${evalCp >= 0 ? "+" : ""}${evalCp}cp`,
+            depthText: depth !== undefined ? `深さ${depth}` : null,
+            advantage: absValue < 100 ? null : isSenteAdvantage ? "sente" : "gote",
+        };
+    }
+
+    return {
+        description: "評価なし",
+        detail: "",
+        depthText: null,
+        advantage: null,
+    };
+}
+
+/**
  * 評価値をグラフ用Y座標に変換
  * @param evalCp 評価値（センチポーン）
  * @param evalMate 詰み手数
