@@ -5,6 +5,7 @@
  */
 
 import type { BoardState, Piece, PieceType, Player, Square } from "@shogi/app-core";
+import { parseSfen } from "./kifParser";
 
 /** KIF形式の指し手情報 */
 export interface KifMove {
@@ -74,6 +75,16 @@ const PROMOTED_NAMES: Readonly<Record<PieceType, string>> = {
     B: "馬",
     R: "龍",
     K: "玉", // 玉は成れないがフォールバック用
+};
+
+const HIRATE_SFEN = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+
+const normalizeStartSfen = (sfen?: string): string | null => {
+    if (!sfen) return null;
+    const trimmed = sfen.trim();
+    if (!trimmed) return null;
+    const parsed = parseSfen(trimmed);
+    return parsed.sfen || null;
 };
 
 // ============================================================
@@ -413,6 +424,8 @@ interface KifExportOptions {
     byoyomi?: number;
     /** 評価値をコメントとして出力するか */
     includeEval?: boolean;
+    /** 開始局面（SFEN形式） */
+    startSfen?: string;
 }
 
 /**
@@ -580,6 +593,11 @@ export function exportToKifString(
         const timeLimitStr = options.timeLimit ? `${Math.floor(options.timeLimit / 60)}分` : "0分";
         const byoyomiStr = options.byoyomi ? `${options.byoyomi}秒` : "0秒";
         lines.push(`持ち時間：${timeLimitStr}+${byoyomiStr}`);
+    }
+
+    const normalizedStartSfen = normalizeStartSfen(options.startSfen);
+    if (normalizedStartSfen && normalizedStartSfen !== HIRATE_SFEN) {
+        lines.push(`開始局面：${normalizedStartSfen}`);
     }
 
     // 指し手ヘッダー

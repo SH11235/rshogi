@@ -13,8 +13,8 @@ type ImportTab = "sfen" | "kif";
 interface KifuImportPanelProps {
     /** SFENインポート時のコールバック（sfen: 開始局面, moves: 指し手配列） */
     onImportSfen: (sfen: string, moves: string[]) => Promise<void>;
-    /** KIFインポート時のコールバック（moves: 指し手配列, moveData: 各手の詳細データ） */
-    onImportKif: (moves: string[], moveData: KifMoveData[]) => Promise<void>;
+    /** KIFインポート時のコールバック（moves: 指し手配列, moveData: 各手の詳細データ, startSfen: 開始局面） */
+    onImportKif: (moves: string[], moveData: KifMoveData[], startSfen?: string) => Promise<void>;
     /** 局面が準備完了しているか */
     positionReady: boolean;
 }
@@ -71,7 +71,7 @@ export function KifuImportPanel({
                     setError(result.error ?? "KIFのパースに失敗しました");
                     return;
                 }
-                await onImportKif(result.moves, result.moveData);
+                await onImportKif(result.moves, result.moveData, result.startSfen);
                 setSuccess(true);
                 setInputValue("");
                 successTimerRef.current = setTimeout(() => setSuccess(false), 2000);

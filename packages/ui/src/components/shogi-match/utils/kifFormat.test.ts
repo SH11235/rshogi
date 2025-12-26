@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
     convertMovesToKif,
     evalToY,
+    exportToKifString,
     formatEval,
     formatMoveSimple,
     formatMoveToKif,
@@ -344,5 +345,42 @@ describe("convertMovesToKif", () => {
         // （移動先が同じ場合のみ「同」になる）
         expect(result[1].kifText).toBe("△７五歩(76)");
         expect(result[1].displayText).toBe("☖7五歩(76)");
+    });
+});
+
+describe("exportToKifString", () => {
+    const buildSingleMoveExport = (startSfen?: string) => {
+        const board = placePiece(createEmptyBoard(), "7g", "sente", "P");
+        const kifMoves = [
+            {
+                ply: 1,
+                kifText: "dummy",
+                displayText: "dummy",
+                usiMove: "7g7f",
+                elapsedMs: 0,
+            },
+        ];
+        return exportToKifString(kifMoves, [board], { startSfen });
+    };
+
+    it("開始局面が平手の場合は開始局面行を省略する", () => {
+        const result = buildSingleMoveExport("startpos");
+        expect(result).not.toContain("開始局面：");
+    });
+
+    it("開始局面が平手SFENの場合は開始局面行を省略する", () => {
+        const result = buildSingleMoveExport(
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+        );
+        expect(result).not.toContain("開始局面：");
+    });
+
+    it("開始局面が平手以外なら開始局面行を出力する", () => {
+        const result = buildSingleMoveExport(
+            "sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPP1/1B5R1/LNSGKGSNL b - 1",
+        );
+        expect(result).toContain(
+            "開始局面：lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPP1/1B5R1/LNSGKGSNL b - 1",
+        );
     });
 });
