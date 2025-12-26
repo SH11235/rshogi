@@ -89,8 +89,10 @@ type WorkerMessage =
     | WorkerAck;
 
 function defaultWorkerFactory(kind: WorkerKind): Worker {
-    // Use the emitted JS file; pointing at .ts breaks when consuming the built package.
-    const entry = kind === "threaded" ? "./engine.worker.threaded.js" : "./engine.worker.single.js";
+    // Vite handles .ts files in dev mode and transforms them during build.
+    // Using .ts extension works for both development (Vite dev server) and
+    // production (after tsc compilation to .js).
+    const entry = kind === "threaded" ? "./engine.worker.threaded.ts" : "./engine.worker.single.ts";
     return new Worker(new URL(entry, import.meta.url), { type: "module" });
 }
 
