@@ -1,4 +1,10 @@
-import type { EngineClient, EngineEvent, SearchHandle, SearchLimits } from "@shogi/engine-client";
+import type {
+    EngineClient,
+    EngineEvent,
+    SearchHandle,
+    SearchLimits,
+    ThreadInfo,
+} from "@shogi/engine-client";
 import type { CSSProperties, ReactElement } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "./button";
@@ -72,6 +78,14 @@ const LIMIT_INPUT_IDS = {
 } as const;
 
 const USI_OPTIONS: UsiOptionDefinition[] = [
+    {
+        name: "Threads",
+        type: "spin",
+        defaultValue: 1,
+        min: 1,
+        max: 4,
+        note: "並列探索スレッド数 (次回init時に適用)",
+    },
     { name: "USI_Hash", type: "spin", defaultValue: 256, min: 1, max: 4096 },
     { name: "USI_Ponder", type: "check", defaultValue: false },
     { name: "Stochastic_Ponder", type: "check", defaultValue: false },
@@ -178,6 +192,8 @@ export function EngineControlPanel({
     const [initialized, setInitialized] = useState(false);
     const [busy, setBusy] = useState(false);
     const [customOption, setCustomOption] = useState({ name: "", value: "" });
+    const [threadInfo, setThreadInfo] = useState<ThreadInfo | null>(null);
+    const [latestNps, setLatestNps] = useState<number | null>(null);
     const handleRef = useRef<SearchHandle | null>(null);
 
     const optionDefaults = useMemo(() => {
@@ -194,6 +210,13 @@ export function EngineControlPanel({
     }, [optionDefaults]);
 
     useEffect(() => {
+        // Update thread info on mount and when engine changes
+        if (engine.getThreadInfo) {
+            setThreadInfo(engine.getThreadInfo());
+        }
+    }, [engine]);
+
+    useEffect(() => {
         const unsubscribe = engine.subscribe((event) => {
             setLogs((prev) => {
                 const entry: EngineLogEntry = {
@@ -208,6 +231,9 @@ export function EngineControlPanel({
                 }
                 return next;
             });
+            if (event.type === "info" && event.nps !== undefined) {
+                setLatestNps(event.nps);
+            }
             if (event.type === "bestmove") {
                 setBestmove(event.move);
                 setStatus("idle");
@@ -249,6 +275,10 @@ export function EngineControlPanel({
         await engine.loadPosition(position.sfen, position.moves);
         setInitialized(true);
         setStatus("ready");
+        // Update thread info after init
+        if (engine.getThreadInfo) {
+            setThreadInfo(engine.getThreadInfo());
+        }
     };
 
     const applyOptions = async (): Promise<boolean> => {
@@ -446,6 +476,155 @@ export function EngineControlPanel({
                                             ログクリア
                                         </Button>
                                     </div>
+                                </div>
+                            </section>
+
+                            <section
+                                style={{
+                                    ...surfaceStyle,
+                                    padding: "12px",
+                                    background:
+                                        "linear-gradient(135deg, hsl(var(--card, 0 0% 100%)), hsl(210 40% 98%))",
+                                }}
+                            >
+                                <div style={{ fontWeight: 600, marginBottom: 8 }}>
+                                    デバッグ情報 (開発者向け)
+                                </div>
+                                <div
+                                    style={{
+                                        display: "grid",
+                                        gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
+                                        gap: "8px",
+                                        fontSize: "12px",
+                                    }}
+                                >
+                                    <div
+                                        style={{
+                                            padding: "8px",
+                                            background: "hsl(var(--background, 0 0% 100%))",
+                                            borderRadius: "6px",
+                                            border: "1px solid hsl(var(--border, 0 0% 86%))",
+                                        }}
+                                    >
+                                        <div style={{ color: labelStyle.color }}>
+                                            アクティブスレッド
+                                        </div>
+                                        <div
+                                            style={{
+                                                fontWeight: 600,
+                                                fontSize: "16px",
+                                                color:
+                                                    threadInfo && threadInfo.activeThreads > 1
+                                                        ? "hsl(142 76% 36%)"
+                                                        : "inherit",
+                                            }}
+                                        >
+                                            {threadInfo?.activeThreads ?? "-"}
+                                        </div>
+                                    </div>
+                                    <div
+                                        style={{
+                                            padding: "8px",
+                                            background: "hsl(var(--background, 0 0% 100%))",
+                                            borderRadius: "6px",
+                                            border: "1px solid hsl(var(--border, 0 0% 86%))",
+                                        }}
+                                    >
+                                        <div style={{ color: labelStyle.color }}>最大スレッド</div>
+                                        <div style={{ fontWeight: 600, fontSize: "16px" }}>
+                                            {threadInfo?.maxThreads ?? "-"}
+                                        </div>
+                                    </div>
+                                    <div
+                                        style={{
+                                            padding: "8px",
+                                            background: "hsl(var(--background, 0 0% 100%))",
+                                            borderRadius: "6px",
+                                            border: "1px solid hsl(var(--border, 0 0% 86%))",
+                                        }}
+                                    >
+                                        <div style={{ color: labelStyle.color }}>
+                                            ハードウェア並列数
+                                        </div>
+                                        <div style={{ fontWeight: 600, fontSize: "16px" }}>
+                                            {threadInfo?.hardwareConcurrency ?? "-"}
+                                        </div>
+                                    </div>
+                                    <div
+                                        style={{
+                                            padding: "8px",
+                                            background: "hsl(var(--background, 0 0% 100%))",
+                                            borderRadius: "6px",
+                                            border: "1px solid hsl(var(--border, 0 0% 86%))",
+                                        }}
+                                    >
+                                        <div style={{ color: labelStyle.color }}>
+                                            スレッド利用可能
+                                        </div>
+                                        <div
+                                            style={{
+                                                fontWeight: 600,
+                                                fontSize: "14px",
+                                                color: threadInfo?.threadedAvailable
+                                                    ? "hsl(142 76% 36%)"
+                                                    : "hsl(0 72% 51%)",
+                                            }}
+                                        >
+                                            {threadInfo?.threadedAvailable ? "Yes" : "No"}
+                                        </div>
+                                    </div>
+                                    <div
+                                        style={{
+                                            padding: "8px",
+                                            background: "hsl(var(--background, 0 0% 100%))",
+                                            borderRadius: "6px",
+                                            border: "1px solid hsl(var(--border, 0 0% 86%))",
+                                        }}
+                                    >
+                                        <div style={{ color: labelStyle.color }}>最新 NPS</div>
+                                        <div style={{ fontWeight: 600, fontSize: "16px" }}>
+                                            {latestNps !== null ? latestNps.toLocaleString() : "-"}
+                                        </div>
+                                    </div>
+                                    <div
+                                        style={{
+                                            padding: "8px",
+                                            background: "hsl(var(--background, 0 0% 100%))",
+                                            borderRadius: "6px",
+                                            border: "1px solid hsl(var(--border, 0 0% 86%))",
+                                        }}
+                                    >
+                                        <div style={{ color: labelStyle.color }}>
+                                            crossOriginIsolated
+                                        </div>
+                                        <div
+                                            style={{
+                                                fontWeight: 600,
+                                                fontSize: "14px",
+                                                color:
+                                                    typeof crossOriginIsolated !== "undefined" &&
+                                                    crossOriginIsolated
+                                                        ? "hsl(142 76% 36%)"
+                                                        : "hsl(0 72% 51%)",
+                                            }}
+                                        >
+                                            {typeof crossOriginIsolated !== "undefined"
+                                                ? crossOriginIsolated
+                                                    ? "true"
+                                                    : "false"
+                                                : "N/A"}
+                                        </div>
+                                    </div>
+                                </div>
+                                <div
+                                    style={{
+                                        marginTop: "8px",
+                                        fontSize: "11px",
+                                        color: labelStyle.color,
+                                    }}
+                                >
+                                    スレッド利用には crossOriginIsolated=true と SharedArrayBuffer
+                                    が必要です
                                 </div>
                             </section>
 

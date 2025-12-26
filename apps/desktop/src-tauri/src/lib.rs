@@ -58,6 +58,7 @@ enum EngineStopMode {
 struct EngineOptions {
     tt_size_mb: usize,
     multi_pv: usize,
+    num_threads: usize,
     time_options: TimeOptions,
     skill_options: SkillOptions,
     max_moves_to_draw: i32,
@@ -69,6 +70,7 @@ impl Default for EngineOptions {
         Self {
             tt_size_mb: 256,
             multi_pv: 1,
+            num_threads: 1,
             time_options: TimeOptions::default(),
             skill_options: SkillOptions::default(),
             max_moves_to_draw: DEFAULT_MAX_MOVES_TO_DRAW,
@@ -80,6 +82,7 @@ impl Default for EngineOptions {
 impl EngineOptions {
     fn apply_to_search(&self, search: &mut Search) {
         search.resize_tt(self.tt_size_mb);
+        search.set_num_threads(self.num_threads);
         search.set_time_options(self.time_options);
         search.set_skill_options(self.skill_options);
         search.set_max_moves_to_draw(self.max_moves_to_draw);
@@ -508,6 +511,11 @@ fn apply_engine_option(
                 inner.options.multi_pv = v.max(1);
             }
         }
+        "Threads" => {
+            if let Some(v) = value_as_usize(value) {
+                inner.options.num_threads = v.max(1);
+            }
+        }
         _ => {
             // Unknown options are ignored for now.
         }
@@ -721,6 +729,39 @@ fn engine_legal_moves(sfen: String, moves: Option<Vec<String>>) -> Result<Vec<St
     Ok(usi_moves)
 }
 
+/// Thread information for debugging parallel search
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ThreadInfoResponse {
+    /// Number of threads currently configured
+    active_threads: usize,
+    /// Maximum threads allowed (hardware concurrency)
+    max_threads: usize,
+    /// Whether threaded execution is available (always true for native)
+    threaded_available: bool,
+    /// Hardware concurrency reported by the system
+    hardware_concurrency: usize,
+}
+
+#[tauri::command]
+fn engine_thread_info(state: State<EngineState>) -> Result<ThreadInfoResponse, String> {
+    let inner = state
+        .inner
+        .lock()
+        .map_err(|e| format!("Failed to acquire engine state lock: {e}"))?;
+
+    let hardware_concurrency = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+
+    Ok(ThreadInfoResponse {
+        active_threads: inner.options.num_threads,
+        max_threads: hardware_concurrency,
+        threaded_available: true,
+        hardware_concurrency,
+    })
+}
+
 fn get_initial_board_impl() -> Result<BoardStateJson, String> {
     Ok(Position::initial_board_json())
 }
@@ -796,6 +837,7 @@ pub fn run() {
             engine_stop,
             engine_option,
             engine_legal_moves,
+            engine_thread_info,
             get_initial_board,
             parse_sfen_to_board,
             board_to_sfen,

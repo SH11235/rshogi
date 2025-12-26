@@ -6,6 +6,7 @@ import type {
     EngineStopMode,
     SearchHandle,
     SearchParams,
+    ThreadInfo,
 } from "@shogi/engine-client";
 import { createMockEngineClient } from "@shogi/engine-client";
 import initWasmModule from "../pkg/engine_wasm.js";
@@ -692,6 +693,24 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
             warnedReasons.clear();
             threadedDisabled = false;
             initInFlight = null;
+        },
+        getThreadInfo(): ThreadInfo {
+            const hcRaw =
+                typeof navigator !== "undefined" &&
+                typeof navigator.hardwareConcurrency === "number"
+                    ? navigator.hardwareConcurrency
+                    : 1;
+            const hardwareConcurrency = Math.max(1, Math.trunc(hcRaw));
+            const threadedAvailable = getThreadedAvailability();
+            const maxThreads = threadedAvailable
+                ? Math.max(1, Math.min(MAX_WASM_THREADS, hardwareConcurrency))
+                : 1;
+            return {
+                activeThreads: activeThreads ?? 1,
+                maxThreads,
+                threadedAvailable,
+                hardwareConcurrency,
+            };
         },
     };
 }

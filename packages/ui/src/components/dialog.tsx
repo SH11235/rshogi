@@ -52,7 +52,7 @@ export const DialogContent = forwardRef<
                     left: "50%",
                     transform: "translate(-50%, -50%)",
                     width: "min(960px, calc(100% - 24px))",
-                    maxHeight: "90vh",
+                    maxHeight: "85vh",
                     overflow: "auto",
                     backgroundColor: "hsl(var(--card, 0 0% 100%))",
                     color: "hsl(var(--foreground, 0 0% 10%))",
@@ -64,7 +64,7 @@ export const DialogContent = forwardRef<
                     ...style,
                 }}
                 className={cn(
-                    "fixed left-1/2 top-1/2 z-50 grid w-full max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 rounded-lg border bg-card p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out data-[state=open]:fade-in data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-1/2 data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%]",
+                    "gap-4 duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out data-[state=open]:fade-in data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
                     className,
                 )}
                 ref={ref}
