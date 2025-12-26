@@ -62,11 +62,29 @@ export interface EngineBestMoveEvent {
     ponder?: string;
 }
 
+export type EngineErrorSeverity = "warning" | "error" | "fatal";
+
+/** Well-known error codes for type-safe error handling */
+export type EngineErrorCode =
+    // Wasm-specific errors
+    | "WASM_INIT_FAILED"
+    | "WASM_THREADS_UNAVAILABLE"
+    | "WASM_THREADS_CLAMPED"
+    | "WASM_THREADS_INIT_FAILED"
+    | "WASM_THREADS_DEFERRED"
+    | "WASM_WORKER_FAILED"
+    // General errors
+    | "MODEL_LOAD_FAILED"
+    | "POSITION_INVALID"
+    | "SEARCH_FAILED"
+    | "TIMEOUT"
+    | "UNKNOWN";
+
 export interface EngineErrorEvent {
     type: "error";
     message: string;
-    severity?: "warning" | "error";
-    code?: string;
+    severity?: EngineErrorSeverity;
+    code?: EngineErrorCode;
 }
 
 export type EngineEvent = EngineInfoEvent | EngineBestMoveEvent | EngineErrorEvent;

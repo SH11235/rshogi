@@ -75,11 +75,48 @@ pnpm --filter @shogi/engine-wasm bench:wasm -- --nnue-file /path/to/nn.bin > was
 
 Material評価のみを計測する場合は `--material` を指定します。
 
+## ブラウザ対応状況
+
+| ブラウザ        | single | threaded | 備考                                      |
+| --------------- | ------ | -------- | ----------------------------------------- |
+| Chrome 92+      | ✅      | ✅        | 完全対応                                  |
+| Edge 92+        | ✅      | ✅        | 完全対応                                  |
+| Firefox 89+     | ✅      | ✅        | 完全対応                                  |
+| Safari 15.2+    | ✅      | ⚠️        | SharedArrayBuffer 制限あり（COOP/COEP 必須） |
+
+**threaded ビルドの追加要件**:
+- `crossOriginIsolated === true` であること
+- `SharedArrayBuffer` が利用可能であること
+- サーバーが以下のヘッダーを返すこと:
+  - `Cross-Origin-Opener-Policy: same-origin`
+  - `Cross-Origin-Embedder-Policy: require-corp`
+
+## トラブルシューティング
+
+### threaded ビルドが動作しない
+
+1. **`crossOriginIsolated` が `false`**: COOP/COEP ヘッダーを確認してください
+2. **`SharedArrayBuffer` が `undefined`**: ブラウザのバージョンを確認してください
+3. **メモリエラー**: スレッド数を減らして再試行してください（推奨: CPUコア数の50-75%）
+
+### ビルドエラー
+
+1. **nightly ツールチェーンが見つからない**: `rustup toolchain install nightly-2025-12-25` を実行
+2. **wasm-bindgen バージョン不一致**: `cargo install wasm-bindgen-cli --version 0.2.106` を実行
+3. **rust-src が見つからない**: `rustup component add rust-src --toolchain nightly-2025-12-25` を実行
+
+## パフォーマンスチューニング
+
+- **推奨スレッド数**: CPU コア数の 50-75%（例: 8コアなら 4スレッド）
+- **メモリ使用量**: ベース + (threads - 1) × 2MB + TT サイズ
+- **最大スレッド数**: 4（安定性のため上限を設定）
+
 ## 使用方法
 
 ```typescript
-import { ShogiEngine } from '@shogi/engine-wasm';
+import { createWasmEngineClient } from '@shogi/engine-wasm';
 
-const engine = new ShogiEngine();
+const engine = createWasmEngineClient();
+await engine.init({ threads: 4 });
 // エンジンの使用
 ```
