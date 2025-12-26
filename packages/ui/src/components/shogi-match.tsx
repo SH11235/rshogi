@@ -394,22 +394,29 @@ export function ShogiMatch({
     const handleMoveFromEngineRef = useRef<(move: string) => void>(() => {});
 
     // エンジン管理フックを使用
-    const { eventLogs, errorLogs, stopAllEngines, isEngineTurn, logEngineError } = useEngineManager(
-        {
-            sides,
-            engineOptions,
-            timeSettings,
-            startSfen,
-            movesRef,
-            positionRef,
-            isMatchRunning,
-            positionReady,
-            onMoveFromEngine: (move) => handleMoveFromEngineRef.current(move),
-            onMatchEnd: endMatch,
-            onEvalUpdate: recordEval,
-            maxLogs,
-        },
-    );
+    const {
+        eventLogs,
+        errorLogs,
+        stopAllEngines,
+        isEngineTurn,
+        logEngineError,
+        engineErrorDetails,
+        retryEngine,
+        isRetrying,
+    } = useEngineManager({
+        sides,
+        engineOptions,
+        timeSettings,
+        startSfen,
+        movesRef,
+        positionRef,
+        isMatchRunning,
+        positionReady,
+        onMoveFromEngine: (move) => handleMoveFromEngineRef.current(move),
+        onMatchEnd: endMatch,
+        onEvalUpdate: recordEval,
+        maxLogs,
+    });
     stopAllEnginesRef.current = stopAllEngines;
 
     // キーボード・ホイールナビゲーション（対局中は無効）
@@ -1606,7 +1613,13 @@ export function ShogiMatch({
                             onSettingsChange={setDisplaySettings}
                         />
 
-                        <EngineLogsPanel eventLogs={eventLogs} errorLogs={errorLogs} />
+                        <EngineLogsPanel
+                            eventLogs={eventLogs}
+                            errorLogs={errorLogs}
+                            engineErrorDetails={engineErrorDetails}
+                            onRetry={retryEngine}
+                            isRetrying={isRetrying}
+                        />
                     </div>
                 </div>
             </section>

@@ -1,3 +1,4 @@
+import type { Player } from "@shogi/app-core";
 import type { ReactElement } from "react";
 
 const baseCard = {
@@ -9,17 +10,102 @@ const baseCard = {
     width: "var(--panel-width)",
 };
 
+interface EngineErrorDetails {
+    hasError: boolean;
+    errorCode?: string;
+    errorMessage?: string;
+    canRetry: boolean;
+}
+
 interface EngineLogsPanelProps {
     /** イベントログのリスト */
     eventLogs: string[];
     /** エラーログのリスト */
     errorLogs: string[];
+    /** エンジンエラーの詳細情報 */
+    engineErrorDetails?: Record<Player, EngineErrorDetails | null>;
+    /** リトライコールバック */
+    onRetry?: (side: Player) => void;
+    /** リトライ中かどうか */
+    isRetrying?: Record<Player, boolean>;
 }
 
-export function EngineLogsPanel({ eventLogs, errorLogs }: EngineLogsPanelProps): ReactElement {
+export function EngineLogsPanel({
+    eventLogs,
+    errorLogs,
+    engineErrorDetails,
+    onRetry,
+    isRetrying,
+}: EngineLogsPanelProps): ReactElement {
+    const hasActiveError =
+        engineErrorDetails?.sente?.hasError || engineErrorDetails?.gote?.hasError;
+
     return (
-        <div style={baseCard}>
+        <div
+            style={{
+                ...baseCard,
+                border: hasActiveError
+                    ? "2px solid hsl(var(--destructive, 0 72% 51%))"
+                    : "1px solid hsl(var(--border, 0 0% 86%))",
+            }}
+        >
             <div style={{ fontWeight: 700, marginBottom: "6px" }}>エンジンログ</div>
+
+            {hasActiveError && (
+                <div
+                    style={{
+                        background: "hsl(var(--destructive, 0 72% 51%) / 0.1)",
+                        border: "1px solid hsl(var(--destructive, 0 72% 51%))",
+                        borderRadius: "8px",
+                        padding: "12px",
+                        marginBottom: "8px",
+                    }}
+                >
+                    <div
+                        style={{
+                            fontWeight: 600,
+                            color: "hsl(var(--destructive, 0 72% 51%))",
+                            marginBottom: "8px",
+                        }}
+                    >
+                        エンジン初期化エラー
+                    </div>
+
+                    {(["sente", "gote"] as const).map((side) => {
+                        const error = engineErrorDetails?.[side];
+                        if (!error?.hasError) return null;
+                        return (
+                            <div key={side} style={{ marginBottom: "8px" }}>
+                                <div style={{ fontSize: "13px", marginBottom: "4px" }}>
+                                    {side === "sente" ? "先手" : "後手"}: {error.errorMessage}
+                                </div>
+                                {error.canRetry && onRetry && (
+                                    <button
+                                        type="button"
+                                        onClick={() => onRetry(side)}
+                                        disabled={isRetrying?.[side]}
+                                        style={{
+                                            padding: "6px 12px",
+                                            borderRadius: "6px",
+                                            background: isRetrying?.[side]
+                                                ? "hsl(var(--muted, 0 0% 80%))"
+                                                : "hsl(var(--primary, 15 86% 55%))",
+                                            color: "white",
+                                            border: "none",
+                                            cursor: isRetrying?.[side] ? "not-allowed" : "pointer",
+                                            fontSize: "12px",
+                                            opacity: isRetrying?.[side] ? 0.6 : 1,
+                                        }}
+                                    >
+                                        {isRetrying?.[side] ? "リトライ中..." : "リトライ"}
+                                    </button>
+                                )}
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
+
             <ul
                 style={{
                     listStyle: "none",
