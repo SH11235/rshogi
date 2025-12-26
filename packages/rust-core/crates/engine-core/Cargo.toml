@@ -46,7 +46,10 @@ debug = []
 simd_avx2 = []
 # 診断ログ
 diagnostics = []
-# WebAssembly threads を有効化
+# WebAssembly スレッドビルド用フラグ
+# 注意: 現在はシングルスレッド動作のみ。wasm_thread による並列化は
+# 非同期ワーカー生成と同期プリミティブの不整合により無効化されている。
+# 詳細は docs/wasm-multithreading-investigation.md を参照。
 wasm-threads = []
 # YaneuraOu DEEP相当のデフォルト遅延設定を使う
 # GPU/ネットワーク待ちが長い環境向けの遅延マージン(400/1400ms)プリセットを有効化する

@@ -23,6 +23,19 @@ export default defineConfig(({ command }) => ({
             "Cross-Origin-Embedder-Policy": "require-corp",
         },
     },
+    worker: {
+        // ES モジュール形式の Worker を使用する。
+        // engine-wasm 内の Worker が import 文を使用するため必須。
+        // 主要ブラウザ対応状況: Chrome 80+, Edge 80+, Safari 15+, Firefox 114+
+        // (Firefox が最後発で 2023年6月にサポート、現在は全主要ブラウザで利用可能)
+        format: "es",
+    },
+    optimizeDeps: {
+        // @shogi/engine-wasm を Vite の pre-bundle (esbuild 変換) から除外。
+        // wasm-bindgen が生成する JS は特殊な形式のため、
+        // esbuild で変換すると WASM の初期化が壊れる。
+        exclude: ["@shogi/engine-wasm"],
+    },
     preview: {
         headers: {
             "Cross-Origin-Opener-Policy": "same-origin",

@@ -6,6 +6,7 @@ import {
     type EngineInitOptions,
     type SearchHandle,
     type SearchParams,
+    type ThreadInfo,
 } from "@shogi/engine-client";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -63,6 +64,36 @@ export function createTauriEngineClient(options: TauriEngineClientOptions = {}):
 
     let usingMock = false;
     let unlisten: UnlistenFn | null = null;
+    let cachedThreadInfo: ThreadInfo | null = null;
+
+    const defaultThreadInfo: ThreadInfo = {
+        activeThreads: 1,
+        maxThreads: 1,
+        threadedAvailable: true,
+        hardwareConcurrency: 1,
+    };
+
+    const fetchThreadInfo = async (): Promise<ThreadInfo> => {
+        try {
+            const response = await ipc.invoke<{
+                activeThreads: number;
+                maxThreads: number;
+                threadedAvailable: boolean;
+                hardwareConcurrency: number;
+            }>("engine_thread_info");
+            return {
+                activeThreads: response.activeThreads,
+                maxThreads: response.maxThreads,
+                threadedAvailable: response.threadedAvailable,
+                hardwareConcurrency: response.hardwareConcurrency,
+            };
+        } catch (error) {
+            if (debug) {
+                console.warn("[engine-tauri] Failed to fetch thread info, using defaults:", error);
+            }
+            return defaultThreadInfo;
+        }
+    };
 
     const emit = (event: EngineEvent) => {
         if (debug) {
@@ -143,6 +174,8 @@ export function createTauriEngineClient(options: TauriEngineClientOptions = {}):
                 async () => {
                     await ipc.invoke("engine_init", { opts: mergedInitOpts });
                     await ensureEventSubscription();
+                    // Fetch and cache thread info after init
+                    cachedThreadInfo = await fetchThreadInfo();
                 },
                 () => mock.init(mergedInitOpts),
             );
@@ -177,7 +210,13 @@ export function createTauriEngineClient(options: TauriEngineClientOptions = {}):
         },
         async setOption(name, value) {
             return runOrMock(
-                () => ipc.invoke("engine_option", { name, value }),
+                async () => {
+                    await ipc.invoke("engine_option", { name, value });
+                    // Update cache if Threads option was changed
+                    if (name === "Threads") {
+                        cachedThreadInfo = await fetchThreadInfo();
+                    }
+                },
                 () => mock.setOption(name, value),
             );
         },
@@ -219,6 +258,10 @@ export function createTauriEngineClient(options: TauriEngineClientOptions = {}):
             );
             detachMockSubscriptions();
             listeners.clear();
+            cachedThreadInfo = null;
+        },
+        getThreadInfo(): ThreadInfo {
+            return cachedThreadInfo ?? defaultThreadInfo;
         },
     };
 }

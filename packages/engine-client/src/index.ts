@@ -95,6 +95,20 @@ export interface SearchHandle {
     cancel(): Promise<void>;
 }
 
+/**
+ * Thread information for debugging and monitoring parallel search.
+ */
+export interface ThreadInfo {
+    /** Number of threads currently active (1 = single-threaded) */
+    activeThreads: number;
+    /** Maximum threads allowed (based on hardware and wasm limits) */
+    maxThreads: number;
+    /** Whether threaded execution is available (SharedArrayBuffer, crossOriginIsolated) */
+    threadedAvailable: boolean;
+    /** Hardware concurrency reported by navigator */
+    hardwareConcurrency: number;
+}
+
 export interface EngineClient {
     init(opts?: EngineInitOptions): Promise<void>;
     loadPosition(sfen: string, moves?: string[]): Promise<void>;
@@ -103,6 +117,11 @@ export interface EngineClient {
     setOption(name: string, value: string | number | boolean): Promise<void>;
     subscribe(handler: EngineEventHandler): () => void;
     dispose(): Promise<void>;
+    /**
+     * Get thread information for debugging parallel search.
+     * Optional - may not be implemented by all backends.
+     */
+    getThreadInfo?(): ThreadInfo;
 }
 
 /**

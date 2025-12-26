@@ -6,6 +6,7 @@ import type {
     EngineStopMode,
     SearchHandle,
     SearchParams,
+    ThreadInfo,
 } from "@shogi/engine-client";
 import { createMockEngineClient } from "@shogi/engine-client";
 import initWasmModule from "../pkg/engine_wasm.js";
@@ -88,7 +89,9 @@ type WorkerMessage =
     | WorkerAck;
 
 function defaultWorkerFactory(kind: WorkerKind): Worker {
-    // Use the emitted JS file; pointing at .ts breaks when consuming the built package.
+    // Use .js extension for compatibility with built artifacts.
+    // In dev mode, bundlers like Vite resolve .js to .ts source files.
+    // In production, tsc outputs .js files directly.
     const entry = kind === "threaded" ? "./engine.worker.threaded.js" : "./engine.worker.single.js";
     return new Worker(new URL(entry, import.meta.url), { type: "module" });
 }
@@ -156,6 +159,13 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
     let lastPosition: { sfen: string; moves: string[] } | null = null;
     let threadedDisabled = false;
     let activeThreads: number | null = null;
+
+    // Cache for getThreadInfo() - hardwareConcurrency and threadedAvailable rarely change
+    let cachedStaticThreadInfo: {
+        hardwareConcurrency: number;
+        maxThreads: number;
+        threadedAvailable: boolean;
+    } | null = null;
 
     const pendingOptions = new Map<string, string | number | boolean>();
     const warnedReasons = new Set<string>();
@@ -692,6 +702,26 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
             warnedReasons.clear();
             threadedDisabled = false;
             initInFlight = null;
+        },
+        getThreadInfo(): ThreadInfo {
+            // Use cached static values (hardwareConcurrency, threadedAvailable rarely change)
+            if (!cachedStaticThreadInfo) {
+                const hcRaw =
+                    typeof navigator !== "undefined" &&
+                    typeof navigator.hardwareConcurrency === "number"
+                        ? navigator.hardwareConcurrency
+                        : 1;
+                const hardwareConcurrency = Math.max(1, Math.trunc(hcRaw));
+                const threadedAvailable = getThreadedAvailability();
+                const maxThreads = threadedAvailable
+                    ? Math.max(1, Math.min(MAX_WASM_THREADS, hardwareConcurrency))
+                    : 1;
+                cachedStaticThreadInfo = { hardwareConcurrency, maxThreads, threadedAvailable };
+            }
+            return {
+                activeThreads: activeThreads ?? 1,
+                ...cachedStaticThreadInfo,
+            };
         },
     };
 }
