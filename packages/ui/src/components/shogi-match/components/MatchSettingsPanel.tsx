@@ -175,11 +175,12 @@ export function MatchSettingsPanel({
 
                         <div className="grid grid-cols-2 gap-2">
                             <label htmlFor="sente-main" className={labelClassName}>
-                                先手 持ち時間 (ms)
+                                先手 持ち時間 (秒)
                                 <Input
                                     id="sente-main"
                                     type="number"
-                                    value={timeSettings.sente.mainMs}
+                                    min={0}
+                                    value={Math.floor(timeSettings.sente.mainMs / 1000)}
                                     disabled={settingsLocked}
                                     className={inputClassName}
                                     onChange={(e) =>
@@ -187,18 +188,19 @@ export function MatchSettingsPanel({
                                             ...timeSettings,
                                             sente: {
                                                 ...timeSettings.sente,
-                                                mainMs: Number(e.target.value),
+                                                mainMs: Number(e.target.value) * 1000,
                                             },
                                         })
                                     }
                                 />
                             </label>
                             <label htmlFor="sente-byoyomi" className={labelClassName}>
-                                先手 秒読み (ms)
+                                先手 秒読み (秒)
                                 <Input
                                     id="sente-byoyomi"
                                     type="number"
-                                    value={timeSettings.sente.byoyomiMs}
+                                    min={0}
+                                    value={Math.floor(timeSettings.sente.byoyomiMs / 1000)}
                                     disabled={settingsLocked}
                                     className={inputClassName}
                                     onChange={(e) =>
@@ -206,18 +208,19 @@ export function MatchSettingsPanel({
                                             ...timeSettings,
                                             sente: {
                                                 ...timeSettings.sente,
-                                                byoyomiMs: Number(e.target.value),
+                                                byoyomiMs: Number(e.target.value) * 1000,
                                             },
                                         })
                                     }
                                 />
                             </label>
                             <label htmlFor="gote-main" className={labelClassName}>
-                                後手 持ち時間 (ms)
+                                後手 持ち時間 (秒)
                                 <Input
                                     id="gote-main"
                                     type="number"
-                                    value={timeSettings.gote.mainMs}
+                                    min={0}
+                                    value={Math.floor(timeSettings.gote.mainMs / 1000)}
                                     disabled={settingsLocked}
                                     className={inputClassName}
                                     onChange={(e) =>
@@ -225,18 +228,19 @@ export function MatchSettingsPanel({
                                             ...timeSettings,
                                             gote: {
                                                 ...timeSettings.gote,
-                                                mainMs: Number(e.target.value),
+                                                mainMs: Number(e.target.value) * 1000,
                                             },
                                         })
                                     }
                                 />
                             </label>
                             <label htmlFor="gote-byoyomi" className={labelClassName}>
-                                後手 秒読み (ms)
+                                後手 秒読み (秒)
                                 <Input
                                     id="gote-byoyomi"
                                     type="number"
-                                    value={timeSettings.gote.byoyomiMs}
+                                    min={0}
+                                    value={Math.floor(timeSettings.gote.byoyomiMs / 1000)}
                                     disabled={settingsLocked}
                                     className={inputClassName}
                                     onChange={(e) =>
@@ -244,7 +248,7 @@ export function MatchSettingsPanel({
                                             ...timeSettings,
                                             gote: {
                                                 ...timeSettings.gote,
-                                                byoyomiMs: Number(e.target.value),
+                                                byoyomiMs: Number(e.target.value) * 1000,
                                             },
                                         })
                                     }
