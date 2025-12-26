@@ -210,10 +210,23 @@ function parseEvalComment(
  */
 function parseStartSfenLine(line: string): string | null {
     const trimmed = line.trim();
-    const match = trimmed.match(/^開始局面[:：]\s*(.+)$/);
-    if (!match) return null;
 
-    const raw = match[1].trim();
+    // 「手合割：平手」を処理
+    const handicapMatch = trimmed.match(/^手合割[:：]\s*(.+)$/);
+    if (handicapMatch) {
+        const handicap = handicapMatch[1].trim();
+        if (handicap.startsWith("平手")) {
+            return "startpos";
+        }
+        // その他の手合割（駒落ちなど）は未対応
+        return null;
+    }
+
+    // 「開始局面：」を処理
+    const sfenMatch = trimmed.match(/^開始局面[:：]\s*(.+)$/);
+    if (!sfenMatch) return null;
+
+    const raw = sfenMatch[1].trim();
     if (!raw) return null;
     if (raw.startsWith("平手")) {
         const parsed = parseSfen("startpos");
