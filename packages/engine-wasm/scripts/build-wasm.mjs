@@ -10,6 +10,7 @@ const crateName = "engine-wasm";
 const artifactName = crateName.replace(/-/g, "_");
 const rustRoot = path.resolve(__dirname, "../../rust-core");
 const nightlyToolchain = process.env.RUST_NIGHTLY_TOOLCHAIN ?? "nightly-2025-12-25";
+const pnpmCmd = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 
 // --production フラグで本番ビルド（最大最適化）
 const isProduction = process.argv.includes("--production");
@@ -23,7 +24,6 @@ const threadedOutDir = path.resolve(__dirname, "../pkg-threaded");
 const threadedTarget = path.resolve(rustRoot, "targets", "wasm32-unknown-unknown.json");
 
 function run(cmd, args, cwd = process.cwd(), extraEnv = {}) {
-    // Use shell string to properly inherit environment on Windows
     const fullCommand = `${cmd} ${args.join(" ")}`;
 
     // Ensure Rust environment variables are properly set
@@ -54,10 +54,9 @@ function run(cmd, args, cwd = process.cwd(), extraEnv = {}) {
         }
     }
 
-    const result = spawnSync(fullCommand, {
+    const result = spawnSync(cmd, args, {
         cwd,
         stdio: "inherit",
-        shell: true,
         env: rustEnv,
     });
     if (result.status !== 0) {
@@ -66,9 +65,8 @@ function run(cmd, args, cwd = process.cwd(), extraEnv = {}) {
 }
 
 function ensureWasmBindgen() {
-    const check = spawnSync("wasm-bindgen --version", {
+    const check = spawnSync("wasm-bindgen", ["--version"], {
         stdio: "pipe",
-        shell: true,
     });
     if (check.status !== 0) {
         throw new Error(
@@ -82,10 +80,12 @@ function runWasmOpt(wasmFile) {
 
     // Rustが使用するWASM機能を有効化
     const enableFlags = [
+        "--enable-simd",
         "--enable-bulk-memory",
         "--enable-nontrapping-float-to-int",
         "--enable-sign-ext",
         "--enable-mutable-globals",
+        "--enable-threads",
     ];
 
     // productionでは-Oz（サイズ最適化）、それ以外は-O3（速度最適化）
@@ -94,12 +94,9 @@ function runWasmOpt(wasmFile) {
     console.log(`Optimizing WASM with wasm-opt ${optLevel}...`);
 
     const result = spawnSync(
-        "npx",
-        ["wasm-opt", optLevel, ...enableFlags, wasmFile, "-o", wasmFile],
-        {
-            stdio: "inherit",
-            shell: true,
-        },
+        pnpmCmd,
+        ["exec", "wasm-opt", optLevel, ...enableFlags, wasmFile, "-o", wasmFile],
+        { stdio: "inherit" },
     );
 
     if (result.status !== 0) {
@@ -228,9 +225,7 @@ try {
         cargoZArgs: ["-Z", "build-std=std,panic_abort"],
         emitThreadWorker: true,
         target: threadedTarget,
-        // threaded ビルドでは atomics 機能があるため wasm-opt のフラグ追加が必要
-        // 一旦スキップ（将来的に --enable-threads を追加して有効化可能）
-        enableWasmOpt: false,
+        enableWasmOpt: true,
     });
 
     verifyThreadedOutput(threadedOutDir);
