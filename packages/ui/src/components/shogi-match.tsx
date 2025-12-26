@@ -8,12 +8,10 @@ import {
     getAllSquares,
     getPositionService,
     type LastMove,
-    movesToCsa,
     type Piece,
     type PieceType,
     type Player,
     type PositionState,
-    parseCsaMoves,
     parseMove,
     type Square,
 } from "@shogi/app-core";
@@ -28,7 +26,8 @@ import { EvalPanel } from "./shogi-match/components/EvalPanel";
 import { GameResultBanner } from "./shogi-match/components/GameResultBanner";
 import { GameResultDialog } from "./shogi-match/components/GameResultDialog";
 import { HandPiecesDisplay } from "./shogi-match/components/HandPiecesDisplay";
-import { KifuIOPanel } from "./shogi-match/components/KifuIOPanel";
+import { KifuImportPanel } from "./shogi-match/components/KifuImportPanel";
+import { KifuPanel } from "./shogi-match/components/KifuPanel";
 import { MatchControls } from "./shogi-match/components/MatchControls";
 import {
     type EngineOption,
@@ -66,7 +65,7 @@ import {
 } from "./shogi-match/utils/boardUtils";
 import { isPromotable, PIECE_CAP, PIECE_LABELS } from "./shogi-match/utils/constants";
 import { exportToKifString } from "./shogi-match/utils/kifFormat";
-import { parseUsiInput } from "./shogi-match/utils/kifuUtils";
+import type { KifMoveData } from "./shogi-match/utils/kifParser";
 import { LegalMoveCache } from "./shogi-match/utils/legalMoveCache";
 import { determinePromotion } from "./shogi-match/utils/promotionLogic";
 import { TooltipProvider } from "./tooltip";
@@ -230,7 +229,7 @@ export function ShogiMatch({
         turn: "sente",
         ply: 1,
     });
-    const [initialBoard, setInitialBoard] = useState<BoardState | null>(null);
+    const [, setInitialBoard] = useState<BoardState | null>(null);
     const [positionReady, setPositionReady] = useState(false);
     const [lastMove, setLastMove] = useState<LastMove | undefined>(undefined);
     const [selection, setSelection] = useState<Selection | null>(null);
@@ -329,6 +328,8 @@ export function ShogiMatch({
     const matchEndedRef = useRef(false);
     const boardSectionRef = useRef<HTMLDivElement>(null);
     const settingsLocked = isMatchRunning;
+    // 現在のターン開始時刻（消費時間計算用）
+    const turnStartTimeRef = useRef<number>(Date.now());
 
     // endMatch のための ref（循環依存を回避）
     const endMatchRef = useRef<((result: GameResult) => Promise<void>) | null>(null);
@@ -434,13 +435,17 @@ export function ShogiMatch({
                 );
                 return;
             }
+            // 消費時間を計算
+            const elapsedMs = Date.now() - turnStartTimeRef.current;
             // 棋譜ナビゲーションに手を追加（局面更新はonPositionChangeで自動実行）
-            navigation.addMove(move, result.next);
+            navigation.addMove(move, result.next, { elapsedMs });
             movesRef.current = [...movesRef.current, move];
             setLastMove(result.lastMove);
             setSelection(null);
             setMessage(null);
             legalCache.clear();
+            // ターン開始時刻をリセット
+            turnStartTimeRef.current = Date.now();
             updateClocksForNextTurn(result.next.turn);
         },
         [legalCache, logEngineError, navigation, updateClocksForNextTurn],
@@ -531,6 +536,8 @@ export function ShogiMatch({
 
         // エンジン管理は useEngineManager フックが自動的に処理する
         setIsMatchRunning(true);
+        // ターン開始時刻をリセット
+        turnStartTimeRef.current = Date.now();
         startTicking(position.turn);
     };
 
@@ -589,6 +596,8 @@ export function ShogiMatch({
         setEditOwner("sente");
         setEditPieceType(null);
         legalCache.clear();
+        // ターン開始時刻をリセット
+        turnStartTimeRef.current = Date.now();
         void refreshStartSfen(next);
     }, [
         basePosition,
@@ -602,13 +611,17 @@ export function ShogiMatch({
 
     const applyMoveCommon = useCallback(
         (nextPosition: PositionState, mv: string, last?: LastMove, _prevBoard?: BoardState) => {
+            // 消費時間を計算
+            const elapsedMs = Date.now() - turnStartTimeRef.current;
             // 棋譜ナビゲーションに手を追加（局面更新はonPositionChangeで自動実行）
-            navigation.addMove(mv, nextPosition);
+            navigation.addMove(mv, nextPosition, { elapsedMs });
             movesRef.current = [...movesRef.current, mv];
             setLastMove(last);
             setSelection(null);
             setMessage(null);
             legalCache.clear();
+            // ターン開始時刻をリセット
+            turnStartTimeRef.current = Date.now();
             updateClocksForNextTurn(nextPosition.turn);
         },
         [legalCache, navigation, updateClocksForNextTurn],
@@ -1093,61 +1106,70 @@ export function ShogiMatch({
         setMessage(null);
     };
 
-    const importUsi = async (raw: string) => {
-        const tokens = parseUsiInput(raw);
-        if (tokens.length === 0) return;
-        await loadMoves(tokens);
-    };
+    const loadMoves = useCallback(
+        async (list: string[], moveData?: KifMoveData[]) => {
+            const filtered = list.filter(Boolean);
+            const service = getPositionService();
+            try {
+                const result = await service.replayMovesStrict(startSfen, filtered);
 
-    const loadMoves = async (list: string[]) => {
-        const filtered = list.filter(Boolean);
-        const service = getPositionService();
-        try {
-            const result = await service.replayMovesStrict(startSfen, filtered);
+                // 開始局面を取得
+                const startPosition = basePosition ?? (await service.getInitialBoard());
 
-            // 開始局面を取得
-            const startPosition = basePosition ?? (await service.getInitialBoard());
+                // 棋譜ナビゲーションをリセット
+                navigation.reset(startPosition, startSfen);
 
-            // 棋譜ナビゲーションをリセット
-            navigation.reset(startPosition, startSfen);
-
-            // 各手を順番に追加
-            let currentPos = startPosition;
-            for (const move of result.applied) {
-                const applyResult = applyMoveWithState(currentPos, move, { validateTurn: false });
-                if (applyResult.ok) {
-                    navigation.addMove(move, applyResult.next);
-                    currentPos = applyResult.next;
+                // 各手を順番に追加
+                let currentPos = startPosition;
+                for (let i = 0; i < result.applied.length; i++) {
+                    const move = result.applied[i];
+                    const data = moveData?.[i];
+                    const applyResult = applyMoveWithState(currentPos, move, {
+                        validateTurn: false,
+                    });
+                    if (applyResult.ok) {
+                        // 消費時間と評価値を渡す
+                        // KIFインポートの評価値は既に先手視点なので normalized: true
+                        navigation.addMove(move, applyResult.next, {
+                            elapsedMs: data?.elapsedMs,
+                            eval:
+                                data?.evalCp !== undefined || data?.evalMate !== undefined
+                                    ? {
+                                          scoreCp: data.evalCp,
+                                          scoreMate: data.evalMate,
+                                          depth: data.depth,
+                                          normalized: true,
+                                      }
+                                    : undefined,
+                        });
+                        currentPos = applyResult.next;
+                    }
                 }
+
+                movesRef.current = result.applied;
+                setLastMove(deriveLastMove(result.applied.at(-1)));
+                setSelection(null);
+                setMessage(result.error ?? null);
+                resetClocks(false);
+
+                legalCache.clear();
+                setPositionReady(true);
+            } catch (error) {
+                setMessage(`棋譜の適用に失敗しました: ${String(error)}`);
             }
-
-            movesRef.current = result.applied;
-            setLastMove(deriveLastMove(result.applied.at(-1)));
-            setSelection(null);
-            setMessage(result.error ?? null);
-            resetClocks(false);
-
-            legalCache.clear();
-            setPositionReady(true);
-        } catch (error) {
-            setMessage(`棋譜の適用に失敗しました: ${String(error)}`);
-        }
-    };
-
-    const exportUsi = moves.length ? `${startSfen} moves ${moves.join(" ")}` : startSfen;
-    const exportCsa = useMemo(
-        () => (positionReady && initialBoard ? movesToCsa(moves, {}, initialBoard) : ""),
-        [initialBoard, moves, positionReady],
+        },
+        [startSfen, basePosition, navigation, resetClocks, legalCache],
     );
 
     // KIFコピー用コールバック
     const handleCopyKif = useCallback((): string => {
-        return exportToKifString(moves, boardHistory, {
+        return exportToKifString(kifMoves, boardHistory, {
             startTime: new Date(),
             senteName: sides.sente.role === "engine" ? "エンジン" : "人間",
             goteName: sides.gote.role === "engine" ? "エンジン" : "人間",
+            includeEval: true, // 評価値もコメントとして出力
         });
-    }, [moves, boardHistory, sides.sente.role, sides.gote.role]);
+    }, [kifMoves, boardHistory, sides.sente.role, sides.gote.role]);
 
     // 棋譜の手数選択コールバック（巻き戻し・リプレイ用）
     const handlePlySelect = useCallback(
@@ -1164,10 +1186,62 @@ export function ShogiMatch({
         [isMatchRunning, navigation, stopTicking, stopAllEngines],
     );
 
-    const importCsa = async (csa: string) => {
-        if (!positionReady) return;
-        await loadMoves(parseCsaMoves(csa, initialBoard ?? undefined));
-    };
+    // SFENインポート（局面 + 指し手）
+    const importSfen = useCallback(
+        async (sfen: string, movesToLoad: string[]) => {
+            const service = getPositionService();
+            try {
+                // 新しい開始局面を設定
+                const newPosition = await service.parseSfen(sfen);
+                setBasePosition(newPosition);
+                setStartSfen(sfen);
+                setInitialBoard(newPosition.board);
+
+                // 棋譜ナビゲーションをリセット
+                navigation.reset(newPosition, sfen);
+
+                // 指し手がある場合は適用
+                if (movesToLoad.length > 0) {
+                    let currentPos = newPosition;
+                    const appliedMoves: string[] = [];
+                    for (const move of movesToLoad) {
+                        const applyResult = applyMoveWithState(currentPos, move, {
+                            validateTurn: false,
+                        });
+                        if (applyResult.ok) {
+                            navigation.addMove(move, applyResult.next);
+                            currentPos = applyResult.next;
+                            appliedMoves.push(move);
+                        } else {
+                            break;
+                        }
+                    }
+                    movesRef.current = appliedMoves;
+                    setLastMove(deriveLastMove(appliedMoves.at(-1)));
+                } else {
+                    movesRef.current = [];
+                    setLastMove(undefined);
+                }
+
+                setSelection(null);
+                setMessage(null);
+                resetClocks(false);
+                legalCache.clear();
+                setPositionReady(true);
+            } catch (error) {
+                setMessage(`SFENの適用に失敗しました: ${String(error)}`);
+            }
+        },
+        [navigation, resetClocks, legalCache],
+    );
+
+    // KIFインポート（指し手のみ、平手初期局面から）
+    const importKif = useCallback(
+        async (movesToLoad: string[], moveData: KifMoveData[]) => {
+            await loadMoves(movesToLoad, moveData);
+        },
+        [loadMoves],
+    );
 
     const candidateNote = positionReady ? null : "局面を読み込み中です。";
 
@@ -1480,13 +1554,13 @@ export function ShogiMatch({
 
                         <ClockDisplayPanel clocks={clocks} sides={sides} />
 
-                        <EvalPanel
-                            evalHistory={evalHistory}
+                        {/* 棋譜パネル（常時表示） */}
+                        <KifuPanel
                             kifMoves={kifMoves}
                             currentPly={navigation.state.currentPly}
+                            showEval={false}
                             onPlySelect={handlePlySelect}
                             onCopyKif={handleCopyKif}
-                            defaultOpen={false}
                             navigation={{
                                 currentPly: navigation.state.currentPly,
                                 totalPly: navigation.state.totalPly,
@@ -1510,12 +1584,18 @@ export function ShogiMatch({
                             branchMarkers={branchMarkers}
                         />
 
-                        <KifuIOPanel
-                            moves={moves}
-                            exportUsi={exportUsi}
-                            exportCsa={exportCsa}
-                            onImportUsi={importUsi}
-                            onImportCsa={importCsa}
+                        {/* 評価値グラフパネル（折りたたみ） */}
+                        <EvalPanel
+                            evalHistory={evalHistory}
+                            currentPly={navigation.state.currentPly}
+                            onPlySelect={handlePlySelect}
+                            defaultOpen={false}
+                        />
+
+                        {/* インポートパネル */}
+                        <KifuImportPanel
+                            onImportSfen={importSfen}
+                            onImportKif={importKif}
                             positionReady={positionReady}
                         />
 
