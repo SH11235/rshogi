@@ -65,6 +65,7 @@ import {
 } from "./shogi-match/utils/boardUtils";
 import { isPromotable, PIECE_CAP, PIECE_LABELS } from "./shogi-match/utils/constants";
 import { exportToKifString } from "./shogi-match/utils/kifFormat";
+import type { KifMoveData } from "./shogi-match/utils/kifParser";
 import { LegalMoveCache } from "./shogi-match/utils/legalMoveCache";
 import { determinePromotion } from "./shogi-match/utils/promotionLogic";
 import { TooltipProvider } from "./tooltip";
@@ -1105,7 +1106,7 @@ export function ShogiMatch({
         setMessage(null);
     };
 
-    const loadMoves = async (list: string[]) => {
+    const loadMoves = async (list: string[], moveData?: KifMoveData[]) => {
         const filtered = list.filter(Boolean);
         const service = getPositionService();
         try {
@@ -1119,10 +1120,23 @@ export function ShogiMatch({
 
             // 各手を順番に追加
             let currentPos = startPosition;
-            for (const move of result.applied) {
+            for (let i = 0; i < result.applied.length; i++) {
+                const move = result.applied[i];
+                const data = moveData?.[i];
                 const applyResult = applyMoveWithState(currentPos, move, { validateTurn: false });
                 if (applyResult.ok) {
-                    navigation.addMove(move, applyResult.next);
+                    // 消費時間と評価値を渡す
+                    navigation.addMove(move, applyResult.next, {
+                        elapsedMs: data?.elapsedMs,
+                        eval:
+                            data?.evalCp !== undefined || data?.evalMate !== undefined
+                                ? {
+                                      scoreCp: data.evalCp,
+                                      scoreMate: data.evalMate,
+                                      depth: data.depth,
+                                  }
+                                : undefined,
+                    });
                     currentPos = applyResult.next;
                 }
             }
@@ -1216,8 +1230,8 @@ export function ShogiMatch({
 
     // KIFインポート（指し手のみ、平手初期局面から）
     const importKif = useCallback(
-        async (movesToLoad: string[]) => {
-            await loadMoves(movesToLoad);
+        async (movesToLoad: string[], moveData: KifMoveData[]) => {
+            await loadMoves(movesToLoad, moveData);
         },
         [loadMoves],
     );

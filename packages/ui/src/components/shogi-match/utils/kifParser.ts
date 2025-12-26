@@ -69,11 +69,27 @@ const PIECE_NAME_TO_USI: Readonly<Record<string, string>> = {
 // パース結果の型
 // ============================================================
 
+/** 1手のパースデータ */
+export interface KifMoveData {
+    /** USI形式の指し手 */
+    usiMove: string;
+    /** 消費時間（ミリ秒） */
+    elapsedMs?: number;
+    /** 評価値（センチポーン） */
+    evalCp?: number;
+    /** 詰み手数 */
+    evalMate?: number;
+    /** 探索深さ */
+    depth?: number;
+}
+
 export interface KifParseResult {
     /** 成功したか */
     success: boolean;
     /** USI形式の指し手配列 */
     moves: string[];
+    /** 各手の詳細データ（消費時間・評価値含む） */
+    moveData: KifMoveData[];
     /** エラーメッセージ（失敗時） */
     error?: string;
     /** パースできなかった行（警告用） */
@@ -116,6 +132,74 @@ function kanjiToUsi(fileChar: string, rankChar: string): string | null {
     return `${file}${rankAlpha}`;
 }
 
+/** 指し手行のパース結果 */
+interface ParsedMoveLine {
+    /** USI形式の指し手 */
+    usiMove: string;
+    /** 移動先マス（次の「同」判定用） */
+    toSquare: string;
+    /** 消費時間（ミリ秒） */
+    elapsedMs?: number;
+}
+
+/**
+ * 時間表記をパースしてミリ秒に変換
+ * @param timeStr "( 0:05/00:00:05)" または "0:05" 形式
+ * @returns ミリ秒、またはundefined
+ */
+function parseTimeNotation(timeStr: string): number | undefined {
+    // "( m:ss/hh:mm:ss)" 形式から最初の m:ss を抽出
+    const match = timeStr.match(/\(\s*(\d+):(\d+)\/[\d:]+\)/);
+    if (match) {
+        const minutes = parseInt(match[1], 10);
+        const seconds = parseInt(match[2], 10);
+        return (minutes * 60 + seconds) * 1000;
+    }
+    return undefined;
+}
+
+/**
+ * 評価値コメントをパース
+ * @param line "*評価値=+0.5 (深さ20)" 形式
+ * @returns { evalCp, evalMate, depth } またはnull
+ */
+function parseEvalComment(
+    line: string,
+): { evalCp?: number; evalMate?: number; depth?: number } | null {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("*評価値=")) {
+        return null;
+    }
+
+    const content = trimmed.slice(5); // "*評価値=" を除去
+
+    // 探索深さを抽出
+    let depth: number | undefined;
+    const depthMatch = content.match(/\(深さ(\d+)\)/);
+    if (depthMatch) {
+        depth = parseInt(depthMatch[1], 10);
+    }
+
+    // 詰み手数: "詰3手" or "被詰5手"
+    const mateMatch = content.match(/^(詰|被詰)(\d+)手/);
+    if (mateMatch) {
+        const mateValue = parseInt(mateMatch[2], 10);
+        const evalMate = mateMatch[1] === "詰" ? mateValue : -mateValue;
+        return { evalMate, depth };
+    }
+
+    // 評価値: "+0.5" or "-1.2"
+    const evalMatch = content.match(/^([+-]?\d+\.?\d*)/);
+    if (evalMatch) {
+        const evalValue = parseFloat(evalMatch[1]);
+        // センチポーンに変換（100倍）
+        const evalCp = Math.round(evalValue * 100);
+        return { evalCp, depth };
+    }
+
+    return null;
+}
+
 /**
  * 1行のKIF指し手をパースしてUSI形式に変換
  *
@@ -127,12 +211,13 @@ function kanjiToUsi(fileChar: string, rankChar: string): string | null {
  * - "同　歩(66)" - 「同」表記
  * - "５五角打" - 駒打ち
  * - "２二角成(88)" - 成り
+ * - "   1 ７六歩(77)   ( 0:05/00:00:05)" - 消費時間付き
  *
  * @param line KIF形式の1行
  * @param prevTo 直前の移動先（「同」表記解決用）
- * @returns [usiMove, newPrevTo] または null
+ * @returns ParsedMoveLine または null
  */
-function parseKifLine(line: string, prevTo: string | null): [string, string] | null {
+function parseKifLine(line: string, prevTo: string | null): ParsedMoveLine | null {
     // 空行やコメント行をスキップ
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("*")) {
@@ -170,6 +255,9 @@ function parseKifLine(line: string, prevTo: string | null): [string, string] | n
         return null;
     }
 
+    // 消費時間を抽出（除去前に）
+    const elapsedMs = parseTimeNotation(trimmed);
+
     // 手数を除去: "   1 ７六歩(77)" → "７六歩(77)"
     // 先手後手マークも除去: "▲７六歩(77)" → "７六歩(77)"
     let moveStr = trimmed
@@ -192,7 +280,7 @@ function parseKifLine(line: string, prevTo: string | null): [string, string] | n
         const piece = PIECE_NAME_TO_USI[pieceName];
 
         if (to && piece) {
-            return [`${piece}*${to}`, to];
+            return { usiMove: `${piece}*${to}`, toSquare: to, elapsedMs };
         }
         return null;
     }
@@ -218,7 +306,7 @@ function parseKifLine(line: string, prevTo: string | null): [string, string] | n
         if (!from) return null;
 
         const usiMove = promotes ? `${from}${prevTo}+` : `${from}${prevTo}`;
-        return [usiMove, prevTo];
+        return { usiMove, toSquare: prevTo, elapsedMs };
     }
 
     // ============================================================
@@ -247,7 +335,7 @@ function parseKifLine(line: string, prevTo: string | null): [string, string] | n
         if (!from) return null;
 
         const usiMove = promotes ? `${from}${to}+` : `${from}${to}`;
-        return [usiMove, to];
+        return { usiMove, toSquare: to, elapsedMs };
     }
 
     return null;
@@ -255,6 +343,9 @@ function parseKifLine(line: string, prevTo: string | null): [string, string] | n
 
 /**
  * KIF形式の棋譜全体をパースしてUSI形式の指し手配列に変換
+ *
+ * 消費時間と評価値コメントもパースして返す。
+ * 評価値コメントは直前の指し手に紐付けられる。
  *
  * @param kifText KIF形式の棋譜テキスト
  * @returns パース結果
@@ -264,21 +355,46 @@ export function parseKif(kifText: string): KifParseResult {
         return {
             success: false,
             moves: [],
+            moveData: [],
             error: "入力が空です",
         };
     }
 
     const lines = kifText.split(/\r?\n/);
     const moves: string[] = [];
+    const moveData: KifMoveData[] = [];
     const warnings: string[] = [];
     let prevTo: string | null = null;
 
     for (const line of lines) {
+        // まず評価値コメントかチェック
+        const evalData = parseEvalComment(line);
+        if (evalData) {
+            // 直前の指し手に評価値を追加
+            if (moveData.length > 0) {
+                const lastMoveData = moveData[moveData.length - 1];
+                if (evalData.evalCp !== undefined) {
+                    lastMoveData.evalCp = evalData.evalCp;
+                }
+                if (evalData.evalMate !== undefined) {
+                    lastMoveData.evalMate = evalData.evalMate;
+                }
+                if (evalData.depth !== undefined) {
+                    lastMoveData.depth = evalData.depth;
+                }
+            }
+            continue;
+        }
+
+        // 指し手行をパース
         const result = parseKifLine(line, prevTo);
         if (result) {
-            const [usiMove, newPrevTo] = result;
-            moves.push(usiMove);
-            prevTo = newPrevTo;
+            moves.push(result.usiMove);
+            moveData.push({
+                usiMove: result.usiMove,
+                elapsedMs: result.elapsedMs,
+            });
+            prevTo = result.toSquare;
         }
     }
 
@@ -286,6 +402,7 @@ export function parseKif(kifText: string): KifParseResult {
         return {
             success: false,
             moves: [],
+            moveData: [],
             error: "パースできる指し手が見つかりませんでした",
         };
     }
@@ -293,6 +410,7 @@ export function parseKif(kifText: string): KifParseResult {
     return {
         success: true,
         moves,
+        moveData,
         warnings: warnings.length > 0 ? warnings : undefined,
     };
 }

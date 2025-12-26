@@ -6,15 +6,15 @@
 
 import type { ReactElement } from "react";
 import { useCallback, useState } from "react";
-import { parseKif, parseSfen } from "../utils/kifParser";
+import { type KifMoveData, parseKif, parseSfen } from "../utils/kifParser";
 
 type ImportTab = "sfen" | "kif";
 
 interface KifuImportPanelProps {
     /** SFENインポート時のコールバック（sfen: 開始局面, moves: 指し手配列） */
     onImportSfen: (sfen: string, moves: string[]) => Promise<void>;
-    /** KIFインポート時のコールバック（moves: 指し手配列） */
-    onImportKif: (moves: string[]) => Promise<void>;
+    /** KIFインポート時のコールバック（moves: 指し手配列, moveData: 各手の詳細データ） */
+    onImportKif: (moves: string[], moveData: KifMoveData[]) => Promise<void>;
     /** 局面が準備完了しているか */
     positionReady: boolean;
 }
@@ -55,7 +55,7 @@ export function KifuImportPanel({
                     setError(result.error ?? "KIFのパースに失敗しました");
                     return;
                 }
-                await onImportKif(result.moves);
+                await onImportKif(result.moves, result.moveData);
                 setSuccess(true);
                 setInputValue("");
                 setTimeout(() => setSuccess(false), 2000);

@@ -108,6 +108,8 @@ export function getCurrentNode(tree: KifuTree): KifuNode {
 export interface AddMoveOptions {
     /** 消費時間（ミリ秒） */
     elapsedMs?: number;
+    /** 評価値情報 */
+    eval?: KifuEval;
 }
 
 export function addMove(
@@ -142,6 +144,7 @@ export function addMove(
         positionAfter,
         boardBefore: cloneBoard(currentNode.positionAfter.board),
         elapsedMs: options?.elapsedMs,
+        eval: options?.eval,
     };
 
     // ノードマップを更新
