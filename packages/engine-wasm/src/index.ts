@@ -88,12 +88,16 @@ type WorkerMessage =
     | { type: "events"; payload: EngineEvent[] }
     | WorkerAck;
 
-function defaultWorkerFactory(kind: WorkerKind): Worker {
-    // Use .js extension for compatibility with built artifacts.
-    // In dev mode, bundlers like Vite resolve .js to .ts source files.
-    // In production, tsc outputs .js files directly.
-    const entry = kind === "threaded" ? "./engine.worker.threaded.js" : "./engine.worker.single.js";
-    return new Worker(new URL(entry, import.meta.url), { type: "module" });
+function defaultWorkerFactory(_kind: WorkerKind): Worker {
+    // Currently only single-threaded mode is supported.
+    // Multi-threaded mode (pkg-threaded) has known issues with GitHub Pages deployment
+    // due to missing COOP/COEP headers required for SharedArrayBuffer.
+    // When threaded mode is requested, we fall back to single-threaded mode.
+    //
+    // IMPORTANT: Vite requires `new URL(..., import.meta.url)` to be used directly
+    // inside `new Worker()` call for proper bundling. Pre-generating the URL
+    // as a variable prevents Vite from recognizing it as a Worker entry point.
+    return new Worker(new URL("./engine.worker.single.js", import.meta.url), { type: "module" });
 }
 
 function collectTransfers(command: WorkerCommand): Transferable[] {
