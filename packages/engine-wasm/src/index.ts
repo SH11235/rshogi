@@ -225,6 +225,14 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
         return undefined;
     };
 
+    const getIncrementalMoves = (prev: string[], next: string[]): string[] | null => {
+        if (prev.length > next.length) return null;
+        for (let i = 0; i < prev.length; i += 1) {
+            if (prev[i] !== next[i]) return null;
+        }
+        return next.slice(prev.length);
+    };
+
     const getThreadedAvailability = () => {
         if (threadedDisabled) return false;
         if (typeof crossOriginIsolated === "undefined" || !crossOriginIsolated) return false;
@@ -554,9 +562,17 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
                 return mock.loadPosition(sfen, moves);
             }
             const normalizedMoves = moves ?? [];
-            // TEMPORARY FIX: Disable incremental position loading to avoid state issues
-            // Always load the full position instead of applying incremental moves
-            void lastPosition; // Keep for reference but don't use
+            const incrementalMoves =
+                lastPosition && lastPosition.sfen === sfen
+                    ? getIncrementalMoves(lastPosition.moves, normalizedMoves)
+                    : null;
+            if (incrementalMoves !== null) {
+                if (incrementalMoves.length > 0) {
+                    await postToWorkerAwait({ type: "applyMoves", moves: incrementalMoves });
+                }
+                lastPosition = { sfen, moves: normalizedMoves.slice() };
+                return;
+            }
             await postToWorkerAwait({ type: "loadPosition", sfen, moves: normalizedMoves });
             lastPosition = { sfen, moves: normalizedMoves.slice() };
         },

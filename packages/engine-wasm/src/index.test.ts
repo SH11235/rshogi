@@ -149,6 +149,46 @@ describe("createWasmEngineClient", () => {
             } as MessageEvent);
         });
 
+        it("同一 SFEN の追加入力は applyMoves で差分だけ送信する", async () => {
+            const client = createWasmEngineClient({ workerFactory: mockWorkerFactory });
+
+            const initPromise = client.init();
+            const initCall = mockWorker.postMessage.mock.calls[0][0];
+            mockWorker.onmessage?.({
+                data: { type: "ack", requestId: initCall.requestId },
+            } as MessageEvent);
+            await initPromise;
+
+            const firstPromise = client.loadPosition("startpos", ["7g7f"]);
+            await new Promise((resolve) => setTimeout(resolve, 0));
+
+            const firstCall = mockWorker.postMessage.mock.calls[1][0];
+            expect(firstCall).toMatchObject({
+                type: "loadPosition",
+                sfen: "startpos",
+                moves: ["7g7f"],
+                requestId: expect.any(String),
+            });
+            mockWorker.onmessage?.({
+                data: { type: "ack", requestId: firstCall.requestId },
+            } as MessageEvent);
+            await firstPromise;
+
+            const secondPromise = client.loadPosition("startpos", ["7g7f", "3c3d"]);
+            await new Promise((resolve) => setTimeout(resolve, 0));
+
+            const secondCall = mockWorker.postMessage.mock.calls[2][0];
+            expect(secondCall).toMatchObject({
+                type: "applyMoves",
+                moves: ["3c3d"],
+                requestId: expect.any(String),
+            });
+            mockWorker.onmessage?.({
+                data: { type: "ack", requestId: secondCall.requestId },
+            } as MessageEvent);
+            await secondPromise;
+        });
+
         it("search で Worker にメッセージを送信する", async () => {
             const client = createWasmEngineClient({ workerFactory: mockWorkerFactory });
 
