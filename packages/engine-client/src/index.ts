@@ -5,7 +5,7 @@ export type EngineStopMode = "terminate" | "cooperative";
 export interface EngineInitOptions {
     /** バックエンドの種類 (native/wasm/external-usi) */
     backend?: EngineBackend;
-    /** 並列設定 (native で使用、wasm では無効) */
+    /** 並列設定 (native / wasm の threaded build で使用) */
     threads?: number;
     /** Worker 数 (将来の並列用) */
     workers?: number;
@@ -62,9 +62,29 @@ export interface EngineBestMoveEvent {
     ponder?: string;
 }
 
+export type EngineErrorSeverity = "warning" | "error" | "fatal";
+
+/** Well-known error codes for type-safe error handling */
+export type EngineErrorCode =
+    // Wasm-specific errors
+    | "WASM_INIT_FAILED"
+    | "WASM_THREADS_UNAVAILABLE"
+    | "WASM_THREADS_CLAMPED"
+    | "WASM_THREADS_INIT_FAILED"
+    | "WASM_THREADS_DEFERRED"
+    | "WASM_WORKER_FAILED"
+    // General errors
+    | "MODEL_LOAD_FAILED"
+    | "POSITION_INVALID"
+    | "SEARCH_FAILED"
+    | "TIMEOUT"
+    | "UNKNOWN";
+
 export interface EngineErrorEvent {
     type: "error";
     message: string;
+    severity?: EngineErrorSeverity;
+    code?: EngineErrorCode;
 }
 
 export type EngineEvent = EngineInfoEvent | EngineBestMoveEvent | EngineErrorEvent;
@@ -75,6 +95,20 @@ export interface SearchHandle {
     cancel(): Promise<void>;
 }
 
+/**
+ * Thread information for debugging and monitoring parallel search.
+ */
+export interface ThreadInfo {
+    /** Number of threads currently active (1 = single-threaded) */
+    activeThreads: number;
+    /** Maximum threads allowed (based on hardware and wasm limits) */
+    maxThreads: number;
+    /** Whether threaded execution is available (SharedArrayBuffer, crossOriginIsolated) */
+    threadedAvailable: boolean;
+    /** Hardware concurrency reported by navigator */
+    hardwareConcurrency: number;
+}
+
 export interface EngineClient {
     init(opts?: EngineInitOptions): Promise<void>;
     loadPosition(sfen: string, moves?: string[]): Promise<void>;
@@ -83,6 +117,11 @@ export interface EngineClient {
     setOption(name: string, value: string | number | boolean): Promise<void>;
     subscribe(handler: EngineEventHandler): () => void;
     dispose(): Promise<void>;
+    /**
+     * Get thread information for debugging parallel search.
+     * Optional - may not be implemented by all backends.
+     */
+    getThreadInfo?(): ThreadInfo;
 }
 
 /**

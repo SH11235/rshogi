@@ -305,6 +305,13 @@ mod imp {
     }
 }
 
+// WASM builds use single-threaded search only.
+// Multi-threading with wasm_thread was attempted but has fundamental issues:
+// - wasm_thread spawns Web Workers asynchronously
+// - Our Condvar/Mutex-based synchronization assumes threads are ready immediately
+// - This mismatch causes deadlocks
+//
+// See docs/wasm-multithreading-investigation.md for details and future options.
 #[cfg(target_arch = "wasm32")]
 mod imp {
     use std::sync::atomic::AtomicBool;

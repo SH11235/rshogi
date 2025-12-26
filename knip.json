@@ -1,4 +1,13 @@
 {
     "$schema": "https://unpkg.com/knip@5/schema.json",
+    "workspaces": {
+        "packages/engine-wasm": {
+            "entry": [
+                "src/index.ts",
+                "src/engine.worker.single.ts",
+                "src/engine.worker.threaded.ts"
+            ]
+        }
+    },
     "ignoreDependencies": ["wasm-opt"]
 }

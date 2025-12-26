@@ -2,27 +2,33 @@ import type { EngineEvent } from "@shogi/engine-client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createWasmEngineClient } from "./index";
 
+type WorkerKind = "single" | "threaded";
+type MockWorker = {
+    postMessage: ReturnType<typeof vi.fn>;
+    terminate: ReturnType<typeof vi.fn>;
+    onmessage: ((event: MessageEvent) => void) | null;
+    onerror: ((error: ErrorEvent) => void) | null;
+};
+
+const createMockWorker = (): MockWorker => ({
+    postMessage: vi.fn(),
+    terminate: vi.fn(),
+    onmessage: null,
+    onerror: null,
+});
+
 describe("createWasmEngineClient", () => {
-    let mockWorker: {
-        postMessage: ReturnType<typeof vi.fn>;
-        terminate: ReturnType<typeof vi.fn>;
-        onmessage: ((event: MessageEvent) => void) | null;
-        onerror: ((error: ErrorEvent) => void) | null;
-    };
-    let mockWorkerFactory: () => Worker;
+    let mockWorker: MockWorker;
+    let mockWorkerFactory: (kind: WorkerKind) => Worker;
 
     beforeEach(() => {
-        mockWorker = {
-            postMessage: vi.fn(),
-            terminate: vi.fn(),
-            onmessage: null,
-            onerror: null,
-        };
-        mockWorkerFactory = vi.fn(() => mockWorker as unknown as Worker);
+        mockWorker = createMockWorker();
+        mockWorkerFactory = vi.fn((_kind: WorkerKind) => mockWorker as unknown as Worker);
     });
 
     afterEach(() => {
         vi.clearAllMocks();
+        vi.unstubAllGlobals();
     });
 
     describe("useMock オプション", () => {
@@ -72,6 +78,22 @@ describe("createWasmEngineClient", () => {
             } as MessageEvent);
 
             await initPromise;
+        });
+
+        it("Threads の setOption は Worker に送らず次回 init に反映する", async () => {
+            const client = createWasmEngineClient({ workerFactory: mockWorkerFactory });
+
+            const initPromise = client.init();
+            const initCall = mockWorker.postMessage.mock.calls[0][0];
+            mockWorker.onmessage?.({
+                data: { type: "ack", requestId: initCall.requestId },
+            } as MessageEvent);
+            await initPromise;
+
+            client.setOption("Threads", 4);
+            await new Promise((resolve) => setTimeout(resolve, 0));
+
+            expect(mockWorker.postMessage).toHaveBeenCalledTimes(1);
         });
 
         it("init オプションを正しく渡す", async () => {
@@ -127,6 +149,46 @@ describe("createWasmEngineClient", () => {
             } as MessageEvent);
         });
 
+        it("同一 SFEN の追加入力は applyMoves で差分だけ送信する", async () => {
+            const client = createWasmEngineClient({ workerFactory: mockWorkerFactory });
+
+            const initPromise = client.init();
+            const initCall = mockWorker.postMessage.mock.calls[0][0];
+            mockWorker.onmessage?.({
+                data: { type: "ack", requestId: initCall.requestId },
+            } as MessageEvent);
+            await initPromise;
+
+            const firstPromise = client.loadPosition("startpos", ["7g7f"]);
+            await new Promise((resolve) => setTimeout(resolve, 0));
+
+            const firstCall = mockWorker.postMessage.mock.calls[1][0];
+            expect(firstCall).toMatchObject({
+                type: "loadPosition",
+                sfen: "startpos",
+                moves: ["7g7f"],
+                requestId: expect.any(String),
+            });
+            mockWorker.onmessage?.({
+                data: { type: "ack", requestId: firstCall.requestId },
+            } as MessageEvent);
+            await firstPromise;
+
+            const secondPromise = client.loadPosition("startpos", ["7g7f", "3c3d"]);
+            await new Promise((resolve) => setTimeout(resolve, 0));
+
+            const secondCall = mockWorker.postMessage.mock.calls[2][0];
+            expect(secondCall).toMatchObject({
+                type: "applyMoves",
+                moves: ["3c3d"],
+                requestId: expect.any(String),
+            });
+            mockWorker.onmessage?.({
+                data: { type: "ack", requestId: secondCall.requestId },
+            } as MessageEvent);
+            await secondPromise;
+        });
+
         it("search で Worker にメッセージを送信する", async () => {
             const client = createWasmEngineClient({ workerFactory: mockWorkerFactory });
 
@@ -162,7 +224,7 @@ describe("createWasmEngineClient", () => {
             await initPromise;
 
             // setOption - trigger the call but don't await yet
-            client.setOption("threads", 4);
+            client.setOption("USI_Hash", 256);
 
             // Wait for microtask to process
             await new Promise((resolve) => setTimeout(resolve, 0));
@@ -171,8 +233,8 @@ describe("createWasmEngineClient", () => {
 
             expect(optionCall).toMatchObject({
                 type: "setOption",
-                name: "threads",
-                value: 4,
+                name: "USI_Hash",
+                value: 256,
                 requestId: expect.any(String),
             });
 
@@ -180,6 +242,32 @@ describe("createWasmEngineClient", () => {
             mockWorker.onmessage?.({
                 data: { type: "ack", requestId: optionCall.requestId },
             } as MessageEvent);
+        });
+
+        it("init 中の setOption は applyPendingOptions のみに反映する", async () => {
+            const client = createWasmEngineClient({ workerFactory: mockWorkerFactory });
+
+            const initPromise = client.init();
+            const initCall = mockWorker.postMessage.mock.calls[0][0];
+
+            const setPromise = client.setOption("USI_Hash", 256);
+
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            expect(mockWorker.postMessage).toHaveBeenCalledTimes(1);
+
+            mockWorker.onmessage?.({
+                data: { type: "ack", requestId: initCall.requestId },
+            } as MessageEvent);
+
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            expect(mockWorker.postMessage).toHaveBeenCalledTimes(2);
+
+            const optionCall = mockWorker.postMessage.mock.calls[1][0];
+            mockWorker.onmessage?.({
+                data: { type: "ack", requestId: optionCall.requestId },
+            } as MessageEvent);
+
+            await Promise.all([initPromise, setPromise]);
         });
     });
 
@@ -277,7 +365,7 @@ describe("createWasmEngineClient", () => {
 
     describe("エラーハンドリング", () => {
         it("Worker 初期化失敗時にモックにフォールバックする", async () => {
-            const failingFactory = vi.fn(() => {
+            const failingFactory = vi.fn((_kind: WorkerKind) => {
                 throw new Error("Worker initialization failed");
             });
 
@@ -324,6 +412,145 @@ describe("createWasmEngineClient", () => {
             } as MessageEvent);
 
             await expect(initPromise).rejects.toThrow("Init failed");
+        });
+    });
+
+    describe("スレッド関連の初期化", () => {
+        it("threaded init 失敗時に single へフォールバックして warning を出す", async () => {
+            vi.stubGlobal("crossOriginIsolated", true);
+            vi.stubGlobal("SharedArrayBuffer", class {});
+            vi.stubGlobal("navigator", { hardwareConcurrency: 8 });
+
+            const workers: { kind: WorkerKind; worker: MockWorker }[] = [];
+            const workerFactory = vi.fn((kind: WorkerKind) => {
+                const worker = createMockWorker();
+                workers.push({ kind, worker });
+                return worker as unknown as Worker;
+            });
+
+            const client = createWasmEngineClient({ workerFactory });
+            const events: EngineEvent[] = [];
+            client.subscribe((event) => events.push(event));
+
+            const initPromise = client.init({ threads: 2 });
+
+            const threadedWorker = workers[0].worker;
+            const threadedInit = threadedWorker.postMessage.mock.calls[0][0];
+            threadedWorker.onmessage?.({
+                data: { type: "ack", requestId: threadedInit.requestId, error: "Init failed" },
+            } as MessageEvent);
+
+            await new Promise((resolve) => setTimeout(resolve, 0));
+
+            expect(workerFactory).toHaveBeenCalledTimes(2);
+            expect(workerFactory).toHaveBeenNthCalledWith(1, "threaded");
+            expect(workerFactory).toHaveBeenNthCalledWith(2, "single");
+
+            const singleWorker = workers[1].worker;
+            const singleInit = singleWorker.postMessage.mock.calls[0][0];
+            singleWorker.onmessage?.({
+                data: { type: "ack", requestId: singleInit.requestId },
+            } as MessageEvent);
+
+            await initPromise;
+
+            expect(events).toEqual(
+                expect.arrayContaining([
+                    expect.objectContaining({
+                        type: "error",
+                        code: "WASM_THREADS_INIT_FAILED",
+                        severity: "warning",
+                    }),
+                ]),
+            );
+        });
+
+        it("Threads が利用不可の場合に warning を出して single で初期化する", async () => {
+            vi.stubGlobal("crossOriginIsolated", false);
+            vi.stubGlobal("SharedArrayBuffer", undefined);
+
+            const client = createWasmEngineClient({ workerFactory: mockWorkerFactory });
+            const events: EngineEvent[] = [];
+            client.subscribe((event) => events.push(event));
+
+            const initPromise = client.init({ threads: 2 });
+            const initCall = mockWorker.postMessage.mock.calls[0][0];
+            mockWorker.onmessage?.({
+                data: { type: "ack", requestId: initCall.requestId },
+            } as MessageEvent);
+
+            await initPromise;
+
+            expect(events).toEqual(
+                expect.arrayContaining([
+                    expect.objectContaining({
+                        type: "error",
+                        code: "WASM_THREADS_UNAVAILABLE",
+                        severity: "warning",
+                    }),
+                ]),
+            );
+        });
+
+        it("Threads が上限超過の場合に clamp warning を出す", async () => {
+            vi.stubGlobal("crossOriginIsolated", true);
+            vi.stubGlobal("SharedArrayBuffer", class {});
+            vi.stubGlobal("navigator", { hardwareConcurrency: 2 });
+
+            const client = createWasmEngineClient({ workerFactory: mockWorkerFactory });
+            const events: EngineEvent[] = [];
+            client.subscribe((event) => events.push(event));
+
+            const initPromise = client.init({ threads: 8 });
+            const initCall = mockWorker.postMessage.mock.calls[0][0];
+            mockWorker.onmessage?.({
+                data: { type: "ack", requestId: initCall.requestId },
+            } as MessageEvent);
+
+            await initPromise;
+
+            expect(events).toEqual(
+                expect.arrayContaining([
+                    expect.objectContaining({
+                        type: "error",
+                        code: "WASM_THREADS_CLAMPED",
+                        severity: "warning",
+                    }),
+                ]),
+            );
+        });
+
+        it("init で threads を変更した場合は worker を再生成する", async () => {
+            vi.stubGlobal("crossOriginIsolated", true);
+            vi.stubGlobal("SharedArrayBuffer", class {});
+            vi.stubGlobal("navigator", { hardwareConcurrency: 8 });
+
+            const workers: MockWorker[] = [];
+            const workerFactory = vi.fn((kind: WorkerKind) => {
+                void kind;
+                const worker = createMockWorker();
+                workers.push(worker);
+                return worker as unknown as Worker;
+            });
+
+            const client = createWasmEngineClient({ workerFactory });
+
+            const initPromise1 = client.init({ threads: 2 });
+            const initCall1 = workers[0].postMessage.mock.calls[0][0];
+            workers[0].onmessage?.({
+                data: { type: "ack", requestId: initCall1.requestId },
+            } as MessageEvent);
+            await initPromise1;
+
+            const initPromise2 = client.init({ threads: 3 });
+            expect(workerFactory).toHaveBeenCalledTimes(2);
+            expect(workers[0].terminate).toHaveBeenCalled();
+
+            const initCall2 = workers[1].postMessage.mock.calls[0][0];
+            workers[1].onmessage?.({
+                data: { type: "ack", requestId: initCall2.requestId },
+            } as MessageEvent);
+            await initPromise2;
         });
     });
 
@@ -457,7 +684,7 @@ describe("createWasmEngineClient", () => {
 
             // 2つの並列リクエスト
             client.loadPosition("startpos");
-            client.setOption("threads", 4);
+            client.setOption("USI_Hash", 256);
 
             // Wait for microtasks to process
             await new Promise((resolve) => setTimeout(resolve, 0));
@@ -472,6 +699,81 @@ describe("createWasmEngineClient", () => {
             mockWorker.onmessage?.({
                 data: { type: "ack", requestId: call1.requestId },
             } as MessageEvent);
+        });
+    });
+
+    describe("スレッド数の動的変更", () => {
+        it("スレッド数を複数回変更した場合の動作", async () => {
+            vi.stubGlobal("crossOriginIsolated", true);
+            vi.stubGlobal("SharedArrayBuffer", class {});
+            vi.stubGlobal("navigator", { hardwareConcurrency: 8 });
+
+            const workers: MockWorker[] = [];
+            const workerFactory = vi.fn((_kind: WorkerKind) => {
+                const worker = createMockWorker();
+                workers.push(worker);
+                return worker as unknown as Worker;
+            });
+
+            const client = createWasmEngineClient({ workerFactory });
+
+            // First init with threads: 2
+            const initPromise1 = client.init({ threads: 2 });
+            workers[0].onmessage?.({
+                data: { type: "ack", requestId: workers[0].postMessage.mock.calls[0][0].requestId },
+            } as MessageEvent);
+            await initPromise1;
+
+            // Second init with threads: 4
+            const initPromise2 = client.init({ threads: 4 });
+            expect(workers[0].terminate).toHaveBeenCalled();
+            workers[1].onmessage?.({
+                data: { type: "ack", requestId: workers[1].postMessage.mock.calls[0][0].requestId },
+            } as MessageEvent);
+            await initPromise2;
+
+            // Third init with threads: 1 (single thread, no worker recreation needed if already single)
+            const initPromise3 = client.init({ threads: 1 });
+            expect(workers[1].terminate).toHaveBeenCalled();
+            workers[2].onmessage?.({
+                data: { type: "ack", requestId: workers[2].postMessage.mock.calls[0][0].requestId },
+            } as MessageEvent);
+            await initPromise3;
+
+            expect(workerFactory).toHaveBeenCalledTimes(3);
+        });
+
+        it("同じスレッド数で再初期化しても Worker は再生成されない", async () => {
+            vi.stubGlobal("crossOriginIsolated", true);
+            vi.stubGlobal("SharedArrayBuffer", class {});
+            vi.stubGlobal("navigator", { hardwareConcurrency: 8 });
+
+            const workers: MockWorker[] = [];
+            const workerFactory = vi.fn((_kind: WorkerKind) => {
+                const worker = createMockWorker();
+                workers.push(worker);
+                return worker as unknown as Worker;
+            });
+
+            const client = createWasmEngineClient({ workerFactory });
+
+            // First init with threads: 2
+            const initPromise1 = client.init({ threads: 2 });
+            workers[0].onmessage?.({
+                data: { type: "ack", requestId: workers[0].postMessage.mock.calls[0][0].requestId },
+            } as MessageEvent);
+            await initPromise1;
+
+            // Second init with same threads: 2
+            const initPromise2 = client.init({ threads: 2 });
+            workers[0].onmessage?.({
+                data: { type: "ack", requestId: workers[0].postMessage.mock.calls[1][0].requestId },
+            } as MessageEvent);
+            await initPromise2;
+
+            // Worker should not be terminated or recreated
+            expect(workers[0].terminate).not.toHaveBeenCalled();
+            expect(workerFactory).toHaveBeenCalledTimes(1);
         });
     });
 });

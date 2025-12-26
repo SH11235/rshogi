@@ -12,6 +12,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   SCCACHE_GHA_ENABLED: "true"
+  RUST_NIGHTLY_TOOLCHAIN: nightly-2025-12-25
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -246,6 +247,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - name: Setup Rust nightly (wasm threads)
+        run: |
+          rustup toolchain install "${RUST_NIGHTLY_TOOLCHAIN}"
+          rustup component add rust-src --toolchain "${RUST_NIGHTLY_TOOLCHAIN}"
       - name: Resolve wasm-bindgen version
         run: |
           WASM_BINDGEN_VERSION=$(awk -F '"' '/^wasm-bindgen[[:space:]]*=/ {for(i=1;i<=NF;i++) if($i ~ /^[0-9]+\./){print $i; exit}}' crates/engine-wasm/Cargo.toml)

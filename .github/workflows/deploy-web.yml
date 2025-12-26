@@ -44,6 +44,7 @@ env:
   CI: true
   CARGO_TERM_COLOR: always
   SCCACHE_GHA_ENABLED: "true"
+  RUST_NIGHTLY_TOOLCHAIN: nightly-2025-12-25
 
 jobs:
   # Single deploy job since we're just deploying
@@ -98,6 +99,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - name: Setup Rust nightly (wasm threads)
+        run: |
+          rustup toolchain install "${RUST_NIGHTLY_TOOLCHAIN}"
+          rustup component add rust-src --toolchain "${RUST_NIGHTLY_TOOLCHAIN}"
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9

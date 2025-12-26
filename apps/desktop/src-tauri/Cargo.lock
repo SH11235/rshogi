@@ -830,12 +830,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "getrandom 0.3.4",
+ "libc",
  "log",
  "once_cell",
  "rand 0.9.2",
  "rand_xoshiro",
  "serde",
  "web-time",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

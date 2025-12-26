@@ -18,7 +18,8 @@
   - `engine-core` はブラウザ wasm (`wasm32-unknown-unknown`) のときだけ `web-time` を使い、それ以外は標準の `std::time::Instant` を利用する（`std::time::Instant` が未実装の wasm でのパニックを回避しつつ、ネイティブに web 系依存を持ち込まない）。
 
 ## ビルド/検証のメモ
-- web で wasm を更新する場合: `pnpm --filter @shogi/engine-wasm build:wasm` を実行し、`packages/engine-wasm/pkg` を再生成する。
+- web で wasm を更新する場合: `pnpm --filter @shogi/engine-wasm build:wasm` を実行し、`packages/engine-wasm/pkg` と `packages/engine-wasm/pkg-threaded` を再生成する。
+- threaded ビルドは固定版 nightly を使用する（`packages/engine-wasm/README.md` に詳細）。
 - desktop の成果物確認（推奨チェック）:
   - `apps/desktop/dist` に `.wasm` / `engine.worker-*.js` が無いこと。
   - バンドル内に `@shogi/engine-wasm` 由来の参照が無いことを簡易 grep で確認。
