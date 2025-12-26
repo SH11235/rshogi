@@ -78,7 +78,12 @@ export type EngineErrorCode =
     | "POSITION_INVALID"
     | "SEARCH_FAILED"
     | "TIMEOUT"
-    | "UNKNOWN";
+    | "UNKNOWN"
+    // Error state
+    | "ENGINE_ERROR_STATE";
+
+/** Backend status for error state management */
+export type EngineBackendStatus = "ready" | "error" | "mock";
 
 export interface EngineErrorEvent {
     type: "error";
@@ -122,6 +127,16 @@ export interface EngineClient {
      * Optional - may not be implemented by all backends.
      */
     getThreadInfo?(): ThreadInfo;
+    /**
+     * Reset the engine to allow retry after error.
+     * Optional - only implemented by wasm backend.
+     */
+    reset?(): Promise<void>;
+    /**
+     * Get current backend status.
+     * Optional - only implemented by wasm backend.
+     */
+    getBackendStatus?(): EngineBackendStatus;
 }
 
 /**

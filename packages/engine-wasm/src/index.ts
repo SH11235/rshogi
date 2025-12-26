@@ -1,4 +1,5 @@
 import type {
+    EngineBackendStatus,
     EngineClient,
     EngineEvent,
     EngineEventHandler,
@@ -47,7 +48,7 @@ export interface WasmEngineClientOptions {
 
 type WorkerKind = "single" | "threaded";
 
-type BackendKind = WorkerKind | "mock";
+type BackendKind = WorkerKind | "mock" | "error";
 
 type WarningCode =
     | "WASM_THREADS_UNAVAILABLE"
@@ -56,7 +57,7 @@ type WarningCode =
     | "WASM_THREADS_DEFERRED"
     | "WASM_WORKER_FAILED";
 
-type ErrorCode = WarningCode | "WASM_INIT_FAILED";
+type ErrorCode = WarningCode | "WASM_INIT_FAILED" | "ENGINE_ERROR_STATE";
 
 type WorkerCommand =
     | {
@@ -369,16 +370,16 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
         rejectAllPending(new Error(reason));
     };
 
-    const fallbackToMock = (message: string, code: ErrorCode) => {
+    const fallbackToError = (message: string, code: ErrorCode) => {
         replaceWorker("engine worker is unavailable");
         initInFlight = null;
-        backend = "mock";
+        backend = "error";
         emitError(code, message);
-        attachMock();
+        // Do not attach mock - engine is in error state
     };
 
     const spawnWorker = (kind: WorkerKind, forceReplace = false) => {
-        if (backend === "mock") return;
+        if (backend === "mock" || backend === "error") return;
         if (!forceReplace && worker && backend === kind) return;
 
         if (forceReplace || worker || backend !== kind) {
@@ -393,7 +394,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
                 : defaultWorkerFactory(kind);
         } catch (error) {
             const message = error instanceof Error ? error.message : "engine worker spawn failed";
-            fallbackToMock(message, "WASM_INIT_FAILED");
+            fallbackToError(message, "WASM_INIT_FAILED");
             return;
         }
 
@@ -430,7 +431,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
                 void recoverWorker("single");
                 return;
             }
-            fallbackToMock("Engine worker encountered an error", "WASM_INIT_FAILED");
+            fallbackToError("Engine worker encountered an error", "WASM_INIT_FAILED");
             if (typeof console !== "undefined") console.error("engine worker error", err);
         };
     };
@@ -490,7 +491,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
         try {
             await initWorkerWithKind(kind, payload, module, true);
         } catch {
-            fallbackToMock("Wasm engine initialization failed", "WASM_INIT_FAILED");
+            fallbackToError("Wasm engine initialization failed", "WASM_INIT_FAILED");
         }
     };
 
@@ -534,7 +535,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
                 try {
                     await initWorkerWithKind("single", fallbackPayload, fallbackModule);
                 } catch (_fallbackError) {
-                    fallbackToMock("Wasm engine initialization failed", "WASM_INIT_FAILED");
+                    fallbackToError("Wasm engine initialization failed", "WASM_INIT_FAILED");
                 }
                 return;
             }
@@ -562,7 +563,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
         replaceWorker("engine worker terminated");
         initInFlight = null;
         void ensureReady().catch(() => {
-            fallbackToMock("Wasm engine initialization failed", "WASM_INIT_FAILED");
+            fallbackToError("Wasm engine initialization failed", "WASM_INIT_FAILED");
         });
     };
 
@@ -571,6 +572,13 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
             if (backend === "mock") {
                 await mock.init(opts);
                 return;
+            }
+            // Allow retry from error state
+            if (backend === "error") {
+                backend = "single"; // Reset to default worker kind
+                initialized = false;
+                warnedReasons.clear();
+                cachedStaticThreadInfo = null;
             }
             lastPosition = null;
             if (initInFlight) {
@@ -586,6 +594,9 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
         async loadPosition(sfen: string, moves?: string[]) {
             if (backend === "mock") {
                 return mock.loadPosition(sfen, moves);
+            }
+            if (backend === "error") {
+                throw new Error("Engine is in error state. Call init() to retry.");
             }
             await ensureReady();
             if (!worker) {
@@ -609,6 +620,19 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
         async search(params: SearchParams): Promise<SearchHandle> {
             if (backend === "mock") {
                 return mock.search(params);
+            }
+            if (backend === "error") {
+                emit({
+                    type: "error",
+                    message: "Engine is in error state. Call init() to retry.",
+                    severity: "error",
+                    code: "ENGINE_ERROR_STATE",
+                });
+                return {
+                    async cancel() {
+                        /* no-op */
+                    },
+                };
             }
             await ensureReady();
             if (!worker) {
@@ -634,6 +658,9 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
         async stop() {
             if (backend === "mock") {
                 return mock.stop();
+            }
+            if (backend === "error") {
+                return; // no-op in error state
             }
             if (stopMode === "terminate") {
                 terminateAndRecover();
@@ -703,7 +730,39 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
             threadedDisabled = false;
             initInFlight = null;
         },
+        async reset(): Promise<void> {
+            // Clear error state to allow retry
+            if (backend === "error") {
+                backend = "single";
+                initialized = false;
+                initInFlight = null;
+                threadedDisabled = false;
+                warnedReasons.clear();
+                cachedStaticThreadInfo = null;
+            }
+            // Note: Does not call init() - caller should explicitly call init() after reset()
+        },
+        getBackendStatus(): EngineBackendStatus {
+            if (backend === "error") return "error";
+            if (backend === "mock") return "mock";
+            if (initialized) return "ready";
+            return "error"; // Treat uninitialized as error
+        },
         getThreadInfo(): ThreadInfo {
+            // Error state: return minimal thread info
+            if (backend === "error") {
+                const hcRaw =
+                    typeof navigator !== "undefined" &&
+                    typeof navigator.hardwareConcurrency === "number"
+                        ? navigator.hardwareConcurrency
+                        : 1;
+                return {
+                    activeThreads: 0,
+                    maxThreads: 0,
+                    threadedAvailable: false,
+                    hardwareConcurrency: Math.max(1, Math.trunc(hcRaw)),
+                };
+            }
             // Use cached static values (hardwareConcurrency, threadedAvailable rarely change)
             if (!cachedStaticThreadInfo) {
                 const hcRaw =
