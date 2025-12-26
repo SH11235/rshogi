@@ -20,14 +20,17 @@ export default defineConfig(({ command }) => ({
     plugins: [
         tailwindcss(),
         react(),
-        isAnalyze &&
-            visualizer({
-                filename: "dist/stats.html",
-                open: true,
-                gzipSize: true,
-                brotliSize: true,
-            }),
-    ].filter(Boolean),
+        ...(isAnalyze
+            ? [
+                  visualizer({
+                      filename: "dist/stats.html",
+                      open: true,
+                      gzipSize: true,
+                      brotliSize: true,
+                  }),
+              ]
+            : []),
+    ],
     resolve: {
         alias: [
             {

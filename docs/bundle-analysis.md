@@ -89,3 +89,9 @@ packages/*:
 | packages/ui | 255 KB |
 | packages/engine-wasm | 31 KB |
 | packages/app-core | 20 KB |
+
+## 更新履歴
+
+| 日付 | 内容 | gzip後合計 | 目標達成 |
+|------|------|------------|----------|
+| 2025-12-26 | wasm-opt適用、初回記録 | 346 KB | ✓ (< 360KB) |

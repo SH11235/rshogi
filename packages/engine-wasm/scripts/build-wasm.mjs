@@ -106,7 +106,12 @@ function runWasmOpt(wasmFile) {
     );
 
     if (result.status !== 0) {
-        console.warn("wasm-opt failed, continuing without optimization");
+        console.warn(
+            `wasm-opt failed with status ${result.status}, continuing without optimization`,
+        );
+        if (result.error) {
+            console.warn(`Error details: ${result.error.message}`);
+        }
         return;
     }
 

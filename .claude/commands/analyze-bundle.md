@@ -29,6 +29,19 @@ pnpm --filter web build:analyze
 # → dist/stats.html が生成され、ブラウザで開く
 ```
 
+### ビジュアルレポートの使い方
+
+`build:analyze` で生成される `dist/stats.html` では以下が確認できます：
+
+- **Treemap**: パッケージサイズを面積で可視化（大きいほど面積が大きい）
+- **Sunburst**: 階層構造の表示（node_modules/packages/app の関係）
+- **サイズ情報**: 各ファイルのgzip/brotli圧縮後サイズ
+
+**操作方法**:
+- クリックでドリルダウン（詳細表示）
+- ホバーでサイズ情報表示
+- 右上のフィルターで表示切替
+
 ### 分析観点
 
 1. **node_modules の大きなパッケージ**
