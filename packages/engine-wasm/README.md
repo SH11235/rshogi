@@ -13,9 +13,9 @@ rustup default stable
 # WASMターゲットを追加（single 用）
 rustup target add wasm32-unknown-unknown
 
-# threaded 用の nightly ツールチェーン
-rustup toolchain install nightly
-rustup component add rust-src --toolchain nightly
+# threaded 用の nightly ツールチェーン（固定版）
+rustup toolchain install nightly-2025-12-25
+rustup component add rust-src --toolchain nightly-2025-12-25
 
 # wasm-bindgen-cli を固定バージョンでインストール
 cargo install wasm-bindgen-cli --version 0.2.106
@@ -43,7 +43,8 @@ WASM だけ再生成したい場合は次を実行します：
 pnpm --filter @shogi/engine-wasm build:wasm
 ```
 
-`build:wasm` は single + threaded を必ず両方作るため、nightly が未導入だと失敗します。
+`build:wasm` は single + threaded を必ず両方作るため、固定版 nightly が未導入だと失敗します。
+別バージョンを使う場合は `RUST_NIGHTLY_TOOLCHAIN` で上書きできます（例: `nightly-YYYY-MM-DD`）。
 
 ## threaded ビルドの詳細（試行錯誤メモ）
 

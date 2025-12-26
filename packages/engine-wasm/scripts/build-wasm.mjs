@@ -9,6 +9,7 @@ const __dirname = path.dirname(__filename);
 const crateName = "engine-wasm";
 const artifactName = crateName.replace(/-/g, "_");
 const rustRoot = path.resolve(__dirname, "../../rust-core");
+const nightlyToolchain = process.env.RUST_NIGHTLY_TOOLCHAIN ?? "nightly-2025-12-25";
 
 // --production フラグで本番ビルド（最大最適化）
 const isProduction = process.argv.includes("--production");
@@ -171,7 +172,7 @@ try {
         outDir: threadedOutDir,
         rustflags:
             "-C link-arg=--shared-memory -C link-arg=--import-memory -C link-arg=--max-memory=2147483648 -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_base -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align",
-        toolchain: "nightly",
+        toolchain: nightlyToolchain,
         cargoZArgs: ["-Z", "build-std=std,panic_abort"],
         emitThreadWorker: true,
         target: threadedTarget,
