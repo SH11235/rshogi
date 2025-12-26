@@ -214,18 +214,38 @@ describe("formatEval", () => {
         expect(formatEval(0)).toBe("+0.0");
     });
 
-    it("詰みをフォーマットする", () => {
-        expect(formatEval(undefined, 3)).toBe("詰3");
-        expect(formatEval(undefined, 1)).toBe("詰1");
+    it("先手の詰みをフォーマットする（ply=1, 奇数=先手の手後）", () => {
+        // ply=1（先手が指した後）でevalMate > 0 → 先手が詰ませられる
+        expect(formatEval(undefined, 3, 1)).toBe("☗詰3");
+        expect(formatEval(undefined, 1, 1)).toBe("☗詰1");
     });
 
-    it("被詰みをフォーマットする", () => {
-        expect(formatEval(undefined, -3)).toBe("被詰3");
-        expect(formatEval(undefined, -1)).toBe("被詰1");
+    it("後手の詰みをフォーマットする（ply=2, 偶数=後手の手後）", () => {
+        // ply=2（後手が指した後）でevalMate > 0 → 後手が詰ませられる
+        expect(formatEval(undefined, 3, 2)).toBe("☖詰3");
+        expect(formatEval(undefined, 1, 2)).toBe("☖詰1");
+    });
+
+    it("先手が詰まされる場合（先手の手後で負の詰み）", () => {
+        // ply=1（先手が指した後）でevalMate < 0 → 先手が詰まされる = 後手が詰ませられる
+        expect(formatEval(undefined, -3, 1)).toBe("☖詰3");
+        expect(formatEval(undefined, -1, 1)).toBe("☖詰1");
+    });
+
+    it("後手が詰まされる場合（後手の手後で負の詰み）", () => {
+        // ply=2（後手が指した後）でevalMate < 0 → 後手が詰まされる = 先手が詰ませられる
+        expect(formatEval(undefined, -3, 2)).toBe("☗詰3");
+        expect(formatEval(undefined, -1, 2)).toBe("☗詰1");
+    });
+
+    it("plyがない場合は記号なしで詰みを表示（後方互換性）", () => {
+        // plyがundefinedの場合、記号は☗になる（奇数扱い）
+        expect(formatEval(undefined, 3)).toBe("☗詰3");
+        expect(formatEval(undefined, -3)).toBe("☖詰3");
     });
 
     it("詰みが評価値より優先される", () => {
-        expect(formatEval(100, 5)).toBe("詰5");
+        expect(formatEval(100, 5, 1)).toBe("☗詰5");
     });
 
     it("undefined の場合は空文字を返す", () => {

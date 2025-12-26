@@ -288,16 +288,28 @@ function squareToSimple(sq: string): string {
 
 /**
  * 評価値を表示用文字列にフォーマット
+ *
+ * 評価値は指し手を指した側の視点で格納されているため:
+ * - evalMate > 0: 指した側が詰ませられる（勝ち）
+ * - evalMate < 0: 指した側が詰まされる（負け）
+ *
  * @param evalCp 評価値（センチポーン）
  * @param evalMate 詰み手数
- * @returns フォーマットされた文字列（例: "+50", "詰3", "被詰5"）
+ * @param ply 手数（奇数=先手の指し手後、偶数=後手の指し手後）
+ * @returns フォーマットされた文字列（例: "+50", "☗詰3", "☖詰5"）
  */
-export function formatEval(evalCp?: number, evalMate?: number): string {
+export function formatEval(evalCp?: number, evalMate?: number, ply?: number): string {
     if (evalMate !== undefined && evalMate !== null) {
+        // 手番を判定（奇数手=先手が指した後、偶数手=後手が指した後）
+        const movingSide = ply !== undefined && ply % 2 === 0 ? "☖" : "☗";
+        const opponentSide = ply !== undefined && ply % 2 === 0 ? "☗" : "☖";
+
         if (evalMate > 0) {
-            return `詰${evalMate}`;
+            // 指した側が勝ち（詰ませられる）
+            return `${movingSide}詰${evalMate}`;
         }
-        return `被詰${Math.abs(evalMate)}`;
+        // 指した側が負け（詰まされる）= 相手側が詰ませられる
+        return `${opponentSide}詰${Math.abs(evalMate)}`;
     }
 
     if (evalCp === undefined || evalCp === null) {

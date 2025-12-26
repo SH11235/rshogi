@@ -323,7 +323,9 @@ export function KifuPanel({
                     kifMoves.map((move) => {
                         const isCurrent = move.ply === currentPly;
                         const isPastCurrent = navigation?.isRewound && move.ply > currentPly;
-                        const evalText = showEval ? formatEval(move.evalCp, move.evalMate) : "";
+                        const evalText = showEval
+                            ? formatEval(move.evalCp, move.evalMate, move.ply)
+                            : "";
                         const hasBranch = branchMarkers?.has(move.ply);
                         const branchCount = branchMarkers?.get(move.ply);
 
