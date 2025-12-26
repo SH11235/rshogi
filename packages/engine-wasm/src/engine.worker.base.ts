@@ -108,6 +108,10 @@ export function createEngineWorker(bindings: WasmWorkerBindings) {
             }
             return;
         }
+        // Force flush pending info before bestmove to ensure final stats are sent
+        if (event.type === "bestmove" && pendingInfoByPv.size > 0) {
+            flushEvents();
+        }
         pendingEvents.push(event);
         flushEvents();
     };

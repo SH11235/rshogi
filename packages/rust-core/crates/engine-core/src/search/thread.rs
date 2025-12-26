@@ -478,7 +478,13 @@ mod imp {
                 progress,
             });
             let inner_clone = Arc::clone(&inner);
-            let handle = std::thread::spawn(move || idle_loop(inner_clone));
+            // Stack size for wasm32 threads: 2MB, matching JS-side DEFAULT_THREAD_STACK_SIZE.
+            // This is smaller than native (64MB) due to wasm memory constraints.
+            const SEARCH_STACK_SIZE: usize = 2 * 1024 * 1024;
+            let handle = std::thread::Builder::new()
+                .stack_size(SEARCH_STACK_SIZE)
+                .spawn(move || idle_loop(inner_clone))
+                .expect("failed to spawn search helper thread");
 
             let thread = Self {
                 id,

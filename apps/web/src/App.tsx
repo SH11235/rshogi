@@ -16,7 +16,8 @@ const wasmThreads = resolveWasmThreads();
 const createEngineClient = () =>
     createWasmEngineClient({
         stopMode: "terminate",
-        threads: wasmThreads,
+        defaultInitOptions: { threads: wasmThreads },
+        logWarningsToConsole: true,
     });
 
 const engineOptions: EngineOption[] = [

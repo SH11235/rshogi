@@ -34,6 +34,14 @@ export interface WasmEngineClientOptions {
      */
     workerFactory?: (kind: WorkerKind) => Worker;
     useMock?: boolean;
+    /**
+     * Emit warning events to console for developers.
+     */
+    logWarningsToConsole?: boolean;
+    /**
+     * Default init() options applied when callers omit init params.
+     */
+    defaultInitOptions?: WasmEngineInitOptions;
 }
 
 type WorkerKind = "single" | "threaded";
@@ -100,7 +108,7 @@ function collectTransfers(command: WorkerCommand): Transferable[] {
 function rememberInitOpts(opts?: WasmEngineInitOptions): WasmEngineInitOptions | undefined {
     if (!opts) return undefined;
     const { wasmModule, ...rest } = opts;
-    if (!Object.prototype.hasOwnProperty.call(opts, "wasmModule")) {
+    if (!Object.hasOwn(opts, "wasmModule")) {
         return { ...rest };
     }
     if (wasmModule instanceof ArrayBuffer || wasmModule instanceof Uint8Array) {
@@ -122,6 +130,12 @@ export const ensureWasmModule = (wasmModule?: WasmModuleSource): Promise<void> =
 const MSG_COOPERATIVE_STOP_NOT_SUPPORTED =
     "cooperative stop is not yet supported for wasm; falling back to terminate";
 const DEFAULT_WORKER_TIMEOUT_MS = 30_000; // Worker リクエストのタイムアウト（30秒）
+
+// Maximum threads for wasm: limited by browser implementation and memory constraints.
+// - Chrome/Edge: 4-8 threads are typically stable
+// - Firefox: similar limitations apply
+// - Higher values may cause memory allocation failures or performance degradation
+// - Conservative limit of 4 balances performance gains with stability
 const MAX_WASM_THREADS = 4;
 
 export function createWasmEngineClient(options: WasmEngineClientOptions = {}): EngineClient {
@@ -129,13 +143,16 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
     const stopMode: EngineStopMode = options.stopMode ?? "terminate";
     const mock = createMockEngineClient();
     const listeners = new Set<EngineEventHandler>();
+    const logWarningsToConsole = options.logWarningsToConsole ?? false;
 
     let backend: BackendKind = options.useMock ? "mock" : "single";
     let worker: Worker | null = null;
     let workerGen = 0;
     let initialized = false;
     let initInFlight: Promise<void> | null = null;
-    let lastInitOpts: WasmEngineInitOptions | undefined;
+    let lastInitOpts: WasmEngineInitOptions | undefined = rememberInitOpts(
+        options.defaultInitOptions,
+    );
     let lastPosition: { sfen: string; moves: string[] } | null = null;
     let threadedDisabled = false;
     let activeThreads: number | null = null;
@@ -155,6 +172,9 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
     const emitWarn = (code: WarningCode, message: string) => {
         if (warnedReasons.has(code)) return;
         warnedReasons.add(code);
+        if (logWarningsToConsole && typeof console !== "undefined") {
+            console.warn(`[engine-wasm] ${code}: ${message}`);
+        }
         emit({ type: "error", message, severity: "warning", code });
     };
 
@@ -206,7 +226,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
         const preserved = rememberInitOpts(opts);
         if (!preserved) return;
         const next: WasmEngineInitOptions = { ...lastInitOpts, ...preserved };
-        if (!Object.prototype.hasOwnProperty.call(opts, "wasmModule") && lastInitOpts?.wasmModule) {
+        if (!Object.hasOwn(opts, "wasmModule") && lastInitOpts?.wasmModule) {
             next.wasmModule = lastInitOpts.wasmModule;
         }
         lastInitOpts = next;
@@ -411,7 +431,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
     };
 
     const getInitWasmModule = (opts?: WasmEngineInitOptions): WasmModuleSource | undefined => {
-        if (opts && Object.prototype.hasOwnProperty.call(opts, "wasmModule")) {
+        if (opts && Object.hasOwn(opts, "wasmModule")) {
             return opts.wasmModule;
         }
         return lastInitOpts?.wasmModule;

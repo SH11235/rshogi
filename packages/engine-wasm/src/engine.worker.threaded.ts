@@ -11,6 +11,10 @@ import initWasm, {
 } from "../pkg-threaded/engine_wasm.js";
 import { createEngineWorker } from "./engine.worker.base";
 
+// Thread stack size: 2MB per worker thread
+// - Shogi search is recursive and can consume significant stack for deep tactical sequences
+// - 2MB provides headroom for typical search depths while limiting memory footprint
+// - Total memory impact: (threads - 1) * 2MB for worker pool
 const DEFAULT_THREAD_STACK_SIZE = 2 * 1024 * 1024;
 
 type WasmExports = { memory?: WebAssembly.Memory };
@@ -21,12 +25,17 @@ let cachedExports: WasmExports | null = null;
 let threadPoolPromise: Promise<void> | null = null;
 const threadWorkers: Worker[] = [];
 
+// HACK: Accessing internal wasm-bindgen property `__wbindgen_wasm_module`.
+// This is not part of the public API and may break in future wasm-bindgen versions.
+// Required to pass the compiled module to worker threads for SharedArrayBuffer-based threading.
+// If this breaks, check wasm-bindgen release notes for alternative approaches.
+type WasmBindgenInternal = { __wbindgen_wasm_module?: WebAssembly.Module };
+
 const initWasmWithCache = async (input?: InitInput) => {
     const exports = (await initWasm(input)) as WasmExports;
     cachedExports = exports;
-    const module = (initWasm as unknown as { __wbindgen_wasm_module?: WebAssembly.Module })
-        .__wbindgen_wasm_module;
-    if (module instanceof WebAssembly.Module) {
+    const module = (initWasm as unknown as WasmBindgenInternal).__wbindgen_wasm_module;
+    if (module && module instanceof WebAssembly.Module) {
         cachedModule = module;
     }
     return exports;
@@ -41,13 +50,11 @@ const initThreadPool = async (poolSize: number) => {
 
     threadPoolPromise = (async () => {
         const module =
-            cachedModule ??
-            (initWasm as unknown as { __wbindgen_wasm_module?: WebAssembly.Module })
-                .__wbindgen_wasm_module;
+            cachedModule ?? (initWasm as unknown as WasmBindgenInternal).__wbindgen_wasm_module;
         const memory = cachedExports?.memory;
 
-        if (!module) {
-            throw new Error("Wasm module is not initialized");
+        if (!module || !(module instanceof WebAssembly.Module)) {
+            throw new Error("Wasm module is not initialized or invalid");
         }
         if (!memory || !(memory instanceof WebAssembly.Memory)) {
             throw new Error("Wasm memory is not initialized");
@@ -64,9 +71,14 @@ const initThreadPool = async (poolSize: number) => {
                     worker.removeEventListener("message", handleMessage);
                     resolve();
                 };
-                const handleError = () => {
+                const handleError = (event: ErrorEvent) => {
                     worker.removeEventListener("message", handleMessage);
-                    reject(new Error("Thread worker initialization failed"));
+                    worker.terminate();
+                    const errorDetail = event.error ? `: ${event.error.message}` : "";
+                    const errorInfo = event.filename ? ` at ${event.filename}:${event.lineno}` : "";
+                    reject(
+                        new Error(`Thread worker initialization failed${errorDetail}${errorInfo}`),
+                    );
                 };
                 worker.addEventListener("message", handleMessage);
                 worker.addEventListener("error", handleError, { once: true });

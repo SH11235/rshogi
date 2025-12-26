@@ -701,4 +701,79 @@ describe("createWasmEngineClient", () => {
             } as MessageEvent);
         });
     });
+
+    describe("スレッド数の動的変更", () => {
+        it("スレッド数を複数回変更した場合の動作", async () => {
+            vi.stubGlobal("crossOriginIsolated", true);
+            vi.stubGlobal("SharedArrayBuffer", class {});
+            vi.stubGlobal("navigator", { hardwareConcurrency: 8 });
+
+            const workers: MockWorker[] = [];
+            const workerFactory = vi.fn((_kind: WorkerKind) => {
+                const worker = createMockWorker();
+                workers.push(worker);
+                return worker as unknown as Worker;
+            });
+
+            const client = createWasmEngineClient({ workerFactory });
+
+            // First init with threads: 2
+            const initPromise1 = client.init({ threads: 2 });
+            workers[0].onmessage?.({
+                data: { type: "ack", requestId: workers[0].postMessage.mock.calls[0][0].requestId },
+            } as MessageEvent);
+            await initPromise1;
+
+            // Second init with threads: 4
+            const initPromise2 = client.init({ threads: 4 });
+            expect(workers[0].terminate).toHaveBeenCalled();
+            workers[1].onmessage?.({
+                data: { type: "ack", requestId: workers[1].postMessage.mock.calls[0][0].requestId },
+            } as MessageEvent);
+            await initPromise2;
+
+            // Third init with threads: 1 (single thread, no worker recreation needed if already single)
+            const initPromise3 = client.init({ threads: 1 });
+            expect(workers[1].terminate).toHaveBeenCalled();
+            workers[2].onmessage?.({
+                data: { type: "ack", requestId: workers[2].postMessage.mock.calls[0][0].requestId },
+            } as MessageEvent);
+            await initPromise3;
+
+            expect(workerFactory).toHaveBeenCalledTimes(3);
+        });
+
+        it("同じスレッド数で再初期化しても Worker は再生成されない", async () => {
+            vi.stubGlobal("crossOriginIsolated", true);
+            vi.stubGlobal("SharedArrayBuffer", class {});
+            vi.stubGlobal("navigator", { hardwareConcurrency: 8 });
+
+            const workers: MockWorker[] = [];
+            const workerFactory = vi.fn((_kind: WorkerKind) => {
+                const worker = createMockWorker();
+                workers.push(worker);
+                return worker as unknown as Worker;
+            });
+
+            const client = createWasmEngineClient({ workerFactory });
+
+            // First init with threads: 2
+            const initPromise1 = client.init({ threads: 2 });
+            workers[0].onmessage?.({
+                data: { type: "ack", requestId: workers[0].postMessage.mock.calls[0][0].requestId },
+            } as MessageEvent);
+            await initPromise1;
+
+            // Second init with same threads: 2
+            const initPromise2 = client.init({ threads: 2 });
+            workers[0].onmessage?.({
+                data: { type: "ack", requestId: workers[0].postMessage.mock.calls[1][0].requestId },
+            } as MessageEvent);
+            await initPromise2;
+
+            // Worker should not be terminated or recreated
+            expect(workers[0].terminate).not.toHaveBeenCalled();
+            expect(workerFactory).toHaveBeenCalledTimes(1);
+        });
+    });
 });
