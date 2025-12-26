@@ -6,6 +6,7 @@
 
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Switch } from "../../switch";
 import type { KifMove } from "../utils/kifFormat";
 import { formatEval } from "../utils/kifFormat";
 import { KifuNavigationToolbar } from "./KifuNavigationToolbar";
@@ -48,6 +49,8 @@ interface KifuPanelProps {
     onPlySelect?: (ply: number) => void;
     /** 評価値を表示するか */
     showEval?: boolean;
+    /** 評価値表示の切り替えコールバック */
+    onShowEvalChange?: (show: boolean) => void;
     /** KIF形式でコピーするときのコールバック（KIF文字列を返す） */
     onCopyKif?: () => string;
     /** ナビゲーション機能（提供された場合はツールバーを表示） */
@@ -79,6 +82,7 @@ export function KifuPanel({
     currentPly,
     onPlySelect,
     showEval = true,
+    onShowEvalChange,
     onCopyKif,
     navigation,
     navigationDisabled = false,
@@ -132,20 +136,39 @@ export function KifuPanel({
                         {kifMoves.length === 0 ? "開始局面" : `${kifMoves.length}手`}
                     </span>
                 </div>
-                {onCopyKif && kifMoves.length > 0 && (
-                    <button
-                        type="button"
-                        className={`px-2 py-1 text-[11px] rounded border cursor-pointer transition-colors duration-150 ${
-                            copySuccess
-                                ? "bg-green-600 text-white border-green-600"
-                                : "bg-background text-foreground border-border"
-                        }`}
-                        onClick={handleCopy}
-                        title="KIF形式でクリップボードにコピー"
-                    >
-                        {copySuccess ? "コピー完了" : "KIFコピー"}
-                    </button>
-                )}
+                <div className="flex items-center gap-2">
+                    {/* 評価値表示トグル */}
+                    {onShowEvalChange && (
+                        <label
+                            htmlFor="kifu-eval-toggle"
+                            className="flex items-center gap-1.5 cursor-pointer"
+                        >
+                            <span className="text-[11px] font-normal text-muted-foreground">
+                                評価値
+                            </span>
+                            <Switch
+                                id="kifu-eval-toggle"
+                                checked={showEval}
+                                onCheckedChange={onShowEvalChange}
+                                aria-label="評価値を表示"
+                            />
+                        </label>
+                    )}
+                    {onCopyKif && kifMoves.length > 0 && (
+                        <button
+                            type="button"
+                            className={`px-2 py-1 text-[11px] rounded border cursor-pointer transition-colors duration-150 ${
+                                copySuccess
+                                    ? "bg-green-600 text-white border-green-600"
+                                    : "bg-background text-foreground border-border"
+                            }`}
+                            onClick={handleCopy}
+                            title="KIF形式でクリップボードにコピー"
+                        >
+                            {copySuccess ? "コピー完了" : "KIFコピー"}
+                        </button>
+                    )}
+                </div>
             </div>
 
             {/* ナビゲーションツールバー */}

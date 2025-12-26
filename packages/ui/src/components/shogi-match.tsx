@@ -1586,7 +1586,13 @@ export function ShogiMatch({
                         <KifuPanel
                             kifMoves={kifMoves}
                             currentPly={navigation.state.currentPly}
-                            showEval={false}
+                            showEval={displaySettings.showKifuEval}
+                            onShowEvalChange={(show) =>
+                                setDisplaySettings((prev) => ({
+                                    ...prev,
+                                    showKifuEval: show,
+                                }))
+                            }
                             onPlySelect={handlePlySelect}
                             onCopyKif={handleCopyKif}
                             navigation={{

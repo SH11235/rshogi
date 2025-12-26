@@ -35,6 +35,8 @@ export interface DisplaySettings {
     showBoardLabels: boolean;
     /** 最終手ハイライト */
     highlightLastMove: boolean;
+    /** 棋譜パネルに評価値を表示 */
+    showKifuEval: boolean;
 }
 
 /** デフォルト表示設定 */
@@ -42,4 +44,5 @@ export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
     squareNotation: "none",
     showBoardLabels: true,
     highlightLastMove: true,
+    showKifuEval: false,
 };
