@@ -3,7 +3,8 @@
 //! USIプロトコルから呼び出すためのハイレベルインターフェース。
 
 use crate::time::Instant;
-// AtomicU64 is only needed for multi-threaded builds (native only).
+// AtomicU64 is only needed for native multi-threaded builds.
+// Wasm Rayon model doesn't use SearchProgress.
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -243,7 +244,8 @@ fn aggregate_best_move_changes(changes: &[f64]) -> (f64, usize) {
     (sum, changes.len())
 }
 
-// SearchProgress is only used in multi-threaded builds (native only).
+// SearchProgress is only used in native multi-threaded builds.
+// Wasm Rayon model doesn't use SearchProgress (passes None to search_helper).
 #[cfg(not(target_arch = "wasm32"))]
 /// SearchProgress はヘルパースレッドの進捗を追跡する。
 /// False Sharing を防ぐため、各フィールドを別々のキャッシュラインに配置する。
@@ -1164,20 +1166,25 @@ impl Search {
     }
 }
 
-// search_helper is only used by helper threads in multi-threaded builds (native only).
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn search_helper(
+// search_helper_impl is the core search logic used by helper threads.
+// Progress callbacks are passed as closures to avoid including progress code in Wasm builds.
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+#[inline(always)]
+fn search_helper_impl<F1, F2>(
     worker: &mut SearchWorker,
     pos: &mut Position,
     limits: &LimitsType,
     time_manager: &mut TimeManagement,
     max_depth: Depth,
     skill_enabled: bool,
-    progress: Option<&SearchProgress>,
-) -> usize {
-    if let Some(progress) = progress {
-        progress.reset();
-    }
+    on_start: F1,
+    mut on_depth_complete: F2,
+) -> usize
+where
+    F1: FnOnce(),
+    F2: FnMut(u64, f64),
+{
+    on_start();
 
     worker.root_moves = super::RootMoves::from_legal_moves(pos, &limits.search_moves);
 
@@ -1296,9 +1303,7 @@ pub(crate) fn search_helper(
 
             let best_move_changes = worker.best_move_changes;
             worker.best_move_changes = 0.0;
-            if let Some(progress) = progress {
-                progress.update(worker.nodes, best_move_changes);
-            }
+            on_depth_complete(worker.nodes, best_move_changes);
 
             if !worker.root_moves[0].pv.is_empty() && worker.root_moves[0].pv[0] != last_best_pv[0]
             {
@@ -1339,6 +1344,59 @@ pub(crate) fn search_helper(
     }
 
     effective_multi_pv
+}
+
+// Native version: takes progress parameter for tracking helper thread statistics.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn search_helper(
+    worker: &mut SearchWorker,
+    pos: &mut Position,
+    limits: &LimitsType,
+    time_manager: &mut TimeManagement,
+    max_depth: Depth,
+    skill_enabled: bool,
+    progress: Option<&SearchProgress>,
+) -> usize {
+    search_helper_impl(
+        worker,
+        pos,
+        limits,
+        time_manager,
+        max_depth,
+        skill_enabled,
+        || {
+            if let Some(p) = progress {
+                p.reset();
+            }
+        },
+        |nodes, bmc| {
+            if let Some(p) = progress {
+                p.update(nodes, bmc);
+            }
+        },
+    )
+}
+
+// Wasm version: no progress parameter. Empty closures are optimized away by LLVM.
+#[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+pub(crate) fn search_helper(
+    worker: &mut SearchWorker,
+    pos: &mut Position,
+    limits: &LimitsType,
+    time_manager: &mut TimeManagement,
+    max_depth: Depth,
+    skill_enabled: bool,
+) -> usize {
+    search_helper_impl(
+        worker,
+        pos,
+        limits,
+        time_manager,
+        max_depth,
+        skill_enabled,
+        || {},
+        |_, _| {},
+    )
 }
 
 // =============================================================================

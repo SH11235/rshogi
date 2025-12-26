@@ -2,6 +2,7 @@ import initWasm, {
     apply_moves as applyMoves,
     dispose as disposeEngine,
     init as initEngine,
+    initThreadPool as initThreadPoolWasm,
     load_model as loadModel,
     load_position as loadPosition,
     search as runSearch,
@@ -19,11 +20,11 @@ const initWasmWithCache = async (input?: InitInput) => {
     return exports;
 };
 
-// wasm_thread crate handles worker spawning automatically when Rust code calls
-// wasm_thread::Builder::new().spawn(). No manual worker pool setup is needed.
-// The poolSize parameter is kept for API compatibility but is not used here.
-const initThreadPool = async (_poolSize: number) => {
-    // No-op: wasm_thread manages thread spawning internally
+// wasm-bindgen-rayon's init_thread_pool returns a Promise that resolves
+// when all worker threads are ready. This handles the async Worker creation
+// that caused deadlocks with the previous wasm_thread approach.
+const initThreadPool = async (poolSize: number) => {
+    await initThreadPoolWasm(poolSize);
 };
 
 createEngineWorker({

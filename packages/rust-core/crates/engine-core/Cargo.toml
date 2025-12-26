@@ -31,6 +31,8 @@ windows-sys = { version = "0.60.2", features = [
 # getrandom for WebAssembly support (required by rand)
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { workspace = true }
+# Rayon for parallel search in Wasm (enabled via wasm-threads feature)
+rayon = { version = "1.10", optional = true }
 
 [dev-dependencies]
 # Test dependencies
@@ -47,10 +49,9 @@ simd_avx2 = []
 # 診断ログ
 diagnostics = []
 # WebAssembly スレッドビルド用フラグ
-# 注意: 現在はシングルスレッド動作のみ。wasm_thread による並列化は
-# 非同期ワーカー生成と同期プリミティブの不整合により無効化されている。
+# wasm-bindgen-rayon + rayon を使用した LazySMP 並列探索を有効化
 # 詳細は docs/wasm-multithreading-investigation.md を参照。
-wasm-threads = []
+wasm-threads = ["rayon"]
 # YaneuraOu DEEP相当のデフォルト遅延設定を使う
 # GPU/ネットワーク待ちが長い環境向けの遅延マージン(400/1400ms)プリセットを有効化する
 deep = []

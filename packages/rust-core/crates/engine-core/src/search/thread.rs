@@ -305,14 +305,9 @@ mod imp {
     }
 }
 
-// WASM builds use single-threaded search only.
-// Multi-threading with wasm_thread was attempted but has fundamental issues:
-// - wasm_thread spawns Web Workers asynchronously
-// - Our Condvar/Mutex-based synchronization assumes threads are ready immediately
-// - This mismatch causes deadlocks
-//
-// See docs/wasm-multithreading-investigation.md for details and future options.
-#[cfg(target_arch = "wasm32")]
+// WASM builds without wasm-threads feature use single-threaded search only.
+// See docs/wasm-multithreading-investigation.md for details.
+#[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
 mod imp {
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
@@ -384,6 +379,180 @@ mod imp {
             F: FnOnce(&mut crate::search::SearchWorker) -> R,
         {
             unreachable!("thread pool is disabled on wasm32")
+        }
+
+        pub fn nodes(&self) -> u64 {
+            0
+        }
+
+        pub fn best_move_changes(&self) -> f64 {
+            0.0
+        }
+    }
+}
+
+// WASM builds with wasm-threads feature use Rayon for parallel search.
+// This uses wasm-bindgen-rayon to handle Web Worker creation asynchronously,
+// avoiding the Condvar/async mismatch that caused deadlocks with wasm_thread.
+#[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+mod imp {
+    use std::cell::RefCell;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    use rayon::prelude::*;
+
+    use crate::position::Position;
+    use crate::tt::TranspositionTable;
+    use crate::types::Depth;
+
+    use crate::search::engine::search_helper;
+    use crate::search::{LimitsType, SearchWorker, TimeManagement, TimeOptions};
+
+    // Thread-local storage for SearchWorker instances.
+    // Each Rayon worker thread gets its own SearchWorker on first use.
+    thread_local! {
+        static THREAD_WORKER: RefCell<Option<Box<SearchWorker>>> = const { RefCell::new(None) };
+    }
+
+    pub struct ThreadPool {
+        num_threads: usize,
+        tt: Arc<TranspositionTable>,
+        stop: Arc<AtomicBool>,
+        ponderhit: Arc<AtomicBool>,
+        max_moves_to_draw: i32,
+    }
+
+    impl ThreadPool {
+        pub fn new(
+            num_threads: usize,
+            tt: Arc<TranspositionTable>,
+            stop: Arc<AtomicBool>,
+            ponderhit: Arc<AtomicBool>,
+            max_moves_to_draw: i32,
+        ) -> Self {
+            Self {
+                num_threads: num_threads.max(1),
+                tt,
+                stop,
+                ponderhit,
+                max_moves_to_draw,
+            }
+        }
+
+        pub fn set_num_threads(
+            &mut self,
+            num_threads: usize,
+            tt: Arc<TranspositionTable>,
+            max_moves_to_draw: i32,
+        ) {
+            self.num_threads = num_threads.max(1);
+            self.tt = tt;
+            self.max_moves_to_draw = max_moves_to_draw;
+        }
+
+        pub fn start_thinking(
+            &self,
+            pos: &Position,
+            limits: LimitsType,
+            max_depth: Depth,
+            time_options: TimeOptions,
+            max_moves_to_draw: i32,
+            skill_enabled: bool,
+        ) {
+            let helper_count = self.num_threads.saturating_sub(1);
+            if helper_count == 0 {
+                return;
+            }
+
+            let stop = Arc::clone(&self.stop);
+            let ponderhit = Arc::clone(&self.ponderhit);
+            let tt = Arc::clone(&self.tt);
+
+            // Use Rayon's parallel iterator for LazySMP search.
+            // Each worker thread independently searches the same position.
+            (1..=helper_count).into_par_iter().for_each(|thread_id| {
+                THREAD_WORKER.with(|cell| {
+                    let mut worker_opt = cell.borrow_mut();
+
+                    // Initialize SearchWorker on first use
+                    if worker_opt.is_none() {
+                        *worker_opt =
+                            Some(SearchWorker::new(Arc::clone(&tt), max_moves_to_draw, thread_id));
+                    }
+
+                    let worker = worker_opt.as_mut().unwrap();
+
+                    // Update worker state for this search
+                    worker.tt = Arc::clone(&tt);
+                    worker.max_moves_to_draw = max_moves_to_draw;
+                    worker.prepare_search();
+
+                    let mut search_pos = pos.clone();
+                    let mut time_manager =
+                        TimeManagement::new(Arc::clone(&stop), Arc::clone(&ponderhit));
+                    time_manager.set_options(&time_options);
+                    time_manager.init(
+                        &limits,
+                        search_pos.side_to_move(),
+                        search_pos.game_ply(),
+                        max_moves_to_draw,
+                    );
+
+                    search_helper(
+                        worker,
+                        &mut search_pos,
+                        &limits,
+                        &mut time_manager,
+                        max_depth,
+                        skill_enabled,
+                    );
+                });
+            });
+        }
+
+        pub fn wait_for_search_finished(&self) {
+            // Rayon's into_par_iter().for_each() is synchronous,
+            // so there's nothing to wait for.
+        }
+
+        pub fn clear_histories(&self) {
+            let helper_count = self.num_threads.saturating_sub(1);
+            if helper_count == 0 {
+                return;
+            }
+
+            (1..=helper_count).into_par_iter().for_each(|_| {
+                THREAD_WORKER.with(|cell| {
+                    if let Some(worker) = cell.borrow_mut().as_mut() {
+                        worker.clear();
+                    }
+                });
+            });
+        }
+
+        pub fn update_tt(&self, _tt: Arc<TranspositionTable>) {
+            // Workers will get the updated TT reference on next start_thinking call
+        }
+
+        pub fn helper_threads(&self) -> &[Thread] {
+            // Rayon model doesn't expose individual Thread objects
+            &[]
+        }
+    }
+
+    pub struct Thread;
+
+    impl Thread {
+        pub fn id(&self) -> usize {
+            0
+        }
+
+        pub fn with_worker<F, R>(&self, _f: F) -> R
+        where
+            F: FnOnce(&mut SearchWorker) -> R,
+        {
+            unreachable!("rayon thread pool does not expose individual threads")
         }
 
         pub fn nodes(&self) -> u64 {

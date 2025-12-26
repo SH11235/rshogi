@@ -354,20 +354,22 @@ export function useEngineManager({
             const engineState = engineStatesRef.current[side];
             if (!engineState.client) return;
 
+            // Check pending state first, before setting isRetrying
+            // This prevents isRetrying from getting stuck if we return early
+            const searchState = searchStatesRef.current[side];
+            if (searchState.pending) {
+                addErrorLog(`リトライ中です (${side})`);
+                return;
+            }
+
             // Prevent concurrent retry attempts using React state
             setIsRetrying((prev) => {
                 if (prev[side]) {
-                    addErrorLog(`リトライ中です (${side})`);
                     return prev;
                 }
                 return { ...prev, [side]: true };
             });
 
-            // Check if already retrying (state might not have updated yet)
-            const searchState = searchStatesRef.current[side];
-            if (searchState.pending) {
-                return;
-            }
             searchState.pending = true;
 
             try {
