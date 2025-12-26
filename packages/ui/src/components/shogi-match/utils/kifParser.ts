@@ -90,6 +90,8 @@ interface KifParseResult {
     moves: string[];
     /** 各手の詳細データ（消費時間・評価値含む） */
     moveData: KifMoveData[];
+    /** 開始局面のSFEN（KIFに記載がある場合のみ） */
+    startSfen?: string;
     /** エラーメッセージ（失敗時） */
     error?: string;
     /** パースできなかった行（警告用） */
@@ -199,6 +201,40 @@ function parseEvalComment(
     }
 
     return null;
+}
+
+/**
+ * 開始局面行をパースしてSFENを取得
+ * @param line KIFヘッダー行
+ * @returns SFEN文字列またはnull
+ */
+function parseStartSfenLine(line: string): string | null {
+    const trimmed = line.trim();
+
+    // 「手合割：平手」を処理
+    const handicapMatch = trimmed.match(/^手合割[:：]\s*(.+)$/);
+    if (handicapMatch) {
+        const handicap = handicapMatch[1].trim();
+        if (handicap.startsWith("平手")) {
+            return "startpos";
+        }
+        // その他の手合割（駒落ちなど）は未対応
+        return null;
+    }
+
+    // 「開始局面：」を処理
+    const sfenMatch = trimmed.match(/^開始局面[:：]\s*(.+)$/);
+    if (!sfenMatch) return null;
+
+    const raw = sfenMatch[1].trim();
+    if (!raw) return null;
+    if (raw.startsWith("平手")) {
+        const parsed = parseSfen("startpos");
+        return parsed.sfen || "startpos";
+    }
+
+    const parsed = parseSfen(raw);
+    return parsed.sfen || null;
 }
 
 /**
@@ -361,6 +397,7 @@ export function parseKif(kifText: string): KifParseResult {
             success: false,
             moves: [],
             moveData: [],
+            startSfen: undefined,
             error: "入力が空です",
         };
     }
@@ -370,8 +407,15 @@ export function parseKif(kifText: string): KifParseResult {
     const moveData: KifMoveData[] = [];
     const warnings: string[] = [];
     let prevTo: string | null = null;
+    let startSfen: string | undefined;
 
     for (const line of lines) {
+        const startSfenFromLine = parseStartSfenLine(line);
+        if (startSfenFromLine && !startSfen) {
+            startSfen = startSfenFromLine;
+            continue;
+        }
+
         // まず評価値コメントかチェック
         const evalData = parseEvalComment(line);
         if (evalData) {
@@ -408,6 +452,7 @@ export function parseKif(kifText: string): KifParseResult {
             success: false,
             moves: [],
             moveData: [],
+            startSfen,
             error: "パースできる指し手が見つかりませんでした",
         };
     }
@@ -416,6 +461,7 @@ export function parseKif(kifText: string): KifParseResult {
         success: true,
         moves,
         moveData,
+        startSfen,
         warnings: warnings.length > 0 ? warnings : undefined,
     };
 }

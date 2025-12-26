@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
     convertMovesToKif,
     evalToY,
+    exportToKifString,
     formatEval,
     formatMoveSimple,
     formatMoveToKif,
@@ -213,18 +214,38 @@ describe("formatEval", () => {
         expect(formatEval(0)).toBe("+0.0");
     });
 
-    it("詰みをフォーマットする", () => {
-        expect(formatEval(undefined, 3)).toBe("詰3");
-        expect(formatEval(undefined, 1)).toBe("詰1");
+    it("先手の詰みをフォーマットする（ply=1, 奇数=先手の手後）", () => {
+        // ply=1（先手が指した後）でevalMate > 0 → 先手が詰ませられる
+        expect(formatEval(undefined, 3, 1)).toBe("☗詰3");
+        expect(formatEval(undefined, 1, 1)).toBe("☗詰1");
     });
 
-    it("被詰みをフォーマットする", () => {
-        expect(formatEval(undefined, -3)).toBe("被詰3");
-        expect(formatEval(undefined, -1)).toBe("被詰1");
+    it("後手の詰みをフォーマットする（ply=2, 偶数=後手の手後）", () => {
+        // ply=2（後手が指した後）でevalMate > 0 → 後手が詰ませられる
+        expect(formatEval(undefined, 3, 2)).toBe("☖詰3");
+        expect(formatEval(undefined, 1, 2)).toBe("☖詰1");
+    });
+
+    it("先手が詰まされる場合（先手の手後で負の詰み）", () => {
+        // ply=1（先手が指した後）でevalMate < 0 → 先手が詰まされる = 後手が詰ませられる
+        expect(formatEval(undefined, -3, 1)).toBe("☖詰3");
+        expect(formatEval(undefined, -1, 1)).toBe("☖詰1");
+    });
+
+    it("後手が詰まされる場合（後手の手後で負の詰み）", () => {
+        // ply=2（後手が指した後）でevalMate < 0 → 後手が詰まされる = 先手が詰ませられる
+        expect(formatEval(undefined, -3, 2)).toBe("☗詰3");
+        expect(formatEval(undefined, -1, 2)).toBe("☗詰1");
+    });
+
+    it("plyがない場合は記号なしで詰みを表示（後方互換性）", () => {
+        // plyがundefinedの場合、記号は☗になる（奇数扱い）
+        expect(formatEval(undefined, 3)).toBe("☗詰3");
+        expect(formatEval(undefined, -3)).toBe("☖詰3");
     });
 
     it("詰みが評価値より優先される", () => {
-        expect(formatEval(100, 5)).toBe("詰5");
+        expect(formatEval(100, 5, 1)).toBe("☗詰5");
     });
 
     it("undefined の場合は空文字を返す", () => {
@@ -344,5 +365,42 @@ describe("convertMovesToKif", () => {
         // （移動先が同じ場合のみ「同」になる）
         expect(result[1].kifText).toBe("△７五歩(76)");
         expect(result[1].displayText).toBe("☖7五歩(76)");
+    });
+});
+
+describe("exportToKifString", () => {
+    const buildSingleMoveExport = (startSfen?: string) => {
+        const board = placePiece(createEmptyBoard(), "7g", "sente", "P");
+        const kifMoves = [
+            {
+                ply: 1,
+                kifText: "dummy",
+                displayText: "dummy",
+                usiMove: "7g7f",
+                elapsedMs: 0,
+            },
+        ];
+        return exportToKifString(kifMoves, [board], { startSfen });
+    };
+
+    it("開始局面が平手の場合は開始局面行を省略する", () => {
+        const result = buildSingleMoveExport("startpos");
+        expect(result).not.toContain("開始局面：");
+    });
+
+    it("開始局面が平手SFENの場合は開始局面行を省略する", () => {
+        const result = buildSingleMoveExport(
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+        );
+        expect(result).not.toContain("開始局面：");
+    });
+
+    it("開始局面が平手以外なら開始局面行を出力する", () => {
+        const result = buildSingleMoveExport(
+            "sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPP1/1B5R1/LNSGKGSNL b - 1",
+        );
+        expect(result).toContain(
+            "開始局面：lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPP1/1B5R1/LNSGKGSNL b - 1",
+        );
     });
 });

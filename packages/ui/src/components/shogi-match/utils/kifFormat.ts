@@ -5,6 +5,7 @@
  */
 
 import type { BoardState, Piece, PieceType, Player, Square } from "@shogi/app-core";
+import { parseSfen } from "./kifParser";
 
 /** KIF形式の指し手情報 */
 export interface KifMove {
@@ -74,6 +75,16 @@ const PROMOTED_NAMES: Readonly<Record<PieceType, string>> = {
     B: "馬",
     R: "龍",
     K: "玉", // 玉は成れないがフォールバック用
+};
+
+const HIRATE_SFEN = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+
+const normalizeStartSfen = (sfen?: string): string | null => {
+    if (!sfen) return null;
+    const trimmed = sfen.trim();
+    if (!trimmed) return null;
+    const parsed = parseSfen(trimmed);
+    return parsed.sfen || null;
 };
 
 // ============================================================
@@ -277,16 +288,28 @@ function squareToSimple(sq: string): string {
 
 /**
  * 評価値を表示用文字列にフォーマット
+ *
+ * 評価値は指し手を指した側の視点で格納されているため:
+ * - evalMate > 0: 指した側が詰ませられる（勝ち）
+ * - evalMate < 0: 指した側が詰まされる（負け）
+ *
  * @param evalCp 評価値（センチポーン）
  * @param evalMate 詰み手数
- * @returns フォーマットされた文字列（例: "+50", "詰3", "被詰5"）
+ * @param ply 手数（奇数=先手の指し手後、偶数=後手の指し手後）
+ * @returns フォーマットされた文字列（例: "+50", "☗詰3", "☖詰5"）
  */
-export function formatEval(evalCp?: number, evalMate?: number): string {
+export function formatEval(evalCp?: number, evalMate?: number, ply?: number): string {
     if (evalMate !== undefined && evalMate !== null) {
+        // 手番を判定（奇数手=先手が指した後、偶数手=後手が指した後）
+        const movingSide = ply !== undefined && ply % 2 === 0 ? "☖" : "☗";
+        const opponentSide = ply !== undefined && ply % 2 === 0 ? "☗" : "☖";
+
         if (evalMate > 0) {
-            return `詰${evalMate}`;
+            // 指した側が勝ち（詰ませられる）
+            return `${movingSide}詰${evalMate}`;
         }
-        return `被詰${Math.abs(evalMate)}`;
+        // 指した側が負け（詰まされる）= 相手側が詰ませられる
+        return `${opponentSide}詰${Math.abs(evalMate)}`;
     }
 
     if (evalCp === undefined || evalCp === null) {
@@ -299,6 +322,84 @@ export function formatEval(evalCp?: number, evalMate?: number): string {
         return `+${value.toFixed(1)}`;
     }
     return value.toFixed(1);
+}
+
+/**
+ * 評価値のツールチップ用の詳細情報を生成
+ *
+ * @param evalCp 評価値（センチポーン）
+ * @param evalMate 詰み手数
+ * @param ply 手数
+ * @param depth 探索深さ
+ * @returns ツールチップ用の情報オブジェクト
+ */
+export function getEvalTooltipInfo(
+    evalCp?: number,
+    evalMate?: number,
+    ply?: number,
+    depth?: number,
+): {
+    /** メイン説明（例: "☗先手有利"） */
+    description: string;
+    /** 詳細値（例: "+150cp"） */
+    detail: string;
+    /** 探索深さ（例: "深さ20"） */
+    depthText: string | null;
+    /** 有利な側（"sente" | "gote" | null） */
+    advantage: "sente" | "gote" | null;
+} {
+    // 詰みの場合
+    if (evalMate !== undefined && evalMate !== null) {
+        const movingSide = ply !== undefined && ply % 2 === 0 ? "gote" : "sente";
+        const winningSide = evalMate > 0 ? movingSide : movingSide === "sente" ? "gote" : "sente";
+        const winnerMark = winningSide === "sente" ? "☗" : "☖";
+        const winnerName = winningSide === "sente" ? "先手" : "後手";
+
+        return {
+            description: `${winnerMark}${winnerName}の勝ち`,
+            detail: `${Math.abs(evalMate)}手詰み`,
+            depthText: depth !== undefined ? `深さ${depth}` : null,
+            advantage: winningSide,
+        };
+    }
+
+    // 通常の評価値
+    if (evalCp !== undefined && evalCp !== null) {
+        const absValue = Math.abs(evalCp);
+        const isSenteAdvantage = evalCp >= 0;
+        const mark = isSenteAdvantage ? "☗" : "☖";
+        const sideName = isSenteAdvantage ? "先手" : "後手";
+
+        // 優勢度の表現
+        let levelText: string;
+        if (absValue < 100) {
+            levelText = "互角";
+        } else if (absValue < 300) {
+            levelText = `${sideName}やや有利`;
+        } else if (absValue < 600) {
+            levelText = `${sideName}有利`;
+        } else if (absValue < 1000) {
+            levelText = `${sideName}優勢`;
+        } else {
+            levelText = `${sideName}勝勢`;
+        }
+
+        const description = absValue < 100 ? levelText : `${mark}${levelText}`;
+
+        return {
+            description,
+            detail: `${evalCp >= 0 ? "+" : ""}${evalCp}cp`,
+            depthText: depth !== undefined ? `深さ${depth}` : null,
+            advantage: absValue < 100 ? null : isSenteAdvantage ? "sente" : "gote",
+        };
+    }
+
+    return {
+        description: "評価なし",
+        detail: "",
+        depthText: null,
+        advantage: null,
+    };
 }
 
 /**
@@ -413,6 +514,8 @@ interface KifExportOptions {
     byoyomi?: number;
     /** 評価値をコメントとして出力するか */
     includeEval?: boolean;
+    /** 開始局面（SFEN形式） */
+    startSfen?: string;
 }
 
 /**
@@ -580,6 +683,11 @@ export function exportToKifString(
         const timeLimitStr = options.timeLimit ? `${Math.floor(options.timeLimit / 60)}分` : "0分";
         const byoyomiStr = options.byoyomi ? `${options.byoyomi}秒` : "0秒";
         lines.push(`持ち時間：${timeLimitStr}+${byoyomiStr}`);
+    }
+
+    const normalizedStartSfen = normalizeStartSfen(options.startSfen);
+    if (normalizedStartSfen && normalizedStartSfen !== HIRATE_SFEN) {
+        lines.push(`開始局面：${normalizedStartSfen}`);
     }
 
     // 指し手ヘッダー

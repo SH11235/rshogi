@@ -125,10 +125,12 @@ impl Position {
 
         for mv in moves {
             let parsed = Move::from_usi(mv).ok_or_else(|| format!("failed to parse move: {mv}"))?;
+            let parsed_raw = parsed.raw();
 
             let mut list = MoveList::new();
             generate_legal(&position, &mut list);
-            if !list.as_slice().contains(&parsed) {
+            let is_legal = list.iter().any(|candidate| candidate.raw() == parsed_raw);
+            if !is_legal {
                 error = Some(format!("illegal move: {mv}"));
                 break;
             }
@@ -323,5 +325,14 @@ mod tests {
 
         let pos = Position::from_board_state_json(&json).unwrap();
         assert_eq!(pos.to_sfen(), sfen);
+    }
+
+    #[test]
+    fn test_replay_moves_strict_accepts_usi_without_piece_info() {
+        let moves = vec!["7g7f".to_string()];
+        let result = Position::replay_moves_strict("startpos", &moves).unwrap();
+        assert_eq!(result.applied, vec!["7g7f".to_string()]);
+        assert!(result.error.is_none());
+        assert_eq!(result.last_ply, 0);
     }
 }
