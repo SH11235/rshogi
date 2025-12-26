@@ -43,6 +43,13 @@ describe("parseKif", () => {
         expect(result.startSfen).toBe(HIRATE_SFEN);
     });
 
+    it("開始局面が平手表記の場合は平手SFENに正規化する", () => {
+        const kif = ["開始局面：平手", "1 ７六歩(77)"].join("\n");
+        const result = parseKif(kif);
+        expect(result.success).toBe(true);
+        expect(result.startSfen).toBe(HIRATE_SFEN);
+    });
+
     it("開始局面行が無い場合はundefined", () => {
         const kif = ["1 ７六歩(77)"].join("\n");
         const result = parseKif(kif);

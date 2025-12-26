@@ -215,6 +215,10 @@ function parseStartSfenLine(line: string): string | null {
 
     const raw = match[1].trim();
     if (!raw) return null;
+    if (raw.startsWith("平手")) {
+        const parsed = parseSfen("startpos");
+        return parsed.sfen || "startpos";
+    }
 
     const parsed = parseSfen(raw);
     return parsed.sfen || null;

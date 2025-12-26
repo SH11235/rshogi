@@ -8,8 +8,6 @@ import type { ReactElement } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { type KifMoveData, parseKif, parseSfen } from "../utils/kifParser";
 
-type ImportTab = "sfen" | "kif";
-
 interface KifuImportPanelProps {
     /** SFENインポート時のコールバック（sfen: 開始局面, moves: 指し手配列） */
     onImportSfen: (sfen: string, moves: string[]) => Promise<void>;
@@ -24,7 +22,6 @@ export function KifuImportPanel({
     onImportKif,
     positionReady,
 }: KifuImportPanelProps): ReactElement {
-    const [activeTab, setActiveTab] = useState<ImportTab>("sfen");
     const [inputValue, setInputValue] = useState("");
     const [error, setError] = useState<string | null>(null);
     const [success, setSuccess] = useState(false);
@@ -55,17 +52,16 @@ export function KifuImportPanel({
         }
 
         try {
-            if (activeTab === "sfen") {
-                const { sfen, moves } = parseSfen(inputValue);
-                if (!sfen) {
-                    setError("SFENの形式が正しくありません");
-                    return;
-                }
-                await onImportSfen(sfen, moves);
-                setSuccess(true);
-                setInputValue("");
-                successTimerRef.current = setTimeout(() => setSuccess(false), 2000);
-            } else {
+            const looksLikeKif =
+                /#KIF|手数----|開始日時|終了日時|手合割|開始局面|先手：|後手：|持ち時間|表題|棋戦/.test(
+                    inputValue,
+                ) ||
+                /[▲△☗☖]/.test(inputValue) ||
+                /[１２３４５６７８９1-9][一二三四五六七八九].*(歩|香|桂|銀|金|角|飛|玉|王|と|馬|龍|竜)/.test(
+                    inputValue,
+                );
+
+            if (looksLikeKif) {
                 const result = parseKif(inputValue);
                 if (!result.success) {
                     setError(result.error ?? "KIFのパースに失敗しました");
@@ -75,17 +71,22 @@ export function KifuImportPanel({
                 setSuccess(true);
                 setInputValue("");
                 successTimerRef.current = setTimeout(() => setSuccess(false), 2000);
+                return;
             }
+
+            const { sfen, moves } = parseSfen(inputValue);
+            if (!sfen) {
+                setError("SFENの形式が正しくありません");
+                return;
+            }
+            await onImportSfen(sfen, moves);
+            setSuccess(true);
+            setInputValue("");
+            successTimerRef.current = setTimeout(() => setSuccess(false), 2000);
         } catch (e) {
             setError(e instanceof Error ? e.message : "インポートに失敗しました");
         }
-    }, [activeTab, inputValue, onImportSfen, onImportKif]);
-
-    const handleTabChange = useCallback((tab: ImportTab) => {
-        setActiveTab(tab);
-        setError(null);
-        setSuccess(false);
-    }, []);
+    }, [inputValue, onImportSfen, onImportKif]);
 
     const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
         setInputValue(e.target.value);
@@ -95,49 +96,15 @@ export function KifuImportPanel({
 
     return (
         <div className="bg-card border border-border rounded-xl p-3 shadow-lg w-[var(--panel-width)]">
-            <div className="font-bold mb-2">インポート</div>
-
-            {/* タブ切り替え */}
-            <div className="flex gap-1 mb-3">
-                <button
-                    type="button"
-                    className={`flex-1 px-3 py-1.5 text-sm rounded-md border transition-colors ${
-                        activeTab === "sfen"
-                            ? "bg-primary text-primary-foreground border-primary"
-                            : "bg-background text-foreground border-border hover:bg-accent"
-                    }`}
-                    onClick={() => handleTabChange("sfen")}
-                >
-                    SFEN
-                </button>
-                <button
-                    type="button"
-                    className={`flex-1 px-3 py-1.5 text-sm rounded-md border transition-colors ${
-                        activeTab === "kif"
-                            ? "bg-primary text-primary-foreground border-primary"
-                            : "bg-background text-foreground border-border hover:bg-accent"
-                    }`}
-                    onClick={() => handleTabChange("kif")}
-                >
-                    KIF
-                </button>
-            </div>
+            <div className="font-bold mb-2">インポート（SFEN / KIF）</div>
 
             {/* 説明文 */}
             <div className="text-xs text-muted-foreground mb-2">
-                {activeTab === "sfen" ? (
-                    <>
-                        SFEN形式の局面を貼り付けてください
-                        <br />
-                        例: <code className="bg-muted px-1 rounded">lnsgkgsnl/...</code>
-                    </>
-                ) : (
-                    <>
-                        KIF形式の棋譜を貼り付けてください
-                        <br />
-                        例: <code className="bg-muted px-1 rounded">1 ７六歩(77)</code>
-                    </>
-                )}
+                SFEN形式の局面、またはKIF形式の棋譜を貼り付けてください
+                <br />
+                例: <code className="bg-muted px-1 rounded">startpos moves 7g7f 3c3d</code>
+                <br />
+                例: <code className="bg-muted px-1 rounded">1 ７六歩(77)</code>
             </div>
 
             {/* 入力エリア */}
@@ -145,9 +112,7 @@ export function KifuImportPanel({
                 value={inputValue}
                 onChange={handleInputChange}
                 placeholder={
-                    activeTab === "sfen"
-                        ? "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1"
-                        : "1 ７六歩(77)\n2 ３四歩(33)\n..."
+                    "startpos moves 7g7f 3c3d\nlnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1\n1 ７六歩(77)\n2 ３四歩(33)"
                 }
                 rows={5}
                 className="w-full p-2 text-sm font-mono rounded-md border border-border bg-background resize-none focus:outline-none focus:ring-2 focus:ring-ring"

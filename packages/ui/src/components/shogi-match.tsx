@@ -1263,7 +1263,7 @@ export function ShogiMatch({
                 legalCache.clear();
                 setPositionReady(true);
             } catch (error) {
-                setMessage(`SFENの適用に失敗しました: ${String(error)}`);
+                throw new Error(`SFENの適用に失敗しました: ${String(error)}`);
             }
         },
         [navigation, resetClocks, legalCache],
@@ -1289,13 +1289,8 @@ export function ShogiMatch({
                     throw new Error(`開始局面の解析に失敗しました: ${String(error)}`);
                 }
             } else {
-                startPosition = await service.getInitialBoard();
                 startSfenToLoad = "startpos";
-                try {
-                    startSfenToLoad = await service.boardToSfen(startPosition);
-                } catch {
-                    startSfenToLoad = "startpos";
-                }
+                startPosition = await service.parseSfen(startSfenToLoad);
             }
 
             setBasePosition(startPosition);
