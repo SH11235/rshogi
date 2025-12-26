@@ -1106,55 +1106,60 @@ export function ShogiMatch({
         setMessage(null);
     };
 
-    const loadMoves = async (list: string[], moveData?: KifMoveData[]) => {
-        const filtered = list.filter(Boolean);
-        const service = getPositionService();
-        try {
-            const result = await service.replayMovesStrict(startSfen, filtered);
+    const loadMoves = useCallback(
+        async (list: string[], moveData?: KifMoveData[]) => {
+            const filtered = list.filter(Boolean);
+            const service = getPositionService();
+            try {
+                const result = await service.replayMovesStrict(startSfen, filtered);
 
-            // 開始局面を取得
-            const startPosition = basePosition ?? (await service.getInitialBoard());
+                // 開始局面を取得
+                const startPosition = basePosition ?? (await service.getInitialBoard());
 
-            // 棋譜ナビゲーションをリセット
-            navigation.reset(startPosition, startSfen);
+                // 棋譜ナビゲーションをリセット
+                navigation.reset(startPosition, startSfen);
 
-            // 各手を順番に追加
-            let currentPos = startPosition;
-            for (let i = 0; i < result.applied.length; i++) {
-                const move = result.applied[i];
-                const data = moveData?.[i];
-                const applyResult = applyMoveWithState(currentPos, move, { validateTurn: false });
-                if (applyResult.ok) {
-                    // 消費時間と評価値を渡す
-                    // KIFインポートの評価値は既に先手視点なので normalized: true
-                    navigation.addMove(move, applyResult.next, {
-                        elapsedMs: data?.elapsedMs,
-                        eval:
-                            data?.evalCp !== undefined || data?.evalMate !== undefined
-                                ? {
-                                      scoreCp: data.evalCp,
-                                      scoreMate: data.evalMate,
-                                      depth: data.depth,
-                                      normalized: true,
-                                  }
-                                : undefined,
+                // 各手を順番に追加
+                let currentPos = startPosition;
+                for (let i = 0; i < result.applied.length; i++) {
+                    const move = result.applied[i];
+                    const data = moveData?.[i];
+                    const applyResult = applyMoveWithState(currentPos, move, {
+                        validateTurn: false,
                     });
-                    currentPos = applyResult.next;
+                    if (applyResult.ok) {
+                        // 消費時間と評価値を渡す
+                        // KIFインポートの評価値は既に先手視点なので normalized: true
+                        navigation.addMove(move, applyResult.next, {
+                            elapsedMs: data?.elapsedMs,
+                            eval:
+                                data?.evalCp !== undefined || data?.evalMate !== undefined
+                                    ? {
+                                          scoreCp: data.evalCp,
+                                          scoreMate: data.evalMate,
+                                          depth: data.depth,
+                                          normalized: true,
+                                      }
+                                    : undefined,
+                        });
+                        currentPos = applyResult.next;
+                    }
                 }
+
+                movesRef.current = result.applied;
+                setLastMove(deriveLastMove(result.applied.at(-1)));
+                setSelection(null);
+                setMessage(result.error ?? null);
+                resetClocks(false);
+
+                legalCache.clear();
+                setPositionReady(true);
+            } catch (error) {
+                setMessage(`棋譜の適用に失敗しました: ${String(error)}`);
             }
-
-            movesRef.current = result.applied;
-            setLastMove(deriveLastMove(result.applied.at(-1)));
-            setSelection(null);
-            setMessage(result.error ?? null);
-            resetClocks(false);
-
-            legalCache.clear();
-            setPositionReady(true);
-        } catch (error) {
-            setMessage(`棋譜の適用に失敗しました: ${String(error)}`);
-        }
-    };
+        },
+        [startSfen, basePosition, navigation, resetClocks, legalCache],
+    );
 
     // KIFコピー用コールバック
     const handleCopyKif = useCallback((): string => {
