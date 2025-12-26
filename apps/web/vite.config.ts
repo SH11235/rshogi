@@ -26,7 +26,8 @@ export default defineConfig(({ command }) => ({
     worker: {
         // ES モジュール形式の Worker を使用する。
         // engine-wasm 内の Worker が import 文を使用するため必須。
-        // Firefox 114+ (2022年〜) で ES module workers がサポートされている。
+        // 主要ブラウザ対応状況: Chrome 80+, Edge 80+, Safari 15+, Firefox 114+
+        // (Firefox が最後発で 2023年6月にサポート、現在は全主要ブラウザで利用可能)
         format: "es",
     },
     optimizeDeps: {
