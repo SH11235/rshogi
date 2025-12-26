@@ -52,6 +52,7 @@ import { type ClockSettings, useClockManager } from "./shogi-match/hooks/useCloc
 import { useEngineManager } from "./shogi-match/hooks/useEngineManager";
 import { useKifuKeyboardNavigation } from "./shogi-match/hooks/useKifuKeyboardNavigation";
 import { useKifuNavigation } from "./shogi-match/hooks/useKifuNavigation";
+import { useLocalStorage } from "./shogi-match/hooks/useLocalStorage";
 import {
     DEFAULT_DISPLAY_SETTINGS,
     type DisplaySettings,
@@ -253,8 +254,10 @@ export function ShogiMatch({
     const [isEditPanelOpen, setIsEditPanelOpen] = useState(false);
     const [isSettingsPanelOpen, setIsSettingsPanelOpen] = useState(false);
     const [isDisplaySettingsPanelOpen, setIsDisplaySettingsPanelOpen] = useState(false);
-    const [displaySettings, setDisplaySettings] =
-        useState<DisplaySettings>(DEFAULT_DISPLAY_SETTINGS);
+    const [displaySettings, setDisplaySettings] = useLocalStorage<DisplaySettings>(
+        "shogi-display-settings",
+        DEFAULT_DISPLAY_SETTINGS,
+    );
 
     // positionRef を先に定義（コールバックで使用するため）
     const positionRef = useRef<PositionState>(position);
@@ -347,6 +350,13 @@ export function ShogiMatch({
             matchEndedRef,
             onClockError: handleClockError,
         });
+
+    // 対局前に timeSettings が変更されたら clocks を同期
+    useEffect(() => {
+        if (!isMatchRunning) {
+            resetClocks(false);
+        }
+    }, [timeSettings, isMatchRunning, resetClocks]);
 
     // 対局終了処理（エンジン管理フックから呼ばれる）
     const endMatch = useCallback(

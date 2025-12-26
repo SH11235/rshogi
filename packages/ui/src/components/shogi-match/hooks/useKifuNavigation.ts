@@ -250,7 +250,8 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
             setTree((prev) => {
                 const newTree = addMoveToTree(prev, usiMove, positionAfter);
                 // 新しいノードに移動したので、コールバックを呼ぶ
-                onPositionChange?.(positionAfter);
+                const lastMove = deriveLastMoveFromUsi(usiMove);
+                onPositionChange?.(positionAfter, lastMove);
                 return newTree;
             });
         },
