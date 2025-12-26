@@ -220,9 +220,9 @@ try {
         cargoArgs: ["--features", "wasm-threads"],
         outDir: threadedOutDir,
         rustflags:
-            "-C link-arg=--shared-memory -C link-arg=--import-memory -C link-arg=--max-memory=2147483648 -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_base -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align",
+            "-Z unstable-options -C panic=immediate-abort -C link-arg=--shared-memory -C link-arg=--import-memory -C link-arg=--max-memory=2147483648 -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_base -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align",
         toolchain: nightlyToolchain,
-        cargoZArgs: ["-Z", "build-std=std,panic_abort"],
+        cargoZArgs: ["-Z", "build-std=core,alloc,std"],
         emitThreadWorker: true,
         target: threadedTarget,
         enableWasmOpt: true,
