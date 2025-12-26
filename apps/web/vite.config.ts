@@ -2,9 +2,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
+import { visualizer } from "rollup-plugin-visualizer";
 import { defineConfig } from "vite";
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
+
+// ANALYZE=true でバンドル分析レポートを生成
+const isAnalyze = process.env.ANALYZE === "true";
 
 // https://vite.dev/config/
 export default defineConfig(({ command }) => ({
@@ -25,7 +29,20 @@ export default defineConfig(({ command }) => ({
             "Cross-Origin-Embedder-Policy": "require-corp",
         },
     },
-    plugins: [tailwindcss(), react()],
+    plugins: [
+        tailwindcss(),
+        react(),
+        ...(isAnalyze
+            ? [
+                  visualizer({
+                      filename: "dist/stats.html",
+                      open: true,
+                      gzipSize: true,
+                      brotliSize: true,
+                  }),
+              ]
+            : []),
+    ],
     resolve: {
         alias: [
             {

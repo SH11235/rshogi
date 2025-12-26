@@ -410,8 +410,8 @@ export function useEngineManager({
                         onEvalUpdate &&
                         (event.scoreCp !== undefined || event.scoreMate !== undefined)
                     ) {
-                        // 現在の手数+1（次の手の評価値として記録）
-                        const ply = movesRef.current.length + 1;
+                        // 現在の手数（現在局面の評価値として記録）
+                        const ply = movesRef.current.length;
                         onEvalUpdate(ply, event);
                     }
                 }

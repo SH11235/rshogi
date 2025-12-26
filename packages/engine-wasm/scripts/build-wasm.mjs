@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -13,6 +13,8 @@ const nightlyToolchain = process.env.RUST_NIGHTLY_TOOLCHAIN ?? "nightly-2025-12-
 
 // --production フラグで本番ビルド（最大最適化）
 const isProduction = process.argv.includes("--production");
+// --skip-wasm-opt フラグでwasm-optをスキップ（デバッグ用）
+const skipWasmOpt = process.argv.includes("--skip-wasm-opt");
 const profile = isProduction ? "production" : "release";
 const targetDir = isProduction ? "production" : "release";
 
@@ -75,6 +77,49 @@ function ensureWasmBindgen() {
     }
 }
 
+function runWasmOpt(wasmFile) {
+    const beforeSize = statSync(wasmFile).size;
+
+    // Rustが使用するWASM機能を有効化
+    const enableFlags = [
+        "--enable-bulk-memory",
+        "--enable-nontrapping-float-to-int",
+        "--enable-sign-ext",
+        "--enable-mutable-globals",
+    ];
+
+    // productionでは-Oz（サイズ最適化）、それ以外は-O3（速度最適化）
+    const optLevel = isProduction ? "-Oz" : "-O3";
+
+    console.log(`Optimizing WASM with wasm-opt ${optLevel}...`);
+
+    const result = spawnSync(
+        "npx",
+        ["wasm-opt", optLevel, ...enableFlags, wasmFile, "-o", wasmFile],
+        {
+            stdio: "inherit",
+            shell: true,
+        },
+    );
+
+    if (result.status !== 0) {
+        console.warn(
+            `wasm-opt failed with status ${result.status}, continuing without optimization`,
+        );
+        if (result.error) {
+            console.warn(`Error details: ${result.error.message}`);
+        }
+        return;
+    }
+
+    const afterSize = statSync(wasmFile).size;
+    const reduction = beforeSize - afterSize;
+    const percent = ((reduction / beforeSize) * 100).toFixed(1);
+    console.log(
+        `wasm-opt: ${(beforeSize / 1024).toFixed(0)}KB -> ${(afterSize / 1024).toFixed(0)}KB (${percent}% reduction)`,
+    );
+}
+
 function buildWasm({
     label,
     cargoArgs,
@@ -84,6 +129,7 @@ function buildWasm({
     cargoZArgs,
     emitThreadWorker,
     target,
+    enableWasmOpt = true,
 }) {
     const targetArg = target ?? "wasm32-unknown-unknown";
     const targetName = targetArg.endsWith(".json") ? path.basename(targetArg, ".json") : targetArg;
@@ -123,6 +169,12 @@ function buildWasm({
         ["--target", "web", "--typescript", "--out-dir", outputDir, targetWasm],
         rustRoot,
     );
+
+    // wasm-optで最適化（--skip-wasm-optでスキップ可能）
+    const outputWasm = path.join(outputDir, `${artifactName}_bg.wasm`);
+    if (enableWasmOpt && !skipWasmOpt && existsSync(outputWasm)) {
+        runWasmOpt(outputWasm);
+    }
 
     if (emitThreadWorker) {
         const workerPath = path.join(outputDir, `${artifactName}_worker.js`);
@@ -176,6 +228,9 @@ try {
         cargoZArgs: ["-Z", "build-std=std,panic_abort"],
         emitThreadWorker: true,
         target: threadedTarget,
+        // threaded ビルドでは atomics 機能があるため wasm-opt のフラグ追加が必要
+        // 一旦スキップ（将来的に --enable-threads を追加して有効化可能）
+        enableWasmOpt: false,
     });
 
     verifyThreadedOutput(threadedOutDir);

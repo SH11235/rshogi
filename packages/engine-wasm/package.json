@@ -39,6 +39,7 @@
     },
     "devDependencies": {
         "typescript": "~5.9.3",
-        "vitest": "^4.0.15"
+        "vitest": "^4.0.15",
+        "wasm-opt": "^1.4.0"
     }
 }

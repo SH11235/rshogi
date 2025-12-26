@@ -5,12 +5,41 @@
  * 対局中のチート防止のためデフォルトで折りたたまれている
  */
 
-import type { CSSProperties, ReactElement } from "react";
+import type { ReactElement } from "react";
 import { useCallback, useState } from "react";
 import type { EvalHistory, KifMove } from "../utils/kifFormat";
 import { EvalGraph } from "./EvalGraph";
 import { EvalGraphModal } from "./EvalGraphModal";
 import { KifuPanel } from "./KifuPanel";
+
+interface BranchInfo {
+    hasBranches: boolean;
+    currentIndex: number;
+    count: number;
+    onSwitch: (index: number) => void;
+    onPromoteToMain?: () => void;
+}
+
+interface NavigationProps {
+    /** 現在の手数（ナビゲーション用） */
+    currentPly: number;
+    /** 最大手数（メインライン） */
+    totalPly: number;
+    /** 1手戻る */
+    onBack: () => void;
+    /** 1手進む */
+    onForward: () => void;
+    /** 最初へ */
+    onToStart: () => void;
+    /** 最後へ */
+    onToEnd: () => void;
+    /** 巻き戻し中か */
+    isRewound?: boolean;
+    /** 分岐情報 */
+    branchInfo?: BranchInfo;
+    /** 進む操作が可能か（現在ノードに子がある） */
+    canGoForward?: boolean;
+}
 
 interface EvalPanelProps {
     /** 評価値の履歴（グラフ用） */
@@ -25,58 +54,13 @@ interface EvalPanelProps {
     onCopyKif?: () => string;
     /** デフォルトで開いているか */
     defaultOpen?: boolean;
+    /** ナビゲーション機能 */
+    navigation?: NavigationProps;
+    /** ナビゲーション無効化（対局中など） */
+    navigationDisabled?: boolean;
+    /** 分岐マーカー（ply -> 分岐数） */
+    branchMarkers?: Map<number, number>;
 }
-
-const panelStyle: CSSProperties = {
-    background: "hsl(var(--card, 0 0% 100%))",
-    border: "1px solid hsl(var(--border, 0 0% 86%))",
-    borderRadius: "12px",
-    boxShadow: "0 14px 28px rgba(0,0,0,0.12)",
-    width: "var(--panel-width)",
-    overflow: "hidden",
-};
-
-const headerStyle: CSSProperties = {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    padding: "10px 12px",
-    cursor: "pointer",
-    userSelect: "none",
-    borderBottom: "1px solid hsl(var(--border, 0 0% 86%))",
-};
-
-const headerCollapsedStyle: CSSProperties = {
-    ...headerStyle,
-    borderBottom: "none",
-};
-
-const titleStyle: CSSProperties = {
-    fontWeight: 700,
-    fontSize: "14px",
-    display: "flex",
-    alignItems: "center",
-    gap: "8px",
-};
-
-const warningStyle: CSSProperties = {
-    fontSize: "11px",
-    color: "hsl(var(--muted-foreground, 0 0% 48%))",
-    fontWeight: 400,
-};
-
-const toggleIconStyle: CSSProperties = {
-    fontSize: "12px",
-    color: "hsl(var(--muted-foreground, 0 0% 48%))",
-    transition: "transform 0.2s ease",
-};
-
-const contentStyle: CSSProperties = {
-    padding: "12px",
-    display: "flex",
-    flexDirection: "column",
-    gap: "12px",
-};
 
 /**
  * 評価値パネル
@@ -89,6 +73,9 @@ export function EvalPanel({
     onPlySelect,
     onCopyKif,
     defaultOpen = false,
+    navigation,
+    navigationDisabled = false,
+    branchMarkers,
 }: EvalPanelProps): ReactElement {
     const [isOpen, setIsOpen] = useState(defaultOpen);
     const [showEvalModal, setShowEvalModal] = useState(false);
@@ -106,45 +93,54 @@ export function EvalPanel({
     }, []);
 
     return (
-        <div style={panelStyle}>
+        <div className="bg-card border border-border rounded-xl shadow-lg w-[var(--panel-width)] overflow-hidden">
             <button
                 type="button"
-                style={isOpen ? headerStyle : headerCollapsedStyle}
+                className={`flex justify-between items-center px-3 py-2.5 cursor-pointer select-none w-full bg-transparent border-0 text-left font-[inherit] text-[inherit] ${
+                    isOpen ? "border-b border-border" : ""
+                }`}
                 onClick={handleToggle}
                 aria-expanded={isOpen}
             >
-                <div style={titleStyle}>
+                <div className="font-bold text-sm flex items-center gap-2">
                     <span>📊 評価値・解析</span>
-                    {!isOpen && <span style={warningStyle}>（クリックで展開）</span>}
+                    {!isOpen && (
+                        <span className="text-[11px] text-muted-foreground font-normal">
+                            （クリックで展開）
+                        </span>
+                    )}
                 </div>
                 <span
-                    style={{
-                        ...toggleIconStyle,
-                        transform: isOpen ? "rotate(180deg)" : "rotate(0deg)",
-                    }}
+                    className={`text-xs text-muted-foreground transition-transform duration-200 ${
+                        isOpen ? "rotate-180" : "rotate-0"
+                    }`}
                 >
                     ▼
                 </span>
             </button>
 
             {isOpen && (
-                <div style={contentStyle}>
-                    {/* 評価値グラフ（クリックで拡大モーダル表示） */}
+                <div className="p-3 flex flex-col gap-3">
+                    {/* 評価値グラフ（クリックで拡大モーダル表示、手数選択対応） */}
                     <EvalGraph
                         evalHistory={evalHistory}
                         currentPly={currentPly}
                         compact={true}
                         height={80}
                         onClick={handleGraphClick}
+                        onPlySelect={onPlySelect}
                     />
 
-                    {/* 棋譜パネル（評価値付き） */}
+                    {/* 棋譜パネル（評価値付き、ナビゲーション機能付き） */}
                     <KifuPanel
                         kifMoves={kifMoves}
                         currentPly={currentPly}
                         showEval={true}
                         onPlySelect={onPlySelect}
                         onCopyKif={onCopyKif}
+                        navigation={navigation}
+                        navigationDisabled={navigationDisabled}
+                        branchMarkers={branchMarkers}
                     />
                 </div>
             )}

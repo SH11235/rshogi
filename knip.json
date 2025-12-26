@@ -8,5 +8,6 @@
                 "src/engine.worker.threaded.ts"
             ]
         }
-    }
+    },
+    "ignoreDependencies": ["wasm-opt"]
 }
