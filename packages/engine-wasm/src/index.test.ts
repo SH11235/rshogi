@@ -487,6 +487,7 @@ describe("createWasmEngineClient", () => {
 
             const workers: MockWorker[] = [];
             const workerFactory = vi.fn((kind: WorkerKind) => {
+                void kind;
                 const worker = createMockWorker();
                 workers.push(worker);
                 return worker as unknown as Worker;
