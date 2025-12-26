@@ -349,7 +349,7 @@ export function KifuPanel({
                                                 </div>
                                             </div>
                                             <div className="text-muted-foreground text-[10px] pt-1 border-t border-border">
-                                                値をクリックで詳細表示
+                                                各評価値にホバーで詳細表示
                                             </div>
                                         </div>
                                     </TooltipContent>
