@@ -916,10 +916,7 @@ impl Search {
                 }
             }
 
-            let search_depth = worker.adjusted_depth(depth);
-            if search_depth < 1 {
-                continue;
-            }
+            let search_depth = depth;
 
             worker.root_depth = search_depth;
             worker.sel_depth = 0;
@@ -1228,10 +1225,7 @@ pub(crate) fn search_helper(
             }
         }
 
-        let search_depth = worker.adjusted_depth(depth);
-        if search_depth < 1 {
-            continue;
-        }
+        let search_depth = depth;
 
         worker.root_depth = search_depth;
         worker.sel_depth = 0;
