@@ -403,6 +403,9 @@ export function ShogiMatch({
         isAnalyzing,
         analyzePosition,
         cancelAnalysis,
+        engineErrorDetails,
+        retryEngine,
+        isRetrying,
     } = useEngineManager({
         sides,
         engineOptions,
@@ -1644,7 +1647,13 @@ export function ShogiMatch({
                             onSettingsChange={setDisplaySettings}
                         />
 
-                        <EngineLogsPanel eventLogs={eventLogs} errorLogs={errorLogs} />
+                        <EngineLogsPanel
+                            eventLogs={eventLogs}
+                            errorLogs={errorLogs}
+                            engineErrorDetails={engineErrorDetails}
+                            onRetry={retryEngine}
+                            isRetrying={isRetrying}
+                        />
                     </div>
                 </div>
             </section>

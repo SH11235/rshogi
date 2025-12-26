@@ -64,7 +64,14 @@ export interface EngineBestMoveEvent {
 
 export type EngineErrorSeverity = "warning" | "error" | "fatal";
 
-/** Well-known error codes for type-safe error handling */
+/**
+ * Well-known error codes for type-safe error handling.
+ *
+ * - WASM_* : Wasm固有のエラー（初期化失敗、スレッド関連）
+ * - General : 一般的なエラー（モデル読み込み、局面、探索）
+ * - ENGINE_ERROR_STATE : エンジンがエラー状態のため操作が拒否されたことを示す
+ *   （エラー原因ではなく、エラー状態にあることを通知するために使用）
+ */
 export type EngineErrorCode =
     // Wasm-specific errors
     | "WASM_INIT_FAILED"
@@ -78,7 +85,12 @@ export type EngineErrorCode =
     | "POSITION_INVALID"
     | "SEARCH_FAILED"
     | "TIMEOUT"
-    | "UNKNOWN";
+    | "UNKNOWN"
+    // Error state indicator (not a failure cause, but indicates engine is in error state)
+    | "ENGINE_ERROR_STATE";
+
+/** Backend status for error state management */
+export type EngineBackendStatus = "ready" | "error" | "mock";
 
 export interface EngineErrorEvent {
     type: "error";
@@ -122,6 +134,20 @@ export interface EngineClient {
      * Optional - may not be implemented by all backends.
      */
     getThreadInfo?(): ThreadInfo;
+    /**
+     * Reset the engine to allow retry after error.
+     * - Clears error state and allows reinitialization
+     * - Does NOT automatically call init() - caller must do so after reset
+     * - Safe to call even when engine is not in error state (no-op)
+     * - Terminates any existing worker and cancels pending operations
+     * Optional - only implemented by wasm backend.
+     */
+    reset?(): Promise<void>;
+    /**
+     * Get current backend status.
+     * Optional - only implemented by wasm backend.
+     */
+    getBackendStatus?(): EngineBackendStatus;
 }
 
 /**

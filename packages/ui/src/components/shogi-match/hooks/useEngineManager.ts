@@ -10,6 +10,13 @@ import type { ClockSettings } from "./useClockManager";
 
 type EngineStatus = "idle" | "thinking" | "error";
 
+interface EngineErrorDetails {
+    hasError: boolean;
+    errorCode?: string;
+    errorMessage?: string;
+    canRetry: boolean;
+}
+
 interface SearchState {
     handle: SearchHandle | null;
     pending: boolean;
@@ -119,6 +126,12 @@ interface UseEngineManagerReturn {
     analyzePosition: (request: AnalysisRequest) => Promise<void>;
     /** 解析をキャンセルする */
     cancelAnalysis: () => Promise<void>;
+    /** エンジンエラーの詳細情報 */
+    engineErrorDetails: Record<Player, EngineErrorDetails | null>;
+    /** エンジンをリトライする */
+    retryEngine: (side: Player) => Promise<void>;
+    /** リトライ中かどうか */
+    isRetrying: Record<Player, boolean>;
 }
 
 export function formatEvent(event: EngineEvent, label: string): string {
@@ -229,6 +242,16 @@ export function useEngineManager({
     const [eventLogs, setEventLogs] = useState<string[]>([]);
     const [errorLogs, setErrorLogs] = useState<string[]>([]);
     const [isAnalyzing, setIsAnalyzing] = useState(false);
+    const [engineErrorDetails, setEngineErrorDetails] = useState<
+        Record<Player, EngineErrorDetails | null>
+    >({
+        sente: null,
+        gote: null,
+    });
+    const [isRetrying, setIsRetrying] = useState<Record<Player, boolean>>({
+        sente: false,
+        gote: false,
+    });
 
     const addErrorLog = useCallback(
         (message: string) => {
@@ -357,6 +380,69 @@ export function useEngineManager({
         );
     }, [disposeEngineForSide]);
 
+    const retryEngine = useCallback(
+        async (side: Player) => {
+            const engineState = engineStatesRef.current[side];
+            if (!engineState.client) return;
+
+            // Prevent concurrent retry attempts using React state
+            setIsRetrying((prev) => {
+                if (prev[side]) {
+                    addErrorLog(`リトライ中です (${side})`);
+                    return prev;
+                }
+                return { ...prev, [side]: true };
+            });
+
+            // Check if already retrying (state might not have updated yet)
+            const searchState = searchStatesRef.current[side];
+            if (searchState.pending) {
+                return;
+            }
+            searchState.pending = true;
+
+            try {
+                // Call reset() if the client supports it
+                const client = engineState.client;
+                if ("reset" in client && typeof client.reset === "function") {
+                    await client.reset();
+                }
+
+                // Clear error state before retry
+                setEngineErrorDetails((prev) => ({
+                    ...prev,
+                    [side]: null,
+                }));
+                setEngineStatus((prev) => ({ ...prev, [side]: "idle" }));
+                engineState.ready = false;
+
+                // Retry initialization
+                await client.init();
+                engineState.ready = true;
+                setEngineReady((prev) => ({ ...prev, [side]: true }));
+            } catch (error) {
+                const errorMsg = error instanceof Error ? error.message : String(error);
+                addErrorLog(`リトライ失敗 (${side}): ${errorMsg}`);
+                setEngineStatus((prev) => ({ ...prev, [side]: "error" }));
+
+                // Update error details on retry failure
+                setEngineErrorDetails((prev) => ({
+                    ...prev,
+                    [side]: {
+                        hasError: true,
+                        errorCode: "WASM_INIT_FAILED",
+                        errorMessage: errorMsg,
+                        canRetry: true,
+                    },
+                }));
+            } finally {
+                searchState.pending = false;
+                setIsRetrying((prev) => ({ ...prev, [side]: false }));
+            }
+        },
+        [addErrorLog],
+    );
+
     const applyMoveFromEngine = useCallback(
         (move: string) => {
             const trimmed = move.trim();
@@ -458,6 +544,19 @@ export function useEngineManager({
                     }
 
                     addErrorLog(event.message);
+
+                    // Save error details for UI display
+                    setEngineErrorDetails((prev) => ({
+                        ...prev,
+                        [side]: {
+                            hasError: true,
+                            errorCode: event.code,
+                            errorMessage: event.message,
+                            canRetry:
+                                event.code === "WASM_INIT_FAILED" ||
+                                event.code === "ENGINE_ERROR_STATE",
+                        },
+                    }));
                 }
             });
 
@@ -792,5 +891,8 @@ export function useEngineManager({
         isAnalyzing,
         analyzePosition,
         cancelAnalysis,
+        engineErrorDetails,
+        retryEngine,
+        isRetrying,
     };
 }
