@@ -5,11 +5,18 @@
  */
 
 import type { ReactElement } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Switch } from "../../switch";
 import type { KifMove } from "../utils/kifFormat";
 import { formatEval } from "../utils/kifFormat";
 import { KifuNavigationToolbar } from "./KifuNavigationToolbar";
+
+/**
+ * 評価値データが存在するかチェック
+ */
+function hasEvalData(kifMoves: KifMove[]): boolean {
+    return kifMoves.some((m) => m.evalCp !== undefined || m.evalMate !== undefined);
+}
 
 interface BranchInfo {
     hasBranches: boolean;
@@ -62,6 +69,79 @@ interface KifuPanelProps {
 }
 
 /**
+ * 評価値ヒントバナー
+ * 評価値がOFFだがデータが存在する場合に表示
+ */
+function EvalHintBanner({
+    onEnable,
+    onDismiss,
+}: {
+    onEnable: () => void;
+    onDismiss: () => void;
+}): ReactElement {
+    return (
+        <div
+            className="
+                relative overflow-hidden
+                bg-gradient-to-r from-[hsl(var(--wafuu-washi-warm))] to-[hsl(var(--wafuu-washi))]
+                border border-[hsl(var(--wafuu-kin)/0.4)]
+                rounded-lg px-3 py-2 mb-2
+                animate-[slideDown_0.3s_ease-out,fadeIn_0.3s_ease-out]
+            "
+            style={{
+                boxShadow: "0 2px 8px hsl(var(--wafuu-kin) / 0.15)",
+            }}
+        >
+            {/* 金色のアクセントライン */}
+            <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-transparent via-[hsl(var(--wafuu-kin))] to-transparent opacity-60" />
+
+            <div className="flex items-center justify-between gap-2">
+                <button
+                    type="button"
+                    onClick={onEnable}
+                    className="
+                        flex items-center gap-2 text-[12px] font-medium
+                        text-[hsl(var(--wafuu-sumi))] dark:text-[hsl(var(--foreground))]
+                        hover:text-[hsl(var(--wafuu-shu))] transition-colors
+                        bg-transparent border-none cursor-pointer p-0
+                    "
+                >
+                    <span
+                        className="
+                            inline-flex items-center justify-center
+                            w-5 h-5 rounded-full
+                            bg-[hsl(var(--wafuu-kin)/0.2)]
+                            text-[hsl(var(--wafuu-kin))]
+                            animate-[pulse_2s_ease-in-out_infinite]
+                        "
+                    >
+                        ✦
+                    </span>
+                    <span>評価値データがあります。表示しますか？</span>
+                </button>
+
+                <button
+                    type="button"
+                    onClick={onDismiss}
+                    className="
+                        flex items-center justify-center
+                        w-5 h-5 rounded-full
+                        text-[hsl(var(--muted-foreground))]
+                        hover:text-[hsl(var(--foreground))]
+                        hover:bg-[hsl(var(--muted))]
+                        bg-transparent border-none cursor-pointer
+                        transition-colors
+                    "
+                    aria-label="閉じる"
+                >
+                    ✕
+                </button>
+            </div>
+        </div>
+    );
+}
+
+/**
  * 評価値のスタイルクラスを決定
  */
 function getEvalClassName(evalCp?: number, evalMate?: number): string {
@@ -91,6 +171,13 @@ export function KifuPanel({
     const listRef = useRef<HTMLDivElement>(null);
     const currentRowRef = useRef<HTMLElement>(null);
     const [copySuccess, setCopySuccess] = useState(false);
+    const [hintDismissed, setHintDismissed] = useState(false);
+
+    // 評価値データの存在チェック
+    const evalDataExists = useMemo(() => hasEvalData(kifMoves), [kifMoves]);
+
+    // ヒントバナーを表示するかどうか
+    const showHintBanner = !showEval && evalDataExists && !hintDismissed && onShowEvalChange;
 
     // 現在の手数が変わったら自動スクロール（現在の手を中央に配置）
     useEffect(() => {
@@ -137,13 +224,45 @@ export function KifuPanel({
                     </span>
                 </div>
                 <div className="flex items-center gap-2">
-                    {/* 評価値表示トグル */}
+                    {/* 評価値表示トグル（強調版） */}
                     {onShowEvalChange && (
                         <label
                             htmlFor="kifu-eval-toggle"
-                            className="flex items-center gap-1.5 cursor-pointer"
+                            className={`
+                                relative flex items-center gap-1.5 cursor-pointer
+                                px-2 py-1 rounded-md transition-all duration-200
+                                ${
+                                    evalDataExists && !showEval
+                                        ? "bg-[hsl(var(--wafuu-kin)/0.1)] hover:bg-[hsl(var(--wafuu-kin)/0.2)]"
+                                        : "hover:bg-muted/50"
+                                }
+                            `}
                         >
-                            <span className="text-[11px] font-normal text-muted-foreground">
+                            {/* 評価値データ存在インジケーター */}
+                            {evalDataExists && !showEval && (
+                                <span
+                                    className="
+                                        absolute -top-1 -right-1
+                                        w-2.5 h-2.5 rounded-full
+                                        bg-[hsl(var(--wafuu-kin))]
+                                        animate-[pulse_2s_ease-in-out_infinite]
+                                        shadow-[0_0_6px_hsl(var(--wafuu-kin)/0.6)]
+                                    "
+                                    aria-hidden="true"
+                                />
+                            )}
+                            <span
+                                className={`
+                                    text-[12px] font-medium transition-colors
+                                    ${
+                                        evalDataExists && !showEval
+                                            ? "text-[hsl(var(--wafuu-kin))]"
+                                            : showEval
+                                              ? "text-foreground"
+                                              : "text-muted-foreground"
+                                    }
+                                `}
+                            >
                                 評価値
                             </span>
                             <Switch
@@ -184,6 +303,14 @@ export function KifuPanel({
                     branchInfo={navigation.branchInfo}
                     isRewound={navigation.isRewound}
                     canGoForward={navigation.canGoForward}
+                />
+            )}
+
+            {/* 評価値ヒントバナー */}
+            {showHintBanner && (
+                <EvalHintBanner
+                    onEnable={() => onShowEvalChange(true)}
+                    onDismiss={() => setHintDismissed(true)}
                 />
             )}
 
