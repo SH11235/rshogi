@@ -160,6 +160,13 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
     let threadedDisabled = false;
     let activeThreads: number | null = null;
 
+    // Cache for getThreadInfo() - hardwareConcurrency and threadedAvailable rarely change
+    let cachedStaticThreadInfo: {
+        hardwareConcurrency: number;
+        maxThreads: number;
+        threadedAvailable: boolean;
+    } | null = null;
+
     const pendingOptions = new Map<string, string | number | boolean>();
     const warnedReasons = new Set<string>();
 
@@ -697,21 +704,23 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
             initInFlight = null;
         },
         getThreadInfo(): ThreadInfo {
-            const hcRaw =
-                typeof navigator !== "undefined" &&
-                typeof navigator.hardwareConcurrency === "number"
-                    ? navigator.hardwareConcurrency
+            // Use cached static values (hardwareConcurrency, threadedAvailable rarely change)
+            if (!cachedStaticThreadInfo) {
+                const hcRaw =
+                    typeof navigator !== "undefined" &&
+                    typeof navigator.hardwareConcurrency === "number"
+                        ? navigator.hardwareConcurrency
+                        : 1;
+                const hardwareConcurrency = Math.max(1, Math.trunc(hcRaw));
+                const threadedAvailable = getThreadedAvailability();
+                const maxThreads = threadedAvailable
+                    ? Math.max(1, Math.min(MAX_WASM_THREADS, hardwareConcurrency))
                     : 1;
-            const hardwareConcurrency = Math.max(1, Math.trunc(hcRaw));
-            const threadedAvailable = getThreadedAvailability();
-            const maxThreads = threadedAvailable
-                ? Math.max(1, Math.min(MAX_WASM_THREADS, hardwareConcurrency))
-                : 1;
+                cachedStaticThreadInfo = { hardwareConcurrency, maxThreads, threadedAvailable };
+            }
             return {
                 activeThreads: activeThreads ?? 1,
-                maxThreads,
-                threadedAvailable,
-                hardwareConcurrency,
+                ...cachedStaticThreadInfo,
             };
         },
     };

@@ -52,6 +52,8 @@ export const DialogContent = forwardRef<
                     left: "50%",
                     transform: "translate(-50%, -50%)",
                     width: "min(960px, calc(100% - 24px))",
+                    // maxHeight/overflow を inline style で指定し、className との競合を防止。
+                    // className に同様の指定があると優先順位の問題でスクロールが効かなくなる。
                     maxHeight: "85vh",
                     overflow: "auto",
                     backgroundColor: "hsl(var(--card, 0 0% 100%))",

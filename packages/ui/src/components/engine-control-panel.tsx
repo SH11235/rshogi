@@ -6,7 +6,7 @@ import type {
     ThreadInfo,
 } from "@shogi/engine-client";
 import type { CSSProperties, ReactElement } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "./button";
 import {
     Dialog,
@@ -196,6 +196,12 @@ export function EngineControlPanel({
     const [latestNps, setLatestNps] = useState<number | null>(null);
     const handleRef = useRef<SearchHandle | null>(null);
 
+    const updateThreadInfo = useCallback(() => {
+        if (engine.getThreadInfo) {
+            setThreadInfo(engine.getThreadInfo());
+        }
+    }, [engine]);
+
     const optionDefaults = useMemo(() => {
         const defaults: Record<string, string> = {};
         for (const opt of USI_OPTIONS) {
@@ -211,10 +217,8 @@ export function EngineControlPanel({
 
     useEffect(() => {
         // Update thread info on mount and when engine changes
-        if (engine.getThreadInfo) {
-            setThreadInfo(engine.getThreadInfo());
-        }
-    }, [engine]);
+        updateThreadInfo();
+    }, [updateThreadInfo]);
 
     useEffect(() => {
         const unsubscribe = engine.subscribe((event) => {
@@ -276,9 +280,7 @@ export function EngineControlPanel({
         setInitialized(true);
         setStatus("ready");
         // Update thread info after init
-        if (engine.getThreadInfo) {
-            setThreadInfo(engine.getThreadInfo());
-        }
+        updateThreadInfo();
     };
 
     const applyOptions = async (): Promise<boolean> => {
