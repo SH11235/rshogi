@@ -259,11 +259,11 @@ export function EvalGraphModal({
             }}
         >
             {/* ヘッダー（ドラッグハンドル） */}
-            {/* biome-ignore lint/a11y/noStaticElementInteractions: drag handle for window movement */}
             <div
                 className="flex justify-between items-center px-3 py-2 bg-muted border-b border-border cursor-move select-none h-10 box-border"
                 onMouseDown={handleMoveStart}
-                role="presentation"
+                role="toolbar"
+                aria-label="ウィンドウ移動ハンドル"
             >
                 <span className="font-semibold text-sm">評価値推移</span>
                 <button
@@ -286,78 +286,56 @@ export function EvalGraphModal({
                 />
             </div>
 
-            {/* 辺リサイズハンドル（上） */}
-            {/* biome-ignore lint/a11y/noStaticElementInteractions: resize handle */}
+            {/* リサイズハンドル - マウス操作専用のためアクセシビリティツリーから除外 */}
             <div
                 className="absolute top-0 left-3 right-3 cursor-ns-resize"
                 style={{ height: EDGE_HANDLE_SIZE }}
                 onMouseDown={createResizeHandler("resize-n")}
-                role="presentation"
+                aria-hidden="true"
             />
-
-            {/* 辺リサイズハンドル（下） */}
-            {/* biome-ignore lint/a11y/noStaticElementInteractions: resize handle */}
             <div
                 className="absolute bottom-0 left-3 right-3 cursor-ns-resize"
                 style={{ height: EDGE_HANDLE_SIZE }}
                 onMouseDown={createResizeHandler("resize-s")}
-                role="presentation"
+                aria-hidden="true"
             />
-
-            {/* 辺リサイズハンドル（左） */}
-            {/* biome-ignore lint/a11y/noStaticElementInteractions: resize handle */}
             <div
                 className="absolute left-0 top-3 bottom-3 cursor-ew-resize"
                 style={{ width: EDGE_HANDLE_SIZE }}
                 onMouseDown={createResizeHandler("resize-w")}
-                role="presentation"
+                aria-hidden="true"
             />
-
-            {/* 辺リサイズハンドル（右） */}
-            {/* biome-ignore lint/a11y/noStaticElementInteractions: resize handle */}
             <div
                 className="absolute right-0 top-3 bottom-3 cursor-ew-resize"
                 style={{ width: EDGE_HANDLE_SIZE }}
                 onMouseDown={createResizeHandler("resize-e")}
-                role="presentation"
+                aria-hidden="true"
             />
-
-            {/* 隅リサイズハンドル（左上） */}
-            {/* biome-ignore lint/a11y/noStaticElementInteractions: resize handle */}
             <div
                 className="absolute left-0 top-0 w-3 h-3 cursor-nwse-resize"
                 onMouseDown={createResizeHandler("resize-nw")}
-                role="presentation"
+                aria-hidden="true"
             >
                 <div className="absolute left-1 top-1 w-2 h-2 border-l-2 border-t-2 border-muted-foreground opacity-50" />
             </div>
-
-            {/* 隅リサイズハンドル（右上） */}
-            {/* biome-ignore lint/a11y/noStaticElementInteractions: resize handle */}
             <div
                 className="absolute right-0 top-0 w-3 h-3 cursor-nesw-resize"
                 onMouseDown={createResizeHandler("resize-ne")}
-                role="presentation"
+                aria-hidden="true"
             >
                 <div className="absolute right-1 top-1 w-2 h-2 border-r-2 border-t-2 border-muted-foreground opacity-50" />
             </div>
-
-            {/* 隅リサイズハンドル（左下） */}
-            {/* biome-ignore lint/a11y/noStaticElementInteractions: resize handle */}
             <div
                 className="absolute left-0 bottom-0 w-3 h-3 cursor-nesw-resize"
                 onMouseDown={createResizeHandler("resize-sw")}
-                role="presentation"
+                aria-hidden="true"
             >
                 <div className="absolute left-1 bottom-1 w-2 h-2 border-l-2 border-b-2 border-muted-foreground opacity-50" />
             </div>
-
-            {/* 隅リサイズハンドル（右下） */}
-            {/* biome-ignore lint/a11y/noStaticElementInteractions: resize handle */}
             <div
                 className="absolute right-0 bottom-0 w-3 h-3 cursor-nwse-resize"
                 onMouseDown={createResizeHandler("resize-se")}
-                role="presentation"
+                aria-hidden="true"
             >
                 <div className="absolute right-1 bottom-1 w-2 h-2 border-r-2 border-b-2 border-muted-foreground opacity-50" />
             </div>
