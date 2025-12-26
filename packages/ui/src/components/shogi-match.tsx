@@ -220,7 +220,10 @@ export function ShogiMatch({
         () => Object.fromEntries(getAllSquares().map((sq) => [sq, null])) as BoardState,
         [],
     );
-    const [sides, setSides] = useState<{ sente: SideSetting; gote: SideSetting }>(defaultSides);
+    const [sides, setSides] = useLocalStorage<{ sente: SideSetting; gote: SideSetting }>(
+        "shogi-match-sides",
+        defaultSides,
+    );
     const [position, setPosition] = useState<PositionState>({
         board: emptyBoard,
         hands: createEmptyHands(),
@@ -238,10 +241,13 @@ export function ShogiMatch({
     const [showResultBanner, setShowResultBanner] = useState(false);
     const [editMessage, setEditMessage] = useState<string | null>(null);
     const [flipBoard, setFlipBoard] = useState(false);
-    const [timeSettings, setTimeSettings] = useState<ClockSettings>({
-        sente: { mainMs: initialMainTimeMs, byoyomiMs: initialByoyomiMs },
-        gote: { mainMs: initialMainTimeMs, byoyomiMs: initialByoyomiMs },
-    });
+    const [timeSettings, setTimeSettings] = useLocalStorage<ClockSettings>(
+        "shogi-match-time-settings",
+        {
+            sente: { mainMs: initialMainTimeMs, byoyomiMs: initialByoyomiMs },
+            gote: { mainMs: initialMainTimeMs, byoyomiMs: initialByoyomiMs },
+        },
+    );
     const [isMatchRunning, setIsMatchRunning] = useState(false);
     const [isEditMode, setIsEditMode] = useState(true);
     const [editOwner, setEditOwner] = useState<Player>("sente");
