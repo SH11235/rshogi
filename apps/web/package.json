@@ -6,6 +6,7 @@
     "scripts": {
         "dev": "vite",
         "build": "tsc -b && vite build",
+        "build:analyze": "ANALYZE=true tsc -b && ANALYZE=true vite build",
         "format": "pnpm --workspace-root exec biome format --write .",
         "format:check": "pnpm --workspace-root exec biome format .",
         "lint": "pnpm --workspace-root exec biome check .",
@@ -26,6 +27,7 @@
         "@types/react": "^19.2.7",
         "@types/react-dom": "^19.2.3",
         "@vitejs/plugin-react": "^5.1.2",
+        "rollup-plugin-visualizer": "^6.0.5",
         "tailwindcss": "^4.1.18",
         "typescript": "~5.9.3",
         "vite": "^7.3.0"
