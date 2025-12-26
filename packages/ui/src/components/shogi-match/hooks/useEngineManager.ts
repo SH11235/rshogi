@@ -103,6 +103,10 @@ interface AnalysisRequest {
     timeMs?: number;
 }
 
+/** 解析のデフォルト設定 */
+const DEFAULT_ANALYSIS_TIME_MS = 3000;
+const DEFAULT_ANALYSIS_DEPTH = 15;
+
 interface UseEngineManagerReturn {
     /** エンジンの準備状態 */
     engineReady: Record<Player, boolean>;
@@ -777,8 +781,11 @@ export function useEngineManager({
                 await cancelAnalysis();
             }
 
-            // 使用するエンジンを決定（最初に見つかったエンジンを使用）
-            const engineOpt = engineOptions[0];
+            // 使用するエンジンを決定（対局で使用中のエンジンを優先）
+            const engineOpt =
+                engineOptions.find(
+                    (opt) => opt.id === sides.sente.engineId || opt.id === sides.gote.engineId,
+                ) ?? engineOptions[0];
             if (!engineOpt) {
                 addErrorLog("利用可能なエンジンがありません");
                 return;
@@ -786,63 +793,80 @@ export function useEngineManager({
 
             const analysisState = analysisEngineRef.current;
 
-            try {
-                setIsAnalyzing(true);
-                analysisState.ply = request.ply;
+            // 状態を初期化
+            setIsAnalyzing(true);
+            analysisState.ply = request.ply;
 
-                // エンジンクライアントを作成または再利用
-                let client = analysisState.client;
-                if (!client) {
+            // エンジンクライアントを作成または再利用
+            let client = analysisState.client;
+            if (!client) {
+                try {
                     client = engineOpt.createClient();
                     analysisState.client = client;
                     await client.init();
+                } catch (error) {
+                    addErrorLog(`エンジン初期化エラー: ${String(error)}`);
+                    analysisState.ply = null;
+                    setIsAnalyzing(false);
+                    return;
+                }
+            }
+
+            // 既存のサブスクリプションがある場合は解除して再登録
+            if (analysisState.subscription) {
+                analysisState.subscription();
+            }
+
+            const unsub = client.subscribe((event) => {
+                const label = "Analysis";
+                setEventLogs((prev) => {
+                    const next = [formatEvent(event, label), ...prev];
+                    return next.length > maxLogs ? next.slice(0, maxLogs) : next;
+                });
+
+                if (event.type === "info") {
+                    // 評価値が含まれている場合はコールバックを呼ぶ
+                    if (
+                        onEvalUpdate &&
+                        (event.scoreCp !== undefined || event.scoreMate !== undefined)
+                    ) {
+                        const ply = analysisEngineRef.current.ply;
+                        if (ply !== null) {
+                            onEvalUpdate(ply, event);
+                        }
+                    }
                 }
 
-                // イベントサブスクリプションをセットアップ
-                if (!analysisState.subscription) {
-                    const unsub = client.subscribe((event) => {
-                        const label = "Analysis";
-                        setEventLogs((prev) => {
-                            const next = [formatEvent(event, label), ...prev];
-                            return next.length > maxLogs ? next.slice(0, maxLogs) : next;
-                        });
-
-                        if (event.type === "info") {
-                            // 評価値が含まれている場合はコールバックを呼ぶ
-                            if (
-                                onEvalUpdate &&
-                                (event.scoreCp !== undefined || event.scoreMate !== undefined)
-                            ) {
-                                const ply = analysisEngineRef.current.ply;
-                                if (ply !== null) {
-                                    onEvalUpdate(ply, event);
-                                }
-                            }
-                        }
-
-                        if (event.type === "bestmove") {
-                            // 解析完了
-                            analysisEngineRef.current.handle = null;
-                            analysisEngineRef.current.ply = null;
-                            setIsAnalyzing(false);
-                        }
-
-                        if (event.type === "error") {
-                            addErrorLog(event.message);
-                            analysisEngineRef.current.handle = null;
-                            analysisEngineRef.current.ply = null;
-                            setIsAnalyzing(false);
-                        }
-                    });
-                    analysisState.subscription = unsub;
+                if (event.type === "bestmove") {
+                    // 解析完了
+                    analysisEngineRef.current.handle = null;
+                    analysisEngineRef.current.ply = null;
+                    setIsAnalyzing(false);
                 }
 
-                // 局面を読み込み
+                if (event.type === "error") {
+                    addErrorLog(event.message);
+                    analysisEngineRef.current.handle = null;
+                    analysisEngineRef.current.ply = null;
+                    setIsAnalyzing(false);
+                }
+            });
+            analysisState.subscription = unsub;
+
+            // 局面を読み込み
+            try {
                 await client.loadPosition(request.sfen, request.moves);
+            } catch (error) {
+                addErrorLog(`局面読み込みエラー: ${String(error)}`);
+                analysisState.ply = null;
+                setIsAnalyzing(false);
+                return;
+            }
 
-                // 探索開始
-                const timeMs = request.timeMs ?? 3000;
-                const depth = request.depth ?? 15;
+            // 探索開始
+            try {
+                const timeMs = request.timeMs ?? DEFAULT_ANALYSIS_TIME_MS;
+                const depth = request.depth ?? DEFAULT_ANALYSIS_DEPTH;
                 const handle = await client.search({
                     limits: {
                         movetimeMs: timeMs,
@@ -853,8 +877,7 @@ export function useEngineManager({
 
                 analysisState.handle = handle;
             } catch (error) {
-                addErrorLog(`解析エラー: ${String(error)}`);
-                analysisState.handle = null;
+                addErrorLog(`探索開始エラー: ${String(error)}`);
                 analysisState.ply = null;
                 setIsAnalyzing(false);
             }
@@ -867,6 +890,7 @@ export function useEngineManager({
             isMatchRunning,
             maxLogs,
             onEvalUpdate,
+            sides,
         ],
     );
 
