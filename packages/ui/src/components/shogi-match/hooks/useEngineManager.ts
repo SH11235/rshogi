@@ -93,7 +93,7 @@ interface UseEngineManagerProps {
 }
 
 /** 解析リクエストパラメータ */
-export interface AnalysisRequest {
+interface AnalysisRequest {
     sfen: string;
     moves: string[];
     ply: number;
