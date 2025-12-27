@@ -539,14 +539,17 @@ mod imp {
             max_moves_to_draw: i32,
             skill_enabled: bool,
         ) {
+            // Clear previous results before starting new search
+            // This must be done even when helper_count is 0, to prevent stale results
+            // from being used after switching from multi-threaded to single-threaded mode.
+            if let Ok(mut results) = self.helper_results.lock() {
+                results.clear();
+            }
+            self.pending_tasks.store(0, Ordering::SeqCst);
+
             let helper_count = self.num_threads.saturating_sub(1);
             if helper_count == 0 {
                 return;
-            }
-
-            // Clear previous results before starting new search
-            if let Ok(mut results) = self.helper_results.lock() {
-                results.clear();
             }
 
             // Set pending task count before spawning
