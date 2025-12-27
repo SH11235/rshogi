@@ -1801,6 +1801,8 @@ export function ShogiMatch({
                             }
                             onStartBatchAnalysis={handleStartBatchAnalysis}
                             onCancelBatchAnalysis={handleCancelBatchAnalysis}
+                            analysisSettings={analysisSettings}
+                            onAnalysisSettingsChange={setAnalysisSettings}
                         />
 
                         {/* 評価値グラフパネル（折りたたみ） */}

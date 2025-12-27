@@ -5,10 +5,13 @@
  */
 
 import type { PositionState } from "@shogi/app-core";
+import { detectParallelism } from "@shogi/app-core";
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Popover, PopoverContent, PopoverTrigger } from "../../popover";
 import { Switch } from "../../switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../../tooltip";
+import type { AnalysisSettings } from "../types";
 import type { KifMove } from "../utils/kifFormat";
 import { formatEval, getEvalTooltipInfo } from "../utils/kifFormat";
 import { EvalPopover } from "./EvalPopover";
@@ -92,6 +95,10 @@ interface KifuPanelProps {
     onStartBatchAnalysis?: () => void;
     /** 一括解析をキャンセルするコールバック */
     onCancelBatchAnalysis?: () => void;
+    /** 解析設定 */
+    analysisSettings?: AnalysisSettings;
+    /** 解析設定変更コールバック */
+    onAnalysisSettingsChange?: (settings: AnalysisSettings) => void;
 }
 
 /**
@@ -220,6 +227,143 @@ function getEvalClassName(evalCp?: number, evalMate?: number): string {
     return `${baseClass} text-muted-foreground`;
 }
 
+/**
+ * 並列ワーカー数の選択肢
+ */
+const PARALLEL_WORKER_OPTIONS: { value: number; label: string }[] = [
+    { value: 0, label: "自動" },
+    { value: 1, label: "1" },
+    { value: 2, label: "2" },
+    { value: 3, label: "3" },
+    { value: 4, label: "4" },
+];
+
+/**
+ * 解析時間の選択肢
+ */
+const ANALYSIS_TIME_OPTIONS: { value: number; label: string }[] = [
+    { value: 500, label: "0.5秒" },
+    { value: 1000, label: "1秒" },
+    { value: 2000, label: "2秒" },
+    { value: 3000, label: "3秒" },
+];
+
+/**
+ * 一括解析ドロップダウン
+ */
+function BatchAnalysisDropdown({
+    movesWithoutPv,
+    analysisSettings,
+    onAnalysisSettingsChange,
+    onStartBatchAnalysis,
+}: {
+    movesWithoutPv: number;
+    analysisSettings: AnalysisSettings;
+    onAnalysisSettingsChange: (settings: AnalysisSettings) => void;
+    onStartBatchAnalysis: () => void;
+}): ReactElement {
+    const [isOpen, setIsOpen] = useState(false);
+    const parallelismConfig = detectParallelism();
+
+    const handleParallelWorkersChange = (value: number) => {
+        onAnalysisSettingsChange({
+            ...analysisSettings,
+            parallelWorkers: value,
+        });
+    };
+
+    const handleAnalysisTimeChange = (value: number) => {
+        onAnalysisSettingsChange({
+            ...analysisSettings,
+            batchAnalysisTimeMs: value,
+        });
+    };
+
+    const handleStart = () => {
+        setIsOpen(false);
+        onStartBatchAnalysis();
+    };
+
+    return (
+        <Popover open={isOpen} onOpenChange={setIsOpen}>
+            <PopoverTrigger asChild>
+                <button
+                    type="button"
+                    className="w-7 h-7 flex items-center justify-center text-[14px] rounded border cursor-pointer transition-colors duration-150 bg-primary/10 text-primary border-primary/30 hover:bg-primary/20"
+                    aria-label={`一括解析: ${movesWithoutPv}手`}
+                >
+                    ⚡
+                </button>
+            </PopoverTrigger>
+            <PopoverContent side="bottom" align="end" className="w-64 p-3">
+                <div className="space-y-3">
+                    <div className="font-medium text-sm">一括解析</div>
+                    <div className="text-xs text-muted-foreground">
+                        PVがない{movesWithoutPv}手を解析します
+                    </div>
+
+                    {/* 並列数設定 */}
+                    <div className="space-y-1.5">
+                        <div className="text-xs font-medium text-foreground">並列数</div>
+                        <div className="flex gap-1 flex-wrap">
+                            {PARALLEL_WORKER_OPTIONS.map((opt) => (
+                                <button
+                                    key={opt.value}
+                                    type="button"
+                                    onClick={() => handleParallelWorkersChange(opt.value)}
+                                    className={`px-2 py-1 rounded text-xs transition-colors ${
+                                        analysisSettings.parallelWorkers === opt.value
+                                            ? "bg-primary text-primary-foreground"
+                                            : "bg-muted text-muted-foreground hover:bg-muted/80"
+                                    }`}
+                                >
+                                    {opt.value === 0
+                                        ? `自動(${parallelismConfig.recommendedWorkers})`
+                                        : opt.label}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+
+                    {/* 解析時間設定 */}
+                    <div className="space-y-1.5">
+                        <div className="text-xs font-medium text-foreground">1手あたり解析時間</div>
+                        <div className="flex gap-1 flex-wrap">
+                            {ANALYSIS_TIME_OPTIONS.map((opt) => (
+                                <button
+                                    key={opt.value}
+                                    type="button"
+                                    onClick={() => handleAnalysisTimeChange(opt.value)}
+                                    className={`px-2 py-1 rounded text-xs transition-colors ${
+                                        analysisSettings.batchAnalysisTimeMs === opt.value
+                                            ? "bg-primary text-primary-foreground"
+                                            : "bg-muted text-muted-foreground hover:bg-muted/80"
+                                    }`}
+                                >
+                                    {opt.label}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="text-[10px] text-muted-foreground">
+                        検出コア数: {parallelismConfig.detectedConcurrency}
+                    </div>
+
+                    {/* 開始ボタン */}
+                    <button
+                        type="button"
+                        onClick={handleStart}
+                        className="w-full py-2 rounded bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors"
+                    >
+                        解析開始
+                    </button>
+                </div>
+            </PopoverContent>
+        </Popover>
+    );
+}
+
 export function KifuPanel({
     kifMoves,
     currentPly,
@@ -239,6 +383,8 @@ export function KifuPanel({
     batchAnalysis,
     onStartBatchAnalysis,
     onCancelBatchAnalysis,
+    analysisSettings,
+    onAnalysisSettingsChange,
 }: KifuPanelProps): ReactElement {
     const listRef = useRef<HTMLDivElement>(null);
     const currentRowRef = useRef<HTMLElement>(null);
@@ -396,31 +542,19 @@ export function KifuPanel({
                                 </Tooltip>
                             </label>
                         )}
-                        {/* 一括解析ボタン（アイコン） */}
+                        {/* 一括解析ボタン（ドロップダウン） */}
                         {onStartBatchAnalysis &&
                             kifMoves.length > 0 &&
                             movesWithoutPv > 0 &&
-                            !batchAnalysis?.isRunning && (
-                                <Tooltip>
-                                    <TooltipTrigger asChild>
-                                        <button
-                                            type="button"
-                                            className="w-7 h-7 flex items-center justify-center text-[14px] rounded border cursor-pointer transition-colors duration-150 bg-primary/10 text-primary border-primary/30 hover:bg-primary/20"
-                                            onClick={onStartBatchAnalysis}
-                                            aria-label={`一括解析: ${movesWithoutPv}手`}
-                                        >
-                                            ⚡
-                                        </button>
-                                    </TooltipTrigger>
-                                    <TooltipContent side="bottom">
-                                        <div className="text-[11px]">
-                                            <div className="font-medium">一括解析</div>
-                                            <div className="text-muted-foreground">
-                                                PVがない{movesWithoutPv}手を解析
-                                            </div>
-                                        </div>
-                                    </TooltipContent>
-                                </Tooltip>
+                            !batchAnalysis?.isRunning &&
+                            analysisSettings &&
+                            onAnalysisSettingsChange && (
+                                <BatchAnalysisDropdown
+                                    movesWithoutPv={movesWithoutPv}
+                                    analysisSettings={analysisSettings}
+                                    onAnalysisSettingsChange={onAnalysisSettingsChange}
+                                    onStartBatchAnalysis={onStartBatchAnalysis}
+                                />
                             )}
                         {/* KIFコピーボタン（アイコン） */}
                         {onCopyKif && kifMoves.length > 0 && (
