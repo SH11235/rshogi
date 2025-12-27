@@ -16,11 +16,13 @@ const engineOptions: EngineOption[] = [
 const panelEngine = createEngineClient();
 
 function App() {
+    // デスクトップ版は常に開発者モードを有効化
     return (
         <main className="mx-auto flex max-w-[1100px] flex-col gap-[14px] px-5 pb-[72px] pt-6">
             <ShogiMatch
                 engineOptions={engineOptions}
                 fetchLegalMoves={(sfen, moves) => getLegalMoves({ sfen, moves })}
+                isDevMode={true}
             />
             <EngineControlPanel engine={panelEngine} />
         </main>

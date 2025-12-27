@@ -53,7 +53,17 @@ export function EvalPopover({
 
     return (
         <Popover open={open} onOpenChange={setOpen}>
-            <PopoverTrigger asChild>{children}</PopoverTrigger>
+            <PopoverTrigger asChild>
+                {/* 親要素（行クリック）へのイベント伝播を防ぐ */}
+                <button
+                    type="button"
+                    className="inline bg-transparent border-none p-0 m-0 font-inherit text-inherit cursor-pointer"
+                    onClick={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => e.stopPropagation()}
+                >
+                    {children}
+                </button>
+            </PopoverTrigger>
             <PopoverContent
                 className="w-80 p-3"
                 side="left"

@@ -8,3 +8,4 @@ export * from "./components/popover";
 export * from "./components/shogi-board";
 export * from "./components/shogi-match";
 export * from "./components/tooltip";
+export * from "./hooks";

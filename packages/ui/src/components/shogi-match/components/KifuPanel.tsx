@@ -469,7 +469,17 @@ export function KifuPanel({
                                             </EvalPopover>
                                         ) : (
                                             <Tooltip>
-                                                <TooltipTrigger asChild>{evalSpan}</TooltipTrigger>
+                                                <TooltipTrigger asChild>
+                                                    {/* 親要素（行クリック）へのイベント伝播を防ぐ */}
+                                                    <button
+                                                        type="button"
+                                                        className="inline bg-transparent border-none p-0 m-0 font-inherit text-inherit"
+                                                        onClick={(e) => e.stopPropagation()}
+                                                        onKeyDown={(e) => e.stopPropagation()}
+                                                    >
+                                                        {evalSpan}
+                                                    </button>
+                                                </TooltipTrigger>
                                                 <TooltipContent
                                                     side="left"
                                                     className="max-w-[200px]"

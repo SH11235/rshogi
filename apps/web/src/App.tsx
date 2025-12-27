@@ -1,6 +1,6 @@
 import { createWasmEngineClient } from "@shogi/engine-wasm";
 import type { EngineOption } from "@shogi/ui";
-import { EngineControlPanel, ShogiMatch } from "@shogi/ui";
+import { EngineControlPanel, ShogiMatch, useDevMode } from "@shogi/ui";
 
 const resolveWasmThreads = () => {
     const fallback = import.meta.env.DEV ? 4 : 1;
@@ -27,10 +27,12 @@ const engineOptions: EngineOption[] = [
 const panelEngine = createEngineClient();
 
 function App() {
+    const isDevMode = useDevMode();
+
     return (
         <main className="mx-auto flex max-w-[1100px] flex-col gap-[14px] px-5 pb-[72px] pt-6">
-            <ShogiMatch engineOptions={engineOptions} />
-            <EngineControlPanel engine={panelEngine} />
+            <ShogiMatch engineOptions={engineOptions} isDevMode={isDevMode} />
+            {isDevMode && <EngineControlPanel engine={panelEngine} />}
         </main>
     );
 }

@@ -80,6 +80,8 @@ export interface ShogiMatchProps {
     initialByoyomiMs?: number;
     maxLogs?: number;
     fetchLegalMoves?: (sfen: string, moves: string[]) => Promise<string[]>;
+    /** 開発者モード（エンジンログパネルなどを表示） */
+    isDevMode?: boolean;
 }
 
 // デフォルト値の定数
@@ -215,6 +217,7 @@ export function ShogiMatch({
     initialByoyomiMs = DEFAULT_BYOYOMI_MS,
     maxLogs = DEFAULT_MAX_LOGS,
     fetchLegalMoves,
+    isDevMode = false,
 }: ShogiMatchProps): ReactElement {
     const emptyBoard = useMemo<BoardState>(
         () => Object.fromEntries(getAllSquares().map((sq) => [sq, null])) as BoardState,
@@ -1723,13 +1726,15 @@ export function ShogiMatch({
                             onSettingsChange={setDisplaySettings}
                         />
 
-                        <EngineLogsPanel
-                            eventLogs={eventLogs}
-                            errorLogs={errorLogs}
-                            engineErrorDetails={engineErrorDetails}
-                            onRetry={retryEngine}
-                            isRetrying={isRetrying}
-                        />
+                        {isDevMode && (
+                            <EngineLogsPanel
+                                eventLogs={eventLogs}
+                                errorLogs={errorLogs}
+                                engineErrorDetails={engineErrorDetails}
+                                onRetry={retryEngine}
+                                isRetrying={isRetrying}
+                            />
+                        )}
                     </div>
                 </div>
             </section>
