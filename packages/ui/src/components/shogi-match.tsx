@@ -1286,12 +1286,11 @@ export function ShogiMatch({
     );
 
     // 単発解析完了時の処理
-    // biome-ignore lint/correctness/useExhaustiveDependencies: isAnalyzingがfalseになったときのみ実行
     useEffect(() => {
         if (!isAnalyzing && analyzingPly !== null) {
             setAnalyzingPly(null);
         }
-    }, [isAnalyzing]);
+    }, [isAnalyzing, analyzingPly]);
 
     // 一括解析を開始（並列処理）
     const handleStartBatchAnalysis = useCallback(() => {

@@ -4,9 +4,28 @@
  * KifuTreeからツリービュー表示用のデータ構造を生成する
  */
 
-import type { KifuNode, KifuTree } from "@shogi/app-core";
-import type { Player } from "@shogi/app-core";
+import {
+    BOARD_FILES,
+    BOARD_RANKS,
+    type KifuNode,
+    type KifuTree,
+    type Player,
+    type Square,
+} from "@shogi/app-core";
 import { formatMoveSimple } from "./kifFormat";
+
+/**
+ * 文字列がSquare型として有効かどうかを判定するtype guard
+ */
+function isSquare(value: string): value is Square {
+    if (value.length !== 2) return false;
+    const file = value[0];
+    const rank = value[1];
+    return (
+        (BOARD_FILES as readonly string[]).includes(file) &&
+        (BOARD_RANKS as readonly string[]).includes(rank)
+    );
+}
 
 /** ツリービュー用のノードデータ */
 export interface BranchTreeNode {
@@ -84,30 +103,30 @@ function getNodeTurn(ply: number): Player {
 }
 
 /**
+ * USI形式の指し手から移動先マスを取得
+ */
+function getToSquare(usiMove: string | null): Square | undefined {
+    if (!usiMove || usiMove.length < 4) return undefined;
+
+    // 駒打ち: "P*5e" または 通常移動: "7g7f" or "7g7f+"
+    const toSquareStr = usiMove[1] === "*" ? usiMove.slice(2, 4) : usiMove.slice(2, 4);
+
+    if (isSquare(toSquareStr)) {
+        return toSquareStr;
+    }
+    return undefined;
+}
+
+/**
  * KifuNodeから表示テキストを生成
  */
-function getDisplayText(node: KifuNode, prevToSquare: string | undefined): string {
+function getDisplayText(node: KifuNode, prevToSquare: Square | undefined): string {
     if (node.usiMove === null) {
         return "開始局面";
     }
 
     const turn = getNodeTurn(node.ply);
-    return formatMoveSimple(node.usiMove, turn, node.boardBefore, prevToSquare as any);
-}
-
-/**
- * USI形式の指し手から移動先マスを取得
- */
-function getToSquare(usiMove: string | null): string | undefined {
-    if (!usiMove || usiMove.length < 4) return undefined;
-
-    // 駒打ち: "P*5e"
-    if (usiMove[1] === "*") {
-        return usiMove.slice(2, 4);
-    }
-
-    // 通常移動: "7g7f" or "7g7f+"
-    return usiMove.slice(2, 4);
+    return formatMoveSimple(node.usiMove, turn, node.boardBefore, prevToSquare);
 }
 
 /**
@@ -124,7 +143,7 @@ export function buildBranchTreeData(tree: KifuTree, maxDepth?: number): BranchTr
         nodeId: string,
         isMainLine: boolean,
         depth: number,
-        prevToSquare: string | undefined,
+        prevToSquare: Square | undefined,
     ): BranchTreeNode | null {
         const node = tree.nodes.get(nodeId);
         if (!node) return null;
@@ -277,7 +296,7 @@ export function flattenTreeAlongCurrentPath(tree: KifuTree): FlatTreeNode[] {
     }
 
     // パスに沿ってフラット化
-    let prevToSquare: string | undefined;
+    let prevToSquare: Square | undefined;
     for (const nid of pathFromRoot) {
         const node = tree.nodes.get(nid);
         if (!node) continue;
