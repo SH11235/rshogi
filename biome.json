@@ -29,7 +29,8 @@
                 "useImportType": "error"
             },
             "correctness": {
-                "noUnusedImports": "error"
+                "noUnusedImports": "error",
+                "noUnusedVariables": "warn"
             },
             "suspicious": {
                 "noExplicitAny": "warn"

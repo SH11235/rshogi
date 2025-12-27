@@ -56,6 +56,13 @@ export function DisplaySettingsPanel({
         });
     };
 
+    const handleWheelNavigationChange = (checked: boolean) => {
+        onSettingsChange({
+            ...settings,
+            enableWheelNavigation: checked,
+        });
+    };
+
     return (
         <Collapsible open={isOpen} onOpenChange={onOpenChange}>
             <div className="bg-wafuu-washi-warm border-2 border-wafuu-border rounded-xl overflow-hidden shadow-lg w-[var(--panel-width)]">
@@ -143,6 +150,26 @@ export function DisplaySettingsPanel({
                                     onChange={(e) => handleHighlightChange(e.target.checked)}
                                 />
                                 <span>最終手を強調表示</span>
+                            </label>
+                        </div>
+
+                        {/* 操作設定 */}
+                        <div className="flex flex-col gap-2">
+                            <div className="text-[13px] font-semibold text-wafuu-sumi mb-1">
+                                操作設定
+                            </div>
+                            <label className="flex items-center gap-2 text-[13px] cursor-pointer py-1">
+                                <input
+                                    type="checkbox"
+                                    checked={settings.enableWheelNavigation}
+                                    onChange={(e) => handleWheelNavigationChange(e.target.checked)}
+                                />
+                                <span>
+                                    マウスホイールで棋譜をナビゲート
+                                    <span className="text-xs text-muted-foreground ml-1">
+                                        (将棋盤エリア上で有効)
+                                    </span>
+                                </span>
                             </label>
                         </div>
                     </div>

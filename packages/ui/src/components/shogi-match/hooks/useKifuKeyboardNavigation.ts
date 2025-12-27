@@ -20,6 +20,8 @@ interface UseKifuKeyboardNavigationOptions {
     disabled?: boolean;
     /** ホイールイベントを受け取るコンテナ要素 */
     containerRef?: React.RefObject<HTMLElement | null>;
+    /** マウスホイールナビゲーションを有効にするか（デフォルト: true） */
+    enableWheelNavigation?: boolean;
 }
 
 /**
@@ -39,6 +41,7 @@ export function useKifuKeyboardNavigation({
     onToEnd,
     disabled = false,
     containerRef,
+    enableWheelNavigation = true,
 }: UseKifuKeyboardNavigationOptions): void {
     // コールバックをrefで保持して最新の値を参照
     const callbacksRef = useRef({ onForward, onBack, onToStart, onToEnd });
@@ -113,6 +116,7 @@ export function useKifuKeyboardNavigation({
     // passive: false を指定してpreventDefaultを有効化
     // スクロール動作を棋譜ナビゲーションに置き換えるため
     useEffect(() => {
+        if (!enableWheelNavigation) return;
         const container = containerRef?.current;
         if (!container) return;
 
@@ -120,5 +124,5 @@ export function useKifuKeyboardNavigation({
         return () => {
             container.removeEventListener("wheel", handleWheel);
         };
-    }, [containerRef, handleWheel]);
+    }, [containerRef, handleWheel, enableWheelNavigation]);
 }

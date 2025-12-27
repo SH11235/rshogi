@@ -18,6 +18,8 @@ export interface KifuEval {
      * - false/undefined: エンジン出力（手番側視点）、符号反転が必要
      */
     normalized?: boolean;
+    /** 読み筋（USI形式の指し手配列） */
+    pv?: string[];
 }
 
 /** 棋譜ノード */
@@ -604,6 +606,45 @@ export function findNodeByPlyInCurrentPath(tree: KifuTree, ply: number): string 
         }
 
         nodeId = node.parentId;
+    }
+
+    return null;
+}
+
+/**
+ * メインラインを辿り、指定plyに一致するノードIDを探す
+ * ルートから順にchildren[0]を辿って検索
+ * O(ply)で検索
+ */
+export function findNodeByPlyInMainLine(tree: KifuTree, ply: number): string | null {
+    // ply 0 はルートノード
+    if (ply === 0) {
+        return tree.rootId;
+    }
+
+    let nodeId: string | null = tree.rootId;
+    let currentPly = 0;
+
+    // ルートからchildren[0]を辿ってplyまで進む
+    while (nodeId !== null && currentPly < ply) {
+        const node = tree.nodes.get(nodeId);
+        if (!node) break;
+
+        // 次の子ノードへ
+        if (node.children.length === 0) {
+            // これ以上進めない
+            return null;
+        }
+        nodeId = node.children[0];
+        currentPly++;
+    }
+
+    // 目的のplyに到達したか確認
+    if (nodeId) {
+        const node = tree.nodes.get(nodeId);
+        if (node && node.ply === ply) {
+            return nodeId;
+        }
     }
 
     return null;

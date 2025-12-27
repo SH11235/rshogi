@@ -4,12 +4,14 @@
  * 棋譜をKIF形式（日本語表記）で表示し、評価値も合わせて表示する
  */
 
+import type { PositionState } from "@shogi/app-core";
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Switch } from "../../switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../../tooltip";
 import type { KifMove } from "../utils/kifFormat";
 import { formatEval, getEvalTooltipInfo } from "../utils/kifFormat";
+import { EvalPopover } from "./EvalPopover";
 import { KifuNavigationToolbar } from "./KifuNavigationToolbar";
 
 /**
@@ -67,6 +69,28 @@ interface KifuPanelProps {
     navigationDisabled?: boolean;
     /** 分岐マーカー（ply -> 分岐数） */
     branchMarkers?: Map<number, number>;
+    /** 局面履歴（各手が指された後の局面、PV表示用） */
+    positionHistory?: PositionState[];
+    /** PVを分岐として追加するコールバック */
+    onAddPvAsBranch?: (ply: number, pv: string[]) => void;
+    /** PVを盤面で確認するコールバック */
+    onPreviewPv?: (ply: number, pv: string[], evalCp?: number, evalMate?: number) => void;
+    /** 指定手数の局面を解析するコールバック（オンデマンド解析用） */
+    onAnalyzePly?: (ply: number) => void;
+    /** 解析中かどうか */
+    isAnalyzing?: boolean;
+    /** 現在解析中の手数 */
+    analyzingPly?: number;
+    /** 一括解析の状態 */
+    batchAnalysis?: {
+        isRunning: boolean;
+        currentIndex: number;
+        totalCount: number;
+    };
+    /** 一括解析を開始するコールバック */
+    onStartBatchAnalysis?: () => void;
+    /** 一括解析をキャンセルするコールバック */
+    onCancelBatchAnalysis?: () => void;
 }
 
 /**
@@ -205,6 +229,15 @@ export function KifuPanel({
     navigation,
     navigationDisabled = false,
     branchMarkers,
+    positionHistory,
+    onAddPvAsBranch,
+    onPreviewPv,
+    onAnalyzePly,
+    isAnalyzing,
+    analyzingPly,
+    batchAnalysis,
+    onStartBatchAnalysis,
+    onCancelBatchAnalysis,
 }: KifuPanelProps): ReactElement {
     const listRef = useRef<HTMLDivElement>(null);
     const currentRowRef = useRef<HTMLElement>(null);
@@ -213,6 +246,12 @@ export function KifuPanel({
 
     // 評価値データの存在チェック
     const evalDataExists = useMemo(() => hasEvalData(kifMoves), [kifMoves]);
+
+    // PVがない手の数
+    const movesWithoutPv = useMemo(
+        () => kifMoves.filter((m) => !m.pv || m.pv.length === 0).length,
+        [kifMoves],
+    );
 
     // ヒントバナーを表示するかどうか
     const showHintBanner = !showEval && evalDataExists && !hintDismissed && onShowEvalChange;
@@ -356,6 +395,20 @@ export function KifuPanel({
                                 </Tooltip>
                             </label>
                         )}
+                        {/* 一括解析ボタン */}
+                        {onStartBatchAnalysis &&
+                            kifMoves.length > 0 &&
+                            movesWithoutPv > 0 &&
+                            !batchAnalysis?.isRunning && (
+                                <button
+                                    type="button"
+                                    className="px-2 py-1 text-[11px] rounded border cursor-pointer transition-colors duration-150 bg-primary/10 text-primary border-primary/30 hover:bg-primary/20"
+                                    onClick={onStartBatchAnalysis}
+                                    title={`PVがない${movesWithoutPv}手を解析`}
+                                >
+                                    一括解析
+                                </button>
+                            )}
                         {onCopyKif && kifMoves.length > 0 && (
                             <button
                                 type="button"
@@ -389,6 +442,39 @@ export function KifuPanel({
                     />
                 )}
 
+                {/* 一括解析進捗バナー */}
+                {batchAnalysis?.isRunning && (
+                    <div className="bg-primary/10 border border-primary/30 rounded-lg px-3 py-2 mb-2">
+                        <div className="flex items-center justify-between gap-2 mb-1.5">
+                            <div className="flex items-center gap-2 text-[12px] text-primary font-medium">
+                                <span className="animate-pulse">●</span>
+                                <span>
+                                    一括解析中... {batchAnalysis.currentIndex + 1}/
+                                    {batchAnalysis.totalCount}
+                                </span>
+                            </div>
+                            {onCancelBatchAnalysis && (
+                                <button
+                                    type="button"
+                                    onClick={onCancelBatchAnalysis}
+                                    className="px-2 py-0.5 text-[11px] rounded border cursor-pointer transition-colors bg-background text-foreground border-border hover:bg-muted"
+                                >
+                                    キャンセル
+                                </button>
+                            )}
+                        </div>
+                        {/* プログレスバー */}
+                        <div className="h-1.5 bg-primary/20 rounded-full overflow-hidden">
+                            <div
+                                className="h-full bg-primary transition-all duration-300 ease-out"
+                                style={{
+                                    width: `${((batchAnalysis.currentIndex + 1) / batchAnalysis.totalCount) * 100}%`,
+                                }}
+                            />
+                        </div>
+                    </div>
+                )}
+
                 {/* 評価値ヒントバナー */}
                 {showHintBanner && (
                     <EvalHintBanner
@@ -403,7 +489,7 @@ export function KifuPanel({
                             まだ指し手がありません
                         </div>
                     ) : (
-                        kifMoves.map((move) => {
+                        kifMoves.map((move, index) => {
                             const isCurrent = move.ply === currentPly;
                             const isPastCurrent = navigation?.isRewound && move.ply > currentPly;
                             const evalText = showEval
@@ -411,6 +497,21 @@ export function KifuPanel({
                                 : "";
                             const hasBranch = branchMarkers?.has(move.ply);
                             const branchCount = branchMarkers?.get(move.ply);
+                            // この手に対応する局面（手が指された後の局面）
+                            const position = positionHistory?.[index];
+                            // PVがあるかどうか
+                            const hasPv = move.pv && move.pv.length > 0;
+                            // EvalPopoverを使用するか（PVがあるか、解析機能がある場合）
+                            const useEvalPopover = position && (hasPv || onAnalyzePly);
+
+                            // 評価値表示コンポーネント
+                            const evalSpan = (
+                                <span
+                                    className={`${getEvalClassName(move.evalCp, move.evalMate)} ${isPastCurrent ? "opacity-50" : ""} ${useEvalPopover ? "cursor-pointer" : "cursor-help"}`}
+                                >
+                                    {evalText}
+                                </span>
+                            );
 
                             const content = (
                                 <>
@@ -432,25 +533,46 @@ export function KifuPanel({
                                     >
                                         {move.displayText}
                                     </span>
-                                    {showEval && evalText && (
-                                        <Tooltip>
-                                            <TooltipTrigger asChild>
-                                                <span
-                                                    className={`${getEvalClassName(move.evalCp, move.evalMate)} ${isPastCurrent ? "opacity-50" : ""} cursor-help`}
+                                    {showEval &&
+                                        evalText &&
+                                        (useEvalPopover && position ? (
+                                            <EvalPopover
+                                                move={move}
+                                                position={position}
+                                                onAddBranch={onAddPvAsBranch}
+                                                onPreview={onPreviewPv}
+                                                onAnalyze={onAnalyzePly}
+                                                isAnalyzing={isAnalyzing}
+                                                analyzingPly={analyzingPly}
+                                            >
+                                                {evalSpan}
+                                            </EvalPopover>
+                                        ) : (
+                                            <Tooltip>
+                                                <TooltipTrigger asChild>
+                                                    {/* 親要素（行クリック）へのイベント伝播を防ぐ */}
+                                                    <button
+                                                        type="button"
+                                                        className="inline bg-transparent border-none p-0 m-0 font-inherit text-inherit"
+                                                        onClick={(e) => e.stopPropagation()}
+                                                        onKeyDown={(e) => e.stopPropagation()}
+                                                    >
+                                                        {evalSpan}
+                                                    </button>
+                                                </TooltipTrigger>
+                                                <TooltipContent
+                                                    side="left"
+                                                    className="max-w-[200px]"
                                                 >
-                                                    {evalText}
-                                                </span>
-                                            </TooltipTrigger>
-                                            <TooltipContent side="left" className="max-w-[200px]">
-                                                <EvalTooltipContent
-                                                    evalCp={move.evalCp}
-                                                    evalMate={move.evalMate}
-                                                    ply={move.ply}
-                                                    depth={move.depth}
-                                                />
-                                            </TooltipContent>
-                                        </Tooltip>
-                                    )}
+                                                    <EvalTooltipContent
+                                                        evalCp={move.evalCp}
+                                                        evalMate={move.evalMate}
+                                                        ply={move.ply}
+                                                        depth={move.depth}
+                                                    />
+                                                </TooltipContent>
+                                            </Tooltip>
+                                        ))}
                                 </>
                             );
 
@@ -460,19 +582,26 @@ export function KifuPanel({
 
                             if (onPlySelect) {
                                 return (
-                                    <button
-                                        type="button"
+                                    <div
                                         key={move.ply}
                                         ref={
                                             isCurrent
-                                                ? (currentRowRef as React.RefObject<HTMLButtonElement>)
+                                                ? (currentRowRef as React.RefObject<HTMLDivElement>)
                                                 : undefined
                                         }
-                                        className={`${rowClassName} w-full text-left bg-transparent border-none cursor-pointer hover:bg-accent/50`}
+                                        role="option"
+                                        className={`${rowClassName} w-full text-left cursor-pointer hover:bg-accent/50`}
                                         onClick={() => onPlySelect(move.ply)}
+                                        onKeyDown={(e) => {
+                                            if (e.key === "Enter" || e.key === " ") {
+                                                e.preventDefault();
+                                                onPlySelect(move.ply);
+                                            }
+                                        }}
+                                        tabIndex={0}
                                     >
                                         {content}
-                                    </button>
+                                    </div>
                                 );
                             }
 

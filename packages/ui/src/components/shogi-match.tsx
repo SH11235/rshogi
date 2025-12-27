@@ -34,6 +34,7 @@ import {
     MatchSettingsPanel,
     type SideSetting,
 } from "./shogi-match/components/MatchSettingsPanel";
+import { PvPreviewDialog } from "./shogi-match/components/PvPreviewDialog";
 import {
     applyDropResult,
     DeleteZone,
@@ -79,6 +80,8 @@ export interface ShogiMatchProps {
     initialByoyomiMs?: number;
     maxLogs?: number;
     fetchLegalMoves?: (sfen: string, moves: string[]) => Promise<string[]>;
+    /** 開発者モード（エンジンログパネルなどを表示） */
+    isDevMode?: boolean;
 }
 
 // デフォルト値の定数
@@ -214,6 +217,7 @@ export function ShogiMatch({
     initialByoyomiMs = DEFAULT_BYOYOMI_MS,
     maxLogs = DEFAULT_MAX_LOGS,
     fetchLegalMoves,
+    isDevMode = false,
 }: ShogiMatchProps): ReactElement {
     const emptyBoard = useMemo<BoardState>(
         () => Object.fromEntries(getAllSquares().map((sq) => [sq, null])) as BoardState,
@@ -263,6 +267,25 @@ export function ShogiMatch({
         "shogi-display-settings",
         DEFAULT_DISPLAY_SETTINGS,
     );
+    // PVプレビュー用のstate
+    const [pvPreview, setPvPreview] = useState<{
+        open: boolean;
+        ply: number;
+        pv: string[];
+        startPosition: PositionState;
+        evalCp?: number;
+        evalMate?: number;
+    } | null>(null);
+    // 解析中の手数（オンデマンド解析用）
+    const [analyzingPly, setAnalyzingPly] = useState<number | null>(null);
+    // 一括解析の状態
+    const [batchAnalysis, setBatchAnalysis] = useState<{
+        isRunning: boolean;
+        currentIndex: number;
+        totalCount: number;
+        targetPlies: number[];
+    } | null>(null);
+    const batchAnalysisCancelledRef = useRef(false);
 
     // positionRef を先に定義（コールバックで使用するため）
     const positionRef = useRef<PositionState>(position);
@@ -297,7 +320,15 @@ export function ShogiMatch({
     const moves = navigation.getMovesArray();
 
     // 棋譜＋評価値データ
-    const { kifMoves, evalHistory, boardHistory, branchMarkers, recordEval } = navigation;
+    const {
+        kifMoves,
+        evalHistory,
+        boardHistory,
+        positionHistory,
+        branchMarkers,
+        recordEval,
+        addPvAsBranch,
+    } = navigation;
 
     // 後手が人間の場合は盤面を反転して手前側に表示
     useEffect(() => {
@@ -430,6 +461,7 @@ export function ShogiMatch({
         onToEnd: navigation.goToEnd,
         disabled: isMatchRunning,
         containerRef: boardSectionRef,
+        enableWheelNavigation: displaySettings.enableWheelNavigation,
     });
 
     // エンジンからの手を受け取って適用するコールバック
@@ -1220,6 +1252,119 @@ export function ShogiMatch({
         void cancelAnalysis();
     }, [cancelAnalysis]);
 
+    // 特定の手数の局面を解析するコールバック（オンデマンド解析用）
+    const handleAnalyzePly = useCallback(
+        (ply: number) => {
+            // ply手目の局面を解析するには、ply-1手までの指し手が必要
+            // （ply 1 = 1手目を指した後の局面 = moves[0]まで適用した局面）
+            const movesForPly = kifMoves.slice(0, ply).map((m) => m.usiMove);
+
+            setAnalyzingPly(ply);
+            void analyzePosition({
+                sfen: startSfen,
+                moves: movesForPly,
+                ply,
+                timeMs: 3000, // 3秒間解析
+                depth: 20, // 最大深さ20
+            });
+        },
+        [kifMoves, analyzePosition, startSfen],
+    );
+
+    // 解析完了時の処理（単発解析のクリアと一括解析の進行）
+    // biome-ignore lint/correctness/useExhaustiveDependencies: isAnalyzingがfalseになったときのみ実行
+    useEffect(() => {
+        if (!isAnalyzing && analyzingPly !== null) {
+            setAnalyzingPly(null);
+
+            // 一括解析中の場合は次の手に進む
+            if (batchAnalysis?.isRunning && !batchAnalysisCancelledRef.current) {
+                const nextIndex = batchAnalysis.currentIndex + 1;
+                if (nextIndex < batchAnalysis.targetPlies.length) {
+                    // 次の手を解析
+                    const nextPly = batchAnalysis.targetPlies[nextIndex];
+                    setBatchAnalysis((prev) =>
+                        prev ? { ...prev, currentIndex: nextIndex } : null,
+                    );
+                    // 少し遅延を入れてから次の解析を開始
+                    setTimeout(() => {
+                        if (!batchAnalysisCancelledRef.current) {
+                            handleAnalyzePlyForBatch(nextPly);
+                        }
+                    }, 100);
+                } else {
+                    // 一括解析完了
+                    setBatchAnalysis(null);
+                }
+            }
+        }
+    }, [isAnalyzing]);
+
+    // 一括解析用の解析関数（短い解析時間）
+    const handleAnalyzePlyForBatch = useCallback(
+        (ply: number) => {
+            const movesForPly = kifMoves.slice(0, ply).map((m) => m.usiMove);
+            setAnalyzingPly(ply);
+            void analyzePosition({
+                sfen: startSfen,
+                moves: movesForPly,
+                ply,
+                timeMs: 1000, // 一括解析は1秒
+                depth: 15, // 深さも控えめに
+            });
+        },
+        [kifMoves, analyzePosition, startSfen],
+    );
+
+    // 一括解析を開始
+    const handleStartBatchAnalysis = useCallback(() => {
+        // PVがない手を抽出
+        const targetPlies = kifMoves.filter((m) => !m.pv || m.pv.length === 0).map((m) => m.ply);
+
+        if (targetPlies.length === 0) {
+            return; // 解析対象がない
+        }
+
+        batchAnalysisCancelledRef.current = false;
+        setBatchAnalysis({
+            isRunning: true,
+            currentIndex: 0,
+            totalCount: targetPlies.length,
+            targetPlies,
+        });
+
+        // 最初の手を解析開始
+        handleAnalyzePlyForBatch(targetPlies[0]);
+    }, [kifMoves, handleAnalyzePlyForBatch]);
+
+    // 一括解析をキャンセル
+    const handleCancelBatchAnalysis = useCallback(() => {
+        batchAnalysisCancelledRef.current = true;
+        void cancelAnalysis();
+        setBatchAnalysis(null);
+        setAnalyzingPly(null);
+    }, [cancelAnalysis]);
+
+    // PVプレビューを開くコールバック
+    const handlePreviewPv = useCallback(
+        (ply: number, pv: string[], evalCp?: number, evalMate?: number) => {
+            // PVはply手目を指した後の局面から計算されている
+            // positionHistory[ply-1] = ply手目を指した後の局面
+            const startPos = positionHistory[ply - 1];
+            if (!startPos) return;
+
+            setPvPreview({
+                open: true,
+                ply,
+                pv,
+                startPosition: startPos,
+                evalCp,
+                evalMate,
+            });
+        },
+        [positionHistory],
+    );
+
     // SFENインポート（局面 + 指し手）
     const importSfen = useCallback(
         async (sfen: string, movesToLoad: string[]) => {
@@ -1331,6 +1476,21 @@ export function ShogiMatch({
                     setShowResultBanner(true);
                 }}
             />
+
+            {/* PVプレビューダイアログ */}
+            {pvPreview && (
+                <PvPreviewDialog
+                    open={pvPreview.open}
+                    onClose={() => setPvPreview(null)}
+                    pv={pvPreview.pv}
+                    startPosition={pvPreview.startPosition}
+                    ply={pvPreview.ply}
+                    evalCp={pvPreview.evalCp}
+                    evalMate={pvPreview.evalMate}
+                    squareNotation={displaySettings.squareNotation}
+                    showBoardLabels={displaySettings.showBoardLabels}
+                />
+            )}
 
             <section
                 style={{
@@ -1647,6 +1807,23 @@ export function ShogiMatch({
                             }}
                             navigationDisabled={isMatchRunning}
                             branchMarkers={branchMarkers}
+                            positionHistory={positionHistory}
+                            onAddPvAsBranch={addPvAsBranch}
+                            onPreviewPv={handlePreviewPv}
+                            onAnalyzePly={handleAnalyzePly}
+                            isAnalyzing={isAnalyzing}
+                            analyzingPly={analyzingPly ?? undefined}
+                            batchAnalysis={
+                                batchAnalysis
+                                    ? {
+                                          isRunning: batchAnalysis.isRunning,
+                                          currentIndex: batchAnalysis.currentIndex,
+                                          totalCount: batchAnalysis.totalCount,
+                                      }
+                                    : undefined
+                            }
+                            onStartBatchAnalysis={handleStartBatchAnalysis}
+                            onCancelBatchAnalysis={handleCancelBatchAnalysis}
                         />
 
                         {/* 評価値グラフパネル（折りたたみ） */}
@@ -1675,13 +1852,15 @@ export function ShogiMatch({
                             onSettingsChange={setDisplaySettings}
                         />
 
-                        <EngineLogsPanel
-                            eventLogs={eventLogs}
-                            errorLogs={errorLogs}
-                            engineErrorDetails={engineErrorDetails}
-                            onRetry={retryEngine}
-                            isRetrying={isRetrying}
-                        />
+                        {isDevMode && (
+                            <EngineLogsPanel
+                                eventLogs={eventLogs}
+                                errorLogs={errorLogs}
+                                engineErrorDetails={engineErrorDetails}
+                                onRetry={retryEngine}
+                                isRetrying={isRetrying}
+                            />
+                        )}
                     </div>
                 </div>
             </section>
