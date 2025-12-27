@@ -22,16 +22,16 @@ use windows_sys::Win32::System::Memory::{
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(super) enum AllocKind {
     LargePages,
+    /// Windows で Large Pages 確保失敗時のフォールバック、
+    /// または macOS 等の Large Pages 未対応環境で使用
+    #[allow(dead_code)]
     Regular,
 }
 
 pub(super) struct Allocation {
     ptr: NonNull<u8>,
-    #[allow(dead_code)]
-    size: usize,
     kind: AllocKind,
     #[cfg(not(windows))]
     layout: Layout,
@@ -151,7 +151,6 @@ fn try_alloc_large_pages(size: usize) -> Option<Allocation> {
         let ptr = NonNull::new(ptr as *mut u8)?;
         Some(Allocation {
             ptr,
-            size: alloc_size,
             kind: AllocKind::LargePages,
         })
     }
@@ -167,7 +166,6 @@ fn alloc_windows(size: usize) -> Allocation {
         });
         Allocation {
             ptr,
-            size,
             kind: AllocKind::Regular,
         }
     }
@@ -204,7 +202,6 @@ fn alloc_unix(size: usize, alignment: usize) -> Allocation {
 
     Allocation {
         ptr: NonNull::new(ptr).expect("TT allocation returned null"),
-        size: layout.size(),
         kind,
         layout,
     }
