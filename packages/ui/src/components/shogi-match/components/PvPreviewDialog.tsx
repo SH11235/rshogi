@@ -11,6 +11,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../../dialog";
 import type { ShogiBoardCell } from "../../shogi-board";
 import { ShogiBoard } from "../../shogi-board";
+import { HandPiecesDisplay } from "./HandPiecesDisplay";
 import type { PvDisplayMove } from "../utils/kifFormat";
 import { convertPvToDisplay } from "../utils/kifFormat";
 
@@ -53,30 +54,38 @@ export function PvPreviewDialog({
     // 現在のプレビュー位置（0 = 開始局面、1 = PVの1手目後、...）
     const [previewIndex, setPreviewIndex] = useState(0);
 
-    // PVを表示用に変換
-    const pvDisplay = useMemo((): PvDisplayMove[] => {
-        return convertPvToDisplay(pv, startPosition);
-    }, [pv, startPosition]);
-
-    // 各ステップの局面を事前計算
-    const positions = useMemo((): PositionState[] => {
-        const result: PositionState[] = [startPosition];
+    // 各ステップの局面を事前計算（有効な手のみ）
+    const { positions, validPv } = useMemo((): {
+        positions: PositionState[];
+        validPv: string[];
+    } => {
+        const positionResult: PositionState[] = [startPosition];
+        const validMoves: string[] = [];
         let currentPosition = startPosition;
 
         for (const move of pv) {
             const moveResult = applyMoveWithState(currentPosition, move, { validateTurn: false });
-            if (!moveResult.ok) break;
-            result.push(moveResult.next);
+            if (!moveResult.ok) {
+                // 無効な手以降は無視（エンジンPVの既知の動作）
+                break;
+            }
+            validMoves.push(move);
+            positionResult.push(moveResult.next);
             currentPosition = moveResult.next;
         }
 
-        return result;
+        return { positions: positionResult, validPv: validMoves };
     }, [pv, startPosition]);
+
+    // 有効なPVを表示用に変換
+    const pvDisplay = useMemo((): PvDisplayMove[] => {
+        return convertPvToDisplay(validPv, startPosition);
+    }, [validPv, startPosition]);
 
     // 最終手情報
     const lastMove = useMemo(() => {
         if (previewIndex === 0) return undefined;
-        const move = pv[previewIndex - 1];
+        const move = validPv[previewIndex - 1];
         if (!move) return undefined;
 
         // 打ち駒の場合
@@ -89,13 +98,17 @@ export function PvPreviewDialog({
         const from = move.slice(0, 2) as Square;
         const to = move.slice(2, 4) as Square;
         return { from, to };
-    }, [pv, previewIndex]);
+    }, [validPv, previewIndex]);
+
+    // 現在の局面
+    const currentPosition = useMemo(() => {
+        return positions[previewIndex] ?? startPosition;
+    }, [positions, previewIndex, startPosition]);
 
     // 盤面グリッド
     const grid = useMemo(() => {
-        const position = positions[previewIndex] ?? startPosition;
-        return boardToGrid(position.board);
-    }, [positions, previewIndex, startPosition]);
+        return boardToGrid(currentPosition.board);
+    }, [currentPosition]);
 
     // キーボード操作
     const handleKeyDown = useCallback(
@@ -142,13 +155,32 @@ export function PvPreviewDialog({
             <DialogContent className="max-w-[500px]">
                 <DialogHeader>
                     <DialogTitle className="text-base font-medium">
-                        {ply}手目の読み筋（{pv.length}手）
+                        {ply}手目の読み筋
+                        <span className="text-muted-foreground font-normal">
+                            （{validPv.length}手）
+                        </span>
                     </DialogTitle>
                 </DialogHeader>
 
                 <div className="flex flex-col gap-4">
-                    {/* 将棋盤 */}
-                    <div className="flex justify-center">
+                    {/* 将棋盤と持ち駒 */}
+                    <div className="flex flex-col items-center gap-2">
+                        {/* 後手の持ち駒 */}
+                        <div className="w-full flex justify-center">
+                            <div className="text-[11px] text-muted-foreground mr-2 self-center">
+                                ☖
+                            </div>
+                            <HandPiecesDisplay
+                                owner="gote"
+                                hand={currentPosition.hands.gote}
+                                selectedPiece={null}
+                                isActive={false}
+                                onHandSelect={() => {}}
+                                flipBoard={false}
+                            />
+                        </div>
+
+                        {/* 将棋盤 */}
                         <ShogiBoard
                             grid={grid}
                             selectedSquare={null}
@@ -159,13 +191,28 @@ export function PvPreviewDialog({
                             squareNotation="japanese"
                             showBoardLabels={true}
                         />
+
+                        {/* 先手の持ち駒 */}
+                        <div className="w-full flex justify-center">
+                            <div className="text-[11px] text-muted-foreground mr-2 self-center">
+                                ☗
+                            </div>
+                            <HandPiecesDisplay
+                                owner="sente"
+                                hand={currentPosition.hands.sente}
+                                selectedPiece={null}
+                                isActive={false}
+                                onHandSelect={() => {}}
+                                flipBoard={false}
+                            />
+                        </div>
                     </div>
 
                     {/* 手数表示 */}
                     <div className="text-center text-sm text-muted-foreground">
                         {previewIndex === 0
                             ? `${ply}手目の局面（読み筋開始前）`
-                            : `読み筋 ${previewIndex}/${pv.length} 手目`}
+                            : `読み筋 ${previewIndex}/${validPv.length} 手目`}
                     </div>
 
                     {/* ナビゲーションボタン */}
@@ -226,9 +273,10 @@ export function PvPreviewDialog({
                         ))}
                     </div>
 
-                    {/* キーボード操作のヒント */}
-                    <div className="text-center text-[11px] text-muted-foreground">
-                        矢印キー: 前後移動 / Home/End: 最初/最後 / Esc: 閉じる
+                    {/* 操作のヒント */}
+                    <div className="text-center text-[11px] text-muted-foreground space-y-0.5">
+                        <div>PC: 矢印キーで前後移動 / Home/Endで最初/最後 / Escで閉じる</div>
+                        <div>スマホ: 指し手をタップで移動 / ◀▶ボタンで前後移動</div>
                     </div>
                 </div>
             </DialogContent>

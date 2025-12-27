@@ -9,6 +9,7 @@ import type { PositionState } from "@shogi/app-core";
 import type { ReactElement } from "react";
 import { useMemo, useState } from "react";
 import { Popover, PopoverContent, PopoverTrigger } from "../../popover";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../../tooltip";
 import type { KifMove } from "../utils/kifFormat";
 import { convertPvToDisplay, getEvalTooltipInfo } from "../utils/kifFormat";
 
@@ -66,78 +67,124 @@ export function EvalPopover({
     }
 
     return (
-        <Popover open={open} onOpenChange={setOpen}>
-            <PopoverTrigger asChild>
-                {/* 親要素（行クリック）へのイベント伝播を防ぐ */}
-                <button
-                    type="button"
-                    className="inline bg-transparent border-none p-0 m-0 font-inherit text-inherit cursor-pointer"
-                    onClick={(e) => e.stopPropagation()}
-                    onKeyDown={(e) => e.stopPropagation()}
-                >
-                    {children}
-                </button>
-            </PopoverTrigger>
-            <PopoverContent
-                className="w-80 p-3"
-                side="left"
-                align="start"
-                onOpenAutoFocus={(e) => e.preventDefault()}
-            >
-                {/* ヘッダー: 評価値情報 */}
-                <div className="flex items-center justify-between mb-3 pb-2 border-b border-border">
-                    <div
-                        className={`font-medium ${
-                            evalInfo.advantage === "sente"
-                                ? "text-wafuu-shu"
-                                : evalInfo.advantage === "gote"
-                                  ? "text-[hsl(210_70%_45%)]"
-                                  : ""
-                        }`}
-                    >
-                        {evalInfo.description}
-                    </div>
-                    <div className="text-muted-foreground text-[11px] space-x-2">
-                        {evalInfo.detail && <span>{evalInfo.detail}</span>}
-                        {evalInfo.depthText && <span>{evalInfo.depthText}</span>}
-                    </div>
-                </div>
-
-                {/* 読み筋がある場合 */}
-                {hasPv && pvDisplay && (
-                    <div className="space-y-2">
-                        <div className="text-[11px] font-medium text-muted-foreground">読み筋:</div>
-                        <div className="flex flex-wrap gap-1 text-[12px] font-mono">
-                            {pvDisplay.map((m, index) => (
-                                <span
-                                    key={`${index}-${m.usiMove}`}
-                                    className={
-                                        m.turn === "sente"
-                                            ? "text-wafuu-shu"
-                                            : "text-[hsl(210_70%_45%)]"
+        // 親要素（行クリック）へのイベント伝播を防ぐラッパー
+        // biome-ignore lint/a11y/noStaticElementInteractions: イベント伝播防止用のラッパー
+        <span
+            className="inline"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+        >
+            <Popover open={open} onOpenChange={setOpen}>
+                <Tooltip>
+                    <TooltipTrigger asChild>
+                        <PopoverTrigger asChild>
+                            {/* buttonではなくspanを使用（親がbuttonの場合のネスト問題回避） */}
+                            <span
+                                role="button"
+                                tabIndex={0}
+                                className="inline bg-transparent border-none p-0 m-0 font-inherit text-inherit cursor-pointer"
+                                onKeyDown={(e) => {
+                                    if (e.key === "Enter" || e.key === " ") {
+                                        e.preventDefault();
+                                        setOpen(true);
                                     }
+                                }}
+                            >
+                                {children}
+                            </span>
+                        </PopoverTrigger>
+                    </TooltipTrigger>
+                    {/* Popoverが開いていない時のみTooltipを表示 */}
+                    {!open && (
+                        <TooltipContent side="left" className="max-w-[200px]">
+                            <div className="space-y-1">
+                                <div
+                                    className={`font-medium ${
+                                        evalInfo.advantage === "sente"
+                                            ? "text-wafuu-shu"
+                                            : evalInfo.advantage === "gote"
+                                              ? "text-[hsl(210_70%_45%)]"
+                                              : ""
+                                    }`}
                                 >
-                                    {m.displayText}
-                                    {index < pvDisplay.length - 1 && (
-                                        <span className="text-muted-foreground mx-0.5">→</span>
-                                    )}
-                                </span>
-                            ))}
+                                    {evalInfo.description}
+                                </div>
+                                <div className="text-muted-foreground text-[10px] space-x-2">
+                                    {evalInfo.detail && <span>{evalInfo.detail}</span>}
+                                    {evalInfo.depthText && <span>{evalInfo.depthText}</span>}
+                                </div>
+                                <div className="text-muted-foreground text-[10px] pt-1 border-t border-border">
+                                    クリックで詳細表示
+                                </div>
+                            </div>
+                        </TooltipContent>
+                    )}
+                </Tooltip>
+                <PopoverContent
+                    className="w-80 p-3"
+                    side="left"
+                    align="start"
+                    onOpenAutoFocus={(e) => e.preventDefault()}
+                >
+                    {/* ヘッダー: 評価値情報 */}
+                    <div className="flex items-center justify-between mb-3 pb-2 border-b border-border">
+                        <div
+                            className={`font-medium ${
+                                evalInfo.advantage === "sente"
+                                    ? "text-wafuu-shu"
+                                    : evalInfo.advantage === "gote"
+                                      ? "text-[hsl(210_70%_45%)]"
+                                      : ""
+                            }`}
+                        >
+                            {evalInfo.description}
+                        </div>
+                        <div className="text-muted-foreground text-[11px] space-x-2">
+                            {evalInfo.detail && <span>{evalInfo.detail}</span>}
+                            {evalInfo.depthText && <span>{evalInfo.depthText}</span>}
                         </div>
                     </div>
-                )}
 
-                {/* 読み筋がない場合は解析ボタンを表示 */}
-                {!hasPv && onAnalyze && (
-                    <div className="space-y-2">
-                        <div className="text-[11px] text-muted-foreground">読み筋がありません</div>
-                        <button
-                            type="button"
-                            onClick={() => {
-                                onAnalyze(move.ply);
-                            }}
-                            disabled={isThisPlyAnalyzing}
-                            className="
+                    {/* 読み筋がある場合 */}
+                    {hasPv && pvDisplay && (
+                        <div className="space-y-2">
+                            <div className="text-[11px] font-medium text-muted-foreground">
+                                読み筋:
+                            </div>
+                            <div className="flex flex-wrap gap-1 text-[12px] font-mono">
+                                {pvDisplay.map((m, index) => (
+                                    <span
+                                        key={`${index}-${m.usiMove}`}
+                                        className={
+                                            m.turn === "sente"
+                                                ? "text-wafuu-shu"
+                                                : "text-[hsl(210_70%_45%)]"
+                                        }
+                                    >
+                                        {m.displayText}
+                                        {index < pvDisplay.length - 1 && (
+                                            <span className="text-muted-foreground mx-0.5">→</span>
+                                        )}
+                                    </span>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* 読み筋がない場合は解析ボタンを表示 */}
+                    {!hasPv && onAnalyze && (
+                        <div className="space-y-2">
+                            <div className="text-[11px] text-muted-foreground">
+                                読み筋がありません
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    onAnalyze(move.ply);
+                                }}
+                                disabled={isThisPlyAnalyzing}
+                                className="
                                 w-full px-3 py-2 text-[12px]
                                 bg-primary text-primary-foreground
                                 hover:bg-primary/90
@@ -145,61 +192,62 @@ export function EvalPopover({
                                 rounded border border-border
                                 transition-colors cursor-pointer
                             "
-                        >
-                            {isThisPlyAnalyzing ? (
-                                <span>解析中...</span>
-                            ) : (
-                                <>
-                                    <span className="mr-1">&#128269;</span>
-                                    この局面を解析する
-                                </>
-                            )}
-                        </button>
-                    </div>
-                )}
+                            >
+                                {isThisPlyAnalyzing ? (
+                                    <span>解析中...</span>
+                                ) : (
+                                    <>
+                                        <span className="mr-1">&#128269;</span>
+                                        この局面を解析する
+                                    </>
+                                )}
+                            </button>
+                        </div>
+                    )}
 
-                {/* アクションボタン（PVがある場合のみ） */}
-                {hasPv && (onPreview || onAddBranch) && (
-                    <div className="flex gap-2 mt-3 pt-2 border-t border-border">
-                        {onPreview && move.pv && (
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    onPreview(move.ply, move.pv ?? []);
-                                    setOpen(false);
-                                }}
-                                className="
+                    {/* アクションボタン（PVがある場合のみ） */}
+                    {hasPv && (onPreview || onAddBranch) && (
+                        <div className="flex gap-2 mt-3 pt-2 border-t border-border">
+                            {onPreview && move.pv && (
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        onPreview(move.ply, move.pv ?? []);
+                                        setOpen(false);
+                                    }}
+                                    className="
                                     flex-1 px-3 py-1.5 text-[11px]
                                     bg-muted hover:bg-muted/80
                                     rounded border border-border
                                     transition-colors cursor-pointer
                                 "
-                            >
-                                <span className="mr-1">&#9654;</span>
-                                盤面で確認
-                            </button>
-                        )}
-                        {onAddBranch && move.pv && (
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    onAddBranch(move.ply, move.pv ?? []);
-                                    setOpen(false);
-                                }}
-                                className="
+                                >
+                                    <span className="mr-1">&#9654;</span>
+                                    盤面で確認
+                                </button>
+                            )}
+                            {onAddBranch && move.pv && (
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        onAddBranch(move.ply, move.pv ?? []);
+                                        setOpen(false);
+                                    }}
+                                    className="
                                     flex-1 px-3 py-1.5 text-[11px]
                                     bg-muted hover:bg-muted/80
                                     rounded border border-border
                                     transition-colors cursor-pointer
                                 "
-                            >
-                                <span className="mr-1">&#128194;</span>
-                                分岐として保存
-                            </button>
-                        )}
-                    </div>
-                )}
-            </PopoverContent>
-        </Popover>
+                                >
+                                    <span className="mr-1">&#128194;</span>
+                                    分岐として保存
+                                </button>
+                            )}
+                        </div>
+                    )}
+                </PopoverContent>
+            </Popover>
+        </span>
     );
 }

@@ -1345,9 +1345,9 @@ export function ShogiMatch({
     // PVプレビューを開くコールバック
     const handlePreviewPv = useCallback(
         (ply: number, pv: string[]) => {
-            // 指定されたplyに対応する局面を取得
-            const positionIndex = ply - 1; // positionHistoryは0-indexed（1手目 = index 0）
-            const startPos = positionHistory[positionIndex];
+            // PVはply手目を指した後の局面から計算されている
+            // positionHistory[ply-1] = ply手目を指した後の局面
+            const startPos = positionHistory[ply - 1];
             if (!startPos) return;
 
             setPvPreview({

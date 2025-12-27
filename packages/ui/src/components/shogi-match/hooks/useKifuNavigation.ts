@@ -11,6 +11,7 @@ import {
     applyMoveWithState,
     createKifuTree,
     findNodeByPlyInCurrentPath,
+    findNodeByPlyInMainLine,
     getBranchInfo,
     getCurrentNode,
     getMainLineMoves,
@@ -266,12 +267,18 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
 
     /**
      * 評価値を記録
-     * findNodeByPlyInCurrentPathを使用してO(depth)で効率的に検索
+     * findNodeByPlyInCurrentPathを使用し、見つからなければfindNodeByPlyInMainLineで検索
      */
     const recordEval = useCallback((ply: number, event: EngineInfoEvent) => {
         setTree((prev) => {
             // 最適化: 現在位置からルートまで遡りながらplyに一致するノードを探す
-            const nodeId = findNodeByPlyInCurrentPath(prev, ply);
+            let nodeId = findNodeByPlyInCurrentPath(prev, ply);
+
+            // 見つからなければメインラインから検索（現在位置より先のノードの場合）
+            if (!nodeId) {
+                nodeId = findNodeByPlyInMainLine(prev, ply);
+            }
+
             if (nodeId) {
                 const node = prev.nodes.get(nodeId);
                 if (node) {
@@ -282,12 +289,18 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
                         pv: event.pv,
                     };
 
-                    // より深い探索深さの評価値で更新
                     const existing = node.eval;
-                    if (
+
+                    // 更新条件:
+                    // 1. 既存の評価値がない場合
+                    // 2. 新しい探索深さが既存より深い場合
+                    // 3. 既存にPVがなく、新しいデータにPVがある場合
+                    const shouldUpdate =
                         !existing ||
-                        (event.depth !== undefined && (existing.depth ?? 0) < event.depth)
-                    ) {
+                        (event.depth !== undefined && (existing.depth ?? 0) < event.depth) ||
+                        (!existing.pv && event.pv && event.pv.length > 0);
+
+                    if (shouldUpdate) {
                         return setNodeEval(prev, nodeId, evalData);
                     }
                 }
@@ -305,8 +318,11 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
         if (pv.length === 0) return;
 
         setTree((prev) => {
-            // 指定plyのノードを探す（現在のパスから）
-            const nodeId = findNodeByPlyInCurrentPath(prev, ply);
+            // 指定plyのノードを探す（現在のパスから、見つからなければメインラインから）
+            let nodeId = findNodeByPlyInCurrentPath(prev, ply);
+            if (!nodeId) {
+                nodeId = findNodeByPlyInMainLine(prev, ply);
+            }
             if (!nodeId) return prev;
 
             const node = prev.nodes.get(nodeId);
