@@ -820,8 +820,10 @@ impl Search {
                         score,
                         completed_depth: r.completed_depth,
                         nodes: r.nodes,
-                        best_previous_score: Some(score),
-                        best_previous_average_score: Some(score),
+                        // Use the actual best score (not skill-weakened) for time management
+                        // and aspiration window initialization, matching native behavior.
+                        best_previous_score: Some(r.best_score),
+                        best_previous_average_score: Some(r.best_score),
                     }
                 })
             };
