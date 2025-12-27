@@ -2,6 +2,7 @@
  * 評価値Popoverコンポーネント
  *
  * 評価値をクリックすると開き、読み筋（PV）を表示する
+ * PVがない場合は解析ボタンを表示する
  */
 
 import type { PositionState } from "@shogi/app-core";
@@ -18,10 +19,16 @@ interface EvalPopoverProps {
     position: PositionState;
     /** 評価値表示要素（トリガー） */
     children: ReactElement;
-    /** 分岐として追加するコールバック（Phase 2で実装） */
+    /** 分岐として追加するコールバック */
     onAddBranch?: (ply: number, pv: string[]) => void;
-    /** 盤面で確認するコールバック（Phase 3で実装） */
+    /** 盤面で確認するコールバック */
     onPreview?: (ply: number, pv: string[]) => void;
+    /** 指定手数の局面を解析するコールバック */
+    onAnalyze?: (ply: number) => void;
+    /** 解析中かどうか */
+    isAnalyzing?: boolean;
+    /** 現在解析中の手数 */
+    analyzingPly?: number;
 }
 
 export function EvalPopover({
@@ -30,6 +37,9 @@ export function EvalPopover({
     children,
     onAddBranch,
     onPreview,
+    onAnalyze,
+    isAnalyzing,
+    analyzingPly,
 }: EvalPopoverProps): ReactElement {
     const [open, setOpen] = useState(false);
 
@@ -46,8 +56,12 @@ export function EvalPopover({
         return getEvalTooltipInfo(move.evalCp, move.evalMate, move.ply, move.depth);
     }, [move.evalCp, move.evalMate, move.ply, move.depth]);
 
-    // PVがない場合はトリガーのみ表示（Popoverは開かない）
-    if (!pvDisplay || pvDisplay.length === 0) {
+    // この手数が解析中かどうか
+    const isThisPlyAnalyzing = isAnalyzing && analyzingPly === move.ply;
+
+    // PVがなく、解析機能もない場合はトリガーのみ表示
+    const hasPv = pvDisplay && pvDisplay.length > 0;
+    if (!hasPv && !onAnalyze) {
         return children;
     }
 
@@ -89,30 +103,63 @@ export function EvalPopover({
                     </div>
                 </div>
 
-                {/* 読み筋 */}
-                <div className="space-y-2">
-                    <div className="text-[11px] font-medium text-muted-foreground">読み筋:</div>
-                    <div className="flex flex-wrap gap-1 text-[12px] font-mono">
-                        {pvDisplay.map((m, index) => (
-                            <span
-                                key={`${index}-${m.usiMove}`}
-                                className={
-                                    m.turn === "sente"
-                                        ? "text-wafuu-shu"
-                                        : "text-[hsl(210_70%_45%)]"
-                                }
-                            >
-                                {m.displayText}
-                                {index < pvDisplay.length - 1 && (
-                                    <span className="text-muted-foreground mx-0.5">→</span>
-                                )}
-                            </span>
-                        ))}
+                {/* 読み筋がある場合 */}
+                {hasPv && pvDisplay && (
+                    <div className="space-y-2">
+                        <div className="text-[11px] font-medium text-muted-foreground">読み筋:</div>
+                        <div className="flex flex-wrap gap-1 text-[12px] font-mono">
+                            {pvDisplay.map((m, index) => (
+                                <span
+                                    key={`${index}-${m.usiMove}`}
+                                    className={
+                                        m.turn === "sente"
+                                            ? "text-wafuu-shu"
+                                            : "text-[hsl(210_70%_45%)]"
+                                    }
+                                >
+                                    {m.displayText}
+                                    {index < pvDisplay.length - 1 && (
+                                        <span className="text-muted-foreground mx-0.5">→</span>
+                                    )}
+                                </span>
+                            ))}
+                        </div>
                     </div>
-                </div>
+                )}
 
-                {/* アクションボタン（Phase 2, 3で有効化） */}
-                {(onPreview || onAddBranch) && (
+                {/* 読み筋がない場合は解析ボタンを表示 */}
+                {!hasPv && onAnalyze && (
+                    <div className="space-y-2">
+                        <div className="text-[11px] text-muted-foreground">読み筋がありません</div>
+                        <button
+                            type="button"
+                            onClick={() => {
+                                onAnalyze(move.ply);
+                            }}
+                            disabled={isThisPlyAnalyzing}
+                            className="
+                                w-full px-3 py-2 text-[12px]
+                                bg-primary text-primary-foreground
+                                hover:bg-primary/90
+                                disabled:opacity-50 disabled:cursor-not-allowed
+                                rounded border border-border
+                                transition-colors cursor-pointer
+                            "
+                        >
+                            {isThisPlyAnalyzing ? (
+                                <span>解析中...</span>
+                            ) : (
+                                <>
+                                    <span className="mr-1">&#128269;</span>
+                                    この局面を解析する
+                                </>
+                            )}
+                        </button>
+                    </div>
+                )}
+
+                {/* アクションボタン（PVがある場合のみ） */}
+                {hasPv && (onPreview || onAddBranch) && (
                     <div className="flex gap-2 mt-3 pt-2 border-t border-border">
                         {onPreview && move.pv && (
                             <button

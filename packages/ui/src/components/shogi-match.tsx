@@ -274,6 +274,8 @@ export function ShogiMatch({
         pv: string[];
         startPosition: PositionState;
     } | null>(null);
+    // 解析中の手数（オンデマンド解析用）
+    const [analyzingPly, setAnalyzingPly] = useState<number | null>(null);
 
     // positionRef を先に定義（コールバックで使用するため）
     const positionRef = useRef<PositionState>(position);
@@ -1239,6 +1241,33 @@ export function ShogiMatch({
         void cancelAnalysis();
     }, [cancelAnalysis]);
 
+    // 特定の手数の局面を解析するコールバック（オンデマンド解析用）
+    const handleAnalyzePly = useCallback(
+        (ply: number) => {
+            // ply手目の局面を解析するには、ply-1手までの指し手が必要
+            // （ply 1 = 1手目を指した後の局面 = moves[0]まで適用した局面）
+            const movesForPly = kifMoves.slice(0, ply).map((m) => m.usiMove);
+
+            setAnalyzingPly(ply);
+            void analyzePosition({
+                sfen: startSfen,
+                moves: movesForPly,
+                ply,
+                timeMs: 3000, // 3秒間解析
+                depth: 20, // 最大深さ20
+            });
+        },
+        [kifMoves, analyzePosition, startSfen],
+    );
+
+    // 解析完了時にanalyzingPlyをクリア
+    // biome-ignore lint/correctness/useExhaustiveDependencies: isAnalyzingがfalseになったときのみクリア
+    useEffect(() => {
+        if (!isAnalyzing && analyzingPly !== null) {
+            setAnalyzingPly(null);
+        }
+    }, [isAnalyzing]);
+
     // PVプレビューを開くコールバック
     const handlePreviewPv = useCallback(
         (ply: number, pv: string[]) => {
@@ -1698,6 +1727,9 @@ export function ShogiMatch({
                             positionHistory={positionHistory}
                             onAddPvAsBranch={addPvAsBranch}
                             onPreviewPv={handlePreviewPv}
+                            onAnalyzePly={handleAnalyzePly}
+                            isAnalyzing={isAnalyzing}
+                            analyzingPly={analyzingPly ?? undefined}
                         />
 
                         {/* 評価値グラフパネル（折りたたみ） */}

@@ -71,10 +71,16 @@ interface KifuPanelProps {
     branchMarkers?: Map<number, number>;
     /** 局面履歴（各手が指された後の局面、PV表示用） */
     positionHistory?: PositionState[];
-    /** PVを分岐として追加するコールバック（Phase 2で実装） */
+    /** PVを分岐として追加するコールバック */
     onAddPvAsBranch?: (ply: number, pv: string[]) => void;
-    /** PVを盤面で確認するコールバック（Phase 3で実装） */
+    /** PVを盤面で確認するコールバック */
     onPreviewPv?: (ply: number, pv: string[]) => void;
+    /** 指定手数の局面を解析するコールバック（オンデマンド解析用） */
+    onAnalyzePly?: (ply: number) => void;
+    /** 解析中かどうか */
+    isAnalyzing?: boolean;
+    /** 現在解析中の手数 */
+    analyzingPly?: number;
 }
 
 /**
@@ -216,6 +222,9 @@ export function KifuPanel({
     positionHistory,
     onAddPvAsBranch,
     onPreviewPv,
+    onAnalyzePly,
+    isAnalyzing,
+    analyzingPly,
 }: KifuPanelProps): ReactElement {
     const listRef = useRef<HTMLDivElement>(null);
     const currentRowRef = useRef<HTMLElement>(null);
@@ -425,12 +434,14 @@ export function KifuPanel({
                             // この手に対応する局面（手が指された後の局面）
                             const position = positionHistory?.[index];
                             // PVがあるかどうか
-                            const hasPv = move.pv && move.pv.length > 0 && position;
+                            const hasPv = move.pv && move.pv.length > 0;
+                            // EvalPopoverを使用するか（PVがあるか、解析機能がある場合）
+                            const useEvalPopover = position && (hasPv || onAnalyzePly);
 
                             // 評価値表示コンポーネント
                             const evalSpan = (
                                 <span
-                                    className={`${getEvalClassName(move.evalCp, move.evalMate)} ${isPastCurrent ? "opacity-50" : ""} ${hasPv ? "cursor-pointer" : "cursor-help"}`}
+                                    className={`${getEvalClassName(move.evalCp, move.evalMate)} ${isPastCurrent ? "opacity-50" : ""} ${useEvalPopover ? "cursor-pointer" : "cursor-help"}`}
                                 >
                                     {evalText}
                                 </span>
@@ -458,12 +469,15 @@ export function KifuPanel({
                                     </span>
                                     {showEval &&
                                         evalText &&
-                                        (hasPv && position ? (
+                                        (useEvalPopover && position ? (
                                             <EvalPopover
                                                 move={move}
                                                 position={position}
                                                 onAddBranch={onAddPvAsBranch}
                                                 onPreview={onPreviewPv}
+                                                onAnalyze={onAnalyzePly}
+                                                isAnalyzing={isAnalyzing}
+                                                analyzingPly={analyzingPly}
                                             >
                                                 {evalSpan}
                                             </EvalPopover>
