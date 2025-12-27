@@ -814,22 +814,3 @@ export function convertPvToDisplay(pv: string[], position: PositionState): PvDis
 
     return result;
 }
-
-/**
- * PVを表示用文字列に変換（矢印区切り）
- *
- * @param pv USI形式の指し手配列
- * @param position 現在局面
- * @param maxMoves 表示する最大手数（省略時は全て表示）
- * @returns 表示用文字列（例: "☗7六歩 → ☖3四歩 → ☗2六歩"）
- */
-function formatPvForDisplay(pv: string[], position: PositionState, maxMoves?: number): string {
-    const moves = convertPvToDisplay(pv, position);
-    const limited = maxMoves !== undefined ? moves.slice(0, maxMoves) : moves;
-    const formatted = limited.map((m) => m.displayText).join(" → ");
-
-    if (maxMoves !== undefined && moves.length > maxMoves) {
-        return `${formatted} ...`;
-    }
-    return formatted;
-}

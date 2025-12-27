@@ -11,9 +11,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../../dialog";
 import type { ShogiBoardCell } from "../../shogi-board";
 import { ShogiBoard } from "../../shogi-board";
-import { HandPiecesDisplay } from "./HandPiecesDisplay";
 import type { PvDisplayMove } from "../utils/kifFormat";
 import { convertPvToDisplay } from "../utils/kifFormat";
+import { HandPiecesDisplay } from "./HandPiecesDisplay";
 
 interface PvPreviewDialogProps {
     /** ダイアログが開いているか */
