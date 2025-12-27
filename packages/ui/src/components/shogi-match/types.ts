@@ -49,3 +49,22 @@ export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
     showKifuEval: false,
     enableWheelNavigation: true,
 };
+
+/**
+ * 解析設定
+ */
+export interface AnalysisSettings {
+    /** 並列解析のワーカー数（0=自動検出） */
+    parallelWorkers: number;
+    /** 一括解析時の1手あたり解析時間(ms) */
+    batchAnalysisTimeMs: number;
+    /** 一括解析時の探索深さ */
+    batchAnalysisDepth: number;
+}
+
+/** デフォルト解析設定 */
+export const DEFAULT_ANALYSIS_SETTINGS: AnalysisSettings = {
+    parallelWorkers: 0, // 0 = 自動検出
+    batchAnalysisTimeMs: 1000,
+    batchAnalysisDepth: 15,
+};

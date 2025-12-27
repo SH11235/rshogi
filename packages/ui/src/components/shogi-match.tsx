@@ -13,6 +13,7 @@ import {
     type Player,
     type PositionState,
     parseMove,
+    resolveWorkerCount,
     type Square,
 } from "@shogi/app-core";
 import type { CSSProperties, ReactElement } from "react";
@@ -50,10 +51,13 @@ import { BoardToolbar } from "./shogi-match/components/BoardToolbar";
 import { DisplaySettingsPanel } from "./shogi-match/components/DisplaySettingsPanel";
 import { type ClockSettings, useClockManager } from "./shogi-match/hooks/useClockManager";
 import { useEngineManager } from "./shogi-match/hooks/useEngineManager";
+import { type AnalysisJob, useEnginePool } from "./shogi-match/hooks/useEnginePool";
 import { useKifuKeyboardNavigation } from "./shogi-match/hooks/useKifuKeyboardNavigation";
 import { useKifuNavigation } from "./shogi-match/hooks/useKifuNavigation";
 import { useLocalStorage } from "./shogi-match/hooks/useLocalStorage";
 import {
+    type AnalysisSettings,
+    DEFAULT_ANALYSIS_SETTINGS,
     DEFAULT_DISPLAY_SETTINGS,
     type DisplaySettings,
     type PromotionSelection,
@@ -267,6 +271,11 @@ export function ShogiMatch({
         "shogi-display-settings",
         DEFAULT_DISPLAY_SETTINGS,
     );
+    // 解析設定
+    const [analysisSettings, setAnalysisSettings] = useLocalStorage<AnalysisSettings>(
+        "shogi-analysis-settings",
+        DEFAULT_ANALYSIS_SETTINGS,
+    );
     // PVプレビュー用のstate
     const [pvPreview, setPvPreview] = useState<{
         open: boolean;
@@ -284,8 +293,8 @@ export function ShogiMatch({
         currentIndex: number;
         totalCount: number;
         targetPlies: number[];
+        inProgress?: number[]; // 並列解析中の手番号
     } | null>(null);
-    const batchAnalysisCancelledRef = useRef(false);
 
     // positionRef を先に定義（コールバックで使用するため）
     const positionRef = useRef<PositionState>(position);
@@ -433,7 +442,6 @@ export function ShogiMatch({
         logEngineError,
         isAnalyzing,
         analyzePosition,
-        cancelAnalysis,
         engineErrorDetails,
         retryEngine,
         isRetrying,
@@ -452,6 +460,33 @@ export function ShogiMatch({
         maxLogs,
     });
     stopAllEnginesRef.current = stopAllEngines;
+
+    // 並列一括解析用のエンジンプール
+    const engineOpt = engineOptions[0]; // デフォルトのエンジンオプションを使用
+    const enginePool = useEnginePool({
+        createClient:
+            engineOpt?.createClient ??
+            (() => {
+                throw new Error("No engine available");
+            }),
+        workerCount: resolveWorkerCount(analysisSettings.parallelWorkers),
+        onProgress: (progress) => {
+            setBatchAnalysis({
+                isRunning: true,
+                currentIndex: progress.completed,
+                totalCount: progress.total,
+                targetPlies: [], // 進捗表示用には不要
+                inProgress: progress.inProgress,
+            });
+        },
+        onResult: recordEval,
+        onComplete: () => {
+            setBatchAnalysis(null);
+        },
+        onError: (ply, error) => {
+            console.error(`解析エラー (ply=${ply}):`, error);
+        },
+    });
 
     // キーボード・ホイールナビゲーション（対局中は無効）
     useKifuKeyboardNavigation({
@@ -1231,27 +1266,6 @@ export function ShogiMatch({
         [isMatchRunning, navigation, stopTicking, stopAllEngines],
     );
 
-    // 現在局面の解析コールバック
-    const handleAnalyze = useCallback(() => {
-        // 現在の局面までの指し手を取得
-        const currentMoves = navigation.getMovesArray();
-        const currentPly = navigation.state.currentPly;
-
-        // 解析リクエストを送信
-        void analyzePosition({
-            sfen: startSfen,
-            moves: currentMoves,
-            ply: currentPly,
-            timeMs: 3000, // 3秒間解析
-            depth: 20, // 最大深さ20
-        });
-    }, [navigation, analyzePosition, startSfen]);
-
-    // 解析キャンセルコールバック
-    const handleCancelAnalysis = useCallback(() => {
-        void cancelAnalysis();
-    }, [cancelAnalysis]);
-
     // 特定の手数の局面を解析するコールバック（オンデマンド解析用）
     const handleAnalyzePly = useCallback(
         (ply: number) => {
@@ -1271,52 +1285,15 @@ export function ShogiMatch({
         [kifMoves, analyzePosition, startSfen],
     );
 
-    // 解析完了時の処理（単発解析のクリアと一括解析の進行）
+    // 単発解析完了時の処理
     // biome-ignore lint/correctness/useExhaustiveDependencies: isAnalyzingがfalseになったときのみ実行
     useEffect(() => {
         if (!isAnalyzing && analyzingPly !== null) {
             setAnalyzingPly(null);
-
-            // 一括解析中の場合は次の手に進む
-            if (batchAnalysis?.isRunning && !batchAnalysisCancelledRef.current) {
-                const nextIndex = batchAnalysis.currentIndex + 1;
-                if (nextIndex < batchAnalysis.targetPlies.length) {
-                    // 次の手を解析
-                    const nextPly = batchAnalysis.targetPlies[nextIndex];
-                    setBatchAnalysis((prev) =>
-                        prev ? { ...prev, currentIndex: nextIndex } : null,
-                    );
-                    // 少し遅延を入れてから次の解析を開始
-                    setTimeout(() => {
-                        if (!batchAnalysisCancelledRef.current) {
-                            handleAnalyzePlyForBatch(nextPly);
-                        }
-                    }, 100);
-                } else {
-                    // 一括解析完了
-                    setBatchAnalysis(null);
-                }
-            }
         }
     }, [isAnalyzing]);
 
-    // 一括解析用の解析関数（短い解析時間）
-    const handleAnalyzePlyForBatch = useCallback(
-        (ply: number) => {
-            const movesForPly = kifMoves.slice(0, ply).map((m) => m.usiMove);
-            setAnalyzingPly(ply);
-            void analyzePosition({
-                sfen: startSfen,
-                moves: movesForPly,
-                ply,
-                timeMs: 1000, // 一括解析は1秒
-                depth: 15, // 深さも控えめに
-            });
-        },
-        [kifMoves, analyzePosition, startSfen],
-    );
-
-    // 一括解析を開始
+    // 一括解析を開始（並列処理）
     const handleStartBatchAnalysis = useCallback(() => {
         // PVがない手を抽出
         const targetPlies = kifMoves.filter((m) => !m.pv || m.pv.length === 0).map((m) => m.ply);
@@ -1325,25 +1302,24 @@ export function ShogiMatch({
             return; // 解析対象がない
         }
 
-        batchAnalysisCancelledRef.current = false;
-        setBatchAnalysis({
-            isRunning: true,
-            currentIndex: 0,
-            totalCount: targetPlies.length,
-            targetPlies,
-        });
+        // ジョブを生成
+        const jobs: AnalysisJob[] = targetPlies.map((ply) => ({
+            ply,
+            sfen: startSfen,
+            moves: kifMoves.slice(0, ply).map((m) => m.usiMove),
+            timeMs: analysisSettings.batchAnalysisTimeMs,
+            depth: analysisSettings.batchAnalysisDepth,
+        }));
 
-        // 最初の手を解析開始
-        handleAnalyzePlyForBatch(targetPlies[0]);
-    }, [kifMoves, handleAnalyzePlyForBatch]);
+        // 並列一括解析を開始
+        enginePool.start(jobs);
+    }, [kifMoves, startSfen, analysisSettings, enginePool]);
 
     // 一括解析をキャンセル
     const handleCancelBatchAnalysis = useCallback(() => {
-        batchAnalysisCancelledRef.current = true;
-        void cancelAnalysis();
+        void enginePool.cancel();
         setBatchAnalysis(null);
-        setAnalyzingPly(null);
-    }, [cancelAnalysis]);
+    }, [enginePool]);
 
     // PVプレビューを開くコールバック
     const handlePreviewPv = useCallback(
@@ -1819,11 +1795,14 @@ export function ShogiMatch({
                                           isRunning: batchAnalysis.isRunning,
                                           currentIndex: batchAnalysis.currentIndex,
                                           totalCount: batchAnalysis.totalCount,
+                                          inProgress: batchAnalysis.inProgress,
                                       }
                                     : undefined
                             }
                             onStartBatchAnalysis={handleStartBatchAnalysis}
                             onCancelBatchAnalysis={handleCancelBatchAnalysis}
+                            analysisSettings={analysisSettings}
+                            onAnalysisSettingsChange={setAnalysisSettings}
                         />
 
                         {/* 評価値グラフパネル（折りたたみ） */}
@@ -1832,10 +1811,6 @@ export function ShogiMatch({
                             currentPly={navigation.state.currentPly}
                             onPlySelect={handlePlySelect}
                             defaultOpen={false}
-                            isMatchRunning={isMatchRunning}
-                            isAnalyzing={isAnalyzing}
-                            onAnalyze={handleAnalyze}
-                            onCancelAnalysis={handleCancelAnalysis}
                         />
 
                         {/* インポートパネル */}
@@ -1850,6 +1825,8 @@ export function ShogiMatch({
                             onOpenChange={setIsDisplaySettingsPanelOpen}
                             settings={displaySettings}
                             onSettingsChange={setDisplaySettings}
+                            analysisSettings={analysisSettings}
+                            onAnalysisSettingsChange={setAnalysisSettings}
                         />
 
                         {isDevMode && (
