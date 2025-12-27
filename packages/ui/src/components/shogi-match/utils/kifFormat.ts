@@ -823,11 +823,7 @@ export function convertPvToDisplay(pv: string[], position: PositionState): PvDis
  * @param maxMoves 表示する最大手数（省略時は全て表示）
  * @returns 表示用文字列（例: "☗7六歩 → ☖3四歩 → ☗2六歩"）
  */
-export function formatPvForDisplay(
-    pv: string[],
-    position: PositionState,
-    maxMoves?: number,
-): string {
+function formatPvForDisplay(pv: string[], position: PositionState, maxMoves?: number): string {
     const moves = convertPvToDisplay(pv, position);
     const limited = maxMoves !== undefined ? moves.slice(0, maxMoves) : moves;
     const formatted = limited.map((m) => m.displayText).join(" → ");
