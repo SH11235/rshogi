@@ -420,20 +420,36 @@ mod imp {
 // This uses wasm-bindgen-rayon to handle Web Worker creation asynchronously,
 // avoiding the Condvar/async mismatch that caused deadlocks with wasm_thread.
 //
-// Key design: start_thinking() uses rayon::spawn() to launch helper threads
+// Key design: start_thinking() uses rayon::spawn_fifo() to launch helper threads
 // asynchronously, allowing main thread search to run in parallel with helpers.
 // wait_for_search_finished() polls an atomic counter until all helpers complete.
+//
+// ## LazySMP Effectiveness
+//
+// The core LazySMP mechanism IS working:
+// - All threads share the same TranspositionTable via Arc
+// - Helper threads write their search results to the shared TT
+// - Main thread benefits from TT entries discovered by helpers
+// - This provides the essential speedup of parallel search
+//
+// ## Result Collection
+//
+// Helper threads push their results to a shared `helper_results` vector when
+// they complete each depth. This allows get_best_thread_id() to consider
+// helper results when selecting the best move.
+//
+// The TT sharing effect (the primary benefit of LazySMP) is NOT affected.
 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
 mod imp {
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use rayon::prelude::*;
 
     use crate::position::Position;
     use crate::tt::TranspositionTable;
-    use crate::types::Depth;
+    use crate::types::{Depth, Move, Value};
 
     use crate::search::engine::search_helper;
     use crate::search::{LimitsType, SearchWorker, TimeManagement, TimeOptions};
@@ -442,6 +458,24 @@ mod imp {
     // Each Rayon worker thread gets its own SearchWorker on first use.
     thread_local! {
         static THREAD_WORKER: RefCell<Option<Box<SearchWorker>>> = const { RefCell::new(None) };
+    }
+
+    /// Helper thread の探索結果を格納する構造体。
+    /// 各 helper が探索完了時にこの情報を shared vector に push する。
+    #[derive(Debug, Clone)]
+    pub struct HelperResult {
+        /// スレッドID (1-indexed for helpers)
+        pub thread_id: usize,
+        /// 探索ノード数
+        pub nodes: u64,
+        /// 最善手の変化量（時間管理用）
+        pub best_move_changes: f64,
+        /// 完了した探索深さ
+        pub completed_depth: Depth,
+        /// 最善手
+        pub best_move: Move,
+        /// 最善手のスコア
+        pub best_score: Value,
     }
 
     pub struct ThreadPool {
@@ -453,6 +487,9 @@ mod imp {
         /// Counter for pending helper thread tasks.
         /// Decremented when each helper thread completes its search.
         pending_tasks: Arc<AtomicUsize>,
+        /// Helper threads の探索結果を収集するベクタ。
+        /// 各 helper が探索完了時に結果を push し、get_best_thread_id() で参照される。
+        helper_results: Arc<Mutex<Vec<HelperResult>>>,
     }
 
     impl ThreadPool {
@@ -470,6 +507,7 @@ mod imp {
                 ponderhit,
                 max_moves_to_draw,
                 pending_tasks: Arc::new(AtomicUsize::new(0)),
+                helper_results: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -506,6 +544,11 @@ mod imp {
                 return;
             }
 
+            // Clear previous results before starting new search
+            if let Ok(mut results) = self.helper_results.lock() {
+                results.clear();
+            }
+
             // Set pending task count before spawning
             self.pending_tasks.store(helper_count, Ordering::SeqCst);
 
@@ -518,6 +561,7 @@ mod imp {
                 let ponderhit = Arc::clone(&self.ponderhit);
                 let tt = Arc::clone(&self.tt);
                 let pending = Arc::clone(&self.pending_tasks);
+                let helper_results = Arc::clone(&self.helper_results);
                 let pos_clone = pos.clone();
                 let limits_clone = limits.clone();
 
@@ -560,6 +604,23 @@ mod imp {
                             max_depth,
                             skill_enabled,
                         );
+
+                        // Collect result after search completes
+                        let result = HelperResult {
+                            thread_id,
+                            nodes: worker.nodes,
+                            best_move_changes: worker.best_move_changes,
+                            completed_depth: worker.completed_depth,
+                            best_move: worker.best_move,
+                            best_score: worker
+                                .root_moves
+                                .get(0)
+                                .map(|rm| rm.score)
+                                .unwrap_or(Value::ZERO),
+                        };
+                        if let Ok(mut results) = helper_results.lock() {
+                            results.push(result);
+                        }
                     });
 
                     // Decrement pending count when this helper completes
@@ -608,12 +669,22 @@ mod imp {
         }
 
         pub fn helper_threads(&self) -> &[Thread] {
-            // Rayon model doesn't expose individual Thread objects
-            // TODO: Consider adding a mechanism to collect helper results
+            // Rayon's thread-local model prevents exposing Thread objects.
+            // Use helper_results() instead to get search results.
             &[]
+        }
+
+        /// Get the collected helper thread results.
+        /// Results are collected when each helper thread completes its search.
+        /// Call this after wait_for_search_finished() to get final results.
+        pub fn helper_results(&self) -> Vec<HelperResult> {
+            self.helper_results.lock().map(|guard| guard.clone()).unwrap_or_default()
         }
     }
 
+    /// Stub Thread for wasm-threads builds.
+    /// These methods exist for API compatibility but cannot return real values
+    /// because Rayon workers use thread-local storage inaccessible from outside.
     pub struct Thread;
 
     impl Thread {
@@ -625,14 +696,19 @@ mod imp {
         where
             F: FnOnce(&mut SearchWorker) -> R,
         {
+            // LIMITATION: Cannot access thread-local SearchWorker from outside
             unreachable!("rayon thread pool does not expose individual threads")
         }
 
         pub fn nodes(&self) -> u64 {
+            // LIMITATION: Returns 0; actual nodes are in thread-local workers
+            // NPS display will be lower than actual
             0
         }
 
         pub fn best_move_changes(&self) -> f64 {
+            // LIMITATION: Returns 0; actual value is in thread-local workers
+            // Time management may be slightly less optimal
             0.0
         }
     }

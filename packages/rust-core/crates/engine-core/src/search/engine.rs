@@ -236,6 +236,7 @@ impl From<&SearchWorker> for WorkerSummary {
 ///
 /// - `changes`: 各スレッドのbest_move_changes
 /// - 戻り値: (合計, スレッド数)。スレッド数0の場合は(0.0, 1)を返しゼロ除算を避ける。
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 fn aggregate_best_move_changes(changes: &[f64]) -> (f64, usize) {
     if changes.is_empty() {
         return (0.0, 1);
@@ -310,6 +311,8 @@ fn get_best_thread_id(main_worker: &SearchWorker, thread_pool: &ThreadPool) -> u
         summaries.push(summary);
     }
 
+    // Native: Use helper_threads() to access Thread objects directly
+    #[cfg(not(target_arch = "wasm32"))]
     for thread in thread_pool.helper_threads() {
         if let Some(summary) = thread.with_worker(|worker: &mut SearchWorker| {
             ThreadSummary::from_worker(thread.id(), worker)
@@ -317,6 +320,20 @@ fn get_best_thread_id(main_worker: &SearchWorker, thread_pool: &ThreadPool) -> u
             summaries.push(summary);
         }
     }
+
+    // Wasm with wasm-threads: Use helper_results() to get collected results
+    #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+    for result in thread_pool.helper_results() {
+        summaries.push(ThreadSummary {
+            id: result.thread_id,
+            score: result.best_score,
+            completed_depth: result.completed_depth,
+        });
+    }
+
+    // Wasm without wasm-threads: No helper threads, suppress unused warning
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+    let _ = thread_pool;
 
     if summaries.is_empty() {
         return 0;
@@ -625,11 +642,14 @@ impl Search {
 
     /// 探索スレッド数を設定
     pub fn set_num_threads(&mut self, num: usize) {
-        let num = num.clamp(1, 512);
         // WASM builds without wasm-threads feature use single-threaded search only.
         // With wasm-threads feature, multi-threading via wasm-bindgen-rayon is supported.
         #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+        let _ = num; // シングルスレッドモードでは引数を無視
+        #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
         let num = 1;
+        #[cfg(not(all(target_arch = "wasm32", not(feature = "wasm-threads"))))]
+        let num = num.clamp(1, 512);
         self.num_threads = num;
         self.thread_pool
             .set_num_threads(num, Arc::clone(&self.tt), self.max_moves_to_draw);
@@ -752,15 +772,42 @@ impl Search {
                 .expect("worker should be initialized by search_with_callback");
             collect_best_thread_result(worker, &limits, skill_enabled, &mut skill)
         } else {
-            let mut result = None;
-            for thread in self.thread_pool.helper_threads() {
-                if thread.id() == best_thread_id {
-                    result = Some(thread.with_worker(|worker: &mut SearchWorker| {
-                        collect_best_thread_result(worker, &limits, skill_enabled, &mut skill)
-                    }));
-                    break;
+            // Native: Use helper_threads() to access Thread objects directly
+            #[cfg(not(target_arch = "wasm32"))]
+            let result = {
+                let mut result = None;
+                for thread in self.thread_pool.helper_threads() {
+                    if thread.id() == best_thread_id {
+                        result = Some(thread.with_worker(|worker: &mut SearchWorker| {
+                            collect_best_thread_result(worker, &limits, skill_enabled, &mut skill)
+                        }));
+                        break;
+                    }
                 }
-            }
+                result
+            };
+
+            // Wasm with wasm-threads: Use helper_results() to get collected results
+            #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+            let result = {
+                let helper_results = self.thread_pool.helper_results();
+                helper_results.iter().find(|r| r.thread_id == best_thread_id).map(|r| {
+                    BestThreadResult {
+                        best_move: r.best_move,
+                        ponder_move: Move::NONE, // Cannot get ponder from helper in Wasm
+                        score: r.best_score,
+                        completed_depth: r.completed_depth,
+                        nodes: r.nodes,
+                        best_previous_score: Some(r.best_score),
+                        best_previous_average_score: Some(r.best_score),
+                    }
+                })
+            };
+
+            // Wasm without wasm-threads: Always use main thread
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+            let result: Option<BestThreadResult> = None;
+
             result.unwrap_or_else(|| {
                 let worker = self
                     .worker
@@ -781,10 +828,26 @@ impl Search {
         } = best_result;
         let total_nodes = {
             let main_nodes = self.worker.as_ref().map(|w| w.nodes).unwrap_or(0);
+
+            // Native: Use helper_threads() to get node counts
+            #[cfg(not(target_arch = "wasm32"))]
             let helper_nodes =
                 self.thread_pool.helper_threads().iter().fold(0u64, |acc, thread| {
                     acc.saturating_add(thread.with_worker(|worker| worker.nodes))
                 });
+
+            // Wasm with wasm-threads: Use helper_results() to get node counts
+            #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+            let helper_nodes = self
+                .thread_pool
+                .helper_results()
+                .iter()
+                .fold(0u64, |acc, r| acc.saturating_add(r.nodes));
+
+            // Wasm without wasm-threads: No helper threads
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+            let helper_nodes = 0u64;
+
             main_nodes.saturating_add(helper_nodes)
         };
 
@@ -998,11 +1061,27 @@ impl Search {
             if processed_pv > 0 {
                 let elapsed = start.elapsed();
                 let time_ms = elapsed.as_millis() as u64;
+
+                // Native: Use helper_threads() to get node counts
+                #[cfg(not(target_arch = "wasm32"))]
                 let helper_nodes = self
                     .thread_pool
                     .helper_threads()
                     .iter()
                     .fold(0u64, |acc, thread| acc.saturating_add(thread.nodes()));
+
+                // Wasm with wasm-threads: Use helper_results() to get node counts
+                #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+                let helper_nodes = self
+                    .thread_pool
+                    .helper_results()
+                    .iter()
+                    .fold(0u64, |acc, r| acc.saturating_add(r.nodes));
+
+                // Wasm without wasm-threads: No helper threads
+                #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+                let helper_nodes = 0u64;
+
                 let total_nodes = worker.nodes.saturating_add(helper_nodes);
                 let nps = if time_ms > 0 {
                     total_nodes.saturating_mul(1000) / time_ms
@@ -1061,6 +1140,8 @@ impl Search {
                 let best_move_changes = summary.best_move_changes;
                 worker.best_move_changes = 0.0; // 先にリセット
 
+                // Native: Use helper_threads() to collect best_move_changes
+                #[cfg(not(target_arch = "wasm32"))]
                 let (changes_sum, thread_count) = {
                     let helper_threads = self.thread_pool.helper_threads();
                     let mut changes = Vec::with_capacity(helper_threads.len() + 1);
@@ -1070,6 +1151,22 @@ impl Search {
                     }
                     aggregate_best_move_changes(&changes)
                 };
+
+                // Wasm with wasm-threads: Use helper_results() to collect best_move_changes
+                #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+                let (changes_sum, thread_count) = {
+                    let helper_results = self.thread_pool.helper_results();
+                    let mut changes = Vec::with_capacity(helper_results.len() + 1);
+                    changes.push(best_move_changes);
+                    for result in &helper_results {
+                        changes.push(result.best_move_changes);
+                    }
+                    aggregate_best_move_changes(&changes)
+                };
+
+                // Wasm without wasm-threads: Only main thread
+                #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+                let (changes_sum, thread_count) = (best_move_changes, 1);
                 let tot_best_move_changes = self.tot_best_move_changes / 2.0 + changes_sum;
                 if limits.use_time_management()
                     && !time_manager.stop_on_ponderhit()
