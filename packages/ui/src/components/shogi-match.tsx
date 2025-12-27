@@ -442,7 +442,6 @@ export function ShogiMatch({
         logEngineError,
         isAnalyzing,
         analyzePosition,
-        cancelAnalysis,
         engineErrorDetails,
         retryEngine,
         isRetrying,
@@ -1267,27 +1266,6 @@ export function ShogiMatch({
         [isMatchRunning, navigation, stopTicking, stopAllEngines],
     );
 
-    // 現在局面の解析コールバック
-    const handleAnalyze = useCallback(() => {
-        // 現在の局面までの指し手を取得
-        const currentMoves = navigation.getMovesArray();
-        const currentPly = navigation.state.currentPly;
-
-        // 解析リクエストを送信
-        void analyzePosition({
-            sfen: startSfen,
-            moves: currentMoves,
-            ply: currentPly,
-            timeMs: 3000, // 3秒間解析
-            depth: 20, // 最大深さ20
-        });
-    }, [navigation, analyzePosition, startSfen]);
-
-    // 解析キャンセルコールバック
-    const handleCancelAnalysis = useCallback(() => {
-        void cancelAnalysis();
-    }, [cancelAnalysis]);
-
     // 特定の手数の局面を解析するコールバック（オンデマンド解析用）
     const handleAnalyzePly = useCallback(
         (ply: number) => {
@@ -1831,10 +1809,6 @@ export function ShogiMatch({
                             currentPly={navigation.state.currentPly}
                             onPlySelect={handlePlySelect}
                             defaultOpen={false}
-                            isMatchRunning={isMatchRunning}
-                            isAnalyzing={isAnalyzing}
-                            onAnalyze={handleAnalyze}
-                            onCancelAnalysis={handleCancelAnalysis}
                         />
 
                         {/* インポートパネル */}

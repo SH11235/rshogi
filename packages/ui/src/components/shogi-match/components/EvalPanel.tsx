@@ -7,7 +7,6 @@
 
 import type { ReactElement } from "react";
 import { useCallback, useState } from "react";
-import { Button } from "../../button";
 import type { EvalHistory } from "../utils/kifFormat";
 import { EvalGraph } from "./EvalGraph";
 import { EvalGraphModal } from "./EvalGraphModal";
@@ -21,14 +20,6 @@ interface EvalPanelProps {
     onPlySelect?: (ply: number) => void;
     /** デフォルトで開いているか */
     defaultOpen?: boolean;
-    /** 対局中かどうか（対局中は解析ボタンを無効化） */
-    isMatchRunning?: boolean;
-    /** 解析中かどうか */
-    isAnalyzing?: boolean;
-    /** 解析ボタンクリック時のコールバック */
-    onAnalyze?: () => void;
-    /** 解析キャンセルボタンクリック時のコールバック */
-    onCancelAnalysis?: () => void;
 }
 
 /**
@@ -40,10 +31,6 @@ export function EvalPanel({
     currentPly,
     onPlySelect,
     defaultOpen = false,
-    isMatchRunning = false,
-    isAnalyzing = false,
-    onAnalyze,
-    onCancelAnalysis,
 }: EvalPanelProps): ReactElement {
     const [isOpen, setIsOpen] = useState(defaultOpen);
     const [showEvalModal, setShowEvalModal] = useState(false);
@@ -59,10 +46,6 @@ export function EvalPanel({
     const handleModalClose = useCallback(() => {
         setShowEvalModal(false);
     }, []);
-
-    // 現在の手数に評価値があるかどうか
-    const currentEval = evalHistory.find((e) => e.ply === currentPly);
-    const hasEval = currentEval?.evalCp !== null || currentEval?.evalMate !== null;
 
     return (
         <div className="bg-card border border-border rounded-xl shadow-lg w-[var(--panel-width)] overflow-hidden">
@@ -102,44 +85,6 @@ export function EvalPanel({
                         onClick={handleGraphClick}
                         onPlySelect={onPlySelect}
                     />
-
-                    {/* 解析ボタン */}
-                    {onAnalyze && (
-                        <div className="mt-3 flex items-center gap-2">
-                            {isAnalyzing ? (
-                                <>
-                                    <Button
-                                        variant="outline"
-                                        size="sm"
-                                        onClick={onCancelAnalysis}
-                                        className="flex-1"
-                                    >
-                                        解析中止
-                                    </Button>
-                                    <span className="text-xs text-muted-foreground animate-pulse">
-                                        解析中...
-                                    </span>
-                                </>
-                            ) : (
-                                <Button
-                                    variant="outline"
-                                    size="sm"
-                                    onClick={onAnalyze}
-                                    disabled={isMatchRunning}
-                                    className="flex-1"
-                                    title={
-                                        isMatchRunning
-                                            ? "対局中は解析できません"
-                                            : hasEval
-                                              ? "現在の局面を再解析"
-                                              : "現在の局面を解析"
-                                    }
-                                >
-                                    {hasEval ? "再解析" : "解析"}
-                                </Button>
-                            )}
-                        </div>
-                    )}
                 </div>
             )}
 
