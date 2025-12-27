@@ -394,10 +394,14 @@ mod imp {
 // WASM builds with wasm-threads feature use Rayon for parallel search.
 // This uses wasm-bindgen-rayon to handle Web Worker creation asynchronously,
 // avoiding the Condvar/async mismatch that caused deadlocks with wasm_thread.
+//
+// Key design: start_thinking() uses rayon::spawn() to launch helper threads
+// asynchronously, allowing main thread search to run in parallel with helpers.
+// wait_for_search_finished() polls an atomic counter until all helpers complete.
 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
 mod imp {
     use std::cell::RefCell;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use rayon::prelude::*;
@@ -421,6 +425,9 @@ mod imp {
         stop: Arc<AtomicBool>,
         ponderhit: Arc<AtomicBool>,
         max_moves_to_draw: i32,
+        /// Counter for pending helper thread tasks.
+        /// Decremented when each helper thread completes its search.
+        pending_tasks: Arc<AtomicUsize>,
     }
 
     impl ThreadPool {
@@ -437,6 +444,7 @@ mod imp {
                 stop,
                 ponderhit,
                 max_moves_to_draw,
+                pending_tasks: Arc::new(AtomicUsize::new(0)),
             }
         }
 
@@ -451,6 +459,14 @@ mod imp {
             self.max_moves_to_draw = max_moves_to_draw;
         }
 
+        /// Start helper threads for LazySMP parallel search.
+        ///
+        /// This method returns immediately after spawning helper threads.
+        /// Helper threads run asynchronously and search the same position
+        /// as the main thread, sharing the transposition table.
+        ///
+        /// Call `wait_for_search_finished()` after main thread search completes
+        /// to ensure all helpers have finished.
         pub fn start_thinking(
             &self,
             pos: &Position,
@@ -465,55 +481,81 @@ mod imp {
                 return;
             }
 
-            let stop = Arc::clone(&self.stop);
-            let ponderhit = Arc::clone(&self.ponderhit);
-            let tt = Arc::clone(&self.tt);
+            // Set pending task count before spawning
+            self.pending_tasks.store(helper_count, Ordering::SeqCst);
 
-            // Use Rayon's parallel iterator for LazySMP search.
-            // Each worker thread independently searches the same position.
-            (1..=helper_count).into_par_iter().for_each(|thread_id| {
-                THREAD_WORKER.with(|cell| {
-                    let mut worker_opt = cell.borrow_mut();
+            // Spawn each helper thread asynchronously using rayon::spawn_fifo
+            // Using spawn_fifo instead of spawn to avoid work-stealing where the
+            // current thread (main search thread) might execute helper tasks,
+            // which would delay the main thread search and cause time management issues.
+            for thread_id in 1..=helper_count {
+                let stop = Arc::clone(&self.stop);
+                let ponderhit = Arc::clone(&self.ponderhit);
+                let tt = Arc::clone(&self.tt);
+                let pending = Arc::clone(&self.pending_tasks);
+                let pos_clone = pos.clone();
+                let limits_clone = limits.clone();
 
-                    // Initialize SearchWorker on first use
-                    if worker_opt.is_none() {
-                        *worker_opt =
-                            Some(SearchWorker::new(Arc::clone(&tt), max_moves_to_draw, thread_id));
-                    }
+                rayon::spawn_fifo(move || {
+                    THREAD_WORKER.with(|cell| {
+                        let mut worker_opt = cell.borrow_mut();
 
-                    let worker = worker_opt.as_mut().unwrap();
+                        // Initialize SearchWorker on first use
+                        if worker_opt.is_none() {
+                            *worker_opt = Some(SearchWorker::new(
+                                Arc::clone(&tt),
+                                max_moves_to_draw,
+                                thread_id,
+                            ));
+                        }
 
-                    // Update worker state for this search
-                    worker.tt = Arc::clone(&tt);
-                    worker.max_moves_to_draw = max_moves_to_draw;
-                    worker.prepare_search();
+                        let worker = worker_opt.as_mut().unwrap();
 
-                    let mut search_pos = pos.clone();
-                    let mut time_manager =
-                        TimeManagement::new(Arc::clone(&stop), Arc::clone(&ponderhit));
-                    time_manager.set_options(&time_options);
-                    time_manager.init(
-                        &limits,
-                        search_pos.side_to_move(),
-                        search_pos.game_ply(),
-                        max_moves_to_draw,
-                    );
+                        // Update worker state for this search
+                        worker.tt = Arc::clone(&tt);
+                        worker.max_moves_to_draw = max_moves_to_draw;
+                        worker.prepare_search();
 
-                    search_helper(
-                        worker,
-                        &mut search_pos,
-                        &limits,
-                        &mut time_manager,
-                        max_depth,
-                        skill_enabled,
-                    );
+                        let mut search_pos = pos_clone;
+                        let mut time_manager =
+                            TimeManagement::new(Arc::clone(&stop), Arc::clone(&ponderhit));
+                        time_manager.set_options(&time_options);
+                        time_manager.init(
+                            &limits_clone,
+                            search_pos.side_to_move(),
+                            search_pos.game_ply(),
+                            max_moves_to_draw,
+                        );
+
+                        search_helper(
+                            worker,
+                            &mut search_pos,
+                            &limits_clone,
+                            &mut time_manager,
+                            max_depth,
+                            skill_enabled,
+                        );
+                    });
+
+                    // Decrement pending count when this helper completes
+                    pending.fetch_sub(1, Ordering::SeqCst);
                 });
-            });
+            }
+            // Returns immediately - helpers run asynchronously
         }
 
+        /// Wait for all helper threads to complete their search.
+        ///
+        /// This polls the pending task counter until all helpers have finished.
+        /// Should be called after the main thread search completes and stop flag is set.
         pub fn wait_for_search_finished(&self) {
-            // Rayon's into_par_iter().for_each() is synchronous,
-            // so there's nothing to wait for.
+            // Spin-wait until all helpers complete
+            // This is acceptable because:
+            // 1. It only happens at search end (not during search)
+            // 2. Helpers should finish quickly once stop flag is set
+            while self.pending_tasks.load(Ordering::SeqCst) > 0 {
+                std::hint::spin_loop();
+            }
         }
 
         pub fn clear_histories(&self) {
@@ -522,6 +564,8 @@ mod imp {
                 return;
             }
 
+            // clear_histories can use synchronous parallel iteration
+            // since it's called outside of search
             (1..=helper_count).into_par_iter().for_each(|_| {
                 THREAD_WORKER.with(|cell| {
                     if let Some(worker) = cell.borrow_mut().as_mut() {
@@ -537,6 +581,7 @@ mod imp {
 
         pub fn helper_threads(&self) -> &[Thread] {
             // Rayon model doesn't expose individual Thread objects
+            // TODO: Consider adding a mechanism to collect helper results
             &[]
         }
     }

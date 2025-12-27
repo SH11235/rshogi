@@ -626,9 +626,10 @@ impl Search {
     /// 探索スレッド数を設定
     pub fn set_num_threads(&mut self, num: usize) {
         let num = num.clamp(1, 512);
-        // WASM builds currently use single-threaded search only.
-        // See docs/wasm-multithreading-investigation.md for details.
-        let num = if cfg!(target_arch = "wasm32") { 1 } else { num };
+        // WASM builds without wasm-threads feature use single-threaded search only.
+        // With wasm-threads feature, multi-threading via wasm-bindgen-rayon is supported.
+        #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+        let num = 1;
         self.num_threads = num;
         self.thread_pool
             .set_num_threads(num, Arc::clone(&self.tt), self.max_moves_to_draw);
