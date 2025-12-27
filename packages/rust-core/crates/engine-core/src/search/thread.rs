@@ -1,3 +1,6 @@
+// Native build (non-Wasm) implementation.
+// Uses std::thread for parallel LazySMP search with Condvar-based synchronization.
+// Each helper thread runs in its own OS thread with a dedicated SearchWorker.
 #[cfg(not(target_arch = "wasm32"))]
 mod imp {
     use std::sync::atomic::AtomicBool;
@@ -101,7 +104,7 @@ mod imp {
             }
         }
 
-        pub fn update_tt(&self, tt: Arc<TranspositionTable>) {
+        pub fn update_tt(&mut self, tt: Arc<TranspositionTable>) {
             for thread in &self.threads {
                 let tt = Arc::clone(&tt);
                 thread.with_worker(|worker| {
@@ -307,6 +310,14 @@ mod imp {
 
 // WASM builds without wasm-threads feature use single-threaded search only.
 // See docs/wasm-multithreading-investigation.md for details.
+//
+// This module provides stub implementations of ThreadPool and Thread for API compatibility.
+// Since there are no helper threads in single-threaded mode:
+// - All ThreadPool methods are no-ops (empty implementations)
+// - helper_threads() always returns an empty slice
+// - The Thread struct exists only for type compatibility and is never instantiated
+//
+// The main thread search runs directly in Search::go() without any parallel helpers.
 #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
 mod imp {
     use std::sync::atomic::AtomicBool;
@@ -318,6 +329,8 @@ mod imp {
 
     use crate::search::{LimitsType, TimeOptions};
 
+    /// Stub ThreadPool for single-threaded Wasm builds.
+    /// All methods are no-ops since there are no helper threads.
     pub struct ThreadPool {
         _stop: Arc<AtomicBool>,
         _ponderhit: Arc<AtomicBool>,
@@ -331,6 +344,7 @@ mod imp {
             ponderhit: Arc<AtomicBool>,
             _max_moves_to_draw: i32,
         ) -> Self {
+            // num_threads is ignored; single-threaded mode has no helpers
             Self {
                 _stop: stop,
                 _ponderhit: ponderhit,
@@ -343,6 +357,7 @@ mod imp {
             _tt: Arc<TranspositionTable>,
             _max_moves_to_draw: i32,
         ) {
+            // No-op: single-threaded mode ignores thread count
         }
 
         pub fn start_thinking(
@@ -354,19 +369,29 @@ mod imp {
             _max_moves_to_draw: i32,
             _skill_enabled: bool,
         ) {
+            // No-op: no helper threads to start
         }
 
-        pub fn wait_for_search_finished(&self) {}
+        pub fn wait_for_search_finished(&self) {
+            // No-op: no helper threads to wait for
+        }
 
-        pub fn clear_histories(&self) {}
+        pub fn clear_histories(&self) {
+            // No-op: no helper thread workers to clear
+        }
 
-        pub fn update_tt(&self, _tt: Arc<TranspositionTable>) {}
+        pub fn update_tt(&mut self, _tt: Arc<TranspositionTable>) {
+            // No-op: no helper thread workers to update
+        }
 
         pub fn helper_threads(&self) -> &[Thread] {
+            // Always empty: no helper threads exist
             &[]
         }
     }
 
+    /// Stub Thread for single-threaded Wasm builds.
+    /// This struct exists only for type compatibility and is never instantiated.
     pub struct Thread;
 
     impl Thread {
@@ -575,8 +600,11 @@ mod imp {
             });
         }
 
-        pub fn update_tt(&self, _tt: Arc<TranspositionTable>) {
-            // Workers will get the updated TT reference on next start_thinking call
+        pub fn update_tt(&mut self, tt: Arc<TranspositionTable>) {
+            // Update self.tt so that subsequent start_thinking calls use the new TT.
+            // Thread-local workers will get the updated TT reference when start_thinking
+            // calls worker.tt = Arc::clone(&tt) for each helper.
+            self.tt = tt;
         }
 
         pub fn helper_threads(&self) -> &[Thread] {
