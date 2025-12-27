@@ -37,6 +37,8 @@ export interface DisplaySettings {
     highlightLastMove: boolean;
     /** 棋譜パネルに評価値を表示 */
     showKifuEval: boolean;
+    /** マウスホイールで棋譜をナビゲート */
+    enableWheelNavigation: boolean;
 }
 
 /** デフォルト表示設定 */
@@ -45,4 +47,5 @@ export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
     showBoardLabels: true,
     highlightLastMove: true,
     showKifuEval: false,
+    enableWheelNavigation: true,
 };

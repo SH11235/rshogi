@@ -461,6 +461,7 @@ export function ShogiMatch({
         onToEnd: navigation.goToEnd,
         disabled: isMatchRunning,
         containerRef: boardSectionRef,
+        enableWheelNavigation: displaySettings.enableWheelNavigation,
     });
 
     // エンジンからの手を受け取って適用するコールバック

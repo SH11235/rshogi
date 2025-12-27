@@ -5,13 +5,13 @@
  */
 
 import type { BoardState, PositionState, Square } from "@shogi/app-core";
-import type { SquareNotation } from "../types";
 import { applyMoveWithState, boardToMatrix } from "@shogi/app-core";
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../../dialog";
 import type { ShogiBoardCell } from "../../shogi-board";
 import { ShogiBoard } from "../../shogi-board";
+import type { SquareNotation } from "../types";
 import type { PvDisplayMove } from "../utils/kifFormat";
 import { convertPvToDisplay } from "../utils/kifFormat";
 import { HandPiecesDisplay } from "./HandPiecesDisplay";
