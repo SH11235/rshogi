@@ -86,6 +86,7 @@ interface KifuPanelProps {
         isRunning: boolean;
         currentIndex: number;
         totalCount: number;
+        inProgress?: number[]; // 並列解析中の手番号
     };
     /** 一括解析を開始するコールバック */
     onStartBatchAnalysis?: () => void;
@@ -395,33 +396,55 @@ export function KifuPanel({
                                 </Tooltip>
                             </label>
                         )}
-                        {/* 一括解析ボタン */}
+                        {/* 一括解析ボタン（アイコン） */}
                         {onStartBatchAnalysis &&
                             kifMoves.length > 0 &&
                             movesWithoutPv > 0 &&
                             !batchAnalysis?.isRunning && (
-                                <button
-                                    type="button"
-                                    className="px-2 py-1 text-[11px] rounded border cursor-pointer transition-colors duration-150 bg-primary/10 text-primary border-primary/30 hover:bg-primary/20"
-                                    onClick={onStartBatchAnalysis}
-                                    title={`PVがない${movesWithoutPv}手を解析`}
-                                >
-                                    一括解析
-                                </button>
+                                <Tooltip>
+                                    <TooltipTrigger asChild>
+                                        <button
+                                            type="button"
+                                            className="w-7 h-7 flex items-center justify-center text-[14px] rounded border cursor-pointer transition-colors duration-150 bg-primary/10 text-primary border-primary/30 hover:bg-primary/20"
+                                            onClick={onStartBatchAnalysis}
+                                            aria-label={`一括解析: ${movesWithoutPv}手`}
+                                        >
+                                            ⚡
+                                        </button>
+                                    </TooltipTrigger>
+                                    <TooltipContent side="bottom">
+                                        <div className="text-[11px]">
+                                            <div className="font-medium">一括解析</div>
+                                            <div className="text-muted-foreground">
+                                                PVがない{movesWithoutPv}手を解析
+                                            </div>
+                                        </div>
+                                    </TooltipContent>
+                                </Tooltip>
                             )}
+                        {/* KIFコピーボタン（アイコン） */}
                         {onCopyKif && kifMoves.length > 0 && (
-                            <button
-                                type="button"
-                                className={`px-2 py-1 text-[11px] rounded border cursor-pointer transition-colors duration-150 ${
-                                    copySuccess
-                                        ? "bg-green-600 text-white border-green-600"
-                                        : "bg-background text-foreground border-border"
-                                }`}
-                                onClick={handleCopy}
-                                title="KIF形式でクリップボードにコピー"
-                            >
-                                {copySuccess ? "コピー完了" : "KIFコピー"}
-                            </button>
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                    <button
+                                        type="button"
+                                        className={`w-7 h-7 flex items-center justify-center text-[14px] rounded border cursor-pointer transition-colors duration-150 ${
+                                            copySuccess
+                                                ? "bg-green-600 text-white border-green-600"
+                                                : "bg-background text-foreground border-border hover:bg-muted"
+                                        }`}
+                                        onClick={handleCopy}
+                                        aria-label="KIF形式でコピー"
+                                    >
+                                        {copySuccess ? "✓" : "📋"}
+                                    </button>
+                                </TooltipTrigger>
+                                <TooltipContent side="bottom">
+                                    <div className="text-[11px]">
+                                        {copySuccess ? "コピー完了!" : "KIF形式でコピー"}
+                                    </div>
+                                </TooltipContent>
+                            </Tooltip>
                         )}
                     </div>
                 </div>
@@ -444,13 +467,19 @@ export function KifuPanel({
 
                 {/* 一括解析進捗バナー */}
                 {batchAnalysis?.isRunning && (
-                    <div className="bg-primary/10 border border-primary/30 rounded-lg px-3 py-2 mb-2">
+                    <section
+                        className="bg-primary/10 border border-primary/30 rounded-lg px-3 py-2 mb-2"
+                        aria-label={`一括解析中: ${batchAnalysis.currentIndex}/${batchAnalysis.totalCount}手完了`}
+                    >
                         <div className="flex items-center justify-between gap-2 mb-1.5">
                             <div className="flex items-center gap-2 text-[12px] text-primary font-medium">
                                 <span className="animate-pulse">●</span>
                                 <span>
-                                    一括解析中... {batchAnalysis.currentIndex + 1}/
+                                    一括解析中... {batchAnalysis.currentIndex}/
                                     {batchAnalysis.totalCount}
+                                    {batchAnalysis.inProgress &&
+                                        batchAnalysis.inProgress.length > 1 &&
+                                        ` (${batchAnalysis.inProgress.length}手並列)`}
                                 </span>
                             </div>
                             {onCancelBatchAnalysis && (
@@ -464,15 +493,21 @@ export function KifuPanel({
                             )}
                         </div>
                         {/* プログレスバー */}
-                        <div className="h-1.5 bg-primary/20 rounded-full overflow-hidden">
+                        <div
+                            className="h-1.5 bg-primary/20 rounded-full overflow-hidden"
+                            role="progressbar"
+                            aria-valuemin={0}
+                            aria-valuemax={batchAnalysis.totalCount}
+                            aria-valuenow={batchAnalysis.currentIndex}
+                        >
                             <div
                                 className="h-full bg-primary transition-all duration-300 ease-out"
                                 style={{
-                                    width: `${((batchAnalysis.currentIndex + 1) / batchAnalysis.totalCount) * 100}%`,
+                                    width: `${(batchAnalysis.currentIndex / batchAnalysis.totalCount) * 100}%`,
                                 }}
                             />
                         </div>
-                    </div>
+                    </section>
                 )}
 
                 {/* 評価値ヒントバナー */}
