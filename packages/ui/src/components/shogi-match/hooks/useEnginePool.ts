@@ -72,6 +72,9 @@ export function useEnginePool(options: UseEnginePoolOptions): EnginePoolHandle {
     const [isRunning, setIsRunning] = useState(false);
     const [progress, setProgress] = useState<BatchAnalysisProgress | null>(null);
 
+    // マウント状態を追跡（Strict Mode対応）
+    const mountedRef = useRef(true);
+
     // 内部状態をrefで管理（レンダリングに依存しない）
     const stateRef = useRef<{
         workers: EngineWorker[];
@@ -110,6 +113,8 @@ export function useEnginePool(options: UseEnginePoolOptions): EnginePoolHandle {
     }, []);
 
     // 次のジョブを取得して実行する
+    // Note: JavaScriptはシングルスレッドのため、複数ワーカーが同時にこの関数を呼び出しても
+    // jobQueue.shift() は安全にアトミックに実行される
     const processNextJob = useCallback(
         async (worker: EngineWorker) => {
             const state = stateRef.current;
@@ -119,7 +124,7 @@ export function useEnginePool(options: UseEnginePoolOptions): EnginePoolHandle {
                 return;
             }
 
-            // キューからジョブを取得
+            // キューからジョブを取得（シングルスレッドのため競合なし）
             const job = state.jobQueue.shift();
             if (!job) {
                 // ジョブがない場合、全ワーカーがアイドルかチェック
@@ -226,6 +231,25 @@ export function useEnginePool(options: UseEnginePoolOptions): EnginePoolHandle {
             }
         }
 
+        // 初期化に成功したワーカーが1つもない場合はエラー
+        if (workers.length === 0) {
+            const error = new Error("No workers could be initialized");
+            callbacksRef.current.onError?.(0, error);
+            // アンマウント後は状態を更新しない
+            if (mountedRef.current) {
+                setIsRunning(false);
+            }
+            return;
+        }
+
+        // 要求された数より少ないワーカーしか初期化できなかった場合は警告
+        if (workers.length < workerCount) {
+            console.warn(
+                `Only ${workers.length}/${workerCount} workers initialized. ` +
+                    "Analysis will continue with fewer parallel workers.",
+            );
+        }
+
         state.workers = workers;
         state.initialized = true;
     }, [createClient, workerCount]);
@@ -286,8 +310,12 @@ export function useEnginePool(options: UseEnginePoolOptions): EnginePoolHandle {
         await Promise.all(stopPromises);
 
         state.inProgress.clear();
-        setIsRunning(false);
-        setProgress(null);
+
+        // アンマウント後は状態を更新しない
+        if (mountedRef.current) {
+            setIsRunning(false);
+            setProgress(null);
+        }
     }, []);
 
     // プールを破棄する
@@ -308,9 +336,15 @@ export function useEnginePool(options: UseEnginePoolOptions): EnginePoolHandle {
         state.initialized = false;
     }, [cancel]);
 
-    // アンマウント時にプールを破棄
+    // マウント時の初期化とアンマウント時のクリーンアップ
+    // React 18 Strict Mode では2回実行されるため、mountedRef で状態を追跡
     useEffect(() => {
+        mountedRef.current = true;
+
         return () => {
+            mountedRef.current = false;
+            // 非同期の dispose を実行（完了を待たない）
+            // Strict Mode では2回目のマウント前にクリーンアップが実行される
             void dispose();
         };
     }, [dispose]);

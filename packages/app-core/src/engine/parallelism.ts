@@ -18,8 +18,13 @@ export interface ParallelismConfig {
  * ハードウェアの並列処理能力を検出し、推奨設定を返す
  */
 export function detectParallelism(): ParallelismConfig {
-    const hardwareConcurrency =
-        typeof navigator !== "undefined" ? (navigator.hardwareConcurrency ?? 1) : 1;
+    // navigator.hardwareConcurrency の値を検証し、異常値を防ぐ
+    // （カスタムブラウザや開発者ツールで不正な値が設定される可能性があるため）
+    const rawConcurrency =
+        typeof navigator !== "undefined" && typeof navigator.hardwareConcurrency === "number"
+            ? navigator.hardwareConcurrency
+            : 1;
+    const hardwareConcurrency = Math.max(1, Math.min(rawConcurrency, 128));
 
     // 推奨: コア数の半分（最低1、最大4）
     // Wasm の MAX_WASM_THREADS = 4 制限を考慮
