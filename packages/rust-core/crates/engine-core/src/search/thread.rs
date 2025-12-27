@@ -439,6 +439,34 @@ mod imp {
 // helper results when selecting the best move.
 //
 // The TT sharing effect (the primary benefit of LazySMP) is NOT affected.
+//
+// ## Memory Ordering Synchronization Pattern
+//
+// The following diagram shows how Release-Acquire ordering ensures proper
+// synchronization between the main thread and helper threads:
+//
+// ```text
+// Main Thread                    Helper Threads
+// -----------                    --------------
+// helper_results.clear()
+// progress.reset()
+//       |
+//       v
+// store(helper_count, Release) -----> [helper starts]
+//       |                                    |
+//       |                              TT updates
+//       |                              results.push()
+//       |                                    |
+//       |                              fetch_sub(1, Release)
+//       |                                    |
+//       v                                    v
+// load(Acquire) <---------------------------|
+//       |
+// helper_results readable
+// ```
+//
+// - Release on store/fetch_sub: Ensures all preceding writes are visible
+// - Acquire on load: Ensures all writes from helpers are visible after loop exits
 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
 mod imp {
     use std::cell::RefCell;
@@ -600,15 +628,20 @@ mod imp {
                     eprintln!("Warning: Failed to lock helper_results for clearing: {e}");
                 }
             }
-            self.pending_tasks.store(0, Ordering::SeqCst);
+            // Relaxed ordering is sufficient here because:
+            // - This runs on the main thread before any helper threads are spawned
+            // - No other threads are reading this value at this point
+            self.pending_tasks.store(0, Ordering::Relaxed);
 
             let helper_count = self.num_threads.saturating_sub(1);
             if helper_count == 0 {
                 return;
             }
 
-            // Set pending task count before spawning
-            self.pending_tasks.store(helper_count, Ordering::SeqCst);
+            // Release ordering ensures that all preceding writes (helper_results.clear(),
+            // progress.reset(), etc.) are visible to helper threads before they start.
+            // Helper threads will observe these writes when they begin execution.
+            self.pending_tasks.store(helper_count, Ordering::Release);
 
             // Reset all helper progress before starting new search
             for progress in &self.helper_progress {
@@ -697,8 +730,10 @@ mod imp {
                         }
                     });
 
-                    // Decrement pending count when this helper completes
-                    pending.fetch_sub(1, Ordering::SeqCst);
+                    // Release ordering ensures that all writes made by this helper thread
+                    // (TT updates, helper_results.push(), etc.) are visible to the main
+                    // thread when it observes the decremented counter with Acquire ordering.
+                    pending.fetch_sub(1, Ordering::Release);
                 });
             }
             // Returns immediately - helpers run asynchronously
@@ -709,11 +744,15 @@ mod imp {
         /// This polls the pending task counter until all helpers have finished.
         /// Should be called after the main thread search completes and stop flag is set.
         pub fn wait_for_search_finished(&self) {
-            // Spin-wait until all helpers complete
+            // Spin-wait until all helpers complete.
             // This is acceptable because:
             // 1. It only happens at search end (not during search)
             // 2. Helpers should finish quickly once stop flag is set
-            while self.pending_tasks.load(Ordering::SeqCst) > 0 {
+            //
+            // Acquire ordering synchronizes with the Release ordering in fetch_sub(),
+            // ensuring that all memory writes from helper threads (TT updates,
+            // helper_results, etc.) are visible to the main thread after this loop exits.
+            while self.pending_tasks.load(Ordering::Acquire) > 0 {
                 std::hint::spin_loop();
             }
         }
