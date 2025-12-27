@@ -687,6 +687,9 @@ impl Search {
         self.start_time = Some(Instant::now());
         // 置換表の世代を進める（YaneuraOu準拠）
         self.tt.new_search();
+        // ヘルパースレッドの結果をクリア
+        // スレッド数が1の場合でも呼び出し、前回のマルチスレッド探索の結果が残らないようにする
+        self.thread_pool.clear_helper_results();
 
         // 時間管理
         let mut time_manager =

@@ -116,6 +116,12 @@ mod imp {
         pub fn helper_threads(&self) -> &[Thread] {
             &self.threads
         }
+
+        /// Clear helper thread results.
+        /// Native builds don't use helper_results, so this is a no-op.
+        pub fn clear_helper_results(&self) {
+            // No-op: Native builds access workers directly via helper_threads()
+        }
     }
 
     struct ThreadInner {
@@ -387,6 +393,12 @@ mod imp {
         pub fn helper_threads(&self) -> &[Thread] {
             // Always empty: no helper threads exist
             &[]
+        }
+
+        /// Clear helper thread results.
+        /// Single-threaded builds don't have helper results, so this is a no-op.
+        pub fn clear_helper_results(&self) {
+            // No-op: no helper threads exist
         }
     }
 
@@ -804,6 +816,19 @@ mod imp {
         /// Call this after wait_for_search_finished() to get final results.
         pub fn helper_results(&self) -> Vec<HelperResult> {
             self.helper_results.lock().map(|guard| guard.clone()).unwrap_or_default()
+        }
+
+        /// Clear helper thread results.
+        /// This should be called at the start of each search to prevent stale results
+        /// from being used when switching from multi-threaded to single-threaded mode.
+        pub fn clear_helper_results(&self) {
+            match self.helper_results.lock() {
+                Ok(mut results) => results.clear(),
+                Err(e) => {
+                    #[cfg(debug_assertions)]
+                    eprintln!("Warning: Failed to lock helper_results for clearing: {e}");
+                }
+            }
         }
 
         /// Get the total nodes searched by all helper threads (realtime).
