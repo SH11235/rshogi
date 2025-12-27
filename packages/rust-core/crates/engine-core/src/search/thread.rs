@@ -752,8 +752,20 @@ mod imp {
             // Acquire ordering synchronizes with the Release ordering in fetch_sub(),
             // ensuring that all memory writes from helper threads (TT updates,
             // helper_results, etc.) are visible to the main thread after this loop exits.
+            //
+            // To reduce CPU usage, we spin for a limited number of iterations before
+            // yielding. Note: On WASM, thread::yield_now() is a no-op, but this pattern
+            // improves portability and documents the intent for potential native builds.
+            const SPIN_LIMIT: u32 = 100;
+            let mut spin_count: u32 = 0;
             while self.pending_tasks.load(Ordering::Acquire) > 0 {
-                std::hint::spin_loop();
+                if spin_count < SPIN_LIMIT {
+                    std::hint::spin_loop();
+                    spin_count += 1;
+                } else {
+                    std::thread::yield_now();
+                    spin_count = 0;
+                }
             }
         }
 
