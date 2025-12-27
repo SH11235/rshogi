@@ -4,12 +4,14 @@
  * 棋譜をKIF形式（日本語表記）で表示し、評価値も合わせて表示する
  */
 
+import type { PositionState } from "@shogi/app-core";
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Switch } from "../../switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../../tooltip";
 import type { KifMove } from "../utils/kifFormat";
 import { formatEval, getEvalTooltipInfo } from "../utils/kifFormat";
+import { EvalPopover } from "./EvalPopover";
 import { KifuNavigationToolbar } from "./KifuNavigationToolbar";
 
 /**
@@ -67,6 +69,12 @@ interface KifuPanelProps {
     navigationDisabled?: boolean;
     /** 分岐マーカー（ply -> 分岐数） */
     branchMarkers?: Map<number, number>;
+    /** 局面履歴（各手が指された後の局面、PV表示用） */
+    positionHistory?: PositionState[];
+    /** PVを分岐として追加するコールバック（Phase 2で実装） */
+    onAddPvAsBranch?: (ply: number, pv: string[]) => void;
+    /** PVを盤面で確認するコールバック（Phase 3で実装） */
+    onPreviewPv?: (ply: number, pv: string[]) => void;
 }
 
 /**
@@ -205,6 +213,9 @@ export function KifuPanel({
     navigation,
     navigationDisabled = false,
     branchMarkers,
+    positionHistory,
+    onAddPvAsBranch,
+    onPreviewPv,
 }: KifuPanelProps): ReactElement {
     const listRef = useRef<HTMLDivElement>(null);
     const currentRowRef = useRef<HTMLElement>(null);
@@ -403,7 +414,7 @@ export function KifuPanel({
                             まだ指し手がありません
                         </div>
                     ) : (
-                        kifMoves.map((move) => {
+                        kifMoves.map((move, index) => {
                             const isCurrent = move.ply === currentPly;
                             const isPastCurrent = navigation?.isRewound && move.ply > currentPly;
                             const evalText = showEval
@@ -411,6 +422,19 @@ export function KifuPanel({
                                 : "";
                             const hasBranch = branchMarkers?.has(move.ply);
                             const branchCount = branchMarkers?.get(move.ply);
+                            // この手に対応する局面（手が指された後の局面）
+                            const position = positionHistory?.[index];
+                            // PVがあるかどうか
+                            const hasPv = move.pv && move.pv.length > 0 && position;
+
+                            // 評価値表示コンポーネント
+                            const evalSpan = (
+                                <span
+                                    className={`${getEvalClassName(move.evalCp, move.evalMate)} ${isPastCurrent ? "opacity-50" : ""} ${hasPv ? "cursor-pointer" : "cursor-help"}`}
+                                >
+                                    {evalText}
+                                </span>
+                            );
 
                             const content = (
                                 <>
@@ -432,25 +456,33 @@ export function KifuPanel({
                                     >
                                         {move.displayText}
                                     </span>
-                                    {showEval && evalText && (
-                                        <Tooltip>
-                                            <TooltipTrigger asChild>
-                                                <span
-                                                    className={`${getEvalClassName(move.evalCp, move.evalMate)} ${isPastCurrent ? "opacity-50" : ""} cursor-help`}
+                                    {showEval &&
+                                        evalText &&
+                                        (hasPv && position ? (
+                                            <EvalPopover
+                                                move={move}
+                                                position={position}
+                                                onAddBranch={onAddPvAsBranch}
+                                                onPreview={onPreviewPv}
+                                            >
+                                                {evalSpan}
+                                            </EvalPopover>
+                                        ) : (
+                                            <Tooltip>
+                                                <TooltipTrigger asChild>{evalSpan}</TooltipTrigger>
+                                                <TooltipContent
+                                                    side="left"
+                                                    className="max-w-[200px]"
                                                 >
-                                                    {evalText}
-                                                </span>
-                                            </TooltipTrigger>
-                                            <TooltipContent side="left" className="max-w-[200px]">
-                                                <EvalTooltipContent
-                                                    evalCp={move.evalCp}
-                                                    evalMate={move.evalMate}
-                                                    ply={move.ply}
-                                                    depth={move.depth}
-                                                />
-                                            </TooltipContent>
-                                        </Tooltip>
-                                    )}
+                                                    <EvalTooltipContent
+                                                        evalCp={move.evalCp}
+                                                        evalMate={move.evalMate}
+                                                        ply={move.ply}
+                                                        depth={move.depth}
+                                                    />
+                                                </TooltipContent>
+                                            </Tooltip>
+                                        ))}
                                 </>
                             );
 

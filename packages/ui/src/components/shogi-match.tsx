@@ -34,6 +34,7 @@ import {
     MatchSettingsPanel,
     type SideSetting,
 } from "./shogi-match/components/MatchSettingsPanel";
+import { PvPreviewDialog } from "./shogi-match/components/PvPreviewDialog";
 import {
     applyDropResult,
     DeleteZone,
@@ -263,6 +264,13 @@ export function ShogiMatch({
         "shogi-display-settings",
         DEFAULT_DISPLAY_SETTINGS,
     );
+    // PVプレビュー用のstate
+    const [pvPreview, setPvPreview] = useState<{
+        open: boolean;
+        ply: number;
+        pv: string[];
+        startPosition: PositionState;
+    } | null>(null);
 
     // positionRef を先に定義（コールバックで使用するため）
     const positionRef = useRef<PositionState>(position);
@@ -297,7 +305,15 @@ export function ShogiMatch({
     const moves = navigation.getMovesArray();
 
     // 棋譜＋評価値データ
-    const { kifMoves, evalHistory, boardHistory, branchMarkers, recordEval } = navigation;
+    const {
+        kifMoves,
+        evalHistory,
+        boardHistory,
+        positionHistory,
+        branchMarkers,
+        recordEval,
+        addPvAsBranch,
+    } = navigation;
 
     // 後手が人間の場合は盤面を反転して手前側に表示
     useEffect(() => {
@@ -1220,6 +1236,24 @@ export function ShogiMatch({
         void cancelAnalysis();
     }, [cancelAnalysis]);
 
+    // PVプレビューを開くコールバック
+    const handlePreviewPv = useCallback(
+        (ply: number, pv: string[]) => {
+            // 指定されたplyに対応する局面を取得
+            const positionIndex = ply - 1; // positionHistoryは0-indexed（1手目 = index 0）
+            const startPos = positionHistory[positionIndex];
+            if (!startPos) return;
+
+            setPvPreview({
+                open: true,
+                ply,
+                pv,
+                startPosition: startPos,
+            });
+        },
+        [positionHistory],
+    );
+
     // SFENインポート（局面 + 指し手）
     const importSfen = useCallback(
         async (sfen: string, movesToLoad: string[]) => {
@@ -1331,6 +1365,17 @@ export function ShogiMatch({
                     setShowResultBanner(true);
                 }}
             />
+
+            {/* PVプレビューダイアログ */}
+            {pvPreview && (
+                <PvPreviewDialog
+                    open={pvPreview.open}
+                    onClose={() => setPvPreview(null)}
+                    pv={pvPreview.pv}
+                    startPosition={pvPreview.startPosition}
+                    ply={pvPreview.ply}
+                />
+            )}
 
             <section
                 style={{
@@ -1647,6 +1692,9 @@ export function ShogiMatch({
                             }}
                             navigationDisabled={isMatchRunning}
                             branchMarkers={branchMarkers}
+                            positionHistory={positionHistory}
+                            onAddPvAsBranch={addPvAsBranch}
+                            onPreviewPv={handlePreviewPv}
                         />
 
                         {/* 評価値グラフパネル（折りたたみ） */}

@@ -18,6 +18,8 @@ export interface KifuEval {
      * - false/undefined: エンジン出力（手番側視点）、符号反転が必要
      */
     normalized?: boolean;
+    /** 読み筋（USI形式の指し手配列） */
+    pv?: string[];
 }
 
 /** 棋譜ノード */

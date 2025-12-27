@@ -4,7 +4,8 @@
  * USI形式の指し手を日本語KIF形式に変換する
  */
 
-import type { BoardState, Piece, PieceType, Player, Square } from "@shogi/app-core";
+import type { BoardState, Piece, PieceType, Player, PositionState, Square } from "@shogi/app-core";
+import { applyMoveWithState } from "@shogi/app-core";
 import { parseSfen } from "./kifParser";
 
 /** KIF形式の指し手情報 */
@@ -25,6 +26,8 @@ export interface KifMove {
     depth?: number;
     /** 消費時間（ミリ秒） */
     elapsedMs?: number;
+    /** 読み筋（USI形式の指し手配列） */
+    pv?: string[];
 }
 
 /** 評価値の履歴（グラフ用） */
@@ -440,6 +443,7 @@ interface NodeData {
     scoreMate?: number;
     depth?: number;
     elapsedMs?: number;
+    pv?: string[];
 }
 
 /**
@@ -481,6 +485,7 @@ export function convertMovesToKif(
             evalMate: nodeData?.scoreMate,
             depth: nodeData?.depth,
             elapsedMs: nodeData?.elapsedMs,
+            pv: nodeData?.pv,
         });
 
         // 次の「同」判定用に移動先を記録
@@ -756,4 +761,79 @@ function formatDateTime(date: Date): string {
     const min = date.getMinutes().toString().padStart(2, "0");
     const s = date.getSeconds().toString().padStart(2, "0");
     return `${y}/${m}/${d} ${h}:${min}:${s}`;
+}
+
+// ============================================================
+// PV（読み筋）変換機能
+// ============================================================
+
+/** PV変換結果 */
+export interface PvDisplayMove {
+    /** USI形式の指し手 */
+    usiMove: string;
+    /** 簡易表示用文字列（例: "☗7六歩"） */
+    displayText: string;
+    /** 手番 */
+    turn: Player;
+}
+
+/**
+ * USI形式のPVを表示用に変換
+ *
+ * @param pv USI形式の指し手配列
+ * @param position 現在局面（PV開始時点の局面）
+ * @returns 表示用PV配列
+ */
+export function convertPvToDisplay(pv: string[], position: PositionState): PvDisplayMove[] {
+    const result: PvDisplayMove[] = [];
+    let currentPosition = position;
+    let prevTo: Square | undefined;
+
+    for (const usiMove of pv) {
+        const turn = currentPosition.turn;
+        const board = currentPosition.board;
+
+        // 簡易表示形式に変換
+        const displayText = formatMoveSimple(usiMove, turn, board, prevTo);
+
+        result.push({
+            usiMove,
+            displayText,
+            turn,
+        });
+
+        // 次の手のために局面を進める
+        const moveResult = applyMoveWithState(currentPosition, usiMove, { validateTurn: false });
+        if (!moveResult.ok) {
+            // 無効な手の場合は残りを処理せずに終了
+            break;
+        }
+        currentPosition = moveResult.next;
+        prevTo = parseToSquare(usiMove);
+    }
+
+    return result;
+}
+
+/**
+ * PVを表示用文字列に変換（矢印区切り）
+ *
+ * @param pv USI形式の指し手配列
+ * @param position 現在局面
+ * @param maxMoves 表示する最大手数（省略時は全て表示）
+ * @returns 表示用文字列（例: "☗7六歩 → ☖3四歩 → ☗2六歩"）
+ */
+export function formatPvForDisplay(
+    pv: string[],
+    position: PositionState,
+    maxMoves?: number,
+): string {
+    const moves = convertPvToDisplay(pv, position);
+    const limited = maxMoves !== undefined ? moves.slice(0, maxMoves) : moves;
+    const formatted = limited.map((m) => m.displayText).join(" → ");
+
+    if (maxMoves !== undefined && moves.length > maxMoves) {
+        return `${formatted} ...`;
+    }
+    return formatted;
 }
