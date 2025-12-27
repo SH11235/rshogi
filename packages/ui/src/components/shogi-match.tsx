@@ -273,6 +273,8 @@ export function ShogiMatch({
         ply: number;
         pv: string[];
         startPosition: PositionState;
+        evalCp?: number;
+        evalMate?: number;
     } | null>(null);
     // 解析中の手数（オンデマンド解析用）
     const [analyzingPly, setAnalyzingPly] = useState<number | null>(null);
@@ -1344,7 +1346,7 @@ export function ShogiMatch({
 
     // PVプレビューを開くコールバック
     const handlePreviewPv = useCallback(
-        (ply: number, pv: string[]) => {
+        (ply: number, pv: string[], evalCp?: number, evalMate?: number) => {
             // PVはply手目を指した後の局面から計算されている
             // positionHistory[ply-1] = ply手目を指した後の局面
             const startPos = positionHistory[ply - 1];
@@ -1355,6 +1357,8 @@ export function ShogiMatch({
                 ply,
                 pv,
                 startPosition: startPos,
+                evalCp,
+                evalMate,
             });
         },
         [positionHistory],
@@ -1480,6 +1484,10 @@ export function ShogiMatch({
                     pv={pvPreview.pv}
                     startPosition={pvPreview.startPosition}
                     ply={pvPreview.ply}
+                    evalCp={pvPreview.evalCp}
+                    evalMate={pvPreview.evalMate}
+                    squareNotation={displaySettings.squareNotation}
+                    showBoardLabels={displaySettings.showBoardLabels}
                 />
             )}
 

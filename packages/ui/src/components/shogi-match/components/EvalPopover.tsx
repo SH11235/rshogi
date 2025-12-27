@@ -23,7 +23,7 @@ interface EvalPopoverProps {
     /** 分岐として追加するコールバック */
     onAddBranch?: (ply: number, pv: string[]) => void;
     /** 盤面で確認するコールバック */
-    onPreview?: (ply: number, pv: string[]) => void;
+    onPreview?: (ply: number, pv: string[], evalCp?: number, evalMate?: number) => void;
     /** 指定手数の局面を解析するコールバック */
     onAnalyze?: (ply: number) => void;
     /** 解析中かどうか */
@@ -89,7 +89,11 @@ export function EvalPopover({
                     </TooltipTrigger>
                     {/* Popoverが開いていない時のみTooltipを表示 */}
                     {!open && (
-                        <TooltipContent side="left" className="max-w-[200px]">
+                        <TooltipContent
+                            side="left"
+                            className="max-w-[200px] cursor-pointer"
+                            onClick={() => setOpen(true)}
+                        >
                             <div className="space-y-1">
                                 <div
                                     className={`font-medium ${
@@ -204,7 +208,12 @@ export function EvalPopover({
                                 <button
                                     type="button"
                                     onClick={() => {
-                                        onPreview(move.ply, move.pv ?? []);
+                                        onPreview(
+                                            move.ply,
+                                            move.pv ?? [],
+                                            move.evalCp,
+                                            move.evalMate,
+                                        );
                                         setOpen(false);
                                     }}
                                     className="

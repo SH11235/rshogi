@@ -74,7 +74,7 @@ interface KifuPanelProps {
     /** PVを分岐として追加するコールバック */
     onAddPvAsBranch?: (ply: number, pv: string[]) => void;
     /** PVを盤面で確認するコールバック */
-    onPreviewPv?: (ply: number, pv: string[]) => void;
+    onPreviewPv?: (ply: number, pv: string[], evalCp?: number, evalMate?: number) => void;
     /** 指定手数の局面を解析するコールバック（オンデマンド解析用） */
     onAnalyzePly?: (ply: number) => void;
     /** 解析中かどうか */
