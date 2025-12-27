@@ -442,7 +442,7 @@ mod imp {
 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
 mod imp {
     use std::cell::RefCell;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use rayon::prelude::*;
@@ -478,6 +478,41 @@ mod imp {
         pub best_score: Value,
     }
 
+    /// Helper thread の進捗をリアルタイムで追跡する構造体。
+    /// 各イテレーション完了時に更新され、info出力や時間管理で参照される。
+    pub struct HelperProgress {
+        nodes: AtomicU64,
+        best_move_changes_bits: AtomicU64,
+    }
+
+    impl HelperProgress {
+        pub fn new() -> Self {
+            Self {
+                nodes: AtomicU64::new(0),
+                best_move_changes_bits: AtomicU64::new(0.0f64.to_bits()),
+            }
+        }
+
+        pub fn reset(&self) {
+            self.nodes.store(0, Ordering::Relaxed);
+            self.best_move_changes_bits.store(0.0f64.to_bits(), Ordering::Relaxed);
+        }
+
+        pub fn update(&self, nodes: u64, best_move_changes: f64) {
+            self.nodes.store(nodes, Ordering::Relaxed);
+            self.best_move_changes_bits
+                .store(best_move_changes.to_bits(), Ordering::Relaxed);
+        }
+
+        pub fn nodes(&self) -> u64 {
+            self.nodes.load(Ordering::Relaxed)
+        }
+
+        pub fn best_move_changes(&self) -> f64 {
+            f64::from_bits(self.best_move_changes_bits.load(Ordering::Relaxed))
+        }
+    }
+
     pub struct ThreadPool {
         num_threads: usize,
         tt: Arc<TranspositionTable>,
@@ -490,6 +525,9 @@ mod imp {
         /// Helper threads の探索結果を収集するベクタ。
         /// 各 helper が探索完了時に結果を push し、get_best_thread_id() で参照される。
         helper_results: Arc<Mutex<Vec<HelperResult>>>,
+        /// Helper threads の進捗をリアルタイムで追跡。
+        /// 各イテレーション完了時に更新され、info出力や時間管理で参照される。
+        helper_progress: Vec<Arc<HelperProgress>>,
     }
 
     impl ThreadPool {
@@ -500,14 +538,19 @@ mod imp {
             ponderhit: Arc<AtomicBool>,
             max_moves_to_draw: i32,
         ) -> Self {
+            let num_threads = num_threads.max(1);
+            let helper_count = num_threads.saturating_sub(1);
+            let helper_progress =
+                (0..helper_count).map(|_| Arc::new(HelperProgress::new())).collect();
             Self {
-                num_threads: num_threads.max(1),
+                num_threads,
                 tt,
                 stop,
                 ponderhit,
                 max_moves_to_draw,
                 pending_tasks: Arc::new(AtomicUsize::new(0)),
                 helper_results: Arc::new(Mutex::new(Vec::new())),
+                helper_progress,
             }
         }
 
@@ -517,7 +560,13 @@ mod imp {
             tt: Arc<TranspositionTable>,
             max_moves_to_draw: i32,
         ) {
-            self.num_threads = num_threads.max(1);
+            let num_threads = num_threads.max(1);
+            let helper_count = num_threads.saturating_sub(1);
+            // Resize helper_progress to match new thread count
+            self.helper_progress
+                .resize_with(helper_count, || Arc::new(HelperProgress::new()));
+            self.helper_progress.truncate(helper_count);
+            self.num_threads = num_threads;
             self.tt = tt;
             self.max_moves_to_draw = max_moves_to_draw;
         }
@@ -555,6 +604,11 @@ mod imp {
             // Set pending task count before spawning
             self.pending_tasks.store(helper_count, Ordering::SeqCst);
 
+            // Reset all helper progress before starting new search
+            for progress in &self.helper_progress {
+                progress.reset();
+            }
+
             // Spawn each helper thread asynchronously using rayon::spawn_fifo
             // Using spawn_fifo instead of spawn to avoid work-stealing where the
             // current thread (main search thread) might execute helper tasks,
@@ -565,6 +619,8 @@ mod imp {
                 let tt = Arc::clone(&self.tt);
                 let pending = Arc::clone(&self.pending_tasks);
                 let helper_results = Arc::clone(&self.helper_results);
+                // thread_id is 1-indexed, so subtract 1 to get the progress index
+                let progress = Arc::clone(&self.helper_progress[thread_id - 1]);
                 let pos_clone = pos.clone();
                 let limits_clone = limits.clone();
 
@@ -606,6 +662,7 @@ mod imp {
                             &mut time_manager,
                             max_depth,
                             skill_enabled,
+                            Some(&*progress),
                         );
 
                         // Collect result after search completes
@@ -682,6 +739,18 @@ mod imp {
         /// Call this after wait_for_search_finished() to get final results.
         pub fn helper_results(&self) -> Vec<HelperResult> {
             self.helper_results.lock().map(|guard| guard.clone()).unwrap_or_default()
+        }
+
+        /// Get the total nodes searched by all helper threads (realtime).
+        /// This is updated each time a helper completes an iteration.
+        pub fn helper_nodes(&self) -> u64 {
+            self.helper_progress.iter().fold(0u64, |acc, p| acc.saturating_add(p.nodes()))
+        }
+
+        /// Get best_move_changes values from all helper threads (realtime).
+        /// Returns a vector of (nodes, best_move_changes) for each helper.
+        pub fn helper_best_move_changes(&self) -> Vec<f64> {
+            self.helper_progress.iter().map(|p| p.best_move_changes()).collect()
         }
     }
 

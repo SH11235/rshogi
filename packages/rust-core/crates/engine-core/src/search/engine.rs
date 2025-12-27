@@ -836,13 +836,9 @@ impl Search {
                     acc.saturating_add(thread.with_worker(|worker| worker.nodes))
                 });
 
-            // Wasm with wasm-threads: Use helper_results() to get node counts
+            // Wasm with wasm-threads: Use helper_nodes() to get node counts
             #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
-            let helper_nodes = self
-                .thread_pool
-                .helper_results()
-                .iter()
-                .fold(0u64, |acc, r| acc.saturating_add(r.nodes));
+            let helper_nodes = self.thread_pool.helper_nodes();
 
             // Wasm without wasm-threads: No helper threads
             #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
@@ -1070,13 +1066,9 @@ impl Search {
                     .iter()
                     .fold(0u64, |acc, thread| acc.saturating_add(thread.nodes()));
 
-                // Wasm with wasm-threads: Use helper_results() to get node counts
+                // Wasm with wasm-threads: Use helper_nodes() for realtime node counts
                 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
-                let helper_nodes = self
-                    .thread_pool
-                    .helper_results()
-                    .iter()
-                    .fold(0u64, |acc, r| acc.saturating_add(r.nodes));
+                let helper_nodes = self.thread_pool.helper_nodes();
 
                 // Wasm without wasm-threads: No helper threads
                 #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
@@ -1152,15 +1144,13 @@ impl Search {
                     aggregate_best_move_changes(&changes)
                 };
 
-                // Wasm with wasm-threads: Use helper_results() to collect best_move_changes
+                // Wasm with wasm-threads: Use helper_best_move_changes() for realtime values
                 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
                 let (changes_sum, thread_count) = {
-                    let helper_results = self.thread_pool.helper_results();
-                    let mut changes = Vec::with_capacity(helper_results.len() + 1);
+                    let helper_changes = self.thread_pool.helper_best_move_changes();
+                    let mut changes = Vec::with_capacity(helper_changes.len() + 1);
                     changes.push(best_move_changes);
-                    for result in &helper_results {
-                        changes.push(result.best_move_changes);
-                    }
+                    changes.extend(helper_changes);
                     aggregate_best_move_changes(&changes)
                 };
 
@@ -1265,7 +1255,8 @@ impl Search {
 }
 
 // search_helper_impl is the core search logic used by helper threads.
-// Progress callbacks are passed as closures to avoid including progress code in Wasm builds.
+// Progress callbacks are passed as closures to allow platform-specific progress tracking.
+// Only compiled for Native and Wasm with wasm-threads (single-threaded Wasm doesn't use helper threads).
 #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 #[inline(always)]
 fn search_helper_impl<F1, F2>(
@@ -1475,7 +1466,7 @@ pub(crate) fn search_helper(
     )
 }
 
-// Wasm version: no progress parameter. Empty closures are optimized away by LLVM.
+// Wasm with wasm-threads: takes progress parameter for tracking helper thread statistics.
 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
 pub(crate) fn search_helper(
     worker: &mut SearchWorker,
@@ -1484,6 +1475,7 @@ pub(crate) fn search_helper(
     time_manager: &mut TimeManagement,
     max_depth: Depth,
     skill_enabled: bool,
+    progress: Option<&super::thread::HelperProgress>,
 ) -> usize {
     search_helper_impl(
         worker,
@@ -1492,10 +1484,21 @@ pub(crate) fn search_helper(
         time_manager,
         max_depth,
         skill_enabled,
-        || {},
-        |_, _| {},
+        || {
+            if let Some(p) = progress {
+                p.reset();
+            }
+        },
+        |nodes, bmc| {
+            if let Some(p) = progress {
+                p.update(nodes, bmc);
+            }
+        },
     )
 }
+
+// Wasm without wasm-threads: search_helper is not needed because there are no helper threads.
+// Single-threaded Wasm only uses the main thread search in search_with_callback().
 
 // =============================================================================
 // テスト
