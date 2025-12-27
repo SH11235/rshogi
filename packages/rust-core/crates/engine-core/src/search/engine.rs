@@ -795,8 +795,20 @@ impl Search {
             let result = {
                 let helper_results = self.thread_pool.helper_results();
                 helper_results.iter().find(|r| r.thread_id == best_thread_id).map(|r| {
+                    // Apply skill-based move weakening if enabled
+                    let best_move = if skill_enabled && !r.top_moves.is_empty() {
+                        let mut rng = rand::rng();
+                        let picked = skill.pick_best_from_pairs(&r.top_moves, &mut rng);
+                        if picked != Move::NONE {
+                            picked
+                        } else {
+                            r.best_move
+                        }
+                    } else {
+                        r.best_move
+                    };
                     BestThreadResult {
-                        best_move: r.best_move,
+                        best_move,
                         ponder_move: Move::NONE, // Cannot get ponder from helper in Wasm
                         score: r.best_score,
                         completed_depth: r.completed_depth,

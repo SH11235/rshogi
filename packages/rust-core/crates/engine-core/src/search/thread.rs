@@ -516,6 +516,10 @@ mod imp {
         pub best_move: Move,
         /// 最善手のスコア
         pub best_score: Value,
+        /// Top N moves for skill-based move selection.
+        /// Contains (move, score) pairs from root_moves, used by skill.pick_best().
+        /// Typically contains up to 4 moves (multi_pv when skill is enabled).
+        pub top_moves: Vec<(Move, Value)>,
     }
 
     /// Helper thread の進捗をリアルタイムで追跡する構造体。
@@ -717,6 +721,13 @@ mod imp {
                         );
 
                         // Collect result after search completes
+                        // Extract top N moves for skill-based selection (typically 4 when skill enabled)
+                        let top_moves: Vec<(Move, Value)> = worker
+                            .root_moves
+                            .iter()
+                            .take(4) // multi_pv is at least 4 when skill is enabled
+                            .map(|rm| (rm.mv(), rm.score))
+                            .collect();
                         let result = HelperResult {
                             thread_id,
                             nodes: worker.nodes,
@@ -728,6 +739,7 @@ mod imp {
                                 .get(0)
                                 .map(|rm| rm.score)
                                 .unwrap_or(Value::ZERO),
+                            top_moves,
                         };
                         match helper_results.lock() {
                             Ok(mut results) => results.push(result),
