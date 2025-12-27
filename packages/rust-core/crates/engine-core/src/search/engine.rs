@@ -236,7 +236,6 @@ impl From<&SearchWorker> for WorkerSummary {
 ///
 /// - `changes`: 各スレッドのbest_move_changes
 /// - 戻り値: (合計, スレッド数)。スレッド数0の場合は(0.0, 1)を返しゼロ除算を避ける。
-#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 fn aggregate_best_move_changes(changes: &[f64]) -> (f64, usize) {
     if changes.is_empty() {
         return (0.0, 1);
