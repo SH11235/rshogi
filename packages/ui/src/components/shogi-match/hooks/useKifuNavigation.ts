@@ -301,51 +301,48 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
      * PVを分岐として追加
      * 指定された手数のノードにPVを分岐として追加する
      */
-    const addPvAsBranch = useCallback(
-        (ply: number, pv: string[]) => {
-            if (pv.length === 0) return;
+    const addPvAsBranch = useCallback((ply: number, pv: string[]) => {
+        if (pv.length === 0) return;
 
-            setTree((prev) => {
-                // 指定plyのノードを探す（現在のパスから）
-                const nodeId = findNodeByPlyInCurrentPath(prev, ply);
-                if (!nodeId) return prev;
+        setTree((prev) => {
+            // 指定plyのノードを探す（現在のパスから）
+            const nodeId = findNodeByPlyInCurrentPath(prev, ply);
+            if (!nodeId) return prev;
 
-                const node = prev.nodes.get(nodeId);
-                if (!node) return prev;
+            const node = prev.nodes.get(nodeId);
+            if (!node) return prev;
 
-                // PVの最初の手が既存の子にあるか確認
-                const firstMove = pv[0];
-                const existingChild = node.children
-                    .map((id) => prev.nodes.get(id))
-                    .find((child) => child?.usiMove === firstMove);
+            // PVの最初の手が既存の子にあるか確認
+            const firstMove = pv[0];
+            const existingChild = node.children
+                .map((id) => prev.nodes.get(id))
+                .find((child) => child?.usiMove === firstMove);
 
-                if (existingChild) {
-                    // 既に同じ手が存在する場合は何もしない
-                    return prev;
+            if (existingChild) {
+                // 既に同じ手が存在する場合は何もしない
+                return prev;
+            }
+
+            // 新しい分岐を追加
+            let currentTree = goToNode(prev, nodeId);
+            let currentPosition = node.positionAfter;
+
+            for (const move of pv) {
+                const moveResult = applyMoveWithState(currentPosition, move, {
+                    validateTurn: false,
+                });
+                if (!moveResult.ok) {
+                    // 無効な手があれば終了
+                    break;
                 }
+                currentTree = addMoveToTree(currentTree, move, moveResult.next);
+                currentPosition = moveResult.next;
+            }
 
-                // 新しい分岐を追加
-                let currentTree = goToNode(prev, nodeId);
-                let currentPosition = node.positionAfter;
-
-                for (const move of pv) {
-                    const moveResult = applyMoveWithState(currentPosition, move, {
-                        validateTurn: false,
-                    });
-                    if (!moveResult.ok) {
-                        // 無効な手があれば終了
-                        break;
-                    }
-                    currentTree = addMoveToTree(currentTree, move, moveResult.next);
-                    currentPosition = moveResult.next;
-                }
-
-                // 元の位置に戻る
-                return goToNode(currentTree, nodeId);
-            });
-        },
-        [onPositionChange],
-    );
+            // 元の位置に戻る
+            return goToNode(currentTree, nodeId);
+        });
+    }, []);
 
     /**
      * リセット
