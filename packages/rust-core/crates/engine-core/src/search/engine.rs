@@ -796,25 +796,32 @@ impl Search {
                 let helper_results = self.thread_pool.helper_results();
                 helper_results.iter().find(|r| r.thread_id == best_thread_id).map(|r| {
                     // Apply skill-based move weakening if enabled
-                    let best_move = if skill_enabled && !r.top_moves.is_empty() {
+                    let (best_move, score) = if skill_enabled && !r.top_moves.is_empty() {
                         let mut rng = rand::rng();
                         let picked = skill.pick_best_from_pairs(&r.top_moves, &mut rng);
                         if picked != Move::NONE {
-                            picked
+                            // Find the score of the picked move from top_moves
+                            let picked_score = r
+                                .top_moves
+                                .iter()
+                                .find(|(mv, _)| *mv == picked)
+                                .map(|(_, score)| *score)
+                                .unwrap_or(r.best_score);
+                            (picked, picked_score)
                         } else {
-                            r.best_move
+                            (r.best_move, r.best_score)
                         }
                     } else {
-                        r.best_move
+                        (r.best_move, r.best_score)
                     };
                     BestThreadResult {
                         best_move,
                         ponder_move: Move::NONE, // Cannot get ponder from helper in Wasm
-                        score: r.best_score,
+                        score,
                         completed_depth: r.completed_depth,
                         nodes: r.nodes,
-                        best_previous_score: Some(r.best_score),
-                        best_previous_average_score: Some(r.best_score),
+                        best_previous_score: Some(score),
+                        best_previous_average_score: Some(score),
                     }
                 })
             };
