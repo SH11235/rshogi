@@ -1803,6 +1803,9 @@ export function ShogiMatch({
                             onCancelBatchAnalysis={handleCancelBatchAnalysis}
                             analysisSettings={analysisSettings}
                             onAnalysisSettingsChange={setAnalysisSettings}
+                            kifuTree={navigation.tree}
+                            onNodeClick={navigation.goToNodeById}
+                            onBranchSwitch={navigation.switchBranchAtNode}
                         />
 
                         {/* 評価値グラフパネル（折りたたみ） */}
