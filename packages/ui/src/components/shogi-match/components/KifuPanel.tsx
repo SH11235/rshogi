@@ -81,6 +81,16 @@ interface KifuPanelProps {
     isAnalyzing?: boolean;
     /** 現在解析中の手数 */
     analyzingPly?: number;
+    /** 一括解析の状態 */
+    batchAnalysis?: {
+        isRunning: boolean;
+        currentIndex: number;
+        totalCount: number;
+    };
+    /** 一括解析を開始するコールバック */
+    onStartBatchAnalysis?: () => void;
+    /** 一括解析をキャンセルするコールバック */
+    onCancelBatchAnalysis?: () => void;
 }
 
 /**
@@ -225,6 +235,9 @@ export function KifuPanel({
     onAnalyzePly,
     isAnalyzing,
     analyzingPly,
+    batchAnalysis,
+    onStartBatchAnalysis,
+    onCancelBatchAnalysis,
 }: KifuPanelProps): ReactElement {
     const listRef = useRef<HTMLDivElement>(null);
     const currentRowRef = useRef<HTMLElement>(null);
@@ -233,6 +246,12 @@ export function KifuPanel({
 
     // 評価値データの存在チェック
     const evalDataExists = useMemo(() => hasEvalData(kifMoves), [kifMoves]);
+
+    // PVがない手の数
+    const movesWithoutPv = useMemo(
+        () => kifMoves.filter((m) => !m.pv || m.pv.length === 0).length,
+        [kifMoves],
+    );
 
     // ヒントバナーを表示するかどうか
     const showHintBanner = !showEval && evalDataExists && !hintDismissed && onShowEvalChange;
@@ -376,6 +395,20 @@ export function KifuPanel({
                                 </Tooltip>
                             </label>
                         )}
+                        {/* 一括解析ボタン */}
+                        {onStartBatchAnalysis &&
+                            kifMoves.length > 0 &&
+                            movesWithoutPv > 0 &&
+                            !batchAnalysis?.isRunning && (
+                                <button
+                                    type="button"
+                                    className="px-2 py-1 text-[11px] rounded border cursor-pointer transition-colors duration-150 bg-primary/10 text-primary border-primary/30 hover:bg-primary/20"
+                                    onClick={onStartBatchAnalysis}
+                                    title={`PVがない${movesWithoutPv}手を解析`}
+                                >
+                                    一括解析
+                                </button>
+                            )}
                         {onCopyKif && kifMoves.length > 0 && (
                             <button
                                 type="button"
@@ -407,6 +440,39 @@ export function KifuPanel({
                         isRewound={navigation.isRewound}
                         canGoForward={navigation.canGoForward}
                     />
+                )}
+
+                {/* 一括解析進捗バナー */}
+                {batchAnalysis?.isRunning && (
+                    <div className="bg-primary/10 border border-primary/30 rounded-lg px-3 py-2 mb-2">
+                        <div className="flex items-center justify-between gap-2 mb-1.5">
+                            <div className="flex items-center gap-2 text-[12px] text-primary font-medium">
+                                <span className="animate-pulse">●</span>
+                                <span>
+                                    一括解析中... {batchAnalysis.currentIndex + 1}/
+                                    {batchAnalysis.totalCount}
+                                </span>
+                            </div>
+                            {onCancelBatchAnalysis && (
+                                <button
+                                    type="button"
+                                    onClick={onCancelBatchAnalysis}
+                                    className="px-2 py-0.5 text-[11px] rounded border cursor-pointer transition-colors bg-background text-foreground border-border hover:bg-muted"
+                                >
+                                    キャンセル
+                                </button>
+                            )}
+                        </div>
+                        {/* プログレスバー */}
+                        <div className="h-1.5 bg-primary/20 rounded-full overflow-hidden">
+                            <div
+                                className="h-full bg-primary transition-all duration-300 ease-out"
+                                style={{
+                                    width: `${((batchAnalysis.currentIndex + 1) / batchAnalysis.totalCount) * 100}%`,
+                                }}
+                            />
+                        </div>
+                    </div>
                 )}
 
                 {/* 評価値ヒントバナー */}
