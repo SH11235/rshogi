@@ -582,19 +582,26 @@ export function KifuPanel({
 
                             if (onPlySelect) {
                                 return (
-                                    <button
-                                        type="button"
+                                    <div
                                         key={move.ply}
                                         ref={
                                             isCurrent
-                                                ? (currentRowRef as React.RefObject<HTMLButtonElement>)
+                                                ? (currentRowRef as React.RefObject<HTMLDivElement>)
                                                 : undefined
                                         }
-                                        className={`${rowClassName} w-full text-left bg-transparent border-none cursor-pointer hover:bg-accent/50`}
+                                        role="option"
+                                        className={`${rowClassName} w-full text-left cursor-pointer hover:bg-accent/50`}
                                         onClick={() => onPlySelect(move.ply)}
+                                        onKeyDown={(e) => {
+                                            if (e.key === "Enter" || e.key === " ") {
+                                                e.preventDefault();
+                                                onPlySelect(move.ply);
+                                            }
+                                        }}
+                                        tabIndex={0}
                                     >
                                         {content}
-                                    </button>
+                                    </div>
                                 );
                             }
 

@@ -79,20 +79,12 @@ export function EvalPopover({
                 <Tooltip>
                     <TooltipTrigger asChild>
                         <PopoverTrigger asChild>
-                            {/* buttonではなくspanを使用（親がbuttonの場合のネスト問題回避） */}
-                            <span
-                                role="button"
-                                tabIndex={0}
+                            <button
+                                type="button"
                                 className="inline bg-transparent border-none p-0 m-0 font-inherit text-inherit cursor-pointer"
-                                onKeyDown={(e) => {
-                                    if (e.key === "Enter" || e.key === " ") {
-                                        e.preventDefault();
-                                        setOpen(true);
-                                    }
-                                }}
                             >
                                 {children}
-                            </span>
+                            </button>
                         </PopoverTrigger>
                     </TooltipTrigger>
                     {/* Popoverが開いていない時のみTooltipを表示 */}
