@@ -591,8 +591,14 @@ mod imp {
             // Clear previous results before starting new search
             // This must be done even when helper_count is 0, to prevent stale results
             // from being used after switching from multi-threaded to single-threaded mode.
-            if let Ok(mut results) = self.helper_results.lock() {
-                results.clear();
+            match self.helper_results.lock() {
+                Ok(mut results) => results.clear(),
+                Err(e) => {
+                    // Mutex poisoned - indicates a panic occurred in another thread.
+                    // This is a serious bug that should be investigated.
+                    #[cfg(debug_assertions)]
+                    eprintln!("Warning: Failed to lock helper_results for clearing: {e}");
+                }
             }
             self.pending_tasks.store(0, Ordering::SeqCst);
 
@@ -678,8 +684,16 @@ mod imp {
                                 .map(|rm| rm.score)
                                 .unwrap_or(Value::ZERO),
                         };
-                        if let Ok(mut results) = helper_results.lock() {
-                            results.push(result);
+                        match helper_results.lock() {
+                            Ok(mut results) => results.push(result),
+                            Err(e) => {
+                                // Mutex poisoned - indicates a panic occurred in another thread.
+                                // This is a serious bug that should be investigated.
+                                #[cfg(debug_assertions)]
+                                eprintln!(
+                                    "Warning: Failed to lock helper_results for pushing: {e}"
+                                );
+                            }
                         }
                     });
 
