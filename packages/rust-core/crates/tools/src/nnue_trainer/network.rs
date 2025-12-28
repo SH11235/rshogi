@@ -3,9 +3,9 @@
 //! HalfKP 256x2-32-32 アーキテクチャをf32で実装し、
 //! 順伝播・逆伝播をサポートする。
 
-use byteorder::{LittleEndian, WriteBytesExt};
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use rand::Rng;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 
 /// ネットワーク定数
 pub const FE_END: usize = 1548;
@@ -18,6 +18,60 @@ pub const FV_SCALE: f32 = 24.0;
 
 /// NNUEバージョン（YaneuraOu互換）
 pub const NNUE_VERSION: u32 = 0x7AF32F16;
+
+/// YaneuraOu互換の構造ハッシュを計算
+///
+/// HalfKP 256x2-32-32 アーキテクチャのハッシュ値を計算する。
+/// 計算式は YaneuraOu の evaluate_nnue.h に基づく：
+/// - kHashValue = FeatureTransformer::GetHashValue() ^ Network::GetHashValue()
+pub fn compute_structure_hash() -> u32 {
+    // HalfKP(Friend) hash
+    const HALFKP_FRIEND_HASH: u32 = 0x5D69D5B9 ^ 1; // 0x5D69D5B8
+
+    // FeatureTransformer hash = RawFeatures::kHashValue ^ kOutputDimensions
+    // kOutputDimensions = 256 * 2 = 512
+    const FT_OUTPUT_DIM: u32 = (TRANSFORMED_DIMENSIONS * 2) as u32;
+    let ft_hash = HALFKP_FRIEND_HASH ^ FT_OUTPUT_DIM;
+
+    // Network hash を計算
+    // InputSlice[512] → AffineTransform[32] → ClippedReLU →
+    // AffineTransform[32] → ClippedReLU → AffineTransform[1]
+
+    // InputSlice: hash = 0xEC42E90D ^ (output_dim ^ (offset << 10))
+    // Offset = 0 なので output_dim だけ XOR
+    let input_slice_hash: u32 = 0xEC42E90D ^ FT_OUTPUT_DIM;
+
+    // AffineTransform (Hidden1, output=32)
+    let h1_hash = affine_hash(HIDDEN1_DIMENSIONS as u32, input_slice_hash);
+
+    // ClippedReLU
+    let relu1_hash = clipped_relu_hash(h1_hash);
+
+    // AffineTransform (Hidden2, output=32)
+    let h2_hash = affine_hash(HIDDEN2_DIMENSIONS as u32, relu1_hash);
+
+    // ClippedReLU
+    let relu2_hash = clipped_relu_hash(h2_hash);
+
+    // AffineTransform (Output, output=1)
+    let output_hash = affine_hash(OUTPUT_DIMENSIONS as u32, relu2_hash);
+
+    // Final hash
+    ft_hash ^ output_hash
+}
+
+/// AffineTransform 層のハッシュを計算
+const fn affine_hash(output_dim: u32, prev_hash: u32) -> u32 {
+    let mut hash = 0xCC03DAE4u32.wrapping_add(output_dim);
+    hash ^= prev_hash >> 1;
+    hash ^= prev_hash << 31;
+    hash
+}
+
+/// ClippedReLU 層のハッシュを計算
+const fn clipped_relu_hash(prev_hash: u32) -> u32 {
+    0x538D24C7u32.wrapping_add(prev_hash)
+}
 
 /// 学習可能なアフィン変換層
 #[derive(Clone)]
@@ -99,6 +153,19 @@ impl<const INPUT: usize, const OUTPUT: usize> TrainableAffine<INPUT, OUTPUT> {
     /// パラメータ数
     pub fn param_count(&self) -> usize {
         OUTPUT * INPUT + OUTPUT
+    }
+
+    /// i32バイアスとi8重みからロード（hidden層用）
+    pub fn load_i32_i8<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
+        // バイアス [OUTPUT] as i32
+        for b in &mut self.biases {
+            *b = reader.read_i32::<LittleEndian>()? as f32;
+        }
+        // 重み [OUTPUT * INPUT] as i8
+        for w in &mut self.weights {
+            *w = reader.read_i8()? as f32;
+        }
+        Ok(())
     }
 }
 
@@ -195,6 +262,19 @@ impl TrainableFeatureTransformer {
     /// パラメータ数
     pub fn param_count(&self) -> usize {
         HALFKP_DIMENSIONS * TRANSFORMED_DIMENSIONS + TRANSFORMED_DIMENSIONS
+    }
+
+    /// i16バイアスとi16重みからロード
+    pub fn load_i16<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
+        // バイアス [TRANSFORMED_DIMENSIONS] as i16
+        for b in &mut self.biases {
+            *b = reader.read_i16::<LittleEndian>()? as f32;
+        }
+        // 重み [HALFKP_DIMENSIONS * TRANSFORMED_DIMENSIONS] as i16
+        for w in &mut self.weights {
+            *w = reader.read_i16::<LittleEndian>()? as f32;
+        }
+        Ok(())
     }
 }
 
@@ -390,8 +470,9 @@ impl TrainableNetwork {
         // ヘッダ
         writer.write_u32::<LittleEndian>(NNUE_VERSION)?;
 
-        // 構造ハッシュ（ダミー）
-        writer.write_u32::<LittleEndian>(0)?;
+        // 構造ハッシュ（YaneuraOu互換）
+        let structure_hash = compute_structure_hash();
+        writer.write_u32::<LittleEndian>(structure_hash)?;
 
         // アーキテクチャ文字列
         let arch_str = b"HalfKP(Friend)[256x2->32->32->1]";
@@ -433,6 +514,49 @@ impl TrainableNetwork {
         }
 
         Ok(())
+    }
+
+    /// YaneuraOu形式からモデルを読み込み
+    pub fn load<R: Read>(reader: &mut R) -> io::Result<Self> {
+        let mut network = Self::new();
+
+        // ヘッダ
+        let version = reader.read_u32::<LittleEndian>()?;
+        if version != NNUE_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid NNUE version: {version:#x}, expected {NNUE_VERSION:#x}"),
+            ));
+        }
+
+        // 構造ハッシュ
+        let structure_hash = reader.read_u32::<LittleEndian>()?;
+        let expected_hash = compute_structure_hash();
+        if structure_hash != expected_hash {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid structure hash: {structure_hash:#x}, expected {expected_hash:#x}"),
+            ));
+        }
+
+        // アーキテクチャ文字列（スキップ）
+        let arch_len = reader.read_u32::<LittleEndian>()? as usize;
+        let mut arch_buf = vec![0u8; arch_len];
+        reader.read_exact(&mut arch_buf)?;
+
+        // FeatureTransformer
+        network.ft_black.load_i16(reader)?;
+
+        // Hidden1
+        network.hidden1.load_i32_i8(reader)?;
+
+        // Hidden2
+        network.hidden2.load_i32_i8(reader)?;
+
+        // Output
+        network.output.load_i32_i8(reader)?;
+
+        Ok(network)
     }
 }
 
@@ -513,5 +637,53 @@ mod tests {
         // 空の特徴量でテスト
         let (output, _cache) = network.forward(&[], &[], 0);
         assert!(output.is_finite());
+    }
+
+    #[test]
+    fn test_network_save_load_roundtrip() {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+        use std::io::Cursor;
+
+        // ランダム初期化されたネットワークを作成
+        let mut rng = ChaCha8Rng::seed_from_u64(12345);
+        let mut original = TrainableNetwork::new();
+        original.init_random(&mut rng);
+
+        // バッファに保存
+        let mut buffer = Vec::new();
+        original.save(&mut buffer).unwrap();
+
+        // バッファから読み込み
+        let mut cursor = Cursor::new(&buffer);
+        let loaded = TrainableNetwork::load(&mut cursor).unwrap();
+
+        // 重みが同じか確認（量子化の誤差があるので許容範囲を設定）
+        // FT層は i16 に量子化されるので誤差は最大 0.5
+        for (orig, load) in original.ft_black.biases.iter().zip(loaded.ft_black.biases.iter()) {
+            assert!((orig.round() - *load).abs() < 1.0, "FT bias mismatch: {orig} vs {load}");
+        }
+
+        // Hidden層は i8 に量子化されるので誤差は最大 0.5
+        for (orig, load) in original.hidden1.biases.iter().zip(loaded.hidden1.biases.iter()) {
+            assert!((orig.round() - *load).abs() < 1.0, "H1 bias mismatch: {orig} vs {load}");
+        }
+
+        // 順伝播の結果も同じか確認
+        let features = vec![0, 100, 1000];
+        let (out_orig, _) = original.forward(&features, &features, 0);
+        let (out_load, _) = loaded.forward(&features, &features, 0);
+        // 量子化誤差が累積するのである程度の誤差は許容
+        assert!(
+            (out_orig.round() - out_load).abs() < 10.0,
+            "Forward output mismatch: {out_orig} vs {out_load}"
+        );
+    }
+
+    #[test]
+    fn test_structure_hash() {
+        // 構造ハッシュが計算できることを確認
+        let hash = compute_structure_hash();
+        assert_ne!(hash, 0);
     }
 }

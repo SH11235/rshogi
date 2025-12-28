@@ -9,7 +9,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufReader, BufWriter};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -20,7 +20,7 @@ pub struct TrainConfig {
     pub batch_size: usize,
     /// エポック数
     pub epochs: usize,
-    /// 学習率
+    /// 学習率（eta1と同義、後方互換性のため残す）
     pub learning_rate: f32,
     /// 重み減衰
     pub weight_decay: f32,
@@ -34,6 +34,28 @@ pub struct TrainConfig {
     pub checkpoint_interval: usize,
     /// 出力ディレクトリ
     pub output_dir: String,
+
+    // === 学習率スケジューリング (eta1/eta2/eta3方式) ===
+    /// eta1: 初期学習率
+    pub eta1: f32,
+    /// eta2: 中間学習率
+    pub eta2: f32,
+    /// eta3: 最終学習率
+    pub eta3: f32,
+    /// eta1_epoch: eta1→eta2への遷移が完了するエポック (0の場合はeta1固定)
+    pub eta1_epoch: usize,
+    /// eta2_epoch: eta2→eta3への遷移が完了するエポック (0の場合はeta2固定)
+    pub eta2_epoch: usize,
+
+    // === Newbobスケジューリング ===
+    /// Newbob decay: 検証損失が改善しない場合の学習率減衰率 (1.0の場合は無効)
+    pub newbob_decay: f32,
+    /// Newbob trials: 最大試行回数
+    pub newbob_num_trials: usize,
+
+    // === リジューム ===
+    /// 既存モデルからのリジュームパス
+    pub resume_path: Option<String>,
 }
 
 impl Default for TrainConfig {
@@ -48,7 +70,150 @@ impl Default for TrainConfig {
             eval_scale: 600.0, // 勝率50%が0cpの場合のスケール
             checkpoint_interval: 10,
             output_dir: ".".to_string(),
+            // 学習率スケジューリング（デフォルトは単一学習率）
+            eta1: 0.001,
+            eta2: 0.001,
+            eta3: 0.001,
+            eta1_epoch: 0,
+            eta2_epoch: 0,
+            // Newbob（デフォルトは無効）
+            newbob_decay: 1.0,
+            newbob_num_trials: 2,
+            // リジューム（デフォルトはなし）
+            resume_path: None,
         }
+    }
+}
+
+/// 学習率スケジューラ
+pub struct LearningRateScheduler {
+    eta1: f32,
+    eta2: f32,
+    eta3: f32,
+    eta1_epoch: usize,
+    eta2_epoch: usize,
+}
+
+impl LearningRateScheduler {
+    /// 新しいスケジューラを作成
+    pub fn new(eta1: f32, eta2: f32, eta3: f32, eta1_epoch: usize, eta2_epoch: usize) -> Self {
+        Self {
+            eta1,
+            eta2,
+            eta3,
+            eta1_epoch,
+            eta2_epoch,
+        }
+    }
+
+    /// 単一学習率のスケジューラを作成
+    pub fn constant(lr: f32) -> Self {
+        Self::new(lr, lr, lr, 0, 0)
+    }
+
+    /// エポックに応じた学習率を計算
+    ///
+    /// YaneuraOuの実装に基づく：
+    /// - epoch < eta1_epoch: eta1 → eta2 を線形補間
+    /// - eta1_epoch <= epoch < eta2_epoch: eta2 → eta3 を線形補間
+    /// - epoch >= eta2_epoch: eta3
+    pub fn get_lr(&self, epoch: usize) -> f32 {
+        if self.eta1_epoch == 0 {
+            // eta1_epoch == 0 の場合は eta1 固定
+            self.eta1
+        } else if epoch < self.eta1_epoch {
+            // eta1 → eta2 を線形補間
+            let t = epoch as f32 / self.eta1_epoch as f32;
+            self.eta1 + (self.eta2 - self.eta1) * t
+        } else if self.eta2_epoch == 0 {
+            // eta2_epoch == 0 の場合は eta2 固定
+            self.eta2
+        } else if epoch < self.eta2_epoch {
+            // eta2 → eta3 を線形補間
+            let t = (epoch - self.eta1_epoch) as f32 / (self.eta2_epoch - self.eta1_epoch) as f32;
+            self.eta2 + (self.eta3 - self.eta2) * t
+        } else {
+            self.eta3
+        }
+    }
+}
+
+/// Newbobスケジューラの状態
+pub struct NewbobState {
+    /// 現在のスケール
+    pub scale: f32,
+    /// 減衰率
+    decay: f32,
+    /// 最大試行回数
+    max_trials: usize,
+    /// 残り試行回数
+    trials_left: usize,
+    /// 最良の検証損失
+    best_loss: f32,
+    /// 最良モデルのパス
+    best_model_path: Option<String>,
+}
+
+impl NewbobState {
+    /// 新しいNewbob状態を作成
+    pub fn new(decay: f32, num_trials: usize) -> Self {
+        Self {
+            scale: 1.0,
+            decay,
+            max_trials: num_trials,
+            trials_left: num_trials,
+            best_loss: f32::MAX,
+            best_model_path: None,
+        }
+    }
+
+    /// Newbobが有効かどうか
+    pub fn is_enabled(&self) -> bool {
+        self.decay < 1.0
+    }
+
+    /// 検証損失に基づいて更新
+    ///
+    /// Returns: (accepted, converged)
+    /// - accepted: 損失が改善したか
+    /// - converged: 収束したか（試行回数が尽きた）
+    pub fn update(&mut self, current_loss: f32, model_path: &str) -> (bool, bool) {
+        if !self.is_enabled() {
+            return (true, false);
+        }
+
+        if current_loss < self.best_loss {
+            // 改善した
+            eprintln!("  Newbob: loss {current_loss:.6} < best {:.6}, accepted", self.best_loss);
+            self.best_loss = current_loss;
+            self.best_model_path = Some(model_path.to_string());
+            self.trials_left = self.max_trials; // 試行回数をリセット
+            (true, false)
+        } else {
+            // 改善しなかった
+            eprintln!("  Newbob: loss {current_loss:.6} >= best {:.6}, rejected", self.best_loss);
+
+            self.trials_left = self.trials_left.saturating_sub(1);
+
+            if self.trials_left == 0 {
+                eprintln!("  Newbob: converged");
+                return (false, true);
+            }
+
+            // 学習率を減衰
+            self.scale *= self.decay;
+            eprintln!(
+                "  Newbob: reducing scale to {:.4} ({} trials left)",
+                self.scale, self.trials_left
+            );
+
+            (false, false)
+        }
+    }
+
+    /// 最良モデルのパスを取得
+    pub fn best_model_path(&self) -> Option<&str> {
+        self.best_model_path.as_deref()
     }
 }
 
@@ -67,21 +232,51 @@ pub struct Trainer {
     network: TrainableNetwork,
     rng: ChaCha8Rng,
     interrupted: Arc<AtomicBool>,
+    lr_scheduler: LearningRateScheduler,
+    newbob_state: NewbobState,
 }
 
 impl Trainer {
     /// 新しいトレーナーを作成
-    pub fn new(config: TrainConfig) -> Self {
+    pub fn new(config: TrainConfig) -> std::io::Result<Self> {
         let mut rng = ChaCha8Rng::seed_from_u64(config.seed);
-        let mut network = TrainableNetwork::new();
-        network.init_random(&mut rng);
 
-        Self {
+        // ネットワークの初期化（リジュームまたはランダム）
+        let network = if let Some(ref path) = config.resume_path {
+            eprintln!("Resuming from: {path}");
+            let file = File::open(path)?;
+            let mut reader = BufReader::new(file);
+            TrainableNetwork::load(&mut reader)?
+        } else {
+            let mut network = TrainableNetwork::new();
+            network.init_random(&mut rng);
+            network
+        };
+
+        // 学習率スケジューラの作成
+        let lr_scheduler = if config.eta1_epoch > 0 || config.eta2_epoch > 0 {
+            LearningRateScheduler::new(
+                config.eta1,
+                config.eta2,
+                config.eta3,
+                config.eta1_epoch,
+                config.eta2_epoch,
+            )
+        } else {
+            LearningRateScheduler::constant(config.learning_rate)
+        };
+
+        // Newbob状態の作成
+        let newbob_state = NewbobState::new(config.newbob_decay, config.newbob_num_trials);
+
+        Ok(Self {
             config,
             network,
             rng,
             interrupted: Arc::new(AtomicBool::new(false)),
-        }
+            lr_scheduler,
+            newbob_state,
+        })
     }
 
     /// 中断フラグを取得
@@ -90,12 +285,42 @@ impl Trainer {
     }
 
     /// 学習を実行
-    pub fn train<O: Optimizer>(&mut self, dataset: &mut TrainingDataset, optimizer: &mut O) {
+    pub fn train<O: Optimizer>(
+        &mut self,
+        dataset: &mut TrainingDataset,
+        validation: Option<&TrainingDataset>,
+        optimizer: &mut O,
+    ) {
         eprintln!("Training with {} samples", dataset.len());
+        if let Some(val) = validation {
+            eprintln!("Validation with {} samples", val.len());
+        }
         eprintln!("  Batch size: {}", self.config.batch_size);
         eprintln!("  Epochs: {}", self.config.epochs);
-        eprintln!("  Learning rate: {}", self.config.learning_rate);
         eprintln!("  Parameters: {}", self.network.param_count());
+
+        // 学習率スケジューリング情報の表示
+        if self.config.eta1_epoch > 0 || self.config.eta2_epoch > 0 {
+            eprintln!(
+                "  LR schedule: eta1={} (epoch 0-{}), eta2={} (epoch {}-{}), eta3={}",
+                self.config.eta1,
+                self.config.eta1_epoch,
+                self.config.eta2,
+                self.config.eta1_epoch,
+                self.config.eta2_epoch,
+                self.config.eta3
+            );
+        } else {
+            eprintln!("  Learning rate: {}", self.config.learning_rate);
+        }
+
+        // Newbob情報の表示
+        if self.newbob_state.is_enabled() {
+            eprintln!(
+                "  Newbob: decay={}, trials={}",
+                self.config.newbob_decay, self.config.newbob_num_trials
+            );
+        }
 
         for epoch in 0..self.config.epochs {
             if self.interrupted.load(Ordering::SeqCst) {
@@ -103,19 +328,41 @@ impl Trainer {
                 break;
             }
 
+            // 学習率の更新
+            let base_lr = self.lr_scheduler.get_lr(epoch);
+            let effective_lr = base_lr * self.newbob_state.scale;
+            optimizer.set_lr(effective_lr);
+
             // シャッフル
             dataset.shuffle(&mut self.rng);
 
             // エポックの学習
-            let (avg_loss, samples_processed) = self.train_epoch(dataset, optimizer, epoch);
+            let (train_loss, samples_processed) = self.train_epoch(dataset, optimizer, epoch);
 
-            eprintln!(
-                "Epoch {}/{}: loss={:.6}, samples={}",
-                epoch + 1,
-                self.config.epochs,
-                avg_loss,
-                samples_processed
-            );
+            // 検証損失の計算
+            let val_loss = validation.map(|val| self.compute_validation_loss(val));
+
+            // ログ出力
+            if let Some(vl) = val_loss {
+                eprintln!(
+                    "Epoch {}/{}: lr={:.6}, train_loss={:.6}, val_loss={:.6}, samples={}",
+                    epoch + 1,
+                    self.config.epochs,
+                    effective_lr,
+                    train_loss,
+                    vl,
+                    samples_processed
+                );
+            } else {
+                eprintln!(
+                    "Epoch {}/{}: lr={:.6}, loss={:.6}, samples={}",
+                    epoch + 1,
+                    self.config.epochs,
+                    effective_lr,
+                    train_loss,
+                    samples_processed
+                );
+            }
 
             // チェックポイント保存
             if (epoch + 1) % self.config.checkpoint_interval == 0 {
@@ -124,6 +371,15 @@ impl Trainer {
                     eprintln!("Failed to save checkpoint: {e}");
                 } else {
                     eprintln!("Saved checkpoint: {path}");
+
+                    // Newbobの更新（検証損失がある場合）
+                    if let Some(vl) = val_loss {
+                        let (_, converged) = self.newbob_state.update(vl, &path);
+                        if converged {
+                            eprintln!("Newbob converged, stopping training");
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -135,6 +391,54 @@ impl Trainer {
         } else {
             eprintln!("Saved final model: {final_path}");
         }
+
+        // Newbobが有効で最良モデルがある場合、それを報告
+        if let Some(best_path) = self.newbob_state.best_model_path() {
+            eprintln!("Best model (by validation loss): {best_path}");
+        }
+    }
+
+    /// 検証損失を計算
+    fn compute_validation_loss(&self, validation: &TrainingDataset) -> f32 {
+        let mut total_loss = 0.0;
+        let mut total_samples = 0;
+
+        for batch in validation.batches(self.config.batch_size) {
+            for sample in &batch.samples {
+                let (output, _) = self.network.forward(
+                    &sample.black_features,
+                    &sample.white_features,
+                    sample.side_to_move,
+                );
+
+                let predicted = output / FV_SCALE;
+                let target = sample.target_score / FV_SCALE;
+
+                let loss = match self.config.loss_type {
+                    LossType::Mse => {
+                        let diff = predicted - target;
+                        diff * diff
+                    }
+                    LossType::SigmoidCrossEntropy => {
+                        const EPS: f32 = 1e-7;
+                        let pred_wr =
+                            sigmoid(predicted / self.config.eval_scale).clamp(EPS, 1.0 - EPS);
+                        let target_wr =
+                            sigmoid(target / self.config.eval_scale).clamp(EPS, 1.0 - EPS);
+                        -target_wr * pred_wr.ln() - (1.0 - target_wr) * (1.0 - pred_wr).ln()
+                    }
+                };
+
+                total_loss += loss;
+                total_samples += 1;
+            }
+        }
+
+        if total_samples > 0 {
+            total_loss / total_samples as f32
+        } else {
+            0.0
+        }
     }
 
     /// 1エポックの学習
@@ -142,7 +446,7 @@ impl Trainer {
         &mut self,
         dataset: &TrainingDataset,
         optimizer: &mut O,
-        epoch: usize,
+        _epoch: usize,
     ) -> (f32, usize) {
         let num_batches = dataset.len().div_ceil(self.config.batch_size);
 
@@ -182,7 +486,6 @@ impl Trainer {
         }
 
         progress.finish();
-        let _ = epoch; // 使用済みマーク
 
         let avg_loss = if total_samples > 0 {
             total_loss / total_samples as f32
@@ -196,6 +499,7 @@ impl Trainer {
     /// バッチの損失を計算（勾配も累積）
     fn compute_batch_loss(&mut self, batch: &super::dataset::TrainingBatch) -> f32 {
         let mut total_loss = 0.0;
+        let batch_size = batch.samples.len() as f32;
 
         for sample in &batch.samples {
             // 順伝播
@@ -216,9 +520,10 @@ impl Trainer {
                     (diff * diff, 2.0 * diff / FV_SCALE)
                 }
                 LossType::SigmoidCrossEntropy => {
-                    // 勝率への変換
-                    let pred_wr = sigmoid(predicted / self.config.eval_scale);
-                    let target_wr = sigmoid(target / self.config.eval_scale);
+                    // 勝率への変換（数値安定性のためクランプ）
+                    const EPS: f32 = 1e-7;
+                    let pred_wr = sigmoid(predicted / self.config.eval_scale).clamp(EPS, 1.0 - EPS);
+                    let target_wr = sigmoid(target / self.config.eval_scale).clamp(EPS, 1.0 - EPS);
 
                     // バイナリ交差エントロピー
                     let loss = -target_wr * pred_wr.ln() - (1.0 - target_wr) * (1.0 - pred_wr).ln();
@@ -232,17 +537,17 @@ impl Trainer {
 
             total_loss += loss;
 
-            // 逆伝播
+            // 逆伝播（勾配をバッチサイズで正規化）
             self.network.backward(
                 &sample.black_features,
                 &sample.white_features,
                 sample.side_to_move,
                 &cache,
-                grad,
+                grad / batch_size,
             );
         }
 
-        total_loss / batch.samples.len() as f32
+        total_loss / batch_size
     }
 
     /// モデルを保存
@@ -274,5 +579,103 @@ mod tests {
         assert!((sigmoid(0.0) - 0.5).abs() < 1e-6);
         assert!(sigmoid(100.0) > 0.99);
         assert!(sigmoid(-100.0) < 0.01);
+    }
+
+    #[test]
+    fn test_lr_scheduler_constant() {
+        let scheduler = LearningRateScheduler::constant(0.001);
+        assert!((scheduler.get_lr(0) - 0.001).abs() < 1e-9);
+        assert!((scheduler.get_lr(50) - 0.001).abs() < 1e-9);
+        assert!((scheduler.get_lr(100) - 0.001).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_lr_scheduler_two_phase() {
+        // eta1 = 0.01, eta2 = 0.001 @ epoch 100
+        let scheduler = LearningRateScheduler::new(0.01, 0.001, 0.001, 100, 0);
+
+        // epoch 0: eta1
+        assert!((scheduler.get_lr(0) - 0.01).abs() < 1e-6);
+
+        // epoch 50: 中間値
+        let expected = 0.01 + (0.001 - 0.01) * 0.5;
+        assert!((scheduler.get_lr(50) - expected).abs() < 1e-6);
+
+        // epoch 100: eta2
+        assert!((scheduler.get_lr(100) - 0.001).abs() < 1e-6);
+
+        // epoch 200: eta2固定（eta2_epoch == 0）
+        assert!((scheduler.get_lr(200) - 0.001).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_lr_scheduler_three_phase() {
+        // eta1 = 0.01 (epoch 0-100), eta2 = 0.001 (epoch 100-200), eta3 = 0.0001
+        let scheduler = LearningRateScheduler::new(0.01, 0.001, 0.0001, 100, 200);
+
+        // epoch 0: eta1
+        assert!((scheduler.get_lr(0) - 0.01).abs() < 1e-6);
+
+        // epoch 100: eta2
+        assert!((scheduler.get_lr(100) - 0.001).abs() < 1e-6);
+
+        // epoch 150: eta2 → eta3 中間
+        let expected = 0.001 + (0.0001 - 0.001) * 0.5;
+        assert!((scheduler.get_lr(150) - expected).abs() < 1e-6);
+
+        // epoch 200: eta3
+        assert!((scheduler.get_lr(200) - 0.0001).abs() < 1e-6);
+
+        // epoch 300: eta3固定
+        assert!((scheduler.get_lr(300) - 0.0001).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_newbob_disabled() {
+        // decay = 1.0 の場合は無効
+        let mut newbob = NewbobState::new(1.0, 2);
+        assert!(!newbob.is_enabled());
+
+        let (accepted, converged) = newbob.update(1.0, "/tmp/model.bin");
+        assert!(accepted);
+        assert!(!converged);
+    }
+
+    #[test]
+    fn test_newbob_improvement() {
+        let mut newbob = NewbobState::new(0.5, 3);
+        assert!(newbob.is_enabled());
+
+        // 最初の改善
+        let (accepted, converged) = newbob.update(0.5, "/tmp/model1.bin");
+        assert!(accepted);
+        assert!(!converged);
+        assert!((newbob.scale - 1.0).abs() < 1e-6);
+        assert_eq!(newbob.best_model_path(), Some("/tmp/model1.bin"));
+
+        // 2回目の改善
+        let (accepted, converged) = newbob.update(0.4, "/tmp/model2.bin");
+        assert!(accepted);
+        assert!(!converged);
+        assert_eq!(newbob.best_model_path(), Some("/tmp/model2.bin"));
+    }
+
+    #[test]
+    fn test_newbob_no_improvement() {
+        let mut newbob = NewbobState::new(0.5, 2);
+
+        // 初期値を設定
+        newbob.update(0.5, "/tmp/model1.bin");
+
+        // 改善なし（1回目）
+        let (accepted, converged) = newbob.update(0.6, "/tmp/model2.bin");
+        assert!(!accepted);
+        assert!(!converged);
+        assert!((newbob.scale - 0.5).abs() < 1e-6);
+
+        // 改善なし（2回目）→ 収束
+        let (accepted, converged) = newbob.update(0.7, "/tmp/model3.bin");
+        assert!(!accepted);
+        assert!(converged);
     }
 }
