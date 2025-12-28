@@ -9,11 +9,19 @@
 //! cargo run -p tools --release --bin train_nnue -- \
 //!   --input train.jsonl --output-dir models --epochs 100
 //!
-//! # 詳細オプション
+//! # 詳細オプション（学習率スケジューリング、バリデーション）
 //! cargo run -p tools --release --bin train_nnue -- \
 //!   --input train.jsonl --output-dir models \
-//!   --epochs 100 --batch-size 16384 --lr 0.001 \
-//!   --loss sigmoid --checkpoint 10
+//!   --epochs 200 --batch-size 16384 \
+//!   --eta1 0.001 --eta2 0.0001 --eta3 0.00001 \
+//!   --eta1-epoch 100 --eta2-epoch 200 \
+//!   --validation val.jsonl \
+//!   --newbob-decay 0.5 --newbob-trials 3
+//!
+//! # 既存モデルからのリジューム
+//! cargo run -p tools --release --bin train_nnue -- \
+//!   --input train.jsonl --output-dir models \
+//!   --resume models/nnue_epoch_50.bin --epochs 100
 //! ```
 
 use anyhow::{Context, Result};
@@ -21,7 +29,7 @@ use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 
-use tools::nnue_trainer::{Adam, TrainConfig, Trainer, TrainingDataset};
+use tools::nnue_trainer::{Adam, LossType, TrainConfig, Trainer, TrainingDataset};
 
 #[derive(Parser)]
 #[command(
@@ -46,7 +54,7 @@ struct Cli {
     #[arg(long, default_value_t = 16384)]
     batch_size: usize,
 
-    /// 学習率
+    /// 学習率（eta1と同義）
     #[arg(long, default_value_t = 0.001)]
     lr: f32,
 
@@ -69,6 +77,45 @@ struct Cli {
     /// 読み込むサンプル数の上限（0=無制限）
     #[arg(long, default_value_t = 0)]
     limit: usize,
+
+    // === 学習率スケジューリング ===
+    /// 初期学習率（eta1）
+    #[arg(long)]
+    eta1: Option<f32>,
+
+    /// 中間学習率（eta2）
+    #[arg(long)]
+    eta2: Option<f32>,
+
+    /// 最終学習率（eta3）
+    #[arg(long)]
+    eta3: Option<f32>,
+
+    /// eta1からeta2への遷移完了エポック
+    #[arg(long, default_value_t = 0)]
+    eta1_epoch: usize,
+
+    /// eta2からeta3への遷移完了エポック
+    #[arg(long, default_value_t = 0)]
+    eta2_epoch: usize,
+
+    // === Validationとリジューム ===
+    /// 検証データファイル（JSONL形式）
+    #[arg(long)]
+    validation: Option<PathBuf>,
+
+    /// 既存モデルからのリジューム
+    #[arg(long)]
+    resume: Option<PathBuf>,
+
+    // === Newbobスケジューリング ===
+    /// Newbob減衰率（1.0で無効）
+    #[arg(long, default_value_t = 1.0)]
+    newbob_decay: f32,
+
+    /// Newbob最大試行回数
+    #[arg(long, default_value_t = 2)]
+    newbob_trials: usize,
 
     /// 詳細出力
     #[arg(short, long)]
@@ -111,11 +158,28 @@ fn main() -> Result<()> {
 
     eprintln!("Loaded {} training samples", dataset.len());
 
+    // 検証データの読み込み
+    let validation = if let Some(ref val_path) = cli.validation {
+        eprintln!("Loading validation data from {}", val_path.display());
+        let val_dataset = TrainingDataset::load(val_path, None).with_context(|| {
+            format!("Failed to load validation data from {}", val_path.display())
+        })?;
+        eprintln!("Loaded {} validation samples", val_dataset.len());
+        Some(val_dataset)
+    } else {
+        None
+    };
+
     // 学習設定
     let loss_type = match cli.loss {
-        LossArg::Mse => tools::nnue_trainer::trainer::LossType::Mse,
-        LossArg::Sigmoid => tools::nnue_trainer::trainer::LossType::SigmoidCrossEntropy,
+        LossArg::Mse => LossType::Mse,
+        LossArg::Sigmoid => LossType::SigmoidCrossEntropy,
     };
+
+    // 学習率の設定
+    let eta1 = cli.eta1.unwrap_or(cli.lr);
+    let eta2 = cli.eta2.unwrap_or(eta1);
+    let eta3 = cli.eta3.unwrap_or(eta2);
 
     let config = TrainConfig {
         batch_size: cli.batch_size,
@@ -126,11 +190,19 @@ fn main() -> Result<()> {
         loss_type,
         checkpoint_interval: cli.checkpoint,
         output_dir: cli.output_dir.to_string_lossy().to_string(),
+        eta1,
+        eta2,
+        eta3,
+        eta1_epoch: cli.eta1_epoch,
+        eta2_epoch: cli.eta2_epoch,
+        newbob_decay: cli.newbob_decay,
+        newbob_num_trials: cli.newbob_trials,
+        resume_path: cli.resume.map(|p| p.to_string_lossy().to_string()),
         ..Default::default()
     };
 
     // トレーナーの作成
-    let mut trainer = Trainer::new(config);
+    let mut trainer = Trainer::new(config).context("Failed to create trainer")?;
 
     // Ctrl-Cハンドラの設定
     let interrupted = trainer.interrupted();
@@ -145,7 +217,7 @@ fn main() -> Result<()> {
 
     // 学習の実行
     eprintln!("\nStarting training...");
-    trainer.train(&mut dataset, &mut optimizer);
+    trainer.train(&mut dataset, validation.as_ref(), &mut optimizer);
 
     eprintln!("\nTraining complete!");
     Ok(())

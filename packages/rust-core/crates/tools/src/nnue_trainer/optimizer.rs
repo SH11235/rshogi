@@ -8,6 +8,12 @@ use super::network::TrainableNetwork;
 pub trait Optimizer {
     /// パラメータを更新
     fn step(&mut self, network: &mut TrainableNetwork);
+
+    /// 学習率を設定
+    fn set_lr(&mut self, lr: f32);
+
+    /// 現在の学習率を取得
+    fn get_lr(&self) -> f32;
 }
 
 /// Adam オプティマイザ
@@ -132,6 +138,14 @@ fn adam_update_params(
 }
 
 impl Optimizer for Adam {
+    fn set_lr(&mut self, lr: f32) {
+        self.lr = lr;
+    }
+
+    fn get_lr(&self) -> f32 {
+        self.lr
+    }
+
     fn step(&mut self, network: &mut TrainableNetwork) {
         self.t += 1;
 

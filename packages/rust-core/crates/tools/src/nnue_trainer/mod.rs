@@ -16,4 +16,4 @@ pub mod trainer;
 pub use dataset::{TrainingBatch, TrainingDataset, TrainingSample};
 pub use network::TrainableNetwork;
 pub use optimizer::{Adam, Optimizer};
-pub use trainer::{TrainConfig, Trainer};
+pub use trainer::{LearningRateScheduler, LossType, NewbobState, TrainConfig, Trainer};
