@@ -11,20 +11,23 @@ const baseCard = {
 };
 
 interface MatchControlsProps {
-    /** 新規対局ボタンのクリックハンドラ */
-    onNewGame: () => void;
+    /** 平手に戻すボタンのクリックハンドラ */
+    onResetToStartpos: () => void;
     /** 停止ボタンのクリックハンドラ */
-    onPause: () => void;
-    /** 対局開始/再開ボタンのクリックハンドラ */
-    onResume: () => void;
+    onStop: () => void;
+    /** 対局開始ボタンのクリックハンドラ */
+    onStart: () => void;
+    /** 対局中かどうか */
+    isMatchRunning: boolean;
     /** メッセージ */
     message: string | null;
 }
 
 export function MatchControls({
-    onNewGame,
-    onPause,
-    onResume,
+    onResetToStartpos,
+    onStop,
+    onStart,
+    isMatchRunning,
     message,
 }: MatchControlsProps): ReactElement {
     return (
@@ -44,25 +47,28 @@ export function MatchControls({
                     alignItems: "center",
                 }}
             >
-                <Button type="button" onClick={onNewGame} style={{ paddingInline: "12px" }}>
-                    新規対局（初期化）
-                </Button>
                 <Button
                     type="button"
-                    onClick={onPause}
+                    onClick={onResetToStartpos}
                     variant="outline"
                     style={{ paddingInline: "12px" }}
                 >
-                    停止（自動進行オフ）
+                    平手に戻す
                 </Button>
-                <Button
-                    type="button"
-                    onClick={onResume}
-                    variant="secondary"
-                    style={{ paddingInline: "12px" }}
-                >
-                    対局開始 / 再開
-                </Button>
+                {isMatchRunning ? (
+                    <Button
+                        type="button"
+                        onClick={onStop}
+                        variant="destructive"
+                        style={{ paddingInline: "16px" }}
+                    >
+                        停止
+                    </Button>
+                ) : (
+                    <Button type="button" onClick={onStart} style={{ paddingInline: "16px" }}>
+                        対局開始
+                    </Button>
+                )}
             </div>
             {message ? (
                 <div

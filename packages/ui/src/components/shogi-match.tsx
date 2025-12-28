@@ -47,8 +47,7 @@ import {
 // EngineOption 型を外部に再エクスポート
 export type { EngineOption };
 
-import { BoardToolbar } from "./shogi-match/components/BoardToolbar";
-import { DisplaySettingsPanel } from "./shogi-match/components/DisplaySettingsPanel";
+import { AppMenu } from "./shogi-match/components/AppMenu";
 import { type ClockSettings, useClockManager } from "./shogi-match/hooks/useClockManager";
 import { useEngineManager } from "./shogi-match/hooks/useEngineManager";
 import { type AnalysisJob, useEnginePool } from "./shogi-match/hooks/useEnginePool";
@@ -263,10 +262,10 @@ export function ShogiMatch({
     const [editFromSquare, setEditFromSquare] = useState<Square | null>(null);
     const [editTool, setEditTool] = useState<"place" | "erase">("place");
     const [startSfen, setStartSfen] = useState<string>("startpos");
-    const [basePosition, setBasePosition] = useState<PositionState | null>(null);
+    // TODO: 将来的に局面編集機能の強化で使用予定
+    const [_basePosition, setBasePosition] = useState<PositionState | null>(null);
     const [isEditPanelOpen, setIsEditPanelOpen] = useState(false);
     const [isSettingsPanelOpen, setIsSettingsPanelOpen] = useState(false);
-    const [isDisplaySettingsPanelOpen, setIsDisplaySettingsPanelOpen] = useState(false);
     const [displaySettings, setDisplaySettings] = useLocalStorage<DisplaySettings>(
         "shogi-display-settings",
         DEFAULT_DISPLAY_SETTINGS,
@@ -295,6 +294,8 @@ export function ShogiMatch({
         targetPlies: number[];
         inProgress?: number[]; // 並列解析中の手番号
     } | null>(null);
+    // 分岐追加シグナル（カウンターが増えるとKifuPanelがツリービューに切り替わる）
+    const [branchAddedSignal, setBranchAddedSignal] = useState(0);
 
     // positionRef を先に定義（コールバックで使用するため）
     const positionRef = useRef<PositionState>(position);
@@ -629,63 +630,6 @@ export function ShogiMatch({
         setEditMessage("局面を確定しました。対局開始でこの局面から進行します。");
     };
 
-    const resetToBasePosition = useCallback(async () => {
-        matchEndedRef.current = false;
-        setGameResult(null);
-        setShowResultDialog(false);
-        setShowResultBanner(false);
-        await stopAllEngines();
-        const service = getPositionService();
-        let next = basePosition ? clonePositionState(basePosition) : null;
-        if (!next) {
-            try {
-                const fetched = await service.getInitialBoard();
-                next = clonePositionState(fetched);
-                setBasePosition(clonePositionState(fetched));
-                try {
-                    const sfen = await service.boardToSfen(fetched);
-                    setStartSfen(sfen);
-                } catch {
-                    setStartSfen("startpos");
-                }
-            } catch (error) {
-                setMessage(`初期局面の再取得に失敗しました: ${String(error)}`);
-                return;
-            }
-        }
-        setPosition(next);
-        positionRef.current = next;
-        setInitialBoard(cloneBoard(next.board));
-        setPositionReady(true);
-        // 棋譜ナビゲーションをリセット（startSfenは後でrefreshStartSfenで更新される）
-        navigation.reset(next, startSfen);
-        movesRef.current = [];
-        setLastMove(undefined);
-        setSelection(null);
-        setMessage(null);
-        resetClocks(false);
-
-        setIsMatchRunning(false);
-        setIsEditMode(true);
-        setEditFromSquare(null);
-        setEditTool("place");
-        setEditPromoted(false);
-        setEditOwner("sente");
-        setEditPieceType(null);
-        legalCache.clear();
-        // ターン開始時刻をリセット
-        turnStartTimeRef.current = Date.now();
-        void refreshStartSfen(next);
-    }, [
-        basePosition,
-        navigation,
-        startSfen,
-        refreshStartSfen,
-        resetClocks,
-        stopAllEngines,
-        legalCache.clear,
-    ]);
-
     const applyMoveCommon = useCallback(
         (nextPosition: PositionState, mv: string, last?: LastMove, _prevBoard?: BoardState) => {
             // 消費時間を計算
@@ -704,9 +648,45 @@ export function ShogiMatch({
         [legalCache, navigation, updateClocksForNextTurn],
     );
 
-    const handleNewGame = async () => {
-        await resetToBasePosition();
-    };
+    /** 平手初期局面にリセット */
+    const handleResetToStartpos = useCallback(async () => {
+        matchEndedRef.current = false;
+        setGameResult(null);
+        setShowResultDialog(false);
+        setShowResultBanner(false);
+        await stopAllEngines();
+
+        const service = getPositionService();
+        try {
+            const pos = await service.getInitialBoard();
+            const next = clonePositionState(pos);
+            setPosition(next);
+            positionRef.current = next;
+            setInitialBoard(cloneBoard(next.board));
+            setBasePosition(clonePositionState(next));
+            setStartSfen("startpos");
+            setPositionReady(true);
+
+            navigation.reset(next, "startpos");
+            movesRef.current = [];
+            setLastMove(undefined);
+            setSelection(null);
+            setMessage(null);
+            resetClocks(false);
+
+            setIsMatchRunning(false);
+            setIsEditMode(true);
+            setEditFromSquare(null);
+            setEditTool("place");
+            setEditPromoted(false);
+            setEditOwner("sente");
+            setEditPieceType(null);
+            legalCache.clear();
+            turnStartTimeRef.current = Date.now();
+        } catch (error) {
+            setMessage(`平手初期化に失敗しました: ${String(error)}`);
+        }
+    }, [navigation, resetClocks, stopAllEngines, legalCache.clear]);
 
     const getLegalSet = async (): Promise<Set<string> | null> => {
         if (!positionReady) return null;
@@ -1286,12 +1266,11 @@ export function ShogiMatch({
     );
 
     // 単発解析完了時の処理
-    // biome-ignore lint/correctness/useExhaustiveDependencies: isAnalyzingがfalseになったときのみ実行
     useEffect(() => {
         if (!isAnalyzing && analyzingPly !== null) {
             setAnalyzingPly(null);
         }
-    }, [isAnalyzing]);
+    }, [isAnalyzing, analyzingPly]);
 
     // 一括解析を開始（並列処理）
     const handleStartBatchAnalysis = useCallback(() => {
@@ -1320,6 +1299,17 @@ export function ShogiMatch({
         void enginePool.cancel();
         setBatchAnalysis(null);
     }, [enginePool]);
+
+    // PVを分岐として追加するコールバック（シグナル付き）
+    const handleAddPvAsBranch = useCallback(
+        (ply: number, pv: string[]) => {
+            // 分岐が実際に追加された場合のみシグナルをインクリメント
+            addPvAsBranch(ply, pv, () => {
+                setBranchAddedSignal((prev) => prev + 1);
+            });
+        },
+        [addPvAsBranch],
+    );
 
     // PVプレビューを開くコールバック
     const handlePreviewPv = useCallback(
@@ -1468,6 +1458,23 @@ export function ShogiMatch({
                 />
             )}
 
+            {/* 左上メニュー（画面固定） */}
+            <div
+                style={{
+                    position: "fixed",
+                    top: "16px",
+                    left: "16px",
+                    zIndex: 100,
+                }}
+            >
+                <AppMenu
+                    settings={displaySettings}
+                    onSettingsChange={setDisplaySettings}
+                    analysisSettings={analysisSettings}
+                    onAnalysisSettingsChange={setAnalysisSettings}
+                />
+            </div>
+
             <section
                 style={{
                     display: "flex",
@@ -1495,33 +1502,20 @@ export function ShogiMatch({
                         alignItems: "flex-start",
                     }}
                 >
+                    {/* 左列: 将棋盤（サイズ固定） */}
                     <div
                         style={{
                             display: "flex",
                             flexDirection: "column",
                             gap: "12px",
                             alignItems: "center",
+                            flexShrink: 0,
                         }}
                     >
                         <div
                             ref={boardSectionRef}
                             style={{ ...baseCard, padding: "12px", width: "fit-content" }}
                         >
-                            <div
-                                style={{
-                                    display: "flex",
-                                    justifyContent: "flex-start",
-                                    alignItems: "center",
-                                    marginBottom: "8px",
-                                }}
-                            >
-                                <BoardToolbar
-                                    flipBoard={flipBoard}
-                                    onFlipBoardChange={setFlipBoard}
-                                    displaySettings={displaySettings}
-                                    onDisplaySettingsChange={setDisplaySettings}
-                                />
-                            </div>
                             <div
                                 style={{
                                     marginTop: "8px",
@@ -1587,7 +1581,7 @@ export function ShogiMatch({
                                                         : `${moves.length}手目`}
                                                 </output>
 
-                                                {/* 手番表示（右） */}
+                                                {/* 手番表示 */}
                                                 <output
                                                     style={{
                                                         ...TEXT_STYLES.mutedSecondary,
@@ -1610,6 +1604,30 @@ export function ShogiMatch({
                                                             : "後手"}
                                                     </span>
                                                 </output>
+
+                                                {/* 反転ボタン */}
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setFlipBoard(!flipBoard)}
+                                                    style={{
+                                                        display: "flex",
+                                                        alignItems: "center",
+                                                        gap: "4px",
+                                                        padding: "4px 8px",
+                                                        borderRadius: "6px",
+                                                        border: "1px solid hsl(var(--wafuu-border))",
+                                                        background: flipBoard
+                                                            ? "hsl(var(--wafuu-kin) / 0.2)"
+                                                            : "hsl(var(--card))",
+                                                        cursor: "pointer",
+                                                        fontSize: "13px",
+                                                        whiteSpace: "nowrap",
+                                                    }}
+                                                    title="盤面を反転"
+                                                >
+                                                    <span>🔄</span>
+                                                    <span>反転</span>
+                                                </button>
                                             </div>
 
                                             {/* 持ち駒表示 */}
@@ -1716,7 +1734,15 @@ export function ShogiMatch({
                         </div>
                     </div>
 
-                    <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                    {/* 中央列: 操作系パネル（サイズ固定） */}
+                    <div
+                        style={{
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "10px",
+                            flexShrink: 0,
+                        }}
+                    >
                         <EditModePanel
                             isOpen={isEditPanelOpen}
                             onOpenChange={setIsEditPanelOpen}
@@ -1728,9 +1754,10 @@ export function ShogiMatch({
                         />
 
                         <MatchControls
-                            onNewGame={handleNewGame}
-                            onPause={pauseAutoPlay}
-                            onResume={resumeAutoPlay}
+                            onResetToStartpos={handleResetToStartpos}
+                            onStop={pauseAutoPlay}
+                            onStart={resumeAutoPlay}
+                            isMatchRunning={isMatchRunning}
                             message={message}
                         />
 
@@ -1748,6 +1775,41 @@ export function ShogiMatch({
                         />
 
                         <ClockDisplayPanel clocks={clocks} sides={sides} />
+
+                        {/* インポートパネル */}
+                        <KifuImportPanel
+                            onImportSfen={importSfen}
+                            onImportKif={importKif}
+                            positionReady={positionReady}
+                        />
+
+                        {isDevMode && (
+                            <EngineLogsPanel
+                                eventLogs={eventLogs}
+                                errorLogs={errorLogs}
+                                engineErrorDetails={engineErrorDetails}
+                                onRetry={retryEngine}
+                                isRetrying={isRetrying}
+                            />
+                        )}
+                    </div>
+
+                    {/* 右列: 棋譜列（EvalPanel + KifuPanel、サイズ固定） */}
+                    <div
+                        style={{
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "10px",
+                            flexShrink: 0,
+                        }}
+                    >
+                        {/* 評価値グラフパネル（折りたたみ） */}
+                        <EvalPanel
+                            evalHistory={evalHistory}
+                            currentPly={navigation.state.currentPly}
+                            onPlySelect={handlePlySelect}
+                            defaultOpen={false}
+                        />
 
                         {/* 棋譜パネル（常時表示） */}
                         <KifuPanel
@@ -1784,8 +1846,9 @@ export function ShogiMatch({
                             navigationDisabled={isMatchRunning}
                             branchMarkers={branchMarkers}
                             positionHistory={positionHistory}
-                            onAddPvAsBranch={addPvAsBranch}
+                            onAddPvAsBranch={handleAddPvAsBranch}
                             onPreviewPv={handlePreviewPv}
+                            branchAddedSignal={branchAddedSignal}
                             onAnalyzePly={handleAnalyzePly}
                             isAnalyzing={isAnalyzing}
                             analyzingPly={analyzingPly ?? undefined}
@@ -1803,41 +1866,10 @@ export function ShogiMatch({
                             onCancelBatchAnalysis={handleCancelBatchAnalysis}
                             analysisSettings={analysisSettings}
                             onAnalysisSettingsChange={setAnalysisSettings}
+                            kifuTree={navigation.tree}
+                            onNodeClick={navigation.goToNodeById}
+                            onBranchSwitch={navigation.switchBranchAtNode}
                         />
-
-                        {/* 評価値グラフパネル（折りたたみ） */}
-                        <EvalPanel
-                            evalHistory={evalHistory}
-                            currentPly={navigation.state.currentPly}
-                            onPlySelect={handlePlySelect}
-                            defaultOpen={false}
-                        />
-
-                        {/* インポートパネル */}
-                        <KifuImportPanel
-                            onImportSfen={importSfen}
-                            onImportKif={importKif}
-                            positionReady={positionReady}
-                        />
-
-                        <DisplaySettingsPanel
-                            isOpen={isDisplaySettingsPanelOpen}
-                            onOpenChange={setIsDisplaySettingsPanelOpen}
-                            settings={displaySettings}
-                            onSettingsChange={setDisplaySettings}
-                            analysisSettings={analysisSettings}
-                            onAnalysisSettingsChange={setAnalysisSettings}
-                        />
-
-                        {isDevMode && (
-                            <EngineLogsPanel
-                                eventLogs={eventLogs}
-                                errorLogs={errorLogs}
-                                engineErrorDetails={engineErrorDetails}
-                                onRetry={retryEngine}
-                                isRetrying={isRetrying}
-                            />
-                        )}
                     </div>
                 </div>
             </section>
