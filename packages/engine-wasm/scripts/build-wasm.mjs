@@ -208,6 +208,18 @@ function verifyThreadedOutput(outputDir) {
     if (!jsSource.includes("initThreadPool")) {
         throw new Error("initThreadPool export missing in threaded wasm output");
     }
+
+    // Generate package.json for Vite/Rollup to resolve import('../../..') in workerHelpers.js
+    // wasm-bindgen-rayon's workerHelpers.js uses import('../../..') to load the main module,
+    // which requires a package.json with "main" pointing to the entry file.
+    const pkgJsonPath = path.join(outputDir, "package.json");
+    const pkgJson = {
+        name: "engine-wasm-threaded",
+        type: "module",
+        main: `./${artifactName}.js`,
+    };
+    writeFileSync(pkgJsonPath, JSON.stringify(pkgJson, null, 2), "utf8");
+    console.log(`Generated ${pkgJsonPath} for wasm-bindgen-rayon compatibility`);
 }
 
 try {

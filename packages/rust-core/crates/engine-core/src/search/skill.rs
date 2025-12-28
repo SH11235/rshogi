@@ -106,6 +106,47 @@ impl Skill {
         self.best = best_move;
         best_move
     }
+
+    /// Pick a move from (Move, Value) pairs, applying skill-based weakening.
+    /// This is used when RootMoves is not available (e.g., WASM helper results).
+    /// The pairs should be sorted by score in descending order.
+    pub fn pick_best_from_pairs<R: Rng + ?Sized>(
+        &mut self,
+        top_moves: &[(Move, Value)],
+        rng: &mut R,
+    ) -> Move {
+        if top_moves.is_empty() {
+            return Move::NONE;
+        }
+
+        let capped_len = top_moves.len().min(4); // multi_pv is at least 4 when skill enabled
+        let top_score = top_moves[0].1.raw();
+        let last_score = top_moves[capped_len - 1].1.raw();
+
+        // Stockfish equivalent: delta capped at 100cp (PawnValue)
+        let delta = (top_score - last_score).min(100);
+        let weakness = 120.0 - 2.0 * self.level;
+        let weakness_int = weakness.max(1.0) as u32;
+
+        let mut max_score = Value::new(-32001).raw();
+        let mut best_move = top_moves[0].0;
+
+        for (mv, score) in top_moves.iter().take(capped_len) {
+            let rand_term = rng.random::<u32>() % weakness_int;
+            let push = ((weakness * (top_score - score.raw()) as f64)
+                + delta as f64 * rand_term as f64)
+                / 128.0;
+            let candidate = score.raw() + push as i32;
+
+            if candidate >= max_score {
+                max_score = candidate;
+                best_move = *mv;
+            }
+        }
+
+        self.best = best_move;
+        best_move
+    }
 }
 
 #[cfg(test)]

@@ -466,13 +466,10 @@ pub fn init(opts: Option<JsValue>) -> Result<(), JsValue> {
     Ok(())
 }
 
+// Re-export wasm-bindgen-rayon's init_thread_pool for async Worker initialization.
+// This returns a Promise that resolves when all workers are ready.
 #[cfg(feature = "wasm-threads")]
-#[wasm_bindgen(js_name = initThreadPool)]
-pub fn init_thread_pool(_pool_size: usize) -> Result<(), JsValue> {
-    let _ = TLS_DUMMY;
-    // std::thread が必要なタイミングでワーカを生成するため、ここでは何もしない。
-    Ok(())
-}
+pub use wasm_bindgen_rayon::init_thread_pool;
 
 #[wasm_bindgen]
 pub fn load_model(bytes: &[u8]) -> Result<(), JsValue> {
