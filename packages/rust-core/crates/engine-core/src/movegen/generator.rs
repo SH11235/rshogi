@@ -169,12 +169,7 @@ fn generate_lance_moves(
 }
 
 /// 桂の移動による指し手を生成
-fn generate_knight_moves(
-    pos: &Position,
-    target: Bitboard,
-    buffer: &mut ExtMoveBuffer,
-    include_non_promotions: bool,
-) {
+fn generate_knight_moves(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuffer) {
     let us = pos.side_to_move();
     let knights = pos.pieces(us, PieceType::Knight);
 
@@ -195,8 +190,9 @@ fn generate_knight_moves(
                 let promoted_pc = moved_pc.promote().unwrap();
                 add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
 
-                // 敵陣内で不成も生成するか（行き所のない段でないとき）
-                if include_non_promotions && !rank12.contains(to) {
+                // 桂馬の3段目不成は戦術的価値があるため常に生成
+                // 1,2段目は行き場がないので不成は生成しない
+                if !rank12.contains(to) {
                     add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
                 }
             } else {
@@ -484,7 +480,7 @@ fn generate_non_evasions_core(
     // 駒の移動
     generate_pawn_moves(pos, targets.pawn, buffer, pawn_promo_mode);
     generate_lance_moves(pos, targets.general, buffer, include_non_promotions);
-    generate_knight_moves(pos, targets.general, buffer, include_non_promotions);
+    generate_knight_moves(pos, targets.general, buffer);
     generate_silver_moves(pos, targets.general, buffer);
     generate_bishop_moves(pos, targets.general, buffer, include_non_promotions);
     generate_rook_moves(pos, targets.general, buffer, include_non_promotions);
@@ -580,7 +576,7 @@ fn generate_evasions_with_promos(
     // 玉以外の駒による移動（targetを制限）
     generate_pawn_moves(pos, move_target, buffer, pawn_promo_mode);
     generate_lance_moves(pos, move_target, buffer, include_non_promotions);
-    generate_knight_moves(pos, move_target, buffer, include_non_promotions);
+    generate_knight_moves(pos, move_target, buffer);
     generate_silver_moves(pos, move_target, buffer);
     generate_bishop_moves(pos, move_target, buffer, include_non_promotions);
     generate_rook_moves(pos, move_target, buffer, include_non_promotions);
@@ -1289,5 +1285,87 @@ mod tests {
         let found = list.iter().any(|m| m.to_usi() == "3a4c");
 
         assert!(found, "3a4c（桂馬で金を取る手）が生成されていない");
+    }
+
+    /// 桂馬が敵陣3段目に移動する場合、成りと不成の両方が生成されることを確認
+    #[test]
+    fn test_knight_to_rank3_generates_both_promote_and_non_promote() {
+        // 先手の桂馬が7五(7e)から移動する局面
+        // 移動先：6三(6c)と8三(8c)、どちらも3段目(c)
+        // 3段目は敵陣だが行き場があるので、成り/不成の両方が生成されるべき
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/9/2N6/9/9/9/4K4 b - 1").unwrap();
+
+        let mut list = MoveList::new();
+        generate_legal(&pos, &mut list);
+
+        // 6c は3段目→成り/不成両方生成
+        let has_6c_promote = list.iter().any(|m| m.to_usi() == "7e6c+");
+        let has_6c_non_promote = list.iter().any(|m| m.to_usi() == "7e6c");
+        assert!(has_6c_promote, "桂馬の成り手 7e6c+ が生成されていない");
+        assert!(
+            has_6c_non_promote,
+            "桂馬の不成手 7e6c が生成されていない（3段目なので不成も合法）"
+        );
+
+        // 8c も3段目→成り/不成両方生成
+        let has_8c_promote = list.iter().any(|m| m.to_usi() == "7e8c+");
+        let has_8c_non_promote = list.iter().any(|m| m.to_usi() == "7e8c");
+        assert!(has_8c_promote, "桂馬の成り手 7e8c+ が生成されていない");
+        assert!(
+            has_8c_non_promote,
+            "桂馬の不成手 7e8c が生成されていない（3段目なので不成も合法）"
+        );
+    }
+
+    /// 桂馬が敵陣1段目に移動する場合、成りのみが生成されることを確認
+    /// 1段目は行き場がないので不成は不可能
+    #[test]
+    fn test_knight_to_rank1_generates_only_promote() {
+        // 先手の桂馬が7三(7c)から移動する局面
+        // 移動先：6一(6a)と8一(8a)、どちらも1段目(a)
+        // 1段目は行き場がないので成りのみ生成されるべき
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/2N6/9/9/9/9/9/4K4 b - 1").unwrap();
+
+        let mut list = MoveList::new();
+        generate_legal(&pos, &mut list);
+
+        // 6a は1段目→成りのみ
+        let has_6a_promote = list.iter().any(|m| m.to_usi() == "7c6a+");
+        let has_6a_non_promote = list.iter().any(|m| m.to_usi() == "7c6a");
+        assert!(has_6a_promote, "7c6a+ が生成されていない");
+        assert!(!has_6a_non_promote, "7c6a（不成）は生成されてはいけない（1段目は行き場がない）");
+
+        // 8a は1段目→成りのみ
+        let has_8a_promote = list.iter().any(|m| m.to_usi() == "7c8a+");
+        let has_8a_non_promote = list.iter().any(|m| m.to_usi() == "7c8a");
+        assert!(has_8a_promote, "7c8a+ が生成されていない");
+        assert!(!has_8a_non_promote, "7c8a（不成）は生成されてはいけない（1段目は行き場がない）");
+    }
+
+    /// 桂馬が敵陣2段目に移動する場合も成りのみが生成されることを確認
+    #[test]
+    fn test_knight_to_rank2_generates_only_promote() {
+        // 先手の桂馬が7四(7d)から移動する局面
+        // 移動先：6二(6b)と8二(8b)、どちらも2段目(b)
+        // 2段目は行き場がないので成りのみ生成されるべき
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/2N6/9/9/9/9/4K4 b - 1").unwrap();
+
+        let mut list = MoveList::new();
+        generate_legal(&pos, &mut list);
+
+        // 8b は2段目→成りのみ
+        let has_8b_promote = list.iter().any(|m| m.to_usi() == "7d8b+");
+        let has_8b_non_promote = list.iter().any(|m| m.to_usi() == "7d8b");
+        assert!(has_8b_promote, "7d8b+ が生成されていない");
+        assert!(!has_8b_non_promote, "7d8b（不成）は生成されてはいけない（2段目は行き場がない）");
+
+        // 6b は2段目→成りのみ
+        let has_6b_promote = list.iter().any(|m| m.to_usi() == "7d6b+");
+        let has_6b_non_promote = list.iter().any(|m| m.to_usi() == "7d6b");
+        assert!(has_6b_promote, "7d6b+ が生成されていない");
+        assert!(!has_6b_non_promote, "7d6b（不成）は生成されてはいけない（2段目は行き場がない）");
     }
 }
