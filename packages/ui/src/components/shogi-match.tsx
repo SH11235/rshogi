@@ -262,7 +262,7 @@ export function ShogiMatch({
     const [editFromSquare, setEditFromSquare] = useState<Square | null>(null);
     const [editTool, setEditTool] = useState<"place" | "erase">("place");
     const [startSfen, setStartSfen] = useState<string>("startpos");
-    const [basePosition, setBasePosition] = useState<PositionState | null>(null);
+    const [_basePosition, setBasePosition] = useState<PositionState | null>(null);
     const [isEditPanelOpen, setIsEditPanelOpen] = useState(false);
     const [isSettingsPanelOpen, setIsSettingsPanelOpen] = useState(false);
     const [displaySettings, setDisplaySettings] = useLocalStorage<DisplaySettings>(
@@ -629,63 +629,6 @@ export function ShogiMatch({
         setEditMessage("局面を確定しました。対局開始でこの局面から進行します。");
     };
 
-    const resetToBasePosition = useCallback(async () => {
-        matchEndedRef.current = false;
-        setGameResult(null);
-        setShowResultDialog(false);
-        setShowResultBanner(false);
-        await stopAllEngines();
-        const service = getPositionService();
-        let next = basePosition ? clonePositionState(basePosition) : null;
-        if (!next) {
-            try {
-                const fetched = await service.getInitialBoard();
-                next = clonePositionState(fetched);
-                setBasePosition(clonePositionState(fetched));
-                try {
-                    const sfen = await service.boardToSfen(fetched);
-                    setStartSfen(sfen);
-                } catch {
-                    setStartSfen("startpos");
-                }
-            } catch (error) {
-                setMessage(`初期局面の再取得に失敗しました: ${String(error)}`);
-                return;
-            }
-        }
-        setPosition(next);
-        positionRef.current = next;
-        setInitialBoard(cloneBoard(next.board));
-        setPositionReady(true);
-        // 棋譜ナビゲーションをリセット（startSfenは後でrefreshStartSfenで更新される）
-        navigation.reset(next, startSfen);
-        movesRef.current = [];
-        setLastMove(undefined);
-        setSelection(null);
-        setMessage(null);
-        resetClocks(false);
-
-        setIsMatchRunning(false);
-        setIsEditMode(true);
-        setEditFromSquare(null);
-        setEditTool("place");
-        setEditPromoted(false);
-        setEditOwner("sente");
-        setEditPieceType(null);
-        legalCache.clear();
-        // ターン開始時刻をリセット
-        turnStartTimeRef.current = Date.now();
-        void refreshStartSfen(next);
-    }, [
-        basePosition,
-        navigation,
-        startSfen,
-        refreshStartSfen,
-        resetClocks,
-        stopAllEngines,
-        legalCache.clear,
-    ]);
-
     const applyMoveCommon = useCallback(
         (nextPosition: PositionState, mv: string, last?: LastMove, _prevBoard?: BoardState) => {
             // 消費時間を計算
@@ -704,9 +647,45 @@ export function ShogiMatch({
         [legalCache, navigation, updateClocksForNextTurn],
     );
 
-    const handleNewGame = async () => {
-        await resetToBasePosition();
-    };
+    /** 平手初期局面にリセット */
+    const handleResetToStartpos = useCallback(async () => {
+        matchEndedRef.current = false;
+        setGameResult(null);
+        setShowResultDialog(false);
+        setShowResultBanner(false);
+        await stopAllEngines();
+
+        const service = getPositionService();
+        try {
+            const pos = await service.getInitialBoard();
+            const next = clonePositionState(pos);
+            setPosition(next);
+            positionRef.current = next;
+            setInitialBoard(cloneBoard(next.board));
+            setBasePosition(clonePositionState(next));
+            setStartSfen("startpos");
+            setPositionReady(true);
+
+            navigation.reset(next, "startpos");
+            movesRef.current = [];
+            setLastMove(undefined);
+            setSelection(null);
+            setMessage(null);
+            resetClocks(false);
+
+            setIsMatchRunning(false);
+            setIsEditMode(true);
+            setEditFromSquare(null);
+            setEditTool("place");
+            setEditPromoted(false);
+            setEditOwner("sente");
+            setEditPieceType(null);
+            legalCache.clear();
+            turnStartTimeRef.current = Date.now();
+        } catch (error) {
+            setMessage(`平手初期化に失敗しました: ${String(error)}`);
+        }
+    }, [navigation, resetClocks, stopAllEngines, legalCache.clear]);
 
     const getLegalSet = async (): Promise<Set<string> | null> => {
         if (!positionReady) return null;
@@ -1774,9 +1753,10 @@ export function ShogiMatch({
                         />
 
                         <MatchControls
-                            onNewGame={handleNewGame}
-                            onPause={pauseAutoPlay}
-                            onResume={resumeAutoPlay}
+                            onResetToStartpos={handleResetToStartpos}
+                            onStop={pauseAutoPlay}
+                            onStart={resumeAutoPlay}
+                            isMatchRunning={isMatchRunning}
                             message={message}
                         />
 

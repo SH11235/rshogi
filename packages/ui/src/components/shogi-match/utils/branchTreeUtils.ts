@@ -7,12 +7,104 @@
 import {
     BOARD_FILES,
     BOARD_RANKS,
+    findNodeByPlyInMainLine,
     type KifuNode,
     type KifuTree,
     type Player,
     type Square,
 } from "@shogi/app-core";
 import { formatMoveSimple } from "./kifFormat";
+
+/**
+ * PVと本譜の比較結果
+ */
+export interface PvMainLineComparison {
+    /** 比較タイプ */
+    type:
+        | "identical" // PVが本譜と完全一致
+        | "diverges_later" // 途中から分岐（1手目は同じ）
+        | "diverges_first"; // 最初から異なる
+    /** 分岐点の手数（diverges_laterの場合のみ有効） */
+    divergePly?: number;
+    /** 分岐開始時のPVインデックス（0-based、diverges_laterの場合のみ有効） */
+    divergeIndex?: number;
+}
+
+/**
+ * PVと本譜を比較し、分岐点を検出する
+ *
+ * @param tree 棋譜ツリー
+ * @param basePly PVの起点手数（この手を指した後の局面からPVが始まる）
+ * @param pv PV（読み筋）の手順
+ * @returns 比較結果
+ */
+export function comparePvWithMainLine(
+    tree: KifuTree,
+    basePly: number,
+    pv: string[],
+): PvMainLineComparison {
+    if (pv.length === 0) {
+        return { type: "identical" };
+    }
+
+    // basePlyのノードを取得
+    const baseNodeId = findNodeByPlyInMainLine(tree, basePly);
+    if (!baseNodeId) {
+        // ノードが見つからない場合は「最初から異なる」として扱う
+        return { type: "diverges_first" };
+    }
+
+    const baseNode = tree.nodes.get(baseNodeId);
+    if (!baseNode) {
+        return { type: "diverges_first" };
+    }
+
+    // メインラインを辿りながらPVと比較
+    let currentNode = baseNode;
+
+    for (let i = 0; i < pv.length; i++) {
+        const pvMove = pv[i];
+
+        // 次のメインラインの手を取得
+        if (currentNode.children.length === 0) {
+            // メインラインの終端に達した場合
+            // 残りのPVは新規分岐となる
+            if (i === 0) {
+                return { type: "diverges_first" };
+            }
+            return {
+                type: "diverges_later",
+                divergePly: currentNode.ply,
+                divergeIndex: i,
+            };
+        }
+
+        const mainLineChildId = currentNode.children[0];
+        const mainLineChild = tree.nodes.get(mainLineChildId);
+        if (!mainLineChild) {
+            return { type: "diverges_first" };
+        }
+
+        // PVの手とメインラインの手を比較
+        if (mainLineChild.usiMove !== pvMove) {
+            // 分岐点発見
+            if (i === 0) {
+                return { type: "diverges_first" };
+            }
+            return {
+                type: "diverges_later",
+                divergePly: currentNode.ply,
+                divergeIndex: i,
+            };
+        }
+
+        // 次のノードへ
+        currentNode = mainLineChild;
+    }
+
+    // すべてのPVの手がメインラインと一致
+    return { type: "identical" };
+}
 
 /**
  * 文字列がSquare型として有効かどうかを判定するtype guard
@@ -27,36 +119,8 @@ function isSquare(value: string): value is Square {
     );
 }
 
-/** ツリービュー用のノードデータ */
-export interface BranchTreeNode {
-    /** ノードID */
-    nodeId: string;
-    /** 手数 */
-    ply: number;
-    /** 表示テキスト（例: "☗7六歩"） */
-    displayText: string;
-    /** USI形式の指し手 */
-    usiMove: string | null;
-    /** 評価値（センチポーン） */
-    evalCp?: number;
-    /** 詰み手数 */
-    evalMate?: number;
-    /** 分岐があるか */
-    hasBranches: boolean;
-    /** 分岐数 */
-    branchCount: number;
-    /** メインラインか */
-    isMainLine: boolean;
-    /** 現在のパス上か */
-    isCurrentPath: boolean;
-    /** 現在位置か */
-    isCurrent: boolean;
-    /** 子ノード */
-    children: BranchTreeNode[];
-}
-
 /** 分岐情報（インライン表示用） */
-export interface BranchOption {
+interface BranchOption {
     /** ノードID */
     nodeId: string;
     /** 表示テキスト */
@@ -130,75 +194,13 @@ function getDisplayText(node: KifuNode, prevToSquare: Square | undefined): strin
 }
 
 /**
- * KifuTreeからツリービュー用のデータを構築
- *
- * @param tree 棋譜ツリー
- * @param maxDepth 最大深さ（省略時は全て）
- * @returns ルートノードから始まるツリーデータ
- */
-export function buildBranchTreeData(tree: KifuTree, maxDepth?: number): BranchTreeNode {
-    const currentPath = getPathToRoot(tree);
-
-    function buildNode(
-        nodeId: string,
-        isMainLine: boolean,
-        depth: number,
-        prevToSquare: Square | undefined,
-    ): BranchTreeNode | null {
-        const node = tree.nodes.get(nodeId);
-        if (!node) return null;
-
-        // 最大深さチェック
-        if (maxDepth !== undefined && depth > maxDepth) {
-            return null;
-        }
-
-        const displayText = getDisplayText(node, prevToSquare);
-        const toSquare = getToSquare(node.usiMove);
-
-        // 子ノードを構築
-        const children: BranchTreeNode[] = [];
-        for (let i = 0; i < node.children.length; i++) {
-            const childId = node.children[i];
-            const isChildMainLine = isMainLine && i === 0;
-            const childNode = buildNode(childId, isChildMainLine, depth + 1, toSquare);
-            if (childNode) {
-                children.push(childNode);
-            }
-        }
-
-        return {
-            nodeId,
-            ply: node.ply,
-            displayText,
-            usiMove: node.usiMove,
-            evalCp: node.eval?.scoreCp,
-            evalMate: node.eval?.scoreMate,
-            hasBranches: node.children.length > 1,
-            branchCount: node.children.length,
-            isMainLine,
-            isCurrentPath: currentPath.has(nodeId),
-            isCurrent: nodeId === tree.currentNodeId,
-            children,
-        };
-    }
-
-    const rootNode = buildNode(tree.rootId, true, 0, undefined);
-    if (!rootNode) {
-        throw new Error("Failed to build tree data: root node not found");
-    }
-
-    return rootNode;
-}
-
-/**
  * 指定ノードの分岐オプションを取得
  *
  * @param tree 棋譜ツリー
  * @param nodeId 分岐があるノードのID
  * @returns 分岐オプションの配列
  */
-export function getBranchOptions(tree: KifuTree, nodeId: string): BranchOption[] {
+function getBranchOptions(tree: KifuTree, nodeId: string): BranchOption[] {
     const node = tree.nodes.get(nodeId);
     if (!node || node.children.length <= 1) {
         return [];
@@ -273,7 +275,7 @@ export interface FlatTreeNode {
  * @param tree 棋譜ツリー
  * @returns フラット化されたノードリスト
  */
-export function flattenTreeAlongCurrentPath(tree: KifuTree): FlatTreeNode[] {
+function flattenTreeAlongCurrentPath(tree: KifuTree): FlatTreeNode[] {
     const result: FlatTreeNode[] = [];
     const currentPath = getPathToRoot(tree);
 
@@ -327,26 +329,6 @@ export function flattenTreeAlongCurrentPath(tree: KifuTree): FlatTreeNode[] {
     }
 
     return result;
-}
-
-/**
- * ツリー内の全分岐点を取得
- *
- * @param tree 棋譜ツリー
- * @returns 分岐点のノードIDと手数のマップ
- */
-export function getAllBranchPoints(tree: KifuTree): Map<number, string[]> {
-    const branchPoints = new Map<number, string[]>();
-
-    for (const [nodeId, node] of tree.nodes) {
-        if (node.children.length > 1) {
-            const existing = branchPoints.get(node.ply) ?? [];
-            existing.push(nodeId);
-            branchPoints.set(node.ply, existing);
-        }
-    }
-
-    return branchPoints;
 }
 
 /** 分岐情報（一覧表示用） */

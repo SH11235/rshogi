@@ -5,11 +5,12 @@
  * PVがない場合は解析ボタンを表示する
  */
 
-import type { PositionState } from "@shogi/app-core";
+import type { KifuTree, PositionState } from "@shogi/app-core";
 import type { ReactElement } from "react";
 import { useMemo, useState } from "react";
 import { Popover, PopoverContent, PopoverTrigger } from "../../popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../tooltip";
+import { comparePvWithMainLine, type PvMainLineComparison } from "../utils/branchTreeUtils";
 import type { KifMove } from "../utils/kifFormat";
 import { convertPvToDisplay, getEvalTooltipInfo } from "../utils/kifFormat";
 
@@ -20,7 +21,7 @@ interface EvalPopoverProps {
     position: PositionState;
     /** 評価値表示要素（トリガー） */
     children: ReactElement;
-    /** 分岐として追加するコールバック */
+    /** 分岐として追加するコールバック（ply: 分岐を追加する手数, pv: 追加するPV部分） */
     onAddBranch?: (ply: number, pv: string[]) => void;
     /** 盤面で確認するコールバック */
     onPreview?: (ply: number, pv: string[], evalCp?: number, evalMate?: number) => void;
@@ -30,6 +31,8 @@ interface EvalPopoverProps {
     isAnalyzing?: boolean;
     /** 現在解析中の手数 */
     analyzingPly?: number;
+    /** 棋譜ツリー（PVと本譜の比較用） */
+    kifuTree?: KifuTree;
 }
 
 export function EvalPopover({
@@ -41,6 +44,7 @@ export function EvalPopover({
     onAnalyze,
     isAnalyzing,
     analyzingPly,
+    kifuTree,
 }: EvalPopoverProps): ReactElement {
     const [open, setOpen] = useState(false);
 
@@ -56,6 +60,14 @@ export function EvalPopover({
     const evalInfo = useMemo(() => {
         return getEvalTooltipInfo(move.evalCp, move.evalMate, move.ply, move.depth);
     }, [move.evalCp, move.evalMate, move.ply, move.depth]);
+
+    // PVと本譜の比較結果
+    const pvComparison = useMemo((): PvMainLineComparison | null => {
+        if (!kifuTree || !move.pv || move.pv.length === 0) {
+            return null;
+        }
+        return comparePvWithMainLine(kifuTree, move.ply, move.pv);
+    }, [kifuTree, move.ply, move.pv]);
 
     // この手数が解析中かどうか
     const isThisPlyAnalyzing = isAnalyzing && analyzingPly === move.ply;
@@ -214,22 +226,71 @@ export function EvalPopover({
                             </button>
                         )}
                         {onAddBranch && move.pv && (
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    onAddBranch(move.ply, move.pv ?? []);
-                                    setOpen(false);
-                                }}
-                                className="
-                                    flex-1 px-3 py-1.5 text-[11px]
-                                    bg-muted hover:bg-muted/80
-                                    rounded border border-border
-                                    transition-colors cursor-pointer
-                                "
-                            >
-                                <span className="mr-1">&#128194;</span>
-                                分岐として保存
-                            </button>
+                            <>
+                                {/* 本譜と完全一致の場合 */}
+                                {pvComparison?.type === "identical" && (
+                                    <div
+                                        className="
+                                            flex-1 px-3 py-1.5 text-[11px] text-center
+                                            bg-muted/50 text-muted-foreground
+                                            rounded border border-border
+                                        "
+                                    >
+                                        <span className="mr-1">✓</span>
+                                        本譜通り
+                                    </div>
+                                )}
+                                {/* 途中から分岐する場合 */}
+                                {pvComparison?.type === "diverges_later" &&
+                                    pvComparison.divergePly !== undefined &&
+                                    pvComparison.divergeIndex !== undefined && (
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                // 分岐点から先のPVのみを追加
+                                                const pvFromDiverge = move.pv?.slice(
+                                                    pvComparison.divergeIndex,
+                                                );
+                                                if (pvFromDiverge && pvFromDiverge.length > 0) {
+                                                    onAddBranch(
+                                                        pvComparison.divergePly!,
+                                                        pvFromDiverge,
+                                                    );
+                                                }
+                                                setOpen(false);
+                                            }}
+                                            className="
+                                                flex-1 px-3 py-1.5 text-[11px]
+                                                bg-[hsl(var(--wafuu-kin)/0.1)] hover:bg-[hsl(var(--wafuu-kin)/0.2)]
+                                                text-[hsl(var(--wafuu-sumi))]
+                                                rounded border border-[hsl(var(--wafuu-kin)/0.3)]
+                                                transition-colors cursor-pointer
+                                            "
+                                        >
+                                            <span className="mr-1">&#128194;</span>
+                                            {pvComparison.divergePly + 1}手目から分岐を追加
+                                        </button>
+                                    )}
+                                {/* 最初から異なる場合（従来通り） */}
+                                {(pvComparison?.type === "diverges_first" || !pvComparison) && (
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            onAddBranch(move.ply, move.pv ?? []);
+                                            setOpen(false);
+                                        }}
+                                        className="
+                                            flex-1 px-3 py-1.5 text-[11px]
+                                            bg-muted hover:bg-muted/80
+                                            rounded border border-border
+                                            transition-colors cursor-pointer
+                                        "
+                                    >
+                                        <span className="mr-1">&#128194;</span>
+                                        分岐として保存
+                                    </button>
+                                )}
+                            </>
                         )}
                     </div>
                 )}

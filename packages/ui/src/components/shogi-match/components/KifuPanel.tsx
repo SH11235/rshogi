@@ -1001,6 +1001,7 @@ export function KifuPanel({
                                                     onAnalyze={onAnalyzePly}
                                                     isAnalyzing={isAnalyzing}
                                                     analyzingPly={analyzingPly}
+                                                    kifuTree={kifuTree}
                                                 >
                                                     {evalSpan}
                                                 </EvalPopover>
