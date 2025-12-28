@@ -16,6 +16,16 @@ pub const HIDDEN2_DIMENSIONS: usize = 32;
 pub const OUTPUT_DIMENSIONS: usize = 1;
 pub const FV_SCALE: f32 = 24.0;
 
+/// 量子化定数（YaneuraOu互換）
+/// WeightScaleBits: 推論時のClippedReLUで右シフトされるビット数
+pub const WEIGHT_SCALE_BITS: i32 = 6;
+/// ActivationScale: 活性化の最大値（i8の最大値 = 127）
+pub const ACTIVATION_SCALE: f32 = 127.0;
+/// WeightScale: 重みの量子化スケール（2^6 = 64）
+pub const WEIGHT_SCALE: f32 = (1 << WEIGHT_SCALE_BITS) as f32;
+/// BiasScale: バイアスの量子化スケール（64 * 127 = 8128）
+pub const BIAS_SCALE: f32 = WEIGHT_SCALE * ACTIVATION_SCALE;
+
 /// NNUEバージョン（YaneuraOu互換）
 pub const NNUE_VERSION: u32 = 0x7AF32F16;
 
@@ -284,16 +294,19 @@ impl Default for TrainableFeatureTransformer {
     }
 }
 
-/// ClippedReLU（0-127にクリップ）
+/// ClippedReLU（0.0-1.0にクリップ）
+///
+/// YaneuraOuの学習実装に従い、正規化された範囲[0, 1]で動作する。
+/// 推論時はこれが[0, 127]の整数範囲にマッピングされる。
 #[inline]
 pub fn clipped_relu(x: f32) -> f32 {
-    x.clamp(0.0, 127.0)
+    x.clamp(0.0, 1.0)
 }
 
 /// ClippedReLUの勾配
 #[inline]
 pub fn clipped_relu_grad(x: f32) -> f32 {
-    if x > 0.0 && x < 127.0 {
+    if x > 0.0 && x < 1.0 {
         1.0
     } else {
         0.0
@@ -466,6 +479,11 @@ impl TrainableNetwork {
     }
 
     /// YaneuraOu形式でモデルを保存
+    ///
+    /// 量子化スケーリング（YaneuraOu互換）:
+    /// - FeatureTransformer: 正規化された値（0.0-1.0）をACTIVATION_SCALE (127)倍してi16に変換
+    /// - Hidden層: 重みをWEIGHT_SCALE (64)倍してi8に、バイアスをBIAS_SCALE (8128)倍してi32に
+    /// - Output層: 重みをWEIGHT_SCALE (64)倍、バイアスをFV_SCALE * ACTIVATION_SCALE倍
     pub fn save<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         // ヘッダ
         writer.write_u32::<LittleEndian>(NNUE_VERSION)?;
@@ -480,43 +498,58 @@ impl TrainableNetwork {
         writer.write_all(arch_str)?;
 
         // FeatureTransformer
-        // バイアス [256] as i16
+        // バイアスと重みは正規化された値（0.0-1.0の活性化に対応）をACTIVATION_SCALE倍
         for &b in &self.ft_black.biases {
-            writer.write_i16::<LittleEndian>(b.round() as i16)?;
+            let quantized = (b * ACTIVATION_SCALE).round() as i16;
+            writer.write_i16::<LittleEndian>(quantized)?;
         }
-        // 重み [HALFKP][256] as i16
         for &w in &self.ft_black.weights {
-            writer.write_i16::<LittleEndian>(w.round() as i16)?;
+            let quantized = (w * ACTIVATION_SCALE).round() as i16;
+            writer.write_i16::<LittleEndian>(quantized)?;
         }
 
-        // Hidden1
+        // Hidden1: バイアスはBIAS_SCALE倍、重みはWEIGHT_SCALE倍
         for &b in &self.hidden1.biases {
-            writer.write_i32::<LittleEndian>(b.round() as i32)?;
+            let quantized = (b * BIAS_SCALE).round() as i32;
+            writer.write_i32::<LittleEndian>(quantized)?;
         }
         for &w in &self.hidden1.weights {
-            writer.write_i8(w.round().clamp(-128.0, 127.0) as i8)?;
+            let quantized = (w * WEIGHT_SCALE).round().clamp(-128.0, 127.0) as i8;
+            writer.write_i8(quantized)?;
         }
 
-        // Hidden2
+        // Hidden2: 同様にスケーリング
         for &b in &self.hidden2.biases {
-            writer.write_i32::<LittleEndian>(b.round() as i32)?;
+            let quantized = (b * BIAS_SCALE).round() as i32;
+            writer.write_i32::<LittleEndian>(quantized)?;
         }
         for &w in &self.hidden2.weights {
-            writer.write_i8(w.round().clamp(-128.0, 127.0) as i8)?;
+            let quantized = (w * WEIGHT_SCALE).round().clamp(-128.0, 127.0) as i8;
+            writer.write_i8(quantized)?;
         }
 
-        // Output
+        // Output層: 入力が0-127なのでバイアスはFV_SCALE * ACTIVATION_SCALEでスケール
+        // 重みは入力がスケール済みなのでそのまま（ただしi8に収まるようにWEIGHT_SCALEで調整）
+        let output_bias_scale = FV_SCALE * ACTIVATION_SCALE;
         for &b in &self.output.biases {
-            writer.write_i32::<LittleEndian>(b.round() as i32)?;
+            let quantized = (b * output_bias_scale).round() as i32;
+            writer.write_i32::<LittleEndian>(quantized)?;
         }
         for &w in &self.output.weights {
-            writer.write_i8(w.round().clamp(-128.0, 127.0) as i8)?;
+            // 出力層の重みは入力(0-127)に対して動作し、FV_SCALEを考慮
+            let quantized = (w * WEIGHT_SCALE).round().clamp(-128.0, 127.0) as i8;
+            writer.write_i8(quantized)?;
         }
 
         Ok(())
     }
 
     /// YaneuraOu形式からモデルを読み込み
+    ///
+    /// 逆量子化スケーリング（YaneuraOu互換）:
+    /// - FeatureTransformer: i16値をACTIVATION_SCALE (127)で割って正規化
+    /// - Hidden層: バイアスをBIAS_SCALE (8128)で、重みをWEIGHT_SCALE (64)で割る
+    /// - Output層: バイアスをFV_SCALE * ACTIVATION_SCALEで、重みをWEIGHT_SCALEで割る
     pub fn load<R: Read>(reader: &mut R) -> io::Result<Self> {
         let mut network = Self::new();
 
@@ -544,17 +577,38 @@ impl TrainableNetwork {
         let mut arch_buf = vec![0u8; arch_len];
         reader.read_exact(&mut arch_buf)?;
 
-        // FeatureTransformer
-        network.ft_black.load_i16(reader)?;
+        // FeatureTransformer: 逆量子化（ACTIVATION_SCALEで割る）
+        for b in &mut network.ft_black.biases {
+            *b = reader.read_i16::<LittleEndian>()? as f32 / ACTIVATION_SCALE;
+        }
+        for w in &mut network.ft_black.weights {
+            *w = reader.read_i16::<LittleEndian>()? as f32 / ACTIVATION_SCALE;
+        }
 
-        // Hidden1
-        network.hidden1.load_i32_i8(reader)?;
+        // Hidden1: バイアスはBIAS_SCALE、重みはWEIGHT_SCALEで割る
+        for b in &mut network.hidden1.biases {
+            *b = reader.read_i32::<LittleEndian>()? as f32 / BIAS_SCALE;
+        }
+        for w in &mut network.hidden1.weights {
+            *w = reader.read_i8()? as f32 / WEIGHT_SCALE;
+        }
 
-        // Hidden2
-        network.hidden2.load_i32_i8(reader)?;
+        // Hidden2: 同様に逆量子化
+        for b in &mut network.hidden2.biases {
+            *b = reader.read_i32::<LittleEndian>()? as f32 / BIAS_SCALE;
+        }
+        for w in &mut network.hidden2.weights {
+            *w = reader.read_i8()? as f32 / WEIGHT_SCALE;
+        }
 
-        // Output
-        network.output.load_i32_i8(reader)?;
+        // Output層: 逆量子化
+        let output_bias_scale = FV_SCALE * ACTIVATION_SCALE;
+        for b in &mut network.output.biases {
+            *b = reader.read_i32::<LittleEndian>()? as f32 / output_bias_scale;
+        }
+        for w in &mut network.output.weights {
+            *w = reader.read_i8()? as f32 / WEIGHT_SCALE;
+        }
 
         Ok(network)
     }
@@ -623,11 +677,14 @@ mod tests {
 
     #[test]
     fn test_clipped_relu() {
+        // ClippedReLUは0.0-1.0の範囲にクリップ（YaneuraOu互換）
         assert_eq!(clipped_relu(-10.0), 0.0);
+        assert_eq!(clipped_relu(-0.5), 0.0);
         assert_eq!(clipped_relu(0.0), 0.0);
-        assert_eq!(clipped_relu(50.0), 50.0);
-        assert_eq!(clipped_relu(127.0), 127.0);
-        assert_eq!(clipped_relu(200.0), 127.0);
+        assert_eq!(clipped_relu(0.5), 0.5);
+        assert_eq!(clipped_relu(1.0), 1.0);
+        assert_eq!(clipped_relu(1.5), 1.0);
+        assert_eq!(clipped_relu(100.0), 1.0);
     }
 
     #[test]
@@ -659,24 +716,34 @@ mod tests {
         let loaded = TrainableNetwork::load(&mut cursor).unwrap();
 
         // 重みが同じか確認（量子化の誤差があるので許容範囲を設定）
-        // FT層は i16 に量子化されるので誤差は最大 0.5
+        // FT層は ACTIVATION_SCALE (127) でスケールされるので誤差は 1/127 程度
         for (orig, load) in original.ft_black.biases.iter().zip(loaded.ft_black.biases.iter()) {
-            assert!((orig.round() - *load).abs() < 1.0, "FT bias mismatch: {orig} vs {load}");
+            let expected = (orig * ACTIVATION_SCALE).round() / ACTIVATION_SCALE;
+            assert!(
+                (expected - *load).abs() < 0.01,
+                "FT bias mismatch: orig={orig}, expected={expected}, load={load}"
+            );
         }
 
-        // Hidden層は i8 に量子化されるので誤差は最大 0.5
+        // Hidden層は WEIGHT_SCALE (64) / BIAS_SCALE (8128) でスケールされる
         for (orig, load) in original.hidden1.biases.iter().zip(loaded.hidden1.biases.iter()) {
-            assert!((orig.round() - *load).abs() < 1.0, "H1 bias mismatch: {orig} vs {load}");
+            let expected = (orig * BIAS_SCALE).round() / BIAS_SCALE;
+            assert!(
+                (expected - *load).abs() < 0.001,
+                "H1 bias mismatch: orig={orig}, expected={expected}, load={load}"
+            );
         }
 
         // 順伝播の結果も同じか確認
         let features = vec![0, 100, 1000];
         let (out_orig, _) = original.forward(&features, &features, 0);
         let (out_load, _) = loaded.forward(&features, &features, 0);
-        // 量子化誤差が累積するのである程度の誤差は許容
+        // 量子化誤差が累積するので相対誤差で比較
+        let diff = (out_orig - out_load).abs();
+        let max_val = out_orig.abs().max(out_load.abs()).max(0.01);
         assert!(
-            (out_orig.round() - out_load).abs() < 10.0,
-            "Forward output mismatch: {out_orig} vs {out_load}"
+            diff / max_val < 0.1,
+            "Forward output mismatch: orig={out_orig}, load={out_load}, diff={diff}"
         );
     }
 
