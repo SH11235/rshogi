@@ -3,7 +3,8 @@
 //! USIプロトコルから呼び出すためのハイレベルインターフェース。
 
 use crate::time::Instant;
-// AtomicU64 is only needed for multi-threaded builds (native only).
+// AtomicU64 is only needed for native multi-threaded builds.
+// Wasm Rayon model doesn't use SearchProgress.
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -243,7 +244,8 @@ fn aggregate_best_move_changes(changes: &[f64]) -> (f64, usize) {
     (sum, changes.len())
 }
 
-// SearchProgress is only used in multi-threaded builds (native only).
+// SearchProgress is only used in native multi-threaded builds.
+// Wasm Rayon model doesn't use SearchProgress (passes None to search_helper).
 #[cfg(not(target_arch = "wasm32"))]
 /// SearchProgress はヘルパースレッドの進捗を追跡する。
 /// False Sharing を防ぐため、各フィールドを別々のキャッシュラインに配置する。
@@ -308,6 +310,8 @@ fn get_best_thread_id(main_worker: &SearchWorker, thread_pool: &ThreadPool) -> u
         summaries.push(summary);
     }
 
+    // Native: Use helper_threads() to access Thread objects directly
+    #[cfg(not(target_arch = "wasm32"))]
     for thread in thread_pool.helper_threads() {
         if let Some(summary) = thread.with_worker(|worker: &mut SearchWorker| {
             ThreadSummary::from_worker(thread.id(), worker)
@@ -315,6 +319,20 @@ fn get_best_thread_id(main_worker: &SearchWorker, thread_pool: &ThreadPool) -> u
             summaries.push(summary);
         }
     }
+
+    // Wasm with wasm-threads: Use helper_results() to get collected results
+    #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+    for result in thread_pool.helper_results() {
+        summaries.push(ThreadSummary {
+            id: result.thread_id,
+            score: result.best_score,
+            completed_depth: result.completed_depth,
+        });
+    }
+
+    // Wasm without wasm-threads: No helper threads, suppress unused warning
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+    let _ = thread_pool;
 
     if summaries.is_empty() {
         return 0;
@@ -623,10 +641,14 @@ impl Search {
 
     /// 探索スレッド数を設定
     pub fn set_num_threads(&mut self, num: usize) {
+        // WASM builds without wasm-threads feature use single-threaded search only.
+        // With wasm-threads feature, multi-threading via wasm-bindgen-rayon is supported.
+        #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+        let _ = num; // シングルスレッドモードでは引数を無視
+        #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+        let num = 1;
+        #[cfg(not(all(target_arch = "wasm32", not(feature = "wasm-threads"))))]
         let num = num.clamp(1, 512);
-        // WASM builds currently use single-threaded search only.
-        // See docs/wasm-multithreading-investigation.md for details.
-        let num = if cfg!(target_arch = "wasm32") { 1 } else { num };
         self.num_threads = num;
         self.thread_pool
             .set_num_threads(num, Arc::clone(&self.tt), self.max_moves_to_draw);
@@ -664,6 +686,9 @@ impl Search {
         self.start_time = Some(Instant::now());
         // 置換表の世代を進める（YaneuraOu準拠）
         self.tt.new_search();
+        // ヘルパースレッドの結果をクリア
+        // スレッド数が1の場合でも呼び出し、前回のマルチスレッド探索の結果が残らないようにする
+        self.thread_pool.clear_helper_results();
 
         // 時間管理
         let mut time_manager =
@@ -749,15 +774,63 @@ impl Search {
                 .expect("worker should be initialized by search_with_callback");
             collect_best_thread_result(worker, &limits, skill_enabled, &mut skill)
         } else {
-            let mut result = None;
-            for thread in self.thread_pool.helper_threads() {
-                if thread.id() == best_thread_id {
-                    result = Some(thread.with_worker(|worker: &mut SearchWorker| {
-                        collect_best_thread_result(worker, &limits, skill_enabled, &mut skill)
-                    }));
-                    break;
+            // Native: Use helper_threads() to access Thread objects directly
+            #[cfg(not(target_arch = "wasm32"))]
+            let result = {
+                let mut result = None;
+                for thread in self.thread_pool.helper_threads() {
+                    if thread.id() == best_thread_id {
+                        result = Some(thread.with_worker(|worker: &mut SearchWorker| {
+                            collect_best_thread_result(worker, &limits, skill_enabled, &mut skill)
+                        }));
+                        break;
+                    }
                 }
-            }
+                result
+            };
+
+            // Wasm with wasm-threads: Use helper_results() to get collected results
+            #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+            let result = {
+                let helper_results = self.thread_pool.helper_results();
+                helper_results.iter().find(|r| r.thread_id == best_thread_id).map(|r| {
+                    // Apply skill-based move weakening if enabled
+                    let (best_move, score) = if skill_enabled && !r.top_moves.is_empty() {
+                        let mut rng = rand::rng();
+                        let picked = skill.pick_best_from_pairs(&r.top_moves, &mut rng);
+                        if picked != Move::NONE {
+                            // Find the score of the picked move from top_moves
+                            let picked_score = r
+                                .top_moves
+                                .iter()
+                                .find(|(mv, _)| *mv == picked)
+                                .map(|(_, score)| *score)
+                                .unwrap_or(r.best_score);
+                            (picked, picked_score)
+                        } else {
+                            (r.best_move, r.best_score)
+                        }
+                    } else {
+                        (r.best_move, r.best_score)
+                    };
+                    BestThreadResult {
+                        best_move,
+                        ponder_move: Move::NONE, // Cannot get ponder from helper in Wasm
+                        score,
+                        completed_depth: r.completed_depth,
+                        nodes: r.nodes,
+                        // Use the actual best score (not skill-weakened) for time management
+                        // and aspiration window initialization, matching native behavior.
+                        best_previous_score: Some(r.best_score),
+                        best_previous_average_score: Some(r.best_score),
+                    }
+                })
+            };
+
+            // Wasm without wasm-threads: Always use main thread
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+            let result: Option<BestThreadResult> = None;
+
             result.unwrap_or_else(|| {
                 let worker = self
                     .worker
@@ -778,10 +851,22 @@ impl Search {
         } = best_result;
         let total_nodes = {
             let main_nodes = self.worker.as_ref().map(|w| w.nodes).unwrap_or(0);
+
+            // Native: Use helper_threads() to get node counts
+            #[cfg(not(target_arch = "wasm32"))]
             let helper_nodes =
                 self.thread_pool.helper_threads().iter().fold(0u64, |acc, thread| {
                     acc.saturating_add(thread.with_worker(|worker| worker.nodes))
                 });
+
+            // Wasm with wasm-threads: Use helper_nodes() to get node counts
+            #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+            let helper_nodes = self.thread_pool.helper_nodes();
+
+            // Wasm without wasm-threads: No helper threads
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+            let helper_nodes = 0u64;
+
             main_nodes.saturating_add(helper_nodes)
         };
 
@@ -995,11 +1080,23 @@ impl Search {
             if processed_pv > 0 {
                 let elapsed = start.elapsed();
                 let time_ms = elapsed.as_millis() as u64;
+
+                // Native: Use helper_threads() to get node counts
+                #[cfg(not(target_arch = "wasm32"))]
                 let helper_nodes = self
                     .thread_pool
                     .helper_threads()
                     .iter()
                     .fold(0u64, |acc, thread| acc.saturating_add(thread.nodes()));
+
+                // Wasm with wasm-threads: Use helper_nodes() for realtime node counts
+                #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+                let helper_nodes = self.thread_pool.helper_nodes();
+
+                // Wasm without wasm-threads: No helper threads
+                #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+                let helper_nodes = 0u64;
+
                 let total_nodes = worker.nodes.saturating_add(helper_nodes);
                 let nps = if time_ms > 0 {
                     total_nodes.saturating_mul(1000) / time_ms
@@ -1058,6 +1155,8 @@ impl Search {
                 let best_move_changes = summary.best_move_changes;
                 worker.best_move_changes = 0.0; // 先にリセット
 
+                // Native: Use helper_threads() to collect best_move_changes
+                #[cfg(not(target_arch = "wasm32"))]
                 let (changes_sum, thread_count) = {
                     let helper_threads = self.thread_pool.helper_threads();
                     let mut changes = Vec::with_capacity(helper_threads.len() + 1);
@@ -1067,6 +1166,20 @@ impl Search {
                     }
                     aggregate_best_move_changes(&changes)
                 };
+
+                // Wasm with wasm-threads: Use helper_best_move_changes() for realtime values
+                #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+                let (changes_sum, thread_count) = {
+                    let helper_changes = self.thread_pool.helper_best_move_changes();
+                    let mut changes = Vec::with_capacity(helper_changes.len() + 1);
+                    changes.push(best_move_changes);
+                    changes.extend(helper_changes);
+                    aggregate_best_move_changes(&changes)
+                };
+
+                // Wasm without wasm-threads: Only main thread
+                #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+                let (changes_sum, thread_count) = (best_move_changes, 1);
                 let tot_best_move_changes = self.tot_best_move_changes / 2.0 + changes_sum;
                 if limits.use_time_management()
                     && !time_manager.stop_on_ponderhit()
@@ -1164,20 +1277,26 @@ impl Search {
     }
 }
 
-// search_helper is only used by helper threads in multi-threaded builds (native only).
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn search_helper(
+// search_helper_impl is the core search logic used by helper threads.
+// Progress callbacks are passed as closures to allow platform-specific progress tracking.
+// Only compiled for Native and Wasm with wasm-threads (single-threaded Wasm doesn't use helper threads).
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+#[inline(always)]
+fn search_helper_impl<F1, F2>(
     worker: &mut SearchWorker,
     pos: &mut Position,
     limits: &LimitsType,
     time_manager: &mut TimeManagement,
     max_depth: Depth,
     skill_enabled: bool,
-    progress: Option<&SearchProgress>,
-) -> usize {
-    if let Some(progress) = progress {
-        progress.reset();
-    }
+    on_start: F1,
+    mut on_depth_complete: F2,
+) -> usize
+where
+    F1: FnOnce(),
+    F2: FnMut(u64, f64),
+{
+    on_start();
 
     worker.root_moves = super::RootMoves::from_legal_moves(pos, &limits.search_moves);
 
@@ -1296,9 +1415,7 @@ pub(crate) fn search_helper(
 
             let best_move_changes = worker.best_move_changes;
             worker.best_move_changes = 0.0;
-            if let Some(progress) = progress {
-                progress.update(worker.nodes, best_move_changes);
-            }
+            on_depth_complete(worker.nodes, best_move_changes);
 
             if !worker.root_moves[0].pv.is_empty() && worker.root_moves[0].pv[0] != last_best_pv[0]
             {
@@ -1340,6 +1457,71 @@ pub(crate) fn search_helper(
 
     effective_multi_pv
 }
+
+// Native version: takes progress parameter for tracking helper thread statistics.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn search_helper(
+    worker: &mut SearchWorker,
+    pos: &mut Position,
+    limits: &LimitsType,
+    time_manager: &mut TimeManagement,
+    max_depth: Depth,
+    skill_enabled: bool,
+    progress: Option<&SearchProgress>,
+) -> usize {
+    search_helper_impl(
+        worker,
+        pos,
+        limits,
+        time_manager,
+        max_depth,
+        skill_enabled,
+        || {
+            if let Some(p) = progress {
+                p.reset();
+            }
+        },
+        |nodes, bmc| {
+            if let Some(p) = progress {
+                p.update(nodes, bmc);
+            }
+        },
+    )
+}
+
+// Wasm with wasm-threads: takes progress parameter for tracking helper thread statistics.
+#[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+pub(crate) fn search_helper(
+    worker: &mut SearchWorker,
+    pos: &mut Position,
+    limits: &LimitsType,
+    time_manager: &mut TimeManagement,
+    max_depth: Depth,
+    skill_enabled: bool,
+    progress: Option<&super::thread::HelperProgress>,
+) -> usize {
+    search_helper_impl(
+        worker,
+        pos,
+        limits,
+        time_manager,
+        max_depth,
+        skill_enabled,
+        || {
+            if let Some(p) = progress {
+                p.reset();
+            }
+        },
+        |nodes, bmc| {
+            if let Some(p) = progress {
+                p.update(nodes, bmc);
+            }
+        },
+    )
+}
+
+// Wasm without wasm-threads: search_helper is not needed because there are no helper threads.
+// Single-threaded Wasm only uses the main thread search in search_with_callback().
 
 // =============================================================================
 // テスト
