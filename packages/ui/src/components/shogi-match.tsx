@@ -262,6 +262,7 @@ export function ShogiMatch({
     const [editFromSquare, setEditFromSquare] = useState<Square | null>(null);
     const [editTool, setEditTool] = useState<"place" | "erase">("place");
     const [startSfen, setStartSfen] = useState<string>("startpos");
+    // TODO: 将来的に局面編集機能の強化で使用予定
     const [_basePosition, setBasePosition] = useState<PositionState | null>(null);
     const [isEditPanelOpen, setIsEditPanelOpen] = useState(false);
     const [isSettingsPanelOpen, setIsSettingsPanelOpen] = useState(false);

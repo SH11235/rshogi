@@ -413,8 +413,7 @@ export function KifuPanel({
     onBranchSwitch: _onBranchSwitch,
     branchAddedSignal,
 }: KifuPanelProps): ReactElement {
-    // 現在はonBranchSwitchは使用していないが、将来的に分岐切り替え機能で使用予定
-    void _onBranchSwitch;
+    // _onBranchSwitch: 将来的に分岐切り替え機能で使用予定
     const listRef = useRef<HTMLDivElement>(null);
     const currentRowRef = useRef<HTMLElement>(null);
     const [copySuccess, setCopySuccess] = useState(false);
@@ -443,12 +442,12 @@ export function KifuPanel({
     }, [kifuTree, selectedBranch]);
 
     // 分岐が追加されたら自動的に分岐一覧に切り替え
+    // branchAddedSignalの変化のみを監視（kifuTreeは依存配列から除外し、条件内でチェック）
     useEffect(() => {
         if (
             branchAddedSignal !== undefined &&
             prevBranchSignalRef.current !== undefined &&
-            branchAddedSignal !== prevBranchSignalRef.current &&
-            kifuTree
+            branchAddedSignal !== prevBranchSignalRef.current
         ) {
             // スクロール位置を保存してから分岐一覧に切り替え
             if (listRef.current) {
@@ -457,7 +456,7 @@ export function KifuPanel({
             setViewMode("branches");
         }
         prevBranchSignalRef.current = branchAddedSignal;
-    }, [branchAddedSignal, kifuTree]);
+    }, [branchAddedSignal]);
 
     // ビューモード切り替えハンドラ（スクロール位置を保存/復元）
     const handleViewModeChange = useCallback(

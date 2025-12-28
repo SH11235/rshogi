@@ -416,6 +416,8 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
             // 分岐が追加されたらコールバックを呼ぶ
             if (addedMoves > 0 && onAdded) {
                 // 次のイベントループで呼び出す（state更新後に実行されるように）
+                // 注意: コンポーネントがアンマウントされた後に実行される可能性があるが、
+                // 現状では問題ないため、シンプルな実装を維持
                 setTimeout(onAdded, 0);
             }
 

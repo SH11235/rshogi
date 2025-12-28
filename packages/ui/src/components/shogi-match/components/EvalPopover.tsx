@@ -83,6 +83,9 @@ export function EvalPopover({
             <Tooltip>
                 <TooltipTrigger asChild>
                     <PopoverTrigger asChild>
+                        {/* 親要素（行クリック）へのイベント伝播を防ぐ
+                            - onClick/onKeyDown: 通常のクリック・キー操作
+                            - onPointerDown: Radix UIのPopover/Tooltipとの互換性のため必要 */}
                         <button
                             type="button"
                             className="inline bg-transparent border-none p-0 m-0 font-inherit text-inherit cursor-pointer"
