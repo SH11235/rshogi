@@ -406,9 +406,37 @@ export function KifuPanel({
     const [copySuccess, setCopySuccess] = useState(false);
     const [hintDismissed, setHintDismissed] = useState(false);
     const [viewMode, setViewMode] = useState<ViewMode>("list");
+    // リストビューのスクロール位置を保存
+    const listScrollPositionRef = useRef<number>(0);
 
     // ツリービューが利用可能か（kifuTreeが渡されている場合のみ）
     const treeViewAvailable = kifuTree !== undefined;
+
+    // ビューモード切り替えハンドラ（スクロール位置を保存/復元）
+    const handleViewModeChange = useCallback(
+        (newMode: ViewMode) => {
+            if (newMode === "tree" && viewMode === "list") {
+                // リスト→ツリー: スクロール位置を保存
+                if (listRef.current) {
+                    listScrollPositionRef.current = listRef.current.scrollTop;
+                }
+            }
+            setViewMode(newMode);
+        },
+        [viewMode],
+    );
+
+    // リストビューに戻ったときにスクロール位置を復元
+    useEffect(() => {
+        if (viewMode === "list" && listRef.current && listScrollPositionRef.current > 0) {
+            // 少し遅延させてDOMが更新された後に復元
+            requestAnimationFrame(() => {
+                if (listRef.current) {
+                    listRef.current.scrollTop = listScrollPositionRef.current;
+                }
+            });
+        }
+    }, [viewMode]);
 
     // 評価値データの存在チェック
     const evalDataExists = useMemo(() => hasEvalData(kifMoves), [kifMoves]);
@@ -623,7 +651,7 @@ export function KifuPanel({
                     <div className="flex border-b border-border mb-1">
                         <button
                             type="button"
-                            onClick={() => setViewMode("list")}
+                            onClick={() => handleViewModeChange("list")}
                             className={`
                                 flex-1 py-1.5 text-[12px] transition-all duration-150
                                 relative
@@ -641,7 +669,7 @@ export function KifuPanel({
                         </button>
                         <button
                             type="button"
-                            onClick={() => setViewMode("tree")}
+                            onClick={() => handleViewModeChange("tree")}
                             className={`
                                 flex-1 py-1.5 text-[12px] transition-all duration-150
                                 relative

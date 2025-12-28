@@ -47,8 +47,7 @@ import {
 // EngineOption 型を外部に再エクスポート
 export type { EngineOption };
 
-import { BoardToolbar } from "./shogi-match/components/BoardToolbar";
-import { DisplaySettingsPanel } from "./shogi-match/components/DisplaySettingsPanel";
+import { AppMenu } from "./shogi-match/components/AppMenu";
 import { type ClockSettings, useClockManager } from "./shogi-match/hooks/useClockManager";
 import { useEngineManager } from "./shogi-match/hooks/useEngineManager";
 import { type AnalysisJob, useEnginePool } from "./shogi-match/hooks/useEnginePool";
@@ -266,7 +265,6 @@ export function ShogiMatch({
     const [basePosition, setBasePosition] = useState<PositionState | null>(null);
     const [isEditPanelOpen, setIsEditPanelOpen] = useState(false);
     const [isSettingsPanelOpen, setIsSettingsPanelOpen] = useState(false);
-    const [isDisplaySettingsPanelOpen, setIsDisplaySettingsPanelOpen] = useState(false);
     const [displaySettings, setDisplaySettings] = useLocalStorage<DisplaySettings>(
         "shogi-display-settings",
         DEFAULT_DISPLAY_SETTINGS,
@@ -1467,6 +1465,23 @@ export function ShogiMatch({
                 />
             )}
 
+            {/* 左上メニュー（画面固定） */}
+            <div
+                style={{
+                    position: "fixed",
+                    top: "16px",
+                    left: "16px",
+                    zIndex: 100,
+                }}
+            >
+                <AppMenu
+                    settings={displaySettings}
+                    onSettingsChange={setDisplaySettings}
+                    analysisSettings={analysisSettings}
+                    onAnalysisSettingsChange={setAnalysisSettings}
+                />
+            </div>
+
             <section
                 style={{
                     display: "flex",
@@ -1494,33 +1509,20 @@ export function ShogiMatch({
                         alignItems: "flex-start",
                     }}
                 >
+                    {/* 左列: 将棋盤（サイズ固定） */}
                     <div
                         style={{
                             display: "flex",
                             flexDirection: "column",
                             gap: "12px",
                             alignItems: "center",
+                            flexShrink: 0,
                         }}
                     >
                         <div
                             ref={boardSectionRef}
                             style={{ ...baseCard, padding: "12px", width: "fit-content" }}
                         >
-                            <div
-                                style={{
-                                    display: "flex",
-                                    justifyContent: "flex-start",
-                                    alignItems: "center",
-                                    marginBottom: "8px",
-                                }}
-                            >
-                                <BoardToolbar
-                                    flipBoard={flipBoard}
-                                    onFlipBoardChange={setFlipBoard}
-                                    displaySettings={displaySettings}
-                                    onDisplaySettingsChange={setDisplaySettings}
-                                />
-                            </div>
                             <div
                                 style={{
                                     marginTop: "8px",
@@ -1586,7 +1588,7 @@ export function ShogiMatch({
                                                         : `${moves.length}手目`}
                                                 </output>
 
-                                                {/* 手番表示（右） */}
+                                                {/* 手番表示 */}
                                                 <output
                                                     style={{
                                                         ...TEXT_STYLES.mutedSecondary,
@@ -1609,6 +1611,30 @@ export function ShogiMatch({
                                                             : "後手"}
                                                     </span>
                                                 </output>
+
+                                                {/* 反転ボタン */}
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setFlipBoard(!flipBoard)}
+                                                    style={{
+                                                        display: "flex",
+                                                        alignItems: "center",
+                                                        gap: "4px",
+                                                        padding: "4px 8px",
+                                                        borderRadius: "6px",
+                                                        border: "1px solid hsl(var(--wafuu-border))",
+                                                        background: flipBoard
+                                                            ? "hsl(var(--wafuu-kin) / 0.2)"
+                                                            : "hsl(var(--card))",
+                                                        cursor: "pointer",
+                                                        fontSize: "13px",
+                                                        whiteSpace: "nowrap",
+                                                    }}
+                                                    title="盤面を反転"
+                                                >
+                                                    <span>🔄</span>
+                                                    <span>反転</span>
+                                                </button>
                                             </div>
 
                                             {/* 持ち駒表示 */}
@@ -1715,7 +1741,15 @@ export function ShogiMatch({
                         </div>
                     </div>
 
-                    <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                    {/* 中央列: 操作系パネル（サイズ固定） */}
+                    <div
+                        style={{
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "10px",
+                            flexShrink: 0,
+                        }}
+                    >
                         <EditModePanel
                             isOpen={isEditPanelOpen}
                             onOpenChange={setIsEditPanelOpen}
@@ -1747,6 +1781,41 @@ export function ShogiMatch({
                         />
 
                         <ClockDisplayPanel clocks={clocks} sides={sides} />
+
+                        {/* インポートパネル */}
+                        <KifuImportPanel
+                            onImportSfen={importSfen}
+                            onImportKif={importKif}
+                            positionReady={positionReady}
+                        />
+
+                        {isDevMode && (
+                            <EngineLogsPanel
+                                eventLogs={eventLogs}
+                                errorLogs={errorLogs}
+                                engineErrorDetails={engineErrorDetails}
+                                onRetry={retryEngine}
+                                isRetrying={isRetrying}
+                            />
+                        )}
+                    </div>
+
+                    {/* 右列: 棋譜列（EvalPanel + KifuPanel、サイズ固定） */}
+                    <div
+                        style={{
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "10px",
+                            flexShrink: 0,
+                        }}
+                    >
+                        {/* 評価値グラフパネル（折りたたみ） */}
+                        <EvalPanel
+                            evalHistory={evalHistory}
+                            currentPly={navigation.state.currentPly}
+                            onPlySelect={handlePlySelect}
+                            defaultOpen={false}
+                        />
 
                         {/* 棋譜パネル（常時表示） */}
                         <KifuPanel
@@ -1806,40 +1875,6 @@ export function ShogiMatch({
                             onNodeClick={navigation.goToNodeById}
                             onBranchSwitch={navigation.switchBranchAtNode}
                         />
-
-                        {/* 評価値グラフパネル（折りたたみ） */}
-                        <EvalPanel
-                            evalHistory={evalHistory}
-                            currentPly={navigation.state.currentPly}
-                            onPlySelect={handlePlySelect}
-                            defaultOpen={false}
-                        />
-
-                        {/* インポートパネル */}
-                        <KifuImportPanel
-                            onImportSfen={importSfen}
-                            onImportKif={importKif}
-                            positionReady={positionReady}
-                        />
-
-                        <DisplaySettingsPanel
-                            isOpen={isDisplaySettingsPanelOpen}
-                            onOpenChange={setIsDisplaySettingsPanelOpen}
-                            settings={displaySettings}
-                            onSettingsChange={setDisplaySettings}
-                            analysisSettings={analysisSettings}
-                            onAnalysisSettingsChange={setAnalysisSettings}
-                        />
-
-                        {isDevMode && (
-                            <EngineLogsPanel
-                                eventLogs={eventLogs}
-                                errorLogs={errorLogs}
-                                engineErrorDetails={engineErrorDetails}
-                                onRetry={retryEngine}
-                                isRetrying={isRetrying}
-                            />
-                        )}
                     </div>
                 </div>
             </section>
