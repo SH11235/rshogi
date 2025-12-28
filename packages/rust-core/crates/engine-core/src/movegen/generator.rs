@@ -195,8 +195,9 @@ fn generate_knight_moves(
                 let promoted_pc = moved_pc.promote().unwrap();
                 add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
 
-                // 敵陣内で不成も生成するか（行き所のない段でないとき）
-                if include_non_promotions && !rank12.contains(to) {
+                // 桂馬の3段目不成は戦術的価値があるため常に生成（YaneuraOu準拠）
+                // 1,2段目は行き場がないので不成は生成しない
+                if !rank12.contains(to) {
                     add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
                 }
             } else {
