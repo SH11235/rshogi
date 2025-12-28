@@ -128,6 +128,10 @@ interface UseKifuNavigationResult {
     branchMarkers: Map<number, number>;
     /** 棋譜ツリー（高度な操作用） */
     tree: KifuTree;
+    /** 指定ノードへジャンプ */
+    goToNodeById: (nodeId: string) => void;
+    /** 指定親ノードで分岐を切り替え */
+    switchBranchAtNode: (parentNodeId: string, branchIndex: number) => void;
 }
 
 /**
@@ -241,6 +245,48 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
     const promoteCurrentLine = useCallback(() => {
         setTree((prev) => promoteToMainLineTree(prev));
     }, []);
+
+    /**
+     * 指定ノードへ直接ジャンプ
+     */
+    const goToNodeById = useCallback(
+        (nodeId: string) => {
+            setTree((prev) => {
+                const newTree = goToNode(prev, nodeId);
+                if (newTree !== prev) {
+                    const node = getCurrentNode(newTree);
+                    const lastMove = deriveLastMoveFromUsi(node.usiMove);
+                    onPositionChange?.(node.positionAfter, lastMove);
+                }
+                return newTree;
+            });
+        },
+        [onPositionChange],
+    );
+
+    /**
+     * 指定親ノードで分岐を切り替え
+     * 親ノードへ移動してから指定インデックスの子ノードへ進む
+     */
+    const switchBranchAtNode = useCallback(
+        (parentNodeId: string, branchIndex: number) => {
+            setTree((prev) => {
+                const parentNode = prev.nodes.get(parentNodeId);
+                if (!parentNode || branchIndex < 0 || branchIndex >= parentNode.children.length) {
+                    return prev;
+                }
+                const targetChildId = parentNode.children[branchIndex];
+                const newTree = goToNode(prev, targetChildId);
+                if (newTree !== prev) {
+                    const node = getCurrentNode(newTree);
+                    const lastMove = deriveLastMoveFromUsi(node.usiMove);
+                    onPositionChange?.(node.positionAfter, lastMove);
+                }
+                return newTree;
+            });
+        },
+        [onPositionChange],
+    );
 
     /**
      * 現在位置以降の手を削除
@@ -586,5 +632,7 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
         positionHistory,
         branchMarkers,
         tree,
+        goToNodeById,
+        switchBranchAtNode,
     };
 }
