@@ -108,8 +108,8 @@ interface UseKifuNavigationResult {
     addMove: (usiMove: string, positionAfter: PositionState, options?: AddMoveOptions) => void;
     /** 評価値を記録 */
     recordEval: (ply: number, event: EngineInfoEvent) => void;
-    /** PVを分岐として追加 */
-    addPvAsBranch: (ply: number, pv: string[]) => void;
+    /** PVを分岐として追加（onAddedは分岐が追加された場合にのみ呼ばれる） */
+    addPvAsBranch: (ply: number, pv: string[], onAdded?: () => void) => void;
     /** 新規対局でリセット */
     reset: (startPosition: PositionState, startSfen: string) => void;
     /** 現在のラインの指し手配列を取得（互換性用） */
@@ -359,8 +359,11 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
     /**
      * PVを分岐として追加
      * 指定された手数のノードにPVを分岐として追加する
+     * @param ply 分岐を追加する手数
+     * @param pv PV（読み筋）の手順
+     * @param onAdded 分岐が追加された場合に呼ばれるコールバック
      */
-    const addPvAsBranch = useCallback((ply: number, pv: string[]) => {
+    const addPvAsBranch = useCallback((ply: number, pv: string[], onAdded?: () => void) => {
         if (pv.length === 0) return;
 
         setTree((prev) => {
@@ -369,10 +372,14 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
             if (!nodeId) {
                 nodeId = findNodeByPlyInMainLine(prev, ply);
             }
-            if (!nodeId) return prev;
+            if (!nodeId) {
+                return prev;
+            }
 
             const node = prev.nodes.get(nodeId);
-            if (!node) return prev;
+            if (!node) {
+                return prev;
+            }
 
             // PVの最初の手が既存の子にあるか確認
             const firstMove = pv[0];
@@ -388,6 +395,7 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
             // 新しい分岐を追加
             let currentTree = goToNode(prev, nodeId);
             let currentPosition = node.positionAfter;
+            let addedMoves = 0;
 
             for (const move of pv) {
                 const moveResult = applyMoveWithState(currentPosition, move, {
@@ -399,10 +407,19 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
                 }
                 currentTree = addMoveToTree(currentTree, move, moveResult.next);
                 currentPosition = moveResult.next;
+                addedMoves++;
             }
 
             // 元の位置に戻る
-            return goToNode(currentTree, nodeId);
+            const result = goToNode(currentTree, nodeId);
+
+            // 分岐が追加されたらコールバックを呼ぶ
+            if (addedMoves > 0 && onAdded) {
+                // 次のイベントループで呼び出す（state更新後に実行されるように）
+                setTimeout(onAdded, 0);
+            }
+
+            return result;
         });
     }, []);
 

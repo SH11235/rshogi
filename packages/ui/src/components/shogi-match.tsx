@@ -293,6 +293,8 @@ export function ShogiMatch({
         targetPlies: number[];
         inProgress?: number[]; // 並列解析中の手番号
     } | null>(null);
+    // 分岐追加シグナル（カウンターが増えるとKifuPanelがツリービューに切り替わる）
+    const [branchAddedSignal, setBranchAddedSignal] = useState(0);
 
     // positionRef を先に定義（コールバックで使用するため）
     const positionRef = useRef<PositionState>(position);
@@ -1318,6 +1320,17 @@ export function ShogiMatch({
         setBatchAnalysis(null);
     }, [enginePool]);
 
+    // PVを分岐として追加するコールバック（シグナル付き）
+    const handleAddPvAsBranch = useCallback(
+        (ply: number, pv: string[]) => {
+            // 分岐が実際に追加された場合のみシグナルをインクリメント
+            addPvAsBranch(ply, pv, () => {
+                setBranchAddedSignal((prev) => prev + 1);
+            });
+        },
+        [addPvAsBranch],
+    );
+
     // PVプレビューを開くコールバック
     const handlePreviewPv = useCallback(
         (ply: number, pv: string[], evalCp?: number, evalMate?: number) => {
@@ -1852,8 +1865,9 @@ export function ShogiMatch({
                             navigationDisabled={isMatchRunning}
                             branchMarkers={branchMarkers}
                             positionHistory={positionHistory}
-                            onAddPvAsBranch={addPvAsBranch}
+                            onAddPvAsBranch={handleAddPvAsBranch}
                             onPreviewPv={handlePreviewPv}
+                            branchAddedSignal={branchAddedSignal}
                             onAnalyzePly={handleAnalyzePly}
                             isAnalyzing={isAnalyzing}
                             analyzingPly={analyzingPly ?? undefined}

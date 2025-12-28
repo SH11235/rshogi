@@ -348,3 +348,183 @@ export function getAllBranchPoints(tree: KifuTree): Map<number, string[]> {
 
     return branchPoints;
 }
+
+/** 分岐情報（一覧表示用） */
+export interface BranchSummary {
+    /** 分岐点のノードID */
+    parentNodeId: string;
+    /** 分岐点の手数 */
+    ply: number;
+    /** 分岐の子ノードID */
+    nodeId: string;
+    /** 分岐インデックス（0=メインライン） */
+    branchIndex: number;
+    /** 表示テキスト（例: "☗7六歩"） */
+    displayText: string;
+    /** 分岐後の手数 */
+    branchLength: number;
+    /** メインラインか */
+    isMainLine: boolean;
+    /** タブ表示用のラベル（例: "12手目△3四歩の変化"） */
+    tabLabel: string;
+}
+
+/**
+ * 分岐ラインの手数を取得（メインラインに沿って数える）
+ */
+function countBranchLength(tree: KifuTree, startNodeId: string): number {
+    let count = 0;
+    let nodeId: string | null = startNodeId;
+
+    while (nodeId) {
+        count++;
+        const node = tree.nodes.get(nodeId);
+        if (!node || node.children.length === 0) break;
+        nodeId = node.children[0]; // メインラインを辿る
+    }
+
+    return count;
+}
+
+/**
+ * ツリー内の全分岐を取得（一覧表示用）
+ * メインラインからの分岐のみを返す（ネストした分岐は除外）
+ *
+ * @param tree 棋譜ツリー
+ * @returns 分岐情報の配列（手数順）
+ */
+export function getAllBranches(tree: KifuTree): BranchSummary[] {
+    const branches: BranchSummary[] = [];
+
+    // メインラインを辿りながら分岐を収集
+    let nodeId: string | null = tree.rootId;
+
+    while (nodeId) {
+        const node = tree.nodes.get(nodeId);
+        if (!node) break;
+
+        // このノードに分岐がある場合
+        if (node.children.length > 1) {
+            const toSquare = getToSquare(node.usiMove);
+
+            // メインライン以外の子ノード（分岐）を追加
+            for (let i = 1; i < node.children.length; i++) {
+                const childId = node.children[i];
+                const childNode = tree.nodes.get(childId);
+                if (!childNode) continue;
+
+                const displayText = getDisplayText(childNode, toSquare);
+                const branchLength = countBranchLength(tree, childId);
+
+                branches.push({
+                    parentNodeId: nodeId,
+                    ply: node.ply,
+                    nodeId: childId,
+                    branchIndex: i,
+                    displayText,
+                    branchLength,
+                    isMainLine: false,
+                    tabLabel: `${childNode.ply}手目の変化`,
+                });
+            }
+        }
+
+        // メインライン（最初の子）を辿る
+        nodeId = node.children.length > 0 ? node.children[0] : null;
+    }
+
+    return branches;
+}
+
+/**
+ * 指定した分岐の手順をリストとして取得
+ * 分岐点以前の本譜も含めて返す
+ *
+ * @param tree 棋譜ツリー
+ * @param branchNodeId 分岐の開始ノードID
+ * @returns 分岐の手順リスト（本譜 + 分岐）
+ */
+export function getBranchMoves(tree: KifuTree, branchNodeId: string): FlatTreeNode[] {
+    const result: FlatTreeNode[] = [];
+    const currentPath = getPathToRoot(tree);
+
+    const branchNode = tree.nodes.get(branchNodeId);
+    if (!branchNode) return result;
+
+    // 1. 分岐点の親ノードまでの本譜を取得
+    const mainLinePath: string[] = [];
+    let nodeId: string | null = tree.rootId;
+
+    // ルートから分岐点の親まで辿る
+    while (nodeId && nodeId !== branchNode.parentId) {
+        mainLinePath.push(nodeId);
+        const node = tree.nodes.get(nodeId);
+        if (!node || node.children.length === 0) break;
+        // メインライン（最初の子）を辿る
+        nodeId = node.children[0];
+    }
+    // 分岐点の親も追加
+    if (branchNode.parentId) {
+        mainLinePath.push(branchNode.parentId);
+    }
+
+    // 本譜部分をリストに追加（ルートノードは除く）
+    let prevToSquare: Square | undefined;
+    for (const nid of mainLinePath) {
+        const node = tree.nodes.get(nid);
+        if (!node) continue;
+
+        // ルートノード（ply 0）は開始局面なので除外
+        if (node.ply === 0) {
+            prevToSquare = getToSquare(node.usiMove);
+            continue;
+        }
+
+        const displayText = getDisplayText(node, prevToSquare);
+        const hasBranches = node.children.length > 1;
+
+        result.push({
+            nodeId: nid,
+            ply: node.ply,
+            displayText,
+            usiMove: node.usiMove,
+            evalCp: node.eval?.scoreCp,
+            evalMate: node.eval?.scoreMate,
+            hasBranches,
+            isCurrentPath: currentPath.has(nid),
+            isCurrent: nid === tree.currentNodeId,
+            nestLevel: 0,
+        });
+
+        prevToSquare = getToSquare(node.usiMove);
+    }
+
+    // 2. 分岐部分を追加
+    nodeId = branchNodeId;
+    while (nodeId) {
+        const node = tree.nodes.get(nodeId);
+        if (!node) break;
+
+        const displayText = getDisplayText(node, prevToSquare);
+        const hasBranches = node.children.length > 1;
+
+        result.push({
+            nodeId,
+            ply: node.ply,
+            displayText,
+            usiMove: node.usiMove,
+            evalCp: node.eval?.scoreCp,
+            evalMate: node.eval?.scoreMate,
+            hasBranches,
+            isCurrentPath: currentPath.has(nodeId),
+            isCurrent: nodeId === tree.currentNodeId,
+            nestLevel: 1, // 分岐部分はnestLevel=1で区別
+        });
+
+        prevToSquare = getToSquare(node.usiMove);
+        // メインライン（最初の子）を辿る
+        nodeId = node.children.length > 0 ? node.children[0] : null;
+    }
+
+    return result;
+}
