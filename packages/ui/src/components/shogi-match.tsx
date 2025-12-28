@@ -1474,9 +1474,6 @@ export function ShogiMatch({
                     gap: "12px",
                     alignItems: "center",
                     padding: "16px 0",
-                    height: "100vh",
-                    maxHeight: "100vh",
-                    overflow: "hidden",
                 }}
             >
                 {/* 勝敗表示バナー */}
@@ -1494,9 +1491,7 @@ export function ShogiMatch({
                     style={{
                         display: "flex",
                         gap: "24px",
-                        alignItems: "stretch",
-                        flex: 1,
-                        minHeight: 0,
+                        alignItems: "flex-start",
                     }}
                 >
                     <div
@@ -1720,16 +1715,7 @@ export function ShogiMatch({
                         </div>
                     </div>
 
-                    <div
-                        style={{
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: "10px",
-                            height: "100%",
-                            minHeight: 0,
-                            overflow: "hidden",
-                        }}
-                    >
+                    <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
                         <EditModePanel
                             isOpen={isEditPanelOpen}
                             onOpenChange={setIsEditPanelOpen}
@@ -1762,9 +1748,8 @@ export function ShogiMatch({
 
                         <ClockDisplayPanel clocks={clocks} sides={sides} />
 
-                        {/* 棋譜パネル（常時表示、残りの高さを使用） */}
+                        {/* 棋譜パネル（常時表示） */}
                         <KifuPanel
-                            className="flex-1 min-h-0"
                             kifMoves={kifMoves}
                             currentPly={navigation.state.currentPly}
                             showEval={displaySettings.showKifuEval}

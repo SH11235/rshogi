@@ -281,7 +281,7 @@ export function BranchTreeView({
     }
 
     return (
-        <div ref={containerRef} className="flex-1 min-h-0 overflow-auto py-2">
+        <div ref={containerRef} className="max-h-[50vh] overflow-auto py-2">
             {flatNodes.map((node, index) => (
                 <div
                     key={node.nodeId}
