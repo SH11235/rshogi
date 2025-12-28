@@ -38,6 +38,13 @@ const ANALYSIS_TIME_OPTIONS: { value: number; label: string }[] = [
 ];
 
 /**
+ * SquareNotation型ガード関数
+ */
+const isSquareNotation = (v: string): v is SquareNotation => {
+    return v === "none" || v === "sfen" || v === "japanese";
+};
+
+/**
  * アプリメニューコンポーネント（左上ハンバーガーメニュー）
  * 表示設定と解析設定を含む
  */
@@ -130,7 +137,11 @@ export function AppMenu({
                         </div>
                         <RadioGroup
                             value={settings.squareNotation}
-                            onValueChange={(v) => handleNotationChange(v as SquareNotation)}
+                            onValueChange={(v) => {
+                                if (isSquareNotation(v)) {
+                                    handleNotationChange(v);
+                                }
+                            }}
                         >
                             {NOTATION_OPTIONS.map((opt) => (
                                 <div
@@ -159,8 +170,12 @@ export function AppMenu({
                         <div className="text-[13px] font-semibold text-wafuu-sumi mb-1">
                             盤外ラベル
                         </div>
-                        <label className="flex items-center gap-2 text-[13px] cursor-pointer py-1">
+                        <label
+                            htmlFor="board-labels-toggle"
+                            className="flex items-center gap-2 text-[13px] cursor-pointer py-1"
+                        >
                             <input
+                                id="board-labels-toggle"
                                 type="checkbox"
                                 checked={settings.showBoardLabels}
                                 onChange={(e) => handleLabelsChange(e.target.checked)}
@@ -174,8 +189,12 @@ export function AppMenu({
                         <div className="text-[13px] font-semibold text-wafuu-sumi mb-1">
                             ハイライト
                         </div>
-                        <label className="flex items-center gap-2 text-[13px] cursor-pointer py-1">
+                        <label
+                            htmlFor="highlight-last-move-toggle"
+                            className="flex items-center gap-2 text-[13px] cursor-pointer py-1"
+                        >
                             <input
+                                id="highlight-last-move-toggle"
                                 type="checkbox"
                                 checked={settings.highlightLastMove}
                                 onChange={(e) => handleHighlightChange(e.target.checked)}
@@ -189,8 +208,12 @@ export function AppMenu({
                         <div className="text-[13px] font-semibold text-wafuu-sumi mb-1">
                             操作設定
                         </div>
-                        <label className="flex items-center gap-2 text-[13px] cursor-pointer py-1">
+                        <label
+                            htmlFor="wheel-navigation-toggle"
+                            className="flex items-center gap-2 text-[13px] cursor-pointer py-1"
+                        >
                             <input
+                                id="wheel-navigation-toggle"
                                 type="checkbox"
                                 checked={settings.enableWheelNavigation}
                                 onChange={(e) => handleWheelNavigationChange(e.target.checked)}

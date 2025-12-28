@@ -47,6 +47,11 @@ export function comparePvWithMainLine(
         return { type: "identical" };
     }
 
+    // basePlyが負の値の場合は無効
+    if (basePly < 0) {
+        return { type: "diverges_first" };
+    }
+
     // basePlyのノードを取得
     const baseNodeId = findNodeByPlyInMainLine(tree, basePly);
     if (!baseNodeId) {

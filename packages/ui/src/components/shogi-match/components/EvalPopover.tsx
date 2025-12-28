@@ -251,9 +251,13 @@ export function EvalPopover({
                                                 const pvFromDiverge = move.pv?.slice(
                                                     pvComparison.divergeIndex,
                                                 );
-                                                if (pvFromDiverge && pvFromDiverge.length > 0) {
+                                                if (
+                                                    pvFromDiverge &&
+                                                    pvFromDiverge.length > 0 &&
+                                                    pvComparison.divergePly !== undefined
+                                                ) {
                                                     onAddBranch(
-                                                        pvComparison.divergePly!,
+                                                        pvComparison.divergePly,
                                                         pvFromDiverge,
                                                     );
                                                 }
