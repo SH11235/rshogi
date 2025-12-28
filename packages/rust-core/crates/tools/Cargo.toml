@@ -14,13 +14,37 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
+flate2.workspace = true
+env_logger.workspace = true
+log.workspace = true
 
 # Local dependencies
 engine-core = { path = "../engine-core" }
 
 # Additional dependencies
 sysinfo = "0.37"
+reqwest = { version = "0.12", features = ["blocking"] }
+walkdir = "2.5"
+url = "2.5"
+rayon = "1.10"
+ctrlc = "3.4"
+indicatif = "0.17"
+rand = "0.9"
+rand_chacha = "0.9"
+byteorder = "1.5"
 
 [[bin]]
 name = "benchmark"
 path = "src/bin/benchmark.rs"
+
+[[bin]]
+name = "floodgate_pipeline"
+path = "src/bin/floodgate_pipeline.rs"
+
+[[bin]]
+name = "generate_training_data"
+path = "src/bin/generate_training_data.rs"
+
+[[bin]]
+name = "train_nnue"
+path = "src/bin/train_nnue.rs"
