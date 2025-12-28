@@ -109,6 +109,8 @@ interface KifuPanelProps {
     onNodeClick?: (nodeId: string) => void;
     /** 分岐切り替え時のコールバック（ツリービュー用） */
     onBranchSwitch?: (parentNodeId: string, branchIndex: number) => void;
+    /** 追加のクラス名（高さ調整用） */
+    className?: string;
 }
 
 /**
@@ -398,6 +400,7 @@ export function KifuPanel({
     kifuTree,
     onNodeClick,
     onBranchSwitch,
+    className,
 }: KifuPanelProps): ReactElement {
     const listRef = useRef<HTMLDivElement>(null);
     const currentRowRef = useRef<HTMLElement>(null);
@@ -457,7 +460,9 @@ export function KifuPanel({
 
     return (
         <TooltipProvider delayDuration={300}>
-            <div className="bg-card border border-border rounded-xl p-3 shadow-lg w-[var(--panel-width)]">
+            <div
+                className={`bg-card border border-border rounded-xl p-3 shadow-lg w-[var(--panel-width)] flex flex-col ${className ?? ""}`}
+            >
                 <div className="font-bold mb-1.5 flex justify-between items-center gap-2">
                     <div className="flex items-center gap-2">
                         <span>棋譜</span>
@@ -721,7 +726,7 @@ export function KifuPanel({
                     />
                 ) : (
                     /* リストビュー */
-                    <div ref={listRef} className="max-h-60 overflow-auto my-2">
+                    <div ref={listRef} className="flex-1 min-h-0 overflow-auto my-2">
                         {kifMoves.length === 0 ? (
                             <div className="text-[13px] text-muted-foreground text-center py-4">
                                 まだ指し手がありません
