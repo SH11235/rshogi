@@ -169,8 +169,6 @@ fn generate_lance_moves(
 }
 
 /// 桂の移動による指し手を生成
-/// 桂馬の3段目不成は戦術的価値があるため常に生成する（YaneuraOu準拠）
-/// 1,2段目は行き場がないので不成は生成しない
 fn generate_knight_moves(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuffer) {
     let us = pos.side_to_move();
     let knights = pos.pieces(us, PieceType::Knight);
@@ -1290,7 +1288,6 @@ mod tests {
     }
 
     /// 桂馬が敵陣3段目に移動する場合、成りと不成の両方が生成されることを確認
-    /// 桂馬の3段目不成は戦術的価値があるため常に生成される
     #[test]
     fn test_knight_to_rank3_generates_both_promote_and_non_promote() {
         // 先手の桂馬が7五(7e)から移動する局面
