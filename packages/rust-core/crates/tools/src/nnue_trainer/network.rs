@@ -14,6 +14,13 @@ pub const TRANSFORMED_DIMENSIONS: usize = 256;
 pub const HIDDEN1_DIMENSIONS: usize = 32;
 pub const HIDDEN2_DIMENSIONS: usize = 32;
 pub const OUTPUT_DIMENSIONS: usize = 1;
+
+/// 評価値のスケーリング係数（YaneuraOu互換）
+///
+/// NNUEの出力を最終的な評価値（centipawn相当）に変換する係数。
+/// この値はengine-core側のFV_SCALEと同じ値を使用する必要がある。
+///
+/// 参照: `engine-core/src/nnue/constants.rs`
 pub const FV_SCALE: f32 = 24.0;
 
 /// 量子化定数（YaneuraOu互換）
@@ -32,22 +39,34 @@ pub const NNUE_VERSION: u32 = 0x7AF32F16;
 /// YaneuraOu互換の構造ハッシュを計算
 ///
 /// HalfKP 256x2-32-32 アーキテクチャのハッシュ値を計算する。
-/// 計算式は YaneuraOu の evaluate_nnue.h に基づく：
-/// - kHashValue = FeatureTransformer::GetHashValue() ^ Network::GetHashValue()
+/// 計算式は YaneuraOu の各ソースファイルに基づく：
+///
+/// 参照:
+/// - `source/eval/nnue/evaluate_nnue.h:23-24` - kHashValue = FT::GetHashValue() ^ Network::GetHashValue()
+/// - `source/eval/nnue/features/half_kp.h:24-25` - HalfKP kHashValue = 0x5D69D5B9u ^ (kFriend == 1)
+/// - `source/eval/nnue/nnue_feature_transformer.h:108` - FT hash = RawFeatures::kHashValue ^ kOutputDimensions
+/// - `source/eval/nnue/layers/input_slice.h:39-42` - InputSlice hash = 0xEC42E90D ^ output_dim
+/// - `source/eval/nnue/layers/affine_transform.h:195-199` - AffineTransform hash 計算式
+/// - `source/eval/nnue/layers/clipped_relu.h:44-48` - ClippedReLU hash = 0x538D24C7 + prev_hash
 pub fn compute_structure_hash() -> u32 {
     // HalfKP(Friend) hash
+    // YaneuraOu: `source/eval/nnue/features/half_kp.h:24-25`
+    // kHashValue = 0x5D69D5B9u ^ (AssociatedKing == Side::kFriend)
+    // Side::kFriend = 1 なので、0x5D69D5B9 ^ 1 = 0x5D69D5B8
     const HALFKP_FRIEND_HASH: u32 = 0x5D69D5B9 ^ 1; // 0x5D69D5B8
 
     // FeatureTransformer hash = RawFeatures::kHashValue ^ kOutputDimensions
+    // YaneuraOu: `source/eval/nnue/nnue_feature_transformer.h:108`
     // kOutputDimensions = 256 * 2 = 512
     const FT_OUTPUT_DIM: u32 = (TRANSFORMED_DIMENSIONS * 2) as u32;
     let ft_hash = HALFKP_FRIEND_HASH ^ FT_OUTPUT_DIM;
 
     // Network hash を計算
-    // InputSlice[512] → AffineTransform[32] → ClippedReLU →
-    // AffineTransform[32] → ClippedReLU → AffineTransform[1]
+    // アーキテクチャ: InputSlice[512] → AffineTransform[32] → ClippedReLU →
+    //                AffineTransform[32] → ClippedReLU → AffineTransform[1]
 
     // InputSlice: hash = 0xEC42E90D ^ (output_dim ^ (offset << 10))
+    // YaneuraOu: `source/eval/nnue/layers/input_slice.h:39-42`
     // Offset = 0 なので output_dim だけ XOR
     let input_slice_hash: u32 = 0xEC42E90D ^ FT_OUTPUT_DIM;
 
@@ -66,11 +85,19 @@ pub fn compute_structure_hash() -> u32 {
     // AffineTransform (Output, output=1)
     let output_hash = affine_hash(OUTPUT_DIMENSIONS as u32, relu2_hash);
 
-    // Final hash
+    // Final hash = FT hash ^ Network hash
+    // YaneuraOu: `source/eval/nnue/evaluate_nnue.h:23-24`
     ft_hash ^ output_hash
 }
 
 /// AffineTransform 層のハッシュを計算
+///
+/// YaneuraOu: `source/eval/nnue/layers/affine_transform.h:195-199`
+/// ```cpp
+/// hash_value = 0xCC03DAE4u + kOutputDimensions;
+/// hash_value ^= PreviousLayer::GetHashValue() >> 1;
+/// hash_value ^= PreviousLayer::GetHashValue() << 31;
+/// ```
 const fn affine_hash(output_dim: u32, prev_hash: u32) -> u32 {
     let mut hash = 0xCC03DAE4u32.wrapping_add(output_dim);
     hash ^= prev_hash >> 1;
@@ -79,8 +106,35 @@ const fn affine_hash(output_dim: u32, prev_hash: u32) -> u32 {
 }
 
 /// ClippedReLU 層のハッシュを計算
+///
+/// YaneuraOu: `source/eval/nnue/layers/clipped_relu.h:44-48`
+/// ```cpp
+/// hash_value = 0x538D24C7u;
+/// hash_value += PreviousLayer::GetHashValue();
+/// ```
 const fn clipped_relu_hash(prev_hash: u32) -> u32 {
     0x538D24C7u32.wrapping_add(prev_hash)
+}
+
+/// 重みの統計情報
+struct WeightStats {
+    min: f32,
+    max: f32,
+}
+
+/// f32配列の統計を計算
+fn compute_stats(data: &[f32]) -> WeightStats {
+    let mut min = f32::MAX;
+    let mut max = f32::MIN;
+    for &v in data {
+        if v < min {
+            min = v;
+        }
+        if v > max {
+            max = v;
+        }
+    }
+    WeightStats { min, max }
 }
 
 /// 学習可能なアフィン変換層
@@ -478,13 +532,116 @@ impl TrainableNetwork {
             + self.output.param_count()
     }
 
+    /// 量子化前の重み統計をログ出力
+    ///
+    /// 量子化による情報損失の程度を確認するための診断情報
+    fn log_quantization_stats(&self) {
+        // FeatureTransformer（ACTIVATION_SCALE = 127でスケールしてi16に）
+        let ft_w_stats = compute_stats(&self.ft_black.weights);
+        let ft_b_stats = compute_stats(&self.ft_black.biases);
+        let ft_w_range = ft_w_stats.max - ft_w_stats.min;
+        let ft_b_range = ft_b_stats.max - ft_b_stats.min;
+
+        // i16の範囲: -32768 ~ 32767
+        // ACTIVATION_SCALE = 127 でスケール後、i16範囲に収まるか確認
+        let ft_w_max_quantized =
+            (ft_w_stats.max.abs().max(ft_w_stats.min.abs()) * ACTIVATION_SCALE).round();
+        let ft_b_max_quantized =
+            (ft_b_stats.max.abs().max(ft_b_stats.min.abs()) * ACTIVATION_SCALE).round();
+
+        eprintln!("  Quantization stats:");
+        eprintln!(
+            "    FT weights: min={:.4}, max={:.4}, range={:.4}, max_quantized={:.0}{}",
+            ft_w_stats.min,
+            ft_w_stats.max,
+            ft_w_range,
+            ft_w_max_quantized,
+            if ft_w_max_quantized > 32767.0 {
+                " [WARNING: overflow]"
+            } else {
+                ""
+            }
+        );
+        eprintln!(
+            "    FT biases:  min={:.4}, max={:.4}, range={:.4}, max_quantized={:.0}{}",
+            ft_b_stats.min,
+            ft_b_stats.max,
+            ft_b_range,
+            ft_b_max_quantized,
+            if ft_b_max_quantized > 32767.0 {
+                " [WARNING: overflow]"
+            } else {
+                ""
+            }
+        );
+
+        // Hidden層（WEIGHT_SCALE = 64でスケールしてi8に、バイアスはBIAS_SCALE = 8128でi32に）
+        let h1_w_stats = compute_stats(&self.hidden1.weights);
+        let h1_b_stats = compute_stats(&self.hidden1.biases);
+        let h1_w_max_quantized =
+            (h1_w_stats.max.abs().max(h1_w_stats.min.abs()) * WEIGHT_SCALE).round();
+
+        eprintln!(
+            "    H1 weights: min={:.4}, max={:.4}, max_quantized={:.0}{}",
+            h1_w_stats.min,
+            h1_w_stats.max,
+            h1_w_max_quantized,
+            if h1_w_max_quantized > 127.0 {
+                " [clipped]"
+            } else {
+                ""
+            }
+        );
+        eprintln!("    H1 biases:  min={:.4}, max={:.4}", h1_b_stats.min, h1_b_stats.max);
+
+        let h2_w_stats = compute_stats(&self.hidden2.weights);
+        let h2_b_stats = compute_stats(&self.hidden2.biases);
+        let h2_w_max_quantized =
+            (h2_w_stats.max.abs().max(h2_w_stats.min.abs()) * WEIGHT_SCALE).round();
+
+        eprintln!(
+            "    H2 weights: min={:.4}, max={:.4}, max_quantized={:.0}{}",
+            h2_w_stats.min,
+            h2_w_stats.max,
+            h2_w_max_quantized,
+            if h2_w_max_quantized > 127.0 {
+                " [clipped]"
+            } else {
+                ""
+            }
+        );
+        eprintln!("    H2 biases:  min={:.4}, max={:.4}", h2_b_stats.min, h2_b_stats.max);
+
+        let out_w_stats = compute_stats(&self.output.weights);
+        let out_b_stats = compute_stats(&self.output.biases);
+        let out_w_max_quantized =
+            (out_w_stats.max.abs().max(out_w_stats.min.abs()) * WEIGHT_SCALE).round();
+
+        eprintln!(
+            "    Out weights: min={:.4}, max={:.4}, max_quantized={:.0}{}",
+            out_w_stats.min,
+            out_w_stats.max,
+            out_w_max_quantized,
+            if out_w_max_quantized > 127.0 {
+                " [clipped]"
+            } else {
+                ""
+            }
+        );
+        eprintln!("    Out biases:  min={:.4}, max={:.4}", out_b_stats.min, out_b_stats.max);
+    }
+
     /// YaneuraOu形式でモデルを保存
     ///
     /// 量子化スケーリング（YaneuraOu互換）:
     /// - FeatureTransformer: 正規化された値（0.0-1.0）をACTIVATION_SCALE (127)倍してi16に変換
     /// - Hidden層: 重みをWEIGHT_SCALE (64)倍してi8に、バイアスをBIAS_SCALE (8128)倍してi32に
     /// - Output層: 重みをWEIGHT_SCALE (64)倍、バイアスをFV_SCALE * ACTIVATION_SCALE倍
+    ///
+    /// 保存時に重みの統計情報をログ出力して量子化精度を確認可能にする。
     pub fn save<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        // 量子化前の統計を出力
+        self.log_quantization_stats();
         // ヘッダ
         writer.write_u32::<LittleEndian>(NNUE_VERSION)?;
 

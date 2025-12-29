@@ -96,7 +96,24 @@ pub struct LearningRateScheduler {
 
 impl LearningRateScheduler {
     /// 新しいスケジューラを作成
+    ///
+    /// # パラメータ
+    /// - `eta1`: 初期学習率
+    /// - `eta2`: 中間学習率（eta1_epoch時点）
+    /// - `eta3`: 最終学習率（eta2_epoch時点）
+    /// - `eta1_epoch`: eta1→eta2遷移完了エポック（0の場合はeta1固定）
+    /// - `eta2_epoch`: eta2→eta3遷移完了エポック（0の場合はeta2固定）
+    ///
+    /// # 注意
+    /// eta1_epoch > 0 かつ eta2_epoch > 0 の場合、eta1_epoch <= eta2_epoch でなければ警告を出力
     pub fn new(eta1: f32, eta2: f32, eta3: f32, eta1_epoch: usize, eta2_epoch: usize) -> Self {
+        // バリデーション: eta1_epochとeta2_epochの関係チェック
+        if eta1_epoch > 0 && eta2_epoch > 0 && eta1_epoch > eta2_epoch {
+            eprintln!(
+                "Warning: eta1_epoch ({eta1_epoch}) > eta2_epoch ({eta2_epoch}). \
+                 This may cause unexpected learning rate behavior."
+            );
+        }
         Self {
             eta1,
             eta2,
@@ -139,6 +156,13 @@ impl LearningRateScheduler {
 }
 
 /// Newbobスケジューラの状態
+///
+/// YaneuraOuのNewbob実装に基づく：
+/// - 検証損失が改善 → best更新、trials リセット
+/// - 検証損失が悪化 → 最良モデルをリストア、学習率を減衰
+/// - trialsが0になったら収束として学習終了
+///
+/// 参考: YaneuraOu/source/learn/learner.cpp (2166-2200行付近)
 pub struct NewbobState {
     /// 現在のスケール
     pub scale: f32,
@@ -174,12 +198,13 @@ impl NewbobState {
 
     /// 検証損失に基づいて更新
     ///
-    /// Returns: (accepted, converged)
+    /// Returns: (accepted, converged, should_restore)
     /// - accepted: 損失が改善したか
     /// - converged: 収束したか（試行回数が尽きた）
-    pub fn update(&mut self, current_loss: f32, model_path: &str) -> (bool, bool) {
+    /// - should_restore: 最良モデルへのリストアが必要か
+    pub fn update(&mut self, current_loss: f32, model_path: &str) -> (bool, bool, bool) {
         if !self.is_enabled() {
-            return (true, false);
+            return (true, false, false);
         }
 
         if current_loss < self.best_loss {
@@ -188,7 +213,7 @@ impl NewbobState {
             self.best_loss = current_loss;
             self.best_model_path = Some(model_path.to_string());
             self.trials_left = self.max_trials; // 試行回数をリセット
-            (true, false)
+            (true, false, false)
         } else {
             // 改善しなかった
             eprintln!("  Newbob: loss {current_loss:.6} >= best {:.6}, rejected", self.best_loss);
@@ -197,7 +222,7 @@ impl NewbobState {
 
             if self.trials_left == 0 {
                 eprintln!("  Newbob: converged");
-                return (false, true);
+                return (false, true, false);
             }
 
             // 学習率を減衰
@@ -207,7 +232,9 @@ impl NewbobState {
                 self.scale, self.trials_left
             );
 
-            (false, false)
+            // 最良モデルがあればリストアが必要
+            let should_restore = self.best_model_path.is_some();
+            (false, false, should_restore)
         }
     }
 
@@ -374,7 +401,20 @@ impl Trainer {
 
                     // Newbobの更新（検証損失がある場合）
                     if let Some(vl) = val_loss {
-                        let (_, converged) = self.newbob_state.update(vl, &path);
+                        let (_, converged, should_restore) = self.newbob_state.update(vl, &path);
+
+                        // 損失が悪化した場合、最良モデルをリストア
+                        if should_restore {
+                            if let Some(best_path) = self.newbob_state.best_model_path() {
+                                let best_path = best_path.to_string(); // Clone to avoid borrow issue
+                                eprintln!("  Restoring parameters from {best_path}");
+                                match self.restore_model(&best_path) {
+                                    Ok(()) => eprintln!("  Restored successfully"),
+                                    Err(e) => eprintln!("  Warning: failed to restore: {e}"),
+                                }
+                            }
+                        }
+
                         if converged {
                             eprintln!("Newbob converged, stopping training");
                             break;
@@ -558,6 +598,16 @@ impl Trainer {
         Ok(())
     }
 
+    /// モデルをリストア（Newbobでの最良モデル復元用）
+    ///
+    /// YaneuraOuのRestoreParameters相当の機能
+    fn restore_model(&mut self, path: &str) -> std::io::Result<()> {
+        let file = File::open(path)?;
+        let mut reader = BufReader::new(file);
+        self.network = TrainableNetwork::load(&mut reader)?;
+        Ok(())
+    }
+
     /// ネットワークへの参照を取得
     pub fn network(&self) -> &TrainableNetwork {
         &self.network
@@ -636,9 +686,10 @@ mod tests {
         let mut newbob = NewbobState::new(1.0, 2);
         assert!(!newbob.is_enabled());
 
-        let (accepted, converged) = newbob.update(1.0, "/tmp/model.bin");
+        let (accepted, converged, should_restore) = newbob.update(1.0, "/tmp/model.bin");
         assert!(accepted);
         assert!(!converged);
+        assert!(!should_restore);
     }
 
     #[test]
@@ -647,16 +698,18 @@ mod tests {
         assert!(newbob.is_enabled());
 
         // 最初の改善
-        let (accepted, converged) = newbob.update(0.5, "/tmp/model1.bin");
+        let (accepted, converged, should_restore) = newbob.update(0.5, "/tmp/model1.bin");
         assert!(accepted);
         assert!(!converged);
+        assert!(!should_restore);
         assert!((newbob.scale - 1.0).abs() < 1e-6);
         assert_eq!(newbob.best_model_path(), Some("/tmp/model1.bin"));
 
         // 2回目の改善
-        let (accepted, converged) = newbob.update(0.4, "/tmp/model2.bin");
+        let (accepted, converged, should_restore) = newbob.update(0.4, "/tmp/model2.bin");
         assert!(accepted);
         assert!(!converged);
+        assert!(!should_restore);
         assert_eq!(newbob.best_model_path(), Some("/tmp/model2.bin"));
     }
 
@@ -667,14 +720,15 @@ mod tests {
         // 初期値を設定
         newbob.update(0.5, "/tmp/model1.bin");
 
-        // 改善なし（1回目）
-        let (accepted, converged) = newbob.update(0.6, "/tmp/model2.bin");
+        // 改善なし（1回目）→ リストアが必要
+        let (accepted, converged, should_restore) = newbob.update(0.6, "/tmp/model2.bin");
         assert!(!accepted);
         assert!(!converged);
+        assert!(should_restore); // 最良モデルへのリストアが必要
         assert!((newbob.scale - 0.5).abs() < 1e-6);
 
         // 改善なし（2回目）→ 収束
-        let (accepted, converged) = newbob.update(0.7, "/tmp/model3.bin");
+        let (accepted, converged, _should_restore) = newbob.update(0.7, "/tmp/model3.bin");
         assert!(!accepted);
         assert!(converged);
     }
