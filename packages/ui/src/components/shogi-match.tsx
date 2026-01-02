@@ -290,9 +290,12 @@ export function ShogiMatch({
         evalCp?: number;
         evalMate?: number;
     } | null>(null);
-    // 解析中の手数（オンデマンド解析用）
+    // 解析状態: analyzingPly と analyzingNodeId は相互排他的に使用される
+    // - analyzingNodeId が設定されている場合: 分岐解析（ノードIDで評価値を保存）
+    // - analyzingNodeId が null の場合: 通常解析（plyで評価値を保存）
+    // 両方が null の場合は解析していない状態
+    // TODO: 将来的には AnalyzingState 型（union型）での明示的な管理を検討
     const [analyzingPly, setAnalyzingPly] = useState<number | null>(null);
-    // 分岐解析中のノードID
     const [analyzingNodeId, setAnalyzingNodeId] = useState<string | null>(null);
     // 一括解析の状態
     const [batchAnalysis, setBatchAnalysis] = useState<{
@@ -449,6 +452,11 @@ export function ShogiMatch({
     const analyzingNodeIdRef = useRef<string | null>(null);
     useEffect(() => {
         analyzingNodeIdRef.current = analyzingNodeId;
+
+        return () => {
+            // クリーンアップ時にrefをリセット
+            analyzingNodeIdRef.current = null;
+        };
     }, [analyzingNodeId]);
 
     // 評価値更新コールバック（分岐解析にも対応）
@@ -1480,34 +1488,46 @@ export function ShogiMatch({
 
     // 分岐内のノードを解析するコールバック
     const handleAnalyzeNode = useCallback(
-        (nodeId: string) => {
+        async (nodeId: string) => {
             const tree = navigation.tree;
-            if (!tree) return;
-
-            const node = tree.nodes.get(nodeId);
-            if (!node) return;
-
-            // ルートからこのノードまでのパスを取得
-            const path = getPathToNode(tree, nodeId);
-            // 各ノードのusiMoveを収集（ルートは除く）
-            const movesForNode: string[] = [];
-            for (const id of path) {
-                const n = tree.nodes.get(id);
-                if (n?.usiMove) {
-                    movesForNode.push(n.usiMove);
-                }
+            if (!tree) {
+                setMessage("棋譜ツリーが初期化されていません");
+                return;
             }
 
-            // 分岐解析用にノードIDを設定
-            setAnalyzingNodeId(nodeId);
-            setAnalyzingPly(node.ply);
-            void analyzePosition({
-                sfen: startSfen,
-                moves: movesForNode,
-                ply: node.ply,
-                timeMs: 3000,
-                depth: 20,
-            });
+            const node = tree.nodes.get(nodeId);
+            if (!node) {
+                setMessage("指定されたノードが見つかりません");
+                return;
+            }
+
+            try {
+                // ルートからこのノードまでのパスを取得
+                const path = getPathToNode(tree, nodeId);
+                // 各ノードのusiMoveを収集（ルートは除く）
+                const movesForNode: string[] = [];
+                for (const id of path) {
+                    const n = tree.nodes.get(id);
+                    if (n?.usiMove) {
+                        movesForNode.push(n.usiMove);
+                    }
+                }
+
+                // 分岐解析用にノードIDを設定
+                setAnalyzingNodeId(nodeId);
+                setAnalyzingPly(node.ply);
+                await analyzePosition({
+                    sfen: startSfen,
+                    moves: movesForNode,
+                    ply: node.ply,
+                    timeMs: 3000,
+                    depth: 20,
+                });
+            } catch (error) {
+                setMessage(`解析エラー: ${error instanceof Error ? error.message : String(error)}`);
+                setAnalyzingNodeId(null);
+                setAnalyzingPly(null);
+            }
         },
         [navigation.tree, analyzePosition, startSfen],
     );

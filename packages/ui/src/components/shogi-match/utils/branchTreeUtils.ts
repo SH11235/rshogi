@@ -363,6 +363,7 @@ export interface TreeAnalysisJob {
 
 /**
  * ツリー全体から解析ジョブを収集する
+ * スタックを使った反復的な実装でスタックオーバーフローを防止
  *
  * @param tree 棋譜ツリー
  * @param options オプション
@@ -380,17 +381,21 @@ export function collectTreeAnalysisJobs(
     const jobs: TreeAnalysisJob[] = [];
     const { onlyWithoutEval = true, mainLineOnly = false } = options;
 
-    // DFSでツリーを走査
-    const traverse = (nodeId: string, moves: string[], isMainLine: boolean) => {
-        const node = tree.nodes.get(nodeId);
-        if (!node) return;
+    // スタックを使った反復的な実装
+    const stack: Array<{ nodeId: string; moves: string[]; isMainLine: boolean }> = [
+        { nodeId: tree.rootId, moves: [], isMainLine: true },
+    ];
 
-        // ルートノードは除外
+    while (stack.length > 0) {
+        const { nodeId, moves, isMainLine } = stack.pop()!;
+        const node = tree.nodes.get(nodeId);
+        if (!node) continue;
+
+        // ルートノード以外を処理
         if (node.usiMove !== null) {
             const currentMoves = [...moves, node.usiMove];
             const hasEval = node.eval?.scoreCp !== undefined || node.eval?.scoreMate !== undefined;
 
-            // 評価値がないノードのみ対象とする場合のフィルタ
             if (!onlyWithoutEval || !hasEval) {
                 jobs.push({
                     nodeId,
@@ -400,30 +405,35 @@ export function collectTreeAnalysisJobs(
                 });
             }
 
-            // 子ノードを走査
-            for (let i = 0; i < node.children.length; i++) {
+            // 子ノードをスタックに追加（逆順で追加して順序を保つ）
+            for (let i = node.children.length - 1; i >= 0; i--) {
                 const childId = node.children[i];
                 const childIsMainLine = isMainLine && i === 0;
 
-                // メインラインのみの場合、メインライン以外はスキップ
                 if (mainLineOnly && !childIsMainLine) continue;
 
-                traverse(childId, currentMoves, childIsMainLine);
+                stack.push({
+                    nodeId: childId,
+                    moves: currentMoves,
+                    isMainLine: childIsMainLine,
+                });
             }
         } else {
-            // ルートノードの場合は子を直接走査
-            for (let i = 0; i < node.children.length; i++) {
+            // ルートノードの子を処理
+            for (let i = node.children.length - 1; i >= 0; i--) {
                 const childId = node.children[i];
                 const childIsMainLine = i === 0;
 
                 if (mainLineOnly && !childIsMainLine) continue;
 
-                traverse(childId, [], childIsMainLine);
+                stack.push({
+                    nodeId: childId,
+                    moves: [],
+                    isMainLine: childIsMainLine,
+                });
             }
         }
-    };
-
-    traverse(tree.rootId, [], true);
+    }
 
     return jobs;
 }

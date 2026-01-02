@@ -475,10 +475,8 @@ export function KifuPanel({
     const [selectedBranch, setSelectedBranch] = useState<SelectedBranch | null>(null);
     // 本譜ビューのスクロール位置を保存
     const mainScrollPositionRef = useRef<number>(0);
-    // 分岐追加シグナルの前回値を追跡（初期値はundefinedで開始）
+    // 分岐追加シグナルの前回値を追跡（StrictMode対応: 初期値undefinedで初回判定）
     const prevBranchSignalRef = useRef<number | undefined>(undefined);
-    // 初回マウント判定用
-    const isFirstMountRef = useRef(true);
 
     // 分岐一覧を取得
     const branches = useMemo<BranchSummary[]>(() => {
@@ -497,21 +495,18 @@ export function KifuPanel({
 
     // 分岐が追加されたら自動的に分岐一覧に切り替え
     // branchAddedSignalの変化のみを監視
+    // StrictMode対応: prevBranchSignalRefがundefinedの場合は初回レンダリングとみなす
     useEffect(() => {
-        // 初回マウント時はスキップ
-        if (isFirstMountRef.current) {
-            isFirstMountRef.current = false;
+        const prev = prevBranchSignalRef.current;
+
+        // 初回レンダリング時（prevがundefinedの場合）はスキップ
+        if (prev === undefined) {
             prevBranchSignalRef.current = branchAddedSignal;
             return;
         }
 
         // シグナルが変化し、分岐が実際に存在する場合のみ切り替え
-        if (
-            branchAddedSignal !== undefined &&
-            prevBranchSignalRef.current !== undefined &&
-            branchAddedSignal !== prevBranchSignalRef.current &&
-            branches.length > 0
-        ) {
+        if (branchAddedSignal !== prev && branches.length > 0) {
             // スクロール位置を保存してから分岐一覧に切り替え
             if (listRef.current) {
                 mainScrollPositionRef.current = listRef.current.scrollTop;

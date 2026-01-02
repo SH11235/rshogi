@@ -240,9 +240,15 @@ export function goForward(tree: KifuTree, preferredBranchNodeId?: string): KifuT
  * nodeIdがancestorIdの子孫（またはancestorId自身）かどうかを判定
  */
 function isDescendantOf(tree: KifuTree, nodeId: string, ancestorId: string): boolean {
+    const visited = new Set<string>();
     let currentId: string | null = nodeId;
     while (currentId !== null) {
+        if (visited.has(currentId)) {
+            // 循環参照を検出
+            return false;
+        }
         if (currentId === ancestorId) return true;
+        visited.add(currentId);
         const node = tree.nodes.get(currentId);
         if (!node) break;
         currentId = node.parentId;
