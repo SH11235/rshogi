@@ -206,7 +206,7 @@ export function goForward(tree: KifuTree, preferredBranchNodeId?: string): KifuT
         const pathToPreferred = getPathToNode(tree, preferredBranchNodeId);
         const pathSet = new Set(pathToPreferred);
 
-        // 現在のノードがそのパス上にあるか確認
+        // 現在のノードがパス上にあるか確認
         if (pathSet.has(currentNode.id)) {
             // パス上の次のノード（現在ノードの子の中でパスに含まれるもの）を探す
             for (const childId of currentNode.children) {
@@ -218,6 +218,15 @@ export function goForward(tree: KifuTree, preferredBranchNodeId?: string): KifuT
                 }
             }
         }
+
+        // 現在位置がpreferredBranchNodeIdの子孫（分岐内）にいる場合は、
+        // 分岐に沿って進む（children[0]）
+        if (isDescendantOf(tree, currentNode.id, preferredBranchNodeId)) {
+            return {
+                ...tree,
+                currentNodeId: currentNode.children[0],
+            };
+        }
     }
 
     // デフォルト: メインライン（最初の子）へ進む
@@ -225,6 +234,20 @@ export function goForward(tree: KifuTree, preferredBranchNodeId?: string): KifuT
         ...tree,
         currentNodeId: currentNode.children[0],
     };
+}
+
+/**
+ * nodeIdがancestorIdの子孫（またはancestorId自身）かどうかを判定
+ */
+function isDescendantOf(tree: KifuTree, nodeId: string, ancestorId: string): boolean {
+    let currentId: string | null = nodeId;
+    while (currentId !== null) {
+        if (currentId === ancestorId) return true;
+        const node = tree.nodes.get(currentId);
+        if (!node) break;
+        currentId = node.parentId;
+    }
+    return false;
 }
 
 /**

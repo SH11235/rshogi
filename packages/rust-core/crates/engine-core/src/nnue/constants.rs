@@ -6,8 +6,8 @@
 /// 評価関数ファイルのバージョン（YaneuraOu互換）
 pub const NNUE_VERSION: u32 = 0x7AF32F16;
 
-/// 評価値のスケーリング（デフォルト: 16）
-pub const FV_SCALE: i32 = 16;
+/// 評価値のスケーリング（suisho5向け: 24）
+pub const FV_SCALE: i32 = 24;
 
 /// 重みのスケーリングビット数
 pub const WEIGHT_SCALE_BITS: u32 = 6;

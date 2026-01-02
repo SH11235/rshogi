@@ -21,7 +21,7 @@ mod network;
 pub use accumulator::{
     Accumulator, AccumulatorStack, ChangedPiece, DirtyPiece, HandChange, StackEntry,
 };
-pub use bona_piece::{BonaPiece, FE_END};
+pub use bona_piece::{halfkp_index, BonaPiece, FE_END};
 pub use constants::*;
 pub use diff::get_changed_features;
 pub use feature_transformer::FeatureTransformer;
