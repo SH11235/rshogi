@@ -88,8 +88,8 @@ interface UseKifuNavigationOptions {
 interface UseKifuNavigationResult {
     /** ナビゲーション状態 */
     state: KifuNavigationState;
-    /** 1手進む */
-    goForward: () => void;
+    /** 1手進む（優先分岐を指定可能） */
+    goForward: (preferredBranchNodeId?: string) => void;
     /** 1手戻る */
     goBack: () => void;
     /** 最初へ */
@@ -147,18 +147,22 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
 
     /**
      * 1手進む
+     * @param preferredBranchNodeId 優先する分岐のノードID（分岐ビューで使用）
      */
-    const goForward = useCallback(() => {
-        setTree((prev) => {
-            const newTree = goForwardTree(prev);
-            if (newTree !== prev) {
-                const node = getCurrentNode(newTree);
-                const lastMove = deriveLastMoveFromUsi(node.usiMove);
-                onPositionChange?.(node.positionAfter, lastMove);
-            }
-            return newTree;
-        });
-    }, [onPositionChange]);
+    const goForward = useCallback(
+        (preferredBranchNodeId?: string) => {
+            setTree((prev) => {
+                const newTree = goForwardTree(prev, preferredBranchNodeId);
+                if (newTree !== prev) {
+                    const node = getCurrentNode(newTree);
+                    const lastMove = deriveLastMoveFromUsi(node.usiMove);
+                    onPositionChange?.(node.positionAfter, lastMove);
+                }
+                return newTree;
+            });
+        },
+        [onPositionChange],
+    );
 
     /**
      * 1手戻る

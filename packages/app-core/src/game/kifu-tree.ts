@@ -187,13 +187,40 @@ export function goToNode(tree: KifuTree, nodeId: string): KifuTree {
 }
 
 /**
- * 1手進む（メインラインの最初の子に移動）
+ * 1手進む
+ *
+ * @param tree 棋譜ツリー
+ * @param preferredBranchNodeId 優先する分岐のノードID（分岐ビュー用）
+ *   - 指定された場合、その分岐への経路上にあれば分岐方向へ進む
+ *   - 指定されていないか、経路上にない場合はメインライン（children[0]）へ進む
  */
-export function goForward(tree: KifuTree): KifuTree {
+export function goForward(tree: KifuTree, preferredBranchNodeId?: string): KifuTree {
     const currentNode = getCurrentNode(tree);
     if (currentNode.children.length === 0) {
         return tree; // 子がない場合は変更なし
     }
+
+    // 優先分岐が指定されている場合、その分岐への経路を確認
+    if (preferredBranchNodeId) {
+        // 優先分岐からルートまでのパスを取得
+        const pathToPreferred = getPathToNode(tree, preferredBranchNodeId);
+        const pathSet = new Set(pathToPreferred);
+
+        // 現在のノードがそのパス上にあるか確認
+        if (pathSet.has(currentNode.id)) {
+            // パス上の次のノード（現在ノードの子の中でパスに含まれるもの）を探す
+            for (const childId of currentNode.children) {
+                if (pathSet.has(childId)) {
+                    return {
+                        ...tree,
+                        currentNodeId: childId,
+                    };
+                }
+            }
+        }
+    }
+
+    // デフォルト: メインライン（最初の子）へ進む
     return {
         ...tree,
         currentNodeId: currentNode.children[0],

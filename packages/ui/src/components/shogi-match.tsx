@@ -304,6 +304,8 @@ export function ShogiMatch({
     } | null>(null);
     // 分岐追加シグナル（カウンターが増えるとKifuPanelがツリービューに切り替わる）
     const [branchAddedSignal, setBranchAddedSignal] = useState(0);
+    // 選択中の分岐ノードID（キーボードナビゲーション用）
+    const [selectedBranchNodeId, setSelectedBranchNodeId] = useState<string | null>(null);
 
     // positionRef を先に定義（コールバックで使用するため）
     const positionRef = useRef<PositionState>(position);
@@ -525,9 +527,15 @@ export function ShogiMatch({
         },
     });
 
+    // キーボード・ホイールナビゲーション用のgoForward（分岐対応）
+    const handleKeyboardForward = useCallback(() => {
+        navigation.goForward(selectedBranchNodeId ?? undefined);
+    }, [navigation, selectedBranchNodeId]);
+
     // キーボード・ホイールナビゲーション（対局中は無効）
+    // selectedBranchNodeIdがある場合は、分岐に沿って進む
     useKifuKeyboardNavigation({
-        onForward: navigation.goForward,
+        onForward: handleKeyboardForward,
         onBack: navigation.goBack,
         onToStart: navigation.goToStart,
         onToEnd: navigation.goToEnd,
@@ -707,6 +715,7 @@ export function ShogiMatch({
             // 現在のノードの子を確認して、分岐が作成されるか判定
             const tree = navigation.tree;
             const currentNode = tree ? tree.nodes.get(tree.currentNodeId) : null;
+
             const existingChild = currentNode?.children.find((childId: string) => {
                 const child = tree?.nodes.get(childId);
                 return child?.usiMove === mv;
@@ -2120,7 +2129,8 @@ export function ShogiMatch({
                                 currentPly: navigation.state.currentPly,
                                 totalPly: navigation.state.totalPly,
                                 onBack: navigation.goBack,
-                                onForward: navigation.goForward,
+                                onForward: () =>
+                                    navigation.goForward(selectedBranchNodeId ?? undefined),
                                 onToStart: navigation.goToStart,
                                 onToEnd: navigation.goToEnd,
                                 isRewound: navigation.state.isRewound,
@@ -2141,6 +2151,7 @@ export function ShogiMatch({
                             onAddPvAsBranch={handleAddPvAsBranch}
                             onPreviewPv={handlePreviewPv}
                             branchAddedSignal={branchAddedSignal}
+                            onSelectedBranchChange={setSelectedBranchNodeId}
                             onAnalyzePly={handleAnalyzePly}
                             isAnalyzing={isAnalyzing}
                             analyzingPly={analyzingPly ?? undefined}

@@ -295,11 +295,11 @@ export function getAllBranches(tree: KifuTree): BranchSummary[] {
 
 /**
  * 指定した分岐の手順をリストとして取得
- * 分岐点以前の本譜も含めて返す
+ * 分岐部分のみを返す（本譜は含まない）
  *
  * @param tree 棋譜ツリー
  * @param branchNodeId 分岐の開始ノードID
- * @returns 分岐の手順リスト（本譜 + 分岐）
+ * @returns 分岐の手順リスト（分岐部分のみ）
  */
 export function getBranchMoves(tree: KifuTree, branchNodeId: string): FlatTreeNode[] {
     const result: FlatTreeNode[] = [];
@@ -308,56 +308,17 @@ export function getBranchMoves(tree: KifuTree, branchNodeId: string): FlatTreeNo
     const branchNode = tree.nodes.get(branchNodeId);
     if (!branchNode) return result;
 
-    // 1. 分岐点の親ノードまでの本譜を取得
-    const mainLinePath: string[] = [];
-    let nodeId: string | null = tree.rootId;
-
-    // ルートから分岐点の親まで辿る
-    while (nodeId && nodeId !== branchNode.parentId) {
-        mainLinePath.push(nodeId);
-        const node = tree.nodes.get(nodeId);
-        if (!node || node.children.length === 0) break;
-        // メインライン（最初の子）を辿る
-        nodeId = node.children[0];
-    }
-    // 分岐点の親も追加
-    if (branchNode.parentId) {
-        mainLinePath.push(branchNode.parentId);
-    }
-
-    // 本譜部分をリストに追加（ルートノードは除く）
+    // 分岐点の親から前の手のtoSquareを取得（表示テキスト生成用）
     let prevToSquare: Square | undefined;
-    for (const nid of mainLinePath) {
-        const node = tree.nodes.get(nid);
-        if (!node) continue;
-
-        // ルートノード（ply 0）は開始局面なので除外
-        if (node.ply === 0) {
-            prevToSquare = getToSquare(node.usiMove);
-            continue;
+    if (branchNode.parentId) {
+        const parentNode = tree.nodes.get(branchNode.parentId);
+        if (parentNode) {
+            prevToSquare = getToSquare(parentNode.usiMove);
         }
-
-        const displayText = getDisplayText(node, prevToSquare);
-        const hasBranches = node.children.length > 1;
-
-        result.push({
-            nodeId: nid,
-            ply: node.ply,
-            displayText,
-            usiMove: node.usiMove,
-            evalCp: node.eval?.scoreCp,
-            evalMate: node.eval?.scoreMate,
-            hasBranches,
-            isCurrentPath: currentPath.has(nid),
-            isCurrent: nid === tree.currentNodeId,
-            nestLevel: 0,
-        });
-
-        prevToSquare = getToSquare(node.usiMove);
     }
 
-    // 2. 分岐部分を追加
-    nodeId = branchNodeId;
+    // 分岐部分のみを追加
+    let nodeId: string | null = branchNodeId;
     while (nodeId) {
         const node = tree.nodes.get(nodeId);
         if (!node) break;
@@ -375,7 +336,7 @@ export function getBranchMoves(tree: KifuTree, branchNodeId: string): FlatTreeNo
             hasBranches,
             isCurrentPath: currentPath.has(nodeId),
             isCurrent: nodeId === tree.currentNodeId,
-            nestLevel: 1, // 分岐部分はnestLevel=1で区別
+            nestLevel: 0, // 分岐のみ表示なのでnestLevel=0
         });
 
         prevToSquare = getToSquare(node.usiMove);
