@@ -512,3 +512,23 @@ export function collectBranchAnalysisJobs(
 
     return jobs;
 }
+
+/**
+ * 手数（ply）ごとに分岐をグルーピング（インライン表示用）
+ *
+ * @param tree 棋譜ツリー
+ * @returns Map<ply, BranchSummary[]> - 各 ply における分岐一覧
+ */
+export function getBranchesByPly(tree: KifuTree): Map<number, BranchSummary[]> {
+    const branches = getAllBranches(tree);
+    const result = new Map<number, BranchSummary[]>();
+
+    for (const branch of branches) {
+        const ply = branch.ply; // 分岐点の手数
+        const existing = result.get(ply) ?? [];
+        existing.push(branch);
+        result.set(ply, existing);
+    }
+
+    return result;
+}

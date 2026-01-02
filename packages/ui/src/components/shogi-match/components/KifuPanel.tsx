@@ -13,7 +13,7 @@ import { Switch } from "../../switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../../tooltip";
 import type { AnalysisSettings } from "../types";
 import type { BranchSummary, FlatTreeNode } from "../utils/branchTreeUtils";
-import { getAllBranches, getBranchMoves } from "../utils/branchTreeUtils";
+import { getAllBranches, getBranchMoves, getBranchesByPly } from "../utils/branchTreeUtils";
 import type { KifMove } from "../utils/kifFormat";
 import { formatEval, getEvalTooltipInfo } from "../utils/kifFormat";
 import { EvalPopover } from "./EvalPopover";
@@ -199,6 +199,56 @@ function EvalHintBanner({
                     ✕
                 </button>
             </div>
+        </div>
+    );
+}
+
+/**
+ * インライン分岐リスト（本譜ビューで分岐を展開表示）
+ */
+function InlineBranchList({
+    branches,
+    onBranchClick,
+}: {
+    branches: BranchSummary[];
+    onBranchClick: (branch: BranchSummary) => void;
+}): ReactElement {
+    return (
+        <div className="ml-6 pl-2 border-l-2 border-[hsl(var(--wafuu-shu)/0.3)] my-0.5">
+            {branches.map((branch, index) => {
+                const isLast = index === branches.length - 1;
+                return (
+                    <div key={branch.nodeId} className="flex items-center gap-1 py-0.5">
+                        {/* ツリー罫線 */}
+                        <span className="text-[11px] text-muted-foreground/60 font-mono">
+                            {isLast ? "└─" : "├─"}
+                        </span>
+                        {/* 分岐ボタン */}
+                        <button
+                            type="button"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                onBranchClick(branch);
+                            }}
+                            className="
+                                flex items-center gap-1.5
+                                text-[12px] text-left
+                                px-1.5 py-0.5 rounded
+                                hover:bg-[hsl(var(--wafuu-washi))]
+                                transition-colors cursor-pointer
+                                bg-transparent border-none
+                            "
+                        >
+                            <span className="font-medium text-[hsl(var(--wafuu-shu))]">
+                                {branch.displayText}
+                            </span>
+                            <span className="text-[10px] text-muted-foreground">
+                                ({branch.branchLength}手)
+                            </span>
+                        </button>
+                    </div>
+                );
+            })}
         </div>
     );
 }
@@ -487,6 +537,28 @@ export function KifuPanel({
     // 分岐があるか
     const hasBranches = branches.length > 0;
 
+    // 手数ごとの分岐をグルーピング（インライン表示用）
+    const branchesByPlyMap = useMemo(() => {
+        if (!kifuTree) return new Map<number, BranchSummary[]>();
+        return getBranchesByPly(kifuTree);
+    }, [kifuTree]);
+
+    // 展開されている手数のセット（折りたたみ状態管理）
+    const [expandedPlies, setExpandedPlies] = useState<Set<number>>(new Set());
+
+    // 折りたたみトグル関数
+    const togglePlyExpansion = useCallback((ply: number) => {
+        setExpandedPlies((prev) => {
+            const next = new Set(prev);
+            if (next.has(ply)) {
+                next.delete(ply);
+            } else {
+                next.add(ply);
+            }
+            return next;
+        });
+    }, []);
+
     // 選択中の分岐の手順を取得
     const selectedBranchMoves = useMemo<FlatTreeNode[]>(() => {
         if (!kifuTree || !selectedBranch) return [];
@@ -555,6 +627,21 @@ export function KifuPanel({
         });
         setViewMode("selectedBranch");
     }, []);
+
+    // インライン分岐クリック時のハンドラ（ノードに移動して分岐ビューに切り替え）
+    const handleInlineBranchClick = useCallback(
+        (branch: BranchSummary) => {
+            // ノードに移動
+            onNodeClick?.(branch.nodeId);
+            // 選択した分岐として設定し、分岐ビューに切り替え
+            setSelectedBranch({
+                nodeId: branch.nodeId,
+                tabLabel: branch.tabLabel,
+            });
+            setViewMode("selectedBranch");
+        },
+        [onNodeClick],
+    );
 
     // 本譜ビューに戻ったときにスクロール位置を復元
     useEffect(() => {
@@ -1057,6 +1144,9 @@ export function KifuPanel({
                                     : "";
                                 const hasBranch = branchMarkers?.has(move.ply);
                                 const branchCount = branchMarkers?.get(move.ply);
+                                // この手での分岐一覧
+                                const branchesAtPly = branchesByPlyMap.get(move.ply) ?? [];
+                                const isExpanded = expandedPlies.has(move.ply);
                                 // この手に対応する局面（手が指された後の局面）
                                 const position = positionHistory?.[index];
                                 // PVがあるかどうか
@@ -1080,12 +1170,17 @@ export function KifuPanel({
                                         >
                                             {move.ply}
                                             {hasBranch && (
-                                                <span
-                                                    className="ml-0.5 text-wafuu-shu"
-                                                    title={`${branchCount}つの分岐`}
+                                                <button
+                                                    type="button"
+                                                    className="ml-0.5 text-wafuu-shu cursor-pointer hover:opacity-70 bg-transparent border-none p-0"
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        togglePlyExpansion(move.ply);
+                                                    }}
+                                                    title={`${branchCount}つの分岐を${isExpanded ? "閉じる" : "開く"}`}
                                                 >
-                                                    ◆
-                                                </span>
+                                                    {isExpanded ? "▼" : "◆"}
+                                                </button>
                                             )}
                                         </span>
                                         <span
@@ -1141,42 +1236,55 @@ export function KifuPanel({
                                     isCurrent ? "bg-accent" : ""
                                 }`;
 
+                                // インライン分岐リスト（展開時のみ表示）
+                                const inlineBranches =
+                                    hasBranch && isExpanded && branchesAtPly.length > 0 ? (
+                                        <InlineBranchList
+                                            branches={branchesAtPly}
+                                            onBranchClick={handleInlineBranchClick}
+                                        />
+                                    ) : null;
+
                                 if (onPlySelect) {
                                     return (
-                                        <div
-                                            key={move.ply}
-                                            ref={
-                                                isCurrent
-                                                    ? (currentRowRef as React.RefObject<HTMLDivElement>)
-                                                    : undefined
-                                            }
-                                            role="option"
-                                            className={`${rowClassName} w-full text-left cursor-pointer hover:bg-accent/50`}
-                                            onClick={() => onPlySelect(move.ply)}
-                                            onKeyDown={(e) => {
-                                                if (e.key === "Enter" || e.key === " ") {
-                                                    e.preventDefault();
-                                                    onPlySelect(move.ply);
+                                        <div key={move.ply}>
+                                            <div
+                                                ref={
+                                                    isCurrent
+                                                        ? (currentRowRef as React.RefObject<HTMLDivElement>)
+                                                        : undefined
                                                 }
-                                            }}
-                                            tabIndex={0}
-                                        >
-                                            {content}
+                                                role="option"
+                                                className={`${rowClassName} w-full text-left cursor-pointer hover:bg-accent/50`}
+                                                onClick={() => onPlySelect(move.ply)}
+                                                onKeyDown={(e) => {
+                                                    if (e.key === "Enter" || e.key === " ") {
+                                                        e.preventDefault();
+                                                        onPlySelect(move.ply);
+                                                    }
+                                                }}
+                                                tabIndex={0}
+                                            >
+                                                {content}
+                                            </div>
+                                            {inlineBranches}
                                         </div>
                                     );
                                 }
 
                                 return (
-                                    <div
-                                        key={move.ply}
-                                        ref={
-                                            isCurrent
-                                                ? (currentRowRef as React.RefObject<HTMLDivElement>)
-                                                : undefined
-                                        }
-                                        className={rowClassName}
-                                    >
-                                        {content}
+                                    <div key={move.ply}>
+                                        <div
+                                            ref={
+                                                isCurrent
+                                                    ? (currentRowRef as React.RefObject<HTMLDivElement>)
+                                                    : undefined
+                                            }
+                                            className={rowClassName}
+                                        >
+                                            {content}
+                                        </div>
+                                        {inlineBranches}
                                     </div>
                                 );
                             })
