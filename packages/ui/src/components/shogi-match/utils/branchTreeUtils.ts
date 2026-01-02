@@ -387,7 +387,9 @@ export function collectTreeAnalysisJobs(
     ];
 
     while (stack.length > 0) {
-        const { nodeId, moves, isMainLine } = stack.pop()!;
+        const item = stack.pop();
+        if (!item) continue;
+        const { nodeId, moves, isMainLine } = item;
         const node = tree.nodes.get(nodeId);
         if (!node) continue;
 

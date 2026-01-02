@@ -56,8 +56,8 @@ import { useKifuKeyboardNavigation } from "./shogi-match/hooks/useKifuKeyboardNa
 import { useKifuNavigation } from "./shogi-match/hooks/useKifuNavigation";
 import { useLocalStorage } from "./shogi-match/hooks/useLocalStorage";
 import {
-    type AnalysisSettings,
     ANALYZING_STATE_NONE,
+    type AnalysisSettings,
     type AnalyzingState,
     DEFAULT_ANALYSIS_SETTINGS,
     DEFAULT_DISPLAY_SETTINGS,
@@ -71,12 +71,12 @@ import {
     consumeFromHand,
     countPieces,
 } from "./shogi-match/utils/boardUtils";
+import { collectTreeAnalysisJobs } from "./shogi-match/utils/branchTreeUtils";
 import { isPromotable, PIECE_CAP, PIECE_LABELS } from "./shogi-match/utils/constants";
 import { exportToKifString } from "./shogi-match/utils/kifFormat";
 import { type KifMoveData, parseSfen } from "./shogi-match/utils/kifParser";
 import { LegalMoveCache } from "./shogi-match/utils/legalMoveCache";
 import { determinePromotion } from "./shogi-match/utils/promotionLogic";
-import { collectTreeAnalysisJobs } from "./shogi-match/utils/branchTreeUtils";
 import { TooltipProvider } from "./tooltip";
 
 type Selection = { kind: "square"; square: string } | { kind: "hand"; piece: PieceType };
@@ -346,7 +346,7 @@ export function ShogiMatch({
         boardHistory,
         positionHistory,
         branchMarkers,
-        recordEval,
+        recordEvalByPly,
         recordEvalByNodeId,
         addPvAsBranch,
     } = navigation;
@@ -465,10 +465,10 @@ export function ShogiMatch({
                 recordEvalByNodeId(state.nodeId, event);
             } else {
                 // 通常解析の場合はplyで保存
-                recordEval(ply, event);
+                recordEvalByPly(ply, event);
             }
         },
-        [recordEval, recordEvalByNodeId],
+        [recordEvalByPly, recordEvalByNodeId],
     );
 
     // エンジン管理フックを使用
@@ -522,7 +522,7 @@ export function ShogiMatch({
             if (nodeId) {
                 recordEvalByNodeId(nodeId, event);
             } else {
-                recordEval(ply, event);
+                recordEvalByPly(ply, event);
             }
         },
         onComplete: () => {

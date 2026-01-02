@@ -58,6 +58,17 @@ export interface KifuTree {
     startSfen: string;
 }
 
+/**
+ * 優先分岐パスのキャッシュ
+ * goForward関数のパフォーマンス改善のため、preferredBranchNodeIdからパスへのマッピングをキャッシュ
+ */
+export interface PreferredPathCache {
+    /** キャッシュされているpreferredBranchNodeId */
+    nodeId: string;
+    /** ルートからpreferredBranchNodeIdまでのパス（Set形式） */
+    pathSet: Set<string>;
+}
+
 /** UUID生成 */
 function generateId(): string {
     return crypto.randomUUID();
@@ -193,8 +204,13 @@ export function goToNode(tree: KifuTree, nodeId: string): KifuTree {
  * @param preferredBranchNodeId 優先する分岐のノードID（分岐ビュー用）
  *   - 指定された場合、その分岐への経路上にあれば分岐方向へ進む
  *   - 指定されていないか、経路上にない場合はメインライン（children[0]）へ進む
+ * @param pathCache オプションのパスキャッシュ（パフォーマンス改善用）
  */
-export function goForward(tree: KifuTree, preferredBranchNodeId?: string): KifuTree {
+export function goForward(
+    tree: KifuTree,
+    preferredBranchNodeId?: string,
+    pathCache?: PreferredPathCache,
+): KifuTree {
     const currentNode = getCurrentNode(tree);
     if (currentNode.children.length === 0) {
         return tree; // 子がない場合は変更なし
@@ -202,9 +218,15 @@ export function goForward(tree: KifuTree, preferredBranchNodeId?: string): KifuT
 
     // 優先分岐が指定されている場合、その分岐への経路を確認
     if (preferredBranchNodeId) {
-        // 優先分岐からルートまでのパスを取得
-        const pathToPreferred = getPathToNode(tree, preferredBranchNodeId);
-        const pathSet = new Set(pathToPreferred);
+        // キャッシュがあり、同じpreferredBranchNodeIdの場合はキャッシュを使用
+        let pathSet: Set<string>;
+        if (pathCache && pathCache.nodeId === preferredBranchNodeId) {
+            pathSet = pathCache.pathSet;
+        } else {
+            // キャッシュがない場合はパスを計算
+            const pathToPreferred = getPathToNode(tree, preferredBranchNodeId);
+            pathSet = new Set(pathToPreferred);
+        }
 
         // 現在のノードがパス上にあるか確認
         if (pathSet.has(currentNode.id)) {
@@ -233,6 +255,25 @@ export function goForward(tree: KifuTree, preferredBranchNodeId?: string): KifuT
     return {
         ...tree,
         currentNodeId: currentNode.children[0],
+    };
+}
+
+/**
+ * 優先分岐パスのキャッシュを作成する
+ * goForward関数と組み合わせて使用し、同じpreferredBranchNodeIdで複数回進む場合のパフォーマンスを改善
+ *
+ * @param tree 棋譜ツリー
+ * @param preferredBranchNodeId 優先分岐のノードID
+ * @returns パスキャッシュ
+ */
+export function createPreferredPathCache(
+    tree: KifuTree,
+    preferredBranchNodeId: string,
+): PreferredPathCache {
+    const pathToPreferred = getPathToNode(tree, preferredBranchNodeId);
+    return {
+        nodeId: preferredBranchNodeId,
+        pathSet: new Set(pathToPreferred),
     };
 }
 
