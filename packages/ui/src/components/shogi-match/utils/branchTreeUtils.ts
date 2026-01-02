@@ -30,7 +30,7 @@ interface EvalData {
 /**
  * 正規化された評価値
  */
-export interface NormalizedEval {
+interface NormalizedEval {
     evalCp?: number;
     evalMate?: number;
 }
