@@ -8,7 +8,6 @@ import {
     BOARD_FILES,
     BOARD_RANKS,
     findNodeByPlyInMainLine,
-    getPathToNode,
     type KifuNode,
     type KifuTree,
     type Player,
@@ -503,79 +502,6 @@ export function collectTreeAnalysisJobs(
                     nodeId: childId,
                     moves: [],
                     isMainLine: childIsMainLine,
-                });
-            }
-        }
-    }
-
-    return jobs;
-}
-
-/**
- * 指定した分岐から解析ジョブを収集する
- * スタックを使った反復的な実装でスタックオーバーフローを防止
- *
- * @param tree 棋譜ツリー
- * @param branchNodeId 分岐の開始ノードID
- * @param options オプション
- * @returns 解析ジョブの配列
- */
-export function collectBranchAnalysisJobs(
-    tree: KifuTree,
-    branchNodeId: string,
-    options: {
-        /** 評価値がないノードのみ対象とする */
-        onlyWithoutEval?: boolean;
-    } = {},
-): TreeAnalysisJob[] {
-    const jobs: TreeAnalysisJob[] = [];
-    const { onlyWithoutEval = true } = options;
-
-    const branchNode = tree.nodes.get(branchNodeId);
-    if (!branchNode) return jobs;
-
-    // 分岐のパスを取得（ルートからの手順）
-    const path = getPathToNode(tree, branchNodeId);
-    const pathMoves: string[] = [];
-    for (const id of path) {
-        const n = tree.nodes.get(id);
-        if (n?.usiMove) {
-            pathMoves.push(n.usiMove);
-        }
-    }
-
-    // スタックを使った反復的な実装（メインラインのみを辿る）
-    const stack: Array<{ nodeId: string; moves: string[] }> = [
-        { nodeId: branchNodeId, moves: pathMoves },
-    ];
-
-    while (stack.length > 0) {
-        const item = stack.pop();
-        if (!item) continue;
-        const { nodeId, moves } = item;
-
-        const node = tree.nodes.get(nodeId);
-        if (!node) continue;
-
-        const hasEval = node.eval?.scoreCp !== undefined || node.eval?.scoreMate !== undefined;
-
-        if (!onlyWithoutEval || !hasEval) {
-            jobs.push({
-                nodeId,
-                ply: node.ply,
-                moves: [...moves],
-                isMainLine: false,
-            });
-        }
-
-        // 子ノードをスタックに追加（メインラインのみ）
-        if (node.children.length > 0) {
-            const childId = node.children[0];
-            const childNode = tree.nodes.get(childId);
-            if (childNode?.usiMove) {
-                stack.push({
-                    nodeId: childId,
-                    moves: [...moves, childNode.usiMove],
                 });
             }
         }
