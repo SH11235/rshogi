@@ -111,7 +111,6 @@ const matchLayoutCssVars = {
 // テキストスタイル用Tailwindクラス定数
 const TEXT_CLASSES = {
     mutedSecondary: "text-xs text-muted-foreground",
-    handLabel: "text-xs font-semibold mb-1",
     moveCount: "text-center text-sm font-semibold text-foreground my-2",
 } as const;
 
@@ -149,17 +148,8 @@ function PlayerHandSection({
     onDecrement,
     flipBoard,
 }: PlayerHandSectionProps): ReactElement {
-    const ownerText = owner === "sente" ? "先手" : "後手";
     return (
         <div data-zone={`hand-${owner}`}>
-            <div className={TEXT_CLASSES.handLabel}>
-                <span
-                    className={`text-[15px] ${owner === "sente" ? "text-[hsl(var(--wafuu-shu))]" : "text-[hsl(210_70%_45%)]"}`}
-                >
-                    {ownerText}
-                </span>
-                <span>の持ち駒</span>
-            </div>
             <HandPiecesDisplay
                 owner={owner}
                 hand={hand}
@@ -1876,24 +1866,11 @@ export function ShogiMatch({
                                 {/* 盤の上側の持ち駒（通常:後手、反転時:先手） */}
                                 {(() => {
                                     const info = getHandInfo("top");
-                                    const ownerText = info.owner === "sente" ? "先手" : "後手";
                                     return (
                                         <div data-zone={`hand-${info.owner}`}>
-                                            {/* ラベル行: [持ち駒ラベル] [手数] [手番] */}
-                                            <div className="flex items-center justify-between mb-1 gap-4">
-                                                {/* 持ち駒ラベル（左） */}
-                                                <div
-                                                    className={`${TEXT_CLASSES.handLabel} !mb-0 whitespace-nowrap`}
-                                                >
-                                                    <span
-                                                        className={`text-[15px] ${info.owner === "sente" ? "text-[hsl(var(--wafuu-shu))]" : "text-[hsl(210_70%_45%)]"}`}
-                                                    >
-                                                        {ownerText}
-                                                    </span>
-                                                    <span>の持ち駒</span>
-                                                </div>
-
-                                                {/* 手数表示（中央） */}
+                                            {/* ステータス行: [手数] [手番] [反転ボタン] */}
+                                            <div className="flex items-center justify-end mb-1 gap-4">
+                                                {/* 手数表示 */}
                                                 <output
                                                     className={`${TEXT_CLASSES.moveCount} !m-0 whitespace-nowrap`}
                                                 >
@@ -1910,8 +1887,8 @@ export function ShogiMatch({
                                                     <span
                                                         className={`font-semibold text-[15px] ${
                                                             position.turn === "sente"
-                                                                ? "text-[hsl(var(--wafuu-shu))]"
-                                                                : "text-[hsl(210_70%_45%)]"
+                                                                ? "text-wafuu-shu"
+                                                                : "text-wafuu-ai"
                                                         }`}
                                                     >
                                                         {position.turn === "sente"

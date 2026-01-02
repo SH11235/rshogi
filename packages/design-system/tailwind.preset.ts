@@ -53,6 +53,8 @@ const preset: Omit<Config, "content"> = {
                     "sumi-light": "hsl(var(--wafuu-sumi-light))",
                     shu: "hsl(var(--wafuu-shu))",
                     "shu-light": "hsl(var(--wafuu-shu-light))",
+                    ai: "hsl(var(--wafuu-ai))",
+                    "ai-light": "hsl(var(--wafuu-ai-light))",
                     kin: "hsl(var(--wafuu-kin))",
                     kincha: "hsl(var(--wafuu-kincha))",
                     washi: "hsl(var(--wafuu-washi))",

@@ -81,8 +81,20 @@ export function HandPiecesDisplay({
     onDecrement,
     flipBoard = false,
 }: HandPiecesDisplayProps): ReactElement {
+    // 先手/後手マーカー（☗=U+2617, ☖=U+2616）
+    const ownerMarker = owner === "sente" ? "☗" : "☖";
+    // 先手: 朱色、後手: 藍色（wafuuテーマ）
+    const markerColorClass = owner === "sente" ? "text-wafuu-shu" : "text-wafuu-ai";
+
     return (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", minHeight: "44px" }}>
+        <div className="flex flex-wrap gap-1.5 min-h-[44px] items-center">
+            {/* 先手/後手マーカー */}
+            <span
+                className={`${markerColorClass} text-xl font-bold select-none shrink-0`}
+                title={owner === "sente" ? "先手" : "後手"}
+            >
+                {ownerMarker}
+            </span>
             {HAND_ORDER.map((piece) => {
                 const count = hand[piece] ?? 0;
 
