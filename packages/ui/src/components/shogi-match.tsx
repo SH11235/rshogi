@@ -1605,6 +1605,7 @@ export function ShogiMatch({
     );
 
     // SFENインポート（局面 + 指し手）
+    // インポート後は自動的に検討モードに入る
     const importSfen = useCallback(
         async (sfen: string, movesToLoad: string[]) => {
             const service = getPositionService();
@@ -1642,10 +1643,17 @@ export function ShogiMatch({
                 }
 
                 setSelection(null);
-                setMessage(null);
                 resetClocks(false);
                 legalCache.clear();
                 setPositionReady(true);
+
+                // インポート後は自動的に検討モードに入る
+                setIsEditMode(false);
+                setIsMatchRunning(false);
+                setIsEditPanelOpen(false);
+                setIsSettingsPanelOpen(false);
+                setMessage("局面をインポートしました。検討モードで閲覧・分岐作成ができます。");
+                setTimeout(() => setMessage(null), 4000);
             } catch (error) {
                 throw new Error(`SFENの適用に失敗しました: ${String(error)}`);
             }
@@ -1654,6 +1662,7 @@ export function ShogiMatch({
     );
 
     // KIFインポート（開始局面情報があれば使用）
+    // インポート後は自動的に検討モードに入る
     const importKif = useCallback(
         async (movesToLoad: string[], moveData: KifMoveData[], startSfenFromKif?: string) => {
             const service = getPositionService();
@@ -1682,6 +1691,14 @@ export function ShogiMatch({
             setInitialBoard(cloneBoard(startPosition.board));
 
             await loadMoves(movesToLoad, moveData, startPosition, startSfenToLoad);
+
+            // KIFインポート後は自動的に検討モードに入る
+            setIsEditMode(false);
+            setIsMatchRunning(false);
+            setIsEditPanelOpen(false);
+            setIsSettingsPanelOpen(false);
+            setMessage("棋譜をインポートしました。検討モードで閲覧・分岐作成ができます。");
+            setTimeout(() => setMessage(null), 4000);
         },
         [loadMoves],
     );
