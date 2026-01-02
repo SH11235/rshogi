@@ -150,33 +150,10 @@ export function findExistingBranchForPv(
     for (const childId of baseNode.children) {
         const child = tree.nodes.get(childId);
         if (child?.usiMove === firstMove) {
-            // 最初の手が一致。残りのPVも一致するか確認
-            let currentNode = child;
-            let allMatch = true;
-
-            for (let i = 1; i < pv.length; i++) {
-                const pvMove = pv[i];
-                if (currentNode.children.length === 0) {
-                    // 分岐の終端に達した。PVはまだ続くが、分岐にはない
-                    // これは「分岐より長いPV」なので、既存分岐とは見なさない
-                    allMatch = false;
-                    break;
-                }
-
-                // メインライン（最初の子）を辿る
-                const nextChildId = currentNode.children[0];
-                const nextChild = tree.nodes.get(nextChildId);
-                if (!nextChild || nextChild.usiMove !== pvMove) {
-                    allMatch = false;
-                    break;
-                }
-                currentNode = nextChild;
-            }
-
-            if (allMatch) {
-                // すべてのPVの手が既存の分岐と一致
-                return childId; // 分岐の最初のノードIDを返す
-            }
+            // 最初の手が一致 = 同じ分岐として扱う
+            // 分岐が既に存在する場合は、PVの残りが一致するかどうかに関わらず
+            // 「既存分岐あり」と判定する（重複追加を防ぐため）
+            return childId;
         }
     }
 

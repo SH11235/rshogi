@@ -126,9 +126,9 @@ interface KifuPanelProps {
     onAnalyzeBranch?: (branchNodeId: string) => void;
     /** 追加のクラス名（高さ調整用） */
     className?: string;
-    /** 最後に追加された分岐のnodeId（この分岐に直接遷移する） */
-    lastAddedBranchNodeId?: string | null;
-    /** lastAddedBranchNodeIdを処理したことを通知するコールバック */
+    /** 最後に追加された分岐の情報（この分岐に直接遷移する） */
+    lastAddedBranchInfo?: { ply: number; firstMove: string } | null;
+    /** lastAddedBranchInfoを処理したことを通知するコールバック */
     onLastAddedBranchHandled?: () => void;
     /** 選択中の分岐が変更されたときのコールバック（キーボードナビゲーション用） */
     onSelectedBranchChange?: (branchNodeId: string | null) => void;
@@ -554,7 +554,7 @@ export function KifuPanel({
     onBranchSwitch: _onBranchSwitch,
     onAnalyzeNode,
     onAnalyzeBranch,
-    lastAddedBranchNodeId,
+    lastAddedBranchInfo,
     onLastAddedBranchHandled,
     onSelectedBranchChange,
 }: KifuPanelProps): ReactElement {
@@ -606,29 +606,60 @@ export function KifuPanel({
         return getBranchMoves(kifuTree, selectedBranch.nodeId);
     }, [kifuTree, selectedBranch]);
 
+    // 処理済みの分岐情報を追跡するref（重複処理防止）
+    const processedBranchInfoRef = useRef<{ ply: number; firstMove: string } | null>(null);
+
     // 分岐が追加されたら直接「選択分岐」ビューに遷移
     useEffect(() => {
-        if (!lastAddedBranchNodeId) return;
+        if (!lastAddedBranchInfo) {
+            processedBranchInfoRef.current = null;
+            return;
+        }
 
-        // 追加された分岐を見つける
-        const addedBranch = branches.find((b) => b.nodeId === lastAddedBranchNodeId);
-        if (addedBranch) {
+        // 既に同じ情報を処理済みの場合はスキップ（重複実行防止）
+        if (
+            processedBranchInfoRef.current &&
+            processedBranchInfoRef.current.ply === lastAddedBranchInfo.ply &&
+            processedBranchInfoRef.current.firstMove === lastAddedBranchInfo.firstMove
+        ) {
+            return;
+        }
+
+        // デバッグログ
+        console.log("[KifuPanel] lastAddedBranchInfo changed:", lastAddedBranchInfo);
+        console.log(
+            "[KifuPanel] branches:",
+            branches.map((b) => ({ nodeId: b.nodeId, ply: b.ply })),
+        );
+
+        // ply + firstMove で分岐を検索
+        const branchInList = branches.find((b) => {
+            if (b.ply !== lastAddedBranchInfo.ply) return false;
+            const node = kifuTree?.nodes.get(b.nodeId);
+            return node?.usiMove === lastAddedBranchInfo.firstMove;
+        });
+        console.log("[KifuPanel] branchInList:", branchInList);
+
+        if (branchInList) {
+            // 処理済みとしてマーク
+            processedBranchInfoRef.current = lastAddedBranchInfo;
             // スクロール位置を保存
             if (listRef.current) {
                 mainScrollPositionRef.current = listRef.current.scrollTop;
             }
             // 追加された分岐を選択して「選択分岐」ビューに遷移
             setSelectedBranch({
-                nodeId: addedBranch.nodeId,
-                tabLabel: addedBranch.tabLabel,
+                nodeId: branchInList.nodeId,
+                tabLabel: branchInList.tabLabel,
             });
             setViewMode("selectedBranch");
-            // 処理完了を通知（分岐が見つかった場合のみ）
+            console.log("[KifuPanel] Set selectedBranch from branches:", branchInList.tabLabel);
+            // 処理完了を通知
             onLastAddedBranchHandled?.();
+        } else {
+            console.log("[KifuPanel] Branch not found by ply + firstMove!");
         }
-        // 注意: addedBranchが見つからない場合はクリアしない
-        // （branchesの更新がまだの可能性があるため、次回のレンダリングで再試行）
-    }, [lastAddedBranchNodeId, branches, onLastAddedBranchHandled]);
+    }, [lastAddedBranchInfo, branches, kifuTree, onLastAddedBranchHandled]);
 
     // 分岐がなくなった場合は本譜ビューに戻す＆分岐状態をクリア
     useEffect(() => {
@@ -636,11 +667,7 @@ export function KifuPanel({
             setViewMode("main");
             setSelectedBranch(null);
         }
-        // 分岐がなくなった場合、保留中の分岐遷移もクリア
-        if (branches.length === 0 && lastAddedBranchNodeId) {
-            onLastAddedBranchHandled?.();
-        }
-    }, [branches.length, viewMode, lastAddedBranchNodeId, onLastAddedBranchHandled]);
+    }, [branches.length, viewMode]);
 
     // 選択中の分岐が変更されたら親に通知（キーボードナビゲーション用）
     useEffect(() => {

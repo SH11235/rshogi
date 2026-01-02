@@ -74,6 +74,7 @@ import {
 import {
     collectBranchAnalysisJobs,
     collectTreeAnalysisJobs,
+    getAllBranches,
 } from "./shogi-match/utils/branchTreeUtils";
 import { isPromotable, PIECE_CAP, PIECE_LABELS } from "./shogi-match/utils/constants";
 import { exportToKifString } from "./shogi-match/utils/kifFormat";
@@ -305,8 +306,12 @@ export function ShogiMatch({
         targetPlies: number[];
         inProgress?: number[]; // 並列解析中の手番号
     } | null>(null);
-    // 最後に追加された分岐のnodeId（KifuPanelが直接その分岐ビューに遷移するため）
-    const [lastAddedBranchNodeId, setLastAddedBranchNodeId] = useState<string | null>(null);
+    // 最後に追加された分岐の情報（KifuPanelが直接その分岐ビューに遷移するため）
+    // nodeIdではなくply+firstMoveを使用（StrictModeでnodeIdが不整合になる問題を回避）
+    const [lastAddedBranchInfo, setLastAddedBranchInfo] = useState<{
+        ply: number;
+        firstMove: string;
+    } | null>(null);
     // 選択中の分岐ノードID（キーボードナビゲーション用）
     const [selectedBranchNodeId, setSelectedBranchNodeId] = useState<string | null>(null);
 
@@ -740,10 +745,9 @@ export function ShogiMatch({
             legalCache.clear();
 
             // 分岐が作成された場合は通知
-            if (willCreateBranch) {
-                // 新しく追加されたノードのIDを取得（addMoveの後はcurrentNodeIdが新ノード）
-                const newNodeId = navigation.tree.currentNodeId;
-                setLastAddedBranchNodeId(newNodeId);
+            if (willCreateBranch && currentNode) {
+                // 分岐点のply（currentNode）と最初の手（mv）を記録
+                setLastAddedBranchInfo({ ply: currentNode.ply, firstMove: mv });
                 setMessage("新しい変化を作成しました");
                 // メッセージを3秒後にクリア
                 setTimeout(() => setMessage(null), 3000);
@@ -776,7 +780,7 @@ export function ShogiMatch({
             setLastMove(undefined);
             setSelection(null);
             setMessage(null);
-            setLastAddedBranchNodeId(null); // 分岐状態をクリア
+            setLastAddedBranchInfo(null); // 分岐状態をクリア
             resetClocks(false);
 
             setIsMatchRunning(false);
@@ -816,7 +820,7 @@ export function ShogiMatch({
             setLastMove(undefined);
             setSelection(null);
             setMessage(null);
-            setLastAddedBranchNodeId(null); // 分岐状態をクリア
+            setLastAddedBranchInfo(null); // 分岐状態をクリア
             setEditFromSquare(null);
 
             legalCache.clear();
@@ -1402,7 +1406,7 @@ export function ShogiMatch({
 
             // 棋譜ナビゲーションをリセット
             navigation.reset(startPosition, startSfenToLoad);
-            setLastAddedBranchNodeId(null); // 分岐状態をクリア
+            setLastAddedBranchInfo(null); // 分岐状態をクリア
 
             // 各手を順番に追加
             let currentPos = startPosition;
@@ -1637,11 +1641,24 @@ export function ShogiMatch({
 
     // 分岐作成時の自動解析
     useEffect(() => {
-        if (lastAddedBranchNodeId && analysisSettings.autoAnalyzeBranch) {
-            // 分岐が追加された直後に自動解析を開始
-            handleAnalyzeBranch(lastAddedBranchNodeId);
+        if (lastAddedBranchInfo && analysisSettings.autoAnalyzeBranch) {
+            // ply + firstMove から分岐のnodeIdを見つける
+            const branches = getAllBranches(navigation.tree);
+            const branch = branches.find((b) => {
+                if (b.ply !== lastAddedBranchInfo.ply) return false;
+                const node = navigation.tree.nodes.get(b.nodeId);
+                return node?.usiMove === lastAddedBranchInfo.firstMove;
+            });
+            if (branch) {
+                handleAnalyzeBranch(branch.nodeId);
+            }
         }
-    }, [lastAddedBranchNodeId, analysisSettings.autoAnalyzeBranch, handleAnalyzeBranch]);
+    }, [
+        lastAddedBranchInfo,
+        analysisSettings.autoAnalyzeBranch,
+        handleAnalyzeBranch,
+        navigation.tree,
+    ]);
 
     // 一括解析をキャンセル
     const handleCancelBatchAnalysis = useCallback(() => {
@@ -1652,9 +1669,11 @@ export function ShogiMatch({
     // PVを分岐として追加するコールバック（シグナル付き）
     const handleAddPvAsBranch = useCallback(
         (ply: number, pv: string[]) => {
-            // 分岐が実際に追加された場合、そのnodeIdを記録
-            addPvAsBranch(ply, pv, (nodeId) => {
-                setLastAddedBranchNodeId(nodeId);
+            console.log("[ShogiMatch] handleAddPvAsBranch called:", { ply, pv });
+            // 分岐が実際に追加された場合、ply+firstMoveを記録
+            addPvAsBranch(ply, pv, (info) => {
+                console.log("[ShogiMatch] addPvAsBranch callback called with info:", info);
+                setLastAddedBranchInfo(info);
             });
         },
         [addPvAsBranch],
@@ -1694,7 +1713,7 @@ export function ShogiMatch({
 
                 // 棋譜ナビゲーションをリセット
                 navigation.reset(newPosition, sfen);
-                setLastAddedBranchNodeId(null); // 分岐状態をクリア
+                setLastAddedBranchInfo(null); // 分岐状態をクリア
 
                 // 指し手がある場合は適用
                 if (movesToLoad.length > 0) {
@@ -2218,8 +2237,8 @@ export function ShogiMatch({
                             positionHistory={positionHistory}
                             onAddPvAsBranch={handleAddPvAsBranch}
                             onPreviewPv={handlePreviewPv}
-                            lastAddedBranchNodeId={lastAddedBranchNodeId}
-                            onLastAddedBranchHandled={() => setLastAddedBranchNodeId(null)}
+                            lastAddedBranchInfo={lastAddedBranchInfo}
+                            onLastAddedBranchHandled={() => setLastAddedBranchInfo(null)}
                             onSelectedBranchChange={setSelectedBranchNodeId}
                             onAnalyzePly={handleAnalyzePly}
                             isAnalyzing={isAnalyzing}
