@@ -37,13 +37,7 @@ import {
     type SideSetting,
 } from "./shogi-match/components/MatchSettingsPanel";
 import { PvPreviewDialog } from "./shogi-match/components/PvPreviewDialog";
-import {
-    applyDropResult,
-    DeleteZone,
-    DragGhost,
-    type DropResult,
-    usePieceDnd,
-} from "./shogi-match/dnd";
+import { applyDropResult, DragGhost, type DropResult, usePieceDnd } from "./shogi-match/dnd";
 
 // EngineOption 型を外部に再エクスポート
 export type { EngineOption };
@@ -109,6 +103,17 @@ const baseCard: CSSProperties = {
     boxShadow: "0 14px 28px rgba(0,0,0,0.12)",
 };
 
+const MATCH_LAYOUT_STYLE = {
+    display: "flex",
+    flexDirection: "column",
+    gap: "8px",
+    alignItems: "center",
+    padding: "12px 0",
+    "--kifu-panel-max-h": "min(60vh, calc(100dvh - 320px))",
+    "--kifu-panel-branch-max-h": "calc(var(--kifu-panel-max-h) - 40px)",
+    "--shogi-cell-size": "44px",
+} as CSSProperties;
+
 // スタイル定数（保守性・一貫性のため）
 const TEXT_STYLES = {
     mutedSecondary: {
@@ -128,6 +133,22 @@ const TEXT_STYLES = {
         margin: "8px 0",
     } as CSSProperties,
 } as const;
+
+const DELETE_HINT_STYLE: CSSProperties = {
+    position: "absolute",
+    top: "8px",
+    right: "8px",
+    padding: "4px 8px",
+    borderRadius: "999px",
+    border: "1px dashed hsl(var(--wafuu-border))",
+    background: "hsl(var(--wafuu-washi-warm))",
+    color: "hsl(var(--wafuu-sumi))",
+    fontSize: "11px",
+    fontWeight: 600,
+    letterSpacing: "0.02em",
+    pointerEvents: "none",
+    boxShadow: "0 6px 12px rgba(0,0,0,0.08)",
+} as CSSProperties;
 
 // 持ち駒表示セクションコンポーネント
 interface PlayerHandSectionProps {
@@ -1799,6 +1820,7 @@ export function ShogiMatch({
     );
 
     const candidateNote = positionReady ? null : "局面を読み込み中です。";
+    const isDraggingPiece = isEditMode && dndController.state.isDragging;
 
     const uiEngineOptions = useMemo(() => {
         // 内蔵エンジンの A/B スロットは UI に露出させず、単一の「内蔵エンジン」として扱う。
@@ -1860,15 +1882,7 @@ export function ShogiMatch({
                 />
             </div>
 
-            <section
-                style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: "12px",
-                    alignItems: "center",
-                    padding: "16px 0",
-                }}
-            >
+            <section style={MATCH_LAYOUT_STYLE}>
                 {/* 勝敗表示バナー */}
                 <GameResultBanner
                     result={gameResult}
@@ -1883,7 +1897,7 @@ export function ShogiMatch({
                 <div
                     style={{
                         display: "flex",
-                        gap: "24px",
+                        gap: "16px",
                         alignItems: "flex-start",
                     }}
                 >
@@ -1892,15 +1906,23 @@ export function ShogiMatch({
                         style={{
                             display: "flex",
                             flexDirection: "column",
-                            gap: "12px",
+                            gap: "8px",
                             alignItems: "center",
                             flexShrink: 0,
                         }}
                     >
                         <div
                             ref={boardSectionRef}
-                            style={{ ...baseCard, padding: "12px", width: "fit-content" }}
+                            style={{
+                                ...baseCard,
+                                padding: "12px",
+                                width: "fit-content",
+                                position: "relative",
+                            }}
                         >
+                            {isDraggingPiece ? (
+                                <div style={DELETE_HINT_STYLE}>盤外へドラッグで削除</div>
+                            ) : null}
                             <div
                                 style={{
                                     marginTop: "8px",
@@ -1908,10 +1930,7 @@ export function ShogiMatch({
                                     gap: "8px",
                                     flexDirection: "column",
                                     alignItems: "center",
-                                    touchAction:
-                                        isEditMode && dndController.state.isDragging
-                                            ? "none"
-                                            : "auto",
+                                    touchAction: isDraggingPiece ? "none" : "auto",
                                 }}
                             >
                                 {/* 盤の上側の持ち駒（通常:後手、反転時:先手） */}
@@ -2107,14 +2126,6 @@ export function ShogiMatch({
                                         />
                                     );
                                 })()}
-
-                                {/* DnD 削除ゾーン（編集モード時のみ表示） */}
-                                {isEditMode && (
-                                    <DeleteZone
-                                        dndState={dndController.state}
-                                        className="mt-2 h-14 w-full"
-                                    />
-                                )}
                             </div>
                         </div>
                     </div>
@@ -2124,7 +2135,7 @@ export function ShogiMatch({
                         style={{
                             display: "flex",
                             flexDirection: "column",
-                            gap: "10px",
+                            gap: "8px",
                             flexShrink: 0,
                         }}
                     >
@@ -2186,7 +2197,7 @@ export function ShogiMatch({
                         style={{
                             display: "flex",
                             flexDirection: "column",
-                            gap: "10px",
+                            gap: "8px",
                             flexShrink: 0,
                         }}
                     >

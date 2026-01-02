@@ -1418,7 +1418,7 @@ export function KifuPanel({
 
                 {/* 分岐一覧ビュー */}
                 {viewMode === "branches" && (
-                    <div className="max-h-[70vh] overflow-auto my-2">
+                    <div className="max-h-[var(--kifu-panel-max-h,70vh)] overflow-auto my-2">
                         {branches.length === 0 ? (
                             <div className="text-[13px] text-muted-foreground text-center py-4">
                                 分岐がありません
@@ -1487,7 +1487,7 @@ export function KifuPanel({
                                 </div>
                             );
                         })()}
-                        <div className="max-h-[calc(70vh-40px)] overflow-auto">
+                        <div className="max-h-[var(--kifu-panel-branch-max-h,calc(70vh-40px))] overflow-auto">
                             {selectedBranchMoves.length === 0 ? (
                                 <div className="text-[13px] text-muted-foreground text-center py-4">
                                     分岐データがありません
@@ -1595,7 +1595,10 @@ export function KifuPanel({
 
                 {/* 本譜ビュー（メインライン） */}
                 {viewMode === "main" && (
-                    <div ref={listRef} className="max-h-[70vh] overflow-auto my-2">
+                    <div
+                        ref={listRef}
+                        className="max-h-[var(--kifu-panel-max-h,70vh)] overflow-auto my-2"
+                    >
                         {kifMoves.length === 0 ? (
                             <div className="text-[13px] text-muted-foreground text-center py-4">
                                 まだ指し手がありません
