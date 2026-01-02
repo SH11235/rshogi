@@ -568,24 +568,26 @@ export function KifuPanel({
 
     // 分岐が追加されたら直接「選択分岐」ビューに遷移
     useEffect(() => {
-        if (lastAddedBranchNodeId && branches.length > 0) {
-            // 追加された分岐を見つける
-            const addedBranch = branches.find((b) => b.nodeId === lastAddedBranchNodeId);
-            if (addedBranch) {
-                // スクロール位置を保存
-                if (listRef.current) {
-                    mainScrollPositionRef.current = listRef.current.scrollTop;
-                }
-                // 追加された分岐を選択して「選択分岐」ビューに遷移
-                setSelectedBranch({
-                    nodeId: addedBranch.nodeId,
-                    tabLabel: addedBranch.tabLabel,
-                });
-                setViewMode("selectedBranch");
+        if (!lastAddedBranchNodeId) return;
+
+        // 追加された分岐を見つける
+        const addedBranch = branches.find((b) => b.nodeId === lastAddedBranchNodeId);
+        if (addedBranch) {
+            // スクロール位置を保存
+            if (listRef.current) {
+                mainScrollPositionRef.current = listRef.current.scrollTop;
             }
-            // 処理完了を通知
+            // 追加された分岐を選択して「選択分岐」ビューに遷移
+            setSelectedBranch({
+                nodeId: addedBranch.nodeId,
+                tabLabel: addedBranch.tabLabel,
+            });
+            setViewMode("selectedBranch");
+            // 処理完了を通知（分岐が見つかった場合のみ）
             onLastAddedBranchHandled?.();
         }
+        // 注意: addedBranchが見つからない場合はクリアしない
+        // （branchesの更新がまだの可能性があるため、次回のレンダリングで再試行）
     }, [lastAddedBranchNodeId, branches, onLastAddedBranchHandled]);
 
     // 分岐がなくなった場合は本譜ビューに戻す
