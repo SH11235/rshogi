@@ -773,6 +773,7 @@ export function ShogiMatch({
             setLastMove(undefined);
             setSelection(null);
             setMessage(null);
+            setLastAddedBranchNodeId(null); // 分岐状態をクリア
             resetClocks(false);
 
             setIsMatchRunning(false);
@@ -812,6 +813,7 @@ export function ShogiMatch({
             setLastMove(undefined);
             setSelection(null);
             setMessage(null);
+            setLastAddedBranchNodeId(null); // 分岐状態をクリア
             setEditFromSquare(null);
 
             legalCache.clear();
@@ -1397,6 +1399,7 @@ export function ShogiMatch({
 
             // 棋譜ナビゲーションをリセット
             navigation.reset(startPosition, startSfenToLoad);
+            setLastAddedBranchNodeId(null); // 分岐状態をクリア
 
             // 各手を順番に追加
             let currentPos = startPosition;
@@ -1644,6 +1647,7 @@ export function ShogiMatch({
 
                 // 棋譜ナビゲーションをリセット
                 navigation.reset(newPosition, sfen);
+                setLastAddedBranchNodeId(null); // 分岐状態をクリア
 
                 // 指し手がある場合は適用
                 if (movesToLoad.length > 0) {

@@ -590,13 +590,17 @@ export function KifuPanel({
         // （branchesの更新がまだの可能性があるため、次回のレンダリングで再試行）
     }, [lastAddedBranchNodeId, branches, onLastAddedBranchHandled]);
 
-    // 分岐がなくなった場合は本譜ビューに戻す
+    // 分岐がなくなった場合は本譜ビューに戻す＆分岐状態をクリア
     useEffect(() => {
         if (branches.length === 0 && viewMode !== "main") {
             setViewMode("main");
             setSelectedBranch(null);
         }
-    }, [branches.length, viewMode]);
+        // 分岐がなくなった場合、保留中の分岐遷移もクリア
+        if (branches.length === 0 && lastAddedBranchNodeId) {
+            onLastAddedBranchHandled?.();
+        }
+    }, [branches.length, viewMode, lastAddedBranchNodeId, onLastAddedBranchHandled]);
 
     // 選択中の分岐が変更されたら親に通知（キーボードナビゲーション用）
     useEffect(() => {

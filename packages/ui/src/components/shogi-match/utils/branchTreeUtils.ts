@@ -520,7 +520,7 @@ export function collectTreeAnalysisJobs(
  * @param options オプション
  * @returns 解析ジョブの配列
  */
-function collectBranchAnalysisJobs(
+export function collectBranchAnalysisJobs(
     tree: KifuTree,
     branchNodeId: string,
     options: {
