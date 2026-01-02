@@ -745,7 +745,8 @@ export function ShogiMatch({
             legalCache.clear();
 
             // 分岐が作成された場合は通知
-            if (willCreateBranch && currentNode) {
+            // メインライン上でのみ通知（サブ分岐はgetAllBranchesで検索されないため）
+            if (willCreateBranch && currentNode && navigation.state.isOnMainLine) {
                 // 分岐点のply（currentNode）と最初の手（mv）を記録
                 setLastAddedBranchInfo({ ply: currentNode.ply, firstMove: mv });
                 setMessage("新しい変化を作成しました");
@@ -2263,6 +2264,7 @@ export function ShogiMatch({
                             onAnalyzeNode={handleAnalyzeNode}
                             onAnalyzeBranch={handleAnalyzeBranch}
                             onStartTreeBatchAnalysis={handleStartTreeBatchAnalysis}
+                            isOnMainLine={navigation.state.isOnMainLine}
                         />
                     </div>
                 </div>

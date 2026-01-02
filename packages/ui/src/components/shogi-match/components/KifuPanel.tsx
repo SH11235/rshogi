@@ -137,6 +137,8 @@ interface KifuPanelProps {
     onLastAddedBranchHandled?: () => void;
     /** 選択中の分岐が変更されたときのコールバック（キーボードナビゲーション用） */
     onSelectedBranchChange?: (branchNodeId: string | null) => void;
+    /** 現在位置がメインライン上にあるか（PV分岐追加の制御用） */
+    isOnMainLine?: boolean;
 }
 
 /**
@@ -329,6 +331,7 @@ function ExpandedMoveDetails({
     analyzingPly,
     kifuTree,
     onCollapse,
+    isOnMainLine = true,
 }: {
     move: KifMove;
     position: PositionState;
@@ -339,6 +342,8 @@ function ExpandedMoveDetails({
     analyzingPly?: number;
     kifuTree?: KifuTree;
     onCollapse: () => void;
+    /** 現在位置がメインライン上にあるか（falseの場合はPV分岐追加を無効化） */
+    isOnMainLine?: boolean;
 }): ReactElement {
     // PVをKIF形式に変換
     const pvDisplay = useMemo((): PvDisplayMove[] | null => {
@@ -518,26 +523,12 @@ function ExpandedMoveDetails({
                             盤面で確認
                         </button>
                     )}
-                    {onAddBranch && move.pv && (
-                        <>
-                            {/* 本譜と完全一致の場合 */}
-                            {pvComparison?.type === "identical" && (
-                                <div
-                                    className="
-                                        flex-1 px-3 py-1.5 text-[11px] text-center
-                                        bg-muted/50 text-muted-foreground
-                                        rounded border border-border
-                                    "
-                                >
-                                    <span className="mr-1">✓</span>
-                                    本譜通り
-                                </div>
-                            )}
-                            {/* 途中から分岐する場合 */}
-                            {pvComparison?.type === "diverges_later" &&
-                                pvComparison.divergePly !== undefined &&
-                                pvComparison.divergeIndex !== undefined &&
-                                (existingBranchNodeId ? (
+                    {onAddBranch &&
+                        move.pv &&
+                        (isOnMainLine ? (
+                            <>
+                                {/* 本譜と完全一致の場合 */}
+                                {pvComparison?.type === "identical" && (
                                     <div
                                         className="
                                             flex-1 px-3 py-1.5 text-[11px] text-center
@@ -546,65 +537,96 @@ function ExpandedMoveDetails({
                                         "
                                     >
                                         <span className="mr-1">✓</span>
-                                        分岐追加済み
+                                        本譜通り
                                     </div>
-                                ) : (
-                                    <button
-                                        type="button"
-                                        onClick={() => {
-                                            const pvFromDiverge = move.pv?.slice(
-                                                pvComparison.divergeIndex,
-                                            );
-                                            if (
-                                                pvFromDiverge &&
-                                                pvFromDiverge.length > 0 &&
-                                                pvComparison.divergePly !== undefined
-                                            ) {
-                                                onAddBranch(pvComparison.divergePly, pvFromDiverge);
-                                            }
-                                        }}
-                                        className="
-                                            flex-1 px-3 py-1.5 text-[11px]
-                                            bg-[hsl(var(--wafuu-kin)/0.1)] hover:bg-[hsl(var(--wafuu-kin)/0.2)]
-                                            text-[hsl(var(--wafuu-sumi))]
-                                            rounded border border-[hsl(var(--wafuu-kin)/0.3)]
-                                            transition-colors cursor-pointer
-                                        "
-                                    >
-                                        <span className="mr-1">&#128194;</span>
-                                        {pvComparison.divergePly + 1}手目から分岐を追加
-                                    </button>
-                                ))}
-                            {/* 最初から異なる場合（従来通り） */}
-                            {(pvComparison?.type === "diverges_first" || !pvComparison) &&
-                                (existingBranchNodeId ? (
-                                    <div
-                                        className="
-                                            flex-1 px-3 py-1.5 text-[11px] text-center
-                                            bg-muted/50 text-muted-foreground
-                                            rounded border border-border
-                                        "
-                                    >
-                                        <span className="mr-1">✓</span>
-                                        分岐追加済み
-                                    </div>
-                                ) : (
-                                    <button
-                                        type="button"
-                                        onClick={() => onAddBranch(move.ply, move.pv ?? [])}
-                                        className="
-                                            flex-1 px-3 py-1.5 text-[11px]
-                                            bg-muted hover:bg-muted/80
-                                            rounded border border-border
-                                            transition-colors cursor-pointer
-                                        "
-                                    >
-                                        <span className="mr-1">&#128194;</span>
-                                        分岐として保存
-                                    </button>
-                                ))}
-                        </>
-                    )}
+                                )}
+                                {/* 途中から分岐する場合 */}
+                                {pvComparison?.type === "diverges_later" &&
+                                    pvComparison.divergePly !== undefined &&
+                                    pvComparison.divergeIndex !== undefined &&
+                                    (existingBranchNodeId ? (
+                                        <div
+                                            className="
+                                                flex-1 px-3 py-1.5 text-[11px] text-center
+                                                bg-muted/50 text-muted-foreground
+                                                rounded border border-border
+                                            "
+                                        >
+                                            <span className="mr-1">✓</span>
+                                            分岐追加済み
+                                        </div>
+                                    ) : (
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                const pvFromDiverge = move.pv?.slice(
+                                                    pvComparison.divergeIndex,
+                                                );
+                                                if (
+                                                    pvFromDiverge &&
+                                                    pvFromDiverge.length > 0 &&
+                                                    pvComparison.divergePly !== undefined
+                                                ) {
+                                                    onAddBranch(
+                                                        pvComparison.divergePly,
+                                                        pvFromDiverge,
+                                                    );
+                                                }
+                                            }}
+                                            className="
+                                                flex-1 px-3 py-1.5 text-[11px]
+                                                bg-[hsl(var(--wafuu-kin)/0.1)] hover:bg-[hsl(var(--wafuu-kin)/0.2)]
+                                                text-[hsl(var(--wafuu-sumi))]
+                                                rounded border border-[hsl(var(--wafuu-kin)/0.3)]
+                                                transition-colors cursor-pointer
+                                            "
+                                        >
+                                            <span className="mr-1">&#128194;</span>
+                                            {pvComparison.divergePly + 1}手目から分岐を追加
+                                        </button>
+                                    ))}
+                                {/* 最初から異なる場合（従来通り） */}
+                                {(pvComparison?.type === "diverges_first" || !pvComparison) &&
+                                    (existingBranchNodeId ? (
+                                        <div
+                                            className="
+                                                flex-1 px-3 py-1.5 text-[11px] text-center
+                                                bg-muted/50 text-muted-foreground
+                                                rounded border border-border
+                                            "
+                                        >
+                                            <span className="mr-1">✓</span>
+                                            分岐追加済み
+                                        </div>
+                                    ) : (
+                                        <button
+                                            type="button"
+                                            onClick={() => onAddBranch(move.ply, move.pv ?? [])}
+                                            className="
+                                                flex-1 px-3 py-1.5 text-[11px]
+                                                bg-muted hover:bg-muted/80
+                                                rounded border border-border
+                                                transition-colors cursor-pointer
+                                            "
+                                        >
+                                            <span className="mr-1">&#128194;</span>
+                                            分岐として保存
+                                        </button>
+                                    ))}
+                            </>
+                        ) : (
+                            <div
+                                className="
+                                    flex-1 px-3 py-1.5 text-[11px] text-center
+                                    bg-muted/30 text-muted-foreground
+                                    rounded border border-border/50
+                                "
+                                title="分岐上にいるため、本譜への分岐追加は利用できません"
+                            >
+                                <span className="mr-1 opacity-50">&#128194;</span>
+                                本譜に戻ると分岐追加可能
+                            </div>
+                        ))}
                 </div>
             )}
         </section>
@@ -871,6 +893,7 @@ export function KifuPanel({
     lastAddedBranchInfo,
     onLastAddedBranchHandled,
     onSelectedBranchChange,
+    isOnMainLine = true,
 }: KifuPanelProps): ReactElement {
     // _onBranchSwitch: 将来的に分岐切り替え機能で使用予定
     const listRef = useRef<HTMLDivElement>(null);
@@ -1701,6 +1724,7 @@ export function KifuPanel({
                                                 analyzingPly={analyzingPly}
                                                 kifuTree={kifuTree}
                                                 onCollapse={() => setExpandedMoveDetail(null)}
+                                                isOnMainLine={isOnMainLine}
                                             />
                                         </div>
                                     ) : null;

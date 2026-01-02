@@ -75,6 +75,8 @@ interface KifuNavigationState {
     isRewound: boolean;
     /** 進む操作が可能か（現在ノードに子がある） */
     canGoForward: boolean;
+    /** 現在位置がメインライン上にあるか */
+    isOnMainLine: boolean;
 }
 
 /** フックの初期化オプション */
@@ -552,6 +554,22 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
             endNode = nextNode;
         }
 
+        // 現在位置がメインライン上にあるかを判定
+        // ルートから現在位置まで、各ノードが親の最初の子（children[0]）であればメインライン上
+        let isOnMainLine = true;
+        let checkNodeId: string | null = tree.currentNodeId;
+        while (checkNodeId !== null && isOnMainLine) {
+            const checkNode = tree.nodes.get(checkNodeId);
+            if (!checkNode) break;
+            if (checkNode.parentId !== null) {
+                const parent = tree.nodes.get(checkNode.parentId);
+                if (parent && parent.children[0] !== checkNodeId) {
+                    isOnMainLine = false;
+                }
+            }
+            checkNodeId = checkNode.parentId;
+        }
+
         return {
             currentPly: currentNode.ply,
             currentNodeId: tree.currentNodeId,
@@ -562,6 +580,7 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
             branchCount: branchInfo.count,
             isRewound: isRewoundTree(tree),
             canGoForward: currentNode.children.length > 0,
+            isOnMainLine,
         };
     }, [tree]);
 
