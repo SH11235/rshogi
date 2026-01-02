@@ -7,6 +7,7 @@
 //! - **USIモード**: 外部エンジンバイナリをUSIプロトコル経由で測定
 //! - **複数スレッド対応**: スレッド数別のスケーリング測定
 //! - **並列効率計算**: 理想的なスケーリングとの比較
+//! - **Floodgate棋譜取得**: Floodgateサーバーから棋譜をダウンロード・変換
 //!
 //! ## 使用例
 //!
@@ -37,7 +38,9 @@
 //! report.print_summary();
 //! ```
 
+pub mod common;
 pub mod config;
+pub mod nnue_trainer;
 pub mod positions;
 pub mod report;
 pub mod runner;
