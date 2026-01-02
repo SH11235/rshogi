@@ -302,8 +302,8 @@ export function ShogiMatch({
         targetPlies: number[];
         inProgress?: number[]; // 並列解析中の手番号
     } | null>(null);
-    // 分岐追加シグナル（カウンターが増えるとKifuPanelがツリービューに切り替わる）
-    const [branchAddedSignal, setBranchAddedSignal] = useState(0);
+    // 最後に追加された分岐のnodeId（KifuPanelが直接その分岐ビューに遷移するため）
+    const [lastAddedBranchNodeId, setLastAddedBranchNodeId] = useState<string | null>(null);
     // 選択中の分岐ノードID（キーボードナビゲーション用）
     const [selectedBranchNodeId, setSelectedBranchNodeId] = useState<string | null>(null);
 
@@ -738,7 +738,9 @@ export function ShogiMatch({
 
             // 分岐が作成された場合は通知
             if (willCreateBranch) {
-                setBranchAddedSignal((prev) => prev + 1);
+                // 新しく追加されたノードのIDを取得（addMoveの後はcurrentNodeIdが新ノード）
+                const newNodeId = navigation.tree.currentNodeId;
+                setLastAddedBranchNodeId(newNodeId);
                 setMessage("新しい変化を作成しました");
                 // メッセージを3秒後にクリア
                 setTimeout(() => setMessage(null), 3000);
@@ -1600,9 +1602,9 @@ export function ShogiMatch({
     // PVを分岐として追加するコールバック（シグナル付き）
     const handleAddPvAsBranch = useCallback(
         (ply: number, pv: string[]) => {
-            // 分岐が実際に追加された場合のみシグナルをインクリメント
-            addPvAsBranch(ply, pv, () => {
-                setBranchAddedSignal((prev) => prev + 1);
+            // 分岐が実際に追加された場合、そのnodeIdを記録
+            addPvAsBranch(ply, pv, (nodeId) => {
+                setLastAddedBranchNodeId(nodeId);
             });
         },
         [addPvAsBranch],
@@ -2165,7 +2167,8 @@ export function ShogiMatch({
                             positionHistory={positionHistory}
                             onAddPvAsBranch={handleAddPvAsBranch}
                             onPreviewPv={handlePreviewPv}
-                            branchAddedSignal={branchAddedSignal}
+                            lastAddedBranchNodeId={lastAddedBranchNodeId}
+                            onLastAddedBranchHandled={() => setLastAddedBranchNodeId(null)}
                             onSelectedBranchChange={setSelectedBranchNodeId}
                             onAnalyzePly={handleAnalyzePly}
                             isAnalyzing={isAnalyzing}

@@ -113,6 +113,77 @@ export function comparePvWithMainLine(
 }
 
 /**
+ * PVが既存の分岐と一致するかを判定
+ *
+ * @param tree 棋譜ツリー
+ * @param basePly PVの起点手数（この手を指した後の局面からPVが始まる）
+ * @param pv PV（読み筋）の手順
+ * @returns 一致する分岐のnodeIdがあればそれを返す、なければnull
+ */
+export function findExistingBranchForPv(
+    tree: KifuTree,
+    basePly: number,
+    pv: string[],
+): string | null {
+    if (pv.length === 0) {
+        return null;
+    }
+
+    // basePlyが負の値の場合は無効
+    if (basePly < 0) {
+        return null;
+    }
+
+    // basePlyのノードを取得（メインラインから）
+    const baseNodeId = findNodeByPlyInMainLine(tree, basePly);
+    if (!baseNodeId) {
+        return null;
+    }
+
+    const baseNode = tree.nodes.get(baseNodeId);
+    if (!baseNode) {
+        return null;
+    }
+
+    // PVの最初の手が既存の子（分岐含む）にあるか確認
+    const firstMove = pv[0];
+    for (const childId of baseNode.children) {
+        const child = tree.nodes.get(childId);
+        if (child?.usiMove === firstMove) {
+            // 最初の手が一致。残りのPVも一致するか確認
+            let currentNode = child;
+            let allMatch = true;
+
+            for (let i = 1; i < pv.length; i++) {
+                const pvMove = pv[i];
+                if (currentNode.children.length === 0) {
+                    // 分岐の終端に達した。PVはまだ続くが、分岐にはない
+                    // これは「分岐より長いPV」なので、既存分岐とは見なさない
+                    allMatch = false;
+                    break;
+                }
+
+                // メインライン（最初の子）を辿る
+                const nextChildId = currentNode.children[0];
+                const nextChild = tree.nodes.get(nextChildId);
+                if (!nextChild || nextChild.usiMove !== pvMove) {
+                    allMatch = false;
+                    break;
+                }
+                currentNode = nextChild;
+            }
+
+            if (allMatch) {
+                // すべてのPVの手が既存の分岐と一致
+                return childId; // 分岐の最初のノードIDを返す
+            }
+        }
+    }
+
+    return null;
+}
+
+/**
  * 文字列がSquare型として有効かどうかを判定するtype guard
  */
 function isSquare(value: string): value is Square {

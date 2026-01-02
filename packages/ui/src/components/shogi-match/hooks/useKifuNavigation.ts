@@ -113,7 +113,7 @@ interface UseKifuNavigationResult {
     /** 評価値を記録（ノードIDで指定、分岐内のノード用） */
     recordEvalByNodeId: (nodeId: string, event: EngineInfoEvent) => void;
     /** PVを分岐として追加（onAddedは分岐が追加された場合にのみ呼ばれる） */
-    addPvAsBranch: (ply: number, pv: string[], onAdded?: () => void) => void;
+    addPvAsBranch: (ply: number, pv: string[], onAdded?: (nodeId: string) => void) => void;
     /** 新規対局でリセット */
     reset: (startPosition: PositionState, startSfen: string) => void;
     /** 現在のラインの指し手配列を取得（互換性用） */
@@ -425,68 +425,78 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
      * @param pv PV（読み筋）の手順
      * @param onAdded 分岐が追加された場合に呼ばれるコールバック
      */
-    const addPvAsBranch = useCallback((ply: number, pv: string[], onAdded?: () => void) => {
-        if (pv.length === 0) return;
+    const addPvAsBranch = useCallback(
+        (ply: number, pv: string[], onAdded?: (nodeId: string) => void) => {
+            if (pv.length === 0) return;
 
-        pathCacheRef.current = null; // キャッシュを無効化
-        setTree((prev) => {
-            // 指定plyのノードを探す（現在のパスから、見つからなければメインラインから）
-            let nodeId = findNodeByPlyInCurrentPath(prev, ply);
-            if (!nodeId) {
-                nodeId = findNodeByPlyInMainLine(prev, ply);
-            }
-            if (!nodeId) {
-                return prev;
-            }
-
-            const node = prev.nodes.get(nodeId);
-            if (!node) {
-                return prev;
-            }
-
-            // PVの最初の手が既存の子にあるか確認
-            const firstMove = pv[0];
-            const existingChild = node.children
-                .map((id) => prev.nodes.get(id))
-                .find((child) => child?.usiMove === firstMove);
-
-            if (existingChild) {
-                // 既に同じ手が存在する場合は何もしない
-                return prev;
-            }
-
-            // 新しい分岐を追加
-            let currentTree = goToNode(prev, nodeId);
-            let currentPosition = node.positionAfter;
-            let addedMoves = 0;
-
-            for (const move of pv) {
-                const moveResult = applyMoveWithState(currentPosition, move, {
-                    validateTurn: false,
-                });
-                if (!moveResult.ok) {
-                    // 無効な手があれば終了
-                    break;
+            pathCacheRef.current = null; // キャッシュを無効化
+            setTree((prev) => {
+                // 指定plyのノードを探す（現在のパスから、見つからなければメインラインから）
+                let nodeId = findNodeByPlyInCurrentPath(prev, ply);
+                if (!nodeId) {
+                    nodeId = findNodeByPlyInMainLine(prev, ply);
                 }
-                currentTree = addMoveToTree(currentTree, move, moveResult.next);
-                currentPosition = moveResult.next;
-                addedMoves++;
-            }
+                if (!nodeId) {
+                    return prev;
+                }
 
-            // 元の位置に戻る
-            const result = goToNode(currentTree, nodeId);
+                const node = prev.nodes.get(nodeId);
+                if (!node) {
+                    return prev;
+                }
 
-            // 分岐が追加されたらコールバックを呼ぶ
-            if (addedMoves > 0 && onAdded) {
-                // 次のイベントループで呼び出す（state更新後に実行されるように）
-                // 注意: コンポーネントがアンマウントされた後に実行される可能性があるが、
-                // 現状では問題ないため、シンプルな実装を維持
-                setTimeout(onAdded, 0);
-            }
+                // PVの最初の手が既存の子にあるか確認
+                const firstMove = pv[0];
+                const existingChild = node.children
+                    .map((id) => prev.nodes.get(id))
+                    .find((child) => child?.usiMove === firstMove);
 
-            return result;
-        });
-    }, []);
+                if (existingChild) {
+                    // 既に同じ手が存在する場合は何もしない
+                    return prev;
+                }
+
+                // 新しい分岐を追加
+                let currentTree = goToNode(prev, nodeId);
+                let currentPosition = node.positionAfter;
+                let addedMoves = 0;
+                let firstAddedNodeId: string | null = null;
+
+                for (const move of pv) {
+                    const moveResult = applyMoveWithState(currentPosition, move, {
+                        validateTurn: false,
+                    });
+                    if (!moveResult.ok) {
+                        // 無効な手があれば終了
+                        break;
+                    }
+                    currentTree = addMoveToTree(currentTree, move, moveResult.next);
+
+                    // 最初に追加されたノードのIDを記録
+                    if (addedMoves === 0) {
+                        firstAddedNodeId = currentTree.currentNodeId;
+                    }
+
+                    currentPosition = moveResult.next;
+                    addedMoves++;
+                }
+
+                // 元の位置に戻る
+                const result = goToNode(currentTree, nodeId);
+
+                // 分岐が追加されたらコールバックを呼ぶ（nodeIdを渡す）
+                if (addedMoves > 0 && onAdded && firstAddedNodeId) {
+                    // 次のイベントループで呼び出す（state更新後に実行されるように）
+                    // 注意: コンポーネントがアンマウントされた後に実行される可能性があるが、
+                    // 現状では問題ないため、シンプルな実装を維持
+                    setTimeout(() => onAdded(firstAddedNodeId), 0);
+                }
+
+                return result;
+            });
+        },
+        [],
+    );
 
     /**
      * リセット

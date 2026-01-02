@@ -10,7 +10,11 @@ import type { ReactElement } from "react";
 import { useMemo, useState } from "react";
 import { Popover, PopoverContent, PopoverTrigger } from "../../popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../tooltip";
-import { comparePvWithMainLine, type PvMainLineComparison } from "../utils/branchTreeUtils";
+import {
+    comparePvWithMainLine,
+    findExistingBranchForPv,
+    type PvMainLineComparison,
+} from "../utils/branchTreeUtils";
 import type { KifMove } from "../utils/kifFormat";
 import { convertPvToDisplay, getEvalTooltipInfo } from "../utils/kifFormat";
 
@@ -68,6 +72,26 @@ export function EvalPopover({
         }
         return comparePvWithMainLine(kifuTree, move.ply, move.pv);
     }, [kifuTree, move.ply, move.pv]);
+
+    // 分岐追加時のPVが既存分岐と一致するかをチェック
+    const existingBranchNodeId = useMemo((): string | null => {
+        if (!kifuTree || !move.pv || move.pv.length === 0 || !pvComparison) {
+            return null;
+        }
+
+        if (pvComparison.type === "diverges_later" && pvComparison.divergePly !== undefined) {
+            // 分岐点から先のPVが既存分岐と一致するか
+            const pvFromDiverge = move.pv.slice(pvComparison.divergeIndex);
+            return findExistingBranchForPv(kifuTree, pvComparison.divergePly, pvFromDiverge);
+        }
+
+        if (pvComparison.type === "diverges_first") {
+            // 最初から異なる場合、move.plyから始まるPVが既存分岐と一致するか
+            return findExistingBranchForPv(kifuTree, move.ply, move.pv);
+        }
+
+        return null;
+    }, [kifuTree, move.ply, move.pv, pvComparison]);
 
     // この手数が解析中かどうか
     const isThisPlyAnalyzing = isAnalyzing && analyzingPly === move.ply;
@@ -246,7 +270,20 @@ export function EvalPopover({
                                 {/* 途中から分岐する場合 */}
                                 {pvComparison?.type === "diverges_later" &&
                                     pvComparison.divergePly !== undefined &&
-                                    pvComparison.divergeIndex !== undefined && (
+                                    pvComparison.divergeIndex !== undefined &&
+                                    (existingBranchNodeId ? (
+                                        // 既に分岐として追加済み
+                                        <div
+                                            className="
+                                                flex-1 px-3 py-1.5 text-[11px] text-center
+                                                bg-muted/50 text-muted-foreground
+                                                rounded border border-border
+                                            "
+                                        >
+                                            <span className="mr-1">✓</span>
+                                            分岐追加済み
+                                        </div>
+                                    ) : (
                                         <button
                                             type="button"
                                             onClick={() => {
@@ -277,26 +314,39 @@ export function EvalPopover({
                                             <span className="mr-1">&#128194;</span>
                                             {pvComparison.divergePly + 1}手目から分岐を追加
                                         </button>
-                                    )}
+                                    ))}
                                 {/* 最初から異なる場合（従来通り） */}
-                                {(pvComparison?.type === "diverges_first" || !pvComparison) && (
-                                    <button
-                                        type="button"
-                                        onClick={() => {
-                                            onAddBranch(move.ply, move.pv ?? []);
-                                            setOpen(false);
-                                        }}
-                                        className="
-                                            flex-1 px-3 py-1.5 text-[11px]
-                                            bg-muted hover:bg-muted/80
-                                            rounded border border-border
-                                            transition-colors cursor-pointer
-                                        "
-                                    >
-                                        <span className="mr-1">&#128194;</span>
-                                        分岐として保存
-                                    </button>
-                                )}
+                                {(pvComparison?.type === "diverges_first" || !pvComparison) &&
+                                    (existingBranchNodeId ? (
+                                        // 既に分岐として追加済み
+                                        <div
+                                            className="
+                                                flex-1 px-3 py-1.5 text-[11px] text-center
+                                                bg-muted/50 text-muted-foreground
+                                                rounded border border-border
+                                            "
+                                        >
+                                            <span className="mr-1">✓</span>
+                                            分岐追加済み
+                                        </div>
+                                    ) : (
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                onAddBranch(move.ply, move.pv ?? []);
+                                                setOpen(false);
+                                            }}
+                                            className="
+                                                flex-1 px-3 py-1.5 text-[11px]
+                                                bg-muted hover:bg-muted/80
+                                                rounded border border-border
+                                                transition-colors cursor-pointer
+                                            "
+                                        >
+                                            <span className="mr-1">&#128194;</span>
+                                            分岐として保存
+                                        </button>
+                                    ))}
                             </>
                         )}
                     </div>

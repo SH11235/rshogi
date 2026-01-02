@@ -124,8 +124,10 @@ interface KifuPanelProps {
     onAnalyzeNode?: (nodeId: string) => void;
     /** 追加のクラス名（高さ調整用） */
     className?: string;
-    /** 分岐が追加されたときのシグナル（カウンター値が変わると自動的にツリービューに切り替え） */
-    branchAddedSignal?: number;
+    /** 最後に追加された分岐のnodeId（この分岐に直接遷移する） */
+    lastAddedBranchNodeId?: string | null;
+    /** lastAddedBranchNodeIdを処理したことを通知するコールバック */
+    onLastAddedBranchHandled?: () => void;
     /** 選択中の分岐が変更されたときのコールバック（キーボードナビゲーション用） */
     onSelectedBranchChange?: (branchNodeId: string | null) => void;
 }
@@ -512,7 +514,8 @@ export function KifuPanel({
     onNodeClick,
     onBranchSwitch: _onBranchSwitch,
     onAnalyzeNode,
-    branchAddedSignal,
+    lastAddedBranchNodeId,
+    onLastAddedBranchHandled,
     onSelectedBranchChange,
 }: KifuPanelProps): ReactElement {
     // _onBranchSwitch: 将来的に分岐切り替え機能で使用予定
@@ -525,8 +528,6 @@ export function KifuPanel({
     const [selectedBranch, setSelectedBranch] = useState<SelectedBranch | null>(null);
     // 本譜ビューのスクロール位置を保存
     const mainScrollPositionRef = useRef<number>(0);
-    // 分岐追加シグナルの前回値を追跡（StrictMode対応: 初期値undefinedで初回判定）
-    const prevBranchSignalRef = useRef<number | undefined>(undefined);
 
     // 分岐一覧を取得
     const branches = useMemo<BranchSummary[]>(() => {
@@ -565,28 +566,27 @@ export function KifuPanel({
         return getBranchMoves(kifuTree, selectedBranch.nodeId);
     }, [kifuTree, selectedBranch]);
 
-    // 分岐が追加されたら自動的に分岐一覧に切り替え
-    // branchAddedSignalの変化のみを監視
-    // StrictMode対応: prevBranchSignalRefがundefinedの場合は初回レンダリングとみなす
+    // 分岐が追加されたら直接「選択分岐」ビューに遷移
     useEffect(() => {
-        const prev = prevBranchSignalRef.current;
-
-        // 初回レンダリング時（prevがundefinedの場合）はスキップ
-        if (prev === undefined) {
-            prevBranchSignalRef.current = branchAddedSignal;
-            return;
-        }
-
-        // シグナルが変化し、分岐が実際に存在する場合のみ切り替え
-        if (branchAddedSignal !== prev && branches.length > 0) {
-            // スクロール位置を保存してから分岐一覧に切り替え
-            if (listRef.current) {
-                mainScrollPositionRef.current = listRef.current.scrollTop;
+        if (lastAddedBranchNodeId && branches.length > 0) {
+            // 追加された分岐を見つける
+            const addedBranch = branches.find((b) => b.nodeId === lastAddedBranchNodeId);
+            if (addedBranch) {
+                // スクロール位置を保存
+                if (listRef.current) {
+                    mainScrollPositionRef.current = listRef.current.scrollTop;
+                }
+                // 追加された分岐を選択して「選択分岐」ビューに遷移
+                setSelectedBranch({
+                    nodeId: addedBranch.nodeId,
+                    tabLabel: addedBranch.tabLabel,
+                });
+                setViewMode("selectedBranch");
             }
-            setViewMode("branches");
+            // 処理完了を通知
+            onLastAddedBranchHandled?.();
         }
-        prevBranchSignalRef.current = branchAddedSignal;
-    }, [branchAddedSignal, branches.length]);
+    }, [lastAddedBranchNodeId, branches, onLastAddedBranchHandled]);
 
     // 分岐がなくなった場合は本譜ビューに戻す
     useEffect(() => {
