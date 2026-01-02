@@ -73,8 +73,13 @@ export type EngineErrorSeverity = "warning" | "error" | "fatal";
  *   （エラー原因ではなく、エラー状態にあることを通知するために使用）
  */
 export type EngineErrorCode =
-    // Wasm-specific errors
-    | "WASM_INIT_FAILED"
+    // Wasm-specific errors (fatal/recoverable)
+    | "WASM_INIT_FAILED" // 一般的な初期化失敗
+    | "WASM_NETWORK_ERROR" // Wasmファイル取得失敗（ネットワーク）
+    | "WASM_MEMORY_ERROR" // メモリ不足
+    | "WASM_WORKER_SPAWN_ERROR" // Worker生成失敗
+    | "WASM_INIT_TIMEOUT" // 初期化タイムアウト
+    // Wasm-specific warnings
     | "WASM_THREADS_UNAVAILABLE"
     | "WASM_THREADS_CLAMPED"
     | "WASM_THREADS_INIT_FAILED"
@@ -88,6 +93,103 @@ export type EngineErrorCode =
     | "UNKNOWN"
     // Error state indicator (not a failure cause, but indicates engine is in error state)
     | "ENGINE_ERROR_STATE";
+
+/**
+ * エラーコードに対応するユーザー向け情報
+ */
+export interface EngineErrorInfo {
+    /** ユーザー向けメッセージ */
+    userMessage: string;
+    /** 考えられる原因 */
+    possibleCauses: string[];
+    /** 対処法 */
+    solutions: string[];
+    /** リトライ可能か */
+    canRetry: boolean;
+}
+
+/**
+ * エラーコードからユーザー向け情報を取得
+ */
+export function getEngineErrorInfo(code: EngineErrorCode | undefined): EngineErrorInfo {
+    switch (code) {
+        case "WASM_NETWORK_ERROR":
+            return {
+                userMessage: "エンジンの読み込みに失敗しました",
+                possibleCauses: ["ネットワーク接続が不安定", "サーバーに一時的な問題が発生"],
+                solutions: [
+                    "ネットワーク接続を確認してください",
+                    "しばらく待ってから再試行してください",
+                ],
+                canRetry: true,
+            };
+        case "WASM_MEMORY_ERROR":
+            return {
+                userMessage: "メモリ不足でエンジンを起動できません",
+                possibleCauses: ["ブラウザのメモリ使用量が多い", "他のタブやアプリがメモリを消費"],
+                solutions: [
+                    "不要なタブを閉じてメモリを解放してください",
+                    "ブラウザを再起動してください",
+                ],
+                canRetry: true,
+            };
+        case "WASM_WORKER_SPAWN_ERROR":
+            return {
+                userMessage: "エンジンの起動に失敗しました",
+                possibleCauses: ["ブラウザのWorker生成制限に到達", "ブラウザの一時的な問題"],
+                solutions: ["他のタブを閉じて再試行してください", "ブラウザを再起動してください"],
+                canRetry: true,
+            };
+        case "WASM_INIT_TIMEOUT":
+            return {
+                userMessage: "エンジンの起動に時間がかかっています",
+                possibleCauses: ["デバイスの処理能力が不足", "他のアプリがリソースを消費"],
+                solutions: ["しばらく待ってから再試行してください", "他のアプリを終了してください"],
+                canRetry: true,
+            };
+        case "WASM_INIT_FAILED":
+            return {
+                userMessage: "エンジンの初期化に失敗しました",
+                possibleCauses: ["ブラウザがWebAssemblyに非対応", "一時的なエラー"],
+                solutions: ["最新版のブラウザをお使いください", "ページを再読み込みしてください"],
+                canRetry: true,
+            };
+        case "WASM_THREADS_UNAVAILABLE":
+            return {
+                userMessage: "マルチスレッド機能が利用できません",
+                possibleCauses: [
+                    "ブラウザがSharedArrayBufferに非対応",
+                    "セキュリティヘッダーが設定されていない",
+                ],
+                solutions: ["シングルスレッドモードで動作します"],
+                canRetry: false,
+            };
+        case "WASM_THREADS_INIT_FAILED":
+            return {
+                userMessage: "マルチスレッド初期化に失敗しました",
+                possibleCauses: ["メモリ不足", "ブラウザの制限"],
+                solutions: ["シングルスレッドモードで再試行します"],
+                canRetry: false,
+            };
+        case "ENGINE_ERROR_STATE":
+            return {
+                userMessage: "エンジンがエラー状態です",
+                possibleCauses: ["前回の操作でエラーが発生"],
+                solutions: ["再試行ボタンを押してエンジンを再起動してください"],
+                canRetry: true,
+            };
+        default:
+            return {
+                userMessage: "予期しないエラーが発生しました",
+                possibleCauses: ["不明なエラー"],
+                solutions: [
+                    "ページを再読み込みしてください",
+                    "問題が続く場合はブラウザを再起動してください",
+                ],
+                canRetry: true,
+            };
+    }
+}
 
 /** Backend status for error state management */
 export type EngineBackendStatus = "ready" | "error" | "mock";
