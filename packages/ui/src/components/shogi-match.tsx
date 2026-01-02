@@ -25,7 +25,6 @@ import { ClockDisplayPanel } from "./shogi-match/components/ClockDisplayPanel";
 import { EditModePanel } from "./shogi-match/components/EditModePanel";
 import { EngineLogsPanel } from "./shogi-match/components/EngineLogsPanel";
 import { EvalPanel } from "./shogi-match/components/EvalPanel";
-import { GameResultBanner } from "./shogi-match/components/GameResultBanner";
 import { GameResultDialog } from "./shogi-match/components/GameResultDialog";
 import { HandPiecesDisplay } from "./shogi-match/components/HandPiecesDisplay";
 import { KifuImportPanel } from "./shogi-match/components/KifuImportPanel";
@@ -232,7 +231,6 @@ export function ShogiMatch({
     const [message, setMessage] = useState<string | null>(null);
     const [gameResult, setGameResult] = useState<GameResult | null>(null);
     const [showResultDialog, setShowResultDialog] = useState(false);
-    const [showResultBanner, setShowResultBanner] = useState(false);
     const [editMessage, setEditMessage] = useState<string | null>(null);
     const [flipBoard, setFlipBoard] = useState(false);
     const [timeSettings, setTimeSettings] = useLocalStorage<ClockSettings>(
@@ -412,7 +410,6 @@ export function ShogiMatch({
             matchEndedRef.current = true;
             setGameResult(result);
             setShowResultDialog(true);
-            setShowResultBanner(false);
             setIsMatchRunning(false);
             stopTicking();
             try {
@@ -742,7 +739,6 @@ export function ShogiMatch({
         matchEndedRef.current = false;
         setGameResult(null);
         setShowResultDialog(false);
-        setShowResultBanner(false);
         await stopAllEngines();
 
         const service = getPositionService();
@@ -1804,10 +1800,7 @@ export function ShogiMatch({
             <GameResultDialog
                 result={gameResult}
                 open={showResultDialog}
-                onClose={() => {
-                    setShowResultDialog(false);
-                    setShowResultBanner(true);
-                }}
+                onClose={() => setShowResultDialog(false)}
             />
 
             {/* PVプレビューダイアログ */}
@@ -1836,17 +1829,6 @@ export function ShogiMatch({
             </div>
 
             <section className={matchLayoutClasses} style={matchLayoutCssVars}>
-                {/* 勝敗表示バナー */}
-                <GameResultBanner
-                    result={gameResult}
-                    visible={showResultBanner}
-                    onShowDetail={() => {
-                        setShowResultDialog(true);
-                        setShowResultBanner(false);
-                    }}
-                    onClose={() => setShowResultBanner(false)}
-                />
-
                 <div className="flex gap-4 items-start">
                     {/* 左列: 将棋盤（サイズ固定） */}
                     <div className="flex flex-col gap-2 items-center shrink-0">

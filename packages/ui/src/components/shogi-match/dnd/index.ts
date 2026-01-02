@@ -5,7 +5,6 @@
  */
 
 // コンポーネント
-export { DeleteZone } from "./DeleteZone";
 // コンテキスト
 export { DragGhost } from "./DragGhost";
 // ドロップロジック
