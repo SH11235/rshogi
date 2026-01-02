@@ -421,7 +421,7 @@ export function getBranchMoves(tree: KifuTree, branchNodeId: string): FlatTreeNo
 /**
  * 解析ジョブ情報
  */
-export interface TreeAnalysisJob {
+interface TreeAnalysisJob {
     /** ノードID */
     nodeId: string;
     /** 手数 */
@@ -520,7 +520,7 @@ export function collectTreeAnalysisJobs(
  * @param options オプション
  * @returns 解析ジョブの配列
  */
-export function collectBranchAnalysisJobs(
+function collectBranchAnalysisJobs(
     tree: KifuTree,
     branchNodeId: string,
     options: {
