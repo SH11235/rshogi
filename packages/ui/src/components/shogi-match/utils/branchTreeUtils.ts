@@ -17,6 +17,56 @@ import {
 import { formatMoveSimple } from "./kifFormat";
 
 /**
+ * 評価値データ（エンジン出力形式）
+ */
+interface EvalData {
+    scoreCp?: number;
+    scoreMate?: number;
+    normalized?: boolean;
+    depth?: number;
+    pv?: string[];
+}
+
+/**
+ * 正規化された評価値
+ */
+export interface NormalizedEval {
+    evalCp?: number;
+    evalMate?: number;
+}
+
+/**
+ * 評価値を先手視点に正規化する
+ *
+ * エンジン出力は「手番側から見た値」なので、先手の手の後（後手の手番）では
+ * 符号を反転して先手視点に変換する必要がある。
+ * normalized=true の場合は既に先手視点なので符号反転不要。
+ *
+ * @param evalData 評価値データ
+ * @param ply 手数
+ * @returns 先手視点に正規化された評価値
+ */
+export function normalizeEvalToSentePerspective(
+    evalData: EvalData | null | undefined,
+    ply: number,
+): NormalizedEval {
+    if (!evalData) {
+        return {};
+    }
+
+    // normalized=true の場合は既に先手視点なので符号反転不要
+    // それ以外（エンジン出力）は「手番側から見た値」なので反転して先手視点に正規化
+    const needsSignFlip = !evalData.normalized;
+    const isSenteMove = ply % 2 !== 0;
+    const sign = needsSignFlip && isSenteMove ? -1 : 1;
+
+    return {
+        evalCp: evalData.scoreCp != null ? evalData.scoreCp * sign : undefined,
+        evalMate: evalData.scoreMate != null ? evalData.scoreMate * sign : undefined,
+    };
+}
+
+/**
  * PVと本譜の比較結果
  */
 export interface PvMainLineComparison {
@@ -374,13 +424,16 @@ export function getBranchMoves(tree: KifuTree, branchNodeId: string): FlatTreeNo
         const displayText = getDisplayText(node, prevToSquare);
         const hasBranches = node.children.length > 1;
 
+        // 評価値を先手視点に正規化
+        const normalizedEval = normalizeEvalToSentePerspective(node.eval, node.ply);
+
         result.push({
             nodeId,
             ply: node.ply,
             displayText,
             usiMove: node.usiMove,
-            evalCp: node.eval?.scoreCp,
-            evalMate: node.eval?.scoreMate,
+            evalCp: normalizedEval.evalCp,
+            evalMate: normalizedEval.evalMate,
             hasBranches,
             isCurrentPath: currentPath.has(nodeId),
             isCurrent: nodeId === tree.currentNodeId,

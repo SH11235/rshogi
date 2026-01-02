@@ -34,6 +34,7 @@ import {
 } from "@shogi/app-core";
 import type { EngineInfoEvent } from "@shogi/engine-client";
 import { useCallback, useMemo, useRef, useState } from "react";
+import { normalizeEvalToSentePerspective } from "../utils/branchTreeUtils";
 import type { EvalHistory, KifMove } from "../utils/kifFormat";
 import { convertMovesToKif } from "../utils/kifFormat";
 
@@ -651,15 +652,10 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
             const hasEval = node.eval != null;
             const hasElapsed = node.elapsedMs != null;
             if (hasEval || hasElapsed) {
-                // normalized=true の場合は既に先手視点なので符号反転不要
-                // それ以外（エンジン出力）は「手番側から見た値」なので反転して先手視点に正規化
-                const needsSignFlip = !node.eval?.normalized;
-                const isSenteMove = node.ply % 2 !== 0;
-                const sign = needsSignFlip && isSenteMove ? -1 : 1;
+                const normalizedEval = normalizeEvalToSentePerspective(node.eval, node.ply);
                 nodeDataMap.set(node.ply, {
-                    scoreCp: node.eval?.scoreCp != null ? node.eval.scoreCp * sign : undefined,
-                    scoreMate:
-                        node.eval?.scoreMate != null ? node.eval.scoreMate * sign : undefined,
+                    scoreCp: normalizedEval.evalCp,
+                    scoreMate: normalizedEval.evalMate,
                     depth: node.eval?.depth,
                     elapsedMs: node.elapsedMs,
                     pv: node.eval?.pv,
@@ -683,19 +679,12 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
             // ルートはスキップ（ply: 0はすでに追加済み）
             if (node.ply === 0) continue;
 
-            const ply = node.ply;
-            const evalData = node.eval;
-
-            // normalized=true の場合は既に先手視点なので符号反転不要
-            // それ以外（エンジン出力）は「手番側から見た値」なので反転して先手視点に正規化
-            const needsSignFlip = !evalData?.normalized;
-            const isSenteMove = ply % 2 !== 0;
-            const sign = needsSignFlip && isSenteMove ? -1 : 1;
+            const normalizedEval = normalizeEvalToSentePerspective(node.eval, node.ply);
 
             history.push({
-                ply,
-                evalCp: evalData?.scoreCp != null ? evalData.scoreCp * sign : null,
-                evalMate: evalData?.scoreMate != null ? evalData.scoreMate * sign : null,
+                ply: node.ply,
+                evalCp: normalizedEval.evalCp ?? null,
+                evalMate: normalizedEval.evalMate ?? null,
             });
         }
 
