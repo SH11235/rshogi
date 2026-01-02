@@ -8,6 +8,7 @@ import {
     BOARD_FILES,
     BOARD_RANKS,
     findNodeByPlyInMainLine,
+    getPathToNode,
     type KifuNode,
     type KifuTree,
     type Player,
@@ -383,4 +384,149 @@ export function getBranchMoves(tree: KifuTree, branchNodeId: string): FlatTreeNo
     }
 
     return result;
+}
+
+/**
+ * 解析ジョブ情報
+ */
+export interface TreeAnalysisJob {
+    /** ノードID */
+    nodeId: string;
+    /** 手数 */
+    ply: number;
+    /** 開始局面からの指し手 */
+    moves: string[];
+    /** メインラインかどうか */
+    isMainLine: boolean;
+}
+
+/**
+ * ツリー全体から解析ジョブを収集する
+ *
+ * @param tree 棋譜ツリー
+ * @param options オプション
+ * @returns 解析ジョブの配列
+ */
+export function collectTreeAnalysisJobs(
+    tree: KifuTree,
+    options: {
+        /** 評価値がないノードのみ対象とする */
+        onlyWithoutEval?: boolean;
+        /** メインラインのみ対象とする */
+        mainLineOnly?: boolean;
+    } = {},
+): TreeAnalysisJob[] {
+    const jobs: TreeAnalysisJob[] = [];
+    const { onlyWithoutEval = true, mainLineOnly = false } = options;
+
+    // DFSでツリーを走査
+    const traverse = (nodeId: string, moves: string[], isMainLine: boolean) => {
+        const node = tree.nodes.get(nodeId);
+        if (!node) return;
+
+        // ルートノードは除外
+        if (node.usiMove !== null) {
+            const currentMoves = [...moves, node.usiMove];
+            const hasEval = node.eval?.scoreCp !== undefined || node.eval?.scoreMate !== undefined;
+
+            // 評価値がないノードのみ対象とする場合のフィルタ
+            if (!onlyWithoutEval || !hasEval) {
+                jobs.push({
+                    nodeId,
+                    ply: node.ply,
+                    moves: currentMoves,
+                    isMainLine,
+                });
+            }
+
+            // 子ノードを走査
+            for (let i = 0; i < node.children.length; i++) {
+                const childId = node.children[i];
+                const childIsMainLine = isMainLine && i === 0;
+
+                // メインラインのみの場合、メインライン以外はスキップ
+                if (mainLineOnly && !childIsMainLine) continue;
+
+                traverse(childId, currentMoves, childIsMainLine);
+            }
+        } else {
+            // ルートノードの場合は子を直接走査
+            for (let i = 0; i < node.children.length; i++) {
+                const childId = node.children[i];
+                const childIsMainLine = i === 0;
+
+                if (mainLineOnly && !childIsMainLine) continue;
+
+                traverse(childId, [], childIsMainLine);
+            }
+        }
+    };
+
+    traverse(tree.rootId, [], true);
+
+    return jobs;
+}
+
+/**
+ * 指定した分岐から解析ジョブを収集する
+ *
+ * @param tree 棋譜ツリー
+ * @param branchNodeId 分岐の開始ノードID
+ * @param options オプション
+ * @returns 解析ジョブの配列
+ */
+export function collectBranchAnalysisJobs(
+    tree: KifuTree,
+    branchNodeId: string,
+    options: {
+        /** 評価値がないノードのみ対象とする */
+        onlyWithoutEval?: boolean;
+    } = {},
+): TreeAnalysisJob[] {
+    const jobs: TreeAnalysisJob[] = [];
+    const { onlyWithoutEval = true } = options;
+
+    const branchNode = tree.nodes.get(branchNodeId);
+    if (!branchNode) return jobs;
+
+    // 分岐のパスを取得（ルートからの手順）
+    const path = getPathToNode(tree, branchNodeId);
+    const pathMoves: string[] = [];
+    for (const id of path) {
+        const n = tree.nodes.get(id);
+        if (n?.usiMove) {
+            pathMoves.push(n.usiMove);
+        }
+    }
+
+    // 分岐内を走査
+    const traverse = (nodeId: string, moves: string[]) => {
+        const node = tree.nodes.get(nodeId);
+        if (!node) return;
+
+        const hasEval = node.eval?.scoreCp !== undefined || node.eval?.scoreMate !== undefined;
+
+        if (!onlyWithoutEval || !hasEval) {
+            jobs.push({
+                nodeId,
+                ply: node.ply,
+                moves: [...moves],
+                isMainLine: false,
+            });
+        }
+
+        // 子ノードを走査（メインラインのみ）
+        if (node.children.length > 0) {
+            const childId = node.children[0];
+            const childNode = tree.nodes.get(childId);
+            if (childNode?.usiMove) {
+                traverse(childId, [...moves, childNode.usiMove]);
+            }
+        }
+    };
+
+    // 分岐ノードから開始
+    traverse(branchNodeId, pathMoves);
+
+    return jobs;
 }

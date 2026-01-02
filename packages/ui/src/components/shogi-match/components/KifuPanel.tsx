@@ -104,8 +104,10 @@ interface KifuPanelProps {
         totalCount: number;
         inProgress?: number[]; // 並列解析中の手番号
     };
-    /** 一括解析を開始するコールバック */
+    /** 一括解析を開始するコールバック（本譜のみ） */
     onStartBatchAnalysis?: () => void;
+    /** ツリー全体の一括解析を開始するコールバック */
+    onStartTreeBatchAnalysis?: (options?: { mainLineOnly?: boolean }) => void;
     /** 一括解析をキャンセルするコールバック */
     onCancelBatchAnalysis?: () => void;
     /** 解析設定 */
@@ -118,6 +120,8 @@ interface KifuPanelProps {
     onNodeClick?: (nodeId: string) => void;
     /** 分岐切り替え時のコールバック（ツリービュー用） */
     onBranchSwitch?: (parentNodeId: string, branchIndex: number) => void;
+    /** 分岐内のノードを解析するコールバック */
+    onAnalyzeNode?: (nodeId: string) => void;
     /** 追加のクラス名（高さ調整用） */
     className?: string;
     /** 分岐が追加されたときのシグナル（カウンター値が変わると自動的にツリービューに切り替え） */
@@ -271,6 +275,9 @@ const ANALYSIS_TIME_OPTIONS: { value: number; label: string }[] = [
     { value: 3000, label: "3秒" },
 ];
 
+/** 解析対象の選択肢 */
+type AnalysisTarget = "mainOnly" | "includeBranches";
+
 /**
  * 一括解析ドロップダウン
  */
@@ -279,13 +286,18 @@ function BatchAnalysisDropdown({
     analysisSettings,
     onAnalysisSettingsChange,
     onStartBatchAnalysis,
+    onStartTreeBatchAnalysis,
+    hasBranches,
 }: {
     movesWithoutPv: number;
     analysisSettings: AnalysisSettings;
     onAnalysisSettingsChange: (settings: AnalysisSettings) => void;
     onStartBatchAnalysis: () => void;
+    onStartTreeBatchAnalysis?: (options?: { mainLineOnly?: boolean }) => void;
+    hasBranches: boolean;
 }): ReactElement {
     const [isOpen, setIsOpen] = useState(false);
+    const [analysisTarget, setAnalysisTarget] = useState<AnalysisTarget>("mainOnly");
     const parallelismConfig = detectParallelism();
 
     const handleParallelWorkersChange = (value: number) => {
@@ -304,7 +316,11 @@ function BatchAnalysisDropdown({
 
     const handleStart = () => {
         setIsOpen(false);
-        onStartBatchAnalysis();
+        if (analysisTarget === "includeBranches" && onStartTreeBatchAnalysis) {
+            onStartTreeBatchAnalysis({ mainLineOnly: false });
+        } else {
+            onStartBatchAnalysis();
+        }
     };
 
     return (
@@ -324,6 +340,37 @@ function BatchAnalysisDropdown({
                     <div className="text-xs text-muted-foreground">
                         PVがない{movesWithoutPv}手を解析します
                     </div>
+
+                    {/* 解析対象の選択（分岐がある場合のみ表示） */}
+                    {hasBranches && onStartTreeBatchAnalysis && (
+                        <div className="space-y-1.5">
+                            <div className="text-xs font-medium text-foreground">解析対象</div>
+                            <div className="flex gap-1 flex-wrap">
+                                <button
+                                    type="button"
+                                    onClick={() => setAnalysisTarget("mainOnly")}
+                                    className={`px-2 py-1 rounded text-xs transition-colors ${
+                                        analysisTarget === "mainOnly"
+                                            ? "bg-primary text-primary-foreground"
+                                            : "bg-muted text-muted-foreground hover:bg-muted/80"
+                                    }`}
+                                >
+                                    本譜のみ
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setAnalysisTarget("includeBranches")}
+                                    className={`px-2 py-1 rounded text-xs transition-colors ${
+                                        analysisTarget === "includeBranches"
+                                            ? "bg-primary text-primary-foreground"
+                                            : "bg-muted text-muted-foreground hover:bg-muted/80"
+                                    }`}
+                                >
+                                    分岐を含む
+                                </button>
+                            </div>
+                        </div>
+                    )}
 
                     {/* 並列数設定 */}
                     <div className="space-y-1.5">
@@ -405,12 +452,14 @@ export function KifuPanel({
     analyzingPly,
     batchAnalysis,
     onStartBatchAnalysis,
+    onStartTreeBatchAnalysis,
     onCancelBatchAnalysis,
     analysisSettings,
     onAnalysisSettingsChange,
     kifuTree,
     onNodeClick,
     onBranchSwitch: _onBranchSwitch,
+    onAnalyzeNode,
     branchAddedSignal,
 }: KifuPanelProps): ReactElement {
     // _onBranchSwitch: 将来的に分岐切り替え機能で使用予定
@@ -656,6 +705,14 @@ export function KifuPanel({
                                     analysisSettings={analysisSettings}
                                     onAnalysisSettingsChange={onAnalysisSettingsChange}
                                     onStartBatchAnalysis={onStartBatchAnalysis}
+                                    onStartTreeBatchAnalysis={onStartTreeBatchAnalysis}
+                                    hasBranches={
+                                        kifuTree
+                                            ? Array.from(kifuTree.nodes.values()).some(
+                                                  (n) => n.children.length > 1,
+                                              )
+                                            : false
+                                    }
                                 />
                             )}
                         {/* KIFコピーボタン（アイコン） */}
@@ -900,7 +957,7 @@ export function KifuPanel({
                                         <div
                                             role="option"
                                             className={`
-                                                grid grid-cols-[32px_1fr_auto] gap-1 items-center px-1 py-0.5 text-[13px] font-mono rounded
+                                                grid grid-cols-[32px_1fr_auto_auto] gap-1 items-center px-1 py-0.5 text-[13px] font-mono rounded
                                                 cursor-pointer hover:bg-accent/50
                                                 ${isCurrent ? "bg-accent" : ""}
                                                 ${isBranchPart ? "border-l-2 border-[hsl(var(--wafuu-shu)/0.5)] ml-1" : ""}
@@ -926,6 +983,27 @@ export function KifuPanel({
                                                     )}
                                                 >
                                                     {evalText}
+                                                </span>
+                                            )}
+                                            {/* 解析ボタン（評価値がない場合に表示） */}
+                                            {onAnalyzeNode &&
+                                                !evalText &&
+                                                analyzingPly !== node.ply && (
+                                                    <button
+                                                        type="button"
+                                                        className="text-[10px] px-1.5 py-0.5 rounded bg-muted hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            onAnalyzeNode(node.nodeId);
+                                                        }}
+                                                        title="この手を解析"
+                                                    >
+                                                        解析
+                                                    </button>
+                                                )}
+                                            {analyzingPly === node.ply && (
+                                                <span className="text-[10px] text-muted-foreground animate-pulse">
+                                                    解析中...
                                                 </span>
                                             )}
                                         </div>

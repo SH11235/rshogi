@@ -6,6 +6,7 @@ import {
     createEmptyHands,
     type GameResult,
     getAllSquares,
+    getPathToNode,
     getPositionService,
     type LastMove,
     type Piece,
@@ -59,6 +60,7 @@ import {
     DEFAULT_ANALYSIS_SETTINGS,
     DEFAULT_DISPLAY_SETTINGS,
     type DisplaySettings,
+    type GameMode,
     type PromotionSelection,
 } from "./shogi-match/types";
 import {
@@ -72,6 +74,7 @@ import { exportToKifString } from "./shogi-match/utils/kifFormat";
 import { type KifMoveData, parseSfen } from "./shogi-match/utils/kifParser";
 import { LegalMoveCache } from "./shogi-match/utils/legalMoveCache";
 import { determinePromotion } from "./shogi-match/utils/promotionLogic";
+import { collectTreeAnalysisJobs } from "./shogi-match/utils/branchTreeUtils";
 import { TooltipProvider } from "./tooltip";
 
 type Selection = { kind: "square"; square: string } | { kind: "hand"; piece: PieceType };
@@ -256,6 +259,9 @@ export function ShogiMatch({
     );
     const [isMatchRunning, setIsMatchRunning] = useState(false);
     const [isEditMode, setIsEditMode] = useState(true);
+    // 検討モード: 編集モードでも対局中でもない状態
+    // 自由に棋譜を閲覧し、分岐を作成できる
+    const isReviewMode = !isEditMode && !isMatchRunning;
     const [editOwner, setEditOwner] = useState<Player>("sente");
     const [editPieceType, setEditPieceType] = useState<PieceType | null>(null);
     const [editPromoted, setEditPromoted] = useState(false);
@@ -286,6 +292,8 @@ export function ShogiMatch({
     } | null>(null);
     // 解析中の手数（オンデマンド解析用）
     const [analyzingPly, setAnalyzingPly] = useState<number | null>(null);
+    // 分岐解析中のノードID
+    const [analyzingNodeId, setAnalyzingNodeId] = useState<string | null>(null);
     // 一括解析の状態
     const [batchAnalysis, setBatchAnalysis] = useState<{
         isRunning: boolean;
@@ -337,6 +345,7 @@ export function ShogiMatch({
         positionHistory,
         branchMarkers,
         recordEval,
+        recordEvalByNodeId,
         addPvAsBranch,
     } = navigation;
 
@@ -434,6 +443,26 @@ export function ShogiMatch({
 
     const handleMoveFromEngineRef = useRef<(move: string) => void>(() => {});
 
+    // 分岐解析用のノードIDをrefで追跡（コールバック内で最新値を参照するため）
+    const analyzingNodeIdRef = useRef<string | null>(null);
+    useEffect(() => {
+        analyzingNodeIdRef.current = analyzingNodeId;
+    }, [analyzingNodeId]);
+
+    // 評価値更新コールバック（分岐解析にも対応）
+    const handleEvalUpdate = useCallback(
+        (ply: number, event: import("@shogi/engine-client").EngineInfoEvent) => {
+            // 分岐解析中の場合はノードIDで保存
+            if (analyzingNodeIdRef.current) {
+                recordEvalByNodeId(analyzingNodeIdRef.current, event);
+            } else {
+                // 通常解析の場合はplyで保存
+                recordEval(ply, event);
+            }
+        },
+        [recordEval, recordEvalByNodeId],
+    );
+
     // エンジン管理フックを使用
     const {
         eventLogs,
@@ -457,7 +486,7 @@ export function ShogiMatch({
         positionReady,
         onMoveFromEngine: (move) => handleMoveFromEngineRef.current(move),
         onMatchEnd: endMatch,
-        onEvalUpdate: recordEval,
+        onEvalUpdate: handleEvalUpdate,
         maxLogs,
     });
     stopAllEnginesRef.current = stopAllEngines;
@@ -480,7 +509,14 @@ export function ShogiMatch({
                 inProgress: progress.inProgress,
             });
         },
-        onResult: recordEval,
+        onResult: (ply, event, nodeId) => {
+            // nodeIdがある場合は分岐解析の結果
+            if (nodeId) {
+                recordEvalByNodeId(nodeId, event);
+            } else {
+                recordEval(ply, event);
+            }
+        },
         onComplete: () => {
             setBatchAnalysis(null);
         },
@@ -619,6 +655,23 @@ export function ShogiMatch({
         startTicking(position.turn);
     };
 
+    /** 検討モードを開始 */
+    const handleStartReview = async () => {
+        if (!positionReady) return;
+        if (isEditMode) {
+            await finalizeEditedPosition();
+            setIsEditMode(false);
+            setIsEditPanelOpen(false);
+        }
+        setIsSettingsPanelOpen(false);
+        // isMatchRunningはfalseのままでisReviewModeになる
+        setMessage("検討モードを開始しました。駒を動かして分岐を作成できます。");
+        setTimeout(() => setMessage(null), 3000);
+    };
+
+    /** 現在のゲームモードを計算 */
+    const gameMode: GameMode = isEditMode ? "editing" : isMatchRunning ? "playing" : "reviewing";
+
     const finalizeEditedPosition = async () => {
         if (isMatchRunning) return;
         const current = positionRef.current;
@@ -646,6 +699,37 @@ export function ShogiMatch({
             updateClocksForNextTurn(nextPosition.turn);
         },
         [legalCache, navigation, updateClocksForNextTurn],
+    );
+
+    /** 検討モードで手を適用（分岐作成、時計更新なし） */
+    const applyMoveForReview = useCallback(
+        (nextPosition: PositionState, mv: string, last?: LastMove, _prevBoard?: BoardState) => {
+            // 現在のノードの子を確認して、分岐が作成されるか判定
+            const tree = navigation.tree;
+            const currentNode = tree ? tree.nodes.get(tree.currentNodeId) : null;
+            const existingChild = currentNode?.children.find((childId: string) => {
+                const child = tree?.nodes.get(childId);
+                return child?.usiMove === mv;
+            });
+            const willCreateBranch = !existingChild && (currentNode?.children.length ?? 0) > 0;
+
+            // 棋譜ナビゲーションに手を追加
+            navigation.addMove(mv, nextPosition);
+            movesRef.current = [...movesRef.current, mv];
+            setLastMove(last);
+            setSelection(null);
+            setMessage(null);
+            legalCache.clear();
+
+            // 分岐が作成された場合は通知
+            if (willCreateBranch) {
+                setBranchAddedSignal((prev) => prev + 1);
+                setMessage("新しい変化を作成しました");
+                // メッセージを3秒後にクリア
+                setTimeout(() => setMessage(null), 3000);
+            }
+        },
+        [legalCache, navigation],
     );
 
     /** 平手初期局面にリセット */
@@ -1019,6 +1103,120 @@ export function ShogiMatch({
             setEditMessage("配置する駒を選ぶか、移動する駒をクリックしてください。");
             return;
         }
+
+        // ========== 検討モード ==========
+        // 自由に棋譜を閲覧し、任意の局面から分岐を作成できる
+        if (isReviewMode) {
+            if (!positionReady) {
+                setMessage("局面を読み込み中です。");
+                return;
+            }
+
+            // 成り選択中の場合：キャンセル
+            if (promotionSelection) {
+                setPromotionSelection(null);
+                setSelection(null);
+                return;
+            }
+
+            const sq = square as Square;
+
+            // 駒を選択
+            if (!selection) {
+                const piece = position.board[sq];
+                // 検討モードでは現在の手番の駒のみ動かせる
+                if (piece && piece.owner === position.turn) {
+                    setSelection({ kind: "square", square: sq });
+                }
+                return;
+            }
+
+            // 持ち駒を打つ
+            if (selection.kind === "hand") {
+                const moveStr = `${selection.piece}*${square}`;
+                const legal = await getLegalSet();
+                if (legal && !legal.has(moveStr)) {
+                    setMessage("合法手ではありません");
+                    return;
+                }
+                const prevBoard = position.board;
+                const result = applyMoveWithState(position, moveStr, { validateTurn: false });
+                if (!result.ok) {
+                    setMessage(result.error ?? "持ち駒を打てませんでした");
+                    return;
+                }
+                applyMoveForReview(result.next, moveStr, result.lastMove, prevBoard);
+                return;
+            }
+
+            // 盤上の駒を移動
+            if (selection.kind === "square") {
+                if (selection.square === square) {
+                    setSelection(null);
+                    return;
+                }
+
+                const legal = await getLegalSet();
+                if (!legal) return;
+
+                const from = selection.square;
+                const to = square;
+                const piece = position.board[from as Square];
+
+                const promotion = determinePromotion(legal, from, to);
+
+                if (promotion === "none") {
+                    const moveStr = `${from}${to}`;
+                    if (!legal.has(moveStr)) {
+                        setMessage("合法手ではありません");
+                        return;
+                    }
+                    const prevBoard = position.board;
+                    const result = applyMoveWithState(position, moveStr, { validateTurn: false });
+                    if (!result.ok) {
+                        setMessage(result.error ?? "指し手を適用できませんでした");
+                        return;
+                    }
+                    applyMoveForReview(result.next, moveStr, result.lastMove, prevBoard);
+                    return;
+                }
+
+                if (promotion === "forced") {
+                    const moveStr = `${from}${to}+`;
+                    const prevBoard = position.board;
+                    const result = applyMoveWithState(position, moveStr, { validateTurn: false });
+                    if (!result.ok) {
+                        setMessage(result.error ?? "指し手を適用できませんでした");
+                        return;
+                    }
+                    applyMoveForReview(result.next, moveStr, result.lastMove, prevBoard);
+                    return;
+                }
+
+                // 任意成り
+                if (shiftKey) {
+                    const moveStr = `${from}${to}+`;
+                    const prevBoard = position.board;
+                    const result = applyMoveWithState(position, moveStr, { validateTurn: false });
+                    if (!result.ok) {
+                        setMessage(result.error ?? "指し手を適用できませんでした");
+                        return;
+                    }
+                    applyMoveForReview(result.next, moveStr, result.lastMove, prevBoard);
+                    return;
+                }
+
+                if (!piece) {
+                    setMessage("駒が見つかりません");
+                    return;
+                }
+                setPromotionSelection({ from: from as Square, to: to as Square, piece });
+                return;
+            }
+            return;
+        }
+
+        // ========== 対局モード ==========
         if (!positionReady) {
             setMessage("局面を読み込み中です。");
             return;
@@ -1135,14 +1333,19 @@ export function ShogiMatch({
         const { from, to } = promotionSelection;
         const moveStr = `${from}${to}${promote ? "+" : ""}`;
         const prevBoard = position.board;
-        const result = applyMoveWithState(position, moveStr, { validateTurn: true });
+        // 検討モードでは手番チェックをスキップ
+        const result = applyMoveWithState(position, moveStr, { validateTurn: !isReviewMode });
         if (!result.ok) {
             setMessage(result.error ?? "指し手を適用できませんでした");
             setPromotionSelection(null);
             setSelection(null);
             return;
         }
-        applyMoveCommon(result.next, moveStr, result.lastMove, prevBoard);
+        if (isReviewMode) {
+            applyMoveForReview(result.next, moveStr, result.lastMove, prevBoard);
+        } else {
+            applyMoveCommon(result.next, moveStr, result.lastMove, prevBoard);
+        }
         setPromotionSelection(null);
     };
 
@@ -1155,7 +1358,8 @@ export function ShogiMatch({
             setMessage("編集モード中は手番入力は無効です。盤面編集パネルを使ってください。");
             return;
         }
-        if (isEngineTurn(position.turn)) {
+        // 検討モードでは手番の持ち駒を選択可能
+        if (!isReviewMode && isEngineTurn(position.turn)) {
             setMessage("エンジンの手番です。");
             return;
         }
@@ -1265,14 +1469,49 @@ export function ShogiMatch({
         [kifMoves, analyzePosition, startSfen],
     );
 
+    // 分岐内のノードを解析するコールバック
+    const handleAnalyzeNode = useCallback(
+        (nodeId: string) => {
+            const tree = navigation.tree;
+            if (!tree) return;
+
+            const node = tree.nodes.get(nodeId);
+            if (!node) return;
+
+            // ルートからこのノードまでのパスを取得
+            const path = getPathToNode(tree, nodeId);
+            // 各ノードのusiMoveを収集（ルートは除く）
+            const movesForNode: string[] = [];
+            for (const id of path) {
+                const n = tree.nodes.get(id);
+                if (n?.usiMove) {
+                    movesForNode.push(n.usiMove);
+                }
+            }
+
+            // 分岐解析用にノードIDを設定
+            setAnalyzingNodeId(nodeId);
+            setAnalyzingPly(node.ply);
+            void analyzePosition({
+                sfen: startSfen,
+                moves: movesForNode,
+                ply: node.ply,
+                timeMs: 3000,
+                depth: 20,
+            });
+        },
+        [navigation.tree, analyzePosition, startSfen],
+    );
+
     // 単発解析完了時の処理
     useEffect(() => {
         if (!isAnalyzing && analyzingPly !== null) {
             setAnalyzingPly(null);
+            setAnalyzingNodeId(null);
         }
     }, [isAnalyzing, analyzingPly]);
 
-    // 一括解析を開始（並列処理）
+    // 一括解析を開始（並列処理）- 本譜のみ
     const handleStartBatchAnalysis = useCallback(() => {
         // PVがない手を抽出
         const targetPlies = kifMoves.filter((m) => !m.pv || m.pv.length === 0).map((m) => m.ply);
@@ -1293,6 +1532,40 @@ export function ShogiMatch({
         // 並列一括解析を開始
         enginePool.start(jobs);
     }, [kifMoves, startSfen, analysisSettings, enginePool]);
+
+    // ツリー全体（分岐含む）の一括解析を開始
+    const handleStartTreeBatchAnalysis = useCallback(
+        (options?: { mainLineOnly?: boolean }) => {
+            const tree = navigation.tree;
+            if (!tree) return;
+
+            // ツリーから解析ジョブを収集
+            const treeJobs = collectTreeAnalysisJobs(tree, {
+                onlyWithoutEval: true,
+                mainLineOnly: options?.mainLineOnly ?? false,
+            });
+
+            if (treeJobs.length === 0) {
+                setMessage("解析対象の手がありません");
+                setTimeout(() => setMessage(null), 3000);
+                return;
+            }
+
+            // AnalysisJob形式に変換
+            const jobs: AnalysisJob[] = treeJobs.map((job) => ({
+                ply: job.ply,
+                sfen: startSfen,
+                moves: job.moves,
+                timeMs: analysisSettings.batchAnalysisTimeMs,
+                depth: analysisSettings.batchAnalysisDepth,
+                nodeId: job.nodeId, // 分岐解析用にnodeIdを保持
+            }));
+
+            // 並列一括解析を開始
+            enginePool.start(jobs);
+        },
+        [navigation.tree, startSfen, analysisSettings, enginePool],
+    );
 
     // 一括解析をキャンセル
     const handleCancelBatchAnalysis = useCallback(() => {
@@ -1757,7 +2030,9 @@ export function ShogiMatch({
                             onResetToStartpos={handleResetToStartpos}
                             onStop={pauseAutoPlay}
                             onStart={resumeAutoPlay}
+                            onStartReview={handleStartReview}
                             isMatchRunning={isMatchRunning}
+                            gameMode={gameMode}
                             message={message}
                         />
 
@@ -1869,6 +2144,8 @@ export function ShogiMatch({
                             kifuTree={navigation.tree}
                             onNodeClick={navigation.goToNodeById}
                             onBranchSwitch={navigation.switchBranchAtNode}
+                            onAnalyzeNode={handleAnalyzeNode}
+                            onStartTreeBatchAnalysis={handleStartTreeBatchAnalysis}
                         />
                     </div>
                 </div>

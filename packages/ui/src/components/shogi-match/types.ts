@@ -68,3 +68,11 @@ export const DEFAULT_ANALYSIS_SETTINGS: AnalysisSettings = {
     batchAnalysisTimeMs: 1000,
     batchAnalysisDepth: 15,
 };
+
+/**
+ * ゲームモード
+ * - 'editing': 盤面編集モード（駒の配置・削除）
+ * - 'playing': 対局モード（手番に従って指し手を進める）
+ * - 'reviewing': 検討モード（自由に分岐を作成）
+ */
+export type GameMode = "editing" | "playing" | "reviewing";

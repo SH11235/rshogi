@@ -108,6 +108,8 @@ interface UseKifuNavigationResult {
     addMove: (usiMove: string, positionAfter: PositionState, options?: AddMoveOptions) => void;
     /** 評価値を記録 */
     recordEval: (ply: number, event: EngineInfoEvent) => void;
+    /** ノードIDを指定して評価値を記録（分岐内のノード用） */
+    recordEvalByNodeId: (nodeId: string, event: EngineInfoEvent) => void;
     /** PVを分岐として追加（onAddedは分岐が追加された場合にのみ呼ばれる） */
     addPvAsBranch: (ply: number, pv: string[], onAdded?: () => void) => void;
     /** 新規対局でリセット */
@@ -350,6 +352,36 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
                         return setNodeEval(prev, nodeId, evalData);
                     }
                 }
+            }
+
+            return prev;
+        });
+    }, []);
+
+    /**
+     * ノードIDを指定して評価値を記録
+     * 分岐内のノードなど、plyだけでは特定できないノードに評価値を保存する場合に使用
+     */
+    const recordEvalByNodeId = useCallback((nodeId: string, event: EngineInfoEvent) => {
+        setTree((prev) => {
+            const node = prev.nodes.get(nodeId);
+            if (!node) return prev;
+
+            const evalData: KifuEval = {
+                scoreCp: event.scoreCp,
+                scoreMate: event.scoreMate,
+                depth: event.depth,
+                pv: event.pv,
+            };
+
+            const existing = node.eval;
+            const shouldUpdate =
+                !existing ||
+                (event.depth !== undefined && (existing.depth ?? 0) < event.depth) ||
+                (!existing.pv && event.pv && event.pv.length > 0);
+
+            if (shouldUpdate) {
+                return setNodeEval(prev, nodeId, evalData);
             }
 
             return prev;
@@ -641,6 +673,7 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
         truncate,
         addMove,
         recordEval,
+        recordEvalByNodeId,
         addPvAsBranch,
         reset,
         getMovesArray,
