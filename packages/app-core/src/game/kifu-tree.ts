@@ -669,9 +669,15 @@ export function isRewound(tree: KifuTree): boolean {
  */
 export function getPathToNode(tree: KifuTree, nodeId: string): string[] {
     const path: string[] = [];
+    const visited = new Set<string>();
     let currentId: string | null = nodeId;
 
     while (currentId !== null) {
+        if (visited.has(currentId)) {
+            // 循環参照を検出した場合は現在のパスを返す
+            break;
+        }
+        visited.add(currentId);
         path.unshift(currentId);
         const node = tree.nodes.get(currentId);
         if (!node) break;

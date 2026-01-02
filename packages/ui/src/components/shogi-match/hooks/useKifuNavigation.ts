@@ -279,6 +279,7 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
      */
     const goToNodeById = useCallback(
         (nodeId: string) => {
+            pathCacheRef.current = null; // キャッシュを無効化
             setTree((prev) => {
                 const newTree = goToNode(prev, nodeId);
                 if (newTree !== prev) {
@@ -298,6 +299,7 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
      */
     const switchBranchAtNode = useCallback(
         (parentNodeId: string, branchIndex: number) => {
+            pathCacheRef.current = null; // キャッシュを無効化
             setTree((prev) => {
                 const parentNode = prev.nodes.get(parentNodeId);
                 if (!parentNode || branchIndex < 0 || branchIndex >= parentNode.children.length) {

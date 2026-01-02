@@ -442,6 +442,7 @@ export function collectTreeAnalysisJobs(
 
 /**
  * 指定した分岐から解析ジョブを収集する
+ * スタックを使った反復的な実装でスタックオーバーフローを防止
  *
  * @param tree 棋譜ツリー
  * @param branchNodeId 分岐の開始ノードID
@@ -472,10 +473,18 @@ export function collectBranchAnalysisJobs(
         }
     }
 
-    // 分岐内を走査
-    const traverse = (nodeId: string, moves: string[]) => {
+    // スタックを使った反復的な実装（メインラインのみを辿る）
+    const stack: Array<{ nodeId: string; moves: string[] }> = [
+        { nodeId: branchNodeId, moves: pathMoves },
+    ];
+
+    while (stack.length > 0) {
+        const item = stack.pop();
+        if (!item) continue;
+        const { nodeId, moves } = item;
+
         const node = tree.nodes.get(nodeId);
-        if (!node) return;
+        if (!node) continue;
 
         const hasEval = node.eval?.scoreCp !== undefined || node.eval?.scoreMate !== undefined;
 
@@ -488,18 +497,18 @@ export function collectBranchAnalysisJobs(
             });
         }
 
-        // 子ノードを走査（メインラインのみ）
+        // 子ノードをスタックに追加（メインラインのみ）
         if (node.children.length > 0) {
             const childId = node.children[0];
             const childNode = tree.nodes.get(childId);
             if (childNode?.usiMove) {
-                traverse(childId, [...moves, childNode.usiMove]);
+                stack.push({
+                    nodeId: childId,
+                    moves: [...moves, childNode.usiMove],
+                });
             }
         }
-    };
-
-    // 分岐ノードから開始
-    traverse(branchNodeId, pathMoves);
+    }
 
     return jobs;
 }
