@@ -76,3 +76,17 @@ export const DEFAULT_ANALYSIS_SETTINGS: AnalysisSettings = {
  * - 'reviewing': 検討モード（自由に分岐を作成）
  */
 export type GameMode = "editing" | "playing" | "reviewing";
+
+/**
+ * 解析状態を表す型
+ * - 'none': 解析していない
+ * - 'by-ply': 通常解析（plyで評価値を保存）
+ * - 'by-node-id': 分岐解析（ノードIDで評価値を保存）
+ */
+export type AnalyzingState =
+    | { type: "none" }
+    | { type: "by-ply"; ply: number }
+    | { type: "by-node-id"; nodeId: string; ply: number };
+
+/** 解析していない状態の定数 */
+export const ANALYZING_STATE_NONE: AnalyzingState = { type: "none" };

@@ -57,6 +57,8 @@ import { useKifuNavigation } from "./shogi-match/hooks/useKifuNavigation";
 import { useLocalStorage } from "./shogi-match/hooks/useLocalStorage";
 import {
     type AnalysisSettings,
+    ANALYZING_STATE_NONE,
+    type AnalyzingState,
     DEFAULT_ANALYSIS_SETTINGS,
     DEFAULT_DISPLAY_SETTINGS,
     type DisplaySettings,
@@ -290,13 +292,8 @@ export function ShogiMatch({
         evalCp?: number;
         evalMate?: number;
     } | null>(null);
-    // 解析状態: analyzingPly と analyzingNodeId は相互排他的に使用される
-    // - analyzingNodeId が設定されている場合: 分岐解析（ノードIDで評価値を保存）
-    // - analyzingNodeId が null の場合: 通常解析（plyで評価値を保存）
-    // 両方が null の場合は解析していない状態
-    // TODO: 将来的には AnalyzingState 型（union型）での明示的な管理を検討
-    const [analyzingPly, setAnalyzingPly] = useState<number | null>(null);
-    const [analyzingNodeId, setAnalyzingNodeId] = useState<string | null>(null);
+    // 解析状態（union型で相互排他的な状態を型レベルで保証）
+    const [analyzingState, setAnalyzingState] = useState<AnalyzingState>(ANALYZING_STATE_NONE);
     // 一括解析の状態
     const [batchAnalysis, setBatchAnalysis] = useState<{
         isRunning: boolean;
@@ -448,23 +445,24 @@ export function ShogiMatch({
 
     const handleMoveFromEngineRef = useRef<(move: string) => void>(() => {});
 
-    // 分岐解析用のノードIDをrefで追跡（コールバック内で最新値を参照するため）
-    const analyzingNodeIdRef = useRef<string | null>(null);
+    // 分岐解析用の状態をrefで追跡（コールバック内で最新値を参照するため）
+    const analyzingStateRef = useRef<AnalyzingState>(ANALYZING_STATE_NONE);
     useEffect(() => {
-        analyzingNodeIdRef.current = analyzingNodeId;
+        analyzingStateRef.current = analyzingState;
 
         return () => {
             // クリーンアップ時にrefをリセット
-            analyzingNodeIdRef.current = null;
+            analyzingStateRef.current = ANALYZING_STATE_NONE;
         };
-    }, [analyzingNodeId]);
+    }, [analyzingState]);
 
     // 評価値更新コールバック（分岐解析にも対応）
     const handleEvalUpdate = useCallback(
         (ply: number, event: import("@shogi/engine-client").EngineInfoEvent) => {
+            const state = analyzingStateRef.current;
             // 分岐解析中の場合はノードIDで保存
-            if (analyzingNodeIdRef.current) {
-                recordEvalByNodeId(analyzingNodeIdRef.current, event);
+            if (state.type === "by-node-id") {
+                recordEvalByNodeId(state.nodeId, event);
             } else {
                 // 通常解析の場合はplyで保存
                 recordEval(ply, event);
@@ -1474,7 +1472,7 @@ export function ShogiMatch({
             // （ply 1 = 1手目を指した後の局面 = moves[0]まで適用した局面）
             const movesForPly = kifMoves.slice(0, ply).map((m) => m.usiMove);
 
-            setAnalyzingPly(ply);
+            setAnalyzingState({ type: "by-ply", ply });
             void analyzePosition({
                 sfen: startSfen,
                 moves: movesForPly,
@@ -1513,9 +1511,8 @@ export function ShogiMatch({
                     }
                 }
 
-                // 分岐解析用にノードIDを設定
-                setAnalyzingNodeId(nodeId);
-                setAnalyzingPly(node.ply);
+                // 分岐解析用に状態を設定
+                setAnalyzingState({ type: "by-node-id", nodeId, ply: node.ply });
                 await analyzePosition({
                     sfen: startSfen,
                     moves: movesForNode,
@@ -1525,8 +1522,7 @@ export function ShogiMatch({
                 });
             } catch (error) {
                 setMessage(`解析エラー: ${error instanceof Error ? error.message : String(error)}`);
-                setAnalyzingNodeId(null);
-                setAnalyzingPly(null);
+                setAnalyzingState(ANALYZING_STATE_NONE);
             }
         },
         [navigation.tree, analyzePosition, startSfen],
@@ -1534,11 +1530,10 @@ export function ShogiMatch({
 
     // 単発解析完了時の処理
     useEffect(() => {
-        if (!isAnalyzing && analyzingPly !== null) {
-            setAnalyzingPly(null);
-            setAnalyzingNodeId(null);
+        if (!isAnalyzing && analyzingState.type !== "none") {
+            setAnalyzingState(ANALYZING_STATE_NONE);
         }
-    }, [isAnalyzing, analyzingPly]);
+    }, [isAnalyzing, analyzingState.type]);
 
     // 一括解析を開始（並列処理）- 本譜のみ
     const handleStartBatchAnalysis = useCallback(() => {
@@ -2174,7 +2169,9 @@ export function ShogiMatch({
                             onSelectedBranchChange={setSelectedBranchNodeId}
                             onAnalyzePly={handleAnalyzePly}
                             isAnalyzing={isAnalyzing}
-                            analyzingPly={analyzingPly ?? undefined}
+                            analyzingPly={
+                                analyzingState.type !== "none" ? analyzingState.ply : undefined
+                            }
                             batchAnalysis={
                                 batchAnalysis
                                     ? {
