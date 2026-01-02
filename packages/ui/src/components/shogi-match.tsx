@@ -71,7 +71,10 @@ import {
     consumeFromHand,
     countPieces,
 } from "./shogi-match/utils/boardUtils";
-import { collectTreeAnalysisJobs } from "./shogi-match/utils/branchTreeUtils";
+import {
+    collectBranchAnalysisJobs,
+    collectTreeAnalysisJobs,
+} from "./shogi-match/utils/branchTreeUtils";
 import { isPromotable, PIECE_CAP, PIECE_LABELS } from "./shogi-match/utils/constants";
 import { exportToKifString } from "./shogi-match/utils/kifFormat";
 import { type KifMoveData, parseSfen } from "./shogi-match/utils/kifParser";
@@ -1596,6 +1599,50 @@ export function ShogiMatch({
         [navigation.tree, startSfen, analysisSettings, enginePool],
     );
 
+    // 特定の分岐を一括解析
+    const handleAnalyzeBranch = useCallback(
+        (branchNodeId: string) => {
+            const tree = navigation.tree;
+            if (!tree) return;
+
+            // 分岐から解析ジョブを収集
+            const branchJobs = collectBranchAnalysisJobs(tree, branchNodeId, {
+                onlyWithoutEval: true,
+            });
+
+            if (branchJobs.length === 0) {
+                setMessage("解析対象の手がありません（すべての手に評価値があります）");
+                setTimeout(() => setMessage(null), 3000);
+                return;
+            }
+
+            // AnalysisJob形式に変換
+            const jobs: AnalysisJob[] = branchJobs.map((job) => ({
+                ply: job.ply,
+                sfen: startSfen,
+                moves: job.moves,
+                timeMs: analysisSettings.batchAnalysisTimeMs,
+                depth: analysisSettings.batchAnalysisDepth,
+                nodeId: job.nodeId,
+            }));
+
+            setMessage(`分岐の${jobs.length}手を解析中...`);
+            setTimeout(() => setMessage(null), 2000);
+
+            // 並列一括解析を開始
+            enginePool.start(jobs);
+        },
+        [navigation.tree, startSfen, analysisSettings, enginePool],
+    );
+
+    // 分岐作成時の自動解析
+    useEffect(() => {
+        if (lastAddedBranchNodeId && analysisSettings.autoAnalyzeBranch) {
+            // 分岐が追加された直後に自動解析を開始
+            handleAnalyzeBranch(lastAddedBranchNodeId);
+        }
+    }, [lastAddedBranchNodeId, analysisSettings.autoAnalyzeBranch, handleAnalyzeBranch]);
+
     // 一括解析をキャンセル
     const handleCancelBatchAnalysis = useCallback(() => {
         void enginePool.cancel();
@@ -2197,6 +2244,7 @@ export function ShogiMatch({
                             onNodeClick={navigation.goToNodeById}
                             onBranchSwitch={navigation.switchBranchAtNode}
                             onAnalyzeNode={handleAnalyzeNode}
+                            onAnalyzeBranch={handleAnalyzeBranch}
                             onStartTreeBatchAnalysis={handleStartTreeBatchAnalysis}
                         />
                     </div>

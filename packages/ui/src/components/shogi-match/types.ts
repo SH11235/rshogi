@@ -60,6 +60,8 @@ export interface AnalysisSettings {
     batchAnalysisTimeMs: number;
     /** 一括解析時の探索深さ */
     batchAnalysisDepth: number;
+    /** 分岐作成時に自動で解析を開始する */
+    autoAnalyzeBranch: boolean;
 }
 
 /** デフォルト解析設定 */
@@ -67,6 +69,7 @@ export const DEFAULT_ANALYSIS_SETTINGS: AnalysisSettings = {
     parallelWorkers: 0, // 0 = 自動検出
     batchAnalysisTimeMs: 1000,
     batchAnalysisDepth: 15,
+    autoAnalyzeBranch: false,
 };
 
 /**

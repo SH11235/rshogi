@@ -122,6 +122,8 @@ interface KifuPanelProps {
     onBranchSwitch?: (parentNodeId: string, branchIndex: number) => void;
     /** 分岐内のノードを解析するコールバック */
     onAnalyzeNode?: (nodeId: string) => void;
+    /** 分岐全体を一括解析するコールバック */
+    onAnalyzeBranch?: (branchNodeId: string) => void;
     /** 追加のクラス名（高さ調整用） */
     className?: string;
     /** 最後に追加された分岐のnodeId（この分岐に直接遷移する） */
@@ -211,9 +213,11 @@ function EvalHintBanner({
 function InlineBranchList({
     branches,
     onBranchClick,
+    onAnalyzeBranch,
 }: {
     branches: BranchSummary[];
     onBranchClick: (branch: BranchSummary) => void;
+    onAnalyzeBranch?: (branchNodeId: string) => void;
 }): ReactElement {
     return (
         <div className="ml-6 pl-2 border-l-2 border-[hsl(var(--wafuu-shu)/0.3)] my-0.5">
@@ -248,6 +252,20 @@ function InlineBranchList({
                                 ({branch.branchLength}手)
                             </span>
                         </button>
+                        {/* 分岐解析ボタン */}
+                        {onAnalyzeBranch && (
+                            <button
+                                type="button"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    onAnalyzeBranch(branch.nodeId);
+                                }}
+                                className="text-[10px] px-1 py-0.5 rounded bg-muted hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                                title="この分岐を一括解析"
+                            >
+                                解析
+                            </button>
+                        )}
                     </div>
                 );
             })}
@@ -470,6 +488,27 @@ function BatchAnalysisDropdown({
                         </div>
                     </div>
 
+                    {/* 分岐作成時の自動解析オプション */}
+                    <div className="space-y-1.5">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={analysisSettings.autoAnalyzeBranch}
+                                onChange={(e) =>
+                                    onAnalysisSettingsChange({
+                                        ...analysisSettings,
+                                        autoAnalyzeBranch: e.target.checked,
+                                    })
+                                }
+                                className="w-3.5 h-3.5 rounded border-muted-foreground/50"
+                            />
+                            <span className="text-xs text-foreground">分岐作成時に自動解析</span>
+                        </label>
+                        <div className="text-[10px] text-muted-foreground pl-5">
+                            新しい分岐を作成したとき、自動的に解析を開始します
+                        </div>
+                    </div>
+
                     <div className="text-[10px] text-muted-foreground">
                         検出コア数: {parallelismConfig.detectedConcurrency}
                     </div>
@@ -514,6 +553,7 @@ export function KifuPanel({
     onNodeClick,
     onBranchSwitch: _onBranchSwitch,
     onAnalyzeNode,
+    onAnalyzeBranch,
     lastAddedBranchNodeId,
     onLastAddedBranchHandled,
     onSelectedBranchChange,
@@ -1070,6 +1110,19 @@ export function KifuPanel({
                                                 <span className="text-[10px] text-[hsl(var(--wafuu-shu))]">
                                                     {node.ply}手目から分岐
                                                 </span>
+                                                {onAnalyzeBranch && (
+                                                    <button
+                                                        type="button"
+                                                        className="text-[10px] px-1.5 py-0.5 rounded bg-[hsl(var(--wafuu-shu)/0.15)] hover:bg-[hsl(var(--wafuu-shu)/0.3)] text-[hsl(var(--wafuu-shu))] transition-colors"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            onAnalyzeBranch(node.nodeId);
+                                                        }}
+                                                        title="この分岐の全手を一括解析"
+                                                    >
+                                                        分岐を解析
+                                                    </button>
+                                                )}
                                                 <div className="flex-1 h-px bg-[hsl(var(--wafuu-shu)/0.3)]" />
                                             </div>
                                         )}
@@ -1248,6 +1301,7 @@ export function KifuPanel({
                                         <InlineBranchList
                                             branches={branchesAtPly}
                                             onBranchClick={handleInlineBranchClick}
+                                            onAnalyzeBranch={onAnalyzeBranch}
                                         />
                                     ) : null;
 
