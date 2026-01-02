@@ -13,7 +13,7 @@ import { Switch } from "../../switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../../tooltip";
 import type { AnalysisSettings } from "../types";
 import type { BranchSummary, FlatTreeNode } from "../utils/branchTreeUtils";
-import { getAllBranches, getBranchMoves, getBranchesByPly } from "../utils/branchTreeUtils";
+import { getAllBranches, getBranchesByPly, getBranchMoves } from "../utils/branchTreeUtils";
 import type { KifMove } from "../utils/kifFormat";
 import { formatEval, getEvalTooltipInfo } from "../utils/kifFormat";
 import { EvalPopover } from "./EvalPopover";

@@ -1,6 +1,6 @@
 import type { Player } from "@shogi/app-core";
 import { type EngineErrorCode, getEngineErrorInfo } from "@shogi/engine-client";
-import { useState, type ReactElement } from "react";
+import { type ReactElement, useState } from "react";
 
 const baseCard = {
     background: "hsl(var(--card, 0 0% 100%))",
@@ -91,8 +91,8 @@ function ErrorDetailSection({
                     考えられる原因:
                 </div>
                 <ul style={{ margin: 0, paddingLeft: "16px", fontSize: "12px" }}>
-                    {errorInfo.possibleCauses.map((cause, i) => (
-                        <li key={i} style={{ marginBottom: "2px" }}>
+                    {errorInfo.possibleCauses.map((cause) => (
+                        <li key={cause} style={{ marginBottom: "2px" }}>
                             {cause}
                         </li>
                     ))}
@@ -111,8 +111,8 @@ function ErrorDetailSection({
                     対処法:
                 </div>
                 <ul style={{ margin: 0, paddingLeft: "16px", fontSize: "12px" }}>
-                    {errorInfo.solutions.map((solution, i) => (
-                        <li key={i} style={{ marginBottom: "2px" }}>
+                    {errorInfo.solutions.map((solution) => (
+                        <li key={solution} style={{ marginBottom: "2px" }}>
                             {solution}
                         </li>
                     ))}
