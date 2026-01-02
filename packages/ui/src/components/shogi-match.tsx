@@ -96,7 +96,7 @@ const DEFAULT_MAX_LOGS = 80; // ログ履歴の最大保持件数
 const TOOLTIP_DELAY_DURATION_MS = 120; // ツールチップ表示遅延
 
 // レイアウト用Tailwindクラス
-const matchLayoutClasses = "flex flex-col gap-2 items-center py-3";
+const matchLayoutClasses = "flex flex-col gap-2 items-center py-2";
 
 // CSS変数は style 属性で設定（Tailwindでは表現できない）
 const matchLayoutCssVars = {

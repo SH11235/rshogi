@@ -74,8 +74,8 @@ export function ShogiBoard({
     const { files, ranks } = getBoardLabels(flipBoard);
 
     return (
-        <div className="relative inline-block w-full max-w-[560px] rounded-2xl border border-[hsl(var(--shogi-outer-border))] bg-[radial-gradient(circle_at_30%_20%,#f9e7c9,#e1c08d)] p-3 shadow-[0_10px_30px_rgba(0,0,0,0.18)]">
-            <div className="pointer-events-none absolute inset-3 rounded-xl border border-white/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]" />
+        <div className="relative inline-block w-full max-w-[560px] rounded-2xl border border-[hsl(var(--shogi-outer-border))] bg-[radial-gradient(circle_at_30%_20%,#f9e7c9,#e1c08d)] p-2 shadow-[0_10px_30px_rgba(0,0,0,0.18)]">
+            <div className="pointer-events-none absolute inset-2 rounded-xl border border-white/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]" />
             {/* 盤外ラベル: 筋（上） - スペースを常に確保、左右対称マージン */}
             <div
                 className="my-1 mx-6 grid grid-cols-9 text-center text-[11px] font-semibold"
