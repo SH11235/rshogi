@@ -1669,10 +1669,8 @@ export function ShogiMatch({
     // PVを分岐として追加するコールバック（シグナル付き）
     const handleAddPvAsBranch = useCallback(
         (ply: number, pv: string[]) => {
-            console.log("[ShogiMatch] handleAddPvAsBranch called:", { ply, pv });
             // 分岐が実際に追加された場合、ply+firstMoveを記録
             addPvAsBranch(ply, pv, (info) => {
-                console.log("[ShogiMatch] addPvAsBranch callback called with info:", info);
                 setLastAddedBranchInfo(info);
             });
         },

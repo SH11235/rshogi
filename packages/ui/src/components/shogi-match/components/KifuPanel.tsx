@@ -625,39 +625,25 @@ export function KifuPanel({
             return;
         }
 
-        // デバッグログ
-        console.log("[KifuPanel] lastAddedBranchInfo changed:", lastAddedBranchInfo);
-        console.log(
-            "[KifuPanel] branches:",
-            branches.map((b) => ({ nodeId: b.nodeId, ply: b.ply })),
-        );
-
         // ply + firstMove で分岐を検索
         const branchInList = branches.find((b) => {
             if (b.ply !== lastAddedBranchInfo.ply) return false;
             const node = kifuTree?.nodes.get(b.nodeId);
             return node?.usiMove === lastAddedBranchInfo.firstMove;
         });
-        console.log("[KifuPanel] branchInList:", branchInList);
 
         if (branchInList) {
             // 処理済みとしてマーク
             processedBranchInfoRef.current = lastAddedBranchInfo;
-            // スクロール位置を保存
-            if (listRef.current) {
-                mainScrollPositionRef.current = listRef.current.scrollTop;
-            }
             // 追加された分岐を選択して「選択分岐」ビューに遷移
+            // （スクロール位置はviewMode遷移検知のuseEffectで自動保存される）
             setSelectedBranch({
                 nodeId: branchInList.nodeId,
                 tabLabel: branchInList.tabLabel,
             });
             setViewMode("selectedBranch");
-            console.log("[KifuPanel] Set selectedBranch from branches:", branchInList.tabLabel);
             // 処理完了を通知
             onLastAddedBranchHandled?.();
-        } else {
-            console.log("[KifuPanel] Branch not found by ply + firstMove!");
         }
     }, [lastAddedBranchInfo, branches, kifuTree, onLastAddedBranchHandled]);
 
@@ -678,19 +664,24 @@ export function KifuPanel({
         onSelectedBranchChange?.(branchNodeId);
     }, [viewMode, selectedBranch, onSelectedBranchChange]);
 
-    // ビューモード切り替えハンドラ（スクロール位置を保存/復元）
-    const handleViewModeChange = useCallback(
-        (newMode: ViewMode) => {
-            if (viewMode === "main" && newMode !== "main") {
-                // 本譜から別ビューへ: スクロール位置を保存
-                if (listRef.current) {
-                    mainScrollPositionRef.current = listRef.current.scrollTop;
-                }
+    // 前回のビューモードを追跡するref
+    const prevViewModeRef = useRef<ViewMode>(viewMode);
+
+    // main → 非main への遷移時にスクロール位置を保存
+    useEffect(() => {
+        if (prevViewModeRef.current === "main" && viewMode !== "main") {
+            // 本譜から別ビューへ: スクロール位置を保存
+            if (listRef.current) {
+                mainScrollPositionRef.current = listRef.current.scrollTop;
             }
-            setViewMode(newMode);
-        },
-        [viewMode],
-    );
+        }
+        prevViewModeRef.current = viewMode;
+    }, [viewMode]);
+
+    // ビューモード切り替えハンドラ
+    const handleViewModeChange = useCallback((newMode: ViewMode) => {
+        setViewMode(newMode);
+    }, []);
 
     // 分岐を選択するハンドラ
     const handleSelectBranch = useCallback((branch: BranchSummary) => {
