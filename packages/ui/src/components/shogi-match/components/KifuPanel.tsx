@@ -12,11 +12,16 @@ import { Popover, PopoverContent, PopoverTrigger } from "../../popover";
 import { Switch } from "../../switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../../tooltip";
 import type { AnalysisSettings } from "../types";
-import type { BranchSummary, FlatTreeNode } from "../utils/branchTreeUtils";
-import { getAllBranches, getBranchesByPly, getBranchMoves } from "../utils/branchTreeUtils";
-import type { KifMove } from "../utils/kifFormat";
-import { formatEval, getEvalTooltipInfo } from "../utils/kifFormat";
-import { EvalPopover } from "./EvalPopover";
+import type { BranchSummary, FlatTreeNode, PvMainLineComparison } from "../utils/branchTreeUtils";
+import {
+    comparePvWithMainLine,
+    findExistingBranchForPv,
+    getAllBranches,
+    getBranchesByPly,
+    getBranchMoves,
+} from "../utils/branchTreeUtils";
+import type { KifMove, PvDisplayMove } from "../utils/kifFormat";
+import { convertPvToDisplay, formatEval, getEvalTooltipInfo } from "../utils/kifFormat";
 import { KifuNavigationToolbar } from "./KifuNavigationToolbar";
 
 /** 表示モード */
@@ -311,6 +316,302 @@ function EvalTooltipContent({
 }
 
 /**
+ * 展開された指し手の詳細表示コンポーネント
+ * EvalPopoverで表示していた内容をインラインで表示する
+ */
+function ExpandedMoveDetails({
+    move,
+    position,
+    onAddBranch,
+    onPreview,
+    onAnalyze,
+    isAnalyzing,
+    analyzingPly,
+    kifuTree,
+    onCollapse,
+}: {
+    move: KifMove;
+    position: PositionState;
+    onAddBranch?: (ply: number, pv: string[]) => void;
+    onPreview?: (ply: number, pv: string[], evalCp?: number, evalMate?: number) => void;
+    onAnalyze?: (ply: number) => void;
+    isAnalyzing?: boolean;
+    analyzingPly?: number;
+    kifuTree?: KifuTree;
+    onCollapse: () => void;
+}): ReactElement {
+    // PVをKIF形式に変換
+    const pvDisplay = useMemo((): PvDisplayMove[] | null => {
+        if (!move.pv || move.pv.length === 0) {
+            return null;
+        }
+        return convertPvToDisplay(move.pv, position);
+    }, [move.pv, position]);
+
+    // 評価値の詳細情報
+    const evalInfo = useMemo(() => {
+        return getEvalTooltipInfo(move.evalCp, move.evalMate, move.ply, move.depth);
+    }, [move.evalCp, move.evalMate, move.ply, move.depth]);
+
+    // PVと本譜の比較結果
+    const pvComparison = useMemo((): PvMainLineComparison | null => {
+        if (!kifuTree || !move.pv || move.pv.length === 0) {
+            return null;
+        }
+        return comparePvWithMainLine(kifuTree, move.ply, move.pv);
+    }, [kifuTree, move.ply, move.pv]);
+
+    // 分岐追加時のPVが既存分岐と一致するかをチェック
+    const existingBranchNodeId = useMemo((): string | null => {
+        if (!kifuTree || !move.pv || move.pv.length === 0 || !pvComparison) {
+            return null;
+        }
+
+        if (pvComparison.type === "diverges_later" && pvComparison.divergePly !== undefined) {
+            const pvFromDiverge = move.pv.slice(pvComparison.divergeIndex);
+            return findExistingBranchForPv(kifuTree, pvComparison.divergePly, pvFromDiverge);
+        }
+
+        if (pvComparison.type === "diverges_first") {
+            return findExistingBranchForPv(kifuTree, move.ply, move.pv);
+        }
+
+        return null;
+    }, [kifuTree, move.ply, move.pv, pvComparison]);
+
+    // この手数が解析中かどうか
+    const isThisPlyAnalyzing = isAnalyzing && analyzingPly === move.ply;
+
+    const hasPv = pvDisplay && pvDisplay.length > 0;
+
+    return (
+        <section
+            className="
+                mt-1 mx-1 p-3 rounded-lg
+                bg-[hsl(var(--wafuu-washi))] dark:bg-[hsl(var(--card))]
+                border border-[hsl(var(--border))]
+                shadow-sm
+                animate-[slideDown_0.15s_ease-out]
+            "
+            aria-label={`${move.ply}手目の詳細`}
+        >
+            {/* ヘッダー: 評価値情報と閉じるボタン */}
+            <div className="flex items-center justify-between mb-2 pb-2 border-b border-border">
+                <div className="flex items-center gap-2">
+                    <span className="text-[11px] text-muted-foreground">{move.ply}手目</span>
+                    <span
+                        className={`font-medium text-[13px] ${
+                            evalInfo.advantage === "sente"
+                                ? "text-wafuu-shu"
+                                : evalInfo.advantage === "gote"
+                                  ? "text-[hsl(210_70%_45%)]"
+                                  : ""
+                        }`}
+                    >
+                        {evalInfo.description}
+                    </span>
+                </div>
+                <div className="flex items-center gap-2">
+                    <div className="text-muted-foreground text-[10px] space-x-1.5">
+                        {evalInfo.detail && <span>{evalInfo.detail}</span>}
+                        {evalInfo.depthText && <span>{evalInfo.depthText}</span>}
+                    </div>
+                    <button
+                        type="button"
+                        onClick={onCollapse}
+                        className="
+                            p-1 rounded hover:bg-muted
+                            text-muted-foreground hover:text-foreground
+                            transition-colors cursor-pointer
+                            bg-transparent border-none
+                        "
+                        aria-label="閉じる"
+                    >
+                        <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden="true"
+                        >
+                            <polyline points="18 15 12 9 6 15" />
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            {/* 読み筋がある場合 */}
+            {hasPv && (
+                <div className="space-y-2">
+                    <div className="text-[11px] font-medium text-muted-foreground">読み筋:</div>
+                    <div className="flex flex-wrap gap-1 text-[12px] font-mono">
+                        {pvDisplay.map((m, index) => (
+                            <span
+                                key={`${index}-${m.usiMove}`}
+                                className={
+                                    m.turn === "sente"
+                                        ? "text-wafuu-shu"
+                                        : "text-[hsl(210_70%_45%)]"
+                                }
+                            >
+                                {m.displayText}
+                                {index < pvDisplay.length - 1 && (
+                                    <span className="text-muted-foreground mx-0.5">→</span>
+                                )}
+                            </span>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {/* 読み筋がない場合は解析ボタンを表示 */}
+            {!hasPv && onAnalyze && (
+                <div className="space-y-2">
+                    <div className="text-[11px] text-muted-foreground">読み筋がありません</div>
+                    <button
+                        type="button"
+                        onClick={() => onAnalyze(move.ply)}
+                        disabled={isThisPlyAnalyzing}
+                        className="
+                            w-full px-3 py-2 text-[12px]
+                            bg-primary text-primary-foreground
+                            hover:bg-primary/90
+                            disabled:opacity-50 disabled:cursor-not-allowed
+                            rounded border border-border
+                            transition-colors cursor-pointer
+                        "
+                    >
+                        {isThisPlyAnalyzing ? (
+                            <span>解析中...</span>
+                        ) : (
+                            <>
+                                <span className="mr-1">&#128269;</span>
+                                この局面を解析する
+                            </>
+                        )}
+                    </button>
+                </div>
+            )}
+
+            {/* アクションボタン（PVがある場合のみ） */}
+            {hasPv && (onPreview || onAddBranch) && (
+                <div className="flex gap-2 mt-3 pt-2 border-t border-border">
+                    {onPreview && move.pv && (
+                        <button
+                            type="button"
+                            onClick={() =>
+                                onPreview(move.ply, move.pv ?? [], move.evalCp, move.evalMate)
+                            }
+                            className="
+                                flex-1 px-3 py-1.5 text-[11px]
+                                bg-muted hover:bg-muted/80
+                                rounded border border-border
+                                transition-colors cursor-pointer
+                            "
+                        >
+                            <span className="mr-1">&#9654;</span>
+                            盤面で確認
+                        </button>
+                    )}
+                    {onAddBranch && move.pv && (
+                        <>
+                            {/* 本譜と完全一致の場合 */}
+                            {pvComparison?.type === "identical" && (
+                                <div
+                                    className="
+                                        flex-1 px-3 py-1.5 text-[11px] text-center
+                                        bg-muted/50 text-muted-foreground
+                                        rounded border border-border
+                                    "
+                                >
+                                    <span className="mr-1">✓</span>
+                                    本譜通り
+                                </div>
+                            )}
+                            {/* 途中から分岐する場合 */}
+                            {pvComparison?.type === "diverges_later" &&
+                                pvComparison.divergePly !== undefined &&
+                                pvComparison.divergeIndex !== undefined &&
+                                (existingBranchNodeId ? (
+                                    <div
+                                        className="
+                                            flex-1 px-3 py-1.5 text-[11px] text-center
+                                            bg-muted/50 text-muted-foreground
+                                            rounded border border-border
+                                        "
+                                    >
+                                        <span className="mr-1">✓</span>
+                                        分岐追加済み
+                                    </div>
+                                ) : (
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            const pvFromDiverge = move.pv?.slice(
+                                                pvComparison.divergeIndex,
+                                            );
+                                            if (
+                                                pvFromDiverge &&
+                                                pvFromDiverge.length > 0 &&
+                                                pvComparison.divergePly !== undefined
+                                            ) {
+                                                onAddBranch(pvComparison.divergePly, pvFromDiverge);
+                                            }
+                                        }}
+                                        className="
+                                            flex-1 px-3 py-1.5 text-[11px]
+                                            bg-[hsl(var(--wafuu-kin)/0.1)] hover:bg-[hsl(var(--wafuu-kin)/0.2)]
+                                            text-[hsl(var(--wafuu-sumi))]
+                                            rounded border border-[hsl(var(--wafuu-kin)/0.3)]
+                                            transition-colors cursor-pointer
+                                        "
+                                    >
+                                        <span className="mr-1">&#128194;</span>
+                                        {pvComparison.divergePly + 1}手目から分岐を追加
+                                    </button>
+                                ))}
+                            {/* 最初から異なる場合（従来通り） */}
+                            {(pvComparison?.type === "diverges_first" || !pvComparison) &&
+                                (existingBranchNodeId ? (
+                                    <div
+                                        className="
+                                            flex-1 px-3 py-1.5 text-[11px] text-center
+                                            bg-muted/50 text-muted-foreground
+                                            rounded border border-border
+                                        "
+                                    >
+                                        <span className="mr-1">✓</span>
+                                        分岐追加済み
+                                    </div>
+                                ) : (
+                                    <button
+                                        type="button"
+                                        onClick={() => onAddBranch(move.ply, move.pv ?? [])}
+                                        className="
+                                            flex-1 px-3 py-1.5 text-[11px]
+                                            bg-muted hover:bg-muted/80
+                                            rounded border border-border
+                                            transition-colors cursor-pointer
+                                        "
+                                    >
+                                        <span className="mr-1">&#128194;</span>
+                                        分岐として保存
+                                    </button>
+                                ))}
+                        </>
+                    )}
+                </div>
+            )}
+        </section>
+    );
+}
+
+/**
  * 評価値のスタイルクラスを決定
  */
 function getEvalClassName(evalCp?: number, evalMate?: number): string {
@@ -587,6 +888,9 @@ export function KifuPanel({
     // 展開されている手数のセット（折りたたみ状態管理）
     const [expandedPlies, setExpandedPlies] = useState<Set<number>>(new Set());
 
+    // 詳細展開中の手数（null = 非展開）
+    const [expandedMoveDetail, setExpandedMoveDetail] = useState<number | null>(null);
+
     // 折りたたみトグル関数
     const togglePlyExpansion = useCallback((ply: number) => {
         setExpandedPlies((prev) => {
@@ -598,6 +902,11 @@ export function KifuPanel({
             }
             return next;
         });
+    }, []);
+
+    // 詳細展開トグル関数
+    const toggleMoveDetailExpansion = useCallback((ply: number) => {
+        setExpandedMoveDetail((prev) => (prev === ply ? null : ply));
     }, []);
 
     // 選択中の分岐の手順を取得
@@ -1228,17 +1537,43 @@ export function KifuPanel({
                                 const position = positionHistory?.[index];
                                 // PVがあるかどうか
                                 const hasPv = move.pv && move.pv.length > 0;
-                                // EvalPopoverを使用するか（PVがあるか、解析機能がある場合）
-                                const useEvalPopover = position && (hasPv || onAnalyzePly);
+                                // 詳細を展開するか（PVがあるか、解析機能がある場合）
+                                const canExpand = position && (hasPv || onAnalyzePly);
+                                // この行が詳細展開中か
+                                const isDetailExpanded = expandedMoveDetail === move.ply;
 
                                 // 評価値表示コンポーネント
                                 const evalSpan = (
-                                    <span
-                                        className={`${getEvalClassName(move.evalCp, move.evalMate)} ${isPastCurrent ? "opacity-50" : ""} ${useEvalPopover ? "cursor-pointer" : "cursor-help"}`}
-                                    >
-                                        {evalText}
-                                    </span>
+                                    <Tooltip>
+                                        <TooltipTrigger asChild>
+                                            <span
+                                                className={`${getEvalClassName(move.evalCp, move.evalMate)} ${isPastCurrent ? "opacity-50" : ""}`}
+                                            >
+                                                {evalText}
+                                            </span>
+                                        </TooltipTrigger>
+                                        {!isDetailExpanded && (
+                                            <TooltipContent side="left" className="max-w-[200px]">
+                                                <EvalTooltipContent
+                                                    evalCp={move.evalCp}
+                                                    evalMate={move.evalMate}
+                                                    ply={move.ply}
+                                                    depth={move.depth}
+                                                />
+                                            </TooltipContent>
+                                        )}
+                                    </Tooltip>
                                 );
+
+                                // 行クリックハンドラ（ply選択 + 詳細展開トグル）
+                                const handleRowClick = () => {
+                                    // まず局面を選択
+                                    onPlySelect?.(move.ply);
+                                    // 詳細展開可能なら展開/折りたたみをトグル
+                                    if (canExpand) {
+                                        toggleMoveDetailExpansion(move.ply);
+                                    }
+                                };
 
                                 const content = (
                                     <>
@@ -1265,53 +1600,21 @@ export function KifuPanel({
                                         >
                                             {move.displayText}
                                         </span>
-                                        {showEval &&
-                                            evalText &&
-                                            (useEvalPopover && position ? (
-                                                <EvalPopover
-                                                    move={move}
-                                                    position={position}
-                                                    onAddBranch={onAddPvAsBranch}
-                                                    onPreview={onPreviewPv}
-                                                    onAnalyze={onAnalyzePly}
-                                                    isAnalyzing={isAnalyzing}
-                                                    analyzingPly={analyzingPly}
-                                                    kifuTree={kifuTree}
-                                                >
-                                                    {evalSpan}
-                                                </EvalPopover>
-                                            ) : (
-                                                <Tooltip>
-                                                    <TooltipTrigger asChild>
-                                                        {/* 親要素（行クリック）へのイベント伝播を防ぐ */}
-                                                        <button
-                                                            type="button"
-                                                            className="inline bg-transparent border-none p-0 m-0 font-inherit text-inherit"
-                                                            onClick={(e) => e.stopPropagation()}
-                                                            onKeyDown={(e) => e.stopPropagation()}
-                                                        >
-                                                            {evalSpan}
-                                                        </button>
-                                                    </TooltipTrigger>
-                                                    <TooltipContent
-                                                        side="left"
-                                                        className="max-w-[200px]"
-                                                    >
-                                                        <EvalTooltipContent
-                                                            evalCp={move.evalCp}
-                                                            evalMate={move.evalMate}
-                                                            ply={move.ply}
-                                                            depth={move.depth}
-                                                        />
-                                                    </TooltipContent>
-                                                </Tooltip>
-                                            ))}
+                                        {showEval && evalText && evalSpan}
+                                        {/* 展開可能インジケータ */}
+                                        {canExpand && (
+                                            <span
+                                                className={`text-[10px] transition-transform duration-150 ${isDetailExpanded ? "rotate-180" : ""} ${isPastCurrent ? "text-muted-foreground/30" : "text-muted-foreground/60"}`}
+                                            >
+                                                ▾
+                                            </span>
+                                        )}
                                     </>
                                 );
 
-                                const rowClassName = `grid grid-cols-[32px_1fr_auto] gap-1 items-center px-1 py-0.5 text-[13px] font-mono rounded ${
+                                const rowClassName = `grid grid-cols-[32px_1fr_auto_auto] gap-1 items-center px-1 py-0.5 text-[13px] font-mono rounded ${
                                     isCurrent ? "bg-accent" : ""
-                                }`;
+                                } ${isDetailExpanded ? "bg-accent/70" : ""}`;
 
                                 // インライン分岐リスト（展開時のみ表示）
                                 const inlineBranches =
@@ -1323,32 +1626,21 @@ export function KifuPanel({
                                         />
                                     ) : null;
 
-                                if (onPlySelect) {
-                                    return (
-                                        <div key={move.ply}>
-                                            <div
-                                                ref={
-                                                    isCurrent
-                                                        ? (currentRowRef as React.RefObject<HTMLDivElement>)
-                                                        : undefined
-                                                }
-                                                role="option"
-                                                className={`${rowClassName} w-full text-left cursor-pointer hover:bg-accent/50`}
-                                                onClick={() => onPlySelect(move.ply)}
-                                                onKeyDown={(e) => {
-                                                    if (e.key === "Enter" || e.key === " ") {
-                                                        e.preventDefault();
-                                                        onPlySelect(move.ply);
-                                                    }
-                                                }}
-                                                tabIndex={0}
-                                            >
-                                                {content}
-                                            </div>
-                                            {inlineBranches}
-                                        </div>
-                                    );
-                                }
+                                // 詳細展開コンテンツ
+                                const expandedDetails =
+                                    isDetailExpanded && position ? (
+                                        <ExpandedMoveDetails
+                                            move={move}
+                                            position={position}
+                                            onAddBranch={onAddPvAsBranch}
+                                            onPreview={onPreviewPv}
+                                            onAnalyze={onAnalyzePly}
+                                            isAnalyzing={isAnalyzing}
+                                            analyzingPly={analyzingPly}
+                                            kifuTree={kifuTree}
+                                            onCollapse={() => setExpandedMoveDetail(null)}
+                                        />
+                                    ) : null;
 
                                 return (
                                     <div key={move.ply}>
@@ -1358,10 +1650,20 @@ export function KifuPanel({
                                                     ? (currentRowRef as React.RefObject<HTMLDivElement>)
                                                     : undefined
                                             }
-                                            className={rowClassName}
+                                            role="option"
+                                            className={`${rowClassName} w-full text-left cursor-pointer hover:bg-accent/50`}
+                                            onClick={handleRowClick}
+                                            onKeyDown={(e) => {
+                                                if (e.key === "Enter" || e.key === " ") {
+                                                    e.preventDefault();
+                                                    handleRowClick();
+                                                }
+                                            }}
+                                            tabIndex={0}
                                         >
                                             {content}
                                         </div>
+                                        {expandedDetails}
                                         {inlineBranches}
                                     </div>
                                 );

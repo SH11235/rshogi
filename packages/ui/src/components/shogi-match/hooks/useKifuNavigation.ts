@@ -443,11 +443,8 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
             const firstMove = pv[0];
 
             setTree((prev) => {
-                // 指定plyのノードを探す（現在のパスから、見つからなければメインラインから）
-                let nodeId = findNodeByPlyInCurrentPath(prev, ply);
-                if (!nodeId) {
-                    nodeId = findNodeByPlyInMainLine(prev, ply);
-                }
+                // 指定plyのノードをメインラインから探す（本譜からの分岐のみサポート）
+                const nodeId = findNodeByPlyInMainLine(prev, ply);
                 if (!nodeId) {
                     return prev;
                 }
@@ -466,6 +463,10 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
                     // 既に同じ手が存在する場合は何もしない
                     return prev;
                 }
+
+                // 分岐が成立するには、既存の子が1つ以上必要
+                // （子が0の場合は単なるメインライン延長で、分岐ではない）
+                const hadExistingChildren = node.children.length > 0;
 
                 // 新しい分岐を追加
                 let currentTree = goToNode(prev, nodeId);
@@ -488,8 +489,9 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
                 // 元の位置に戻る
                 const result = goToNode(currentTree, nodeId);
 
-                // 分岐が追加されたかどうかを記録
-                if (addedMoves > 0) {
+                // 分岐が成立したかどうかを記録
+                // （既存の子があり、かつ新しい手が追加された場合のみ）
+                if (addedMoves > 0 && hadExistingChildren) {
                     branchAdded = true;
                 }
 
