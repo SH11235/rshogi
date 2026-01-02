@@ -375,7 +375,7 @@ describe("createWasmEngineClient", () => {
             await expect(client.init()).rejects.toThrow();
 
             // バックエンドがエラー状態であることを確認
-            expect(client.getBackendStatus()).toBe("error");
+            expect(client.getBackendStatus?.()).toBe("error");
         });
 
         it("Worker 初期化失敗後にリトライで復帰できる", async () => {
@@ -392,7 +392,7 @@ describe("createWasmEngineClient", () => {
 
             // 初回の init は失敗
             await expect(client.init()).rejects.toThrow();
-            expect(client.getBackendStatus()).toBe("error");
+            expect(client.getBackendStatus?.()).toBe("error");
 
             // リトライで復帰
             const retryPromise = client.init();
@@ -403,7 +403,7 @@ describe("createWasmEngineClient", () => {
             } as MessageEvent);
             await retryPromise;
 
-            expect(client.getBackendStatus()).toBe("ready");
+            expect(client.getBackendStatus?.()).toBe("ready");
         });
 
         it("Worker onerror 時にエラー状態になり、リトライを促す", async () => {
