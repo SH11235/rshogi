@@ -48,3 +48,7 @@ path = "src/bin/generate_training_data.rs"
 [[bin]]
 name = "train_nnue"
 path = "src/bin/train_nnue.rs"
+
+[[bin]]
+name = "pack_to_jsonl"
+path = "src/bin/pack_to_jsonl.rs"
