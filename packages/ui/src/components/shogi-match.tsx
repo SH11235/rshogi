@@ -17,7 +17,7 @@ import {
     resolveWorkerCount,
     type Square,
 } from "@shogi/app-core";
-import type { CSSProperties, ReactElement } from "react";
+import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ShogiBoardCell } from "./shogi-board";
 import { ShogiBoard } from "./shogi-board";
@@ -95,60 +95,28 @@ const DEFAULT_BYOYOMI_MS = 5_000; // デフォルト秒読み時間（5秒）
 const DEFAULT_MAX_LOGS = 80; // ログ履歴の最大保持件数
 const TOOLTIP_DELAY_DURATION_MS = 120; // ツールチップ表示遅延
 
-const baseCard: CSSProperties = {
-    background: "hsl(var(--card, 0 0% 100%))",
-    border: "1px solid hsl(var(--border, 0 0% 86%))",
-    borderRadius: "12px",
-    padding: "14px",
-    boxShadow: "0 14px 28px rgba(0,0,0,0.12)",
-};
+const baseCardClasses =
+    "bg-card border border-border rounded-xl p-3.5 shadow-[0_14px_28px_rgba(0,0,0,0.12)]";
 
-const MATCH_LAYOUT_STYLE = {
-    display: "flex",
-    flexDirection: "column",
-    gap: "8px",
-    alignItems: "center",
-    padding: "12px 0",
+// レイアウト用Tailwindクラス
+const matchLayoutClasses = "flex flex-col gap-2 items-center py-3";
+
+// CSS変数は style 属性で設定（Tailwindでは表現できない）
+const matchLayoutCssVars = {
     "--kifu-panel-max-h": "min(60vh, calc(100dvh - 320px))",
     "--kifu-panel-branch-max-h": "calc(var(--kifu-panel-max-h) - 40px)",
     "--shogi-cell-size": "44px",
-} as CSSProperties;
+} as React.CSSProperties;
 
-// スタイル定数（保守性・一貫性のため）
-const TEXT_STYLES = {
-    mutedSecondary: {
-        fontSize: "12px",
-        color: "hsl(var(--muted-foreground, 0 0% 48%))",
-    } as CSSProperties,
-    handLabel: {
-        fontSize: "12px",
-        fontWeight: 600,
-        marginBottom: "4px",
-    } as CSSProperties,
-    moveCount: {
-        textAlign: "center",
-        fontSize: "14px",
-        fontWeight: 600,
-        color: "hsl(var(--foreground, 0 0% 10%))",
-        margin: "8px 0",
-    } as CSSProperties,
+// テキストスタイル用Tailwindクラス定数
+const TEXT_CLASSES = {
+    mutedSecondary: "text-xs text-muted-foreground",
+    handLabel: "text-xs font-semibold mb-1",
+    moveCount: "text-center text-sm font-semibold text-foreground my-2",
 } as const;
 
-const DELETE_HINT_STYLE: CSSProperties = {
-    position: "absolute",
-    top: "8px",
-    right: "8px",
-    padding: "4px 8px",
-    borderRadius: "999px",
-    border: "1px dashed hsl(var(--wafuu-border))",
-    background: "hsl(var(--wafuu-washi-warm))",
-    color: "hsl(var(--wafuu-sumi))",
-    fontSize: "11px",
-    fontWeight: 600,
-    letterSpacing: "0.02em",
-    pointerEvents: "none",
-    boxShadow: "0 6px 12px rgba(0,0,0,0.08)",
-} as CSSProperties;
+const deleteHintClasses =
+    "absolute top-2 right-2 px-2 py-1 rounded-full border border-dashed border-[hsl(var(--wafuu-border))] bg-[hsl(var(--wafuu-washi-warm))] text-[hsl(var(--wafuu-sumi))] text-[11px] font-semibold tracking-wide pointer-events-none shadow-[0_6px_12px_rgba(0,0,0,0.08)]";
 
 // 持ち駒表示セクションコンポーネント
 interface PlayerHandSectionProps {
@@ -181,12 +149,15 @@ function PlayerHandSection({
     onDecrement,
     flipBoard,
 }: PlayerHandSectionProps): ReactElement {
-    const labelColor = owner === "sente" ? "hsl(var(--wafuu-shu))" : "hsl(210 70% 45%)";
     const ownerText = owner === "sente" ? "先手" : "後手";
     return (
         <div data-zone={`hand-${owner}`}>
-            <div style={TEXT_STYLES.handLabel}>
-                <span style={{ color: labelColor, fontSize: "15px" }}>{ownerText}</span>
+            <div className={TEXT_CLASSES.handLabel}>
+                <span
+                    className={`text-[15px] ${owner === "sente" ? "text-[hsl(var(--wafuu-shu))]" : "text-[hsl(210_70%_45%)]"}`}
+                >
+                    {ownerText}
+                </span>
                 <span>の持ち駒</span>
             </div>
             <HandPiecesDisplay
@@ -668,6 +639,7 @@ export function ShogiMatch({
 
     const pauseAutoPlay = async () => {
         setIsMatchRunning(false);
+        setIsEditMode(true); // 編集モードに戻す（局面調整→再開を可能に）
         stopTicking();
         await stopAllEngines();
     };
@@ -1487,9 +1459,10 @@ export function ShogiMatch({
     // 棋譜の手数選択コールバック（巻き戻し・リプレイ用）
     const handlePlySelect = useCallback(
         (ply: number) => {
-            // 対局中は自動進行を一時停止
+            // 対局中は自動進行を一時停止し、編集モードに戻す
             if (isMatchRunning) {
                 setIsMatchRunning(false);
+                setIsEditMode(true);
                 stopTicking();
                 void stopAllEngines();
             }
@@ -1866,14 +1839,7 @@ export function ShogiMatch({
             )}
 
             {/* 左上メニュー（画面固定） */}
-            <div
-                style={{
-                    position: "fixed",
-                    top: "16px",
-                    left: "16px",
-                    zIndex: 100,
-                }}
-            >
+            <div className="fixed top-4 left-4 z-[100]">
                 <AppMenu
                     settings={displaySettings}
                     onSettingsChange={setDisplaySettings}
@@ -1882,7 +1848,7 @@ export function ShogiMatch({
                 />
             </div>
 
-            <section style={MATCH_LAYOUT_STYLE}>
+            <section className={matchLayoutClasses} style={matchLayoutCssVars}>
                 {/* 勝敗表示バナー */}
                 <GameResultBanner
                     result={gameResult}
@@ -1894,78 +1860,33 @@ export function ShogiMatch({
                     onClose={() => setShowResultBanner(false)}
                 />
 
-                <div
-                    style={{
-                        display: "flex",
-                        gap: "16px",
-                        alignItems: "flex-start",
-                    }}
-                >
+                <div className="flex gap-4 items-start">
                     {/* 左列: 将棋盤（サイズ固定） */}
-                    <div
-                        style={{
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: "8px",
-                            alignItems: "center",
-                            flexShrink: 0,
-                        }}
-                    >
+                    <div className="flex flex-col gap-2 items-center shrink-0">
                         <div
                             ref={boardSectionRef}
-                            style={{
-                                ...baseCard,
-                                padding: "12px",
-                                width: "fit-content",
-                                position: "relative",
-                            }}
+                            className={`${baseCardClasses} p-3 w-fit relative`}
                         >
                             {isDraggingPiece ? (
-                                <div style={DELETE_HINT_STYLE}>盤外へドラッグで削除</div>
+                                <div className={deleteHintClasses}>盤外へドラッグで削除</div>
                             ) : null}
                             <div
-                                style={{
-                                    marginTop: "8px",
-                                    display: "flex",
-                                    gap: "8px",
-                                    flexDirection: "column",
-                                    alignItems: "center",
-                                    touchAction: isDraggingPiece ? "none" : "auto",
-                                }}
+                                className={`mt-2 flex flex-col gap-2 items-center ${isDraggingPiece ? "touch-none" : ""}`}
                             >
                                 {/* 盤の上側の持ち駒（通常:後手、反転時:先手） */}
                                 {(() => {
                                     const info = getHandInfo("top");
-                                    const labelColor =
-                                        info.owner === "sente"
-                                            ? "hsl(var(--wafuu-shu))"
-                                            : "hsl(210 70% 45%)";
                                     const ownerText = info.owner === "sente" ? "先手" : "後手";
                                     return (
                                         <div data-zone={`hand-${info.owner}`}>
                                             {/* ラベル行: [持ち駒ラベル] [手数] [手番] */}
-                                            <div
-                                                style={{
-                                                    display: "flex",
-                                                    alignItems: "center",
-                                                    justifyContent: "space-between",
-                                                    marginBottom: "4px",
-                                                    gap: "16px",
-                                                }}
-                                            >
+                                            <div className="flex items-center justify-between mb-1 gap-4">
                                                 {/* 持ち駒ラベル（左） */}
                                                 <div
-                                                    style={{
-                                                        ...TEXT_STYLES.handLabel,
-                                                        marginBottom: 0,
-                                                        whiteSpace: "nowrap",
-                                                    }}
+                                                    className={`${TEXT_CLASSES.handLabel} !mb-0 whitespace-nowrap`}
                                                 >
                                                     <span
-                                                        style={{
-                                                            color: labelColor,
-                                                            fontSize: "15px",
-                                                        }}
+                                                        className={`text-[15px] ${info.owner === "sente" ? "text-[hsl(var(--wafuu-shu))]" : "text-[hsl(210_70%_45%)]"}`}
                                                     >
                                                         {ownerText}
                                                     </span>
@@ -1974,11 +1895,7 @@ export function ShogiMatch({
 
                                                 {/* 手数表示（中央） */}
                                                 <output
-                                                    style={{
-                                                        ...TEXT_STYLES.moveCount,
-                                                        margin: 0,
-                                                        whiteSpace: "nowrap",
-                                                    }}
+                                                    className={`${TEXT_CLASSES.moveCount} !m-0 whitespace-nowrap`}
                                                 >
                                                     {moves.length === 0
                                                         ? "開始局面"
@@ -1987,21 +1904,15 @@ export function ShogiMatch({
 
                                                 {/* 手番表示 */}
                                                 <output
-                                                    style={{
-                                                        ...TEXT_STYLES.mutedSecondary,
-                                                        whiteSpace: "nowrap",
-                                                    }}
+                                                    className={`${TEXT_CLASSES.mutedSecondary} whitespace-nowrap`}
                                                 >
                                                     手番:{" "}
                                                     <span
-                                                        style={{
-                                                            fontWeight: 600,
-                                                            fontSize: "15px",
-                                                            color:
-                                                                position.turn === "sente"
-                                                                    ? "hsl(var(--wafuu-shu))"
-                                                                    : "hsl(210 70% 45%)",
-                                                        }}
+                                                        className={`font-semibold text-[15px] ${
+                                                            position.turn === "sente"
+                                                                ? "text-[hsl(var(--wafuu-shu))]"
+                                                                : "text-[hsl(210_70%_45%)]"
+                                                        }`}
                                                     >
                                                         {position.turn === "sente"
                                                             ? "先手"
@@ -2013,20 +1924,11 @@ export function ShogiMatch({
                                                 <button
                                                     type="button"
                                                     onClick={() => setFlipBoard(!flipBoard)}
-                                                    style={{
-                                                        display: "flex",
-                                                        alignItems: "center",
-                                                        gap: "4px",
-                                                        padding: "4px 8px",
-                                                        borderRadius: "6px",
-                                                        border: "1px solid hsl(var(--wafuu-border))",
-                                                        background: flipBoard
-                                                            ? "hsl(var(--wafuu-kin) / 0.2)"
-                                                            : "hsl(var(--card))",
-                                                        cursor: "pointer",
-                                                        fontSize: "13px",
-                                                        whiteSpace: "nowrap",
-                                                    }}
+                                                    className={`flex items-center gap-1 px-2 py-1 rounded-md border border-[hsl(var(--wafuu-border))] cursor-pointer text-[13px] whitespace-nowrap ${
+                                                        flipBoard
+                                                            ? "bg-[hsl(var(--wafuu-kin)/0.2)]"
+                                                            : "bg-card"
+                                                    }`}
                                                     title="盤面を反転"
                                                 >
                                                     <span>🔄</span>
@@ -2097,7 +1999,9 @@ export function ShogiMatch({
                                     showBoardLabels={displaySettings.showBoardLabels}
                                 />
                                 {candidateNote ? (
-                                    <div style={TEXT_STYLES.mutedSecondary}>{candidateNote}</div>
+                                    <div className={TEXT_CLASSES.mutedSecondary}>
+                                        {candidateNote}
+                                    </div>
                                 ) : null}
 
                                 {/* 盤の下側の持ち駒（通常:先手、反転時:後手） */}
@@ -2131,14 +2035,7 @@ export function ShogiMatch({
                     </div>
 
                     {/* 中央列: 操作系パネル（サイズ固定） */}
-                    <div
-                        style={{
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: "8px",
-                            flexShrink: 0,
-                        }}
-                    >
+                    <div className="flex flex-col gap-2 shrink-0">
                         <EditModePanel
                             isOpen={isEditPanelOpen}
                             onOpenChange={setIsEditPanelOpen}
@@ -2193,14 +2090,7 @@ export function ShogiMatch({
                     </div>
 
                     {/* 右列: 棋譜列（EvalPanel + KifuPanel、サイズ固定） */}
-                    <div
-                        style={{
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: "8px",
-                            flexShrink: 0,
-                        }}
-                    >
+                    <div className="flex flex-col gap-2 shrink-0">
                         {/* 評価値グラフパネル（折りたたみ） */}
                         <EvalPanel
                             evalHistory={evalHistory}
