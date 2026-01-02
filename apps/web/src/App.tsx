@@ -30,7 +30,7 @@ function App() {
     const isDevMode = useDevMode();
 
     return (
-        <main className="mx-auto flex max-w-[1100px] flex-col gap-3 px-5 py-4">
+        <main className="mx-auto flex max-w-[1100px] flex-col gap-3 px-5">
             <ShogiMatch engineOptions={engineOptions} isDevMode={isDevMode} />
             {isDevMode && <EngineControlPanel engine={panelEngine} />}
         </main>

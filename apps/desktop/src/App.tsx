@@ -18,7 +18,7 @@ const panelEngine = createEngineClient();
 function App() {
     // デスクトップ版は常に開発者モードを有効化
     return (
-        <main className="mx-auto flex max-w-[1100px] flex-col gap-3 px-5 py-4">
+        <main className="mx-auto flex max-w-[1100px] flex-col gap-3 px-5">
             <ShogiMatch
                 engineOptions={engineOptions}
                 fetchLegalMoves={(sfen, moves) => getLegalMoves({ sfen, moves })}

@@ -95,9 +95,6 @@ const DEFAULT_BYOYOMI_MS = 5_000; // デフォルト秒読み時間（5秒）
 const DEFAULT_MAX_LOGS = 80; // ログ履歴の最大保持件数
 const TOOLTIP_DELAY_DURATION_MS = 120; // ツールチップ表示遅延
 
-const baseCardClasses =
-    "bg-card border border-border rounded-xl p-3.5 shadow-[0_14px_28px_rgba(0,0,0,0.12)]";
-
 // レイアウト用Tailwindクラス
 const matchLayoutClasses = "flex flex-col gap-2 items-center py-3";
 
@@ -1853,10 +1850,7 @@ export function ShogiMatch({
                 <div className="flex gap-4 items-start">
                     {/* 左列: 将棋盤（サイズ固定） */}
                     <div className="flex flex-col gap-2 items-center shrink-0">
-                        <div
-                            ref={boardSectionRef}
-                            className={`${baseCardClasses} p-3 w-fit relative`}
-                        >
+                        <div ref={boardSectionRef} className="w-fit relative">
                             {isDraggingPiece ? (
                                 <div className={deleteHintClasses}>盤外へドラッグで削除</div>
                             ) : null}
