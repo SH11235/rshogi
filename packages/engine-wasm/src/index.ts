@@ -1,6 +1,7 @@
 import type {
     EngineBackendStatus,
     EngineClient,
+    EngineErrorCode,
     EngineEvent,
     EngineEventHandler,
     EngineInitOptions,
@@ -50,14 +51,54 @@ type WorkerKind = "single" | "threaded";
 
 type BackendKind = WorkerKind | "mock" | "error";
 
-type WarningCode =
-    | "WASM_THREADS_UNAVAILABLE"
-    | "WASM_THREADS_CLAMPED"
-    | "WASM_THREADS_INIT_FAILED"
-    | "WASM_THREADS_DEFERRED"
-    | "WASM_WORKER_FAILED";
+/**
+ * エラーメッセージからエラーコードを推測する
+ */
+function classifyErrorCode(error: unknown): EngineErrorCode {
+    const message =
+        error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
 
-type ErrorCode = WarningCode | "WASM_INIT_FAILED" | "ENGINE_ERROR_STATE";
+    // ネットワーク関連エラー
+    if (
+        message.includes("fetch") ||
+        message.includes("network") ||
+        message.includes("failed to load") ||
+        message.includes("networkerror") ||
+        message.includes("cors") ||
+        message.includes("not found") ||
+        message.includes("404")
+    ) {
+        return "WASM_NETWORK_ERROR";
+    }
+
+    // メモリ関連エラー
+    if (
+        message.includes("memory") ||
+        message.includes("out of memory") ||
+        message.includes("oom") ||
+        message.includes("allocation") ||
+        message.includes("sharedarraybuffer")
+    ) {
+        return "WASM_MEMORY_ERROR";
+    }
+
+    // Worker生成エラー
+    if (
+        message.includes("worker") ||
+        message.includes("spawn") ||
+        message.includes("create worker")
+    ) {
+        return "WASM_WORKER_SPAWN_ERROR";
+    }
+
+    // タイムアウト
+    if (message.includes("timeout") || message.includes("timed out")) {
+        return "WASM_INIT_TIMEOUT";
+    }
+
+    // デフォルト
+    return "WASM_INIT_FAILED";
+}
 
 type WorkerCommand =
     | {
@@ -188,7 +229,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
         }
     };
 
-    const emitWarn = (code: WarningCode, message: string) => {
+    const emitWarn = (code: EngineErrorCode, message: string) => {
         if (warnedReasons.has(code)) return;
         warnedReasons.add(code);
         if (logWarningsToConsole && typeof console !== "undefined") {
@@ -197,7 +238,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
         emit({ type: "error", message, severity: "warning", code });
     };
 
-    const emitError = (code: ErrorCode, message: string) => {
+    const emitError = (code: EngineErrorCode, message: string) => {
         emit({ type: "error", message, severity: "error", code });
     };
 
@@ -378,7 +419,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
         rejectAllPending(new Error(reason));
     };
 
-    const enterErrorState = (message: string, code: ErrorCode) => {
+    const enterErrorState = (message: string, code: EngineErrorCode) => {
         replaceWorker("engine worker is unavailable");
         initInFlight = null;
         backend = "error";
@@ -402,7 +443,8 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
                 : defaultWorkerFactory(kind);
         } catch (error) {
             const message = error instanceof Error ? error.message : "engine worker spawn failed";
-            enterErrorState(message, "WASM_INIT_FAILED");
+            const code = classifyErrorCode(error);
+            enterErrorState(message, code);
             return;
         }
 
@@ -439,7 +481,8 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
                 void recoverWorker("single");
                 return;
             }
-            enterErrorState("Engine worker encountered an error", "WASM_INIT_FAILED");
+            const code = classifyErrorCode(err);
+            enterErrorState("Engine worker encountered an error", code);
             if (typeof console !== "undefined") console.error("engine worker error", err);
         };
     };
@@ -498,8 +541,9 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
         const module = getInitWasmModule();
         try {
             await initWorkerWithKind(kind, payload, module, true);
-        } catch {
-            enterErrorState("Wasm engine initialization failed", "WASM_INIT_FAILED");
+        } catch (error) {
+            const code = classifyErrorCode(error);
+            enterErrorState("Wasm engine initialization failed", code);
         }
     };
 
@@ -542,8 +586,9 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
                 const fallbackModule = getInitWasmModule();
                 try {
                     await initWorkerWithKind("single", fallbackPayload, fallbackModule);
-                } catch (_fallbackError) {
-                    enterErrorState("Wasm engine initialization failed", "WASM_INIT_FAILED");
+                } catch (fallbackError) {
+                    const fallbackCode = classifyErrorCode(fallbackError);
+                    enterErrorState("Wasm engine initialization failed", fallbackCode);
                 }
                 return;
             }
@@ -570,8 +615,9 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
         if (backend === "mock") return;
         replaceWorker("engine worker terminated");
         initInFlight = null;
-        void ensureReady().catch(() => {
-            enterErrorState("Wasm engine initialization failed", "WASM_INIT_FAILED");
+        void ensureReady().catch((error) => {
+            const code = classifyErrorCode(error);
+            enterErrorState("Wasm engine initialization failed", code);
         });
     };
 

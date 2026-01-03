@@ -364,18 +364,49 @@ describe("createWasmEngineClient", () => {
     });
 
     describe("エラーハンドリング", () => {
-        it("Worker 初期化失敗時にモックにフォールバックする", async () => {
+        it("Worker 初期化失敗時にエラー状態になる", async () => {
             const failingFactory = vi.fn((_kind: WorkerKind) => {
                 throw new Error("Worker initialization failed");
             });
 
             const client = createWasmEngineClient({ workerFactory: failingFactory });
 
-            // init でエラーが発生するが、モックにフォールバックするので成功する
-            await expect(client.init()).resolves.toBeUndefined();
+            // init でエラーが発生し、エラー状態になる
+            await expect(client.init()).rejects.toThrow();
+
+            // バックエンドがエラー状態であることを確認
+            expect(client.getBackendStatus?.()).toBe("error");
         });
 
-        it("Worker onerror 時にモックにフォールバックする", async () => {
+        it("Worker 初期化失敗後にリトライで復帰できる", async () => {
+            let failCount = 0;
+            const recoverableFactory = vi.fn((_kind: WorkerKind) => {
+                failCount++;
+                if (failCount === 1) {
+                    throw new Error("Worker initialization failed");
+                }
+                return mockWorker as unknown as Worker;
+            });
+
+            const client = createWasmEngineClient({ workerFactory: recoverableFactory });
+
+            // 初回の init は失敗
+            await expect(client.init()).rejects.toThrow();
+            expect(client.getBackendStatus?.()).toBe("error");
+
+            // リトライで復帰
+            const retryPromise = client.init();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            const initCall = mockWorker.postMessage.mock.calls[0][0];
+            mockWorker.onmessage?.({
+                data: { type: "ack", requestId: initCall.requestId },
+            } as MessageEvent);
+            await retryPromise;
+
+            expect(client.getBackendStatus?.()).toBe("ready");
+        });
+
+        it("Worker onerror 時にエラー状態になり、リトライを促す", async () => {
             const client = createWasmEngineClient({ workerFactory: mockWorkerFactory });
 
             const events: EngineEvent[] = [];
@@ -396,8 +427,10 @@ describe("createWasmEngineClient", () => {
             const errorEvents = events.filter((e) => e.type === "error");
             expect(errorEvents.length).toBeGreaterThan(0);
 
-            // その後の操作はモックで動作する
-            await expect(client.loadPosition("startpos")).resolves.toBeUndefined();
+            // その後の操作はエラーメッセージを返す（リトライを促す）
+            await expect(client.loadPosition("startpos")).rejects.toThrow(
+                "エンジンはエラー状態です",
+            );
         });
 
         it("ack でエラーが返された場合は reject する", async () => {

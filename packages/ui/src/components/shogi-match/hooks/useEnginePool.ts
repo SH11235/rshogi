@@ -10,6 +10,8 @@ export interface AnalysisJob {
     moves: string[];
     timeMs: number;
     depth: number;
+    /** 分岐解析用のノードID（オプション） */
+    nodeId?: string;
 }
 
 /**
@@ -32,7 +34,7 @@ interface UseEnginePoolOptions {
     /** 進捗更新時のコールバック */
     onProgress?: (progress: BatchAnalysisProgress) => void;
     /** 解析結果のコールバック */
-    onResult?: (ply: number, event: EngineInfoEvent) => void;
+    onResult?: (ply: number, event: EngineInfoEvent, nodeId?: string) => void;
     /** 全ジョブ完了時のコールバック */
     onComplete?: () => void;
     /** エラー時のコールバック */
@@ -158,7 +160,7 @@ export function useEnginePool(options: UseEnginePoolOptions): EnginePoolHandle {
                     if (event.type === "info") {
                         // 評価値が含まれている場合のみコールバック
                         if (event.scoreCp !== undefined || event.scoreMate !== undefined) {
-                            callbacksRef.current.onResult?.(job.ply, event);
+                            callbacksRef.current.onResult?.(job.ply, event, job.nodeId);
                         }
                     }
 

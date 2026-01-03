@@ -60,6 +60,8 @@ export interface AnalysisSettings {
     batchAnalysisTimeMs: number;
     /** 一括解析時の探索深さ */
     batchAnalysisDepth: number;
+    /** 分岐作成時に自動で解析を開始する */
+    autoAnalyzeBranch: boolean;
 }
 
 /** デフォルト解析設定 */
@@ -67,4 +69,27 @@ export const DEFAULT_ANALYSIS_SETTINGS: AnalysisSettings = {
     parallelWorkers: 0, // 0 = 自動検出
     batchAnalysisTimeMs: 1000,
     batchAnalysisDepth: 15,
+    autoAnalyzeBranch: false,
 };
+
+/**
+ * ゲームモード
+ * - 'editing': 盤面編集モード（駒の配置・削除）
+ * - 'playing': 対局モード（手番に従って指し手を進める）
+ * - 'reviewing': 検討モード（自由に分岐を作成）
+ */
+export type GameMode = "editing" | "playing" | "reviewing";
+
+/**
+ * 解析状態を表す型
+ * - 'none': 解析していない
+ * - 'by-ply': 通常解析（plyで評価値を保存）
+ * - 'by-node-id': 分岐解析（ノードIDで評価値を保存）
+ */
+export type AnalyzingState =
+    | { type: "none" }
+    | { type: "by-ply"; ply: number }
+    | { type: "by-node-id"; nodeId: string; ply: number };
+
+/** 解析していない状態の定数 */
+export const ANALYZING_STATE_NONE: AnalyzingState = { type: "none" };

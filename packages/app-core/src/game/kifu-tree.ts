@@ -58,6 +58,17 @@ export interface KifuTree {
     startSfen: string;
 }
 
+/**
+ * 優先分岐パスのキャッシュ
+ * goForward関数のパフォーマンス改善のため、preferredBranchNodeIdからパスへのマッピングをキャッシュ
+ */
+export interface PreferredPathCache {
+    /** キャッシュされているpreferredBranchNodeId */
+    nodeId: string;
+    /** ルートからpreferredBranchNodeIdまでのパス（Set形式） */
+    pathSet: Set<string>;
+}
+
 /** UUID生成 */
 function generateId(): string {
     return crypto.randomUUID();
@@ -187,17 +198,103 @@ export function goToNode(tree: KifuTree, nodeId: string): KifuTree {
 }
 
 /**
- * 1手進む（メインラインの最初の子に移動）
+ * 1手進む
+ *
+ * @param tree 棋譜ツリー
+ * @param preferredBranchNodeId 優先する分岐のノードID（分岐ビュー用）
+ *   - 指定された場合、その分岐への経路上にあれば分岐方向へ進む
+ *   - 指定されていないか、経路上にない場合はメインライン（children[0]）へ進む
+ * @param pathCache オプションのパスキャッシュ（パフォーマンス改善用）
  */
-export function goForward(tree: KifuTree): KifuTree {
+export function goForward(
+    tree: KifuTree,
+    preferredBranchNodeId?: string,
+    pathCache?: PreferredPathCache,
+): KifuTree {
     const currentNode = getCurrentNode(tree);
     if (currentNode.children.length === 0) {
         return tree; // 子がない場合は変更なし
     }
+
+    // 優先分岐が指定されている場合、その分岐への経路を確認
+    if (preferredBranchNodeId) {
+        // キャッシュがあり、同じpreferredBranchNodeIdの場合はキャッシュを使用
+        let pathSet: Set<string>;
+        if (pathCache && pathCache.nodeId === preferredBranchNodeId) {
+            pathSet = pathCache.pathSet;
+        } else {
+            // キャッシュがない場合はパスを計算
+            const pathToPreferred = getPathToNode(tree, preferredBranchNodeId);
+            pathSet = new Set(pathToPreferred);
+        }
+
+        // 現在のノードがパス上にあるか確認
+        if (pathSet.has(currentNode.id)) {
+            // パス上の次のノード（現在ノードの子の中でパスに含まれるもの）を探す
+            for (const childId of currentNode.children) {
+                if (pathSet.has(childId)) {
+                    return {
+                        ...tree,
+                        currentNodeId: childId,
+                    };
+                }
+            }
+        }
+
+        // 現在位置がpreferredBranchNodeIdの子孫（分岐内）にいる場合は、
+        // 分岐に沿って進む（children[0]）
+        if (isDescendantOf(tree, currentNode.id, preferredBranchNodeId)) {
+            return {
+                ...tree,
+                currentNodeId: currentNode.children[0],
+            };
+        }
+    }
+
+    // デフォルト: メインライン（最初の子）へ進む
     return {
         ...tree,
         currentNodeId: currentNode.children[0],
     };
+}
+
+/**
+ * 優先分岐パスのキャッシュを作成する
+ * goForward関数と組み合わせて使用し、同じpreferredBranchNodeIdで複数回進む場合のパフォーマンスを改善
+ *
+ * @param tree 棋譜ツリー
+ * @param preferredBranchNodeId 優先分岐のノードID
+ * @returns パスキャッシュ
+ */
+export function createPreferredPathCache(
+    tree: KifuTree,
+    preferredBranchNodeId: string,
+): PreferredPathCache {
+    const pathToPreferred = getPathToNode(tree, preferredBranchNodeId);
+    return {
+        nodeId: preferredBranchNodeId,
+        pathSet: new Set(pathToPreferred),
+    };
+}
+
+/**
+ * nodeIdがancestorIdの子孫（またはancestorId自身）かどうかを判定
+ */
+function isDescendantOf(tree: KifuTree, nodeId: string, ancestorId: string): boolean {
+    const visited = new Set<string>();
+    let currentId: string | null = nodeId;
+    while (currentId !== null) {
+        if (visited.has(currentId)) {
+            // 循環参照を検出
+            return false;
+        }
+        if (currentId === ancestorId) return true;
+        visited.add(currentId);
+        const node = tree.nodes.get(currentId);
+        if (!node) break;
+        currentId = node.parentId;
+    }
+    return false;
 }
 
 /**
@@ -572,9 +669,15 @@ export function isRewound(tree: KifuTree): boolean {
  */
 export function getPathToNode(tree: KifuTree, nodeId: string): string[] {
     const path: string[] = [];
+    const visited = new Set<string>();
     let currentId: string | null = nodeId;
 
     while (currentId !== null) {
+        if (visited.has(currentId)) {
+            // 循環参照を検出した場合は現在のパスを返す
+            break;
+        }
+        visited.add(currentId);
         path.unshift(currentId);
         const node = tree.nodes.get(currentId);
         if (!node) break;

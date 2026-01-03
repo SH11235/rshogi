@@ -10,6 +10,7 @@ import {
     addMove as addMoveToTree,
     applyMoveWithState,
     createKifuTree,
+    createPreferredPathCache,
     findNodeByPlyInCurrentPath,
     findNodeByPlyInMainLine,
     getBranchInfo,
@@ -25,13 +26,15 @@ import {
     isRewound as isRewoundTree,
     type KifuEval,
     type KifuTree,
+    type PreferredPathCache,
     promoteToMainLine as promoteToMainLineTree,
     setNodeEval,
     switchBranch as switchBranchTree,
     truncateFromCurrent,
 } from "@shogi/app-core";
 import type { EngineInfoEvent } from "@shogi/engine-client";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { normalizeEvalToSentePerspective } from "../utils/branchTreeUtils";
 import type { EvalHistory, KifMove } from "../utils/kifFormat";
 import { convertMovesToKif } from "../utils/kifFormat";
 
@@ -72,6 +75,8 @@ interface KifuNavigationState {
     isRewound: boolean;
     /** 進む操作が可能か（現在ノードに子がある） */
     canGoForward: boolean;
+    /** 現在位置がメインライン上にあるか */
+    isOnMainLine: boolean;
 }
 
 /** フックの初期化オプション */
@@ -88,8 +93,8 @@ interface UseKifuNavigationOptions {
 interface UseKifuNavigationResult {
     /** ナビゲーション状態 */
     state: KifuNavigationState;
-    /** 1手進む */
-    goForward: () => void;
+    /** 1手進む（優先分岐を指定可能） */
+    goForward: (preferredBranchNodeId?: string) => void;
     /** 1手戻る */
     goBack: () => void;
     /** 最初へ */
@@ -106,10 +111,16 @@ interface UseKifuNavigationResult {
     truncate: () => void;
     /** 指し手を追加（分岐生成含む） */
     addMove: (usiMove: string, positionAfter: PositionState, options?: AddMoveOptions) => void;
-    /** 評価値を記録 */
-    recordEval: (ply: number, event: EngineInfoEvent) => void;
+    /** 評価値を記録（手数で指定） */
+    recordEvalByPly: (ply: number, event: EngineInfoEvent) => void;
+    /** 評価値を記録（ノードIDで指定、分岐内のノード用） */
+    recordEvalByNodeId: (nodeId: string, event: EngineInfoEvent) => void;
     /** PVを分岐として追加（onAddedは分岐が追加された場合にのみ呼ばれる） */
-    addPvAsBranch: (ply: number, pv: string[], onAdded?: () => void) => void;
+    addPvAsBranch: (
+        ply: number,
+        pv: string[],
+        onAdded?: (info: { ply: number; firstMove: string }) => void,
+    ) => void;
     /** 新規対局でリセット */
     reset: (startPosition: PositionState, startSfen: string) => void;
     /** 現在のラインの指し手配列を取得（互換性用） */
@@ -143,20 +154,44 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
     // 棋譜ツリー
     const [tree, setTree] = useState<KifuTree>(() => createKifuTree(initialPosition, initialSfen));
 
+    // 優先分岐パスのキャッシュ（goForwardのパフォーマンス改善用）
+    // - refへの書き込みはレンダリング結果に影響しない副作用のため許容される
+    // - ツリー変更操作（addMove, truncate, addPvAsBranch, reset）では明示的に無効化
+    const pathCacheRef = useRef<PreferredPathCache | null>(null);
+
     /**
      * 1手進む
+     * @param preferredBranchNodeId 優先する分岐のノードID（分岐ビューで使用）
      */
-    const goForward = useCallback(() => {
-        setTree((prev) => {
-            const newTree = goForwardTree(prev);
-            if (newTree !== prev) {
-                const node = getCurrentNode(newTree);
-                const lastMove = deriveLastMoveFromUsi(node.usiMove);
-                onPositionChange?.(node.positionAfter, lastMove);
-            }
-            return newTree;
-        });
-    }, [onPositionChange]);
+    const goForward = useCallback(
+        (preferredBranchNodeId?: string) => {
+            setTree((prev) => {
+                // キャッシュの取得または作成
+                // refへの書き込みはレンダリングに影響しないため許容
+                let cache: PreferredPathCache | undefined;
+                if (preferredBranchNodeId) {
+                    const currentCache = pathCacheRef.current;
+                    if (currentCache && currentCache.nodeId === preferredBranchNodeId) {
+                        cache = currentCache;
+                    } else {
+                        cache = createPreferredPathCache(prev, preferredBranchNodeId);
+                        pathCacheRef.current = cache;
+                    }
+                } else {
+                    pathCacheRef.current = null;
+                }
+
+                const newTree = goForwardTree(prev, preferredBranchNodeId, cache);
+                if (newTree !== prev) {
+                    const node = getCurrentNode(newTree);
+                    const lastMove = deriveLastMoveFromUsi(node.usiMove);
+                    onPositionChange?.(node.positionAfter, lastMove);
+                }
+                return newTree;
+            });
+        },
+        [onPositionChange],
+    );
 
     /**
      * 1手戻る
@@ -251,6 +286,7 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
      */
     const goToNodeById = useCallback(
         (nodeId: string) => {
+            pathCacheRef.current = null; // キャッシュを無効化
             setTree((prev) => {
                 const newTree = goToNode(prev, nodeId);
                 if (newTree !== prev) {
@@ -270,6 +306,7 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
      */
     const switchBranchAtNode = useCallback(
         (parentNodeId: string, branchIndex: number) => {
+            pathCacheRef.current = null; // キャッシュを無効化
             setTree((prev) => {
                 const parentNode = prev.nodes.get(parentNodeId);
                 if (!parentNode || branchIndex < 0 || branchIndex >= parentNode.children.length) {
@@ -292,6 +329,7 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
      * 現在位置以降の手を削除
      */
     const truncate = useCallback(() => {
+        pathCacheRef.current = null; // キャッシュを無効化
         setTree((prev) => truncateFromCurrent(prev));
     }, []);
 
@@ -300,6 +338,7 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
      */
     const addMove = useCallback(
         (usiMove: string, positionAfter: PositionState, options?: AddMoveOptions) => {
+            pathCacheRef.current = null; // キャッシュを無効化
             setTree((prev) => {
                 const newTree = addMoveToTree(prev, usiMove, positionAfter, options);
                 // 新しいノードに移動したので、コールバックを呼ぶ
@@ -312,10 +351,10 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
     );
 
     /**
-     * 評価値を記録
+     * 評価値を記録（手数で指定）
      * findNodeByPlyInCurrentPathを使用し、見つからなければfindNodeByPlyInMainLineで検索
      */
-    const recordEval = useCallback((ply: number, event: EngineInfoEvent) => {
+    const recordEvalByPly = useCallback((ply: number, event: EngineInfoEvent) => {
         setTree((prev) => {
             // 最適化: 現在位置からルートまで遡りながらplyに一致するノードを探す
             let nodeId = findNodeByPlyInCurrentPath(prev, ply);
@@ -357,79 +396,130 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
     }, []);
 
     /**
+     * ノードIDを指定して評価値を記録
+     * 分岐内のノードなど、plyだけでは特定できないノードに評価値を保存する場合に使用
+     */
+    const recordEvalByNodeId = useCallback((nodeId: string, event: EngineInfoEvent) => {
+        setTree((prev) => {
+            const node = prev.nodes.get(nodeId);
+            if (!node) return prev;
+
+            const evalData: KifuEval = {
+                scoreCp: event.scoreCp,
+                scoreMate: event.scoreMate,
+                depth: event.depth,
+                pv: event.pv,
+            };
+
+            const existing = node.eval;
+            const shouldUpdate =
+                !existing ||
+                (event.depth !== undefined && (existing.depth ?? 0) < event.depth) ||
+                (!existing.pv && event.pv && event.pv.length > 0);
+
+            if (shouldUpdate) {
+                return setNodeEval(prev, nodeId, evalData);
+            }
+
+            return prev;
+        });
+    }, []);
+
+    /**
      * PVを分岐として追加
      * 指定された手数のノードにPVを分岐として追加する
      * @param ply 分岐を追加する手数
      * @param pv PV（読み筋）の手順
-     * @param onAdded 分岐が追加された場合に呼ばれるコールバック
+     * @param onAdded 分岐が追加された場合に呼ばれるコールバック（ply, firstMoveを渡す）
      */
-    const addPvAsBranch = useCallback((ply: number, pv: string[], onAdded?: () => void) => {
-        if (pv.length === 0) return;
+    const addPvAsBranch = useCallback(
+        (
+            ply: number,
+            pv: string[],
+            onAdded?: (info: { ply: number; firstMove: string }) => void,
+        ) => {
+            if (pv.length === 0) return;
 
-        setTree((prev) => {
-            // 指定plyのノードを探す（現在のパスから、見つからなければメインラインから）
-            let nodeId = findNodeByPlyInCurrentPath(prev, ply);
-            if (!nodeId) {
-                nodeId = findNodeByPlyInMainLine(prev, ply);
-            }
-            if (!nodeId) {
-                return prev;
-            }
+            pathCacheRef.current = null; // キャッシュを無効化
 
-            const node = prev.nodes.get(nodeId);
-            if (!node) {
-                return prev;
-            }
-
-            // PVの最初の手が既存の子にあるか確認
+            let branchAdded = false;
             const firstMove = pv[0];
-            const existingChild = node.children
-                .map((id) => prev.nodes.get(id))
-                .find((child) => child?.usiMove === firstMove);
 
-            if (existingChild) {
-                // 既に同じ手が存在する場合は何もしない
-                return prev;
-            }
-
-            // 新しい分岐を追加
-            let currentTree = goToNode(prev, nodeId);
-            let currentPosition = node.positionAfter;
-            let addedMoves = 0;
-
-            for (const move of pv) {
-                const moveResult = applyMoveWithState(currentPosition, move, {
-                    validateTurn: false,
-                });
-                if (!moveResult.ok) {
-                    // 無効な手があれば終了
-                    break;
+            setTree((prev) => {
+                // 指定plyのノードをメインラインから探す（本譜からの分岐のみサポート）
+                const nodeId = findNodeByPlyInMainLine(prev, ply);
+                if (!nodeId) {
+                    return prev;
                 }
-                currentTree = addMoveToTree(currentTree, move, moveResult.next);
-                currentPosition = moveResult.next;
-                addedMoves++;
+
+                const node = prev.nodes.get(nodeId);
+                if (!node) {
+                    return prev;
+                }
+
+                // PVの最初の手が既存の子にあるか確認
+                const existingChild = node.children
+                    .map((id) => prev.nodes.get(id))
+                    .find((child) => child?.usiMove === firstMove);
+
+                if (existingChild) {
+                    // 既に同じ手が存在する場合は何もしない
+                    return prev;
+                }
+
+                // 分岐が成立するには、既存の子が1つ以上必要
+                // （子が0の場合は単なるメインライン延長で、分岐ではない）
+                const hadExistingChildren = node.children.length > 0;
+
+                // 新しい分岐を追加
+                let currentTree = goToNode(prev, nodeId);
+                let currentPosition = node.positionAfter;
+                let addedMoves = 0;
+
+                for (const move of pv) {
+                    const moveResult = applyMoveWithState(currentPosition, move, {
+                        validateTurn: false,
+                    });
+                    if (!moveResult.ok) {
+                        // 無効な手があれば終了
+                        break;
+                    }
+                    currentTree = addMoveToTree(currentTree, move, moveResult.next);
+                    currentPosition = moveResult.next;
+                    addedMoves++;
+                }
+
+                // 元の位置に戻る
+                const result = goToNode(currentTree, nodeId);
+
+                // 分岐が成立したかどうかを記録
+                // （既存の子があり、かつ新しい手が追加された場合のみ）
+                if (addedMoves > 0 && hadExistingChildren) {
+                    branchAdded = true;
+                }
+
+                return result;
+            });
+
+            // setTreeの外でコールバックをスケジュール
+            // nodeIdではなくply + firstMoveを渡すことでStrictModeの影響を回避
+            if (onAdded) {
+                setTimeout(() => {
+                    if (branchAdded) {
+                        onAdded({ ply, firstMove });
+                    }
+                }, 0);
             }
-
-            // 元の位置に戻る
-            const result = goToNode(currentTree, nodeId);
-
-            // 分岐が追加されたらコールバックを呼ぶ
-            if (addedMoves > 0 && onAdded) {
-                // 次のイベントループで呼び出す（state更新後に実行されるように）
-                // 注意: コンポーネントがアンマウントされた後に実行される可能性があるが、
-                // 現状では問題ないため、シンプルな実装を維持
-                setTimeout(onAdded, 0);
-            }
-
-            return result;
-        });
-    }, []);
+        },
+        [],
+    );
 
     /**
      * リセット
      */
     const reset = useCallback(
         (startPosition: PositionState, startSfen: string) => {
+            pathCacheRef.current = null; // キャッシュを無効化
             const newTree = createKifuTree(startPosition, startSfen);
             setTree(newTree);
             onPositionChange?.(startPosition);
@@ -464,6 +554,22 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
             endNode = nextNode;
         }
 
+        // 現在位置がメインライン上にあるかを判定
+        // ルートから現在位置まで、各ノードが親の最初の子（children[0]）であればメインライン上
+        let isOnMainLine = true;
+        let checkNodeId: string | null = tree.currentNodeId;
+        while (checkNodeId !== null && isOnMainLine) {
+            const checkNode = tree.nodes.get(checkNodeId);
+            if (!checkNode) break;
+            if (checkNode.parentId !== null) {
+                const parent = tree.nodes.get(checkNode.parentId);
+                if (parent && parent.children[0] !== checkNodeId) {
+                    isOnMainLine = false;
+                }
+            }
+            checkNodeId = checkNode.parentId;
+        }
+
         return {
             currentPly: currentNode.ply,
             currentNodeId: tree.currentNodeId,
@@ -474,6 +580,7 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
             branchCount: branchInfo.count,
             isRewound: isRewoundTree(tree),
             canGoForward: currentNode.children.length > 0,
+            isOnMainLine,
         };
     }, [tree]);
 
@@ -564,15 +671,10 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
             const hasEval = node.eval != null;
             const hasElapsed = node.elapsedMs != null;
             if (hasEval || hasElapsed) {
-                // normalized=true の場合は既に先手視点なので符号反転不要
-                // それ以外（エンジン出力）は「手番側から見た値」なので反転して先手視点に正規化
-                const needsSignFlip = !node.eval?.normalized;
-                const isSenteMove = node.ply % 2 !== 0;
-                const sign = needsSignFlip && isSenteMove ? -1 : 1;
+                const normalizedEval = normalizeEvalToSentePerspective(node.eval, node.ply);
                 nodeDataMap.set(node.ply, {
-                    scoreCp: node.eval?.scoreCp != null ? node.eval.scoreCp * sign : undefined,
-                    scoreMate:
-                        node.eval?.scoreMate != null ? node.eval.scoreMate * sign : undefined,
+                    scoreCp: normalizedEval.evalCp,
+                    scoreMate: normalizedEval.evalMate,
                     depth: node.eval?.depth,
                     elapsedMs: node.elapsedMs,
                     pv: node.eval?.pv,
@@ -596,19 +698,12 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
             // ルートはスキップ（ply: 0はすでに追加済み）
             if (node.ply === 0) continue;
 
-            const ply = node.ply;
-            const evalData = node.eval;
-
-            // normalized=true の場合は既に先手視点なので符号反転不要
-            // それ以外（エンジン出力）は「手番側から見た値」なので反転して先手視点に正規化
-            const needsSignFlip = !evalData?.normalized;
-            const isSenteMove = ply % 2 !== 0;
-            const sign = needsSignFlip && isSenteMove ? -1 : 1;
+            const normalizedEval = normalizeEvalToSentePerspective(node.eval, node.ply);
 
             history.push({
-                ply,
-                evalCp: evalData?.scoreCp != null ? evalData.scoreCp * sign : null,
-                evalMate: evalData?.scoreMate != null ? evalData.scoreMate * sign : null,
+                ply: node.ply,
+                evalCp: normalizedEval.evalCp ?? null,
+                evalMate: normalizedEval.evalMate ?? null,
             });
         }
 
@@ -640,7 +735,8 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
         promoteCurrentLine,
         truncate,
         addMove,
-        recordEval,
+        recordEvalByPly,
+        recordEvalByNodeId,
         addPvAsBranch,
         reset,
         getMovesArray,

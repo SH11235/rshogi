@@ -12,11 +12,16 @@ import { Popover, PopoverContent, PopoverTrigger } from "../../popover";
 import { Switch } from "../../switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../../tooltip";
 import type { AnalysisSettings } from "../types";
-import type { BranchSummary, FlatTreeNode } from "../utils/branchTreeUtils";
-import { getAllBranches, getBranchMoves } from "../utils/branchTreeUtils";
-import type { KifMove } from "../utils/kifFormat";
-import { formatEval, getEvalTooltipInfo } from "../utils/kifFormat";
-import { EvalPopover } from "./EvalPopover";
+import type { BranchSummary, FlatTreeNode, PvMainLineComparison } from "../utils/branchTreeUtils";
+import {
+    comparePvWithMainLine,
+    findExistingBranchForPv,
+    getAllBranches,
+    getBranchesByPly,
+    getBranchMoves,
+} from "../utils/branchTreeUtils";
+import type { KifMove, PvDisplayMove } from "../utils/kifFormat";
+import { convertPvToDisplay, formatEval, getEvalTooltipInfo } from "../utils/kifFormat";
 import { KifuNavigationToolbar } from "./KifuNavigationToolbar";
 
 /** 表示モード */
@@ -104,8 +109,10 @@ interface KifuPanelProps {
         totalCount: number;
         inProgress?: number[]; // 並列解析中の手番号
     };
-    /** 一括解析を開始するコールバック */
+    /** 一括解析を開始するコールバック（本譜のみ） */
     onStartBatchAnalysis?: () => void;
+    /** ツリー全体の一括解析を開始するコールバック */
+    onStartTreeBatchAnalysis?: (options?: { mainLineOnly?: boolean }) => void;
     /** 一括解析をキャンセルするコールバック */
     onCancelBatchAnalysis?: () => void;
     /** 解析設定 */
@@ -118,10 +125,20 @@ interface KifuPanelProps {
     onNodeClick?: (nodeId: string) => void;
     /** 分岐切り替え時のコールバック（ツリービュー用） */
     onBranchSwitch?: (parentNodeId: string, branchIndex: number) => void;
+    /** 分岐内のノードを解析するコールバック */
+    onAnalyzeNode?: (nodeId: string) => void;
+    /** 分岐全体を一括解析するコールバック */
+    onAnalyzeBranch?: (branchNodeId: string) => void;
     /** 追加のクラス名（高さ調整用） */
     className?: string;
-    /** 分岐が追加されたときのシグナル（カウンター値が変わると自動的にツリービューに切り替え） */
-    branchAddedSignal?: number;
+    /** 最後に追加された分岐の情報（この分岐に直接遷移する） */
+    lastAddedBranchInfo?: { ply: number; firstMove: string } | null;
+    /** lastAddedBranchInfoを処理したことを通知するコールバック */
+    onLastAddedBranchHandled?: () => void;
+    /** 選択中の分岐が変更されたときのコールバック（キーボードナビゲーション用） */
+    onSelectedBranchChange?: (branchNodeId: string | null) => void;
+    /** 現在位置がメインライン上にあるか（PV分岐追加の制御用） */
+    isOnMainLine?: boolean;
 }
 
 /**
@@ -198,6 +215,72 @@ function EvalHintBanner({
 }
 
 /**
+ * インライン分岐リスト（本譜ビューで分岐を展開表示）
+ */
+function InlineBranchList({
+    branches,
+    onBranchClick,
+    onAnalyzeBranch,
+}: {
+    branches: BranchSummary[];
+    onBranchClick: (branch: BranchSummary) => void;
+    onAnalyzeBranch?: (branchNodeId: string) => void;
+}): ReactElement {
+    return (
+        <div className="ml-6 pl-2 border-l-2 border-[hsl(var(--wafuu-shu)/0.3)] my-0.5">
+            {branches.map((branch, index) => {
+                const isLast = index === branches.length - 1;
+                return (
+                    <div key={branch.nodeId} className="flex items-center gap-1 py-0.5">
+                        {/* ツリー罫線 */}
+                        <span className="text-[11px] text-muted-foreground/60 font-mono">
+                            {isLast ? "└─" : "├─"}
+                        </span>
+                        {/* 分岐ボタン */}
+                        <button
+                            type="button"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                onBranchClick(branch);
+                            }}
+                            className="
+                                flex items-center gap-1.5
+                                text-[12px] text-left
+                                px-1.5 py-0.5 rounded
+                                hover:bg-[hsl(var(--wafuu-washi))]
+                                transition-colors cursor-pointer
+                                bg-transparent border-none
+                            "
+                        >
+                            <span className="font-medium text-[hsl(var(--wafuu-shu))]">
+                                {branch.displayText}
+                            </span>
+                            <span className="text-[10px] text-muted-foreground">
+                                ({branch.branchLength}手)
+                            </span>
+                        </button>
+                        {/* 分岐解析ボタン */}
+                        {onAnalyzeBranch && (
+                            <button
+                                type="button"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    onAnalyzeBranch(branch.nodeId);
+                                }}
+                                className="text-[10px] px-1 py-0.5 rounded bg-muted hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                                title="この分岐を一括解析"
+                            >
+                                解析
+                            </button>
+                        )}
+                    </div>
+                );
+            })}
+        </div>
+    );
+}
+
+/**
  * 評価値ツールチップの内容
  */
 function EvalTooltipContent({
@@ -231,6 +314,322 @@ function EvalTooltipContent({
                 {info.depthText && <span>{info.depthText}</span>}
             </div>
         </div>
+    );
+}
+
+/**
+ * 展開された指し手の詳細表示コンポーネント
+ * EvalPopoverで表示していた内容をインラインで表示する
+ */
+function ExpandedMoveDetails({
+    move,
+    position,
+    onAddBranch,
+    onPreview,
+    onAnalyze,
+    isAnalyzing,
+    analyzingPly,
+    kifuTree,
+    onCollapse,
+    isOnMainLine = true,
+}: {
+    move: KifMove;
+    position: PositionState;
+    onAddBranch?: (ply: number, pv: string[]) => void;
+    onPreview?: (ply: number, pv: string[], evalCp?: number, evalMate?: number) => void;
+    onAnalyze?: (ply: number) => void;
+    isAnalyzing?: boolean;
+    analyzingPly?: number;
+    kifuTree?: KifuTree;
+    onCollapse: () => void;
+    /** 現在位置がメインライン上にあるか（falseの場合はPV分岐追加を無効化） */
+    isOnMainLine?: boolean;
+}): ReactElement {
+    // PVをKIF形式に変換
+    const pvDisplay = useMemo((): PvDisplayMove[] | null => {
+        if (!move.pv || move.pv.length === 0) {
+            return null;
+        }
+        return convertPvToDisplay(move.pv, position);
+    }, [move.pv, position]);
+
+    // 評価値の詳細情報
+    const evalInfo = useMemo(() => {
+        return getEvalTooltipInfo(move.evalCp, move.evalMate, move.ply, move.depth);
+    }, [move.evalCp, move.evalMate, move.ply, move.depth]);
+
+    // PVと本譜の比較結果
+    const pvComparison = useMemo((): PvMainLineComparison | null => {
+        if (!kifuTree || !move.pv || move.pv.length === 0) {
+            return null;
+        }
+        return comparePvWithMainLine(kifuTree, move.ply, move.pv);
+    }, [kifuTree, move.ply, move.pv]);
+
+    // 分岐追加時のPVが既存分岐と一致するかをチェック
+    const existingBranchNodeId = useMemo((): string | null => {
+        if (!kifuTree || !move.pv || move.pv.length === 0 || !pvComparison) {
+            return null;
+        }
+
+        if (pvComparison.type === "diverges_later" && pvComparison.divergePly !== undefined) {
+            const pvFromDiverge = move.pv.slice(pvComparison.divergeIndex);
+            return findExistingBranchForPv(kifuTree, pvComparison.divergePly, pvFromDiverge);
+        }
+
+        if (pvComparison.type === "diverges_first") {
+            return findExistingBranchForPv(kifuTree, move.ply, move.pv);
+        }
+
+        return null;
+    }, [kifuTree, move.ply, move.pv, pvComparison]);
+
+    // この手数が解析中かどうか
+    const isThisPlyAnalyzing = isAnalyzing && analyzingPly === move.ply;
+
+    const hasPv = pvDisplay && pvDisplay.length > 0;
+
+    return (
+        <section
+            className="
+                mt-1 mx-1 p-3 rounded-lg
+                bg-[hsl(var(--wafuu-washi))] dark:bg-[hsl(var(--card))]
+                border border-[hsl(var(--border))]
+                shadow-sm
+                animate-[slideDown_0.15s_ease-out]
+            "
+            aria-label={`${move.ply}手目の詳細`}
+        >
+            {/* ヘッダー: 評価値情報と閉じるボタン */}
+            <div className="flex items-center justify-between mb-2 pb-2 border-b border-border">
+                <div className="flex items-center gap-2">
+                    <span className="text-[11px] text-muted-foreground">{move.ply}手目</span>
+                    <span
+                        className={`font-medium text-[13px] ${
+                            evalInfo.advantage === "sente"
+                                ? "text-wafuu-shu"
+                                : evalInfo.advantage === "gote"
+                                  ? "text-[hsl(210_70%_45%)]"
+                                  : ""
+                        }`}
+                    >
+                        {evalInfo.description}
+                    </span>
+                </div>
+                <div className="flex items-center gap-2">
+                    <div className="text-muted-foreground text-[10px] space-x-1.5">
+                        {evalInfo.detail && <span>{evalInfo.detail}</span>}
+                        {evalInfo.depthText && <span>{evalInfo.depthText}</span>}
+                    </div>
+                    <button
+                        type="button"
+                        onClick={onCollapse}
+                        className="
+                            p-1 rounded hover:bg-muted
+                            text-muted-foreground hover:text-foreground
+                            transition-colors cursor-pointer
+                            bg-transparent border-none
+                        "
+                        aria-label="閉じる"
+                    >
+                        <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden="true"
+                        >
+                            <polyline points="18 15 12 9 6 15" />
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            {/* 読み筋がある場合 */}
+            {hasPv && (
+                <div className="space-y-2">
+                    <div className="text-[11px] font-medium text-muted-foreground">読み筋:</div>
+                    <div className="flex flex-wrap gap-1 text-[12px] font-mono">
+                        {pvDisplay.map((m, index) => (
+                            <span
+                                key={`${index}-${m.usiMove}`}
+                                className={
+                                    m.turn === "sente"
+                                        ? "text-wafuu-shu"
+                                        : "text-[hsl(210_70%_45%)]"
+                                }
+                            >
+                                {m.displayText}
+                                {index < pvDisplay.length - 1 && (
+                                    <span className="text-muted-foreground mx-0.5">→</span>
+                                )}
+                            </span>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {/* 読み筋がない場合は解析ボタンを表示 */}
+            {!hasPv && onAnalyze && (
+                <div className="space-y-2">
+                    <div className="text-[11px] text-muted-foreground">読み筋がありません</div>
+                    <button
+                        type="button"
+                        onClick={() => onAnalyze(move.ply)}
+                        disabled={isThisPlyAnalyzing}
+                        className="
+                            w-full px-3 py-2 text-[12px]
+                            bg-primary text-primary-foreground
+                            hover:bg-primary/90
+                            disabled:opacity-50 disabled:cursor-not-allowed
+                            rounded border border-border
+                            transition-colors cursor-pointer
+                        "
+                    >
+                        {isThisPlyAnalyzing ? (
+                            <span>解析中...</span>
+                        ) : (
+                            <>
+                                <span className="mr-1">&#128269;</span>
+                                この局面を解析する
+                            </>
+                        )}
+                    </button>
+                </div>
+            )}
+
+            {/* アクションボタン（PVがある場合のみ） */}
+            {hasPv && (onPreview || onAddBranch) && (
+                <div className="flex gap-2 mt-3 pt-2 border-t border-border">
+                    {onPreview && move.pv && (
+                        <button
+                            type="button"
+                            onClick={() =>
+                                onPreview(move.ply, move.pv ?? [], move.evalCp, move.evalMate)
+                            }
+                            className="
+                                flex-1 px-3 py-1.5 text-[11px]
+                                bg-muted hover:bg-muted/80
+                                rounded border border-border
+                                transition-colors cursor-pointer
+                            "
+                        >
+                            <span className="mr-1">&#9654;</span>
+                            盤面で確認
+                        </button>
+                    )}
+                    {onAddBranch &&
+                        move.pv &&
+                        (isOnMainLine ? (
+                            <>
+                                {/* 本譜と完全一致の場合 */}
+                                {pvComparison?.type === "identical" && (
+                                    <div
+                                        className="
+                                            flex-1 px-3 py-1.5 text-[11px] text-center
+                                            bg-muted/50 text-muted-foreground
+                                            rounded border border-border
+                                        "
+                                    >
+                                        <span className="mr-1">✓</span>
+                                        本譜通り
+                                    </div>
+                                )}
+                                {/* 途中から分岐する場合 */}
+                                {pvComparison?.type === "diverges_later" &&
+                                    pvComparison.divergePly !== undefined &&
+                                    pvComparison.divergeIndex !== undefined &&
+                                    (existingBranchNodeId ? (
+                                        <div
+                                            className="
+                                                flex-1 px-3 py-1.5 text-[11px] text-center
+                                                bg-muted/50 text-muted-foreground
+                                                rounded border border-border
+                                            "
+                                        >
+                                            <span className="mr-1">✓</span>
+                                            分岐追加済み
+                                        </div>
+                                    ) : (
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                const pvFromDiverge = move.pv?.slice(
+                                                    pvComparison.divergeIndex,
+                                                );
+                                                if (
+                                                    pvFromDiverge &&
+                                                    pvFromDiverge.length > 0 &&
+                                                    pvComparison.divergePly !== undefined
+                                                ) {
+                                                    onAddBranch(
+                                                        pvComparison.divergePly,
+                                                        pvFromDiverge,
+                                                    );
+                                                }
+                                            }}
+                                            className="
+                                                flex-1 px-3 py-1.5 text-[11px]
+                                                bg-[hsl(var(--wafuu-kin)/0.1)] hover:bg-[hsl(var(--wafuu-kin)/0.2)]
+                                                text-[hsl(var(--wafuu-sumi))]
+                                                rounded border border-[hsl(var(--wafuu-kin)/0.3)]
+                                                transition-colors cursor-pointer
+                                            "
+                                        >
+                                            <span className="mr-1">&#128194;</span>
+                                            {pvComparison.divergePly + 1}手目から分岐を追加
+                                        </button>
+                                    ))}
+                                {/* 最初から異なる場合（従来通り） */}
+                                {(pvComparison?.type === "diverges_first" || !pvComparison) &&
+                                    (existingBranchNodeId ? (
+                                        <div
+                                            className="
+                                                flex-1 px-3 py-1.5 text-[11px] text-center
+                                                bg-muted/50 text-muted-foreground
+                                                rounded border border-border
+                                            "
+                                        >
+                                            <span className="mr-1">✓</span>
+                                            分岐追加済み
+                                        </div>
+                                    ) : (
+                                        <button
+                                            type="button"
+                                            onClick={() => onAddBranch(move.ply, move.pv ?? [])}
+                                            className="
+                                                flex-1 px-3 py-1.5 text-[11px]
+                                                bg-muted hover:bg-muted/80
+                                                rounded border border-border
+                                                transition-colors cursor-pointer
+                                            "
+                                        >
+                                            <span className="mr-1">&#128194;</span>
+                                            分岐として保存
+                                        </button>
+                                    ))}
+                            </>
+                        ) : (
+                            <div
+                                className="
+                                    flex-1 px-3 py-1.5 text-[11px] text-center
+                                    bg-muted/30 text-muted-foreground
+                                    rounded border border-border/50
+                                "
+                                title="分岐上にいるため、本譜への分岐追加は利用できません"
+                            >
+                                <span className="mr-1 opacity-50">&#128194;</span>
+                                本譜に戻ると分岐追加可能
+                            </div>
+                        ))}
+                </div>
+            )}
+        </section>
     );
 }
 
@@ -271,6 +670,9 @@ const ANALYSIS_TIME_OPTIONS: { value: number; label: string }[] = [
     { value: 3000, label: "3秒" },
 ];
 
+/** 解析対象の選択肢 */
+type AnalysisTarget = "mainOnly" | "includeBranches";
+
 /**
  * 一括解析ドロップダウン
  */
@@ -279,13 +681,18 @@ function BatchAnalysisDropdown({
     analysisSettings,
     onAnalysisSettingsChange,
     onStartBatchAnalysis,
+    onStartTreeBatchAnalysis,
+    hasBranches,
 }: {
     movesWithoutPv: number;
     analysisSettings: AnalysisSettings;
     onAnalysisSettingsChange: (settings: AnalysisSettings) => void;
     onStartBatchAnalysis: () => void;
+    onStartTreeBatchAnalysis?: (options?: { mainLineOnly?: boolean }) => void;
+    hasBranches: boolean;
 }): ReactElement {
     const [isOpen, setIsOpen] = useState(false);
+    const [analysisTarget, setAnalysisTarget] = useState<AnalysisTarget>("mainOnly");
     const parallelismConfig = detectParallelism();
 
     const handleParallelWorkersChange = (value: number) => {
@@ -304,7 +711,11 @@ function BatchAnalysisDropdown({
 
     const handleStart = () => {
         setIsOpen(false);
-        onStartBatchAnalysis();
+        if (analysisTarget === "includeBranches" && onStartTreeBatchAnalysis) {
+            onStartTreeBatchAnalysis({ mainLineOnly: false });
+        } else {
+            onStartBatchAnalysis();
+        }
     };
 
     return (
@@ -312,18 +723,83 @@ function BatchAnalysisDropdown({
             <PopoverTrigger asChild>
                 <button
                     type="button"
-                    className="w-7 h-7 flex items-center justify-center text-[14px] rounded border cursor-pointer transition-colors duration-150 bg-primary/10 text-primary border-primary/30 hover:bg-primary/20"
+                    className="relative w-7 h-7 flex items-center justify-center text-[14px] rounded border cursor-pointer transition-colors duration-150 bg-primary/10 text-primary border-primary/30 hover:bg-primary/20"
                     aria-label={`一括解析: ${movesWithoutPv}手`}
                 >
-                    ⚡
+                    ⚡{/* 自動解析有効時のインジケーター */}
+                    {analysisSettings.autoAnalyzeBranch && (
+                        <span className="absolute -top-1 -right-1 w-2 h-2 bg-[hsl(var(--wafuu-kin))] rounded-full" />
+                    )}
                 </button>
             </PopoverTrigger>
             <PopoverContent side="bottom" align="end" className="w-64 p-3">
                 <div className="space-y-3">
                     <div className="font-medium text-sm">一括解析</div>
                     <div className="text-xs text-muted-foreground">
-                        PVがない{movesWithoutPv}手を解析します
+                        読み筋がない{movesWithoutPv}手を解析します
                     </div>
+
+                    {/* 分岐作成時の自動解析オプション（目立つ位置に配置） */}
+                    <div
+                        className={`p-2 rounded-lg border transition-colors ${
+                            analysisSettings.autoAnalyzeBranch
+                                ? "bg-[hsl(var(--wafuu-kin)/0.1)] border-[hsl(var(--wafuu-kin)/0.3)]"
+                                : "bg-muted/30 border-border"
+                        }`}
+                    >
+                        <label className="flex items-center gap-2 cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={analysisSettings.autoAnalyzeBranch}
+                                onChange={(e) =>
+                                    onAnalysisSettingsChange({
+                                        ...analysisSettings,
+                                        autoAnalyzeBranch: e.target.checked,
+                                    })
+                                }
+                                className="w-4 h-4 rounded border-muted-foreground/50 accent-[hsl(var(--wafuu-kin))]"
+                            />
+                            <div>
+                                <div className="text-xs font-medium text-foreground">
+                                    分岐作成時に自動解析
+                                </div>
+                                <div className="text-[10px] text-muted-foreground">
+                                    読み筋から分岐を作成すると自動で解析開始
+                                </div>
+                            </div>
+                        </label>
+                    </div>
+
+                    {/* 解析対象の選択（分岐がある場合のみ表示） */}
+                    {hasBranches && onStartTreeBatchAnalysis && (
+                        <div className="space-y-1.5">
+                            <div className="text-xs font-medium text-foreground">解析対象</div>
+                            <div className="flex gap-1 flex-wrap">
+                                <button
+                                    type="button"
+                                    onClick={() => setAnalysisTarget("mainOnly")}
+                                    className={`px-2 py-1 rounded text-xs transition-colors ${
+                                        analysisTarget === "mainOnly"
+                                            ? "bg-primary text-primary-foreground"
+                                            : "bg-muted text-muted-foreground hover:bg-muted/80"
+                                    }`}
+                                >
+                                    本譜のみ
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setAnalysisTarget("includeBranches")}
+                                    className={`px-2 py-1 rounded text-xs transition-colors ${
+                                        analysisTarget === "includeBranches"
+                                            ? "bg-primary text-primary-foreground"
+                                            : "bg-muted text-muted-foreground hover:bg-muted/80"
+                                    }`}
+                                >
+                                    分岐を含む
+                                </button>
+                            </div>
+                        </div>
+                    )}
 
                     {/* 並列数設定 */}
                     <div className="space-y-1.5">
@@ -405,17 +881,24 @@ export function KifuPanel({
     analyzingPly,
     batchAnalysis,
     onStartBatchAnalysis,
+    onStartTreeBatchAnalysis,
     onCancelBatchAnalysis,
     analysisSettings,
     onAnalysisSettingsChange,
     kifuTree,
     onNodeClick,
     onBranchSwitch: _onBranchSwitch,
-    branchAddedSignal,
+    onAnalyzeNode,
+    onAnalyzeBranch,
+    lastAddedBranchInfo,
+    onLastAddedBranchHandled,
+    onSelectedBranchChange,
+    isOnMainLine = true,
 }: KifuPanelProps): ReactElement {
     // _onBranchSwitch: 将来的に分岐切り替え機能で使用予定
     const listRef = useRef<HTMLDivElement>(null);
     const currentRowRef = useRef<HTMLElement>(null);
+    const expandedDetailsRef = useRef<HTMLElement>(null);
     const [copySuccess, setCopySuccess] = useState(false);
     const [hintDismissed, setHintDismissed] = useState(false);
     const [viewMode, setViewMode] = useState<ViewMode>("main");
@@ -423,8 +906,6 @@ export function KifuPanel({
     const [selectedBranch, setSelectedBranch] = useState<SelectedBranch | null>(null);
     // 本譜ビューのスクロール位置を保存
     const mainScrollPositionRef = useRef<number>(0);
-    // 分岐追加シグナルの前回値を追跡
-    const prevBranchSignalRef = useRef<number | undefined>(branchAddedSignal);
 
     // 分岐一覧を取得
     const branches = useMemo<BranchSummary[]>(() => {
@@ -435,42 +916,131 @@ export function KifuPanel({
     // 分岐があるか
     const hasBranches = branches.length > 0;
 
+    // 手数ごとの分岐をグルーピング（インライン表示用）
+    const branchesByPlyMap = useMemo(() => {
+        if (!kifuTree) return new Map<number, BranchSummary[]>();
+        return getBranchesByPly(kifuTree);
+    }, [kifuTree]);
+
+    // 展開されている手数のセット（折りたたみ状態管理）
+    const [expandedPlies, setExpandedPlies] = useState<Set<number>>(new Set());
+
+    // 詳細展開中の手数（null = 非展開）
+    const [expandedMoveDetail, setExpandedMoveDetail] = useState<number | null>(null);
+
+    // 折りたたみトグル関数
+    const togglePlyExpansion = useCallback((ply: number) => {
+        setExpandedPlies((prev) => {
+            const next = new Set(prev);
+            if (next.has(ply)) {
+                next.delete(ply);
+            } else {
+                next.add(ply);
+            }
+            return next;
+        });
+    }, []);
+
+    // 詳細展開トグル関数
+    const toggleMoveDetailExpansion = useCallback((ply: number) => {
+        setExpandedMoveDetail((prev) => (prev === ply ? null : ply));
+    }, []);
+
+    // 詳細展開時に自動スクロール
+    useEffect(() => {
+        if (expandedMoveDetail !== null && expandedDetailsRef.current) {
+            // 少し遅延させてDOMが更新された後にスクロール
+            requestAnimationFrame(() => {
+                expandedDetailsRef.current?.scrollIntoView({
+                    behavior: "smooth",
+                    block: "nearest",
+                });
+            });
+        }
+    }, [expandedMoveDetail]);
+
     // 選択中の分岐の手順を取得
     const selectedBranchMoves = useMemo<FlatTreeNode[]>(() => {
         if (!kifuTree || !selectedBranch) return [];
         return getBranchMoves(kifuTree, selectedBranch.nodeId);
     }, [kifuTree, selectedBranch]);
 
-    // 分岐が追加されたら自動的に分岐一覧に切り替え
-    // branchAddedSignalの変化のみを監視（kifuTreeは依存配列から除外し、条件内でチェック）
+    // 処理済みの分岐情報を追跡するref（重複処理防止）
+    const processedBranchInfoRef = useRef<{ ply: number; firstMove: string } | null>(null);
+
+    // 分岐が追加されたら直接「選択分岐」ビューに遷移
     useEffect(() => {
+        if (!lastAddedBranchInfo) {
+            processedBranchInfoRef.current = null;
+            return;
+        }
+
+        // 既に同じ情報を処理済みの場合はスキップ（重複実行防止）
         if (
-            branchAddedSignal !== undefined &&
-            prevBranchSignalRef.current !== undefined &&
-            branchAddedSignal !== prevBranchSignalRef.current
+            processedBranchInfoRef.current &&
+            processedBranchInfoRef.current.ply === lastAddedBranchInfo.ply &&
+            processedBranchInfoRef.current.firstMove === lastAddedBranchInfo.firstMove
         ) {
-            // スクロール位置を保存してから分岐一覧に切り替え
+            return;
+        }
+
+        // ply + firstMove で分岐を検索
+        const branchInList = branches.find((b) => {
+            if (b.ply !== lastAddedBranchInfo.ply) return false;
+            const node = kifuTree?.nodes.get(b.nodeId);
+            return node?.usiMove === lastAddedBranchInfo.firstMove;
+        });
+
+        if (branchInList) {
+            // 処理済みとしてマーク
+            processedBranchInfoRef.current = lastAddedBranchInfo;
+            // 追加された分岐を選択して「選択分岐」ビューに遷移
+            // （スクロール位置はviewMode遷移検知のuseEffectで自動保存される）
+            setSelectedBranch({
+                nodeId: branchInList.nodeId,
+                tabLabel: branchInList.tabLabel,
+            });
+            setViewMode("selectedBranch");
+            // 処理完了を通知
+            onLastAddedBranchHandled?.();
+        }
+    }, [lastAddedBranchInfo, branches, kifuTree, onLastAddedBranchHandled]);
+
+    // 分岐がなくなった場合は本譜ビューに戻す＆分岐状態をクリア
+    useEffect(() => {
+        if (branches.length === 0 && viewMode !== "main") {
+            setViewMode("main");
+            setSelectedBranch(null);
+        }
+    }, [branches.length, viewMode]);
+
+    // 選択中の分岐が変更されたら親に通知（キーボードナビゲーション用）
+    useEffect(() => {
+        // selectedBranchビューで分岐が選択されている場合のみnodeIdを通知
+        // それ以外の場合はnullを通知（本譜に沿って進む）
+        const branchNodeId =
+            viewMode === "selectedBranch" && selectedBranch ? selectedBranch.nodeId : null;
+        onSelectedBranchChange?.(branchNodeId);
+    }, [viewMode, selectedBranch, onSelectedBranchChange]);
+
+    // 前回のビューモードを追跡するref
+    const prevViewModeRef = useRef<ViewMode>(viewMode);
+
+    // main → 非main への遷移時にスクロール位置を保存
+    useEffect(() => {
+        if (prevViewModeRef.current === "main" && viewMode !== "main") {
+            // 本譜から別ビューへ: スクロール位置を保存
             if (listRef.current) {
                 mainScrollPositionRef.current = listRef.current.scrollTop;
             }
-            setViewMode("branches");
         }
-        prevBranchSignalRef.current = branchAddedSignal;
-    }, [branchAddedSignal]);
+        prevViewModeRef.current = viewMode;
+    }, [viewMode]);
 
-    // ビューモード切り替えハンドラ（スクロール位置を保存/復元）
-    const handleViewModeChange = useCallback(
-        (newMode: ViewMode) => {
-            if (viewMode === "main" && newMode !== "main") {
-                // 本譜から別ビューへ: スクロール位置を保存
-                if (listRef.current) {
-                    mainScrollPositionRef.current = listRef.current.scrollTop;
-                }
-            }
-            setViewMode(newMode);
-        },
-        [viewMode],
-    );
+    // ビューモード切り替えハンドラ
+    const handleViewModeChange = useCallback((newMode: ViewMode) => {
+        setViewMode(newMode);
+    }, []);
 
     // 分岐を選択するハンドラ
     const handleSelectBranch = useCallback((branch: BranchSummary) => {
@@ -480,6 +1050,21 @@ export function KifuPanel({
         });
         setViewMode("selectedBranch");
     }, []);
+
+    // インライン分岐クリック時のハンドラ（ノードに移動して分岐ビューに切り替え）
+    const handleInlineBranchClick = useCallback(
+        (branch: BranchSummary) => {
+            // ノードに移動
+            onNodeClick?.(branch.nodeId);
+            // 選択した分岐として設定し、分岐ビューに切り替え
+            setSelectedBranch({
+                nodeId: branch.nodeId,
+                tabLabel: branch.tabLabel,
+            });
+            setViewMode("selectedBranch");
+        },
+        [onNodeClick],
+    );
 
     // 本譜ビューに戻ったときにスクロール位置を復元
     useEffect(() => {
@@ -656,6 +1241,14 @@ export function KifuPanel({
                                     analysisSettings={analysisSettings}
                                     onAnalysisSettingsChange={onAnalysisSettingsChange}
                                     onStartBatchAnalysis={onStartBatchAnalysis}
+                                    onStartTreeBatchAnalysis={onStartTreeBatchAnalysis}
+                                    hasBranches={
+                                        kifuTree
+                                            ? Array.from(kifuTree.nodes.values()).some(
+                                                  (n) => n.children.length > 1,
+                                              )
+                                            : false
+                                    }
                                 />
                             )}
                         {/* KIFコピーボタン（アイコン） */}
@@ -825,7 +1418,7 @@ export function KifuPanel({
 
                 {/* 分岐一覧ビュー */}
                 {viewMode === "branches" && (
-                    <div className="max-h-[50vh] overflow-auto my-2">
+                    <div className="max-h-[var(--kifu-panel-max-h,70vh)] overflow-auto my-2">
                         {branches.length === 0 ? (
                             <div className="text-[13px] text-muted-foreground text-center py-4">
                                 分岐がありません
@@ -867,78 +1460,145 @@ export function KifuPanel({
 
                 {/* 選択した分岐ビュー */}
                 {viewMode === "selectedBranch" && selectedBranch && (
-                    <div className="max-h-[50vh] overflow-auto my-2">
-                        {selectedBranchMoves.length === 0 ? (
-                            <div className="text-[13px] text-muted-foreground text-center py-4">
-                                分岐データがありません
-                            </div>
-                        ) : (
-                            selectedBranchMoves.map((node, index) => {
-                                const isCurrent = node.isCurrent;
-                                const evalText = showEval
-                                    ? formatEval(node.evalCp, node.evalMate, node.ply)
-                                    : "";
-                                const isBranchPart = node.nestLevel > 0;
-                                // 分岐開始点かどうか（前の手が本譜で現在が分岐）
-                                const isBranchStart =
-                                    isBranchPart &&
-                                    index > 0 &&
-                                    selectedBranchMoves[index - 1].nestLevel === 0;
+                    <div className="my-2">
+                        {/* 分岐ヘッダー: 解析ボタン（分岐部分が1手以上ある場合のみ表示） */}
+                        {(() => {
+                            const branchMoveCount = selectedBranchMoves.filter(
+                                (n) => n.nestLevel > 0,
+                            ).length;
+                            if (!onAnalyzeBranch || branchMoveCount === 0) return null;
+                            return (
+                                <div className="flex items-center justify-between gap-2 px-2 py-1.5 mb-1 bg-[hsl(var(--wafuu-washi))] rounded-lg border border-[hsl(var(--border))]">
+                                    <span className="text-[11px] text-muted-foreground">
+                                        {branchMoveCount}手の分岐
+                                    </span>
+                                    <button
+                                        type="button"
+                                        onClick={() => onAnalyzeBranch(selectedBranch.nodeId)}
+                                        className="
+                                        px-3 py-1 text-[11px] font-medium
+                                        bg-primary text-primary-foreground
+                                        hover:bg-primary/90
+                                        rounded transition-colors cursor-pointer
+                                    "
+                                    >
+                                        この分岐を解析
+                                    </button>
+                                </div>
+                            );
+                        })()}
+                        <div className="max-h-[var(--kifu-panel-branch-max-h,calc(70vh-40px))] overflow-auto">
+                            {selectedBranchMoves.length === 0 ? (
+                                <div className="text-[13px] text-muted-foreground text-center py-4">
+                                    分岐データがありません
+                                </div>
+                            ) : (
+                                selectedBranchMoves.map((node, index) => {
+                                    const isCurrent = node.isCurrent;
+                                    const evalText = showEval
+                                        ? formatEval(node.evalCp, node.evalMate, node.ply)
+                                        : "";
+                                    const isBranchPart = node.nestLevel > 0;
+                                    // 分岐開始点かどうか（前の手が本譜で現在が分岐）
+                                    const isBranchStart =
+                                        isBranchPart &&
+                                        index > 0 &&
+                                        selectedBranchMoves[index - 1].nestLevel === 0;
 
-                                return (
-                                    <div key={node.nodeId}>
-                                        {/* 分岐開始の区切り線 */}
-                                        {isBranchStart && (
-                                            <div className="flex items-center gap-2 my-1.5 px-1">
-                                                <div className="flex-1 h-px bg-[hsl(var(--wafuu-shu)/0.3)]" />
-                                                <span className="text-[10px] text-[hsl(var(--wafuu-shu))]">
-                                                    {node.ply}手目から分岐
-                                                </span>
-                                                <div className="flex-1 h-px bg-[hsl(var(--wafuu-shu)/0.3)]" />
-                                            </div>
-                                        )}
-                                        <div
-                                            role="option"
-                                            className={`
-                                                grid grid-cols-[32px_1fr_auto] gap-1 items-center px-1 py-0.5 text-[13px] font-mono rounded
+                                    return (
+                                        <div key={node.nodeId}>
+                                            {/* 分岐開始の区切り線 */}
+                                            {isBranchStart && (
+                                                <div className="flex items-center gap-2 my-1.5 px-1">
+                                                    <div className="flex-1 h-px bg-[hsl(var(--wafuu-shu)/0.3)]" />
+                                                    <span className="text-[10px] text-[hsl(var(--wafuu-shu))]">
+                                                        {node.ply}手目から分岐
+                                                    </span>
+                                                    {onAnalyzeBranch && (
+                                                        <button
+                                                            type="button"
+                                                            className="text-[10px] px-1.5 py-0.5 rounded bg-[hsl(var(--wafuu-shu)/0.15)] hover:bg-[hsl(var(--wafuu-shu)/0.3)] text-[hsl(var(--wafuu-shu))] transition-colors"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                onAnalyzeBranch(node.nodeId);
+                                                            }}
+                                                            title="この分岐の全手を一括解析"
+                                                        >
+                                                            分岐を解析
+                                                        </button>
+                                                    )}
+                                                    <div className="flex-1 h-px bg-[hsl(var(--wafuu-shu)/0.3)]" />
+                                                </div>
+                                            )}
+                                            <div
+                                                role="option"
+                                                className={`
+                                                grid grid-cols-[32px_1fr_auto_auto] gap-1 items-center px-1 py-0.5 text-[13px] font-mono rounded
                                                 cursor-pointer hover:bg-accent/50
                                                 ${isCurrent ? "bg-accent" : ""}
                                                 ${isBranchPart ? "border-l-2 border-[hsl(var(--wafuu-shu)/0.5)] ml-1" : ""}
                                             `}
-                                            onClick={() => onNodeClick?.(node.nodeId)}
-                                            onKeyDown={(e) => {
-                                                if (e.key === "Enter" || e.key === " ") {
-                                                    e.preventDefault();
-                                                    onNodeClick?.(node.nodeId);
-                                                }
-                                            }}
-                                            tabIndex={0}
-                                        >
-                                            <span className="text-right text-xs text-muted-foreground">
-                                                {node.ply}
-                                            </span>
-                                            <span className="font-medium">{node.displayText}</span>
-                                            {showEval && evalText && (
-                                                <span
-                                                    className={getEvalClassName(
-                                                        node.evalCp,
-                                                        node.evalMate,
-                                                    )}
-                                                >
-                                                    {evalText}
+                                                onClick={() => onNodeClick?.(node.nodeId)}
+                                                onKeyDown={(e) => {
+                                                    if (e.key === "Enter" || e.key === " ") {
+                                                        e.preventDefault();
+                                                        onNodeClick?.(node.nodeId);
+                                                    }
+                                                }}
+                                                tabIndex={0}
+                                            >
+                                                <span className="text-right text-xs text-muted-foreground">
+                                                    {node.ply}
                                                 </span>
-                                            )}
+                                                <span className="font-medium">
+                                                    {node.displayText}
+                                                </span>
+                                                {showEval && evalText && (
+                                                    <span
+                                                        className={getEvalClassName(
+                                                            node.evalCp,
+                                                            node.evalMate,
+                                                        )}
+                                                    >
+                                                        {evalText}
+                                                    </span>
+                                                )}
+                                                {/* 解析ボタン（評価値がない場合に表示） */}
+                                                {onAnalyzeNode &&
+                                                    !evalText &&
+                                                    analyzingPly !== node.ply && (
+                                                        <button
+                                                            type="button"
+                                                            className="text-[10px] px-1.5 py-0.5 rounded bg-muted hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                onAnalyzeNode(node.nodeId);
+                                                            }}
+                                                            title="この手を解析"
+                                                        >
+                                                            解析
+                                                        </button>
+                                                    )}
+                                                {analyzingPly === node.ply && (
+                                                    <span className="text-[10px] text-muted-foreground animate-pulse">
+                                                        解析中...
+                                                    </span>
+                                                )}
+                                            </div>
                                         </div>
-                                    </div>
-                                );
-                            })
-                        )}
+                                    );
+                                })
+                            )}
+                        </div>
                     </div>
                 )}
 
                 {/* 本譜ビュー（メインライン） */}
                 {viewMode === "main" && (
-                    <div ref={listRef} className="max-h-[50vh] overflow-auto my-2">
+                    <div
+                        ref={listRef}
+                        className="max-h-[var(--kifu-panel-max-h,70vh)] overflow-auto my-2"
+                    >
                         {kifMoves.length === 0 ? (
                             <div className="text-[13px] text-muted-foreground text-center py-4">
                                 まだ指し手がありません
@@ -953,21 +1613,50 @@ export function KifuPanel({
                                     : "";
                                 const hasBranch = branchMarkers?.has(move.ply);
                                 const branchCount = branchMarkers?.get(move.ply);
+                                // この手での分岐一覧
+                                const branchesAtPly = branchesByPlyMap.get(move.ply) ?? [];
+                                const isExpanded = expandedPlies.has(move.ply);
                                 // この手に対応する局面（手が指された後の局面）
                                 const position = positionHistory?.[index];
                                 // PVがあるかどうか
                                 const hasPv = move.pv && move.pv.length > 0;
-                                // EvalPopoverを使用するか（PVがあるか、解析機能がある場合）
-                                const useEvalPopover = position && (hasPv || onAnalyzePly);
+                                // 詳細を展開するか（PVがあるか、解析機能がある場合）
+                                const canExpand = position && (hasPv || onAnalyzePly);
+                                // この行が詳細展開中か
+                                const isDetailExpanded = expandedMoveDetail === move.ply;
 
                                 // 評価値表示コンポーネント
                                 const evalSpan = (
-                                    <span
-                                        className={`${getEvalClassName(move.evalCp, move.evalMate)} ${isPastCurrent ? "opacity-50" : ""} ${useEvalPopover ? "cursor-pointer" : "cursor-help"}`}
-                                    >
-                                        {evalText}
-                                    </span>
+                                    <Tooltip>
+                                        <TooltipTrigger asChild>
+                                            <span
+                                                className={`${getEvalClassName(move.evalCp, move.evalMate)} ${isPastCurrent ? "opacity-50" : ""}`}
+                                            >
+                                                {evalText}
+                                            </span>
+                                        </TooltipTrigger>
+                                        {!isDetailExpanded && (
+                                            <TooltipContent side="left" className="max-w-[200px]">
+                                                <EvalTooltipContent
+                                                    evalCp={move.evalCp}
+                                                    evalMate={move.evalMate}
+                                                    ply={move.ply}
+                                                    depth={move.depth}
+                                                />
+                                            </TooltipContent>
+                                        )}
+                                    </Tooltip>
                                 );
+
+                                // 行クリックハンドラ（ply選択 + 詳細展開トグル）
+                                const handleRowClick = () => {
+                                    // まず局面を選択
+                                    onPlySelect?.(move.ply);
+                                    // 詳細展開可能なら展開/折りたたみをトグル
+                                    if (canExpand) {
+                                        toggleMoveDetailExpansion(move.ply);
+                                    }
+                                };
 
                                 const content = (
                                     <>
@@ -976,12 +1665,17 @@ export function KifuPanel({
                                         >
                                             {move.ply}
                                             {hasBranch && (
-                                                <span
-                                                    className="ml-0.5 text-wafuu-shu"
-                                                    title={`${branchCount}つの分岐`}
+                                                <button
+                                                    type="button"
+                                                    className="ml-0.5 text-wafuu-shu cursor-pointer hover:opacity-70 bg-transparent border-none p-0"
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        togglePlyExpansion(move.ply);
+                                                    }}
+                                                    title={`${branchCount}つの分岐を${isExpanded ? "閉じる" : "開く"}`}
                                                 >
-                                                    ◆
-                                                </span>
+                                                    {isExpanded ? "▼" : "◆"}
+                                                </button>
                                             )}
                                         </span>
                                         <span
@@ -989,58 +1683,58 @@ export function KifuPanel({
                                         >
                                             {move.displayText}
                                         </span>
-                                        {showEval &&
-                                            evalText &&
-                                            (useEvalPopover && position ? (
-                                                <EvalPopover
-                                                    move={move}
-                                                    position={position}
-                                                    onAddBranch={onAddPvAsBranch}
-                                                    onPreview={onPreviewPv}
-                                                    onAnalyze={onAnalyzePly}
-                                                    isAnalyzing={isAnalyzing}
-                                                    analyzingPly={analyzingPly}
-                                                    kifuTree={kifuTree}
-                                                >
-                                                    {evalSpan}
-                                                </EvalPopover>
-                                            ) : (
-                                                <Tooltip>
-                                                    <TooltipTrigger asChild>
-                                                        {/* 親要素（行クリック）へのイベント伝播を防ぐ */}
-                                                        <button
-                                                            type="button"
-                                                            className="inline bg-transparent border-none p-0 m-0 font-inherit text-inherit"
-                                                            onClick={(e) => e.stopPropagation()}
-                                                            onKeyDown={(e) => e.stopPropagation()}
-                                                        >
-                                                            {evalSpan}
-                                                        </button>
-                                                    </TooltipTrigger>
-                                                    <TooltipContent
-                                                        side="left"
-                                                        className="max-w-[200px]"
-                                                    >
-                                                        <EvalTooltipContent
-                                                            evalCp={move.evalCp}
-                                                            evalMate={move.evalMate}
-                                                            ply={move.ply}
-                                                            depth={move.depth}
-                                                        />
-                                                    </TooltipContent>
-                                                </Tooltip>
-                                            ))}
+                                        {showEval && evalText && evalSpan}
+                                        {/* 展開可能インジケータ */}
+                                        {canExpand && (
+                                            <span
+                                                className={`text-[10px] transition-transform duration-150 ${isDetailExpanded ? "rotate-180" : ""} ${isPastCurrent ? "text-muted-foreground/30" : "text-muted-foreground/60"}`}
+                                            >
+                                                ▾
+                                            </span>
+                                        )}
                                     </>
                                 );
 
-                                const rowClassName = `grid grid-cols-[32px_1fr_auto] gap-1 items-center px-1 py-0.5 text-[13px] font-mono rounded ${
+                                const rowClassName = `grid grid-cols-[32px_1fr_auto_auto] gap-1 items-center px-1 py-0.5 text-[13px] font-mono rounded ${
                                     isCurrent ? "bg-accent" : ""
-                                }`;
+                                } ${isDetailExpanded ? "bg-accent/70" : ""}`;
 
-                                if (onPlySelect) {
-                                    return (
+                                // インライン分岐リスト（展開時のみ表示）
+                                const inlineBranches =
+                                    hasBranch && isExpanded && branchesAtPly.length > 0 ? (
+                                        <InlineBranchList
+                                            branches={branchesAtPly}
+                                            onBranchClick={handleInlineBranchClick}
+                                            onAnalyzeBranch={onAnalyzeBranch}
+                                        />
+                                    ) : null;
+
+                                // 詳細展開コンテンツ
+                                const expandedDetails =
+                                    isDetailExpanded && position ? (
                                         <div
-                                            key={move.ply}
+                                            ref={
+                                                expandedDetailsRef as React.RefObject<HTMLDivElement>
+                                            }
+                                        >
+                                            <ExpandedMoveDetails
+                                                move={move}
+                                                position={position}
+                                                onAddBranch={onAddPvAsBranch}
+                                                onPreview={onPreviewPv}
+                                                onAnalyze={onAnalyzePly}
+                                                isAnalyzing={isAnalyzing}
+                                                analyzingPly={analyzingPly}
+                                                kifuTree={kifuTree}
+                                                onCollapse={() => setExpandedMoveDetail(null)}
+                                                isOnMainLine={isOnMainLine}
+                                            />
+                                        </div>
+                                    ) : null;
+
+                                return (
+                                    <div key={move.ply}>
+                                        <div
                                             ref={
                                                 isCurrent
                                                     ? (currentRowRef as React.RefObject<HTMLDivElement>)
@@ -1048,31 +1742,19 @@ export function KifuPanel({
                                             }
                                             role="option"
                                             className={`${rowClassName} w-full text-left cursor-pointer hover:bg-accent/50`}
-                                            onClick={() => onPlySelect(move.ply)}
+                                            onClick={handleRowClick}
                                             onKeyDown={(e) => {
                                                 if (e.key === "Enter" || e.key === " ") {
                                                     e.preventDefault();
-                                                    onPlySelect(move.ply);
+                                                    handleRowClick();
                                                 }
                                             }}
                                             tabIndex={0}
                                         >
                                             {content}
                                         </div>
-                                    );
-                                }
-
-                                return (
-                                    <div
-                                        key={move.ply}
-                                        ref={
-                                            isCurrent
-                                                ? (currentRowRef as React.RefObject<HTMLDivElement>)
-                                                : undefined
-                                        }
-                                        className={rowClassName}
-                                    >
-                                        {content}
+                                        {expandedDetails}
+                                        {inlineBranches}
                                     </div>
                                 );
                             })

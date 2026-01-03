@@ -38,10 +38,7 @@ export function ClockDisplayPanel({ clocks, sides }: ClockDisplayPanelProps): Re
                 <span
                     style={{
                         fontWeight: 700,
-                        color:
-                            side === "sente"
-                                ? "hsl(var(--primary, 15 86% 55%))"
-                                : "hsl(var(--accent, 37 94% 50%))",
+                        color: side === "sente" ? "hsl(var(--wafuu-shu))" : "hsl(var(--wafuu-ai))",
                     }}
                 >
                     {sideLabel}

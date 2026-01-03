@@ -163,6 +163,14 @@ export function PvPreviewDialog({
         }
     }, [open]);
 
+    // positions.length が変わったときに previewIndex が範囲外にならないようクランプ
+    // （開いたままPVが差し替わった場合への対応）
+    useEffect(() => {
+        if (positions.length > 0) {
+            setPreviewIndex((prev) => Math.min(prev, positions.length - 1));
+        }
+    }, [positions.length]);
+
     // 評価値の表示フォーマット
     const evalText = useMemo(() => {
         if (evalMate !== undefined && evalMate !== null) {

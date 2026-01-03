@@ -8,12 +8,63 @@ import {
     BOARD_FILES,
     BOARD_RANKS,
     findNodeByPlyInMainLine,
+    getPathToNode,
     type KifuNode,
     type KifuTree,
     type Player,
     type Square,
 } from "@shogi/app-core";
 import { formatMoveSimple } from "./kifFormat";
+
+/**
+ * 評価値データ（エンジン出力形式）
+ */
+interface EvalData {
+    scoreCp?: number;
+    scoreMate?: number;
+    normalized?: boolean;
+    depth?: number;
+    pv?: string[];
+}
+
+/**
+ * 正規化された評価値
+ */
+interface NormalizedEval {
+    evalCp?: number;
+    evalMate?: number;
+}
+
+/**
+ * 評価値を先手視点に正規化する
+ *
+ * エンジン出力は「手番側から見た値」なので、先手の手の後（後手の手番）では
+ * 符号を反転して先手視点に変換する必要がある。
+ * normalized=true の場合は既に先手視点なので符号反転不要。
+ *
+ * @param evalData 評価値データ
+ * @param ply 手数
+ * @returns 先手視点に正規化された評価値
+ */
+export function normalizeEvalToSentePerspective(
+    evalData: EvalData | null | undefined,
+    ply: number,
+): NormalizedEval {
+    if (!evalData) {
+        return {};
+    }
+
+    // normalized=true の場合は既に先手視点なので符号反転不要
+    // それ以外（エンジン出力）は「手番側から見た値」なので反転して先手視点に正規化
+    const needsSignFlip = !evalData.normalized;
+    const isSenteMove = ply % 2 !== 0;
+    const sign = needsSignFlip && isSenteMove ? -1 : 1;
+
+    return {
+        evalCp: evalData.scoreCp != null ? evalData.scoreCp * sign : undefined,
+        evalMate: evalData.scoreMate != null ? evalData.scoreMate * sign : undefined,
+    };
+}
 
 /**
  * PVと本譜の比較結果
@@ -109,6 +160,54 @@ export function comparePvWithMainLine(
 
     // すべてのPVの手がメインラインと一致
     return { type: "identical" };
+}
+
+/**
+ * PVが既存の分岐と一致するかを判定
+ *
+ * @param tree 棋譜ツリー
+ * @param basePly PVの起点手数（この手を指した後の局面からPVが始まる）
+ * @param pv PV（読み筋）の手順
+ * @returns 一致する分岐のnodeIdがあればそれを返す、なければnull
+ */
+export function findExistingBranchForPv(
+    tree: KifuTree,
+    basePly: number,
+    pv: string[],
+): string | null {
+    if (pv.length === 0) {
+        return null;
+    }
+
+    // basePlyが負の値の場合は無効
+    if (basePly < 0) {
+        return null;
+    }
+
+    // basePlyのノードを取得（メインラインから）
+    const baseNodeId = findNodeByPlyInMainLine(tree, basePly);
+    if (!baseNodeId) {
+        return null;
+    }
+
+    const baseNode = tree.nodes.get(baseNodeId);
+    if (!baseNode) {
+        return null;
+    }
+
+    // PVの最初の手が既存の子（分岐含む）にあるか確認
+    const firstMove = pv[0];
+    for (const childId of baseNode.children) {
+        const child = tree.nodes.get(childId);
+        if (child?.usiMove === firstMove) {
+            // 最初の手が一致 = 同じ分岐として扱う
+            // 分岐が既に存在する場合は、PVの残りが一致するかどうかに関わらず
+            // 「既存分岐あり」と判定する（重複追加を防ぐため）
+            return childId;
+        }
+    }
+
+    return null;
 }
 
 /**
@@ -294,11 +393,11 @@ export function getAllBranches(tree: KifuTree): BranchSummary[] {
 
 /**
  * 指定した分岐の手順をリストとして取得
- * 分岐点以前の本譜も含めて返す
+ * 分岐部分のみを返す（本譜は含まない）
  *
  * @param tree 棋譜ツリー
  * @param branchNodeId 分岐の開始ノードID
- * @returns 分岐の手順リスト（本譜 + 分岐）
+ * @returns 分岐の手順リスト（分岐部分のみ）
  */
 export function getBranchMoves(tree: KifuTree, branchNodeId: string): FlatTreeNode[] {
     const result: FlatTreeNode[] = [];
@@ -307,56 +406,17 @@ export function getBranchMoves(tree: KifuTree, branchNodeId: string): FlatTreeNo
     const branchNode = tree.nodes.get(branchNodeId);
     if (!branchNode) return result;
 
-    // 1. 分岐点の親ノードまでの本譜を取得
-    const mainLinePath: string[] = [];
-    let nodeId: string | null = tree.rootId;
-
-    // ルートから分岐点の親まで辿る
-    while (nodeId && nodeId !== branchNode.parentId) {
-        mainLinePath.push(nodeId);
-        const node = tree.nodes.get(nodeId);
-        if (!node || node.children.length === 0) break;
-        // メインライン（最初の子）を辿る
-        nodeId = node.children[0];
-    }
-    // 分岐点の親も追加
-    if (branchNode.parentId) {
-        mainLinePath.push(branchNode.parentId);
-    }
-
-    // 本譜部分をリストに追加（ルートノードは除く）
+    // 分岐点の親から前の手のtoSquareを取得（表示テキスト生成用）
     let prevToSquare: Square | undefined;
-    for (const nid of mainLinePath) {
-        const node = tree.nodes.get(nid);
-        if (!node) continue;
-
-        // ルートノード（ply 0）は開始局面なので除外
-        if (node.ply === 0) {
-            prevToSquare = getToSquare(node.usiMove);
-            continue;
+    if (branchNode.parentId) {
+        const parentNode = tree.nodes.get(branchNode.parentId);
+        if (parentNode) {
+            prevToSquare = getToSquare(parentNode.usiMove);
         }
-
-        const displayText = getDisplayText(node, prevToSquare);
-        const hasBranches = node.children.length > 1;
-
-        result.push({
-            nodeId: nid,
-            ply: node.ply,
-            displayText,
-            usiMove: node.usiMove,
-            evalCp: node.eval?.scoreCp,
-            evalMate: node.eval?.scoreMate,
-            hasBranches,
-            isCurrentPath: currentPath.has(nid),
-            isCurrent: nid === tree.currentNodeId,
-            nestLevel: 0,
-        });
-
-        prevToSquare = getToSquare(node.usiMove);
     }
 
-    // 2. 分岐部分を追加
-    nodeId = branchNodeId;
+    // 分岐部分のみを追加
+    let nodeId: string | null = branchNodeId;
     while (nodeId) {
         const node = tree.nodes.get(nodeId);
         if (!node) break;
@@ -364,22 +424,215 @@ export function getBranchMoves(tree: KifuTree, branchNodeId: string): FlatTreeNo
         const displayText = getDisplayText(node, prevToSquare);
         const hasBranches = node.children.length > 1;
 
+        // 評価値を先手視点に正規化
+        const normalizedEval = normalizeEvalToSentePerspective(node.eval, node.ply);
+
         result.push({
             nodeId,
             ply: node.ply,
             displayText,
             usiMove: node.usiMove,
-            evalCp: node.eval?.scoreCp,
-            evalMate: node.eval?.scoreMate,
+            evalCp: normalizedEval.evalCp,
+            evalMate: normalizedEval.evalMate,
             hasBranches,
             isCurrentPath: currentPath.has(nodeId),
             isCurrent: nodeId === tree.currentNodeId,
-            nestLevel: 1, // 分岐部分はnestLevel=1で区別
+            nestLevel: 0, // 分岐のみ表示なのでnestLevel=0
         });
 
         prevToSquare = getToSquare(node.usiMove);
         // メインライン（最初の子）を辿る
         nodeId = node.children.length > 0 ? node.children[0] : null;
+    }
+
+    return result;
+}
+
+/**
+ * 解析ジョブ情報
+ */
+interface TreeAnalysisJob {
+    /** ノードID */
+    nodeId: string;
+    /** 手数 */
+    ply: number;
+    /** 開始局面からの指し手 */
+    moves: string[];
+    /** メインラインかどうか */
+    isMainLine: boolean;
+}
+
+/**
+ * ツリー全体から解析ジョブを収集する
+ * スタックを使った反復的な実装でスタックオーバーフローを防止
+ *
+ * @param tree 棋譜ツリー
+ * @param options オプション
+ * @returns 解析ジョブの配列
+ */
+export function collectTreeAnalysisJobs(
+    tree: KifuTree,
+    options: {
+        /** 評価値がないノードのみ対象とする */
+        onlyWithoutEval?: boolean;
+        /** メインラインのみ対象とする */
+        mainLineOnly?: boolean;
+    } = {},
+): TreeAnalysisJob[] {
+    const jobs: TreeAnalysisJob[] = [];
+    const { onlyWithoutEval = true, mainLineOnly = false } = options;
+
+    // スタックを使った反復的な実装
+    const stack: Array<{ nodeId: string; moves: string[]; isMainLine: boolean }> = [
+        { nodeId: tree.rootId, moves: [], isMainLine: true },
+    ];
+
+    while (stack.length > 0) {
+        const item = stack.pop();
+        if (!item) continue;
+        const { nodeId, moves, isMainLine } = item;
+        const node = tree.nodes.get(nodeId);
+        if (!node) continue;
+
+        // ルートノード以外を処理
+        if (node.usiMove !== null) {
+            const currentMoves = [...moves, node.usiMove];
+            const hasEval = node.eval?.scoreCp !== undefined || node.eval?.scoreMate !== undefined;
+
+            if (!onlyWithoutEval || !hasEval) {
+                jobs.push({
+                    nodeId,
+                    ply: node.ply,
+                    moves: currentMoves,
+                    isMainLine,
+                });
+            }
+
+            // 子ノードをスタックに追加（逆順で追加して順序を保つ）
+            for (let i = node.children.length - 1; i >= 0; i--) {
+                const childId = node.children[i];
+                const childIsMainLine = isMainLine && i === 0;
+
+                if (mainLineOnly && !childIsMainLine) continue;
+
+                stack.push({
+                    nodeId: childId,
+                    moves: currentMoves,
+                    isMainLine: childIsMainLine,
+                });
+            }
+        } else {
+            // ルートノードの子を処理
+            for (let i = node.children.length - 1; i >= 0; i--) {
+                const childId = node.children[i];
+                const childIsMainLine = i === 0;
+
+                if (mainLineOnly && !childIsMainLine) continue;
+
+                stack.push({
+                    nodeId: childId,
+                    moves: [],
+                    isMainLine: childIsMainLine,
+                });
+            }
+        }
+    }
+
+    return jobs;
+}
+
+/**
+ * 指定した分岐ノードから解析ジョブを収集する
+ * スタックを使った反復的な実装でスタックオーバーフローを防止
+ *
+ * @param tree 棋譜ツリー
+ * @param branchNodeId 分岐の開始ノードID
+ * @param options オプション
+ * @returns 解析ジョブの配列
+ */
+export function collectBranchAnalysisJobs(
+    tree: KifuTree,
+    branchNodeId: string,
+    options: {
+        /** 評価値がないノードのみ対象とする */
+        onlyWithoutEval?: boolean;
+    } = {},
+): TreeAnalysisJob[] {
+    const jobs: TreeAnalysisJob[] = [];
+    const { onlyWithoutEval = true } = options;
+
+    const branchNode = tree.nodes.get(branchNodeId);
+    if (!branchNode) return jobs;
+
+    // 分岐のパスを取得（ルートからの手順）
+    const path = getPathToNode(tree, branchNodeId);
+    const pathMoves: string[] = [];
+    for (const id of path) {
+        const n = tree.nodes.get(id);
+        if (n?.usiMove) {
+            pathMoves.push(n.usiMove);
+        }
+    }
+
+    // スタックを使った反復的な実装（この分岐の全ノードを辿る）
+    const stack: Array<{ nodeId: string; moves: string[] }> = [
+        { nodeId: branchNodeId, moves: pathMoves },
+    ];
+    const visited = new Set<string>();
+
+    while (stack.length > 0) {
+        const item = stack.pop();
+        if (!item) continue;
+        const { nodeId, moves } = item;
+
+        if (visited.has(nodeId)) continue;
+        visited.add(nodeId);
+
+        const node = tree.nodes.get(nodeId);
+        if (!node) continue;
+
+        const hasEval = node.eval?.scoreCp !== undefined || node.eval?.scoreMate !== undefined;
+
+        if (!onlyWithoutEval || !hasEval) {
+            jobs.push({
+                nodeId,
+                ply: node.ply,
+                moves: [...moves],
+                isMainLine: false,
+            });
+        }
+
+        // 子ノードをスタックに追加（すべての子を辿る）
+        for (let i = node.children.length - 1; i >= 0; i--) {
+            const childId = node.children[i];
+            const childNode = tree.nodes.get(childId);
+            if (childNode?.usiMove) {
+                stack.push({
+                    nodeId: childId,
+                    moves: [...moves, childNode.usiMove],
+                });
+            }
+        }
+    }
+
+    return jobs;
+}
+
+/**
+ * 手数（ply）ごとに分岐をグルーピング（インライン表示用）
+ *
+ * @param tree 棋譜ツリー
+ * @returns Map<ply, BranchSummary[]> - 各 ply における分岐一覧
+ */
+export function getBranchesByPly(tree: KifuTree): Map<number, BranchSummary[]> {
+    const branches = getAllBranches(tree);
+    const result = new Map<number, BranchSummary[]>();
+
+    for (const branch of branches) {
+        const ply = branch.ply; // 分岐点の手数
+        const existing = result.get(ply) ?? [];
+        existing.push(branch);
+        result.set(ply, existing);
     }
 
     return result;

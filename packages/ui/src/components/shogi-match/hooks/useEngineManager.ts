@@ -1,10 +1,12 @@
 import type { GameResult, Player, PositionState } from "@shogi/app-core";
 import type {
     EngineClient,
+    EngineErrorCode,
     EngineEvent,
     EngineInfoEvent,
     SearchHandle,
 } from "@shogi/engine-client";
+import { getEngineErrorInfo } from "@shogi/engine-client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ClockSettings } from "./useClockManager";
 
@@ -12,7 +14,7 @@ type EngineStatus = "idle" | "thinking" | "error";
 
 interface EngineErrorDetails {
     hasError: boolean;
-    errorCode?: string;
+    errorCode?: EngineErrorCode;
     errorMessage?: string;
     canRetry: boolean;
 }
@@ -432,13 +434,14 @@ export function useEngineManager({
                 setEngineStatus((prev) => ({ ...prev, [side]: "error" }));
 
                 // Update error details on retry failure
+                const errorInfo = getEngineErrorInfo("WASM_INIT_FAILED");
                 setEngineErrorDetails((prev) => ({
                     ...prev,
                     [side]: {
                         hasError: true,
                         errorCode: "WASM_INIT_FAILED",
                         errorMessage: errorMsg,
-                        canRetry: true,
+                        canRetry: errorInfo.canRetry,
                     },
                 }));
             } finally {
@@ -552,15 +555,14 @@ export function useEngineManager({
                     addErrorLog(event.message);
 
                     // Save error details for UI display
+                    const errorInfo = getEngineErrorInfo(event.code);
                     setEngineErrorDetails((prev) => ({
                         ...prev,
                         [side]: {
                             hasError: true,
                             errorCode: event.code,
                             errorMessage: event.message,
-                            canRetry:
-                                event.code === "WASM_INIT_FAILED" ||
-                                event.code === "ENGINE_ERROR_STATE",
+                            canRetry: errorInfo.canRetry,
                         },
                     }));
                 }
