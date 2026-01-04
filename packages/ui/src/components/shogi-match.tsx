@@ -691,6 +691,27 @@ export function ShogiMatch({
         setEditMessage("局面を確定しました。対局開始でこの局面から進行します。");
     };
 
+    /** 検討モードから編集モードに戻る */
+    const handleEnterEditMode = useCallback(async () => {
+        if (isMatchRunning) return;
+        const current = positionRef.current;
+        // 現在局面を編集開始局面として設定
+        setBasePosition(clonePositionState(current));
+        setInitialBoard(cloneBoard(current.board));
+        await refreshStartSfen(current);
+        // 棋譜ナビゲーションをリセット（現在局面から新規開始）
+        navigation.reset(current, startSfen);
+        movesRef.current = [];
+        setLastMove(undefined);
+        setSelection(null);
+        setMessage(null);
+        setLastAddedBranchInfo(null);
+        legalCache.clear();
+        // 編集モードに移行
+        setIsEditMode(true);
+        setEditMessage("局面編集モードに戻りました。駒をドラッグして編集できます。");
+    }, [isMatchRunning, navigation, startSfen, legalCache]);
+
     const applyMoveCommon = useCallback(
         (nextPosition: PositionState, mv: string, last?: LastMove, _prevBoard?: BoardState) => {
             // 消費時間を計算
@@ -2012,6 +2033,7 @@ export function ShogiMatch({
                             onStop={pauseAutoPlay}
                             onStart={resumeAutoPlay}
                             onStartReview={handleStartReview}
+                            onEnterEditMode={handleEnterEditMode}
                             isMatchRunning={isMatchRunning}
                             gameMode={gameMode}
                             message={message}

@@ -20,6 +20,8 @@ interface MatchControlsProps {
     onStart: () => void;
     /** 検討モード開始ボタンのクリックハンドラ */
     onStartReview?: () => void;
+    /** 局面編集モードに戻るボタンのクリックハンドラ */
+    onEnterEditMode?: () => void;
     /** 対局中かどうか */
     isMatchRunning: boolean;
     /** 現在のゲームモード */
@@ -33,6 +35,7 @@ export function MatchControls({
     onStop,
     onStart,
     onStartReview,
+    onEnterEditMode,
     isMatchRunning,
     gameMode = "editing",
     message,
@@ -94,6 +97,9 @@ export function MatchControls({
             {isReviewMode && (
                 <div
                     style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "8px",
                         fontSize: "12px",
                         color: "hsl(var(--muted-foreground, 0 0% 48%))",
                         padding: "4px 8px",
@@ -101,7 +107,18 @@ export function MatchControls({
                         borderRadius: "4px",
                     }}
                 >
-                    検討モード: 駒を動かして分岐を作成できます
+                    <span>検討モード: 駒を動かして分岐を作成できます</span>
+                    {onEnterEditMode && (
+                        <Button
+                            type="button"
+                            onClick={onEnterEditMode}
+                            variant="outline"
+                            size="sm"
+                            style={{ marginLeft: "auto", fontSize: "11px", padding: "2px 8px" }}
+                        >
+                            局面編集
+                        </Button>
+                    )}
                 </div>
             )}
             {message ? (
