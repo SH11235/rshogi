@@ -1,9 +1,7 @@
 import type { LastMove, PieceType, Player, PositionState, Square } from "@shogi/app-core";
 import type { ReactElement, RefObject } from "react";
-import { useState } from "react";
 import type { ShogiBoardCell } from "../../shogi-board";
 import { ShogiBoard } from "../../shogi-board";
-import { BottomSheet } from "../components/BottomSheet";
 import { EvalBar } from "../components/EvalBar";
 import { HandPiecesDisplay } from "../components/HandPiecesDisplay";
 import { type KifuMove, MobileKifuBar } from "../components/MobileKifuBar";
@@ -86,9 +84,6 @@ export interface MobileLayoutProps {
     onResetToStartpos?: () => void;
     onStartReview?: () => void;
 
-    // メニュー用コンテンツ
-    menuContent?: ReactElement;
-
     // 持ち駒情報取得
     getHandInfo: (pos: "top" | "bottom") => {
         owner: Player;
@@ -145,7 +140,6 @@ export function MobileLayout({
     onStop,
     onResetToStartpos,
     onStartReview,
-    menuContent,
     getHandInfo,
     boardSectionRef,
     isDraggingPiece,
@@ -153,9 +147,6 @@ export function MobileLayout({
     // モバイル時のセルサイズを計算
     const mode = gameMode === "playing" ? "playing" : "reviewing";
     const cellSize = useMobileCellSize(mode);
-
-    // メニューボトムシートの状態
-    const [isMenuOpen, setIsMenuOpen] = useState(false);
 
     const topHand = getHandInfo("top");
     const bottomHand = getHandInfo("bottom");
@@ -165,18 +156,8 @@ export function MobileLayout({
             className="flex flex-col items-center w-full px-2"
             style={{ "--shogi-cell-size": `${cellSize}px` } as React.CSSProperties}
         >
-            {/* ステータス行 */}
-            <div className="flex items-center justify-between w-full py-2 px-1">
-                {/* メニューボタン */}
-                <button
-                    type="button"
-                    onClick={() => setIsMenuOpen(true)}
-                    className="flex items-center justify-center w-8 h-8 rounded-md hover:bg-muted"
-                    title="メニュー"
-                >
-                    ☰
-                </button>
-
+            {/* ステータス行（左上にAppMenuがあるため左側に余白を確保） */}
+            <div className="flex items-center justify-between w-full py-2 pl-12 pr-2">
                 <output className={`${TEXT_CLASSES.moveCount} whitespace-nowrap`}>
                     {moves.length === 0 ? "開始局面" : `${moves.length}手目`}
                 </output>
@@ -370,20 +351,6 @@ export function MobileLayout({
                     盤面をタップして編集
                 </div>
             )}
-
-            {/* メニューボトムシート */}
-            <BottomSheet
-                isOpen={isMenuOpen}
-                onClose={() => setIsMenuOpen(false)}
-                title="メニュー"
-                height="auto"
-            >
-                {menuContent ?? (
-                    <div className="text-muted-foreground text-sm">
-                        設定項目はここに表示されます
-                    </div>
-                )}
-            </BottomSheet>
         </div>
     );
 }
