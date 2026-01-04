@@ -14,12 +14,16 @@ const baseCard = {
 interface MatchControlsProps {
     /** 平手に戻すボタンのクリックハンドラ */
     onResetToStartpos: () => void;
+    /** 盤面をクリアするボタンのクリックハンドラ（編集モード用） */
+    onClearBoard?: () => void;
     /** 停止ボタンのクリックハンドラ */
     onStop: () => void;
     /** 対局開始ボタンのクリックハンドラ */
     onStart: () => void;
     /** 検討モード開始ボタンのクリックハンドラ */
     onStartReview?: () => void;
+    /** 局面編集モードに戻るボタンのクリックハンドラ */
+    onEnterEditMode?: () => void;
     /** 対局中かどうか */
     isMatchRunning: boolean;
     /** 現在のゲームモード */
@@ -30,13 +34,16 @@ interface MatchControlsProps {
 
 export function MatchControls({
     onResetToStartpos,
+    onClearBoard,
     onStop,
     onStart,
     onStartReview,
+    onEnterEditMode,
     isMatchRunning,
     gameMode = "editing",
     message,
 }: MatchControlsProps): ReactElement {
+    const isEditMode = gameMode === "editing";
     const isReviewMode = gameMode === "reviewing";
 
     return (
@@ -54,16 +61,10 @@ export function MatchControls({
                     gap: "8px",
                     flexWrap: "wrap",
                     alignItems: "center",
+                    minHeight: "36px",
                 }}
             >
-                <Button
-                    type="button"
-                    onClick={onResetToStartpos}
-                    variant="outline"
-                    style={{ paddingInline: "12px" }}
-                >
-                    平手に戻す
-                </Button>
+                {/* 対局中: 停止ボタンのみ */}
                 {isMatchRunning ? (
                     <Button
                         type="button"
@@ -75,22 +76,95 @@ export function MatchControls({
                     </Button>
                 ) : (
                     <>
-                        <Button type="button" onClick={onStart} style={{ paddingInline: "16px" }}>
-                            対局開始
-                        </Button>
-                        {onStartReview && !isReviewMode && (
-                            <Button
-                                type="button"
-                                onClick={onStartReview}
-                                variant="secondary"
-                                style={{ paddingInline: "16px" }}
-                            >
-                                検討モード
-                            </Button>
+                        {/* 編集モード時: [平手に戻す] [盤面クリア] [検討開始] [対局開始] */}
+                        {isEditMode && (
+                            <>
+                                <Button
+                                    type="button"
+                                    onClick={onResetToStartpos}
+                                    variant="outline"
+                                    style={{ paddingInline: "12px" }}
+                                >
+                                    平手に戻す
+                                </Button>
+                                {onClearBoard && (
+                                    <Button
+                                        type="button"
+                                        onClick={onClearBoard}
+                                        variant="outline"
+                                        style={{ paddingInline: "12px" }}
+                                    >
+                                        盤面クリア
+                                    </Button>
+                                )}
+                                {onStartReview && (
+                                    <Button
+                                        type="button"
+                                        onClick={onStartReview}
+                                        variant="secondary"
+                                        style={{ paddingInline: "16px" }}
+                                    >
+                                        検討開始
+                                    </Button>
+                                )}
+                                <Button
+                                    type="button"
+                                    onClick={onStart}
+                                    style={{ paddingInline: "16px" }}
+                                >
+                                    対局開始
+                                </Button>
+                            </>
+                        )}
+
+                        {/* 検討モード時: [平手に戻す] [局面編集] [対局開始] */}
+                        {isReviewMode && (
+                            <>
+                                <Button
+                                    type="button"
+                                    onClick={onResetToStartpos}
+                                    variant="outline"
+                                    style={{ paddingInline: "12px" }}
+                                >
+                                    平手に戻す
+                                </Button>
+                                {onEnterEditMode && (
+                                    <Button
+                                        type="button"
+                                        onClick={onEnterEditMode}
+                                        variant="outline"
+                                        style={{ paddingInline: "12px" }}
+                                    >
+                                        局面編集
+                                    </Button>
+                                )}
+                                <Button
+                                    type="button"
+                                    onClick={onStart}
+                                    style={{ paddingInline: "16px" }}
+                                >
+                                    対局開始
+                                </Button>
+                            </>
                         )}
                     </>
                 )}
             </div>
+
+            {/* モード表示 */}
+            {isEditMode && (
+                <div
+                    style={{
+                        fontSize: "12px",
+                        color: "hsl(var(--muted-foreground, 0 0% 48%))",
+                        padding: "4px 8px",
+                        background: "hsl(var(--muted, 0 0% 96%))",
+                        borderRadius: "4px",
+                    }}
+                >
+                    編集モード: 駒をドラッグして盤面を編集できます
+                </div>
+            )}
             {isReviewMode && (
                 <div
                     style={{
@@ -104,6 +178,7 @@ export function MatchControls({
                     検討モード: 駒を動かして分岐を作成できます
                 </div>
             )}
+
             {message ? (
                 <div
                     style={{

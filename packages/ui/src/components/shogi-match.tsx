@@ -349,19 +349,28 @@ export function ShogiMatch({
     const getHandInfo = (pos: "top" | "bottom") => {
         const owner: Player =
             pos === "top" ? (flipBoard ? "sente" : "gote") : flipBoard ? "gote" : "sente";
+        // 検討モードでは手番の持ち駒を選択可能（対局設定に関係なく）
+        const isActiveInReview = isReviewMode && position.turn === owner;
+        const isActiveInMatch =
+            !isEditMode &&
+            !isReviewMode &&
+            position.turn === owner &&
+            sides[owner].role === "human";
         return {
             owner,
             hand: owner === "sente" ? position.hands.sente : position.hands.gote,
-            isActive: !isEditMode && position.turn === owner && sides[owner].role === "human",
+            isActive: isActiveInReview || isActiveInMatch,
         };
     };
 
     const movesRef = useRef<string[]>(moves);
-    // movesRefをnavigationの変更に同期
+    const legalCache = useMemo(() => new LegalMoveCache(), []);
+    // movesRefをnavigationの変更に同期し、legalCacheをクリア
     useEffect(() => {
         movesRef.current = moves;
-    }, [moves]);
-    const legalCache = useMemo(() => new LegalMoveCache(), []);
+        // ナビゲーションで局面が変わったらキャッシュをクリア
+        legalCache.clear();
+    }, [moves, legalCache]);
     const matchEndedRef = useRef(false);
     const boardSectionRef = useRef<HTMLDivElement>(null);
     const settingsLocked = isMatchRunning;
@@ -664,8 +673,6 @@ export function ShogiMatch({
         }
         setIsSettingsPanelOpen(false);
         // isMatchRunningはfalseのままでisReviewModeになる
-        setMessage("検討モードを開始しました。駒を動かして分岐を作成できます。");
-        setTimeout(() => setMessage(null), 3000);
     };
 
     /** 現在のゲームモードを計算 */
@@ -681,6 +688,27 @@ export function ShogiMatch({
         setIsEditMode(false);
         setEditMessage("局面を確定しました。対局開始でこの局面から進行します。");
     };
+
+    /** 検討モードから編集モードに戻る */
+    const handleEnterEditMode = useCallback(async () => {
+        if (isMatchRunning) return;
+        const current = positionRef.current;
+        // 現在局面を編集開始局面として設定
+        setBasePosition(clonePositionState(current));
+        setInitialBoard(cloneBoard(current.board));
+        await refreshStartSfen(current);
+        // 棋譜ナビゲーションをリセット（現在局面から新規開始）
+        navigation.reset(current, startSfen);
+        movesRef.current = [];
+        setLastMove(undefined);
+        setSelection(null);
+        setMessage(null);
+        setLastAddedBranchInfo(null);
+        legalCache.clear();
+        // 編集モードに移行
+        setIsEditMode(true);
+        setEditMessage("局面編集モードに戻りました。駒をドラッグして編集できます。");
+    }, [isMatchRunning, navigation, startSfen, legalCache, refreshStartSfen]);
 
     const applyMoveCommon = useCallback(
         (nextPosition: PositionState, mv: string, last?: LastMove, _prevBoard?: BoardState) => {
@@ -721,14 +749,10 @@ export function ShogiMatch({
             setMessage(null);
             legalCache.clear();
 
-            // 分岐が作成された場合は通知
-            // メインライン上でのみ通知（サブ分岐はgetAllBranchesで検索されないため）
-            if (willCreateBranch && currentNode && navigation.state.isOnMainLine) {
+            // 分岐が作成された場合は記録（ネスト分岐も含む）
+            if (willCreateBranch && currentNode) {
                 // 分岐点のply（currentNode）と最初の手（mv）を記録
                 setLastAddedBranchInfo({ ply: currentNode.ply, firstMove: mv });
-                setMessage("新しい変化を作成しました");
-                // メッセージを3秒後にクリア
-                setTimeout(() => setMessage(null), 3000);
             }
         },
         [legalCache, navigation],
@@ -963,19 +987,6 @@ export function ShogiMatch({
         };
         applyEditedPosition(next);
         setEditMessage("盤面をクリアしました。");
-    };
-
-    const resetToStartposForEdit = async () => {
-        if (isMatchRunning) return;
-        try {
-            const service = getPositionService();
-            const pos = await service.getInitialBoard();
-            applyEditedPosition(clonePositionState(pos));
-            setInitialBoard(cloneBoard(pos.board));
-            setEditMessage("平手初期化しました。");
-        } catch (error) {
-            setMessage(`平手初期化に失敗しました: ${String(error)}`);
-        }
     };
 
     const updateTurnForEdit = (turn: Player) => {
@@ -1724,8 +1735,6 @@ export function ShogiMatch({
                 setIsMatchRunning(false);
                 setIsEditPanelOpen(false);
                 setIsSettingsPanelOpen(false);
-                setMessage("局面をインポートしました。検討モードで閲覧・分岐作成ができます。");
-                setTimeout(() => setMessage(null), 4000);
             } catch (error) {
                 throw new Error(`SFENの適用に失敗しました: ${String(error)}`);
             }
@@ -1769,8 +1778,6 @@ export function ShogiMatch({
             setIsMatchRunning(false);
             setIsEditPanelOpen(false);
             setIsSettingsPanelOpen(false);
-            setMessage("棋譜をインポートしました。検討モードで閲覧・分岐作成ができます。");
-            setTimeout(() => setMessage(null), 4000);
         },
         [loadMoves],
     );
@@ -1989,25 +1996,25 @@ export function ShogiMatch({
 
                     {/* 中央列: 操作系パネル（サイズ固定） */}
                     <div className="flex flex-col gap-2 shrink-0">
-                        <EditModePanel
-                            isOpen={isEditPanelOpen}
-                            onOpenChange={setIsEditPanelOpen}
-                            onResetToStartpos={resetToStartposForEdit}
-                            onClearBoard={clearBoardForEdit}
-                            isMatchRunning={isMatchRunning}
-                            positionReady={positionReady}
-                            message={editMessage}
-                        />
-
                         <MatchControls
                             onResetToStartpos={handleResetToStartpos}
+                            onClearBoard={clearBoardForEdit}
                             onStop={pauseAutoPlay}
                             onStart={resumeAutoPlay}
                             onStartReview={handleStartReview}
+                            onEnterEditMode={handleEnterEditMode}
                             isMatchRunning={isMatchRunning}
                             gameMode={gameMode}
                             message={message}
                         />
+
+                        {gameMode === "editing" && (
+                            <EditModePanel
+                                isOpen={isEditPanelOpen}
+                                onOpenChange={setIsEditPanelOpen}
+                                message={editMessage}
+                            />
+                        )}
 
                         <MatchSettingsPanel
                             isOpen={isSettingsPanelOpen}

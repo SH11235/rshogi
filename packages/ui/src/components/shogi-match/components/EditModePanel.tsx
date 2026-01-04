@@ -1,5 +1,4 @@
 import type { ReactElement } from "react";
-import { Button } from "../../button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../../collapsible";
 
 interface EditModePanelProps {
@@ -7,169 +6,46 @@ interface EditModePanelProps {
     isOpen: boolean;
     onOpenChange: (open: boolean) => void;
 
-    // アクション
-    onResetToStartpos: () => Promise<void>;
-    onClearBoard: () => void;
-
-    // 制約
-    isMatchRunning: boolean;
-    positionReady: boolean;
-
     // メッセージ
     message: string | null;
 }
 
-export function EditModePanel({
-    isOpen,
-    onOpenChange,
-    onResetToStartpos,
-    onClearBoard,
-    isMatchRunning,
-    positionReady,
-    message,
-}: EditModePanelProps): ReactElement {
+export function EditModePanel({ isOpen, onOpenChange, message }: EditModePanelProps): ReactElement {
     return (
         <Collapsible open={isOpen} onOpenChange={onOpenChange}>
-            <div
-                style={{
-                    background: "hsl(var(--wafuu-washi-warm))",
-                    border: "2px solid hsl(var(--wafuu-border))",
-                    borderRadius: "12px",
-                    overflow: "hidden",
-                    boxShadow: "0 8px 20px rgba(0,0,0,0.08)",
-                    width: "var(--panel-width)",
-                }}
-            >
+            <div className="w-[var(--panel-width)] overflow-hidden rounded-xl border-2 border-[hsl(var(--wafuu-border))] bg-[hsl(var(--wafuu-washi-warm))] shadow-lg">
                 <CollapsibleTrigger asChild>
                     <button
                         type="button"
-                        aria-label="局面編集パネルを開閉"
-                        style={{
-                            width: "100%",
-                            padding: "14px 16px",
-                            background:
-                                "linear-gradient(135deg, hsl(var(--wafuu-washi)) 0%, hsl(var(--wafuu-washi-warm)) 100%)",
-                            borderTop: "none",
-                            borderLeft: "none",
-                            borderRight: "none",
-                            borderBottom: isOpen ? "1px solid hsl(var(--wafuu-border))" : "none",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "space-between",
-                            cursor: "pointer",
-                            transition: "all 0.2s ease",
-                        }}
+                        aria-label="操作ヘルプを開閉"
+                        className={`flex w-full cursor-pointer items-center justify-between gap-3 border-none bg-gradient-to-br from-[hsl(var(--wafuu-washi))] to-[hsl(var(--wafuu-washi-warm))] px-4 py-3.5 transition-all duration-200 ${
+                            isOpen ? "border-b border-[hsl(var(--wafuu-border))]" : ""
+                        }`}
                     >
-                        <span
-                            style={{
-                                fontSize: "18px",
-                                fontWeight: 700,
-                                color: isOpen ? "hsl(var(--wafuu-shu))" : "hsl(var(--wafuu-sumi))",
-                                letterSpacing: "0.05em",
-                                transition: "color 0.2s ease",
-                            }}
-                        >
-                            {isOpen ? "局面編集中" : "局面編集"}
+                        <span className="text-lg font-bold tracking-wide text-[hsl(var(--wafuu-sumi))]">
+                            操作ヘルプ
                         </span>
                         <span
-                            style={{
-                                fontSize: "20px",
-                                color: "hsl(var(--wafuu-kincha))",
-                                transform: isOpen ? "rotate(180deg)" : "rotate(0deg)",
-                                transition: "transform 0.2s ease",
-                            }}
+                            className={`shrink-0 text-xl text-[hsl(var(--wafuu-kincha))] transition-transform duration-200 ${
+                                isOpen ? "rotate-180" : "rotate-0"
+                            }`}
                         >
                             ▼
                         </span>
                     </button>
                 </CollapsibleTrigger>
                 <CollapsibleContent>
-                    <div
-                        style={{
-                            padding: "16px",
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: "14px",
-                        }}
-                    >
-                        <div
-                            style={{
-                                fontSize: "12px",
-                                color: "hsl(var(--wafuu-sumi-light))",
-                                padding: "10px",
-                                background: "hsl(var(--wafuu-washi))",
-                                borderRadius: "8px",
-                                borderLeft: "3px solid hsl(var(--wafuu-kin))",
-                            }}
-                        >
-                            駒をドラッグして盤面を編集できます。持ち駒の±ボタンで駒数を調整できます。
-                        </div>
-                        <div
-                            style={{
-                                display: "flex",
-                                gap: "8px",
-                                flexWrap: "wrap",
-                            }}
-                        >
-                            <Button
-                                type="button"
-                                onClick={onResetToStartpos}
-                                disabled={isMatchRunning || !positionReady}
-                                variant="outline"
-                                style={{ paddingInline: "12px" }}
-                            >
-                                平手に戻す
-                            </Button>
-                            <Button
-                                type="button"
-                                onClick={onClearBoard}
-                                disabled={isMatchRunning || !positionReady}
-                                variant="outline"
-                                style={{ paddingInline: "12px" }}
-                            >
-                                盤面をクリア
-                            </Button>
-                        </div>
+                    <div className="flex flex-col gap-3.5 p-4">
                         {message && (
-                            <div
-                                style={{
-                                    fontSize: "13px",
-                                    color: "hsl(var(--wafuu-shu))",
-                                    padding: "10px",
-                                    background: "hsl(var(--wafuu-washi))",
-                                    borderRadius: "8px",
-                                    borderLeft: "3px solid hsl(var(--wafuu-shu))",
-                                }}
-                            >
+                            <div className="rounded-lg border-l-[3px] border-l-[hsl(var(--wafuu-shu))] bg-[hsl(var(--wafuu-washi))] p-2.5 text-[13px] text-[hsl(var(--wafuu-shu))]">
                                 {message}
                             </div>
                         )}
-                        <div
-                            style={{
-                                fontSize: "12px",
-                                color: "hsl(var(--wafuu-sumi-light))",
-                                padding: "12px",
-                                background: "hsl(var(--wafuu-washi))",
-                                borderRadius: "8px",
-                                borderLeft: "3px solid hsl(var(--wafuu-shu))",
-                            }}
-                        >
-                            <div
-                                style={{
-                                    fontWeight: 600,
-                                    marginBottom: "6px",
-                                    color: "hsl(var(--wafuu-sumi))",
-                                }}
-                            >
-                                操作方法
+                        <div className="rounded-lg border-l-[3px] border-l-[hsl(var(--wafuu-kin))] bg-[hsl(var(--wafuu-washi))] p-3 text-xs text-[hsl(var(--wafuu-sumi-light))]">
+                            <div className="mb-1.5 font-semibold text-[hsl(var(--wafuu-sumi))]">
+                                編集モード操作
                             </div>
-                            <ul
-                                style={{
-                                    margin: 0,
-                                    paddingLeft: "20px",
-                                    lineHeight: 1.6,
-                                }}
-                            >
+                            <ul className="m-0 list-disc pl-5 leading-relaxed">
                                 <li>
                                     <strong>駒を配置:</strong> 持ち駒から盤面にドラッグ
                                 </li>
@@ -185,6 +61,9 @@ export function EditModePanel({
                                 </li>
                                 <li>
                                     <strong>成り付与:</strong> Shift を押しながらドラッグ
+                                </li>
+                                <li>
+                                    <strong>持ち駒調整:</strong> ±ボタンで駒数を変更
                                 </li>
                             </ul>
                         </div>
