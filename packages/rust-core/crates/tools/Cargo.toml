@@ -32,6 +32,7 @@ indicatif = "0.18"
 rand = "0.9"
 rand_chacha = "0.9"
 byteorder = "1.5"
+tempfile = "3.20"
 
 [[bin]]
 name = "benchmark"
@@ -52,3 +53,7 @@ path = "src/bin/train_nnue.rs"
 [[bin]]
 name = "pack_to_jsonl"
 path = "src/bin/pack_to_jsonl.rs"
+
+[[bin]]
+name = "shuffle_pack"
+path = "src/bin/shuffle_pack.rs"
