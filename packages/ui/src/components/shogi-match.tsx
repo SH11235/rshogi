@@ -1889,6 +1889,14 @@ export function ShogiMatch({
                     onStop={pauseAutoPlay}
                     onResetToStartpos={handleResetToStartpos}
                     onStartReview={handleStartReview}
+                    // 対局設定
+                    sides={sides}
+                    onSidesChange={setSides}
+                    timeSettings={timeSettings}
+                    onTimeSettingsChange={setTimeSettings}
+                    onTurnChange={updateTurnForEdit}
+                    uiEngineOptions={uiEngineOptions}
+                    settingsLocked={settingsLocked}
                 />
             ) : (
                 <section className={matchLayoutClasses} style={matchLayoutCssVars}>

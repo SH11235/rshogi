@@ -1,11 +1,16 @@
 import type { LastMove, PieceType, Player, PositionState, Square } from "@shogi/app-core";
 import type { ReactElement, RefObject } from "react";
+import { useState } from "react";
 import type { ShogiBoardCell } from "../../shogi-board";
 import { ShogiBoard } from "../../shogi-board";
+import { BottomSheet } from "../components/BottomSheet";
 import { EvalBar } from "../components/EvalBar";
 import { HandPiecesDisplay } from "../components/HandPiecesDisplay";
+import type { EngineOption, SideSetting } from "../components/MatchSettingsPanel";
 import { type KifuMove, MobileKifuBar } from "../components/MobileKifuBar";
 import { MobileNavigation } from "../components/MobileNavigation";
+import { MobileSettingsSheet } from "../components/MobileSettingsSheet";
+import type { ClockSettings } from "../hooks/useClockManager";
 import { useMobileCellSize } from "../hooks/useMobileCellSize";
 import type { DisplaySettings, GameMode, PromotionSelection } from "../types";
 
@@ -84,6 +89,15 @@ export interface MobileLayoutProps {
     onResetToStartpos?: () => void;
     onStartReview?: () => void;
 
+    // 対局設定（モバイル用BottomSheet）
+    sides: { sente: SideSetting; gote: SideSetting };
+    onSidesChange: (sides: { sente: SideSetting; gote: SideSetting }) => void;
+    timeSettings: ClockSettings;
+    onTimeSettingsChange: (settings: ClockSettings) => void;
+    onTurnChange: (turn: Player) => void;
+    uiEngineOptions: EngineOption[];
+    settingsLocked: boolean;
+
     // 持ち駒情報取得
     getHandInfo: (pos: "top" | "bottom") => {
         owner: Player;
@@ -140,6 +154,13 @@ export function MobileLayout({
     onStop,
     onResetToStartpos,
     onStartReview,
+    sides,
+    onSidesChange,
+    timeSettings,
+    onTimeSettingsChange,
+    onTurnChange,
+    uiEngineOptions,
+    settingsLocked,
     getHandInfo,
     boardSectionRef,
     isDraggingPiece,
@@ -147,6 +168,9 @@ export function MobileLayout({
     // モバイル時のセルサイズを計算
     const mode = gameMode === "playing" ? "playing" : "reviewing";
     const cellSize = useMobileCellSize(mode);
+
+    // 設定BottomSheetの状態
+    const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
     const topHand = getHandInfo("top");
     const bottomHand = getHandInfo("bottom");
@@ -351,6 +375,38 @@ export function MobileLayout({
                     盤面をタップして編集
                 </div>
             )}
+
+            {/* FAB: 設定ボタン（右下固定） */}
+            <button
+                type="button"
+                onClick={() => setIsSettingsOpen(true)}
+                className="fixed bottom-4 right-4 w-14 h-14 rounded-full bg-primary text-primary-foreground shadow-lg flex items-center justify-center text-2xl active:scale-95 transition-transform z-40"
+                aria-label="対局設定を開く"
+            >
+                ⚙️
+            </button>
+
+            {/* 設定BottomSheet */}
+            <BottomSheet
+                isOpen={isSettingsOpen}
+                onClose={() => setIsSettingsOpen(false)}
+                title="対局設定"
+                height="auto"
+            >
+                <MobileSettingsSheet
+                    sides={sides}
+                    onSidesChange={onSidesChange}
+                    timeSettings={timeSettings}
+                    onTimeSettingsChange={onTimeSettingsChange}
+                    currentTurn={position.turn}
+                    onTurnChange={onTurnChange}
+                    uiEngineOptions={uiEngineOptions}
+                    settingsLocked={settingsLocked}
+                    isMatchRunning={isMatchRunning}
+                    onStartMatch={onStartReview}
+                    onStopMatch={onStop}
+                />
+            </BottomSheet>
         </div>
     );
 }
