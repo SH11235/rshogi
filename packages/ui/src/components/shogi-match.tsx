@@ -349,19 +349,28 @@ export function ShogiMatch({
     const getHandInfo = (pos: "top" | "bottom") => {
         const owner: Player =
             pos === "top" ? (flipBoard ? "sente" : "gote") : flipBoard ? "gote" : "sente";
+        // 検討モードでは手番の持ち駒を選択可能（対局設定に関係なく）
+        const isActiveInReview = isReviewMode && position.turn === owner;
+        const isActiveInMatch =
+            !isEditMode &&
+            !isReviewMode &&
+            position.turn === owner &&
+            sides[owner].role === "human";
         return {
             owner,
             hand: owner === "sente" ? position.hands.sente : position.hands.gote,
-            isActive: !isEditMode && position.turn === owner && sides[owner].role === "human",
+            isActive: isActiveInReview || isActiveInMatch,
         };
     };
 
     const movesRef = useRef<string[]>(moves);
-    // movesRefをnavigationの変更に同期
+    const legalCache = useMemo(() => new LegalMoveCache(), []);
+    // movesRefをnavigationの変更に同期し、legalCacheをクリア
     useEffect(() => {
         movesRef.current = moves;
-    }, [moves]);
-    const legalCache = useMemo(() => new LegalMoveCache(), []);
+        // ナビゲーションで局面が変わったらキャッシュをクリア
+        legalCache.clear();
+    }, [moves, legalCache]);
     const matchEndedRef = useRef(false);
     const boardSectionRef = useRef<HTMLDivElement>(null);
     const settingsLocked = isMatchRunning;
@@ -721,9 +730,8 @@ export function ShogiMatch({
             setMessage(null);
             legalCache.clear();
 
-            // 分岐が作成された場合は通知
-            // メインライン上でのみ通知（サブ分岐はgetAllBranchesで検索されないため）
-            if (willCreateBranch && currentNode && navigation.state.isOnMainLine) {
+            // 分岐が作成された場合は通知（ネスト分岐も含む）
+            if (willCreateBranch && currentNode) {
                 // 分岐点のply（currentNode）と最初の手（mv）を記録
                 setLastAddedBranchInfo({ ply: currentNode.ply, firstMove: mv });
                 setMessage("新しい変化を作成しました");

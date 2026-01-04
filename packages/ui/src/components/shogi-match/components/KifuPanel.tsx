@@ -1437,15 +1437,25 @@ export function KifuPanel({
                                             hover:bg-[hsl(var(--wafuu-washi))] hover:border-[hsl(var(--wafuu-shu)/0.3)]
                                             ${selectedBranch?.nodeId === branch.nodeId ? "bg-[hsl(var(--wafuu-kin)/0.1)] border-[hsl(var(--wafuu-kin)/0.3)]" : "bg-card"}
                                         `}
+                                        style={{
+                                            marginLeft: branch.nestLevel * 16,
+                                        }}
                                     >
                                         <div className="flex items-center justify-between gap-2">
-                                            <div className="flex items-center gap-2">
-                                                <span className="text-[11px] text-muted-foreground min-w-[2.5rem]">
-                                                    {branch.ply + 1}手目
-                                                </span>
-                                                <span className="text-[13px] font-medium">
-                                                    {branch.displayText}
-                                                </span>
+                                            <div className="flex flex-col gap-0.5">
+                                                {branch.parentPath && (
+                                                    <span className="text-[10px] text-muted-foreground">
+                                                        {branch.parentPath}
+                                                    </span>
+                                                )}
+                                                <div className="flex items-center gap-2">
+                                                    <span className="text-[11px] text-muted-foreground min-w-[2.5rem]">
+                                                        {branch.ply + 1}手目
+                                                    </span>
+                                                    <span className="text-[13px] font-medium">
+                                                        {branch.displayText}
+                                                    </span>
+                                                </div>
                                             </div>
                                             <span className="text-[10px] text-muted-foreground">
                                                 {branch.branchLength}手

@@ -322,6 +322,10 @@ export interface BranchSummary {
     isMainLine: boolean;
     /** タブ表示用のラベル（例: "12手目△3四歩の変化"） */
     tabLabel: string;
+    /** ネストの深さ（0=本譜から、1=分岐から、...） */
+    nestLevel: number;
+    /** 親のパス表示（例: "3手目変化 → "） */
+    parentPath?: string;
 }
 
 /**
@@ -342,21 +346,60 @@ function countBranchLength(tree: KifuTree, startNodeId: string): number {
 }
 
 /**
+ * ノードからルートまで遡り、親の分岐点のラベルを収集してパス文字列を生成
+ * @param tree 棋譜ツリー
+ * @param nodeId 分岐ノードID（この分岐自体の情報は含めない）
+ * @returns 親のパス表示（例: "3手目変化 → "）、本譜からの分岐はundefined
+ */
+function getParentPath(tree: KifuTree, nodeId: string): string | undefined {
+    const pathParts: string[] = [];
+    const startNode = tree.nodes.get(nodeId);
+    if (!startNode || !startNode.parentId) return undefined;
+
+    // 親から開始（自分自身の分岐情報は含めない）
+    let currentId: string | null = startNode.parentId;
+
+    while (currentId) {
+        const node = tree.nodes.get(currentId);
+        if (!node || !node.parentId) break;
+
+        const parent = tree.nodes.get(node.parentId);
+        if (!parent) break;
+
+        // 親のchildren[0]がこのノードでない場合（= 分岐上にいる）
+        if (parent.children[0] !== currentId) {
+            // この分岐点のラベルを追加（nodeは分岐に入った最初のノード）
+            pathParts.unshift(`${node.ply}手目変化`);
+        }
+
+        currentId = node.parentId;
+    }
+
+    if (pathParts.length === 0) {
+        return undefined;
+    }
+
+    return pathParts.join(" → ") + " → ";
+}
+
+/**
  * ツリー内の全分岐を取得（一覧表示用）
- * メインラインからの分岐のみを返す（ネストした分岐は除外）
+ * ネストした分岐も含めて再帰的に全探索
  *
  * @param tree 棋譜ツリー
- * @returns 分岐情報の配列（手数順）
+ * @returns 分岐情報の配列（探索順）
  */
 export function getAllBranches(tree: KifuTree): BranchSummary[] {
     const branches: BranchSummary[] = [];
 
-    // メインラインを辿りながら分岐を収集
-    let nodeId: string | null = tree.rootId;
-
-    while (nodeId) {
+    /**
+     * 再帰的にツリーを探索し、分岐を収集
+     * @param nodeId 現在のノードID
+     * @param nestLevel 現在のネスト深さ（0=本譜上）
+     */
+    function traverse(nodeId: string, nestLevel: number) {
         const node = tree.nodes.get(nodeId);
-        if (!node) break;
+        if (!node) return;
 
         // このノードに分岐がある場合
         if (node.children.length > 1) {
@@ -370,6 +413,7 @@ export function getAllBranches(tree: KifuTree): BranchSummary[] {
 
                 const displayText = getDisplayText(childNode, toSquare);
                 const branchLength = countBranchLength(tree, childId);
+                const parentPath = getParentPath(tree, childId);
 
                 branches.push({
                     parentNodeId: nodeId,
@@ -380,14 +424,21 @@ export function getAllBranches(tree: KifuTree): BranchSummary[] {
                     branchLength,
                     isMainLine: false,
                     tabLabel: `${childNode.ply}手目の変化`,
+                    nestLevel,
+                    parentPath,
                 });
             }
         }
 
-        // メインライン（最初の子）を辿る
-        nodeId = node.children.length > 0 ? node.children[0] : null;
+        // 全ての子を再帰的に探索
+        for (const childId of node.children) {
+            const isMainLineChild = node.children[0] === childId;
+            // メインラインの子はネストレベルを維持、分岐の子はネストレベルを+1
+            traverse(childId, isMainLineChild ? nestLevel : nestLevel + 1);
+        }
     }
 
+    traverse(tree.rootId, 0);
     return branches;
 }
 
