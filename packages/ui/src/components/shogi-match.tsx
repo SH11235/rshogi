@@ -48,6 +48,8 @@ import { type AnalysisJob, useEnginePool } from "./shogi-match/hooks/useEnginePo
 import { useKifuKeyboardNavigation } from "./shogi-match/hooks/useKifuKeyboardNavigation";
 import { useKifuNavigation } from "./shogi-match/hooks/useKifuNavigation";
 import { useLocalStorage } from "./shogi-match/hooks/useLocalStorage";
+import { useIsMobile } from "./shogi-match/hooks/useMediaQuery";
+import { MobileLayout } from "./shogi-match/layouts/MobileLayout";
 import {
     ANALYZING_STATE_NONE,
     type AnalysisSettings,
@@ -1785,6 +1787,9 @@ export function ShogiMatch({
     const candidateNote = positionReady ? null : "局面を読み込み中です。";
     const isDraggingPiece = isEditMode && dndController.state.isDragging;
 
+    // モバイル判定
+    const isMobile = useIsMobile();
+
     const uiEngineOptions = useMemo(() => {
         // 内蔵エンジンの A/B スロットは UI に露出させず、単一の「内蔵エンジン」として扱う。
         const internal = engineOptions.find((opt) => opt.kind === "internal") ?? engineOptions[0];
@@ -1835,69 +1840,188 @@ export function ShogiMatch({
                 />
             </div>
 
-            <section className={matchLayoutClasses} style={matchLayoutCssVars}>
-                <div className="flex gap-4 items-start">
-                    {/* 左列: 将棋盤（サイズ固定） */}
-                    <div className="flex flex-col gap-2 items-center shrink-0">
-                        <div ref={boardSectionRef} className="w-fit relative">
-                            {isDraggingPiece ? (
-                                <div className={deleteHintClasses}>盤外へドラッグで削除</div>
-                            ) : null}
-                            <div
-                                className={`mt-2 flex flex-col gap-2 items-center ${isDraggingPiece ? "touch-none" : ""}`}
-                            >
-                                {/* 盤の上側の持ち駒（通常:後手、反転時:先手） */}
-                                {(() => {
-                                    const info = getHandInfo("top");
-                                    return (
-                                        <div data-zone={`hand-${info.owner}`}>
-                                            {/* ステータス行: [手数] [手番] [反転ボタン] */}
-                                            <div className="flex items-center justify-end mb-1 gap-4">
-                                                {/* 手数表示 */}
-                                                <output
-                                                    className={`${TEXT_CLASSES.moveCount} !m-0 whitespace-nowrap`}
-                                                >
-                                                    {moves.length === 0
-                                                        ? "開始局面"
-                                                        : `${moves.length}手目`}
-                                                </output>
-
-                                                {/* 手番表示 */}
-                                                <output
-                                                    className={`${TEXT_CLASSES.mutedSecondary} whitespace-nowrap`}
-                                                >
-                                                    手番:{" "}
-                                                    <span
-                                                        className={`font-semibold text-[15px] ${
-                                                            position.turn === "sente"
-                                                                ? "text-wafuu-shu"
-                                                                : "text-wafuu-ai"
-                                                        }`}
+            {/* モバイル時はMobileLayout、PC時は3列レイアウト */}
+            {isMobile ? (
+                <MobileLayout
+                    grid={grid}
+                    position={position}
+                    flipBoard={flipBoard}
+                    lastMove={lastMove}
+                    selection={selection}
+                    promotionSelection={promotionSelection}
+                    isEditMode={isEditMode}
+                    isMatchRunning={isMatchRunning}
+                    gameMode={gameMode}
+                    editFromSquare={editFromSquare}
+                    moves={moves}
+                    candidateNote={candidateNote}
+                    displaySettings={displaySettings}
+                    onSquareSelect={(sq, shiftKey) => void handleSquareSelect(sq, shiftKey)}
+                    onPromotionChoice={handlePromotionChoice}
+                    onFlipBoard={() => setFlipBoard(!flipBoard)}
+                    onHandSelect={handleHandSelect}
+                    onPiecePointerDown={isEditMode ? handlePiecePointerDown : undefined}
+                    onPieceTogglePromote={isEditMode ? handlePieceTogglePromote : undefined}
+                    onHandPiecePointerDown={isEditMode ? handleHandPiecePointerDown : undefined}
+                    onIncrementHand={handleIncrementHand}
+                    onDecrementHand={handleDecrementHand}
+                    isReviewMode={isReviewMode}
+                    getHandInfo={getHandInfo}
+                    boardSectionRef={boardSectionRef}
+                    isDraggingPiece={isDraggingPiece}
+                    // 棋譜関連
+                    kifMoves={kifMoves}
+                    currentPly={navigation.state.currentPly}
+                    totalPly={navigation.state.totalPly}
+                    onPlySelect={handlePlySelect}
+                    // ナビゲーション
+                    onBack={navigation.goBack}
+                    onForward={() => navigation.goForward(selectedBranchNodeId ?? undefined)}
+                    onToStart={navigation.goToStart}
+                    onToEnd={navigation.goToEnd}
+                    // 評価値
+                    evalCp={evalHistory[navigation.state.currentPly]?.evalCp ?? undefined}
+                    evalMate={evalHistory[navigation.state.currentPly]?.evalMate ?? undefined}
+                    // 対局コントロール
+                    onStop={pauseAutoPlay}
+                    onResetToStartpos={handleResetToStartpos}
+                    onStartReview={handleStartReview}
+                />
+            ) : (
+                <section className={matchLayoutClasses} style={matchLayoutCssVars}>
+                    <div className="flex gap-4 items-start">
+                        {/* 左列: 将棋盤（サイズ固定） */}
+                        <div className="flex flex-col gap-2 items-center shrink-0">
+                            <div ref={boardSectionRef} className="w-fit relative">
+                                {isDraggingPiece ? (
+                                    <div className={deleteHintClasses}>盤外へドラッグで削除</div>
+                                ) : null}
+                                <div
+                                    className={`mt-2 flex flex-col gap-2 items-center ${isDraggingPiece ? "touch-none" : ""}`}
+                                >
+                                    {/* 盤の上側の持ち駒（通常:後手、反転時:先手） */}
+                                    {(() => {
+                                        const info = getHandInfo("top");
+                                        return (
+                                            <div data-zone={`hand-${info.owner}`}>
+                                                {/* ステータス行: [手数] [手番] [反転ボタン] */}
+                                                <div className="flex items-center justify-end mb-1 gap-4">
+                                                    {/* 手数表示 */}
+                                                    <output
+                                                        className={`${TEXT_CLASSES.moveCount} !m-0 whitespace-nowrap`}
                                                     >
-                                                        {position.turn === "sente"
-                                                            ? "先手"
-                                                            : "後手"}
-                                                    </span>
-                                                </output>
+                                                        {moves.length === 0
+                                                            ? "開始局面"
+                                                            : `${moves.length}手目`}
+                                                    </output>
 
-                                                {/* 反転ボタン */}
-                                                <button
-                                                    type="button"
-                                                    onClick={() => setFlipBoard(!flipBoard)}
-                                                    className={`flex items-center gap-1 px-2 py-1 rounded-md border border-[hsl(var(--wafuu-border))] cursor-pointer text-[13px] whitespace-nowrap ${
-                                                        flipBoard
-                                                            ? "bg-[hsl(var(--wafuu-kin)/0.2)]"
-                                                            : "bg-card"
-                                                    }`}
-                                                    title="盤面を反転"
-                                                >
-                                                    <span>🔄</span>
-                                                    <span>反転</span>
-                                                </button>
+                                                    {/* 手番表示 */}
+                                                    <output
+                                                        className={`${TEXT_CLASSES.mutedSecondary} whitespace-nowrap`}
+                                                    >
+                                                        手番:{" "}
+                                                        <span
+                                                            className={`font-semibold text-[15px] ${
+                                                                position.turn === "sente"
+                                                                    ? "text-wafuu-shu"
+                                                                    : "text-wafuu-ai"
+                                                            }`}
+                                                        >
+                                                            {position.turn === "sente"
+                                                                ? "先手"
+                                                                : "後手"}
+                                                        </span>
+                                                    </output>
+
+                                                    {/* 反転ボタン */}
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setFlipBoard(!flipBoard)}
+                                                        className={`flex items-center gap-1 px-2 py-1 rounded-md border border-[hsl(var(--wafuu-border))] cursor-pointer text-[13px] whitespace-nowrap ${
+                                                            flipBoard
+                                                                ? "bg-[hsl(var(--wafuu-kin)/0.2)]"
+                                                                : "bg-card"
+                                                        }`}
+                                                        title="盤面を反転"
+                                                    >
+                                                        <span>🔄</span>
+                                                        <span>反転</span>
+                                                    </button>
+                                                </div>
+
+                                                {/* 持ち駒表示 */}
+                                                <HandPiecesDisplay
+                                                    owner={info.owner}
+                                                    hand={info.hand}
+                                                    selectedPiece={
+                                                        selection?.kind === "hand"
+                                                            ? selection.piece
+                                                            : null
+                                                    }
+                                                    isActive={info.isActive}
+                                                    onHandSelect={handleHandSelect}
+                                                    onPiecePointerDown={
+                                                        isEditMode
+                                                            ? handleHandPiecePointerDown
+                                                            : undefined
+                                                    }
+                                                    isEditMode={isEditMode && !isMatchRunning}
+                                                    onIncrement={(piece) =>
+                                                        handleIncrementHand(info.owner, piece)
+                                                    }
+                                                    onDecrement={(piece) =>
+                                                        handleDecrementHand(info.owner, piece)
+                                                    }
+                                                    flipBoard={flipBoard}
+                                                />
                                             </div>
+                                        );
+                                    })()}
 
-                                            {/* 持ち駒表示 */}
-                                            <HandPiecesDisplay
+                                    {/* 盤面 */}
+                                    <ShogiBoard
+                                        grid={grid}
+                                        selectedSquare={
+                                            isEditMode && editFromSquare
+                                                ? editFromSquare
+                                                : selection?.kind === "square"
+                                                  ? selection.square
+                                                  : null
+                                        }
+                                        lastMove={
+                                            displaySettings.highlightLastMove && lastMove
+                                                ? {
+                                                      from: lastMove.from ?? undefined,
+                                                      to: lastMove.to,
+                                                  }
+                                                : undefined
+                                        }
+                                        promotionSquare={promotionSelection?.to ?? null}
+                                        onSelect={(sq, shiftKey) => {
+                                            void handleSquareSelect(sq, shiftKey);
+                                        }}
+                                        onPromotionChoice={handlePromotionChoice}
+                                        flipBoard={flipBoard}
+                                        onPiecePointerDown={
+                                            isEditMode ? handlePiecePointerDown : undefined
+                                        }
+                                        onPieceTogglePromote={
+                                            isEditMode ? handlePieceTogglePromote : undefined
+                                        }
+                                        squareNotation={displaySettings.squareNotation}
+                                        showBoardLabels={displaySettings.showBoardLabels}
+                                    />
+                                    {candidateNote ? (
+                                        <div className={TEXT_CLASSES.mutedSecondary}>
+                                            {candidateNote}
+                                        </div>
+                                    ) : null}
+
+                                    {/* 盤の下側の持ち駒（通常:先手、反転時:後手） */}
+                                    {(() => {
+                                        const info = getHandInfo("bottom");
+                                        return (
+                                            <PlayerHandSection
                                                 owner={info.owner}
                                                 hand={info.hand}
                                                 selectedPiece={
@@ -1921,215 +2045,149 @@ export function ShogiMatch({
                                                 }
                                                 flipBoard={flipBoard}
                                             />
-                                        </div>
-                                    );
-                                })()}
-
-                                {/* 盤面 */}
-                                <ShogiBoard
-                                    grid={grid}
-                                    selectedSquare={
-                                        isEditMode && editFromSquare
-                                            ? editFromSquare
-                                            : selection?.kind === "square"
-                                              ? selection.square
-                                              : null
-                                    }
-                                    lastMove={
-                                        displaySettings.highlightLastMove && lastMove
-                                            ? {
-                                                  from: lastMove.from ?? undefined,
-                                                  to: lastMove.to,
-                                              }
-                                            : undefined
-                                    }
-                                    promotionSquare={promotionSelection?.to ?? null}
-                                    onSelect={(sq, shiftKey) => {
-                                        void handleSquareSelect(sq, shiftKey);
-                                    }}
-                                    onPromotionChoice={handlePromotionChoice}
-                                    flipBoard={flipBoard}
-                                    onPiecePointerDown={
-                                        isEditMode ? handlePiecePointerDown : undefined
-                                    }
-                                    onPieceTogglePromote={
-                                        isEditMode ? handlePieceTogglePromote : undefined
-                                    }
-                                    squareNotation={displaySettings.squareNotation}
-                                    showBoardLabels={displaySettings.showBoardLabels}
-                                />
-                                {candidateNote ? (
-                                    <div className={TEXT_CLASSES.mutedSecondary}>
-                                        {candidateNote}
-                                    </div>
-                                ) : null}
-
-                                {/* 盤の下側の持ち駒（通常:先手、反転時:後手） */}
-                                {(() => {
-                                    const info = getHandInfo("bottom");
-                                    return (
-                                        <PlayerHandSection
-                                            owner={info.owner}
-                                            hand={info.hand}
-                                            selectedPiece={
-                                                selection?.kind === "hand" ? selection.piece : null
-                                            }
-                                            isActive={info.isActive}
-                                            onHandSelect={handleHandSelect}
-                                            onPiecePointerDown={
-                                                isEditMode ? handleHandPiecePointerDown : undefined
-                                            }
-                                            isEditMode={isEditMode && !isMatchRunning}
-                                            onIncrement={(piece) =>
-                                                handleIncrementHand(info.owner, piece)
-                                            }
-                                            onDecrement={(piece) =>
-                                                handleDecrementHand(info.owner, piece)
-                                            }
-                                            flipBoard={flipBoard}
-                                        />
-                                    );
-                                })()}
+                                        );
+                                    })()}
+                                </div>
                             </div>
                         </div>
-                    </div>
 
-                    {/* 中央列: 操作系パネル（サイズ固定） */}
-                    <div className="flex flex-col gap-2 shrink-0">
-                        <MatchControls
-                            onResetToStartpos={handleResetToStartpos}
-                            onClearBoard={clearBoardForEdit}
-                            onStop={pauseAutoPlay}
-                            onStart={resumeAutoPlay}
-                            onStartReview={handleStartReview}
-                            onEnterEditMode={handleEnterEditMode}
-                            isMatchRunning={isMatchRunning}
-                            gameMode={gameMode}
-                            message={message}
-                        />
-
-                        {gameMode === "editing" && (
-                            <EditModePanel
-                                isOpen={isEditPanelOpen}
-                                onOpenChange={setIsEditPanelOpen}
-                                message={editMessage}
+                        {/* 中央列: 操作系パネル（サイズ固定） */}
+                        <div className="flex flex-col gap-2 shrink-0">
+                            <MatchControls
+                                onResetToStartpos={handleResetToStartpos}
+                                onClearBoard={clearBoardForEdit}
+                                onStop={pauseAutoPlay}
+                                onStart={resumeAutoPlay}
+                                onStartReview={handleStartReview}
+                                onEnterEditMode={handleEnterEditMode}
+                                isMatchRunning={isMatchRunning}
+                                gameMode={gameMode}
+                                message={message}
                             />
-                        )}
 
-                        <MatchSettingsPanel
-                            isOpen={isSettingsPanelOpen}
-                            onOpenChange={setIsSettingsPanelOpen}
-                            sides={sides}
-                            onSidesChange={setSides}
-                            timeSettings={timeSettings}
-                            onTimeSettingsChange={setTimeSettings}
-                            currentTurn={position.turn}
-                            onTurnChange={updateTurnForEdit}
-                            uiEngineOptions={uiEngineOptions}
-                            settingsLocked={settingsLocked}
-                        />
+                            {gameMode === "editing" && (
+                                <EditModePanel
+                                    isOpen={isEditPanelOpen}
+                                    onOpenChange={setIsEditPanelOpen}
+                                    message={editMessage}
+                                />
+                            )}
 
-                        <ClockDisplayPanel clocks={clocks} sides={sides} />
-
-                        {/* インポートパネル */}
-                        <KifuImportPanel
-                            onImportSfen={importSfen}
-                            onImportKif={importKif}
-                            positionReady={positionReady}
-                        />
-
-                        {isDevMode && (
-                            <EngineLogsPanel
-                                eventLogs={eventLogs}
-                                errorLogs={errorLogs}
-                                engineErrorDetails={engineErrorDetails}
-                                onRetry={retryEngine}
-                                isRetrying={isRetrying}
+                            <MatchSettingsPanel
+                                isOpen={isSettingsPanelOpen}
+                                onOpenChange={setIsSettingsPanelOpen}
+                                sides={sides}
+                                onSidesChange={setSides}
+                                timeSettings={timeSettings}
+                                onTimeSettingsChange={setTimeSettings}
+                                currentTurn={position.turn}
+                                onTurnChange={updateTurnForEdit}
+                                uiEngineOptions={uiEngineOptions}
+                                settingsLocked={settingsLocked}
                             />
-                        )}
-                    </div>
 
-                    {/* 右列: 棋譜列（EvalPanel + KifuPanel、サイズ固定） */}
-                    <div className="flex flex-col gap-2 shrink-0">
-                        {/* 評価値グラフパネル（折りたたみ） */}
-                        <EvalPanel
-                            evalHistory={evalHistory}
-                            currentPly={navigation.state.currentPly}
-                            onPlySelect={handlePlySelect}
-                            defaultOpen={false}
-                        />
+                            <ClockDisplayPanel clocks={clocks} sides={sides} />
 
-                        {/* 棋譜パネル（常時表示） */}
-                        <KifuPanel
-                            kifMoves={kifMoves}
-                            currentPly={navigation.state.currentPly}
-                            showEval={displaySettings.showKifuEval}
-                            onShowEvalChange={(show) =>
-                                setDisplaySettings((prev) => ({
-                                    ...prev,
-                                    showKifuEval: show,
-                                }))
-                            }
-                            onPlySelect={handlePlySelect}
-                            onCopyKif={handleCopyKif}
-                            navigation={{
-                                currentPly: navigation.state.currentPly,
-                                totalPly: navigation.state.totalPly,
-                                onBack: navigation.goBack,
-                                onForward: () =>
-                                    navigation.goForward(selectedBranchNodeId ?? undefined),
-                                onToStart: navigation.goToStart,
-                                onToEnd: navigation.goToEnd,
-                                isRewound: navigation.state.isRewound,
-                                canGoForward: navigation.state.canGoForward,
-                                branchInfo: navigation.state.hasBranches
-                                    ? {
-                                          hasBranches: true,
-                                          currentIndex: navigation.state.currentBranchIndex,
-                                          count: navigation.state.branchCount,
-                                          onSwitch: navigation.switchBranch,
-                                          onPromoteToMain: navigation.promoteCurrentLine,
-                                      }
-                                    : undefined,
-                            }}
-                            navigationDisabled={isMatchRunning}
-                            branchMarkers={branchMarkers}
-                            positionHistory={positionHistory}
-                            onAddPvAsBranch={handleAddPvAsBranch}
-                            onPreviewPv={handlePreviewPv}
-                            lastAddedBranchInfo={lastAddedBranchInfo}
-                            onLastAddedBranchHandled={() => setLastAddedBranchInfo(null)}
-                            onSelectedBranchChange={setSelectedBranchNodeId}
-                            onAnalyzePly={handleAnalyzePly}
-                            isAnalyzing={isAnalyzing}
-                            analyzingPly={
-                                analyzingState.type !== "none" ? analyzingState.ply : undefined
-                            }
-                            batchAnalysis={
-                                batchAnalysis
-                                    ? {
-                                          isRunning: batchAnalysis.isRunning,
-                                          currentIndex: batchAnalysis.currentIndex,
-                                          totalCount: batchAnalysis.totalCount,
-                                          inProgress: batchAnalysis.inProgress,
-                                      }
-                                    : undefined
-                            }
-                            onStartBatchAnalysis={handleStartBatchAnalysis}
-                            onCancelBatchAnalysis={handleCancelBatchAnalysis}
-                            analysisSettings={analysisSettings}
-                            onAnalysisSettingsChange={setAnalysisSettings}
-                            kifuTree={navigation.tree}
-                            onNodeClick={navigation.goToNodeById}
-                            onBranchSwitch={navigation.switchBranchAtNode}
-                            onAnalyzeNode={handleAnalyzeNode}
-                            onAnalyzeBranch={handleAnalyzeBranch}
-                            onStartTreeBatchAnalysis={handleStartTreeBatchAnalysis}
-                            isOnMainLine={navigation.state.isOnMainLine}
-                        />
+                            {/* インポートパネル */}
+                            <KifuImportPanel
+                                onImportSfen={importSfen}
+                                onImportKif={importKif}
+                                positionReady={positionReady}
+                            />
+
+                            {isDevMode && (
+                                <EngineLogsPanel
+                                    eventLogs={eventLogs}
+                                    errorLogs={errorLogs}
+                                    engineErrorDetails={engineErrorDetails}
+                                    onRetry={retryEngine}
+                                    isRetrying={isRetrying}
+                                />
+                            )}
+                        </div>
+
+                        {/* 右列: 棋譜列（EvalPanel + KifuPanel、サイズ固定） */}
+                        <div className="flex flex-col gap-2 shrink-0">
+                            {/* 評価値グラフパネル（折りたたみ） */}
+                            <EvalPanel
+                                evalHistory={evalHistory}
+                                currentPly={navigation.state.currentPly}
+                                onPlySelect={handlePlySelect}
+                                defaultOpen={false}
+                            />
+
+                            {/* 棋譜パネル（常時表示） */}
+                            <KifuPanel
+                                kifMoves={kifMoves}
+                                currentPly={navigation.state.currentPly}
+                                showEval={displaySettings.showKifuEval}
+                                onShowEvalChange={(show) =>
+                                    setDisplaySettings((prev) => ({
+                                        ...prev,
+                                        showKifuEval: show,
+                                    }))
+                                }
+                                onPlySelect={handlePlySelect}
+                                onCopyKif={handleCopyKif}
+                                navigation={{
+                                    currentPly: navigation.state.currentPly,
+                                    totalPly: navigation.state.totalPly,
+                                    onBack: navigation.goBack,
+                                    onForward: () =>
+                                        navigation.goForward(selectedBranchNodeId ?? undefined),
+                                    onToStart: navigation.goToStart,
+                                    onToEnd: navigation.goToEnd,
+                                    isRewound: navigation.state.isRewound,
+                                    canGoForward: navigation.state.canGoForward,
+                                    branchInfo: navigation.state.hasBranches
+                                        ? {
+                                              hasBranches: true,
+                                              currentIndex: navigation.state.currentBranchIndex,
+                                              count: navigation.state.branchCount,
+                                              onSwitch: navigation.switchBranch,
+                                              onPromoteToMain: navigation.promoteCurrentLine,
+                                          }
+                                        : undefined,
+                                }}
+                                navigationDisabled={isMatchRunning}
+                                branchMarkers={branchMarkers}
+                                positionHistory={positionHistory}
+                                onAddPvAsBranch={handleAddPvAsBranch}
+                                onPreviewPv={handlePreviewPv}
+                                lastAddedBranchInfo={lastAddedBranchInfo}
+                                onLastAddedBranchHandled={() => setLastAddedBranchInfo(null)}
+                                onSelectedBranchChange={setSelectedBranchNodeId}
+                                onAnalyzePly={handleAnalyzePly}
+                                isAnalyzing={isAnalyzing}
+                                analyzingPly={
+                                    analyzingState.type !== "none" ? analyzingState.ply : undefined
+                                }
+                                batchAnalysis={
+                                    batchAnalysis
+                                        ? {
+                                              isRunning: batchAnalysis.isRunning,
+                                              currentIndex: batchAnalysis.currentIndex,
+                                              totalCount: batchAnalysis.totalCount,
+                                              inProgress: batchAnalysis.inProgress,
+                                          }
+                                        : undefined
+                                }
+                                onStartBatchAnalysis={handleStartBatchAnalysis}
+                                onCancelBatchAnalysis={handleCancelBatchAnalysis}
+                                analysisSettings={analysisSettings}
+                                onAnalysisSettingsChange={setAnalysisSettings}
+                                kifuTree={navigation.tree}
+                                onNodeClick={navigation.goToNodeById}
+                                onBranchSwitch={navigation.switchBranchAtNode}
+                                onAnalyzeNode={handleAnalyzeNode}
+                                onAnalyzeBranch={handleAnalyzeBranch}
+                                onStartTreeBatchAnalysis={handleStartTreeBatchAnalysis}
+                                isOnMainLine={navigation.state.isOnMainLine}
+                            />
+                        </div>
                     </div>
-                </div>
-            </section>
+                </section>
+            )}
         </TooltipProvider>
     );
 }
