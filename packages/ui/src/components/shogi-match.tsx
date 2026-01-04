@@ -323,6 +323,10 @@ export function ShogiMatch({
         onPositionChange: handleNavigationPositionChange,
     });
 
+    // navigation.resetの参照をrefで保持（初期化useEffectで使用）
+    const navigationResetRef = useRef(navigation.reset);
+    navigationResetRef.current = navigation.reset;
+
     // 互換性用のmoves配列
     const moves = navigation.getMovesArray();
 
@@ -600,7 +604,7 @@ export function ShogiMatch({
                 }
                 // 棋譜ナビゲーションを正しい初期局面でリセット
                 if (!cancelled) {
-                    navigation.reset(pos, sfen);
+                    navigationResetRef.current(pos, sfen);
                     setPositionReady(true);
                 }
             } catch (error) {
@@ -614,8 +618,7 @@ export function ShogiMatch({
         return () => {
             cancelled = true;
         };
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- navigation.resetは初回のみ使用
-    }, [navigation.reset]);
+    }, []);
 
     const grid = useMemo(() => {
         const g = boardToGrid(position.board);

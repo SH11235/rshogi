@@ -1,6 +1,6 @@
 import { cn } from "@shogi/design-system";
 import type { ReactElement } from "react";
-import { useEffect, useRef } from "react";
+import { useCallback, useRef } from "react";
 
 export interface KifuMove {
     /** 手数（1から始まる） */
@@ -28,21 +28,19 @@ export function MobileKifuBar({
     onPlySelect,
 }: MobileKifuBarProps): ReactElement {
     const containerRef = useRef<HTMLDivElement>(null);
-    const currentRef = useRef<HTMLButtonElement>(null);
 
-    // 現在の手を中央にスクロール
-    useEffect(() => {
-        if (currentRef.current && containerRef.current) {
+    // 現在の手を中央にスクロール（コールバックref）
+    const scrollToCurrentRef = useCallback((node: HTMLButtonElement | null) => {
+        if (node && containerRef.current) {
             const container = containerRef.current;
-            const current = currentRef.current;
             const containerWidth = container.clientWidth;
-            const currentLeft = current.offsetLeft;
-            const currentWidth = current.clientWidth;
+            const currentLeft = node.offsetLeft;
+            const currentWidth = node.clientWidth;
             // 現在の手を中央に配置
             const scrollLeft = currentLeft - containerWidth / 2 + currentWidth / 2;
             container.scrollTo({ left: scrollLeft, behavior: "smooth" });
         }
-    }, [currentPly]);
+    }, []);
 
     if (moves.length === 0) {
         return (
@@ -63,7 +61,7 @@ export function MobileKifuBar({
                 return (
                     <button
                         key={move.ply}
-                        ref={isCurrent ? currentRef : undefined}
+                        ref={isCurrent ? scrollToCurrentRef : undefined}
                         type="button"
                         onClick={() => onPlySelect?.(move.ply)}
                         className={cn(
