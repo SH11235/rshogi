@@ -27,6 +27,9 @@ import { KifuNavigationToolbar } from "./KifuNavigationToolbar";
 /** 表示モード */
 type ViewMode = "main" | "branches" | "selectedBranch";
 
+/** ネストされた分岐のインデント幅（px） */
+const NEST_INDENT_PX = 16;
+
 /** 選択中の分岐情報 */
 interface SelectedBranch {
     /** 分岐のノードID */
@@ -1438,7 +1441,7 @@ export function KifuPanel({
                                             ${selectedBranch?.nodeId === branch.nodeId ? "bg-[hsl(var(--wafuu-kin)/0.1)] border-[hsl(var(--wafuu-kin)/0.3)]" : "bg-card"}
                                         `}
                                         style={{
-                                            marginLeft: branch.nestLevel * 16,
+                                            marginLeft: branch.nestLevel * NEST_INDENT_PX,
                                         }}
                                     >
                                         <div className="flex items-center justify-between gap-2">

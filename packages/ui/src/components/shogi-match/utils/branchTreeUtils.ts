@@ -359,15 +359,21 @@ function getParentPath(tree: KifuTree, nodeId: string): string | undefined {
     // 親から開始（自分自身の分岐情報は含めない）
     let currentId: string | null = startNode.parentId;
 
-    while (currentId) {
+    // 循環参照による無限ループを防止
+    const visited = new Set<string>();
+
+    while (currentId && !visited.has(currentId)) {
+        visited.add(currentId);
+
         const node = tree.nodes.get(currentId);
         if (!node || !node.parentId) break;
 
         const parent = tree.nodes.get(node.parentId);
         if (!parent) break;
 
-        // 親のchildren[0]がこのノードでない場合（= 分岐上にいる）
-        if (parent.children[0] !== currentId) {
+        // 親のchildren[0]がこのノードでない場合 = 分岐上にいる
+        const isOnBranchLine = parent.children[0] !== currentId;
+        if (isOnBranchLine) {
             // この分岐点のラベルを追加（nodeは分岐に入った最初のノード）
             pathParts.unshift(`${node.ply}手目変化`);
         }
@@ -381,6 +387,9 @@ function getParentPath(tree: KifuTree, nodeId: string): string | undefined {
 
     return `${pathParts.join(" → ")} → `;
 }
+
+/** 再帰探索の最大深度（スタックオーバーフロー防止） */
+const MAX_TRAVERSE_DEPTH = 1000;
 
 /**
  * ツリー内の全分岐を取得（一覧表示用）
@@ -396,8 +405,14 @@ export function getAllBranches(tree: KifuTree): BranchSummary[] {
      * 再帰的にツリーを探索し、分岐を収集
      * @param nodeId 現在のノードID
      * @param nestLevel 現在のネスト深さ（0=本譜上）
+     * @param depth 再帰の深さ（安全装置用）
      */
-    function traverse(nodeId: string, nestLevel: number) {
+    function traverse(nodeId: string, nestLevel: number, depth = 0) {
+        if (depth > MAX_TRAVERSE_DEPTH) {
+            console.warn("getAllBranches: Maximum recursion depth reached");
+            return;
+        }
+
         const node = tree.nodes.get(nodeId);
         if (!node) return;
 
@@ -434,7 +449,7 @@ export function getAllBranches(tree: KifuTree): BranchSummary[] {
         for (const childId of node.children) {
             const isMainLineChild = node.children[0] === childId;
             // メインラインの子はネストレベルを維持、分岐の子はネストレベルを+1
-            traverse(childId, isMainLineChild ? nestLevel : nestLevel + 1);
+            traverse(childId, isMainLineChild ? nestLevel : nestLevel + 1, depth + 1);
         }
     }
 

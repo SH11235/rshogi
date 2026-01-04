@@ -370,7 +370,7 @@ export function ShogiMatch({
         movesRef.current = moves;
         // ナビゲーションで局面が変わったらキャッシュをクリア
         legalCache.clear();
-    }, [moves, legalCache]);
+    }, [moves]);
     const matchEndedRef = useRef(false);
     const boardSectionRef = useRef<HTMLDivElement>(null);
     const settingsLocked = isMatchRunning;
