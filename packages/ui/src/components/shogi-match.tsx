@@ -710,7 +710,7 @@ export function ShogiMatch({
         // 編集モードに移行
         setIsEditMode(true);
         setEditMessage("局面編集モードに戻りました。駒をドラッグして編集できます。");
-    }, [isMatchRunning, navigation, startSfen, legalCache]);
+    }, [isMatchRunning, navigation, startSfen, legalCache, refreshStartSfen]);
 
     const applyMoveCommon = useCallback(
         (nextPosition: PositionState, mv: string, last?: LastMove, _prevBoard?: BoardState) => {
@@ -992,19 +992,6 @@ export function ShogiMatch({
         };
         applyEditedPosition(next);
         setEditMessage("盤面をクリアしました。");
-    };
-
-    const resetToStartposForEdit = async () => {
-        if (isMatchRunning) return;
-        try {
-            const service = getPositionService();
-            const pos = await service.getInitialBoard();
-            applyEditedPosition(clonePositionState(pos));
-            setInitialBoard(cloneBoard(pos.board));
-            setEditMessage("平手初期化しました。");
-        } catch (error) {
-            setMessage(`平手初期化に失敗しました: ${String(error)}`);
-        }
     };
 
     const updateTurnForEdit = (turn: Player) => {
@@ -2018,18 +2005,9 @@ export function ShogiMatch({
 
                     {/* 中央列: 操作系パネル（サイズ固定） */}
                     <div className="flex flex-col gap-2 shrink-0">
-                        <EditModePanel
-                            isOpen={isEditPanelOpen}
-                            onOpenChange={setIsEditPanelOpen}
-                            onResetToStartpos={resetToStartposForEdit}
-                            onClearBoard={clearBoardForEdit}
-                            isMatchRunning={isMatchRunning}
-                            positionReady={positionReady}
-                            message={editMessage}
-                        />
-
                         <MatchControls
                             onResetToStartpos={handleResetToStartpos}
+                            onClearBoard={clearBoardForEdit}
                             onStop={pauseAutoPlay}
                             onStart={resumeAutoPlay}
                             onStartReview={handleStartReview}
@@ -2037,6 +2015,12 @@ export function ShogiMatch({
                             isMatchRunning={isMatchRunning}
                             gameMode={gameMode}
                             message={message}
+                        />
+
+                        <EditModePanel
+                            isOpen={isEditPanelOpen}
+                            onOpenChange={setIsEditPanelOpen}
+                            message={editMessage}
                         />
 
                         <MatchSettingsPanel

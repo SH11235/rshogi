@@ -379,7 +379,7 @@ function getParentPath(tree: KifuTree, nodeId: string): string | undefined {
         return undefined;
     }
 
-    return pathParts.join(" → ") + " → ";
+    return `${pathParts.join(" → ")} → `;
 }
 
 /**
