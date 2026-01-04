@@ -673,8 +673,6 @@ export function ShogiMatch({
         }
         setIsSettingsPanelOpen(false);
         // isMatchRunningはfalseのままでisReviewModeになる
-        setMessage("検討モードを開始しました。駒を動かして分岐を作成できます。");
-        setTimeout(() => setMessage(null), 3000);
     };
 
     /** 現在のゲームモードを計算 */
@@ -751,13 +749,10 @@ export function ShogiMatch({
             setMessage(null);
             legalCache.clear();
 
-            // 分岐が作成された場合は通知（ネスト分岐も含む）
+            // 分岐が作成された場合は記録（ネスト分岐も含む）
             if (willCreateBranch && currentNode) {
                 // 分岐点のply（currentNode）と最初の手（mv）を記録
                 setLastAddedBranchInfo({ ply: currentNode.ply, firstMove: mv });
-                setMessage("新しい変化を作成しました");
-                // メッセージを3秒後にクリア
-                setTimeout(() => setMessage(null), 3000);
             }
         },
         [legalCache, navigation],
@@ -1740,8 +1735,6 @@ export function ShogiMatch({
                 setIsMatchRunning(false);
                 setIsEditPanelOpen(false);
                 setIsSettingsPanelOpen(false);
-                setMessage("局面をインポートしました。検討モードで閲覧・分岐作成ができます。");
-                setTimeout(() => setMessage(null), 4000);
             } catch (error) {
                 throw new Error(`SFENの適用に失敗しました: ${String(error)}`);
             }
@@ -1785,8 +1778,6 @@ export function ShogiMatch({
             setIsMatchRunning(false);
             setIsEditPanelOpen(false);
             setIsSettingsPanelOpen(false);
-            setMessage("棋譜をインポートしました。検討モードで閲覧・分岐作成ができます。");
-            setTimeout(() => setMessage(null), 4000);
         },
         [loadMoves],
     );
@@ -2017,11 +2008,13 @@ export function ShogiMatch({
                             message={message}
                         />
 
-                        <EditModePanel
-                            isOpen={isEditPanelOpen}
-                            onOpenChange={setIsEditPanelOpen}
-                            message={editMessage}
-                        />
+                        {gameMode === "editing" && (
+                            <EditModePanel
+                                isOpen={isEditPanelOpen}
+                                onOpenChange={setIsEditPanelOpen}
+                                message={editMessage}
+                            />
+                        )}
 
                         <MatchSettingsPanel
                             isOpen={isSettingsPanelOpen}

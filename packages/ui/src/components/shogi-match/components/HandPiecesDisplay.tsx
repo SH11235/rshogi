@@ -152,78 +152,77 @@ export function HandPiecesDisplay({
                             />
                         </button>
 
-                        {/* 編集モード: ±ボタン（縦並び） */}
-                        {isEditMode && (
-                            <div
+                        {/* ±ボタン（縦並び）- 編集モードでなくてもスペースを確保 */}
+                        <div
+                            style={{
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: "1px",
+                                visibility: isEditMode ? "visible" : "hidden",
+                            }}
+                        >
+                            <button
+                                type="button"
+                                onClick={() => onIncrement?.(piece)}
+                                disabled={!isEditMode || count >= maxCount}
+                                aria-label={`${PIECE_LABELS[piece]}を増やす`}
                                 style={{
+                                    width: "20px",
+                                    height: "16px",
+                                    borderRadius: "4px 4px 0 0",
+                                    border: "1px solid hsl(var(--border, 0 0% 86%))",
+                                    borderBottom: "none",
+                                    background:
+                                        count < maxCount
+                                            ? "hsl(var(--wafuu-washi))"
+                                            : "hsl(var(--muted, 210 40% 96%))",
+                                    color:
+                                        count < maxCount
+                                            ? "hsl(var(--wafuu-sumi))"
+                                            : "hsl(var(--muted-foreground, 0 0% 70%))",
+                                    cursor: count < maxCount ? "pointer" : "not-allowed",
+                                    fontSize: "12px",
+                                    fontWeight: "bold",
                                     display: "flex",
-                                    flexDirection: "column",
-                                    gap: "1px",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    lineHeight: 1,
+                                    opacity: count < maxCount ? 1 : 0.4,
                                 }}
                             >
-                                <button
-                                    type="button"
-                                    onClick={() => onIncrement?.(piece)}
-                                    disabled={count >= maxCount}
-                                    aria-label={`${PIECE_LABELS[piece]}を増やす`}
-                                    style={{
-                                        width: "20px",
-                                        height: "16px",
-                                        borderRadius: "4px 4px 0 0",
-                                        border: "1px solid hsl(var(--border, 0 0% 86%))",
-                                        borderBottom: "none",
-                                        background:
-                                            count < maxCount
-                                                ? "hsl(var(--wafuu-washi))"
-                                                : "hsl(var(--muted, 210 40% 96%))",
-                                        color:
-                                            count < maxCount
-                                                ? "hsl(var(--wafuu-sumi))"
-                                                : "hsl(var(--muted-foreground, 0 0% 70%))",
-                                        cursor: count < maxCount ? "pointer" : "not-allowed",
-                                        fontSize: "12px",
-                                        fontWeight: "bold",
-                                        display: "flex",
-                                        alignItems: "center",
-                                        justifyContent: "center",
-                                        lineHeight: 1,
-                                        opacity: count < maxCount ? 1 : 0.4,
-                                    }}
-                                >
-                                    +
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => onDecrement?.(piece)}
-                                    disabled={count <= 0}
-                                    aria-label={`${PIECE_LABELS[piece]}を減らす`}
-                                    style={{
-                                        width: "20px",
-                                        height: "16px",
-                                        borderRadius: "0 0 4px 4px",
-                                        border: "1px solid hsl(var(--border, 0 0% 86%))",
-                                        background:
-                                            count > 0
-                                                ? "hsl(var(--wafuu-washi))"
-                                                : "hsl(var(--muted, 210 40% 96%))",
-                                        color:
-                                            count > 0
-                                                ? "hsl(var(--wafuu-sumi))"
-                                                : "hsl(var(--muted-foreground, 0 0% 70%))",
-                                        cursor: count > 0 ? "pointer" : "not-allowed",
-                                        fontSize: "12px",
-                                        fontWeight: "bold",
-                                        display: "flex",
-                                        alignItems: "center",
-                                        justifyContent: "center",
-                                        lineHeight: 1,
-                                        opacity: count > 0 ? 1 : 0.4,
-                                    }}
-                                >
-                                    −
-                                </button>
-                            </div>
-                        )}
+                                +
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => onDecrement?.(piece)}
+                                disabled={!isEditMode || count <= 0}
+                                aria-label={`${PIECE_LABELS[piece]}を減らす`}
+                                style={{
+                                    width: "20px",
+                                    height: "16px",
+                                    borderRadius: "0 0 4px 4px",
+                                    border: "1px solid hsl(var(--border, 0 0% 86%))",
+                                    background:
+                                        count > 0
+                                            ? "hsl(var(--wafuu-washi))"
+                                            : "hsl(var(--muted, 210 40% 96%))",
+                                    color:
+                                        count > 0
+                                            ? "hsl(var(--wafuu-sumi))"
+                                            : "hsl(var(--muted-foreground, 0 0% 70%))",
+                                    cursor: count > 0 ? "pointer" : "not-allowed",
+                                    fontSize: "12px",
+                                    fontWeight: "bold",
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    lineHeight: 1,
+                                    opacity: count > 0 ? 1 : 0.4,
+                                }}
+                            >
+                                −
+                            </button>
+                        </div>
                     </div>
                 );
             })}

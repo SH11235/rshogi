@@ -61,6 +61,7 @@ export function MatchControls({
                     gap: "8px",
                     flexWrap: "wrap",
                     alignItems: "center",
+                    minHeight: "36px",
                 }}
             >
                 {/* 対局中: 停止ボタンのみ */}
