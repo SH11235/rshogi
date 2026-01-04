@@ -1833,15 +1833,17 @@ export function ShogiMatch({
                 />
             )}
 
-            {/* 左上メニュー（画面固定） */}
-            <div className="fixed top-4 left-4 z-[100]">
-                <AppMenu
-                    settings={displaySettings}
-                    onSettingsChange={setDisplaySettings}
-                    analysisSettings={analysisSettings}
-                    onAnalysisSettingsChange={setAnalysisSettings}
-                />
-            </div>
+            {/* 左上メニュー（画面固定、PC版のみ） */}
+            {!isMobile && (
+                <div className="fixed top-4 left-4 z-[100]">
+                    <AppMenu
+                        settings={displaySettings}
+                        onSettingsChange={setDisplaySettings}
+                        analysisSettings={analysisSettings}
+                        onAnalysisSettingsChange={setAnalysisSettings}
+                    />
+                </div>
+            )}
 
             {/* モバイル時はMobileLayout、PC時は3列レイアウト */}
             {isMobile ? (
@@ -1897,6 +1899,11 @@ export function ShogiMatch({
                     onTurnChange={updateTurnForEdit}
                     uiEngineOptions={uiEngineOptions}
                     settingsLocked={settingsLocked}
+                    // クロック表示
+                    clocks={clocks}
+                    // 表示設定
+                    displaySettingsFull={displaySettings}
+                    onDisplaySettingsChange={setDisplaySettings}
                 />
             ) : (
                 <section className={matchLayoutClasses} style={matchLayoutCssVars}>

@@ -7,10 +7,11 @@ import { BottomSheet } from "../components/BottomSheet";
 import { EvalBar } from "../components/EvalBar";
 import { HandPiecesDisplay } from "../components/HandPiecesDisplay";
 import type { EngineOption, SideSetting } from "../components/MatchSettingsPanel";
+import { MobileClockDisplay } from "../components/MobileClockDisplay";
 import { type KifuMove, MobileKifuBar } from "../components/MobileKifuBar";
 import { MobileNavigation } from "../components/MobileNavigation";
 import { MobileSettingsSheet } from "../components/MobileSettingsSheet";
-import type { ClockSettings } from "../hooks/useClockManager";
+import type { ClockSettings, TickState } from "../hooks/useClockManager";
 import { useMobileCellSize } from "../hooks/useMobileCellSize";
 import type { DisplaySettings, GameMode, PromotionSelection } from "../types";
 
@@ -98,6 +99,13 @@ export interface MobileLayoutProps {
     uiEngineOptions: EngineOption[];
     settingsLocked: boolean;
 
+    // クロック表示
+    clocks: TickState;
+
+    // 表示設定（フル版、BottomSheet用）
+    displaySettingsFull: DisplaySettings;
+    onDisplaySettingsChange: (settings: DisplaySettings) => void;
+
     // 持ち駒情報取得
     getHandInfo: (pos: "top" | "bottom") => {
         owner: Player;
@@ -161,6 +169,9 @@ export function MobileLayout({
     onTurnChange,
     uiEngineOptions,
     settingsLocked,
+    clocks,
+    displaySettingsFull,
+    onDisplaySettingsChange,
     getHandInfo,
     boardSectionRef,
     isDraggingPiece,
@@ -180,8 +191,8 @@ export function MobileLayout({
             className="flex flex-col items-center w-full px-2"
             style={{ "--shogi-cell-size": `${cellSize}px` } as React.CSSProperties}
         >
-            {/* ステータス行（左上にAppMenuがあるため左側に余白を確保） */}
-            <div className="flex items-center justify-between w-full py-2 pl-12 pr-2">
+            {/* ステータス行 */}
+            <div className="flex items-center justify-between w-full py-2 px-2">
                 <output className={`${TEXT_CLASSES.moveCount} whitespace-nowrap`}>
                     {moves.length === 0 ? "開始局面" : `${moves.length}手目`}
                 </output>
@@ -206,6 +217,9 @@ export function MobileLayout({
                     🔄
                 </button>
             </div>
+
+            {/* クロック表示（対局中のみ） */}
+            {isMatchRunning && <MobileClockDisplay clocks={clocks} sides={sides} />}
 
             {/* 盤面セクション */}
             <div
@@ -390,7 +404,7 @@ export function MobileLayout({
             <BottomSheet
                 isOpen={isSettingsOpen}
                 onClose={() => setIsSettingsOpen(false)}
-                title="対局設定"
+                title="設定"
                 height="auto"
             >
                 <MobileSettingsSheet
@@ -403,8 +417,24 @@ export function MobileLayout({
                     uiEngineOptions={uiEngineOptions}
                     settingsLocked={settingsLocked}
                     isMatchRunning={isMatchRunning}
-                    onStartMatch={onStartReview}
-                    onStopMatch={onStop}
+                    onStartMatch={
+                        onStartReview
+                            ? () => {
+                                  onStartReview();
+                                  setIsSettingsOpen(false);
+                              }
+                            : undefined
+                    }
+                    onStopMatch={
+                        onStop
+                            ? () => {
+                                  onStop();
+                                  setIsSettingsOpen(false);
+                              }
+                            : undefined
+                    }
+                    displaySettings={displaySettingsFull}
+                    onDisplaySettingsChange={onDisplaySettingsChange}
                 />
             </BottomSheet>
         </div>

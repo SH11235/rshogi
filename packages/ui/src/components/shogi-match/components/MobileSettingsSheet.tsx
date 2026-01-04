@@ -2,6 +2,7 @@ import type { Player } from "@shogi/app-core";
 import type { ReactElement } from "react";
 import { Input } from "../../input";
 import type { ClockSettings } from "../hooks/useClockManager";
+import type { DisplaySettings, SquareNotation } from "../types";
 import type { EngineOption, SideSetting } from "./MatchSettingsPanel";
 
 interface MobileSettingsSheetProps {
@@ -23,6 +24,10 @@ interface MobileSettingsSheetProps {
     // アクション
     onStartMatch?: () => void;
     onStopMatch?: () => void;
+
+    // 表示設定
+    displaySettings: DisplaySettings;
+    onDisplaySettingsChange: (settings: DisplaySettings) => void;
 }
 
 const selectClassName = "w-full p-2 rounded-lg border border-border bg-background text-sm";
@@ -32,6 +37,12 @@ const labelClassName = "flex flex-col gap-1 text-sm";
 /**
  * モバイル用設定シート（BottomSheet内のコンテンツ）
  */
+const NOTATION_OPTIONS: { value: SquareNotation; label: string }[] = [
+    { value: "none", label: "非表示" },
+    { value: "sfen", label: "SFEN (5e)" },
+    { value: "japanese", label: "日本式 (５五)" },
+];
+
 export function MobileSettingsSheet({
     sides,
     onSidesChange,
@@ -44,6 +55,8 @@ export function MobileSettingsSheet({
     isMatchRunning,
     onStartMatch,
     onStopMatch,
+    displaySettings,
+    onDisplaySettingsChange,
 }: MobileSettingsSheetProps): ReactElement {
     // 選択肢の値を生成: "human" または "engine:{engineId}"
     const getSelectorValue = (setting: SideSetting): string => {
@@ -212,8 +225,67 @@ export function MobileSettingsSheet({
                 </div>
             </div>
 
+            {/* 表示設定 */}
+            <div className="space-y-3 pt-3 border-t border-border">
+                <div className="font-medium text-sm">表示設定</div>
+
+                {/* 座標表示 */}
+                <label htmlFor="mobile-notation" className={labelClassName}>
+                    <span className="text-xs text-muted-foreground">座標表示</span>
+                    <select
+                        id="mobile-notation"
+                        value={displaySettings.squareNotation}
+                        onChange={(e) =>
+                            onDisplaySettingsChange({
+                                ...displaySettings,
+                                squareNotation: e.target.value as SquareNotation,
+                            })
+                        }
+                        className={selectClassName}
+                    >
+                        {NOTATION_OPTIONS.map((opt) => (
+                            <option key={opt.value} value={opt.value}>
+                                {opt.label}
+                            </option>
+                        ))}
+                    </select>
+                </label>
+
+                {/* チェックボックス設定 */}
+                <div className="space-y-2">
+                    <label className="flex items-center gap-2 text-sm">
+                        <input
+                            type="checkbox"
+                            checked={displaySettings.showBoardLabels}
+                            onChange={(e) =>
+                                onDisplaySettingsChange({
+                                    ...displaySettings,
+                                    showBoardLabels: e.target.checked,
+                                })
+                            }
+                            className="w-4 h-4"
+                        />
+                        <span>盤外ラベル（筋・段）を表示</span>
+                    </label>
+                    <label className="flex items-center gap-2 text-sm">
+                        <input
+                            type="checkbox"
+                            checked={displaySettings.highlightLastMove}
+                            onChange={(e) =>
+                                onDisplaySettingsChange({
+                                    ...displaySettings,
+                                    highlightLastMove: e.target.checked,
+                                })
+                            }
+                            className="w-4 h-4"
+                        />
+                        <span>最終手を強調表示</span>
+                    </label>
+                </div>
+            </div>
+
             {/* アクションボタン */}
-            <div className="flex justify-center gap-3 pt-2 border-t border-border">
+            <div className="flex justify-center gap-3 pt-3 border-t border-border">
                 {isMatchRunning
                     ? onStopMatch && (
                           <button
