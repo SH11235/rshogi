@@ -812,7 +812,7 @@ export function ShogiMatch({
         }
     }, [navigation, resetClocks, stopAllEngines, legalCache.clear]);
 
-    const getLegalSet = async (): Promise<Set<string> | null> => {
+    const getLegalSet = useCallback(async (): Promise<Set<string> | null> => {
         if (!positionReady) return null;
         const ply = movesRef.current.length;
         const resolver = async () => {
@@ -822,7 +822,7 @@ export function ShogiMatch({
             return getPositionService().getLegalMoves(startSfen, movesRef.current);
         };
         return legalCache.getOrResolve(ply, resolver);
-    };
+    }, [positionReady, fetchLegalMoves, startSfen, legalCache]);
 
     const applyEditedPosition = useCallback(
         (nextPosition: PositionState) => {
@@ -1009,66 +1009,65 @@ export function ShogiMatch({
         applyEditedPosition({ ...current, turn });
     };
 
-    const placePieceAt = (
-        square: Square,
-        piece: Piece | null,
-        options?: { fromSquare?: Square },
-    ): boolean => {
-        const current = positionRef.current;
-        const nextBoard = cloneBoard(current.board);
-        let workingHands = cloneHandsState(current.hands);
+    const placePieceAt = useCallback(
+        (square: Square, piece: Piece | null, options?: { fromSquare?: Square }): boolean => {
+            const current = positionRef.current;
+            const nextBoard = cloneBoard(current.board);
+            let workingHands = cloneHandsState(current.hands);
 
-        if (options?.fromSquare) {
-            nextBoard[options.fromSquare] = null;
-        }
+            if (options?.fromSquare) {
+                nextBoard[options.fromSquare] = null;
+            }
 
-        const existing = nextBoard[square];
-        if (existing) {
-            const base = existing.type;
-            workingHands = addToHand(workingHands, existing.owner, base);
-        }
+            const existing = nextBoard[square];
+            if (existing) {
+                const base = existing.type;
+                workingHands = addToHand(workingHands, existing.owner, base);
+            }
 
-        if (!piece) {
-            nextBoard[square] = null;
+            if (!piece) {
+                nextBoard[square] = null;
+                const nextPosition: PositionState = {
+                    ...current,
+                    board: nextBoard,
+                    hands: workingHands,
+                };
+                applyEditedPosition(nextPosition);
+                return true;
+            }
+
+            const baseType = piece.type;
+            const consumedHands = consumeFromHand(workingHands, piece.owner, baseType);
+            const handsForPlacement = consumedHands ?? workingHands;
+            const countsBefore = countPieces({
+                ...current,
+                board: nextBoard,
+                hands: handsForPlacement,
+            });
+            const nextCount = countsBefore[piece.owner][baseType] + 1;
+            if (nextCount > PIECE_CAP[baseType]) {
+                setEditMessage(
+                    `${piece.owner === "sente" ? "先手" : "後手"}の${PIECE_LABELS[baseType]}は最大${PIECE_CAP[baseType]}枚までです`,
+                );
+                return false;
+            }
+            if (piece.type === "K" && countsBefore[piece.owner][baseType] >= PIECE_CAP.K) {
+                setEditMessage("玉はそれぞれ1枚まで配置できます。");
+                return false;
+            }
+
+            nextBoard[square] = piece.promoted ? { ...piece, promoted: true } : { ...piece };
+            const finalHands = consumedHands ?? workingHands;
             const nextPosition: PositionState = {
                 ...current,
                 board: nextBoard,
-                hands: workingHands,
+                hands: finalHands,
             };
             applyEditedPosition(nextPosition);
             return true;
-        }
-
-        const baseType = piece.type;
-        const consumedHands = consumeFromHand(workingHands, piece.owner, baseType);
-        const handsForPlacement = consumedHands ?? workingHands;
-        const countsBefore = countPieces({
-            ...current,
-            board: nextBoard,
-            hands: handsForPlacement,
-        });
-        const nextCount = countsBefore[piece.owner][baseType] + 1;
-        if (nextCount > PIECE_CAP[baseType]) {
-            setEditMessage(
-                `${piece.owner === "sente" ? "先手" : "後手"}の${PIECE_LABELS[baseType]}は最大${PIECE_CAP[baseType]}枚までです`,
-            );
-            return false;
-        }
-        if (piece.type === "K" && countsBefore[piece.owner][baseType] >= PIECE_CAP.K) {
-            setEditMessage("玉はそれぞれ1枚まで配置できます。");
-            return false;
-        }
-
-        nextBoard[square] = piece.promoted ? { ...piece, promoted: true } : { ...piece };
-        const finalHands = consumedHands ?? workingHands;
-        const nextPosition: PositionState = {
-            ...current,
-            board: nextBoard,
-            hands: finalHands,
-        };
-        applyEditedPosition(nextPosition);
-        return true;
-    };
+        },
+        [applyEditedPosition],
+    );
 
     const handleSquareSelect = useCallback(
         async (square: string, shiftKey?: boolean) => {
@@ -1378,6 +1377,8 @@ export function ShogiMatch({
             isEngineTurn,
             applyMoveCommon,
             applyMoveForReview,
+            getLegalSet,
+            placePieceAt,
         ],
     );
 
