@@ -2070,6 +2070,7 @@ export function ShogiMatch({
                                         onPieceTogglePromote={
                                             isEditMode ? handlePieceTogglePromote : undefined
                                         }
+                                        isDraggable={isEditMode}
                                         squareNotation={displaySettings.squareNotation}
                                         showBoardLabels={displaySettings.showBoardLabels}
                                     />

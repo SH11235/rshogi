@@ -37,6 +37,8 @@ export interface ShogiBoardProps {
         piece: ShogiBoardPiece,
         event: React.MouseEvent<HTMLButtonElement>,
     ) => void;
+    /** ドラッグ操作を有効にするか（trueの場合、タッチスクロールを防止） */
+    isDraggable?: boolean;
     /** マス内座標表示形式 */
     squareNotation?: SquareNotation;
     /** 盤外ラベル（筋・段）を表示するか */
@@ -67,6 +69,7 @@ export function ShogiBoard({
     flipBoard = false,
     onPiecePointerDown,
     onPieceTogglePromote,
+    isDraggable = false,
     squareNotation = "none",
     showBoardLabels = false,
 }: ShogiBoardProps): ReactElement {
@@ -171,10 +174,8 @@ export function ShogiBoard({
                                             "shadow-[inset_0_1px_0_rgba(255,255,255,0.5)] hover:ring-2 hover:ring-inset hover:ring-[hsl(var(--shogi-border))]",
                                             // タッチ選択・長押しメニュー防止
                                             "select-none [-webkit-touch-callout:none]",
-                                            // 編集モード（ドラッグ可能）時はスクロールも防止
-                                            onPiecePointerDown
-                                                ? "touch-none"
-                                                : "touch-manipulation",
+                                            // ドラッグ可能時はスクロールも防止
+                                            isDraggable ? "touch-none" : "touch-manipulation",
                                             // 背景色: ハイライト時は専用色、通常時はチェッカーパターン
                                             !isHighlighted && baseTone,
                                             !isHighlighted &&

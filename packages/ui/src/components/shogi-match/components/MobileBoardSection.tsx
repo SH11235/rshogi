@@ -168,6 +168,7 @@ export const MobileBoardSection = memo(function MobileBoardSection({
                 flipBoard={flipBoard}
                 onPiecePointerDown={isEditModeActive ? onPiecePointerDown : undefined}
                 onPieceTogglePromote={isEditModeActive ? onPieceTogglePromote : undefined}
+                isDraggable={isEditModeActive}
                 squareNotation={displaySettings.squareNotation}
                 showBoardLabels={displaySettings.showBoardLabels}
             />
