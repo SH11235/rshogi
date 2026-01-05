@@ -324,6 +324,8 @@ export function ShogiMatch({
     });
 
     // navigation.resetの参照をrefで保持（初期化useEffectで使用）
+    // navigation オブジェクト全体は useKifuNavigation 内で再生成されるため、
+    // reset メソッドのみを保持して不要な再実行を防ぐ
     const navigationResetRef = useRef(navigation.reset);
     navigationResetRef.current = navigation.reset;
 

@@ -9,11 +9,17 @@ const BOARD_CELLS = 9;
 const PC_CELL_SIZE = 44;
 
 // 横方向のマージン（盤面装飾含む）
-// - MobileLayout px-2: 8px × 2 = 16px
-// - ShogiBoard border: 1px × 2 = 2px
-// - 左右パディング px-0.5: 2px × 2 = 4px
-// - 選択リング余裕: 4px
-const HORIZONTAL_MARGIN = 26;
+// CSSの変更時にこれらの値も更新が必要
+const MOBILE_LAYOUT_HORIZONTAL_PADDING = 16; // MobileLayout px-2: 8px × 2
+const BOARD_BORDER_WIDTH = 2; // ShogiBoard border: 1px × 2
+const BOARD_LABEL_PADDING = 4; // 左右パディング px-0.5: 2px × 2
+const SELECTION_RING_MARGIN = 4; // 選択リング余裕
+
+const HORIZONTAL_MARGIN =
+    MOBILE_LAYOUT_HORIZONTAL_PADDING +
+    BOARD_BORDER_WIDTH +
+    BOARD_LABEL_PADDING +
+    SELECTION_RING_MARGIN;
 
 // セルサイズの範囲
 const MIN_CELL_SIZE = 28;
@@ -58,11 +64,15 @@ export function useMobileCellSize(): number {
 
     const prevSizeRef = useRef(cellSize);
 
-    // リサイズ時の再計算
+    // リサイズ時の再計算（requestAnimationFrameでthrottling）
     useEffect(() => {
         if (typeof window === "undefined") return;
 
+        let rafId: number | null = null;
+
         const updateSize = () => {
+            rafId = null; // リセット
+
             if (window.innerWidth >= MOBILE_BREAKPOINT) {
                 if (prevSizeRef.current !== PC_CELL_SIZE) {
                     prevSizeRef.current = PC_CELL_SIZE;
@@ -79,8 +89,19 @@ export function useMobileCellSize(): number {
             }
         };
 
-        window.addEventListener("resize", updateSize);
-        return () => window.removeEventListener("resize", updateSize);
+        const handleResize = () => {
+            // 既にrequestAnimationFrameが予約されていればスキップ
+            if (rafId !== null) return;
+            rafId = requestAnimationFrame(updateSize);
+        };
+
+        window.addEventListener("resize", handleResize);
+        return () => {
+            window.removeEventListener("resize", handleResize);
+            if (rafId !== null) {
+                cancelAnimationFrame(rafId);
+            }
+        };
     }, []);
 
     return cellSize;

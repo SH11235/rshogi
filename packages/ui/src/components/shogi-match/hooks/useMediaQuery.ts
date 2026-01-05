@@ -15,10 +15,15 @@ export function useMediaQuery(query: string): boolean {
         if (typeof window === "undefined") return;
 
         const mql = window.matchMedia(query);
+
+        // query変更時に初期状態を同期
+        // （useState初期化はSSR対応のため、useEffectで再度設定）
         setMatches(mql.matches);
 
         const handler = (e: MediaQueryListEvent) => setMatches(e.matches);
         mql.addEventListener("change", handler);
+
+        // クリーンアップ時に正しいmqlからリスナーを削除
         return () => mql.removeEventListener("change", handler);
     }, [query]);
 

@@ -128,8 +128,10 @@ export function ShogiBoard({
                                         onPointerDown={(e) => {
                                             lastPointerTypeRef.current = e.pointerType;
                                             if (cell.piece && onPiecePointerDown) {
-                                                // タッチ時のテキスト選択・長押しメニューを防止
-                                                e.preventDefault();
+                                                // タッチ操作時のみpreventDefault（マウスクリックのフォーカス処理は維持）
+                                                if (e.pointerType === "touch") {
+                                                    e.preventDefault();
+                                                }
                                                 onPiecePointerDown(cell.id, cell.piece, e);
                                             }
                                         }}
