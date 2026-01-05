@@ -156,6 +156,8 @@ export function HandPiecesDisplay({
                             type="button"
                             onPointerDown={(e) => {
                                 if (canDrag && onPiecePointerDown) {
+                                    // タッチ時のテキスト選択・長押しメニューを防止
+                                    e.preventDefault();
                                     onPiecePointerDown(owner, piece, e);
                                 }
                             }}
@@ -169,6 +171,10 @@ export function HandPiecesDisplay({
                             disabled={isDisabled}
                             className={cn(
                                 "relative rounded-lg border-2 transition-all",
+                                // タッチ選択・長押しメニュー防止
+                                "select-none [-webkit-touch-callout:none]",
+                                // 編集モード（ドラッグ可能）時はスクロールも防止
+                                canDrag ? "touch-none" : "touch-manipulation",
                                 compact ? "p-0.5" : "p-1",
                                 selected
                                     ? "border-[hsl(var(--wafuu-shu))] bg-[hsl(var(--wafuu-kin)/0.2)]"

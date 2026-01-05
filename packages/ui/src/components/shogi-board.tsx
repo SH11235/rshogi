@@ -125,6 +125,8 @@ export function ShogiBoard({
                                         onPointerDown={(e) => {
                                             lastPointerTypeRef.current = e.pointerType;
                                             if (cell.piece && onPiecePointerDown) {
+                                                // タッチ時のテキスト選択・長押しメニューを防止
+                                                e.preventDefault();
                                                 onPiecePointerDown(cell.id, cell.piece, e);
                                             }
                                         }}
@@ -162,6 +164,12 @@ export function ShogiBoard({
                                         className={cn(
                                             "absolute inset-0 overflow-hidden text-base font-semibold transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-[hsl(var(--wafuu-shu))]/70 focus-visible:ring-offset-transparent",
                                             "shadow-[inset_0_1px_0_rgba(255,255,255,0.5)] hover:ring-2 hover:ring-inset hover:ring-[hsl(var(--shogi-border))]",
+                                            // タッチ選択・長押しメニュー防止
+                                            "select-none [-webkit-touch-callout:none]",
+                                            // 編集モード（ドラッグ可能）時はスクロールも防止
+                                            onPiecePointerDown
+                                                ? "touch-none"
+                                                : "touch-manipulation",
                                             // 背景色: ハイライト時は専用色、通常時はチェッカーパターン
                                             !isHighlighted && baseTone,
                                             !isHighlighted &&

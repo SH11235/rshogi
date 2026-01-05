@@ -360,9 +360,31 @@ export function MobileLayout({
                     </div>
                 </div>
             ) : (
-                /* 編集モード: 操作ボタンは shogi-match.tsx 側で BottomSheet として表示 */
-                <div className="w-full mt-2 text-center text-sm text-muted-foreground flex-shrink-0">
-                    盤面をタップして編集
+                /* 編集モード: 平手に戻す + 対局開始ボタン */
+                <div className="w-full mt-2 space-y-2 flex-shrink-0">
+                    <div className="text-center text-sm text-muted-foreground">
+                        盤面をタップして編集
+                    </div>
+                    <div className="flex justify-center gap-3 py-2">
+                        {onResetToStartpos && (
+                            <button
+                                type="button"
+                                onClick={onResetToStartpos}
+                                className="px-4 py-2 border border-border rounded-lg text-sm font-medium hover:bg-muted active:scale-95 transition-all"
+                            >
+                                平手に戻す
+                            </button>
+                        )}
+                        {onStart && (
+                            <button
+                                type="button"
+                                onClick={onStart}
+                                className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium shadow-md active:scale-95 transition-all"
+                            >
+                                対局を開始
+                            </button>
+                        )}
+                    </div>
                 </div>
             )}
 
