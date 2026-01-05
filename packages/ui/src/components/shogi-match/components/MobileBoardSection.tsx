@@ -4,7 +4,7 @@ import { memo } from "react";
 import type { ShogiBoardCell } from "../../shogi-board";
 import { ShogiBoard } from "../../shogi-board";
 import { useMobileCellSize } from "../hooks/useMobileCellSize";
-import type { DisplaySettings, GameMode, PromotionSelection } from "../types";
+import type { DisplaySettings, PromotionSelection } from "../types";
 import { HandPiecesDisplay } from "./HandPiecesDisplay";
 
 type Selection = { kind: "square"; square: string } | { kind: "hand"; piece: PieceType };
@@ -16,10 +16,6 @@ type HandInfo = {
 };
 
 export interface MobileBoardSectionProps {
-    // === レイアウト計算用 ===
-    gameMode: GameMode;
-    hasKifuMoves: boolean;
-
     // === 盤面データ（変更頻度: 低） ===
     grid: ShogiBoardCell[][];
     position: PositionState;
@@ -70,6 +66,8 @@ export interface MobileBoardSectionProps {
     // === Ref / その他 ===
     boardSectionRef: RefObject<HTMLDivElement | null>;
     isDraggingPiece: boolean;
+    /** 固定レイアウト: trueの場合、持ち駒エリアのレイアウトを固定（対局中のレイアウトシフト防止） */
+    fixedLayout?: boolean;
 }
 
 /**
@@ -78,8 +76,6 @@ export interface MobileBoardSectionProps {
  * useMobileCellSize()を内部で呼び、CSS変数を設定
  */
 export const MobileBoardSection = memo(function MobileBoardSection({
-    gameMode,
-    hasKifuMoves,
     grid,
     flipBoard,
     lastMove,
@@ -101,9 +97,10 @@ export const MobileBoardSection = memo(function MobileBoardSection({
     bottomHand,
     boardSectionRef,
     isDraggingPiece,
+    fixedLayout = false,
 }: MobileBoardSectionProps): ReactElement {
-    // セルサイズはこのコンポーネント内で管理（画面幅・高さ・モードから計算）
-    const cellSize = useMobileCellSize({ gameMode, hasKifuMoves });
+    // セルサイズはこのコンポーネント内で管理（画面幅のみから計算）
+    const cellSize = useMobileCellSize();
 
     // 盤面の幅を計算（9セル + 盤面装飾）
     // ShogiBoard: border (1px×2=2) + 段ラベル左右 (px-0.5×2 + 文字幅) × 2 ≈ 30px + border-l (1px)
@@ -143,6 +140,7 @@ export const MobileBoardSection = memo(function MobileBoardSection({
                     }
                     flipBoard={flipBoard}
                     size={isEditModeActive ? "compact" : "medium"}
+                    fixedLayout={fixedLayout}
                 />
             </div>
 
@@ -202,6 +200,7 @@ export const MobileBoardSection = memo(function MobileBoardSection({
                     }
                     flipBoard={flipBoard}
                     size={isEditModeActive ? "compact" : "medium"}
+                    fixedLayout={fixedLayout}
                 />
             </div>
         </div>

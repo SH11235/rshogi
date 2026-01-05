@@ -79,6 +79,7 @@ interface MobileSettingsSheetProps {
     // アクション
     onStartMatch?: () => void;
     onStopMatch?: () => void;
+    onResetToStartpos?: () => void;
 
     // 表示設定
     displaySettings: DisplaySettings;
@@ -111,6 +112,7 @@ export function MobileSettingsSheet({
     isMatchRunning,
     onStartMatch,
     onStopMatch,
+    onResetToStartpos,
     displaySettings,
     onDisplaySettingsChange,
 }: MobileSettingsSheetProps): ReactElement {
@@ -261,6 +263,42 @@ export function MobileSettingsSheet({
                 </div>
             </div>
 
+            {/* アクションボタン（頻繁に使うので上部に配置） */}
+            <div className="flex justify-center gap-3 pt-3 border-t border-border">
+                {isMatchRunning ? (
+                    onStopMatch && (
+                        <button
+                            type="button"
+                            onClick={onStopMatch}
+                            className="flex-1 px-6 py-3 bg-destructive text-destructive-foreground rounded-lg font-medium shadow-md active:scale-95 transition-transform"
+                        >
+                            対局を停止
+                        </button>
+                    )
+                ) : (
+                    <>
+                        {onResetToStartpos && (
+                            <button
+                                type="button"
+                                onClick={onResetToStartpos}
+                                className="px-4 py-3 border border-border rounded-lg font-medium hover:bg-muted active:scale-95 transition-all"
+                            >
+                                平手に戻す
+                            </button>
+                        )}
+                        {onStartMatch && (
+                            <button
+                                type="button"
+                                onClick={onStartMatch}
+                                className="flex-1 px-6 py-3 bg-primary text-primary-foreground rounded-lg font-medium shadow-md active:scale-95 transition-transform"
+                            >
+                                対局を開始
+                            </button>
+                        )}
+                    </>
+                )}
+            </div>
+
             {/* 表示設定 */}
             <div className="space-y-3 pt-3 border-t border-border">
                 <div className="font-medium text-sm">表示設定</div>
@@ -318,29 +356,6 @@ export function MobileSettingsSheet({
                         <span>最終手を強調表示</span>
                     </label>
                 </div>
-            </div>
-
-            {/* アクションボタン */}
-            <div className="flex justify-center gap-3 pt-3 border-t border-border">
-                {isMatchRunning
-                    ? onStopMatch && (
-                          <button
-                              type="button"
-                              onClick={onStopMatch}
-                              className="flex-1 px-6 py-3 bg-destructive text-destructive-foreground rounded-lg font-medium shadow-md active:scale-95 transition-transform"
-                          >
-                              対局を停止
-                          </button>
-                      )
-                    : onStartMatch && (
-                          <button
-                              type="button"
-                              onClick={onStartMatch}
-                              className="flex-1 px-6 py-3 bg-primary text-primary-foreground rounded-lg font-medium shadow-md active:scale-95 transition-transform"
-                          >
-                              対局を開始
-                          </button>
-                      )}
             </div>
         </div>
     );

@@ -116,6 +116,8 @@ export function BottomSheet({
                     "w-screen",
                     "bg-background rounded-t-2xl",
                     "overflow-x-hidden overflow-y-auto",
+                    // iOS pull-to-refresh との干渉を防ぐ
+                    "overscroll-contain touch-pan-y",
                     "transition-transform duration-300 ease-out",
                     "animate-in slide-in-from-bottom",
                     heightClasses[height],

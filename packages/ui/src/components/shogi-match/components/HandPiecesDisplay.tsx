@@ -128,6 +128,8 @@ interface HandPiecesDisplayProps {
     flipBoard?: boolean;
     /** サイズ: compact=編集用, medium=モバイル対局用, normal=PC用 */
     size?: HandPieceSize;
+    /** 固定レイアウト: trueの場合、0個の駒もスペースを確保（対局中のレイアウトシフト防止） */
+    fixedLayout?: boolean;
 }
 
 export function HandPiecesDisplay({
@@ -142,6 +144,7 @@ export function HandPiecesDisplay({
     onDecrement,
     flipBoard = false,
     size = "normal",
+    fixedLayout = false,
 }: HandPiecesDisplayProps): ReactElement {
     // 先手/後手マーカー（☗=U+2617, ☖=U+2616）
     const ownerMarker = owner === "sente" ? "☗" : "☖";
@@ -177,8 +180,9 @@ export function HandPiecesDisplay({
                 const maxCount = PIECE_CAP[piece];
 
                 // コンパクトレイアウトかつ非編集時は0個の駒は完全に非表示（スペースも確保しない）
+                // ただし、fixedLayoutがtrueの場合はスペースを確保（対局中のレイアウトシフト防止）
                 // 編集モードでは全ての駒を表示する
-                if (isCompactLayout && count === 0 && !isEditMode) {
+                if (isCompactLayout && count === 0 && !isEditMode && !fixedLayout) {
                     return null;
                 }
 

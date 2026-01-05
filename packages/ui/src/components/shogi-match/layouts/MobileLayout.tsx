@@ -121,8 +121,9 @@ export interface MobileLayoutProps {
 
 /**
  * スマホ用レイアウト
- * 対局モード: 盤面フルサイズ + 最小限UI
- * 検討モード: 盤面縮小 + 棋譜パネル
+ * 「盤面優先 + Flexbox」方式
+ * - 盤面は画面幅から計算した固定サイズ
+ * - コントロール部分は残りの高さを使い、必要に応じて縮小
  */
 export function MobileLayout({
     grid,
@@ -186,100 +187,99 @@ export function MobileLayout({
     // 編集モード判定を事前計算（MobileBoardSectionに渡す）
     const isEditModeActive = isEditMode && !isMatchRunning;
 
-    // 棋譜があるかどうか（セルサイズ計算用）
-    const hasKifuMoves = Boolean(kifMoves && kifMoves.length > 0);
-
     return (
         <div className="fixed inset-0 flex flex-col w-full h-dvh overflow-hidden px-2 bg-background">
-            {/* ステータス行 */}
-            <div className="flex items-center justify-between w-full py-2 px-2 flex-shrink-0">
-                <output className={`${TEXT_CLASSES.moveCount} whitespace-nowrap`}>
-                    {moves.length === 0 ? "開始局面" : `${moves.length}手目`}
-                </output>
+            {/* === ヘッダー: 自然な高さ、縮小しない === */}
+            <header className="flex-shrink-0">
+                {/* ステータス行 */}
+                <div className="flex items-center justify-between w-full py-2 px-2">
+                    <output className={`${TEXT_CLASSES.moveCount} whitespace-nowrap`}>
+                        {moves.length === 0 ? "開始局面" : `${moves.length}手目`}
+                    </output>
 
-                <output className={`${TEXT_CLASSES.mutedSecondary} whitespace-nowrap`}>
-                    手番:{" "}
-                    <span
-                        className={`font-semibold text-[15px] ${
-                            position.turn === "sente" ? "text-wafuu-shu" : "text-wafuu-ai"
-                        }`}
+                    <output className={`${TEXT_CLASSES.mutedSecondary} whitespace-nowrap`}>
+                        手番:{" "}
+                        <span
+                            className={`font-semibold text-[15px] ${
+                                position.turn === "sente" ? "text-wafuu-shu" : "text-wafuu-ai"
+                            }`}
+                        >
+                            {position.turn === "sente" ? "先手" : "後手"}
+                        </span>
+                    </output>
+
+                    <button
+                        type="button"
+                        onClick={onFlipBoard}
+                        className="flex items-center justify-center w-8 h-8 rounded-md hover:bg-muted"
+                        title="盤面を反転"
                     >
-                        {position.turn === "sente" ? "先手" : "後手"}
-                    </span>
-                </output>
+                        🔄
+                    </button>
+                </div>
 
-                <button
-                    type="button"
-                    onClick={onFlipBoard}
-                    className="flex items-center justify-center w-8 h-8 rounded-md hover:bg-muted"
-                    title="盤面を反転"
-                >
-                    🔄
-                </button>
-            </div>
-
-            {/* クロック表示（対局モード時は常に表示） */}
-            {(isMatchRunning || gameMode === "playing") && (
-                <div className="w-full flex-shrink-0">
+                {/* クロック表示（対局モード時は常に表示） */}
+                {(isMatchRunning || gameMode === "playing") && (
                     <MobileClockDisplay clocks={clocks} sides={sides} isRunning={isMatchRunning} />
-                </div>
-            )}
+                )}
+            </header>
 
-            {/* 盤面セクション（React.memoでラップ） */}
-            <MobileBoardSection
-                gameMode={gameMode}
-                hasKifuMoves={hasKifuMoves}
-                grid={grid}
-                position={position}
-                flipBoard={flipBoard}
-                lastMove={lastMove}
-                selection={selection}
-                promotionSelection={promotionSelection}
-                displaySettings={displaySettings}
-                isEditModeActive={isEditModeActive}
-                editFromSquare={editFromSquare}
-                candidateNote={candidateNote}
-                onSquareSelect={onSquareSelect}
-                onPromotionChoice={onPromotionChoice}
-                onHandSelect={onHandSelect}
-                onPiecePointerDown={onPiecePointerDown}
-                onPieceTogglePromote={onPieceTogglePromote}
-                onHandPiecePointerDown={onHandPiecePointerDown}
-                onIncrementHand={onIncrementHand}
-                onDecrementHand={onDecrementHand}
-                topHand={topHand}
-                bottomHand={bottomHand}
-                boardSectionRef={boardSectionRef}
-                isDraggingPiece={isDraggingPiece}
-            />
+            {/* === 盤面セクション: 固定サイズ、縮小しない === */}
+            <main className="flex-shrink-0">
+                <MobileBoardSection
+                    grid={grid}
+                    position={position}
+                    flipBoard={flipBoard}
+                    lastMove={lastMove}
+                    selection={selection}
+                    promotionSelection={promotionSelection}
+                    displaySettings={displaySettings}
+                    isEditModeActive={isEditModeActive}
+                    editFromSquare={editFromSquare}
+                    candidateNote={candidateNote}
+                    onSquareSelect={onSquareSelect}
+                    onPromotionChoice={onPromotionChoice}
+                    onHandSelect={onHandSelect}
+                    onPiecePointerDown={onPiecePointerDown}
+                    onPieceTogglePromote={onPieceTogglePromote}
+                    onHandPiecePointerDown={onHandPiecePointerDown}
+                    onIncrementHand={onIncrementHand}
+                    onDecrementHand={onDecrementHand}
+                    topHand={topHand}
+                    bottomHand={bottomHand}
+                    boardSectionRef={boardSectionRef}
+                    isDraggingPiece={isDraggingPiece}
+                    fixedLayout={gameMode === "playing"}
+                />
+            </main>
 
-            {/* モード別UI */}
-            {gameMode === "playing" ? (
-                /* 対局モード: 1行棋譜 + 停止ボタン */
-                <div className="w-full mt-2 space-y-2 flex-shrink-0">
-                    {kifMoves && kifMoves.length > 0 && (
-                        <MobileKifuBar
-                            moves={kifMoves}
-                            currentPly={currentPly}
-                            onPlySelect={onPlySelect}
-                        />
-                    )}
-                    {onStop && (
-                        <div className="flex justify-center py-2">
-                            <button
-                                type="button"
-                                onClick={onStop}
-                                className="px-8 py-3 bg-destructive text-destructive-foreground rounded-lg font-medium shadow-md active:scale-95 transition-transform"
-                            >
-                                停止
-                            </button>
-                        </div>
-                    )}
-                </div>
-            ) : isReviewMode && totalPly === 0 ? (
-                /* 対局準備モード: 開始ボタンのみ（棋譜がまだない状態） */
-                <div className="w-full mt-2 flex-shrink-0">
-                    <div className="flex justify-center gap-3 py-4">
+            {/* === コントロール: 残りの高さを使う、必要に応じて縮小 === */}
+            <footer className="flex-1 flex flex-col min-h-0 mt-2">
+                {gameMode === "playing" ? (
+                    /* 対局モード: 1行棋譜 + 停止ボタン */
+                    <div className="flex flex-col gap-2 flex-shrink-0">
+                        {kifMoves && kifMoves.length > 0 && (
+                            <MobileKifuBar
+                                moves={kifMoves}
+                                currentPly={currentPly}
+                                onPlySelect={onPlySelect}
+                            />
+                        )}
+                        {onStop && (
+                            <div className="flex justify-center py-2">
+                                <button
+                                    type="button"
+                                    onClick={onStop}
+                                    className="px-8 py-3 bg-destructive text-destructive-foreground rounded-lg font-medium shadow-md active:scale-95 transition-transform"
+                                >
+                                    停止
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                ) : isReviewMode && totalPly === 0 ? (
+                    /* 対局準備モード: 開始ボタンのみ（棋譜がまだない状態） */
+                    <div className="flex justify-center gap-3 py-4 flex-shrink-0">
                         {onStart && (
                             <button
                                 type="button"
@@ -290,104 +290,86 @@ export function MobileLayout({
                             </button>
                         )}
                     </div>
-                </div>
-            ) : isReviewMode ? (
-                /* 検討モード: 評価値グラフ + ナビゲーション + 操作ボタン */
-                <div className="w-full mt-2 space-y-1 flex-shrink-0">
-                    {/* 評価値グラフ + 現在の評価値 */}
-                    <div className="px-2">
-                        <div className="flex items-center gap-2 mb-1">
-                            <span className="text-xs text-muted-foreground">評価値:</span>
-                            <span className="text-sm font-mono tabular-nums">
-                                {evalMate !== undefined
-                                    ? evalMate > 0
-                                        ? `詰み${evalMate}手`
-                                        : `詰まされ${Math.abs(evalMate)}手`
-                                    : evalCp !== undefined
-                                      ? `${evalCp > 0 ? "+" : ""}${evalCp}`
-                                      : "-"}
-                            </span>
+                ) : isReviewMode ? (
+                    /* 検討モード: 評価値グラフ + ナビゲーション + 棋譜バー */
+                    <div className="flex flex-col h-full min-h-0">
+                        {/* 評価値グラフ + 現在の評価値: 縮小可能 */}
+                        <div className="flex-shrink min-h-[60px] px-2 overflow-hidden">
+                            <div className="flex items-center gap-2 mb-1">
+                                <span className="text-xs text-muted-foreground">評価値:</span>
+                                <span className="text-sm font-mono tabular-nums">
+                                    {evalMate !== undefined
+                                        ? evalMate > 0
+                                            ? `詰み${evalMate}手`
+                                            : `詰まされ${Math.abs(evalMate)}手`
+                                        : evalCp !== undefined
+                                          ? `${evalCp > 0 ? "+" : ""}${evalCp}`
+                                          : "-"}
+                                </span>
+                            </div>
+                            <EvalGraph
+                                evalHistory={evalHistory}
+                                currentPly={currentPly}
+                                compact
+                                height={50}
+                            />
                         </div>
-                        <EvalGraph
-                            evalHistory={evalHistory}
-                            currentPly={currentPly}
-                            compact
-                            height={50}
-                        />
-                    </div>
 
-                    {/* ナビゲーションボタン（設定ボタン統合） */}
-                    {onBack && onForward && onToStart && onToEnd && (
-                        <MobileNavigation
-                            currentPly={currentPly}
-                            totalPly={totalPly}
-                            onBack={onBack}
-                            onForward={onForward}
-                            onToStart={onToStart}
-                            onToEnd={onToEnd}
-                            onSettingsClick={() => setIsSettingsOpen(true)}
-                        />
-                    )}
+                        {/* ナビゲーションボタン: 縮小しない */}
+                        {onBack && onForward && onToStart && onToEnd && (
+                            <div className="flex-shrink-0 mt-1">
+                                <MobileNavigation
+                                    currentPly={currentPly}
+                                    totalPly={totalPly}
+                                    onBack={onBack}
+                                    onForward={onForward}
+                                    onToStart={onToStart}
+                                    onToEnd={onToEnd}
+                                    onSettingsClick={() => setIsSettingsOpen(true)}
+                                />
+                            </div>
+                        )}
 
-                    {/* 簡易棋譜表示 */}
-                    {kifMoves && kifMoves.length > 0 && (
-                        <MobileKifuBar
-                            moves={kifMoves}
-                            currentPly={currentPly}
-                            onPlySelect={onPlySelect}
-                        />
-                    )}
-
-                    {/* 操作ボタン */}
-                    <div className="flex justify-center gap-3 py-2">
-                        {onResetToStartpos && (
-                            <button
-                                type="button"
-                                onClick={onResetToStartpos}
-                                className="px-4 py-2 border border-border rounded-lg text-sm font-medium hover:bg-muted active:scale-95 transition-all"
-                            >
-                                平手に戻す
-                            </button>
-                        )}
-                        {onStart && (
-                            <button
-                                type="button"
-                                onClick={onStart}
-                                className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium shadow-md active:scale-95 transition-all"
-                            >
-                                対局を開始
-                            </button>
+                        {/* 簡易棋譜表示: 縮小可能 */}
+                        {kifMoves && kifMoves.length > 0 && (
+                            <div className="flex-shrink min-h-[36px] mt-1">
+                                <MobileKifuBar
+                                    moves={kifMoves}
+                                    currentPly={currentPly}
+                                    onPlySelect={onPlySelect}
+                                />
+                            </div>
                         )}
                     </div>
-                </div>
-            ) : (
-                /* 編集モード: 平手に戻す + 対局開始ボタン */
-                <div className="w-full mt-2 space-y-2 flex-shrink-0">
-                    <div className="text-center text-sm text-muted-foreground">
-                        盤面をタップして編集
+                ) : (
+                    /* 編集モード: 平手に戻す + 対局開始ボタン */
+                    <div className="flex flex-col gap-2 flex-shrink-0">
+                        <div className="text-center text-sm text-muted-foreground">
+                            盤面をタップして編集
+                        </div>
+                        <div className="flex justify-center gap-3 py-2">
+                            {onResetToStartpos && (
+                                <button
+                                    type="button"
+                                    onClick={onResetToStartpos}
+                                    className="px-4 py-2 border border-border rounded-lg text-sm font-medium hover:bg-muted active:scale-95 transition-all"
+                                >
+                                    平手に戻す
+                                </button>
+                            )}
+                            {onStart && (
+                                <button
+                                    type="button"
+                                    onClick={onStart}
+                                    className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium shadow-md active:scale-95 transition-all"
+                                >
+                                    対局を開始
+                                </button>
+                            )}
+                        </div>
                     </div>
-                    <div className="flex justify-center gap-3 py-2">
-                        {onResetToStartpos && (
-                            <button
-                                type="button"
-                                onClick={onResetToStartpos}
-                                className="px-4 py-2 border border-border rounded-lg text-sm font-medium hover:bg-muted active:scale-95 transition-all"
-                            >
-                                平手に戻す
-                            </button>
-                        )}
-                        {onStart && (
-                            <button
-                                type="button"
-                                onClick={onStart}
-                                className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium shadow-md active:scale-95 transition-all"
-                            >
-                                対局を開始
-                            </button>
-                        )}
-                    </div>
-                </div>
-            )}
+                )}
+            </footer>
 
             {/* FAB: 設定ボタン（右下固定）
                 検討モードで棋譜がある場合は、ナビゲーションバーに設定ボタンがあるので非表示 */}
@@ -431,6 +413,14 @@ export function MobileLayout({
                         onStop
                             ? () => {
                                   onStop();
+                                  setIsSettingsOpen(false);
+                              }
+                            : undefined
+                    }
+                    onResetToStartpos={
+                        onResetToStartpos
+                            ? () => {
+                                  onResetToStartpos();
                                   setIsSettingsOpen(false);
                               }
                             : undefined
