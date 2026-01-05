@@ -276,8 +276,8 @@ export function MobileLayout({
                         </div>
                     )}
                 </div>
-            ) : isReviewMode && moves.length === 0 ? (
-                /* 対局準備モード: 開始ボタンのみ */
+            ) : isReviewMode && totalPly === 0 ? (
+                /* 対局準備モード: 開始ボタンのみ（棋譜がまだない状態） */
                 <div className="w-full mt-2 flex-shrink-0">
                     <div className="flex justify-center gap-3 py-4">
                         {onStart && (
