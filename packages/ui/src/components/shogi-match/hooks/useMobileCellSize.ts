@@ -20,7 +20,8 @@ const HORIZONTAL_MARGIN = 46;
 const UI_HEIGHTS = {
     // 共通要素
     statusBar: 40, // ステータス行
-    handPiece: 24, // 持ち駒エリア（上下各、compact時min-h-[24px]）
+    handPieceCompact: 24, // 持ち駒エリア（編集モード時、compact min-h-[24px]）
+    handPieceMedium: 32, // 持ち駒エリア（対局/検討モード時、medium min-h-[32px]）
     boardDecoration: 40, // 盤面装飾（パディング、ボーダー、ラベル余白）
     safeArea: 20, // 下部セーフエリア
 
@@ -40,9 +41,13 @@ const UI_HEIGHTS = {
  * モードに応じたUI高さの合計を計算
  */
 function calcUIHeight(gameMode: GameMode, hasKifuMoves: boolean): number {
+    // 編集モード時はcompact、それ以外はmediumサイズの持ち駒
+    const handPieceHeight =
+        gameMode === "editing" ? UI_HEIGHTS.handPieceCompact : UI_HEIGHTS.handPieceMedium;
+
     const base =
         UI_HEIGHTS.statusBar +
-        UI_HEIGHTS.handPiece * 2 +
+        handPieceHeight * 2 +
         UI_HEIGHTS.boardDecoration +
         UI_HEIGHTS.safeArea;
 

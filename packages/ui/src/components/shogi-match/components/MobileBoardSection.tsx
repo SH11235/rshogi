@@ -143,7 +143,7 @@ export const MobileBoardSection = memo(function MobileBoardSection({
                             : undefined
                     }
                     flipBoard={flipBoard}
-                    compact
+                    size={isEditModeActive ? "compact" : "medium"}
                 />
             </div>
 
@@ -202,7 +202,7 @@ export const MobileBoardSection = memo(function MobileBoardSection({
                             : undefined
                     }
                     flipBoard={flipBoard}
-                    compact
+                    size={isEditModeActive ? "compact" : "medium"}
                 />
             </div>
         </div>

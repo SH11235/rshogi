@@ -65,12 +65,20 @@ export function MobileKifuBar({
                         type="button"
                         onClick={() => onPlySelect?.(move.ply)}
                         className={cn(
-                            "shrink-0 px-2 py-1 rounded text-sm whitespace-nowrap transition-colors",
+                            "shrink-0 px-1.5 py-1 rounded text-sm whitespace-nowrap transition-colors",
                             isCurrent
                                 ? "bg-primary text-primary-foreground font-semibold"
                                 : "text-foreground hover:bg-muted",
                         )}
                     >
+                        <span
+                            className={cn(
+                                "text-[10px] mr-0.5 tabular-nums",
+                                isCurrent ? "opacity-80" : "opacity-50",
+                            )}
+                        >
+                            {move.ply}
+                        </span>
                         {move.displayText}
                     </button>
                 );

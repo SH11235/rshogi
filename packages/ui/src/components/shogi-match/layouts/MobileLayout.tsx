@@ -190,7 +190,7 @@ export function MobileLayout({
     const hasKifuMoves = Boolean(kifMoves && kifMoves.length > 0);
 
     return (
-        <div className="flex flex-col w-full h-dvh overflow-hidden px-2">
+        <div className="fixed inset-0 flex flex-col w-full h-dvh overflow-hidden px-2 bg-background">
             {/* ステータス行 */}
             <div className="flex items-center justify-between w-full py-2 px-2 flex-shrink-0">
                 <output className={`${TEXT_CLASSES.moveCount} whitespace-nowrap`}>

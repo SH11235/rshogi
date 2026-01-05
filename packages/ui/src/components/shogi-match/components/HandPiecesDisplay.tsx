@@ -5,35 +5,63 @@ import { PIECE_CAP, PIECE_LABELS } from "../utils/constants";
 
 const HAND_ORDER: PieceType[] = ["R", "B", "G", "S", "N", "L", "P"];
 
+/** サイズ設定: compact=編集用, medium=モバイル対局用, normal=PC用 */
+type HandPieceSize = "compact" | "medium" | "normal";
+
+const SIZE_CONFIG = {
+    compact: {
+        text: "text-[11px]",
+        padding: "px-1 py-0.5",
+        badgeSize: "min-w-[10px] text-[8px]",
+        badgePos: "-bottom-0.5 -right-0.5",
+        badgePosRotated: "-left-0.5 -top-0.5 rotate-180",
+    },
+    medium: {
+        text: "text-[14px]",
+        padding: "px-1.5 py-1",
+        badgeSize: "min-w-[12px] text-[9px]",
+        badgePos: "-bottom-0.5 -right-0.5",
+        badgePosRotated: "-left-0.5 -top-0.5 rotate-180",
+    },
+    normal: {
+        text: "text-[16px]",
+        padding: "px-2 py-[5px]",
+        badgeSize: "min-w-[14px] text-[11px]",
+        badgePos: "-bottom-1 -right-1",
+        badgePosRotated: "-left-1 -top-1 rotate-180",
+    },
+} as const;
+
 /** 盤上の駒と同じスタイルの駒表示 */
 function PieceToken({
     pieceType,
     owner,
     count,
     flipBoard = false,
-    compact = false,
+    size = "normal",
 }: {
     pieceType: PieceType;
     owner: Player;
     count: number;
     flipBoard?: boolean;
-    compact?: boolean;
+    size?: HandPieceSize;
 }): ReactElement {
     // 盤面と同じ回転ロジック: 反転時は先手が逆さ、通常時は後手が逆さ
     const shouldRotate = flipBoard ? owner === "sente" : owner === "gote";
+    const config = SIZE_CONFIG[size];
 
     return (
         <span
             className={cn(
                 "relative inline-flex items-center justify-center leading-none tracking-tight text-[#3a2a16]",
-                compact ? "text-[11px]" : "text-[16px]",
+                config.text,
                 shouldRotate && "-rotate-180",
             )}
         >
             <span
                 className={cn(
                     "rounded-[8px] bg-[#fdf6ec]/90 shadow-[0_3px_6px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)]",
-                    compact ? "px-1 py-0.5" : "px-2 py-[5px]",
+                    config.padding,
                 )}
             >
                 {PIECE_LABELS[pieceType]}
@@ -42,14 +70,8 @@ function PieceToken({
             <span
                 className={cn(
                     "absolute text-center font-bold leading-none",
-                    compact ? "min-w-[10px] text-[8px]" : "min-w-[14px] text-[11px]",
-                    shouldRotate
-                        ? compact
-                            ? "-left-0.5 -top-0.5 rotate-180"
-                            : "-left-1 -top-1 rotate-180"
-                        : compact
-                          ? "-bottom-0.5 -right-0.5"
-                          : "-bottom-1 -right-1",
+                    config.badgeSize,
+                    shouldRotate ? config.badgePosRotated : config.badgePos,
                     count > 0
                         ? "text-[hsl(var(--wafuu-sumi))]"
                         : "text-[hsl(var(--muted-foreground))]",
@@ -60,6 +82,28 @@ function PieceToken({
         </span>
     );
 }
+
+// コンテナ用のサイズ設定
+const CONTAINER_SIZE_CONFIG = {
+    compact: {
+        container: "flex-nowrap gap-0.5 min-h-[24px]",
+        marker: "text-sm mr-0.5",
+        buttonPadding: "p-0.5",
+        gap: "1px",
+    },
+    medium: {
+        container: "flex-nowrap gap-1 min-h-[32px]",
+        marker: "text-base mr-0.5",
+        buttonPadding: "p-0.5",
+        gap: "2px",
+    },
+    normal: {
+        container: "flex-wrap gap-1.5 min-h-[44px]",
+        marker: "text-xl",
+        buttonPadding: "p-1",
+        gap: "2px",
+    },
+} as const;
 
 interface HandPiecesDisplayProps {
     /** 持ち駒を持つプレイヤー */
@@ -82,8 +126,8 @@ interface HandPiecesDisplayProps {
     onDecrement?: (piece: PieceType) => void;
     /** 盤面反転状態 */
     flipBoard?: boolean;
-    /** コンパクト表示（モバイル用、1行に収める） */
-    compact?: boolean;
+    /** サイズ: compact=編集用, medium=モバイル対局用, normal=PC用 */
+    size?: HandPieceSize;
 }
 
 export function HandPiecesDisplay({
@@ -97,26 +141,23 @@ export function HandPiecesDisplay({
     onIncrement,
     onDecrement,
     flipBoard = false,
-    compact = false,
+    size = "normal",
 }: HandPiecesDisplayProps): ReactElement {
     // 先手/後手マーカー（☗=U+2617, ☖=U+2616）
     const ownerMarker = owner === "sente" ? "☗" : "☖";
     // 先手: 朱色、後手: 藍色（wafuuテーマ）
     const markerColorClass = owner === "sente" ? "text-wafuu-shu" : "text-wafuu-ai";
+    const containerConfig = CONTAINER_SIZE_CONFIG[size];
+    const isCompactLayout = size === "compact" || size === "medium";
 
     return (
-        <div
-            className={cn(
-                "flex items-center",
-                compact ? "flex-nowrap gap-0.5 min-h-[24px]" : "flex-wrap gap-1.5 min-h-[44px]",
-            )}
-        >
+        <div className={cn("flex items-center", containerConfig.container)}>
             {/* 先手/後手マーカー */}
             <span
                 className={cn(
                     markerColorClass,
                     "font-bold select-none shrink-0",
-                    compact ? "text-sm mr-0.5" : "text-xl",
+                    containerConfig.marker,
                 )}
                 title={owner === "sente" ? "先手" : "後手"}
             >
@@ -135,9 +176,9 @@ export function HandPiecesDisplay({
                 const isDisabled = !canDrag && !canSelect && !isEditMode;
                 const maxCount = PIECE_CAP[piece];
 
-                // compactモードかつ非編集時は0個の駒は完全に非表示（スペースも確保しない）
+                // コンパクトレイアウトかつ非編集時は0個の駒は完全に非表示（スペースも確保しない）
                 // 編集モードでは全ての駒を表示する
-                if (compact && count === 0 && !isEditMode) {
+                if (isCompactLayout && count === 0 && !isEditMode) {
                     return null;
                 }
 
@@ -147,8 +188,8 @@ export function HandPiecesDisplay({
                         style={{
                             display: "flex",
                             alignItems: "center",
-                            gap: compact ? "1px" : "2px",
-                            visibility: isHidden && !compact ? "hidden" : "visible",
+                            gap: containerConfig.gap,
+                            visibility: isHidden && !isCompactLayout ? "hidden" : "visible",
                         }}
                     >
                         {/* 駒ボタン */}
@@ -175,7 +216,7 @@ export function HandPiecesDisplay({
                                 "select-none [-webkit-touch-callout:none]",
                                 // 編集モード（ドラッグ可能）時はスクロールも防止
                                 canDrag ? "touch-none" : "touch-manipulation",
-                                compact ? "p-0.5" : "p-1",
+                                containerConfig.buttonPadding,
                                 selected
                                     ? "border-[hsl(var(--wafuu-shu))] bg-[hsl(var(--wafuu-kin)/0.2)]"
                                     : "border-transparent",
@@ -189,12 +230,12 @@ export function HandPiecesDisplay({
                                 owner={owner}
                                 count={count}
                                 flipBoard={flipBoard}
-                                compact={compact}
+                                size={size}
                             />
                         </button>
 
-                        {/* ±ボタン（縦並び）- 編集モードでなくてもスペースを確保、compactモード時は編集モードのみ表示 */}
-                        {(!compact || isEditMode) && (
+                        {/* ±ボタン（縦並び）- 編集モードでなくてもスペースを確保、compact/mediumモード時は編集モードのみ表示 */}
+                        {(!isCompactLayout || isEditMode) && (
                             <div
                                 style={{
                                     display: "flex",
