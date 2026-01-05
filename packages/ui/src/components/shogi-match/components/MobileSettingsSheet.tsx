@@ -1,9 +1,64 @@
 import type { Player } from "@shogi/app-core";
-import type { ReactElement } from "react";
-import { Input } from "../../input";
+import { type ReactElement, useEffect, useState } from "react";
 import type { ClockSettings } from "../hooks/useClockManager";
 import type { DisplaySettings, SquareNotation } from "../types";
 import type { EngineOption, SideSetting } from "./MatchSettingsPanel";
+
+// =============================================================================
+// NumericInput: 文字列ベースの数値入力コンポーネント
+// =============================================================================
+
+interface NumericInputProps {
+    id: string;
+    value: number;
+    onChange: (value: number) => void;
+    disabled?: boolean;
+    min?: number;
+    className?: string;
+}
+
+/**
+ * 編集中は空欄を許容し、blur時に数値変換する入力コンポーネント
+ * - type="text" + inputMode="numeric" でモバイルで数字キーボードを表示
+ * - 「0を消して3を入力」のような自然な操作が可能
+ */
+function NumericInput({
+    id,
+    value,
+    onChange,
+    disabled = false,
+    min = 0,
+    className,
+}: NumericInputProps): ReactElement {
+    const [inputValue, setInputValue] = useState(String(value));
+
+    // 外部からの値変更を反映（ただし編集中でない場合のみ）
+    useEffect(() => {
+        setInputValue(String(value));
+    }, [value]);
+
+    const handleBlur = () => {
+        // 空文字や無効な値は min に正規化
+        const parsed = parseInt(inputValue, 10);
+        const normalized = Number.isNaN(parsed) ? min : Math.max(min, parsed);
+        setInputValue(String(normalized));
+        onChange(normalized);
+    };
+
+    return (
+        <input
+            id={id}
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            value={inputValue}
+            disabled={disabled}
+            className={`${className} h-10 rounded-md px-3 py-2`}
+            onChange={(e) => setInputValue(e.target.value)}
+            onBlur={handleBlur}
+        />
+    );
+}
 
 interface MobileSettingsSheetProps {
     // 対局設定
@@ -145,80 +200,60 @@ export function MobileSettingsSheet({
                 <div className="grid grid-cols-2 gap-2 [&>label]:min-w-0">
                     <label htmlFor="mobile-sente-main" className={labelClassName}>
                         <span className="text-xs text-muted-foreground">先手 持ち時間(秒)</span>
-                        <Input
+                        <NumericInput
                             id="mobile-sente-main"
-                            type="number"
-                            min={0}
                             value={Math.floor(timeSettings.sente.mainMs / 1000)}
                             disabled={settingsLocked}
                             className={inputClassName}
-                            onChange={(e) =>
+                            onChange={(v) =>
                                 onTimeSettingsChange({
                                     ...timeSettings,
-                                    sente: {
-                                        ...timeSettings.sente,
-                                        mainMs: Number(e.target.value) * 1000,
-                                    },
+                                    sente: { ...timeSettings.sente, mainMs: v * 1000 },
                                 })
                             }
                         />
                     </label>
                     <label htmlFor="mobile-sente-byoyomi" className={labelClassName}>
                         <span className="text-xs text-muted-foreground">先手 秒読み(秒)</span>
-                        <Input
+                        <NumericInput
                             id="mobile-sente-byoyomi"
-                            type="number"
-                            min={0}
                             value={Math.floor(timeSettings.sente.byoyomiMs / 1000)}
                             disabled={settingsLocked}
                             className={inputClassName}
-                            onChange={(e) =>
+                            onChange={(v) =>
                                 onTimeSettingsChange({
                                     ...timeSettings,
-                                    sente: {
-                                        ...timeSettings.sente,
-                                        byoyomiMs: Number(e.target.value) * 1000,
-                                    },
+                                    sente: { ...timeSettings.sente, byoyomiMs: v * 1000 },
                                 })
                             }
                         />
                     </label>
                     <label htmlFor="mobile-gote-main" className={labelClassName}>
                         <span className="text-xs text-muted-foreground">後手 持ち時間(秒)</span>
-                        <Input
+                        <NumericInput
                             id="mobile-gote-main"
-                            type="number"
-                            min={0}
                             value={Math.floor(timeSettings.gote.mainMs / 1000)}
                             disabled={settingsLocked}
                             className={inputClassName}
-                            onChange={(e) =>
+                            onChange={(v) =>
                                 onTimeSettingsChange({
                                     ...timeSettings,
-                                    gote: {
-                                        ...timeSettings.gote,
-                                        mainMs: Number(e.target.value) * 1000,
-                                    },
+                                    gote: { ...timeSettings.gote, mainMs: v * 1000 },
                                 })
                             }
                         />
                     </label>
                     <label htmlFor="mobile-gote-byoyomi" className={labelClassName}>
                         <span className="text-xs text-muted-foreground">後手 秒読み(秒)</span>
-                        <Input
+                        <NumericInput
                             id="mobile-gote-byoyomi"
-                            type="number"
-                            min={0}
                             value={Math.floor(timeSettings.gote.byoyomiMs / 1000)}
                             disabled={settingsLocked}
                             className={inputClassName}
-                            onChange={(e) =>
+                            onChange={(v) =>
                                 onTimeSettingsChange({
                                     ...timeSettings,
-                                    gote: {
-                                        ...timeSettings.gote,
-                                        byoyomiMs: Number(e.target.value) * 1000,
-                                    },
+                                    gote: { ...timeSettings.gote, byoyomiMs: v * 1000 },
                                 })
                             }
                         />
