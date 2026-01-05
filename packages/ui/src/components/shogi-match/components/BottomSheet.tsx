@@ -33,6 +33,7 @@ export function BottomSheet({
     height = "auto",
 }: BottomSheetProps): ReactElement | null {
     const sheetRef = useRef<HTMLDivElement>(null);
+    const closeButtonRef = useRef<HTMLButtonElement>(null);
 
     // ESCキーで閉じる
     useEffect(() => {
@@ -59,8 +60,8 @@ export function BottomSheet({
         const firstFocusable = focusableElements[0];
         const lastFocusable = focusableElements[focusableElements.length - 1];
 
-        // シートが開いたら最初の要素にフォーカス
-        firstFocusable?.focus();
+        // シートが開いたら閉じるボタンにフォーカス（input/selectへのフォーカスはiOSでズームを引き起こすため避ける）
+        closeButtonRef.current?.focus();
 
         const handleTabKey = (e: KeyboardEvent) => {
             if (e.key !== "Tab") return;
@@ -112,8 +113,9 @@ export function BottomSheet({
                 aria-labelledby="bottom-sheet-title"
                 className={cn(
                     "fixed bottom-0 left-0 right-0 z-[1000]",
+                    "w-screen",
                     "bg-background rounded-t-2xl",
-                    "overflow-y-auto",
+                    "overflow-x-hidden overflow-y-auto",
                     "transition-transform duration-300 ease-out",
                     "animate-in slide-in-from-bottom",
                     heightClasses[height],
@@ -133,11 +135,12 @@ export function BottomSheet({
                 </div>
 
                 {/* コンテンツ */}
-                <div className="p-4">{children}</div>
+                <div className="p-4 max-w-full">{children}</div>
 
                 {/* 閉じるボタン */}
                 <div className="sticky bottom-0 p-4 bg-background border-t border-border">
                     <button
+                        ref={closeButtonRef}
                         type="button"
                         onClick={onClose}
                         className="w-full py-3 rounded-lg bg-muted hover:bg-muted/80 font-medium transition-colors"

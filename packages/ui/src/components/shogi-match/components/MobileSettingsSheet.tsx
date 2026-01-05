@@ -30,8 +30,9 @@ interface MobileSettingsSheetProps {
     onDisplaySettingsChange: (settings: DisplaySettings) => void;
 }
 
-const selectClassName = "w-full p-2 rounded-lg border border-border bg-background text-sm";
-const inputClassName = "w-full border border-border bg-background text-sm";
+// iOS Safari は16px未満のinput/selectにフォーカスすると自動ズームするため、text-base(16px)を使用
+const selectClassName = "w-full p-2 rounded-lg border border-border bg-background text-base";
+const inputClassName = "w-full border border-border bg-background text-base";
 const labelClassName = "flex flex-col gap-1 text-sm";
 
 /**
@@ -80,7 +81,7 @@ export function MobileSettingsSheet({
     };
 
     return (
-        <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-4 w-full max-w-full overflow-hidden">
             {/* 対局中のロック表示 */}
             {settingsLocked && (
                 <div className="flex items-center gap-2 p-2 rounded-lg bg-destructive/10 text-destructive text-sm">
@@ -103,7 +104,7 @@ export function MobileSettingsSheet({
             </label>
 
             {/* 先手/後手設定 */}
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 gap-3 [&>label]:min-w-0">
                 <label className={labelClassName}>
                     <span className="font-medium text-wafuu-shu">☗ 先手</span>
                     <select
@@ -141,7 +142,7 @@ export function MobileSettingsSheet({
             {/* 持ち時間設定 */}
             <div className="space-y-2">
                 <div className="font-medium text-sm">持ち時間</div>
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-2 gap-2 [&>label]:min-w-0">
                     <label htmlFor="mobile-sente-main" className={labelClassName}>
                         <span className="text-xs text-muted-foreground">先手 持ち時間(秒)</span>
                         <Input

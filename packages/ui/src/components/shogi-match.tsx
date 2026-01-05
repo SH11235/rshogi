@@ -1924,6 +1924,7 @@ export function ShogiMatch({
                     onToStart={navigation.goToStart}
                     onToEnd={navigation.goToEnd}
                     // 評価値
+                    evalHistory={evalHistory}
                     evalCp={evalHistory[navigation.state.currentPly]?.evalCp ?? undefined}
                     evalMate={evalHistory[navigation.state.currentPly]?.evalMate ?? undefined}
                     // 対局コントロール

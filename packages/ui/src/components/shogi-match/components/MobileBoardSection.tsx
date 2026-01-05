@@ -4,7 +4,7 @@ import { memo } from "react";
 import type { ShogiBoardCell } from "../../shogi-board";
 import { ShogiBoard } from "../../shogi-board";
 import { useMobileCellSize } from "../hooks/useMobileCellSize";
-import type { DisplaySettings, PromotionSelection } from "../types";
+import type { DisplaySettings, GameMode, PromotionSelection } from "../types";
 import { HandPiecesDisplay } from "./HandPiecesDisplay";
 
 type Selection = { kind: "square"; square: string } | { kind: "hand"; piece: PieceType };
@@ -16,6 +16,10 @@ type HandInfo = {
 };
 
 export interface MobileBoardSectionProps {
+    // === レイアウト計算用 ===
+    gameMode: GameMode;
+    hasKifuMoves: boolean;
+
     // === 盤面データ（変更頻度: 低） ===
     grid: ShogiBoardCell[][];
     position: PositionState;
@@ -74,6 +78,8 @@ export interface MobileBoardSectionProps {
  * useMobileCellSize()を内部で呼び、CSS変数を設定
  */
 export const MobileBoardSection = memo(function MobileBoardSection({
+    gameMode,
+    hasKifuMoves,
     grid,
     flipBoard,
     lastMove,
@@ -96,8 +102,8 @@ export const MobileBoardSection = memo(function MobileBoardSection({
     boardSectionRef,
     isDraggingPiece,
 }: MobileBoardSectionProps): ReactElement {
-    // セルサイズはこのコンポーネント内で管理
-    const cellSize = useMobileCellSize();
+    // セルサイズはこのコンポーネント内で管理（画面幅・高さ・モードから計算）
+    const cellSize = useMobileCellSize({ gameMode, hasKifuMoves });
 
     // 盤面の幅を計算（9セル + 盤面装飾）
     // ShogiBoard: p-2 (8px×2=16) + border (1px×2=2) + mx-1 (4px×2=8) + border-l (1px) = 27px

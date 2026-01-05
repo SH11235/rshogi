@@ -3,7 +3,7 @@ import type { ReactElement, RefObject } from "react";
 import { useMemo, useState } from "react";
 import type { ShogiBoardCell } from "../../shogi-board";
 import { BottomSheet } from "../components/BottomSheet";
-import { EvalBar } from "../components/EvalBar";
+import { EvalGraph } from "../components/EvalGraph";
 import type { EngineOption, SideSetting } from "../components/MatchSettingsPanel";
 import { MobileBoardSection } from "../components/MobileBoardSection";
 import { MobileClockDisplay } from "../components/MobileClockDisplay";
@@ -12,6 +12,7 @@ import { MobileNavigation } from "../components/MobileNavigation";
 import { MobileSettingsSheet } from "../components/MobileSettingsSheet";
 import type { ClockSettings, TickState } from "../hooks/useClockManager";
 import type { DisplaySettings, GameMode, PromotionSelection } from "../types";
+import type { EvalHistory } from "../utils/kifFormat";
 
 // テキストスタイル用Tailwindクラス
 const TEXT_CLASSES = {
@@ -79,6 +80,7 @@ export interface MobileLayoutProps {
     onToEnd?: () => void;
 
     // 評価値
+    evalHistory: EvalHistory[];
     evalCp?: number;
     evalMate?: number;
 
@@ -154,6 +156,7 @@ export function MobileLayout({
     onForward,
     onToStart,
     onToEnd,
+    evalHistory,
     evalCp,
     evalMate,
     onStop,
@@ -183,10 +186,13 @@ export function MobileLayout({
     // 編集モード判定を事前計算（MobileBoardSectionに渡す）
     const isEditModeActive = isEditMode && !isMatchRunning;
 
+    // 棋譜があるかどうか（セルサイズ計算用）
+    const hasKifuMoves = Boolean(kifMoves && kifMoves.length > 0);
+
     return (
-        <div className="flex flex-col w-full px-2">
+        <div className="flex flex-col w-full h-dvh overflow-hidden px-2">
             {/* ステータス行 */}
-            <div className="flex items-center justify-between w-full py-2 px-2">
+            <div className="flex items-center justify-between w-full py-2 px-2 flex-shrink-0">
                 <output className={`${TEXT_CLASSES.moveCount} whitespace-nowrap`}>
                     {moves.length === 0 ? "開始局面" : `${moves.length}手目`}
                 </output>
@@ -214,13 +220,15 @@ export function MobileLayout({
 
             {/* クロック表示（対局モード時は常に表示） */}
             {(isMatchRunning || gameMode === "playing") && (
-                <div className="w-full">
+                <div className="w-full flex-shrink-0">
                     <MobileClockDisplay clocks={clocks} sides={sides} isRunning={isMatchRunning} />
                 </div>
             )}
 
             {/* 盤面セクション（React.memoでラップ） */}
             <MobileBoardSection
+                gameMode={gameMode}
+                hasKifuMoves={hasKifuMoves}
                 grid={grid}
                 position={position}
                 flipBoard={flipBoard}
@@ -248,7 +256,7 @@ export function MobileLayout({
             {/* モード別UI */}
             {gameMode === "playing" ? (
                 /* 対局モード: 1行棋譜 + 停止ボタン */
-                <div className="w-full mt-2 space-y-2">
+                <div className="w-full mt-2 space-y-2 flex-shrink-0">
                     {kifMoves && kifMoves.length > 0 && (
                         <MobileKifuBar
                             moves={kifMoves}
@@ -270,7 +278,7 @@ export function MobileLayout({
                 </div>
             ) : isReviewMode && moves.length === 0 ? (
                 /* 対局準備モード: 開始ボタンのみ */
-                <div className="w-full mt-2">
+                <div className="w-full mt-2 flex-shrink-0">
                     <div className="flex justify-center gap-3 py-4">
                         {onStart && (
                             <button
@@ -284,10 +292,29 @@ export function MobileLayout({
                     </div>
                 </div>
             ) : isReviewMode ? (
-                /* 検討モード: 評価値バー + ナビゲーション + 操作ボタン */
-                <div className="w-full mt-2 space-y-1">
-                    {/* 評価値バー */}
-                    <EvalBar evalCp={evalCp} evalMate={evalMate} />
+                /* 検討モード: 評価値グラフ + ナビゲーション + 操作ボタン */
+                <div className="w-full mt-2 space-y-1 flex-shrink-0">
+                    {/* 評価値グラフ + 現在の評価値 */}
+                    <div className="px-2">
+                        <div className="flex items-center gap-2 mb-1">
+                            <span className="text-xs text-muted-foreground">評価値:</span>
+                            <span className="text-sm font-mono tabular-nums">
+                                {evalMate !== undefined
+                                    ? evalMate > 0
+                                        ? `詰み${evalMate}手`
+                                        : `詰まされ${Math.abs(evalMate)}手`
+                                    : evalCp !== undefined
+                                      ? `${evalCp > 0 ? "+" : ""}${evalCp}`
+                                      : "-"}
+                            </span>
+                        </div>
+                        <EvalGraph
+                            evalHistory={evalHistory}
+                            currentPly={currentPly}
+                            compact
+                            height={50}
+                        />
+                    </div>
 
                     {/* ナビゲーションボタン */}
                     {onBack && onForward && onToStart && onToEnd && (
@@ -334,7 +361,7 @@ export function MobileLayout({
                 </div>
             ) : (
                 /* 編集モード: 操作ボタンは shogi-match.tsx 側で BottomSheet として表示 */
-                <div className="w-full mt-2 text-center text-sm text-muted-foreground">
+                <div className="w-full mt-2 text-center text-sm text-muted-foreground flex-shrink-0">
                     盤面をタップして編集
                 </div>
             )}

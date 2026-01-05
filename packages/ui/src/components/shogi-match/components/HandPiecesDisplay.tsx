@@ -26,14 +26,14 @@ function PieceToken({
         <span
             className={cn(
                 "relative inline-flex items-center justify-center leading-none tracking-tight text-[#3a2a16]",
-                compact ? "text-[13px]" : "text-[16px]",
+                compact ? "text-[11px]" : "text-[16px]",
                 shouldRotate && "-rotate-180",
             )}
         >
             <span
                 className={cn(
                     "rounded-[8px] bg-[#fdf6ec]/90 shadow-[0_3px_6px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)]",
-                    compact ? "px-1.5 py-1" : "px-2 py-[5px]",
+                    compact ? "px-1 py-0.5" : "px-2 py-[5px]",
                 )}
             >
                 {PIECE_LABELS[pieceType]}
@@ -42,8 +42,14 @@ function PieceToken({
             <span
                 className={cn(
                     "absolute text-center font-bold leading-none",
-                    compact ? "min-w-[12px] text-[9px]" : "min-w-[14px] text-[11px]",
-                    shouldRotate ? "-left-1 -top-1 rotate-180" : "-bottom-1 -right-1",
+                    compact ? "min-w-[10px] text-[8px]" : "min-w-[14px] text-[11px]",
+                    shouldRotate
+                        ? compact
+                            ? "-left-0.5 -top-0.5 rotate-180"
+                            : "-left-1 -top-1 rotate-180"
+                        : compact
+                          ? "-bottom-0.5 -right-0.5"
+                          : "-bottom-1 -right-1",
                     count > 0
                         ? "text-[hsl(var(--wafuu-sumi))]"
                         : "text-[hsl(var(--muted-foreground))]",
@@ -102,18 +108,15 @@ export function HandPiecesDisplay({
         <div
             className={cn(
                 "flex items-center",
-                compact
-                    ? "flex-nowrap gap-0.5 min-h-[32px] overflow-x-auto"
-                    : "flex-wrap gap-1.5 min-h-[44px]",
+                compact ? "flex-nowrap gap-0.5 min-h-[24px]" : "flex-wrap gap-1.5 min-h-[44px]",
             )}
-            style={compact ? { scrollbarWidth: "none", msOverflowStyle: "none" } : undefined}
         >
             {/* 先手/後手マーカー */}
             <span
                 className={cn(
                     markerColorClass,
                     "font-bold select-none shrink-0",
-                    compact ? "text-base mr-1" : "text-xl",
+                    compact ? "text-sm mr-0.5" : "text-xl",
                 )}
                 title={owner === "sente" ? "先手" : "後手"}
             >
