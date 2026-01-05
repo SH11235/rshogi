@@ -186,7 +186,7 @@ export function MobileLayout({
 
     return (
         <div
-            className="flex flex-col items-center w-full px-2"
+            className="flex flex-col w-full px-2"
             style={{ "--shogi-cell-size": `${cellSize}px` } as React.CSSProperties}
         >
             {/* ステータス行 */}
@@ -218,13 +218,15 @@ export function MobileLayout({
 
             {/* クロック表示（対局モード時は常に表示） */}
             {(isMatchRunning || gameMode === "playing") && (
-                <MobileClockDisplay clocks={clocks} sides={sides} isRunning={isMatchRunning} />
+                <div className="w-full">
+                    <MobileClockDisplay clocks={clocks} sides={sides} isRunning={isMatchRunning} />
+                </div>
             )}
 
             {/* 盤面セクション */}
             <div
                 ref={boardSectionRef}
-                className={`relative ${isDraggingPiece ? "touch-none" : ""}`}
+                className={`relative mx-auto ${isDraggingPiece ? "touch-none" : ""}`}
             >
                 {/* 上側の持ち駒 */}
                 <div data-zone={`hand-${topHand.owner}`} className="mb-1">

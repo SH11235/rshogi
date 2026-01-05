@@ -22,7 +22,14 @@ function calcMobileCellSize(viewportWidth: number): number {
  * @returns セルサイズ (px)
  */
 export function useMobileCellSize(): number {
-    const [cellSize, setCellSize] = useState(PC_CELL_SIZE);
+    const [cellSize, setCellSize] = useState(() => {
+        // SSR対応
+        if (typeof window === "undefined") return PC_CELL_SIZE;
+        // PC表示時は固定値
+        if (window.innerWidth >= MOBILE_BREAKPOINT) return PC_CELL_SIZE;
+        // モバイル時は計算
+        return calcMobileCellSize(window.innerWidth);
+    });
 
     useEffect(() => {
         if (typeof window === "undefined") return;
