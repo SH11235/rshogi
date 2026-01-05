@@ -15,7 +15,7 @@ type HandInfo = {
     isActive: boolean;
 };
 
-export interface MobileBoardSectionProps {
+interface MobileBoardSectionProps {
     // === 盤面データ（変更頻度: 低） ===
     grid: ShogiBoardCell[][];
     position: PositionState;

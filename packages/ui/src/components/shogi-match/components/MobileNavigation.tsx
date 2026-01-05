@@ -1,7 +1,7 @@
 import { cn } from "@shogi/design-system";
 import type { ReactElement } from "react";
 
-export interface MobileNavigationProps {
+interface MobileNavigationProps {
     /** 現在の手数 */
     currentPly: number;
     /** 総手数 */

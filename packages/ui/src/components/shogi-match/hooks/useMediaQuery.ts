@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
  * @param query - CSS メディアクエリ文字列 (例: '(max-width: 767px)')
  * @returns マッチしているかどうか
  */
-export function useMediaQuery(query: string): boolean {
+function useMediaQuery(query: string): boolean {
     const [matches, setMatches] = useState(() => {
         if (typeof window === "undefined") return false;
         return window.matchMedia(query).matches;

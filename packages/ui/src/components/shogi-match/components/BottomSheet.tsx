@@ -2,7 +2,7 @@ import { cn } from "@shogi/design-system";
 import type { ReactElement, ReactNode } from "react";
 import { useEffect, useRef } from "react";
 
-export interface BottomSheetProps {
+interface BottomSheetProps {
     /** シートを開くかどうか */
     isOpen: boolean;
     /** 閉じる時のコールバック */

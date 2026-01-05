@@ -9,7 +9,7 @@ export interface KifuMove {
     displayText: string;
 }
 
-export interface MobileKifuBarProps {
+interface MobileKifuBarProps {
     /** 棋譜データ */
     moves: KifuMove[];
     /** 現在の手数 */

@@ -22,7 +22,7 @@ const TEXT_CLASSES = {
 
 type Selection = { kind: "square"; square: string } | { kind: "hand"; piece: PieceType };
 
-export interface MobileLayoutProps {
+interface MobileLayoutProps {
     // 盤面関連
     grid: ShogiBoardCell[][];
     position: PositionState;
