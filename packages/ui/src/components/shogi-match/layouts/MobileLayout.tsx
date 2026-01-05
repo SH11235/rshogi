@@ -1,18 +1,16 @@
 import type { LastMove, PieceType, Player, PositionState, Square } from "@shogi/app-core";
 import type { ReactElement, RefObject } from "react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { ShogiBoardCell } from "../../shogi-board";
-import { ShogiBoard } from "../../shogi-board";
 import { BottomSheet } from "../components/BottomSheet";
 import { EvalBar } from "../components/EvalBar";
-import { HandPiecesDisplay } from "../components/HandPiecesDisplay";
 import type { EngineOption, SideSetting } from "../components/MatchSettingsPanel";
+import { MobileBoardSection } from "../components/MobileBoardSection";
 import { MobileClockDisplay } from "../components/MobileClockDisplay";
 import { type KifuMove, MobileKifuBar } from "../components/MobileKifuBar";
 import { MobileNavigation } from "../components/MobileNavigation";
 import { MobileSettingsSheet } from "../components/MobileSettingsSheet";
 import type { ClockSettings, TickState } from "../hooks/useClockManager";
-import { useMobileCellSize } from "../hooks/useMobileCellSize";
 import type { DisplaySettings, GameMode, PromotionSelection } from "../types";
 
 // テキストスタイル用Tailwindクラス
@@ -175,20 +173,18 @@ export function MobileLayout({
     boardSectionRef,
     isDraggingPiece,
 }: MobileLayoutProps): ReactElement {
-    // モバイル時のセルサイズを計算
-    const cellSize = useMobileCellSize();
-
     // 設定BottomSheetの状態
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
-    const topHand = getHandInfo("top");
-    const bottomHand = getHandInfo("bottom");
+    // 持ち駒情報を事前計算（useMemoで安定させてReact.memoを有効にする）
+    const topHand = useMemo(() => getHandInfo("top"), [getHandInfo]);
+    const bottomHand = useMemo(() => getHandInfo("bottom"), [getHandInfo]);
+
+    // 編集モード判定を事前計算（MobileBoardSectionに渡す）
+    const isEditModeActive = isEditMode && !isMatchRunning;
 
     return (
-        <div
-            className="flex flex-col w-full px-2"
-            style={{ "--shogi-cell-size": `${cellSize}px` } as React.CSSProperties}
-        >
+        <div className="flex flex-col w-full px-2">
             {/* ステータス行 */}
             <div className="flex items-center justify-between w-full py-2 px-2">
                 <output className={`${TEXT_CLASSES.moveCount} whitespace-nowrap`}>
@@ -223,95 +219,31 @@ export function MobileLayout({
                 </div>
             )}
 
-            {/* 盤面セクション */}
-            <div
-                ref={boardSectionRef}
-                className={`relative mx-auto ${isDraggingPiece ? "touch-none" : ""}`}
-            >
-                {/* 上側の持ち駒 */}
-                <div data-zone={`hand-${topHand.owner}`} className="mb-1">
-                    <HandPiecesDisplay
-                        owner={topHand.owner}
-                        hand={topHand.hand}
-                        selectedPiece={selection?.kind === "hand" ? selection.piece : null}
-                        isActive={topHand.isActive}
-                        onHandSelect={onHandSelect}
-                        onPiecePointerDown={isEditMode ? onHandPiecePointerDown : undefined}
-                        isEditMode={isEditMode && !isMatchRunning}
-                        onIncrement={
-                            onIncrementHand
-                                ? (piece) => onIncrementHand(topHand.owner, piece)
-                                : undefined
-                        }
-                        onDecrement={
-                            onDecrementHand
-                                ? (piece) => onDecrementHand(topHand.owner, piece)
-                                : undefined
-                        }
-                        flipBoard={flipBoard}
-                        compact
-                    />
-                </div>
-
-                {/* 盤面 */}
-                <ShogiBoard
-                    grid={grid}
-                    selectedSquare={
-                        isEditMode && editFromSquare
-                            ? editFromSquare
-                            : selection?.kind === "square"
-                              ? selection.square
-                              : null
-                    }
-                    lastMove={
-                        displaySettings.highlightLastMove && lastMove
-                            ? {
-                                  from: lastMove.from ?? undefined,
-                                  to: lastMove.to,
-                              }
-                            : undefined
-                    }
-                    promotionSquare={promotionSelection?.to ?? null}
-                    onSelect={onSquareSelect}
-                    onPromotionChoice={onPromotionChoice}
-                    flipBoard={flipBoard}
-                    onPiecePointerDown={isEditMode ? onPiecePointerDown : undefined}
-                    onPieceTogglePromote={isEditMode ? onPieceTogglePromote : undefined}
-                    squareNotation={displaySettings.squareNotation}
-                    showBoardLabels={displaySettings.showBoardLabels}
-                />
-
-                {candidateNote ? (
-                    <div className={`${TEXT_CLASSES.mutedSecondary} text-center mt-1`}>
-                        {candidateNote}
-                    </div>
-                ) : null}
-
-                {/* 下側の持ち駒 */}
-                <div data-zone={`hand-${bottomHand.owner}`} className="mt-1">
-                    <HandPiecesDisplay
-                        owner={bottomHand.owner}
-                        hand={bottomHand.hand}
-                        selectedPiece={selection?.kind === "hand" ? selection.piece : null}
-                        isActive={bottomHand.isActive}
-                        onHandSelect={onHandSelect}
-                        onPiecePointerDown={isEditMode ? onHandPiecePointerDown : undefined}
-                        isEditMode={isEditMode && !isMatchRunning}
-                        onIncrement={
-                            onIncrementHand
-                                ? (piece) => onIncrementHand(bottomHand.owner, piece)
-                                : undefined
-                        }
-                        onDecrement={
-                            onDecrementHand
-                                ? (piece) => onDecrementHand(bottomHand.owner, piece)
-                                : undefined
-                        }
-                        flipBoard={flipBoard}
-                        compact
-                    />
-                </div>
-            </div>
+            {/* 盤面セクション（React.memoでラップ） */}
+            <MobileBoardSection
+                grid={grid}
+                position={position}
+                flipBoard={flipBoard}
+                lastMove={lastMove}
+                selection={selection}
+                promotionSelection={promotionSelection}
+                displaySettings={displaySettings}
+                isEditModeActive={isEditModeActive}
+                editFromSquare={editFromSquare}
+                candidateNote={candidateNote}
+                onSquareSelect={onSquareSelect}
+                onPromotionChoice={onPromotionChoice}
+                onHandSelect={onHandSelect}
+                onPiecePointerDown={onPiecePointerDown}
+                onPieceTogglePromote={onPieceTogglePromote}
+                onHandPiecePointerDown={onHandPiecePointerDown}
+                onIncrementHand={onIncrementHand}
+                onDecrementHand={onDecrementHand}
+                topHand={topHand}
+                bottomHand={bottomHand}
+                boardSectionRef={boardSectionRef}
+                isDraggingPiece={isDraggingPiece}
+            />
 
             {/* モード別UI */}
             {gameMode === "playing" ? (

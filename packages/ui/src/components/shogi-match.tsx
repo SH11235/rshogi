@@ -351,23 +351,26 @@ export function ShogiMatch({
         setFlipBoard(goteIsHuman && !senteIsHuman);
     }, [sides.sente.role, sides.gote.role]);
 
-    // 持ち駒表示用のヘルパー関数
-    const getHandInfo = (pos: "top" | "bottom") => {
-        const owner: Player =
-            pos === "top" ? (flipBoard ? "sente" : "gote") : flipBoard ? "gote" : "sente";
-        // 検討モードでは手番の持ち駒を選択可能（対局設定に関係なく）
-        const isActiveInReview = isReviewMode && position.turn === owner;
-        const isActiveInMatch =
-            !isEditMode &&
-            !isReviewMode &&
-            position.turn === owner &&
-            sides[owner].role === "human";
-        return {
-            owner,
-            hand: owner === "sente" ? position.hands.sente : position.hands.gote,
-            isActive: isActiveInReview || isActiveInMatch,
-        };
-    };
+    // 持ち駒表示用のヘルパー関数（メモ化してMobileBoardSectionの再レンダリングを防ぐ）
+    const getHandInfo = useCallback(
+        (pos: "top" | "bottom") => {
+            const owner: Player =
+                pos === "top" ? (flipBoard ? "sente" : "gote") : flipBoard ? "gote" : "sente";
+            // 検討モードでは手番の持ち駒を選択可能（対局設定に関係なく）
+            const isActiveInReview = isReviewMode && position.turn === owner;
+            const isActiveInMatch =
+                !isEditMode &&
+                !isReviewMode &&
+                position.turn === owner &&
+                sides[owner].role === "human";
+            return {
+                owner,
+                hand: owner === "sente" ? position.hands.sente : position.hands.gote,
+                isActive: isActiveInReview || isActiveInMatch,
+            };
+        },
+        [flipBoard, isReviewMode, isEditMode, position.turn, position.hands, sides],
+    );
 
     const movesRef = useRef<string[]>(moves);
     const legalCache = useMemo(() => new LegalMoveCache(), []);
@@ -536,6 +539,11 @@ export function ShogiMatch({
     const handleKeyboardForward = useCallback(() => {
         navigation.goForward(selectedBranchNodeId ?? undefined);
     }, [navigation, selectedBranchNodeId]);
+
+    // 盤面反転のハンドラ（メモ化）
+    const handleFlipBoard = useCallback(() => {
+        setFlipBoard((prev) => !prev);
+    }, []);
 
     // キーボード・ホイールナビゲーション（対局中は無効）
     // selectedBranchNodeIdがある場合は、分岐に沿って進む
@@ -1061,114 +1069,214 @@ export function ShogiMatch({
         return true;
     };
 
-    const handleSquareSelect = async (square: string, shiftKey?: boolean) => {
-        setMessage(null);
-        if (isEditMode) {
+    const handleSquareSelect = useCallback(
+        async (square: string, shiftKey?: boolean) => {
+            setMessage(null);
+            if (isEditMode) {
+                if (!positionReady) {
+                    setMessage("局面を読み込み中です。");
+                    return;
+                }
+                // 編集パネルが閉じていたら自動的に開く
+                if (!isEditPanelOpen) {
+                    setIsEditPanelOpen(true);
+                }
+                const sq = square as Square;
+
+                // 移動元が選択されている場合：移動先として処理
+                if (editFromSquare) {
+                    const from = editFromSquare;
+                    if (from === sq) {
+                        // 同じマスをクリック：選択解除
+                        setEditFromSquare(null);
+                        return;
+                    }
+                    const moving = position.board[from];
+                    if (!moving) {
+                        setEditFromSquare(null);
+                        return;
+                    }
+                    const ok = placePieceAt(sq, moving, { fromSquare: from });
+                    if (ok) {
+                        setEditFromSquare(null);
+                    }
+                    return;
+                }
+
+                // 削除モード：駒を削除
+                if (editTool === "erase") {
+                    placePieceAt(sq, null);
+                    return;
+                }
+
+                // 駒ボタンが選択されている場合：配置
+                if (editPieceType) {
+                    const pieceToPlace: Piece = {
+                        owner: editOwner,
+                        type: editPieceType,
+                        promoted: editPromoted || undefined,
+                    };
+                    placePieceAt(sq, pieceToPlace);
+                    return;
+                }
+
+                // 駒ボタン未選択：盤上の駒をクリックで移動元として選択
+                const current = position.board[sq];
+                if (current) {
+                    setEditFromSquare(sq);
+                    return;
+                }
+
+                // 空マスをクリックした場合
+                setEditMessage("配置する駒を選ぶか、移動する駒をクリックしてください。");
+                return;
+            }
+
+            // ========== 検討モード ==========
+            // 自由に棋譜を閲覧し、任意の局面から分岐を作成できる
+            if (isReviewMode) {
+                if (!positionReady) {
+                    setMessage("局面を読み込み中です。");
+                    return;
+                }
+
+                // 成り選択中の場合：キャンセル
+                if (promotionSelection) {
+                    setPromotionSelection(null);
+                    setSelection(null);
+                    return;
+                }
+
+                const sq = square as Square;
+
+                // 駒を選択
+                if (!selection) {
+                    const piece = position.board[sq];
+                    // 検討モードでは現在の手番の駒のみ動かせる
+                    if (piece && piece.owner === position.turn) {
+                        setSelection({ kind: "square", square: sq });
+                    }
+                    return;
+                }
+
+                // 持ち駒を打つ
+                if (selection.kind === "hand") {
+                    const moveStr = `${selection.piece}*${square}`;
+                    const legal = await getLegalSet();
+                    if (legal && !legal.has(moveStr)) {
+                        setMessage("合法手ではありません");
+                        return;
+                    }
+                    const prevBoard = position.board;
+                    const result = applyMoveWithState(position, moveStr, { validateTurn: false });
+                    if (!result.ok) {
+                        setMessage(result.error ?? "持ち駒を打てませんでした");
+                        return;
+                    }
+                    applyMoveForReview(result.next, moveStr, result.lastMove, prevBoard);
+                    return;
+                }
+
+                // 盤上の駒を移動
+                if (selection.kind === "square") {
+                    if (selection.square === square) {
+                        setSelection(null);
+                        return;
+                    }
+
+                    const legal = await getLegalSet();
+                    if (!legal) return;
+
+                    const from = selection.square;
+                    const to = square;
+                    const piece = position.board[from as Square];
+
+                    const promotion = determinePromotion(legal, from, to);
+
+                    if (promotion === "none") {
+                        const moveStr = `${from}${to}`;
+                        if (!legal.has(moveStr)) {
+                            setMessage("合法手ではありません");
+                            return;
+                        }
+                        const prevBoard = position.board;
+                        const result = applyMoveWithState(position, moveStr, {
+                            validateTurn: false,
+                        });
+                        if (!result.ok) {
+                            setMessage(result.error ?? "指し手を適用できませんでした");
+                            return;
+                        }
+                        applyMoveForReview(result.next, moveStr, result.lastMove, prevBoard);
+                        return;
+                    }
+
+                    if (promotion === "forced") {
+                        const moveStr = `${from}${to}+`;
+                        const prevBoard = position.board;
+                        const result = applyMoveWithState(position, moveStr, {
+                            validateTurn: false,
+                        });
+                        if (!result.ok) {
+                            setMessage(result.error ?? "指し手を適用できませんでした");
+                            return;
+                        }
+                        applyMoveForReview(result.next, moveStr, result.lastMove, prevBoard);
+                        return;
+                    }
+
+                    // 任意成り
+                    if (shiftKey) {
+                        const moveStr = `${from}${to}+`;
+                        const prevBoard = position.board;
+                        const result = applyMoveWithState(position, moveStr, {
+                            validateTurn: false,
+                        });
+                        if (!result.ok) {
+                            setMessage(result.error ?? "指し手を適用できませんでした");
+                            return;
+                        }
+                        applyMoveForReview(result.next, moveStr, result.lastMove, prevBoard);
+                        return;
+                    }
+
+                    if (!piece) {
+                        setMessage("駒が見つかりません");
+                        return;
+                    }
+                    setPromotionSelection({ from: from as Square, to: to as Square, piece });
+                    return;
+                }
+                return;
+            }
+
+            // ========== 対局モード ==========
             if (!positionReady) {
                 setMessage("局面を読み込み中です。");
                 return;
             }
-            // 編集パネルが閉じていたら自動的に開く
-            if (!isEditPanelOpen) {
-                setIsEditPanelOpen(true);
-            }
-            const sq = square as Square;
-
-            // 移動元が選択されている場合：移動先として処理
-            if (editFromSquare) {
-                const from = editFromSquare;
-                if (from === sq) {
-                    // 同じマスをクリック：選択解除
-                    setEditFromSquare(null);
-                    return;
-                }
-                const moving = position.board[from];
-                if (!moving) {
-                    setEditFromSquare(null);
-                    return;
-                }
-                const ok = placePieceAt(sq, moving, { fromSquare: from });
-                if (ok) {
-                    setEditFromSquare(null);
-                }
+            if (isEngineTurn(position.turn)) {
+                setMessage("エンジンの手番です。");
                 return;
             }
 
-            // 削除モード：駒を削除
-            if (editTool === "erase") {
-                placePieceAt(sq, null);
-                return;
-            }
-
-            // 駒ボタンが選択されている場合：配置
-            if (editPieceType) {
-                const pieceToPlace: Piece = {
-                    owner: editOwner,
-                    type: editPieceType,
-                    promoted: editPromoted || undefined,
-                };
-                placePieceAt(sq, pieceToPlace);
-                return;
-            }
-
-            // 駒ボタン未選択：盤上の駒をクリックで移動元として選択
-            const current = position.board[sq];
-            if (current) {
-                setEditFromSquare(sq);
-                return;
-            }
-
-            // 空マスをクリックした場合
-            setEditMessage("配置する駒を選ぶか、移動する駒をクリックしてください。");
-            return;
-        }
-
-        // ========== 検討モード ==========
-        // 自由に棋譜を閲覧し、任意の局面から分岐を作成できる
-        if (isReviewMode) {
-            if (!positionReady) {
-                setMessage("局面を読み込み中です。");
-                return;
-            }
-
-            // 成り選択中の場合：キャンセル
+            // 成り選択中の場合：成り/不成を選択
             if (promotionSelection) {
+                // 成り選択UIの外をクリック → キャンセル
                 setPromotionSelection(null);
                 setSelection(null);
                 return;
             }
 
-            const sq = square as Square;
-
-            // 駒を選択
             if (!selection) {
+                const sq = square as Square;
                 const piece = position.board[sq];
-                // 検討モードでは現在の手番の駒のみ動かせる
                 if (piece && piece.owner === position.turn) {
                     setSelection({ kind: "square", square: sq });
                 }
                 return;
             }
 
-            // 持ち駒を打つ
-            if (selection.kind === "hand") {
-                const moveStr = `${selection.piece}*${square}`;
-                const legal = await getLegalSet();
-                if (legal && !legal.has(moveStr)) {
-                    setMessage("合法手ではありません");
-                    return;
-                }
-                const prevBoard = position.board;
-                const result = applyMoveWithState(position, moveStr, { validateTurn: false });
-                if (!result.ok) {
-                    setMessage(result.error ?? "持ち駒を打てませんでした");
-                    return;
-                }
-                applyMoveForReview(result.next, moveStr, result.lastMove, prevBoard);
-                return;
-            }
-
-            // 盤上の駒を移動
             if (selection.kind === "square") {
                 if (selection.square === square) {
                     setSelection(null);
@@ -1182,8 +1290,10 @@ export function ShogiMatch({
                 const to = square;
                 const piece = position.board[from as Square];
 
+                // 成り判定を実行
                 const promotion = determinePromotion(legal, from, to);
 
+                // 【ケース1】成れない場合 → 基本移動を試行
                 if (promotion === "none") {
                     const moveStr = `${from}${to}`;
                     if (!legal.has(moveStr)) {
@@ -1191,40 +1301,43 @@ export function ShogiMatch({
                         return;
                     }
                     const prevBoard = position.board;
-                    const result = applyMoveWithState(position, moveStr, { validateTurn: false });
+                    const result = applyMoveWithState(position, moveStr, { validateTurn: true });
                     if (!result.ok) {
                         setMessage(result.error ?? "指し手を適用できませんでした");
                         return;
                     }
-                    applyMoveForReview(result.next, moveStr, result.lastMove, prevBoard);
+                    applyMoveCommon(result.next, moveStr, result.lastMove, prevBoard);
                     return;
                 }
 
+                // 【ケース2】強制成り → 自動的に成って移動（ダイアログなし）
                 if (promotion === "forced") {
                     const moveStr = `${from}${to}+`;
                     const prevBoard = position.board;
-                    const result = applyMoveWithState(position, moveStr, { validateTurn: false });
+                    const result = applyMoveWithState(position, moveStr, { validateTurn: true });
                     if (!result.ok) {
                         setMessage(result.error ?? "指し手を適用できませんでした");
                         return;
                     }
-                    applyMoveForReview(result.next, moveStr, result.lastMove, prevBoard);
+                    applyMoveCommon(result.next, moveStr, result.lastMove, prevBoard);
                     return;
                 }
 
-                // 任意成り
+                // 【ケース3】任意成り（promotion === 'optional'）
+                // Shift+クリック：即座に成って移動
                 if (shiftKey) {
                     const moveStr = `${from}${to}+`;
                     const prevBoard = position.board;
-                    const result = applyMoveWithState(position, moveStr, { validateTurn: false });
+                    const result = applyMoveWithState(position, moveStr, { validateTurn: true });
                     if (!result.ok) {
                         setMessage(result.error ?? "指し手を適用できませんでした");
                         return;
                     }
-                    applyMoveForReview(result.next, moveStr, result.lastMove, prevBoard);
+                    applyMoveCommon(result.next, moveStr, result.lastMove, prevBoard);
                     return;
                 }
 
+                // 通常クリック：成り選択ダイアログを表示
                 if (!piece) {
                     setMessage("駒が見つかりません");
                     return;
@@ -1232,159 +1345,85 @@ export function ShogiMatch({
                 setPromotionSelection({ from: from as Square, to: to as Square, piece });
                 return;
             }
-            return;
-        }
 
-        // ========== 対局モード ==========
-        if (!positionReady) {
-            setMessage("局面を読み込み中です。");
-            return;
-        }
-        if (isEngineTurn(position.turn)) {
-            setMessage("エンジンの手番です。");
-            return;
-        }
-
-        // 成り選択中の場合：成り/不成を選択
-        if (promotionSelection) {
-            // 成り選択UIの外をクリック → キャンセル
-            setPromotionSelection(null);
-            setSelection(null);
-            return;
-        }
-
-        if (!selection) {
-            const sq = square as Square;
-            const piece = position.board[sq];
-            if (piece && piece.owner === position.turn) {
-                setSelection({ kind: "square", square: sq });
+            // 持ち駒を打つ
+            const moveStr = `${selection.piece}*${square}`;
+            const legal = await getLegalSet();
+            if (legal && !legal.has(moveStr)) {
+                setMessage("合法手ではありません");
+                return;
             }
-            return;
-        }
+            const prevBoard = position.board;
+            const result = applyMoveWithState(position, moveStr, { validateTurn: true });
+            if (!result.ok) {
+                setMessage(result.error ?? "持ち駒を打てませんでした");
+                return;
+            }
+            applyMoveCommon(result.next, moveStr, result.lastMove, prevBoard);
+        },
+        [
+            isEditMode,
+            positionReady,
+            isEditPanelOpen,
+            editFromSquare,
+            position,
+            editTool,
+            editPieceType,
+            editOwner,
+            editPromoted,
+            isReviewMode,
+            promotionSelection,
+            selection,
+            isEngineTurn,
+            applyMoveCommon,
+            applyMoveForReview,
+        ],
+    );
 
-        if (selection.kind === "square") {
-            if (selection.square === square) {
+    const handlePromotionChoice = useCallback(
+        (promote: boolean) => {
+            if (!promotionSelection) return;
+            const { from, to } = promotionSelection;
+            const moveStr = `${from}${to}${promote ? "+" : ""}`;
+            const prevBoard = position.board;
+            // 検討モードでは手番チェックをスキップ
+            const result = applyMoveWithState(position, moveStr, { validateTurn: !isReviewMode });
+            if (!result.ok) {
+                setMessage(result.error ?? "指し手を適用できませんでした");
+                setPromotionSelection(null);
                 setSelection(null);
                 return;
             }
-
-            const legal = await getLegalSet();
-            if (!legal) return;
-
-            const from = selection.square;
-            const to = square;
-            const piece = position.board[from as Square];
-
-            // 成り判定を実行
-            const promotion = determinePromotion(legal, from, to);
-
-            // 【ケース1】成れない場合 → 基本移動を試行
-            if (promotion === "none") {
-                const moveStr = `${from}${to}`;
-                if (!legal.has(moveStr)) {
-                    setMessage("合法手ではありません");
-                    return;
-                }
-                const prevBoard = position.board;
-                const result = applyMoveWithState(position, moveStr, { validateTurn: true });
-                if (!result.ok) {
-                    setMessage(result.error ?? "指し手を適用できませんでした");
-                    return;
-                }
+            if (isReviewMode) {
+                applyMoveForReview(result.next, moveStr, result.lastMove, prevBoard);
+            } else {
                 applyMoveCommon(result.next, moveStr, result.lastMove, prevBoard);
-                return;
             }
-
-            // 【ケース2】強制成り → 自動的に成って移動（ダイアログなし）
-            if (promotion === "forced") {
-                const moveStr = `${from}${to}+`;
-                const prevBoard = position.board;
-                const result = applyMoveWithState(position, moveStr, { validateTurn: true });
-                if (!result.ok) {
-                    setMessage(result.error ?? "指し手を適用できませんでした");
-                    return;
-                }
-                applyMoveCommon(result.next, moveStr, result.lastMove, prevBoard);
-                return;
-            }
-
-            // 【ケース3】任意成り（promotion === 'optional'）
-            // Shift+クリック：即座に成って移動
-            if (shiftKey) {
-                const moveStr = `${from}${to}+`;
-                const prevBoard = position.board;
-                const result = applyMoveWithState(position, moveStr, { validateTurn: true });
-                if (!result.ok) {
-                    setMessage(result.error ?? "指し手を適用できませんでした");
-                    return;
-                }
-                applyMoveCommon(result.next, moveStr, result.lastMove, prevBoard);
-                return;
-            }
-
-            // 通常クリック：成り選択ダイアログを表示
-            if (!piece) {
-                setMessage("駒が見つかりません");
-                return;
-            }
-            setPromotionSelection({ from: from as Square, to: to as Square, piece });
-            return;
-        }
-
-        // 持ち駒を打つ
-        const moveStr = `${selection.piece}*${square}`;
-        const legal = await getLegalSet();
-        if (legal && !legal.has(moveStr)) {
-            setMessage("合法手ではありません");
-            return;
-        }
-        const prevBoard = position.board;
-        const result = applyMoveWithState(position, moveStr, { validateTurn: true });
-        if (!result.ok) {
-            setMessage(result.error ?? "持ち駒を打てませんでした");
-            return;
-        }
-        applyMoveCommon(result.next, moveStr, result.lastMove, prevBoard);
-    };
-
-    const handlePromotionChoice = (promote: boolean) => {
-        if (!promotionSelection) return;
-        const { from, to } = promotionSelection;
-        const moveStr = `${from}${to}${promote ? "+" : ""}`;
-        const prevBoard = position.board;
-        // 検討モードでは手番チェックをスキップ
-        const result = applyMoveWithState(position, moveStr, { validateTurn: !isReviewMode });
-        if (!result.ok) {
-            setMessage(result.error ?? "指し手を適用できませんでした");
             setPromotionSelection(null);
-            setSelection(null);
-            return;
-        }
-        if (isReviewMode) {
-            applyMoveForReview(result.next, moveStr, result.lastMove, prevBoard);
-        } else {
-            applyMoveCommon(result.next, moveStr, result.lastMove, prevBoard);
-        }
-        setPromotionSelection(null);
-    };
+        },
+        [promotionSelection, position, isReviewMode, applyMoveForReview, applyMoveCommon],
+    );
 
-    const handleHandSelect = (piece: PieceType) => {
-        if (!positionReady) {
-            setMessage("局面を読み込み中です。");
-            return;
-        }
-        if (isEditMode) {
-            setMessage("編集モード中は手番入力は無効です。盤面編集パネルを使ってください。");
-            return;
-        }
-        // 検討モードでは手番の持ち駒を選択可能
-        if (!isReviewMode && isEngineTurn(position.turn)) {
-            setMessage("エンジンの手番です。");
-            return;
-        }
-        setSelection({ kind: "hand", piece });
-        setMessage(null);
-    };
+    const handleHandSelect = useCallback(
+        (piece: PieceType) => {
+            if (!positionReady) {
+                setMessage("局面を読み込み中です。");
+                return;
+            }
+            if (isEditMode) {
+                setMessage("編集モード中は手番入力は無効です。盤面編集パネルを使ってください。");
+                return;
+            }
+            // 検討モードでは手番の持ち駒を選択可能
+            if (!isReviewMode && isEngineTurn(position.turn)) {
+                setMessage("エンジンの手番です。");
+                return;
+            }
+            setSelection({ kind: "hand", piece });
+            setMessage(null);
+        },
+        [positionReady, isEditMode, isReviewMode, isEngineTurn, position.turn],
+    );
 
     const loadMoves = useCallback(
         async (
@@ -1861,9 +1900,9 @@ export function ShogiMatch({
                     moves={moves}
                     candidateNote={candidateNote}
                     displaySettings={displaySettings}
-                    onSquareSelect={(sq, shiftKey) => void handleSquareSelect(sq, shiftKey)}
+                    onSquareSelect={handleSquareSelect}
                     onPromotionChoice={handlePromotionChoice}
-                    onFlipBoard={() => setFlipBoard(!flipBoard)}
+                    onFlipBoard={handleFlipBoard}
                     onHandSelect={handleHandSelect}
                     onPiecePointerDown={isEditMode ? handlePiecePointerDown : undefined}
                     onPieceTogglePromote={isEditMode ? handlePieceTogglePromote : undefined}
@@ -1881,7 +1920,7 @@ export function ShogiMatch({
                     onPlySelect={handlePlySelect}
                     // ナビゲーション
                     onBack={navigation.goBack}
-                    onForward={() => navigation.goForward(selectedBranchNodeId ?? undefined)}
+                    onForward={handleKeyboardForward}
                     onToStart={navigation.goToStart}
                     onToEnd={navigation.goToEnd}
                     // 評価値
