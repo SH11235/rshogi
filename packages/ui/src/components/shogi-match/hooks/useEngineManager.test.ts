@@ -87,6 +87,14 @@ describe("useEngineManager", () => {
         sente: { mainMs: 1000, byoyomiMs: 500 },
         gote: { mainMs: 1000, byoyomiMs: 500 },
     };
+    const createMockClocksRef = () => ({
+        current: {
+            sente: { mainMs: 1000, byoyomiMs: 500 },
+            gote: { mainMs: 1000, byoyomiMs: 500 },
+            ticking: null as "sente" | "gote" | null,
+            lastUpdatedAt: Date.now(),
+        },
+    });
 
     const createMockEngineClient = () => {
         const listeners = new Set<(event: EngineEvent) => void>();
@@ -129,6 +137,7 @@ describe("useEngineManager", () => {
         onMatchEnd,
         sides,
         mockClient,
+        clocksRef = createMockClocksRef(),
     }: {
         positionRef: { current: PositionState };
         movesRef: { current: string[] };
@@ -139,6 +148,7 @@ describe("useEngineManager", () => {
             gote: { role: "human" | "engine"; engineId?: string };
         };
         mockClient: ReturnType<typeof createMockEngineClient>;
+        clocksRef?: ReturnType<typeof createMockClocksRef>;
     }) => {
         return renderHook(() =>
             useEngineManager({
@@ -151,6 +161,7 @@ describe("useEngineManager", () => {
                     },
                 ],
                 timeSettings,
+                clocksRef,
                 startSfen: "startpos",
                 movesRef,
                 positionRef,

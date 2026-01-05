@@ -49,6 +49,8 @@ interface UseClockManagerProps {
 interface UseClockManagerReturn {
     /** 現在の時計状態 */
     clocks: TickState;
+    /** 現在の時計状態への参照（リアルタイム参照用） */
+    clocksRef: { readonly current: TickState };
     /** 時計をリセットする */
     resetClocks: (startTick: boolean) => void;
     /** 次の手番に時計を更新する（秒読み時間をリセット） */
@@ -221,6 +223,7 @@ export function useClockManager({
 
     return {
         clocks,
+        clocksRef,
         resetClocks,
         updateClocksForNextTurn,
         stopTicking,

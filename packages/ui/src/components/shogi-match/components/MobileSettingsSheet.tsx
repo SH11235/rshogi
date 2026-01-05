@@ -1,0 +1,362 @@
+import type { Player } from "@shogi/app-core";
+import { type ReactElement, useEffect, useState } from "react";
+import type { ClockSettings } from "../hooks/useClockManager";
+import type { DisplaySettings, SquareNotation } from "../types";
+import type { EngineOption, SideSetting } from "./MatchSettingsPanel";
+
+// =============================================================================
+// NumericInput: 文字列ベースの数値入力コンポーネント
+// =============================================================================
+
+interface NumericInputProps {
+    id: string;
+    value: number;
+    onChange: (value: number) => void;
+    disabled?: boolean;
+    min?: number;
+    className?: string;
+}
+
+/**
+ * 編集中は空欄を許容し、blur時に数値変換する入力コンポーネント
+ * - type="text" + inputMode="numeric" でモバイルで数字キーボードを表示
+ * - 「0を消して3を入力」のような自然な操作が可能
+ */
+function NumericInput({
+    id,
+    value,
+    onChange,
+    disabled = false,
+    min = 0,
+    className,
+}: NumericInputProps): ReactElement {
+    const [inputValue, setInputValue] = useState(String(value));
+
+    // 外部からの値変更を反映（ただし編集中でない場合のみ）
+    useEffect(() => {
+        setInputValue(String(value));
+    }, [value]);
+
+    const handleBlur = () => {
+        // 空文字や無効な値は min に正規化
+        const parsed = parseInt(inputValue, 10);
+        const normalized = Number.isNaN(parsed) ? min : Math.max(min, parsed);
+        setInputValue(String(normalized));
+        onChange(normalized);
+    };
+
+    return (
+        <input
+            id={id}
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            value={inputValue}
+            disabled={disabled}
+            className={`${className} h-10 rounded-md px-3 py-2`}
+            onChange={(e) => setInputValue(e.target.value)}
+            onBlur={handleBlur}
+        />
+    );
+}
+
+interface MobileSettingsSheetProps {
+    // 対局設定
+    sides: { sente: SideSetting; gote: SideSetting };
+    onSidesChange: (sides: { sente: SideSetting; gote: SideSetting }) => void;
+    timeSettings: ClockSettings;
+    onTimeSettingsChange: (settings: ClockSettings) => void;
+    currentTurn: Player;
+    onTurnChange: (turn: Player) => void;
+
+    // エンジン情報
+    uiEngineOptions: EngineOption[];
+
+    // 状態
+    settingsLocked: boolean;
+    isMatchRunning: boolean;
+
+    // アクション
+    onStartMatch?: () => void;
+    onStopMatch?: () => void;
+    onResetToStartpos?: () => void;
+
+    // 表示設定
+    displaySettings: DisplaySettings;
+    onDisplaySettingsChange: (settings: DisplaySettings) => void;
+}
+
+// iOS Safari は16px未満のinput/selectにフォーカスすると自動ズームするため、text-base(16px)を使用
+const selectClassName = "w-full p-2 rounded-lg border border-border bg-background text-base";
+const inputClassName = "w-full border border-border bg-background text-base";
+const labelClassName = "flex flex-col gap-1 text-sm";
+
+/**
+ * モバイル用設定シート（BottomSheet内のコンテンツ）
+ */
+const NOTATION_OPTIONS: { value: SquareNotation; label: string }[] = [
+    { value: "none", label: "非表示" },
+    { value: "sfen", label: "SFEN (5e)" },
+    { value: "japanese", label: "日本式 (５五)" },
+];
+
+export function MobileSettingsSheet({
+    sides,
+    onSidesChange,
+    timeSettings,
+    onTimeSettingsChange,
+    currentTurn,
+    onTurnChange,
+    uiEngineOptions,
+    settingsLocked,
+    isMatchRunning,
+    onStartMatch,
+    onStopMatch,
+    onResetToStartpos,
+    displaySettings,
+    onDisplaySettingsChange,
+}: MobileSettingsSheetProps): ReactElement {
+    // 選択肢の値を生成: "human" または "engine:{engineId}"
+    const getSelectorValue = (setting: SideSetting): string => {
+        if (setting.role === "human") return "human";
+        return `engine:${setting.engineId ?? uiEngineOptions[0]?.id ?? ""}`;
+    };
+
+    const handleSelectorChange = (side: Player, value: string) => {
+        if (value === "human") {
+            onSidesChange({
+                ...sides,
+                [side]: { role: "human", engineId: undefined },
+            });
+        } else if (value.startsWith("engine:")) {
+            const engineId = value.slice("engine:".length);
+            onSidesChange({
+                ...sides,
+                [side]: { role: "engine", engineId },
+            });
+        }
+    };
+
+    return (
+        <div className="flex flex-col gap-4 w-full max-w-full overflow-hidden">
+            {/* 対局中のロック表示 */}
+            {settingsLocked && (
+                <div className="flex items-center gap-2 p-2 rounded-lg bg-destructive/10 text-destructive text-sm">
+                    <span>対局中は設定を変更できません</span>
+                </div>
+            )}
+
+            {/* 手番設定 */}
+            <label className={labelClassName}>
+                <span className="font-medium">手番（開始時）</span>
+                <select
+                    value={currentTurn}
+                    onChange={(e) => onTurnChange(e.target.value as Player)}
+                    disabled={settingsLocked}
+                    className={selectClassName}
+                >
+                    <option value="sente">先手</option>
+                    <option value="gote">後手</option>
+                </select>
+            </label>
+
+            {/* 先手/後手設定 */}
+            <div className="grid grid-cols-2 gap-3 [&>label]:min-w-0">
+                <label className={labelClassName}>
+                    <span className="font-medium text-wafuu-shu">☗ 先手</span>
+                    <select
+                        value={getSelectorValue(sides.sente)}
+                        onChange={(e) => handleSelectorChange("sente", e.target.value)}
+                        disabled={settingsLocked}
+                        className={selectClassName}
+                    >
+                        <option value="human">人間</option>
+                        {uiEngineOptions.map((opt) => (
+                            <option key={opt.id} value={`engine:${opt.id}`}>
+                                {opt.label}
+                            </option>
+                        ))}
+                    </select>
+                </label>
+                <label className={labelClassName}>
+                    <span className="font-medium text-wafuu-ai">☖ 後手</span>
+                    <select
+                        value={getSelectorValue(sides.gote)}
+                        onChange={(e) => handleSelectorChange("gote", e.target.value)}
+                        disabled={settingsLocked}
+                        className={selectClassName}
+                    >
+                        <option value="human">人間</option>
+                        {uiEngineOptions.map((opt) => (
+                            <option key={opt.id} value={`engine:${opt.id}`}>
+                                {opt.label}
+                            </option>
+                        ))}
+                    </select>
+                </label>
+            </div>
+
+            {/* 持ち時間設定 */}
+            <div className="space-y-2">
+                <div className="font-medium text-sm">持ち時間</div>
+                <div className="grid grid-cols-2 gap-2 [&>label]:min-w-0">
+                    <label htmlFor="mobile-sente-main" className={labelClassName}>
+                        <span className="text-xs text-muted-foreground">先手 持ち時間(秒)</span>
+                        <NumericInput
+                            id="mobile-sente-main"
+                            value={Math.floor(timeSettings.sente.mainMs / 1000)}
+                            disabled={settingsLocked}
+                            className={inputClassName}
+                            onChange={(v) =>
+                                onTimeSettingsChange({
+                                    ...timeSettings,
+                                    sente: { ...timeSettings.sente, mainMs: v * 1000 },
+                                })
+                            }
+                        />
+                    </label>
+                    <label htmlFor="mobile-sente-byoyomi" className={labelClassName}>
+                        <span className="text-xs text-muted-foreground">先手 秒読み(秒)</span>
+                        <NumericInput
+                            id="mobile-sente-byoyomi"
+                            value={Math.floor(timeSettings.sente.byoyomiMs / 1000)}
+                            disabled={settingsLocked}
+                            className={inputClassName}
+                            onChange={(v) =>
+                                onTimeSettingsChange({
+                                    ...timeSettings,
+                                    sente: { ...timeSettings.sente, byoyomiMs: v * 1000 },
+                                })
+                            }
+                        />
+                    </label>
+                    <label htmlFor="mobile-gote-main" className={labelClassName}>
+                        <span className="text-xs text-muted-foreground">後手 持ち時間(秒)</span>
+                        <NumericInput
+                            id="mobile-gote-main"
+                            value={Math.floor(timeSettings.gote.mainMs / 1000)}
+                            disabled={settingsLocked}
+                            className={inputClassName}
+                            onChange={(v) =>
+                                onTimeSettingsChange({
+                                    ...timeSettings,
+                                    gote: { ...timeSettings.gote, mainMs: v * 1000 },
+                                })
+                            }
+                        />
+                    </label>
+                    <label htmlFor="mobile-gote-byoyomi" className={labelClassName}>
+                        <span className="text-xs text-muted-foreground">後手 秒読み(秒)</span>
+                        <NumericInput
+                            id="mobile-gote-byoyomi"
+                            value={Math.floor(timeSettings.gote.byoyomiMs / 1000)}
+                            disabled={settingsLocked}
+                            className={inputClassName}
+                            onChange={(v) =>
+                                onTimeSettingsChange({
+                                    ...timeSettings,
+                                    gote: { ...timeSettings.gote, byoyomiMs: v * 1000 },
+                                })
+                            }
+                        />
+                    </label>
+                </div>
+            </div>
+
+            {/* アクションボタン（頻繁に使うので上部に配置） */}
+            <div className="flex justify-center gap-3 pt-3 border-t border-border">
+                {isMatchRunning ? (
+                    onStopMatch && (
+                        <button
+                            type="button"
+                            onClick={onStopMatch}
+                            className="flex-1 px-6 py-3 bg-destructive text-destructive-foreground rounded-lg font-medium shadow-md active:scale-95 transition-transform"
+                        >
+                            対局を停止
+                        </button>
+                    )
+                ) : (
+                    <>
+                        {onResetToStartpos && (
+                            <button
+                                type="button"
+                                onClick={onResetToStartpos}
+                                className="px-4 py-3 border border-border rounded-lg font-medium hover:bg-muted active:scale-95 transition-all"
+                            >
+                                平手に戻す
+                            </button>
+                        )}
+                        {onStartMatch && (
+                            <button
+                                type="button"
+                                onClick={onStartMatch}
+                                className="flex-1 px-6 py-3 bg-primary text-primary-foreground rounded-lg font-medium shadow-md active:scale-95 transition-transform"
+                            >
+                                対局を開始
+                            </button>
+                        )}
+                    </>
+                )}
+            </div>
+
+            {/* 表示設定 */}
+            <div className="space-y-3 pt-3 border-t border-border">
+                <div className="font-medium text-sm">表示設定</div>
+
+                {/* 座標表示 */}
+                <label htmlFor="mobile-notation" className={labelClassName}>
+                    <span className="text-xs text-muted-foreground">座標表示</span>
+                    <select
+                        id="mobile-notation"
+                        value={displaySettings.squareNotation}
+                        onChange={(e) =>
+                            onDisplaySettingsChange({
+                                ...displaySettings,
+                                squareNotation: e.target.value as SquareNotation,
+                            })
+                        }
+                        className={selectClassName}
+                    >
+                        {NOTATION_OPTIONS.map((opt) => (
+                            <option key={opt.value} value={opt.value}>
+                                {opt.label}
+                            </option>
+                        ))}
+                    </select>
+                </label>
+
+                {/* チェックボックス設定 */}
+                <div className="space-y-2">
+                    <label className="flex items-center gap-2 text-sm">
+                        <input
+                            type="checkbox"
+                            checked={displaySettings.showBoardLabels}
+                            onChange={(e) =>
+                                onDisplaySettingsChange({
+                                    ...displaySettings,
+                                    showBoardLabels: e.target.checked,
+                                })
+                            }
+                            className="w-4 h-4"
+                        />
+                        <span>盤外ラベル（筋・段）を表示</span>
+                    </label>
+                    <label className="flex items-center gap-2 text-sm">
+                        <input
+                            type="checkbox"
+                            checked={displaySettings.highlightLastMove}
+                            onChange={(e) =>
+                                onDisplaySettingsChange({
+                                    ...displaySettings,
+                                    highlightLastMove: e.target.checked,
+                                })
+                            }
+                            className="w-4 h-4"
+                        />
+                        <span>最終手を強調表示</span>
+                    </label>
+                </div>
+            </div>
+        </div>
+    );
+}

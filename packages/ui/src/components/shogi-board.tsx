@@ -37,6 +37,8 @@ export interface ShogiBoardProps {
         piece: ShogiBoardPiece,
         event: React.MouseEvent<HTMLButtonElement>,
     ) => void;
+    /** ドラッグ操作を有効にするか（trueの場合、タッチスクロールを防止） */
+    isDraggable?: boolean;
     /** マス内座標表示形式 */
     squareNotation?: SquareNotation;
     /** 盤外ラベル（筋・段）を表示するか */
@@ -67,6 +69,7 @@ export function ShogiBoard({
     flipBoard = false,
     onPiecePointerDown,
     onPieceTogglePromote,
+    isDraggable = false,
     squareNotation = "none",
     showBoardLabels = false,
 }: ShogiBoardProps): ReactElement {
@@ -74,15 +77,18 @@ export function ShogiBoard({
     const { files, ranks } = getBoardLabels(flipBoard);
 
     return (
-        <div className="relative inline-block rounded-2xl border border-[hsl(var(--shogi-outer-border))] bg-[radial-gradient(circle_at_30%_20%,#f9e7c9,#e1c08d)] p-2 shadow-[0_10px_30px_rgba(0,0,0,0.18)]">
-            <div className="pointer-events-none absolute inset-2 rounded-xl border border-white/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]" />
-            {/* 盤外ラベル: 筋（上） - スペースを常に確保、左右対称マージン */}
+        <div className="relative inline-block rounded-lg border border-[hsl(var(--shogi-outer-border))] bg-[radial-gradient(circle_at_30%_20%,#f9e7c9,#e1c08d)] shadow-[0_10px_30px_rgba(0,0,0,0.18)]">
+            <div className="pointer-events-none absolute inset-0 rounded-lg border border-white/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]" />
+            {/* 盤外ラベル: 筋（上） */}
             <div
-                className="my-1 mx-6 grid grid-cols-9 text-center text-[11px] font-semibold"
+                className="py-0.5 grid grid-cols-9 text-center text-[11px] font-semibold"
                 style={{
                     visibility: showBoardLabels ? "visible" : "hidden",
                     color: "hsl(var(--wafuu-sumi) / 0.7)",
                     textShadow: "0 1px 0 rgba(255,255,255,0.5)",
+                    // 左側: 段ラベル分の余白、右側: 段ラベル幅分
+                    marginLeft: "1.25em",
+                    marginRight: "1.25em",
                 }}
             >
                 {files.map((label) => (
@@ -91,7 +97,7 @@ export function ShogiBoard({
             </div>
             <div className="flex">
                 {/* 左パディング - 右ラベルと対称のスペース確保 */}
-                <div className="mx-1 flex flex-col justify-around text-[11px]" aria-hidden="true">
+                <div className="px-0.5 flex flex-col justify-around text-[11px]" aria-hidden="true">
                     {ranks.map((label) => (
                         <span key={`left-${label}`} style={{ visibility: "hidden" }}>
                             {label}
@@ -117,7 +123,7 @@ export function ShogiBoard({
                             return (
                                 <div
                                     key={`${rowIndex}-${columnIndex}-${cell.id}`}
-                                    className="relative aspect-square min-w-[var(--shogi-cell-size,48px)] border-b border-r border-[hsl(var(--shogi-border))]"
+                                    className="relative aspect-square w-[var(--shogi-cell-size,48px)] border-b border-r border-[hsl(var(--shogi-border))]"
                                 >
                                     <button
                                         type="button"
@@ -125,6 +131,10 @@ export function ShogiBoard({
                                         onPointerDown={(e) => {
                                             lastPointerTypeRef.current = e.pointerType;
                                             if (cell.piece && onPiecePointerDown) {
+                                                // タッチ操作時のみpreventDefault（マウスクリックのフォーカス処理は維持）
+                                                if (e.pointerType === "touch") {
+                                                    e.preventDefault();
+                                                }
                                                 onPiecePointerDown(cell.id, cell.piece, e);
                                             }
                                         }}
@@ -162,6 +172,10 @@ export function ShogiBoard({
                                         className={cn(
                                             "absolute inset-0 overflow-hidden text-base font-semibold transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-[hsl(var(--wafuu-shu))]/70 focus-visible:ring-offset-transparent",
                                             "shadow-[inset_0_1px_0_rgba(255,255,255,0.5)] hover:ring-2 hover:ring-inset hover:ring-[hsl(var(--shogi-border))]",
+                                            // タッチ選択・長押しメニュー防止
+                                            "select-none [-webkit-touch-callout:none]",
+                                            // ドラッグ可能時はスクロールも防止
+                                            isDraggable ? "touch-none" : "touch-manipulation",
                                             // 背景色: ハイライト時は専用色、通常時はチェッカーパターン
                                             !isHighlighted && baseTone,
                                             !isHighlighted &&
@@ -265,9 +279,9 @@ export function ShogiBoard({
                         }),
                     )}
                 </div>
-                {/* 盤外ラベル: 段（右） - スペースを常に確保 */}
+                {/* 盤外ラベル: 段（右） */}
                 <div
-                    className="mx-1 flex flex-col justify-around text-[11px] font-semibold"
+                    className="px-0.5 flex flex-col justify-around text-[11px] font-semibold"
                     style={{
                         visibility: showBoardLabels ? "visible" : "hidden",
                         color: "hsl(var(--wafuu-sumi) / 0.7)",
@@ -280,7 +294,14 @@ export function ShogiBoard({
                 </div>
             </div>
             {/* 下パディング - 上ラベルと対称のスペース確保 */}
-            <div className="my-1 mx-6 grid grid-cols-9 text-center text-[11px]" aria-hidden="true">
+            <div
+                className="py-0.5 grid grid-cols-9 text-center text-[11px]"
+                aria-hidden="true"
+                style={{
+                    marginLeft: "1.25em",
+                    marginRight: "1.25em",
+                }}
+            >
                 {files.map((label) => (
                     <span key={`bottom-${label}`} style={{ visibility: "hidden" }}>
                         {label}
