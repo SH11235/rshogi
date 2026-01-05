@@ -10,16 +10,22 @@ interface MobileClockDisplayProps {
     clocks: TickState;
     /** 先手・後手の設定 */
     sides: { sente: SideSetting; gote: SideSetting };
+    /** 対局が進行中かどうか */
+    isRunning?: boolean;
 }
 
 /**
  * モバイル用コンパクトクロック表示
  * 対局中に盤面の上に横並びで表示
  */
-export function MobileClockDisplay({ clocks, sides }: MobileClockDisplayProps): ReactElement {
+export function MobileClockDisplay({
+    clocks,
+    sides,
+    isRunning = true,
+}: MobileClockDisplayProps): ReactElement {
     const renderClock = (side: Player) => {
         const clock = clocks[side];
-        const ticking = clocks.ticking === side;
+        const ticking = isRunning && clocks.ticking === side;
         const isHuman = sides[side].role === "human";
         const sideMarker = side === "sente" ? "☗" : "☖";
         const colorClass = side === "sente" ? "text-wafuu-shu" : "text-wafuu-ai";

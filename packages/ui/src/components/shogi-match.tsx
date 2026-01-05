@@ -1889,8 +1889,8 @@ export function ShogiMatch({
                     evalMate={evalHistory[navigation.state.currentPly]?.evalMate ?? undefined}
                     // 対局コントロール
                     onStop={pauseAutoPlay}
+                    onStart={resumeAutoPlay}
                     onResetToStartpos={handleResetToStartpos}
-                    onStartReview={handleStartReview}
                     // 対局設定
                     sides={sides}
                     onSidesChange={setSides}

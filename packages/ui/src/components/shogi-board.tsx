@@ -117,7 +117,7 @@ export function ShogiBoard({
                             return (
                                 <div
                                     key={`${rowIndex}-${columnIndex}-${cell.id}`}
-                                    className="relative aspect-square min-w-[var(--shogi-cell-size,48px)] border-b border-r border-[hsl(var(--shogi-border))]"
+                                    className="relative aspect-square w-[var(--shogi-cell-size,48px)] border-b border-r border-[hsl(var(--shogi-border))]"
                                 >
                                     <button
                                         type="button"

@@ -88,7 +88,6 @@ export interface MobileLayoutProps {
     onStop?: () => void;
     onStart?: () => void;
     onResetToStartpos?: () => void;
-    onStartReview?: () => void;
 
     // 対局設定（モバイル用BottomSheet）
     sides: { sente: SideSetting; gote: SideSetting };
@@ -160,8 +159,8 @@ export function MobileLayout({
     evalCp,
     evalMate,
     onStop,
+    onStart,
     onResetToStartpos,
-    onStartReview,
     sides,
     onSidesChange,
     timeSettings,
@@ -177,8 +176,7 @@ export function MobileLayout({
     isDraggingPiece,
 }: MobileLayoutProps): ReactElement {
     // モバイル時のセルサイズを計算
-    const mode = gameMode === "playing" ? "playing" : "reviewing";
-    const cellSize = useMobileCellSize(mode);
+    const cellSize = useMobileCellSize();
 
     // 設定BottomSheetの状態
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -218,8 +216,10 @@ export function MobileLayout({
                 </button>
             </div>
 
-            {/* クロック表示（対局中のみ） */}
-            {isMatchRunning && <MobileClockDisplay clocks={clocks} sides={sides} />}
+            {/* クロック表示（対局モード時は常に表示） */}
+            {(isMatchRunning || gameMode === "playing") && (
+                <MobileClockDisplay clocks={clocks} sides={sides} isRunning={isMatchRunning} />
+            )}
 
             {/* 盤面セクション */}
             <div
@@ -334,6 +334,21 @@ export function MobileLayout({
                         </div>
                     )}
                 </div>
+            ) : isReviewMode && moves.length === 0 ? (
+                /* 対局準備モード: 開始ボタンのみ */
+                <div className="w-full mt-2">
+                    <div className="flex justify-center gap-3 py-4">
+                        {onStart && (
+                            <button
+                                type="button"
+                                onClick={onStart}
+                                className="px-8 py-3 bg-primary text-primary-foreground rounded-lg font-medium shadow-md active:scale-95 transition-transform"
+                            >
+                                対局を開始
+                            </button>
+                        )}
+                    </div>
+                </div>
             ) : isReviewMode ? (
                 /* 検討モード: 評価値バー + ナビゲーション + 操作ボタン */
                 <div className="w-full mt-2 space-y-1">
@@ -372,13 +387,13 @@ export function MobileLayout({
                                 平手に戻す
                             </button>
                         )}
-                        {onStartReview && (
+                        {onStart && (
                             <button
                                 type="button"
-                                onClick={onStartReview}
+                                onClick={onStart}
                                 className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium shadow-md active:scale-95 transition-all"
                             >
-                                対局開始
+                                対局を開始
                             </button>
                         )}
                     </div>
@@ -418,9 +433,9 @@ export function MobileLayout({
                     settingsLocked={settingsLocked}
                     isMatchRunning={isMatchRunning}
                     onStartMatch={
-                        onStartReview
+                        onStart
                             ? () => {
-                                  onStartReview();
+                                  onStart();
                                   setIsSettingsOpen(false);
                               }
                             : undefined
