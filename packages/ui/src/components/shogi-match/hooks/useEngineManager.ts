@@ -667,7 +667,7 @@ export function useEngineManager({
                 const clocks = clocksRef.current;
                 const clockState = clocks[side];
                 const elapsedSinceUpdate = Date.now() - clocks.lastUpdatedAt;
-                let remainingMainMs = Math.max(0, clockState.mainMs - elapsedSinceUpdate);
+                const remainingMainMs = Math.max(0, clockState.mainMs - elapsedSinceUpdate);
                 let remainingByoyomiMs = clockState.byoyomiMs;
 
                 // 持ち時間が消費された場合は秒読みから減らす
