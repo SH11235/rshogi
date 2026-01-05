@@ -8,7 +8,7 @@ import type {
 } from "@shogi/engine-client";
 import { getEngineErrorInfo } from "@shogi/engine-client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ClockSettings } from "./useClockManager";
+import type { ClockSettings, TickState } from "./useClockManager";
 
 type EngineStatus = "idle" | "thinking" | "error";
 
@@ -74,6 +74,8 @@ interface UseEngineManagerProps {
     engineOptions: EngineOption[];
     /** 時間設定 */
     timeSettings: ClockSettings;
+    /** 現在の時計状態への参照（リアルタイムの残り時間計算用） */
+    clocksRef: { readonly current: TickState };
     /** 開始局面のSFEN */
     startSfen: string;
     /** 棋譜の ref */
@@ -226,7 +228,8 @@ export function determineBestmoveAction(params: BestmoveHandlerParams): Bestmove
 export function useEngineManager({
     sides,
     engineOptions,
-    timeSettings,
+    timeSettings: _timeSettings,
+    clocksRef,
     startSfen,
     movesRef,
     positionRef,
@@ -658,8 +661,29 @@ export function useEngineManager({
 
             try {
                 await client.loadPosition(startSfen, movesRef.current);
+
+                // UIタイマーの現在の残り時間を計算してエンジンに渡す
+                // これにより、タイマー開始からloadPosition完了までの経過時間を考慮できる
+                const clocks = clocksRef.current;
+                const clockState = clocks[side];
+                const elapsedSinceUpdate = Date.now() - clocks.lastUpdatedAt;
+                let remainingMainMs = Math.max(0, clockState.mainMs - elapsedSinceUpdate);
+                let remainingByoyomiMs = clockState.byoyomiMs;
+
+                // 持ち時間が消費された場合は秒読みから減らす
+                if (remainingMainMs <= 0 && clockState.mainMs > 0) {
+                    const overTime = elapsedSinceUpdate - clockState.mainMs;
+                    remainingByoyomiMs = Math.max(0, clockState.byoyomiMs - overTime);
+                } else if (clockState.mainMs === 0) {
+                    // 持ち時間なしの秒読みモード
+                    remainingByoyomiMs = Math.max(0, clockState.byoyomiMs - elapsedSinceUpdate);
+                }
+
+                // 最小100msを確保
+                const effectiveByoyomiMs = Math.max(100, remainingByoyomiMs);
+
                 const handle = await client.search({
-                    limits: { byoyomiMs: timeSettings[side].byoyomiMs },
+                    limits: { byoyomiMs: effectiveByoyomiMs },
                     ponder: false,
                 });
 
@@ -669,7 +693,7 @@ export function useEngineManager({
                 searchState.pending = false;
             }
         },
-        [ensureEngineReady, movesRef, positionReady, startSfen, timeSettings],
+        [clocksRef, ensureEngineReady, movesRef, positionReady, startSfen],
     );
 
     // エンジンのrole変更時に破棄

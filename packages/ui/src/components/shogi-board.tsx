@@ -74,15 +74,18 @@ export function ShogiBoard({
     const { files, ranks } = getBoardLabels(flipBoard);
 
     return (
-        <div className="relative inline-block rounded-2xl border border-[hsl(var(--shogi-outer-border))] bg-[radial-gradient(circle_at_30%_20%,#f9e7c9,#e1c08d)] p-2 shadow-[0_10px_30px_rgba(0,0,0,0.18)]">
-            <div className="pointer-events-none absolute inset-2 rounded-xl border border-white/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]" />
-            {/* 盤外ラベル: 筋（上） - スペースを常に確保、左右対称マージン */}
+        <div className="relative inline-block rounded-lg border border-[hsl(var(--shogi-outer-border))] bg-[radial-gradient(circle_at_30%_20%,#f9e7c9,#e1c08d)] shadow-[0_10px_30px_rgba(0,0,0,0.18)]">
+            <div className="pointer-events-none absolute inset-0 rounded-lg border border-white/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]" />
+            {/* 盤外ラベル: 筋（上） */}
             <div
-                className="my-1 mx-6 grid grid-cols-9 text-center text-[11px] font-semibold"
+                className="py-0.5 grid grid-cols-9 text-center text-[11px] font-semibold"
                 style={{
                     visibility: showBoardLabels ? "visible" : "hidden",
                     color: "hsl(var(--wafuu-sumi) / 0.7)",
                     textShadow: "0 1px 0 rgba(255,255,255,0.5)",
+                    // 左側: 段ラベル分の余白、右側: 段ラベル幅分
+                    marginLeft: "1.25em",
+                    marginRight: "1.25em",
                 }}
             >
                 {files.map((label) => (
@@ -91,7 +94,7 @@ export function ShogiBoard({
             </div>
             <div className="flex">
                 {/* 左パディング - 右ラベルと対称のスペース確保 */}
-                <div className="mx-1 flex flex-col justify-around text-[11px]" aria-hidden="true">
+                <div className="px-0.5 flex flex-col justify-around text-[11px]" aria-hidden="true">
                     {ranks.map((label) => (
                         <span key={`left-${label}`} style={{ visibility: "hidden" }}>
                             {label}
@@ -273,9 +276,9 @@ export function ShogiBoard({
                         }),
                     )}
                 </div>
-                {/* 盤外ラベル: 段（右） - スペースを常に確保 */}
+                {/* 盤外ラベル: 段（右） */}
                 <div
-                    className="mx-1 flex flex-col justify-around text-[11px] font-semibold"
+                    className="px-0.5 flex flex-col justify-around text-[11px] font-semibold"
                     style={{
                         visibility: showBoardLabels ? "visible" : "hidden",
                         color: "hsl(var(--wafuu-sumi) / 0.7)",
@@ -288,7 +291,14 @@ export function ShogiBoard({
                 </div>
             </div>
             {/* 下パディング - 上ラベルと対称のスペース確保 */}
-            <div className="my-1 mx-6 grid grid-cols-9 text-center text-[11px]" aria-hidden="true">
+            <div
+                className="py-0.5 grid grid-cols-9 text-center text-[11px]"
+                aria-hidden="true"
+                style={{
+                    marginLeft: "1.25em",
+                    marginRight: "1.25em",
+                }}
+            >
                 {files.map((label) => (
                     <span key={`bottom-${label}`} style={{ visibility: "hidden" }}>
                         {label}

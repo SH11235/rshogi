@@ -106,10 +106,9 @@ export const MobileBoardSection = memo(function MobileBoardSection({
     const cellSize = useMobileCellSize({ gameMode, hasKifuMoves });
 
     // 盤面の幅を計算（9セル + 盤面装飾）
-    // ShogiBoard: p-2 (8px×2=16) + border (1px×2=2) + mx-1 (4px×2=8) + border-l (1px) = 27px
-    // 選択リング ring-[3px] が外側にはみ出すため追加余裕が必要
-    // 余裕を持たせて40pxに設定
-    const boardWidth = cellSize * 9 + 40;
+    // ShogiBoard: border (1px×2=2) + 段ラベル左右 (px-0.5×2 + 文字幅) × 2 ≈ 30px + border-l (1px)
+    // 余裕を持たせて 20px に設定（p-2 削除、マージン縮小後）
+    const boardWidth = cellSize * 9 + 20;
 
     return (
         <div

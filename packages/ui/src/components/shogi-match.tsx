@@ -396,7 +396,7 @@ export function ShogiMatch({
     const stopAllEnginesRef = useRef<() => Promise<void>>(async () => {});
 
     // 時計管理フックを使用
-    const { clocks, resetClocks, updateClocksForNextTurn, stopTicking, startTicking } =
+    const { clocks, clocksRef, resetClocks, updateClocksForNextTurn, stopTicking, startTicking } =
         useClockManager({
             timeSettings,
             isMatchRunning,
@@ -489,6 +489,7 @@ export function ShogiMatch({
         sides,
         engineOptions,
         timeSettings,
+        clocksRef,
         startSfen,
         movesRef,
         positionRef,
