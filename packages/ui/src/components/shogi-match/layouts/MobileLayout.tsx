@@ -316,7 +316,7 @@ export function MobileLayout({
                         />
                     </div>
 
-                    {/* ナビゲーションボタン */}
+                    {/* ナビゲーションボタン（設定ボタン統合） */}
                     {onBack && onForward && onToStart && onToEnd && (
                         <MobileNavigation
                             currentPly={currentPly}
@@ -325,6 +325,7 @@ export function MobileLayout({
                             onForward={onForward}
                             onToStart={onToStart}
                             onToEnd={onToEnd}
+                            onSettingsClick={() => setIsSettingsOpen(true)}
                         />
                     )}
 
@@ -388,15 +389,18 @@ export function MobileLayout({
                 </div>
             )}
 
-            {/* FAB: 設定ボタン（右下固定） */}
-            <button
-                type="button"
-                onClick={() => setIsSettingsOpen(true)}
-                className="fixed bottom-4 right-4 w-14 h-14 rounded-full bg-primary text-primary-foreground shadow-lg flex items-center justify-center text-2xl active:scale-95 transition-transform z-40"
-                aria-label="対局設定を開く"
-            >
-                ⚙️
-            </button>
+            {/* FAB: 設定ボタン（右下固定）
+                検討モードで棋譜がある場合は、ナビゲーションバーに設定ボタンがあるので非表示 */}
+            {!(isReviewMode && totalPly > 0) && (
+                <button
+                    type="button"
+                    onClick={() => setIsSettingsOpen(true)}
+                    className="fixed bottom-4 right-4 w-14 h-14 rounded-full bg-primary text-primary-foreground shadow-lg flex items-center justify-center text-2xl active:scale-95 transition-transform z-40"
+                    aria-label="対局設定を開く"
+                >
+                    ⚙️
+                </button>
+            )}
 
             {/* 設定BottomSheet */}
             <BottomSheet

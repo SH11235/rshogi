@@ -16,6 +16,8 @@ export interface MobileNavigationProps {
     onToEnd: () => void;
     /** 無効状態 */
     disabled?: boolean;
+    /** 設定ボタンクリック（指定時は右端に設定ボタンを表示） */
+    onSettingsClick?: () => void;
 }
 
 /**
@@ -29,6 +31,7 @@ export function MobileNavigation({
     onToStart,
     onToEnd,
     disabled = false,
+    onSettingsClick,
 }: MobileNavigationProps): ReactElement {
     const canGoBack = currentPly > 0;
     const canGoForward = currentPly < totalPly;
@@ -111,6 +114,24 @@ export function MobileNavigation({
             >
                 ⏭
             </button>
+
+            {/* 設定ボタン（検討モード時にFABの代わりに表示） */}
+            {onSettingsClick && (
+                <button
+                    type="button"
+                    onClick={onSettingsClick}
+                    className={cn(
+                        "w-10 h-10 flex items-center justify-center rounded-lg text-lg",
+                        "bg-primary text-primary-foreground",
+                        "shadow-md transition-all",
+                        "hover:bg-primary/90 active:scale-95",
+                    )}
+                    title="設定"
+                    aria-label="設定を開く"
+                >
+                    ⚙️
+                </button>
+            )}
         </div>
     );
 }
