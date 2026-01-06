@@ -49,9 +49,15 @@ impl Feature for HalfKA_hm {
     /// 特徴量の次元数: BASE (45×1629) = 73,305
     const DIMENSIONS: usize = HALFKA_HM_DIMENSIONS;
 
-    /// 同時にアクティブになる最大数
-    /// 合法局面では盤上駒 + 手駒 + 両王 = 40駒
-    /// Factorization無し（coalesce済み）なので MAX_ACTIVE = 40
+    /// 同時にアクティブになる最大数（合法局面での理論上限）
+    ///
+    /// 将棋の合法局面では駒の総数は40個固定:
+    /// - 盤上駒（王含む）+ 手駒 = 40
+    ///
+    /// coalesce済みモデルでは各駒が1特徴量なので MAX_ACTIVE = 40。
+    ///
+    /// 注意: この値は理論上限。実際のIndexListは`MAX_ACTIVE_FEATURES = 54`を使用し、
+    /// テスト用の非合法局面（駒数超過）にも対応できる安全マージンを持つ。
     const MAX_ACTIVE: usize = 40;
 
     /// 自玉が動いた場合に全計算

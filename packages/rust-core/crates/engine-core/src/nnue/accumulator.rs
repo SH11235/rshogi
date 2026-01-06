@@ -24,10 +24,17 @@ use std::ops::{Deref, DerefMut};
 /// 余裕を持たせて16
 pub const MAX_CHANGED_FEATURES: usize = 16;
 
-/// 全特徴量取得での最大数
-/// HalfKP: 盤上38 + 手駒14 = 52
-/// HalfKA_hm^（coalesced）: 盤上38 + 自玉1 + 敵玉1 + 手駒14 = 54
-/// MAX(HalfKP, HalfKA) = 54
+/// IndexListの容量（全特徴量取得用）
+///
+/// アーキテクチャごとの理論上限:
+/// - HalfKP: 盤上38 + 手駒14 = 52
+/// - HalfKA_hm^（coalesced）: 盤上38 + 自玉1 + 敵玉1 + 手駒14 = 54
+///
+/// この値は`Feature::MAX_ACTIVE`（合法局面での最大値）より大きく設定し、
+/// テスト用の非合法局面にも安全に対応できるマージンを持たせている。
+///
+/// 注意: 合法局面では Feature::MAX_ACTIVE を超えることはないが、
+/// SFEN入力で非合法局面が来た場合にもパニックしないよう、余裕を持たせている。
 pub const MAX_ACTIVE_FEATURES: usize = 54;
 
 /// collect_path での最大パス長（find_usable_accumulator の MAX_DEPTH と同じ）

@@ -242,6 +242,37 @@ impl NetworkHalfKA {
             AffineTransform::read(reader)?
         };
 
+        // ファイル残余データの検証（factorizedモデル検出）
+        // coalesce済みモデルでは、全層読み込み後にデータが残らない。
+        // factorizedモデル（74,934次元）を誤って読んだ場合、
+        // FTが73,305次元分しか読まないため、余りデータが発生する。
+        // 余り = (74,934 - 73,305) × 256 × 2 = 834,048 bytes
+        let mut probe = [0u8; 1];
+        match reader.read(&mut probe) {
+            Ok(0) => {
+                // EOF到達 - 正常（coalesce済みモデル）
+            }
+            Ok(_) => {
+                // 余りデータあり - おそらくfactorizedモデル
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "NNUE file has unexpected trailing data.\n\
+                     This likely indicates a factorized (non-coalesced) model.\n\
+                     This engine only supports coalesced models (73,305 dimensions).\n\n\
+                     To fix: Re-export the model using nnue-pytorch serialize.py:\n\
+                       python serialize.py model.ckpt output.nnue\n\n\
+                     The serialize.py script automatically coalesces factor weights.",
+                ));
+            }
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                // EOF - 正常
+            }
+            Err(e) => {
+                // その他のIOエラー
+                return Err(e);
+            }
+        }
+
         Ok(Self {
             feature_transformer,
             hidden1,

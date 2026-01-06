@@ -25,6 +25,16 @@ use crate::position::Position;
 use crate::types::Color;
 use std::io::{self, Read};
 
+/// 特徴インデックスの範囲外アクセス時のパニック
+///
+/// cold属性により、この関数は分岐予測で「呼ばれない」と判断され、
+/// 通常経路の性能に影響しない。
+#[cold]
+#[inline(never)]
+fn feature_index_oob(index: usize, max: usize) -> ! {
+    panic!("Feature index out of range: {index} (max: {max})")
+}
+
 /// HalfKA_hm^用のFeatureTransformer
 #[repr(C, align(64))]
 pub struct FeatureTransformerHalfKA {
@@ -233,14 +243,10 @@ impl FeatureTransformerHalfKA {
     #[inline]
     fn add_weights(&self, accumulation: &mut [i16; TRANSFORMED_FEATURE_DIMENSIONS], index: usize) {
         let offset = index * TRANSFORMED_FEATURE_DIMENSIONS;
-        // debugビルドではpanic、releaseではUB回避のため早期リターン
-        debug_assert!(
-            offset + TRANSFORMED_FEATURE_DIMENSIONS <= self.weights.len(),
-            "Feature index {index} out of range (max: {})",
-            self.weights.len() / TRANSFORMED_FEATURE_DIMENSIONS
-        );
+        // OOBは即座にパニック（debug/release両方で検知）
+        // 通常経路では分岐予測が当たり、性能影響はほぼゼロ
         if offset + TRANSFORMED_FEATURE_DIMENSIONS > self.weights.len() {
-            return;
+            feature_index_oob(index, self.weights.len() / TRANSFORMED_FEATURE_DIMENSIONS);
         }
 
         let weights = &self.weights[offset..offset + TRANSFORMED_FEATURE_DIMENSIONS];
@@ -310,14 +316,10 @@ impl FeatureTransformerHalfKA {
     #[inline]
     fn sub_weights(&self, accumulation: &mut [i16; TRANSFORMED_FEATURE_DIMENSIONS], index: usize) {
         let offset = index * TRANSFORMED_FEATURE_DIMENSIONS;
-        // debugビルドではpanic、releaseではUB回避のため早期リターン
-        debug_assert!(
-            offset + TRANSFORMED_FEATURE_DIMENSIONS <= self.weights.len(),
-            "Feature index {index} out of range (max: {})",
-            self.weights.len() / TRANSFORMED_FEATURE_DIMENSIONS
-        );
+        // OOBは即座にパニック（debug/release両方で検知）
+        // 通常経路では分岐予測が当たり、性能影響はほぼゼロ
         if offset + TRANSFORMED_FEATURE_DIMENSIONS > self.weights.len() {
-            return;
+            feature_index_oob(index, self.weights.len() / TRANSFORMED_FEATURE_DIMENSIONS);
         }
 
         let weights = &self.weights[offset..offset + TRANSFORMED_FEATURE_DIMENSIONS];
