@@ -18,11 +18,16 @@ use std::ops::{Deref, DerefMut};
 // IndexList - 固定長の特徴量インデックスリスト
 // =============================================================================
 
-/// 差分更新での最大変化特徴量数（駒3 + 手駒2 + 余裕）
-pub const MAX_CHANGED_FEATURES: usize = 8;
+/// 差分更新での最大変化特徴量数
+/// HalfKP: 駒3 + 手駒2 = 5
+/// HalfKA_hm^（factorized）: 各変化×2 = 最大10
+/// 余裕を持たせて16
+pub const MAX_CHANGED_FEATURES: usize = 16;
 
-/// 全特徴量取得での最大数（盤上38 + 手駒14 = 52）
-pub const MAX_ACTIVE_FEATURES: usize = 52;
+/// 全特徴量取得での最大数
+/// HalfKP: 盤上38 + 手駒14 = 52
+/// HalfKA_hm^（factorized）: (盤上38 + 自玉1 + 敵玉1 + 手駒14) × 2 = 108
+pub const MAX_ACTIVE_FEATURES: usize = 108;
 
 /// collect_path での最大パス長（find_usable_accumulator の MAX_DEPTH と同じ）
 pub const MAX_PATH_LENGTH: usize = 8;
@@ -120,6 +125,19 @@ pub const CACHE_LINE_SIZE: usize = 64;
 ///
 /// FeatureTransformerのweightsなど、大きな配列をアラインして確保するために使用。
 /// aligned load/store命令を使うためにはデータが64バイト境界に配置されている必要がある。
+///
+/// # 安全性契約
+///
+/// - `T: Copy + Default` を要求することで、`T` が `Drop` を実装できないことを保証
+/// - `Copy` トレイトは `Drop` と排他的（コンパイラが禁止）
+/// - これにより `drop` 時に `drop_in_place` を呼ぶ必要がなく、`dealloc` のみで安全
+///
+/// # 使用例
+///
+/// ```ignore
+/// let weights: AlignedBox<i16> = AlignedBox::new_zeroed(1000);
+/// assert!(weights.as_ptr() as usize % 64 == 0); // 64バイトアライン
+/// ```
 pub struct AlignedBox<T> {
     ptr: *mut T,
     len: usize,

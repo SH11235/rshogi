@@ -1,29 +1,263 @@
 //! NNUEネットワーク全体の構造と評価関数
 //!
-//! HalfKP 256x2-32-32 アーキテクチャを想定した NNUE ネットワークを表現する。
-//! - `FeatureTransformer` で HalfKP 特徴量を 512 次元に変換
+//! 以下のアーキテクチャをサポート:
+//! - **HalfKP**: classic NNUE（水匠/tanuki互換）
+//! - **HalfKA_hm^**: nnue-pytorch互換（Half-Mirror + Factorization）
+//!
+//! 評価値計算フロー:
+//! - `FeatureTransformer` で特徴量を 512 次元に変換
 //! - `AffineTransform` + `ClippedReLU` を 2 層適用して 32→32 と圧縮
 //! - 出力層（32→1）で整数スコアを得て `FV_SCALE` でスケーリングし `Value` に変換
 //! - グローバルな `NETWORK` にロードし、`evaluate` から利用する
 
 use super::accumulator::{Accumulator, AccumulatorStack, Aligned};
 use super::constants::{
-    FV_SCALE, HIDDEN1_DIMENSIONS, HIDDEN2_DIMENSIONS, NNUE_VERSION, OUTPUT_DIMENSIONS,
-    TRANSFORMED_FEATURE_DIMENSIONS,
+    FV_SCALE, HIDDEN1_DIMENSIONS, HIDDEN2_DIMENSIONS, NNUE_VERSION, NNUE_VERSION_HALFKA,
+    OUTPUT_DIMENSIONS, TRANSFORMED_FEATURE_DIMENSIONS,
 };
 use super::feature_transformer::FeatureTransformer;
+use super::feature_transformer_halfka::FeatureTransformerHalfKA;
 use super::layers::{AffineTransform, ClippedReLU};
 #[cfg(not(feature = "tournament"))]
 use crate::eval::material;
 use crate::position::Position;
 use crate::types::Value;
 use std::fs::File;
-use std::io::{self, Cursor, Read};
+use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::OnceLock;
 
-/// グローバルなNNUEネットワーク
-static NETWORK: OnceLock<Network> = OnceLock::new();
+/// グローバルなNNUEネットワーク（HalfKPまたはHalfKA_hm^）
+static NETWORK: OnceLock<NNUENetwork> = OnceLock::new();
+
+// =============================================================================
+// NNUENetwork - アーキテクチャを抽象化するenum
+// =============================================================================
+
+/// NNUEネットワーク（HalfKPまたはHalfKA_hm^をラップ）
+pub enum NNUENetwork {
+    /// HalfKP classic NNUE
+    HalfKP(Box<Network>),
+    /// HalfKA_hm^ nnue-pytorch互換
+    HalfKA(Box<NetworkHalfKA>),
+}
+
+impl NNUENetwork {
+    /// ファイルから読み込み（バージョン自動判別）
+    pub fn load<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        let file = File::open(path)?;
+        let mut reader = BufReader::new(file);
+        Self::read(&mut reader)
+    }
+
+    /// リーダーから読み込み（バージョン自動判別）
+    pub fn read<R: Read + Seek>(reader: &mut R) -> io::Result<Self> {
+        // バージョンを読み取り
+        let mut buf4 = [0u8; 4];
+        reader.read_exact(&mut buf4)?;
+        let version = u32::from_le_bytes(buf4);
+
+        // 位置を戻す
+        reader.seek(SeekFrom::Start(0))?;
+
+        match version {
+            NNUE_VERSION => {
+                let network = Network::read(reader)?;
+                Ok(Self::HalfKP(Box::new(network)))
+            }
+            NNUE_VERSION_HALFKA => {
+                let network = NetworkHalfKA::read(reader)?;
+                Ok(Self::HalfKA(Box::new(network)))
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Unknown NNUE version: {version:#x}. Expected {NNUE_VERSION:#x} (HalfKP) or {NNUE_VERSION_HALFKA:#x} (HalfKA_hm^)"
+                ),
+            )),
+        }
+    }
+
+    /// バイト列から読み込み（バージョン自動判別）
+    pub fn from_bytes(bytes: &[u8]) -> io::Result<Self> {
+        let mut cursor = Cursor::new(bytes);
+        Self::read(&mut cursor)
+    }
+
+    /// 評価値を計算
+    pub fn evaluate(&self, pos: &Position, acc: &Accumulator) -> Value {
+        match self {
+            Self::HalfKP(net) => net.evaluate(pos, acc),
+            Self::HalfKA(net) => net.evaluate(pos, acc),
+        }
+    }
+
+    /// アーキテクチャ名を取得
+    pub fn architecture_name(&self) -> &'static str {
+        match self {
+            Self::HalfKP(_) => "HalfKP",
+            Self::HalfKA(_) => "HalfKA_hm^",
+        }
+    }
+
+    /// 差分計算を使わずにAccumulatorを計算
+    pub fn refresh_accumulator(&self, pos: &Position, acc: &mut Accumulator) {
+        match self {
+            Self::HalfKP(net) => net.feature_transformer.refresh_accumulator(pos, acc),
+            Self::HalfKA(net) => net.feature_transformer.refresh_accumulator(pos, acc),
+        }
+    }
+
+    /// 差分計算でAccumulatorを更新
+    pub fn update_accumulator(
+        &self,
+        pos: &Position,
+        dirty_piece: &super::accumulator::DirtyPiece,
+        acc: &mut Accumulator,
+        prev_acc: &Accumulator,
+    ) {
+        match self {
+            Self::HalfKP(net) => {
+                net.feature_transformer.update_accumulator(pos, dirty_piece, acc, prev_acc)
+            }
+            Self::HalfKA(net) => {
+                net.feature_transformer.update_accumulator(pos, dirty_piece, acc, prev_acc)
+            }
+        }
+    }
+
+    /// 複数手分の差分を適用してアキュムレータを更新
+    pub fn forward_update_incremental(
+        &self,
+        pos: &Position,
+        stack: &mut AccumulatorStack,
+        source_idx: usize,
+    ) -> bool {
+        match self {
+            Self::HalfKP(net) => {
+                net.feature_transformer.forward_update_incremental(pos, stack, source_idx)
+            }
+            Self::HalfKA(net) => {
+                net.feature_transformer.forward_update_incremental(pos, stack, source_idx)
+            }
+        }
+    }
+}
+
+// =============================================================================
+// NetworkHalfKA - HalfKA_hm^用ネットワーク
+// =============================================================================
+
+/// HalfKA_hm^用NNUEネットワーク
+pub struct NetworkHalfKA {
+    /// 特徴量変換器
+    pub feature_transformer: FeatureTransformerHalfKA,
+    /// 隠れ層1: 512 → 32
+    pub hidden1: AffineTransform<{ TRANSFORMED_FEATURE_DIMENSIONS * 2 }, HIDDEN1_DIMENSIONS>,
+    /// 隠れ層2: 32 → 32
+    pub hidden2: AffineTransform<HIDDEN1_DIMENSIONS, HIDDEN2_DIMENSIONS>,
+    /// 出力層: 32 → 1
+    pub output: AffineTransform<HIDDEN2_DIMENSIONS, OUTPUT_DIMENSIONS>,
+}
+
+impl NetworkHalfKA {
+    /// ファイルから読み込み
+    pub fn load<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        let file = File::open(path)?;
+        let mut reader = BufReader::new(file);
+        Self::read(&mut reader)
+    }
+
+    /// リーダーから読み込み
+    pub fn read<R: Read>(reader: &mut R) -> io::Result<Self> {
+        // ヘッダを読み込み
+        let mut buf4 = [0u8; 4];
+        reader.read_exact(&mut buf4)?;
+        let version = u32::from_le_bytes(buf4);
+
+        if version != NNUE_VERSION_HALFKA {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Invalid NNUE version for HalfKA_hm^: {version:#x}, expected {NNUE_VERSION_HALFKA:#x}"
+                ),
+            ));
+        }
+
+        // 構造ハッシュを読み込み
+        reader.read_exact(&mut buf4)?;
+        let _hash = u32::from_le_bytes(buf4);
+
+        // アーキテクチャ文字列を読み込み
+        reader.read_exact(&mut buf4)?;
+        let arch_len = u32::from_le_bytes(buf4) as usize;
+        let mut arch = vec![0u8; arch_len];
+        reader.read_exact(&mut arch)?;
+
+        // 圧縮形式を判定（アーキテクチャ文字列から）
+        let arch_str = String::from_utf8_lossy(&arch);
+        let is_leb128 = arch_str.contains("leb128");
+
+        // パラメータを読み込み
+        let feature_transformer = if is_leb128 {
+            FeatureTransformerHalfKA::read_leb128(reader)?
+        } else {
+            FeatureTransformerHalfKA::read(reader)?
+        };
+
+        let hidden1 = if is_leb128 {
+            AffineTransform::read_leb128(reader)?
+        } else {
+            AffineTransform::read(reader)?
+        };
+
+        let hidden2 = if is_leb128 {
+            AffineTransform::read_leb128(reader)?
+        } else {
+            AffineTransform::read(reader)?
+        };
+
+        let output = if is_leb128 {
+            AffineTransform::read_leb128(reader)?
+        } else {
+            AffineTransform::read(reader)?
+        };
+
+        Ok(Self {
+            feature_transformer,
+            hidden1,
+            hidden2,
+            output,
+        })
+    }
+
+    /// 評価値を計算
+    pub fn evaluate(&self, pos: &Position, acc: &Accumulator) -> Value {
+        let mut transformed = Aligned([0u8; TRANSFORMED_FEATURE_DIMENSIONS * 2]);
+        self.feature_transformer.transform(acc, pos.side_to_move(), &mut transformed.0);
+
+        let mut hidden1_out = Aligned([0i32; HIDDEN1_DIMENSIONS]);
+        self.hidden1.propagate(&transformed.0, &mut hidden1_out.0);
+
+        let mut hidden1_relu = Aligned([0u8; HIDDEN1_DIMENSIONS]);
+        ClippedReLU::propagate(&hidden1_out.0, &mut hidden1_relu.0);
+
+        let mut hidden2_out = Aligned([0i32; HIDDEN2_DIMENSIONS]);
+        self.hidden2.propagate(&hidden1_relu.0, &mut hidden2_out.0);
+
+        let mut hidden2_relu = Aligned([0u8; HIDDEN2_DIMENSIONS]);
+        ClippedReLU::propagate(&hidden2_out.0, &mut hidden2_relu.0);
+
+        let mut output = Aligned([0i32; OUTPUT_DIMENSIONS]);
+        self.output.propagate(&hidden2_relu.0, &mut output.0);
+
+        Value::new(output.0[0] / FV_SCALE)
+    }
+}
+
+// =============================================================================
+// Network - HalfKP用ネットワーク（既存）
+// =============================================================================
 
 /// NNUEネットワーク全体
 pub struct Network {
@@ -54,7 +288,9 @@ impl Network {
         if version != NNUE_VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Invalid NNUE version: {version:#x}, expected {NNUE_VERSION:#x}"),
+                format!(
+                    "Invalid NNUE version for HalfKP: {version:#x}, expected {NNUE_VERSION:#x}"
+                ),
             ));
         }
 
@@ -68,8 +304,18 @@ impl Network {
         let mut arch = vec![0u8; arch_len];
         reader.read_exact(&mut arch)?;
 
+        // FeatureTransformerのレイヤーハッシュを読み飛ばす
+        // (YaneuraOu/Stockfishフォーマットでは各レイヤーの前に4バイトのハッシュがある)
+        reader.read_exact(&mut buf4)?;
+        let _ft_hash = u32::from_le_bytes(buf4);
+
         // パラメータを読み込み
         let feature_transformer = FeatureTransformer::read(reader)?;
+
+        // Networkのレイヤーハッシュを読み飛ばす
+        reader.read_exact(&mut buf4)?;
+        let _network_hash = u32::from_le_bytes(buf4);
+
         let hidden1 = AffineTransform::read(reader)?;
         let hidden2 = AffineTransform::read(reader)?;
         let output = AffineTransform::read(reader)?;
@@ -146,18 +392,17 @@ impl Network {
     }
 }
 
-/// NNUEを初期化
+/// NNUEを初期化（バージョン自動判別）
 pub fn init_nnue<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    let network = Network::load(path)?;
+    let network = NNUENetwork::load(path)?;
     NETWORK
         .set(network)
         .map_err(|_| io::Error::new(io::ErrorKind::AlreadyExists, "NNUE already initialized"))
 }
 
-/// バイト列からNNUEを初期化
+/// バイト列からNNUEを初期化（バージョン自動判別）
 pub fn init_nnue_from_bytes(bytes: &[u8]) -> io::Result<()> {
-    let mut cursor = Cursor::new(bytes);
-    let network = Network::read(&mut cursor)?;
+    let network = NNUENetwork::from_bytes(bytes)?;
     NETWORK
         .set(network)
         .map_err(|_| io::Error::new(io::ErrorKind::AlreadyExists, "NNUE already initialized"))
@@ -220,12 +465,7 @@ pub fn evaluate(pos: &Position, stack: &mut AccumulatorStack) -> Value {
                     // （値コピー + std::memcpy）を使用している。
                     let prev_acc = stack.entry_at(prev_idx).accumulator.clone();
                     let current_acc = &mut stack.current_mut().accumulator;
-                    network.feature_transformer.update_accumulator(
-                        pos,
-                        &dirty_piece,
-                        current_acc,
-                        &prev_acc,
-                    );
+                    network.update_accumulator(pos, &dirty_piece, current_acc, &prev_acc);
                     updated = true;
                     #[cfg(feature = "diagnostics")]
                     {
@@ -247,9 +487,7 @@ pub fn evaluate(pos: &Position, stack: &mut AccumulatorStack) -> Value {
             // 2. 失敗なら祖先探索 + 複数手差分更新を試行
             if !updated {
                 if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
-                    updated = network
-                        .feature_transformer
-                        .forward_update_incremental(pos, stack, source_idx);
+                    updated = network.forward_update_incremental(pos, stack, source_idx);
                     #[cfg(feature = "diagnostics")]
                     if updated {
                         diff_update_result = 6; // ancestor_success
@@ -260,7 +498,7 @@ pub fn evaluate(pos: &Position, stack: &mut AccumulatorStack) -> Value {
             // 3. それでも失敗なら全計算
             if !updated {
                 let acc = &mut stack.current_mut().accumulator;
-                network.feature_transformer.refresh_accumulator(pos, acc);
+                network.refresh_accumulator(pos, acc);
             }
         }
         // else: cached (diff_update_result = 0)
@@ -382,5 +620,97 @@ mod tests {
         // フォールバックの駒得評価は手番に依存して符号が変わる可能性があるが、
         // ここでは「計算が成功し、フラグが維持された」ことのみ検証する。
         let _ = (value1, value2);
+    }
+
+    #[test]
+    fn test_debug_network_layers() {
+        use crate::nnue::layers::ClippedReLU;
+
+        let path =
+            "/home/sh11235/development/shogi/packages/rust-core/memo/nnue-pytorch/eval/nn.bin";
+        let network = match Network::load(path) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("Skipping test: {e}");
+                return;
+            }
+        };
+
+        // 初期局面
+        let mut pos = Position::new();
+        pos.set_sfen(SFEN_HIRATE).unwrap();
+
+        // Accumulator
+        let mut acc = Accumulator::new();
+        network.feature_transformer.refresh_accumulator(&pos, &mut acc);
+
+        eprintln!("=== Network Layer Debug ===\n");
+
+        // 1. FeatureTransformer 出力
+        let mut transformed = Aligned([0u8; TRANSFORMED_FEATURE_DIMENSIONS * 2]);
+        network
+            .feature_transformer
+            .transform(&acc, pos.side_to_move(), &mut transformed.0);
+
+        let nonzero = transformed.0.iter().filter(|&&x| x != 0).count();
+        let sum: u64 = transformed.0.iter().map(|&x| x as u64).sum();
+        let min = *transformed.0.iter().min().unwrap();
+        let max = *transformed.0.iter().max().unwrap();
+        eprintln!("Transform output (512 u8):");
+        eprintln!("  nonzero={nonzero}, sum={sum}, min={min}, max={max}");
+        eprintln!("  first 10: {:?}", &transformed.0[..10]);
+
+        // 2. hidden1 層
+        eprintln!("\nHidden1 layer (512→32):");
+        eprintln!("  biases: {:?}", &network.hidden1.biases);
+        let bias_sum: i64 = network.hidden1.biases.iter().map(|&v| v as i64).sum();
+        eprintln!("  bias sum={bias_sum}");
+
+        // hidden1 の重みの範囲を確認
+        let weight_min = *network.hidden1.weights.iter().min().unwrap();
+        let weight_max = *network.hidden1.weights.iter().max().unwrap();
+        eprintln!(
+            "  weights: min={weight_min}, max={weight_max}, len={}",
+            network.hidden1.weights.len()
+        );
+
+        let mut hidden1_out = Aligned([0i32; HIDDEN1_DIMENSIONS]);
+        network.hidden1.propagate(&transformed.0, &mut hidden1_out.0);
+        eprintln!("  output (i32): {:?}", &hidden1_out.0);
+        let h1_sum: i64 = hidden1_out.0.iter().map(|&v| v as i64).sum();
+        eprintln!("  sum={h1_sum}");
+
+        // 3. hidden1 ReLU
+        let mut hidden1_relu = Aligned([0u8; HIDDEN1_DIMENSIONS]);
+        ClippedReLU::<HIDDEN1_DIMENSIONS>::propagate(&hidden1_out.0, &mut hidden1_relu.0);
+        eprintln!("\nHidden1 ReLU (i32 >> 6, clamp 0-127):");
+        eprintln!("  output (u8): {:?}", &hidden1_relu.0);
+
+        // 4. hidden2 層
+        eprintln!("\nHidden2 layer (32→32):");
+        eprintln!("  biases: {:?}", &network.hidden2.biases);
+
+        let mut hidden2_out = Aligned([0i32; HIDDEN2_DIMENSIONS]);
+        network.hidden2.propagate(&hidden1_relu.0, &mut hidden2_out.0);
+        eprintln!("  output (i32): {:?}", &hidden2_out.0);
+
+        // 5. hidden2 ReLU
+        let mut hidden2_relu = Aligned([0u8; HIDDEN2_DIMENSIONS]);
+        ClippedReLU::<HIDDEN2_DIMENSIONS>::propagate(&hidden2_out.0, &mut hidden2_relu.0);
+        eprintln!("\nHidden2 ReLU:");
+        eprintln!("  output (u8): {:?}", &hidden2_relu.0);
+
+        // 6. output 層
+        eprintln!("\nOutput layer (32→1):");
+        eprintln!("  biases: {:?}", &network.output.biases);
+
+        let mut output_val = Aligned([0i32; OUTPUT_DIMENSIONS]);
+        network.output.propagate(&hidden2_relu.0, &mut output_val.0);
+        eprintln!("  raw output: {}", output_val.0[0]);
+        eprintln!("  / FV_SCALE({}): {}", FV_SCALE, output_val.0[0] / FV_SCALE);
+
+        // Network.evaluate() の結果
+        let score = network.evaluate(&pos, &acc);
+        eprintln!("\nNetwork.evaluate() = {}", score.raw());
     }
 }

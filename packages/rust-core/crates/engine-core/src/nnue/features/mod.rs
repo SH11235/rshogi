@@ -3,8 +3,10 @@
 //! YaneuraOu の FeatureSet/Feature 構造に準拠した特徴量定義。
 //! 将来の sfnn 対応を見据えた拡張可能な設計。
 
+mod half_ka_hm;
 mod half_kp;
 
+pub use half_ka_hm::HalfKA_hm;
 pub use half_kp::HalfKP;
 
 use super::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES};
@@ -127,6 +129,55 @@ impl FeatureSet for HalfKPFeatureSet {
         let mut removed = IndexList::new();
         let mut added = IndexList::new();
         HalfKP::append_changed_indices(dirty_piece, perspective, king_sq, &mut removed, &mut added);
+        (removed, added)
+    }
+
+    #[inline]
+    fn needs_refresh(dirty_piece: &DirtyPiece, perspective: Color) -> bool {
+        dirty_piece.king_moved[perspective.index()]
+    }
+}
+
+// =============================================================================
+// HalfKA_hmFeatureSet - HalfKA_hm^ NNUE 用の FeatureSet
+// =============================================================================
+
+/// HalfKA_hm^ 用の FeatureSet（nnue-pytorch互換）
+///
+/// Half-Mirror King + All pieces with Factorization
+#[allow(non_camel_case_types)]
+pub struct HalfKA_hmFeatureSet;
+
+impl FeatureSet for HalfKA_hmFeatureSet {
+    const DIMENSIONS: usize = HalfKA_hm::DIMENSIONS;
+    const MAX_ACTIVE: usize = HalfKA_hm::MAX_ACTIVE;
+    const REFRESH_TRIGGERS: &'static [TriggerEvent] = &[TriggerEvent::FriendKingMoved];
+
+    #[inline]
+    fn collect_active_indices(
+        pos: &Position,
+        perspective: Color,
+    ) -> IndexList<MAX_ACTIVE_FEATURES> {
+        let mut active = IndexList::new();
+        HalfKA_hm::append_active_indices(pos, perspective, &mut active);
+        active
+    }
+
+    #[inline]
+    fn collect_changed_indices(
+        dirty_piece: &DirtyPiece,
+        perspective: Color,
+        king_sq: Square,
+    ) -> ChangedFeatures {
+        let mut removed = IndexList::new();
+        let mut added = IndexList::new();
+        HalfKA_hm::append_changed_indices(
+            dirty_piece,
+            perspective,
+            king_sq,
+            &mut removed,
+            &mut added,
+        );
         (removed, added)
     }
 

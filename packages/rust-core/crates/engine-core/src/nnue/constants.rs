@@ -41,6 +41,28 @@ pub const NUM_REFRESH_TRIGGERS: usize = 1;
 /// 81（玉の位置）× FE_END（BonaPiece数）
 pub const HALFKP_DIMENSIONS: usize = 81 * super::bona_piece::FE_END;
 
+// =============================================================================
+// HalfKA_hm^ アーキテクチャ用定数
+// =============================================================================
+
+/// HalfKA_hm^のバージョン（nnue-pytorch互換）
+pub const NNUE_VERSION_HALFKA: u32 = 0x7AF32F20;
+
+/// キングバケット数（Half-Mirror: 9段 × 5筋）
+pub const KING_BUCKETS: usize = 45;
+
+/// 駒入力数（DISTINGUISH_GOLDS有効時のe_king = 1629）
+pub const PIECE_INPUTS_HALFKA: usize = 1629;
+
+/// HalfKA_hm^のベース入力数（キングバケット × 駒入力）
+pub const BASE_INPUTS_HALFKA: usize = KING_BUCKETS * PIECE_INPUTS_HALFKA; // 73,305
+
+/// Factorization用の追加入力数（駒のみ）
+pub const FACT_INPUTS_HALFKA: usize = PIECE_INPUTS_HALFKA; // 1,629
+
+/// HalfKA_hm^の総入力次元数
+pub const HALFKA_HM_DIMENSIONS: usize = BASE_INPUTS_HALFKA + FACT_INPUTS_HALFKA; // 74,934
+
 /// 隠れ層1の次元数
 pub const HIDDEN1_DIMENSIONS: usize = 32;
 

@@ -41,6 +41,7 @@
 pub mod common;
 pub mod config;
 pub mod nnue_trainer;
+pub mod packed_sfen;
 pub mod positions;
 pub mod report;
 pub mod runner;

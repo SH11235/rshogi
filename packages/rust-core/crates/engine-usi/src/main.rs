@@ -9,6 +9,7 @@ use std::thread;
 
 use anyhow::Result;
 use engine_core::eval::{set_material_level, MaterialLevel};
+use engine_core::nnue::init_nnue;
 use engine_core::position::Position;
 use engine_core::search::{LimitsType, Search, SearchInfo, SearchResult};
 use engine_core::types::Move;
@@ -134,6 +135,7 @@ impl UsiEngine {
         println!("option name UCI_LimitStrength type check default false");
         println!("option name UCI_Elo type spin default 0 min 0 max 4000");
         println!("option name MaterialLevel type combo default 9 var 1 var 2 var 3 var 4 var 7 var 8 var 9");
+        println!("option name EvalFile type string default <empty>");
         println!("usiok");
     }
 
@@ -326,6 +328,24 @@ impl UsiEngine {
                     }
                 } else {
                     eprintln!("info string Warning: MaterialLevel parse error for '{value}'");
+                }
+            }
+            "EvalFile" => {
+                if value.is_empty() || value == "<empty>" {
+                    // 空の場合は何もしない
+                } else {
+                    match init_nnue(&value) {
+                        Ok(()) => {
+                            let payload = json!({
+                                "type": "info",
+                                "message": format!("NNUE loaded: {value}"),
+                            });
+                            eprintln!("info string {payload}");
+                        }
+                        Err(e) => {
+                            eprintln!("info string Error loading NNUE file: {e}");
+                        }
+                    }
                 }
             }
             _ => {
