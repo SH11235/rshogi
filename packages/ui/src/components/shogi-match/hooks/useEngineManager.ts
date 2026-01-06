@@ -7,7 +7,7 @@ import type {
     SearchHandle,
     SkillLevelSettings,
 } from "@shogi/engine-client";
-import { getEngineErrorInfo } from "@shogi/engine-client";
+import { getEngineErrorInfo, normalizeSkillLevelSettings } from "@shogi/engine-client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ClockSettings, TickState } from "./useClockManager";
 
@@ -116,18 +116,30 @@ const DEFAULT_ANALYSIS_DEPTH = 15;
 
 /**
  * エンジンに Skill Level 設定を適用する
+ *
+ * @throws エンジンへのオプション設定が失敗した場合
  */
 async function applySkillLevelSettings(
     client: EngineClient,
     settings: SkillLevelSettings,
 ): Promise<void> {
-    await client.setOption("Skill Level", settings.skillLevel);
+    // 値を正規化（範囲外の値をクランプ）
+    const normalized = normalizeSkillLevelSettings(settings);
 
-    if (settings.useLimitStrength && settings.elo !== undefined) {
-        await client.setOption("UCI_LimitStrength", true);
-        await client.setOption("UCI_Elo", settings.elo);
-    } else {
-        await client.setOption("UCI_LimitStrength", false);
+    try {
+        await client.setOption("Skill Level", normalized.skillLevel);
+
+        if (normalized.useLimitStrength && normalized.elo !== undefined) {
+            await client.setOption("UCI_LimitStrength", true);
+            await client.setOption("UCI_Elo", normalized.elo);
+        } else {
+            await client.setOption("UCI_LimitStrength", false);
+        }
+    } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        throw new Error(
+            `Failed to apply skill level settings (skillLevel: ${normalized.skillLevel}, elo: ${normalized.elo ?? "none"}): ${errorMsg}`,
+        );
     }
 }
 

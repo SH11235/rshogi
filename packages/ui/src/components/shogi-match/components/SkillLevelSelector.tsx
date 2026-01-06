@@ -1,5 +1,6 @@
 import {
     detectSkillPreset,
+    SKILL_LEVEL_MAX,
     SKILL_PRESET_LABELS,
     SKILL_PRESETS,
     type SkillLevelSettings,
@@ -38,8 +39,10 @@ export function SkillLevelSelector({
         setPreset(newPreset);
 
         if (newPreset === "custom") {
-            // カスタムに切り替え時は現在の値を維持、なければデフォルト
-            onChange(value ?? { skillLevel: 10 });
+            // カスタムに切り替え時は現在の値を維持
+            // 全力（professional）から切り替えた場合は 20 から開始
+            const defaultSkillLevel = preset === "professional" ? SKILL_LEVEL_MAX : 10;
+            onChange(value ?? { skillLevel: defaultSkillLevel });
         } else if (newPreset === "professional") {
             // 全力の場合は undefined（デフォルト）を設定
             onChange(undefined);
@@ -50,24 +53,8 @@ export function SkillLevelSelector({
     };
 
     const handleSkillLevelChange = (skillLevel: number) => {
-        onChange({ ...value, skillLevel });
-    };
-
-    const handleEloToggle = (useLimitStrength: boolean) => {
-        if (useLimitStrength) {
-            onChange({
-                ...value,
-                skillLevel: value?.skillLevel ?? 10,
-                useLimitStrength: true,
-                elo: 1500,
-            });
-        } else {
-            onChange({ skillLevel: value?.skillLevel ?? 10 });
-        }
-    };
-
-    const handleEloChange = (elo: number) => {
-        onChange({ ...value, skillLevel: value?.skillLevel ?? 10, useLimitStrength: true, elo });
+        // 明示的にプロパティを設定（value が undefined でも安全）
+        onChange({ skillLevel });
     };
 
     return (
@@ -97,14 +84,14 @@ export function SkillLevelSelector({
                         <span className="flex justify-between">
                             <span>スキルレベル</span>
                             <span className="font-mono text-[hsl(var(--wafuu-kincha))]">
-                                {value?.skillLevel ?? 20}
+                                {value?.skillLevel ?? SKILL_LEVEL_MAX}
                             </span>
                         </span>
                         <input
                             type="range"
                             min={0}
                             max={20}
-                            value={value?.skillLevel ?? 20}
+                            value={value?.skillLevel ?? SKILL_LEVEL_MAX}
                             onChange={(e) => handleSkillLevelChange(Number(e.target.value))}
                             disabled={disabled}
                             className="w-full accent-[hsl(var(--wafuu-shu))]"
@@ -114,43 +101,6 @@ export function SkillLevelSelector({
                             <span>強い</span>
                         </span>
                     </label>
-
-                    {/* ELO指定オプション */}
-                    <label className="flex cursor-pointer items-center gap-2 text-[13px]">
-                        <input
-                            type="checkbox"
-                            checked={value?.useLimitStrength ?? false}
-                            onChange={(e) => handleEloToggle(e.target.checked)}
-                            disabled={disabled}
-                            className="accent-[hsl(var(--wafuu-shu))]"
-                        />
-                        <span>ELOで指定</span>
-                    </label>
-
-                    {value?.useLimitStrength && (
-                        <label className={labelClassName}>
-                            <span className="flex justify-between">
-                                <span>ELO</span>
-                                <span className="font-mono text-[hsl(var(--wafuu-kincha))]">
-                                    {value?.elo ?? 1500}
-                                </span>
-                            </span>
-                            <input
-                                type="range"
-                                min={1320}
-                                max={3190}
-                                step={10}
-                                value={value?.elo ?? 1500}
-                                onChange={(e) => handleEloChange(Number(e.target.value))}
-                                disabled={disabled}
-                                className="w-full accent-[hsl(var(--wafuu-shu))]"
-                            />
-                            <span className="flex justify-between text-[11px] text-[hsl(var(--muted-foreground))]">
-                                <span>1320</span>
-                                <span>3190</span>
-                            </span>
-                        </label>
-                    )}
                 </div>
             )}
         </div>
