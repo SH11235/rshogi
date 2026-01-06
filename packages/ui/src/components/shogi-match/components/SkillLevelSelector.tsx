@@ -6,7 +6,7 @@ import {
     type SkillLevelSettings,
     type SkillPreset,
 } from "@shogi/engine-client";
-import { type ReactElement, useState } from "react";
+import { type ReactElement, useMemo } from "react";
 
 interface SkillLevelSelectorProps {
     /** 現在の設定値（undefined = デフォルト（全力）） */
@@ -29,15 +29,13 @@ export function SkillLevelSelector({
     onChange,
     disabled,
 }: SkillLevelSelectorProps): ReactElement {
-    // プリセット状態を管理（value から初期値を推定）
-    const [preset, setPreset] = useState<SkillPreset>(() => {
+    // value から preset を派生（状態ではなく計算値）
+    const preset = useMemo<SkillPreset>(() => {
         if (!value) return "professional";
         return detectSkillPreset(value);
-    });
+    }, [value]);
 
     const handlePresetChange = (newPreset: SkillPreset) => {
-        setPreset(newPreset);
-
         if (newPreset === "custom") {
             // カスタムに切り替え時は現在の値を維持
             // 全力（professional）から切り替えた場合は 20 から開始
