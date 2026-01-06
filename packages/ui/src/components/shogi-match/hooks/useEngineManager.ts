@@ -5,6 +5,7 @@ import type {
     EngineEvent,
     EngineInfoEvent,
     SearchHandle,
+    SkillLevelSettings,
 } from "@shogi/engine-client";
 import { getEngineErrorInfo } from "@shogi/engine-client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -65,6 +66,8 @@ type SideRole = "human" | "engine";
 type SideSetting = {
     role: SideRole;
     engineId?: string;
+    /** エンジンの強さ設定（role="engine"時のみ有効） */
+    skillLevel?: SkillLevelSettings;
 };
 
 interface UseEngineManagerProps {
@@ -110,6 +113,23 @@ interface AnalysisRequest {
 /** 解析のデフォルト設定 */
 const DEFAULT_ANALYSIS_TIME_MS = 3000;
 const DEFAULT_ANALYSIS_DEPTH = 15;
+
+/**
+ * エンジンに Skill Level 設定を適用する
+ */
+async function applySkillLevelSettings(
+    client: EngineClient,
+    settings: SkillLevelSettings,
+): Promise<void> {
+    await client.setOption("Skill Level", settings.skillLevel);
+
+    if (settings.useLimitStrength && settings.elo !== undefined) {
+        await client.setOption("UCI_LimitStrength", true);
+        await client.setOption("UCI_Elo", settings.elo);
+    } else {
+        await client.setOption("UCI_LimitStrength", false);
+    }
+}
 
 interface UseEngineManagerReturn {
     /** エンジンの準備状態 */
@@ -429,6 +449,13 @@ export function useEngineManager({
 
                 // Retry initialization
                 await client.init();
+
+                // Skill Level 設定の適用（リトライ時も再適用）
+                const skillSettings = sides[side].skillLevel;
+                if (skillSettings) {
+                    await applySkillLevelSettings(client, skillSettings);
+                }
+
                 engineState.ready = true;
                 setEngineReady((prev) => ({ ...prev, [side]: true }));
             } catch (error) {
@@ -452,7 +479,7 @@ export function useEngineManager({
                 setIsRetrying((prev) => ({ ...prev, [side]: false }));
             }
         },
-        [addErrorLog],
+        [addErrorLog, sides],
     );
 
     const applyMoveFromEngine = useCallback(
@@ -613,6 +640,13 @@ export function useEngineManager({
                 // エンジンの初期化と局面読み込み
                 if (!engineState.ready) {
                     await client.init();
+
+                    // Skill Level 設定の適用
+                    const skillSettings = setting.skillLevel;
+                    if (skillSettings) {
+                        await applySkillLevelSettings(client, skillSettings);
+                    }
+
                     await client.loadPosition(startSfen, movesRef.current);
                     engineState.ready = true;
                     setEngineReady((prev) => ({ ...prev, [side]: true }));

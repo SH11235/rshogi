@@ -2,6 +2,71 @@ export type EngineBackend = "native" | "wasm" | "external-usi";
 
 export type EngineStopMode = "terminate" | "cooperative";
 
+// ============================================================
+// Skill Level Settings
+// ============================================================
+
+/**
+ * Skill Level 設定
+ *
+ * エンジンの強さを制御するための設定。
+ * - skillLevel: 0-20 の整数（0=最弱、20=全力）
+ * - useLimitStrength: ELO制限を使用するか
+ * - elo: ELO値（useLimitStrength=true時のみ有効、1320-3190の範囲）
+ */
+export interface SkillLevelSettings {
+    /** スキルレベル (0-20, 20=全力) */
+    skillLevel: number;
+    /** ELO制限を使用するか */
+    useLimitStrength?: boolean;
+    /** ELO値 (useLimitStrength=true時のみ有効, 1320-3190) */
+    elo?: number;
+}
+
+/**
+ * プリセットレベル
+ */
+export type SkillPreset = "beginner" | "intermediate" | "advanced" | "professional" | "custom";
+
+/**
+ * プリセットから SkillLevelSettings への変換マップ
+ */
+export const SKILL_PRESETS: Record<Exclude<SkillPreset, "custom">, SkillLevelSettings> = {
+    beginner: { skillLevel: 2 },
+    intermediate: { skillLevel: 10 },
+    advanced: { skillLevel: 16 },
+    professional: { skillLevel: 20 },
+};
+
+/**
+ * SkillLevelSettings からプリセットを推定
+ */
+export function detectSkillPreset(settings: SkillLevelSettings): SkillPreset {
+    if (settings.useLimitStrength) {
+        return "custom";
+    }
+    for (const [preset, presetSettings] of Object.entries(SKILL_PRESETS) as [
+        Exclude<SkillPreset, "custom">,
+        SkillLevelSettings,
+    ][]) {
+        if (presetSettings.skillLevel === settings.skillLevel) {
+            return preset;
+        }
+    }
+    return "custom";
+}
+
+/**
+ * プリセット名の日本語表示
+ */
+export const SKILL_PRESET_LABELS: Record<SkillPreset, string> = {
+    beginner: "初心者",
+    intermediate: "中級者",
+    advanced: "上級者",
+    professional: "全力",
+    custom: "カスタム",
+};
+
 export interface EngineInitOptions {
     /** バックエンドの種類 (native/wasm/external-usi) */
     backend?: EngineBackend;
