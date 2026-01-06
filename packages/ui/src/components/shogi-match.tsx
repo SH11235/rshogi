@@ -1191,13 +1191,12 @@ export function ShogiMatch({
                         setMessage("合法手ではありません");
                         return;
                     }
-                    const prevBoard = position.board;
                     const result = applyMoveWithState(position, moveStr, { validateTurn: false });
                     if (!result.ok) {
                         setMessage(result.error ?? "持ち駒を打てませんでした");
                         return;
                     }
-                    applyMoveForReview(result.next, moveStr, result.lastMove, prevBoard);
+                    applyMoveForReview(result.next, moveStr, result.lastMove);
                     return;
                 }
 
@@ -1223,7 +1222,6 @@ export function ShogiMatch({
                             setMessage("合法手ではありません");
                             return;
                         }
-                        const prevBoard = position.board;
                         const result = applyMoveWithState(position, moveStr, {
                             validateTurn: false,
                         });
@@ -1231,13 +1229,12 @@ export function ShogiMatch({
                             setMessage(result.error ?? "指し手を適用できませんでした");
                             return;
                         }
-                        applyMoveForReview(result.next, moveStr, result.lastMove, prevBoard);
+                        applyMoveForReview(result.next, moveStr, result.lastMove);
                         return;
                     }
 
                     if (promotion === "forced") {
                         const moveStr = `${from}${to}+`;
-                        const prevBoard = position.board;
                         const result = applyMoveWithState(position, moveStr, {
                             validateTurn: false,
                         });
@@ -1245,14 +1242,13 @@ export function ShogiMatch({
                             setMessage(result.error ?? "指し手を適用できませんでした");
                             return;
                         }
-                        applyMoveForReview(result.next, moveStr, result.lastMove, prevBoard);
+                        applyMoveForReview(result.next, moveStr, result.lastMove);
                         return;
                     }
 
                     // 任意成り
                     if (shiftKey) {
                         const moveStr = `${from}${to}+`;
-                        const prevBoard = position.board;
                         const result = applyMoveWithState(position, moveStr, {
                             validateTurn: false,
                         });
@@ -1260,7 +1256,7 @@ export function ShogiMatch({
                             setMessage(result.error ?? "指し手を適用できませんでした");
                             return;
                         }
-                        applyMoveForReview(result.next, moveStr, result.lastMove, prevBoard);
+                        applyMoveForReview(result.next, moveStr, result.lastMove);
                         return;
                     }
 
@@ -1324,26 +1320,24 @@ export function ShogiMatch({
                         setMessage("合法手ではありません");
                         return;
                     }
-                    const prevBoard = position.board;
                     const result = applyMoveWithState(position, moveStr, { validateTurn: true });
                     if (!result.ok) {
                         setMessage(result.error ?? "指し手を適用できませんでした");
                         return;
                     }
-                    applyMoveCommon(result.next, moveStr, result.lastMove, prevBoard);
+                    applyMoveCommon(result.next, moveStr, result.lastMove);
                     return;
                 }
 
                 // 【ケース2】強制成り → 自動的に成って移動（ダイアログなし）
                 if (promotion === "forced") {
                     const moveStr = `${from}${to}+`;
-                    const prevBoard = position.board;
                     const result = applyMoveWithState(position, moveStr, { validateTurn: true });
                     if (!result.ok) {
                         setMessage(result.error ?? "指し手を適用できませんでした");
                         return;
                     }
-                    applyMoveCommon(result.next, moveStr, result.lastMove, prevBoard);
+                    applyMoveCommon(result.next, moveStr, result.lastMove);
                     return;
                 }
 
@@ -1351,13 +1345,12 @@ export function ShogiMatch({
                 // Shift+クリック：即座に成って移動
                 if (shiftKey) {
                     const moveStr = `${from}${to}+`;
-                    const prevBoard = position.board;
                     const result = applyMoveWithState(position, moveStr, { validateTurn: true });
                     if (!result.ok) {
                         setMessage(result.error ?? "指し手を適用できませんでした");
                         return;
                     }
-                    applyMoveCommon(result.next, moveStr, result.lastMove, prevBoard);
+                    applyMoveCommon(result.next, moveStr, result.lastMove);
                     return;
                 }
 
@@ -1377,13 +1370,12 @@ export function ShogiMatch({
                 setMessage("合法手ではありません");
                 return;
             }
-            const prevBoard = position.board;
             const result = applyMoveWithState(position, moveStr, { validateTurn: true });
             if (!result.ok) {
                 setMessage(result.error ?? "持ち駒を打てませんでした");
                 return;
             }
-            applyMoveCommon(result.next, moveStr, result.lastMove, prevBoard);
+            applyMoveCommon(result.next, moveStr, result.lastMove);
         },
         [
             isEditMode,
@@ -1411,7 +1403,6 @@ export function ShogiMatch({
             if (!promotionSelection) return;
             const { from, to } = promotionSelection;
             const moveStr = `${from}${to}${promote ? "+" : ""}`;
-            const prevBoard = position.board;
             // 検討モードでは手番チェックをスキップ
             const result = applyMoveWithState(position, moveStr, { validateTurn: !isReviewMode });
             if (!result.ok) {
@@ -1421,9 +1412,9 @@ export function ShogiMatch({
                 return;
             }
             if (isReviewMode) {
-                applyMoveForReview(result.next, moveStr, result.lastMove, prevBoard);
+                applyMoveForReview(result.next, moveStr, result.lastMove);
             } else {
-                applyMoveCommon(result.next, moveStr, result.lastMove, prevBoard);
+                applyMoveCommon(result.next, moveStr, result.lastMove);
             }
             setPromotionSelection(null);
         },
