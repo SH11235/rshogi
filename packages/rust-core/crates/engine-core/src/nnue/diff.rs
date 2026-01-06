@@ -34,7 +34,13 @@ pub fn get_changed_features(
         return (IndexList::new(), IndexList::new());
     }
 
-    let king_sq = pos.king_square(perspective);
+    // 玉のマスを取得（後手視点では反転）
+    let raw_king_sq = pos.king_square(perspective);
+    let king_sq = if perspective == Color::Black {
+        raw_king_sq
+    } else {
+        raw_king_sq.inverse()
+    };
     HalfKPFeatureSet::collect_changed_indices(dirty_piece, perspective, king_sq)
 }
 

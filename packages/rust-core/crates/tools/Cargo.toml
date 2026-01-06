@@ -32,6 +32,7 @@ indicatif = "0.18"
 rand = "0.9"
 rand_chacha = "0.9"
 byteorder = "1.5"
+tempfile = "3.20"
 
 [[bin]]
 name = "benchmark"
@@ -48,3 +49,15 @@ path = "src/bin/generate_training_data.rs"
 [[bin]]
 name = "train_nnue"
 path = "src/bin/train_nnue.rs"
+
+# YaneuraOuのpack形式をJSONLに変換するツール
+# NNUE学習用の教師データを扱いやすい形式に変換
+[[bin]]
+name = "pack_to_jsonl"
+path = "src/bin/pack_to_jsonl.rs"
+
+# packファイルのレコードをシャッフルするツール
+# NNUE学習時のデータのランダム化に使用
+[[bin]]
+name = "shuffle_pack"
+path = "src/bin/shuffle_pack.rs"
