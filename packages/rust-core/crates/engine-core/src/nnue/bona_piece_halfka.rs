@@ -94,14 +94,13 @@ pub fn pack_bonapiece(bp: BonaPieceHalfKA, hm_mirror: bool) -> usize {
         let piece_index = rel / 81;
         let sq = rel % 81;
 
-        // マス目をミラー（ファイルのみ: 9一 ↔ 1一）
-        // Square index: file + rank * 9 (file: 0-8, rank: 0-8)
-        // ただし、BonaPieceのsqはYaneuraOu形式: rank * 9 + file ではなく別の形式かも
-        // 実際はC++実装に合わせる: mir_file(sq)
-        let file = sq % 9;
-        let rank = sq / 9;
+        // マス目をミラー（ファイルのみ: 1筋 ↔ 9筋）
+        // Square index: sq = file * 9 + rank (file: 0-8, rank: 0-8)
+        // file = sq / 9, rank = sq % 9
+        let file = sq / 9;
+        let rank = sq % 9;
         let mirrored_file = 8 - file;
-        let mirrored_sq = rank * 9 + mirrored_file;
+        let mirrored_sq = mirrored_file * 9 + rank;
 
         pp = FE_HAND_END + piece_index * 81 + mirrored_sq;
     }
@@ -247,15 +246,27 @@ mod tests {
     fn test_pack_bonapiece_board_mirror() {
         // 盤上駒のミラー
         // f_pawn (90) + sq の場合
-        let sq = 0; // 1一
+        // sq = file * 9 + rank
+
+        // sq=0 (1一): file=0, rank=0
+        // ミラー後: file=8 (9筋), rank=0 → sq = 8*9+0 = 72
+        let sq = 0;
         let bp = BonaPiece::new((90 + sq) as u16);
-
-        // ミラーなし: そのまま
         assert_eq!(pack_bonapiece(bp, false), 90 + sq);
+        assert_eq!(pack_bonapiece(bp, true), 90 + 72);
 
-        // ミラーあり: 1筋 → 9筋 (file: 0 → 8)
-        // mirrored_sq = rank * 9 + (8 - file) = 0 * 9 + 8 = 8
-        assert_eq!(pack_bonapiece(bp, true), 90 + 8);
+        // sq=9 (2一): file=1, rank=0
+        // ミラー後: file=7 (8筋), rank=0 → sq = 7*9+0 = 63
+        let sq = 9;
+        let bp = BonaPiece::new((90 + sq) as u16);
+        assert_eq!(pack_bonapiece(bp, false), 90 + sq);
+        assert_eq!(pack_bonapiece(bp, true), 90 + 63);
+
+        // sq=40 (5五): file=4, rank=4
+        // ミラー後: file=4 (5筋), rank=4 → sq = 4*9+4 = 40 (中央なので変わらない)
+        let sq = 40;
+        let bp = BonaPiece::new((90 + sq) as u16);
+        assert_eq!(pack_bonapiece(bp, true), 90 + 40);
     }
 
     #[test]
