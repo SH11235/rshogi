@@ -90,21 +90,18 @@ const CONTAINER_SIZE_CONFIG = {
         piecesContainer: "flex-nowrap gap-0",
         marker: "text-sm w-4",
         buttonPadding: "p-0.5",
-        gap: "1px",
     },
     medium: {
         container: "min-h-[32px]",
         piecesContainer: "flex-nowrap gap-0.5",
         marker: "text-base w-5",
         buttonPadding: "p-0.5",
-        gap: "1px",
     },
     normal: {
         container: "min-h-[44px]",
         piecesContainer: "flex-wrap gap-0.5",
         marker: "text-xl w-7",
         buttonPadding: "p-0.5",
-        gap: "1px",
     },
 } as const;
 
@@ -186,14 +183,7 @@ export function HandPiecesDisplay({
                     }
 
                     return (
-                        <div
-                            key={`${owner}-${piece}`}
-                            style={{
-                                display: "flex",
-                                alignItems: "center",
-                                gap: containerConfig.gap,
-                            }}
-                        >
+                        <div key={`${owner}-${piece}`} className="flex items-center gap-px">
                             {/* 駒ボタン */}
                             <button
                                 type="button"
@@ -239,41 +229,22 @@ export function HandPiecesDisplay({
                             {/* ±ボタン（縦並び）- 編集モードでなくてもスペースを確保、compact/mediumモード時は編集モードのみ表示 */}
                             {(!isCompactLayout || isEditMode) && (
                                 <div
-                                    style={{
-                                        display: "flex",
-                                        flexDirection: "column",
-                                        gap: "1px",
-                                        visibility: isEditMode ? "visible" : "hidden",
-                                    }}
+                                    className={cn(
+                                        "flex flex-col gap-px",
+                                        isEditMode ? "visible" : "invisible",
+                                    )}
                                 >
                                     <button
                                         type="button"
                                         onClick={() => onIncrement?.(piece)}
                                         disabled={!isEditMode || count >= maxCount}
                                         aria-label={`${PIECE_LABELS[piece]}を増やす`}
-                                        style={{
-                                            width: "20px",
-                                            height: "16px",
-                                            borderRadius: "4px 4px 0 0",
-                                            border: "1px solid hsl(var(--border, 0 0% 86%))",
-                                            borderBottom: "none",
-                                            background:
-                                                count < maxCount
-                                                    ? "hsl(var(--wafuu-washi))"
-                                                    : "hsl(var(--muted, 210 40% 96%))",
-                                            color:
-                                                count < maxCount
-                                                    ? "hsl(var(--wafuu-sumi))"
-                                                    : "hsl(var(--muted-foreground, 0 0% 70%))",
-                                            cursor: count < maxCount ? "pointer" : "not-allowed",
-                                            fontSize: "12px",
-                                            fontWeight: "bold",
-                                            display: "flex",
-                                            alignItems: "center",
-                                            justifyContent: "center",
-                                            lineHeight: 1,
-                                            opacity: count < maxCount ? 1 : 0.4,
-                                        }}
+                                        className={cn(
+                                            "flex h-4 w-5 items-center justify-center rounded-t border border-b-0 border-[hsl(var(--border))] text-xs font-bold leading-none",
+                                            count < maxCount
+                                                ? "cursor-pointer bg-[hsl(var(--wafuu-washi))] text-[hsl(var(--wafuu-sumi))] opacity-100"
+                                                : "cursor-not-allowed bg-[hsl(var(--muted))] text-[hsl(var(--muted-foreground))] opacity-40",
+                                        )}
                                     >
                                         +
                                     </button>
@@ -282,28 +253,12 @@ export function HandPiecesDisplay({
                                         onClick={() => onDecrement?.(piece)}
                                         disabled={!isEditMode || count <= 0}
                                         aria-label={`${PIECE_LABELS[piece]}を減らす`}
-                                        style={{
-                                            width: "20px",
-                                            height: "16px",
-                                            borderRadius: "0 0 4px 4px",
-                                            border: "1px solid hsl(var(--border, 0 0% 86%))",
-                                            background:
-                                                count > 0
-                                                    ? "hsl(var(--wafuu-washi))"
-                                                    : "hsl(var(--muted, 210 40% 96%))",
-                                            color:
-                                                count > 0
-                                                    ? "hsl(var(--wafuu-sumi))"
-                                                    : "hsl(var(--muted-foreground, 0 0% 70%))",
-                                            cursor: count > 0 ? "pointer" : "not-allowed",
-                                            fontSize: "12px",
-                                            fontWeight: "bold",
-                                            display: "flex",
-                                            alignItems: "center",
-                                            justifyContent: "center",
-                                            lineHeight: 1,
-                                            opacity: count > 0 ? 1 : 0.4,
-                                        }}
+                                        className={cn(
+                                            "flex h-4 w-5 items-center justify-center rounded-b border border-[hsl(var(--border))] text-xs font-bold leading-none",
+                                            count > 0
+                                                ? "cursor-pointer bg-[hsl(var(--wafuu-washi))] text-[hsl(var(--wafuu-sumi))] opacity-100"
+                                                : "cursor-not-allowed bg-[hsl(var(--muted))] text-[hsl(var(--muted-foreground))] opacity-40",
+                                        )}
                                     >
                                         −
                                     </button>
