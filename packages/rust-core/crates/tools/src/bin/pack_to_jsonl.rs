@@ -197,7 +197,7 @@ fn main() -> Result<()> {
         let current_written = written.fetch_add(1, Ordering::Relaxed) + 1;
 
         // 10000レコードごとにフラッシュ（エラー時のデータ損失を防ぐため）
-        if current_written % 10000 == 0 {
+        if current_written.is_multiple_of(10000) {
             writer.flush()?;
         }
     }

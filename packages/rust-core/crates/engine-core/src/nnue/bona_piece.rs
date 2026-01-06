@@ -124,7 +124,7 @@ pub const PIECE_BASE: [[u16; 2]; 15] = [
 #[inline]
 pub fn bona_piece_from_base(sq_index: usize, base: u16) -> BonaPiece {
     debug_assert!(sq_index <= 80, "sq_index out of range: {sq_index}");
-    debug_assert!(base >= F_PAWN && base <= E_DRAGON, "base out of range: {base}");
+    debug_assert!((F_PAWN..=E_DRAGON).contains(&base), "base out of range: {base}");
     BonaPiece::new(base + sq_index as u16)
 }
 
@@ -335,7 +335,17 @@ impl BonaPiece {
 
         // countに応じてオフセット
         // count=1 のとき base, count=2 のとき base+1, ...
-        BonaPiece::new(base + count as u16 - 1)
+        let bp = BonaPiece::new(base + count as u16 - 1);
+
+        // 手駒のBonaPieceは必ずFE_HAND_END未満
+        debug_assert!(
+            (bp.0 as usize) < FE_HAND_END,
+            "Hand piece BonaPiece {} exceeds FE_HAND_END {}",
+            bp.0,
+            FE_HAND_END
+        );
+
+        bp
     }
 }
 
