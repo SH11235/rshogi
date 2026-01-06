@@ -13,7 +13,7 @@ use super::{Feature, TriggerEvent};
 use crate::nnue::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES};
 use crate::nnue::bona_piece::{BonaPiece, PIECE_BASE};
 use crate::nnue::bona_piece_halfka::{
-    factorized_index, halfka_index, is_hm_mirror, king_bucket, pack_bonapiece,
+    factorized_index, halfka_index, is_hm_mirror, king_bonapiece, king_bucket, pack_bonapiece,
 };
 use crate::nnue::constants::HALFKA_HM_DIMENSIONS;
 use crate::position::Position;
@@ -47,9 +47,9 @@ impl Feature for HalfKA_hm {
     /// 特徴量の次元数: BASE (45×1629) + FACT (1629) = 74,934
     const DIMENSIONS: usize = HALFKA_HM_DIMENSIONS;
 
-    /// 同時にアクティブになる最大数: (盤上38駒 + 手駒14) × 2 (factorized) = 104
+    /// 同時にアクティブになる最大数: (盤上38駒 + 相手の王 + 手駒14) × 2 (factorized) = 106
     /// ※ 実際は40駒程度なので80くらいが現実的
-    const MAX_ACTIVE: usize = 104;
+    const MAX_ACTIVE: usize = 106;
 
     /// 自玉が動いた場合に全計算
     const REFRESH_TRIGGER: TriggerEvent = TriggerEvent::FriendKingMoved;
@@ -69,7 +69,7 @@ impl Feature for HalfKA_hm {
         let kb = king_bucket(king_sq, perspective);
         let hm_mirror = is_hm_mirror(king_sq, perspective);
 
-        // 盤上の駒（駒種・色ごとにループ）
+        // 盤上の駒（駒種・色ごとにループ）- 王以外
         for color in [Color::Black, Color::White] {
             let is_friend = (color == perspective) as usize;
 
@@ -99,6 +99,21 @@ impl Feature for HalfKA_hm {
                 }
             }
         }
+
+        // 相手の王の特徴量を追加
+        // HalfKA_hmでは相手の王も特徴量に含める
+        // 自玉はking bucketとして使用されるため、特徴量には含めない
+        let enemy = perspective.opponent();
+        let enemy_king_sq = pos.king_square(enemy);
+        let enemy_king_sq_index = if perspective == Color::Black {
+            enemy_king_sq.index()
+        } else {
+            enemy_king_sq.inverse().index()
+        };
+        let enemy_king_bp = king_bonapiece(enemy_king_sq_index, false); // is_friend=false
+        let packed_enemy_king = pack_bonapiece(enemy_king_bp, hm_mirror);
+        active.push(halfka_index(kb, packed_enemy_king));
+        active.push(factorized_index(packed_enemy_king));
 
         // 手駒の特徴量
         // HalfKPと同様に、手駒の枚数分すべての特徴量を追加する
@@ -155,7 +170,22 @@ impl Feature for HalfKA_hm {
             // 盤上から消える側（old）
             if dp.old_piece.is_some() {
                 if let Some(sq) = dp.old_sq {
-                    let bp = BonaPiece::from_piece_square(dp.old_piece, sq, perspective);
+                    // 視点に応じてマスを変換
+                    let sq_index = if perspective == Color::Black {
+                        sq.index()
+                    } else {
+                        sq.inverse().index()
+                    };
+
+                    // 王の場合は king_bonapiece を使用
+                    // (BonaPiece::from_piece_square は King に対して ZERO を返すため)
+                    let bp = if dp.old_piece.piece_type() == PieceType::King {
+                        let is_friend = dp.color == perspective;
+                        king_bonapiece(sq_index, is_friend)
+                    } else {
+                        BonaPiece::from_piece_square(dp.old_piece, sq, perspective)
+                    };
+
                     if bp != BonaPiece::ZERO {
                         let packed = pack_bonapiece(bp, hm_mirror);
                         removed.push(halfka_index(kb, packed));
@@ -167,7 +197,21 @@ impl Feature for HalfKA_hm {
             // 盤上に現れる側（new）
             if dp.new_piece.is_some() {
                 if let Some(sq) = dp.new_sq {
-                    let bp = BonaPiece::from_piece_square(dp.new_piece, sq, perspective);
+                    // 視点に応じてマスを変換
+                    let sq_index = if perspective == Color::Black {
+                        sq.index()
+                    } else {
+                        sq.inverse().index()
+                    };
+
+                    // 王の場合は king_bonapiece を使用
+                    let bp = if dp.new_piece.piece_type() == PieceType::King {
+                        let is_friend = dp.color == perspective;
+                        king_bonapiece(sq_index, is_friend)
+                    } else {
+                        BonaPiece::from_piece_square(dp.new_piece, sq, perspective)
+                    };
+
                     if bp != BonaPiece::ZERO {
                         let packed = pack_bonapiece(bp, hm_mirror);
                         added.push(halfka_index(kb, packed));
@@ -227,8 +271,8 @@ mod tests {
     #[test]
     fn test_halfka_hm_max_active() {
         // 各駒で2つの特徴量（base + factor）
-        // 最大52駒 × 2 = 104
-        assert_eq!(HalfKA_hm::MAX_ACTIVE, 104);
+        // 最大53駒（盤上38 + 相手の王1 + 手駒14）× 2 = 106
+        assert_eq!(HalfKA_hm::MAX_ACTIVE, 106);
     }
 
     #[test]
@@ -245,8 +289,8 @@ mod tests {
 
         HalfKA_hm::append_active_indices(&pos, Color::Black, &mut active);
 
-        // 初期局面: 盤上38駒 × 2 (factorized) = 76
-        assert_eq!(active.len(), 76);
+        // 初期局面: (盤上38駒 + 相手の王) × 2 (factorized) = 78
+        assert_eq!(active.len(), 78);
     }
 
     #[test]
@@ -367,10 +411,10 @@ mod tests {
         let mut active = IndexList::new();
         HalfKA_hm::append_active_indices(&pos, Color::Black, &mut active);
 
-        // 盤上38駒 × 2 = 76
+        // (盤上38駒 + 相手の王) × 2 = 78
         // 手駒: 歩3枚(3×2=6) + 香1枚(1×2=2) = 8
-        // 合計 = 76 + 8 = 84
-        assert_eq!(active.len(), 84, "手駒の枚数分すべての特徴量が追加されるべき");
+        // 合計 = 78 + 8 = 86
+        assert_eq!(active.len(), 86, "手駒の枚数分すべての特徴量が追加されるべき");
     }
 
     #[test]
@@ -384,10 +428,10 @@ mod tests {
         let mut active = IndexList::new();
         HalfKA_hm::append_active_indices(&pos, Color::Black, &mut active);
 
-        // 盤上38駒 × 2 = 76
+        // (盤上38駒 + 相手の王) × 2 = 78
         // 手駒: 歩5枚(5×2=10) + 桂2枚(2×2=4) + 銀1枚(1×2=2) = 16
-        // 合計 = 76 + 16 = 92
-        assert_eq!(active.len(), 92, "手駒の枚数分すべての特徴量が追加されるべき");
+        // 合計 = 78 + 16 = 94
+        assert_eq!(active.len(), 94, "手駒の枚数分すべての特徴量が追加されるべき");
     }
 
     #[test]
@@ -478,5 +522,38 @@ mod tests {
         // 0→3: removed=0, added=6（3枚分 × 2 (base+factor)）
         assert_eq!(removed.len(), 0);
         assert_eq!(added.len(), 6, "3枚分の特徴量を追加");
+    }
+
+    #[test]
+    fn test_append_changed_indices_enemy_king_move() {
+        // 相手の王の移動: 5一→4一
+        // HalfKA_hmでは相手の王も特徴量に含めるため、差分更新で処理される
+        let sq_51 = Square::new(File::File5, Rank::Rank1);
+        let sq_41 = Square::new(File::File4, Rank::Rank1);
+        let king_sq = Square::new(File::File5, Rank::Rank9); // 自玉は5九
+
+        let mut dirty_piece = DirtyPiece::new();
+        dirty_piece.push_piece(ChangedPiece {
+            color: Color::White, // 相手（後手）の王
+            old_piece: Piece::W_KING,
+            old_sq: Some(sq_51),
+            new_piece: Piece::W_KING,
+            new_sq: Some(sq_41),
+        });
+
+        let mut removed = IndexList::new();
+        let mut added = IndexList::new();
+
+        HalfKA_hm::append_changed_indices(
+            &dirty_piece,
+            Color::Black,
+            king_sq,
+            &mut removed,
+            &mut added,
+        );
+
+        // 相手の王の移動: removed=2 (base+factor), added=2 (base+factor)
+        assert_eq!(removed.len(), 2, "相手の王の旧位置の特徴量を削除");
+        assert_eq!(added.len(), 2, "相手の王の新位置の特徴量を追加");
     }
 }
