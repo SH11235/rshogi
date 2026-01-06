@@ -37,10 +37,18 @@ export function SkillLevelSelector({
 
     const handlePresetChange = (newPreset: SkillPreset) => {
         if (newPreset === "custom") {
-            // カスタムに切り替え時は現在の値を維持
-            // 全力（professional）から切り替えた場合は 20 から開始
-            const defaultSkillLevel = preset === "professional" ? SKILL_LEVEL_MAX : 10;
-            onChange(value ?? { skillLevel: defaultSkillLevel });
+            // カスタムに切り替え時
+            let skillLevel = value?.skillLevel ?? SKILL_LEVEL_MAX;
+
+            // プリセット値と一致する場合は微調整してカスタムモードを維持
+            // （detectSkillPreset が custom 以外を返す場合は一致している）
+            const matchesPreset = detectSkillPreset({ skillLevel }) !== "custom";
+            if (matchesPreset) {
+                // プリセット値から1減らす（0の場合は1増やす）
+                skillLevel = skillLevel > 0 ? skillLevel - 1 : skillLevel + 1;
+            }
+
+            onChange({ skillLevel });
         } else if (newPreset === "professional") {
             // 全力の場合は undefined（デフォルト）を設定
             onChange(undefined);
