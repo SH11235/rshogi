@@ -147,7 +147,7 @@ function PlayerHandSection({
     flipBoard,
 }: PlayerHandSectionProps): ReactElement {
     return (
-        <div data-zone={`hand-${owner}`}>
+        <div data-zone={`hand-${owner}`} className="w-full">
             <HandPiecesDisplay
                 owner={owner}
                 hand={hand}
@@ -1965,7 +1965,10 @@ export function ShogiMatch({
                                     {(() => {
                                         const info = getHandInfo("top");
                                         return (
-                                            <div data-zone={`hand-${info.owner}`}>
+                                            <div
+                                                data-zone={`hand-${info.owner}`}
+                                                className="w-full"
+                                            >
                                                 {/* ステータス行: [手数] [手番] [反転ボタン] */}
                                                 <div className="flex items-center justify-end mb-1 gap-4">
                                                     {/* 手数表示 */}
