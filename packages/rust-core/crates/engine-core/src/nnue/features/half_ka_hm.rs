@@ -178,34 +178,30 @@ impl Feature for HalfKA_hm {
         }
 
         // 手駒の変化を反映
+        // HalfKA_hmでは手駒の枚数分すべての特徴量がアクティブになる設計
+        // 例: 歩3枚 → 歩1枚目、歩2枚目、歩3枚目の3つの特徴量がすべてアクティブ
+        // したがって差分更新では:
+        // - 増加時: 増えた分だけ追加（既存はそのまま維持）
+        // - 減少時: 減った分だけ削除（残る分は維持）
         for hc in dirty_piece.hand_changes() {
-            if hc.old_count != hc.new_count {
-                // 旧カウント分の特徴量を削除
-                if hc.old_count > 0 {
-                    let bp_old = BonaPiece::from_hand_piece(
-                        perspective,
-                        hc.owner,
-                        hc.piece_type,
-                        hc.old_count,
-                    );
-                    if bp_old != BonaPiece::ZERO {
-                        let packed = pack_bonapiece(bp_old, hm_mirror);
-                        removed.push(halfka_index(kb, packed));
-                        removed.push(factorized_index(packed));
-                    }
-                }
-                // 新カウント分の特徴量を追加
-                if hc.new_count > 0 {
-                    let bp_new = BonaPiece::from_hand_piece(
-                        perspective,
-                        hc.owner,
-                        hc.piece_type,
-                        hc.new_count,
-                    );
-                    if bp_new != BonaPiece::ZERO {
-                        let packed = pack_bonapiece(bp_new, hm_mirror);
+            if hc.old_count < hc.new_count {
+                // 枚数増加: old_count+1 から new_count までの特徴量を追加
+                for i in (hc.old_count + 1)..=hc.new_count {
+                    let bp = BonaPiece::from_hand_piece(perspective, hc.owner, hc.piece_type, i);
+                    if bp != BonaPiece::ZERO {
+                        let packed = pack_bonapiece(bp, hm_mirror);
                         added.push(halfka_index(kb, packed));
                         added.push(factorized_index(packed));
+                    }
+                }
+            } else if hc.old_count > hc.new_count {
+                // 枚数減少: new_count+1 から old_count までの特徴量を削除
+                for i in (hc.new_count + 1)..=hc.old_count {
+                    let bp = BonaPiece::from_hand_piece(perspective, hc.owner, hc.piece_type, i);
+                    if bp != BonaPiece::ZERO {
+                        let packed = pack_bonapiece(bp, hm_mirror);
+                        removed.push(halfka_index(kb, packed));
+                        removed.push(factorized_index(packed));
                     }
                 }
             }
@@ -392,5 +388,95 @@ mod tests {
         // 手駒: 歩5枚(5×2=10) + 桂2枚(2×2=4) + 銀1枚(1×2=2) = 16
         // 合計 = 76 + 16 = 92
         assert_eq!(active.len(), 92, "手駒の枚数分すべての特徴量が追加されるべき");
+    }
+
+    #[test]
+    fn test_append_changed_indices_hand_increase() {
+        // 手駒増加（1枚→2枚）: 2枚目の特徴量だけを追加し、1枚目は維持
+        let king_sq = Square::new(File::File5, Rank::Rank9);
+
+        let mut dirty_piece = DirtyPiece::new();
+
+        dirty_piece.push_hand_change(HandChange {
+            owner: Color::Black,
+            piece_type: PieceType::Pawn,
+            old_count: 1,
+            new_count: 2,
+        });
+
+        let mut removed = IndexList::new();
+        let mut added = IndexList::new();
+
+        HalfKA_hm::append_changed_indices(
+            &dirty_piece,
+            Color::Black,
+            king_sq,
+            &mut removed,
+            &mut added,
+        );
+
+        // 増加時: removed=0（既存の1枚目は維持）, added=2（2枚目のbase+factor）
+        assert_eq!(removed.len(), 0, "増加時は既存の特徴量を削除しない");
+        assert_eq!(added.len(), 2, "増加分の特徴量だけを追加");
+    }
+
+    #[test]
+    fn test_append_changed_indices_hand_decrease() {
+        // 手駒減少（2枚→1枚）: 2枚目の特徴量だけを削除し、1枚目は維持
+        let king_sq = Square::new(File::File5, Rank::Rank9);
+
+        let mut dirty_piece = DirtyPiece::new();
+
+        dirty_piece.push_hand_change(HandChange {
+            owner: Color::Black,
+            piece_type: PieceType::Pawn,
+            old_count: 2,
+            new_count: 1,
+        });
+
+        let mut removed = IndexList::new();
+        let mut added = IndexList::new();
+
+        HalfKA_hm::append_changed_indices(
+            &dirty_piece,
+            Color::Black,
+            king_sq,
+            &mut removed,
+            &mut added,
+        );
+
+        // 減少時: removed=2（2枚目のbase+factor）, added=0（1枚目は維持）
+        assert_eq!(removed.len(), 2, "減少分の特徴量だけを削除");
+        assert_eq!(added.len(), 0, "減少時は特徴量を追加しない");
+    }
+
+    #[test]
+    fn test_append_changed_indices_hand_increase_multiple() {
+        // 手駒が0枚→3枚に増加: 1枚目、2枚目、3枚目すべて追加
+        let king_sq = Square::new(File::File5, Rank::Rank9);
+
+        let mut dirty_piece = DirtyPiece::new();
+
+        dirty_piece.push_hand_change(HandChange {
+            owner: Color::Black,
+            piece_type: PieceType::Pawn,
+            old_count: 0,
+            new_count: 3,
+        });
+
+        let mut removed = IndexList::new();
+        let mut added = IndexList::new();
+
+        HalfKA_hm::append_changed_indices(
+            &dirty_piece,
+            Color::Black,
+            king_sq,
+            &mut removed,
+            &mut added,
+        );
+
+        // 0→3: removed=0, added=6（3枚分 × 2 (base+factor)）
+        assert_eq!(removed.len(), 0);
+        assert_eq!(added.len(), 6, "3枚分の特徴量を追加");
     }
 }
