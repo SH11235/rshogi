@@ -2,6 +2,133 @@ export type EngineBackend = "native" | "wasm" | "external-usi";
 
 export type EngineStopMode = "terminate" | "cooperative";
 
+// ============================================================
+// Skill Level Settings
+// ============================================================
+
+/**
+ * Skill Level 設定
+ *
+ * エンジンの強さを制御するための設定。
+ * - skillLevel: 0-20 の整数（0=最弱、20=全力）
+ * - useLimitStrength: ELO制限を使用するか
+ * - elo: ELO値（useLimitStrength=true時のみ有効、1320-3190の範囲）
+ */
+export interface SkillLevelSettings {
+    /** スキルレベル (0-20, 20=全力) */
+    skillLevel: number;
+    /** ELO制限を使用するか */
+    useLimitStrength?: boolean;
+    /** ELO値 (useLimitStrength=true時のみ有効, 1320-3190) */
+    elo?: number;
+}
+
+/**
+ * プリセットレベル
+ */
+export type SkillPreset = "beginner" | "intermediate" | "advanced" | "professional" | "custom";
+
+/**
+ * プリセットから SkillLevelSettings への変換マップ
+ */
+export const SKILL_PRESETS: Record<Exclude<SkillPreset, "custom">, SkillLevelSettings> = {
+    beginner: { skillLevel: 2 },
+    intermediate: { skillLevel: 10 },
+    advanced: { skillLevel: 16 },
+    professional: { skillLevel: 20 },
+};
+
+/** Skill Level の有効範囲 */
+export const SKILL_LEVEL_MIN = 0;
+export const SKILL_LEVEL_MAX = 20;
+
+/** ELO の有効範囲 */
+export const ELO_MIN = 1320;
+export const ELO_MAX = 3190;
+
+/**
+ * SkillLevelSettings のバリデーション結果
+ */
+export interface SkillLevelValidationResult {
+    valid: boolean;
+    errors: string[];
+}
+
+/**
+ * SkillLevelSettings をバリデーションする
+ */
+export function validateSkillLevelSettings(
+    settings: SkillLevelSettings,
+): SkillLevelValidationResult {
+    const errors: string[] = [];
+
+    if (settings.skillLevel < SKILL_LEVEL_MIN || settings.skillLevel > SKILL_LEVEL_MAX) {
+        errors.push(
+            `skillLevel must be between ${SKILL_LEVEL_MIN} and ${SKILL_LEVEL_MAX}, got ${settings.skillLevel}`,
+        );
+    }
+
+    if (settings.useLimitStrength && settings.elo !== undefined) {
+        if (settings.elo < ELO_MIN || settings.elo > ELO_MAX) {
+            errors.push(`elo must be between ${ELO_MIN} and ${ELO_MAX}, got ${settings.elo}`);
+        }
+    }
+
+    return {
+        valid: errors.length === 0,
+        errors,
+    };
+}
+
+/**
+ * SkillLevelSettings の値をクランプして正規化する
+ */
+export function normalizeSkillLevelSettings(settings: SkillLevelSettings): SkillLevelSettings {
+    const skillLevel = Math.max(SKILL_LEVEL_MIN, Math.min(SKILL_LEVEL_MAX, settings.skillLevel));
+
+    if (settings.useLimitStrength && settings.elo !== undefined) {
+        const elo = Math.max(ELO_MIN, Math.min(ELO_MAX, settings.elo));
+        return { skillLevel, useLimitStrength: true, elo };
+    }
+
+    return { skillLevel };
+}
+
+/**
+ * SkillLevelSettings からプリセットを推定
+ */
+export function detectSkillPreset(settings: SkillLevelSettings): SkillPreset {
+    // 範囲外の値はカスタムとして扱う
+    if (settings.skillLevel < SKILL_LEVEL_MIN || settings.skillLevel > SKILL_LEVEL_MAX) {
+        return "custom";
+    }
+
+    if (settings.useLimitStrength) {
+        return "custom";
+    }
+
+    for (const [preset, presetSettings] of Object.entries(SKILL_PRESETS) as [
+        Exclude<SkillPreset, "custom">,
+        SkillLevelSettings,
+    ][]) {
+        if (presetSettings.skillLevel === settings.skillLevel) {
+            return preset;
+        }
+    }
+    return "custom";
+}
+
+/**
+ * プリセット名の日本語表示
+ */
+export const SKILL_PRESET_LABELS: Record<SkillPreset, string> = {
+    beginner: "初心者",
+    intermediate: "中級者",
+    advanced: "上級者",
+    professional: "全力",
+    custom: "カスタム",
+};
+
 export interface EngineInitOptions {
     /** バックエンドの種類 (native/wasm/external-usi) */
     backend?: EngineBackend;

@@ -1,15 +1,18 @@
 import type { Player } from "@shogi/app-core";
-import type { EngineClient } from "@shogi/engine-client";
+import type { EngineClient, SkillLevelSettings } from "@shogi/engine-client";
 import type { ReactElement } from "react";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../../collapsible";
 import { Input } from "../../input";
 import type { ClockSettings } from "../hooks/useClockManager";
+import { SkillLevelSelector } from "./SkillLevelSelector";
 
 type SideRole = "human" | "engine";
 
 export type SideSetting = {
     role: SideRole;
     engineId?: string;
+    /** エンジンの強さ設定（role="engine"時のみ有効） */
+    skillLevel?: SkillLevelSettings;
 };
 
 export type EngineOption = {
@@ -69,18 +72,31 @@ export function MatchSettingsPanel({
     };
 
     const handleSelectorChange = (side: Player, value: string) => {
+        const currentSetting = sides[side];
         if (value === "human") {
             onSidesChange({
                 ...sides,
-                [side]: { role: "human", engineId: undefined },
+                [side]: { role: "human", engineId: undefined, skillLevel: undefined },
             });
         } else if (value.startsWith("engine:")) {
             const engineId = value.slice("engine:".length);
             onSidesChange({
                 ...sides,
-                [side]: { role: "engine", engineId },
+                [side]: {
+                    role: "engine",
+                    engineId,
+                    // 既存の skillLevel 設定を保持
+                    skillLevel: currentSetting.skillLevel,
+                },
             });
         }
+    };
+
+    const handleSkillLevelChange = (side: Player, skillLevel: SkillLevelSettings | undefined) => {
+        onSidesChange({
+            ...sides,
+            [side]: { ...sides[side], skillLevel },
+        });
     };
 
     const sideSelector = (side: Player) => {
@@ -88,22 +104,32 @@ export function MatchSettingsPanel({
         const selectorValue = getSelectorValue(setting);
 
         return (
-            <label className={labelClassName}>
-                {side === "sente" ? "先手" : "後手"}
-                <select
-                    value={selectorValue}
-                    onChange={(e) => handleSelectorChange(side, e.target.value)}
-                    disabled={settingsLocked}
-                    className={selectClassName}
-                >
-                    <option value="human">人間</option>
-                    {uiEngineOptions.map((opt) => (
-                        <option key={opt.id} value={`engine:${opt.id}`}>
-                            {opt.label}
-                        </option>
-                    ))}
-                </select>
-            </label>
+            <div className="flex flex-col gap-2">
+                <label className={labelClassName}>
+                    {side === "sente" ? "先手" : "後手"}
+                    <select
+                        value={selectorValue}
+                        onChange={(e) => handleSelectorChange(side, e.target.value)}
+                        disabled={settingsLocked}
+                        className={selectClassName}
+                    >
+                        <option value="human">人間</option>
+                        {uiEngineOptions.map((opt) => (
+                            <option key={opt.id} value={`engine:${opt.id}`}>
+                                {opt.label}
+                            </option>
+                        ))}
+                    </select>
+                </label>
+                {/* エンジン選択時のみ Skill Level 設定を表示 */}
+                {setting.role === "engine" && (
+                    <SkillLevelSelector
+                        value={setting.skillLevel}
+                        onChange={(skillLevel) => handleSkillLevelChange(side, skillLevel)}
+                        disabled={settingsLocked}
+                    />
+                )}
+            </div>
         );
     };
 

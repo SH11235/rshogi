@@ -292,27 +292,25 @@ function squareToSimple(sq: string): string {
 /**
  * 評価値を表示用文字列にフォーマット
  *
- * 評価値は指し手を指した側の視点で格納されているため:
- * - evalMate > 0: 指した側が詰ませられる（勝ち）
- * - evalMate < 0: 指した側が詰まされる（負け）
+ * 評価値は先手視点に正規化されていることを前提とする:
+ * - evalMate > 0: 先手の勝ち（先手が詰ませる）
+ * - evalMate < 0: 後手の勝ち（後手が詰ませる）
+ * - evalCp > 0: 先手有利
+ * - evalCp < 0: 後手有利
  *
- * @param evalCp 評価値（センチポーン）
- * @param evalMate 詰み手数
- * @param ply 手数（奇数=先手の指し手後、偶数=後手の指し手後）
- * @returns フォーマットされた文字列（例: "+50", "☗詰3", "☖詰5"）
+ * @param evalCp 評価値（センチポーン、先手視点）
+ * @param evalMate 詰み手数（先手視点）
+ * @param _ply 手数（後方互換性のため残すが使用しない）
+ * @returns フォーマットされた文字列（例: "+5.0", "+詰3", "-詰5"）
  */
-export function formatEval(evalCp?: number, evalMate?: number, ply?: number): string {
+export function formatEval(evalCp?: number, evalMate?: number, _ply?: number): string {
     if (evalMate !== undefined && evalMate !== null) {
-        // 手番を判定（奇数手=先手が指した後、偶数手=後手が指した後）
-        const movingSide = ply !== undefined && ply % 2 === 0 ? "☖" : "☗";
-        const opponentSide = ply !== undefined && ply % 2 === 0 ? "☗" : "☖";
-
+        // 先手視点に正規化済みなので、符号だけで判定
+        // 符号式: +詰N（先手勝ち）、-詰N（後手勝ち）
         if (evalMate > 0) {
-            // 指した側が勝ち（詰ませられる）
-            return `${movingSide}詰${evalMate}`;
+            return `+詰${evalMate}`;
         }
-        // 指した側が負け（詰まされる）= 相手側が詰ませられる
-        return `${opponentSide}詰${Math.abs(evalMate)}`;
+        return `-詰${Math.abs(evalMate)}`;
     }
 
     if (evalCp === undefined || evalCp === null) {
@@ -330,16 +328,22 @@ export function formatEval(evalCp?: number, evalMate?: number, ply?: number): st
 /**
  * 評価値のツールチップ用の詳細情報を生成
  *
- * @param evalCp 評価値（センチポーン）
- * @param evalMate 詰み手数
- * @param ply 手数
+ * 評価値は先手視点に正規化されていることを前提とする:
+ * - evalMate > 0: 先手の勝ち
+ * - evalMate < 0: 後手の勝ち
+ * - evalCp > 0: 先手有利
+ * - evalCp < 0: 後手有利
+ *
+ * @param evalCp 評価値（センチポーン、先手視点）
+ * @param evalMate 詰み手数（先手視点）
+ * @param _ply 手数（後方互換性のため残すが使用しない）
  * @param depth 探索深さ
  * @returns ツールチップ用の情報オブジェクト
  */
 export function getEvalTooltipInfo(
     evalCp?: number,
     evalMate?: number,
-    ply?: number,
+    _ply?: number,
     depth?: number,
 ): {
     /** メイン説明（例: "☗先手有利"） */
@@ -351,10 +355,10 @@ export function getEvalTooltipInfo(
     /** 有利な側（"sente" | "gote" | null） */
     advantage: "sente" | "gote" | null;
 } {
-    // 詰みの場合
+    // 詰みの場合（先手視点に正規化済み）
     if (evalMate !== undefined && evalMate !== null) {
-        const movingSide = ply !== undefined && ply % 2 === 0 ? "gote" : "sente";
-        const winningSide = evalMate > 0 ? movingSide : movingSide === "sente" ? "gote" : "sente";
+        // 符号だけで判定: > 0 なら先手勝ち、< 0 なら後手勝ち
+        const winningSide = evalMate > 0 ? "sente" : "gote";
         const winnerMark = winningSide === "sente" ? "☗" : "☖";
         const winnerName = winningSide === "sente" ? "先手" : "後手";
 

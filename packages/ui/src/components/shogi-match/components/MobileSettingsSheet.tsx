@@ -1,8 +1,10 @@
 import type { Player } from "@shogi/app-core";
+import type { SkillLevelSettings } from "@shogi/engine-client";
 import { type ReactElement, useEffect, useState } from "react";
 import type { ClockSettings } from "../hooks/useClockManager";
 import type { DisplaySettings, SquareNotation } from "../types";
 import type { EngineOption, SideSetting } from "./MatchSettingsPanel";
+import { SkillLevelSelector } from "./SkillLevelSelector";
 
 // =============================================================================
 // NumericInput: 文字列ベースの数値入力コンポーネント
@@ -123,18 +125,30 @@ export function MobileSettingsSheet({
     };
 
     const handleSelectorChange = (side: Player, value: string) => {
+        const currentSetting = sides[side];
         if (value === "human") {
             onSidesChange({
                 ...sides,
-                [side]: { role: "human", engineId: undefined },
+                [side]: { role: "human", engineId: undefined, skillLevel: undefined },
             });
         } else if (value.startsWith("engine:")) {
             const engineId = value.slice("engine:".length);
             onSidesChange({
                 ...sides,
-                [side]: { role: "engine", engineId },
+                [side]: {
+                    role: "engine",
+                    engineId,
+                    skillLevel: currentSetting.skillLevel,
+                },
             });
         }
+    };
+
+    const handleSkillLevelChange = (side: Player, skillLevel: SkillLevelSettings | undefined) => {
+        onSidesChange({
+            ...sides,
+            [side]: { ...sides[side], skillLevel },
+        });
     };
 
     return (
@@ -161,39 +175,57 @@ export function MobileSettingsSheet({
             </label>
 
             {/* 先手/後手設定 */}
-            <div className="grid grid-cols-2 gap-3 [&>label]:min-w-0">
-                <label className={labelClassName}>
-                    <span className="font-medium text-wafuu-shu">☗ 先手</span>
-                    <select
-                        value={getSelectorValue(sides.sente)}
-                        onChange={(e) => handleSelectorChange("sente", e.target.value)}
-                        disabled={settingsLocked}
-                        className={selectClassName}
-                    >
-                        <option value="human">人間</option>
-                        {uiEngineOptions.map((opt) => (
-                            <option key={opt.id} value={`engine:${opt.id}`}>
-                                {opt.label}
-                            </option>
-                        ))}
-                    </select>
-                </label>
-                <label className={labelClassName}>
-                    <span className="font-medium text-wafuu-ai">☖ 後手</span>
-                    <select
-                        value={getSelectorValue(sides.gote)}
-                        onChange={(e) => handleSelectorChange("gote", e.target.value)}
-                        disabled={settingsLocked}
-                        className={selectClassName}
-                    >
-                        <option value="human">人間</option>
-                        {uiEngineOptions.map((opt) => (
-                            <option key={opt.id} value={`engine:${opt.id}`}>
-                                {opt.label}
-                            </option>
-                        ))}
-                    </select>
-                </label>
+            <div className="grid grid-cols-2 gap-3 [&>div]:min-w-0">
+                <div className="flex flex-col gap-2">
+                    <label className={labelClassName}>
+                        <span className="font-medium text-wafuu-shu">☗ 先手</span>
+                        <select
+                            value={getSelectorValue(sides.sente)}
+                            onChange={(e) => handleSelectorChange("sente", e.target.value)}
+                            disabled={settingsLocked}
+                            className={selectClassName}
+                        >
+                            <option value="human">人間</option>
+                            {uiEngineOptions.map((opt) => (
+                                <option key={opt.id} value={`engine:${opt.id}`}>
+                                    {opt.label}
+                                </option>
+                            ))}
+                        </select>
+                    </label>
+                    {sides.sente.role === "engine" && (
+                        <SkillLevelSelector
+                            value={sides.sente.skillLevel}
+                            onChange={(sl) => handleSkillLevelChange("sente", sl)}
+                            disabled={settingsLocked}
+                        />
+                    )}
+                </div>
+                <div className="flex flex-col gap-2">
+                    <label className={labelClassName}>
+                        <span className="font-medium text-wafuu-ai">☖ 後手</span>
+                        <select
+                            value={getSelectorValue(sides.gote)}
+                            onChange={(e) => handleSelectorChange("gote", e.target.value)}
+                            disabled={settingsLocked}
+                            className={selectClassName}
+                        >
+                            <option value="human">人間</option>
+                            {uiEngineOptions.map((opt) => (
+                                <option key={opt.id} value={`engine:${opt.id}`}>
+                                    {opt.label}
+                                </option>
+                            ))}
+                        </select>
+                    </label>
+                    {sides.gote.role === "engine" && (
+                        <SkillLevelSelector
+                            value={sides.gote.skillLevel}
+                            onChange={(sl) => handleSkillLevelChange("gote", sl)}
+                            disabled={settingsLocked}
+                        />
+                    )}
+                </div>
             </div>
 
             {/* 持ち時間設定 */}
