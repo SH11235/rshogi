@@ -1,19 +1,21 @@
 //! HalfKA_hm^ 特徴量
 //!
-//! Half-Mirror King + All pieces with Factorization
+//! Half-Mirror King + All pieces (coalesced)
 //!
 //! 主な特徴:
 //! - キングバケット: 45バケット（Half-Mirror: 9段 × 5筋）
-//! - Factorization: 各駒に2つの特徴量（base + factor）
-//! - 入力次元: 74,934 (BASE: 73,305 + FACT: 1,629)
+//! - 入力次元: 73,305 (BASE: 45×1629)
 //!
-//! 参考実装: nnue-pytorch training_data_loader.cpp
+//! 注意: nnue-pytorchのcoalesce済みモデル専用。
+//! Factorizationの重みはBase側に畳み込み済みのため、推論時はBaseのみで計算する。
+//!
+//! 参考実装: nnue-pytorch training_data_loader.cpp, serialize.py
 
 use super::{Feature, TriggerEvent};
 use crate::nnue::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES};
 use crate::nnue::bona_piece::{BonaPiece, PIECE_BASE};
 use crate::nnue::bona_piece_halfka::{
-    factorized_index, halfka_index, is_hm_mirror, king_bonapiece, king_bucket, pack_bonapiece,
+    halfka_index, is_hm_mirror, king_bonapiece, king_bucket, pack_bonapiece,
 };
 use crate::nnue::constants::HALFKA_HM_DIMENSIONS;
 use crate::position::Position;
@@ -44,12 +46,19 @@ const BOARD_PIECE_TYPES: [PieceType; 13] = [
 pub struct HalfKA_hm;
 
 impl Feature for HalfKA_hm {
-    /// 特徴量の次元数: BASE (45×1629) + FACT (1629) = 74,934
+    /// 特徴量の次元数: BASE (45×1629) = 73,305
     const DIMENSIONS: usize = HALFKA_HM_DIMENSIONS;
 
-    /// 同時にアクティブになる最大数: (盤上38駒 + 両方の王2 + 手駒14) × 2 (factorized) = 108
-    /// ※ 実際は40駒程度なので80くらいが現実的
-    const MAX_ACTIVE: usize = 108;
+    /// 同時にアクティブになる最大数（合法局面での理論上限）
+    ///
+    /// 将棋の合法局面では駒の総数は40個固定:
+    /// - 盤上駒（王含む）+ 手駒 = 40
+    ///
+    /// coalesce済みモデルでは各駒が1特徴量なので MAX_ACTIVE = 40。
+    ///
+    /// 注意: この値は理論上限。実際のIndexListは`MAX_ACTIVE_FEATURES = 54`を使用し、
+    /// テスト用の非合法局面（駒数超過）にも対応できる安全マージンを持つ。
+    const MAX_ACTIVE: usize = 40;
 
     /// 自玉が動いた場合に全計算
     const REFRESH_TRIGGER: TriggerEvent = TriggerEvent::FriendKingMoved;
@@ -57,8 +66,9 @@ impl Feature for HalfKA_hm {
     /// アクティブな特徴量インデックスを追記
     ///
     /// 各駒について:
-    /// 1. Base特徴: king_bucket * PIECE_INPUTS + pack(bp, hm_mirror)
-    /// 2. Factor特徴: BASE_INPUTS + pack(bp, hm_mirror)
+    /// Base特徴: king_bucket * PIECE_INPUTS + pack(bp, hm_mirror)
+    ///
+    /// 注意: coalesce済みモデル専用のため、Factor特徴量は追加しない。
     #[inline]
     fn append_active_indices(
         pos: &Position,
@@ -91,11 +101,8 @@ impl Feature for HalfKA_hm {
                     // pack_bonapieceでHalf-Mirror処理
                     let packed = pack_bonapiece(bp, hm_mirror);
 
-                    // Base特徴量
+                    // Base特徴量（coalesce済みモデルではこれのみ）
                     active.push(halfka_index(kb, packed));
-
-                    // Factorization特徴量
-                    active.push(factorized_index(packed));
                 }
             }
         }
@@ -114,7 +121,6 @@ impl Feature for HalfKA_hm {
         let friend_king_bp = king_bonapiece(friend_king_sq_index, true); // is_friend=true
         let packed_friend_king = pack_bonapiece(friend_king_bp, hm_mirror);
         active.push(halfka_index(kb, packed_friend_king));
-        active.push(factorized_index(packed_friend_king));
 
         // 敵玉の特徴量
         let enemy = perspective.opponent();
@@ -127,7 +133,6 @@ impl Feature for HalfKA_hm {
         let enemy_king_bp = king_bonapiece(enemy_king_sq_index, false); // is_friend=false
         let packed_enemy_king = pack_bonapiece(enemy_king_bp, hm_mirror);
         active.push(halfka_index(kb, packed_enemy_king));
-        active.push(factorized_index(packed_enemy_king));
 
         // 手駒の特徴量
         // HalfKPと同様に、手駒の枚数分すべての特徴量を追加する
@@ -153,11 +158,8 @@ impl Feature for HalfKA_hm {
                         // 手駒はミラー不要
                         let packed = pack_bonapiece(bp, hm_mirror);
 
-                        // Base特徴量
+                        // Base特徴量（coalesce済みモデルではこれのみ）
                         active.push(halfka_index(kb, packed));
-
-                        // Factorization特徴量
-                        active.push(factorized_index(packed));
                     }
                 }
             }
@@ -167,7 +169,7 @@ impl Feature for HalfKA_hm {
     /// 変化した特徴量インデックスを追記
     ///
     /// DirtyPieceから変化した特徴量を計算する。
-    /// Factorization対応のため、各変化に対して2つの特徴量（base + factor）を処理。
+    /// coalesce済みモデル専用のため、Base特徴量のみを処理。
     #[inline]
     fn append_changed_indices(
         dirty_piece: &DirtyPiece,
@@ -203,7 +205,6 @@ impl Feature for HalfKA_hm {
                     if bp != BonaPiece::ZERO {
                         let packed = pack_bonapiece(bp, hm_mirror);
                         removed.push(halfka_index(kb, packed));
-                        removed.push(factorized_index(packed));
                     }
                 }
             }
@@ -229,7 +230,6 @@ impl Feature for HalfKA_hm {
                     if bp != BonaPiece::ZERO {
                         let packed = pack_bonapiece(bp, hm_mirror);
                         added.push(halfka_index(kb, packed));
-                        added.push(factorized_index(packed));
                     }
                 }
             }
@@ -249,7 +249,6 @@ impl Feature for HalfKA_hm {
                     if bp != BonaPiece::ZERO {
                         let packed = pack_bonapiece(bp, hm_mirror);
                         added.push(halfka_index(kb, packed));
-                        added.push(factorized_index(packed));
                     }
                 }
             } else if hc.old_count > hc.new_count {
@@ -259,7 +258,6 @@ impl Feature for HalfKA_hm {
                     if bp != BonaPiece::ZERO {
                         let packed = pack_bonapiece(bp, hm_mirror);
                         removed.push(halfka_index(kb, packed));
-                        removed.push(factorized_index(packed));
                     }
                 }
             }
@@ -271,22 +269,22 @@ impl Feature for HalfKA_hm {
 mod tests {
     use super::*;
     use crate::nnue::accumulator::{ChangedPiece, HandChange};
-    use crate::nnue::bona_piece_halfka::PIECE_INPUTS;
     use crate::nnue::constants::BASE_INPUTS_HALFKA;
     use crate::position::Position;
     use crate::types::{File, Piece, Rank};
 
     #[test]
     fn test_halfka_hm_dimensions() {
-        assert_eq!(HalfKA_hm::DIMENSIONS, 74_934);
-        assert_eq!(HalfKA_hm::DIMENSIONS, BASE_INPUTS_HALFKA + PIECE_INPUTS);
+        // coalesce済みモデル: BASE (45×1629) = 73,305
+        assert_eq!(HalfKA_hm::DIMENSIONS, 73_305);
+        assert_eq!(HalfKA_hm::DIMENSIONS, BASE_INPUTS_HALFKA);
     }
 
     #[test]
     fn test_halfka_hm_max_active() {
-        // 各駒で2つの特徴量（base + factor）
-        // 最大54駒（盤上38 + 両方の王2 + 手駒14）× 2 = 108
-        assert_eq!(HalfKA_hm::MAX_ACTIVE, 108);
+        // coalesce済みモデルではFactorization無し
+        // 合法局面では盤上駒 + 手駒 + 両王 = 40駒
+        assert_eq!(HalfKA_hm::MAX_ACTIVE, 40);
     }
 
     #[test]
@@ -303,8 +301,9 @@ mod tests {
 
         HalfKA_hm::append_active_indices(&pos, Color::Black, &mut active);
 
-        // 初期局面: (盤上38駒 + 両方の王2) × 2 (factorized) = 80
-        assert_eq!(active.len(), 80);
+        // 初期局面: 盤上38駒 + 両方の王2 = 40
+        // coalesce済みモデルではFactorization無し
+        assert_eq!(active.len(), 40);
     }
 
     #[test]
@@ -334,9 +333,10 @@ mod tests {
             &mut added,
         );
 
-        // 1駒移動: removed=2 (base+factor), added=2 (base+factor)
-        assert_eq!(removed.len(), 2);
-        assert_eq!(added.len(), 2);
+        // 1駒移動: removed=1 (base), added=1 (base)
+        // coalesce済みモデルではFactorization無し
+        assert_eq!(removed.len(), 1);
+        assert_eq!(added.len(), 1);
     }
 
     #[test]
@@ -377,10 +377,11 @@ mod tests {
             &mut added,
         );
 
-        // 2駒がremoved（元位置の歩 + 取られた歩）× 2 (factor) = 4
-        // 1駒がadded（新位置の歩）× 2 (factor) = 2
-        assert_eq!(removed.len(), 4);
-        assert_eq!(added.len(), 2);
+        // 2駒がremoved（元位置の歩 + 取られた歩）= 2
+        // 1駒がadded（新位置の歩）= 1
+        // coalesce済みモデルではFactorization無し
+        assert_eq!(removed.len(), 2);
+        assert_eq!(added.len(), 1);
     }
 
     #[test]
@@ -408,9 +409,10 @@ mod tests {
             &mut added,
         );
 
-        // 手駒変化: removed=0, added=2 (base+factor)
+        // 手駒変化: removed=0, added=1 (base)
+        // coalesce済みモデルではFactorization無し
         assert_eq!(removed.len(), 0);
-        assert_eq!(added.len(), 2);
+        assert_eq!(added.len(), 1);
     }
 
     #[test]
@@ -425,10 +427,11 @@ mod tests {
         let mut active = IndexList::new();
         HalfKA_hm::append_active_indices(&pos, Color::Black, &mut active);
 
-        // (盤上38駒 + 両方の王2) × 2 = 80
-        // 手駒: 歩3枚(3×2=6) + 香1枚(1×2=2) = 8
-        // 合計 = 80 + 8 = 88
-        assert_eq!(active.len(), 88, "手駒の枚数分すべての特徴量が追加されるべき");
+        // 盤上38駒 + 両方の王2 = 40
+        // 手駒: 歩3枚(3) + 香1枚(1) = 4
+        // 合計 = 40 + 4 = 44
+        // coalesce済みモデルではFactorization無し
+        assert_eq!(active.len(), 44, "手駒の枚数分すべての特徴量が追加されるべき");
     }
 
     #[test]
@@ -442,10 +445,11 @@ mod tests {
         let mut active = IndexList::new();
         HalfKA_hm::append_active_indices(&pos, Color::Black, &mut active);
 
-        // (盤上38駒 + 両方の王2) × 2 = 80
-        // 手駒: 歩5枚(5×2=10) + 桂2枚(2×2=4) + 銀1枚(1×2=2) = 16
-        // 合計 = 80 + 16 = 96
-        assert_eq!(active.len(), 96, "手駒の枚数分すべての特徴量が追加されるべき");
+        // 盤上38駒 + 両方の王2 = 40
+        // 手駒: 歩5枚(5) + 桂2枚(2) + 銀1枚(1) = 8
+        // 合計 = 40 + 8 = 48
+        // coalesce済みモデルではFactorization無し
+        assert_eq!(active.len(), 48, "手駒の枚数分すべての特徴量が追加されるべき");
     }
 
     #[test]
@@ -473,9 +477,10 @@ mod tests {
             &mut added,
         );
 
-        // 増加時: removed=0（既存の1枚目は維持）, added=2（2枚目のbase+factor）
+        // 増加時: removed=0（既存の1枚目は維持）, added=1（2枚目のbase）
+        // coalesce済みモデルではFactorization無し
         assert_eq!(removed.len(), 0, "増加時は既存の特徴量を削除しない");
-        assert_eq!(added.len(), 2, "増加分の特徴量だけを追加");
+        assert_eq!(added.len(), 1, "増加分の特徴量だけを追加");
     }
 
     #[test]
@@ -503,8 +508,9 @@ mod tests {
             &mut added,
         );
 
-        // 減少時: removed=2（2枚目のbase+factor）, added=0（1枚目は維持）
-        assert_eq!(removed.len(), 2, "減少分の特徴量だけを削除");
+        // 減少時: removed=1（2枚目のbase）, added=0（1枚目は維持）
+        // coalesce済みモデルではFactorization無し
+        assert_eq!(removed.len(), 1, "減少分の特徴量だけを削除");
         assert_eq!(added.len(), 0, "減少時は特徴量を追加しない");
     }
 
@@ -533,9 +539,10 @@ mod tests {
             &mut added,
         );
 
-        // 0→3: removed=0, added=6（3枚分 × 2 (base+factor)）
+        // 0→3: removed=0, added=3（3枚分のbase）
+        // coalesce済みモデルではFactorization無し
         assert_eq!(removed.len(), 0);
-        assert_eq!(added.len(), 6, "3枚分の特徴量を追加");
+        assert_eq!(added.len(), 3, "3枚分の特徴量を追加");
     }
 
     #[test]
@@ -566,8 +573,9 @@ mod tests {
             &mut added,
         );
 
-        // 相手の王の移動: removed=2 (base+factor), added=2 (base+factor)
-        assert_eq!(removed.len(), 2, "相手の王の旧位置の特徴量を削除");
-        assert_eq!(added.len(), 2, "相手の王の新位置の特徴量を追加");
+        // 相手の王の移動: removed=1 (base), added=1 (base)
+        // coalesce済みモデルではFactorization無し
+        assert_eq!(removed.len(), 1, "相手の王の旧位置の特徴量を削除");
+        assert_eq!(added.len(), 1, "相手の王の新位置の特徴量を追加");
     }
 }
