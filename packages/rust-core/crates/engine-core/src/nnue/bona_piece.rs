@@ -116,6 +116,48 @@ pub const PIECE_BASE: [[u16; 2]; 15] = [
     [E_DRAGON, F_DRAGON],
 ];
 
+// コンパイル時の静的検証: PIECE_BASE テーブルの整合性チェック
+// 手動定義のミスを防ぐため、各駒種のbaseオフセットが正しいことを検証
+const _: () = {
+    use crate::types::PieceType;
+
+    // 生駒のチェック
+    assert!(PIECE_BASE[PieceType::Pawn as usize][0] == E_PAWN);
+    assert!(PIECE_BASE[PieceType::Pawn as usize][1] == F_PAWN);
+    assert!(PIECE_BASE[PieceType::Lance as usize][0] == E_LANCE);
+    assert!(PIECE_BASE[PieceType::Lance as usize][1] == F_LANCE);
+    assert!(PIECE_BASE[PieceType::Knight as usize][0] == E_KNIGHT);
+    assert!(PIECE_BASE[PieceType::Knight as usize][1] == F_KNIGHT);
+    assert!(PIECE_BASE[PieceType::Silver as usize][0] == E_SILVER);
+    assert!(PIECE_BASE[PieceType::Silver as usize][1] == F_SILVER);
+    assert!(PIECE_BASE[PieceType::Bishop as usize][0] == E_BISHOP);
+    assert!(PIECE_BASE[PieceType::Bishop as usize][1] == F_BISHOP);
+    assert!(PIECE_BASE[PieceType::Rook as usize][0] == E_ROOK);
+    assert!(PIECE_BASE[PieceType::Rook as usize][1] == F_ROOK);
+    assert!(PIECE_BASE[PieceType::Gold as usize][0] == E_GOLD);
+    assert!(PIECE_BASE[PieceType::Gold as usize][1] == F_GOLD);
+
+    // 成駒のチェック（すべてGOLDと同じ扱い）
+    assert!(PIECE_BASE[PieceType::ProPawn as usize][0] == E_GOLD);
+    assert!(PIECE_BASE[PieceType::ProPawn as usize][1] == F_GOLD);
+    assert!(PIECE_BASE[PieceType::ProLance as usize][0] == E_GOLD);
+    assert!(PIECE_BASE[PieceType::ProLance as usize][1] == F_GOLD);
+    assert!(PIECE_BASE[PieceType::ProKnight as usize][0] == E_GOLD);
+    assert!(PIECE_BASE[PieceType::ProKnight as usize][1] == F_GOLD);
+    assert!(PIECE_BASE[PieceType::ProSilver as usize][0] == E_GOLD);
+    assert!(PIECE_BASE[PieceType::ProSilver as usize][1] == F_GOLD);
+
+    // 馬・龍のチェック
+    assert!(PIECE_BASE[PieceType::Horse as usize][0] == E_HORSE);
+    assert!(PIECE_BASE[PieceType::Horse as usize][1] == F_HORSE);
+    assert!(PIECE_BASE[PieceType::Dragon as usize][0] == E_DRAGON);
+    assert!(PIECE_BASE[PieceType::Dragon as usize][1] == F_DRAGON);
+
+    // Kingは使用しない（0埋め）
+    assert!(PIECE_BASE[PieceType::King as usize][0] == 0);
+    assert!(PIECE_BASE[PieceType::King as usize][1] == 0);
+};
+
 /// base offset から直接 BonaPiece を生成（高速パス用）
 ///
 /// # Safety

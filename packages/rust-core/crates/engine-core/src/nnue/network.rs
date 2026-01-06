@@ -178,7 +178,9 @@ impl NetworkHalfKA {
         if version != NNUE_VERSION_HALFKA {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Invalid NNUE version: {version:#x}, expected {NNUE_VERSION_HALFKA:#x}"),
+                format!(
+                    "Invalid NNUE version for HalfKA_hm^: {version:#x}, expected {NNUE_VERSION_HALFKA:#x}"
+                ),
             ));
         }
 
@@ -286,7 +288,9 @@ impl Network {
         if version != NNUE_VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Invalid NNUE version: {version:#x}, expected {NNUE_VERSION:#x}"),
+                format!(
+                    "Invalid NNUE version for HalfKP: {version:#x}, expected {NNUE_VERSION:#x}"
+                ),
             ));
         }
 

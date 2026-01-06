@@ -125,6 +125,19 @@ pub const CACHE_LINE_SIZE: usize = 64;
 ///
 /// FeatureTransformerのweightsなど、大きな配列をアラインして確保するために使用。
 /// aligned load/store命令を使うためにはデータが64バイト境界に配置されている必要がある。
+///
+/// # 安全性契約
+///
+/// - `T: Copy + Default` を要求することで、`T` が `Drop` を実装できないことを保証
+/// - `Copy` トレイトは `Drop` と排他的（コンパイラが禁止）
+/// - これにより `drop` 時に `drop_in_place` を呼ぶ必要がなく、`dealloc` のみで安全
+///
+/// # 使用例
+///
+/// ```ignore
+/// let weights: AlignedBox<i16> = AlignedBox::new_zeroed(1000);
+/// assert!(weights.as_ptr() as usize % 64 == 0); // 64バイトアライン
+/// ```
 pub struct AlignedBox<T> {
     ptr: *mut T,
     len: usize,
