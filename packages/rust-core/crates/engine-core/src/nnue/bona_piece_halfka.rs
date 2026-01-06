@@ -33,12 +33,12 @@ pub const PIECE_INPUTS: usize = E_KING; // 1629
 
 /// 王のBonaPieceを生成（HalfKA_hm用）
 ///
-/// HalfKA_hmでは相手の王も特徴量に含める。
-/// - is_friend=true: F_KING + sq_index
-/// - is_friend=false: E_KING + sq_index
+/// HalfKA_hmでは両方の王を特徴量に含める。
+/// - is_friend=true: F_KING + sq_index（自玉）
+/// - is_friend=false: E_KING + sq_index（敵玉）
 ///
-/// 注意: 自玉はking bucketとして使用されるため、自分視点の自玉は
-/// 通常特徴量には含めない。相手の王のみを追加する。
+/// 自玉の位置は king_bucket にも反映されるが、
+/// Half-Mirror の粗いバケット（45個）を補うため特徴量としても追加する。
 #[inline]
 pub fn king_bonapiece(sq_index: usize, is_friend: bool) -> BonaPiece {
     let base = if is_friend { F_KING } else { E_KING };
@@ -185,15 +185,6 @@ pub fn halfka_index(kb: usize, packed_bp: usize) -> usize {
     kb * PIECE_INPUTS + packed_bp
 }
 
-/// Factorization特徴インデックスを計算
-///
-/// BASE_INPUTS + packed_bonapiece
-#[inline]
-pub fn factorized_index(packed_bp: usize) -> usize {
-    use super::constants::BASE_INPUTS_HALFKA;
-    BASE_INPUTS_HALFKA + packed_bp
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,16 +291,5 @@ mod tests {
 
         // kb=44, bp=0 → index=44*1629=71676
         assert_eq!(halfka_index(44, 0), 44 * PIECE_INPUTS);
-    }
-
-    #[test]
-    fn test_factorized_index() {
-        use super::super::constants::BASE_INPUTS_HALFKA;
-
-        // bp=0 → index=73305
-        assert_eq!(factorized_index(0), BASE_INPUTS_HALFKA);
-
-        // bp=100 → index=73405
-        assert_eq!(factorized_index(100), BASE_INPUTS_HALFKA + 100);
     }
 }

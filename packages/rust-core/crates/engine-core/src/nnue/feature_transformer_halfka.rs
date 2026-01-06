@@ -1,7 +1,18 @@
 //! FeatureTransformerHalfKA - HalfKA_hm^用の入力特徴量変換器
 //!
-//! HalfKA_hm^ 特徴量（キングバケット×BonaPiece + Factorization）から、
+//! HalfKA_hm^ 特徴量（キングバケット×BonaPiece）から、
 //! 片側 256 次元×両視点 = 512 次元の中間表現を生成する。
+//!
+//! # モデル形式
+//!
+//! **coalesced（畳み込み済み）モデル専用**
+//!
+//! - 入力次元: 73,305 (45キングバケット × 1,629駒入力)
+//! - Factorization重みは訓練時にのみ使用
+//! - nnue-pytorch serialize.py で自動的にcoalesceされる
+//!
+//! 未coalesceモデル（74,934次元）はサポートしない。
+//! `NetworkHalfKA::read()` で検出し、エラーメッセージを表示する。
 
 use super::accumulator::{
     Accumulator, AccumulatorStack, Aligned, AlignedBox, DirtyPiece, IndexList, MAX_ACTIVE_FEATURES,
@@ -13,6 +24,16 @@ use super::features::{FeatureSet, HalfKA_hmFeatureSet};
 use crate::position::Position;
 use crate::types::Color;
 use std::io::{self, Read};
+
+/// 特徴インデックスの範囲外アクセス時のパニック
+///
+/// cold属性により、この関数は分岐予測で「呼ばれない」と判断され、
+/// 通常経路の性能に影響しない。
+#[cold]
+#[inline(never)]
+fn feature_index_oob(index: usize, max: usize) -> ! {
+    panic!("Feature index out of range: {index} (max: {max})")
+}
 
 /// HalfKA_hm^用のFeatureTransformer
 #[repr(C, align(64))]
@@ -222,8 +243,10 @@ impl FeatureTransformerHalfKA {
     #[inline]
     fn add_weights(&self, accumulation: &mut [i16; TRANSFORMED_FEATURE_DIMENSIONS], index: usize) {
         let offset = index * TRANSFORMED_FEATURE_DIMENSIONS;
+        // OOBは即座にパニック（debug/release両方で検知）
+        // 通常経路では分岐予測が当たり、性能影響はほぼゼロ
         if offset + TRANSFORMED_FEATURE_DIMENSIONS > self.weights.len() {
-            return;
+            feature_index_oob(index, self.weights.len() / TRANSFORMED_FEATURE_DIMENSIONS);
         }
 
         let weights = &self.weights[offset..offset + TRANSFORMED_FEATURE_DIMENSIONS];
@@ -293,8 +316,10 @@ impl FeatureTransformerHalfKA {
     #[inline]
     fn sub_weights(&self, accumulation: &mut [i16; TRANSFORMED_FEATURE_DIMENSIONS], index: usize) {
         let offset = index * TRANSFORMED_FEATURE_DIMENSIONS;
+        // OOBは即座にパニック（debug/release両方で検知）
+        // 通常経路では分岐予測が当たり、性能影響はほぼゼロ
         if offset + TRANSFORMED_FEATURE_DIMENSIONS > self.weights.len() {
-            return;
+            feature_index_oob(index, self.weights.len() / TRANSFORMED_FEATURE_DIMENSIONS);
         }
 
         let weights = &self.weights[offset..offset + TRANSFORMED_FEATURE_DIMENSIONS];
