@@ -2,6 +2,31 @@
 //!
 //! YaneuraOuのpack形式（PackedSfenValue）を読み込み、SFEN文字列に変換する。
 //!
+//! # 概要
+//!
+//! このモジュールは、将棋エンジンYaneuraOuが生成する圧縮された局面データ形式（PackedSfen）を
+//! 標準的なSFEN（Shogi Forsyth-Edwards Notation）形式に変換する機能を提供します。
+//!
+//! # 使用例
+//!
+//! ```rust,ignore
+//! use tools::packed_sfen::{PackedSfenValue, unpack_sfen, move16_to_usi};
+//!
+//! // バイト列からPackedSfenValueを読み込み
+//! let bytes = [0u8; 40]; // 実際のデータ
+//! let psv = PackedSfenValue::from_bytes(&bytes).unwrap();
+//!
+//! // SFEN文字列に変換
+//! let sfen = unpack_sfen(&psv.sfen).unwrap();
+//! println!("SFEN: {}", sfen);
+//!
+//! // 指し手をUSI形式に変換
+//! let usi_move = move16_to_usi(psv.move16);
+//! println!("Move: {}", usi_move);
+//! ```
+//!
+//! # データ形式
+//!
 //! ## PackedSfenValue (40バイト/レコード)
 //!
 //! | フィールド  | サイズ | 説明                                    |
@@ -85,11 +110,21 @@ impl<'a> BitStream<'a> {
         }
     }
 
-    /// 1ビット読み込む (オーバーフロー時は0を返す)
+    /// 1ビット読み込む
+    ///
+    /// # 戻り値
+    /// 読み込んだビット値 (0 または 1)
+    ///
+    /// # オーバーフロー時の動作
+    /// ビットストリームの終端を超えて読み込もうとした場合は 0 を返す。
+    /// これは意図的な設計で、ハフマン復号時に終端を超えた読み込みが
+    /// 発生しても安全に処理を継続できるようにしている。
+    /// 呼び出し側は `remaining()` で残りビット数を確認することで、
+    /// 終端を検出できる。
     fn read_one_bit(&mut self) -> u8 {
         let byte_idx = self.bit_cursor / 8;
         if byte_idx >= self.data.len() {
-            return 0; // オーバーフロー時は0を返す
+            return 0; // オーバーフロー時は0を返す（意図的な動作）
         }
         let bit_idx = self.bit_cursor & 7;
         self.bit_cursor += 1;
@@ -171,7 +206,8 @@ const HUFFMAN_TABLE: [HuffmanCode; 8] = [
 ];
 
 /// ハフマン符号から駒種を復号する
-/// 戻り値: (駒種, 玉=true) または None=空きマス
+/// 戻り値: Some(駒種インデックス) または None=空きマス
+/// 駒種インデックス: 1=歩, 2=香, 3=桂, 4=銀, 5=角, 6=飛, 7=金
 fn decode_huffman_piece(stream: &mut BitStream) -> Option<usize> {
     let mut code = 0u8;
     let mut bits = 0u8;
@@ -195,8 +231,8 @@ fn decode_huffman_piece(stream: &mut BitStream) -> Option<usize> {
 
 /// 手駒用ハフマン符号から駒種を復号する
 /// 盤上の駒の符号からbit0を削除した形式
-/// 戻り値: (駒種インデックス, 成りフラグ=駒箱の駒)
-fn decode_huffman_hand_piece(stream: &mut BitStream) -> (usize, bool) {
+/// 戻り値: Some((駒種インデックス, 成りフラグ=駒箱の駒)) または None (不正なデータ)
+fn decode_huffman_hand_piece(stream: &mut BitStream) -> Option<(usize, bool)> {
     let mut code = 0u8;
     let mut bits = 0u8;
 
@@ -205,7 +241,7 @@ fn decode_huffman_hand_piece(stream: &mut BitStream) -> (usize, bool) {
         bits += 1;
 
         if bits > 5 {
-            panic!("Invalid hand piece huffman code");
+            return None; // 不正なハフマン符号
         }
 
         // 手駒用テーブルは盤上テーブルのコードを>>1したもの
@@ -218,7 +254,7 @@ fn decode_huffman_hand_piece(stream: &mut BitStream) -> (usize, bool) {
                 } else {
                     false
                 };
-                return (i, is_piecebox);
+                return Some((i, is_piecebox));
             }
         }
     }
@@ -255,15 +291,17 @@ pub fn unpack_sfen(packed: &[u8; 32]) -> Result<String, String> {
 
     // 先手玉位置 (7bit)
     let black_king_sq = stream.read_n_bit(7) as u8;
-    if black_king_sq < 81 {
-        board[black_king_sq as usize] = Piece::B_KING;
+    if black_king_sq >= 81 {
+        return Err(format!("Invalid black king position: {black_king_sq}"));
     }
+    board[black_king_sq as usize] = Piece::B_KING;
 
     // 後手玉位置 (7bit)
     let white_king_sq = stream.read_n_bit(7) as u8;
-    if white_king_sq < 81 {
-        board[white_king_sq as usize] = Piece::W_KING;
+    if white_king_sq >= 81 {
+        return Err(format!("Invalid white king position: {white_king_sq}"));
     }
+    board[white_king_sq as usize] = Piece::W_KING;
 
     // 盤上の駒 (ハフマン符号化)
     for (sq, cell) in board.iter_mut().enumerate() {
@@ -307,9 +345,16 @@ pub fn unpack_sfen(packed: &[u8; 32]) -> Result<String, String> {
 
     // 手駒 (残りのビット)
     let mut hands = [Hand::EMPTY; 2];
+    const MAX_HAND_ITERATIONS: usize = 256; // 十分に大きい値
+    let mut iterations = 0;
 
-    while stream.remaining() > 0 {
-        let (piece_idx, is_piecebox) = decode_huffman_hand_piece(&mut stream);
+    while stream.remaining() > 0 && iterations < MAX_HAND_ITERATIONS {
+        iterations += 1;
+
+        let (piece_idx, is_piecebox) = match decode_huffman_hand_piece(&mut stream) {
+            Some(result) => result,
+            None => return Err("Invalid hand piece huffman code".to_string()),
+        };
 
         // 駒箱の駒は無視
         if is_piecebox {
@@ -332,6 +377,10 @@ pub fn unpack_sfen(packed: &[u8; 32]) -> Result<String, String> {
 
         let pt = piece_type_from_index(piece_idx).ok_or("Invalid hand piece type")?;
         hands[color.index()] = hands[color.index()].add(pt);
+    }
+
+    if iterations >= MAX_HAND_ITERATIONS {
+        return Err("Hand piece parsing exceeded maximum iterations".to_string());
     }
 
     // SFEN文字列を生成
@@ -487,7 +536,21 @@ fn generate_hand_sfen(black_hand: &Hand, white_hand: &Hand) -> String {
 /// - bit 14:    成りフラグ
 /// - bit 15:    未使用 (YaneuraOuでは0)
 ///
-/// 打ち駒の判定: from >= 81 の場合は打ち駒
+/// ## 駒打ちの判定
+/// `from >= 81` の場合は駒打ち。この場合、`from - 81` が駒種インデックスになります：
+/// - 1: 歩(P), 2: 香(L), 3: 桂(N), 4: 銀(S), 5: 角(B), 6: 飛(R), 7: 金(G)
+///
+/// ## 例
+/// ```text
+/// // 7g7f の場合: from=60, to=59
+/// // move16 = 59 | (60 << 7) = 0x1E3B
+///
+/// // 2c2b+ の場合: from=11, to=10, promote=true
+/// // move16 = 10 | (11 << 7) | 0x4000 = 0x458A
+///
+/// // P*5e の場合: to=40, piece=1(歩)
+/// // move16 = 40 | (82 << 7) = 0x2928
+/// ```
 pub fn move16_to_usi(move16: u16) -> String {
     if move16 == 0 {
         return "none".to_string();
@@ -623,5 +686,101 @@ mod tests {
         assert_eq!(psv.move16, 0x1234);
         assert_eq!(psv.game_ply, 50);
         assert_eq!(psv.game_result, 1);
+    }
+
+    #[test]
+    fn test_packed_sfen_value_from_bytes_too_short() {
+        let bytes = [0u8; 39]; // 40バイト未満
+        assert!(PackedSfenValue::from_bytes(&bytes).is_none());
+    }
+
+    #[test]
+    fn test_unpack_sfen_invalid_black_king_position() {
+        let mut data = [0u8; 32];
+        // 手番: 先手 (bit 0 = 0)
+        // 先手玉位置: 127 (7bit, 不正な位置)
+        // bits 1-7 に 127 を設定
+        data[0] = 0b11111110; // bit0=0(手番), bits1-7=0x7F(127)の下位7bit
+                              // bit7は次のバイトに跨る
+                              // 127 = 0b01111111, bit0が手番なので、bits1-7に入れる
+                              // data[0] のbits 1-7: 127の下位6bit = 0b111111 << 1 = 0xFE
+                              // data[1] の bit0: 127の最上位bit = 1
+        data[0] = 0b11111110; // bits 1-7 = 0b0111111 (63)
+        data[1] = 0b00000001; // bit 0 = 1 → 127 = 63 + 64
+
+        let result = unpack_sfen(&data);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid black king position"));
+    }
+
+    #[test]
+    fn test_unpack_sfen_boundary_king_position_80() {
+        // 80は有効な位置（9x9盤の最後のマス）
+        // このテストでは、位置80が境界値として有効であることを確認
+        // 実際のunpackは盤上の駒も必要なのでエラーになる可能性があるが、
+        // 境界値チェック（>= 81）には引っかからないことを確認
+
+        let mut data = [0u8; 32];
+        // 手番: 先手 (bit 0 = 0)
+        // 先手玉位置: 80 (7bit) = 0b1010000
+        // data[0] = 80 << 1 | 0 = 160 = 0xA0
+        data[0] = 0xA0;
+
+        // 後手玉位置: 0 (7bit) - data[1]のbits 1-7
+        // このデータは完全ではないが、先手玉80がエラーにならないことを確認
+
+        // unpack_sfen は他の理由でエラーになる可能性があるが、
+        // "Invalid black king position: 80" というエラーは出ないはず
+        let result = unpack_sfen(&data);
+        if let Err(e) = &result {
+            assert!(
+                !e.contains("Invalid black king position"),
+                "Position 80 should be valid, got error: {e}"
+            );
+        }
+        // Ok の場合も、エラーの場合も、位置80の境界チェックは通過している
+    }
+
+    #[test]
+    fn test_bitstream_overflow_returns_zero() {
+        let data = [0b11111111u8];
+        let mut stream = BitStream::new(&data);
+
+        // 8ビット全て読む
+        for _ in 0..8 {
+            stream.read_one_bit();
+        }
+
+        // オーバーフロー時は0を返す
+        assert_eq!(stream.read_one_bit(), 0);
+        assert_eq!(stream.read_one_bit(), 0);
+    }
+
+    #[test]
+    fn test_bitstream_remaining() {
+        let data = [0u8; 4]; // 32ビット
+        let mut stream = BitStream::new(&data);
+
+        assert_eq!(stream.remaining(), 32);
+
+        stream.read_one_bit();
+        assert_eq!(stream.remaining(), 31);
+
+        stream.read_n_bit(10);
+        assert_eq!(stream.remaining(), 21);
+    }
+
+    #[test]
+    fn test_move16_to_usi_invalid() {
+        // move16 = 0 は "none" を返す
+        assert_eq!(move16_to_usi(0), "none");
+
+        // 不正な駒種インデックス (81 + 0 = 81, pt_index = 0)
+        let move16 = 40 | (81 << 7);
+        assert_eq!(move16_to_usi(move16), "none");
+
+        // 不正な駒種インデックス (81 + 8 = 89)
+        let move16 = 40 | (89 << 7);
+        assert_eq!(move16_to_usi(move16), "none");
     }
 }

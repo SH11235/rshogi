@@ -54,17 +54,21 @@ struct Cli {
 }
 
 /// 教師データの1レコード
+///
+/// # フィールドについて
+/// `depth` と `nodes` は pack 形式には含まれていないため、常に 0 が設定されます。
+/// これらのフィールドは、他のツールとの互換性のために保持しています。
 #[derive(Serialize)]
 struct TrainingRecord {
     /// SFEN文字列
     sfen: String,
     /// 評価値（センチポーン）
     score: i32,
-    /// 探索深さ（pack形式には含まれないため0固定）
+    /// 探索深さ（pack形式には含まれないため常に0）
     depth: i32,
     /// 最善手（USI形式）
     best_move: String,
-    /// 探索ノード数（pack形式には含まれないため0固定）
+    /// 探索ノード数（pack形式には含まれないため常に0）
     nodes: u64,
 }
 
@@ -190,7 +194,12 @@ fn main() -> Result<()> {
         // JSON出力
         let json = serde_json::to_string(&record).context("Failed to serialize record")?;
         writeln!(writer, "{json}").context("Failed to write record")?;
-        written.fetch_add(1, Ordering::Relaxed);
+        let current_written = written.fetch_add(1, Ordering::Relaxed) + 1;
+
+        // 10000レコードごとにフラッシュ（エラー時のデータ損失を防ぐため）
+        if current_written % 10000 == 0 {
+            writer.flush()?;
+        }
     }
 
     progress.finish();

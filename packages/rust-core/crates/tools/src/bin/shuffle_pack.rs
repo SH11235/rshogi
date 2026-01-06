@@ -131,11 +131,22 @@ fn shuffle_in_memory(
     // メモリ使用量の見積もり
     let data_size = record_count * PackedSfenValue::SIZE as u64;
     let index_size = record_count * std::mem::size_of::<usize>() as u64;
+    let total_mb = (data_size + index_size) / 1_000_000;
     eprintln!(
-        "Estimated memory usage: {} MB (data) + {} MB (indices)",
+        "Estimated memory usage: {} MB (data) + {} MB (indices) = {} MB total",
         data_size / 1_000_000,
-        index_size / 1_000_000
+        index_size / 1_000_000,
+        total_mb
     );
+
+    // 大規模ファイルの場合は警告
+    const LARGE_FILE_THRESHOLD_MB: u64 = 4000; // 4GB
+    if total_mb > LARGE_FILE_THRESHOLD_MB {
+        eprintln!(
+            "Warning: Large memory allocation ({} MB). Consider using --chunk-size option.",
+            total_mb
+        );
+    }
 
     // 進捗バー設定
     let progress = ProgressBar::new(record_count * 2); // 読み込み + 書き出し
@@ -212,7 +223,21 @@ fn shuffle_chunked(
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
     let num_chunks = (record_count as usize).div_ceil(chunk_size);
-    eprintln!("Creating {} temporary chunks", num_chunks);
+
+    // チャンク数のバリデーション
+    if num_chunks == 0 {
+        anyhow::bail!("Invalid chunk configuration: num_chunks is 0");
+    }
+
+    const MAX_CHUNKS: usize = 1000;
+    if num_chunks > MAX_CHUNKS {
+        anyhow::bail!(
+            "Too many chunks ({num_chunks}). Maximum is {MAX_CHUNKS}. \
+             Consider increasing --chunk-size (current: {chunk_size})"
+        );
+    }
+
+    eprintln!("Creating {num_chunks} temporary chunks");
 
     // 一時ディレクトリを作成
     let temp_dir = tempfile::tempdir().context("Failed to create temp directory")?;
