@@ -101,6 +101,8 @@ impl Feature for HalfKA_hm {
         }
 
         // 手駒の特徴量
+        // HalfKPと同様に、手駒の枚数分すべての特徴量を追加する
+        // 例: 歩を3枚持っている場合、1枚目・2枚目・3枚目の特徴量をそれぞれ追加
         for owner in [Color::Black, Color::White] {
             for pt in [
                 PieceType::Pawn,
@@ -115,16 +117,19 @@ impl Feature for HalfKA_hm {
                 if count == 0 {
                     continue;
                 }
-                let bp = BonaPiece::from_hand_piece(perspective, owner, pt, count);
-                if bp != BonaPiece::ZERO {
-                    // 手駒はミラー不要
-                    let packed = pack_bonapiece(bp, hm_mirror);
+                // 手駒の枚数分、すべての特徴量を追加
+                for i in 1..=count {
+                    let bp = BonaPiece::from_hand_piece(perspective, owner, pt, i);
+                    if bp != BonaPiece::ZERO {
+                        // 手駒はミラー不要
+                        let packed = pack_bonapiece(bp, hm_mirror);
 
-                    // Base特徴量
-                    active.push(halfka_index(kb, packed));
+                        // Base特徴量
+                        active.push(halfka_index(kb, packed));
 
-                    // Factorization特徴量
-                    active.push(factorized_index(packed));
+                        // Factorization特徴量
+                        active.push(factorized_index(packed));
+                    }
                 }
             }
         }
@@ -352,5 +357,40 @@ mod tests {
         // 手駒変化: removed=0, added=2 (base+factor)
         assert_eq!(removed.len(), 0);
         assert_eq!(added.len(), 2);
+    }
+
+    #[test]
+    fn test_append_active_indices_with_hand_pieces() {
+        // 手駒が複数枚ある局面のテスト
+        // P1バグ修正の検証: 手駒の枚数分すべての特徴量が追加されることを確認
+        let mut pos = Position::new();
+        // 先手が歩3枚、香1枚を持っている局面
+        pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b 3P1L 1")
+            .unwrap();
+
+        let mut active = IndexList::new();
+        HalfKA_hm::append_active_indices(&pos, Color::Black, &mut active);
+
+        // 盤上38駒 × 2 = 76
+        // 手駒: 歩3枚(3×2=6) + 香1枚(1×2=2) = 8
+        // 合計 = 76 + 8 = 84
+        assert_eq!(active.len(), 84, "手駒の枚数分すべての特徴量が追加されるべき");
+    }
+
+    #[test]
+    fn test_append_active_indices_multiple_hand_pieces() {
+        // より多くの手駒がある局面
+        let mut pos = Position::new();
+        // 先手が歩5枚、桂2枚、銀1枚を持っている局面
+        pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b 5P2N1S 1")
+            .unwrap();
+
+        let mut active = IndexList::new();
+        HalfKA_hm::append_active_indices(&pos, Color::Black, &mut active);
+
+        // 盤上38駒 × 2 = 76
+        // 手駒: 歩5枚(5×2=10) + 桂2枚(2×2=4) + 銀1枚(1×2=2) = 16
+        // 合計 = 76 + 16 = 92
+        assert_eq!(active.len(), 92, "手駒の枚数分すべての特徴量が追加されるべき");
     }
 }
