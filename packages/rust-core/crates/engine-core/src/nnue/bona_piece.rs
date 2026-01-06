@@ -1,49 +1,119 @@
 //! BonaPiece - 駒の種類と位置を一意に表現するインデックス
 //!
-//! YaneuraOu の NNUE 実装で用いられる BonaPiece に概ね準拠した定義。
+//! YaneuraOu の NNUE 実装で用いられる BonaPiece に準拠した定義。
 //! - `PieceType` / 升 / 手番（視点）により一意なインデックスに写像する。
 //! - 玉は特徴量に含めないため、BonaPiece としては常に `ZERO` を返す。
-//! - 手駒は種類と枚数に応じて盤上特徴の末尾に割り当てる。
+//!
+//! ## YaneuraOu BonaPiece定義 (DISTINGUISH_GOLDS無効時)
+//!
+//! ### 手駒 (1〜89)
+//! - f_hand_pawn = 1, e_hand_pawn = 20 (各18枚分)
+//! - f_hand_lance = 39, e_hand_lance = 44 (各4枚分)
+//! - f_hand_knight = 49, e_hand_knight = 54 (各4枚分)
+//! - f_hand_silver = 59, e_hand_silver = 64 (各4枚分)
+//! - f_hand_gold = 69, e_hand_gold = 74 (各4枚分)
+//! - f_hand_bishop = 79, e_hand_bishop = 82 (各2枚分)
+//! - f_hand_rook = 85, e_hand_rook = 88 (各2枚分)
+//! - fe_hand_end = 90
+//!
+//! ### 盤上駒 (90〜1547)
+//! - f_pawn = 90, e_pawn = 171
+//! - f_lance = 252, e_lance = 333
+//! - f_knight = 414, e_knight = 495
+//! - f_silver = 576, e_silver = 657
+//! - f_gold = 738, e_gold = 819
+//! - f_bishop = 900, e_bishop = 981
+//! - f_horse = 1062, e_horse = 1143
+//! - f_rook = 1224, e_rook = 1305
+//! - f_dragon = 1386, e_dragon = 1467
+//! - fe_end = 1548
 
 use crate::types::{Color, Piece, PieceType, Square};
 
-/// 駒種・is_friend に対する base offset テーブル
+// =============================================================================
+// YaneuraOu形式の手駒BonaPiece定数
+// =============================================================================
+
+/// 手駒領域の終端
+pub const FE_HAND_END: usize = 90;
+
+// 先手の手駒ベースオフセット
+pub const F_HAND_PAWN: u16 = 1;
+pub const F_HAND_LANCE: u16 = 39;
+pub const F_HAND_KNIGHT: u16 = 49;
+pub const F_HAND_SILVER: u16 = 59;
+pub const F_HAND_GOLD: u16 = 69;
+pub const F_HAND_BISHOP: u16 = 79;
+pub const F_HAND_ROOK: u16 = 85;
+
+// 後手の手駒ベースオフセット
+pub const E_HAND_PAWN: u16 = 20;
+pub const E_HAND_LANCE: u16 = 44;
+pub const E_HAND_KNIGHT: u16 = 54;
+pub const E_HAND_SILVER: u16 = 64;
+pub const E_HAND_GOLD: u16 = 74;
+pub const E_HAND_BISHOP: u16 = 82;
+pub const E_HAND_ROOK: u16 = 88;
+
+// =============================================================================
+// YaneuraOu形式の盤上駒BonaPiece定数
+// =============================================================================
+
+pub const F_PAWN: u16 = 90;
+pub const E_PAWN: u16 = 171;
+pub const F_LANCE: u16 = 252;
+pub const E_LANCE: u16 = 333;
+pub const F_KNIGHT: u16 = 414;
+pub const E_KNIGHT: u16 = 495;
+pub const F_SILVER: u16 = 576;
+pub const E_SILVER: u16 = 657;
+pub const F_GOLD: u16 = 738;
+pub const E_GOLD: u16 = 819;
+pub const F_BISHOP: u16 = 900;
+pub const E_BISHOP: u16 = 981;
+pub const F_HORSE: u16 = 1062;
+pub const E_HORSE: u16 = 1143;
+pub const F_ROOK: u16 = 1224;
+pub const E_ROOK: u16 = 1305;
+pub const F_DRAGON: u16 = 1386;
+pub const E_DRAGON: u16 = 1467;
+
+/// 駒種・is_friend に対する base offset テーブル（盤上駒用）
 /// `[piece_type as usize][is_friend as usize]` -> base offset
 /// is_friend: 0=enemy, 1=friend
 ///
-/// 値は `from_piece_square()` の実装から抽出。
 /// PieceType は 1 始まり（Pawn=1, ..., Dragon=14）なので index 0 はダミー。
 pub const PIECE_BASE: [[u16; 2]; 15] = [
     // index 0: 未使用（ダミー）
     [0, 0],
     // PieceType::Pawn = 1
-    [82, 1], // [enemy, friend]
+    [E_PAWN, F_PAWN], // [enemy, friend]
     // PieceType::Lance = 2
-    [244, 163],
+    [E_LANCE, F_LANCE],
     // PieceType::Knight = 3
-    [406, 325],
+    [E_KNIGHT, F_KNIGHT],
     // PieceType::Silver = 4
-    [568, 487],
+    [E_SILVER, F_SILVER],
     // PieceType::Bishop = 5
-    [892, 811],
+    [E_BISHOP, F_BISHOP],
     // PieceType::Rook = 6
-    [1054, 973],
+    [E_ROOK, F_ROOK],
     // PieceType::Gold = 7 (成駒と同じ)
-    [730, 649],
+    [E_GOLD, F_GOLD],
     // PieceType::King = 8 (使用しない、0埋め)
     [0, 0],
     // PieceType::ProPawn = 9 (Gold と同じ)
-    [730, 649],
+    [E_GOLD, F_GOLD],
     // PieceType::ProLance = 10 (Gold と同じ)
-    [730, 649],
+    [E_GOLD, F_GOLD],
     // PieceType::ProKnight = 11 (Gold と同じ)
-    [730, 649],
+    [E_GOLD, F_GOLD],
     // PieceType::ProSilver = 12 (Gold と同じ)
-    [730, 649],
+    [E_GOLD, F_GOLD],
     // PieceType::Horse = 13
-    [1216, 1135],
+    [E_HORSE, F_HORSE],
     // PieceType::Dragon = 14
-    [1378, 1297],
+    [E_DRAGON, F_DRAGON],
 ];
 
 /// base offset から直接 BonaPiece を生成（高速パス用）
@@ -54,14 +124,14 @@ pub const PIECE_BASE: [[u16; 2]; 15] = [
 #[inline]
 pub fn bona_piece_from_base(sq_index: usize, base: u16) -> BonaPiece {
     debug_assert!(sq_index <= 80, "sq_index out of range: {sq_index}");
-    debug_assert!(base <= 1378, "base out of range: {base}");
+    debug_assert!(base >= F_PAWN && base <= E_DRAGON, "base out of range: {base}");
     BonaPiece::new(base + sq_index as u16)
 }
 
 /// fe_end: BonaPieceの最大値
 ///
-/// YaneuraOu の HalfKP 用定義に基づく概算値。
-/// 盤上駒 + 手駒の全パターン数で、おおよそ 1548 程度になる。
+/// YaneuraOu の HalfKP 用定義に基づく。
+/// fe_end = e_dragon + 81 = 1467 + 81 = 1548
 pub const FE_END: usize = 1548;
 
 /// BonaPieceの定義
@@ -109,34 +179,34 @@ impl BonaPiece {
         let is_friend = pc_color == perspective;
 
         // 基本オフセット（YaneuraOuの定義に準拠）
-        // f_pawn = 1, e_pawn = 82, ...のようなオフセット
+        // 盤上駒は fe_hand_end (90) から始まる
         let base = match pt {
             PieceType::Pawn => {
                 if is_friend {
-                    1
+                    F_PAWN
                 } else {
-                    82
+                    E_PAWN
                 }
             }
             PieceType::Lance => {
                 if is_friend {
-                    163
+                    F_LANCE
                 } else {
-                    244
+                    E_LANCE
                 }
             }
             PieceType::Knight => {
                 if is_friend {
-                    325
+                    F_KNIGHT
                 } else {
-                    406
+                    E_KNIGHT
                 }
             }
             PieceType::Silver => {
                 if is_friend {
-                    487
+                    F_SILVER
                 } else {
-                    568
+                    E_SILVER
                 }
             }
             PieceType::Gold
@@ -146,37 +216,37 @@ impl BonaPiece {
             | PieceType::ProSilver => {
                 // 金と成駒（金の動き）は同じカテゴリ
                 if is_friend {
-                    649
+                    F_GOLD
                 } else {
-                    730
+                    E_GOLD
                 }
             }
             PieceType::Bishop => {
                 if is_friend {
-                    811
+                    F_BISHOP
                 } else {
-                    892
+                    E_BISHOP
                 }
             }
             PieceType::Rook => {
                 if is_friend {
-                    973
+                    F_ROOK
                 } else {
-                    1054
+                    E_ROOK
                 }
             }
             PieceType::Horse => {
                 if is_friend {
-                    1135
+                    F_HORSE
                 } else {
-                    1216
+                    E_HORSE
                 }
             }
             PieceType::Dragon => {
                 if is_friend {
-                    1297
+                    F_DRAGON
                 } else {
-                    1378
+                    E_DRAGON
                 }
             }
             PieceType::King => {
@@ -185,12 +255,17 @@ impl BonaPiece {
             }
         };
 
-        BonaPiece::new((base + sq_index) as u16)
+        BonaPiece::new(base + sq_index as u16)
     }
 
     /// 手駒からBonaPieceを計算
     ///
-    /// 手駒は位置がないので、種類と枚数でインデックスを決定
+    /// YaneuraOuの手駒BonaPiece定義に従う。
+    /// 手駒は (駒種, 枚数) でインデックスが決まる。
+    /// 枚数が増えると新しいBonaPieceになる（0→1枚でbase, 1→2枚でbase+1, ...）
+    ///
+    /// 注意: countは「現在の枚数」であり、「追加する枚数」ではない。
+    /// count=1 のとき base が返る（1枚目のBonaPiece）。
     pub fn from_hand_piece(
         perspective: Color,
         owner: Color,
@@ -203,63 +278,64 @@ impl BonaPiece {
 
         let is_friend = owner == perspective;
 
-        // 手駒のオフセット（盤上駒の後）
-        // 実際の実装ではもっと複雑だが、簡略化
+        // YaneuraOu形式の手駒オフセット（1から始まる）
+        // 手駒は盤上駒より前に配置されている
         let base = match pt {
             PieceType::Pawn => {
                 if is_friend {
-                    1459
+                    F_HAND_PAWN
                 } else {
-                    1477
+                    E_HAND_PAWN
                 }
             }
             PieceType::Lance => {
                 if is_friend {
-                    1495
+                    F_HAND_LANCE
                 } else {
-                    1499
+                    E_HAND_LANCE
                 }
             }
             PieceType::Knight => {
                 if is_friend {
-                    1503
+                    F_HAND_KNIGHT
                 } else {
-                    1507
+                    E_HAND_KNIGHT
                 }
             }
             PieceType::Silver => {
                 if is_friend {
-                    1511
+                    F_HAND_SILVER
                 } else {
-                    1515
+                    E_HAND_SILVER
                 }
             }
             PieceType::Gold => {
                 if is_friend {
-                    1519
+                    F_HAND_GOLD
                 } else {
-                    1523
+                    E_HAND_GOLD
                 }
             }
             PieceType::Bishop => {
                 if is_friend {
-                    1527
+                    F_HAND_BISHOP
                 } else {
-                    1529
+                    E_HAND_BISHOP
                 }
             }
             PieceType::Rook => {
                 if is_friend {
-                    1531
+                    F_HAND_ROOK
                 } else {
-                    1533
+                    E_HAND_ROOK
                 }
             }
             _ => return BonaPiece::ZERO,
         };
 
-        // countに応じてオフセット（0枚目は使わない）
-        BonaPiece::new((base + count as usize - 1) as u16)
+        // countに応じてオフセット
+        // count=1 のとき base, count=2 のとき base+1, ...
+        BonaPiece::new(base + count as u16 - 1)
     }
 }
 

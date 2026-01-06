@@ -325,6 +325,61 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
         Ok(Self { biases, weights })
     }
 
+    /// LEB128圧縮形式から読み込み
+    pub fn read_leb128<R: Read>(reader: &mut R) -> io::Result<Self> {
+        use super::leb128::read_signed_leb128;
+
+        // バイアスを読み込み
+        let mut biases = [0i32; OUTPUT_DIM];
+        for bias in biases.iter_mut() {
+            let val = read_signed_leb128(reader)?;
+            *bias = val as i32;
+        }
+
+        // 重みを読み込み（64バイトアラインで確保）
+        let weight_size = OUTPUT_DIM * Self::PADDED_INPUT;
+        let mut weights = AlignedBox::new_zeroed(weight_size);
+
+        // AVX2/SSSE3: スクランブル形式で格納
+        #[cfg(any(
+            all(target_arch = "x86_64", target_feature = "avx2"),
+            all(
+                target_arch = "x86_64",
+                target_feature = "ssse3",
+                not(target_feature = "avx2")
+            )
+        ))]
+        {
+            for i in 0..weight_size {
+                let val = read_signed_leb128(reader)?;
+                let idx = if Self::should_use_scrambled_weights() {
+                    Self::get_weight_index_scrambled(i)
+                } else {
+                    i
+                };
+                weights[idx] = val as i8;
+            }
+        }
+
+        // 非AVX2/非SSSE3環境: 元の順序で格納
+        #[cfg(not(any(
+            all(target_arch = "x86_64", target_feature = "avx2"),
+            all(
+                target_arch = "x86_64",
+                target_feature = "ssse3",
+                not(target_feature = "avx2")
+            )
+        )))]
+        {
+            for i in 0..weight_size {
+                let val = read_signed_leb128(reader)?;
+                weights[i] = val as i8;
+            }
+        }
+
+        Ok(Self { biases, weights })
+    }
+
     /// 順伝播
     ///
     /// AVX2/SSE2/WASMのSIMD最適化版。
