@@ -47,9 +47,9 @@ impl Feature for HalfKA_hm {
     /// 特徴量の次元数: BASE (45×1629) + FACT (1629) = 74,934
     const DIMENSIONS: usize = HALFKA_HM_DIMENSIONS;
 
-    /// 同時にアクティブになる最大数: (盤上38駒 + 相手の王 + 手駒14) × 2 (factorized) = 106
+    /// 同時にアクティブになる最大数: (盤上38駒 + 両方の王2 + 手駒14) × 2 (factorized) = 108
     /// ※ 実際は40駒程度なので80くらいが現実的
-    const MAX_ACTIVE: usize = 106;
+    const MAX_ACTIVE: usize = 108;
 
     /// 自玉が動いた場合に全計算
     const REFRESH_TRIGGER: TriggerEvent = TriggerEvent::FriendKingMoved;
@@ -100,9 +100,23 @@ impl Feature for HalfKA_hm {
             }
         }
 
-        // 相手の王の特徴量を追加
-        // HalfKA_hmでは相手の王も特徴量に含める
-        // 自玉はking bucketとして使用されるため、特徴量には含めない
+        // 両方の王の特徴量を追加
+        // nnue-pytorchのtraining_data_loader.cppでは、EvalList内の全40駒
+        // （両方の王を含む）を特徴量として使用している。
+        // 自玉の位置はking_bucketにも反映されるが、特徴量としても追加する。
+
+        // 自玉の特徴量
+        let friend_king_sq_index = if perspective == Color::Black {
+            king_sq.index()
+        } else {
+            king_sq.inverse().index()
+        };
+        let friend_king_bp = king_bonapiece(friend_king_sq_index, true); // is_friend=true
+        let packed_friend_king = pack_bonapiece(friend_king_bp, hm_mirror);
+        active.push(halfka_index(kb, packed_friend_king));
+        active.push(factorized_index(packed_friend_king));
+
+        // 敵玉の特徴量
         let enemy = perspective.opponent();
         let enemy_king_sq = pos.king_square(enemy);
         let enemy_king_sq_index = if perspective == Color::Black {
@@ -271,8 +285,8 @@ mod tests {
     #[test]
     fn test_halfka_hm_max_active() {
         // 各駒で2つの特徴量（base + factor）
-        // 最大53駒（盤上38 + 相手の王1 + 手駒14）× 2 = 106
-        assert_eq!(HalfKA_hm::MAX_ACTIVE, 106);
+        // 最大54駒（盤上38 + 両方の王2 + 手駒14）× 2 = 108
+        assert_eq!(HalfKA_hm::MAX_ACTIVE, 108);
     }
 
     #[test]
@@ -289,8 +303,8 @@ mod tests {
 
         HalfKA_hm::append_active_indices(&pos, Color::Black, &mut active);
 
-        // 初期局面: (盤上38駒 + 相手の王) × 2 (factorized) = 78
-        assert_eq!(active.len(), 78);
+        // 初期局面: (盤上38駒 + 両方の王2) × 2 (factorized) = 80
+        assert_eq!(active.len(), 80);
     }
 
     #[test]
@@ -411,10 +425,10 @@ mod tests {
         let mut active = IndexList::new();
         HalfKA_hm::append_active_indices(&pos, Color::Black, &mut active);
 
-        // (盤上38駒 + 相手の王) × 2 = 78
+        // (盤上38駒 + 両方の王2) × 2 = 80
         // 手駒: 歩3枚(3×2=6) + 香1枚(1×2=2) = 8
-        // 合計 = 78 + 8 = 86
-        assert_eq!(active.len(), 86, "手駒の枚数分すべての特徴量が追加されるべき");
+        // 合計 = 80 + 8 = 88
+        assert_eq!(active.len(), 88, "手駒の枚数分すべての特徴量が追加されるべき");
     }
 
     #[test]
@@ -428,10 +442,10 @@ mod tests {
         let mut active = IndexList::new();
         HalfKA_hm::append_active_indices(&pos, Color::Black, &mut active);
 
-        // (盤上38駒 + 相手の王) × 2 = 78
+        // (盤上38駒 + 両方の王2) × 2 = 80
         // 手駒: 歩5枚(5×2=10) + 桂2枚(2×2=4) + 銀1枚(1×2=2) = 16
-        // 合計 = 78 + 16 = 94
-        assert_eq!(active.len(), 94, "手駒の枚数分すべての特徴量が追加されるべき");
+        // 合計 = 80 + 16 = 96
+        assert_eq!(active.len(), 96, "手駒の枚数分すべての特徴量が追加されるべき");
     }
 
     #[test]
