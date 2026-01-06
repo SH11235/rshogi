@@ -182,10 +182,10 @@ export function HandPiecesDisplay({
                     const isDisabled = !canDrag && !canSelect && !isEditMode;
                     const maxCount = PIECE_CAP[piece];
 
-                    // 対局中（非編集モード）は0個の駒を完全に非表示（スペースも確保しない）
-                    // → 持っている駒だけが詰まって表示される
-                    // 編集モードでは全ての駒を表示する（固定位置）
-                    if (!isEditMode && count === 0) {
+                    // PC版（normal）: 常に全駒種のスペースを確保（レイアウトシフト防止）
+                    // モバイル版（compact/medium）: 対局中は持っている駒だけ詰めて表示
+                    // 編集モードでは全ての駒を表示する
+                    if (!isEditMode && count === 0 && isCompactLayout) {
                         return null;
                     }
 
