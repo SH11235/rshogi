@@ -249,7 +249,6 @@ export function MobileLayout({
                     bottomHand={bottomHand}
                     boardSectionRef={boardSectionRef}
                     isDraggingPiece={isDraggingPiece}
-                    fixedLayout={gameMode === "playing"}
                 />
             </main>
 

@@ -131,8 +131,6 @@ interface HandPiecesDisplayProps {
     flipBoard?: boolean;
     /** サイズ: compact=編集用, medium=モバイル対局用, normal=PC用 */
     size?: HandPieceSize;
-    /** 固定レイアウト: trueの場合、0個の駒もスペースを確保（対局中のレイアウトシフト防止） */
-    fixedLayout?: boolean;
 }
 
 export function HandPiecesDisplay({
@@ -147,9 +145,7 @@ export function HandPiecesDisplay({
     onDecrement,
     flipBoard = false,
     size = "normal",
-    fixedLayout: _fixedLayout = false,
 }: HandPiecesDisplayProps): ReactElement {
-    // _fixedLayout: 後方互換性のため残すが、対局中は常に駒を詰めて表示するため使用しない
     // 先手/後手マーカー（☗=U+2617, ☖=U+2616）
     const ownerMarker = owner === "sente" ? "☗" : "☖";
     // 先手: 朱色、後手: 藍色（wafuuテーマ）

@@ -701,12 +701,16 @@ export function ShogiMatch({
         setBasePosition(clonePositionState(current));
         setInitialBoard(cloneBoard(current.board));
         // SFENを取得して棋譜ツリーをリセット（編集した持ち駒情報を反映）
-        const newSfen = await refreshStartSfen(current);
-        navigation.reset(current, newSfen);
-        movesRef.current = [];
-        legalCache.clear();
-        setIsEditMode(false);
-        setEditMessage("局面を確定しました。対局開始でこの局面から進行します。");
+        try {
+            const newSfen = await refreshStartSfen(current);
+            navigation.reset(current, newSfen);
+            movesRef.current = [];
+            legalCache.clear();
+            setIsEditMode(false);
+            setEditMessage("局面を確定しました。対局開始でこの局面から進行します。");
+        } catch {
+            setEditMessage("局面の確定に失敗しました。");
+        }
     };
 
     /** 検討モードから編集モードに戻る */
@@ -717,21 +721,25 @@ export function ShogiMatch({
         setBasePosition(clonePositionState(current));
         setInitialBoard(cloneBoard(current.board));
         // 先にSFENを取得してから棋譜ナビゲーションをリセット
-        const newSfen = await refreshStartSfen(current);
-        navigation.reset(current, newSfen);
-        movesRef.current = [];
-        setLastMove(undefined);
-        setSelection(null);
-        setMessage(null);
-        setLastAddedBranchInfo(null);
-        legalCache.clear();
-        // 編集モードに移行
-        setIsEditMode(true);
-        setEditMessage("局面編集モードに戻りました。駒をドラッグして編集できます。");
+        try {
+            const newSfen = await refreshStartSfen(current);
+            navigation.reset(current, newSfen);
+            movesRef.current = [];
+            setLastMove(undefined);
+            setSelection(null);
+            setMessage(null);
+            setLastAddedBranchInfo(null);
+            legalCache.clear();
+            // 編集モードに移行
+            setIsEditMode(true);
+            setEditMessage("局面編集モードに戻りました。駒をドラッグして編集できます。");
+        } catch {
+            setEditMessage("編集モードへの移行に失敗しました。");
+        }
     }, [isMatchRunning, navigation, legalCache, refreshStartSfen]);
 
     const applyMoveCommon = useCallback(
-        (nextPosition: PositionState, mv: string, last?: LastMove, _prevBoard?: BoardState) => {
+        (nextPosition: PositionState, mv: string, last?: LastMove) => {
             // 消費時間を計算
             const elapsedMs = Date.now() - turnStartTimeRef.current;
             // 棋譜ナビゲーションに手を追加（局面更新はonPositionChangeで自動実行）
@@ -750,7 +758,7 @@ export function ShogiMatch({
 
     /** 検討モードで手を適用（分岐作成、時計更新なし） */
     const applyMoveForReview = useCallback(
-        (nextPosition: PositionState, mv: string, last?: LastMove, _prevBoard?: BoardState) => {
+        (nextPosition: PositionState, mv: string, last?: LastMove) => {
             // 現在のノードの子を確認して、分岐が作成されるか判定
             const tree = navigation.tree;
             const currentNode = tree ? tree.nodes.get(tree.currentNodeId) : null;
@@ -837,20 +845,24 @@ export function ShogiMatch({
             setInitialBoard(cloneBoard(nextPosition.board));
 
             // 先にSFENを取得してから棋譜ナビゲーションをリセット
-            const newSfen = await refreshStartSfen(nextPosition);
-            navigation.reset(nextPosition, newSfen);
+            try {
+                const newSfen = await refreshStartSfen(nextPosition);
+                navigation.reset(nextPosition, newSfen);
 
-            movesRef.current = [];
-            setLastMove(undefined);
-            setSelection(null);
-            setMessage(null);
-            setLastAddedBranchInfo(null); // 分岐状態をクリア
-            setEditFromSquare(null);
+                movesRef.current = [];
+                setLastMove(undefined);
+                setSelection(null);
+                setMessage(null);
+                setLastAddedBranchInfo(null); // 分岐状態をクリア
+                setEditFromSquare(null);
 
-            legalCache.clear();
-            stopTicking();
-            matchEndedRef.current = false;
-            setIsMatchRunning(false);
+                legalCache.clear();
+                stopTicking();
+                matchEndedRef.current = false;
+                setIsMatchRunning(false);
+            } catch {
+                setEditMessage("局面の適用に失敗しました。");
+            }
         },
         [navigation, legalCache, stopTicking, refreshStartSfen],
     );
