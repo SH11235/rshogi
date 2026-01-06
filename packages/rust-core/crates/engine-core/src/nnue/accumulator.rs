@@ -20,14 +20,15 @@ use std::ops::{Deref, DerefMut};
 
 /// 差分更新での最大変化特徴量数
 /// HalfKP: 駒3 + 手駒2 = 5
-/// HalfKA_hm^（factorized）: 各変化×2 = 最大10
+/// HalfKA_hm^（coalesced）: 各変化=最大5
 /// 余裕を持たせて16
 pub const MAX_CHANGED_FEATURES: usize = 16;
 
 /// 全特徴量取得での最大数
 /// HalfKP: 盤上38 + 手駒14 = 52
-/// HalfKA_hm^（factorized）: (盤上38 + 自玉1 + 敵玉1 + 手駒14) × 2 = 108
-pub const MAX_ACTIVE_FEATURES: usize = 108;
+/// HalfKA_hm^（coalesced）: 盤上38 + 自玉1 + 敵玉1 + 手駒14 = 54
+/// MAX(HalfKP, HalfKA) = 54
+pub const MAX_ACTIVE_FEATURES: usize = 54;
 
 /// collect_path での最大パス長（find_usable_accumulator の MAX_DEPTH と同じ）
 pub const MAX_PATH_LENGTH: usize = 8;

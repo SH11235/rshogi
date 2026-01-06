@@ -33,12 +33,12 @@ pub const PIECE_INPUTS: usize = E_KING; // 1629
 
 /// 王のBonaPieceを生成（HalfKA_hm用）
 ///
-/// HalfKA_hmでは相手の王も特徴量に含める。
-/// - is_friend=true: F_KING + sq_index
-/// - is_friend=false: E_KING + sq_index
+/// HalfKA_hmでは両方の王を特徴量に含める。
+/// - is_friend=true: F_KING + sq_index（自玉）
+/// - is_friend=false: E_KING + sq_index（敵玉）
 ///
-/// 注意: 自玉はking bucketとして使用されるため、自分視点の自玉は
-/// 通常特徴量には含めない。相手の王のみを追加する。
+/// 自玉の位置は king_bucket にも反映されるが、
+/// Half-Mirror の粗いバケット（45個）を補うため特徴量としても追加する。
 #[inline]
 pub fn king_bonapiece(sq_index: usize, is_friend: bool) -> BonaPiece {
     let base = if is_friend { F_KING } else { E_KING };

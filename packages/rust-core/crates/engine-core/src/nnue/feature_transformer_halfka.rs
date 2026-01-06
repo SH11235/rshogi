@@ -222,6 +222,12 @@ impl FeatureTransformerHalfKA {
     #[inline]
     fn add_weights(&self, accumulation: &mut [i16; TRANSFORMED_FEATURE_DIMENSIONS], index: usize) {
         let offset = index * TRANSFORMED_FEATURE_DIMENSIONS;
+        // debugビルドではpanic、releaseではUB回避のため早期リターン
+        debug_assert!(
+            offset + TRANSFORMED_FEATURE_DIMENSIONS <= self.weights.len(),
+            "Feature index {index} out of range (max: {})",
+            self.weights.len() / TRANSFORMED_FEATURE_DIMENSIONS
+        );
         if offset + TRANSFORMED_FEATURE_DIMENSIONS > self.weights.len() {
             return;
         }
@@ -293,6 +299,12 @@ impl FeatureTransformerHalfKA {
     #[inline]
     fn sub_weights(&self, accumulation: &mut [i16; TRANSFORMED_FEATURE_DIMENSIONS], index: usize) {
         let offset = index * TRANSFORMED_FEATURE_DIMENSIONS;
+        // debugビルドではpanic、releaseではUB回避のため早期リターン
+        debug_assert!(
+            offset + TRANSFORMED_FEATURE_DIMENSIONS <= self.weights.len(),
+            "Feature index {index} out of range (max: {})",
+            self.weights.len() / TRANSFORMED_FEATURE_DIMENSIONS
+        );
         if offset + TRANSFORMED_FEATURE_DIMENSIONS > self.weights.len() {
             return;
         }
