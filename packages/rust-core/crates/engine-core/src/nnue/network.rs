@@ -194,9 +194,28 @@ impl NetworkHalfKA {
         let mut arch = vec![0u8; arch_len];
         reader.read_exact(&mut arch)?;
 
-        // 圧縮形式を判定（アーキテクチャ文字列から）
+        // 圧縮形式とFactorization状態を判定（アーキテクチャ文字列から）
         let arch_str = String::from_utf8_lossy(&arch);
         let is_leb128 = arch_str.contains("leb128");
+
+        // Factorizedモデル（未coalesce）の検出
+        // nnue-pytorchのFactorizerは訓練時のみ使用され、
+        // serialize.pyで自動的にcoalesceされる。
+        // "Factorizer"が含まれる場合は訓練中のcheckpointの可能性がある。
+        if arch_str.contains("Factorizer") {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Unsupported model format: factorized (non-coalesced) HalfKA_hm^ model detected.\n\
+                     This engine only supports coalesced models (73,305 dimensions).\n\
+                     Factorized models (74,934 dimensions) are for training only.\n\n\
+                     To fix: Re-export the model using nnue-pytorch serialize.py:\n\
+                       python serialize.py model.ckpt output.nnue\n\n\
+                     The serialize.py script automatically coalesces factor weights.\n\
+                     Architecture string: {arch_str}"
+                ),
+            ));
+        }
 
         // パラメータを読み込み
         let feature_transformer = if is_leb128 {

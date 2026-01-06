@@ -185,15 +185,6 @@ pub fn halfka_index(kb: usize, packed_bp: usize) -> usize {
     kb * PIECE_INPUTS + packed_bp
 }
 
-/// Factorization特徴インデックスを計算
-///
-/// BASE_INPUTS + packed_bonapiece
-#[inline]
-pub fn factorized_index(packed_bp: usize) -> usize {
-    use super::constants::BASE_INPUTS_HALFKA;
-    BASE_INPUTS_HALFKA + packed_bp
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,16 +291,5 @@ mod tests {
 
         // kb=44, bp=0 → index=44*1629=71676
         assert_eq!(halfka_index(44, 0), 44 * PIECE_INPUTS);
-    }
-
-    #[test]
-    fn test_factorized_index() {
-        use super::super::constants::BASE_INPUTS_HALFKA;
-
-        // bp=0 → index=73305
-        assert_eq!(factorized_index(0), BASE_INPUTS_HALFKA);
-
-        // bp=100 → index=73405
-        assert_eq!(factorized_index(100), BASE_INPUTS_HALFKA + 100);
     }
 }

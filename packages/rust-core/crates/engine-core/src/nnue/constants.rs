@@ -62,7 +62,16 @@ pub const BASE_INPUTS_HALFKA: usize = KING_BUCKETS * PIECE_INPUTS_HALFKA; // 73,
 /// nnue-pytorch標準のcoalesce済みモデル専用。
 /// Factorizationの重みはBase側に畳み込み済みのため、推論時はBaseのみで計算する。
 /// これにより特徴量数が半減（80→40）し、NPSが約20%向上する。
+///
+/// 非coalesceモデル（74,934次元）はサポートしない。
+/// nnue-pytorch serialize.py でエクスポートすると自動的にcoalesceされる。
 pub const HALFKA_HM_DIMENSIONS: usize = BASE_INPUTS_HALFKA; // 73,305
+
+/// HalfKA_hm^のFactorization込み入力次元数（未coalesce）
+///
+/// 訓練時のみ使用。推論用モデルは serialize.py で自動的に coalesce される。
+/// この定数は互換性エラー検出のために定義。
+pub const HALFKA_HM_DIMENSIONS_FACTORIZED: usize = BASE_INPUTS_HALFKA + PIECE_INPUTS_HALFKA; // 74,934
 
 /// 隠れ層1の次元数
 pub const HIDDEN1_DIMENSIONS: usize = 32;

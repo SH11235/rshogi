@@ -1,7 +1,18 @@
 //! FeatureTransformerHalfKA - HalfKA_hm^用の入力特徴量変換器
 //!
-//! HalfKA_hm^ 特徴量（キングバケット×BonaPiece + Factorization）から、
+//! HalfKA_hm^ 特徴量（キングバケット×BonaPiece）から、
 //! 片側 256 次元×両視点 = 512 次元の中間表現を生成する。
+//!
+//! # モデル形式
+//!
+//! **coalesced（畳み込み済み）モデル専用**
+//!
+//! - 入力次元: 73,305 (45キングバケット × 1,629駒入力)
+//! - Factorization重みは訓練時にのみ使用
+//! - nnue-pytorch serialize.py で自動的にcoalesceされる
+//!
+//! 未coalesceモデル（74,934次元）はサポートしない。
+//! `NetworkHalfKA::read()` で検出し、エラーメッセージを表示する。
 
 use super::accumulator::{
     Accumulator, AccumulatorStack, Aligned, AlignedBox, DirtyPiece, IndexList, MAX_ACTIVE_FEATURES,
