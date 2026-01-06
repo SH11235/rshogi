@@ -296,6 +296,8 @@ export function ShogiMatch({
 
     // positionRef を先に定義（コールバックで使用するため）
     const positionRef = useRef<PositionState>(position);
+    // 編集操作のバージョンカウンター（非同期SFEN計算の競合状態を防止）
+    const editVersionRef = useRef(0);
 
     // ナビゲーションからの局面変更コールバック（メモ化して安定した参照を維持）
     const handleNavigationPositionChange = useCallback(
@@ -840,6 +842,10 @@ export function ShogiMatch({
 
     const applyEditedPosition = useCallback(
         async (nextPosition: PositionState) => {
+            // バージョンをインクリメントして現在の操作IDを取得
+            editVersionRef.current += 1;
+            const currentVersion = editVersionRef.current;
+
             setPosition(nextPosition);
             positionRef.current = nextPosition;
             setInitialBoard(cloneBoard(nextPosition.board));
@@ -847,6 +853,12 @@ export function ShogiMatch({
             // 先にSFENを取得してから棋譜ナビゲーションをリセット
             try {
                 const newSfen = await refreshStartSfen(nextPosition);
+
+                // 古い操作の結果は無視（より新しい編集が既に開始されている場合）
+                if (editVersionRef.current !== currentVersion) {
+                    return;
+                }
+
                 navigation.reset(nextPosition, newSfen);
 
                 movesRef.current = [];
@@ -861,6 +873,10 @@ export function ShogiMatch({
                 matchEndedRef.current = false;
                 setIsMatchRunning(false);
             } catch {
+                // 古い操作のエラーは無視
+                if (editVersionRef.current !== currentVersion) {
+                    return;
+                }
                 setEditMessage("局面の適用に失敗しました。");
             }
         },
