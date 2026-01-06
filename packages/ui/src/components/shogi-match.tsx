@@ -147,7 +147,7 @@ function PlayerHandSection({
     flipBoard,
 }: PlayerHandSectionProps): ReactElement {
     return (
-        <div data-zone={`hand-${owner}`}>
+        <div data-zone={`hand-${owner}`} className="w-full">
             <HandPiecesDisplay
                 owner={owner}
                 hand={hand}
@@ -636,10 +636,11 @@ export function ShogiMatch({
         return flipBoard ? [...g].reverse().map((row) => [...row].reverse()) : g;
     }, [position.board, flipBoard]);
 
-    const refreshStartSfen = useCallback(async (pos: PositionState) => {
+    const refreshStartSfen = useCallback(async (pos: PositionState): Promise<string> => {
         try {
             const sfen = await getPositionService().boardToSfen(pos);
             setStartSfen(sfen);
+            return sfen;
         } catch (error) {
             setMessage(`局面のSFEN変換に失敗しました: ${String(error)}`);
             throw error;
@@ -699,7 +700,10 @@ export function ShogiMatch({
         const current = positionRef.current;
         setBasePosition(clonePositionState(current));
         setInitialBoard(cloneBoard(current.board));
-        await refreshStartSfen(current);
+        // SFENを取得して棋譜ツリーをリセット（編集した持ち駒情報を反映）
+        const newSfen = await refreshStartSfen(current);
+        navigation.reset(current, newSfen);
+        movesRef.current = [];
         legalCache.clear();
         setIsEditMode(false);
         setEditMessage("局面を確定しました。対局開始でこの局面から進行します。");
@@ -712,9 +716,9 @@ export function ShogiMatch({
         // 現在局面を編集開始局面として設定
         setBasePosition(clonePositionState(current));
         setInitialBoard(cloneBoard(current.board));
-        await refreshStartSfen(current);
-        // 棋譜ナビゲーションをリセット（現在局面から新規開始）
-        navigation.reset(current, startSfen);
+        // 先にSFENを取得してから棋譜ナビゲーションをリセット
+        const newSfen = await refreshStartSfen(current);
+        navigation.reset(current, newSfen);
         movesRef.current = [];
         setLastMove(undefined);
         setSelection(null);
@@ -724,7 +728,7 @@ export function ShogiMatch({
         // 編集モードに移行
         setIsEditMode(true);
         setEditMessage("局面編集モードに戻りました。駒をドラッグして編集できます。");
-    }, [isMatchRunning, navigation, startSfen, legalCache, refreshStartSfen]);
+    }, [isMatchRunning, navigation, legalCache, refreshStartSfen]);
 
     const applyMoveCommon = useCallback(
         (nextPosition: PositionState, mv: string, last?: LastMove, _prevBoard?: BoardState) => {
@@ -827,12 +831,15 @@ export function ShogiMatch({
     }, [positionReady, fetchLegalMoves, startSfen, legalCache]);
 
     const applyEditedPosition = useCallback(
-        (nextPosition: PositionState) => {
+        async (nextPosition: PositionState) => {
             setPosition(nextPosition);
             positionRef.current = nextPosition;
             setInitialBoard(cloneBoard(nextPosition.board));
-            // 棋譜ナビゲーションをリセット（startSfenは後でrefreshStartSfenで更新される）
-            navigation.reset(nextPosition, startSfen);
+
+            // 先にSFENを取得してから棋譜ナビゲーションをリセット
+            const newSfen = await refreshStartSfen(nextPosition);
+            navigation.reset(nextPosition, newSfen);
+
             movesRef.current = [];
             setLastMove(undefined);
             setSelection(null);
@@ -844,9 +851,8 @@ export function ShogiMatch({
             stopTicking();
             matchEndedRef.current = false;
             setIsMatchRunning(false);
-            void refreshStartSfen(nextPosition);
         },
-        [navigation, startSfen, legalCache, stopTicking, refreshStartSfen],
+        [navigation, legalCache, stopTicking, refreshStartSfen],
     );
 
     const setPiecePromotion = useCallback(
@@ -964,10 +970,12 @@ export function ShogiMatch({
             if (currentCount >= PIECE_CAP[pieceType]) return;
 
             const nextHands = addToHand(cloneHandsState(position.hands), owner, pieceType);
-            setPosition({
+            const nextPosition = {
                 ...position,
                 hands: nextHands,
-            });
+            };
+            setPosition(nextPosition);
+            positionRef.current = nextPosition;
         },
         [isMatchRunning, position],
     );
@@ -981,10 +989,12 @@ export function ShogiMatch({
 
             const nextHands = consumeFromHand(cloneHandsState(position.hands), owner, pieceType);
             if (nextHands) {
-                setPosition({
+                const nextPosition = {
                     ...position,
                     hands: nextHands,
-                });
+                };
+                setPosition(nextPosition);
+                positionRef.current = nextPosition;
             }
         },
         [isMatchRunning, position],
@@ -1965,7 +1975,10 @@ export function ShogiMatch({
                                     {(() => {
                                         const info = getHandInfo("top");
                                         return (
-                                            <div data-zone={`hand-${info.owner}`}>
+                                            <div
+                                                data-zone={`hand-${info.owner}`}
+                                                className="w-full"
+                                            >
                                                 {/* ステータス行: [手数] [手番] [反転ボタン] */}
                                                 <div className="flex items-center justify-end mb-1 gap-4">
                                                     {/* 手数表示 */}
