@@ -26,8 +26,8 @@ pub const MAX_CHANGED_FEATURES: usize = 16;
 
 /// 全特徴量取得での最大数
 /// HalfKP: 盤上38 + 手駒14 = 52
-/// HalfKA_hm^（factorized）: (盤上38 + 手駒14) × 2 = 104
-pub const MAX_ACTIVE_FEATURES: usize = 104;
+/// HalfKA_hm^（factorized）: (盤上38 + 自玉1 + 敵玉1 + 手駒14) × 2 = 108
+pub const MAX_ACTIVE_FEATURES: usize = 108;
 
 /// collect_path での最大パス長（find_usable_accumulator の MAX_DEPTH と同じ）
 pub const MAX_PATH_LENGTH: usize = 8;
