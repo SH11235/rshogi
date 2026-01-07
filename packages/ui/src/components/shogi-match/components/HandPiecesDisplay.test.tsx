@@ -48,6 +48,7 @@ describe("HandPiecesDisplay", () => {
                     isActive={false}
                     onHandSelect={mockHandSelect}
                     size="compact"
+                    isMatchRunning={true}
                 />,
             );
 
@@ -72,6 +73,7 @@ describe("HandPiecesDisplay", () => {
                     isActive={false}
                     onHandSelect={mockHandSelect}
                     size="medium"
+                    isMatchRunning={true}
                 />,
             );
 

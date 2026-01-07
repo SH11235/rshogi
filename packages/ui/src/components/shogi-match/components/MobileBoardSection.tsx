@@ -33,9 +33,10 @@ interface MobileBoardSectionProps {
     >;
 
     // === 編集状態 ===
-    // ★ポイント: isMatchRunning を含まない
     // 親で事前計算: isEditMode && !isMatchRunning
     isEditModeActive: boolean;
+    /** 対局中かどうか（持ち駒表示の制御に使用） */
+    isMatchRunning: boolean;
     editFromSquare: Square | null;
     candidateNote: string | null;
 
@@ -81,6 +82,7 @@ export const MobileBoardSection = memo(function MobileBoardSection({
     promotionSelection,
     displaySettings,
     isEditModeActive,
+    isMatchRunning,
     editFromSquare,
     candidateNote,
     onSquareSelect,
@@ -125,6 +127,7 @@ export const MobileBoardSection = memo(function MobileBoardSection({
                     onHandSelect={onHandSelect}
                     onPiecePointerDown={isEditModeActive ? onHandPiecePointerDown : undefined}
                     isEditMode={isEditModeActive}
+                    isMatchRunning={isMatchRunning}
                     onIncrement={
                         onIncrementHand
                             ? (piece) => onIncrementHand(topHand.owner, piece)
@@ -185,6 +188,7 @@ export const MobileBoardSection = memo(function MobileBoardSection({
                     onHandSelect={onHandSelect}
                     onPiecePointerDown={isEditModeActive ? onHandPiecePointerDown : undefined}
                     isEditMode={isEditModeActive}
+                    isMatchRunning={isMatchRunning}
                     onIncrement={
                         onIncrementHand
                             ? (piece) => onIncrementHand(bottomHand.owner, piece)

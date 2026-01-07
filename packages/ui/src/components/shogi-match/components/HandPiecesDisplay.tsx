@@ -120,6 +120,8 @@ interface HandPiecesDisplayProps {
     onPiecePointerDown?: (owner: Player, pieceType: PieceType, e: React.PointerEvent) => void;
     /** 編集モードかどうか */
     isEditMode?: boolean;
+    /** 対局中かどうか（対局中のみ持ち駒がない駒を非表示にする） */
+    isMatchRunning?: boolean;
     /** 持ち駒を増やす（編集モード用） */
     onIncrement?: (piece: PieceType) => void;
     /** 持ち駒を減らす（編集モード用） */
@@ -138,6 +140,7 @@ export function HandPiecesDisplay({
     onHandSelect,
     onPiecePointerDown,
     isEditMode = false,
+    isMatchRunning = false,
     onIncrement,
     onDecrement,
     flipBoard = false,
@@ -177,8 +180,8 @@ export function HandPiecesDisplay({
 
                     // PC版（normal）: 常に全駒種のスペースを確保（レイアウトシフト防止）
                     // モバイル版（compact/medium）: 対局中は持っている駒だけ詰めて表示
-                    // 編集モードでは全ての駒を表示する
-                    if (!isEditMode && count === 0 && isCompactLayout) {
+                    // 対局前（!isMatchRunning）は編集のために全ての駒を表示する
+                    if (isMatchRunning && !isEditMode && count === 0 && isCompactLayout) {
                         return null;
                     }
 
