@@ -587,5 +587,119 @@ describe("kifu-tree", () => {
             expect(node.multiPvEvals).toHaveLength(1);
             expect(node.multiPvEvals?.[0]).toEqual({});
         });
+
+        it("スパース配列を正しく扱える（multipv=1と3を設定、2は未定義）", () => {
+            const startPosition = createTestPosition(0);
+            let tree = createKifuTree(startPosition, "startpos");
+            tree = addMove(tree, "7g7f", createTestPosition(1));
+
+            tree = setNodeMultiPvEval(tree, tree.currentNodeId, 1, {
+                scoreCp: 100,
+                depth: 20,
+            });
+            tree = setNodeMultiPvEval(tree, tree.currentNodeId, 3, {
+                scoreCp: 50,
+                depth: 20,
+            });
+
+            const node = getCurrentNode(tree);
+            expect(node.multiPvEvals).toHaveLength(3);
+            expect(node.multiPvEvals?.[0]).toBeDefined();
+            expect(node.multiPvEvals?.[1]).toBeUndefined();
+            expect(node.multiPvEvals?.[2]).toBeDefined();
+            expect(node.multiPvEvals?.[0]?.scoreCp).toBe(100);
+            expect(node.multiPvEvals?.[2]?.scoreCp).toBe(50);
+        });
+
+        it("深さが同じ場合は上書きされない（PVが既にある場合）", () => {
+            const startPosition = createTestPosition(0);
+            let tree = createKifuTree(startPosition, "startpos");
+            tree = addMove(tree, "7g7f", createTestPosition(1));
+
+            tree = setNodeMultiPvEval(tree, tree.currentNodeId, 1, {
+                scoreCp: 100,
+                depth: 20,
+                pv: ["3c3d"],
+            });
+            // 同じ深さで別の評価値を設定しようとしても上書きされない（既存にPVがある場合）
+            tree = setNodeMultiPvEval(tree, tree.currentNodeId, 1, {
+                scoreCp: 80,
+                depth: 20,
+                pv: ["8c8d"],
+            });
+
+            const node = getCurrentNode(tree);
+            expect(node.multiPvEvals?.[0]?.scoreCp).toBe(100);
+            expect(node.multiPvEvals?.[0]?.pv).toEqual(["3c3d"]);
+        });
+
+        it("深さが同じでも既存のPVが空で新しいPVがある場合は上書きされる", () => {
+            const startPosition = createTestPosition(0);
+            let tree = createKifuTree(startPosition, "startpos");
+            tree = addMove(tree, "7g7f", createTestPosition(1));
+
+            // 最初はPVなしで設定
+            tree = setNodeMultiPvEval(tree, tree.currentNodeId, 1, {
+                scoreCp: 100,
+                depth: 20,
+            });
+            // 同じ深さでPVありのデータを設定すると上書きされる
+            tree = setNodeMultiPvEval(tree, tree.currentNodeId, 1, {
+                scoreCp: 100,
+                depth: 20,
+                pv: ["3c3d"],
+            });
+
+            const node = getCurrentNode(tree);
+            expect(node.multiPvEvals?.[0]?.pv).toEqual(["3c3d"]);
+        });
+
+        it("深さが深い評価値で上書きされる", () => {
+            const startPosition = createTestPosition(0);
+            let tree = createKifuTree(startPosition, "startpos");
+            tree = addMove(tree, "7g7f", createTestPosition(1));
+
+            tree = setNodeMultiPvEval(tree, tree.currentNodeId, 1, {
+                scoreCp: 100,
+                depth: 20,
+            });
+            // 深さが深い場合は上書きされる
+            tree = setNodeMultiPvEval(tree, tree.currentNodeId, 1, {
+                scoreCp: 150,
+                depth: 25,
+            });
+
+            const node = getCurrentNode(tree);
+            expect(node.multiPvEvals?.[0]?.scoreCp).toBe(150);
+            expect(node.multiPvEvals?.[0]?.depth).toBe(25);
+        });
+
+        it("multipv < 1 の場合はツリーを変更しない", () => {
+            const startPosition = createTestPosition(0);
+            let tree = createKifuTree(startPosition, "startpos");
+            tree = addMove(tree, "7g7f", createTestPosition(1));
+
+            const treeBefore = tree;
+            tree = setNodeMultiPvEval(tree, tree.currentNodeId, 0, {
+                scoreCp: 100,
+                depth: 20,
+            });
+
+            expect(tree).toBe(treeBefore);
+        });
+
+        it("multipvが小数の場合はツリーを変更しない", () => {
+            const startPosition = createTestPosition(0);
+            let tree = createKifuTree(startPosition, "startpos");
+            tree = addMove(tree, "7g7f", createTestPosition(1));
+
+            const treeBefore = tree;
+            tree = setNodeMultiPvEval(tree, tree.currentNodeId, 1.5, {
+                scoreCp: 100,
+                depth: 20,
+            });
+
+            expect(tree).toBe(treeBefore);
+        });
     });
 });
