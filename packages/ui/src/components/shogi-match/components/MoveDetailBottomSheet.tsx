@@ -5,7 +5,7 @@
  * 複数PV（読み筋）の表示と操作が可能
  */
 
-import type { KifuTree, PositionState } from "@shogi/app-core";
+import type { PositionState } from "@shogi/app-core";
 import type { ReactElement } from "react";
 import { useMemo } from "react";
 import type { KifMove, PvDisplayMove, PvEvalInfo } from "../utils/kifFormat";
@@ -27,8 +27,6 @@ interface MoveDetailBottomSheetProps {
     onPreview?: (ply: number, pv: string[], evalCp?: number, evalMate?: number) => void;
     /** 現在位置がメインライン上にあるか */
     isOnMainLine?: boolean;
-    /** 棋譜ツリー（分岐追加時の重複チェック用） */
-    kifuTree?: KifuTree;
 }
 
 /**
@@ -163,7 +161,6 @@ export function MoveDetailBottomSheet({
     onAddBranch,
     onPreview,
     isOnMainLine = true,
-    kifuTree: _kifuTree,
 }: MoveDetailBottomSheetProps): ReactElement | null {
     // 複数PVがある場合はリストで表示、なければ従来の単一PVを使用
     const pvList = useMemo((): PvEvalInfo[] => {

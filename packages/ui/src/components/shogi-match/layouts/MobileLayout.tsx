@@ -1,4 +1,4 @@
-import type { KifuTree, LastMove, PieceType, Player, PositionState, Square } from "@shogi/app-core";
+import type { LastMove, PieceType, Player, PositionState, Square } from "@shogi/app-core";
 import type { ReactElement, RefObject } from "react";
 import { useCallback, useMemo, useState } from "react";
 import type { ShogiBoardCell } from "../../shogi-board";
@@ -128,8 +128,6 @@ interface MobileLayoutProps {
     onAddPvAsBranch?: (ply: number, pv: string[]) => void;
     /** PVを盤面で確認するコールバック */
     onPreviewPv?: (ply: number, pv: string[], evalCp?: number, evalMate?: number) => void;
-    /** 棋譜ツリー */
-    kifuTree?: KifuTree;
     /** 現在位置がメインライン上にあるか */
     isOnMainLine?: boolean;
 }
@@ -196,7 +194,6 @@ export function MobileLayout({
     positionHistory,
     onAddPvAsBranch,
     onPreviewPv,
-    kifuTree,
     isOnMainLine = true,
 }: MobileLayoutProps): ReactElement {
     // 設定BottomSheetの状態
@@ -511,7 +508,6 @@ export function MobileLayout({
                 onAddBranch={onAddPvAsBranch}
                 onPreview={onPreviewPv}
                 isOnMainLine={isOnMainLine}
-                kifuTree={kifuTree}
             />
         </div>
     );

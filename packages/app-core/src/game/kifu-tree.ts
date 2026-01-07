@@ -681,12 +681,18 @@ export function setNodeMultiPvEval(
     // 既存エントリがある場合は深さを比較して更新判定
     const existing = newEvals[index];
     if (existing) {
-        // 新しい深さが既存より深い場合のみ更新
-        const shouldUpdate = evalData.depth !== undefined && (existing.depth ?? 0) < evalData.depth;
-        if (!shouldUpdate) {
-            // 既存のほうが深い場合はそのまま返す
+        // 両方に深さがある場合のみ比較
+        if (evalData.depth !== undefined && existing.depth !== undefined) {
+            if (existing.depth >= evalData.depth) {
+                // 既存のほうが深い、または同じ深さの場合はスキップ
+                return tree;
+            }
+        } else if (evalData.depth === undefined && existing.depth !== undefined) {
+            // 新規に深さ情報がなく、既存にある場合はスキップ
+            // （深さ情報がない新しいデータで上書きしない）
             return tree;
         }
+        // それ以外（新規に深さがあり既存にない、または両方に深さがない）は更新を許可
     }
 
     // 評価値を設定
