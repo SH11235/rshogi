@@ -11,6 +11,7 @@
 //! - グローバルな `NETWORK` にロードし、`evaluate` から利用する
 
 use super::accumulator::{Accumulator, AccumulatorStack, Aligned};
+use super::accumulator_nnue_pytorch::AccumulatorStackNnuePytorch;
 use super::constants::{
     FV_SCALE, HIDDEN1_DIMENSIONS, HIDDEN2_DIMENSIONS, NNUE_VERSION, NNUE_VERSION_HALFKA,
     OUTPUT_DIMENSIONS, TRANSFORMED_FEATURE_DIMENSIONS,
@@ -18,6 +19,7 @@ use super::constants::{
 use super::feature_transformer::FeatureTransformer;
 use super::feature_transformer_halfka::FeatureTransformerHalfKA;
 use super::layers::{AffineTransform, ClippedReLU};
+use super::network_layer_stacks::NetworkLayerStacks;
 #[cfg(not(feature = "tournament"))]
 use crate::eval::material;
 use crate::position::Position;
@@ -38,8 +40,10 @@ static NETWORK: OnceLock<NNUENetwork> = OnceLock::new();
 pub enum NNUENetwork {
     /// HalfKP classic NNUE
     HalfKP(Box<Network>),
-    /// HalfKA_hm^ nnue-pytorch互換
+    /// HalfKA_hm^ nnue-pytorch互換（256次元FC層）
     HalfKA(Box<NetworkHalfKA>),
+    /// LayerStacks（1536次元 + 9バケット）
+    LayerStacks(Box<NetworkLayerStacks>),
 }
 
 impl NNUENetwork {
@@ -57,17 +61,43 @@ impl NNUENetwork {
         reader.read_exact(&mut buf4)?;
         let version = u32::from_le_bytes(buf4);
 
-        // 位置を戻す
-        reader.seek(SeekFrom::Start(0))?;
-
         match version {
             NNUE_VERSION => {
+                // 位置を戻す
+                reader.seek(SeekFrom::Start(0))?;
                 let network = Network::read(reader)?;
                 Ok(Self::HalfKP(Box::new(network)))
             }
             NNUE_VERSION_HALFKA => {
-                let network = NetworkHalfKA::read(reader)?;
-                Ok(Self::HalfKA(Box::new(network)))
+                // HalfKA_hm^ には複数のアーキテクチャがある:
+                // - HalfKA (256次元 FC層)
+                // - LayerStacks (1536次元 + 9バケット)
+                // アーキテクチャ文字列で区別する
+
+                // ハッシュを読み飛ばす
+                reader.read_exact(&mut buf4)?;
+                let _hash = u32::from_le_bytes(buf4);
+
+                // アーキテクチャ文字列を読み込み
+                reader.read_exact(&mut buf4)?;
+                let arch_len = u32::from_le_bytes(buf4) as usize;
+                let mut arch = vec![0u8; arch_len];
+                reader.read_exact(&mut arch)?;
+
+                let arch_str = String::from_utf8_lossy(&arch);
+
+                // 位置を戻す
+                reader.seek(SeekFrom::Start(0))?;
+
+                // nnue-pytorch で学習したモデルは LayerStacks アーキテクチャ
+                // （アーキテクチャ文字列に "nnue-pytorch" を含む）
+                if arch_str.contains("nnue-pytorch") {
+                    let network = NetworkLayerStacks::read(reader)?;
+                    Ok(Self::LayerStacks(Box::new(network)))
+                } else {
+                    let network = NetworkHalfKA::read(reader)?;
+                    Ok(Self::HalfKA(Box::new(network)))
+                }
             }
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -84,12 +114,35 @@ impl NNUENetwork {
         Self::read(&mut cursor)
     }
 
-    /// 評価値を計算
+    /// 評価値を計算（HalfKP/HalfKA用）
+    ///
+    /// LayerStacks は異なるアキュムレータを使用するため、
+    /// `evaluate_layer_stacks` を使用してください。
     pub fn evaluate(&self, pos: &Position, acc: &Accumulator) -> Value {
         match self {
             Self::HalfKP(net) => net.evaluate(pos, acc),
             Self::HalfKA(net) => net.evaluate(pos, acc),
+            Self::LayerStacks(_) => {
+                panic!("LayerStacks requires AccumulatorNnuePytorch. Use evaluate_layer_stacks().")
+            }
         }
+    }
+
+    /// 評価値を計算（LayerStacks用）
+    pub fn evaluate_layer_stacks(
+        &self,
+        pos: &Position,
+        acc: &super::accumulator_nnue_pytorch::AccumulatorNnuePytorch,
+    ) -> Value {
+        match self {
+            Self::LayerStacks(net) => net.evaluate(pos, acc),
+            _ => panic!("This method is only for LayerStacks architecture."),
+        }
+    }
+
+    /// LayerStacks アーキテクチャかどうか
+    pub fn is_layer_stacks(&self) -> bool {
+        matches!(self, Self::LayerStacks(_))
     }
 
     /// アーキテクチャ名を取得
@@ -97,18 +150,36 @@ impl NNUENetwork {
         match self {
             Self::HalfKP(_) => "HalfKP",
             Self::HalfKA(_) => "HalfKA_hm^",
+            Self::LayerStacks(_) => "LayerStacks",
         }
     }
 
-    /// 差分計算を使わずにAccumulatorを計算
+    /// 差分計算を使わずにAccumulatorを計算（HalfKP/HalfKA用）
     pub fn refresh_accumulator(&self, pos: &Position, acc: &mut Accumulator) {
         match self {
             Self::HalfKP(net) => net.feature_transformer.refresh_accumulator(pos, acc),
             Self::HalfKA(net) => net.feature_transformer.refresh_accumulator(pos, acc),
+            Self::LayerStacks(_) => {
+                panic!(
+                    "LayerStacks requires AccumulatorNnuePytorch. Use refresh_accumulator_layer_stacks()."
+                )
+            }
         }
     }
 
-    /// 差分計算でAccumulatorを更新
+    /// 差分計算を使わずにAccumulatorを計算（LayerStacks用）
+    pub fn refresh_accumulator_layer_stacks(
+        &self,
+        pos: &Position,
+        acc: &mut super::accumulator_nnue_pytorch::AccumulatorNnuePytorch,
+    ) {
+        match self {
+            Self::LayerStacks(net) => net.refresh_accumulator(pos, acc),
+            _ => panic!("This method is only for LayerStacks architecture."),
+        }
+    }
+
+    /// 差分計算でAccumulatorを更新（HalfKP/HalfKA用）
     pub fn update_accumulator(
         &self,
         pos: &Position,
@@ -123,10 +194,27 @@ impl NNUENetwork {
             Self::HalfKA(net) => {
                 net.feature_transformer.update_accumulator(pos, dirty_piece, acc, prev_acc)
             }
+            Self::LayerStacks(_) => {
+                panic!("LayerStacks requires AccumulatorNnuePytorch. Use update_accumulator_layer_stacks().")
+            }
         }
     }
 
-    /// 複数手分の差分を適用してアキュムレータを更新
+    /// 差分計算でAccumulatorを更新（LayerStacks用）
+    pub fn update_accumulator_layer_stacks(
+        &self,
+        pos: &Position,
+        dirty_piece: &super::accumulator::DirtyPiece,
+        acc: &mut super::accumulator_nnue_pytorch::AccumulatorNnuePytorch,
+        prev_acc: &super::accumulator_nnue_pytorch::AccumulatorNnuePytorch,
+    ) {
+        match self {
+            Self::LayerStacks(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
+            _ => panic!("This method is only for LayerStacks architecture."),
+        }
+    }
+
+    /// 複数手分の差分を適用してアキュムレータを更新（HalfKP/HalfKA用）
     pub fn forward_update_incremental(
         &self,
         pos: &Position,
@@ -140,6 +228,22 @@ impl NNUENetwork {
             Self::HalfKA(net) => {
                 net.feature_transformer.forward_update_incremental(pos, stack, source_idx)
             }
+            Self::LayerStacks(_) => {
+                panic!("LayerStacks requires AccumulatorStackNnuePytorch. Use forward_update_incremental_layer_stacks().")
+            }
+        }
+    }
+
+    /// 複数手分の差分を適用してアキュムレータを更新（LayerStacks用）
+    pub fn forward_update_incremental_layer_stacks(
+        &self,
+        pos: &Position,
+        stack: &mut AccumulatorStackNnuePytorch,
+        source_idx: usize,
+    ) -> bool {
+        match self {
+            Self::LayerStacks(net) => net.forward_update_incremental(pos, stack, source_idx),
+            _ => panic!("This method is only for LayerStacks architecture."),
         }
     }
 }
@@ -475,6 +579,9 @@ pub fn is_nnue_initialized() -> bool {
 /// 1. 直前局面で差分更新を試行
 /// 2. 失敗なら祖先探索 + 複数手差分更新を試行
 /// 3. それでも失敗なら全計算
+///
+/// # 注意
+/// LayerStacks アーキテクチャの場合は `evaluate_layer_stacks` を使用してください。
 pub fn evaluate(pos: &Position, stack: &mut AccumulatorStack) -> Value {
     // tournamentビルド: NNUEが必須（フォールバックなし）
     #[cfg(feature = "tournament")]
@@ -489,6 +596,13 @@ pub fn evaluate(pos: &Position, stack: &mut AccumulatorStack) -> Value {
     let Some(network) = NETWORK.get() else {
         return material::evaluate_material(pos);
     };
+
+    // LayerStacks は別のアキュムレータ型を使用する
+    if network.is_layer_stacks() {
+        panic!(
+            "LayerStacks architecture detected. Use evaluate_layer_stacks() with AccumulatorStackNnuePytorch."
+        );
+    }
 
     // 差分更新の成功率計測（diagnosticsフィーチャー有効時のみ）
     // 0=cached, 1=diff_success, 2=no_prev, 3=prev_not_computed, 4=update_failed,
@@ -623,6 +737,82 @@ pub fn evaluate(pos: &Position, stack: &mut AccumulatorStack) -> Value {
     // 不変借用で評価
     let acc_ref = &stack.current().accumulator;
     network.evaluate(pos, acc_ref)
+}
+
+/// ロードされたNNUEがLayerStacksアーキテクチャかどうか
+pub fn is_layer_stacks_loaded() -> bool {
+    NETWORK.get().map(|n| n.is_layer_stacks()).unwrap_or(false)
+}
+
+/// 局面を評価（LayerStacks用）
+///
+/// AccumulatorStackNnuePytorch を使って差分更新し、計算済みなら再利用する。
+///
+/// # フォールバック動作
+/// - 通常ビルド: NNUEが初期化されていない場合は駒得評価にフォールバック
+/// - tournamentビルド: NNUEが初期化されていない場合はパニック
+pub fn evaluate_layer_stacks(pos: &Position, stack: &mut AccumulatorStackNnuePytorch) -> Value {
+    // tournamentビルド: NNUEが必須（フォールバックなし）
+    #[cfg(feature = "tournament")]
+    let network = NETWORK.get().expect(
+        "NNUE network is not initialized. \
+         Tournament build requires NNUE to be loaded before evaluation. \
+         Call init_nnue() or init_nnue_from_bytes() first.",
+    );
+
+    // 通常ビルド: NNUEがなければMaterial評価にフォールバック
+    #[cfg(not(feature = "tournament"))]
+    let Some(network) = NETWORK.get() else {
+        return material::evaluate_material(pos);
+    };
+
+    // LayerStacks 以外はエラー
+    if !network.is_layer_stacks() {
+        panic!("Non-LayerStacks architecture detected. Use evaluate() with AccumulatorStack.");
+    }
+
+    // AccumulatorStackNnuePytorch 上の Accumulator をインプレースで更新
+    {
+        let current_entry = stack.current();
+        if !current_entry.accumulator.computed_accumulation {
+            let mut updated = false;
+
+            // 1. 直前局面で差分更新を試行
+            if let Some(prev_idx) = current_entry.previous {
+                let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
+                if prev_computed {
+                    let dirty_piece = stack.current().dirty_piece;
+                    let prev_acc = stack.entry_at(prev_idx).accumulator.clone();
+                    let current_acc = &mut stack.current_mut().accumulator;
+                    network.update_accumulator_layer_stacks(
+                        pos,
+                        &dirty_piece,
+                        current_acc,
+                        &prev_acc,
+                    );
+                    updated = true;
+                }
+            }
+
+            // 2. 失敗なら祖先探索 + 複数手差分更新を試行
+            if !updated {
+                if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+                    updated =
+                        network.forward_update_incremental_layer_stacks(pos, stack, source_idx);
+                }
+            }
+
+            // 3. それでも失敗なら全計算
+            if !updated {
+                let acc = &mut stack.current_mut().accumulator;
+                network.refresh_accumulator_layer_stacks(pos, acc);
+            }
+        }
+    }
+
+    // 不変借用で評価
+    let acc_ref = &stack.current().accumulator;
+    network.evaluate_layer_stacks(pos, acc_ref)
 }
 
 #[cfg(test)]
@@ -762,5 +952,44 @@ mod tests {
         // Network.evaluate() の結果
         let score = network.evaluate(&pos, &acc);
         eprintln!("\nNetwork.evaluate() = {}", score.raw());
+    }
+
+    /// NNUENetwork のアーキテクチャ自動検出テスト
+    ///
+    /// 外部NNUEファイルが必要なため通常はスキップ。
+    /// 実行方法: `NNUE_TEST_FILE=/path/to/file.nnue cargo test test_nnue_network_auto_detect_layer_stacks -- --ignored`
+    ///
+    /// テスト結果 (epoch82.nnue):
+    /// - LayerStacks として正しく認識される
+    /// - 評価値: 0 (学習初期のモデル)
+    #[test]
+    #[ignore]
+    fn test_nnue_network_auto_detect_layer_stacks() {
+        let path = std::env::var("NNUE_TEST_FILE")
+            .unwrap_or_else(|_| "/path/to/your/layer_stacks.nnue".to_string());
+        let network = match NNUENetwork::load(path) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("Skipping test: {e}");
+                return;
+            }
+        };
+
+        // LayerStacks として認識されることを確認
+        assert!(network.is_layer_stacks(), "epoch82.nnue should be detected as LayerStacks");
+        assert_eq!(network.architecture_name(), "LayerStacks");
+
+        // LayerStacks 用の評価が動作することを確認
+        let mut pos = crate::position::Position::new();
+        pos.set_sfen(SFEN_HIRATE).unwrap();
+
+        let mut acc = crate::nnue::AccumulatorNnuePytorch::new();
+        network.refresh_accumulator_layer_stacks(&pos, &mut acc);
+
+        let value = network.evaluate_layer_stacks(&pos, &acc);
+        eprintln!("LayerStacks evaluate: {}", value.raw());
+
+        // 評価値が妥当な範囲内
+        assert!(value.raw().abs() < 1000);
     }
 }
