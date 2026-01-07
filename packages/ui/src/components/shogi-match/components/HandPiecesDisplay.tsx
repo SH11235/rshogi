@@ -178,10 +178,9 @@ export function HandPiecesDisplay({
                     const isDisabled = !canDrag && !canSelect && !isEditMode;
                     const maxCount = PIECE_CAP[piece];
 
-                    // PC版（normal）: 常に全駒種のスペースを確保（レイアウトシフト防止）
-                    // モバイル版（compact/medium）: 対局中は持っている駒だけ詰めて表示
+                    // 対局中は持っている駒だけ詰めて表示
                     // 対局前（!isMatchRunning）は編集のために全ての駒を表示する
-                    if (isMatchRunning && !isEditMode && count === 0 && isCompactLayout) {
+                    if (isMatchRunning && !isEditMode && count === 0) {
                         return null;
                     }
 

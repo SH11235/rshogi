@@ -126,6 +126,8 @@ interface PlayerHandSectionProps {
     onPiecePointerDown?: (owner: Player, pieceType: PieceType, e: React.PointerEvent) => void;
     /** 編集モードかどうか */
     isEditMode?: boolean;
+    /** 対局中かどうか */
+    isMatchRunning?: boolean;
     /** 持ち駒を増やす（編集モード用） */
     onIncrement?: (piece: PieceType) => void;
     /** 持ち駒を減らす（編集モード用） */
@@ -142,6 +144,7 @@ function PlayerHandSection({
     onHandSelect,
     onPiecePointerDown,
     isEditMode,
+    isMatchRunning,
     onIncrement,
     onDecrement,
     flipBoard,
@@ -156,6 +159,7 @@ function PlayerHandSection({
                 onHandSelect={onHandSelect}
                 onPiecePointerDown={onPiecePointerDown}
                 isEditMode={isEditMode}
+                isMatchRunning={isMatchRunning}
                 onIncrement={onIncrement}
                 onDecrement={onDecrement}
                 flipBoard={flipBoard}
@@ -2045,6 +2049,7 @@ export function ShogiMatch({
                                                             : undefined
                                                     }
                                                     isEditMode={isEditMode && !isMatchRunning}
+                                                    isMatchRunning={isMatchRunning}
                                                     onIncrement={(piece) =>
                                                         handleIncrementHand(info.owner, piece)
                                                     }
@@ -2117,6 +2122,7 @@ export function ShogiMatch({
                                                         : undefined
                                                 }
                                                 isEditMode={isEditMode && !isMatchRunning}
+                                                isMatchRunning={isMatchRunning}
                                                 onIncrement={(piece) =>
                                                     handleIncrementHand(info.owner, piece)
                                                 }

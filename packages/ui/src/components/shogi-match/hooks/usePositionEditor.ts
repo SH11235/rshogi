@@ -191,6 +191,11 @@ export function usePositionEditor(props: UsePositionEditorProps): UsePositionEdi
 
             // piece が null の場合：駒を削除
             if (!piece) {
+                // 玉は削除できない
+                if (existing?.type === "K") {
+                    props.onMessageChange("玉は削除できません。");
+                    return false;
+                }
                 nextBoard[square] = null;
                 const nextPosition: PositionState = {
                     ...current,

@@ -16,7 +16,7 @@ describe("HandPiecesDisplay", () => {
     const mockHandSelect = vi.fn();
 
     describe("レイアウトロジック", () => {
-        it("normal サイズでは count=0 でも全駒種を表示する", () => {
+        it("対局前は count=0 でも全駒種を表示する", () => {
             render(
                 <HandPiecesDisplay
                     owner="sente"
@@ -25,11 +25,11 @@ describe("HandPiecesDisplay", () => {
                     isActive={false}
                     onHandSelect={mockHandSelect}
                     size="normal"
+                    isMatchRunning={false}
                 />,
             );
 
-            // 全7種類の駒が表示される（飛、角、金、銀、桂、香、歩）
-            // getByText は要素が見つからない場合にエラーをスローする
+            // 対局前は全7種類の駒が表示される（飛、角、金、銀、桂、香、歩）
             expect(screen.getByText("飛")).toBeDefined();
             expect(screen.getByText("角")).toBeDefined();
             expect(screen.getByText("金")).toBeDefined();
@@ -39,7 +39,32 @@ describe("HandPiecesDisplay", () => {
             expect(screen.getByText("歩")).toBeDefined();
         });
 
-        it("compact サイズでは count=0 の駒は表示しない（対局中）", () => {
+        it("対局中は count=0 の駒は表示しない（normal サイズ）", () => {
+            render(
+                <HandPiecesDisplay
+                    owner="sente"
+                    hand={{ ...defaultHand, P: 3, G: 1 }}
+                    selectedPiece={null}
+                    isActive={false}
+                    onHandSelect={mockHandSelect}
+                    size="normal"
+                    isMatchRunning={true}
+                />,
+            );
+
+            // 持っている駒のみ表示
+            expect(screen.getByText("金")).toBeDefined();
+            expect(screen.getByText("歩")).toBeDefined();
+
+            // 持っていない駒は表示されない
+            expect(screen.queryByText("飛")).toBeNull();
+            expect(screen.queryByText("角")).toBeNull();
+            expect(screen.queryByText("銀")).toBeNull();
+            expect(screen.queryByText("桂")).toBeNull();
+            expect(screen.queryByText("香")).toBeNull();
+        });
+
+        it("対局中は count=0 の駒は表示しない（compact サイズ）", () => {
             render(
                 <HandPiecesDisplay
                     owner="sente"
