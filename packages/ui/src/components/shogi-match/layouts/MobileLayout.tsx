@@ -8,9 +8,9 @@ import type { EngineOption, SideSetting } from "../components/MatchSettingsPanel
 import { MobileBoardSection } from "../components/MobileBoardSection";
 import { MobileClockDisplay } from "../components/MobileClockDisplay";
 import { type KifuMove, MobileKifuBar } from "../components/MobileKifuBar";
-import { MoveDetailBottomSheet } from "../components/MoveDetailBottomSheet";
 import { MobileNavigation } from "../components/MobileNavigation";
 import { MobileSettingsSheet } from "../components/MobileSettingsSheet";
+import { MoveDetailBottomSheet } from "../components/MoveDetailBottomSheet";
 import type { ClockSettings, TickState } from "../hooks/useClockManager";
 import type { DisplaySettings, GameMode, PromotionSelection } from "../types";
 import type { EvalHistory, KifMove as FullKifMove } from "../utils/kifFormat";
