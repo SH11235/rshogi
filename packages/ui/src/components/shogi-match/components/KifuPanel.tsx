@@ -611,9 +611,10 @@ function PvCandidateItem({
             )}
 
             {/* アクションボタン */}
+            {/* hasPv が true なら pv.pv は必ず存在する（pvDisplay の生成条件より） */}
             {hasPv && (onPreview || onAddBranch) && (
                 <div className="flex gap-2">
-                    {onPreview && pv.pv && (
+                    {onPreview && (
                         <button
                             type="button"
                             onClick={() => onPreview(ply, pv.pv ?? [], pv.evalCp, pv.evalMate)}
@@ -629,7 +630,6 @@ function PvCandidateItem({
                         </button>
                     )}
                     {onAddBranch &&
-                        pv.pv &&
                         (isOnMainLine ? (
                             <>
                                 {/* 本譜と完全一致の場合 */}

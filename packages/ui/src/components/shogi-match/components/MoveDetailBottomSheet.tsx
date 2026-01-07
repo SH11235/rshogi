@@ -108,9 +108,10 @@ function MobilePvCandidateItem({
             )}
 
             {/* アクションボタン（タッチ操作に最適化） */}
+            {/* hasPv が true なら pv.pv は必ず存在する（pvDisplay の生成条件より） */}
             {hasPv && (onPreview || onAddBranch) && (
                 <div className="flex gap-2">
-                    {onPreview && pv.pv && (
+                    {onPreview && (
                         <button
                             type="button"
                             onClick={() => {
@@ -127,7 +128,7 @@ function MobilePvCandidateItem({
                             ▶ 盤面で確認
                         </button>
                     )}
-                    {onAddBranch && pv.pv && isOnMainLine && (
+                    {onAddBranch && isOnMainLine && (
                         <button
                             type="button"
                             onClick={() => {

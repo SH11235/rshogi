@@ -659,6 +659,11 @@ export function setNodeMultiPvEval(
     multipv: number,
     evalData: KifuEval,
 ): KifuTree {
+    // multipv は 1 以上の正の整数である必要がある
+    if (multipv < 1 || !Number.isInteger(multipv)) {
+        return tree;
+    }
+
     const node = tree.nodes.get(nodeId);
     if (!node) {
         return tree;
@@ -681,12 +686,23 @@ export function setNodeMultiPvEval(
     // 既存エントリがある場合は深さを比較して更新判定
     const existing = newEvals[index];
     if (existing) {
-        // 両方に深さがある場合のみ比較
+        // 両方に深さがある場合
         if (evalData.depth !== undefined && existing.depth !== undefined) {
-            if (existing.depth >= evalData.depth) {
-                // 既存のほうが深い、または同じ深さの場合はスキップ
+            if (existing.depth > evalData.depth) {
+                // 既存のほうが深い場合はスキップ
                 return tree;
             }
+            if (existing.depth === evalData.depth) {
+                // 同じ深さの場合、新しいPVがあり既存のPVが空なら更新を許可
+                const existingHasPv = existing.pv && existing.pv.length > 0;
+                const newHasPv = evalData.pv && evalData.pv.length > 0;
+                if (existingHasPv || !newHasPv) {
+                    // 既存にPVがある、または新しいデータにもPVがない場合はスキップ
+                    return tree;
+                }
+                // 新しいデータにPVがあり既存にPVがない場合は更新を許可
+            }
+            // 新しいほうが深い場合は更新を許可
         } else if (evalData.depth === undefined && existing.depth !== undefined) {
             // 新規に深さ情報がなく、既存にある場合はスキップ
             // （深さ情報がない新しいデータで上書きしない）

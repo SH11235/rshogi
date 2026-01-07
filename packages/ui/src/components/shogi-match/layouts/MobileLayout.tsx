@@ -213,6 +213,8 @@ export function MobileLayout({
             if (isReviewMode && fullKifMoves && positionHistory) {
                 const move = fullKifMoves.find((m) => m.ply === ply);
                 // 対応する局面（その手が指された後の局面）
+                // ply は 1 始まりの手数、positionHistory は「その手が指された後の局面」を 0 始まりで保持しているため、
+                // 手数 ply に対応する局面は positionHistory[ply - 1] になる。
                 const pos = positionHistory[ply - 1];
                 if (move && pos) {
                     setSelectedMoveForDetail(move);

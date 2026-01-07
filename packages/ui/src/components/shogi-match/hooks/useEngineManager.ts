@@ -887,7 +887,10 @@ export function useEngineManager({
                 await client.setOption("MultiPV", String(multiPv));
             } catch (error) {
                 // MultiPV オプションが未対応のエンジンでは無視
-                console.warn("MultiPV option not supported:", error);
+                console.warn(
+                    `MultiPV option (value: ${multiPv}) not supported by engine, using default single PV:`,
+                    error,
+                );
             }
 
             // 既存のサブスクリプションがある場合は解除して再登録
