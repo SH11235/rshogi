@@ -128,17 +128,10 @@ async function applySkillLevelSettings(
 
     try {
         await client.setOption("Skill Level", normalized.skillLevel);
-
-        if (normalized.useLimitStrength && normalized.elo !== undefined) {
-            await client.setOption("UCI_LimitStrength", true);
-            await client.setOption("UCI_Elo", normalized.elo);
-        } else {
-            await client.setOption("UCI_LimitStrength", false);
-        }
     } catch (error) {
         const errorMsg = error instanceof Error ? error.message : String(error);
         throw new Error(
-            `Failed to apply skill level settings (skillLevel: ${normalized.skillLevel}, elo: ${normalized.elo ?? "none"}): ${errorMsg}`,
+            `Failed to apply skill level settings (skillLevel: ${normalized.skillLevel}): ${errorMsg}`,
         );
     }
 }

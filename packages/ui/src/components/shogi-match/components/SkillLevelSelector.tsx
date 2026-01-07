@@ -6,7 +6,7 @@ import {
     type SkillLevelSettings,
     type SkillPreset,
 } from "@shogi/engine-client";
-import { type ReactElement, useState } from "react";
+import { type ReactElement, useEffect, useRef, useState } from "react";
 
 interface SkillLevelSelectorProps {
     /** 現在の設定値（undefined = デフォルト（全力）） */
@@ -29,20 +29,37 @@ export function SkillLevelSelector({
     onChange,
     disabled,
 }: SkillLevelSelectorProps): ReactElement {
-    // プリセット状態を管理（value から初期値を推定）
-    const [preset, setPreset] = useState<SkillPreset>(() => {
+    // UI上で選択されているプリセット
+    // 「カスタム」を明示的に選択した場合、値がプリセットと一致してもカスタム表示を維持
+    const [selectedPreset, setSelectedPreset] = useState<SkillPreset>(() => {
         if (!value) return "professional";
         return detectSkillPreset(value);
     });
 
+    // 内部からの変更かどうかを追跡
+    // 内部変更時は selectedPreset を維持、外部変更時は value から派生
+    const isInternalChangeRef = useRef(false);
+
+    useEffect(() => {
+        if (isInternalChangeRef.current) {
+            // 内部からの変更 - selectedPreset を維持
+            isInternalChangeRef.current = false;
+            return;
+        }
+
+        // 外部からの変更 - value から preset を派生
+        const derivedPreset = value ? detectSkillPreset(value) : "professional";
+        setSelectedPreset(derivedPreset);
+    }, [value]);
+
     const handlePresetChange = (newPreset: SkillPreset) => {
-        setPreset(newPreset);
+        setSelectedPreset(newPreset);
+        isInternalChangeRef.current = true;
 
         if (newPreset === "custom") {
-            // カスタムに切り替え時は現在の値を維持
-            // 全力（professional）から切り替えた場合は 20 から開始
-            const defaultSkillLevel = preset === "professional" ? SKILL_LEVEL_MAX : 10;
-            onChange(value ?? { skillLevel: defaultSkillLevel });
+            // カスタムに切り替え時は現在の値を維持（値は変更しない）
+            const currentSkillLevel = value?.skillLevel ?? SKILL_LEVEL_MAX;
+            onChange({ skillLevel: currentSkillLevel });
         } else if (newPreset === "professional") {
             // 全力の場合は undefined（デフォルト）を設定
             onChange(undefined);
@@ -53,7 +70,7 @@ export function SkillLevelSelector({
     };
 
     const handleSkillLevelChange = (skillLevel: number) => {
-        // 明示的にプロパティを設定（value が undefined でも安全）
+        isInternalChangeRef.current = true;
         onChange({ skillLevel });
     };
 
@@ -63,7 +80,7 @@ export function SkillLevelSelector({
             <label className={labelClassName}>
                 エンジンの強さ
                 <select
-                    value={preset}
+                    value={selectedPreset}
                     onChange={(e) => handlePresetChange(e.target.value as SkillPreset)}
                     disabled={disabled}
                     className={selectClassName}
@@ -76,8 +93,8 @@ export function SkillLevelSelector({
                 </select>
             </label>
 
-            {/* カスタム設定（preset="custom"時のみ表示） */}
-            {preset === "custom" && (
+            {/* カスタム設定（selectedPreset="custom"時のみ表示） */}
+            {selectedPreset === "custom" && (
                 <div className="space-y-2 rounded-lg border border-[hsl(var(--wafuu-border))] bg-[hsl(var(--card,0_0%_100%)/0.5)] p-3">
                     {/* スキルレベルスライダー */}
                     <label className={labelClassName}>

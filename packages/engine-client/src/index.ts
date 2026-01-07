@@ -11,16 +11,10 @@ export type EngineStopMode = "terminate" | "cooperative";
  *
  * エンジンの強さを制御するための設定。
  * - skillLevel: 0-20 の整数（0=最弱、20=全力）
- * - useLimitStrength: ELO制限を使用するか
- * - elo: ELO値（useLimitStrength=true時のみ有効、1320-3190の範囲）
  */
 export interface SkillLevelSettings {
     /** スキルレベル (0-20, 20=全力) */
     skillLevel: number;
-    /** ELO制限を使用するか */
-    useLimitStrength?: boolean;
-    /** ELO値 (useLimitStrength=true時のみ有効, 1320-3190) */
-    elo?: number;
 }
 
 /**
@@ -41,10 +35,6 @@ export const SKILL_PRESETS: Record<Exclude<SkillPreset, "custom">, SkillLevelSet
 /** Skill Level の有効範囲 */
 export const SKILL_LEVEL_MIN = 0;
 export const SKILL_LEVEL_MAX = 20;
-
-/** ELO の有効範囲 */
-export const ELO_MIN = 1320;
-export const ELO_MAX = 3190;
 
 /**
  * SkillLevelSettings のバリデーション結果
@@ -68,12 +58,6 @@ export function validateSkillLevelSettings(
         );
     }
 
-    if (settings.useLimitStrength && settings.elo !== undefined) {
-        if (settings.elo < ELO_MIN || settings.elo > ELO_MAX) {
-            errors.push(`elo must be between ${ELO_MIN} and ${ELO_MAX}, got ${settings.elo}`);
-        }
-    }
-
     return {
         valid: errors.length === 0,
         errors,
@@ -85,12 +69,6 @@ export function validateSkillLevelSettings(
  */
 export function normalizeSkillLevelSettings(settings: SkillLevelSettings): SkillLevelSettings {
     const skillLevel = Math.max(SKILL_LEVEL_MIN, Math.min(SKILL_LEVEL_MAX, settings.skillLevel));
-
-    if (settings.useLimitStrength && settings.elo !== undefined) {
-        const elo = Math.max(ELO_MIN, Math.min(ELO_MAX, settings.elo));
-        return { skillLevel, useLimitStrength: true, elo };
-    }
-
     return { skillLevel };
 }
 
@@ -100,10 +78,6 @@ export function normalizeSkillLevelSettings(settings: SkillLevelSettings): Skill
 export function detectSkillPreset(settings: SkillLevelSettings): SkillPreset {
     // 範囲外の値はカスタムとして扱う
     if (settings.skillLevel < SKILL_LEVEL_MIN || settings.skillLevel > SKILL_LEVEL_MAX) {
-        return "custom";
-    }
-
-    if (settings.useLimitStrength) {
         return "custom";
     }
 

@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { EngineEvent, EngineInfoEvent } from "./index";
-import { createMockEngineClient } from "./index";
+import type { EngineEvent, EngineInfoEvent, SkillLevelSettings } from "./index";
+import {
+    createMockEngineClient,
+    detectSkillPreset,
+    normalizeSkillLevelSettings,
+    SKILL_LEVEL_MAX,
+    SKILL_LEVEL_MIN,
+    validateSkillLevelSettings,
+} from "./index";
 
 describe("createMockEngineClient", () => {
     beforeEach(() => {
@@ -209,5 +216,86 @@ describe("createMockEngineClient", () => {
             expect(infoEvent.nps).toBe(1024);
             expect(infoEvent.pv).toEqual([]);
         });
+    });
+});
+
+describe("validateSkillLevelSettings", () => {
+    it("有効な設定で valid: true を返す", () => {
+        const result = validateSkillLevelSettings({ skillLevel: 10 });
+        expect(result.valid).toBe(true);
+        expect(result.errors).toHaveLength(0);
+    });
+
+    it("skillLevel が最小値の場合に有効", () => {
+        const result = validateSkillLevelSettings({ skillLevel: SKILL_LEVEL_MIN });
+        expect(result.valid).toBe(true);
+    });
+
+    it("skillLevel が最大値の場合に有効", () => {
+        const result = validateSkillLevelSettings({ skillLevel: SKILL_LEVEL_MAX });
+        expect(result.valid).toBe(true);
+    });
+
+    it("skillLevel が範囲外（負数）の場合にエラー", () => {
+        const result = validateSkillLevelSettings({ skillLevel: -1 });
+        expect(result.valid).toBe(false);
+        expect(result.errors).toHaveLength(1);
+        expect(result.errors[0]).toContain("skillLevel");
+    });
+
+    it("skillLevel が範囲外（上限超え）の場合にエラー", () => {
+        const result = validateSkillLevelSettings({ skillLevel: 21 });
+        expect(result.valid).toBe(false);
+        expect(result.errors).toHaveLength(1);
+    });
+});
+
+describe("normalizeSkillLevelSettings", () => {
+    it("有効な設定はそのまま返す", () => {
+        const input: SkillLevelSettings = { skillLevel: 10 };
+        const result = normalizeSkillLevelSettings(input);
+        expect(result.skillLevel).toBe(10);
+    });
+
+    it("skillLevel が負数の場合は最小値にクランプ", () => {
+        const result = normalizeSkillLevelSettings({ skillLevel: -5 });
+        expect(result.skillLevel).toBe(SKILL_LEVEL_MIN);
+    });
+
+    it("skillLevel が上限超えの場合は最大値にクランプ", () => {
+        const result = normalizeSkillLevelSettings({ skillLevel: 100 });
+        expect(result.skillLevel).toBe(SKILL_LEVEL_MAX);
+    });
+});
+
+describe("detectSkillPreset", () => {
+    it("skillLevel=2 は beginner プリセットを返す", () => {
+        const result = detectSkillPreset({ skillLevel: 2 });
+        expect(result).toBe("beginner");
+    });
+
+    it("skillLevel=10 は intermediate プリセットを返す", () => {
+        const result = detectSkillPreset({ skillLevel: 10 });
+        expect(result).toBe("intermediate");
+    });
+
+    it("skillLevel=16 は advanced プリセットを返す", () => {
+        const result = detectSkillPreset({ skillLevel: 16 });
+        expect(result).toBe("advanced");
+    });
+
+    it("skillLevel=20 は professional プリセットを返す", () => {
+        const result = detectSkillPreset({ skillLevel: 20 });
+        expect(result).toBe("professional");
+    });
+
+    it("プリセットに一致しない skillLevel は custom を返す", () => {
+        const result = detectSkillPreset({ skillLevel: 5 });
+        expect(result).toBe("custom");
+    });
+
+    it("範囲外の skillLevel は custom を返す", () => {
+        expect(detectSkillPreset({ skillLevel: -1 })).toBe("custom");
+        expect(detectSkillPreset({ skillLevel: 21 })).toBe("custom");
     });
 });

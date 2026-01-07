@@ -66,8 +66,6 @@ interface MobileBoardSectionProps {
     // === Ref / その他 ===
     boardSectionRef: RefObject<HTMLDivElement | null>;
     isDraggingPiece: boolean;
-    /** 固定レイアウト: trueの場合、持ち駒エリアのレイアウトを固定（対局中のレイアウトシフト防止） */
-    fixedLayout?: boolean;
 }
 
 /**
@@ -97,7 +95,6 @@ export const MobileBoardSection = memo(function MobileBoardSection({
     bottomHand,
     boardSectionRef,
     isDraggingPiece,
-    fixedLayout = false,
 }: MobileBoardSectionProps): ReactElement {
     // セルサイズはこのコンポーネント内で管理（画面幅のみから計算）
     const cellSize = useMobileCellSize();
@@ -140,7 +137,6 @@ export const MobileBoardSection = memo(function MobileBoardSection({
                     }
                     flipBoard={flipBoard}
                     size={isEditModeActive ? "compact" : "medium"}
-                    fixedLayout={fixedLayout}
                 />
             </div>
 
@@ -201,7 +197,6 @@ export const MobileBoardSection = memo(function MobileBoardSection({
                     }
                     flipBoard={flipBoard}
                     size={isEditModeActive ? "compact" : "medium"}
-                    fixedLayout={fixedLayout}
                 />
             </div>
         </div>
