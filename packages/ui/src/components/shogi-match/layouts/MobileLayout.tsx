@@ -1,6 +1,6 @@
-import type { LastMove, PieceType, Player, PositionState, Square } from "@shogi/app-core";
+import type { KifuTree, LastMove, PieceType, Player, PositionState, Square } from "@shogi/app-core";
 import type { ReactElement, RefObject } from "react";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type { ShogiBoardCell } from "../../shogi-board";
 import { BottomSheet } from "../components/BottomSheet";
 import { EvalGraph } from "../components/EvalGraph";
@@ -8,11 +8,12 @@ import type { EngineOption, SideSetting } from "../components/MatchSettingsPanel
 import { MobileBoardSection } from "../components/MobileBoardSection";
 import { MobileClockDisplay } from "../components/MobileClockDisplay";
 import { type KifuMove, MobileKifuBar } from "../components/MobileKifuBar";
+import { MoveDetailBottomSheet } from "../components/MoveDetailBottomSheet";
 import { MobileNavigation } from "../components/MobileNavigation";
 import { MobileSettingsSheet } from "../components/MobileSettingsSheet";
 import type { ClockSettings, TickState } from "../hooks/useClockManager";
 import type { DisplaySettings, GameMode, PromotionSelection } from "../types";
-import type { EvalHistory } from "../utils/kifFormat";
+import type { EvalHistory, KifMove as FullKifMove } from "../utils/kifFormat";
 
 // テキストスタイル用Tailwindクラス
 const TEXT_CLASSES = {
@@ -117,6 +118,20 @@ interface MobileLayoutProps {
 
     // DnD関連
     isDraggingPiece: boolean;
+
+    // MultiPV詳細表示用（検討モード）
+    /** 完全なKifMove配列（multiPvEvalsを含む） */
+    fullKifMoves?: FullKifMove[];
+    /** 局面履歴（各手が指された後の局面） */
+    positionHistory?: PositionState[];
+    /** PVを分岐として追加するコールバック */
+    onAddPvAsBranch?: (ply: number, pv: string[]) => void;
+    /** PVを盤面で確認するコールバック */
+    onPreviewPv?: (ply: number, pv: string[], evalCp?: number, evalMate?: number) => void;
+    /** 棋譜ツリー */
+    kifuTree?: KifuTree;
+    /** 現在位置がメインライン上にあるか */
+    isOnMainLine?: boolean;
 }
 
 /**
@@ -176,9 +191,46 @@ export function MobileLayout({
     getHandInfo,
     boardSectionRef,
     isDraggingPiece,
+    // MultiPV詳細表示用
+    fullKifMoves,
+    positionHistory,
+    onAddPvAsBranch,
+    onPreviewPv,
+    kifuTree,
+    isOnMainLine = true,
 }: MobileLayoutProps): ReactElement {
     // 設定BottomSheetの状態
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
+    // 手詳細BottomSheetの状態
+    const [selectedMoveForDetail, setSelectedMoveForDetail] = useState<FullKifMove | null>(null);
+    const [selectedMovePosition, setSelectedMovePosition] = useState<PositionState | null>(null);
+
+    // 手タップ時のハンドラ（検討モードで詳細表示を開く）
+    const handlePlySelectWithDetail = useCallback(
+        (ply: number) => {
+            // まず局面を選択
+            onPlySelect?.(ply);
+
+            // 検討モードで fullKifMoves がある場合は詳細を表示
+            if (isReviewMode && fullKifMoves && positionHistory) {
+                const move = fullKifMoves.find((m) => m.ply === ply);
+                // 対応する局面（その手が指された後の局面）
+                const pos = positionHistory[ply - 1];
+                if (move && pos) {
+                    setSelectedMoveForDetail(move);
+                    setSelectedMovePosition(pos);
+                }
+            }
+        },
+        [onPlySelect, isReviewMode, fullKifMoves, positionHistory],
+    );
+
+    // 詳細シートを閉じる
+    const handleMoveDetailClose = useCallback(() => {
+        setSelectedMoveForDetail(null);
+        setSelectedMovePosition(null);
+    }, []);
 
     // 持ち駒情報を事前計算（useMemoで安定させてReact.memoを有効にする）
     const topHand = useMemo(() => getHandInfo("top"), [getHandInfo]);
@@ -261,7 +313,11 @@ export function MobileLayout({
                             <MobileKifuBar
                                 moves={kifMoves}
                                 currentPly={currentPly}
-                                onPlySelect={onPlySelect}
+                                onPlySelect={
+                                    fullKifMoves && positionHistory
+                                        ? handlePlySelectWithDetail
+                                        : onPlySelect
+                                }
                             />
                         )}
                         {onStop && (
@@ -335,7 +391,11 @@ export function MobileLayout({
                                 <MobileKifuBar
                                     moves={kifMoves}
                                     currentPly={currentPly}
-                                    onPlySelect={onPlySelect}
+                                    onPlySelect={
+                                        fullKifMoves && positionHistory
+                                            ? handlePlySelectWithDetail
+                                            : onPlySelect
+                                    }
                                 />
                             </div>
                         )}
@@ -441,6 +501,18 @@ export function MobileLayout({
                     onDisplaySettingsChange={onDisplaySettingsChange}
                 />
             </BottomSheet>
+
+            {/* 手詳細BottomSheet（検討モード用） */}
+            <MoveDetailBottomSheet
+                isOpen={selectedMoveForDetail !== null}
+                onClose={handleMoveDetailClose}
+                move={selectedMoveForDetail}
+                position={selectedMovePosition}
+                onAddBranch={onAddPvAsBranch}
+                onPreview={onPreviewPv}
+                isOnMainLine={isOnMainLine}
+                kifuTree={kifuTree}
+            />
         </div>
     );
 }
