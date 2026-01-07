@@ -108,6 +108,8 @@ interface AnalysisRequest {
     depth?: number;
     /** 解析時間制限（省略時は3秒） */
     timeMs?: number;
+    /** 候補手数（MultiPV）（省略時は1） */
+    multiPv?: number;
 }
 
 /** 解析のデフォルト設定 */
@@ -876,6 +878,25 @@ export function useEngineManager({
                     analysisState.ply = null;
                     setIsAnalyzing(false);
                     return;
+                }
+            }
+
+            // MultiPV オプションを設定
+            const multiPv = request.multiPv ?? 1;
+            try {
+                await client.setOption("MultiPV", String(multiPv));
+            } catch (error) {
+                // MultiPV オプションが未対応のエンジンでは無視（単一PVにフォールバック）
+                if (multiPv > 1) {
+                    console.warn(
+                        `MultiPV option not supported by this engine. Requested MultiPV=${multiPv}, but only single PV will be returned.`,
+                        error,
+                    );
+                } else {
+                    console.warn(
+                        "MultiPV option not supported by this engine. Falling back to single PV.",
+                        error,
+                    );
                 }
             }
 

@@ -62,6 +62,8 @@ export interface AnalysisSettings {
     batchAnalysisDepth: number;
     /** 分岐作成時に自動で解析を開始する */
     autoAnalyzeBranch: boolean;
+    /** 候補手数（MultiPV）、デフォルト: 1 */
+    multiPv: number;
 }
 
 /** デフォルト解析設定 */
@@ -70,6 +72,7 @@ export const DEFAULT_ANALYSIS_SETTINGS: AnalysisSettings = {
     batchAnalysisTimeMs: 1000,
     batchAnalysisDepth: 15,
     autoAnalyzeBranch: false,
+    multiPv: 1,
 };
 
 /**
