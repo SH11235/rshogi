@@ -108,6 +108,8 @@ interface AnalysisRequest {
     depth?: number;
     /** 解析時間制限（省略時は3秒） */
     timeMs?: number;
+    /** 候補手数（MultiPV）（省略時は1） */
+    multiPv?: number;
 }
 
 /** 解析のデフォルト設定 */
@@ -877,6 +879,15 @@ export function useEngineManager({
                     setIsAnalyzing(false);
                     return;
                 }
+            }
+
+            // MultiPV オプションを設定
+            const multiPv = request.multiPv ?? 1;
+            try {
+                await client.setOption("MultiPV", String(multiPv));
+            } catch (error) {
+                // MultiPV オプションが未対応のエンジンでは無視
+                console.warn("MultiPV option not supported:", error);
             }
 
             // 既存のサブスクリプションがある場合は解除して再登録

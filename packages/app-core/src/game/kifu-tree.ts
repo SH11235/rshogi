@@ -38,8 +38,15 @@ export interface KifuNode {
     positionAfter: PositionState;
     /** 指し手適用前の盤面状態 */
     boardBefore: BoardState;
-    /** 評価値情報（オプション） */
+    /** 評価値情報（後方互換性のため残す、multipv=1相当） */
     eval?: KifuEval;
+    /**
+     * 複数PV用の評価値配列（multipv順、1-indexed相当）
+     * - multiPvEvals[0] = multipv=1 の評価値
+     * - multiPvEvals[1] = multipv=2 の評価値
+     * - 未設定の位置は undefined になる可能性がある
+     */
+    multiPvEvals?: (KifuEval | undefined)[];
     /** コメント（オプション） */
     comment?: string;
     /** 消費時間（ミリ秒） */
@@ -624,6 +631,71 @@ export function setNodeComment(tree: KifuTree, nodeId: string, comment: string):
     newNodes.set(nodeId, {
         ...node,
         comment,
+    });
+
+    return {
+        ...tree,
+        nodes: newNodes,
+    };
+}
+
+/**
+ * ノードに複数PVの評価値を設定
+ *
+ * multiPvEvals配列はmultipv順（1-indexed相当）で格納される:
+ * - multiPvEvals[0] = multipv=1 の評価値
+ * - multiPvEvals[1] = multipv=2 の評価値
+ * - 未設定の位置は undefined になる（スパース配列）
+ *
+ * @param tree 棋譜ツリー
+ * @param nodeId ノードID
+ * @param multipv PV番号（1-indexed）
+ * @param evalData 評価値データ
+ * @returns 更新された棋譜ツリー
+ */
+export function setNodeMultiPvEval(
+    tree: KifuTree,
+    nodeId: string,
+    multipv: number,
+    evalData: KifuEval,
+): KifuTree {
+    const node = tree.nodes.get(nodeId);
+    if (!node) {
+        return tree;
+    }
+
+    // multipv に対応するインデックス（1-indexed → 0-indexed）
+    const index = multipv - 1;
+
+    // 既存の配列をコピー（スパース配列を維持）
+    const newLength = Math.max(node.multiPvEvals?.length ?? 0, multipv);
+    const newEvals: (KifuEval | undefined)[] = new Array(newLength);
+
+    // 既存の値をコピー
+    if (node.multiPvEvals) {
+        for (let i = 0; i < node.multiPvEvals.length; i++) {
+            newEvals[i] = node.multiPvEvals[i];
+        }
+    }
+
+    // 既存エントリがある場合は深さを比較して更新判定
+    const existing = newEvals[index];
+    if (existing) {
+        // 新しい深さが既存より深い場合のみ更新
+        const shouldUpdate = evalData.depth !== undefined && (existing.depth ?? 0) < evalData.depth;
+        if (!shouldUpdate) {
+            // 既存のほうが深い場合はそのまま返す
+            return tree;
+        }
+    }
+
+    // 評価値を設定
+    newEvals[index] = evalData;
+
+    const newNodes = new Map(tree.nodes);
+    newNodes.set(nodeId, {
+        ...node,
+        multiPvEvals: newEvals,
     });
 
     return {
