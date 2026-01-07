@@ -14,8 +14,6 @@ const baseCard = {
 interface MatchControlsProps {
     /** 平手に戻すボタンのクリックハンドラ */
     onResetToStartpos: () => void;
-    /** 盤面をクリアするボタンのクリックハンドラ（編集モード用） */
-    onClearBoard?: () => void;
     /** 停止ボタンのクリックハンドラ */
     onStop: () => void;
     /** 対局開始ボタンのクリックハンドラ */
@@ -34,7 +32,6 @@ interface MatchControlsProps {
 
 export function MatchControls({
     onResetToStartpos,
-    onClearBoard,
     onStop,
     onStart,
     onStartReview,
@@ -76,7 +73,7 @@ export function MatchControls({
                     </Button>
                 ) : (
                     <>
-                        {/* 編集モード時: [平手に戻す] [盤面クリア] [検討開始] [対局開始] */}
+                        {/* 編集モード時: [平手に戻す] [検討開始] [対局開始] */}
                         {isEditMode && (
                             <>
                                 <Button
@@ -87,16 +84,6 @@ export function MatchControls({
                                 >
                                     平手に戻す
                                 </Button>
-                                {onClearBoard && (
-                                    <Button
-                                        type="button"
-                                        onClick={onClearBoard}
-                                        variant="outline"
-                                        style={{ paddingInline: "12px" }}
-                                    >
-                                        盤面クリア
-                                    </Button>
-                                )}
                                 {onStartReview && (
                                     <Button
                                         type="button"

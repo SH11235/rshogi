@@ -427,41 +427,6 @@ describe("usePositionEditor", () => {
     });
 
     describe("board operations", () => {
-        it("clearBoardForEdit が盤面をクリアする", () => {
-            const boardWithPieces = cloneBoard(initialBoard);
-            boardWithPieces["5i"] = { owner: "sente", type: "K" };
-            boardWithPieces["5a"] = { owner: "gote", type: "K" };
-
-            mockProps.positionRef.current = {
-                ...initialPosition,
-                board: boardWithPieces,
-            };
-
-            const { result } = renderHook(() => usePositionEditor(mockProps));
-
-            act(() => {
-                result.current.clearBoardForEdit();
-            });
-
-            expect(mockProps.onPositionChange).toHaveBeenCalled();
-            const calledPosition = (mockProps.onPositionChange as Mock).mock
-                .calls[0][0] as PositionState;
-            expect(Object.values(calledPosition.board).every((p) => p === null)).toBe(true);
-            expect(mockProps.onMessageChange).toHaveBeenCalledWith("盤面をクリアしました。");
-        });
-
-        it("clearBoardForEdit は対局中は実行されない", () => {
-            mockProps.isMatchRunning = true;
-
-            const { result } = renderHook(() => usePositionEditor(mockProps));
-
-            act(() => {
-                result.current.clearBoardForEdit();
-            });
-
-            expect(mockProps.onPositionChange).not.toHaveBeenCalled();
-        });
-
         it("updateTurnForEdit が手番を更新する", () => {
             const { result } = renderHook(() => usePositionEditor(mockProps));
 

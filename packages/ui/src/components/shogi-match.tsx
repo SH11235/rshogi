@@ -1028,21 +1028,6 @@ export function ShogiMatch({
         [isMatchRunning, position],
     );
 
-    const clearBoardForEdit = () => {
-        if (isMatchRunning) return;
-        const emptyBoard = Object.fromEntries(
-            getAllSquares().map((sq) => [sq, null]),
-        ) as BoardState;
-        const next: PositionState = {
-            board: emptyBoard,
-            hands: createEmptyHands(),
-            turn: "sente",
-            ply: 1,
-        };
-        applyEditedPosition(next);
-        setEditMessage("盤面をクリアしました。");
-    };
-
     const updateTurnForEdit = (turn: Player) => {
         if (isMatchRunning) return;
         const current = positionRef.current;
@@ -2150,7 +2135,6 @@ export function ShogiMatch({
                         <div className="flex flex-col gap-2 shrink-0">
                             <MatchControls
                                 onResetToStartpos={handleResetToStartpos}
-                                onClearBoard={clearBoardForEdit}
                                 onStop={pauseAutoPlay}
                                 onStart={resumeAutoPlay}
                                 onStartReview={handleStartReview}

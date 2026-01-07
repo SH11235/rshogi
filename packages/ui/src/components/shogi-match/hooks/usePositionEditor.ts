@@ -1,5 +1,5 @@
 import type { BoardState, Piece, PieceType, Player, PositionState, Square } from "@shogi/app-core";
-import { cloneBoard, createEmptyHands, getAllSquares, getPositionService } from "@shogi/app-core";
+import { cloneBoard, getPositionService } from "@shogi/app-core";
 import { useCallback, useState } from "react";
 import { addToHand, cloneHandsState, consumeFromHand, countPieces } from "../utils/boardUtils";
 import { PIECE_CAP, PIECE_LABELS } from "../utils/constants";
@@ -70,7 +70,6 @@ interface UsePositionEditorReturn {
     setEditTool: (v: "place" | "erase") => void;
 
     // アクション関数
-    clearBoardForEdit: () => void;
     resetToStartposForEdit: () => Promise<void>;
     updateTurnForEdit: (turn: Player) => void;
     placePieceAt: (
@@ -132,25 +131,6 @@ export function usePositionEditor(props: UsePositionEditorProps): UsePositionEdi
         },
         [props],
     );
-
-    /**
-     * 盤面をクリアする
-     */
-    const clearBoardForEdit = useCallback(() => {
-        if (props.isMatchRunning) return;
-
-        const emptyBoard = Object.fromEntries(
-            getAllSquares().map((sq) => [sq, null]),
-        ) as BoardState;
-        const next: PositionState = {
-            board: emptyBoard,
-            hands: createEmptyHands(),
-            turn: "sente",
-            ply: 1,
-        };
-        applyEditedPosition(next);
-        props.onMessageChange("盤面をクリアしました。");
-    }, [props, applyEditedPosition]);
 
     /**
      * 平手初期局面を復元する
@@ -303,7 +283,6 @@ export function usePositionEditor(props: UsePositionEditorProps): UsePositionEdi
         setEditTool,
 
         // アクション関数
-        clearBoardForEdit,
         resetToStartposForEdit,
         updateTurnForEdit,
         placePieceAt,
