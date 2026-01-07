@@ -3,8 +3,6 @@ import type { EngineEvent, EngineInfoEvent, SkillLevelSettings } from "./index";
 import {
     createMockEngineClient,
     detectSkillPreset,
-    ELO_MAX,
-    ELO_MIN,
     normalizeSkillLevelSettings,
     SKILL_LEVEL_MAX,
     SKILL_LEVEL_MIN,
@@ -250,43 +248,6 @@ describe("validateSkillLevelSettings", () => {
         expect(result.valid).toBe(false);
         expect(result.errors).toHaveLength(1);
     });
-
-    it("useLimitStrength=true で有効な ELO の場合に有効", () => {
-        const result = validateSkillLevelSettings({
-            skillLevel: 10,
-            useLimitStrength: true,
-            elo: 2000,
-        });
-        expect(result.valid).toBe(true);
-    });
-
-    it("useLimitStrength=true で ELO が範囲外の場合にエラー", () => {
-        const result = validateSkillLevelSettings({
-            skillLevel: 10,
-            useLimitStrength: true,
-            elo: 1000, // ELO_MIN = 1320 より小さい
-        });
-        expect(result.valid).toBe(false);
-        expect(result.errors[0]).toContain("elo");
-    });
-
-    it("useLimitStrength=true で ELO が上限超えの場合にエラー", () => {
-        const result = validateSkillLevelSettings({
-            skillLevel: 10,
-            useLimitStrength: true,
-            elo: 4000, // ELO_MAX = 3190 より大きい
-        });
-        expect(result.valid).toBe(false);
-    });
-
-    it("useLimitStrength=false の場合は ELO のバリデーションをスキップ", () => {
-        const result = validateSkillLevelSettings({
-            skillLevel: 10,
-            useLimitStrength: false,
-            elo: 1000, // 範囲外だが無視される
-        });
-        expect(result.valid).toBe(true);
-    });
 });
 
 describe("normalizeSkillLevelSettings", () => {
@@ -304,37 +265,6 @@ describe("normalizeSkillLevelSettings", () => {
     it("skillLevel が上限超えの場合は最大値にクランプ", () => {
         const result = normalizeSkillLevelSettings({ skillLevel: 100 });
         expect(result.skillLevel).toBe(SKILL_LEVEL_MAX);
-    });
-
-    it("useLimitStrength=true の場合は ELO もクランプ", () => {
-        const result = normalizeSkillLevelSettings({
-            skillLevel: 10,
-            useLimitStrength: true,
-            elo: 500,
-        });
-        expect(result.skillLevel).toBe(10);
-        expect(result.useLimitStrength).toBe(true);
-        expect(result.elo).toBe(ELO_MIN);
-    });
-
-    it("ELO が上限超えの場合は最大値にクランプ", () => {
-        const result = normalizeSkillLevelSettings({
-            skillLevel: 10,
-            useLimitStrength: true,
-            elo: 5000,
-        });
-        expect(result.elo).toBe(ELO_MAX);
-    });
-
-    it("useLimitStrength=false の場合は ELO 関連のプロパティを含めない", () => {
-        const result = normalizeSkillLevelSettings({
-            skillLevel: 10,
-            useLimitStrength: false,
-            elo: 2000,
-        });
-        expect(result).toEqual({ skillLevel: 10 });
-        expect(result.useLimitStrength).toBeUndefined();
-        expect(result.elo).toBeUndefined();
     });
 });
 
@@ -361,14 +291,6 @@ describe("detectSkillPreset", () => {
 
     it("プリセットに一致しない skillLevel は custom を返す", () => {
         const result = detectSkillPreset({ skillLevel: 5 });
-        expect(result).toBe("custom");
-    });
-
-    it("useLimitStrength=true の場合は常に custom を返す", () => {
-        const result = detectSkillPreset({
-            skillLevel: 10, // intermediate に一致するが
-            useLimitStrength: true,
-        });
         expect(result).toBe("custom");
     });
 
