@@ -832,7 +832,7 @@ function BatchAnalysisDropdown({
                     aria-label={`一括解析: ${movesWithoutPv}手`}
                 >
                     ⚡{/* 自動解析有効時のインジケーター */}
-                    {analysisSettings.autoAnalyzeBranch && (
+                    {analysisSettings.autoAnalyzeMode !== "off" && (
                         <span className="absolute -top-1 -right-1 w-2 h-2 bg-[hsl(var(--wafuu-kin))] rounded-full" />
                     )}
                 </button>
@@ -844,35 +844,44 @@ function BatchAnalysisDropdown({
                         読み筋がない{movesWithoutPv}手を解析します
                     </div>
 
-                    {/* 分岐作成時の自動解析オプション（目立つ位置に配置） */}
+                    {/* 分岐作成時の自動解析オプション */}
                     <div
                         className={`p-2 rounded-lg border transition-colors ${
-                            analysisSettings.autoAnalyzeBranch
+                            analysisSettings.autoAnalyzeMode !== "off"
                                 ? "bg-[hsl(var(--wafuu-kin)/0.1)] border-[hsl(var(--wafuu-kin)/0.3)]"
                                 : "bg-muted/30 border-border"
                         }`}
                     >
-                        <label className="flex items-center gap-2 cursor-pointer">
-                            <input
-                                type="checkbox"
-                                checked={analysisSettings.autoAnalyzeBranch}
+                        <div className="space-y-1.5">
+                            <div className="text-xs font-medium text-foreground">
+                                分岐作成時の自動解析
+                            </div>
+                            <select
+                                value={analysisSettings.autoAnalyzeMode}
                                 onChange={(e) =>
                                     onAnalysisSettingsChange({
                                         ...analysisSettings,
-                                        autoAnalyzeBranch: e.target.checked,
+                                        autoAnalyzeMode: e.target.value as
+                                            | "off"
+                                            | "delayed"
+                                            | "immediate",
                                     })
                                 }
-                                className="w-4 h-4 rounded border-muted-foreground/50 accent-[hsl(var(--wafuu-kin))]"
-                            />
-                            <div>
-                                <div className="text-xs font-medium text-foreground">
-                                    分岐作成時に自動解析
-                                </div>
-                                <div className="text-[10px] text-muted-foreground">
-                                    読み筋から分岐を作成すると自動で解析開始
-                                </div>
+                                className="w-full px-2 py-1 text-xs rounded border border-border bg-background"
+                            >
+                                <option value="off">オフ</option>
+                                <option value="delayed">操作が落ち着いてから</option>
+                                <option value="immediate">すぐに解析</option>
+                            </select>
+                            <div className="text-[10px] text-muted-foreground">
+                                {analysisSettings.autoAnalyzeMode === "off" &&
+                                    "手動で解析ボタンを押したときのみ"}
+                                {analysisSettings.autoAnalyzeMode === "delayed" &&
+                                    "分岐入力後、数秒待ってから解析開始"}
+                                {analysisSettings.autoAnalyzeMode === "immediate" &&
+                                    "分岐作成と同時に解析開始（電池消費大）"}
                             </div>
-                        </label>
+                        </div>
                     </div>
 
                     {/* 解析対象の選択（分岐がある場合のみ表示） */}

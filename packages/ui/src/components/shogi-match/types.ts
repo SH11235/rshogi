@@ -51,6 +51,14 @@ export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
 };
 
 /**
+ * 自動解析モード
+ * - 'off': 手動で解析ボタンを押したときのみ
+ * - 'delayed': 操作が落ち着いてから（デフォルト、省電力）
+ * - 'immediate': 分岐作成と同時に解析開始（電池消費大）
+ */
+export type AutoAnalyzeMode = "off" | "delayed" | "immediate";
+
+/**
  * 解析設定
  */
 export interface AnalysisSettings {
@@ -60,8 +68,8 @@ export interface AnalysisSettings {
     batchAnalysisTimeMs: number;
     /** 一括解析時の探索深さ */
     batchAnalysisDepth: number;
-    /** 分岐作成時に自動で解析を開始する */
-    autoAnalyzeBranch: boolean;
+    /** 分岐作成時の自動解析モード */
+    autoAnalyzeMode: AutoAnalyzeMode;
     /** 候補手数（MultiPV）、デフォルト: 1 */
     multiPv: number;
 }
@@ -71,7 +79,7 @@ export const DEFAULT_ANALYSIS_SETTINGS: AnalysisSettings = {
     parallelWorkers: 0, // 0 = 自動検出
     batchAnalysisTimeMs: 1000,
     batchAnalysisDepth: 15,
-    autoAnalyzeBranch: false,
+    autoAnalyzeMode: "delayed",
     multiPv: 1,
 };
 

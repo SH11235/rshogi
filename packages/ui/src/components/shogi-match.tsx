@@ -1696,7 +1696,11 @@ export function ShogiMatch({
 
     // 分岐作成時の自動解析
     useEffect(() => {
-        if (lastAddedBranchInfo && analysisSettings.autoAnalyzeBranch) {
+        if (!lastAddedBranchInfo || analysisSettings.autoAnalyzeMode === "off") {
+            return;
+        }
+
+        const runAnalysis = () => {
             // ply + firstMove から分岐のnodeIdを見つける
             const branches = getAllBranches(navigation.tree);
             const branch = branches.find((b) => {
@@ -1707,10 +1711,19 @@ export function ShogiMatch({
             if (branch) {
                 handleAnalyzeBranch(branch.nodeId);
             }
+        };
+
+        if (analysisSettings.autoAnalyzeMode === "immediate") {
+            // 即時モード: すぐに解析開始
+            runAnalysis();
+        } else {
+            // delayedモード: 3秒後に解析開始（操作が続けばリセット）
+            const timerId = setTimeout(runAnalysis, 3000);
+            return () => clearTimeout(timerId);
         }
     }, [
         lastAddedBranchInfo,
-        analysisSettings.autoAnalyzeBranch,
+        analysisSettings.autoAnalyzeMode,
         handleAnalyzeBranch,
         navigation.tree,
     ]);
