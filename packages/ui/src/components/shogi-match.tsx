@@ -453,6 +453,31 @@ export function ShogiMatch({
     // endMatchRef を更新
     endMatchRef.current = endMatch;
 
+    // 投了処理
+    const handleResign = useCallback(async () => {
+        const result: GameResult = {
+            winner: position.turn === "sente" ? "gote" : "sente",
+            reason: { kind: "resignation", loser: position.turn },
+            totalMoves: movesRef.current.length,
+        };
+        await endMatch(result);
+    }, [position.turn, endMatch]);
+
+    // 待った処理（2手戻す：相手の手と自分の前の手を戻す）
+    const handleUndo = useCallback(() => {
+        const moveCount = movesRef.current.length;
+        if (moveCount === 0) return;
+
+        // 2手戻す（自分の前の手まで戻る）
+        // ただし、1手しかない場合は1手だけ戻す
+        const undoCount = moveCount >= 2 ? 2 : 1;
+
+        for (let i = 0; i < undoCount; i++) {
+            navigation.goBack();
+        }
+        movesRef.current = movesRef.current.slice(0, -undoCount);
+    }, [navigation]);
+
     const handleMoveFromEngineRef = useRef<(move: string) => void>(() => {});
 
     // 分岐解析用の状態をrefで追跡（コールバック内で最新値を参照するため）
@@ -2158,6 +2183,9 @@ export function ShogiMatch({
                                 onStart={resumeAutoPlay}
                                 onStartReview={handleStartReview}
                                 onEnterEditMode={handleEnterEditMode}
+                                onResign={handleResign}
+                                onUndo={handleUndo}
+                                canUndo={moves.length > 0}
                                 isMatchRunning={isMatchRunning}
                                 gameMode={gameMode}
                                 message={message}

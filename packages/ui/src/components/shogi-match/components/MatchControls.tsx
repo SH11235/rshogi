@@ -22,6 +22,12 @@ interface MatchControlsProps {
     onStartReview?: () => void;
     /** 局面編集モードに戻るボタンのクリックハンドラ */
     onEnterEditMode?: () => void;
+    /** 投了ボタンのクリックハンドラ */
+    onResign?: () => void;
+    /** 待ったボタンのクリックハンドラ */
+    onUndo?: () => void;
+    /** 待った可能かどうか（手数が1以上） */
+    canUndo?: boolean;
     /** 対局中かどうか */
     isMatchRunning: boolean;
     /** 現在のゲームモード */
@@ -36,6 +42,9 @@ export function MatchControls({
     onStart,
     onStartReview,
     onEnterEditMode,
+    onResign,
+    onUndo,
+    canUndo = false,
     isMatchRunning,
     gameMode = "editing",
     message,
@@ -61,16 +70,43 @@ export function MatchControls({
                     minHeight: "36px",
                 }}
             >
-                {/* 対局中: 停止ボタンのみ */}
+                {/* 対局中: 停止・投了・待ったボタン */}
                 {isMatchRunning ? (
-                    <Button
-                        type="button"
-                        onClick={onStop}
-                        variant="destructive"
-                        style={{ paddingInline: "16px" }}
-                    >
-                        停止
-                    </Button>
+                    <>
+                        <Button
+                            type="button"
+                            onClick={onStop}
+                            variant="destructive"
+                            style={{ paddingInline: "16px" }}
+                        >
+                            停止
+                        </Button>
+                        {onResign && (
+                            <Button
+                                type="button"
+                                onClick={() => {
+                                    if (window.confirm("投了しますか？")) {
+                                        onResign();
+                                    }
+                                }}
+                                variant="outline"
+                                style={{ paddingInline: "16px" }}
+                            >
+                                投了
+                            </Button>
+                        )}
+                        {onUndo && (
+                            <Button
+                                type="button"
+                                onClick={onUndo}
+                                variant="outline"
+                                style={{ paddingInline: "16px" }}
+                                disabled={!canUndo}
+                            >
+                                待った
+                            </Button>
+                        )}
+                    </>
                 ) : (
                     <>
                         {/* 編集モード時: [平手に戻す] [検討開始] [対局開始] */}
