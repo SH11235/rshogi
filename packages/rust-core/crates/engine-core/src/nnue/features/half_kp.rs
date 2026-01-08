@@ -265,7 +265,7 @@ mod tests {
         let king_sq = Square::new(File::File5, Rank::Rank9); // 5九
 
         let mut dirty_piece = DirtyPiece::new();
-        dirty_piece.push_piece(ChangedPiece {
+        let _ = dirty_piece.push_piece(ChangedPiece {
             color: Color::Black,
             old_piece: Piece::B_PAWN,
             old_sq: Some(sq_77),
@@ -305,7 +305,7 @@ mod tests {
         let mut dirty_piece = DirtyPiece::new();
 
         // 動いた駒（先手の歩）
-        dirty_piece.push_piece(ChangedPiece {
+        let _ = dirty_piece.push_piece(ChangedPiece {
             color: Color::Black,
             old_piece: Piece::B_PAWN,
             old_sq: Some(sq_24),
@@ -314,7 +314,7 @@ mod tests {
         });
 
         // 取られた駒（後手の歩）- 盤上から消える
-        dirty_piece.push_piece(ChangedPiece {
+        let _ = dirty_piece.push_piece(ChangedPiece {
             color: Color::White,
             old_piece: Piece::W_PAWN,
             old_sq: Some(sq_23),
@@ -346,7 +346,7 @@ mod tests {
         let mut dirty_piece = DirtyPiece::new();
 
         // 打った駒（盤上に現れる）
-        dirty_piece.push_piece(ChangedPiece {
+        let _ = dirty_piece.push_piece(ChangedPiece {
             color: Color::Black,
             old_piece: Piece::NONE,
             old_sq: None,
@@ -378,7 +378,7 @@ mod tests {
         let mut dirty_piece = DirtyPiece::new();
 
         // 手駒変化（歩を1枚取得: 0 → 1）
-        dirty_piece.push_hand_change(HandChange {
+        let _ = dirty_piece.push_hand_change(HandChange {
             owner: Color::Black,
             piece_type: PieceType::Pawn,
             old_count: 0,
@@ -408,7 +408,7 @@ mod tests {
 
         let mut dirty_piece = DirtyPiece::new();
 
-        dirty_piece.push_hand_change(HandChange {
+        let _ = dirty_piece.push_hand_change(HandChange {
             owner: Color::Black,
             piece_type: PieceType::Pawn,
             old_count: 1,

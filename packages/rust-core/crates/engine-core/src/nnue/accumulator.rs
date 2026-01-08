@@ -63,7 +63,12 @@ impl<const N: usize> IndexList<N> {
 
     /// 空のリストを作成（初期化コストゼロ）
     #[inline]
+    #[allow(path_statements)]
     pub fn new() -> Self {
+        // N <= 255 のコンパイル時チェックを強制評価
+        // これにより IndexList::<300>::new() などはコンパイルエラーになる
+        // path_statements警告を許可するのは意図的な強制評価のため
+        Self::_ASSERT_N_FITS_U8;
         Self {
             // インラインconst ブロックで未初期化配列を安全に作成
             indices: [const { MaybeUninit::uninit() }; N],
@@ -705,7 +710,7 @@ mod tests {
     #[test]
     fn test_dirty_piece_push() {
         let mut dp = DirtyPiece::new();
-        dp.push_piece(ChangedPiece {
+        let _ = dp.push_piece(ChangedPiece {
             color: Color::Black,
             old_piece: Piece::NONE,
             old_sq: None,
@@ -714,7 +719,7 @@ mod tests {
         });
         assert_eq!(dp.pieces().len(), 1);
 
-        dp.push_hand_change(HandChange {
+        let _ = dp.push_hand_change(HandChange {
             owner: Color::Black,
             piece_type: PieceType::Pawn,
             old_count: 1,

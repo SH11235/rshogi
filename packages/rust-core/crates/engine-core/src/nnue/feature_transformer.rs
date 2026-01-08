@@ -244,12 +244,19 @@ impl FeatureTransformer {
     fn add_weights(&self, accumulation: &mut [i16; TRANSFORMED_FEATURE_DIMENSIONS], index: usize) {
         // オーバーフロー安全なオフセット計算
         let Some(offset) = index.checked_mul(TRANSFORMED_FEATURE_DIMENSIONS) else {
+            debug_assert!(false, "HalfKP add_weights: index overflow (index={index})");
             return; // オーバーフロー → 不正なindex
         };
         let Some(end) = offset.checked_add(TRANSFORMED_FEATURE_DIMENSIONS) else {
+            debug_assert!(false, "HalfKP add_weights: offset+dim overflow (offset={offset})");
             return;
         };
         if end > self.weights.len() {
+            debug_assert!(
+                false,
+                "HalfKP add_weights: OOB (index={index}, end={end}, weights_len={})",
+                self.weights.len()
+            );
             return; // 範囲外チェック
         }
 
@@ -347,12 +354,19 @@ impl FeatureTransformer {
     fn sub_weights(&self, accumulation: &mut [i16; TRANSFORMED_FEATURE_DIMENSIONS], index: usize) {
         // オーバーフロー安全なオフセット計算
         let Some(offset) = index.checked_mul(TRANSFORMED_FEATURE_DIMENSIONS) else {
+            debug_assert!(false, "HalfKP sub_weights: index overflow (index={index})");
             return; // オーバーフロー → 不正なindex
         };
         let Some(end) = offset.checked_add(TRANSFORMED_FEATURE_DIMENSIONS) else {
+            debug_assert!(false, "HalfKP sub_weights: offset+dim overflow (offset={offset})");
             return;
         };
         if end > self.weights.len() {
+            debug_assert!(
+                false,
+                "HalfKP sub_weights: OOB (index={index}, end={end}, weights_len={})",
+                self.weights.len()
+            );
             return;
         }
 
