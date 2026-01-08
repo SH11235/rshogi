@@ -8,7 +8,10 @@
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-use crate::nnue::{evaluate, AccumulatorStack, DirtyPiece};
+use crate::nnue::{
+    evaluate_dispatch, is_layer_stacks_loaded, AccumulatorStack, AccumulatorStackNnuePytorch,
+    DirtyPiece,
+};
 use crate::position::Position;
 use crate::search::PieceToHistory;
 use crate::tt::{ProbeResult, TTData, TranspositionTable};
@@ -269,11 +272,17 @@ pub struct SearchWorker {
     /// 深い探索（depth >= 16）でZugzwangを検出して再探索する仕組み。
     pub nmp_min_ply: i32,
 
-    /// NNUE Accumulator スタック
+    /// NNUE Accumulator スタック（HalfKP/HalfKA用、256次元）
     ///
     /// 探索時のNNUE差分更新用。Position.do_move/undo_moveと同期してpush/popする。
     /// StateInfoからAccumulatorを分離することで、do_moveでの初期化コストを削減。
     pub nnue_stack: AccumulatorStack,
+
+    /// NNUE Accumulator スタック（LayerStacks用、1536次元）
+    ///
+    /// nnue-pytorch で学習した LayerStacks モデル用のアキュムレータ。
+    /// `is_layer_stacks_loaded()` が true の場合にこちらを使用する。
+    pub nnue_stack_layer_stacks: AccumulatorStackNnuePytorch,
 
     // =========================================================================
     // 頻度制御（YaneuraOu準拠）
@@ -312,6 +321,7 @@ impl SearchWorker {
             max_moves_to_draw,
             nmp_min_ply: 0,
             nnue_stack: AccumulatorStack::new(),
+            nnue_stack_layer_stacks: AccumulatorStackNnuePytorch::new(),
             // 頻度制御
             calls_cnt: 0,
         });
@@ -401,6 +411,7 @@ impl SearchWorker {
         self.history.low_ply_history.clear();
         // NNUE AccumulatorStackをリセット
         self.nnue_stack.reset();
+        self.nnue_stack_layer_stacks.reset();
         // check_abort頻度制御カウンターをリセット
         // これにより新しい探索開始時に即座に停止チェックが行われる
         self.calls_cnt = 0;
@@ -417,6 +428,40 @@ impl SearchWorker {
     /// 全合法手生成モードの設定（YaneuraOu互換）
     pub fn set_generate_all_legal_moves(&mut self, flag: bool) {
         self.generate_all_legal_moves = flag;
+    }
+
+    // =========================================================================
+    // NNUE ヘルパーメソッド（LayerStacks / HalfKP・HalfKA の分岐を隠蔽）
+    // =========================================================================
+
+    /// NNUE 評価値を計算
+    ///
+    /// ロードされた NNUE のアーキテクチャに応じて適切なアキュムレータと評価関数を使用。
+    /// レースコンディションを回避するため、一度の NETWORK.get() で判定して評価する。
+    #[inline]
+    fn nnue_evaluate(&mut self, pos: &Position) -> Value {
+        evaluate_dispatch(pos, &mut self.nnue_stack, &mut self.nnue_stack_layer_stacks)
+    }
+
+    /// NNUE アキュムレータスタックを push
+    #[inline]
+    fn nnue_push(&mut self, dirty_piece: DirtyPiece) {
+        if is_layer_stacks_loaded() {
+            self.nnue_stack_layer_stacks.push();
+            self.nnue_stack_layer_stacks.current_mut().dirty_piece = dirty_piece;
+        } else {
+            self.nnue_stack.push(dirty_piece);
+        }
+    }
+
+    /// NNUE アキュムレータスタックを pop
+    #[inline]
+    fn nnue_pop(&mut self) {
+        if is_layer_stacks_loaded() {
+            self.nnue_stack_layer_stacks.pop();
+        } else {
+            self.nnue_stack.pop();
+        }
     }
 
     /// 中断チェック
@@ -714,7 +759,7 @@ impl SearchWorker {
             unadjusted_static_eval = tt_ctx.data.eval;
             unadjusted_static_eval
         } else {
-            unadjusted_static_eval = evaluate(pos, &mut self.nnue_stack);
+            unadjusted_static_eval = self.nnue_evaluate(pos);
             unadjusted_static_eval
         };
 
@@ -882,7 +927,7 @@ impl SearchWorker {
             self.clear_cont_history_for_null(ply);
 
             pos.do_null_move_with_prefetch(self.tt.as_ref());
-            self.nnue_stack.push(DirtyPiece::new()); // null moveでは駒の移動なし
+            self.nnue_push(DirtyPiece::new()); // null moveでは駒の移動なし
             let null_value = -self.search_node::<{ NodeType::NonPV as u8 }>(
                 pos,
                 depth - r,
@@ -893,7 +938,7 @@ impl SearchWorker {
                 limits,
                 time_manager,
             );
-            self.nnue_stack.pop();
+            self.nnue_pop();
             pos.undo_null_move();
 
             // Do not return unproven mate scores（勝ちスコアは信頼しない）
@@ -1011,7 +1056,7 @@ impl SearchWorker {
 
             self.stack[ply as usize].current_move = mv;
             let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, self.tt.as_ref());
-            self.nnue_stack.push(dirty_piece);
+            self.nnue_push(dirty_piece);
             self.nodes += 1;
             self.set_cont_history_for_move(
                 ply,
@@ -1042,7 +1087,7 @@ impl SearchWorker {
                     time_manager,
                 );
             }
-            self.nnue_stack.pop();
+            self.nnue_pop();
             pos.undo_move(mv);
 
             if value >= prob_beta {
@@ -1364,7 +1409,7 @@ impl SearchWorker {
 
             // 探索
             let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, self.tt.as_ref());
-            self.nnue_stack.push(dirty_piece);
+            self.nnue_push(dirty_piece);
             self.nodes += 1;
             self.stack[0].current_move = mv;
             self.set_cont_history_for_move(
@@ -1417,7 +1462,7 @@ impl SearchWorker {
                 value
             };
 
-            self.nnue_stack.pop();
+            self.nnue_pop();
             pos.undo_move(mv);
 
             // この手に費やしたノード数をeffortに積算
@@ -1528,7 +1573,7 @@ impl SearchWorker {
 
             // 探索
             let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, self.tt.as_ref());
-            self.nnue_stack.push(dirty_piece);
+            self.nnue_push(dirty_piece);
             self.nodes += 1;
             self.stack[0].current_move = mv;
             self.set_cont_history_for_move(
@@ -1581,7 +1626,7 @@ impl SearchWorker {
                 value
             };
 
-            self.nnue_stack.pop();
+            self.nnue_pop();
             pos.undo_move(mv);
 
             // この手に費やしたノード数をeffortに積算
@@ -1670,7 +1715,7 @@ impl SearchWorker {
             return if in_check {
                 Value::ZERO
             } else {
-                evaluate(pos, &mut self.nnue_stack)
+                self.nnue_evaluate(pos)
             };
         }
 
@@ -2011,7 +2056,7 @@ impl SearchWorker {
             let cont_hist_to = mv.to();
 
             let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, self.tt.as_ref());
-            self.nnue_stack.push(dirty_piece);
+            self.nnue_push(dirty_piece);
             self.nodes += 1;
             // YaneuraOu方式: ContHistKey/ContinuationHistoryを設定
             // ⚠ in_checkは親ノードの王手状態を使用（gives_checkではない）
@@ -2222,7 +2267,7 @@ impl SearchWorker {
                         time_manager,
                     )
                 };
-            self.nnue_stack.pop();
+            self.nnue_pop();
             pos.undo_move(mv);
 
             if self.abort {
@@ -2664,7 +2709,7 @@ impl SearchWorker {
             return if in_check {
                 Value::ZERO
             } else {
-                evaluate(pos, &mut self.nnue_stack)
+                self.nnue_evaluate(pos)
             };
         }
 
@@ -2733,7 +2778,7 @@ impl SearchWorker {
                     return Value::mate_in(ply + 1);
                 }
             }
-            unadjusted_static_eval = evaluate(pos, &mut self.nnue_stack);
+            unadjusted_static_eval = self.nnue_evaluate(pos);
             unadjusted_static_eval
         };
 
@@ -2943,7 +2988,7 @@ impl SearchWorker {
             let cont_hist_to = mv.to();
 
             let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, self.tt.as_ref());
-            self.nnue_stack.push(dirty_piece);
+            self.nnue_push(dirty_piece);
             self.nodes += 1;
 
             self.set_cont_history_for_move(ply, in_check, capture, cont_hist_pc, cont_hist_to);
@@ -2951,7 +2996,7 @@ impl SearchWorker {
             let value =
                 -self.qsearch::<NT>(pos, depth - 1, -beta, -alpha, ply + 1, limits, time_manager);
 
-            self.nnue_stack.pop();
+            self.nnue_pop();
             pos.undo_move(mv);
 
             if self.abort {

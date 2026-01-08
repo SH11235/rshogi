@@ -13,8 +13,8 @@
 use super::accumulator::{Accumulator, AccumulatorStack, Aligned};
 use super::accumulator_nnue_pytorch::AccumulatorStackNnuePytorch;
 use super::constants::{
-    FV_SCALE, HIDDEN1_DIMENSIONS, HIDDEN2_DIMENSIONS, NNUE_VERSION, NNUE_VERSION_HALFKA,
-    OUTPUT_DIMENSIONS, TRANSFORMED_FEATURE_DIMENSIONS,
+    FV_SCALE, HIDDEN1_DIMENSIONS, HIDDEN2_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION,
+    NNUE_VERSION_HALFKA, OUTPUT_DIMENSIONS, TRANSFORMED_FEATURE_DIMENSIONS,
 };
 use super::feature_transformer::FeatureTransformer;
 use super::feature_transformer_halfka::FeatureTransformerHalfKA;
@@ -72,31 +72,27 @@ impl NNUENetwork {
                 // HalfKA_hm^ には複数のアーキテクチャがある:
                 // - HalfKA (256次元 FC層)
                 // - LayerStacks (1536次元 + 9バケット)
-                // アーキテクチャ文字列で区別する
+                //
+                // 文字列判定は信頼性が低いため、try-read方式で判別:
+                // 1. LayerStacksとして読み込みを試行
+                // 2. InvalidData/UnexpectedEofなら HalfKA にフォールバック
+                // 3. その他のエラーは伝播
 
-                // ハッシュを読み飛ばす
-                reader.read_exact(&mut buf4)?;
-                let _hash = u32::from_le_bytes(buf4);
-
-                // アーキテクチャ文字列を読み込み
-                reader.read_exact(&mut buf4)?;
-                let arch_len = u32::from_le_bytes(buf4) as usize;
-                let mut arch = vec![0u8; arch_len];
-                reader.read_exact(&mut arch)?;
-
-                let arch_str = String::from_utf8_lossy(&arch);
-
-                // 位置を戻す
                 reader.seek(SeekFrom::Start(0))?;
 
-                // nnue-pytorch で学習したモデルは LayerStacks アーキテクチャ
-                // （アーキテクチャ文字列に "nnue-pytorch" を含む）
-                if arch_str.contains("nnue-pytorch") {
-                    let network = NetworkLayerStacks::read(reader)?;
-                    Ok(Self::LayerStacks(Box::new(network)))
-                } else {
-                    let network = NetworkHalfKA::read(reader)?;
-                    Ok(Self::HalfKA(Box::new(network)))
+                // LayerStacksとして読み込みを試行
+                match NetworkLayerStacks::read(reader) {
+                    Ok(network) => Ok(Self::LayerStacks(Box::new(network))),
+                    Err(e)
+                        if e.kind() == io::ErrorKind::InvalidData
+                            || e.kind() == io::ErrorKind::UnexpectedEof =>
+                    {
+                        // LayerStacks ではない → HalfKA として再試行
+                        reader.seek(SeekFrom::Start(0))?;
+                        let network = NetworkHalfKA::read(reader)?;
+                        Ok(Self::HalfKA(Box::new(network)))
+                    }
+                    Err(e) => Err(e), // その他のエラーは伝播
                 }
             }
             _ => Err(io::Error::new(
@@ -295,6 +291,12 @@ impl NetworkHalfKA {
         // アーキテクチャ文字列を読み込み
         reader.read_exact(&mut buf4)?;
         let arch_len = u32::from_le_bytes(buf4) as usize;
+        if arch_len == 0 || arch_len > MAX_ARCH_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid arch string length: {arch_len} (max: {MAX_ARCH_LEN})"),
+            ));
+        }
         let mut arch = vec![0u8; arch_len];
         reader.read_exact(&mut arch)?;
 
@@ -813,6 +815,114 @@ pub fn evaluate_layer_stacks(pos: &Position, stack: &mut AccumulatorStackNnuePyt
     // 不変借用で評価
     let acc_ref = &stack.current().accumulator;
     network.evaluate_layer_stacks(pos, acc_ref)
+}
+
+/// アーキテクチャに応じて適切な評価関数を呼び出す
+///
+/// 一度の NETWORK.get() 呼び出しでアーキテクチャを判定し、
+/// 適切な評価関数を呼び出す。レースコンディションを回避するために使用。
+///
+/// # フォールバック動作
+/// - 通常ビルド: NNUEが初期化されていない場合は駒得評価にフォールバック
+/// - tournamentビルド: NNUEが初期化されていない場合はパニック
+pub fn evaluate_dispatch(
+    pos: &Position,
+    stack: &mut AccumulatorStack,
+    stack_layer_stacks: &mut AccumulatorStackNnuePytorch,
+) -> Value {
+    // tournamentビルド: NNUEが必須（フォールバックなし）
+    #[cfg(feature = "tournament")]
+    let network = NETWORK.get().expect(
+        "NNUE network is not initialized. \
+         Tournament build requires NNUE to be loaded before evaluation. \
+         Call init_nnue() or init_nnue_from_bytes() first.",
+    );
+
+    // 通常ビルド: NNUEがなければMaterial評価にフォールバック
+    #[cfg(not(feature = "tournament"))]
+    let Some(network) = NETWORK.get() else {
+        return material::evaluate_material(pos);
+    };
+
+    if network.is_layer_stacks() {
+        // LayerStacks アーキテクチャの場合
+        let current_entry = stack_layer_stacks.current();
+        if !current_entry.accumulator.computed_accumulation {
+            let mut updated = false;
+
+            // 1. 直前局面で差分更新を試行
+            if let Some(prev_idx) = current_entry.previous {
+                let prev_computed =
+                    stack_layer_stacks.entry_at(prev_idx).accumulator.computed_accumulation;
+                if prev_computed {
+                    let dirty_piece = stack_layer_stacks.current().dirty_piece;
+                    let prev_acc = stack_layer_stacks.entry_at(prev_idx).accumulator.clone();
+                    let current_acc = &mut stack_layer_stacks.current_mut().accumulator;
+                    network.update_accumulator_layer_stacks(
+                        pos,
+                        &dirty_piece,
+                        current_acc,
+                        &prev_acc,
+                    );
+                    updated = true;
+                }
+            }
+
+            // 2. 失敗なら祖先探索 + 複数手差分更新を試行
+            if !updated {
+                if let Some((source_idx, _depth)) = stack_layer_stacks.find_usable_accumulator() {
+                    updated = network.forward_update_incremental_layer_stacks(
+                        pos,
+                        stack_layer_stacks,
+                        source_idx,
+                    );
+                }
+            }
+
+            // 3. それでも失敗なら全計算
+            if !updated {
+                let acc = &mut stack_layer_stacks.current_mut().accumulator;
+                network.refresh_accumulator_layer_stacks(pos, acc);
+            }
+        }
+
+        let acc_ref = &stack_layer_stacks.current().accumulator;
+        network.evaluate_layer_stacks(pos, acc_ref)
+    } else {
+        // HalfKP/HalfKA アーキテクチャの場合
+        let current_entry = stack.current();
+        if !current_entry.accumulator.computed_accumulation {
+            let mut updated = false;
+
+            // 1. 直前局面で差分更新を試行
+            if let Some(prev_idx) = current_entry.previous {
+                let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
+                if prev_computed {
+                    let dirty_piece = stack.current().dirty_piece;
+                    let prev_acc = stack.entry_at(prev_idx).accumulator.clone();
+                    let current_acc = &mut stack.current_mut().accumulator;
+                    network.update_accumulator(pos, &dirty_piece, current_acc, &prev_acc);
+                    updated = true;
+                }
+            }
+
+            // 2. 失敗なら祖先探索 + 複数手差分更新を試行
+            if !updated {
+                if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+                    updated = network.forward_update_incremental(pos, stack, source_idx);
+                }
+            }
+
+            // 3. それでも失敗なら全計算
+            if !updated {
+                let acc = &mut stack.current_mut().accumulator;
+                network.refresh_accumulator(pos, acc);
+            }
+        }
+
+        let acc_ref = &stack.current().accumulator;
+        network.evaluate(pos, acc_ref)
+    }
 }
 
 #[cfg(test)]
