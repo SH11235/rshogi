@@ -158,10 +158,10 @@ impl FeatureTransformer {
         source_idx: usize,
     ) -> bool {
         // 1. source → current のパスを収集
-        let path = stack.collect_path(source_idx);
-        if path.is_empty() && stack.current_index() != source_idx {
+        let Some(path) = stack.collect_path(source_idx) else {
+            // パスが途切れた場合、または MAX_PATH_LENGTH を超えた場合
             return false;
-        }
+        };
 
         // 2. ソースのアキュムレータをコピー
         // Note: clone() + copy_from_slice による二重コピーを避ける最適化を試みたが、

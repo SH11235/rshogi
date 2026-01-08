@@ -199,15 +199,17 @@ impl AccumulatorStackNnuePytorch {
             // 計算済みかチェック
             if entry.accumulator.computed_accumulation {
                 // 玉が移動していないかチェック
-                let path = self.collect_path_internal(idx);
-                let has_king_move = path.iter().any(|&i| {
-                    let e = &self.entries[i];
-                    e.dirty_piece.king_moved[0] || e.dirty_piece.king_moved[1]
-                });
+                if let Some(path) = self.collect_path_internal(idx) {
+                    let has_king_move = path.iter().any(|&i| {
+                        let e = &self.entries[i];
+                        e.dirty_piece.king_moved[0] || e.dirty_piece.king_moved[1]
+                    });
 
-                if !has_king_move {
-                    return Some((idx, depth));
+                    if !has_king_move {
+                        return Some((idx, depth));
+                    }
                 }
+                // パス収集に失敗した場合は次の祖先を探す
             }
 
             // 前のエントリへ
@@ -224,24 +226,31 @@ impl AccumulatorStackNnuePytorch {
     }
 
     /// 指定インデックスから現在位置までのパスを収集
-    pub fn collect_path(&self, source_idx: usize) -> IndexList<MAX_PATH_LENGTH> {
+    ///
+    /// 戻り値:
+    /// - Some(path): source_idx に到達できた場合、source側から適用する順のインデックス列
+    /// - None: パスが途切れた場合、または MAX_PATH_LENGTH を超えた場合
+    pub fn collect_path(&self, source_idx: usize) -> Option<IndexList<MAX_PATH_LENGTH>> {
         self.collect_path_internal(source_idx)
     }
 
-    fn collect_path_internal(&self, source_idx: usize) -> IndexList<MAX_PATH_LENGTH> {
+    fn collect_path_internal(&self, source_idx: usize) -> Option<IndexList<MAX_PATH_LENGTH>> {
         let mut path = IndexList::new();
         let mut idx = self.current;
 
-        while idx != source_idx && path.len() < MAX_PATH_LENGTH {
-            path.push(idx);
+        while idx != source_idx {
+            // パス長が上限を超えたら失敗
+            if !path.push(idx) {
+                return None;
+            }
             match self.entries[idx].previous {
                 Some(prev) => idx = prev,
-                None => break,
+                None => return None,
             }
         }
 
         path.reverse();
-        path
+        Some(path)
     }
 }
 

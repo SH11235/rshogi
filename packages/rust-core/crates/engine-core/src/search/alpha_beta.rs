@@ -281,8 +281,14 @@ pub struct SearchWorker {
     /// NNUE Accumulator スタック（LayerStacks用、1536次元）
     ///
     /// nnue-pytorch で学習した LayerStacks モデル用のアキュムレータ。
-    /// `is_layer_stacks_loaded()` が true の場合にこちらを使用する。
+    /// `use_layer_stacks` が true の場合にこちらを使用する。
     pub nnue_stack_layer_stacks: AccumulatorStackNnuePytorch,
+
+    /// LayerStacks アーキテクチャを使用するかどうか
+    ///
+    /// `prepare_search()` で設定され、探索中は変更されない。
+    /// push/pop で毎回 `is_layer_stacks_loaded()` を呼ぶ代わりにこのフラグを参照する。
+    use_layer_stacks: bool,
 
     // =========================================================================
     // 頻度制御（YaneuraOu準拠）
@@ -322,6 +328,7 @@ impl SearchWorker {
             nmp_min_ply: 0,
             nnue_stack: AccumulatorStack::new(),
             nnue_stack_layer_stacks: AccumulatorStackNnuePytorch::new(),
+            use_layer_stacks: false, // prepare_search() で設定
             // 頻度制御
             calls_cnt: 0,
         });
@@ -412,6 +419,8 @@ impl SearchWorker {
         // NNUE AccumulatorStackをリセット
         self.nnue_stack.reset();
         self.nnue_stack_layer_stacks.reset();
+        // LayerStacks フラグを設定（探索開始時点で固定）
+        self.use_layer_stacks = is_layer_stacks_loaded();
         // check_abort頻度制御カウンターをリセット
         // これにより新しい探索開始時に即座に停止チェックが行われる
         self.calls_cnt = 0;
@@ -446,7 +455,7 @@ impl SearchWorker {
     /// NNUE アキュムレータスタックを push
     #[inline]
     fn nnue_push(&mut self, dirty_piece: DirtyPiece) {
-        if is_layer_stacks_loaded() {
+        if self.use_layer_stacks {
             self.nnue_stack_layer_stacks.push();
             self.nnue_stack_layer_stacks.current_mut().dirty_piece = dirty_piece;
         } else {
@@ -457,7 +466,7 @@ impl SearchWorker {
     /// NNUE アキュムレータスタックを pop
     #[inline]
     fn nnue_pop(&mut self) {
-        if is_layer_stacks_loaded() {
+        if self.use_layer_stacks {
             self.nnue_stack_layer_stacks.pop();
         } else {
             self.nnue_stack.pop();

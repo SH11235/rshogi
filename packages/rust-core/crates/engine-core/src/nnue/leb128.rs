@@ -242,4 +242,68 @@ mod tests {
         let result = read_compressed_tensor_i16(&mut cursor, 3).unwrap();
         assert_eq!(result, vec![1, 2, 3]);
     }
+
+    #[test]
+    fn test_decode_single_leb128_early_eof() {
+        // 継続ビットが立っているが次のバイトがない
+        let result = decode_single_leb128(&[0x80]); // 継続ビットが立っているが終端
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unexpected end"));
+
+        // 空のデータ
+        let result = decode_single_leb128(&[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_single_leb128_large_values() {
+        // 多バイトエンコーディング（正常系）
+        // 300 = 0xAC 0x02
+        let (val, consumed) = decode_single_leb128(&[0xAC, 0x02]).unwrap();
+        assert_eq!(val, 300);
+        assert_eq!(consumed, 2);
+
+        // 16384 = 0x80 0x80 0x01
+        let (val, consumed) = decode_single_leb128(&[0x80, 0x80, 0x01]).unwrap();
+        assert_eq!(val, 16384);
+        assert_eq!(consumed, 3);
+    }
+
+    #[test]
+    fn test_decode_leb128_array_count_mismatch() {
+        // 要求数より少ないデータ
+        let data = [0x00, 0x01]; // 2つの値
+        let result = decode_leb128_array_i16(&data, 10); // 10個要求
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_signed_leb128_stream() {
+        // ストリームからの読み込みテスト
+        let data = vec![0x00, 0x7F, 0x80, 0x01]; // 0, -1, 128
+        let mut cursor = Cursor::new(data);
+
+        let val = read_signed_leb128(&mut cursor).unwrap();
+        assert_eq!(val, 0);
+
+        let val = read_signed_leb128(&mut cursor).unwrap();
+        assert_eq!(val, -1);
+
+        let val = read_signed_leb128(&mut cursor).unwrap();
+        assert_eq!(val, 128);
+    }
+
+    #[test]
+    fn test_read_signed_leb128_i16_range() {
+        // i16の範囲内の値が正しく読み込まれることを確認
+        // i16::MAX = 32767 = 0xFF 0xFF 0x01
+        let (val, _) = decode_single_leb128(&[0xFF, 0xFF, 0x01]).unwrap();
+        assert_eq!(val, 32767);
+        assert_eq!(val as i16, i16::MAX);
+
+        // i16::MIN = -32768 = 0x80 0x80 0x7E
+        let (val, _) = decode_single_leb128(&[0x80, 0x80, 0x7E]).unwrap();
+        assert_eq!(val, -32768);
+        assert_eq!(val as i16, i16::MIN);
+    }
 }

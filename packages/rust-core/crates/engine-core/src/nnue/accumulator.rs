@@ -65,16 +65,19 @@ impl<const N: usize> IndexList<N> {
 
     /// 要素を追加
     ///
-    /// # Safety Contract
-    /// 呼び出し側が容量（N）を超えないことを保証する責任がある。
-    /// release ビルドでは境界チェックが行われないため、
-    /// 容量オーバー時の動作は未定義。
+    /// 容量（N）を超える場合は追加を無視する（安全のため）。
+    /// 戻り値: 追加に成功した場合は true、容量オーバーで無視した場合は false
     #[inline]
-    pub fn push(&mut self, index: usize) {
-        debug_assert!((self.len as usize) < N, "IndexList overflow");
-        // SAFETY: len < N なので範囲内。MaybeUninit への書き込みは常に安全
-        self.indices[self.len as usize].write(index);
+    pub fn push(&mut self, index: usize) -> bool {
+        let pos = self.len as usize;
+        if pos >= N {
+            debug_assert!(false, "IndexList overflow: capacity={N}, len={pos}");
+            return false;
+        }
+        // SAFETY: pos < N なので範囲内。MaybeUninit への書き込みは常に安全
+        self.indices[pos].write(index);
         self.len += 1;
+        true
     }
 
     /// イテレータを返す
@@ -330,19 +333,35 @@ impl DirtyPiece {
     }
 
     /// 駒変化を追加
+    ///
+    /// 容量を超える場合は追加を無視する（安全のため）。
+    /// 戻り値: 追加に成功した場合は true、容量オーバーで無視した場合は false
     #[inline]
-    pub fn push_piece(&mut self, piece: ChangedPiece) {
+    pub fn push_piece(&mut self, piece: ChangedPiece) -> bool {
         let idx = self.pieces_len as usize;
+        if idx >= Self::MAX_PIECES {
+            debug_assert!(false, "DirtyPiece::push_piece overflow: idx={idx}");
+            return false;
+        }
         self.pieces[idx] = piece;
         self.pieces_len += 1;
+        true
     }
 
     /// 手駒変化を追加
+    ///
+    /// 容量を超える場合は追加を無視する（安全のため）。
+    /// 戻り値: 追加に成功した場合は true、容量オーバーで無視した場合は false
     #[inline]
-    pub fn push_hand_change(&mut self, change: HandChange) {
+    pub fn push_hand_change(&mut self, change: HandChange) -> bool {
         let idx = self.hand_changes_len as usize;
+        if idx >= Self::MAX_HAND_CHANGES {
+            debug_assert!(false, "DirtyPiece::push_hand_change overflow: idx={idx}");
+            return false;
+        }
         self.hand_changes[idx] = change;
         self.hand_changes_len += 1;
+        true
     }
 
     /// 駒変化のスライスを取得
@@ -583,13 +602,19 @@ impl AccumulatorStack {
 
     /// source_idxからcurrent_idxまでのパスを収集
     ///
-    /// 戻り値: source側から適用する順のインデックス列
-    pub fn collect_path(&self, source_idx: usize) -> IndexList<MAX_PATH_LENGTH> {
+    /// 戻り値:
+    /// - Some(path): source_idx に到達できた場合、source側から適用する順のインデックス列
+    /// - None: パスが途切れた場合、または MAX_PATH_LENGTH を超えた場合
+    pub fn collect_path(&self, source_idx: usize) -> Option<IndexList<MAX_PATH_LENGTH>> {
         let mut path = IndexList::new();
         let mut idx = self.current_idx;
 
         while idx != source_idx {
-            path.push(idx);
+            // パス長が上限を超えたら失敗
+            if !path.push(idx) {
+                debug_assert!(false, "collect_path overflow: MAX_PATH_LENGTH={MAX_PATH_LENGTH}");
+                return None;
+            }
             let entry = &self.entries[idx];
             match entry.previous {
                 Some(prev_idx) => idx = prev_idx,
@@ -598,13 +623,13 @@ impl AccumulatorStack {
                         false,
                         "Path broken: expected to reach source_idx={source_idx} but got None at idx={idx}"
                     );
-                    return IndexList::new();
+                    return None;
                 }
             }
         }
 
         path.reverse();
-        path
+        Some(path)
     }
 }
 

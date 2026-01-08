@@ -575,6 +575,100 @@ pub fn is_nnue_initialized() -> bool {
     NETWORK.get().is_some()
 }
 
+// =============================================================================
+// 内部ヘルパー関数（ロジック集約用）
+// =============================================================================
+
+/// HalfKP/HalfKA アキュムレータを更新して評価（内部実装）
+///
+/// `evaluate` と `evaluate_dispatch` から呼び出される共通ロジック。
+/// network は既に取得済みで、アーキテクチャチェックも完了していることが前提。
+#[inline]
+fn update_and_evaluate_halfka(
+    network: &NNUENetwork,
+    pos: &Position,
+    stack: &mut AccumulatorStack,
+) -> Value {
+    // アキュムレータの更新
+    let current_entry = stack.current();
+    if !current_entry.accumulator.computed_accumulation {
+        let mut updated = false;
+
+        // 1. 直前局面で差分更新を試行
+        if let Some(prev_idx) = current_entry.previous {
+            let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
+            if prev_computed {
+                let dirty_piece = stack.current().dirty_piece;
+                let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
+                network.update_accumulator(pos, &dirty_piece, current_acc, prev_acc);
+                updated = true;
+            }
+        }
+
+        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
+        if !updated {
+            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+                updated = network.forward_update_incremental(pos, stack, source_idx);
+            }
+        }
+
+        // 3. それでも失敗なら全計算
+        if !updated {
+            let acc = &mut stack.current_mut().accumulator;
+            network.refresh_accumulator(pos, acc);
+        }
+    }
+
+    // 評価
+    let acc_ref = &stack.current().accumulator;
+    network.evaluate(pos, acc_ref)
+}
+
+/// LayerStacks アキュムレータを更新して評価（内部実装）
+///
+/// `evaluate_layer_stacks` と `evaluate_dispatch` から呼び出される共通ロジック。
+/// network は既に取得済みで、アーキテクチャチェックも完了していることが前提。
+#[inline]
+fn update_and_evaluate_layer_stacks(
+    network: &NNUENetwork,
+    pos: &Position,
+    stack: &mut AccumulatorStackNnuePytorch,
+) -> Value {
+    // アキュムレータの更新
+    let current_entry = stack.current();
+    if !current_entry.accumulator.computed_accumulation {
+        let mut updated = false;
+
+        // 1. 直前局面で差分更新を試行
+        if let Some(prev_idx) = current_entry.previous {
+            let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
+            if prev_computed {
+                let dirty_piece = stack.current().dirty_piece;
+                let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
+                network.update_accumulator_layer_stacks(pos, &dirty_piece, current_acc, prev_acc);
+                updated = true;
+            }
+        }
+
+        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
+        if !updated {
+            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+                updated = network.forward_update_incremental_layer_stacks(pos, stack, source_idx);
+            }
+        }
+
+        // 3. それでも失敗なら全計算
+        if !updated {
+            let acc = &mut stack.current_mut().accumulator;
+            network.refresh_accumulator_layer_stacks(pos, acc);
+        }
+    }
+
+    // 評価
+    let acc_ref = &stack.current().accumulator;
+    network.evaluate_layer_stacks(pos, acc_ref)
+}
+
 /// 局面を評価
 ///
 /// AccumulatorStack を使って差分更新し、計算済みなら再利用する。
@@ -776,48 +870,8 @@ pub fn evaluate_layer_stacks(pos: &Position, stack: &mut AccumulatorStackNnuePyt
         panic!("Non-LayerStacks architecture detected. Use evaluate() with AccumulatorStack.");
     }
 
-    // AccumulatorStackNnuePytorch 上の Accumulator をインプレースで更新
-    {
-        let current_entry = stack.current();
-        if !current_entry.accumulator.computed_accumulation {
-            let mut updated = false;
-
-            // 1. 直前局面で差分更新を試行
-            if let Some(prev_idx) = current_entry.previous {
-                let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
-                if prev_computed {
-                    let dirty_piece = stack.current().dirty_piece;
-                    // split_at_mut を使用して clone を回避
-                    let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
-                    network.update_accumulator_layer_stacks(
-                        pos,
-                        &dirty_piece,
-                        current_acc,
-                        prev_acc,
-                    );
-                    updated = true;
-                }
-            }
-
-            // 2. 失敗なら祖先探索 + 複数手差分更新を試行
-            if !updated {
-                if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
-                    updated =
-                        network.forward_update_incremental_layer_stacks(pos, stack, source_idx);
-                }
-            }
-
-            // 3. それでも失敗なら全計算
-            if !updated {
-                let acc = &mut stack.current_mut().accumulator;
-                network.refresh_accumulator_layer_stacks(pos, acc);
-            }
-        }
-    }
-
-    // 不変借用で評価
-    let acc_ref = &stack.current().accumulator;
-    network.evaluate_layer_stacks(pos, acc_ref)
+    // 内部ヘルパー関数を呼び出し
+    update_and_evaluate_layer_stacks(network, pos, stack)
 }
 
 /// アーキテクチャに応じて適切な評価関数を呼び出す
@@ -847,85 +901,11 @@ pub fn evaluate_dispatch(
         return material::evaluate_material(pos);
     };
 
+    // アーキテクチャに応じて内部ヘルパー関数を呼び出し
     if network.is_layer_stacks() {
-        // LayerStacks アーキテクチャの場合
-        let current_entry = stack_layer_stacks.current();
-        if !current_entry.accumulator.computed_accumulation {
-            let mut updated = false;
-
-            // 1. 直前局面で差分更新を試行
-            if let Some(prev_idx) = current_entry.previous {
-                let prev_computed =
-                    stack_layer_stacks.entry_at(prev_idx).accumulator.computed_accumulation;
-                if prev_computed {
-                    let dirty_piece = stack_layer_stacks.current().dirty_piece;
-                    // split_at_mut を使用して clone を回避
-                    let (prev_acc, current_acc) =
-                        stack_layer_stacks.get_prev_and_current_accumulators(prev_idx);
-                    network.update_accumulator_layer_stacks(
-                        pos,
-                        &dirty_piece,
-                        current_acc,
-                        prev_acc,
-                    );
-                    updated = true;
-                }
-            }
-
-            // 2. 失敗なら祖先探索 + 複数手差分更新を試行
-            if !updated {
-                if let Some((source_idx, _depth)) = stack_layer_stacks.find_usable_accumulator() {
-                    updated = network.forward_update_incremental_layer_stacks(
-                        pos,
-                        stack_layer_stacks,
-                        source_idx,
-                    );
-                }
-            }
-
-            // 3. それでも失敗なら全計算
-            if !updated {
-                let acc = &mut stack_layer_stacks.current_mut().accumulator;
-                network.refresh_accumulator_layer_stacks(pos, acc);
-            }
-        }
-
-        let acc_ref = &stack_layer_stacks.current().accumulator;
-        network.evaluate_layer_stacks(pos, acc_ref)
+        update_and_evaluate_layer_stacks(network, pos, stack_layer_stacks)
     } else {
-        // HalfKP/HalfKA アーキテクチャの場合
-        let current_entry = stack.current();
-        if !current_entry.accumulator.computed_accumulation {
-            let mut updated = false;
-
-            // 1. 直前局面で差分更新を試行
-            if let Some(prev_idx) = current_entry.previous {
-                let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
-                if prev_computed {
-                    let dirty_piece = stack.current().dirty_piece;
-                    // split_at_mut を使用して clone を回避
-                    let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
-                    network.update_accumulator(pos, &dirty_piece, current_acc, prev_acc);
-                    updated = true;
-                }
-            }
-
-            // 2. 失敗なら祖先探索 + 複数手差分更新を試行
-            if !updated {
-                if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
-                    updated = network.forward_update_incremental(pos, stack, source_idx);
-                }
-            }
-
-            // 3. それでも失敗なら全計算
-            if !updated {
-                let acc = &mut stack.current_mut().accumulator;
-                network.refresh_accumulator(pos, acc);
-            }
-        }
-
-        let acc_ref = &stack.current().accumulator;
-        network.evaluate(pos, acc_ref)
+        update_and_evaluate_halfka(network, pos, stack)
     }
 }
 

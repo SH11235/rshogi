@@ -465,4 +465,112 @@ mod tests {
         // 範囲外は clamp される
         assert_eq!(compute_bucket_index(10, 10), 8);
     }
+
+    #[test]
+    fn test_compute_king_ranks_hirate() {
+        use crate::position::{Position, SFEN_HIRATE};
+        use crate::types::Color;
+
+        // 平手初期局面
+        let mut pos = Position::new();
+        pos.set_sfen(SFEN_HIRATE).unwrap();
+
+        // 先手番の場合
+        assert_eq!(pos.side_to_move(), Color::Black);
+
+        let f_king_sq = pos.king_square(Color::Black); // 5i (rank=8)
+        let e_king_sq = pos.king_square(Color::White); // 5a (rank=0)
+
+        let (f_rank, e_rank) = compute_king_ranks(Color::Black, f_king_sq, e_king_sq);
+
+        // 先手玉: 5i(rank=8) → 先手視点でそのまま8
+        // 後手玉: 5a(rank=0) → 先手から見て反転 → 8-0=8
+        assert_eq!(f_rank, 8, "f_rank for Black in hirate");
+        assert_eq!(e_rank, 8, "e_rank for Black in hirate");
+
+        // bucket = F_TO_INDEX[8] + E_TO_INDEX[8] = 6 + 2 = 8
+        assert_eq!(compute_bucket_index(f_rank, e_rank), 8);
+    }
+
+    #[test]
+    fn test_compute_king_ranks_positions() {
+        use crate::position::Position;
+        use crate::types::Color;
+
+        // 玉が中央付近にいる局面
+        // 先手玉が5e(rank=4)、後手玉が5e(rank=4)相当の局面
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/9/4K4/9/9/9/9 b - 1").unwrap();
+
+        let f_king_sq = pos.king_square(Color::Black); // 5e (rank=4)
+        let e_king_sq = pos.king_square(Color::White); // 5a (rank=0)
+
+        let (f_rank, e_rank) = compute_king_ranks(Color::Black, f_king_sq, e_king_sq);
+
+        // 先手玉: 5e(rank=4) → 先手視点でそのまま4
+        assert_eq!(f_rank, 4, "f_rank for Black king at 5e");
+        // 後手玉: 5a(rank=0) → 先手から見て反転 → 8-0=8
+        assert_eq!(e_rank, 8, "e_rank for White king at 5a");
+
+        // bucket = F_TO_INDEX[4] + E_TO_INDEX[8] = 3 + 2 = 5
+        assert_eq!(compute_bucket_index(f_rank, e_rank), 5);
+
+        // 後手番の局面でテスト
+        let mut pos2 = Position::new();
+        pos2.set_sfen("4k4/9/9/9/4K4/9/9/9/9 w - 1").unwrap();
+
+        let (f_rank2, e_rank2) = compute_king_ranks(
+            Color::White,
+            pos2.king_square(Color::White),
+            pos2.king_square(Color::Black),
+        );
+
+        // 後手玉: 5a(rank=0) → 後手視点で反転 → 8-0=8
+        assert_eq!(f_rank2, 8, "f_rank for White king at 5a");
+        // 先手玉: 5e(rank=4) → 後手から見てそのまま → 4
+        assert_eq!(e_rank2, 4, "e_rank for Black king at 5e");
+
+        // bucket = F_TO_INDEX[8] + E_TO_INDEX[4] = 6 + 1 = 7
+        assert_eq!(compute_bucket_index(f_rank2, e_rank2), 7);
+    }
+
+    #[test]
+    fn test_sqr_clipped_relu_transform_basic() {
+        // 基本的な入出力テスト
+        let mut us_acc = [0i16; NNUE_PYTORCH_L1];
+        let mut them_acc = [0i16; NNUE_PYTORCH_L1];
+        let mut output = [0u8; NNUE_PYTORCH_L1];
+
+        // 入力が0の場合、出力も0
+        sqr_clipped_relu_transform(&us_acc, &them_acc, &mut output);
+        assert!(
+            output.iter().all(|&x| x == 0),
+            "all zeros input should produce all zeros output"
+        );
+
+        // 最大値テスト: 127 * 127 >> 7 = 16129 >> 7 = 126
+        let half = NNUE_PYTORCH_L1 / 2;
+        for i in 0..half {
+            us_acc[i] = 127;
+            us_acc[half + i] = 127;
+            them_acc[i] = 127;
+            them_acc[half + i] = 127;
+        }
+
+        sqr_clipped_relu_transform(&us_acc, &them_acc, &mut output);
+
+        // 期待値: (127 * 127) >> 7 = 126
+        for i in 0..NNUE_PYTORCH_L1 {
+            assert_eq!(output[i], 126, "max input should produce 126 at index {i}");
+        }
+
+        // 負の値はクランプされて0になる
+        for i in 0..NNUE_PYTORCH_L1 {
+            us_acc[i] = -100;
+            them_acc[i] = -100;
+        }
+
+        sqr_clipped_relu_transform(&us_acc, &them_acc, &mut output);
+        assert!(output.iter().all(|&x| x == 0), "negative input should be clamped to 0");
+    }
 }

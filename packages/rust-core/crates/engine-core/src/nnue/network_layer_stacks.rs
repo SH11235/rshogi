@@ -9,12 +9,19 @@
 //! Feature Transformer (HalfKA_hm^): 73,305 → 1536 (各視点)
 //! 視点結合: 両視点を連結 → 3072
 //! SqrClippedReLU: 3072 → 1536
-//! LayerStacks (駒数ベースの9バケット選択後):
+//! LayerStacks (両玉の相対段ベースの9バケット選択後):
 //!   L1: 1536 → 16
 //!   SqrReLU + concat: 30
 //!   L2: 30 → 32
 //!   Output: 32 → 1 + skip
 //! ```
+//!
+//! ## バケット選択
+//!
+//! 両玉の相対段（0-8）に基づいて9個のバケットから1つを選択：
+//! - 味方玉の段: 0-2 → 0, 3-5 → 3, 6-8 → 6
+//! - 相手玉の段: 0-2 → 0, 3-5 → 1, 6-8 → 2
+//! - bucket = f_index + e_index (0-8)
 
 use super::accumulator_nnue_pytorch::{AccumulatorNnuePytorch, AccumulatorStackNnuePytorch};
 use super::constants::{MAX_ARCH_LEN, NNUE_PYTORCH_L1, NNUE_VERSION_HALFKA};

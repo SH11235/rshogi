@@ -152,10 +152,10 @@ impl FeatureTransformerNnuePytorch {
         stack: &mut AccumulatorStackNnuePytorch,
         source_idx: usize,
     ) -> bool {
-        let path = stack.collect_path(source_idx);
-        if path.is_empty() && stack.current_index() != source_idx {
+        let Some(path) = stack.collect_path(source_idx) else {
+            // パスが途切れた場合、または MAX_PATH_LENGTH を超えた場合
             return false;
-        }
+        };
 
         let source_acc = stack.entry_at(source_idx).accumulator.clone();
         {
