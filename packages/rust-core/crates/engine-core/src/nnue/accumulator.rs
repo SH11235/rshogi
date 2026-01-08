@@ -44,15 +44,23 @@ pub const MAX_PATH_LENGTH: usize = 8;
 ///
 /// Vec の代わりにスタック上の固定長配列を使用し、ヒープ割り当てを回避する。
 /// MaybeUninit を使用して初期化コストをゼロにする。
+///
+/// # 制約
+/// N は 255 以下である必要がある（len が u8 のため）。
+/// この制約はコンパイル時にチェックされる。
 #[derive(Clone, Copy)]
 pub struct IndexList<const N: usize> {
     /// 未初期化領域を許容する配列
     indices: [MaybeUninit<usize>; N],
-    /// 有効な要素数（N ≤ 255 の前提）
+    /// 有効な要素数
     len: u8,
 }
 
 impl<const N: usize> IndexList<N> {
+    /// N <= 255 をコンパイル時に保証
+    /// N > 255 の場合、このアサートがコンパイルエラーを発生させる
+    const _ASSERT_N_FITS_U8: () = assert!(N <= u8::MAX as usize, "IndexList: N must be <= 255");
+
     /// 空のリストを作成（初期化コストゼロ）
     #[inline]
     pub fn new() -> Self {
@@ -68,6 +76,7 @@ impl<const N: usize> IndexList<N> {
     /// 容量（N）を超える場合は追加を無視する（安全のため）。
     /// 戻り値: 追加に成功した場合は true、容量オーバーで無視した場合は false
     #[inline]
+    #[must_use]
     pub fn push(&mut self, index: usize) -> bool {
         let pos = self.len as usize;
         if pos >= N {
@@ -337,6 +346,7 @@ impl DirtyPiece {
     /// 容量を超える場合は追加を無視する（安全のため）。
     /// 戻り値: 追加に成功した場合は true、容量オーバーで無視した場合は false
     #[inline]
+    #[must_use]
     pub fn push_piece(&mut self, piece: ChangedPiece) -> bool {
         let idx = self.pieces_len as usize;
         if idx >= Self::MAX_PIECES {
@@ -353,6 +363,7 @@ impl DirtyPiece {
     /// 容量を超える場合は追加を無視する（安全のため）。
     /// 戻り値: 追加に成功した場合は true、容量オーバーで無視した場合は false
     #[inline]
+    #[must_use]
     pub fn push_hand_change(&mut self, change: HandChange) -> bool {
         let idx = self.hand_changes_len as usize;
         if idx >= Self::MAX_HAND_CHANGES {

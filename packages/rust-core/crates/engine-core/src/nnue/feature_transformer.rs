@@ -242,8 +242,14 @@ impl FeatureTransformer {
     /// weightsとaccumulationは64バイトアラインされている前提でaligned load/storeを使用。
     #[inline]
     fn add_weights(&self, accumulation: &mut [i16; TRANSFORMED_FEATURE_DIMENSIONS], index: usize) {
-        let offset = index * TRANSFORMED_FEATURE_DIMENSIONS;
-        if offset + TRANSFORMED_FEATURE_DIMENSIONS > self.weights.len() {
+        // オーバーフロー安全なオフセット計算
+        let Some(offset) = index.checked_mul(TRANSFORMED_FEATURE_DIMENSIONS) else {
+            return; // オーバーフロー → 不正なindex
+        };
+        let Some(end) = offset.checked_add(TRANSFORMED_FEATURE_DIMENSIONS) else {
+            return;
+        };
+        if end > self.weights.len() {
             return; // 範囲外チェック
         }
 
@@ -339,8 +345,14 @@ impl FeatureTransformer {
     /// weightsとaccumulationは64バイトアラインされている前提でaligned load/storeを使用。
     #[inline]
     fn sub_weights(&self, accumulation: &mut [i16; TRANSFORMED_FEATURE_DIMENSIONS], index: usize) {
-        let offset = index * TRANSFORMED_FEATURE_DIMENSIONS;
-        if offset + TRANSFORMED_FEATURE_DIMENSIONS > self.weights.len() {
+        // オーバーフロー安全なオフセット計算
+        let Some(offset) = index.checked_mul(TRANSFORMED_FEATURE_DIMENSIONS) else {
+            return; // オーバーフロー → 不正なindex
+        };
+        let Some(end) = offset.checked_add(TRANSFORMED_FEATURE_DIMENSIONS) else {
+            return;
+        };
+        if end > self.weights.len() {
             return;
         }
 

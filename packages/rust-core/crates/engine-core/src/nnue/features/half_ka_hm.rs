@@ -102,7 +102,8 @@ impl Feature for HalfKA_hm {
                     let packed = pack_bonapiece(bp, hm_mirror);
 
                     // Base特徴量（coalesce済みモデルではこれのみ）
-                    active.push(halfka_index(kb, packed));
+                    // 合法局面では溢れないため戻り値を無視
+                    let _ = active.push(halfka_index(kb, packed));
                 }
             }
         }
@@ -120,7 +121,8 @@ impl Feature for HalfKA_hm {
         };
         let friend_king_bp = king_bonapiece(friend_king_sq_index, true); // is_friend=true
         let packed_friend_king = pack_bonapiece(friend_king_bp, hm_mirror);
-        active.push(halfka_index(kb, packed_friend_king));
+        // 合法局面では溢れないため戻り値を無視
+        let _ = active.push(halfka_index(kb, packed_friend_king));
 
         // 敵玉の特徴量
         let enemy = perspective.opponent();
@@ -132,7 +134,8 @@ impl Feature for HalfKA_hm {
         };
         let enemy_king_bp = king_bonapiece(enemy_king_sq_index, false); // is_friend=false
         let packed_enemy_king = pack_bonapiece(enemy_king_bp, hm_mirror);
-        active.push(halfka_index(kb, packed_enemy_king));
+        // 合法局面では溢れないため戻り値を無視
+        let _ = active.push(halfka_index(kb, packed_enemy_king));
 
         // 手駒の特徴量
         // HalfKPと同様に、手駒の枚数分すべての特徴量を追加する
@@ -159,7 +162,8 @@ impl Feature for HalfKA_hm {
                         let packed = pack_bonapiece(bp, hm_mirror);
 
                         // Base特徴量（coalesce済みモデルではこれのみ）
-                        active.push(halfka_index(kb, packed));
+                        // 合法局面では溢れないため戻り値を無視
+                        let _ = active.push(halfka_index(kb, packed));
                     }
                 }
             }
@@ -204,7 +208,8 @@ impl Feature for HalfKA_hm {
 
                     if bp != BonaPiece::ZERO {
                         let packed = pack_bonapiece(bp, hm_mirror);
-                        removed.push(halfka_index(kb, packed));
+                        // 合法局面では溢れないため戻り値を無視
+                        let _ = removed.push(halfka_index(kb, packed));
                     }
                 }
             }
@@ -229,7 +234,8 @@ impl Feature for HalfKA_hm {
 
                     if bp != BonaPiece::ZERO {
                         let packed = pack_bonapiece(bp, hm_mirror);
-                        added.push(halfka_index(kb, packed));
+                        // 合法局面では溢れないため戻り値を無視
+                        let _ = added.push(halfka_index(kb, packed));
                     }
                 }
             }
@@ -248,7 +254,8 @@ impl Feature for HalfKA_hm {
                     let bp = BonaPiece::from_hand_piece(perspective, hc.owner, hc.piece_type, i);
                     if bp != BonaPiece::ZERO {
                         let packed = pack_bonapiece(bp, hm_mirror);
-                        added.push(halfka_index(kb, packed));
+                        // 合法局面では溢れないため戻り値を無視
+                        let _ = added.push(halfka_index(kb, packed));
                     }
                 }
             } else if hc.old_count > hc.new_count {
@@ -257,7 +264,8 @@ impl Feature for HalfKA_hm {
                     let bp = BonaPiece::from_hand_piece(perspective, hc.owner, hc.piece_type, i);
                     if bp != BonaPiece::ZERO {
                         let packed = pack_bonapiece(bp, hm_mirror);
-                        removed.push(halfka_index(kb, packed));
+                        // 合法局面では溢れないため戻り値を無視
+                        let _ = removed.push(halfka_index(kb, packed));
                     }
                 }
             }

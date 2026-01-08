@@ -212,8 +212,14 @@ impl FeatureTransformerNnuePytorch {
     /// 重みを累積値に加算
     #[inline]
     fn add_weights(&self, accumulation: &mut [i16; NNUE_PYTORCH_L1], index: usize) {
-        let offset = index * NNUE_PYTORCH_L1;
-        if offset + NNUE_PYTORCH_L1 > self.weights.len() {
+        // オーバーフロー安全なオフセット計算
+        let Some(offset) = index.checked_mul(NNUE_PYTORCH_L1) else {
+            feature_index_oob(index, self.weights.len() / NNUE_PYTORCH_L1);
+        };
+        let Some(end) = offset.checked_add(NNUE_PYTORCH_L1) else {
+            feature_index_oob(index, self.weights.len() / NNUE_PYTORCH_L1);
+        };
+        if end > self.weights.len() {
             feature_index_oob(index, self.weights.len() / NNUE_PYTORCH_L1);
         }
 
@@ -228,8 +234,14 @@ impl FeatureTransformerNnuePytorch {
     /// 重みを累積値から減算
     #[inline]
     fn sub_weights(&self, accumulation: &mut [i16; NNUE_PYTORCH_L1], index: usize) {
-        let offset = index * NNUE_PYTORCH_L1;
-        if offset + NNUE_PYTORCH_L1 > self.weights.len() {
+        // オーバーフロー安全なオフセット計算
+        let Some(offset) = index.checked_mul(NNUE_PYTORCH_L1) else {
+            feature_index_oob(index, self.weights.len() / NNUE_PYTORCH_L1);
+        };
+        let Some(end) = offset.checked_add(NNUE_PYTORCH_L1) else {
+            feature_index_oob(index, self.weights.len() / NNUE_PYTORCH_L1);
+        };
+        if end > self.weights.len() {
             feature_index_oob(index, self.weights.len() / NNUE_PYTORCH_L1);
         }
 

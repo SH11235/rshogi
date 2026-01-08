@@ -78,7 +78,8 @@ impl Feature for HalfKP {
                     };
                     let bp = bona_piece_from_base(sq_index, base);
                     let index = halfkp_index(king_sq, bp);
-                    active.push(index);
+                    // 合法局面では溢れないため戻り値を無視
+                    let _ = active.push(index);
                 }
             }
         }
@@ -102,7 +103,8 @@ impl Feature for HalfKP {
                     let bp = BonaPiece::from_hand_piece(perspective, owner, pt, i);
                     if bp != BonaPiece::ZERO {
                         let index = halfkp_index(king_sq, bp);
-                        active.push(index);
+                        // 合法局面では溢れないため戻り値を無視
+                        let _ = active.push(index);
                     }
                 }
             }
@@ -127,7 +129,8 @@ impl Feature for HalfKP {
                 if let Some(sq) = dp.old_sq {
                     let bp = BonaPiece::from_piece_square(dp.old_piece, sq, perspective);
                     if bp != BonaPiece::ZERO {
-                        removed.push(halfkp_index(king_sq, bp));
+                        // 合法局面では溢れないため戻り値を無視
+                        let _ = removed.push(halfkp_index(king_sq, bp));
                     }
                 }
             }
@@ -137,7 +140,8 @@ impl Feature for HalfKP {
                 if let Some(sq) = dp.new_sq {
                     let bp = BonaPiece::from_piece_square(dp.new_piece, sq, perspective);
                     if bp != BonaPiece::ZERO {
-                        added.push(halfkp_index(king_sq, bp));
+                        // 合法局面では溢れないため戻り値を無視
+                        let _ = added.push(halfkp_index(king_sq, bp));
                     }
                 }
             }
@@ -152,7 +156,8 @@ impl Feature for HalfKP {
                 for i in (hc.old_count + 1)..=hc.new_count {
                     let bp = BonaPiece::from_hand_piece(perspective, hc.owner, hc.piece_type, i);
                     if bp != BonaPiece::ZERO {
-                        added.push(halfkp_index(king_sq, bp));
+                        // 合法局面では溢れないため戻り値を無視
+                        let _ = added.push(halfkp_index(king_sq, bp));
                     }
                 }
             } else if hc.old_count > hc.new_count {
@@ -160,7 +165,8 @@ impl Feature for HalfKP {
                 for i in (hc.new_count + 1)..=hc.old_count {
                     let bp = BonaPiece::from_hand_piece(perspective, hc.owner, hc.piece_type, i);
                     if bp != BonaPiece::ZERO {
-                        removed.push(halfkp_index(king_sq, bp));
+                        // 合法局面では溢れないため戻り値を無視
+                        let _ = removed.push(halfkp_index(king_sq, bp));
                     }
                 }
             }
