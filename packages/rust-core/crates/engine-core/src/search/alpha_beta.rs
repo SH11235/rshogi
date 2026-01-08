@@ -9,8 +9,8 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 use crate::nnue::{
-    evaluate_dispatch, is_layer_stacks_loaded, AccumulatorStack, AccumulatorStackNnuePytorch,
-    DirtyPiece,
+    evaluate_dispatch, is_halfka_dynamic_loaded, is_layer_stacks_loaded, AccumulatorStack,
+    AccumulatorStackHalfKADynamic, AccumulatorStackNnuePytorch, DirtyPiece,
 };
 use crate::position::Position;
 use crate::search::PieceToHistory;
@@ -284,11 +284,22 @@ pub struct SearchWorker {
     /// `use_layer_stacks` が true の場合にこちらを使用する。
     pub nnue_stack_layer_stacks: AccumulatorStackNnuePytorch,
 
+    /// NNUE Accumulator スタック（HalfKADynamic用、動的サイズ）
+    ///
+    /// nnue-pytorch で学習した HalfKADynamic モデル用のアキュムレータ。
+    /// `use_halfka_dynamic` が true の場合にこちらを使用する。
+    pub nnue_stack_halfka_dynamic: AccumulatorStackHalfKADynamic,
+
     /// LayerStacks アーキテクチャを使用するかどうか
     ///
     /// `prepare_search()` で設定され、探索中は変更されない。
     /// push/pop で毎回 `is_layer_stacks_loaded()` を呼ぶ代わりにこのフラグを参照する。
     use_layer_stacks: bool,
+
+    /// HalfKADynamic アーキテクチャを使用するかどうか
+    ///
+    /// `prepare_search()` で設定され、探索中は変更されない。
+    use_halfka_dynamic: bool,
 
     // =========================================================================
     // 頻度制御（YaneuraOu準拠）
@@ -328,7 +339,9 @@ impl SearchWorker {
             nmp_min_ply: 0,
             nnue_stack: AccumulatorStack::new(),
             nnue_stack_layer_stacks: AccumulatorStackNnuePytorch::new(),
-            use_layer_stacks: false, // prepare_search() で設定
+            nnue_stack_halfka_dynamic: AccumulatorStackHalfKADynamic::new(1024), // デフォルトL1=1024
+            use_layer_stacks: false,   // prepare_search() で設定
+            use_halfka_dynamic: false, // prepare_search() で設定
             // 頻度制御
             calls_cnt: 0,
         });
@@ -419,8 +432,10 @@ impl SearchWorker {
         // NNUE AccumulatorStackをリセット
         self.nnue_stack.reset();
         self.nnue_stack_layer_stacks.reset();
-        // LayerStacks フラグを設定（探索開始時点で固定）
+        // HalfKADynamic スタックは pop でリセット相当（新規作成が高コストなため）
+        // LayerStacks/HalfKADynamic フラグを設定（探索開始時点で固定）
         self.use_layer_stacks = is_layer_stacks_loaded();
+        self.use_halfka_dynamic = is_halfka_dynamic_loaded();
         // check_abort頻度制御カウンターをリセット
         // これにより新しい探索開始時に即座に停止チェックが行われる
         self.calls_cnt = 0;
@@ -449,7 +464,12 @@ impl SearchWorker {
     /// レースコンディションを回避するため、一度の NETWORK.get() で判定して評価する。
     #[inline]
     fn nnue_evaluate(&mut self, pos: &Position) -> Value {
-        evaluate_dispatch(pos, &mut self.nnue_stack, &mut self.nnue_stack_layer_stacks)
+        evaluate_dispatch(
+            pos,
+            &mut self.nnue_stack,
+            &mut self.nnue_stack_layer_stacks,
+            &mut self.nnue_stack_halfka_dynamic,
+        )
     }
 
     /// NNUE アキュムレータスタックを push
@@ -458,6 +478,8 @@ impl SearchWorker {
         if self.use_layer_stacks {
             self.nnue_stack_layer_stacks.push();
             self.nnue_stack_layer_stacks.current_mut().dirty_piece = dirty_piece;
+        } else if self.use_halfka_dynamic {
+            self.nnue_stack_halfka_dynamic.push(dirty_piece);
         } else {
             self.nnue_stack.push(dirty_piece);
         }
@@ -468,6 +490,8 @@ impl SearchWorker {
     fn nnue_pop(&mut self) {
         if self.use_layer_stacks {
             self.nnue_stack_layer_stacks.pop();
+        } else if self.use_halfka_dynamic {
+            self.nnue_stack_halfka_dynamic.pop();
         } else {
             self.nnue_stack.pop();
         }
