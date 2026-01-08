@@ -701,6 +701,7 @@ mod tests {
 
     #[test]
     fn test_debug_accumulator_values() {
+        use crate::nnue::constants::MAX_ARCH_LEN;
         use crate::types::Color;
         use std::fs::File;
         use std::io::BufReader;
@@ -724,6 +725,10 @@ mod tests {
         std::io::Read::read_exact(&mut reader, &mut buf4).unwrap();
         std::io::Read::read_exact(&mut reader, &mut buf4).unwrap();
         let arch_len = u32::from_le_bytes(buf4) as usize;
+        assert!(
+            arch_len > 0 && arch_len <= MAX_ARCH_LEN,
+            "Invalid arch string length: {arch_len}"
+        );
         let mut arch = vec![0u8; arch_len];
         std::io::Read::read_exact(&mut reader, &mut arch).unwrap();
         eprintln!("Architecture: {}", String::from_utf8_lossy(&arch));

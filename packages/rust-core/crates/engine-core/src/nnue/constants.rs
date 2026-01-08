@@ -6,6 +6,9 @@
 /// 評価関数ファイルのバージョン（YaneuraOu互換）
 pub const NNUE_VERSION: u32 = 0x7AF32F16;
 
+/// アーキテクチャ文字列の最大長（破損ファイル/DoS対策）
+pub const MAX_ARCH_LEN: usize = 4096;
+
 /// 評価値のスケーリング（suisho5向け: 24）
 pub const FV_SCALE: i32 = 24;
 

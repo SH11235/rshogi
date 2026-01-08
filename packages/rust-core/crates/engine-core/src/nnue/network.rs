@@ -457,6 +457,12 @@ impl Network {
         // アーキテクチャ文字列を読み込み
         reader.read_exact(&mut buf4)?;
         let arch_len = u32::from_le_bytes(buf4) as usize;
+        if arch_len == 0 || arch_len > MAX_ARCH_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid arch string length: {arch_len} (max: {MAX_ARCH_LEN})"),
+            ));
+        }
         let mut arch = vec![0u8; arch_len];
         reader.read_exact(&mut arch)?;
 
@@ -626,12 +632,9 @@ pub fn evaluate(pos: &Position, stack: &mut AccumulatorStack) -> Value {
                 if prev_computed {
                     // DirtyPieceをコピーして借用を解消
                     let dirty_piece = stack.current().dirty_piece;
-                    // Note: clone() + copy_from_slice による二重コピーを避ける最適化を試みたが、
-                    // NPSに改善が見られなかった。YaneuraOu の C++ 実装でも同様のパターン
-                    // （値コピー + std::memcpy）を使用している。
-                    let prev_acc = stack.entry_at(prev_idx).accumulator.clone();
-                    let current_acc = &mut stack.current_mut().accumulator;
-                    network.update_accumulator(pos, &dirty_piece, current_acc, &prev_acc);
+                    // split_at_mut を使用して clone を回避
+                    let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
+                    network.update_accumulator(pos, &dirty_piece, current_acc, prev_acc);
                     updated = true;
                     #[cfg(feature = "diagnostics")]
                     {
@@ -784,13 +787,13 @@ pub fn evaluate_layer_stacks(pos: &Position, stack: &mut AccumulatorStackNnuePyt
                 let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
                 if prev_computed {
                     let dirty_piece = stack.current().dirty_piece;
-                    let prev_acc = stack.entry_at(prev_idx).accumulator.clone();
-                    let current_acc = &mut stack.current_mut().accumulator;
+                    // split_at_mut を使用して clone を回避
+                    let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
                     network.update_accumulator_layer_stacks(
                         pos,
                         &dirty_piece,
                         current_acc,
-                        &prev_acc,
+                        prev_acc,
                     );
                     updated = true;
                 }
@@ -856,13 +859,14 @@ pub fn evaluate_dispatch(
                     stack_layer_stacks.entry_at(prev_idx).accumulator.computed_accumulation;
                 if prev_computed {
                     let dirty_piece = stack_layer_stacks.current().dirty_piece;
-                    let prev_acc = stack_layer_stacks.entry_at(prev_idx).accumulator.clone();
-                    let current_acc = &mut stack_layer_stacks.current_mut().accumulator;
+                    // split_at_mut を使用して clone を回避
+                    let (prev_acc, current_acc) =
+                        stack_layer_stacks.get_prev_and_current_accumulators(prev_idx);
                     network.update_accumulator_layer_stacks(
                         pos,
                         &dirty_piece,
                         current_acc,
-                        &prev_acc,
+                        prev_acc,
                     );
                     updated = true;
                 }
@@ -899,9 +903,9 @@ pub fn evaluate_dispatch(
                 let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
                 if prev_computed {
                     let dirty_piece = stack.current().dirty_piece;
-                    let prev_acc = stack.entry_at(prev_idx).accumulator.clone();
-                    let current_acc = &mut stack.current_mut().accumulator;
-                    network.update_accumulator(pos, &dirty_piece, current_acc, &prev_acc);
+                    // split_at_mut を使用して clone を回避
+                    let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
+                    network.update_accumulator(pos, &dirty_piece, current_acc, prev_acc);
                     updated = true;
                 }
             }

@@ -17,11 +17,13 @@
 //! ```
 
 use super::accumulator_nnue_pytorch::{AccumulatorNnuePytorch, AccumulatorStackNnuePytorch};
-use super::constants::{NNUE_PYTORCH_L1, NNUE_VERSION_HALFKA};
+use super::constants::{MAX_ARCH_LEN, NNUE_PYTORCH_L1, NNUE_VERSION_HALFKA};
 use super::feature_transformer_nnue_pytorch::FeatureTransformerNnuePytorch;
 use super::layer_stacks::{compute_bucket_index, sqr_clipped_relu_transform, LayerStacks};
 use crate::position::Position;
 use crate::types::{Color, Value};
+#[cfg(feature = "diagnostics")]
+use log::info;
 use std::fs::File;
 use std::io::{self, BufReader, Cursor, Read, Seek};
 use std::path::Path;
@@ -67,6 +69,12 @@ impl NetworkLayerStacks {
         // アーキテクチャ文字列を読み込み
         reader.read_exact(&mut buf4)?;
         let arch_len = u32::from_le_bytes(buf4) as usize;
+        if arch_len == 0 || arch_len > MAX_ARCH_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid arch string length: {arch_len} (max: {MAX_ARCH_LEN})"),
+            ));
+        }
         let mut arch = vec![0u8; arch_len];
         reader.read_exact(&mut arch)?;
 
@@ -97,10 +105,67 @@ impl NetworkLayerStacks {
         // LayerStacks を読み込み（FC層は常に非圧縮）
         let layer_stacks = LayerStacks::read(reader)?;
 
+        // EOF検証: 余りデータがないことを確認
+        // factorizedモデル（非coalesced）を誤って読んだ場合、
+        // 余りデータが発生する可能性がある。
+        let mut probe = [0u8; 1];
+        match reader.read(&mut probe) {
+            Ok(0) => {
+                // EOF到達 - 正常（coalesce済みモデル）
+            }
+            Ok(_) => {
+                // 余りデータあり - おそらくfactorizedモデル
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "NNUE file has unexpected trailing data.\n\
+                     This likely indicates a factorized (non-coalesced) model.\n\
+                     This engine only supports coalesced models.\n\n\
+                     To fix: Re-export the model using nnue-pytorch serialize.py:\n\
+                       python serialize.py model.ckpt output.nnue\n\n\
+                     The serialize.py script automatically coalesces factor weights.",
+                ));
+            }
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                // EOF - 正常
+            }
+            Err(e) => {
+                // その他のIOエラー
+                return Err(e);
+            }
+        }
+
+        // 診断ログを出力
+        #[cfg(feature = "diagnostics")]
+        {
+            Self::log_load_diagnostics(&feature_transformer, &layer_stacks);
+        }
+
         Ok(Self {
             feature_transformer,
             layer_stacks,
         })
+    }
+
+    /// 読み込み時の診断ログを出力
+    #[cfg(feature = "diagnostics")]
+    fn log_load_diagnostics(ft: &FeatureTransformerNnuePytorch, ls: &LayerStacks) {
+        // FT統計
+        let bias_sum: i64 = ft.biases.0.iter().map(|&x| x as i64).sum();
+        let weight_min = ft.weights.iter().copied().min().unwrap_or(0);
+        let weight_max = ft.weights.iter().copied().max().unwrap_or(0);
+        let weight_nonzero: usize = ft.weights.iter().filter(|&&x| x != 0).count();
+        let weight_total = ft.weights.len();
+
+        info!("[NNUE Load] FT bias sum: {bias_sum}");
+        info!("[NNUE Load] FT weight: min={weight_min}, max={weight_max}");
+        info!(
+            "[NNUE Load] FT weight nonzero: {weight_nonzero}/{weight_total} ({:.2}%)",
+            weight_nonzero as f64 / weight_total as f64 * 100.0
+        );
+
+        // LayerStacks bucket0 の l1_biases
+        let l1_biases = &ls.buckets[0].l1_biases;
+        info!("[NNUE Load] LayerStacks bucket0 l1_biases: {l1_biases:?}");
     }
 
     /// バイト列から読み込み
@@ -123,12 +188,78 @@ impl NetworkLayerStacks {
         let mut transformed = [0u8; NNUE_PYTORCH_L1];
         sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed);
 
-        // バケットインデックスを計算（盤上の駒数）
-        let piece_count = pos.occupied().count() as usize;
-        let bucket_index = compute_bucket_index(piece_count);
+        // バケットインデックスを計算（両玉の段に基づく）
+        let f_king = pos.king_square(side_to_move);
+        let e_king = pos.king_square(!side_to_move);
+        let (f_rank, e_rank) =
+            crate::nnue::layer_stacks::compute_king_ranks(side_to_move, f_king, e_king);
+        let bucket_index = compute_bucket_index(f_rank, e_rank);
 
         // LayerStacks で評価
         let score = self.layer_stacks.evaluate(bucket_index, &transformed);
+
+        Value::new(score)
+    }
+
+    /// 評価値を計算（詳細診断ログ付き）
+    ///
+    /// Python (nnue-pytorch) との比較検証用。
+    /// 各中間値をログ出力する。
+    #[cfg(feature = "diagnostics")]
+    pub fn evaluate_with_diagnostics(&self, pos: &Position, acc: &AccumulatorNnuePytorch) -> Value {
+        use log::info;
+
+        let side_to_move = pos.side_to_move();
+
+        // アキュムレータの統計
+        let (us_acc, them_acc) = if side_to_move == Color::Black {
+            (acc.get(Color::Black as usize), acc.get(Color::White as usize))
+        } else {
+            (acc.get(Color::White as usize), acc.get(Color::Black as usize))
+        };
+
+        // us_acc の統計
+        let us_min = us_acc.iter().copied().min().unwrap_or(0);
+        let us_max = us_acc.iter().copied().max().unwrap_or(0);
+        let us_first_half_positive: usize = us_acc[0..768].iter().filter(|&&x| x > 0).count();
+        let us_second_half_positive: usize = us_acc[768..1536].iter().filter(|&&x| x > 0).count();
+
+        info!("[NNUE Eval] us_acc: min={us_min}, max={us_max}");
+        info!(
+            "[NNUE Eval] us_acc positive: first_half={us_first_half_positive}/768, second_half={us_second_half_positive}/768"
+        );
+        info!("[NNUE Eval] us_acc first 16: {:?}", &us_acc[0..16]);
+
+        // SqrClippedReLU変換
+        let mut transformed = [0u8; NNUE_PYTORCH_L1];
+        sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed);
+
+        let transformed_nonzero: usize = transformed.iter().filter(|&&x| x > 0).count();
+        let transformed_sum: u64 = transformed.iter().map(|&x| x as u64).sum();
+        info!("[NNUE Eval] transformed: nonzero={transformed_nonzero}/1536, sum={transformed_sum}");
+        info!("[NNUE Eval] transformed first 32: {:?}", &transformed[0..32]);
+
+        // バケットインデックスを計算（両玉の段に基づく）
+        let f_king = pos.king_square(side_to_move);
+        let e_king = pos.king_square(!side_to_move);
+        let (f_rank, e_rank) =
+            crate::nnue::layer_stacks::compute_king_ranks(side_to_move, f_king, e_king);
+        let bucket_index = compute_bucket_index(f_rank, e_rank);
+        info!(
+            "[NNUE Eval] f_king_rank={f_rank}, e_king_rank={e_rank}, bucket_index={bucket_index}"
+        );
+
+        // LayerStacks で評価（詳細ログ付き）
+        let (raw_score, l1_out, l1_skip) =
+            self.layer_stacks.evaluate_raw_with_diagnostics(bucket_index, &transformed);
+
+        info!("[NNUE Eval] l1_out (16 elements): {l1_out:?}");
+        info!("[NNUE Eval] l1_skip: {l1_skip}");
+        info!("[NNUE Eval] raw_score (with skip): {raw_score}");
+
+        let score = raw_score / super::constants::NNUE_PYTORCH_NNUE2SCORE;
+        let score_float = raw_score as f64 / super::constants::NNUE_PYTORCH_NNUE2SCORE as f64;
+        info!("[NNUE Eval] score: {score} (float: {score_float:.4})");
 
         Value::new(score)
     }
@@ -299,10 +430,14 @@ mod tests {
         eprintln!("Transformed sum: {transformed_sum}, nonzero count: {transformed_nonzero}");
         eprintln!("Transformed sample (first 20): {:?}", &transformed[0..20]);
 
-        // バケットインデックスを計算
-        let piece_count = pos.occupied().count() as usize;
-        let bucket_index = compute_bucket_index(piece_count);
-        eprintln!("Piece count: {piece_count}, bucket index: {bucket_index}");
+        // バケットインデックスを計算（玉の段に基づく）
+        let side_to_move = pos.side_to_move();
+        let f_king = pos.king_square(side_to_move);
+        let e_king = pos.king_square(!side_to_move);
+        let (f_rank, e_rank) =
+            crate::nnue::layer_stacks::compute_king_ranks(side_to_move, f_king, e_king);
+        let bucket_index = compute_bucket_index(f_rank, e_rank);
+        eprintln!("King ranks: f={f_rank}, e={e_rank}, bucket index: {bucket_index}");
 
         // LayerStacks の生スコアを計算
         let raw_score = network.layer_stacks.evaluate_raw(bucket_index, &transformed);
@@ -333,8 +468,11 @@ mod tests {
             let (us_acc, them_acc) = (acc.get(0), acc.get(1));
             let mut transformed = [0u8; NNUE_PYTORCH_L1];
             sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed);
-            let piece_count = pos.occupied().count() as usize;
-            let bucket_idx = compute_bucket_index(piece_count);
+            let stm = pos.side_to_move();
+            let f_k = pos.king_square(stm);
+            let e_k = pos.king_square(!stm);
+            let (f_r, e_r) = crate::nnue::layer_stacks::compute_king_ranks(stm, f_k, e_k);
+            let bucket_idx = compute_bucket_index(f_r, e_r);
             let raw = network.layer_stacks.evaluate_raw(bucket_idx, &transformed);
 
             let val = network.evaluate(&pos, &acc);

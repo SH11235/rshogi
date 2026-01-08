@@ -162,6 +162,21 @@ impl AccumulatorStackNnuePytorch {
         self.current -= 1;
     }
 
+    /// 前回と現在のアキュムレータを同時に取得（clone不要）
+    ///
+    /// `split_at_mut`を使用して、prev_idx の accumulator への不変参照と
+    /// 現在の accumulator への可変参照を同時に返す。
+    #[inline]
+    pub fn get_prev_and_current_accumulators(
+        &mut self,
+        prev_idx: usize,
+    ) -> (&AccumulatorNnuePytorch, &mut AccumulatorNnuePytorch) {
+        let cur_idx = self.current;
+        debug_assert!(prev_idx < cur_idx, "prev_idx ({prev_idx}) must be < cur_idx ({cur_idx})");
+        let (left, right) = self.entries.split_at_mut(cur_idx);
+        (&left[prev_idx].accumulator, &mut right[0].accumulator)
+    }
+
     /// スタックをリセット
     #[inline]
     pub fn reset(&mut self) {
