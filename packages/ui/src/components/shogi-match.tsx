@@ -477,7 +477,12 @@ export function ShogiMatch({
             navigation.goBack();
         }
         movesRef.current = movesRef.current.slice(0, -undoCount);
-    }, [navigation]);
+
+        // 待った後の思考時間計測を新しく開始
+        turnStartTimeRef.current = Date.now();
+        // 秒読みをリセット（戻った局面の手番で時計を更新）
+        updateClocksForNextTurn(positionRef.current.turn);
+    }, [navigation, updateClocksForNextTurn]);
 
     const handleMoveFromEngineRef = useRef<(move: string) => void>(() => {});
 
