@@ -11,7 +11,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Popover, PopoverContent, PopoverTrigger } from "../../popover";
 import { Switch } from "../../switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../../tooltip";
-import type { AnalysisSettings } from "../types";
+import type { AnalysisSettings, AutoAnalyzeMode } from "../types";
 import type { BranchSummary, FlatTreeNode, PvMainLineComparison } from "../utils/branchTreeUtils";
 import {
     comparePvWithMainLine,
@@ -861,10 +861,7 @@ function BatchAnalysisDropdown({
                                 onChange={(e) =>
                                     onAnalysisSettingsChange({
                                         ...analysisSettings,
-                                        autoAnalyzeMode: e.target.value as
-                                            | "off"
-                                            | "delayed"
-                                            | "immediate",
+                                        autoAnalyzeMode: e.target.value as AutoAnalyzeMode,
                                     })
                                 }
                                 className="w-full px-2 py-1 text-xs rounded border border-border bg-background"

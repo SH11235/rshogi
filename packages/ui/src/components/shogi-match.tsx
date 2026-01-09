@@ -455,13 +455,14 @@ export function ShogiMatch({
 
     // 投了処理
     const handleResign = useCallback(async () => {
+        const currentTurn = positionRef.current.turn;
         const result: GameResult = {
-            winner: position.turn === "sente" ? "gote" : "sente",
-            reason: { kind: "resignation", loser: position.turn },
+            winner: currentTurn === "sente" ? "gote" : "sente",
+            reason: { kind: "resignation", loser: currentTurn },
             totalMoves: movesRef.current.length,
         };
         await endMatch(result);
-    }, [position.turn, endMatch]);
+    }, [endMatch]);
 
     // 待った処理（2手戻す：相手の手と自分の前の手を戻す）
     const handleUndo = useCallback(() => {
