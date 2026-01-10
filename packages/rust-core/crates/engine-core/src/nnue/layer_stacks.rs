@@ -79,11 +79,14 @@ impl LayerStackBucket {
             *bias = i32::from_le_bytes(buf4);
         }
 
-        // L1層: weights
-        let mut buf1 = [0u8; 1];
-        for i in 0..(LAYER_STACK_L1_OUT * Self::L1_PADDED_INPUT) {
-            reader.read_exact(&mut buf1)?;
-            bucket.l1_weights[i] = buf1[0] as i8;
+        // L1層: weights（一括読み込みで I/O 呼び出しを削減）
+        {
+            let total_bytes = LAYER_STACK_L1_OUT * Self::L1_PADDED_INPUT;
+            let mut temp_buf = vec![0u8; total_bytes];
+            reader.read_exact(&mut temp_buf)?;
+            for (i, &byte) in temp_buf.iter().enumerate() {
+                bucket.l1_weights[i] = byte as i8;
+            }
         }
 
         // L2層: bias
@@ -92,20 +95,27 @@ impl LayerStackBucket {
             *bias = i32::from_le_bytes(buf4);
         }
 
-        // L2層: weights
-        for i in 0..(NNUE_PYTORCH_L3 * Self::L2_PADDED_INPUT) {
-            reader.read_exact(&mut buf1)?;
-            bucket.l2_weights[i] = buf1[0] as i8;
+        // L2層: weights（一括読み込みで I/O 呼び出しを削減）
+        {
+            let total_bytes = NNUE_PYTORCH_L3 * Self::L2_PADDED_INPUT;
+            let mut temp_buf = vec![0u8; total_bytes];
+            reader.read_exact(&mut temp_buf)?;
+            for (i, &byte) in temp_buf.iter().enumerate() {
+                bucket.l2_weights[i] = byte as i8;
+            }
         }
 
         // 出力層: bias
         reader.read_exact(&mut buf4)?;
         bucket.output_bias = i32::from_le_bytes(buf4);
 
-        // 出力層: weights
-        for i in 0..Self::OUTPUT_PADDED_INPUT {
-            reader.read_exact(&mut buf1)?;
-            bucket.output_weights[i] = buf1[0] as i8;
+        // 出力層: weights（一括読み込みで I/O 呼び出しを削減）
+        {
+            let mut temp_buf = vec![0u8; Self::OUTPUT_PADDED_INPUT];
+            reader.read_exact(&mut temp_buf)?;
+            for (i, &byte) in temp_buf.iter().enumerate() {
+                bucket.output_weights[i] = byte as i8;
+            }
         }
 
         Ok(bucket)

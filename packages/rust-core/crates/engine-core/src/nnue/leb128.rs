@@ -103,6 +103,15 @@ pub fn read_compressed_tensor_i16<R: Read>(reader: &mut R, count: usize) -> io::
         reader.read_exact(&mut size_buf)?;
         let compressed_size = u32::from_le_bytes(size_buf) as usize;
 
+        // サイズ上限チェック（DoS対策）
+        const MAX_COMPRESSED_SIZE: usize = 100 * 1024 * 1024; // 100MB
+        if compressed_size == 0 || compressed_size > MAX_COMPRESSED_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid compressed size: {compressed_size} (max: {MAX_COMPRESSED_SIZE})"),
+            ));
+        }
+
         // 圧縮データを読み込み
         let mut compressed_data = vec![0u8; compressed_size];
         reader.read_exact(&mut compressed_data)?;

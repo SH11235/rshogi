@@ -31,6 +31,12 @@ use std::io::{self, Read, Seek, SeekFrom};
 // =============================================================================
 
 /// AVX2用 DPBUSD エミュレーション（u8×i8→i32積和演算）
+///
+/// # Safety
+///
+/// - 呼び出し元のCPUがAVX2命令をサポートしていること
+///   （`target_feature = "avx2"` で保証）
+/// - `acc`, `a`, `b` は有効な `__m256i` 値であること
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 #[inline]
 unsafe fn m256_add_dpbusd_epi32(
@@ -45,6 +51,12 @@ unsafe fn m256_add_dpbusd_epi32(
 }
 
 /// AVX2: 8×i32 の水平加算
+///
+/// # Safety
+///
+/// - 呼び出し元のCPUがAVX2命令をサポートしていること
+///   （`target_feature = "avx2"` で保証）
+/// - `v` は有効な `__m256i` 値であること
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 #[inline]
 unsafe fn hsum_i32_avx2(v: std::arch::x86_64::__m256i) -> i32 {
@@ -60,6 +72,12 @@ unsafe fn hsum_i32_avx2(v: std::arch::x86_64::__m256i) -> i32 {
 }
 
 /// SSE2: 4×i32 の水平加算（SSSE3フォールバック用）
+///
+/// # Safety
+///
+/// - 呼び出し元のCPUがSSSE3命令をサポートしていること
+///   （`target_feature = "ssse3"` で保証）
+/// - `v` は有効な `__m128i` 値であること
 #[cfg(all(
     target_arch = "x86_64",
     target_feature = "ssse3",
@@ -76,6 +94,12 @@ unsafe fn hsum_i32_sse2(v: std::arch::x86_64::__m128i) -> i32 {
 }
 
 /// SSSE3用 DPBUSD エミュレーション（u8×i8→i32積和演算）
+///
+/// # Safety
+///
+/// - 呼び出し元のCPUがSSSE3命令をサポートしていること
+///   （`target_feature = "ssse3"` で保証）
+/// - `acc`, `a`, `b` は有効な `__m128i` 値であること
 #[cfg(all(
     target_arch = "x86_64",
     target_feature = "ssse3",
@@ -647,6 +671,13 @@ impl AffineTransformDynamic {
     }
 
     /// AVX2 による順伝播
+    ///
+    /// # Safety
+    ///
+    /// - 呼び出し元のCPUがAVX2命令をサポートしていること
+    ///   （`target_feature = "avx2"` で保証）
+    /// - `input` のサイズは `self.padded_input_dim` 以上であること
+    /// - `self.weights` のアライメントが32バイト境界であること
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     #[inline]
     unsafe fn propagate_avx2(&self, input: &[u8], output: &mut [i32]) {
@@ -672,6 +703,13 @@ impl AffineTransformDynamic {
     }
 
     /// SSSE3 による順伝播
+    ///
+    /// # Safety
+    ///
+    /// - 呼び出し元のCPUがSSSE3命令をサポートしていること
+    ///   （`target_feature = "ssse3"` で保証）
+    /// - `input` のサイズは `self.padded_input_dim` 以上であること
+    /// - `self.weights` のアライメントが16バイト境界であること
     #[cfg(all(
         target_arch = "x86_64",
         target_feature = "ssse3",

@@ -630,6 +630,11 @@ impl AccumulatorStack {
     /// - Some(path): source_idx に到達できた場合、source側から適用する順のインデックス列
     /// - None: パスが途切れた場合、または MAX_PATH_LENGTH を超えた場合
     pub fn collect_path(&self, source_idx: usize) -> Option<IndexList<MAX_PATH_LENGTH>> {
+        // 早期リターン: 明らかにパスが長すぎる場合はループに入る前に終了
+        if self.current_idx.saturating_sub(source_idx) > MAX_PATH_LENGTH {
+            return None;
+        }
+
         let mut path = IndexList::new();
         let mut idx = self.current_idx;
 
