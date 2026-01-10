@@ -1400,7 +1400,9 @@ impl SearchWorker {
                     break;
                 }
 
-                delta = Value::new(delta.raw() + delta.raw() / 3);
+                delta = Value::new(
+                    delta.raw().saturating_add(delta.raw() / 3).min(Value::INFINITE.raw()),
+                );
             }
 
             if !self.abort {

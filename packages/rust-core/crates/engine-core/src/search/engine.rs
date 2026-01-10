@@ -1394,7 +1394,9 @@ where
                     break;
                 }
 
-                delta = Value::new(delta.raw() + delta.raw() / 3);
+                delta = Value::new(
+                    delta.raw().saturating_add(delta.raw() / 3).min(Value::INFINITE.raw()),
+                );
             }
 
             worker.root_moves.stable_sort_range(pv_idx, worker.root_moves.len());
