@@ -134,18 +134,14 @@ pub fn qsearch_with_pv<E: Evaluator>(
     for mv in moves.iter() {
         // 王手中は全ての手を探索、そうでなければ駒取りのみ
         if !in_check {
-            // 駒取りかどうか確認
             let to = mv.to();
             let captured = pos.piece_on(to);
-            if captured.is_none() && !mv.is_drop() {
-                // 駒打ちでも駒取りでもない場合はスキップ
-                // ただし駒打ちは駒取りではないのでスキップ
-                continue;
-            }
+
+            // 駒取りでない手はスキップ（駒打ちも駒取りではない）
             if captured.is_none() {
-                // 駒取りでない
                 continue;
             }
+
             // SEEフィルタ
             if !pos.see_ge(*mv, Value::ZERO) {
                 continue;

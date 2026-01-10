@@ -72,6 +72,11 @@ struct Cli {
 /// 処理中にCtrl-Cが押されたかを追跡
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
+/// qsearchの初期alpha値
+const QSEARCH_ALPHA_INIT: i32 = -30000;
+/// qsearchの初期beta値
+const QSEARCH_BETA_INIT: i32 = 30000;
+
 fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
@@ -98,7 +103,12 @@ fn main() -> Result<()> {
 
     // スレッド数を設定
     if cli.threads > 0 {
-        rayon::ThreadPoolBuilder::new().num_threads(cli.threads).build_global().ok();
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(cli.threads)
+            .build_global()
+            .unwrap_or_else(|e| {
+                eprintln!("Warning: Failed to set thread count: {e}");
+            });
     }
 
     // 入力ファイルサイズからレコード数を計算
@@ -185,6 +195,7 @@ fn process_file(cli: &Cli, process_count: u64) -> Result<()> {
     progress.set_message("Processing...");
     let evaluator = MaterialEvaluator;
     let max_ply = cli.max_ply;
+    let verbose = cli.verbose;
 
     let processed_records: Vec<[u8; PackedSfenValue::SIZE]> = records
         .par_iter()
@@ -201,8 +212,11 @@ fn process_file(cli: &Cli, process_count: u64) -> Result<()> {
                     progress.inc(1);
                     new_record
                 }
-                Err(_) => {
+                Err(e) => {
                     error_count.fetch_add(1, Ordering::Relaxed);
+                    if verbose {
+                        eprintln!("Error processing record: {e}");
+                    }
                     progress.inc(1);
                     *record // エラー時は元のレコードを返す
                 }
@@ -253,7 +267,8 @@ fn process_record<E: Evaluator>(
     pos.set_sfen(&sfen).map_err(|e| anyhow::anyhow!("Failed to set SFEN: {e:?}"))?;
 
     // qsearch_with_pvを実行
-    let result = qsearch_with_pv(&mut pos, evaluator, -30000, 30000, 0, max_ply);
+    let result =
+        qsearch_with_pv(&mut pos, evaluator, QSEARCH_ALPHA_INIT, QSEARCH_BETA_INIT, 0, max_ply);
 
     // PVに沿って局面を進める
     for mv in &result.pv {

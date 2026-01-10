@@ -769,8 +769,8 @@ pub fn pack_position(pos: &Position) -> [u8; 32] {
     stream.write_n_bit(white_king_sq.index() as u32, 7);
 
     // 4. 盤上の駒 (81マス、玉はスキップ)
-    for sq_idx in 0..81 {
-        let sq = Square::from_u8(sq_idx).unwrap();
+    for sq_idx in 0..81u8 {
+        let sq = Square::from_u8(sq_idx).expect("sq_idx should be in valid range 0-80");
         let piece = pos.piece_on(sq);
 
         // 玉はスキップ
