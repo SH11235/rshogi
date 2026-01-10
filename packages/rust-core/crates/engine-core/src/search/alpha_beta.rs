@@ -9,8 +9,8 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 use crate::nnue::{
-    evaluate_dispatch, is_halfka_dynamic_loaded, is_layer_stacks_loaded, AccumulatorStack,
-    AccumulatorStackHalfKADynamic, AccumulatorStackNnuePytorch, DirtyPiece,
+    evaluate_dispatch, get_halfka_dynamic_l1, is_halfka_dynamic_loaded, is_layer_stacks_loaded,
+    AccumulatorStack, AccumulatorStackHalfKADynamic, AccumulatorStackNnuePytorch, DirtyPiece,
 };
 use crate::position::Position;
 use crate::search::PieceToHistory;
@@ -432,7 +432,12 @@ impl SearchWorker {
         // NNUE AccumulatorStackをリセット
         self.nnue_stack.reset();
         self.nnue_stack_layer_stacks.reset();
-        // HalfKADynamic スタックは pop でリセット相当（新規作成が高コストなため）
+        // HalfKADynamic: L1サイズが変わっている場合はスタックを再作成
+        if let Some(l1) = get_halfka_dynamic_l1() {
+            if self.nnue_stack_halfka_dynamic.l1() != l1 {
+                self.nnue_stack_halfka_dynamic = AccumulatorStackHalfKADynamic::new(l1);
+            }
+        }
         // LayerStacks/HalfKADynamic フラグを設定（探索開始時点で固定）
         self.use_layer_stacks = is_layer_stacks_loaded();
         self.use_halfka_dynamic = is_halfka_dynamic_loaded();

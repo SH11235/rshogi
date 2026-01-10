@@ -203,6 +203,14 @@ impl NNUENetwork {
         matches!(self, Self::HalfKADynamic(_))
     }
 
+    /// HalfKADynamic の L1 サイズを取得（他のアーキテクチャでは None）
+    pub fn get_halfka_dynamic_l1(&self) -> Option<usize> {
+        match self {
+            Self::HalfKADynamic(net) => Some(net.arch_l1),
+            _ => None,
+        }
+    }
+
     /// アーキテクチャ名を取得
     pub fn architecture_name(&self) -> &'static str {
         match self {
@@ -1029,6 +1037,11 @@ pub fn is_layer_stacks_loaded() -> bool {
 /// ロードされたNNUEがHalfKADynamicアーキテクチャかどうか
 pub fn is_halfka_dynamic_loaded() -> bool {
     NETWORK.get().map(|n| n.is_halfka_dynamic()).unwrap_or(false)
+}
+
+/// ロードされたHalfKADynamicのL1サイズを取得（未ロードまたは別アーキテクチャの場合はNone）
+pub fn get_halfka_dynamic_l1() -> Option<usize> {
+    NETWORK.get().and_then(|n| n.get_halfka_dynamic_l1())
 }
 
 /// 局面を評価（LayerStacks用）

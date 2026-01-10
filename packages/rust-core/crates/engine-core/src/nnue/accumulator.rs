@@ -224,6 +224,14 @@ impl<T> Drop for AlignedBox<T> {
     }
 }
 
+impl<T: Copy + Default> Clone for AlignedBox<T> {
+    fn clone(&self) -> Self {
+        let mut new_box = Self::new_zeroed(self.len);
+        new_box.copy_from_slice(self);
+        new_box
+    }
+}
+
 // SAFETY: T が Send なら AlignedBox<T> も Send
 unsafe impl<T: Send> Send for AlignedBox<T> {}
 // SAFETY: T が Sync なら AlignedBox<T> も Sync

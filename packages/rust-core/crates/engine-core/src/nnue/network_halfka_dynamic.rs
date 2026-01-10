@@ -10,6 +10,12 @@
 //! - l2: L2 → L3 (例: 8 → 96)
 //! - output: L3 → 1 (例: 96 → 1)
 //! - 活性化: ClippedReLU のみ（SqrClippedReLU なし）
+//!
+//! # SIMD最適化
+//!
+//! AVX2/SSE2/WASM SIMD128 による最適化を実装:
+//! - AffineTransformDynamic: DPBUSD emulation による行列積
+//! - FeatureTransformerHalfKADynamic: i16 加減算のベクトル化
 
 use super::accumulator::{AlignedBox, DirtyPiece};
 use super::constants::{
@@ -19,6 +25,73 @@ use super::features::{FeatureSet, HalfKA_hmFeatureSet};
 use crate::position::Position;
 use crate::types::{Color, Value};
 use std::io::{self, Read, Seek, SeekFrom};
+
+// =============================================================================
+// SIMD ヘルパー関数
+// =============================================================================
+
+/// AVX2用 DPBUSD エミュレーション（u8×i8→i32積和演算）
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[inline]
+unsafe fn m256_add_dpbusd_epi32(
+    acc: &mut std::arch::x86_64::__m256i,
+    a: std::arch::x86_64::__m256i,
+    b: std::arch::x86_64::__m256i,
+) {
+    use std::arch::x86_64::*;
+    let product = _mm256_maddubs_epi16(a, b);
+    let product32 = _mm256_madd_epi16(product, _mm256_set1_epi16(1));
+    *acc = _mm256_add_epi32(*acc, product32);
+}
+
+/// AVX2: 8×i32 の水平加算
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[inline]
+unsafe fn hsum_i32_avx2(v: std::arch::x86_64::__m256i) -> i32 {
+    use std::arch::x86_64::*;
+    let hi = _mm256_extracti128_si256(v, 1);
+    let lo = _mm256_castsi256_si128(v);
+    let sum128 = _mm_add_epi32(lo, hi);
+    let hi64 = _mm_unpackhi_epi64(sum128, sum128);
+    let sum64 = _mm_add_epi32(sum128, hi64);
+    let hi32 = _mm_shuffle_epi32(sum64, 1);
+    let sum32 = _mm_add_epi32(sum64, hi32);
+    _mm_cvtsi128_si32(sum32)
+}
+
+/// SSE2: 4×i32 の水平加算（SSSE3フォールバック用）
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "ssse3",
+    not(target_feature = "avx2")
+))]
+#[inline]
+unsafe fn hsum_i32_sse2(v: std::arch::x86_64::__m128i) -> i32 {
+    use std::arch::x86_64::*;
+    let hi64 = _mm_unpackhi_epi64(v, v);
+    let sum64 = _mm_add_epi32(v, hi64);
+    let hi32 = _mm_shuffle_epi32(sum64, 1);
+    let sum32 = _mm_add_epi32(sum64, hi32);
+    _mm_cvtsi128_si32(sum32)
+}
+
+/// SSSE3用 DPBUSD エミュレーション（u8×i8→i32積和演算）
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "ssse3",
+    not(target_feature = "avx2")
+))]
+#[inline]
+unsafe fn m128_add_dpbusd_epi32(
+    acc: &mut std::arch::x86_64::__m128i,
+    a: std::arch::x86_64::__m128i,
+    b: std::arch::x86_64::__m128i,
+) {
+    use std::arch::x86_64::*;
+    let product = _mm_maddubs_epi16(a, b);
+    let product32 = _mm_madd_epi16(product, _mm_set1_epi16(1));
+    *acc = _mm_add_epi32(*acc, product32);
+}
 
 // =============================================================================
 // 定数
@@ -31,10 +104,10 @@ const FV_SCALE_HALFKA_DYNAMIC: i32 = 16;
 // AccumulatorHalfKADynamic - 動的サイズのアキュムレータ
 // =============================================================================
 
-/// 動的サイズのアキュムレータ
+/// 動的サイズのアキュムレータ（64バイトアライン済み）
 pub struct AccumulatorHalfKADynamic {
-    /// アキュムレータバッファ [perspective][L1]
-    pub accumulation: [Vec<i16>; 2],
+    /// アキュムレータバッファ [perspective][L1]（SIMD最適化のため64バイトアライン）
+    pub accumulation: [AlignedBox<i16>; 2],
     /// 計算済みフラグ
     pub computed_accumulation: bool,
     /// L1 サイズ
@@ -45,7 +118,7 @@ impl AccumulatorHalfKADynamic {
     /// 新規作成
     pub fn new(l1: usize) -> Self {
         Self {
-            accumulation: [vec![0i16; l1], vec![0i16; l1]],
+            accumulation: [AlignedBox::new_zeroed(l1), AlignedBox::new_zeroed(l1)],
             computed_accumulation: false,
             l1,
         }
@@ -101,6 +174,11 @@ impl AccumulatorStackHalfKADynamic {
             current_idx: 0,
             l1,
         }
+    }
+
+    /// L1サイズを取得
+    pub fn l1(&self) -> usize {
+        self.l1
     }
 
     /// 現在のエントリを取得
@@ -260,27 +338,117 @@ impl FeatureTransformerHalfKADynamic {
         acc.computed_accumulation = true;
     }
 
-    /// 重みを加算
+    /// 重みを加算（SIMD最適化版）
     #[inline]
     fn add_weights(&self, accumulation: &mut [i16], index: usize) {
         let offset = index * self.l1;
         let weights = &self.weights[offset..offset + self.l1];
+
+        // AVX2: 256bit = 16 x i16（アライン済みロード/ストア）
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        {
+            unsafe {
+                use std::arch::x86_64::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let weight_ptr = weights.as_ptr();
+                let num_chunks = self.l1 / 16;
+
+                for i in 0..num_chunks {
+                    let acc_vec = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
+                    let weight_vec = _mm256_load_si256(weight_ptr.add(i * 16) as *const __m256i);
+                    let result = _mm256_add_epi16(acc_vec, weight_vec);
+                    _mm256_store_si256(acc_ptr.add(i * 16) as *mut __m256i, result);
+                }
+            }
+            return;
+        }
+
+        // SSE2: 128bit = 8 x i16（アライン済みロード/ストア）
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "sse2",
+            not(target_feature = "avx2")
+        ))]
+        {
+            unsafe {
+                use std::arch::x86_64::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let weight_ptr = weights.as_ptr();
+                let num_chunks = self.l1 / 8;
+
+                for i in 0..num_chunks {
+                    let acc_vec = _mm_load_si128(acc_ptr.add(i * 8) as *const __m128i);
+                    let weight_vec = _mm_load_si128(weight_ptr.add(i * 8) as *const __m128i);
+                    let result = _mm_add_epi16(acc_vec, weight_vec);
+                    _mm_store_si128(acc_ptr.add(i * 8) as *mut __m128i, result);
+                }
+            }
+            return;
+        }
+
+        // スカラーフォールバック
+        #[allow(unreachable_code)]
         for (acc, &w) in accumulation.iter_mut().zip(weights) {
             *acc = acc.wrapping_add(w);
         }
     }
 
-    /// 重みを減算
+    /// 重みを減算（SIMD最適化版）
     #[inline]
     fn sub_weights(&self, accumulation: &mut [i16], index: usize) {
         let offset = index * self.l1;
         let weights = &self.weights[offset..offset + self.l1];
+
+        // AVX2: 256bit = 16 x i16（アライン済みロード/ストア）
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        {
+            unsafe {
+                use std::arch::x86_64::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let weight_ptr = weights.as_ptr();
+                let num_chunks = self.l1 / 16;
+
+                for i in 0..num_chunks {
+                    let acc_vec = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
+                    let weight_vec = _mm256_load_si256(weight_ptr.add(i * 16) as *const __m256i);
+                    let result = _mm256_sub_epi16(acc_vec, weight_vec);
+                    _mm256_store_si256(acc_ptr.add(i * 16) as *mut __m256i, result);
+                }
+            }
+            return;
+        }
+
+        // SSE2: 128bit = 8 x i16（アライン済みロード/ストア）
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "sse2",
+            not(target_feature = "avx2")
+        ))]
+        {
+            unsafe {
+                use std::arch::x86_64::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let weight_ptr = weights.as_ptr();
+                let num_chunks = self.l1 / 8;
+
+                for i in 0..num_chunks {
+                    let acc_vec = _mm_load_si128(acc_ptr.add(i * 8) as *const __m128i);
+                    let weight_vec = _mm_load_si128(weight_ptr.add(i * 8) as *const __m128i);
+                    let result = _mm_sub_epi16(acc_vec, weight_vec);
+                    _mm_store_si128(acc_ptr.add(i * 8) as *mut __m128i, result);
+                }
+            }
+            return;
+        }
+
+        // スカラーフォールバック
+        #[allow(unreachable_code)]
         for (acc, &w) in accumulation.iter_mut().zip(weights) {
             *acc = acc.wrapping_sub(w);
         }
     }
 
-    /// 変換（ClippedReLU適用）
+    /// 変換（ClippedReLU適用、SIMD最適化版）
     pub fn transform(
         &self,
         acc: &AccumulatorHalfKADynamic,
@@ -289,6 +457,80 @@ impl FeatureTransformerHalfKADynamic {
     ) {
         let perspectives = [side_to_move, !side_to_move];
 
+        // AVX2: i16→u8パック + クリップ [0, 127]（accumulation はアライン済み）
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        {
+            unsafe {
+                use std::arch::x86_64::*;
+                let zero = _mm256_setzero_si256();
+                let max_val = _mm256_set1_epi16(127);
+
+                for (p, &perspective) in perspectives.iter().enumerate() {
+                    let out_offset = self.l1 * p;
+                    let accumulation = &acc.accumulation[perspective as usize];
+                    let acc_ptr = accumulation.as_ptr();
+                    let out_ptr = output.as_mut_ptr().add(out_offset);
+                    let num_chunks = self.l1 / 16;
+
+                    for i in 0..num_chunks {
+                        // accumulation は AlignedBox なので aligned load
+                        let v = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
+                        // クリップ: max(0, min(127, v))
+                        let clamped = _mm256_min_epi16(_mm256_max_epi16(v, zero), max_val);
+                        // i16→u8 パック（飽和）
+                        let packed = _mm256_packus_epi16(clamped, clamped);
+                        // レーン順序を修正
+                        let result = _mm256_permute4x64_epi64(packed, 0b11011000);
+                        // 下位128bitのみ保存（output はアライメント保証なしなので unaligned）
+                        _mm_storeu_si128(
+                            out_ptr.add(i * 16) as *mut __m128i,
+                            _mm256_castsi256_si128(result),
+                        );
+                    }
+                }
+            }
+            return;
+        }
+
+        // SSE2: i16→u8パック + クリップ（accumulation はアライン済み）
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "sse2",
+            not(target_feature = "avx2")
+        ))]
+        {
+            unsafe {
+                use std::arch::x86_64::*;
+                let zero = _mm_setzero_si128();
+                let max_val = _mm_set1_epi16(127);
+
+                for (p, &perspective) in perspectives.iter().enumerate() {
+                    let out_offset = self.l1 * p;
+                    let accumulation = &acc.accumulation[perspective as usize];
+                    let acc_ptr = accumulation.as_ptr();
+                    let out_ptr = output.as_mut_ptr().add(out_offset);
+                    let num_chunks = self.l1 / 16;
+
+                    for i in 0..num_chunks {
+                        // 16要素を2つのSSEレジスタで処理（aligned load）
+                        let v0 = _mm_load_si128(acc_ptr.add(i * 16) as *const __m128i);
+                        let v1 = _mm_load_si128(acc_ptr.add(i * 16 + 8) as *const __m128i);
+
+                        // クリップ
+                        let clamped0 = _mm_min_epi16(_mm_max_epi16(v0, zero), max_val);
+                        let clamped1 = _mm_min_epi16(_mm_max_epi16(v1, zero), max_val);
+
+                        // i16→u8 パック（output は unaligned store）
+                        let packed = _mm_packus_epi16(clamped0, clamped1);
+                        _mm_storeu_si128(out_ptr.add(i * 16) as *mut __m128i, packed);
+                    }
+                }
+            }
+            return;
+        }
+
+        // スカラーフォールバック
+        #[allow(unreachable_code)]
         for (p, &perspective) in perspectives.iter().enumerate() {
             let out_offset = self.l1 * p;
             let accumulation = &acc.accumulation[perspective as usize];
@@ -354,17 +596,94 @@ impl AffineTransformDynamic {
         })
     }
 
-    /// 順伝播
+    /// 順伝播（SIMD最適化版）
     pub fn propagate(&self, input: &[u8], output: &mut [i32]) {
         // バイアスで初期化
         output.copy_from_slice(&self.biases);
 
-        // 行列×ベクトル
+        // AVX2: 32バイトずつ処理
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        {
+            unsafe {
+                self.propagate_avx2(input, output);
+            }
+            return;
+        }
+
+        // SSSE3: 16バイトずつ処理
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "ssse3",
+            not(target_feature = "avx2")
+        ))]
+        {
+            unsafe {
+                self.propagate_ssse3(input, output);
+            }
+            return;
+        }
+
+        // スカラーフォールバック
+        #[allow(unreachable_code)]
         for (j, out) in output.iter_mut().enumerate() {
             let weight_offset = j * self.padded_input_dim;
             for (i, &in_val) in input.iter().enumerate().take(self.input_dim) {
                 *out += self.weights[weight_offset + i] as i32 * in_val as i32;
             }
+        }
+    }
+
+    /// AVX2 による順伝播
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[inline]
+    unsafe fn propagate_avx2(&self, input: &[u8], output: &mut [i32]) {
+        use std::arch::x86_64::*;
+
+        let num_chunks = self.padded_input_dim / 32;
+        let input_ptr = input.as_ptr();
+        let weight_ptr = self.weights.as_ptr();
+
+        for (j, out) in output.iter_mut().enumerate() {
+            let mut acc = _mm256_setzero_si256();
+            let row_offset = j * self.padded_input_dim;
+
+            for chunk in 0..num_chunks {
+                let in_vec = _mm256_loadu_si256(input_ptr.add(chunk * 32) as *const __m256i);
+                let w_vec =
+                    _mm256_load_si256(weight_ptr.add(row_offset + chunk * 32) as *const __m256i);
+                m256_add_dpbusd_epi32(&mut acc, in_vec, w_vec);
+            }
+
+            *out += hsum_i32_avx2(acc);
+        }
+    }
+
+    /// SSSE3 による順伝播
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "ssse3",
+        not(target_feature = "avx2")
+    ))]
+    #[inline]
+    unsafe fn propagate_ssse3(&self, input: &[u8], output: &mut [i32]) {
+        use std::arch::x86_64::*;
+
+        let num_chunks = self.padded_input_dim / 16;
+        let input_ptr = input.as_ptr();
+        let weight_ptr = self.weights.as_ptr();
+
+        for (j, out) in output.iter_mut().enumerate() {
+            let mut acc = _mm_setzero_si128();
+            let row_offset = j * self.padded_input_dim;
+
+            for chunk in 0..num_chunks {
+                let in_vec = _mm_loadu_si128(input_ptr.add(chunk * 16) as *const __m128i);
+                let w_vec =
+                    _mm_load_si128(weight_ptr.add(row_offset + chunk * 16) as *const __m128i);
+                m128_add_dpbusd_epi32(&mut acc, in_vec, w_vec);
+            }
+
+            *out += hsum_i32_sse2(acc);
         }
     }
 }

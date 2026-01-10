@@ -53,9 +53,9 @@ pub use layer_stacks::{
 };
 pub use layers::{AffineTransform, ClippedReLU};
 pub use network::{
-    evaluate, evaluate_dispatch, evaluate_layer_stacks, init_nnue, init_nnue_from_bytes,
-    is_halfka_dynamic_loaded, is_layer_stacks_loaded, is_nnue_initialized, NNUENetwork, Network,
-    NetworkHalfKA,
+    evaluate, evaluate_dispatch, evaluate_layer_stacks, get_halfka_dynamic_l1, init_nnue,
+    init_nnue_from_bytes, is_halfka_dynamic_loaded, is_layer_stacks_loaded, is_nnue_initialized,
+    NNUENetwork, Network, NetworkHalfKA,
 };
 pub use network_halfka_dynamic::{
     AccumulatorHalfKADynamic, AccumulatorStackHalfKADynamic, NetworkHalfKADynamic,
