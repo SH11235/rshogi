@@ -286,6 +286,7 @@ export function MobileLayout({
                     promotionSelection={promotionSelection}
                     displaySettings={displaySettings}
                     isEditModeActive={isEditModeActive}
+                    isMatchRunning={isMatchRunning}
                     editFromSquare={editFromSquare}
                     candidateNote={candidateNote}
                     onSquareSelect={onSquareSelect}

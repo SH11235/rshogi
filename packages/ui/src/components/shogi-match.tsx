@@ -126,6 +126,8 @@ interface PlayerHandSectionProps {
     onPiecePointerDown?: (owner: Player, pieceType: PieceType, e: React.PointerEvent) => void;
     /** 編集モードかどうか */
     isEditMode?: boolean;
+    /** 対局中かどうか */
+    isMatchRunning?: boolean;
     /** 持ち駒を増やす（編集モード用） */
     onIncrement?: (piece: PieceType) => void;
     /** 持ち駒を減らす（編集モード用） */
@@ -142,6 +144,7 @@ function PlayerHandSection({
     onHandSelect,
     onPiecePointerDown,
     isEditMode,
+    isMatchRunning,
     onIncrement,
     onDecrement,
     flipBoard,
@@ -156,6 +159,7 @@ function PlayerHandSection({
                 onHandSelect={onHandSelect}
                 onPiecePointerDown={onPiecePointerDown}
                 isEditMode={isEditMode}
+                isMatchRunning={isMatchRunning}
                 onIncrement={onIncrement}
                 onDecrement={onDecrement}
                 flipBoard={flipBoard}
@@ -261,11 +265,21 @@ export function ShogiMatch({
         "shogi-display-settings",
         DEFAULT_DISPLAY_SETTINGS,
     );
-    // 解析設定
-    const [analysisSettings, setAnalysisSettings] = useLocalStorage<AnalysisSettings>(
+    // 解析設定（古いlocalStorageデータとの互換性のためデフォルト値とマージ）
+    const [storedAnalysisSettings, setAnalysisSettings] = useLocalStorage<AnalysisSettings>(
         "shogi-analysis-settings",
         DEFAULT_ANALYSIS_SETTINGS,
     );
+    const analysisSettings = useMemo(() => {
+        const merged = { ...DEFAULT_ANALYSIS_SETTINGS, ...storedAnalysisSettings };
+        // 旧設定 autoAnalyzeBranch からの移行処理
+        // autoAnalyzeMode が未設定で autoAnalyzeBranch が存在する場合、マッピングする
+        const stored = storedAnalysisSettings as unknown as Record<string, unknown>;
+        if (!("autoAnalyzeMode" in stored) && "autoAnalyzeBranch" in stored) {
+            merged.autoAnalyzeMode = stored.autoAnalyzeBranch ? "delayed" : "off";
+        }
+        return merged;
+    }, [storedAnalysisSettings]);
     // PVプレビュー用のstate
     const [pvPreview, setPvPreview] = useState<{
         open: boolean;
@@ -448,6 +462,40 @@ export function ShogiMatch({
 
     // endMatchRef を更新
     endMatchRef.current = endMatch;
+
+    // 投了処理
+    const handleResign = useCallback(async () => {
+        const currentTurn = positionRef.current.turn;
+        const result: GameResult = {
+            winner: currentTurn === "sente" ? "gote" : "sente",
+            reason: { kind: "resignation", loser: currentTurn },
+            totalMoves: movesRef.current.length,
+        };
+        await endMatch(result);
+    }, [endMatch]);
+
+    // 待った処理（2手戻す：相手の手と自分の前の手を戻す）
+    const handleUndo = useCallback(async () => {
+        const moveCount = movesRef.current.length;
+        if (moveCount === 0) return;
+
+        // エンジンの思考を停止（旧局面のbestmoveが適用されるのを防ぐ）
+        await stopAllEnginesRef.current();
+
+        // 2手戻す（自分の前の手まで戻る）
+        // ただし、1手しかない場合は1手だけ戻す
+        const undoCount = moveCount >= 2 ? 2 : 1;
+
+        for (let i = 0; i < undoCount; i++) {
+            navigation.goBack();
+        }
+        movesRef.current = movesRef.current.slice(0, -undoCount);
+
+        // 待った後の思考時間計測を新しく開始
+        turnStartTimeRef.current = Date.now();
+        // 秒読みをリセット（戻った局面の手番で時計を更新）
+        updateClocksForNextTurn(positionRef.current.turn);
+    }, [navigation, updateClocksForNextTurn]);
 
     const handleMoveFromEngineRef = useRef<(move: string) => void>(() => {});
 
@@ -1027,21 +1075,6 @@ export function ShogiMatch({
         },
         [isMatchRunning, position],
     );
-
-    const clearBoardForEdit = () => {
-        if (isMatchRunning) return;
-        const emptyBoard = Object.fromEntries(
-            getAllSquares().map((sq) => [sq, null]),
-        ) as BoardState;
-        const next: PositionState = {
-            board: emptyBoard,
-            hands: createEmptyHands(),
-            turn: "sente",
-            ply: 1,
-        };
-        applyEditedPosition(next);
-        setEditMessage("盤面をクリアしました。");
-    };
 
     const updateTurnForEdit = (turn: Player) => {
         if (isMatchRunning) return;
@@ -1707,7 +1740,11 @@ export function ShogiMatch({
 
     // 分岐作成時の自動解析
     useEffect(() => {
-        if (lastAddedBranchInfo && analysisSettings.autoAnalyzeBranch) {
+        if (!lastAddedBranchInfo || analysisSettings.autoAnalyzeMode === "off") {
+            return;
+        }
+
+        const runAnalysis = () => {
             // ply + firstMove から分岐のnodeIdを見つける
             const branches = getAllBranches(navigation.tree);
             const branch = branches.find((b) => {
@@ -1718,10 +1755,19 @@ export function ShogiMatch({
             if (branch) {
                 handleAnalyzeBranch(branch.nodeId);
             }
+        };
+
+        if (analysisSettings.autoAnalyzeMode === "immediate") {
+            // 即時モード: すぐに解析開始
+            runAnalysis();
+        } else {
+            // delayedモード: 3秒後に解析開始（操作が続けばリセット）
+            const timerId = setTimeout(runAnalysis, 3000);
+            return () => clearTimeout(timerId);
         }
     }, [
         lastAddedBranchInfo,
-        analysisSettings.autoAnalyzeBranch,
+        analysisSettings.autoAnalyzeMode,
         handleAnalyzeBranch,
         navigation.tree,
     ]);
@@ -2060,6 +2106,7 @@ export function ShogiMatch({
                                                             : undefined
                                                     }
                                                     isEditMode={isEditMode && !isMatchRunning}
+                                                    isMatchRunning={isMatchRunning}
                                                     onIncrement={(piece) =>
                                                         handleIncrementHand(info.owner, piece)
                                                     }
@@ -2132,6 +2179,7 @@ export function ShogiMatch({
                                                         : undefined
                                                 }
                                                 isEditMode={isEditMode && !isMatchRunning}
+                                                isMatchRunning={isMatchRunning}
                                                 onIncrement={(piece) =>
                                                     handleIncrementHand(info.owner, piece)
                                                 }
@@ -2150,11 +2198,13 @@ export function ShogiMatch({
                         <div className="flex flex-col gap-2 shrink-0">
                             <MatchControls
                                 onResetToStartpos={handleResetToStartpos}
-                                onClearBoard={clearBoardForEdit}
                                 onStop={pauseAutoPlay}
                                 onStart={resumeAutoPlay}
                                 onStartReview={handleStartReview}
                                 onEnterEditMode={handleEnterEditMode}
+                                onResign={handleResign}
+                                onUndo={handleUndo}
+                                canUndo={moves.length > 0}
                                 isMatchRunning={isMatchRunning}
                                 gameMode={gameMode}
                                 message={message}
