@@ -210,6 +210,19 @@ impl AccumulatorStackHalfKADynamic {
         self.entries.truncate(self.current_idx + 1);
     }
 
+    /// 探索開始時のリセット
+    ///
+    /// スタックを初期状態に戻し、computed_accumulation フラグをクリアする。
+    /// これにより、前回の探索で計算済みになったアキュムレータが
+    /// 新しい探索で誤用されることを防ぐ。
+    pub fn reset(&mut self) {
+        self.current_idx = 0;
+        self.entries.truncate(1);
+        self.entries[0].accumulator.computed_accumulation = false;
+        self.entries[0].dirty_piece.clear();
+        self.entries[0].previous = None;
+    }
+
     /// 指定インデックスのエントリを取得
     pub fn entry_at(&self, idx: usize) -> &AccumulatorEntryHalfKADynamic {
         &self.entries[idx]

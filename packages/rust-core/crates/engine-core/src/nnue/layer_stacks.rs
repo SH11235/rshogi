@@ -560,8 +560,8 @@ mod tests {
         sqr_clipped_relu_transform(&us_acc, &them_acc, &mut output);
 
         // 期待値: (127 * 127) >> 7 = 126
-        for i in 0..NNUE_PYTORCH_L1 {
-            assert_eq!(output[i], 126, "max input should produce 126 at index {i}");
+        for (i, &val) in output.iter().enumerate().take(NNUE_PYTORCH_L1) {
+            assert_eq!(val, 126, "max input should produce 126 at index {i}");
         }
 
         // 負の値はクランプされて0になる

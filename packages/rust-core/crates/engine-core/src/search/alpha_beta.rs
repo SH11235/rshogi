@@ -432,10 +432,12 @@ impl SearchWorker {
         // NNUE AccumulatorStackをリセット
         self.nnue_stack.reset();
         self.nnue_stack_layer_stacks.reset();
-        // HalfKADynamic: L1サイズが変わっている場合はスタックを再作成
+        // HalfKADynamic: L1サイズが変わっている場合はスタックを再作成、そうでなければリセット
         if let Some(l1) = get_halfka_dynamic_l1() {
             if self.nnue_stack_halfka_dynamic.l1() != l1 {
                 self.nnue_stack_halfka_dynamic = AccumulatorStackHalfKADynamic::new(l1);
+            } else {
+                self.nnue_stack_halfka_dynamic.reset();
             }
         }
         // LayerStacks/HalfKADynamic フラグを設定（探索開始時点で固定）
