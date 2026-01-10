@@ -265,10 +265,14 @@ export function ShogiMatch({
         "shogi-display-settings",
         DEFAULT_DISPLAY_SETTINGS,
     );
-    // 解析設定
-    const [analysisSettings, setAnalysisSettings] = useLocalStorage<AnalysisSettings>(
+    // 解析設定（古いlocalStorageデータとの互換性のためデフォルト値とマージ）
+    const [storedAnalysisSettings, setAnalysisSettings] = useLocalStorage<AnalysisSettings>(
         "shogi-analysis-settings",
         DEFAULT_ANALYSIS_SETTINGS,
+    );
+    const analysisSettings = useMemo(
+        () => ({ ...DEFAULT_ANALYSIS_SETTINGS, ...storedAnalysisSettings }),
+        [storedAnalysisSettings],
     );
     // PVプレビュー用のstate
     const [pvPreview, setPvPreview] = useState<{
@@ -465,9 +469,12 @@ export function ShogiMatch({
     }, [endMatch]);
 
     // 待った処理（2手戻す：相手の手と自分の前の手を戻す）
-    const handleUndo = useCallback(() => {
+    const handleUndo = useCallback(async () => {
         const moveCount = movesRef.current.length;
         if (moveCount === 0) return;
+
+        // エンジンの思考を停止（旧局面のbestmoveが適用されるのを防ぐ）
+        await stopAllEnginesRef.current();
 
         // 2手戻す（自分の前の手まで戻る）
         // ただし、1手しかない場合は1手だけ戻す
