@@ -28,9 +28,14 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use std::cell::RefCell;
+
+use engine_core::nnue::init_nnue;
 use engine_core::position::Position;
 use tools::packed_sfen::{move_to_move16, pack_position, unpack_sfen, PackedSfenValue};
-use tools::qsearch_pv::{qsearch_with_pv, Evaluator, MaterialEvaluator};
+use tools::qsearch_pv::{
+    qsearch_with_pv, qsearch_with_pv_nnue, MaterialEvaluator, NnueStacks, QsearchResult,
+};
 
 /// PackedSfenValue形式のpackファイルにqsearch leaf置換を適用
 #[derive(Parser)]
@@ -86,13 +91,17 @@ fn main() -> Result<()> {
         anyhow::bail!("Input file not found: {}", cli.input.display());
     }
 
-    // NNUEモデルの確認
-    if let Some(ref nnue_path) = cli.nnue {
+    // NNUEモデルのロード
+    let use_nnue = if let Some(ref nnue_path) = cli.nnue {
         if !nnue_path.exists() {
             anyhow::bail!("NNUE model file not found: {}", nnue_path.display());
         }
-        eprintln!("Note: NNUE evaluation is not yet implemented, using Material evaluation");
-    }
+        init_nnue(nnue_path).context("Failed to load NNUE model")?;
+        eprintln!("NNUE model loaded: {}", nnue_path.display());
+        true
+    } else {
+        false
+    };
 
     // Ctrl-Cハンドラを設定
     ctrlc::set_handler(|| {
@@ -138,7 +147,7 @@ fn main() -> Result<()> {
     eprintln!("Max ply: {}", cli.max_ply);
 
     // 処理実行
-    process_file(&cli, process_count)?;
+    process_file(&cli, process_count, use_nnue)?;
 
     if INTERRUPTED.load(Ordering::SeqCst) {
         eprintln!("Note: Processing was interrupted, output may be incomplete");
@@ -150,7 +159,7 @@ fn main() -> Result<()> {
 }
 
 /// ファイルを処理
-fn process_file(cli: &Cli, process_count: u64) -> Result<()> {
+fn process_file(cli: &Cli, process_count: u64, use_nnue: bool) -> Result<()> {
     // 進捗バー設定
     let progress = ProgressBar::new(process_count);
     progress.set_style(
@@ -185,7 +194,7 @@ fn process_file(cli: &Cli, process_count: u64) -> Result<()> {
     }
 
     let actual_count = records.len();
-    eprintln!("Read {} records", actual_count);
+    eprintln!("Read {actual_count} records");
 
     // エラーカウンタ
     let error_count = AtomicU64::new(0);
@@ -193,36 +202,77 @@ fn process_file(cli: &Cli, process_count: u64) -> Result<()> {
 
     // qsearch leaf置換を並列で適用
     progress.set_message("Processing...");
-    let evaluator = MaterialEvaluator;
     let max_ply = cli.max_ply;
     let verbose = cli.verbose;
 
-    let processed_records: Vec<[u8; PackedSfenValue::SIZE]> = records
-        .par_iter()
-        .map(|record| {
-            if INTERRUPTED.load(Ordering::SeqCst) {
-                return *record; // 中断時は元のレコードを返す
-            }
-
-            let result = process_record(record, &evaluator, max_ply);
-
-            match result {
-                Ok(new_record) => {
-                    processed_count.fetch_add(1, Ordering::Relaxed);
-                    progress.inc(1);
-                    new_record
+    // 処理関数を選択
+    let processed_records: Vec<[u8; PackedSfenValue::SIZE]> = if use_nnue {
+        eprintln!("Using NNUE evaluation (with incremental updates)");
+        records
+            .par_iter()
+            .map(|record| {
+                if INTERRUPTED.load(Ordering::SeqCst) {
+                    return *record;
                 }
-                Err(e) => {
-                    error_count.fetch_add(1, Ordering::Relaxed);
-                    if verbose {
-                        eprintln!("Error processing record: {e}");
+
+                // スレッドローカルでNnueStacksを管理
+                thread_local! {
+                    static NNUE_STACKS: RefCell<NnueStacks> = RefCell::new(NnueStacks::new());
+                }
+
+                let result = NNUE_STACKS.with(|stacks| {
+                    let mut stacks = stacks.borrow_mut();
+                    stacks.reset();
+                    process_record_nnue(record, &mut stacks, max_ply)
+                });
+
+                match result {
+                    Ok(new_record) => {
+                        processed_count.fetch_add(1, Ordering::Relaxed);
+                        progress.inc(1);
+                        new_record
                     }
-                    progress.inc(1);
-                    *record // エラー時は元のレコードを返す
+                    Err(e) => {
+                        error_count.fetch_add(1, Ordering::Relaxed);
+                        if verbose {
+                            eprintln!("Error processing record: {e}");
+                        }
+                        progress.inc(1);
+                        *record
+                    }
                 }
-            }
-        })
-        .collect();
+            })
+            .collect()
+    } else {
+        eprintln!("Using Material evaluation");
+        let evaluator = MaterialEvaluator;
+        records
+            .par_iter()
+            .map(|record| {
+                if INTERRUPTED.load(Ordering::SeqCst) {
+                    return *record;
+                }
+
+                let result = process_record_material(record, &evaluator, max_ply);
+
+                match result {
+                    Ok(new_record) => {
+                        processed_count.fetch_add(1, Ordering::Relaxed);
+                        progress.inc(1);
+                        new_record
+                    }
+                    Err(e) => {
+                        error_count.fetch_add(1, Ordering::Relaxed);
+                        if verbose {
+                            eprintln!("Error processing record: {e}");
+                        }
+                        progress.inc(1);
+                        *record
+                    }
+                }
+            })
+            .collect()
+    };
 
     progress.finish_with_message("Done");
 
@@ -250,10 +300,10 @@ fn process_file(cli: &Cli, process_count: u64) -> Result<()> {
     Ok(())
 }
 
-/// 1レコードを処理
-fn process_record<E: Evaluator>(
+/// 1レコードを処理（Material評価版）
+fn process_record_material(
     record: &[u8; PackedSfenValue::SIZE],
-    evaluator: &E,
+    evaluator: &MaterialEvaluator,
     max_ply: i32,
 ) -> Result<[u8; PackedSfenValue::SIZE]> {
     // PackedSfenValueを読み込み
@@ -270,6 +320,40 @@ fn process_record<E: Evaluator>(
     let result =
         qsearch_with_pv(&mut pos, evaluator, QSEARCH_ALPHA_INIT, QSEARCH_BETA_INIT, 0, max_ply);
 
+    // 結果をPackedSfenValueに変換
+    finalize_result(&mut pos, &psv, result)
+}
+
+/// 1レコードを処理（NNUE評価版、差分更新）
+fn process_record_nnue(
+    record: &[u8; PackedSfenValue::SIZE],
+    stacks: &mut NnueStacks,
+    max_ply: i32,
+) -> Result<[u8; PackedSfenValue::SIZE]> {
+    // PackedSfenValueを読み込み
+    let psv = PackedSfenValue::from_bytes(record)
+        .ok_or_else(|| anyhow::anyhow!("Failed to parse PackedSfenValue"))?;
+
+    // PackedSfen → SFEN → Position
+    let sfen = unpack_sfen(&psv.sfen).map_err(|e| anyhow::anyhow!("Failed to unpack SFEN: {e}"))?;
+
+    let mut pos = Position::new();
+    pos.set_sfen(&sfen).map_err(|e| anyhow::anyhow!("Failed to set SFEN: {e:?}"))?;
+
+    // qsearch_with_pv_nnueを実行（差分更新版）
+    let result =
+        qsearch_with_pv_nnue(&mut pos, stacks, QSEARCH_ALPHA_INIT, QSEARCH_BETA_INIT, 0, max_ply);
+
+    // 結果をPackedSfenValueに変換
+    finalize_result(&mut pos, &psv, result)
+}
+
+/// qsearch結果をPackedSfenValueに変換
+fn finalize_result(
+    pos: &mut Position,
+    psv: &PackedSfenValue,
+    result: QsearchResult,
+) -> Result<[u8; PackedSfenValue::SIZE]> {
     // PVに沿って局面を進める
     for mv in &result.pv {
         let gives_check = pos.gives_check(*mv);
@@ -277,7 +361,7 @@ fn process_record<E: Evaluator>(
     }
 
     // 新しいPackedSfenValueを作成
-    let new_sfen = pack_position(&pos);
+    let new_sfen = pack_position(pos);
     let new_move16 = if let Some(&first_mv) = result.pv.first() {
         move_to_move16(first_mv)
     } else {
