@@ -96,6 +96,8 @@ impl LayerStackBucket {
         }
 
         // L2層: weights（一括読み込みで I/O 呼び出しを削減）
+        // nnue-pytorch は FC層の入力を32の倍数にパディングして保存するため、
+        // L2_PADDED_INPUT (32) で読み込む
         {
             let total_bytes = NNUE_PYTORCH_L3 * Self::L2_PADDED_INPUT;
             let mut temp_buf = vec![0u8; total_bytes];
