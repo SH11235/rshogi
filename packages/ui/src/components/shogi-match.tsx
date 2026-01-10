@@ -270,10 +270,16 @@ export function ShogiMatch({
         "shogi-analysis-settings",
         DEFAULT_ANALYSIS_SETTINGS,
     );
-    const analysisSettings = useMemo(
-        () => ({ ...DEFAULT_ANALYSIS_SETTINGS, ...storedAnalysisSettings }),
-        [storedAnalysisSettings],
-    );
+    const analysisSettings = useMemo(() => {
+        const merged = { ...DEFAULT_ANALYSIS_SETTINGS, ...storedAnalysisSettings };
+        // 旧設定 autoAnalyzeBranch からの移行処理
+        // autoAnalyzeMode が未設定で autoAnalyzeBranch が存在する場合、マッピングする
+        const stored = storedAnalysisSettings as unknown as Record<string, unknown>;
+        if (!("autoAnalyzeMode" in stored) && "autoAnalyzeBranch" in stored) {
+            merged.autoAnalyzeMode = stored.autoAnalyzeBranch ? "delayed" : "off";
+        }
+        return merged;
+    }, [storedAnalysisSettings]);
     // PVプレビュー用のstate
     const [pvPreview, setPvPreview] = useState<{
         open: boolean;
