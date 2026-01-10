@@ -130,18 +130,21 @@ pub struct NnueStacks {
     pub acc: AccumulatorStack,
     /// LayerStacks用スタック
     pub acc_ls: AccumulatorStackNnuePytorch,
-    /// HalfKADynamic用スタック（L1サイズに応じて動的に作成）
-    pub acc_hd: Option<AccumulatorStackHalfKADynamic>,
+    /// HalfKADynamic用スタック（常に存在、evaluate_dispatchに必要）
+    pub acc_hd: AccumulatorStackHalfKADynamic,
 }
 
 impl NnueStacks {
+    /// デフォルトのL1サイズ（HalfKADynamicを使わない場合のダミー用）
+    const DEFAULT_L1: usize = 256;
+
     /// 新しいNnueStacksを作成
     pub fn new() -> Self {
-        let acc_hd = get_halfka_dynamic_l1().map(AccumulatorStackHalfKADynamic::new);
+        let l1 = get_halfka_dynamic_l1().unwrap_or(Self::DEFAULT_L1);
         Self {
             acc: AccumulatorStack::new(),
             acc_ls: AccumulatorStackNnuePytorch::new(),
-            acc_hd,
+            acc_hd: AccumulatorStackHalfKADynamic::new(l1),
         }
     }
 
@@ -149,13 +152,15 @@ impl NnueStacks {
     pub fn reset(&mut self) {
         self.acc.reset();
         self.acc_ls.reset();
-        // HalfKADynamicはL1サイズが変わっている可能性があるので再作成
+        // HalfKADynamicはL1サイズが変わっている可能性があるので確認
         if let Some(l1) = get_halfka_dynamic_l1() {
-            if self.acc_hd.is_none() || self.acc_hd.as_ref().unwrap().l1() != l1 {
-                self.acc_hd = Some(AccumulatorStackHalfKADynamic::new(l1));
+            if self.acc_hd.l1() != l1 {
+                self.acc_hd = AccumulatorStackHalfKADynamic::new(l1);
             } else {
-                self.acc_hd.as_mut().unwrap().reset();
+                self.acc_hd.reset();
             }
+        } else {
+            self.acc_hd.reset();
         }
     }
 
@@ -166,9 +171,7 @@ impl NnueStacks {
         // LayerStacks用: push()後にdirty_pieceを設定
         self.acc_ls.push();
         self.acc_ls.current_mut().dirty_piece = dirty_piece;
-        if let Some(ref mut hd) = self.acc_hd {
-            hd.push(dirty_piece);
-        }
+        self.acc_hd.push(dirty_piece);
     }
 
     /// 手の取り消し時にスタックをポップ
@@ -176,17 +179,13 @@ impl NnueStacks {
     pub fn pop(&mut self) {
         self.acc.pop();
         self.acc_ls.pop();
-        if let Some(ref mut hd) = self.acc_hd {
-            hd.pop();
-        }
+        self.acc_hd.pop();
     }
 
     /// 現在の局面を評価
     #[inline]
     pub fn evaluate(&mut self, pos: &Position) -> i32 {
-        let mut dummy_hd = AccumulatorStackHalfKADynamic::new(256);
-        let stack_hd = self.acc_hd.as_mut().unwrap_or(&mut dummy_hd);
-        evaluate_dispatch(pos, &mut self.acc, &mut self.acc_ls, stack_hd).raw()
+        evaluate_dispatch(pos, &mut self.acc, &mut self.acc_ls, &mut self.acc_hd).raw()
     }
 }
 
