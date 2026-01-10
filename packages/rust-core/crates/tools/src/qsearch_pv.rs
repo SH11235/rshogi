@@ -163,7 +163,9 @@ impl NnueStacks {
     #[inline]
     pub fn push(&mut self, dirty_piece: DirtyPiece) {
         self.acc.push(dirty_piece);
+        // LayerStacks用: push()後にdirty_pieceを設定
         self.acc_ls.push();
+        self.acc_ls.current_mut().dirty_piece = dirty_piece;
         if let Some(ref mut hd) = self.acc_hd {
             hd.push(dirty_piece);
         }
