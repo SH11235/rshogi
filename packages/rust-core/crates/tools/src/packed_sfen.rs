@@ -289,6 +289,17 @@ fn piece_type_from_index(index: usize) -> Option<PieceType> {
 }
 
 /// PackedSfenをSFEN文字列に変換
+///
+/// # 制限事項
+///
+/// **標準局面（盤上+手駒=40枚）のみ対応**
+///
+/// このハフマン符号化形式は、盤上の駒と手駒の合計が40枚の場合に
+/// 常に256bit（32バイト）になるよう設計されています（YaneuraOu準拠）。
+///
+/// 駒落ち局面や詰将棋など、駒数が40枚未満の局面をpackしたデータでは、
+/// 末尾の0埋め部分が歩として誤読される可能性があります。
+/// 詳細は `pack_position` のドキュメントを参照してください。
 pub fn unpack_sfen(packed: &[u8; 32]) -> Result<String, String> {
     let mut stream = BitStream::new(packed);
 
@@ -754,6 +765,23 @@ fn write_hand_piece(stream: &mut BitStreamWriter, pt: PieceType, color: Color) {
 ///
 /// # 戻り値
 /// 32バイトのPackedSfen
+///
+/// # 制限事項
+///
+/// **標準局面（盤上+手駒=40枚）のみ対応**
+///
+/// このハフマン符号化形式は、盤上の駒と手駒の合計が40枚の場合に
+/// 常に256bit（32バイト）になるよう設計されています（YaneuraOu準拠）。
+///
+/// 駒落ち局面や詰将棋など、駒数が40枚未満の局面では256bitに達せず、
+/// 余ったビットが0埋めされます。unpack時にこの0が歩として誤読される
+/// 可能性があるため、現時点では標準局面のみをサポートしています。
+///
+/// ## 駒落ち対応が必要な場合の改修案
+///
+/// 1. 不足分を「駒箱フラグ（成りフラグ=1）」でパディング
+///    - 駒箱の駒はunpack時に無視されるため、誤読を防げる
+/// 2. またはビット列長を別途記録し、unpack時にその長さで終了
 pub fn pack_position(pos: &Position) -> [u8; 32] {
     let mut stream = BitStreamWriter::new();
 
