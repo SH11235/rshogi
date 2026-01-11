@@ -26,6 +26,8 @@
 //!     eval_config: EvalConfig::default(),
 //!     reuse_search: false,
 //!     warmup: 0,
+//!     eval_hash_mb: 256,
+//!     use_eval_hash: false,
 //! };
 //!
 //! // 内部APIモード

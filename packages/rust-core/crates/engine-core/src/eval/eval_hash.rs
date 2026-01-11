@@ -158,38 +158,6 @@ impl EvalHash {
         }
     }
 
-    pub fn clear(&self) {
-        let len = self.table.len();
-        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-
-        if threads <= 1 || len < threads * 1024 {
-            unsafe {
-                std::ptr::write_bytes(self.table.as_ptr() as *mut EvalHashEntryAtomic, 0, len);
-            }
-            return;
-        }
-
-        let chunk = len.div_ceil(threads);
-        let ptr = self.table.as_ptr();
-
-        std::thread::scope(|scope| {
-            for i in 0..threads {
-                let start = i * chunk;
-                if start >= len {
-                    break;
-                }
-                let end = (start + chunk).min(len);
-                let count = end - start;
-                let ptr_addr = unsafe { ptr.add(start) } as usize;
-
-                scope.spawn(move || unsafe {
-                    let ptr = ptr_addr as *mut EvalHashEntryAtomic;
-                    std::ptr::write_bytes(ptr, 0, count);
-                });
-            }
-        });
-    }
-
     pub fn probe(&self, key: u64) -> Option<i32> {
         if self.table.is_empty() {
             return None;
@@ -270,15 +238,6 @@ mod tests {
 
         hash.store(key, score);
         assert_eq!(hash.probe(key), Some(score));
-    }
-
-    #[test]
-    fn test_eval_hash_clear() {
-        let hash = EvalHash::new(1);
-        let key = 0x0FED_CBA9_8765_4321;
-        hash.store(key, 42);
-        hash.clear();
-        assert_eq!(hash.probe(key), None);
     }
 
     #[test]
