@@ -206,7 +206,7 @@ fn main() -> Result<()> {
 
         processed += 1;
 
-        if processed % cli.progress_interval == 0 {
+        if processed.is_multiple_of(cli.progress_interval) {
             let elapsed = start.elapsed().as_secs_f64();
             let rate = processed as f64 / elapsed;
             let remaining = (total_records - processed) as f64 / rate;
