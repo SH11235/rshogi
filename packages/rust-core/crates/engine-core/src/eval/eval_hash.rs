@@ -1,11 +1,7 @@
 //! Eval hash (evaluation cache) for NNUE.
 
-#[cfg(target_arch = "x86_64")]
-use std::cell::UnsafeCell;
 use std::mem;
-#[cfg(not(target_arch = "x86_64"))]
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EvalHashEntry {
@@ -18,7 +14,81 @@ pub struct EvalHash {
     mask: usize,
 }
 
-static USE_EVAL_HASH: AtomicBool = AtomicBool::new(true);
+static USE_EVAL_HASH: AtomicBool = AtomicBool::new(false);
+
+// ============================================================================
+// 統計機能（diagnostics フィーチャー有効時のみ）
+// ============================================================================
+
+#[cfg(feature = "diagnostics")]
+mod stats {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static PROBE_COUNT: AtomicU64 = AtomicU64::new(0);
+    static HIT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+    /// EvalHash の統計情報
+    #[derive(Debug, Clone, Copy)]
+    pub struct EvalHashStats {
+        pub probes: u64,
+        pub hits: u64,
+    }
+
+    impl EvalHashStats {
+        /// ヒット率を計算（0.0 - 1.0）
+        pub fn hit_rate(&self) -> f64 {
+            if self.probes == 0 {
+                0.0
+            } else {
+                self.hits as f64 / self.probes as f64
+            }
+        }
+
+        /// ヒット率をパーセントで取得
+        pub fn hit_rate_percent(&self) -> f64 {
+            self.hit_rate() * 100.0
+        }
+    }
+
+    impl std::fmt::Display for EvalHashStats {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "probes: {}, hits: {}, hit_rate: {:.2}%",
+                self.probes,
+                self.hits,
+                self.hit_rate_percent()
+            )
+        }
+    }
+
+    /// 統計情報を取得
+    pub fn eval_hash_stats() -> EvalHashStats {
+        EvalHashStats {
+            probes: PROBE_COUNT.load(Ordering::Relaxed),
+            hits: HIT_COUNT.load(Ordering::Relaxed),
+        }
+    }
+
+    /// 統計情報をリセット
+    pub fn reset_eval_hash_stats() {
+        PROBE_COUNT.store(0, Ordering::Relaxed);
+        HIT_COUNT.store(0, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn record_probe() {
+        PROBE_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn record_hit() {
+        HIT_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(feature = "diagnostics")]
+pub use stats::{eval_hash_stats, reset_eval_hash_stats, EvalHashStats};
 
 pub fn eval_hash_enabled() -> bool {
     USE_EVAL_HASH.load(Ordering::Relaxed)
@@ -28,77 +98,49 @@ pub fn set_eval_hash_enabled(enabled: bool) {
     USE_EVAL_HASH.store(enabled, Ordering::Relaxed);
 }
 
-#[cfg(target_arch = "x86_64")]
-#[repr(C, align(16))]
+/// スレッドセーフなEvalHashエントリ
+///
+/// AtomicU64×2 + XORエンコーディングによる実装。
+/// - key_xor = key ^ score として格納
+/// - 読み取り時に key = key_xor ^ score で復元
+/// - torn read（部分的な読み取り）が発生した場合、keyが不一致となり検出可能
+///
+/// Relaxed orderingを使用し、最小限のオーバーヘッドで同期を実現。
 struct EvalHashEntryAtomic {
-    raw: UnsafeCell<[u64; 2]>,
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-struct EvalHashEntryAtomic {
-    key: AtomicU64,
+    key_xor: AtomicU64,
     score: AtomicU64,
 }
 
-#[cfg(target_arch = "x86_64")]
-unsafe impl Sync for EvalHashEntryAtomic {}
-
 impl EvalHashEntryAtomic {
     fn new() -> Self {
-        #[cfg(target_arch = "x86_64")]
-        {
-            Self {
-                raw: UnsafeCell::new([0, 0]),
-            }
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            Self {
-                key: AtomicU64::new(0),
-                score: AtomicU64::new(0),
-            }
+        Self {
+            key_xor: AtomicU64::new(0),
+            score: AtomicU64::new(0),
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
+    /// エントリを読み取り、(key, score) を返す
+    ///
+    /// XORエンコーディングにより、torn readは key 不一致として検出される
     #[inline]
     fn load_pair(&self) -> (u64, u64) {
-        unsafe {
-            use std::arch::x86_64::{_mm_load_si128, _mm_storeu_si128};
-            let ptr = self.raw.get() as *const std::arch::x86_64::__m128i;
-            let raw = _mm_load_si128(ptr);
-            let mut out = mem::MaybeUninit::<[u64; 2]>::uninit();
-            _mm_storeu_si128(out.as_mut_ptr() as *mut std::arch::x86_64::__m128i, raw);
-            let [key, score] = out.assume_init();
-            (key, score)
-        }
-    }
-
-    #[cfg(not(target_arch = "x86_64"))]
-    #[inline]
-    fn load_pair(&self) -> (u64, u64) {
-        let key_xor = self.key.load(Ordering::Relaxed);
+        let key_xor = self.key_xor.load(Ordering::Relaxed);
         let score = self.score.load(Ordering::Relaxed);
         (key_xor ^ score, score)
     }
 
-    #[cfg(target_arch = "x86_64")]
-    #[inline]
-    fn store_pair(&self, key: u64, score: u64) {
-        unsafe {
-            use std::arch::x86_64::{_mm_set_epi64x, _mm_store_si128};
-            let raw = _mm_set_epi64x(score as i64, key as i64);
-            let ptr = self.raw.get() as *mut std::arch::x86_64::__m128i;
-            _mm_store_si128(ptr, raw);
-        }
-    }
-
-    #[cfg(not(target_arch = "x86_64"))]
+    /// エントリを書き込む
+    ///
+    /// key ^ score を key_xor として格納することで、
+    /// 部分的な書き込みが読み取られた場合でもkey不一致で検出可能
     #[inline]
     fn store_pair(&self, key: u64, score: u64) {
         let key_xor = key ^ score;
+        // score を先に書き込み、次に key_xor を書き込む
+        // 読み取り側は key_xor, score の順で読むため、
+        // 不整合があれば XOR 結果が元の key と一致しない
         self.score.store(score, Ordering::Relaxed);
-        self.key.store(key_xor, Ordering::Relaxed);
+        self.key_xor.store(key_xor, Ordering::Relaxed);
     }
 }
 
@@ -152,11 +194,15 @@ impl EvalHash {
         if self.table.is_empty() {
             return None;
         }
+        #[cfg(feature = "diagnostics")]
+        stats::record_probe();
         let entry = &self.table[self.index(key)];
         let (stored_key, stored_score) = entry.load_pair();
         if stored_key != key {
             return None;
         }
+        #[cfg(feature = "diagnostics")]
+        stats::record_hit();
         Some(stored_score as u32 as i32)
     }
 
@@ -243,8 +289,8 @@ mod tests {
 
     #[test]
     fn test_eval_hash_enabled_default() {
-        // デフォルトで有効
-        assert!(eval_hash_enabled());
+        // デフォルトで無効
+        assert!(!eval_hash_enabled());
     }
 
     #[test]

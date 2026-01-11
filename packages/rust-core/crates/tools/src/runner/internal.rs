@@ -5,6 +5,8 @@ use std::thread;
 
 use anyhow::{Context, Result};
 
+#[cfg(feature = "diagnostics")]
+use engine_core::eval::{eval_hash_stats, reset_eval_hash_stats};
 use engine_core::eval::{set_eval_hash_enabled, set_material_level, MaterialLevel};
 use engine_core::nnue::init_nnue;
 use engine_core::position::Position;
@@ -79,7 +81,11 @@ fn run_internal_benchmark_standard(config: &BenchmarkConfig) -> Result<Benchmark
     let mut all_results = Vec::new();
 
     for threads in &config.threads {
-        println!("=== Threads: {} ===", threads);
+        println!("=== Threads: {threads} ===");
+
+        // EvalHash 統計をリセット
+        #[cfg(feature = "diagnostics")]
+        reset_eval_hash_stats();
 
         let mut thread_results = Vec::new();
         let tt_mb = config.tt_mb;
@@ -171,6 +177,13 @@ fn run_internal_benchmark_standard(config: &BenchmarkConfig) -> Result<Benchmark
             }
         }
 
+        // EvalHash 統計を表示
+        #[cfg(feature = "diagnostics")]
+        if config.use_eval_hash {
+            let stats = eval_hash_stats();
+            println!("EvalHash stats: {stats}");
+        }
+
         all_results.push(ThreadResult {
             threads: *threads,
             results: thread_results,
@@ -192,7 +205,11 @@ fn run_internal_benchmark_reuse(config: &BenchmarkConfig) -> Result<BenchmarkRep
     let mut all_results = Vec::new();
 
     for threads in &config.threads {
-        println!("=== Threads: {} (reuse_search mode) ===", threads);
+        println!("=== Threads: {threads} (reuse_search mode) ===");
+
+        // EvalHash 統計をリセット
+        #[cfg(feature = "diagnostics")]
+        reset_eval_hash_stats();
 
         // 設定値をキャプチャ
         let tt_mb = config.tt_mb;
@@ -277,6 +294,13 @@ fn run_internal_benchmark_reuse(config: &BenchmarkConfig) -> Result<BenchmarkRep
 
         // 結果を収集（スレッド終了後、チャネルは自動的にクローズされている）
         let thread_results: Vec<BenchResult> = rx.into_iter().collect();
+
+        // EvalHash 統計を表示
+        #[cfg(feature = "diagnostics")]
+        if config.use_eval_hash {
+            let stats = eval_hash_stats();
+            println!("EvalHash stats: {stats}");
+        }
 
         all_results.push(ThreadResult {
             threads: *threads,

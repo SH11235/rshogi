@@ -595,6 +595,11 @@ impl Search {
     pub fn resize_eval_hash(&mut self, size_mb: usize) {
         self.eval_hash = Arc::new(EvalHash::new(size_mb));
         self.eval_hash_size_mb = size_mb;
+        // workerが存在する場合、EvalHash参照を更新
+        if let Some(worker) = &mut self.worker {
+            worker.eval_hash = Arc::clone(&self.eval_hash);
+        }
+        self.thread_pool.update_eval_hash(Arc::clone(&self.eval_hash));
     }
 
     /// EvalHashをクリア

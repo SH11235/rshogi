@@ -2,4 +2,6 @@ pub mod eval_hash;
 pub mod material;
 
 pub use eval_hash::{eval_hash_enabled, set_eval_hash_enabled, EvalHash};
+#[cfg(feature = "diagnostics")]
+pub use eval_hash::{eval_hash_stats, reset_eval_hash_stats, EvalHashStats};
 pub use material::{get_material_level, set_material_level, MaterialLevel};

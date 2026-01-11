@@ -121,6 +121,15 @@ mod imp {
             }
         }
 
+        pub fn update_eval_hash(&mut self, eval_hash: Arc<EvalHash>) {
+            for thread in &self.threads {
+                let eval_hash = Arc::clone(&eval_hash);
+                thread.with_worker(|worker| {
+                    worker.eval_hash = eval_hash;
+                });
+            }
+        }
+
         pub fn helper_threads(&self) -> &[Thread] {
             &self.threads
         }
@@ -399,6 +408,10 @@ mod imp {
         }
 
         pub fn update_tt(&mut self, _tt: Arc<TranspositionTable>) {
+            // No-op: no helper thread workers to update
+        }
+
+        pub fn update_eval_hash(&mut self, _eval_hash: Arc<EvalHash>) {
             // No-op: no helper thread workers to update
         }
 
@@ -836,6 +849,13 @@ mod imp {
             // Thread-local workers will get the updated TT reference when start_thinking
             // calls worker.tt = Arc::clone(&tt) for each helper.
             self.tt = tt;
+        }
+
+        pub fn update_eval_hash(&mut self, eval_hash: Arc<EvalHash>) {
+            // Update self.eval_hash so that subsequent start_thinking calls use the new EvalHash.
+            // Thread-local workers will get the updated EvalHash reference when start_thinking
+            // calls worker.eval_hash = Arc::clone(&eval_hash) for each helper.
+            self.eval_hash = eval_hash;
         }
 
         pub fn helper_threads(&self) -> &[Thread] {
