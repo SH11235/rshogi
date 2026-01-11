@@ -8,6 +8,7 @@
 use std::ptr::NonNull;
 use std::sync::Arc;
 
+use crate::eval::EvalHash;
 use crate::nnue::{evaluate, AccumulatorStack, DirtyPiece};
 use crate::position::Position;
 use crate::search::PieceToHistory;
@@ -205,6 +206,9 @@ pub struct SearchWorker {
     /// 置換表への共有参照（Arc）
     pub tt: Arc<TranspositionTable>,
 
+    /// 評価ハッシュへの共有参照（Arc）
+    pub eval_hash: Arc<EvalHash>,
+
     /// スレッドID（0=main）
     pub thread_id: usize,
 
@@ -286,13 +290,19 @@ impl SearchWorker {
     /// 新しいSearchWorkerを作成（YaneuraOu準拠: isreadyまたは最初のgo時）
     ///
     /// Box化してヒープに配置し、スタックオーバーフローを防ぐ。
-    pub fn new(tt: Arc<TranspositionTable>, max_moves_to_draw: i32, thread_id: usize) -> Box<Self> {
+    pub fn new(
+        tt: Arc<TranspositionTable>,
+        eval_hash: Arc<EvalHash>,
+        max_moves_to_draw: i32,
+        thread_id: usize,
+    ) -> Box<Self> {
         let history = HistoryTables::new_boxed();
         let cont_history_sentinel =
             NonNull::from(history.continuation_history[0][0].get_table(Piece::NONE, Square::SQ_11));
 
         let mut worker = Box::new(Self {
             tt,
+            eval_hash,
             thread_id,
             // 履歴統計の初期化
             history,
@@ -714,7 +724,7 @@ impl SearchWorker {
             unadjusted_static_eval = tt_ctx.data.eval;
             unadjusted_static_eval
         } else {
-            unadjusted_static_eval = evaluate(pos, &mut self.nnue_stack);
+            unadjusted_static_eval = evaluate(pos, &mut self.nnue_stack, &self.eval_hash);
             unadjusted_static_eval
         };
 
@@ -1670,7 +1680,7 @@ impl SearchWorker {
             return if in_check {
                 Value::ZERO
             } else {
-                evaluate(pos, &mut self.nnue_stack)
+                evaluate(pos, &mut self.nnue_stack, &self.eval_hash)
             };
         }
 
@@ -2664,7 +2674,7 @@ impl SearchWorker {
             return if in_check {
                 Value::ZERO
             } else {
-                evaluate(pos, &mut self.nnue_stack)
+                evaluate(pos, &mut self.nnue_stack, &self.eval_hash)
             };
         }
 
@@ -2733,7 +2743,7 @@ impl SearchWorker {
                     return Value::mate_in(ply + 1);
                 }
             }
-            unadjusted_static_eval = evaluate(pos, &mut self.nnue_stack);
+            unadjusted_static_eval = evaluate(pos, &mut self.nnue_stack, &self.eval_hash);
             unadjusted_static_eval
         };
 
@@ -3094,7 +3104,8 @@ mod tests {
 
         // SearchWorker作成時にsentinelが正しく初期化されることを確認
         let tt = Arc::new(TranspositionTable::new(16));
-        let worker = SearchWorker::new(tt, 0, 0);
+        let eval_hash = Arc::new(EvalHash::new(1));
+        let worker = SearchWorker::new(tt, eval_hash, 0, 0);
 
         // sentinelポインタがdanglingではなく、実際のテーブルを指していることを確認
         let sentinel = worker.cont_history_sentinel;
@@ -3122,7 +3133,8 @@ mod tests {
         use std::sync::Arc;
 
         let tt = Arc::new(TranspositionTable::new(16));
-        let worker = SearchWorker::new(tt, 0, 0);
+        let eval_hash = Arc::new(EvalHash::new(1));
+        let worker = SearchWorker::new(tt, eval_hash, 0, 0);
 
         // ply < back の場合はsentinelを返すことを確認
         let ptr = worker.cont_history_ptr(0, 1);

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::thread;
 
 use anyhow::Result;
-use engine_core::eval::{set_material_level, MaterialLevel};
+use engine_core::eval::{set_eval_hash_enabled, set_material_level, MaterialLevel};
 use engine_core::nnue::init_nnue;
 use engine_core::position::Position;
 use engine_core::search::{LimitsType, Search, SearchInfo, SearchResult};
@@ -32,6 +32,10 @@ struct UsiEngine {
     position: Position,
     /// 置換表サイズ（USI_Hashで変更）
     tt_size_mb: usize,
+    /// 評価ハッシュサイズ（EvalHashで変更）
+    eval_hash_size_mb: usize,
+    /// EvalHash使用フラグ（UseEvalHashで変更）
+    use_eval_hash: bool,
     /// MultiPV値
     multi_pv: usize,
     /// Skill Level オプション
@@ -50,11 +54,14 @@ impl UsiEngine {
     /// 新しいUSIエンジンを作成
     fn new() -> Self {
         let tt_size_mb = 256;
+        let eval_hash_size_mb = 256;
 
         Self {
             search: Some(Search::new(tt_size_mb)), // デフォルト256MB
             position: Position::new(),
             tt_size_mb,
+            eval_hash_size_mb,
+            use_eval_hash: true, // デフォルトで有効
             multi_pv: 1,
             skill_options: engine_core::search::SkillOptions::default(),
             search_thread: None,
@@ -131,6 +138,8 @@ impl UsiEngine {
         println!("option name MinimumThinkingTime type spin default 2000 min 1000 max 100000");
         println!("option name SlowMover type spin default 100 min 1 max 1000");
         println!("option name MaxMovesToDraw type spin default 100000 min 0 max 100000");
+        println!("option name EvalHash type spin default 256 min 0 max 4096");
+        println!("option name UseEvalHash type check default true");
         println!("option name Skill Level type spin default 20 min 0 max 20");
         println!("option name UCI_LimitStrength type check default false");
         println!("option name UCI_Elo type spin default 0 min 0 max 4000");
@@ -306,6 +315,19 @@ impl UsiEngine {
                         search.set_skill_options(opts);
                     }
                 }
+            }
+            "EvalHash" => {
+                if let Ok(size) = value.parse::<usize>() {
+                    if let Some(search) = self.search.as_mut() {
+                        search.resize_eval_hash(size);
+                        self.eval_hash_size_mb = size;
+                    }
+                }
+            }
+            "UseEvalHash" => {
+                let v = value == "true" || value == "1";
+                self.use_eval_hash = v;
+                set_eval_hash_enabled(v);
             }
             "MaxMovesToDraw" => {
                 if let Ok(v) = value.parse::<i32>() {

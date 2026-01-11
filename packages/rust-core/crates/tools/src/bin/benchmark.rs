@@ -74,6 +74,14 @@ struct Cli {
     /// ウォームアップ実行回数（結果に含めないが履歴を蓄積）
     #[arg(long, default_value = "0")]
     warmup: u32,
+
+    /// EvalHashサイズ（MB）
+    #[arg(long, default_value = "256")]
+    eval_hash_mb: u32,
+
+    /// EvalHashを使用するか（true/false）
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    use_eval_hash: bool,
 }
 
 /// Material評価レベルのバリデーション
@@ -122,6 +130,8 @@ impl Cli {
             },
             reuse_search: self.reuse_search,
             warmup: self.warmup,
+            eval_hash_mb: self.eval_hash_mb,
+            use_eval_hash: self.use_eval_hash,
         }
     }
 }

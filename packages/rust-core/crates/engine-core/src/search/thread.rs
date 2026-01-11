@@ -7,6 +7,7 @@ mod imp {
     use std::sync::{Arc, Condvar, Mutex};
     use std::thread::JoinHandle;
 
+    use crate::eval::EvalHash;
     use crate::position::Position;
     use crate::tt::TranspositionTable;
     use crate::types::Depth;
@@ -20,12 +21,14 @@ mod imp {
         threads: Vec<Thread>,
         stop: Arc<AtomicBool>,
         ponderhit: Arc<AtomicBool>,
+        eval_hash: Arc<EvalHash>,
     }
 
     impl ThreadPool {
         pub fn new(
             num_threads: usize,
             tt: Arc<TranspositionTable>,
+            eval_hash: Arc<EvalHash>,
             stop: Arc<AtomicBool>,
             ponderhit: Arc<AtomicBool>,
             max_moves_to_draw: i32,
@@ -34,8 +37,9 @@ mod imp {
                 threads: Vec::new(),
                 stop,
                 ponderhit,
+                eval_hash: Arc::clone(&eval_hash),
             };
-            pool.set_num_threads(num_threads, tt, max_moves_to_draw);
+            pool.set_num_threads(num_threads, tt, eval_hash, max_moves_to_draw);
             pool
         }
 
@@ -43,20 +47,24 @@ mod imp {
             &mut self,
             num_threads: usize,
             tt: Arc<TranspositionTable>,
+            eval_hash: Arc<EvalHash>,
             max_moves_to_draw: i32,
         ) {
             let helper_count = num_threads.saturating_sub(1);
             if helper_count == self.threads.len() {
+                self.eval_hash = eval_hash;
                 return;
             }
 
             self.wait_for_search_finished();
             self.threads.clear();
+            self.eval_hash = Arc::clone(&eval_hash);
 
             for id in 1..=helper_count {
                 self.threads.push(Thread::new(
                     id,
                     Arc::clone(&tt),
+                    Arc::clone(&eval_hash),
                     Arc::clone(&self.stop),
                     Arc::clone(&self.ponderhit),
                     max_moves_to_draw,
@@ -163,11 +171,12 @@ mod imp {
         fn new(
             id: usize,
             tt: Arc<TranspositionTable>,
+            eval_hash: Arc<EvalHash>,
             stop: Arc<AtomicBool>,
             ponderhit: Arc<AtomicBool>,
             max_moves_to_draw: i32,
         ) -> Self {
-            let worker = SearchWorker::new(tt, max_moves_to_draw, id);
+            let worker = SearchWorker::new(tt, eval_hash, max_moves_to_draw, id);
             let progress = Arc::new(SearchProgress::new());
             let inner = Arc::new(ThreadInner {
                 worker: Mutex::new(worker),
@@ -329,6 +338,7 @@ mod imp {
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
+    use crate::eval::EvalHash;
     use crate::position::Position;
     use crate::tt::TranspositionTable;
     use crate::types::Depth;
@@ -346,6 +356,7 @@ mod imp {
         pub fn new(
             _num_threads: usize,
             _tt: Arc<TranspositionTable>,
+            _eval_hash: Arc<EvalHash>,
             stop: Arc<AtomicBool>,
             ponderhit: Arc<AtomicBool>,
             _max_moves_to_draw: i32,
@@ -361,6 +372,7 @@ mod imp {
             &mut self,
             _num_threads: usize,
             _tt: Arc<TranspositionTable>,
+            _eval_hash: Arc<EvalHash>,
             _max_moves_to_draw: i32,
         ) {
             // No-op: single-threaded mode ignores thread count
@@ -487,6 +499,7 @@ mod imp {
 
     use rayon::prelude::*;
 
+    use crate::eval::EvalHash;
     use crate::position::Position;
     use crate::tt::TranspositionTable;
     use crate::types::{Depth, Move, Value};
@@ -560,6 +573,7 @@ mod imp {
     pub struct ThreadPool {
         num_threads: usize,
         tt: Arc<TranspositionTable>,
+        eval_hash: Arc<EvalHash>,
         stop: Arc<AtomicBool>,
         ponderhit: Arc<AtomicBool>,
         max_moves_to_draw: i32,
@@ -578,6 +592,7 @@ mod imp {
         pub fn new(
             num_threads: usize,
             tt: Arc<TranspositionTable>,
+            eval_hash: Arc<EvalHash>,
             stop: Arc<AtomicBool>,
             ponderhit: Arc<AtomicBool>,
             max_moves_to_draw: i32,
@@ -589,6 +604,7 @@ mod imp {
             Self {
                 num_threads,
                 tt,
+                eval_hash,
                 stop,
                 ponderhit,
                 max_moves_to_draw,
@@ -602,6 +618,7 @@ mod imp {
             &mut self,
             num_threads: usize,
             tt: Arc<TranspositionTable>,
+            eval_hash: Arc<EvalHash>,
             max_moves_to_draw: i32,
         ) {
             let num_threads = num_threads.max(1);
@@ -612,6 +629,7 @@ mod imp {
             self.helper_progress.truncate(helper_count);
             self.num_threads = num_threads;
             self.tt = tt;
+            self.eval_hash = eval_hash;
             self.max_moves_to_draw = max_moves_to_draw;
         }
 
@@ -672,6 +690,7 @@ mod imp {
                 let stop = Arc::clone(&self.stop);
                 let ponderhit = Arc::clone(&self.ponderhit);
                 let tt = Arc::clone(&self.tt);
+                let eval_hash = Arc::clone(&self.eval_hash);
                 let pending = Arc::clone(&self.pending_tasks);
                 let helper_results = Arc::clone(&self.helper_results);
                 // thread_id is 1-indexed, so subtract 1 to get the progress index
@@ -687,6 +706,7 @@ mod imp {
                         if worker_opt.is_none() {
                             *worker_opt = Some(SearchWorker::new(
                                 Arc::clone(&tt),
+                                Arc::clone(&eval_hash),
                                 max_moves_to_draw,
                                 thread_id,
                             ));
@@ -696,6 +716,7 @@ mod imp {
 
                         // Update worker state for this search
                         worker.tt = Arc::clone(&tt);
+                        worker.eval_hash = Arc::clone(&eval_hash);
                         worker.max_moves_to_draw = max_moves_to_draw;
                         worker.prepare_search();
 
