@@ -384,7 +384,7 @@ fn finalize_result(
 
     let new_psv = PackedSfenValue {
         sfen: new_sfen,
-        score: result.value as i16,
+        score: psv.score, // 元のスコア（深い探索結果）を保持
         move16: new_move16,
         game_ply: psv.game_ply,
         game_result: psv.game_result,
