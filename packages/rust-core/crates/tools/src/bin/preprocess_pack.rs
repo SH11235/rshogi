@@ -316,6 +316,13 @@ fn process_record_material(
     let mut pos = Position::new();
     pos.set_sfen(&sfen).map_err(|e| anyhow::anyhow!("Failed to set SFEN: {e:?}"))?;
 
+    // 王手中の局面はqsearchをスキップして元のレコードを返す
+    // 理由: 王手中は静止局面ではなく、qsearchで探索爆発が起きる可能性がある
+    // 学習時に--smart-fen-skippingで王手中の局面はフィルタリングされる
+    if pos.in_check() {
+        return Ok(*record);
+    }
+
     // qsearch_with_pvを実行
     let result =
         qsearch_with_pv(&mut pos, evaluator, QSEARCH_ALPHA_INIT, QSEARCH_BETA_INIT, 0, max_ply);
@@ -339,6 +346,13 @@ fn process_record_nnue(
 
     let mut pos = Position::new();
     pos.set_sfen(&sfen).map_err(|e| anyhow::anyhow!("Failed to set SFEN: {e:?}"))?;
+
+    // 王手中の局面はqsearchをスキップして元のレコードを返す
+    // 理由: 王手中は静止局面ではなく、qsearchで探索爆発が起きる可能性がある
+    // 学習時に--smart-fen-skippingで王手中の局面はフィルタリングされる
+    if pos.in_check() {
+        return Ok(*record);
+    }
 
     // qsearch_with_pv_nnueを実行（差分更新版）
     let result =
