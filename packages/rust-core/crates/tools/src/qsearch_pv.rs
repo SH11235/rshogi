@@ -132,11 +132,17 @@ pub struct NnueStacks {
     pub acc_ls: AccumulatorStackNnuePytorch,
     /// HalfKADynamic用スタック（常に存在、evaluate_dispatchに必要）
     pub acc_hd: AccumulatorStackHalfKADynamic,
+    /// ノード数カウンター（探索爆発防止用）
+    pub node_count: u64,
 }
 
 impl NnueStacks {
     /// デフォルトのL1サイズ（HalfKADynamicを使わない場合のダミー用）
     const DEFAULT_L1: usize = 256;
+
+    /// ノード数上限（探索爆発防止）
+    /// 100万ノードで打ち切り（問題局面でも数秒以内に完了）
+    pub const MAX_NODES: u64 = 1_000_000;
 
     /// 新しいNnueStacksを作成
     pub fn new() -> Self {
@@ -145,6 +151,7 @@ impl NnueStacks {
             acc: AccumulatorStack::new(),
             acc_ls: AccumulatorStackNnuePytorch::new(),
             acc_hd: AccumulatorStackHalfKADynamic::new(l1),
+            node_count: 0,
         }
     }
 
@@ -152,6 +159,7 @@ impl NnueStacks {
     pub fn reset(&mut self) {
         self.acc.reset();
         self.acc_ls.reset();
+        self.node_count = 0;
         // HalfKADynamicはL1サイズが変わっている可能性があるので確認
         if let Some(l1) = get_halfka_dynamic_l1() {
             if self.acc_hd.l1() != l1 {
@@ -162,6 +170,18 @@ impl NnueStacks {
         } else {
             self.acc_hd.reset();
         }
+    }
+
+    /// ノード数上限に達したかどうか
+    #[inline]
+    pub fn node_limit_reached(&self) -> bool {
+        self.node_count >= Self::MAX_NODES
+    }
+
+    /// ノード数をインクリメント
+    #[inline]
+    pub fn increment_nodes(&mut self) {
+        self.node_count += 1;
     }
 
     /// 手の実行時にスタックをプッシュ
@@ -218,6 +238,17 @@ pub fn qsearch_with_pv_nnue(
     ply: i32,
     max_ply: i32,
 ) -> QsearchResult {
+    // ノード数をインクリメント
+    stacks.increment_nodes();
+
+    // ノード数上限チェック（探索爆発防止）
+    if stacks.node_limit_reached() {
+        return QsearchResult {
+            value: stacks.evaluate(pos),
+            pv: vec![],
+        };
+    }
+
     // 深さ制限チェック
     if ply >= max_ply {
         return QsearchResult {

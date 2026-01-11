@@ -53,8 +53,8 @@ struct Cli {
     #[arg(short, long)]
     output: PathBuf,
 
-    /// qsearchの最大深さ
-    #[arg(long, default_value_t = 32)]
+    /// qsearchの最大深さ（ノード制限と併用で爆発防止）
+    #[arg(long, default_value_t = 16)]
     max_ply: i32,
 
     /// 並列処理スレッド数（0=自動）
