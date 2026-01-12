@@ -917,7 +917,15 @@ impl GameOutcome {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+
+    // 時間制限のバリデーション: すべて0の場合は無限思考モードになりタイムアウト問題が発生するため警告
+    if cli.btime == 0 && cli.wtime == 0 && cli.byoyomi == 0 && cli.binc == 0 && cli.winc == 0 {
+        eprintln!(
+            "Warning: No time control specified. Using default byoyomi=1000ms to prevent infinite thinking."
+        );
+        cli.byoyomi = 1000;
+    }
 
     let (start_defs, start_commands) =
         load_start_positions(cli.startpos_file.as_deref(), cli.sfen.as_deref())?;
