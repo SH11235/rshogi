@@ -32,7 +32,7 @@ use std::cell::RefCell;
 
 use engine_core::nnue::init_nnue;
 use engine_core::position::Position;
-use tools::packed_sfen::{move_to_move16, pack_position, unpack_sfen, PackedSfenValue};
+use tools::packed_sfen::{pack_position, unpack_sfen, PackedSfenValue};
 use tools::qsearch_pv::{
     qsearch_with_pv, qsearch_with_pv_nnue, MaterialEvaluator, NnueStacks, QsearchResult,
 };
@@ -72,6 +72,11 @@ struct Cli {
     /// 詳細出力
     #[arg(short, long)]
     verbose: bool,
+
+    /// 手番反転時にscoreとgame_resultの符号を補正しない（デバッグ用）
+    /// qsearch leaf置換で手番が変わった場合でもscoreとgame_resultを反転しない
+    #[arg(long)]
+    no_fix_stm_sign: bool,
 }
 
 /// 処理中にCtrl-Cが押されたかを追跡
@@ -145,9 +150,11 @@ fn main() -> Result<()> {
     );
     eprintln!("Processing {} records with {} thread(s)", process_count, cli.threads);
     eprintln!("Max ply: {}", cli.max_ply);
+    let fix_stm_sign = !cli.no_fix_stm_sign;
+    eprintln!("STM sign fix: {}", if fix_stm_sign { "enabled" } else { "disabled" });
 
     // 処理実行
-    process_file(&cli, process_count, use_nnue)?;
+    process_file(&cli, process_count, use_nnue, fix_stm_sign)?;
 
     if INTERRUPTED.load(Ordering::SeqCst) {
         eprintln!("Note: Processing was interrupted, output may be incomplete");
@@ -159,7 +166,7 @@ fn main() -> Result<()> {
 }
 
 /// ファイルを処理
-fn process_file(cli: &Cli, process_count: u64, use_nnue: bool) -> Result<()> {
+fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, fix_stm_sign: bool) -> Result<()> {
     // 進捗バー設定
     let progress = ProgressBar::new(process_count);
     progress.set_style(
@@ -223,7 +230,7 @@ fn process_file(cli: &Cli, process_count: u64, use_nnue: bool) -> Result<()> {
                 let result = NNUE_STACKS.with(|stacks| {
                     let mut stacks = stacks.borrow_mut();
                     stacks.reset();
-                    process_record_nnue(record, &mut stacks, max_ply)
+                    process_record_nnue(record, &mut stacks, max_ply, fix_stm_sign)
                 });
 
                 match result {
@@ -253,7 +260,7 @@ fn process_file(cli: &Cli, process_count: u64, use_nnue: bool) -> Result<()> {
                     return *record;
                 }
 
-                let result = process_record_material(record, &evaluator, max_ply);
+                let result = process_record_material(record, &evaluator, max_ply, fix_stm_sign);
 
                 match result {
                     Ok(new_record) => {
@@ -305,6 +312,7 @@ fn process_record_material(
     record: &[u8; PackedSfenValue::SIZE],
     evaluator: &MaterialEvaluator,
     max_ply: i32,
+    fix_stm_sign: bool,
 ) -> Result<[u8; PackedSfenValue::SIZE]> {
     // PackedSfenValueを読み込み
     let psv = PackedSfenValue::from_bytes(record)
@@ -323,12 +331,15 @@ fn process_record_material(
         return Ok(*record);
     }
 
+    // 元の手番を記録
+    let original_stm = pos.side_to_move();
+
     // qsearch_with_pvを実行
     let result =
         qsearch_with_pv(&mut pos, evaluator, QSEARCH_ALPHA_INIT, QSEARCH_BETA_INIT, 0, max_ply);
 
     // 結果をPackedSfenValueに変換
-    finalize_result(&mut pos, &psv, result)
+    finalize_result(&mut pos, &psv, result, original_stm, fix_stm_sign)
 }
 
 /// 1レコードを処理（NNUE評価版、差分更新）
@@ -336,6 +347,7 @@ fn process_record_nnue(
     record: &[u8; PackedSfenValue::SIZE],
     stacks: &mut NnueStacks,
     max_ply: i32,
+    fix_stm_sign: bool,
 ) -> Result<[u8; PackedSfenValue::SIZE]> {
     // PackedSfenValueを読み込み
     let psv = PackedSfenValue::from_bytes(record)
@@ -354,19 +366,31 @@ fn process_record_nnue(
         return Ok(*record);
     }
 
+    // 元の手番を記録
+    let original_stm = pos.side_to_move();
+
     // qsearch_with_pv_nnueを実行（差分更新版）
     let result =
         qsearch_with_pv_nnue(&mut pos, stacks, QSEARCH_ALPHA_INIT, QSEARCH_BETA_INIT, 0, max_ply);
 
     // 結果をPackedSfenValueに変換
-    finalize_result(&mut pos, &psv, result)
+    finalize_result(&mut pos, &psv, result, original_stm, fix_stm_sign)
 }
 
 /// qsearch結果をPackedSfenValueに変換
+///
+/// # Arguments
+/// * `pos` - qsearch PVを進めた後の局面（PV進行後は既にleaf位置）
+/// * `psv` - 元のPackedSfenValue
+/// * `result` - qsearchの結果
+/// * `original_stm` - 元の局面の手番
+/// * `fix_stm_sign` - 手番反転時に符号を補正するか
 fn finalize_result(
     pos: &mut Position,
     psv: &PackedSfenValue,
     result: QsearchResult,
+    original_stm: engine_core::types::Color,
+    fix_stm_sign: bool,
 ) -> Result<[u8; PackedSfenValue::SIZE]> {
     // PVに沿って局面を進める
     for mv in &result.pv {
@@ -374,20 +398,39 @@ fn finalize_result(
         let _ = pos.do_move(*mv, gives_check);
     }
 
+    // 手番が変わったかチェック
+    let stm_changed = pos.side_to_move() != original_stm;
+
+    // 符号補正: 手番が変わった場合、scoreとgame_resultを反転
+    // YaneuraOuのlearner.cppと同様:
+    // Value shallow_value = (rootColor == pos.side_to_move()) ?
+    //   Eval::evaluate(pos) : -Eval::evaluate(pos);
+    let (new_score, new_game_result) = if fix_stm_sign && stm_changed {
+        // scoreの反転（オーバーフロー対策でsaturating_neg使用）
+        let flipped_score = psv.score.saturating_neg();
+        // game_resultの反転（1 → -1, -1 → 1, 0 → 0）
+        let flipped_result = -psv.game_result;
+        (flipped_score, flipped_result)
+    } else {
+        (psv.score, psv.game_result)
+    };
+
     // 新しいPackedSfenValueを作成
     let new_sfen = pack_position(pos);
-    let new_move16 = if let Some(&first_mv) = result.pv.first() {
-        move_to_move16(first_mv)
-    } else {
-        psv.move16 // PVが空の場合は元の手を維持
-    };
+
+    // move16は0（無効値）に設定
+    // 理由: PV末端局面に置換した後、元のmoveやqsearch結果のPVは
+    // 置換後局面での合法手ではない。nnue-pytorchの--smart-fen-skipping
+    // オプションはmove16を使ってisCapturingMove()を判定するため、
+    // 非合法手が設定されていると未定義動作やスキップ判定の破綻を招く。
+    let new_move16 = 0;
 
     let new_psv = PackedSfenValue {
         sfen: new_sfen,
-        score: psv.score, // 元のスコア（深い探索結果）を保持
+        score: new_score,
         move16: new_move16,
         game_ply: psv.game_ply,
-        game_result: psv.game_result,
+        game_result: new_game_result,
         padding: 0,
     };
 
