@@ -13,7 +13,7 @@
 use super::accumulator::{Accumulator, AccumulatorStack, Aligned};
 use super::accumulator_nnue_pytorch::AccumulatorStackNnuePytorch;
 use super::constants::{
-    FV_SCALE, HIDDEN1_DIMENSIONS, HIDDEN2_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION,
+    FV_SCALE, FV_SCALE_HALFKA, HIDDEN1_DIMENSIONS, HIDDEN2_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION,
     NNUE_VERSION_HALFKA, OUTPUT_DIMENSIONS, TRANSFORMED_FEATURE_DIMENSIONS,
 };
 use super::feature_transformer::FeatureTransformer;
@@ -695,8 +695,8 @@ impl Network {
         let mut output = Aligned([0i32; OUTPUT_DIMENSIONS]);
         self.output.propagate(&hidden2_relu.0, &mut output.0);
 
-        // スケーリング
-        Value::new(output.0[0] / FV_SCALE)
+        // スケーリング（nnue-pytorch形式はFV_SCALE=16）
+        Value::new(output.0[0] / FV_SCALE_HALFKA)
     }
 }
 

@@ -10,7 +10,13 @@ pub const NNUE_VERSION: u32 = 0x7AF32F16;
 pub const MAX_ARCH_LEN: usize = 4096;
 
 /// 評価値のスケーリング（suisho5向け: 24）
+/// HalfKP形式（NNUE_VERSION = 0x7AF32F16）用
 pub const FV_SCALE: i32 = 24;
+
+/// 評価値のスケーリング（nnue-pytorch向け: 16）
+/// HalfKA形式（NNUE_VERSION_HALFKA = 0x7AF32F20）用
+/// kPonanzaConstant = 600, FV_SCALE = 16
+pub const FV_SCALE_HALFKA: i32 = 16;
 
 /// 重みのスケーリングビット数
 pub const WEIGHT_SCALE_BITS: u32 = 6;
