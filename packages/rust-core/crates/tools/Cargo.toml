@@ -7,6 +7,11 @@ description = "Performance benchmarking and analysis tools for shogi engine"
 license = "MIT"
 repository = "https://github.com/sh11235/shogi"
 
+[features]
+default = []
+# 診断ログ（EvalHashヒット率など）
+diagnostics = ["engine-core/diagnostics"]
+
 [dependencies]
 # Workspace dependencies
 anyhow.workspace = true

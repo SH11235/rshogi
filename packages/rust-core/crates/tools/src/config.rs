@@ -66,4 +66,8 @@ pub struct BenchmarkConfig {
     pub reuse_search: bool,
     /// ウォームアップ実行回数（結果に含めないが履歴を蓄積）
     pub warmup: u32,
+    /// EvalHashサイズ（メガバイト単位）
+    pub eval_hash_mb: u32,
+    /// EvalHashを使用するか
+    pub use_eval_hash: bool,
 }

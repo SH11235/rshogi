@@ -165,13 +165,15 @@ fn test_worker_best_move_changes_initial_value() {
     std::thread::Builder::new()
         .stack_size(STACK_SIZE)
         .spawn(|| {
+            use crate::eval::EvalHash;
             use crate::search::alpha_beta::SearchWorker;
             use crate::tt::TranspositionTable;
             use std::sync::Arc;
 
             let tt = Arc::new(TranspositionTable::new(16));
+            let eval_hash = Arc::new(EvalHash::new(1));
 
-            let worker = SearchWorker::new(tt, DEFAULT_MAX_MOVES_TO_DRAW, 0);
+            let worker = SearchWorker::new(tt, eval_hash, DEFAULT_MAX_MOVES_TO_DRAW, 0);
 
             assert_eq!(worker.best_move_changes, 0.0, "初期値は0.0であるべき");
         })
@@ -187,13 +189,15 @@ fn test_worker_best_move_changes_decay() {
     std::thread::Builder::new()
         .stack_size(STACK_SIZE)
         .spawn(|| {
+            use crate::eval::EvalHash;
             use crate::search::alpha_beta::SearchWorker;
             use crate::tt::TranspositionTable;
             use std::sync::Arc;
 
             let tt = Arc::new(TranspositionTable::new(16));
+            let eval_hash = Arc::new(EvalHash::new(1));
 
-            let mut worker = SearchWorker::new(tt, DEFAULT_MAX_MOVES_TO_DRAW, 0);
+            let mut worker = SearchWorker::new(tt, eval_hash, DEFAULT_MAX_MOVES_TO_DRAW, 0);
             worker.best_move_changes = 4.0;
             worker.decay_best_move_changes();
 
