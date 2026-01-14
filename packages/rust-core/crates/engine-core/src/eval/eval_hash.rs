@@ -100,12 +100,24 @@ pub fn set_eval_hash_enabled(enabled: bool) {
 
 /// スレッドセーフなEvalHashエントリ
 ///
-/// AtomicU64×2 + XORエンコーディングによる実装。
-/// - key_xor = key ^ score として格納
-/// - 読み取り時に key = key_xor ^ score で復元
-/// - torn read（部分的な読み取り）が発生した場合、keyが不一致となり検出可能
+/// AtomicU64×2 + XORエンコーディングによる実装（Stockfish/YaneuraOu準拠）。
 ///
-/// Relaxed orderingを使用し、最小限のオーバーヘッドで同期を実現。
+/// ## 設計原理
+/// - `key_xor = key ^ score` として格納
+/// - 読み取り時に `key = key_xor ^ score` で復元
+/// - 競合状態で不整合な読み取りが発生した場合、XOR結果が元のkeyと一致しない
+/// - キー不一致はキャッシュミスとして扱われ、安全に無視される
+///
+/// ## Memory Ordering について
+/// Relaxed orderingを使用。これは以下の理由で安全：
+/// 1. キャッシュの正確性はXORエンコーディングで保証される
+/// 2. 競合時の「偽陰性」（キャッシュミス）は許容される
+/// 3. 「偽陽性」（誤ったデータを返す）は発生しない（キー検証で排除）
+/// 4. Stockfish/YaneuraOuも同様のアプローチを採用
+///
+/// Release/Acquireを使用しない理由：
+/// - x86_64では差がない（ハードウェアが強いメモリモデルを提供）
+/// - ARMでは追加コストが発生するが、XORエンコーディングで正確性は保証済み
 struct EvalHashEntryAtomic {
     key_xor: AtomicU64,
     score: AtomicU64,
@@ -121,24 +133,24 @@ impl EvalHashEntryAtomic {
 
     /// エントリを読み取り、(key, score) を返す
     ///
-    /// XORエンコーディングにより、torn readは key 不一致として検出される
+    /// XORエンコーディングにより、競合状態での不整合は key 不一致として検出される。
+    /// 不一致の場合はキャッシュミスとして扱い、再計算を行う。
     #[inline]
     fn load_pair(&self) -> (u64, u64) {
+        // 読み取り順序: key_xor → score
         let key_xor = self.key_xor.load(Ordering::Relaxed);
         let score = self.score.load(Ordering::Relaxed);
+        // XORで元のkeyを復元。競合があれば不正なkeyになりキー検証で弾かれる
         (key_xor ^ score, score)
     }
 
     /// エントリを書き込む
     ///
-    /// key ^ score を key_xor として格納することで、
-    /// 部分的な書き込みが読み取られた場合でもkey不一致で検出可能
+    /// 書き込み順序は score → key_xor。読み取り側は key_xor → score の順で読む。
+    /// 競合状態で片方だけ更新された場合、XOR結果が不整合になり検出可能。
     #[inline]
     fn store_pair(&self, key: u64, score: u64) {
         let key_xor = key ^ score;
-        // score を先に書き込み、次に key_xor を書き込む
-        // 読み取り側は key_xor, score の順で読むため、
-        // 不整合があれば XOR 結果が元の key と一致しない
         self.score.store(score, Ordering::Relaxed);
         self.key_xor.store(key_xor, Ordering::Relaxed);
     }
@@ -171,6 +183,8 @@ impl EvalHash {
         }
         #[cfg(feature = "diagnostics")]
         stats::record_hit();
+        // u64 → u32 → i32: 下位32ビットを符号付き整数として解釈
+        // store時に i32 → u32 → u64 と変換しているため、逆変換で元の値を復元
         Some(stored_score as u32 as i32)
     }
 
@@ -180,6 +194,8 @@ impl EvalHash {
         }
         let idx = self.index(key);
         let entry = &self.table[idx];
+        // i32 → u32 → u64: 符号付き整数をビットパターンを保持したまま拡張
+        // probe時に逆変換で元の値を復元する
         entry.store_pair(key, score as u32 as u64);
     }
 
@@ -213,6 +229,10 @@ impl EvalHash {
     }
 }
 
+/// エントリ数を2のべき乗に正規化（切り下げ）
+///
+/// ハッシュテーブルのサイズは2のべき乗である必要がある（ビットマスクでインデックス計算するため）。
+/// 入力値より小さい最大の2のべき乗を返す。
 fn normalize_size(entries: usize) -> usize {
     if entries == 0 {
         return 0;
@@ -220,7 +240,12 @@ fn normalize_size(entries: usize) -> usize {
     if entries.is_power_of_two() {
         return entries;
     }
-    entries.next_power_of_two() / 2
+    // checked_next_power_of_two でオーバーフローを安全に処理
+    // オーバーフロー時は利用可能な最大サイズにフォールバック
+    entries
+        .checked_next_power_of_two()
+        .map(|n| n / 2)
+        .unwrap_or(1 << (usize::BITS - 2))
 }
 
 #[cfg(test)]
@@ -261,5 +286,83 @@ mod tests {
         assert!(eval_hash_enabled());
         // 元に戻す
         set_eval_hash_enabled(original);
+    }
+
+    #[test]
+    fn test_eval_hash_size_zero() {
+        // サイズ0でも安全に動作すること
+        let hash = EvalHash::new(0);
+        assert!(hash.table.is_empty());
+        assert_eq!(hash.probe(0x1234), None);
+        hash.store(0x1234, 100); // パニックしないこと
+        hash.prefetch(0x1234); // パニックしないこと
+    }
+
+    #[test]
+    fn test_eval_hash_collision_overwrite() {
+        // 同じインデックスにマッピングされるキーは上書きされる
+        let hash = EvalHash::new(1);
+        let key1 = 0x0000_0000_0000_0001;
+        hash.store(key1, 100);
+        assert_eq!(hash.probe(key1), Some(100));
+
+        // 異なるキーで同じエントリを上書き
+        let key2 = 0x0000_0001_0000_0001;
+        hash.store(key2, 200);
+
+        // key2 は取得できる
+        assert_eq!(hash.probe(key2), Some(200));
+        // key1 は上書きされてキー不一致でNone（または偶然一致する可能性もある）
+        // 同じインデックスで異なるキーの場合、キー検証で弾かれる
+    }
+
+    #[test]
+    fn test_eval_hash_boundary_scores() {
+        // 境界値テスト
+        let hash = EvalHash::new(1);
+
+        // 最大値
+        let key1 = 0x1111_1111_1111_1111;
+        hash.store(key1, i32::MAX);
+        assert_eq!(hash.probe(key1), Some(i32::MAX));
+
+        // 最小値
+        let key2 = 0x2222_2222_2222_2222;
+        hash.store(key2, i32::MIN);
+        assert_eq!(hash.probe(key2), Some(i32::MIN));
+
+        // ゼロ
+        let key3 = 0x3333_3333_3333_3333;
+        hash.store(key3, 0);
+        assert_eq!(hash.probe(key3), Some(0));
+
+        // 負の値
+        let key4 = 0x4444_4444_4444_4444;
+        hash.store(key4, -12345);
+        assert_eq!(hash.probe(key4), Some(-12345));
+    }
+
+    #[test]
+    fn test_normalize_size() {
+        // 0 → 0
+        assert_eq!(normalize_size(0), 0);
+        // 2のべき乗はそのまま
+        assert_eq!(normalize_size(1), 1);
+        assert_eq!(normalize_size(2), 2);
+        assert_eq!(normalize_size(4), 4);
+        assert_eq!(normalize_size(1024), 1024);
+        // 2のべき乗でない場合は切り下げ
+        assert_eq!(normalize_size(3), 2);
+        assert_eq!(normalize_size(5), 4);
+        assert_eq!(normalize_size(1000), 512);
+        assert_eq!(normalize_size(1025), 1024);
+    }
+
+    #[test]
+    fn test_eval_hash_key_zero() {
+        // キー0でも正常動作
+        let hash = EvalHash::new(1);
+        hash.store(0, 42);
+        assert_eq!(hash.probe(0), Some(42));
     }
 }

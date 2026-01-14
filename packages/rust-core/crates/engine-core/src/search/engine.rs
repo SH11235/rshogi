@@ -592,6 +592,12 @@ impl Search {
     }
 
     /// EvalHashのサイズを変更
+    ///
+    /// # 注意
+    /// このメソッドは**探索停止中にのみ**呼び出すこと。
+    /// `&mut self` を取るため、探索中（`go` 実行中）には呼び出せない。
+    /// USIプロトコルでは `setoption` は探索中に送られないため、
+    /// 通常の使用では問題ない。
     pub fn resize_eval_hash(&mut self, size_mb: usize) {
         self.eval_hash = Arc::new(EvalHash::new(size_mb));
         self.eval_hash_size_mb = size_mb;
