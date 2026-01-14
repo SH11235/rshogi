@@ -1141,7 +1141,7 @@ pub fn evaluate(pos: &Position, stack: &mut AccumulatorStack, eval_hash: &EvalHa
         return material::evaluate_material(pos);
     };
 
-    // LayerStacks/HalfKADynamic は別のアキュムレータ型を使用する
+    // LayerStacks/HalfKADynamic/HalfKA512/HalfKA1024 は別のアキュムレータ型を使用する
     if network.is_layer_stacks() {
         unreachable!(
             "BUG: LayerStacks architecture detected. Use evaluate_layer_stacks() with AccumulatorStackLayerStacks."
@@ -1150,6 +1150,16 @@ pub fn evaluate(pos: &Position, stack: &mut AccumulatorStack, eval_hash: &EvalHa
     if network.is_halfka_dynamic() {
         unreachable!(
             "BUG: HalfKADynamic architecture detected. Use evaluate_halfka_dynamic() with AccumulatorStackHalfKADynamic."
+        );
+    }
+    if network.is_halfka_512() {
+        unreachable!(
+            "BUG: HalfKA512 architecture detected. Use evaluate_dispatch() with AccumulatorStackHalfKA512."
+        );
+    }
+    if network.is_halfka_1024() {
+        unreachable!(
+            "BUG: HalfKA1024 architecture detected. Use evaluate_dispatch() with AccumulatorStackHalfKA1024."
         );
     }
 
