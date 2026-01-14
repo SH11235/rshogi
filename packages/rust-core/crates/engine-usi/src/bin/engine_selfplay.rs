@@ -298,6 +298,41 @@ struct MetricsLog {
     reason: String,
 }
 
+/// 対局セッション全体のサマリ
+#[derive(Serialize)]
+struct SummaryLog {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    timestamp: String,
+    total_games: u32,
+    black_wins: u32,
+    white_wins: u32,
+    draws: u32,
+    black_win_rate: f64,
+    white_win_rate: f64,
+    draw_rate: f64,
+    engine_black: EngineSummary,
+    engine_white: EngineSummary,
+    time_control: TimeControlSummary,
+}
+
+#[derive(Serialize)]
+struct EngineSummary {
+    path: String,
+    name: String,
+    usi_options: Vec<String>,
+    threads: usize,
+}
+
+#[derive(Serialize)]
+struct TimeControlSummary {
+    btime: u64,
+    wtime: u64,
+    binc: u64,
+    winc: u64,
+    byoyomi: u64,
+}
+
 #[derive(Default)]
 struct MetricsCollector {
     nodes_black: u64,
@@ -1325,8 +1360,83 @@ fn main() -> Result<()> {
             black_rate, white_rate, draw_rate
         );
     }
-    println!("======================");
     println!();
+    println!("--- Engine Settings ---");
+    println!("Black: {}", format_engine_settings(&engine_paths.black, &black_usi_opts));
+    println!("White: {}", format_engine_settings(&engine_paths.white, &white_usi_opts));
+    println!("=======================");
+    println!();
+
+    // サマリファイル出力
+    let summary_path = default_summary_path(&output_path);
+    {
+        let black_rate = if cli.games > 0 {
+            (black_wins as f64 / cli.games as f64) * 100.0
+        } else {
+            0.0
+        };
+        let white_rate = if cli.games > 0 {
+            (white_wins as f64 / cli.games as f64) * 100.0
+        } else {
+            0.0
+        };
+        let draw_rate = if cli.games > 0 {
+            (draws as f64 / cli.games as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let summary = SummaryLog {
+            kind: "summary",
+            timestamp: timestamp.to_rfc3339(),
+            total_games: cli.games,
+            black_wins,
+            white_wins,
+            draws,
+            black_win_rate: black_rate,
+            white_win_rate: white_rate,
+            draw_rate,
+            engine_black: EngineSummary {
+                path: engine_paths.black.path.display().to_string(),
+                name: engine_paths
+                    .black
+                    .path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("engine-usi")
+                    .to_string(),
+                usi_options: black_usi_opts.clone(),
+                threads: threads_black,
+            },
+            engine_white: EngineSummary {
+                path: engine_paths.white.path.display().to_string(),
+                name: engine_paths
+                    .white
+                    .path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("engine-usi")
+                    .to_string(),
+                usi_options: white_usi_opts.clone(),
+                threads: threads_white,
+            },
+            time_control: TimeControlSummary {
+                btime: cli.btime,
+                wtime: cli.wtime,
+                binc: cli.binc,
+                winc: cli.winc,
+                byoyomi: cli.byoyomi,
+            },
+        };
+
+        let mut summary_writer = BufWriter::new(
+            File::create(&summary_path)
+                .with_context(|| format!("failed to create {}", summary_path.display()))?,
+        );
+        serde_json::to_writer(&mut summary_writer, &summary)?;
+        summary_writer.write_all(b"\n")?;
+        summary_writer.flush()?;
+    }
 
     if let Some(logger) = info_logger.as_mut() {
         logger.flush()?;
@@ -1339,6 +1449,7 @@ fn main() -> Result<()> {
     }
     writer.flush()?;
     println!("selfplay log written to {}", output_path.display());
+    println!("summary written to {}", summary_path.display());
     if cli.log_info {
         println!("info log written to {}", info_path.display());
     }
@@ -1382,6 +1493,12 @@ fn default_metrics_path(jsonl: &Path) -> PathBuf {
     let parent = jsonl.parent().unwrap_or_else(|| Path::new("."));
     let stem = jsonl.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
     parent.join(format!("{stem}.metrics.jsonl"))
+}
+
+fn default_summary_path(jsonl: &Path) -> PathBuf {
+    let parent = jsonl.parent().unwrap_or_else(|| Path::new("."));
+    let stem = jsonl.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+    parent.join(format!("{stem}.summary.jsonl"))
 }
 
 fn resolve_engine_paths(cli: &Cli) -> ResolvedEnginePaths {
@@ -1950,7 +2067,22 @@ fn engine_names_for(meta: Option<&MetaLog>) -> (String, String) {
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(&meta.engine_cmd.path_white);
-    (format!("{} (black)", black_name), format!("{} (white)", white_name))
+
+    let black_opts = &meta.engine_cmd.usi_options_black;
+    let white_opts = &meta.engine_cmd.usi_options_white;
+
+    let black_display = if black_opts.is_empty() {
+        black_name.to_string()
+    } else {
+        format!("{} [{}]", black_name, black_opts.join(", "))
+    };
+    let white_display = if white_opts.is_empty() {
+        white_name.to_string()
+    } else {
+        format!("{} [{}]", white_name, white_opts.join(", "))
+    };
+
+    (black_display, white_display)
 }
 
 fn format_move_kif(ply: u32, pos: &Position, mv: Move, elapsed_ms: u64, total_ms: u64) -> String {
@@ -2080,6 +2212,17 @@ fn format_mm_ss(ms: u64) -> String {
     let m = secs / 60;
     let s = secs % 60;
     format!("{:>2}:{:02}", m, s)
+}
+
+/// エンジン設定を人間可読な形式でフォーマットする
+fn format_engine_settings(engine: &ResolvedEnginePath, usi_options: &[String]) -> String {
+    let engine_name = engine.path.file_name().and_then(|s| s.to_str()).unwrap_or("engine-usi");
+
+    if usi_options.is_empty() {
+        format!("{engine_name} (default)")
+    } else {
+        format!("{engine_name} [{}]", usi_options.join(", "))
+    }
 }
 
 fn format_hh_mm_ss(ms: u64) -> String {

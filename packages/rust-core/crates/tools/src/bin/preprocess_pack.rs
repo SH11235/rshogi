@@ -61,7 +61,7 @@ struct Cli {
     #[arg(short, long, default_value_t = 1)]
     threads: usize,
 
-    /// NNUEモデルファイル（省略時はMaterial評価）
+    /// NNUEモデルファイル（省略時はMaterial評価、--rescoreには必須）
     #[arg(long)]
     nnue: Option<PathBuf>,
 
@@ -77,6 +77,20 @@ struct Cli {
     /// qsearch leaf置換で手番が変わった場合でもscoreとgame_resultを反転しない
     #[arg(long)]
     no_fix_stm_sign: bool,
+
+    /// qsearch leaf置換後にNNUEで再評価（推奨）
+    /// 元の評価値を破棄し、指定したNNUEモデルで評価し直す
+    /// これにより局面とスコアの整合性が保証される
+    #[arg(long)]
+    rescore: bool,
+
+    /// 王手局面をスキップ（出力から除外）
+    #[arg(long)]
+    skip_in_check: bool,
+
+    /// スコアのクリップ範囲（±この値にクリップ、--rescore時のみ有効）
+    #[arg(long, default_value_t = 10000)]
+    score_clip: i16,
 }
 
 /// 処理中にCtrl-Cが押されたかを追跡
@@ -87,6 +101,26 @@ const QSEARCH_ALPHA_INIT: i32 = -30000;
 /// qsearchの初期beta値
 const QSEARCH_BETA_INIT: i32 = 30000;
 
+/// 処理結果
+enum ProcessResult {
+    /// 正常に処理完了
+    Ok([u8; PackedSfenValue::SIZE]),
+    /// スキップ（王手局面など）
+    Skip,
+    /// エラー
+    Error(anyhow::Error),
+}
+
+/// 処理オプション
+#[derive(Clone, Copy)]
+struct ProcessOptions {
+    max_ply: i32,
+    fix_stm_sign: bool,
+    rescore: bool,
+    skip_in_check: bool,
+    score_clip: i16,
+}
+
 fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
@@ -94,6 +128,11 @@ fn main() -> Result<()> {
     // 入力ファイルの存在確認
     if !cli.input.exists() {
         anyhow::bail!("Input file not found: {}", cli.input.display());
+    }
+
+    // --rescoreは--nnueが必須
+    if cli.rescore && cli.nnue.is_none() {
+        anyhow::bail!("--rescore requires --nnue option");
     }
 
     // NNUEモデルのロード
@@ -152,9 +191,23 @@ fn main() -> Result<()> {
     eprintln!("Max ply: {}", cli.max_ply);
     let fix_stm_sign = !cli.no_fix_stm_sign;
     eprintln!("STM sign fix: {}", if fix_stm_sign { "enabled" } else { "disabled" });
+    eprintln!("Rescore with NNUE: {}", if cli.rescore { "yes" } else { "no" });
+    eprintln!("Skip in-check positions: {}", if cli.skip_in_check { "yes" } else { "no" });
+    if cli.rescore {
+        eprintln!("Score clip: ±{}", cli.score_clip);
+    }
+
+    // 処理オプションを構築
+    let opts = ProcessOptions {
+        max_ply: cli.max_ply,
+        fix_stm_sign,
+        rescore: cli.rescore,
+        skip_in_check: cli.skip_in_check,
+        score_clip: cli.score_clip,
+    };
 
     // 処理実行
-    process_file(&cli, process_count, use_nnue, fix_stm_sign)?;
+    process_file(&cli, process_count, use_nnue, opts)?;
 
     if INTERRUPTED.load(Ordering::SeqCst) {
         eprintln!("Note: Processing was interrupted, output may be incomplete");
@@ -166,7 +219,7 @@ fn main() -> Result<()> {
 }
 
 /// ファイルを処理
-fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, fix_stm_sign: bool) -> Result<()> {
+fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, opts: ProcessOptions) -> Result<()> {
     // 進捗バー設定
     let progress = ProgressBar::new(process_count);
     progress.set_style(
@@ -203,13 +256,13 @@ fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, fix_stm_sign: boo
     let actual_count = records.len();
     eprintln!("Read {actual_count} records");
 
-    // エラーカウンタ
+    // カウンタ
     let error_count = AtomicU64::new(0);
     let processed_count = AtomicU64::new(0);
+    let skipped_count = AtomicU64::new(0);
 
     // qsearch leaf置換を並列で適用
     progress.set_message("Processing...");
-    let max_ply = cli.max_ply;
     let verbose = cli.verbose;
 
     // 処理関数を選択
@@ -217,9 +270,9 @@ fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, fix_stm_sign: boo
         eprintln!("Using NNUE evaluation (with incremental updates)");
         records
             .par_iter()
-            .map(|record| {
+            .filter_map(|record| {
                 if INTERRUPTED.load(Ordering::SeqCst) {
-                    return *record;
+                    return Some(*record);
                 }
 
                 // スレッドローカルでNnueStacksを管理
@@ -230,22 +283,27 @@ fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, fix_stm_sign: boo
                 let result = NNUE_STACKS.with(|stacks| {
                     let mut stacks = stacks.borrow_mut();
                     stacks.reset();
-                    process_record_nnue(record, &mut stacks, max_ply, fix_stm_sign)
+                    process_record_nnue(record, &mut stacks, opts)
                 });
 
                 match result {
-                    Ok(new_record) => {
+                    ProcessResult::Ok(new_record) => {
                         processed_count.fetch_add(1, Ordering::Relaxed);
                         progress.inc(1);
-                        new_record
+                        Some(new_record)
                     }
-                    Err(e) => {
+                    ProcessResult::Skip => {
+                        skipped_count.fetch_add(1, Ordering::Relaxed);
+                        progress.inc(1);
+                        None
+                    }
+                    ProcessResult::Error(e) => {
                         error_count.fetch_add(1, Ordering::Relaxed);
                         if verbose {
                             eprintln!("Error processing record: {e}");
                         }
                         progress.inc(1);
-                        *record
+                        None
                     }
                 }
             })
@@ -255,26 +313,31 @@ fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, fix_stm_sign: boo
         let evaluator = MaterialEvaluator;
         records
             .par_iter()
-            .map(|record| {
+            .filter_map(|record| {
                 if INTERRUPTED.load(Ordering::SeqCst) {
-                    return *record;
+                    return Some(*record);
                 }
 
-                let result = process_record_material(record, &evaluator, max_ply, fix_stm_sign);
+                let result = process_record_material(record, &evaluator, opts);
 
                 match result {
-                    Ok(new_record) => {
+                    ProcessResult::Ok(new_record) => {
                         processed_count.fetch_add(1, Ordering::Relaxed);
                         progress.inc(1);
-                        new_record
+                        Some(new_record)
                     }
-                    Err(e) => {
+                    ProcessResult::Skip => {
+                        skipped_count.fetch_add(1, Ordering::Relaxed);
+                        progress.inc(1);
+                        None
+                    }
+                    ProcessResult::Error(e) => {
                         error_count.fetch_add(1, Ordering::Relaxed);
                         if verbose {
                             eprintln!("Error processing record: {e}");
                         }
                         progress.inc(1);
-                        *record
+                        None
                     }
                 }
             })
@@ -284,8 +347,16 @@ fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, fix_stm_sign: boo
     progress.finish_with_message("Done");
 
     let final_errors = error_count.load(Ordering::SeqCst);
+    let final_skipped = skipped_count.load(Ordering::SeqCst);
     if final_errors > 0 {
-        eprintln!("Note: {final_errors} positions had errors and were skipped");
+        eprintln!("Note: {final_errors} positions had errors");
+    }
+    if final_skipped > 0 {
+        eprintln!(
+            "Skipped: {} ({:.2}%)",
+            final_skipped,
+            final_skipped as f64 / actual_count as f64 * 100.0
+        );
     }
 
     // 出力ファイルに書き込み
@@ -308,90 +379,121 @@ fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, fix_stm_sign: boo
 }
 
 /// 1レコードを処理（Material評価版）
+/// 注意: --rescoreオプションはNNUEモードでのみ有効
 fn process_record_material(
     record: &[u8; PackedSfenValue::SIZE],
     evaluator: &MaterialEvaluator,
-    max_ply: i32,
-    fix_stm_sign: bool,
-) -> Result<[u8; PackedSfenValue::SIZE]> {
+    opts: ProcessOptions,
+) -> ProcessResult {
     // PackedSfenValueを読み込み
-    let psv = PackedSfenValue::from_bytes(record)
-        .ok_or_else(|| anyhow::anyhow!("Failed to parse PackedSfenValue"))?;
+    let psv = match PackedSfenValue::from_bytes(record) {
+        Some(p) => p,
+        None => return ProcessResult::Error(anyhow::anyhow!("Failed to parse PackedSfenValue")),
+    };
 
     // PackedSfen → SFEN → Position
-    let sfen = unpack_sfen(&psv.sfen).map_err(|e| anyhow::anyhow!("Failed to unpack SFEN: {e}"))?;
+    let sfen = match unpack_sfen(&psv.sfen) {
+        Ok(s) => s,
+        Err(e) => return ProcessResult::Error(anyhow::anyhow!("Failed to unpack SFEN: {e}")),
+    };
 
     let mut pos = Position::new();
-    pos.set_sfen(&sfen).map_err(|e| anyhow::anyhow!("Failed to set SFEN: {e:?}"))?;
+    if let Err(e) = pos.set_sfen(&sfen) {
+        return ProcessResult::Error(anyhow::anyhow!("Failed to set SFEN: {e:?}"));
+    }
 
-    // 王手中の局面はqsearchをスキップして元のレコードを返す
-    // 理由: 王手中は静止局面ではなく、qsearchで探索爆発が起きる可能性がある
-    // 学習時に--smart-fen-skippingで王手中の局面はフィルタリングされる
+    // 王手中の局面の処理
     if pos.in_check() {
-        return Ok(*record);
+        if opts.skip_in_check {
+            return ProcessResult::Skip;
+        }
+        // 王手中はqsearchをスキップして元のレコードを返す
+        return ProcessResult::Ok(*record);
     }
 
     // 元の手番を記録
     let original_stm = pos.side_to_move();
 
     // qsearch_with_pvを実行
-    let result =
-        qsearch_with_pv(&mut pos, evaluator, QSEARCH_ALPHA_INIT, QSEARCH_BETA_INIT, 0, max_ply);
+    let result = qsearch_with_pv(
+        &mut pos,
+        evaluator,
+        QSEARCH_ALPHA_INIT,
+        QSEARCH_BETA_INIT,
+        0,
+        opts.max_ply,
+    );
 
-    // 結果をPackedSfenValueに変換
-    finalize_result(&mut pos, &psv, result, original_stm, fix_stm_sign)
+    // 結果をPackedSfenValueに変換（Material評価版はrescore非対応）
+    finalize_result(&mut pos, &psv, result, original_stm, opts, None)
 }
 
 /// 1レコードを処理（NNUE評価版、差分更新）
 fn process_record_nnue(
     record: &[u8; PackedSfenValue::SIZE],
     stacks: &mut NnueStacks,
-    max_ply: i32,
-    fix_stm_sign: bool,
-) -> Result<[u8; PackedSfenValue::SIZE]> {
+    opts: ProcessOptions,
+) -> ProcessResult {
     // PackedSfenValueを読み込み
-    let psv = PackedSfenValue::from_bytes(record)
-        .ok_or_else(|| anyhow::anyhow!("Failed to parse PackedSfenValue"))?;
+    let psv = match PackedSfenValue::from_bytes(record) {
+        Some(p) => p,
+        None => return ProcessResult::Error(anyhow::anyhow!("Failed to parse PackedSfenValue")),
+    };
 
     // PackedSfen → SFEN → Position
-    let sfen = unpack_sfen(&psv.sfen).map_err(|e| anyhow::anyhow!("Failed to unpack SFEN: {e}"))?;
+    let sfen = match unpack_sfen(&psv.sfen) {
+        Ok(s) => s,
+        Err(e) => return ProcessResult::Error(anyhow::anyhow!("Failed to unpack SFEN: {e}")),
+    };
 
     let mut pos = Position::new();
-    pos.set_sfen(&sfen).map_err(|e| anyhow::anyhow!("Failed to set SFEN: {e:?}"))?;
+    if let Err(e) = pos.set_sfen(&sfen) {
+        return ProcessResult::Error(anyhow::anyhow!("Failed to set SFEN: {e:?}"));
+    }
 
-    // 王手中の局面はqsearchをスキップして元のレコードを返す
-    // 理由: 王手中は静止局面ではなく、qsearchで探索爆発が起きる可能性がある
-    // 学習時に--smart-fen-skippingで王手中の局面はフィルタリングされる
+    // 王手中の局面の処理
     if pos.in_check() {
-        return Ok(*record);
+        if opts.skip_in_check {
+            return ProcessResult::Skip;
+        }
+        // 王手中はqsearchをスキップして元のレコードを返す
+        return ProcessResult::Ok(*record);
     }
 
     // 元の手番を記録
     let original_stm = pos.side_to_move();
 
     // qsearch_with_pv_nnueを実行（差分更新版）
-    let result =
-        qsearch_with_pv_nnue(&mut pos, stacks, QSEARCH_ALPHA_INIT, QSEARCH_BETA_INIT, 0, max_ply);
+    let result = qsearch_with_pv_nnue(
+        &mut pos,
+        stacks,
+        QSEARCH_ALPHA_INIT,
+        QSEARCH_BETA_INIT,
+        0,
+        opts.max_ply,
+    );
 
-    // 結果をPackedSfenValueに変換
-    finalize_result(&mut pos, &psv, result, original_stm, fix_stm_sign)
+    // 結果をPackedSfenValueに変換（rescore対応）
+    finalize_result(&mut pos, &psv, result, original_stm, opts, Some(stacks))
 }
 
 /// qsearch結果をPackedSfenValueに変換
 ///
 /// # Arguments
-/// * `pos` - qsearch PVを進めた後の局面（PV進行後は既にleaf位置）
+/// * `pos` - qsearch実行後の局面（まだPV進行していない）
 /// * `psv` - 元のPackedSfenValue
 /// * `result` - qsearchの結果
 /// * `original_stm` - 元の局面の手番
-/// * `fix_stm_sign` - 手番反転時に符号を補正するか
+/// * `opts` - 処理オプション
+/// * `stacks` - NNUE評価用スタック（rescore時に使用、NoneならMaterial評価版）
 fn finalize_result(
     pos: &mut Position,
     psv: &PackedSfenValue,
     result: QsearchResult,
     original_stm: engine_core::types::Color,
-    fix_stm_sign: bool,
-) -> Result<[u8; PackedSfenValue::SIZE]> {
+    opts: ProcessOptions,
+    stacks: Option<&mut NnueStacks>,
+) -> ProcessResult {
     // PVに沿って局面を進める
     for mv in &result.pv {
         let gives_check = pos.gives_check(*mv);
@@ -401,18 +503,38 @@ fn finalize_result(
     // 手番が変わったかチェック
     let stm_changed = pos.side_to_move() != original_stm;
 
-    // 符号補正: 手番が変わった場合、scoreとgame_resultを反転
-    // YaneuraOuのlearner.cppと同様:
-    // Value shallow_value = (rootColor == pos.side_to_move()) ?
-    //   Eval::evaluate(pos) : -Eval::evaluate(pos);
-    let (new_score, new_game_result) = if fix_stm_sign && stm_changed {
-        // scoreの反転（オーバーフロー対策でsaturating_neg使用）
-        let flipped_score = psv.score.saturating_neg();
-        // game_resultの反転（1 → -1, -1 → 1, 0 → 0）
-        let flipped_result = -psv.game_result;
-        (flipped_score, flipped_result)
+    // スコアの決定
+    let new_score = if opts.rescore {
+        // --rescore: NNUEで再評価（推奨）
+        // leaf位置の局面をNNUEで評価し、局面とスコアの整合性を保証
+        if let Some(stacks) = stacks {
+            stacks.reset();
+            let raw_score = stacks.evaluate(pos);
+            // スコアをクリップ
+            raw_score.clamp(-opts.score_clip as i32, opts.score_clip as i32) as i16
+        } else {
+            // Material評価版は--rescore非対応なので元スコアを使用
+            if opts.fix_stm_sign && stm_changed {
+                psv.score.saturating_neg()
+            } else {
+                psv.score
+            }
+        }
     } else {
-        (psv.score, psv.game_result)
+        // 元スコアを使用（従来の動作）
+        // 注意: これは局面とスコアの不整合を引き起こす可能性がある
+        if opts.fix_stm_sign && stm_changed {
+            psv.score.saturating_neg()
+        } else {
+            psv.score
+        }
+    };
+
+    // game_resultの決定（手番が変わった場合は反転）
+    let new_game_result = if opts.fix_stm_sign && stm_changed {
+        -psv.game_result
+    } else {
+        psv.game_result
     };
 
     // 新しいPackedSfenValueを作成
@@ -434,5 +556,5 @@ fn finalize_result(
         padding: 0,
     };
 
-    Ok(new_psv.to_bytes())
+    ProcessResult::Ok(new_psv.to_bytes())
 }
