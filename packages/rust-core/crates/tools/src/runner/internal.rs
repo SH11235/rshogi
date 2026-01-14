@@ -5,7 +5,9 @@ use std::thread;
 
 use anyhow::{Context, Result};
 
-use engine_core::eval::{set_material_level, MaterialLevel};
+#[cfg(feature = "diagnostics")]
+use engine_core::eval::{eval_hash_stats, reset_eval_hash_stats};
+use engine_core::eval::{set_eval_hash_enabled, set_material_level, MaterialLevel};
 use engine_core::nnue::init_nnue;
 use engine_core::position::Position;
 use engine_core::search::{LimitsType, Search, SearchInfo};
@@ -41,6 +43,18 @@ fn setup_eval(config: &BenchmarkConfig) -> Result<()> {
         );
     }
 
+    // EvalHash設定
+    set_eval_hash_enabled(config.use_eval_hash);
+    println!(
+        "EvalHash: {} (size: {}MB)",
+        if config.use_eval_hash {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        config.eval_hash_mb
+    );
+
     // NNUE初期化（指定時のみ）
     if let Some(nnue_path) = &config.eval_config.nnue_file {
         match init_nnue(nnue_path) {
@@ -67,7 +81,11 @@ fn run_internal_benchmark_standard(config: &BenchmarkConfig) -> Result<Benchmark
     let mut all_results = Vec::new();
 
     for threads in &config.threads {
-        println!("=== Threads: {} ===", threads);
+        println!("=== Threads: {threads} ===");
+
+        // EvalHash 統計をリセット
+        #[cfg(feature = "diagnostics")]
+        reset_eval_hash_stats();
 
         let mut thread_results = Vec::new();
         let tt_mb = config.tt_mb;
@@ -100,11 +118,13 @@ fn run_internal_benchmark_standard(config: &BenchmarkConfig) -> Result<Benchmark
                 // 探索実行（専用スタックサイズのスレッドで実行）
                 let verbose = config.verbose;
                 let sfen_clone = sfen.to_string();
+                let eval_hash_mb = config.eval_hash_mb;
                 let bench_result = thread::Builder::new()
                     .stack_size(SEARCH_STACK_SIZE)
                     .spawn(move || {
                         let mut search = Search::new(tt_mb as usize);
                         search.set_num_threads(num_threads);
+                        search.resize_eval_hash(eval_hash_mb as usize);
 
                         let mut last_info: Option<SearchInfo> = None;
                         let result = search.go(
@@ -157,6 +177,13 @@ fn run_internal_benchmark_standard(config: &BenchmarkConfig) -> Result<Benchmark
             }
         }
 
+        // EvalHash 統計を表示
+        #[cfg(feature = "diagnostics")]
+        if config.use_eval_hash {
+            let stats = eval_hash_stats();
+            println!("EvalHash stats: {stats}");
+        }
+
         all_results.push(ThreadResult {
             threads: *threads,
             results: thread_results,
@@ -178,7 +205,11 @@ fn run_internal_benchmark_reuse(config: &BenchmarkConfig) -> Result<BenchmarkRep
     let mut all_results = Vec::new();
 
     for threads in &config.threads {
-        println!("=== Threads: {} (reuse_search mode) ===", threads);
+        println!("=== Threads: {threads} (reuse_search mode) ===");
+
+        // EvalHash 統計をリセット
+        #[cfg(feature = "diagnostics")]
+        reset_eval_hash_stats();
 
         // 設定値をキャプチャ
         let tt_mb = config.tt_mb;
@@ -189,6 +220,7 @@ fn run_internal_benchmark_reuse(config: &BenchmarkConfig) -> Result<BenchmarkRep
         let verbose = config.verbose;
         let limit_type = config.limit_type;
         let limit = config.limit;
+        let eval_hash_mb = config.eval_hash_mb;
 
         // チャネルで結果を受け取る
         let (tx, rx) = mpsc::channel::<BenchResult>();
@@ -200,6 +232,7 @@ fn run_internal_benchmark_reuse(config: &BenchmarkConfig) -> Result<BenchmarkRep
                 // Searchインスタンスを1回だけ作成
                 let mut search = Search::new(tt_mb as usize);
                 search.set_num_threads(num_threads);
+                search.resize_eval_hash(eval_hash_mb as usize);
                 let mut search_run_index: u32 = 0;
 
                 // ウォームアップフェーズ
@@ -261,6 +294,13 @@ fn run_internal_benchmark_reuse(config: &BenchmarkConfig) -> Result<BenchmarkRep
 
         // 結果を収集（スレッド終了後、チャネルは自動的にクローズされている）
         let thread_results: Vec<BenchResult> = rx.into_iter().collect();
+
+        // EvalHash 統計を表示
+        #[cfg(feature = "diagnostics")]
+        if config.use_eval_hash {
+            let stats = eval_hash_stats();
+            println!("EvalHash stats: {stats}");
+        }
 
         all_results.push(ThreadResult {
             threads: *threads,
@@ -353,6 +393,8 @@ mod tests {
             eval_config: EvalConfig::default(),
             reuse_search: false,
             warmup: 0,
+            eval_hash_mb: 16,
+            use_eval_hash: true,
         }
     }
 

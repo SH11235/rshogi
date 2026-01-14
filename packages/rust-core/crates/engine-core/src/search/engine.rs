@@ -2,6 +2,7 @@
 //!
 //! USIプロトコルから呼び出すためのハイレベルインターフェース。
 
+use crate::eval::EvalHash;
 use crate::time::Instant;
 // AtomicU64 is only needed for native multi-threaded builds.
 // Wasm Rayon model doesn't use SearchProgress.
@@ -167,11 +168,18 @@ pub struct SearchResult {
 /// 探索エンジン
 ///
 /// USIプロトコルから呼び出すための主要インターフェース。
+/// デフォルトのEvalHashサイズ（MB）
+pub const DEFAULT_EVAL_HASH_SIZE_MB: usize = 256;
+
 pub struct Search {
     /// 置換表
     tt: Arc<TranspositionTable>,
+    /// 評価ハッシュ（NNUE評価値キャッシュ）
+    eval_hash: Arc<EvalHash>,
     /// 置換表のサイズ（MB）
     tt_size_mb: usize,
+    /// EvalHashのサイズ（MB）
+    eval_hash_size_mb: usize,
     /// 停止フラグ
     stop: Arc<AtomicBool>,
     /// ponderhit通知フラグ
@@ -512,12 +520,14 @@ impl Search {
     /// * `tt_size_mb` - 置換表のサイズ（MB）
     pub fn new(tt_size_mb: usize) -> Self {
         let tt = Arc::new(TranspositionTable::new(tt_size_mb));
+        let eval_hash = Arc::new(EvalHash::new(DEFAULT_EVAL_HASH_SIZE_MB));
         let stop = Arc::new(AtomicBool::new(false));
         let ponderhit_flag = Arc::new(AtomicBool::new(false));
         let max_moves_to_draw = DEFAULT_MAX_MOVES_TO_DRAW;
         let thread_pool = ThreadPool::new(
             1,
             Arc::clone(&tt),
+            Arc::clone(&eval_hash),
             Arc::clone(&stop),
             Arc::clone(&ponderhit_flag),
             max_moves_to_draw,
@@ -525,7 +535,9 @@ impl Search {
 
         Self {
             tt,
+            eval_hash,
             tt_size_mb,
+            eval_hash_size_mb: DEFAULT_EVAL_HASH_SIZE_MB,
             stop,
             ponderhit_flag,
             start_time: None,
@@ -577,6 +589,28 @@ impl Search {
     /// Large Pagesで確保されているかを返す
     pub fn tt_uses_large_pages(&self) -> bool {
         self.tt.uses_large_pages()
+    }
+
+    /// EvalHashのサイズを変更
+    ///
+    /// # 注意
+    /// このメソッドは**探索停止中にのみ**呼び出すこと。
+    /// `&mut self` を取るため、探索中（`go` 実行中）には呼び出せない。
+    /// USIプロトコルでは `setoption` は探索中に送られないため、
+    /// 通常の使用では問題ない。
+    pub fn resize_eval_hash(&mut self, size_mb: usize) {
+        self.eval_hash = Arc::new(EvalHash::new(size_mb));
+        self.eval_hash_size_mb = size_mb;
+        // workerが存在する場合、EvalHash参照を更新
+        if let Some(worker) = &mut self.worker {
+            worker.eval_hash = Arc::clone(&self.eval_hash);
+        }
+        self.thread_pool.update_eval_hash(Arc::clone(&self.eval_hash));
+    }
+
+    /// EvalHashへの参照を取得
+    pub fn eval_hash(&self) -> Arc<EvalHash> {
+        Arc::clone(&self.eval_hash)
     }
 
     /// 履歴統計をクリア（usinewgame時に呼び出し）
@@ -650,8 +684,12 @@ impl Search {
         #[cfg(not(all(target_arch = "wasm32", not(feature = "wasm-threads"))))]
         let num = num.clamp(1, 512);
         self.num_threads = num;
-        self.thread_pool
-            .set_num_threads(num, Arc::clone(&self.tt), self.max_moves_to_draw);
+        self.thread_pool.set_num_threads(
+            num,
+            Arc::clone(&self.tt),
+            Arc::clone(&self.eval_hash),
+            self.max_moves_to_draw,
+        );
     }
 
     /// 探索スレッド数を取得
@@ -700,8 +738,11 @@ impl Search {
 
         // YaneuraOu準拠: workerは遅延初期化、再利用する
         let tt_clone = Arc::clone(&self.tt);
+        let eval_hash_clone = Arc::clone(&self.eval_hash);
         let max_moves = self.max_moves_to_draw;
-        let worker = self.worker.get_or_insert_with(|| SearchWorker::new(tt_clone, max_moves, 0));
+        let worker = self
+            .worker
+            .get_or_insert_with(|| SearchWorker::new(tt_clone, eval_hash_clone, max_moves, 0));
 
         // setoptionで変更された可能性があるため、最新値を反映
         worker.max_moves_to_draw = self.max_moves_to_draw;
@@ -1555,7 +1596,8 @@ mod tests {
             .stack_size(STACK_SIZE)
             .spawn(|| {
                 let tt = Arc::new(TranspositionTable::new(16));
-                let mut worker = SearchWorker::new(tt, DEFAULT_MAX_MOVES_TO_DRAW, 0);
+                let eval_hash = Arc::new(EvalHash::new(1));
+                let mut worker = SearchWorker::new(tt, eval_hash, DEFAULT_MAX_MOVES_TO_DRAW, 0);
                 worker.best_move_changes = 3.5;
 
                 let summary = WorkerSummary::from(&*worker);

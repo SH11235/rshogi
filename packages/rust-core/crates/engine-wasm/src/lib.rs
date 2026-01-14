@@ -6,6 +6,7 @@
 use std::cell::RefCell;
 use std::io::ErrorKind;
 
+use engine_core::eval::set_eval_hash_enabled;
 use engine_core::movegen::{generate_legal, MoveList};
 use engine_core::nnue::init_nnue_from_bytes;
 use engine_core::position::{Position, SFEN_HIRATE};
@@ -18,6 +19,8 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
 const DEFAULT_TT_SIZE_MB: usize = 64;
+const DEFAULT_EVAL_HASH_SIZE_MB: usize = 16;
+const DEFAULT_USE_EVAL_HASH: bool = false;
 
 thread_local! {
     static ENGINE: RefCell<Option<EngineState>> = const { RefCell::new(None) };
@@ -33,6 +36,8 @@ static TLS_DUMMY: u8 = 0;
 #[serde(rename_all = "camelCase")]
 struct InitOptions {
     tt_size_mb: Option<usize>,
+    eval_hash_size_mb: Option<usize>,
+    use_eval_hash: Option<bool>,
     multi_pv: Option<usize>,
     threads: Option<usize>,
 }
@@ -191,6 +196,8 @@ fn parse_init_options(opts: Option<JsValue>) -> Result<InitOptions, JsValue> {
         tt_size_mb: get_optional_usize(&opts, "ttSizeMb")?,
         multi_pv: get_optional_usize(&opts, "multiPv")?,
         threads: get_optional_usize(&opts, "threads")?,
+        eval_hash_size_mb: get_optional_usize(&opts, "evalHashSizeMb")?,
+        use_eval_hash: get_optional_bool(&opts, "useEvalHash")?,
     })
 }
 
@@ -460,6 +467,12 @@ pub fn init(opts: Option<JsValue>) -> Result<(), JsValue> {
         if let Some(threads) = opts.threads {
             engine.search.set_num_threads(threads);
         }
+        if let Some(size) = opts.eval_hash_size_mb {
+            engine.search.resize_eval_hash(size);
+        } else {
+            engine.search.resize_eval_hash(DEFAULT_EVAL_HASH_SIZE_MB);
+        }
+        set_eval_hash_enabled(opts.use_eval_hash.unwrap_or(DEFAULT_USE_EVAL_HASH));
         *state.borrow_mut() = Some(engine);
     });
 
