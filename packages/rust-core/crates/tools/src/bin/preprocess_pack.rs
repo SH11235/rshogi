@@ -547,11 +547,15 @@ fn finalize_result(
     // 非合法手が設定されていると未定義動作やスキップ判定の破綻を招く。
     let new_move16 = 0;
 
+    // game_plyはPV長分を加算
+    // 理由: PVで局面を進めた分だけ手数が増えている
+    let new_game_ply = psv.game_ply.saturating_add(result.pv.len() as u16);
+
     let new_psv = PackedSfenValue {
         sfen: new_sfen,
         score: new_score,
         move16: new_move16,
-        game_ply: psv.game_ply,
+        game_ply: new_game_ply,
         game_result: new_game_result,
         padding: 0,
     };

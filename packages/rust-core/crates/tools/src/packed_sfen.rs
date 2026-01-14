@@ -692,6 +692,11 @@ impl BitStreamWriter {
         }
     }
 
+    /// 現在のビット位置を取得
+    fn bit_position(&self) -> usize {
+        self.bit_cursor
+    }
+
     /// データを取得
     fn finish(self) -> [u8; 32] {
         self.data
@@ -740,6 +745,22 @@ fn write_board_piece(stream: &mut BitStreamWriter, piece: Piece) {
     stream.write_one_bit(color == Color::White);
 }
 
+/// 駒箱パディングを書き込む（成りフラグ=1の歩）
+///
+/// 駒落ち局面や詰将棋など、駒数が40枚未満の場合に256bitに達するまで
+/// 駒箱フラグ（成りフラグ=1）でパディングする。unpack時に駒箱の駒は
+/// 無視されるため、余った0ビットが歩として誤読される問題を防げる。
+///
+/// 駒箱の歩は3ビット: ハフマン(1bit=0) + 成りフラグ(1bit=1) + 先後フラグ(1bit=0)
+fn write_piecebox_padding(stream: &mut BitStreamWriter) {
+    // 歩のハフマンコード（手駒用）: 0x01 >> 1 = 0, 1bit
+    stream.write_one_bit(false);
+    // 成りフラグ = 1（駒箱フラグ）
+    stream.write_one_bit(true);
+    // 先後フラグ = 0（先手扱い、どちらでもよい）
+    stream.write_one_bit(false);
+}
+
 /// 手駒をハフマン符号化して書き込む
 /// 手駒用は盤上用のコードを1bit右シフトした形式
 fn write_hand_piece(stream: &mut BitStreamWriter, pt: PieceType, color: Color) {
@@ -766,22 +787,13 @@ fn write_hand_piece(stream: &mut BitStreamWriter, pt: PieceType, color: Color) {
 /// # 戻り値
 /// 32バイトのPackedSfen
 ///
-/// # 制限事項
+/// # 対応局面
 ///
-/// **標準局面（盤上+手駒=40枚）のみ対応**
+/// 標準局面（40枚）および駒落ち局面・詰将棋（40枚未満）の両方に対応。
 ///
-/// このハフマン符号化形式は、盤上の駒と手駒の合計が40枚の場合に
-/// 常に256bit（32バイト）になるよう設計されています（YaneuraOu準拠）。
-///
-/// 駒落ち局面や詰将棋など、駒数が40枚未満の局面では256bitに達せず、
-/// 余ったビットが0埋めされます。unpack時にこの0が歩として誤読される
-/// 可能性があるため、現時点では標準局面のみをサポートしています。
-///
-/// ## 駒落ち対応が必要な場合の改修案
-///
-/// 1. 不足分を「駒箱フラグ（成りフラグ=1）」でパディング
-///    - 駒箱の駒はunpack時に無視されるため、誤読を防げる
-/// 2. またはビット列長を別途記録し、unpack時にその長さで終了
+/// 駒数が40枚未満の場合、余ったビットは「駒箱フラグ（成りフラグ=1）」で
+/// パディングされます。駒箱の駒はunpack時に無視されるため、
+/// 余った0ビットが歩として誤読される問題を防止しています。
 pub fn pack_position(pos: &Position) -> [u8; 32] {
     let mut stream = BitStreamWriter::new();
 
@@ -831,8 +843,15 @@ pub fn pack_position(pos: &Position) -> [u8; 32] {
         }
     }
 
-    // 残りのビットは0で埋められている（BitStreamWriterの初期化時）
-    // 256ビットに満たない場合でも、32バイト全体を返す
+    // 6. 駒箱パディング
+    // 駒落ち局面や詰将棋など駒数が40枚未満の場合、256bitに達するまで
+    // 駒箱フラグ（成りフラグ=1）でパディングする。
+    // 駒箱の歩は3ビットなので、残り3ビット以上あればパディングを追加。
+    // 残り1-2ビットの場合は0埋めのままだが、3ビット未満では
+    // 有効な手駒としてデコードされないため安全。
+    while stream.bit_position() + 3 <= 256 {
+        write_piecebox_padding(&mut stream);
+    }
 
     stream.finish()
 }
