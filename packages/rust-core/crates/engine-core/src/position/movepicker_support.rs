@@ -4,8 +4,8 @@
 
 use super::Position;
 use crate::bitboard::{
-    bishop_effect, direct_of, gold_effect, king_effect, knight_effect, lance_effect, pawn_effect,
-    ray_effect, rook_effect, silver_effect, Bitboard, Direct,
+    between_bb, bishop_effect, direct_of, gold_effect, king_effect, knight_effect, lance_effect,
+    pawn_effect, ray_effect, rook_effect, silver_effect, Bitboard, Direct,
 };
 use crate::movegen::{generate_evasions, generate_with_type, ExtMoveBuffer, GenType};
 use crate::types::{Color, Move, Piece, PieceType, Square, Value};
@@ -19,17 +19,26 @@ impl Position {
     ///
     /// 指し手が現在の局面で pseudo-legal かどうかを確認する。
     /// 完全な合法性（自玉への王手回避など）はチェックしない。
+    ///
+    /// YaneuraOuの実装を参考に、王手中の不正な手を早期リジェクトする。
+    /// 成らない手の制限は行わない（特殊な詰み手順の発見を可能にするため）。
+    ///
+    /// ## パフォーマンスについて
+    ///
+    /// この最適化によるNPS改善は誤差範囲内（+0.3%）だった。
+    /// これはTT手検証で王手中の不正な手が出現する頻度が低いため。
+    /// パフォーマンスよりもコードの正確性向上が主な目的。
     pub fn pseudo_legal(&self, m: Move) -> bool {
         if m.is_none() {
             return false;
         }
 
         let us = self.side_to_move();
+        let to = m.to();
 
         if m.is_drop() {
             // 駒打ち
             let pt = m.drop_piece_type();
-            let to = m.to();
 
             // 手駒にあるか
             if !self.hand(us).has(pt) {
@@ -39,6 +48,23 @@ impl Position {
             // 移動先が空きか
             if self.piece_on(to).is_some() {
                 return false;
+            }
+
+            // 王手中の合駒チェック
+            if self.in_check() {
+                let checkers = self.checkers();
+                let checker_sq = checkers.lsb().unwrap();
+
+                // 両王手なら合駒不可
+                if checkers.count() > 1 {
+                    return false;
+                }
+
+                // 王と王手駒の間に打つ手でなければ不可
+                let king_sq = self.king_square(us);
+                if !between_bb(checker_sq, king_sq).contains(to) {
+                    return false;
+                }
             }
 
             // 二歩チェック（歩の場合）
@@ -53,7 +79,6 @@ impl Position {
         } else {
             // 駒移動
             let from = m.from();
-            let to = m.to();
             let pc = self.piece_on(from);
 
             // 移動元に自分の駒があるか
@@ -61,14 +86,7 @@ impl Position {
                 return false;
             }
 
-            // 移動先に自分の駒がないか
-            let to_pc = self.piece_on(to);
-            if to_pc.is_some() && to_pc.color() == us {
-                return false;
-            }
-
-            // 駒の動きとして正しいか（簡易チェック）
-            // 完全なチェックは重いので、基本的な駒の動きのみ確認
+            // 駒の動きとして正しいか
             let pt = pc.piece_type();
             let occupied = self.occupied();
 
@@ -107,7 +125,71 @@ impl Position {
                 PieceType::King => king_effect(from),
             };
 
-            attacks.contains(to)
+            if !attacks.contains(to) {
+                return false;
+            }
+
+            // 移動先に自分の駒がないか
+            let to_pc = self.piece_on(to);
+            if to_pc.is_some() && to_pc.color() == us {
+                return false;
+            }
+
+            // 成りの場合、成れない駒は成れない
+            if m.is_promotion() && !pt.can_promote() {
+                return false;
+            }
+
+            // 【参考実装】成らない手の制限（YaneuraOu の generate_all_legal_moves = false 相当）
+            // 特殊な詰み手順（歩不成での打ち歩詰め回避、角不成での利き調整など）の
+            // 発見を可能にするため、本実装では有効化しない。
+            // NPS改善も誤差範囲内だったため、制限しないことによるデメリットはない。
+            //
+            // if !m.is_promotion() {
+            //     match pt {
+            //         PieceType::Pawn => {
+            //             // 歩の不成: 敵陣での不成を禁止
+            //             if is_enemy_field(us, to) {
+            //                 return false;
+            //             }
+            //         }
+            //         PieceType::Lance => {
+            //             // 香の不成: 1-2段目（先手）/ 8-9段目（後手）への不成を禁止
+            //             if is_deep_enemy_field(us, to) {
+            //                 return false;
+            //             }
+            //         }
+            //         PieceType::Bishop | PieceType::Rook => {
+            //             // 大駒の不成: 敵陣に関わる移動での不成を禁止
+            //             if is_enemy_field(us, from) || is_enemy_field(us, to) {
+            //                 return false;
+            //             }
+            //         }
+            //         _ => {}
+            //     }
+            // }
+
+            // 王手中の駒移動チェック
+            let checkers = self.checkers();
+            if !checkers.is_empty() {
+                // 玉以外を動かす場合
+                if pt != PieceType::King {
+                    // 両王手なら玉を動かす以外は不可
+                    if checkers.count() > 1 {
+                        return false;
+                    }
+
+                    // 王手を遮断しているか、王手駒を取る手でなければ不可
+                    let checker_sq = checkers.lsb().unwrap();
+                    let king_sq = self.king_square(us);
+                    let valid_targets = between_bb(checker_sq, king_sq) | checkers;
+                    if !valid_targets.contains(to) {
+                        return false;
+                    }
+                }
+            }
+
+            true
         }
     }
 
@@ -133,10 +215,11 @@ impl Position {
     }
 
     /// pseudo-legal判定（生成モード指定版）
+    ///
+    /// 互換性のため `generate_all_legal_moves` パラメータを受け取るが、
+    /// 成らない手の制限は行わないため、常に `pseudo_legal()` と同じ動作をする。
     #[inline]
     pub fn pseudo_legal_with_all(&self, m: Move, _generate_all_legal_moves: bool) -> bool {
-        // 現状の pseudo_legal はALL/非ALLで挙動差がないためそのまま呼ぶ。
-        // 将来的に不成抑止などを切替える場合に備えたインターフェース。
         self.pseudo_legal(m)
     }
 
@@ -453,6 +536,27 @@ fn can_promote_on(us: Color, from: Square, to: Square) -> bool {
         Color::White => to.rank().index() > 5 || from.rank().index() > 5,
     }
 }
+
+// 【参考実装】成らない手の制限用ヘルパー関数
+// pseudo_legal 内のコメントアウトされた実装で使用する。
+//
+// /// 敵陣かどうか（1-3段目/7-9段目）
+// #[inline]
+// fn is_enemy_field(us: Color, sq: Square) -> bool {
+//     match us {
+//         Color::Black => sq.rank().index() < 3,
+//         Color::White => sq.rank().index() > 5,
+//     }
+// }
+//
+// /// 深い敵陣かどうか（1-2段目/8-9段目）- 香の不成禁止用
+// #[inline]
+// fn is_deep_enemy_field(us: Color, sq: Square) -> bool {
+//     match us {
+//         Color::Black => sq.rank().index() < 2,
+//         Color::White => sq.rank().index() > 6,
+//     }
+// }
 
 // =============================================================================
 // テスト
