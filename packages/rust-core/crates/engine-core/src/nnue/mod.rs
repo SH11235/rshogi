@@ -20,7 +20,6 @@ mod bona_piece_halfka;
 mod constants;
 mod diff;
 mod feature_transformer;
-mod feature_transformer_halfka;
 mod feature_transformer_layer_stacks;
 pub mod features;
 mod layer_stacks;
@@ -28,6 +27,7 @@ mod layers;
 mod leb128;
 mod network;
 mod network_halfka_dynamic;
+mod network_halfka_static;
 mod network_layer_stacks;
 
 pub use accumulator::{
@@ -53,11 +53,16 @@ pub use layer_stacks::{
 };
 pub use layers::{AffineTransform, ClippedReLU};
 pub use network::{
-    evaluate, evaluate_dispatch, evaluate_layer_stacks, get_halfka_dynamic_l1, init_nnue,
-    init_nnue_from_bytes, is_halfka_dynamic_loaded, is_layer_stacks_loaded, is_nnue_initialized,
-    NNUENetwork, Network, NetworkHalfKA,
+    evaluate, evaluate_dispatch, evaluate_layer_stacks, get_fv_scale_override,
+    get_halfka_dynamic_l1, init_nnue, init_nnue_from_bytes, is_halfka_1024_loaded,
+    is_halfka_512_loaded, is_halfka_dynamic_loaded, is_layer_stacks_loaded, is_nnue_initialized,
+    set_fv_scale_override, NNUENetwork, Network,
 };
 pub use network_halfka_dynamic::{
     AccumulatorHalfKADynamic, AccumulatorStackHalfKADynamic, NetworkHalfKADynamic,
+};
+pub use network_halfka_static::{
+    AccumulatorHalfKA1024, AccumulatorHalfKA512, AccumulatorStackHalfKA1024,
+    AccumulatorStackHalfKA512, NetworkHalfKA1024, NetworkHalfKA512,
 };
 pub use network_layer_stacks::NetworkLayerStacks;

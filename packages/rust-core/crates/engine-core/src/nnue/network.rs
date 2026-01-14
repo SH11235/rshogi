@@ -17,9 +17,9 @@ use super::constants::{
     NNUE_VERSION_HALFKA, OUTPUT_DIMENSIONS, TRANSFORMED_FEATURE_DIMENSIONS,
 };
 use super::feature_transformer::FeatureTransformer;
-use super::feature_transformer_halfka::FeatureTransformerHalfKA;
 use super::layers::{AffineTransform, ClippedReLU};
 use super::network_halfka_dynamic::NetworkHalfKADynamic;
+use super::network_halfka_static::{NetworkHalfKA1024, NetworkHalfKA512};
 use super::network_layer_stacks::NetworkLayerStacks;
 #[cfg(not(feature = "tournament"))]
 use crate::eval::material;
@@ -29,10 +29,42 @@ use crate::types::Value;
 use std::fs::File;
 use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::OnceLock;
 
 /// グローバルなNNUEネットワーク（HalfKPまたはHalfKA_hm^）
 static NETWORK: OnceLock<NNUENetwork> = OnceLock::new();
+
+/// FV_SCALE のグローバルオーバーライド設定
+///
+/// 0 = 自動判定（Network 構造体の fv_scale を使用）
+/// 1以上 = 指定値でオーバーライド
+///
+/// YaneuraOuと同様にエンジンオプションで設定可能。
+/// 評価関数によって異なる値が必要な場合に使用。
+static FV_SCALE_OVERRIDE: AtomicI32 = AtomicI32::new(0);
+
+/// FV_SCALE オーバーライドを取得
+///
+/// 戻り値:
+/// - `Some(value)`: オーバーライド値が設定されている
+/// - `None`: 自動判定を使用（Network の fv_scale を使用）
+pub fn get_fv_scale_override() -> Option<i32> {
+    let value = FV_SCALE_OVERRIDE.load(Ordering::Relaxed);
+    if value > 0 {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+/// FV_SCALE オーバーライドを設定
+///
+/// 引数:
+/// - `value`: 設定値（0 = 自動判定、1以上 = オーバーライド）
+pub fn set_fv_scale_override(value: i32) {
+    FV_SCALE_OVERRIDE.store(value.max(0), Ordering::Relaxed);
+}
 
 // =============================================================================
 // NNUENetwork - アーキテクチャを抽象化するenum
@@ -42,9 +74,11 @@ static NETWORK: OnceLock<NNUENetwork> = OnceLock::new();
 pub enum NNUENetwork {
     /// HalfKP classic NNUE
     HalfKP(Box<Network>),
-    /// HalfKA_hm^ nnue-pytorch互換（256次元FC層）
-    HalfKA(Box<NetworkHalfKA>),
-    /// HalfKA_hm^ 動的サイズ（1024x2-8-96 など）
+    /// HalfKA_hm^ 512x2-8-96 静的実装
+    HalfKA512(Box<NetworkHalfKA512>),
+    /// HalfKA_hm^ 1024x2-8-96 静的実装
+    HalfKA1024(Box<NetworkHalfKA1024>),
+    /// HalfKA_hm^ 動的サイズ（フォールバック: 256x2-32-32 など）
     HalfKADynamic(Box<NetworkHalfKADynamic>),
     /// LayerStacks（1536次元 + 9バケット）
     LayerStacks(Box<NetworkLayerStacks>),
@@ -98,20 +132,31 @@ impl NNUENetwork {
                 if arch_str.contains("HalfKA") {
                     // HalfKA_hm^ には複数のアーキテクチャがある:
                     // - LayerStacks (1536次元 + 9バケット)
-                    // - HalfKADynamic (動的サイズ: 1024x2-8-96 など)
-                    // - HalfKA (256次元 FC層)
+                    // - HalfKA512 (512x2-8-96 静的)
+                    // - HalfKA1024 (1024x2-8-96 静的)
+                    // - HalfKADynamic (その他: 256x2-32-32 など)
                     if arch_str.contains("->1536x2]") || arch_str.contains("LayerStacks") {
                         // LayerStacks (1536次元)
                         let network = NetworkLayerStacks::read(reader)?;
                         Ok(Self::LayerStacks(Box::new(network)))
-                    } else if Self::detect_dynamic_l1(&arch_str) {
-                        // HalfKADynamic (1024, 512 など動的サイズ)
-                        let network = NetworkHalfKADynamic::read(reader)?;
-                        Ok(Self::HalfKADynamic(Box::new(network)))
                     } else {
-                        // HalfKA (256次元) - デフォルト
-                        let network = NetworkHalfKA::read(reader)?;
-                        Ok(Self::HalfKA(Box::new(network)))
+                        // L1, L2, L3 をパースして静的/動的を判定
+                        let (l1, l2, l3) = Self::parse_arch_dimensions(&arch_str);
+                        match (l1, l2, l3) {
+                            (512, 8, 96) => {
+                                let network = NetworkHalfKA512::read(reader)?;
+                                Ok(Self::HalfKA512(Box::new(network)))
+                            }
+                            (1024, 8, 96) => {
+                                let network = NetworkHalfKA1024::read(reader)?;
+                                Ok(Self::HalfKA1024(Box::new(network)))
+                            }
+                            _ => {
+                                // フォールバック: 動的実装
+                                let network = NetworkHalfKADynamic::read(reader)?;
+                                Ok(Self::HalfKADynamic(Box::new(network)))
+                            }
+                        }
                     }
                 } else {
                     // HalfKP (classic NNUE)
@@ -128,23 +173,61 @@ impl NNUENetwork {
         }
     }
 
-    /// アーキテクチャ文字列から動的L1サイズを検出
+    /// アーキテクチャ文字列から L1, L2, L3 を抽出
     ///
-    /// `->1024x2]` や `->512x2]` などのパターンを検出する。
-    /// `->256x2]` は HalfKA (固定256次元) として扱う。
-    fn detect_dynamic_l1(arch_str: &str) -> bool {
-        // "->NNNx2]" パターンを探す
-        if let Some(idx) = arch_str.find("x2]") {
+    /// 戻り値: (L1, L2, L3)
+    /// パース失敗時はデフォルト値 (0, 0, 0) を返す
+    fn parse_arch_dimensions(arch_str: &str) -> (usize, usize, usize) {
+        // L1: "->NNNx2]" パターンを探す
+        let l1 = if let Some(idx) = arch_str.find("x2]") {
             let before = &arch_str[..idx];
             if let Some(arrow_idx) = before.rfind("->") {
                 let num_str = &before[arrow_idx + 2..];
-                if let Ok(l1) = num_str.parse::<usize>() {
-                    // 256以外の場合は動的サイズ (1024, 512 など)
-                    return l1 != 256;
+                num_str.parse::<usize>().unwrap_or(0)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        // L2, L3: AffineTransform[OUT<-IN] パターンを探す
+        // 例: AffineTransform[8<-1024] → L2=8
+        //     AffineTransform[96<-8] → L3=96
+        let mut layers: Vec<(usize, usize)> = Vec::new();
+        let pattern = "AffineTransform[";
+
+        let mut search_start = 0;
+        while let Some(start) = arch_str[search_start..].find(pattern) {
+            let abs_start = search_start + start + pattern.len();
+            if let Some(end) = arch_str[abs_start..].find(']') {
+                let content = &arch_str[abs_start..abs_start + end];
+                if let Some(arrow_idx) = content.find("<-") {
+                    let out_str = &content[..arrow_idx];
+                    let in_str = &content[arrow_idx + 2..];
+                    if let (Ok(out), Ok(inp)) = (out_str.parse::<usize>(), in_str.parse::<usize>())
+                    {
+                        layers.push((out, inp));
+                    }
                 }
+                search_start = abs_start + end;
+            } else {
+                break;
             }
         }
-        false
+
+        // nnue-pytorch のネストされた構造では、出力に近い順に並ぶ
+        // 例: [1<-96], [96<-8], [8<-1024]
+        // 逆順にして最内側から: [8<-1024] (L2), [96<-8] (L3), [1<-96] (output)
+        layers.reverse();
+
+        let (l2, l3) = if layers.len() >= 3 {
+            (layers[0].0, layers[1].0)
+        } else {
+            (0, 0)
+        };
+
+        (l1, l2, l3)
     }
 
     /// バイト列から読み込み（バージョン自動判別）
@@ -153,22 +236,32 @@ impl NNUENetwork {
         Self::read(&mut cursor)
     }
 
-    /// 評価値を計算（HalfKP/HalfKA用）
+    /// 評価値を計算（HalfKP用）
     ///
-    /// LayerStacks/HalfKADynamic は異なるアキュムレータを使用するため、
+    /// 他のアーキテクチャは異なるアキュムレータを使用するため、
     /// それぞれ専用のメソッドを使用してください。
     ///
     /// # Panics
     ///
-    /// HalfKADynamic または LayerStacks アーキテクチャで呼び出された場合にパニックします。
-    /// これらのアーキテクチャには専用のメソッドを使用してください。
+    /// HalfKP 以外のアーキテクチャで呼び出された場合にパニックします。
     ///
     // TODO: ライブラリコードとしては Result<Value, EvaluationError> を返すべき。
     // 現在は呼び出し元が多いため、将来的に段階的に移行する。
     pub fn evaluate(&self, pos: &Position, acc: &Accumulator) -> Value {
         match self {
             Self::HalfKP(net) => net.evaluate(pos, acc),
-            Self::HalfKA(net) => net.evaluate(pos, acc),
+            Self::HalfKA512(_) => {
+                unreachable!(
+                    "BUG: wrong accumulator type - HalfKA512 requires \
+                     AccumulatorHalfKA512. Use evaluate_halfka_512() instead."
+                )
+            }
+            Self::HalfKA1024(_) => {
+                unreachable!(
+                    "BUG: wrong accumulator type - HalfKA1024 requires \
+                     AccumulatorHalfKA1024. Use evaluate_halfka_1024() instead."
+                )
+            }
             Self::HalfKADynamic(_) => {
                 unreachable!(
                     "BUG: wrong accumulator type - HalfKADynamic requires \
@@ -224,6 +317,44 @@ impl NNUENetwork {
         }
     }
 
+    /// 評価値を計算（HalfKA512用）
+    ///
+    /// # Panics
+    ///
+    /// HalfKA512 以外のアーキテクチャで呼び出された場合にパニックします。
+    pub fn evaluate_halfka_512(
+        &self,
+        pos: &Position,
+        acc: &super::network_halfka_static::AccumulatorHalfKA512,
+    ) -> Value {
+        match self {
+            Self::HalfKA512(net) => net.evaluate(pos, acc),
+            _ => unreachable!(
+                "BUG: evaluate_halfka_512() called on non-HalfKA512 architecture: {:?}",
+                self.architecture_name()
+            ),
+        }
+    }
+
+    /// 評価値を計算（HalfKA1024用）
+    ///
+    /// # Panics
+    ///
+    /// HalfKA1024 以外のアーキテクチャで呼び出された場合にパニックします。
+    pub fn evaluate_halfka_1024(
+        &self,
+        pos: &Position,
+        acc: &super::network_halfka_static::AccumulatorHalfKA1024,
+    ) -> Value {
+        match self {
+            Self::HalfKA1024(net) => net.evaluate(pos, acc),
+            _ => unreachable!(
+                "BUG: evaluate_halfka_1024() called on non-HalfKA1024 architecture: {:?}",
+                self.architecture_name()
+            ),
+        }
+    }
+
     /// LayerStacks アーキテクチャかどうか
     pub fn is_layer_stacks(&self) -> bool {
         matches!(self, Self::LayerStacks(_))
@@ -232,6 +363,16 @@ impl NNUENetwork {
     /// HalfKADynamic アーキテクチャかどうか
     pub fn is_halfka_dynamic(&self) -> bool {
         matches!(self, Self::HalfKADynamic(_))
+    }
+
+    /// HalfKA512 アーキテクチャかどうか
+    pub fn is_halfka_512(&self) -> bool {
+        matches!(self, Self::HalfKA512(_))
+    }
+
+    /// HalfKA1024 アーキテクチャかどうか
+    pub fn is_halfka_1024(&self) -> bool {
+        matches!(self, Self::HalfKA1024(_))
     }
 
     /// HalfKADynamic の L1 サイズを取得（他のアーキテクチャでは None）
@@ -246,17 +387,27 @@ impl NNUENetwork {
     pub fn architecture_name(&self) -> &'static str {
         match self {
             Self::HalfKP(_) => "HalfKP",
-            Self::HalfKA(_) => "HalfKA_hm^",
+            Self::HalfKA512(_) => "HalfKA512",
+            Self::HalfKA1024(_) => "HalfKA1024",
             Self::HalfKADynamic(_) => "HalfKADynamic",
             Self::LayerStacks(_) => "LayerStacks",
         }
     }
 
-    /// 差分計算を使わずにAccumulatorを計算（HalfKP/HalfKA用）
+    /// 差分計算を使わずにAccumulatorを計算（HalfKP用）
     pub fn refresh_accumulator(&self, pos: &Position, acc: &mut Accumulator) {
         match self {
             Self::HalfKP(net) => net.feature_transformer.refresh_accumulator(pos, acc),
-            Self::HalfKA(net) => net.feature_transformer.refresh_accumulator(pos, acc),
+            Self::HalfKA512(_) => {
+                panic!(
+                    "HalfKA512 requires AccumulatorHalfKA512. Use refresh_accumulator_halfka_512()."
+                )
+            }
+            Self::HalfKA1024(_) => {
+                panic!(
+                    "HalfKA1024 requires AccumulatorHalfKA1024. Use refresh_accumulator_halfka_1024()."
+                )
+            }
             Self::HalfKADynamic(_) => {
                 panic!(
                     "HalfKADynamic requires AccumulatorHalfKADynamic. Use refresh_accumulator_halfka_dynamic()."
@@ -294,7 +445,31 @@ impl NNUENetwork {
         }
     }
 
-    /// 差分計算でAccumulatorを更新（HalfKP/HalfKA用）
+    /// 差分計算を使わずにAccumulatorを計算（HalfKA512用）
+    pub fn refresh_accumulator_halfka_512(
+        &self,
+        pos: &Position,
+        acc: &mut super::network_halfka_static::AccumulatorHalfKA512,
+    ) {
+        match self {
+            Self::HalfKA512(net) => net.refresh_accumulator(pos, acc),
+            _ => panic!("This method is only for HalfKA512 architecture."),
+        }
+    }
+
+    /// 差分計算を使わずにAccumulatorを計算（HalfKA1024用）
+    pub fn refresh_accumulator_halfka_1024(
+        &self,
+        pos: &Position,
+        acc: &mut super::network_halfka_static::AccumulatorHalfKA1024,
+    ) {
+        match self {
+            Self::HalfKA1024(net) => net.refresh_accumulator(pos, acc),
+            _ => panic!("This method is only for HalfKA1024 architecture."),
+        }
+    }
+
+    /// 差分計算でAccumulatorを更新（HalfKP用）
     pub fn update_accumulator(
         &self,
         pos: &Position,
@@ -306,8 +481,13 @@ impl NNUENetwork {
             Self::HalfKP(net) => {
                 net.feature_transformer.update_accumulator(pos, dirty_piece, acc, prev_acc)
             }
-            Self::HalfKA(net) => {
-                net.feature_transformer.update_accumulator(pos, dirty_piece, acc, prev_acc)
+            Self::HalfKA512(_) => {
+                panic!(
+                    "HalfKA512 requires AccumulatorHalfKA512. Use update_accumulator_halfka_512()."
+                )
+            }
+            Self::HalfKA1024(_) => {
+                panic!("HalfKA1024 requires AccumulatorHalfKA1024. Use update_accumulator_halfka_1024().")
             }
             Self::HalfKADynamic(_) => {
                 panic!("HalfKADynamic requires AccumulatorHalfKADynamic. Use update_accumulator_halfka_dynamic().")
@@ -346,7 +526,35 @@ impl NNUENetwork {
         }
     }
 
-    /// 複数手分の差分を適用してアキュムレータを更新（HalfKP/HalfKA用）
+    /// 差分計算でAccumulatorを更新（HalfKA512用）
+    pub fn update_accumulator_halfka_512(
+        &self,
+        pos: &Position,
+        dirty_piece: &super::accumulator::DirtyPiece,
+        acc: &mut super::network_halfka_static::AccumulatorHalfKA512,
+        prev_acc: &super::network_halfka_static::AccumulatorHalfKA512,
+    ) {
+        match self {
+            Self::HalfKA512(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
+            _ => panic!("This method is only for HalfKA512 architecture."),
+        }
+    }
+
+    /// 差分計算でAccumulatorを更新（HalfKA1024用）
+    pub fn update_accumulator_halfka_1024(
+        &self,
+        pos: &Position,
+        dirty_piece: &super::accumulator::DirtyPiece,
+        acc: &mut super::network_halfka_static::AccumulatorHalfKA1024,
+        prev_acc: &super::network_halfka_static::AccumulatorHalfKA1024,
+    ) {
+        match self {
+            Self::HalfKA1024(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
+            _ => panic!("This method is only for HalfKA1024 architecture."),
+        }
+    }
+
+    /// 複数手分の差分を適用してアキュムレータを更新（HalfKP用）
     pub fn forward_update_incremental(
         &self,
         pos: &Position,
@@ -357,8 +565,11 @@ impl NNUENetwork {
             Self::HalfKP(net) => {
                 net.feature_transformer.forward_update_incremental(pos, stack, source_idx)
             }
-            Self::HalfKA(net) => {
-                net.feature_transformer.forward_update_incremental(pos, stack, source_idx)
+            Self::HalfKA512(_) => {
+                panic!("HalfKA512 requires AccumulatorStackHalfKA512. Use forward_update_incremental_halfka_512().")
+            }
+            Self::HalfKA1024(_) => {
+                panic!("HalfKA1024 requires AccumulatorStackHalfKA1024. Use forward_update_incremental_halfka_1024().")
             }
             Self::HalfKADynamic(_) => {
                 panic!("HalfKADynamic requires AccumulatorStackHalfKADynamic. Use forward_update_incremental_halfka_dynamic().")
@@ -395,6 +606,32 @@ impl NNUENetwork {
         }
     }
 
+    /// 複数手分の差分を適用してアキュムレータを更新（HalfKA512用）
+    pub fn forward_update_incremental_halfka_512(
+        &self,
+        pos: &Position,
+        stack: &mut super::network_halfka_static::AccumulatorStackHalfKA512,
+        source_idx: usize,
+    ) -> bool {
+        match self {
+            Self::HalfKA512(net) => net.forward_update_incremental(pos, stack, source_idx),
+            _ => panic!("This method is only for HalfKA512 architecture."),
+        }
+    }
+
+    /// 複数手分の差分を適用してアキュムレータを更新（HalfKA1024用）
+    pub fn forward_update_incremental_halfka_1024(
+        &self,
+        pos: &Position,
+        stack: &mut super::network_halfka_static::AccumulatorStackHalfKA1024,
+        source_idx: usize,
+    ) -> bool {
+        match self {
+            Self::HalfKA1024(net) => net.forward_update_incremental(pos, stack, source_idx),
+            _ => panic!("This method is only for HalfKA1024 architecture."),
+        }
+    }
+
     /// HalfKADynamic 用の新しいアキュムレータを作成
     pub fn new_accumulator_halfka_dynamic(
         &self,
@@ -414,180 +651,43 @@ impl NNUENetwork {
             _ => panic!("This method is only for HalfKADynamic architecture."),
         }
     }
-}
 
-// =============================================================================
-// NetworkHalfKA - HalfKA_hm^用ネットワーク (256x2-32-32 固定)
-// =============================================================================
-
-/// HalfKA_hm^用NNUEネットワーク (256x2-32-32 アーキテクチャ固定)
-///
-/// アーキテクチャ表記 `L1xN-L2-L3` の意味:
-/// - L1: Feature Transformer 出力次元（片側）= 256
-/// - L1*2: Hidden1 入力次元（両視点連結）= 512
-/// - L2: Hidden1 出力次元 = 32
-/// - L3: Hidden2 出力次元 = 32
-///
-/// 他のアーキテクチャ（512x2-8-96 など）は `NetworkHalfKADynamic` を使用。
-pub struct NetworkHalfKA {
-    /// 特徴量変換器 (入力 → L1=256)
-    pub feature_transformer: FeatureTransformerHalfKA,
-    /// 隠れ層1: L1*2=512 → L2=32（両視点の連結が入力）
-    pub hidden1: AffineTransform<{ TRANSFORMED_FEATURE_DIMENSIONS * 2 }, HIDDEN1_DIMENSIONS>,
-    /// 隠れ層2: L2=32 → L3=32
-    pub hidden2: AffineTransform<HIDDEN1_DIMENSIONS, HIDDEN2_DIMENSIONS>,
-    /// 出力層: L3=32 → 1
-    pub output: AffineTransform<HIDDEN2_DIMENSIONS, OUTPUT_DIMENSIONS>,
-}
-
-impl NetworkHalfKA {
-    /// ファイルから読み込み
-    pub fn load<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        let file = File::open(path)?;
-        let mut reader = BufReader::new(file);
-        Self::read(&mut reader)
+    /// HalfKA512 用の新しいアキュムレータを作成
+    pub fn new_accumulator_halfka_512(&self) -> super::network_halfka_static::AccumulatorHalfKA512 {
+        match self {
+            Self::HalfKA512(net) => net.new_accumulator(),
+            _ => panic!("This method is only for HalfKA512 architecture."),
+        }
     }
 
-    /// リーダーから読み込み
-    pub fn read<R: Read>(reader: &mut R) -> io::Result<Self> {
-        // ヘッダを読み込み
-        let mut buf4 = [0u8; 4];
-        reader.read_exact(&mut buf4)?;
-        let version = u32::from_le_bytes(buf4);
-
-        if version != NNUE_VERSION_HALFKA {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "Invalid NNUE version for HalfKA_hm^: {version:#x}, expected {NNUE_VERSION_HALFKA:#x}"
-                ),
-            ));
+    /// HalfKA512 用の新しいアキュムレータスタックを作成
+    pub fn new_accumulator_stack_halfka_512(
+        &self,
+    ) -> super::network_halfka_static::AccumulatorStackHalfKA512 {
+        match self {
+            Self::HalfKA512(net) => net.new_accumulator_stack(),
+            _ => panic!("This method is only for HalfKA512 architecture."),
         }
-
-        // 構造ハッシュを読み込み
-        reader.read_exact(&mut buf4)?;
-        let _hash = u32::from_le_bytes(buf4);
-
-        // アーキテクチャ文字列を読み込み
-        reader.read_exact(&mut buf4)?;
-        let arch_len = u32::from_le_bytes(buf4) as usize;
-        if arch_len == 0 || arch_len > MAX_ARCH_LEN {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Invalid arch string length: {arch_len} (max: {MAX_ARCH_LEN})"),
-            ));
-        }
-        let mut arch = vec![0u8; arch_len];
-        reader.read_exact(&mut arch)?;
-
-        // 圧縮形式とFactorization状態を判定（アーキテクチャ文字列から）
-        let arch_str = String::from_utf8_lossy(&arch);
-        let is_leb128 = arch_str.contains("leb128");
-
-        // Factorizedモデル（未coalesce）の検出
-        // nnue-pytorchのFactorizerは訓練時のみ使用され、
-        // serialize.pyで自動的にcoalesceされる。
-        // "Factorizer"が含まれる場合は訓練中のcheckpointの可能性がある。
-        if arch_str.contains("Factorizer") {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "Unsupported model format: factorized (non-coalesced) HalfKA_hm^ model detected.\n\
-                     This engine only supports coalesced models (73,305 dimensions).\n\
-                     Factorized models (74,934 dimensions) are for training only.\n\n\
-                     To fix: Re-export the model using nnue-pytorch serialize.py:\n\
-                       python serialize.py model.ckpt output.nnue\n\n\
-                     The serialize.py script automatically coalesces factor weights.\n\
-                     Architecture string: {arch_str}"
-                ),
-            ));
-        }
-
-        // パラメータを読み込み
-        let feature_transformer = if is_leb128 {
-            FeatureTransformerHalfKA::read_leb128(reader)?
-        } else {
-            FeatureTransformerHalfKA::read(reader)?
-        };
-
-        let hidden1 = if is_leb128 {
-            AffineTransform::read_leb128(reader)?
-        } else {
-            AffineTransform::read(reader)?
-        };
-
-        let hidden2 = if is_leb128 {
-            AffineTransform::read_leb128(reader)?
-        } else {
-            AffineTransform::read(reader)?
-        };
-
-        let output = if is_leb128 {
-            AffineTransform::read_leb128(reader)?
-        } else {
-            AffineTransform::read(reader)?
-        };
-
-        // ファイル残余データの検証（factorizedモデル検出）
-        // coalesce済みモデルでは、全層読み込み後にデータが残らない。
-        // factorizedモデル（74,934次元）を誤って読んだ場合、
-        // FTが73,305次元分しか読まないため、余りデータが発生する。
-        // 余り = (74,934 - 73,305) × 256 × 2 = 834,048 bytes
-        let mut probe = [0u8; 1];
-        match reader.read(&mut probe) {
-            Ok(0) => {
-                // EOF到達 - 正常（coalesce済みモデル）
-            }
-            Ok(_) => {
-                // 余りデータあり - おそらくfactorizedモデル
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "NNUE file has unexpected trailing data.\n\
-                     This likely indicates a factorized (non-coalesced) model.\n\
-                     This engine only supports coalesced models (73,305 dimensions).\n\n\
-                     To fix: Re-export the model using nnue-pytorch serialize.py:\n\
-                       python serialize.py model.ckpt output.nnue\n\n\
-                     The serialize.py script automatically coalesces factor weights.",
-                ));
-            }
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                // EOF - 正常
-            }
-            Err(e) => {
-                // その他のIOエラー
-                return Err(e);
-            }
-        }
-
-        Ok(Self {
-            feature_transformer,
-            hidden1,
-            hidden2,
-            output,
-        })
     }
 
-    /// 評価値を計算
-    pub fn evaluate(&self, pos: &Position, acc: &Accumulator) -> Value {
-        let mut transformed = Aligned([0u8; TRANSFORMED_FEATURE_DIMENSIONS * 2]);
-        self.feature_transformer.transform(acc, pos.side_to_move(), &mut transformed.0);
+    /// HalfKA1024 用の新しいアキュムレータを作成
+    pub fn new_accumulator_halfka_1024(
+        &self,
+    ) -> super::network_halfka_static::AccumulatorHalfKA1024 {
+        match self {
+            Self::HalfKA1024(net) => net.new_accumulator(),
+            _ => panic!("This method is only for HalfKA1024 architecture."),
+        }
+    }
 
-        let mut hidden1_out = Aligned([0i32; HIDDEN1_DIMENSIONS]);
-        self.hidden1.propagate(&transformed.0, &mut hidden1_out.0);
-
-        let mut hidden1_relu = Aligned([0u8; HIDDEN1_DIMENSIONS]);
-        ClippedReLU::propagate(&hidden1_out.0, &mut hidden1_relu.0);
-
-        let mut hidden2_out = Aligned([0i32; HIDDEN2_DIMENSIONS]);
-        self.hidden2.propagate(&hidden1_relu.0, &mut hidden2_out.0);
-
-        let mut hidden2_relu = Aligned([0u8; HIDDEN2_DIMENSIONS]);
-        ClippedReLU::propagate(&hidden2_out.0, &mut hidden2_relu.0);
-
-        let mut output = Aligned([0i32; OUTPUT_DIMENSIONS]);
-        self.output.propagate(&hidden2_relu.0, &mut output.0);
-
-        Value::new(output.0[0] / FV_SCALE)
+    /// HalfKA1024 用の新しいアキュムレータスタックを作成
+    pub fn new_accumulator_stack_halfka_1024(
+        &self,
+    ) -> super::network_halfka_static::AccumulatorStackHalfKA1024 {
+        match self {
+            Self::HalfKA1024(net) => net.new_accumulator_stack(),
+            _ => panic!("This method is only for HalfKA1024 architecture."),
+        }
     }
 }
 
@@ -605,6 +705,16 @@ pub struct Network {
     pub hidden2: AffineTransform<HIDDEN1_DIMENSIONS, HIDDEN2_DIMENSIONS>,
     /// 出力層: 32 → 1
     pub output: AffineTransform<HIDDEN2_DIMENSIONS, OUTPUT_DIMENSIONS>,
+    /// 評価値スケーリング係数
+    ///
+    /// 評価関数の訓練時に決定されるパラメータ。
+    /// 同じファイル形式でも評価関数によって値が異なる場合がある。
+    /// - 水匠5: 24
+    /// - デフォルト（YaneuraOu互換）: 16
+    ///
+    /// 注意: 現在は自動判定しているが、将来的にはエンジンオプションで
+    /// 設定可能にすることを検討（YaneuraOuと同様）。
+    pub fv_scale: i32,
 }
 
 impl Network {
@@ -646,6 +756,25 @@ impl Network {
         let mut arch = vec![0u8; arch_len];
         reader.read_exact(&mut arch)?;
 
+        // FV_SCALEの判定
+        //
+        // FV_SCALEは評価関数の訓練時に決まるパラメータであり、
+        // ファイル形式からは完全に判定できない。
+        // ここではleb128圧縮の有無をヒューリスティックとして使用:
+        // - leb128あり: nnue-pytorch出力（通常16）
+        // - leb128なし: クラシック形式（水匠5等は24）
+        //
+        // 注意: この判定は不完全。将来的にはエンジンオプションで
+        // 設定可能にすることを検討（YaneuraOuのFV_SCALEオプション参照）。
+        let arch_str = String::from_utf8_lossy(&arch);
+        let fv_scale = if arch_str.contains("leb128") {
+            // leb128圧縮あり: デフォルト16
+            FV_SCALE_HALFKA
+        } else {
+            // leb128圧縮なし: 水匠5等を想定して24
+            FV_SCALE
+        };
+
         // FeatureTransformerのレイヤーハッシュを読み飛ばす
         // (YaneuraOu/Stockfishフォーマットでは各レイヤーの前に4バイトのハッシュがある)
         reader.read_exact(&mut buf4)?;
@@ -667,6 +796,7 @@ impl Network {
             hidden1,
             hidden2,
             output,
+            fv_scale,
         })
     }
 
@@ -729,8 +859,9 @@ impl Network {
         let mut output = Aligned([0i32; OUTPUT_DIMENSIONS]);
         self.output.propagate(&hidden2_relu.0, &mut output.0);
 
-        // スケーリング（nnue-pytorch形式はFV_SCALE=16）
-        Value::new(output.0[0] / FV_SCALE_HALFKA)
+        // スケーリング（オーバーライド設定があればそちらを優先）
+        let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
+        Value::new(output.0[0] / fv_scale)
     }
 }
 
@@ -892,6 +1023,90 @@ fn update_and_evaluate_halfka_dynamic(
     // 評価
     let acc_ref = &stack.current().accumulator;
     network.evaluate_halfka_dynamic(pos, acc_ref)
+}
+
+/// HalfKA512 アキュムレータを更新して評価（内部実装）
+#[inline]
+fn update_and_evaluate_halfka_512(
+    network: &NNUENetwork,
+    pos: &Position,
+    stack: &mut super::network_halfka_static::AccumulatorStackHalfKA512,
+) -> Value {
+    // アキュムレータの更新
+    let current_entry = stack.current();
+    if !current_entry.accumulator.computed_accumulation {
+        let mut updated = false;
+
+        // 1. 直前局面で差分更新を試行
+        if let Some(prev_idx) = current_entry.previous {
+            let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
+            if prev_computed {
+                let dirty_piece = stack.current().dirty_piece;
+                let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
+                network.update_accumulator_halfka_512(pos, &dirty_piece, current_acc, prev_acc);
+                updated = true;
+            }
+        }
+
+        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
+        if !updated {
+            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+                updated = network.forward_update_incremental_halfka_512(pos, stack, source_idx);
+            }
+        }
+
+        // 3. それでも失敗なら全計算
+        if !updated {
+            let acc = &mut stack.current_mut().accumulator;
+            network.refresh_accumulator_halfka_512(pos, acc);
+        }
+    }
+
+    // 評価
+    let acc_ref = &stack.current().accumulator;
+    network.evaluate_halfka_512(pos, acc_ref)
+}
+
+/// HalfKA1024 アキュムレータを更新して評価（内部実装）
+#[inline]
+fn update_and_evaluate_halfka_1024(
+    network: &NNUENetwork,
+    pos: &Position,
+    stack: &mut super::network_halfka_static::AccumulatorStackHalfKA1024,
+) -> Value {
+    // アキュムレータの更新
+    let current_entry = stack.current();
+    if !current_entry.accumulator.computed_accumulation {
+        let mut updated = false;
+
+        // 1. 直前局面で差分更新を試行
+        if let Some(prev_idx) = current_entry.previous {
+            let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
+            if prev_computed {
+                let dirty_piece = stack.current().dirty_piece;
+                let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
+                network.update_accumulator_halfka_1024(pos, &dirty_piece, current_acc, prev_acc);
+                updated = true;
+            }
+        }
+
+        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
+        if !updated {
+            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+                updated = network.forward_update_incremental_halfka_1024(pos, stack, source_idx);
+            }
+        }
+
+        // 3. それでも失敗なら全計算
+        if !updated {
+            let acc = &mut stack.current_mut().accumulator;
+            network.refresh_accumulator_halfka_1024(pos, acc);
+        }
+    }
+
+    // 評価
+    let acc_ref = &stack.current().accumulator;
+    network.evaluate_halfka_1024(pos, acc_ref)
 }
 
 /// 局面を評価
@@ -1095,6 +1310,16 @@ pub fn is_halfka_dynamic_loaded() -> bool {
     NETWORK.get().map(|n| n.is_halfka_dynamic()).unwrap_or(false)
 }
 
+/// ロードされたNNUEがHalfKA512アーキテクチャかどうか
+pub fn is_halfka_512_loaded() -> bool {
+    NETWORK.get().map(|n| n.is_halfka_512()).unwrap_or(false)
+}
+
+/// ロードされたNNUEがHalfKA1024アーキテクチャかどうか
+pub fn is_halfka_1024_loaded() -> bool {
+    NETWORK.get().map(|n| n.is_halfka_1024()).unwrap_or(false)
+}
+
 /// ロードされたHalfKADynamicのL1サイズを取得（未ロードまたは別アーキテクチャの場合はNone）
 pub fn get_halfka_dynamic_l1() -> Option<usize> {
     NETWORK.get().and_then(|n| n.get_halfka_dynamic_l1())
@@ -1144,6 +1369,8 @@ pub fn evaluate_dispatch(
     stack: &mut AccumulatorStack,
     stack_layer_stacks: &mut AccumulatorStackLayerStacks,
     stack_halfka_dynamic: &mut super::network_halfka_dynamic::AccumulatorStackHalfKADynamic,
+    stack_halfka_512: &mut super::network_halfka_static::AccumulatorStackHalfKA512,
+    stack_halfka_1024: &mut super::network_halfka_static::AccumulatorStackHalfKA1024,
 ) -> Value {
     // tournamentビルド: NNUEが必須（フォールバックなし）
     #[cfg(feature = "tournament")]
@@ -1162,6 +1389,10 @@ pub fn evaluate_dispatch(
     // アーキテクチャに応じて内部ヘルパー関数を呼び出し
     if network.is_layer_stacks() {
         update_and_evaluate_layer_stacks(network, pos, stack_layer_stacks)
+    } else if network.is_halfka_512() {
+        update_and_evaluate_halfka_512(network, pos, stack_halfka_512)
+    } else if network.is_halfka_1024() {
+        update_and_evaluate_halfka_1024(network, pos, stack_halfka_1024)
     } else if network.is_halfka_dynamic() {
         update_and_evaluate_halfka_dynamic(network, pos, stack_halfka_dynamic)
     } else {

@@ -3,7 +3,7 @@
 //! エポック単位での学習を管理する。
 
 use super::dataset::TrainingDataset;
-use super::network::{TrainableNetwork, FV_SCALE};
+use super::network::TrainableNetwork;
 use super::optimizer::Optimizer;
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::SeedableRng;
@@ -34,6 +34,12 @@ pub struct TrainConfig {
     pub checkpoint_interval: usize,
     /// 出力ディレクトリ
     pub output_dir: String,
+    /// FV_SCALE: 評価値のスケーリング係数
+    ///
+    /// NNUEの出力を最終的な評価値に変換する係数。
+    /// 推論時の engine-core 側 FV_SCALE と同じ値を使用する必要がある。
+    /// 訓練時の選択によって値が決まる（例: 水匠5=24, YaneuraOuデフォルト=16）。
+    pub fv_scale: f32,
 
     // === 学習率スケジューリング (eta1/eta2/eta3方式) ===
     /// eta1: 初期学習率
@@ -70,6 +76,7 @@ impl Default for TrainConfig {
             eval_scale: 600.0, // 勝率50%が0cpの場合のスケール
             checkpoint_interval: 10,
             output_dir: ".".to_string(),
+            fv_scale: 24.0, // HalfKP (水匠5互換) のデフォルト値
             // 学習率スケジューリング（デフォルトは単一学習率）
             eta1: 0.001,
             eta2: 0.001,
@@ -451,8 +458,8 @@ impl Trainer {
                     sample.side_to_move,
                 );
 
-                let predicted = output / FV_SCALE;
-                let target = sample.target_score / FV_SCALE;
+                let predicted = output / self.config.fv_scale;
+                let target = sample.target_score / self.config.fv_scale;
 
                 let loss = match self.config.loss_type {
                     LossType::Mse => {
@@ -550,14 +557,15 @@ impl Trainer {
             );
 
             // スケーリング後の評価値
-            let predicted = output / FV_SCALE;
-            let target = sample.target_score / FV_SCALE;
+            let fv_scale = self.config.fv_scale;
+            let predicted = output / fv_scale;
+            let target = sample.target_score / fv_scale;
 
             // 損失計算
             let (loss, grad) = match self.config.loss_type {
                 LossType::Mse => {
                     let diff = predicted - target;
-                    (diff * diff, 2.0 * diff / FV_SCALE)
+                    (diff * diff, 2.0 * diff / fv_scale)
                 }
                 LossType::SigmoidCrossEntropy => {
                     // 勝率への変換（数値安定性のためクランプ）
@@ -569,7 +577,7 @@ impl Trainer {
                     let loss = -target_wr * pred_wr.ln() - (1.0 - target_wr) * (1.0 - pred_wr).ln();
 
                     // 勾配: d(loss)/d(output)
-                    let grad = (pred_wr - target_wr) / (self.config.eval_scale * FV_SCALE);
+                    let grad = (pred_wr - target_wr) / (self.config.eval_scale * fv_scale);
 
                     (loss, grad)
                 }

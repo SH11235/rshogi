@@ -9,13 +9,17 @@ pub const NNUE_VERSION: u32 = 0x7AF32F16;
 /// アーキテクチャ文字列の最大長（破損ファイル/DoS対策）
 pub const MAX_ARCH_LEN: usize = 4096;
 
-/// 評価値のスケーリング（suisho5向け: 24）
-/// HalfKP形式（NNUE_VERSION = 0x7AF32F16）用
+/// 評価値のスケーリング（水匠5用: 24）
+///
+/// FV_SCALEは評価関数の訓練時に決まるパラメータ。
+/// 同じファイル形式でも評価関数によって異なる場合がある。
+/// 例: YaneuraOuのデフォルトは16だが、水匠5は24を使用。
 pub const FV_SCALE: i32 = 24;
 
-/// 評価値のスケーリング（nnue-pytorch向け: 16）
-/// HalfKA形式（NNUE_VERSION_HALFKA = 0x7AF32F20）用
-/// kPonanzaConstant = 600, FV_SCALE = 16
+/// 評価値のスケーリング（デフォルト: 16）
+///
+/// YaneuraOuのデフォルト値。多くのnnue-pytorch訓練モデルもこの値を使用。
+/// kPonanzaConstant = 600 に対応。
 pub const FV_SCALE_HALFKA: i32 = 16;
 
 /// 重みのスケーリングビット数
