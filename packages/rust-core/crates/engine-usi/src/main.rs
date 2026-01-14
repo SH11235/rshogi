@@ -55,13 +55,18 @@ impl UsiEngine {
     fn new() -> Self {
         let tt_size_mb = 256;
         let eval_hash_size_mb = 256;
+        let use_eval_hash = true;
+
+        // グローバルフラグをデフォルト値で初期化
+        // （USI GUIがsetoptionを送らない場合に備える）
+        set_eval_hash_enabled(use_eval_hash);
 
         Self {
             search: Some(Search::new(tt_size_mb)), // デフォルト256MB
             position: Position::new(),
             tt_size_mb,
             eval_hash_size_mb,
-            use_eval_hash: true, // デフォルトで有効
+            use_eval_hash,
             multi_pv: 1,
             skill_options: engine_core::search::SkillOptions::default(),
             search_thread: None,
