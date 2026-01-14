@@ -23,6 +23,7 @@ use super::network_halfka_dynamic::NetworkHalfKADynamic;
 use super::network_layer_stacks::NetworkLayerStacks;
 #[cfg(not(feature = "tournament"))]
 use crate::eval::material;
+use crate::eval::{eval_hash_enabled, EvalHash};
 use crate::position::Position;
 use crate::types::Value;
 use std::fs::File;
@@ -888,6 +889,8 @@ fn update_and_evaluate_halfka_dynamic(
 /// 局面を評価
 ///
 /// AccumulatorStack を使って差分更新し、計算済みなら再利用する。
+/// EvalHash が有効な場合は、まずハッシュテーブルを検索し、
+/// ヒットしなければ計算してキャッシュに保存する。
 ///
 /// # フォールバック動作
 /// - 通常ビルド: NNUEが初期化されていない場合は駒得評価にフォールバック
@@ -900,7 +903,7 @@ fn update_and_evaluate_halfka_dynamic(
 ///
 /// # 注意
 /// LayerStacks アーキテクチャの場合は `evaluate_layer_stacks` を使用してください。
-pub fn evaluate(pos: &Position, stack: &mut AccumulatorStack) -> Value {
+pub fn evaluate(pos: &Position, stack: &mut AccumulatorStack, eval_hash: &EvalHash) -> Value {
     // tournamentビルド: NNUEが必須（フォールバックなし）
     #[cfg(feature = "tournament")]
     let network = NETWORK.get().expect(
@@ -917,14 +920,22 @@ pub fn evaluate(pos: &Position, stack: &mut AccumulatorStack) -> Value {
 
     // LayerStacks/HalfKADynamic は別のアキュムレータ型を使用する
     if network.is_layer_stacks() {
-        panic!(
-            "LayerStacks architecture detected. Use evaluate_layer_stacks() with AccumulatorStackNnuePytorch."
+        unreachable!(
+            "BUG: LayerStacks architecture detected. Use evaluate_layer_stacks() with AccumulatorStackNnuePytorch."
         );
     }
     if network.is_halfka_dynamic() {
-        panic!(
-            "HalfKADynamic architecture detected. Use evaluate_halfka_dynamic() with AccumulatorStackHalfKADynamic."
+        unreachable!(
+            "BUG: HalfKADynamic architecture detected. Use evaluate_halfka_dynamic() with AccumulatorStackHalfKADynamic."
         );
+    }
+
+    // EvalHash が有効な場合はキャッシュを検索
+    let key = pos.key();
+    if eval_hash_enabled() {
+        if let Some(score) = eval_hash.probe(key) {
+            return Value::new(score);
+        }
     }
 
     // 差分更新の成功率計測（diagnosticsフィーチャー有効時のみ）
@@ -1056,7 +1067,14 @@ pub fn evaluate(pos: &Position, stack: &mut AccumulatorStack) -> Value {
 
     // 不変借用で評価
     let acc_ref = &stack.current().accumulator;
-    network.evaluate(pos, acc_ref)
+    let value = network.evaluate(pos, acc_ref);
+
+    // EvalHash が有効な場合はキャッシュに保存
+    if eval_hash_enabled() {
+        eval_hash.store(key, value.raw());
+    }
+
+    value
 }
 
 /// ロードされたNNUEがLayerStacksアーキテクチャかどうか
@@ -1156,9 +1174,10 @@ mod tests {
         let mut pos = Position::new();
         pos.set_sfen(SFEN_HIRATE).unwrap();
         let mut stack = AccumulatorStack::new();
+        let eval_hash = EvalHash::new(1);
 
         // NNUEが初期化されていない場合はフォールバック
-        let value = evaluate(&pos, &mut stack);
+        let value = evaluate(&pos, &mut stack, &eval_hash);
 
         // フォールバック評価が動作することを確認
         assert!(value.raw().abs() < 1000);
@@ -1173,16 +1192,17 @@ mod tests {
         let mut pos = Position::new();
         pos.set_sfen(SFEN_HIRATE).unwrap();
         let mut stack = AccumulatorStack::new();
+        let eval_hash = EvalHash::new(1);
 
         // 手動で accumulator を計算済みにする
         stack.current_mut().accumulator.computed_accumulation = true;
 
         // 1回目の evaluate: computed_accumulation が true のままならそのまま評価する
-        let value1 = evaluate(&pos, &mut stack);
+        let value1 = evaluate(&pos, &mut stack, &eval_hash);
         assert!(stack.current().accumulator.computed_accumulation);
 
         // 2回目もフラグが維持されていることを確認
-        let value2 = evaluate(&pos, &mut stack);
+        let value2 = evaluate(&pos, &mut stack, &eval_hash);
         assert!(stack.current().accumulator.computed_accumulation);
 
         // フォールバックの駒得評価は手番に依存して符号が変わる可能性があるが、

@@ -29,13 +29,14 @@ import {
     type PreferredPathCache,
     promoteToMainLine as promoteToMainLineTree,
     setNodeEval,
+    setNodeMultiPvEval,
     switchBranch as switchBranchTree,
     truncateFromCurrent,
 } from "@shogi/app-core";
 import type { EngineInfoEvent } from "@shogi/engine-client";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { normalizeEvalToSentePerspective } from "../utils/branchTreeUtils";
-import type { EvalHistory, KifMove } from "../utils/kifFormat";
+import type { EvalHistory, KifMove, MultiPvNodeData, NodeData } from "../utils/kifFormat";
 import { convertMovesToKif } from "../utils/kifFormat";
 
 /** USI形式の指し手からlastMove情報を導出 */
@@ -364,18 +365,27 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
                 nodeId = findNodeByPlyInMainLine(prev, ply);
             }
 
-            if (nodeId) {
-                const node = prev.nodes.get(nodeId);
+            if (!nodeId) {
+                return prev;
+            }
+
+            const evalData: KifuEval = {
+                scoreCp: event.scoreCp,
+                scoreMate: event.scoreMate,
+                depth: event.depth,
+                pv: event.pv,
+            };
+
+            const multipv = event.multipv ?? 1;
+
+            // multiPvEvalsを更新（setNodeMultiPvEval内で深さ比較を行う）
+            let updated = setNodeMultiPvEval(prev, nodeId, multipv, evalData);
+
+            // multipv=1の場合は単一evalも更新（後方互換性）
+            if (multipv === 1) {
+                const node = updated.nodes.get(nodeId);
                 if (node) {
-                    const evalData: KifuEval = {
-                        scoreCp: event.scoreCp,
-                        scoreMate: event.scoreMate,
-                        depth: event.depth,
-                        pv: event.pv,
-                    };
-
                     const existing = node.eval;
-
                     // 更新条件:
                     // 1. 既存の評価値がない場合
                     // 2. 新しい探索深さが既存より深い場合
@@ -386,12 +396,12 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
                         (!existing.pv && event.pv && event.pv.length > 0);
 
                     if (shouldUpdate) {
-                        return setNodeEval(prev, nodeId, evalData);
+                        updated = setNodeEval(updated, nodeId, evalData);
                     }
                 }
             }
 
-            return prev;
+            return updated;
         });
     }, []);
 
@@ -411,17 +421,28 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
                 pv: event.pv,
             };
 
-            const existing = node.eval;
-            const shouldUpdate =
-                !existing ||
-                (event.depth !== undefined && (existing.depth ?? 0) < event.depth) ||
-                (!existing.pv && event.pv && event.pv.length > 0);
+            const multipv = event.multipv ?? 1;
 
-            if (shouldUpdate) {
-                return setNodeEval(prev, nodeId, evalData);
+            // multiPvEvalsを更新（setNodeMultiPvEval内で深さ比較を行う）
+            let updated = setNodeMultiPvEval(prev, nodeId, multipv, evalData);
+
+            // multipv=1の場合は単一evalも更新（後方互換性）
+            if (multipv === 1) {
+                const updatedNode = updated.nodes.get(nodeId);
+                if (updatedNode) {
+                    const existing = updatedNode.eval;
+                    const shouldUpdate =
+                        !existing ||
+                        (event.depth !== undefined && (existing.depth ?? 0) < event.depth) ||
+                        (!existing.pv && event.pv && event.pv.length > 0);
+
+                    if (shouldUpdate) {
+                        updated = setNodeEval(updated, nodeId, evalData);
+                    }
+                }
             }
 
-            return prev;
+            return updated;
         });
     }, []);
 
@@ -652,16 +673,7 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
     const kifMoves = useMemo((): KifMove[] => {
         // フルラインから指し手を抽出
         const moves: string[] = [];
-        const nodeDataMap = new Map<
-            number,
-            {
-                scoreCp?: number;
-                scoreMate?: number;
-                depth?: number;
-                elapsedMs?: number;
-                pv?: string[];
-            }
-        >();
+        const nodeDataMap = new Map<number, NodeData>();
 
         for (const node of fullLinePath) {
             if (node.usiMove !== null) {
@@ -670,14 +682,33 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
             // 評価値と消費時間をまとめてマップに格納
             const hasEval = node.eval != null;
             const hasElapsed = node.elapsedMs != null;
-            if (hasEval || hasElapsed) {
+            const hasMultiPv = node.multiPvEvals != null && node.multiPvEvals.length > 0;
+
+            if (hasEval || hasElapsed || hasMultiPv) {
                 const normalizedEval = normalizeEvalToSentePerspective(node.eval, node.ply);
+
+                // multiPvEvalsを正規化
+                let normalizedMultiPvEvals: (MultiPvNodeData | undefined)[] | undefined;
+                if (hasMultiPv && node.multiPvEvals) {
+                    normalizedMultiPvEvals = node.multiPvEvals.map((eval_) => {
+                        if (!eval_) return undefined;
+                        const normalized = normalizeEvalToSentePerspective(eval_, node.ply);
+                        return {
+                            scoreCp: normalized.evalCp,
+                            scoreMate: normalized.evalMate,
+                            depth: eval_.depth,
+                            pv: eval_.pv,
+                        };
+                    });
+                }
+
                 nodeDataMap.set(node.ply, {
                     scoreCp: normalizedEval.evalCp,
                     scoreMate: normalizedEval.evalMate,
                     depth: node.eval?.depth,
                     elapsedMs: node.elapsedMs,
                     pv: node.eval?.pv,
+                    multiPvEvals: normalizedMultiPvEvals,
                 });
             }
         }

@@ -19,6 +19,12 @@
 - Desktop (Tauri) UI rules: see `apps/desktop/AGENTS.md` (StrictMode impact, engine client handling).
 - Web (Wasm) UI rules: see `apps/web/AGENTS.md` (StrictMode impact, engine client handling).
 
+## テストファイルの配置
+
+- テストファイルはソースファイルと同じディレクトリに `*.test.ts` または `*.test.tsx` として配置する
+- `__tests__/` ディレクトリは使用しない
+- 例: `hooks/useEngineManager.ts` → `hooks/useEngineManager.test.ts`
+
 ## Git操作に関する注意
 
 **重要**: ユーザーの明示的な指示なしに、以下の操作を行ってはいけない:

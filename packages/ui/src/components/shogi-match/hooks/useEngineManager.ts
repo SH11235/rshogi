@@ -108,6 +108,8 @@ interface AnalysisRequest {
     depth?: number;
     /** 解析時間制限（省略時は3秒） */
     timeMs?: number;
+    /** 候補手数（MultiPV）（省略時は1） */
+    multiPv?: number;
 }
 
 /** 解析のデフォルト設定 */
@@ -128,17 +130,10 @@ async function applySkillLevelSettings(
 
     try {
         await client.setOption("Skill Level", normalized.skillLevel);
-
-        if (normalized.useLimitStrength && normalized.elo !== undefined) {
-            await client.setOption("UCI_LimitStrength", true);
-            await client.setOption("UCI_Elo", normalized.elo);
-        } else {
-            await client.setOption("UCI_LimitStrength", false);
-        }
     } catch (error) {
         const errorMsg = error instanceof Error ? error.message : String(error);
         throw new Error(
-            `Failed to apply skill level settings (skillLevel: ${normalized.skillLevel}, elo: ${normalized.elo ?? "none"}): ${errorMsg}`,
+            `Failed to apply skill level settings (skillLevel: ${normalized.skillLevel}): ${errorMsg}`,
         );
     }
 }
@@ -883,6 +878,25 @@ export function useEngineManager({
                     analysisState.ply = null;
                     setIsAnalyzing(false);
                     return;
+                }
+            }
+
+            // MultiPV オプションを設定
+            const multiPv = request.multiPv ?? 1;
+            try {
+                await client.setOption("MultiPV", String(multiPv));
+            } catch (error) {
+                // MultiPV オプションが未対応のエンジンでは無視（単一PVにフォールバック）
+                if (multiPv > 1) {
+                    console.warn(
+                        `MultiPV option not supported by this engine. Requested MultiPV=${multiPv}, but only single PV will be returned.`,
+                        error,
+                    );
+                } else {
+                    console.warn(
+                        "MultiPV option not supported by this engine. Falling back to single PV.",
+                        error,
+                    );
                 }
             }
 

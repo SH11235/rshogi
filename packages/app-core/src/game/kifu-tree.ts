@@ -38,8 +38,15 @@ export interface KifuNode {
     positionAfter: PositionState;
     /** 指し手適用前の盤面状態 */
     boardBefore: BoardState;
-    /** 評価値情報（オプション） */
+    /** 評価値情報（後方互換性のため残す、multipv=1相当） */
     eval?: KifuEval;
+    /**
+     * 複数PV用の評価値配列（multipv順、1-indexed相当）
+     * - multiPvEvals[0] = multipv=1 の評価値
+     * - multiPvEvals[1] = multipv=2 の評価値
+     * - 未設定の位置は undefined になる可能性がある
+     */
+    multiPvEvals?: (KifuEval | undefined)[];
     /** コメント（オプション） */
     comment?: string;
     /** 消費時間（ミリ秒） */
@@ -624,6 +631,93 @@ export function setNodeComment(tree: KifuTree, nodeId: string, comment: string):
     newNodes.set(nodeId, {
         ...node,
         comment,
+    });
+
+    return {
+        ...tree,
+        nodes: newNodes,
+    };
+}
+
+/**
+ * ノードに複数PVの評価値を設定
+ *
+ * multiPvEvals配列はmultipv順（1-indexed相当）で格納される:
+ * - multiPvEvals[0] = multipv=1 の評価値
+ * - multiPvEvals[1] = multipv=2 の評価値
+ * - 未設定の位置は undefined になる（スパース配列）
+ *
+ * @param tree 棋譜ツリー
+ * @param nodeId ノードID
+ * @param multipv PV番号（1-indexed）
+ * @param evalData 評価値データ
+ * @returns 更新された棋譜ツリー
+ */
+export function setNodeMultiPvEval(
+    tree: KifuTree,
+    nodeId: string,
+    multipv: number,
+    evalData: KifuEval,
+): KifuTree {
+    // multipv は 1 以上の正の整数である必要がある
+    if (multipv < 1 || !Number.isInteger(multipv)) {
+        return tree;
+    }
+
+    const node = tree.nodes.get(nodeId);
+    if (!node) {
+        return tree;
+    }
+
+    // multipv に対応するインデックス（1-indexed → 0-indexed）
+    const index = multipv - 1;
+
+    // 既存の配列をコピー（スパース配列を維持）
+    const newLength = Math.max(node.multiPvEvals?.length ?? 0, multipv);
+    const newEvals: (KifuEval | undefined)[] = new Array(newLength);
+
+    // 既存の値をコピー
+    if (node.multiPvEvals) {
+        for (let i = 0; i < node.multiPvEvals.length; i++) {
+            newEvals[i] = node.multiPvEvals[i];
+        }
+    }
+
+    // 既存エントリがある場合は深さを比較して更新判定
+    const existing = newEvals[index];
+    if (existing) {
+        // 両方に深さがある場合
+        if (evalData.depth !== undefined && existing.depth !== undefined) {
+            if (existing.depth > evalData.depth) {
+                // 既存のほうが深い場合はスキップ
+                return tree;
+            }
+            if (existing.depth === evalData.depth) {
+                // 同じ深さの場合、新しいPVがあり既存のPVが空なら更新を許可
+                const existingHasPv = existing.pv && existing.pv.length > 0;
+                const newHasPv = evalData.pv && evalData.pv.length > 0;
+                if (existingHasPv || !newHasPv) {
+                    // 既存にPVがある、または新しいデータにもPVがない場合はスキップ
+                    return tree;
+                }
+                // 新しいデータにPVがあり既存にPVがない場合は更新を許可
+            }
+            // 新しいほうが深い場合は更新を許可
+        } else if (evalData.depth === undefined && existing.depth !== undefined) {
+            // 新規に深さ情報がなく、既存にある場合はスキップ
+            // （深さ情報がない新しいデータで上書きしない）
+            return tree;
+        }
+        // それ以外（新規に深さがあり既存にない、または両方に深さがない）は更新を許可
+    }
+
+    // 評価値を設定
+    newEvals[index] = evalData;
+
+    const newNodes = new Map(tree.nodes);
+    newNodes.set(nodeId, {
+        ...node,
+        multiPvEvals: newEvals,
     });
 
     return {

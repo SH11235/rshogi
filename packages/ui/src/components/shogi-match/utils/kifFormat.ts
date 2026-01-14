@@ -8,6 +8,20 @@ import type { BoardState, Piece, PieceType, Player, PositionState, Square } from
 import { applyMoveWithState } from "@shogi/app-core";
 import { parseSfen } from "./kifParser";
 
+/** 単一PVの評価値情報 */
+export interface PvEvalInfo {
+    /** PV番号（1-indexed） */
+    multipv: number;
+    /** 評価値（センチポーン） */
+    evalCp?: number;
+    /** 詰み手数 */
+    evalMate?: number;
+    /** 探索深さ */
+    depth?: number;
+    /** 読み筋（USI形式） */
+    pv?: string[];
+}
+
 /** KIF形式の指し手情報 */
 export interface KifMove {
     /** 手数（1始まり） */
@@ -28,6 +42,8 @@ export interface KifMove {
     elapsedMs?: number;
     /** 読み筋（USI形式の指し手配列） */
     pv?: string[];
+    /** 複数PV用の評価値配列 */
+    multiPvEvals?: PvEvalInfo[];
 }
 
 /** 評価値の履歴（グラフ用） */
@@ -441,13 +457,23 @@ export function evalToY(
     return center + normalized * (center - 4); // マージン考慮
 }
 
+/** multiPvEvals変換用の入力データ（KifuNode.multiPvEvalsから正規化後） */
+export interface MultiPvNodeData {
+    scoreCp?: number;
+    scoreMate?: number;
+    depth?: number;
+    pv?: string[];
+}
+
 /** 評価値と消費時間を含むノードデータ */
-interface NodeData {
+export interface NodeData {
     scoreCp?: number;
     scoreMate?: number;
     depth?: number;
     elapsedMs?: number;
     pv?: string[];
+    /** 複数PV用の評価値配列（インデックス=multipv-1） */
+    multiPvEvals?: (MultiPvNodeData | undefined)[];
 }
 
 /**
@@ -480,6 +506,28 @@ export function convertMovesToKif(
         const kifText = formatMoveToKif(moves[i], turn, board, prevTo);
         const displayText = formatMoveSimple(moves[i], turn, board, prevTo);
 
+        // multiPvEvals を PvEvalInfo[] に変換
+        let multiPvEvals: PvEvalInfo[] | undefined;
+        if (nodeData?.multiPvEvals && nodeData.multiPvEvals.length > 0) {
+            multiPvEvals = [];
+            for (let mpvIndex = 0; mpvIndex < nodeData.multiPvEvals.length; mpvIndex++) {
+                const mpvData = nodeData.multiPvEvals[mpvIndex];
+                if (mpvData) {
+                    multiPvEvals.push({
+                        multipv: mpvIndex + 1,
+                        evalCp: mpvData.scoreCp,
+                        evalMate: mpvData.scoreMate,
+                        depth: mpvData.depth,
+                        pv: mpvData.pv,
+                    });
+                }
+            }
+            // 空配列の場合は undefined にする
+            if (multiPvEvals.length === 0) {
+                multiPvEvals = undefined;
+            }
+        }
+
         kifMoves.push({
             ply,
             kifText,
@@ -490,6 +538,7 @@ export function convertMovesToKif(
             depth: nodeData?.depth,
             elapsedMs: nodeData?.elapsedMs,
             pv: nodeData?.pv,
+            multiPvEvals,
         });
 
         // 次の「同」判定用に移動先を記録

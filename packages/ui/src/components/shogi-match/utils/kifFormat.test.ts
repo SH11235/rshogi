@@ -359,6 +359,163 @@ describe("convertMovesToKif", () => {
     });
 });
 
+describe("convertMovesToKif with multiPV", () => {
+    it("KifuNode.multiPvEvals が KifMove.multiPvEvals に変換される", () => {
+        const board1 = placePiece(createEmptyBoard(), "7g", "sente", "P");
+
+        const moves = ["7g7f"];
+        const boardHistory = [board1];
+        const evalMap = new Map([
+            [
+                1,
+                {
+                    scoreCp: 100,
+                    depth: 20,
+                    multiPvEvals: [
+                        { scoreCp: 100, depth: 20, pv: ["3c3d"] },
+                        { scoreCp: 50, depth: 20, pv: ["8c8d"] },
+                    ],
+                },
+            ],
+        ]);
+
+        const result = convertMovesToKif(moves, boardHistory, evalMap);
+
+        expect(result[0].multiPvEvals).toHaveLength(2);
+        expect(result[0].multiPvEvals?.[0]).toMatchObject({
+            multipv: 1,
+            evalCp: 100,
+            depth: 20,
+            pv: ["3c3d"],
+        });
+        expect(result[0].multiPvEvals?.[1]).toMatchObject({
+            multipv: 2,
+            evalCp: 50,
+            depth: 20,
+            pv: ["8c8d"],
+        });
+    });
+
+    it("multiPvEvals が空の場合は undefined になる", () => {
+        const board1 = placePiece(createEmptyBoard(), "7g", "sente", "P");
+
+        const moves = ["7g7f"];
+        const boardHistory = [board1];
+        const evalMap = new Map([
+            [
+                1,
+                {
+                    scoreCp: 100,
+                    depth: 20,
+                    multiPvEvals: [],
+                },
+            ],
+        ]);
+
+        const result = convertMovesToKif(moves, boardHistory, evalMap);
+
+        expect(result[0].multiPvEvals).toBeUndefined();
+    });
+
+    it("multiPvEvals がない場合でも eval から単一PVとして扱える", () => {
+        const board1 = placePiece(createEmptyBoard(), "7g", "sente", "P");
+
+        const moves = ["7g7f"];
+        const boardHistory = [board1];
+        const evalMap = new Map([
+            [
+                1,
+                {
+                    scoreCp: 100,
+                    depth: 20,
+                    pv: ["3c3d"],
+                },
+            ],
+        ]);
+
+        const result = convertMovesToKif(moves, boardHistory, evalMap);
+
+        // multiPvEvalsがなくても、evalCp/pv は設定される（後方互換性）
+        expect(result[0].evalCp).toBe(100);
+        expect(result[0].pv).toEqual(["3c3d"]);
+        expect(result[0].multiPvEvals).toBeUndefined();
+    });
+
+    it("各PVの evalCp, evalMate, depth, pv が正しく変換される", () => {
+        const board1 = placePiece(createEmptyBoard(), "7g", "sente", "P");
+
+        const moves = ["7g7f"];
+        const boardHistory = [board1];
+        const evalMap = new Map([
+            [
+                1,
+                {
+                    scoreCp: 100,
+                    depth: 20,
+                    multiPvEvals: [
+                        { scoreCp: 100, depth: 20, pv: ["3c3d", "2g2f"] },
+                        { scoreMate: 5, depth: 18, pv: ["8c8d"] },
+                        { scoreCp: -50, depth: 15 },
+                    ],
+                },
+            ],
+        ]);
+
+        const result = convertMovesToKif(moves, boardHistory, evalMap);
+
+        expect(result[0].multiPvEvals).toHaveLength(3);
+        expect(result[0].multiPvEvals?.[0]).toMatchObject({
+            multipv: 1,
+            evalCp: 100,
+            evalMate: undefined,
+            depth: 20,
+            pv: ["3c3d", "2g2f"],
+        });
+        expect(result[0].multiPvEvals?.[1]).toMatchObject({
+            multipv: 2,
+            evalCp: undefined,
+            evalMate: 5,
+            depth: 18,
+            pv: ["8c8d"],
+        });
+        expect(result[0].multiPvEvals?.[2]).toMatchObject({
+            multipv: 3,
+            evalCp: -50,
+            depth: 15,
+        });
+        expect(result[0].multiPvEvals?.[2]?.pv).toBeUndefined();
+    });
+
+    it("スパース配列のmultiPvEvalsを正しく変換する（undefinedをスキップ）", () => {
+        const board1 = placePiece(createEmptyBoard(), "7g", "sente", "P");
+
+        const moves = ["7g7f"];
+        const boardHistory = [board1];
+        // インデックス0がundefined、インデックス1に値がある（multipv=2のみ設定された状態）
+        const evalMap = new Map([
+            [
+                1,
+                {
+                    scoreCp: 50,
+                    depth: 20,
+                    multiPvEvals: [undefined, { scoreCp: 50, depth: 20, pv: ["8c8d"] }],
+                },
+            ],
+        ]);
+
+        const result = convertMovesToKif(moves, boardHistory, evalMap);
+
+        // undefinedはスキップされるので、1つだけ
+        expect(result[0].multiPvEvals).toHaveLength(1);
+        expect(result[0].multiPvEvals?.[0]).toMatchObject({
+            multipv: 2, // インデックス1なのでmultipv=2
+            evalCp: 50,
+            depth: 20,
+            pv: ["8c8d"],
+        });
+    });
+});
+
 describe("exportToKifString", () => {
     const buildSingleMoveExport = (startSfen?: string) => {
         const board = placePiece(createEmptyBoard(), "7g", "sente", "P");
