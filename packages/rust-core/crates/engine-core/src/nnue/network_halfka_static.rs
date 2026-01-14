@@ -774,12 +774,16 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformStatic<INPUT, OUTPU
         }
 
         // 重みを読み込み
+        // nnue-pytorch の .nnue ファイルは OUTPUT * padded_input バイトで格納
+        // （パディング込みで並んでいる）
         let weight_size = OUTPUT * padded_input;
         let mut weights = AlignedBox::new_zeroed(weight_size);
-        let mut buf1 = [0u8; 1];
-        for i in 0..weight_size {
-            reader.read_exact(&mut buf1)?;
-            weights[i] = buf1[0] as i8;
+        let mut row_buf = vec![0u8; padded_input];
+        for o in 0..OUTPUT {
+            reader.read_exact(&mut row_buf)?;
+            for i in 0..padded_input {
+                weights[o * padded_input + i] = row_buf[i] as i8;
+            }
         }
 
         Ok(Self {
@@ -1003,13 +1007,35 @@ impl NetworkHalfKA512 {
         let mut l1_out = [0i32; 8];
         self.l1.propagate(&transformed, &mut l1_out);
 
-        // ClippedReLU
-        let mut l1_relu = [0u8; 8];
-        clipped_relu_static(&l1_out, &mut l1_relu);
+        // デバッグ: L1出力の範囲チェック
+        #[cfg(debug_assertions)]
+        for (i, &v) in l1_out.iter().enumerate() {
+            debug_assert!(
+                v.abs() < 1_000_000,
+                "L1 output[{i}] = {v} is out of expected range (HalfKA512)"
+            );
+        }
+
+        // ClippedReLU - l2入力用に32バイトにパディング
+        // (l2のpadded_input=32だが、l1_outは8要素しかない)
+        let mut l1_relu = [0u8; 32];
+        for (i, &v) in l1_out.iter().enumerate() {
+            let shifted = v >> WEIGHT_SCALE_BITS;
+            l1_relu[i] = shifted.clamp(0, 127) as u8;
+        }
 
         // l2 層
         let mut l2_out = [0i32; 96];
         self.l2.propagate(&l1_relu, &mut l2_out);
+
+        // デバッグ: L2出力の範囲チェック
+        #[cfg(debug_assertions)]
+        for (i, &v) in l2_out.iter().enumerate() {
+            debug_assert!(
+                v.abs() < 1_000_000,
+                "L2 output[{i}] = {v} is out of expected range (HalfKA512)"
+            );
+        }
 
         // ClippedReLU
         let mut l2_relu = [0u8; 96];
@@ -1021,7 +1047,17 @@ impl NetworkHalfKA512 {
 
         // スケーリング（オーバーライド設定があればそちらを優先）
         let fv_scale = get_fv_scale_override().unwrap_or(FV_SCALE_HALFKA);
-        Value::new(output[0] / fv_scale)
+        let eval = output[0] / fv_scale;
+
+        // デバッグ: 最終評価値の範囲チェック
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            eval.abs() < 50_000,
+            "Final evaluation {eval} is out of expected range (HalfKA512). Raw output: {}",
+            output[0]
+        );
+
+        Value::new(eval)
     }
 
     /// 新しい Accumulator を作成
@@ -1163,9 +1199,13 @@ impl NetworkHalfKA1024 {
         let mut l1_out = [0i32; 8];
         self.l1.propagate(&transformed, &mut l1_out);
 
-        // ClippedReLU
-        let mut l1_relu = [0u8; 8];
-        clipped_relu_static(&l1_out, &mut l1_relu);
+        // ClippedReLU - l2入力用に32バイトにパディング
+        // (l2のpadded_input=32だが、l1_outは8要素しかない)
+        let mut l1_relu = [0u8; 32];
+        for (i, &v) in l1_out.iter().enumerate() {
+            let shifted = v >> WEIGHT_SCALE_BITS;
+            l1_relu[i] = shifted.clamp(0, 127) as u8;
+        }
 
         // l2 層
         let mut l2_out = [0i32; 96];
@@ -1235,5 +1275,114 @@ mod tests {
         assert_eq!(AffineTransformStatic::<96, 1>::padded_input(), 96);
         assert_eq!(AffineTransformStatic::<1024, 8>::padded_input(), 1024);
         assert_eq!(AffineTransformStatic::<2048, 8>::padded_input(), 2048);
+    }
+
+    #[test]
+    fn test_clipped_relu_static_basic() {
+        // WEIGHT_SCALE_BITS = 6 なので、64で割った結果が出力される
+        // 入力: [0, 64, 128, 8192, -64, -128]
+        // 期待: [0, 1, 2, 127, 0, 0] (負は0にクランプ、127超は127にクランプ)
+        let input: [i32; 8] = [0, 64, 128, 8192, -64, -128, 64 * 100, 64 * 127];
+        let mut output = [0u8; 8];
+        clipped_relu_static(&input, &mut output);
+
+        assert_eq!(output[0], 0); // 0 >> 6 = 0
+        assert_eq!(output[1], 1); // 64 >> 6 = 1
+        assert_eq!(output[2], 2); // 128 >> 6 = 2
+        assert_eq!(output[3], 127); // 8192 >> 6 = 128 -> clamped to 127
+        assert_eq!(output[4], 0); // -64 >> 6 = -1 -> clamped to 0
+        assert_eq!(output[5], 0); // -128 >> 6 = -2 -> clamped to 0
+        assert_eq!(output[6], 100); // 6400 >> 6 = 100
+        assert_eq!(output[7], 127); // 8128 >> 6 = 127
+    }
+
+    #[test]
+    fn test_clipped_relu_static_96_elements() {
+        // 96要素のテスト（L2層で使用）
+        let mut input = [0i32; 96];
+        for i in 0..96 {
+            input[i] = (i as i32) * 64; // 0, 64, 128, ...
+        }
+        let mut output = [0u8; 96];
+        clipped_relu_static(&input, &mut output);
+
+        for i in 0..96 {
+            let expected = (i as u8).min(127);
+            assert_eq!(
+                output[i], expected,
+                "Mismatch at index {i}: expected {expected}, got {}",
+                output[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_affine_transform_static_propagate() {
+        // 簡単な 4 -> 2 のアフィン変換テスト
+        // バイアス: [100, 200]
+        // 重み: [[1, 2, 0, 0, ...], [3, 4, 0, 0, ...]] (padded to 32)
+        // 入力: [10, 20, 0, 0]
+        // 期待出力: [100 + 1*10 + 2*20, 200 + 3*10 + 4*20] = [150, 310]
+
+        let padded_input = AffineTransformStatic::<4, 2>::padded_input();
+        assert_eq!(padded_input, 32);
+
+        let mut weights = AlignedBox::new_zeroed(2 * padded_input);
+        // Row 0: [1, 2, 0, 0, ...]
+        weights[0] = 1;
+        weights[1] = 2;
+        // Row 1: [3, 4, 0, 0, ...]
+        weights[padded_input] = 3;
+        weights[padded_input + 1] = 4;
+
+        let layer = AffineTransformStatic::<4, 2> {
+            biases: [100, 200],
+            weights,
+            padded_input,
+        };
+
+        let mut input = [0u8; 32];
+        input[0] = 10;
+        input[1] = 20;
+
+        let mut output = [0i32; 2];
+        layer.propagate(&input, &mut output);
+
+        assert_eq!(output[0], 150); // 100 + 1*10 + 2*20 = 150
+        assert_eq!(output[1], 310); // 200 + 3*10 + 4*20 = 310
+    }
+
+    #[test]
+    fn test_l1_relu_with_weight_scale_bits() {
+        // L1出力からL2入力への変換をテスト
+        // WEIGHT_SCALE_BITS = 6 でシフトが正しく適用されることを確認
+        let l1_out: [i32; 8] = [
+            64,    // -> 1
+            128,   // -> 2
+            0,     // -> 0
+            -64,   // -> 0 (clamped)
+            8128,  // -> 127
+            10000, // -> 127 (clamped from 156)
+            3200,  // -> 50
+            6400,  // -> 100
+        ];
+
+        let mut l1_relu = [0u8; 32];
+        for (i, &v) in l1_out.iter().enumerate() {
+            let shifted = v >> WEIGHT_SCALE_BITS;
+            l1_relu[i] = shifted.clamp(0, 127) as u8;
+        }
+
+        assert_eq!(l1_relu[0], 1);
+        assert_eq!(l1_relu[1], 2);
+        assert_eq!(l1_relu[2], 0);
+        assert_eq!(l1_relu[3], 0); // 負の値は0にクランプ
+        assert_eq!(l1_relu[4], 127);
+        assert_eq!(l1_relu[5], 127); // 127超は127にクランプ
+        assert_eq!(l1_relu[6], 50);
+        assert_eq!(l1_relu[7], 100);
+        // パディング部分は0
+        assert_eq!(l1_relu[8], 0);
+        assert_eq!(l1_relu[31], 0);
     }
 }
