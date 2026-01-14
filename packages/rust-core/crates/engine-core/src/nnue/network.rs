@@ -383,19 +383,14 @@ impl NNUENetwork {
     }
 
     /// 複数手分の差分を適用してアキュムレータを更新（HalfKADynamic用）
-    ///
-    /// 注: 現在は未実装のため常に false を返し、全計算にフォールバックします。
     pub fn forward_update_incremental_halfka_dynamic(
         &self,
-        _pos: &Position,
-        _stack: &mut super::network_halfka_dynamic::AccumulatorStackHalfKADynamic,
-        _source_idx: usize,
+        pos: &Position,
+        stack: &mut super::network_halfka_dynamic::AccumulatorStackHalfKADynamic,
+        source_idx: usize,
     ) -> bool {
         match self {
-            Self::HalfKADynamic(_) => {
-                // TODO: 複数手差分更新の実装
-                false
-            }
+            Self::HalfKADynamic(net) => net.forward_update_incremental(pos, stack, source_idx),
             _ => panic!("This method is only for HalfKADynamic architecture."),
         }
     }
@@ -872,7 +867,12 @@ fn update_and_evaluate_halfka_dynamic(
             }
         }
 
-        // 2. forward_update_incremental は未実装なのでスキップ
+        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
+        if !updated {
+            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+                updated = network.forward_update_incremental_halfka_dynamic(pos, stack, source_idx);
+            }
+        }
 
         // 3. それでも失敗なら全計算
         if !updated {

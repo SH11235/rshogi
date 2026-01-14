@@ -17,7 +17,7 @@
 //! - AffineTransformDynamic: DPBUSD emulation による行列積
 //! - FeatureTransformerHalfKADynamic: i16 加減算のベクトル化
 
-use super::accumulator::{AlignedBox, DirtyPiece};
+use super::accumulator::{AlignedBox, DirtyPiece, IndexList, MAX_PATH_LENGTH};
 use super::constants::{
     HALFKA_HM_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION_HALFKA, WEIGHT_SCALE_BITS,
 };
@@ -247,9 +247,72 @@ impl AccumulatorStackHalfKADynamic {
         self.entries[0].previous = None;
     }
 
+    /// 祖先を辿って使用可能なアキュムレータを探す
+    ///
+    /// ## 実装方針
+    ///
+    /// アキュムレータの差分更新における祖先探索には複数のアプローチがある:
+    ///
+    /// - **YaneuraOu方式**: 1手前のみをチェック（シンプルだが差分更新の機会を逃す）
+    /// - **Stockfish方式**: スタック全体を探索し、各ステップで玉移動をチェック
+    ///
+    /// このプロジェクトでは、HalfKP側（accumulator.rs）と同じロジックを採用している。
+    /// 最大8手前まで探索し、各ステップで玉移動があれば即座に打ち切る方式である。
+    /// この方式により、1手前限定より多くの差分更新機会を得つつ、玉移動時の
+    /// 無駄な探索を早期に打ち切ることでNPS向上が観測されている。
+    ///
+    /// ## 戻り値
+    ///
+    /// `Some((計算済みエントリのインデックス, 経由する局面数))` - 玉移動がない範囲で
+    /// 計算済み祖先が見つかった場合。`None` - 使用可能な祖先が見つからない場合。
+    pub fn find_usable_accumulator(&self) -> Option<(usize, usize)> {
+        const MAX_DEPTH: usize = 8;
+
+        let current = &self.entries[self.current_idx];
+
+        // 現局面で玉が動いていたら差分更新不可
+        if current.dirty_piece.king_moved[0] || current.dirty_piece.king_moved[1] {
+            return None;
+        }
+
+        // 直前局面をチェック（depth=1から開始）
+        let mut prev_idx = current.previous?;
+        let mut depth = 1;
+
+        loop {
+            let prev = &self.entries[prev_idx];
+
+            // 計算済みなら成功
+            if prev.accumulator.computed_accumulation {
+                return Some((prev_idx, depth));
+            }
+
+            // 探索上限に達した
+            if depth >= MAX_DEPTH {
+                return None;
+            }
+
+            // さらに前の局面へ（ルートに達したらNone）
+            let next_prev_idx = prev.previous?;
+
+            // 玉が動いていたら打ち切り（早期終了による最適化）
+            if prev.dirty_piece.king_moved[0] || prev.dirty_piece.king_moved[1] {
+                return None;
+            }
+
+            prev_idx = next_prev_idx;
+            depth += 1;
+        }
+    }
+
     /// 指定インデックスのエントリを取得
     pub fn entry_at(&self, idx: usize) -> &AccumulatorEntryHalfKADynamic {
         &self.entries[idx]
+    }
+
+    /// 指定インデックスのエントリを取得（可変）
+    pub fn entry_at_mut(&mut self, idx: usize) -> &mut AccumulatorEntryHalfKADynamic {
+        &mut self.entries[idx]
     }
 
     /// 前回と現在のアキュムレータを取得（可変）
@@ -267,6 +330,35 @@ impl AccumulatorStackHalfKADynamic {
             let (left, right) = self.entries.split_at_mut(prev_idx);
             (&right[0].accumulator, &mut left[current_idx].accumulator)
         }
+    }
+
+    /// 現在のインデックスを取得
+    pub fn current_index(&self) -> usize {
+        self.current_idx
+    }
+
+    /// 指定インデックスから現在位置までのパスを収集
+    ///
+    /// 戻り値:
+    /// - Some(path): source_idx に到達できた場合、source側から適用する順のインデックス列
+    /// - None: パスが途切れた場合、または MAX_PATH_LENGTH を超えた場合
+    pub fn collect_path(&self, source_idx: usize) -> Option<IndexList<MAX_PATH_LENGTH>> {
+        let mut path = IndexList::new();
+        let mut idx = self.current_idx;
+
+        while idx != source_idx {
+            // パス長が上限を超えたら失敗
+            if !path.push(idx) {
+                return None;
+            }
+            match self.entries[idx].previous {
+                Some(prev) => idx = prev,
+                None => return None,
+            }
+        }
+
+        path.reverse();
+        Some(path)
     }
 }
 
@@ -373,6 +465,62 @@ impl FeatureTransformerHalfKADynamic {
         }
 
         acc.computed_accumulation = true;
+    }
+
+    /// 複数手分の差分を適用してアキュムレータを更新
+    pub fn forward_update_incremental(
+        &self,
+        pos: &Position,
+        stack: &mut AccumulatorStackHalfKADynamic,
+        source_idx: usize,
+    ) -> bool {
+        let Some(path) = stack.collect_path(source_idx) else {
+            // パスが途切れた場合、または MAX_PATH_LENGTH を超えた場合
+            return false;
+        };
+
+        // ソースからコピー（借用の競合を避けるため、一時バッファにコピー）
+        let current_idx = stack.current_index();
+        for p in 0..2 {
+            // 一時バッファを経由してコピー
+            let source_data: Vec<i16> =
+                stack.entry_at(source_idx).accumulator.accumulation[p].to_vec();
+            stack.entry_at_mut(current_idx).accumulator.accumulation[p]
+                .copy_from_slice(&source_data);
+        }
+
+        // パス上の各エントリの差分を適用
+        let current_idx = stack.current_index();
+        for &entry_idx in path.iter() {
+            let dirty_piece = stack.entry_at(entry_idx).dirty_piece;
+
+            for perspective in [Color::Black, Color::White] {
+                debug_assert!(
+                    !dirty_piece.king_moved[perspective.index()],
+                    "King moved between source and current"
+                );
+
+                let king_sq = pos.king_square(perspective);
+                let (removed, added) = HalfKA_hmFeatureSet::collect_changed_indices(
+                    &dirty_piece,
+                    perspective,
+                    king_sq,
+                );
+
+                let p = perspective as usize;
+                let accumulation = &mut stack.entry_at_mut(current_idx).accumulator.accumulation[p];
+
+                for &index in removed.iter() {
+                    self.sub_weights(accumulation, index);
+                }
+                for &index in added.iter() {
+                    self.add_weights(accumulation, index);
+                }
+            }
+        }
+
+        stack.entry_at_mut(current_idx).accumulator.computed_accumulation = true;
+        true
     }
 
     /// 重みを加算（SIMD最適化版）
@@ -904,6 +1052,16 @@ impl NetworkHalfKADynamic {
         prev_acc: &AccumulatorHalfKADynamic,
     ) {
         self.feature_transformer.update_accumulator(pos, dirty_piece, acc, prev_acc);
+    }
+
+    /// 複数手分の差分を適用してアキュムレータを更新
+    pub fn forward_update_incremental(
+        &self,
+        pos: &Position,
+        stack: &mut AccumulatorStackHalfKADynamic,
+        source_idx: usize,
+    ) -> bool {
+        self.feature_transformer.forward_update_incremental(pos, stack, source_idx)
     }
 
     /// 評価値を計算
