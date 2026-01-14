@@ -296,7 +296,7 @@ fn main() -> Result<()> {
     println!();
 
     // 4. サンプルをチャンクに分割して並列評価
-    let chunk_size = (samples.len() + cli.threads - 1) / cli.threads;
+    let chunk_size = samples.len().div_ceil(cli.threads);
     let chunks: Vec<Vec<Sample>> = samples.chunks(chunk_size).map(|c| c.to_vec()).collect();
 
     let progress = Arc::new(AtomicUsize::new(0));
@@ -346,7 +346,7 @@ fn main() -> Result<()> {
                 ));
 
                 let count = progress_clone.fetch_add(1, Ordering::Relaxed) + 1;
-                if count % 100 == 0 {
+                if count.is_multiple_of(100) {
                     pb.set_position(count as u64);
                 }
             }
