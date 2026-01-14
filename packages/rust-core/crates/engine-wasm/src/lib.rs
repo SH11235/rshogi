@@ -19,7 +19,8 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
 const DEFAULT_TT_SIZE_MB: usize = 64;
-const DEFAULT_EVAL_HASH_SIZE_MB: usize = 64;
+const DEFAULT_EVAL_HASH_SIZE_MB: usize = 16;
+const DEFAULT_USE_EVAL_HASH: bool = false;
 
 thread_local! {
     static ENGINE: RefCell<Option<EngineState>> = const { RefCell::new(None) };
@@ -471,9 +472,7 @@ pub fn init(opts: Option<JsValue>) -> Result<(), JsValue> {
         } else {
             engine.search.resize_eval_hash(DEFAULT_EVAL_HASH_SIZE_MB);
         }
-        if let Some(enabled) = opts.use_eval_hash {
-            set_eval_hash_enabled(enabled);
-        }
+        set_eval_hash_enabled(opts.use_eval_hash.unwrap_or(DEFAULT_USE_EVAL_HASH));
         *state.borrow_mut() = Some(engine);
     });
 
