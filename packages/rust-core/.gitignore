@@ -58,3 +58,5 @@ scripts/analysis/__pycache__/
 
 # Perf script config (personal settings)
 scripts/perf.conf
+
+docs/experiment-archive
