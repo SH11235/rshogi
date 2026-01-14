@@ -47,6 +47,7 @@
 //! 4. 盤上の駒 (ハフマン符号化): 81マス分（玉のマスはスキップ）
 //! 5. 手駒 (ハフマン符号化): 残りビットで表現
 
+use engine_core::position::Position;
 use engine_core::types::{Color, Hand, Move, Piece, PieceType, Square};
 
 /// PackedSfenValue (40バイト)
@@ -93,6 +94,18 @@ impl PackedSfenValue {
             game_result,
             padding,
         })
+    }
+
+    /// PackedSfenValueをバイト列にシリアライズ
+    pub fn to_bytes(self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..32].copy_from_slice(&self.sfen);
+        bytes[32..34].copy_from_slice(&self.score.to_le_bytes());
+        bytes[34..36].copy_from_slice(&self.move16.to_le_bytes());
+        bytes[36..38].copy_from_slice(&self.game_ply.to_le_bytes());
+        bytes[38] = self.game_result as u8;
+        bytes[39] = self.padding;
+        bytes
     }
 }
 
@@ -276,6 +289,17 @@ fn piece_type_from_index(index: usize) -> Option<PieceType> {
 }
 
 /// PackedSfenをSFEN文字列に変換
+///
+/// # 制限事項
+///
+/// **標準局面（盤上+手駒=40枚）のみ対応**
+///
+/// このハフマン符号化形式は、盤上の駒と手駒の合計が40枚の場合に
+/// 常に256bit（32バイト）になるよう設計されています（YaneuraOu準拠）。
+///
+/// 駒落ち局面や詰将棋など、駒数が40枚未満の局面をpackしたデータでは、
+/// 末尾の0埋め部分が歩として誤読される可能性があります。
+/// 詳細は `pack_position` のドキュメントを参照してください。
 pub fn unpack_sfen(packed: &[u8; 32]) -> Result<String, String> {
     let mut stream = BitStream::new(packed);
 
@@ -630,6 +654,243 @@ pub fn move16_to_move(move16: u16) -> Move {
     }
 }
 
+// ============================================================================
+// Pack機能（Position → PackedSfen）
+// ============================================================================
+
+/// ビットストリーム書き込み用構造体
+struct BitStreamWriter {
+    data: [u8; 32],
+    bit_cursor: usize,
+}
+
+impl BitStreamWriter {
+    /// 新規作成
+    fn new() -> Self {
+        Self {
+            data: [0u8; 32],
+            bit_cursor: 0,
+        }
+    }
+
+    /// 1ビット書き込む
+    fn write_one_bit(&mut self, b: bool) {
+        if self.bit_cursor < 256 {
+            let byte_idx = self.bit_cursor / 8;
+            let bit_idx = self.bit_cursor & 7;
+            if b {
+                self.data[byte_idx] |= 1 << bit_idx;
+            }
+            self.bit_cursor += 1;
+        }
+    }
+
+    /// nビット書き込む（下位ビットから順に）
+    fn write_n_bit(&mut self, d: u32, n: usize) {
+        for i in 0..n {
+            self.write_one_bit((d >> i) & 1 != 0);
+        }
+    }
+
+    /// 現在のビット位置を取得
+    fn bit_position(&self) -> usize {
+        self.bit_cursor
+    }
+
+    /// データを取得
+    fn finish(self) -> [u8; 32] {
+        self.data
+    }
+}
+
+/// 駒種インデックスを取得
+/// 戻り値: 1=歩, 2=香, 3=桂, 4=銀, 5=角, 6=飛, 7=金
+fn piece_type_to_index(pt: PieceType) -> usize {
+    match pt {
+        PieceType::Pawn | PieceType::ProPawn => 1,
+        PieceType::Lance | PieceType::ProLance => 2,
+        PieceType::Knight | PieceType::ProKnight => 3,
+        PieceType::Silver | PieceType::ProSilver => 4,
+        PieceType::Bishop | PieceType::Horse => 5,
+        PieceType::Rook | PieceType::Dragon => 6,
+        PieceType::Gold => 7,
+        _ => 0, // 玉や空は0
+    }
+}
+
+/// 盤上の駒をハフマン符号化して書き込む
+fn write_board_piece(stream: &mut BitStreamWriter, piece: Piece) {
+    if piece.is_none() {
+        // 空升: 0 (1bit)
+        stream.write_one_bit(false);
+        return;
+    }
+
+    let pt = piece.piece_type();
+    let raw_pt = pt.unpromote();
+    let promoted = pt.is_promoted();
+    let color = piece.color();
+    let idx = piece_type_to_index(pt);
+
+    // ハフマン符号を書き込み
+    let huff = &HUFFMAN_TABLE[idx];
+    stream.write_n_bit(huff.code as u32, huff.bits as usize);
+
+    // 金以外は成りフラグ
+    if raw_pt != PieceType::Gold {
+        stream.write_one_bit(promoted);
+    }
+
+    // 先後フラグ (0=先手, 1=後手)
+    stream.write_one_bit(color == Color::White);
+}
+
+/// 駒箱パディングを書き込む（成りフラグ=1の歩）
+///
+/// 駒落ち局面や詰将棋など、駒数が40枚未満の場合に256bitに達するまで
+/// 駒箱フラグ（成りフラグ=1）でパディングする。unpack時に駒箱の駒は
+/// 無視されるため、余った0ビットが歩として誤読される問題を防げる。
+///
+/// 駒箱の歩は3ビット: ハフマン(1bit=0) + 成りフラグ(1bit=1) + 先後フラグ(1bit=0)
+fn write_piecebox_padding(stream: &mut BitStreamWriter) {
+    // 歩のハフマンコード（手駒用）: 0x01 >> 1 = 0, 1bit
+    stream.write_one_bit(false);
+    // 成りフラグ = 1（駒箱フラグ）
+    stream.write_one_bit(true);
+    // 先後フラグ = 0（先手扱い、どちらでもよい）
+    stream.write_one_bit(false);
+}
+
+/// 手駒をハフマン符号化して書き込む
+/// 手駒用は盤上用のコードを1bit右シフトした形式
+fn write_hand_piece(stream: &mut BitStreamWriter, pt: PieceType, color: Color) {
+    let idx = piece_type_to_index(pt);
+    let huff = &HUFFMAN_TABLE[idx];
+
+    // コードを1bit右シフトして書き込み
+    stream.write_n_bit((huff.code >> 1) as u32, (huff.bits - 1) as usize);
+
+    // 金以外は成りフラグ（手駒は成っていないので0）
+    if pt != PieceType::Gold {
+        stream.write_one_bit(false);
+    }
+
+    // 先後フラグ
+    stream.write_one_bit(color == Color::White);
+}
+
+/// Position から PackedSfen を生成
+///
+/// # 引数
+/// * `pos` - 変換する局面
+///
+/// # 戻り値
+/// 32バイトのPackedSfen
+///
+/// # 対応局面
+///
+/// 標準局面（40枚）および駒落ち局面・詰将棋（40枚未満）の両方に対応。
+///
+/// 駒数が40枚未満の場合、余ったビットは「駒箱フラグ（成りフラグ=1）」で
+/// パディングされます。駒箱の駒はunpack時に無視されるため、
+/// 余った0ビットが歩として誤読される問題を防止しています。
+pub fn pack_position(pos: &Position) -> [u8; 32] {
+    let mut stream = BitStreamWriter::new();
+
+    // 1. 手番 (1bit): 0=先手, 1=後手
+    stream.write_one_bit(pos.side_to_move() == Color::White);
+
+    // 2. 先手玉位置 (7bit)
+    let black_king_sq = pos.king_square(Color::Black);
+    stream.write_n_bit(black_king_sq.index() as u32, 7);
+
+    // 3. 後手玉位置 (7bit)
+    let white_king_sq = pos.king_square(Color::White);
+    stream.write_n_bit(white_king_sq.index() as u32, 7);
+
+    // 4. 盤上の駒 (81マス、玉はスキップ)
+    for sq_idx in 0..81u8 {
+        let sq = Square::from_u8(sq_idx).expect("sq_idx should be in valid range 0-80");
+        let piece = pos.piece_on(sq);
+
+        // 玉はスキップ
+        if piece.is_some() && piece.piece_type() == PieceType::King {
+            continue;
+        }
+
+        write_board_piece(&mut stream, piece);
+    }
+
+    // 5. 手駒
+    // 先手と後手の手駒を順に書き込む
+    let piece_order = [
+        PieceType::Rook,
+        PieceType::Bishop,
+        PieceType::Gold,
+        PieceType::Silver,
+        PieceType::Knight,
+        PieceType::Lance,
+        PieceType::Pawn,
+    ];
+
+    for &color in &[Color::Black, Color::White] {
+        let hand = pos.hand(color);
+        for &pt in &piece_order {
+            let count = hand.count(pt);
+            for _ in 0..count {
+                write_hand_piece(&mut stream, pt, color);
+            }
+        }
+    }
+
+    // 6. 駒箱パディング
+    // 駒落ち局面や詰将棋など駒数が40枚未満の場合、256bitに達するまで
+    // 駒箱フラグ（成りフラグ=1）でパディングする。
+    // 駒箱の歩は3ビットなので、残り3ビット以上あればパディングを追加。
+    // 残り1-2ビットの場合は0埋めのままだが、3ビット未満では
+    // 有効な手駒としてデコードされないため安全。
+    while stream.bit_position() + 3 <= 256 {
+        write_piecebox_padding(&mut stream);
+    }
+
+    stream.finish()
+}
+
+/// Move を Move16形式に変換
+///
+/// ## Move16形式
+/// - bits 0-6:  移動先マス (to)
+/// - bits 7-13: 移動元マス (from) または打つ駒種+81
+/// - bit 14:    成りフラグ
+pub fn move_to_move16(mv: Move) -> u16 {
+    if mv == Move::NONE || mv == Move::NULL {
+        return 0;
+    }
+
+    let to = mv.to().index() as u16;
+
+    if mv.is_drop() {
+        // 駒打ち
+        let pt = mv.drop_piece_type();
+        let pt_index = match pt {
+            PieceType::Pawn => 1,
+            PieceType::Lance => 2,
+            PieceType::Knight => 3,
+            PieceType::Silver => 4,
+            PieceType::Bishop => 5,
+            PieceType::Rook => 6,
+            PieceType::Gold => 7,
+            _ => 0,
+        };
+        to | ((81 + pt_index) << 7)
+    } else {
+        // 通常の移動
+        let from = mv.from().index() as u16;
+        let promote = if mv.is_promotion() { 0x4000 } else { 0 };
+        to | (from << 7) | promote
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -782,5 +1043,134 @@ mod tests {
         // 不正な駒種インデックス (81 + 8 = 89)
         let move16 = 40 | (89 << 7);
         assert_eq!(move16_to_usi(move16), "none");
+    }
+
+    #[test]
+    fn test_bitstream_writer() {
+        let mut writer = BitStreamWriter::new();
+        writer.write_one_bit(false);
+        writer.write_one_bit(true);
+        writer.write_one_bit(false);
+        writer.write_one_bit(true);
+
+        let data = writer.finish();
+        // ビット順: 0, 1, 0, 1 → バイト[0] = 0b00001010 = 10
+        assert_eq!(data[0] & 0x0F, 0b1010);
+    }
+
+    #[test]
+    fn test_pack_unpack_roundtrip_hirate() {
+        // 平手初期局面でのroundtripテスト
+        let mut pos = Position::new();
+        pos.set_hirate();
+
+        // pack
+        let packed = pack_position(&pos);
+
+        // unpack
+        let sfen = unpack_sfen(&packed).expect("unpack should succeed");
+
+        // 平手SFENと比較（手数部分を除く）
+        let expected = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b -";
+        assert!(
+            sfen.starts_with(expected),
+            "SFEN mismatch:\n  got: {sfen}\n  expected: {expected}"
+        );
+    }
+
+    #[test]
+    fn test_pack_unpack_roundtrip_with_hands() {
+        // 手駒ありの局面
+        // 盤上の歩を1枚減らして（7九→空）、先手の手駒に歩1枚
+        let mut pos = Position::new();
+        let sfen = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPP1P/1B5R1/LNSGKGSNL b P 1";
+        pos.set_sfen(sfen).expect("set_sfen should succeed");
+
+        // pack
+        let packed = pack_position(&pos);
+
+        // unpack
+        let unpacked_sfen = unpack_sfen(&packed).expect("unpack should succeed");
+
+        // 手駒部分を確認（先手に歩1枚）
+        assert!(
+            unpacked_sfen.contains(" P ") || unpacked_sfen.contains(" P 1"),
+            "Hand pieces should be preserved: {unpacked_sfen}"
+        );
+    }
+
+    #[test]
+    fn test_pack_unpack_roundtrip_promoted() {
+        // 成り駒を含む局面
+        let mut pos = Position::new();
+        let sfen = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1+B5R1/LNSGKGSNL b - 1";
+        pos.set_sfen(sfen).expect("set_sfen should succeed");
+
+        // pack
+        let packed = pack_position(&pos);
+
+        // unpack
+        let unpacked_sfen = unpack_sfen(&packed).expect("unpack should succeed");
+
+        // 成り角が保存されているか確認
+        assert!(
+            unpacked_sfen.contains("+B"),
+            "Promoted bishop should be preserved: {unpacked_sfen}"
+        );
+    }
+
+    #[test]
+    fn test_move_to_move16_and_back() {
+        // 7七(file=7, rank=7)のマス番号 = (7-1)*9 + (7-1) = 54 + 6 = 60
+        // 7六(file=7, rank=6)のマス番号 = (7-1)*9 + (6-1) = 54 + 5 = 59
+        let sq_77 = Square::from_u8(60).unwrap();
+        let sq_76 = Square::from_u8(59).unwrap();
+
+        // 通常の移動
+        let mv = Move::new_move(sq_77, sq_76, false);
+        let move16 = move_to_move16(mv);
+        let mv_back = move16_to_move(move16);
+        assert_eq!(mv, mv_back);
+
+        // 2三(file=2, rank=3)のマス番号 = (2-1)*9 + (3-1) = 9 + 2 = 11
+        // 2二(file=2, rank=2)のマス番号 = (2-1)*9 + (2-1) = 9 + 1 = 10
+        let sq_23 = Square::from_u8(11).unwrap();
+        let sq_22 = Square::from_u8(10).unwrap();
+
+        // 成り
+        let mv = Move::new_move(sq_23, sq_22, true);
+        let move16 = move_to_move16(mv);
+        let mv_back = move16_to_move(move16);
+        assert_eq!(mv, mv_back);
+
+        // 駒打ち
+        let mv = Move::new_drop(PieceType::Pawn, Square::SQ_55);
+        let move16 = move_to_move16(mv);
+        let mv_back = move16_to_move(move16);
+        assert_eq!(mv, mv_back);
+    }
+
+    #[test]
+    fn test_packed_sfen_value_to_bytes_roundtrip() {
+        let psv = PackedSfenValue {
+            sfen: [
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+                24, 25, 26, 27, 28, 29, 30, 31, 32,
+            ],
+            score: -123,
+            move16: 0x1234,
+            game_ply: 42,
+            game_result: -1,
+            padding: 0,
+        };
+
+        let bytes = psv.to_bytes();
+        let psv2 = PackedSfenValue::from_bytes(&bytes).unwrap();
+
+        assert_eq!(psv.sfen, psv2.sfen);
+        assert_eq!(psv.score, psv2.score);
+        assert_eq!(psv.move16, psv2.move16);
+        assert_eq!(psv.game_ply, psv2.game_ply);
+        assert_eq!(psv.game_result, psv2.game_result);
     }
 }

@@ -136,6 +136,18 @@ struct Cli {
     #[arg(long, num_args = 1..)]
     engine_args_white: Option<Vec<String>>,
 
+    /// USI options to set (format: "Name=Value", can be specified multiple times)
+    #[arg(long = "usi-option", num_args = 1..)]
+    usi_options: Option<Vec<String>>,
+
+    /// USI options for Black (overrides usi_options when set)
+    #[arg(long = "usi-option-black", num_args = 1..)]
+    usi_options_black: Option<Vec<String>>,
+
+    /// USI options for White (overrides usi_options when set)
+    #[arg(long = "usi-option-white", num_args = 1..)]
+    usi_options_white: Option<Vec<String>>,
+
     /// Start position file (USI position lines, one per line)
     #[arg(long)]
     startpos_file: Option<PathBuf>,
@@ -214,6 +226,10 @@ struct EngineCommandMeta {
     source_white: String,
     args_black: Vec<String>,
     args_white: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    usi_options_black: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    usi_options_white: Vec<String>,
 }
 
 /// バイナリの発見元を含む解決結果。
@@ -280,6 +296,41 @@ struct MetricsLog {
     last_mate_white: Option<i32>,
     outcome: String,
     reason: String,
+}
+
+/// 対局セッション全体のサマリ
+#[derive(Serialize)]
+struct SummaryLog {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    timestamp: String,
+    total_games: u32,
+    black_wins: u32,
+    white_wins: u32,
+    draws: u32,
+    black_win_rate: f64,
+    white_win_rate: f64,
+    draw_rate: f64,
+    engine_black: EngineSummary,
+    engine_white: EngineSummary,
+    time_control: TimeControlSummary,
+}
+
+#[derive(Serialize)]
+struct EngineSummary {
+    path: String,
+    name: String,
+    usi_options: Vec<String>,
+    threads: usize,
+}
+
+#[derive(Serialize)]
+struct TimeControlSummary {
+    btime: u64,
+    wtime: u64,
+    binc: u64,
+    winc: u64,
+    byoyomi: u64,
 }
 
 #[derive(Default)]
@@ -622,6 +673,8 @@ struct EngineConfig {
     minimum_thinking_time: Option<i64>,
     slowmover: Option<i32>,
     ponder: bool,
+    /// 追加のUSIオプション (Name=Value 形式)
+    usi_options: Vec<String>,
 }
 
 /// 1本のエンジンに対する入出力をカプセル化する。
@@ -707,6 +760,15 @@ impl EngineProcess {
                 "Ponder"
             };
             self.set_option_if_available(name, if cfg.ponder { "true" } else { "false" })?;
+        }
+        // 追加のUSIオプションを設定
+        for opt in &cfg.usi_options {
+            if let Some((name, value)) = opt.split_once('=') {
+                self.set_option_if_available(name.trim(), value.trim())?;
+            } else {
+                // "=" がない場合はオプション名のみとみなし、値なしで送る
+                self.write_line(&format!("setoption name {}", opt.trim()))?;
+            }
         }
         self.sync_ready()?;
         self.write_line("usinewgame")?;
@@ -890,7 +952,15 @@ impl GameOutcome {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+
+    // 時間制限のバリデーション: すべて0の場合は無限思考モードになりタイムアウト問題が発生するため警告
+    if cli.btime == 0 && cli.wtime == 0 && cli.byoyomi == 0 && cli.binc == 0 && cli.winc == 0 {
+        eprintln!(
+            "Warning: No time control specified. Using default byoyomi=1000ms to prevent infinite thinking."
+        );
+        cli.byoyomi = 1000;
+    }
 
     let (start_defs, start_commands) =
         load_start_positions(cli.startpos_file.as_deref(), cli.sfen.as_deref())?;
@@ -972,6 +1042,10 @@ fn main() -> Result<()> {
     let black_args = cli.engine_args_black.clone().unwrap_or_else(|| common_args.clone());
     let white_args = cli.engine_args_white.clone().unwrap_or(common_args.clone());
 
+    let common_usi_opts = cli.usi_options.clone().unwrap_or_default();
+    let black_usi_opts = cli.usi_options_black.clone().unwrap_or_else(|| common_usi_opts.clone());
+    let white_usi_opts = cli.usi_options_white.clone().unwrap_or_else(|| common_usi_opts.clone());
+
     let mut black = EngineProcess::spawn(
         &EngineConfig {
             path: engine_paths.black.path.clone(),
@@ -983,6 +1057,7 @@ fn main() -> Result<()> {
             minimum_thinking_time: cli.minimum_thinking_time,
             slowmover: cli.slowmover,
             ponder: cli.ponder,
+            usi_options: black_usi_opts.clone(),
         },
         "black",
     )?;
@@ -997,6 +1072,7 @@ fn main() -> Result<()> {
             minimum_thinking_time: cli.minimum_thinking_time,
             slowmover: cli.slowmover,
             ponder: cli.ponder,
+            usi_options: white_usi_opts.clone(),
         },
         "white",
     )?;
@@ -1035,6 +1111,8 @@ fn main() -> Result<()> {
             source_white: engine_paths.white.source.to_string(),
             args_black: black_args.clone(),
             args_white: white_args.clone(),
+            usi_options_black: black_usi_opts.clone(),
+            usi_options_white: white_usi_opts.clone(),
         },
         start_positions: start_commands.clone(),
         output: output_path.display().to_string(),
@@ -1042,6 +1120,11 @@ fn main() -> Result<()> {
     };
     serde_json::to_writer(&mut writer, &meta)?;
     writer.write_all(b"\n")?;
+
+    // 勝敗カウンター
+    let mut black_wins = 0u32;
+    let mut white_wins = 0u32;
+    let mut draws = 0u32;
 
     for game_idx in 0..cli.games {
         black.new_game()?;
@@ -1239,6 +1322,120 @@ fn main() -> Result<()> {
             }
         }
         writer.flush()?;
+
+        // 勝敗カウント更新
+        match outcome {
+            GameOutcome::BlackWin => black_wins += 1,
+            GameOutcome::WhiteWin => white_wins += 1,
+            GameOutcome::Draw => draws += 1,
+            GameOutcome::InProgress => {}
+        }
+
+        // 進捗表示
+        println!(
+            "game {}/{}: {} ({}) - black {} / white {} / draw {}",
+            game_idx + 1,
+            cli.games,
+            outcome.label(),
+            outcome_reason,
+            black_wins,
+            white_wins,
+            draws
+        );
+    }
+
+    // 最終サマリー
+    println!();
+    println!("=== Result Summary ===");
+    println!(
+        "Total: {} games | Black wins: {} | White wins: {} | Draws: {}",
+        cli.games, black_wins, white_wins, draws
+    );
+    if cli.games > 0 {
+        let black_rate = (black_wins as f64 / cli.games as f64) * 100.0;
+        let white_rate = (white_wins as f64 / cli.games as f64) * 100.0;
+        let draw_rate = (draws as f64 / cli.games as f64) * 100.0;
+        println!(
+            "Win rate: Black {:.1}% | White {:.1}% | Draw {:.1}%",
+            black_rate, white_rate, draw_rate
+        );
+    }
+    println!();
+    println!("--- Engine Settings ---");
+    println!("Black: {}", format_engine_settings(&engine_paths.black, &black_usi_opts));
+    println!("White: {}", format_engine_settings(&engine_paths.white, &white_usi_opts));
+    println!("=======================");
+    println!();
+
+    // サマリファイル出力
+    let summary_path = default_summary_path(&output_path);
+    {
+        let black_rate = if cli.games > 0 {
+            (black_wins as f64 / cli.games as f64) * 100.0
+        } else {
+            0.0
+        };
+        let white_rate = if cli.games > 0 {
+            (white_wins as f64 / cli.games as f64) * 100.0
+        } else {
+            0.0
+        };
+        let draw_rate = if cli.games > 0 {
+            (draws as f64 / cli.games as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let summary = SummaryLog {
+            kind: "summary",
+            timestamp: timestamp.to_rfc3339(),
+            total_games: cli.games,
+            black_wins,
+            white_wins,
+            draws,
+            black_win_rate: black_rate,
+            white_win_rate: white_rate,
+            draw_rate,
+            engine_black: EngineSummary {
+                path: engine_paths.black.path.display().to_string(),
+                name: engine_paths
+                    .black
+                    .path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("engine-usi")
+                    .to_string(),
+                usi_options: black_usi_opts.clone(),
+                threads: threads_black,
+            },
+            engine_white: EngineSummary {
+                path: engine_paths.white.path.display().to_string(),
+                name: engine_paths
+                    .white
+                    .path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("engine-usi")
+                    .to_string(),
+                usi_options: white_usi_opts.clone(),
+                threads: threads_white,
+            },
+            time_control: TimeControlSummary {
+                btime: cli.btime,
+                wtime: cli.wtime,
+                binc: cli.binc,
+                winc: cli.winc,
+                byoyomi: cli.byoyomi,
+            },
+        };
+
+        let mut summary_writer = BufWriter::new(
+            File::create(&summary_path)
+                .with_context(|| format!("failed to create {}", summary_path.display()))?,
+        );
+        serde_json::to_writer(&mut summary_writer, &summary)?;
+        summary_writer.write_all(b"\n")?;
+        summary_writer.flush()?;
     }
 
     if let Some(logger) = info_logger.as_mut() {
@@ -1252,6 +1449,7 @@ fn main() -> Result<()> {
     }
     writer.flush()?;
     println!("selfplay log written to {}", output_path.display());
+    println!("summary written to {}", summary_path.display());
     if cli.log_info {
         println!("info log written to {}", info_path.display());
     }
@@ -1295,6 +1493,12 @@ fn default_metrics_path(jsonl: &Path) -> PathBuf {
     let parent = jsonl.parent().unwrap_or_else(|| Path::new("."));
     let stem = jsonl.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
     parent.join(format!("{stem}.metrics.jsonl"))
+}
+
+fn default_summary_path(jsonl: &Path) -> PathBuf {
+    let parent = jsonl.parent().unwrap_or_else(|| Path::new("."));
+    let stem = jsonl.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+    parent.join(format!("{stem}.summary.jsonl"))
 }
 
 fn resolve_engine_paths(cli: &Cli) -> ResolvedEnginePaths {
@@ -1863,7 +2067,22 @@ fn engine_names_for(meta: Option<&MetaLog>) -> (String, String) {
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(&meta.engine_cmd.path_white);
-    (format!("{} (black)", black_name), format!("{} (white)", white_name))
+
+    let black_opts = &meta.engine_cmd.usi_options_black;
+    let white_opts = &meta.engine_cmd.usi_options_white;
+
+    let black_display = if black_opts.is_empty() {
+        black_name.to_string()
+    } else {
+        format!("{} [{}]", black_name, black_opts.join(", "))
+    };
+    let white_display = if white_opts.is_empty() {
+        white_name.to_string()
+    } else {
+        format!("{} [{}]", white_name, white_opts.join(", "))
+    };
+
+    (black_display, white_display)
 }
 
 fn format_move_kif(ply: u32, pos: &Position, mv: Move, elapsed_ms: u64, total_ms: u64) -> String {
@@ -1993,6 +2212,17 @@ fn format_mm_ss(ms: u64) -> String {
     let m = secs / 60;
     let s = secs % 60;
     format!("{:>2}:{:02}", m, s)
+}
+
+/// エンジン設定を人間可読な形式でフォーマットする
+fn format_engine_settings(engine: &ResolvedEnginePath, usi_options: &[String]) -> String {
+    let engine_name = engine.path.file_name().and_then(|s| s.to_str()).unwrap_or("engine-usi");
+
+    if usi_options.is_empty() {
+        format!("{engine_name} (default)")
+    } else {
+        format!("{engine_name} [{}]", usi_options.join(", "))
+    }
 }
 
 fn format_hh_mm_ss(ms: u64) -> String {

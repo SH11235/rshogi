@@ -44,18 +44,31 @@ pub const MAX_PATH_LENGTH: usize = 8;
 ///
 /// Vec の代わりにスタック上の固定長配列を使用し、ヒープ割り当てを回避する。
 /// MaybeUninit を使用して初期化コストをゼロにする。
+///
+/// # 制約
+/// N は 255 以下である必要がある（len が u8 のため）。
+/// この制約はコンパイル時にチェックされる。
 #[derive(Clone, Copy)]
 pub struct IndexList<const N: usize> {
     /// 未初期化領域を許容する配列
     indices: [MaybeUninit<usize>; N],
-    /// 有効な要素数（N ≤ 255 の前提）
+    /// 有効な要素数
     len: u8,
 }
 
 impl<const N: usize> IndexList<N> {
+    /// N <= 255 をコンパイル時に保証
+    /// N > 255 の場合、このアサートがコンパイルエラーを発生させる
+    const _ASSERT_N_FITS_U8: () = assert!(N <= u8::MAX as usize, "IndexList: N must be <= 255");
+
     /// 空のリストを作成（初期化コストゼロ）
     #[inline]
+    #[allow(path_statements)]
     pub fn new() -> Self {
+        // N <= 255 のコンパイル時チェックを強制評価
+        // これにより IndexList::<300>::new() などはコンパイルエラーになる
+        // path_statements警告を許可するのは意図的な強制評価のため
+        Self::_ASSERT_N_FITS_U8;
         Self {
             // インラインconst ブロックで未初期化配列を安全に作成
             indices: [const { MaybeUninit::uninit() }; N],
@@ -65,16 +78,20 @@ impl<const N: usize> IndexList<N> {
 
     /// 要素を追加
     ///
-    /// # Safety Contract
-    /// 呼び出し側が容量（N）を超えないことを保証する責任がある。
-    /// release ビルドでは境界チェックが行われないため、
-    /// 容量オーバー時の動作は未定義。
+    /// 容量（N）を超える場合は追加を無視する（安全のため）。
+    /// 戻り値: 追加に成功した場合は true、容量オーバーで無視した場合は false
     #[inline]
-    pub fn push(&mut self, index: usize) {
-        debug_assert!((self.len as usize) < N, "IndexList overflow");
-        // SAFETY: len < N なので範囲内。MaybeUninit への書き込みは常に安全
-        self.indices[self.len as usize].write(index);
+    #[must_use]
+    pub fn push(&mut self, index: usize) -> bool {
+        let pos = self.len as usize;
+        if pos >= N {
+            debug_assert!(false, "IndexList overflow: capacity={N}, len={pos}");
+            return false;
+        }
+        // SAFETY: pos < N なので範囲内。MaybeUninit への書き込みは常に安全
+        self.indices[pos].write(index);
         self.len += 1;
+        true
     }
 
     /// イテレータを返す
@@ -207,6 +224,14 @@ impl<T> Drop for AlignedBox<T> {
     }
 }
 
+impl<T: Copy + Default> Clone for AlignedBox<T> {
+    fn clone(&self) -> Self {
+        let mut new_box = Self::new_zeroed(self.len);
+        new_box.copy_from_slice(self);
+        new_box
+    }
+}
+
 // SAFETY: T が Send なら AlignedBox<T> も Send
 unsafe impl<T: Send> Send for AlignedBox<T> {}
 // SAFETY: T が Sync なら AlignedBox<T> も Sync
@@ -330,19 +355,37 @@ impl DirtyPiece {
     }
 
     /// 駒変化を追加
+    ///
+    /// 容量を超える場合は追加を無視する（安全のため）。
+    /// 戻り値: 追加に成功した場合は true、容量オーバーで無視した場合は false
     #[inline]
-    pub fn push_piece(&mut self, piece: ChangedPiece) {
+    #[must_use]
+    pub fn push_piece(&mut self, piece: ChangedPiece) -> bool {
         let idx = self.pieces_len as usize;
+        if idx >= Self::MAX_PIECES {
+            debug_assert!(false, "DirtyPiece::push_piece overflow: idx={idx}");
+            return false;
+        }
         self.pieces[idx] = piece;
         self.pieces_len += 1;
+        true
     }
 
     /// 手駒変化を追加
+    ///
+    /// 容量を超える場合は追加を無視する（安全のため）。
+    /// 戻り値: 追加に成功した場合は true、容量オーバーで無視した場合は false
     #[inline]
-    pub fn push_hand_change(&mut self, change: HandChange) {
+    #[must_use]
+    pub fn push_hand_change(&mut self, change: HandChange) -> bool {
         let idx = self.hand_changes_len as usize;
+        if idx >= Self::MAX_HAND_CHANGES {
+            debug_assert!(false, "DirtyPiece::push_hand_change overflow: idx={idx}");
+            return false;
+        }
         self.hand_changes[idx] = change;
         self.hand_changes_len += 1;
+        true
     }
 
     /// 駒変化のスライスを取得
@@ -515,6 +558,24 @@ impl AccumulatorStack {
         self.current_idx -= 1;
     }
 
+    /// 前回と現在のアキュムレータを同時に取得（clone不要）
+    ///
+    /// `split_at_mut`を使用して、prev_idx の accumulator への不変参照と
+    /// 現在の accumulator への可変参照を同時に返す。
+    ///
+    /// # Safety
+    /// prev_idx < current_idx であることが前提（常に成り立つはず）
+    #[inline]
+    pub fn get_prev_and_current_accumulators(
+        &mut self,
+        prev_idx: usize,
+    ) -> (&Accumulator, &mut Accumulator) {
+        let cur_idx = self.current_idx;
+        debug_assert!(prev_idx < cur_idx, "prev_idx ({prev_idx}) must be < cur_idx ({cur_idx})");
+        let (left, right) = self.entries.split_at_mut(cur_idx);
+        (&left[prev_idx].accumulator, &mut right[0].accumulator)
+    }
+
     /// 祖先を遡って計算済みアキュムレータを探す
     ///
     /// 戻り値: Some((計算済みエントリのインデックス, 経由する局面数))
@@ -565,13 +626,24 @@ impl AccumulatorStack {
 
     /// source_idxからcurrent_idxまでのパスを収集
     ///
-    /// 戻り値: source側から適用する順のインデックス列
-    pub fn collect_path(&self, source_idx: usize) -> IndexList<MAX_PATH_LENGTH> {
+    /// 戻り値:
+    /// - Some(path): source_idx に到達できた場合、source側から適用する順のインデックス列
+    /// - None: パスが途切れた場合、または MAX_PATH_LENGTH を超えた場合
+    pub fn collect_path(&self, source_idx: usize) -> Option<IndexList<MAX_PATH_LENGTH>> {
+        // 早期リターン: 明らかにパスが長すぎる場合はループに入る前に終了
+        if self.current_idx.saturating_sub(source_idx) > MAX_PATH_LENGTH {
+            return None;
+        }
+
         let mut path = IndexList::new();
         let mut idx = self.current_idx;
 
         while idx != source_idx {
-            path.push(idx);
+            // パス長が上限を超えたら失敗
+            if !path.push(idx) {
+                debug_assert!(false, "collect_path overflow: MAX_PATH_LENGTH={MAX_PATH_LENGTH}");
+                return None;
+            }
             let entry = &self.entries[idx];
             match entry.previous {
                 Some(prev_idx) => idx = prev_idx,
@@ -580,13 +652,13 @@ impl AccumulatorStack {
                         false,
                         "Path broken: expected to reach source_idx={source_idx} but got None at idx={idx}"
                     );
-                    return IndexList::new();
+                    return None;
                 }
             }
         }
 
         path.reverse();
-        path
+        Some(path)
     }
 }
 
@@ -651,7 +723,7 @@ mod tests {
     #[test]
     fn test_dirty_piece_push() {
         let mut dp = DirtyPiece::new();
-        dp.push_piece(ChangedPiece {
+        let _ = dp.push_piece(ChangedPiece {
             color: Color::Black,
             old_piece: Piece::NONE,
             old_sq: None,
@@ -660,7 +732,7 @@ mod tests {
         });
         assert_eq!(dp.pieces().len(), 1);
 
-        dp.push_hand_change(HandChange {
+        let _ = dp.push_hand_change(HandChange {
             owner: Color::Black,
             piece_type: PieceType::Pawn,
             old_count: 1,

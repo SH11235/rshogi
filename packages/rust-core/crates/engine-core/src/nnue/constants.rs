@@ -6,8 +6,17 @@
 /// 評価関数ファイルのバージョン（YaneuraOu互換）
 pub const NNUE_VERSION: u32 = 0x7AF32F16;
 
+/// アーキテクチャ文字列の最大長（破損ファイル/DoS対策）
+pub const MAX_ARCH_LEN: usize = 4096;
+
 /// 評価値のスケーリング（suisho5向け: 24）
+/// HalfKP形式（NNUE_VERSION = 0x7AF32F16）用
 pub const FV_SCALE: i32 = 24;
+
+/// 評価値のスケーリング（nnue-pytorch向け: 16）
+/// HalfKA形式（NNUE_VERSION_HALFKA = 0x7AF32F20）用
+/// kPonanzaConstant = 600, FV_SCALE = 16
+pub const FV_SCALE_HALFKA: i32 = 16;
 
 /// 重みのスケーリングビット数
 pub const WEIGHT_SCALE_BITS: u32 = 6;
@@ -73,14 +82,48 @@ pub const HALFKA_HM_DIMENSIONS: usize = BASE_INPUTS_HALFKA; // 73,305
 /// この定数は互換性エラー検出のために定義。
 pub const HALFKA_HM_DIMENSIONS_FACTORIZED: usize = BASE_INPUTS_HALFKA + PIECE_INPUTS_HALFKA; // 74,934
 
-/// 隠れ層1の次元数
+/// 隠れ層1の次元数（YaneuraOu classic）
 pub const HIDDEN1_DIMENSIONS: usize = 32;
 
-/// 隠れ層2の次元数
+/// 隠れ層2の次元数（YaneuraOu classic）
 pub const HIDDEN2_DIMENSIONS: usize = 32;
 
 /// 出力次元数
 pub const OUTPUT_DIMENSIONS: usize = 1;
+
+// =============================================================================
+// nnue-pytorch LayerStacks アーキテクチャ用定数
+// =============================================================================
+
+/// nnue-pytorch の Feature Transformer 出力次元数（片方の視点）
+pub const NNUE_PYTORCH_L1: usize = 1536;
+
+/// nnue-pytorch の L2 次元数
+pub const NNUE_PYTORCH_L2: usize = 15;
+
+/// nnue-pytorch の L3 次元数
+pub const NNUE_PYTORCH_L3: usize = 32;
+
+/// LayerStacks のバケット数
+pub const NUM_LAYER_STACK_BUCKETS: usize = 9;
+
+/// LayerStacks L1層の出力次元数（L2 + 1 = 16）
+pub const LAYER_STACK_L1_OUT: usize = NNUE_PYTORCH_L2 + 1; // 16
+
+/// LayerStacks L2層の入力次元数（L2 * 2 = 30）
+pub const LAYER_STACK_L2_IN: usize = NNUE_PYTORCH_L2 * 2; // 30
+
+/// nnue-pytorch の評価値スケーリング
+pub const NNUE_PYTORCH_NNUE2SCORE: i32 = 600;
+
+/// nnue-pytorch の隠れ層重みスケール
+pub const NNUE_PYTORCH_WEIGHT_SCALE_HIDDEN: i32 = 64;
+
+/// nnue-pytorch の出力層重みスケール
+pub const NNUE_PYTORCH_WEIGHT_SCALE_OUT: i32 = 16;
+
+/// nnue-pytorch の量子化単位
+pub const NNUE_PYTORCH_QUANTIZED_ONE: i32 = 127;
 
 #[cfg(test)]
 mod tests {
