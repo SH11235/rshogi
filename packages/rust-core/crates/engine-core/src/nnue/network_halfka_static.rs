@@ -1199,6 +1199,15 @@ impl NetworkHalfKA1024 {
         let mut l1_out = [0i32; 8];
         self.l1.propagate(&transformed, &mut l1_out);
 
+        // デバッグ: L1出力の範囲チェック
+        #[cfg(debug_assertions)]
+        for (i, &v) in l1_out.iter().enumerate() {
+            debug_assert!(
+                v.abs() < 1_000_000,
+                "L1 output[{i}] = {v} is out of expected range (HalfKA1024)"
+            );
+        }
+
         // ClippedReLU - l2入力用に32バイトにパディング
         // (l2のpadded_input=32だが、l1_outは8要素しかない)
         let mut l1_relu = [0u8; 32];
@@ -1211,6 +1220,15 @@ impl NetworkHalfKA1024 {
         let mut l2_out = [0i32; 96];
         self.l2.propagate(&l1_relu, &mut l2_out);
 
+        // デバッグ: L2出力の範囲チェック
+        #[cfg(debug_assertions)]
+        for (i, &v) in l2_out.iter().enumerate() {
+            debug_assert!(
+                v.abs() < 1_000_000,
+                "L2 output[{i}] = {v} is out of expected range (HalfKA1024)"
+            );
+        }
+
         // ClippedReLU
         let mut l2_relu = [0u8; 96];
         clipped_relu_static(&l2_out, &mut l2_relu);
@@ -1221,7 +1239,17 @@ impl NetworkHalfKA1024 {
 
         // スケーリング（オーバーライド設定があればそちらを優先）
         let fv_scale = get_fv_scale_override().unwrap_or(FV_SCALE_HALFKA);
-        Value::new(output[0] / fv_scale)
+        let eval = output[0] / fv_scale;
+
+        // デバッグ: 最終評価値の範囲チェック
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            eval.abs() < 50_000,
+            "Final evaluation {eval} is out of expected range (HalfKA1024). Raw output: {}",
+            output[0]
+        );
+
+        Value::new(eval)
     }
 
     /// 新しい Accumulator を作成
