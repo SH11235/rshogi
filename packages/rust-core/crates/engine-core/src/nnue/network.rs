@@ -156,20 +156,39 @@ impl NNUENetwork {
     ///
     /// LayerStacks/HalfKADynamic は異なるアキュムレータを使用するため、
     /// それぞれ専用のメソッドを使用してください。
+    ///
+    /// # Panics
+    ///
+    /// HalfKADynamic または LayerStacks アーキテクチャで呼び出された場合にパニックします。
+    /// これらのアーキテクチャには専用のメソッドを使用してください。
+    ///
+    // TODO: ライブラリコードとしては Result<Value, EvaluationError> を返すべき。
+    // 現在は呼び出し元が多いため、将来的に段階的に移行する。
     pub fn evaluate(&self, pos: &Position, acc: &Accumulator) -> Value {
         match self {
             Self::HalfKP(net) => net.evaluate(pos, acc),
             Self::HalfKA(net) => net.evaluate(pos, acc),
             Self::HalfKADynamic(_) => {
-                panic!("HalfKADynamic requires AccumulatorHalfKADynamic. Use evaluate_halfka_dynamic().")
+                unreachable!(
+                    "BUG: wrong accumulator type - HalfKADynamic requires \
+                     AccumulatorHalfKADynamic. Use evaluate_halfka_dynamic() instead."
+                )
             }
             Self::LayerStacks(_) => {
-                panic!("LayerStacks requires AccumulatorNnuePytorch. Use evaluate_layer_stacks().")
+                unreachable!(
+                    "BUG: wrong accumulator type - LayerStacks requires \
+                     AccumulatorNnuePytorch. Use evaluate_layer_stacks() instead."
+                )
             }
         }
     }
 
     /// 評価値を計算（LayerStacks用）
+    ///
+    /// # Panics
+    ///
+    /// LayerStacks 以外のアーキテクチャで呼び出された場合にパニックします。
+    // TODO: Result<Value, EvaluationError> を返すように変更する
     pub fn evaluate_layer_stacks(
         &self,
         pos: &Position,
@@ -177,11 +196,19 @@ impl NNUENetwork {
     ) -> Value {
         match self {
             Self::LayerStacks(net) => net.evaluate(pos, acc),
-            _ => panic!("This method is only for LayerStacks architecture."),
+            _ => unreachable!(
+                "BUG: evaluate_layer_stacks() called on non-LayerStacks architecture: {:?}",
+                self.architecture_name()
+            ),
         }
     }
 
     /// 評価値を計算（HalfKADynamic用）
+    ///
+    /// # Panics
+    ///
+    /// HalfKADynamic 以外のアーキテクチャで呼び出された場合にパニックします。
+    // TODO: Result<Value, EvaluationError> を返すように変更する
     pub fn evaluate_halfka_dynamic(
         &self,
         pos: &Position,
@@ -189,7 +216,10 @@ impl NNUENetwork {
     ) -> Value {
         match self {
             Self::HalfKADynamic(net) => net.evaluate(pos, acc),
-            _ => panic!("This method is only for HalfKADynamic architecture."),
+            _ => unreachable!(
+                "BUG: evaluate_halfka_dynamic() called on non-HalfKADynamic architecture: {:?}",
+                self.architecture_name()
+            ),
         }
     }
 
