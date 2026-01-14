@@ -507,12 +507,12 @@ impl<const L1: usize> FeatureTransformerHalfKAStatic<L1> {
             return false;
         };
 
-        let current_idx = stack.current_index();
-        for p in 0..2 {
-            let source_data: Vec<i16> =
-                stack.entry_at(source_idx).accumulator.accumulation[p].to_vec();
-            stack.entry_at_mut(current_idx).accumulator.accumulation[p]
-                .copy_from_slice(&source_data);
+        // source から current へコピー（to_vec() を避けてヒープアロケーション削減）
+        {
+            let (source_acc, current_acc) = stack.get_prev_and_current_accumulators(source_idx);
+            for p in 0..2 {
+                current_acc.accumulation[p].copy_from_slice(&source_acc.accumulation[p]);
+            }
         }
 
         let current_idx = stack.current_index();
@@ -999,8 +999,8 @@ impl NetworkHalfKA512 {
 
     /// 評価値を計算
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorHalfKA512) -> Value {
-        // Feature Transformer 出力
-        let mut transformed = vec![0u8; 1024];
+        // Feature Transformer 出力（スタック配列でヒープアロケーション回避）
+        let mut transformed = [0u8; 1024];
         self.feature_transformer.transform(acc, pos.side_to_move(), &mut transformed);
 
         // l1 層
@@ -1191,8 +1191,8 @@ impl NetworkHalfKA1024 {
 
     /// 評価値を計算
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorHalfKA1024) -> Value {
-        // Feature Transformer 出力
-        let mut transformed = vec![0u8; 2048];
+        // Feature Transformer 出力（スタック配列でヒープアロケーション回避）
+        let mut transformed = [0u8; 2048];
         self.feature_transformer.transform(acc, pos.side_to_move(), &mut transformed);
 
         // l1 層
