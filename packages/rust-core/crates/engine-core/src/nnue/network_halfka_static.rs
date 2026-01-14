@@ -1328,18 +1328,17 @@ mod tests {
     fn test_clipped_relu_static_96_elements() {
         // 96要素のテスト（L2層で使用）
         let mut input = [0i32; 96];
-        for i in 0..96 {
-            input[i] = (i as i32) * 64; // 0, 64, 128, ...
+        for (i, val) in input.iter_mut().enumerate() {
+            *val = (i as i32) * 64; // 0, 64, 128, ...
         }
         let mut output = [0u8; 96];
         clipped_relu_static(&input, &mut output);
 
-        for i in 0..96 {
+        for (i, &actual) in output.iter().enumerate() {
             let expected = (i as u8).min(127);
             assert_eq!(
-                output[i], expected,
-                "Mismatch at index {i}: expected {expected}, got {}",
-                output[i]
+                actual, expected,
+                "Mismatch at index {i}: expected {expected}, got {actual}",
             );
         }
     }
