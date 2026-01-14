@@ -1,16 +1,16 @@
-//! AccumulatorNnuePytorch - nnue-pytorch用の1536次元アキュムレータ
+//! AccumulatorLayerStacks - LayerStacksアーキテクチャ用の1536次元アキュムレータ
 //!
-//! nnue-pytorch の Feature Transformer は各視点で 1536 次元を出力する。
-//! 既存の Accumulator（256次元）とは別に管理する。
+//! LayerStacks の Feature Transformer は各視点で 1536 次元を出力する。
+//! 既存の Accumulator（256次元、HalfKP用）とは別に管理する。
 
 use super::accumulator::{DirtyPiece, IndexList, MAX_PATH_LENGTH};
 use super::constants::NNUE_PYTORCH_L1;
 use crate::types::MAX_PLY;
 
-/// nnue-pytorch用アキュムレータ（1536次元）
+/// LayerStacks用アキュムレータ（1536次元）
 #[repr(C, align(64))]
 #[derive(Clone)]
-pub struct AccumulatorNnuePytorch {
+pub struct AccumulatorLayerStacks {
     /// 各視点の累積値 [perspective][dimension]
     /// perspective: 0 = Black, 1 = White
     pub accumulation: [[i16; NNUE_PYTORCH_L1]; 2],
@@ -22,7 +22,7 @@ pub struct AccumulatorNnuePytorch {
     pub computed_score: bool,
 }
 
-impl AccumulatorNnuePytorch {
+impl AccumulatorLayerStacks {
     /// 新規作成
     pub fn new() -> Self {
         Self {
@@ -45,67 +45,67 @@ impl AccumulatorNnuePytorch {
     }
 }
 
-impl Default for AccumulatorNnuePytorch {
+impl Default for AccumulatorLayerStacks {
     fn default() -> Self {
         Self::new()
     }
 }
 
 // =============================================================================
-// DirtyPiece - 駒の変更情報（nnue-pytorch用、accumulator.rsから再エクスポート）
+// DirtyPiece - 駒の変更情報（LayerStacks用、accumulator.rsから再エクスポート）
 // =============================================================================
 
 // DirtyPiece は accumulator.rs で定義済み
 
 // =============================================================================
-// StackEntryNnuePytorch - スタックエントリ
+// StackEntryLayerStacks - スタックエントリ
 // =============================================================================
 
-/// スタックエントリ（nnue-pytorch用）
-pub struct StackEntryNnuePytorch {
+/// スタックエントリ（LayerStacks用）
+pub struct StackEntryLayerStacks {
     /// アキュムレータ
-    pub accumulator: AccumulatorNnuePytorch,
+    pub accumulator: AccumulatorLayerStacks,
     /// 変更された駒の情報
     pub dirty_piece: DirtyPiece,
     /// 直前のエントリインデックス（差分計算用）
     pub previous: Option<usize>,
 }
 
-impl StackEntryNnuePytorch {
+impl StackEntryLayerStacks {
     pub fn new() -> Self {
         Self {
-            accumulator: AccumulatorNnuePytorch::new(),
+            accumulator: AccumulatorLayerStacks::new(),
             dirty_piece: DirtyPiece::default(),
             previous: None,
         }
     }
 }
 
-impl Default for StackEntryNnuePytorch {
+impl Default for StackEntryLayerStacks {
     fn default() -> Self {
         Self::new()
     }
 }
 
 // =============================================================================
-// AccumulatorStackNnuePytorch - スタック管理
+// AccumulatorStackLayerStacks - スタック管理
 // =============================================================================
 
-/// アキュムレータスタック（nnue-pytorch用）
-pub struct AccumulatorStackNnuePytorch {
+/// アキュムレータスタック（LayerStacks用）
+pub struct AccumulatorStackLayerStacks {
     /// スタックエントリ
-    entries: Box<[StackEntryNnuePytorch]>,
+    entries: Box<[StackEntryLayerStacks]>,
     /// 現在のインデックス
     current: usize,
 }
 
-impl AccumulatorStackNnuePytorch {
+impl AccumulatorStackLayerStacks {
     const STACK_SIZE: usize = (MAX_PLY as usize) + 16;
 
     /// 新規作成
     pub fn new() -> Self {
-        let entries: Vec<StackEntryNnuePytorch> =
-            (0..Self::STACK_SIZE).map(|_| StackEntryNnuePytorch::new()).collect();
+        let entries: Vec<StackEntryLayerStacks> =
+            (0..Self::STACK_SIZE).map(|_| StackEntryLayerStacks::new()).collect();
 
         Self {
             entries: entries.into_boxed_slice(),
@@ -115,13 +115,13 @@ impl AccumulatorStackNnuePytorch {
 
     /// 現在のエントリを取得
     #[inline]
-    pub fn current(&self) -> &StackEntryNnuePytorch {
+    pub fn current(&self) -> &StackEntryLayerStacks {
         &self.entries[self.current]
     }
 
     /// 現在のエントリを取得（可変）
     #[inline]
-    pub fn current_mut(&mut self) -> &mut StackEntryNnuePytorch {
+    pub fn current_mut(&mut self) -> &mut StackEntryLayerStacks {
         &mut self.entries[self.current]
     }
 
@@ -133,13 +133,13 @@ impl AccumulatorStackNnuePytorch {
 
     /// 指定インデックスのエントリを取得
     #[inline]
-    pub fn entry_at(&self, index: usize) -> &StackEntryNnuePytorch {
+    pub fn entry_at(&self, index: usize) -> &StackEntryLayerStacks {
         &self.entries[index]
     }
 
     /// 指定インデックスのエントリを取得（可変）
     #[inline]
-    pub fn entry_at_mut(&mut self, index: usize) -> &mut StackEntryNnuePytorch {
+    pub fn entry_at_mut(&mut self, index: usize) -> &mut StackEntryLayerStacks {
         &mut self.entries[index]
     }
 
@@ -170,7 +170,7 @@ impl AccumulatorStackNnuePytorch {
     pub fn get_prev_and_current_accumulators(
         &mut self,
         prev_idx: usize,
-    ) -> (&AccumulatorNnuePytorch, &mut AccumulatorNnuePytorch) {
+    ) -> (&AccumulatorLayerStacks, &mut AccumulatorLayerStacks) {
         let cur_idx = self.current;
         debug_assert!(prev_idx < cur_idx, "prev_idx ({prev_idx}) must be < cur_idx ({cur_idx})");
         let (left, right) = self.entries.split_at_mut(cur_idx);
@@ -187,42 +187,61 @@ impl AccumulatorStackNnuePytorch {
     }
 
     /// 祖先を辿って使用可能なアキュムレータを探す
+    ///
+    /// ## 実装方針
+    ///
+    /// アキュムレータの差分更新における祖先探索には複数のアプローチがある:
+    ///
+    /// - **YaneuraOu方式**: 1手前のみをチェック（シンプルだが差分更新の機会を逃す）
+    /// - **Stockfish方式**: スタック全体を探索し、各ステップで玉移動をチェック
+    ///
+    /// このプロジェクトでは、HalfKP側（accumulator.rs）と同じロジックを採用している。
+    /// 最大8手前まで探索し、各ステップで玉移動があれば即座に打ち切る方式である。
+    /// この方式により、1手前限定より多くの差分更新機会を得つつ、玉移動時の
+    /// 無駄な探索を早期に打ち切ることでNPS向上が観測されている。
+    ///
+    /// ## 戻り値
+    ///
+    /// `Some((計算済みエントリのインデックス, 経由する局面数))` - 玉移動がない範囲で
+    /// 計算済み祖先が見つかった場合。`None` - 使用可能な祖先が見つからない場合。
     pub fn find_usable_accumulator(&self) -> Option<(usize, usize)> {
-        const MAX_DEPTH: usize = MAX_PATH_LENGTH;
+        const MAX_DEPTH: usize = 8;
 
-        let mut idx = self.current;
-        let mut depth = 0;
+        let current = &self.entries[self.current];
 
-        while depth < MAX_DEPTH {
-            let entry = &self.entries[idx];
-
-            // 計算済みかチェック
-            if entry.accumulator.computed_accumulation {
-                // 玉が移動していないかチェック
-                if let Some(path) = self.collect_path_internal(idx) {
-                    let has_king_move = path.iter().any(|&i| {
-                        let e = &self.entries[i];
-                        e.dirty_piece.king_moved[0] || e.dirty_piece.king_moved[1]
-                    });
-
-                    if !has_king_move {
-                        return Some((idx, depth));
-                    }
-                }
-                // パス収集に失敗した場合は次の祖先を探す
-            }
-
-            // 前のエントリへ
-            match entry.previous {
-                Some(prev) => {
-                    idx = prev;
-                    depth += 1;
-                }
-                None => break,
-            }
+        // 現局面で玉が動いていたら差分更新不可
+        if current.dirty_piece.king_moved[0] || current.dirty_piece.king_moved[1] {
+            return None;
         }
 
-        None
+        // 直前局面をチェック（depth=1から開始）
+        let mut prev_idx = current.previous?;
+        let mut depth = 1;
+
+        loop {
+            let prev = &self.entries[prev_idx];
+
+            // 計算済みなら成功
+            if prev.accumulator.computed_accumulation {
+                return Some((prev_idx, depth));
+            }
+
+            // 探索上限に達した
+            if depth >= MAX_DEPTH {
+                return None;
+            }
+
+            // さらに前の局面へ（ルートに達したらNone）
+            let next_prev_idx = prev.previous?;
+
+            // 玉が動いていたら打ち切り（早期終了による最適化）
+            if prev.dirty_piece.king_moved[0] || prev.dirty_piece.king_moved[1] {
+                return None;
+            }
+
+            prev_idx = next_prev_idx;
+            depth += 1;
+        }
     }
 
     /// 指定インデックスから現在位置までのパスを収集
@@ -254,7 +273,7 @@ impl AccumulatorStackNnuePytorch {
     }
 }
 
-impl Default for AccumulatorStackNnuePytorch {
+impl Default for AccumulatorStackLayerStacks {
     fn default() -> Self {
         Self::new()
     }
@@ -266,14 +285,14 @@ mod tests {
 
     #[test]
     fn test_accumulator_new() {
-        let acc = AccumulatorNnuePytorch::new();
+        let acc = AccumulatorLayerStacks::new();
         assert!(!acc.computed_accumulation);
         assert_eq!(acc.accumulation[0].len(), NNUE_PYTORCH_L1);
     }
 
     #[test]
     fn test_stack_push_pop() {
-        let mut stack = AccumulatorStackNnuePytorch::new();
+        let mut stack = AccumulatorStackLayerStacks::new();
         assert_eq!(stack.current_index(), 0);
 
         stack.push();

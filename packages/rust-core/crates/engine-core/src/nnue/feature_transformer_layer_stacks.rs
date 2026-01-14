@@ -1,11 +1,11 @@
-//! FeatureTransformerNnuePytorch - nnue-pytorch用の1536次元Feature Transformer
+//! FeatureTransformerLayerStacks - LayerStacksアーキテクチャ用の1536次元Feature Transformer
 //!
 //! HalfKA_hm^ 特徴量（キングバケット×BonaPiece）から、
 //! 片側 1536 次元×両視点の中間表現を生成する。
 
 use super::accumulator::{Aligned, AlignedBox};
 use super::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES};
-use super::accumulator_nnue_pytorch::{AccumulatorNnuePytorch, AccumulatorStackNnuePytorch};
+use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLayerStacks};
 use super::constants::{HALFKA_HM_DIMENSIONS, NNUE_PYTORCH_L1};
 use super::features::{FeatureSet, HalfKA_hmFeatureSet};
 use super::leb128::read_compressed_tensor_i16;
@@ -22,7 +22,7 @@ fn feature_index_oob(index: usize, max: usize) -> ! {
 
 /// nnue-pytorch用のFeatureTransformer（1536次元出力）
 #[repr(C, align(64))]
-pub struct FeatureTransformerNnuePytorch {
+pub struct FeatureTransformerLayerStacks {
     /// バイアス [L1]
     pub biases: Aligned<[i16; NNUE_PYTORCH_L1]>,
 
@@ -31,7 +31,7 @@ pub struct FeatureTransformerNnuePytorch {
     pub weights: AlignedBox<i16>,
 }
 
-impl FeatureTransformerNnuePytorch {
+impl FeatureTransformerLayerStacks {
     /// ファイルから読み込み（非圧縮形式）
     pub fn read<R: Read>(reader: &mut R) -> io::Result<Self> {
         // バイアスを読み込み
@@ -79,7 +79,7 @@ impl FeatureTransformerNnuePytorch {
     }
 
     /// 差分計算を使わずにAccumulatorを計算
-    pub fn refresh_accumulator(&self, pos: &Position, acc: &mut AccumulatorNnuePytorch) {
+    pub fn refresh_accumulator(&self, pos: &Position, acc: &mut AccumulatorLayerStacks) {
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
             let accumulation = acc.get_mut(p);
@@ -103,8 +103,8 @@ impl FeatureTransformerNnuePytorch {
         &self,
         pos: &Position,
         dirty_piece: &DirtyPiece,
-        acc: &mut AccumulatorNnuePytorch,
-        prev_acc: &AccumulatorNnuePytorch,
+        acc: &mut AccumulatorLayerStacks,
+        prev_acc: &AccumulatorLayerStacks,
     ) {
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
@@ -149,7 +149,7 @@ impl FeatureTransformerNnuePytorch {
     pub fn forward_update_incremental(
         &self,
         pos: &Position,
-        stack: &mut AccumulatorStackNnuePytorch,
+        stack: &mut AccumulatorStackLayerStacks,
         source_idx: usize,
     ) -> bool {
         let Some(path) = stack.collect_path(source_idx) else {

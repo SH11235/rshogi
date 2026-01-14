@@ -14,14 +14,14 @@
 //! - NNUE 未初期化時のフォールバック駒得評価
 
 mod accumulator;
-mod accumulator_nnue_pytorch;
+mod accumulator_layer_stacks;
 mod bona_piece;
 mod bona_piece_halfka;
 mod constants;
 mod diff;
 mod feature_transformer;
 mod feature_transformer_halfka;
-mod feature_transformer_nnue_pytorch;
+mod feature_transformer_layer_stacks;
 pub mod features;
 mod layer_stacks;
 mod layers;
@@ -33,8 +33,8 @@ mod network_layer_stacks;
 pub use accumulator::{
     Accumulator, AccumulatorStack, ChangedPiece, DirtyPiece, HandChange, StackEntry,
 };
-pub use accumulator_nnue_pytorch::{
-    AccumulatorNnuePytorch, AccumulatorStackNnuePytorch, StackEntryNnuePytorch,
+pub use accumulator_layer_stacks::{
+    AccumulatorLayerStacks, AccumulatorStackLayerStacks, StackEntryLayerStacks,
 };
 pub use bona_piece::{halfkp_index, BonaPiece, FE_END};
 pub use bona_piece_halfka::{
@@ -44,7 +44,7 @@ pub use bona_piece_halfka::{
 pub use constants::*;
 pub use diff::get_changed_features;
 pub use feature_transformer::FeatureTransformer;
-pub use feature_transformer_nnue_pytorch::FeatureTransformerNnuePytorch;
+pub use feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
 pub use features::{
     Feature, FeatureSet, HalfKA_hm, HalfKA_hmFeatureSet, HalfKP, HalfKPFeatureSet, TriggerEvent,
 };

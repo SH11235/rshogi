@@ -11,7 +11,7 @@
 //! - グローバルな `NETWORK` にロードし、`evaluate` から利用する
 
 use super::accumulator::{Accumulator, AccumulatorStack, Aligned};
-use super::accumulator_nnue_pytorch::AccumulatorStackNnuePytorch;
+use super::accumulator_layer_stacks::AccumulatorStackLayerStacks;
 use super::constants::{
     FV_SCALE, FV_SCALE_HALFKA, HIDDEN1_DIMENSIONS, HIDDEN2_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION,
     NNUE_VERSION_HALFKA, OUTPUT_DIMENSIONS, TRANSFORMED_FEATURE_DIMENSIONS,
@@ -178,7 +178,7 @@ impl NNUENetwork {
             Self::LayerStacks(_) => {
                 unreachable!(
                     "BUG: wrong accumulator type - LayerStacks requires \
-                     AccumulatorNnuePytorch. Use evaluate_layer_stacks() instead."
+                     AccumulatorLayerStacks. Use evaluate_layer_stacks() instead."
                 )
             }
         }
@@ -193,7 +193,7 @@ impl NNUENetwork {
     pub fn evaluate_layer_stacks(
         &self,
         pos: &Position,
-        acc: &super::accumulator_nnue_pytorch::AccumulatorNnuePytorch,
+        acc: &super::accumulator_layer_stacks::AccumulatorLayerStacks,
     ) -> Value {
         match self {
             Self::LayerStacks(net) => net.evaluate(pos, acc),
@@ -264,7 +264,7 @@ impl NNUENetwork {
             }
             Self::LayerStacks(_) => {
                 panic!(
-                    "LayerStacks requires AccumulatorNnuePytorch. Use refresh_accumulator_layer_stacks()."
+                    "LayerStacks requires AccumulatorLayerStacks. Use refresh_accumulator_layer_stacks()."
                 )
             }
         }
@@ -274,7 +274,7 @@ impl NNUENetwork {
     pub fn refresh_accumulator_layer_stacks(
         &self,
         pos: &Position,
-        acc: &mut super::accumulator_nnue_pytorch::AccumulatorNnuePytorch,
+        acc: &mut super::accumulator_layer_stacks::AccumulatorLayerStacks,
     ) {
         match self {
             Self::LayerStacks(net) => net.refresh_accumulator(pos, acc),
@@ -313,7 +313,7 @@ impl NNUENetwork {
                 panic!("HalfKADynamic requires AccumulatorHalfKADynamic. Use update_accumulator_halfka_dynamic().")
             }
             Self::LayerStacks(_) => {
-                panic!("LayerStacks requires AccumulatorNnuePytorch. Use update_accumulator_layer_stacks().")
+                panic!("LayerStacks requires AccumulatorLayerStacks. Use update_accumulator_layer_stacks().")
             }
         }
     }
@@ -323,8 +323,8 @@ impl NNUENetwork {
         &self,
         pos: &Position,
         dirty_piece: &super::accumulator::DirtyPiece,
-        acc: &mut super::accumulator_nnue_pytorch::AccumulatorNnuePytorch,
-        prev_acc: &super::accumulator_nnue_pytorch::AccumulatorNnuePytorch,
+        acc: &mut super::accumulator_layer_stacks::AccumulatorLayerStacks,
+        prev_acc: &super::accumulator_layer_stacks::AccumulatorLayerStacks,
     ) {
         match self {
             Self::LayerStacks(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
@@ -364,7 +364,7 @@ impl NNUENetwork {
                 panic!("HalfKADynamic requires AccumulatorStackHalfKADynamic. Use forward_update_incremental_halfka_dynamic().")
             }
             Self::LayerStacks(_) => {
-                panic!("LayerStacks requires AccumulatorStackNnuePytorch. Use forward_update_incremental_layer_stacks().")
+                panic!("LayerStacks requires AccumulatorStackLayerStacks. Use forward_update_incremental_layer_stacks().")
             }
         }
     }
@@ -373,7 +373,7 @@ impl NNUENetwork {
     pub fn forward_update_incremental_layer_stacks(
         &self,
         pos: &Position,
-        stack: &mut AccumulatorStackNnuePytorch,
+        stack: &mut AccumulatorStackLayerStacks,
         source_idx: usize,
     ) -> bool {
         match self {
@@ -809,7 +809,7 @@ fn update_and_evaluate_halfka(
 fn update_and_evaluate_layer_stacks(
     network: &NNUENetwork,
     pos: &Position,
-    stack: &mut AccumulatorStackNnuePytorch,
+    stack: &mut AccumulatorStackLayerStacks,
 ) -> Value {
     // アキュムレータの更新
     let current_entry = stack.current();
@@ -921,7 +921,7 @@ pub fn evaluate(pos: &Position, stack: &mut AccumulatorStack, eval_hash: &EvalHa
     // LayerStacks/HalfKADynamic は別のアキュムレータ型を使用する
     if network.is_layer_stacks() {
         unreachable!(
-            "BUG: LayerStacks architecture detected. Use evaluate_layer_stacks() with AccumulatorStackNnuePytorch."
+            "BUG: LayerStacks architecture detected. Use evaluate_layer_stacks() with AccumulatorStackLayerStacks."
         );
     }
     if network.is_halfka_dynamic() {
@@ -1094,12 +1094,12 @@ pub fn get_halfka_dynamic_l1() -> Option<usize> {
 
 /// 局面を評価（LayerStacks用）
 ///
-/// AccumulatorStackNnuePytorch を使って差分更新し、計算済みなら再利用する。
+/// AccumulatorStackLayerStacks を使って差分更新し、計算済みなら再利用する。
 ///
 /// # フォールバック動作
 /// - 通常ビルド: NNUEが初期化されていない場合は駒得評価にフォールバック
 /// - tournamentビルド: NNUEが初期化されていない場合はパニック
-pub fn evaluate_layer_stacks(pos: &Position, stack: &mut AccumulatorStackNnuePytorch) -> Value {
+pub fn evaluate_layer_stacks(pos: &Position, stack: &mut AccumulatorStackLayerStacks) -> Value {
     // tournamentビルド: NNUEが必須（フォールバックなし）
     #[cfg(feature = "tournament")]
     let network = NETWORK.get().expect(
@@ -1134,7 +1134,7 @@ pub fn evaluate_layer_stacks(pos: &Position, stack: &mut AccumulatorStackNnuePyt
 pub fn evaluate_dispatch(
     pos: &Position,
     stack: &mut AccumulatorStack,
-    stack_layer_stacks: &mut AccumulatorStackNnuePytorch,
+    stack_layer_stacks: &mut AccumulatorStackLayerStacks,
     stack_halfka_dynamic: &mut super::network_halfka_dynamic::AccumulatorStackHalfKADynamic,
 ) -> Value {
     // tournamentビルド: NNUEが必須（フォールバックなし）
@@ -1331,7 +1331,7 @@ mod tests {
         let mut pos = crate::position::Position::new();
         pos.set_sfen(SFEN_HIRATE).unwrap();
 
-        let mut acc = crate::nnue::AccumulatorNnuePytorch::new();
+        let mut acc = crate::nnue::AccumulatorLayerStacks::new();
         network.refresh_accumulator_layer_stacks(&pos, &mut acc);
 
         let value = network.evaluate_layer_stacks(&pos, &acc);

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use crate::eval::EvalHash;
 use crate::nnue::{
     evaluate_dispatch, get_halfka_dynamic_l1, is_halfka_dynamic_loaded, is_layer_stacks_loaded,
-    AccumulatorStack, AccumulatorStackHalfKADynamic, AccumulatorStackNnuePytorch, DirtyPiece,
+    AccumulatorStack, AccumulatorStackHalfKADynamic, AccumulatorStackLayerStacks, DirtyPiece,
 };
 use crate::position::Position;
 use crate::search::PieceToHistory;
@@ -286,7 +286,7 @@ pub struct SearchWorker {
     ///
     /// nnue-pytorch で学習した LayerStacks モデル用のアキュムレータ。
     /// `use_layer_stacks` が true の場合にこちらを使用する。
-    pub nnue_stack_layer_stacks: AccumulatorStackNnuePytorch,
+    pub nnue_stack_layer_stacks: AccumulatorStackLayerStacks,
 
     /// NNUE Accumulator スタック（HalfKADynamic用、動的サイズ）
     ///
@@ -348,7 +348,7 @@ impl SearchWorker {
             max_moves_to_draw,
             nmp_min_ply: 0,
             nnue_stack: AccumulatorStack::new(),
-            nnue_stack_layer_stacks: AccumulatorStackNnuePytorch::new(),
+            nnue_stack_layer_stacks: AccumulatorStackLayerStacks::new(),
             nnue_stack_halfka_dynamic: AccumulatorStackHalfKADynamic::new(1024), // デフォルトL1=1024
             use_layer_stacks: false,   // prepare_search() で設定
             use_halfka_dynamic: false, // prepare_search() で設定

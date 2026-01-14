@@ -23,9 +23,9 @@
 //! - 相手玉の段: 0-2 → 0, 3-5 → 1, 6-8 → 2
 //! - bucket = f_index + e_index (0-8)
 
-use super::accumulator_nnue_pytorch::{AccumulatorNnuePytorch, AccumulatorStackNnuePytorch};
+use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLayerStacks};
 use super::constants::{MAX_ARCH_LEN, NNUE_PYTORCH_L1, NNUE_VERSION_HALFKA};
-use super::feature_transformer_nnue_pytorch::FeatureTransformerNnuePytorch;
+use super::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
 use super::layer_stacks::{compute_bucket_index, sqr_clipped_relu_transform, LayerStacks};
 use crate::position::Position;
 use crate::types::{Color, Value};
@@ -40,7 +40,7 @@ use std::path::Path;
 /// HalfKA_hm^ 特徴量（73,305次元）+ 1536次元 Feature Transformer + 9バケット LayerStacks
 pub struct NetworkLayerStacks {
     /// Feature Transformer (73,305 → 1536)
-    pub feature_transformer: FeatureTransformerNnuePytorch,
+    pub feature_transformer: FeatureTransformerLayerStacks,
     /// LayerStacks (9バケット)
     pub layer_stacks: LayerStacks,
 }
@@ -107,7 +107,7 @@ impl NetworkLayerStacks {
         let _ft_hash = u32::from_le_bytes(buf4);
 
         // Feature Transformer を読み込み（圧縮形式を自動検出）
-        let feature_transformer = FeatureTransformerNnuePytorch::read_leb128(reader)?;
+        let feature_transformer = FeatureTransformerLayerStacks::read_leb128(reader)?;
 
         // LayerStacks を読み込み（FC層は常に非圧縮）
         let layer_stacks = LayerStacks::read(reader)?;
@@ -155,7 +155,7 @@ impl NetworkLayerStacks {
 
     /// 読み込み時の診断ログを出力
     #[cfg(feature = "diagnostics")]
-    fn log_load_diagnostics(ft: &FeatureTransformerNnuePytorch, ls: &LayerStacks) {
+    fn log_load_diagnostics(ft: &FeatureTransformerLayerStacks, ls: &LayerStacks) {
         // FT統計
         let bias_sum: i64 = ft.biases.0.iter().map(|&x| x as i64).sum();
         let weight_min = ft.weights.iter().copied().min().unwrap_or(0);
@@ -182,7 +182,7 @@ impl NetworkLayerStacks {
     }
 
     /// 評価値を計算
-    pub fn evaluate(&self, pos: &Position, acc: &AccumulatorNnuePytorch) -> Value {
+    pub fn evaluate(&self, pos: &Position, acc: &AccumulatorLayerStacks) -> Value {
         let side_to_move = pos.side_to_move();
 
         // SqrClippedReLU変換
@@ -213,7 +213,7 @@ impl NetworkLayerStacks {
     /// Python (nnue-pytorch) との比較検証用。
     /// 各中間値をログ出力する。
     #[cfg(feature = "diagnostics")]
-    pub fn evaluate_with_diagnostics(&self, pos: &Position, acc: &AccumulatorNnuePytorch) -> Value {
+    pub fn evaluate_with_diagnostics(&self, pos: &Position, acc: &AccumulatorLayerStacks) -> Value {
         use log::info;
 
         let side_to_move = pos.side_to_move();
@@ -272,7 +272,7 @@ impl NetworkLayerStacks {
     }
 
     /// 差分計算を使わずにAccumulatorを計算
-    pub fn refresh_accumulator(&self, pos: &Position, acc: &mut AccumulatorNnuePytorch) {
+    pub fn refresh_accumulator(&self, pos: &Position, acc: &mut AccumulatorLayerStacks) {
         self.feature_transformer.refresh_accumulator(pos, acc);
     }
 
@@ -281,8 +281,8 @@ impl NetworkLayerStacks {
         &self,
         pos: &Position,
         dirty_piece: &super::accumulator::DirtyPiece,
-        acc: &mut AccumulatorNnuePytorch,
-        prev_acc: &AccumulatorNnuePytorch,
+        acc: &mut AccumulatorLayerStacks,
+        prev_acc: &AccumulatorLayerStacks,
     ) {
         self.feature_transformer.update_accumulator(pos, dirty_piece, acc, prev_acc);
     }
@@ -291,7 +291,7 @@ impl NetworkLayerStacks {
     pub fn forward_update_incremental(
         &self,
         pos: &Position,
-        stack: &mut AccumulatorStackNnuePytorch,
+        stack: &mut AccumulatorStackLayerStacks,
         source_idx: usize,
     ) -> bool {
         self.feature_transformer.forward_update_incremental(pos, stack, source_idx)
@@ -396,7 +396,7 @@ mod tests {
             }
         }
 
-        let mut acc = AccumulatorNnuePytorch::new();
+        let mut acc = AccumulatorLayerStacks::new();
         network.refresh_accumulator(&pos, &mut acc);
 
         // Accumulatorの値を確認

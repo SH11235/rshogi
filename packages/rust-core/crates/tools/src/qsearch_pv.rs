@@ -26,7 +26,7 @@ use engine_core::eval::material::evaluate_material;
 use engine_core::movegen::{generate_legal, MoveList};
 use engine_core::nnue::{
     evaluate_dispatch, get_halfka_dynamic_l1, is_nnue_initialized, AccumulatorStack,
-    AccumulatorStackHalfKADynamic, AccumulatorStackNnuePytorch, DirtyPiece,
+    AccumulatorStackHalfKADynamic, AccumulatorStackLayerStacks, DirtyPiece,
 };
 use engine_core::position::Position;
 use engine_core::types::{Move, Value};
@@ -83,8 +83,8 @@ impl Evaluator for NnueEvaluator {
         // qsearchでは差分更新が複雑なため、各評価で全計算を行う
         thread_local! {
             static ACC_STACK: RefCell<AccumulatorStack> = RefCell::new(AccumulatorStack::new());
-            static ACC_STACK_LAYER_STACKS: RefCell<AccumulatorStackNnuePytorch> =
-                RefCell::new(AccumulatorStackNnuePytorch::new());
+            static ACC_STACK_LAYER_STACKS: RefCell<AccumulatorStackLayerStacks> =
+                RefCell::new(AccumulatorStackLayerStacks::new());
             static ACC_STACK_HALFKA_DYNAMIC: RefCell<Option<AccumulatorStackHalfKADynamic>> =
                 const { RefCell::new(None) };
         }
@@ -129,7 +129,7 @@ pub struct NnueStacks {
     /// HalfKP用スタック
     pub acc: AccumulatorStack,
     /// LayerStacks用スタック
-    pub acc_ls: AccumulatorStackNnuePytorch,
+    pub acc_ls: AccumulatorStackLayerStacks,
     /// HalfKADynamic用スタック（常に存在、evaluate_dispatchに必要）
     pub acc_hd: AccumulatorStackHalfKADynamic,
     /// ノード数カウンター（探索爆発防止用）
@@ -149,7 +149,7 @@ impl NnueStacks {
         let l1 = get_halfka_dynamic_l1().unwrap_or(Self::DEFAULT_L1);
         Self {
             acc: AccumulatorStack::new(),
-            acc_ls: AccumulatorStackNnuePytorch::new(),
+            acc_ls: AccumulatorStackLayerStacks::new(),
             acc_hd: AccumulatorStackHalfKADynamic::new(l1),
             node_count: 0,
         }
