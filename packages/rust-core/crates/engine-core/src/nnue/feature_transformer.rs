@@ -486,22 +486,21 @@ impl FeatureTransformer {
                     let acc_ptr = accumulation.as_ptr();
                     let out_ptr = output[out_offset..].as_mut_ptr();
                     let zero = _mm256_setzero_si256();
-                    let max_val = _mm256_set1_epi8(127);
 
                     for i in 0..8 {
                         // 32個のi16を読み込み（2つの__m256i）
                         let v0 = _mm256_loadu_si256(acc_ptr.add(i * 32) as *const __m256i);
                         let v1 = _mm256_loadu_si256(acc_ptr.add(i * 32 + 16) as *const __m256i);
 
-                        // i16 → i8 にパック（符号付き飽和）
+                        // i16 → i8 にパック（符号付き飽和: -128〜127）
                         // 結果のレーン順序: [v0_lo, v1_lo, v0_hi, v1_hi]
                         let packed = _mm256_packs_epi16(v0, v1);
                         // レーン順序を修正: 0xD8 = 11_01_10_00 → [0, 2, 1, 3]
                         let packed = _mm256_permute4x64_epi64(packed, 0xD8);
 
-                        // ClippedReLU: max(0, min(127, x))
+                        // ClippedReLU: max(0, x)
+                        // 注: min(127, x) は不要。飽和パックで既に -128〜127 にクランプ済み
                         let clipped = _mm256_max_epi8(packed, zero);
-                        let clipped = _mm256_min_epi8(clipped, max_val);
 
                         _mm256_storeu_si256(out_ptr.add(i * 32) as *mut __m256i, clipped);
                     }
@@ -521,26 +520,24 @@ impl FeatureTransformer {
                     use std::arch::x86_64::*;
                     let acc_ptr = accumulation.as_ptr();
                     let out_ptr = output[out_offset..].as_mut_ptr();
-                    let zero = _mm_setzero_si128();
-                    let max_val = _mm_set1_epi8(127);
+
+                    // SSE2には_mm_max_epi8がないため、符号付きi8を符号なしu8に変換して処理
+                    // [-128, 127] → [0, 255] に変換してから符号なしmaxを適用し、最後に戻す
+                    let offset_128 = _mm_set1_epi8(-128i8);
+                    let zero_unsigned = _mm_set1_epi8(-128i8); // 0 + (-128) = -128 (as u8: 128)
 
                     for i in 0..16 {
                         // 16個のi16を読み込み（2つの__m128i）
                         let v0 = _mm_loadu_si128(acc_ptr.add(i * 16) as *const __m128i);
                         let v1 = _mm_loadu_si128(acc_ptr.add(i * 16 + 8) as *const __m128i);
 
-                        // i16 → i8 にパック（符号付き飽和）
+                        // i16 → i8 にパック（符号付き飽和: -128〜127）
                         let packed = _mm_packs_epi16(v0, v1);
 
-                        // ClippedReLU: max(0, min(127, x))
-                        // SSE2には_mm_max_epi8がないため、符号付きi8を符号なしu8に変換:
-                        // [-128, 127] → [0, 255] に変換してから符号なしmax/minを適用し、最後に戻す
-                        let offset_128 = _mm_set1_epi8(-128i8);
+                        // ClippedReLU: max(0, x)
+                        // 注: min(127, x) は不要。飽和パックで既に -128〜127 にクランプ済み
                         let packed_unsigned = _mm_add_epi8(packed, offset_128);
-                        let zero_unsigned = _mm_add_epi8(zero, offset_128);
-                        let max_unsigned = _mm_add_epi8(max_val, offset_128);
                         let clipped = _mm_max_epu8(packed_unsigned, zero_unsigned);
-                        let clipped = _mm_min_epu8(clipped, max_unsigned);
                         let clipped = _mm_sub_epi8(clipped, offset_128);
 
                         _mm_storeu_si128(out_ptr.add(i * 16) as *mut __m128i, clipped);
@@ -558,19 +555,19 @@ impl FeatureTransformer {
                     let acc_ptr = accumulation.as_ptr();
                     let out_ptr = output[out_offset..].as_mut_ptr();
 
+                    let zero = i8x16_splat(0);
+
                     for i in 0..16 {
                         // 16個のi16を読み込み（2つのv128）
                         let v0 = v128_load(acc_ptr.add(i * 16) as *const v128);
                         let v1 = v128_load(acc_ptr.add(i * 16 + 8) as *const v128);
 
-                        // i16 → i8 にパック（符号付き飽和）
+                        // i16 → i8 にパック（符号付き飽和: -128〜127）
                         let packed = i8x16_narrow_i16x8(v0, v1);
 
-                        // ClippedReLU: max(0, min(127, x))
-                        let zero = i8x16_splat(0);
-                        let max_val = i8x16_splat(127);
+                        // ClippedReLU: max(0, x)
+                        // 注: min(127, x) は不要。飽和パックで既に -128〜127 にクランプ済み
                         let clipped = i8x16_max(packed, zero);
-                        let clipped = i8x16_min(clipped, max_val);
 
                         v128_store(out_ptr.add(i * 16) as *mut v128, clipped);
                     }
