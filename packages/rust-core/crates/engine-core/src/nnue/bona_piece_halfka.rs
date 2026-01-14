@@ -130,15 +130,19 @@ pub fn pack_bonapiece(bp: BonaPieceHalfKA, hm_mirror: bool) -> usize {
 /// キングバケットを計算（Half-Mirror）
 ///
 /// 玉位置を45バケット（9段 × 5筋）に圧縮。
-/// ファイル5-8（0-indexed）は0-3にミラーリング。
+/// ファイル5-8（0-indexed）は4-1にミラーリング。
 ///
-/// C++実装:
+/// C++実装 (training_data_loader.cpp make_index):
 /// ```cpp
-/// int file = file_of(ksq);  // 0..8
-/// int rank = rank_of(ksq);  // 0..8
-/// int file_m = (file >= 5) ? (8 - file) : file;  // 0..4
-/// return rank * 5 + file_m;  // 0..44
+/// if (sq_k >= SQ_61) {  // file >= 6
+///     sq_k = Mir(sq_k);  // file' = 8 - file
+/// }
+/// // sq_k = file * 9 + rank (file ∈ {0..4})
+/// // 最大: 4*9 + 8 = 44
+/// return e_king * sq_k + packed_p;
 /// ```
+///
+/// 注意: nnue-pytorchで使われるYaneuraOuは `file * 9 + rank` 順で、Rust側も同じにする必要がある。
 #[inline]
 pub fn king_bucket(ksq: Square, perspective: Color) -> usize {
     // 視点に応じてマスを変換
@@ -154,7 +158,9 @@ pub fn king_bucket(ksq: Square, perspective: Color) -> usize {
     // Half-mirror: file >= 5 なら反転（5,6,7,8 → 3,2,1,0）
     let file_m = if file >= 5 { 8 - file } else { file }; // 0..4
 
-    rank * 5 + file_m // 0..44
+    // C++と同じ計算: file_m * 9 + rank
+    // 範囲: 0..(4*9 + 8) = 0..44
+    file_m * 9 + rank
 }
 
 /// Half-Mirrorが必要かどうかを判定
@@ -202,28 +208,29 @@ mod tests {
     #[test]
     fn test_king_bucket_black_perspective() {
         // 先手視点でのキングバケット計算
+        // C++と同じ計算: file_m * 9 + rank
 
-        // 5九（file=4, rank=8）: bucket = 8*5 + 4 = 44
+        // 5九（file=4, rank=8）: bucket = 4*9 + 8 = 44
         let sq_59 = Square::new(File::File5, Rank::Rank9);
         assert_eq!(king_bucket(sq_59, Color::Black), 44);
 
-        // 1九（file=0, rank=8）: bucket = 8*5 + 0 = 40
+        // 1九（file=0, rank=8）: bucket = 0*9 + 8 = 8
         let sq_19 = Square::new(File::File1, Rank::Rank9);
-        assert_eq!(king_bucket(sq_19, Color::Black), 40);
+        assert_eq!(king_bucket(sq_19, Color::Black), 8);
 
-        // 9九（file=8, mirror to 0, rank=8）: bucket = 8*5 + 0 = 40
+        // 9九（file=8, mirror to 0, rank=8）: bucket = 0*9 + 8 = 8
         let sq_99 = Square::new(File::File9, Rank::Rank9);
-        assert_eq!(king_bucket(sq_99, Color::Black), 40);
+        assert_eq!(king_bucket(sq_99, Color::Black), 8);
 
-        // 6九（file=5, mirror to 3, rank=8）: bucket = 8*5 + 3 = 43
+        // 6九（file=5, mirror to 3, rank=8）: bucket = 3*9 + 8 = 35
         let sq_69 = Square::new(File::File6, Rank::Rank9);
-        assert_eq!(king_bucket(sq_69, Color::Black), 43);
+        assert_eq!(king_bucket(sq_69, Color::Black), 35);
 
-        // 5一（file=4, rank=0）: bucket = 0*5 + 4 = 4
+        // 5一（file=4, rank=0）: bucket = 4*9 + 0 = 36
         let sq_51 = Square::new(File::File5, Rank::Rank1);
-        assert_eq!(king_bucket(sq_51, Color::Black), 4);
+        assert_eq!(king_bucket(sq_51, Color::Black), 36);
 
-        // 1一（file=0, rank=0）: bucket = 0*5 + 0 = 0
+        // 1一（file=0, rank=0）: bucket = 0*9 + 0 = 0
         let sq_11 = Square::new(File::File1, Rank::Rank1);
         assert_eq!(king_bucket(sq_11, Color::Black), 0);
     }

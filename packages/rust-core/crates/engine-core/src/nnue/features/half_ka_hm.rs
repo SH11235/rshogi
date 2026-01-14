@@ -102,7 +102,8 @@ impl Feature for HalfKA_hm {
                     let packed = pack_bonapiece(bp, hm_mirror);
 
                     // Base特徴量（coalesce済みモデルではこれのみ）
-                    active.push(halfka_index(kb, packed));
+                    // 合法局面では溢れないため戻り値を無視
+                    let _ = active.push(halfka_index(kb, packed));
                 }
             }
         }
@@ -120,7 +121,8 @@ impl Feature for HalfKA_hm {
         };
         let friend_king_bp = king_bonapiece(friend_king_sq_index, true); // is_friend=true
         let packed_friend_king = pack_bonapiece(friend_king_bp, hm_mirror);
-        active.push(halfka_index(kb, packed_friend_king));
+        // 合法局面では溢れないため戻り値を無視
+        let _ = active.push(halfka_index(kb, packed_friend_king));
 
         // 敵玉の特徴量
         let enemy = perspective.opponent();
@@ -132,7 +134,8 @@ impl Feature for HalfKA_hm {
         };
         let enemy_king_bp = king_bonapiece(enemy_king_sq_index, false); // is_friend=false
         let packed_enemy_king = pack_bonapiece(enemy_king_bp, hm_mirror);
-        active.push(halfka_index(kb, packed_enemy_king));
+        // 合法局面では溢れないため戻り値を無視
+        let _ = active.push(halfka_index(kb, packed_enemy_king));
 
         // 手駒の特徴量
         // HalfKPと同様に、手駒の枚数分すべての特徴量を追加する
@@ -159,7 +162,8 @@ impl Feature for HalfKA_hm {
                         let packed = pack_bonapiece(bp, hm_mirror);
 
                         // Base特徴量（coalesce済みモデルではこれのみ）
-                        active.push(halfka_index(kb, packed));
+                        // 合法局面では溢れないため戻り値を無視
+                        let _ = active.push(halfka_index(kb, packed));
                     }
                 }
             }
@@ -204,7 +208,8 @@ impl Feature for HalfKA_hm {
 
                     if bp != BonaPiece::ZERO {
                         let packed = pack_bonapiece(bp, hm_mirror);
-                        removed.push(halfka_index(kb, packed));
+                        // 合法局面では溢れないため戻り値を無視
+                        let _ = removed.push(halfka_index(kb, packed));
                     }
                 }
             }
@@ -229,7 +234,8 @@ impl Feature for HalfKA_hm {
 
                     if bp != BonaPiece::ZERO {
                         let packed = pack_bonapiece(bp, hm_mirror);
-                        added.push(halfka_index(kb, packed));
+                        // 合法局面では溢れないため戻り値を無視
+                        let _ = added.push(halfka_index(kb, packed));
                     }
                 }
             }
@@ -248,7 +254,8 @@ impl Feature for HalfKA_hm {
                     let bp = BonaPiece::from_hand_piece(perspective, hc.owner, hc.piece_type, i);
                     if bp != BonaPiece::ZERO {
                         let packed = pack_bonapiece(bp, hm_mirror);
-                        added.push(halfka_index(kb, packed));
+                        // 合法局面では溢れないため戻り値を無視
+                        let _ = added.push(halfka_index(kb, packed));
                     }
                 }
             } else if hc.old_count > hc.new_count {
@@ -257,7 +264,8 @@ impl Feature for HalfKA_hm {
                     let bp = BonaPiece::from_hand_piece(perspective, hc.owner, hc.piece_type, i);
                     if bp != BonaPiece::ZERO {
                         let packed = pack_bonapiece(bp, hm_mirror);
-                        removed.push(halfka_index(kb, packed));
+                        // 合法局面では溢れないため戻り値を無視
+                        let _ = removed.push(halfka_index(kb, packed));
                     }
                 }
             }
@@ -314,7 +322,7 @@ mod tests {
         let king_sq = Square::new(File::File5, Rank::Rank9); // 5九
 
         let mut dirty_piece = DirtyPiece::new();
-        dirty_piece.push_piece(ChangedPiece {
+        let _ = dirty_piece.push_piece(ChangedPiece {
             color: Color::Black,
             old_piece: Piece::B_PAWN,
             old_sq: Some(sq_77),
@@ -349,7 +357,7 @@ mod tests {
         let mut dirty_piece = DirtyPiece::new();
 
         // 動いた駒（先手の歩）
-        dirty_piece.push_piece(ChangedPiece {
+        let _ = dirty_piece.push_piece(ChangedPiece {
             color: Color::Black,
             old_piece: Piece::B_PAWN,
             old_sq: Some(sq_24),
@@ -358,7 +366,7 @@ mod tests {
         });
 
         // 取られた駒（後手の歩）
-        dirty_piece.push_piece(ChangedPiece {
+        let _ = dirty_piece.push_piece(ChangedPiece {
             color: Color::White,
             old_piece: Piece::W_PAWN,
             old_sq: Some(sq_23),
@@ -391,7 +399,7 @@ mod tests {
 
         let mut dirty_piece = DirtyPiece::new();
 
-        dirty_piece.push_hand_change(HandChange {
+        let _ = dirty_piece.push_hand_change(HandChange {
             owner: Color::Black,
             piece_type: PieceType::Pawn,
             old_count: 0,
@@ -459,7 +467,7 @@ mod tests {
 
         let mut dirty_piece = DirtyPiece::new();
 
-        dirty_piece.push_hand_change(HandChange {
+        let _ = dirty_piece.push_hand_change(HandChange {
             owner: Color::Black,
             piece_type: PieceType::Pawn,
             old_count: 1,
@@ -490,7 +498,7 @@ mod tests {
 
         let mut dirty_piece = DirtyPiece::new();
 
-        dirty_piece.push_hand_change(HandChange {
+        let _ = dirty_piece.push_hand_change(HandChange {
             owner: Color::Black,
             piece_type: PieceType::Pawn,
             old_count: 2,
@@ -521,7 +529,7 @@ mod tests {
 
         let mut dirty_piece = DirtyPiece::new();
 
-        dirty_piece.push_hand_change(HandChange {
+        let _ = dirty_piece.push_hand_change(HandChange {
             owner: Color::Black,
             piece_type: PieceType::Pawn,
             old_count: 0,
@@ -554,7 +562,7 @@ mod tests {
         let king_sq = Square::new(File::File5, Rank::Rank9); // 自玉は5九
 
         let mut dirty_piece = DirtyPiece::new();
-        dirty_piece.push_piece(ChangedPiece {
+        let _ = dirty_piece.push_piece(ChangedPiece {
             color: Color::White, // 相手（後手）の王
             old_piece: Piece::W_KING,
             old_sq: Some(sq_51),

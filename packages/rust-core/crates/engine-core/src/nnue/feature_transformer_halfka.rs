@@ -178,10 +178,10 @@ impl FeatureTransformerHalfKA {
         stack: &mut AccumulatorStack,
         source_idx: usize,
     ) -> bool {
-        let path = stack.collect_path(source_idx);
-        if path.is_empty() && stack.current_index() != source_idx {
+        let Some(path) = stack.collect_path(source_idx) else {
+            // パスが途切れた場合、または MAX_PATH_LENGTH を超えた場合
             return false;
-        }
+        };
 
         let source_acc = stack.entry_at(source_idx).accumulator.clone();
         {
@@ -242,10 +242,16 @@ impl FeatureTransformerHalfKA {
     /// 重みを累積値に加算
     #[inline]
     fn add_weights(&self, accumulation: &mut [i16; TRANSFORMED_FEATURE_DIMENSIONS], index: usize) {
-        let offset = index * TRANSFORMED_FEATURE_DIMENSIONS;
+        // オーバーフロー安全なオフセット計算
+        let Some(offset) = index.checked_mul(TRANSFORMED_FEATURE_DIMENSIONS) else {
+            feature_index_oob(index, self.weights.len() / TRANSFORMED_FEATURE_DIMENSIONS);
+        };
+        let Some(end) = offset.checked_add(TRANSFORMED_FEATURE_DIMENSIONS) else {
+            feature_index_oob(index, self.weights.len() / TRANSFORMED_FEATURE_DIMENSIONS);
+        };
         // OOBは即座にパニック（debug/release両方で検知）
         // 通常経路では分岐予測が当たり、性能影響はほぼゼロ
-        if offset + TRANSFORMED_FEATURE_DIMENSIONS > self.weights.len() {
+        if end > self.weights.len() {
             feature_index_oob(index, self.weights.len() / TRANSFORMED_FEATURE_DIMENSIONS);
         }
 
@@ -315,10 +321,16 @@ impl FeatureTransformerHalfKA {
     /// 重みを累積値から減算
     #[inline]
     fn sub_weights(&self, accumulation: &mut [i16; TRANSFORMED_FEATURE_DIMENSIONS], index: usize) {
-        let offset = index * TRANSFORMED_FEATURE_DIMENSIONS;
+        // オーバーフロー安全なオフセット計算
+        let Some(offset) = index.checked_mul(TRANSFORMED_FEATURE_DIMENSIONS) else {
+            feature_index_oob(index, self.weights.len() / TRANSFORMED_FEATURE_DIMENSIONS);
+        };
+        let Some(end) = offset.checked_add(TRANSFORMED_FEATURE_DIMENSIONS) else {
+            feature_index_oob(index, self.weights.len() / TRANSFORMED_FEATURE_DIMENSIONS);
+        };
         // OOBは即座にパニック（debug/release両方で検知）
         // 通常経路では分岐予測が当たり、性能影響はほぼゼロ
-        if offset + TRANSFORMED_FEATURE_DIMENSIONS > self.weights.len() {
+        if end > self.weights.len() {
             feature_index_oob(index, self.weights.len() / TRANSFORMED_FEATURE_DIMENSIONS);
         }
 

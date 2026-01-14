@@ -14,19 +14,27 @@
 //! - NNUE 未初期化時のフォールバック駒得評価
 
 mod accumulator;
+mod accumulator_layer_stacks;
 mod bona_piece;
 mod bona_piece_halfka;
 mod constants;
 mod diff;
 mod feature_transformer;
 mod feature_transformer_halfka;
+mod feature_transformer_layer_stacks;
 pub mod features;
+mod layer_stacks;
 mod layers;
 mod leb128;
 mod network;
+mod network_halfka_dynamic;
+mod network_layer_stacks;
 
 pub use accumulator::{
     Accumulator, AccumulatorStack, ChangedPiece, DirtyPiece, HandChange, StackEntry,
+};
+pub use accumulator_layer_stacks::{
+    AccumulatorLayerStacks, AccumulatorStackLayerStacks, StackEntryLayerStacks,
 };
 pub use bona_piece::{halfkp_index, BonaPiece, FE_END};
 pub use bona_piece_halfka::{
@@ -36,11 +44,20 @@ pub use bona_piece_halfka::{
 pub use constants::*;
 pub use diff::get_changed_features;
 pub use feature_transformer::FeatureTransformer;
+pub use feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
 pub use features::{
     Feature, FeatureSet, HalfKA_hm, HalfKA_hmFeatureSet, HalfKP, HalfKPFeatureSet, TriggerEvent,
 };
+pub use layer_stacks::{
+    compute_bucket_index, sqr_clipped_relu_transform, LayerStackBucket, LayerStacks,
+};
 pub use layers::{AffineTransform, ClippedReLU};
 pub use network::{
-    evaluate, init_nnue, init_nnue_from_bytes, is_nnue_initialized, NNUENetwork, Network,
-    NetworkHalfKA,
+    evaluate, evaluate_dispatch, evaluate_layer_stacks, get_halfka_dynamic_l1, init_nnue,
+    init_nnue_from_bytes, is_halfka_dynamic_loaded, is_layer_stacks_loaded, is_nnue_initialized,
+    NNUENetwork, Network, NetworkHalfKA,
 };
+pub use network_halfka_dynamic::{
+    AccumulatorHalfKADynamic, AccumulatorStackHalfKADynamic, NetworkHalfKADynamic,
+};
+pub use network_layer_stacks::NetworkLayerStacks;

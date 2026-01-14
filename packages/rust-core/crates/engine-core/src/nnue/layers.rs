@@ -767,14 +767,206 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
     }
 }
 
-/// ClippedReLU層
+/// ClippedReLU層（静的サイズ版）
 /// 入力: i32、出力: u8（0-127にクランプ）
+///
+/// SIMD最適化版（AVX2/SSE2/WASM対応）
+/// tanuki-/YaneuraOu の clipped_relu.h を参考にフォールスルー構造で実装。
+///
+/// # パフォーマンス特性
+///
+/// 小さい次元（DIM=8, 32, 96など）ではSIMDセットアップオーバーヘッドが
+/// 相対的に大きく、スカラー版との差は約1-2%程度。
+/// ClippedReLUは計算全体に占める割合が小さいため、全体への影響は限定的。
+///
+/// ## ベンチマーク結果 (AMD Ryzen 9 5950X)
+///
+/// ### ClippedReLU SIMD効果（HalfKP 256x2-32-32, DIM=32）
+/// - スカラー版: ~667 kNPS
+/// - SIMD版: ~673 kNPS (~1%改善)
+///
+/// ### NNUEアーキテクチャ別NPS比較
+/// | アーキテクチャ | L1 | NPS | 備考 |
+/// |---------------|-----|-----|------|
+/// | HalfKP 256x2-32-32 | 256 | ~703 kNPS | 本構造体を使用 |
+/// | HalfKA_hm 512x2-8-96 | 512 | ~512 kNPS | 動的版使用 |
+/// | HalfKA_hm 1024x2-8-96 | 1024 | ~406 kNPS | 動的版使用 |
 pub struct ClippedReLU<const DIM: usize>;
 
 impl<const DIM: usize> ClippedReLU<DIM> {
     /// 順伝播
+    ///
+    /// AVX2/SSE2/WASMのSIMD最適化版。
+    /// i32入力を右シフトし、0-127にクランプしてu8に変換。
+    ///
+    /// フォールスルー構造:
+    /// 1. AVX2で32要素ずつ処理
+    /// 2. 残りをSSE2で16要素ずつ処理
+    /// 3. 残りをSSE2で8要素ずつ処理（DIM=8対応）
+    /// 4. 残りをスカラーで処理
     pub fn propagate(input: &[i32; DIM], output: &mut [u8; DIM]) {
-        for i in 0..DIM {
+        let mut processed: usize = 0;
+
+        // === AVX2: 32要素ずつ処理 ===
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        {
+            let num_chunks = DIM / 32;
+            if num_chunks > 0 {
+                // SAFETY:
+                // - num_chunks > 0 を確認済み
+                // - loadu/storeu を使用するためアライメント不要
+                unsafe {
+                    use std::arch::x86_64::*;
+
+                    let zero = _mm256_setzero_si256();
+                    let offsets = _mm256_set_epi32(7, 3, 6, 2, 5, 1, 4, 0);
+
+                    let in_ptr = input.as_ptr() as *const __m256i;
+                    let out_ptr = output.as_mut_ptr() as *mut __m256i;
+
+                    for i in 0..num_chunks {
+                        let in0 = _mm256_loadu_si256(in_ptr.add(i * 4));
+                        let in1 = _mm256_loadu_si256(in_ptr.add(i * 4 + 1));
+                        let in2 = _mm256_loadu_si256(in_ptr.add(i * 4 + 2));
+                        let in3 = _mm256_loadu_si256(in_ptr.add(i * 4 + 3));
+
+                        let words0 = _mm256_srai_epi16(
+                            _mm256_packs_epi32(in0, in1),
+                            WEIGHT_SCALE_BITS as i32,
+                        );
+                        let words1 = _mm256_srai_epi16(
+                            _mm256_packs_epi32(in2, in3),
+                            WEIGHT_SCALE_BITS as i32,
+                        );
+
+                        let bytes = _mm256_max_epi8(_mm256_packs_epi16(words0, words1), zero);
+                        let result = _mm256_permutevar8x32_epi32(bytes, offsets);
+
+                        _mm256_storeu_si256(out_ptr.add(i), result);
+                    }
+                }
+                processed = num_chunks * 32;
+            }
+        }
+
+        // === SSE2: 16要素ずつ処理（残り部分） ===
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+        {
+            let remaining = DIM - processed;
+            let num_chunks = remaining / 16;
+            if num_chunks > 0 {
+                // SAFETY: 同上
+                unsafe {
+                    use std::arch::x86_64::*;
+
+                    #[cfg(target_feature = "sse4.1")]
+                    let zero = _mm_setzero_si128();
+                    #[cfg(not(target_feature = "sse4.1"))]
+                    let k0x80s = _mm_set1_epi8(-128i8);
+
+                    let in_ptr = input.as_ptr().add(processed) as *const __m128i;
+                    let out_ptr = output.as_mut_ptr().add(processed) as *mut __m128i;
+
+                    for i in 0..num_chunks {
+                        let in0 = _mm_loadu_si128(in_ptr.add(i * 4));
+                        let in1 = _mm_loadu_si128(in_ptr.add(i * 4 + 1));
+                        let in2 = _mm_loadu_si128(in_ptr.add(i * 4 + 2));
+                        let in3 = _mm_loadu_si128(in_ptr.add(i * 4 + 3));
+
+                        let words0 =
+                            _mm_srai_epi16(_mm_packs_epi32(in0, in1), WEIGHT_SCALE_BITS as i32);
+                        let words1 =
+                            _mm_srai_epi16(_mm_packs_epi32(in2, in3), WEIGHT_SCALE_BITS as i32);
+
+                        let packedbytes = _mm_packs_epi16(words0, words1);
+
+                        #[cfg(target_feature = "sse4.1")]
+                        let result = _mm_max_epi8(packedbytes, zero);
+                        #[cfg(not(target_feature = "sse4.1"))]
+                        let result = _mm_subs_epi8(_mm_adds_epi8(packedbytes, k0x80s), k0x80s);
+
+                        _mm_storeu_si128(out_ptr.add(i), result);
+                    }
+                }
+                processed += num_chunks * 16;
+            }
+        }
+
+        // === SSE2: 8要素処理（DIM=8対応） ===
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+        {
+            let remaining = DIM - processed;
+            if remaining >= 8 {
+                // SAFETY: 同上
+                // 8個のi32を2つの__m128iで読み込み、1つの__m128iの下位8バイトに出力
+                unsafe {
+                    use std::arch::x86_64::*;
+
+                    #[cfg(target_feature = "sse4.1")]
+                    let zero = _mm_setzero_si128();
+                    #[cfg(not(target_feature = "sse4.1"))]
+                    let k0x80s = _mm_set1_epi8(-128i8);
+
+                    let in_ptr = input.as_ptr().add(processed) as *const __m128i;
+                    let out_ptr = output.as_mut_ptr().add(processed);
+
+                    // 8個のi32を読み込み（2つの__m128i）
+                    let in0 = _mm_loadu_si128(in_ptr);
+                    let in1 = _mm_loadu_si128(in_ptr.add(1));
+
+                    // i32 → i16 にパック（8要素）
+                    let words = _mm_packs_epi32(in0, in1);
+                    // 右シフト
+                    let shifted = _mm_srai_epi16(words, WEIGHT_SCALE_BITS as i32);
+                    // i16 → i8 にパック（下位8バイトが有効）
+                    let packedbytes = _mm_packs_epi16(shifted, shifted);
+
+                    // max(0, x)
+                    #[cfg(target_feature = "sse4.1")]
+                    let result = _mm_max_epi8(packedbytes, zero);
+                    #[cfg(not(target_feature = "sse4.1"))]
+                    let result = _mm_subs_epi8(_mm_adds_epi8(packedbytes, k0x80s), k0x80s);
+
+                    // 下位8バイトのみ書き出し
+                    _mm_storel_epi64(out_ptr as *mut __m128i, result);
+                }
+                processed += 8;
+            }
+        }
+
+        // === WASM SIMD128: 8要素ずつ処理 ===
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        {
+            let num_chunks = (DIM - processed) / 8;
+            if num_chunks > 0 {
+                // SAFETY: 同上
+                unsafe {
+                    use std::arch::wasm32::*;
+
+                    let zero = i8x16_splat(0);
+                    let in_ptr = input.as_ptr().add(processed) as *const v128;
+                    let out_ptr = output.as_mut_ptr().add(processed) as *mut i64;
+
+                    for i in 0..num_chunks {
+                        let in0 = v128_load(in_ptr.add(i * 2));
+                        let in1 = v128_load(in_ptr.add(i * 2 + 1));
+
+                        let shifted0 = i32x4_shr(in0, WEIGHT_SCALE_BITS as u32);
+                        let shifted1 = i32x4_shr(in1, WEIGHT_SCALE_BITS as u32);
+                        let words = i16x8_narrow_i32x4(shifted0, shifted1);
+
+                        let bytes = i8x16_narrow_i16x8(words, words);
+                        let result = i8x16_max(bytes, zero);
+
+                        *out_ptr.add(i) = i64x2_extract_lane::<0>(result);
+                    }
+                }
+                processed += num_chunks * 8;
+            }
+        }
+
+        // === スカラーフォールバック（残り要素） ===
+        for i in processed..DIM {
             let shifted = input[i] >> WEIGHT_SCALE_BITS;
             output[i] = shifted.clamp(0, 127) as u8;
         }

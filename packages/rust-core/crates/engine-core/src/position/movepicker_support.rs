@@ -72,6 +72,24 @@ impl Position {
             let pt = pc.piece_type();
             let occupied = self.occupied();
 
+            // 成りフラグの検証
+            // TTからの手が現在の局面の駒種と一致しない場合のパニックを防ぐ
+            if m.is_promote() {
+                // 成りフラグが立っている場合、駒種が成れるかチェック
+                if !pt.can_promote() {
+                    return false;
+                }
+                // 成れる段（敵陣 = from or to が敵陣）かどうかチェック
+                let in_enemy_zone = if us == Color::Black {
+                    from.rank().index() <= 2 || to.rank().index() <= 2
+                } else {
+                    from.rank().index() >= 6 || to.rank().index() >= 6
+                };
+                if !in_enemy_zone {
+                    return false;
+                }
+            }
+
             let attacks = match pt {
                 PieceType::Pawn => pawn_effect(us, from),
                 PieceType::Lance => lance_effect(us, from, occupied),
@@ -605,5 +623,97 @@ mod tests {
             !pos.see_ge(m, Value::new(80)),
             "Diagonal x-ray should make the capture unfavorable"
         );
+    }
+
+    /// 成りフラグ検証テスト: 成れない駒（金）に成りフラグが立っている手は pseudo_legal で弾く
+    #[test]
+    fn test_pseudo_legal_rejects_invalid_promote_on_gold() {
+        let mut pos = Position::new();
+        let from = Square::new(File::File5, Rank::Rank9);
+        let to = Square::new(File::File5, Rank::Rank8);
+        let king_sq = Square::new(File::File1, Rank::Rank9);
+        let enemy_king = Square::new(File::File1, Rank::Rank1);
+
+        pos.put_piece(Piece::B_GOLD, from);
+        pos.put_piece(Piece::B_KING, king_sq);
+        pos.put_piece(Piece::W_KING, enemy_king);
+        pos.king_square[Color::Black.index()] = king_sq;
+        pos.king_square[Color::White.index()] = enemy_king;
+
+        // 金に成りフラグを付けた不正な手
+        let invalid_promote = Move::new_move(from, to, true);
+        assert!(!pos.pseudo_legal(invalid_promote), "Gold with promote flag should be rejected");
+
+        // 金の通常移動は許可
+        let valid_move = Move::new_move(from, to, false);
+        assert!(pos.pseudo_legal(valid_move), "Gold normal move should be allowed");
+    }
+
+    /// 成りフラグ検証テスト: 既に成駒（龍）に成りフラグが立っている手は pseudo_legal で弾く
+    #[test]
+    fn test_pseudo_legal_rejects_invalid_promote_on_promoted_piece() {
+        let mut pos = Position::new();
+        let from = Square::new(File::File5, Rank::Rank5);
+        let to = Square::new(File::File5, Rank::Rank4);
+        let king_sq = Square::new(File::File1, Rank::Rank9);
+        let enemy_king = Square::new(File::File1, Rank::Rank1);
+
+        pos.put_piece(Piece::B_DRAGON, from);
+        pos.put_piece(Piece::B_KING, king_sq);
+        pos.put_piece(Piece::W_KING, enemy_king);
+        pos.king_square[Color::Black.index()] = king_sq;
+        pos.king_square[Color::White.index()] = enemy_king;
+
+        // 龍に成りフラグを付けた不正な手
+        let invalid_promote = Move::new_move(from, to, true);
+        assert!(
+            !pos.pseudo_legal(invalid_promote),
+            "Dragon with promote flag should be rejected"
+        );
+    }
+
+    /// 成りフラグ検証テスト: 敵陣外での成りは pseudo_legal で弾く
+    #[test]
+    fn test_pseudo_legal_rejects_promote_outside_enemy_zone() {
+        let mut pos = Position::new();
+        // 先手の銀を5五に置く（敵陣外）
+        let from = Square::new(File::File5, Rank::Rank5);
+        let to = Square::new(File::File5, Rank::Rank4); // 移動先も敵陣外
+        let king_sq = Square::new(File::File1, Rank::Rank9);
+        let enemy_king = Square::new(File::File1, Rank::Rank1);
+
+        pos.put_piece(Piece::B_SILVER, from);
+        pos.put_piece(Piece::B_KING, king_sq);
+        pos.put_piece(Piece::W_KING, enemy_king);
+        pos.king_square[Color::Black.index()] = king_sq;
+        pos.king_square[Color::White.index()] = enemy_king;
+
+        // 敵陣外での成りは不正
+        let invalid_promote = Move::new_move(from, to, true);
+        assert!(
+            !pos.pseudo_legal(invalid_promote),
+            "Promote outside enemy zone should be rejected"
+        );
+    }
+
+    /// 成りフラグ検証テスト: 敵陣内での成りは許可
+    #[test]
+    fn test_pseudo_legal_allows_promote_in_enemy_zone() {
+        let mut pos = Position::new();
+        // 先手の銀を3四に置く（敵陣外だが移動先が敵陣内）
+        let from = Square::new(File::File3, Rank::Rank4);
+        let to = Square::new(File::File3, Rank::Rank3); // 移動先が敵陣
+        let king_sq = Square::new(File::File1, Rank::Rank9);
+        let enemy_king = Square::new(File::File1, Rank::Rank1);
+
+        pos.put_piece(Piece::B_SILVER, from);
+        pos.put_piece(Piece::B_KING, king_sq);
+        pos.put_piece(Piece::W_KING, enemy_king);
+        pos.king_square[Color::Black.index()] = king_sq;
+        pos.king_square[Color::White.index()] = enemy_king;
+
+        // 敵陣内への成りは正当
+        let valid_promote = Move::new_move(from, to, true);
+        assert!(pos.pseudo_legal(valid_promote), "Promote into enemy zone should be allowed");
     }
 }

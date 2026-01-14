@@ -57,3 +57,5 @@ _shared/*
 runs_local/
 .serena/
 packages/rust-core/.cargo/config.toml
+packages/rust-core/*.nnue
+packages/rust-core/eval/
