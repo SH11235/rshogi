@@ -1052,24 +1052,34 @@ impl AffineTransformDynamic {
 }
 
 // =============================================================================
-// NetworkHalfKADynamic - 動的サイズのネットワーク
+// NetworkHalfKADynamic - 動的サイズのネットワーク (512x2-8-96, 1024x2-8-96 など)
 // =============================================================================
 
 /// HalfKA_hm^ 特徴量 + 動的サイズ FC 層のネットワーク
+///
+/// アーキテクチャ表記 `L1xN-L2-L3` の意味:
+/// - L1: Feature Transformer 出力次元（片側）
+/// - L1*2: Hidden1 入力次元（両視点連結）
+/// - L2: Hidden1 出力次元
+/// - L3: Hidden2 出力次元
+///
+/// 例: 512x2-8-96 → L1=512, Hidden1入力=1024, L2=8, L3=96
+///
+/// 256x2-32-32 固定の場合は `NetworkHalfKA` を使用。
 pub struct NetworkHalfKADynamic {
-    /// Feature Transformer
+    /// 特徴量変換器 (入力 → L1)
     pub feature_transformer: FeatureTransformerHalfKADynamic,
-    /// L1 層: L1*2 → L2
+    /// 隠れ層1: L1*2 → L2（両視点の連結が入力）
     pub l1: AffineTransformDynamic,
-    /// L2 層: L2 → L3
+    /// 隠れ層2: L2 → L3
     pub l2: AffineTransformDynamic,
     /// 出力層: L3 → 1
     pub output: AffineTransformDynamic,
-    /// アーキテクチャ: Feature Transformer 出力次元
+    /// L1: Feature Transformer 出力次元（片側）
     pub arch_l1: usize,
-    /// アーキテクチャ: L1 出力次元
+    /// L2: 隠れ層1 出力次元
     pub arch_l2: usize,
-    /// アーキテクチャ: L2 出力次元
+    /// L3: 隠れ層2 出力次元
     pub arch_l3: usize,
 }
 
@@ -1165,17 +1175,18 @@ impl NetworkHalfKADynamic {
         reader.read_exact(&mut arch)?;
         let arch_str = String::from_utf8_lossy(&arch);
 
-        // アーキテクチャ文字列から L1 を推定
+        // アーキテクチャ文字列から L1, L2, L3 をパース
         // 例: "[1024x2]" や "[256x2]" を探す
         let l1 = Self::parse_l1_from_arch(&arch_str).unwrap_or(1024);
 
-        // 将棋用デフォルトは L1=1024, L2=8, L3=96
-        let (l2, l3) = match l1 {
-            1024 => (8, 96),
-            512 => (8, 96),
-            256 => (32, 32), // classic
+        // アーキテクチャ文字列から L2, L3 をパース
+        // 例: AffineTransform[32<-512] → L2=32, AffineTransform[32<-32] → L3=32
+        // フォールバック: L1 から推定（後方互換性のため）
+        let fallback = match l1 {
+            256 => (32, 32),
             _ => (8, 96),
         };
+        let (l2, l3) = Self::parse_l2_l3_from_arch(&arch_str).unwrap_or(fallback);
 
         // 位置を戻して読み直し
         reader.seek(SeekFrom::Start(start_pos))?;
@@ -1200,6 +1211,59 @@ impl NetworkHalfKADynamic {
             return num_str.parse().ok();
         }
         None
+    }
+
+    /// アーキテクチャ文字列から L2, L3 をパース
+    ///
+    /// アーキテクチャ文字列の例:
+    /// ```text
+    /// Features=HalfKA_hm[73305->256x2],Network=AffineTransform[1<-32](ClippedReLU[32](
+    ///   AffineTransform[32<-32](ClippedReLU[32](AffineTransform[32<-512](InputSlice[512(0:512)])))))
+    /// ```
+    ///
+    /// `AffineTransform[OUT<-IN]` パターンを探して:
+    /// - 1番目（最内側）: L2 = OUT（L1*2 からの入力）
+    /// - 2番目: L3 = OUT（L2 からの入力）
+    fn parse_l2_l3_from_arch(arch: &str) -> Option<(usize, usize)> {
+        // AffineTransform[OUT<-IN] パターンを全て抽出
+        let mut layers: Vec<(usize, usize)> = Vec::new();
+        let pattern = "AffineTransform[";
+
+        let mut search_start = 0;
+        while let Some(start) = arch[search_start..].find(pattern) {
+            let abs_start = search_start + start + pattern.len();
+            if let Some(end) = arch[abs_start..].find(']') {
+                let content = &arch[abs_start..abs_start + end];
+                // "OUT<-IN" をパース
+                if let Some(arrow_idx) = content.find("<-") {
+                    let out_str = &content[..arrow_idx];
+                    let in_str = &content[arrow_idx + 2..];
+                    if let (Ok(out), Ok(inp)) = (out_str.parse::<usize>(), in_str.parse::<usize>())
+                    {
+                        layers.push((out, inp));
+                    }
+                }
+                search_start = abs_start + end;
+            } else {
+                break;
+            }
+        }
+
+        // nnue-pytorch のネストされた構造では、出力に近い順に並ぶ
+        // 例: [1<-32], [32<-32], [32<-512]
+        // 逆順にして最内側から: [32<-512] (L2), [32<-32] (L3), [1<-32] (output)
+        layers.reverse();
+
+        if layers.len() >= 3 {
+            // layers[0]: L1層 (L1*2 → L2)
+            // layers[1]: L2層 (L2 → L3)
+            // layers[2]: 出力層 (L3 → 1)
+            let l2 = layers[0].0; // L1層の出力 = L2
+            let l3 = layers[1].0; // L2層の出力 = L3
+            Some((l2, l3))
+        } else {
+            None
+        }
     }
 
     /// Accumulator をリフレッシュ
@@ -1289,6 +1353,30 @@ mod tests {
             Some(1024)
         );
         assert_eq!(NetworkHalfKADynamic::parse_l1_from_arch("->512x2"), Some(512));
+    }
+
+    #[test]
+    fn test_parse_l2_l3_from_arch() {
+        // v27 (256x2-32-32) のアーキテクチャ文字列
+        let arch_256_32_32 = "Features=HalfKA_hm[73305->256x2],Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-32](ClippedReLU[32](AffineTransform[32<-512](InputSlice[512(0:512)])))))";
+        assert_eq!(NetworkHalfKADynamic::parse_l2_l3_from_arch(arch_256_32_32), Some((32, 32)));
+
+        // 512x2-8-96 のアーキテクチャ文字列
+        let arch_512_8_96 = "Features=HalfKA_hm[73305->512x2],Network=AffineTransform[1<-96](ClippedReLU[96](AffineTransform[96<-8](ClippedReLU[8](AffineTransform[8<-1024](InputSlice[1024(0:1024)])))))";
+        assert_eq!(NetworkHalfKADynamic::parse_l2_l3_from_arch(arch_512_8_96), Some((8, 96)));
+
+        // 256x2-8-96 のアーキテクチャ文字列（今まで誤認識されていたケース）
+        let arch_256_8_96 = "Features=HalfKA_hm[73305->256x2],Network=AffineTransform[1<-96](ClippedReLU[96](AffineTransform[96<-8](ClippedReLU[8](AffineTransform[8<-512](InputSlice[512(0:512)])))))";
+        assert_eq!(NetworkHalfKADynamic::parse_l2_l3_from_arch(arch_256_8_96), Some((8, 96)));
+
+        // 512x2-32-32 のアーキテクチャ文字列（今まで誤認識されていたケース）
+        let arch_512_32_32 = "Features=HalfKA_hm[73305->512x2],Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-32](ClippedReLU[32](AffineTransform[32<-1024](InputSlice[1024(0:1024)])))))";
+        assert_eq!(NetworkHalfKADynamic::parse_l2_l3_from_arch(arch_512_32_32), Some((32, 32)));
+
+        // パースできない文字列
+        assert_eq!(NetworkHalfKADynamic::parse_l2_l3_from_arch("invalid"), None);
+        assert_eq!(NetworkHalfKADynamic::parse_l2_l3_from_arch("AffineTransform[1<-32]"), None);
+        // 層が足りない
     }
 
     #[test]

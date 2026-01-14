@@ -417,18 +417,26 @@ impl NNUENetwork {
 }
 
 // =============================================================================
-// NetworkHalfKA - HalfKA_hm^用ネットワーク
+// NetworkHalfKA - HalfKA_hm^用ネットワーク (256x2-32-32 固定)
 // =============================================================================
 
-/// HalfKA_hm^用NNUEネットワーク
+/// HalfKA_hm^用NNUEネットワーク (256x2-32-32 アーキテクチャ固定)
+///
+/// アーキテクチャ表記 `L1xN-L2-L3` の意味:
+/// - L1: Feature Transformer 出力次元（片側）= 256
+/// - L1*2: Hidden1 入力次元（両視点連結）= 512
+/// - L2: Hidden1 出力次元 = 32
+/// - L3: Hidden2 出力次元 = 32
+///
+/// 他のアーキテクチャ（512x2-8-96 など）は `NetworkHalfKADynamic` を使用。
 pub struct NetworkHalfKA {
-    /// 特徴量変換器
+    /// 特徴量変換器 (入力 → L1=256)
     pub feature_transformer: FeatureTransformerHalfKA,
-    /// 隠れ層1: 512 → 32
+    /// 隠れ層1: L1*2=512 → L2=32（両視点の連結が入力）
     pub hidden1: AffineTransform<{ TRANSFORMED_FEATURE_DIMENSIONS * 2 }, HIDDEN1_DIMENSIONS>,
-    /// 隠れ層2: 32 → 32
+    /// 隠れ層2: L2=32 → L3=32
     pub hidden2: AffineTransform<HIDDEN1_DIMENSIONS, HIDDEN2_DIMENSIONS>,
-    /// 出力層: 32 → 1
+    /// 出力層: L3=32 → 1
     pub output: AffineTransform<HIDDEN2_DIMENSIONS, OUTPUT_DIMENSIONS>,
 }
 
