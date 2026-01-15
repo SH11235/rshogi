@@ -414,25 +414,20 @@ impl<'a> MovePicker<'a> {
 
                         self.cur = self.end_captures;
                         self.score_quiets();
-
-                        // depth依存の閾値でソート
-                        let threshold = -3560 * self.depth;
-                        partial_insertion_sort_range(
-                            self.moves.as_mut_slice(),
-                            self.cur,
-                            self.end_cur,
-                            threshold,
-                        );
+                        // ソートは行わず、lazy selection で最良の手を選ぶ
                     }
                     self.stage = Stage::GoodQuiet;
                 }
 
                 // ==============================
-                // 良い静かな手を返す
+                // 良い静かな手を返す（lazy selection）
                 // ==============================
                 Stage::GoodQuiet => {
                     if !self.skip_quiets {
-                        if let Some(m) = self.select(|_, ext| ext.value > GOOD_QUIET_THRESHOLD) {
+                        // 最大スコアの手を選んで返す（GOOD_QUIET_THRESHOLD以上のみ）
+                        if let Some(m) =
+                            self.pick_best_filtered(|_, ext| ext.value > GOOD_QUIET_THRESHOLD)
+                        {
                             return m;
                         }
                     }
@@ -458,11 +453,12 @@ impl<'a> MovePicker<'a> {
                 }
 
                 // ==============================
-                // 悪い静かな手を返す
+                // 悪い静かな手を返す（lazy selection）
                 // ==============================
                 Stage::BadQuiet => {
                     if !self.skip_quiets {
-                        if let Some(m) = self.select(|_, ext| ext.value <= GOOD_QUIET_THRESHOLD) {
+                        // 残りの手から最大スコアを選んで返す
+                        if let Some(m) = self.pick_best() {
                             return m;
                         }
                     }
@@ -679,6 +675,83 @@ impl<'a> MovePicker<'a> {
         }
         None
     }
+
+    /// 最良の手を選択して返す（lazy selection）
+    ///
+    /// cur から end_cur の範囲で最大スコアの手を探し、
+    /// cur 位置と交換してから返す。ソート済みでなくても動作する。
+    fn pick_best(&mut self) -> Option<Move> {
+        if self.cur >= self.end_cur {
+            return None;
+        }
+
+        // TT手をスキップしながら最大スコアの手を探す
+        let mut best_idx = None;
+        let mut best_value = i32::MIN;
+
+        for i in self.cur..self.end_cur {
+            let ext = self.moves.get(i);
+            if ext.mv == self.tt_move {
+                continue;
+            }
+            if ext.value > best_value {
+                best_value = ext.value;
+                best_idx = Some(i);
+            }
+        }
+
+        let best_idx = best_idx?;
+
+        // 最良の手を cur 位置と交換
+        if best_idx != self.cur {
+            self.moves.swap(self.cur, best_idx);
+        }
+
+        let m = self.moves.get(self.cur).mv;
+        self.cur += 1;
+        Some(m)
+    }
+
+    /// 条件を満たす最良の手を選択（lazy selection + filter）
+    fn pick_best_filtered<F>(&mut self, filter: F) -> Option<Move>
+    where
+        F: Fn(&Self, &ExtMove) -> bool,
+    {
+        while self.cur < self.end_cur {
+            // 残りの中から最大スコアの手を探す
+            let mut best_idx = None;
+            let mut best_value = i32::MIN;
+
+            for i in self.cur..self.end_cur {
+                let ext = self.moves.get(i);
+                if ext.mv == self.tt_move {
+                    continue;
+                }
+                if ext.value > best_value {
+                    best_value = ext.value;
+                    best_idx = Some(i);
+                }
+            }
+
+            let Some(best_idx) = best_idx else {
+                return None;
+            };
+
+            // 最良の手を cur 位置と交換
+            if best_idx != self.cur {
+                self.moves.swap(self.cur, best_idx);
+            }
+
+            let ext = self.moves.get(self.cur);
+            self.cur += 1;
+
+            // フィルタを通過したら返す
+            if filter(self, &ext) {
+                return Some(ext.mv);
+            }
+        }
+        None
+    }
 }
 
 // Iteratorトレイトの実装
@@ -751,11 +824,21 @@ fn partial_insertion_sort(moves: &mut [ExtMove], end: usize, limit: i32) {
 /// 部分挿入ソート（配列の start から end までの範囲）
 ///
 /// `limit` より大きいスコアの手だけを降順でソートする。
+/// 大きい配列ではPDQSortを使用してO(n²)を回避。
 fn partial_insertion_sort_range(moves: &mut [ExtMove], start: usize, end: usize, limit: i32) {
     if end <= start + 1 {
         return;
     }
     let slice = &mut moves[start..end];
+
+    // 大きい配列ではPDQSort（O(n log n)）を使用
+    // limit による部分ソートの意図は失われるが、O(n²)よりはマシ
+    if slice.len() > SORT_SWITCH_THRESHOLD {
+        slice.sort_unstable_by(|a, b| b.value.cmp(&a.value));
+        return;
+    }
+
+    // 小さい配列では挿入ソート
     let mut sorted_end = 0;
 
     for p in 1..slice.len() {
