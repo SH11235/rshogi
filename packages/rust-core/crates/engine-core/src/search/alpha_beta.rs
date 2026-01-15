@@ -9,12 +9,7 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 use crate::eval::EvalHash;
-use crate::nnue::{
-    evaluate_dispatch, get_halfka_dynamic_l1, is_halfka_1024_loaded, is_halfka_512_loaded,
-    is_halfka_dynamic_loaded, is_layer_stacks_loaded, AccumulatorStack, AccumulatorStackHalfKA1024,
-    AccumulatorStackHalfKA512, AccumulatorStackHalfKADynamic, AccumulatorStackLayerStacks,
-    DirtyPiece,
-};
+use crate::nnue::{evaluate_dispatch, get_network, AccumulatorStackVariant, DirtyPiece};
 use crate::position::Position;
 use crate::search::PieceToHistory;
 use crate::tt::{ProbeResult, TTData, TranspositionTable};
@@ -278,46 +273,11 @@ pub struct SearchWorker {
     /// 深い探索（depth >= 16）でZugzwangを検出して再探索する仕組み。
     pub nmp_min_ply: i32,
 
-    /// NNUE Accumulator スタック（HalfKP/HalfKA用、256次元）
+    /// NNUE Accumulator スタック（統合型）
     ///
     /// 探索時のNNUE差分更新用。Position.do_move/undo_moveと同期してpush/popする。
-    /// StateInfoからAccumulatorを分離することで、do_moveでの初期化コストを削減。
-    pub nnue_stack: AccumulatorStack,
-
-    /// NNUE Accumulator スタック（LayerStacks用、1536次元）
-    ///
-    /// nnue-pytorch で学習した LayerStacks モデル用のアキュムレータ。
-    /// `use_layer_stacks` が true の場合にこちらを使用する。
-    pub nnue_stack_layer_stacks: AccumulatorStackLayerStacks,
-
-    /// NNUE Accumulator スタック（HalfKADynamic用、動的サイズ）
-    ///
-    /// nnue-pytorch で学習した HalfKADynamic モデル用のアキュムレータ。
-    /// `use_halfka_dynamic` が true の場合にこちらを使用する。
-    pub nnue_stack_halfka_dynamic: AccumulatorStackHalfKADynamic,
-
-    /// NNUE Accumulator スタック（HalfKA512用、512次元静的）
-    pub nnue_stack_halfka_512: AccumulatorStackHalfKA512,
-
-    /// NNUE Accumulator スタック（HalfKA1024用、1024次元静的）
-    pub nnue_stack_halfka_1024: AccumulatorStackHalfKA1024,
-
-    /// LayerStacks アーキテクチャを使用するかどうか
-    ///
-    /// `prepare_search()` で設定され、探索中は変更されない。
-    /// push/pop で毎回 `is_layer_stacks_loaded()` を呼ぶ代わりにこのフラグを参照する。
-    use_layer_stacks: bool,
-
-    /// HalfKADynamic アーキテクチャを使用するかどうか
-    ///
-    /// `prepare_search()` で設定され、探索中は変更されない。
-    use_halfka_dynamic: bool,
-
-    /// HalfKA512 アーキテクチャを使用するかどうか
-    use_halfka_512: bool,
-
-    /// HalfKA1024 アーキテクチャを使用するかどうか
-    use_halfka_1024: bool,
+    /// アーキテクチャに応じて適切なスタックを1つだけ保持し、メモリ効率を向上。
+    pub nnue_stack: AccumulatorStackVariant,
 
     // =========================================================================
     // 頻度制御（YaneuraOu準拠）
@@ -361,15 +321,7 @@ impl SearchWorker {
             best_move_changes: 0.0,
             max_moves_to_draw,
             nmp_min_ply: 0,
-            nnue_stack: AccumulatorStack::new(),
-            nnue_stack_layer_stacks: AccumulatorStackLayerStacks::new(),
-            nnue_stack_halfka_dynamic: AccumulatorStackHalfKADynamic::new(1024), // デフォルトL1=1024
-            nnue_stack_halfka_512: AccumulatorStackHalfKA512::new(),
-            nnue_stack_halfka_1024: AccumulatorStackHalfKA1024::new(),
-            use_layer_stacks: false,   // prepare_search() で設定
-            use_halfka_dynamic: false, // prepare_search() で設定
-            use_halfka_512: false,     // prepare_search() で設定
-            use_halfka_1024: false,    // prepare_search() で設定
+            nnue_stack: AccumulatorStackVariant::new_default(), // prepare_search() で適切なバリアントに更新
             // 頻度制御
             calls_cnt: 0,
         });
@@ -457,25 +409,18 @@ impl SearchWorker {
         self.root_moves.clear();
         // YaneuraOu準拠: low_ply_historyのみクリア
         self.history.low_ply_history.clear();
-        // NNUE AccumulatorStackをリセット
-        self.nnue_stack.reset();
-        self.nnue_stack_layer_stacks.reset();
-        // HalfKADynamic: L1サイズが変わっている場合はスタックを再作成、そうでなければリセット
-        if let Some(l1) = get_halfka_dynamic_l1() {
-            if self.nnue_stack_halfka_dynamic.l1() != l1 {
-                self.nnue_stack_halfka_dynamic = AccumulatorStackHalfKADynamic::new(l1);
+        // NNUE AccumulatorStack: ネットワークに応じたバリアントに更新・リセット
+        if let Some(network) = get_network() {
+            // バリアントがネットワークと一致しない場合は再作成
+            if !self.nnue_stack.matches_network(network) {
+                self.nnue_stack = AccumulatorStackVariant::from_network(network);
             } else {
-                self.nnue_stack_halfka_dynamic.reset();
+                self.nnue_stack.reset();
             }
+        } else {
+            // NNUE未初期化の場合はデフォルト（HalfKP）でリセット
+            self.nnue_stack.reset();
         }
-        // HalfKA512/1024: 静的サイズなのでリセットのみ
-        self.nnue_stack_halfka_512.reset();
-        self.nnue_stack_halfka_1024.reset();
-        // アーキテクチャフラグを設定（探索開始時点で固定）
-        self.use_layer_stacks = is_layer_stacks_loaded();
-        self.use_halfka_dynamic = is_halfka_dynamic_loaded();
-        self.use_halfka_512 = is_halfka_512_loaded();
-        self.use_halfka_1024 = is_halfka_1024_loaded();
         // check_abort頻度制御カウンターをリセット
         // これにより新しい探索開始時に即座に停止チェックが行われる
         self.calls_cnt = 0;
@@ -501,50 +446,21 @@ impl SearchWorker {
     /// NNUE 評価値を計算
     ///
     /// ロードされた NNUE のアーキテクチャに応じて適切なアキュムレータと評価関数を使用。
-    /// レースコンディションを回避するため、一度の NETWORK.get() で判定して評価する。
     #[inline]
     fn nnue_evaluate(&mut self, pos: &Position) -> Value {
-        evaluate_dispatch(
-            pos,
-            &mut self.nnue_stack,
-            &mut self.nnue_stack_layer_stacks,
-            &mut self.nnue_stack_halfka_dynamic,
-            &mut self.nnue_stack_halfka_512,
-            &mut self.nnue_stack_halfka_1024,
-        )
+        evaluate_dispatch(pos, &mut self.nnue_stack)
     }
 
     /// NNUE アキュムレータスタックを push
     #[inline]
     fn nnue_push(&mut self, dirty_piece: DirtyPiece) {
-        if self.use_layer_stacks {
-            self.nnue_stack_layer_stacks.push();
-            self.nnue_stack_layer_stacks.current_mut().dirty_piece = dirty_piece;
-        } else if self.use_halfka_512 {
-            self.nnue_stack_halfka_512.push(dirty_piece);
-        } else if self.use_halfka_1024 {
-            self.nnue_stack_halfka_1024.push(dirty_piece);
-        } else if self.use_halfka_dynamic {
-            self.nnue_stack_halfka_dynamic.push(dirty_piece);
-        } else {
-            self.nnue_stack.push(dirty_piece);
-        }
+        self.nnue_stack.push(dirty_piece);
     }
 
     /// NNUE アキュムレータスタックを pop
     #[inline]
     fn nnue_pop(&mut self) {
-        if self.use_layer_stacks {
-            self.nnue_stack_layer_stacks.pop();
-        } else if self.use_halfka_512 {
-            self.nnue_stack_halfka_512.pop();
-        } else if self.use_halfka_1024 {
-            self.nnue_stack_halfka_1024.pop();
-        } else if self.use_halfka_dynamic {
-            self.nnue_stack_halfka_dynamic.pop();
-        } else {
-            self.nnue_stack.pop();
-        }
+        self.nnue_stack.pop();
     }
 
     /// 中断チェック

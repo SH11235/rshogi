@@ -25,9 +25,7 @@
 use engine_core::eval::material::evaluate_material;
 use engine_core::movegen::{generate_legal, MoveList};
 use engine_core::nnue::{
-    evaluate_dispatch, get_halfka_dynamic_l1, is_nnue_initialized, AccumulatorStack,
-    AccumulatorStackHalfKA1024, AccumulatorStackHalfKA512, AccumulatorStackHalfKADynamic,
-    AccumulatorStackLayerStacks, DirtyPiece,
+    evaluate_dispatch, get_network, is_nnue_initialized, AccumulatorStackVariant, DirtyPiece,
 };
 use engine_core::position::Position;
 use engine_core::types::{Move, Value};
@@ -80,124 +78,77 @@ impl NnueEvaluator {
 
 impl Evaluator for NnueEvaluator {
     fn evaluate(&self, pos: &Position) -> i32 {
-        // スレッドローカルでAccumulatorStackを管理
+        // スレッドローカルでAccumulatorStackVariantを管理
         // qsearchでは差分更新が複雑なため、各評価で全計算を行う
         thread_local! {
-            static ACC_STACK: RefCell<AccumulatorStack> = RefCell::new(AccumulatorStack::new());
-            static ACC_STACK_LAYER_STACKS: RefCell<AccumulatorStackLayerStacks> =
-                RefCell::new(AccumulatorStackLayerStacks::new());
-            static ACC_STACK_HALFKA_DYNAMIC: RefCell<Option<AccumulatorStackHalfKADynamic>> =
-                const { RefCell::new(None) };
-            static ACC_STACK_HALFKA_512: RefCell<AccumulatorStackHalfKA512> =
-                RefCell::new(AccumulatorStackHalfKA512::new());
-            static ACC_STACK_HALFKA_1024: RefCell<AccumulatorStackHalfKA1024> =
-                RefCell::new(AccumulatorStackHalfKA1024::new());
+            static ACC_STACK: RefCell<Option<AccumulatorStackVariant>> = const { RefCell::new(None) };
         }
 
         ACC_STACK.with(|acc| {
-            ACC_STACK_LAYER_STACKS.with(|acc_ls| {
-                ACC_STACK_HALFKA_DYNAMIC.with(|acc_hd| {
-                    ACC_STACK_HALFKA_512.with(|acc_512| {
-                        ACC_STACK_HALFKA_1024.with(|acc_1024| {
-                            let mut acc = acc.borrow_mut();
-                            let mut acc_ls = acc_ls.borrow_mut();
-                            let mut acc_hd = acc_hd.borrow_mut();
-                            let mut acc_512 = acc_512.borrow_mut();
-                            let mut acc_1024 = acc_1024.borrow_mut();
+            let mut acc = acc.borrow_mut();
 
-                            // AccumulatorStackをリセット（全計算を強制）
-                            acc.reset();
-                            acc_ls.reset();
-                            acc_512.reset();
-                            acc_1024.reset();
+            // ネットワークに応じたスタックを作成/更新
+            if let Some(network) = get_network() {
+                if acc.is_none() || !acc.as_ref().unwrap().matches_network(network) {
+                    *acc = Some(AccumulatorStackVariant::from_network(network));
+                }
+            } else {
+                // NNUEが初期化されていない場合はデフォルトを使用
+                if acc.is_none() {
+                    *acc = Some(AccumulatorStackVariant::new_default());
+                }
+            }
 
-                            // HalfKADynamicの場合、L1サイズに応じてスタックを作成/リセット
-                            if let Some(l1) = get_halfka_dynamic_l1() {
-                                if acc_hd.is_none() || acc_hd.as_ref().unwrap().l1() != l1 {
-                                    *acc_hd = Some(AccumulatorStackHalfKADynamic::new(l1));
-                                } else {
-                                    acc_hd.as_mut().unwrap().reset();
-                                }
-                            }
+            let stack = acc.as_mut().unwrap();
+            // AccumulatorStackをリセット（全計算を強制）
+            stack.reset();
 
-                            // HalfKADynamicスタックが必要な場合のダミー作成
-                            let mut dummy_hd = AccumulatorStackHalfKADynamic::new(256);
-
-                            let stack_hd = acc_hd.as_mut().unwrap_or(&mut dummy_hd);
-
-                            evaluate_dispatch(
-                                pos,
-                                &mut acc,
-                                &mut acc_ls,
-                                stack_hd,
-                                &mut acc_512,
-                                &mut acc_1024,
-                            )
-                            .raw()
-                        })
-                    })
-                })
-            })
+            evaluate_dispatch(pos, stack).raw()
         })
     }
 }
 
-/// NNUE評価用のスタック群
+/// NNUE評価用のスタック
 ///
-/// 3種類のNNUEアーキテクチャに対応するAccumulatorStackを管理する。
+/// NNUEアーキテクチャに対応するAccumulatorStackVariantを管理する。
 /// スレッドローカルで使用することを想定。
 pub struct NnueStacks {
-    /// HalfKP用スタック
-    pub acc: AccumulatorStack,
-    /// LayerStacks用スタック
-    pub acc_ls: AccumulatorStackLayerStacks,
-    /// HalfKADynamic用スタック（常に存在、evaluate_dispatchに必要）
-    pub acc_hd: AccumulatorStackHalfKADynamic,
-    /// HalfKA512用スタック
-    pub acc_512: AccumulatorStackHalfKA512,
-    /// HalfKA1024用スタック
-    pub acc_1024: AccumulatorStackHalfKA1024,
+    /// 統合アキュムレータスタック
+    pub stack: AccumulatorStackVariant,
     /// ノード数カウンター（探索爆発防止用）
     pub node_count: u64,
 }
 
 impl NnueStacks {
-    /// デフォルトのL1サイズ（HalfKADynamicを使わない場合のダミー用）
-    const DEFAULT_L1: usize = 256;
-
     /// ノード数上限（探索爆発防止）
     /// 100万ノードで打ち切り（問題局面でも数秒以内に完了）
     pub const MAX_NODES: u64 = 1_000_000;
 
     /// 新しいNnueStacksを作成
     pub fn new() -> Self {
-        let l1 = get_halfka_dynamic_l1().unwrap_or(Self::DEFAULT_L1);
+        let stack = if let Some(network) = get_network() {
+            AccumulatorStackVariant::from_network(network)
+        } else {
+            AccumulatorStackVariant::new_default()
+        };
         Self {
-            acc: AccumulatorStack::new(),
-            acc_ls: AccumulatorStackLayerStacks::new(),
-            acc_hd: AccumulatorStackHalfKADynamic::new(l1),
-            acc_512: AccumulatorStackHalfKA512::new(),
-            acc_1024: AccumulatorStackHalfKA1024::new(),
+            stack,
             node_count: 0,
         }
     }
 
     /// スタックをリセット（探索開始時に呼び出す）
     pub fn reset(&mut self) {
-        self.acc.reset();
-        self.acc_ls.reset();
-        self.acc_512.reset();
-        self.acc_1024.reset();
         self.node_count = 0;
-        // HalfKADynamicはL1サイズが変わっている可能性があるので確認
-        if let Some(l1) = get_halfka_dynamic_l1() {
-            if self.acc_hd.l1() != l1 {
-                self.acc_hd = AccumulatorStackHalfKADynamic::new(l1);
+        // ネットワークが変わっている可能性があるので確認
+        if let Some(network) = get_network() {
+            if !self.stack.matches_network(network) {
+                self.stack = AccumulatorStackVariant::from_network(network);
             } else {
-                self.acc_hd.reset();
+                self.stack.reset();
             }
         } else {
-            self.acc_hd.reset();
+            self.stack.reset();
         }
     }
 
@@ -216,37 +167,19 @@ impl NnueStacks {
     /// 手の実行時にスタックをプッシュ
     #[inline]
     pub fn push(&mut self, dirty_piece: DirtyPiece) {
-        self.acc.push(dirty_piece);
-        // LayerStacks用: push()後にdirty_pieceを設定
-        self.acc_ls.push();
-        self.acc_ls.current_mut().dirty_piece = dirty_piece;
-        self.acc_hd.push(dirty_piece);
-        self.acc_512.push(dirty_piece);
-        self.acc_1024.push(dirty_piece);
+        self.stack.push(dirty_piece);
     }
 
     /// 手の取り消し時にスタックをポップ
     #[inline]
     pub fn pop(&mut self) {
-        self.acc.pop();
-        self.acc_ls.pop();
-        self.acc_hd.pop();
-        self.acc_512.pop();
-        self.acc_1024.pop();
+        self.stack.pop();
     }
 
     /// 現在の局面を評価
     #[inline]
     pub fn evaluate(&mut self, pos: &Position) -> i32 {
-        evaluate_dispatch(
-            pos,
-            &mut self.acc,
-            &mut self.acc_ls,
-            &mut self.acc_hd,
-            &mut self.acc_512,
-            &mut self.acc_1024,
-        )
-        .raw()
+        evaluate_dispatch(pos, &mut self.stack).raw()
     }
 }
 
