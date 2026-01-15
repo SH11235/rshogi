@@ -141,6 +141,8 @@ pub struct MovePicker<'a> {
     end_bad_captures: usize,
     end_captures: usize,
     end_generated: usize,
+    /// 悪い静かな手の開始位置（GoodQuietステージ終了時に設定）
+    end_bad_quiets: usize,
 }
 
 impl<'a> MovePicker<'a> {
@@ -200,6 +202,7 @@ impl<'a> MovePicker<'a> {
             end_bad_captures: 0,
             end_captures: 0,
             end_generated: 0,
+            end_bad_quiets: 0,
         }
     }
 
@@ -244,6 +247,7 @@ impl<'a> MovePicker<'a> {
             end_bad_captures: 0,
             end_captures: 0,
             end_generated: 0,
+            end_bad_quiets: 0,
         }
     }
 
@@ -292,6 +296,7 @@ impl<'a> MovePicker<'a> {
             end_bad_captures: 0,
             end_captures: 0,
             end_generated: 0,
+            end_bad_quiets: 0,
         }
     }
 
@@ -441,13 +446,14 @@ impl<'a> MovePicker<'a> {
                 // ==============================
                 Stage::GoodQuiet => {
                     if !self.skip_quiets {
-                        // ソート済みなので単純に線形で返す
-                        if let Some(m) = self.select(|_, _| true) {
+                        // 閾値より大きいスコアの手のみ返す（YaneuraOu準拠）
+                        if let Some(m) = self.select(|_, ext| ext.value > GOOD_QUIET_THRESHOLD) {
                             return m;
                         }
                     }
 
-                    // 悪い捕獲手の準備
+                    // 悪い捕獲手の準備（悪い静かな手の開始位置を保存）
+                    self.end_bad_quiets = self.cur;
                     self.cur = 0;
                     self.end_cur = self.end_bad_captures;
                     self.stage = Stage::BadCapture;
@@ -461,18 +467,22 @@ impl<'a> MovePicker<'a> {
                         return m;
                     }
 
-                    // 悪い静かな手の準備
-                    self.cur = self.end_captures;
+                    // 悪い静かな手の準備（GoodQuietで止まった位置から再開）
+                    self.cur = self.end_bad_quiets;
                     self.end_cur = self.end_generated;
                     self.stage = Stage::BadQuiet;
                 }
 
                 // ==============================
-                // 悪い静かな手を返す
+                // 悪い静かな手を返す（閾値以下のスコアの手）
                 // ==============================
-                // 注: GoodQuietで全手を返すので、ここには通常到達しない
-                // （skip_quietsがtrueの場合のみ到達）
                 Stage::BadQuiet => {
+                    if !self.skip_quiets {
+                        // 閾値以下のスコアの手を返す（YaneuraOu準拠）
+                        if let Some(m) = self.select(|_, ext| ext.value <= GOOD_QUIET_THRESHOLD) {
+                            return m;
+                        }
+                    }
                     return Move::NONE;
                 }
 
@@ -716,6 +726,12 @@ impl Iterator for MovePicker<'_> {
 /// 挿入ソートへのフォールバック閾値として広く使われている値。
 /// Rust標準ライブラリのPDQSortも内部で同様の閾値を使用している。
 const SORT_SWITCH_THRESHOLD: usize = 16;
+
+/// 静かな手の良し悪しを分ける閾値（YaneuraOu準拠）
+///
+/// この閾値より大きいスコアの手はGoodQuietステージで返され、
+/// 閾値以下の手はBadQuietステージで返される。
+const GOOD_QUIET_THRESHOLD: i32 = -14000;
 
 /// 部分挿入ソート（配列の先頭からend まで）
 ///
