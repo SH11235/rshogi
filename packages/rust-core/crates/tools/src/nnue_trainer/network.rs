@@ -15,12 +15,17 @@ pub const HIDDEN1_DIMENSIONS: usize = 32;
 pub const HIDDEN2_DIMENSIONS: usize = 32;
 pub const OUTPUT_DIMENSIONS: usize = 1;
 
-/// 評価値のスケーリング係数（YaneuraOu互換）
+/// 評価値のスケーリング係数（量子化用デフォルト値）
 ///
 /// NNUEの出力を最終的な評価値（centipawn相当）に変換する係数。
-/// この値はengine-core側のFV_SCALEと同じ値を使用する必要がある。
+/// この値はモデル保存時の量子化に使用される。
 ///
-/// 参照: `engine-core/src/nnue/constants.rs`
+/// 訓練時の損失計算には `TrainConfig.fv_scale` を使用する。
+/// 推論時の値は `engine-core/src/nnue/constants.rs` を参照。
+///
+/// 一般的な値:
+/// - 水匠5: 24
+/// - YaneuraOu デフォルト / nnue-pytorch: 16
 pub const FV_SCALE: f32 = 24.0;
 
 /// 量子化定数（YaneuraOu互換）

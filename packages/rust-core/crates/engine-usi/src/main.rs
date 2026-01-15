@@ -9,7 +9,7 @@ use std::thread;
 
 use anyhow::Result;
 use engine_core::eval::{set_eval_hash_enabled, set_material_level, MaterialLevel};
-use engine_core::nnue::init_nnue;
+use engine_core::nnue::{init_nnue, set_fv_scale_override};
 use engine_core::position::Position;
 use engine_core::search::{LimitsType, Search, SearchInfo, SearchResult};
 use engine_core::types::Move;
@@ -150,6 +150,9 @@ impl UsiEngine {
         println!("option name UCI_Elo type spin default 0 min 0 max 4000");
         println!("option name MaterialLevel type combo default 9 var 1 var 2 var 3 var 4 var 7 var 8 var 9");
         println!("option name EvalFile type string default <empty>");
+        // FV_SCALE: 0=自動判定、1以上=指定値でオーバーライド
+        // 水匠5等は24、YaneuraOuデフォルトは16
+        println!("option name FV_SCALE type spin default 0 min 0 max 100");
         println!("usiok");
     }
 
@@ -372,6 +375,16 @@ impl UsiEngine {
                         Err(e) => {
                             eprintln!("info string Error loading NNUE file: {e}");
                         }
+                    }
+                }
+            }
+            "FV_SCALE" => {
+                if let Ok(v) = value.parse::<i32>() {
+                    set_fv_scale_override(v);
+                    if v == 0 {
+                        eprintln!("info string FV_SCALE: auto-detect");
+                    } else {
+                        eprintln!("info string FV_SCALE: {v}");
                     }
                 }
             }
