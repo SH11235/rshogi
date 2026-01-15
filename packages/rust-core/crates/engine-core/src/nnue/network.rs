@@ -12,6 +12,7 @@
 
 use super::accumulator::{Accumulator, AccumulatorStack, Aligned};
 use super::accumulator_layer_stacks::AccumulatorStackLayerStacks;
+use super::accumulator_stack_variant::AccumulatorStackVariant;
 use super::constants::{
     FV_SCALE, FV_SCALE_HALFKA, HIDDEN1_DIMENSIONS, HIDDEN2_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION,
     NNUE_VERSION_HALFKA, OUTPUT_DIMENSIONS, TRANSFORMED_FEATURE_DIMENSIONS,
@@ -886,6 +887,13 @@ pub fn is_nnue_initialized() -> bool {
     NETWORK.get().is_some()
 }
 
+/// NNUEネットワークへの参照を取得（初期化されていない場合はNone）
+///
+/// AccumulatorStackVariant の初期化・更新に使用。
+pub fn get_network() -> Option<&'static NNUENetwork> {
+    NETWORK.get()
+}
+
 // =============================================================================
 // 内部ヘルパー関数（ロジック集約用）
 // =============================================================================
@@ -1368,20 +1376,13 @@ pub fn evaluate_layer_stacks(pos: &Position, stack: &mut AccumulatorStackLayerSt
 
 /// アーキテクチャに応じて適切な評価関数を呼び出す
 ///
-/// 一度の NETWORK.get() 呼び出しでアーキテクチャを判定し、
-/// 適切な評価関数を呼び出す。レースコンディションを回避するために使用。
+/// AccumulatorStackVariant を受け取り、内部のバリアントに応じて
+/// 適切な評価関数を呼び出す。
 ///
 /// # フォールバック動作
 /// - 通常ビルド: NNUEが初期化されていない場合は駒得評価にフォールバック
 /// - tournamentビルド: NNUEが初期化されていない場合はパニック
-pub fn evaluate_dispatch(
-    pos: &Position,
-    stack: &mut AccumulatorStack,
-    stack_layer_stacks: &mut AccumulatorStackLayerStacks,
-    stack_halfka_dynamic: &mut super::network_halfka_dynamic::AccumulatorStackHalfKADynamic,
-    stack_halfka_512: &mut super::network_halfka_static::AccumulatorStackHalfKA512,
-    stack_halfka_1024: &mut super::network_halfka_static::AccumulatorStackHalfKA1024,
-) -> Value {
+pub fn evaluate_dispatch(pos: &Position, stack: &mut AccumulatorStackVariant) -> Value {
     // tournamentビルド: NNUEが必須（フォールバックなし）
     #[cfg(feature = "tournament")]
     let network = NETWORK.get().expect(
@@ -1396,17 +1397,17 @@ pub fn evaluate_dispatch(
         return material::evaluate_material(pos);
     };
 
-    // アーキテクチャに応じて内部ヘルパー関数を呼び出し
-    if network.is_layer_stacks() {
-        update_and_evaluate_layer_stacks(network, pos, stack_layer_stacks)
-    } else if network.is_halfka_512() {
-        update_and_evaluate_halfka_512(network, pos, stack_halfka_512)
-    } else if network.is_halfka_1024() {
-        update_and_evaluate_halfka_1024(network, pos, stack_halfka_1024)
-    } else if network.is_halfka_dynamic() {
-        update_and_evaluate_halfka_dynamic(network, pos, stack_halfka_dynamic)
-    } else {
-        update_and_evaluate_halfka(network, pos, stack)
+    // バリアントに応じて適切な評価関数を呼び出し
+    match stack {
+        AccumulatorStackVariant::LayerStacks(s) => {
+            update_and_evaluate_layer_stacks(network, pos, s)
+        }
+        AccumulatorStackVariant::HalfKA512(s) => update_and_evaluate_halfka_512(network, pos, s),
+        AccumulatorStackVariant::HalfKA1024(s) => update_and_evaluate_halfka_1024(network, pos, s),
+        AccumulatorStackVariant::HalfKADynamic(s) => {
+            update_and_evaluate_halfka_dynamic(network, pos, s)
+        }
+        AccumulatorStackVariant::HalfKP(s) => update_and_evaluate_halfka(network, pos, s),
     }
 }
 
