@@ -15,6 +15,7 @@
 
 mod accumulator;
 mod accumulator_layer_stacks;
+mod accumulator_stack_variant;
 mod bona_piece;
 mod bona_piece_halfka;
 mod constants;
@@ -36,6 +37,7 @@ pub use accumulator::{
 pub use accumulator_layer_stacks::{
     AccumulatorLayerStacks, AccumulatorStackLayerStacks, StackEntryLayerStacks,
 };
+pub use accumulator_stack_variant::AccumulatorStackVariant;
 pub use bona_piece::{halfkp_index, BonaPiece, FE_END};
 pub use bona_piece_halfka::{
     halfka_index, is_hm_mirror, king_bucket, pack_bonapiece, BonaPieceHalfKA, E_KING, FE_HAND_END,
@@ -54,7 +56,7 @@ pub use layer_stacks::{
 pub use layers::{AffineTransform, ClippedReLU};
 pub use network::{
     evaluate, evaluate_dispatch, evaluate_layer_stacks, get_fv_scale_override,
-    get_halfka_dynamic_l1, init_nnue, init_nnue_from_bytes, is_halfka_1024_loaded,
+    get_halfka_dynamic_l1, get_network, init_nnue, init_nnue_from_bytes, is_halfka_1024_loaded,
     is_halfka_512_loaded, is_halfka_dynamic_loaded, is_layer_stacks_loaded, is_nnue_initialized,
     set_fv_scale_override, NNUENetwork, Network,
 };
