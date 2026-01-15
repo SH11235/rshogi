@@ -53,6 +53,10 @@ impl Position {
             // 王手中の合駒チェック
             if self.in_check() {
                 let checkers = self.checkers();
+                debug_assert!(
+                    !checkers.is_empty(),
+                    "checkers should not be empty when in_check() is true"
+                );
                 let checker_sq = checkers.lsb().unwrap();
 
                 // 両王手なら合駒不可
@@ -180,6 +184,10 @@ impl Position {
                     }
 
                     // 王手を遮断しているか、王手駒を取る手でなければ不可
+                    debug_assert!(
+                        !checkers.is_empty(),
+                        "checkers should not be empty in this branch"
+                    );
                     let checker_sq = checkers.lsb().unwrap();
                     let king_sq = self.king_square(us);
                     let valid_targets = between_bb(checker_sq, king_sq) | checkers;
@@ -819,5 +827,222 @@ mod tests {
         // 敵陣内への成りは正当
         let valid_promote = Move::new_move(from, to, true);
         assert!(pos.pseudo_legal(valid_promote), "Promote into enemy zone should be allowed");
+    }
+
+    // =========================================================================
+    // 王手中の pseudo_legal テスト
+    // =========================================================================
+
+    /// 両王手時は駒打ち不可
+    #[test]
+    fn test_pseudo_legal_drop_double_check() {
+        let mut pos = Position::new();
+
+        // 配置: 先手玉59、後手玉51、後手飛55（縦の王手）、後手角77（斜めの王手）
+        // → 両王手なので合駒不可
+        let b_king = Square::new(File::File5, Rank::Rank9);
+        let w_king = Square::new(File::File5, Rank::Rank1);
+        let w_rook = Square::new(File::File5, Rank::Rank5);
+        let w_bishop = Square::new(File::File7, Rank::Rank7);
+
+        pos.put_piece(Piece::B_KING, b_king);
+        pos.put_piece(Piece::W_KING, w_king);
+        pos.put_piece(Piece::W_ROOK, w_rook);
+        pos.put_piece(Piece::W_BISHOP, w_bishop);
+        pos.king_square[Color::Black.index()] = b_king;
+        pos.king_square[Color::White.index()] = w_king;
+        pos.side_to_move = Color::Black;
+        // checkers を手動で設定（テスト用）
+        let king_sq = pos.king_square(Color::Black);
+        let checkers = pos.attackers_to(king_sq) & pos.pieces_c(Color::White);
+        pos.state_stack.last_mut().unwrap().checkers = checkers;
+
+        // 手駒に金を追加
+        pos.hand[Color::Black.index()] = pos.hand[Color::Black.index()].add(PieceType::Gold);
+
+        // 両王手なので、どこに打っても不可
+        let drop_56 = Move::new_drop(PieceType::Gold, Square::new(File::File5, Rank::Rank6));
+        let drop_68 = Move::new_drop(PieceType::Gold, Square::new(File::File6, Rank::Rank8));
+        assert!(!pos.pseudo_legal(drop_56), "Drop should be illegal during double check");
+        assert!(!pos.pseudo_legal(drop_68), "Drop should be illegal during double check");
+    }
+
+    /// 飛車による王手で合駒可能（王と王手駒の間に打つ）
+    #[test]
+    fn test_pseudo_legal_drop_interpose_rook() {
+        let mut pos = Position::new();
+
+        // 配置: 先手玉59、後手玉51、後手飛55（縦の王手）
+        let b_king = Square::new(File::File5, Rank::Rank9);
+        let w_king = Square::new(File::File5, Rank::Rank1);
+        let w_rook = Square::new(File::File5, Rank::Rank5);
+
+        pos.put_piece(Piece::B_KING, b_king);
+        pos.put_piece(Piece::W_KING, w_king);
+        pos.put_piece(Piece::W_ROOK, w_rook);
+        pos.king_square[Color::Black.index()] = b_king;
+        pos.king_square[Color::White.index()] = w_king;
+        pos.side_to_move = Color::Black;
+        // checkers を手動で設定（テスト用）
+        let king_sq = pos.king_square(Color::Black);
+        let checkers = pos.attackers_to(king_sq) & pos.pieces_c(Color::White);
+        pos.state_stack.last_mut().unwrap().checkers = checkers;
+
+        // 手駒に金を追加
+        pos.hand[Color::Black.index()] = pos.hand[Color::Black.index()].add(PieceType::Gold);
+
+        // 王と飛車の間（56, 57, 58）に打つのは合法
+        let drop_56 = Move::new_drop(PieceType::Gold, Square::new(File::File5, Rank::Rank6));
+        let drop_57 = Move::new_drop(PieceType::Gold, Square::new(File::File5, Rank::Rank7));
+        let drop_58 = Move::new_drop(PieceType::Gold, Square::new(File::File5, Rank::Rank8));
+        assert!(pos.pseudo_legal(drop_56), "Drop at 56 should be legal (interpose)");
+        assert!(pos.pseudo_legal(drop_57), "Drop at 57 should be legal (interpose)");
+        assert!(pos.pseudo_legal(drop_58), "Drop at 58 should be legal (interpose)");
+
+        // 王と飛車の間以外（例: 45）に打つのは不可
+        let drop_45 = Move::new_drop(PieceType::Gold, Square::new(File::File4, Rank::Rank5));
+        assert!(!pos.pseudo_legal(drop_45), "Drop at 45 should be illegal (not interposing)");
+    }
+
+    /// 桂馬による王手では合駒不可（between_bb が空）
+    #[test]
+    fn test_pseudo_legal_drop_knight_check() {
+        let mut pos = Position::new();
+
+        // 配置: 先手玉59、後手玉51、後手桂47（桂馬の王手）
+        let b_king = Square::new(File::File5, Rank::Rank9);
+        let w_king = Square::new(File::File5, Rank::Rank1);
+        let w_knight = Square::new(File::File4, Rank::Rank7);
+
+        pos.put_piece(Piece::B_KING, b_king);
+        pos.put_piece(Piece::W_KING, w_king);
+        pos.put_piece(Piece::W_KNIGHT, w_knight);
+        pos.king_square[Color::Black.index()] = b_king;
+        pos.king_square[Color::White.index()] = w_king;
+        pos.side_to_move = Color::Black;
+        // checkers を手動で設定（テスト用）
+        let king_sq = pos.king_square(Color::Black);
+        let checkers = pos.attackers_to(king_sq) & pos.pieces_c(Color::White);
+        pos.state_stack.last_mut().unwrap().checkers = checkers;
+
+        // 手駒に金を追加
+        pos.hand[Color::Black.index()] = pos.hand[Color::Black.index()].add(PieceType::Gold);
+
+        // 桂馬の王手は合駒不可（between_bb が空）
+        let drop_48 = Move::new_drop(PieceType::Gold, Square::new(File::File4, Rank::Rank8));
+        let drop_58 = Move::new_drop(PieceType::Gold, Square::new(File::File5, Rank::Rank8));
+        assert!(
+            !pos.pseudo_legal(drop_48),
+            "Drop should be illegal (knight check, no interpose)"
+        );
+        assert!(
+            !pos.pseudo_legal(drop_58),
+            "Drop should be illegal (knight check, no interpose)"
+        );
+    }
+
+    /// 両王手時は玉以外の駒移動不可
+    #[test]
+    fn test_pseudo_legal_move_double_check() {
+        let mut pos = Position::new();
+
+        // 配置: 先手玉59、後手玉51、後手飛55（縦の王手）、後手角68（斜めの王手）、先手金78
+        // 角68は59の玉に対して斜め方向から王手
+        let b_king = Square::new(File::File5, Rank::Rank9);
+        let w_king = Square::new(File::File5, Rank::Rank1);
+        let w_rook = Square::new(File::File5, Rank::Rank5);
+        let w_bishop = Square::new(File::File6, Rank::Rank8); // 59に対して斜め王手
+        let b_gold = Square::new(File::File7, Rank::Rank8);
+
+        pos.put_piece(Piece::B_KING, b_king);
+        pos.put_piece(Piece::W_KING, w_king);
+        pos.put_piece(Piece::W_ROOK, w_rook);
+        pos.put_piece(Piece::W_BISHOP, w_bishop);
+        pos.put_piece(Piece::B_GOLD, b_gold);
+        pos.king_square[Color::Black.index()] = b_king;
+        pos.king_square[Color::White.index()] = w_king;
+        pos.side_to_move = Color::Black;
+        // checkers を手動で設定（テスト用）
+        let king_sq = pos.king_square(Color::Black);
+        let checkers = pos.attackers_to(king_sq) & pos.pieces_c(Color::White);
+        pos.state_stack.last_mut().unwrap().checkers = checkers;
+
+        // 両王手であることを確認
+        assert!(
+            checkers.count() >= 2,
+            "Should be double check: checkers count = {}",
+            checkers.count()
+        );
+
+        // 両王手なので金を動かしても不可（王手を遮断しても両王手は回避できない）
+        let gold_move = Move::new_move(b_gold, Square::new(File::File6, Rank::Rank9), false);
+        assert!(
+            !pos.pseudo_legal(gold_move),
+            "Non-king move should be illegal during double check"
+        );
+    }
+
+    /// 王手中の駒移動（遮断）
+    #[test]
+    fn test_pseudo_legal_move_interpose() {
+        let mut pos = Position::new();
+
+        // 配置: 先手玉59、後手玉51、後手飛55、先手金68
+        let b_king = Square::new(File::File5, Rank::Rank9);
+        let w_king = Square::new(File::File5, Rank::Rank1);
+        let w_rook = Square::new(File::File5, Rank::Rank5);
+        let b_gold = Square::new(File::File6, Rank::Rank8);
+
+        pos.put_piece(Piece::B_KING, b_king);
+        pos.put_piece(Piece::W_KING, w_king);
+        pos.put_piece(Piece::W_ROOK, w_rook);
+        pos.put_piece(Piece::B_GOLD, b_gold);
+        pos.king_square[Color::Black.index()] = b_king;
+        pos.king_square[Color::White.index()] = w_king;
+        pos.side_to_move = Color::Black;
+        // checkers を手動で設定（テスト用）
+        let king_sq = pos.king_square(Color::Black);
+        let checkers = pos.attackers_to(king_sq) & pos.pieces_c(Color::White);
+        pos.state_stack.last_mut().unwrap().checkers = checkers;
+
+        // 金を58に動かして遮断（合法）
+        let gold_interpose = Move::new_move(b_gold, Square::new(File::File5, Rank::Rank8), false);
+        assert!(pos.pseudo_legal(gold_interpose), "Gold move to interpose should be legal");
+
+        // 金を67に動かす（遮断にならない、不合法）
+        let gold_not_interpose =
+            Move::new_move(b_gold, Square::new(File::File6, Rank::Rank7), false);
+        assert!(
+            !pos.pseudo_legal(gold_not_interpose),
+            "Gold move not interposing should be illegal"
+        );
+    }
+
+    /// 王手中の駒移動（王手駒を取る）
+    #[test]
+    fn test_pseudo_legal_move_capture_checker() {
+        let mut pos = Position::new();
+
+        // 配置: 先手玉59、後手玉51、後手飛55、先手金56
+        let b_king = Square::new(File::File5, Rank::Rank9);
+        let w_king = Square::new(File::File5, Rank::Rank1);
+        let w_rook = Square::new(File::File5, Rank::Rank5);
+        let b_gold = Square::new(File::File5, Rank::Rank6);
+
+        pos.put_piece(Piece::B_KING, b_king);
+        pos.put_piece(Piece::W_KING, w_king);
+        pos.put_piece(Piece::W_ROOK, w_rook);
+        pos.put_piece(Piece::B_GOLD, b_gold);
+        pos.king_square[Color::Black.index()] = b_king;
+        pos.king_square[Color::White.index()] = w_king;
+        pos.side_to_move = Color::Black;
+        // checkers を手動で設定（テスト用）
+        let king_sq = pos.king_square(Color::Black);
+        let checkers = pos.attackers_to(king_sq) & pos.pieces_c(Color::White);
+        pos.state_stack.last_mut().unwrap().checkers = checkers;
+
+        // 金で飛車を取る（合法）
+        let gold_capture = Move::new_move(b_gold, w_rook, false);
+        assert!(pos.pseudo_legal(gold_capture), "Gold capturing the checker should be legal");
     }
 }
