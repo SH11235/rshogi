@@ -10,8 +10,10 @@ use std::sync::Arc;
 
 use crate::eval::EvalHash;
 use crate::nnue::{
-    evaluate_dispatch, get_halfka_dynamic_l1, is_halfka_dynamic_loaded, is_layer_stacks_loaded,
-    AccumulatorStack, AccumulatorStackHalfKADynamic, AccumulatorStackLayerStacks, DirtyPiece,
+    evaluate_dispatch, get_halfka_dynamic_l1, is_halfka_1024_loaded, is_halfka_512_loaded,
+    is_halfka_dynamic_loaded, is_layer_stacks_loaded, AccumulatorStack, AccumulatorStackHalfKA1024,
+    AccumulatorStackHalfKA512, AccumulatorStackHalfKADynamic, AccumulatorStackLayerStacks,
+    DirtyPiece,
 };
 use crate::position::Position;
 use crate::search::PieceToHistory;
@@ -294,6 +296,12 @@ pub struct SearchWorker {
     /// `use_halfka_dynamic` が true の場合にこちらを使用する。
     pub nnue_stack_halfka_dynamic: AccumulatorStackHalfKADynamic,
 
+    /// NNUE Accumulator スタック（HalfKA512用、512次元静的）
+    pub nnue_stack_halfka_512: AccumulatorStackHalfKA512,
+
+    /// NNUE Accumulator スタック（HalfKA1024用、1024次元静的）
+    pub nnue_stack_halfka_1024: AccumulatorStackHalfKA1024,
+
     /// LayerStacks アーキテクチャを使用するかどうか
     ///
     /// `prepare_search()` で設定され、探索中は変更されない。
@@ -304,6 +312,12 @@ pub struct SearchWorker {
     ///
     /// `prepare_search()` で設定され、探索中は変更されない。
     use_halfka_dynamic: bool,
+
+    /// HalfKA512 アーキテクチャを使用するかどうか
+    use_halfka_512: bool,
+
+    /// HalfKA1024 アーキテクチャを使用するかどうか
+    use_halfka_1024: bool,
 
     // =========================================================================
     // 頻度制御（YaneuraOu準拠）
@@ -350,8 +364,12 @@ impl SearchWorker {
             nnue_stack: AccumulatorStack::new(),
             nnue_stack_layer_stacks: AccumulatorStackLayerStacks::new(),
             nnue_stack_halfka_dynamic: AccumulatorStackHalfKADynamic::new(1024), // デフォルトL1=1024
+            nnue_stack_halfka_512: AccumulatorStackHalfKA512::new(),
+            nnue_stack_halfka_1024: AccumulatorStackHalfKA1024::new(),
             use_layer_stacks: false,   // prepare_search() で設定
             use_halfka_dynamic: false, // prepare_search() で設定
+            use_halfka_512: false,     // prepare_search() で設定
+            use_halfka_1024: false,    // prepare_search() で設定
             // 頻度制御
             calls_cnt: 0,
         });
@@ -450,9 +468,14 @@ impl SearchWorker {
                 self.nnue_stack_halfka_dynamic.reset();
             }
         }
-        // LayerStacks/HalfKADynamic フラグを設定（探索開始時点で固定）
+        // HalfKA512/1024: 静的サイズなのでリセットのみ
+        self.nnue_stack_halfka_512.reset();
+        self.nnue_stack_halfka_1024.reset();
+        // アーキテクチャフラグを設定（探索開始時点で固定）
         self.use_layer_stacks = is_layer_stacks_loaded();
         self.use_halfka_dynamic = is_halfka_dynamic_loaded();
+        self.use_halfka_512 = is_halfka_512_loaded();
+        self.use_halfka_1024 = is_halfka_1024_loaded();
         // check_abort頻度制御カウンターをリセット
         // これにより新しい探索開始時に即座に停止チェックが行われる
         self.calls_cnt = 0;
@@ -486,6 +509,8 @@ impl SearchWorker {
             &mut self.nnue_stack,
             &mut self.nnue_stack_layer_stacks,
             &mut self.nnue_stack_halfka_dynamic,
+            &mut self.nnue_stack_halfka_512,
+            &mut self.nnue_stack_halfka_1024,
         )
     }
 
@@ -495,6 +520,10 @@ impl SearchWorker {
         if self.use_layer_stacks {
             self.nnue_stack_layer_stacks.push();
             self.nnue_stack_layer_stacks.current_mut().dirty_piece = dirty_piece;
+        } else if self.use_halfka_512 {
+            self.nnue_stack_halfka_512.push(dirty_piece);
+        } else if self.use_halfka_1024 {
+            self.nnue_stack_halfka_1024.push(dirty_piece);
         } else if self.use_halfka_dynamic {
             self.nnue_stack_halfka_dynamic.push(dirty_piece);
         } else {
@@ -507,6 +536,10 @@ impl SearchWorker {
     fn nnue_pop(&mut self) {
         if self.use_layer_stacks {
             self.nnue_stack_layer_stacks.pop();
+        } else if self.use_halfka_512 {
+            self.nnue_stack_halfka_512.pop();
+        } else if self.use_halfka_1024 {
+            self.nnue_stack_halfka_1024.pop();
         } else if self.use_halfka_dynamic {
             self.nnue_stack_halfka_dynamic.pop();
         } else {

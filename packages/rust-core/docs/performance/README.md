@@ -278,6 +278,74 @@ TTにLarge Pages（2MB HugePages）を導入し、prefetchタイミングを前�
 
 ---
 
+## NPSリグレッション調査 (2026-01-15)
+
+**調査日**: 2026-01-15
+**結論**: **リグレッション原因を特定** - YaneuraOu互換のための正しい変更だが、構造的な差異により約13%のNPS低下が発生
+
+### 背景
+
+コミット `4f26b576` (Nnue script #324) でHalfKA_hm対応を追加した際、HalfKP評価（nn.bin使用時）のNPSが13.5%低下。
+
+### ベンチマーク結果
+
+計測条件: `--threads 1 --tt-mb 1024 --limit-type movetime --limit 15000 --use-eval-hash false`
+
+| バージョン | NPS | 対目標比 | 備考 |
+|-----------|----:|----------|------|
+| リグレッション前（7c020c02） | 779,548 | 100% | **目標値** |
+| リグレッション後（4f26b576） | 670,982 | 86.1% | HalfKA_hm対応追加 |
+| main（現在） | 666,604 | 85.5% | - |
+| nnue-architecture | **676,686** | **86.8%** | HalfKA512/1024静的対応 |
+
+### リグレッション原因
+
+#### 1. 手駒処理の変更（主要因、約10%影響）
+
+**変更前（7c020c02）**:
+```rust
+// 手駒は最新カウントのみ（例: 歩3枚なら「歩3枚」の1特徴量）
+let bp = BonaPiece::from_hand_piece(perspective, owner, pt, count);
+active.push(halfkp_index(king_sq, bp));
+```
+
+**変更後（現在）**:
+```rust
+// 手駒は1からcount枚目まですべて（例: 歩3枚なら3特徴量）
+for i in 1..=count {
+    let bp = BonaPiece::from_hand_piece(perspective, owner, pt, i);
+    active.push(halfkp_index(king_sq, bp));
+}
+```
+
+**YaneuraOu互換の正しい実装**であり、元に戻すのは不適切。
+
+#### 2. 評価パスの分岐追加（約3%影響）
+
+`evaluate_dispatch`でHalfKA/LayerStacks判定を毎回実行:
+```rust
+if network.is_layer_stacks() { ... }
+else if network.is_halfka_dynamic() { ... }
+else { update_and_evaluate_halfka(...) }
+```
+
+#### 3. king_sq反転処理の追加（軽微）
+
+後手視点での玉マス反転処理が追加:
+```rust
+let king_sq = if perspective == Color::Black {
+    raw_king_sq
+} else {
+    raw_king_sq.inverse()
+};
+```
+
+### 結論
+
+- リグレッションの原因は**YaneuraOu互換のための正しい変更**
+
+---
+
 ## 調査完了項目
 
 ### MovePicker (調査完了)
@@ -609,3 +677,4 @@ PGOビルドの処理フロー:
 | 2025-12-23 | **NNUE Accumulator差分更新調査完了**（最適化余地なし）。YaneuraOuより高度な実装（祖先探索、複数手差分適用）済み。診断結果: diff_ok=76.0%, refresh=24.0%。24%のrefreshは探索アルゴリズムの特性（null move, LMRなど）に起因 |
 | 2025-12-26 | **並列探索効率大幅改善**: PDQSort最適化により8T効率がMaterial 71%→**100.1%**、NNUE 72%→**92.6%**に向上。MovePicker内の挿入ソート（O(n²)）を大きい配列でPDQSort（O(n log n)）に切り替え、L3キャッシュ競合を解消。計測結果更新（NNUE: MovePicker 12.49%, Network::evaluate 4.28%, search_node 3.11%、Material: eval_lv7_like 19.64%, MovePicker 17.39%, direction_of 14.10%）。NPS: NNUE平均 726,439（+6.8%）、Material平均 469,158。YaneuraOu比: NNUE 61%→**65%**に改善。**並列探索効率セクション新設**。**ホットスポット変動**: Material評価でMovePicker::next_moveが8.91%→17.39%に増加し2位に浮上（PDQSort導入でソート時間自体は減少したが、eval_lv7_like等の相対比率が下がったため） |
 | 2025-12-26 | 計測結果更新（NNUE: MovePicker 12.49%, Network::evaluate 4.31%, search_node 3.20%、Material: eval_lv7_like 20.64%, MovePicker 17.18%, direction_of 12.83%）。NPS: NNUE平均 725,280（-0.2%、誤差範囲）、Material平均 473,021。並列効率: Material 98.4%、NNUE 95.8%（前回100.1%/92.6%からの変動は誤差範囲）。`skip_size`/`skip_phase`設定削除ブランチでの計測 |
+| 2026-01-15 | **NPSリグレッション調査完了**。コミット4f26b576（HalfKA_hm対応）で発生した13.5%のNPS低下（779,548→666,604）の原因を特定。主要因: (1) 手駒処理の変更（最新カウントのみ→全カウント、YaneuraOu互換のため必要）、(2) evaluate_dispatch分岐追加、(3) king_sq反転処理追加。YaneuraOuは`piece_list`構造で38+手駒を1回走査するが、本実装はbitboard走査+手駒ループのため構造的な差異あり。nnue-architectureブランチ（676,686 NPS）がmain（666,604 NPS）より約1.5%高速。目標達成には`piece_list`相当のデータ構造導入が必要。詳細は[NPSリグレッション調査](#npsリグレッション調査-2026-01-15)セクション参照 |

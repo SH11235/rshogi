@@ -26,7 +26,8 @@ use engine_core::eval::material::evaluate_material;
 use engine_core::movegen::{generate_legal, MoveList};
 use engine_core::nnue::{
     evaluate_dispatch, get_halfka_dynamic_l1, is_nnue_initialized, AccumulatorStack,
-    AccumulatorStackHalfKADynamic, AccumulatorStackLayerStacks, DirtyPiece,
+    AccumulatorStackHalfKA1024, AccumulatorStackHalfKA512, AccumulatorStackHalfKADynamic,
+    AccumulatorStackLayerStacks, DirtyPiece,
 };
 use engine_core::position::Position;
 use engine_core::types::{Move, Value};
@@ -87,34 +88,54 @@ impl Evaluator for NnueEvaluator {
                 RefCell::new(AccumulatorStackLayerStacks::new());
             static ACC_STACK_HALFKA_DYNAMIC: RefCell<Option<AccumulatorStackHalfKADynamic>> =
                 const { RefCell::new(None) };
+            static ACC_STACK_HALFKA_512: RefCell<AccumulatorStackHalfKA512> =
+                RefCell::new(AccumulatorStackHalfKA512::new());
+            static ACC_STACK_HALFKA_1024: RefCell<AccumulatorStackHalfKA1024> =
+                RefCell::new(AccumulatorStackHalfKA1024::new());
         }
 
         ACC_STACK.with(|acc| {
             ACC_STACK_LAYER_STACKS.with(|acc_ls| {
                 ACC_STACK_HALFKA_DYNAMIC.with(|acc_hd| {
-                    let mut acc = acc.borrow_mut();
-                    let mut acc_ls = acc_ls.borrow_mut();
-                    let mut acc_hd = acc_hd.borrow_mut();
+                    ACC_STACK_HALFKA_512.with(|acc_512| {
+                        ACC_STACK_HALFKA_1024.with(|acc_1024| {
+                            let mut acc = acc.borrow_mut();
+                            let mut acc_ls = acc_ls.borrow_mut();
+                            let mut acc_hd = acc_hd.borrow_mut();
+                            let mut acc_512 = acc_512.borrow_mut();
+                            let mut acc_1024 = acc_1024.borrow_mut();
 
-                    // AccumulatorStackをリセット（全計算を強制）
-                    acc.reset();
-                    acc_ls.reset();
+                            // AccumulatorStackをリセット（全計算を強制）
+                            acc.reset();
+                            acc_ls.reset();
+                            acc_512.reset();
+                            acc_1024.reset();
 
-                    // HalfKADynamicの場合、L1サイズに応じてスタックを作成/リセット
-                    if let Some(l1) = get_halfka_dynamic_l1() {
-                        if acc_hd.is_none() || acc_hd.as_ref().unwrap().l1() != l1 {
-                            *acc_hd = Some(AccumulatorStackHalfKADynamic::new(l1));
-                        } else {
-                            acc_hd.as_mut().unwrap().reset();
-                        }
-                    }
+                            // HalfKADynamicの場合、L1サイズに応じてスタックを作成/リセット
+                            if let Some(l1) = get_halfka_dynamic_l1() {
+                                if acc_hd.is_none() || acc_hd.as_ref().unwrap().l1() != l1 {
+                                    *acc_hd = Some(AccumulatorStackHalfKADynamic::new(l1));
+                                } else {
+                                    acc_hd.as_mut().unwrap().reset();
+                                }
+                            }
 
-                    // HalfKADynamicスタックが必要な場合のダミー作成
-                    let mut dummy_hd = AccumulatorStackHalfKADynamic::new(256);
+                            // HalfKADynamicスタックが必要な場合のダミー作成
+                            let mut dummy_hd = AccumulatorStackHalfKADynamic::new(256);
 
-                    let stack_hd = acc_hd.as_mut().unwrap_or(&mut dummy_hd);
+                            let stack_hd = acc_hd.as_mut().unwrap_or(&mut dummy_hd);
 
-                    evaluate_dispatch(pos, &mut acc, &mut acc_ls, stack_hd).raw()
+                            evaluate_dispatch(
+                                pos,
+                                &mut acc,
+                                &mut acc_ls,
+                                stack_hd,
+                                &mut acc_512,
+                                &mut acc_1024,
+                            )
+                            .raw()
+                        })
+                    })
                 })
             })
         })
@@ -132,6 +153,10 @@ pub struct NnueStacks {
     pub acc_ls: AccumulatorStackLayerStacks,
     /// HalfKADynamic用スタック（常に存在、evaluate_dispatchに必要）
     pub acc_hd: AccumulatorStackHalfKADynamic,
+    /// HalfKA512用スタック
+    pub acc_512: AccumulatorStackHalfKA512,
+    /// HalfKA1024用スタック
+    pub acc_1024: AccumulatorStackHalfKA1024,
     /// ノード数カウンター（探索爆発防止用）
     pub node_count: u64,
 }
@@ -151,6 +176,8 @@ impl NnueStacks {
             acc: AccumulatorStack::new(),
             acc_ls: AccumulatorStackLayerStacks::new(),
             acc_hd: AccumulatorStackHalfKADynamic::new(l1),
+            acc_512: AccumulatorStackHalfKA512::new(),
+            acc_1024: AccumulatorStackHalfKA1024::new(),
             node_count: 0,
         }
     }
@@ -159,6 +186,8 @@ impl NnueStacks {
     pub fn reset(&mut self) {
         self.acc.reset();
         self.acc_ls.reset();
+        self.acc_512.reset();
+        self.acc_1024.reset();
         self.node_count = 0;
         // HalfKADynamicはL1サイズが変わっている可能性があるので確認
         if let Some(l1) = get_halfka_dynamic_l1() {
@@ -192,6 +221,8 @@ impl NnueStacks {
         self.acc_ls.push();
         self.acc_ls.current_mut().dirty_piece = dirty_piece;
         self.acc_hd.push(dirty_piece);
+        self.acc_512.push(dirty_piece);
+        self.acc_1024.push(dirty_piece);
     }
 
     /// 手の取り消し時にスタックをポップ
@@ -200,12 +231,22 @@ impl NnueStacks {
         self.acc.pop();
         self.acc_ls.pop();
         self.acc_hd.pop();
+        self.acc_512.pop();
+        self.acc_1024.pop();
     }
 
     /// 現在の局面を評価
     #[inline]
     pub fn evaluate(&mut self, pos: &Position) -> i32 {
-        evaluate_dispatch(pos, &mut self.acc, &mut self.acc_ls, &mut self.acc_hd).raw()
+        evaluate_dispatch(
+            pos,
+            &mut self.acc,
+            &mut self.acc_ls,
+            &mut self.acc_hd,
+            &mut self.acc_512,
+            &mut self.acc_1024,
+        )
+        .raw()
     }
 }
 
