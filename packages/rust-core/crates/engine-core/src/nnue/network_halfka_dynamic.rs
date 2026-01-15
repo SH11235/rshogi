@@ -1295,11 +1295,13 @@ impl NetworkHalfKADynamic {
         self.feature_transformer.transform(acc, pos.side_to_move(), &mut transformed);
 
         // l1 層
-        let mut l1_out = vec![0i32; self.arch_l2];
-        self.l1.propagate(&transformed, &mut l1_out);
+        // l2 層の padded_input_dim に合わせてバッファを確保（SIMD境界外読み取り防止）
+        let l1_out_size = self.l2.padded_input_dim;
+        let mut l1_out = vec![0i32; l1_out_size];
+        self.l1.propagate(&transformed, &mut l1_out[..self.arch_l2]);
 
         // ClippedReLU (SIMD最適化版)
-        let mut l1_relu = vec![0u8; self.arch_l2];
+        let mut l1_relu = vec![0u8; l1_out_size];
         clipped_relu_dynamic(&l1_out, &mut l1_relu);
 
         // l2 層
