@@ -1026,21 +1026,13 @@ mod tests {
         assert_eq!(good_count, 3);
 
         // 最初のgood_count個が閾値以上
-        for i in 0..good_count {
-            assert!(
-                moves[i].value >= 0,
-                "Move at index {i} should have value >= 0, got {}",
-                moves[i].value
-            );
+        for (i, m) in moves.iter().enumerate().take(good_count) {
+            assert!(m.value >= 0, "Move at index {i} should have value >= 0, got {}", m.value);
         }
 
         // good_count以降が閾値未満
-        for i in good_count..len {
-            assert!(
-                moves[i].value < 0,
-                "Move at index {i} should have value < 0, got {}",
-                moves[i].value
-            );
+        for (i, m) in moves.iter().enumerate().skip(good_count) {
+            assert!(m.value < 0, "Move at index {i} should have value < 0, got {}", m.value);
         }
     }
 }
