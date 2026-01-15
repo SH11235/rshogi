@@ -128,7 +128,7 @@ pub struct MovePicker<'a> {
     stage: Stage,
     tt_move: Move,
     probcut_threshold: Option<Value>,
-    #[allow(dead_code)] // 将来的にYaneuraOu方式の部分ソートで使用予定
+    /// 探索の深さ（部分ソートの閾値計算に使用）
     depth: Depth,
     ply: i32,
     skip_quiets: bool,
@@ -418,25 +418,15 @@ impl<'a> MovePicker<'a> {
                         self.cur = self.end_captures;
                         self.score_quiets();
 
-                        // PDQSortで静かな手の範囲だけをソート（YaneuraOu方式）
-                        // その後は線形で返すだけなのでO(n log n) + O(n)
-                        let quiet_slice =
-                            &mut self.moves.as_mut_slice()[self.end_captures..self.end_cur];
-                        if quiet_slice.len() > SORT_SWITCH_THRESHOLD {
-                            // 大きい配列はPDQSort
-                            quiet_slice.sort_unstable_by(|a, b| b.value.cmp(&a.value));
-                        } else if quiet_slice.len() > 1 {
-                            // 小さい配列は挿入ソート
-                            for i in 1..quiet_slice.len() {
-                                let tmp = quiet_slice[i];
-                                let mut j = i;
-                                while j > 0 && quiet_slice[j - 1].value < tmp.value {
-                                    quiet_slice[j] = quiet_slice[j - 1];
-                                    j -= 1;
-                                }
-                                quiet_slice[j] = tmp;
-                            }
-                        }
+                        // YaneuraOu方式: 深さベースの閾値で部分ソート
+                        // 深さが浅いほど多くの手をソート、深いほど少ない手のみソート
+                        let limit = -3560 * self.depth;
+                        let quiet_count = self.end_cur - self.end_captures;
+                        partial_insertion_sort(
+                            &mut self.moves.as_mut_slice()[self.end_captures..],
+                            quiet_count,
+                            limit,
+                        );
                     }
                     self.stage = Stage::GoodQuiet;
                 }
@@ -733,40 +723,71 @@ const SORT_SWITCH_THRESHOLD: usize = 16;
 /// 閾値以下の手はBadQuietステージで返される。
 const GOOD_QUIET_THRESHOLD: i32 = -14000;
 
-/// 部分挿入ソート（配列の先頭からend まで）
+/// 部分ソート（ハイブリッド方式）
 ///
-/// `limit` より大きいスコアの手だけを降順でソートする。
-/// `limit = i32::MIN`の場合は全要素をソートする（この場合、大きい配列ではPDQSortを使用）。
+/// `limit` 以上のスコアの手だけを降順でソートする。
+/// 閾値以上の手を先頭に集めてから、その部分だけをソートする。
+///
+/// - 閾値以上の手が多い場合: PDQSort O(k log k)
+/// - 閾値以上の手が少ない場合: 挿入ソート O(k²)
+/// - 全体の計算量: O(n) + O(k log k) または O(n) + O(k²)
 fn partial_insertion_sort(moves: &mut [ExtMove], end: usize, limit: i32) {
     if end <= 1 {
         return;
     }
 
+    let slice = &mut moves[..end];
+
     // limit = i32::MIN の場合は全要素ソート
-    // 大きい配列では標準ライブラリのPDQSortを使用（O(n log n)）
-    if limit == i32::MIN && end > SORT_SWITCH_THRESHOLD {
-        let slice = &mut moves[..end];
-        // 降順ソート
-        slice.sort_unstable_by(|a, b| b.value.cmp(&a.value));
+    if limit == i32::MIN {
+        if end > SORT_SWITCH_THRESHOLD {
+            slice.sort_unstable_by(|a, b| b.value.cmp(&a.value));
+        } else {
+            // 小さい配列は挿入ソート
+            for i in 1..end {
+                let tmp = slice[i];
+                let mut j = i;
+                while j > 0 && slice[j - 1].value < tmp.value {
+                    slice[j] = slice[j - 1];
+                    j -= 1;
+                }
+                slice[j] = tmp;
+            }
+        }
         return;
     }
 
-    // 小さい配列または部分ソートの場合は挿入ソート
-    let mut sorted_end = 0;
+    // ハイブリッド方式: 閾値以上の手を先頭に集めてからソート
 
-    for p in 1..end {
-        if moves[p].value >= limit {
-            let tmp = moves[p];
-            moves[p] = moves[sorted_end + 1];
-            sorted_end += 1;
+    // 1. 閾値以上の手を先頭に集める（O(n)）
+    let mut good_count = 0;
+    for i in 0..end {
+        if slice[i].value >= limit {
+            slice.swap(i, good_count);
+            good_count += 1;
+        }
+    }
 
-            // 挿入位置を探す
-            let mut q = sorted_end;
-            while q > 0 && moves[q - 1].value < tmp.value {
-                moves[q] = moves[q - 1];
-                q -= 1;
+    // 閾値以上の手がない場合は終了
+    if good_count == 0 {
+        return;
+    }
+
+    // 2. 閾値以上の手の部分だけをソート
+    let good_slice = &mut slice[..good_count];
+    if good_count > SORT_SWITCH_THRESHOLD {
+        // 多い場合はPDQSort O(k log k)
+        good_slice.sort_unstable_by(|a, b| b.value.cmp(&a.value));
+    } else {
+        // 少ない場合は挿入ソート O(k²)
+        for i in 1..good_count {
+            let tmp = good_slice[i];
+            let mut j = i;
+            while j > 0 && good_slice[j - 1].value < tmp.value {
+                good_slice[j] = good_slice[j - 1];
+                j -= 1;
             }
-            moves[q] = tmp;
+            good_slice[j] = tmp;
         }
     }
 }
