@@ -745,8 +745,12 @@ const SORT_SWITCH_THRESHOLD: usize = 16;
 /// - 閾値以上の手が少ない場合: 挿入ソート O(k²)
 /// - 全体の計算量: O(n) + O(k log k) または O(n) + O(k²)
 fn partial_insertion_sort(moves: &mut [ExtMove], end: usize, limit: i32) -> usize {
-    if end <= 1 {
-        return end;
+    if end == 0 {
+        return 0;
+    }
+    // 1手の場合もlimit判定を行う
+    if end == 1 {
+        return if moves[0].value >= limit { 1 } else { 0 };
     }
 
     let slice = &mut moves[..end];
@@ -984,10 +988,10 @@ mod tests {
         assert_eq!(good_count, 1);
         assert_eq!(moves[0].value, 150);
 
-        // 閾値未満の1要素
+        // 閾値未満の1要素: limit判定を正しく行う
         let mut moves2 = vec![ExtMove::new(Move::NONE, 50)];
         let good_count2 = partial_insertion_sort(&mut moves2, 1, 100);
-        assert_eq!(good_count2, 1); // end <= 1 なので早期リターン
+        assert_eq!(good_count2, 0); // 50 < 100 なので閾値未満、good_count=0
     }
 
     #[test]
@@ -1007,19 +1011,19 @@ mod tests {
         // partial_insertion_sortで閾値以上の手を前に集めた後、
         // end_good_quietsが正しく設定されることを検証
         let mut moves = vec![
-            ExtMove::new(Move::NONE, 100),  // 閾値以上
-            ExtMove::new(Move::NONE, -200), // 閾値未満
-            ExtMove::new(Move::NONE, 50),   // 閾値未満
-            ExtMove::new(Move::NONE, 200),  // 閾値以上
-            ExtMove::new(Move::NONE, -100), // 閾値未満
+            ExtMove::new(Move::NONE, 100),  // 閾値以上 (100 >= 0)
+            ExtMove::new(Move::NONE, -200), // 閾値未満 (-200 < 0)
+            ExtMove::new(Move::NONE, 50),   // 閾値以上 (50 >= 0)
+            ExtMove::new(Move::NONE, 200),  // 閾値以上 (200 >= 0)
+            ExtMove::new(Move::NONE, -100), // 閾値未満 (-100 < 0)
         ];
 
         // limit=0でソート
         let len = moves.len();
         let good_count = partial_insertion_sort(&mut moves, len, 0);
 
-        // 閾値(0)以上の手は100と200の2つ
-        assert_eq!(good_count, 2);
+        // 閾値(0)以上の手は100, 50, 200の3つ
+        assert_eq!(good_count, 3);
 
         // 最初のgood_count個が閾値以上
         for i in 0..good_count {

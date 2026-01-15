@@ -425,8 +425,7 @@ mod tests {
 
     #[test]
     fn test_append_active_indices_with_hand_pieces() {
-        // 手駒が複数枚ある局面のテスト
-        // P1バグ修正の検証: 手駒の枚数分すべての特徴量が追加されることを確認
+        // 手駒の枚数分すべての特徴量が追加されることを確認
         let mut pos = Position::new();
         // 先手が歩3枚、香1枚を持っている局面
         pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b 3P1L 1")
