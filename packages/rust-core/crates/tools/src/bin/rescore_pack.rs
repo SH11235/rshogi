@@ -20,6 +20,14 @@
 //! cargo run --release -p tools --bin rescore_pack -- \
 //!   --input data.pack --output rescored.pack \
 //!   --nnue path/to/nn.bin --apply-qsearch-leaf
+//!
+//! # 深さ指定探索で再スコア（最も正確だが低速）
+//! cargo run --release -p tools --bin rescore_pack -- \
+//!   --input data.pack --output rescored_depth8.pack \
+//!   --nnue path/to/nn.bin \
+//!   --search-depth 8 \
+//!   --hash-mb 256 \
+//!   --threads 4
 //! ```
 
 use anyhow::{Context, Result};
@@ -31,11 +39,17 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::thread;
 
 use engine_core::nnue::init_nnue;
 use engine_core::position::Position;
+use engine_core::search::{LimitsType, Search};
 use tools::packed_sfen::{pack_position, unpack_sfen, PackedSfenValue};
 use tools::qsearch_pv::{qsearch_with_pv_nnue, NnueStacks};
+
+/// 探索用スタックサイズ（64MB）
+const SEARCH_STACK_SIZE: usize = 64 * 1024 * 1024;
 
 /// packファイルの評価値をNNUEで再評価
 #[derive(Parser)]
@@ -60,6 +74,15 @@ struct Cli {
     /// qsearch評価を使用（デフォルトは静的評価）
     #[arg(long)]
     use_qsearch: bool,
+
+    /// 深さ指定探索を使用（--use-qsearchと排他）
+    /// 指定した深さでalpha-beta探索を実行し、その結果をスコアとして使用
+    #[arg(long)]
+    search_depth: Option<i32>,
+
+    /// 置換表サイズ（MB）、--search-depth使用時のみ有効
+    #[arg(long, default_value_t = 64)]
+    hash_mb: usize,
 
     /// qsearch leaf置換も同時に適用
     #[arg(long)]
@@ -119,6 +142,16 @@ fn main() -> Result<()> {
         anyhow::bail!("Input file not found: {}", cli.input.display());
     }
 
+    // --use-qsearch と --search-depth は排他
+    if cli.use_qsearch && cli.search_depth.is_some() {
+        anyhow::bail!("--use-qsearch and --search-depth are mutually exclusive");
+    }
+
+    // --search-depth 指定時に --apply-qsearch-leaf が有効なら警告
+    if cli.search_depth.is_some() && cli.apply_qsearch_leaf {
+        eprintln!("Warning: --apply-qsearch-leaf is ignored when --search-depth is specified");
+    }
+
     // NNUEモデルのロード
     if !cli.nnue.exists() {
         anyhow::bail!("NNUE model file not found: {}", cli.nnue.display());
@@ -133,8 +166,8 @@ fn main() -> Result<()> {
     })
     .context("Failed to set Ctrl-C handler")?;
 
-    // スレッド数を設定
-    if cli.threads > 0 {
+    // rayon スレッドプール設定（process_file で使用、process_file_with_search では独自スレッド管理）
+    if cli.search_depth.is_none() && cli.threads > 0 {
         rayon::ThreadPoolBuilder::new()
             .num_threads(cli.threads)
             .build_global()
@@ -160,19 +193,24 @@ fn main() -> Result<()> {
         record_count
     };
 
-    eprintln!("Input: {} ({} records)", cli.input.display(), record_count);
-    eprintln!("Processing {} records", process_count);
+    eprintln!("Input: {} ({record_count} records)", cli.input.display());
+    eprintln!("Processing {process_count} records");
     eprintln!(
         "Mode: {}",
-        if cli.use_qsearch {
-            "qsearch evaluation"
+        if let Some(depth) = cli.search_depth {
+            format!("depth {depth} search")
+        } else if cli.use_qsearch {
+            "qsearch evaluation".to_string()
         } else {
-            "static NNUE evaluation"
+            "static NNUE evaluation".to_string()
         }
     );
+    if cli.search_depth.is_some() {
+        eprintln!("Hash size: {} MB", cli.hash_mb);
+    }
     eprintln!(
         "qsearch leaf replacement: {}",
-        if cli.apply_qsearch_leaf {
+        if cli.apply_qsearch_leaf && cli.search_depth.is_none() {
             "enabled"
         } else {
             "disabled"
@@ -188,7 +226,11 @@ fn main() -> Result<()> {
     );
 
     // 処理実行
-    process_file(&cli, process_count)?;
+    if cli.search_depth.is_some() {
+        process_file_with_search(&cli, process_count)?;
+    } else {
+        process_file(&cli, process_count)?;
+    }
 
     if INTERRUPTED.load(Ordering::SeqCst) {
         eprintln!("Note: Processing was interrupted, output may be incomplete");
@@ -464,6 +506,276 @@ fn process_record(
         move16: 0, // 無効値
         game_ply: psv.game_ply,
         game_result: new_game_result,
+        padding: 0,
+    };
+
+    ProcessResult::Ok(new_psv.to_bytes(), clipped)
+}
+
+/// 深さ指定探索でファイルを処理
+///
+/// 探索は重いため、rayon並列処理ではなく、複数のワーカースレッドが
+/// それぞれ独自のSearchインスタンスを持ってチャンク単位で処理する。
+fn process_file_with_search(cli: &Cli, process_count: u64) -> Result<()> {
+    let search_depth = cli.search_depth.expect("search_depth should be Some");
+
+    // 進捗バー設定
+    let progress = ProgressBar::new(process_count);
+    progress.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({per_sec}) {msg}")
+            .expect("valid template"),
+    );
+
+    // 入力ファイルを読み込み
+    let in_file = File::open(&cli.input)
+        .with_context(|| format!("Failed to open {}", cli.input.display()))?;
+    let mut reader = BufReader::new(in_file);
+
+    // 全レコードを読み込み
+    let mut records: Vec<[u8; PackedSfenValue::SIZE]> = Vec::with_capacity(process_count as usize);
+    let mut buffer = [0u8; PackedSfenValue::SIZE];
+
+    progress.set_message("Reading...");
+    for _ in 0..process_count {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            progress.abandon_with_message("Interrupted");
+            return Ok(());
+        }
+
+        match reader.read_exact(&mut buffer) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e.into()),
+        }
+
+        records.push(buffer);
+    }
+
+    let actual_count = records.len();
+    eprintln!("Read {actual_count} records");
+
+    // スレッド数を決定（0なら利用可能なCPU数）
+    let num_threads = if cli.threads > 0 {
+        cli.threads
+    } else {
+        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+    };
+    eprintln!("Using {num_threads} worker threads for search");
+
+    // レコードをチャンクに分割
+    let chunk_size = records.len().div_ceil(num_threads);
+    let chunks: Vec<Vec<[u8; PackedSfenValue::SIZE]>> =
+        records.chunks(chunk_size).map(|chunk| chunk.to_vec()).collect();
+
+    // 設定値をキャプチャ
+    let hash_mb = cli.hash_mb;
+    let score_clip = cli.score_clip;
+    let skip_in_check = cli.skip_in_check;
+    let source_fv_scale = cli.source_fv_scale;
+    let target_fv_scale = cli.target_fv_scale;
+    let verbose = cli.verbose;
+
+    // カウンタ
+    let error_count = AtomicU64::new(0);
+    let clipped_count = AtomicU64::new(0);
+    let skipped_count = AtomicU64::new(0);
+
+    // 結果収集用チャネル
+    let (tx, rx) = mpsc::channel::<SearchProcessResult>();
+
+    // 進捗カウンタ（スレッド間共有）
+    let progress_arc = std::sync::Arc::new(progress);
+
+    progress_arc.set_message("Processing...");
+
+    // ワーカースレッドを起動
+    let handles: Vec<_> = chunks
+        .into_iter()
+        .enumerate()
+        .map(|(chunk_idx, chunk)| {
+            let tx = tx.clone();
+            let progress = std::sync::Arc::clone(&progress_arc);
+
+            thread::Builder::new()
+                .stack_size(SEARCH_STACK_SIZE)
+                .spawn(move || {
+                    // 各ワーカースレッドで独自のSearchインスタンスを作成
+                    // 各ワーカーは1スレッドで探索（マルチスレッド探索を無効化）
+                    let mut search = Search::new(hash_mb);
+                    search.set_num_threads(1);
+
+                    for (record_idx, record) in chunk.iter().enumerate() {
+                        if INTERRUPTED.load(Ordering::SeqCst) {
+                            break;
+                        }
+
+                        let result = process_record_with_search(
+                            record,
+                            &mut search,
+                            search_depth,
+                            score_clip,
+                            skip_in_check,
+                            source_fv_scale,
+                            target_fv_scale,
+                        );
+
+                        let global_idx = chunk_idx * chunk_size + record_idx;
+                        let send_result = SearchProcessResult {
+                            index: global_idx,
+                            result,
+                        };
+
+                        if tx.send(send_result).is_err() {
+                            break;
+                        }
+
+                        progress.inc(1);
+                    }
+                })
+                .expect("Failed to spawn worker thread")
+        })
+        .collect();
+
+    // 送信側をドロップ（全ワーカーが終了したらチャネルがクローズされる）
+    drop(tx);
+
+    // 結果を収集（順序を保持するためにインデックス付きで受け取る）
+    let mut results_with_index: Vec<(usize, ProcessResult)> = Vec::with_capacity(actual_count);
+    for search_result in rx {
+        results_with_index.push((search_result.index, search_result.result));
+    }
+
+    // インデックスでソート
+    results_with_index.sort_by_key(|(idx, _)| *idx);
+
+    // 結果を処理
+    let mut processed_records: Vec<[u8; PackedSfenValue::SIZE]> = Vec::with_capacity(actual_count);
+    for (_, result) in results_with_index {
+        match result {
+            ProcessResult::Ok(record, clipped) => {
+                if clipped {
+                    clipped_count.fetch_add(1, Ordering::Relaxed);
+                }
+                processed_records.push(record);
+            }
+            ProcessResult::Skip => {
+                skipped_count.fetch_add(1, Ordering::Relaxed);
+            }
+            ProcessResult::Error(e) => {
+                error_count.fetch_add(1, Ordering::Relaxed);
+                if verbose {
+                    eprintln!("Error processing record: {e}");
+                }
+            }
+        }
+    }
+
+    // ワーカースレッドの終了を待機
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    progress_arc.finish_with_message("Done");
+
+    let final_errors = error_count.load(Ordering::SeqCst);
+    let final_clipped = clipped_count.load(Ordering::SeqCst);
+    let final_skipped = skipped_count.load(Ordering::SeqCst);
+    if final_errors > 0 {
+        eprintln!("Note: {final_errors} positions had errors");
+    }
+    if final_skipped > 0 {
+        eprintln!(
+            "Skipped (in check): {final_skipped} ({:.2}%)",
+            final_skipped as f64 / actual_count as f64 * 100.0
+        );
+    }
+    eprintln!(
+        "Clipped scores: {final_clipped} ({:.2}%)",
+        final_clipped as f64 / actual_count as f64 * 100.0
+    );
+
+    // 出力ファイルに書き込み
+    eprintln!("Writing output...");
+    let out_file = File::create(&cli.output)
+        .with_context(|| format!("Failed to create {}", cli.output.display()))?;
+    let mut writer = BufWriter::new(out_file);
+
+    for record in &processed_records {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            break;
+        }
+        writer.write_all(record)?;
+    }
+
+    writer.flush()?;
+    eprintln!("Wrote {} records", processed_records.len());
+
+    Ok(())
+}
+
+/// 探索結果（インデックス付き）
+struct SearchProcessResult {
+    index: usize,
+    result: ProcessResult,
+}
+
+/// 深さ指定探索で1レコードを処理
+fn process_record_with_search(
+    record: &[u8; PackedSfenValue::SIZE],
+    search: &mut Search,
+    depth: i32,
+    score_clip: i16,
+    skip_in_check: bool,
+    source_fv_scale: i32,
+    target_fv_scale: i32,
+) -> ProcessResult {
+    // PackedSfenValueを読み込み
+    let psv = match PackedSfenValue::from_bytes(record) {
+        Some(p) => p,
+        None => return ProcessResult::Error(anyhow::anyhow!("Failed to parse PackedSfenValue")),
+    };
+
+    // PackedSfen → SFEN → Position
+    let sfen = match unpack_sfen(&psv.sfen) {
+        Ok(s) => s,
+        Err(e) => return ProcessResult::Error(anyhow::anyhow!("Failed to unpack SFEN: {e}")),
+    };
+
+    let mut pos = Position::new();
+    if let Err(e) = pos.set_sfen(&sfen) {
+        return ProcessResult::Error(anyhow::anyhow!("Failed to set SFEN: {e:?}"));
+    }
+
+    // 王手局面をスキップ
+    if skip_in_check && pos.in_check() {
+        return ProcessResult::Skip;
+    }
+
+    // 探索を実行
+    let mut limits = LimitsType::default();
+    limits.depth = depth;
+    limits.set_start_time();
+
+    let search_result = search.go(&mut pos, limits, None::<fn(&engine_core::search::SearchInfo)>);
+
+    // 探索結果のスコアを取得（STM視点）
+    let raw_score: i32 = search_result.score.into();
+
+    // FV_SCALE補正
+    let scaled_score = raw_score * source_fv_scale / target_fv_scale;
+
+    // スコアをクリップ
+    let clipped = scaled_score.abs() > score_clip as i32;
+    let new_score = scaled_score.clamp(-score_clip as i32, score_clip as i32) as i16;
+
+    // 新しいPackedSfenValueを作成（局面は変更しない）
+    let new_psv = PackedSfenValue {
+        sfen: psv.sfen,
+        score: new_score,
+        move16: 0, // 無効値
+        game_ply: psv.game_ply,
+        game_result: psv.game_result,
         padding: 0,
     };
 
