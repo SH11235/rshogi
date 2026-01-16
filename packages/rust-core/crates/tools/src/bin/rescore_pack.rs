@@ -8,22 +8,27 @@
 //! ```bash
 //! # NNUE静的評価で再スコア（高速）
 //! cargo run --release -p tools --bin rescore_pack -- \
-//!   --input data.pack --output rescored.pack \
+//!   --input data.pack --output-dir rescored/ \
+//!   --nnue path/to/nn.bin
+//!
+//! # 複数ファイルを処理（glob パターン）
+//! cargo run --release -p tools --bin rescore_pack -- \
+//!   --input "data/*.bin" --output-dir rescored/ \
 //!   --nnue path/to/nn.bin
 //!
 //! # qsearch評価で再スコア（より正確）
 //! cargo run --release -p tools --bin rescore_pack -- \
-//!   --input data.pack --output rescored.pack \
+//!   --input data.pack --output-dir rescored/ \
 //!   --nnue path/to/nn.bin --use-qsearch
 //!
 //! # qsearch leaf置換も同時に実行
 //! cargo run --release -p tools --bin rescore_pack -- \
-//!   --input data.pack --output rescored.pack \
+//!   --input data.pack --output-dir rescored/ \
 //!   --nnue path/to/nn.bin --apply-qsearch-leaf
 //!
 //! # 深さ指定探索で再スコア（最も正確だが低速）
 //! cargo run --release -p tools --bin rescore_pack -- \
-//!   --input data.pack --output rescored_depth8.pack \
+//!   --input "data/*.bin" --output-dir rescored/ \
 //!   --nnue path/to/nn.bin \
 //!   --search-depth 8 \
 //!   --hash-mb 256 \
@@ -32,10 +37,11 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use glob::glob;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::cell::RefCell;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -59,13 +65,15 @@ const SEARCH_STACK_SIZE: usize = 64 * 1024 * 1024;
     about = "packファイルの評価値をNNUEで再評価\n\n局面とスコアの整合性を確保するためのツール"
 )]
 struct Cli {
-    /// 入力packファイル
-    #[arg(short, long)]
-    input: PathBuf,
+    /// 入力packファイル（複数指定可、globパターン対応）
+    /// 例: --input file1.bin --input file2.bin
+    /// 例: --input "data/*.bin"
+    #[arg(short, long, required = true, num_args = 1..)]
+    input: Vec<String>,
 
-    /// 出力packファイル
+    /// 出力ディレクトリ（入力ファイル名で出力）
     #[arg(short, long)]
-    output: PathBuf,
+    output_dir: PathBuf,
 
     /// NNUEモデルファイル（必須）
     #[arg(long)]
@@ -83,6 +91,11 @@ struct Cli {
     /// 置換表サイズ（MB）、--search-depth使用時のみ有効
     #[arg(long, default_value_t = 64)]
     hash_mb: usize,
+
+    /// 探索ノード数の上限（0=無制限）、--search-depth使用時のみ有効
+    /// 複雑な局面での探索時間爆発を防ぐため、100万〜1000万程度を推奨
+    #[arg(long, default_value_t = 0)]
+    max_nodes: u64,
 
     /// qsearch leaf置換も同時に適用
     #[arg(long)]
@@ -123,6 +136,11 @@ struct Cli {
     /// 詳細出力
     #[arg(short, long)]
     verbose: bool,
+
+    /// 処理完了後に入力ファイルを削除
+    /// ディスク容量節約のため、各ファイルの処理完了後に入力を削除
+    #[arg(long)]
+    delete_input: bool,
 }
 
 /// 処理中にCtrl-Cが押されたかを追跡
@@ -133,14 +151,43 @@ const QSEARCH_ALPHA_INIT: i32 = -30000;
 /// qsearchの初期beta値
 const QSEARCH_BETA_INIT: i32 = 30000;
 
+/// 入力パターンをglobで展開してファイルリストを取得
+fn expand_input_patterns(patterns: &[String]) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+
+    for pattern in patterns {
+        // まず通常のファイルとして存在するか確認
+        let path = PathBuf::from(pattern);
+        if path.exists() && path.is_file() {
+            files.push(path);
+            continue;
+        }
+
+        // globパターンとして展開
+        let matches: Vec<_> = glob(pattern)
+            .with_context(|| format!("Invalid glob pattern: {pattern}"))?
+            .filter_map(|entry| entry.ok())
+            .filter(|p| p.is_file())
+            .collect();
+
+        if matches.is_empty() {
+            // ファイルが見つからない場合はエラー
+            anyhow::bail!("No files found matching pattern: {pattern}");
+        }
+
+        files.extend(matches);
+    }
+
+    // 重複を除去してソート
+    files.sort();
+    files.dedup();
+
+    Ok(files)
+}
+
 fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
-
-    // 入力ファイルの存在確認
-    if !cli.input.exists() {
-        anyhow::bail!("Input file not found: {}", cli.input.display());
-    }
 
     // --use-qsearch と --search-depth は排他
     if cli.use_qsearch && cli.search_depth.is_some() {
@@ -150,6 +197,21 @@ fn main() -> Result<()> {
     // --search-depth 指定時に --apply-qsearch-leaf が有効なら警告
     if cli.search_depth.is_some() && cli.apply_qsearch_leaf {
         eprintln!("Warning: --apply-qsearch-leaf is ignored when --search-depth is specified");
+    }
+
+    // 入力ファイルをglobパターンで展開
+    let input_files = expand_input_patterns(&cli.input)?;
+    if input_files.is_empty() {
+        anyhow::bail!("No input files found matching the patterns");
+    }
+
+    eprintln!("Found {} input file(s)", input_files.len());
+
+    // 出力ディレクトリの作成
+    if !cli.output_dir.exists() {
+        fs::create_dir_all(&cli.output_dir).with_context(|| {
+            format!("Failed to create output directory: {}", cli.output_dir.display())
+        })?;
     }
 
     // NNUEモデルのロード
@@ -176,25 +238,7 @@ fn main() -> Result<()> {
             });
     }
 
-    // 入力ファイルサイズからレコード数を計算
-    let file_size = std::fs::metadata(&cli.input)?.len();
-    let record_count = file_size / PackedSfenValue::SIZE as u64;
-
-    if file_size % PackedSfenValue::SIZE as u64 != 0 {
-        eprintln!(
-            "Warning: File size ({file_size}) is not a multiple of record size ({})",
-            PackedSfenValue::SIZE
-        );
-    }
-
-    let process_count = if cli.limit > 0 && cli.limit < record_count {
-        cli.limit
-    } else {
-        record_count
-    };
-
-    eprintln!("Input: {} ({record_count} records)", cli.input.display());
-    eprintln!("Processing {process_count} records");
+    // 処理設定の表示
     eprintln!(
         "Mode: {}",
         if let Some(depth) = cli.search_depth {
@@ -207,6 +251,11 @@ fn main() -> Result<()> {
     );
     if cli.search_depth.is_some() {
         eprintln!("Hash size: {} MB", cli.hash_mb);
+        if cli.max_nodes > 0 {
+            eprintln!("Max nodes: {} (per position)", cli.max_nodes);
+        } else {
+            eprintln!("Max nodes: unlimited");
+        }
     }
     eprintln!(
         "qsearch leaf replacement: {}",
@@ -224,25 +273,90 @@ fn main() -> Result<()> {
         cli.target_fv_scale,
         cli.source_fv_scale as f64 / cli.target_fv_scale as f64
     );
+    eprintln!("Output directory: {}", cli.output_dir.display());
+    if cli.delete_input {
+        eprintln!("Delete input after processing: yes");
+    }
+    eprintln!();
 
-    // 処理実行
-    if cli.search_depth.is_some() {
-        process_file_with_search(&cli, process_count)?;
-    } else {
-        process_file(&cli, process_count)?;
+    // 各ファイルを処理
+    let total_files = input_files.len();
+    for (file_idx, input_path) in input_files.iter().enumerate() {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            eprintln!("Processing interrupted");
+            break;
+        }
+
+        // 出力ファイルパスを生成
+        let output_path = cli.output_dir.join(
+            input_path
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("Invalid input file name"))?,
+        );
+
+        eprintln!(
+            "=== [{}/{}] Processing: {} ===",
+            file_idx + 1,
+            total_files,
+            input_path.display()
+        );
+
+        // ファイルサイズからレコード数を計算
+        let file_size = fs::metadata(input_path)?.len();
+        let record_count = file_size / PackedSfenValue::SIZE as u64;
+
+        if file_size % PackedSfenValue::SIZE as u64 != 0 {
+            eprintln!(
+                "Warning: File size ({file_size}) is not a multiple of record size ({})",
+                PackedSfenValue::SIZE
+            );
+        }
+
+        let process_count = if cli.limit > 0 && cli.limit < record_count {
+            cli.limit
+        } else {
+            record_count
+        };
+
+        eprintln!("Records: {record_count}, Processing: {process_count}");
+
+        // 処理実行
+        if cli.search_depth.is_some() {
+            process_file_with_search(&cli, input_path, &output_path, process_count)?;
+        } else {
+            process_file(&cli, input_path, &output_path, process_count)?;
+        }
+
+        if !INTERRUPTED.load(Ordering::SeqCst) {
+            eprintln!("Output: {}", output_path.display());
+
+            // 処理完了後に入力ファイルを削除
+            if cli.delete_input {
+                fs::remove_file(input_path).with_context(|| {
+                    format!("Failed to delete input file: {}", input_path.display())
+                })?;
+                eprintln!("Deleted input: {}", input_path.display());
+            }
+        }
+        eprintln!();
     }
 
     if INTERRUPTED.load(Ordering::SeqCst) {
-        eprintln!("Note: Processing was interrupted, output may be incomplete");
+        eprintln!("Note: Processing was interrupted, some outputs may be incomplete");
     } else {
-        eprintln!("Output: {}", cli.output.display());
+        eprintln!("All {} file(s) processed successfully", total_files);
     }
 
     Ok(())
 }
 
 /// ファイルを処理
-fn process_file(cli: &Cli, process_count: u64) -> Result<()> {
+fn process_file(
+    cli: &Cli,
+    input_path: &PathBuf,
+    output_path: &PathBuf,
+    process_count: u64,
+) -> Result<()> {
     // 進捗バー設定
     let progress = ProgressBar::new(process_count);
     progress.set_style(
@@ -252,8 +366,8 @@ fn process_file(cli: &Cli, process_count: u64) -> Result<()> {
     );
 
     // 入力ファイルを読み込み
-    let in_file = File::open(&cli.input)
-        .with_context(|| format!("Failed to open {}", cli.input.display()))?;
+    let in_file = File::open(input_path)
+        .with_context(|| format!("Failed to open {}", input_path.display()))?;
     let mut reader = BufReader::new(in_file);
 
     // 全レコードを読み込み
@@ -375,8 +489,8 @@ fn process_file(cli: &Cli, process_count: u64) -> Result<()> {
 
     // 出力ファイルに書き込み
     eprintln!("Writing output...");
-    let out_file = File::create(&cli.output)
-        .with_context(|| format!("Failed to create {}", cli.output.display()))?;
+    let out_file = File::create(output_path)
+        .with_context(|| format!("Failed to create {}", output_path.display()))?;
     let mut writer = BufWriter::new(out_file);
 
     for record in &processed_records {
@@ -516,7 +630,12 @@ fn process_record(
 ///
 /// 探索は重いため、rayon並列処理ではなく、複数のワーカースレッドが
 /// それぞれ独自のSearchインスタンスを持ってチャンク単位で処理する。
-fn process_file_with_search(cli: &Cli, process_count: u64) -> Result<()> {
+fn process_file_with_search(
+    cli: &Cli,
+    input_path: &PathBuf,
+    output_path: &PathBuf,
+    process_count: u64,
+) -> Result<()> {
     let search_depth = cli.search_depth.expect("search_depth should be Some");
 
     // 進捗バー設定
@@ -528,8 +647,8 @@ fn process_file_with_search(cli: &Cli, process_count: u64) -> Result<()> {
     );
 
     // 入力ファイルを読み込み
-    let in_file = File::open(&cli.input)
-        .with_context(|| format!("Failed to open {}", cli.input.display()))?;
+    let in_file = File::open(input_path)
+        .with_context(|| format!("Failed to open {}", input_path.display()))?;
     let mut reader = BufReader::new(in_file);
 
     // 全レコードを読み込み
@@ -570,6 +689,7 @@ fn process_file_with_search(cli: &Cli, process_count: u64) -> Result<()> {
 
     // 設定値をキャプチャ
     let hash_mb = cli.hash_mb;
+    let max_nodes = cli.max_nodes;
     let score_clip = cli.score_clip;
     let skip_in_check = cli.skip_in_check;
     let source_fv_scale = cli.source_fv_scale;
@@ -614,6 +734,7 @@ fn process_file_with_search(cli: &Cli, process_count: u64) -> Result<()> {
                             record,
                             &mut search,
                             search_depth,
+                            max_nodes,
                             score_clip,
                             skip_in_check,
                             source_fv_scale,
@@ -697,8 +818,8 @@ fn process_file_with_search(cli: &Cli, process_count: u64) -> Result<()> {
 
     // 出力ファイルに書き込み
     eprintln!("Writing output...");
-    let out_file = File::create(&cli.output)
-        .with_context(|| format!("Failed to create {}", cli.output.display()))?;
+    let out_file = File::create(output_path)
+        .with_context(|| format!("Failed to create {}", output_path.display()))?;
     let mut writer = BufWriter::new(out_file);
 
     for record in &processed_records {
@@ -725,6 +846,7 @@ fn process_record_with_search(
     record: &[u8; PackedSfenValue::SIZE],
     search: &mut Search,
     depth: i32,
+    max_nodes: u64,
     score_clip: i16,
     skip_in_check: bool,
     source_fv_scale: i32,
@@ -755,6 +877,9 @@ fn process_record_with_search(
     // 探索を実行
     let mut limits = LimitsType::default();
     limits.depth = depth;
+    if max_nodes > 0 {
+        limits.nodes = max_nodes;
+    }
     limits.set_start_time();
 
     let search_result = search.go(&mut pos, limits, None::<fn(&engine_core::search::SearchInfo)>);
