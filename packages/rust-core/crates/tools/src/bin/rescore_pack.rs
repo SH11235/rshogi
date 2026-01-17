@@ -288,11 +288,18 @@ fn main() -> Result<()> {
         }
 
         // 出力ファイルパスを生成
-        let output_path = cli.output_dir.join(
-            input_path
-                .file_name()
-                .ok_or_else(|| anyhow::anyhow!("Invalid input file name"))?,
-        );
+        let output_path =
+            cli.output_dir.join(input_path.file_name().ok_or_else(|| {
+                anyhow::anyhow!("Invalid input file name: {}", input_path.display())
+            })?);
+
+        // 入力と出力が同じパスの場合はエラー（--delete-input でデータ消失を防ぐ）
+        if input_path.canonicalize().ok() == output_path.canonicalize().ok() {
+            anyhow::bail!(
+                "Input and output paths are the same: {}. Use a different --output-dir.",
+                input_path.display()
+            );
+        }
 
         eprintln!(
             "=== [{}/{}] Processing: {} ===",
@@ -332,10 +339,18 @@ fn main() -> Result<()> {
 
             // 処理完了後に入力ファイルを削除
             if cli.delete_input {
-                fs::remove_file(input_path).with_context(|| {
-                    format!("Failed to delete input file: {}", input_path.display())
-                })?;
-                eprintln!("Deleted input: {}", input_path.display());
+                let output_size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                if output_size > 0 {
+                    fs::remove_file(input_path).with_context(|| {
+                        format!("Failed to delete input file: {}", input_path.display())
+                    })?;
+                    eprintln!("Deleted input: {}", input_path.display());
+                } else {
+                    eprintln!(
+                        "Warning: Output file is empty or missing, keeping input file: {}",
+                        input_path.display()
+                    );
+                }
             }
         }
         eprintln!();
@@ -392,6 +407,13 @@ fn process_file(
 
     let actual_count = records.len();
     eprintln!("Read {actual_count} records");
+
+    if actual_count == 0 {
+        eprintln!("Warning: No records to process, creating empty output file");
+        progress.finish_with_message("Done (empty)");
+        File::create(output_path)?;
+        return Ok(());
+    }
 
     // エラーカウンタ
     let error_count = AtomicU64::new(0);
@@ -674,6 +696,13 @@ fn process_file_with_search(
     let actual_count = records.len();
     eprintln!("Read {actual_count} records");
 
+    // 空ファイルガード（chunks(0)でpanicを防ぐ）
+    if actual_count == 0 {
+        eprintln!("Warning: No records to process, creating empty output file");
+        File::create(output_path)?;
+        return Ok(());
+    }
+
     // スレッド数を決定（0なら利用可能なCPU数）
     let num_threads = if cli.threads > 0 {
         cli.threads
@@ -682,8 +711,21 @@ fn process_file_with_search(
     };
     eprintln!("Using {num_threads} worker threads for search");
 
-    // レコードをチャンクに分割
-    let chunk_size = records.len().div_ceil(num_threads);
+    // メモリ使用量の警告（各スレッドが独自の置換表を持つ）
+    let total_hash_mb = cli.hash_mb * num_threads;
+    eprintln!(
+        "Total hash table size: {} MB ({} MB × {} threads)",
+        total_hash_mb, cli.hash_mb, num_threads
+    );
+    if total_hash_mb > 4096 {
+        eprintln!(
+            "Warning: Large memory allocation ({} GB). Consider reducing --hash-mb or --threads.",
+            total_hash_mb / 1024
+        );
+    }
+
+    // レコードをチャンクに分割（chunk_sizeは最低1を保証）
+    let chunk_size = records.len().div_ceil(num_threads).max(1);
     let chunks: Vec<Vec<[u8; PackedSfenValue::SIZE]>> =
         records.chunks(chunk_size).map(|chunk| chunk.to_vec()).collect();
 
