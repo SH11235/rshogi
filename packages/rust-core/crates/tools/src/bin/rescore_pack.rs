@@ -97,6 +97,11 @@ struct Cli {
     #[arg(long, default_value_t = 0)]
     max_nodes: u64,
 
+    /// 1局面あたりの探索時間上限（ミリ秒、0=無制限）、--search-depth使用時のみ有効
+    /// 複雑な局面での探索時間爆発を防ぐため、1000〜10000程度を推奨
+    #[arg(long, default_value_t = 0)]
+    max_time: i64,
+
     /// qsearch leaf置換も同時に適用
     #[arg(long)]
     apply_qsearch_leaf: bool,
@@ -256,6 +261,11 @@ fn main() -> Result<()> {
         } else {
             eprintln!("Max nodes: unlimited");
         }
+        if cli.max_time > 0 {
+            eprintln!("Max time: {} ms (per position)", cli.max_time);
+        } else {
+            eprintln!("Max time: unlimited");
+        }
     }
     eprintln!(
         "qsearch leaf replacement: {}",
@@ -326,6 +336,16 @@ fn main() -> Result<()> {
         };
 
         eprintln!("Records: {record_count}, Processing: {process_count}");
+
+        // 必要メモリの概算と警告（入力バッファ + 出力バッファ）
+        let required_memory_mb =
+            (process_count as usize * PackedSfenValue::SIZE * 2) / (1024 * 1024);
+        if required_memory_mb > 1024 {
+            eprintln!(
+                "Warning: Estimated memory usage: {} GB. Ensure sufficient RAM is available.",
+                required_memory_mb / 1024
+            );
+        }
 
         // 処理実行
         if cli.search_depth.is_some() {
@@ -732,6 +752,7 @@ fn process_file_with_search(
     // 設定値をキャプチャ
     let hash_mb = cli.hash_mb;
     let max_nodes = cli.max_nodes;
+    let max_time = cli.max_time;
     let score_clip = cli.score_clip;
     let skip_in_check = cli.skip_in_check;
     let source_fv_scale = cli.source_fv_scale;
@@ -777,6 +798,7 @@ fn process_file_with_search(
                             &mut search,
                             search_depth,
                             max_nodes,
+                            max_time,
                             score_clip,
                             skip_in_check,
                             source_fv_scale,
@@ -889,6 +911,7 @@ fn process_record_with_search(
     search: &mut Search,
     depth: i32,
     max_nodes: u64,
+    max_time: i64,
     score_clip: i16,
     skip_in_check: bool,
     source_fv_scale: i32,
@@ -921,6 +944,9 @@ fn process_record_with_search(
     limits.depth = depth;
     if max_nodes > 0 {
         limits.nodes = max_nodes;
+    }
+    if max_time > 0 {
+        limits.movetime = max_time;
     }
     limits.set_start_time();
 
