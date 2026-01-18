@@ -6,6 +6,7 @@ converted_openings/opening_book_*.bin.gz
 converted_openings/opening_book_full.bin
 
 target/
+target_before
 
 # Coverage reports
 tarpaulin-report.html
@@ -64,3 +65,5 @@ scripts/analysis/__pycache__/
 scripts/perf.conf
 
 docs/experiment-archive
+
+data/

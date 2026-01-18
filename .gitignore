@@ -41,14 +41,6 @@ test-results/
 # Coverage
 packages/web/coverage/
 
-# Rust build artifacts
-packages/rust-core/target/
-packages/engine-wasm/pkg/
-packages/engine-wasm/pkg-threaded/
-target/
-packages/rust-core/data/floodgate/raw/
-packages/rust-core/target_before
-
 # private memo
 memo/
 
@@ -56,6 +48,6 @@ _shared/*
 
 runs_local/
 .serena/
-packages/rust-core/.cargo/config.toml
-packages/rust-core/*.nnue
-packages/rust-core/eval/
+
+packages/engine-wasm/pkg/
+packages/engine-wasm/pkg-threaded/
