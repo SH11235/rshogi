@@ -1616,4 +1616,115 @@ mod tests {
 
         println!("Successfully loaded: {}", network.architecture_name());
     }
+
+    #[test]
+    fn test_screlu_detection_from_arch() {
+        // SCReLU サフィックスありの場合
+        let arch_screlu = "Features=HalfKA_hm[73305->256x2]-SCReLU";
+        assert!(arch_screlu.contains("SCReLU"));
+
+        // SCReLU サフィックスなしの場合
+        let arch_crelu = "Features=HalfKA_hm[73305->256x2]";
+        assert!(!arch_crelu.contains("SCReLU"));
+
+        // ClippedReLU 明示の場合も SCReLU なし
+        let arch_clipped = "Features=HalfKA_hm[73305->256x2],Network=ClippedReLU";
+        assert!(!arch_clipped.contains("SCReLU"));
+    }
+
+    #[test]
+    fn test_transform_raw() {
+        // FeatureTransformer の transform_raw() テスト
+        let l1 = 32; // 小さいサイズでテスト
+
+        // アキュムレータを作成
+        let mut acc = AccumulatorHalfKADynamic::new(l1);
+
+        // テストデータを設定
+        for i in 0..l1 {
+            acc.accumulation[0][i] = (i as i16) * 10; // Black: 0, 10, 20, ...
+            acc.accumulation[1][i] = -((i as i16) * 5); // White: 0, -5, -10, ...
+        }
+        acc.computed_accumulation = true;
+
+        // ダミーの FeatureTransformer を作成
+        let ft = FeatureTransformerHalfKADynamic {
+            biases: vec![0i16; l1],
+            weights: AlignedBox::new_zeroed(HALFKA_HM_DIMENSIONS * l1),
+            l1,
+            input_dim: HALFKA_HM_DIMENSIONS,
+        };
+
+        // transform_raw() を呼び出し（Black の手番）
+        let mut output = vec![0i16; l1 * 2];
+        ft.transform_raw(&acc, Color::Black, &mut output);
+
+        // Black視点が先頭、White視点が後続
+        for i in 0..l1 {
+            assert_eq!(output[i], (i as i16) * 10, "Black perspective mismatch at {i}");
+            assert_eq!(output[l1 + i], -((i as i16) * 5), "White perspective mismatch at {i}");
+        }
+
+        // transform_raw() を呼び出し（White の手番）
+        let mut output_white = vec![0i16; l1 * 2];
+        ft.transform_raw(&acc, Color::White, &mut output_white);
+
+        // White視点が先頭、Black視点が後続
+        for i in 0..l1 {
+            assert_eq!(output_white[i], -((i as i16) * 5), "White perspective mismatch at {i}");
+            assert_eq!(output_white[l1 + i], (i as i16) * 10, "Black perspective mismatch at {i}");
+        }
+    }
+
+    #[test]
+    fn test_architecture_name_with_screlu() {
+        // use_screlu = true の場合
+        let name_screlu = {
+            let activation = if true { "-SCReLU" } else { "" };
+            format!("HalfKADynamic {}x2-{}-{}{activation}", 256, 32, 32)
+        };
+        assert_eq!(name_screlu, "HalfKADynamic 256x2-32-32-SCReLU");
+
+        // use_screlu = false の場合
+        let name_crelu = {
+            let activation = if false { "-SCReLU" } else { "" };
+            format!("HalfKADynamic {}x2-{}-{}{activation}", 256, 32, 32)
+        };
+        assert_eq!(name_crelu, "HalfKADynamic 256x2-32-32");
+    }
+
+    #[test]
+    fn test_propagate_i32() {
+        // AffineTransformDynamic の propagate_i32() テスト
+        let input_dim = 8;
+        let output_dim = 4;
+        let padded_input_dim = AffineTransformDynamic::padded_input(input_dim);
+
+        // 重みとバイアスを設定
+        let mut weights = AlignedBox::new_zeroed(output_dim * padded_input_dim);
+        // 対角成分を1に設定（最初の4入力だけ使用）
+        for i in 0..output_dim {
+            weights[i * padded_input_dim + i] = 1;
+        }
+
+        let affine = AffineTransformDynamic {
+            biases: vec![100, 200, 300, 400],
+            weights,
+            input_dim,
+            padded_input_dim,
+            output_dim,
+        };
+
+        // i32 入力
+        let input = vec![10i32, 20, 30, 40, 0, 0, 0, 0];
+        let mut output = vec![0i32; output_dim];
+
+        affine.propagate_i32(&input, &mut output);
+
+        // output[i] = bias[i] + input[i] * 1
+        assert_eq!(output[0], 100 + 10);
+        assert_eq!(output[1], 200 + 20);
+        assert_eq!(output[2], 300 + 30);
+        assert_eq!(output[3], 400 + 40);
+    }
 }

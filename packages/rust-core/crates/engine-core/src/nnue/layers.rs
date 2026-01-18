@@ -1000,8 +1000,10 @@ impl<const DIM: usize> ClippedReLU<DIM> {
 ///
 /// 現在は NetworkHalfKADynamic の evaluate_screlu で SCReLUDynamic を使用。
 /// この静的サイズ版は将来の最適化用に残している。
+#[allow(dead_code)]
 pub struct SCReLU<const DIM: usize>;
 
+#[allow(dead_code)]
 impl<const DIM: usize> SCReLU<DIM> {
     /// 量子化係数 QA（クランプ上限）
     pub const QA: i16 = super::constants::SCRELU_QA;
