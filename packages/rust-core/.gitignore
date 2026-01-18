@@ -44,6 +44,10 @@ complete-result.json
 
 memo/
 
+# Evaluation function files (large binary files)
+eval/*
+!eval/.gitkeep
+
 # Ignore tool-generated manifests under run outputs
 runs
 

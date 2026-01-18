@@ -1000,10 +1000,8 @@ impl<const DIM: usize> ClippedReLU<DIM> {
 ///
 /// 現在は NetworkHalfKADynamic の evaluate_screlu で SCReLUDynamic を使用。
 /// この静的サイズ版は将来の最適化用に残している。
-#[allow(dead_code)]
 pub struct SCReLU<const DIM: usize>;
 
-#[allow(dead_code)]
 impl<const DIM: usize> SCReLU<DIM> {
     /// 量子化係数 QA（クランプ上限）
     pub const QA: i16 = super::constants::SCRELU_QA;
@@ -1015,8 +1013,14 @@ impl<const DIM: usize> SCReLU<DIM> {
     ///
     /// # SIMD最適化
     ///
-    /// 現在はスカラー実装のみ。Phase 4 で SIMD 最適化予定。
+    /// 現在はスカラー実装のみ。ベンチマーク結果（ClippedReLU比較）では、
+    /// サイズ512で静的スカラー版が動的SIMD版の約2.7倍高速であり、
+    /// コンパイラの自動ベクトル化が効いている可能性があるため、
+    /// SIMD手動実装の優先度は低い。
+    ///
+    /// 参照: `bench_clipped_relu_multiple_sizes` テスト
     #[inline]
+    #[allow(dead_code)] // i32出力版は将来の拡張用に保持
     pub fn propagate_i16(input: &[i16; DIM], output: &mut [i32; DIM]) {
         // TODO: Phase 4 で AVX2/SSE2/WASM SIMD 最適化
         for i in 0..DIM {
@@ -1035,12 +1039,41 @@ impl<const DIM: usize> SCReLU<DIM> {
     /// - `output`: SCReLU 適用後の出力 (i32)
     /// - `scale_shift`: 入力を右シフトするビット数（スケール調整用）
     #[inline]
+    #[allow(dead_code)] // i32出力版は将来の拡張用に保持
     pub fn propagate_i32(input: &[i32; DIM], output: &mut [i32; DIM], scale_shift: u32) {
-        // TODO: Phase 4 で AVX2/SSE2/WASM SIMD 最適化
         for i in 0..DIM {
             let shifted = input[i] >> scale_shift;
             let clamped = shifted.clamp(0, i32::from(Self::QA));
             output[i] = clamped * clamped;
+        }
+    }
+
+    /// i16入力版 SCReLU (FeatureTransformer直後用)
+    ///
+    /// Accumulator の i16 値を受け取り、SCReLU を適用して u8 を出力。
+    /// clamp(x, 0, 127)² >> 7 → u8 (0〜127)
+    #[inline]
+    pub fn propagate_i16_to_u8(input: &[i16; DIM], output: &mut [u8; DIM]) {
+        for i in 0..DIM {
+            let clamped = i32::from(input[i]).clamp(0, i32::from(Self::QA));
+            let squared = clamped * clamped;
+            output[i] = (squared >> 7).clamp(0, 127) as u8;
+        }
+    }
+
+    /// i32入力版 SCReLU (中間層用)
+    ///
+    /// AffineTransform の i32 出力を受け取り、SCReLU を適用して u8 を出力。
+    /// Stockfish 互換のスケーリング: x² >> (2 * WEIGHT_SCALE_BITS + 7) = x² >> 19
+    ///
+    /// 等価な計算: clamp(x >> 6, 0, 127)² >> 7
+    #[inline]
+    pub fn propagate_i32_to_u8(input: &[i32; DIM], output: &mut [u8; DIM]) {
+        for i in 0..DIM {
+            let shifted = input[i] >> 6; // WEIGHT_SCALE_BITS
+            let clamped = shifted.clamp(0, i32::from(Self::QA));
+            let squared = clamped * clamped;
+            output[i] = (squared >> 7).clamp(0, 127) as u8;
         }
     }
 }
@@ -1053,6 +1086,7 @@ pub struct SCReLUDynamic;
 
 impl SCReLUDynamic {
     /// 量子化係数 QA（クランプ上限）
+    #[allow(dead_code)] // 内部定数、将来の拡張用に保持
     pub const QA: i16 = super::constants::SCRELU_QA;
 
     /// i16入力版 (FeatureTransformer直後用)
@@ -1067,6 +1101,7 @@ impl SCReLUDynamic {
     /// - WASM SIMD128: 8要素ずつ処理（i16x8 → i32x4 × 2）
     /// - スカラー: 残り要素を処理
     #[inline]
+    #[allow(dead_code)] // i32出力版は将来の拡張用に保持
     pub fn propagate_i16(input: &[i16], output: &mut [i32]) {
         debug_assert_eq!(input.len(), output.len());
         let len = input.len();
@@ -1198,6 +1233,7 @@ impl SCReLUDynamic {
     /// - WASM SIMD128: 4要素ずつ処理
     /// - スカラー: 残り要素を処理
     #[inline]
+    #[allow(dead_code)] // i32出力版は将来の拡張用に保持
     pub fn propagate_i32(input: &[i32], output: &mut [i32], scale_shift: u32) {
         debug_assert_eq!(input.len(), output.len());
         let len = input.len();
@@ -1318,6 +1354,252 @@ impl SCReLUDynamic {
             let shifted = input[i] >> scale_shift;
             let clamped = shifted.clamp(0, i32::from(Self::QA));
             output[i] = clamped * clamped;
+        }
+    }
+
+    /// i32入力版 SCReLU (中間層用)
+    ///
+    /// AffineTransform の i32 出力を受け取り、SCReLU を適用して u8 を出力。
+    /// Stockfish 互換のスケーリング: x² >> (2 * WEIGHT_SCALE_BITS + 7) = x² >> 19
+    ///
+    /// 等価な計算: clamp(x >> 6, 0, 127)² >> 7
+    ///
+    /// # スケーリング設計
+    ///
+    /// - 入力: i32 (WEIGHT_SCALE_BITS=6 でスケーリング済み、64倍)
+    /// - 出力: u8 [0, 127]
+    /// - 入力 8128 (= 127 × 64) が float 1.0 に対応
+    /// - 8128² >> 19 = 126 ≈ 127
+    #[inline]
+    pub fn propagate_i32_to_u8(input: &[i32], output: &mut [u8]) {
+        debug_assert_eq!(input.len(), output.len());
+        let len = input.len();
+        let mut processed: usize = 0;
+
+        // === AVX2: 8要素ずつ処理 ===
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        {
+            let num_chunks = len / 8;
+            if num_chunks > 0 {
+                // SAFETY:
+                // - num_chunks > 0 を確認済み
+                // - loadu/storeu を使用するためアライメント不要
+                unsafe {
+                    use std::arch::x86_64::*;
+
+                    let zero = _mm256_setzero_si256();
+                    let max_val = _mm256_set1_epi32(127);
+                    // WEIGHT_SCALE_BITS = 6
+                    let shift_vec = _mm256_set1_epi32(6);
+
+                    let in_ptr = input.as_ptr() as *const __m256i;
+                    let out_ptr = output.as_mut_ptr();
+
+                    for i in 0..num_chunks {
+                        let in_vec = _mm256_loadu_si256(in_ptr.add(i));
+
+                        // >> 6 (WEIGHT_SCALE_BITS)
+                        let shifted = _mm256_srav_epi32(in_vec, shift_vec);
+
+                        // clamp(0, 127)
+                        let clamped = _mm256_min_epi32(_mm256_max_epi32(shifted, zero), max_val);
+
+                        // 二乗
+                        let squared = _mm256_mullo_epi32(clamped, clamped);
+
+                        // >> 7
+                        let result = _mm256_srli_epi32::<7>(squared);
+
+                        // min(127) して u8 にパック
+                        let result_clamped = _mm256_min_epi32(result, max_val);
+
+                        // i32x8 → i16x8 → u8x8
+                        let packed16 = _mm256_packs_epi32(result_clamped, result_clamped);
+                        let permuted = _mm256_permute4x64_epi64::<0b11011000>(packed16);
+                        let packed8 = _mm256_packus_epi16(permuted, permuted);
+
+                        // 下位8バイトを保存
+                        let result_128 = _mm256_castsi256_si128(packed8);
+                        _mm_storel_epi64(out_ptr.add(i * 8) as *mut __m128i, result_128);
+                    }
+                }
+                processed = num_chunks * 8;
+            }
+        }
+
+        // === SSE4.1: 4要素ずつ処理 ===
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse4.1"))]
+        {
+            let remaining = len - processed;
+            let num_chunks = remaining / 4;
+            if num_chunks > 0 {
+                unsafe {
+                    use std::arch::x86_64::*;
+
+                    let zero = _mm_setzero_si128();
+                    let max_val = _mm_set1_epi32(127);
+                    let shift_vec = _mm_cvtsi32_si128(6);
+
+                    let in_ptr = input.as_ptr().add(processed) as *const __m128i;
+                    let out_ptr = output.as_mut_ptr().add(processed);
+
+                    for i in 0..num_chunks {
+                        let in_vec = _mm_loadu_si128(in_ptr.add(i));
+
+                        // >> 6
+                        let shifted = _mm_sra_epi32(in_vec, shift_vec);
+
+                        // clamp(0, 127)
+                        let clamped = _mm_min_epi32(_mm_max_epi32(shifted, zero), max_val);
+
+                        // 二乗
+                        let squared = _mm_mullo_epi32(clamped, clamped);
+
+                        // >> 7
+                        let result = _mm_srli_epi32::<7>(squared);
+
+                        // min(127)
+                        let result_clamped = _mm_min_epi32(result, max_val);
+
+                        // i32x4 → i16x4 → u8x4
+                        let packed16 = _mm_packs_epi32(result_clamped, result_clamped);
+                        let packed8 = _mm_packus_epi16(packed16, packed16);
+
+                        // 下位4バイトを保存
+                        let val = _mm_cvtsi128_si32(packed8) as u32;
+                        std::ptr::write_unaligned(out_ptr.add(i * 4) as *mut u32, val);
+                    }
+                }
+                processed += num_chunks * 4;
+            }
+        }
+
+        // === スカラーフォールバック（残り要素） ===
+        for i in processed..len {
+            let x = input[i];
+            // >> 6 (WEIGHT_SCALE_BITS)
+            let shifted = x >> 6;
+            let clamped = shifted.clamp(0, 127);
+            // 二乗して >> 7
+            let squared_shifted = (clamped * clamped) >> 7;
+            output[i] = squared_shifted.min(127) as u8;
+        }
+    }
+
+    /// FeatureTransformer の i16 出力を受け取り、SCReLU を適用して u8 を出力。
+    /// Stockfish 互換のスケーリング: clamp(x, 0, 127)² >> 7 → u8
+    ///
+    /// これにより後続の AffineTransform は ClippedReLU と同じ u8 入力を受け取れる。
+    ///
+    /// # SIMD最適化
+    ///
+    /// フォールスルー構造で AVX2 → SSE4.1 → スカラーの順に処理。
+    #[inline]
+    pub fn propagate_i16_to_u8(input: &[i16], output: &mut [u8]) {
+        debug_assert_eq!(input.len(), output.len());
+        let len = input.len();
+        let mut processed: usize = 0;
+
+        // === AVX2: 16要素ずつ処理 ===
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        {
+            let num_chunks = len / 16;
+            if num_chunks > 0 {
+                // SAFETY:
+                // - num_chunks > 0 を確認済み
+                // - loadu/storeu を使用するためアライメント不要
+                unsafe {
+                    use std::arch::x86_64::*;
+
+                    let zero = _mm256_setzero_si256();
+                    let max_val_i32 = _mm256_set1_epi32(127);
+
+                    let in_ptr = input.as_ptr() as *const __m128i;
+                    let out_ptr = output.as_mut_ptr() as *mut __m128i;
+
+                    for i in 0..num_chunks {
+                        // 前半8要素: i16x8 → i32x8 → clamp → 二乗 → >> 7
+                        let in_vec_lo = _mm_loadu_si128(in_ptr.add(i * 2));
+                        let expanded_lo = _mm256_cvtepi16_epi32(in_vec_lo);
+                        let clamped_lo =
+                            _mm256_min_epi32(_mm256_max_epi32(expanded_lo, zero), max_val_i32);
+                        let squared_lo = _mm256_mullo_epi32(clamped_lo, clamped_lo);
+                        let shifted_lo = _mm256_srli_epi32::<7>(squared_lo);
+
+                        // 後半8要素: i16x8 → i32x8 → clamp → 二乗 → >> 7
+                        let in_vec_hi = _mm_loadu_si128(in_ptr.add(i * 2 + 1));
+                        let expanded_hi = _mm256_cvtepi16_epi32(in_vec_hi);
+                        let clamped_hi =
+                            _mm256_min_epi32(_mm256_max_epi32(expanded_hi, zero), max_val_i32);
+                        let squared_hi = _mm256_mullo_epi32(clamped_hi, clamped_hi);
+                        let shifted_hi = _mm256_srli_epi32::<7>(squared_hi);
+
+                        // i32x8 × 2 → i16x16 → u8x16
+                        // まず i32 → i16 にパック
+                        let packed_lo = _mm256_packs_epi32(shifted_lo, shifted_hi);
+                        // AVX2の_mm256_packs_epi32は [lo0-3, hi0-3, lo4-7, hi4-7] の順になるので並び替え
+                        let permuted = _mm256_permute4x64_epi64::<0b11011000>(packed_lo);
+                        // i16 → u8 にパック (packus_epi16 はサチュレーション付き)
+                        let result = _mm256_packus_epi16(permuted, permuted);
+                        // 下位128ビットを取り出して保存
+                        let result_128 = _mm256_castsi256_si128(result);
+                        _mm_storeu_si128(out_ptr.add(i), result_128);
+                    }
+                }
+                processed = num_chunks * 16;
+            }
+        }
+
+        // === SSE4.1: 8要素ずつ処理 ===
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse4.1"))]
+        {
+            let remaining = len - processed;
+            let num_chunks = remaining / 8;
+            if num_chunks > 0 {
+                unsafe {
+                    use std::arch::x86_64::*;
+
+                    let zero = _mm_setzero_si128();
+                    let max_val_i32 = _mm_set1_epi32(127);
+
+                    let in_ptr = input.as_ptr().add(processed) as *const i64;
+                    let out_ptr = output.as_mut_ptr().add(processed) as *mut i64;
+
+                    for i in 0..num_chunks {
+                        // 前半4要素: i16x4 → i32x4
+                        let in_vec_lo = _mm_loadl_epi64(in_ptr.add(i * 2) as *const __m128i);
+                        let expanded_lo = _mm_cvtepi16_epi32(in_vec_lo);
+                        let clamped_lo =
+                            _mm_min_epi32(_mm_max_epi32(expanded_lo, zero), max_val_i32);
+                        let squared_lo = _mm_mullo_epi32(clamped_lo, clamped_lo);
+                        let shifted_lo = _mm_srli_epi32::<7>(squared_lo);
+
+                        // 後半4要素: i16x4 → i32x4
+                        let in_vec_hi = _mm_loadl_epi64(in_ptr.add(i * 2 + 1) as *const __m128i);
+                        let expanded_hi = _mm_cvtepi16_epi32(in_vec_hi);
+                        let clamped_hi =
+                            _mm_min_epi32(_mm_max_epi32(expanded_hi, zero), max_val_i32);
+                        let squared_hi = _mm_mullo_epi32(clamped_hi, clamped_hi);
+                        let shifted_hi = _mm_srli_epi32::<7>(squared_hi);
+
+                        // i32x4 × 2 → i16x8 → u8x8
+                        let packed = _mm_packs_epi32(shifted_lo, shifted_hi);
+                        let result = _mm_packus_epi16(packed, packed);
+                        // 下位64ビット (8バイト) を保存
+                        *out_ptr.add(i) = _mm_cvtsi128_si64(result);
+                    }
+                }
+                processed += num_chunks * 8;
+            }
+        }
+
+        // === スカラーフォールバック（残り要素） ===
+        for i in processed..len {
+            let x = i32::from(input[i]);
+            let clamped = x.clamp(0, 127);
+            // 127² = 16129, 16129 >> 7 = 126
+            let squared_shifted = (clamped * clamped) >> 7;
+            output[i] = squared_shifted.min(127) as u8;
         }
     }
 }
@@ -1621,5 +1903,325 @@ mod tests {
             };
             assert_eq!(output[i], expected, "index {i}: input={x}");
         }
+    }
+
+    /// propagate_i32_to_u8 の基本テスト
+    #[test]
+    fn test_screlu_dynamic_i32_to_u8() {
+        // 計算: clamp(x >> 6, 0, 127)² >> 7
+        // 入力 8128 (= 127 × 64) が float 1.0 に対応
+        let input: [i32; 8] = [0, 64, 8128, 10000, -100, 127 * 64, 50 * 64, 100 * 64];
+        let mut output = [0u8; 8];
+
+        SCReLUDynamic::propagate_i32_to_u8(&input, &mut output);
+
+        // 0 >> 6 = 0 → 0² >> 7 = 0
+        assert_eq!(output[0], 0);
+        // 64 >> 6 = 1 → 1² >> 7 = 0
+        assert_eq!(output[1], 0);
+        // 8128 >> 6 = 127 → 127² >> 7 = 16129 >> 7 = 126
+        assert_eq!(output[2], 126);
+        // 10000 >> 6 = 156 → clamp(156, 0, 127) = 127 → 126
+        assert_eq!(output[3], 126);
+        // -100 >> 6 = -2 → clamp(-2, 0, 127) = 0 → 0
+        assert_eq!(output[4], 0);
+        // 127*64 >> 6 = 127 → 127² >> 7 = 126
+        assert_eq!(output[5], 126);
+        // 50*64 >> 6 = 50 → 50² >> 7 = 2500 >> 7 = 19
+        assert_eq!(output[6], 19);
+        // 100*64 >> 6 = 100 → 100² >> 7 = 10000 >> 7 = 78
+        assert_eq!(output[7], 78);
+    }
+
+    /// propagate_i32_to_u8 の SIMD 境界テスト
+    #[test]
+    fn test_screlu_dynamic_i32_to_u8_simd_boundary() {
+        for size in [1, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 64, 65, 96] {
+            let input: Vec<i32> = (0..size).map(|i| (i as i32 * 1000 - 5000) % 20000).collect();
+            let mut output = vec![0u8; size];
+
+            SCReLUDynamic::propagate_i32_to_u8(&input, &mut output);
+
+            // スカラー計算で期待値を生成
+            for (i, &x) in input.iter().enumerate() {
+                let expected = {
+                    let shifted = x >> 6;
+                    let clamped = shifted.clamp(0, 127);
+                    ((clamped * clamped) >> 7).min(127) as u8
+                };
+                assert_eq!(
+                    output[i], expected,
+                    "size={size}, index={i}, input={x}: got {}, expected {expected}",
+                    output[i]
+                );
+            }
+        }
+    }
+
+    /// propagate_i32_to_u8 の実サイズテスト (32要素 = L2出力)
+    #[test]
+    fn test_screlu_dynamic_i32_to_u8_real_size() {
+        let size = 32;
+        let input: Vec<i32> = (0..size).map(|i| (i as i32 * 500 - 8000) % 16000).collect();
+        let mut output = vec![0u8; size];
+
+        SCReLUDynamic::propagate_i32_to_u8(&input, &mut output);
+
+        for (i, &x) in input.iter().enumerate() {
+            let expected = {
+                let shifted = x >> 6;
+                let clamped = shifted.clamp(0, 127);
+                ((clamped * clamped) >> 7).min(127) as u8
+            };
+            assert_eq!(output[i], expected, "index {i}: input={x}");
+        }
+    }
+
+    // =========================================================================
+    // ベンチマーク: ClippedReLU 静的版 vs 動的版
+    // =========================================================================
+
+    /// 動的版 ClippedReLU（比較用）
+    /// network_halfka_dynamic.rs の clipped_relu_dynamic と同等の実装
+    fn clipped_relu_dynamic_for_bench(input: &[i32], output: &mut [u8]) {
+        let len = input.len();
+        let mut processed: usize = 0;
+
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        {
+            let num_chunks = len / 32;
+            if num_chunks > 0 {
+                unsafe {
+                    use std::arch::x86_64::*;
+                    let zero = _mm256_setzero_si256();
+                    let offsets = _mm256_set_epi32(7, 3, 6, 2, 5, 1, 4, 0);
+                    let in_ptr = input.as_ptr() as *const __m256i;
+                    let out_ptr = output.as_mut_ptr() as *mut __m256i;
+
+                    for i in 0..num_chunks {
+                        let in0 = _mm256_loadu_si256(in_ptr.add(i * 4));
+                        let in1 = _mm256_loadu_si256(in_ptr.add(i * 4 + 1));
+                        let in2 = _mm256_loadu_si256(in_ptr.add(i * 4 + 2));
+                        let in3 = _mm256_loadu_si256(in_ptr.add(i * 4 + 3));
+
+                        let words0 = _mm256_srai_epi16(
+                            _mm256_packs_epi32(in0, in1),
+                            WEIGHT_SCALE_BITS as i32,
+                        );
+                        let words1 = _mm256_srai_epi16(
+                            _mm256_packs_epi32(in2, in3),
+                            WEIGHT_SCALE_BITS as i32,
+                        );
+
+                        let bytes = _mm256_max_epi8(_mm256_packs_epi16(words0, words1), zero);
+                        let result = _mm256_permutevar8x32_epi32(bytes, offsets);
+                        _mm256_storeu_si256(out_ptr.add(i), result);
+                    }
+                }
+                processed = num_chunks * 32;
+            }
+        }
+
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+        {
+            let remaining = len - processed;
+            let num_chunks = remaining / 16;
+            if num_chunks > 0 {
+                unsafe {
+                    use std::arch::x86_64::*;
+                    #[cfg(target_feature = "sse4.1")]
+                    let zero = _mm_setzero_si128();
+                    #[cfg(not(target_feature = "sse4.1"))]
+                    let k0x80s = _mm_set1_epi8(-128i8);
+
+                    let in_ptr = input.as_ptr().add(processed) as *const __m128i;
+                    let out_ptr = output.as_mut_ptr().add(processed) as *mut __m128i;
+
+                    for i in 0..num_chunks {
+                        let in0 = _mm_loadu_si128(in_ptr.add(i * 4));
+                        let in1 = _mm_loadu_si128(in_ptr.add(i * 4 + 1));
+                        let in2 = _mm_loadu_si128(in_ptr.add(i * 4 + 2));
+                        let in3 = _mm_loadu_si128(in_ptr.add(i * 4 + 3));
+
+                        let words0 =
+                            _mm_srai_epi16(_mm_packs_epi32(in0, in1), WEIGHT_SCALE_BITS as i32);
+                        let words1 =
+                            _mm_srai_epi16(_mm_packs_epi32(in2, in3), WEIGHT_SCALE_BITS as i32);
+                        let packedbytes = _mm_packs_epi16(words0, words1);
+
+                        #[cfg(target_feature = "sse4.1")]
+                        let result = _mm_max_epi8(packedbytes, zero);
+                        #[cfg(not(target_feature = "sse4.1"))]
+                        let result = _mm_subs_epi8(_mm_adds_epi8(packedbytes, k0x80s), k0x80s);
+
+                        _mm_storeu_si128(out_ptr.add(i), result);
+                    }
+                }
+                processed += num_chunks * 16;
+            }
+        }
+
+        for i in processed..len {
+            let shifted = input[i] >> WEIGHT_SCALE_BITS;
+            output[i] = shifted.clamp(0, 127) as u8;
+        }
+    }
+
+    /// ClippedReLU ベンチマーク: 静的版 vs 動的版
+    ///
+    /// 実行: cargo test bench_clipped_relu_static_vs_dynamic -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_clipped_relu_static_vs_dynamic() {
+        use std::time::Instant;
+
+        const ITERATIONS: usize = 100_000;
+
+        // テストサイズ: 1024 (512x2 の FT出力相当)
+        const SIZE: usize = 1024;
+
+        // 入力データ生成（ランダムではなく決定論的に）
+        let input: [i32; SIZE] = std::array::from_fn(|i| {
+            ((i as i32 * 127 + 13) % 16000) - 8000 // -8000 ~ +8000 の範囲
+        });
+        let input_vec: Vec<i32> = input.to_vec();
+
+        // ウォームアップ
+        let mut output_static = [0u8; SIZE];
+        let mut output_dynamic = vec![0u8; SIZE];
+        for _ in 0..1000 {
+            ClippedReLU::<SIZE>::propagate(&input, &mut output_static);
+            clipped_relu_dynamic_for_bench(&input_vec, &mut output_dynamic);
+        }
+
+        // 静的版ベンチマーク
+        let start = Instant::now();
+        for _ in 0..ITERATIONS {
+            ClippedReLU::<SIZE>::propagate(&input, &mut output_static);
+            std::hint::black_box(&output_static);
+        }
+        let static_time = start.elapsed();
+
+        // 動的版ベンチマーク
+        let start = Instant::now();
+        for _ in 0..ITERATIONS {
+            clipped_relu_dynamic_for_bench(&input_vec, &mut output_dynamic);
+            std::hint::black_box(&output_dynamic);
+        }
+        let dynamic_time = start.elapsed();
+
+        // 結果検証（両者の出力が一致することを確認）
+        assert_eq!(output_static.as_slice(), output_dynamic.as_slice());
+
+        // 結果出力
+        println!("\n========================================");
+        println!("ClippedReLU Benchmark (SIZE={})", SIZE);
+        println!("========================================");
+        println!("Iterations: {}", ITERATIONS);
+        println!(
+            "Static  version: {:?} ({:.2} ns/iter)",
+            static_time,
+            static_time.as_nanos() as f64 / ITERATIONS as f64
+        );
+        println!(
+            "Dynamic version: {:?} ({:.2} ns/iter)",
+            dynamic_time,
+            dynamic_time.as_nanos() as f64 / ITERATIONS as f64
+        );
+        println!(
+            "Ratio (static/dynamic): {:.3}x",
+            static_time.as_nanos() as f64 / dynamic_time.as_nanos() as f64
+        );
+        println!("========================================\n");
+    }
+
+    /// ClippedReLU ベンチマーク: 複数サイズ比較
+    ///
+    /// 静的版（スカラー、const generics）と動的版（SIMD最適化済み）の性能比較。
+    /// SCReLU の SIMD 最適化優先度を判断するための参考データ。
+    ///
+    /// # 実行方法
+    ///
+    /// ```bash
+    /// cargo test -p engine-core bench_clipped_relu_multiple_sizes --release -- --ignored --nocapture
+    /// ```
+    ///
+    /// # ベンチマーク結果 (2025-01 時点、Linux x86_64 AVX2)
+    ///
+    /// | サイズ | 静的(ns) | 動的(ns) | 比率 | 解釈 |
+    /// |--------|----------|----------|------|------|
+    /// | 32     | 0.81     | 0.54     | 1.50x | 動的版が有利 |
+    /// | 96     | 1.08     | 1.41     | 0.77x | 静的版が有利 |
+    /// | 512    | 4.60     | 12.55    | 0.37x | 静的版が約2.7倍速い |
+    /// | 1024   | 23.74    | 22.50    | 1.06x | ほぼ同等 |
+    /// | 2048   | 48.38    | 45.46    | 1.06x | ほぼ同等 |
+    ///
+    /// # 結論
+    ///
+    /// - サイズ512では静的スカラー版が動的SIMD版より約2.7倍高速
+    /// - コンパイラの自動ベクトル化が効いている可能性あり
+    /// - SCReLU静的版へのSIMD手動実装は優先度低
+    #[test]
+    #[ignore]
+    fn bench_clipped_relu_multiple_sizes() {
+        use std::time::Instant;
+
+        const ITERATIONS: usize = 100_000;
+
+        println!("\n================================================================");
+        println!("ClippedReLU Benchmark: Static vs Dynamic (Multiple Sizes)");
+        println!("================================================================");
+        println!("{:>8} | {:>12} | {:>12} | {:>8}", "Size", "Static(ns)", "Dynamic(ns)", "Ratio");
+        println!("---------|--------------|--------------|----------");
+
+        // マクロで複数サイズをテスト
+        macro_rules! bench_size {
+            ($size:expr) => {{
+                let input: [i32; $size] =
+                    std::array::from_fn(|i| ((i as i32 * 127 + 13) % 16000) - 8000);
+                let input_vec: Vec<i32> = input.to_vec();
+
+                let mut output_static = [0u8; $size];
+                let mut output_dynamic = vec![0u8; $size];
+
+                // ウォームアップ
+                for _ in 0..1000 {
+                    ClippedReLU::<$size>::propagate(&input, &mut output_static);
+                    clipped_relu_dynamic_for_bench(&input_vec, &mut output_dynamic);
+                }
+
+                // 静的版
+                let start = Instant::now();
+                for _ in 0..ITERATIONS {
+                    ClippedReLU::<$size>::propagate(&input, &mut output_static);
+                    std::hint::black_box(&output_static);
+                }
+                let static_ns = start.elapsed().as_nanos() as f64 / ITERATIONS as f64;
+
+                // 動的版
+                let start = Instant::now();
+                for _ in 0..ITERATIONS {
+                    clipped_relu_dynamic_for_bench(&input_vec, &mut output_dynamic);
+                    std::hint::black_box(&output_dynamic);
+                }
+                let dynamic_ns = start.elapsed().as_nanos() as f64 / ITERATIONS as f64;
+
+                println!(
+                    "{:>8} | {:>12.2} | {:>12.2} | {:>8.3}x",
+                    $size,
+                    static_ns,
+                    dynamic_ns,
+                    static_ns / dynamic_ns
+                );
+            }};
+        }
+
+        bench_size!(32); // L2出力
+        bench_size!(96); // L3出力
+        bench_size!(512); // FT出力 (256x2)
+        bench_size!(1024); // FT出力 (512x2)
+        bench_size!(2048); // FT出力 (1024x2)
+
+        println!("================================================================\n");
     }
 }

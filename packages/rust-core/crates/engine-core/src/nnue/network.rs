@@ -716,6 +716,11 @@ pub struct Network {
     /// 注意: 現在は自動判定しているが、将来的にはエンジンオプションで
     /// 設定可能にすることを検討（YaneuraOuと同様）。
     pub fv_scale: i32,
+    /// SCReLU を使用するかどうか
+    ///
+    /// arch_string に "-SCReLU" サフィックスが含まれている場合に true。
+    /// bullet-shogi で学習した SCReLU モデル用。
+    pub use_screlu: bool,
 }
 
 impl Network {
@@ -776,6 +781,9 @@ impl Network {
             FV_SCALE
         };
 
+        // SCReLU 検出: arch_string に "-SCReLU" が含まれているかチェック
+        let use_screlu = arch_str.contains("SCReLU");
+
         // FeatureTransformerのレイヤーハッシュを読み飛ばす
         // (YaneuraOu/Stockfishフォーマットでは各レイヤーの前に4バイトのハッシュがある)
         reader.read_exact(&mut buf4)?;
@@ -798,11 +806,23 @@ impl Network {
             hidden2,
             output,
             fv_scale,
+            use_screlu,
         })
     }
 
     /// 評価値を計算
+    ///
+    /// `use_screlu` フラグに応じて ClippedReLU 版または SCReLU 版を呼び出す。
     pub fn evaluate(&self, pos: &Position, acc: &Accumulator) -> Value {
+        if self.use_screlu {
+            self.evaluate_screlu(pos, acc)
+        } else {
+            self.evaluate_clipped_relu(pos, acc)
+        }
+    }
+
+    /// ClippedReLU 版の評価値計算（従来の実装）
+    fn evaluate_clipped_relu(&self, pos: &Position, acc: &Accumulator) -> Value {
         // 変換済み特徴量（64バイトアラインで SIMD アラインロードを有効化）
         let mut transformed = Aligned([0u8; TRANSFORMED_FEATURE_DIMENSIONS * 2]);
         self.feature_transformer.transform(acc, pos.side_to_move(), &mut transformed.0);
@@ -859,6 +879,116 @@ impl Network {
         // 出力層（64バイトアラインバッファ使用）
         let mut output = Aligned([0i32; OUTPUT_DIMENSIONS]);
         self.output.propagate(&hidden2_relu.0, &mut output.0);
+
+        // スケーリング（オーバーライド設定があればそちらを優先）
+        let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
+        Value::new(output.0[0] / fv_scale)
+    }
+
+    /// SCReLU 版の評価値計算
+    ///
+    /// bullet-shogi で学習した SCReLU モデル用。
+    ///
+    /// 処理フロー:
+    ///     Accumulator (i16)
+    ///     ↓ SCReLU (i16 → u8)
+    ///     L1 AffineTransform (512 → 32)
+    ///     ↓ SCReLU (i32 → u8)
+    ///     L2 AffineTransform (32 → 32)
+    ///     ↓ SCReLU (i32 → u8)
+    ///     Output AffineTransform (32 → 1)
+    ///     ↓ FV_SCALE で割る
+    ///     評価値
+    fn evaluate_screlu(&self, pos: &Position, acc: &Accumulator) -> Value {
+        use super::layers::SCReLUDynamic;
+
+        let perspectives = [pos.side_to_move(), !pos.side_to_move()];
+
+        // FeatureTransformer 出力 (i16) を取得
+        // 両視点を concat して 512 要素にする
+        let mut ft_out_i16 = Aligned([0i16; TRANSFORMED_FEATURE_DIMENSIONS * 2]);
+        for (p, &perspective) in perspectives.iter().enumerate() {
+            let offset = TRANSFORMED_FEATURE_DIMENSIONS * p;
+            let accumulation = acc.get(perspective as usize, 0);
+            ft_out_i16.0[offset..offset + TRANSFORMED_FEATURE_DIMENSIONS]
+                .copy_from_slice(accumulation);
+        }
+
+        // SCReLU 適用 (i16 → u8)
+        let mut transformed = Aligned([0u8; TRANSFORMED_FEATURE_DIMENSIONS * 2]);
+        SCReLUDynamic::propagate_i16_to_u8(&ft_out_i16.0, &mut transformed.0);
+
+        // デバッグ出力
+        #[cfg(debug_assertions)]
+        if std::env::var("NNUE_DEBUG").is_ok() {
+            let min = *transformed.0.iter().min().unwrap();
+            let max = *transformed.0.iter().max().unwrap();
+            let nonzero = transformed.0.iter().filter(|&&x| x != 0).count();
+            let sum: u32 = transformed.0.iter().map(|&x| u32::from(x)).sum();
+            eprintln!(
+                "[DEBUG] HalfKP FT SCReLU u8: min={min}, max={max}, nonzero={nonzero}/{}, sum={sum}",
+                TRANSFORMED_FEATURE_DIMENSIONS * 2
+            );
+        }
+
+        // L1 層 (512 → 32)
+        let mut l1_out = Aligned([0i32; HIDDEN1_DIMENSIONS]);
+        self.hidden1.propagate(&transformed.0, &mut l1_out.0);
+
+        // SCReLU 適用 (i32 → u8)
+        let mut l1_relu = Aligned([0u8; HIDDEN1_DIMENSIONS]);
+        SCReLUDynamic::propagate_i32_to_u8(&l1_out.0, &mut l1_relu.0);
+
+        #[cfg(debug_assertions)]
+        if std::env::var("NNUE_DEBUG").is_ok() {
+            let min = *l1_out.0.iter().min().unwrap();
+            let max = *l1_out.0.iter().max().unwrap();
+            eprintln!("[DEBUG] HalfKP L1 out i32: min={min}, max={max}");
+            let l1r_min = *l1_relu.0.iter().min().unwrap();
+            let l1r_max = *l1_relu.0.iter().max().unwrap();
+            let l1r_nonzero = l1_relu.0.iter().filter(|&&x| x != 0).count();
+            eprintln!(
+                "[DEBUG] HalfKP After L1 SCReLU u8: min={l1r_min}, max={l1r_max}, nonzero={l1r_nonzero}/{}",
+                HIDDEN1_DIMENSIONS
+            );
+        }
+
+        // L2 層 (32 → 32)
+        let mut l2_out = Aligned([0i32; HIDDEN2_DIMENSIONS]);
+        self.hidden2.propagate(&l1_relu.0, &mut l2_out.0);
+
+        // SCReLU 適用 (i32 → u8)
+        let mut l2_relu = Aligned([0u8; HIDDEN2_DIMENSIONS]);
+        SCReLUDynamic::propagate_i32_to_u8(&l2_out.0, &mut l2_relu.0);
+
+        #[cfg(debug_assertions)]
+        if std::env::var("NNUE_DEBUG").is_ok() {
+            let l2_min = *l2_out.0.iter().min().unwrap();
+            let l2_max = *l2_out.0.iter().max().unwrap();
+            eprintln!("[DEBUG] HalfKP L2 out i32: min={l2_min}, max={l2_max}");
+            let l2r_min = *l2_relu.0.iter().min().unwrap();
+            let l2r_max = *l2_relu.0.iter().max().unwrap();
+            let l2r_nonzero = l2_relu.0.iter().filter(|&&x| x != 0).count();
+            eprintln!(
+                "[DEBUG] HalfKP After L2 SCReLU u8: min={l2r_min}, max={l2r_max}, nonzero={l2r_nonzero}/{}",
+                HIDDEN2_DIMENSIONS
+            );
+            eprintln!("[DEBUG] HalfKP L2 ReLU u8: {:?}", &l2_relu.0[..16.min(HIDDEN2_DIMENSIONS)]);
+        }
+
+        // 出力層 (32 → 1)
+        let mut output = Aligned([0i32; OUTPUT_DIMENSIONS]);
+        self.output.propagate(&l2_relu.0, &mut output.0);
+
+        #[cfg(debug_assertions)]
+        if std::env::var("NNUE_DEBUG").is_ok() {
+            eprintln!("[DEBUG] HalfKP Output bias: {}", self.output.biases[0]);
+            eprintln!(
+                "[DEBUG] HalfKP Output weights: {:?}",
+                &self.output.weights[..16.min(HIDDEN2_DIMENSIONS)]
+            );
+            eprintln!("[DEBUG] HalfKP Final output i32: {}", output.0[0]);
+        }
 
         // スケーリング（オーバーライド設定があればそちらを優先）
         let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
@@ -1023,6 +1153,10 @@ fn update_and_evaluate_halfka_dynamic(
 
         // 3. それでも失敗なら全計算
         if !updated {
+            #[cfg(debug_assertions)]
+            if std::env::var("NNUE_DEBUG").is_ok() {
+                eprintln!("[DEBUG] Calling refresh_accumulator_halfka_dynamic");
+            }
             let acc = &mut stack.current_mut().accumulator;
             network.refresh_accumulator_halfka_dynamic(pos, acc);
         }
