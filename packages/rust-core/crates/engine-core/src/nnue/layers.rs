@@ -2,6 +2,7 @@
 //!
 //! - `AffineTransform`: 全結合アフィン変換層（入力×重み + バイアス）
 //! - `ClippedReLU`: 整数スケーリング付きのクリップ付き ReLU 層
+//! - `SCReLU`: Squared Clipped ReLU 層（bullet-shogi SCReLUモデル用）
 
 use super::accumulator::AlignedBox;
 use super::constants::WEIGHT_SCALE_BITS;
@@ -973,6 +974,113 @@ impl<const DIM: usize> ClippedReLU<DIM> {
     }
 }
 
+/// SCReLU (Squared Clipped ReLU) 層（静的サイズ版）
+///
+/// bullet-shogi の SCReLU モデル用。
+/// 入力を [0, QA] にクランプしてから二乗する。
+///
+/// 計算式: y = clamp(x, 0, QA)²
+///
+/// # スケーリング設計
+///
+/// - QA = 127 のとき、最大出力は 127² = 16,129
+/// - 後続の Affine 層で i32 演算を行うためオーバーフローしない
+///   - 16,129 × 127 (weight) × 512 (inputs) = 1,048,707,456 < i32::MAX
+/// - L1層後の逆量子化で ÷ QA
+/// - 最終出力で ÷ (QA × QB)
+///
+/// # 入出力型
+///
+/// - i16入力版 (`propagate_i16`): FeatureTransformer 直後用
+///   - 入力: i16 (Accumulator の値)
+///   - 出力: i32 (二乗後の値)
+/// - i32入力版 (`propagate_i32`): 中間層用（将来の拡張用）
+///
+/// # Note
+///
+/// 現在は NetworkHalfKADynamic の evaluate_screlu で SCReLUDynamic を使用。
+/// この静的サイズ版は将来の最適化用に残している。
+pub struct SCReLU<const DIM: usize>;
+
+impl<const DIM: usize> SCReLU<DIM> {
+    /// 量子化係数 QA（クランプ上限）
+    pub const QA: i16 = super::constants::SCRELU_QA;
+
+    /// i16入力版 (FeatureTransformer直後用)
+    ///
+    /// Accumulator の i16 値を受け取り、SCReLU を適用して i32 を出力。
+    /// ClippedReLU と異なり、ClippedReLU適用前の生のAccumulator値が必要。
+    ///
+    /// # SIMD最適化
+    ///
+    /// 現在はスカラー実装のみ。Phase 4 で SIMD 最適化予定。
+    #[inline]
+    pub fn propagate_i16(input: &[i16; DIM], output: &mut [i32; DIM]) {
+        // TODO: Phase 4 で AVX2/SSE2/WASM SIMD 最適化
+        for i in 0..DIM {
+            let clamped = i32::from(input[i]).clamp(0, i32::from(Self::QA));
+            output[i] = clamped * clamped;
+        }
+    }
+
+    /// i32入力版 (中間層用)
+    ///
+    /// 中間層での使用を想定。入力のスケーリングに注意が必要。
+    ///
+    /// # 引数
+    ///
+    /// - `input`: 前層の出力 (i32)
+    /// - `output`: SCReLU 適用後の出力 (i32)
+    /// - `scale_shift`: 入力を右シフトするビット数（スケール調整用）
+    #[inline]
+    pub fn propagate_i32(input: &[i32; DIM], output: &mut [i32; DIM], scale_shift: u32) {
+        // TODO: Phase 4 で AVX2/SSE2/WASM SIMD 最適化
+        for i in 0..DIM {
+            let shifted = input[i] >> scale_shift;
+            let clamped = shifted.clamp(0, i32::from(Self::QA));
+            output[i] = clamped * clamped;
+        }
+    }
+}
+
+/// SCReLU (Squared Clipped ReLU) 動的サイズ版
+///
+/// 実行時にサイズが決まる場合に使用。
+/// 使い方は静的サイズ版 `SCReLU<DIM>` と同じ。
+pub struct SCReLUDynamic;
+
+impl SCReLUDynamic {
+    /// 量子化係数 QA（クランプ上限）
+    pub const QA: i16 = super::constants::SCRELU_QA;
+
+    /// i16入力版 (FeatureTransformer直後用)
+    ///
+    /// Accumulator の i16 値を受け取り、SCReLU を適用して i32 を出力。
+    #[inline]
+    pub fn propagate_i16(input: &[i16], output: &mut [i32]) {
+        debug_assert_eq!(input.len(), output.len());
+
+        // TODO: Phase 4 で AVX2/SSE2/WASM SIMD 最適化
+        for (i, &x) in input.iter().enumerate() {
+            let clamped = i32::from(x).clamp(0, i32::from(Self::QA));
+            output[i] = clamped * clamped;
+        }
+    }
+
+    /// i32入力版 (中間層用)
+    #[inline]
+    pub fn propagate_i32(input: &[i32], output: &mut [i32], scale_shift: u32) {
+        debug_assert_eq!(input.len(), output.len());
+
+        // TODO: Phase 4 で AVX2/SSE2/WASM SIMD 最適化
+        for (i, &x) in input.iter().enumerate() {
+            let shifted = x >> scale_shift;
+            let clamped = shifted.clamp(0, i32::from(Self::QA));
+            output[i] = clamped * clamped;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1076,5 +1184,102 @@ mod tests {
         for (i, &val) in output.iter().enumerate() {
             assert_eq!(val, 10 + (i + 1) as i32, "mismatch at index {i}");
         }
+    }
+
+    #[test]
+    fn test_screlu_i16() {
+        // SCReLU: y = clamp(x, 0, QA)², QA = 127
+        let input: [i16; 8] = [0, 64, 127, 128, -10, 200, 50, 100];
+        let mut output = [0i32; 8];
+
+        SCReLU::<8>::propagate_i16(&input, &mut output);
+
+        // 0 → clamp(0, 0, 127)² = 0
+        assert_eq!(output[0], 0);
+        // 64 → clamp(64, 0, 127)² = 64² = 4096
+        assert_eq!(output[1], 4096);
+        // 127 → clamp(127, 0, 127)² = 127² = 16129
+        assert_eq!(output[2], 16129);
+        // 128 → clamp(128, 0, 127)² = 127² = 16129 (clamped)
+        assert_eq!(output[3], 16129);
+        // -10 → clamp(-10, 0, 127)² = 0² = 0 (clamped to 0)
+        assert_eq!(output[4], 0);
+        // 200 → clamp(200, 0, 127)² = 127² = 16129 (clamped)
+        assert_eq!(output[5], 16129);
+        // 50 → clamp(50, 0, 127)² = 50² = 2500
+        assert_eq!(output[6], 2500);
+        // 100 → clamp(100, 0, 127)² = 100² = 10000
+        assert_eq!(output[7], 10000);
+    }
+
+    #[test]
+    fn test_screlu_i32() {
+        // SCReLU with scale_shift: y = clamp(x >> shift, 0, QA)²
+        let input: [i32; 4] = [0, 640, -100, 2000];
+        let mut output = [0i32; 4];
+
+        // scale_shift = 1 (divide by 2)
+        SCReLU::<4>::propagate_i32(&input, &mut output, 1);
+
+        // 0 >> 1 = 0 → 0² = 0
+        assert_eq!(output[0], 0);
+        // 640 >> 1 = 320 → clamp(320, 0, 127)² = 127² = 16129
+        assert_eq!(output[1], 16129);
+        // -100 >> 1 = -50 → clamp(-50, 0, 127)² = 0
+        assert_eq!(output[2], 0);
+        // 2000 >> 1 = 1000 → clamp(1000, 0, 127)² = 127² = 16129
+        assert_eq!(output[3], 16129);
+    }
+
+    #[test]
+    fn test_screlu_dynamic_i16() {
+        // 動的サイズ版
+        let input: [i16; 5] = [0, 50, 127, -5, 150];
+        let mut output = [0i32; 5];
+
+        SCReLUDynamic::propagate_i16(&input, &mut output);
+
+        assert_eq!(output[0], 0); // 0² = 0
+        assert_eq!(output[1], 2500); // 50² = 2500
+        assert_eq!(output[2], 16129); // 127² = 16129
+        assert_eq!(output[3], 0); // clamp(-5, 0, 127) = 0
+        assert_eq!(output[4], 16129); // clamp(150, 0, 127) = 127
+    }
+
+    #[test]
+    fn test_screlu_dynamic_i32() {
+        // 動的サイズ版
+        let input: [i32; 4] = [128, 256, -64, 512];
+        let mut output = [0i32; 4];
+
+        // scale_shift = 2 (divide by 4)
+        SCReLUDynamic::propagate_i32(&input, &mut output, 2);
+
+        // 128 >> 2 = 32 → 32² = 1024
+        assert_eq!(output[0], 1024);
+        // 256 >> 2 = 64 → 64² = 4096
+        assert_eq!(output[1], 4096);
+        // -64 >> 2 = -16 → clamp to 0 → 0
+        assert_eq!(output[2], 0);
+        // 512 >> 2 = 128 → clamp(128, 0, 127) = 127 → 16129
+        assert_eq!(output[3], 16129);
+    }
+
+    #[test]
+    fn test_screlu_max_value() {
+        // SCReLU の最大出力値が正しいことを確認
+        let qa = super::super::constants::SCRELU_QA;
+        assert_eq!(qa, 127);
+
+        let max_output = i32::from(qa) * i32::from(qa);
+        assert_eq!(max_output, 16129);
+
+        // オーバーフロー検証: 16129 × 127 × 512 < i32::MAX
+        let max_accumulation: i64 = 16129 * 127 * 512;
+        assert!(
+            max_accumulation < i32::MAX as i64,
+            "SCReLU output could overflow in affine layer: {max_accumulation} >= {}",
+            i32::MAX
+        );
     }
 }

@@ -883,6 +883,34 @@ impl FeatureTransformerHalfKADynamic {
             }
         }
     }
+
+    /// SCReLU用: i16出力版transform (ClippedReLU適用なし)
+    ///
+    /// SCReLU モデルでは、Accumulator の生の i16 値に対して
+    /// SCReLU を適用する必要がある。この関数は ClippedReLU を
+    /// スキップして、Accumulator の値をそのまま出力する。
+    ///
+    /// # 引数
+    ///
+    /// - `acc`: アキュムレータ
+    /// - `side_to_move`: 手番
+    /// - `output`: 出力バッファ (サイズ: L1 * 2)
+    pub fn transform_raw(
+        &self,
+        acc: &AccumulatorHalfKADynamic,
+        side_to_move: Color,
+        output: &mut [i16],
+    ) {
+        let perspectives = [side_to_move, !side_to_move];
+
+        for (p, &perspective) in perspectives.iter().enumerate() {
+            let out_offset = self.l1 * p;
+            let accumulation = &acc.accumulation[perspective as usize];
+
+            // Accumulator の値をそのままコピー
+            output[out_offset..out_offset + self.l1].copy_from_slice(&accumulation[..self.l1]);
+        }
+    }
 }
 
 // =============================================================================
@@ -1043,6 +1071,29 @@ impl AffineTransformDynamic {
             *out += hsum_i32_sse2(acc);
         }
     }
+
+    /// i32入力版 順伝播（SCReLU用）
+    ///
+    /// SCReLU の出力 (i32) を入力として受け取る。
+    /// u8入力版と異なり、i32 × i8 の積和演算を行う。
+    ///
+    /// # スケーリング
+    ///
+    /// SCReLU出力は最大 QA² = 16,129。
+    /// i8重み（最大127）との積は最大 16,129 × 127 = 2,048,383。
+    /// 512入力の総和でも i32 に収まる。
+    pub fn propagate_i32(&self, input: &[i32], output: &mut [i32]) {
+        // バイアスで初期化
+        output.copy_from_slice(&self.biases);
+
+        // スカラー実装（TODO: Phase 4 で SIMD 最適化）
+        for (j, out) in output.iter_mut().enumerate() {
+            let weight_offset = j * self.padded_input_dim;
+            for (i, &in_val) in input.iter().enumerate().take(self.input_dim) {
+                *out += self.weights[weight_offset + i] as i32 * in_val;
+            }
+        }
+    }
 }
 
 // =============================================================================
@@ -1075,6 +1126,11 @@ pub struct NetworkHalfKADynamic {
     pub arch_l2: usize,
     /// L3: 隠れ層2 出力次元
     pub arch_l3: usize,
+    /// SCReLU を使用するかどうか
+    ///
+    /// arch_string に "-SCReLU" サフィックスが含まれている場合に true。
+    /// bullet-shogi で学習した SCReLU モデル用。
+    pub use_screlu: bool,
 }
 
 impl NetworkHalfKADynamic {
@@ -1113,6 +1169,10 @@ impl NetworkHalfKADynamic {
         }
         let mut arch = vec![0u8; arch_len];
         reader.read_exact(&mut arch)?;
+        let arch_str = String::from_utf8_lossy(&arch);
+
+        // SCReLU 検出: arch_string に "-SCReLU" が含まれているかチェック
+        let use_screlu = arch_str.contains("SCReLU");
 
         // Feature Transformer ハッシュ
         reader.read_exact(&mut buf4)?;
@@ -1142,6 +1202,7 @@ impl NetworkHalfKADynamic {
             arch_l1: l1,
             arch_l2: l2,
             arch_l3: l3,
+            use_screlu,
         })
     }
 
@@ -1287,7 +1348,18 @@ impl NetworkHalfKADynamic {
     }
 
     /// 評価値を計算
+    ///
+    /// `use_screlu` フラグに応じて ClippedReLU 版または SCReLU 版を呼び出す。
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorHalfKADynamic) -> Value {
+        if self.use_screlu {
+            self.evaluate_screlu(pos, acc)
+        } else {
+            self.evaluate_clipped_relu(pos, acc)
+        }
+    }
+
+    /// ClippedReLU 版の評価値計算（従来の実装）
+    fn evaluate_clipped_relu(&self, pos: &Position, acc: &AccumulatorHalfKADynamic) -> Value {
         let l1 = self.arch_l1;
 
         // Feature Transformer 出力
@@ -1321,6 +1393,85 @@ impl NetworkHalfKADynamic {
         Value::new(output[0] / fv_scale)
     }
 
+    /// SCReLU 版の評価値計算
+    ///
+    /// bullet-shogi で学習した SCReLU モデル用。
+    ///
+    /// # データフロー
+    ///
+    /// ```text
+    /// Accumulator (i16[L1*2])
+    ///     ↓ transform_raw（ClippedReLUスキップ）
+    /// i16[L1*2]
+    ///     ↓ SCReLU (i16 → i32)
+    /// i32[L1*2]
+    ///     ↓ AffineTransform.propagate_i32（i32入力対応）
+    /// i32[L2]
+    ///     ↓ SCReLU + スケーリング (÷ QA)
+    /// i32[L2]
+    ///     ↓ AffineTransform (i32入力、要u8変換)
+    /// i32[L3]
+    ///     ↓ SCReLU + スケーリング (÷ QA)
+    /// i32[L3]
+    ///     ↓ AffineTransform (i32入力、要u8変換)
+    /// i32[1]
+    ///     ↓ 最終スケーリング (÷ QB)
+    /// 評価値
+    /// ```
+    fn evaluate_screlu(&self, pos: &Position, acc: &AccumulatorHalfKADynamic) -> Value {
+        use super::constants::SCRELU_QA;
+        use super::layers::SCReLUDynamic;
+
+        let l1 = self.arch_l1;
+        let qa = i32::from(SCRELU_QA);
+
+        // Feature Transformer 出力（生のi16値）
+        let mut ft_out_i16 = vec![0i16; l1 * 2];
+        self.feature_transformer.transform_raw(acc, pos.side_to_move(), &mut ft_out_i16);
+
+        // SCReLU 適用 (i16 → i32)
+        let mut screlu_out = vec![0i32; l1 * 2];
+        SCReLUDynamic::propagate_i16(&ft_out_i16, &mut screlu_out);
+
+        // l1 層 (i32入力)
+        let l1_out_size = self.l2.padded_input_dim;
+        let mut l1_out = vec![0i32; l1_out_size];
+        self.l1.propagate_i32(&screlu_out, &mut l1_out[..self.arch_l2]);
+
+        // L1層後の逆量子化 (÷ QA)
+        for x in l1_out.iter_mut().take(self.arch_l2) {
+            *x /= qa;
+        }
+
+        // SCReLU 適用 (中間層)
+        let mut l1_screlu = vec![0i32; l1_out_size];
+        SCReLUDynamic::propagate_i32(&l1_out[..self.arch_l2], &mut l1_screlu[..self.arch_l2], 0);
+
+        // l2 層 (i32入力)
+        // 中間層の入力サイズは arch_l2 だが、パディングが必要
+        let mut l2_out = vec![0i32; self.arch_l3];
+        self.l2.propagate_i32(&l1_screlu[..self.l2.padded_input_dim], &mut l2_out);
+
+        // L2層後の逆量子化 (÷ QA)
+        for x in l2_out.iter_mut() {
+            *x /= qa;
+        }
+
+        // SCReLU 適用 (中間層)
+        let mut l2_screlu = vec![0i32; self.arch_l3];
+        SCReLUDynamic::propagate_i32(&l2_out, &mut l2_screlu, 0);
+
+        // output 層 (i32入力)
+        let mut output = vec![0i32; 1];
+        self.output.propagate_i32(&l2_screlu, &mut output);
+
+        // 最終スケーリング (÷ QA × QB)
+        // bullet-shogi では最終出力で ÷ (QA × QB) を行う
+        // FV_SCALE も考慮
+        let fv_scale = get_fv_scale_override().unwrap_or(FV_SCALE_HALFKA);
+        Value::new(output[0] / (qa * fv_scale))
+    }
+
     /// 新しい Accumulator を作成
     pub fn new_accumulator(&self) -> AccumulatorHalfKADynamic {
         AccumulatorHalfKADynamic::new(self.arch_l1)
@@ -1333,7 +1484,13 @@ impl NetworkHalfKADynamic {
 
     /// アーキテクチャ名を取得
     pub fn architecture_name(&self) -> String {
-        format!("HalfKADynamic {}x2-{}-{}", self.arch_l1, self.arch_l2, self.arch_l3)
+        let activation = if self.use_screlu { "-SCReLU" } else { "" };
+        format!("HalfKADynamic {}x2-{}-{}{activation}", self.arch_l1, self.arch_l2, self.arch_l3)
+    }
+
+    /// SCReLU を使用しているかどうか
+    pub fn is_screlu(&self) -> bool {
+        self.use_screlu
     }
 }
 

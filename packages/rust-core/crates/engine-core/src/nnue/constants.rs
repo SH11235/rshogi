@@ -129,6 +129,26 @@ pub const NNUE_PYTORCH_WEIGHT_SCALE_OUT: i32 = 16;
 /// nnue-pytorch の量子化単位
 pub const NNUE_PYTORCH_QUANTIZED_ONE: i32 = 127;
 
+// =============================================================================
+// SCReLU (Squared Clipped ReLU) 用定数
+// =============================================================================
+
+/// SCReLU 量子化係数 (bullet-shogi 準拠)
+///
+/// SCReLU では clamp(x, 0, QA)² を計算する。
+/// QA = 127 のとき、最大出力は 127² = 16,129。
+///
+/// スケーリング設計:
+/// - 入力: i16 (FeatureTransformer出力、範囲 [-QA, QA])
+/// - 出力: i32 (最大 QA² = 16,129)
+/// - オーバーフロー検証: 16,129 × 127 × 512 < i32_MAX ✓
+pub const SCRELU_QA: i16 = 127;
+
+/// SCReLU L1層以降の量子化係数 (bullet-shogi 準拠)
+///
+/// L1層以降では QB = 64 を使用。
+pub const SCRELU_QB: i16 = 64;
+
 #[cfg(test)]
 mod tests {
     use super::*;
