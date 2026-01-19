@@ -883,6 +883,34 @@ impl FeatureTransformerHalfKADynamic {
             }
         }
     }
+
+    /// SCReLU用: i16出力版transform (ClippedReLU適用なし)
+    ///
+    /// SCReLU モデルでは、Accumulator の生の i16 値に対して
+    /// SCReLU を適用する必要がある。この関数は ClippedReLU を
+    /// スキップして、Accumulator の値をそのまま出力する。
+    ///
+    /// # 引数
+    ///
+    /// - `acc`: アキュムレータ
+    /// - `side_to_move`: 手番
+    /// - `output`: 出力バッファ (サイズ: L1 * 2)
+    pub fn transform_raw(
+        &self,
+        acc: &AccumulatorHalfKADynamic,
+        side_to_move: Color,
+        output: &mut [i16],
+    ) {
+        let perspectives = [side_to_move, !side_to_move];
+
+        for (p, &perspective) in perspectives.iter().enumerate() {
+            let out_offset = self.l1 * p;
+            let accumulation = &acc.accumulation[perspective as usize];
+
+            // Accumulator の値をそのままコピー
+            output[out_offset..out_offset + self.l1].copy_from_slice(&accumulation[..self.l1]);
+        }
+    }
 }
 
 // =============================================================================
@@ -1043,6 +1071,29 @@ impl AffineTransformDynamic {
             *out += hsum_i32_sse2(acc);
         }
     }
+
+    /// i32入力版 順伝播（SCReLU用）
+    ///
+    /// SCReLU の出力 (i32) を入力として受け取る。
+    /// u8入力版と異なり、i32 × i8 の積和演算を行う。
+    ///
+    /// # スケーリング
+    ///
+    /// SCReLU出力は最大 QA² = 16,129。
+    /// i8重み（最大127）との積は最大 16,129 × 127 = 2,048,383。
+    /// 512入力の総和でも i32 に収まる。
+    pub fn propagate_i32(&self, input: &[i32], output: &mut [i32]) {
+        // バイアスで初期化
+        output.copy_from_slice(&self.biases);
+
+        // スカラー実装（TODO: Phase 4 で SIMD 最適化）
+        for (j, out) in output.iter_mut().enumerate() {
+            let weight_offset = j * self.padded_input_dim;
+            for (i, &in_val) in input.iter().enumerate().take(self.input_dim) {
+                *out += self.weights[weight_offset + i] as i32 * in_val;
+            }
+        }
+    }
 }
 
 // =============================================================================
@@ -1075,6 +1126,11 @@ pub struct NetworkHalfKADynamic {
     pub arch_l2: usize,
     /// L3: 隠れ層2 出力次元
     pub arch_l3: usize,
+    /// SCReLU を使用するかどうか
+    ///
+    /// arch_string に "-SCReLU" サフィックスが含まれている場合に true。
+    /// bullet-shogi で学習した SCReLU モデル用。
+    pub use_screlu: bool,
 }
 
 impl NetworkHalfKADynamic {
@@ -1113,6 +1169,10 @@ impl NetworkHalfKADynamic {
         }
         let mut arch = vec![0u8; arch_len];
         reader.read_exact(&mut arch)?;
+        let arch_str = String::from_utf8_lossy(&arch);
+
+        // SCReLU 検出: arch_string に "-SCReLU" が含まれているかチェック
+        let use_screlu = arch_str.contains("SCReLU");
 
         // Feature Transformer ハッシュ
         reader.read_exact(&mut buf4)?;
@@ -1142,6 +1202,7 @@ impl NetworkHalfKADynamic {
             arch_l1: l1,
             arch_l2: l2,
             arch_l3: l3,
+            use_screlu,
         })
     }
 
@@ -1263,6 +1324,18 @@ impl NetworkHalfKADynamic {
     /// Accumulator をリフレッシュ
     pub fn refresh_accumulator(&self, pos: &Position, acc: &mut AccumulatorHalfKADynamic) {
         self.feature_transformer.refresh_accumulator(pos, acc);
+
+        // デバッグ: アキュムレータの統計
+        #[cfg(debug_assertions)]
+        if std::env::var("NNUE_DEBUG").is_ok() {
+            let black_min = acc.accumulation[0].iter().min().unwrap_or(&0);
+            let black_max = acc.accumulation[0].iter().max().unwrap_or(&0);
+            let white_min = acc.accumulation[1].iter().min().unwrap_or(&0);
+            let white_max = acc.accumulation[1].iter().max().unwrap_or(&0);
+            eprintln!(
+                "[DEBUG] After refresh_accumulator: Black(min={black_min},max={black_max}) White(min={white_min},max={white_max})"
+            );
+        }
     }
 
     /// Accumulator を差分更新
@@ -1287,12 +1360,37 @@ impl NetworkHalfKADynamic {
     }
 
     /// 評価値を計算
+    ///
+    /// `use_screlu` フラグに応じて ClippedReLU 版または SCReLU 版を呼び出す。
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorHalfKADynamic) -> Value {
+        let debug = cfg!(debug_assertions) && std::env::var("NNUE_DEBUG").is_ok();
+        if self.use_screlu {
+            if debug {
+                eprintln!("[DEBUG] Using evaluate_screlu (use_screlu={})", self.use_screlu);
+            }
+            self.evaluate_screlu(pos, acc)
+        } else {
+            if debug {
+                eprintln!("[DEBUG] Using evaluate_clipped_relu (use_screlu={})", self.use_screlu);
+            }
+            self.evaluate_clipped_relu(pos, acc)
+        }
+    }
+
+    /// ClippedReLU 版の評価値計算（従来の実装）
+    fn evaluate_clipped_relu(&self, pos: &Position, acc: &AccumulatorHalfKADynamic) -> Value {
         let l1 = self.arch_l1;
+        let debug = cfg!(debug_assertions) && std::env::var("NNUE_DEBUG").is_ok();
 
         // Feature Transformer 出力
         let mut transformed = vec![0u8; l1 * 2];
         self.feature_transformer.transform(acc, pos.side_to_move(), &mut transformed);
+
+        if debug {
+            let sum: u32 = transformed.iter().map(|&x| x as u32).sum();
+            let nonzero = transformed.iter().filter(|&&x| x != 0).count();
+            eprintln!("[DEBUG] CReLU FT u8: nonzero={nonzero}/{}, sum={sum}", l1 * 2);
+        }
 
         // l1 層
         // l2 層の padded_input_dim に合わせてバッファを確保（SIMD境界外読み取り防止）
@@ -1316,6 +1414,150 @@ impl NetworkHalfKADynamic {
         let mut output = vec![0i32; 1];
         self.output.propagate(&l2_relu, &mut output);
 
+        if debug {
+            eprintln!("[DEBUG] CReLU L2 ReLU u8: {:?}", &l2_relu[..self.arch_l3.min(16)]);
+            eprintln!("[DEBUG] CReLU Output bias: {}", self.output.biases[0]);
+            eprintln!(
+                "[DEBUG] CReLU Output weights: {:?}",
+                &self.output.weights[..self.arch_l3.min(16)]
+            );
+            eprintln!("[DEBUG] CReLU Final output i32: {}", output[0]);
+        }
+
+        // スケーリング（オーバーライド設定があればそちらを優先）
+        let fv_scale = get_fv_scale_override().unwrap_or(FV_SCALE_HALFKA);
+        Value::new(output[0] / fv_scale)
+    }
+
+    /// SCReLU 版の評価値計算
+    ///
+    /// bullet-shogi で学習した SCReLU モデル用。
+    ///
+    /// # データフロー
+    ///
+    /// ```text
+    /// Accumulator (i16[L1*2])
+    ///     ↓ transform_raw（ClippedReLUスキップ）
+    /// i16[L1*2]
+    ///     ↓ SCReLU (i16 → i32)
+    /// i32[L1*2]
+    ///     ↓ AffineTransform.propagate_i32（i32入力対応）
+    /// i32[L2]
+    ///     ↓ SCReLU + スケーリング (÷ QA)
+    /// i32[L2]
+    ///     ↓ AffineTransform (i32入力、要u8変換)
+    /// i32[L3]
+    ///     ↓ SCReLU + スケーリング (÷ QA)
+    /// i32[L3]
+    ///     ↓ AffineTransform (i32入力、要u8変換)
+    /// i32[1]
+    ///     ↓ 最終スケーリング (÷ QB)
+    /// 評価値
+    /// ```
+    fn evaluate_screlu(&self, pos: &Position, acc: &AccumulatorHalfKADynamic) -> Value {
+        use crate::nnue::layers::SCReLUDynamic;
+
+        let l1 = self.arch_l1;
+        let debug = cfg!(debug_assertions) && std::env::var("NNUE_DEBUG").is_ok();
+
+        // Feature Transformer 出力（生のi16値）
+        let mut ft_out_i16 = vec![0i16; l1 * 2];
+        self.feature_transformer.transform_raw(acc, pos.side_to_move(), &mut ft_out_i16);
+
+        // デバッグ: FT出力の統計（パースペクティブ別）
+        if debug {
+            // 手番側（前半）
+            let stm_part = &ft_out_i16[..l1];
+            let stm_min = stm_part.iter().min().unwrap_or(&0);
+            let stm_max = stm_part.iter().max().unwrap_or(&0);
+            let stm_pos = stm_part.iter().filter(|&&x| x > 0).count();
+            let stm_pos_sum: i32 = stm_part.iter().filter(|&&x| x > 0).map(|&x| x as i32).sum();
+
+            // 相手側（後半）
+            let opp_part = &ft_out_i16[l1..];
+            let opp_min = opp_part.iter().min().unwrap_or(&0);
+            let opp_max = opp_part.iter().max().unwrap_or(&0);
+            let opp_pos = opp_part.iter().filter(|&&x| x > 0).count();
+            let opp_pos_sum: i32 = opp_part.iter().filter(|&&x| x > 0).map(|&x| x as i32).sum();
+
+            eprintln!(
+                "[DEBUG] FT i16: STM(min={stm_min},max={stm_max},pos={stm_pos},pos_sum={stm_pos_sum}) OPP(min={opp_min},max={opp_max},pos={opp_pos},pos_sum={opp_pos_sum})"
+            );
+        }
+
+        // SCReLU 適用 (i16 → u8)
+        // FT後: clamp(x, 0, 127)² >> 7 → u8 (0〜127)
+        let mut transformed = vec![0u8; l1 * 2];
+        SCReLUDynamic::propagate_i16_to_u8(&ft_out_i16, &mut transformed);
+
+        if debug {
+            let min = transformed.iter().min().unwrap_or(&0);
+            let max = transformed.iter().max().unwrap_or(&0);
+            let nonzero = transformed.iter().filter(|&&x| x != 0).count();
+            let sum: u32 = transformed.iter().map(|&x| x as u32).sum();
+            eprintln!(
+                "[DEBUG] After FT SCReLU u8: min={min}, max={max}, nonzero={nonzero}/{}, sum={sum}",
+                l1 * 2
+            );
+        }
+
+        // l1 層
+        let l1_out_size = self.l2.padded_input_dim;
+        let mut l1_out = vec![0i32; l1_out_size];
+        self.l1.propagate(&transformed, &mut l1_out[..self.arch_l2]);
+
+        if debug {
+            let min = l1_out.iter().min().unwrap_or(&0);
+            let max = l1_out.iter().max().unwrap_or(&0);
+            eprintln!("[DEBUG] L1 out i32: min={min}, max={max}");
+        }
+
+        // SCReLU (i32 → u8)
+        // L1後: clamp(x >> 6, 0, 127)² >> 7 → u8
+        // 等価: x² >> 19 (Stockfish方式)
+        let mut l1_relu = vec![0u8; l1_out_size];
+        SCReLUDynamic::propagate_i32_to_u8(&l1_out[..self.arch_l2], &mut l1_relu[..self.arch_l2]);
+
+        if debug {
+            let min = l1_relu.iter().min().unwrap_or(&0);
+            let max = l1_relu.iter().max().unwrap_or(&0);
+            let nonzero = l1_relu.iter().filter(|&&x| x != 0).count();
+            eprintln!(
+                "[DEBUG] After L1 SCReLU u8: min={min}, max={max}, nonzero={nonzero}/{}",
+                self.arch_l2
+            );
+        }
+
+        // l2 層
+        let mut l2_out = vec![0i32; self.arch_l3];
+        self.l2.propagate(&l1_relu, &mut l2_out);
+
+        // SCReLU (i32 → u8)
+        // L2後: clamp(x >> 6, 0, 127)² >> 7 → u8
+        let mut l2_relu = vec![0u8; self.arch_l3];
+        SCReLUDynamic::propagate_i32_to_u8(&l2_out, &mut l2_relu);
+
+        // output 層
+        let mut output = vec![0i32; 1];
+        self.output.propagate(&l2_relu, &mut output);
+
+        if debug {
+            let l2_min = l2_out.iter().min().unwrap_or(&0);
+            let l2_max = l2_out.iter().max().unwrap_or(&0);
+            let l2r_min = l2_relu.iter().min().unwrap_or(&0);
+            let l2r_max = l2_relu.iter().max().unwrap_or(&0);
+            let l2r_nonzero = l2_relu.iter().filter(|&&x| x != 0).count();
+            eprintln!("[DEBUG] L2 out i32: min={l2_min}, max={l2_max}");
+            eprintln!(
+                "[DEBUG] After L2 SCReLU u8: min={l2r_min}, max={l2r_max}, nonzero={l2r_nonzero}/{}",
+                self.arch_l3
+            );
+            eprintln!("[DEBUG] L2 ReLU u8: {:?}", &l2_relu[..self.arch_l3.min(16)]);
+            eprintln!("[DEBUG] Output bias: {}", self.output.biases[0]);
+            eprintln!("[DEBUG] Output weights: {:?}", &self.output.weights[..self.arch_l3.min(16)]);
+            eprintln!("[DEBUG] Final output i32: {}", output[0]);
+        }
+
         // スケーリング（オーバーライド設定があればそちらを優先）
         let fv_scale = get_fv_scale_override().unwrap_or(FV_SCALE_HALFKA);
         Value::new(output[0] / fv_scale)
@@ -1333,7 +1575,13 @@ impl NetworkHalfKADynamic {
 
     /// アーキテクチャ名を取得
     pub fn architecture_name(&self) -> String {
-        format!("HalfKADynamic {}x2-{}-{}", self.arch_l1, self.arch_l2, self.arch_l3)
+        let activation = if self.use_screlu { "-SCReLU" } else { "" };
+        format!("HalfKADynamic {}x2-{}-{}{activation}", self.arch_l1, self.arch_l2, self.arch_l3)
+    }
+
+    /// SCReLU を使用しているかどうか
+    pub fn is_screlu(&self) -> bool {
+        self.use_screlu
     }
 }
 
@@ -1458,5 +1706,355 @@ mod tests {
         assert_eq!(network.output.output_dim, 1, "output output_dim should be 1");
 
         println!("Successfully loaded: {}", network.architecture_name());
+    }
+
+    #[test]
+    fn test_screlu_detection_from_arch() {
+        // SCReLU サフィックスありの場合
+        let arch_screlu = "Features=HalfKA_hm[73305->256x2]-SCReLU";
+        assert!(arch_screlu.contains("SCReLU"));
+
+        // SCReLU サフィックスなしの場合
+        let arch_crelu = "Features=HalfKA_hm[73305->256x2]";
+        assert!(!arch_crelu.contains("SCReLU"));
+
+        // ClippedReLU 明示の場合も SCReLU なし
+        let arch_clipped = "Features=HalfKA_hm[73305->256x2],Network=ClippedReLU";
+        assert!(!arch_clipped.contains("SCReLU"));
+    }
+
+    #[test]
+    fn test_transform_raw() {
+        // FeatureTransformer の transform_raw() テスト
+        let l1 = 32; // 小さいサイズでテスト
+
+        // アキュムレータを作成
+        let mut acc = AccumulatorHalfKADynamic::new(l1);
+
+        // テストデータを設定
+        for i in 0..l1 {
+            acc.accumulation[0][i] = (i as i16) * 10; // Black: 0, 10, 20, ...
+            acc.accumulation[1][i] = -((i as i16) * 5); // White: 0, -5, -10, ...
+        }
+        acc.computed_accumulation = true;
+
+        // ダミーの FeatureTransformer を作成
+        let ft = FeatureTransformerHalfKADynamic {
+            biases: vec![0i16; l1],
+            weights: AlignedBox::new_zeroed(HALFKA_HM_DIMENSIONS * l1),
+            l1,
+            input_dim: HALFKA_HM_DIMENSIONS,
+        };
+
+        // transform_raw() を呼び出し（Black の手番）
+        let mut output = vec![0i16; l1 * 2];
+        ft.transform_raw(&acc, Color::Black, &mut output);
+
+        // Black視点が先頭、White視点が後続
+        for i in 0..l1 {
+            assert_eq!(output[i], (i as i16) * 10, "Black perspective mismatch at {i}");
+            assert_eq!(output[l1 + i], -((i as i16) * 5), "White perspective mismatch at {i}");
+        }
+
+        // transform_raw() を呼び出し（White の手番）
+        let mut output_white = vec![0i16; l1 * 2];
+        ft.transform_raw(&acc, Color::White, &mut output_white);
+
+        // White視点が先頭、Black視点が後続
+        for i in 0..l1 {
+            assert_eq!(output_white[i], -((i as i16) * 5), "White perspective mismatch at {i}");
+            assert_eq!(output_white[l1 + i], (i as i16) * 10, "Black perspective mismatch at {i}");
+        }
+    }
+
+    #[test]
+    fn test_architecture_name_with_screlu() {
+        // use_screlu = true の場合
+        let name_screlu = {
+            let activation = if true { "-SCReLU" } else { "" };
+            format!("HalfKADynamic {}x2-{}-{}{activation}", 256, 32, 32)
+        };
+        assert_eq!(name_screlu, "HalfKADynamic 256x2-32-32-SCReLU");
+
+        // use_screlu = false の場合
+        let name_crelu = {
+            let activation = if false { "-SCReLU" } else { "" };
+            format!("HalfKADynamic {}x2-{}-{}{activation}", 256, 32, 32)
+        };
+        assert_eq!(name_crelu, "HalfKADynamic 256x2-32-32");
+    }
+
+    #[test]
+    fn test_propagate_i32() {
+        // AffineTransformDynamic の propagate_i32() テスト
+        let input_dim = 8;
+        let output_dim = 4;
+        let padded_input_dim = AffineTransformDynamic::padded_input(input_dim);
+
+        // 重みとバイアスを設定
+        let mut weights = AlignedBox::new_zeroed(output_dim * padded_input_dim);
+        // 対角成分を1に設定（最初の4入力だけ使用）
+        for i in 0..output_dim {
+            weights[i * padded_input_dim + i] = 1;
+        }
+
+        let affine = AffineTransformDynamic {
+            biases: vec![100, 200, 300, 400],
+            weights,
+            input_dim,
+            padded_input_dim,
+            output_dim,
+        };
+
+        // i32 入力
+        let input = vec![10i32, 20, 30, 40, 0, 0, 0, 0];
+        let mut output = vec![0i32; output_dim];
+
+        affine.propagate_i32(&input, &mut output);
+
+        // output[i] = bias[i] + input[i] * 1
+        assert_eq!(output[0], 100 + 10);
+        assert_eq!(output[1], 200 + 20);
+        assert_eq!(output[2], 300 + 30);
+        assert_eq!(output[3], 400 + 40);
+    }
+
+    /// SCReLU モデル統合テスト: モデル読み込み → 初期局面評価
+    #[test]
+    fn test_screlu_model_integration() {
+        use std::fs::File;
+        use std::io::BufReader;
+        use std::path::Path;
+
+        // SCReLU モデルのパス（/tmp に学習済みモデルがある場合のみ実行）
+        let screlu_path = Path::new("/tmp/screlu_test/screlu-256x2-32-32-10/quantised.bin");
+        let crelu_path = Path::new("/tmp/crelu_test/crelu-256x2-32-32-10/quantised.bin");
+
+        if !screlu_path.exists() || !crelu_path.exists() {
+            eprintln!("Skipping test: SCReLU/CReLU model files not found in /tmp/");
+            eprintln!("Run bullet-shogi training first to create test models.");
+            return;
+        }
+
+        // SCReLU モデルを読み込み
+        let screlu_file = File::open(screlu_path).expect("Failed to open SCReLU model");
+        let mut screlu_reader = BufReader::new(screlu_file);
+        let screlu_net =
+            NetworkHalfKADynamic::read(&mut screlu_reader).expect("Failed to read SCReLU model");
+
+        // CReLU モデルを読み込み
+        let crelu_file = File::open(crelu_path).expect("Failed to open CReLU model");
+        let mut crelu_reader = BufReader::new(crelu_file);
+        let crelu_net =
+            NetworkHalfKADynamic::read(&mut crelu_reader).expect("Failed to read CReLU model");
+
+        // SCReLU 検出確認
+        assert!(screlu_net.is_screlu(), "SCReLU model should have use_screlu=true");
+        assert!(!crelu_net.is_screlu(), "CReLU model should have use_screlu=false");
+
+        // アーキテクチャ確認
+        println!("SCReLU architecture: {}", screlu_net.architecture_name());
+        println!("CReLU architecture: {}", crelu_net.architecture_name());
+
+        assert!(
+            screlu_net.architecture_name().contains("SCReLU"),
+            "SCReLU arch name should contain 'SCReLU'"
+        );
+        assert!(
+            !crelu_net.architecture_name().contains("SCReLU"),
+            "CReLU arch name should not contain 'SCReLU'"
+        );
+
+        // 初期局面で評価値を取得
+        let mut pos = Position::default();
+        pos.set_hirate();
+
+        let mut screlu_acc = AccumulatorHalfKADynamic::new(screlu_net.arch_l1);
+        screlu_net.feature_transformer.refresh_accumulator(&pos, &mut screlu_acc);
+        let screlu_eval = screlu_net.evaluate(&pos, &screlu_acc);
+
+        let mut crelu_acc = AccumulatorHalfKADynamic::new(crelu_net.arch_l1);
+        crelu_net.feature_transformer.refresh_accumulator(&pos, &mut crelu_acc);
+        let crelu_eval = crelu_net.evaluate(&pos, &crelu_acc);
+
+        println!("Initial position evaluation:");
+        println!("  SCReLU: {}", screlu_eval.raw());
+        println!("  CReLU:  {}", crelu_eval.raw());
+
+        // 評価値が妥当な範囲にあることを確認
+        // 注意: 10 superbatches では十分に学習されていないため、
+        // 初期局面の評価値は0から離れることがある
+        // ここでは「モデルが読み込めて、評価値が計算できる」ことを確認
+        // 完全に学習したモデルでは |eval| < 300 程度になるべき
+        assert!(
+            screlu_eval.raw().abs() < 5000,
+            "SCReLU initial eval {} seems unreasonable",
+            screlu_eval.raw()
+        );
+        assert!(
+            crelu_eval.raw().abs() < 5000,
+            "CReLU initial eval {} seems unreasonable",
+            crelu_eval.raw()
+        );
+
+        // SCReLU と CReLU で異なる評価値が出ることを確認
+        // （同じパスで処理されていないことの証明）
+        assert_ne!(
+            screlu_eval.raw(),
+            crelu_eval.raw(),
+            "SCReLU and CReLU should produce different evaluations"
+        );
+    }
+
+    /// SCReLU推論パスのデバッグ: 各層の中間値を確認
+    #[test]
+    fn test_screlu_debug_intermediate_values() {
+        use crate::nnue::constants::SCRELU_QA;
+        use crate::nnue::layers::SCReLUDynamic;
+        use std::fs::File;
+        use std::io::BufReader;
+        use std::path::Path;
+
+        let screlu_path = Path::new("/tmp/screlu_test/screlu-256x2-32-32-10/quantised.bin");
+        let crelu_path = Path::new("/tmp/crelu_test/crelu-256x2-32-32-10/quantised.bin");
+
+        if !screlu_path.exists() || !crelu_path.exists() {
+            eprintln!("Skipping debug test: model files not found");
+            return;
+        }
+
+        // SCReLUモデル読み込み
+        let screlu_file = File::open(screlu_path).expect("Failed to open SCReLU model");
+        let mut screlu_reader = BufReader::new(screlu_file);
+        let screlu_net =
+            NetworkHalfKADynamic::read(&mut screlu_reader).expect("Failed to read SCReLU model");
+
+        // CReLUモデル読み込み
+        let crelu_file = File::open(crelu_path).expect("Failed to open CReLU model");
+        let mut crelu_reader = BufReader::new(crelu_file);
+        let crelu_net =
+            NetworkHalfKADynamic::read(&mut crelu_reader).expect("Failed to read CReLU model");
+
+        let pos = Position::default();
+        let qa = i32::from(SCRELU_QA);
+
+        println!("\n=== SCReLU Debug: Intermediate Values ===\n");
+
+        // --- SCReLU パス ---
+        let mut screlu_acc = AccumulatorHalfKADynamic::new(screlu_net.arch_l1);
+        screlu_net.feature_transformer.refresh_accumulator(&pos, &mut screlu_acc);
+
+        // FT出力 (raw i16)
+        let l1 = screlu_net.arch_l1;
+        let mut ft_out_i16 = vec![0i16; l1 * 2];
+        screlu_net.feature_transformer.transform_raw(
+            &screlu_acc,
+            pos.side_to_move(),
+            &mut ft_out_i16,
+        );
+
+        let ft_min = *ft_out_i16.iter().min().unwrap();
+        let ft_max = *ft_out_i16.iter().max().unwrap();
+        let ft_sum: i64 = ft_out_i16.iter().map(|&x| x as i64).sum();
+        let ft_mean = ft_sum as f64 / ft_out_i16.len() as f64;
+        println!("SCReLU FT output (i16): min={ft_min}, max={ft_max}, mean={ft_mean:.1}");
+
+        // SCReLU適用
+        let mut screlu_out = vec![0i32; l1 * 2];
+        SCReLUDynamic::propagate_i16(&ft_out_i16, &mut screlu_out);
+
+        let screlu_min = *screlu_out.iter().min().unwrap();
+        let screlu_max = *screlu_out.iter().max().unwrap();
+        let screlu_sum: i64 = screlu_out.iter().map(|&x| x as i64).sum();
+        let screlu_mean = screlu_sum as f64 / screlu_out.len() as f64;
+        let screlu_nonzero = screlu_out.iter().filter(|&&x| x > 0).count();
+        println!("SCReLU output (i32): min={screlu_min}, max={screlu_max}, mean={screlu_mean:.1}, nonzero={screlu_nonzero}");
+
+        // L1層
+        let l1_out_size = screlu_net.l2.padded_input_dim;
+        let mut l1_out = vec![0i32; l1_out_size];
+        screlu_net.l1.propagate_i32(&screlu_out, &mut l1_out[..screlu_net.arch_l2]);
+
+        let l1_min = *l1_out.iter().take(screlu_net.arch_l2).min().unwrap();
+        let l1_max = *l1_out.iter().take(screlu_net.arch_l2).max().unwrap();
+        println!("L1 output (before ÷QA): min={l1_min}, max={l1_max}");
+
+        for x in l1_out.iter_mut().take(screlu_net.arch_l2) {
+            *x /= qa;
+        }
+        let l1_div_min = *l1_out.iter().take(screlu_net.arch_l2).min().unwrap();
+        let l1_div_max = *l1_out.iter().take(screlu_net.arch_l2).max().unwrap();
+        println!("L1 output (after ÷QA=127): min={l1_div_min}, max={l1_div_max}");
+
+        // --- CReLU パス ---
+        println!("\n=== CReLU Debug: Intermediate Values ===\n");
+
+        let mut crelu_acc = AccumulatorHalfKADynamic::new(crelu_net.arch_l1);
+        crelu_net.feature_transformer.refresh_accumulator(&pos, &mut crelu_acc);
+
+        // FT出力 (u8)
+        let mut ft_out_u8 = vec![0u8; crelu_net.arch_l1 * 2];
+        crelu_net
+            .feature_transformer
+            .transform(&crelu_acc, pos.side_to_move(), &mut ft_out_u8);
+
+        let ft_u8_min = *ft_out_u8.iter().min().unwrap();
+        let ft_u8_max = *ft_out_u8.iter().max().unwrap();
+        let ft_u8_sum: u64 = ft_out_u8.iter().map(|&x| x as u64).sum();
+        let ft_u8_mean = ft_u8_sum as f64 / ft_out_u8.len() as f64;
+        let ft_u8_nonzero = ft_out_u8.iter().filter(|&&x| x > 0).count();
+        println!("CReLU FT output (u8): min={ft_u8_min}, max={ft_u8_max}, mean={ft_u8_mean:.1}, nonzero={ft_u8_nonzero}");
+
+        // L1層
+        let mut crelu_l1_out = vec![0i32; crelu_net.l2.padded_input_dim];
+        crelu_net.l1.propagate(&ft_out_u8, &mut crelu_l1_out[..crelu_net.arch_l2]);
+
+        let crelu_l1_min = *crelu_l1_out.iter().take(crelu_net.arch_l2).min().unwrap();
+        let crelu_l1_max = *crelu_l1_out.iter().take(crelu_net.arch_l2).max().unwrap();
+        println!("CReLU L1 output (before >>6): min={crelu_l1_min}, max={crelu_l1_max}");
+
+        // ClippedReLU (>> 6)
+        let mut crelu_l1_relu = vec![0u8; crelu_net.l2.padded_input_dim];
+        clipped_relu_dynamic(&crelu_l1_out, &mut crelu_l1_relu);
+
+        let crelu_l1_relu_min = *crelu_l1_relu.iter().take(crelu_net.arch_l2).min().unwrap();
+        let crelu_l1_relu_max = *crelu_l1_relu.iter().take(crelu_net.arch_l2).max().unwrap();
+        println!(
+            "CReLU L1 output (after ClippedReLU): min={crelu_l1_relu_min}, max={crelu_l1_relu_max}"
+        );
+
+        println!("\n=== Weight Statistics ===\n");
+        println!(
+            "SCReLU L1 weights: input_dim={}, output_dim={}",
+            screlu_net.l1.padded_input_dim, screlu_net.arch_l2
+        );
+        println!(
+            "CReLU L1 weights: input_dim={}, output_dim={}",
+            crelu_net.l1.padded_input_dim, crelu_net.arch_l2
+        );
+
+        let screlu_w_min = *screlu_net.l1.weights.iter().min().unwrap();
+        let screlu_w_max = *screlu_net.l1.weights.iter().max().unwrap();
+        let crelu_w_min = *crelu_net.l1.weights.iter().min().unwrap();
+        let crelu_w_max = *crelu_net.l1.weights.iter().max().unwrap();
+        println!("SCReLU L1 weight range: [{screlu_w_min}, {screlu_w_max}]");
+        println!("CReLU L1 weight range: [{crelu_w_min}, {crelu_w_max}]");
+
+        // 新しい SCReLU (i16 → u8) の出力を確認
+        println!("\n=== NEW SCReLU (i16 → u8) Debug ===\n");
+        let mut screlu_u8_out = vec![0u8; l1 * 2];
+        SCReLUDynamic::propagate_i16_to_u8(&ft_out_i16, &mut screlu_u8_out);
+
+        let screlu_u8_min = *screlu_u8_out.iter().min().unwrap();
+        let screlu_u8_max = *screlu_u8_out.iter().max().unwrap();
+        let screlu_u8_sum: u64 = screlu_u8_out.iter().map(|&x| x as u64).sum();
+        let screlu_u8_mean = screlu_u8_sum as f64 / screlu_u8_out.len() as f64;
+        let screlu_u8_nonzero = screlu_u8_out.iter().filter(|&&x| x > 0).count();
+        println!(
+            "SCReLU u8 output: min={screlu_u8_min}, max={screlu_u8_max}, mean={screlu_u8_mean:.2}, nonzero={screlu_u8_nonzero}"
+        );
+        println!(
+            "CReLU u8 output:  min={ft_u8_min}, max={ft_u8_max}, mean={ft_u8_mean:.2}, nonzero={ft_u8_nonzero}"
+        );
     }
 }

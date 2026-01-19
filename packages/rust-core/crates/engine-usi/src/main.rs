@@ -9,7 +9,9 @@ use std::thread;
 
 use anyhow::Result;
 use engine_core::eval::{set_eval_hash_enabled, set_material_level, MaterialLevel};
-use engine_core::nnue::{init_nnue, set_fv_scale_override};
+use engine_core::nnue::{
+    evaluate_dispatch, get_network, init_nnue, set_fv_scale_override, AccumulatorStackVariant,
+};
 use engine_core::position::Position;
 use engine_core::search::{LimitsType, Search, SearchInfo, SearchResult};
 use engine_core::types::Move;
@@ -118,6 +120,9 @@ impl UsiEngine {
             // デバッグ用コマンド
             "d" | "display" => {
                 self.cmd_display();
+            }
+            "eval" => {
+                self.cmd_eval();
             }
             _ => {
                 // 未知のコマンドは無視
@@ -664,6 +669,23 @@ impl UsiEngine {
         println!("SFEN: {}", self.position.to_sfen());
         println!("Side to move: {:?}", self.position.side_to_move());
         println!("Game ply: {}", self.position.game_ply());
+    }
+
+    /// evalコマンド: 現在の局面の静的評価値を表示（デバッグ用）
+    fn cmd_eval(&self) {
+        let Some(network) = get_network() else {
+            println!("info string Error: No NNUE network loaded");
+            return;
+        };
+
+        // アーキテクチャに応じたアキュムレータスタックを作成
+        let mut stack = AccumulatorStackVariant::from_network(network);
+
+        // 評価値を計算
+        let value = evaluate_dispatch(&self.position, &mut stack);
+
+        println!("info string Static eval: {}", value.raw());
+        println!("info string SFEN: {}", self.position.to_sfen());
     }
 }
 

@@ -733,6 +733,26 @@ impl<const L1: usize> FeatureTransformerHalfKAStatic<L1> {
             }
         }
     }
+
+    /// 変換（ClippedReLU非適用、SCReLU用）
+    ///
+    /// SCReLU モデルでは ClippedReLU を適用せず、生の i16 値を出力する。
+    /// SCReLU 活性化は呼び出し側で別途適用する。
+    pub fn transform_raw(
+        &self,
+        acc: &AccumulatorHalfKAStatic<L1>,
+        side_to_move: Color,
+        output: &mut [i16],
+    ) {
+        let perspectives = [side_to_move, !side_to_move];
+
+        for (p, &perspective) in perspectives.iter().enumerate() {
+            let out_offset = L1 * p;
+            let accumulation = &acc.accumulation[perspective as usize];
+
+            output[out_offset..out_offset + L1].copy_from_slice(accumulation);
+        }
+    }
 }
 
 /// 512次元用Feature Transformerの型エイリアス
@@ -893,6 +913,11 @@ pub struct NetworkHalfKA512 {
     pub l2: AffineTransformStatic<8, 96>,
     /// 出力層: 96 → 1
     pub output: AffineTransformStatic<96, 1>,
+    /// SCReLU を使用するかどうか
+    ///
+    /// arch_string に "-SCReLU" サフィックスが含まれている場合に true。
+    /// bullet-shogi で学習した SCReLU モデル用。
+    pub use_screlu: bool,
 }
 
 impl NetworkHalfKA512 {
@@ -945,6 +970,9 @@ impl NetworkHalfKA512 {
             ));
         }
 
+        // SCReLU 検出: arch_string に "-SCReLU" が含まれているかチェック
+        let use_screlu = arch_str.contains("SCReLU");
+
         // Feature Transformer ハッシュ
         reader.read_exact(&mut buf4)?;
 
@@ -968,6 +996,7 @@ impl NetworkHalfKA512 {
             l1,
             l2,
             output,
+            use_screlu,
         })
     }
 
@@ -998,7 +1027,18 @@ impl NetworkHalfKA512 {
     }
 
     /// 評価値を計算
+    ///
+    /// `use_screlu` フラグに応じて ClippedReLU 版または SCReLU 版を呼び出す。
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorHalfKA512) -> Value {
+        if self.use_screlu {
+            self.evaluate_screlu(pos, acc)
+        } else {
+            self.evaluate_clipped_relu(pos, acc)
+        }
+    }
+
+    /// ClippedReLU 版の評価値計算（従来の実装）
+    fn evaluate_clipped_relu(&self, pos: &Position, acc: &AccumulatorHalfKA512) -> Value {
         // Feature Transformer 出力（スタック配列でヒープアロケーション回避）
         let mut transformed = [0u8; 1024];
         self.feature_transformer.transform(acc, pos.side_to_move(), &mut transformed);
@@ -1060,6 +1100,54 @@ impl NetworkHalfKA512 {
         Value::new(eval)
     }
 
+    /// SCReLU 版の評価値計算
+    ///
+    /// bullet-shogi で学習した SCReLU モデル用。
+    fn evaluate_screlu(&self, pos: &Position, acc: &AccumulatorHalfKA512) -> Value {
+        use super::layers::SCReLU;
+
+        // Feature Transformer 出力（生のi16値）
+        let mut ft_out_i16 = [0i16; 1024];
+        self.feature_transformer.transform_raw(acc, pos.side_to_move(), &mut ft_out_i16);
+
+        // SCReLU 適用 (i16 → u8)
+        let mut transformed = [0u8; 1024];
+        SCReLU::<1024>::propagate_i16_to_u8(&ft_out_i16, &mut transformed);
+
+        // l1 層
+        let mut l1_out = [0i32; 8];
+        self.l1.propagate(&transformed, &mut l1_out);
+
+        // SCReLU (i32 → u8) - l2入力用に32バイトにパディング
+        let mut l1_relu = [0u8; 32];
+        let mut l1_screlu = [0u8; 8];
+        SCReLU::<8>::propagate_i32_to_u8(&l1_out, &mut l1_screlu);
+        l1_relu[..8].copy_from_slice(&l1_screlu);
+
+        // l2 層
+        let mut l2_out = [0i32; 96];
+        self.l2.propagate(&l1_relu, &mut l2_out);
+
+        // SCReLU (i32 → u8)
+        let mut l2_relu = [0u8; 96];
+        SCReLU::<96>::propagate_i32_to_u8(&l2_out, &mut l2_relu);
+
+        // output 層
+        let mut output = [0i32; 1];
+        self.output.propagate(&l2_relu, &mut output);
+
+        // スケーリング（オーバーライド設定があればそちらを優先）
+        let fv_scale = get_fv_scale_override().unwrap_or(FV_SCALE_HALFKA);
+        let eval = output[0] / fv_scale;
+
+        Value::new(eval)
+    }
+
+    /// SCReLU を使用しているかどうか
+    pub fn is_screlu(&self) -> bool {
+        self.use_screlu
+    }
+
     /// 新しい Accumulator を作成
     pub fn new_accumulator(&self) -> AccumulatorHalfKA512 {
         AccumulatorHalfKA512::new()
@@ -1085,6 +1173,11 @@ pub struct NetworkHalfKA1024 {
     pub l2: AffineTransformStatic<8, 96>,
     /// 出力層: 96 → 1
     pub output: AffineTransformStatic<96, 1>,
+    /// SCReLU を使用するかどうか
+    ///
+    /// arch_string に "-SCReLU" サフィックスが含まれている場合に true。
+    /// bullet-shogi で学習した SCReLU モデル用。
+    pub use_screlu: bool,
 }
 
 impl NetworkHalfKA1024 {
@@ -1137,6 +1230,9 @@ impl NetworkHalfKA1024 {
             ));
         }
 
+        // SCReLU 検出: arch_string に "-SCReLU" が含まれているかチェック
+        let use_screlu = arch_str.contains("SCReLU");
+
         // Feature Transformer ハッシュ
         reader.read_exact(&mut buf4)?;
 
@@ -1160,6 +1256,7 @@ impl NetworkHalfKA1024 {
             l1,
             l2,
             output,
+            use_screlu,
         })
     }
 
@@ -1190,7 +1287,18 @@ impl NetworkHalfKA1024 {
     }
 
     /// 評価値を計算
+    ///
+    /// `use_screlu` フラグに応じて ClippedReLU 版または SCReLU 版を呼び出す。
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorHalfKA1024) -> Value {
+        if self.use_screlu {
+            self.evaluate_screlu(pos, acc)
+        } else {
+            self.evaluate_clipped_relu(pos, acc)
+        }
+    }
+
+    /// ClippedReLU 版の評価値計算（従来の実装）
+    fn evaluate_clipped_relu(&self, pos: &Position, acc: &AccumulatorHalfKA1024) -> Value {
         // Feature Transformer 出力（スタック配列でヒープアロケーション回避）
         let mut transformed = [0u8; 2048];
         self.feature_transformer.transform(acc, pos.side_to_move(), &mut transformed);
@@ -1250,6 +1358,54 @@ impl NetworkHalfKA1024 {
         );
 
         Value::new(eval)
+    }
+
+    /// SCReLU 版の評価値計算
+    ///
+    /// bullet-shogi で学習した SCReLU モデル用。
+    fn evaluate_screlu(&self, pos: &Position, acc: &AccumulatorHalfKA1024) -> Value {
+        use super::layers::SCReLU;
+
+        // Feature Transformer 出力（生のi16値）
+        let mut ft_out_i16 = [0i16; 2048];
+        self.feature_transformer.transform_raw(acc, pos.side_to_move(), &mut ft_out_i16);
+
+        // SCReLU 適用 (i16 → u8)
+        let mut transformed = [0u8; 2048];
+        SCReLU::<2048>::propagate_i16_to_u8(&ft_out_i16, &mut transformed);
+
+        // l1 層
+        let mut l1_out = [0i32; 8];
+        self.l1.propagate(&transformed, &mut l1_out);
+
+        // SCReLU (i32 → u8) - l2入力用に32バイトにパディング
+        let mut l1_relu = [0u8; 32];
+        let mut l1_screlu = [0u8; 8];
+        SCReLU::<8>::propagate_i32_to_u8(&l1_out, &mut l1_screlu);
+        l1_relu[..8].copy_from_slice(&l1_screlu);
+
+        // l2 層
+        let mut l2_out = [0i32; 96];
+        self.l2.propagate(&l1_relu, &mut l2_out);
+
+        // SCReLU (i32 → u8)
+        let mut l2_relu = [0u8; 96];
+        SCReLU::<96>::propagate_i32_to_u8(&l2_out, &mut l2_relu);
+
+        // output 層
+        let mut output = [0i32; 1];
+        self.output.propagate(&l2_relu, &mut output);
+
+        // スケーリング（オーバーライド設定があればそちらを優先）
+        let fv_scale = get_fv_scale_override().unwrap_or(FV_SCALE_HALFKA);
+        let eval = output[0] / fv_scale;
+
+        Value::new(eval)
+    }
+
+    /// SCReLU を使用しているかどうか
+    pub fn is_screlu(&self) -> bool {
+        self.use_screlu
     }
 
     /// 新しい Accumulator を作成
