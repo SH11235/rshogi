@@ -189,12 +189,23 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     no_training_data: bool,
 
-    /// 学習データ出力時に序盤の手数をスキップする（ランダム性確保のため）
-    #[arg(long, default_value_t = 8)]
+    /// 学習データ出力時に序盤の手数をスキップする（1手目からN手目まで）
+    /// ランダム性確保のため、序盤の定跡手順をスキップする
+    #[arg(
+        long,
+        default_value_t = 8,
+        help = "Skip initial N plies (1 to N) for training data"
+    )]
     skip_initial_ply: u32,
 
     /// 学習データ出力時に王手局面をスキップする
-    #[arg(long, default_value_t = true)]
+    /// 王手局面は応手が限られるため学習価値が低い
+    /// 無効化するには --skip-in-check false を指定
+    #[arg(
+        long,
+        default_value_t = true,
+        help = "Skip positions where king is in check"
+    )]
     skip_in_check: bool,
 }
 
@@ -432,6 +443,8 @@ struct TrainingDataCollector {
     total_written: u64,
     skipped_initial: u64,
     skipped_in_check: u64,
+    /// InProgress（手数制限/タイムアウト）で終了した対局のスキップ数
+    skipped_in_progress: u64,
 }
 
 impl TrainingDataCollector {
@@ -453,6 +466,7 @@ impl TrainingDataCollector {
             total_written: 0,
             skipped_initial: 0,
             skipped_in_check: 0,
+            skipped_in_progress: 0,
         })
     }
 
@@ -462,16 +476,19 @@ impl TrainingDataCollector {
     }
 
     /// 局面を記録（game_resultは後で設定）
+    /// 注: game_plyとスキップ判定はpos.game_ply()を使用する
+    /// （startpos+movesやSFEN手数指定のケースに対応するため）
     fn record_position(
         &mut self,
         pos: &Position,
         score_cp: Option<i32>,
         score_mate: Option<i32>,
         best_move: Option<Move>,
-        ply: u32,
     ) {
-        // 序盤をスキップ
-        if ply <= self.skip_initial_ply {
+        let current_ply = pos.game_ply();
+
+        // 序盤をスキップ（1手目から skip_initial_ply 手目まで）
+        if current_ply <= self.skip_initial_ply as i32 {
             self.skipped_initial += 1;
             return;
         }
@@ -485,8 +502,8 @@ impl TrainingDataCollector {
         // スコアを決定（mate > cp の優先順位）
         let score = if let Some(mate) = score_mate {
             // 詰みスコアは大きな値にクリップ
-            if mate > 0 {
-                10000i16 // 勝ちの詰み
+            if mate >= 0 {
+                10000i16 // 勝ちの詰み（即詰みを含む）
             } else {
                 -10000i16 // 負けの詰み
             }
@@ -508,14 +525,22 @@ impl TrainingDataCollector {
             sfen: packed_sfen,
             score,
             move16,
-            game_ply: ply.min(u16::MAX as u32) as u16,
+            game_ply: current_ply.clamp(0, u16::MAX as i32) as u16,
             side_to_move: pos.side_to_move(),
         });
     }
 
     /// 対局終了時に勝敗を設定して書き出す
+    /// InProgress（手数制限/タイムアウト終了）の対局は学習データに含めない
     fn finish_game(&mut self, outcome: GameOutcome) -> Result<()> {
-        for entry in &self.entries {
+        // InProgressの対局は学習データとして不適切なので破棄
+        if outcome == GameOutcome::InProgress {
+            self.skipped_in_progress += self.entries.len() as u64;
+            self.entries.clear();
+            return Ok(());
+        }
+
+        for (idx, entry) in self.entries.iter().enumerate() {
             // game_result: 手番側から見た勝敗
             // 1 = 勝ち, 0 = 引き分け, -1 = 負け
             let game_result = match outcome {
@@ -533,7 +558,8 @@ impl TrainingDataCollector {
                         -1i8
                     }
                 }
-                GameOutcome::Draw | GameOutcome::InProgress => 0i8,
+                GameOutcome::Draw => 0i8,
+                GameOutcome::InProgress => unreachable!(), // 上でreturn済み
             };
 
             let psv = PackedSfenValue {
@@ -545,7 +571,9 @@ impl TrainingDataCollector {
                 padding: 0,
             };
 
-            self.writer.write_all(&psv.to_bytes())?;
+            self.writer
+                .write_all(&psv.to_bytes())
+                .with_context(|| format!("failed to write position {idx} of game"))?;
             self.total_written += 1;
         }
         self.entries.clear();
@@ -557,8 +585,13 @@ impl TrainingDataCollector {
         Ok(())
     }
 
-    fn stats(&self) -> (u64, u64, u64) {
-        (self.total_written, self.skipped_initial, self.skipped_in_check)
+    fn stats(&self) -> (u64, u64, u64, u64) {
+        (
+            self.total_written,
+            self.skipped_initial,
+            self.skipped_in_check,
+            self.skipped_in_progress,
+        )
     }
 }
 
@@ -1200,12 +1233,10 @@ fn main() -> Result<()> {
     };
 
     // 学習データ出力の初期化（デフォルトで有効、--no-training-data で無効化）
-    let training_data_path = if cli.no_training_data {
-        None
-    } else if let Some(ref path) = cli.output_training_data {
-        Some(path.clone())
-    } else {
-        Some(default_training_data_path(&output_path))
+    let training_data_path = match (cli.no_training_data, &cli.output_training_data) {
+        (true, _) => None,
+        (false, Some(path)) => Some(path.clone()),
+        (false, None) => Some(default_training_data_path(&output_path)),
     };
     let mut training_data_collector = if let Some(ref path) = training_data_path {
         Some(TrainingDataCollector::new(path, cli.skip_initial_ply, cli.skip_in_check)?)
@@ -1423,7 +1454,6 @@ fn main() -> Result<()> {
                                     eval_log.as_ref().and_then(|e| e.score_cp),
                                     eval_log.as_ref().and_then(|e| e.score_mate),
                                     Some(mv),
-                                    plies_played,
                                 );
                             }
                             let gives_check = pos.gives_check(mv);
@@ -1671,13 +1701,16 @@ fn main() -> Result<()> {
     // 学習データのflushとサマリー出力
     if let Some(ref mut collector) = training_data_collector {
         collector.flush()?;
-        let (total, skipped_initial, skipped_in_check) = collector.stats();
+        let (total, skipped_initial, skipped_in_check, skipped_in_progress) = collector.stats();
         println!();
         println!("--- Training Data ---");
         println!("Total positions written: {total}");
-        println!("Skipped (initial ply ≤ {}): {}", cli.skip_initial_ply, skipped_initial);
+        println!("Skipped (initial ply 1-{}): {skipped_initial}", cli.skip_initial_ply);
         if cli.skip_in_check {
             println!("Skipped (in check): {skipped_in_check}");
+        }
+        if skipped_in_progress > 0 {
+            println!("Skipped (in progress games): {skipped_in_progress}");
         }
         println!(
             "Output: {}",
