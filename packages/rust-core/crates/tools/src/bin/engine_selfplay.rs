@@ -14,6 +14,7 @@ use engine_core::position::{Position, SFEN_HIRATE};
 use engine_core::types::{Color, Move, PieceType, Square};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tools::packed_sfen::{move_to_move16, pack_position, PackedSfenValue};
 
 const ENGINE_READY_TIMEOUT: Duration = Duration::from_secs(30);
 const ENGINE_QUIT_TIMEOUT: Duration = Duration::from_millis(300);
@@ -27,13 +28,16 @@ const MIN_THINK_MS: u64 = 10;
 /// # よく使うコマンド例
 ///
 /// - 1秒秒読みで数をこなす（infoログなし、デフォルト出力先）:
-///   `cargo run -p engine-usi --bin engine_selfplay -- --games 10 --max-moves 300 --byoyomi 1000`
+///   `cargo run -p tools --bin engine_selfplay -- --games 10 --max-moves 300 --byoyomi 1000`
 ///
 /// - 5秒秒読み + network-delay2=1120、infoログ付きで指定パスに出力:
-///   `cargo run -p engine-usi --bin engine_selfplay -- --games 2 --max-moves 300 --byoyomi 5000 --network-delay2 1120 --log-info --out runs/selfplay/byoyomi5s.jsonl`
+///   `cargo run -p tools --bin engine_selfplay -- --games 2 --max-moves 300 --byoyomi 5000 --network-delay2 1120 --log-info --out runs/selfplay/byoyomi5s.jsonl`
 ///
 /// - 特定SFENの再現（startposファイルを用意して1局だけ）:
-///   `cargo run -p engine-usi --bin engine_selfplay -- --games 1 --max-moves 300 --byoyomi 5000 --startpos-file sfen.txt --log-info`
+///   `cargo run -p tools --bin engine_selfplay -- --games 1 --max-moves 300 --byoyomi 5000 --startpos-file sfen.txt --log-info`
+///
+/// - 学習データを生成しながら対局:
+///   `cargo run -p tools --bin engine_selfplay -- --games 100 --byoyomi 1000 --output-training-data output.pack`
 ///
 /// `--out` 未指定時は `runs/selfplay/<timestamp>-selfplay.jsonl` に書き出し、infoは同名 `.info.jsonl` を生成する。
 ///
@@ -175,6 +179,23 @@ struct Cli {
     /// ノード数などの簡易メトリクスを各対局ごとに JSONL で出力
     #[arg(long, default_value_t = false)]
     emit_metrics: bool,
+
+    /// 学習データ (PackedSfenValue形式) の出力先パス
+    /// 指定しない場合はデフォルトで <output>.pack に出力
+    #[arg(long)]
+    output_training_data: Option<PathBuf>,
+
+    /// 学習データ出力を無効化
+    #[arg(long, default_value_t = false)]
+    no_training_data: bool,
+
+    /// 学習データ出力時に序盤の手数をスキップする（ランダム性確保のため）
+    #[arg(long, default_value_t = 8)]
+    skip_initial_ply: u32,
+
+    /// 学習データ出力時に王手局面をスキップする
+    #[arg(long, default_value_t = true)]
+    skip_in_check: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -216,6 +237,16 @@ struct MetaSettings {
     emit_metrics: bool,
     startpos_file: Option<String>,
     sfen: Option<String>,
+    #[serde(default)]
+    output_training_data: Option<String>,
+    #[serde(default)]
+    skip_initial_ply: u32,
+    #[serde(default = "default_skip_in_check")]
+    skip_in_check: bool,
+}
+
+fn default_skip_in_check() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize)]
@@ -374,6 +405,160 @@ impl MetricsCollector {
                 self.last_mate_white = None;
             }
         }
+    }
+}
+
+/// 学習データ出力用のエントリ（game_result未設定の一時データ）
+struct TrainingEntry {
+    /// PackedSfen (32バイト)
+    sfen: [u8; 32],
+    /// 探索スコア（手番側から見た評価値）
+    score: i16,
+    /// 最善手 (Move16形式)
+    move16: u16,
+    /// 手数
+    game_ply: u16,
+    /// 手番（game_result計算用）
+    side_to_move: Color,
+}
+
+/// 学習データ収集器
+/// 対局中の局面データを収集し、対局終了後に勝敗を設定して書き出す
+struct TrainingDataCollector {
+    entries: Vec<TrainingEntry>,
+    writer: BufWriter<File>,
+    skip_initial_ply: u32,
+    skip_in_check: bool,
+    total_written: u64,
+    skipped_initial: u64,
+    skipped_in_check: u64,
+}
+
+impl TrainingDataCollector {
+    fn new(path: &Path, skip_initial_ply: u32, skip_in_check: bool) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!("failed to create training data directory: {}", parent.display())
+                })?;
+            }
+        }
+        let file = File::create(path)
+            .with_context(|| format!("failed to create training data file: {}", path.display()))?;
+        Ok(Self {
+            entries: Vec::new(),
+            writer: BufWriter::new(file),
+            skip_initial_ply,
+            skip_in_check,
+            total_written: 0,
+            skipped_initial: 0,
+            skipped_in_check: 0,
+        })
+    }
+
+    /// 新しい対局を開始（エントリをクリア）
+    fn start_game(&mut self) {
+        self.entries.clear();
+    }
+
+    /// 局面を記録（game_resultは後で設定）
+    fn record_position(
+        &mut self,
+        pos: &Position,
+        score_cp: Option<i32>,
+        score_mate: Option<i32>,
+        best_move: Option<Move>,
+        ply: u32,
+    ) {
+        // 序盤をスキップ
+        if ply <= self.skip_initial_ply {
+            self.skipped_initial += 1;
+            return;
+        }
+
+        // 王手局面をスキップ
+        if self.skip_in_check && pos.in_check() {
+            self.skipped_in_check += 1;
+            return;
+        }
+
+        // スコアを決定（mate > cp の優先順位）
+        let score = if let Some(mate) = score_mate {
+            // 詰みスコアは大きな値にクリップ
+            if mate > 0 {
+                10000i16 // 勝ちの詰み
+            } else {
+                -10000i16 // 負けの詰み
+            }
+        } else if let Some(cp) = score_cp {
+            // 通常のセンチポーンスコア
+            cp.clamp(-10000, 10000) as i16
+        } else {
+            // スコアがない場合は記録しない
+            return;
+        };
+
+        // 最善手をMove16形式に変換
+        let move16 = best_move.map_or(0, move_to_move16);
+
+        // PackedSfenを生成
+        let packed_sfen = pack_position(pos);
+
+        self.entries.push(TrainingEntry {
+            sfen: packed_sfen,
+            score,
+            move16,
+            game_ply: ply.min(u16::MAX as u32) as u16,
+            side_to_move: pos.side_to_move(),
+        });
+    }
+
+    /// 対局終了時に勝敗を設定して書き出す
+    fn finish_game(&mut self, outcome: GameOutcome) -> Result<()> {
+        for entry in &self.entries {
+            // game_result: 手番側から見た勝敗
+            // 1 = 勝ち, 0 = 引き分け, -1 = 負け
+            let game_result = match outcome {
+                GameOutcome::BlackWin => {
+                    if entry.side_to_move == Color::Black {
+                        1i8
+                    } else {
+                        -1i8
+                    }
+                }
+                GameOutcome::WhiteWin => {
+                    if entry.side_to_move == Color::White {
+                        1i8
+                    } else {
+                        -1i8
+                    }
+                }
+                GameOutcome::Draw | GameOutcome::InProgress => 0i8,
+            };
+
+            let psv = PackedSfenValue {
+                sfen: entry.sfen,
+                score: entry.score,
+                move16: entry.move16,
+                game_ply: entry.game_ply,
+                game_result,
+                padding: 0,
+            };
+
+            self.writer.write_all(&psv.to_bytes())?;
+            self.total_written += 1;
+        }
+        self.entries.clear();
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        self.writer.flush()?;
+        Ok(())
+    }
+
+    fn stats(&self) -> (u64, u64, u64) {
+        (self.total_written, self.skipped_initial, self.skipped_in_check)
     }
 }
 
@@ -1014,6 +1199,20 @@ fn main() -> Result<()> {
         None
     };
 
+    // 学習データ出力の初期化（デフォルトで有効、--no-training-data で無効化）
+    let training_data_path = if cli.no_training_data {
+        None
+    } else if let Some(ref path) = cli.output_training_data {
+        Some(path.clone())
+    } else {
+        Some(default_training_data_path(&output_path))
+    };
+    let mut training_data_collector = if let Some(ref path) = training_data_path {
+        Some(TrainingDataCollector::new(path, cli.skip_initial_ply, cli.skip_in_check)?)
+    } else {
+        None
+    };
+
     let engine_paths = resolve_engine_paths(&cli);
     let threads_black = cli.threads_black.unwrap_or(cli.threads);
     let threads_white = cli.threads_white.unwrap_or(cli.threads);
@@ -1103,6 +1302,11 @@ fn main() -> Result<()> {
             emit_metrics: cli.emit_metrics,
             startpos_file: cli.startpos_file.as_ref().map(|p| p.display().to_string()),
             sfen: cli.sfen.clone(),
+            output_training_data: training_data_path
+                .as_ref()
+                .map(|p| p.display().to_string()),
+            skip_initial_ply: cli.skip_initial_ply,
+            skip_in_check: cli.skip_in_check,
         },
         engine_cmd: EngineCommandMeta {
             path_black: engine_paths.black.path.display().to_string(),
@@ -1138,6 +1342,11 @@ fn main() -> Result<()> {
         let mut move_list: Vec<String> = Vec::new();
         let mut eval_list: Vec<String> = Vec::new();
         let mut metrics = MetricsCollector::default();
+
+        // 学習データ収集を開始
+        if let Some(ref mut collector) = training_data_collector {
+            collector.start_game();
+        }
 
         for ply_idx in 0..cli.max_moves {
             plies_played = ply_idx + 1;
@@ -1209,6 +1418,16 @@ fn main() -> Result<()> {
                     }
                     _ => match Move::from_usi(mv_str) {
                         Some(mv) if pos.is_legal(mv) => {
+                            // 学習データを記録（do_move前に記録することが重要）
+                            if let Some(ref mut collector) = training_data_collector {
+                                collector.record_position(
+                                    &pos,
+                                    eval_log.as_ref().and_then(|e| e.score_cp),
+                                    eval_log.as_ref().and_then(|e| e.score_mate),
+                                    Some(mv),
+                                    plies_played,
+                                );
+                            }
                             let gives_check = pos.gives_check(mv);
                             pos.do_move(mv, gives_check);
                             tc.update_after_move(side, search.elapsed_ms);
@@ -1320,6 +1539,10 @@ fn main() -> Result<()> {
                 serde_json::to_writer(&mut *w, &metrics_log)?;
                 w.write_all(b"\n")?;
             }
+        }
+        // 学習データの書き出し（勝敗を設定してから書き出す）
+        if let Some(ref mut collector) = training_data_collector {
+            collector.finish_game(outcome)?;
         }
         writer.flush()?;
 
@@ -1447,6 +1670,25 @@ fn main() -> Result<()> {
     if let Some(w) = metrics_writer.as_mut() {
         w.flush()?;
     }
+    // 学習データのflushとサマリー出力
+    if let Some(ref mut collector) = training_data_collector {
+        collector.flush()?;
+        let (total, skipped_initial, skipped_in_check) = collector.stats();
+        println!();
+        println!("--- Training Data ---");
+        println!("Total positions written: {total}");
+        println!("Skipped (initial ply ≤ {}): {}", cli.skip_initial_ply, skipped_initial);
+        if cli.skip_in_check {
+            println!("Skipped (in check): {skipped_in_check}");
+        }
+        println!(
+            "Output: {}",
+            training_data_path
+                .as_ref()
+                .map_or("-".to_string(), |p| p.display().to_string())
+        );
+        println!("---------------------");
+    }
     writer.flush()?;
     println!("selfplay log written to {}", output_path.display());
     println!("summary written to {}", summary_path.display());
@@ -1499,6 +1741,12 @@ fn default_summary_path(jsonl: &Path) -> PathBuf {
     let parent = jsonl.parent().unwrap_or_else(|| Path::new("."));
     let stem = jsonl.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
     parent.join(format!("{stem}.summary.jsonl"))
+}
+
+fn default_training_data_path(jsonl: &Path) -> PathBuf {
+    let parent = jsonl.parent().unwrap_or_else(|| Path::new("."));
+    let stem = jsonl.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+    parent.join(format!("{stem}.pack"))
 }
 
 fn resolve_engine_paths(cli: &Cli) -> ResolvedEnginePaths {
