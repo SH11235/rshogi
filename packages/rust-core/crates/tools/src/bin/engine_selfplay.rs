@@ -1894,9 +1894,12 @@ fn load_start_positions(
                 if trimmed.is_empty() || trimmed.starts_with('#') {
                     continue;
                 }
-                let parsed = parse_position_line(trimmed).with_context(|| {
-                    format!("invalid position syntax on line {}: {}", idx + 1, trimmed)
-                })?;
+                // position形式または生のSFEN形式の両方をサポート
+                let parsed = parse_position_line(trimmed)
+                    .or_else(|_| parse_sfen_only(trimmed))
+                    .with_context(|| {
+                        format!("invalid position syntax on line {}: {}", idx + 1, trimmed)
+                    })?;
                 build_position(&parsed)?;
                 let cmd = describe_position(&parsed);
                 positions.push(parsed);
