@@ -2330,11 +2330,17 @@ fn start_position_for_game(
     game_id: u32,
     moves: &[MoveEntry],
 ) -> Option<(Position, String)> {
-    if let Some(meta) = meta {
-        if !meta.start_positions.is_empty() {
-            let idx = ((game_id - 1) as usize) % meta.start_positions.len();
-            if let Ok((pos, sfen)) = start_position_from_command(&meta.start_positions[idx]) {
-                return Some((pos, sfen));
+    // random_startpos の場合は moves[0].sfen_before を優先
+    // （meta.start_positions からの game_id % len() による選択は実際の対局と一致しないため）
+    let use_moves_first = meta.map(|m| m.settings.random_startpos).unwrap_or(false);
+
+    if !use_moves_first {
+        if let Some(meta) = meta {
+            if !meta.start_positions.is_empty() {
+                let idx = ((game_id - 1) as usize) % meta.start_positions.len();
+                if let Ok((pos, sfen)) = start_position_from_command(&meta.start_positions[idx]) {
+                    return Some((pos, sfen));
+                }
             }
         }
     }
