@@ -12,6 +12,7 @@ use chrono::Local;
 use clap::Parser;
 use engine_core::position::{Position, SFEN_HIRATE};
 use engine_core::types::{Color, Move, PieceType, Square};
+use rand::prelude::IndexedRandom;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tools::packed_sfen::{move_to_move16, pack_position, PackedSfenValue};
@@ -160,6 +161,11 @@ struct Cli {
     #[arg(long)]
     sfen: Option<String>,
 
+    /// Randomly select start positions instead of sequential selection
+    /// (effective when using --startpos-file with multiple positions)
+    #[arg(long, default_value_t = false)]
+    random_startpos: bool,
+
     /// Output path (defaults to runs/selfplay/<timestamp>-selfplay.jsonl)
     #[arg(long)]
     out: Option<PathBuf>,
@@ -248,6 +254,8 @@ struct MetaSettings {
     emit_metrics: bool,
     startpos_file: Option<String>,
     sfen: Option<String>,
+    #[serde(default)]
+    random_startpos: bool,
     #[serde(default)]
     output_training_data: Option<String>,
     #[serde(default)]
@@ -1333,6 +1341,7 @@ fn main() -> Result<()> {
             emit_metrics: cli.emit_metrics,
             startpos_file: cli.startpos_file.as_ref().map(|p| p.display().to_string()),
             sfen: cli.sfen.clone(),
+            random_startpos: cli.random_startpos,
             output_training_data: training_data_path.as_ref().map(|p| p.display().to_string()),
             skip_initial_ply: cli.skip_initial_ply,
             skip_in_check: cli.skip_in_check,
@@ -1359,10 +1368,18 @@ fn main() -> Result<()> {
     let mut white_wins = 0u32;
     let mut draws = 0u32;
 
+    // 開始局面選択用のRNG
+    let mut rng = rand::rng();
+
     for game_idx in 0..cli.games {
         black.new_game()?;
         white.new_game()?;
-        let parsed = &start_defs[(game_idx as usize) % start_defs.len()];
+        // 開始局面を選択（ランダムまたは順繰り）
+        let parsed = if cli.random_startpos {
+            start_defs.choose(&mut rng).unwrap()
+        } else {
+            &start_defs[(game_idx as usize) % start_defs.len()]
+        };
         let mut pos = build_position(parsed)?;
         let mut tc = TimeControl::new(&cli);
         let mut outcome = GameOutcome::InProgress;
