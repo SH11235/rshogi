@@ -6,6 +6,7 @@ converted_openings/opening_book_*.bin.gz
 converted_openings/opening_book_full.bin
 
 target/
+target_before
 
 # Coverage reports
 tarpaulin-report.html
@@ -44,6 +45,10 @@ complete-result.json
 
 memo/
 
+# Evaluation function files (large binary files)
+eval/*
+!eval/.gitkeep
+
 # Ignore tool-generated manifests under run outputs
 runs
 
@@ -60,3 +65,5 @@ scripts/analysis/__pycache__/
 scripts/perf.conf
 
 docs/experiment-archive
+
+data/
