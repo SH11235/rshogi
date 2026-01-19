@@ -1302,9 +1302,7 @@ fn main() -> Result<()> {
             emit_metrics: cli.emit_metrics,
             startpos_file: cli.startpos_file.as_ref().map(|p| p.display().to_string()),
             sfen: cli.sfen.clone(),
-            output_training_data: training_data_path
-                .as_ref()
-                .map(|p| p.display().to_string()),
+            output_training_data: training_data_path.as_ref().map(|p| p.display().to_string()),
             skip_initial_ply: cli.skip_initial_ply,
             skip_in_check: cli.skip_in_check,
         },
@@ -1683,9 +1681,7 @@ fn main() -> Result<()> {
         }
         println!(
             "Output: {}",
-            training_data_path
-                .as_ref()
-                .map_or("-".to_string(), |p| p.display().to_string())
+            training_data_path.as_ref().map_or("-".to_string(), |p| p.display().to_string())
         );
         println!("---------------------");
     }
