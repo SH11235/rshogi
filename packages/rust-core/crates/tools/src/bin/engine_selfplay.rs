@@ -206,11 +206,12 @@ struct Cli {
 
     /// 学習データ出力時に王手局面をスキップする
     /// 王手局面は応手が限られるため学習価値が低い
-    /// 無効化するには --skip-in-check false を指定
+    /// 無効化するには --skip-in-check=false を指定
     #[arg(
         long,
         default_value_t = true,
-        help = "Skip positions where king is in check"
+        action = clap::ArgAction::Set,
+        help = "Skip positions where king is in check (use --skip-in-check=false to disable)"
     )]
     skip_in_check: bool,
 }
