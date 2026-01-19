@@ -1105,6 +1105,9 @@ impl SCReLUDynamic {
     pub fn propagate_i16(input: &[i16], output: &mut [i32]) {
         debug_assert_eq!(input.len(), output.len());
         let len = input.len();
+        // SIMDブロックは #[cfg(target_feature)] でコンパイル時に切り替わるため、
+        // ビルド環境によって processed が変更されるかどうかが変わる
+        #[allow(unused_mut)]
         let mut processed: usize = 0;
 
         // === AVX2: 8要素ずつ処理 ===
@@ -1237,6 +1240,9 @@ impl SCReLUDynamic {
     pub fn propagate_i32(input: &[i32], output: &mut [i32], scale_shift: u32) {
         debug_assert_eq!(input.len(), output.len());
         let len = input.len();
+        // SIMDブロックは #[cfg(target_feature)] でコンパイル時に切り替わるため、
+        // ビルド環境によって processed が変更されるかどうかが変わる
+        #[allow(unused_mut)]
         let mut processed: usize = 0;
 
         // === AVX2: 8要素ずつ処理 ===
@@ -1374,6 +1380,9 @@ impl SCReLUDynamic {
     pub fn propagate_i32_to_u8(input: &[i32], output: &mut [u8]) {
         debug_assert_eq!(input.len(), output.len());
         let len = input.len();
+        // SIMDブロックは #[cfg(target_feature)] でコンパイル時に切り替わるため、
+        // ビルド環境によって processed が変更されるかどうかが変わる
+        #[allow(unused_mut)]
         let mut processed: usize = 0;
 
         // === AVX2: 8要素ずつ処理 ===
@@ -1498,6 +1507,9 @@ impl SCReLUDynamic {
     pub fn propagate_i16_to_u8(input: &[i16], output: &mut [u8]) {
         debug_assert_eq!(input.len(), output.len());
         let len = input.len();
+        // SIMDブロックは #[cfg(target_feature)] でコンパイル時に切り替わるため、
+        // ビルド環境によって processed が変更されるかどうかが変わる
+        #[allow(unused_mut)]
         let mut processed: usize = 0;
 
         // === AVX2: 16要素ずつ処理 ===
