@@ -260,11 +260,11 @@ export function MobileLayout({
                     <output className={`${TEXT_CLASSES.mutedSecondary} whitespace-nowrap`}>
                         手番:{" "}
                         <span
-                            className={`font-semibold text-[15px] ${
+                            className={`font-semibold text-[18px] ${
                                 position.turn === "sente" ? "text-wafuu-shu" : "text-wafuu-ai"
                             }`}
                         >
-                            {position.turn === "sente" ? "先手" : "後手"}
+                            {position.turn === "sente" ? "☗" : "☖"}
                         </span>
                     </output>
 

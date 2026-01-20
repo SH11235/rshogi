@@ -720,9 +720,8 @@ export function ShogiMatch({
         // 編集モードからの再開：棋譜をリセットして新しい対局を開始
         if (isEditMode) {
             await finalizeEditedPosition();
-            // 対局開始時に編集モードを終了し、パネルを閉じる
+            // 対局開始時に編集モードを終了
             setIsEditMode(false);
-            setIsEditPanelOpen(false);
         }
         // 盤面セクションにスクロール
         setTimeout(() => {
@@ -745,7 +744,6 @@ export function ShogiMatch({
         if (isEditMode) {
             await finalizeEditedPosition();
             setIsEditMode(false);
-            setIsEditPanelOpen(false);
         }
         // isMatchRunningはfalseのままでisReviewModeになる
     };
@@ -771,9 +769,9 @@ export function ShogiMatch({
             movesRef.current = [];
             legalCache.clear();
             setIsEditMode(false);
-            setEditMessage("局面を確定しました。対局開始でこの局面から進行します。");
+            setMessage("局面を確定しました。対局開始でこの局面から進行します。");
         } catch {
-            setEditMessage("局面の確定に失敗しました。");
+            setMessage("局面の確定に失敗しました。");
         }
     };
 
@@ -796,9 +794,9 @@ export function ShogiMatch({
             legalCache.clear();
             // 編集モードに移行
             setIsEditMode(true);
-            setEditMessage("局面編集モードに戻りました。駒をドラッグして編集できます。");
+            setMessage("局面編集モードに戻りました。駒をドラッグして編集できます。");
         } catch {
-            setEditMessage("編集モードへの移行に失敗しました。");
+            setMessage("編集モードへの移行に失敗しました。");
         }
     }, [isMatchRunning, navigation, legalCache, refreshStartSfen]);
 
@@ -939,7 +937,7 @@ export function ShogiMatch({
                 if (editVersionRef.current !== currentVersion) {
                     return;
                 }
-                setEditMessage("局面の適用に失敗しました。");
+                setMessage("局面の適用に失敗しました。");
             }
         },
         [navigation, legalCache, stopTicking, refreshStartSfen],
@@ -952,7 +950,7 @@ export function ShogiMatch({
             const piece = current.board[square];
             if (!piece) return;
             if (!isPromotable(piece.type)) {
-                setEditMessage(`${PIECE_LABELS[piece.type]}は成れません。`);
+                setMessage(`${PIECE_LABELS[piece.type]}は成れません。`);
                 return;
             }
 
@@ -1123,13 +1121,13 @@ export function ShogiMatch({
             });
             const nextCount = countsBefore[piece.owner][baseType] + 1;
             if (nextCount > PIECE_CAP[baseType]) {
-                setEditMessage(
+                setMessage(
                     `${piece.owner === "sente" ? "先手" : "後手"}の${PIECE_LABELS[baseType]}は最大${PIECE_CAP[baseType]}枚までです`,
                 );
                 return false;
             }
             if (piece.type === "K" && countsBefore[piece.owner][baseType] >= PIECE_CAP.K) {
-                setEditMessage("玉はそれぞれ1枚まで配置できます。");
+                setMessage("玉はそれぞれ1枚まで配置できます。");
                 return false;
             }
 
@@ -1201,7 +1199,7 @@ export function ShogiMatch({
                 }
 
                 // 空マスをクリックした場合
-                setEditMessage("配置する駒を選ぶか、移動する駒をクリックしてください。");
+                setMessage("配置する駒を選ぶか、移動する駒をクリックしてください。");
                 return;
             }
 
@@ -1855,7 +1853,6 @@ export function ShogiMatch({
                 // インポート後は自動的に検討モードに入る
                 setIsEditMode(false);
                 setIsMatchRunning(false);
-                setIsEditPanelOpen(false);
             } catch (error) {
                 throw new Error(`SFENの適用に失敗しました: ${String(error)}`);
             }
@@ -1897,7 +1894,6 @@ export function ShogiMatch({
             // KIFインポート後は自動的に検討モードに入る
             setIsEditMode(false);
             setIsMatchRunning(false);
-            setIsEditPanelOpen(false);
         },
         [loadMoves],
     );
@@ -2069,15 +2065,13 @@ export function ShogiMatch({
                                                     >
                                                         手番:{" "}
                                                         <span
-                                                            className={`font-semibold text-[15px] ${
+                                                            className={`font-semibold text-[18px] ${
                                                                 position.turn === "sente"
                                                                     ? "text-wafuu-shu"
                                                                     : "text-wafuu-ai"
                                                             }`}
                                                         >
-                                                            {position.turn === "sente"
-                                                                ? "先手"
-                                                                : "後手"}
+                                                            {position.turn === "sente" ? "☗" : "☖"}
                                                         </span>
                                                     </output>
 

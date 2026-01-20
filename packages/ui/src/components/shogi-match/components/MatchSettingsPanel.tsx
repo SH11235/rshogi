@@ -45,9 +45,8 @@ const labelClassName = "flex flex-col gap-1 text-xs text-muted-foreground";
 
 const turnToggleBaseClassName =
     "w-9 h-9 flex items-center justify-center rounded-lg text-lg font-bold transition-all cursor-pointer border-2";
-const turnToggleActiveClassName = "bg-primary/15 border-primary text-primary shadow-sm";
-const turnToggleInactiveClassName =
-    "bg-muted/30 border-transparent text-muted-foreground hover:bg-muted/50";
+const turnToggleActiveClassName = "bg-background border-foreground/40";
+const turnToggleInactiveClassName = "bg-muted/30 border-transparent opacity-50 hover:opacity-75";
 
 export function MatchSettingsPanel({
     sides,
@@ -187,7 +186,7 @@ export function MatchSettingsPanel({
 
                 {/* 手番設定（横並び） */}
                 <div className="flex items-center gap-3">
-                    <span className="text-xs text-muted-foreground">先攻</span>
+                    <span className="text-xs text-muted-foreground">先手</span>
                     <div className="flex gap-1">
                         <button
                             type="button"
@@ -196,7 +195,7 @@ export function MatchSettingsPanel({
                             className={`${turnToggleBaseClassName} ${currentTurn === "sente" ? turnToggleActiveClassName : turnToggleInactiveClassName}`}
                             aria-label="先手から開始"
                         >
-                            ☗
+                            <span className="text-wafuu-shu">☗</span>
                         </button>
                         <button
                             type="button"
@@ -205,12 +204,12 @@ export function MatchSettingsPanel({
                             className={`${turnToggleBaseClassName} ${currentTurn === "gote" ? turnToggleActiveClassName : turnToggleInactiveClassName}`}
                             aria-label="後手から開始"
                         >
-                            ☖
+                            <span className="text-wafuu-ai">☖</span>
                         </button>
                     </div>
                 </div>
 
-                {/* 先攻/後攻設定（選択に応じて入れ替わる） */}
+                {/* 先手/後手設定（選択に応じて入れ替わる） */}
                 {(() => {
                     const firstSide = currentTurn;
                     const secondSide = currentTurn === "sente" ? "gote" : "sente";
@@ -221,18 +220,18 @@ export function MatchSettingsPanel({
 
                     return (
                         <div className="grid grid-cols-2 gap-3">
-                            {/* 先攻側 */}
+                            {/* 先手側 */}
                             <div className="flex flex-col gap-3 border-r-2 border-[hsl(var(--wafuu-sumi)/0.2)] pr-3">
                                 <div className={`text-xs font-semibold ${firstColor}`}>
-                                    {firstMarker}（先攻）
+                                    {firstMarker}先手
                                 </div>
                                 {sideSelector(firstSide)}
                                 {timeSelector(firstSide)}
                             </div>
-                            {/* 後攻側 */}
+                            {/* 後手側 */}
                             <div className="flex flex-col gap-3">
                                 <div className={`text-xs font-semibold ${secondColor}`}>
-                                    {secondMarker}（後攻）
+                                    {secondMarker}後手
                                 </div>
                                 {sideSelector(secondSide)}
                                 {timeSelector(secondSide)}
