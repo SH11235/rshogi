@@ -1022,7 +1022,7 @@ impl<const DIM: usize> SCReLU<DIM> {
     #[inline]
     #[allow(dead_code)] // i32出力版は将来の拡張用に保持
     pub fn propagate_i16(input: &[i16; DIM], output: &mut [i32; DIM]) {
-        // TODO: Phase 4 で AVX2/SSE2/WASM SIMD 最適化
+        // TODO: AVX2/SSE2/WASM SIMD 最適化
         for i in 0..DIM {
             let clamped = i32::from(input[i]).clamp(0, i32::from(Self::QA));
             output[i] = clamped * clamped;
