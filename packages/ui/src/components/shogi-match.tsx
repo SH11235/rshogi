@@ -1341,6 +1341,10 @@ export function ShogiMatch({
             }
 
             // ========== 対局モード ==========
+            // 一時停止中は入力をブロック
+            if (isPaused) {
+                return;
+            }
             if (!positionReady) {
                 return;
             }
@@ -1464,6 +1468,7 @@ export function ShogiMatch({
             editOwner,
             editPromoted,
             isReviewMode,
+            isPaused,
             promotionSelection,
             selection,
             isEngineTurn,
