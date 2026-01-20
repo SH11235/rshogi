@@ -109,7 +109,7 @@ export const MobileBoardSection = memo(function MobileBoardSection({
     return (
         <div
             ref={boardSectionRef}
-            className={`relative mx-auto ${isDraggingPiece ? "touch-none" : ""}`}
+            className={`relative mx-auto flex flex-col gap-1 ${isDraggingPiece ? "touch-none" : ""}`}
             style={
                 {
                     "--shogi-cell-size": `${cellSize}px`,
@@ -118,7 +118,7 @@ export const MobileBoardSection = memo(function MobileBoardSection({
             }
         >
             {/* 上側の持ち駒 */}
-            <div data-zone={`hand-${topHand.owner}`} className="mb-1">
+            <div data-zone={`hand-${topHand.owner}`}>
                 <HandPiecesDisplay
                     owner={topHand.owner}
                     hand={topHand.hand}
@@ -173,13 +173,11 @@ export const MobileBoardSection = memo(function MobileBoardSection({
             />
 
             {candidateNote ? (
-                <div className="text-xs text-muted-foreground text-center mt-1">
-                    {candidateNote}
-                </div>
+                <div className="text-xs text-muted-foreground text-center">{candidateNote}</div>
             ) : null}
 
             {/* 下側の持ち駒 */}
-            <div data-zone={`hand-${bottomHand.owner}`} className="mt-1">
+            <div data-zone={`hand-${bottomHand.owner}`}>
                 <HandPiecesDisplay
                     owner={bottomHand.owner}
                     hand={bottomHand.hand}

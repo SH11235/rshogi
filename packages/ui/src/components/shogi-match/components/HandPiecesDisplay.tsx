@@ -86,19 +86,16 @@ function PieceToken({
 // コンテナ用のサイズ設定
 const CONTAINER_SIZE_CONFIG = {
     compact: {
-        container: "min-h-[24px]",
         piecesContainer: "flex-nowrap gap-0",
         marker: "text-sm w-4",
         buttonPadding: "p-0.5",
     },
     medium: {
-        container: "min-h-[32px]",
         piecesContainer: "flex-nowrap gap-0.5",
         marker: "text-base w-5",
         buttonPadding: "p-0.5",
     },
     normal: {
-        container: "min-h-[44px]",
         piecesContainer: "flex-wrap gap-0.5",
         marker: "text-xl w-7",
         buttonPadding: "p-0.5",
@@ -154,7 +151,11 @@ export function HandPiecesDisplay({
     const isCompactLayout = size === "compact" || size === "medium";
 
     return (
-        <div className={cn("flex items-center justify-start w-full", containerConfig.container)}>
+        <div
+            className={cn(
+                "flex items-center justify-start w-full rounded-md border border-border/50 bg-muted/30 px-1",
+            )}
+        >
             {/* 先手/後手マーカー - 固定幅で左端に配置 */}
             <span
                 className={cn(
@@ -167,7 +168,24 @@ export function HandPiecesDisplay({
                 {ownerMarker}
             </span>
             {/* 持ち駒コンテナ - 駒だけが詰まる */}
-            <div className={cn("flex items-center", containerConfig.piecesContainer)}>
+            <div className={cn("flex items-center relative", containerConfig.piecesContainer)}>
+                {/* 高さ確保用のダミー駒（常に非表示だがスペースを確保） */}
+                <div className="invisible" aria-hidden="true">
+                    <div
+                        className={cn(
+                            "border-2 border-transparent rounded-lg",
+                            containerConfig.buttonPadding,
+                        )}
+                    >
+                        <PieceToken
+                            pieceType="P"
+                            owner={owner}
+                            count={0}
+                            flipBoard={flipBoard}
+                            size={size}
+                        />
+                    </div>
+                </div>
                 {HAND_ORDER.map((piece) => {
                     const count = hand[piece] ?? 0;
 

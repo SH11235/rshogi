@@ -4,6 +4,7 @@ import { useCallback, useMemo, useState } from "react";
 import type { ShogiBoardCell } from "../../shogi-board";
 import { BottomSheet } from "../components/BottomSheet";
 import { EvalGraph } from "../components/EvalGraph";
+import { PausedModeControls, PlayingModeControls } from "../components/GameModeControls";
 import type { EngineOption, SideSetting } from "../components/MatchSettingsPanel";
 import { MobileBoardSection } from "../components/MobileBoardSection";
 import { MobileClockDisplay } from "../components/MobileClockDisplay";
@@ -92,6 +93,7 @@ interface MobileLayoutProps {
     onResign?: () => void;
     onUndo?: () => void;
     canUndo?: boolean;
+    onEnterEditMode?: () => void;
 
     // 対局設定（モバイル用BottomSheet）
     sides: { sente: SideSetting; gote: SideSetting };
@@ -182,6 +184,7 @@ export function MobileLayout({
     onResign,
     onUndo,
     canUndo,
+    onEnterEditMode,
     sides,
     onSidesChange,
     timeSettings,
@@ -275,10 +278,13 @@ export function MobileLayout({
                     </button>
                 </div>
 
-                {/* クロック表示（対局モード時は常に表示） */}
-                {(isMatchRunning || gameMode === "playing") && (
-                    <MobileClockDisplay clocks={clocks} sides={sides} isRunning={isMatchRunning} />
-                )}
+                {/* クロック表示（常に表示、非対局時はグレーアウト） */}
+                <MobileClockDisplay
+                    clocks={clocks}
+                    sides={sides}
+                    isRunning={isMatchRunning}
+                    className="py-1"
+                />
             </header>
 
             {/* === 盤面セクション: 固定サイズ、縮小しない === */}
@@ -313,7 +319,7 @@ export function MobileLayout({
             {/* === コントロール: 残りの高さを使う、必要に応じて縮小 === */}
             <footer className="flex-1 flex flex-col min-h-0 mt-2">
                 {gameMode === "playing" ? (
-                    /* 対局モード: 1行棋譜 + 停止ボタン */
+                    /* 対局モード: 1行棋譜 + 停止・投了・待ったボタン */
                     <div className="flex flex-col gap-2 flex-shrink-0">
                         {kifMoves && kifMoves.length > 0 && (
                             <MobileKifuBar
@@ -326,40 +332,40 @@ export function MobileLayout({
                                 }
                             />
                         )}
-                        <div className="flex justify-center gap-2 py-2">
-                            {onStop && (
-                                <button
-                                    type="button"
-                                    onClick={onStop}
-                                    className="px-4 py-3 bg-destructive text-destructive-foreground rounded-lg font-medium shadow-md active:scale-95 transition-transform"
-                                >
-                                    停止
-                                </button>
-                            )}
-                            {onResign && (
-                                <button
-                                    type="button"
-                                    onClick={() => {
-                                        if (window.confirm("投了しますか？")) {
-                                            onResign();
-                                        }
-                                    }}
-                                    className="px-4 py-3 bg-secondary text-secondary-foreground border border-border rounded-lg font-medium shadow-md active:scale-95 transition-transform"
-                                >
-                                    投了
-                                </button>
-                            )}
-                            {onUndo && (
-                                <button
-                                    type="button"
-                                    onClick={onUndo}
-                                    disabled={!canUndo}
-                                    className="px-4 py-3 bg-secondary text-secondary-foreground border border-border rounded-lg font-medium shadow-md active:scale-95 transition-transform disabled:opacity-50 disabled:cursor-not-allowed"
-                                >
-                                    待った
-                                </button>
-                            )}
-                        </div>
+                        {onStop && (
+                            <div className="flex justify-center gap-2 py-2">
+                                <PlayingModeControls
+                                    onStop={onStop}
+                                    onResign={onResign}
+                                    onUndo={onUndo}
+                                    canUndo={canUndo}
+                                />
+                            </div>
+                        )}
+                    </div>
+                ) : gameMode === "paused" ? (
+                    /* 一時停止モード: 1行棋譜 + 対局再開・局面編集・投了ボタン */
+                    <div className="flex flex-col gap-2 flex-shrink-0">
+                        {kifMoves && kifMoves.length > 0 && (
+                            <MobileKifuBar
+                                moves={kifMoves}
+                                currentPly={currentPly}
+                                onPlySelect={
+                                    fullKifMoves && positionHistory
+                                        ? handlePlySelectWithDetail
+                                        : onPlySelect
+                                }
+                            />
+                        )}
+                        {onStart && (
+                            <div className="flex justify-center gap-2 py-2">
+                                <PausedModeControls
+                                    onResume={onStart}
+                                    onEnterEditMode={onEnterEditMode}
+                                    onResign={onResign}
+                                />
+                            </div>
+                        )}
                     </div>
                 ) : isReviewMode && totalPly === 0 ? (
                     /* 対局準備モード: 開始ボタンのみ（棋譜がまだない状態） */

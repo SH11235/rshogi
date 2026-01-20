@@ -1,6 +1,7 @@
 import type { ReactElement } from "react";
 import { Button } from "../../button";
 import type { GameMode } from "../types";
+import { PausedModeControls, PlayingModeControls } from "./GameModeControls";
 
 const baseCard = {
     background: "hsl(var(--card, 0 0% 100%))",
@@ -51,6 +52,7 @@ export function MatchControls({
 }: MatchControlsProps): ReactElement {
     const isEditMode = gameMode === "editing";
     const isReviewMode = gameMode === "reviewing";
+    const isPausedMode = gameMode === "paused";
 
     return (
         <div
@@ -72,52 +74,18 @@ export function MatchControls({
             >
                 {/* 対局中: 停止・投了・待ったボタン */}
                 {isMatchRunning ? (
-                    <>
-                        <Button
-                            type="button"
-                            onClick={onStop}
-                            variant="destructive"
-                            style={{ paddingInline: "16px" }}
-                        >
-                            停止
-                        </Button>
-                        {onResign && (
-                            <Button
-                                type="button"
-                                onClick={() => {
-                                    if (window.confirm("投了しますか？")) {
-                                        onResign();
-                                    }
-                                }}
-                                variant="outline"
-                                style={{ paddingInline: "16px" }}
-                            >
-                                投了
-                            </Button>
-                        )}
-                        {onUndo && (
-                            <Button
-                                type="button"
-                                onClick={onUndo}
-                                variant="outline"
-                                style={{ paddingInline: "16px" }}
-                                disabled={!canUndo}
-                            >
-                                待った
-                            </Button>
-                        )}
-                    </>
+                    <PlayingModeControls
+                        onStop={onStop}
+                        onResign={onResign}
+                        onUndo={onUndo}
+                        canUndo={canUndo}
+                    />
                 ) : (
                     <>
                         {/* 編集モード時: [平手に戻す] [検討開始] [対局開始] */}
                         {isEditMode && (
                             <>
-                                <Button
-                                    type="button"
-                                    onClick={onResetToStartpos}
-                                    variant="outline"
-                                    style={{ paddingInline: "12px" }}
-                                >
+                                <Button type="button" onClick={onResetToStartpos} variant="outline">
                                     平手に戻す
                                 </Button>
                                 {onStartReview && (
@@ -125,16 +93,11 @@ export function MatchControls({
                                         type="button"
                                         onClick={onStartReview}
                                         variant="secondary"
-                                        style={{ paddingInline: "16px" }}
                                     >
                                         検討開始
                                     </Button>
                                 )}
-                                <Button
-                                    type="button"
-                                    onClick={onStart}
-                                    style={{ paddingInline: "16px" }}
-                                >
+                                <Button type="button" onClick={onStart}>
                                     対局開始
                                 </Button>
                             </>
@@ -143,12 +106,7 @@ export function MatchControls({
                         {/* 検討モード時: [平手に戻す] [局面編集] [対局開始] */}
                         {isReviewMode && (
                             <>
-                                <Button
-                                    type="button"
-                                    onClick={onResetToStartpos}
-                                    variant="outline"
-                                    style={{ paddingInline: "12px" }}
-                                >
+                                <Button type="button" onClick={onResetToStartpos} variant="outline">
                                     平手に戻す
                                 </Button>
                                 {onEnterEditMode && (
@@ -156,19 +114,23 @@ export function MatchControls({
                                         type="button"
                                         onClick={onEnterEditMode}
                                         variant="outline"
-                                        style={{ paddingInline: "12px" }}
                                     >
                                         局面編集
                                     </Button>
                                 )}
-                                <Button
-                                    type="button"
-                                    onClick={onStart}
-                                    style={{ paddingInline: "16px" }}
-                                >
+                                <Button type="button" onClick={onStart}>
                                     対局開始
                                 </Button>
                             </>
+                        )}
+
+                        {/* 一時停止モード時: [対局再開] [局面編集] [投了] */}
+                        {isPausedMode && (
+                            <PausedModeControls
+                                onResume={onStart}
+                                onEnterEditMode={onEnterEditMode}
+                                onResign={onResign}
+                            />
                         )}
                     </>
                 )}

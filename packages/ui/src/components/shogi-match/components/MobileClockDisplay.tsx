@@ -12,16 +12,20 @@ interface MobileClockDisplayProps {
     sides: { sente: SideSetting; gote: SideSetting };
     /** 対局が進行中かどうか */
     isRunning?: boolean;
+    /** 追加のクラス名（スペーシング等は親から指定） */
+    className?: string;
 }
 
 /**
  * モバイル用コンパクトクロック表示
  * 対局中に盤面の上に横並びで表示
+ * 非対局時はグレーアウト表示
  */
 export function MobileClockDisplay({
     clocks,
     sides,
     isRunning = true,
+    className,
 }: MobileClockDisplayProps): ReactElement {
     const renderClock = (side: Player) => {
         const clock = clocks[side];
@@ -33,8 +37,9 @@ export function MobileClockDisplay({
         return (
             <div
                 className={cn(
-                    "flex items-center gap-1.5 px-2 py-1 rounded-lg",
+                    "flex items-center gap-1.5 px-2 py-1 rounded-lg transition-opacity",
                     ticking ? "bg-primary/10 ring-1 ring-primary/30" : "bg-muted/50",
+                    !isRunning && "opacity-50",
                 )}
             >
                 <span className={cn("font-bold text-sm", colorClass)}>{sideMarker}</span>
@@ -50,7 +55,7 @@ export function MobileClockDisplay({
     };
 
     return (
-        <div className="flex items-center justify-center gap-2 py-1">
+        <div className={cn("flex items-center justify-center gap-2", className)}>
             {renderClock("sente")}
             {renderClock("gote")}
         </div>

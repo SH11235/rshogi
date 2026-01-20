@@ -248,9 +248,10 @@ export function ShogiMatch({
     );
     const [isMatchRunning, setIsMatchRunning] = useState(false);
     const [isEditMode, setIsEditMode] = useState(true);
-    // 検討モード: 編集モードでも対局中でもない状態
+    const [isPaused, setIsPaused] = useState(false);
+    // 検討モード: 編集モードでも対局中でも一時停止中でもない状態
     // 自由に棋譜を閲覧し、分岐を作成できる
-    const isReviewMode = !isEditMode && !isMatchRunning;
+    const isReviewMode = !isEditMode && !isMatchRunning && !isPaused;
     const [editOwner, setEditOwner] = useState<Player>("sente");
     const [editPieceType, setEditPieceType] = useState<PieceType | null>(null);
     const [editPromoted, setEditPromoted] = useState(false);
@@ -699,14 +700,31 @@ export function ShogiMatch({
 
     const pauseAutoPlay = async () => {
         setIsMatchRunning(false);
-        setIsEditMode(true); // 編集モードに戻す（局面調整→再開を可能に）
+        setIsPaused(true); // 一時停止モードに（棋譜を保持）
         stopTicking();
         await stopAllEngines();
+    };
+
+    /** 一時停止中から編集モードに移行 */
+    const enterEditModeFromPaused = () => {
+        setIsPaused(false);
+        setIsEditMode(true);
     };
 
     const resumeAutoPlay = async () => {
         matchEndedRef.current = false;
         if (!positionReady) return;
+
+        // 一時停止からの再開：棋譜を保持したまま再開
+        if (isPaused) {
+            setIsPaused(false);
+            setIsMatchRunning(true);
+            turnStartTimeRef.current = Date.now();
+            startTicking(position.turn);
+            return;
+        }
+
+        // 編集モードからの再開：棋譜をリセットして新しい対局を開始
         if (isEditMode) {
             await finalizeEditedPosition();
             // 対局開始時に編集モードを終了し、パネルを閉じる
@@ -743,7 +761,13 @@ export function ShogiMatch({
     };
 
     /** 現在のゲームモードを計算 */
-    const gameMode: GameMode = isEditMode ? "editing" : isMatchRunning ? "playing" : "reviewing";
+    const gameMode: GameMode = isEditMode
+        ? "editing"
+        : isMatchRunning
+          ? "playing"
+          : isPaused
+            ? "paused"
+            : "reviewing";
 
     const finalizeEditedPosition = async () => {
         if (isMatchRunning) return;
@@ -2013,6 +2037,7 @@ export function ShogiMatch({
                     onResign={handleResign}
                     onUndo={handleUndo}
                     canUndo={moves.length > 0}
+                    onEnterEditMode={isPaused ? enterEditModeFromPaused : undefined}
                     // 対局設定
                     sides={sides}
                     onSidesChange={setSides}
@@ -2204,7 +2229,9 @@ export function ShogiMatch({
                                 onStop={pauseAutoPlay}
                                 onStart={resumeAutoPlay}
                                 onStartReview={handleStartReview}
-                                onEnterEditMode={handleEnterEditMode}
+                                onEnterEditMode={
+                                    isPaused ? enterEditModeFromPaused : handleEnterEditMode
+                                }
                                 onResign={handleResign}
                                 onUndo={handleUndo}
                                 canUndo={moves.length > 0}
