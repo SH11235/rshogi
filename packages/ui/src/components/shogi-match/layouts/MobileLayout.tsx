@@ -427,9 +427,12 @@ export function MobileLayout({
                     </div>
                 ) : (
                     /* 編集モード: 対局開始 + 平手に戻すボタン */
-                    <div className="flex flex-col gap-2 flex-shrink-0">
-                        <div className="text-center text-sm text-muted-foreground">
-                            盤面をタップして編集
+                    <div className="flex flex-col gap-1.5 flex-shrink-0">
+                        <div className="flex flex-col gap-0.5 text-center text-muted-foreground">
+                            <div className="text-sm">盤面をタップして編集</div>
+                            <div className="text-[10px] opacity-80">
+                                ダブルタップ: 成切替 / 盤外へ: 削除
+                            </div>
                         </div>
                         <div className="flex justify-center gap-3 py-2">
                             {onStart && (

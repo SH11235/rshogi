@@ -122,8 +122,11 @@ export function MatchControls({
 
             {/* モード表示 */}
             {isEditMode && (
-                <div className="text-xs text-muted-foreground">
-                    編集モード: 駒をドラッグして盤面を編集できます
+                <div className="flex flex-col gap-0.5 text-xs text-muted-foreground text-center">
+                    <div>編集モード: 駒をドラッグして盤面を編集できます</div>
+                    <div className="text-[10px] opacity-80">
+                        ダブルクリック: 成切替 / Shift+ドラッグ: 成駒 / 盤外: 削除
+                    </div>
                 </div>
             )}
             {isReviewMode && (
