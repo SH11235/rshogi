@@ -43,6 +43,12 @@ const inputClassName =
     "border border-[hsl(var(--border,0_0%_86%))] bg-[hsl(var(--card,0_0%_100%))] text-sm";
 const labelClassName = "flex flex-col gap-1 text-xs text-muted-foreground";
 
+const turnToggleBaseClassName =
+    "w-9 h-9 flex items-center justify-center rounded-lg text-lg font-bold transition-all cursor-pointer border-2";
+const turnToggleActiveClassName = "bg-primary/15 border-primary text-primary shadow-sm";
+const turnToggleInactiveClassName =
+    "bg-muted/30 border-transparent text-muted-foreground hover:bg-muted/50";
+
 export function MatchSettingsPanel({
     sides,
     onSidesChange,
@@ -179,35 +185,61 @@ export function MatchSettingsPanel({
                 {/* タイトル */}
                 <div className="text-sm font-semibold text-[hsl(var(--wafuu-sumi))]">対局設定</div>
 
-                {/* 手番設定 */}
-                <label className={labelClassName}>
-                    開始時の手番
-                    <select
-                        value={currentTurn}
-                        onChange={(e) => onTurnChange(e.target.value as Player)}
-                        disabled={settingsLocked}
-                        className={selectClassName}
-                    >
-                        <option value="sente">先手から</option>
-                        <option value="gote">後手から</option>
-                    </select>
-                </label>
-
-                {/* 先手/後手設定（ヘッダー + エンジン + 持ち時間） */}
-                <div className="grid grid-cols-2 gap-3">
-                    {/* 先手側 */}
-                    <div className="flex flex-col gap-3 border-r-2 border-[hsl(var(--wafuu-sumi)/0.2)] pr-3">
-                        <div className="text-xs font-semibold text-wafuu-shu">☗先手</div>
-                        {sideSelector("sente")}
-                        {timeSelector("sente")}
-                    </div>
-                    {/* 後手側 */}
-                    <div className="flex flex-col gap-3">
-                        <div className="text-xs font-semibold text-wafuu-ai">☖後手</div>
-                        {sideSelector("gote")}
-                        {timeSelector("gote")}
+                {/* 手番設定（横並び） */}
+                <div className="flex items-center gap-3">
+                    <span className="text-xs text-muted-foreground">先攻</span>
+                    <div className="flex gap-1">
+                        <button
+                            type="button"
+                            onClick={() => !settingsLocked && onTurnChange("sente")}
+                            disabled={settingsLocked}
+                            className={`${turnToggleBaseClassName} ${currentTurn === "sente" ? turnToggleActiveClassName : turnToggleInactiveClassName}`}
+                            aria-label="先手から開始"
+                        >
+                            ☗
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => !settingsLocked && onTurnChange("gote")}
+                            disabled={settingsLocked}
+                            className={`${turnToggleBaseClassName} ${currentTurn === "gote" ? turnToggleActiveClassName : turnToggleInactiveClassName}`}
+                            aria-label="後手から開始"
+                        >
+                            ☖
+                        </button>
                     </div>
                 </div>
+
+                {/* 先攻/後攻設定（選択に応じて入れ替わる） */}
+                {(() => {
+                    const firstSide = currentTurn;
+                    const secondSide = currentTurn === "sente" ? "gote" : "sente";
+                    const firstMarker = firstSide === "sente" ? "☗" : "☖";
+                    const secondMarker = secondSide === "sente" ? "☗" : "☖";
+                    const firstColor = firstSide === "sente" ? "text-wafuu-shu" : "text-wafuu-ai";
+                    const secondColor = secondSide === "sente" ? "text-wafuu-shu" : "text-wafuu-ai";
+
+                    return (
+                        <div className="grid grid-cols-2 gap-3">
+                            {/* 先攻側 */}
+                            <div className="flex flex-col gap-3 border-r-2 border-[hsl(var(--wafuu-sumi)/0.2)] pr-3">
+                                <div className={`text-xs font-semibold ${firstColor}`}>
+                                    {firstMarker}（先攻）
+                                </div>
+                                {sideSelector(firstSide)}
+                                {timeSelector(firstSide)}
+                            </div>
+                            {/* 後攻側 */}
+                            <div className="flex flex-col gap-3">
+                                <div className={`text-xs font-semibold ${secondColor}`}>
+                                    {secondMarker}（後攻）
+                                </div>
+                                {sideSelector(secondSide)}
+                                {timeSelector(secondSide)}
+                            </div>
+                        </div>
+                    );
+                })()}
             </div>
         </div>
     );
