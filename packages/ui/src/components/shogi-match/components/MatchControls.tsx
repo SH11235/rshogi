@@ -3,15 +3,6 @@ import { Button } from "../../button";
 import type { GameMode } from "../types";
 import { PausedModeControls, PlayingModeControls } from "./GameModeControls";
 
-const baseCard = {
-    background: "hsl(var(--card, 0 0% 100%))",
-    border: "1px solid hsl(var(--border, 0 0% 86%))",
-    borderRadius: "12px",
-    padding: "12px",
-    boxShadow: "0 14px 28px rgba(0,0,0,0.12)",
-    width: "var(--panel-width)",
-};
-
 interface MatchControlsProps {
     /** 平手に戻すボタンのクリックハンドラ */
     onResetToStartpos: () => void;
@@ -55,23 +46,9 @@ export function MatchControls({
     const isPausedMode = gameMode === "paused";
 
     return (
-        <div
-            style={{
-                ...baseCard,
-                display: "flex",
-                flexDirection: "column",
-                gap: "10px",
-            }}
-        >
-            <div
-                style={{
-                    display: "flex",
-                    gap: "8px",
-                    flexWrap: "wrap",
-                    alignItems: "center",
-                    minHeight: "36px",
-                }}
-            >
+        <div className="flex flex-col gap-2 items-center">
+            {/* ボタン行 */}
+            <div className="flex gap-2 flex-wrap justify-center min-h-[36px] items-center">
                 {/* 対局中: 停止・投了・待ったボタン */}
                 {isMatchRunning ? (
                     <PlayingModeControls
@@ -138,42 +115,18 @@ export function MatchControls({
 
             {/* モード表示 */}
             {isEditMode && (
-                <div
-                    style={{
-                        fontSize: "12px",
-                        color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                        padding: "4px 8px",
-                        background: "hsl(var(--muted, 0 0% 96%))",
-                        borderRadius: "4px",
-                    }}
-                >
+                <div className="text-xs text-muted-foreground">
                     編集モード: 駒をドラッグして盤面を編集できます
                 </div>
             )}
             {isReviewMode && (
-                <div
-                    style={{
-                        fontSize: "12px",
-                        color: "hsl(var(--muted-foreground, 0 0% 48%))",
-                        padding: "4px 8px",
-                        background: "hsl(var(--muted, 0 0% 96%))",
-                        borderRadius: "4px",
-                    }}
-                >
+                <div className="text-xs text-muted-foreground">
                     検討モード: 駒を動かして分岐を作成できます
                 </div>
             )}
 
-            {message ? (
-                <div
-                    style={{
-                        color: "hsl(var(--destructive, 0 72% 51%))",
-                        fontSize: "13px",
-                    }}
-                >
-                    {message}
-                </div>
-            ) : null}
+            {/* エラーメッセージ */}
+            {message && <div className="text-destructive text-sm">{message}</div>}
         </div>
     );
 }

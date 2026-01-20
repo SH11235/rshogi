@@ -2054,9 +2054,9 @@ export function ShogiMatch({
                 />
             ) : (
                 <section className={matchLayoutClasses} style={matchLayoutCssVars}>
-                    <div className="flex gap-4 items-start">
+                    <div className="flex gap-4 items-start min-h-[calc(100dvh-1rem)]">
                         {/* 左列: 将棋盤（サイズ固定） */}
-                        <div className="flex flex-col gap-2 items-center shrink-0">
+                        <div className="flex flex-col gap-2 items-center shrink-0 self-center">
                             <div
                                 ref={boardSectionRef}
                                 className="w-fit relative flex flex-col gap-2"
@@ -2221,147 +2221,153 @@ export function ShogiMatch({
                                             />
                                         );
                                     })()}
+
+                                    {/* 対局コントロール（盤面の下） */}
+                                    <MatchControls
+                                        onResetToStartpos={handleResetToStartpos}
+                                        onStop={pauseAutoPlay}
+                                        onStart={resumeAutoPlay}
+                                        onStartReview={handleStartReview}
+                                        onEnterEditMode={
+                                            isPaused ? enterEditModeFromPaused : handleEnterEditMode
+                                        }
+                                        onResign={handleResign}
+                                        onUndo={handleUndo}
+                                        canUndo={moves.length > 0}
+                                        isMatchRunning={isMatchRunning}
+                                        gameMode={gameMode}
+                                        message={message}
+                                    />
                                 </div>
                             </div>
                         </div>
 
-                        {/* 中央列: 操作系パネル（サイズ固定） */}
-                        <div className="flex flex-col gap-2 shrink-0">
-                            <MatchControls
-                                onResetToStartpos={handleResetToStartpos}
-                                onStop={pauseAutoPlay}
-                                onStart={resumeAutoPlay}
-                                onStartReview={handleStartReview}
-                                onEnterEditMode={
-                                    isPaused ? enterEditModeFromPaused : handleEnterEditMode
-                                }
-                                onResign={handleResign}
-                                onUndo={handleUndo}
-                                canUndo={moves.length > 0}
-                                isMatchRunning={isMatchRunning}
-                                gameMode={gameMode}
-                                message={message}
-                            />
+                        {/* 中央列+右列グループ */}
+                        <div className="flex gap-4 items-start pt-16">
+                            {/* 中央列: 設定系パネル（サイズ固定） */}
+                            <div className="flex flex-col gap-2 shrink-0">
+                                {gameMode === "editing" && (
+                                    <EditModePanel
+                                        isOpen={isEditPanelOpen}
+                                        onOpenChange={setIsEditPanelOpen}
+                                        message={editMessage}
+                                    />
+                                )}
 
-                            {gameMode === "editing" && (
-                                <EditModePanel
-                                    isOpen={isEditPanelOpen}
-                                    onOpenChange={setIsEditPanelOpen}
-                                    message={editMessage}
+                                <MatchSettingsPanel
+                                    isOpen={isSettingsPanelOpen}
+                                    onOpenChange={setIsSettingsPanelOpen}
+                                    sides={sides}
+                                    onSidesChange={setSides}
+                                    timeSettings={timeSettings}
+                                    onTimeSettingsChange={setTimeSettings}
+                                    currentTurn={position.turn}
+                                    onTurnChange={updateTurnForEdit}
+                                    uiEngineOptions={uiEngineOptions}
+                                    settingsLocked={settingsLocked}
                                 />
-                            )}
 
-                            <MatchSettingsPanel
-                                isOpen={isSettingsPanelOpen}
-                                onOpenChange={setIsSettingsPanelOpen}
-                                sides={sides}
-                                onSidesChange={setSides}
-                                timeSettings={timeSettings}
-                                onTimeSettingsChange={setTimeSettings}
-                                currentTurn={position.turn}
-                                onTurnChange={updateTurnForEdit}
-                                uiEngineOptions={uiEngineOptions}
-                                settingsLocked={settingsLocked}
-                            />
+                                <ClockDisplayPanel clocks={clocks} sides={sides} />
 
-                            <ClockDisplayPanel clocks={clocks} sides={sides} />
-
-                            {/* インポートパネル */}
-                            <KifuImportPanel
-                                onImportSfen={importSfen}
-                                onImportKif={importKif}
-                                positionReady={positionReady}
-                            />
-
-                            {isDevMode && (
-                                <EngineLogsPanel
-                                    eventLogs={eventLogs}
-                                    errorLogs={errorLogs}
-                                    engineErrorDetails={engineErrorDetails}
-                                    onRetry={retryEngine}
-                                    isRetrying={isRetrying}
+                                {/* インポートパネル */}
+                                <KifuImportPanel
+                                    onImportSfen={importSfen}
+                                    onImportKif={importKif}
+                                    positionReady={positionReady}
                                 />
-                            )}
-                        </div>
 
-                        {/* 右列: 棋譜列（EvalPanel + KifuPanel、サイズ固定） */}
-                        <div className="flex flex-col gap-2 shrink-0">
-                            {/* 評価値グラフパネル（折りたたみ） */}
-                            <EvalPanel
-                                evalHistory={evalHistory}
-                                currentPly={navigation.state.currentPly}
-                                onPlySelect={handlePlySelect}
-                                defaultOpen={false}
-                            />
+                                {isDevMode && (
+                                    <EngineLogsPanel
+                                        eventLogs={eventLogs}
+                                        errorLogs={errorLogs}
+                                        engineErrorDetails={engineErrorDetails}
+                                        onRetry={retryEngine}
+                                        isRetrying={isRetrying}
+                                    />
+                                )}
+                            </div>
 
-                            {/* 棋譜パネル（常時表示） */}
-                            <KifuPanel
-                                kifMoves={kifMoves}
-                                currentPly={navigation.state.currentPly}
-                                showEval={displaySettings.showKifuEval}
-                                onShowEvalChange={(show) =>
-                                    setDisplaySettings((prev) => ({
-                                        ...prev,
-                                        showKifuEval: show,
-                                    }))
-                                }
-                                onPlySelect={handlePlySelect}
-                                onCopyKif={handleCopyKif}
-                                navigation={{
-                                    currentPly: navigation.state.currentPly,
-                                    totalPly: navigation.state.totalPly,
-                                    onBack: navigation.goBack,
-                                    onForward: () =>
-                                        navigation.goForward(selectedBranchNodeId ?? undefined),
-                                    onToStart: navigation.goToStart,
-                                    onToEnd: navigation.goToEnd,
-                                    isRewound: navigation.state.isRewound,
-                                    canGoForward: navigation.state.canGoForward,
-                                    branchInfo: navigation.state.hasBranches
-                                        ? {
-                                              hasBranches: true,
-                                              currentIndex: navigation.state.currentBranchIndex,
-                                              count: navigation.state.branchCount,
-                                              onSwitch: navigation.switchBranch,
-                                              onPromoteToMain: navigation.promoteCurrentLine,
-                                          }
-                                        : undefined,
-                                }}
-                                navigationDisabled={isMatchRunning}
-                                branchMarkers={branchMarkers}
-                                positionHistory={positionHistory}
-                                onAddPvAsBranch={handleAddPvAsBranch}
-                                onPreviewPv={handlePreviewPv}
-                                lastAddedBranchInfo={lastAddedBranchInfo}
-                                onLastAddedBranchHandled={() => setLastAddedBranchInfo(null)}
-                                onSelectedBranchChange={setSelectedBranchNodeId}
-                                onAnalyzePly={handleAnalyzePly}
-                                isAnalyzing={isAnalyzing}
-                                analyzingPly={
-                                    analyzingState.type !== "none" ? analyzingState.ply : undefined
-                                }
-                                batchAnalysis={
-                                    batchAnalysis
-                                        ? {
-                                              isRunning: batchAnalysis.isRunning,
-                                              currentIndex: batchAnalysis.currentIndex,
-                                              totalCount: batchAnalysis.totalCount,
-                                              inProgress: batchAnalysis.inProgress,
-                                          }
-                                        : undefined
-                                }
-                                onStartBatchAnalysis={handleStartBatchAnalysis}
-                                onCancelBatchAnalysis={handleCancelBatchAnalysis}
-                                analysisSettings={analysisSettings}
-                                onAnalysisSettingsChange={setAnalysisSettings}
-                                kifuTree={navigation.tree}
-                                onNodeClick={navigation.goToNodeById}
-                                onBranchSwitch={navigation.switchBranchAtNode}
-                                onAnalyzeNode={handleAnalyzeNode}
-                                onAnalyzeBranch={handleAnalyzeBranch}
-                                onStartTreeBatchAnalysis={handleStartTreeBatchAnalysis}
-                                isOnMainLine={navigation.state.isOnMainLine}
-                            />
+                            {/* 右列: 棋譜列（EvalPanel + KifuPanel、サイズ固定） */}
+                            <div className="flex flex-col gap-2 shrink-0">
+                                {/* 評価値グラフパネル（折りたたみ） */}
+                                <EvalPanel
+                                    evalHistory={evalHistory}
+                                    currentPly={navigation.state.currentPly}
+                                    onPlySelect={handlePlySelect}
+                                    defaultOpen={false}
+                                />
+
+                                {/* 棋譜パネル（常時表示） */}
+                                <KifuPanel
+                                    kifMoves={kifMoves}
+                                    currentPly={navigation.state.currentPly}
+                                    showEval={displaySettings.showKifuEval}
+                                    onShowEvalChange={(show) =>
+                                        setDisplaySettings((prev) => ({
+                                            ...prev,
+                                            showKifuEval: show,
+                                        }))
+                                    }
+                                    onPlySelect={handlePlySelect}
+                                    onCopyKif={handleCopyKif}
+                                    navigation={{
+                                        currentPly: navigation.state.currentPly,
+                                        totalPly: navigation.state.totalPly,
+                                        onBack: navigation.goBack,
+                                        onForward: () =>
+                                            navigation.goForward(selectedBranchNodeId ?? undefined),
+                                        onToStart: navigation.goToStart,
+                                        onToEnd: navigation.goToEnd,
+                                        isRewound: navigation.state.isRewound,
+                                        canGoForward: navigation.state.canGoForward,
+                                        branchInfo: navigation.state.hasBranches
+                                            ? {
+                                                  hasBranches: true,
+                                                  currentIndex: navigation.state.currentBranchIndex,
+                                                  count: navigation.state.branchCount,
+                                                  onSwitch: navigation.switchBranch,
+                                                  onPromoteToMain: navigation.promoteCurrentLine,
+                                              }
+                                            : undefined,
+                                    }}
+                                    navigationDisabled={isMatchRunning}
+                                    branchMarkers={branchMarkers}
+                                    positionHistory={positionHistory}
+                                    onAddPvAsBranch={handleAddPvAsBranch}
+                                    onPreviewPv={handlePreviewPv}
+                                    lastAddedBranchInfo={lastAddedBranchInfo}
+                                    onLastAddedBranchHandled={() => setLastAddedBranchInfo(null)}
+                                    onSelectedBranchChange={setSelectedBranchNodeId}
+                                    onAnalyzePly={handleAnalyzePly}
+                                    isAnalyzing={isAnalyzing}
+                                    analyzingPly={
+                                        analyzingState.type !== "none"
+                                            ? analyzingState.ply
+                                            : undefined
+                                    }
+                                    batchAnalysis={
+                                        batchAnalysis
+                                            ? {
+                                                  isRunning: batchAnalysis.isRunning,
+                                                  currentIndex: batchAnalysis.currentIndex,
+                                                  totalCount: batchAnalysis.totalCount,
+                                                  inProgress: batchAnalysis.inProgress,
+                                              }
+                                            : undefined
+                                    }
+                                    onStartBatchAnalysis={handleStartBatchAnalysis}
+                                    onCancelBatchAnalysis={handleCancelBatchAnalysis}
+                                    analysisSettings={analysisSettings}
+                                    onAnalysisSettingsChange={setAnalysisSettings}
+                                    kifuTree={navigation.tree}
+                                    onNodeClick={navigation.goToNodeById}
+                                    onBranchSwitch={navigation.switchBranchAtNode}
+                                    onAnalyzeNode={handleAnalyzeNode}
+                                    onAnalyzeBranch={handleAnalyzeBranch}
+                                    onStartTreeBatchAnalysis={handleStartTreeBatchAnalysis}
+                                    isOnMainLine={navigation.state.isOnMainLine}
+                                />
+                            </div>
                         </div>
                     </div>
                 </section>

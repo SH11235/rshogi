@@ -322,15 +322,7 @@ export function MobileLayout({
                     /* 対局モード: 1行棋譜 + 停止・投了・待ったボタン */
                     <div className="flex flex-col gap-2 flex-shrink-0">
                         {kifMoves && kifMoves.length > 0 && (
-                            <MobileKifuBar
-                                moves={kifMoves}
-                                currentPly={currentPly}
-                                onPlySelect={
-                                    fullKifMoves && positionHistory
-                                        ? handlePlySelectWithDetail
-                                        : onPlySelect
-                                }
-                            />
+                            <MobileKifuBar moves={kifMoves} currentPly={currentPly} />
                         )}
                         {onStop && (
                             <div className="flex justify-center gap-2 py-2">
