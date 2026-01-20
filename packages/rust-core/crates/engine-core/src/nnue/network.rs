@@ -702,12 +702,27 @@ impl NNUENetwork {
 /// 例: "Features=HalfKA_hm^[73305->256x2]-SCReLU,fv_scale=13,qa=127,qb=64,scale=600"
 ///
 /// 戻り値:
-/// - `Some(N)`: fv_scale=N が見つかった
-/// - `None`: fv_scale が見つからない（従来のモデル）
+/// - `Some(N)`: fv_scale=N が見つかり、妥当な範囲（1〜128）内の場合
+/// - `None`: fv_scale が見つからない、またはパース失敗、または範囲外
+///
+/// 範囲外の値（0, 負数, 128超）は None を返し、フォールバック値が使用される。
+/// これによりゼロ除算や不正な評価値スケーリングを防止する。
 pub fn parse_fv_scale_from_arch(arch_str: &str) -> Option<i32> {
+    /// fv_scale の許容最小値（ゼロ除算防止）
+    const FV_SCALE_MIN: i32 = 1;
+    /// fv_scale の許容最大値（実用的な上限）
+    const FV_SCALE_MAX: i32 = 128;
+
     for part in arch_str.split(',') {
         if let Some(value) = part.strip_prefix("fv_scale=") {
-            return value.parse().ok();
+            if let Ok(scale) = value.parse::<i32>() {
+                // 妥当な範囲内のみ受け入れる
+                if (FV_SCALE_MIN..=FV_SCALE_MAX).contains(&scale) {
+                    return Some(scale);
+                }
+            }
+            // fv_scale= が見つかったがパース失敗または範囲外の場合は None
+            return None;
         }
     }
     None
@@ -1819,10 +1834,48 @@ mod tests {
         // 空文字列
         assert_eq!(parse_fv_scale_from_arch(""), None);
 
-        // 不正な fv_scale 値
+        // 不正な fv_scale 値（文字列）
         assert_eq!(
             parse_fv_scale_from_arch("Features=HalfKA_hm^[73305->256x2],fv_scale=abc"),
             None
         );
+    }
+
+    /// parse_fv_scale_from_arch の境界値・エラーケーステスト
+    #[test]
+    fn test_parse_fv_scale_edge_cases() {
+        // 境界値（許容範囲内）
+        assert_eq!(parse_fv_scale_from_arch("fv_scale=1"), Some(1));
+        assert_eq!(parse_fv_scale_from_arch("fv_scale=128"), Some(128));
+        assert_eq!(parse_fv_scale_from_arch("fv_scale=64"), Some(64));
+
+        // 境界値（範囲外 - ゼロ除算防止）
+        assert_eq!(parse_fv_scale_from_arch("fv_scale=0"), None);
+        assert_eq!(parse_fv_scale_from_arch("fv_scale=129"), None);
+
+        // 不正な値（負数）
+        assert_eq!(parse_fv_scale_from_arch("fv_scale=-1"), None);
+        assert_eq!(parse_fv_scale_from_arch("fv_scale=-100"), None);
+
+        // 不正な値（極端に大きい値）
+        assert_eq!(parse_fv_scale_from_arch("fv_scale=99999"), None);
+        assert_eq!(parse_fv_scale_from_arch("fv_scale=2147483647"), None);
+
+        // ホワイトスペースを含む（パース失敗を期待）
+        assert_eq!(parse_fv_scale_from_arch("fv_scale= 16"), None);
+        assert_eq!(parse_fv_scale_from_arch("fv_scale=16 "), None);
+
+        // 複数の fv_scale がある場合（最初のものが使用される）
+        assert_eq!(parse_fv_scale_from_arch("fv_scale=10,fv_scale=20"), Some(10));
+
+        // fv_scale= の後に何もない
+        assert_eq!(parse_fv_scale_from_arch("fv_scale="), None);
+
+        // 小数点を含む（パース失敗を期待）
+        assert_eq!(parse_fv_scale_from_arch("fv_scale=16.5"), None);
+
+        // プレフィックスが部分一致する場合（マッチしない）
+        assert_eq!(parse_fv_scale_from_arch("my_fv_scale=16"), None);
+        assert_eq!(parse_fv_scale_from_arch("fv_scale_v2=16"), None);
     }
 }
