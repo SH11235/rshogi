@@ -35,6 +35,7 @@ import {
     MatchSettingsPanel,
     type SideSetting,
 } from "./shogi-match/components/MatchSettingsPanel";
+import { SettingsModal } from "./shogi-match/components/SettingsModal";
 import { PvPreviewDialog } from "./shogi-match/components/PvPreviewDialog";
 import { applyDropResult, DragGhost, type DropResult, usePieceDnd } from "./shogi-match/dnd";
 
@@ -308,6 +309,8 @@ export function ShogiMatch({
         move: KifMove;
         position: PositionState;
     } | null>(null);
+    // 設定モーダルの表示状態
+    const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
 
     // positionRef を先に定義（コールバックで使用するため）
     const positionRef = useRef<PositionState>(position);
@@ -2241,128 +2244,103 @@ export function ShogiMatch({
                                         isMatchRunning={isMatchRunning}
                                         gameMode={gameMode}
                                         message={message}
+                                        onOpenSettings={() => setIsSettingsModalOpen(true)}
                                     />
                                 </div>
                             </div>
                         </div>
 
-                        {/* 中央列+右列グループ */}
-                        <div className="flex gap-4 items-start pt-16">
-                            {/* 中央列: 設定系パネル（サイズ固定） */}
-                            <div className="flex flex-col gap-2 shrink-0">
-                                <MatchSettingsPanel
-                                    sides={sides}
-                                    onSidesChange={setSides}
-                                    timeSettings={timeSettings}
-                                    onTimeSettingsChange={setTimeSettings}
-                                    uiEngineOptions={uiEngineOptions}
-                                    settingsLocked={settingsLocked}
-                                />
+                        {/* 棋譜列（盤面の隣に密着配置） */}
+                        <div className="flex flex-col gap-2 shrink-0 pt-16">
+                            {/* 評価値グラフパネル（折りたたみ） */}
+                            <EvalPanel
+                                evalHistory={evalHistory}
+                                currentPly={navigation.state.currentPly}
+                                onPlySelect={handlePlySelect}
+                                defaultOpen={false}
+                            />
 
-                                {/* インポートパネル */}
-                                <KifuImportPanel
-                                    onImportSfen={importSfen}
-                                    onImportKif={importKif}
-                                    positionReady={positionReady}
-                                />
+                            {/* 棋譜パネル（常時表示） */}
+                            <KifuPanel
+                                kifMoves={kifMoves}
+                                currentPly={navigation.state.currentPly}
+                                showEval={displaySettings.showKifuEval}
+                                onShowEvalChange={(show) =>
+                                    setDisplaySettings((prev) => ({
+                                        ...prev,
+                                        showKifuEval: show,
+                                    }))
+                                }
+                                onPlySelect={handlePlySelect}
+                                onCopyKif={handleCopyKif}
+                                navigation={{
+                                    currentPly: navigation.state.currentPly,
+                                    totalPly: navigation.state.totalPly,
+                                    onBack: navigation.goBack,
+                                    onForward: () =>
+                                        navigation.goForward(selectedBranchNodeId ?? undefined),
+                                    onToStart: navigation.goToStart,
+                                    onToEnd: navigation.goToEnd,
+                                    isRewound: navigation.state.isRewound,
+                                    canGoForward: navigation.state.canGoForward,
+                                    branchInfo: navigation.state.hasBranches
+                                        ? {
+                                              hasBranches: true,
+                                              currentIndex: navigation.state.currentBranchIndex,
+                                              count: navigation.state.branchCount,
+                                              onSwitch: navigation.switchBranch,
+                                              onPromoteToMain: navigation.promoteCurrentLine,
+                                          }
+                                        : undefined,
+                                }}
+                                navigationDisabled={isMatchRunning}
+                                branchMarkers={branchMarkers}
+                                positionHistory={positionHistory}
+                                onAddPvAsBranch={handleAddPvAsBranch}
+                                onPreviewPv={handlePreviewPv}
+                                lastAddedBranchInfo={lastAddedBranchInfo}
+                                onLastAddedBranchHandled={() => setLastAddedBranchInfo(null)}
+                                onSelectedBranchChange={setSelectedBranchNodeId}
+                                onAnalyzePly={handleAnalyzePly}
+                                isAnalyzing={isAnalyzing}
+                                analyzingPly={
+                                    analyzingState.type !== "none" ? analyzingState.ply : undefined
+                                }
+                                batchAnalysis={
+                                    batchAnalysis
+                                        ? {
+                                              isRunning: batchAnalysis.isRunning,
+                                              currentIndex: batchAnalysis.currentIndex,
+                                              totalCount: batchAnalysis.totalCount,
+                                              inProgress: batchAnalysis.inProgress,
+                                          }
+                                        : undefined
+                                }
+                                onStartBatchAnalysis={handleStartBatchAnalysis}
+                                onCancelBatchAnalysis={handleCancelBatchAnalysis}
+                                analysisSettings={analysisSettings}
+                                onAnalysisSettingsChange={setAnalysisSettings}
+                                kifuTree={navigation.tree}
+                                onNodeClick={navigation.goToNodeById}
+                                onBranchSwitch={navigation.switchBranchAtNode}
+                                onAnalyzeNode={handleAnalyzeNode}
+                                onAnalyzeBranch={handleAnalyzeBranch}
+                                onStartTreeBatchAnalysis={handleStartTreeBatchAnalysis}
+                                isOnMainLine={navigation.state.isOnMainLine}
+                                onMoveDetailSelect={handleMoveDetailSelect}
+                            />
+                        </div>
 
-                                {isDevMode && (
-                                    <EngineLogsPanel
-                                        eventLogs={eventLogs}
-                                        errorLogs={errorLogs}
-                                        engineErrorDetails={engineErrorDetails}
-                                        onRetry={retryEngine}
-                                        isRetrying={isRetrying}
-                                    />
-                                )}
-                            </div>
-
-                            {/* 右列: 棋譜列（EvalPanel + KifuPanel、サイズ固定） */}
-                            <div className="flex flex-col gap-2 shrink-0">
-                                {/* 評価値グラフパネル（折りたたみ） */}
-                                <EvalPanel
-                                    evalHistory={evalHistory}
-                                    currentPly={navigation.state.currentPly}
-                                    onPlySelect={handlePlySelect}
-                                    defaultOpen={false}
-                                />
-
-                                {/* 棋譜パネル（常時表示） */}
-                                <KifuPanel
-                                    kifMoves={kifMoves}
-                                    currentPly={navigation.state.currentPly}
-                                    showEval={displaySettings.showKifuEval}
-                                    onShowEvalChange={(show) =>
-                                        setDisplaySettings((prev) => ({
-                                            ...prev,
-                                            showKifuEval: show,
-                                        }))
-                                    }
-                                    onPlySelect={handlePlySelect}
-                                    onCopyKif={handleCopyKif}
-                                    navigation={{
-                                        currentPly: navigation.state.currentPly,
-                                        totalPly: navigation.state.totalPly,
-                                        onBack: navigation.goBack,
-                                        onForward: () =>
-                                            navigation.goForward(selectedBranchNodeId ?? undefined),
-                                        onToStart: navigation.goToStart,
-                                        onToEnd: navigation.goToEnd,
-                                        isRewound: navigation.state.isRewound,
-                                        canGoForward: navigation.state.canGoForward,
-                                        branchInfo: navigation.state.hasBranches
-                                            ? {
-                                                  hasBranches: true,
-                                                  currentIndex: navigation.state.currentBranchIndex,
-                                                  count: navigation.state.branchCount,
-                                                  onSwitch: navigation.switchBranch,
-                                                  onPromoteToMain: navigation.promoteCurrentLine,
-                                              }
-                                            : undefined,
-                                    }}
-                                    navigationDisabled={isMatchRunning}
-                                    branchMarkers={branchMarkers}
-                                    positionHistory={positionHistory}
-                                    onAddPvAsBranch={handleAddPvAsBranch}
-                                    onPreviewPv={handlePreviewPv}
-                                    lastAddedBranchInfo={lastAddedBranchInfo}
-                                    onLastAddedBranchHandled={() => setLastAddedBranchInfo(null)}
-                                    onSelectedBranchChange={setSelectedBranchNodeId}
-                                    onAnalyzePly={handleAnalyzePly}
-                                    isAnalyzing={isAnalyzing}
-                                    analyzingPly={
-                                        analyzingState.type !== "none"
-                                            ? analyzingState.ply
-                                            : undefined
-                                    }
-                                    batchAnalysis={
-                                        batchAnalysis
-                                            ? {
-                                                  isRunning: batchAnalysis.isRunning,
-                                                  currentIndex: batchAnalysis.currentIndex,
-                                                  totalCount: batchAnalysis.totalCount,
-                                                  inProgress: batchAnalysis.inProgress,
-                                              }
-                                            : undefined
-                                    }
-                                    onStartBatchAnalysis={handleStartBatchAnalysis}
-                                    onCancelBatchAnalysis={handleCancelBatchAnalysis}
-                                    analysisSettings={analysisSettings}
-                                    onAnalysisSettingsChange={setAnalysisSettings}
-                                    kifuTree={navigation.tree}
-                                    onNodeClick={navigation.goToNodeById}
-                                    onBranchSwitch={navigation.switchBranchAtNode}
-                                    onAnalyzeNode={handleAnalyzeNode}
-                                    onAnalyzeBranch={handleAnalyzeBranch}
-                                    onStartTreeBatchAnalysis={handleStartTreeBatchAnalysis}
-                                    isOnMainLine={navigation.state.isOnMainLine}
-                                    onMoveDetailSelect={handleMoveDetailSelect}
-                                />
-                            </div>
-
-                            {/* 右端列: 手の詳細パネル（選択時のみ表示） */}
-                            {selectedMoveDetail && (
-                                <div className="shrink-0">
+                        {/* 右サイドドロワー: 手の詳細パネル */}
+                        <div
+                            className={`
+                                fixed top-0 right-0 h-full z-50
+                                transform transition-transform duration-300 ease-out
+                                ${selectedMoveDetail ? "translate-x-0" : "translate-x-full"}
+                            `}
+                        >
+                            <div className="h-full flex items-start pt-20 pr-4">
+                                {selectedMoveDetail && (
                                     <MoveDetailPanel
                                         move={selectedMoveDetail.move}
                                         position={selectedMoveDetail.position}
@@ -2379,9 +2357,45 @@ export function ShogiMatch({
                                         onClose={() => setSelectedMoveDetail(null)}
                                         isOnMainLine={navigation.state.isOnMainLine}
                                     />
-                                </div>
-                            )}
+                                )}
+                            </div>
                         </div>
+
+                        {/* 設定モーダル */}
+                        <SettingsModal
+                            isOpen={isSettingsModalOpen}
+                            onClose={() => setIsSettingsModalOpen(false)}
+                        >
+                            <div className="flex flex-col gap-6 min-w-[400px]">
+                                {/* 対局設定 */}
+                                <MatchSettingsPanel
+                                    sides={sides}
+                                    onSidesChange={setSides}
+                                    timeSettings={timeSettings}
+                                    onTimeSettingsChange={setTimeSettings}
+                                    uiEngineOptions={uiEngineOptions}
+                                    settingsLocked={settingsLocked}
+                                />
+
+                                {/* インポート */}
+                                <KifuImportPanel
+                                    onImportSfen={importSfen}
+                                    onImportKif={importKif}
+                                    positionReady={positionReady}
+                                />
+
+                                {/* エンジンログ（開発モード） */}
+                                {isDevMode && (
+                                    <EngineLogsPanel
+                                        eventLogs={eventLogs}
+                                        errorLogs={errorLogs}
+                                        engineErrorDetails={engineErrorDetails}
+                                        onRetry={retryEngine}
+                                        isRetrying={isRetrying}
+                                    />
+                                )}
+                            </div>
+                        </SettingsModal>
                     </div>
                 </section>
             )}

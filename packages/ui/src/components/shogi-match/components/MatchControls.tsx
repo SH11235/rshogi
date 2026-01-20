@@ -33,6 +33,8 @@ interface MatchControlsProps {
     gameMode?: GameMode;
     /** メッセージ */
     message: Message | null;
+    /** 設定を開くボタンのクリックハンドラ */
+    onOpenSettings?: () => void;
 }
 
 export function MatchControls({
@@ -47,6 +49,7 @@ export function MatchControls({
     isMatchRunning,
     gameMode = "editing",
     message,
+    onOpenSettings,
 }: MatchControlsProps): ReactElement {
     const isEditMode = gameMode === "editing";
     const isReviewMode = gameMode === "reviewing";
@@ -66,12 +69,37 @@ export function MatchControls({
                     />
                 ) : (
                     <>
-                        {/* 編集モード時: [対局開始] [平手に戻す] [検討開始] */}
+                        {/* 編集モード時: [対局開始] [設定] [平手に戻す] [検討開始] */}
                         {isEditMode && (
                             <>
                                 <Button type="button" onClick={onStart}>
                                     対局開始
                                 </Button>
+                                {onOpenSettings && (
+                                    <Button
+                                        type="button"
+                                        onClick={onOpenSettings}
+                                        variant="outline"
+                                    >
+                                        <svg
+                                            xmlns="http://www.w3.org/2000/svg"
+                                            width="16"
+                                            height="16"
+                                            viewBox="0 0 24 24"
+                                            fill="none"
+                                            stroke="currentColor"
+                                            strokeWidth="2"
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                            aria-hidden="true"
+                                            className="mr-1.5"
+                                        >
+                                            <circle cx="12" cy="12" r="3" />
+                                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                                        </svg>
+                                        対局設定
+                                    </Button>
+                                )}
                                 <Button type="button" onClick={onResetToStartpos} variant="outline">
                                     平手に戻す
                                 </Button>
@@ -87,12 +115,37 @@ export function MatchControls({
                             </>
                         )}
 
-                        {/* 検討モード時: [対局開始] [平手に戻す] [局面編集] */}
+                        {/* 検討モード時: [対局開始] [対局設定] [平手に戻す] [局面編集] */}
                         {isReviewMode && (
                             <>
                                 <Button type="button" onClick={onStart}>
                                     対局開始
                                 </Button>
+                                {onOpenSettings && (
+                                    <Button
+                                        type="button"
+                                        onClick={onOpenSettings}
+                                        variant="outline"
+                                    >
+                                        <svg
+                                            xmlns="http://www.w3.org/2000/svg"
+                                            width="16"
+                                            height="16"
+                                            viewBox="0 0 24 24"
+                                            fill="none"
+                                            stroke="currentColor"
+                                            strokeWidth="2"
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                            aria-hidden="true"
+                                            className="mr-1.5"
+                                        >
+                                            <circle cx="12" cy="12" r="3" />
+                                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                                        </svg>
+                                        対局設定
+                                    </Button>
+                                )}
                                 <Button type="button" onClick={onResetToStartpos} variant="outline">
                                     平手に戻す
                                 </Button>
