@@ -2616,7 +2616,7 @@ mod tests {
 
     #[test]
     fn test_pass_while_giving_check() {
-        // 設計書 1.4.1: 相手に王手をかけている状態でパス可能
+        // 相手に王手をかけている状態でパス可能
         // 先手が後手玉に王手 → 先手パス → 後手が王手状態になる
         // 5a: 後手玉, 5b: 先手金（後手玉に王手）, 5i: 先手玉
         let sfen = "4k4/4G4/9/9/9/9/9/9/4K4 b - 1";
@@ -2641,7 +2641,7 @@ mod tests {
 
     #[test]
     fn test_set_pass_rights_idempotent() {
-        // 設計書 5.2: 同じ値で2回呼んでもkeyが変わらない（冪等性）
+        // 同じ値で2回呼んでもkeyが変わらない（冪等性）
         let mut pos = Position::new();
         pos.set_startpos_with_pass_rights(2, 3);
 

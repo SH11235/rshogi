@@ -8,7 +8,7 @@
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-use crate::eval::{evaluate_pass_rights, EvalHash};
+use crate::eval::{get_scaled_pass_move_bonus, EvalHash};
 use crate::nnue::{evaluate_dispatch, get_network, AccumulatorStackVariant, DirtyPiece};
 use crate::position::Position;
 use crate::search::PieceToHistory;
@@ -448,8 +448,7 @@ impl SearchWorker {
     /// ロードされた NNUE のアーキテクチャに応じて適切なアキュムレータと評価関数を使用。
     #[inline]
     fn nnue_evaluate(&mut self, pos: &Position) -> Value {
-        let game_ply = pos.game_ply() as u16;
-        evaluate_dispatch(pos, &mut self.nnue_stack) + evaluate_pass_rights(pos, game_ply)
+        evaluate_dispatch(pos, &mut self.nnue_stack)
     }
 
     /// NNUE アキュムレータスタックを push
@@ -910,7 +909,6 @@ impl SearchWorker {
         // Move::NONEのチェックは不要（root直下でNMPを無効化してしまう）
         // YaneuraOuではASSERT_LV3で検証しているのみ
         // NMP条件に加えて、連続パスの禁止（prev_move が PASS でないこと）
-        // 設計書 10.4: NMP を PASS 使用版に置換
         let prev_is_pass = prev_move.is_pass();
         if excluded_move.is_none()
             && cut_node
@@ -1229,7 +1227,7 @@ impl SearchWorker {
             }
         }
 
-        // 設計書 10.4: PASS は最低優先度（探索最後に試す）
+        // PASS は最低優先度（探索最後に試す）
         // 静止探索 (depth <= DEPTH_QS) では PASS を追加しない
         if depth > DEPTH_QS && pos.can_pass() {
             ordered_moves.push(Move::PASS);
@@ -1240,6 +1238,11 @@ impl SearchWorker {
 
     /// Step14 の枝刈り（進行可否を返す）
     fn step14_pruning(&self, ctx: Step14Context<'_>) -> Step14Outcome {
+        // パス手は枝刈りの対象外（ボーナス評価のため探索する必要がある）
+        if ctx.mv.is_pass() {
+            return Step14Outcome::Continue;
+        }
+
         let mut lmr_depth = ctx.lmr_depth;
 
         if ctx.ply != 0 && !ctx.best_value.is_loss() {
@@ -2057,7 +2060,8 @@ impl SearchWorker {
             // =============================================================
             // Late Move Pruning
             // =============================================================
-            if !pv_node && !in_check && !is_capture {
+            // パス手はLMPの対象外（ボーナス評価のため探索する必要がある）
+            if !pv_node && !in_check && !is_capture && !mv.is_pass() {
                 let lmp_limit = (3 + depth * depth) / (2 - improving as i32);
                 if move_count >= lmp_limit {
                     continue;
@@ -2067,7 +2071,8 @@ impl SearchWorker {
             // =============================================================
             // SEE Pruning
             // =============================================================
-            if !pv_node && depth <= 8 && !in_check {
+            // パス手はSEE Pruningの対象外（SEEは駒交換の評価でありパスには適用不可）
+            if !pv_node && depth <= 8 && !in_check && !mv.is_pass() {
                 let see_threshold = if is_capture {
                     Value::new(-20 * depth * depth)
                 } else {
@@ -2149,7 +2154,7 @@ impl SearchWorker {
             }
 
             // statScoreによる補正
-            // 設計書 10.4: PASS は history が未定義のため stat_score = 0 とし、還元を控えめに
+            // PASS は history が未定義のため stat_score = 0 とし、還元を控えめに
             let stat_score = if mv.is_pass() {
                 0 // PASS は history がないので還元補正なし
             } else if is_capture {
@@ -2172,7 +2177,7 @@ impl SearchWorker {
             // =============================================================
             // 探索
             // =============================================================
-            let value =
+            let mut value =
                 if depth >= 2 && move_count > 1 {
                     let d = (std::cmp::max(
                         1,
@@ -2306,6 +2311,15 @@ impl SearchWorker {
             self.nnue_pop();
             pos.undo_move(mv);
 
+            // パス手評価ボーナス: パス手を実行した場合、評価値にボーナスを加算
+            // スケーリングなし（常に設定値の100%を適用）
+            if mv.is_pass() {
+                let bonus = get_scaled_pass_move_bonus(pos.game_ply());
+                if bonus > 0 {
+                    value += Value::new(bonus);
+                }
+            }
+
             if self.abort {
                 return Value::ZERO;
             }
@@ -2359,7 +2373,7 @@ impl SearchWorker {
         // History更新（YaneuraOu準拠: update_all_stats）
         // =================================================================
         // YaneuraOu: bestMoveがある場合は常にupdate_all_statsを呼ぶ
-        // 設計書 10.4: PASS は history_index() が未定義のためスキップ
+        // PASS は history_index() が未定義のためスキップ
         if best_move.is_some() && !best_move.is_pass() {
             let is_best_capture = pos.is_capture(best_move);
             let is_tt_move = best_move == tt_move;

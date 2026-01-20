@@ -9,7 +9,7 @@ use std::thread;
 
 use anyhow::Result;
 use engine_core::eval::{
-    set_eval_hash_enabled, set_material_level, set_pass_right_value, MaterialLevel,
+    set_eval_hash_enabled, set_material_level, set_pass_move_bonus, MaterialLevel,
 };
 use engine_core::nnue::{
     evaluate_dispatch, get_network, init_nnue, set_fv_scale_override, AccumulatorStackVariant,
@@ -170,7 +170,7 @@ impl UsiEngine {
         // 有限パス権（Finite Pass Rights）オプション
         println!("option name PassRights type check default false");
         println!("option name InitialPassCount type spin default 2 min 0 max 10");
-        println!("option name PassRightValue type spin default 200 min 0 max 1000");
+        println!("option name PassMoveBonus type spin default 0 min 0 max 1000");
         println!("usiok");
     }
 
@@ -417,11 +417,11 @@ impl UsiEngine {
                     eprintln!("info string InitialPassCount: {}", self.initial_pass_count);
                 }
             }
-            "PassRightValue" => {
+            "PassMoveBonus" => {
                 if let Ok(v) = value.parse::<i32>() {
                     let clamped = v.clamp(0, 1000);
-                    set_pass_right_value(clamped);
-                    eprintln!("info string PassRightValue: {clamped}");
+                    set_pass_move_bonus(clamped);
+                    eprintln!("info string PassMoveBonus: {clamped}");
                 }
             }
             _ => {

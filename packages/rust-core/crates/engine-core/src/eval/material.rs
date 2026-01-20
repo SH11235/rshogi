@@ -59,12 +59,12 @@ fn pass_right_value_by_ply(ply: u16) -> i32 {
 
 /// パス権の評価値を計算（手番側視点）
 ///
-/// 設計書 10.5: evaluate_material_with_pass() 実装
+/// evaluate_material_with_pass() 実装
 /// - `(自分のパス権 - 相手のパス権) * pass_right_value_by_ply(ply)`
 ///
 /// 手数に応じてパス権の価値が変化する:
 /// - 序盤(〜40手): 50cp（テンポが重要なため低い）
-/// - 終盤(120手〜): 300cp（ツークツワンク回避のため高い）
+/// - 終盤(120手〜): 200cp（ツークツワンク回避のため高い）
 /// - 中間: 線形補間
 ///
 /// パス権ルールが無効な場合は 0 を返す。
@@ -81,6 +81,41 @@ pub fn evaluate_pass_rights(pos: &Position, ply: u16) -> Value {
     let value = pass_right_value_by_ply(ply);
 
     Value::new((our_rights - their_rights) * value)
+}
+
+// =============================================================================
+// パス手評価ボーナス
+// =============================================================================
+
+/// パス手の評価値ボーナス（デフォルト: 0）
+///
+/// 正の値を設定するとパス手が選ばれやすくなる。
+/// USI オプション PassMoveBonus で調整可能。
+/// 手数によるスケーリングは行わず、常に設定値の100%が適用される。
+const DEFAULT_PASS_MOVE_BONUS: i32 = 0;
+
+/// ランタイムで切り替え可能なパス手ボーナス
+static PASS_MOVE_BONUS: AtomicI32 = AtomicI32::new(DEFAULT_PASS_MOVE_BONUS);
+
+/// 現在のパス手ボーナス設定値を取得
+#[inline]
+pub fn get_pass_move_bonus() -> i32 {
+    PASS_MOVE_BONUS.load(Ordering::Relaxed)
+}
+
+/// パス手ボーナスを設定
+pub fn set_pass_move_bonus(value: i32) {
+    PASS_MOVE_BONUS.store(value, Ordering::Relaxed);
+}
+
+/// パス手ボーナスを取得（スケーリングなし、常に100%）
+///
+/// 以前は手数によるスケーリング（序盤抑制）を行っていたが、
+/// 実際の将棋では序盤〜中盤の手待ち局面でパスが有効であり、
+/// 終盤は詰めろ等で逆にパスが不利なため、スケーリングを廃止。
+#[inline]
+pub fn get_scaled_pass_move_bonus(_ply: i32) -> i32 {
+    PASS_MOVE_BONUS.load(Ordering::Relaxed)
 }
 
 /// Material評価の適用レベル（YaneuraOu MaterialLv に対応）

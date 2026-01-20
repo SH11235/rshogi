@@ -304,7 +304,8 @@ impl Move {
         if s == "none" {
             return Some(Move::NONE);
         }
-        if s == "pass" {
+        // パス手: "pass" または "0000" 形式をサポート
+        if s == "pass" || s == "0000" {
             return Some(Move::PASS);
         }
 
