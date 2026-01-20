@@ -693,6 +693,27 @@ impl NNUENetwork {
 }
 
 // =============================================================================
+// arch_str メタデータパース
+// =============================================================================
+
+/// arch_str から fv_scale を抽出
+///
+/// bullet-shogi で学習したモデルは arch_str に "fv_scale=N" を含む。
+/// 例: "Features=HalfKA_hm^[73305->256x2]-SCReLU,fv_scale=13,qa=127,qb=64,scale=600"
+///
+/// 戻り値:
+/// - `Some(N)`: fv_scale=N が見つかった
+/// - `None`: fv_scale が見つからない（従来のモデル）
+pub fn parse_fv_scale_from_arch(arch_str: &str) -> Option<i32> {
+    for part in arch_str.split(',') {
+        if let Some(value) = part.strip_prefix("fv_scale=") {
+            return value.parse().ok();
+        }
+    }
+    None
+}
+
+// =============================================================================
 // Network - HalfKP用ネットワーク（既存）
 // =============================================================================
 
@@ -764,22 +785,24 @@ impl Network {
 
         // FV_SCALEの判定
         //
-        // FV_SCALEは評価関数の訓練時に決まるパラメータであり、
-        // ファイル形式からは完全に判定できない。
-        // ここではleb128圧縮の有無をヒューリスティックとして使用:
-        // - leb128あり: nnue-pytorch出力（通常16）
-        // - leb128なし: クラシック形式（水匠5等は24）
+        // 優先順位:
+        // 1. arch_str に "fv_scale=N" が含まれていればその値を使用
+        //    (bullet-shogi で学習したモデル用)
+        // 2. フォールバック: leb128圧縮の有無でヒューリスティック判定
+        //    - leb128あり: nnue-pytorch出力（通常16）
+        //    - leb128なし: クラシック形式（水匠5等は24）
         //
-        // 注意: この判定は不完全。将来的にはエンジンオプションで
-        // 設定可能にすることを検討（YaneuraOuのFV_SCALEオプション参照）。
+        // 注意: フォールバック判定は不完全。
+        // エンジンオプション (FV_SCALE_OVERRIDE) で上書き可能。
         let arch_str = String::from_utf8_lossy(&arch);
-        let fv_scale = if arch_str.contains("leb128") {
-            // leb128圧縮あり: デフォルト16
-            FV_SCALE_HALFKA
-        } else {
-            // leb128圧縮なし: 水匠5等を想定して24
-            FV_SCALE
-        };
+        let fv_scale = parse_fv_scale_from_arch(&arch_str).unwrap_or_else(|| {
+            // フォールバック: 従来のヒューリスティック
+            if arch_str.contains("leb128") {
+                FV_SCALE_HALFKA
+            } else {
+                FV_SCALE
+            }
+        });
 
         // SCReLU 検出: arch_string に "-SCReLU" が含まれているかチェック
         let use_screlu = arch_str.contains("SCReLU");
@@ -1764,5 +1787,42 @@ mod tests {
 
         // 評価値が妥当な範囲内（初期局面は概ね0に近いはず）
         assert!(value.raw().abs() < 500, "Hirate eval should be near 0, got: {}", value.raw());
+    }
+
+    /// parse_fv_scale_from_arch のユニットテスト
+    #[test]
+    fn test_parse_fv_scale_from_arch() {
+        // bullet-shogi 形式の arch_str
+        assert_eq!(
+            parse_fv_scale_from_arch(
+                "Features=HalfKA_hm^[73305->256x2]-SCReLU,fv_scale=13,qa=127,qb=64,scale=600"
+            ),
+            Some(13)
+        );
+        assert_eq!(
+            parse_fv_scale_from_arch(
+                "Features=HalfKA_hm^[73305->512x2]-SCReLU,fv_scale=20,qa=127,qb=64,scale=400"
+            ),
+            Some(20)
+        );
+        assert_eq!(
+            parse_fv_scale_from_arch(
+                "Features=HalfKA_hm^[73305->1024x2]-SCReLU,fv_scale=16,qa=127,qb=64,scale=508"
+            ),
+            Some(16)
+        );
+
+        // fv_scale が含まれていない従来形式
+        assert_eq!(parse_fv_scale_from_arch("Features=HalfKP[125388->256x2]"), None);
+        assert_eq!(parse_fv_scale_from_arch("Features=HalfKA_hm^[73305->512x2]"), None);
+
+        // 空文字列
+        assert_eq!(parse_fv_scale_from_arch(""), None);
+
+        // 不正な fv_scale 値
+        assert_eq!(
+            parse_fv_scale_from_arch("Features=HalfKA_hm^[73305->256x2],fv_scale=abc"),
+            None
+        );
     }
 }

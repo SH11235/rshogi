@@ -30,7 +30,7 @@ use super::constants::{
     FV_SCALE_HALFKA, HALFKA_HM_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION_HALFKA, WEIGHT_SCALE_BITS,
 };
 use super::features::{FeatureSet, HalfKA_hmFeatureSet};
-use super::network::get_fv_scale_override;
+use super::network::{get_fv_scale_override, parse_fv_scale_from_arch};
 use crate::position::Position;
 use crate::types::{Color, Value};
 use std::io::{self, Read, Seek};
@@ -918,6 +918,11 @@ pub struct NetworkHalfKA512 {
     /// arch_string に "-SCReLU" サフィックスが含まれている場合に true。
     /// bullet-shogi で学習した SCReLU モデル用。
     pub use_screlu: bool,
+    /// 評価値スケーリング係数
+    ///
+    /// arch_str に "fv_scale=N" が含まれていればその値、
+    /// なければ FV_SCALE_HALFKA (16) をデフォルトとする。
+    pub fv_scale: i32,
 }
 
 impl NetworkHalfKA512 {
@@ -973,6 +978,9 @@ impl NetworkHalfKA512 {
         // SCReLU 検出: arch_string に "-SCReLU" が含まれているかチェック
         let use_screlu = arch_str.contains("SCReLU");
 
+        // FV_SCALE 検出: arch_str に "fv_scale=N" が含まれていればその値を使用
+        let fv_scale = parse_fv_scale_from_arch(&arch_str).unwrap_or(FV_SCALE_HALFKA);
+
         // Feature Transformer ハッシュ
         reader.read_exact(&mut buf4)?;
 
@@ -997,6 +1005,7 @@ impl NetworkHalfKA512 {
             l2,
             output,
             use_screlu,
+            fv_scale,
         })
     }
 
@@ -1086,7 +1095,7 @@ impl NetworkHalfKA512 {
         self.output.propagate(&l2_relu, &mut output);
 
         // スケーリング（オーバーライド設定があればそちらを優先）
-        let fv_scale = get_fv_scale_override().unwrap_or(FV_SCALE_HALFKA);
+        let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
         let eval = output[0] / fv_scale;
 
         // デバッグ: 最終評価値の範囲チェック
@@ -1137,7 +1146,7 @@ impl NetworkHalfKA512 {
         self.output.propagate(&l2_relu, &mut output);
 
         // スケーリング（オーバーライド設定があればそちらを優先）
-        let fv_scale = get_fv_scale_override().unwrap_or(FV_SCALE_HALFKA);
+        let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
         let eval = output[0] / fv_scale;
 
         Value::new(eval)
@@ -1178,6 +1187,11 @@ pub struct NetworkHalfKA1024 {
     /// arch_string に "-SCReLU" サフィックスが含まれている場合に true。
     /// bullet-shogi で学習した SCReLU モデル用。
     pub use_screlu: bool,
+    /// 評価値スケーリング係数
+    ///
+    /// arch_str に "fv_scale=N" が含まれていればその値、
+    /// なければ FV_SCALE_HALFKA (16) をデフォルトとする。
+    pub fv_scale: i32,
 }
 
 impl NetworkHalfKA1024 {
@@ -1233,6 +1247,9 @@ impl NetworkHalfKA1024 {
         // SCReLU 検出: arch_string に "-SCReLU" が含まれているかチェック
         let use_screlu = arch_str.contains("SCReLU");
 
+        // FV_SCALE 検出: arch_str に "fv_scale=N" が含まれていればその値を使用
+        let fv_scale = parse_fv_scale_from_arch(&arch_str).unwrap_or(FV_SCALE_HALFKA);
+
         // Feature Transformer ハッシュ
         reader.read_exact(&mut buf4)?;
 
@@ -1257,6 +1274,7 @@ impl NetworkHalfKA1024 {
             l2,
             output,
             use_screlu,
+            fv_scale,
         })
     }
 
@@ -1346,7 +1364,7 @@ impl NetworkHalfKA1024 {
         self.output.propagate(&l2_relu, &mut output);
 
         // スケーリング（オーバーライド設定があればそちらを優先）
-        let fv_scale = get_fv_scale_override().unwrap_or(FV_SCALE_HALFKA);
+        let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
         let eval = output[0] / fv_scale;
 
         // デバッグ: 最終評価値の範囲チェック
@@ -1397,7 +1415,7 @@ impl NetworkHalfKA1024 {
         self.output.propagate(&l2_relu, &mut output);
 
         // スケーリング（オーバーライド設定があればそちらを優先）
-        let fv_scale = get_fv_scale_override().unwrap_or(FV_SCALE_HALFKA);
+        let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
         let eval = output[0] / fv_scale;
 
         Value::new(eval)
