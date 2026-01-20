@@ -89,6 +89,9 @@ interface MobileLayoutProps {
     onStop?: () => void;
     onStart?: () => void;
     onResetToStartpos?: () => void;
+    onResign?: () => void;
+    onUndo?: () => void;
+    canUndo?: boolean;
 
     // 対局設定（モバイル用BottomSheet）
     sides: { sente: SideSetting; gote: SideSetting };
@@ -176,6 +179,9 @@ export function MobileLayout({
     onStop,
     onStart,
     onResetToStartpos,
+    onResign,
+    onUndo,
+    canUndo,
     sides,
     onSidesChange,
     timeSettings,
@@ -320,17 +326,40 @@ export function MobileLayout({
                                 }
                             />
                         )}
-                        {onStop && (
-                            <div className="flex justify-center py-2">
+                        <div className="flex justify-center gap-2 py-2">
+                            {onStop && (
                                 <button
                                     type="button"
                                     onClick={onStop}
-                                    className="px-8 py-3 bg-destructive text-destructive-foreground rounded-lg font-medium shadow-md active:scale-95 transition-transform"
+                                    className="px-4 py-3 bg-destructive text-destructive-foreground rounded-lg font-medium shadow-md active:scale-95 transition-transform"
                                 >
                                     停止
                                 </button>
-                            </div>
-                        )}
+                            )}
+                            {onResign && (
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        if (window.confirm("投了しますか？")) {
+                                            onResign();
+                                        }
+                                    }}
+                                    className="px-4 py-3 bg-secondary text-secondary-foreground border border-border rounded-lg font-medium shadow-md active:scale-95 transition-transform"
+                                >
+                                    投了
+                                </button>
+                            )}
+                            {onUndo && (
+                                <button
+                                    type="button"
+                                    onClick={onUndo}
+                                    disabled={!canUndo}
+                                    className="px-4 py-3 bg-secondary text-secondary-foreground border border-border rounded-lg font-medium shadow-md active:scale-95 transition-transform disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    待った
+                                </button>
+                            )}
+                        </div>
                     </div>
                 ) : isReviewMode && totalPly === 0 ? (
                     /* 対局準備モード: 開始ボタンのみ（棋譜がまだない状態） */

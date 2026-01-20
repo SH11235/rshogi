@@ -2010,6 +2010,9 @@ export function ShogiMatch({
                     onStop={pauseAutoPlay}
                     onStart={resumeAutoPlay}
                     onResetToStartpos={handleResetToStartpos}
+                    onResign={handleResign}
+                    onUndo={handleUndo}
+                    canUndo={moves.length > 0}
                     // 対局設定
                     sides={sides}
                     onSidesChange={setSides}
