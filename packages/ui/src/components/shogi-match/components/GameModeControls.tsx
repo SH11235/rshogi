@@ -1,4 +1,15 @@
 import type { ReactElement } from "react";
+import {
+    AlertDialog,
+    AlertDialogAction,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle,
+    AlertDialogTrigger,
+} from "../../alert-dialog";
 import { Button } from "../../button";
 
 interface PlayingModeControlsProps {
@@ -28,17 +39,25 @@ export function PlayingModeControls({
                 停止
             </Button>
             {onResign && (
-                <Button
-                    type="button"
-                    onClick={() => {
-                        if (window.confirm("投了しますか？")) {
-                            onResign();
-                        }
-                    }}
-                    variant="outline"
-                >
-                    投了
-                </Button>
+                <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                        <Button type="button" variant="outline">
+                            投了
+                        </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                        <AlertDialogHeader>
+                            <AlertDialogTitle>投了しますか？</AlertDialogTitle>
+                            <AlertDialogDescription>
+                                この操作は取り消せません。
+                            </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                            <AlertDialogCancel>キャンセル</AlertDialogCancel>
+                            <AlertDialogAction onClick={onResign}>投了する</AlertDialogAction>
+                        </AlertDialogFooter>
+                    </AlertDialogContent>
+                </AlertDialog>
             )}
             {onUndo && (
                 <Button type="button" onClick={onUndo} variant="outline" disabled={!canUndo}>
@@ -78,17 +97,25 @@ export function PausedModeControls({
                 </Button>
             )}
             {onResign && (
-                <Button
-                    type="button"
-                    onClick={() => {
-                        if (window.confirm("投了しますか？")) {
-                            onResign();
-                        }
-                    }}
-                    variant="outline"
-                >
-                    投了
-                </Button>
+                <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                        <Button type="button" variant="outline">
+                            投了
+                        </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                        <AlertDialogHeader>
+                            <AlertDialogTitle>投了しますか？</AlertDialogTitle>
+                            <AlertDialogDescription>
+                                この操作は取り消せません。
+                            </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                            <AlertDialogCancel>キャンセル</AlertDialogCancel>
+                            <AlertDialogAction onClick={onResign}>投了する</AlertDialogAction>
+                        </AlertDialogFooter>
+                    </AlertDialogContent>
+                </AlertDialog>
             )}
         </>
     );

@@ -118,6 +118,24 @@ export function MatchSettingsPanel({
 
     const timeSelector = (side: SideKey) => {
         const settings = timeSettings[side];
+        // 最大24時間（86400秒）
+        const MAX_SECONDS = 86400;
+
+        const handleTimeChange = (field: "mainMs" | "byoyomiMs", inputValue: string) => {
+            const parsed = Number(inputValue);
+            // NaNまたは負の値は無視
+            if (Number.isNaN(parsed) || parsed < 0) return;
+            // 最大値でクランプ
+            const clampedSeconds = Math.min(Math.floor(parsed), MAX_SECONDS);
+            onTimeSettingsChange({
+                ...timeSettings,
+                [side]: {
+                    ...settings,
+                    [field]: clampedSeconds * 1000,
+                },
+            });
+        };
+
         return (
             <div className="flex flex-col gap-1.5">
                 {/* biome-ignore lint/a11y/noLabelWithoutControl: Input component renders native input inside label */}
@@ -126,18 +144,11 @@ export function MatchSettingsPanel({
                     <Input
                         type="number"
                         min={0}
+                        max={MAX_SECONDS}
                         value={Math.floor(settings.mainMs / 1000)}
                         disabled={settingsLocked}
                         className={inputClassName}
-                        onChange={(e) =>
-                            onTimeSettingsChange({
-                                ...timeSettings,
-                                [side]: {
-                                    ...settings,
-                                    mainMs: Number(e.target.value) * 1000,
-                                },
-                            })
-                        }
+                        onChange={(e) => handleTimeChange("mainMs", e.target.value)}
                     />
                 </label>
                 {/* biome-ignore lint/a11y/noLabelWithoutControl: Input component renders native input inside label */}
@@ -146,18 +157,11 @@ export function MatchSettingsPanel({
                     <Input
                         type="number"
                         min={0}
+                        max={MAX_SECONDS}
                         value={Math.floor(settings.byoyomiMs / 1000)}
                         disabled={settingsLocked}
                         className={inputClassName}
-                        onChange={(e) =>
-                            onTimeSettingsChange({
-                                ...timeSettings,
-                                [side]: {
-                                    ...settings,
-                                    byoyomiMs: Number(e.target.value) * 1000,
-                                },
-                            })
-                        }
+                        onChange={(e) => handleTimeChange("byoyomiMs", e.target.value)}
                     />
                 </label>
             </div>
