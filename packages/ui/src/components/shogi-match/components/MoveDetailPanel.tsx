@@ -7,13 +7,13 @@
 import type { KifuTree, PositionState } from "@shogi/app-core";
 import type { ReactElement } from "react";
 import { useMemo } from "react";
-import type { KifMove, PvDisplayMove, PvEvalInfo } from "../utils/kifFormat";
-import { convertPvToDisplay, formatEval, getEvalTooltipInfo } from "../utils/kifFormat";
 import {
     comparePvWithMainLine,
     findExistingBranchForPv,
     type PvMainLineComparison,
 } from "../utils/branchTreeUtils";
+import type { KifMove, PvDisplayMove, PvEvalInfo } from "../utils/kifFormat";
+import { convertPvToDisplay, formatEval, getEvalTooltipInfo } from "../utils/kifFormat";
 
 interface MoveDetailPanelProps {
     /** 選択された手 */

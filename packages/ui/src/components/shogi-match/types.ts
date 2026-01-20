@@ -112,7 +112,7 @@ export const ANALYZING_STATE_NONE: AnalyzingState = { type: "none" };
  * - 'warning': 警告メッセージ（オレンジ）
  * - 'success': 成功メッセージ（緑）
  */
-export type MessageType = "error" | "warning" | "success";
+type MessageType = "error" | "warning" | "success";
 
 /**
  * 表示メッセージ

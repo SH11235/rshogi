@@ -120,6 +120,7 @@ export function MatchSettingsPanel({
         const settings = timeSettings[side];
         return (
             <div className="flex flex-col gap-1.5">
+                {/* biome-ignore lint/a11y/noLabelWithoutControl: Input component renders native input inside label */}
                 <label className={labelClassName}>
                     持ち時間(秒)
                     <Input
@@ -139,6 +140,7 @@ export function MatchSettingsPanel({
                         }
                     />
                 </label>
+                {/* biome-ignore lint/a11y/noLabelWithoutControl: Input component renders native input inside label */}
                 <label className={labelClassName}>
                     秒読み(秒)
                     <Input
