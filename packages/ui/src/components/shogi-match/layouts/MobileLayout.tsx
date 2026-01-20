@@ -315,7 +315,7 @@ export function MobileLayout({
             </main>
 
             {/* === コントロール: 残りの高さを使う、必要に応じて縮小 === */}
-            <footer className="flex-1 flex flex-col min-h-0">
+            <footer className="flex-1 flex flex-col min-h-0 pb-[env(safe-area-inset-bottom)]">
                 {gameMode === "playing" ? (
                     /* 対局モード: 1行棋譜 + 停止・投了・待ったボタン */
                     <div className="flex flex-col gap-2 flex-shrink-0">
@@ -464,7 +464,7 @@ export function MobileLayout({
                 <button
                     type="button"
                     onClick={() => setIsSettingsOpen(true)}
-                    className="fixed bottom-4 right-4 w-10 h-10 rounded-full bg-muted/80 backdrop-blur-sm border border-border/50 shadow-md flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted active:scale-95 transition-all z-40"
+                    className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] right-4 w-10 h-10 rounded-full bg-muted/80 backdrop-blur-sm border border-border/50 shadow-md flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted active:scale-95 transition-all z-40"
                     aria-label="対局設定を開く"
                 >
                     <svg
@@ -507,14 +507,7 @@ export function MobileLayout({
                               }
                             : undefined
                     }
-                    onStopMatch={
-                        onStop
-                            ? () => {
-                                  onStop();
-                                  setIsSettingsOpen(false);
-                              }
-                            : undefined
-                    }
+                    onStopMatch={onStop}
                     onResetToStartpos={
                         onResetToStartpos
                             ? () => {
