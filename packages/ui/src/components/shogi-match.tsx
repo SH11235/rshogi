@@ -261,7 +261,6 @@ export function ShogiMatch({
     // TODO: 将来的に局面編集機能の強化で使用予定
     const [_basePosition, setBasePosition] = useState<PositionState | null>(null);
     const [isEditPanelOpen, setIsEditPanelOpen] = useState(false);
-    const [isSettingsPanelOpen, setIsSettingsPanelOpen] = useState(false);
     const [displaySettings, setDisplaySettings] = useLocalStorage<DisplaySettings>(
         "shogi-display-settings",
         DEFAULT_DISPLAY_SETTINGS,
@@ -731,8 +730,6 @@ export function ShogiMatch({
             setIsEditMode(false);
             setIsEditPanelOpen(false);
         }
-        // 対局開始時に設定パネルを閉じる
-        setIsSettingsPanelOpen(false);
         // 盤面セクションにスクロール
         setTimeout(() => {
             boardSectionRef.current?.scrollIntoView({
@@ -756,7 +753,6 @@ export function ShogiMatch({
             setIsEditMode(false);
             setIsEditPanelOpen(false);
         }
-        setIsSettingsPanelOpen(false);
         // isMatchRunningはfalseのままでisReviewModeになる
     };
 
@@ -1881,7 +1877,6 @@ export function ShogiMatch({
                 setIsEditMode(false);
                 setIsMatchRunning(false);
                 setIsEditPanelOpen(false);
-                setIsSettingsPanelOpen(false);
             } catch (error) {
                 throw new Error(`SFENの適用に失敗しました: ${String(error)}`);
             }
@@ -1924,7 +1919,6 @@ export function ShogiMatch({
             setIsEditMode(false);
             setIsMatchRunning(false);
             setIsEditPanelOpen(false);
-            setIsSettingsPanelOpen(false);
         },
         [loadMoves],
     );
@@ -2255,8 +2249,6 @@ export function ShogiMatch({
                                 )}
 
                                 <MatchSettingsPanel
-                                    isOpen={isSettingsPanelOpen}
-                                    onOpenChange={setIsSettingsPanelOpen}
                                     sides={sides}
                                     onSidesChange={setSides}
                                     timeSettings={timeSettings}

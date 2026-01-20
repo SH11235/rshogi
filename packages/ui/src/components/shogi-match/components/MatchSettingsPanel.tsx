@@ -1,7 +1,6 @@
 import type { Player } from "@shogi/app-core";
 import type { EngineClient, SkillLevelSettings } from "@shogi/engine-client";
 import type { ReactElement } from "react";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../../collapsible";
 import { Input } from "../../input";
 import type { ClockSettings } from "../hooks/useClockManager";
 import { SkillLevelSelector } from "./SkillLevelSelector";
@@ -23,10 +22,6 @@ export type EngineOption = {
 };
 
 interface MatchSettingsPanelProps {
-    // パネル表示状態
-    isOpen: boolean;
-    onOpenChange: (open: boolean) => void;
-
     // 設定値
     sides: { sente: SideSetting; gote: SideSetting };
     onSidesChange: (sides: { sente: SideSetting; gote: SideSetting }) => void;
@@ -43,13 +38,12 @@ interface MatchSettingsPanelProps {
 }
 
 const selectClassName =
-    "p-2 rounded-lg border border-[hsl(var(--wafuu-border))] bg-[hsl(var(--card,0_0%_100%))]";
-const inputClassName = "border border-[hsl(var(--wafuu-border))] bg-[hsl(var(--card,0_0%_100%))]";
-const labelClassName = "flex flex-col gap-1 text-[13px]";
+    "p-2 rounded-lg border border-[hsl(var(--wafuu-border))] bg-[hsl(var(--card,0_0%_100%))] text-sm";
+const inputClassName =
+    "border border-[hsl(var(--wafuu-border))] bg-[hsl(var(--card,0_0%_100%))] text-sm";
+const labelClassName = "flex flex-col gap-1 text-xs text-muted-foreground";
 
 export function MatchSettingsPanel({
-    isOpen,
-    onOpenChange,
     sides,
     onSidesChange,
     timeSettings,
@@ -59,12 +53,6 @@ export function MatchSettingsPanel({
     uiEngineOptions,
     settingsLocked,
 }: MatchSettingsPanelProps): ReactElement {
-    // 折りたたみ時に表示するサマリー（短いラベル）
-    const getSideLabel = (setting: SideSetting): string => {
-        return setting.role === "human" ? "人" : "AI";
-    };
-    const summary = `☗${getSideLabel(sides.sente)} vs ☖${getSideLabel(sides.gote)}`;
-
     // 選択肢の値を生成: "human" または "engine:{engineId}"
     const getSelectorValue = (setting: SideSetting): string => {
         if (setting.role === "human") return "human";
@@ -85,7 +73,6 @@ export function MatchSettingsPanel({
                 [side]: {
                     role: "engine",
                     engineId,
-                    // 既存の skillLevel 設定を保持
                     skillLevel: currentSetting.skillLevel,
                 },
             });
@@ -102,11 +89,13 @@ export function MatchSettingsPanel({
     const sideSelector = (side: Player) => {
         const setting = sides[side];
         const selectorValue = getSelectorValue(setting);
+        const sideLabel = side === "sente" ? "☗先手" : "☖後手";
+        const colorClass = side === "sente" ? "text-wafuu-shu" : "text-wafuu-ai";
 
         return (
-            <div className="flex flex-col gap-2">
+            <div className="flex flex-col gap-1.5">
                 <label className={labelClassName}>
-                    {side === "sente" ? "先手" : "後手"}
+                    <span className={`font-semibold ${colorClass}`}>{sideLabel}</span>
                     <select
                         value={selectorValue}
                         onChange={(e) => handleSelectorChange(side, e.target.value)}
@@ -121,7 +110,6 @@ export function MatchSettingsPanel({
                         ))}
                     </select>
                 </label>
-                {/* エンジン選択時のみ Skill Level 設定を表示 */}
                 {setting.role === "engine" && (
                     <SkillLevelSelector
                         value={setting.skillLevel}
@@ -134,156 +122,124 @@ export function MatchSettingsPanel({
     };
 
     return (
-        <Collapsible open={isOpen} onOpenChange={onOpenChange}>
-            <div className="w-[var(--panel-width)] overflow-hidden rounded-xl border-2 border-[hsl(var(--wafuu-border))] bg-[hsl(var(--wafuu-washi-warm))] shadow-lg">
-                <CollapsibleTrigger asChild>
-                    <button
-                        type="button"
-                        aria-label="対局設定パネルを開閉"
-                        className={`flex w-full cursor-pointer items-center justify-between gap-3 border-none bg-gradient-to-br from-[hsl(var(--wafuu-washi))] to-[hsl(var(--wafuu-washi-warm))] px-4 py-3.5 transition-all duration-200 ${
-                            isOpen ? "border-b border-[hsl(var(--wafuu-border))]" : ""
-                        }`}
+        <div className="w-[var(--panel-width)] rounded-xl border border-[hsl(var(--wafuu-border))] bg-[hsl(var(--wafuu-washi-warm))] p-3 shadow-md">
+            {/* 対局中のロックオーバーレイ */}
+            {settingsLocked && (
+                <div className="mb-2 flex items-center gap-2 rounded-lg bg-[hsl(var(--wafuu-sumi)/0.1)] px-3 py-1.5 text-xs text-muted-foreground">
+                    <span>🔒</span>
+                    <span>対局中は変更不可</span>
+                </div>
+            )}
+
+            <div className="flex flex-col gap-3">
+                {/* タイトル */}
+                <div className="text-sm font-semibold text-[hsl(var(--wafuu-sumi))]">対局設定</div>
+
+                {/* 手番設定 */}
+                <label className={labelClassName}>
+                    開始時の手番
+                    <select
+                        value={currentTurn}
+                        onChange={(e) => onTurnChange(e.target.value as Player)}
+                        disabled={settingsLocked}
+                        className={selectClassName}
                     >
-                        <span className="flex items-center gap-3">
-                            <span className="text-lg font-bold tracking-wide text-[hsl(var(--wafuu-sumi))]">
-                                対局設定
-                            </span>
-                            {settingsLocked && (
-                                <span
-                                    title="対局中は変更できません"
-                                    className="text-base text-[hsl(var(--wafuu-shu))]"
-                                >
-                                    🚫
-                                </span>
-                            )}
-                            <span className="text-sm font-semibold text-[hsl(var(--wafuu-kincha))]">
-                                {summary}
-                            </span>
-                        </span>
-                        <span
-                            className={`shrink-0 text-xl text-[hsl(var(--wafuu-kincha))] transition-transform duration-200 ${
-                                isOpen ? "rotate-180" : "rotate-0"
-                            }`}
-                        >
-                            ▼
-                        </span>
-                    </button>
-                </CollapsibleTrigger>
-                <CollapsibleContent>
-                    <div className="relative flex flex-col gap-3.5 p-4">
-                        {/* 対局中のロックオーバーレイ */}
-                        {settingsLocked && (
-                            <div className="absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-[hsl(var(--wafuu-washi-warm)/0.7)]">
-                                <div className="flex items-center gap-2 rounded-lg bg-[hsl(var(--wafuu-sumi)/0.9)] px-4 py-2 text-sm font-semibold text-white">
-                                    <span>🚫</span>
-                                    <span>対局中は変更不可</span>
-                                </div>
-                            </div>
-                        )}
+                        <option value="sente">先手から</option>
+                        <option value="gote">後手から</option>
+                    </select>
+                </label>
 
-                        <label className={labelClassName}>
-                            手番（開始時にどちらが指すか）
-                            <select
-                                value={currentTurn}
-                                onChange={(e) => onTurnChange(e.target.value as Player)}
-                                disabled={settingsLocked}
-                                className={selectClassName}
-                            >
-                                <option value="sente">先手</option>
-                                <option value="gote">後手</option>
-                            </select>
-                        </label>
+                {/* 先手/後手設定 */}
+                <div className="grid grid-cols-2 gap-3">
+                    {sideSelector("sente")}
+                    {sideSelector("gote")}
+                </div>
 
-                        <div className="grid grid-cols-2 gap-3">
-                            {sideSelector("sente")}
-                            {sideSelector("gote")}
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-2">
-                            <label htmlFor="sente-main" className={labelClassName}>
-                                先手 持ち時間 (秒)
-                                <Input
-                                    id="sente-main"
-                                    type="number"
-                                    min={0}
-                                    value={Math.floor(timeSettings.sente.mainMs / 1000)}
-                                    disabled={settingsLocked}
-                                    className={inputClassName}
-                                    onChange={(e) =>
-                                        onTimeSettingsChange({
-                                            ...timeSettings,
-                                            sente: {
-                                                ...timeSettings.sente,
-                                                mainMs: Number(e.target.value) * 1000,
-                                            },
-                                        })
-                                    }
-                                />
-                            </label>
-                            <label htmlFor="sente-byoyomi" className={labelClassName}>
-                                先手 秒読み (秒)
-                                <Input
-                                    id="sente-byoyomi"
-                                    type="number"
-                                    min={0}
-                                    value={Math.floor(timeSettings.sente.byoyomiMs / 1000)}
-                                    disabled={settingsLocked}
-                                    className={inputClassName}
-                                    onChange={(e) =>
-                                        onTimeSettingsChange({
-                                            ...timeSettings,
-                                            sente: {
-                                                ...timeSettings.sente,
-                                                byoyomiMs: Number(e.target.value) * 1000,
-                                            },
-                                        })
-                                    }
-                                />
-                            </label>
-                            <label htmlFor="gote-main" className={labelClassName}>
-                                後手 持ち時間 (秒)
-                                <Input
-                                    id="gote-main"
-                                    type="number"
-                                    min={0}
-                                    value={Math.floor(timeSettings.gote.mainMs / 1000)}
-                                    disabled={settingsLocked}
-                                    className={inputClassName}
-                                    onChange={(e) =>
-                                        onTimeSettingsChange({
-                                            ...timeSettings,
-                                            gote: {
-                                                ...timeSettings.gote,
-                                                mainMs: Number(e.target.value) * 1000,
-                                            },
-                                        })
-                                    }
-                                />
-                            </label>
-                            <label htmlFor="gote-byoyomi" className={labelClassName}>
-                                後手 秒読み (秒)
-                                <Input
-                                    id="gote-byoyomi"
-                                    type="number"
-                                    min={0}
-                                    value={Math.floor(timeSettings.gote.byoyomiMs / 1000)}
-                                    disabled={settingsLocked}
-                                    className={inputClassName}
-                                    onChange={(e) =>
-                                        onTimeSettingsChange({
-                                            ...timeSettings,
-                                            gote: {
-                                                ...timeSettings.gote,
-                                                byoyomiMs: Number(e.target.value) * 1000,
-                                            },
-                                        })
-                                    }
-                                />
-                            </label>
-                        </div>
+                {/* 時間設定 */}
+                <div className="border-t border-[hsl(var(--wafuu-border))] pt-3">
+                    <div className="mb-2 text-xs font-semibold text-[hsl(var(--wafuu-sumi))]">
+                        持ち時間
                     </div>
-                </CollapsibleContent>
+                    <div className="grid grid-cols-2 gap-2">
+                        <label className={labelClassName}>
+                            ☗持ち時間(秒)
+                            <Input
+                                type="number"
+                                min={0}
+                                value={Math.floor(timeSettings.sente.mainMs / 1000)}
+                                disabled={settingsLocked}
+                                className={inputClassName}
+                                onChange={(e) =>
+                                    onTimeSettingsChange({
+                                        ...timeSettings,
+                                        sente: {
+                                            ...timeSettings.sente,
+                                            mainMs: Number(e.target.value) * 1000,
+                                        },
+                                    })
+                                }
+                            />
+                        </label>
+                        <label className={labelClassName}>
+                            ☗秒読み(秒)
+                            <Input
+                                type="number"
+                                min={0}
+                                value={Math.floor(timeSettings.sente.byoyomiMs / 1000)}
+                                disabled={settingsLocked}
+                                className={inputClassName}
+                                onChange={(e) =>
+                                    onTimeSettingsChange({
+                                        ...timeSettings,
+                                        sente: {
+                                            ...timeSettings.sente,
+                                            byoyomiMs: Number(e.target.value) * 1000,
+                                        },
+                                    })
+                                }
+                            />
+                        </label>
+                        <label className={labelClassName}>
+                            ☖持ち時間(秒)
+                            <Input
+                                type="number"
+                                min={0}
+                                value={Math.floor(timeSettings.gote.mainMs / 1000)}
+                                disabled={settingsLocked}
+                                className={inputClassName}
+                                onChange={(e) =>
+                                    onTimeSettingsChange({
+                                        ...timeSettings,
+                                        gote: {
+                                            ...timeSettings.gote,
+                                            mainMs: Number(e.target.value) * 1000,
+                                        },
+                                    })
+                                }
+                            />
+                        </label>
+                        <label className={labelClassName}>
+                            ☖秒読み(秒)
+                            <Input
+                                type="number"
+                                min={0}
+                                value={Math.floor(timeSettings.gote.byoyomiMs / 1000)}
+                                disabled={settingsLocked}
+                                className={inputClassName}
+                                onChange={(e) =>
+                                    onTimeSettingsChange({
+                                        ...timeSettings,
+                                        gote: {
+                                            ...timeSettings.gote,
+                                            byoyomiMs: Number(e.target.value) * 1000,
+                                        },
+                                    })
+                                }
+                            />
+                        </label>
+                    </div>
+                </div>
             </div>
-        </Collapsible>
+        </div>
     );
 }
