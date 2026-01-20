@@ -21,7 +21,7 @@ import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ShogiBoardCell } from "./shogi-board";
 import { ShogiBoard } from "./shogi-board";
-import { MobileClockDisplay } from "./shogi-match/components/MobileClockDisplay";
+import { ClockDisplay } from "./shogi-match/components/ClockDisplay";
 import { EditModePanel } from "./shogi-match/components/EditModePanel";
 import { EngineLogsPanel } from "./shogi-match/components/EngineLogsPanel";
 import { EvalPanel } from "./shogi-match/components/EvalPanel";
@@ -2056,7 +2056,7 @@ export function ShogiMatch({
                                     className={`flex flex-col gap-2 items-center ${isDraggingPiece ? "touch-none" : ""}`}
                                 >
                                     {/* 時間管理（将棋盤の上） */}
-                                    <MobileClockDisplay
+                                    <ClockDisplay
                                         clocks={clocks}
                                         sides={sides}
                                         isRunning={isMatchRunning}

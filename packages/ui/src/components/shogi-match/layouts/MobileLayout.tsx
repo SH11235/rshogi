@@ -7,7 +7,7 @@ import { EvalGraph } from "../components/EvalGraph";
 import { PausedModeControls, PlayingModeControls } from "../components/GameModeControls";
 import type { EngineOption, SideSetting } from "../components/MatchSettingsPanel";
 import { MobileBoardSection } from "../components/MobileBoardSection";
-import { MobileClockDisplay } from "../components/MobileClockDisplay";
+import { ClockDisplay } from "../components/ClockDisplay";
 import { type KifuMove, MobileKifuBar } from "../components/MobileKifuBar";
 import { MobileNavigation } from "../components/MobileNavigation";
 import { MobileSettingsSheet } from "../components/MobileSettingsSheet";
@@ -279,7 +279,7 @@ export function MobileLayout({
                 </div>
 
                 {/* クロック表示（常に表示、非対局時はグレーアウト） */}
-                <MobileClockDisplay
+                <ClockDisplay
                     clocks={clocks}
                     sides={sides}
                     isRunning={isMatchRunning}
