@@ -1,6 +1,7 @@
 //! Zobristハッシュ
 
 use crate::types::{Color, Piece, PieceType, Square};
+use std::sync::LazyLock;
 
 /// Zobristハッシュ用乱数テーブル
 pub struct Zobrist {
@@ -113,6 +114,42 @@ pub fn zobrist_side() -> u64 {
     ZOBRIST.side
 }
 
+// =============================================================================
+// パス権用Zobristキー
+// =============================================================================
+
+/// パス権用Zobristキーのシード値
+/// 既存のZobristキーと衝突しない値を選択
+/// 注: 16進リテラルは 0-9, A-F のみ有効
+const PASS_RIGHTS_ZOBRIST_SEED: u64 = 0x5A55_0000_0000_0001;
+
+/// パス権用のZobristキー
+/// [先手パス権0-15][後手パス権0-15] = 256エントリ
+///
+/// 【重要】(0,0) は 0 を維持し、通常ルールとのキー互換を保つ
+static PASS_RIGHTS_KEYS: LazyLock<[[u64; 16]; 16]> = LazyLock::new(|| {
+    let mut keys = [[0u64; 16]; 16];
+    let mut seed = PASS_RIGHTS_ZOBRIST_SEED;
+
+    for (black, row) in keys.iter_mut().enumerate() {
+        for (white, key) in row.iter_mut().enumerate() {
+            // (0,0) は 0 のまま → 通常ルールとキー互換
+            if black == 0 && white == 0 {
+                continue;
+            }
+            seed = xorshift64(seed);
+            *key = seed;
+        }
+    }
+    keys
+});
+
+/// パス権のZobristキーを取得
+#[inline]
+pub fn zobrist_pass_rights(black_rights: u8, white_rights: u8) -> u64 {
+    PASS_RIGHTS_KEYS[black_rights.min(15) as usize][white_rights.min(15) as usize]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +190,52 @@ mod tests {
         let combined = h1 ^ h2;
         assert_eq!(combined ^ h2, h1);
         assert_eq!(combined ^ h1, h2);
+    }
+
+    // =========================================
+    // パス権用Zobristキーのテスト
+    // =========================================
+
+    #[test]
+    fn test_zobrist_pass_rights_zero_compatible() {
+        // (0,0) は 0 → 通常ルールとキー互換
+        assert_eq!(zobrist_pass_rights(0, 0), 0);
+    }
+
+    #[test]
+    fn test_zobrist_pass_rights_nonzero() {
+        // (0,0) 以外は非ゼロ（高確率で）
+        // 注: RNGが偶然 0 を返す可能性は極めて低い
+        assert_ne!(zobrist_pass_rights(1, 0), 0);
+        assert_ne!(zobrist_pass_rights(0, 1), 0);
+        assert_ne!(zobrist_pass_rights(2, 2), 0);
+        assert_ne!(zobrist_pass_rights(15, 15), 0);
+    }
+
+    #[test]
+    fn test_zobrist_pass_rights_uniqueness() {
+        // 異なるパス権の組み合わせで異なるキー
+        assert_ne!(zobrist_pass_rights(1, 0), zobrist_pass_rights(0, 1));
+        assert_ne!(zobrist_pass_rights(2, 2), zobrist_pass_rights(3, 3));
+        assert_ne!(zobrist_pass_rights(1, 1), zobrist_pass_rights(2, 2));
+    }
+
+    #[test]
+    fn test_zobrist_pass_rights_clamp() {
+        // 15を超える値は15に丸められる
+        let key15 = zobrist_pass_rights(15, 15);
+        let key20 = zobrist_pass_rights(20, 20);
+        assert_eq!(key15, key20);
+    }
+
+    #[test]
+    fn test_zobrist_pass_rights_xor_property() {
+        // XOR性質: A ^ B ^ B = A
+        let key1 = zobrist_pass_rights(2, 2);
+        let key2 = zobrist_pass_rights(3, 3);
+
+        let combined = key1 ^ key2;
+        assert_eq!(combined ^ key2, key1);
+        assert_eq!(combined ^ key1, key2);
     }
 }
