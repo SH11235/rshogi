@@ -57,6 +57,7 @@ import {
     DEFAULT_DISPLAY_SETTINGS,
     type DisplaySettings,
     type GameMode,
+    type Message,
     type PromotionSelection,
 } from "./shogi-match/types";
 import {
@@ -230,7 +231,7 @@ export function ShogiMatch({
     const [lastMove, setLastMove] = useState<LastMove | undefined>(undefined);
     const [selection, setSelection] = useState<Selection | null>(null);
     const [promotionSelection, setPromotionSelection] = useState<PromotionSelection | null>(null);
-    const [message, setMessage] = useState<string | null>(null);
+    const [message, setMessage] = useState<Message | null>(null);
     const [gameResult, setGameResult] = useState<GameResult | null>(null);
     const [showResultDialog, setShowResultDialog] = useState(false);
     const [flipBoard, setFlipBoard] = useState(false);
@@ -401,8 +402,8 @@ export function ShogiMatch({
     // endMatch のための ref（循環依存を回避）
     const endMatchRef = useRef<((result: GameResult) => Promise<void>) | null>(null);
 
-    const handleClockError = useCallback((message: string) => {
-        setMessage(message);
+    const handleClockError = useCallback((text: string) => {
+        setMessage({ text, type: "error" });
     }, []);
 
     const stopAllEnginesRef = useRef<() => Promise<void>>(async () => {});
@@ -446,9 +447,10 @@ export function ShogiMatch({
                 await stopAllEnginesRef.current();
             } catch (error) {
                 console.error("エンジン停止に失敗しました:", error);
-                setMessage(
-                    `対局終了処理でエンジン停止に失敗しました: ${String(error ?? "unknown")}`,
-                );
+                setMessage({
+                    text: `対局終了処理でエンジン停止に失敗しました: ${String(error ?? "unknown")}`,
+                    type: "error",
+                });
             }
         },
         [stopTicking],
@@ -654,7 +656,10 @@ export function ShogiMatch({
                     }
                 } catch (error) {
                     if (!cancelled) {
-                        setMessage(`局面のSFEN変換に失敗しました: ${String(error)}`);
+                        setMessage({
+                            text: `局面のSFEN変換に失敗しました: ${String(error)}`,
+                            type: "error",
+                        });
                     }
                 }
                 // 棋譜ナビゲーションを正しい初期局面でリセット
@@ -664,7 +669,10 @@ export function ShogiMatch({
                 }
             } catch (error) {
                 if (!cancelled) {
-                    setMessage(`初期局面の取得に失敗しました: ${String(error)}`);
+                    setMessage({
+                        text: `初期局面の取得に失敗しました: ${String(error)}`,
+                        type: "error",
+                    });
                 }
             }
         };
@@ -686,7 +694,7 @@ export function ShogiMatch({
             setStartSfen(sfen);
             return sfen;
         } catch (error) {
-            setMessage(`局面のSFEN変換に失敗しました: ${String(error)}`);
+            setMessage({ text: `局面のSFEN変換に失敗しました: ${String(error)}`, type: "error" });
             throw error;
         }
     }, []);
@@ -769,9 +777,12 @@ export function ShogiMatch({
             movesRef.current = [];
             legalCache.clear();
             setIsEditMode(false);
-            setMessage("局面を確定しました。対局開始でこの局面から進行します。");
+            setMessage({
+                text: "局面を確定しました。対局開始でこの局面から進行します。",
+                type: "success",
+            });
         } catch {
-            setMessage("局面の確定に失敗しました。");
+            setMessage({ text: "局面の確定に失敗しました。", type: "error" });
         }
     };
 
@@ -794,9 +805,8 @@ export function ShogiMatch({
             legalCache.clear();
             // 編集モードに移行
             setIsEditMode(true);
-            setMessage("局面編集モードに戻りました。駒をドラッグして編集できます。");
         } catch {
-            setMessage("編集モードへの移行に失敗しました。");
+            setMessage({ text: "編集モードへの移行に失敗しました。", type: "error" });
         }
     }, [isMatchRunning, navigation, legalCache, refreshStartSfen]);
 
@@ -884,7 +894,7 @@ export function ShogiMatch({
             legalCache.clear();
             turnStartTimeRef.current = Date.now();
         } catch (error) {
-            setMessage(`平手初期化に失敗しました: ${String(error)}`);
+            setMessage({ text: `平手初期化に失敗しました: ${String(error)}`, type: "error" });
         }
     }, [navigation, resetClocks, stopAllEngines, legalCache.clear]);
 
@@ -937,7 +947,7 @@ export function ShogiMatch({
                 if (editVersionRef.current !== currentVersion) {
                     return;
                 }
-                setMessage("局面の適用に失敗しました。");
+                setMessage({ text: "局面の適用に失敗しました。", type: "error" });
             }
         },
         [navigation, legalCache, stopTicking, refreshStartSfen],
@@ -950,7 +960,7 @@ export function ShogiMatch({
             const piece = current.board[square];
             if (!piece) return;
             if (!isPromotable(piece.type)) {
-                setMessage(`${PIECE_LABELS[piece.type]}は成れません。`);
+                setMessage({ text: `${PIECE_LABELS[piece.type]}は成れません。`, type: "error" });
                 return;
             }
 
@@ -970,7 +980,7 @@ export function ShogiMatch({
 
             const applied = applyDropResult(result, positionRef.current);
             if (!applied.ok) {
-                setMessage(applied.error ?? "ドロップに失敗しました");
+                setMessage({ text: applied.error ?? "ドロップに失敗しました", type: "error" });
                 return;
             }
 
@@ -1121,13 +1131,14 @@ export function ShogiMatch({
             });
             const nextCount = countsBefore[piece.owner][baseType] + 1;
             if (nextCount > PIECE_CAP[baseType]) {
-                setMessage(
-                    `${piece.owner === "sente" ? "先手" : "後手"}の${PIECE_LABELS[baseType]}は最大${PIECE_CAP[baseType]}枚までです`,
-                );
+                setMessage({
+                    text: `${piece.owner === "sente" ? "先手" : "後手"}の${PIECE_LABELS[baseType]}は最大${PIECE_CAP[baseType]}枚までです`,
+                    type: "warning",
+                });
                 return false;
             }
             if (piece.type === "K" && countsBefore[piece.owner][baseType] >= PIECE_CAP.K) {
-                setMessage("玉はそれぞれ1枚まで配置できます。");
+                setMessage({ text: "玉はそれぞれ1枚まで配置できます。", type: "warning" });
                 return false;
             }
 
@@ -1149,7 +1160,6 @@ export function ShogiMatch({
             setMessage(null);
             if (isEditMode) {
                 if (!positionReady) {
-                    setMessage("局面を読み込み中です。");
                     return;
                 }
                 const sq = square as Square;
@@ -1198,8 +1208,7 @@ export function ShogiMatch({
                     return;
                 }
 
-                // 空マスをクリックした場合
-                setMessage("配置する駒を選ぶか、移動する駒をクリックしてください。");
+                // 空マスをクリックした場合は何もしない
                 return;
             }
 
@@ -1207,7 +1216,6 @@ export function ShogiMatch({
             // 自由に棋譜を閲覧し、任意の局面から分岐を作成できる
             if (isReviewMode) {
                 if (!positionReady) {
-                    setMessage("局面を読み込み中です。");
                     return;
                 }
 
@@ -1235,12 +1243,15 @@ export function ShogiMatch({
                     const moveStr = `${selection.piece}*${square}`;
                     const legal = await getLegalSet();
                     if (legal && !legal.has(moveStr)) {
-                        setMessage("合法手ではありません");
+                        setMessage({ text: "合法手ではありません", type: "error" });
                         return;
                     }
                     const result = applyMoveWithState(position, moveStr, { validateTurn: false });
                     if (!result.ok) {
-                        setMessage(result.error ?? "持ち駒を打てませんでした");
+                        setMessage({
+                            text: result.error ?? "持ち駒を打てませんでした",
+                            type: "error",
+                        });
                         return;
                     }
                     applyMoveForReview(result.next, moveStr, result.lastMove);
@@ -1266,14 +1277,17 @@ export function ShogiMatch({
                     if (promotion === "none") {
                         const moveStr = `${from}${to}`;
                         if (!legal.has(moveStr)) {
-                            setMessage("合法手ではありません");
+                            setMessage({ text: "合法手ではありません", type: "error" });
                             return;
                         }
                         const result = applyMoveWithState(position, moveStr, {
                             validateTurn: false,
                         });
                         if (!result.ok) {
-                            setMessage(result.error ?? "指し手を適用できませんでした");
+                            setMessage({
+                                text: result.error ?? "指し手を適用できませんでした",
+                                type: "error",
+                            });
                             return;
                         }
                         applyMoveForReview(result.next, moveStr, result.lastMove);
@@ -1286,7 +1300,10 @@ export function ShogiMatch({
                             validateTurn: false,
                         });
                         if (!result.ok) {
-                            setMessage(result.error ?? "指し手を適用できませんでした");
+                            setMessage({
+                                text: result.error ?? "指し手を適用できませんでした",
+                                type: "error",
+                            });
                             return;
                         }
                         applyMoveForReview(result.next, moveStr, result.lastMove);
@@ -1300,7 +1317,10 @@ export function ShogiMatch({
                             validateTurn: false,
                         });
                         if (!result.ok) {
-                            setMessage(result.error ?? "指し手を適用できませんでした");
+                            setMessage({
+                                text: result.error ?? "指し手を適用できませんでした",
+                                type: "error",
+                            });
                             return;
                         }
                         applyMoveForReview(result.next, moveStr, result.lastMove);
@@ -1308,7 +1328,7 @@ export function ShogiMatch({
                     }
 
                     if (!piece) {
-                        setMessage("駒が見つかりません");
+                        setMessage({ text: "駒が見つかりません", type: "error" });
                         return;
                     }
                     setPromotionSelection({ from: from as Square, to: to as Square, piece });
@@ -1319,11 +1339,9 @@ export function ShogiMatch({
 
             // ========== 対局モード ==========
             if (!positionReady) {
-                setMessage("局面を読み込み中です。");
                 return;
             }
             if (isEngineTurn(position.turn)) {
-                setMessage("エンジンの手番です。");
                 return;
             }
 
@@ -1364,12 +1382,15 @@ export function ShogiMatch({
                 if (promotion === "none") {
                     const moveStr = `${from}${to}`;
                     if (!legal.has(moveStr)) {
-                        setMessage("合法手ではありません");
+                        setMessage({ text: "合法手ではありません", type: "error" });
                         return;
                     }
                     const result = applyMoveWithState(position, moveStr, { validateTurn: true });
                     if (!result.ok) {
-                        setMessage(result.error ?? "指し手を適用できませんでした");
+                        setMessage({
+                            text: result.error ?? "指し手を適用できませんでした",
+                            type: "error",
+                        });
                         return;
                     }
                     applyMoveCommon(result.next, moveStr, result.lastMove);
@@ -1381,7 +1402,10 @@ export function ShogiMatch({
                     const moveStr = `${from}${to}+`;
                     const result = applyMoveWithState(position, moveStr, { validateTurn: true });
                     if (!result.ok) {
-                        setMessage(result.error ?? "指し手を適用できませんでした");
+                        setMessage({
+                            text: result.error ?? "指し手を適用できませんでした",
+                            type: "error",
+                        });
                         return;
                     }
                     applyMoveCommon(result.next, moveStr, result.lastMove);
@@ -1394,7 +1418,10 @@ export function ShogiMatch({
                     const moveStr = `${from}${to}+`;
                     const result = applyMoveWithState(position, moveStr, { validateTurn: true });
                     if (!result.ok) {
-                        setMessage(result.error ?? "指し手を適用できませんでした");
+                        setMessage({
+                            text: result.error ?? "指し手を適用できませんでした",
+                            type: "error",
+                        });
                         return;
                     }
                     applyMoveCommon(result.next, moveStr, result.lastMove);
@@ -1403,7 +1430,7 @@ export function ShogiMatch({
 
                 // 通常クリック：成り選択ダイアログを表示
                 if (!piece) {
-                    setMessage("駒が見つかりません");
+                    setMessage({ text: "駒が見つかりません", type: "error" });
                     return;
                 }
                 setPromotionSelection({ from: from as Square, to: to as Square, piece });
@@ -1414,12 +1441,12 @@ export function ShogiMatch({
             const moveStr = `${selection.piece}*${square}`;
             const legal = await getLegalSet();
             if (legal && !legal.has(moveStr)) {
-                setMessage("合法手ではありません");
+                setMessage({ text: "合法手ではありません", type: "error" });
                 return;
             }
             const result = applyMoveWithState(position, moveStr, { validateTurn: true });
             if (!result.ok) {
-                setMessage(result.error ?? "持ち駒を打てませんでした");
+                setMessage({ text: result.error ?? "持ち駒を打てませんでした", type: "error" });
                 return;
             }
             applyMoveCommon(result.next, moveStr, result.lastMove);
@@ -1452,7 +1479,7 @@ export function ShogiMatch({
             // 検討モードでは手番チェックをスキップ
             const result = applyMoveWithState(position, moveStr, { validateTurn: !isReviewMode });
             if (!result.ok) {
-                setMessage(result.error ?? "指し手を適用できませんでした");
+                setMessage({ text: result.error ?? "指し手を適用できませんでした", type: "error" });
                 setPromotionSelection(null);
                 setSelection(null);
                 return;
@@ -1470,16 +1497,13 @@ export function ShogiMatch({
     const handleHandSelect = useCallback(
         (piece: PieceType) => {
             if (!positionReady) {
-                setMessage("局面を読み込み中です。");
                 return;
             }
             if (isEditMode) {
-                setMessage("編集モード中は手番入力は無効です。盤面編集パネルを使ってください。");
                 return;
             }
             // 検討モードでは手番の持ち駒を選択可能
             if (!isReviewMode && isEngineTurn(position.turn)) {
-                setMessage("エンジンの手番です。");
                 return;
             }
             setSelection({ kind: "hand", piece });
@@ -1597,13 +1621,13 @@ export function ShogiMatch({
         async (nodeId: string) => {
             const tree = navigation.tree;
             if (!tree) {
-                setMessage("棋譜ツリーが初期化されていません");
+                setMessage({ text: "棋譜ツリーが初期化されていません", type: "error" });
                 return;
             }
 
             const node = tree.nodes.get(nodeId);
             if (!node) {
-                setMessage("指定されたノードが見つかりません");
+                setMessage({ text: "指定されたノードが見つかりません", type: "error" });
                 return;
             }
 
@@ -1629,7 +1653,10 @@ export function ShogiMatch({
                     depth: 20,
                 });
             } catch (error) {
-                setMessage(`解析エラー: ${error instanceof Error ? error.message : String(error)}`);
+                setMessage({
+                    text: `解析エラー: ${error instanceof Error ? error.message : String(error)}`,
+                    type: "error",
+                });
                 setAnalyzingState(ANALYZING_STATE_NONE);
             }
         },
@@ -1678,7 +1705,7 @@ export function ShogiMatch({
             });
 
             if (treeJobs.length === 0) {
-                setMessage("解析対象の手がありません");
+                setMessage({ text: "解析対象の手がありません", type: "warning" });
                 setTimeout(() => setMessage(null), 3000);
                 return;
             }
@@ -1711,8 +1738,6 @@ export function ShogiMatch({
             });
 
             if (branchJobs.length === 0) {
-                setMessage("解析対象の手がありません（すべての手に評価値があります）");
-                setTimeout(() => setMessage(null), 3000);
                 return;
             }
 
@@ -1725,9 +1750,6 @@ export function ShogiMatch({
                 depth: analysisSettings.batchAnalysisDepth,
                 nodeId: job.nodeId,
             }));
-
-            setMessage(`分岐の${jobs.length}手を解析中...`);
-            setTimeout(() => setMessage(null), 2000);
 
             // 並列一括解析を開始
             enginePool.start(jobs);

@@ -1,7 +1,14 @@
 import type { ReactElement } from "react";
 import { Button } from "../../button";
-import type { GameMode } from "../types";
+import type { GameMode, Message } from "../types";
 import { PausedModeControls, PlayingModeControls } from "./GameModeControls";
+
+/** メッセージ種類に応じたスタイルクラス */
+const MESSAGE_STYLES: Record<Message["type"], string> = {
+    error: "text-destructive",
+    warning: "text-yellow-600 dark:text-yellow-500",
+    success: "text-green-600 dark:text-green-500",
+};
 
 interface MatchControlsProps {
     /** 平手に戻すボタンのクリックハンドラ */
@@ -25,7 +32,7 @@ interface MatchControlsProps {
     /** 現在のゲームモード */
     gameMode?: GameMode;
     /** メッセージ */
-    message: string | null;
+    message: Message | null;
 }
 
 export function MatchControls({
@@ -125,8 +132,10 @@ export function MatchControls({
                 </div>
             )}
 
-            {/* エラーメッセージ */}
-            {message && <div className="text-destructive text-sm">{message}</div>}
+            {/* メッセージ */}
+            {message && (
+                <div className={`text-sm ${MESSAGE_STYLES[message.type]}`}>{message.text}</div>
+            )}
         </div>
     );
 }

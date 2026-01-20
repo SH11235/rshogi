@@ -105,3 +105,19 @@ export type AnalyzingState =
 
 /** 解析していない状態の定数 */
 export const ANALYZING_STATE_NONE: AnalyzingState = { type: "none" };
+
+/**
+ * メッセージの種類
+ * - 'error': エラーメッセージ（赤）
+ * - 'warning': 警告メッセージ（オレンジ）
+ * - 'success': 成功メッセージ（緑）
+ */
+export type MessageType = "error" | "warning" | "success";
+
+/**
+ * 表示メッセージ
+ */
+export interface Message {
+    text: string;
+    type: MessageType;
+}
