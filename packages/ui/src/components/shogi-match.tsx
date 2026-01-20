@@ -1088,12 +1088,6 @@ export function ShogiMatch({
         [isMatchRunning, position],
     );
 
-    const updateTurnForEdit = (turn: Player) => {
-        if (isMatchRunning) return;
-        const current = positionRef.current;
-        applyEditedPosition({ ...current, turn });
-    };
-
     const placePieceAt = useCallback(
         (square: Square, piece: Piece | null, options?: { fromSquare?: Square }): boolean => {
             const current = positionRef.current;
@@ -2034,7 +2028,6 @@ export function ShogiMatch({
                     onSidesChange={setSides}
                     timeSettings={timeSettings}
                     onTimeSettingsChange={setTimeSettings}
-                    onTurnChange={updateTurnForEdit}
                     uiEngineOptions={uiEngineOptions}
                     settingsLocked={settingsLocked}
                     // クロック表示
@@ -2244,8 +2237,6 @@ export function ShogiMatch({
                                     onSidesChange={setSides}
                                     timeSettings={timeSettings}
                                     onTimeSettingsChange={setTimeSettings}
-                                    currentTurn={position.turn}
-                                    onTurnChange={updateTurnForEdit}
                                     uiEngineOptions={uiEngineOptions}
                                     settingsLocked={settingsLocked}
                                 />

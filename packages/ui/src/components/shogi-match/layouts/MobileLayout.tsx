@@ -100,7 +100,6 @@ interface MobileLayoutProps {
     onSidesChange: (sides: { sente: SideSetting; gote: SideSetting }) => void;
     timeSettings: ClockSettings;
     onTimeSettingsChange: (settings: ClockSettings) => void;
-    onTurnChange: (turn: Player) => void;
     uiEngineOptions: EngineOption[];
     settingsLocked: boolean;
 
@@ -189,7 +188,6 @@ export function MobileLayout({
     onSidesChange,
     timeSettings,
     onTimeSettingsChange,
-    onTurnChange,
     uiEngineOptions,
     settingsLocked,
     clocks,
@@ -495,8 +493,6 @@ export function MobileLayout({
                     onSidesChange={onSidesChange}
                     timeSettings={timeSettings}
                     onTimeSettingsChange={onTimeSettingsChange}
-                    currentTurn={position.turn}
-                    onTurnChange={onTurnChange}
                     uiEngineOptions={uiEngineOptions}
                     settingsLocked={settingsLocked}
                     isMatchRunning={isMatchRunning}
