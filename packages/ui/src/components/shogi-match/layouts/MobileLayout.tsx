@@ -16,12 +16,6 @@ import type { ClockSettings, TickState } from "../hooks/useClockManager";
 import type { DisplaySettings, GameMode, PromotionSelection } from "../types";
 import type { EvalHistory, KifMove as FullKifMove } from "../utils/kifFormat";
 
-// テキストスタイル用Tailwindクラス
-const TEXT_CLASSES = {
-    mutedSecondary: "text-xs text-muted-foreground",
-    moveCount: "text-center text-sm font-semibold text-foreground",
-} as const;
-
 type Selection = { kind: "square"; square: string } | { kind: "hand"; piece: PieceType };
 
 interface MobileLayoutProps {
@@ -206,6 +200,9 @@ export function MobileLayout({
     // 設定BottomSheetの状態
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
+    // 棋譜詳細BottomSheetの状態（評価値グラフ + 棋譜バー）
+    const [isKifuDetailOpen, setIsKifuDetailOpen] = useState(false);
+
     // 手詳細BottomSheetの状態
     const [selectedMoveForDetail, setSelectedMoveForDetail] = useState<FullKifMove | null>(null);
     const [selectedMovePosition, setSelectedMovePosition] = useState<PositionState | null>(null);
@@ -246,42 +243,28 @@ export function MobileLayout({
     const isEditModeActive = isEditMode && !isMatchRunning;
 
     return (
-        <div className="fixed inset-0 flex flex-col gap-2 w-full h-dvh overflow-hidden px-2 bg-background">
-            {/* === ヘッダー: 自然な高さ、縮小しない === */}
-            <header className="flex-shrink-0">
-                {/* ステータス行 */}
-                <div className="flex items-center justify-between w-full py-2 px-2">
-                    <output className={`${TEXT_CLASSES.moveCount} whitespace-nowrap`}>
-                        {moves.length === 0 ? "開始局面" : `${moves.length}手目`}
-                    </output>
-
-                    <output className={`${TEXT_CLASSES.mutedSecondary} whitespace-nowrap`}>
-                        手番:{" "}
-                        <span
-                            className={`font-semibold text-[18px] ${
-                                position.turn === "sente" ? "text-wafuu-shu" : "text-wafuu-ai"
-                            }`}
-                        >
-                            {position.turn === "sente" ? "☗" : "☖"}
-                        </span>
-                    </output>
-
-                    <button
-                        type="button"
-                        onClick={onFlipBoard}
-                        className="flex items-center justify-center w-8 h-8 rounded-md hover:bg-muted"
-                        title="盤面を反転"
-                    >
-                        🔄
-                    </button>
-                </div>
-
-                {/* クロック表示（常に表示、非対局時はグレーアウト） */}
+        <div className="fixed inset-0 flex flex-col gap-1 w-full h-dvh overflow-hidden px-2 bg-background">
+            {/* === ヘッダー: クロック + 手数 + 反転ボタンを1行に統合 === */}
+            <header className="flex-shrink-0 pt-1">
                 <ClockDisplay
                     clocks={clocks}
                     sides={sides}
                     isRunning={isMatchRunning}
-                    className="py-1"
+                    centerContent={
+                        <>
+                            <span className="text-xs text-muted-foreground tabular-nums">
+                                {moves.length === 0 ? "開始" : `${moves.length}手`}
+                            </span>
+                            <button
+                                type="button"
+                                onClick={onFlipBoard}
+                                className="flex items-center justify-center w-6 h-6 rounded hover:bg-muted text-sm"
+                                title="盤面を反転"
+                            >
+                                🔄
+                            </button>
+                        </>
+                    }
                 />
             </header>
 
@@ -318,12 +301,12 @@ export function MobileLayout({
             <footer className="flex-1 flex flex-col min-h-0 pb-[env(safe-area-inset-bottom)]">
                 {gameMode === "playing" ? (
                     /* 対局モード: 1行棋譜 + 停止・投了・待ったボタン */
-                    <div className="flex flex-col gap-2 flex-shrink-0">
+                    <div className="flex flex-col gap-1 flex-shrink-0">
                         {kifMoves && kifMoves.length > 0 && (
                             <MobileKifuBar moves={kifMoves} currentPly={currentPly} />
                         )}
                         {onStop && (
-                            <div className="flex justify-center gap-2 py-2">
+                            <div className="flex justify-center gap-2 py-1">
                                 <PlayingModeControls
                                     onStop={onStop}
                                     onResign={onResign}
@@ -335,7 +318,7 @@ export function MobileLayout({
                     </div>
                 ) : gameMode === "paused" ? (
                     /* 一時停止モード: 1行棋譜 + 対局再開・局面編集・投了ボタン */
-                    <div className="flex flex-col gap-2 flex-shrink-0">
+                    <div className="flex flex-col gap-1 flex-shrink-0">
                         {kifMoves && kifMoves.length > 0 && (
                             <MobileKifuBar
                                 moves={kifMoves}
@@ -348,7 +331,7 @@ export function MobileLayout({
                             />
                         )}
                         {onStart && (
-                            <div className="flex justify-center gap-2 py-2">
+                            <div className="flex justify-center gap-2 py-1">
                                 <PausedModeControls
                                     onResume={onStart}
                                     onEnterEditMode={onEnterEditMode}
@@ -359,7 +342,7 @@ export function MobileLayout({
                     </div>
                 ) : isReviewMode && totalPly === 0 ? (
                     /* 対局準備モード: 開始ボタンのみ（棋譜がまだない状態） */
-                    <div className="flex justify-center gap-3 py-4 flex-shrink-0">
+                    <div className="flex justify-center gap-2 py-2 flex-shrink-0">
                         {onStart && (
                             <button
                                 type="button"
@@ -371,58 +354,41 @@ export function MobileLayout({
                         )}
                     </div>
                 ) : isReviewMode ? (
-                    /* 検討モード: 評価値グラフ + ナビゲーション + 棋譜バー */
-                    <div className="flex flex-col h-full min-h-0">
-                        {/* 評価値グラフ + 現在の評価値: 縮小可能 */}
-                        <div className="flex-shrink min-h-[60px] px-2 overflow-hidden">
-                            <div className="flex items-center gap-2 mb-1">
-                                <span className="text-xs text-muted-foreground">評価値:</span>
-                                <span className="text-sm font-mono tabular-nums">
-                                    {evalMate !== undefined
-                                        ? evalMate > 0
-                                            ? `詰み${evalMate}手`
-                                            : `詰まされ${Math.abs(evalMate)}手`
-                                        : evalCp !== undefined
-                                          ? `${evalCp > 0 ? "+" : ""}${(evalCp / 100).toFixed(1)}`
-                                          : "-"}
-                                </span>
-                            </div>
-                            <EvalGraph
-                                evalHistory={evalHistory}
-                                currentPly={currentPly}
-                                compact
-                                height={50}
-                            />
+                    /* 検討モード: 評価値 + ナビゲーション + 詳細ボタン（コンパクト） */
+                    <div className="flex flex-col gap-1 flex-shrink-0">
+                        {/* 現在の評価値（コンパクト表示） */}
+                        <div className="flex items-center justify-center gap-2 text-sm">
+                            <span className="text-muted-foreground">評価:</span>
+                            <span className="font-mono tabular-nums">
+                                {evalMate !== undefined
+                                    ? evalMate > 0
+                                        ? `詰み${evalMate}手`
+                                        : `詰まされ${Math.abs(evalMate)}手`
+                                    : evalCp !== undefined
+                                      ? `${evalCp > 0 ? "+" : ""}${(evalCp / 100).toFixed(1)}`
+                                      : "-"}
+                            </span>
+                            {/* 詳細ボタン */}
+                            <button
+                                type="button"
+                                onClick={() => setIsKifuDetailOpen(true)}
+                                className="px-2 py-0.5 text-xs bg-muted rounded hover:bg-muted/80 active:scale-95 transition-all"
+                            >
+                                📊 詳細
+                            </button>
                         </div>
 
-                        {/* ナビゲーションボタン: 縮小しない */}
+                        {/* ナビゲーションボタン */}
                         {onBack && onForward && onToStart && onToEnd && (
-                            <div className="flex-shrink-0 mt-1">
-                                <MobileNavigation
-                                    currentPly={currentPly}
-                                    totalPly={totalPly}
-                                    onBack={onBack}
-                                    onForward={onForward}
-                                    onToStart={onToStart}
-                                    onToEnd={onToEnd}
-                                    onSettingsClick={() => setIsSettingsOpen(true)}
-                                />
-                            </div>
-                        )}
-
-                        {/* 簡易棋譜表示: 縮小可能 */}
-                        {kifMoves && kifMoves.length > 0 && (
-                            <div className="flex-shrink min-h-[36px] mt-1">
-                                <MobileKifuBar
-                                    moves={kifMoves}
-                                    currentPly={currentPly}
-                                    onPlySelect={
-                                        fullKifMoves && positionHistory
-                                            ? handlePlySelectWithDetail
-                                            : onPlySelect
-                                    }
-                                />
-                            </div>
+                            <MobileNavigation
+                                currentPly={currentPly}
+                                totalPly={totalPly}
+                                onBack={onBack}
+                                onForward={onForward}
+                                onToStart={onToStart}
+                                onToEnd={onToEnd}
+                                onSettingsClick={() => setIsSettingsOpen(true)}
+                            />
                         )}
                     </div>
                 ) : (
@@ -464,7 +430,7 @@ export function MobileLayout({
                 <button
                     type="button"
                     onClick={() => setIsSettingsOpen(true)}
-                    className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] right-4 w-10 h-10 rounded-full bg-muted/80 backdrop-blur-sm border border-border/50 shadow-md flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted active:scale-95 transition-all z-40"
+                    className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] right-4 w-9 h-9 rounded-full bg-background/60 backdrop-blur-sm border border-border/30 shadow-sm flex items-center justify-center text-muted-foreground/70 hover:text-muted-foreground hover:bg-background/80 active:scale-95 transition-all z-40"
                     aria-label="対局設定を開く"
                 >
                     <svg
@@ -531,6 +497,56 @@ export function MobileLayout({
                 onPreview={onPreviewPv}
                 isOnMainLine={isOnMainLine}
             />
+
+            {/* 棋譜詳細BottomSheet（評価値グラフ + 棋譜バー） */}
+            <BottomSheet
+                isOpen={isKifuDetailOpen}
+                onClose={() => setIsKifuDetailOpen(false)}
+                title="棋譜詳細"
+                height="half"
+            >
+                <div className="flex flex-col gap-3 px-2">
+                    {/* 評価値グラフ */}
+                    <div>
+                        <div className="flex items-center gap-2 mb-2">
+                            <span className="text-sm text-muted-foreground">評価値グラフ</span>
+                            <span className="text-sm font-mono tabular-nums">
+                                {evalMate !== undefined
+                                    ? evalMate > 0
+                                        ? `詰み${evalMate}手`
+                                        : `詰まされ${Math.abs(evalMate)}手`
+                                    : evalCp !== undefined
+                                      ? `${evalCp > 0 ? "+" : ""}${(evalCp / 100).toFixed(1)}`
+                                      : "-"}
+                            </span>
+                        </div>
+                        <EvalGraph
+                            evalHistory={evalHistory}
+                            currentPly={currentPly}
+                            compact
+                            height={80}
+                        />
+                    </div>
+
+                    {/* 棋譜バー */}
+                    {kifMoves && kifMoves.length > 0 && (
+                        <div>
+                            <div className="text-sm text-muted-foreground mb-2">棋譜</div>
+                            <MobileKifuBar
+                                moves={kifMoves}
+                                currentPly={currentPly}
+                                onPlySelect={(ply) => {
+                                    if (fullKifMoves && positionHistory) {
+                                        handlePlySelectWithDetail(ply);
+                                    } else {
+                                        onPlySelect?.(ply);
+                                    }
+                                }}
+                            />
+                        </div>
+                    )}
+                </div>
+            </BottomSheet>
         </div>
     );
 }

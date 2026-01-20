@@ -159,26 +159,6 @@ export function EvalGraph({
         return segments;
     }, [evalHistory, graphHeight, scaleMax]);
 
-    // ドット表示用のポイント（評価値がある手のみ）
-    const dots = useMemo(() => {
-        if (evalHistory.length === 0) return [];
-
-        const maxPly = Math.max(evalHistory.length - 1, 1);
-
-        return evalHistory
-            .map((entry, index) => {
-                const hasValue = entry.evalCp !== null || entry.evalMate !== null;
-                if (!hasValue) return null;
-
-                const x = (index / maxPly) * 100;
-                const y =
-                    padding.top +
-                    evalToYWithScale(entry.evalCp, entry.evalMate, graphHeight, scaleMax);
-                return { x, y, index };
-            })
-            .filter((dot): dot is { x: number; y: number; index: number } => dot !== null);
-    }, [evalHistory, graphHeight, scaleMax]);
-
     // 現在位置のマーカー
     const currentMarker = useMemo(() => {
         if (currentPly < 0 || currentPly >= evalHistory.length) return null;
@@ -307,24 +287,16 @@ export function EvalGraph({
                     />
                 ))}
 
-                {/* 各ポイントにドット表示 */}
-                {dots.map((dot) => (
-                    <circle
-                        key={`dot-${dot.index}`}
-                        cx={dot.x}
-                        cy={dot.y}
-                        r="1.5"
-                        fill="hsl(var(--wafuu-shu, 350 80% 45%))"
-                    />
-                ))}
-
-                {/* 現在位置マーカー */}
+                {/* 現在位置マーカー（縦線） */}
                 {currentMarker && (
-                    <circle
-                        cx={currentMarker.x}
-                        cy={currentMarker.y}
-                        r="4"
-                        fill="hsl(var(--primary, 210 100% 50%))"
+                    <line
+                        x1={currentMarker.x}
+                        y1={padding.top}
+                        x2={currentMarker.x}
+                        y2={padding.top + graphHeight}
+                        stroke="hsl(var(--primary, 210 100% 50%))"
+                        strokeWidth="2"
+                        vectorEffect="non-scaling-stroke"
                     />
                 )}
             </svg>
@@ -469,24 +441,16 @@ export function EvalGraph({
                 />
             ))}
 
-            {/* 各ポイントにドット表示 */}
-            {dots.map((dot) => (
-                <circle
-                    key={`dot-${dot.index}`}
-                    cx={dot.x}
-                    cy={dot.y}
-                    r="1.5"
-                    fill="hsl(var(--wafuu-shu))"
-                />
-            ))}
-
-            {/* 現在位置マーカー */}
+            {/* 現在位置マーカー（縦線） */}
             {currentMarker && (
-                <circle
-                    cx={currentMarker.x}
-                    cy={currentMarker.y}
-                    r="4"
-                    fill="hsl(var(--primary))"
+                <line
+                    x1={currentMarker.x}
+                    y1={padding.top}
+                    x2={currentMarker.x}
+                    y2={padding.top + graphHeight}
+                    stroke="hsl(var(--primary))"
+                    strokeWidth="2"
+                    vectorEffect="non-scaling-stroke"
                 />
             )}
         </svg>

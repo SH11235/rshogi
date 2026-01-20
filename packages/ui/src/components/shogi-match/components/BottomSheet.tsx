@@ -17,8 +17,8 @@ interface BottomSheetProps {
 
 const heightClasses = {
     half: "h-[50vh]",
-    full: "h-[90vh]",
-    auto: "max-h-[90vh]",
+    full: "h-[85vh]",
+    auto: "max-h-[85vh]",
 } as const;
 
 /**
