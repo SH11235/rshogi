@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EngineEvent, EngineInfoEvent, SkillLevelSettings } from "./index";
 import {
     createMockEngineClient,
-    detectSkillPreset,
     normalizeSkillLevelSettings,
     SKILL_LEVEL_MAX,
     SKILL_LEVEL_MIN,
@@ -265,37 +264,5 @@ describe("normalizeSkillLevelSettings", () => {
     it("skillLevel が上限超えの場合は最大値にクランプ", () => {
         const result = normalizeSkillLevelSettings({ skillLevel: 100 });
         expect(result.skillLevel).toBe(SKILL_LEVEL_MAX);
-    });
-});
-
-describe("detectSkillPreset", () => {
-    it("skillLevel=2 は beginner プリセットを返す", () => {
-        const result = detectSkillPreset({ skillLevel: 2 });
-        expect(result).toBe("beginner");
-    });
-
-    it("skillLevel=10 は intermediate プリセットを返す", () => {
-        const result = detectSkillPreset({ skillLevel: 10 });
-        expect(result).toBe("intermediate");
-    });
-
-    it("skillLevel=16 は advanced プリセットを返す", () => {
-        const result = detectSkillPreset({ skillLevel: 16 });
-        expect(result).toBe("advanced");
-    });
-
-    it("skillLevel=20 は professional プリセットを返す", () => {
-        const result = detectSkillPreset({ skillLevel: 20 });
-        expect(result).toBe("professional");
-    });
-
-    it("プリセットに一致しない skillLevel は custom を返す", () => {
-        const result = detectSkillPreset({ skillLevel: 5 });
-        expect(result).toBe("custom");
-    });
-
-    it("範囲外の skillLevel は custom を返す", () => {
-        expect(detectSkillPreset({ skillLevel: -1 })).toBe("custom");
-        expect(detectSkillPreset({ skillLevel: 21 })).toBe("custom");
     });
 });

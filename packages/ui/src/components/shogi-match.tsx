@@ -21,8 +21,7 @@ import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ShogiBoardCell } from "./shogi-board";
 import { ShogiBoard } from "./shogi-board";
-import { ClockDisplayPanel } from "./shogi-match/components/ClockDisplayPanel";
-import { EditModePanel } from "./shogi-match/components/EditModePanel";
+import { ClockDisplay } from "./shogi-match/components/ClockDisplay";
 import { EngineLogsPanel } from "./shogi-match/components/EngineLogsPanel";
 import { EvalPanel } from "./shogi-match/components/EvalPanel";
 import { GameResultDialog } from "./shogi-match/components/GameResultDialog";
@@ -35,7 +34,9 @@ import {
     MatchSettingsPanel,
     type SideSetting,
 } from "./shogi-match/components/MatchSettingsPanel";
+import { MoveDetailPanel } from "./shogi-match/components/MoveDetailPanel";
 import { PvPreviewDialog } from "./shogi-match/components/PvPreviewDialog";
+import { SettingsModal } from "./shogi-match/components/SettingsModal";
 import { applyDropResult, DragGhost, type DropResult, usePieceDnd } from "./shogi-match/dnd";
 
 // EngineOption 型を外部に再エクスポート
@@ -58,6 +59,7 @@ import {
     DEFAULT_DISPLAY_SETTINGS,
     type DisplaySettings,
     type GameMode,
+    type Message,
     type PromotionSelection,
 } from "./shogi-match/types";
 import {
@@ -72,7 +74,7 @@ import {
     getAllBranches,
 } from "./shogi-match/utils/branchTreeUtils";
 import { isPromotable, PIECE_CAP, PIECE_LABELS } from "./shogi-match/utils/constants";
-import { exportToKifString } from "./shogi-match/utils/kifFormat";
+import { exportToKifString, type KifMove } from "./shogi-match/utils/kifFormat";
 import { type KifMoveData, parseSfen } from "./shogi-match/utils/kifParser";
 import { LegalMoveCache } from "./shogi-match/utils/legalMoveCache";
 import { determinePromotion } from "./shogi-match/utils/promotionLogic";
@@ -111,9 +113,6 @@ const TEXT_CLASSES = {
     mutedSecondary: "text-xs text-muted-foreground",
     moveCount: "text-center text-sm font-semibold text-foreground my-2",
 } as const;
-
-const deleteHintClasses =
-    "absolute top-2 right-2 px-2 py-1 rounded-full border border-dashed border-[hsl(var(--wafuu-border))] bg-[hsl(var(--wafuu-washi-warm))] text-[hsl(var(--wafuu-sumi))] text-[11px] font-semibold tracking-wide pointer-events-none shadow-[0_6px_12px_rgba(0,0,0,0.08)]";
 
 // 持ち駒表示セクションコンポーネント
 interface PlayerHandSectionProps {
@@ -234,10 +233,9 @@ export function ShogiMatch({
     const [lastMove, setLastMove] = useState<LastMove | undefined>(undefined);
     const [selection, setSelection] = useState<Selection | null>(null);
     const [promotionSelection, setPromotionSelection] = useState<PromotionSelection | null>(null);
-    const [message, setMessage] = useState<string | null>(null);
+    const [message, setMessage] = useState<Message | null>(null);
     const [gameResult, setGameResult] = useState<GameResult | null>(null);
     const [showResultDialog, setShowResultDialog] = useState(false);
-    const [editMessage, setEditMessage] = useState<string | null>(null);
     const [flipBoard, setFlipBoard] = useState(false);
     const [timeSettings, setTimeSettings] = useLocalStorage<ClockSettings>(
         "shogi-match-time-settings",
@@ -248,9 +246,10 @@ export function ShogiMatch({
     );
     const [isMatchRunning, setIsMatchRunning] = useState(false);
     const [isEditMode, setIsEditMode] = useState(true);
-    // 検討モード: 編集モードでも対局中でもない状態
+    const [isPaused, setIsPaused] = useState(false);
+    // 検討モード: 編集モードでも対局中でも一時停止中でもない状態
     // 自由に棋譜を閲覧し、分岐を作成できる
-    const isReviewMode = !isEditMode && !isMatchRunning;
+    const isReviewMode = !isEditMode && !isMatchRunning && !isPaused;
     const [editOwner, setEditOwner] = useState<Player>("sente");
     const [editPieceType, setEditPieceType] = useState<PieceType | null>(null);
     const [editPromoted, setEditPromoted] = useState(false);
@@ -259,8 +258,6 @@ export function ShogiMatch({
     const [startSfen, setStartSfen] = useState<string>("startpos");
     // TODO: 将来的に局面編集機能の強化で使用予定
     const [_basePosition, setBasePosition] = useState<PositionState | null>(null);
-    const [isEditPanelOpen, setIsEditPanelOpen] = useState(false);
-    const [isSettingsPanelOpen, setIsSettingsPanelOpen] = useState(false);
     const [displaySettings, setDisplaySettings] = useLocalStorage<DisplaySettings>(
         "shogi-display-settings",
         DEFAULT_DISPLAY_SETTINGS,
@@ -307,6 +304,13 @@ export function ShogiMatch({
     } | null>(null);
     // 選択中の分岐ノードID（キーボードナビゲーション用）
     const [selectedBranchNodeId, setSelectedBranchNodeId] = useState<string | null>(null);
+    // 選択中の手の詳細（右パネル表示用）
+    const [selectedMoveDetail, setSelectedMoveDetail] = useState<{
+        move: KifMove;
+        position: PositionState;
+    } | null>(null);
+    // 設定モーダルの表示状態
+    const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
 
     // positionRef を先に定義（コールバックで使用するため）
     const positionRef = useRef<PositionState>(position);
@@ -407,8 +411,8 @@ export function ShogiMatch({
     // endMatch のための ref（循環依存を回避）
     const endMatchRef = useRef<((result: GameResult) => Promise<void>) | null>(null);
 
-    const handleClockError = useCallback((message: string) => {
-        setMessage(message);
+    const handleClockError = useCallback((text: string) => {
+        setMessage({ text, type: "error" });
     }, []);
 
     const stopAllEnginesRef = useRef<() => Promise<void>>(async () => {});
@@ -452,9 +456,10 @@ export function ShogiMatch({
                 await stopAllEnginesRef.current();
             } catch (error) {
                 console.error("エンジン停止に失敗しました:", error);
-                setMessage(
-                    `対局終了処理でエンジン停止に失敗しました: ${String(error ?? "unknown")}`,
-                );
+                setMessage({
+                    text: `対局終了処理でエンジン停止に失敗しました: ${String(error ?? "unknown")}`,
+                    type: "error",
+                });
             }
         },
         [stopTicking],
@@ -660,7 +665,10 @@ export function ShogiMatch({
                     }
                 } catch (error) {
                     if (!cancelled) {
-                        setMessage(`局面のSFEN変換に失敗しました: ${String(error)}`);
+                        setMessage({
+                            text: `局面のSFEN変換に失敗しました: ${String(error)}`,
+                            type: "error",
+                        });
                     }
                 }
                 // 棋譜ナビゲーションを正しい初期局面でリセット
@@ -670,7 +678,10 @@ export function ShogiMatch({
                 }
             } catch (error) {
                 if (!cancelled) {
-                    setMessage(`初期局面の取得に失敗しました: ${String(error)}`);
+                    setMessage({
+                        text: `初期局面の取得に失敗しました: ${String(error)}`,
+                        type: "error",
+                    });
                 }
             }
         };
@@ -692,29 +703,43 @@ export function ShogiMatch({
             setStartSfen(sfen);
             return sfen;
         } catch (error) {
-            setMessage(`局面のSFEN変換に失敗しました: ${String(error)}`);
+            setMessage({ text: `局面のSFEN変換に失敗しました: ${String(error)}`, type: "error" });
             throw error;
         }
     }, []);
 
     const pauseAutoPlay = async () => {
         setIsMatchRunning(false);
-        setIsEditMode(true); // 編集モードに戻す（局面調整→再開を可能に）
+        setIsPaused(true); // 一時停止モードに（棋譜を保持）
         stopTicking();
         await stopAllEngines();
+    };
+
+    /** 一時停止中から編集モードに移行 */
+    const enterEditModeFromPaused = () => {
+        setIsPaused(false);
+        setIsEditMode(true);
     };
 
     const resumeAutoPlay = async () => {
         matchEndedRef.current = false;
         if (!positionReady) return;
+
+        // 一時停止からの再開：棋譜を保持したまま再開
+        if (isPaused) {
+            setIsPaused(false);
+            setIsMatchRunning(true);
+            turnStartTimeRef.current = Date.now();
+            startTicking(position.turn);
+            return;
+        }
+
+        // 編集モードからの再開：棋譜をリセットして新しい対局を開始
         if (isEditMode) {
             await finalizeEditedPosition();
-            // 対局開始時に編集モードを終了し、パネルを閉じる
+            // 対局開始時に編集モードを終了
             setIsEditMode(false);
-            setIsEditPanelOpen(false);
         }
-        // 対局開始時に設定パネルを閉じる
-        setIsSettingsPanelOpen(false);
         // 盤面セクションにスクロール
         setTimeout(() => {
             boardSectionRef.current?.scrollIntoView({
@@ -736,14 +761,18 @@ export function ShogiMatch({
         if (isEditMode) {
             await finalizeEditedPosition();
             setIsEditMode(false);
-            setIsEditPanelOpen(false);
         }
-        setIsSettingsPanelOpen(false);
         // isMatchRunningはfalseのままでisReviewModeになる
     };
 
     /** 現在のゲームモードを計算 */
-    const gameMode: GameMode = isEditMode ? "editing" : isMatchRunning ? "playing" : "reviewing";
+    const gameMode: GameMode = isEditMode
+        ? "editing"
+        : isMatchRunning
+          ? "playing"
+          : isPaused
+            ? "paused"
+            : "reviewing";
 
     const finalizeEditedPosition = async () => {
         if (isMatchRunning) return;
@@ -757,9 +786,12 @@ export function ShogiMatch({
             movesRef.current = [];
             legalCache.clear();
             setIsEditMode(false);
-            setEditMessage("局面を確定しました。対局開始でこの局面から進行します。");
+            setMessage({
+                text: "局面を確定しました。対局開始でこの局面から進行します。",
+                type: "success",
+            });
         } catch {
-            setEditMessage("局面の確定に失敗しました。");
+            setMessage({ text: "局面の確定に失敗しました。", type: "error" });
         }
     };
 
@@ -782,9 +814,8 @@ export function ShogiMatch({
             legalCache.clear();
             // 編集モードに移行
             setIsEditMode(true);
-            setEditMessage("局面編集モードに戻りました。駒をドラッグして編集できます。");
         } catch {
-            setEditMessage("編集モードへの移行に失敗しました。");
+            setMessage({ text: "編集モードへの移行に失敗しました。", type: "error" });
         }
     }, [isMatchRunning, navigation, legalCache, refreshStartSfen]);
 
@@ -872,7 +903,7 @@ export function ShogiMatch({
             legalCache.clear();
             turnStartTimeRef.current = Date.now();
         } catch (error) {
-            setMessage(`平手初期化に失敗しました: ${String(error)}`);
+            setMessage({ text: `平手初期化に失敗しました: ${String(error)}`, type: "error" });
         }
     }, [navigation, resetClocks, stopAllEngines, legalCache.clear]);
 
@@ -925,7 +956,7 @@ export function ShogiMatch({
                 if (editVersionRef.current !== currentVersion) {
                     return;
                 }
-                setEditMessage("局面の適用に失敗しました。");
+                setMessage({ text: "局面の適用に失敗しました。", type: "error" });
             }
         },
         [navigation, legalCache, stopTicking, refreshStartSfen],
@@ -938,7 +969,7 @@ export function ShogiMatch({
             const piece = current.board[square];
             if (!piece) return;
             if (!isPromotable(piece.type)) {
-                setEditMessage(`${PIECE_LABELS[piece.type]}は成れません。`);
+                setMessage({ text: `${PIECE_LABELS[piece.type]}は成れません。`, type: "error" });
                 return;
             }
 
@@ -958,7 +989,7 @@ export function ShogiMatch({
 
             const applied = applyDropResult(result, positionRef.current);
             if (!applied.ok) {
-                setMessage(applied.error ?? "ドロップに失敗しました");
+                setMessage({ text: applied.error ?? "ドロップに失敗しました", type: "error" });
                 return;
             }
 
@@ -982,11 +1013,6 @@ export function ShogiMatch({
             piece: { owner: "sente" | "gote"; type: string; promoted?: boolean },
             e: React.PointerEvent,
         ) => {
-            // 編集パネルが閉じていたら自動的に開く
-            if (!isEditPanelOpen) {
-                setIsEditPanelOpen(true);
-            }
-
             const origin = { type: "board" as const, square: square as Square };
             const payload = {
                 owner: piece.owner as Player,
@@ -996,17 +1022,12 @@ export function ShogiMatch({
 
             dndController.startDrag(origin, payload, e);
         },
-        [dndController, isEditPanelOpen],
+        [dndController],
     );
 
     // DnD ドラッグ開始ハンドラ（持ち駒）
     const handleHandPiecePointerDown = useCallback(
         (owner: Player, pieceType: PieceType, e: React.PointerEvent) => {
-            // 編集パネルが閉じていたら自動的に開く
-            if (!isEditPanelOpen) {
-                setIsEditPanelOpen(true);
-            }
-
             // 持ち駒が0個の場合はストック扱い（編集モード時、無限供給）
             const count = position?.hands[owner][pieceType] ?? 0;
             const origin =
@@ -1021,7 +1042,7 @@ export function ShogiMatch({
 
             dndController.startDrag(origin, payload, e);
         },
-        [dndController, position, isEditPanelOpen],
+        [dndController, position],
     );
 
     const handlePieceTogglePromote = useCallback(
@@ -1076,12 +1097,6 @@ export function ShogiMatch({
         [isMatchRunning, position],
     );
 
-    const updateTurnForEdit = (turn: Player) => {
-        if (isMatchRunning) return;
-        const current = positionRef.current;
-        applyEditedPosition({ ...current, turn });
-    };
-
     const placePieceAt = useCallback(
         (square: Square, piece: Piece | null, options?: { fromSquare?: Square }): boolean => {
             const current = positionRef.current;
@@ -1119,13 +1134,14 @@ export function ShogiMatch({
             });
             const nextCount = countsBefore[piece.owner][baseType] + 1;
             if (nextCount > PIECE_CAP[baseType]) {
-                setEditMessage(
-                    `${piece.owner === "sente" ? "先手" : "後手"}の${PIECE_LABELS[baseType]}は最大${PIECE_CAP[baseType]}枚までです`,
-                );
+                setMessage({
+                    text: `${piece.owner === "sente" ? "先手" : "後手"}の${PIECE_LABELS[baseType]}は最大${PIECE_CAP[baseType]}枚までです`,
+                    type: "warning",
+                });
                 return false;
             }
             if (piece.type === "K" && countsBefore[piece.owner][baseType] >= PIECE_CAP.K) {
-                setEditMessage("玉はそれぞれ1枚まで配置できます。");
+                setMessage({ text: "玉はそれぞれ1枚まで配置できます。", type: "warning" });
                 return false;
             }
 
@@ -1147,12 +1163,7 @@ export function ShogiMatch({
             setMessage(null);
             if (isEditMode) {
                 if (!positionReady) {
-                    setMessage("局面を読み込み中です。");
                     return;
-                }
-                // 編集パネルが閉じていたら自動的に開く
-                if (!isEditPanelOpen) {
-                    setIsEditPanelOpen(true);
                 }
                 const sq = square as Square;
 
@@ -1200,8 +1211,7 @@ export function ShogiMatch({
                     return;
                 }
 
-                // 空マスをクリックした場合
-                setEditMessage("配置する駒を選ぶか、移動する駒をクリックしてください。");
+                // 空マスをクリックした場合は何もしない
                 return;
             }
 
@@ -1209,7 +1219,6 @@ export function ShogiMatch({
             // 自由に棋譜を閲覧し、任意の局面から分岐を作成できる
             if (isReviewMode) {
                 if (!positionReady) {
-                    setMessage("局面を読み込み中です。");
                     return;
                 }
 
@@ -1237,12 +1246,15 @@ export function ShogiMatch({
                     const moveStr = `${selection.piece}*${square}`;
                     const legal = await getLegalSet();
                     if (legal && !legal.has(moveStr)) {
-                        setMessage("合法手ではありません");
+                        setMessage({ text: "合法手ではありません", type: "error" });
                         return;
                     }
                     const result = applyMoveWithState(position, moveStr, { validateTurn: false });
                     if (!result.ok) {
-                        setMessage(result.error ?? "持ち駒を打てませんでした");
+                        setMessage({
+                            text: result.error ?? "持ち駒を打てませんでした",
+                            type: "error",
+                        });
                         return;
                     }
                     applyMoveForReview(result.next, moveStr, result.lastMove);
@@ -1268,14 +1280,17 @@ export function ShogiMatch({
                     if (promotion === "none") {
                         const moveStr = `${from}${to}`;
                         if (!legal.has(moveStr)) {
-                            setMessage("合法手ではありません");
+                            setMessage({ text: "合法手ではありません", type: "error" });
                             return;
                         }
                         const result = applyMoveWithState(position, moveStr, {
                             validateTurn: false,
                         });
                         if (!result.ok) {
-                            setMessage(result.error ?? "指し手を適用できませんでした");
+                            setMessage({
+                                text: result.error ?? "指し手を適用できませんでした",
+                                type: "error",
+                            });
                             return;
                         }
                         applyMoveForReview(result.next, moveStr, result.lastMove);
@@ -1288,7 +1303,10 @@ export function ShogiMatch({
                             validateTurn: false,
                         });
                         if (!result.ok) {
-                            setMessage(result.error ?? "指し手を適用できませんでした");
+                            setMessage({
+                                text: result.error ?? "指し手を適用できませんでした",
+                                type: "error",
+                            });
                             return;
                         }
                         applyMoveForReview(result.next, moveStr, result.lastMove);
@@ -1302,7 +1320,10 @@ export function ShogiMatch({
                             validateTurn: false,
                         });
                         if (!result.ok) {
-                            setMessage(result.error ?? "指し手を適用できませんでした");
+                            setMessage({
+                                text: result.error ?? "指し手を適用できませんでした",
+                                type: "error",
+                            });
                             return;
                         }
                         applyMoveForReview(result.next, moveStr, result.lastMove);
@@ -1310,7 +1331,7 @@ export function ShogiMatch({
                     }
 
                     if (!piece) {
-                        setMessage("駒が見つかりません");
+                        setMessage({ text: "駒が見つかりません", type: "error" });
                         return;
                     }
                     setPromotionSelection({ from: from as Square, to: to as Square, piece });
@@ -1320,12 +1341,14 @@ export function ShogiMatch({
             }
 
             // ========== 対局モード ==========
+            // 一時停止中は入力をブロック
+            if (isPaused) {
+                return;
+            }
             if (!positionReady) {
-                setMessage("局面を読み込み中です。");
                 return;
             }
             if (isEngineTurn(position.turn)) {
-                setMessage("エンジンの手番です。");
                 return;
             }
 
@@ -1366,12 +1389,15 @@ export function ShogiMatch({
                 if (promotion === "none") {
                     const moveStr = `${from}${to}`;
                     if (!legal.has(moveStr)) {
-                        setMessage("合法手ではありません");
+                        setMessage({ text: "合法手ではありません", type: "error" });
                         return;
                     }
                     const result = applyMoveWithState(position, moveStr, { validateTurn: true });
                     if (!result.ok) {
-                        setMessage(result.error ?? "指し手を適用できませんでした");
+                        setMessage({
+                            text: result.error ?? "指し手を適用できませんでした",
+                            type: "error",
+                        });
                         return;
                     }
                     applyMoveCommon(result.next, moveStr, result.lastMove);
@@ -1383,7 +1409,10 @@ export function ShogiMatch({
                     const moveStr = `${from}${to}+`;
                     const result = applyMoveWithState(position, moveStr, { validateTurn: true });
                     if (!result.ok) {
-                        setMessage(result.error ?? "指し手を適用できませんでした");
+                        setMessage({
+                            text: result.error ?? "指し手を適用できませんでした",
+                            type: "error",
+                        });
                         return;
                     }
                     applyMoveCommon(result.next, moveStr, result.lastMove);
@@ -1396,7 +1425,10 @@ export function ShogiMatch({
                     const moveStr = `${from}${to}+`;
                     const result = applyMoveWithState(position, moveStr, { validateTurn: true });
                     if (!result.ok) {
-                        setMessage(result.error ?? "指し手を適用できませんでした");
+                        setMessage({
+                            text: result.error ?? "指し手を適用できませんでした",
+                            type: "error",
+                        });
                         return;
                     }
                     applyMoveCommon(result.next, moveStr, result.lastMove);
@@ -1405,7 +1437,7 @@ export function ShogiMatch({
 
                 // 通常クリック：成り選択ダイアログを表示
                 if (!piece) {
-                    setMessage("駒が見つかりません");
+                    setMessage({ text: "駒が見つかりません", type: "error" });
                     return;
                 }
                 setPromotionSelection({ from: from as Square, to: to as Square, piece });
@@ -1416,12 +1448,12 @@ export function ShogiMatch({
             const moveStr = `${selection.piece}*${square}`;
             const legal = await getLegalSet();
             if (legal && !legal.has(moveStr)) {
-                setMessage("合法手ではありません");
+                setMessage({ text: "合法手ではありません", type: "error" });
                 return;
             }
             const result = applyMoveWithState(position, moveStr, { validateTurn: true });
             if (!result.ok) {
-                setMessage(result.error ?? "持ち駒を打てませんでした");
+                setMessage({ text: result.error ?? "持ち駒を打てませんでした", type: "error" });
                 return;
             }
             applyMoveCommon(result.next, moveStr, result.lastMove);
@@ -1429,7 +1461,6 @@ export function ShogiMatch({
         [
             isEditMode,
             positionReady,
-            isEditPanelOpen,
             editFromSquare,
             position,
             editTool,
@@ -1437,6 +1468,7 @@ export function ShogiMatch({
             editOwner,
             editPromoted,
             isReviewMode,
+            isPaused,
             promotionSelection,
             selection,
             isEngineTurn,
@@ -1455,7 +1487,7 @@ export function ShogiMatch({
             // 検討モードでは手番チェックをスキップ
             const result = applyMoveWithState(position, moveStr, { validateTurn: !isReviewMode });
             if (!result.ok) {
-                setMessage(result.error ?? "指し手を適用できませんでした");
+                setMessage({ text: result.error ?? "指し手を適用できませんでした", type: "error" });
                 setPromotionSelection(null);
                 setSelection(null);
                 return;
@@ -1473,16 +1505,13 @@ export function ShogiMatch({
     const handleHandSelect = useCallback(
         (piece: PieceType) => {
             if (!positionReady) {
-                setMessage("局面を読み込み中です。");
                 return;
             }
             if (isEditMode) {
-                setMessage("編集モード中は手番入力は無効です。盤面編集パネルを使ってください。");
                 return;
             }
             // 検討モードでは手番の持ち駒を選択可能
             if (!isReviewMode && isEngineTurn(position.turn)) {
-                setMessage("エンジンの手番です。");
                 return;
             }
             setSelection({ kind: "hand", piece });
@@ -1600,13 +1629,13 @@ export function ShogiMatch({
         async (nodeId: string) => {
             const tree = navigation.tree;
             if (!tree) {
-                setMessage("棋譜ツリーが初期化されていません");
+                setMessage({ text: "棋譜ツリーが初期化されていません", type: "error" });
                 return;
             }
 
             const node = tree.nodes.get(nodeId);
             if (!node) {
-                setMessage("指定されたノードが見つかりません");
+                setMessage({ text: "指定されたノードが見つかりません", type: "error" });
                 return;
             }
 
@@ -1632,7 +1661,10 @@ export function ShogiMatch({
                     depth: 20,
                 });
             } catch (error) {
-                setMessage(`解析エラー: ${error instanceof Error ? error.message : String(error)}`);
+                setMessage({
+                    text: `解析エラー: ${error instanceof Error ? error.message : String(error)}`,
+                    type: "error",
+                });
                 setAnalyzingState(ANALYZING_STATE_NONE);
             }
         },
@@ -1681,7 +1713,7 @@ export function ShogiMatch({
             });
 
             if (treeJobs.length === 0) {
-                setMessage("解析対象の手がありません");
+                setMessage({ text: "解析対象の手がありません", type: "warning" });
                 setTimeout(() => setMessage(null), 3000);
                 return;
             }
@@ -1714,8 +1746,6 @@ export function ShogiMatch({
             });
 
             if (branchJobs.length === 0) {
-                setMessage("解析対象の手がありません（すべての手に評価値があります）");
-                setTimeout(() => setMessage(null), 3000);
                 return;
             }
 
@@ -1728,9 +1758,6 @@ export function ShogiMatch({
                 depth: analysisSettings.batchAnalysisDepth,
                 nodeId: job.nodeId,
             }));
-
-            setMessage(`分岐の${jobs.length}手を解析中...`);
-            setTimeout(() => setMessage(null), 2000);
 
             // 並列一括解析を開始
             enginePool.start(jobs);
@@ -1809,6 +1836,18 @@ export function ShogiMatch({
         [positionHistory],
     );
 
+    // 手の詳細を選択するコールバック（右パネル表示用）
+    const handleMoveDetailSelect = useCallback(
+        (move: KifMove | null, pos: PositionState | null) => {
+            if (move && pos) {
+                setSelectedMoveDetail({ move, position: pos });
+            } else {
+                setSelectedMoveDetail(null);
+            }
+        },
+        [],
+    );
+
     // SFENインポート（局面 + 指し手）
     // インポート後は自動的に検討モードに入る
     const importSfen = useCallback(
@@ -1856,8 +1895,6 @@ export function ShogiMatch({
                 // インポート後は自動的に検討モードに入る
                 setIsEditMode(false);
                 setIsMatchRunning(false);
-                setIsEditPanelOpen(false);
-                setIsSettingsPanelOpen(false);
             } catch (error) {
                 throw new Error(`SFENの適用に失敗しました: ${String(error)}`);
             }
@@ -1899,8 +1936,6 @@ export function ShogiMatch({
             // KIFインポート後は自動的に検討モードに入る
             setIsEditMode(false);
             setIsMatchRunning(false);
-            setIsEditPanelOpen(false);
-            setIsSettingsPanelOpen(false);
         },
         [loadMoves],
     );
@@ -2013,12 +2048,12 @@ export function ShogiMatch({
                     onResign={handleResign}
                     onUndo={handleUndo}
                     canUndo={moves.length > 0}
+                    onEnterEditMode={isPaused ? enterEditModeFromPaused : undefined}
                     // 対局設定
                     sides={sides}
                     onSidesChange={setSides}
                     timeSettings={timeSettings}
                     onTimeSettingsChange={setTimeSettings}
-                    onTurnChange={updateTurnForEdit}
                     uiEngineOptions={uiEngineOptions}
                     settingsLocked={settingsLocked}
                     // クロック表示
@@ -2029,16 +2064,23 @@ export function ShogiMatch({
                 />
             ) : (
                 <section className={matchLayoutClasses} style={matchLayoutCssVars}>
-                    <div className="flex gap-4 items-start">
+                    <div className="flex gap-4 items-start min-h-[calc(100dvh-1rem)]">
                         {/* 左列: 将棋盤（サイズ固定） */}
-                        <div className="flex flex-col gap-2 items-center shrink-0">
-                            <div ref={boardSectionRef} className="w-fit relative">
-                                {isDraggingPiece ? (
-                                    <div className={deleteHintClasses}>盤外へドラッグで削除</div>
-                                ) : null}
+                        <div className="flex flex-col gap-2 items-center shrink-0 self-center">
+                            <div
+                                ref={boardSectionRef}
+                                className="w-fit relative flex flex-col gap-2"
+                            >
                                 <div
-                                    className={`mt-2 flex flex-col gap-2 items-center ${isDraggingPiece ? "touch-none" : ""}`}
+                                    className={`flex flex-col gap-2 items-center ${isDraggingPiece ? "touch-none" : ""}`}
                                 >
+                                    {/* 時間管理（将棋盤の上） */}
+                                    <ClockDisplay
+                                        clocks={clocks}
+                                        sides={sides}
+                                        isRunning={isMatchRunning}
+                                    />
+
                                     {/* 盤の上側の持ち駒（通常:後手、反転時:先手） */}
                                     {(() => {
                                         const info = getHandInfo("top");
@@ -2064,15 +2106,13 @@ export function ShogiMatch({
                                                     >
                                                         手番:{" "}
                                                         <span
-                                                            className={`font-semibold text-[15px] ${
+                                                            className={`font-semibold text-[18px] ${
                                                                 position.turn === "sente"
                                                                     ? "text-wafuu-shu"
                                                                     : "text-wafuu-ai"
                                                             }`}
                                                         >
-                                                            {position.turn === "sente"
-                                                                ? "先手"
-                                                                : "後手"}
+                                                            {position.turn === "sente" ? "☗" : "☖"}
                                                         </span>
                                                     </output>
 
@@ -2193,69 +2233,30 @@ export function ShogiMatch({
                                             />
                                         );
                                     })()}
+
+                                    {/* 対局コントロール（盤面の下） */}
+                                    <MatchControls
+                                        onResetToStartpos={handleResetToStartpos}
+                                        onStop={pauseAutoPlay}
+                                        onStart={resumeAutoPlay}
+                                        onStartReview={handleStartReview}
+                                        onEnterEditMode={
+                                            isPaused ? enterEditModeFromPaused : handleEnterEditMode
+                                        }
+                                        onResign={handleResign}
+                                        onUndo={handleUndo}
+                                        canUndo={moves.length > 0}
+                                        isMatchRunning={isMatchRunning}
+                                        gameMode={gameMode}
+                                        message={message}
+                                        onOpenSettings={() => setIsSettingsModalOpen(true)}
+                                    />
                                 </div>
                             </div>
                         </div>
 
-                        {/* 中央列: 操作系パネル（サイズ固定） */}
-                        <div className="flex flex-col gap-2 shrink-0">
-                            <MatchControls
-                                onResetToStartpos={handleResetToStartpos}
-                                onStop={pauseAutoPlay}
-                                onStart={resumeAutoPlay}
-                                onStartReview={handleStartReview}
-                                onEnterEditMode={handleEnterEditMode}
-                                onResign={handleResign}
-                                onUndo={handleUndo}
-                                canUndo={moves.length > 0}
-                                isMatchRunning={isMatchRunning}
-                                gameMode={gameMode}
-                                message={message}
-                            />
-
-                            {gameMode === "editing" && (
-                                <EditModePanel
-                                    isOpen={isEditPanelOpen}
-                                    onOpenChange={setIsEditPanelOpen}
-                                    message={editMessage}
-                                />
-                            )}
-
-                            <MatchSettingsPanel
-                                isOpen={isSettingsPanelOpen}
-                                onOpenChange={setIsSettingsPanelOpen}
-                                sides={sides}
-                                onSidesChange={setSides}
-                                timeSettings={timeSettings}
-                                onTimeSettingsChange={setTimeSettings}
-                                currentTurn={position.turn}
-                                onTurnChange={updateTurnForEdit}
-                                uiEngineOptions={uiEngineOptions}
-                                settingsLocked={settingsLocked}
-                            />
-
-                            <ClockDisplayPanel clocks={clocks} sides={sides} />
-
-                            {/* インポートパネル */}
-                            <KifuImportPanel
-                                onImportSfen={importSfen}
-                                onImportKif={importKif}
-                                positionReady={positionReady}
-                            />
-
-                            {isDevMode && (
-                                <EngineLogsPanel
-                                    eventLogs={eventLogs}
-                                    errorLogs={errorLogs}
-                                    engineErrorDetails={engineErrorDetails}
-                                    onRetry={retryEngine}
-                                    isRetrying={isRetrying}
-                                />
-                            )}
-                        </div>
-
-                        {/* 右列: 棋譜列（EvalPanel + KifuPanel、サイズ固定） */}
-                        <div className="flex flex-col gap-2 shrink-0">
+                        {/* 棋譜列 + 詳細ドロワー */}
+                        <div className="flex flex-col gap-2 shrink-0 pt-16">
                             {/* 評価値グラフパネル（折りたたみ） */}
                             <EvalPanel
                                 evalHistory={evalHistory}
@@ -2264,75 +2265,147 @@ export function ShogiMatch({
                                 defaultOpen={false}
                             />
 
-                            {/* 棋譜パネル（常時表示） */}
-                            <KifuPanel
-                                kifMoves={kifMoves}
-                                currentPly={navigation.state.currentPly}
-                                showEval={displaySettings.showKifuEval}
-                                onShowEvalChange={(show) =>
-                                    setDisplaySettings((prev) => ({
-                                        ...prev,
-                                        showKifuEval: show,
-                                    }))
-                                }
-                                onPlySelect={handlePlySelect}
-                                onCopyKif={handleCopyKif}
-                                navigation={{
-                                    currentPly: navigation.state.currentPly,
-                                    totalPly: navigation.state.totalPly,
-                                    onBack: navigation.goBack,
-                                    onForward: () =>
-                                        navigation.goForward(selectedBranchNodeId ?? undefined),
-                                    onToStart: navigation.goToStart,
-                                    onToEnd: navigation.goToEnd,
-                                    isRewound: navigation.state.isRewound,
-                                    canGoForward: navigation.state.canGoForward,
-                                    branchInfo: navigation.state.hasBranches
-                                        ? {
-                                              hasBranches: true,
-                                              currentIndex: navigation.state.currentBranchIndex,
-                                              count: navigation.state.branchCount,
-                                              onSwitch: navigation.switchBranch,
-                                              onPromoteToMain: navigation.promoteCurrentLine,
-                                          }
-                                        : undefined,
-                                }}
-                                navigationDisabled={isMatchRunning}
-                                branchMarkers={branchMarkers}
-                                positionHistory={positionHistory}
-                                onAddPvAsBranch={handleAddPvAsBranch}
-                                onPreviewPv={handlePreviewPv}
-                                lastAddedBranchInfo={lastAddedBranchInfo}
-                                onLastAddedBranchHandled={() => setLastAddedBranchInfo(null)}
-                                onSelectedBranchChange={setSelectedBranchNodeId}
-                                onAnalyzePly={handleAnalyzePly}
-                                isAnalyzing={isAnalyzing}
-                                analyzingPly={
-                                    analyzingState.type !== "none" ? analyzingState.ply : undefined
-                                }
-                                batchAnalysis={
-                                    batchAnalysis
-                                        ? {
-                                              isRunning: batchAnalysis.isRunning,
-                                              currentIndex: batchAnalysis.currentIndex,
-                                              totalCount: batchAnalysis.totalCount,
-                                              inProgress: batchAnalysis.inProgress,
-                                          }
-                                        : undefined
-                                }
-                                onStartBatchAnalysis={handleStartBatchAnalysis}
-                                onCancelBatchAnalysis={handleCancelBatchAnalysis}
-                                analysisSettings={analysisSettings}
-                                onAnalysisSettingsChange={setAnalysisSettings}
-                                kifuTree={navigation.tree}
-                                onNodeClick={navigation.goToNodeById}
-                                onBranchSwitch={navigation.switchBranchAtNode}
-                                onAnalyzeNode={handleAnalyzeNode}
-                                onAnalyzeBranch={handleAnalyzeBranch}
-                                onStartTreeBatchAnalysis={handleStartTreeBatchAnalysis}
-                                isOnMainLine={navigation.state.isOnMainLine}
-                            />
+                            {/* 棋譜パネル + ドロワー（横並び） */}
+                            <div className="relative flex items-start">
+                                {/* 棋譜パネル（常時表示） */}
+                                <KifuPanel
+                                    kifMoves={kifMoves}
+                                    currentPly={navigation.state.currentPly}
+                                    showEval={displaySettings.showKifuEval}
+                                    onShowEvalChange={(show) =>
+                                        setDisplaySettings((prev) => ({
+                                            ...prev,
+                                            showKifuEval: show,
+                                        }))
+                                    }
+                                    onPlySelect={handlePlySelect}
+                                    onCopyKif={handleCopyKif}
+                                    navigation={{
+                                        currentPly: navigation.state.currentPly,
+                                        totalPly: navigation.state.totalPly,
+                                        onBack: navigation.goBack,
+                                        onForward: () =>
+                                            navigation.goForward(selectedBranchNodeId ?? undefined),
+                                        onToStart: navigation.goToStart,
+                                        onToEnd: navigation.goToEnd,
+                                        isRewound: navigation.state.isRewound,
+                                        canGoForward: navigation.state.canGoForward,
+                                        branchInfo: navigation.state.hasBranches
+                                            ? {
+                                                  hasBranches: true,
+                                                  currentIndex: navigation.state.currentBranchIndex,
+                                                  count: navigation.state.branchCount,
+                                                  onSwitch: navigation.switchBranch,
+                                                  onPromoteToMain: navigation.promoteCurrentLine,
+                                              }
+                                            : undefined,
+                                    }}
+                                    navigationDisabled={isMatchRunning}
+                                    branchMarkers={branchMarkers}
+                                    positionHistory={positionHistory}
+                                    onAddPvAsBranch={handleAddPvAsBranch}
+                                    onPreviewPv={handlePreviewPv}
+                                    lastAddedBranchInfo={lastAddedBranchInfo}
+                                    onLastAddedBranchHandled={() => setLastAddedBranchInfo(null)}
+                                    onSelectedBranchChange={setSelectedBranchNodeId}
+                                    onAnalyzePly={handleAnalyzePly}
+                                    isAnalyzing={isAnalyzing}
+                                    analyzingPly={
+                                        analyzingState.type !== "none"
+                                            ? analyzingState.ply
+                                            : undefined
+                                    }
+                                    batchAnalysis={
+                                        batchAnalysis
+                                            ? {
+                                                  isRunning: batchAnalysis.isRunning,
+                                                  currentIndex: batchAnalysis.currentIndex,
+                                                  totalCount: batchAnalysis.totalCount,
+                                                  inProgress: batchAnalysis.inProgress,
+                                              }
+                                            : undefined
+                                    }
+                                    onStartBatchAnalysis={handleStartBatchAnalysis}
+                                    onCancelBatchAnalysis={handleCancelBatchAnalysis}
+                                    analysisSettings={analysisSettings}
+                                    onAnalysisSettingsChange={setAnalysisSettings}
+                                    kifuTree={navigation.tree}
+                                    onNodeClick={navigation.goToNodeById}
+                                    onBranchSwitch={navigation.switchBranchAtNode}
+                                    onAnalyzeNode={handleAnalyzeNode}
+                                    onAnalyzeBranch={handleAnalyzeBranch}
+                                    onStartTreeBatchAnalysis={handleStartTreeBatchAnalysis}
+                                    isOnMainLine={navigation.state.isOnMainLine}
+                                    onMoveDetailSelect={handleMoveDetailSelect}
+                                />
+
+                                {/* 詳細ドロワー（棋譜パネルの右側にスライドイン） */}
+                                <div
+                                    className={`
+                                        absolute top-0 left-full z-50
+                                        transform transition-transform duration-300 ease-out
+                                        ${selectedMoveDetail ? "translate-x-0" : "-translate-x-full opacity-0 pointer-events-none"}
+                                    `}
+                                >
+                                    <div className="pl-2">
+                                        {selectedMoveDetail && (
+                                            <MoveDetailPanel
+                                                move={selectedMoveDetail.move}
+                                                position={selectedMoveDetail.position}
+                                                onAddBranch={handleAddPvAsBranch}
+                                                onPreview={handlePreviewPv}
+                                                onAnalyze={handleAnalyzePly}
+                                                isAnalyzing={isAnalyzing}
+                                                analyzingPly={
+                                                    analyzingState.type !== "none"
+                                                        ? analyzingState.ply
+                                                        : undefined
+                                                }
+                                                kifuTree={navigation.tree}
+                                                onClose={() => setSelectedMoveDetail(null)}
+                                                isOnMainLine={navigation.state.isOnMainLine}
+                                            />
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
                         </div>
+
+                        {/* 設定モーダル */}
+                        <SettingsModal
+                            isOpen={isSettingsModalOpen}
+                            onClose={() => setIsSettingsModalOpen(false)}
+                        >
+                            <div className="flex flex-col gap-6 min-w-[400px]">
+                                {/* 対局設定 */}
+                                <MatchSettingsPanel
+                                    sides={sides}
+                                    onSidesChange={setSides}
+                                    timeSettings={timeSettings}
+                                    onTimeSettingsChange={setTimeSettings}
+                                    uiEngineOptions={uiEngineOptions}
+                                    settingsLocked={settingsLocked}
+                                />
+
+                                {/* インポート */}
+                                <KifuImportPanel
+                                    onImportSfen={importSfen}
+                                    onImportKif={importKif}
+                                    positionReady={positionReady}
+                                />
+
+                                {/* エンジンログ（開発モード） */}
+                                {isDevMode && (
+                                    <EngineLogsPanel
+                                        eventLogs={eventLogs}
+                                        errorLogs={errorLogs}
+                                        engineErrorDetails={engineErrorDetails}
+                                        onRetry={retryEngine}
+                                        isRetrying={isRetrying}
+                                    />
+                                )}
+                            </div>
+                        </SettingsModal>
                     </div>
                 </section>
             )}

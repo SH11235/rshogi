@@ -1,10 +1,11 @@
-import type { Player } from "@shogi/app-core";
 import type { SkillLevelSettings } from "@shogi/engine-client";
 import { type ReactElement, useEffect, useState } from "react";
 import type { ClockSettings } from "../hooks/useClockManager";
 import type { DisplaySettings, SquareNotation } from "../types";
 import type { EngineOption, SideSetting } from "./MatchSettingsPanel";
 import { SkillLevelSelector } from "./SkillLevelSelector";
+
+type SideKey = "sente" | "gote";
 
 // =============================================================================
 // NumericInput: 文字列ベースの数値入力コンポーネント
@@ -68,8 +69,6 @@ interface MobileSettingsSheetProps {
     onSidesChange: (sides: { sente: SideSetting; gote: SideSetting }) => void;
     timeSettings: ClockSettings;
     onTimeSettingsChange: (settings: ClockSettings) => void;
-    currentTurn: Player;
-    onTurnChange: (turn: Player) => void;
 
     // エンジン情報
     uiEngineOptions: EngineOption[];
@@ -107,8 +106,6 @@ export function MobileSettingsSheet({
     onSidesChange,
     timeSettings,
     onTimeSettingsChange,
-    currentTurn,
-    onTurnChange,
     uiEngineOptions,
     settingsLocked,
     isMatchRunning,
@@ -124,7 +121,7 @@ export function MobileSettingsSheet({
         return `engine:${setting.engineId ?? uiEngineOptions[0]?.id ?? ""}`;
     };
 
-    const handleSelectorChange = (side: Player, value: string) => {
+    const handleSelectorChange = (side: SideKey, value: string) => {
         const currentSetting = sides[side];
         if (value === "human") {
             onSidesChange({
@@ -144,7 +141,7 @@ export function MobileSettingsSheet({
         }
     };
 
-    const handleSkillLevelChange = (side: Player, skillLevel: SkillLevelSettings | undefined) => {
+    const handleSkillLevelChange = (side: SideKey, skillLevel: SkillLevelSettings | undefined) => {
         onSidesChange({
             ...sides,
             [side]: { ...sides[side], skillLevel },
@@ -159,20 +156,6 @@ export function MobileSettingsSheet({
                     <span>対局中は設定を変更できません</span>
                 </div>
             )}
-
-            {/* 手番設定 */}
-            <label className={labelClassName}>
-                <span className="font-medium">手番（開始時）</span>
-                <select
-                    value={currentTurn}
-                    onChange={(e) => onTurnChange(e.target.value as Player)}
-                    disabled={settingsLocked}
-                    className={selectClassName}
-                >
-                    <option value="sente">先手</option>
-                    <option value="gote">後手</option>
-                </select>
-            </label>
 
             {/* 先手/後手設定 */}
             <div className="grid grid-cols-2 gap-3 [&>div]:min-w-0">

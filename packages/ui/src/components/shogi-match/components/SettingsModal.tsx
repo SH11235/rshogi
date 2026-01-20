@@ -1,38 +1,32 @@
+/**
+ * 設定モーダルコンポーネント
+ *
+ * PC版で対局設定とインポート機能をモーダル表示する
+ */
+
 import { cn } from "@shogi/design-system";
 import type { ReactElement, ReactNode } from "react";
 import { useEffect, useRef } from "react";
 
-interface BottomSheetProps {
-    /** シートを開くかどうか */
+interface SettingsModalProps {
+    /** モーダルを開くかどうか */
     isOpen: boolean;
     /** 閉じる時のコールバック */
     onClose: () => void;
-    /** タイトル */
-    title: string;
     /** コンテンツ */
     children: ReactNode;
-    /** 高さ: 'half' | 'full' | 'auto' */
-    height?: "half" | "full" | "auto";
 }
 
-const heightClasses = {
-    half: "h-[50vh]",
-    full: "h-[85vh]",
-    auto: "max-h-[85vh]",
-} as const;
-
 /**
- * スマホ向けボトムシートコンポーネント
- * 設定パネルなどを下からスライドして表示する
+ * PC向け設定モーダル
+ * 画面中央に表示される
  */
-export function BottomSheet({
+export function SettingsModal({
     isOpen,
     onClose,
-    title,
     children,
-    height = "auto",
-}: BottomSheetProps): ReactElement | null {
-    const sheetRef = useRef<HTMLDivElement>(null);
+}: SettingsModalProps): ReactElement | null {
+    const modalRef = useRef<HTMLDivElement>(null);
     const closeButtonRef = useRef<HTMLButtonElement>(null);
 
     // ESCキーで閉じる
@@ -49,18 +43,18 @@ export function BottomSheet({
         return () => document.removeEventListener("keydown", handleKeyDown);
     }, [isOpen, onClose]);
 
-    // フォーカストラップ（アクセシビリティ対応）
+    // フォーカストラップ
     useEffect(() => {
-        if (!isOpen || !sheetRef.current) return;
+        if (!isOpen || !modalRef.current) return;
 
-        const sheet = sheetRef.current;
-        const focusableElements = sheet.querySelectorAll<HTMLElement>(
+        const modal = modalRef.current;
+        const focusableElements = modal.querySelectorAll<HTMLElement>(
             'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
         );
         const firstFocusable = focusableElements[0];
         const lastFocusable = focusableElements[focusableElements.length - 1];
 
-        // シートが開いたら閉じるボタンにフォーカス（input/selectへのフォーカスはiOSでズームを引き起こすため避ける）
+        // モーダルが開いたら閉じるボタンにフォーカス
         closeButtonRef.current?.focus();
 
         const handleTabKey = (e: KeyboardEvent) => {
@@ -105,51 +99,51 @@ export function BottomSheet({
                 aria-hidden="true"
             />
 
-            {/* シート本体 */}
+            {/* モーダル本体 */}
             <div
-                ref={sheetRef}
+                ref={modalRef}
                 role="dialog"
                 aria-modal="true"
-                aria-labelledby="bottom-sheet-title"
+                aria-labelledby="settings-modal-title"
                 className={cn(
-                    "fixed bottom-0 left-0 right-0 z-[1000]",
-                    "w-screen",
-                    "bg-background rounded-t-2xl",
-                    "overflow-x-hidden overflow-y-auto",
-                    // iOS pull-to-refresh との干渉を防ぐ
-                    "overscroll-contain touch-pan-y",
-                    "transition-transform duration-300 ease-out",
-                    "animate-in slide-in-from-bottom",
-                    heightClasses[height],
+                    "fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[1000]",
+                    "bg-background rounded-xl shadow-2xl",
+                    "max-h-[85vh] overflow-auto",
+                    "animate-in fade-in zoom-in-95 duration-200",
                 )}
             >
-                {/* ドラッグハンドル（装飾） */}
-                <div className="flex justify-center py-2 sticky top-0 bg-background">
-                    <div className="w-10 h-1 bg-muted rounded-full" />
-                </div>
-
                 {/* ヘッダー */}
-                <div
-                    id="bottom-sheet-title"
-                    className="px-4 pb-3 border-b border-border font-semibold text-lg"
-                >
-                    {title}
-                </div>
-
-                {/* コンテンツ */}
-                <div className="p-4 max-w-full">{children}</div>
-
-                {/* 閉じるボタン */}
-                <div className="sticky bottom-0 p-4 bg-background border-t border-border">
+                <div className="sticky top-0 bg-background border-b border-border px-6 py-4 flex items-center justify-between">
+                    <h2 id="settings-modal-title" className="font-bold text-lg">
+                        設定
+                    </h2>
                     <button
                         ref={closeButtonRef}
                         type="button"
                         onClick={onClose}
-                        className="w-full py-3 rounded-lg bg-muted hover:bg-muted/80 font-medium transition-colors"
+                        className="p-2 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                        aria-label="閉じる"
                     >
-                        閉じる
+                        <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            width="20"
+                            height="20"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden="true"
+                        >
+                            <line x1="18" y1="6" x2="6" y2="18" />
+                            <line x1="6" y1="6" x2="18" y2="18" />
+                        </svg>
                     </button>
                 </div>
+
+                {/* コンテンツ */}
+                <div className="p-6">{children}</div>
             </div>
         </>
     );
