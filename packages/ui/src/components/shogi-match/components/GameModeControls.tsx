@@ -48,9 +48,7 @@ export function PlayingModeControls({
                     <AlertDialogContent>
                         <AlertDialogHeader>
                             <AlertDialogTitle>投了しますか？</AlertDialogTitle>
-                            <AlertDialogDescription>
-                                この操作は取り消せません。
-                            </AlertDialogDescription>
+                            <AlertDialogDescription>対局を終了します。</AlertDialogDescription>
                         </AlertDialogHeader>
                         <AlertDialogFooter>
                             <AlertDialogCancel>キャンセル</AlertDialogCancel>
@@ -106,9 +104,7 @@ export function PausedModeControls({
                     <AlertDialogContent>
                         <AlertDialogHeader>
                             <AlertDialogTitle>投了しますか？</AlertDialogTitle>
-                            <AlertDialogDescription>
-                                この操作は取り消せません。
-                            </AlertDialogDescription>
+                            <AlertDialogDescription>対局を終了します。</AlertDialogDescription>
                         </AlertDialogHeader>
                         <AlertDialogFooter>
                             <AlertDialogCancel>キャンセル</AlertDialogCancel>

@@ -86,8 +86,13 @@ export interface PvMainLineComparison {
  *
  * @param tree 棋譜ツリー
  * @param basePly PVの起点手数（この手を指した後の局面からPVが始まる）
- * @param pv PV（読み筋）の手順
+ * @param pv PV（読み筋）の手順。空配列の場合は「identical」を返す
  * @returns 比較結果
+ *
+ * @remarks
+ * 呼び出し元で `pv.length === 0` を事前チェックすることで、
+ * 不要な関数呼び出しを回避できる（パフォーマンス最適化）。
+ * 関数内でも空配列チェックを行うため、事前チェックは必須ではない。
  */
 export function comparePvWithMainLine(
     tree: KifuTree,
