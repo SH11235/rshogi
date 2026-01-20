@@ -33,6 +33,11 @@ impl Position {
             return false;
         }
 
+        // PASS の場合は can_pass() で判定
+        if m.is_pass() {
+            return self.can_pass();
+        }
+
         let us = self.side_to_move();
         let to = m.to();
 
@@ -234,7 +239,8 @@ impl Position {
     /// 取る手かどうか
     #[inline]
     pub fn is_capture(&self, m: Move) -> bool {
-        if m.is_drop() {
+        // PASS は駒を取らない
+        if m.is_pass() || m.is_drop() {
             false
         } else {
             self.piece_on(m.to()).is_some()

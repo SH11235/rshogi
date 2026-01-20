@@ -988,6 +988,11 @@ impl Position {
 
     /// pseudo-legal手が本当に合法かどうかをチェック
     pub fn is_legal(&self, mv: Move) -> bool {
+        // PASS の場合は can_pass() で判定
+        if mv.is_pass() {
+            return self.can_pass();
+        }
+
         let us = self.side_to_move();
         let king_sq = self.king_square(us);
 

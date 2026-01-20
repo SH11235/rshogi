@@ -779,6 +779,14 @@ impl Position {
         Ok(())
     }
 
+    /// パス権ルールを有効化してパス権を設定（外部向けAPI）
+    ///
+    /// 既に set_sfen() や set_hirate() で局面を設定した後に呼ぶことを想定。
+    pub fn enable_pass_rights(&mut self, black_rights: u8, white_rights: u8) {
+        self.set_pass_rights_enabled(true);
+        self.set_pass_rights_pair(black_rights, white_rights);
+    }
+
     /// 平手初期局面をパス権付きで初期化（外部向けAPI）
     pub fn set_startpos_with_pass_rights(&mut self, black_rights: u8, white_rights: u8) {
         self.set_hirate();

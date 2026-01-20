@@ -8,7 +8,9 @@ use std::sync::Arc;
 use std::thread;
 
 use anyhow::Result;
-use engine_core::eval::{set_eval_hash_enabled, set_material_level, MaterialLevel};
+use engine_core::eval::{
+    set_eval_hash_enabled, set_material_level, set_pass_right_value, MaterialLevel,
+};
 use engine_core::nnue::{
     evaluate_dispatch, get_network, init_nnue, set_fv_scale_override, AccumulatorStackVariant,
 };
@@ -50,6 +52,11 @@ struct UsiEngine {
     ponderhit_flag: Option<Arc<AtomicBool>>,
     /// Large Pages使用メッセージの出力済みフラグ
     large_pages_reported: bool,
+    // --- 有限パス権（Finite Pass Rights）関連 ---
+    /// パス権ルール有効化フラグ
+    pass_rights_enabled: bool,
+    /// 初期パス権数（デフォルト2）
+    initial_pass_count: u8,
 }
 
 impl UsiEngine {
@@ -75,6 +82,8 @@ impl UsiEngine {
             stop_flag: None,
             ponderhit_flag: None,
             large_pages_reported: false,
+            pass_rights_enabled: false,
+            initial_pass_count: 2,
         }
     }
 
@@ -158,6 +167,10 @@ impl UsiEngine {
         // FV_SCALE: 0=自動判定、1以上=指定値でオーバーライド
         // 水匠5等は24、YaneuraOuデフォルトは16
         println!("option name FV_SCALE type spin default 0 min 0 max 100");
+        // 有限パス権（Finite Pass Rights）オプション
+        println!("option name PassRights type check default false");
+        println!("option name InitialPassCount type spin default 2 min 0 max 10");
+        println!("option name PassRightValue type spin default 200 min 0 max 1000");
         println!("usiok");
     }
 
@@ -393,6 +406,24 @@ impl UsiEngine {
                     }
                 }
             }
+            "PassRights" => {
+                let v = value == "true" || value == "1";
+                self.pass_rights_enabled = v;
+                eprintln!("info string PassRights: {}", if v { "enabled" } else { "disabled" });
+            }
+            "InitialPassCount" => {
+                if let Ok(v) = value.parse::<u8>() {
+                    self.initial_pass_count = v.clamp(0, 10);
+                    eprintln!("info string InitialPassCount: {}", self.initial_pass_count);
+                }
+            }
+            "PassRightValue" => {
+                if let Ok(v) = value.parse::<i32>() {
+                    let clamped = v.clamp(0, 1000);
+                    set_pass_right_value(clamped);
+                    eprintln!("info string PassRightValue: {clamped}");
+                }
+            }
             _ => {
                 // 未知のオプションは無視
             }
@@ -411,8 +442,10 @@ impl UsiEngine {
     }
 
     /// positionコマンド: 局面設定
+    ///
+    /// 拡張形式: `position [sfen <sfen> | startpos] [passrights <black> <white>] [moves <move1> ...]`
     fn cmd_position(&mut self, tokens: &[&str]) {
-        // position [sfen <sfen> | startpos] [moves <move1> <move2> ...]
+        // position [sfen <sfen> | startpos] [passrights <black> <white>] [moves <move1> <move2> ...]
         let mut idx = 1;
         if idx >= tokens.len() {
             return;
@@ -424,9 +457,9 @@ impl UsiEngine {
             idx += 1;
         } else if tokens[idx] == "sfen" {
             idx += 1;
-            // SFENを収集（movesの前まで）
+            // SFENを収集（movesまたはpassrightsの前まで）
             let mut sfen_parts = Vec::new();
-            while idx < tokens.len() && tokens[idx] != "moves" {
+            while idx < tokens.len() && tokens[idx] != "moves" && tokens[idx] != "passrights" {
                 sfen_parts.push(tokens[idx]);
                 idx += 1;
             }
@@ -437,12 +470,50 @@ impl UsiEngine {
             }
         }
 
+        // パス権の設定（passrights キーワード）
+        // 形式: passrights <black_count> <white_count>
+        if idx < tokens.len() && tokens[idx] == "passrights" {
+            idx += 1;
+            if self.pass_rights_enabled {
+                // 先手のパス権数
+                let black_pass = if idx < tokens.len() {
+                    tokens[idx].parse::<u8>().unwrap_or(self.initial_pass_count)
+                } else {
+                    self.initial_pass_count
+                };
+                idx += 1;
+
+                // 後手のパス権数
+                let white_pass = if idx < tokens.len() {
+                    tokens[idx].parse::<u8>().unwrap_or(self.initial_pass_count)
+                } else {
+                    self.initial_pass_count
+                };
+                idx += 1;
+
+                // パス権を設定
+                self.position.enable_pass_rights(black_pass, white_pass);
+            } else {
+                // パス権が無効な場合は値を読み飛ばす
+                idx += 2;
+            }
+        } else if self.pass_rights_enabled {
+            // passrights キーワードがないがパス権が有効な場合、デフォルト値を設定
+            self.position
+                .enable_pass_rights(self.initial_pass_count, self.initial_pass_count);
+        }
+
         // 指し手の適用
         if idx < tokens.len() && tokens[idx] == "moves" {
             idx += 1;
             while idx < tokens.len() {
                 if let Some(mv) = Move::from_usi(tokens[idx]) {
-                    let gives_check = self.position.gives_check(mv);
+                    // PASS の場合は gives_check は false
+                    let gives_check = if mv.is_pass() {
+                        false
+                    } else {
+                        self.position.gives_check(mv)
+                    };
                     self.position.do_move(mv, gives_check);
                 } else {
                     eprintln!("info string Error parsing move: {token}", token = tokens[idx]);

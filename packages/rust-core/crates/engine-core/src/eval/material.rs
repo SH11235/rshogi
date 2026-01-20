@@ -1,8 +1,87 @@
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 use std::sync::LazyLock;
 
 use crate::position::{BoardEffects, Position};
 use crate::types::{Color, Piece, PieceType, Square, Value};
+
+// =============================================================================
+// パス権評価（Finite Pass Rights）
+// =============================================================================
+
+/// パス権評価の序盤値（デフォルト: 50cp）
+const DEFAULT_PASS_RIGHT_VALUE_EARLY: i32 = 50;
+/// パス権評価の終盤値（デフォルト: 200cp）
+const DEFAULT_PASS_RIGHT_VALUE_LATE: i32 = 200;
+/// 序盤の終わり（この手数まで EARLY_VALUE を使用）
+const EARLY_PLY: u16 = 40;
+/// 終盤の始まり（この手数以降 LATE_VALUE を使用）
+const LATE_PLY: u16 = 120;
+
+/// ランタイムで切り替え可能なパス権評価値（序盤）
+static PASS_RIGHT_VALUE_EARLY: AtomicI32 = AtomicI32::new(DEFAULT_PASS_RIGHT_VALUE_EARLY);
+/// ランタイムで切り替え可能なパス権評価値（終盤）
+static PASS_RIGHT_VALUE_LATE: AtomicI32 = AtomicI32::new(DEFAULT_PASS_RIGHT_VALUE_LATE);
+
+/// 現在のパス権評価値を取得（後方互換のため終盤値を返す）
+pub fn get_pass_right_value() -> i32 {
+    PASS_RIGHT_VALUE_LATE.load(Ordering::Relaxed)
+}
+
+/// パス権評価値を設定（序盤・終盤両方を同じ値に設定）
+pub fn set_pass_right_value(value: i32) {
+    PASS_RIGHT_VALUE_EARLY.store(value, Ordering::Relaxed);
+    PASS_RIGHT_VALUE_LATE.store(value, Ordering::Relaxed);
+}
+
+/// パス権評価値を設定（序盤・終盤を個別に設定）
+pub fn set_pass_right_value_phased(early: i32, late: i32) {
+    PASS_RIGHT_VALUE_EARLY.store(early, Ordering::Relaxed);
+    PASS_RIGHT_VALUE_LATE.store(late, Ordering::Relaxed);
+}
+
+/// 手数に応じたパス権評価値を計算
+#[inline]
+fn pass_right_value_by_ply(ply: u16) -> i32 {
+    let early_value = PASS_RIGHT_VALUE_EARLY.load(Ordering::Relaxed);
+    let late_value = PASS_RIGHT_VALUE_LATE.load(Ordering::Relaxed);
+
+    if ply <= EARLY_PLY {
+        early_value
+    } else if ply >= LATE_PLY {
+        late_value
+    } else {
+        // 線形補間
+        let ratio = (ply - EARLY_PLY) as i32;
+        let range = (LATE_PLY - EARLY_PLY) as i32;
+        early_value + (late_value - early_value) * ratio / range
+    }
+}
+
+/// パス権の評価値を計算（手番側視点）
+///
+/// 設計書 10.5: evaluate_material_with_pass() 実装
+/// - `(自分のパス権 - 相手のパス権) * pass_right_value_by_ply(ply)`
+///
+/// 手数に応じてパス権の価値が変化する:
+/// - 序盤(〜40手): 50cp（テンポが重要なため低い）
+/// - 終盤(120手〜): 300cp（ツークツワンク回避のため高い）
+/// - 中間: 線形補間
+///
+/// パス権ルールが無効な場合は 0 を返す。
+#[inline]
+pub fn evaluate_pass_rights(pos: &Position, ply: u16) -> Value {
+    if !pos.is_pass_rights_enabled() {
+        return Value::ZERO;
+    }
+
+    let us = pos.side_to_move();
+    let them = !us;
+    let our_rights = pos.pass_rights(us) as i32;
+    let their_rights = pos.pass_rights(them) as i32;
+    let value = pass_right_value_by_ply(ply);
+
+    Value::new((our_rights - their_rights) * value)
+}
 
 /// Material評価の適用レベル（YaneuraOu MaterialLv に対応）
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -575,5 +654,59 @@ mod tests {
 
         // 元に戻す
         set_material_level(original);
+    }
+
+    #[test]
+    fn test_pass_right_value_by_ply_early() {
+        // デフォルト値をリセット
+        set_pass_right_value_phased(DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE);
+
+        // 序盤（40手以下）は EARLY 値
+        assert_eq!(pass_right_value_by_ply(0), DEFAULT_PASS_RIGHT_VALUE_EARLY);
+        assert_eq!(pass_right_value_by_ply(20), DEFAULT_PASS_RIGHT_VALUE_EARLY);
+        assert_eq!(pass_right_value_by_ply(40), DEFAULT_PASS_RIGHT_VALUE_EARLY);
+    }
+
+    #[test]
+    fn test_pass_right_value_by_ply_late() {
+        // デフォルト値をリセット
+        set_pass_right_value_phased(DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE);
+
+        // 終盤（120手以上）は LATE 値
+        assert_eq!(pass_right_value_by_ply(120), DEFAULT_PASS_RIGHT_VALUE_LATE);
+        assert_eq!(pass_right_value_by_ply(150), DEFAULT_PASS_RIGHT_VALUE_LATE);
+        assert_eq!(pass_right_value_by_ply(200), DEFAULT_PASS_RIGHT_VALUE_LATE);
+    }
+
+    #[test]
+    fn test_pass_right_value_by_ply_interpolation() {
+        // デフォルト値をリセット
+        set_pass_right_value_phased(DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE);
+
+        // 中盤（40〜120手）は線形補間
+        // 80手目は中間点: (50 + 300) / 2 = 175
+        let mid_ply = (EARLY_PLY + LATE_PLY) / 2; // 80
+        let expected_mid = (DEFAULT_PASS_RIGHT_VALUE_EARLY + DEFAULT_PASS_RIGHT_VALUE_LATE) / 2;
+        assert_eq!(pass_right_value_by_ply(mid_ply), expected_mid);
+
+        // 補間値は EARLY と LATE の間
+        let ply_60 = pass_right_value_by_ply(60);
+        assert!(ply_60 > DEFAULT_PASS_RIGHT_VALUE_EARLY);
+        assert!(ply_60 < DEFAULT_PASS_RIGHT_VALUE_LATE);
+
+        let ply_100 = pass_right_value_by_ply(100);
+        assert!(ply_100 > ply_60);
+        assert!(ply_100 < DEFAULT_PASS_RIGHT_VALUE_LATE);
+    }
+
+    #[test]
+    fn test_set_pass_right_value_sets_both() {
+        // set_pass_right_value は両方を同じ値に設定
+        set_pass_right_value(150);
+        assert_eq!(pass_right_value_by_ply(0), 150);
+        assert_eq!(pass_right_value_by_ply(200), 150);
+
+        // デフォルトに戻す
+        set_pass_right_value_phased(DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE);
     }
 }

@@ -8,7 +8,7 @@
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-use crate::eval::EvalHash;
+use crate::eval::{evaluate_pass_rights, EvalHash};
 use crate::nnue::{evaluate_dispatch, get_network, AccumulatorStackVariant, DirtyPiece};
 use crate::position::Position;
 use crate::search::PieceToHistory;
@@ -448,7 +448,8 @@ impl SearchWorker {
     /// ロードされた NNUE のアーキテクチャに応じて適切なアキュムレータと評価関数を使用。
     #[inline]
     fn nnue_evaluate(&mut self, pos: &Position) -> Value {
-        evaluate_dispatch(pos, &mut self.nnue_stack)
+        let game_ply = pos.game_ply() as u16;
+        evaluate_dispatch(pos, &mut self.nnue_stack) + evaluate_pass_rights(pos, game_ply)
     }
 
     /// NNUE アキュムレータスタックを push
@@ -908,6 +909,9 @@ impl SearchWorker {
         // YaneuraOu準拠: prev_move != Move::null() のみをチェック
         // Move::NONEのチェックは不要（root直下でNMPを無効化してしまう）
         // YaneuraOuではASSERT_LV3で検証しているのみ
+        // NMP条件に加えて、連続パスの禁止（prev_move が PASS でないこと）
+        // 設計書 10.4: NMP を PASS 使用版に置換
+        let prev_is_pass = prev_move.is_pass();
         if excluded_move.is_none()
             && cut_node
             && !in_check
@@ -915,18 +919,33 @@ impl SearchWorker {
             && ply >= self.nmp_min_ply
             && !beta.is_loss()
             && !prev_move.is_null()
+            && !prev_is_pass
+        // 連続パスを禁止
         {
             // Null move dynamic reduction based on depth（YaneuraOu準拠）
             let r = 7 + depth / 3;
 
+            // パス権ルールが有効かつパス可能な場合は、実際のパス手を使用
+            // これにより、パス権の消費が正しく反映され、評価もより正確になる
+            let use_pass = pos.is_pass_rights_enabled() && pos.can_pass();
+
             // YaneuraOu準拠: NullMove探索前にcurrent_moveとcont_hist_keyを設定
             // これにより再帰呼び出し先で連続NullMoveが禁止され、
             // continuation historyの不正参照を防ぐ
-            self.stack[ply as usize].current_move = Move::NULL;
+            if use_pass {
+                self.stack[ply as usize].current_move = Move::PASS;
+            } else {
+                self.stack[ply as usize].current_move = Move::NULL;
+            }
             self.clear_cont_history_for_null(ply);
 
-            pos.do_null_move_with_prefetch(self.tt.as_ref());
-            self.nnue_push(DirtyPiece::new()); // null moveでは駒の移動なし
+            // パス手または NullMove を実行
+            if use_pass {
+                pos.do_pass_move();
+            } else {
+                pos.do_null_move_with_prefetch(self.tt.as_ref());
+            }
+            self.nnue_push(DirtyPiece::new()); // パス/null moveでは駒の移動なし
             let null_value = -self.search_node::<{ NodeType::NonPV as u8 }>(
                 pos,
                 depth - r,
@@ -938,7 +957,11 @@ impl SearchWorker {
                 time_manager,
             );
             self.nnue_pop();
-            pos.undo_null_move();
+            if use_pass {
+                pos.undo_pass_move();
+            } else {
+                pos.undo_null_move();
+            }
 
             // Do not return unproven mate scores（勝ちスコアは信頼しない）
             if null_value >= beta && !null_value.is_win() {
@@ -1204,6 +1227,12 @@ impl SearchWorker {
             for ext in buf.iter() {
                 ordered_moves.push(ext.mv);
             }
+        }
+
+        // 設計書 10.4: PASS は最低優先度（探索最後に試す）
+        // 静止探索 (depth <= DEPTH_QS) では PASS を追加しない
+        if depth > DEPTH_QS && pos.can_pass() {
+            ordered_moves.push(Move::PASS);
         }
 
         (ordered_moves, tt_move)
@@ -2070,10 +2099,13 @@ impl SearchWorker {
             );
 
             // 手の記録（YaneuraOu準拠: quietsSearched, capturesSearched）
-            if is_capture {
-                captures_tried.push(mv);
-            } else {
-                quiets_tried.push(mv);
+            // PASS は history_index() が未定義のため記録しない
+            if !mv.is_pass() {
+                if is_capture {
+                    captures_tried.push(mv);
+                } else {
+                    quiets_tried.push(mv);
+                }
             }
 
             // 延長量をnew_depthに加算（YaneuraOu準拠: do_moveの後、yaneuraou-search.cpp:3482）
@@ -2117,7 +2149,10 @@ impl SearchWorker {
             }
 
             // statScoreによる補正
-            let stat_score = if is_capture {
+            // 設計書 10.4: PASS は history が未定義のため stat_score = 0 とし、還元を控えめに
+            let stat_score = if mv.is_pass() {
+                0 // PASS は history がないので還元補正なし
+            } else if is_capture {
                 let captured = pos.captured_piece();
                 let captured_pt = captured.piece_type();
                 let moved_piece = mv.moved_piece_after();
@@ -2324,7 +2359,8 @@ impl SearchWorker {
         // History更新（YaneuraOu準拠: update_all_stats）
         // =================================================================
         // YaneuraOu: bestMoveがある場合は常にupdate_all_statsを呼ぶ
-        if best_move.is_some() {
+        // 設計書 10.4: PASS は history_index() が未定義のためスキップ
+        if best_move.is_some() && !best_move.is_pass() {
             let is_best_capture = pos.is_capture(best_move);
             let is_tt_move = best_move == tt_move;
             // YaneuraOu準拠: bonus = min(170*depth-87, 1598) + 332*(bestMove==ttMove)
