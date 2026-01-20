@@ -22,7 +22,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ShogiBoardCell } from "./shogi-board";
 import { ShogiBoard } from "./shogi-board";
 import { ClockDisplay } from "./shogi-match/components/ClockDisplay";
-import { EditModePanel } from "./shogi-match/components/EditModePanel";
 import { EngineLogsPanel } from "./shogi-match/components/EngineLogsPanel";
 import { EvalPanel } from "./shogi-match/components/EvalPanel";
 import { GameResultDialog } from "./shogi-match/components/GameResultDialog";
@@ -234,7 +233,6 @@ export function ShogiMatch({
     const [message, setMessage] = useState<string | null>(null);
     const [gameResult, setGameResult] = useState<GameResult | null>(null);
     const [showResultDialog, setShowResultDialog] = useState(false);
-    const [editMessage, setEditMessage] = useState<string | null>(null);
     const [flipBoard, setFlipBoard] = useState(false);
     const [timeSettings, setTimeSettings] = useLocalStorage<ClockSettings>(
         "shogi-match-time-settings",
@@ -257,7 +255,6 @@ export function ShogiMatch({
     const [startSfen, setStartSfen] = useState<string>("startpos");
     // TODO: 将来的に局面編集機能の強化で使用予定
     const [_basePosition, setBasePosition] = useState<PositionState | null>(null);
-    const [isEditPanelOpen, setIsEditPanelOpen] = useState(false);
     const [displaySettings, setDisplaySettings] = useLocalStorage<DisplaySettings>(
         "shogi-display-settings",
         DEFAULT_DISPLAY_SETTINGS,
@@ -999,11 +996,6 @@ export function ShogiMatch({
             piece: { owner: "sente" | "gote"; type: string; promoted?: boolean },
             e: React.PointerEvent,
         ) => {
-            // 編集パネルが閉じていたら自動的に開く
-            if (!isEditPanelOpen) {
-                setIsEditPanelOpen(true);
-            }
-
             const origin = { type: "board" as const, square: square as Square };
             const payload = {
                 owner: piece.owner as Player,
@@ -1013,17 +1005,12 @@ export function ShogiMatch({
 
             dndController.startDrag(origin, payload, e);
         },
-        [dndController, isEditPanelOpen],
+        [dndController],
     );
 
     // DnD ドラッグ開始ハンドラ（持ち駒）
     const handleHandPiecePointerDown = useCallback(
         (owner: Player, pieceType: PieceType, e: React.PointerEvent) => {
-            // 編集パネルが閉じていたら自動的に開く
-            if (!isEditPanelOpen) {
-                setIsEditPanelOpen(true);
-            }
-
             // 持ち駒が0個の場合はストック扱い（編集モード時、無限供給）
             const count = position?.hands[owner][pieceType] ?? 0;
             const origin =
@@ -1038,7 +1025,7 @@ export function ShogiMatch({
 
             dndController.startDrag(origin, payload, e);
         },
-        [dndController, position, isEditPanelOpen],
+        [dndController, position],
     );
 
     const handlePieceTogglePromote = useCallback(
@@ -1166,10 +1153,6 @@ export function ShogiMatch({
                 if (!positionReady) {
                     setMessage("局面を読み込み中です。");
                     return;
-                }
-                // 編集パネルが閉じていたら自動的に開く
-                if (!isEditPanelOpen) {
-                    setIsEditPanelOpen(true);
                 }
                 const sq = square as Square;
 
@@ -1446,7 +1429,6 @@ export function ShogiMatch({
         [
             isEditMode,
             positionReady,
-            isEditPanelOpen,
             editFromSquare,
             position,
             editTool,
@@ -2241,14 +2223,6 @@ export function ShogiMatch({
                         <div className="flex gap-4 items-start pt-16">
                             {/* 中央列: 設定系パネル（サイズ固定） */}
                             <div className="flex flex-col gap-2 shrink-0">
-                                {gameMode === "editing" && (
-                                    <EditModePanel
-                                        isOpen={isEditPanelOpen}
-                                        onOpenChange={setIsEditPanelOpen}
-                                        message={editMessage}
-                                    />
-                                )}
-
                                 <MatchSettingsPanel
                                     sides={sides}
                                     onSidesChange={setSides}
