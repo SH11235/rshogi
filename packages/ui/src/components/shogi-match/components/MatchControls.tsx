@@ -82,9 +82,12 @@ export function MatchControls({
                     />
                 ) : (
                     <>
-                        {/* 編集モード時: [平手に戻す] [検討開始] [対局開始] */}
+                        {/* 編集モード時: [対局開始] [平手に戻す] [検討開始] */}
                         {isEditMode && (
                             <>
+                                <Button type="button" onClick={onStart}>
+                                    対局開始
+                                </Button>
                                 <Button type="button" onClick={onResetToStartpos} variant="outline">
                                     平手に戻す
                                 </Button>
@@ -97,15 +100,15 @@ export function MatchControls({
                                         検討開始
                                     </Button>
                                 )}
-                                <Button type="button" onClick={onStart}>
-                                    対局開始
-                                </Button>
                             </>
                         )}
 
-                        {/* 検討モード時: [平手に戻す] [局面編集] [対局開始] */}
+                        {/* 検討モード時: [対局開始] [平手に戻す] [局面編集] */}
                         {isReviewMode && (
                             <>
+                                <Button type="button" onClick={onStart}>
+                                    対局開始
+                                </Button>
                                 <Button type="button" onClick={onResetToStartpos} variant="outline">
                                     平手に戻す
                                 </Button>
@@ -118,9 +121,6 @@ export function MatchControls({
                                         局面編集
                                     </Button>
                                 )}
-                                <Button type="button" onClick={onStart}>
-                                    対局開始
-                                </Button>
                             </>
                         )}
 
