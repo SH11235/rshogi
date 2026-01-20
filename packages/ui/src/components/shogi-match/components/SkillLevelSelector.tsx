@@ -20,7 +20,7 @@ export function SkillLevelSelector({
     onChange,
     disabled,
 }: SkillLevelSelectorProps): ReactElement {
-    // 現在のレベル（1-20、undefined時は最大値）
+    // 現在のレベル（0-20、undefined時は最大値）
     const currentLevel = value?.skillLevel ?? SKILL_LEVEL_MAX;
 
     const handleLevelChange = (level: number) => {
