@@ -1,9 +1,6 @@
-user_book1.db
-user_book_100T.db
-# Opening book large files (prevent re-introduction)
-converted_openings/opening_book_*.binz
-converted_openings/opening_book_*.bin.gz
-converted_openings/opening_book_full.bin
+.cargo/config.toml
+.cargo/config.local.toml
+.cargo/registry/
 
 target/
 target_before
@@ -15,11 +12,6 @@ coverage/
 *.profraw
 *.profdata
 
-# Test data - ignore uncompressed files but keep compressed ones
-test_data/nn.bin
-test_data/mock_nn.bin
-# Keep: test_data/mock_nn.bin.gz
-
 # Profiling outputs
 flamegraph.svg
 see_profile.svg
@@ -30,20 +22,7 @@ perf_*.data.old
 perf_results/
 
 # Benchmark artifacts
-/target/criterion/
-target/criterion/
 benchmark_results/
-pr_summaries/
-
-# Benchmark result files (temporary)
-benchmark-result.json
-system-info.json
-complete-result.json
-
-.cargo/config.local.toml
-.cargo/registry/
-
-memo/
 
 # Evaluation function files (large binary files)
 eval/*
@@ -55,16 +34,17 @@ runs
 # Avoid re-introducing accidentally generated manifest in tools crate root
 crates/tools/manifest.json
 
-sample_data/train.jsonl
-sample_data/val.jsonl
 taikyoku-log/
 docs/reports
-scripts/analysis/__pycache__/
 
 # Perf script config (personal settings)
 scripts/perf.conf
 
+# local documents
 docs/experiment-archive
 docs/bullet
+pr_summaries/
+memo/
+
 
 data/

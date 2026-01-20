@@ -22,7 +22,7 @@ use super::constants::{
     FV_SCALE_HALFKA, HALFKA_HM_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION_HALFKA, WEIGHT_SCALE_BITS,
 };
 use super::features::{FeatureSet, HalfKA_hmFeatureSet};
-use super::network::get_fv_scale_override;
+use super::network::{get_fv_scale_override, parse_fv_scale_from_arch};
 use crate::position::Position;
 use crate::types::{Color, Value};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -1086,7 +1086,7 @@ impl AffineTransformDynamic {
         // バイアスで初期化
         output.copy_from_slice(&self.biases);
 
-        // スカラー実装（TODO: Phase 4 で SIMD 最適化）
+        // スカラー実装（TODO: SIMD 最適化）
         for (j, out) in output.iter_mut().enumerate() {
             let weight_offset = j * self.padded_input_dim;
             for (i, &in_val) in input.iter().enumerate().take(self.input_dim) {
@@ -1131,6 +1131,11 @@ pub struct NetworkHalfKADynamic {
     /// arch_string に "-SCReLU" サフィックスが含まれている場合に true。
     /// bullet-shogi で学習した SCReLU モデル用。
     pub use_screlu: bool,
+    /// 評価値スケーリング係数
+    ///
+    /// arch_str に "fv_scale=N" が含まれていればその値、
+    /// なければ FV_SCALE_HALFKA (16) をデフォルトとする。
+    pub fv_scale: i32,
 }
 
 impl NetworkHalfKADynamic {
@@ -1174,6 +1179,9 @@ impl NetworkHalfKADynamic {
         // SCReLU 検出: arch_string に "-SCReLU" が含まれているかチェック
         let use_screlu = arch_str.contains("SCReLU");
 
+        // FV_SCALE 検出: arch_str に "fv_scale=N" が含まれていればその値を使用
+        let fv_scale = parse_fv_scale_from_arch(&arch_str).unwrap_or(FV_SCALE_HALFKA);
+
         // Feature Transformer ハッシュ
         reader.read_exact(&mut buf4)?;
         let _ft_hash = u32::from_le_bytes(buf4);
@@ -1203,6 +1211,7 @@ impl NetworkHalfKADynamic {
             arch_l2: l2,
             arch_l3: l3,
             use_screlu,
+            fv_scale,
         })
     }
 
@@ -1425,7 +1434,7 @@ impl NetworkHalfKADynamic {
         }
 
         // スケーリング（オーバーライド設定があればそちらを優先）
-        let fv_scale = get_fv_scale_override().unwrap_or(FV_SCALE_HALFKA);
+        let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
         Value::new(output[0] / fv_scale)
     }
 
@@ -1559,7 +1568,7 @@ impl NetworkHalfKADynamic {
         }
 
         // スケーリング（オーバーライド設定があればそちらを優先）
-        let fv_scale = get_fv_scale_override().unwrap_or(FV_SCALE_HALFKA);
+        let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
         Value::new(output[0] / fv_scale)
     }
 
