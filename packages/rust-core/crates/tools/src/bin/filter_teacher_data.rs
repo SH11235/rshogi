@@ -214,11 +214,11 @@ impl ScoreDistribution {
         self.max = self.max.max(score);
         self.sum += score as i64;
 
-        let abs_score = score.saturating_abs();
-        if abs_score >= 30000 {
+        let abs_score = score.unsigned_abs();
+        if abs_score >= MATE_LIKE_THRESHOLD {
             self.mate_like += 1;
         }
-        if abs_score >= 10000 {
+        if abs_score >= HIGH_SCORE_THRESHOLD {
             self.high_score += 1;
         }
 
@@ -234,7 +234,7 @@ impl ScoreDistribution {
     fn percentile(&self, p: f64) -> Option<i16> {
         let hist = self.histogram.as_ref()?;
         if self.count == 0 {
-            return Some(0);
+            return None; // データがない場合はパーセンタイルも存在しない
         }
         let target = (self.count as f64 * p / 100.0).ceil() as u64;
         let mut cumulative = 0u64;
@@ -300,6 +300,9 @@ fn main() -> Result<()> {
     // 入力ファイルの存在確認
     if !cli.input.exists() {
         anyhow::bail!("Input file not found: {}", cli.input.display());
+    }
+    if !cli.input.is_file() {
+        anyhow::bail!("Input path is not a regular file: {}", cli.input.display());
     }
 
     // --stats-only でない場合は出力ファイルが必須
@@ -437,7 +440,18 @@ fn main() -> Result<()> {
 }
 
 /// チャンクサイズ（レコード数）
-const CHUNK_SIZE: usize = 1_000_000; // 1M records = 40MB
+/// 1M records = 40MB: メモリ効率と並列化のバランスを考慮
+const CHUNK_SIZE: usize = 1_000_000;
+
+/// 詰み近似と判定するスコアの絶対値閾値
+const MATE_LIKE_THRESHOLD: u16 = 30_000;
+/// 高スコアと判定するスコアの絶対値閾値
+const HIGH_SCORE_THRESHOLD: u16 = 10_000;
+
+/// 飽和率計算: 低飽和と判定する閾値
+const SATURATION_LOW_THRESHOLD: f64 = 0.05;
+/// 飽和率計算: 高飽和と判定する閾値
+const SATURATION_HIGH_THRESHOLD: f64 = 0.95;
 
 /// 高速シーケンシャル処理（王手フィルタなし）
 /// メインスレッドでストリーミング処理、ヒストグラムはオプション
@@ -522,7 +536,7 @@ fn process_file_sequential(
 
         // スコア絶対値フィルタ
         if let Some(score_abs_max) = opts.score_abs_max {
-            if psv.score.saturating_abs() > score_abs_max {
+            if psv.score.unsigned_abs() > score_abs_max as u16 {
                 stats.filtered_score_abs_max += 1;
                 continue;
             }
@@ -544,9 +558,9 @@ fn process_file_sequential(
         // 飽和率計算
         if let Some(scale) = opts.target_scale {
             let target = 1.0 / (1.0 + (-final_score as f64 / scale).exp());
-            if target < 0.05 {
+            if target < SATURATION_LOW_THRESHOLD {
                 total_saturated_low += 1;
-            } else if target > 0.95 {
+            } else if target > SATURATION_HIGH_THRESHOLD {
                 total_saturated_high += 1;
             }
         }
@@ -567,7 +581,7 @@ fn process_file_sequential(
             total_written += 1; // stats-only でもカウント
         }
 
-        if total_read.is_multiple_of(10_000_000) {
+        if total_read.is_multiple_of(100_000) {
             progress.set_position(total_read);
         }
     }
@@ -843,7 +857,7 @@ fn process_record_common<O>(
 
     // スコア絶対値フィルタ
     if let Some(score_abs_max) = opts.score_abs_max {
-        if psv.score.saturating_abs() > score_abs_max {
+        if psv.score.unsigned_abs() > score_abs_max as u16 {
             return Err(FilterResult::FilteredScoreAbsMax { score_before });
         }
     }
@@ -876,7 +890,7 @@ fn process_record_common<O>(
     // 飽和率計算
     let (saturated_low, saturated_high) = if let Some(scale) = opts.target_scale {
         let target = 1.0 / (1.0 + (-score_clipped as f64 / scale).exp());
-        (target < 0.05, target > 0.95)
+        (target < SATURATION_LOW_THRESHOLD, target > SATURATION_HIGH_THRESHOLD)
     } else {
         (false, false)
     };
@@ -1006,8 +1020,14 @@ fn print_statistics(stats: &Statistics, opts: &FilterOptions, histogram_enabled:
         }
         let mate_pct = dist.mate_like as f64 / dist.count as f64 * 100.0;
         let high_pct = dist.high_score as f64 / dist.count as f64 * 100.0;
-        eprintln!("  |score| >= 30000 (mate-like): {} ({mate_pct:.2}%)", dist.mate_like);
-        eprintln!("  |score| >= 10000 (high):      {} ({high_pct:.2}%)", dist.high_score);
+        eprintln!(
+            "  |score| >= {MATE_LIKE_THRESHOLD} (mate-like): {} ({mate_pct:.2}%)",
+            dist.mate_like
+        );
+        eprintln!(
+            "  |score| >= {HIGH_SCORE_THRESHOLD} (high):      {} ({high_pct:.2}%)",
+            dist.high_score
+        );
     }
 
     // スコア分布（フィルタ後）
@@ -1029,8 +1049,14 @@ fn print_statistics(stats: &Statistics, opts: &FilterOptions, histogram_enabled:
         }
         let mate_pct = dist_filtered.mate_like as f64 / dist_filtered.count as f64 * 100.0;
         let high_pct = dist_filtered.high_score as f64 / dist_filtered.count as f64 * 100.0;
-        eprintln!("  |score| >= 30000 (mate-like): {} ({mate_pct:.2}%)", dist_filtered.mate_like);
-        eprintln!("  |score| >= 10000 (high):      {} ({high_pct:.2}%)", dist_filtered.high_score);
+        eprintln!(
+            "  |score| >= {MATE_LIKE_THRESHOLD} (mate-like): {} ({mate_pct:.2}%)",
+            dist_filtered.mate_like
+        );
+        eprintln!(
+            "  |score| >= {HIGH_SCORE_THRESHOLD} (high):      {} ({high_pct:.2}%)",
+            dist_filtered.high_score
+        );
     }
 
     // スコア分布（クリップ後）
@@ -1051,7 +1077,10 @@ fn print_statistics(stats: &Statistics, opts: &FilterOptions, histogram_enabled:
             }
         }
         let high_pct = dist_clipped.high_score as f64 / dist_clipped.count as f64 * 100.0;
-        eprintln!("  |score| >= 10000 (high):      {} ({high_pct:.2}%)", dist_clipped.high_score);
+        eprintln!(
+            "  |score| >= {HIGH_SCORE_THRESHOLD} (high):      {} ({high_pct:.2}%)",
+            dist_clipped.high_score
+        );
     }
 
     // 飽和率統計
@@ -1074,8 +1103,14 @@ fn print_statistics(stats: &Statistics, opts: &FilterOptions, histogram_enabled:
         } else {
             0.0
         };
-        eprintln!("  Saturated low  (target < 0.05): {} ({low_pct:.2}%)", sat.saturated_low);
-        eprintln!("  Saturated high (target > 0.95): {} ({high_pct:.2}%)", sat.saturated_high);
+        eprintln!(
+            "  Saturated low  (target < {SATURATION_LOW_THRESHOLD}): {} ({low_pct:.2}%)",
+            sat.saturated_low
+        );
+        eprintln!(
+            "  Saturated high (target > {SATURATION_HIGH_THRESHOLD}): {} ({high_pct:.2}%)",
+            sat.saturated_high
+        );
         eprintln!("  Total saturation rate: {:.2}%", sat.saturation_rate);
     }
 
