@@ -28,6 +28,7 @@ import { GameResultDialog } from "./shogi-match/components/GameResultDialog";
 import { HandPiecesDisplay } from "./shogi-match/components/HandPiecesDisplay";
 import { KifuImportPanel } from "./shogi-match/components/KifuImportPanel";
 import { KifuPanel } from "./shogi-match/components/KifuPanel";
+import { MoveDetailPanel } from "./shogi-match/components/MoveDetailPanel";
 import { MatchControls } from "./shogi-match/components/MatchControls";
 import {
     type EngineOption,
@@ -72,7 +73,7 @@ import {
     getAllBranches,
 } from "./shogi-match/utils/branchTreeUtils";
 import { isPromotable, PIECE_CAP, PIECE_LABELS } from "./shogi-match/utils/constants";
-import { exportToKifString } from "./shogi-match/utils/kifFormat";
+import { exportToKifString, type KifMove } from "./shogi-match/utils/kifFormat";
 import { type KifMoveData, parseSfen } from "./shogi-match/utils/kifParser";
 import { LegalMoveCache } from "./shogi-match/utils/legalMoveCache";
 import { determinePromotion } from "./shogi-match/utils/promotionLogic";
@@ -302,6 +303,11 @@ export function ShogiMatch({
     } | null>(null);
     // 選択中の分岐ノードID（キーボードナビゲーション用）
     const [selectedBranchNodeId, setSelectedBranchNodeId] = useState<string | null>(null);
+    // 選択中の手の詳細（右パネル表示用）
+    const [selectedMoveDetail, setSelectedMoveDetail] = useState<{
+        move: KifMove;
+        position: PositionState;
+    } | null>(null);
 
     // positionRef を先に定義（コールバックで使用するため）
     const positionRef = useRef<PositionState>(position);
@@ -1822,6 +1828,18 @@ export function ShogiMatch({
         [positionHistory],
     );
 
+    // 手の詳細を選択するコールバック（右パネル表示用）
+    const handleMoveDetailSelect = useCallback(
+        (move: KifMove | null, pos: PositionState | null) => {
+            if (move && pos) {
+                setSelectedMoveDetail({ move, position: pos });
+            } else {
+                setSelectedMoveDetail(null);
+            }
+        },
+        [],
+    );
+
     // SFENインポート（局面 + 指し手）
     // インポート後は自動的に検討モードに入る
     const importSfen = useCallback(
@@ -2338,8 +2356,31 @@ export function ShogiMatch({
                                     onAnalyzeBranch={handleAnalyzeBranch}
                                     onStartTreeBatchAnalysis={handleStartTreeBatchAnalysis}
                                     isOnMainLine={navigation.state.isOnMainLine}
+                                    onMoveDetailSelect={handleMoveDetailSelect}
                                 />
                             </div>
+
+                            {/* 右端列: 手の詳細パネル（選択時のみ表示） */}
+                            {selectedMoveDetail && (
+                                <div className="shrink-0">
+                                    <MoveDetailPanel
+                                        move={selectedMoveDetail.move}
+                                        position={selectedMoveDetail.position}
+                                        onAddBranch={handleAddPvAsBranch}
+                                        onPreview={handlePreviewPv}
+                                        onAnalyze={handleAnalyzePly}
+                                        isAnalyzing={isAnalyzing}
+                                        analyzingPly={
+                                            analyzingState.type !== "none"
+                                                ? analyzingState.ply
+                                                : undefined
+                                        }
+                                        kifuTree={navigation.tree}
+                                        onClose={() => setSelectedMoveDetail(null)}
+                                        isOnMainLine={navigation.state.isOnMainLine}
+                                    />
+                                </div>
+                            )}
                         </div>
                     </div>
                 </section>
