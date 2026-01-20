@@ -28,15 +28,15 @@ import { GameResultDialog } from "./shogi-match/components/GameResultDialog";
 import { HandPiecesDisplay } from "./shogi-match/components/HandPiecesDisplay";
 import { KifuImportPanel } from "./shogi-match/components/KifuImportPanel";
 import { KifuPanel } from "./shogi-match/components/KifuPanel";
-import { MoveDetailPanel } from "./shogi-match/components/MoveDetailPanel";
 import { MatchControls } from "./shogi-match/components/MatchControls";
 import {
     type EngineOption,
     MatchSettingsPanel,
     type SideSetting,
 } from "./shogi-match/components/MatchSettingsPanel";
-import { SettingsModal } from "./shogi-match/components/SettingsModal";
+import { MoveDetailPanel } from "./shogi-match/components/MoveDetailPanel";
 import { PvPreviewDialog } from "./shogi-match/components/PvPreviewDialog";
+import { SettingsModal } from "./shogi-match/components/SettingsModal";
 import { applyDropResult, DragGhost, type DropResult, usePieceDnd } from "./shogi-match/dnd";
 
 // EngineOption 型を外部に再エクスポート
@@ -2250,7 +2250,7 @@ export function ShogiMatch({
                             </div>
                         </div>
 
-                        {/* 棋譜列（盤面の隣に密着配置） */}
+                        {/* 棋譜列 + 詳細ドロワー */}
                         <div className="flex flex-col gap-2 shrink-0 pt-16">
                             {/* 評価値グラフパネル（折りたたみ） */}
                             <EvalPanel
@@ -2260,104 +2260,109 @@ export function ShogiMatch({
                                 defaultOpen={false}
                             />
 
-                            {/* 棋譜パネル（常時表示） */}
-                            <KifuPanel
-                                kifMoves={kifMoves}
-                                currentPly={navigation.state.currentPly}
-                                showEval={displaySettings.showKifuEval}
-                                onShowEvalChange={(show) =>
-                                    setDisplaySettings((prev) => ({
-                                        ...prev,
-                                        showKifuEval: show,
-                                    }))
-                                }
-                                onPlySelect={handlePlySelect}
-                                onCopyKif={handleCopyKif}
-                                navigation={{
-                                    currentPly: navigation.state.currentPly,
-                                    totalPly: navigation.state.totalPly,
-                                    onBack: navigation.goBack,
-                                    onForward: () =>
-                                        navigation.goForward(selectedBranchNodeId ?? undefined),
-                                    onToStart: navigation.goToStart,
-                                    onToEnd: navigation.goToEnd,
-                                    isRewound: navigation.state.isRewound,
-                                    canGoForward: navigation.state.canGoForward,
-                                    branchInfo: navigation.state.hasBranches
-                                        ? {
-                                              hasBranches: true,
-                                              currentIndex: navigation.state.currentBranchIndex,
-                                              count: navigation.state.branchCount,
-                                              onSwitch: navigation.switchBranch,
-                                              onPromoteToMain: navigation.promoteCurrentLine,
-                                          }
-                                        : undefined,
-                                }}
-                                navigationDisabled={isMatchRunning}
-                                branchMarkers={branchMarkers}
-                                positionHistory={positionHistory}
-                                onAddPvAsBranch={handleAddPvAsBranch}
-                                onPreviewPv={handlePreviewPv}
-                                lastAddedBranchInfo={lastAddedBranchInfo}
-                                onLastAddedBranchHandled={() => setLastAddedBranchInfo(null)}
-                                onSelectedBranchChange={setSelectedBranchNodeId}
-                                onAnalyzePly={handleAnalyzePly}
-                                isAnalyzing={isAnalyzing}
-                                analyzingPly={
-                                    analyzingState.type !== "none" ? analyzingState.ply : undefined
-                                }
-                                batchAnalysis={
-                                    batchAnalysis
-                                        ? {
-                                              isRunning: batchAnalysis.isRunning,
-                                              currentIndex: batchAnalysis.currentIndex,
-                                              totalCount: batchAnalysis.totalCount,
-                                              inProgress: batchAnalysis.inProgress,
-                                          }
-                                        : undefined
-                                }
-                                onStartBatchAnalysis={handleStartBatchAnalysis}
-                                onCancelBatchAnalysis={handleCancelBatchAnalysis}
-                                analysisSettings={analysisSettings}
-                                onAnalysisSettingsChange={setAnalysisSettings}
-                                kifuTree={navigation.tree}
-                                onNodeClick={navigation.goToNodeById}
-                                onBranchSwitch={navigation.switchBranchAtNode}
-                                onAnalyzeNode={handleAnalyzeNode}
-                                onAnalyzeBranch={handleAnalyzeBranch}
-                                onStartTreeBatchAnalysis={handleStartTreeBatchAnalysis}
-                                isOnMainLine={navigation.state.isOnMainLine}
-                                onMoveDetailSelect={handleMoveDetailSelect}
-                            />
-                        </div>
+                            {/* 棋譜パネル + ドロワー（横並び） */}
+                            <div className="relative flex items-start">
+                                {/* 棋譜パネル（常時表示） */}
+                                <KifuPanel
+                                    kifMoves={kifMoves}
+                                    currentPly={navigation.state.currentPly}
+                                    showEval={displaySettings.showKifuEval}
+                                    onShowEvalChange={(show) =>
+                                        setDisplaySettings((prev) => ({
+                                            ...prev,
+                                            showKifuEval: show,
+                                        }))
+                                    }
+                                    onPlySelect={handlePlySelect}
+                                    onCopyKif={handleCopyKif}
+                                    navigation={{
+                                        currentPly: navigation.state.currentPly,
+                                        totalPly: navigation.state.totalPly,
+                                        onBack: navigation.goBack,
+                                        onForward: () =>
+                                            navigation.goForward(selectedBranchNodeId ?? undefined),
+                                        onToStart: navigation.goToStart,
+                                        onToEnd: navigation.goToEnd,
+                                        isRewound: navigation.state.isRewound,
+                                        canGoForward: navigation.state.canGoForward,
+                                        branchInfo: navigation.state.hasBranches
+                                            ? {
+                                                  hasBranches: true,
+                                                  currentIndex: navigation.state.currentBranchIndex,
+                                                  count: navigation.state.branchCount,
+                                                  onSwitch: navigation.switchBranch,
+                                                  onPromoteToMain: navigation.promoteCurrentLine,
+                                              }
+                                            : undefined,
+                                    }}
+                                    navigationDisabled={isMatchRunning}
+                                    branchMarkers={branchMarkers}
+                                    positionHistory={positionHistory}
+                                    onAddPvAsBranch={handleAddPvAsBranch}
+                                    onPreviewPv={handlePreviewPv}
+                                    lastAddedBranchInfo={lastAddedBranchInfo}
+                                    onLastAddedBranchHandled={() => setLastAddedBranchInfo(null)}
+                                    onSelectedBranchChange={setSelectedBranchNodeId}
+                                    onAnalyzePly={handleAnalyzePly}
+                                    isAnalyzing={isAnalyzing}
+                                    analyzingPly={
+                                        analyzingState.type !== "none"
+                                            ? analyzingState.ply
+                                            : undefined
+                                    }
+                                    batchAnalysis={
+                                        batchAnalysis
+                                            ? {
+                                                  isRunning: batchAnalysis.isRunning,
+                                                  currentIndex: batchAnalysis.currentIndex,
+                                                  totalCount: batchAnalysis.totalCount,
+                                                  inProgress: batchAnalysis.inProgress,
+                                              }
+                                            : undefined
+                                    }
+                                    onStartBatchAnalysis={handleStartBatchAnalysis}
+                                    onCancelBatchAnalysis={handleCancelBatchAnalysis}
+                                    analysisSettings={analysisSettings}
+                                    onAnalysisSettingsChange={setAnalysisSettings}
+                                    kifuTree={navigation.tree}
+                                    onNodeClick={navigation.goToNodeById}
+                                    onBranchSwitch={navigation.switchBranchAtNode}
+                                    onAnalyzeNode={handleAnalyzeNode}
+                                    onAnalyzeBranch={handleAnalyzeBranch}
+                                    onStartTreeBatchAnalysis={handleStartTreeBatchAnalysis}
+                                    isOnMainLine={navigation.state.isOnMainLine}
+                                    onMoveDetailSelect={handleMoveDetailSelect}
+                                />
 
-                        {/* 右サイドドロワー: 手の詳細パネル */}
-                        <div
-                            className={`
-                                fixed top-0 right-0 h-full z-50
-                                transform transition-transform duration-300 ease-out
-                                ${selectedMoveDetail ? "translate-x-0" : "translate-x-full"}
-                            `}
-                        >
-                            <div className="h-full flex items-start pt-20 pr-4">
-                                {selectedMoveDetail && (
-                                    <MoveDetailPanel
-                                        move={selectedMoveDetail.move}
-                                        position={selectedMoveDetail.position}
-                                        onAddBranch={handleAddPvAsBranch}
-                                        onPreview={handlePreviewPv}
-                                        onAnalyze={handleAnalyzePly}
-                                        isAnalyzing={isAnalyzing}
-                                        analyzingPly={
-                                            analyzingState.type !== "none"
-                                                ? analyzingState.ply
-                                                : undefined
-                                        }
-                                        kifuTree={navigation.tree}
-                                        onClose={() => setSelectedMoveDetail(null)}
-                                        isOnMainLine={navigation.state.isOnMainLine}
-                                    />
-                                )}
+                                {/* 詳細ドロワー（棋譜パネルの右側にスライドイン） */}
+                                <div
+                                    className={`
+                                        absolute top-0 left-full z-50
+                                        transform transition-transform duration-300 ease-out
+                                        ${selectedMoveDetail ? "translate-x-0" : "-translate-x-full opacity-0 pointer-events-none"}
+                                    `}
+                                >
+                                    <div className="pl-2">
+                                        {selectedMoveDetail && (
+                                            <MoveDetailPanel
+                                                move={selectedMoveDetail.move}
+                                                position={selectedMoveDetail.position}
+                                                onAddBranch={handleAddPvAsBranch}
+                                                onPreview={handlePreviewPv}
+                                                onAnalyze={handleAnalyzePly}
+                                                isAnalyzing={isAnalyzing}
+                                                analyzingPly={
+                                                    analyzingState.type !== "none"
+                                                        ? analyzingState.ply
+                                                        : undefined
+                                                }
+                                                kifuTree={navigation.tree}
+                                                onClose={() => setSelectedMoveDetail(null)}
+                                                isOnMainLine={navigation.state.isOnMainLine}
+                                            />
+                                        )}
+                                    </div>
+                                </div>
                             </div>
                         </div>
 
