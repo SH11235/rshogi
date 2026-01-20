@@ -48,7 +48,7 @@
         --shogi-cell-dark: 35 49% 80%; /* マス目（暗） #ead2ac */
 
         /* レイアウト */
-        --panel-width: 340px; /* 右サイドパネルの幅 */
+        --panel-width: 400px; /* 右サイドパネルの幅 */
     }
 
     .dark {
