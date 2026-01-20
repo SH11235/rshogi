@@ -52,7 +52,12 @@ export function ClockDisplay({
                     <span className="text-muted-foreground">+</span>
                     {formatTime(clock.byoyomiMs)}
                 </span>
-                {ticking && <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />}
+                <span
+                    className={cn(
+                        "w-1.5 h-1.5 rounded-full",
+                        ticking ? "bg-primary animate-pulse" : "invisible",
+                    )}
+                />
             </div>
         );
     };
