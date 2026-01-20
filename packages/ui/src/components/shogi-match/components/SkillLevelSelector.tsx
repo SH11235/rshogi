@@ -24,12 +24,7 @@ export function SkillLevelSelector({
     const currentLevel = value?.skillLevel ?? SKILL_LEVEL_MAX;
 
     const handleLevelChange = (level: number) => {
-        if (level === SKILL_LEVEL_MAX) {
-            // 最大レベル（全力）の場合は undefined を設定
-            onChange(undefined);
-        } else {
-            onChange({ skillLevel: level });
-        }
+        onChange({ skillLevel: level });
     };
 
     return (
