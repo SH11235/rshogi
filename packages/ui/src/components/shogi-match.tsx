@@ -2057,12 +2057,15 @@ export function ShogiMatch({
                     <div className="flex gap-4 items-start">
                         {/* 左列: 将棋盤（サイズ固定） */}
                         <div className="flex flex-col gap-2 items-center shrink-0">
-                            <div ref={boardSectionRef} className="w-fit relative">
+                            <div
+                                ref={boardSectionRef}
+                                className="w-fit relative flex flex-col gap-2"
+                            >
                                 {isDraggingPiece ? (
                                     <div className={deleteHintClasses}>盤外へドラッグで削除</div>
                                 ) : null}
                                 <div
-                                    className={`mt-2 flex flex-col gap-2 items-center ${isDraggingPiece ? "touch-none" : ""}`}
+                                    className={`flex flex-col gap-2 items-center ${isDraggingPiece ? "touch-none" : ""}`}
                                 >
                                     {/* 盤の上側の持ち駒（通常:後手、反転時:先手） */}
                                     {(() => {

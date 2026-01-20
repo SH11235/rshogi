@@ -248,7 +248,7 @@ export function MobileLayout({
     const isEditModeActive = isEditMode && !isMatchRunning;
 
     return (
-        <div className="fixed inset-0 flex flex-col w-full h-dvh overflow-hidden px-2 bg-background">
+        <div className="fixed inset-0 flex flex-col gap-2 w-full h-dvh overflow-hidden px-2 bg-background">
             {/* === ヘッダー: 自然な高さ、縮小しない === */}
             <header className="flex-shrink-0">
                 {/* ステータス行 */}
@@ -317,7 +317,7 @@ export function MobileLayout({
             </main>
 
             {/* === コントロール: 残りの高さを使う、必要に応じて縮小 === */}
-            <footer className="flex-1 flex flex-col min-h-0 mt-2">
+            <footer className="flex-1 flex flex-col min-h-0">
                 {gameMode === "playing" ? (
                     /* 対局モード: 1行棋譜 + 停止・投了・待ったボタン */
                     <div className="flex flex-col gap-2 flex-shrink-0">
