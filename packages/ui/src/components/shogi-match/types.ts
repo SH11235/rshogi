@@ -87,9 +87,10 @@ export const DEFAULT_ANALYSIS_SETTINGS: AnalysisSettings = {
  * ゲームモード
  * - 'editing': 盤面編集モード（駒の配置・削除）
  * - 'playing': 対局モード（手番に従って指し手を進める）
+ * - 'paused': 対局一時停止モード（棋譜を保持したまま停止）
  * - 'reviewing': 検討モード（自由に分岐を作成）
  */
-export type GameMode = "editing" | "playing" | "reviewing";
+export type GameMode = "editing" | "playing" | "paused" | "reviewing";
 
 /**
  * 解析状態を表す型
@@ -104,3 +105,19 @@ export type AnalyzingState =
 
 /** 解析していない状態の定数 */
 export const ANALYZING_STATE_NONE: AnalyzingState = { type: "none" };
+
+/**
+ * メッセージの種類
+ * - 'error': エラーメッセージ（赤）
+ * - 'warning': 警告メッセージ（オレンジ）
+ * - 'success': 成功メッセージ（緑）
+ */
+type MessageType = "error" | "warning" | "success";
+
+/**
+ * 表示メッセージ
+ */
+export interface Message {
+    text: string;
+    type: MessageType;
+}

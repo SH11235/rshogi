@@ -27,7 +27,7 @@ const createEmptyPosition = (): PositionState => ({
 
 describe("dropLogic", () => {
     describe("validateDrop", () => {
-        it("削除は常に許可される", () => {
+        it("削除は許可される（通常の駒）", () => {
             const position = createEmptyPosition();
             const origin: DragOrigin = { type: "board", square: "5e" };
             const payload: DragPayload = {
@@ -40,6 +40,24 @@ describe("dropLogic", () => {
             const result = validateDrop(origin, payload, target, position);
 
             expect(result.ok).toBe(true);
+        });
+
+        it("玉は削除できない", () => {
+            const position = createEmptyPosition();
+            position.board["5i"] = { owner: "sente", type: "K" };
+
+            const origin: DragOrigin = { type: "board", square: "5i" };
+            const payload: DragPayload = {
+                owner: "sente",
+                pieceType: "K",
+                isPromoted: false,
+            };
+            const target: DropTarget = { type: "delete" };
+
+            const result = validateDrop(origin, payload, target, position);
+
+            expect(result.ok).toBe(false);
+            expect(result.error).toBe("玉は削除できません");
         });
 
         it("盤上から盤上への移動を許可する", () => {

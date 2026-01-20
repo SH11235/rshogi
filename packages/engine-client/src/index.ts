@@ -17,21 +17,6 @@ export interface SkillLevelSettings {
     skillLevel: number;
 }
 
-/**
- * プリセットレベル
- */
-export type SkillPreset = "beginner" | "intermediate" | "advanced" | "professional" | "custom";
-
-/**
- * プリセットから SkillLevelSettings への変換マップ
- */
-export const SKILL_PRESETS: Record<Exclude<SkillPreset, "custom">, SkillLevelSettings> = {
-    beginner: { skillLevel: 2 },
-    intermediate: { skillLevel: 10 },
-    advanced: { skillLevel: 16 },
-    professional: { skillLevel: 20 },
-};
-
 /** Skill Level の有効範囲 */
 export const SKILL_LEVEL_MIN = 0;
 export const SKILL_LEVEL_MAX = 20;
@@ -71,37 +56,6 @@ export function normalizeSkillLevelSettings(settings: SkillLevelSettings): Skill
     const skillLevel = Math.max(SKILL_LEVEL_MIN, Math.min(SKILL_LEVEL_MAX, settings.skillLevel));
     return { skillLevel };
 }
-
-/**
- * SkillLevelSettings からプリセットを推定
- */
-export function detectSkillPreset(settings: SkillLevelSettings): SkillPreset {
-    // 範囲外の値はカスタムとして扱う
-    if (settings.skillLevel < SKILL_LEVEL_MIN || settings.skillLevel > SKILL_LEVEL_MAX) {
-        return "custom";
-    }
-
-    for (const [preset, presetSettings] of Object.entries(SKILL_PRESETS) as [
-        Exclude<SkillPreset, "custom">,
-        SkillLevelSettings,
-    ][]) {
-        if (presetSettings.skillLevel === settings.skillLevel) {
-            return preset;
-        }
-    }
-    return "custom";
-}
-
-/**
- * プリセット名の日本語表示
- */
-export const SKILL_PRESET_LABELS: Record<SkillPreset, string> = {
-    beginner: "初心者",
-    intermediate: "中級者",
-    advanced: "上級者",
-    professional: "全力",
-    custom: "カスタム",
-};
 
 export interface EngineInitOptions {
     /** バックエンドの種類 (native/wasm/external-usi) */

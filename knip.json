@@ -9,5 +9,6 @@
             ]
         }
     },
-    "ignoreDependencies": ["wasm-opt"]
+    "ignoreDependencies": ["wasm-opt"],
+    "ignore": ["apps/desktop/src-tauri/target/**"]
 }

@@ -142,6 +142,8 @@ interface KifuPanelProps {
     onSelectedBranchChange?: (branchNodeId: string | null) => void;
     /** 現在位置がメインライン上にあるか（PV分岐追加の制御用） */
     isOnMainLine?: boolean;
+    /** 手の詳細を選択したときのコールバック（右パネル表示用） */
+    onMoveDetailSelect?: (move: KifMove | null, position: PositionState | null) => void;
 }
 
 /**
@@ -823,16 +825,25 @@ function BatchAnalysisDropdown({
         }
     };
 
+    const isDisabled = movesWithoutPv === 0;
+
     return (
-        <Popover open={isOpen} onOpenChange={setIsOpen}>
+        <Popover open={isOpen} onOpenChange={isDisabled ? undefined : setIsOpen}>
             <PopoverTrigger asChild>
                 <button
                     type="button"
-                    className="relative w-7 h-7 flex items-center justify-center text-[14px] rounded border cursor-pointer transition-colors duration-150 bg-primary/10 text-primary border-primary/30 hover:bg-primary/20"
-                    aria-label={`一括解析: ${movesWithoutPv}手`}
+                    disabled={isDisabled}
+                    className={`relative w-7 h-7 flex items-center justify-center text-[14px] rounded border transition-colors duration-150 ${
+                        isDisabled
+                            ? "cursor-not-allowed opacity-40 bg-muted text-muted-foreground border-border"
+                            : "cursor-pointer bg-primary/10 text-primary border-primary/30 hover:bg-primary/20"
+                    }`}
+                    aria-label={
+                        isDisabled ? "解析対象の手がありません" : `一括解析: ${movesWithoutPv}手`
+                    }
                 >
                     ⚡{/* 自動解析有効時のインジケーター */}
-                    {analysisSettings.autoAnalyzeMode !== "off" && (
+                    {!isDisabled && analysisSettings.autoAnalyzeMode !== "off" && (
                         <span className="absolute -top-1 -right-1 w-2 h-2 bg-[hsl(var(--wafuu-kin))] rounded-full" />
                     )}
                 </button>
@@ -1034,11 +1045,11 @@ export function KifuPanel({
     onLastAddedBranchHandled,
     onSelectedBranchChange,
     isOnMainLine = true,
+    onMoveDetailSelect,
 }: KifuPanelProps): ReactElement {
     // _onBranchSwitch: 将来的に分岐切り替え機能で使用予定
     const listRef = useRef<HTMLDivElement>(null);
     const currentRowRef = useRef<HTMLElement>(null);
-    const expandedDetailsRef = useRef<HTMLElement>(null);
     const [copySuccess, setCopySuccess] = useState(false);
     const [hintDismissed, setHintDismissed] = useState(false);
     const [viewMode, setViewMode] = useState<ViewMode>("main");
@@ -1085,19 +1096,6 @@ export function KifuPanel({
     const toggleMoveDetailExpansion = useCallback((ply: number) => {
         setExpandedMoveDetail((prev) => (prev === ply ? null : ply));
     }, []);
-
-    // 詳細展開時に自動スクロール
-    useEffect(() => {
-        if (expandedMoveDetail !== null && expandedDetailsRef.current) {
-            // 少し遅延させてDOMが更新された後にスクロール
-            requestAnimationFrame(() => {
-                expandedDetailsRef.current?.scrollIntoView({
-                    behavior: "smooth",
-                    block: "nearest",
-                });
-            });
-        }
-    }, [expandedMoveDetail]);
 
     // 選択中の分岐の手順を取得
     const selectedBranchMoves = useMemo<FlatTreeNode[]>(() => {
@@ -1369,10 +1367,9 @@ export function KifuPanel({
                                 </Tooltip>
                             </label>
                         )}
-                        {/* 一括解析ボタン（ドロップダウン） */}
+                        {/* 一括解析ボタン（ドロップダウン） - 常に表示してレイアウトシフトを防止 */}
                         {onStartBatchAnalysis &&
                             kifMoves.length > 0 &&
-                            movesWithoutPv > 0 &&
                             !batchAnalysis?.isRunning &&
                             analysisSettings &&
                             onAnalysisSettingsChange && (
@@ -1798,11 +1795,25 @@ export function KifuPanel({
                                     </Tooltip>
                                 );
 
-                                // 行クリックハンドラ（ply選択 + 詳細展開トグル）
+                                // 行クリックハンドラ（ply選択 + 詳細展開/外部通知）
                                 const handleRowClick = () => {
                                     // まず局面を選択
                                     onPlySelect?.(move.ply);
-                                    // 詳細展開可能なら展開/折りたたみをトグル
+
+                                    // 外部コールバックがある場合は詳細を右パネルに表示
+                                    if (onMoveDetailSelect && canExpand && position) {
+                                        // 同じ手をもう一度クリックしたら選択解除
+                                        if (isDetailExpanded) {
+                                            onMoveDetailSelect(null, null);
+                                            setExpandedMoveDetail(null);
+                                        } else {
+                                            onMoveDetailSelect(move, position);
+                                            setExpandedMoveDetail(move.ply);
+                                        }
+                                        return;
+                                    }
+
+                                    // 外部コールバックがない場合は従来のインライン展開
                                     if (canExpand) {
                                         toggleMoveDetailExpansion(move.ply);
                                     }
@@ -1859,14 +1870,10 @@ export function KifuPanel({
                                         />
                                     ) : null;
 
-                                // 詳細展開コンテンツ
+                                // 詳細展開コンテンツ（外部コールバックがある場合は右パネルに表示するためインライン非表示）
                                 const expandedDetails =
-                                    isDetailExpanded && position ? (
-                                        <div
-                                            ref={
-                                                expandedDetailsRef as React.RefObject<HTMLDivElement>
-                                            }
-                                        >
+                                    !onMoveDetailSelect && isDetailExpanded && position ? (
+                                        <div>
                                             <ExpandedMoveDetails
                                                 move={move}
                                                 position={position}

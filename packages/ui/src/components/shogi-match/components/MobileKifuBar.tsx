@@ -63,12 +63,15 @@ export function MobileKifuBar({
                         key={move.ply}
                         ref={isCurrent ? scrollToCurrentRef : undefined}
                         type="button"
-                        onClick={() => onPlySelect?.(move.ply)}
+                        onClick={onPlySelect ? () => onPlySelect(move.ply) : undefined}
+                        disabled={!onPlySelect}
                         className={cn(
                             "shrink-0 px-1.5 py-1 rounded text-sm whitespace-nowrap transition-colors",
                             isCurrent
                                 ? "bg-primary text-primary-foreground font-semibold"
-                                : "text-foreground hover:bg-muted",
+                                : "text-foreground",
+                            onPlySelect && !isCurrent && "hover:bg-muted",
+                            !onPlySelect && "cursor-default",
                         )}
                     >
                         <span
