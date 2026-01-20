@@ -38,8 +38,12 @@ export function validateDrop(
     target: DropTarget,
     position: PositionState,
 ): ValidateDropResult {
-    // 削除は常に許可
+    // 削除
     if (target.type === "delete") {
+        // 玉は削除できない
+        if (payload.pieceType === "K") {
+            return { ok: false, error: "玉は削除できません" };
+        }
         return { ok: true };
     }
 
