@@ -21,7 +21,7 @@ import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ShogiBoardCell } from "./shogi-board";
 import { ShogiBoard } from "./shogi-board";
-import { ClockDisplayPanel } from "./shogi-match/components/ClockDisplayPanel";
+import { MobileClockDisplay } from "./shogi-match/components/MobileClockDisplay";
 import { EditModePanel } from "./shogi-match/components/EditModePanel";
 import { EngineLogsPanel } from "./shogi-match/components/EngineLogsPanel";
 import { EvalPanel } from "./shogi-match/components/EvalPanel";
@@ -111,9 +111,6 @@ const TEXT_CLASSES = {
     mutedSecondary: "text-xs text-muted-foreground",
     moveCount: "text-center text-sm font-semibold text-foreground my-2",
 } as const;
-
-const deleteHintClasses =
-    "absolute top-2 right-2 px-2 py-1 rounded-full border border-dashed border-[hsl(var(--wafuu-border))] bg-[hsl(var(--wafuu-washi-warm))] text-[hsl(var(--wafuu-sumi))] text-[11px] font-semibold tracking-wide pointer-events-none shadow-[0_6px_12px_rgba(0,0,0,0.08)]";
 
 // 持ち駒表示セクションコンポーネント
 interface PlayerHandSectionProps {
@@ -2055,12 +2052,16 @@ export function ShogiMatch({
                                 ref={boardSectionRef}
                                 className="w-fit relative flex flex-col gap-2"
                             >
-                                {isDraggingPiece ? (
-                                    <div className={deleteHintClasses}>盤外へドラッグで削除</div>
-                                ) : null}
                                 <div
                                     className={`flex flex-col gap-2 items-center ${isDraggingPiece ? "touch-none" : ""}`}
                                 >
+                                    {/* 時間管理（将棋盤の上） */}
+                                    <MobileClockDisplay
+                                        clocks={clocks}
+                                        sides={sides}
+                                        isRunning={isMatchRunning}
+                                    />
+
                                     {/* 盤の上側の持ち駒（通常:後手、反転時:先手） */}
                                     {(() => {
                                         const info = getHandInfo("top");
@@ -2258,8 +2259,6 @@ export function ShogiMatch({
                                     uiEngineOptions={uiEngineOptions}
                                     settingsLocked={settingsLocked}
                                 />
-
-                                <ClockDisplayPanel clocks={clocks} sides={sides} />
 
                                 {/* インポートパネル */}
                                 <KifuImportPanel
