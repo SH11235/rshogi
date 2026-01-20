@@ -18,8 +18,9 @@ pub const FV_SCALE: i32 = 24;
 
 /// 評価値のスケーリング（デフォルト: 16）
 ///
-/// YaneuraOuのデフォルト値。多くのnnue-pytorch訓練モデルもこの値を使用。
-/// kPonanzaConstant = 600 に対応。
+/// nnue-pytorchでハードコードされている値（kBiasScale = 600 * 16 = 9600）。
+/// YaneuraOuのデフォルト値でもある。
+/// bullet-shogiで学習したモデル（scale=600）もこの値で動作する。
 pub const FV_SCALE_HALFKA: i32 = 16;
 
 /// 重みのスケーリングビット数
