@@ -169,124 +169,164 @@ export function HandPiecesDisplay({
             </span>
             {/* 持ち駒コンテナ - 駒だけが詰まる */}
             <div className={cn("flex items-center relative", containerConfig.piecesContainer)}>
-                {/* 高さ確保用のダミー駒（常に非表示だがスペースを確保） */}
-                <div className="invisible" aria-hidden="true">
-                    <div
-                        className={cn(
-                            "border-2 border-transparent rounded-lg",
-                            containerConfig.buttonPadding,
-                        )}
-                    >
-                        <PieceToken
-                            pieceType="P"
-                            owner={owner}
-                            count={0}
-                            flipBoard={flipBoard}
-                            size={size}
-                        />
-                    </div>
-                </div>
-                {HAND_ORDER.map((piece) => {
-                    const count = hand[piece] ?? 0;
-
-                    const selected = selectedPiece === piece;
-                    // 編集モード時は0個でもドラッグ可能（ストックとして機能）
-                    const canDrag = (count > 0 || isEditMode) && Boolean(onPiecePointerDown);
-                    const canSelect = count > 0 && isActive;
-                    const isDisabled = !canDrag && !canSelect && !isEditMode;
-                    const maxCount = PIECE_CAP[piece];
-
-                    // 対局中は持っている駒だけ詰めて表示
-                    // 対局前（!isMatchRunning）は編集のために全ての駒を表示する
-                    if (isMatchRunning && !isEditMode && count === 0) {
-                        return null;
-                    }
-
-                    return (
-                        <div key={`${owner}-${piece}`} className="flex items-center gap-px">
-                            {/* 駒ボタン */}
-                            <button
-                                type="button"
-                                onPointerDown={(e) => {
-                                    if (canDrag && onPiecePointerDown) {
-                                        // タッチ時のテキスト選択・長押しメニューを防止
-                                        e.preventDefault();
-                                        onPiecePointerDown(owner, piece, e);
-                                    }
-                                }}
-                                onClick={(e) => {
-                                    if (!canSelect) {
-                                        e.preventDefault();
-                                        return;
-                                    }
-                                    onHandSelect(piece);
-                                }}
-                                disabled={isDisabled}
-                                className={cn(
-                                    "relative rounded-lg border-2 transition-all",
-                                    // タッチ選択・長押しメニュー防止
-                                    "select-none [-webkit-touch-callout:none]",
-                                    // 編集モード（ドラッグ可能）時はスクロールも防止
-                                    canDrag ? "touch-none" : "touch-manipulation",
-                                    containerConfig.buttonPadding,
-                                    selected
-                                        ? "border-[hsl(var(--wafuu-shu))] bg-[hsl(var(--wafuu-kin)/0.2)]"
-                                        : "border-transparent",
-                                    count > 0 || isEditMode ? "opacity-100" : "opacity-40",
-                                    (canDrag || canSelect) &&
-                                        "cursor-pointer hover:bg-[hsl(var(--wafuu-kin)/0.1)]",
-                                )}
-                            >
-                                <PieceToken
-                                    pieceType={piece}
-                                    owner={owner}
-                                    count={count}
-                                    flipBoard={flipBoard}
-                                    size={size}
-                                />
-                            </button>
-
-                            {/* ±ボタン（縦並び）- 編集モードでなくてもスペースを確保、compact/mediumモード時は編集モードのみ表示 */}
-                            {(!isCompactLayout || isEditMode) && (
+                {/* 横幅/高さ確保用のダミー要素 */}
+                {!isCompactLayout ? (
+                    // PC版: 全7種の駒＋±ボタンで横幅を確保
+                    <div className="invisible flex items-center gap-0.5" aria-hidden="true">
+                        {HAND_ORDER.map((piece) => (
+                            <div key={piece} className="flex items-center gap-px">
                                 <div
                                     className={cn(
-                                        "flex flex-col gap-px",
-                                        isEditMode ? "visible" : "invisible",
+                                        "border-2 border-transparent rounded-lg",
+                                        containerConfig.buttonPadding,
                                     )}
                                 >
-                                    <button
-                                        type="button"
-                                        onClick={() => onIncrement?.(piece)}
-                                        disabled={!isEditMode || count >= maxCount}
-                                        aria-label={`${PIECE_LABELS[piece]}を増やす`}
-                                        className={cn(
-                                            "flex h-4 w-5 items-center justify-center rounded-t border border-b-0 border-[hsl(var(--border))] text-xs font-bold leading-none",
-                                            count < maxCount
-                                                ? "cursor-pointer bg-[hsl(var(--wafuu-washi))] text-[hsl(var(--wafuu-sumi))] opacity-100"
-                                                : "cursor-not-allowed bg-[hsl(var(--muted))] text-[hsl(var(--muted-foreground))] opacity-40",
-                                        )}
-                                    >
-                                        +
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => onDecrement?.(piece)}
-                                        disabled={!isEditMode || count <= 0}
-                                        aria-label={`${PIECE_LABELS[piece]}を減らす`}
-                                        className={cn(
-                                            "flex h-4 w-5 items-center justify-center rounded-b border border-[hsl(var(--border))] text-xs font-bold leading-none",
-                                            count > 0
-                                                ? "cursor-pointer bg-[hsl(var(--wafuu-washi))] text-[hsl(var(--wafuu-sumi))] opacity-100"
-                                                : "cursor-not-allowed bg-[hsl(var(--muted))] text-[hsl(var(--muted-foreground))] opacity-40",
-                                        )}
-                                    >
-                                        −
-                                    </button>
+                                    <PieceToken
+                                        pieceType={piece}
+                                        owner={owner}
+                                        count={0}
+                                        flipBoard={flipBoard}
+                                        size={size}
+                                    />
                                 </div>
+                                {/* ±ボタン分のスペース */}
+                                <div className="flex flex-col gap-px">
+                                    <div className="h-4 w-5" />
+                                    <div className="h-4 w-5" />
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                ) : (
+                    // モバイル版: 高さ確保用の1つの駒
+                    <div className="invisible" aria-hidden="true">
+                        <div
+                            className={cn(
+                                "border-2 border-transparent rounded-lg",
+                                containerConfig.buttonPadding,
                             )}
+                        >
+                            <PieceToken
+                                pieceType="P"
+                                owner={owner}
+                                count={0}
+                                flipBoard={flipBoard}
+                                size={size}
+                            />
                         </div>
-                    );
-                })}
+                    </div>
+                )}
+
+                {/* 実際の駒（PC版は absolute で左寄せ、モバイル版は通常フロー） */}
+                <div
+                    className={
+                        !isCompactLayout
+                            ? "absolute left-0 top-0 flex items-center gap-0.5 h-full"
+                            : "contents"
+                    }
+                >
+                    {HAND_ORDER.map((piece) => {
+                        const count = hand[piece] ?? 0;
+
+                        const selected = selectedPiece === piece;
+                        // 編集モード時は0個でもドラッグ可能（ストックとして機能）
+                        const canDrag = (count > 0 || isEditMode) && Boolean(onPiecePointerDown);
+                        const canSelect = count > 0 && isActive;
+                        const isDisabled = !canDrag && !canSelect && !isEditMode;
+                        const maxCount = PIECE_CAP[piece];
+
+                        // 対局中は持っている駒だけ詰めて表示
+                        // 対局前（!isMatchRunning）は編集のために全ての駒を表示する
+                        if (isMatchRunning && !isEditMode && count === 0) {
+                            return null;
+                        }
+
+                        return (
+                            <div key={`${owner}-${piece}`} className="flex items-center gap-px">
+                                {/* 駒ボタン */}
+                                <button
+                                    type="button"
+                                    onPointerDown={(e) => {
+                                        if (canDrag && onPiecePointerDown) {
+                                            // タッチ時のテキスト選択・長押しメニューを防止
+                                            e.preventDefault();
+                                            onPiecePointerDown(owner, piece, e);
+                                        }
+                                    }}
+                                    onClick={(e) => {
+                                        if (!canSelect) {
+                                            e.preventDefault();
+                                            return;
+                                        }
+                                        onHandSelect(piece);
+                                    }}
+                                    disabled={isDisabled}
+                                    className={cn(
+                                        "relative rounded-lg border-2 transition-all",
+                                        // タッチ選択・長押しメニュー防止
+                                        "select-none [-webkit-touch-callout:none]",
+                                        // 編集モード（ドラッグ可能）時はスクロールも防止
+                                        canDrag ? "touch-none" : "touch-manipulation",
+                                        containerConfig.buttonPadding,
+                                        selected
+                                            ? "border-[hsl(var(--wafuu-shu))] bg-[hsl(var(--wafuu-kin)/0.2)]"
+                                            : "border-transparent",
+                                        count > 0 || isEditMode ? "opacity-100" : "opacity-40",
+                                        (canDrag || canSelect) &&
+                                            "cursor-pointer hover:bg-[hsl(var(--wafuu-kin)/0.1)]",
+                                    )}
+                                >
+                                    <PieceToken
+                                        pieceType={piece}
+                                        owner={owner}
+                                        count={count}
+                                        flipBoard={flipBoard}
+                                        size={size}
+                                    />
+                                </button>
+
+                                {/* ±ボタン（縦並び）- 編集モードでなくてもスペースを確保、compact/mediumモード時は編集モードのみ表示 */}
+                                {(!isCompactLayout || isEditMode) && (
+                                    <div
+                                        className={cn(
+                                            "flex flex-col gap-px",
+                                            isEditMode ? "visible" : "invisible",
+                                        )}
+                                    >
+                                        <button
+                                            type="button"
+                                            onClick={() => onIncrement?.(piece)}
+                                            disabled={!isEditMode || count >= maxCount}
+                                            aria-label={`${PIECE_LABELS[piece]}を増やす`}
+                                            className={cn(
+                                                "flex h-4 w-5 items-center justify-center rounded-t border border-b-0 border-[hsl(var(--border))] text-xs font-bold leading-none",
+                                                count < maxCount
+                                                    ? "cursor-pointer bg-[hsl(var(--wafuu-washi))] text-[hsl(var(--wafuu-sumi))] opacity-100"
+                                                    : "cursor-not-allowed bg-[hsl(var(--muted))] text-[hsl(var(--muted-foreground))] opacity-40",
+                                            )}
+                                        >
+                                            +
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => onDecrement?.(piece)}
+                                            disabled={!isEditMode || count <= 0}
+                                            aria-label={`${PIECE_LABELS[piece]}を減らす`}
+                                            className={cn(
+                                                "flex h-4 w-5 items-center justify-center rounded-b border border-[hsl(var(--border))] text-xs font-bold leading-none",
+                                                count > 0
+                                                    ? "cursor-pointer bg-[hsl(var(--wafuu-washi))] text-[hsl(var(--wafuu-sumi))] opacity-100"
+                                                    : "cursor-not-allowed bg-[hsl(var(--muted))] text-[hsl(var(--muted-foreground))] opacity-40",
+                                            )}
+                                        >
+                                            −
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })}
+                </div>
             </div>
         </div>
     );
