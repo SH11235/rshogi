@@ -10,7 +10,7 @@ use std::thread;
 use anyhow::Result;
 use engine_core::eval::{
     set_eval_hash_enabled, set_material_level, set_pass_move_bonus, set_pass_right_value_phased,
-    MaterialLevel,
+    MaterialLevel, DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE,
 };
 use engine_core::nnue::{
     evaluate_dispatch, get_network, init_nnue, set_fv_scale_override, AccumulatorStackVariant,
@@ -89,8 +89,8 @@ impl UsiEngine {
             large_pages_reported: false,
             pass_rights_enabled: false,
             initial_pass_count: 2,
-            pass_right_value_early: 50,
-            pass_right_value_late: 200,
+            pass_right_value_early: DEFAULT_PASS_RIGHT_VALUE_EARLY,
+            pass_right_value_late: DEFAULT_PASS_RIGHT_VALUE_LATE,
         }
     }
 
@@ -178,8 +178,8 @@ impl UsiEngine {
         println!("option name PassRights type check default false");
         println!("option name InitialPassCount type spin default 2 min 0 max 10");
         println!("option name PassMoveBonus type spin default 0 min -1000 max 1000");
-        println!("option name PassRightValueEarly type spin default 0 min 0 max 500");
-        println!("option name PassRightValueLate type spin default 0 min 0 max 500");
+        println!("option name PassRightValueEarly type spin default {DEFAULT_PASS_RIGHT_VALUE_EARLY} min 0 max 500");
+        println!("option name PassRightValueLate type spin default {DEFAULT_PASS_RIGHT_VALUE_LATE} min 0 max 500");
         println!("usiok");
     }
 

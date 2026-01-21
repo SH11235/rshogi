@@ -89,8 +89,13 @@ impl Move {
 
     /// 移動先を取得
     ///
-    /// 【注意】PASSに対して呼ぶと不正な値が返る
-    /// NULLはNMPで使用されるため従来通り許可
+    /// # 注意
+    /// - PASSに対して呼ぶと不正な値が返る
+    /// - NULLはNMPで使用されるため従来通り許可
+    ///
+    /// # Safety
+    /// - release ビルドでは PASS チェックが無効化される（`debug_assert!`）
+    /// - 呼び出し側で PASS でないことを保証する必要がある
     #[inline]
     pub const fn to(self) -> Square {
         debug_assert!(!self.is_pass(), "to() called on PASS move");
@@ -300,6 +305,10 @@ impl Move {
     }
 
     /// USI形式の文字列からMoveに変換（パス対応）
+    ///
+    /// # パス手の形式
+    /// - `"pass"`: 独自形式
+    /// - `"0000"`: UCI（チェス）由来のnull move形式
     pub fn from_usi(s: &str) -> Option<Move> {
         if s == "none" {
             return Some(Move::NONE);

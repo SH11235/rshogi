@@ -1489,7 +1489,14 @@ impl Position {
     }
 
     /// 王手になるかどうか
+    ///
+    /// PASSは王手にならないため false を返す
     pub fn gives_check(&self, m: Move) -> bool {
+        // PASS は王手にならない
+        if m.is_pass() {
+            return false;
+        }
+
         let us = self.side_to_move;
         let to = m.to();
 

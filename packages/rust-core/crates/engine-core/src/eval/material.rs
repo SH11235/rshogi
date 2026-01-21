@@ -9,9 +9,9 @@ use crate::types::{Color, Piece, PieceType, Square, Value};
 // =============================================================================
 
 /// パス権評価の序盤値（デフォルト: 0cp - 評価関数に委ねる）
-const DEFAULT_PASS_RIGHT_VALUE_EARLY: i32 = 0;
+pub const DEFAULT_PASS_RIGHT_VALUE_EARLY: i32 = 0;
 /// パス権評価の終盤値（デフォルト: 0cp - 評価関数に委ねる）
-const DEFAULT_PASS_RIGHT_VALUE_LATE: i32 = 0;
+pub const DEFAULT_PASS_RIGHT_VALUE_LATE: i32 = 0;
 /// 序盤の終わり（この手数まで EARLY_VALUE を使用）
 const EARLY_PLY: u16 = 40;
 /// 終盤の始まり（この手数以降 LATE_VALUE を使用）
@@ -39,12 +39,12 @@ pub fn set_pass_right_value_phased(early: i32, late: i32) {
     PASS_RIGHT_VALUE_LATE.store(late, Ordering::Relaxed);
 }
 
-/// 手数に応じたパス権評価値を計算
+/// 手数に応じたパス権評価値を計算（純粋関数）
+///
+/// グローバル変数を参照せず、引数のみで計算する。
+/// テストやデバッグで使用可能。
 #[inline]
-fn pass_right_value_by_ply(ply: u16) -> i32 {
-    let early_value = PASS_RIGHT_VALUE_EARLY.load(Ordering::Relaxed);
-    let late_value = PASS_RIGHT_VALUE_LATE.load(Ordering::Relaxed);
-
+fn compute_pass_right_value(ply: u16, early_value: i32, late_value: i32) -> i32 {
     if ply <= EARLY_PLY {
         early_value
     } else if ply >= LATE_PLY {
@@ -55,6 +55,14 @@ fn pass_right_value_by_ply(ply: u16) -> i32 {
         let range = (LATE_PLY - EARLY_PLY) as i32;
         early_value + (late_value - early_value) * ratio / range
     }
+}
+
+/// 手数に応じたパス権評価値を計算（グローバル設定を使用）
+#[inline]
+fn pass_right_value_by_ply(ply: u16) -> i32 {
+    let early_value = PASS_RIGHT_VALUE_EARLY.load(Ordering::Relaxed);
+    let late_value = PASS_RIGHT_VALUE_LATE.load(Ordering::Relaxed);
+    compute_pass_right_value(ply, early_value, late_value)
 }
 
 /// パス権の評価値を計算（手番側視点）
@@ -695,104 +703,92 @@ mod tests {
         set_material_level(original);
     }
 
+    // =========================================================================
+    // 純粋関数のテスト（並列実行可能、グローバル変数を使用しない）
+    // =========================================================================
+
     #[test]
-    fn test_pass_right_value_by_ply_early() {
-        // テスト用の明示的な値を設定
+    fn test_compute_pass_right_value_early() {
         const TEST_EARLY: i32 = 50;
         const TEST_LATE: i32 = 200;
-        set_pass_right_value_phased(TEST_EARLY, TEST_LATE);
 
         // 序盤（40手以下）は EARLY 値
-        assert_eq!(pass_right_value_by_ply(0), TEST_EARLY);
-        assert_eq!(pass_right_value_by_ply(20), TEST_EARLY);
-        assert_eq!(pass_right_value_by_ply(40), TEST_EARLY);
-
-        // デフォルトに戻す
-        set_pass_right_value_phased(DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE);
+        assert_eq!(compute_pass_right_value(0, TEST_EARLY, TEST_LATE), TEST_EARLY);
+        assert_eq!(compute_pass_right_value(20, TEST_EARLY, TEST_LATE), TEST_EARLY);
+        assert_eq!(compute_pass_right_value(40, TEST_EARLY, TEST_LATE), TEST_EARLY);
     }
 
     #[test]
-    fn test_pass_right_value_by_ply_late() {
-        // テスト用の明示的な値を設定
+    fn test_compute_pass_right_value_late() {
         const TEST_EARLY: i32 = 50;
         const TEST_LATE: i32 = 200;
-        set_pass_right_value_phased(TEST_EARLY, TEST_LATE);
 
         // 終盤（120手以上）は LATE 値
-        assert_eq!(pass_right_value_by_ply(120), TEST_LATE);
-        assert_eq!(pass_right_value_by_ply(150), TEST_LATE);
-        assert_eq!(pass_right_value_by_ply(200), TEST_LATE);
-
-        // デフォルトに戻す
-        set_pass_right_value_phased(DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE);
+        assert_eq!(compute_pass_right_value(120, TEST_EARLY, TEST_LATE), TEST_LATE);
+        assert_eq!(compute_pass_right_value(150, TEST_EARLY, TEST_LATE), TEST_LATE);
+        assert_eq!(compute_pass_right_value(200, TEST_EARLY, TEST_LATE), TEST_LATE);
     }
 
     #[test]
-    fn test_pass_right_value_by_ply_interpolation() {
-        // テスト用の明示的な値を設定
+    fn test_compute_pass_right_value_interpolation() {
         const TEST_EARLY: i32 = 50;
         const TEST_LATE: i32 = 200;
-        set_pass_right_value_phased(TEST_EARLY, TEST_LATE);
 
         // 中盤（40〜120手）は線形補間
         // 80手目は中間点: (50 + 200) / 2 = 125
         let mid_ply = (EARLY_PLY + LATE_PLY) / 2; // 80
         let expected_mid = (TEST_EARLY + TEST_LATE) / 2;
-        assert_eq!(pass_right_value_by_ply(mid_ply), expected_mid);
+        assert_eq!(compute_pass_right_value(mid_ply, TEST_EARLY, TEST_LATE), expected_mid);
 
         // 補間値は EARLY と LATE の間
-        let ply_60 = pass_right_value_by_ply(60);
+        let ply_60 = compute_pass_right_value(60, TEST_EARLY, TEST_LATE);
         assert!(ply_60 > TEST_EARLY);
         assert!(ply_60 < TEST_LATE);
 
-        let ply_100 = pass_right_value_by_ply(100);
+        let ply_100 = compute_pass_right_value(100, TEST_EARLY, TEST_LATE);
         assert!(ply_100 > ply_60);
         assert!(ply_100 < TEST_LATE);
-
-        // デフォルトに戻す
-        set_pass_right_value_phased(DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE);
     }
 
-    #[test]
-    fn test_set_pass_right_value_sets_both() {
-        // set_pass_right_value は両方を同じ値に設定
-        set_pass_right_value(150);
-        assert_eq!(pass_right_value_by_ply(0), 150);
-        assert_eq!(pass_right_value_by_ply(200), 150);
+    // =========================================================================
+    // グローバル変数を使用するテスト（1つにまとめて競合を回避）
+    // =========================================================================
 
-        // デフォルトに戻す
-        set_pass_right_value_phased(DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE);
-    }
-
-    /// パス後の評価値が正しく計算されることを確認
+    /// グローバル変数のセット/ゲットと統合テスト
     ///
-    /// PassRightValueEarly=200 の設定で:
-    /// - 初期局面 (2,2): パス権評価=0 (2-2=0)
-    /// - パス後 (1,2): パス権評価=+200 (白視点で 2-1=+1)
-    /// - Negamax: 黒視点では -200 相当のペナルティ
+    /// このテストはグローバル変数 PASS_RIGHT_VALUE_EARLY/LATE を変更するため、
+    /// 他のテストとの競合を避けるために1つにまとめている。
     #[test]
     #[cfg(not(feature = "tournament"))]
-    fn test_pass_evaluation_after_pass() {
+    fn test_pass_right_value_global_and_evaluation() {
         use crate::types::Color;
 
         // 設定を保存
         let orig_early = PASS_RIGHT_VALUE_EARLY.load(std::sync::atomic::Ordering::Relaxed);
         let orig_late = PASS_RIGHT_VALUE_LATE.load(std::sync::atomic::Ordering::Relaxed);
+        let orig_level = get_material_level();
 
+        // --- Part 1: set_pass_right_value_phased のテスト ---
+        set_pass_right_value_phased(50, 200);
+        assert_eq!(pass_right_value_by_ply(0), 50, "Early value should be 50");
+        assert_eq!(pass_right_value_by_ply(200), 200, "Late value should be 200");
+
+        // --- Part 2: set_pass_right_value のテスト（両方を同じ値に設定）---
+        set_pass_right_value(150);
+        assert_eq!(pass_right_value_by_ply(0), 150, "Both should be 150");
+        assert_eq!(pass_right_value_by_ply(200), 150, "Both should be 150");
+
+        // --- Part 3: パス後の評価値テスト ---
         set_material_level(MaterialLevel::Lv9);
         set_pass_right_value_phased(200, 50); // Early=200, Late=50
 
-        // Test 1: Startpos with pass rights 2 2
         let mut pos = Position::new();
         pos.set_startpos_with_pass_rights(2, 2);
 
-        let _eval1 = evaluate_material(&pos);
         let pass_eval1 = evaluate_pass_rights(&pos, pos.game_ply() as u16);
-
-        // パス権が等しいので pass_eval = 0
         assert_eq!(pass_eval1.raw(), 0, "Equal pass rights should give 0 eval");
 
-        // Test 2: After black passes
+        // After black passes
         pos.do_pass_move();
 
         assert_eq!(pos.side_to_move(), Color::White);
@@ -814,5 +810,6 @@ mod tests {
 
         // 設定を復元
         set_pass_right_value_phased(orig_early, orig_late);
+        set_material_level(orig_level);
     }
 }
