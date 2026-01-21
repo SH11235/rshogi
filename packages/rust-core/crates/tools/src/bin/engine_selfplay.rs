@@ -1432,15 +1432,12 @@ fn main() -> Result<()> {
             let sfen_before = pos.to_sfen();
             let think_limit_ms = tc.think_limit_ms(side);
             // パス権が有効な場合、現在のパス権を取得
-            let pass_rights =
-                if cli.pass_rights_black.is_some() || cli.pass_rights_white.is_some() {
-                    Some((
-                        pos.pass_rights(Color::Black),
-                        pos.pass_rights(Color::White),
-                    ))
-                } else {
-                    None
-                };
+            let pass_rights = if cli.pass_rights_black.is_some() || cli.pass_rights_white.is_some()
+            {
+                Some((pos.pass_rights(Color::Black), pos.pass_rights(Color::White)))
+            } else {
+                None
+            };
             let req = SearchRequest {
                 sfen: &sfen_before,
                 time_args: tc.time_args(),
@@ -1507,7 +1504,11 @@ fn main() -> Result<()> {
                                 );
                             }
                             // パス手は王手にならない
-                            let gives_check = if mv.is_pass() { false } else { pos.gives_check(mv) };
+                            let gives_check = if mv.is_pass() {
+                                false
+                            } else {
+                                pos.gives_check(mv)
+                            };
                             pos.do_move(mv, gives_check);
                             tc.update_after_move(side, search.elapsed_ms);
                             move_usi = mv_str.clone();
@@ -2061,7 +2062,11 @@ fn build_position(
         if !is_legal_with_pass(&pos, mv) {
             bail!("illegal move '{mv_str}' in start position");
         }
-        let gives_check = if mv.is_pass() { false } else { pos.gives_check(mv) };
+        let gives_check = if mv.is_pass() {
+            false
+        } else {
+            pos.gives_check(mv)
+        };
         pos.do_move(mv, gives_check);
     }
     Ok(pos)
@@ -2341,7 +2346,11 @@ fn export_game_to_kif<W: Write>(
         };
         let line = format_move_kif(entry.ply, &pos, mv, elapsed_ms, total_time);
         writeln!(writer, "{line}")?;
-        let gives_check = if mv.is_pass() { false } else { pos.gives_check(mv) };
+        let gives_check = if mv.is_pass() {
+            false
+        } else {
+            pos.gives_check(mv)
+        };
         pos.do_move(mv, gives_check);
         if side == Color::Black {
             total_black = total_time;
@@ -2463,10 +2472,7 @@ fn format_move_kif(ply: u32, pos: &Position, mv: Move, elapsed_ms: u64, total_ms
 
     let dest = square_label_kanji(mv.to());
     let (label, from_suffix) = if mv.is_drop() {
-        (
-            format!("{}打", piece_label(mv.drop_piece_type(), false)),
-            String::new(),
-        )
+        (format!("{}打", piece_label(mv.drop_piece_type(), false)), String::new())
     } else {
         let from = mv.from();
         let piece = pos.piece_on(from);

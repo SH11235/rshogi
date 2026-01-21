@@ -8,10 +8,10 @@ use crate::types::{Color, Piece, PieceType, Square, Value};
 // パス権評価（Finite Pass Rights）
 // =============================================================================
 
-/// パス権評価の序盤値（デフォルト: 50cp）
-const DEFAULT_PASS_RIGHT_VALUE_EARLY: i32 = 50;
-/// パス権評価の終盤値（デフォルト: 200cp）
-const DEFAULT_PASS_RIGHT_VALUE_LATE: i32 = 200;
+/// パス権評価の序盤値（デフォルト: 0cp - 評価関数に委ねる）
+const DEFAULT_PASS_RIGHT_VALUE_EARLY: i32 = 0;
+/// パス権評価の終盤値（デフォルト: 0cp - 評価関数に委ねる）
+const DEFAULT_PASS_RIGHT_VALUE_LATE: i32 = 0;
 /// 序盤の終わり（この手数まで EARLY_VALUE を使用）
 const EARLY_PLY: u16 = 40;
 /// 終盤の始まり（この手数以降 LATE_VALUE を使用）
@@ -625,11 +625,15 @@ pub fn evaluate_material(pos: &Position) -> Value {
         }
     };
 
-    if pos.side_to_move() == Color::Black {
+    let base = if pos.side_to_move() == Color::Black {
         Value::new(raw)
     } else {
         Value::new(-raw)
-    }
+    };
+
+    // パス権評価を追加（手番側視点で返される）
+    let pass_eval = evaluate_pass_rights(pos, pos.game_ply() as u16);
+    base + pass_eval
 }
 
 #[cfg(test)]
@@ -693,45 +697,60 @@ mod tests {
 
     #[test]
     fn test_pass_right_value_by_ply_early() {
-        // デフォルト値をリセット
-        set_pass_right_value_phased(DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE);
+        // テスト用の明示的な値を設定
+        const TEST_EARLY: i32 = 50;
+        const TEST_LATE: i32 = 200;
+        set_pass_right_value_phased(TEST_EARLY, TEST_LATE);
 
         // 序盤（40手以下）は EARLY 値
-        assert_eq!(pass_right_value_by_ply(0), DEFAULT_PASS_RIGHT_VALUE_EARLY);
-        assert_eq!(pass_right_value_by_ply(20), DEFAULT_PASS_RIGHT_VALUE_EARLY);
-        assert_eq!(pass_right_value_by_ply(40), DEFAULT_PASS_RIGHT_VALUE_EARLY);
+        assert_eq!(pass_right_value_by_ply(0), TEST_EARLY);
+        assert_eq!(pass_right_value_by_ply(20), TEST_EARLY);
+        assert_eq!(pass_right_value_by_ply(40), TEST_EARLY);
+
+        // デフォルトに戻す
+        set_pass_right_value_phased(DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE);
     }
 
     #[test]
     fn test_pass_right_value_by_ply_late() {
-        // デフォルト値をリセット
-        set_pass_right_value_phased(DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE);
+        // テスト用の明示的な値を設定
+        const TEST_EARLY: i32 = 50;
+        const TEST_LATE: i32 = 200;
+        set_pass_right_value_phased(TEST_EARLY, TEST_LATE);
 
         // 終盤（120手以上）は LATE 値
-        assert_eq!(pass_right_value_by_ply(120), DEFAULT_PASS_RIGHT_VALUE_LATE);
-        assert_eq!(pass_right_value_by_ply(150), DEFAULT_PASS_RIGHT_VALUE_LATE);
-        assert_eq!(pass_right_value_by_ply(200), DEFAULT_PASS_RIGHT_VALUE_LATE);
+        assert_eq!(pass_right_value_by_ply(120), TEST_LATE);
+        assert_eq!(pass_right_value_by_ply(150), TEST_LATE);
+        assert_eq!(pass_right_value_by_ply(200), TEST_LATE);
+
+        // デフォルトに戻す
+        set_pass_right_value_phased(DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE);
     }
 
     #[test]
     fn test_pass_right_value_by_ply_interpolation() {
-        // デフォルト値をリセット
-        set_pass_right_value_phased(DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE);
+        // テスト用の明示的な値を設定
+        const TEST_EARLY: i32 = 50;
+        const TEST_LATE: i32 = 200;
+        set_pass_right_value_phased(TEST_EARLY, TEST_LATE);
 
         // 中盤（40〜120手）は線形補間
-        // 80手目は中間点: (50 + 300) / 2 = 175
+        // 80手目は中間点: (50 + 200) / 2 = 125
         let mid_ply = (EARLY_PLY + LATE_PLY) / 2; // 80
-        let expected_mid = (DEFAULT_PASS_RIGHT_VALUE_EARLY + DEFAULT_PASS_RIGHT_VALUE_LATE) / 2;
+        let expected_mid = (TEST_EARLY + TEST_LATE) / 2;
         assert_eq!(pass_right_value_by_ply(mid_ply), expected_mid);
 
         // 補間値は EARLY と LATE の間
         let ply_60 = pass_right_value_by_ply(60);
-        assert!(ply_60 > DEFAULT_PASS_RIGHT_VALUE_EARLY);
-        assert!(ply_60 < DEFAULT_PASS_RIGHT_VALUE_LATE);
+        assert!(ply_60 > TEST_EARLY);
+        assert!(ply_60 < TEST_LATE);
 
         let ply_100 = pass_right_value_by_ply(100);
         assert!(ply_100 > ply_60);
-        assert!(ply_100 < DEFAULT_PASS_RIGHT_VALUE_LATE);
+        assert!(ply_100 < TEST_LATE);
+
+        // デフォルトに戻す
+        set_pass_right_value_phased(DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE);
     }
 
     #[test]
@@ -743,5 +762,57 @@ mod tests {
 
         // デフォルトに戻す
         set_pass_right_value_phased(DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE);
+    }
+
+    /// パス後の評価値が正しく計算されることを確認
+    ///
+    /// PassRightValueEarly=200 の設定で:
+    /// - 初期局面 (2,2): パス権評価=0 (2-2=0)
+    /// - パス後 (1,2): パス権評価=+200 (白視点で 2-1=+1)
+    /// - Negamax: 黒視点では -200 相当のペナルティ
+    #[test]
+    #[cfg(not(feature = "tournament"))]
+    fn test_pass_evaluation_after_pass() {
+        use crate::types::Color;
+
+        // 設定を保存
+        let orig_early = PASS_RIGHT_VALUE_EARLY.load(std::sync::atomic::Ordering::Relaxed);
+        let orig_late = PASS_RIGHT_VALUE_LATE.load(std::sync::atomic::Ordering::Relaxed);
+
+        set_material_level(MaterialLevel::Lv9);
+        set_pass_right_value_phased(200, 50); // Early=200, Late=50
+
+        // Test 1: Startpos with pass rights 2 2
+        let mut pos = Position::new();
+        pos.set_startpos_with_pass_rights(2, 2);
+
+        let _eval1 = evaluate_material(&pos);
+        let pass_eval1 = evaluate_pass_rights(&pos, pos.game_ply() as u16);
+
+        // パス権が等しいので pass_eval = 0
+        assert_eq!(pass_eval1.raw(), 0, "Equal pass rights should give 0 eval");
+
+        // Test 2: After black passes
+        pos.do_pass_move();
+
+        assert_eq!(pos.side_to_move(), Color::White);
+        assert_eq!(pos.pass_rights(Color::Black), 1);
+        assert_eq!(pos.pass_rights(Color::White), 2);
+
+        let eval2 = evaluate_material(&pos);
+        let pass_eval2 = evaluate_pass_rights(&pos, pos.game_ply() as u16);
+
+        // 白視点: 白2 - 黒1 = +1 → +200cp
+        assert_eq!(pass_eval2.raw(), 200, "White should have +200cp pass rights advantage");
+
+        // Negamaxスコア: 黒視点では負の値になるはず
+        let negamax_pass_score = -eval2.raw();
+        assert!(
+            negamax_pass_score < 0,
+            "Negamax score for pass should be negative: got {negamax_pass_score}"
+        );
+
+        // 設定を復元
+        set_pass_right_value_phased(orig_early, orig_late);
     }
 }

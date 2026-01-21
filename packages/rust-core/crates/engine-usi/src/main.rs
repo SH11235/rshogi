@@ -9,7 +9,8 @@ use std::thread;
 
 use anyhow::Result;
 use engine_core::eval::{
-    set_eval_hash_enabled, set_material_level, set_pass_move_bonus, MaterialLevel,
+    set_eval_hash_enabled, set_material_level, set_pass_move_bonus, set_pass_right_value_phased,
+    MaterialLevel,
 };
 use engine_core::nnue::{
     evaluate_dispatch, get_network, init_nnue, set_fv_scale_override, AccumulatorStackVariant,
@@ -57,6 +58,10 @@ struct UsiEngine {
     pass_rights_enabled: bool,
     /// 初期パス権数（デフォルト2）
     initial_pass_count: u8,
+    /// パス権評価値（序盤）
+    pass_right_value_early: i32,
+    /// パス権評価値（終盤）
+    pass_right_value_late: i32,
 }
 
 impl UsiEngine {
@@ -84,6 +89,8 @@ impl UsiEngine {
             large_pages_reported: false,
             pass_rights_enabled: false,
             initial_pass_count: 2,
+            pass_right_value_early: 50,
+            pass_right_value_late: 200,
         }
     }
 
@@ -170,7 +177,9 @@ impl UsiEngine {
         // 有限パス権（Finite Pass Rights）オプション
         println!("option name PassRights type check default false");
         println!("option name InitialPassCount type spin default 2 min 0 max 10");
-        println!("option name PassMoveBonus type spin default 0 min 0 max 1000");
+        println!("option name PassMoveBonus type spin default 0 min -1000 max 1000");
+        println!("option name PassRightValueEarly type spin default 0 min 0 max 500");
+        println!("option name PassRightValueLate type spin default 0 min 0 max 500");
         println!("usiok");
     }
 
@@ -419,9 +428,29 @@ impl UsiEngine {
             }
             "PassMoveBonus" => {
                 if let Ok(v) = value.parse::<i32>() {
-                    let clamped = v.clamp(0, 1000);
+                    let clamped = v.clamp(-1000, 1000);
                     set_pass_move_bonus(clamped);
                     eprintln!("info string PassMoveBonus: {clamped}");
+                }
+            }
+            "PassRightValueEarly" => {
+                if let Ok(v) = value.parse::<i32>() {
+                    self.pass_right_value_early = v.clamp(0, 500);
+                    set_pass_right_value_phased(
+                        self.pass_right_value_early,
+                        self.pass_right_value_late,
+                    );
+                    eprintln!("info string PassRightValueEarly: {}", self.pass_right_value_early);
+                }
+            }
+            "PassRightValueLate" => {
+                if let Ok(v) = value.parse::<i32>() {
+                    self.pass_right_value_late = v.clamp(0, 500);
+                    set_pass_right_value_phased(
+                        self.pass_right_value_early,
+                        self.pass_right_value_late,
+                    );
+                    eprintln!("info string PassRightValueLate: {}", self.pass_right_value_late);
                 }
             }
             _ => {

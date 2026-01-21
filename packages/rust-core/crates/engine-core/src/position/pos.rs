@@ -816,6 +816,11 @@ impl Position {
         gives_check: bool,
         prefetcher: &P,
     ) -> DirtyPiece {
+        // PASSの場合は do_pass_move に委譲
+        if m.is_pass() {
+            return self.do_pass_move();
+        }
+
         let us = self.side_to_move;
         let them = !us;
         let prev_continuous = self.cur_state().continuous_check;

@@ -8,7 +8,7 @@
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-use crate::eval::{get_scaled_pass_move_bonus, EvalHash};
+use crate::eval::{evaluate_pass_rights, get_scaled_pass_move_bonus, EvalHash};
 use crate::nnue::{evaluate_dispatch, get_network, AccumulatorStackVariant, DirtyPiece};
 use crate::position::Position;
 use crate::search::PieceToHistory;
@@ -446,9 +446,13 @@ impl SearchWorker {
     /// NNUE 評価値を計算
     ///
     /// ロードされた NNUE のアーキテクチャに応じて適切なアキュムレータと評価関数を使用。
+    /// パス権評価も加算する。
     #[inline]
     fn nnue_evaluate(&mut self, pos: &Position) -> Value {
-        evaluate_dispatch(pos, &mut self.nnue_stack)
+        let base = evaluate_dispatch(pos, &mut self.nnue_stack);
+        // パス権評価を追加（手番側視点で返される）
+        let pass_eval = evaluate_pass_rights(pos, pos.game_ply() as u16);
+        base + pass_eval
     }
 
     /// NNUE アキュムレータスタックを push
@@ -1423,6 +1427,11 @@ impl SearchWorker {
         self.stack[0].in_check = root_in_check;
         self.stack[0].cont_history_ptr = self.cont_history_sentinel;
         self.stack[0].cont_hist_key = None;
+        // PVをクリアして前回探索の残留を防ぐ
+        // NOTE: YaneuraOuでは (ss+1)->pv = pv でポインタを新配列に向け、ss->pv[0] = Move::none() でクリア
+        //       Vecベースの実装では明示的なclear()で同等の効果を得る
+        self.stack[0].pv.clear();
+        self.stack[1].pv.clear();
 
         for rm_idx in 0..self.root_moves.len() {
             if self.check_abort(limits, time_manager) {
@@ -1586,6 +1595,11 @@ impl SearchWorker {
         self.stack[0].in_check = root_in_check;
         self.stack[0].cont_history_ptr = self.cont_history_sentinel;
         self.stack[0].cont_hist_key = None;
+        // PVをクリアして前回探索の残留を防ぐ
+        // NOTE: YaneuraOuでは (ss+1)->pv = pv でポインタを新配列に向け、ss->pv[0] = Move::none() でクリア
+        //       Vecベースの実装では明示的なclear()で同等の効果を得る
+        self.stack[0].pv.clear();
+        self.stack[1].pv.clear();
 
         // pv_idx以降の手のみを探索
         for rm_idx in pv_idx..self.root_moves.len() {
@@ -1766,6 +1780,13 @@ impl SearchWorker {
         self.stack[ply as usize].in_check = in_check;
         self.stack[ply as usize].move_count = 0;
         self.stack[(ply + 1) as usize].cutoff_cnt = 0;
+        // PVノードの場合、PVをクリアして前回探索の残留を防ぐ
+        // NOTE: YaneuraOuでは (ss+1)->pv = pv でポインタを新配列に向け、ss->pv[0] = Move::none() でクリア
+        //       Vecベースの実装では明示的なclear()で同等の効果を得る
+        if pv_node {
+            self.stack[ply as usize].pv.clear();
+            self.stack[(ply + 1) as usize].pv.clear();
+        }
         let prior_reduction = self.take_prior_reduction(ply);
         self.stack[ply as usize].reduction = 0;
 
