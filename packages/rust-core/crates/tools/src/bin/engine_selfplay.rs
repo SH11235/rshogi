@@ -1303,8 +1303,21 @@ fn main() -> Result<()> {
     let white_args = cli.engine_args_white.clone().unwrap_or(common_args.clone());
 
     let common_usi_opts = cli.usi_options.clone().unwrap_or_default();
-    let black_usi_opts = cli.usi_options_black.clone().unwrap_or_else(|| common_usi_opts.clone());
-    let white_usi_opts = cli.usi_options_white.clone().unwrap_or_else(|| common_usi_opts.clone());
+    let mut black_usi_opts =
+        cli.usi_options_black.clone().unwrap_or_else(|| common_usi_opts.clone());
+    let mut white_usi_opts =
+        cli.usi_options_white.clone().unwrap_or_else(|| common_usi_opts.clone());
+
+    // パス権オプションが指定されている場合、PassRights=true を自動追加
+    if cli.pass_rights_black.is_some() || cli.pass_rights_white.is_some() {
+        let pass_rights_opt = "PassRights=true".to_string();
+        if !black_usi_opts.iter().any(|o| o.starts_with("PassRights")) {
+            black_usi_opts.push(pass_rights_opt.clone());
+        }
+        if !white_usi_opts.iter().any(|o| o.starts_with("PassRights")) {
+            white_usi_opts.push(pass_rights_opt);
+        }
+    }
 
     let mut black = EngineProcess::spawn(
         &EngineConfig {
