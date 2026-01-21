@@ -1233,7 +1233,8 @@ impl SearchWorker {
 
         // PASS は最低優先度（探索最後に試す）
         // 静止探索 (depth <= DEPTH_QS) では PASS を追加しない
-        if depth > DEPTH_QS && pos.can_pass() {
+        // TT手としてPASSが既に追加されている場合は重複を避ける
+        if depth > DEPTH_QS && pos.can_pass() && !ordered_moves.contains(&Move::PASS) {
             ordered_moves.push(Move::PASS);
         }
 
@@ -2338,9 +2339,10 @@ impl SearchWorker {
 
             // パス手評価ボーナス: パス手を実行した場合、評価値にボーナスを加算
             // スケーリングなし（常に設定値の100%を適用）
+            // 負のボーナスも適用（パス抑制用途）
             if mv.is_pass() {
                 let bonus = get_scaled_pass_move_bonus(pos.game_ply());
-                if bonus > 0 {
+                if bonus != 0 {
                     value += Value::new(bonus);
                 }
             }
