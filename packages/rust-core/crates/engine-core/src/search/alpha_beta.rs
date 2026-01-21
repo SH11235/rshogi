@@ -1427,6 +1427,7 @@ impl SearchWorker {
         self.stack[0].in_check = root_in_check;
         self.stack[0].cont_history_ptr = self.cont_history_sentinel;
         self.stack[0].cont_hist_key = None;
+
         // PVをクリアして前回探索の残留を防ぐ
         // NOTE: YaneuraOuでは (ss+1)->pv = pv でポインタを新配列に向け、ss->pv[0] = Move::none() でクリア
         //       Vecベースの実装では明示的なclear()で同等の効果を得る
@@ -1595,6 +1596,7 @@ impl SearchWorker {
         self.stack[0].in_check = root_in_check;
         self.stack[0].cont_history_ptr = self.cont_history_sentinel;
         self.stack[0].cont_hist_key = None;
+
         // PVをクリアして前回探索の残留を防ぐ
         // NOTE: YaneuraOuでは (ss+1)->pv = pv でポインタを新配列に向け、ss->pv[0] = Move::none() でクリア
         //       Vecベースの実装では明示的なclear()で同等の効果を得る
@@ -1780,6 +1782,7 @@ impl SearchWorker {
         self.stack[ply as usize].in_check = in_check;
         self.stack[ply as usize].move_count = 0;
         self.stack[(ply + 1) as usize].cutoff_cnt = 0;
+
         // PVノードの場合、PVをクリアして前回探索の残留を防ぐ
         // NOTE: YaneuraOuでは (ss+1)->pv = pv でポインタを新配列に向け、ss->pv[0] = Move::none() でクリア
         //       Vecベースの実装では明示的なclear()で同等の効果を得る
@@ -1787,6 +1790,7 @@ impl SearchWorker {
             self.stack[ply as usize].pv.clear();
             self.stack[(ply + 1) as usize].pv.clear();
         }
+
         let prior_reduction = self.take_prior_reduction(ply);
         self.stack[ply as usize].reduction = 0;
 
