@@ -1279,7 +1279,14 @@ impl NetworkHalfKADynamic {
 
     /// アーキテクチャ文字列から L2, L3 をパース
     ///
-    /// アーキテクチャ文字列の例:
+    /// 2つのフォーマットをサポート:
+    ///
+    /// ## 1. bullet-shogi 形式（優先）
+    /// ```text
+    /// Features=halfka-hm[73305->512x2],fv_scale=16,l2=32,l3=32,qa=255,qb=64,scale=1600
+    /// ```
+    ///
+    /// ## 2. nnue-pytorch 形式（フォールバック）
     /// ```text
     /// Features=HalfKA_hm[73305->256x2],Network=AffineTransform[1<-32](ClippedReLU[32](
     ///   AffineTransform[32<-32](ClippedReLU[32](AffineTransform[32<-512](InputSlice[512(0:512)])))))
@@ -1289,7 +1296,12 @@ impl NetworkHalfKADynamic {
     /// - 1番目（最内側）: L2 = OUT（L1*2 からの入力）
     /// - 2番目: L3 = OUT（L2 からの入力）
     fn parse_l2_l3_from_arch(arch: &str) -> Option<(usize, usize)> {
-        // AffineTransform[OUT<-IN] パターンを全て抽出
+        // まず bullet-shogi の l2=N,l3=N フィールドを試す
+        if let Some(result) = Self::parse_l2_l3_fields(arch) {
+            return Some(result);
+        }
+
+        // フォールバック: AffineTransform[OUT<-IN] パターンを全て抽出
         let mut layers: Vec<(usize, usize)> = Vec::new();
         let pattern = "AffineTransform[";
 
@@ -1327,6 +1339,28 @@ impl NetworkHalfKADynamic {
             Some((l2, l3))
         } else {
             None
+        }
+    }
+
+    /// bullet-shogi 形式の l2=N,l3=N フィールドをパース
+    ///
+    /// 例: "Features=halfka-hm[73305->512x2],fv_scale=16,l2=32,l3=32,qa=255,qb=64,scale=1600"
+    fn parse_l2_l3_fields(arch: &str) -> Option<(usize, usize)> {
+        let mut l2: Option<usize> = None;
+        let mut l3: Option<usize> = None;
+
+        for part in arch.split(',') {
+            let part = part.trim();
+            if let Some(val_str) = part.strip_prefix("l2=") {
+                l2 = val_str.parse().ok();
+            } else if let Some(val_str) = part.strip_prefix("l3=") {
+                l3 = val_str.parse().ok();
+            }
+        }
+
+        match (l2, l3) {
+            (Some(l2_val), Some(l3_val)) => Some((l2_val, l3_val)),
+            _ => None,
         }
     }
 
@@ -1626,6 +1660,24 @@ mod tests {
         // 512x2-32-32 のアーキテクチャ文字列（今まで誤認識されていたケース）
         let arch_512_32_32 = "Features=HalfKA_hm[73305->512x2],Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-32](ClippedReLU[32](AffineTransform[32<-1024](InputSlice[1024(0:1024)])))))";
         assert_eq!(NetworkHalfKADynamic::parse_l2_l3_from_arch(arch_512_32_32), Some((32, 32)));
+
+        // bullet-shogi 形式 (l2=N,l3=N フィールド)
+        let bullet_512_32_32 =
+            "Features=halfka-hm[73305->512x2],fv_scale=16,l2=32,l3=32,qa=255,qb=64,scale=1600";
+        assert_eq!(NetworkHalfKADynamic::parse_l2_l3_from_arch(bullet_512_32_32), Some((32, 32)));
+
+        let bullet_256_8_96 =
+            "Features=halfka-hm[73305->256x2],fv_scale=16,l2=8,l3=96,qa=255,qb=64,scale=1600";
+        assert_eq!(NetworkHalfKADynamic::parse_l2_l3_from_arch(bullet_256_8_96), Some((8, 96)));
+
+        // SCReLU 形式も対応
+        let bullet_screlu =
+            "Features=halfka-hm[73305->512x2]-SCReLU,fv_scale=16,l2=32,l3=32,qa=255,qb=64,scale=1600";
+        assert_eq!(NetworkHalfKADynamic::parse_l2_l3_from_arch(bullet_screlu), Some((32, 32)));
+
+        // l2のみ、l3のみの場合は None を返す
+        assert_eq!(NetworkHalfKADynamic::parse_l2_l3_from_arch("Features=test,l2=32,qa=255"), None);
+        assert_eq!(NetworkHalfKADynamic::parse_l2_l3_from_arch("Features=test,l3=32,qa=255"), None);
 
         // パースできない文字列
         assert_eq!(NetworkHalfKADynamic::parse_l2_l3_from_arch("invalid"), None);
