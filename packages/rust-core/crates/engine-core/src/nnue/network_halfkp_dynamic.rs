@@ -43,8 +43,15 @@ pub struct AccumulatorHalfKPDynamic {
 }
 
 impl AccumulatorHalfKPDynamic {
-    /// 新規作成
+    /// # 制約
+    ///
+    /// `l1` は SIMD 最適化のため 16 の倍数である必要がある。
+    /// 一般的な値: 256, 512, 1024
     pub fn new(l1: usize) -> Self {
+        debug_assert!(
+            l1.is_multiple_of(16),
+            "L1 size must be multiple of 16 for SIMD optimization, got {l1}"
+        );
         Self {
             accumulation: [AlignedBox::new_zeroed(l1), AlignedBox::new_zeroed(l1)],
             computed_accumulation: false,
@@ -395,6 +402,11 @@ impl FeatureTransformerHalfKPDynamic {
     }
 
     /// 重みを加算（SIMD最適化版）
+    ///
+    /// # 制約
+    ///
+    /// - `accumulation` は 32 バイトアライン済み（AlignedBox 使用）
+    /// - `self.l1` は 16 の倍数
     #[inline]
     fn add_weights(&self, accumulation: &mut [i16], index: usize) {
         let offset = index * self.l1;
@@ -407,6 +419,16 @@ impl FeatureTransformerHalfKPDynamic {
                 use std::arch::x86_64::*;
                 let acc_ptr = accumulation.as_mut_ptr();
                 let weight_ptr = weights.as_ptr();
+
+                debug_assert!(
+                    (acc_ptr as usize).is_multiple_of(32),
+                    "accumulation must be 32-byte aligned for AVX2"
+                );
+                debug_assert!(
+                    (weight_ptr as usize).is_multiple_of(32),
+                    "weights must be 32-byte aligned for AVX2"
+                );
+
                 let num_chunks = self.l1 / 16;
 
                 for i in 0..num_chunks {
@@ -450,6 +472,11 @@ impl FeatureTransformerHalfKPDynamic {
     }
 
     /// 重みを減算（SIMD最適化版）
+    ///
+    /// # 制約
+    ///
+    /// - `accumulation` は 32 バイトアライン済み（AlignedBox 使用）
+    /// - `self.l1` は 16 の倍数
     #[inline]
     fn sub_weights(&self, accumulation: &mut [i16], index: usize) {
         let offset = index * self.l1;
@@ -462,6 +489,16 @@ impl FeatureTransformerHalfKPDynamic {
                 use std::arch::x86_64::*;
                 let acc_ptr = accumulation.as_mut_ptr();
                 let weight_ptr = weights.as_ptr();
+
+                debug_assert!(
+                    (acc_ptr as usize).is_multiple_of(32),
+                    "accumulation must be 32-byte aligned for AVX2"
+                );
+                debug_assert!(
+                    (weight_ptr as usize).is_multiple_of(32),
+                    "weights must be 32-byte aligned for AVX2"
+                );
+
                 let num_chunks = self.l1 / 16;
 
                 for i in 0..num_chunks {
@@ -505,6 +542,11 @@ impl FeatureTransformerHalfKPDynamic {
     }
 
     /// 変換（ClippedReLU適用、SIMD最適化版）
+    ///
+    /// # 制約
+    ///
+    /// - `acc.accumulation` は 32 バイトアライン済み（AlignedBox 使用）
+    /// - `self.l1` は 16 の倍数
     pub fn transform(
         &self,
         acc: &AccumulatorHalfKPDynamic,
@@ -514,6 +556,7 @@ impl FeatureTransformerHalfKPDynamic {
         let perspectives = [side_to_move, !side_to_move];
 
         // AVX2: i16→u8パック + クリップ [0, 127]
+        // 32要素/イテレーションで最適化
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         {
             unsafe {
@@ -526,15 +569,43 @@ impl FeatureTransformerHalfKPDynamic {
                     let accumulation = &acc.accumulation[perspective as usize];
                     let acc_ptr = accumulation.as_ptr();
                     let out_ptr = output.as_mut_ptr().add(out_offset);
-                    let num_chunks = self.l1 / 16;
 
-                    for i in 0..num_chunks {
-                        let v = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
+                    debug_assert!(
+                        (acc_ptr as usize).is_multiple_of(32),
+                        "accumulation must be 32-byte aligned for AVX2"
+                    );
+
+                    // 32要素ずつ処理（2x __m256i → 1x __m256i出力）
+                    let num_pairs = self.l1 / 32;
+                    for i in 0..num_pairs {
+                        // 32個のi16をロード
+                        let v0 = _mm256_load_si256(acc_ptr.add(i * 32) as *const __m256i);
+                        let v1 = _mm256_load_si256(acc_ptr.add(i * 32 + 16) as *const __m256i);
+
+                        // クランプ [0, 127]
+                        let clamped0 = _mm256_min_epi16(_mm256_max_epi16(v0, zero), max_val);
+                        let clamped1 = _mm256_min_epi16(_mm256_max_epi16(v1, zero), max_val);
+
+                        // パック: 32個のi16 → 32個のu8
+                        // packus_epi16はレーン内で動作するため、結果は [v0_lo, v1_lo | v0_hi, v1_hi]
+                        let packed = _mm256_packus_epi16(clamped0, clamped1);
+
+                        // レーン再配置: [0,1,2,3] → [0,2,1,3] で正しい順序に
+                        let result = _mm256_permute4x64_epi64(packed, 0b11011000);
+
+                        // 32バイト出力
+                        _mm256_storeu_si256(out_ptr.add(i * 32) as *mut __m256i, result);
+                    }
+
+                    // 残り16要素があれば処理（L1が32の倍数でない場合）
+                    let remainder_start = num_pairs * 32;
+                    if remainder_start < self.l1 {
+                        let v = _mm256_load_si256(acc_ptr.add(remainder_start) as *const __m256i);
                         let clamped = _mm256_min_epi16(_mm256_max_epi16(v, zero), max_val);
                         let packed = _mm256_packus_epi16(clamped, clamped);
                         let result = _mm256_permute4x64_epi64(packed, 0b11011000);
                         _mm_storeu_si128(
-                            out_ptr.add(i * 16) as *mut __m128i,
+                            out_ptr.add(remainder_start) as *mut __m128i,
                             _mm256_castsi256_si128(result),
                         );
                     }
@@ -875,45 +946,36 @@ impl NetworkHalfKPDynamic {
     }
 
     /// SCReLU 版の評価値計算
+    ///
+    /// HalfKA Dynamic と同じパターンで、全層に SCReLU (二乗活性化) を適用。
     fn evaluate_screlu(&self, pos: &Position, acc: &AccumulatorHalfKPDynamic) -> Value {
-        // SCReLU: clamp(x, 0, QA)² を計算
-        const QA: i16 = 127;
-        const QB: i16 = 64;
+        use crate::nnue::layers::SCReLUDynamic;
 
         let ft_out_size = self.arch_l1 * 2;
         let mut ft_out_i16 = vec![0i16; ft_out_size];
         self.feature_transformer.transform_raw(acc, pos.side_to_move(), &mut ft_out_i16);
 
-        // SCReLU適用
+        // FT出力に SCReLU 適用 (i16 → u8)
+        // clamp(x, 0, 127)² >> 7 → u8 (0〜127)
         let mut transformed = vec![0u8; ft_out_size];
-        for (i, &v) in ft_out_i16.iter().enumerate() {
-            let clamped = v.clamp(0, QA);
-            // clamped² / 127 を u8 に変換
-            let squared = (clamped as i32 * clamped as i32) / QA as i32;
-            transformed[i] = squared.clamp(0, 127) as u8;
-        }
+        SCReLUDynamic::propagate_i16_to_u8(&ft_out_i16, &mut transformed);
 
         // 隠れ層1
         let mut l1_out = vec![0i32; self.arch_l2];
         self.l1.propagate(&transformed, &mut l1_out);
 
+        // L1出力に SCReLU 適用 (i32 → u8)
+        // clamp(x >> 6, 0, 127)² >> 7 → u8
         let mut l1_relu = vec![0u8; self.arch_l2];
-        for (i, &v) in l1_out.iter().enumerate() {
-            let shifted = v >> WEIGHT_SCALE_BITS;
-            let clamped = shifted.clamp(0, QB as i32);
-            l1_relu[i] = clamped as u8;
-        }
+        SCReLUDynamic::propagate_i32_to_u8(&l1_out, &mut l1_relu);
 
         // 隠れ層2
         let mut l2_out = vec![0i32; self.arch_l3];
         self.l2.propagate(&l1_relu, &mut l2_out);
 
+        // L2出力に SCReLU 適用 (i32 → u8)
         let mut l2_relu = vec![0u8; self.arch_l3];
-        for (i, &v) in l2_out.iter().enumerate() {
-            let shifted = v >> WEIGHT_SCALE_BITS;
-            let clamped = shifted.clamp(0, QB as i32);
-            l2_relu[i] = clamped as u8;
-        }
+        SCReLUDynamic::propagate_i32_to_u8(&l2_out, &mut l2_relu);
 
         // 出力層
         let mut output = vec![0i32; 1];

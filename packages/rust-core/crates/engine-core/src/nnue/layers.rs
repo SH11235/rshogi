@@ -1551,10 +1551,11 @@ impl SCReLUDynamic {
                         let packed_lo = _mm256_packs_epi32(shifted_lo, shifted_hi);
                         // AVX2の_mm256_packs_epi32は [lo0-3, hi0-3, lo4-7, hi4-7] の順になるので並び替え
                         let permuted = _mm256_permute4x64_epi64::<0b11011000>(packed_lo);
-                        // i16 → u8 にパック (packus_epi16 はサチュレーション付き)
-                        let result = _mm256_packus_epi16(permuted, permuted);
-                        // 下位128ビットを取り出して保存
-                        let result_128 = _mm256_castsi256_si128(result);
+                        // i16 → u8 にパック
+                        // permuted は [lo0-7, hi0-7] の順で i16x16
+                        let lo_128 = _mm256_castsi256_si128(permuted); // lo0-7 as i16x8
+                        let hi_128 = _mm256_extracti128_si256::<1>(permuted); // hi0-7 as i16x8
+                        let result_128 = _mm_packus_epi16(lo_128, hi_128); // 16 u8 values
                         _mm_storeu_si128(out_ptr.add(i), result_128);
                     }
                 }
@@ -1611,6 +1612,196 @@ impl SCReLUDynamic {
             let clamped = x.clamp(0, 127);
             // 127² = 16129, 16129 >> 7 = 126
             let squared_shifted = (clamped * clamped) >> 7;
+            output[i] = squared_shifted.min(127) as u8;
+        }
+    }
+
+    /// i16入力版 SCReLU (FeatureTransformer直後用) - QA パラメータ対応版
+    ///
+    /// Accumulator の i16 値を受け取り、SCReLU を適用して u8 を出力。
+    ///
+    /// # スケーリング
+    ///
+    /// - QA=127: clamp(x, 0, 127)² >> 7 → u8 (0〜126)  [従来の実装]
+    /// - QA=255: clamp(x, 0, 255)² >> 9 → u8 (0〜127)  [Reckless 互換、高精度]
+    ///
+    /// QA=255 では量子化分解能が向上し、小さい値の表現力が改善される。
+    ///
+    /// # SIMD最適化
+    ///
+    /// フォールスルー構造で AVX2 → SSE4.1 → スカラーの順に処理。
+    #[inline]
+    pub fn propagate_i16_to_u8_with_qa(input: &[i16], output: &mut [u8], qa: i16) {
+        debug_assert_eq!(input.len(), output.len());
+        let len = input.len();
+        #[allow(unused_mut)]
+        let mut processed: usize = 0;
+
+        // QA に基づいてシフト量を決定
+        let (qa_i32, shift) = if qa >= 255 {
+            (255i32, 9u32)
+        } else {
+            (127i32, 7u32)
+        };
+
+        // === AVX2: 16要素ずつ処理 ===
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        {
+            let num_chunks = len / 16;
+            if num_chunks > 0 {
+                unsafe {
+                    use std::arch::x86_64::*;
+
+                    let zero = _mm256_setzero_si256();
+                    let max_val_i32 = _mm256_set1_epi32(qa_i32);
+                    let shift_vec = _mm256_set1_epi32(shift as i32);
+                    let out_max = _mm256_set1_epi32(127);
+
+                    let in_ptr = input.as_ptr() as *const __m128i;
+                    let out_ptr = output.as_mut_ptr() as *mut __m128i;
+
+                    for i in 0..num_chunks {
+                        // 前半8要素: i16x8 → i32x8 → clamp → 二乗 → >> shift
+                        let in_vec_lo = _mm_loadu_si128(in_ptr.add(i * 2));
+                        let expanded_lo = _mm256_cvtepi16_epi32(in_vec_lo);
+                        let clamped_lo =
+                            _mm256_min_epi32(_mm256_max_epi32(expanded_lo, zero), max_val_i32);
+                        let squared_lo = _mm256_mullo_epi32(clamped_lo, clamped_lo);
+                        let shifted_lo = _mm256_srlv_epi32(squared_lo, shift_vec);
+                        let shifted_lo = _mm256_min_epi32(shifted_lo, out_max);
+
+                        // 後半8要素
+                        let in_vec_hi = _mm_loadu_si128(in_ptr.add(i * 2 + 1));
+                        let expanded_hi = _mm256_cvtepi16_epi32(in_vec_hi);
+                        let clamped_hi =
+                            _mm256_min_epi32(_mm256_max_epi32(expanded_hi, zero), max_val_i32);
+                        let squared_hi = _mm256_mullo_epi32(clamped_hi, clamped_hi);
+                        let shifted_hi = _mm256_srlv_epi32(squared_hi, shift_vec);
+                        let shifted_hi = _mm256_min_epi32(shifted_hi, out_max);
+
+                        // i32x8 × 2 → i16x16 → u8x16
+                        let packed_lo = _mm256_packs_epi32(shifted_lo, shifted_hi);
+                        let permuted = _mm256_permute4x64_epi64::<0b11011000>(packed_lo);
+                        // i16 → u8 にパック
+                        let lo_128 = _mm256_castsi256_si128(permuted);
+                        let hi_128 = _mm256_extracti128_si256::<1>(permuted);
+                        let result_128 = _mm_packus_epi16(lo_128, hi_128);
+                        _mm_storeu_si128(out_ptr.add(i), result_128);
+                    }
+                }
+                processed = num_chunks * 16;
+            }
+        }
+
+        // === SSE4.1: 8要素ずつ処理 ===
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse4.1"))]
+        {
+            let remaining = len - processed;
+            let num_chunks = remaining / 8;
+            if num_chunks > 0 {
+                unsafe {
+                    use std::arch::x86_64::*;
+
+                    let zero = _mm_setzero_si128();
+                    let max_val_i32 = _mm_set1_epi32(qa_i32);
+                    let shift_vec = _mm_set_epi64x(0, shift as i64);
+                    let out_max = _mm_set1_epi32(127);
+
+                    let in_ptr = input.as_ptr().add(processed) as *const i64;
+                    let out_ptr = output.as_mut_ptr().add(processed) as *mut i64;
+
+                    for i in 0..num_chunks {
+                        // 前半4要素
+                        let in_vec_lo = _mm_loadl_epi64(in_ptr.add(i * 2) as *const __m128i);
+                        let expanded_lo = _mm_cvtepi16_epi32(in_vec_lo);
+                        let clamped_lo =
+                            _mm_min_epi32(_mm_max_epi32(expanded_lo, zero), max_val_i32);
+                        let squared_lo = _mm_mullo_epi32(clamped_lo, clamped_lo);
+                        let shifted_lo = _mm_srl_epi32(squared_lo, shift_vec);
+                        let shifted_lo = _mm_min_epi32(shifted_lo, out_max);
+
+                        // 後半4要素
+                        let in_vec_hi = _mm_loadl_epi64(in_ptr.add(i * 2 + 1) as *const __m128i);
+                        let expanded_hi = _mm_cvtepi16_epi32(in_vec_hi);
+                        let clamped_hi =
+                            _mm_min_epi32(_mm_max_epi32(expanded_hi, zero), max_val_i32);
+                        let squared_hi = _mm_mullo_epi32(clamped_hi, clamped_hi);
+                        let shifted_hi = _mm_srl_epi32(squared_hi, shift_vec);
+                        let shifted_hi = _mm_min_epi32(shifted_hi, out_max);
+
+                        // i32x4 × 2 → i16x8 → u8x8
+                        let packed = _mm_packs_epi32(shifted_lo, shifted_hi);
+                        let result = _mm_packus_epi16(packed, packed);
+                        *out_ptr.add(i) = _mm_cvtsi128_si64(result);
+                    }
+                }
+                processed += num_chunks * 8;
+            }
+        }
+
+        // === WASM SIMD128: 8要素ずつ処理 ===
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        {
+            let remaining = len - processed;
+            let num_chunks = remaining / 8;
+            if num_chunks > 0 {
+                unsafe {
+                    use std::arch::wasm32::*;
+
+                    let zero = i32x4_splat(0);
+                    let max_val_i32 = i32x4_splat(qa_i32);
+                    let out_max = i32x4_splat(127);
+
+                    let in_ptr = input.as_ptr().add(processed) as *const v128;
+                    let out_ptr = output.as_mut_ptr().add(processed);
+
+                    for i in 0..num_chunks {
+                        let in_vec = v128_load(in_ptr.add(i));
+
+                        // i16x8 → i32x4 × 2 に拡張
+                        let lo = i32x4_extend_low_i16x8(in_vec);
+                        let hi = i32x4_extend_high_i16x8(in_vec);
+
+                        // clamp(0, qa)
+                        let lo_clamped = i32x4_min(i32x4_max(lo, zero), max_val_i32);
+                        let hi_clamped = i32x4_min(i32x4_max(hi, zero), max_val_i32);
+
+                        // 二乗
+                        let lo_squared = i32x4_mul(lo_clamped, lo_clamped);
+                        let hi_squared = i32x4_mul(hi_clamped, hi_clamped);
+
+                        // >> shift
+                        let lo_shifted = i32x4_shr(lo_squared, shift);
+                        let hi_shifted = i32x4_shr(hi_squared, shift);
+
+                        // min(127)
+                        let lo_shifted = i32x4_min(lo_shifted, out_max);
+                        let hi_shifted = i32x4_min(hi_shifted, out_max);
+
+                        // i32x4 × 2 → u8x8 (手動でパック)
+                        for j in 0..4 {
+                            let val = i32x4_extract_lane::<0>(i32x4_shuffle::<{ j }, 0, 0, 0>(
+                                lo_shifted, lo_shifted,
+                            ));
+                            *out_ptr.add(i * 8 + j) = val as u8;
+                        }
+                        for j in 0..4 {
+                            let val = i32x4_extract_lane::<0>(i32x4_shuffle::<{ j }, 0, 0, 0>(
+                                hi_shifted, hi_shifted,
+                            ));
+                            *out_ptr.add(i * 8 + 4 + j) = val as u8;
+                        }
+                    }
+                }
+                processed += num_chunks * 8;
+            }
+        }
+
+        // === スカラーフォールバック（残り要素） ===
+        for i in processed..len {
+            let x = i32::from(input[i]);
+            let clamped = x.clamp(0, qa_i32);
+            let squared_shifted = (clamped * clamped) >> shift;
             output[i] = squared_shifted.min(127) as u8;
         }
     }
@@ -1986,6 +2177,95 @@ mod tests {
                 ((clamped * clamped) >> 7).min(127) as u8
             };
             assert_eq!(output[i], expected, "index {i}: input={x}");
+        }
+    }
+
+    /// propagate_i16_to_u8_with_qa の QA=127 テスト（従来互換）
+    #[test]
+    fn test_screlu_dynamic_i16_to_u8_with_qa_127() {
+        let input: [i16; 8] = [0, 50, 127, -5, 150, 64, 100, 200];
+        let mut output = [0u8; 8];
+
+        SCReLUDynamic::propagate_i16_to_u8_with_qa(&input, &mut output, 127);
+
+        // QA=127: clamp(x, 0, 127)² >> 7
+        // 0² >> 7 = 0
+        assert_eq!(output[0], 0);
+        // 50² >> 7 = 2500 >> 7 = 19
+        assert_eq!(output[1], 19);
+        // 127² >> 7 = 16129 >> 7 = 126
+        assert_eq!(output[2], 126);
+        // clamp(-5, 0, 127) = 0 → 0² >> 7 = 0
+        assert_eq!(output[3], 0);
+        // clamp(150, 0, 127) = 127 → 127² >> 7 = 126
+        assert_eq!(output[4], 126);
+        // 64² >> 7 = 4096 >> 7 = 32
+        assert_eq!(output[5], 32);
+        // 100² >> 7 = 10000 >> 7 = 78
+        assert_eq!(output[6], 78);
+        // clamp(200, 0, 127) = 127 → 127² >> 7 = 126
+        assert_eq!(output[7], 126);
+    }
+
+    /// propagate_i16_to_u8_with_qa の QA=255 テスト（Reckless 互換）
+    #[test]
+    fn test_screlu_dynamic_i16_to_u8_with_qa_255() {
+        let input: [i16; 8] = [0, 50, 127, 255, -5, 300, 100, 200];
+        let mut output = [0u8; 8];
+
+        SCReLUDynamic::propagate_i16_to_u8_with_qa(&input, &mut output, 255);
+
+        // QA=255: clamp(x, 0, 255)² >> 9
+        // 0² >> 9 = 0
+        assert_eq!(output[0], 0);
+        // 50² >> 9 = 2500 >> 9 = 4
+        assert_eq!(output[1], 4);
+        // 127² >> 9 = 16129 >> 9 = 31
+        assert_eq!(output[2], 31);
+        // 255² >> 9 = 65025 >> 9 = 127
+        assert_eq!(output[3], 127);
+        // clamp(-5, 0, 255) = 0 → 0
+        assert_eq!(output[4], 0);
+        // clamp(300, 0, 255) = 255 → 255² >> 9 = 127
+        assert_eq!(output[5], 127);
+        // 100² >> 9 = 10000 >> 9 = 19
+        assert_eq!(output[6], 19);
+        // 200² >> 9 = 40000 >> 9 = 78
+        assert_eq!(output[7], 78);
+    }
+
+    /// propagate_i16_to_u8_with_qa の SIMD 境界テスト (QA=255)
+    #[test]
+    fn test_screlu_dynamic_i16_to_u8_with_qa_simd_boundary() {
+        for size in [1, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33, 64, 65, 512] {
+            let input: Vec<i16> = (0..size).map(|i| ((i as i32 * 37 - 50) % 350) as i16).collect();
+            let mut output_127 = vec![0u8; size];
+            let mut output_255 = vec![0u8; size];
+
+            SCReLUDynamic::propagate_i16_to_u8_with_qa(&input, &mut output_127, 127);
+            SCReLUDynamic::propagate_i16_to_u8_with_qa(&input, &mut output_255, 255);
+
+            for (i, &x) in input.iter().enumerate() {
+                // QA=127
+                let expected_127 = {
+                    let clamped = i32::from(x).clamp(0, 127);
+                    ((clamped * clamped) >> 7).min(127) as u8
+                };
+                assert_eq!(
+                    output_127[i], expected_127,
+                    "QA=127, size={size}, index={i}, input={x}"
+                );
+
+                // QA=255
+                let expected_255 = {
+                    let clamped = i32::from(x).clamp(0, 255);
+                    ((clamped * clamped) >> 9).min(127) as u8
+                };
+                assert_eq!(
+                    output_255[i], expected_255,
+                    "QA=255, size={size}, index={i}, input={x}"
+                );
+            }
         }
     }
 

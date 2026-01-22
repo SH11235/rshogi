@@ -22,7 +22,7 @@ use super::constants::{
     FV_SCALE_HALFKA, HALFKA_HM_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION_HALFKA, WEIGHT_SCALE_BITS,
 };
 use super::features::{FeatureSet, HalfKA_hmFeatureSet};
-use super::network::{get_fv_scale_override, parse_fv_scale_from_arch};
+use super::network::{get_fv_scale_override, parse_fv_scale_from_arch, parse_qa_from_arch};
 use crate::position::Position;
 use crate::types::{Color, Value};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -1131,6 +1131,14 @@ pub struct NetworkHalfKADynamic {
     /// arch_string に "-SCReLU" サフィックスが含まれている場合に true。
     /// bullet-shogi で学習した SCReLU モデル用。
     pub use_screlu: bool,
+    /// SCReLU 量子化係数
+    ///
+    /// arch_str に "qa=N" が含まれていればその値、
+    /// なければ 127 をデフォルトとする。
+    ///
+    /// - QA=127: YaneuraOu の ClippedReLU 由来、シフト >>7
+    /// - QA=255: Reckless 互換の高精度モード、シフト >>9
+    pub screlu_qa: i16,
     /// 評価値スケーリング係数
     ///
     /// arch_str に "fv_scale=N" が含まれていればその値、
@@ -1182,6 +1190,13 @@ impl NetworkHalfKADynamic {
         // FV_SCALE 検出: arch_str に "fv_scale=N" が含まれていればその値を使用
         let fv_scale = parse_fv_scale_from_arch(&arch_str).unwrap_or(FV_SCALE_HALFKA);
 
+        // QA 検出: arch_str に "qa=N" が含まれていればその値を使用
+        // デフォルトは 127（YaneuraOu の ClippedReLU 由来の量子化係数）
+        // - YaneuraOu/Stockfish の ClippedReLU は clamp(x, 0, 127) を使用
+        // - bullet-shogi の SCReLU もデフォルトで QA=127 を使用
+        // - QA=255 は Reckless 互換の高精度モード
+        let screlu_qa = parse_qa_from_arch(&arch_str).unwrap_or(127);
+
         // Feature Transformer ハッシュ
         reader.read_exact(&mut buf4)?;
         let _ft_hash = u32::from_le_bytes(buf4);
@@ -1211,6 +1226,7 @@ impl NetworkHalfKADynamic {
             arch_l2: l2,
             arch_l3: l3,
             use_screlu,
+            screlu_qa,
             fv_scale,
         })
     }
@@ -1529,9 +1545,10 @@ impl NetworkHalfKADynamic {
         }
 
         // SCReLU 適用 (i16 → u8)
-        // FT後: clamp(x, 0, 127)² >> 7 → u8 (0〜127)
+        // QA=127: clamp(x, 0, 127)² >> 7 → u8 (0〜126)
+        // QA=255: clamp(x, 0, 255)² >> 9 → u8 (0〜127)
         let mut transformed = vec![0u8; l1 * 2];
-        SCReLUDynamic::propagate_i16_to_u8(&ft_out_i16, &mut transformed);
+        SCReLUDynamic::propagate_i16_to_u8_with_qa(&ft_out_i16, &mut transformed, self.screlu_qa);
 
         if debug {
             let min = transformed.iter().min().unwrap_or(&0);

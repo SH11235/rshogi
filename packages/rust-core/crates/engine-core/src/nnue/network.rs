@@ -879,6 +879,37 @@ pub fn parse_fv_scale_from_arch(arch_str: &str) -> Option<i32> {
     None
 }
 
+/// arch_str から qa（SCReLU量子化係数）を抽出
+///
+/// bullet-shogi で学習したモデルは arch_str に "qa=N" を含む。
+/// 例: "Features=HalfKA_hm^[73305->256x2]-SCReLU,fv_scale=13,qa=255,qb=64,scale=600"
+///
+/// 戻り値:
+/// - `Some(N)`: qa=N が見つかり、妥当な範囲内の場合
+/// - `None`: qa が見つからない、またはパース失敗
+///
+/// QA=127 と QA=255 の両方をサポート:
+/// - QA=127: シフト >>7 (従来の自己乗算 SCReLU)
+/// - QA=255: シフト >>9 (Reckless 互換)
+pub fn parse_qa_from_arch(arch_str: &str) -> Option<i16> {
+    /// qa の許容最小値
+    const QA_MIN: i16 = 1;
+    /// qa の許容最大値
+    const QA_MAX: i16 = 255;
+
+    for part in arch_str.split(',') {
+        if let Some(value) = part.strip_prefix("qa=") {
+            if let Ok(qa) = value.parse::<i16>() {
+                if (QA_MIN..=QA_MAX).contains(&qa) {
+                    return Some(qa);
+                }
+            }
+            return None;
+        }
+    }
+    None
+}
+
 // =============================================================================
 // Network - HalfKP用ネットワーク（既存）
 // =============================================================================
