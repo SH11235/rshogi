@@ -205,8 +205,8 @@ function deriveLastMove(move: string | undefined): LastMove | undefined {
         return { from: null, to: parsed.to, dropPiece: parsed.piece, promotes: false };
     }
     if (parsed.kind === "pass") {
-        // パス手の場合は特別なLastMoveを返す
-        return { to: "5e" as Square, isPass: true };
+        // パス手の場合は移動先なし
+        return { isPass: true };
     }
     return { from: parsed.from, to: parsed.to, promotes: parsed.promote };
 }
@@ -662,9 +662,27 @@ export function ShogiMatch({
 
     // パス手を処理するコールバック
     // 人間・エンジン両方のパス手で使用される
-    const handlePassMove = useCallback(() => {
+    const handlePassMove = useCallback(async () => {
         if (matchEndedRef.current) return;
         if (!passRightsSettings?.enabled) return;
+
+        // 合法手をチェック（王手中はパスが合法手に含まれない）
+        // エンジン側の can_pass() は王手中のパスを禁止しており、
+        // パスが合法でない場合にloadPositionするとパニックするため、事前にチェック
+        try {
+            const resolver = fetchLegalMoves
+                ? () => fetchLegalMoves(startSfen, movesRef.current)
+                : () => getPositionService().getLegalMoves(startSfen, movesRef.current);
+            const ply = movesRef.current.length;
+            const legal = await legalCache.getOrResolve(ply, resolver);
+            if (!legal || !legal.has("pass")) {
+                setMessage({ text: "王手されているためパスできません", type: "error" });
+                return;
+            }
+        } catch (error) {
+            setMessage({ text: `合法手の取得に失敗しました: ${String(error)}`, type: "error" });
+            return;
+        }
 
         // "pass" を applyMoveWithState で適用
         // validateTurn: false の理由:
@@ -692,7 +710,14 @@ export function ShogiMatch({
         // ターン開始時刻をリセット
         turnStartTimeRef.current = Date.now();
         updateClocksForNextTurn(result.next.turn);
-    }, [legalCache, navigation, passRightsSettings, updateClocksForNextTurn]);
+    }, [
+        fetchLegalMoves,
+        legalCache,
+        navigation,
+        passRightsSettings,
+        startSfen,
+        updateClocksForNextTurn,
+    ]);
 
     useEffect(() => {
         let cancelled = false;
