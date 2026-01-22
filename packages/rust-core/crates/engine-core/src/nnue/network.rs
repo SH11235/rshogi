@@ -24,12 +24,10 @@ use super::network_halfka::{
     AccumulatorHalfKA, AccumulatorStackHalfKA, HalfKA1024CReLU, HalfKA1024SCReLU, HalfKA512CReLU,
     HalfKA512SCReLU,
 };
-use super::network_halfka_dynamic::NetworkHalfKADynamic;
 use super::network_halfkp::{
     AccumulatorHalfKP, AccumulatorStackHalfKP, HalfKP256CReLU, HalfKP256SCReLU, HalfKP512CReLU,
     HalfKP512SCReLU,
 };
-use super::network_halfkp_dynamic::NetworkHalfKPDynamic;
 use super::network_layer_stacks::NetworkLayerStacks;
 #[cfg(not(feature = "tournament"))]
 use crate::eval::material;
@@ -83,6 +81,16 @@ pub fn set_fv_scale_override(value: i32) {
 /// NNUEネットワーク（HalfKPまたはHalfKA_hm^をラップ）
 ///
 /// const generics 版の統一実装を使用。各バリアントは活性化関数ごとに分かれる。
+///
+/// # サポートするアーキテクチャ
+///
+/// - HalfKP 256x2-32-32 (CReLU/SCReLU)
+/// - HalfKP 512x2-8-96 (CReLU/SCReLU)
+/// - HalfKA 512x2-8-96 (CReLU/SCReLU)
+/// - HalfKA 1024x2-8-96 (CReLU/SCReLU)
+/// - LayerStacks 1536x2 + 9バケット
+///
+/// それ以外のアーキテクチャ（例: HalfKA 256x2-32-32）はロード時にエラーになります。
 pub enum NNUENetwork {
     /// HalfKP classic NNUE (256x2-32-32) - 旧実装（互換性維持用）
     HalfKP(Box<Network>),
@@ -94,8 +102,6 @@ pub enum NNUENetwork {
     HalfKP512CReLU(Box<HalfKP512CReLU>),
     /// HalfKP 512x2-8-96 SCReLU (const generics版)
     HalfKP512SCReLU(Box<HalfKP512SCReLU>),
-    /// HalfKP 動的サイズ（フォールバック: 他のL1サイズ）
-    HalfKPDynamic(Box<NetworkHalfKPDynamic>),
     /// HalfKA_hm^ 512x2-8-96 CReLU (const generics版)
     HalfKA512CReLU(Box<HalfKA512CReLU>),
     /// HalfKA_hm^ 512x2-8-96 SCReLU (const generics版)
@@ -104,8 +110,6 @@ pub enum NNUENetwork {
     HalfKA1024CReLU(Box<HalfKA1024CReLU>),
     /// HalfKA_hm^ 1024x2-8-96 SCReLU (const generics版)
     HalfKA1024SCReLU(Box<HalfKA1024SCReLU>),
-    /// HalfKA_hm^ 動的サイズ（フォールバック: 他のL1サイズ）
-    HalfKADynamic(Box<NetworkHalfKADynamic>),
     /// LayerStacks（1536次元 + 9バケット）
     LayerStacks(Box<NetworkLayerStacks>),
 }
@@ -161,15 +165,14 @@ impl NNUENetwork {
                 if arch_str.contains("HalfKA") {
                     // HalfKA_hm^ には複数のアーキテクチャがある:
                     // - LayerStacks (1536次元 + 9バケット)
-                    // - HalfKA512 (512x2-8-96 静的)
-                    // - HalfKA1024 (1024x2-8-96 静的)
-                    // - HalfKADynamic (その他: 256x2-32-32 など)
+                    // - HalfKA512 (512x2-8-96)
+                    // - HalfKA1024 (1024x2-8-96)
                     if arch_str.contains("->1536x2]") || arch_str.contains("LayerStacks") {
                         // LayerStacks (1536次元)
                         let network = NetworkLayerStacks::read(reader)?;
                         Ok(Self::LayerStacks(Box::new(network)))
                     } else {
-                        // L1, L2, L3 をパースして静的/動的を判定
+                        // L1, L2, L3 をパースして判定
                         let (l1, l2, l3) = Self::parse_arch_dimensions(&arch_str);
                         match (l1, l2, l3, use_screlu) {
                             (512, 8, 96, false) => {
@@ -189,9 +192,15 @@ impl NNUENetwork {
                                 Ok(Self::HalfKA1024SCReLU(Box::new(network)))
                             }
                             _ => {
-                                // フォールバック: 動的実装
-                                let network = NetworkHalfKADynamic::read(reader)?;
-                                Ok(Self::HalfKADynamic(Box::new(network)))
+                                // 未対応アーキテクチャ
+                                Err(io::Error::new(
+                                    io::ErrorKind::Unsupported,
+                                    format!(
+                                        "Unsupported HalfKA architecture: {arch_str}. \
+                                         Supported architectures: 512x2-8-96, 1024x2-8-96, LayerStacks(1536x2). \
+                                         Detected: L1={l1}, L2={l2}, L3={l3}"
+                                    ),
+                                ))
                             }
                         }
                     }
@@ -219,9 +228,15 @@ impl NNUENetwork {
                             Ok(Self::HalfKP512SCReLU(Box::new(network)))
                         }
                         _ => {
-                            // フォールバック: 動的実装
-                            let network = NetworkHalfKPDynamic::read(reader)?;
-                            Ok(Self::HalfKPDynamic(Box::new(network)))
+                            // 未対応アーキテクチャ
+                            Err(io::Error::new(
+                                io::ErrorKind::Unsupported,
+                                format!(
+                                    "Unsupported HalfKP architecture: {arch_str}. \
+                                     Supported architectures: 256x2-32-32, 512x2-8-96. \
+                                     Detected: L1={l1}, L2={l2}, L3={l3}"
+                                ),
+                            ))
                         }
                     }
                 }
@@ -362,46 +377,6 @@ impl NNUENetwork {
         }
     }
 
-    /// 評価値を計算（HalfKPDynamic用）
-    ///
-    /// # Panics
-    ///
-    /// HalfKPDynamic 以外のアーキテクチャで呼び出された場合にパニックします。
-    // TODO: Result<Value, EvaluationError> を返すように変更する
-    pub fn evaluate_halfkp_dynamic(
-        &self,
-        pos: &Position,
-        acc: &super::network_halfkp_dynamic::AccumulatorHalfKPDynamic,
-    ) -> Value {
-        match self {
-            Self::HalfKPDynamic(net) => net.evaluate(pos, acc),
-            _ => unreachable!(
-                "BUG: evaluate_halfkp_dynamic() called on non-HalfKPDynamic architecture: {:?}",
-                self.architecture_name()
-            ),
-        }
-    }
-
-    /// 評価値を計算（HalfKADynamic用）
-    ///
-    /// # Panics
-    ///
-    /// HalfKADynamic 以外のアーキテクチャで呼び出された場合にパニックします。
-    // TODO: Result<Value, EvaluationError> を返すように変更する
-    pub fn evaluate_halfka_dynamic(
-        &self,
-        pos: &Position,
-        acc: &super::network_halfka_dynamic::AccumulatorHalfKADynamic,
-    ) -> Value {
-        match self {
-            Self::HalfKADynamic(net) => net.evaluate(pos, acc),
-            _ => unreachable!(
-                "BUG: evaluate_halfka_dynamic() called on non-HalfKADynamic architecture: {:?}",
-                self.architecture_name()
-            ),
-        }
-    }
-
     /// 評価値を計算（HalfKA512用 - const generics版）
     ///
     /// # Panics
@@ -471,16 +446,6 @@ impl NNUENetwork {
         matches!(self, Self::LayerStacks(_))
     }
 
-    /// HalfKPDynamic アーキテクチャかどうか
-    pub fn is_halfkp_dynamic(&self) -> bool {
-        matches!(self, Self::HalfKPDynamic(_))
-    }
-
-    /// HalfKADynamic アーキテクチャかどうか
-    pub fn is_halfka_dynamic(&self) -> bool {
-        matches!(self, Self::HalfKADynamic(_))
-    }
-
     /// HalfKA512 アーキテクチャかどうか
     pub fn is_halfka_512(&self) -> bool {
         matches!(self, Self::HalfKA512CReLU(_) | Self::HalfKA512SCReLU(_))
@@ -491,22 +456,6 @@ impl NNUENetwork {
         matches!(self, Self::HalfKA1024CReLU(_) | Self::HalfKA1024SCReLU(_))
     }
 
-    /// HalfKADynamic の L1 サイズを取得（他のアーキテクチャでは None）
-    pub fn get_halfka_dynamic_l1(&self) -> Option<usize> {
-        match self {
-            Self::HalfKADynamic(net) => Some(net.arch_l1),
-            _ => None,
-        }
-    }
-
-    /// HalfKPDynamic の L1 サイズを取得（他のアーキテクチャでは None）
-    pub fn get_halfkp_dynamic_l1(&self) -> Option<usize> {
-        match self {
-            Self::HalfKPDynamic(net) => Some(net.arch_l1),
-            _ => None,
-        }
-    }
-
     /// アーキテクチャ名を取得
     pub fn architecture_name(&self) -> &'static str {
         match self {
@@ -515,12 +464,10 @@ impl NNUENetwork {
             Self::HalfKP256SCReLU(_) => "HalfKP256SCReLU",
             Self::HalfKP512CReLU(_) => "HalfKP512CReLU",
             Self::HalfKP512SCReLU(_) => "HalfKP512SCReLU",
-            Self::HalfKPDynamic(_) => "HalfKPDynamic",
             Self::HalfKA512CReLU(_) => "HalfKA512CReLU",
             Self::HalfKA512SCReLU(_) => "HalfKA512SCReLU",
             Self::HalfKA1024CReLU(_) => "HalfKA1024CReLU",
             Self::HalfKA1024SCReLU(_) => "HalfKA1024SCReLU",
-            Self::HalfKADynamic(_) => "HalfKADynamic",
             Self::LayerStacks(_) => "LayerStacks",
         }
     }
@@ -535,11 +482,6 @@ impl NNUENetwork {
             Self::HalfKP512CReLU(_) | Self::HalfKP512SCReLU(_) => {
                 panic!("HalfKP512 requires AccumulatorHalfKP<512>. Use refresh_accumulator_halfkp_512().")
             }
-            Self::HalfKPDynamic(_) => {
-                panic!(
-                    "HalfKPDynamic requires AccumulatorHalfKPDynamic. Use refresh_accumulator_halfkp_dynamic()."
-                )
-            }
             Self::HalfKA512CReLU(_) | Self::HalfKA512SCReLU(_) => {
                 panic!(
                     "HalfKA512 requires AccumulatorHalfKA<512>. Use refresh_accumulator_halfka_512()."
@@ -548,11 +490,6 @@ impl NNUENetwork {
             Self::HalfKA1024CReLU(_) | Self::HalfKA1024SCReLU(_) => {
                 panic!(
                     "HalfKA1024 requires AccumulatorHalfKA<1024>. Use refresh_accumulator_halfka_1024()."
-                )
-            }
-            Self::HalfKADynamic(_) => {
-                panic!(
-                    "HalfKADynamic requires AccumulatorHalfKADynamic. Use refresh_accumulator_halfka_dynamic()."
                 )
             }
             Self::LayerStacks(_) => {
@@ -572,18 +509,6 @@ impl NNUENetwork {
         match self {
             Self::LayerStacks(net) => net.refresh_accumulator(pos, acc),
             _ => panic!("This method is only for LayerStacks architecture."),
-        }
-    }
-
-    /// 差分計算を使わずにAccumulatorを計算（HalfKADynamic用）
-    pub fn refresh_accumulator_halfka_dynamic(
-        &self,
-        pos: &Position,
-        acc: &mut super::network_halfka_dynamic::AccumulatorHalfKADynamic,
-    ) {
-        match self {
-            Self::HalfKADynamic(net) => net.refresh_accumulator(pos, acc),
-            _ => panic!("This method is only for HalfKADynamic architecture."),
         }
     }
 
@@ -627,18 +552,6 @@ impl NNUENetwork {
         }
     }
 
-    /// 差分計算を使わずにAccumulatorを計算（HalfKPDynamic用）
-    pub fn refresh_accumulator_halfkp_dynamic(
-        &self,
-        pos: &Position,
-        acc: &mut super::network_halfkp_dynamic::AccumulatorHalfKPDynamic,
-    ) {
-        match self {
-            Self::HalfKPDynamic(net) => net.feature_transformer.refresh_accumulator(pos, acc),
-            _ => panic!("This method is only for HalfKPDynamic architecture."),
-        }
-    }
-
     /// 差分計算でAccumulatorを更新（HalfKP用）
     pub fn update_accumulator(
         &self,
@@ -657,9 +570,6 @@ impl NNUENetwork {
             Self::HalfKP512CReLU(_) | Self::HalfKP512SCReLU(_) => {
                 panic!("HalfKP512 requires AccumulatorHalfKP<512>. Use update_accumulator_halfkp_512().")
             }
-            Self::HalfKPDynamic(_) => {
-                panic!("HalfKPDynamic requires AccumulatorHalfKPDynamic. Use update_accumulator_halfkp_dynamic().")
-            }
             Self::HalfKA512CReLU(_) | Self::HalfKA512SCReLU(_) => {
                 panic!(
                     "HalfKA512 requires AccumulatorHalfKA<512>. Use update_accumulator_halfka_512()."
@@ -667,9 +577,6 @@ impl NNUENetwork {
             }
             Self::HalfKA1024CReLU(_) | Self::HalfKA1024SCReLU(_) => {
                 panic!("HalfKA1024 requires AccumulatorHalfKA<1024>. Use update_accumulator_halfka_1024().")
-            }
-            Self::HalfKADynamic(_) => {
-                panic!("HalfKADynamic requires AccumulatorHalfKADynamic. Use update_accumulator_halfka_dynamic().")
             }
             Self::LayerStacks(_) => {
                 panic!("LayerStacks requires AccumulatorLayerStacks. Use update_accumulator_layer_stacks().")
@@ -688,20 +595,6 @@ impl NNUENetwork {
         match self {
             Self::LayerStacks(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
             _ => panic!("This method is only for LayerStacks architecture."),
-        }
-    }
-
-    /// 差分計算でAccumulatorを更新（HalfKADynamic用）
-    pub fn update_accumulator_halfka_dynamic(
-        &self,
-        pos: &Position,
-        dirty_piece: &super::accumulator::DirtyPiece,
-        acc: &mut super::network_halfka_dynamic::AccumulatorHalfKADynamic,
-        prev_acc: &super::network_halfka_dynamic::AccumulatorHalfKADynamic,
-    ) {
-        match self {
-            Self::HalfKADynamic(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
-            _ => panic!("This method is only for HalfKADynamic architecture."),
         }
     }
 
@@ -765,22 +658,6 @@ impl NNUENetwork {
         }
     }
 
-    /// 差分計算でAccumulatorを更新（HalfKPDynamic用）
-    pub fn update_accumulator_halfkp_dynamic(
-        &self,
-        pos: &Position,
-        dirty_piece: &super::accumulator::DirtyPiece,
-        acc: &mut super::network_halfkp_dynamic::AccumulatorHalfKPDynamic,
-        prev_acc: &super::network_halfkp_dynamic::AccumulatorHalfKPDynamic,
-    ) {
-        match self {
-            Self::HalfKPDynamic(net) => {
-                net.feature_transformer.update_accumulator(pos, dirty_piece, acc, prev_acc)
-            }
-            _ => panic!("This method is only for HalfKPDynamic architecture."),
-        }
-    }
-
     /// 複数手分の差分を適用してアキュムレータを更新（旧HalfKP用）
     pub fn forward_update_incremental(
         &self,
@@ -798,17 +675,11 @@ impl NNUENetwork {
             Self::HalfKP512CReLU(_) | Self::HalfKP512SCReLU(_) => {
                 panic!("HalfKP512 requires AccumulatorStackHalfKP<512>. Use forward_update_incremental_halfkp_512().")
             }
-            Self::HalfKPDynamic(_) => {
-                panic!("HalfKPDynamic requires AccumulatorStackHalfKPDynamic. Use forward_update_incremental_halfkp_dynamic().")
-            }
             Self::HalfKA512CReLU(_) | Self::HalfKA512SCReLU(_) => {
                 panic!("HalfKA512 requires AccumulatorStackHalfKA<512>. Use forward_update_incremental_halfka_512().")
             }
             Self::HalfKA1024CReLU(_) | Self::HalfKA1024SCReLU(_) => {
                 panic!("HalfKA1024 requires AccumulatorStackHalfKA<1024>. Use forward_update_incremental_halfka_1024().")
-            }
-            Self::HalfKADynamic(_) => {
-                panic!("HalfKADynamic requires AccumulatorStackHalfKADynamic. Use forward_update_incremental_halfka_dynamic().")
             }
             Self::LayerStacks(_) => {
                 panic!("LayerStacks requires AccumulatorStackLayerStacks. Use forward_update_incremental_layer_stacks().")
@@ -826,19 +697,6 @@ impl NNUENetwork {
         match self {
             Self::LayerStacks(net) => net.forward_update_incremental(pos, stack, source_idx),
             _ => panic!("This method is only for LayerStacks architecture."),
-        }
-    }
-
-    /// 複数手分の差分を適用してアキュムレータを更新（HalfKADynamic用）
-    pub fn forward_update_incremental_halfka_dynamic(
-        &self,
-        pos: &Position,
-        stack: &mut super::network_halfka_dynamic::AccumulatorStackHalfKADynamic,
-        source_idx: usize,
-    ) -> bool {
-        match self {
-            Self::HalfKADynamic(net) => net.forward_update_incremental(pos, stack, source_idx),
-            _ => panic!("This method is only for HalfKADynamic architecture."),
         }
     }
 
@@ -895,65 +753,6 @@ impl NNUENetwork {
             Self::HalfKP512CReLU(net) => net.forward_update_incremental(pos, stack, source_idx),
             Self::HalfKP512SCReLU(net) => net.forward_update_incremental(pos, stack, source_idx),
             _ => panic!("This method is only for HalfKP512 architecture."),
-        }
-    }
-
-    /// 複数手分の差分を適用してアキュムレータを更新（HalfKPDynamic用）
-    pub fn forward_update_incremental_halfkp_dynamic(
-        &self,
-        pos: &Position,
-        stack: &mut super::network_halfkp_dynamic::AccumulatorStackHalfKPDynamic,
-        source_idx: usize,
-    ) -> bool {
-        match self {
-            Self::HalfKPDynamic(net) => {
-                net.feature_transformer.forward_update_incremental(pos, stack, source_idx)
-            }
-            _ => panic!("This method is only for HalfKPDynamic architecture."),
-        }
-    }
-
-    /// HalfKPDynamic 用の新しいアキュムレータを作成
-    pub fn new_accumulator_halfkp_dynamic(
-        &self,
-    ) -> super::network_halfkp_dynamic::AccumulatorHalfKPDynamic {
-        match self {
-            Self::HalfKPDynamic(net) => {
-                super::network_halfkp_dynamic::AccumulatorHalfKPDynamic::new(net.arch_l1)
-            }
-            _ => panic!("This method is only for HalfKPDynamic architecture."),
-        }
-    }
-
-    /// HalfKPDynamic 用の新しいアキュムレータスタックを作成
-    pub fn new_accumulator_stack_halfkp_dynamic(
-        &self,
-    ) -> super::network_halfkp_dynamic::AccumulatorStackHalfKPDynamic {
-        match self {
-            Self::HalfKPDynamic(net) => {
-                super::network_halfkp_dynamic::AccumulatorStackHalfKPDynamic::new(net.arch_l1)
-            }
-            _ => panic!("This method is only for HalfKPDynamic architecture."),
-        }
-    }
-
-    /// HalfKADynamic 用の新しいアキュムレータを作成
-    pub fn new_accumulator_halfka_dynamic(
-        &self,
-    ) -> super::network_halfka_dynamic::AccumulatorHalfKADynamic {
-        match self {
-            Self::HalfKADynamic(net) => net.new_accumulator(),
-            _ => panic!("This method is only for HalfKADynamic architecture."),
-        }
-    }
-
-    /// HalfKADynamic 用の新しいアキュムレータスタックを作成
-    pub fn new_accumulator_stack_halfka_dynamic(
-        &self,
-    ) -> super::network_halfka_dynamic::AccumulatorStackHalfKADynamic {
-        match self {
-            Self::HalfKADynamic(net) => net.new_accumulator_stack(),
-            _ => panic!("This method is only for HalfKADynamic architecture."),
         }
     }
 
@@ -1060,37 +859,6 @@ pub fn parse_fv_scale_from_arch(arch_str: &str) -> Option<i32> {
                 }
             }
             // fv_scale= が見つかったがパース失敗または範囲外の場合は None
-            return None;
-        }
-    }
-    None
-}
-
-/// arch_str から qa（SCReLU量子化係数）を抽出
-///
-/// bullet-shogi で学習したモデルは arch_str に "qa=N" を含む。
-/// 例: "Features=HalfKA_hm^[73305->256x2]-SCReLU,fv_scale=13,qa=255,qb=64,scale=600"
-///
-/// 戻り値:
-/// - `Some(N)`: qa=N が見つかり、妥当な範囲内の場合
-/// - `None`: qa が見つからない、またはパース失敗
-///
-/// QA=127 と QA=255 の両方をサポート:
-/// - QA=127: シフト >>7 (従来の自己乗算 SCReLU)
-/// - QA=255: シフト >>9 (Reckless 互換)
-pub fn parse_qa_from_arch(arch_str: &str) -> Option<i16> {
-    /// qa の許容最小値
-    const QA_MIN: i16 = 1;
-    /// qa の許容最大値
-    const QA_MAX: i16 = 255;
-
-    for part in arch_str.split(',') {
-        if let Some(value) = part.strip_prefix("qa=") {
-            if let Ok(qa) = value.parse::<i16>() {
-                if (QA_MIN..=QA_MAX).contains(&qa) {
-                    return Some(qa);
-                }
-            }
             return None;
         }
     }
@@ -1525,101 +1293,6 @@ fn update_and_evaluate_layer_stacks(
     network.evaluate_layer_stacks(pos, acc_ref)
 }
 
-/// HalfKADynamic アキュムレータを更新して評価（内部実装）
-///
-/// `evaluate_halfka_dynamic` と `evaluate_dispatch` から呼び出される共通ロジック。
-/// network は既に取得済みで、アーキテクチャチェックも完了していることが前提。
-#[inline]
-fn update_and_evaluate_halfka_dynamic(
-    network: &NNUENetwork,
-    pos: &Position,
-    stack: &mut super::network_halfka_dynamic::AccumulatorStackHalfKADynamic,
-) -> Value {
-    // アキュムレータの更新
-    let current_entry = stack.current();
-    if !current_entry.accumulator.computed_accumulation {
-        let mut updated = false;
-
-        // 1. 直前局面で差分更新を試行
-        if let Some(prev_idx) = current_entry.previous {
-            let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
-            if prev_computed {
-                let dirty_piece = stack.current().dirty_piece;
-                let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
-                network.update_accumulator_halfka_dynamic(pos, &dirty_piece, current_acc, prev_acc);
-                updated = true;
-            }
-        }
-
-        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
-        if !updated {
-            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
-                updated = network.forward_update_incremental_halfka_dynamic(pos, stack, source_idx);
-            }
-        }
-
-        // 3. それでも失敗なら全計算
-        if !updated {
-            #[cfg(debug_assertions)]
-            if std::env::var("NNUE_DEBUG").is_ok() {
-                eprintln!("[DEBUG] Calling refresh_accumulator_halfka_dynamic");
-            }
-            let acc = &mut stack.current_mut().accumulator;
-            network.refresh_accumulator_halfka_dynamic(pos, acc);
-        }
-    }
-
-    // 評価
-    let acc_ref = &stack.current().accumulator;
-    network.evaluate_halfka_dynamic(pos, acc_ref)
-}
-
-/// HalfKPDynamic アキュムレータを更新して評価（内部実装）
-#[inline]
-fn update_and_evaluate_halfkp_dynamic(
-    network: &NNUENetwork,
-    pos: &Position,
-    stack: &mut super::network_halfkp_dynamic::AccumulatorStackHalfKPDynamic,
-) -> Value {
-    // アキュムレータの更新
-    let current_entry = stack.current();
-    if !current_entry.accumulator.computed_accumulation {
-        let mut updated = false;
-
-        // 1. 直前局面で差分更新を試行
-        if let Some(prev_idx) = current_entry.previous {
-            let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
-            if prev_computed {
-                let dirty_piece = stack.current().dirty_piece;
-                let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
-                network.update_accumulator_halfkp_dynamic(pos, &dirty_piece, current_acc, prev_acc);
-                updated = true;
-            }
-        }
-
-        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
-        if !updated {
-            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
-                updated = network.forward_update_incremental_halfkp_dynamic(pos, stack, source_idx);
-            }
-        }
-
-        // 3. それでも失敗なら全計算
-        if !updated {
-            #[cfg(debug_assertions)]
-            if std::env::var("NNUE_DEBUG").is_ok() {
-                eprintln!("[DEBUG] Calling refresh_accumulator_halfkp_dynamic");
-            }
-            let acc = &mut stack.current_mut().accumulator;
-            network.refresh_accumulator_halfkp_dynamic(pos, acc);
-        }
-    }
-
-    // 評価
-    let acc_ref = &stack.current().accumulator;
-    network.evaluate_halfkp_dynamic(pos, acc_ref)
-}
-
 /// HalfKA512 アキュムレータを更新して評価（内部実装）
 #[inline]
 fn update_and_evaluate_halfka_512(
@@ -1826,11 +1499,6 @@ pub fn evaluate(pos: &Position, stack: &mut AccumulatorStack, eval_hash: &EvalHa
             "BUG: LayerStacks architecture detected. Use evaluate_layer_stacks() with AccumulatorStackLayerStacks."
         );
     }
-    if network.is_halfka_dynamic() {
-        unreachable!(
-            "BUG: HalfKADynamic architecture detected. Use evaluate_halfka_dynamic() with AccumulatorStackHalfKADynamic."
-        );
-    }
     if network.is_halfka_512() {
         unreachable!(
             "BUG: HalfKA512 architecture detected. Use evaluate_dispatch() with AccumulatorStackHalfKA<512>."
@@ -1994,11 +1662,6 @@ pub fn is_layer_stacks_loaded() -> bool {
     NETWORK.get().map(|n| n.is_layer_stacks()).unwrap_or(false)
 }
 
-/// ロードされたNNUEがHalfKADynamicアーキテクチャかどうか
-pub fn is_halfka_dynamic_loaded() -> bool {
-    NETWORK.get().map(|n| n.is_halfka_dynamic()).unwrap_or(false)
-}
-
 /// ロードされたNNUEがHalfKA512アーキテクチャかどうか
 pub fn is_halfka_512_loaded() -> bool {
     NETWORK.get().map(|n| n.is_halfka_512()).unwrap_or(false)
@@ -2007,11 +1670,6 @@ pub fn is_halfka_512_loaded() -> bool {
 /// ロードされたNNUEがHalfKA1024アーキテクチャかどうか
 pub fn is_halfka_1024_loaded() -> bool {
     NETWORK.get().map(|n| n.is_halfka_1024()).unwrap_or(false)
-}
-
-/// ロードされたHalfKADynamicのL1サイズを取得（未ロードまたは別アーキテクチャの場合はNone）
-pub fn get_halfka_dynamic_l1() -> Option<usize> {
-    NETWORK.get().and_then(|n| n.get_halfka_dynamic_l1())
 }
 
 /// 局面を評価（LayerStacks用）
@@ -2075,15 +1733,9 @@ pub fn evaluate_dispatch(pos: &Position, stack: &mut AccumulatorStackVariant) ->
         }
         AccumulatorStackVariant::HalfKA512(s) => update_and_evaluate_halfka_512(network, pos, s),
         AccumulatorStackVariant::HalfKA1024(s) => update_and_evaluate_halfka_1024(network, pos, s),
-        AccumulatorStackVariant::HalfKADynamic(s) => {
-            update_and_evaluate_halfka_dynamic(network, pos, s)
-        }
         AccumulatorStackVariant::HalfKP(s) => update_and_evaluate_halfka(network, pos, s),
         AccumulatorStackVariant::HalfKP256(s) => update_and_evaluate_halfkp_256(network, pos, s),
         AccumulatorStackVariant::HalfKP512(s) => update_and_evaluate_halfkp_512(network, pos, s),
-        AccumulatorStackVariant::HalfKPDynamic(s) => {
-            update_and_evaluate_halfkp_dynamic(network, pos, s)
-        }
     }
 }
 
@@ -2173,47 +1825,6 @@ mod tests {
 
         // 評価値が妥当な範囲内
         assert!(value.raw().abs() < 1000);
-    }
-
-    /// epoch20_v2.nnue (HalfKADynamic 1024x2-8-96) の自動判別テスト
-    #[test]
-    fn test_nnue_network_auto_detect_halfka_dynamic() {
-        use std::path::Path;
-
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("epoch20_v2.nnue");
-
-        if !path.exists() {
-            eprintln!("Skipping test: NNUE file not found at {path:?}");
-            return;
-        }
-
-        let network = NNUENetwork::load(&path).expect("Failed to load NNUE file");
-
-        // HalfKADynamic として認識されることを確認
-        assert!(
-            network.is_halfka_dynamic(),
-            "epoch20_v2.nnue should be detected as HalfKADynamic, but got: {}",
-            network.architecture_name()
-        );
-        assert_eq!(network.architecture_name(), "HalfKADynamic");
-
-        // HalfKADynamic 用の評価が動作することを確認
-        let mut pos = crate::position::Position::new();
-        pos.set_sfen(SFEN_HIRATE).unwrap();
-
-        let mut acc = network.new_accumulator_halfka_dynamic();
-        network.refresh_accumulator_halfka_dynamic(&pos, &mut acc);
-
-        let value = network.evaluate_halfka_dynamic(&pos, &acc);
-        eprintln!("HalfKADynamic evaluate (hirate): {}", value.raw());
-
-        // 評価値が妥当な範囲内（初期局面は概ね0に近いはず）
-        assert!(value.raw().abs() < 500, "Hirate eval should be near 0, got: {}", value.raw());
     }
 
     /// parse_fv_scale_from_arch のユニットテスト

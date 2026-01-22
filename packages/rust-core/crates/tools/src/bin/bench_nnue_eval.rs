@@ -11,9 +11,9 @@ use anyhow::{bail, Result};
 use clap::Parser;
 
 use engine_core::nnue::{
-    Accumulator, AccumulatorHalfKA, AccumulatorHalfKADynamic, AccumulatorHalfKP,
-    AccumulatorHalfKPDynamic, HalfKA1024CReLU, HalfKA1024SCReLU, HalfKA512CReLU, HalfKA512SCReLU,
-    HalfKP256CReLU, HalfKP256SCReLU, HalfKP512CReLU, HalfKP512SCReLU, NNUENetwork,
+    Accumulator, AccumulatorHalfKA, AccumulatorHalfKP, HalfKA1024CReLU, HalfKA1024SCReLU,
+    HalfKA512CReLU, HalfKA512SCReLU, HalfKP256CReLU, HalfKP256SCReLU, HalfKP512CReLU,
+    HalfKP512SCReLU, NNUENetwork,
 };
 use engine_core::position::Position;
 
@@ -568,124 +568,6 @@ fn bench_halfka1024_screlu(
     }
 }
 
-/// HalfKADynamic のベンチマーク
-fn bench_halfka_dynamic(
-    network: &engine_core::nnue::NetworkHalfKADynamic,
-    positions: &[Position],
-    warmup: u64,
-    iterations: u64,
-) -> BenchResult {
-    let arch_name = format!(
-        "HalfKADynamic {}x2-{}-{} (dynamic)",
-        network.arch_l1, network.arch_l2, network.arch_l3
-    );
-
-    // ウォームアップ
-    let mut acc = AccumulatorHalfKADynamic::new(network.arch_l1);
-    for i in 0..warmup {
-        let pos = &positions[i as usize % positions.len()];
-        network.refresh_accumulator(pos, &mut acc);
-        black_box(network.evaluate(pos, &acc));
-    }
-
-    // refresh_accumulator ベンチマーク
-    let start = Instant::now();
-    for i in 0..iterations {
-        let pos = &positions[i as usize % positions.len()];
-        network.refresh_accumulator(pos, &mut acc);
-    }
-    let refresh_duration = start.elapsed();
-
-    // evaluate ベンチマーク
-    network.refresh_accumulator(&positions[0], &mut acc);
-    let start = Instant::now();
-    for i in 0..iterations {
-        let pos = &positions[i as usize % positions.len()];
-        black_box(network.evaluate(pos, &acc));
-    }
-    let eval_duration = start.elapsed();
-
-    // 結合ベンチマーク
-    let start = Instant::now();
-    for i in 0..iterations {
-        let pos = &positions[i as usize % positions.len()];
-        network.refresh_accumulator(pos, &mut acc);
-        black_box(network.evaluate(pos, &acc));
-    }
-    let total_duration = start.elapsed();
-
-    let refresh_ns = refresh_duration.as_nanos() as f64 / iterations as f64;
-    let eval_ns = eval_duration.as_nanos() as f64 / iterations as f64;
-    let total_ns = total_duration.as_nanos() as f64 / iterations as f64;
-
-    BenchResult {
-        arch_name,
-        refresh_ns_per_op: refresh_ns,
-        eval_ns_per_op: eval_ns,
-        total_ns_per_op: total_ns,
-        evals_per_sec: 1_000_000_000.0 / total_ns,
-    }
-}
-
-/// HalfKPDynamic のベンチマーク
-fn bench_halfkp_dynamic(
-    network: &engine_core::nnue::NetworkHalfKPDynamic,
-    positions: &[Position],
-    warmup: u64,
-    iterations: u64,
-) -> BenchResult {
-    let arch_name = format!(
-        "HalfKPDynamic {}x2-{}-{} (dynamic)",
-        network.arch_l1, network.arch_l2, network.arch_l3
-    );
-
-    // ウォームアップ
-    let mut acc = AccumulatorHalfKPDynamic::new(network.arch_l1);
-    for i in 0..warmup {
-        let pos = &positions[i as usize % positions.len()];
-        network.feature_transformer.refresh_accumulator(pos, &mut acc);
-        black_box(network.evaluate(pos, &acc));
-    }
-
-    // refresh_accumulator ベンチマーク
-    let start = Instant::now();
-    for i in 0..iterations {
-        let pos = &positions[i as usize % positions.len()];
-        network.feature_transformer.refresh_accumulator(pos, &mut acc);
-    }
-    let refresh_duration = start.elapsed();
-
-    // evaluate ベンチマーク
-    network.feature_transformer.refresh_accumulator(&positions[0], &mut acc);
-    let start = Instant::now();
-    for i in 0..iterations {
-        let pos = &positions[i as usize % positions.len()];
-        black_box(network.evaluate(pos, &acc));
-    }
-    let eval_duration = start.elapsed();
-
-    // 結合ベンチマーク
-    let start = Instant::now();
-    for i in 0..iterations {
-        let pos = &positions[i as usize % positions.len()];
-        network.feature_transformer.refresh_accumulator(pos, &mut acc);
-        black_box(network.evaluate(pos, &acc));
-    }
-    let total_duration = start.elapsed();
-
-    let refresh_ns = refresh_duration.as_nanos() as f64 / iterations as f64;
-    let eval_ns = eval_duration.as_nanos() as f64 / iterations as f64;
-    let total_ns = total_duration.as_nanos() as f64 / iterations as f64;
-
-    BenchResult {
-        arch_name,
-        refresh_ns_per_op: refresh_ns,
-        eval_ns_per_op: eval_ns,
-        total_ns_per_op: total_ns,
-        evals_per_sec: 1_000_000_000.0 / total_ns,
-    }
-}
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -776,9 +658,6 @@ fn main() -> Result<()> {
         NNUENetwork::HalfKP512SCReLU(net) => {
             bench_halfkp512_screlu(&net, &positions, cli.warmup, cli.iterations)
         }
-        NNUENetwork::HalfKPDynamic(net) => {
-            bench_halfkp_dynamic(&net, &positions, cli.warmup, cli.iterations)
-        }
         NNUENetwork::HalfKA512CReLU(net) => {
             bench_halfka512_crelu(&net, &positions, cli.warmup, cli.iterations)
         }
@@ -790,9 +669,6 @@ fn main() -> Result<()> {
         }
         NNUENetwork::HalfKA1024SCReLU(net) => {
             bench_halfka1024_screlu(&net, &positions, cli.warmup, cli.iterations)
-        }
-        NNUENetwork::HalfKADynamic(net) => {
-            bench_halfka_dynamic(&net, &positions, cli.warmup, cli.iterations)
         }
         NNUENetwork::LayerStacks(_) => {
             bail!("LayerStacks benchmark not implemented yet");

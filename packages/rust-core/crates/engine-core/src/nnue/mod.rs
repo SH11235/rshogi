@@ -37,9 +37,7 @@ mod layers;
 mod leb128;
 mod network;
 pub mod network_halfka;
-mod network_halfka_dynamic;
 pub mod network_halfkp;
-mod network_halfkp_dynamic;
 mod network_layer_stacks;
 
 pub use accumulator::{
@@ -66,16 +64,9 @@ pub use layer_stacks::{
 };
 pub use layers::{AffineTransform, ClippedReLU};
 pub use network::{
-    evaluate, evaluate_dispatch, evaluate_layer_stacks, get_fv_scale_override,
-    get_halfka_dynamic_l1, get_network, init_nnue, init_nnue_from_bytes, is_halfka_1024_loaded,
-    is_halfka_512_loaded, is_halfka_dynamic_loaded, is_layer_stacks_loaded, is_nnue_initialized,
-    set_fv_scale_override, NNUENetwork, Network,
-};
-pub use network_halfka_dynamic::{
-    AccumulatorHalfKADynamic, AccumulatorStackHalfKADynamic, NetworkHalfKADynamic,
-};
-pub use network_halfkp_dynamic::{
-    AccumulatorHalfKPDynamic, AccumulatorStackHalfKPDynamic, NetworkHalfKPDynamic,
+    evaluate, evaluate_dispatch, evaluate_layer_stacks, get_fv_scale_override, get_network,
+    init_nnue, init_nnue_from_bytes, is_halfka_1024_loaded, is_halfka_512_loaded,
+    is_layer_stacks_loaded, is_nnue_initialized, set_fv_scale_override, NNUENetwork, Network,
 };
 pub use network_layer_stacks::NetworkLayerStacks;
 

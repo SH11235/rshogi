@@ -1601,7 +1601,10 @@ impl SCReLUDynamic {
     /// # SIMD最適化
     ///
     /// フォールスルー構造で AVX2 → SSE4.1 → スカラーの順に処理。
+    ///
+    /// Note: この関数は Dynamic 実装が削除されたため、テストでのみ使用される。
     #[inline]
+    #[allow(dead_code)]
     pub fn propagate_i16_to_u8_with_qa(input: &[i16], output: &mut [u8], qa: i16) {
         debug_assert_eq!(input.len(), output.len());
         let len = input.len();
