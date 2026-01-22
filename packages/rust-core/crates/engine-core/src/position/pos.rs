@@ -1371,7 +1371,9 @@ impl Position {
         new_state.captured_piece = Piece::NONE;
         new_state.last_move = Move::PASS;
         new_state.hand_snapshot = self.hand;
-        new_state.plies_from_null = 0;
+        // パスは合法手なので通常の手と同様にカウントを進める（千日手検出のため）
+        // ※ do_null_move（探索用）とは異なり、0リセットしない
+        new_state.plies_from_null += 1;
 
         // 6. 連続王手カウンタ: パスは王手ではないのでリセット
         new_state.continuous_check[us.index()] = 0;
