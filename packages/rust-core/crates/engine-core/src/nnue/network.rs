@@ -198,11 +198,14 @@ impl NNUENetwork {
                                 let network = HalfKA256SCReLU::read(reader)?;
                                 Ok(Self::HalfKA256SCReLU(Box::new(network)))
                             }
-                            (512, 8, 96, false) => {
+                            // 512x2-8-96 CReLU
+                            // HalfKA 512x2 は1バリアント（8-96）のみ
+                            (512, 8, 96, false) | (512, 0, 0, false) => {
                                 let network = HalfKA512CReLU::read(reader)?;
                                 Ok(Self::HalfKA512CReLU(Box::new(network)))
                             }
-                            (512, 8, 96, true) => {
+                            // 512x2-8-96 SCReLU
+                            (512, 8, 96, true) | (512, 0, 0, true) => {
                                 let network = HalfKA512SCReLU::read(reader)?;
                                 Ok(Self::HalfKA512SCReLU(Box::new(network)))
                             }
@@ -303,21 +306,29 @@ impl NNUENetwork {
                     let l1 = Self::parse_halfkp_l1(&arch_str);
                     let (_, l2, l3) = Self::parse_arch_dimensions(&arch_str);
                     match (l1, l2, l3, use_screlu) {
-                        (256, 32, 32, false) | (0, _, _, false) => {
-                            // 256x2-32-32 CReLU: const generics版を使用
+                        // 256x2-32-32 CReLU
+                        // - (256, 32, 32): 完全一致
+                        // - (256, 0, 0): L2/L3パース失敗（古い/簡易フォーマット）
+                        // - (0, _, _): L1パース失敗（フォールバック）
+                        // HalfKP 256x2 は1バリアント（32-32）のみのため、
+                        // L2/L3が不明でもデフォルトで使用可能
+                        (256, 32, 32, false) | (256, 0, 0, false) | (0, _, _, false) => {
                             let network = HalfKP256CReLU::read(reader)?;
                             Ok(Self::HalfKP256CReLU(Box::new(network)))
                         }
-                        (256, 32, 32, true) | (0, _, _, true) => {
-                            // 256x2-32-32 SCReLU: const generics版を使用
+                        // 256x2-32-32 SCReLU（同様のフォールバック）
+                        (256, 32, 32, true) | (256, 0, 0, true) | (0, _, _, true) => {
                             let network = HalfKP256SCReLU::read(reader)?;
                             Ok(Self::HalfKP256SCReLU(Box::new(network)))
                         }
-                        (512, 8, 96, false) => {
+                        // 512x2-8-96 CReLU
+                        // HalfKP 512x2 も1バリアント（8-96）のみ
+                        (512, 8, 96, false) | (512, 0, 0, false) => {
                             let network = HalfKP512CReLU::read(reader)?;
                             Ok(Self::HalfKP512CReLU(Box::new(network)))
                         }
-                        (512, 8, 96, true) => {
+                        // 512x2-8-96 SCReLU
+                        (512, 8, 96, true) | (512, 0, 0, true) => {
                             let network = HalfKP512SCReLU::read(reader)?;
                             Ok(Self::HalfKP512SCReLU(Box::new(network)))
                         }
