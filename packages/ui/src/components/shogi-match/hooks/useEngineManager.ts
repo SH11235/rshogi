@@ -77,18 +77,56 @@ interface PassRightsSettings {
 }
 
 /**
- * パス権設定からloadPositionのオプションを生成するヘルパー関数
+ * パス権設定と棋譜からloadPositionのオプションを生成するヘルパー関数
+ *
+ * 注意: 棋譜に"pass"が含まれる場合は、設定が無効でもpassRightsを送る必要がある。
+ * これは、Rust側のPosition::do_pass_moveがcan_pass()を満たせずパニックするのを防ぐため。
+ * （パス権有効で対局後に設定をOFFにした場合や、パス入り棋譜をインポートした場合など）
  */
-function buildPassRightsOption(passRightsSettings?: PassRightsSettings) {
-    if (!passRightsSettings?.enabled) {
-        return undefined;
+function buildPassRightsOption(
+    passRightsSettings: PassRightsSettings | undefined,
+    moves: string[],
+) {
+    const hasPassInMoves = moves.includes("pass");
+
+    if (passRightsSettings?.enabled) {
+        // 設定が有効: 初期値を使用
+        return {
+            passRights: {
+                sente: passRightsSettings.initialCount,
+                gote: passRightsSettings.initialCount,
+            },
+        };
     }
-    return {
-        passRights: {
-            sente: passRightsSettings.initialCount,
-            gote: passRightsSettings.initialCount,
-        },
-    };
+
+    if (hasPassInMoves) {
+        // 設定は無効だが棋譜にpassが含まれる: 十分な数のパス権を設定
+        // （各プレイヤーのパス回数の最大値を使用）
+        let sentePassCount = 0;
+        let gotePassCount = 0;
+        let isSenteTurn = true; // 平手初期局面は先手番
+        for (const move of moves) {
+            if (move === "pass") {
+                if (isSenteTurn) {
+                    sentePassCount++;
+                } else {
+                    gotePassCount++;
+                }
+            }
+            isSenteTurn = !isSenteTurn;
+        }
+        // 最低でも現在のパス数 + 1 を確保（追加パスの余地を残す）
+        const minRights = Math.max(sentePassCount, gotePassCount) + 1;
+        return {
+            passRights: {
+                sente: minRights,
+                gote: minRights,
+            },
+        };
+    }
+
+    // 設定無効かつパスなし: passRights不要
+    return undefined;
 }
 
 interface UseEngineManagerProps {
@@ -681,7 +719,7 @@ export function useEngineManager({
                     await client.loadPosition(
                         startSfen,
                         movesRef.current,
-                        buildPassRightsOption(passRightsSettings),
+                        buildPassRightsOption(passRightsSettings, movesRef.current),
                     );
                     engineState.ready = true;
                     setEngineReady((prev) => ({ ...prev, [side]: true }));
@@ -733,7 +771,7 @@ export function useEngineManager({
                 await client.loadPosition(
                     startSfen,
                     movesRef.current,
-                    buildPassRightsOption(passRightsSettings),
+                    buildPassRightsOption(passRightsSettings, movesRef.current),
                 );
 
                 // UIタイマーの現在の残り時間を計算してエンジンに渡す
