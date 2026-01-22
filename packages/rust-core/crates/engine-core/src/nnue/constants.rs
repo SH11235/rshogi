@@ -26,6 +26,13 @@ pub const FV_SCALE_HALFKA: i32 = 16;
 /// 重みのスケーリングビット数
 pub const WEIGHT_SCALE_BITS: u32 = 6;
 
+/// SCReLU のデフォルト QA 値
+///
+/// FT SCReLU 出力は QA に依存せず 0〜127 に正規化されるため、
+/// L1/L2 の積和スケールは常に `SCRELU_DEFAULT_QA × QB` になる。
+/// QA > 127 の場合は bias スケールを調整する必要がある。
+pub const SCRELU_DEFAULT_QA: i32 = 127;
+
 /// キャッシュラインサイズ（バイト）
 pub const CACHE_LINE_SIZE: usize = 64;
 
@@ -148,7 +155,8 @@ pub const SCRELU_QA: i16 = 127;
 /// SCReLU L1層以降の量子化係数 (bullet-shogi 準拠)
 ///
 /// L1層以降では QB = 64 を使用。
-pub const SCRELU_QB: i16 = 64;
+/// i32 として定義（中間層の i32 演算で使用するため）
+pub const SCRELU_QB: i32 = 64;
 
 #[cfg(test)]
 mod tests {

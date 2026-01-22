@@ -239,6 +239,12 @@ impl Move {
     #[inline]
     pub const fn from_u16_checked(value: u16) -> Option<Move> {
         let value32 = value as u32;
+
+        // PASS は特殊値なので先にチェック
+        if value32 == Self::PASS.0 {
+            return Some(Self::PASS);
+        }
+
         let to = value32 & Self::TO_MASK;
         let from = (value32 & Self::FROM_MASK) >> Self::FROM_SHIFT;
         if to >= Square::NUM as u32 {
@@ -431,6 +437,13 @@ mod tests {
         // invalid drop piece type
         let raw = 0x4000 | (8 << 7) | Square::SQ_55.raw() as u16;
         assert_eq!(Move::from_u16_checked(raw), None);
+
+        // PASS手のu16往復（TT保存/読み出しで使用される）
+        let pass_u16 = Move::PASS.to_u16();
+        assert_eq!(pass_u16, 0xC000);
+        let restored = Move::from_u16_checked(pass_u16);
+        assert_eq!(restored, Some(Move::PASS));
+        assert!(restored.unwrap().is_pass());
     }
 
     #[test]

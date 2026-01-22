@@ -1206,11 +1206,55 @@ fn main() -> Result<()> {
         cli.byoyomi = 1000;
     }
 
+    // USIオプションからパス権情報を早期に解析（load_start_positions で使用するため）
+    let common_usi_opts_early = cli.usi_options.clone().unwrap_or_default();
+    let black_usi_opts_early =
+        cli.usi_options_black.clone().unwrap_or_else(|| common_usi_opts_early.clone());
+    let white_usi_opts_early =
+        cli.usi_options_white.clone().unwrap_or_else(|| common_usi_opts_early.clone());
+    let pass_rights_via_usi_early = black_usi_opts_early
+        .iter()
+        .any(|o| o == "PassRights=true" || o == "PassRights = true")
+        || white_usi_opts_early
+            .iter()
+            .any(|o| o == "PassRights=true" || o == "PassRights = true");
+
+    // USIオプションから InitialPassCount を解析
+    let parse_initial_pass_count_early = |opts: &[String]| -> Option<u8> {
+        for opt in opts {
+            if let Some(val) = opt.strip_prefix("InitialPassCount=") {
+                return val.trim().parse().ok();
+            }
+            if let Some(val) = opt.strip_prefix("InitialPassCount = ") {
+                return val.trim().parse().ok();
+            }
+        }
+        None
+    };
+    let usi_initial_pass_count_early = parse_initial_pass_count_early(&black_usi_opts_early)
+        .or_else(|| parse_initial_pass_count_early(&white_usi_opts_early))
+        .unwrap_or(2);
+
+    // load_start_positions 用のパス権初期値
+    // 片側だけCLIで指定された場合、未指定側はデフォルト値で補完
+    let pass_rights_cli_specified =
+        cli.pass_rights_black.is_some() || cli.pass_rights_white.is_some();
+    let load_pass_black = if pass_rights_cli_specified || pass_rights_via_usi_early {
+        Some(cli.pass_rights_black.unwrap_or(usi_initial_pass_count_early))
+    } else {
+        None
+    };
+    let load_pass_white = if pass_rights_cli_specified || pass_rights_via_usi_early {
+        Some(cli.pass_rights_white.unwrap_or(usi_initial_pass_count_early))
+    } else {
+        None
+    };
+
     let (start_defs, start_commands) = load_start_positions(
         cli.startpos_file.as_deref(),
         cli.sfen.as_deref(),
-        cli.pass_rights_black,
-        cli.pass_rights_white,
+        load_pass_black,
+        load_pass_white,
     )?;
     let timestamp = Local::now();
     let output_path = resolve_output_path(cli.out.as_deref(), &timestamp);
@@ -1319,6 +1363,35 @@ fn main() -> Result<()> {
         }
     }
 
+    // USIオプションで PassRights=true が設定されているかを検出
+    // （--pass-rights-* 未指定でも --usi-options PassRights=true で有効化される場合に対応）
+    let pass_rights_via_usi = black_usi_opts
+        .iter()
+        .any(|o| o == "PassRights=true" || o == "PassRights = true")
+        || white_usi_opts
+            .iter()
+            .any(|o| o == "PassRights=true" || o == "PassRights = true");
+
+    // USIオプションから InitialPassCount を解析（エンジン設定と同期するため）
+    let parse_initial_pass_count = |opts: &[String]| -> Option<u8> {
+        for opt in opts {
+            if let Some(val) = opt.strip_prefix("InitialPassCount=") {
+                return val.trim().parse().ok();
+            }
+            if let Some(val) = opt.strip_prefix("InitialPassCount = ") {
+                return val.trim().parse().ok();
+            }
+        }
+        None
+    };
+    let usi_initial_pass_count = parse_initial_pass_count(&black_usi_opts)
+        .or_else(|| parse_initial_pass_count(&white_usi_opts))
+        .unwrap_or(2); // USI未指定時のデフォルト値
+
+    // ドライバ側のパス権有効化フラグ（CLIオプションまたはUSIオプションで有効）
+    let pass_rights_enabled =
+        cli.pass_rights_black.is_some() || cli.pass_rights_white.is_some() || pass_rights_via_usi;
+
     let mut black = EngineProcess::spawn(
         &EngineConfig {
             path: engine_paths.black.path.clone(),
@@ -1415,7 +1488,19 @@ fn main() -> Result<()> {
         } else {
             &start_defs[(game_idx as usize) % start_defs.len()]
         };
-        let mut pos = build_position(parsed, cli.pass_rights_black, cli.pass_rights_white)?;
+        // パス権の初期値（CLIオプション > USIオプションの InitialPassCount）
+        // ドライバ側の Position 初期化用
+        let pass_black = if pass_rights_enabled {
+            Some(cli.pass_rights_black.unwrap_or(usi_initial_pass_count))
+        } else {
+            None
+        };
+        let pass_white = if pass_rights_enabled {
+            Some(cli.pass_rights_white.unwrap_or(usi_initial_pass_count))
+        } else {
+            None
+        };
+        let mut pos = build_position(parsed, pass_black, pass_white)?;
         let mut tc = TimeControl::new(&cli);
         let mut outcome = GameOutcome::InProgress;
         let mut outcome_reason = "max_moves";
@@ -1445,8 +1530,7 @@ fn main() -> Result<()> {
             let sfen_before = pos.to_sfen();
             let think_limit_ms = tc.think_limit_ms(side);
             // パス権が有効な場合、現在のパス権を取得
-            let pass_rights = if cli.pass_rights_black.is_some() || cli.pass_rights_white.is_some()
-            {
+            let pass_rights = if pass_rights_enabled {
                 Some((pos.pass_rights(Color::Black), pos.pass_rights(Color::White)))
             } else {
                 None
@@ -2434,8 +2518,14 @@ fn start_position_for_game(
 
 fn start_position_from_command(cmd: &str) -> Result<(Position, String)> {
     let parsed = parse_position_line(cmd)?;
-    // KIF生成時はパス権利なしで処理（既に手は記録済み）
-    let pos = build_position(&parsed, None, None)?;
+    // パス手が含まれていればパス権利を有効化
+    let has_pass = parsed.moves.iter().any(|m| m == "pass");
+    let (pass_black, pass_white) = if has_pass {
+        (Some(15), Some(15))
+    } else {
+        (None, None)
+    };
+    let pos = build_position(&parsed, pass_black, pass_white)?;
     let sfen = pos.to_sfen();
     Ok((pos, sfen))
 }

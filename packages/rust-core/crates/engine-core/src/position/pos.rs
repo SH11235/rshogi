@@ -1371,10 +1371,22 @@ impl Position {
         new_state.captured_piece = Piece::NONE;
         new_state.last_move = Move::PASS;
         new_state.hand_snapshot = self.hand;
-        new_state.plies_from_null = 0;
+        // パスは合法手なので通常の手と同様にカウントを進める（千日手検出のため）
+        // ※ do_null_move（探索用）とは異なり、0リセットしない
+        new_state.plies_from_null += 1;
 
-        // 6. 連続王手カウンタ: パスは王手ではないのでリセット
-        new_state.continuous_check[us.index()] = 0;
+        // 6. 連続王手カウンタ: パスが王手を維持する場合はカウンタを更新
+        // （自分が相手玉に攻撃している場合、パス後も相手は王手状態）
+        let their_king = self.king_square(them);
+        let gives_check = !self.attackers_to_c(their_king, us).is_empty();
+        if gives_check {
+            // 王手を維持するので、連続王手カウンタを更新（do_moveと同様）
+            new_state.continuous_check[us.index()] += 2;
+        } else {
+            new_state.continuous_check[us.index()] = 0;
+        }
+        // 受け手側はリセット（do_moveと同様）
+        new_state.continuous_check[them.index()] = 0;
 
         // 7. 手番交代
         self.side_to_move = them;
@@ -1490,11 +1502,14 @@ impl Position {
 
     /// 王手になるかどうか
     ///
-    /// PASSは王手にならないため false を返す
+    /// PASSの場合：自分が相手玉に王手をかけている状態なら true
+    /// （パス後、相手が王手状態になるため）
     pub fn gives_check(&self, m: Move) -> bool {
-        // PASS は王手にならない
+        // PASS の場合：自分が相手玉に攻撃しているか
         if m.is_pass() {
-            return false;
+            let them = !self.side_to_move;
+            let their_king = self.king_square(them);
+            return !self.attackers_to_c(their_king, self.side_to_move).is_empty();
         }
 
         let us = self.side_to_move;
