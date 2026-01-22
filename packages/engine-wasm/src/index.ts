@@ -6,6 +6,7 @@ import type {
     EngineEventHandler,
     EngineInitOptions,
     EngineStopMode,
+    LoadPositionOptions,
     SearchHandle,
     SearchParams,
     ThreadInfo,
@@ -107,7 +108,13 @@ type WorkerCommand =
           wasmModule?: WasmModuleSource;
           requestId?: string;
       }
-    | { type: "loadPosition"; sfen: string; moves?: string[]; requestId?: string }
+    | {
+          type: "loadPosition";
+          sfen: string;
+          moves?: string[];
+          passRights?: { sente: number; gote: number };
+          requestId?: string;
+      }
     | { type: "applyMoves"; moves: string[]; requestId?: string }
     | { type: "search"; params: SearchParams; requestId?: string }
     | { type: "stop"; requestId?: string }
@@ -116,7 +123,12 @@ type WorkerCommand =
 
 type WorkerCommandPayload =
     | { type: "init"; opts?: WasmEngineInitOptions; wasmModule?: WasmModuleSource }
-    | { type: "loadPosition"; sfen: string; moves?: string[] }
+    | {
+          type: "loadPosition";
+          sfen: string;
+          moves?: string[];
+          passRights?: { sente: number; gote: number };
+      }
     | { type: "applyMoves"; moves: string[] }
     | { type: "search"; params: SearchParams }
     | { type: "stop" }
@@ -206,7 +218,11 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
     let lastInitOpts: WasmEngineInitOptions | undefined = rememberInitOpts(
         options.defaultInitOptions,
     );
-    let lastPosition: { sfen: string; moves: string[] } | null = null;
+    let lastPosition: {
+        sfen: string;
+        moves: string[];
+        passRights?: { sente: number; gote: number };
+    } | null = null;
     let threadedDisabled = false;
     let activeThreads: number | null = null;
 
@@ -512,6 +528,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
             type: "loadPosition",
             sfen: lastPosition.sfen,
             moves: lastPosition.moves,
+            passRights: lastPosition.passRights,
         });
     };
 
@@ -651,9 +668,9 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
                 initInFlight = null;
             }
         },
-        async loadPosition(sfen: string, moves?: string[]) {
+        async loadPosition(sfen: string, moves?: string[], options?: LoadPositionOptions) {
             if (backend === "mock") {
-                return mock.loadPosition(sfen, moves);
+                return mock.loadPosition(sfen, moves, options);
             }
             if (backend === "error") {
                 throw new Error(
@@ -662,22 +679,34 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
             }
             await ensureReady();
             if (!worker) {
-                return mock.loadPosition(sfen, moves);
+                return mock.loadPosition(sfen, moves, options);
             }
             const normalizedMoves = moves ?? [];
+            const passRights = options?.passRights;
+
+            // パス権設定が変わった場合は差分適用ではなく完全再読み込み
+            const passRightsChanged =
+                lastPosition?.passRights?.sente !== passRights?.sente ||
+                lastPosition?.passRights?.gote !== passRights?.gote;
+
             const incrementalMoves =
-                lastPosition && lastPosition.sfen === sfen
+                lastPosition && lastPosition.sfen === sfen && !passRightsChanged
                     ? getIncrementalMoves(lastPosition.moves, normalizedMoves)
                     : null;
             if (incrementalMoves !== null) {
                 if (incrementalMoves.length > 0) {
                     await postToWorkerAwait({ type: "applyMoves", moves: incrementalMoves });
                 }
-                lastPosition = { sfen, moves: normalizedMoves.slice() };
+                lastPosition = { sfen, moves: normalizedMoves.slice(), passRights };
                 return;
             }
-            await postToWorkerAwait({ type: "loadPosition", sfen, moves: normalizedMoves });
-            lastPosition = { sfen, moves: normalizedMoves.slice() };
+            await postToWorkerAwait({
+                type: "loadPosition",
+                sfen,
+                moves: normalizedMoves,
+                passRights,
+            });
+            lastPosition = { sfen, moves: normalizedMoves.slice(), passRights };
         },
         async search(params: SearchParams): Promise<SearchHandle> {
             if (backend === "mock") {

@@ -1,7 +1,8 @@
 import type { SkillLevelSettings } from "@shogi/engine-client";
 import { type ReactElement, useEffect, useState } from "react";
+import { Switch } from "../../switch";
 import type { ClockSettings } from "../hooks/useClockManager";
-import type { DisplaySettings, SquareNotation } from "../types";
+import type { DisplaySettings, PassRightsSettings, SquareNotation } from "../types";
 import type { EngineOption, SideSetting } from "./MatchSettingsPanel";
 import { SkillLevelSelector } from "./SkillLevelSelector";
 
@@ -70,6 +71,10 @@ interface MobileSettingsSheetProps {
     timeSettings: ClockSettings;
     onTimeSettingsChange: (settings: ClockSettings) => void;
 
+    // パス権設定（オプション）
+    passRightsSettings?: PassRightsSettings;
+    onPassRightsSettingsChange?: (settings: PassRightsSettings) => void;
+
     // エンジン情報
     uiEngineOptions: EngineOption[];
 
@@ -106,6 +111,8 @@ export function MobileSettingsSheet({
     onSidesChange,
     timeSettings,
     onTimeSettingsChange,
+    passRightsSettings,
+    onPassRightsSettingsChange,
     uiEngineOptions,
     settingsLocked,
     isMatchRunning,
@@ -277,6 +284,78 @@ export function MobileSettingsSheet({
                     </label>
                 </div>
             </div>
+
+            {/* パス権設定（オプション） */}
+            {passRightsSettings && onPassRightsSettingsChange && (
+                <div className="space-y-3 pt-3 border-t border-border">
+                    <div className="font-medium text-sm">変則ルール</div>
+                    <div className="flex items-center justify-between">
+                        <label htmlFor="mobile-pass-rights-toggle" className="text-sm">
+                            パス権を有効にする
+                        </label>
+                        <Switch
+                            id="mobile-pass-rights-toggle"
+                            checked={passRightsSettings.enabled}
+                            onCheckedChange={(checked) =>
+                                onPassRightsSettingsChange({
+                                    ...passRightsSettings,
+                                    enabled: checked,
+                                })
+                            }
+                            disabled={settingsLocked}
+                        />
+                    </div>
+                    {passRightsSettings.enabled && (
+                        <div className="flex items-center justify-between">
+                            <span className="text-sm text-muted-foreground">初期パス権数</span>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() =>
+                                        onPassRightsSettingsChange({
+                                            ...passRightsSettings,
+                                            initialCount: Math.max(
+                                                0,
+                                                passRightsSettings.initialCount - 1,
+                                            ),
+                                        })
+                                    }
+                                    disabled={
+                                        settingsLocked || passRightsSettings.initialCount <= 0
+                                    }
+                                    className="flex h-8 w-8 items-center justify-center rounded border border-border bg-background text-base disabled:opacity-50"
+                                >
+                                    -
+                                </button>
+                                <span className="w-8 text-center text-base font-semibold">
+                                    {passRightsSettings.initialCount}
+                                </span>
+                                <button
+                                    type="button"
+                                    onClick={() =>
+                                        onPassRightsSettingsChange({
+                                            ...passRightsSettings,
+                                            initialCount: Math.min(
+                                                10,
+                                                passRightsSettings.initialCount + 1,
+                                            ),
+                                        })
+                                    }
+                                    disabled={
+                                        settingsLocked || passRightsSettings.initialCount >= 10
+                                    }
+                                    className="flex h-8 w-8 items-center justify-center rounded border border-border bg-background text-base disabled:opacity-50"
+                                >
+                                    +
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                    <p className="text-xs text-muted-foreground">
+                        王手されていない時に手番をパスできます
+                    </p>
+                </div>
+            )}
 
             {/* アクションボタン（頻繁に使うので上部に配置） */}
             <div className="flex justify-center gap-3 pt-3 border-t border-border">

@@ -199,6 +199,10 @@ function deriveLastMove(move: string | undefined): LastMove | undefined {
     if (parsed.kind === "drop") {
         return { from: null, to: parsed.to, dropPiece: parsed.piece, promotes: false };
     }
+    if (parsed.kind === "pass") {
+        // パス手の場合は特別なLastMoveを返す
+        return { to: "5e" as Square, isPass: true };
+    }
     return { from: parsed.from, to: parsed.to, promotes: parsed.promote };
 }
 

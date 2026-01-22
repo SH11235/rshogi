@@ -84,6 +84,22 @@ export const DEFAULT_ANALYSIS_SETTINGS: AnalysisSettings = {
 };
 
 /**
+ * パス権設定
+ */
+export interface PassRightsSettings {
+    /** パス権ルールが有効かどうか */
+    enabled: boolean;
+    /** 初期パス権数（先手・後手共通） */
+    initialCount: number;
+}
+
+/** デフォルトパス権設定 */
+export const DEFAULT_PASS_RIGHTS_SETTINGS: PassRightsSettings = {
+    enabled: false,
+    initialCount: 2,
+};
+
+/**
  * ゲームモード
  * - 'editing': 盤面編集モード（駒の配置・削除）
  * - 'playing': 対局モード（手番に従って指し手を進める）

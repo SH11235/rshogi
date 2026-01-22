@@ -4,6 +4,7 @@ import {
     type EngineEvent,
     type EngineEventHandler,
     type EngineInitOptions,
+    type LoadPositionOptions,
     type SearchHandle,
     type SearchParams,
     type ThreadInfo,
@@ -180,10 +181,15 @@ export function createTauriEngineClient(options: TauriEngineClientOptions = {}):
                 () => mock.init(mergedInitOpts),
             );
         },
-        async loadPosition(sfen, moves) {
+        async loadPosition(sfen, moves, options?: LoadPositionOptions) {
             return runOrMock(
-                () => ipc.invoke("engine_position", { sfen, moves }),
-                () => mock.loadPosition(sfen, moves),
+                () =>
+                    ipc.invoke("engine_position", {
+                        sfen,
+                        moves,
+                        passRights: options?.passRights,
+                    }),
+                () => mock.loadPosition(sfen, moves, options),
             );
         },
         async search(params: SearchParams): Promise<SearchHandle> {
