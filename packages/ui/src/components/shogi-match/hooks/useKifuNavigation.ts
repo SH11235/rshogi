@@ -42,6 +42,8 @@ import { convertMovesToKif } from "../utils/kifFormat";
 /** USI形式の指し手からlastMove情報を導出 */
 function deriveLastMoveFromUsi(usiMove: string | null): { from?: string; to: string } | undefined {
     if (!usiMove) return undefined;
+    // パス手は盤上のハイライト対象がないため lastMove を設定しない
+    if (usiMove.toLowerCase() === "pass") return undefined;
     // 駒打ち: "P*5e" のような形式
     if (usiMove.includes("*")) {
         const to = usiMove.slice(-2);

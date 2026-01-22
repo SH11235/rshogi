@@ -1015,7 +1015,11 @@ export function useEngineManager({
 
             // 局面を読み込み
             try {
-                await client.loadPosition(request.sfen, request.moves);
+                await client.loadPosition(
+                    request.sfen,
+                    request.moves,
+                    buildPassRightsOption(passRightsSettings, request.moves),
+                );
             } catch (error) {
                 addErrorLog(`局面読み込みエラー: ${String(error)}`);
                 analysisState.ply = null;
@@ -1049,6 +1053,7 @@ export function useEngineManager({
             isAnalyzing,
             isMatchRunning,
             maxLogs,
+            passRightsSettings,
             onEvalUpdate,
             sides,
         ],
