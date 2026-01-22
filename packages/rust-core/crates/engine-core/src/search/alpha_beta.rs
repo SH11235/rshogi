@@ -575,7 +575,7 @@ impl SearchWorker {
         let mut cntcv = 0;
         if ply >= 2 {
             let prev_move = self.stack[(ply - 1) as usize].current_move;
-            if prev_move.is_some() {
+            if prev_move.is_normal() {
                 if let Some(prev2_key) = self.stack[(ply - 2) as usize].cont_hist_key {
                     let pc = pos.piece_on(prev_move.to());
                     cntcv = self.history.correction_history.continuation_value(
@@ -621,7 +621,7 @@ impl SearchWorker {
 
         if ply >= 2 {
             let prev_move = self.stack[(ply - 1) as usize].current_move;
-            if prev_move.is_some() {
+            if prev_move.is_normal() {
                 if let Some(prev2_key) = self.stack[(ply - 2) as usize].cont_hist_key {
                     let pc = pos.piece_on(prev_move.to());
                     self.history.correction_history.update_continuation(
@@ -3005,7 +3005,7 @@ impl SearchWorker {
                 }
             }
 
-            if !in_check && depth <= -5 && ply >= 1 && !prev_move.is_none() {
+            if !in_check && depth <= -5 && ply >= 1 && prev_move.is_normal() {
                 let mut buf = crate::movegen::ExtMoveBuffer::new();
                 let rec_sq = prev_move.to();
                 let gen_type = if self.generate_all_legal_moves {
@@ -3050,7 +3050,7 @@ impl SearchWorker {
 
             if !best_value.is_loss() {
                 if !gives_check
-                    && (prev_move.is_none() || mv.to() != prev_move.to())
+                    && (!prev_move.is_normal() || mv.to() != prev_move.to())
                     && futility_base != Value::NONE
                 {
                     if move_count > 2 {
