@@ -437,6 +437,13 @@ mod tests {
         // invalid drop piece type
         let raw = 0x4000 | (8 << 7) | Square::SQ_55.raw() as u16;
         assert_eq!(Move::from_u16_checked(raw), None);
+
+        // PASS手のu16往復（TT保存/読み出しで使用される）
+        let pass_u16 = Move::PASS.to_u16();
+        assert_eq!(pass_u16, 0xC000);
+        let restored = Move::from_u16_checked(pass_u16);
+        assert_eq!(restored, Some(Move::PASS));
+        assert!(restored.unwrap().is_pass());
     }
 
     #[test]
