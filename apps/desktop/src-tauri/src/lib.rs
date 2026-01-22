@@ -350,7 +350,18 @@ fn spawn_search(
     })
 }
 
-fn parse_position(sfen: &str, moves: Option<Vec<String>>) -> Result<Position, String> {
+/// パス権設定
+#[derive(Clone, Debug, Deserialize)]
+struct PassRightsInput {
+    sente: u8,
+    gote: u8,
+}
+
+fn parse_position(
+    sfen: &str,
+    moves: Option<Vec<String>>,
+    pass_rights: Option<PassRightsInput>,
+) -> Result<Position, String> {
     let mut position = Position::new();
 
     if sfen.trim() == "startpos" {
@@ -361,6 +372,11 @@ fn parse_position(sfen: &str, moves: Option<Vec<String>>) -> Result<Position, St
         position
             .set_sfen(sfen)
             .map_err(|e| format!("Failed to parse SFEN: {e}"))?;
+    }
+
+    // パス権を有効化（movesを適用する前に設定）
+    if let Some(pr) = pass_rights {
+        position.enable_pass_rights(pr.sente, pr.gote);
     }
 
     if let Some(moves) = moves {
@@ -597,9 +613,13 @@ fn engine_position(
     state: State<EngineState>,
     sfen: String,
     moves: Option<Vec<String>>,
+    #[serde(rename = "passRights")] pass_rights: Option<PassRightsInput>,
 ) -> Result<(), String> {
-    eprintln!("engine_position: sfen={}, moves={:?}", sfen, moves);
-    let position = parse_position(&sfen, moves)?;
+    eprintln!(
+        "engine_position: sfen={}, moves={:?}, passRights={:?}",
+        sfen, moves, pass_rights
+    );
+    let position = parse_position(&sfen, moves, pass_rights)?;
 
     eprintln!("engine_position: resulting SFEN = {}", position.to_sfen());
 
@@ -721,8 +741,12 @@ fn engine_stop(state: State<EngineState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn engine_legal_moves(sfen: String, moves: Option<Vec<String>>) -> Result<Vec<String>, String> {
-    let position = parse_position(&sfen, moves)?;
+fn engine_legal_moves(
+    sfen: String,
+    moves: Option<Vec<String>>,
+    #[serde(rename = "passRights")] pass_rights: Option<PassRightsInput>,
+) -> Result<Vec<String>, String> {
+    let position = parse_position(&sfen, moves, pass_rights)?;
     let mut list = MoveList::new();
     generate_legal(&position, &mut list);
     let usi_moves = list.as_slice().iter().map(|mv| mv.to_usi()).collect();
