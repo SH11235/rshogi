@@ -15,7 +15,13 @@ import { MoveDetailBottomSheet } from "../components/MoveDetailBottomSheet";
 import { PassButton } from "../components/PassButton";
 import { PassRightsDisplay } from "../components/PassRightsDisplay";
 import type { ClockSettings, TickState } from "../hooks/useClockManager";
-import type { DisplaySettings, GameMode, PassRightsSettings, PromotionSelection } from "../types";
+import type {
+    DisplaySettings,
+    GameMode,
+    Message,
+    PassRightsSettings,
+    PromotionSelection,
+} from "../types";
 import type { EvalHistory, KifMove as FullKifMove } from "../utils/kifFormat";
 
 type Selection = { kind: "square"; square: string } | { kind: "hand"; piece: PieceType };
@@ -114,6 +120,9 @@ interface MobileLayoutProps {
     displaySettingsFull: DisplaySettings;
     onDisplaySettingsChange: (settings: DisplaySettings) => void;
 
+    // メッセージ
+    message?: Message | null;
+
     // 持ち駒情報取得
     getHandInfo: (pos: "top" | "bottom") => {
         owner: Player;
@@ -201,6 +210,7 @@ export function MobileLayout({
     clocks,
     displaySettingsFull,
     onDisplaySettingsChange,
+    message,
     getHandInfo,
     boardSectionRef,
     isDraggingPiece,
@@ -319,37 +329,53 @@ export function MobileLayout({
                         {kifMoves && kifMoves.length > 0 && (
                             <MobileKifuBar moves={kifMoves} currentPly={currentPly} />
                         )}
-                        {/* パス権表示とパスボタン */}
-                        {passRightsSettings?.enabled && position.passRights && (
-                            <div className="flex items-center justify-between px-2 py-1 text-xs">
-                                <div className="flex items-center gap-3 text-muted-foreground">
-                                    <span className="flex items-center gap-1">
-                                        先手:
-                                        <PassRightsDisplay
-                                            remaining={position.passRights.sente}
-                                            max={passRightsSettings.initialCount}
-                                            isActive={position.turn === "sente"}
-                                        />
-                                    </span>
-                                    <span className="flex items-center gap-1">
-                                        後手:
-                                        <PassRightsDisplay
-                                            remaining={position.passRights.gote}
-                                            max={passRightsSettings.initialCount}
-                                            isActive={position.turn === "gote"}
-                                        />
-                                    </span>
-                                </div>
-                                {canPassMove && onPassMove && (
-                                    <PassButton
-                                        canPass={true}
-                                        onPass={onPassMove}
-                                        remainingPassRights={position.passRights[position.turn]}
-                                        showConfirmDialog={true}
-                                    />
-                                )}
+                        {/* メッセージ表示 */}
+                        {message && (
+                            <div
+                                className={`text-sm text-center px-2 ${
+                                    message.type === "error"
+                                        ? "text-destructive"
+                                        : message.type === "warning"
+                                          ? "text-yellow-600 dark:text-yellow-500"
+                                          : "text-green-600 dark:text-green-500"
+                                }`}
+                            >
+                                {message.text}
                             </div>
                         )}
+                        {/* パス権表示とパスボタン（initialCount > 0 の場合のみ表示） */}
+                        {passRightsSettings?.enabled &&
+                            passRightsSettings.initialCount > 0 &&
+                            position.passRights && (
+                                <div className="flex items-center justify-between px-2 py-1 text-xs">
+                                    <div className="flex items-center gap-3 text-muted-foreground">
+                                        <span className="flex items-center gap-1">
+                                            先手:
+                                            <PassRightsDisplay
+                                                remaining={position.passRights.sente}
+                                                max={passRightsSettings.initialCount}
+                                                isActive={position.turn === "sente"}
+                                            />
+                                        </span>
+                                        <span className="flex items-center gap-1">
+                                            後手:
+                                            <PassRightsDisplay
+                                                remaining={position.passRights.gote}
+                                                max={passRightsSettings.initialCount}
+                                                isActive={position.turn === "gote"}
+                                            />
+                                        </span>
+                                    </div>
+                                    {canPassMove && onPassMove && (
+                                        <PassButton
+                                            canPass={true}
+                                            onPass={onPassMove}
+                                            remainingPassRights={position.passRights[position.turn]}
+                                            showConfirmDialog={true}
+                                        />
+                                    )}
+                                </div>
+                            )}
                         {onStop && (
                             <div className="flex justify-center gap-2 py-1">
                                 <PlayingModeControls

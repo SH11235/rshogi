@@ -2156,6 +2156,8 @@ export function ShogiMatch({
                     // 表示設定
                     displaySettingsFull={displaySettings}
                     onDisplaySettingsChange={setDisplaySettings}
+                    // メッセージ
+                    message={message}
                 />
             ) : (
                 <section className={matchLayoutClasses} style={matchLayoutCssVars}>
