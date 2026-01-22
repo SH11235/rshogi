@@ -1206,11 +1206,60 @@ fn main() -> Result<()> {
         cli.byoyomi = 1000;
     }
 
+    // USIオプションからパス権情報を早期に解析（load_start_positions で使用するため）
+    let common_usi_opts_early = cli.usi_options.clone().unwrap_or_default();
+    let black_usi_opts_early = cli
+        .usi_options_black
+        .clone()
+        .unwrap_or_else(|| common_usi_opts_early.clone());
+    let white_usi_opts_early = cli
+        .usi_options_white
+        .clone()
+        .unwrap_or_else(|| common_usi_opts_early.clone());
+    let pass_rights_via_usi_early = black_usi_opts_early
+        .iter()
+        .any(|o| o == "PassRights=true" || o == "PassRights = true")
+        || white_usi_opts_early
+            .iter()
+            .any(|o| o == "PassRights=true" || o == "PassRights = true");
+
+    // USIオプションから InitialPassCount を解析
+    let parse_initial_pass_count_early = |opts: &[String]| -> Option<u8> {
+        for opt in opts {
+            if let Some(val) = opt.strip_prefix("InitialPassCount=") {
+                return val.trim().parse().ok();
+            }
+            if let Some(val) = opt.strip_prefix("InitialPassCount = ") {
+                return val.trim().parse().ok();
+            }
+        }
+        None
+    };
+    let usi_initial_pass_count_early = parse_initial_pass_count_early(&black_usi_opts_early)
+        .or_else(|| parse_initial_pass_count_early(&white_usi_opts_early))
+        .unwrap_or(2);
+
+    // load_start_positions 用のパス権初期値
+    let load_pass_black = if cli.pass_rights_black.is_some() {
+        cli.pass_rights_black
+    } else if pass_rights_via_usi_early {
+        Some(usi_initial_pass_count_early)
+    } else {
+        None
+    };
+    let load_pass_white = if cli.pass_rights_white.is_some() {
+        cli.pass_rights_white
+    } else if pass_rights_via_usi_early {
+        Some(usi_initial_pass_count_early)
+    } else {
+        None
+    };
+
     let (start_defs, start_commands) = load_start_positions(
         cli.startpos_file.as_deref(),
         cli.sfen.as_deref(),
-        cli.pass_rights_black,
-        cli.pass_rights_white,
+        load_pass_black,
+        load_pass_white,
     )?;
     let timestamp = Local::now();
     let output_path = resolve_output_path(cli.out.as_deref(), &timestamp);
