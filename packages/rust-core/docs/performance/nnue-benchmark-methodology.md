@@ -46,19 +46,22 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release --bin bench_nnue_eval
 
 # 静的実装とconst generics実装の比較（HalfKP 256x2-32-32のみ）
 ./target/release/bench_nnue_eval \
-  --nnue-file eval/suisho_finetune/suisho5_reconverted.nnue \
+  --nnue-file <HALFKP_256_NNUE_FILE> \
   --iterations 500000 \
   --warmup 10000 \
   --compare
 ```
 
-### NNUEファイル例
+### オプション
 
-| アーキテクチャ | ファイルパス |
-|----------------|--------------|
-| HalfKP 256x2-32-32 | `eval/suisho_finetune/suisho5_reconverted.nnue` |
-| HalfKA 512x2-8-96 | `eval/exp_100epoch_v2/epoch10.nnue` |
-| HalfKA 1024x2-8-96 | `eval/halfka_hm_1024x2-8-96/epoch20_v2.nnue` |
+| オプション | 説明 | デフォルト |
+|-----------|------|-----------|
+| `--nnue-file` | NNUEファイルのパス | 必須 |
+| `--iterations` | 測定反復回数 | 1,000,000 |
+| `--warmup` | ウォームアップ回数 | 10,000 |
+| `--compare` | static vs const generics 比較モード | false |
+
+NNUEファイルの配置規約は [eval/README.md](../../eval/README.md) を参照。
 
 ## テスト局面
 
@@ -94,27 +97,9 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release --bin bench_nnue_eval
 
 ## 結果ファイル
 
-測定結果は `docs/benchmarks/nnue-eval-results.json` に記録する。
+測定結果は `nnue-eval-results.json` に記録する。
 
 ```bash
 # 結果の確認
-cat docs/benchmarks/nnue-eval-results.json | jq .
-```
-
-## NNUEファイル変換
-
-bullet-shogiのチェックポイントからNNUEファイルを生成：
-
-```bash
-# HalfKP用
-./target/release/convert_bullet_nnue \
-  --input <checkpoint>/raw.bin \
-  --output eval/halfkp_512x2-8-96.nnue \
-  --arch 512x2-8-96 --features HalfKP --scale 1600
-
-# HalfKA_hm用
-./target/release/convert_bullet_nnue \
-  --input <checkpoint>/raw.bin \
-  --output eval/halfka_hm_512x2-8-96.nnue \
-  --arch 512x2-8-96 --features HalfKA_hm --scale 400
+cat docs/performance/nnue-eval-results.json | jq .
 ```
