@@ -101,7 +101,7 @@ export function PassButton({
             size={compact ? "sm" : "default"}
             disabled={!canPass}
             onClick={handleClick}
-            className={cn("min-w-[4rem]", !canPass && "opacity-50 cursor-not-allowed", className)}
+            className={cn("min-w-[4rem]", className)}
             aria-label={canPass ? "パスする" : getDisabledReasonMessage(disabledReason)}
         >
             パス

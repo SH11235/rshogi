@@ -2304,42 +2304,44 @@ export function ShogiMatch({
                                         );
                                     })()}
 
-                                    {/* パス権表示とパスボタン */}
-                                    {passRightsSettings?.enabled && position.passRights && (
-                                        <div className="flex items-center justify-between w-full px-2 gap-2">
-                                            <div className="flex items-center gap-4 text-xs text-muted-foreground">
-                                                <span className="flex items-center gap-1">
-                                                    先手:
-                                                    <PassRightsDisplay
-                                                        remaining={position.passRights.sente}
-                                                        max={passRightsSettings.initialCount}
-                                                        isActive={position.turn === "sente"}
-                                                    />
-                                                </span>
-                                                <span className="flex items-center gap-1">
-                                                    後手:
-                                                    <PassRightsDisplay
-                                                        remaining={position.passRights.gote}
-                                                        max={passRightsSettings.initialCount}
-                                                        isActive={position.turn === "gote"}
-                                                    />
-                                                </span>
+                                    {/* パス権表示とパスボタン（initialCount > 0 の場合のみ表示） */}
+                                    {passRightsSettings?.enabled &&
+                                        passRightsSettings.initialCount > 0 &&
+                                        position.passRights && (
+                                            <div className="flex items-center justify-between w-full px-2 gap-2">
+                                                <div className="flex items-center gap-4 text-xs text-muted-foreground">
+                                                    <span className="flex items-center gap-1">
+                                                        先手:
+                                                        <PassRightsDisplay
+                                                            remaining={position.passRights.sente}
+                                                            max={passRightsSettings.initialCount}
+                                                            isActive={position.turn === "sente"}
+                                                        />
+                                                    </span>
+                                                    <span className="flex items-center gap-1">
+                                                        後手:
+                                                        <PassRightsDisplay
+                                                            remaining={position.passRights.gote}
+                                                            max={passRightsSettings.initialCount}
+                                                            isActive={position.turn === "gote"}
+                                                        />
+                                                    </span>
+                                                </div>
+                                                {/* 人間の手番でパス可能な場合のみボタン表示 */}
+                                                {isMatchRunning &&
+                                                    sides[position.turn].role === "human" &&
+                                                    canPass(position) && (
+                                                        <PassButton
+                                                            canPass={true}
+                                                            onPass={handlePassMove}
+                                                            remainingPassRights={
+                                                                position.passRights[position.turn]
+                                                            }
+                                                            showConfirmDialog={true}
+                                                        />
+                                                    )}
                                             </div>
-                                            {/* 人間の手番でパス可能な場合のみボタン表示 */}
-                                            {isMatchRunning &&
-                                                sides[position.turn].role === "human" &&
-                                                canPass(position) && (
-                                                    <PassButton
-                                                        canPass={true}
-                                                        onPass={handlePassMove}
-                                                        remainingPassRights={
-                                                            position.passRights[position.turn]
-                                                        }
-                                                        showConfirmDialog={true}
-                                                    />
-                                                )}
-                                        </div>
-                                    )}
+                                        )}
 
                                     {/* 対局コントロール（盤面の下） */}
                                     <MatchControls
