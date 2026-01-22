@@ -2434,8 +2434,14 @@ fn start_position_for_game(
 
 fn start_position_from_command(cmd: &str) -> Result<(Position, String)> {
     let parsed = parse_position_line(cmd)?;
-    // KIF生成時はパス権利なしで処理（既に手は記録済み）
-    let pos = build_position(&parsed, None, None)?;
+    // パス手が含まれていればパス権利を有効化
+    let has_pass = parsed.moves.iter().any(|m| m == "pass");
+    let (pass_black, pass_white) = if has_pass {
+        (Some(15), Some(15))
+    } else {
+        (None, None)
+    };
+    let pos = build_position(&parsed, pass_black, pass_white)?;
     let sfen = pos.to_sfen();
     Ok((pos, sfen))
 }
