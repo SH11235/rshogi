@@ -1779,18 +1779,15 @@ impl SCReLUDynamic {
                         let hi_shifted = i32x4_min(hi_shifted, out_max);
 
                         // i32x4 × 2 → u8x8 (手動でパック)
-                        for j in 0..4 {
-                            let val = i32x4_extract_lane::<0>(i32x4_shuffle::<{ j }, 0, 0, 0>(
-                                lo_shifted, lo_shifted,
-                            ));
-                            *out_ptr.add(i * 8 + j) = val as u8;
-                        }
-                        for j in 0..4 {
-                            let val = i32x4_extract_lane::<0>(i32x4_shuffle::<{ j }, 0, 0, 0>(
-                                hi_shifted, hi_shifted,
-                            ));
-                            *out_ptr.add(i * 8 + 4 + j) = val as u8;
-                        }
+                        // 注: i32x4_extract_lane のレーン指定はコンパイル時定数が必要
+                        *out_ptr.add(i * 8 + 0) = i32x4_extract_lane::<0>(lo_shifted) as u8;
+                        *out_ptr.add(i * 8 + 1) = i32x4_extract_lane::<1>(lo_shifted) as u8;
+                        *out_ptr.add(i * 8 + 2) = i32x4_extract_lane::<2>(lo_shifted) as u8;
+                        *out_ptr.add(i * 8 + 3) = i32x4_extract_lane::<3>(lo_shifted) as u8;
+                        *out_ptr.add(i * 8 + 4) = i32x4_extract_lane::<0>(hi_shifted) as u8;
+                        *out_ptr.add(i * 8 + 5) = i32x4_extract_lane::<1>(hi_shifted) as u8;
+                        *out_ptr.add(i * 8 + 6) = i32x4_extract_lane::<2>(hi_shifted) as u8;
+                        *out_ptr.add(i * 8 + 7) = i32x4_extract_lane::<3>(hi_shifted) as u8;
                     }
                 }
                 processed += num_chunks * 8;
