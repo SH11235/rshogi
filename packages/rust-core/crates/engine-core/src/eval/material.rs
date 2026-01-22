@@ -804,7 +804,8 @@ mod tests {
         // evaluate_materialは駒価値のみを返す（初形なので0に近い）
         // パス権評価は別途探索側で追加される
         assert_eq!(
-            material_eval.raw(), 0,
+            material_eval.raw(),
+            0,
             "Material eval should be 0 for starting position (pass rights added separately)"
         );
 

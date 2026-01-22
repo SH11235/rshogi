@@ -9,9 +9,7 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 use crate::eval::{evaluate_pass_rights, get_scaled_pass_move_bonus, EvalHash};
-use crate::nnue::{
-    evaluate_dispatch, get_network, AccumulatorStackVariant, DirtyPiece,
-};
+use crate::nnue::{evaluate_dispatch, get_network, AccumulatorStackVariant, DirtyPiece};
 use crate::position::Position;
 use crate::search::PieceToHistory;
 use crate::tt::{ProbeResult, TTData, TranspositionTable};
