@@ -1098,7 +1098,7 @@ impl<const L1: usize, const L1_INPUT: usize, const L2: usize, const L3: usize, A
 
         // 活性化関数適用 (i32 → u8) - 64バイトアライン
         let mut l1_relu = AlignedGeneric([0u8; L2]);
-        A::activate_i32_to_u8(&l1_out.0, &mut l1_relu.0);
+        A::activate_i32_to_u8(&l1_out.0, &mut l1_relu.0, self.qa);
 
         // l2 層 - 64バイトアライン
         let mut l2_out = AlignedGeneric([0i32; L3]);
@@ -1119,7 +1119,7 @@ impl<const L1: usize, const L1_INPUT: usize, const L2: usize, const L3: usize, A
 
         // 活性化関数適用 (i32 → u8) - 64バイトアライン
         let mut l2_relu = AlignedGeneric([0u8; L3]);
-        A::activate_i32_to_u8(&l2_out.0, &mut l2_relu.0);
+        A::activate_i32_to_u8(&l2_out.0, &mut l2_relu.0, self.qa);
 
         // output 層
         let mut output = [0i32; 1];

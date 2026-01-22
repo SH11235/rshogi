@@ -11,9 +11,8 @@ use anyhow::{bail, Result};
 use clap::Parser;
 
 use engine_core::nnue::{
-    Accumulator, AccumulatorHalfKA, AccumulatorHalfKP, HalfKA1024CReLU, HalfKA1024SCReLU,
-    HalfKA512CReLU, HalfKA512SCReLU, HalfKP256CReLU, HalfKP256SCReLU, HalfKP512CReLU,
-    HalfKP512SCReLU, NNUENetwork,
+    AccumulatorHalfKA, AccumulatorHalfKP, HalfKA1024CReLU, HalfKA1024SCReLU, HalfKA512CReLU,
+    HalfKA512SCReLU, HalfKP256CReLU, HalfKP256SCReLU, HalfKP512CReLU, HalfKP512SCReLU, NNUENetwork,
 };
 use engine_core::position::Position;
 
@@ -36,10 +35,6 @@ struct Cli {
     /// ウォームアップ回数（デフォルト: 1万回）
     #[arg(long, default_value = "10000")]
     warmup: u64,
-
-    /// HalfKP 256x2-32-32 の場合、元の静的実装と const generics 実装を両方比較
-    #[arg(long, default_value = "false")]
-    compare: bool,
 }
 
 /// ベンチマーク用のテスト局面（SFEN形式）
@@ -78,61 +73,6 @@ impl BenchResult {
         println!("  total (refresh+eval):{:.1} ns/op", self.total_ns_per_op);
         println!("  throughput:          {:.0} evals/sec", self.evals_per_sec);
         println!();
-    }
-}
-
-/// HalfKP (256x2-32-32) のベンチマーク
-fn bench_halfkp(
-    network: &engine_core::nnue::Network,
-    positions: &[Position],
-    warmup: u64,
-    iterations: u64,
-) -> BenchResult {
-    // ウォームアップ
-    let mut acc = Accumulator::default();
-    for i in 0..warmup {
-        let pos = &positions[i as usize % positions.len()];
-        network.feature_transformer.refresh_accumulator(pos, &mut acc);
-        black_box(network.evaluate(pos, &acc));
-    }
-
-    // refresh_accumulator ベンチマーク
-    let start = Instant::now();
-    for i in 0..iterations {
-        let pos = &positions[i as usize % positions.len()];
-        network.feature_transformer.refresh_accumulator(pos, &mut acc);
-    }
-    let refresh_duration = start.elapsed();
-
-    // evaluate ベンチマーク
-    // まずAccumulatorを設定
-    network.feature_transformer.refresh_accumulator(&positions[0], &mut acc);
-    let start = Instant::now();
-    for i in 0..iterations {
-        let pos = &positions[i as usize % positions.len()];
-        black_box(network.evaluate(pos, &acc));
-    }
-    let eval_duration = start.elapsed();
-
-    // 結合ベンチマーク（refresh + evaluate）
-    let start = Instant::now();
-    for i in 0..iterations {
-        let pos = &positions[i as usize % positions.len()];
-        network.feature_transformer.refresh_accumulator(pos, &mut acc);
-        black_box(network.evaluate(pos, &acc));
-    }
-    let total_duration = start.elapsed();
-
-    let refresh_ns = refresh_duration.as_nanos() as f64 / iterations as f64;
-    let eval_ns = eval_duration.as_nanos() as f64 / iterations as f64;
-    let total_ns = total_duration.as_nanos() as f64 / iterations as f64;
-
-    BenchResult {
-        arch_name: "HalfKP 256x2-32-32 (static)".to_string(),
-        refresh_ns_per_op: refresh_ns,
-        eval_ns_per_op: eval_ns,
-        total_ns_per_op: total_ns,
-        evals_per_sec: 1_000_000_000.0 / total_ns,
     }
 }
 
@@ -584,59 +524,6 @@ fn main() -> Result<()> {
     println!("Benchmark config: {} warmup, {} iterations", cli.warmup, cli.iterations);
     println!("Test positions: {}", positions.len());
     println!();
-
-    // --compare モード: 元の静的実装と const generics 実装を両方ベンチマーク
-    if cli.compare {
-        use engine_core::nnue::{HalfKP256CReLU, Network};
-        use std::fs::File;
-        use std::io::BufReader;
-
-        println!("=== Compare Mode: Static vs Const Generics ===\n");
-
-        // 元の静的実装を読み込み
-        println!("Loading static implementation (Network)...");
-        let file = File::open(&cli.nnue_file)?;
-        let mut reader = BufReader::new(file);
-        let static_network = Network::read(&mut reader)?;
-        let result_static = bench_halfkp(&static_network, &positions, cli.warmup, cli.iterations);
-        result_static.print();
-
-        // const generics 実装を読み込み
-        println!("Loading const generics implementation (HalfKP256CReLU)...");
-        let file = File::open(&cli.nnue_file)?;
-        let mut reader = BufReader::new(file);
-        let cg_network = HalfKP256CReLU::read(&mut reader)?;
-        let result_cg = bench_halfkp256_crelu(&cg_network, &positions, cli.warmup, cli.iterations);
-        result_cg.print();
-
-        // 比較結果
-        println!("=== Comparison ===");
-        let refresh_diff = (result_cg.refresh_ns_per_op - result_static.refresh_ns_per_op)
-            / result_static.refresh_ns_per_op
-            * 100.0;
-        let eval_diff = (result_cg.eval_ns_per_op - result_static.eval_ns_per_op)
-            / result_static.eval_ns_per_op
-            * 100.0;
-        let total_diff = (result_cg.total_ns_per_op - result_static.total_ns_per_op)
-            / result_static.total_ns_per_op
-            * 100.0;
-        println!(
-            "  refresh: {:.1} ns (static) vs {:.1} ns (cg) = {:+.1}%",
-            result_static.refresh_ns_per_op, result_cg.refresh_ns_per_op, refresh_diff
-        );
-        println!(
-            "  evaluate: {:.1} ns (static) vs {:.1} ns (cg) = {:+.1}%",
-            result_static.eval_ns_per_op, result_cg.eval_ns_per_op, eval_diff
-        );
-        println!(
-            "  total: {:.1} ns (static) vs {:.1} ns (cg) = {:+.1}%",
-            result_static.total_ns_per_op, result_cg.total_ns_per_op, total_diff
-        );
-
-        return Ok(());
-    }
-
-    // 通常モード
     println!("Loading NNUE file: {}", cli.nnue_file.display());
     let network = NNUENetwork::load(&cli.nnue_file)?;
     let arch_name = network.architecture_name();
@@ -645,7 +532,6 @@ fn main() -> Result<()> {
 
     // アーキテクチャに応じてベンチマーク実行
     let result = match network {
-        NNUENetwork::HalfKP(net) => bench_halfkp(&net, &positions, cli.warmup, cli.iterations),
         NNUENetwork::HalfKP256CReLU(net) => {
             bench_halfkp256_crelu(&net, &positions, cli.warmup, cli.iterations)
         }
