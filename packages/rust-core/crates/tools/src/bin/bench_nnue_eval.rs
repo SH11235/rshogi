@@ -11,8 +11,8 @@ use anyhow::{bail, Result};
 use clap::Parser;
 
 use engine_core::nnue::{
-    Accumulator, AccumulatorHalfKA, AccumulatorHalfKADynamic, AccumulatorHalfKP,
-    AccumulatorHalfKPDynamic, HalfKA1024CReLU, HalfKA1024SCReLU, HalfKA512CReLU, HalfKA512SCReLU,
+    AccumulatorHalfKA, AccumulatorHalfKP, HalfKA1024CReLU, HalfKA1024SCReLU, HalfKA1024_8_32CReLU,
+    HalfKA1024_8_32SCReLU, HalfKA256CReLU, HalfKA256SCReLU, HalfKA512CReLU, HalfKA512SCReLU,
     HalfKP256CReLU, HalfKP256SCReLU, HalfKP512CReLU, HalfKP512SCReLU, NNUENetwork,
 };
 use engine_core::position::Position;
@@ -36,10 +36,6 @@ struct Cli {
     /// ウォームアップ回数（デフォルト: 1万回）
     #[arg(long, default_value = "10000")]
     warmup: u64,
-
-    /// HalfKP 256x2-32-32 の場合、元の静的実装と const generics 実装を両方比較
-    #[arg(long, default_value = "false")]
-    compare: bool,
 }
 
 /// ベンチマーク用のテスト局面（SFEN形式）
@@ -78,61 +74,6 @@ impl BenchResult {
         println!("  total (refresh+eval):{:.1} ns/op", self.total_ns_per_op);
         println!("  throughput:          {:.0} evals/sec", self.evals_per_sec);
         println!();
-    }
-}
-
-/// HalfKP (256x2-32-32) のベンチマーク
-fn bench_halfkp(
-    network: &engine_core::nnue::Network,
-    positions: &[Position],
-    warmup: u64,
-    iterations: u64,
-) -> BenchResult {
-    // ウォームアップ
-    let mut acc = Accumulator::default();
-    for i in 0..warmup {
-        let pos = &positions[i as usize % positions.len()];
-        network.feature_transformer.refresh_accumulator(pos, &mut acc);
-        black_box(network.evaluate(pos, &acc));
-    }
-
-    // refresh_accumulator ベンチマーク
-    let start = Instant::now();
-    for i in 0..iterations {
-        let pos = &positions[i as usize % positions.len()];
-        network.feature_transformer.refresh_accumulator(pos, &mut acc);
-    }
-    let refresh_duration = start.elapsed();
-
-    // evaluate ベンチマーク
-    // まずAccumulatorを設定
-    network.feature_transformer.refresh_accumulator(&positions[0], &mut acc);
-    let start = Instant::now();
-    for i in 0..iterations {
-        let pos = &positions[i as usize % positions.len()];
-        black_box(network.evaluate(pos, &acc));
-    }
-    let eval_duration = start.elapsed();
-
-    // 結合ベンチマーク（refresh + evaluate）
-    let start = Instant::now();
-    for i in 0..iterations {
-        let pos = &positions[i as usize % positions.len()];
-        network.feature_transformer.refresh_accumulator(pos, &mut acc);
-        black_box(network.evaluate(pos, &acc));
-    }
-    let total_duration = start.elapsed();
-
-    let refresh_ns = refresh_duration.as_nanos() as f64 / iterations as f64;
-    let eval_ns = eval_duration.as_nanos() as f64 / iterations as f64;
-    let total_ns = total_duration.as_nanos() as f64 / iterations as f64;
-
-    BenchResult {
-        arch_name: "HalfKP 256x2-32-32 (static)".to_string(),
-        refresh_ns_per_op: refresh_ns,
-        eval_ns_per_op: eval_ns,
-        total_ns_per_op: total_ns,
-        evals_per_sec: 1_000_000_000.0 / total_ns,
     }
 }
 
@@ -345,6 +286,114 @@ fn bench_halfkp512_screlu(
 
     BenchResult {
         arch_name: "HalfKP512 512x2-8-96 SCReLU (const generics)".to_string(),
+        refresh_ns_per_op: refresh_ns,
+        eval_ns_per_op: eval_ns,
+        total_ns_per_op: total_ns,
+        evals_per_sec: 1_000_000_000.0 / total_ns,
+    }
+}
+
+/// HalfKA256 (256x2-32-32) CReLU のベンチマーク
+fn bench_halfka256_crelu(
+    network: &HalfKA256CReLU,
+    positions: &[Position],
+    warmup: u64,
+    iterations: u64,
+) -> BenchResult {
+    // ウォームアップ
+    let mut acc = AccumulatorHalfKA::<256>::default();
+    for i in 0..warmup {
+        let pos = &positions[i as usize % positions.len()];
+        network.refresh_accumulator(pos, &mut acc);
+        black_box(network.evaluate(pos, &acc));
+    }
+
+    // refresh_accumulator ベンチマーク
+    let start = Instant::now();
+    for i in 0..iterations {
+        let pos = &positions[i as usize % positions.len()];
+        network.refresh_accumulator(pos, &mut acc);
+    }
+    let refresh_duration = start.elapsed();
+
+    // evaluate ベンチマーク
+    network.refresh_accumulator(&positions[0], &mut acc);
+    let start = Instant::now();
+    for i in 0..iterations {
+        let pos = &positions[i as usize % positions.len()];
+        black_box(network.evaluate(pos, &acc));
+    }
+    let eval_duration = start.elapsed();
+
+    // 結合ベンチマーク
+    let start = Instant::now();
+    for i in 0..iterations {
+        let pos = &positions[i as usize % positions.len()];
+        network.refresh_accumulator(pos, &mut acc);
+        black_box(network.evaluate(pos, &acc));
+    }
+    let total_duration = start.elapsed();
+
+    let refresh_ns = refresh_duration.as_nanos() as f64 / iterations as f64;
+    let eval_ns = eval_duration.as_nanos() as f64 / iterations as f64;
+    let total_ns = total_duration.as_nanos() as f64 / iterations as f64;
+
+    BenchResult {
+        arch_name: "HalfKA256 256x2-32-32 CReLU (const generics)".to_string(),
+        refresh_ns_per_op: refresh_ns,
+        eval_ns_per_op: eval_ns,
+        total_ns_per_op: total_ns,
+        evals_per_sec: 1_000_000_000.0 / total_ns,
+    }
+}
+
+/// HalfKA256 (256x2-32-32) SCReLU のベンチマーク
+fn bench_halfka256_screlu(
+    network: &HalfKA256SCReLU,
+    positions: &[Position],
+    warmup: u64,
+    iterations: u64,
+) -> BenchResult {
+    // ウォームアップ
+    let mut acc = AccumulatorHalfKA::<256>::default();
+    for i in 0..warmup {
+        let pos = &positions[i as usize % positions.len()];
+        network.refresh_accumulator(pos, &mut acc);
+        black_box(network.evaluate(pos, &acc));
+    }
+
+    // refresh_accumulator ベンチマーク
+    let start = Instant::now();
+    for i in 0..iterations {
+        let pos = &positions[i as usize % positions.len()];
+        network.refresh_accumulator(pos, &mut acc);
+    }
+    let refresh_duration = start.elapsed();
+
+    // evaluate ベンチマーク
+    network.refresh_accumulator(&positions[0], &mut acc);
+    let start = Instant::now();
+    for i in 0..iterations {
+        let pos = &positions[i as usize % positions.len()];
+        black_box(network.evaluate(pos, &acc));
+    }
+    let eval_duration = start.elapsed();
+
+    // 結合ベンチマーク
+    let start = Instant::now();
+    for i in 0..iterations {
+        let pos = &positions[i as usize % positions.len()];
+        network.refresh_accumulator(pos, &mut acc);
+        black_box(network.evaluate(pos, &acc));
+    }
+    let total_duration = start.elapsed();
+
+    let refresh_ns = refresh_duration.as_nanos() as f64 / iterations as f64;
+    let eval_ns = eval_duration.as_nanos() as f64 / iterations as f64;
+    let total_ns = total_duration.as_nanos() as f64 / iterations as f64;
+
+    BenchResult {
+        arch_name: "HalfKA256 256x2-32-32 SCReLU (const generics)".to_string(),
         refresh_ns_per_op: refresh_ns,
         eval_ns_per_op: eval_ns,
         total_ns_per_op: total_ns,
@@ -568,20 +617,15 @@ fn bench_halfka1024_screlu(
     }
 }
 
-/// HalfKADynamic のベンチマーク
-fn bench_halfka_dynamic(
-    network: &engine_core::nnue::NetworkHalfKADynamic,
+/// HalfKA1024_8_32 (1024x2-8-32) CReLU のベンチマーク
+fn bench_halfka1024_8_32_crelu(
+    network: &HalfKA1024_8_32CReLU,
     positions: &[Position],
     warmup: u64,
     iterations: u64,
 ) -> BenchResult {
-    let arch_name = format!(
-        "HalfKADynamic {}x2-{}-{} (dynamic)",
-        network.arch_l1, network.arch_l2, network.arch_l3
-    );
-
     // ウォームアップ
-    let mut acc = AccumulatorHalfKADynamic::new(network.arch_l1);
+    let mut acc = AccumulatorHalfKA::<1024>::default();
     for i in 0..warmup {
         let pos = &positions[i as usize % positions.len()];
         network.refresh_accumulator(pos, &mut acc);
@@ -619,7 +663,7 @@ fn bench_halfka_dynamic(
     let total_ns = total_duration.as_nanos() as f64 / iterations as f64;
 
     BenchResult {
-        arch_name,
+        arch_name: "HalfKA1024_8_32 1024x2-8-32 CReLU (const generics)".to_string(),
         refresh_ns_per_op: refresh_ns,
         eval_ns_per_op: eval_ns,
         total_ns_per_op: total_ns,
@@ -627,23 +671,18 @@ fn bench_halfka_dynamic(
     }
 }
 
-/// HalfKPDynamic のベンチマーク
-fn bench_halfkp_dynamic(
-    network: &engine_core::nnue::NetworkHalfKPDynamic,
+/// HalfKA1024_8_32 (1024x2-8-32) SCReLU のベンチマーク
+fn bench_halfka1024_8_32_screlu(
+    network: &HalfKA1024_8_32SCReLU,
     positions: &[Position],
     warmup: u64,
     iterations: u64,
 ) -> BenchResult {
-    let arch_name = format!(
-        "HalfKPDynamic {}x2-{}-{} (dynamic)",
-        network.arch_l1, network.arch_l2, network.arch_l3
-    );
-
     // ウォームアップ
-    let mut acc = AccumulatorHalfKPDynamic::new(network.arch_l1);
+    let mut acc = AccumulatorHalfKA::<1024>::default();
     for i in 0..warmup {
         let pos = &positions[i as usize % positions.len()];
-        network.feature_transformer.refresh_accumulator(pos, &mut acc);
+        network.refresh_accumulator(pos, &mut acc);
         black_box(network.evaluate(pos, &acc));
     }
 
@@ -651,12 +690,12 @@ fn bench_halfkp_dynamic(
     let start = Instant::now();
     for i in 0..iterations {
         let pos = &positions[i as usize % positions.len()];
-        network.feature_transformer.refresh_accumulator(pos, &mut acc);
+        network.refresh_accumulator(pos, &mut acc);
     }
     let refresh_duration = start.elapsed();
 
     // evaluate ベンチマーク
-    network.feature_transformer.refresh_accumulator(&positions[0], &mut acc);
+    network.refresh_accumulator(&positions[0], &mut acc);
     let start = Instant::now();
     for i in 0..iterations {
         let pos = &positions[i as usize % positions.len()];
@@ -668,7 +707,7 @@ fn bench_halfkp_dynamic(
     let start = Instant::now();
     for i in 0..iterations {
         let pos = &positions[i as usize % positions.len()];
-        network.feature_transformer.refresh_accumulator(pos, &mut acc);
+        network.refresh_accumulator(pos, &mut acc);
         black_box(network.evaluate(pos, &acc));
     }
     let total_duration = start.elapsed();
@@ -678,7 +717,7 @@ fn bench_halfkp_dynamic(
     let total_ns = total_duration.as_nanos() as f64 / iterations as f64;
 
     BenchResult {
-        arch_name,
+        arch_name: "HalfKA1024_8_32 1024x2-8-32 SCReLU (const generics)".to_string(),
         refresh_ns_per_op: refresh_ns,
         eval_ns_per_op: eval_ns,
         total_ns_per_op: total_ns,
@@ -702,59 +741,6 @@ fn main() -> Result<()> {
     println!("Benchmark config: {} warmup, {} iterations", cli.warmup, cli.iterations);
     println!("Test positions: {}", positions.len());
     println!();
-
-    // --compare モード: 元の静的実装と const generics 実装を両方ベンチマーク
-    if cli.compare {
-        use engine_core::nnue::{HalfKP256CReLU, Network};
-        use std::fs::File;
-        use std::io::BufReader;
-
-        println!("=== Compare Mode: Static vs Const Generics ===\n");
-
-        // 元の静的実装を読み込み
-        println!("Loading static implementation (Network)...");
-        let file = File::open(&cli.nnue_file)?;
-        let mut reader = BufReader::new(file);
-        let static_network = Network::read(&mut reader)?;
-        let result_static = bench_halfkp(&static_network, &positions, cli.warmup, cli.iterations);
-        result_static.print();
-
-        // const generics 実装を読み込み
-        println!("Loading const generics implementation (HalfKP256CReLU)...");
-        let file = File::open(&cli.nnue_file)?;
-        let mut reader = BufReader::new(file);
-        let cg_network = HalfKP256CReLU::read(&mut reader)?;
-        let result_cg = bench_halfkp256_crelu(&cg_network, &positions, cli.warmup, cli.iterations);
-        result_cg.print();
-
-        // 比較結果
-        println!("=== Comparison ===");
-        let refresh_diff = (result_cg.refresh_ns_per_op - result_static.refresh_ns_per_op)
-            / result_static.refresh_ns_per_op
-            * 100.0;
-        let eval_diff = (result_cg.eval_ns_per_op - result_static.eval_ns_per_op)
-            / result_static.eval_ns_per_op
-            * 100.0;
-        let total_diff = (result_cg.total_ns_per_op - result_static.total_ns_per_op)
-            / result_static.total_ns_per_op
-            * 100.0;
-        println!(
-            "  refresh: {:.1} ns (static) vs {:.1} ns (cg) = {:+.1}%",
-            result_static.refresh_ns_per_op, result_cg.refresh_ns_per_op, refresh_diff
-        );
-        println!(
-            "  evaluate: {:.1} ns (static) vs {:.1} ns (cg) = {:+.1}%",
-            result_static.eval_ns_per_op, result_cg.eval_ns_per_op, eval_diff
-        );
-        println!(
-            "  total: {:.1} ns (static) vs {:.1} ns (cg) = {:+.1}%",
-            result_static.total_ns_per_op, result_cg.total_ns_per_op, total_diff
-        );
-
-        return Ok(());
-    }
-
-    // 通常モード
     println!("Loading NNUE file: {}", cli.nnue_file.display());
     let network = NNUENetwork::load(&cli.nnue_file)?;
     let arch_name = network.architecture_name();
@@ -763,7 +749,6 @@ fn main() -> Result<()> {
 
     // アーキテクチャに応じてベンチマーク実行
     let result = match network {
-        NNUENetwork::HalfKP(net) => bench_halfkp(&net, &positions, cli.warmup, cli.iterations),
         NNUENetwork::HalfKP256CReLU(net) => {
             bench_halfkp256_crelu(&net, &positions, cli.warmup, cli.iterations)
         }
@@ -776,8 +761,11 @@ fn main() -> Result<()> {
         NNUENetwork::HalfKP512SCReLU(net) => {
             bench_halfkp512_screlu(&net, &positions, cli.warmup, cli.iterations)
         }
-        NNUENetwork::HalfKPDynamic(net) => {
-            bench_halfkp_dynamic(&net, &positions, cli.warmup, cli.iterations)
+        NNUENetwork::HalfKA256CReLU(net) => {
+            bench_halfka256_crelu(&net, &positions, cli.warmup, cli.iterations)
+        }
+        NNUENetwork::HalfKA256SCReLU(net) => {
+            bench_halfka256_screlu(&net, &positions, cli.warmup, cli.iterations)
         }
         NNUENetwork::HalfKA512CReLU(net) => {
             bench_halfka512_crelu(&net, &positions, cli.warmup, cli.iterations)
@@ -791,8 +779,11 @@ fn main() -> Result<()> {
         NNUENetwork::HalfKA1024SCReLU(net) => {
             bench_halfka1024_screlu(&net, &positions, cli.warmup, cli.iterations)
         }
-        NNUENetwork::HalfKADynamic(net) => {
-            bench_halfka_dynamic(&net, &positions, cli.warmup, cli.iterations)
+        NNUENetwork::HalfKA1024_8_32CReLU(net) => {
+            bench_halfka1024_8_32_crelu(&net, &positions, cli.warmup, cli.iterations)
+        }
+        NNUENetwork::HalfKA1024_8_32SCReLU(net) => {
+            bench_halfka1024_8_32_screlu(&net, &positions, cli.warmup, cli.iterations)
         }
         NNUENetwork::LayerStacks(_) => {
             bail!("LayerStacks benchmark not implemented yet");

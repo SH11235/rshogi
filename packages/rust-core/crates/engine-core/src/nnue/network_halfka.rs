@@ -1176,6 +1176,12 @@ pub type HalfKA1024SCReLU = NetworkHalfKA<1024, 2048, 8, 96, SCReLU>;
 /// HalfKA 1024x2-8-96 PairwiseCReLU
 pub type HalfKA1024Pairwise = NetworkHalfKA<1024, 2048, 8, 96, PairwiseCReLU>;
 
+// L1=1024, L2=8, L3=32
+/// HalfKA 1024x2-8-32 CReLU
+pub type HalfKA1024_8_32CReLU = NetworkHalfKA<1024, 2048, 8, 32, CReLU>;
+/// HalfKA 1024x2-8-32 SCReLU
+pub type HalfKA1024_8_32SCReLU = NetworkHalfKA<1024, 2048, 8, 32, SCReLU>;
+
 // =============================================================================
 // テスト
 // =============================================================================
