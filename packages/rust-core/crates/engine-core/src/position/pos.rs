@@ -1375,8 +1375,18 @@ impl Position {
         // ※ do_null_move（探索用）とは異なり、0リセットしない
         new_state.plies_from_null += 1;
 
-        // 6. 連続王手カウンタ: パスは王手ではないのでリセット
-        new_state.continuous_check[us.index()] = 0;
+        // 6. 連続王手カウンタ: パスが王手を維持する場合はカウンタを更新
+        // （自分が相手玉に攻撃している場合、パス後も相手は王手状態）
+        let their_king = self.king_square(them);
+        let gives_check = !self.attackers_to_c(their_king, us).is_empty();
+        if gives_check {
+            // 王手を維持するので、連続王手カウンタを更新（do_moveと同様）
+            new_state.continuous_check[us.index()] += 2;
+        } else {
+            new_state.continuous_check[us.index()] = 0;
+        }
+        // 受け手側はリセット（do_moveと同様）
+        new_state.continuous_check[them.index()] = 0;
 
         // 7. 手番交代
         self.side_to_move = them;

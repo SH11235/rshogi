@@ -1328,11 +1328,25 @@ fn main() -> Result<()> {
             .iter()
             .any(|o| o == "PassRights=true" || o == "PassRights = true");
 
+    // USIオプションから InitialPassCount を解析（エンジン設定と同期するため）
+    let parse_initial_pass_count = |opts: &[String]| -> Option<u8> {
+        for opt in opts {
+            if let Some(val) = opt.strip_prefix("InitialPassCount=") {
+                return val.trim().parse().ok();
+            }
+            if let Some(val) = opt.strip_prefix("InitialPassCount = ") {
+                return val.trim().parse().ok();
+            }
+        }
+        None
+    };
+    let usi_initial_pass_count = parse_initial_pass_count(&black_usi_opts)
+        .or_else(|| parse_initial_pass_count(&white_usi_opts))
+        .unwrap_or(2); // USI未指定時のデフォルト値
+
     // ドライバ側のパス権有効化フラグ（CLIオプションまたはUSIオプションで有効）
     let pass_rights_enabled =
         cli.pass_rights_black.is_some() || cli.pass_rights_white.is_some() || pass_rights_via_usi;
-    // USIオプションのみでパス権が有効化された場合のデフォルト値
-    let default_pass_count = 2u8;
 
     let mut black = EngineProcess::spawn(
         &EngineConfig {
@@ -1430,14 +1444,15 @@ fn main() -> Result<()> {
         } else {
             &start_defs[(game_idx as usize) % start_defs.len()]
         };
-        // パス権の初期値（CLIオプション > USIオプションのデフォルト値）
+        // パス権の初期値（CLIオプション > USIオプションの InitialPassCount）
+        // ドライバ側の Position 初期化用
         let pass_black = if pass_rights_enabled {
-            Some(cli.pass_rights_black.unwrap_or(default_pass_count))
+            Some(cli.pass_rights_black.unwrap_or(usi_initial_pass_count))
         } else {
             None
         };
         let pass_white = if pass_rights_enabled {
-            Some(cli.pass_rights_white.unwrap_or(default_pass_count))
+            Some(cli.pass_rights_white.unwrap_or(usi_initial_pass_count))
         } else {
             None
         };
