@@ -21,6 +21,7 @@ use super::feature_transformer::FeatureTransformer;
 use super::layers::{AffineTransform, ClippedReLU};
 use super::network_halfka_dynamic::NetworkHalfKADynamic;
 use super::network_halfka_static::{NetworkHalfKA1024, NetworkHalfKA512};
+use super::network_halfkp_dynamic::NetworkHalfKPDynamic;
 use super::network_layer_stacks::NetworkLayerStacks;
 #[cfg(not(feature = "tournament"))]
 use crate::eval::material;
@@ -73,8 +74,10 @@ pub fn set_fv_scale_override(value: i32) {
 
 /// NNUEネットワーク（HalfKPまたはHalfKA_hm^をラップ）
 pub enum NNUENetwork {
-    /// HalfKP classic NNUE
+    /// HalfKP classic NNUE (256x2-32-32)
     HalfKP(Box<Network>),
+    /// HalfKP 動的サイズ（512x2-8-96, 512x2-32-32, 1024x2-8-32 など）
+    HalfKPDynamic(Box<NetworkHalfKPDynamic>),
     /// HalfKA_hm^ 512x2-8-96 静的実装
     HalfKA512(Box<NetworkHalfKA512>),
     /// HalfKA_hm^ 1024x2-8-96 静的実装
@@ -160,9 +163,17 @@ impl NNUENetwork {
                         }
                     }
                 } else {
-                    // HalfKP (classic NNUE)
-                    let network = Network::read(reader)?;
-                    Ok(Self::HalfKP(Box::new(network)))
+                    // HalfKP: L1をパースして256以外なら動的実装を使用
+                    let l1 = Self::parse_halfkp_l1(&arch_str);
+                    if l1 == 256 || l1 == 0 {
+                        // 256x2-32-32: 既存の静的実装
+                        let network = Network::read(reader)?;
+                        Ok(Self::HalfKP(Box::new(network)))
+                    } else {
+                        // 512x2-*, 1024x2-* など: 動的実装
+                        let network = NetworkHalfKPDynamic::read(reader)?;
+                        Ok(Self::HalfKPDynamic(Box::new(network)))
+                    }
                 }
             }
             _ => Err(io::Error::new(
@@ -231,6 +242,28 @@ impl NNUENetwork {
         (l1, l2, l3)
     }
 
+    /// HalfKP アーキテクチャ文字列から L1 を抽出
+    ///
+    /// パース失敗時は 0 を返す
+    fn parse_halfkp_l1(arch_str: &str) -> usize {
+        // "[NNNx2]" パターンを探す
+        if let Some(idx) = arch_str.find("x2]") {
+            let before = &arch_str[..idx];
+            if let Some(start) = before.rfind(|c: char| !c.is_ascii_digit()) {
+                let num_str = &before[start + 1..];
+                return num_str.parse().unwrap_or(0);
+            }
+        }
+        // "->NNN" パターンを探す
+        if let Some(idx) = arch_str.find("->") {
+            let after = &arch_str[idx + 2..];
+            let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+            let num_str = &after[..end];
+            return num_str.parse().unwrap_or(0);
+        }
+        0
+    }
+
     /// バイト列から読み込み（バージョン自動判別）
     pub fn from_bytes(bytes: &[u8]) -> io::Result<Self> {
         let mut cursor = Cursor::new(bytes);
@@ -251,6 +284,12 @@ impl NNUENetwork {
     pub fn evaluate(&self, pos: &Position, acc: &Accumulator) -> Value {
         match self {
             Self::HalfKP(net) => net.evaluate(pos, acc),
+            Self::HalfKPDynamic(_) => {
+                unreachable!(
+                    "BUG: wrong accumulator type - HalfKPDynamic requires \
+                     AccumulatorHalfKPDynamic. Use evaluate_halfkp_dynamic() instead."
+                )
+            }
             Self::HalfKA512(_) => {
                 unreachable!(
                     "BUG: wrong accumulator type - HalfKA512 requires \
@@ -293,6 +332,26 @@ impl NNUENetwork {
             Self::LayerStacks(net) => net.evaluate(pos, acc),
             _ => unreachable!(
                 "BUG: evaluate_layer_stacks() called on non-LayerStacks architecture: {:?}",
+                self.architecture_name()
+            ),
+        }
+    }
+
+    /// 評価値を計算（HalfKPDynamic用）
+    ///
+    /// # Panics
+    ///
+    /// HalfKPDynamic 以外のアーキテクチャで呼び出された場合にパニックします。
+    // TODO: Result<Value, EvaluationError> を返すように変更する
+    pub fn evaluate_halfkp_dynamic(
+        &self,
+        pos: &Position,
+        acc: &super::network_halfkp_dynamic::AccumulatorHalfKPDynamic,
+    ) -> Value {
+        match self {
+            Self::HalfKPDynamic(net) => net.evaluate(pos, acc),
+            _ => unreachable!(
+                "BUG: evaluate_halfkp_dynamic() called on non-HalfKPDynamic architecture: {:?}",
                 self.architecture_name()
             ),
         }
@@ -361,6 +420,11 @@ impl NNUENetwork {
         matches!(self, Self::LayerStacks(_))
     }
 
+    /// HalfKPDynamic アーキテクチャかどうか
+    pub fn is_halfkp_dynamic(&self) -> bool {
+        matches!(self, Self::HalfKPDynamic(_))
+    }
+
     /// HalfKADynamic アーキテクチャかどうか
     pub fn is_halfka_dynamic(&self) -> bool {
         matches!(self, Self::HalfKADynamic(_))
@@ -384,10 +448,19 @@ impl NNUENetwork {
         }
     }
 
+    /// HalfKPDynamic の L1 サイズを取得（他のアーキテクチャでは None）
+    pub fn get_halfkp_dynamic_l1(&self) -> Option<usize> {
+        match self {
+            Self::HalfKPDynamic(net) => Some(net.arch_l1),
+            _ => None,
+        }
+    }
+
     /// アーキテクチャ名を取得
     pub fn architecture_name(&self) -> &'static str {
         match self {
             Self::HalfKP(_) => "HalfKP",
+            Self::HalfKPDynamic(_) => "HalfKPDynamic",
             Self::HalfKA512(_) => "HalfKA512",
             Self::HalfKA1024(_) => "HalfKA1024",
             Self::HalfKADynamic(_) => "HalfKADynamic",
@@ -399,6 +472,11 @@ impl NNUENetwork {
     pub fn refresh_accumulator(&self, pos: &Position, acc: &mut Accumulator) {
         match self {
             Self::HalfKP(net) => net.feature_transformer.refresh_accumulator(pos, acc),
+            Self::HalfKPDynamic(_) => {
+                panic!(
+                    "HalfKPDynamic requires AccumulatorHalfKPDynamic. Use refresh_accumulator_halfkp_dynamic()."
+                )
+            }
             Self::HalfKA512(_) => {
                 panic!(
                     "HalfKA512 requires AccumulatorHalfKA512. Use refresh_accumulator_halfka_512()."
@@ -470,6 +548,18 @@ impl NNUENetwork {
         }
     }
 
+    /// 差分計算を使わずにAccumulatorを計算（HalfKPDynamic用）
+    pub fn refresh_accumulator_halfkp_dynamic(
+        &self,
+        pos: &Position,
+        acc: &mut super::network_halfkp_dynamic::AccumulatorHalfKPDynamic,
+    ) {
+        match self {
+            Self::HalfKPDynamic(net) => net.feature_transformer.refresh_accumulator(pos, acc),
+            _ => panic!("This method is only for HalfKPDynamic architecture."),
+        }
+    }
+
     /// 差分計算でAccumulatorを更新（HalfKP用）
     pub fn update_accumulator(
         &self,
@@ -481,6 +571,9 @@ impl NNUENetwork {
         match self {
             Self::HalfKP(net) => {
                 net.feature_transformer.update_accumulator(pos, dirty_piece, acc, prev_acc)
+            }
+            Self::HalfKPDynamic(_) => {
+                panic!("HalfKPDynamic requires AccumulatorHalfKPDynamic. Use update_accumulator_halfkp_dynamic().")
             }
             Self::HalfKA512(_) => {
                 panic!(
@@ -555,6 +648,22 @@ impl NNUENetwork {
         }
     }
 
+    /// 差分計算でAccumulatorを更新（HalfKPDynamic用）
+    pub fn update_accumulator_halfkp_dynamic(
+        &self,
+        pos: &Position,
+        dirty_piece: &super::accumulator::DirtyPiece,
+        acc: &mut super::network_halfkp_dynamic::AccumulatorHalfKPDynamic,
+        prev_acc: &super::network_halfkp_dynamic::AccumulatorHalfKPDynamic,
+    ) {
+        match self {
+            Self::HalfKPDynamic(net) => {
+                net.feature_transformer.update_accumulator(pos, dirty_piece, acc, prev_acc)
+            }
+            _ => panic!("This method is only for HalfKPDynamic architecture."),
+        }
+    }
+
     /// 複数手分の差分を適用してアキュムレータを更新（HalfKP用）
     pub fn forward_update_incremental(
         &self,
@@ -565,6 +674,9 @@ impl NNUENetwork {
         match self {
             Self::HalfKP(net) => {
                 net.feature_transformer.forward_update_incremental(pos, stack, source_idx)
+            }
+            Self::HalfKPDynamic(_) => {
+                panic!("HalfKPDynamic requires AccumulatorStackHalfKPDynamic. Use forward_update_incremental_halfkp_dynamic().")
             }
             Self::HalfKA512(_) => {
                 panic!("HalfKA512 requires AccumulatorStackHalfKA512. Use forward_update_incremental_halfka_512().")
@@ -630,6 +742,45 @@ impl NNUENetwork {
         match self {
             Self::HalfKA1024(net) => net.forward_update_incremental(pos, stack, source_idx),
             _ => panic!("This method is only for HalfKA1024 architecture."),
+        }
+    }
+
+    /// 複数手分の差分を適用してアキュムレータを更新（HalfKPDynamic用）
+    pub fn forward_update_incremental_halfkp_dynamic(
+        &self,
+        pos: &Position,
+        stack: &mut super::network_halfkp_dynamic::AccumulatorStackHalfKPDynamic,
+        source_idx: usize,
+    ) -> bool {
+        match self {
+            Self::HalfKPDynamic(net) => {
+                net.feature_transformer.forward_update_incremental(pos, stack, source_idx)
+            }
+            _ => panic!("This method is only for HalfKPDynamic architecture."),
+        }
+    }
+
+    /// HalfKPDynamic 用の新しいアキュムレータを作成
+    pub fn new_accumulator_halfkp_dynamic(
+        &self,
+    ) -> super::network_halfkp_dynamic::AccumulatorHalfKPDynamic {
+        match self {
+            Self::HalfKPDynamic(net) => {
+                super::network_halfkp_dynamic::AccumulatorHalfKPDynamic::new(net.arch_l1)
+            }
+            _ => panic!("This method is only for HalfKPDynamic architecture."),
+        }
+    }
+
+    /// HalfKPDynamic 用の新しいアキュムレータスタックを作成
+    pub fn new_accumulator_stack_halfkp_dynamic(
+        &self,
+    ) -> super::network_halfkp_dynamic::AccumulatorStackHalfKPDynamic {
+        match self {
+            Self::HalfKPDynamic(net) => {
+                super::network_halfkp_dynamic::AccumulatorStackHalfKPDynamic::new(net.arch_l1)
+            }
+            _ => panic!("This method is only for HalfKPDynamic architecture."),
         }
     }
 
@@ -1205,6 +1356,52 @@ fn update_and_evaluate_halfka_dynamic(
     network.evaluate_halfka_dynamic(pos, acc_ref)
 }
 
+/// HalfKPDynamic アキュムレータを更新して評価（内部実装）
+#[inline]
+fn update_and_evaluate_halfkp_dynamic(
+    network: &NNUENetwork,
+    pos: &Position,
+    stack: &mut super::network_halfkp_dynamic::AccumulatorStackHalfKPDynamic,
+) -> Value {
+    // アキュムレータの更新
+    let current_entry = stack.current();
+    if !current_entry.accumulator.computed_accumulation {
+        let mut updated = false;
+
+        // 1. 直前局面で差分更新を試行
+        if let Some(prev_idx) = current_entry.previous {
+            let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
+            if prev_computed {
+                let dirty_piece = stack.current().dirty_piece;
+                let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
+                network.update_accumulator_halfkp_dynamic(pos, &dirty_piece, current_acc, prev_acc);
+                updated = true;
+            }
+        }
+
+        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
+        if !updated {
+            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+                updated = network.forward_update_incremental_halfkp_dynamic(pos, stack, source_idx);
+            }
+        }
+
+        // 3. それでも失敗なら全計算
+        if !updated {
+            #[cfg(debug_assertions)]
+            if std::env::var("NNUE_DEBUG").is_ok() {
+                eprintln!("[DEBUG] Calling refresh_accumulator_halfkp_dynamic");
+            }
+            let acc = &mut stack.current_mut().accumulator;
+            network.refresh_accumulator_halfkp_dynamic(pos, acc);
+        }
+    }
+
+    // 評価
+    let acc_ref = &stack.current().accumulator;
+    network.evaluate_halfkp_dynamic(pos, acc_ref)
+}
+
 /// HalfKA512 アキュムレータを更新して評価（内部実装）
 #[inline]
 fn update_and_evaluate_halfka_512(
@@ -1580,6 +1777,9 @@ pub fn evaluate_dispatch(pos: &Position, stack: &mut AccumulatorStackVariant) ->
             update_and_evaluate_halfka_dynamic(network, pos, s)
         }
         AccumulatorStackVariant::HalfKP(s) => update_and_evaluate_halfka(network, pos, s),
+        AccumulatorStackVariant::HalfKPDynamic(s) => {
+            update_and_evaluate_halfkp_dynamic(network, pos, s)
+        }
     }
 }
 
@@ -1630,98 +1830,6 @@ mod tests {
         // フォールバックの駒得評価は手番に依存して符号が変わる可能性があるが、
         // ここでは「計算が成功し、フラグが維持された」ことのみ検証する。
         let _ = (value1, value2);
-    }
-
-    #[test]
-    fn test_debug_network_layers() {
-        use crate::nnue::layers::ClippedReLU;
-
-        let path =
-            "/home/sh11235/development/shogi/packages/rust-core/memo/nnue-pytorch/eval/nn.bin";
-        let network = match Network::load(path) {
-            Ok(n) => n,
-            Err(e) => {
-                eprintln!("Skipping test: {e}");
-                return;
-            }
-        };
-
-        // 初期局面
-        let mut pos = Position::new();
-        pos.set_sfen(SFEN_HIRATE).unwrap();
-
-        // Accumulator
-        let mut acc = Accumulator::new();
-        network.feature_transformer.refresh_accumulator(&pos, &mut acc);
-
-        eprintln!("=== Network Layer Debug ===\n");
-
-        // 1. FeatureTransformer 出力
-        let mut transformed = Aligned([0u8; TRANSFORMED_FEATURE_DIMENSIONS * 2]);
-        network
-            .feature_transformer
-            .transform(&acc, pos.side_to_move(), &mut transformed.0);
-
-        let nonzero = transformed.0.iter().filter(|&&x| x != 0).count();
-        let sum: u64 = transformed.0.iter().map(|&x| x as u64).sum();
-        let min = *transformed.0.iter().min().unwrap();
-        let max = *transformed.0.iter().max().unwrap();
-        eprintln!("Transform output (512 u8):");
-        eprintln!("  nonzero={nonzero}, sum={sum}, min={min}, max={max}");
-        eprintln!("  first 10: {:?}", &transformed.0[..10]);
-
-        // 2. hidden1 層
-        eprintln!("\nHidden1 layer (512→32):");
-        eprintln!("  biases: {:?}", &network.hidden1.biases);
-        let bias_sum: i64 = network.hidden1.biases.iter().map(|&v| v as i64).sum();
-        eprintln!("  bias sum={bias_sum}");
-
-        // hidden1 の重みの範囲を確認
-        let weight_min = *network.hidden1.weights.iter().min().unwrap();
-        let weight_max = *network.hidden1.weights.iter().max().unwrap();
-        eprintln!(
-            "  weights: min={weight_min}, max={weight_max}, len={}",
-            network.hidden1.weights.len()
-        );
-
-        let mut hidden1_out = Aligned([0i32; HIDDEN1_DIMENSIONS]);
-        network.hidden1.propagate(&transformed.0, &mut hidden1_out.0);
-        eprintln!("  output (i32): {:?}", &hidden1_out.0);
-        let h1_sum: i64 = hidden1_out.0.iter().map(|&v| v as i64).sum();
-        eprintln!("  sum={h1_sum}");
-
-        // 3. hidden1 ReLU
-        let mut hidden1_relu = Aligned([0u8; HIDDEN1_DIMENSIONS]);
-        ClippedReLU::<HIDDEN1_DIMENSIONS>::propagate(&hidden1_out.0, &mut hidden1_relu.0);
-        eprintln!("\nHidden1 ReLU (i32 >> 6, clamp 0-127):");
-        eprintln!("  output (u8): {:?}", &hidden1_relu.0);
-
-        // 4. hidden2 層
-        eprintln!("\nHidden2 layer (32→32):");
-        eprintln!("  biases: {:?}", &network.hidden2.biases);
-
-        let mut hidden2_out = Aligned([0i32; HIDDEN2_DIMENSIONS]);
-        network.hidden2.propagate(&hidden1_relu.0, &mut hidden2_out.0);
-        eprintln!("  output (i32): {:?}", &hidden2_out.0);
-
-        // 5. hidden2 ReLU
-        let mut hidden2_relu = Aligned([0u8; HIDDEN2_DIMENSIONS]);
-        ClippedReLU::<HIDDEN2_DIMENSIONS>::propagate(&hidden2_out.0, &mut hidden2_relu.0);
-        eprintln!("\nHidden2 ReLU:");
-        eprintln!("  output (u8): {:?}", &hidden2_relu.0);
-
-        // 6. output 層
-        eprintln!("\nOutput layer (32→1):");
-        eprintln!("  biases: {:?}", &network.output.biases);
-
-        let mut output_val = Aligned([0i32; OUTPUT_DIMENSIONS]);
-        network.output.propagate(&hidden2_relu.0, &mut output_val.0);
-        eprintln!("  raw output: {}", output_val.0[0]);
-        eprintln!("  / FV_SCALE({}): {}", FV_SCALE, output_val.0[0] / FV_SCALE);
-
-        // Network.evaluate() の結果
-        let score = network.evaluate(&pos, &acc);
-        eprintln!("\nNetwork.evaluate() = {}", score.raw());
     }
 
     /// NNUENetwork のアーキテクチャ自動検出テスト
