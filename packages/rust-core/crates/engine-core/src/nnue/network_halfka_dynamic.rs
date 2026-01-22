@@ -19,10 +19,11 @@
 
 use super::accumulator::{AlignedBox, DirtyPiece, IndexList, MAX_PATH_LENGTH};
 use super::constants::{
-    FV_SCALE_HALFKA, HALFKA_HM_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION_HALFKA, WEIGHT_SCALE_BITS,
+    FV_SCALE_HALFKA, HALFKA_HM_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION_HALFKA, SCRELU_DEFAULT_QA,
+    WEIGHT_SCALE_BITS,
 };
 use super::features::{FeatureSet, HalfKA_hmFeatureSet};
-use super::network::{get_fv_scale_override, parse_fv_scale_from_arch};
+use super::network::{get_fv_scale_override, parse_fv_scale_from_arch, parse_qa_from_arch};
 use crate::position::Position;
 use crate::types::{Color, Value};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -1131,6 +1132,14 @@ pub struct NetworkHalfKADynamic {
     /// arch_string に "-SCReLU" サフィックスが含まれている場合に true。
     /// bullet-shogi で学習した SCReLU モデル用。
     pub use_screlu: bool,
+    /// SCReLU 量子化係数
+    ///
+    /// arch_str に "qa=N" が含まれていればその値、
+    /// なければ 127 をデフォルトとする。
+    ///
+    /// - QA=127: YaneuraOu の ClippedReLU 由来、シフト >>7
+    /// - QA=255: Reckless 互換の高精度モード、シフト >>9
+    pub screlu_qa: i16,
     /// 評価値スケーリング係数
     ///
     /// arch_str に "fv_scale=N" が含まれていればその値、
@@ -1182,6 +1191,13 @@ impl NetworkHalfKADynamic {
         // FV_SCALE 検出: arch_str に "fv_scale=N" が含まれていればその値を使用
         let fv_scale = parse_fv_scale_from_arch(&arch_str).unwrap_or(FV_SCALE_HALFKA);
 
+        // QA 検出: arch_str に "qa=N" が含まれていればその値を使用
+        // デフォルトは 127（YaneuraOu の ClippedReLU 由来の量子化係数）
+        // - YaneuraOu/Stockfish の ClippedReLU は clamp(x, 0, 127) を使用
+        // - bullet-shogi の SCReLU もデフォルトで QA=127 を使用
+        // - QA=255 は Reckless 互換の高精度モード
+        let screlu_qa = parse_qa_from_arch(&arch_str).unwrap_or(127);
+
         // Feature Transformer ハッシュ
         reader.read_exact(&mut buf4)?;
         let _ft_hash = u32::from_le_bytes(buf4);
@@ -1202,6 +1218,33 @@ impl NetworkHalfKADynamic {
         // output: L3 → 1
         let output_layer = AffineTransformDynamic::read(reader, l3, 1)?;
 
+        // QA > SCRELU_DEFAULT_QA の場合、全層の bias スケールを修正
+        //
+        // 背景:
+        // - bullet-shogi は bias を QA×QB でスケールする
+        // - しかし FT SCReLU 出力は QA に依存せず 0〜SCRELU_DEFAULT_QA に正規化される
+        // - そのため L1 積和のスケールは常に SCRELU_DEFAULT_QA×QB
+        // - QA > SCRELU_DEFAULT_QA の場合、bias スケールと積和スケールが不一致
+        // - bias を QA/SCRELU_DEFAULT_QA で割ることでスケールを統一
+        //
+        // 注: output layer の bias 修正は棋力に影響しない（評価値のオフセットが変わるだけ）が、
+        //     GUIに表示される評価値の絶対値が正確になるため修正する
+        let mut l1_layer = l1_layer;
+        let mut l2_layer = l2_layer;
+        let mut output_layer = output_layer;
+        if use_screlu && screlu_qa as i32 > SCRELU_DEFAULT_QA {
+            let bias_scale = screlu_qa as i32 / SCRELU_DEFAULT_QA;
+            for bias in l1_layer.biases.iter_mut() {
+                *bias /= bias_scale;
+            }
+            for bias in l2_layer.biases.iter_mut() {
+                *bias /= bias_scale;
+            }
+            for bias in output_layer.biases.iter_mut() {
+                *bias /= bias_scale;
+            }
+        }
+
         Ok(Self {
             feature_transformer,
             l1: l1_layer,
@@ -1211,6 +1254,7 @@ impl NetworkHalfKADynamic {
             arch_l2: l2,
             arch_l3: l3,
             use_screlu,
+            screlu_qa,
             fv_scale,
         })
     }
@@ -1279,7 +1323,14 @@ impl NetworkHalfKADynamic {
 
     /// アーキテクチャ文字列から L2, L3 をパース
     ///
-    /// アーキテクチャ文字列の例:
+    /// 2つのフォーマットをサポート:
+    ///
+    /// ## 1. bullet-shogi 形式（優先）
+    /// ```text
+    /// Features=halfka-hm[73305->512x2],fv_scale=16,l2=32,l3=32,qa=255,qb=64,scale=1600
+    /// ```
+    ///
+    /// ## 2. nnue-pytorch 形式（フォールバック）
     /// ```text
     /// Features=HalfKA_hm[73305->256x2],Network=AffineTransform[1<-32](ClippedReLU[32](
     ///   AffineTransform[32<-32](ClippedReLU[32](AffineTransform[32<-512](InputSlice[512(0:512)])))))
@@ -1289,7 +1340,12 @@ impl NetworkHalfKADynamic {
     /// - 1番目（最内側）: L2 = OUT（L1*2 からの入力）
     /// - 2番目: L3 = OUT（L2 からの入力）
     fn parse_l2_l3_from_arch(arch: &str) -> Option<(usize, usize)> {
-        // AffineTransform[OUT<-IN] パターンを全て抽出
+        // まず bullet-shogi の l2=N,l3=N フィールドを試す
+        if let Some(result) = Self::parse_l2_l3_fields(arch) {
+            return Some(result);
+        }
+
+        // フォールバック: AffineTransform[OUT<-IN] パターンを全て抽出
         let mut layers: Vec<(usize, usize)> = Vec::new();
         let pattern = "AffineTransform[";
 
@@ -1327,6 +1383,28 @@ impl NetworkHalfKADynamic {
             Some((l2, l3))
         } else {
             None
+        }
+    }
+
+    /// bullet-shogi 形式の l2=N,l3=N フィールドをパース
+    ///
+    /// 例: "Features=halfka-hm[73305->512x2],fv_scale=16,l2=32,l3=32,qa=255,qb=64,scale=1600"
+    fn parse_l2_l3_fields(arch: &str) -> Option<(usize, usize)> {
+        let mut l2: Option<usize> = None;
+        let mut l3: Option<usize> = None;
+
+        for part in arch.split(',') {
+            let part = part.trim();
+            if let Some(val_str) = part.strip_prefix("l2=") {
+                l2 = val_str.parse().ok();
+            } else if let Some(val_str) = part.strip_prefix("l3=") {
+                l3 = val_str.parse().ok();
+            }
+        }
+
+        match (l2, l3) {
+            (Some(l2_val), Some(l3_val)) => Some((l2_val, l3_val)),
+            _ => None,
         }
     }
 
@@ -1495,9 +1573,10 @@ impl NetworkHalfKADynamic {
         }
 
         // SCReLU 適用 (i16 → u8)
-        // FT後: clamp(x, 0, 127)² >> 7 → u8 (0〜127)
+        // QA=127: clamp(x, 0, 127)² >> 7 → u8 (0〜126)
+        // QA=255: clamp(x, 0, 255)² >> 9 → u8 (0〜127)
         let mut transformed = vec![0u8; l1 * 2];
-        SCReLUDynamic::propagate_i16_to_u8(&ft_out_i16, &mut transformed);
+        SCReLUDynamic::propagate_i16_to_u8_with_qa(&ft_out_i16, &mut transformed, self.screlu_qa);
 
         if debug {
             let min = transformed.iter().min().unwrap_or(&0);
@@ -1514,6 +1593,8 @@ impl NetworkHalfKADynamic {
         let l1_out_size = self.l2.padded_input_dim;
         let mut l1_out = vec![0i32; l1_out_size];
         self.l1.propagate(&transformed, &mut l1_out[..self.arch_l2]);
+
+        // 注: QA > 127 の場合の正規化は読み込み時の bias スケール修正で対応済み
 
         if debug {
             let min = l1_out.iter().min().unwrap_or(&0);
@@ -1626,6 +1707,24 @@ mod tests {
         // 512x2-32-32 のアーキテクチャ文字列（今まで誤認識されていたケース）
         let arch_512_32_32 = "Features=HalfKA_hm[73305->512x2],Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-32](ClippedReLU[32](AffineTransform[32<-1024](InputSlice[1024(0:1024)])))))";
         assert_eq!(NetworkHalfKADynamic::parse_l2_l3_from_arch(arch_512_32_32), Some((32, 32)));
+
+        // bullet-shogi 形式 (l2=N,l3=N フィールド)
+        let bullet_512_32_32 =
+            "Features=halfka-hm[73305->512x2],fv_scale=16,l2=32,l3=32,qa=255,qb=64,scale=1600";
+        assert_eq!(NetworkHalfKADynamic::parse_l2_l3_from_arch(bullet_512_32_32), Some((32, 32)));
+
+        let bullet_256_8_96 =
+            "Features=halfka-hm[73305->256x2],fv_scale=16,l2=8,l3=96,qa=255,qb=64,scale=1600";
+        assert_eq!(NetworkHalfKADynamic::parse_l2_l3_from_arch(bullet_256_8_96), Some((8, 96)));
+
+        // SCReLU 形式も対応
+        let bullet_screlu =
+            "Features=halfka-hm[73305->512x2]-SCReLU,fv_scale=16,l2=32,l3=32,qa=255,qb=64,scale=1600";
+        assert_eq!(NetworkHalfKADynamic::parse_l2_l3_from_arch(bullet_screlu), Some((32, 32)));
+
+        // l2のみ、l3のみの場合は None を返す
+        assert_eq!(NetworkHalfKADynamic::parse_l2_l3_from_arch("Features=test,l2=32,qa=255"), None);
+        assert_eq!(NetworkHalfKADynamic::parse_l2_l3_from_arch("Features=test,l3=32,qa=255"), None);
 
         // パースできない文字列
         assert_eq!(NetworkHalfKADynamic::parse_l2_l3_from_arch("invalid"), None);

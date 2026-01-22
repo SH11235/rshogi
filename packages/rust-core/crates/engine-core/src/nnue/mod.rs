@@ -29,6 +29,7 @@ mod leb128;
 mod network;
 mod network_halfka_dynamic;
 mod network_halfka_static;
+mod network_halfkp_dynamic;
 mod network_layer_stacks;
 
 pub use accumulator::{
@@ -66,5 +67,8 @@ pub use network_halfka_dynamic::{
 pub use network_halfka_static::{
     AccumulatorHalfKA1024, AccumulatorHalfKA512, AccumulatorStackHalfKA1024,
     AccumulatorStackHalfKA512, NetworkHalfKA1024, NetworkHalfKA512,
+};
+pub use network_halfkp_dynamic::{
+    AccumulatorHalfKPDynamic, AccumulatorStackHalfKPDynamic, NetworkHalfKPDynamic,
 };
 pub use network_layer_stacks::NetworkLayerStacks;
