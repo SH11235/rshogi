@@ -2,7 +2,6 @@ import {
     applyMoveWithState,
     type BoardState,
     boardToMatrix,
-    canPass,
     cloneBoard,
     createEmptyHands,
     type GameResult,
@@ -484,15 +483,13 @@ export function ShogiMatch({
         [setPassRightsSettings, legalCache],
     );
 
-    // パス可能かどうかの判定
-    // 合法手キャッシュがあれば"pass"が含まれるかで判定（王手中はpassが合法手に含まれない）
-    // キャッシュがなければcanPass()でフォールバック（handlePassMoveで再チェックされる）
+    // パス可能かどうかの判定（合法手キャッシュに"pass"が含まれるかでのみ判定）
+    // 王手中は合法手に含まれないため、フォールバックは行わない
     const canMakePassMove =
         isMatchRunning &&
         sides[position.turn].role === "human" &&
-        (legalCache.isCached(moves.length)
-            ? (legalCache.getCached()?.has("pass") ?? false)
-            : canPass(position));
+        legalCache.isCached(moves.length) &&
+        (legalCache.getCached()?.has("pass") ?? false);
 
     const matchEndedRef = useRef(false);
     const boardSectionRef = useRef<HTMLDivElement>(null);
@@ -1101,6 +1098,42 @@ export function ShogiMatch({
         };
         return legalCache.getOrResolve(ply, resolver);
     }, [positionReady, fetchLegalMoves, startSfen, legalCache, passRightsSettings]);
+
+    // パス可否判定のため、キャッシュ未作成時は合法手をプリフェッチ
+    useEffect(() => {
+        if (!isMatchRunning || !positionReady) return;
+        if (sides[position.turn].role !== "human") return;
+        const ply = movesRef.current.length;
+        if (legalCache.isCached(ply)) return;
+
+        const passRightsOption = buildPassRightsOptionForLegalMoves(
+            passRightsSettings,
+            movesRef.current,
+        );
+        const resolver = async () => {
+            if (fetchLegalMoves) {
+                return fetchLegalMoves(startSfen, movesRef.current, passRightsOption);
+            }
+            return getPositionService().getLegalMoves(
+                startSfen,
+                movesRef.current,
+                passRightsOption,
+            );
+        };
+
+        // エラーはパスボタンクリック時の再解決に委ねる
+        void legalCache.getOrResolve(ply, resolver).catch(() => undefined);
+    }, [
+        fetchLegalMoves,
+        isMatchRunning,
+        legalCache,
+        movesRef,
+        passRightsSettings,
+        position.turn,
+        positionReady,
+        sides,
+        startSfen,
+    ]);
 
     const applyEditedPosition = useCallback(
         async (nextPosition: PositionState) => {
