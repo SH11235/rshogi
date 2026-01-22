@@ -107,6 +107,60 @@ const DEFAULT_BYOYOMI_MS = 5_000; // デフォルト秒読み時間（5秒）
 const DEFAULT_MAX_LOGS = 80; // ログ履歴の最大保持件数
 const TOOLTIP_DELAY_DURATION_MS = 120; // ツールチップ表示遅延
 
+/**
+ * パス権設定と棋譜からgetLegalMovesのオプションを生成するヘルパー関数
+ *
+ * 注意: 棋譜に"pass"が含まれる場合は、設定が無効でもpassRightsを送る必要がある。
+ * これは、Rust側でパス手を適用する際にパス権が必須なため。
+ * （パス権有効で対局後に設定をOFFにした場合や、パス入り棋譜を読み込んだ場合など）
+ */
+function buildPassRightsOptionForLegalMoves(
+    passRightsSettings: { enabled: boolean; initialCount: number } | undefined,
+    moves: string[],
+): { passRights?: { sente: number; gote: number } } {
+    // 大文字小文字を区別せずにパス手を検出（parseMoveと同様）
+    const hasPassInMoves = moves.some((m) => m.toLowerCase() === "pass");
+
+    if (passRightsSettings?.enabled) {
+        // 設定が有効: 初期値を使用
+        return {
+            passRights: {
+                sente: passRightsSettings.initialCount,
+                gote: passRightsSettings.initialCount,
+            },
+        };
+    }
+
+    if (hasPassInMoves) {
+        // 設定は無効だが棋譜にpassが含まれる: 十分な数のパス権を設定
+        // （各プレイヤーのパス回数の最大値を使用）
+        let sentePassCount = 0;
+        let gotePassCount = 0;
+        let isSenteTurn = true; // 平手初期局面は先手番
+        for (const move of moves) {
+            if (move.toLowerCase() === "pass") {
+                if (isSenteTurn) {
+                    sentePassCount++;
+                } else {
+                    gotePassCount++;
+                }
+            }
+            isSenteTurn = !isSenteTurn;
+        }
+        // 最低でも現在のパス数 + 1 を確保（追加パスの余地を残す）
+        const minRights = Math.max(sentePassCount, gotePassCount) + 1;
+        return {
+            passRights: {
+                sente: minRights,
+                gote: minRights,
+            },
+        };
+    }
+
+    // 設定無効かつパスなし: passRights不要
+    return {};
+}
+
 // レイアウト用Tailwindクラス
 const matchLayoutClasses = "flex flex-col gap-2 items-center py-2";
 
@@ -683,16 +737,10 @@ export function ShogiMatch({
         // エンジン側の can_pass() は王手中のパスを禁止しており、
         // パスが合法でない場合にloadPositionするとパニックするため、事前にチェック
         try {
-            // pass_rights は初期値を渡す（エンジンは moves を適用してパスを減算するため、
-            // 現在の残数を渡すと二重減算になる）
-            const passRightsOption = passRightsSettings?.enabled
-                ? {
-                      passRights: {
-                          sente: passRightsSettings.initialCount,
-                          gote: passRightsSettings.initialCount,
-                      },
-                  }
-                : {};
+            const passRightsOption = buildPassRightsOptionForLegalMoves(
+                passRightsSettings,
+                movesRef.current,
+            );
             const resolver = fetchLegalMoves
                 ? () => fetchLegalMoves(startSfen, movesRef.current, passRightsOption)
                 : () =>
@@ -1026,16 +1074,10 @@ export function ShogiMatch({
     const getLegalSet = useCallback(async (): Promise<Set<string> | null> => {
         if (!positionReady) return null;
         const ply = movesRef.current.length;
-        // pass_rights は初期値を渡す（エンジンは moves を適用してパスを減算するため、
-        // 現在の残数を渡すと二重減算になる）
-        const passRightsOption = passRightsSettings?.enabled
-            ? {
-                  passRights: {
-                      sente: passRightsSettings.initialCount,
-                      gote: passRightsSettings.initialCount,
-                  },
-              }
-            : {};
+        const passRightsOption = buildPassRightsOptionForLegalMoves(
+            passRightsSettings,
+            movesRef.current,
+        );
         const resolver = async () => {
             if (fetchLegalMoves) {
                 return fetchLegalMoves(startSfen, movesRef.current, passRightsOption);

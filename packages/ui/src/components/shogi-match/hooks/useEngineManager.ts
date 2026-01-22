@@ -87,7 +87,8 @@ function buildPassRightsOption(
     passRightsSettings: PassRightsSettings | undefined,
     moves: string[],
 ) {
-    const hasPassInMoves = moves.includes("pass");
+    // 大文字小文字を区別せずにパス手を検出（parseMoveと同様）
+    const hasPassInMoves = moves.some((m) => m.toLowerCase() === "pass");
 
     if (passRightsSettings?.enabled) {
         // 設定が有効: 初期値を使用
