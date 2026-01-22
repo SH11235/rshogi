@@ -420,6 +420,11 @@ export function ShogiMatch({
         // ナビゲーションで局面が変わったらキャッシュをクリア
         legalCache.clear();
     }, [moves, legalCache]);
+    // パス権設定変更時にキャッシュをクリア
+    // （合法手にpassが含まれるかどうかが変わるため）
+    useEffect(() => {
+        legalCache.clear();
+    }, [passRightsSettings?.enabled, passRightsSettings?.initialCount, legalCache]);
     const matchEndedRef = useRef(false);
     const boardSectionRef = useRef<HTMLDivElement>(null);
     const settingsLocked = isMatchRunning;
