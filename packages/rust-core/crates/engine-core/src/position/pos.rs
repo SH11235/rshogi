@@ -1490,11 +1490,14 @@ impl Position {
 
     /// 王手になるかどうか
     ///
-    /// PASSは王手にならないため false を返す
+    /// PASSの場合：自分が相手玉に王手をかけている状態なら true
+    /// （パス後、相手が王手状態になるため）
     pub fn gives_check(&self, m: Move) -> bool {
-        // PASS は王手にならない
+        // PASS の場合：自分が相手玉に攻撃しているか
         if m.is_pass() {
-            return false;
+            let them = !self.side_to_move;
+            let their_king = self.king_square(them);
+            return !self.attackers_to_c(their_king, self.side_to_move).is_empty();
         }
 
         let us = self.side_to_move;
