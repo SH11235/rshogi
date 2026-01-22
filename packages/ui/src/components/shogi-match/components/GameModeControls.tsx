@@ -90,9 +90,27 @@ export function PausedModeControls({
                 対局再開
             </Button>
             {onEnterEditMode && (
-                <Button type="button" onClick={onEnterEditMode} variant="outline">
-                    局面編集
-                </Button>
+                <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                        <Button type="button" variant="outline">
+                            局面編集
+                        </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                        <AlertDialogHeader>
+                            <AlertDialogTitle>局面編集モードに入りますか？</AlertDialogTitle>
+                            <AlertDialogDescription>
+                                現在の対局を中断して編集モードに移行します。
+                            </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter className="sm:justify-center">
+                            <AlertDialogCancel>キャンセル</AlertDialogCancel>
+                            <AlertDialogAction onClick={onEnterEditMode}>
+                                編集モードへ
+                            </AlertDialogAction>
+                        </AlertDialogFooter>
+                    </AlertDialogContent>
+                </AlertDialog>
             )}
             {onResign && (
                 <AlertDialog>

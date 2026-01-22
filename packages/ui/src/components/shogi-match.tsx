@@ -491,6 +491,13 @@ export function ShogiMatch({
         // ただし、1手しかない場合は1手だけ戻す
         const undoCount = moveCount >= 2 ? 2 : 1;
 
+        // 待った後の手番を明示的に計算
+        // React のバッチ処理により navigation.goBack() 後の positionRef.current は
+        // 即座に更新されないため、手番を事前に計算する
+        const turnBeforeUndo = positionRef.current.turn;
+        const turnAfterUndo =
+            undoCount % 2 === 1 ? (turnBeforeUndo === "sente" ? "gote" : "sente") : turnBeforeUndo;
+
         for (let i = 0; i < undoCount; i++) {
             navigation.goBack();
         }
@@ -498,8 +505,8 @@ export function ShogiMatch({
 
         // 待った後の思考時間計測を新しく開始
         turnStartTimeRef.current = Date.now();
-        // 秒読みをリセット（戻った局面の手番で時計を更新）
-        updateClocksForNextTurn(positionRef.current.turn);
+        // 秒読みをリセット（計算した手番で時計を更新）
+        updateClocksForNextTurn(turnAfterUndo);
     }, [navigation, updateClocksForNextTurn]);
 
     const handleMoveFromEngineRef = useRef<(move: string) => void>(() => {});
@@ -2047,7 +2054,10 @@ export function ShogiMatch({
                     onResetToStartpos={handleResetToStartpos}
                     onResign={handleResign}
                     onUndo={handleUndo}
-                    canUndo={moves.length > 0}
+                    canUndo={
+                        moves.length > 0 &&
+                        !(sides.sente.role === "engine" && sides.gote.role === "engine")
+                    }
                     onEnterEditMode={isPaused ? enterEditModeFromPaused : undefined}
                     // 対局設定
                     sides={sides}
@@ -2245,7 +2255,13 @@ export function ShogiMatch({
                                         }
                                         onResign={handleResign}
                                         onUndo={handleUndo}
-                                        canUndo={moves.length > 0}
+                                        canUndo={
+                                            moves.length > 0 &&
+                                            !(
+                                                sides.sente.role === "engine" &&
+                                                sides.gote.role === "engine"
+                                            )
+                                        }
                                         isMatchRunning={isMatchRunning}
                                         gameMode={gameMode}
                                         message={message}
