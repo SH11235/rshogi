@@ -613,7 +613,7 @@ fn engine_position(
     state: State<EngineState>,
     sfen: String,
     moves: Option<Vec<String>>,
-    #[serde(rename = "passRights")] pass_rights: Option<PassRightsInput>,
+    pass_rights: Option<PassRightsInput>,
 ) -> Result<(), String> {
     eprintln!(
         "engine_position: sfen={}, moves={:?}, passRights={:?}",
@@ -744,7 +744,7 @@ fn engine_stop(state: State<EngineState>) -> Result<(), String> {
 fn engine_legal_moves(
     sfen: String,
     moves: Option<Vec<String>>,
-    #[serde(rename = "passRights")] pass_rights: Option<PassRightsInput>,
+    pass_rights: Option<PassRightsInput>,
 ) -> Result<Vec<String>, String> {
     let position = parse_position(&sfen, moves, pass_rights)?;
     let mut list = MoveList::new();

@@ -187,7 +187,7 @@ export function createTauriEngineClient(options: TauriEngineClientOptions = {}):
                     ipc.invoke("engine_position", {
                         sfen,
                         moves,
-                        passRights: options?.passRights,
+                        pass_rights: options?.passRights,
                     }),
                 () => mock.loadPosition(sfen, moves, options),
             );

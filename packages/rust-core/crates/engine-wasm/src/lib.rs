@@ -458,7 +458,7 @@ pub fn wasm_get_legal_moves(
 ) -> Result<JsValue, JsValue> {
     let parsed_moves = parse_moves(moves)?;
     let pass_rights: Option<PassRightsInput> = pass_rights
-        .map(|v| swb::from_value(v))
+        .map(swb::from_value)
         .transpose()
         .map_err(|e| JsValue::from_str(&format!("invalid passRights: {e}")))?;
 
@@ -530,7 +530,7 @@ pub fn load_position(
 ) -> Result<(), JsValue> {
     let moves = parse_moves(moves)?;
     let pass_rights: Option<PassRightsInput> = pass_rights
-        .map(|v| swb::from_value(v))
+        .map(swb::from_value)
         .transpose()
         .map_err(|e| JsValue::from_str(&format!("invalid passRights: {e}")))?;
     let position = build_position(sfen, &moves, pass_rights)?;

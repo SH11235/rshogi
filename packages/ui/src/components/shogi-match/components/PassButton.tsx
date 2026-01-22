@@ -137,7 +137,7 @@ export function PassButton({
                                     パス権残り: {remainingPassRights}回
                                 </span>
                             )}
-                            パスすると手番が相手に移ります。この操作は取り消せません。
+                            パスすると手番が相手に移ります。
                         </AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter>
