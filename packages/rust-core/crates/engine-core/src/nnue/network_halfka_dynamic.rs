@@ -19,7 +19,8 @@
 
 use super::accumulator::{AlignedBox, DirtyPiece, IndexList, MAX_PATH_LENGTH};
 use super::constants::{
-    FV_SCALE_HALFKA, HALFKA_HM_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION_HALFKA, WEIGHT_SCALE_BITS,
+    FV_SCALE_HALFKA, HALFKA_HM_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION_HALFKA, SCRELU_DEFAULT_QA,
+    WEIGHT_SCALE_BITS,
 };
 use super::features::{FeatureSet, HalfKA_hmFeatureSet};
 use super::network::{get_fv_scale_override, parse_fv_scale_from_arch, parse_qa_from_arch};
@@ -1217,6 +1218,33 @@ impl NetworkHalfKADynamic {
         // output: L3 → 1
         let output_layer = AffineTransformDynamic::read(reader, l3, 1)?;
 
+        // QA > SCRELU_DEFAULT_QA の場合、全層の bias スケールを修正
+        //
+        // 背景:
+        // - bullet-shogi は bias を QA×QB でスケールする
+        // - しかし FT SCReLU 出力は QA に依存せず 0〜SCRELU_DEFAULT_QA に正規化される
+        // - そのため L1 積和のスケールは常に SCRELU_DEFAULT_QA×QB
+        // - QA > SCRELU_DEFAULT_QA の場合、bias スケールと積和スケールが不一致
+        // - bias を QA/SCRELU_DEFAULT_QA で割ることでスケールを統一
+        //
+        // 注: output layer の bias 修正は棋力に影響しない（評価値のオフセットが変わるだけ）が、
+        //     GUIに表示される評価値の絶対値が正確になるため修正する
+        let mut l1_layer = l1_layer;
+        let mut l2_layer = l2_layer;
+        let mut output_layer = output_layer;
+        if use_screlu && screlu_qa as i32 > SCRELU_DEFAULT_QA {
+            let bias_scale = screlu_qa as i32 / SCRELU_DEFAULT_QA;
+            for bias in l1_layer.biases.iter_mut() {
+                *bias /= bias_scale;
+            }
+            for bias in l2_layer.biases.iter_mut() {
+                *bias /= bias_scale;
+            }
+            for bias in output_layer.biases.iter_mut() {
+                *bias /= bias_scale;
+            }
+        }
+
         Ok(Self {
             feature_transformer,
             l1: l1_layer,
@@ -1565,6 +1593,8 @@ impl NetworkHalfKADynamic {
         let l1_out_size = self.l2.padded_input_dim;
         let mut l1_out = vec![0i32; l1_out_size];
         self.l1.propagate(&transformed, &mut l1_out[..self.arch_l2]);
+
+        // 注: QA > 127 の場合の正規化は読み込み時の bias スケール修正で対応済み
 
         if debug {
             let min = l1_out.iter().min().unwrap_or(&0);

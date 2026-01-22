@@ -19,10 +19,11 @@
 
 use super::accumulator::{AlignedBox, DirtyPiece, IndexList, MAX_PATH_LENGTH};
 use super::constants::{
-    FV_SCALE, FV_SCALE_HALFKA, HALFKP_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION, WEIGHT_SCALE_BITS,
+    FV_SCALE, FV_SCALE_HALFKA, HALFKP_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION, SCRELU_DEFAULT_QA,
+    WEIGHT_SCALE_BITS,
 };
 use super::features::{FeatureSet, HalfKPFeatureSet};
-use super::network::parse_fv_scale_from_arch;
+use super::network::{get_fv_scale_override, parse_fv_scale_from_arch, parse_qa_from_arch};
 use super::network_halfka_dynamic::AffineTransformDynamic;
 use crate::position::Position;
 use crate::types::{Color, Value};
@@ -711,6 +712,8 @@ pub struct NetworkHalfKPDynamic {
     pub use_screlu: bool,
     /// 評価値スケーリング係数
     pub fv_scale: i32,
+    /// SCReLU の量子化係数 QA (127 or 255)
+    pub screlu_qa: i16,
 }
 
 impl NetworkHalfKPDynamic {
@@ -766,6 +769,10 @@ impl NetworkHalfKPDynamic {
             }
         });
 
+        // QA 検出: arch_str に "qa=N" が含まれていればその値を使用
+        // デフォルトは 127（YaneuraOu の ClippedReLU 由来の量子化係数）
+        let screlu_qa = parse_qa_from_arch(&arch_str).unwrap_or(127);
+
         // Feature Transformer ハッシュ
         reader.read_exact(&mut buf4)?;
         let _ft_hash = u32::from_le_bytes(buf4);
@@ -786,6 +793,33 @@ impl NetworkHalfKPDynamic {
         // output: L3 → 1
         let output_layer = AffineTransformDynamic::read(reader, l3, 1)?;
 
+        // QA > SCRELU_DEFAULT_QA の場合、全層の bias スケールを修正
+        //
+        // 背景:
+        // - bullet-shogi は bias を QA×QB でスケールする
+        // - しかし FT SCReLU 出力は QA に依存せず 0〜SCRELU_DEFAULT_QA に正規化される
+        // - そのため L1 積和のスケールは常に SCRELU_DEFAULT_QA×QB
+        // - QA > SCRELU_DEFAULT_QA の場合、bias スケールと積和スケールが不一致
+        // - bias を QA/SCRELU_DEFAULT_QA で割ることでスケールを統一
+        //
+        // 注: output layer の bias 修正は棋力に影響しない（評価値のオフセットが変わるだけ）が、
+        //     GUIに表示される評価値の絶対値が正確になるため修正する
+        let mut l1_layer = l1_layer;
+        let mut l2_layer = l2_layer;
+        let mut output_layer = output_layer;
+        if use_screlu && screlu_qa as i32 > SCRELU_DEFAULT_QA {
+            let bias_scale = screlu_qa as i32 / SCRELU_DEFAULT_QA;
+            for bias in l1_layer.biases.iter_mut() {
+                *bias /= bias_scale;
+            }
+            for bias in l2_layer.biases.iter_mut() {
+                *bias /= bias_scale;
+            }
+            for bias in output_layer.biases.iter_mut() {
+                *bias /= bias_scale;
+            }
+        }
+
         Ok(Self {
             feature_transformer,
             l1: l1_layer,
@@ -796,6 +830,7 @@ impl NetworkHalfKPDynamic {
             arch_l3: l3,
             use_screlu,
             fv_scale,
+            screlu_qa,
         })
     }
 
@@ -942,7 +977,9 @@ impl NetworkHalfKPDynamic {
         let mut output = vec![0i32; 1];
         self.output.propagate(&l2_relu, &mut output);
 
-        Value::new(output[0] / self.fv_scale)
+        // スケーリング（オーバーライド設定があればそちらを優先）
+        let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
+        Value::new(output[0] / fv_scale)
     }
 
     /// SCReLU 版の評価値計算
@@ -956,9 +993,12 @@ impl NetworkHalfKPDynamic {
         self.feature_transformer.transform_raw(acc, pos.side_to_move(), &mut ft_out_i16);
 
         // FT出力に SCReLU 適用 (i16 → u8)
-        // clamp(x, 0, 127)² >> 7 → u8 (0〜127)
+        // QA=127: clamp(x, 0, 127)² >> 7 → u8 (0〜126)
+        // QA=255: clamp(x, 0, 255)² >> 9 → u8 (0〜127)
         let mut transformed = vec![0u8; ft_out_size];
-        SCReLUDynamic::propagate_i16_to_u8(&ft_out_i16, &mut transformed);
+        SCReLUDynamic::propagate_i16_to_u8_with_qa(&ft_out_i16, &mut transformed, self.screlu_qa);
+
+        // 注: QA > 127 の場合の正規化は読み込み時の bias スケール修正で対応済み
 
         // 隠れ層1
         let mut l1_out = vec![0i32; self.arch_l2];
@@ -981,7 +1021,9 @@ impl NetworkHalfKPDynamic {
         let mut output = vec![0i32; 1];
         self.output.propagate(&l2_relu, &mut output);
 
-        Value::new(output[0] / self.fv_scale)
+        // スケーリング（オーバーライド設定があればそちらを優先）
+        let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
+        Value::new(output[0] / fv_scale)
     }
 
     /// アーキテクチャ名を取得
