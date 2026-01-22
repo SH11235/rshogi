@@ -420,11 +420,15 @@ export function ShogiMatch({
         // ナビゲーションで局面が変わったらキャッシュをクリア
         legalCache.clear();
     }, [moves, legalCache]);
-    // パス権設定変更時にキャッシュをクリア
+    // パス権設定変更時にキャッシュもクリアするラッパー
     // （合法手にpassが含まれるかどうかが変わるため）
-    useEffect(() => {
-        legalCache.clear();
-    }, [passRightsSettings?.enabled, passRightsSettings?.initialCount, legalCache]);
+    const handlePassRightsSettingsChange = useCallback(
+        (newSettings: PassRightsSettings) => {
+            setPassRightsSettings(newSettings);
+            legalCache.clear();
+        },
+        [setPassRightsSettings, legalCache],
+    );
     const matchEndedRef = useRef(false);
     const boardSectionRef = useRef<HTMLDivElement>(null);
     const settingsLocked = isMatchRunning;
@@ -2184,7 +2188,7 @@ export function ShogiMatch({
                     settingsLocked={settingsLocked}
                     // パス権設定
                     passRightsSettings={passRightsSettings}
-                    onPassRightsSettingsChange={setPassRightsSettings}
+                    onPassRightsSettingsChange={handlePassRightsSettingsChange}
                     onPassMove={handlePassMove}
                     canPassMove={
                         isMatchRunning && sides[position.turn].role === "human" && canPass(position)
@@ -2558,7 +2562,7 @@ export function ShogiMatch({
                                     timeSettings={timeSettings}
                                     onTimeSettingsChange={setTimeSettings}
                                     passRightsSettings={passRightsSettings}
-                                    onPassRightsSettingsChange={setPassRightsSettings}
+                                    onPassRightsSettingsChange={handlePassRightsSettingsChange}
                                     uiEngineOptions={uiEngineOptions}
                                     settingsLocked={settingsLocked}
                                 />
