@@ -28,8 +28,6 @@ import { EvalPanel } from "./shogi-match/components/EvalPanel";
 import { GameResultDialog } from "./shogi-match/components/GameResultDialog";
 import { HandPiecesDisplay } from "./shogi-match/components/HandPiecesDisplay";
 import { KifuImportPanel } from "./shogi-match/components/KifuImportPanel";
-import { PassButton } from "./shogi-match/components/PassButton";
-import { PassRightsDisplay } from "./shogi-match/components/PassRightsDisplay";
 import { KifuPanel } from "./shogi-match/components/KifuPanel";
 import { MatchControls } from "./shogi-match/components/MatchControls";
 import {
@@ -38,6 +36,8 @@ import {
     type SideSetting,
 } from "./shogi-match/components/MatchSettingsPanel";
 import { MoveDetailPanel } from "./shogi-match/components/MoveDetailPanel";
+import { PassButton } from "./shogi-match/components/PassButton";
+import { PassRightsDisplay } from "./shogi-match/components/PassRightsDisplay";
 import { PvPreviewDialog } from "./shogi-match/components/PvPreviewDialog";
 import { SettingsModal } from "./shogi-match/components/SettingsModal";
 import { applyDropResult, DragGhost, type DropResult, usePieceDnd } from "./shogi-match/dnd";
@@ -660,12 +660,16 @@ export function ShogiMatch({
     );
     handleMoveFromEngineRef.current = handleMoveFromEngine;
 
-    // 人間のパス手を処理するコールバック
+    // パス手を処理するコールバック
+    // 人間・エンジン両方のパス手で使用される
     const handlePassMove = useCallback(() => {
         if (matchEndedRef.current) return;
         if (!passRightsSettings?.enabled) return;
 
         // "pass" を applyMoveWithState で適用
+        // validateTurn: false の理由:
+        // - 人間のパスはUI側で手番チェック済み（sides[position.turn].role === "human"）
+        // - エンジンのパスも受け付けるため、ここでは手番検証をスキップ
         const result = applyMoveWithState(positionRef.current, "pass", {
             validateTurn: false,
         });

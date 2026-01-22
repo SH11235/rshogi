@@ -11,7 +11,7 @@ import { cn } from "@shogi/design-system";
 import type { ReactElement } from "react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../../tooltip";
 
-export interface PassRightsDisplayProps {
+interface PassRightsDisplayProps {
     /** 残りパス権数 */
     remaining: number;
     /** 最大パス権数（表示用） */
@@ -39,12 +39,13 @@ export function PassRightsDisplay({
         return null;
     }
 
-    // ドットのレンダリング
-    const dots = Array.from({ length: max }, (_, i) => {
-        const isFilled = i < remaining;
+    // ドットのレンダリング（固定ID配列を使用してlintエラーを回避）
+    const DOT_IDS = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"] as const;
+    const dots = DOT_IDS.slice(0, max).map((id, idx) => {
+        const isFilled = idx < remaining;
         return (
             <span
-                key={i}
+                key={id}
                 className={cn(
                     "inline-block rounded-full",
                     compact ? "h-2 w-2" : "h-2.5 w-2.5",

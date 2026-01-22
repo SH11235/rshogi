@@ -3,6 +3,7 @@ import type { ReactElement } from "react";
 import { Input } from "../../input";
 import { Switch } from "../../switch";
 import type { ClockSettings } from "../hooks/useClockManager";
+import type { PassRightsSettings } from "../types";
 import { SkillLevelSelector } from "./SkillLevelSelector";
 
 type SideKey = "sente" | "gote";
@@ -22,16 +23,6 @@ export type EngineOption = {
     createClient: () => EngineClient;
     kind?: "internal" | "external";
 };
-
-/**
- * パス権設定
- */
-export interface PassRightsSettings {
-    /** パス権ルールが有効かどうか */
-    enabled: boolean;
-    /** 初期パス権数（先手・後手共通） */
-    initialCount: number;
-}
 
 interface MatchSettingsPanelProps {
     // 設定値

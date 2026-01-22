@@ -8,7 +8,7 @@
  */
 
 import { cn } from "@shogi/design-system";
-import { useState, type ReactElement } from "react";
+import { type ReactElement, useState } from "react";
 import {
     AlertDialog,
     AlertDialogAction,
@@ -23,14 +23,14 @@ import { Button } from "../../button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../../tooltip";
 
 /** パス不可の理由 */
-export type PassDisabledReason =
+type PassDisabledReason =
     | "in-check" // 王手されている
     | "no-rights" // パス権がない
     | "not-your-turn" // 自分の手番ではない
     | "disabled" // パス権機能が無効
     | "match-not-running"; // 対局中でない
 
-export interface PassButtonProps {
+interface PassButtonProps {
     /** パス可能かどうか */
     canPass: boolean;
     /** パス不可の理由（ツールチップ表示用） */
@@ -137,7 +137,7 @@ export function PassButton({
                                     パス権残り: {remainingPassRights}回
                                 </span>
                             )}
-                            パスすると手番が相手に移ります。 この操作は取り消せません。
+                            パスすると手番が相手に移ります。この操作は取り消せません。
                         </AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter>
