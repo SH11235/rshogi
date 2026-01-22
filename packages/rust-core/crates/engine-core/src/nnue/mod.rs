@@ -7,6 +7,14 @@
 //! - **HalfKP**: 従来のclassic NNUE（水匠/tanuki互換）
 //! - **HalfKA_hm^**: nnue-pytorch互換（Half-Mirror + Factorization）
 //!
+//! # const generics 版統一実装
+//!
+//! `NetworkHalfKA<L1, L2, L3, A>` で複数のアーキテクチャに対応:
+//! - L1: FT出力次元（256, 512, 1024）
+//! - L2: 隠れ層1出力次元（8, 32）
+//! - L3: 隠れ層2出力次元（32, 96）
+//! - A: 活性化関数（CReLU, SCReLU, PairwiseCReLU）
+//!
 //! - ネットワーク構造の読み込み（`Network::load` / `init_nnue`）
 //! - 入力特徴量（HalfKP: 自玉×駒配置）の計算と変換（`BonaPiece` / `FeatureTransformer`）
 //! - Accumulator による差分更新可能な中間表現の保持（`diff::get_changed_features` を用いた増分更新 + フォールバック全計算）
@@ -16,6 +24,7 @@
 mod accumulator;
 mod accumulator_layer_stacks;
 mod accumulator_stack_variant;
+pub mod activation;
 mod bona_piece;
 mod bona_piece_halfka;
 mod constants;
@@ -27,8 +36,9 @@ mod layer_stacks;
 mod layers;
 mod leb128;
 mod network;
+pub mod network_halfka;
 mod network_halfka_dynamic;
-mod network_halfka_static;
+pub mod network_halfkp;
 mod network_halfkp_dynamic;
 mod network_layer_stacks;
 
@@ -64,11 +74,21 @@ pub use network::{
 pub use network_halfka_dynamic::{
     AccumulatorHalfKADynamic, AccumulatorStackHalfKADynamic, NetworkHalfKADynamic,
 };
-pub use network_halfka_static::{
-    AccumulatorHalfKA1024, AccumulatorHalfKA512, AccumulatorStackHalfKA1024,
-    AccumulatorStackHalfKA512, NetworkHalfKA1024, NetworkHalfKA512,
-};
 pub use network_halfkp_dynamic::{
     AccumulatorHalfKPDynamic, AccumulatorStackHalfKPDynamic, NetworkHalfKPDynamic,
 };
 pub use network_layer_stacks::NetworkLayerStacks;
+
+// const generics 版統一実装
+pub use activation::{detect_activation_from_arch, CReLU, FtActivation, PairwiseCReLU, SCReLU};
+pub use network_halfka::{
+    AccumulatorEntryHalfKA, AccumulatorHalfKA, AccumulatorStackHalfKA, AffineTransformHalfKA,
+    FeatureTransformerHalfKA, HalfKA1024CReLU, HalfKA1024Pairwise, HalfKA1024SCReLU,
+    HalfKA256CReLU, HalfKA256Pairwise, HalfKA256SCReLU, HalfKA512CReLU, HalfKA512Pairwise,
+    HalfKA512SCReLU, NetworkHalfKA,
+};
+pub use network_halfkp::{
+    AccumulatorEntryHalfKP, AccumulatorHalfKP, AccumulatorStackHalfKP, AffineTransformHalfKP,
+    FeatureTransformerHalfKP, HalfKP256CReLU, HalfKP256Pairwise, HalfKP256SCReLU, HalfKP512CReLU,
+    HalfKP512Pairwise, HalfKP512SCReLU, HalfKP512_32_32CReLU, NetworkHalfKP,
+};

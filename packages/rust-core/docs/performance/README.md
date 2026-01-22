@@ -12,6 +12,13 @@
 | アーキテクチャ | x86_64 |
 | 計測日 | 2025-12-26 |
 
+## 関連ドキュメント
+
+| ファイル | 内容 |
+|----------|------|
+| [nnue-benchmark-methodology.md](./nnue-benchmark-methodology.md) | NNUE評価関数のマイクロベンチマーク方法 |
+| [nnue-eval-results.json](./nnue-eval-results.json) | NNUE評価関数のベンチマーク結果（機械可読） |
+
 ---
 
 ## NPS計測結果

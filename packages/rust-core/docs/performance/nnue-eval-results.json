@@ -1,0 +1,115 @@
+{
+  "schema_version": "1.0",
+  "description": "NNUE評価関数ベンチマーク結果",
+  "methodology": "./nnue-benchmark-methodology.md",
+  "measurements": [
+    {
+      "id": "baseline-2026-01-22",
+      "measured_at": "2026-01-22",
+      "description": "const-generics実装前のベースライン",
+      "environment": {
+        "cpu": "AMD Ryzen 9 5950X 16-Core Processor",
+        "rust_version": "1.92.0",
+        "os": "Linux (Ubuntu)",
+        "build_flags": "--release"
+      },
+      "config": {
+        "iterations": 500000,
+        "warmup": 10000,
+        "test_positions": 5
+      },
+      "results": {
+        "HalfKP_256x2-32-32_static": {
+          "refresh_ns": 510.4,
+          "eval_ns": 151.0,
+          "total_ns": 672.4,
+          "evals_per_sec": 1487128
+        },
+        "HalfKA512_512x2-8-96_static": {
+          "refresh_ns": 1100.2,
+          "eval_ns": 348.5,
+          "total_ns": 1427.5,
+          "evals_per_sec": 700521
+        },
+        "HalfKA1024_1024x2-8-96_static": {
+          "refresh_ns": 2231.6,
+          "eval_ns": 418.5,
+          "total_ns": 2591.6,
+          "evals_per_sec": 385868
+        }
+      }
+    },
+    {
+      "id": "const-generics-simd-2026-01-22",
+      "measured_at": "2026-01-22",
+      "description": "const-generics実装 + SIMD最適化（ループ逆転 + スクランブル重み）",
+      "environment": {
+        "cpu": "AMD Ryzen 9 5950X 16-Core Processor",
+        "rust_version": "1.92.0",
+        "os": "Linux (Ubuntu)",
+        "build_flags": "-C target-cpu=native"
+      },
+      "config": {
+        "iterations": 500000,
+        "warmup": 10000,
+        "test_positions": 5
+      },
+      "results": {
+        "HalfKP256_const_generics": {
+          "refresh_ns": 498.3,
+          "eval_ns": 147.6,
+          "total_ns": 660.5,
+          "evals_per_sec": 1513996,
+          "vs_static": {
+            "refresh_diff_percent": -2.4,
+            "eval_diff_percent": -2.3,
+            "total_diff_percent": -1.8
+          }
+        },
+        "HalfKA512_const_generics": {
+          "refresh_ns": 1036.1,
+          "eval_ns": 131.8,
+          "total_ns": 1207.3,
+          "evals_per_sec": 828301,
+          "vs_static": {
+            "refresh_diff_percent": -6,
+            "eval_diff_percent": -62,
+            "total_diff_percent": -15
+          }
+        },
+        "HalfKA1024_const_generics": {
+          "refresh_ns": 1836.2,
+          "eval_ns": 223.1,
+          "total_ns": 2121.4,
+          "evals_per_sec": 471378,
+          "vs_static": {
+            "refresh_diff_percent": -18,
+            "eval_diff_percent": -47,
+            "total_diff_percent": -18
+          }
+        }
+      }
+    }
+  ],
+  "optimization_history": [
+    {
+      "date": "2026-01-22",
+      "change": "インライン配列への変更",
+      "description": "Box<AlignedArray<L1>> から AlignedI16<L1> へ変更し、ポインタ間接参照を排除",
+      "impact": {
+        "HalfKP256_refresh": "+27% → -2%",
+        "HalfKP256_total": "+20% → -1%"
+      }
+    },
+    {
+      "date": "2026-01-22",
+      "change": "ループカウントのバグ修正",
+      "description": "SIMD最適化のループカウントをリテラル16からL1/16に変更。L1=512/1024で正しく動作するように修正",
+      "impact": {
+        "HalfKP256": "性能変化なし（L1/16はコンパイル時に定数展開）",
+        "HalfKP512": "バグ修正（前半のみ処理→全体処理）",
+        "HalfKA1024": "バグ修正（1/4のみ処理→全体処理）"
+      }
+    }
+  ]
+}
