@@ -77,7 +77,11 @@ export interface PositionService {
         moves?: string[],
         options?: { passRights?: { sente: number; gote: number } },
     ): Promise<string[]>;
-    replayMovesStrict(sfen: string, moves: string[]): Promise<ReplayResult>;
+    replayMovesStrict(
+        sfen: string,
+        moves: string[],
+        options?: { passRights?: { sente: number; gote: number } },
+    ): Promise<ReplayResult>;
 }
 
 const FILES_ASC: readonly string[] = [...BOARD_FILES].reverse();

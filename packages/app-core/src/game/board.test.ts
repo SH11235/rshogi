@@ -40,7 +40,11 @@ const createMockPositionService = (): PositionService => {
         async getLegalMoves(_sfen: string, _moves?: string[]) {
             return [];
         },
-        async replayMovesStrict(_sfen: string, moves: string[]) {
+        async replayMovesStrict(
+            _sfen: string,
+            moves: string[],
+            _options?: { passRights?: { sente: number; gote: number } },
+        ) {
             return {
                 applied: moves,
                 lastPly: moves.length,

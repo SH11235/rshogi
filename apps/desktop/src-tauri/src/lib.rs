@@ -802,8 +802,10 @@ fn board_to_sfen_impl(board: BoardStateJson) -> Result<String, String> {
 fn engine_replay_moves_strict_impl(
     sfen: String,
     moves: Vec<String>,
+    pass_rights: Option<PassRightsInput>,
 ) -> Result<ReplayResultJson, String> {
-    Position::replay_moves_strict(&sfen, &moves)
+    let pass_rights_tuple = pass_rights.map(|pr| (pr.sente, pr.gote));
+    Position::replay_moves_strict(&sfen, &moves, pass_rights_tuple)
 }
 
 #[tauri::command]
@@ -825,8 +827,9 @@ fn board_to_sfen(board: BoardStateJson) -> Result<String, String> {
 fn engine_replay_moves_strict(
     sfen: String,
     moves: Vec<String>,
+    pass_rights: Option<PassRightsInput>,
 ) -> Result<ReplayResultJson, String> {
-    engine_replay_moves_strict_impl(sfen, moves)
+    engine_replay_moves_strict_impl(sfen, moves, pass_rights)
 }
 
 // テスト用にコマンド実装を公開
@@ -845,8 +848,9 @@ pub fn board_to_sfen_for_test(board: BoardStateJson) -> Result<String, String> {
 pub fn engine_replay_moves_strict_for_test(
     sfen: String,
     moves: Vec<String>,
+    pass_rights: Option<PassRightsInput>,
 ) -> Result<ReplayResultJson, String> {
-    engine_replay_moves_strict_impl(sfen, moves)
+    engine_replay_moves_strict_impl(sfen, moves, pass_rights)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

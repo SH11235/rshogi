@@ -1701,7 +1701,16 @@ export function ShogiMatch({
         ) => {
             const filtered = list.filter(Boolean);
             const service = getPositionService();
-            const result = await service.replayMovesStrict(startSfenToLoad, filtered);
+            // パス入り棋譜の場合はpassRightsを渡す
+            const passRightsOption = buildPassRightsOptionForLegalMoves(
+                passRightsSettings,
+                filtered,
+            );
+            const result = await service.replayMovesStrict(
+                startSfenToLoad,
+                filtered,
+                passRightsOption,
+            );
 
             // 棋譜ナビゲーションをリセット
             navigation.reset(startPosition, startSfenToLoad);

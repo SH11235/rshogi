@@ -40,10 +40,15 @@ export const createTauriPositionService = (): PositionService => {
             });
         },
 
-        async replayMovesStrict(sfen: string, moves: string[]): Promise<ReplayResult> {
+        async replayMovesStrict(
+            sfen: string,
+            moves: string[],
+            options?: { passRights?: { sente: number; gote: number } },
+        ): Promise<ReplayResult> {
             const result = await invoke<ReplayResultJson>("engine_replay_moves_strict", {
                 sfen,
                 moves,
+                pass_rights: options?.passRights,
             });
             return {
                 applied: result.applied,

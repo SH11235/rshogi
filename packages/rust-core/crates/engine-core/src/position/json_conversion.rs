@@ -112,12 +112,26 @@ impl Position {
     }
 
     /// 棋譜を厳密に適用し、不正手で停止する。
-    pub fn replay_moves_strict(sfen: &str, moves: &[String]) -> Result<ReplayResultJson, String> {
+    ///
+    /// # Arguments
+    /// * `sfen` - 開始局面のSFEN
+    /// * `moves` - 適用する棋譜
+    /// * `pass_rights` - パス権の初期値（先手, 後手）。棋譜に"pass"が含まれる場合は必須
+    pub fn replay_moves_strict(
+        sfen: &str,
+        moves: &[String],
+        pass_rights: Option<(u8, u8)>,
+    ) -> Result<ReplayResultJson, String> {
         let mut position = Position::new();
         if sfen.trim() == "startpos" {
             position.set_sfen(SFEN_HIRATE).map_err(|e| e.to_string())?;
         } else {
             position.set_sfen(sfen).map_err(|e| e.to_string())?;
+        }
+
+        // パス権が指定された場合は有効化
+        if let Some((black, white)) = pass_rights {
+            position.enable_pass_rights(black, white);
         }
 
         let mut applied: Vec<String> = Vec::with_capacity(moves.len());

@@ -471,10 +471,19 @@ pub fn wasm_get_legal_moves(
 }
 
 #[wasm_bindgen]
-pub fn wasm_replay_moves_strict(sfen: String, moves: JsValue) -> Result<JsValue, JsValue> {
+pub fn wasm_replay_moves_strict(
+    sfen: String,
+    moves: JsValue,
+    pass_rights: Option<JsValue>,
+) -> Result<JsValue, JsValue> {
     let parsed_moves = parse_moves(Some(moves))?;
-    let result =
-        Position::replay_moves_strict(&sfen, &parsed_moves).map_err(|e| JsValue::from_str(&e))?;
+    let pass_rights: Option<PassRightsInput> = pass_rights
+        .map(swb::from_value)
+        .transpose()
+        .map_err(|e| JsValue::from_str(&format!("invalid passRights: {e}")))?;
+    let pass_rights_tuple = pass_rights.map(|pr| (pr.sente, pr.gote));
+    let result = Position::replay_moves_strict(&sfen, &parsed_moves, pass_rights_tuple)
+        .map_err(|e| JsValue::from_str(&e))?;
     swb::to_value(&result).map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
