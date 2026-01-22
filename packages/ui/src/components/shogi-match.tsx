@@ -674,7 +674,16 @@ export function ShogiMatch({
         // エンジン側の can_pass() は王手中のパスを禁止しており、
         // パスが合法でない場合にloadPositionするとパニックするため、事前にチェック
         try {
-            const passRightsOption = { passRights: positionRef.current.passRights };
+            // pass_rights は初期値を渡す（エンジンは moves を適用してパスを減算するため、
+            // 現在の残数を渡すと二重減算になる）
+            const passRightsOption = passRightsSettings?.enabled
+                ? {
+                      passRights: {
+                          sente: passRightsSettings.initialCount,
+                          gote: passRightsSettings.initialCount,
+                      },
+                  }
+                : {};
             const resolver = fetchLegalMoves
                 ? () => fetchLegalMoves(startSfen, movesRef.current, passRightsOption)
                 : () =>
@@ -1008,7 +1017,16 @@ export function ShogiMatch({
     const getLegalSet = useCallback(async (): Promise<Set<string> | null> => {
         if (!positionReady) return null;
         const ply = movesRef.current.length;
-        const passRightsOption = { passRights: positionRef.current.passRights };
+        // pass_rights は初期値を渡す（エンジンは moves を適用してパスを減算するため、
+        // 現在の残数を渡すと二重減算になる）
+        const passRightsOption = passRightsSettings?.enabled
+            ? {
+                  passRights: {
+                      sente: passRightsSettings.initialCount,
+                      gote: passRightsSettings.initialCount,
+                  },
+              }
+            : {};
         const resolver = async () => {
             if (fetchLegalMoves) {
                 return fetchLegalMoves(startSfen, movesRef.current, passRightsOption);
@@ -1020,7 +1038,7 @@ export function ShogiMatch({
             );
         };
         return legalCache.getOrResolve(ply, resolver);
-    }, [positionReady, fetchLegalMoves, startSfen, legalCache]);
+    }, [positionReady, fetchLegalMoves, startSfen, legalCache, passRightsSettings]);
 
     const applyEditedPosition = useCallback(
         async (nextPosition: PositionState) => {
