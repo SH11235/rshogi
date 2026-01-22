@@ -46,11 +46,12 @@ pub trait FtActivation: Clone + Copy + Default + Send + Sync + 'static {
 
     /// i32入力からu8出力への活性化関数適用（中間層用）
     ///
+    /// 中間層では固定のスケーリング係数を使用（FT層のQAとは異なる）。
+    ///
     /// # 引数
     /// - `input`: AffineTransform出力（i32）
     /// - `output`: 活性化後の出力（u8）
-    /// - `qa`: クリッピング閾値（通常127または255）
-    fn activate_i32_to_u8(input: &[i32], output: &mut [u8], qa: i16);
+    fn activate_i32_to_u8(input: &[i32], output: &mut [u8]);
 
     /// アーキテクチャ文字列のサフィックス
     ///
@@ -83,9 +84,9 @@ impl FtActivation for CReLU {
     }
 
     #[inline]
-    fn activate_i32_to_u8(input: &[i32], output: &mut [u8], qa: i16) {
+    fn activate_i32_to_u8(input: &[i32], output: &mut [u8]) {
         debug_assert_eq!(input.len(), output.len());
-        crelu_i32_to_u8(input, output, qa);
+        crelu_i32_to_u8(input, output);
     }
 
     fn header_suffix() -> &'static str {
@@ -195,8 +196,8 @@ fn crelu_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16) {
 
 /// CReLU: i32 → u8（SIMD最適化版）
 ///
-/// CReLU では qa に関わらず 0-127 にクランプする（i8 出力のため）
-fn crelu_i32_to_u8(input: &[i32], output: &mut [u8], _qa: i16) {
+/// 中間層では固定で 0-127 にクランプする（u8 出力のため）
+fn crelu_i32_to_u8(input: &[i32], output: &mut [u8]) {
     let mut processed = 0;
 
     // AVX2: 32要素ずつ処理
@@ -304,9 +305,9 @@ impl FtActivation for PairwiseCReLU {
     }
 
     #[inline]
-    fn activate_i32_to_u8(input: &[i32], output: &mut [u8], qa: i16) {
+    fn activate_i32_to_u8(input: &[i32], output: &mut [u8]) {
         debug_assert_eq!(input.len(), output.len() * 2);
-        pairwise_crelu_i32_to_u8(input, output, qa);
+        pairwise_crelu_i32_to_u8(input, output);
     }
 
     fn header_suffix() -> &'static str {
@@ -333,16 +334,17 @@ fn pairwise_crelu_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16) {
 }
 
 /// PairwiseCReLU: i32 → u8
-fn pairwise_crelu_i32_to_u8(input: &[i32], output: &mut [u8], qa: i16) {
+///
+/// 中間層では固定のスケーリングを使用（QB=64相当、shift=7）
+fn pairwise_crelu_i32_to_u8(input: &[i32], output: &mut [u8]) {
     let half = input.len() / 2;
     debug_assert_eq!(output.len(), half, "output length must be half of input length");
-    let (qa_i32, shift) = if qa >= 255 { (255i32, 9) } else { (127i32, 7) };
 
     // TODO: SIMD最適化
     for j in 0..half {
-        let a = (input[j] >> WEIGHT_SCALE_BITS).clamp(0, qa_i32);
-        let b = (input[j + half] >> WEIGHT_SCALE_BITS).clamp(0, qa_i32);
-        output[j] = ((a * b) >> shift).min(127) as u8;
+        let a = (input[j] >> WEIGHT_SCALE_BITS).clamp(0, 127);
+        let b = (input[j + half] >> WEIGHT_SCALE_BITS).clamp(0, 127);
+        output[j] = ((a * b) >> 7).min(127) as u8;
     }
 }
 
@@ -369,9 +371,9 @@ impl FtActivation for SCReLU {
     }
 
     #[inline]
-    fn activate_i32_to_u8(input: &[i32], output: &mut [u8], qa: i16) {
+    fn activate_i32_to_u8(input: &[i32], output: &mut [u8]) {
         debug_assert_eq!(input.len(), output.len());
-        screlu_i32_to_u8(input, output, qa);
+        screlu_i32_to_u8(input, output);
     }
 
     fn header_suffix() -> &'static str {
@@ -400,16 +402,22 @@ fn screlu_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16) {
 }
 
 /// SCReLU: i32 → u8
-fn screlu_i32_to_u8(input: &[i32], output: &mut [u8], qa: i16) {
+///
+/// 中間層では固定のスケーリングを使用。
+/// - クランプ: 0-127（FT層のQAに関係なく固定）
+/// - スケーリング: clamped² / QB（QB=64）
+///
+/// 参考: bullet-shogi の L1 以降の実装と同様
+fn screlu_i32_to_u8(input: &[i32], output: &mut [u8]) {
+    use super::constants::SCRELU_QB;
     debug_assert_eq!(input.len(), output.len(), "input and output must have same length");
-    let (qa_i32, shift) = if qa >= 255 { (255i32, 9) } else { (127i32, 7) };
 
     // スカラー実装（SIMD最適化は必要に応じて追加）
     for (i, &v) in input.iter().enumerate() {
         let shifted = v >> WEIGHT_SCALE_BITS;
-        let clamped = shifted.clamp(0, qa_i32);
+        let clamped = shifted.clamp(0, 127);
         let squared = clamped * clamped;
-        output[i] = (squared >> shift).min(127) as u8;
+        output[i] = (squared / SCRELU_QB).min(127) as u8;
     }
 }
 
@@ -462,7 +470,7 @@ mod tests {
         let input = [0i32, 64, 128, 8192, -64, 64 * 100];
         let mut output = [0u8; 6];
 
-        CReLU::activate_i32_to_u8(&input, &mut output, 127);
+        CReLU::activate_i32_to_u8(&input, &mut output);
 
         assert_eq!(output[0], 0); // 0 >> 6 = 0
         assert_eq!(output[1], 1); // 64 >> 6 = 1
