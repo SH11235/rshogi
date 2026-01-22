@@ -53,7 +53,8 @@ export interface PositionState {
 
 export interface LastMove {
     from?: Square | null;
-    to: Square;
+    /** 移動先（パス手の場合は undefined） */
+    to?: Square;
     dropPiece?: PieceType;
     promotes?: boolean;
     /** パス手の場合 true */
@@ -281,8 +282,8 @@ export function applyMoveWithState(
             sente: currentTurn === "sente" ? state.passRights.sente - 1 : state.passRights.sente,
             gote: currentTurn === "gote" ? state.passRights.gote - 1 : state.passRights.gote,
         };
-        // パス手のlastMoveを作成（toは不要だが型の都合上ダミー値を設定）
-        lastMove = { isPass: true, to: "5e" as Square };
+        // パス手のlastMove（移動先なし）
+        lastMove = { isPass: true };
         return {
             ok: true,
             next: {

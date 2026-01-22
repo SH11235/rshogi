@@ -789,6 +789,20 @@ export function ShogiMatch({
             // 対局開始時に編集モードを終了
             setIsEditMode(false);
         }
+
+        // パス権が有効な場合、対局開始時に初期化
+        if (passRightsSettings?.enabled && !positionRef.current.passRights) {
+            const updatedPosition = {
+                ...positionRef.current,
+                passRights: {
+                    sente: passRightsSettings.initialCount,
+                    gote: passRightsSettings.initialCount,
+                },
+            };
+            setPosition(updatedPosition);
+            positionRef.current = updatedPosition;
+        }
+
         // 盤面セクションにスクロール
         setTimeout(() => {
             boardSectionRef.current?.scrollIntoView({
