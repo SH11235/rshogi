@@ -1208,14 +1208,10 @@ fn main() -> Result<()> {
 
     // USIオプションからパス権情報を早期に解析（load_start_positions で使用するため）
     let common_usi_opts_early = cli.usi_options.clone().unwrap_or_default();
-    let black_usi_opts_early = cli
-        .usi_options_black
-        .clone()
-        .unwrap_or_else(|| common_usi_opts_early.clone());
-    let white_usi_opts_early = cli
-        .usi_options_white
-        .clone()
-        .unwrap_or_else(|| common_usi_opts_early.clone());
+    let black_usi_opts_early =
+        cli.usi_options_black.clone().unwrap_or_else(|| common_usi_opts_early.clone());
+    let white_usi_opts_early =
+        cli.usi_options_white.clone().unwrap_or_else(|| common_usi_opts_early.clone());
     let pass_rights_via_usi_early = black_usi_opts_early
         .iter()
         .any(|o| o == "PassRights=true" || o == "PassRights = true")
