@@ -318,6 +318,7 @@ impl FtActivation for PairwiseCReLU {
 /// PairwiseCReLU: i16 → u8
 fn pairwise_crelu_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16) {
     let half = input.len() / 2;
+    debug_assert_eq!(output.len(), half, "output length must be half of input length");
     let (qa_i32, shift) = if qa >= 255 { (255i32, 9) } else { (127i32, 7) };
 
     // TODO: SIMD最適化
@@ -331,6 +332,7 @@ fn pairwise_crelu_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16) {
 /// PairwiseCReLU: i32 → u8
 fn pairwise_crelu_i32_to_u8(input: &[i32], output: &mut [u8]) {
     let half = input.len() / 2;
+    debug_assert_eq!(output.len(), half, "output length must be half of input length");
 
     // TODO: SIMD最適化
     for j in 0..half {
@@ -386,6 +388,7 @@ const SCRELU_QB: i32 = 64;
 /// シフト量が qa に依存するため、SIMD 版は qa=127 と qa=255 で分岐して実装。
 /// 現時点ではシンプルなスカラー実装のみ。
 fn screlu_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16) {
+    debug_assert_eq!(input.len(), output.len(), "input and output must have same length");
     let qa_i32 = qa as i32;
     let shift = if qa >= 255 { 9 } else { 7 };
 
@@ -398,6 +401,7 @@ fn screlu_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16) {
 
 /// SCReLU: i32 → u8
 fn screlu_i32_to_u8(input: &[i32], output: &mut [u8]) {
+    debug_assert_eq!(input.len(), output.len(), "input and output must have same length");
     // スカラー実装（SIMD最適化は必要に応じて追加）
     for (i, &v) in input.iter().enumerate() {
         let shifted = v >> WEIGHT_SCALE_BITS;

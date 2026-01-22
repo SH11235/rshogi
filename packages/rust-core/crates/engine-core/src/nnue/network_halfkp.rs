@@ -661,12 +661,16 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKP<INPUT, OUTPU
     /// パディング済み入力次元（32の倍数）
     const PADDED_INPUT: usize = INPUT.div_ceil(32) * 32;
 
+    // SIMD最適化用の定数・メソッド（AVX2/SSSE3環境でのみコンパイル）
+    #[cfg(any(target_feature = "avx2", target_feature = "ssse3"))]
     /// チャンクサイズ（u8×4 = i32として読む単位）
     const CHUNK_SIZE: usize = 4;
 
+    #[cfg(any(target_feature = "avx2", target_feature = "ssse3"))]
     /// 入力チャンク数
     const NUM_INPUT_CHUNKS: usize = Self::PADDED_INPUT / Self::CHUNK_SIZE;
 
+    #[cfg(any(target_feature = "avx2", target_feature = "ssse3"))]
     /// スクランブル形式を使用するかどうか
     /// AVX2: OUTPUT % 8 == 0、SSSE3: OUTPUT % 4 == 0
     #[inline]
@@ -684,6 +688,7 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKP<INPUT, OUTPU
         }
     }
 
+    #[cfg(any(target_feature = "avx2", target_feature = "ssse3"))]
     /// 重みインデックスのスクランブル変換
     ///
     /// 元のレイアウト: weights[output][input]
@@ -966,6 +971,9 @@ pub struct NetworkHalfKP<
 impl<const L1: usize, const L1_INPUT: usize, const L2: usize, const L3: usize, A: FtActivation>
     NetworkHalfKP<L1, L1_INPUT, L2, L3, A>
 {
+    /// コンパイル時制約: L1_INPUT == L1 * 2
+    const _ASSERT_L1_INPUT: () = assert!(L1_INPUT == L1 * 2, "L1_INPUT must equal L1 * 2");
+
     /// ファイルから読み込み
     pub fn read<R: Read + Seek>(reader: &mut R) -> io::Result<Self> {
         // ヘッダを読み込み
