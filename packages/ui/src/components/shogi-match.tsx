@@ -35,7 +35,7 @@ import {
     type SideSetting,
 } from "./shogi-match/components/MatchSettingsPanel";
 import { MoveDetailPanel } from "./shogi-match/components/MoveDetailPanel";
-import { PassButton } from "./shogi-match/components/PassButton";
+import { PassButton, type PassDisabledReason } from "./shogi-match/components/PassButton";
 import { PassRightsDisplay } from "./shogi-match/components/PassRightsDisplay";
 import { PvPreviewDialog } from "./shogi-match/components/PvPreviewDialog";
 import { SettingsModal } from "./shogi-match/components/SettingsModal";
@@ -472,6 +472,24 @@ export function ShogiMatch({
         legalCache.clear();
         setCanPassLegal(false);
     }, [legalCache]);
+    const ensurePassRightsInitialized = useCallback(() => {
+        if (!passRightsSettings?.enabled) return null;
+        if (positionRef.current.passRights) return positionRef.current.passRights;
+        const rights = {
+            sente: passRightsSettings.initialCount,
+            gote: passRightsSettings.initialCount,
+        };
+        const updated = { ...positionRef.current, passRights: rights };
+        setPosition(updated);
+        positionRef.current = updated;
+        return rights;
+    }, [passRightsSettings]);
+    // 合法手取得用のパス権オプションを返す
+    // build_position（Rust側）はパス権を設定してからmovesを適用するため、
+    // 現在のパス権ではなく初期パス権を渡す必要がある（二重消費を防ぐため）
+    const getPassRightsOption = useCallback(() => {
+        return buildPassRightsOptionForLegalMoves(passRightsSettings, movesRef.current);
+    }, [passRightsSettings]);
     // movesRefをnavigationの変更に同期し、legalCacheをクリア
     useEffect(() => {
         movesRef.current = moves;
@@ -488,9 +506,36 @@ export function ShogiMatch({
         [setPassRightsSettings, clearLegalCache],
     );
 
+    const hasPassRights = position.passRights && position.passRights[position.turn] > 0;
+    // パス合法可否が計算済みか
+    const passLegalKnown = legalCache.isCached(moves.length);
     // パス可能かどうかの判定（合法手キャッシュに"pass"が含まれるかでのみ判定）
-    // 王手中は合法手に含まれないため、フォールバックは行わない
-    const canMakePassMove = isMatchRunning && sides[position.turn].role === "human" && canPassLegal;
+    // 判定前は楽観的に true とし、実際の適用時に再チェックする
+    const canMakePassMove =
+        isMatchRunning &&
+        sides[position.turn].role === "human" &&
+        !!hasPassRights &&
+        (passLegalKnown ? canPassLegal : true);
+    // ボタン表示可否（計算中でも表示するため判定は別で持つ）
+    // ボタンは常時表示（レイアウトシフト防止）。非活性理由はdisabledReasonで管理。
+    const shouldRenderPassButton =
+        passRightsSettings?.enabled &&
+        passRightsSettings.initialCount > 0 &&
+        !!position.passRights &&
+        !!position.passRights[position.turn];
+
+    // パス権が有効なら不足時に初期化しておく（編集開始局面などでpassRightsが未設定な場合に備える）
+    useEffect(() => {
+        if (!passRightsSettings?.enabled) return;
+        ensurePassRightsInitialized();
+    }, [ensurePassRightsInitialized, passRightsSettings?.enabled]);
+    const passButtonDisabledReason: PassDisabledReason | undefined = (() => {
+        if (!isMatchRunning) return "match-not-running";
+        if (sides[position.turn].role !== "human") return "not-your-turn";
+        if (!hasPassRights) return "no-rights";
+        if (passLegalKnown && !canPassLegal) return "in-check";
+        return undefined;
+    })();
 
     const matchEndedRef = useRef(false);
     const boardSectionRef = useRef<HTMLDivElement>(null);
@@ -524,6 +569,28 @@ export function ShogiMatch({
             matchEndedRef,
             onClockError: handleClockError,
         });
+
+    const getRemainingTimeMs = useCallback(
+        (side: Player) => {
+            const clock = clocksRef.current;
+            const state = clock[side];
+            if (!state) return 0;
+            const isTicking = clock.ticking === side;
+            const elapsed = isTicking ? Date.now() - clock.lastUpdatedAt : 0;
+            const mainLeft = Math.max(0, state.mainMs - elapsed);
+            const overMain = Math.max(0, elapsed - state.mainMs);
+            const byoyomiLeft =
+                state.mainMs === 0 && isTicking
+                    ? Math.max(0, state.byoyomiMs - elapsed)
+                    : Math.max(0, state.byoyomiMs - overMain);
+            return mainLeft + byoyomiLeft;
+        },
+        [clocksRef],
+    );
+    const shouldShowPassConfirm =
+        passButtonDisabledReason === undefined &&
+        getRemainingTimeMs(position.turn) <
+            (passRightsSettings?.confirmDialogThresholdMs ?? Infinity);
 
     // 対局前に timeSettings が変更されたら clocks を同期
     // （resetClocks は timeSettings に依存しているため、resetClocks の変更で検知可能）
@@ -741,15 +808,18 @@ export function ShogiMatch({
     const handlePassMove = useCallback(async () => {
         if (matchEndedRef.current) return;
         if (!passRightsSettings?.enabled) return;
+        const rights = positionRef.current.passRights ?? ensurePassRightsInitialized();
+        const hasRightsNow = rights ? rights[positionRef.current.turn] > 0 : false;
+        if (!hasRightsNow) {
+            setMessage({ text: "パス権がありません", type: "error" });
+            return;
+        }
 
         // 合法手をチェック（王手中はパスが合法手に含まれない）
         // エンジン側の can_pass() は王手中のパスを禁止しており、
         // パスが合法でない場合にloadPositionするとパニックするため、事前にチェック
         try {
-            const passRightsOption = buildPassRightsOptionForLegalMoves(
-                passRightsSettings,
-                movesRef.current,
-            );
+            const passRightsOption = getPassRightsOption();
             const resolver = fetchLegalMoves
                 ? () => fetchLegalMoves(startSfen, movesRef.current, passRightsOption)
                 : () =>
@@ -759,10 +829,15 @@ export function ShogiMatch({
                           passRightsOption,
                       );
             const ply = movesRef.current.length;
-            const legal = await legalCache.getOrResolve(ply, resolver);
+            let legal = await legalCache.getOrResolve(ply, resolver);
             if (!legal || !legal.has("pass")) {
-                setMessage({ text: "王手されているためパスできません", type: "error" });
-                return;
+                // パス権ありでも合法手に含まれない場合はキャッシュをクリアして再取得（パス権オプション漏れ対策）
+                clearLegalCache();
+                legal = await legalCache.getOrResolve(ply, resolver);
+                if (!legal || !legal.has("pass")) {
+                    setMessage({ text: "王手されているためパスできません", type: "error" });
+                    return;
+                }
             }
         } catch (error) {
             setMessage({ text: `合法手の取得に失敗しました: ${String(error)}`, type: "error" });
@@ -798,7 +873,9 @@ export function ShogiMatch({
     }, [
         fetchLegalMoves,
         clearLegalCache,
+        getPassRightsOption,
         legalCache,
+        ensurePassRightsInitialized,
         navigation,
         passRightsSettings,
         startSfen,
@@ -1084,10 +1161,7 @@ export function ShogiMatch({
     const getLegalSet = useCallback(async (): Promise<Set<string> | null> => {
         if (!positionReady) return null;
         const ply = movesRef.current.length;
-        const passRightsOption = buildPassRightsOptionForLegalMoves(
-            passRightsSettings,
-            movesRef.current,
-        );
+        const passRightsOption = getPassRightsOption();
         const resolver = async () => {
             if (fetchLegalMoves) {
                 return fetchLegalMoves(startSfen, movesRef.current, passRightsOption);
@@ -1103,7 +1177,7 @@ export function ShogiMatch({
             setCanPassLegal(result.has("pass"));
         }
         return result;
-    }, [positionReady, fetchLegalMoves, startSfen, legalCache, passRightsSettings]);
+    }, [positionReady, fetchLegalMoves, startSfen, legalCache, getPassRightsOption]);
 
     // パス可否判定のため、キャッシュ未作成時は合法手をプリフェッチ
     useEffect(() => {
@@ -1112,10 +1186,7 @@ export function ShogiMatch({
         const ply = movesRef.current.length;
         if (legalCache.isCached(ply)) return;
 
-        const passRightsOption = buildPassRightsOptionForLegalMoves(
-            passRightsSettings,
-            movesRef.current,
-        );
+        const passRightsOption = getPassRightsOption();
         const resolver = async () => {
             if (fetchLegalMoves) {
                 return fetchLegalMoves(startSfen, movesRef.current, passRightsOption);
@@ -1140,7 +1211,7 @@ export function ShogiMatch({
         fetchLegalMoves,
         isMatchRunning,
         legalCache,
-        passRightsSettings,
+        getPassRightsOption,
         position.turn,
         positionReady,
         sides,
@@ -2298,6 +2369,8 @@ export function ShogiMatch({
                     onPassRightsSettingsChange={handlePassRightsSettingsChange}
                     onPassMove={handlePassMove}
                     canPassMove={canMakePassMove}
+                    passMoveDisabledReason={passButtonDisabledReason}
+                    passMoveConfirmDialog={shouldShowPassConfirm}
                     // クロック表示
                     clocks={clocks}
                     // 表示設定
@@ -2501,15 +2574,16 @@ export function ShogiMatch({
                                                         />
                                                     </span>
                                                 </div>
-                                                {/* 人間の手番でパス可能な場合のみボタン表示 */}
-                                                {canMakePassMove && (
+                                                {/* 人間の手番かつパス権がある場合に表示（合法手判定中はdisabled表示） */}
+                                                {shouldRenderPassButton && (
                                                     <PassButton
-                                                        canPass={true}
+                                                        canPass={canMakePassMove}
+                                                        disabledReason={passButtonDisabledReason}
                                                         onPass={handlePassMove}
                                                         remainingPassRights={
                                                             position.passRights[position.turn]
                                                         }
-                                                        showConfirmDialog={true}
+                                                        showConfirmDialog={shouldShowPassConfirm}
                                                     />
                                                 )}
                                             </div>

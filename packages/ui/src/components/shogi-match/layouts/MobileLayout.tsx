@@ -12,7 +12,7 @@ import { type KifuMove, MobileKifuBar } from "../components/MobileKifuBar";
 import { MobileNavigation } from "../components/MobileNavigation";
 import { MobileSettingsSheet } from "../components/MobileSettingsSheet";
 import { MoveDetailBottomSheet } from "../components/MoveDetailBottomSheet";
-import { PassButton } from "../components/PassButton";
+import { PassButton, type PassDisabledReason } from "../components/PassButton";
 import { PassRightsDisplay } from "../components/PassRightsDisplay";
 import type { ClockSettings, TickState } from "../hooks/useClockManager";
 import type {
@@ -112,6 +112,10 @@ interface MobileLayoutProps {
     onPassMove?: () => void;
     /** パスが可能かどうか */
     canPassMove?: boolean;
+    /** パス不可理由（ツールチップ用） */
+    passMoveDisabledReason?: PassDisabledReason;
+    /** パス時に確認ダイアログを出すか */
+    passMoveConfirmDialog?: boolean;
 
     // クロック表示
     clocks: TickState;
@@ -207,6 +211,8 @@ export function MobileLayout({
     onPassRightsSettingsChange,
     onPassMove,
     canPassMove,
+    passMoveDisabledReason,
+    passMoveConfirmDialog,
     clocks,
     displaySettingsFull,
     onDisplaySettingsChange,
@@ -366,12 +372,13 @@ export function MobileLayout({
                                             />
                                         </span>
                                     </div>
-                                    {canPassMove && onPassMove && (
+                                    {onPassMove && (
                                         <PassButton
-                                            canPass={true}
+                                            canPass={canPassMove ?? false}
+                                            disabledReason={passMoveDisabledReason}
                                             onPass={onPassMove}
                                             remainingPassRights={position.passRights[position.turn]}
-                                            showConfirmDialog={true}
+                                            showConfirmDialog={passMoveConfirmDialog}
                                         />
                                     )}
                                 </div>

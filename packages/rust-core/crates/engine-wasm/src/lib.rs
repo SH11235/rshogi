@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::io::ErrorKind;
 
 use engine_core::eval::set_eval_hash_enabled;
-use engine_core::movegen::{generate_legal, MoveList};
+use engine_core::movegen::{generate_legal_with_pass, MoveList};
 use engine_core::nnue::init_nnue_from_bytes;
 use engine_core::position::{Position, SFEN_HIRATE};
 use engine_core::search::{LimitsType, Search, SearchInfo, SearchResult, SkillOptions};
@@ -464,7 +464,7 @@ pub fn wasm_get_legal_moves(
 
     let position = build_position(&sfen, &parsed_moves, pass_rights)?;
     let mut list = MoveList::new();
-    generate_legal(&position, &mut list);
+    generate_legal_with_pass(&position, &mut list);
     let legal_moves: Vec<String> = list.as_slice().iter().map(|mv| mv.to_usi()).collect();
 
     swb::to_value(&legal_moves).map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))

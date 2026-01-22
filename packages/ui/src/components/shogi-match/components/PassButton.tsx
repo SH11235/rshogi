@@ -23,12 +23,13 @@ import { Button } from "../../button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../../tooltip";
 
 /** パス不可の理由 */
-type PassDisabledReason =
+export type PassDisabledReason =
     | "in-check" // 王手されている
     | "no-rights" // パス権がない
     | "not-your-turn" // 自分の手番ではない
     | "disabled" // パス権機能が無効
-    | "match-not-running"; // 対局中でない
+    | "match-not-running" // 対局中でない
+    | "checking"; // 合法手判定中
 
 interface PassButtonProps {
     /** パス可能かどうか */
@@ -62,6 +63,8 @@ function getDisabledReasonMessage(reason?: PassDisabledReason): string {
             return "パス権機能が無効です";
         case "match-not-running":
             return "対局中ではありません";
+        case "checking":
+            return "合法手を確認しています";
         default:
             return "パスできません";
     }
@@ -140,7 +143,7 @@ export function PassButton({
                             パスすると手番が相手に移ります。
                         </AlertDialogDescription>
                     </AlertDialogHeader>
-                    <AlertDialogFooter>
+                    <AlertDialogFooter className="sm:justify-center gap-2">
                         <AlertDialogCancel>キャンセル</AlertDialogCancel>
                         <AlertDialogAction onClick={handleConfirm}>パスする</AlertDialogAction>
                     </AlertDialogFooter>

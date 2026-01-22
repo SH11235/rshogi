@@ -281,6 +281,33 @@ export function MatchSettingsPanel({
                                     </div>
                                 </label>
                             )}
+                            {passRightsSettings.enabled && (
+                                <label className={labelClassName}>
+                                    パス確認ダイアログしきい値（ms）
+                                    <div className="flex items-center gap-2">
+                                        <input
+                                            type="number"
+                                            min={0}
+                                            step={500}
+                                            value={passRightsSettings.confirmDialogThresholdMs}
+                                            onChange={(e) =>
+                                                onPassRightsSettingsChange({
+                                                    ...passRightsSettings,
+                                                    confirmDialogThresholdMs: Math.max(
+                                                        0,
+                                                        Number(e.target.value) || 0,
+                                                    ),
+                                                })
+                                            }
+                                            disabled={settingsLocked}
+                                            className="w-28 rounded border border-[hsl(var(--border,0_0%_86%))] bg-[hsl(var(--card,0_0%_100%))] px-2 py-1 text-sm"
+                                        />
+                                        <span className="text-xs text-muted-foreground">
+                                            0で即時、時間が多ければ確認
+                                        </span>
+                                    </div>
+                                </label>
+                            )}
                             <p className="text-xs text-muted-foreground/70">
                                 王手されていない時に手番をパスできます
                             </p>

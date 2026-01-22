@@ -351,6 +351,30 @@ export function MobileSettingsSheet({
                             </div>
                         </div>
                     )}
+                    {passRightsSettings.enabled && (
+                        <div className="flex items-center justify-between">
+                            <span className="text-sm text-muted-foreground">
+                                確認ダイアログしきい値(ms)
+                            </span>
+                            <input
+                                type="number"
+                                min={0}
+                                step={500}
+                                value={passRightsSettings.confirmDialogThresholdMs}
+                                onChange={(e) =>
+                                    onPassRightsSettingsChange({
+                                        ...passRightsSettings,
+                                        confirmDialogThresholdMs: Math.max(
+                                            0,
+                                            Number(e.target.value) || 0,
+                                        ),
+                                    })
+                                }
+                                disabled={settingsLocked}
+                                className="w-28 rounded border border-border bg-background px-2 py-1 text-sm"
+                            />
+                        </div>
+                    )}
                     <p className="text-xs text-muted-foreground">
                         王手されていない時に手番をパスできます
                     </p>
