@@ -65,8 +65,8 @@ pub use layer_stacks::{
 pub use layers::{AffineTransform, ClippedReLU};
 pub use network::{
     evaluate_dispatch, evaluate_layer_stacks, get_fv_scale_override, get_network, init_nnue,
-    init_nnue_from_bytes, is_halfka_1024_loaded, is_halfka_512_loaded, is_layer_stacks_loaded,
-    is_nnue_initialized, set_fv_scale_override, NNUENetwork,
+    init_nnue_from_bytes, is_halfka_1024_loaded, is_halfka_256_loaded, is_halfka_512_loaded,
+    is_layer_stacks_loaded, is_nnue_initialized, set_fv_scale_override, NNUENetwork,
 };
 pub use network_layer_stacks::NetworkLayerStacks;
 
@@ -75,8 +75,8 @@ pub use activation::{detect_activation_from_arch, CReLU, FtActivation, PairwiseC
 pub use network_halfka::{
     AccumulatorEntryHalfKA, AccumulatorHalfKA, AccumulatorStackHalfKA, AffineTransformHalfKA,
     FeatureTransformerHalfKA, HalfKA1024CReLU, HalfKA1024Pairwise, HalfKA1024SCReLU,
-    HalfKA256CReLU, HalfKA256Pairwise, HalfKA256SCReLU, HalfKA512CReLU, HalfKA512Pairwise,
-    HalfKA512SCReLU, NetworkHalfKA,
+    HalfKA1024_8_32CReLU, HalfKA1024_8_32SCReLU, HalfKA256CReLU, HalfKA256Pairwise,
+    HalfKA256SCReLU, HalfKA512CReLU, HalfKA512Pairwise, HalfKA512SCReLU, NetworkHalfKA,
 };
 pub use network_halfkp::{
     AccumulatorEntryHalfKP, AccumulatorHalfKP, AccumulatorStackHalfKP, AffineTransformHalfKP,

@@ -11,8 +11,9 @@ use anyhow::{bail, Result};
 use clap::Parser;
 
 use engine_core::nnue::{
-    AccumulatorHalfKA, AccumulatorHalfKP, HalfKA1024CReLU, HalfKA1024SCReLU, HalfKA512CReLU,
-    HalfKA512SCReLU, HalfKP256CReLU, HalfKP256SCReLU, HalfKP512CReLU, HalfKP512SCReLU, NNUENetwork,
+    AccumulatorHalfKA, AccumulatorHalfKP, HalfKA1024CReLU, HalfKA1024SCReLU, HalfKA1024_8_32CReLU,
+    HalfKA1024_8_32SCReLU, HalfKA256CReLU, HalfKA256SCReLU, HalfKA512CReLU, HalfKA512SCReLU,
+    HalfKP256CReLU, HalfKP256SCReLU, HalfKP512CReLU, HalfKP512SCReLU, NNUENetwork,
 };
 use engine_core::position::Position;
 
@@ -292,6 +293,114 @@ fn bench_halfkp512_screlu(
     }
 }
 
+/// HalfKA256 (256x2-32-32) CReLU のベンチマーク
+fn bench_halfka256_crelu(
+    network: &HalfKA256CReLU,
+    positions: &[Position],
+    warmup: u64,
+    iterations: u64,
+) -> BenchResult {
+    // ウォームアップ
+    let mut acc = AccumulatorHalfKA::<256>::default();
+    for i in 0..warmup {
+        let pos = &positions[i as usize % positions.len()];
+        network.refresh_accumulator(pos, &mut acc);
+        black_box(network.evaluate(pos, &acc));
+    }
+
+    // refresh_accumulator ベンチマーク
+    let start = Instant::now();
+    for i in 0..iterations {
+        let pos = &positions[i as usize % positions.len()];
+        network.refresh_accumulator(pos, &mut acc);
+    }
+    let refresh_duration = start.elapsed();
+
+    // evaluate ベンチマーク
+    network.refresh_accumulator(&positions[0], &mut acc);
+    let start = Instant::now();
+    for i in 0..iterations {
+        let pos = &positions[i as usize % positions.len()];
+        black_box(network.evaluate(pos, &acc));
+    }
+    let eval_duration = start.elapsed();
+
+    // 結合ベンチマーク
+    let start = Instant::now();
+    for i in 0..iterations {
+        let pos = &positions[i as usize % positions.len()];
+        network.refresh_accumulator(pos, &mut acc);
+        black_box(network.evaluate(pos, &acc));
+    }
+    let total_duration = start.elapsed();
+
+    let refresh_ns = refresh_duration.as_nanos() as f64 / iterations as f64;
+    let eval_ns = eval_duration.as_nanos() as f64 / iterations as f64;
+    let total_ns = total_duration.as_nanos() as f64 / iterations as f64;
+
+    BenchResult {
+        arch_name: "HalfKA256 256x2-32-32 CReLU (const generics)".to_string(),
+        refresh_ns_per_op: refresh_ns,
+        eval_ns_per_op: eval_ns,
+        total_ns_per_op: total_ns,
+        evals_per_sec: 1_000_000_000.0 / total_ns,
+    }
+}
+
+/// HalfKA256 (256x2-32-32) SCReLU のベンチマーク
+fn bench_halfka256_screlu(
+    network: &HalfKA256SCReLU,
+    positions: &[Position],
+    warmup: u64,
+    iterations: u64,
+) -> BenchResult {
+    // ウォームアップ
+    let mut acc = AccumulatorHalfKA::<256>::default();
+    for i in 0..warmup {
+        let pos = &positions[i as usize % positions.len()];
+        network.refresh_accumulator(pos, &mut acc);
+        black_box(network.evaluate(pos, &acc));
+    }
+
+    // refresh_accumulator ベンチマーク
+    let start = Instant::now();
+    for i in 0..iterations {
+        let pos = &positions[i as usize % positions.len()];
+        network.refresh_accumulator(pos, &mut acc);
+    }
+    let refresh_duration = start.elapsed();
+
+    // evaluate ベンチマーク
+    network.refresh_accumulator(&positions[0], &mut acc);
+    let start = Instant::now();
+    for i in 0..iterations {
+        let pos = &positions[i as usize % positions.len()];
+        black_box(network.evaluate(pos, &acc));
+    }
+    let eval_duration = start.elapsed();
+
+    // 結合ベンチマーク
+    let start = Instant::now();
+    for i in 0..iterations {
+        let pos = &positions[i as usize % positions.len()];
+        network.refresh_accumulator(pos, &mut acc);
+        black_box(network.evaluate(pos, &acc));
+    }
+    let total_duration = start.elapsed();
+
+    let refresh_ns = refresh_duration.as_nanos() as f64 / iterations as f64;
+    let eval_ns = eval_duration.as_nanos() as f64 / iterations as f64;
+    let total_ns = total_duration.as_nanos() as f64 / iterations as f64;
+
+    BenchResult {
+        arch_name: "HalfKA256 256x2-32-32 SCReLU (const generics)".to_string(),
+        refresh_ns_per_op: refresh_ns,
+        eval_ns_per_op: eval_ns,
+        total_ns_per_op: total_ns,
+        evals_per_sec: 1_000_000_000.0 / total_ns,
+    }
+}
+
 /// HalfKA512 (512x2-8-96) CReLU のベンチマーク
 fn bench_halfka512_crelu(
     network: &HalfKA512CReLU,
@@ -508,6 +617,114 @@ fn bench_halfka1024_screlu(
     }
 }
 
+/// HalfKA1024_8_32 (1024x2-8-32) CReLU のベンチマーク
+fn bench_halfka1024_8_32_crelu(
+    network: &HalfKA1024_8_32CReLU,
+    positions: &[Position],
+    warmup: u64,
+    iterations: u64,
+) -> BenchResult {
+    // ウォームアップ
+    let mut acc = AccumulatorHalfKA::<1024>::default();
+    for i in 0..warmup {
+        let pos = &positions[i as usize % positions.len()];
+        network.refresh_accumulator(pos, &mut acc);
+        black_box(network.evaluate(pos, &acc));
+    }
+
+    // refresh_accumulator ベンチマーク
+    let start = Instant::now();
+    for i in 0..iterations {
+        let pos = &positions[i as usize % positions.len()];
+        network.refresh_accumulator(pos, &mut acc);
+    }
+    let refresh_duration = start.elapsed();
+
+    // evaluate ベンチマーク
+    network.refresh_accumulator(&positions[0], &mut acc);
+    let start = Instant::now();
+    for i in 0..iterations {
+        let pos = &positions[i as usize % positions.len()];
+        black_box(network.evaluate(pos, &acc));
+    }
+    let eval_duration = start.elapsed();
+
+    // 結合ベンチマーク
+    let start = Instant::now();
+    for i in 0..iterations {
+        let pos = &positions[i as usize % positions.len()];
+        network.refresh_accumulator(pos, &mut acc);
+        black_box(network.evaluate(pos, &acc));
+    }
+    let total_duration = start.elapsed();
+
+    let refresh_ns = refresh_duration.as_nanos() as f64 / iterations as f64;
+    let eval_ns = eval_duration.as_nanos() as f64 / iterations as f64;
+    let total_ns = total_duration.as_nanos() as f64 / iterations as f64;
+
+    BenchResult {
+        arch_name: "HalfKA1024_8_32 1024x2-8-32 CReLU (const generics)".to_string(),
+        refresh_ns_per_op: refresh_ns,
+        eval_ns_per_op: eval_ns,
+        total_ns_per_op: total_ns,
+        evals_per_sec: 1_000_000_000.0 / total_ns,
+    }
+}
+
+/// HalfKA1024_8_32 (1024x2-8-32) SCReLU のベンチマーク
+fn bench_halfka1024_8_32_screlu(
+    network: &HalfKA1024_8_32SCReLU,
+    positions: &[Position],
+    warmup: u64,
+    iterations: u64,
+) -> BenchResult {
+    // ウォームアップ
+    let mut acc = AccumulatorHalfKA::<1024>::default();
+    for i in 0..warmup {
+        let pos = &positions[i as usize % positions.len()];
+        network.refresh_accumulator(pos, &mut acc);
+        black_box(network.evaluate(pos, &acc));
+    }
+
+    // refresh_accumulator ベンチマーク
+    let start = Instant::now();
+    for i in 0..iterations {
+        let pos = &positions[i as usize % positions.len()];
+        network.refresh_accumulator(pos, &mut acc);
+    }
+    let refresh_duration = start.elapsed();
+
+    // evaluate ベンチマーク
+    network.refresh_accumulator(&positions[0], &mut acc);
+    let start = Instant::now();
+    for i in 0..iterations {
+        let pos = &positions[i as usize % positions.len()];
+        black_box(network.evaluate(pos, &acc));
+    }
+    let eval_duration = start.elapsed();
+
+    // 結合ベンチマーク
+    let start = Instant::now();
+    for i in 0..iterations {
+        let pos = &positions[i as usize % positions.len()];
+        network.refresh_accumulator(pos, &mut acc);
+        black_box(network.evaluate(pos, &acc));
+    }
+    let total_duration = start.elapsed();
+
+    let refresh_ns = refresh_duration.as_nanos() as f64 / iterations as f64;
+    let eval_ns = eval_duration.as_nanos() as f64 / iterations as f64;
+    let total_ns = total_duration.as_nanos() as f64 / iterations as f64;
+
+    BenchResult {
+        arch_name: "HalfKA1024_8_32 1024x2-8-32 SCReLU (const generics)".to_string(),
+        refresh_ns_per_op: refresh_ns,
+        eval_ns_per_op: eval_ns,
+        total_ns_per_op: total_ns,
+        evals_per_sec: 1_000_000_000.0 / total_ns,
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -544,6 +761,12 @@ fn main() -> Result<()> {
         NNUENetwork::HalfKP512SCReLU(net) => {
             bench_halfkp512_screlu(&net, &positions, cli.warmup, cli.iterations)
         }
+        NNUENetwork::HalfKA256CReLU(net) => {
+            bench_halfka256_crelu(&net, &positions, cli.warmup, cli.iterations)
+        }
+        NNUENetwork::HalfKA256SCReLU(net) => {
+            bench_halfka256_screlu(&net, &positions, cli.warmup, cli.iterations)
+        }
         NNUENetwork::HalfKA512CReLU(net) => {
             bench_halfka512_crelu(&net, &positions, cli.warmup, cli.iterations)
         }
@@ -555,6 +778,12 @@ fn main() -> Result<()> {
         }
         NNUENetwork::HalfKA1024SCReLU(net) => {
             bench_halfka1024_screlu(&net, &positions, cli.warmup, cli.iterations)
+        }
+        NNUENetwork::HalfKA1024_8_32CReLU(net) => {
+            bench_halfka1024_8_32_crelu(&net, &positions, cli.warmup, cli.iterations)
+        }
+        NNUENetwork::HalfKA1024_8_32SCReLU(net) => {
+            bench_halfka1024_8_32_screlu(&net, &positions, cli.warmup, cli.iterations)
         }
         NNUENetwork::LayerStacks(_) => {
             bail!("LayerStacks benchmark not implemented yet");

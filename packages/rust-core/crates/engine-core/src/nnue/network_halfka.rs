@@ -1063,7 +1063,7 @@ impl<const L1: usize, const L1_INPUT: usize, const L2: usize, const L3: usize, A
 
         // 活性化関数適用 (i32 → u8) - 64バイトアライン
         let mut l1_relu = Aligned([0u8; L2]);
-        A::activate_i32_to_u8(&l1_out.0, &mut l1_relu.0, self.qa);
+        A::activate_i32_to_u8(&l1_out.0, &mut l1_relu.0);
 
         // l2 層 - 64バイトアライン
         let mut l2_out = Aligned([0i32; L3]);
@@ -1084,7 +1084,7 @@ impl<const L1: usize, const L1_INPUT: usize, const L2: usize, const L3: usize, A
 
         // 活性化関数適用 (i32 → u8) - 64バイトアライン
         let mut l2_relu = Aligned([0u8; L3]);
-        A::activate_i32_to_u8(&l2_out.0, &mut l2_relu.0, self.qa);
+        A::activate_i32_to_u8(&l2_out.0, &mut l2_relu.0);
 
         // output 層
         let mut output = [0i32; 1];
@@ -1175,6 +1175,12 @@ pub type HalfKA1024CReLU = NetworkHalfKA<1024, 2048, 8, 96, CReLU>;
 pub type HalfKA1024SCReLU = NetworkHalfKA<1024, 2048, 8, 96, SCReLU>;
 /// HalfKA 1024x2-8-96 PairwiseCReLU
 pub type HalfKA1024Pairwise = NetworkHalfKA<1024, 2048, 8, 96, PairwiseCReLU>;
+
+// L1=1024, L2=8, L3=32
+/// HalfKA 1024x2-8-32 CReLU
+pub type HalfKA1024_8_32CReLU = NetworkHalfKA<1024, 2048, 8, 32, CReLU>;
+/// HalfKA 1024x2-8-32 SCReLU
+pub type HalfKA1024_8_32SCReLU = NetworkHalfKA<1024, 2048, 8, 32, SCReLU>;
 
 // =============================================================================
 // テスト

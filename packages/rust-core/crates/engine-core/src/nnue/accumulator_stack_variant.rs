@@ -17,10 +17,12 @@ use super::network_halfkp::AccumulatorStackHalfKP;
 ///
 /// すべて const generics 版の実装を使用:
 ///
-/// - **HalfKP256**: 256x2-32-32（水匠/tanuki互換、レガシーNNUE）
-/// - **HalfKP512**: 512x2-8-96（大規模HalfKP）
-/// - **HalfKA512**: 512x2-8-96（nnue-pytorch/bullet-shogi互換）
-/// - **HalfKA1024**: 1024x2-8-96（大規模HalfKA）
+/// - **HalfKP256**: 256x2-32-32（水匠5互換、レガシーNNUE）
+/// - **HalfKP512**: 512x2-8-96
+/// - **HalfKA256**: 256x2-32-32
+/// - **HalfKA512**: 512x2-8-96
+/// - **HalfKA1024**: 1024x2-8-96
+/// - **HalfKA1024_8_32**: 1024x2-8-32
 /// - **LayerStacks**: 1536次元 + 9バケット（最新アーキテクチャ）
 pub enum AccumulatorStackVariant {
     /// HalfKP 256x2-32-32 (const generics版)
@@ -29,10 +31,14 @@ pub enum AccumulatorStackVariant {
     HalfKP512(AccumulatorStackHalfKP<512>),
     /// LayerStacks（1536次元 + 9バケット）
     LayerStacks(AccumulatorStackLayerStacks),
+    /// HalfKA_hm^ 256x2-32-32 (const generics版)
+    HalfKA256(AccumulatorStackHalfKA<256>),
     /// HalfKA_hm^ 512x2-8-96 (const generics版)
     HalfKA512(AccumulatorStackHalfKA<512>),
     /// HalfKA_hm^ 1024x2-8-96 (const generics版)
     HalfKA1024(AccumulatorStackHalfKA<1024>),
+    /// HalfKA_hm^ 1024x2-8-32 (const generics版)
+    HalfKA1024_8_32(AccumulatorStackHalfKA<1024>),
 }
 
 impl AccumulatorStackVariant {
@@ -48,11 +54,17 @@ impl AccumulatorStackVariant {
                 Self::HalfKP512(AccumulatorStackHalfKP::<512>::new())
             }
             NNUENetwork::LayerStacks(_) => Self::LayerStacks(AccumulatorStackLayerStacks::new()),
+            NNUENetwork::HalfKA256CReLU(_) | NNUENetwork::HalfKA256SCReLU(_) => {
+                Self::HalfKA256(AccumulatorStackHalfKA::<256>::new())
+            }
             NNUENetwork::HalfKA512CReLU(_) | NNUENetwork::HalfKA512SCReLU(_) => {
                 Self::HalfKA512(AccumulatorStackHalfKA::<512>::new())
             }
             NNUENetwork::HalfKA1024CReLU(_) | NNUENetwork::HalfKA1024SCReLU(_) => {
                 Self::HalfKA1024(AccumulatorStackHalfKA::<1024>::new())
+            }
+            NNUENetwork::HalfKA1024_8_32CReLU(_) | NNUENetwork::HalfKA1024_8_32SCReLU(_) => {
+                Self::HalfKA1024_8_32(AccumulatorStackHalfKA::<1024>::new())
             }
         }
     }
@@ -80,12 +92,20 @@ impl AccumulatorStackVariant {
             ) => true,
             (Self::LayerStacks(_), NNUENetwork::LayerStacks(_)) => true,
             (
+                Self::HalfKA256(_),
+                NNUENetwork::HalfKA256CReLU(_) | NNUENetwork::HalfKA256SCReLU(_),
+            ) => true,
+            (
                 Self::HalfKA512(_),
                 NNUENetwork::HalfKA512CReLU(_) | NNUENetwork::HalfKA512SCReLU(_),
             ) => true,
             (
                 Self::HalfKA1024(_),
                 NNUENetwork::HalfKA1024CReLU(_) | NNUENetwork::HalfKA1024SCReLU(_),
+            ) => true,
+            (
+                Self::HalfKA1024_8_32(_),
+                NNUENetwork::HalfKA1024_8_32CReLU(_) | NNUENetwork::HalfKA1024_8_32SCReLU(_),
             ) => true,
             // 将来バリアントを追加した場合、ここでコンパイラ警告が出る
             _ => false,
@@ -99,8 +119,10 @@ impl AccumulatorStackVariant {
             Self::HalfKP256(stack) => stack.reset(),
             Self::HalfKP512(stack) => stack.reset(),
             Self::LayerStacks(stack) => stack.reset(),
+            Self::HalfKA256(stack) => stack.reset(),
             Self::HalfKA512(stack) => stack.reset(),
             Self::HalfKA1024(stack) => stack.reset(),
+            Self::HalfKA1024_8_32(stack) => stack.reset(),
         }
     }
 
@@ -114,8 +136,10 @@ impl AccumulatorStackVariant {
                 stack.push();
                 stack.current_mut().dirty_piece = dirty_piece;
             }
+            Self::HalfKA256(stack) => stack.push(dirty_piece),
             Self::HalfKA512(stack) => stack.push(dirty_piece),
             Self::HalfKA1024(stack) => stack.push(dirty_piece),
+            Self::HalfKA1024_8_32(stack) => stack.push(dirty_piece),
         }
     }
 
@@ -126,8 +150,10 @@ impl AccumulatorStackVariant {
             Self::HalfKP256(stack) => stack.pop(),
             Self::HalfKP512(stack) => stack.pop(),
             Self::LayerStacks(stack) => stack.pop(),
+            Self::HalfKA256(stack) => stack.pop(),
             Self::HalfKA512(stack) => stack.pop(),
             Self::HalfKA1024(stack) => stack.pop(),
+            Self::HalfKA1024_8_32(stack) => stack.pop(),
         }
     }
 
@@ -154,8 +180,10 @@ mod tests {
         assert!(stack.is_halfkp());
         assert!(matches!(stack, AccumulatorStackVariant::HalfKP256(_)));
         assert!(!matches!(stack, AccumulatorStackVariant::LayerStacks(_)));
+        assert!(!matches!(stack, AccumulatorStackVariant::HalfKA256(_)));
         assert!(!matches!(stack, AccumulatorStackVariant::HalfKA512(_)));
         assert!(!matches!(stack, AccumulatorStackVariant::HalfKA1024(_)));
+        assert!(!matches!(stack, AccumulatorStackVariant::HalfKA1024_8_32(_)));
     }
 
     #[test]
