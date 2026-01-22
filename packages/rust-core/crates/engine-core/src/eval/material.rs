@@ -633,15 +633,13 @@ pub fn evaluate_material(pos: &Position) -> Value {
         }
     };
 
-    let base = if pos.side_to_move() == Color::Black {
+    // 手番側視点の評価値を返す
+    // 注意: パス権評価は探索側で動的に追加される（キャッシュ互換性のため）
+    if pos.side_to_move() == Color::Black {
         Value::new(raw)
     } else {
         Value::new(-raw)
-    };
-
-    // パス権評価を追加（手番側視点で返される）
-    let pass_eval = evaluate_pass_rights(pos, pos.game_ply() as u16);
-    base + pass_eval
+    }
 }
 
 #[cfg(test)]
@@ -779,6 +777,8 @@ mod tests {
         assert_eq!(pass_right_value_by_ply(200), 150, "Both should be 150");
 
         // --- Part 3: パス後の評価値テスト ---
+        // 注意: evaluate_materialはパス権評価を含まない（キャッシュ互換性のため）
+        // パス権評価は探索側で動的に追加される
         set_material_level(MaterialLevel::Lv9);
         set_pass_right_value_phased(200, 50); // Early=200, Late=50
 
@@ -795,17 +795,26 @@ mod tests {
         assert_eq!(pos.pass_rights(Color::Black), 1);
         assert_eq!(pos.pass_rights(Color::White), 2);
 
-        let eval2 = evaluate_material(&pos);
+        let material_eval = evaluate_material(&pos);
         let pass_eval2 = evaluate_pass_rights(&pos, pos.game_ply() as u16);
 
         // 白視点: 白2 - 黒1 = +1 → +200cp
         assert_eq!(pass_eval2.raw(), 200, "White should have +200cp pass rights advantage");
 
-        // Negamaxスコア: 黒視点では負の値になるはず
-        let negamax_pass_score = -eval2.raw();
+        // evaluate_materialは駒価値のみを返す（初形なので0に近い）
+        // パス権評価は別途探索側で追加される
+        assert_eq!(
+            material_eval.raw(), 0,
+            "Material eval should be 0 for starting position (pass rights added separately)"
+        );
+
+        // 合計評価値（探索で使う形式）を計算
+        let combined_eval = material_eval + pass_eval2;
+        // 白視点で+200cpなので、negamax（黒視点）では-200cp
+        let negamax_combined = -combined_eval.raw();
         assert!(
-            negamax_pass_score < 0,
-            "Negamax score for pass should be negative: got {negamax_pass_score}"
+            negamax_combined < 0,
+            "Negamax combined score should be negative: got {negamax_combined}"
         );
 
         // 設定を復元
