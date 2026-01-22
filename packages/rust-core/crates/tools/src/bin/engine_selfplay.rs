@@ -1312,8 +1312,18 @@ fn main() -> Result<()> {
         (false, Some(path)) => Some(path.clone()),
         (false, None) => Some(default_training_data_path(&output_path)),
     };
+    // パス権有効時は学習データ収集を抑止（PackedSfen形式がパス権をサポートしていないため）
+    let pass_rights_active = pass_rights_cli_specified || pass_rights_via_usi_early;
     let mut training_data_collector = if let Some(ref path) = training_data_path {
-        Some(TrainingDataCollector::new(path, cli.skip_initial_ply, cli.skip_in_check)?)
+        if pass_rights_active {
+            eprintln!(
+                "Warning: Training data collection is disabled when pass rights are enabled \
+                 (PackedSfen format does not support pass rights)"
+            );
+            None
+        } else {
+            Some(TrainingDataCollector::new(path, cli.skip_initial_ply, cli.skip_in_check)?)
+        }
     } else {
         None
     };

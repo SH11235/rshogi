@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::eval::{evaluate_pass_rights, get_scaled_pass_move_bonus, EvalHash};
 use crate::nnue::{
-    evaluate_dispatch, get_network, is_nnue_initialized, AccumulatorStackVariant, DirtyPiece,
+    evaluate_dispatch, get_network, AccumulatorStackVariant, DirtyPiece,
 };
 use crate::position::Position;
 use crate::search::PieceToHistory;
@@ -452,14 +452,10 @@ impl SearchWorker {
     #[inline]
     fn nnue_evaluate(&mut self, pos: &Position) -> Value {
         let base = evaluate_dispatch(pos, &mut self.nnue_stack);
-        // NNUEがロードされている場合のみパス権評価を追加
-        // （evaluate_material へのフォールバック時は既にパス権評価が含まれている）
-        if is_nnue_initialized() {
-            let pass_eval = evaluate_pass_rights(pos, pos.game_ply() as u16);
-            base + pass_eval
-        } else {
-            base
-        }
+        // パス権評価は常に探索側で追加（キャッシュには含めない）
+        // これにより、手数依存の評価がキャッシュと不整合を起こすことを防ぐ
+        let pass_eval = evaluate_pass_rights(pos, pos.game_ply() as u16);
+        base + pass_eval
     }
 
     /// NNUE アキュムレータスタックを push
