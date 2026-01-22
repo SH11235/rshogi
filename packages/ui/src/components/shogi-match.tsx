@@ -483,6 +483,17 @@ export function ShogiMatch({
         },
         [setPassRightsSettings, legalCache],
     );
+
+    // パス可能かどうかの判定
+    // 合法手キャッシュがあれば"pass"が含まれるかで判定（王手中はpassが合法手に含まれない）
+    // キャッシュがなければcanPass()でフォールバック（handlePassMoveで再チェックされる）
+    const canMakePassMove =
+        isMatchRunning &&
+        sides[position.turn].role === "human" &&
+        (legalCache.isCached(moves.length)
+            ? (legalCache.getCached()?.has("pass") ?? false)
+            : canPass(position));
+
     const matchEndedRef = useRef(false);
     const boardSectionRef = useRef<HTMLDivElement>(null);
     const settingsLocked = isMatchRunning;
@@ -2241,9 +2252,7 @@ export function ShogiMatch({
                     passRightsSettings={passRightsSettings}
                     onPassRightsSettingsChange={handlePassRightsSettingsChange}
                     onPassMove={handlePassMove}
-                    canPassMove={
-                        isMatchRunning && sides[position.turn].role === "human" && canPass(position)
-                    }
+                    canPassMove={canMakePassMove}
                     // クロック表示
                     clocks={clocks}
                     // 表示設定
@@ -2448,18 +2457,16 @@ export function ShogiMatch({
                                                     </span>
                                                 </div>
                                                 {/* 人間の手番でパス可能な場合のみボタン表示 */}
-                                                {isMatchRunning &&
-                                                    sides[position.turn].role === "human" &&
-                                                    canPass(position) && (
-                                                        <PassButton
-                                                            canPass={true}
-                                                            onPass={handlePassMove}
-                                                            remainingPassRights={
-                                                                position.passRights[position.turn]
-                                                            }
-                                                            showConfirmDialog={true}
-                                                        />
-                                                    )}
+                                                {canMakePassMove && (
+                                                    <PassButton
+                                                        canPass={true}
+                                                        onPass={handlePassMove}
+                                                        remainingPassRights={
+                                                            position.passRights[position.turn]
+                                                        }
+                                                        showConfirmDialog={true}
+                                                    />
+                                                )}
                                             </div>
                                         )}
 
