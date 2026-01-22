@@ -240,18 +240,22 @@ impl NNUENetwork {
                             // - bullet-shogi の新バージョンは l2/l3 フィールドを出力するため、
                             //   今後の新規ファイルでは問題なし
                             //
-                            // フォールバック順序: 8-32 → 8-96（ファイルサイズで判別）
+                            // フォールバック順序: 8-96 → 8-32
+                            // 理由: NetworkHalfKA::read はEOF検証を行わないため、大きい方を
+                            // 先に試す必要がある。8-32 を先に試すと、8-96 ファイルでも途中まで
+                            // 読み込んで成功してしまい、誤った重みで評価が壊れる。
+                            // 8-96 を先に試せば、8-32 ファイルでは EOF エラーで失敗するため安全。
                             (1024, 0, 0, false) => {
-                                // まず小さい方（8-32）を試す
+                                // まず大きい方（8-96）を試す
                                 let start_pos = reader.stream_position()?;
-                                reader.seek(SeekFrom::Start(0))?;
-                                if let Ok(network) = HalfKA1024_8_32CReLU::read(reader) {
-                                    return Ok(Self::HalfKA1024_8_32CReLU(Box::new(network)));
-                                }
-                                // 失敗したら 8-96 を試す
                                 reader.seek(SeekFrom::Start(0))?;
                                 if let Ok(network) = HalfKA1024CReLU::read(reader) {
                                     return Ok(Self::HalfKA1024CReLU(Box::new(network)));
+                                }
+                                // 失敗したら 8-32 を試す
+                                reader.seek(SeekFrom::Start(0))?;
+                                if let Ok(network) = HalfKA1024_8_32CReLU::read(reader) {
+                                    return Ok(Self::HalfKA1024_8_32CReLU(Box::new(network)));
                                 }
                                 // 両方失敗
                                 reader.seek(SeekFrom::Start(start_pos))?;
@@ -259,22 +263,22 @@ impl NNUENetwork {
                                     io::ErrorKind::InvalidData,
                                     format!(
                                         "Failed to load HalfKA 1024x2 network: {arch_str}. \
-                                         Tried both 8-32 and 8-96 architectures."
+                                         Tried both 8-96 and 8-32 architectures."
                                     ),
                                 ))
                             }
                             // SCReLU版も同様のフォールバック（詳細は上記 CReLU 版のコメント参照）
                             (1024, 0, 0, true) => {
-                                // まず小さい方（8-32）を試す
+                                // まず大きい方（8-96）を試す
                                 let start_pos = reader.stream_position()?;
-                                reader.seek(SeekFrom::Start(0))?;
-                                if let Ok(network) = HalfKA1024_8_32SCReLU::read(reader) {
-                                    return Ok(Self::HalfKA1024_8_32SCReLU(Box::new(network)));
-                                }
-                                // 失敗したら 8-96 を試す
                                 reader.seek(SeekFrom::Start(0))?;
                                 if let Ok(network) = HalfKA1024SCReLU::read(reader) {
                                     return Ok(Self::HalfKA1024SCReLU(Box::new(network)));
+                                }
+                                // 失敗したら 8-32 を試す
+                                reader.seek(SeekFrom::Start(0))?;
+                                if let Ok(network) = HalfKA1024_8_32SCReLU::read(reader) {
+                                    return Ok(Self::HalfKA1024_8_32SCReLU(Box::new(network)));
                                 }
                                 // 両方失敗
                                 reader.seek(SeekFrom::Start(start_pos))?;
@@ -282,7 +286,7 @@ impl NNUENetwork {
                                     io::ErrorKind::InvalidData,
                                     format!(
                                         "Failed to load HalfKA 1024x2 SCReLU network: {arch_str}. \
-                                         Tried both 8-32 and 8-96 architectures."
+                                         Tried both 8-96 and 8-32 architectures."
                                     ),
                                 ))
                             }

@@ -339,7 +339,19 @@ fn pairwise_crelu_i16_to_u8_inner<const QA: i32, const SHIFT: i32>(
     output: &mut [u8],
     half: usize,
 ) {
-    let mut processed = 0;
+    // SIMD 有効環境: processed は SIMD 処理で更新される
+    #[cfg(any(
+        all(target_arch = "x86_64", target_feature = "avx2"),
+        all(target_arch = "x86_64", target_feature = "sse4.1")
+    ))]
+    let mut processed = 0usize;
+
+    // SIMD 無効環境: processed は常に 0（全要素をスカラー処理）
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_feature = "avx2"),
+        all(target_arch = "x86_64", target_feature = "sse4.1")
+    )))]
+    let processed = 0usize;
 
     // AVX2: 8要素ずつ処理（i16→i32拡張が必要なため）
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
@@ -444,7 +456,19 @@ fn pairwise_crelu_i32_to_u8(input: &[i32], output: &mut [u8]) {
     let half = input.len() / 2;
     debug_assert_eq!(output.len(), half, "output length must be half of input length");
 
-    let mut processed = 0;
+    // SIMD 有効環境: processed は SIMD 処理で更新される
+    #[cfg(any(
+        all(target_arch = "x86_64", target_feature = "avx2"),
+        all(target_arch = "x86_64", target_feature = "sse4.1")
+    ))]
+    let mut processed = 0usize;
+
+    // SIMD 無効環境: processed は常に 0（全要素をスカラー処理）
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_feature = "avx2"),
+        all(target_arch = "x86_64", target_feature = "sse4.1")
+    )))]
+    let processed = 0usize;
 
     // AVX2: 8要素ずつ処理
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
