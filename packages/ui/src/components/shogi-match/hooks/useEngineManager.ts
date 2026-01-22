@@ -107,7 +107,7 @@ function buildPassRightsOption(
         let gotePassCount = 0;
         let isSenteTurn = true; // 平手初期局面は先手番
         for (const move of moves) {
-            if (move === "pass") {
+            if (move.toLowerCase() === "pass") {
                 if (isSenteTurn) {
                     sentePassCount++;
                 } else {
