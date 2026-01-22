@@ -57,9 +57,17 @@ export const createWasmPositionService = (): PositionService => {
             return result as unknown as string[];
         },
 
-        async replayMovesStrict(sfen: string, moves: string[]): Promise<ReplayResult> {
+        async replayMovesStrict(
+            sfen: string,
+            moves: string[],
+            options?: { passRights?: { sente: number; gote: number } },
+        ): Promise<ReplayResult> {
             await ensureReady();
-            const result = wasm_replay_moves_strict(sfen, moves) as ReplayResultJson;
+            const result = wasm_replay_moves_strict(
+                sfen,
+                moves,
+                options?.passRights,
+            ) as ReplayResultJson;
             return {
                 applied: result.applied,
                 lastPly: result.last_ply,

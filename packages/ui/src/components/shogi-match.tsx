@@ -1756,7 +1756,7 @@ export function ShogiMatch({
                 throw new Error(result.error);
             }
         },
-        [navigation, resetClocks, legalCache],
+        [navigation, resetClocks, legalCache, passRightsSettings],
     );
 
     // KIFコピー用コールバック
