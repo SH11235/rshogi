@@ -1047,35 +1047,6 @@ impl<const DIM: usize> SCReLU<DIM> {
             output[i] = clamped * clamped;
         }
     }
-
-    /// i16入力版 SCReLU (FeatureTransformer直後用)
-    ///
-    /// Accumulator の i16 値を受け取り、SCReLU を適用して u8 を出力。
-    /// clamp(x, 0, 127)² >> 7 → u8 (0〜127)
-    #[inline]
-    pub fn propagate_i16_to_u8(input: &[i16; DIM], output: &mut [u8; DIM]) {
-        for i in 0..DIM {
-            let clamped = i32::from(input[i]).clamp(0, i32::from(Self::QA));
-            let squared = clamped * clamped;
-            output[i] = (squared >> 7).clamp(0, 127) as u8;
-        }
-    }
-
-    /// i32入力版 SCReLU (中間層用)
-    ///
-    /// AffineTransform の i32 出力を受け取り、SCReLU を適用して u8 を出力。
-    /// Stockfish 互換のスケーリング: x² >> (2 * WEIGHT_SCALE_BITS + 7) = x² >> 19
-    ///
-    /// 等価な計算: clamp(x >> 6, 0, 127)² >> 7
-    #[inline]
-    pub fn propagate_i32_to_u8(input: &[i32; DIM], output: &mut [u8; DIM]) {
-        for i in 0..DIM {
-            let shifted = input[i] >> 6; // WEIGHT_SCALE_BITS
-            let clamped = shifted.clamp(0, i32::from(Self::QA));
-            let squared = clamped * clamped;
-            output[i] = (squared >> 7).clamp(0, 127) as u8;
-        }
-    }
 }
 
 /// SCReLU (Squared Clipped ReLU) 動的サイズ版
