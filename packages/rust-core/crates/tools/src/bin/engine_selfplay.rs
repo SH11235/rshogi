@@ -1236,17 +1236,16 @@ fn main() -> Result<()> {
         .unwrap_or(2);
 
     // load_start_positions 用のパス権初期値
-    let load_pass_black = if cli.pass_rights_black.is_some() {
-        cli.pass_rights_black
-    } else if pass_rights_via_usi_early {
-        Some(usi_initial_pass_count_early)
+    // 片側だけCLIで指定された場合、未指定側はデフォルト値で補完
+    let pass_rights_cli_specified =
+        cli.pass_rights_black.is_some() || cli.pass_rights_white.is_some();
+    let load_pass_black = if pass_rights_cli_specified || pass_rights_via_usi_early {
+        Some(cli.pass_rights_black.unwrap_or(usi_initial_pass_count_early))
     } else {
         None
     };
-    let load_pass_white = if cli.pass_rights_white.is_some() {
-        cli.pass_rights_white
-    } else if pass_rights_via_usi_early {
-        Some(usi_initial_pass_count_early)
+    let load_pass_white = if pass_rights_cli_specified || pass_rights_via_usi_early {
+        Some(cli.pass_rights_white.unwrap_or(usi_initial_pass_count_early))
     } else {
         None
     };
