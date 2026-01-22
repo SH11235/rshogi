@@ -467,29 +467,30 @@ export function ShogiMatch({
 
     const movesRef = useRef<string[]>(moves);
     const legalCache = useMemo(() => new LegalMoveCache(), []);
+    const [canPassLegal, setCanPassLegal] = useState(false);
+    const clearLegalCache = useCallback(() => {
+        legalCache.clear();
+        setCanPassLegal(false);
+    }, [legalCache]);
     // movesRefをnavigationの変更に同期し、legalCacheをクリア
     useEffect(() => {
         movesRef.current = moves;
         // ナビゲーションで局面が変わったらキャッシュをクリア
-        legalCache.clear();
-    }, [moves, legalCache]);
+        clearLegalCache();
+    }, [moves, clearLegalCache]);
     // パス権設定変更時にキャッシュもクリアするラッパー
     // （合法手にpassが含まれるかどうかが変わるため）
     const handlePassRightsSettingsChange = useCallback(
         (newSettings: PassRightsSettings) => {
             setPassRightsSettings(newSettings);
-            legalCache.clear();
+            clearLegalCache();
         },
-        [setPassRightsSettings, legalCache],
+        [setPassRightsSettings, clearLegalCache],
     );
 
     // パス可能かどうかの判定（合法手キャッシュに"pass"が含まれるかでのみ判定）
     // 王手中は合法手に含まれないため、フォールバックは行わない
-    const canMakePassMove =
-        isMatchRunning &&
-        sides[position.turn].role === "human" &&
-        legalCache.isCached(moves.length) &&
-        (legalCache.getCached()?.has("pass") ?? false);
+    const canMakePassMove = isMatchRunning && sides[position.turn].role === "human" && canPassLegal;
 
     const matchEndedRef = useRef(false);
     const boardSectionRef = useRef<HTMLDivElement>(null);
@@ -726,12 +727,12 @@ export function ShogiMatch({
             setLastMove(result.lastMove);
             setSelection(null);
             setMessage(null);
-            legalCache.clear();
+            clearLegalCache();
             // ターン開始時刻をリセット
             turnStartTimeRef.current = Date.now();
             updateClocksForNextTurn(result.next.turn);
         },
-        [legalCache, logEngineError, navigation, updateClocksForNextTurn],
+        [clearLegalCache, logEngineError, navigation, updateClocksForNextTurn],
     );
     handleMoveFromEngineRef.current = handleMoveFromEngine;
 
@@ -789,13 +790,14 @@ export function ShogiMatch({
         setLastMove(result.lastMove);
         setSelection(null);
         setMessage(null);
-        legalCache.clear();
+        clearLegalCache();
 
         // ターン開始時刻をリセット
         turnStartTimeRef.current = Date.now();
         updateClocksForNextTurn(result.next.turn);
     }, [
         fetchLegalMoves,
+        clearLegalCache,
         legalCache,
         navigation,
         passRightsSettings,
@@ -956,7 +958,7 @@ export function ShogiMatch({
             const newSfen = await refreshStartSfen(current);
             navigation.reset(current, newSfen);
             movesRef.current = [];
-            legalCache.clear();
+            clearLegalCache();
             setIsEditMode(false);
             setMessage({
                 text: "局面を確定しました。対局開始でこの局面から進行します。",
@@ -983,13 +985,13 @@ export function ShogiMatch({
             setSelection(null);
             setMessage(null);
             setLastAddedBranchInfo(null);
-            legalCache.clear();
+            clearLegalCache();
             // 編集モードに移行
             setIsEditMode(true);
         } catch {
             setMessage({ text: "編集モードへの移行に失敗しました。", type: "error" });
         }
-    }, [isMatchRunning, navigation, legalCache, refreshStartSfen]);
+    }, [clearLegalCache, isMatchRunning, navigation, refreshStartSfen]);
 
     const applyMoveCommon = useCallback(
         (nextPosition: PositionState, mv: string, last?: LastMove) => {
@@ -1001,12 +1003,12 @@ export function ShogiMatch({
             setLastMove(last);
             setSelection(null);
             setMessage(null);
-            legalCache.clear();
+            clearLegalCache();
             // ターン開始時刻をリセット
             turnStartTimeRef.current = Date.now();
             updateClocksForNextTurn(nextPosition.turn);
         },
-        [legalCache, navigation, updateClocksForNextTurn],
+        [clearLegalCache, navigation, updateClocksForNextTurn],
     );
 
     /** 検討モードで手を適用（分岐作成、時計更新なし） */
@@ -1028,7 +1030,7 @@ export function ShogiMatch({
             setLastMove(last);
             setSelection(null);
             setMessage(null);
-            legalCache.clear();
+            clearLegalCache();
 
             // 分岐が作成された場合は記録（ネスト分岐も含む）
             if (willCreateBranch && currentNode) {
@@ -1036,7 +1038,7 @@ export function ShogiMatch({
                 setLastAddedBranchInfo({ ply: currentNode.ply, firstMove: mv });
             }
         },
-        [legalCache, navigation],
+        [clearLegalCache, navigation],
     );
 
     /** 平手初期局面にリセット */
@@ -1072,12 +1074,12 @@ export function ShogiMatch({
             setEditPromoted(false);
             setEditOwner("sente");
             setEditPieceType(null);
-            legalCache.clear();
+            clearLegalCache();
             turnStartTimeRef.current = Date.now();
         } catch (error) {
             setMessage({ text: `平手初期化に失敗しました: ${String(error)}`, type: "error" });
         }
-    }, [navigation, resetClocks, stopAllEngines, legalCache.clear]);
+    }, [clearLegalCache, navigation, resetClocks, stopAllEngines]);
 
     const getLegalSet = useCallback(async (): Promise<Set<string> | null> => {
         if (!positionReady) return null;
@@ -1096,7 +1098,11 @@ export function ShogiMatch({
                 passRightsOption,
             );
         };
-        return legalCache.getOrResolve(ply, resolver);
+        const result = await legalCache.getOrResolve(ply, resolver);
+        if (movesRef.current.length === ply) {
+            setCanPassLegal(result.has("pass"));
+        }
+        return result;
     }, [positionReady, fetchLegalMoves, startSfen, legalCache, passRightsSettings]);
 
     // パス可否判定のため、キャッシュ未作成時は合法手をプリフェッチ
@@ -1122,12 +1128,18 @@ export function ShogiMatch({
         };
 
         // エラーはパスボタンクリック時の再解決に委ねる
-        void legalCache.getOrResolve(ply, resolver).catch(() => undefined);
+        void legalCache
+            .getOrResolve(ply, resolver)
+            .then((result) => {
+                if (movesRef.current.length === ply) {
+                    setCanPassLegal(result.has("pass"));
+                }
+            })
+            .catch(() => undefined);
     }, [
         fetchLegalMoves,
         isMatchRunning,
         legalCache,
-        movesRef,
         passRightsSettings,
         position.turn,
         positionReady,
@@ -1163,7 +1175,7 @@ export function ShogiMatch({
                 setLastAddedBranchInfo(null); // 分岐状態をクリア
                 setEditFromSquare(null);
 
-                legalCache.clear();
+                clearLegalCache();
                 stopTicking();
                 matchEndedRef.current = false;
                 setIsMatchRunning(false);
@@ -1175,7 +1187,7 @@ export function ShogiMatch({
                 setMessage({ text: "局面の適用に失敗しました。", type: "error" });
             }
         },
-        [navigation, legalCache, stopTicking, refreshStartSfen],
+        [clearLegalCache, navigation, stopTicking, refreshStartSfen],
     );
 
     const setPiecePromotion = useCallback(
@@ -1793,14 +1805,14 @@ export function ShogiMatch({
             setMessage(null);
             resetClocks(false);
 
-            legalCache.clear();
+            clearLegalCache();
             setPositionReady(true);
 
             if (result.error) {
                 throw new Error(result.error);
             }
         },
-        [navigation, resetClocks, legalCache, passRightsSettings],
+        [clearLegalCache, navigation, resetClocks, passRightsSettings],
     );
 
     // KIFコピー用コールバック
@@ -2114,7 +2126,7 @@ export function ShogiMatch({
 
                 setSelection(null);
                 resetClocks(false);
-                legalCache.clear();
+                clearLegalCache();
                 setPositionReady(true);
 
                 // インポート後は自動的に検討モードに入る
@@ -2124,7 +2136,7 @@ export function ShogiMatch({
                 throw new Error(`SFENの適用に失敗しました: ${String(error)}`);
             }
         },
-        [navigation, resetClocks, legalCache],
+        [clearLegalCache, navigation, resetClocks],
     );
 
     // KIFインポート（開始局面情報があれば使用）
