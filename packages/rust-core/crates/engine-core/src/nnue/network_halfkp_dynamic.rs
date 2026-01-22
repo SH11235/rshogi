@@ -965,23 +965,29 @@ impl NetworkHalfKPDynamic {
 
     /// ClippedReLU 版の評価値計算
     fn evaluate_clipped_relu(&self, pos: &Position, acc: &AccumulatorHalfKPDynamic) -> Value {
-        // 変換済み特徴量
-        let ft_out_size = self.arch_l1 * 2;
+        // 変換済み特徴量（L1層の padded_input_dim でパディング）
+        let ft_out_size = self.l1.padded_input_dim;
         let mut transformed = vec![0u8; ft_out_size];
-        self.feature_transformer.transform(acc, pos.side_to_move(), &mut transformed);
+        self.feature_transformer.transform(
+            acc,
+            pos.side_to_move(),
+            &mut transformed[..self.arch_l1 * 2],
+        );
 
-        // 隠れ層1
-        let mut l1_out = vec![0i32; self.arch_l2];
-        self.l1.propagate(&transformed, &mut l1_out);
+        // 隠れ層1（L2層の padded_input_dim でパディング）
+        let l1_out_size = self.l2.padded_input_dim;
+        let mut l1_out = vec![0i32; l1_out_size];
+        self.l1.propagate(&transformed, &mut l1_out[..self.arch_l2]);
 
-        let mut l1_relu = vec![0u8; self.arch_l2];
+        let mut l1_relu = vec![0u8; l1_out_size];
         clipped_relu_dynamic(&l1_out, &mut l1_relu);
 
-        // 隠れ層2
-        let mut l2_out = vec![0i32; self.arch_l3];
-        self.l2.propagate(&l1_relu, &mut l2_out);
+        // 隠れ層2（output層の padded_input_dim でパディング）
+        let l2_out_size = self.output.padded_input_dim;
+        let mut l2_out = vec![0i32; l2_out_size];
+        self.l2.propagate(&l1_relu, &mut l2_out[..self.arch_l3]);
 
-        let mut l2_relu = vec![0u8; self.arch_l3];
+        let mut l2_relu = vec![0u8; l2_out_size];
         clipped_relu_dynamic(&l2_out, &mut l2_relu);
 
         // 出力層
@@ -1006,27 +1012,34 @@ impl NetworkHalfKPDynamic {
         // FT出力に SCReLU 適用 (i16 → u8)
         // QA=127: clamp(x, 0, 127)² >> 7 → u8 (0〜126)
         // QA=255: clamp(x, 0, 255)² >> 9 → u8 (0〜127)
-        let mut transformed = vec![0u8; ft_out_size];
-        SCReLUDynamic::propagate_i16_to_u8_with_qa(&ft_out_i16, &mut transformed, self.screlu_qa);
+        // L1層の padded_input_dim でパディング
+        let mut transformed = vec![0u8; self.l1.padded_input_dim];
+        SCReLUDynamic::propagate_i16_to_u8_with_qa(
+            &ft_out_i16,
+            &mut transformed[..ft_out_size],
+            self.screlu_qa,
+        );
 
         // 注: QA > 127 の場合の正規化は読み込み時の bias スケール修正で対応済み
 
-        // 隠れ層1
-        let mut l1_out = vec![0i32; self.arch_l2];
-        self.l1.propagate(&transformed, &mut l1_out);
+        // 隠れ層1（L2層の padded_input_dim でパディング）
+        let l1_out_size = self.l2.padded_input_dim;
+        let mut l1_out = vec![0i32; l1_out_size];
+        self.l1.propagate(&transformed, &mut l1_out[..self.arch_l2]);
 
         // L1出力に SCReLU 適用 (i32 → u8)
         // clamp(x >> 6, 0, 127)² >> 7 → u8
-        let mut l1_relu = vec![0u8; self.arch_l2];
-        SCReLUDynamic::propagate_i32_to_u8(&l1_out, &mut l1_relu);
+        let mut l1_relu = vec![0u8; l1_out_size];
+        SCReLUDynamic::propagate_i32_to_u8(&l1_out[..self.arch_l2], &mut l1_relu[..self.arch_l2]);
 
-        // 隠れ層2
-        let mut l2_out = vec![0i32; self.arch_l3];
-        self.l2.propagate(&l1_relu, &mut l2_out);
+        // 隠れ層2（output層の padded_input_dim でパディング）
+        let l2_out_size = self.output.padded_input_dim;
+        let mut l2_out = vec![0i32; l2_out_size];
+        self.l2.propagate(&l1_relu, &mut l2_out[..self.arch_l3]);
 
         // L2出力に SCReLU 適用 (i32 → u8)
-        let mut l2_relu = vec![0u8; self.arch_l3];
-        SCReLUDynamic::propagate_i32_to_u8(&l2_out, &mut l2_relu);
+        let mut l2_relu = vec![0u8; l2_out_size];
+        SCReLUDynamic::propagate_i32_to_u8(&l2_out[..self.arch_l3], &mut l2_relu[..self.arch_l3]);
 
         // 出力層
         let mut output = vec![0i32; 1];
