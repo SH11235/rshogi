@@ -29,8 +29,8 @@ struct Cli {
     #[arg(long)]
     nnue_file: PathBuf,
 
-    /// 反復回数（デフォルト: 100万回）
-    #[arg(long, default_value = "1000000")]
+    /// 反復回数（デフォルト: 50万回）
+    #[arg(long, default_value = "500000")]
     iterations: u64,
 
     /// ウォームアップ回数（デフォルト: 1万回）

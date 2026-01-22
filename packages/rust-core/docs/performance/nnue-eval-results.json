@@ -61,9 +61,9 @@
           "total_ns": 660.5,
           "evals_per_sec": 1513996,
           "vs_static": {
-            "refresh_diff_percent": -1.9,
-            "eval_diff_percent": -1.5,
-            "total_diff_percent": -1.1
+            "refresh_diff_percent": -2.4,
+            "eval_diff_percent": -2.3,
+            "total_diff_percent": -1.8
           }
         },
         "HalfKA512_const_generics": {

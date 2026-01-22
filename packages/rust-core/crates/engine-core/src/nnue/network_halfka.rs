@@ -915,6 +915,9 @@ pub struct NetworkHalfKA<
 impl<const L1: usize, const L1_INPUT: usize, const L2: usize, const L3: usize, A: FtActivation>
     NetworkHalfKA<L1, L1_INPUT, L2, L3, A>
 {
+    /// コンパイル時制約: L1_INPUT == L1 * 2
+    const _ASSERT_L1_INPUT: () = assert!(L1_INPUT == L1 * 2, "L1_INPUT must equal L1 * 2");
+
     /// ファイルから読み込み
     pub fn read<R: Read + Seek>(reader: &mut R) -> io::Result<Self> {
         // ヘッダを読み込み
