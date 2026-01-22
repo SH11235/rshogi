@@ -1319,6 +1319,21 @@ fn main() -> Result<()> {
         }
     }
 
+    // USIオプションで PassRights=true が設定されているかを検出
+    // （--pass-rights-* 未指定でも --usi-options PassRights=true で有効化される場合に対応）
+    let pass_rights_via_usi = black_usi_opts
+        .iter()
+        .any(|o| o == "PassRights=true" || o == "PassRights = true")
+        || white_usi_opts
+            .iter()
+            .any(|o| o == "PassRights=true" || o == "PassRights = true");
+
+    // ドライバ側のパス権有効化フラグ（CLIオプションまたはUSIオプションで有効）
+    let pass_rights_enabled =
+        cli.pass_rights_black.is_some() || cli.pass_rights_white.is_some() || pass_rights_via_usi;
+    // USIオプションのみでパス権が有効化された場合のデフォルト値
+    let default_pass_count = 2u8;
+
     let mut black = EngineProcess::spawn(
         &EngineConfig {
             path: engine_paths.black.path.clone(),
@@ -1415,7 +1430,18 @@ fn main() -> Result<()> {
         } else {
             &start_defs[(game_idx as usize) % start_defs.len()]
         };
-        let mut pos = build_position(parsed, cli.pass_rights_black, cli.pass_rights_white)?;
+        // パス権の初期値（CLIオプション > USIオプションのデフォルト値）
+        let pass_black = if pass_rights_enabled {
+            Some(cli.pass_rights_black.unwrap_or(default_pass_count))
+        } else {
+            None
+        };
+        let pass_white = if pass_rights_enabled {
+            Some(cli.pass_rights_white.unwrap_or(default_pass_count))
+        } else {
+            None
+        };
+        let mut pos = build_position(parsed, pass_black, pass_white)?;
         let mut tc = TimeControl::new(&cli);
         let mut outcome = GameOutcome::InProgress;
         let mut outcome_reason = "max_moves";
@@ -1445,8 +1471,7 @@ fn main() -> Result<()> {
             let sfen_before = pos.to_sfen();
             let think_limit_ms = tc.think_limit_ms(side);
             // パス権が有効な場合、現在のパス権を取得
-            let pass_rights = if cli.pass_rights_black.is_some() || cli.pass_rights_white.is_some()
-            {
+            let pass_rights = if pass_rights_enabled {
                 Some((pos.pass_rights(Color::Black), pos.pass_rights(Color::White)))
             } else {
                 None

@@ -1223,9 +1223,11 @@ impl SearchWorker {
         }
 
         // depth <= -5 なら recaptures のみに絞る
-        if depth <= -5 && ply >= 1 {
+        // ただし前手がPASSの場合は to() が未定義なのでスキップ
+        let prev_move = self.stack[(ply - 1) as usize].current_move;
+        if depth <= -5 && ply >= 1 && prev_move.is_normal() {
             let mut buf = crate::movegen::ExtMoveBuffer::new();
-            let rec_sq = self.stack[(ply - 1) as usize].current_move.to();
+            let rec_sq = prev_move.to();
             let gen_type = if self.generate_all_legal_moves {
                 crate::movegen::GenType::RecapturesAll
             } else {
