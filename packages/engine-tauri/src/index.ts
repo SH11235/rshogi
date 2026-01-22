@@ -22,6 +22,7 @@ export interface TauriIpc {
 export interface LegalMovesParams {
     sfen: string;
     moves?: string[];
+    passRights?: { sente: number; gote: number };
     ipc?: Partial<TauriIpc>;
 }
 
@@ -280,6 +281,7 @@ export async function getLegalMoves(params: LegalMovesParams): Promise<string[]>
         const result = await ipc.invoke<string[]>("engine_legal_moves", {
             sfen: params.sfen,
             moves: params.moves,
+            pass_rights: params.passRights,
         });
         return result;
     } catch (error) {

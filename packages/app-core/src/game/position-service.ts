@@ -72,7 +72,11 @@ export interface PositionService {
     getInitialBoard(): Promise<PositionState>;
     parseSfen(sfen: string): Promise<PositionState>;
     boardToSfen(position: PositionState): Promise<string>;
-    getLegalMoves(sfen: string, moves?: string[]): Promise<string[]>;
+    getLegalMoves(
+        sfen: string,
+        moves?: string[],
+        options?: { passRights?: { sente: number; gote: number } },
+    ): Promise<string[]>;
     replayMovesStrict(sfen: string, moves: string[]): Promise<ReplayResult>;
 }
 

@@ -47,9 +47,13 @@ export const createWasmPositionService = (): PositionService => {
             return boardToSfen(payload);
         },
 
-        async getLegalMoves(sfen: string, moves?: string[]): Promise<string[]> {
+        async getLegalMoves(
+            sfen: string,
+            moves?: string[],
+            options?: { passRights?: { sente: number; gote: number } },
+        ): Promise<string[]> {
             await ensureReady();
-            const result = wasm_get_legal_moves(sfen, moves ?? undefined);
+            const result = wasm_get_legal_moves(sfen, moves ?? undefined, options?.passRights);
             return result as unknown as string[];
         },
 

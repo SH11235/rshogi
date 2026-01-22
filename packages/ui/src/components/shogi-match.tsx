@@ -93,7 +93,11 @@ export interface ShogiMatchProps {
     initialMainTimeMs?: number;
     initialByoyomiMs?: number;
     maxLogs?: number;
-    fetchLegalMoves?: (sfen: string, moves: string[]) => Promise<string[]>;
+    fetchLegalMoves?: (
+        sfen: string,
+        moves: string[],
+        options?: { passRights?: { sente: number; gote: number } },
+    ) => Promise<string[]>;
     /** 開発者モード（エンジンログパネルなどを表示） */
     isDevMode?: boolean;
 }
@@ -670,9 +674,15 @@ export function ShogiMatch({
         // エンジン側の can_pass() は王手中のパスを禁止しており、
         // パスが合法でない場合にloadPositionするとパニックするため、事前にチェック
         try {
+            const passRightsOption = { passRights: positionRef.current.passRights };
             const resolver = fetchLegalMoves
-                ? () => fetchLegalMoves(startSfen, movesRef.current)
-                : () => getPositionService().getLegalMoves(startSfen, movesRef.current);
+                ? () => fetchLegalMoves(startSfen, movesRef.current, passRightsOption)
+                : () =>
+                      getPositionService().getLegalMoves(
+                          startSfen,
+                          movesRef.current,
+                          passRightsOption,
+                      );
             const ply = movesRef.current.length;
             const legal = await legalCache.getOrResolve(ply, resolver);
             if (!legal || !legal.has("pass")) {
@@ -998,11 +1008,16 @@ export function ShogiMatch({
     const getLegalSet = useCallback(async (): Promise<Set<string> | null> => {
         if (!positionReady) return null;
         const ply = movesRef.current.length;
+        const passRightsOption = { passRights: positionRef.current.passRights };
         const resolver = async () => {
             if (fetchLegalMoves) {
-                return fetchLegalMoves(startSfen, movesRef.current);
+                return fetchLegalMoves(startSfen, movesRef.current, passRightsOption);
             }
-            return getPositionService().getLegalMoves(startSfen, movesRef.current);
+            return getPositionService().getLegalMoves(
+                startSfen,
+                movesRef.current,
+                passRightsOption,
+            );
         };
         return legalCache.getOrResolve(ply, resolver);
     }, [positionReady, fetchLegalMoves, startSfen, legalCache]);
