@@ -239,6 +239,12 @@ impl Move {
     #[inline]
     pub const fn from_u16_checked(value: u16) -> Option<Move> {
         let value32 = value as u32;
+
+        // PASS は特殊値なので先にチェック
+        if value32 == Self::PASS.0 {
+            return Some(Self::PASS);
+        }
+
         let to = value32 & Self::TO_MASK;
         let from = (value32 & Self::FROM_MASK) >> Self::FROM_SHIFT;
         if to >= Square::NUM as u32 {
