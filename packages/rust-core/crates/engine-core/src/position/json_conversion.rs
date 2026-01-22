@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn test_replay_moves_strict_accepts_usi_without_piece_info() {
         let moves = vec!["7g7f".to_string()];
-        let result = Position::replay_moves_strict("startpos", &moves).unwrap();
+        let result = Position::replay_moves_strict("startpos", &moves, None).unwrap();
         assert_eq!(result.applied, vec!["7g7f".to_string()]);
         assert!(result.error.is_none());
         assert_eq!(result.last_ply, 0);
