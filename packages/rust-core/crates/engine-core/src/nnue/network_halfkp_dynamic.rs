@@ -331,11 +331,16 @@ impl FeatureTransformerHalfKPDynamic {
                 }
             } else {
                 // 差分更新
-                let (removed, added) = HalfKPFeatureSet::collect_changed_indices(
-                    dirty_piece,
-                    perspective,
-                    pos.king_square(perspective),
-                );
+                // 注: HalfKP の append_changed_indices は視点変換済みの玉座標を期待する
+                // append_active_indices と同様に、白視点では反転が必要
+                let raw_king_sq = pos.king_square(perspective);
+                let king_sq = if perspective == Color::White {
+                    raw_king_sq.inverse()
+                } else {
+                    raw_king_sq
+                };
+                let (removed, added) =
+                    HalfKPFeatureSet::collect_changed_indices(dirty_piece, perspective, king_sq);
 
                 acc.accumulation[p].copy_from_slice(&prev_acc.accumulation[p]);
 
@@ -382,7 +387,13 @@ impl FeatureTransformerHalfKPDynamic {
                     "King moved between source and current"
                 );
 
-                let king_sq = pos.king_square(perspective);
+                // 注: HalfKP の append_changed_indices は視点変換済みの玉座標を期待する
+                let raw_king_sq = pos.king_square(perspective);
+                let king_sq = if perspective == Color::White {
+                    raw_king_sq.inverse()
+                } else {
+                    raw_king_sq
+                };
                 let (removed, added) =
                     HalfKPFeatureSet::collect_changed_indices(&dirty_piece, perspective, king_sq);
 
