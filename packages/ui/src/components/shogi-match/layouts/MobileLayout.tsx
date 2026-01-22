@@ -329,20 +329,20 @@ export function MobileLayout({
                         {kifMoves && kifMoves.length > 0 && (
                             <MobileKifuBar moves={kifMoves} currentPly={currentPly} />
                         )}
-                        {/* メッセージ表示 */}
-                        {message && (
-                            <div
-                                className={`text-sm text-center px-2 ${
-                                    message.type === "error"
+                        {/* メッセージ表示（高さを常に確保してレイアウトシフトを防ぐ） */}
+                        <div
+                            className={`text-sm text-center px-2 min-h-[1.25rem] ${
+                                message
+                                    ? message.type === "error"
                                         ? "text-destructive"
                                         : message.type === "warning"
                                           ? "text-yellow-600 dark:text-yellow-500"
                                           : "text-green-600 dark:text-green-500"
-                                }`}
-                            >
-                                {message.text}
-                            </div>
-                        )}
+                                    : ""
+                            }`}
+                        >
+                            {message?.text}
+                        </div>
                         {/* パス権表示とパスボタン（initialCount > 0 の場合のみ表示） */}
                         {passRightsSettings?.enabled &&
                             passRightsSettings.initialCount > 0 &&

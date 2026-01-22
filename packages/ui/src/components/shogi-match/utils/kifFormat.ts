@@ -881,8 +881,10 @@ export function convertPvToDisplay(pv: string[], position: PositionState): PvDis
             break;
         }
         currentPosition = moveResult.next;
-        // パス手の場合は prevTo を更新しない（「同」表記の判定に影響しないよう）
-        if (usiMove.toLowerCase() !== "pass") {
+        // パス手の場合は prevTo をリセット（パス後の手では「同」表記を使わない）
+        if (usiMove.toLowerCase() === "pass") {
+            prevTo = undefined;
+        } else {
             prevTo = parseToSquare(usiMove);
         }
     }
