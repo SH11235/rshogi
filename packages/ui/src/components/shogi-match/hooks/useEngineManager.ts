@@ -70,6 +70,12 @@ type SideSetting = {
     skillLevel?: SkillLevelSettings;
 };
 
+/** パス権設定 */
+interface PassRightsSettings {
+    enabled: boolean;
+    initialCount: number;
+}
+
 interface UseEngineManagerProps {
     /** 先手/後手の設定 */
     sides: { sente: SideSetting; gote: SideSetting };
@@ -89,6 +95,8 @@ interface UseEngineManagerProps {
     isMatchRunning: boolean;
     /** 局面が準備完了しているか */
     positionReady: boolean;
+    /** パス権設定（オプション） */
+    passRightsSettings?: PassRightsSettings;
     /** エンジンからの手を適用するコールバック */
     onMoveFromEngine: (move: string) => void;
     /** 対局終了時のコールバック */
@@ -262,6 +270,7 @@ export function useEngineManager({
     positionRef,
     isMatchRunning,
     positionReady,
+    passRightsSettings,
     onMoveFromEngine,
     onMatchEnd,
     onEvalUpdate,
@@ -654,7 +663,16 @@ export function useEngineManager({
                         await applySkillLevelSettings(client, skillSettings);
                     }
 
-                    await client.loadPosition(startSfen, movesRef.current);
+                    // パス権設定を準備
+                    const passRightsOption = passRightsSettings?.enabled
+                        ? {
+                              passRights: {
+                                  sente: passRightsSettings.initialCount,
+                                  gote: passRightsSettings.initialCount,
+                              },
+                          }
+                        : undefined;
+                    await client.loadPosition(startSfen, movesRef.current, passRightsOption);
                     engineState.ready = true;
                     setEngineReady((prev) => ({ ...prev, [side]: true }));
                 }
@@ -701,7 +719,16 @@ export function useEngineManager({
             searchState.pending = true;
 
             try {
-                await client.loadPosition(startSfen, movesRef.current);
+                // パス権設定を準備
+                const passRightsOption = passRightsSettings?.enabled
+                    ? {
+                          passRights: {
+                              sente: passRightsSettings.initialCount,
+                              gote: passRightsSettings.initialCount,
+                          },
+                      }
+                    : undefined;
+                await client.loadPosition(startSfen, movesRef.current, passRightsOption);
 
                 // UIタイマーの現在の残り時間を計算してエンジンに渡す
                 // これにより、タイマー開始からloadPosition完了までの経過時間を考慮できる

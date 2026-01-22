@@ -6,6 +6,8 @@ import { BottomSheet } from "../components/BottomSheet";
 import { ClockDisplay } from "../components/ClockDisplay";
 import { EvalGraph } from "../components/EvalGraph";
 import { PausedModeControls, PlayingModeControls } from "../components/GameModeControls";
+import { PassButton } from "../components/PassButton";
+import { PassRightsDisplay } from "../components/PassRightsDisplay";
 import type { EngineOption, SideSetting } from "../components/MatchSettingsPanel";
 import { MobileBoardSection } from "../components/MobileBoardSection";
 import { type KifuMove, MobileKifuBar } from "../components/MobileKifuBar";
@@ -13,7 +15,7 @@ import { MobileNavigation } from "../components/MobileNavigation";
 import { MobileSettingsSheet } from "../components/MobileSettingsSheet";
 import { MoveDetailBottomSheet } from "../components/MoveDetailBottomSheet";
 import type { ClockSettings, TickState } from "../hooks/useClockManager";
-import type { DisplaySettings, GameMode, PromotionSelection } from "../types";
+import type { DisplaySettings, GameMode, PassRightsSettings, PromotionSelection } from "../types";
 import type { EvalHistory, KifMove as FullKifMove } from "../utils/kifFormat";
 
 type Selection = { kind: "square"; square: string } | { kind: "hand"; piece: PieceType };
@@ -96,6 +98,14 @@ interface MobileLayoutProps {
     onTimeSettingsChange: (settings: ClockSettings) => void;
     uiEngineOptions: EngineOption[];
     settingsLocked: boolean;
+
+    // パス権設定（オプション）
+    passRightsSettings?: PassRightsSettings;
+    onPassRightsSettingsChange?: (settings: PassRightsSettings) => void;
+    /** パス手を指すハンドラ */
+    onPassMove?: () => void;
+    /** パスが可能かどうか */
+    canPassMove?: boolean;
 
     // クロック表示
     clocks: TickState;
@@ -184,6 +194,10 @@ export function MobileLayout({
     onTimeSettingsChange,
     uiEngineOptions,
     settingsLocked,
+    passRightsSettings,
+    onPassRightsSettingsChange,
+    onPassMove,
+    canPassMove,
     clocks,
     displaySettingsFull,
     onDisplaySettingsChange,
@@ -300,10 +314,41 @@ export function MobileLayout({
             {/* === コントロール: 残りの高さを使う、必要に応じて縮小 === */}
             <footer className="flex-1 flex flex-col min-h-0 pb-[env(safe-area-inset-bottom)]">
                 {gameMode === "playing" ? (
-                    /* 対局モード: 1行棋譜 + 停止・投了・待ったボタン */
+                    /* 対局モード: 1行棋譜 + パス権 + 停止・投了・待ったボタン */
                     <div className="flex flex-col gap-1 flex-shrink-0">
                         {kifMoves && kifMoves.length > 0 && (
                             <MobileKifuBar moves={kifMoves} currentPly={currentPly} />
+                        )}
+                        {/* パス権表示とパスボタン */}
+                        {passRightsSettings?.enabled && position.passRights && (
+                            <div className="flex items-center justify-between px-2 py-1 text-xs">
+                                <div className="flex items-center gap-3 text-muted-foreground">
+                                    <span className="flex items-center gap-1">
+                                        先手:
+                                        <PassRightsDisplay
+                                            remaining={position.passRights.sente}
+                                            max={passRightsSettings.initialCount}
+                                            isActive={position.turn === "sente"}
+                                        />
+                                    </span>
+                                    <span className="flex items-center gap-1">
+                                        後手:
+                                        <PassRightsDisplay
+                                            remaining={position.passRights.gote}
+                                            max={passRightsSettings.initialCount}
+                                            isActive={position.turn === "gote"}
+                                        />
+                                    </span>
+                                </div>
+                                {canPassMove && onPassMove && (
+                                    <PassButton
+                                        canPass={true}
+                                        onPass={onPassMove}
+                                        remainingPassRights={position.passRights[position.turn]}
+                                        showConfirmDialog={true}
+                                    />
+                                )}
+                            </div>
                         )}
                         {onStop && (
                             <div className="flex justify-center gap-2 py-1">
@@ -464,6 +509,8 @@ export function MobileLayout({
                     onTimeSettingsChange={onTimeSettingsChange}
                     uiEngineOptions={uiEngineOptions}
                     settingsLocked={settingsLocked}
+                    passRightsSettings={passRightsSettings}
+                    onPassRightsSettingsChange={onPassRightsSettingsChange}
                     isMatchRunning={isMatchRunning}
                     onStartMatch={
                         onStart
