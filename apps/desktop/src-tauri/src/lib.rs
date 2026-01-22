@@ -845,14 +845,6 @@ pub fn board_to_sfen_for_test(board: BoardStateJson) -> Result<String, String> {
     board_to_sfen_impl(board)
 }
 
-pub fn engine_replay_moves_strict_for_test(
-    sfen: String,
-    moves: Vec<String>,
-    pass_rights: Option<PassRightsInput>,
-) -> Result<ReplayResultJson, String> {
-    engine_replay_moves_strict_impl(sfen, moves, pass_rights)
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
