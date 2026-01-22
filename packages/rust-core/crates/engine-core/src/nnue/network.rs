@@ -106,6 +106,21 @@ pub enum NNUENetwork {
 }
 
 impl NNUENetwork {
+    /// HalfKP でサポートされているアーキテクチャ一覧
+    ///
+    /// 新しいバリアント追加時は `architecture_spec()` と合わせて更新すること。
+    pub fn supported_halfkp_specs() -> &'static str {
+        "256x2-32-32, 512x2-8-96"
+    }
+
+    /// HalfKA でサポートされているアーキテクチャ一覧
+    ///
+    /// 新しいバリアント追加時は `architecture_spec()` と合わせて更新すること。
+    /// 注: LayerStacks は実験段階のため含まない。
+    pub fn supported_halfka_specs() -> &'static str {
+        "512x2-8-96, 1024x2-8-96"
+    }
+
     /// ファイルから読み込み（バージョン自動判別）
     pub fn load<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let file = File::open(path)?;
@@ -184,12 +199,14 @@ impl NNUENetwork {
                             }
                             _ => {
                                 // 未対応アーキテクチャ
+                                let activation = if use_screlu { "SCReLU" } else { "CReLU" };
                                 Err(io::Error::new(
                                     io::ErrorKind::Unsupported,
                                     format!(
                                         "Unsupported HalfKA architecture: {arch_str}. \
-                                         Supported architectures: 512x2-8-96, 1024x2-8-96, LayerStacks(1536x2). \
-                                         Detected: L1={l1}, L2={l2}, L3={l3}"
+                                         Supported: {}. \
+                                         Detected: L1={l1}, L2={l2}, L3={l3}, activation={activation}",
+                                        Self::supported_halfka_specs()
                                     ),
                                 ))
                             }
@@ -220,12 +237,14 @@ impl NNUENetwork {
                         }
                         _ => {
                             // 未対応アーキテクチャ
+                            let activation = if use_screlu { "SCReLU" } else { "CReLU" };
                             Err(io::Error::new(
                                 io::ErrorKind::Unsupported,
                                 format!(
                                     "Unsupported HalfKP architecture: {arch_str}. \
-                                     Supported architectures: 256x2-32-32, 512x2-8-96. \
-                                     Detected: L1={l1}, L2={l2}, L3={l3}"
+                                     Supported: {}. \
+                                     Detected: L1={l1}, L2={l2}, L3={l3}, activation={activation}",
+                                    Self::supported_halfkp_specs()
                                 ),
                             ))
                         }
@@ -284,16 +303,38 @@ impl NNUENetwork {
             }
         }
 
-        // nnue-pytorch のネストされた構造では、出力に近い順に並ぶ
-        // 例: [1<-96], [96<-8], [8<-1024]
-        // 逆順にして最内側から: [8<-1024] (L2), [96<-8] (L3), [1<-96] (output)
-        layers.reverse();
+        // 1. まず bullet-shogi 形式 "l2=8,l3=96" を優先的にパース
+        //    明示的に指定された値を尊重する
+        let mut l2 = 0usize;
+        let mut l3 = 0usize;
+        for part in arch_str.split(',') {
+            if let Some(val_str) = part.strip_prefix("l2=") {
+                if let Ok(val) = val_str.parse::<usize>() {
+                    l2 = val;
+                }
+            } else if let Some(val_str) = part.strip_prefix("l3=") {
+                if let Ok(val) = val_str.parse::<usize>() {
+                    l3 = val;
+                }
+            }
+        }
 
-        let (l2, l3) = if layers.len() >= 3 {
-            (layers[0].0, layers[1].0)
-        } else {
-            (0, 0)
-        };
+        // 2. l2/l3 が取得できなかった場合、AffineTransform パターンでフォールバック
+        //    nnue-pytorch のネストされた構造では、出力に近い順に並ぶ
+        //    例: AffineTransform[1<-96](ClippedReLU[96](AffineTransform[96<-8](...)))
+        //    パース結果: [1<-96], [96<-8], [8<-1024]
+        //    逆順にして入力側から: [8<-1024] (L2), [96<-8] (L3), [1<-96] (output)
+        if l2 == 0 || l3 == 0 {
+            layers.reverse();
+            if layers.len() >= 3 {
+                if l2 == 0 {
+                    l2 = layers[0].0;
+                }
+                if l3 == 0 {
+                    l3 = layers[1].0;
+                }
+            }
+        }
 
         (l1, l2, l3)
     }
@@ -425,7 +466,7 @@ impl NNUENetwork {
         matches!(self, Self::HalfKA1024CReLU(_) | Self::HalfKA1024SCReLU(_))
     }
 
-    /// アーキテクチャ名を取得
+    /// アーキテクチャ名を取得（例: "HalfKP256CReLU"）
     pub fn architecture_name(&self) -> &'static str {
         match self {
             Self::HalfKP256CReLU(_) => "HalfKP256CReLU",
@@ -437,6 +478,20 @@ impl NNUENetwork {
             Self::HalfKA1024CReLU(_) => "HalfKA1024CReLU",
             Self::HalfKA1024SCReLU(_) => "HalfKA1024SCReLU",
             Self::LayerStacks(_) => "LayerStacks",
+        }
+    }
+
+    /// アーキテクチャ仕様を取得（例: "256x2-32-32"）
+    ///
+    /// `supported_halfkp_specs()` / `supported_halfka_specs()` と整合性を保つこと。
+    /// 新しいバリアント追加時はここも更新が必要（exhaustive matchで警告される）。
+    pub fn architecture_spec(&self) -> &'static str {
+        match self {
+            Self::HalfKP256CReLU(_) | Self::HalfKP256SCReLU(_) => "256x2-32-32",
+            Self::HalfKP512CReLU(_) | Self::HalfKP512SCReLU(_) => "512x2-8-96",
+            Self::HalfKA512CReLU(_) | Self::HalfKA512SCReLU(_) => "512x2-8-96",
+            Self::HalfKA1024CReLU(_) | Self::HalfKA1024SCReLU(_) => "1024x2-8-96",
+            Self::LayerStacks(_) => "LayerStacks(1536x2)",
         }
     }
 
@@ -1223,5 +1278,38 @@ mod tests {
         // プレフィックスが部分一致する場合（マッチしない）
         assert_eq!(parse_fv_scale_from_arch("my_fv_scale=16"), None);
         assert_eq!(parse_fv_scale_from_arch("fv_scale_v2=16"), None);
+    }
+
+    /// parse_arch_dimensions のユニットテスト
+    #[test]
+    fn test_parse_arch_dimensions() {
+        // nnue-pytorch 形式 (ネスト構造、出力→入力の順)
+        // 実際のファイル例: "Network=AffineTransform[1<-96](ClippedReLU[96](AffineTransform[96<-8](...)))"
+        let arch = "Features=HalfKA_hm[73305->512x2],Network=AffineTransform[1<-96](ClippedReLU[96](AffineTransform[96<-8](ClippedReLU[8](AffineTransform[8<-1024](InputSlice[1024(0:1024)])))))";
+        assert_eq!(NNUENetwork::parse_arch_dimensions(arch), (512, 8, 96));
+
+        // nnue-pytorch 形式 (1024次元)
+        let arch = "Features=HalfKA_hm[73305->1024x2],Network=AffineTransform[1<-96](ClippedReLU[96](AffineTransform[96<-8](ClippedReLU[8](AffineTransform[8<-2048](InputSlice[2048(0:2048)])))))";
+        assert_eq!(NNUENetwork::parse_arch_dimensions(arch), (1024, 8, 96));
+
+        // bullet-shogi 形式 (l2=, l3= パターン)
+        let arch = "Features=HalfKA_hm^[73305->512x2]-SCReLU,fv_scale=13,l2=8,l3=96,qa=127,qb=64";
+        assert_eq!(NNUENetwork::parse_arch_dimensions(arch), (512, 8, 96));
+
+        // bullet-shogi 形式 (1024次元)
+        let arch = "Features=HalfKA_hm^[73305->1024x2]-SCReLU,fv_scale=16,l2=8,l3=96,qa=127,qb=64";
+        assert_eq!(NNUENetwork::parse_arch_dimensions(arch), (1024, 8, 96));
+
+        // bullet-shogi 形式 (256次元, 32-32)
+        let arch = "Features=HalfKA_hm^[73305->256x2]-SCReLU,fv_scale=13,l2=32,l3=32,qa=127,qb=64";
+        assert_eq!(NNUENetwork::parse_arch_dimensions(arch), (256, 32, 32));
+
+        // L1のみ取得できる場合 (L2/L3 は 0)
+        let arch = "Features=HalfKP[125388->256x2]";
+        assert_eq!(NNUENetwork::parse_arch_dimensions(arch), (256, 0, 0));
+
+        // 何も取得できない場合
+        assert_eq!(NNUENetwork::parse_arch_dimensions("unknown"), (0, 0, 0));
+        assert_eq!(NNUENetwork::parse_arch_dimensions(""), (0, 0, 0));
     }
 }

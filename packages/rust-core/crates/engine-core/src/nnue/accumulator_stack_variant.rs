@@ -15,9 +15,13 @@ use super::network_halfkp::AccumulatorStackHalfKP;
 ///
 /// # サポートするバリアント
 ///
-/// - HalfKP256/HalfKP512: const generics版
-/// - HalfKA512/HalfKA1024: const generics版
-/// - LayerStacks: 1536次元 + 9バケット
+/// すべて const generics 版の実装を使用:
+///
+/// - **HalfKP256**: 256x2-32-32（水匠/tanuki互換、レガシーNNUE）
+/// - **HalfKP512**: 512x2-8-96（大規模HalfKP）
+/// - **HalfKA512**: 512x2-8-96（nnue-pytorch/bullet-shogi互換）
+/// - **HalfKA1024**: 1024x2-8-96（大規模HalfKA）
+/// - **LayerStacks**: 1536次元 + 9バケット（最新アーキテクチャ）
 pub enum AccumulatorStackVariant {
     /// HalfKP 256x2-32-32 (const generics版)
     HalfKP256(AccumulatorStackHalfKP<256>),
