@@ -27,6 +27,7 @@ benchmark_results/
 # Evaluation function files (large binary files)
 eval/*
 !eval/.gitkeep
+!eval/README.md
 
 # Ignore tool-generated manifests under run outputs
 runs
