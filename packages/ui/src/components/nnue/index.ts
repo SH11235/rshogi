@@ -8,3 +8,4 @@ export { NnueList, type NnueListProps } from "./NnueList";
 export { NnueListItem, type NnueListItemProps } from "./NnueListItem";
 export { NnueProgressOverlay, type NnueProgressOverlayProps } from "./NnueProgressOverlay";
 export { NnueSelectorDialog, type NnueSelectorDialogProps } from "./NnueSelectorDialog";
+export { PresetListItem, type PresetListItemProps } from "./PresetListItem";

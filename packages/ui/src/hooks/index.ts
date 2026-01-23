@@ -10,3 +10,9 @@ export {
     useNnueSelector,
 } from "./useNnueSelector";
 export { type UseNnueStorageReturn, useNnueStorage } from "./useNnueStorage";
+export {
+    getDownloadedMeta,
+    type UsePresetManagerOptions,
+    type UsePresetManagerReturn,
+    usePresetManager,
+} from "./usePresetManager";

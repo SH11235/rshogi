@@ -3,6 +3,7 @@ import { type ReactElement, useCallback, useState } from "react";
 import { useEngineRestart } from "../../hooks/useEngineRestart";
 import { useNnueSelector } from "../../hooks/useNnueSelector";
 import { useNnueStorage } from "../../hooks/useNnueStorage";
+import { usePresetManager } from "../../hooks/usePresetManager";
 import { Button } from "../button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../dialog";
 import { EngineRestartingOverlay } from "./EngineRestartingOverlay";
@@ -10,6 +11,7 @@ import { NnueErrorAlert } from "./NnueErrorAlert";
 import { NnueImportArea } from "./NnueImportArea";
 import { NnueList } from "./NnueList";
 import { NnueProgressOverlay } from "./NnueProgressOverlay";
+import { PresetListItem } from "./PresetListItem";
 
 export interface NnueSelectorDialogProps {
     /** モーダルが開いているか */
@@ -24,6 +26,10 @@ export interface NnueSelectorDialogProps {
     engine?: EngineClient | null;
     /** エンジンが初期化済みか */
     isEngineInitialized?: boolean;
+    /** プリセット manifest.json の URL（指定時のみプリセット機能が有効） */
+    manifestUrl?: string;
+    /** Desktop 用: ファイル選択ダイアログを開いてパスを取得するコールバック */
+    onRequestFilePath?: () => Promise<string | null>;
 }
 
 /**
@@ -38,15 +44,20 @@ export function NnueSelectorDialog({
     onNnueChange,
     engine,
     isEngineInitialized = false,
+    manifestUrl,
+    onRequestFilePath,
 }: NnueSelectorDialogProps): ReactElement {
     const {
         nnueList,
         isLoading: isStorageLoading,
         error: storageError,
         importFromFile,
+        importFromPath,
         deleteNnue,
         clearError: clearStorageError,
         storageUsage,
+        refreshList,
+        platform,
     } = useNnueStorage();
 
     const { selectedNnueId, select, showRestartWarning } = useNnueSelector({
@@ -61,6 +72,25 @@ export function NnueSelectorDialog({
         clearError: clearRestartError,
     } = useEngineRestart({
         engine: engine ?? null,
+    });
+
+    const {
+        presets,
+        isLoading: isPresetsLoading,
+        downloadingKey,
+        downloadProgress,
+        error: presetError,
+        download: downloadPreset,
+        clearError: clearPresetError,
+        isConfigured: isPresetConfigured,
+    } = usePresetManager({
+        manifestUrl,
+        autoFetch: open && Boolean(manifestUrl),
+        onDownloadComplete: (meta) => {
+            // ダウンロード完了時にストレージを更新して自動選択
+            void refreshList();
+            select(meta.id);
+        },
     });
 
     const [isImporting, setIsImporting] = useState(false);
@@ -81,6 +111,23 @@ export function NnueSelectorDialog({
         },
         [importFromFile, select],
     );
+
+    // Desktop 用: ファイルダイアログでパスを取得してインポート
+    const handleRequestFilePath = useCallback(async () => {
+        if (!onRequestFilePath) return;
+        setIsImporting(true);
+        try {
+            const filePath = await onRequestFilePath();
+            if (filePath) {
+                const meta = await importFromPath(filePath);
+                select(meta.id);
+            }
+        } catch {
+            // エラーは useNnueStorage で管理される
+        } finally {
+            setIsImporting(false);
+        }
+    }, [onRequestFilePath, importFromPath, select]);
 
     const handleDelete = useCallback(
         async (id: string) => {
@@ -131,10 +178,12 @@ export function NnueSelectorDialog({
     const handleClearError = useCallback(() => {
         clearStorageError();
         clearRestartError();
-    }, [clearStorageError, clearRestartError]);
+        clearPresetError();
+    }, [clearStorageError, clearRestartError, clearPresetError]);
 
-    const error = storageError ?? restartError;
-    const isDisabled = isImporting || deletingId !== null || isRestarting;
+    const error = storageError ?? restartError ?? presetError;
+    const isDisabled =
+        isImporting || deletingId !== null || isRestarting || downloadingKey !== null;
 
     return (
         <>
@@ -175,9 +224,62 @@ export function NnueSelectorDialog({
                             disabled={isDisabled}
                         />
 
+                        {/* プリセット一覧（manifestUrl が設定されている場合のみ） */}
+                        {isPresetConfigured && presets.length > 0 && (
+                            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                                <div
+                                    style={{
+                                        fontSize: "12px",
+                                        fontWeight: 500,
+                                        color: "hsl(var(--muted-foreground, 0 0% 45%))",
+                                        marginTop: "8px",
+                                        marginBottom: "4px",
+                                    }}
+                                >
+                                    ダウンロード可能なプリセット
+                                </div>
+                                {presets.map((preset) => (
+                                    <PresetListItem
+                                        key={preset.config.presetKey}
+                                        preset={preset}
+                                        isSelected={preset.localMetas.some(
+                                            (m) => m.id === selectedNnueId,
+                                        )}
+                                        onSelect={select}
+                                        onDownload={downloadPreset}
+                                        isDownloading={downloadingKey === preset.config.presetKey}
+                                        downloadProgress={
+                                            downloadingKey === preset.config.presetKey
+                                                ? downloadProgress
+                                                : null
+                                        }
+                                        disabled={isDisabled}
+                                    />
+                                ))}
+                            </div>
+                        )}
+
+                        {/* プリセット読み込み中 */}
+                        {isPresetConfigured && isPresetsLoading && (
+                            <div
+                                style={{
+                                    fontSize: "13px",
+                                    color: "hsl(var(--muted-foreground, 0 0% 45%))",
+                                    textAlign: "center",
+                                    padding: "16px",
+                                }}
+                            >
+                                プリセット一覧を読み込み中...
+                            </div>
+                        )}
+
                         {/* インポートエリア */}
                         <NnueImportArea
-                            onFileSelect={handleFileSelect}
+                            onFileSelect={platform === "web" ? handleFileSelect : undefined}
+                            onRequestFilePath={
+                                platform === "desktop" ? handleRequestFilePath : undefined
+                            }
+                            platform={platform ?? "web"}
                             isImporting={isImporting}
                             disabled={isDisabled}
                         />

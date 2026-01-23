@@ -83,6 +83,8 @@ import { type KifMoveData, parseSfen } from "./shogi-match/utils/kifParser";
 import { LegalMoveCache } from "./shogi-match/utils/legalMoveCache";
 import { determinePromotion } from "./shogi-match/utils/promotionLogic";
 import { TooltipProvider } from "./tooltip";
+import { NnueSelectorDialog } from "./nnue";
+import { useNnueStorage } from "../hooks/useNnueStorage";
 
 type Selection = { kind: "square"; square: string } | { kind: "hand"; piece: PieceType };
 
@@ -99,6 +101,10 @@ export interface ShogiMatchProps {
     ) => Promise<string[]>;
     /** 開発者モード（エンジンログパネルなどを表示） */
     isDevMode?: boolean;
+    /** NNUE プリセット manifest.json の URL（指定時のみプリセット機能が有効） */
+    manifestUrl?: string;
+    /** Desktop 用: NNUE ファイル選択ダイアログを開いてパスを取得するコールバック */
+    onRequestNnueFilePath?: () => Promise<string | null>;
 }
 
 // デフォルト値の定数
@@ -282,6 +288,8 @@ export function ShogiMatch({
     maxLogs = DEFAULT_MAX_LOGS,
     fetchLegalMoves,
     isDevMode = false,
+    manifestUrl,
+    onRequestNnueFilePath,
 }: ShogiMatchProps): ReactElement {
     const emptyBoard = useMemo<BoardState>(
         () => Object.fromEntries(getAllSquares().map((sq) => [sq, null])) as BoardState,
@@ -385,6 +393,18 @@ export function ShogiMatch({
     } | null>(null);
     // 設定モーダルの表示状態
     const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+
+    // NNUE 選択ダイアログの状態
+    const [isNnueSelectorOpen, setIsNnueSelectorOpen] = useState(false);
+    const [selectedNnueId, setSelectedNnueId] = useState<string | null>(null);
+
+    // NNUE ストレージから一覧を取得（表示名の取得に使用）
+    const { nnueList } = useNnueStorage();
+    const selectedNnueDisplayName = useMemo(() => {
+        if (!selectedNnueId) return null;
+        const found = nnueList.find((n) => n.id === selectedNnueId);
+        return found?.displayName ?? null;
+    }, [selectedNnueId, nnueList]);
 
     // positionRef を先に定義（コールバックで使用するため）
     const positionRef = useRef<PositionState>(position);
@@ -2817,6 +2837,8 @@ export function ShogiMatch({
                                     onPassRightsSettingsChange={handlePassRightsSettingsChange}
                                     uiEngineOptions={uiEngineOptions}
                                     settingsLocked={settingsLocked}
+                                    onOpenNnueSelector={() => setIsNnueSelectorOpen(true)}
+                                    currentNnueDisplayName={selectedNnueDisplayName}
                                 />
 
                                 {/* インポート */}
@@ -2838,6 +2860,17 @@ export function ShogiMatch({
                                 )}
                             </div>
                         </SettingsModal>
+
+                        {/* NNUE 選択ダイアログ */}
+                        <NnueSelectorDialog
+                            open={isNnueSelectorOpen}
+                            onOpenChange={setIsNnueSelectorOpen}
+                            currentNnueId={selectedNnueId}
+                            onNnueChange={setSelectedNnueId}
+                            isEngineInitialized={isMatchRunning}
+                            manifestUrl={manifestUrl}
+                            onRequestFilePath={onRequestNnueFilePath}
+                        />
                     </div>
                 </section>
             )}

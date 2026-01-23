@@ -29,13 +29,20 @@ const panelEngine = createEngineClient();
 // Web版のストレージも同期的に初期化可能
 const nnueStorage = createIndexedDBNnueStorage();
 
+// NNUE プリセット manifest.json の URL（環境変数で設定）
+const nnueManifestUrl = import.meta.env.VITE_NNUE_MANIFEST_URL as string | undefined;
+
 function App() {
     const isDevMode = useDevMode();
 
     return (
         <NnueProvider storage={nnueStorage} platform="web">
             <main className="mx-auto flex max-w-[1100px] flex-col gap-3 md:px-5">
-                <ShogiMatch engineOptions={engineOptions} isDevMode={isDevMode} />
+                <ShogiMatch
+                    engineOptions={engineOptions}
+                    isDevMode={isDevMode}
+                    manifestUrl={nnueManifestUrl}
+                />
                 {isDevMode && <EngineControlPanel engine={panelEngine} />}
             </main>
         </NnueProvider>

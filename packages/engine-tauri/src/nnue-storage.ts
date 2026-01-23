@@ -9,6 +9,26 @@
 import type { NnueMeta, NnueStorage } from "@shogi/app-core";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 
+/**
+ * チャンクサイズ（1MB）
+ * base64 変換後は約 1.33MB
+ */
+const CHUNK_SIZE = 1 * 1024 * 1024;
+
+/**
+ * Uint8Array の一部を base64 文字列に変換
+ * チャンク単位で変換することでメモリ効率を改善
+ */
+function chunkToBase64(bytes: Uint8Array, offset: number, length: number): string {
+    const chunk = bytes.subarray(offset, offset + length);
+    // チャンクサイズなら O(n) で収まる
+    let binary = "";
+    for (let i = 0; i < chunk.length; i++) {
+        binary += String.fromCharCode(chunk[i]);
+    }
+    return btoa(binary);
+}
+
 export type InvokeFn = typeof tauriInvoke;
 
 export interface TauriNnueStorageOptions {
@@ -56,12 +76,33 @@ export function createTauriNnueStorage(options: TauriNnueStorageOptions = {}): N
     const metaCache = loadMetaFromStorage();
 
     return {
-        async save(_id: string, _data: Blob | Uint8Array, _meta: NnueMeta): Promise<void> {
-            // Tauri では save は使わない（import_nnue_from_path を使う）
-            // この関数は URL からダウンロードした場合に使用
-            // 一時ファイルに書き出してから import するか、
-            // または Tauri 側に専用のコマンドを追加する必要がある
-            throw new Error("Direct save is not supported in Tauri. Use importNnueFile() instead.");
+        async save(id: string, data: Blob | Uint8Array, meta: NnueMeta): Promise<void> {
+            const bytes = data instanceof Blob ? new Uint8Array(await data.arrayBuffer()) : data;
+
+            try {
+                // チャンク単位で送信（1MB ずつ）
+                const totalChunks = Math.ceil(bytes.length / CHUNK_SIZE);
+                for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+                    const offset = chunkIndex * CHUNK_SIZE;
+                    const length = Math.min(CHUNK_SIZE, bytes.length - offset);
+                    const dataBase64 = chunkToBase64(bytes, offset, length);
+
+                    await invoke("save_nnue_chunk", { id, chunkIndex, dataBase64 });
+                }
+
+                // 保存を完了
+                await invoke("finalize_nnue_save", { id });
+
+                // メタデータを保存
+                metaCache.set(id, meta);
+                saveMetaToStorage(metaCache);
+            } catch (error) {
+                // エラー時は一時ファイルを削除
+                await invoke("abort_nnue_save", { id }).catch(() => {
+                    // 中止処理のエラーは無視
+                });
+                throw error;
+            }
         },
 
         async load(_id: string): Promise<Uint8Array> {
@@ -130,6 +171,46 @@ export function createTauriNnueStorage(options: TauriNnueStorageOptions = {}): N
 
         async listByPresetKey(presetKey: string): Promise<NnueMeta[]> {
             return Array.from(metaCache.values()).filter((m) => m.presetKey === presetKey);
+        },
+
+        async importFromPath(srcPath: string, displayName?: string): Promise<NnueMeta> {
+            const id = crypto.randomUUID();
+
+            // ファイルをコピー
+            const result = await importNnueFromPath(srcPath, id, { invoke });
+
+            // SHA-256 計算
+            const hash = await calculateNnueHash(id, { invoke });
+
+            // ファイル名を抽出
+            const fileName = srcPath.split(/[/\\]/).pop() ?? "unknown.nnue";
+
+            // 重複チェック
+            const existing = Array.from(metaCache.values()).filter(
+                (m) => m.contentHashSha256 === hash,
+            );
+            if (existing.length > 0) {
+                // 重複ファイルを削除して既存のメタを返す
+                await invoke("delete_nnue", { id });
+                return existing[0];
+            }
+
+            const meta: NnueMeta = {
+                id,
+                displayName: displayName ?? fileName.replace(/\.nnue$/i, ""),
+                originalFileName: fileName,
+                size: result.size,
+                contentHashSha256: hash,
+                source: "user-uploaded",
+                createdAt: Date.now(),
+                verified: false,
+            };
+
+            // メタデータを保存
+            metaCache.set(id, meta);
+            saveMetaToStorage(metaCache);
+
+            return meta;
         },
     };
 }

@@ -3,8 +3,12 @@ import { useCallback, useRef, useState } from "react";
 import { Button } from "../button";
 
 export interface NnueImportAreaProps {
-    /** ファイル選択時のコールバック */
-    onFileSelect: (file: File) => void;
+    /** ファイル選択時のコールバック（Web 用） */
+    onFileSelect?: (file: File) => void;
+    /** ファイル選択ボタンクリック時のコールバック（Desktop 用: Tauri dialog を開く） */
+    onRequestFilePath?: () => void;
+    /** プラットフォーム */
+    platform?: "web" | "desktop";
     /** インポート中かどうか */
     isImporting?: boolean;
     /** 無効化 */
@@ -18,20 +22,24 @@ export interface NnueImportAreaProps {
  */
 export function NnueImportArea({
     onFileSelect,
+    onRequestFilePath,
+    platform = "web",
     isImporting = false,
     disabled = false,
 }: NnueImportAreaProps): ReactElement {
     const inputRef = useRef<HTMLInputElement>(null);
     const [isDragOver, setIsDragOver] = useState(false);
+    const isDesktop = platform === "desktop";
 
     const handleDragOver = useCallback(
         (e: React.DragEvent) => {
             e.preventDefault();
-            if (!disabled && !isImporting) {
+            // Desktop ではドラッグ＆ドロップをサポートしない
+            if (!disabled && !isImporting && !isDesktop) {
                 setIsDragOver(true);
             }
         },
-        [disabled, isImporting],
+        [disabled, isImporting, isDesktop],
     );
 
     const handleDragLeave = useCallback((e: React.DragEvent) => {
@@ -43,21 +51,21 @@ export function NnueImportArea({
         (e: React.DragEvent) => {
             e.preventDefault();
             setIsDragOver(false);
-            if (disabled || isImporting) return;
+            if (disabled || isImporting || isDesktop) return;
 
             const file = e.dataTransfer.files[0];
             if (file?.name.toLowerCase().endsWith(".nnue")) {
-                onFileSelect(file);
+                onFileSelect?.(file);
             }
         },
-        [disabled, isImporting, onFileSelect],
+        [disabled, isImporting, isDesktop, onFileSelect],
     );
 
     const handleFileChange = useCallback(
         (e: React.ChangeEvent<HTMLInputElement>) => {
             const file = e.target.files?.[0];
             if (file) {
-                onFileSelect(file);
+                onFileSelect?.(file);
             }
             // リセットして同じファイルを再選択可能に
             e.target.value = "";
@@ -66,8 +74,14 @@ export function NnueImportArea({
     );
 
     const handleButtonClick = useCallback(() => {
-        inputRef.current?.click();
-    }, []);
+        if (isDesktop) {
+            // Desktop: Tauri のファイルダイアログを開く
+            onRequestFilePath?.();
+        } else {
+            // Web: input[type=file] を使用
+            inputRef.current?.click();
+        }
+    }, [isDesktop, onRequestFilePath]);
 
     return (
         // biome-ignore lint/a11y/noStaticElementInteractions: Drop zone requires interactive div

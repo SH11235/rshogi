@@ -1,7 +1,7 @@
 import type { NnueMeta } from "@shogi/app-core";
 import { NnueError } from "@shogi/app-core";
 import { useCallback, useEffect, useState } from "react";
-import { useNnueContextOptional } from "../providers/NnueContext";
+import { type NnuePlatform, useNnueContextOptional } from "../providers/NnueContext";
 
 export interface UseNnueStorageReturn {
     /** NNUE メタデータ一覧 */
@@ -12,14 +12,18 @@ export interface UseNnueStorageReturn {
     error: NnueError | null;
     /** 一覧を再取得 */
     refreshList: () => Promise<void>;
-    /** ファイルから NNUE をインポート */
+    /** ファイルから NNUE をインポート（Web 専用） */
     importFromFile: (file: File) => Promise<NnueMeta>;
+    /** パスから NNUE をインポート（Desktop 専用） */
+    importFromPath: (srcPath: string, displayName?: string) => Promise<NnueMeta>;
     /** NNUE を削除 */
     deleteNnue: (id: string) => Promise<void>;
     /** エラーをクリア */
     clearError: () => void;
     /** ストレージ使用量 */
     storageUsage: { used: number; quota?: number } | null;
+    /** プラットフォーム */
+    platform: NnuePlatform | null;
 }
 
 /**
@@ -31,6 +35,7 @@ export interface UseNnueStorageReturn {
 export function useNnueStorage(): UseNnueStorageReturn {
     const context = useNnueContextOptional();
     const storage = context?.storage ?? null;
+    const platform = context?.platform ?? null;
 
     const [nnueList, setNnueList] = useState<NnueMeta[]>([]);
     const [isLoading, setIsLoading] = useState(false);
@@ -127,6 +132,46 @@ export function useNnueStorage(): UseNnueStorageReturn {
         [storage, refreshList],
     );
 
+    const importFromPath = useCallback(
+        async (srcPath: string, displayName?: string): Promise<NnueMeta> => {
+            if (!storage) {
+                throw new NnueError(
+                    "NNUE_STORAGE_FAILED",
+                    "NnueProvider が設定されていません",
+                    null,
+                );
+            }
+            if (!storage.importFromPath) {
+                throw new NnueError(
+                    "NNUE_STORAGE_FAILED",
+                    "このプラットフォームではパスからのインポートがサポートされていません",
+                    null,
+                );
+            }
+            setIsLoading(true);
+            try {
+                const meta = await storage.importFromPath(srcPath, displayName);
+                await refreshList();
+                setError(null);
+                return meta;
+            } catch (e) {
+                const err =
+                    e instanceof NnueError
+                        ? e
+                        : new NnueError(
+                              "NNUE_STORAGE_FAILED",
+                              "NNUE のインポートに失敗しました",
+                              e,
+                          );
+                setError(err);
+                throw err;
+            } finally {
+                setIsLoading(false);
+            }
+        },
+        [storage, refreshList],
+    );
+
     const deleteNnue = useCallback(
         async (id: string) => {
             if (!storage) {
@@ -165,8 +210,10 @@ export function useNnueStorage(): UseNnueStorageReturn {
         error,
         refreshList,
         importFromFile,
+        importFromPath,
         deleteNnue,
         clearError,
         storageUsage,
+        platform,
     };
 }

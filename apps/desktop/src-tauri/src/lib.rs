@@ -999,10 +999,146 @@ async fn list_nnue_files(app: AppHandle) -> Result<Vec<String>, String> {
     Ok(ids)
 }
 
+/// NNUE チャンクを保存（大きいファイル対応）
+/// チャンクごとに base64 エンコードされたデータを受け取り、一時ファイルに追記
+#[tauri::command]
+async fn save_nnue_chunk(
+    app: AppHandle,
+    id: String,
+    chunk_index: u32,
+    data_base64: String,
+) -> Result<(), String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use tokio::io::AsyncWriteExt;
+
+    let dir = get_nnue_dir(&app);
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| format!("Failed to create NNUE directory: {e}"))?;
+
+    // base64 デコード
+    let data = STANDARD
+        .decode(&data_base64)
+        .map_err(|e| format!("Failed to decode base64 data: {e}"))?;
+
+    let temp_path = dir.join(format!("{id}.tmp"));
+    let index_path = dir.join(format!("{id}.idx"));
+
+    // チャンク順序の検証
+    if chunk_index == 0 {
+        // 最初のチャンク: 一時ファイルを新規作成、インデックスファイルも作成
+        if temp_path.exists() {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+        }
+        if index_path.exists() {
+            let _ = tokio::fs::remove_file(&index_path).await;
+        }
+        tokio::fs::write(&temp_path, &data)
+            .await
+            .map_err(|e| format!("Failed to write first chunk: {e}"))?;
+        tokio::fs::write(&index_path, b"1")
+            .await
+            .map_err(|e| format!("Failed to write index file: {e}"))?;
+    } else {
+        // 後続のチャンク: インデックスを検証して追記
+        let expected_index = tokio::fs::read_to_string(&index_path)
+            .await
+            .map_err(|e| format!("Failed to read index file (chunk order error?): {e}"))?
+            .parse::<u32>()
+            .map_err(|e| format!("Invalid index file: {e}"))?;
+
+        if chunk_index != expected_index {
+            return Err(format!(
+                "Chunk order mismatch: expected {}, got {}",
+                expected_index, chunk_index
+            ));
+        }
+
+        // 追記
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&temp_path)
+            .await
+            .map_err(|e| format!("Failed to open temp file for append: {e}"))?;
+
+        file.write_all(&data)
+            .await
+            .map_err(|e| format!("Failed to append chunk: {e}"))?;
+
+        // インデックスを更新
+        tokio::fs::write(&index_path, (chunk_index + 1).to_string())
+            .await
+            .map_err(|e| format!("Failed to update index file: {e}"))?;
+    }
+
+    Ok(())
+}
+
+/// NNUE 保存を完了（一時ファイルを正式ファイルにリネーム）
+#[tauri::command]
+async fn finalize_nnue_save(app: AppHandle, id: String) -> Result<NnueImportResult, String> {
+    let dir = get_nnue_dir(&app);
+    let temp_path = dir.join(format!("{id}.tmp"));
+    let index_path = dir.join(format!("{id}.idx"));
+    let dest_path = dir.join(format!("{id}.nnue"));
+
+    // 一時ファイルの存在確認
+    if !temp_path.exists() {
+        return Err(format!("Temp file not found: {id}"));
+    }
+
+    // ファイルサイズ確認（0バイト対策）
+    let metadata = tokio::fs::metadata(&temp_path)
+        .await
+        .map_err(|e| format!("Failed to get temp file metadata: {e}"))?;
+
+    if metadata.len() == 0 {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        let _ = tokio::fs::remove_file(&index_path).await;
+        return Err("Temp file is empty".to_string());
+    }
+
+    // Windows では既存ファイルを先に削除
+    #[cfg(target_os = "windows")]
+    if dest_path.exists() {
+        let _ = tokio::fs::remove_file(&dest_path).await;
+    }
+
+    // リネーム（原子的）
+    if let Err(e) = tokio::fs::rename(&temp_path, &dest_path).await {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        let _ = tokio::fs::remove_file(&index_path).await;
+        return Err(format!("Failed to finalize NNUE file: {e}"));
+    }
+
+    // インデックスファイルを削除
+    let _ = tokio::fs::remove_file(&index_path).await;
+
+    Ok(NnueImportResult {
+        id,
+        size: metadata.len(),
+        path: dest_path.to_string_lossy().into_owned(),
+    })
+}
+
+/// NNUE 保存を中止（一時ファイルを削除）
+#[tauri::command]
+async fn abort_nnue_save(app: AppHandle, id: String) -> Result<(), String> {
+    let dir = get_nnue_dir(&app);
+    let temp_path = dir.join(format!("{id}.tmp"));
+    let index_path = dir.join(format!("{id}.idx"));
+
+    let _ = tokio::fs::remove_file(&temp_path).await;
+    let _ = tokio::fs::remove_file(&index_path).await;
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(EngineState::default())
         .invoke_handler(tauri::generate_handler![
             engine_init,
@@ -1021,7 +1157,10 @@ pub fn run() {
             get_nnue_path,
             delete_nnue,
             calculate_nnue_hash,
-            list_nnue_files
+            list_nnue_files,
+            save_nnue_chunk,
+            finalize_nnue_save,
+            abort_nnue_save
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

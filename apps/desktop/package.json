@@ -19,6 +19,7 @@
         "@shogi/engine-tauri": "workspace:*",
         "@shogi/ui": "workspace:*",
         "@tauri-apps/api": "^2",
+        "@tauri-apps/plugin-dialog": "^2.6.0",
         "react": "^19.2.3",
         "react-dom": "^19.2.3"
     },

@@ -70,4 +70,11 @@ export interface NnueStorage {
      * @param presetKey プリセットキー
      */
     listByPresetKey(presetKey: string): Promise<NnueMeta[]>;
+
+    /**
+     * ファイルパスから NNUE をインポート（Desktop 専用）
+     * @param srcPath ソースファイルのパス
+     * @param displayName 表示名（省略時はファイル名）
+     */
+    importFromPath?(srcPath: string, displayName?: string): Promise<NnueMeta>;
 }
