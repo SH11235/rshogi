@@ -802,6 +802,8 @@ export function ShogiMatch({
     // エンジンからの手を受け取って適用するコールバック
     const handleMoveFromEngine = useCallback(
         (move: string) => {
+            // 待った・パス処理中は無視（旧局面への適用防止）
+            if (moveProcessingRef.current) return;
             if (matchEndedRef.current) return;
             const result = applyMoveWithState(positionRef.current, move, {
                 validateTurn: false,
@@ -1013,6 +1015,7 @@ export function ShogiMatch({
         }
 
         // パス権が有効な場合、対局開始時に初期化
+        // ナビゲーションのルートノードにもパス権を反映するため、navigation.resetを呼び直す
         if (passRightsSettings?.enabled && !positionRef.current.passRights) {
             const updatedPosition = {
                 ...positionRef.current,
@@ -1023,6 +1026,10 @@ export function ShogiMatch({
             };
             setPosition(updatedPosition);
             positionRef.current = updatedPosition;
+            // ナビゲーションのルートノードをパス権付きの局面で更新
+            // （待った時にパス権が復元されるようにするため）
+            navigation.reset(updatedPosition, startSfen);
+            movesRef.current = [];
         }
 
         // 盤面セクションにスクロール
@@ -1674,6 +1681,10 @@ export function ShogiMatch({
             }
 
             // ========== 対局モード ==========
+            // 待った・パス処理中は入力をブロック
+            if (moveProcessingRef.current) {
+                return;
+            }
             // 一時停止中は入力をブロック
             if (isPaused) {
                 return;
