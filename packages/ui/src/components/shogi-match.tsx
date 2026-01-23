@@ -35,7 +35,7 @@ import {
     type SideSetting,
 } from "./shogi-match/components/MatchSettingsPanel";
 import { MoveDetailPanel } from "./shogi-match/components/MoveDetailPanel";
-import { PassButton, type PassDisabledReason } from "./shogi-match/components/PassButton";
+import type { PassDisabledReason } from "./shogi-match/components/PassButton";
 import { PassRightsDisplay } from "./shogi-match/components/PassRightsDisplay";
 import { PvPreviewDialog } from "./shogi-match/components/PvPreviewDialog";
 import { SettingsModal } from "./shogi-match/components/SettingsModal";
@@ -516,13 +516,13 @@ export function ShogiMatch({
         sides[position.turn].role === "human" &&
         !!hasPassRights &&
         (passLegalKnown ? canPassLegal : true);
-    // ボタン表示可否（計算中でも表示するため判定は別で持つ）
-    // ボタンは常時表示（レイアウトシフト防止）。非活性理由はdisabledReasonで管理。
+    // ボタン表示可否（対局中でパス機能が有効な場合に表示）
+    // パス権が0でも表示（レイアウトシフト防止）。非活性理由はdisabledReasonで管理。
     const shouldRenderPassButton =
+        isMatchRunning &&
         passRightsSettings?.enabled &&
         passRightsSettings.initialCount > 0 &&
-        !!position.passRights &&
-        !!position.passRights[position.turn];
+        !!position.passRights;
 
     // パス権が有効なら不足時に初期化しておく（編集開始局面などでpassRightsが未設定な場合に備える）
     useEffect(() => {
@@ -2475,6 +2475,25 @@ export function ShogiMatch({
                                                     }
                                                     flipBoard={flipBoard}
                                                 />
+                                                {/* パス権表示（上側プレイヤー） */}
+                                                {passRightsSettings?.enabled &&
+                                                    passRightsSettings.initialCount > 0 &&
+                                                    position.passRights && (
+                                                        <div className="flex justify-end mt-1">
+                                                            <PassRightsDisplay
+                                                                remaining={
+                                                                    position.passRights[info.owner]
+                                                                }
+                                                                max={
+                                                                    passRightsSettings.initialCount
+                                                                }
+                                                                isActive={
+                                                                    position.turn === info.owner
+                                                                }
+                                                                compact
+                                                            />
+                                                        </div>
+                                                    )}
                                             </div>
                                         );
                                     })()}
@@ -2523,71 +2542,54 @@ export function ShogiMatch({
                                     {(() => {
                                         const info = getHandInfo("bottom");
                                         return (
-                                            <PlayerHandSection
-                                                owner={info.owner}
-                                                hand={info.hand}
-                                                selectedPiece={
-                                                    selection?.kind === "hand"
-                                                        ? selection.piece
-                                                        : null
-                                                }
-                                                isActive={info.isActive}
-                                                onHandSelect={handleHandSelect}
-                                                onPiecePointerDown={
-                                                    isEditMode
-                                                        ? handleHandPiecePointerDown
-                                                        : undefined
-                                                }
-                                                isEditMode={isEditMode && !isMatchRunning}
-                                                isMatchRunning={isMatchRunning}
-                                                onIncrement={(piece) =>
-                                                    handleIncrementHand(info.owner, piece)
-                                                }
-                                                onDecrement={(piece) =>
-                                                    handleDecrementHand(info.owner, piece)
-                                                }
-                                                flipBoard={flipBoard}
-                                            />
+                                            <>
+                                                <PlayerHandSection
+                                                    owner={info.owner}
+                                                    hand={info.hand}
+                                                    selectedPiece={
+                                                        selection?.kind === "hand"
+                                                            ? selection.piece
+                                                            : null
+                                                    }
+                                                    isActive={info.isActive}
+                                                    onHandSelect={handleHandSelect}
+                                                    onPiecePointerDown={
+                                                        isEditMode
+                                                            ? handleHandPiecePointerDown
+                                                            : undefined
+                                                    }
+                                                    isEditMode={isEditMode && !isMatchRunning}
+                                                    isMatchRunning={isMatchRunning}
+                                                    onIncrement={(piece) =>
+                                                        handleIncrementHand(info.owner, piece)
+                                                    }
+                                                    onDecrement={(piece) =>
+                                                        handleDecrementHand(info.owner, piece)
+                                                    }
+                                                    flipBoard={flipBoard}
+                                                />
+                                                {/* パス権表示（下側プレイヤー） */}
+                                                {passRightsSettings?.enabled &&
+                                                    passRightsSettings.initialCount > 0 &&
+                                                    position.passRights && (
+                                                        <div className="flex justify-start mt-1 w-full">
+                                                            <PassRightsDisplay
+                                                                remaining={
+                                                                    position.passRights[info.owner]
+                                                                }
+                                                                max={
+                                                                    passRightsSettings.initialCount
+                                                                }
+                                                                isActive={
+                                                                    position.turn === info.owner
+                                                                }
+                                                                compact
+                                                            />
+                                                        </div>
+                                                    )}
+                                            </>
                                         );
                                     })()}
-
-                                    {/* パス権表示とパスボタン（initialCount > 0 の場合のみ表示） */}
-                                    {passRightsSettings?.enabled &&
-                                        passRightsSettings.initialCount > 0 &&
-                                        position.passRights && (
-                                            <div className="flex items-center justify-between w-full px-2 gap-2">
-                                                <div className="flex items-center gap-4 text-xs text-muted-foreground">
-                                                    <span className="flex items-center gap-1">
-                                                        先手:
-                                                        <PassRightsDisplay
-                                                            remaining={position.passRights.sente}
-                                                            max={passRightsSettings.initialCount}
-                                                            isActive={position.turn === "sente"}
-                                                        />
-                                                    </span>
-                                                    <span className="flex items-center gap-1">
-                                                        後手:
-                                                        <PassRightsDisplay
-                                                            remaining={position.passRights.gote}
-                                                            max={passRightsSettings.initialCount}
-                                                            isActive={position.turn === "gote"}
-                                                        />
-                                                    </span>
-                                                </div>
-                                                {/* 人間の手番かつパス権がある場合に表示（合法手判定中はdisabled表示） */}
-                                                {shouldRenderPassButton && (
-                                                    <PassButton
-                                                        canPass={canMakePassMove}
-                                                        disabledReason={passButtonDisabledReason}
-                                                        onPass={handlePassMove}
-                                                        remainingPassRights={
-                                                            position.passRights[position.turn]
-                                                        }
-                                                        showConfirmDialog={shouldShowPassConfirm}
-                                                    />
-                                                )}
-                                            </div>
-                                        )}
 
                                     {/* 対局コントロール（盤面の下） */}
                                     <MatchControls
@@ -2605,6 +2607,18 @@ export function ShogiMatch({
                                         gameMode={gameMode}
                                         message={message}
                                         onOpenSettings={() => setIsSettingsModalOpen(true)}
+                                        passProps={
+                                            shouldRenderPassButton
+                                                ? {
+                                                      canPass: canMakePassMove,
+                                                      disabledReason: passButtonDisabledReason,
+                                                      onPass: handlePassMove,
+                                                      remainingPassRights:
+                                                          position.passRights?.[position.turn] ?? 0,
+                                                      showConfirmDialog: shouldShowPassConfirm,
+                                                  }
+                                                : undefined
+                                        }
                                     />
                                 </div>
                             </div>

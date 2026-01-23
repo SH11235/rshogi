@@ -13,7 +13,6 @@ import { MobileNavigation } from "../components/MobileNavigation";
 import { MobileSettingsSheet } from "../components/MobileSettingsSheet";
 import { MoveDetailBottomSheet } from "../components/MoveDetailBottomSheet";
 import { PassButton, type PassDisabledReason } from "../components/PassButton";
-import { PassRightsDisplay } from "../components/PassRightsDisplay";
 import type { ClockSettings, TickState } from "../hooks/useClockManager";
 import type {
     DisplaySettings,
@@ -324,6 +323,9 @@ export function MobileLayout({
                     bottomHand={bottomHand}
                     boardSectionRef={boardSectionRef}
                     isDraggingPiece={isDraggingPiece}
+                    passRightsSettings={passRightsSettings}
+                    passRights={position.passRights}
+                    turn={position.turn}
                 />
             </main>
 
@@ -349,40 +351,6 @@ export function MobileLayout({
                         >
                             {message?.text}
                         </div>
-                        {/* パス権表示とパスボタン（initialCount > 0 の場合のみ表示） */}
-                        {passRightsSettings?.enabled &&
-                            passRightsSettings.initialCount > 0 &&
-                            position.passRights && (
-                                <div className="flex items-center justify-between px-2 py-1 text-xs">
-                                    <div className="flex items-center gap-3 text-muted-foreground">
-                                        <span className="flex items-center gap-1">
-                                            先手:
-                                            <PassRightsDisplay
-                                                remaining={position.passRights.sente}
-                                                max={passRightsSettings.initialCount}
-                                                isActive={position.turn === "sente"}
-                                            />
-                                        </span>
-                                        <span className="flex items-center gap-1">
-                                            後手:
-                                            <PassRightsDisplay
-                                                remaining={position.passRights.gote}
-                                                max={passRightsSettings.initialCount}
-                                                isActive={position.turn === "gote"}
-                                            />
-                                        </span>
-                                    </div>
-                                    {onPassMove && (
-                                        <PassButton
-                                            canPass={canPassMove ?? false}
-                                            disabledReason={passMoveDisabledReason}
-                                            onPass={onPassMove}
-                                            remainingPassRights={position.passRights[position.turn]}
-                                            showConfirmDialog={passMoveConfirmDialog}
-                                        />
-                                    )}
-                                </div>
-                            )}
                         {onStop && (
                             <div className="flex justify-center gap-2 py-1">
                                 <PlayingModeControls
@@ -391,6 +359,20 @@ export function MobileLayout({
                                     onUndo={onUndo}
                                     canUndo={canUndo}
                                 />
+                                {/* パスボタン（パス機能有効時のみ） */}
+                                {passRightsSettings?.enabled &&
+                                    passRightsSettings.initialCount > 0 &&
+                                    position.passRights &&
+                                    onPassMove && (
+                                        <PassButton
+                                            canPass={canPassMove ?? false}
+                                            disabledReason={passMoveDisabledReason}
+                                            onPass={onPassMove}
+                                            remainingPassRights={position.passRights[position.turn]}
+                                            showConfirmDialog={passMoveConfirmDialog}
+                                            compact
+                                        />
+                                    )}
                             </div>
                         )}
                     </div>
