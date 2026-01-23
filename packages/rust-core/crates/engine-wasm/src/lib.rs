@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::io::ErrorKind;
 
 use engine_core::eval::set_eval_hash_enabled;
-use engine_core::movegen::{generate_legal, MoveList};
+use engine_core::movegen::{generate_legal_with_pass, MoveList};
 use engine_core::nnue::init_nnue_from_bytes;
 use engine_core::position::{Position, SFEN_HIRATE};
 use engine_core::search::{LimitsType, Search, SearchInfo, SearchResult, SkillOptions};
@@ -286,12 +286,28 @@ fn parse_set_option_value(value: Option<JsValue>) -> Result<serde_json::Value, J
     Err(JsValue::from_str("setOption value must be string/number/boolean"))
 }
 
-fn build_position(sfen: &str, moves: &[String]) -> Result<Position, JsValue> {
+/// パス権設定
+#[derive(Debug, Clone, Copy, Deserialize)]
+struct PassRightsInput {
+    sente: u8,
+    gote: u8,
+}
+
+fn build_position(
+    sfen: &str,
+    moves: &[String],
+    pass_rights: Option<PassRightsInput>,
+) -> Result<Position, JsValue> {
     let mut position = Position::new();
     if sfen.trim() == "startpos" {
         position.set_sfen(SFEN_HIRATE).map_err(|e| JsValue::from_str(&e.to_string()))?;
     } else {
         position.set_sfen(sfen).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    }
+
+    // パス権を有効化（movesを適用する前に設定）
+    if let Some(pr) = pass_rights {
+        position.enable_pass_rights(pr.sente, pr.gote);
     }
 
     for mv in moves {
@@ -435,22 +451,39 @@ pub fn wasm_board_to_sfen(board_json: JsValue) -> Result<String, JsValue> {
 }
 
 #[wasm_bindgen]
-pub fn wasm_get_legal_moves(sfen: String, moves: Option<JsValue>) -> Result<JsValue, JsValue> {
+pub fn wasm_get_legal_moves(
+    sfen: String,
+    moves: Option<JsValue>,
+    pass_rights: Option<JsValue>,
+) -> Result<JsValue, JsValue> {
     let parsed_moves = parse_moves(moves)?;
+    let pass_rights: Option<PassRightsInput> = pass_rights
+        .map(swb::from_value)
+        .transpose()
+        .map_err(|e| JsValue::from_str(&format!("invalid passRights: {e}")))?;
 
-    let position = build_position(&sfen, &parsed_moves)?;
+    let position = build_position(&sfen, &parsed_moves, pass_rights)?;
     let mut list = MoveList::new();
-    generate_legal(&position, &mut list);
+    generate_legal_with_pass(&position, &mut list);
     let legal_moves: Vec<String> = list.as_slice().iter().map(|mv| mv.to_usi()).collect();
 
     swb::to_value(&legal_moves).map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
 #[wasm_bindgen]
-pub fn wasm_replay_moves_strict(sfen: String, moves: JsValue) -> Result<JsValue, JsValue> {
+pub fn wasm_replay_moves_strict(
+    sfen: String,
+    moves: JsValue,
+    pass_rights: Option<JsValue>,
+) -> Result<JsValue, JsValue> {
     let parsed_moves = parse_moves(Some(moves))?;
-    let result =
-        Position::replay_moves_strict(&sfen, &parsed_moves).map_err(|e| JsValue::from_str(&e))?;
+    let pass_rights: Option<PassRightsInput> = pass_rights
+        .map(swb::from_value)
+        .transpose()
+        .map_err(|e| JsValue::from_str(&format!("invalid passRights: {e}")))?;
+    let pass_rights_tuple = pass_rights.map(|pr| (pr.sente, pr.gote));
+    let result = Position::replay_moves_strict(&sfen, &parsed_moves, pass_rights_tuple)
+        .map_err(|e| JsValue::from_str(&e))?;
     swb::to_value(&result).map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
@@ -499,9 +532,17 @@ pub fn load_model(bytes: &[u8]) -> Result<(), JsValue> {
 }
 
 #[wasm_bindgen]
-pub fn load_position(sfen: &str, moves: Option<JsValue>) -> Result<(), JsValue> {
+pub fn load_position(
+    sfen: &str,
+    moves: Option<JsValue>,
+    pass_rights: Option<JsValue>,
+) -> Result<(), JsValue> {
     let moves = parse_moves(moves)?;
-    let position = build_position(sfen, &moves)?;
+    let pass_rights: Option<PassRightsInput> = pass_rights
+        .map(swb::from_value)
+        .transpose()
+        .map_err(|e| JsValue::from_str(&format!("invalid passRights: {e}")))?;
+    let position = build_position(sfen, &moves, pass_rights)?;
 
     with_engine_mut(|engine| {
         engine.position = position;

@@ -219,6 +219,7 @@ export function HandPiecesDisplay({
 
                 {/* 実際の駒（PC版は absolute で左寄せ、モバイル版は通常フロー） */}
                 <div
+                    data-testid="hand-pieces-actual"
                     className={
                         !isCompactLayout
                             ? "absolute left-0 top-0 flex items-center gap-0.5 h-full"

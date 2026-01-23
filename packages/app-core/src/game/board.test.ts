@@ -3,12 +3,14 @@ import {
     applyMove,
     applyMoveWithState,
     boardFromMoves,
+    canPass,
     cloneBoard,
     createEmptyHands,
     createInitialBoard,
     createInitialPositionState,
     getAllSquares,
     type Hands,
+    isPassMove,
     type PositionState,
     parseMove,
     replayMoves,
@@ -38,7 +40,11 @@ const createMockPositionService = (): PositionService => {
         async getLegalMoves(_sfen: string, _moves?: string[]) {
             return [];
         },
-        async replayMovesStrict(_sfen: string, moves: string[]) {
+        async replayMovesStrict(
+            _sfen: string,
+            moves: string[],
+            _options?: { passRights?: { sente: number; gote: number } },
+        ) {
             return {
                 applied: moves,
                 lastPly: moves.length,
@@ -460,5 +466,202 @@ describe("getAllSquares", () => {
         expect(squares).toContain("9a");
         expect(squares).toContain("1i");
         expect(squares).toContain("5e");
+    });
+});
+
+describe("パス手の処理", () => {
+    describe("parseMove - パス手のパース", () => {
+        it("'pass' をパスとしてパースする", () => {
+            const result = parseMove("pass");
+            expect(result).toEqual({ kind: "pass" });
+        });
+
+        it("'PASS' (大文字) もパスとしてパースする", () => {
+            const result = parseMove("PASS");
+            expect(result).toEqual({ kind: "pass" });
+        });
+
+        it("'Pass' (混在) もパスとしてパースする", () => {
+            const result = parseMove("Pass");
+            expect(result).toEqual({ kind: "pass" });
+        });
+    });
+
+    describe("isPassMove", () => {
+        it("'pass' は true を返す", () => {
+            expect(isPassMove("pass")).toBe(true);
+        });
+
+        it("'PASS' (大文字) も true を返す", () => {
+            expect(isPassMove("PASS")).toBe(true);
+        });
+
+        it("通常の指し手は false を返す", () => {
+            expect(isPassMove("7g7f")).toBe(false);
+            expect(isPassMove("P*5e")).toBe(false);
+        });
+    });
+
+    describe("canPass", () => {
+        it("パス権が残っている場合は true を返す", () => {
+            const state: PositionState = {
+                board: createInitialBoard(),
+                hands: createEmptyHands(),
+                turn: "sente",
+                passRights: { sente: 2, gote: 2 },
+            };
+            expect(canPass(state)).toBe(true);
+        });
+
+        it("パス権が0の場合は false を返す", () => {
+            const state: PositionState = {
+                board: createInitialBoard(),
+                hands: createEmptyHands(),
+                turn: "sente",
+                passRights: { sente: 0, gote: 2 },
+            };
+            expect(canPass(state)).toBe(false);
+        });
+
+        it("パス権が有効でない場合は false を返す", () => {
+            const state: PositionState = {
+                board: createInitialBoard(),
+                hands: createEmptyHands(),
+                turn: "sente",
+            };
+            expect(canPass(state)).toBe(false);
+        });
+
+        it("後手番で後手のパス権が残っている場合は true を返す", () => {
+            const state: PositionState = {
+                board: createInitialBoard(),
+                hands: createEmptyHands(),
+                turn: "gote",
+                passRights: { sente: 0, gote: 1 },
+            };
+            expect(canPass(state)).toBe(true);
+        });
+    });
+
+    describe("applyMoveWithState - パス手の適用", () => {
+        it("パス権が有効な場合にパスが成功する", () => {
+            const state: PositionState = {
+                board: createInitialBoard(),
+                hands: createEmptyHands(),
+                turn: "sente",
+                passRights: { sente: 2, gote: 2 },
+            };
+
+            const result = applyMoveWithState(state, "pass", { validateTurn: false });
+
+            expect(result.ok).toBe(true);
+            expect(result.next.passRights?.sente).toBe(1);
+            expect(result.next.passRights?.gote).toBe(2);
+            expect(result.next.turn).toBe("gote");
+            expect(result.lastMove?.isPass).toBe(true);
+        });
+
+        it("パス権が0の場合はエラーを返す", () => {
+            const state: PositionState = {
+                board: createInitialBoard(),
+                hands: createEmptyHands(),
+                turn: "sente",
+                passRights: { sente: 0, gote: 2 },
+            };
+
+            const result = applyMoveWithState(state, "pass", { validateTurn: false });
+
+            expect(result.ok).toBe(false);
+            expect(result.error).toBe("no pass rights remaining");
+        });
+
+        it("パス権が有効でない場合はエラーを返す", () => {
+            const state: PositionState = {
+                board: createInitialBoard(),
+                hands: createEmptyHands(),
+                turn: "sente",
+            };
+
+            const result = applyMoveWithState(state, "pass", { validateTurn: false });
+
+            expect(result.ok).toBe(false);
+            expect(result.error).toBe("pass rights not enabled");
+        });
+
+        it("後手がパスすると後手のパス権が減る", () => {
+            const state: PositionState = {
+                board: createInitialBoard(),
+                hands: createEmptyHands(),
+                turn: "gote",
+                passRights: { sente: 2, gote: 2 },
+            };
+
+            const result = applyMoveWithState(state, "pass", { validateTurn: false });
+
+            expect(result.ok).toBe(true);
+            expect(result.next.passRights?.sente).toBe(2);
+            expect(result.next.passRights?.gote).toBe(1);
+            expect(result.next.turn).toBe("sente");
+        });
+
+        it("パス手の後も盤面は変わらない", () => {
+            const state: PositionState = {
+                board: createInitialBoard(),
+                hands: createEmptyHands(),
+                turn: "sente",
+                passRights: { sente: 2, gote: 2 },
+            };
+
+            const result = applyMoveWithState(state, "pass", { validateTurn: false });
+
+            expect(result.ok).toBe(true);
+            // 盤面が変わっていないことを確認（7g の歩がそのまま）
+            expect(result.next.board["7g"]).toEqual({ owner: "sente", type: "P" });
+        });
+
+        it("連続してパスできる", () => {
+            let state: PositionState = {
+                board: createInitialBoard(),
+                hands: createEmptyHands(),
+                turn: "sente",
+                passRights: { sente: 2, gote: 2 },
+            };
+
+            // 先手パス
+            const result1 = applyMoveWithState(state, "pass", { validateTurn: false });
+            expect(result1.ok).toBe(true);
+            state = result1.next;
+
+            // 後手パス
+            const result2 = applyMoveWithState(state, "pass", { validateTurn: false });
+            expect(result2.ok).toBe(true);
+            state = result2.next;
+
+            // 先手パス（2回目）
+            const result3 = applyMoveWithState(state, "pass", { validateTurn: false });
+            expect(result3.ok).toBe(true);
+
+            expect(result3.next.passRights?.sente).toBe(0);
+            expect(result3.next.passRights?.gote).toBe(1);
+        });
+    });
+
+    describe("replayMoves - パス手を含む棋譜の再生", () => {
+        it("パス手を含む棋譜を正しく再生する", () => {
+            const initialState: PositionState = {
+                board: createInitialBoard(),
+                hands: createEmptyHands(),
+                turn: "sente",
+                passRights: { sente: 2, gote: 2 },
+            };
+
+            const moves = ["7g7f", "pass", "2g2f"];
+            const result = replayMoves(moves, { validateTurn: false }, initialState);
+
+            expect(result.errors).toHaveLength(0);
+            expect(result.state.passRights?.gote).toBe(1); // 後手がパスした
+            expect(result.state.board["7f"]).toEqual({ owner: "sente", type: "P" });
+            expect(result.state.board["2f"]).toEqual({ owner: "sente", type: "P" });
+        });
     });
 });

@@ -77,6 +77,20 @@ export interface EngineInitOptions {
     multiPv?: number;
 }
 
+/**
+ * loadPosition のオプション
+ */
+export interface LoadPositionOptions {
+    /**
+     * パス権の設定
+     * - sente: 先手の初期パス権数
+     * - gote: 後手の初期パス権数
+     *
+     * 設定すると USI コマンドに "passrights <sente> <gote>" が追加される
+     */
+    passRights?: { sente: number; gote: number };
+}
+
 export interface SearchLimits {
     /** 探索最大深さ */
     maxDepth?: number;
@@ -280,7 +294,13 @@ export interface ThreadInfo {
 
 export interface EngineClient {
     init(opts?: EngineInitOptions): Promise<void>;
-    loadPosition(sfen: string, moves?: string[]): Promise<void>;
+    /**
+     * 局面を読み込む
+     * @param sfen SFEN文字列（"startpos" または完全なSFEN）
+     * @param moves USI形式の指し手配列（"pass" を含むことが可能）
+     * @param options 追加オプション（パス権設定など）
+     */
+    loadPosition(sfen: string, moves?: string[], options?: LoadPositionOptions): Promise<void>;
     search(params: SearchParams): Promise<SearchHandle>;
     stop(): Promise<void>;
     setOption(name: string, value: string | number | boolean): Promise<void>;
@@ -326,7 +346,7 @@ export function createMockEngineClient(): EngineClient {
         async init() {
             return;
         },
-        async loadPosition() {
+        async loadPosition(_sfen: string, _moves?: string[], _options?: LoadPositionOptions) {
             return;
         },
         async search(): Promise<SearchHandle> {

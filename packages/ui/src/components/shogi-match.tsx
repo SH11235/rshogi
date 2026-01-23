@@ -35,6 +35,8 @@ import {
     type SideSetting,
 } from "./shogi-match/components/MatchSettingsPanel";
 import { MoveDetailPanel } from "./shogi-match/components/MoveDetailPanel";
+import type { PassDisabledReason } from "./shogi-match/components/PassButton";
+import { PassRightsDisplay } from "./shogi-match/components/PassRightsDisplay";
 import { PvPreviewDialog } from "./shogi-match/components/PvPreviewDialog";
 import { SettingsModal } from "./shogi-match/components/SettingsModal";
 import { applyDropResult, DragGhost, type DropResult, usePieceDnd } from "./shogi-match/dnd";
@@ -57,9 +59,11 @@ import {
     type AnalyzingState,
     DEFAULT_ANALYSIS_SETTINGS,
     DEFAULT_DISPLAY_SETTINGS,
+    DEFAULT_PASS_RIGHTS_SETTINGS,
     type DisplaySettings,
     type GameMode,
     type Message,
+    type PassRightsSettings,
     type PromotionSelection,
 } from "./shogi-match/types";
 import {
@@ -88,7 +92,11 @@ export interface ShogiMatchProps {
     initialMainTimeMs?: number;
     initialByoyomiMs?: number;
     maxLogs?: number;
-    fetchLegalMoves?: (sfen: string, moves: string[]) => Promise<string[]>;
+    fetchLegalMoves?: (
+        sfen: string,
+        moves: string[],
+        options?: { passRights?: { sente: number; gote: number } },
+    ) => Promise<string[]>;
     /** 開発者モード（エンジンログパネルなどを表示） */
     isDevMode?: boolean;
 }
@@ -97,6 +105,60 @@ export interface ShogiMatchProps {
 const DEFAULT_BYOYOMI_MS = 5_000; // デフォルト秒読み時間（5秒）
 const DEFAULT_MAX_LOGS = 80; // ログ履歴の最大保持件数
 const TOOLTIP_DELAY_DURATION_MS = 120; // ツールチップ表示遅延
+
+/**
+ * パス権設定と棋譜からgetLegalMovesのオプションを生成するヘルパー関数
+ *
+ * 注意: 棋譜に"pass"が含まれる場合は、設定が無効でもpassRightsを送る必要がある。
+ * これは、Rust側でパス手を適用する際にパス権が必須なため。
+ * （パス権有効で対局後に設定をOFFにした場合や、パス入り棋譜を読み込んだ場合など）
+ */
+function buildPassRightsOptionForLegalMoves(
+    passRightsSettings: { enabled: boolean; initialCount: number } | undefined,
+    moves: string[],
+): { passRights?: { sente: number; gote: number } } {
+    // 大文字小文字を区別せずにパス手を検出（parseMoveと同様）
+    const hasPassInMoves = moves.some((m) => m.toLowerCase() === "pass");
+
+    if (passRightsSettings?.enabled) {
+        // 設定が有効: 初期値を使用
+        return {
+            passRights: {
+                sente: passRightsSettings.initialCount,
+                gote: passRightsSettings.initialCount,
+            },
+        };
+    }
+
+    if (hasPassInMoves) {
+        // 設定は無効だが棋譜にpassが含まれる: 十分な数のパス権を設定
+        // （各プレイヤーのパス回数の最大値を使用）
+        let sentePassCount = 0;
+        let gotePassCount = 0;
+        let isSenteTurn = true; // 平手初期局面は先手番
+        for (const move of moves) {
+            if (move.toLowerCase() === "pass") {
+                if (isSenteTurn) {
+                    sentePassCount++;
+                } else {
+                    gotePassCount++;
+                }
+            }
+            isSenteTurn = !isSenteTurn;
+        }
+        // 最低でも現在のパス数 + 1 を確保（追加パスの余地を残す）
+        const minRights = Math.max(sentePassCount, gotePassCount) + 1;
+        return {
+            passRights: {
+                sente: minRights,
+                gote: minRights,
+            },
+        };
+    }
+
+    // 設定無効かつパスなし: passRights不要
+    return {};
+}
 
 // レイアウト用Tailwindクラス
 const matchLayoutClasses = "flex flex-col gap-2 items-center py-2";
@@ -172,6 +234,9 @@ const clonePositionState = (pos: PositionState): PositionState => ({
     hands: cloneHandsState(pos.hands),
     turn: pos.turn,
     ply: pos.ply,
+    passRights: pos.passRights
+        ? { sente: pos.passRights.sente, gote: pos.passRights.gote }
+        : undefined,
 });
 
 function boardToGrid(board: BoardState): ShogiBoardCell[][] {
@@ -198,6 +263,10 @@ function deriveLastMove(move: string | undefined): LastMove | undefined {
     if (!parsed) return undefined;
     if (parsed.kind === "drop") {
         return { from: null, to: parsed.to, dropPiece: parsed.piece, promotes: false };
+    }
+    if (parsed.kind === "pass") {
+        // パス手の場合は移動先なし
+        return { isPass: true };
     }
     return { from: parsed.from, to: parsed.to, promotes: parsed.promote };
 }
@@ -277,6 +346,11 @@ export function ShogiMatch({
         }
         return merged;
     }, [storedAnalysisSettings]);
+    // パス権設定
+    const [passRightsSettings, setPassRightsSettings] = useLocalStorage<PassRightsSettings>(
+        "shogi-pass-rights-settings",
+        DEFAULT_PASS_RIGHTS_SETTINGS,
+    );
     // PVプレビュー用のstate
     const [pvPreview, setPvPreview] = useState<{
         open: boolean;
@@ -396,12 +470,76 @@ export function ShogiMatch({
 
     const movesRef = useRef<string[]>(moves);
     const legalCache = useMemo(() => new LegalMoveCache(), []);
+    const [canPassLegal, setCanPassLegal] = useState(false);
+    const clearLegalCache = useCallback(() => {
+        legalCache.clear();
+        setCanPassLegal(false);
+    }, [legalCache]);
+    const ensurePassRightsInitialized = useCallback(() => {
+        if (!passRightsSettings?.enabled) return null;
+        if (positionRef.current.passRights) return positionRef.current.passRights;
+        const rights = {
+            sente: passRightsSettings.initialCount,
+            gote: passRightsSettings.initialCount,
+        };
+        const updated = { ...positionRef.current, passRights: rights };
+        setPosition(updated);
+        positionRef.current = updated;
+        return rights;
+    }, [passRightsSettings]);
+    // 合法手取得用のパス権オプションを返す
+    // build_position（Rust側）はパス権を設定してからmovesを適用するため、
+    // 現在のパス権ではなく初期パス権を渡す必要がある（二重消費を防ぐため）
+    const getPassRightsOption = useCallback(() => {
+        return buildPassRightsOptionForLegalMoves(passRightsSettings, movesRef.current);
+    }, [passRightsSettings]);
     // movesRefをnavigationの変更に同期し、legalCacheをクリア
     useEffect(() => {
         movesRef.current = moves;
         // ナビゲーションで局面が変わったらキャッシュをクリア
-        legalCache.clear();
-    }, [moves, legalCache]);
+        clearLegalCache();
+    }, [moves, clearLegalCache]);
+    // パス権設定変更時にキャッシュもクリアするラッパー
+    // （合法手にpassが含まれるかどうかが変わるため）
+    const handlePassRightsSettingsChange = useCallback(
+        (newSettings: PassRightsSettings) => {
+            setPassRightsSettings(newSettings);
+            clearLegalCache();
+        },
+        [setPassRightsSettings, clearLegalCache],
+    );
+
+    const hasPassRights = position.passRights && position.passRights[position.turn] > 0;
+    // パス合法可否が計算済みか
+    const passLegalKnown = legalCache.isCached(moves.length);
+    // パス可能かどうかの判定（合法手キャッシュに"pass"が含まれるかでのみ判定）
+    // 判定前は楽観的に true とし、実際の適用時に再チェックする
+    const canMakePassMove =
+        isMatchRunning &&
+        sides[position.turn].role === "human" &&
+        !!hasPassRights &&
+        (passLegalKnown ? canPassLegal : true);
+    // ボタン表示可否（対局中でパス機能が有効な場合に表示）
+    // パス権が0でも表示（レイアウトシフト防止）。非活性理由はdisabledReasonで管理。
+    const shouldRenderPassButton =
+        isMatchRunning &&
+        passRightsSettings?.enabled &&
+        passRightsSettings.initialCount > 0 &&
+        !!position.passRights;
+
+    // パス権が有効なら不足時に初期化しておく（編集開始局面などでpassRightsが未設定な場合に備える）
+    useEffect(() => {
+        if (!passRightsSettings?.enabled) return;
+        ensurePassRightsInitialized();
+    }, [ensurePassRightsInitialized, passRightsSettings?.enabled]);
+    const passButtonDisabledReason: PassDisabledReason | undefined = (() => {
+        if (!isMatchRunning) return "match-not-running";
+        if (sides[position.turn].role !== "human") return "not-your-turn";
+        if (!hasPassRights) return "no-rights";
+        if (passLegalKnown && !canPassLegal) return "in-check";
+        return undefined;
+    })();
+
     const matchEndedRef = useRef(false);
     const boardSectionRef = useRef<HTMLDivElement>(null);
     const settingsLocked = isMatchRunning;
@@ -434,6 +572,28 @@ export function ShogiMatch({
             matchEndedRef,
             onClockError: handleClockError,
         });
+
+    const getRemainingTimeMs = useCallback(
+        (side: Player) => {
+            const clock = clocksRef.current;
+            const state = clock[side];
+            if (!state) return 0;
+            const isTicking = clock.ticking === side;
+            const elapsed = isTicking ? Date.now() - clock.lastUpdatedAt : 0;
+            const mainLeft = Math.max(0, state.mainMs - elapsed);
+            const overMain = Math.max(0, elapsed - state.mainMs);
+            const byoyomiLeft =
+                state.mainMs === 0 && isTicking
+                    ? Math.max(0, state.byoyomiMs - elapsed)
+                    : Math.max(0, state.byoyomiMs - overMain);
+            return mainLeft + byoyomiLeft;
+        },
+        [clocksRef],
+    );
+    const shouldShowPassConfirm =
+        passButtonDisabledReason === undefined &&
+        getRemainingTimeMs(position.turn) <
+            (passRightsSettings?.confirmDialogThresholdMs ?? Infinity);
 
     // 対局前に timeSettings が変更されたら clocks を同期
     // （resetClocks は timeSettings に依存しているため、resetClocks の変更で検知可能）
@@ -479,35 +639,54 @@ export function ShogiMatch({
         await endMatch(result);
     }, [endMatch]);
 
+    // 手の処理中フラグ（待った・パス等の連打・競合防止用）
+    const moveProcessingRef = useRef(false);
+
     // 待った処理（2手戻す：相手の手と自分の前の手を戻す）
     const handleUndo = useCallback(async () => {
+        // 処理中なら無視（連打・競合防止）
+        if (moveProcessingRef.current) return;
+
         const moveCount = movesRef.current.length;
         if (moveCount === 0) return;
 
-        // エンジンの思考を停止（旧局面のbestmoveが適用されるのを防ぐ）
-        await stopAllEnginesRef.current();
+        moveProcessingRef.current = true;
 
-        // 2手戻す（自分の前の手まで戻る）
-        // ただし、1手しかない場合は1手だけ戻す
-        const undoCount = moveCount >= 2 ? 2 : 1;
+        try {
+            // まず時計を停止（待った処理中に時間が進むのを防ぐ）
+            stopTicking();
 
-        // 待った後の手番を明示的に計算
-        // React のバッチ処理により navigation.goBack() 後の positionRef.current は
-        // 即座に更新されないため、手番を事前に計算する
-        const turnBeforeUndo = positionRef.current.turn;
-        const turnAfterUndo =
-            undoCount % 2 === 1 ? (turnBeforeUndo === "sente" ? "gote" : "sente") : turnBeforeUndo;
+            // エンジンの思考を停止（旧局面のbestmoveが適用されるのを防ぐ）
+            await stopAllEnginesRef.current();
 
-        for (let i = 0; i < undoCount; i++) {
-            navigation.goBack();
+            // 2手戻す（自分の前の手まで戻る）
+            // ただし、1手しかない場合は1手だけ戻す
+            const undoCount = moveCount >= 2 ? 2 : 1;
+
+            // 待った後の手番を明示的に計算
+            // React のバッチ処理により navigation.goBack() 後の positionRef.current は
+            // 即座に更新されないため、手番を事前に計算する
+            const turnBeforeUndo = positionRef.current.turn;
+            const turnAfterUndo =
+                undoCount % 2 === 1
+                    ? turnBeforeUndo === "sente"
+                        ? "gote"
+                        : "sente"
+                    : turnBeforeUndo;
+
+            for (let i = 0; i < undoCount; i++) {
+                navigation.goBack();
+            }
+            movesRef.current = movesRef.current.slice(0, -undoCount);
+
+            // 待った後の思考時間計測を新しく開始
+            turnStartTimeRef.current = Date.now();
+            // 秒読みをリセット（計算した手番で時計を更新・開始）
+            updateClocksForNextTurn(turnAfterUndo);
+        } finally {
+            moveProcessingRef.current = false;
         }
-        movesRef.current = movesRef.current.slice(0, -undoCount);
-
-        // 待った後の思考時間計測を新しく開始
-        turnStartTimeRef.current = Date.now();
-        // 秒読みをリセット（計算した手番で時計を更新）
-        updateClocksForNextTurn(turnAfterUndo);
-    }, [navigation, updateClocksForNextTurn]);
+    }, [navigation, stopTicking, updateClocksForNextTurn]);
 
     const handleMoveFromEngineRef = useRef<(move: string) => void>(() => {});
 
@@ -556,9 +735,10 @@ export function ShogiMatch({
         clocksRef,
         startSfen,
         movesRef,
-        positionRef,
+        positionTurn: position.turn,
         isMatchRunning,
         positionReady,
+        passRightsSettings,
         onMoveFromEngine: (move) => handleMoveFromEngineRef.current(move),
         onMatchEnd: endMatch,
         onEvalUpdate: handleEvalUpdate,
@@ -625,7 +805,17 @@ export function ShogiMatch({
     // エンジンからの手を受け取って適用するコールバック
     const handleMoveFromEngine = useCallback(
         (move: string) => {
+            // 待った・パス処理中は無視（旧局面への適用防止）
+            if (moveProcessingRef.current) return;
             if (matchEndedRef.current) return;
+            // 手番チェック: エンジンの手番でない場合は無視
+            // （待った→パス→待った等の連続操作で古いbestmoveが届く競合状態を防止）
+            if (sides[positionRef.current.turn].role !== "engine") {
+                console.warn(
+                    `Ignoring engine move "${move}": current turn is ${positionRef.current.turn} (human)`,
+                );
+                return;
+            }
             const result = applyMoveWithState(positionRef.current, move, {
                 validateTurn: false,
             });
@@ -643,14 +833,101 @@ export function ShogiMatch({
             setLastMove(result.lastMove);
             setSelection(null);
             setMessage(null);
-            legalCache.clear();
+            clearLegalCache();
             // ターン開始時刻をリセット
             turnStartTimeRef.current = Date.now();
             updateClocksForNextTurn(result.next.turn);
         },
-        [legalCache, logEngineError, navigation, updateClocksForNextTurn],
+        [clearLegalCache, logEngineError, navigation, sides, updateClocksForNextTurn],
     );
     handleMoveFromEngineRef.current = handleMoveFromEngine;
+
+    // パス手を処理するコールバック
+    // 人間・エンジン両方のパス手で使用される
+    const handlePassMove = useCallback(async () => {
+        // 処理中なら無視（待ったとの競合防止）
+        if (moveProcessingRef.current) return;
+        if (matchEndedRef.current) return;
+        if (!passRightsSettings?.enabled) return;
+        const rights = positionRef.current.passRights ?? ensurePassRightsInitialized();
+        const hasRightsNow = rights ? rights[positionRef.current.turn] > 0 : false;
+        if (!hasRightsNow) {
+            setMessage({ text: "パス権がありません", type: "error" });
+            return;
+        }
+
+        moveProcessingRef.current = true;
+
+        try {
+            // 合法手をチェック（王手中はパスが合法手に含まれない）
+            // エンジン側の can_pass() は王手中のパスを禁止しており、
+            // パスが合法でない場合にloadPositionするとパニックするため、事前にチェック
+            try {
+                const passRightsOption = getPassRightsOption();
+                const resolver = fetchLegalMoves
+                    ? () => fetchLegalMoves(startSfen, movesRef.current, passRightsOption)
+                    : () =>
+                          getPositionService().getLegalMoves(
+                              startSfen,
+                              movesRef.current,
+                              passRightsOption,
+                          );
+                const ply = movesRef.current.length;
+                let legal = await legalCache.getOrResolve(ply, resolver);
+                if (!legal || !legal.has("pass")) {
+                    // パス権ありでも合法手に含まれない場合はキャッシュをクリアして再取得（パス権オプション漏れ対策）
+                    clearLegalCache();
+                    legal = await legalCache.getOrResolve(ply, resolver);
+                    if (!legal || !legal.has("pass")) {
+                        setMessage({ text: "王手されているためパスできません", type: "error" });
+                        return;
+                    }
+                }
+            } catch (error) {
+                setMessage({ text: `合法手の取得に失敗しました: ${String(error)}`, type: "error" });
+                return;
+            }
+
+            // "pass" を applyMoveWithState で適用
+            // validateTurn: false の理由:
+            // - 人間のパスはUI側で手番チェック済み（sides[position.turn].role === "human"）
+            // - エンジンのパスも受け付けるため、ここでは手番検証をスキップ
+            const result = applyMoveWithState(positionRef.current, "pass", {
+                validateTurn: false,
+            });
+
+            if (!result.ok) {
+                setMessage({ text: `パスに失敗しました: ${result.error}`, type: "error" });
+                return;
+            }
+
+            // 消費時間を計算
+            const elapsedMs = Date.now() - turnStartTimeRef.current;
+            // 棋譜ナビゲーションに手を追加（局面更新はonPositionChangeで自動実行）
+            navigation.addMove("pass", result.next, { elapsedMs });
+            movesRef.current = [...movesRef.current, "pass"];
+            setLastMove(result.lastMove);
+            setSelection(null);
+            setMessage(null);
+            clearLegalCache();
+
+            // ターン開始時刻をリセット
+            turnStartTimeRef.current = Date.now();
+            updateClocksForNextTurn(result.next.turn);
+        } finally {
+            moveProcessingRef.current = false;
+        }
+    }, [
+        fetchLegalMoves,
+        clearLegalCache,
+        getPassRightsOption,
+        legalCache,
+        ensurePassRightsInitialized,
+        navigation,
+        passRightsSettings,
+        startSfen,
+        updateClocksForNextTurn,
+    ]);
 
     useEffect(() => {
         let cancelled = false;
@@ -747,6 +1024,25 @@ export function ShogiMatch({
             // 対局開始時に編集モードを終了
             setIsEditMode(false);
         }
+
+        // パス権が有効な場合、対局開始時に初期化
+        // ナビゲーションのルートノードにもパス権を反映するため、navigation.resetを呼び直す
+        if (passRightsSettings?.enabled && !positionRef.current.passRights) {
+            const updatedPosition = {
+                ...positionRef.current,
+                passRights: {
+                    sente: passRightsSettings.initialCount,
+                    gote: passRightsSettings.initialCount,
+                },
+            };
+            setPosition(updatedPosition);
+            positionRef.current = updatedPosition;
+            // ナビゲーションのルートノードをパス権付きの局面で更新
+            // （待った時にパス権が復元されるようにするため）
+            navigation.reset(updatedPosition, startSfen);
+            movesRef.current = [];
+        }
+
         // 盤面セクションにスクロール
         setTimeout(() => {
             boardSectionRef.current?.scrollIntoView({
@@ -791,7 +1087,7 @@ export function ShogiMatch({
             const newSfen = await refreshStartSfen(current);
             navigation.reset(current, newSfen);
             movesRef.current = [];
-            legalCache.clear();
+            clearLegalCache();
             setIsEditMode(false);
             setMessage({
                 text: "局面を確定しました。対局開始でこの局面から進行します。",
@@ -818,13 +1114,13 @@ export function ShogiMatch({
             setSelection(null);
             setMessage(null);
             setLastAddedBranchInfo(null);
-            legalCache.clear();
+            clearLegalCache();
             // 編集モードに移行
             setIsEditMode(true);
         } catch {
             setMessage({ text: "編集モードへの移行に失敗しました。", type: "error" });
         }
-    }, [isMatchRunning, navigation, legalCache, refreshStartSfen]);
+    }, [clearLegalCache, isMatchRunning, navigation, refreshStartSfen]);
 
     const applyMoveCommon = useCallback(
         (nextPosition: PositionState, mv: string, last?: LastMove) => {
@@ -836,12 +1132,12 @@ export function ShogiMatch({
             setLastMove(last);
             setSelection(null);
             setMessage(null);
-            legalCache.clear();
+            clearLegalCache();
             // ターン開始時刻をリセット
             turnStartTimeRef.current = Date.now();
             updateClocksForNextTurn(nextPosition.turn);
         },
-        [legalCache, navigation, updateClocksForNextTurn],
+        [clearLegalCache, navigation, updateClocksForNextTurn],
     );
 
     /** 検討モードで手を適用（分岐作成、時計更新なし） */
@@ -863,7 +1159,7 @@ export function ShogiMatch({
             setLastMove(last);
             setSelection(null);
             setMessage(null);
-            legalCache.clear();
+            clearLegalCache();
 
             // 分岐が作成された場合は記録（ネスト分岐も含む）
             if (willCreateBranch && currentNode) {
@@ -871,7 +1167,7 @@ export function ShogiMatch({
                 setLastAddedBranchInfo({ ply: currentNode.ply, firstMove: mv });
             }
         },
-        [legalCache, navigation],
+        [clearLegalCache, navigation],
     );
 
     /** 平手初期局面にリセット */
@@ -907,24 +1203,72 @@ export function ShogiMatch({
             setEditPromoted(false);
             setEditOwner("sente");
             setEditPieceType(null);
-            legalCache.clear();
+            clearLegalCache();
             turnStartTimeRef.current = Date.now();
         } catch (error) {
             setMessage({ text: `平手初期化に失敗しました: ${String(error)}`, type: "error" });
         }
-    }, [navigation, resetClocks, stopAllEngines, legalCache.clear]);
+    }, [clearLegalCache, navigation, resetClocks, stopAllEngines]);
 
     const getLegalSet = useCallback(async (): Promise<Set<string> | null> => {
         if (!positionReady) return null;
         const ply = movesRef.current.length;
+        const passRightsOption = getPassRightsOption();
         const resolver = async () => {
             if (fetchLegalMoves) {
-                return fetchLegalMoves(startSfen, movesRef.current);
+                return fetchLegalMoves(startSfen, movesRef.current, passRightsOption);
             }
-            return getPositionService().getLegalMoves(startSfen, movesRef.current);
+            return getPositionService().getLegalMoves(
+                startSfen,
+                movesRef.current,
+                passRightsOption,
+            );
         };
-        return legalCache.getOrResolve(ply, resolver);
-    }, [positionReady, fetchLegalMoves, startSfen, legalCache]);
+        const result = await legalCache.getOrResolve(ply, resolver);
+        if (movesRef.current.length === ply) {
+            setCanPassLegal(result.has("pass"));
+        }
+        return result;
+    }, [positionReady, fetchLegalMoves, startSfen, legalCache, getPassRightsOption]);
+
+    // パス可否判定のため、キャッシュ未作成時は合法手をプリフェッチ
+    useEffect(() => {
+        if (!isMatchRunning || !positionReady) return;
+        if (sides[position.turn].role !== "human") return;
+        const ply = movesRef.current.length;
+        if (legalCache.isCached(ply)) return;
+
+        const passRightsOption = getPassRightsOption();
+        const resolver = async () => {
+            if (fetchLegalMoves) {
+                return fetchLegalMoves(startSfen, movesRef.current, passRightsOption);
+            }
+            return getPositionService().getLegalMoves(
+                startSfen,
+                movesRef.current,
+                passRightsOption,
+            );
+        };
+
+        // エラーはパスボタンクリック時の再解決に委ねる
+        void legalCache
+            .getOrResolve(ply, resolver)
+            .then((result) => {
+                if (movesRef.current.length === ply) {
+                    setCanPassLegal(result.has("pass"));
+                }
+            })
+            .catch(() => undefined);
+    }, [
+        fetchLegalMoves,
+        isMatchRunning,
+        legalCache,
+        getPassRightsOption,
+        position.turn,
+        positionReady,
+        sides,
+        startSfen,
+    ]);
 
     const applyEditedPosition = useCallback(
         async (nextPosition: PositionState) => {
@@ -954,7 +1298,7 @@ export function ShogiMatch({
                 setLastAddedBranchInfo(null); // 分岐状態をクリア
                 setEditFromSquare(null);
 
-                legalCache.clear();
+                clearLegalCache();
                 stopTicking();
                 matchEndedRef.current = false;
                 setIsMatchRunning(false);
@@ -966,7 +1310,7 @@ export function ShogiMatch({
                 setMessage({ text: "局面の適用に失敗しました。", type: "error" });
             }
         },
-        [navigation, legalCache, stopTicking, refreshStartSfen],
+        [clearLegalCache, navigation, stopTicking, refreshStartSfen],
     );
 
     const setPiecePromotion = useCallback(
@@ -1348,6 +1692,10 @@ export function ShogiMatch({
             }
 
             // ========== 対局モード ==========
+            // 待った・パス処理中は入力をブロック
+            if (moveProcessingRef.current) {
+                return;
+            }
             // 一時停止中は入力をブロック
             if (isPaused) {
                 return;
@@ -1536,7 +1884,16 @@ export function ShogiMatch({
         ) => {
             const filtered = list.filter(Boolean);
             const service = getPositionService();
-            const result = await service.replayMovesStrict(startSfenToLoad, filtered);
+            // パス入り棋譜の場合はpassRightsを渡す
+            const passRightsOption = buildPassRightsOptionForLegalMoves(
+                passRightsSettings,
+                filtered,
+            );
+            const result = await service.replayMovesStrict(
+                startSfenToLoad,
+                filtered,
+                passRightsOption,
+            );
 
             // 棋譜ナビゲーションをリセット
             navigation.reset(startPosition, startSfenToLoad);
@@ -1575,14 +1932,14 @@ export function ShogiMatch({
             setMessage(null);
             resetClocks(false);
 
-            legalCache.clear();
+            clearLegalCache();
             setPositionReady(true);
 
             if (result.error) {
                 throw new Error(result.error);
             }
         },
-        [navigation, resetClocks, legalCache],
+        [clearLegalCache, navigation, resetClocks, passRightsSettings],
     );
 
     // KIFコピー用コールバック
@@ -1896,7 +2253,7 @@ export function ShogiMatch({
 
                 setSelection(null);
                 resetClocks(false);
-                legalCache.clear();
+                clearLegalCache();
                 setPositionReady(true);
 
                 // インポート後は自動的に検討モードに入る
@@ -1906,7 +2263,7 @@ export function ShogiMatch({
                 throw new Error(`SFENの適用に失敗しました: ${String(error)}`);
             }
         },
-        [navigation, resetClocks, legalCache],
+        [clearLegalCache, navigation, resetClocks],
     );
 
     // KIFインポート（開始局面情報があれば使用）
@@ -2066,11 +2423,20 @@ export function ShogiMatch({
                     onTimeSettingsChange={setTimeSettings}
                     uiEngineOptions={uiEngineOptions}
                     settingsLocked={settingsLocked}
+                    // パス権設定
+                    passRightsSettings={passRightsSettings}
+                    onPassRightsSettingsChange={handlePassRightsSettingsChange}
+                    onPassMove={handlePassMove}
+                    canPassMove={canMakePassMove}
+                    passMoveDisabledReason={passButtonDisabledReason}
+                    passMoveConfirmDialog={shouldShowPassConfirm}
                     // クロック表示
                     clocks={clocks}
                     // 表示設定
                     displaySettingsFull={displaySettings}
                     onDisplaySettingsChange={setDisplaySettings}
+                    // メッセージ
+                    message={message}
                 />
             ) : (
                 <section className={matchLayoutClasses} style={matchLayoutCssVars}>
@@ -2168,6 +2534,25 @@ export function ShogiMatch({
                                                     }
                                                     flipBoard={flipBoard}
                                                 />
+                                                {/* パス権表示（上側プレイヤー） */}
+                                                {passRightsSettings?.enabled &&
+                                                    passRightsSettings.initialCount > 0 &&
+                                                    position.passRights && (
+                                                        <div className="flex justify-end mt-1">
+                                                            <PassRightsDisplay
+                                                                remaining={
+                                                                    position.passRights[info.owner]
+                                                                }
+                                                                max={
+                                                                    passRightsSettings.initialCount
+                                                                }
+                                                                isActive={
+                                                                    position.turn === info.owner
+                                                                }
+                                                                compact
+                                                            />
+                                                        </div>
+                                                    )}
                                             </div>
                                         );
                                     })()}
@@ -2216,31 +2601,52 @@ export function ShogiMatch({
                                     {(() => {
                                         const info = getHandInfo("bottom");
                                         return (
-                                            <PlayerHandSection
-                                                owner={info.owner}
-                                                hand={info.hand}
-                                                selectedPiece={
-                                                    selection?.kind === "hand"
-                                                        ? selection.piece
-                                                        : null
-                                                }
-                                                isActive={info.isActive}
-                                                onHandSelect={handleHandSelect}
-                                                onPiecePointerDown={
-                                                    isEditMode
-                                                        ? handleHandPiecePointerDown
-                                                        : undefined
-                                                }
-                                                isEditMode={isEditMode && !isMatchRunning}
-                                                isMatchRunning={isMatchRunning}
-                                                onIncrement={(piece) =>
-                                                    handleIncrementHand(info.owner, piece)
-                                                }
-                                                onDecrement={(piece) =>
-                                                    handleDecrementHand(info.owner, piece)
-                                                }
-                                                flipBoard={flipBoard}
-                                            />
+                                            <>
+                                                <PlayerHandSection
+                                                    owner={info.owner}
+                                                    hand={info.hand}
+                                                    selectedPiece={
+                                                        selection?.kind === "hand"
+                                                            ? selection.piece
+                                                            : null
+                                                    }
+                                                    isActive={info.isActive}
+                                                    onHandSelect={handleHandSelect}
+                                                    onPiecePointerDown={
+                                                        isEditMode
+                                                            ? handleHandPiecePointerDown
+                                                            : undefined
+                                                    }
+                                                    isEditMode={isEditMode && !isMatchRunning}
+                                                    isMatchRunning={isMatchRunning}
+                                                    onIncrement={(piece) =>
+                                                        handleIncrementHand(info.owner, piece)
+                                                    }
+                                                    onDecrement={(piece) =>
+                                                        handleDecrementHand(info.owner, piece)
+                                                    }
+                                                    flipBoard={flipBoard}
+                                                />
+                                                {/* パス権表示（下側プレイヤー） */}
+                                                {passRightsSettings?.enabled &&
+                                                    passRightsSettings.initialCount > 0 &&
+                                                    position.passRights && (
+                                                        <div className="flex justify-start mt-1 w-full">
+                                                            <PassRightsDisplay
+                                                                remaining={
+                                                                    position.passRights[info.owner]
+                                                                }
+                                                                max={
+                                                                    passRightsSettings.initialCount
+                                                                }
+                                                                isActive={
+                                                                    position.turn === info.owner
+                                                                }
+                                                                compact
+                                                            />
+                                                        </div>
+                                                    )}
+                                            </>
                                         );
                                     })()}
 
@@ -2266,6 +2672,18 @@ export function ShogiMatch({
                                         gameMode={gameMode}
                                         message={message}
                                         onOpenSettings={() => setIsSettingsModalOpen(true)}
+                                        passProps={
+                                            shouldRenderPassButton
+                                                ? {
+                                                      canPass: canMakePassMove,
+                                                      disabledReason: passButtonDisabledReason,
+                                                      onPass: handlePassMove,
+                                                      remainingPassRights:
+                                                          position.passRights?.[position.turn] ?? 0,
+                                                      showConfirmDialog: shouldShowPassConfirm,
+                                                  }
+                                                : undefined
+                                        }
                                     />
                                 </div>
                             </div>
@@ -2399,6 +2817,8 @@ export function ShogiMatch({
                                     onSidesChange={setSides}
                                     timeSettings={timeSettings}
                                     onTimeSettingsChange={setTimeSettings}
+                                    passRightsSettings={passRightsSettings}
+                                    onPassRightsSettingsChange={handlePassRightsSettingsChange}
                                     uiEngineOptions={uiEngineOptions}
                                     settingsLocked={settingsLocked}
                                 />

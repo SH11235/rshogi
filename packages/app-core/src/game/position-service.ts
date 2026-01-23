@@ -3,6 +3,7 @@ import {
     BOARD_RANKS,
     type BoardState,
     type Hands,
+    type PassRightsState,
     type Piece,
     type PieceType,
     type Player,
@@ -36,11 +37,21 @@ export interface HandsJson {
     gote: HandJson;
 }
 
+/**
+ * パス権のJSON表現
+ */
+export interface PassRightsJson {
+    sente: number;
+    gote: number;
+}
+
 export interface BoardStateJson {
     cells: CellJson[][];
     hands: HandsJson;
     turn: Player;
     ply?: number;
+    /** パス権の状態（オプション） */
+    pass_rights?: PassRightsJson;
 }
 
 export interface ReplayResultJson {
@@ -61,8 +72,16 @@ export interface PositionService {
     getInitialBoard(): Promise<PositionState>;
     parseSfen(sfen: string): Promise<PositionState>;
     boardToSfen(position: PositionState): Promise<string>;
-    getLegalMoves(sfen: string, moves?: string[]): Promise<string[]>;
-    replayMovesStrict(sfen: string, moves: string[]): Promise<ReplayResult>;
+    getLegalMoves(
+        sfen: string,
+        moves?: string[],
+        options?: { passRights?: { sente: number; gote: number } },
+    ): Promise<string[]>;
+    replayMovesStrict(
+        sfen: string,
+        moves: string[],
+        options?: { passRights?: { sente: number; gote: number } },
+    ): Promise<ReplayResult>;
 }
 
 const FILES_ASC: readonly string[] = [...BOARD_FILES].reverse();
@@ -127,7 +146,16 @@ export const boardJsonToPositionState = (json: BoardStateJson): PositionState =>
             board[cell.square] = pieceFromJson(cell.piece);
         }
     }
-    return { board, hands: handsFromJson(json.hands), turn: json.turn, ply: json.ply };
+    const passRights: PassRightsState | undefined = json.pass_rights
+        ? { sente: json.pass_rights.sente, gote: json.pass_rights.gote }
+        : undefined;
+    return {
+        board,
+        hands: handsFromJson(json.hands),
+        turn: json.turn,
+        ply: json.ply,
+        passRights,
+    };
 };
 
 export const positionStateToBoardJson = (state: PositionState): BoardStateJson => {
@@ -145,5 +173,8 @@ export const positionStateToBoardJson = (state: PositionState): BoardStateJson =
         hands: handsToJson(state.hands),
         turn: state.turn,
         ply: state.ply,
+        pass_rights: state.passRights
+            ? { sente: state.passRights.sente, gote: state.passRights.gote }
+            : undefined,
     };
 };

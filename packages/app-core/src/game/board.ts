@@ -25,20 +25,40 @@ export interface Hands {
 
 export type ParsedMove =
     | { kind: "move"; from: Square; to: Square; promote: boolean }
-    | { kind: "drop"; to: Square; piece: PieceType };
+    | { kind: "drop"; to: Square; piece: PieceType }
+    | { kind: "pass" };
+
+/**
+ * パス権の状態
+ * 各プレイヤーの残りパス権数を保持
+ */
+export interface PassRightsState {
+    /** 先手のパス権残数 */
+    sente: number;
+    /** 後手のパス権残数 */
+    gote: number;
+}
 
 export interface PositionState {
     board: BoardState;
     hands: Hands;
     turn: Player;
     ply?: number;
+    /**
+     * パス権の状態（オプション）
+     * 設定されていない場合はパス権ルールが無効
+     */
+    passRights?: PassRightsState;
 }
 
 export interface LastMove {
     from?: Square | null;
-    to: Square;
+    /** 移動先（パス手の場合は undefined） */
+    to?: Square;
     dropPiece?: PieceType;
     promotes?: boolean;
+    /** パス手の場合 true */
+    isPass?: boolean;
 }
 
 const ALL_SQUARES: Square[] = BOARD_RANKS.flatMap((rank) =>
@@ -98,6 +118,9 @@ const clonePosition = (position: PositionState): PositionState => ({
     hands: cloneHands(position.hands),
     turn: position.turn,
     ply: position.ply,
+    passRights: position.passRights
+        ? { sente: position.passRights.sente, gote: position.passRights.gote }
+        : undefined,
 });
 
 async function ensureInitialPosition(): Promise<PositionState> {
@@ -244,6 +267,36 @@ export function applyMoveWithState(
     const currentTurn = state.turn;
     let lastMove: LastMove | undefined;
 
+    // パス手の処理
+    if (parsed.kind === "pass") {
+        // パス権が設定されていない場合はエラー
+        if (!state.passRights) {
+            return { ok: false, next: state, error: "pass rights not enabled" };
+        }
+        const remainingPassRights = state.passRights[currentTurn];
+        if (remainingPassRights <= 0) {
+            return { ok: false, next: state, error: "no pass rights remaining" };
+        }
+        // パス権を消費して手番を交代
+        const newPassRights: PassRightsState = {
+            sente: currentTurn === "sente" ? state.passRights.sente - 1 : state.passRights.sente,
+            gote: currentTurn === "gote" ? state.passRights.gote - 1 : state.passRights.gote,
+        };
+        // パス手のlastMove（移動先なし）
+        lastMove = { isPass: true };
+        return {
+            ok: true,
+            next: {
+                board,
+                hands,
+                turn: toggleTurn(currentTurn),
+                ply: (state.ply ?? 1) + 1,
+                passRights: newPassRights,
+            },
+            lastMove,
+        };
+    }
+
     if (parsed.kind === "drop") {
         if (board[parsed.to]) {
             return { ok: false, next: state, error: "cannot drop onto occupied square" };
@@ -259,7 +312,13 @@ export function applyMoveWithState(
         lastMove = { from: null, to: parsed.to, dropPiece: parsed.piece, promotes: false };
         return {
             ok: true,
-            next: { board, hands: updatedHands, turn: toggleTurn(currentTurn) },
+            next: {
+                board,
+                hands: updatedHands,
+                turn: toggleTurn(currentTurn),
+                ply: (state.ply ?? 1) + 1,
+                passRights: state.passRights,
+            },
             lastMove,
         };
     }
@@ -292,7 +351,13 @@ export function applyMoveWithState(
 
     return {
         ok: true,
-        next: { board, hands: updatedHands, turn: toggleTurn(currentTurn) },
+        next: {
+            board,
+            hands: updatedHands,
+            turn: toggleTurn(currentTurn),
+            ply: (state.ply ?? 1) + 1,
+            passRights: state.passRights,
+        },
         lastMove,
     };
 }
@@ -355,6 +420,12 @@ export function isPlayerPiece(piece: Piece | null, player: Player): boolean {
 
 export function parseMove(move: string): ParsedMove | null {
     if (!move) return null;
+
+    // パス手の判定
+    if (move.toLowerCase() === "pass") {
+        return { kind: "pass" };
+    }
+
     const dropMatch = move.match(/^([prbsgnlk])\*([1-9][a-i])$/i);
     if (dropMatch) {
         const [, rawPiece, toSquare] = dropMatch;
@@ -377,6 +448,30 @@ export function parseMove(move: string): ParsedMove | null {
         to: to as Square,
         promote: promoteFlag === "+",
     };
+}
+
+/**
+ * 指し手がパス手かどうかを判定
+ */
+export function isPassMove(move: string): boolean {
+    return move.toLowerCase() === "pass";
+}
+
+/**
+ * 現在の局面でパスが可能かどうかを判定
+ *
+ * パスが可能な条件:
+ * 1. パス権ルールが有効（passRightsが設定されている）
+ * 2. 手番側のパス権が1以上残っている
+ *
+ * 注意: 王手されているかどうかはエンジン側で判定される
+ * （TypeScript層では王手判定機能がないため）
+ */
+export function canPass(state: PositionState): boolean {
+    if (!state.passRights) {
+        return false;
+    }
+    return state.passRights[state.turn] > 0;
 }
 
 export function getAllSquares(): Square[] {

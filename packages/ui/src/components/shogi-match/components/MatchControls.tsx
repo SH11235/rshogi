@@ -2,6 +2,7 @@ import type { ReactElement } from "react";
 import { Button } from "../../button";
 import type { GameMode, Message } from "../types";
 import { PausedModeControls, PlayingModeControls } from "./GameModeControls";
+import { PassButton, type PassDisabledReason } from "./PassButton";
 
 /** メッセージ種類に応じたスタイルクラス */
 const MESSAGE_STYLES: Record<Message["type"], string> = {
@@ -35,6 +36,19 @@ interface MatchControlsProps {
     message: Message | null;
     /** 設定を開くボタンのクリックハンドラ */
     onOpenSettings?: () => void;
+    /** パス関連のprops（パス機能有効時のみ渡される） */
+    passProps?: {
+        /** パス可能かどうか */
+        canPass: boolean;
+        /** パス不可の理由 */
+        disabledReason?: PassDisabledReason;
+        /** パスボタン押下時のコールバック */
+        onPass: () => void;
+        /** 残りパス権数 */
+        remainingPassRights: number;
+        /** 確認ダイアログを表示するかどうか */
+        showConfirmDialog?: boolean;
+    };
 }
 
 export function MatchControls({
@@ -50,6 +64,7 @@ export function MatchControls({
     gameMode = "editing",
     message,
     onOpenSettings,
+    passProps,
 }: MatchControlsProps): ReactElement {
     const isEditMode = gameMode === "editing";
     const isReviewMode = gameMode === "reviewing";
@@ -59,14 +74,25 @@ export function MatchControls({
         <div className="flex flex-col gap-2 items-center">
             {/* ボタン行 */}
             <div className="flex gap-2 flex-wrap justify-center min-h-[36px] items-center">
-                {/* 対局中: 停止・投了・待ったボタン */}
+                {/* 対局中: 停止・投了・待った・パスボタン */}
                 {isMatchRunning ? (
-                    <PlayingModeControls
-                        onStop={onStop}
-                        onResign={onResign}
-                        onUndo={onUndo}
-                        canUndo={canUndo}
-                    />
+                    <>
+                        <PlayingModeControls
+                            onStop={onStop}
+                            onResign={onResign}
+                            onUndo={onUndo}
+                            canUndo={canUndo}
+                        />
+                        {passProps && (
+                            <PassButton
+                                canPass={passProps.canPass}
+                                disabledReason={passProps.disabledReason}
+                                onPass={passProps.onPass}
+                                remainingPassRights={passProps.remainingPassRights}
+                                showConfirmDialog={passProps.showConfirmDialog}
+                            />
+                        )}
+                    </>
                 ) : (
                     <>
                         {/* 編集モード時: [対局開始] [設定] [平手に戻す] [検討開始] */}

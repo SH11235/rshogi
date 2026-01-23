@@ -47,15 +47,27 @@ export const createWasmPositionService = (): PositionService => {
             return boardToSfen(payload);
         },
 
-        async getLegalMoves(sfen: string, moves?: string[]): Promise<string[]> {
+        async getLegalMoves(
+            sfen: string,
+            moves?: string[],
+            options?: { passRights?: { sente: number; gote: number } },
+        ): Promise<string[]> {
             await ensureReady();
-            const result = wasm_get_legal_moves(sfen, moves ?? undefined);
+            const result = wasm_get_legal_moves(sfen, moves ?? undefined, options?.passRights);
             return result as unknown as string[];
         },
 
-        async replayMovesStrict(sfen: string, moves: string[]): Promise<ReplayResult> {
+        async replayMovesStrict(
+            sfen: string,
+            moves: string[],
+            options?: { passRights?: { sente: number; gote: number } },
+        ): Promise<ReplayResult> {
             await ensureReady();
-            const result = wasm_replay_moves_strict(sfen, moves) as ReplayResultJson;
+            const result = wasm_replay_moves_strict(
+                sfen,
+                moves,
+                options?.passRights,
+            ) as ReplayResultJson;
             return {
                 applied: result.applied,
                 lastPly: result.last_ply,

@@ -12,8 +12,15 @@ import { type KifuMove, MobileKifuBar } from "../components/MobileKifuBar";
 import { MobileNavigation } from "../components/MobileNavigation";
 import { MobileSettingsSheet } from "../components/MobileSettingsSheet";
 import { MoveDetailBottomSheet } from "../components/MoveDetailBottomSheet";
+import { PassButton, type PassDisabledReason } from "../components/PassButton";
 import type { ClockSettings, TickState } from "../hooks/useClockManager";
-import type { DisplaySettings, GameMode, PromotionSelection } from "../types";
+import type {
+    DisplaySettings,
+    GameMode,
+    Message,
+    PassRightsSettings,
+    PromotionSelection,
+} from "../types";
 import type { EvalHistory, KifMove as FullKifMove } from "../utils/kifFormat";
 
 type Selection = { kind: "square"; square: string } | { kind: "hand"; piece: PieceType };
@@ -97,12 +104,27 @@ interface MobileLayoutProps {
     uiEngineOptions: EngineOption[];
     settingsLocked: boolean;
 
+    // パス権設定（オプション）
+    passRightsSettings?: PassRightsSettings;
+    onPassRightsSettingsChange?: (settings: PassRightsSettings) => void;
+    /** パス手を指すハンドラ */
+    onPassMove?: () => void;
+    /** パスが可能かどうか */
+    canPassMove?: boolean;
+    /** パス不可理由（ツールチップ用） */
+    passMoveDisabledReason?: PassDisabledReason;
+    /** パス時に確認ダイアログを出すか */
+    passMoveConfirmDialog?: boolean;
+
     // クロック表示
     clocks: TickState;
 
     // 表示設定（フル版、BottomSheet用）
     displaySettingsFull: DisplaySettings;
     onDisplaySettingsChange: (settings: DisplaySettings) => void;
+
+    // メッセージ
+    message?: Message | null;
 
     // 持ち駒情報取得
     getHandInfo: (pos: "top" | "bottom") => {
@@ -184,9 +206,16 @@ export function MobileLayout({
     onTimeSettingsChange,
     uiEngineOptions,
     settingsLocked,
+    passRightsSettings,
+    onPassRightsSettingsChange,
+    onPassMove,
+    canPassMove,
+    passMoveDisabledReason,
+    passMoveConfirmDialog,
     clocks,
     displaySettingsFull,
     onDisplaySettingsChange,
+    message,
     getHandInfo,
     boardSectionRef,
     isDraggingPiece,
@@ -294,17 +323,34 @@ export function MobileLayout({
                     bottomHand={bottomHand}
                     boardSectionRef={boardSectionRef}
                     isDraggingPiece={isDraggingPiece}
+                    passRightsSettings={passRightsSettings}
+                    passRights={position.passRights}
+                    turn={position.turn}
                 />
             </main>
 
             {/* === コントロール: 残りの高さを使う、必要に応じて縮小 === */}
             <footer className="flex-1 flex flex-col min-h-0 pb-[env(safe-area-inset-bottom)]">
                 {gameMode === "playing" ? (
-                    /* 対局モード: 1行棋譜 + 停止・投了・待ったボタン */
+                    /* 対局モード: 1行棋譜 + パス権 + 停止・投了・待ったボタン */
                     <div className="flex flex-col gap-1 flex-shrink-0">
                         {kifMoves && kifMoves.length > 0 && (
                             <MobileKifuBar moves={kifMoves} currentPly={currentPly} />
                         )}
+                        {/* メッセージ表示（高さを常に確保してレイアウトシフトを防ぐ） */}
+                        <div
+                            className={`text-sm text-center px-2 min-h-[1.25rem] ${
+                                message
+                                    ? message.type === "error"
+                                        ? "text-destructive"
+                                        : message.type === "warning"
+                                          ? "text-yellow-600 dark:text-yellow-500"
+                                          : "text-green-600 dark:text-green-500"
+                                    : ""
+                            }`}
+                        >
+                            {message?.text}
+                        </div>
                         {onStop && (
                             <div className="flex justify-center gap-2 py-1">
                                 <PlayingModeControls
@@ -313,6 +359,20 @@ export function MobileLayout({
                                     onUndo={onUndo}
                                     canUndo={canUndo}
                                 />
+                                {/* パスボタン（パス機能有効時のみ） */}
+                                {passRightsSettings?.enabled &&
+                                    passRightsSettings.initialCount > 0 &&
+                                    position.passRights &&
+                                    onPassMove && (
+                                        <PassButton
+                                            canPass={canPassMove ?? false}
+                                            disabledReason={passMoveDisabledReason}
+                                            onPass={onPassMove}
+                                            remainingPassRights={position.passRights[position.turn]}
+                                            showConfirmDialog={passMoveConfirmDialog}
+                                            compact
+                                        />
+                                    )}
                             </div>
                         )}
                     </div>
@@ -464,6 +524,8 @@ export function MobileLayout({
                     onTimeSettingsChange={onTimeSettingsChange}
                     uiEngineOptions={uiEngineOptions}
                     settingsLocked={settingsLocked}
+                    passRightsSettings={passRightsSettings}
+                    onPassRightsSettingsChange={onPassRightsSettingsChange}
                     isMatchRunning={isMatchRunning}
                     onStartMatch={
                         onStart

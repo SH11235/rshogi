@@ -21,7 +21,9 @@ function App() {
         <main className="mx-auto flex max-w-[1100px] flex-col gap-3 md:px-5">
             <ShogiMatch
                 engineOptions={engineOptions}
-                fetchLegalMoves={(sfen, moves) => getLegalMoves({ sfen, moves })}
+                fetchLegalMoves={(sfen, moves, options) =>
+                    getLegalMoves({ sfen, moves, passRights: options?.passRights })
+                }
                 isDevMode={true}
             />
             <EngineControlPanel engine={panelEngine} />
