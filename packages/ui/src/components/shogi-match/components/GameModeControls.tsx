@@ -73,22 +73,26 @@ interface PausedModeControlsProps {
     onEnterEditMode?: () => void;
     /** 投了ボタンのクリックハンドラ */
     onResign?: () => void;
+    /** 設定ボタン（対局再開と局面編集の間に表示） */
+    settingsButton?: React.ReactNode;
 }
 
 /**
  * 一時停止中のコントロールボタン
- * 対局再開・局面編集・投了
+ * 対局再開・対局設定・局面編集・投了
  */
 export function PausedModeControls({
     onResume,
     onEnterEditMode,
     onResign,
+    settingsButton,
 }: PausedModeControlsProps): ReactElement {
     return (
         <>
             <Button type="button" onClick={onResume}>
                 対局再開
             </Button>
+            {settingsButton}
             {onEnterEditMode && (
                 <AlertDialog>
                     <AlertDialogTrigger asChild>

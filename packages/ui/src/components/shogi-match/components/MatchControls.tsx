@@ -147,14 +147,14 @@ export function MatchControls({
 
                         {/* 一時停止モード時: [対局再開] [対局設定] [局面編集] [投了] */}
                         {isPausedMode && (
-                            <>
-                                <PausedModeControls
-                                    onResume={onStart}
-                                    onEnterEditMode={onEnterEditMode}
-                                    onResign={onResign}
-                                />
-                                {onOpenSettings && <SettingsButton onClick={onOpenSettings} />}
-                            </>
+                            <PausedModeControls
+                                onResume={onStart}
+                                onEnterEditMode={onEnterEditMode}
+                                onResign={onResign}
+                                settingsButton={
+                                    onOpenSettings && <SettingsButton onClick={onOpenSettings} />
+                                }
+                            />
                         )}
                     </>
                 )}
