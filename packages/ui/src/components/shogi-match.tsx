@@ -636,37 +636,53 @@ export function ShogiMatch({
         await endMatch(result);
     }, [endMatch]);
 
+    // 手の処理中フラグ（待った・パス等の連打・競合防止用）
+    const moveProcessingRef = useRef(false);
+
     // 待った処理（2手戻す：相手の手と自分の前の手を戻す）
     const handleUndo = useCallback(async () => {
+        // 処理中なら無視（連打・競合防止）
+        if (moveProcessingRef.current) return;
+
         const moveCount = movesRef.current.length;
         if (moveCount === 0) return;
 
-        // まず時計を停止（待った処理中に時間が進むのを防ぐ）
-        stopTicking();
+        moveProcessingRef.current = true;
 
-        // エンジンの思考を停止（旧局面のbestmoveが適用されるのを防ぐ）
-        await stopAllEnginesRef.current();
+        try {
+            // まず時計を停止（待った処理中に時間が進むのを防ぐ）
+            stopTicking();
 
-        // 2手戻す（自分の前の手まで戻る）
-        // ただし、1手しかない場合は1手だけ戻す
-        const undoCount = moveCount >= 2 ? 2 : 1;
+            // エンジンの思考を停止（旧局面のbestmoveが適用されるのを防ぐ）
+            await stopAllEnginesRef.current();
 
-        // 待った後の手番を明示的に計算
-        // React のバッチ処理により navigation.goBack() 後の positionRef.current は
-        // 即座に更新されないため、手番を事前に計算する
-        const turnBeforeUndo = positionRef.current.turn;
-        const turnAfterUndo =
-            undoCount % 2 === 1 ? (turnBeforeUndo === "sente" ? "gote" : "sente") : turnBeforeUndo;
+            // 2手戻す（自分の前の手まで戻る）
+            // ただし、1手しかない場合は1手だけ戻す
+            const undoCount = moveCount >= 2 ? 2 : 1;
 
-        for (let i = 0; i < undoCount; i++) {
-            navigation.goBack();
+            // 待った後の手番を明示的に計算
+            // React のバッチ処理により navigation.goBack() 後の positionRef.current は
+            // 即座に更新されないため、手番を事前に計算する
+            const turnBeforeUndo = positionRef.current.turn;
+            const turnAfterUndo =
+                undoCount % 2 === 1
+                    ? turnBeforeUndo === "sente"
+                        ? "gote"
+                        : "sente"
+                    : turnBeforeUndo;
+
+            for (let i = 0; i < undoCount; i++) {
+                navigation.goBack();
+            }
+            movesRef.current = movesRef.current.slice(0, -undoCount);
+
+            // 待った後の思考時間計測を新しく開始
+            turnStartTimeRef.current = Date.now();
+            // 秒読みをリセット（計算した手番で時計を更新・開始）
+            updateClocksForNextTurn(turnAfterUndo);
+        } finally {
+            moveProcessingRef.current = false;
         }
-        movesRef.current = movesRef.current.slice(0, -undoCount);
-
-        // 待った後の思考時間計測を新しく開始
-        turnStartTimeRef.current = Date.now();
-        // 秒読みをリセット（計算した手番で時計を更新・開始）
-        updateClocksForNextTurn(turnAfterUndo);
     }, [navigation, stopTicking, updateClocksForNextTurn]);
 
     const handleMoveFromEngineRef = useRef<(move: string) => void>(() => {});
@@ -816,6 +832,8 @@ export function ShogiMatch({
     // パス手を処理するコールバック
     // 人間・エンジン両方のパス手で使用される
     const handlePassMove = useCallback(async () => {
+        // 処理中なら無視（待ったとの競合防止）
+        if (moveProcessingRef.current) return;
         if (matchEndedRef.current) return;
         if (!passRightsSettings?.enabled) return;
         const rights = positionRef.current.passRights ?? ensurePassRightsInitialized();
@@ -825,61 +843,67 @@ export function ShogiMatch({
             return;
         }
 
-        // 合法手をチェック（王手中はパスが合法手に含まれない）
-        // エンジン側の can_pass() は王手中のパスを禁止しており、
-        // パスが合法でない場合にloadPositionするとパニックするため、事前にチェック
+        moveProcessingRef.current = true;
+
         try {
-            const passRightsOption = getPassRightsOption();
-            const resolver = fetchLegalMoves
-                ? () => fetchLegalMoves(startSfen, movesRef.current, passRightsOption)
-                : () =>
-                      getPositionService().getLegalMoves(
-                          startSfen,
-                          movesRef.current,
-                          passRightsOption,
-                      );
-            const ply = movesRef.current.length;
-            let legal = await legalCache.getOrResolve(ply, resolver);
-            if (!legal || !legal.has("pass")) {
-                // パス権ありでも合法手に含まれない場合はキャッシュをクリアして再取得（パス権オプション漏れ対策）
-                clearLegalCache();
-                legal = await legalCache.getOrResolve(ply, resolver);
+            // 合法手をチェック（王手中はパスが合法手に含まれない）
+            // エンジン側の can_pass() は王手中のパスを禁止しており、
+            // パスが合法でない場合にloadPositionするとパニックするため、事前にチェック
+            try {
+                const passRightsOption = getPassRightsOption();
+                const resolver = fetchLegalMoves
+                    ? () => fetchLegalMoves(startSfen, movesRef.current, passRightsOption)
+                    : () =>
+                          getPositionService().getLegalMoves(
+                              startSfen,
+                              movesRef.current,
+                              passRightsOption,
+                          );
+                const ply = movesRef.current.length;
+                let legal = await legalCache.getOrResolve(ply, resolver);
                 if (!legal || !legal.has("pass")) {
-                    setMessage({ text: "王手されているためパスできません", type: "error" });
-                    return;
+                    // パス権ありでも合法手に含まれない場合はキャッシュをクリアして再取得（パス権オプション漏れ対策）
+                    clearLegalCache();
+                    legal = await legalCache.getOrResolve(ply, resolver);
+                    if (!legal || !legal.has("pass")) {
+                        setMessage({ text: "王手されているためパスできません", type: "error" });
+                        return;
+                    }
                 }
+            } catch (error) {
+                setMessage({ text: `合法手の取得に失敗しました: ${String(error)}`, type: "error" });
+                return;
             }
-        } catch (error) {
-            setMessage({ text: `合法手の取得に失敗しました: ${String(error)}`, type: "error" });
-            return;
+
+            // "pass" を applyMoveWithState で適用
+            // validateTurn: false の理由:
+            // - 人間のパスはUI側で手番チェック済み（sides[position.turn].role === "human"）
+            // - エンジンのパスも受け付けるため、ここでは手番検証をスキップ
+            const result = applyMoveWithState(positionRef.current, "pass", {
+                validateTurn: false,
+            });
+
+            if (!result.ok) {
+                setMessage({ text: `パスに失敗しました: ${result.error}`, type: "error" });
+                return;
+            }
+
+            // 消費時間を計算
+            const elapsedMs = Date.now() - turnStartTimeRef.current;
+            // 棋譜ナビゲーションに手を追加（局面更新はonPositionChangeで自動実行）
+            navigation.addMove("pass", result.next, { elapsedMs });
+            movesRef.current = [...movesRef.current, "pass"];
+            setLastMove(result.lastMove);
+            setSelection(null);
+            setMessage(null);
+            clearLegalCache();
+
+            // ターン開始時刻をリセット
+            turnStartTimeRef.current = Date.now();
+            updateClocksForNextTurn(result.next.turn);
+        } finally {
+            moveProcessingRef.current = false;
         }
-
-        // "pass" を applyMoveWithState で適用
-        // validateTurn: false の理由:
-        // - 人間のパスはUI側で手番チェック済み（sides[position.turn].role === "human"）
-        // - エンジンのパスも受け付けるため、ここでは手番検証をスキップ
-        const result = applyMoveWithState(positionRef.current, "pass", {
-            validateTurn: false,
-        });
-
-        if (!result.ok) {
-            setMessage({ text: `パスに失敗しました: ${result.error}`, type: "error" });
-            return;
-        }
-
-        // 消費時間を計算
-        const elapsedMs = Date.now() - turnStartTimeRef.current;
-        // 棋譜ナビゲーションに手を追加（局面更新はonPositionChangeで自動実行）
-        navigation.addMove("pass", result.next, { elapsedMs });
-        movesRef.current = [...movesRef.current, "pass"];
-        setLastMove(result.lastMove);
-        setSelection(null);
-        setMessage(null);
-        clearLegalCache();
-
-        // ターン開始時刻をリセット
-        turnStartTimeRef.current = Date.now();
-        updateClocksForNextTurn(result.next.turn);
     }, [
         fetchLegalMoves,
         clearLegalCache,
