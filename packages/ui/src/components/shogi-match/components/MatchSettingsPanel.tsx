@@ -1,5 +1,5 @@
 import type { EngineClient, SkillLevelSettings } from "@shogi/engine-client";
-import type { ReactElement } from "react";
+import { type ReactElement, useId } from "react";
 import { Button } from "../../button";
 import { Input } from "../../input";
 import { Switch } from "../../switch";
@@ -67,6 +67,7 @@ export function MatchSettingsPanel({
     currentNnueDisplayName,
     settingsLocked,
 }: MatchSettingsPanelProps): ReactElement {
+    const timeInputIdPrefix = useId();
     // 選択肢の値を生成: "human" または "engine:{engineId}"
     const getSelectorValue = (setting: SideSetting): string => {
         if (setting.role === "human") return "human";
@@ -140,6 +141,8 @@ export function MatchSettingsPanel({
         const settings = timeSettings[side];
         // 最大24時間（86400秒）
         const MAX_SECONDS = 86400;
+        const mainInputId = `${timeInputIdPrefix}-${side}-main`;
+        const byoyomiInputId = `${timeInputIdPrefix}-${side}-byoyomi`;
 
         const handleTimeChange = (field: "mainMs" | "byoyomiMs", inputValue: string) => {
             const parsed = Number(inputValue);
@@ -158,10 +161,10 @@ export function MatchSettingsPanel({
 
         return (
             <div className="flex flex-col gap-1.5">
-                {/* biome-ignore lint/a11y/noLabelWithoutControl: Input component renders native input inside label */}
-                <label className={labelClassName}>
+                <label className={labelClassName} htmlFor={mainInputId}>
                     持ち時間(秒)
                     <Input
+                        id={mainInputId}
                         type="number"
                         min={0}
                         max={MAX_SECONDS}
@@ -171,10 +174,10 @@ export function MatchSettingsPanel({
                         onChange={(e) => handleTimeChange("mainMs", e.target.value)}
                     />
                 </label>
-                {/* biome-ignore lint/a11y/noLabelWithoutControl: Input component renders native input inside label */}
-                <label className={labelClassName}>
+                <label className={labelClassName} htmlFor={byoyomiInputId}>
                     秒読み(秒)
                     <Input
+                        id={byoyomiInputId}
                         type="number"
                         min={0}
                         max={MAX_SECONDS}

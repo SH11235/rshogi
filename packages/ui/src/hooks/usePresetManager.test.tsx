@@ -229,7 +229,7 @@ describe("usePresetManager", () => {
             const storage = createMockStorage();
 
             // ダウンロードが完了しないモック
-            let resolveDownload: () => void;
+            let resolveDownload: (() => void) | undefined;
             mockFetch
                 .mockResolvedValueOnce({
                     ok: true,
@@ -278,7 +278,7 @@ describe("usePresetManager", () => {
             expect(result.current.error?.code).toBe("NNUE_DOWNLOAD_IN_PROGRESS");
 
             // クリーンアップ
-            resolveDownload!();
+            resolveDownload?.();
         });
 
         it("重複ファイルがある場合は既存のメタを返す", async () => {

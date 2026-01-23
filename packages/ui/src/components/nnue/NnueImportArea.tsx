@@ -94,10 +94,7 @@ export function NnueImportArea({
         : "ファイル選択ボタンをクリック";
 
     return (
-        // biome-ignore lint/a11y/noStaticElementInteractions: Drop zone requires interactive div
-        // biome-ignore lint/a11y/useSemanticElements: Drop zone with region role
-        <div
-            role="region"
+        <section
             aria-label="NNUE ファイルインポートエリア"
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
@@ -138,6 +135,6 @@ export function NnueImportArea({
             >
                 ファイルを選択...
             </Button>
-        </div>
+        </section>
     );
 }

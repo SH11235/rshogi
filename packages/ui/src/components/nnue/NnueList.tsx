@@ -1,5 +1,5 @@
 import type { NnueMeta } from "@shogi/app-core";
-import type { ReactElement } from "react";
+import { type ReactElement, useId } from "react";
 import { NnueListItem } from "./NnueListItem";
 
 export interface NnueListProps {
@@ -30,6 +30,7 @@ export function NnueList({
     deletingId,
     disabled = false,
 }: NnueListProps): ReactElement {
+    const groupName = useId();
     const presets = nnueList.filter((m) => m.source === "preset");
     const userUploaded = nnueList.filter((m) => m.source !== "preset");
 
@@ -53,6 +54,7 @@ export function NnueList({
                 }}
                 isSelected={selectedId === null}
                 onSelect={() => onSelect(null)}
+                name={groupName}
                 showDelete={false}
                 disabled={disabled}
             />
@@ -77,6 +79,7 @@ export function NnueList({
                             meta={meta}
                             isSelected={selectedId === meta.id}
                             onSelect={() => onSelect(meta.id)}
+                            name={groupName}
                             onDelete={onDelete ? () => onDelete(meta.id) : undefined}
                             showDelete={false}
                             isDeleting={deletingId === meta.id}
@@ -106,6 +109,7 @@ export function NnueList({
                             meta={meta}
                             isSelected={selectedId === meta.id}
                             onSelect={() => onSelect(meta.id)}
+                            name={groupName}
                             onDelete={onDelete ? () => onDelete(meta.id) : undefined}
                             showDelete={true}
                             isDeleting={deletingId === meta.id}

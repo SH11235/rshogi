@@ -44,6 +44,8 @@ import { applyDropResult, DragGhost, type DropResult, usePieceDnd } from "./shog
 // EngineOption 型を外部に再エクスポート
 export type { EngineOption };
 
+import { useNnueStorage } from "../hooks/useNnueStorage";
+import { NnueSelectorDialog } from "./nnue";
 import { AppMenu } from "./shogi-match/components/AppMenu";
 import { type ClockSettings, useClockManager } from "./shogi-match/hooks/useClockManager";
 import { useEngineManager } from "./shogi-match/hooks/useEngineManager";
@@ -83,8 +85,6 @@ import { type KifMoveData, parseSfen } from "./shogi-match/utils/kifParser";
 import { LegalMoveCache } from "./shogi-match/utils/legalMoveCache";
 import { determinePromotion } from "./shogi-match/utils/promotionLogic";
 import { TooltipProvider } from "./tooltip";
-import { NnueSelectorDialog } from "./nnue";
-import { useNnueStorage } from "../hooks/useNnueStorage";
 
 type Selection = { kind: "square"; square: string } | { kind: "hand"; piece: PieceType };
 

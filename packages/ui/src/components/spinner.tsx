@@ -31,10 +31,10 @@ export function Spinner({
     ...props
 }: SpinnerProps): ReactElement {
     return (
-        // biome-ignore lint/a11y/useSemanticElements: Spinner requires div with role="status"
         <div
-            role="status"
-            aria-label={label}
+            aria-live="polite"
+            aria-atomic="true"
+            aria-busy="true"
             style={{
                 borderTopColor: "transparent",
                 borderRightColor: "transparent",
