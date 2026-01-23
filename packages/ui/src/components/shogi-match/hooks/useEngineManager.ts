@@ -157,6 +157,8 @@ interface UseEngineManagerProps {
     onMatchEnd: (result: GameResult) => Promise<void>;
     /** 評価値更新時のコールバック */
     onEvalUpdate?: (ply: number, event: EngineInfoEvent) => void;
+    /** 解析完了時のコールバック */
+    onAnalysisComplete?: () => void;
     /** ログの最大件数 */
     maxLogs?: number;
 }
@@ -330,6 +332,7 @@ export function useEngineManager({
     onMoveFromEngine,
     onMatchEnd,
     onEvalUpdate,
+    onAnalysisComplete,
     maxLogs = 80,
 }: UseEngineManagerProps): UseEngineManagerReturn {
     const [engineReady, setEngineReady] = useState<Record<Player, boolean>>({
@@ -1014,6 +1017,7 @@ export function useEngineManager({
                     analysisEngineRef.current.handle = null;
                     analysisEngineRef.current.ply = null;
                     setIsAnalyzing(false);
+                    onAnalysisComplete?.();
                 }
 
                 if (event.type === "error") {
@@ -1021,6 +1025,7 @@ export function useEngineManager({
                     analysisEngineRef.current.handle = null;
                     analysisEngineRef.current.ply = null;
                     setIsAnalyzing(false);
+                    onAnalysisComplete?.();
                 }
             });
             analysisState.subscription = unsub;
@@ -1056,6 +1061,7 @@ export function useEngineManager({
                 addErrorLog(`探索開始エラー: ${String(error)}`);
                 analysisState.ply = null;
                 setIsAnalyzing(false);
+                onAnalysisComplete?.();
             }
         },
         [
@@ -1065,6 +1071,7 @@ export function useEngineManager({
             isAnalyzing,
             isMatchRunning,
             maxLogs,
+            onAnalysisComplete,
             passRightsSettings,
             onEvalUpdate,
             sides,

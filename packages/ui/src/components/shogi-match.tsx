@@ -726,6 +726,7 @@ export function ShogiMatch({
         onMoveFromEngine: (move) => handleMoveFromEngineRef.current(move),
         onMatchEnd: endMatch,
         onEvalUpdate: handleEvalUpdate,
+        onAnalysisComplete: () => setAnalyzingState(ANALYZING_STATE_NONE),
         maxLogs,
     });
     stopAllEnginesRef.current = stopAllEngines;
@@ -988,8 +989,8 @@ export function ShogiMatch({
             setIsMatchRunning(true);
             turnStartTimeRef.current = Date.now();
             startTicking(position.turn);
-            // エンジンの手番なら思考を開始
-            tryStartEngineTurn();
+            // エンジンの手番なら思考を開始（状態更新後に実行）
+            queueMicrotask(() => tryStartEngineTurnRef.current());
             return;
         }
 
@@ -1025,8 +1026,8 @@ export function ShogiMatch({
         // ターン開始時刻をリセット
         turnStartTimeRef.current = Date.now();
         startTicking(position.turn);
-        // エンジンの手番なら思考を開始
-        tryStartEngineTurn();
+        // エンジンの手番なら思考を開始（状態更新後に実行）
+        queueMicrotask(() => tryStartEngineTurnRef.current());
     };
 
     /** 検討モードを開始 */
@@ -2010,13 +2011,6 @@ export function ShogiMatch({
         },
         [navigation.tree, analyzePosition, startSfen],
     );
-
-    // 単発解析完了時の処理
-    useEffect(() => {
-        if (!isAnalyzing && analyzingState.type !== "none") {
-            setAnalyzingState(ANALYZING_STATE_NONE);
-        }
-    }, [isAnalyzing, analyzingState.type]);
 
     // 一括解析を開始（並列処理）- 本譜のみ
     const handleStartBatchAnalysis = useCallback(() => {
