@@ -856,6 +856,8 @@ export function useEngineManager({
     useEffect(() => {
         if (!isMatchRunning || !positionReady) return;
         if (!isEngineTurn(positionTurn)) return;
+        // エンジン停止後の再開トリガーに必要（engineReadyの変更で再実行される）
+        if (!engineReady[positionTurn]) return;
         const engineOpt = getEngineForSide(positionTurn);
         if (!engineOpt) return;
 
@@ -875,7 +877,7 @@ export function useEngineManager({
         });
     }, [
         addErrorLog,
-        engineReady, // エンジン停止後の再開トリガーに必要
+        engineReady,
         getEngineForSide,
         isEngineTurn,
         isMatchRunning,
