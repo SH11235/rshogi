@@ -641,6 +641,9 @@ export function ShogiMatch({
         const moveCount = movesRef.current.length;
         if (moveCount === 0) return;
 
+        // まず時計を停止（待った処理中に時間が進むのを防ぐ）
+        stopTicking();
+
         // エンジンの思考を停止（旧局面のbestmoveが適用されるのを防ぐ）
         await stopAllEnginesRef.current();
 
@@ -655,9 +658,9 @@ export function ShogiMatch({
 
         // 待った後の思考時間計測を新しく開始
         turnStartTimeRef.current = Date.now();
-        // 秒読みをリセット（戻った局面の手番で時計を更新）
+        // 秒読みをリセット（戻った局面の手番で時計を更新・開始）
         updateClocksForNextTurn(positionRef.current.turn);
-    }, [navigation, updateClocksForNextTurn]);
+    }, [navigation, stopTicking, updateClocksForNextTurn]);
 
     const handleMoveFromEngineRef = useRef<(move: string) => void>(() => {});
 

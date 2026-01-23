@@ -856,6 +856,7 @@ export function useEngineManager({
         });
     }, [
         addErrorLog,
+        engineReady, // エンジン停止後の再開トリガーに必要
         getEngineForSide,
         isEngineTurn,
         isMatchRunning,
