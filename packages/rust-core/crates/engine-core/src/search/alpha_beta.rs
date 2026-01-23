@@ -2365,7 +2365,8 @@ impl SearchWorker {
             // パス手評価ボーナス: パス手を実行した場合、評価値にボーナスを加算
             // スケーリングなし（常に設定値の100%を適用）
             // 負のボーナスも適用（パス抑制用途）
-            if mv.is_pass() {
+            // 注意: 詰みスコアには加算しない（mate距離が壊れるため）
+            if mv.is_pass() && !value.is_mate_score() {
                 let bonus = get_scaled_pass_move_bonus(pos.game_ply());
                 if bonus != 0 {
                     value += Value::new(bonus);

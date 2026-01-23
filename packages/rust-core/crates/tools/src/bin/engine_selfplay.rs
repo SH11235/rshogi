@@ -272,6 +272,12 @@ struct MetaSettings {
     skip_initial_ply: u32,
     #[serde(default = "default_skip_in_check")]
     skip_in_check: bool,
+    /// 先手の初期パス権数（パス権有効時のみ使用）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    initial_pass_count_black: Option<u8>,
+    /// 後手の初期パス権数（パス権有効時のみ使用）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    initial_pass_count_white: Option<u8>,
 }
 
 fn default_skip_in_check() -> bool {
@@ -1212,12 +1218,19 @@ fn main() -> Result<()> {
         cli.usi_options_black.clone().unwrap_or_else(|| common_usi_opts_early.clone());
     let white_usi_opts_early =
         cli.usi_options_white.clone().unwrap_or_else(|| common_usi_opts_early.clone());
+    // engine-usi は value == "true" || value == "1" で解釈するため両方検出する
+    let is_pass_rights_enabled_early = |o: &str| {
+        o == "PassRights=true"
+            || o == "PassRights = true"
+            || o == "PassRights=1"
+            || o == "PassRights = 1"
+    };
     let pass_rights_via_usi_early = black_usi_opts_early
         .iter()
-        .any(|o| o == "PassRights=true" || o == "PassRights = true")
+        .any(|o| is_pass_rights_enabled_early(o))
         || white_usi_opts_early
             .iter()
-            .any(|o| o == "PassRights=true" || o == "PassRights = true");
+            .any(|o| is_pass_rights_enabled_early(o));
 
     // USIオプションから InitialPassCount を解析
     let parse_initial_pass_count_early = |opts: &[String]| -> Option<u8> {
@@ -1373,14 +1386,17 @@ fn main() -> Result<()> {
         }
     }
 
-    // USIオプションで PassRights=true が設定されているかを検出
+    // USIオプションで PassRights=true/1 が設定されているかを検出
     // （--pass-rights-* 未指定でも --usi-options PassRights=true で有効化される場合に対応）
-    let pass_rights_via_usi = black_usi_opts
-        .iter()
-        .any(|o| o == "PassRights=true" || o == "PassRights = true")
-        || white_usi_opts
-            .iter()
-            .any(|o| o == "PassRights=true" || o == "PassRights = true");
+    // engine-usi は value == "true" || value == "1" で解釈するため両方検出する
+    let is_pass_rights_enabled = |o: &str| {
+        o == "PassRights=true"
+            || o == "PassRights = true"
+            || o == "PassRights=1"
+            || o == "PassRights = 1"
+    };
+    let pass_rights_via_usi = black_usi_opts.iter().any(|o| is_pass_rights_enabled(o))
+        || white_usi_opts.iter().any(|o| is_pass_rights_enabled(o));
 
     // USIオプションから InitialPassCount を解析（エンジン設定と同期するため）
     let parse_initial_pass_count = |opts: &[String]| -> Option<u8> {
@@ -1463,6 +1479,16 @@ fn main() -> Result<()> {
             output_training_data: training_data_path.as_ref().map(|p| p.display().to_string()),
             skip_initial_ply: cli.skip_initial_ply,
             skip_in_check: cli.skip_in_check,
+            initial_pass_count_black: if pass_rights_enabled {
+                Some(cli.pass_rights_black.unwrap_or(usi_initial_pass_count))
+            } else {
+                None
+            },
+            initial_pass_count_white: if pass_rights_enabled {
+                Some(cli.pass_rights_white.unwrap_or(usi_initial_pass_count))
+            } else {
+                None
+            },
         },
         engine_cmd: EngineCommandMeta {
             path_black: engine_paths.black.path.display().to_string(),
@@ -2495,6 +2521,15 @@ fn start_position_for_game(
     // パス手がログに含まれているか確認
     let has_pass = moves.iter().any(|m| m.move_usi == "pass");
 
+    // metaから初期パス権数を取得（未記録の場合は後方互換のため15を使用）
+    let (pass_black, pass_white) = if has_pass {
+        let black = meta.and_then(|m| m.settings.initial_pass_count_black).unwrap_or(15);
+        let white = meta.and_then(|m| m.settings.initial_pass_count_white).unwrap_or(15);
+        (black, white)
+    } else {
+        (0, 0)
+    };
+
     // random_startpos の場合は moves[0].sfen_before を優先
     // （meta.start_positions からの game_id % len() による選択は実際の対局と一致しないため）
     let use_moves_first = meta.map(|m| m.settings.random_startpos).unwrap_or(false);
@@ -2503,12 +2538,13 @@ fn start_position_for_game(
         if let Some(meta) = meta {
             if !meta.start_positions.is_empty() {
                 let idx = ((game_id - 1) as usize) % meta.start_positions.len();
-                if let Ok((mut pos, sfen)) = start_position_from_command(&meta.start_positions[idx])
-                {
-                    // パス手があればパス権利を有効化（大きな値で初期化）
+                if let Ok((mut pos, _)) = start_position_from_command(&meta.start_positions[idx]) {
+                    // パス手があればパス権利を有効化（metaの設定値を使用）
                     if has_pass {
-                        pos.enable_pass_rights(15, 15);
+                        pos.enable_pass_rights(pass_black, pass_white);
                     }
+                    // SFENは正しいパス権値で再生成
+                    let sfen = pos.to_sfen();
                     return Some((pos, sfen));
                 }
             }
@@ -2517,9 +2553,9 @@ fn start_position_for_game(
     moves.first().and_then(|m| {
         let mut pos = Position::new();
         pos.set_sfen(&m.sfen_before).ok()?;
-        // パス手があればパス権利を有効化
+        // パス手があればパス権利を有効化（metaの設定値を使用）
         if has_pass {
-            pos.enable_pass_rights(15, 15);
+            pos.enable_pass_rights(pass_black, pass_white);
         }
         let sfen = pos.to_sfen();
         Some((pos, sfen))
