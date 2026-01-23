@@ -808,6 +808,14 @@ export function ShogiMatch({
             // 待った・パス処理中は無視（旧局面への適用防止）
             if (moveProcessingRef.current) return;
             if (matchEndedRef.current) return;
+            // 手番チェック: エンジンの手番でない場合は無視
+            // （待った→パス→待った等の連続操作で古いbestmoveが届く競合状態を防止）
+            if (sides[positionRef.current.turn].role !== "engine") {
+                console.warn(
+                    `Ignoring engine move "${move}": current turn is ${positionRef.current.turn} (human)`,
+                );
+                return;
+            }
             const result = applyMoveWithState(positionRef.current, move, {
                 validateTurn: false,
             });
@@ -830,7 +838,7 @@ export function ShogiMatch({
             turnStartTimeRef.current = Date.now();
             updateClocksForNextTurn(result.next.turn);
         },
-        [clearLegalCache, logEngineError, navigation, updateClocksForNextTurn],
+        [clearLegalCache, logEngineError, navigation, sides, updateClocksForNextTurn],
     );
     handleMoveFromEngineRef.current = handleMoveFromEngine;
 
