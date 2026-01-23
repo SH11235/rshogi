@@ -267,7 +267,6 @@ export function usePositionEditor(props: UsePositionEditorProps): UsePositionEdi
         await props.onStartSfenRefresh(current);
         props.legalCache.clear();
         setIsEditMode(false);
-        props.onMessageChange("局面を確定しました。対局開始でこの局面から進行します。");
     }, [props]);
 
     return {

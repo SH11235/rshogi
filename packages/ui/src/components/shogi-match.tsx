@@ -793,10 +793,6 @@ export function ShogiMatch({
             movesRef.current = [];
             legalCache.clear();
             setIsEditMode(false);
-            setMessage({
-                text: "局面を確定しました。対局開始でこの局面から進行します。",
-                type: "success",
-            });
         } catch {
             setMessage({ text: "局面の確定に失敗しました。", type: "error" });
         }

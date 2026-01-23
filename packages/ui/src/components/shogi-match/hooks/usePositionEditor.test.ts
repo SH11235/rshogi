@@ -491,9 +491,6 @@ describe("usePositionEditor", () => {
             expect(result.current.isEditMode).toBe(false);
             expect(mockProps.onBasePositionChange).toHaveBeenCalled();
             expect(mockProps.onStartSfenRefresh).toHaveBeenCalled();
-            expect(mockProps.onMessageChange).toHaveBeenCalledWith(
-                "局面を確定しました。対局開始でこの局面から進行します。",
-            );
         });
 
         it("finalizeEditedPosition は対局中は実行されない", async () => {
