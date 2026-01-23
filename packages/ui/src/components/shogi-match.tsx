@@ -551,7 +551,6 @@ export function ShogiMatch({
     }, []);
 
     const stopAllEnginesRef = useRef<() => Promise<void>>(async () => {});
-    const tryStartEngineTurnRef = useRef<() => void>(() => {});
 
     // 時計管理フックを使用
     const { clocks, clocksRef, resetClocks, updateClocksForNextTurn, stopTicking, startTicking } =
@@ -652,7 +651,9 @@ export function ShogiMatch({
         // ただし、1手しかない場合は1手だけ戻す
         const undoCount = moveCount >= 2 ? 2 : 1;
 
-        // 待った後の手番を明示的に計算（時計更新用）
+        // 待った後の手番を明示的に計算
+        // React のバッチ処理により navigation.goBack() 後の positionRef.current は
+        // 即座に更新されないため、手番を事前に計算する
         const turnBeforeUndo = positionRef.current.turn;
         const turnAfterUndo =
             undoCount % 2 === 1 ? (turnBeforeUndo === "sente" ? "gote" : "sente") : turnBeforeUndo;
@@ -666,9 +667,6 @@ export function ShogiMatch({
         turnStartTimeRef.current = Date.now();
         // 秒読みをリセット（計算した手番で時計を更新・開始）
         updateClocksForNextTurn(turnAfterUndo);
-
-        // 待った後がエンジンの手番なら思考を開始
-        tryStartEngineTurnRef.current();
     }, [navigation, stopTicking, updateClocksForNextTurn]);
 
     const handleMoveFromEngineRef = useRef<(move: string) => void>(() => {});
@@ -705,7 +703,6 @@ export function ShogiMatch({
         errorLogs,
         stopAllEngines,
         isEngineTurn,
-        tryStartEngineTurn,
         logEngineError,
         isAnalyzing,
         analyzePosition,
@@ -719,7 +716,7 @@ export function ShogiMatch({
         clocksRef,
         startSfen,
         movesRef,
-        positionRef,
+        positionTurn: position.turn,
         isMatchRunning,
         positionReady,
         passRightsSettings,
@@ -729,7 +726,6 @@ export function ShogiMatch({
         maxLogs,
     });
     stopAllEnginesRef.current = stopAllEngines;
-    tryStartEngineTurnRef.current = tryStartEngineTurn;
 
     // 並列一括解析用のエンジンプール
     const engineOpt = engineOptions[0]; // デフォルトのエンジンオプションを使用
@@ -812,10 +808,8 @@ export function ShogiMatch({
             // ターン開始時刻をリセット
             turnStartTimeRef.current = Date.now();
             updateClocksForNextTurn(result.next.turn);
-            // 次がエンジンの手番なら思考を開始
-            tryStartEngineTurn();
         },
-        [clearLegalCache, logEngineError, navigation, tryStartEngineTurn, updateClocksForNextTurn],
+        [clearLegalCache, logEngineError, navigation, updateClocksForNextTurn],
     );
     handleMoveFromEngineRef.current = handleMoveFromEngine;
 
@@ -886,9 +880,6 @@ export function ShogiMatch({
         // ターン開始時刻をリセット
         turnStartTimeRef.current = Date.now();
         updateClocksForNextTurn(result.next.turn);
-
-        // パス後がエンジンの手番なら思考を開始
-        tryStartEngineTurn();
     }, [
         fetchLegalMoves,
         clearLegalCache,
@@ -898,7 +889,6 @@ export function ShogiMatch({
         navigation,
         passRightsSettings,
         startSfen,
-        tryStartEngineTurn,
         updateClocksForNextTurn,
     ]);
 
@@ -988,8 +978,6 @@ export function ShogiMatch({
             setIsMatchRunning(true);
             turnStartTimeRef.current = Date.now();
             startTicking(position.turn);
-            // エンジンの手番なら思考を開始
-            tryStartEngineTurn();
             return;
         }
 
@@ -1021,12 +1009,11 @@ export function ShogiMatch({
             });
         }, 100);
 
+        // エンジン管理は useEngineManager フックが自動的に処理する
         setIsMatchRunning(true);
         // ターン開始時刻をリセット
         turnStartTimeRef.current = Date.now();
         startTicking(position.turn);
-        // エンジンの手番なら思考を開始
-        tryStartEngineTurn();
     };
 
     /** 検討モードを開始 */
@@ -1107,11 +1094,8 @@ export function ShogiMatch({
             // ターン開始時刻をリセット
             turnStartTimeRef.current = Date.now();
             updateClocksForNextTurn(nextPosition.turn);
-
-            // 人間の手後がエンジンの手番なら思考を開始
-            tryStartEngineTurn();
         },
-        [clearLegalCache, navigation, tryStartEngineTurn, updateClocksForNextTurn],
+        [clearLegalCache, navigation, updateClocksForNextTurn],
     );
 
     /** 検討モードで手を適用（分岐作成、時計更新なし） */
@@ -1859,12 +1843,6 @@ export function ShogiMatch({
                 passRightsSettings,
                 filtered,
             );
-
-            // パス入り棋譜の場合、startPositionにpassRightsを設定
-            const startPositionWithPassRights: PositionState = passRightsOption.passRights
-                ? { ...startPosition, passRights: passRightsOption.passRights }
-                : startPosition;
-
             const result = await service.replayMovesStrict(
                 startSfenToLoad,
                 filtered,
@@ -1872,11 +1850,11 @@ export function ShogiMatch({
             );
 
             // 棋譜ナビゲーションをリセット
-            navigation.reset(startPositionWithPassRights, startSfenToLoad);
+            navigation.reset(startPosition, startSfenToLoad);
             setLastAddedBranchInfo(null); // 分岐状態をクリア
 
             // 各手を順番に追加
-            let currentPos = startPositionWithPassRights;
+            let currentPos = startPosition;
             for (let i = 0; i < result.applied.length; i++) {
                 const move = result.applied[i];
                 const data = moveData?.[i];

@@ -1,4 +1,4 @@
-import type { GameResult, Player, PositionState } from "@shogi/app-core";
+import type { GameResult, Player } from "@shogi/app-core";
 import type {
     EngineClient,
     EngineErrorCode,
@@ -143,8 +143,8 @@ interface UseEngineManagerProps {
     startSfen: string;
     /** 棋譜の ref */
     movesRef: { current: string[] };
-    /** 局面の ref */
-    positionRef: { current: PositionState };
+    /** 現在の手番（エンジンターン開始のトリガー用） */
+    positionTurn: Player;
     /** 対局実行中かどうか */
     isMatchRunning: boolean;
     /** 局面が準備完了しているか */
@@ -229,8 +229,6 @@ interface UseEngineManagerReturn {
     retryEngine: (side: Player) => Promise<void>;
     /** リトライ中かどうか */
     isRetrying: Record<Player, boolean>;
-    /** エンジンターンの開始を試行する（手番がエンジンなら思考開始） */
-    tryStartEngineTurn: () => void;
 }
 
 export function formatEvent(event: EngineEvent, label: string): string {
@@ -323,7 +321,7 @@ export function useEngineManager({
     clocksRef,
     startSfen,
     movesRef,
-    positionRef,
+    positionTurn,
     isMatchRunning,
     positionReady,
     passRightsSettings,
@@ -834,46 +832,37 @@ export function useEngineManager({
         };
     }, [addErrorLog, disposeEngineForSide]);
 
-    /**
-     * エンジンターンの開始を試行する
-     *
-     * 現在の手番がエンジンの場合、エンジンの思考を開始する。
-     * イベント発生箇所から明示的に呼び出す（useEffectでの自動開始は行わない）。
-     *
-     * 呼び出し箇所:
-     * - 対局開始時 (resumeAutoPlay)
-     * - 手が指された後 (handleMoveFromEngine, applyMoveForMatch, handlePassMove)
-     * - 待った後 (handleUndo)
-     */
-    const tryStartEngineTurn = useCallback(() => {
+    // エンジンターンの自動開始
+    // positionTurnをpropsで受け取ることで、手番変更時に確実にuseEffectが再実行される
+    useEffect(() => {
         if (!isMatchRunning || !positionReady) return;
-        const side = positionRef.current.turn;
-        if (!isEngineTurn(side)) return;
-        const engineOpt = getEngineForSide(side);
+        if (!isEngineTurn(positionTurn)) return;
+        const engineOpt = getEngineForSide(positionTurn);
         if (!engineOpt) return;
 
-        const searchState = searchStatesRef.current[side];
+        const searchState = searchStatesRef.current[positionTurn];
         const current = activeSearchRef.current;
 
-        if (current && current.side === side && current.engineId === engineOpt.id) {
+        if (current && current.side === positionTurn && current.engineId === engineOpt.id) {
             return;
         }
         if (searchState.requestPly === movesRef.current.length) return;
 
         searchState.requestPly = movesRef.current.length;
 
-        startEngineTurn(side).catch((error) => {
-            setEngineStatus((prev) => ({ ...prev, [side]: "error" }));
+        startEngineTurn(positionTurn).catch((error) => {
+            setEngineStatus((prev) => ({ ...prev, [positionTurn]: "error" }));
             addErrorLog(`engine error: ${String(error)}`);
         });
     }, [
         addErrorLog,
+        engineReady, // エンジン停止後の再開トリガーに必要
         getEngineForSide,
         isEngineTurn,
         isMatchRunning,
         movesRef,
         positionReady,
-        positionRef,
+        positionTurn,
         startEngineTurn,
     ]);
 
@@ -1088,7 +1077,6 @@ export function useEngineManager({
         stopAllEngines,
         getEngineForSide,
         isEngineTurn,
-        tryStartEngineTurn,
         logEngineError: addErrorLog,
         isAnalyzing,
         analyzePosition,
