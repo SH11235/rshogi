@@ -28,6 +28,11 @@ pub struct StateInfo {
     pub continuous_check: [i32; Color::NUM],
     /// ゲーム開始からの総手数（320手ルール用）
     pub game_ply: u16,
+    /// パス権残数（パック形式）
+    /// 上位4bit: 先手のパス権 (0-15)
+    /// 下位4bit: 後手のパス権 (0-15)
+    /// デフォルト: 0（パス権なし＝通常将棋）
+    pub pass_rights: u8,
 
     // === 再計算される部分 ===
     /// 盤面ハッシュ（手番込み）
@@ -71,6 +76,7 @@ impl StateInfo {
             plies_from_null: 0,
             continuous_check: [0; Color::NUM],
             game_ply: 0,
+            pass_rights: 0, // パス権なし＝通常将棋
             board_key: 0,
             hand_key: 0,
             hand_snapshot: [Hand::EMPTY; Color::NUM],
@@ -85,6 +91,29 @@ impl StateInfo {
             repetition_type: RepetitionState::None,
             material_value: Value::ZERO,
             last_move: Move::NONE,
+        }
+    }
+
+    /// 指定した手番のパス権残数を取得
+    #[inline]
+    pub fn get_pass_rights(&self, color: Color) -> u8 {
+        match color {
+            Color::Black => (self.pass_rights >> 4) & 0x0F,
+            Color::White => self.pass_rights & 0x0F,
+        }
+    }
+
+    /// 指定した手番のパス権を設定（内部用、Position経由で呼ぶこと）
+    #[inline]
+    pub(crate) fn set_pass_rights_internal(&mut self, color: Color, count: u8) {
+        let count = count.min(15); // 15超は丸める
+        match color {
+            Color::Black => {
+                self.pass_rights = (self.pass_rights & 0x0F) | ((count & 0x0F) << 4);
+            }
+            Color::White => {
+                self.pass_rights = (self.pass_rights & 0xF0) | (count & 0x0F);
+            }
         }
     }
 
@@ -107,6 +136,7 @@ impl StateInfo {
             plies_from_null: self.plies_from_null,
             continuous_check: self.continuous_check,
             game_ply: self.game_ply,
+            pass_rights: self.pass_rights, // パス権をコピー
             // 以下は再計算される
             board_key: self.board_key,
             hand_key: self.hand_key,
@@ -173,5 +203,51 @@ mod tests {
         assert_eq!(cloned.minor_piece_key, 42);
         assert_eq!(cloned.non_pawn_key, [7, 11]);
         assert!(cloned.previous.is_none());
+    }
+
+    // =========================================
+    // パス権関連のテスト
+    // =========================================
+
+    #[test]
+    fn test_pass_rights_storage() {
+        let mut state = StateInfo::new();
+        state.set_pass_rights_internal(Color::Black, 2);
+        state.set_pass_rights_internal(Color::White, 3);
+        assert_eq!(state.get_pass_rights(Color::Black), 2);
+        assert_eq!(state.get_pass_rights(Color::White), 3);
+        assert_eq!(state.pass_rights, 0x23);
+    }
+
+    #[test]
+    fn test_pass_rights_clamp() {
+        let mut state = StateInfo::new();
+        state.set_pass_rights_internal(Color::Black, 20);
+        assert_eq!(state.get_pass_rights(Color::Black), 15);
+    }
+
+    #[test]
+    fn test_pass_rights_independence() {
+        let mut state = StateInfo::new();
+        // 先手のパス権を設定
+        state.set_pass_rights_internal(Color::Black, 5);
+        assert_eq!(state.get_pass_rights(Color::Black), 5);
+        assert_eq!(state.get_pass_rights(Color::White), 0);
+
+        // 後手のパス権を設定（先手は変わらない）
+        state.set_pass_rights_internal(Color::White, 7);
+        assert_eq!(state.get_pass_rights(Color::Black), 5);
+        assert_eq!(state.get_pass_rights(Color::White), 7);
+    }
+
+    #[test]
+    fn test_pass_rights_partial_clone() {
+        let mut state = StateInfo::new();
+        state.set_pass_rights_internal(Color::Black, 3);
+        state.set_pass_rights_internal(Color::White, 5);
+
+        let cloned = state.partial_clone();
+        assert_eq!(cloned.get_pass_rights(Color::Black), 3);
+        assert_eq!(cloned.get_pass_rights(Color::White), 5);
     }
 }

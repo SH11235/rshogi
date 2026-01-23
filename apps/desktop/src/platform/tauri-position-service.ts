@@ -28,14 +28,27 @@ export const createTauriPositionService = (): PositionService => {
             return invoke<string>("board_to_sfen", { board: payload });
         },
 
-        async getLegalMoves(sfen: string, moves?: string[]): Promise<string[]> {
-            return invoke<string[]>("engine_legal_moves", { sfen, moves });
+        async getLegalMoves(
+            sfen: string,
+            moves?: string[],
+            options?: { passRights?: { sente: number; gote: number } },
+        ): Promise<string[]> {
+            return invoke<string[]>("engine_legal_moves", {
+                sfen,
+                moves,
+                pass_rights: options?.passRights,
+            });
         },
 
-        async replayMovesStrict(sfen: string, moves: string[]): Promise<ReplayResult> {
+        async replayMovesStrict(
+            sfen: string,
+            moves: string[],
+            options?: { passRights?: { sente: number; gote: number } },
+        ): Promise<ReplayResult> {
             const result = await invoke<ReplayResultJson>("engine_replay_moves_strict", {
                 sfen,
                 moves,
+                pass_rights: options?.passRights,
             });
             return {
                 applied: result.applied,

@@ -6,7 +6,7 @@ use super::board_effect::{
     update_by_no_capturing_piece, BoardEffects, LongEffects,
 };
 use super::state::StateInfo;
-use super::zobrist::{zobrist_hand, zobrist_psq, zobrist_side};
+use super::zobrist::{zobrist_hand, zobrist_pass_rights, zobrist_psq, zobrist_side};
 use crate::bitboard::{
     bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect, knight_effect,
     lance_effect, pawn_effect, rook_effect, silver_effect, Bitboard,
@@ -76,6 +76,8 @@ pub struct Position {
     pub(super) side_to_move: Color,
     /// 玉の位置 [Color]
     pub(super) king_square: [Square; Color::NUM],
+    /// パス権ルールが有効かどうか
+    pass_rights_enabled: bool,
 }
 
 impl Position {
@@ -135,6 +137,7 @@ impl Position {
             game_ply: 0,
             side_to_move: Color::Black,
             king_square: [Square::SQ_11; Color::NUM],
+            pass_rights_enabled: false,
         }
     }
 
@@ -679,13 +682,130 @@ impl Position {
         st.check_squares[PieceType::Dragon as usize] = dragon_effect(ksq, occupied);
     }
 
+    // ========== パス権 ==========
+
+    /// 指定した手番のパス権残数を取得
+    #[inline]
+    pub fn pass_rights(&self, color: Color) -> u8 {
+        self.cur_state().get_pass_rights(color)
+    }
+
+    /// パス権ルールが有効かどうか
+    #[inline]
+    pub fn is_pass_rights_enabled(&self) -> bool {
+        self.pass_rights_enabled
+    }
+
+    /// 現在の手番がパス可能か
+    ///
+    /// 条件:
+    /// - パス権ルールが有効
+    /// - 王手されていない
+    /// - パス権が残っている
+    #[inline]
+    pub fn can_pass(&self) -> bool {
+        self.pass_rights_enabled && !self.in_check() && self.pass_rights(self.side_to_move) > 0
+    }
+
+    /// パス権ルールの有効/無効を設定
+    ///
+    /// 【重要】無効化時に状態を正規化
+    /// - `enabled=false` のとき、pass_rights を (0,0) にリセット
+    /// - これにより「無効なのにキー体系が異なる」経路を閉じる
+    pub fn set_pass_rights_enabled(&mut self, enabled: bool) {
+        self.pass_rights_enabled = enabled;
+
+        // 無効化時は状態を正規化（キー互換性を保証）
+        if !enabled {
+            self.set_pass_rights_pair(0, 0);
+        }
+    }
+
+    /// パス権を設定（ハッシュ更新込み）
+    ///
+    /// 差分更新により冪等性を保証（同じ値で2回呼んでもkeyは変わらない）
+    #[allow(dead_code)] // Phase 3 で使用予定
+    pub(crate) fn set_pass_rights(&mut self, color: Color, count: u8) {
+        let count = count.min(15);
+        let st = self.cur_state_mut();
+
+        let old_black = st.get_pass_rights(Color::Black);
+        let old_white = st.get_pass_rights(Color::White);
+
+        st.set_pass_rights_internal(color, count);
+
+        let new_black = st.get_pass_rights(Color::Black);
+        let new_white = st.get_pass_rights(Color::White);
+
+        // Zobrist差分更新（冪等性保証）
+        st.board_key ^= zobrist_pass_rights(old_black, old_white);
+        st.board_key ^= zobrist_pass_rights(new_black, new_white);
+    }
+
+    /// 両者のパス権をまとめて設定（初期化用）
+    ///
+    /// 差分更新により冪等性を保証（同じ値で2回呼んでもkeyは変わらない）
+    pub(crate) fn set_pass_rights_pair(&mut self, black: u8, white: u8) {
+        let black = black.min(15);
+        let white = white.min(15);
+        let st = self.cur_state_mut();
+
+        let old_black = st.get_pass_rights(Color::Black);
+        let old_white = st.get_pass_rights(Color::White);
+
+        st.set_pass_rights_internal(Color::Black, black);
+        st.set_pass_rights_internal(Color::White, white);
+
+        // Zobrist差分更新
+        st.board_key ^= zobrist_pass_rights(old_black, old_white);
+        st.board_key ^= zobrist_pass_rights(black, white);
+    }
+
+    /// パス権付きで局面を初期化（外部向けAPI）
+    ///
+    /// # Arguments
+    /// * `sfen` - SFEN文字列
+    /// * `black_rights` - 先手のパス権（0-15）
+    /// * `white_rights` - 後手のパス権（0-15）
+    pub fn set_sfen_with_pass_rights(
+        &mut self,
+        sfen: &str,
+        black_rights: u8,
+        white_rights: u8,
+    ) -> Result<(), super::sfen::SfenError> {
+        self.set_sfen(sfen)?;
+        self.set_pass_rights_enabled(true);
+        self.set_pass_rights_pair(black_rights, white_rights);
+        Ok(())
+    }
+
+    /// パス権ルールを有効化してパス権を設定（外部向けAPI）
+    ///
+    /// 既に set_sfen() や set_hirate() で局面を設定した後に呼ぶことを想定。
+    pub fn enable_pass_rights(&mut self, black_rights: u8, white_rights: u8) {
+        self.set_pass_rights_enabled(true);
+        self.set_pass_rights_pair(black_rights, white_rights);
+    }
+
+    /// 平手初期局面をパス権付きで初期化（外部向けAPI）
+    pub fn set_startpos_with_pass_rights(&mut self, black_rights: u8, white_rights: u8) {
+        self.set_hirate();
+        self.set_pass_rights_enabled(true);
+        self.set_pass_rights_pair(black_rights, white_rights);
+    }
+
     // ========== 指し手実行 ==========
 
     /// 指し手を実行
     ///
     /// DirtyPieceを返す。探索時はAccumulatorStackと同期して使用する。
     /// NNUE評価を使わない場合は無視して良い。
+    ///
+    /// PASSの場合は do_pass_move に委譲する。
     pub fn do_move(&mut self, m: Move, gives_check: bool) -> DirtyPiece {
+        if m.is_pass() {
+            return self.do_pass_move();
+        }
         let noop = NoPrefetch;
         self.do_move_with_prefetch(m, gives_check, &noop)
     }
@@ -696,6 +816,11 @@ impl Position {
         gives_check: bool,
         prefetcher: &P,
     ) -> DirtyPiece {
+        // PASSの場合は do_pass_move に委譲
+        if m.is_pass() {
+            return self.do_pass_move();
+        }
+
         let us = self.side_to_move;
         let them = !us;
         let prev_continuous = self.cur_state().continuous_check;
@@ -1054,7 +1179,13 @@ impl Position {
     }
 
     /// 指し手を戻す
+    ///
+    /// PASSの場合は undo_pass_move に委譲する。
     pub fn undo_move(&mut self, m: Move) {
+        if m.is_pass() {
+            return self.undo_pass_move();
+        }
+
         // 1. 手番を戻す
         self.side_to_move = !self.side_to_move;
         self.game_ply -= 1;
@@ -1197,6 +1328,99 @@ impl Position {
         self.state_idx = prev_idx;
     }
 
+    /// パス手を実行
+    ///
+    /// 【重要】
+    /// - checkers は正しく再計算する（相手が王手をかけたままパス可能なため）
+    /// - ハッシュ更新は StateInfo 更新前に差分計算
+    /// - assert! で release ビルドでも不正入力を検出
+    pub fn do_pass_move(&mut self) -> DirtyPiece {
+        // release ビルドでも検出
+        assert!(self.can_pass(), "Cannot pass: rule disabled, in check, or no pass rights");
+
+        let us = self.side_to_move;
+        let them = !us;
+
+        // 1. partial_clone で StateInfo をコピー
+        let mut new_state = self.cur_state().partial_clone();
+
+        // 2. パス権のZobrist差分を計算（変更前に取得）
+        let old_black = new_state.get_pass_rights(Color::Black);
+        let old_white = new_state.get_pass_rights(Color::White);
+
+        // 3. パス権を消費（checked_sub で underflow 防止）
+        let new_black = if us == Color::Black {
+            old_black.checked_sub(1).expect("Black pass rights underflow")
+        } else {
+            old_black
+        };
+        let new_white = if us == Color::White {
+            old_white.checked_sub(1).expect("White pass rights underflow")
+        } else {
+            old_white
+        };
+        new_state.set_pass_rights_internal(Color::Black, new_black);
+        new_state.set_pass_rights_internal(Color::White, new_white);
+
+        // 4. Zobristキー更新（手番 + パス権）
+        new_state.board_key ^= zobrist_side();
+        new_state.board_key ^= zobrist_pass_rights(old_black, old_white);
+        new_state.board_key ^= zobrist_pass_rights(new_black, new_white);
+
+        // 5. その他の StateInfo 更新
+        new_state.captured_piece = Piece::NONE;
+        new_state.last_move = Move::PASS;
+        new_state.hand_snapshot = self.hand;
+        // パスは合法手なので通常の手と同様にカウントを進める（千日手検出のため）
+        // ※ do_null_move（探索用）とは異なり、0リセットしない
+        new_state.plies_from_null += 1;
+
+        // 6. 連続王手カウンタ: パスが王手を維持する場合はカウンタを更新
+        // （自分が相手玉に攻撃している場合、パス後も相手は王手状態）
+        let their_king = self.king_square(them);
+        let gives_check = !self.attackers_to_c(their_king, us).is_empty();
+        if gives_check {
+            // 王手を維持するので、連続王手カウンタを更新（do_moveと同様）
+            new_state.continuous_check[us.index()] += 2;
+        } else {
+            new_state.continuous_check[us.index()] = 0;
+        }
+        // 受け手側はリセット（do_moveと同様）
+        new_state.continuous_check[them.index()] = 0;
+
+        // 7. 手番交代
+        self.side_to_move = them;
+        self.game_ply += 1;
+
+        // 8. push_state で StateInfo を積む
+        self.push_state(new_state);
+
+        // 9. 【重要】checkers を正しく計算
+        // （相手が王手をかけたままパスした場合、こちらは王手状態になる）
+        // Note: side_to_move は既に them に変更済み
+        self.cur_state_mut().checkers =
+            self.attackers_to_c(self.king_square(self.side_to_move), !self.side_to_move);
+
+        // 10. blockers/pinners/check_squares を更新
+        self.update_blockers_and_pinners();
+        self.update_check_squares();
+
+        // 11. 繰り返し情報を更新
+        self.update_repetition_info();
+
+        // PASSは盤面変化なしのため、DirtyPiece は空で返す
+        DirtyPiece::new()
+    }
+
+    /// パス手を戻す
+    pub fn undo_pass_move(&mut self) {
+        self.side_to_move = !self.side_to_move;
+        self.game_ply -= 1;
+
+        let prev_idx = self.cur_state().previous.expect("No previous state for undo_pass_move");
+        self.state_idx = prev_idx;
+    }
+
     /// 繰り返し情報を更新（最大16手遡り）
     fn update_repetition_info(&mut self) {
         // 初期化
@@ -1277,7 +1501,17 @@ impl Position {
     }
 
     /// 王手になるかどうか
+    ///
+    /// PASSの場合：自分が相手玉に王手をかけている状態なら true
+    /// （パス後、相手が王手状態になるため）
     pub fn gives_check(&self, m: Move) -> bool {
+        // PASS の場合：自分が相手玉に攻撃しているか
+        if m.is_pass() {
+            let them = !self.side_to_move;
+            let their_king = self.king_square(them);
+            return !self.attackers_to_c(their_king, self.side_to_move).is_empty();
+        }
+
         let us = self.side_to_move;
         let to = m.to();
 
@@ -2183,5 +2417,276 @@ mod tests {
 
         pos.undo_move(mv);
         assert!(!pos.bishop_horse().contains(to), "undo後に馬がbishop_horse_bbに残っている");
+    }
+
+    // =========================================
+    // パス権（Finite Pass Rights）テスト
+    // =========================================
+
+    #[test]
+    fn test_pass_rights_enabled_default() {
+        let mut pos = Position::new();
+        pos.set_hirate();
+        // デフォルトは無効
+        assert!(!pos.is_pass_rights_enabled());
+        assert_eq!(pos.pass_rights(Color::Black), 0);
+        assert_eq!(pos.pass_rights(Color::White), 0);
+    }
+
+    #[test]
+    fn test_set_startpos_with_pass_rights() {
+        let mut pos = Position::new();
+        pos.set_startpos_with_pass_rights(2, 2);
+
+        assert!(pos.is_pass_rights_enabled());
+        assert_eq!(pos.pass_rights(Color::Black), 2);
+        assert_eq!(pos.pass_rights(Color::White), 2);
+        assert!(pos.can_pass()); // 先手番、王手されていない、パス権あり
+    }
+
+    #[test]
+    fn test_set_sfen_with_pass_rights() {
+        let mut pos = Position::new();
+        pos.set_sfen_with_pass_rights(
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            3,
+            5,
+        )
+        .unwrap();
+
+        assert!(pos.is_pass_rights_enabled());
+        assert_eq!(pos.pass_rights(Color::Black), 3);
+        assert_eq!(pos.pass_rights(Color::White), 5);
+    }
+
+    #[test]
+    fn test_can_pass_requires_enabled() {
+        let mut pos = Position::new();
+        pos.set_hirate();
+
+        // 無効時は can_pass() = false
+        assert!(!pos.is_pass_rights_enabled());
+        assert!(!pos.can_pass());
+
+        // 有効化してもパス権0なので can_pass() = false
+        pos.set_pass_rights_enabled(true);
+        assert!(pos.is_pass_rights_enabled());
+        assert!(!pos.can_pass());
+    }
+
+    #[test]
+    fn test_can_pass_requires_no_check() {
+        // 王手状態でパスできないことを確認
+        // 5a に後手玉、5b に先手金 → 後手玉に王手
+        let sfen = "4k4/4G4/9/9/9/9/9/9/4K4 w - 1";
+        let mut pos = Position::new();
+        pos.set_sfen_with_pass_rights(sfen, 2, 2).unwrap();
+
+        // 後手番で王手されている
+        assert!(pos.in_check(), "White king at 5a should be in check from Gold at 5b");
+        assert!(!pos.can_pass()); // 王手中はパス不可
+    }
+
+    #[test]
+    fn test_do_pass_move_basic() {
+        let mut pos = Position::new();
+        pos.set_startpos_with_pass_rights(2, 2);
+
+        let key_before = pos.state().key();
+        let game_ply_before = pos.game_ply();
+
+        // パス実行
+        pos.do_pass_move();
+
+        // 手番が変わる
+        assert_eq!(pos.side_to_move(), Color::White);
+
+        // パス権が減る
+        assert_eq!(pos.pass_rights(Color::Black), 1);
+        assert_eq!(pos.pass_rights(Color::White), 2);
+
+        // ゲーム手数が増える（Position.game_ply）
+        assert_eq!(pos.game_ply(), game_ply_before + 1);
+
+        // ハッシュキーが変わる（手番とパス権の変化）
+        assert_ne!(pos.state().key(), key_before);
+    }
+
+    #[test]
+    fn test_undo_pass_move_restores_state() {
+        let mut pos = Position::new();
+        pos.set_startpos_with_pass_rights(2, 2);
+
+        let key_before = pos.state().key();
+        let side_before = pos.side_to_move();
+        let black_rights_before = pos.pass_rights(Color::Black);
+        let white_rights_before = pos.pass_rights(Color::White);
+        let game_ply_before = pos.game_ply();
+
+        pos.do_pass_move();
+        pos.undo_pass_move();
+
+        // 全ての状態が復元される
+        assert_eq!(pos.side_to_move(), side_before);
+        assert_eq!(pos.pass_rights(Color::Black), black_rights_before);
+        assert_eq!(pos.pass_rights(Color::White), white_rights_before);
+        assert_eq!(pos.game_ply(), game_ply_before);
+        assert_eq!(pos.state().key(), key_before);
+    }
+
+    #[test]
+    fn test_do_move_delegates_pass() {
+        let mut pos = Position::new();
+        pos.set_startpos_with_pass_rights(2, 2);
+
+        // do_move(Move::PASS, ...) がdo_pass_move と同じ結果になることを確認
+        let key_before = pos.state().key();
+        pos.do_move(Move::PASS, false);
+
+        assert_eq!(pos.side_to_move(), Color::White);
+        assert_eq!(pos.pass_rights(Color::Black), 1);
+        assert_ne!(pos.state().key(), key_before);
+    }
+
+    #[test]
+    fn test_undo_move_delegates_pass() {
+        let mut pos = Position::new();
+        pos.set_startpos_with_pass_rights(2, 2);
+
+        let key_before = pos.state().key();
+        pos.do_move(Move::PASS, false);
+        pos.undo_move(Move::PASS);
+
+        assert_eq!(pos.side_to_move(), Color::Black);
+        assert_eq!(pos.pass_rights(Color::Black), 2);
+        assert_eq!(pos.state().key(), key_before);
+    }
+
+    #[test]
+    fn test_pass_rights_hash_consistency() {
+        // パス権の有無でハッシュが異なることを確認
+        let mut pos_normal = Position::new();
+        pos_normal.set_hirate();
+
+        let mut pos_pass = Position::new();
+        pos_pass.set_startpos_with_pass_rights(0, 0);
+
+        // パス権(0,0) の場合は通常ルールとキー互換
+        // Note: pass_rights_enabled フラグ自体はハッシュに影響しない
+        assert_eq!(pos_normal.state().key(), pos_pass.state().key());
+
+        // パス権を設定するとキーが変わる
+        pos_pass.set_pass_rights_pair(2, 2);
+        assert_ne!(pos_normal.state().key(), pos_pass.state().key());
+    }
+
+    #[test]
+    fn test_set_pass_rights_enabled_normalizes_on_disable() {
+        let mut pos = Position::new();
+        pos.set_startpos_with_pass_rights(2, 3);
+
+        assert_eq!(pos.pass_rights(Color::Black), 2);
+        assert_eq!(pos.pass_rights(Color::White), 3);
+
+        // 無効化すると (0,0) に正規化される
+        pos.set_pass_rights_enabled(false);
+
+        assert!(!pos.is_pass_rights_enabled());
+        assert_eq!(pos.pass_rights(Color::Black), 0);
+        assert_eq!(pos.pass_rights(Color::White), 0);
+    }
+
+    #[test]
+    fn test_multiple_passes_decrement_correctly() {
+        let mut pos = Position::new();
+        pos.set_startpos_with_pass_rights(3, 2);
+
+        // 先手パス → 後手パス → 先手パス
+        pos.do_pass_move();
+        assert_eq!(pos.pass_rights(Color::Black), 2);
+        assert_eq!(pos.side_to_move(), Color::White);
+
+        pos.do_pass_move();
+        assert_eq!(pos.pass_rights(Color::White), 1);
+        assert_eq!(pos.side_to_move(), Color::Black);
+
+        pos.do_pass_move();
+        assert_eq!(pos.pass_rights(Color::Black), 1);
+        assert_eq!(pos.side_to_move(), Color::White);
+
+        // 3回戻す
+        pos.undo_pass_move();
+        pos.undo_pass_move();
+        pos.undo_pass_move();
+
+        assert_eq!(pos.pass_rights(Color::Black), 3);
+        assert_eq!(pos.pass_rights(Color::White), 2);
+        assert_eq!(pos.side_to_move(), Color::Black);
+    }
+
+    #[test]
+    fn test_pass_checkers_computed_correctly() {
+        // パス後に相手の攻撃が自分の玉への王手になることを確認
+        // 例: 先手が金を5七に置いて、後手玉が5一にいる状態
+        // 先手パス → 後手番、後手玉への王手はない
+        // 後手パス → 先手番、先手玉への王手はない
+        let mut pos = Position::new();
+        pos.set_startpos_with_pass_rights(2, 2);
+
+        // 平手初期局面でパス → 王手なし
+        pos.do_pass_move();
+        assert!(!pos.in_check());
+
+        pos.do_pass_move();
+        assert!(!pos.in_check());
+    }
+
+    #[test]
+    fn test_pass_while_giving_check() {
+        // 相手に王手をかけている状態でパス可能
+        // 先手が後手玉に王手 → 先手パス → 後手が王手状態になる
+        // 5a: 後手玉, 5b: 先手金（後手玉に王手）, 5i: 先手玉
+        let sfen = "4k4/4G4/9/9/9/9/9/9/4K4 b - 1";
+        let mut pos = Position::new();
+        pos.set_sfen_with_pass_rights(sfen, 2, 2).unwrap();
+
+        // 先手番で、後手玉に王手をかけている状態
+        assert_eq!(pos.side_to_move(), Color::Black);
+        assert!(!pos.in_check()); // 先手は王手されていない
+        assert!(pos.can_pass()); // 王手をかけていてもパス可能
+
+        // 先手がパス
+        pos.do_pass_move();
+
+        // 後手番になり、後手は王手状態
+        assert_eq!(pos.side_to_move(), Color::White);
+        assert!(pos.in_check(), "White should be in check after Black's pass");
+
+        // 後手はパスできない（王手中）
+        assert!(!pos.can_pass());
+    }
+
+    #[test]
+    fn test_set_pass_rights_idempotent() {
+        // 同じ値で2回呼んでもkeyが変わらない（冪等性）
+        let mut pos = Position::new();
+        pos.set_startpos_with_pass_rights(2, 3);
+
+        let key1 = pos.state().key();
+
+        // 同じ値で再度設定
+        pos.set_pass_rights_pair(2, 3);
+        let key2 = pos.state().key();
+
+        assert_eq!(key1, key2, "Setting same pass rights should not change key");
+
+        // 異なる値に変更してから元に戻す
+        pos.set_pass_rights_pair(5, 5);
+        let key3 = pos.state().key();
+        assert_ne!(key1, key3, "Different pass rights should change key");
+
+        pos.set_pass_rights_pair(2, 3);
+        let key4 = pos.state().key();
+        assert_eq!(key1, key4, "Restoring original pass rights should restore key");
     }
 }

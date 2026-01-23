@@ -33,6 +33,11 @@ impl Position {
             return false;
         }
 
+        // PASS の場合は can_pass() で判定
+        if m.is_pass() {
+            return self.can_pass();
+        }
+
         let us = self.side_to_move();
         let to = m.to();
 
@@ -206,9 +211,13 @@ impl Position {
     // =========================================================================
 
     /// 指し手で動く駒を取得
+    ///
+    /// PASSの場合は Piece::NONE を返す
     #[inline]
     pub fn moved_piece(&self, m: Move) -> Piece {
-        if m.is_drop() {
+        if m.is_pass() {
+            Piece::NONE
+        } else if m.is_drop() {
             // 駒打ちの場合は、手番と駒種から駒を構築
             Piece::make(self.side_to_move(), m.drop_piece_type())
         } else {
@@ -217,9 +226,11 @@ impl Position {
     }
 
     /// capture_stage: 捕獲手かどうか（ProbCut等の判定用）
+    ///
+    /// PASSは捕獲手ではない
     #[inline]
     pub fn capture_stage(&self, m: Move) -> bool {
-        !m.is_drop() && self.piece_on(m.to()).is_some()
+        !m.is_pass() && !m.is_drop() && self.piece_on(m.to()).is_some()
     }
 
     /// pseudo-legal判定（生成モード指定版）
@@ -234,7 +245,8 @@ impl Position {
     /// 取る手かどうか
     #[inline]
     pub fn is_capture(&self, m: Move) -> bool {
-        if m.is_drop() {
+        // PASS は駒を取らない
+        if m.is_pass() || m.is_drop() {
             false
         } else {
             self.piece_on(m.to()).is_some()
@@ -330,8 +342,8 @@ impl Position {
     ///
     /// 指し手の静的駒交換評価が閾値以上かどうかを高速に判定する。
     pub fn see_ge(&self, m: Move, threshold: Value) -> bool {
-        if m.is_drop() {
-            // 駒打ちは常に >= 0
+        // PASS/駒打ちは駒交換が発生しないので >= 0
+        if m.is_pass() || m.is_drop() {
             return threshold.raw() <= 0;
         }
 

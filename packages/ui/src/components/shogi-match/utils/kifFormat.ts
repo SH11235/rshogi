@@ -129,11 +129,14 @@ export function squareToKanji(sq: string): string {
 
 /**
  * USI形式の指し手から移動先マスを取得
- * @param usiMove "7g7f" or "P*5e" or "7g7f+"
- * @returns 移動先マス（例: "7f"）
+ * @param usiMove "7g7f" or "P*5e" or "7g7f+" or "pass"
+ * @returns 移動先マス（例: "7f"）、パス手の場合は undefined
  */
 export function parseToSquare(usiMove: string): Square | undefined {
     if (!usiMove || usiMove.length < 4) return undefined;
+
+    // パス手の場合は移動先マスがない
+    if (usiMove.toLowerCase() === "pass") return undefined;
 
     // 駒打ち: "P*5e"
     if (usiMove[1] === "*") {
@@ -172,7 +175,7 @@ function squareToDigits(sq: string): string {
 /**
  * USI形式の指し手をKIF形式に変換
  *
- * @param usiMove USI形式の指し手（例: "7g7f", "P*5e", "7g7f+"）
+ * @param usiMove USI形式の指し手（例: "7g7f", "P*5e", "7g7f+", "pass"）
  * @param turn 手番
  * @param board 現在の盤面状態（指し手適用前）
  * @param prevTo 直前の移動先マス（「同」表記判定用）
@@ -185,6 +188,11 @@ export function formatMoveToKif(
     prevTo?: Square,
 ): string {
     const mark = turn === "sente" ? "▲" : "△";
+
+    // パス手の処理
+    if (usiMove?.toLowerCase() === "pass") {
+        return `${mark}パス`;
+    }
 
     if (!usiMove || usiMove.length < 4) {
         return `${mark}${usiMove}`; // フォールバック
@@ -232,7 +240,7 @@ export function formatMoveToKif(
  * - 先手後手: ▲△ → ☗☖（Unicode駒記号）
  * - 筋: 全角（７）→ 半角（7）
  *
- * @param usiMove USI形式の指し手（例: "7g7f", "P*5e", "7g7f+"）
+ * @param usiMove USI形式の指し手（例: "7g7f", "P*5e", "7g7f+", "pass"）
  * @param turn 手番
  * @param board 現在の盤面状態（指し手適用前）
  * @param prevTo 直前の移動先マス（「同」表記判定用）
@@ -245,6 +253,11 @@ export function formatMoveSimple(
     prevTo?: Square,
 ): string {
     const mark = turn === "sente" ? "☗" : "☖";
+
+    // パス手の処理
+    if (usiMove?.toLowerCase() === "pass") {
+        return `${mark}パス`;
+    }
 
     if (!usiMove || usiMove.length < 4) {
         return `${mark}${usiMove}`; // フォールバック
@@ -497,14 +510,20 @@ export function convertMovesToKif(
         const turn: Player = i % 2 === 0 ? "sente" : "gote";
         const board = boardHistory[i];
         const nodeData = nodeDataMap?.get(ply);
+        const move = moves[i];
 
-        if (!board) {
-            // 盤面履歴がない場合はスキップ
+        // パス手の場合は盤面履歴がなくても処理可能
+        const isPassMove = move?.toLowerCase() === "pass";
+
+        if (!board && !isPassMove) {
+            // 盤面履歴がなく、パス手でもない場合はスキップ
             continue;
         }
 
-        const kifText = formatMoveToKif(moves[i], turn, board, prevTo);
-        const displayText = formatMoveSimple(moves[i], turn, board, prevTo);
+        // パス手の場合は空の盤面でも処理できる（formatMoveToKif/formatMoveSimpleがパスを特別処理する）
+        const effectiveBoard = board ?? ({} as BoardState);
+        const kifText = formatMoveToKif(move, turn, effectiveBoard, prevTo);
+        const displayText = formatMoveSimple(move, turn, effectiveBoard, prevTo);
 
         // multiPvEvals を PvEvalInfo[] に変換
         let multiPvEvals: PvEvalInfo[] | undefined;
@@ -833,7 +852,7 @@ export interface PvDisplayMove {
 /**
  * USI形式のPVを表示用に変換
  *
- * @param pv USI形式の指し手配列
+ * @param pv USI形式の指し手配列（パス手 "pass" を含む可能性あり）
  * @param position 現在局面（PV開始時点の局面）
  * @returns 表示用PV配列
  */
@@ -846,7 +865,7 @@ export function convertPvToDisplay(pv: string[], position: PositionState): PvDis
         const turn = currentPosition.turn;
         const board = currentPosition.board;
 
-        // 簡易表示形式に変換
+        // 簡易表示形式に変換（パス手も正しく処理される）
         const displayText = formatMoveSimple(usiMove, turn, board, prevTo);
 
         result.push({
@@ -862,7 +881,12 @@ export function convertPvToDisplay(pv: string[], position: PositionState): PvDis
             break;
         }
         currentPosition = moveResult.next;
-        prevTo = parseToSquare(usiMove);
+        // パス手の場合は prevTo をリセット（パス後の手では「同」表記を使わない）
+        if (usiMove.toLowerCase() === "pass") {
+            prevTo = undefined;
+        } else {
+            prevTo = parseToSquare(usiMove);
+        }
     }
 
     return result;

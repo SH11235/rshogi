@@ -8,7 +8,7 @@
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-use crate::eval::EvalHash;
+use crate::eval::{evaluate_pass_rights, get_scaled_pass_move_bonus, EvalHash};
 use crate::nnue::{evaluate_dispatch, get_network, AccumulatorStackVariant, DirtyPiece};
 use crate::position::Position;
 use crate::search::PieceToHistory;
@@ -443,9 +443,11 @@ impl SearchWorker {
     // NNUE ヘルパーメソッド（LayerStacks / HalfKP・HalfKA の分岐を隠蔽）
     // =========================================================================
 
-    /// NNUE 評価値を計算
+    /// NNUE 評価値を計算（パス権なし）
     ///
     /// ロードされた NNUE のアーキテクチャに応じて適切なアキュムレータと評価関数を使用。
+    /// パス権評価は手数依存のためここでは加算せず、静的評価補正後に毎回再計算して加える。
+    /// これにより TT/EvalHash（局面キーのみ）と整合し、再訪局面で古い手数のパス権評価を再利用しない。
     #[inline]
     fn nnue_evaluate(&mut self, pos: &Position) -> Value {
         evaluate_dispatch(pos, &mut self.nnue_stack)
@@ -564,7 +566,7 @@ impl SearchWorker {
         let mut cntcv = 0;
         if ply >= 2 {
             let prev_move = self.stack[(ply - 1) as usize].current_move;
-            if prev_move.is_some() {
+            if prev_move.is_normal() {
                 if let Some(prev2_key) = self.stack[(ply - 2) as usize].cont_hist_key {
                     let pc = pos.piece_on(prev_move.to());
                     cntcv = self.history.correction_history.continuation_value(
@@ -610,7 +612,7 @@ impl SearchWorker {
 
         if ply >= 2 {
             let prev_move = self.stack[(ply - 1) as usize].current_move;
-            if prev_move.is_some() {
+            if prev_move.is_normal() {
                 if let Some(prev2_key) = self.stack[(ply - 2) as usize].cont_hist_key {
                     let pc = pos.piece_on(prev_move.to());
                     self.history.correction_history.update_continuation(
@@ -764,6 +766,8 @@ impl SearchWorker {
 
         if !in_check && unadjusted_static_eval != Value::NONE {
             static_eval = to_corrected_static_eval(unadjusted_static_eval, correction_value);
+            // パス権評価を動的に追加（TTには保存されないので手数依存でもOK）
+            static_eval += evaluate_pass_rights(pos, pos.game_ply() as u16);
         }
 
         if !in_check
@@ -908,6 +912,8 @@ impl SearchWorker {
         // YaneuraOu準拠: prev_move != Move::null() のみをチェック
         // Move::NONEのチェックは不要（root直下でNMPを無効化してしまう）
         // YaneuraOuではASSERT_LV3で検証しているのみ
+        // NMP条件に加えて、連続パスの禁止（prev_move が PASS でないこと）
+        let prev_is_pass = prev_move.is_pass();
         if excluded_move.is_none()
             && cut_node
             && !in_check
@@ -915,18 +921,33 @@ impl SearchWorker {
             && ply >= self.nmp_min_ply
             && !beta.is_loss()
             && !prev_move.is_null()
+            && !prev_is_pass
+        // 連続パスを禁止
         {
             // Null move dynamic reduction based on depth（YaneuraOu準拠）
             let r = 7 + depth / 3;
 
+            // パス権ルールが有効かつパス可能な場合は、実際のパス手を使用
+            // これにより、パス権の消費が正しく反映され、評価もより正確になる
+            let use_pass = pos.is_pass_rights_enabled() && pos.can_pass();
+
             // YaneuraOu準拠: NullMove探索前にcurrent_moveとcont_hist_keyを設定
             // これにより再帰呼び出し先で連続NullMoveが禁止され、
             // continuation historyの不正参照を防ぐ
-            self.stack[ply as usize].current_move = Move::NULL;
+            if use_pass {
+                self.stack[ply as usize].current_move = Move::PASS;
+            } else {
+                self.stack[ply as usize].current_move = Move::NULL;
+            }
             self.clear_cont_history_for_null(ply);
 
-            pos.do_null_move_with_prefetch(self.tt.as_ref());
-            self.nnue_push(DirtyPiece::new()); // null moveでは駒の移動なし
+            // パス手または NullMove を実行
+            if use_pass {
+                pos.do_pass_move();
+            } else {
+                pos.do_null_move_with_prefetch(self.tt.as_ref());
+            }
+            self.nnue_push(DirtyPiece::new()); // パス/null moveでは駒の移動なし
             let null_value = -self.search_node::<{ NodeType::NonPV as u8 }>(
                 pos,
                 depth - r,
@@ -938,7 +959,11 @@ impl SearchWorker {
                 time_manager,
             );
             self.nnue_pop();
-            pos.undo_null_move();
+            if use_pass {
+                pos.undo_pass_move();
+            } else {
+                pos.undo_null_move();
+            }
 
             // Do not return unproven mate scores（勝ちスコアは信頼しない）
             if null_value >= beta && !null_value.is_win() {
@@ -1188,12 +1213,19 @@ impl SearchWorker {
                 }
                 ordered_moves.push(ext.mv);
             }
+            // PASSが王手になる場合は quiet check として追加
+            if pos.can_pass() && pos.gives_check(Move::PASS) && !ordered_moves.contains(&Move::PASS)
+            {
+                ordered_moves.push(Move::PASS);
+            }
         }
 
         // depth <= -5 なら recaptures のみに絞る
-        if depth <= -5 && ply >= 1 {
+        // ただし前手がPASSの場合は to() が未定義なのでスキップ
+        let prev_move = self.stack[(ply - 1) as usize].current_move;
+        if depth <= -5 && ply >= 1 && prev_move.is_normal() {
             let mut buf = crate::movegen::ExtMoveBuffer::new();
-            let rec_sq = self.stack[(ply - 1) as usize].current_move.to();
+            let rec_sq = prev_move.to();
             let gen_type = if self.generate_all_legal_moves {
                 crate::movegen::GenType::RecapturesAll
             } else {
@@ -1206,11 +1238,23 @@ impl SearchWorker {
             }
         }
 
+        // PASS は最低優先度（探索最後に試す）
+        // 静止探索 (depth <= DEPTH_QS) では PASS を追加しない
+        // TT手としてPASSが既に追加されている場合は重複を避ける
+        if depth > DEPTH_QS && pos.can_pass() && !ordered_moves.contains(&Move::PASS) {
+            ordered_moves.push(Move::PASS);
+        }
+
         (ordered_moves, tt_move)
     }
 
     /// Step14 の枝刈り（進行可否を返す）
     fn step14_pruning(&self, ctx: Step14Context<'_>) -> Step14Outcome {
+        // パス手は枝刈りの対象外（ボーナス評価のため探索する必要がある）
+        if ctx.mv.is_pass() {
+            return Step14Outcome::Continue;
+        }
+
         let mut lmr_depth = ctx.lmr_depth;
 
         if ctx.ply != 0 && !ctx.best_value.is_loss() {
@@ -1409,8 +1453,6 @@ impl SearchWorker {
             let mv = self.root_moves[rm_idx].mv();
             let gives_check = pos.gives_check(mv);
             let is_capture = pos.is_capture(mv);
-            let cont_hist_piece = mv.moved_piece_after();
-            let cont_hist_to = mv.to();
 
             let nodes_before = self.nodes;
 
@@ -1419,13 +1461,21 @@ impl SearchWorker {
             self.nnue_push(dirty_piece);
             self.nodes += 1;
             self.stack[0].current_move = mv;
-            self.set_cont_history_for_move(
-                0,
-                root_in_check,
-                is_capture,
-                cont_hist_piece,
-                cont_hist_to,
-            );
+
+            // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う
+            if mv.is_pass() {
+                self.clear_cont_history_for_null(0);
+            } else {
+                let cont_hist_piece = mv.moved_piece_after();
+                let cont_hist_to = mv.to();
+                self.set_cont_history_for_move(
+                    0,
+                    root_in_check,
+                    is_capture,
+                    cont_hist_piece,
+                    cont_hist_to,
+                );
+            }
 
             // PVS
             let value = if rm_idx == 0 {
@@ -1579,8 +1629,6 @@ impl SearchWorker {
             let mv = self.root_moves[rm_idx].mv();
             let gives_check = pos.gives_check(mv);
             let is_capture = pos.is_capture(mv);
-            let cont_hist_piece = mv.moved_piece_after();
-            let cont_hist_to = mv.to();
 
             let nodes_before = self.nodes;
 
@@ -1589,13 +1637,21 @@ impl SearchWorker {
             self.nnue_push(dirty_piece);
             self.nodes += 1;
             self.stack[0].current_move = mv;
-            self.set_cont_history_for_move(
-                0,
-                root_in_check,
-                is_capture,
-                cont_hist_piece,
-                cont_hist_to,
-            );
+
+            // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う
+            if mv.is_pass() {
+                self.clear_cont_history_for_null(0);
+            } else {
+                let cont_hist_piece = mv.moved_piece_after();
+                let cont_hist_to = mv.to();
+                self.set_cont_history_for_move(
+                    0,
+                    root_in_check,
+                    is_capture,
+                    cont_hist_piece,
+                    cont_hist_to,
+                );
+            }
 
             // PVS: 最初の手（このPVラインの候補）はPV探索
             let value = if rm_idx == pv_idx {
@@ -2049,7 +2105,8 @@ impl SearchWorker {
             // =============================================================
             // Late Move Pruning
             // =============================================================
-            if !pv_node && !in_check && !is_capture {
+            // パス手はLMPの対象外（ボーナス評価のため探索する必要がある）
+            if !pv_node && !in_check && !is_capture && !mv.is_pass() {
                 let lmp_limit = (3 + depth * depth) / (2 - improving as i32);
                 if move_count >= lmp_limit {
                     continue;
@@ -2059,7 +2116,8 @@ impl SearchWorker {
             // =============================================================
             // SEE Pruning
             // =============================================================
-            if !pv_node && depth <= 8 && !in_check {
+            // パス手はSEE Pruningの対象外（SEEは駒交換の評価でありパスには適用不可）
+            if !pv_node && depth <= 8 && !in_check && !mv.is_pass() {
                 let see_threshold = if is_capture {
                     Value::new(-20 * depth * depth)
                 } else {
@@ -2073,28 +2131,35 @@ impl SearchWorker {
             // 指し手を実行
             self.stack[ply as usize].current_move = mv;
 
-            // ContHistKey用の情報をMoveから取得（YaneuraOu方式）
-            let cont_hist_piece = mv.moved_piece_after();
-            let cont_hist_to = mv.to();
-
             let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, self.tt.as_ref());
             self.nnue_push(dirty_piece);
             self.nodes += 1;
+
             // YaneuraOu方式: ContHistKey/ContinuationHistoryを設定
             // ⚠ in_checkは親ノードの王手状態を使用（gives_checkではない）
-            self.set_cont_history_for_move(
-                ply,
-                in_check,
-                is_capture,
-                cont_hist_piece,
-                cont_hist_to,
-            );
+            // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う
+            if mv.is_pass() {
+                self.clear_cont_history_for_null(ply);
+            } else {
+                let cont_hist_piece = mv.moved_piece_after();
+                let cont_hist_to = mv.to();
+                self.set_cont_history_for_move(
+                    ply,
+                    in_check,
+                    is_capture,
+                    cont_hist_piece,
+                    cont_hist_to,
+                );
+            }
 
             // 手の記録（YaneuraOu準拠: quietsSearched, capturesSearched）
-            if is_capture {
-                captures_tried.push(mv);
-            } else {
-                quiets_tried.push(mv);
+            // PASS は history_index() が未定義のため記録しない
+            if !mv.is_pass() {
+                if is_capture {
+                    captures_tried.push(mv);
+                } else {
+                    quiets_tried.push(mv);
+                }
             }
 
             // 延長量をnew_depthに加算（YaneuraOu準拠: do_moveの後、yaneuraou-search.cpp:3482）
@@ -2138,7 +2203,10 @@ impl SearchWorker {
             }
 
             // statScoreによる補正
-            let stat_score = if is_capture {
+            // PASS は history が未定義のため stat_score = 0 とし、還元を控えめに
+            let stat_score = if mv.is_pass() {
+                0 // PASS は history がないので還元補正なし
+            } else if is_capture {
                 let captured = pos.captured_piece();
                 let captured_pt = captured.piece_type();
                 let moved_piece = mv.moved_piece_after();
@@ -2158,48 +2226,49 @@ impl SearchWorker {
             // =============================================================
             // 探索
             // =============================================================
-            let value =
-                if depth >= 2 && move_count > 1 {
-                    let d = (std::cmp::max(
-                        1,
-                        std::cmp::min(new_depth - r / 1024, new_depth + 1 + pv_node as i32),
-                    ) + pv_node as i32)
-                        .max(1);
+            let mut value = if depth >= 2 && move_count > 1 {
+                let d = (std::cmp::max(
+                    1,
+                    std::cmp::min(new_depth - r / 1024, new_depth + 1 + pv_node as i32),
+                ) + pv_node as i32)
+                    .max(1);
 
-                    let reduction_from_parent = (depth - 1) - d;
-                    self.stack[ply as usize].reduction = reduction_from_parent;
-                    let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
-                        pos,
-                        d,
-                        -alpha - Value::new(1),
-                        -alpha,
-                        ply + 1,
-                        true,
-                        limits,
-                        time_manager,
-                    );
-                    self.stack[ply as usize].reduction = 0;
+                let reduction_from_parent = (depth - 1) - d;
+                self.stack[ply as usize].reduction = reduction_from_parent;
+                let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
+                    pos,
+                    d,
+                    -alpha - Value::new(1),
+                    -alpha,
+                    ply + 1,
+                    true,
+                    limits,
+                    time_manager,
+                );
+                self.stack[ply as usize].reduction = 0;
 
-                    if value > alpha {
-                        let do_deeper =
-                            d < new_depth && value > (best_value + Value::new(43 + 2 * new_depth));
-                        let do_shallower = value < best_value + Value::new(9);
-                        new_depth += do_deeper as i32 - do_shallower as i32;
+                if value > alpha {
+                    let do_deeper =
+                        d < new_depth && value > (best_value + Value::new(43 + 2 * new_depth));
+                    let do_shallower = value < best_value + Value::new(9);
+                    new_depth += do_deeper as i32 - do_shallower as i32;
 
-                        if new_depth > d {
-                            value = -self.search_node::<{ NodeType::NonPV as u8 }>(
-                                pos,
-                                new_depth,
-                                -alpha - Value::new(1),
-                                -alpha,
-                                ply + 1,
-                                !cut_node,
-                                limits,
-                                time_manager,
-                            );
-                        }
+                    if new_depth > d {
+                        value = -self.search_node::<{ NodeType::NonPV as u8 }>(
+                            pos,
+                            new_depth,
+                            -alpha - Value::new(1),
+                            -alpha,
+                            ply + 1,
+                            !cut_node,
+                            limits,
+                            time_manager,
+                        );
+                    }
 
-                        // YaneuraOu: fail high後にcontHistを更新 (yaneuraou-search.cpp:3614-3618)
+                    // YaneuraOu: fail high後にcontHistを更新 (yaneuraou-search.cpp:3614-3618)
+                    // PASS は履歴の対象外なのでスキップ
+                    if !mv.is_pass() {
                         let moved_piece = mv.moved_piece_after();
                         let to_sq = mv.to();
                         const CONTHIST_BONUSES: &[(i32, i32)] =
@@ -2220,63 +2289,17 @@ impl SearchWorker {
                                     .update(key.piece, key.to, moved_piece, to_sq, bonus);
                             }
                         }
-                        // cutoffCntインクリメント条件 (extension<2 || PvNode) をベータカット時に加算で近似。
-                        // ※ Extension導入後は extension<2 を実際の延長量で判定する形に差し替えること。
-                    } else if value > alpha && value < best_value + Value::new(9) {
-                        #[allow(unused_assignments)]
-                        {
-                            new_depth -= 1;
-                        }
                     }
-
-                    if pv_node && (move_count == 1 || value > alpha) {
-                        self.stack[ply as usize].reduction = 0;
-                        -self.search_node::<{ NodeType::PV as u8 }>(
-                            pos,
-                            depth - 1,
-                            -beta,
-                            -alpha,
-                            ply + 1,
-                            false,
-                            limits,
-                            time_manager,
-                        )
-                    } else {
-                        value
+                    // cutoffCntインクリメント条件 (extension<2 || PvNode) をベータカット時に加算で近似。
+                    // ※ Extension導入後は extension<2 を実際の延長量で判定する形に差し替えること。
+                } else if value > alpha && value < best_value + Value::new(9) {
+                    #[allow(unused_assignments)]
+                    {
+                        new_depth -= 1;
                     }
-                } else if !pv_node || move_count > 1 {
-                    // Zero window search
-                    self.stack[ply as usize].reduction = 0;
-                    let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
-                        pos,
-                        depth - 1,
-                        -alpha - Value::new(1),
-                        -alpha,
-                        ply + 1,
-                        !cut_node,
-                        limits,
-                        time_manager,
-                    );
-                    self.stack[ply as usize].reduction = 0;
+                }
 
-                    if pv_node && value > alpha && value < beta {
-                        self.stack[ply as usize].reduction = 0;
-                        value = -self.search_node::<{ NodeType::PV as u8 }>(
-                            pos,
-                            depth - 1,
-                            -beta,
-                            -alpha,
-                            ply + 1,
-                            false,
-                            limits,
-                            time_manager,
-                        );
-                        self.stack[ply as usize].reduction = 0;
-                    }
-
-                    value
-                } else {
-                    // Full window search
+                if pv_node && (move_count == 1 || value > alpha) {
                     self.stack[ply as usize].reduction = 0;
                     -self.search_node::<{ NodeType::PV as u8 }>(
                         pos,
@@ -2288,9 +2311,67 @@ impl SearchWorker {
                         limits,
                         time_manager,
                     )
-                };
+                } else {
+                    value
+                }
+            } else if !pv_node || move_count > 1 {
+                // Zero window search
+                self.stack[ply as usize].reduction = 0;
+                let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
+                    pos,
+                    depth - 1,
+                    -alpha - Value::new(1),
+                    -alpha,
+                    ply + 1,
+                    !cut_node,
+                    limits,
+                    time_manager,
+                );
+                self.stack[ply as usize].reduction = 0;
+
+                if pv_node && value > alpha && value < beta {
+                    self.stack[ply as usize].reduction = 0;
+                    value = -self.search_node::<{ NodeType::PV as u8 }>(
+                        pos,
+                        depth - 1,
+                        -beta,
+                        -alpha,
+                        ply + 1,
+                        false,
+                        limits,
+                        time_manager,
+                    );
+                    self.stack[ply as usize].reduction = 0;
+                }
+
+                value
+            } else {
+                // Full window search
+                self.stack[ply as usize].reduction = 0;
+                -self.search_node::<{ NodeType::PV as u8 }>(
+                    pos,
+                    depth - 1,
+                    -beta,
+                    -alpha,
+                    ply + 1,
+                    false,
+                    limits,
+                    time_manager,
+                )
+            };
             self.nnue_pop();
             pos.undo_move(mv);
+
+            // パス手評価ボーナス: パス手を実行した場合、評価値にボーナスを加算
+            // スケーリングなし（常に設定値の100%を適用）
+            // 負のボーナスも適用（パス抑制用途）
+            // 注意: 詰みスコアには加算しない（mate距離が壊れるため）
+            if mv.is_pass() && !value.is_mate_score() {
+                let bonus = get_scaled_pass_move_bonus(pos.game_ply());
+                if bonus != 0 {
+                    value += Value::new(bonus);
+                }
+            }
 
             if self.abort {
                 return Value::ZERO;
@@ -2345,7 +2426,8 @@ impl SearchWorker {
         // History更新（YaneuraOu準拠: update_all_stats）
         // =================================================================
         // YaneuraOu: bestMoveがある場合は常にupdate_all_statsを呼ぶ
-        if best_move.is_some() {
+        // PASS は history_index() が未定義のためスキップ
+        if best_move.is_some() && !best_move.is_pass() {
             let is_best_capture = pos.is_capture(best_move);
             let is_tt_move = best_move == tt_move;
             // YaneuraOu準拠: bonus = min(170*depth-87, 1598) + 332*(bestMove==ttMove)
@@ -2806,6 +2888,8 @@ impl SearchWorker {
 
         if !in_check && unadjusted_static_eval != Value::NONE {
             static_eval = to_corrected_static_eval(unadjusted_static_eval, correction_value);
+            // パス権評価を動的に追加（TTには保存されないので手数依存でもOK）
+            static_eval += evaluate_pass_rights(pos, pos.game_ply() as u16);
         }
 
         self.stack[ply as usize].static_eval = static_eval;
@@ -2924,7 +3008,7 @@ impl SearchWorker {
                 }
             }
 
-            if !in_check && depth <= -5 && ply >= 1 && !prev_move.is_none() {
+            if !in_check && depth <= -5 && ply >= 1 && prev_move.is_normal() {
                 let mut buf = crate::movegen::ExtMoveBuffer::new();
                 let rec_sq = prev_move.to();
                 let gen_type = if self.generate_all_legal_moves {
@@ -2945,6 +3029,11 @@ impl SearchWorker {
         let mut move_count = 0;
 
         for mv in ordered_moves.iter() {
+            // 静止探索では PASS は対象外（TT手として来る可能性があるため明示的にスキップ）
+            if mv.is_pass() {
+                continue;
+            }
+
             if !pos.is_legal(mv) {
                 continue;
             }
@@ -2964,7 +3053,7 @@ impl SearchWorker {
 
             if !best_value.is_loss() {
                 if !gives_check
-                    && (prev_move.is_none() || mv.to() != prev_move.to())
+                    && (!prev_move.is_normal() || mv.to() != prev_move.to())
                     && futility_base != Value::NONE
                 {
                     if move_count > 2 {
@@ -3006,14 +3095,19 @@ impl SearchWorker {
             }
 
             self.stack[ply as usize].current_move = mv;
-            let cont_hist_pc = mv.moved_piece_after();
-            let cont_hist_to = mv.to();
 
             let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, self.tt.as_ref());
             self.nnue_push(dirty_piece);
             self.nodes += 1;
 
-            self.set_cont_history_for_move(ply, in_check, capture, cont_hist_pc, cont_hist_to);
+            // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う
+            if mv.is_pass() {
+                self.clear_cont_history_for_null(ply);
+            } else {
+                let cont_hist_pc = mv.moved_piece_after();
+                let cont_hist_to = mv.to();
+                self.set_cont_history_for_move(ply, in_check, capture, cont_hist_pc, cont_hist_to);
+            }
 
             let value =
                 -self.qsearch::<NT>(pos, depth - 1, -beta, -alpha, ply + 1, limits, time_manager);

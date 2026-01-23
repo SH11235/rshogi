@@ -4,6 +4,7 @@ import {
     type EngineEvent,
     type EngineEventHandler,
     type EngineInitOptions,
+    type LoadPositionOptions,
     type SearchHandle,
     type SearchParams,
     type ThreadInfo,
@@ -21,6 +22,7 @@ export interface TauriIpc {
 export interface LegalMovesParams {
     sfen: string;
     moves?: string[];
+    passRights?: { sente: number; gote: number };
     ipc?: Partial<TauriIpc>;
 }
 
@@ -180,10 +182,15 @@ export function createTauriEngineClient(options: TauriEngineClientOptions = {}):
                 () => mock.init(mergedInitOpts),
             );
         },
-        async loadPosition(sfen, moves) {
+        async loadPosition(sfen, moves, options?: LoadPositionOptions) {
             return runOrMock(
-                () => ipc.invoke("engine_position", { sfen, moves }),
-                () => mock.loadPosition(sfen, moves),
+                () =>
+                    ipc.invoke("engine_position", {
+                        sfen,
+                        moves,
+                        pass_rights: options?.passRights,
+                    }),
+                () => mock.loadPosition(sfen, moves, options),
             );
         },
         async search(params: SearchParams): Promise<SearchHandle> {
@@ -274,6 +281,7 @@ export async function getLegalMoves(params: LegalMovesParams): Promise<string[]>
         const result = await ipc.invoke<string[]>("engine_legal_moves", {
             sfen: params.sfen,
             moves: params.moves,
+            pass_rights: params.passRights,
         });
         return result;
     } catch (error) {

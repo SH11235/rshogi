@@ -9,13 +9,19 @@ type WasmInitInput =
           thread_stack_size?: number;
       };
 
+type PassRightsInput = { sente: number; gote: number };
+
 type WasmWorkerBindings = {
     initWasm: (input?: WasmInitInput) => Promise<unknown>;
     applyMoves: (moves: string[]) => Promise<void> | void;
     disposeEngine: () => void;
     initEngine: (opts?: EngineInitOptions) => Promise<void> | void;
     loadModel: (bytes: Uint8Array) => Promise<void> | void;
-    loadPosition: (sfen: string, moves?: string[]) => Promise<void> | void;
+    loadPosition: (
+        sfen: string,
+        moves?: string[],
+        passRights?: PassRightsInput,
+    ) => Promise<void> | void;
     runSearch: (params?: SearchParams) => Promise<void> | void;
     setEventHandler: (handler: (event: EngineEvent) => void) => void;
     setOption: (name: string, value: string | number | boolean) => Promise<void> | void;
@@ -34,7 +40,12 @@ type InitCommand = CommandBase & {
 
 type WorkerCommand =
     | InitCommand
-    | (CommandBase & { type: "loadPosition"; sfen: string; moves?: string[] })
+    | (CommandBase & {
+          type: "loadPosition";
+          sfen: string;
+          moves?: string[];
+          passRights?: PassRightsInput;
+      })
     | (CommandBase & { type: "applyMoves"; moves: string[] })
     | (CommandBase & { type: "search"; params: SearchParams })
     | (CommandBase & { type: "stop" })
@@ -195,7 +206,11 @@ export function createEngineWorker(bindings: WasmWorkerBindings) {
                     break;
                 case "loadPosition":
                     await ensureEngineReady();
-                    await bindings.loadPosition(command.sfen, command.moves ?? undefined);
+                    await bindings.loadPosition(
+                        command.sfen,
+                        command.moves ?? undefined,
+                        command.passRights,
+                    );
                     postAck(requestId);
                     break;
                 case "applyMoves":

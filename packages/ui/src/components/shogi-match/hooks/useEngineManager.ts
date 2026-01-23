@@ -1,4 +1,4 @@
-import type { GameResult, Player, PositionState } from "@shogi/app-core";
+import type { GameResult, Player } from "@shogi/app-core";
 import type {
     EngineClient,
     EngineErrorCode,
@@ -70,6 +70,66 @@ type SideSetting = {
     skillLevel?: SkillLevelSettings;
 };
 
+/** パス権設定 */
+interface PassRightsSettings {
+    enabled: boolean;
+    initialCount: number;
+}
+
+/**
+ * パス権設定と棋譜からloadPositionのオプションを生成するヘルパー関数
+ *
+ * 注意: 棋譜に"pass"が含まれる場合は、設定が無効でもpassRightsを送る必要がある。
+ * これは、Rust側のPosition::do_pass_moveがcan_pass()を満たせずパニックするのを防ぐため。
+ * （パス権有効で対局後に設定をOFFにした場合や、パス入り棋譜をインポートした場合など）
+ */
+function buildPassRightsOption(
+    passRightsSettings: PassRightsSettings | undefined,
+    moves: string[],
+) {
+    // 大文字小文字を区別せずにパス手を検出（parseMoveと同様）
+    const hasPassInMoves = moves.some((m) => m.toLowerCase() === "pass");
+
+    if (passRightsSettings?.enabled) {
+        // 設定が有効: 初期値を使用
+        return {
+            passRights: {
+                sente: passRightsSettings.initialCount,
+                gote: passRightsSettings.initialCount,
+            },
+        };
+    }
+
+    if (hasPassInMoves) {
+        // 設定は無効だが棋譜にpassが含まれる: 十分な数のパス権を設定
+        // （各プレイヤーのパス回数の最大値を使用）
+        let sentePassCount = 0;
+        let gotePassCount = 0;
+        let isSenteTurn = true; // 平手初期局面は先手番
+        for (const move of moves) {
+            if (move.toLowerCase() === "pass") {
+                if (isSenteTurn) {
+                    sentePassCount++;
+                } else {
+                    gotePassCount++;
+                }
+            }
+            isSenteTurn = !isSenteTurn;
+        }
+        // 最低でも現在のパス数 + 1 を確保（追加パスの余地を残す）
+        const minRights = Math.max(sentePassCount, gotePassCount) + 1;
+        return {
+            passRights: {
+                sente: minRights,
+                gote: minRights,
+            },
+        };
+    }
+
+    // 設定無効かつパスなし: passRights不要
+    return undefined;
+}
+
 interface UseEngineManagerProps {
     /** 先手/後手の設定 */
     sides: { sente: SideSetting; gote: SideSetting };
@@ -83,12 +143,14 @@ interface UseEngineManagerProps {
     startSfen: string;
     /** 棋譜の ref */
     movesRef: { current: string[] };
-    /** 局面の ref */
-    positionRef: { current: PositionState };
+    /** 現在の手番（エンジンターン開始のトリガー用） */
+    positionTurn: Player;
     /** 対局実行中かどうか */
     isMatchRunning: boolean;
     /** 局面が準備完了しているか */
     positionReady: boolean;
+    /** パス権設定（オプション） */
+    passRightsSettings?: PassRightsSettings;
     /** エンジンからの手を適用するコールバック */
     onMoveFromEngine: (move: string) => void;
     /** 対局終了時のコールバック */
@@ -259,9 +321,10 @@ export function useEngineManager({
     clocksRef,
     startSfen,
     movesRef,
-    positionRef,
+    positionTurn,
     isMatchRunning,
     positionReady,
+    passRightsSettings,
     onMoveFromEngine,
     onMatchEnd,
     onEvalUpdate,
@@ -654,7 +717,11 @@ export function useEngineManager({
                         await applySkillLevelSettings(client, skillSettings);
                     }
 
-                    await client.loadPosition(startSfen, movesRef.current);
+                    await client.loadPosition(
+                        startSfen,
+                        movesRef.current,
+                        buildPassRightsOption(passRightsSettings, movesRef.current),
+                    );
                     engineState.ready = true;
                     setEngineReady((prev) => ({ ...prev, [side]: true }));
                 }
@@ -670,6 +737,7 @@ export function useEngineManager({
             engineMap,
             engineOptions,
             movesRef,
+            passRightsSettings,
             sides,
             startSfen,
         ],
@@ -688,6 +756,13 @@ export function useEngineManager({
             if (!ready) return;
             const { client, engineId } = ready;
 
+            // ensureEngineReady後にエンジンがdisposeされていないかチェック
+            // （待った処理等でstopAllEnginesが呼ばれた場合）
+            const engineState = engineStatesRef.current[side];
+            if (engineState.client !== client || !isMatchRunningRef.current) {
+                return;
+            }
+
             // 既存の検索ハンドルがある場合の処理
             if (searchState.handle) {
                 const current = activeSearchRef.current;
@@ -701,7 +776,16 @@ export function useEngineManager({
             searchState.pending = true;
 
             try {
-                await client.loadPosition(startSfen, movesRef.current);
+                await client.loadPosition(
+                    startSfen,
+                    movesRef.current,
+                    buildPassRightsOption(passRightsSettings, movesRef.current),
+                );
+
+                // loadPosition後にエンジンがdisposeされていないかチェック
+                if (engineState.client !== client || !isMatchRunningRef.current) {
+                    return;
+                }
 
                 // UIタイマーの現在の残り時間を計算してエンジンに渡す
                 // これにより、タイマー開始からloadPosition完了までの経過時間を考慮できる
@@ -728,13 +812,20 @@ export function useEngineManager({
                     ponder: false,
                 });
 
+                // search後にもチェック（handleを設定する前に中断されていないか）
+                if (engineState.client !== client || !isMatchRunningRef.current) {
+                    // 既に中断されているので、開始した検索をキャンセル
+                    await handle.cancel().catch(() => undefined);
+                    return;
+                }
+
                 searchState.handle = handle;
                 activeSearchRef.current = { side, engineId };
             } finally {
                 searchState.pending = false;
             }
         },
-        [clocksRef, ensureEngineReady, movesRef, positionReady, startSfen],
+        [clocksRef, ensureEngineReady, movesRef, passRightsSettings, positionReady, startSfen],
     );
 
     // エンジンのrole変更時に破棄
@@ -761,35 +852,38 @@ export function useEngineManager({
     }, [addErrorLog, disposeEngineForSide]);
 
     // エンジンターンの自動開始
+    // positionTurnをpropsで受け取ることで、手番変更時に確実にuseEffectが再実行される
     useEffect(() => {
         if (!isMatchRunning || !positionReady) return;
-        const side = positionRef.current.turn;
-        if (!isEngineTurn(side)) return;
-        const engineOpt = getEngineForSide(side);
+        if (!isEngineTurn(positionTurn)) return;
+        // エンジン停止後の再開トリガーに必要（engineReadyの変更で再実行される）
+        if (!engineReady[positionTurn]) return;
+        const engineOpt = getEngineForSide(positionTurn);
         if (!engineOpt) return;
 
-        const searchState = searchStatesRef.current[side];
+        const searchState = searchStatesRef.current[positionTurn];
         const current = activeSearchRef.current;
 
-        if (current && current.side === side && current.engineId === engineOpt.id) {
+        if (current && current.side === positionTurn && current.engineId === engineOpt.id) {
             return;
         }
         if (searchState.requestPly === movesRef.current.length) return;
 
         searchState.requestPly = movesRef.current.length;
 
-        startEngineTurn(side).catch((error) => {
-            setEngineStatus((prev) => ({ ...prev, [side]: "error" }));
+        startEngineTurn(positionTurn).catch((error) => {
+            setEngineStatus((prev) => ({ ...prev, [positionTurn]: "error" }));
             addErrorLog(`engine error: ${String(error)}`);
         });
     }, [
         addErrorLog,
+        engineReady,
         getEngineForSide,
         isEngineTurn,
         isMatchRunning,
         movesRef,
         positionReady,
-        positionRef,
+        positionTurn,
         startEngineTurn,
     ]);
 
@@ -943,7 +1037,11 @@ export function useEngineManager({
 
             // 局面を読み込み
             try {
-                await client.loadPosition(request.sfen, request.moves);
+                await client.loadPosition(
+                    request.sfen,
+                    request.moves,
+                    buildPassRightsOption(passRightsSettings, request.moves),
+                );
             } catch (error) {
                 addErrorLog(`局面読み込みエラー: ${String(error)}`);
                 analysisState.ply = null;
@@ -977,6 +1075,7 @@ export function useEngineManager({
             isAnalyzing,
             isMatchRunning,
             maxLogs,
+            passRightsSettings,
             onEvalUpdate,
             sides,
         ],

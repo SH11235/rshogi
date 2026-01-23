@@ -1,4 +1,4 @@
-import type { GameResult, PositionState } from "@shogi/app-core";
+import type { GameResult, Player } from "@shogi/app-core";
 import type { EngineEvent } from "@shogi/engine-client";
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -78,11 +78,6 @@ describe("formatEvent", () => {
 });
 
 describe("useEngineManager", () => {
-    const basePosition: PositionState = {
-        board: {} as PositionState["board"],
-        hands: { sente: {}, gote: {} },
-        turn: "sente",
-    };
     const timeSettings = {
         sente: { mainMs: 1000, byoyomiMs: 500 },
         gote: { mainMs: 1000, byoyomiMs: 500 },
@@ -131,7 +126,7 @@ describe("useEngineManager", () => {
     };
 
     const renderEngineHook = ({
-        positionRef,
+        positionTurn,
         movesRef,
         onMoveFromEngine,
         onMatchEnd,
@@ -139,7 +134,7 @@ describe("useEngineManager", () => {
         mockClient,
         clocksRef = createMockClocksRef(),
     }: {
-        positionRef: { current: PositionState };
+        positionTurn: Player;
         movesRef: { current: string[] };
         onMoveFromEngine: (move: string) => void;
         onMatchEnd: (result: GameResult) => Promise<void>;
@@ -164,7 +159,7 @@ describe("useEngineManager", () => {
                 clocksRef,
                 startSfen: "startpos",
                 movesRef,
-                positionRef,
+                positionTurn,
                 isMatchRunning: true,
                 positionReady: true,
                 onMoveFromEngine,
@@ -180,13 +175,12 @@ describe("useEngineManager", () => {
 
     it("エンジンを初期化し探索を開始する", async () => {
         const mockClient = createMockEngineClient();
-        const positionRef = { current: { ...basePosition, turn: "sente" as const } };
         const movesRef = { current: [] as string[] };
         const onMoveFromEngine = vi.fn();
         const onMatchEnd = vi.fn().mockResolvedValue(undefined);
 
         const { result } = renderEngineHook({
-            positionRef,
+            positionTurn: "sente",
             movesRef,
             onMoveFromEngine,
             onMatchEnd,
@@ -208,13 +202,12 @@ describe("useEngineManager", () => {
 
     it("bestmove の通常手を適用してコールバックを呼び出す", async () => {
         const mockClient = createMockEngineClient();
-        const positionRef = { current: { ...basePosition, turn: "sente" as const } };
         const movesRef = { current: [] as string[] };
         const onMoveFromEngine = vi.fn();
         const onMatchEnd = vi.fn().mockResolvedValue(undefined);
 
         const { result } = renderEngineHook({
-            positionRef,
+            positionTurn: "sente",
             movesRef,
             onMoveFromEngine,
             onMatchEnd,
@@ -236,13 +229,12 @@ describe("useEngineManager", () => {
 
     it("bestmove の resign で対局終了コールバックを呼ぶ", async () => {
         const mockClient = createMockEngineClient();
-        const positionRef = { current: { ...basePosition, turn: "sente" as const } };
         const movesRef = { current: [] as string[] };
         const onMoveFromEngine = vi.fn();
         const onMatchEnd = vi.fn().mockResolvedValue(undefined);
 
         renderEngineHook({
-            positionRef,
+            positionTurn: "sente",
             movesRef,
             onMoveFromEngine,
             onMatchEnd,

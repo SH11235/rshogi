@@ -884,6 +884,42 @@ pub fn generate_legal(pos: &Position, list: &mut MoveList) {
 }
 
 // ============================================================================
+// パス権対応の合法手生成
+// ============================================================================
+
+/// パス手を含む合法手を生成
+///
+/// `generate_legal()` の結果に加えて、パス可能な場合は `Move::PASS` を追加する。
+///
+/// # 使用条件
+/// - パス権ルールが有効な場合のみ PASS が生成される
+/// - 王手中はパス不可（can_pass() が false を返す）
+///
+/// # 注意
+/// 探索の qsearch (静止探索) では使用しないこと。
+/// qsearch では駒取り手のみを生成すべきであり、PASS は不要。
+pub fn generate_legal_with_pass(pos: &Position, list: &mut MoveList) {
+    generate_legal(pos, list);
+
+    // パス可能な場合のみ追加
+    if pos.can_pass() {
+        list.push(Move::PASS);
+    }
+}
+
+/// パス手を含む合法性チェック
+///
+/// Move::PASS の場合は `pos.can_pass()` で判定し、
+/// それ以外は `pos.is_legal()` に委譲する。
+#[inline]
+pub fn is_legal_with_pass(pos: &Position, m: Move) -> bool {
+    if m.is_pass() {
+        return pos.can_pass();
+    }
+    pos.is_legal(m)
+}
+
+// ============================================================================
 // Position に合法性チェックを追加
 // ============================================================================
 
@@ -952,6 +988,11 @@ impl Position {
 
     /// pseudo-legal手が本当に合法かどうかをチェック
     pub fn is_legal(&self, mv: Move) -> bool {
+        // PASS の場合は can_pass() で判定
+        if mv.is_pass() {
+            return self.can_pass();
+        }
+
         let us = self.side_to_move();
         let king_sq = self.king_square(us);
 
@@ -1367,5 +1408,111 @@ mod tests {
         let has_6b_non_promote = list.iter().any(|m| m.to_usi() == "7d6b");
         assert!(has_6b_promote, "7d6b+ が生成されていない");
         assert!(!has_6b_non_promote, "7d6b（不成）は生成されてはいけない（2段目は行き場がない）");
+    }
+
+    // =========================================
+    // パス権対応テスト
+    // =========================================
+
+    #[test]
+    fn test_generate_legal_with_pass_no_pass_rights() {
+        // パス権なしの場合、PASSは生成されない
+        let mut pos = Position::new();
+        pos.set_hirate();
+
+        let mut list = MoveList::new();
+        generate_legal_with_pass(&pos, &mut list);
+
+        // 通常の合法手は生成される
+        assert!(!list.is_empty());
+        // PASSは含まれない
+        assert!(
+            !list.iter().any(|m| m.is_pass()),
+            "PASS should not be generated without pass rights"
+        );
+    }
+
+    #[test]
+    fn test_generate_legal_with_pass_with_pass_rights() {
+        // パス権ありの場合、PASSも生成される
+        let mut pos = Position::new();
+        pos.set_startpos_with_pass_rights(2, 2);
+
+        let mut list = MoveList::new();
+        generate_legal_with_pass(&pos, &mut list);
+
+        // PASSが含まれる
+        assert!(list.iter().any(|m| m.is_pass()), "PASS should be generated with pass rights");
+    }
+
+    #[test]
+    fn test_generate_legal_with_pass_in_check() {
+        // 王手中はPASSが生成されない
+        // 5a: 後手玉, 5b: 先手金（後手玉に王手）, 5i: 先手玉
+        let sfen = "4k4/4G4/9/9/9/9/9/9/4K4 w - 1";
+        let mut pos = Position::new();
+        pos.set_sfen_with_pass_rights(sfen, 2, 2).unwrap();
+
+        // 後手番で王手されている
+        assert!(pos.in_check());
+        assert!(!pos.can_pass());
+
+        let mut list = MoveList::new();
+        generate_legal_with_pass(&pos, &mut list);
+
+        // PASSは含まれない
+        assert!(!list.iter().any(|m| m.is_pass()), "PASS should not be generated when in check");
+    }
+
+    #[test]
+    fn test_is_legal_with_pass_normal_move() {
+        let mut pos = Position::new();
+        pos.set_hirate();
+
+        // 通常の合法手
+        let mv = Move::from_usi("7g7f").unwrap();
+        assert!(is_legal_with_pass(&pos, mv));
+
+        // is_legal_with_pass は通常手に対して is_legal と同じ結果を返す
+        assert_eq!(is_legal_with_pass(&pos, mv), pos.is_legal(mv));
+    }
+
+    #[test]
+    fn test_is_legal_with_pass_pass_move() {
+        // パス権なし
+        let mut pos = Position::new();
+        pos.set_hirate();
+        assert!(!is_legal_with_pass(&pos, Move::PASS));
+
+        // パス権あり
+        pos.set_startpos_with_pass_rights(2, 2);
+        assert!(is_legal_with_pass(&pos, Move::PASS));
+
+        // パス権あり、王手中
+        let sfen = "4k4/4G4/9/9/9/9/9/9/4K4 w - 1";
+        pos.set_sfen_with_pass_rights(sfen, 2, 2).unwrap();
+        assert!(!is_legal_with_pass(&pos, Move::PASS));
+    }
+
+    #[test]
+    fn test_generate_legal_with_pass_count() {
+        // PASSが生成される場合、合法手数が1増える
+        let mut pos = Position::new();
+        pos.set_hirate();
+
+        let mut list_without_pass = MoveList::new();
+        generate_legal(&pos, &mut list_without_pass);
+
+        // パス権を有効化
+        pos.set_startpos_with_pass_rights(2, 2);
+
+        let mut list_with_pass = MoveList::new();
+        generate_legal_with_pass(&pos, &mut list_with_pass);
+
+        assert_eq!(
+            list_with_pass.len(),
+            list_without_pass.len() + 1,
+            "With pass rights, legal move count should increase by 1"
+        );
     }
 }

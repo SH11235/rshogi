@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use engine_core::movegen::{generate_legal, MoveList};
+use engine_core::movegen::{generate_legal_with_pass, MoveList};
 use engine_core::position::{Position, SFEN_HIRATE};
 use engine_core::search::{
     LimitsType, Search, SearchInfo, SearchResult, SkillOptions, TimeOptions,
@@ -294,9 +294,9 @@ fn spawn_search(
     eprintln!("spawn_search: position SFEN = {}", position.to_sfen());
 
     // Generate legal moves to debug
-    use engine_core::movegen::{generate_legal, MoveList};
+    use engine_core::movegen::{generate_legal_with_pass, MoveList};
     let mut legal_moves = MoveList::new();
-    generate_legal(&position, &mut legal_moves);
+    generate_legal_with_pass(&position, &mut legal_moves);
     eprintln!("spawn_search: legal moves count = {}", legal_moves.len());
     if !legal_moves.is_empty() {
         eprintln!("spawn_search: first few legal moves:");
@@ -350,7 +350,18 @@ fn spawn_search(
     })
 }
 
-fn parse_position(sfen: &str, moves: Option<Vec<String>>) -> Result<Position, String> {
+/// パス権設定
+#[derive(Clone, Debug, Deserialize)]
+struct PassRightsInput {
+    sente: u8,
+    gote: u8,
+}
+
+fn parse_position(
+    sfen: &str,
+    moves: Option<Vec<String>>,
+    pass_rights: Option<PassRightsInput>,
+) -> Result<Position, String> {
     let mut position = Position::new();
 
     if sfen.trim() == "startpos" {
@@ -361,6 +372,11 @@ fn parse_position(sfen: &str, moves: Option<Vec<String>>) -> Result<Position, St
         position
             .set_sfen(sfen)
             .map_err(|e| format!("Failed to parse SFEN: {e}"))?;
+    }
+
+    // パス権を有効化（movesを適用する前に設定）
+    if let Some(pr) = pass_rights {
+        position.enable_pass_rights(pr.sente, pr.gote);
     }
 
     if let Some(moves) = moves {
@@ -597,9 +613,13 @@ fn engine_position(
     state: State<EngineState>,
     sfen: String,
     moves: Option<Vec<String>>,
+    pass_rights: Option<PassRightsInput>,
 ) -> Result<(), String> {
-    eprintln!("engine_position: sfen={}, moves={:?}", sfen, moves);
-    let position = parse_position(&sfen, moves)?;
+    eprintln!(
+        "engine_position: sfen={}, moves={:?}, passRights={:?}",
+        sfen, moves, pass_rights
+    );
+    let position = parse_position(&sfen, moves, pass_rights)?;
 
     eprintln!("engine_position: resulting SFEN = {}", position.to_sfen());
 
@@ -721,10 +741,14 @@ fn engine_stop(state: State<EngineState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn engine_legal_moves(sfen: String, moves: Option<Vec<String>>) -> Result<Vec<String>, String> {
-    let position = parse_position(&sfen, moves)?;
+fn engine_legal_moves(
+    sfen: String,
+    moves: Option<Vec<String>>,
+    pass_rights: Option<PassRightsInput>,
+) -> Result<Vec<String>, String> {
+    let position = parse_position(&sfen, moves, pass_rights)?;
     let mut list = MoveList::new();
-    generate_legal(&position, &mut list);
+    generate_legal_with_pass(&position, &mut list);
     let usi_moves = list.as_slice().iter().map(|mv| mv.to_usi()).collect();
     Ok(usi_moves)
 }
@@ -778,8 +802,10 @@ fn board_to_sfen_impl(board: BoardStateJson) -> Result<String, String> {
 fn engine_replay_moves_strict_impl(
     sfen: String,
     moves: Vec<String>,
+    pass_rights: Option<PassRightsInput>,
 ) -> Result<ReplayResultJson, String> {
-    Position::replay_moves_strict(&sfen, &moves)
+    let pass_rights_tuple = pass_rights.map(|pr| (pr.sente, pr.gote));
+    Position::replay_moves_strict(&sfen, &moves, pass_rights_tuple)
 }
 
 #[tauri::command]
@@ -801,8 +827,9 @@ fn board_to_sfen(board: BoardStateJson) -> Result<String, String> {
 fn engine_replay_moves_strict(
     sfen: String,
     moves: Vec<String>,
+    pass_rights: Option<PassRightsInput>,
 ) -> Result<ReplayResultJson, String> {
-    engine_replay_moves_strict_impl(sfen, moves)
+    engine_replay_moves_strict_impl(sfen, moves, pass_rights)
 }
 
 // テスト用にコマンド実装を公開
@@ -816,13 +843,6 @@ pub fn parse_sfen_to_board_for_test(sfen: String) -> Result<BoardStateJson, Stri
 
 pub fn board_to_sfen_for_test(board: BoardStateJson) -> Result<String, String> {
     board_to_sfen_impl(board)
-}
-
-pub fn engine_replay_moves_strict_for_test(
-    sfen: String,
-    moves: Vec<String>,
-) -> Result<ReplayResultJson, String> {
-    engine_replay_moves_strict_impl(sfen, moves)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

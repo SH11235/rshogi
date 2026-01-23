@@ -4,8 +4,9 @@ import { memo } from "react";
 import type { ShogiBoardCell } from "../../shogi-board";
 import { ShogiBoard } from "../../shogi-board";
 import { useMobileCellSize } from "../hooks/useMobileCellSize";
-import type { DisplaySettings, PromotionSelection } from "../types";
+import type { DisplaySettings, PassRightsSettings, PromotionSelection } from "../types";
 import { HandPiecesDisplay } from "./HandPiecesDisplay";
+import { PassRightsDisplay } from "./PassRightsDisplay";
 
 type Selection = { kind: "square"; square: string } | { kind: "hand"; piece: PieceType };
 
@@ -67,6 +68,14 @@ interface MobileBoardSectionProps {
     // === Ref / その他 ===
     boardSectionRef: RefObject<HTMLDivElement | null>;
     isDraggingPiece: boolean;
+
+    // === パス権表示（オプション） ===
+    /** パス権設定 */
+    passRightsSettings?: PassRightsSettings;
+    /** 現在のパス権状態 */
+    passRights?: { sente: number; gote: number };
+    /** 現在の手番 */
+    turn?: Player;
 }
 
 /**
@@ -97,6 +106,9 @@ export const MobileBoardSection = memo(function MobileBoardSection({
     bottomHand,
     boardSectionRef,
     isDraggingPiece,
+    passRightsSettings,
+    passRights,
+    turn,
 }: MobileBoardSectionProps): ReactElement {
     // セルサイズはこのコンポーネント内で管理（画面幅のみから計算）
     const cellSize = useMobileCellSize();
@@ -141,6 +153,19 @@ export const MobileBoardSection = memo(function MobileBoardSection({
                     flipBoard={flipBoard}
                     size={isEditModeActive ? "compact" : "medium"}
                 />
+                {/* パス権表示（上側プレイヤー） */}
+                {passRightsSettings?.enabled &&
+                    passRightsSettings.initialCount > 0 &&
+                    passRights && (
+                        <div className="flex justify-end mt-0.5">
+                            <PassRightsDisplay
+                                remaining={passRights[topHand.owner]}
+                                max={passRightsSettings.initialCount}
+                                isActive={turn === topHand.owner}
+                                compact
+                            />
+                        </div>
+                    )}
             </div>
 
             {/* 盤面 */}
@@ -200,6 +225,19 @@ export const MobileBoardSection = memo(function MobileBoardSection({
                     flipBoard={flipBoard}
                     size={isEditModeActive ? "compact" : "medium"}
                 />
+                {/* パス権表示（下側プレイヤー） */}
+                {passRightsSettings?.enabled &&
+                    passRightsSettings.initialCount > 0 &&
+                    passRights && (
+                        <div className="flex justify-start mt-0.5">
+                            <PassRightsDisplay
+                                remaining={passRights[bottomHand.owner]}
+                                max={passRightsSettings.initialCount}
+                                isActive={turn === bottomHand.owner}
+                                compact
+                            />
+                        </div>
+                    )}
             </div>
         </div>
     );

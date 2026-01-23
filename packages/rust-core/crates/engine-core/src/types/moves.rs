@@ -20,8 +20,13 @@ pub struct Move(u32);
 impl Move {
     /// 無効な指し手
     pub const NONE: Move = Move(0);
-    /// パス（null move）
+    /// 探索用 null move（合法性なし、NMP等で使用）
     pub const NULL: Move = Move(0x0081);
+    /// 実ルールのパス手（パス権ルールで使用）
+    /// エンコード: bit14=1, bit15=1 (0xC000)
+    /// - 通常手では bit14(DROP) と bit15(PROMOTE) が同時に立つことはない
+    /// - この不可能な組み合わせを PASS のマーカーとして使用
+    pub const PASS: Move = Move(0xC000);
 
     // 下位16bitのマスク（YaneuraOu互換）
     const TO_MASK: u32 = 0x007F; // bit 0-6
@@ -83,16 +88,30 @@ impl Move {
     }
 
     /// 移動先を取得
+    ///
+    /// # 注意
+    /// - PASSに対して呼ぶと不正な値が返る
+    /// - NULLはNMPで使用されるため従来通り許可
+    ///
+    /// # Safety
+    /// - release ビルドでは PASS チェックが無効化される（`debug_assert!`）
+    /// - 呼び出し側で PASS でないことを保証する必要がある
     #[inline]
     pub const fn to(self) -> Square {
+        debug_assert!(!self.is_pass(), "to() called on PASS move");
         // SAFETY: to は 0-80 の範囲（7bit）
         unsafe { Square::from_u8_unchecked((self.0 & Self::TO_MASK) as u8) }
     }
 
     /// 移動元を取得（駒打ちの場合は無効）
+    ///
+    /// 【注意】PASSや駒打ちに対して呼ぶと不正な値が返る
     #[inline]
     pub const fn from(self) -> Square {
-        debug_assert!(!self.is_drop());
+        debug_assert!(
+            !self.is_pass() && !self.is_drop(),
+            "from() called on invalid move (PASS or drop)"
+        );
         // SAFETY: from は 0-80 の範囲（7bit）
         unsafe { Square::from_u8_unchecked(((self.0 & Self::FROM_MASK) >> Self::FROM_SHIFT) as u8) }
     }
@@ -125,16 +144,20 @@ impl Move {
         Move((self.0 & Self::LOWER_16BIT_MASK) | ((piece.raw() as u32) << Self::PIECE_SHIFT))
     }
 
-    /// 駒打ちかどうか
+    /// 駒打ちかどうか（PASS除外）
+    ///
+    /// 【重要】PASSは bit14=1 だが駒打ちではない
     #[inline]
     pub const fn is_drop(self) -> bool {
-        (self.0 & Self::DROP_FLAG) != 0
+        (self.0 & Self::DROP_FLAG) != 0 && !self.is_pass()
     }
 
-    /// 成りかどうか
+    /// 成りかどうか（PASS除外）
+    ///
+    /// 【重要】PASSは bit15=1 だが成りではない
     #[inline]
     pub const fn is_promote(self) -> bool {
-        (self.0 & Self::PROMOTE_FLAG) != 0
+        (self.0 & Self::PROMOTE_FLAG) != 0 && !self.is_pass()
     }
 
     /// 無効な指し手かどうか
@@ -149,10 +172,26 @@ impl Move {
         self.0 != 0
     }
 
-    /// Null move（パス）かどうか
+    /// Null move（探索用パス）かどうか
     #[inline]
     pub const fn is_null(self) -> bool {
         self.0 == Self::NULL.0
+    }
+
+    /// 実ルールのパス手かどうか
+    ///
+    /// 【重要】等値判定を使用（マスク判定ではない）
+    /// - PASSは唯一の特殊値として固定し、等値で判定
+    /// - マスク判定 `(self.0 & 0xC000) == 0xC000` は将来の拡張で誤判定の余地がある
+    #[inline]
+    pub const fn is_pass(self) -> bool {
+        self.0 == Self::PASS.0
+    }
+
+    /// 通常の着手か（パスでもNULLでもNONEでもない）
+    #[inline]
+    pub const fn is_normal(self) -> bool {
+        self.0 != 0 && !self.is_null() && !self.is_pass()
     }
 
     /// History用インデックス（0〜(81+7)*81-1）
@@ -200,6 +239,12 @@ impl Move {
     #[inline]
     pub const fn from_u16_checked(value: u16) -> Option<Move> {
         let value32 = value as u32;
+
+        // PASS は特殊値なので先にチェック
+        if value32 == Self::PASS.0 {
+            return Some(Self::PASS);
+        }
+
         let to = value32 & Self::TO_MASK;
         let from = (value32 & Self::FROM_MASK) >> Self::FROM_SHIFT;
         if to >= Square::NUM as u32 {
@@ -236,10 +281,13 @@ impl Move {
         Move(value)
     }
 
-    /// USI形式の文字列に変換
+    /// USI形式の文字列に変換（パス対応）
     pub fn to_usi(self) -> String {
         if self.is_none() {
             return "none".to_string();
+        }
+        if self.is_pass() {
+            return "pass".to_string();
         }
         if self.is_drop() {
             let pt_char = match self.drop_piece_type() {
@@ -262,10 +310,18 @@ impl Move {
         }
     }
 
-    /// USI形式の文字列からMoveに変換
+    /// USI形式の文字列からMoveに変換（パス対応）
+    ///
+    /// # パス手の形式
+    /// - `"pass"`: 独自形式
+    /// - `"0000"`: UCI（チェス）由来のnull move形式
     pub fn from_usi(s: &str) -> Option<Move> {
         if s == "none" {
             return Some(Move::NONE);
+        }
+        // パス手: "pass" または "0000" 形式をサポート
+        if s == "pass" || s == "0000" {
+            return Some(Move::PASS);
         }
 
         let chars: Vec<char> = s.chars().collect();
@@ -381,6 +437,13 @@ mod tests {
         // invalid drop piece type
         let raw = 0x4000 | (8 << 7) | Square::SQ_55.raw() as u16;
         assert_eq!(Move::from_u16_checked(raw), None);
+
+        // PASS手のu16往復（TT保存/読み出しで使用される）
+        let pass_u16 = Move::PASS.to_u16();
+        assert_eq!(pass_u16, 0xC000);
+        let restored = Move::from_u16_checked(pass_u16);
+        assert_eq!(restored, Some(Move::PASS));
+        assert!(restored.unwrap().is_pass());
     }
 
     #[test]
@@ -464,10 +527,95 @@ mod tests {
     #[test]
     fn test_move_roundtrip() {
         // USI形式の往復変換テスト
-        let test_cases = ["7g7f", "2c2b+", "P*5e", "G*1a", "none"];
+        let test_cases = ["7g7f", "2c2b+", "P*5e", "G*1a", "none", "pass"];
         for s in test_cases {
             let m = Move::from_usi(s).unwrap();
             assert_eq!(m.to_usi(), s);
         }
+    }
+
+    // =========================================
+    // パス手（PASS）関連のテスト
+    // =========================================
+
+    #[test]
+    fn test_move_pass_encoding() {
+        // PASS は bit14=1, bit15=1 (0xC000)
+        assert_eq!(Move::PASS.0, 0xC000);
+        assert!(Move::PASS.is_pass());
+        assert!(!Move::NONE.is_pass());
+        assert!(!Move::NULL.is_pass());
+    }
+
+    #[test]
+    fn test_move_pass_not_drop() {
+        // PASSは bit14=1 だが is_drop() は false
+        assert!(!Move::PASS.is_drop());
+    }
+
+    #[test]
+    fn test_move_pass_not_promote() {
+        // PASSは bit15=1 だが is_promote() は false
+        assert!(!Move::PASS.is_promote());
+    }
+
+    #[test]
+    fn test_move_pass_is_not_normal() {
+        // PASSは is_normal() = false
+        assert!(!Move::PASS.is_normal());
+        assert!(!Move::NONE.is_normal());
+        assert!(!Move::NULL.is_normal());
+
+        // 通常の手は is_normal() = true
+        let from = Square::new(File::File1, Rank::Rank1);
+        let to = Square::new(File::File1, Rank::Rank2);
+        let m = Move::new_move(from, to, false);
+        assert!(m.is_normal());
+    }
+
+    #[test]
+    fn test_move_pass_no_collision_with_normal_moves() {
+        // 通常手では bit14=1 かつ bit15=1 は生成されない
+        // 駒打ち (bit14=1) は成り (bit15=1) と組み合わせられない
+        for pt in [
+            PieceType::Pawn,
+            PieceType::Lance,
+            PieceType::Knight,
+            PieceType::Silver,
+            PieceType::Gold,
+            PieceType::Bishop,
+            PieceType::Rook,
+        ] {
+            for to in Square::all() {
+                let drop = Move::new_drop(pt, to);
+                assert!(!drop.is_pass(), "Drop move collided with PASS: {drop:?}");
+                assert!(!drop.is_promote(), "Drop move cannot be promotion");
+            }
+        }
+    }
+
+    #[test]
+    fn test_move_usi_pass() {
+        assert_eq!(Move::PASS.to_usi(), "pass");
+        assert_eq!(Move::from_usi("pass"), Some(Move::PASS));
+    }
+
+    // 【注意】以下のテストは debug_assert! なので debug ビルドでのみ動作
+    // cargo test で実行（release ビルドでは panic しない）
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "to() called on PASS move")]
+    fn test_move_pass_to_panics_in_debug() {
+        // PASSに対して to() を呼ぶとパニック（debug のみ）
+        let _ = Move::PASS.to();
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "from() called on invalid move")]
+    fn test_move_pass_from_panics_in_debug() {
+        // PASSに対して from() を呼ぶとパニック（debug のみ）
+        let _ = Move::PASS.from();
     }
 }
