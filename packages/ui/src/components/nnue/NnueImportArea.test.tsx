@@ -169,6 +169,50 @@ describe("NnueImportArea", () => {
         });
     });
 
+    describe("コールバック未設定の場合", () => {
+        it("supportsFileImport=true でも onFileSelect がない場合はドラッグ&ドロップ無効", () => {
+            render(
+                <NnueImportArea
+                    capabilities={webCapabilities}
+                    // onFileSelect なし
+                    onRequestFilePath={vi.fn()}
+                />,
+            );
+
+            const dropZone = screen.getByRole("region", { name: "NNUE ファイルインポートエリア" });
+            fireEvent.dragOver(dropZone);
+
+            // ドラッグ&ドロップは無効なのでメッセージは変わらない
+            expect(screen.queryByText("ここにドロップ")).toBeNull();
+            expect(screen.getByText("ファイル選択ボタンをクリック")).toBeDefined();
+        });
+
+        it("supportsPathImport=true でも onRequestFilePath がない場合はボタン無効", () => {
+            render(
+                <NnueImportArea
+                    capabilities={desktopCapabilities}
+                    onFileSelect={vi.fn()}
+                    // onRequestFilePath なし
+                />,
+            );
+
+            const button = screen.getByRole("button", { name: "ファイルを選択..." });
+            expect(button.getAttribute("disabled")).toBe("");
+        });
+
+        it("どちらのコールバックもない場合はボタン無効", () => {
+            render(
+                <NnueImportArea
+                    capabilities={webCapabilities}
+                    // どちらもなし
+                />,
+            );
+
+            const button = screen.getByRole("button", { name: "ファイルを選択..." });
+            expect(button.getAttribute("disabled")).toBe("");
+        });
+    });
+
     describe("disabled 状態", () => {
         it("disabled=true の場合、ボタンが無効化される", () => {
             render(

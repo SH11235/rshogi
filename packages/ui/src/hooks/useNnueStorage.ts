@@ -76,6 +76,13 @@ export function useNnueStorage(): UseNnueStorageReturn {
                     null,
                 );
             }
+            if (!storage.capabilities.supportsFileImport) {
+                throw new NnueError(
+                    "NNUE_STORAGE_FAILED",
+                    "このプラットフォームでは File からのインポートがサポートされていません",
+                    null,
+                );
+            }
             setIsLoading(true);
             try {
                 const arrayBuffer = await file.arrayBuffer();
@@ -141,7 +148,7 @@ export function useNnueStorage(): UseNnueStorageReturn {
                     null,
                 );
             }
-            if (!storage.importFromPath) {
+            if (!storage.capabilities.supportsPathImport || !storage.importFromPath) {
                 throw new NnueError(
                     "NNUE_STORAGE_FAILED",
                     "このプラットフォームではパスからのインポートがサポートされていません",

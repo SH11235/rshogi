@@ -869,15 +869,23 @@ pub struct NnueImportResult {
     path: String,
 }
 
+/// NNUE インポートの引数
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportNnueFromPathArgs {
+    src_path: String,
+    id: String,
+}
+
 /// ユーザーが選択したファイルを app_data にコピー
 /// ⚠️ Vec<u8> でバイト列を渡さない（IPC のオーバーヘッドを避ける）
 /// ⚠️ 一時ファイル経由で原子的にコピー（途中失敗でゴミファイルが残らない）
 #[tauri::command]
 async fn import_nnue_from_path(
     app: AppHandle,
-    src_path: String,
-    id: String,
+    args: ImportNnueFromPathArgs,
 ) -> Result<NnueImportResult, String> {
+    let ImportNnueFromPathArgs { src_path, id } = args;
     let dir = get_nnue_dir(&app);
     tokio::fs::create_dir_all(&dir)
         .await
@@ -999,15 +1007,24 @@ async fn list_nnue_files(app: AppHandle) -> Result<Vec<String>, String> {
     Ok(ids)
 }
 
-/// NNUE チャンクを保存（大きいファイル対応）
-/// チャンクごとに base64 エンコードされたデータを受け取り、一時ファイルに追記
-#[tauri::command]
-async fn save_nnue_chunk(
-    app: AppHandle,
+/// NNUE チャンク保存の引数
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveNnueChunkArgs {
     id: String,
     chunk_index: u32,
     data_base64: String,
-) -> Result<(), String> {
+}
+
+/// NNUE チャンクを保存（大きいファイル対応）
+/// チャンクごとに base64 エンコードされたデータを受け取り、一時ファイルに追記
+#[tauri::command]
+async fn save_nnue_chunk(app: AppHandle, args: SaveNnueChunkArgs) -> Result<(), String> {
+    let SaveNnueChunkArgs {
+        id,
+        chunk_index,
+        data_base64,
+    } = args;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use tokio::io::AsyncWriteExt;
 

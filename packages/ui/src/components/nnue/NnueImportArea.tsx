@@ -32,15 +32,20 @@ export function NnueImportArea({
     const inputRef = useRef<HTMLInputElement>(null);
     const [isDragOver, setIsDragOver] = useState(false);
 
+    // capability とコールバックの両方が必要
+    const canFileImport = capabilities.supportsFileImport && Boolean(onFileSelect);
+    const canPathImport = capabilities.supportsPathImport && Boolean(onRequestFilePath);
+    const canImport = canFileImport || canPathImport;
+
     const handleDragOver = useCallback(
         (e: React.DragEvent) => {
             e.preventDefault();
-            // supportsFileImport の場合のみドラッグ＆ドロップをサポート
-            if (!disabled && !isImporting && capabilities.supportsFileImport) {
+            // canFileImport の場合のみドラッグ＆ドロップをサポート
+            if (!disabled && !isImporting && canFileImport) {
                 setIsDragOver(true);
             }
         },
-        [disabled, isImporting, capabilities.supportsFileImport],
+        [disabled, isImporting, canFileImport],
     );
 
     const handleDragLeave = useCallback((e: React.DragEvent) => {
@@ -52,14 +57,14 @@ export function NnueImportArea({
         (e: React.DragEvent) => {
             e.preventDefault();
             setIsDragOver(false);
-            if (disabled || isImporting || !capabilities.supportsFileImport) return;
+            if (disabled || isImporting || !canFileImport) return;
 
             const file = e.dataTransfer.files[0];
             if (file?.name.toLowerCase().endsWith(".nnue")) {
                 onFileSelect?.(file);
             }
         },
-        [disabled, isImporting, capabilities.supportsFileImport, onFileSelect],
+        [disabled, isImporting, canFileImport, onFileSelect],
     );
 
     const handleFileChange = useCallback(
@@ -75,16 +80,16 @@ export function NnueImportArea({
     );
 
     const handleButtonClick = useCallback(() => {
-        // supportsPathImport が優先される（将来の Desktop drag&drop 対応時）
-        if (capabilities.supportsPathImport && onRequestFilePath) {
-            onRequestFilePath();
-        } else if (capabilities.supportsFileImport) {
+        // canPathImport が優先される（将来の Desktop drag&drop 対応時）
+        if (canPathImport) {
+            onRequestFilePath?.();
+        } else if (canFileImport) {
             inputRef.current?.click();
         }
-    }, [capabilities.supportsPathImport, capabilities.supportsFileImport, onRequestFilePath]);
+    }, [canPathImport, canFileImport, onRequestFilePath]);
 
-    // メッセージも capabilities で分岐
-    const dropMessage = capabilities.supportsFileImport
+    // メッセージも capability とコールバックの両方で判定
+    const dropMessage = canFileImport
         ? "NNUE ファイルをドラッグ＆ドロップ"
         : "ファイル選択ボタンをクリック";
 
@@ -129,7 +134,7 @@ export function NnueImportArea({
             <Button
                 variant="outline"
                 onClick={handleButtonClick}
-                disabled={disabled || isImporting}
+                disabled={disabled || isImporting || !canImport}
             >
                 ファイルを選択...
             </Button>
