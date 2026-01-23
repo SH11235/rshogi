@@ -1,5 +1,6 @@
 import type { EngineClient, SkillLevelSettings } from "@shogi/engine-client";
 import type { ReactElement } from "react";
+import { Button } from "../../button";
 import { Input } from "../../input";
 import { Switch } from "../../switch";
 import type { ClockSettings } from "../hooks/useClockManager";
@@ -38,6 +39,12 @@ interface MatchSettingsPanelProps {
     // エンジン情報
     uiEngineOptions: EngineOption[];
 
+    // NNUE 設定（オプション）
+    /** NNUE 選択ダイアログを開くコールバック */
+    onOpenNnueSelector?: () => void;
+    /** 現在選択中の NNUE 表示名（null = デフォルト） */
+    currentNnueDisplayName?: string | null;
+
     // 制約
     settingsLocked: boolean;
 }
@@ -56,6 +63,8 @@ export function MatchSettingsPanel({
     passRightsSettings,
     onPassRightsSettingsChange,
     uiEngineOptions,
+    onOpenNnueSelector,
+    currentNnueDisplayName,
     settingsLocked,
 }: MatchSettingsPanelProps): ReactElement {
     // 選択肢の値を生成: "human" または "engine:{engineId}"
@@ -208,6 +217,32 @@ export function MatchSettingsPanel({
                         {timeSelector("gote")}
                     </div>
                 </div>
+
+                {/* NNUE 設定（エンジン使用時のみ） */}
+                {onOpenNnueSelector &&
+                    (sides.sente.role === "engine" || sides.gote.role === "engine") && (
+                        <>
+                            <div className="h-px bg-[hsl(var(--border,0_0%_86%))]" />
+                            <div className="flex flex-col gap-2">
+                                <div className="text-xs font-semibold text-[hsl(var(--wafuu-sumi))]">
+                                    NNUE 評価関数
+                                </div>
+                                <div className="flex items-center justify-between gap-2">
+                                    <span className="truncate text-xs text-muted-foreground">
+                                        {currentNnueDisplayName ?? "デフォルト"}
+                                    </span>
+                                    <Button
+                                        variant="outline"
+                                        size="sm"
+                                        onClick={onOpenNnueSelector}
+                                        disabled={settingsLocked}
+                                    >
+                                        変更...
+                                    </Button>
+                                </div>
+                            </div>
+                        </>
+                    )}
 
                 {/* パス権設定（オプション） */}
                 {passRightsSettings && onPassRightsSettingsChange && (

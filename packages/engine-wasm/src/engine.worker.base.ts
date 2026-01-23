@@ -1,5 +1,5 @@
-import type { EngineEvent, EngineInitOptions, SearchParams } from "@shogi/engine-client";
 import { NNUE_DB_NAME, NNUE_DB_VERSION, NNUE_PROGRESS_THROTTLE_MS } from "@shogi/app-core";
+import type { EngineEvent, EngineInitOptions, SearchParams } from "@shogi/engine-client";
 
 type WasmModuleSource = WebAssembly.Module | ArrayBuffer | Uint8Array | string | URL;
 type WasmInitInput =

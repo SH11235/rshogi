@@ -973,16 +973,16 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): W
     };
 }
 
+// NNUE フォーマット検出 API
 export {
+    detect_nnue_format,
+    is_nnue_compatible,
     wasm_board_to_sfen,
     wasm_get_initial_board,
     wasm_get_legal_moves,
     wasm_parse_sfen_to_board,
     wasm_replay_moves_strict,
 } from "../pkg/engine_wasm.js";
-
-// NNUE フォーマット検出 API
-export { detect_nnue_format, is_nnue_compatible } from "../pkg/engine_wasm.js";
 
 // NNUE ストレージ
 export { createIndexedDBNnueStorage, requestPersistentStorage } from "./nnue";

@@ -2,7 +2,6 @@
  * IndexedDB を使った NNUE ストレージ実装
  */
 
-import { openDB, type DBSchema, type IDBPDatabase } from "idb";
 import {
     NNUE_DB_NAME,
     NNUE_DB_VERSION,
@@ -11,6 +10,7 @@ import {
     type NnueMeta,
     type NnueStorage,
 } from "@shogi/app-core";
+import { type DBSchema, type IDBPDatabase, openDB } from "idb";
 
 /**
  * IndexedDB スキーマ定義
