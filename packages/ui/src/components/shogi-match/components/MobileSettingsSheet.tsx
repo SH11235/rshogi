@@ -183,13 +183,16 @@ export function MobileSettingsSheet({
                             ))}
                         </select>
                     </label>
-                    {sides.sente.role === "engine" && (
-                        <SkillLevelSelector
-                            value={sides.sente.skillLevel}
-                            onChange={(sl) => handleSkillLevelChange("sente", sl)}
-                            disabled={settingsLocked}
-                        />
-                    )}
+                    {/* レイアウトシフト防止のため固定高さを確保 */}
+                    <div className="min-h-[4rem]">
+                        {sides.sente.role === "engine" && (
+                            <SkillLevelSelector
+                                value={sides.sente.skillLevel}
+                                onChange={(sl) => handleSkillLevelChange("sente", sl)}
+                                disabled={settingsLocked}
+                            />
+                        )}
+                    </div>
                 </div>
                 <div className="flex flex-col gap-2">
                     <label className={labelClassName}>
@@ -208,13 +211,16 @@ export function MobileSettingsSheet({
                             ))}
                         </select>
                     </label>
-                    {sides.gote.role === "engine" && (
-                        <SkillLevelSelector
-                            value={sides.gote.skillLevel}
-                            onChange={(sl) => handleSkillLevelChange("gote", sl)}
-                            disabled={settingsLocked}
-                        />
-                    )}
+                    {/* レイアウトシフト防止のため固定高さを確保 */}
+                    <div className="min-h-[4rem]">
+                        {sides.gote.role === "engine" && (
+                            <SkillLevelSelector
+                                value={sides.gote.skillLevel}
+                                onChange={(sl) => handleSkillLevelChange("gote", sl)}
+                                disabled={settingsLocked}
+                            />
+                        )}
+                    </div>
                 </div>
             </div>
 

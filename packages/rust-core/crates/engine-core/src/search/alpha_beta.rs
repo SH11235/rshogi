@@ -447,13 +447,12 @@ impl SearchWorker {
     ///
     /// ロードされた NNUE のアーキテクチャに応じて適切なアキュムレータと評価関数を使用。
     /// パス権評価も加算する。
+    /// NNUE評価関数
+    /// 注意: パス権評価は含まない（TTに保存されるため、手数依存の評価を含めると不整合を起こす）
+    /// パス権評価は evaluate_static_eval 内で動的に追加される
     #[inline]
     fn nnue_evaluate(&mut self, pos: &Position) -> Value {
-        let base = evaluate_dispatch(pos, &mut self.nnue_stack);
-        // パス権評価は常に探索側で追加（キャッシュには含めない）
-        // これにより、手数依存の評価がキャッシュと不整合を起こすことを防ぐ
-        let pass_eval = evaluate_pass_rights(pos, pos.game_ply() as u16);
-        base + pass_eval
+        evaluate_dispatch(pos, &mut self.nnue_stack)
     }
 
     /// NNUE アキュムレータスタックを push
@@ -769,6 +768,8 @@ impl SearchWorker {
 
         if !in_check && unadjusted_static_eval != Value::NONE {
             static_eval = to_corrected_static_eval(unadjusted_static_eval, correction_value);
+            // パス権評価を動的に追加（TTには保存されないので手数依存でもOK）
+            static_eval += evaluate_pass_rights(pos, pos.game_ply() as u16);
         }
 
         if !in_check
@@ -2883,6 +2884,8 @@ impl SearchWorker {
 
         if !in_check && unadjusted_static_eval != Value::NONE {
             static_eval = to_corrected_static_eval(unadjusted_static_eval, correction_value);
+            // パス権評価を動的に追加（TTには保存されないので手数依存でもOK）
+            static_eval += evaluate_pass_rights(pos, pos.game_ply() as u16);
         }
 
         self.stack[ply as usize].static_eval = static_eval;

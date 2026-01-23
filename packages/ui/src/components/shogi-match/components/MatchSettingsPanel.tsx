@@ -113,13 +113,16 @@ export function MatchSettingsPanel({
                         ))}
                     </select>
                 </label>
-                {setting.role === "engine" && (
-                    <SkillLevelSelector
-                        value={setting.skillLevel}
-                        onChange={(skillLevel) => handleSkillLevelChange(side, skillLevel)}
-                        disabled={settingsLocked}
-                    />
-                )}
+                {/* レイアウトシフト防止のため固定高さを確保 */}
+                <div className="min-h-[4rem]">
+                    {setting.role === "engine" && (
+                        <SkillLevelSelector
+                            value={setting.skillLevel}
+                            onChange={(skillLevel) => handleSkillLevelChange(side, skillLevel)}
+                            disabled={settingsLocked}
+                        />
+                    )}
+                </div>
             </div>
         );
     };
