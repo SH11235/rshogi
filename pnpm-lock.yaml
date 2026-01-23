@@ -188,6 +188,9 @@ importers:
 
   packages/engine-tauri:
     dependencies:
+      '@shogi/app-core':
+        specifier: workspace:*
+        version: link:../app-core
       '@shogi/engine-client':
         specifier: workspace:*
         version: link:../engine-client
