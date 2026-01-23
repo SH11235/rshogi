@@ -92,6 +92,9 @@ const selectClassName = "w-full p-2 rounded-lg border border-border bg-backgroun
 const inputClassName = "w-full border border-border bg-background text-base";
 const labelClassName = "flex flex-col gap-1 text-sm";
 
+// SkillLevelSelectorの高さを確保してレイアウトシフトを防止
+const SKILL_LEVEL_SELECTOR_MIN_HEIGHT = "min-h-[4rem]";
+
 /**
  * モバイル用設定シート（BottomSheet内のコンテンツ）
  */
@@ -160,7 +163,7 @@ export function MobileSettingsSheet({
             {/* 先手/後手設定（PC版と同じ2列レイアウト） */}
             <div className="grid grid-cols-2 gap-3 [&>div]:min-w-0">
                 {/* 先手側 */}
-                <div className="flex flex-col gap-2 border-r-2 border-[hsl(var(--wafuu-sumi)/0.2)] pr-3">
+                <div className="flex flex-col gap-2 border-r border-border pr-3">
                     <div className="text-sm font-semibold text-wafuu-shu">☗先手</div>
                     <label className={labelClassName}>
                         <span className="text-xs text-muted-foreground">プレイヤー</span>
@@ -179,7 +182,7 @@ export function MobileSettingsSheet({
                         </select>
                     </label>
                     {/* レイアウトシフト防止のため固定高さを確保 */}
-                    <div className="min-h-[4rem]">
+                    <div className={SKILL_LEVEL_SELECTOR_MIN_HEIGHT}>
                         {sides.sente.role === "engine" && (
                             <SkillLevelSelector
                                 value={sides.sente.skillLevel}
@@ -239,7 +242,7 @@ export function MobileSettingsSheet({
                         </select>
                     </label>
                     {/* レイアウトシフト防止のため固定高さを確保 */}
-                    <div className="min-h-[4rem]">
+                    <div className={SKILL_LEVEL_SELECTOR_MIN_HEIGHT}>
                         {sides.gote.role === "engine" && (
                             <SkillLevelSelector
                                 value={sides.gote.skillLevel}
