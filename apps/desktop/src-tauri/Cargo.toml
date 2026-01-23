@@ -29,3 +29,4 @@ tokio = { version = "1", features = ["fs", "io-util"] }
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
+uuid = "1"
