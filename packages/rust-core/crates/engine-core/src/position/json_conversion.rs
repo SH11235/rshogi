@@ -1,5 +1,5 @@
 use crate::eval::material::compute_material_value;
-use crate::movegen::{generate_legal, MoveList};
+use crate::movegen::{generate_legal_with_pass, MoveList};
 use crate::types::json::{
     BoardStateJson, CellJson, HandJson, HandsJson, PieceJson, ReplayResultJson,
 };
@@ -142,7 +142,7 @@ impl Position {
             let parsed_raw = parsed.raw();
 
             let mut list = MoveList::new();
-            generate_legal(&position, &mut list);
+            generate_legal_with_pass(&position, &mut list);
             let is_legal = list.iter().any(|candidate| candidate.raw() == parsed_raw);
             if !is_legal {
                 error = Some(format!("illegal move: {mv}"));
@@ -348,5 +348,52 @@ mod tests {
         assert_eq!(result.applied, vec!["7g7f".to_string()]);
         assert!(result.error.is_none());
         assert_eq!(result.last_ply, 0);
+    }
+
+    #[test]
+    fn test_replay_moves_strict_with_pass_move() {
+        // パス権あり（各1回）でパス手を含む棋譜をリプレイ
+        let moves = vec!["7g7f".to_string(), "pass".to_string(), "2g2f".to_string()];
+        let result = Position::replay_moves_strict("startpos", &moves, Some((1, 1))).unwrap();
+
+        assert_eq!(
+            result.applied,
+            vec!["7g7f".to_string(), "pass".to_string(), "2g2f".to_string()]
+        );
+        assert!(result.error.is_none());
+        assert_eq!(result.last_ply, 2);
+        // パス後も先手の手番（パスで後手が手番スキップ）
+        assert_eq!(result.board.turn, "gote");
+    }
+
+    #[test]
+    fn test_replay_moves_strict_pass_without_rights() {
+        // パス権なしでパス手を含む棋譜はエラー
+        let moves = vec!["7g7f".to_string(), "pass".to_string()];
+        let result = Position::replay_moves_strict("startpos", &moves, None).unwrap();
+
+        // 最初の手だけ適用され、パス手でエラー
+        assert_eq!(result.applied, vec!["7g7f".to_string()]);
+        assert!(result.error.is_some());
+        assert!(result.error.unwrap().contains("illegal move"));
+    }
+
+    #[test]
+    fn test_replay_moves_strict_pass_exhausted() {
+        // パス権を使い切った後のパス手はエラー
+        let moves = vec![
+            "7g7f".to_string(),
+            "pass".to_string(), // 後手パス（残り0）
+            "2g2f".to_string(),
+            "pass".to_string(), // 後手パス権なし → エラー
+        ];
+        let result = Position::replay_moves_strict("startpos", &moves, Some((1, 1))).unwrap();
+
+        assert_eq!(
+            result.applied,
+            vec!["7g7f".to_string(), "pass".to_string(), "2g2f".to_string()]
+        );
+        assert!(result.error.is_some());
+        assert!(result.error.unwrap().contains("illegal move"));
     }
 }

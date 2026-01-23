@@ -234,6 +234,9 @@ const clonePositionState = (pos: PositionState): PositionState => ({
     hands: cloneHandsState(pos.hands),
     turn: pos.turn,
     ply: pos.ply,
+    passRights: pos.passRights
+        ? { sente: pos.passRights.sente, gote: pos.passRights.gote }
+        : undefined,
 });
 
 function boardToGrid(board: BoardState): ShogiBoardCell[][] {
