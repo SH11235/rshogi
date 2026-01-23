@@ -1,8 +1,6 @@
-import type { NnueStorage } from "@shogi/app-core";
 import { createIndexedDBNnueStorage, createWasmEngineClient } from "@shogi/engine-wasm";
 import type { EngineOption } from "@shogi/ui";
 import { EngineControlPanel, NnueProvider, ShogiMatch, useDevMode } from "@shogi/ui";
-import { useEffect, useState } from "react";
 
 const resolveWasmThreads = () => {
     const fallback = import.meta.env.DEV ? 4 : 1;
@@ -28,40 +26,18 @@ const engineOptions: EngineOption[] = [
 
 const panelEngine = createEngineClient();
 
+// Web版のストレージも同期的に初期化可能
+const nnueStorage = createIndexedDBNnueStorage();
+
 function App() {
     const isDevMode = useDevMode();
-    const [nnueStorage, setNnueStorage] = useState<NnueStorage | null>(null);
-
-    useEffect(() => {
-        let cancelled = false;
-        createIndexedDBNnueStorage()
-            .then((storage) => {
-                if (!cancelled) {
-                    setNnueStorage(storage);
-                }
-            })
-            .catch((error) => {
-                console.error("Failed to initialize NNUE storage:", error);
-            });
-        return () => {
-            cancelled = true;
-        };
-    }, []);
-
-    const content = (
-        <main className="mx-auto flex max-w-[1100px] flex-col gap-3 md:px-5">
-            <ShogiMatch engineOptions={engineOptions} isDevMode={isDevMode} />
-            {isDevMode && <EngineControlPanel engine={panelEngine} />}
-        </main>
-    );
-
-    if (!nnueStorage) {
-        return content;
-    }
 
     return (
         <NnueProvider storage={nnueStorage} platform="web">
-            {content}
+            <main className="mx-auto flex max-w-[1100px] flex-col gap-3 md:px-5">
+                <ShogiMatch engineOptions={engineOptions} isDevMode={isDevMode} />
+                {isDevMode && <EngineControlPanel engine={panelEngine} />}
+            </main>
         </NnueProvider>
     );
 }
