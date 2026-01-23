@@ -1,5 +1,4 @@
 import type { NnueMeta, NnueStorage, PresetManifest } from "@shogi/app-core";
-import { NnueError } from "@shogi/app-core";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,15 +7,13 @@ import { getDownloadedMeta, usePresetManager } from "./usePresetManager";
 
 // モック fetch（各テスト後に復元）
 const mockFetch = vi.fn();
-let originalFetch: typeof fetch;
 
 beforeEach(() => {
-    originalFetch = global.fetch;
-    global.fetch = mockFetch;
+    vi.stubGlobal("fetch", mockFetch);
 });
 
 afterEach(() => {
-    global.fetch = originalFetch;
+    vi.unstubAllGlobals();
 });
 
 // テスト用の NnueMeta
@@ -53,6 +50,11 @@ const createTestManifest = (): PresetManifest => ({
 
 // モックストレージを作成
 const createMockStorage = (overrides: Partial<NnueStorage> = {}): NnueStorage => ({
+    capabilities: {
+        supportsFileImport: true,
+        supportsPathImport: false,
+        supportsLoad: true,
+    },
     save: vi.fn().mockResolvedValue(undefined),
     load: vi.fn().mockResolvedValue(new Uint8Array()),
     loadStream: vi.fn().mockResolvedValue(new ReadableStream()),
@@ -69,11 +71,7 @@ const createMockStorage = (overrides: Partial<NnueStorage> = {}): NnueStorage =>
 // NnueProvider でラップする wrapper
 const createWrapper = (storage: NnueStorage) => {
     return function Wrapper({ children }: { children: ReactNode }) {
-        return (
-            <NnueProvider storage={storage} platform="web">
-                {children}
-            </NnueProvider>
-        );
+        return <NnueProvider storage={storage}>{children}</NnueProvider>;
     };
 };
 

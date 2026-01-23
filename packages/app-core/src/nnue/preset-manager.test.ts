@@ -50,6 +50,11 @@ const createTestMeta = (overrides: Partial<NnueMeta> = {}): NnueMeta => ({
 
 // モックストレージを作成
 const createMockStorage = (overrides: Partial<NnueStorage> = {}): NnueStorage => ({
+    capabilities: {
+        supportsFileImport: true,
+        supportsPathImport: false,
+        supportsLoad: true,
+    },
     save: vi.fn().mockResolvedValue(undefined),
     load: vi.fn().mockResolvedValue(new Uint8Array()),
     loadStream: vi.fn().mockResolvedValue(new ReadableStream()),
@@ -282,22 +287,18 @@ describe("downloadPreset", () => {
         // 進捗ハンドラーが呼ばれることを確認
         expect(progressHandler).toHaveBeenCalled();
 
+        const calls = progressHandler.mock.calls as [NnueDownloadProgress][];
+
         // downloading フェーズが呼ばれる
-        const downloadingCalls = progressHandler.mock.calls.filter(
-            (call: [NnueDownloadProgress]) => call[0].phase === "downloading",
-        );
+        const downloadingCalls = calls.filter((call) => call[0].phase === "downloading");
         expect(downloadingCalls.length).toBeGreaterThanOrEqual(1);
 
         // validating フェーズが呼ばれる
-        const validatingCalls = progressHandler.mock.calls.filter(
-            (call: [NnueDownloadProgress]) => call[0].phase === "validating",
-        );
+        const validatingCalls = calls.filter((call) => call[0].phase === "validating");
         expect(validatingCalls.length).toBe(1);
 
         // saving フェーズが呼ばれる
-        const savingCalls = progressHandler.mock.calls.filter(
-            (call: [NnueDownloadProgress]) => call[0].phase === "saving",
-        );
+        const savingCalls = calls.filter((call) => call[0].phase === "saving");
         expect(savingCalls.length).toBe(1);
     });
 });

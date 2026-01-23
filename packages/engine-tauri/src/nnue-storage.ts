@@ -14,6 +14,7 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
  * base64 変換後は約 1.33MB
  */
 const CHUNK_SIZE = 1 * 1024 * 1024;
+const latin1Decoder = new TextDecoder("latin1");
 
 /**
  * Uint8Array の一部を base64 文字列に変換
@@ -21,12 +22,7 @@ const CHUNK_SIZE = 1 * 1024 * 1024;
  */
 function chunkToBase64(bytes: Uint8Array, offset: number, length: number): string {
     const chunk = bytes.subarray(offset, offset + length);
-    // チャンクサイズなら O(n) で収まる
-    let binary = "";
-    for (let i = 0; i < chunk.length; i++) {
-        binary += String.fromCharCode(chunk[i]);
-    }
-    return btoa(binary);
+    return btoa(latin1Decoder.decode(chunk));
 }
 
 export type InvokeFn = typeof tauriInvoke;
@@ -76,6 +72,12 @@ export function createTauriNnueStorage(options: TauriNnueStorageOptions = {}): N
     const metaCache = loadMetaFromStorage();
 
     return {
+        capabilities: {
+            supportsFileImport: false, // 将来 true に変更可能（Tauri drag&drop API対応時）
+            supportsPathImport: true, // Tauri ダイアログでパス取得
+            supportsLoad: false, // Rust 側でファイルパス直接使用
+        },
+
         async save(id: string, data: Blob | Uint8Array, meta: NnueMeta): Promise<void> {
             const bytes = data instanceof Blob ? new Uint8Array(await data.arrayBuffer()) : data;
 
@@ -105,18 +107,7 @@ export function createTauriNnueStorage(options: TauriNnueStorageOptions = {}): N
             }
         },
 
-        async load(_id: string): Promise<Uint8Array> {
-            // Tauri では Rust 側でファイルを読み込むため、
-            // 通常は使用しない（エンジンに直接パスを渡す）
-            throw new Error(
-                "Direct load is not supported in Tauri. Use getNnuePath() and pass to engine.",
-            );
-        },
-
-        async loadStream(_id: string): Promise<ReadableStream<Uint8Array>> {
-            // Tauri では使用しない
-            throw new Error("Stream load is not supported in Tauri.");
-        },
+        // load / loadStream は capabilities.supportsLoad === false のため未定義
 
         async delete(id: string): Promise<void> {
             await invoke("delete_nnue", { id });

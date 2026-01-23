@@ -36,7 +36,7 @@ function App() {
     const isDevMode = useDevMode();
 
     return (
-        <NnueProvider storage={nnueStorage} platform="web">
+        <NnueProvider storage={nnueStorage}>
             <main className="mx-auto flex max-w-[1100px] flex-col gap-3 md:px-5">
                 <ShogiMatch
                     engineOptions={engineOptions}

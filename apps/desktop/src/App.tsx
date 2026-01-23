@@ -43,7 +43,7 @@ async function requestNnueFilePath(): Promise<string | null> {
 function App() {
     // デスクトップ版は常に開発者モードを有効化
     return (
-        <NnueProvider storage={nnueStorage} platform="desktop">
+        <NnueProvider storage={nnueStorage}>
             <main className="mx-auto flex max-w-[1100px] flex-col gap-3 md:px-5">
                 <ShogiMatch
                     engineOptions={engineOptions}

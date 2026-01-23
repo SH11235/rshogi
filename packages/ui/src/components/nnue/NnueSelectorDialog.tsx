@@ -57,7 +57,7 @@ export function NnueSelectorDialog({
         clearError: clearStorageError,
         storageUsage,
         refreshList,
-        platform,
+        capabilities,
     } = useNnueStorage();
 
     const { selectedNnueId, select, showRestartWarning } = useNnueSelector({
@@ -274,15 +274,15 @@ export function NnueSelectorDialog({
                         )}
 
                         {/* インポートエリア */}
-                        <NnueImportArea
-                            onFileSelect={platform === "web" ? handleFileSelect : undefined}
-                            onRequestFilePath={
-                                platform === "desktop" ? handleRequestFilePath : undefined
-                            }
-                            platform={platform ?? "web"}
-                            isImporting={isImporting}
-                            disabled={isDisabled}
-                        />
+                        {capabilities && (
+                            <NnueImportArea
+                                capabilities={capabilities}
+                                onFileSelect={handleFileSelect}
+                                onRequestFilePath={handleRequestFilePath}
+                                isImporting={isImporting}
+                                disabled={isDisabled}
+                            />
+                        )}
 
                         {/* ストレージ使用量 */}
                         {storageUsage && (

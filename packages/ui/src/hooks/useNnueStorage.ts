@@ -1,7 +1,7 @@
-import type { NnueMeta } from "@shogi/app-core";
+import type { NnueMeta, NnueStorageCapabilities } from "@shogi/app-core";
 import { NnueError } from "@shogi/app-core";
 import { useCallback, useEffect, useState } from "react";
-import { type NnuePlatform, useNnueContextOptional } from "../providers/NnueContext";
+import { useNnueContextOptional } from "../providers/NnueContext";
 
 export interface UseNnueStorageReturn {
     /** NNUE メタデータ一覧 */
@@ -12,9 +12,9 @@ export interface UseNnueStorageReturn {
     error: NnueError | null;
     /** 一覧を再取得 */
     refreshList: () => Promise<void>;
-    /** ファイルから NNUE をインポート（Web 専用） */
+    /** ファイルから NNUE をインポート（capabilities.supportsFileImport === true の場合） */
     importFromFile: (file: File) => Promise<NnueMeta>;
-    /** パスから NNUE をインポート（Desktop 専用） */
+    /** パスから NNUE をインポート（capabilities.supportsPathImport === true の場合） */
     importFromPath: (srcPath: string, displayName?: string) => Promise<NnueMeta>;
     /** NNUE を削除 */
     deleteNnue: (id: string) => Promise<void>;
@@ -22,8 +22,8 @@ export interface UseNnueStorageReturn {
     clearError: () => void;
     /** ストレージ使用量 */
     storageUsage: { used: number; quota?: number } | null;
-    /** プラットフォーム */
-    platform: NnuePlatform | null;
+    /** ストレージの capability */
+    capabilities: NnueStorageCapabilities | null;
 }
 
 /**
@@ -35,7 +35,7 @@ export interface UseNnueStorageReturn {
 export function useNnueStorage(): UseNnueStorageReturn {
     const context = useNnueContextOptional();
     const storage = context?.storage ?? null;
-    const platform = context?.platform ?? null;
+    const capabilities = storage?.capabilities ?? null;
 
     const [nnueList, setNnueList] = useState<NnueMeta[]>([]);
     const [isLoading, setIsLoading] = useState(false);
@@ -214,6 +214,6 @@ export function useNnueStorage(): UseNnueStorageReturn {
         deleteNnue,
         clearError,
         storageUsage,
-        platform,
+        capabilities,
     };
 }

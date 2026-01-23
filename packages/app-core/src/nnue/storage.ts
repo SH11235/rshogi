@@ -7,9 +7,25 @@
 import type { NnueMeta } from "./types";
 
 /**
+ * NnueStorage の capability
+ *
+ * 各プラットフォームでサポートする機能を示す
+ */
+export interface NnueStorageCapabilities {
+    /** File オブジェクトからの import をサポートするか（drag&drop, input[type=file]） */
+    supportsFileImport: boolean;
+    /** ファイルパスからの import をサポートするか（Tauri ダイアログ経由） */
+    supportsPathImport: boolean;
+    /** load/loadStream をサポートするか（Web: true, Desktop: false） */
+    supportsLoad: boolean;
+}
+
+/**
  * NNUE ストレージインターフェース
  */
 export interface NnueStorage {
+    /** ストレージの capability */
+    readonly capabilities: NnueStorageCapabilities;
     /**
      * NNUE ファイルを保存
      * @param id 識別子
@@ -20,15 +36,17 @@ export interface NnueStorage {
 
     /**
      * NNUE ファイルを読み込み（バイト配列として）
+     * capabilities.supportsLoad === true の場合のみ利用可能
      * @param id 識別子
      */
-    load(id: string): Promise<Uint8Array>;
+    load?(id: string): Promise<Uint8Array>;
 
     /**
      * NNUE ファイルを読み込み（ストリームとして）
+     * capabilities.supportsLoad === true の場合のみ利用可能
      * @param id 識別子
      */
-    loadStream(id: string): Promise<ReadableStream<Uint8Array>>;
+    loadStream?(id: string): Promise<ReadableStream<Uint8Array>>;
 
     /**
      * NNUE ファイルを削除

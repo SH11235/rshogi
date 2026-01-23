@@ -1,14 +1,15 @@
+import type { NnueStorageCapabilities } from "@shogi/app-core";
 import type { ReactElement } from "react";
 import { useCallback, useRef, useState } from "react";
 import { Button } from "../button";
 
 export interface NnueImportAreaProps {
-    /** ファイル選択時のコールバック（Web 用） */
+    /** ストレージの capability */
+    capabilities: NnueStorageCapabilities;
+    /** ファイル選択時のコールバック（File インポート: drag&drop + input） */
     onFileSelect?: (file: File) => void;
-    /** ファイル選択ボタンクリック時のコールバック（Desktop 用: Tauri dialog を開く） */
+    /** ファイル選択ボタンクリック時のコールバック（Tauri dialog を開く） */
     onRequestFilePath?: () => void;
-    /** プラットフォーム */
-    platform?: "web" | "desktop";
     /** インポート中かどうか */
     isImporting?: boolean;
     /** 無効化 */
@@ -19,27 +20,27 @@ export interface NnueImportAreaProps {
  * NNUE ファイルインポートエリア
  *
  * ファイルドロップとファイル選択ダイアログをサポート。
+ * capabilities に基づいて機能を切り替える。
  */
 export function NnueImportArea({
+    capabilities,
     onFileSelect,
     onRequestFilePath,
-    platform = "web",
     isImporting = false,
     disabled = false,
 }: NnueImportAreaProps): ReactElement {
     const inputRef = useRef<HTMLInputElement>(null);
     const [isDragOver, setIsDragOver] = useState(false);
-    const isDesktop = platform === "desktop";
 
     const handleDragOver = useCallback(
         (e: React.DragEvent) => {
             e.preventDefault();
-            // Desktop ではドラッグ＆ドロップをサポートしない
-            if (!disabled && !isImporting && !isDesktop) {
+            // supportsFileImport の場合のみドラッグ＆ドロップをサポート
+            if (!disabled && !isImporting && capabilities.supportsFileImport) {
                 setIsDragOver(true);
             }
         },
-        [disabled, isImporting, isDesktop],
+        [disabled, isImporting, capabilities.supportsFileImport],
     );
 
     const handleDragLeave = useCallback((e: React.DragEvent) => {
@@ -51,14 +52,14 @@ export function NnueImportArea({
         (e: React.DragEvent) => {
             e.preventDefault();
             setIsDragOver(false);
-            if (disabled || isImporting || isDesktop) return;
+            if (disabled || isImporting || !capabilities.supportsFileImport) return;
 
             const file = e.dataTransfer.files[0];
             if (file?.name.toLowerCase().endsWith(".nnue")) {
                 onFileSelect?.(file);
             }
         },
-        [disabled, isImporting, isDesktop, onFileSelect],
+        [disabled, isImporting, capabilities.supportsFileImport, onFileSelect],
     );
 
     const handleFileChange = useCallback(
@@ -74,14 +75,18 @@ export function NnueImportArea({
     );
 
     const handleButtonClick = useCallback(() => {
-        if (isDesktop) {
-            // Desktop: Tauri のファイルダイアログを開く
-            onRequestFilePath?.();
-        } else {
-            // Web: input[type=file] を使用
+        // supportsPathImport が優先される（将来の Desktop drag&drop 対応時）
+        if (capabilities.supportsPathImport && onRequestFilePath) {
+            onRequestFilePath();
+        } else if (capabilities.supportsFileImport) {
             inputRef.current?.click();
         }
-    }, [isDesktop, onRequestFilePath]);
+    }, [capabilities.supportsPathImport, capabilities.supportsFileImport, onRequestFilePath]);
+
+    // メッセージも capabilities で分岐
+    const dropMessage = capabilities.supportsFileImport
+        ? "NNUE ファイルをドラッグ＆ドロップ"
+        : "ファイル選択ボタンをクリック";
 
     return (
         // biome-ignore lint/a11y/noStaticElementInteractions: Drop zone requires interactive div
@@ -119,11 +124,7 @@ export function NnueImportArea({
                     color: "hsl(var(--muted-foreground, 0 0% 45%))",
                 }}
             >
-                {isImporting
-                    ? "インポート中..."
-                    : isDragOver
-                      ? "ここにドロップ"
-                      : "NNUE ファイルをドラッグ＆ドロップ"}
+                {isImporting ? "インポート中..." : isDragOver ? "ここにドロップ" : dropMessage}
             </div>
             <Button
                 variant="outline"

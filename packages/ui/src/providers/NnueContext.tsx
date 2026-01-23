@@ -1,13 +1,9 @@
 import type { NnueStorage } from "@shogi/app-core";
 import { createContext, type ReactNode, useContext } from "react";
 
-export type NnuePlatform = "web" | "desktop";
-
 export interface NnueContextValue {
     /** NNUE ストレージ実装 */
     storage: NnueStorage;
-    /** プラットフォーム種別 */
-    platform: NnuePlatform;
 }
 
 const NnueContext = createContext<NnueContextValue | null>(null);
@@ -15,8 +11,6 @@ const NnueContext = createContext<NnueContextValue | null>(null);
 export interface NnueProviderProps {
     /** NNUE ストレージ実装 */
     storage: NnueStorage;
-    /** プラットフォーム種別 */
-    platform: NnuePlatform;
     children: ReactNode;
 }
 
@@ -30,16 +24,16 @@ export interface NnueProviderProps {
  * // Web (IndexedDB)
  * import { createIndexedDBNnueStorage } from "@shogi/engine-wasm";
  * const storage = await createIndexedDBNnueStorage();
- * <NnueProvider storage={storage} platform="web">...</NnueProvider>
+ * <NnueProvider storage={storage}>...</NnueProvider>
  *
  * // Desktop (Tauri)
  * import { createTauriNnueStorage } from "@shogi/engine-tauri";
  * const storage = await createTauriNnueStorage();
- * <NnueProvider storage={storage} platform="desktop">...</NnueProvider>
+ * <NnueProvider storage={storage}>...</NnueProvider>
  * ```
  */
-export function NnueProvider({ storage, platform, children }: NnueProviderProps): ReactNode {
-    return <NnueContext.Provider value={{ storage, platform }}>{children}</NnueContext.Provider>;
+export function NnueProvider({ storage, children }: NnueProviderProps): ReactNode {
+    return <NnueContext.Provider value={{ storage }}>{children}</NnueContext.Provider>;
 }
 
 /**

@@ -77,6 +77,12 @@ function mapIdbError(error: unknown): NnueError {
  */
 export function createIndexedDBNnueStorage(): NnueStorage {
     return {
+        capabilities: {
+            supportsFileImport: true, // drag&drop + input[type=file]
+            supportsPathImport: false, // Tauri 専用
+            supportsLoad: true, // IndexedDB から読み込み可能
+        },
+
         async save(id: string, data: Blob | Uint8Array, meta: NnueMeta): Promise<void> {
             // ID の一致を確認
             if (meta.id !== id) {
