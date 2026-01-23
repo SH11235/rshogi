@@ -35,7 +35,9 @@
         "test": "vitest"
     },
     "dependencies": {
-        "@shogi/engine-client": "workspace:*"
+        "@shogi/app-core": "workspace:*",
+        "@shogi/engine-client": "workspace:*",
+        "idb": "^8.0.3"
     },
     "devDependencies": {
         "typescript": "~5.9.3",

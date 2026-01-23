@@ -16,7 +16,7 @@ export default defineConfig(({ command }) => ({
     // - 開発時 (pnpm dev): "/" でローカルホストで動作
     // - ビルド時 (pnpm build): "/shogi/" で GitHub Pages のリポジトリページに対応
     // command === "build" による判定は Vite 公式の推奨方法で、環境変数の追加設定は不要
-    base: command === "build" ? "/shogi/" : "/",
+    base: process.env.VITE_BASE_PATH ?? (command === "build" ? "/shogi/" : "/"),
     server: {
         headers: {
             "Cross-Origin-Opener-Policy": "same-origin",
