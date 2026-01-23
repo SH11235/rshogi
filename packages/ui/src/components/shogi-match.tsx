@@ -1854,6 +1854,12 @@ export function ShogiMatch({
                 passRightsSettings,
                 filtered,
             );
+
+            // パス入り棋譜の場合、startPositionにpassRightsを設定
+            const startPositionWithPassRights: PositionState = passRightsOption.passRights
+                ? { ...startPosition, passRights: passRightsOption.passRights }
+                : startPosition;
+
             const result = await service.replayMovesStrict(
                 startSfenToLoad,
                 filtered,
@@ -1861,11 +1867,11 @@ export function ShogiMatch({
             );
 
             // 棋譜ナビゲーションをリセット
-            navigation.reset(startPosition, startSfenToLoad);
+            navigation.reset(startPositionWithPassRights, startSfenToLoad);
             setLastAddedBranchInfo(null); // 分岐状態をクリア
 
             // 各手を順番に追加
-            let currentPos = startPosition;
+            let currentPos = startPositionWithPassRights;
             for (let i = 0; i < result.applied.length; i++) {
                 const move = result.applied[i];
                 const data = moveData?.[i];
