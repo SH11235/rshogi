@@ -1214,9 +1214,7 @@ impl SearchWorker {
                 ordered_moves.push(ext.mv);
             }
             // PASSが王手になる場合は quiet check として追加
-            if pos.can_pass()
-                && pos.gives_check(Move::PASS)
-                && !ordered_moves.contains(&Move::PASS)
+            if pos.can_pass() && pos.gives_check(Move::PASS) && !ordered_moves.contains(&Move::PASS)
             {
                 ordered_moves.push(Move::PASS);
             }
