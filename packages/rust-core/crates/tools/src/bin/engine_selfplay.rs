@@ -1225,12 +1225,9 @@ fn main() -> Result<()> {
             || o == "PassRights=1"
             || o == "PassRights = 1"
     };
-    let pass_rights_via_usi_early = black_usi_opts_early
-        .iter()
-        .any(|o| is_pass_rights_enabled_early(o))
-        || white_usi_opts_early
-            .iter()
-            .any(|o| is_pass_rights_enabled_early(o));
+    let pass_rights_via_usi_early =
+        black_usi_opts_early.iter().any(|o| is_pass_rights_enabled_early(o))
+            || white_usi_opts_early.iter().any(|o| is_pass_rights_enabled_early(o));
 
     // USIオプションから InitialPassCount を解析
     let parse_initial_pass_count_early = |opts: &[String]| -> Option<u8> {
