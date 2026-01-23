@@ -43,6 +43,7 @@ packages/web/coverage/
 
 # private memo
 memo/
+docs/archive/
 
 _shared/*
 
