@@ -812,8 +812,10 @@ export function ShogiMatch({
             // ターン開始時刻をリセット
             turnStartTimeRef.current = Date.now();
             updateClocksForNextTurn(result.next.turn);
+            // 次がエンジンの手番なら思考を開始
+            tryStartEngineTurn();
         },
-        [clearLegalCache, logEngineError, navigation, updateClocksForNextTurn],
+        [clearLegalCache, logEngineError, navigation, tryStartEngineTurn, updateClocksForNextTurn],
     );
     handleMoveFromEngineRef.current = handleMoveFromEngine;
 
@@ -986,6 +988,8 @@ export function ShogiMatch({
             setIsMatchRunning(true);
             turnStartTimeRef.current = Date.now();
             startTicking(position.turn);
+            // エンジンの手番なら思考を開始
+            tryStartEngineTurn();
             return;
         }
 
@@ -1017,11 +1021,12 @@ export function ShogiMatch({
             });
         }, 100);
 
-        // エンジン管理は useEngineManager フックが自動的に処理する
         setIsMatchRunning(true);
         // ターン開始時刻をリセット
         turnStartTimeRef.current = Date.now();
         startTicking(position.turn);
+        // エンジンの手番なら思考を開始
+        tryStartEngineTurn();
     };
 
     /** 検討モードを開始 */
