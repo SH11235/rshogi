@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::Local;
 use clap::Parser;
+use engine_core::movegen::is_legal_with_pass;
 use engine_core::position::{Position, SFEN_HIRATE};
 use engine_core::types::{Color, Move, PieceType, Square};
 use rand::prelude::IndexedRandom;
@@ -56,6 +57,14 @@ struct Cli {
     /// Maximum plies per game before declaring a draw
     #[arg(long, default_value_t = 512)]
     max_moves: u32,
+
+    /// Enable pass rights (finite pass mode) with specified number of passes for Black
+    #[arg(long)]
+    pass_rights_black: Option<u8>,
+
+    /// Enable pass rights (finite pass mode) with specified number of passes for White
+    #[arg(long)]
+    pass_rights_white: Option<u8>,
 
     /// Initial time for Black in milliseconds
     #[arg(long, default_value_t = 0)]
@@ -263,6 +272,12 @@ struct MetaSettings {
     skip_initial_ply: u32,
     #[serde(default = "default_skip_in_check")]
     skip_in_check: bool,
+    /// 先手の初期パス権数（パス権有効時のみ使用）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    initial_pass_count_black: Option<u8>,
+    /// 後手の初期パス権数（パス権有効時のみ使用）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    initial_pass_count_white: Option<u8>,
 }
 
 fn default_skip_in_check() -> bool {
@@ -1011,7 +1026,13 @@ impl EngineProcess {
         req: &SearchRequest<'_>,
         info_logger: &mut Option<InfoLogger>,
     ) -> Result<SearchOutcome> {
-        self.write_line(&format!("position sfen {}", req.sfen))?;
+        // パス権がある場合は passrights を付加
+        let position_cmd = if let Some((b, w)) = req.pass_rights {
+            format!("position sfen {} passrights {} {}", req.sfen, b, w)
+        } else {
+            format!("position sfen {}", req.sfen)
+        };
+        self.write_line(&position_cmd)?;
         let time_args = &req.time_args;
         self.write_line(&format!(
             "go btime {} wtime {} byoyomi {} binc {} winc {}",
@@ -1150,6 +1171,8 @@ struct SearchRequest<'a> {
     ply: u32,
     side: Color,
     engine_label: &'static str,
+    /// パス権利（先手, 後手）: Someの場合はpassrightsキーワードで送信
+    pass_rights: Option<(u8, u8)>,
 }
 
 struct SearchOutcome {
@@ -1189,8 +1212,63 @@ fn main() -> Result<()> {
         cli.byoyomi = 1000;
     }
 
-    let (start_defs, start_commands) =
-        load_start_positions(cli.startpos_file.as_deref(), cli.sfen.as_deref())?;
+    // USIオプションからパス権情報を早期に解析（load_start_positions で使用するため）
+    let common_usi_opts_early = cli.usi_options.clone().unwrap_or_default();
+    let black_usi_opts_early =
+        cli.usi_options_black.clone().unwrap_or_else(|| common_usi_opts_early.clone());
+    let white_usi_opts_early =
+        cli.usi_options_white.clone().unwrap_or_else(|| common_usi_opts_early.clone());
+    // engine-usi は value == "true" || value == "1" で解釈するため両方検出する
+    let is_pass_rights_enabled_early = |o: &str| {
+        o == "PassRights=true"
+            || o == "PassRights = true"
+            || o == "PassRights=1"
+            || o == "PassRights = 1"
+    };
+    let pass_rights_via_usi_early = black_usi_opts_early
+        .iter()
+        .any(|o| is_pass_rights_enabled_early(o))
+        || white_usi_opts_early
+            .iter()
+            .any(|o| is_pass_rights_enabled_early(o));
+
+    // USIオプションから InitialPassCount を解析
+    let parse_initial_pass_count_early = |opts: &[String]| -> Option<u8> {
+        for opt in opts {
+            if let Some(val) = opt.strip_prefix("InitialPassCount=") {
+                return val.trim().parse().ok();
+            }
+            if let Some(val) = opt.strip_prefix("InitialPassCount = ") {
+                return val.trim().parse().ok();
+            }
+        }
+        None
+    };
+    let usi_initial_pass_count_early = parse_initial_pass_count_early(&black_usi_opts_early)
+        .or_else(|| parse_initial_pass_count_early(&white_usi_opts_early))
+        .unwrap_or(2);
+
+    // load_start_positions 用のパス権初期値
+    // 片側だけCLIで指定された場合、未指定側はデフォルト値で補完
+    let pass_rights_cli_specified =
+        cli.pass_rights_black.is_some() || cli.pass_rights_white.is_some();
+    let load_pass_black = if pass_rights_cli_specified || pass_rights_via_usi_early {
+        Some(cli.pass_rights_black.unwrap_or(usi_initial_pass_count_early))
+    } else {
+        None
+    };
+    let load_pass_white = if pass_rights_cli_specified || pass_rights_via_usi_early {
+        Some(cli.pass_rights_white.unwrap_or(usi_initial_pass_count_early))
+    } else {
+        None
+    };
+
+    let (start_defs, start_commands) = load_start_positions(
+        cli.startpos_file.as_deref(),
+        cli.sfen.as_deref(),
+        load_pass_black,
+        load_pass_white,
+    )?;
     let timestamp = Local::now();
     let output_path = resolve_output_path(cli.out.as_deref(), &timestamp);
     let info_path = output_path.with_extension("info.jsonl");
@@ -1247,8 +1325,18 @@ fn main() -> Result<()> {
         (false, Some(path)) => Some(path.clone()),
         (false, None) => Some(default_training_data_path(&output_path)),
     };
+    // パス権有効時は学習データ収集を抑止（PackedSfen形式がパス権をサポートしていないため）
+    let pass_rights_active = pass_rights_cli_specified || pass_rights_via_usi_early;
     let mut training_data_collector = if let Some(ref path) = training_data_path {
-        Some(TrainingDataCollector::new(path, cli.skip_initial_ply, cli.skip_in_check)?)
+        if pass_rights_active {
+            eprintln!(
+                "Warning: Training data collection is disabled when pass rights are enabled \
+                 (PackedSfen format does not support pass rights)"
+            );
+            None
+        } else {
+            Some(TrainingDataCollector::new(path, cli.skip_initial_ply, cli.skip_in_check)?)
+        }
     } else {
         None
     };
@@ -1282,8 +1370,53 @@ fn main() -> Result<()> {
     let white_args = cli.engine_args_white.clone().unwrap_or(common_args.clone());
 
     let common_usi_opts = cli.usi_options.clone().unwrap_or_default();
-    let black_usi_opts = cli.usi_options_black.clone().unwrap_or_else(|| common_usi_opts.clone());
-    let white_usi_opts = cli.usi_options_white.clone().unwrap_or_else(|| common_usi_opts.clone());
+    let mut black_usi_opts =
+        cli.usi_options_black.clone().unwrap_or_else(|| common_usi_opts.clone());
+    let mut white_usi_opts =
+        cli.usi_options_white.clone().unwrap_or_else(|| common_usi_opts.clone());
+
+    // パス権オプションが指定されている場合、PassRights=true を自動追加
+    if cli.pass_rights_black.is_some() || cli.pass_rights_white.is_some() {
+        let pass_rights_opt = "PassRights=true".to_string();
+        if !black_usi_opts.iter().any(|o| o.starts_with("PassRights")) {
+            black_usi_opts.push(pass_rights_opt.clone());
+        }
+        if !white_usi_opts.iter().any(|o| o.starts_with("PassRights")) {
+            white_usi_opts.push(pass_rights_opt);
+        }
+    }
+
+    // USIオプションで PassRights=true/1 が設定されているかを検出
+    // （--pass-rights-* 未指定でも --usi-options PassRights=true で有効化される場合に対応）
+    // engine-usi は value == "true" || value == "1" で解釈するため両方検出する
+    let is_pass_rights_enabled = |o: &str| {
+        o == "PassRights=true"
+            || o == "PassRights = true"
+            || o == "PassRights=1"
+            || o == "PassRights = 1"
+    };
+    let pass_rights_via_usi = black_usi_opts.iter().any(|o| is_pass_rights_enabled(o))
+        || white_usi_opts.iter().any(|o| is_pass_rights_enabled(o));
+
+    // USIオプションから InitialPassCount を解析（エンジン設定と同期するため）
+    let parse_initial_pass_count = |opts: &[String]| -> Option<u8> {
+        for opt in opts {
+            if let Some(val) = opt.strip_prefix("InitialPassCount=") {
+                return val.trim().parse().ok();
+            }
+            if let Some(val) = opt.strip_prefix("InitialPassCount = ") {
+                return val.trim().parse().ok();
+            }
+        }
+        None
+    };
+    let usi_initial_pass_count = parse_initial_pass_count(&black_usi_opts)
+        .or_else(|| parse_initial_pass_count(&white_usi_opts))
+        .unwrap_or(2); // USI未指定時のデフォルト値
+
+    // ドライバ側のパス権有効化フラグ（CLIオプションまたはUSIオプションで有効）
+    let pass_rights_enabled =
+        cli.pass_rights_black.is_some() || cli.pass_rights_white.is_some() || pass_rights_via_usi;
 
     let mut black = EngineProcess::spawn(
         &EngineConfig {
@@ -1346,6 +1479,16 @@ fn main() -> Result<()> {
             output_training_data: training_data_path.as_ref().map(|p| p.display().to_string()),
             skip_initial_ply: cli.skip_initial_ply,
             skip_in_check: cli.skip_in_check,
+            initial_pass_count_black: if pass_rights_enabled {
+                Some(cli.pass_rights_black.unwrap_or(usi_initial_pass_count))
+            } else {
+                None
+            },
+            initial_pass_count_white: if pass_rights_enabled {
+                Some(cli.pass_rights_white.unwrap_or(usi_initial_pass_count))
+            } else {
+                None
+            },
         },
         engine_cmd: EngineCommandMeta {
             path_black: engine_paths.black.path.display().to_string(),
@@ -1381,7 +1524,19 @@ fn main() -> Result<()> {
         } else {
             &start_defs[(game_idx as usize) % start_defs.len()]
         };
-        let mut pos = build_position(parsed)?;
+        // パス権の初期値（CLIオプション > USIオプションの InitialPassCount）
+        // ドライバ側の Position 初期化用
+        let pass_black = if pass_rights_enabled {
+            Some(cli.pass_rights_black.unwrap_or(usi_initial_pass_count))
+        } else {
+            None
+        };
+        let pass_white = if pass_rights_enabled {
+            Some(cli.pass_rights_white.unwrap_or(usi_initial_pass_count))
+        } else {
+            None
+        };
+        let mut pos = build_position(parsed, pass_black, pass_white)?;
         let mut tc = TimeControl::new(&cli);
         let mut outcome = GameOutcome::InProgress;
         let mut outcome_reason = "max_moves";
@@ -1410,6 +1565,12 @@ fn main() -> Result<()> {
             };
             let sfen_before = pos.to_sfen();
             let think_limit_ms = tc.think_limit_ms(side);
+            // パス権が有効な場合、現在のパス権を取得
+            let pass_rights = if pass_rights_enabled {
+                Some((pos.pass_rights(Color::Black), pos.pass_rights(Color::White)))
+            } else {
+                None
+            };
             let req = SearchRequest {
                 sfen: &sfen_before,
                 time_args: tc.time_args(),
@@ -1419,6 +1580,7 @@ fn main() -> Result<()> {
                 ply: plies_played,
                 side,
                 engine_label,
+                pass_rights,
             };
             let search = engine.search(&req, &mut info_logger)?;
 
@@ -1464,7 +1626,7 @@ fn main() -> Result<()> {
                         terminal = true;
                     }
                     _ => match Move::from_usi(mv_str) {
-                        Some(mv) if pos.is_legal(mv) => {
+                        Some(mv) if is_legal_with_pass(&pos, mv) => {
                             // 学習データを記録（do_move前に記録することが重要）
                             if let Some(ref mut collector) = training_data_collector {
                                 collector.record_position(
@@ -1474,7 +1636,12 @@ fn main() -> Result<()> {
                                     Some(mv),
                                 );
                             }
-                            let gives_check = pos.gives_check(mv);
+                            // パス手は王手にならない
+                            let gives_check = if mv.is_pass() {
+                                false
+                            } else {
+                                pos.gives_check(mv)
+                            };
                             pos.do_move(mv, gives_check);
                             tc.update_after_move(side, search.elapsed_ms);
                             move_usi = mv_str.clone();
@@ -1878,6 +2045,8 @@ fn find_engine_in_dir(dir: &Path) -> Option<ResolvedEnginePath> {
 fn load_start_positions(
     file: Option<&Path>,
     sfen: Option<&str>,
+    pass_rights_black: Option<u8>,
+    pass_rights_white: Option<u8>,
 ) -> Result<(Vec<ParsedPosition>, Vec<String>)> {
     match (file, sfen) {
         (Some(_), Some(_)) => {
@@ -1901,7 +2070,7 @@ fn load_start_positions(
                     .with_context(|| {
                         format!("invalid position syntax on line {}: {}", idx + 1, trimmed)
                     })?;
-                build_position(&parsed)?;
+                build_position(&parsed, pass_rights_black, pass_rights_white)?;
                 let cmd = describe_position(&parsed);
                 positions.push(parsed);
                 commands.push(cmd);
@@ -1913,7 +2082,7 @@ fn load_start_positions(
         }
         (None, Some(sfen_arg)) => {
             let parsed = parse_position_line(sfen_arg).or_else(|_| parse_sfen_only(sfen_arg))?;
-            build_position(&parsed)?;
+            build_position(&parsed, pass_rights_black, pass_rights_white)?;
             let cmd = describe_position(&parsed);
             Ok((vec![parsed], vec![cmd]))
         }
@@ -2001,7 +2170,11 @@ where
     }
 }
 
-fn build_position(parsed: &ParsedPosition) -> Result<Position> {
+fn build_position(
+    parsed: &ParsedPosition,
+    pass_rights_black: Option<u8>,
+    pass_rights_white: Option<u8>,
+) -> Result<Position> {
     let mut pos = Position::new();
     if parsed.startpos {
         pos.set_sfen(SFEN_HIRATE)?;
@@ -2010,13 +2183,23 @@ fn build_position(parsed: &ParsedPosition) -> Result<Position> {
     } else {
         bail!("missing sfen payload");
     }
+    // パス権利を有効化（先手または後手の少なくとも一方が指定されている場合）
+    if pass_rights_black.is_some() || pass_rights_white.is_some() {
+        let black = pass_rights_black.unwrap_or(0);
+        let white = pass_rights_white.unwrap_or(0);
+        pos.enable_pass_rights(black, white);
+    }
     for mv_str in &parsed.moves {
         let mv = Move::from_usi(mv_str)
-            .ok_or_else(|| anyhow!("invalid move in start position: {}", mv_str))?;
-        if !pos.is_legal(mv) {
-            bail!("illegal move '{}' in start position", mv_str);
+            .ok_or_else(|| anyhow!("invalid move in start position: {mv_str}"))?;
+        if !is_legal_with_pass(&pos, mv) {
+            bail!("illegal move '{mv_str}' in start position");
         }
-        let gives_check = pos.gives_check(mv);
+        let gives_check = if mv.is_pass() {
+            false
+        } else {
+            pos.gives_check(mv)
+        };
         pos.do_move(mv, gives_check);
     }
     Ok(pos)
@@ -2285,7 +2468,7 @@ fn export_game_to_kif<W: Write>(
         let side = pos.side_to_move();
         let mv = Move::from_usi(&entry.move_usi)
             .ok_or_else(|| anyhow!("invalid move in log: {}", entry.move_usi))?;
-        if !pos.is_legal(mv) {
+        if !is_legal_with_pass(&pos, mv) {
             bail!("illegal move '{}' in log for game {}", entry.move_usi, game_id);
         }
         let elapsed_ms = entry.elapsed_ms.unwrap_or(0);
@@ -2295,8 +2478,12 @@ fn export_game_to_kif<W: Write>(
             total_white + elapsed_ms
         };
         let line = format_move_kif(entry.ply, &pos, mv, elapsed_ms, total_time);
-        writeln!(writer, "{}", line)?;
-        let gives_check = pos.gives_check(mv);
+        writeln!(writer, "{line}")?;
+        let gives_check = if mv.is_pass() {
+            false
+        } else {
+            pos.gives_check(mv)
+        };
         pos.do_move(mv, gives_check);
         if side == Color::Black {
             total_black = total_time;
@@ -2331,6 +2518,18 @@ fn start_position_for_game(
     game_id: u32,
     moves: &[MoveEntry],
 ) -> Option<(Position, String)> {
+    // パス手がログに含まれているか確認
+    let has_pass = moves.iter().any(|m| m.move_usi == "pass");
+
+    // metaから初期パス権数を取得（未記録の場合は後方互換のため15を使用）
+    let (pass_black, pass_white) = if has_pass {
+        let black = meta.and_then(|m| m.settings.initial_pass_count_black).unwrap_or(15);
+        let white = meta.and_then(|m| m.settings.initial_pass_count_white).unwrap_or(15);
+        (black, white)
+    } else {
+        (0, 0)
+    };
+
     // random_startpos の場合は moves[0].sfen_before を優先
     // （meta.start_positions からの game_id % len() による選択は実際の対局と一致しないため）
     let use_moves_first = meta.map(|m| m.settings.random_startpos).unwrap_or(false);
@@ -2339,7 +2538,13 @@ fn start_position_for_game(
         if let Some(meta) = meta {
             if !meta.start_positions.is_empty() {
                 let idx = ((game_id - 1) as usize) % meta.start_positions.len();
-                if let Ok((pos, sfen)) = start_position_from_command(&meta.start_positions[idx]) {
+                if let Ok((mut pos, _)) = start_position_from_command(&meta.start_positions[idx]) {
+                    // パス手があればパス権利を有効化（metaの設定値を使用）
+                    if has_pass {
+                        pos.enable_pass_rights(pass_black, pass_white);
+                    }
+                    // SFENは正しいパス権値で再生成
+                    let sfen = pos.to_sfen();
                     return Some((pos, sfen));
                 }
             }
@@ -2348,6 +2553,10 @@ fn start_position_for_game(
     moves.first().and_then(|m| {
         let mut pos = Position::new();
         pos.set_sfen(&m.sfen_before).ok()?;
+        // パス手があればパス権利を有効化（metaの設定値を使用）
+        if has_pass {
+            pos.enable_pass_rights(pass_black, pass_white);
+        }
         let sfen = pos.to_sfen();
         Some((pos, sfen))
     })
@@ -2355,7 +2564,14 @@ fn start_position_for_game(
 
 fn start_position_from_command(cmd: &str) -> Result<(Position, String)> {
     let parsed = parse_position_line(cmd)?;
-    let pos = build_position(&parsed)?;
+    // パス手が含まれていればパス権利を有効化
+    let has_pass = parsed.moves.iter().any(|m| m == "pass");
+    let (pass_black, pass_white) = if has_pass {
+        (Some(15), Some(15))
+    } else {
+        (None, None)
+    };
+    let pos = build_position(&parsed, pass_black, pass_white)?;
     let sfen = pos.to_sfen();
     Ok((pos, sfen))
 }
@@ -2395,6 +2611,14 @@ fn format_move_kif(ply: u32, pos: &Position, mv: Move, elapsed_ms: u64, total_ms
     } else {
         "△"
     };
+
+    // パス手は特別に処理
+    if mv.is_pass() {
+        let per_move = format_mm_ss(elapsed_ms);
+        let total = format_hh_mm_ss(total_ms);
+        return format!("{:>4} {}パス   ({:>5}/{})", ply, prefix, per_move, total);
+    }
+
     let dest = square_label_kanji(mv.to());
     let (label, from_suffix) = if mv.is_drop() {
         (format!("{}打", piece_label(mv.drop_piece_type(), false)), String::new())

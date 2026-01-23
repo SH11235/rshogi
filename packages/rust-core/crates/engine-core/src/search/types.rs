@@ -7,7 +7,7 @@
 
 use std::mem::MaybeUninit;
 
-use crate::movegen::{generate_legal, MoveList};
+use crate::movegen::{generate_legal_with_pass, MoveList};
 use crate::position::Position;
 use crate::types::{Move, Piece, RepetitionState, Square, Value, MAX_PLY};
 
@@ -324,6 +324,30 @@ impl OrderedMovesBuffer {
         }
     }
 
+    /// 指定位置に指し手を挿入
+    ///
+    /// index以降の要素を後方にシフトして挿入する。
+    /// 容量を超えた場合は無視する。
+    #[inline]
+    pub fn insert(&mut self, index: usize, mv: Move) {
+        if self.len >= ORDERED_MOVES_CAPACITY {
+            return;
+        }
+        let index = index.min(self.len);
+        // index以降を1つ後ろにシフト
+        if index < self.len {
+            unsafe {
+                std::ptr::copy(
+                    self.buf.as_ptr().add(index),
+                    self.buf.as_mut_ptr().add(index + 1),
+                    self.len - index,
+                );
+            }
+        }
+        self.buf[index].write(mv);
+        self.len += 1;
+    }
+
     /// 指し手が含まれているかチェック（線形探索）
     #[inline]
     pub fn contains(&self, mv: &Move) -> bool {
@@ -506,7 +530,8 @@ impl RootMoves {
     /// * `search_moves` - 探索対象の手（空なら全合法手）
     pub fn from_legal_moves(pos: &Position, search_moves: &[Move]) -> Self {
         let mut legal_moves = MoveList::new();
-        generate_legal(pos, &mut legal_moves);
+        // パス権利が有効な場合、パス手も含める
+        generate_legal_with_pass(pos, &mut legal_moves);
         let mut moves = Vec::new();
 
         for &mv in legal_moves.as_slice() {
