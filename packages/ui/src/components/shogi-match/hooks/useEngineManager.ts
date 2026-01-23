@@ -756,6 +756,13 @@ export function useEngineManager({
             if (!ready) return;
             const { client, engineId } = ready;
 
+            // ensureEngineReady後にエンジンがdisposeされていないかチェック
+            // （待った処理等でstopAllEnginesが呼ばれた場合）
+            const engineState = engineStatesRef.current[side];
+            if (engineState.client !== client || !isMatchRunningRef.current) {
+                return;
+            }
+
             // 既存の検索ハンドルがある場合の処理
             if (searchState.handle) {
                 const current = activeSearchRef.current;
@@ -774,6 +781,11 @@ export function useEngineManager({
                     movesRef.current,
                     buildPassRightsOption(passRightsSettings, movesRef.current),
                 );
+
+                // loadPosition後にエンジンがdisposeされていないかチェック
+                if (engineState.client !== client || !isMatchRunningRef.current) {
+                    return;
+                }
 
                 // UIタイマーの現在の残り時間を計算してエンジンに渡す
                 // これにより、タイマー開始からloadPosition完了までの経過時間を考慮できる
@@ -799,6 +811,13 @@ export function useEngineManager({
                     limits: { byoyomiMs: effectiveByoyomiMs },
                     ponder: false,
                 });
+
+                // search後にもチェック（handleを設定する前に中断されていないか）
+                if (engineState.client !== client || !isMatchRunningRef.current) {
+                    // 既に中断されているので、開始した検索をキャンセル
+                    await handle.cancel().catch(() => undefined);
+                    return;
+                }
 
                 searchState.handle = handle;
                 activeSearchRef.current = { side, engineId };
