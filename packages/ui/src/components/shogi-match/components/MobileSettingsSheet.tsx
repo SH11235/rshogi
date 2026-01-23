@@ -157,11 +157,13 @@ export function MobileSettingsSheet({
                 </div>
             )}
 
-            {/* 先手/後手設定 */}
+            {/* 先手/後手設定（PC版と同じ2列レイアウト） */}
             <div className="grid grid-cols-2 gap-3 [&>div]:min-w-0">
-                <div className="flex flex-col gap-2">
+                {/* 先手側 */}
+                <div className="flex flex-col gap-2 border-r-2 border-[hsl(var(--wafuu-sumi)/0.2)] pr-3">
+                    <div className="text-sm font-semibold text-wafuu-shu">☗先手</div>
                     <label className={labelClassName}>
-                        <span className="font-medium text-wafuu-shu">☗ 先手</span>
+                        <span className="text-xs text-muted-foreground">プレイヤー</span>
                         <select
                             value={getSelectorValue(sides.sente)}
                             onChange={(e) => handleSelectorChange("sente", e.target.value)}
@@ -186,10 +188,42 @@ export function MobileSettingsSheet({
                             />
                         )}
                     </div>
+                    <label htmlFor="mobile-sente-main" className={labelClassName}>
+                        <span className="text-xs text-muted-foreground">持ち時間(秒)</span>
+                        <NumericInput
+                            id="mobile-sente-main"
+                            value={Math.floor(timeSettings.sente.mainMs / 1000)}
+                            disabled={settingsLocked}
+                            className={inputClassName}
+                            onChange={(v) =>
+                                onTimeSettingsChange({
+                                    ...timeSettings,
+                                    sente: { ...timeSettings.sente, mainMs: v * 1000 },
+                                })
+                            }
+                        />
+                    </label>
+                    <label htmlFor="mobile-sente-byoyomi" className={labelClassName}>
+                        <span className="text-xs text-muted-foreground">秒読み(秒)</span>
+                        <NumericInput
+                            id="mobile-sente-byoyomi"
+                            value={Math.floor(timeSettings.sente.byoyomiMs / 1000)}
+                            disabled={settingsLocked}
+                            className={inputClassName}
+                            onChange={(v) =>
+                                onTimeSettingsChange({
+                                    ...timeSettings,
+                                    sente: { ...timeSettings.sente, byoyomiMs: v * 1000 },
+                                })
+                            }
+                        />
+                    </label>
                 </div>
+                {/* 後手側 */}
                 <div className="flex flex-col gap-2">
+                    <div className="text-sm font-semibold text-wafuu-ai">☖後手</div>
                     <label className={labelClassName}>
-                        <span className="font-medium text-wafuu-ai">☖ 後手</span>
+                        <span className="text-xs text-muted-foreground">プレイヤー</span>
                         <select
                             value={getSelectorValue(sides.gote)}
                             onChange={(e) => handleSelectorChange("gote", e.target.value)}
@@ -214,45 +248,8 @@ export function MobileSettingsSheet({
                             />
                         )}
                     </div>
-                </div>
-            </div>
-
-            {/* 持ち時間設定 */}
-            <div className="space-y-2">
-                <div className="font-medium text-sm">持ち時間</div>
-                <div className="grid grid-cols-2 gap-2 [&>label]:min-w-0">
-                    <label htmlFor="mobile-sente-main" className={labelClassName}>
-                        <span className="text-xs text-muted-foreground">先手 持ち時間(秒)</span>
-                        <NumericInput
-                            id="mobile-sente-main"
-                            value={Math.floor(timeSettings.sente.mainMs / 1000)}
-                            disabled={settingsLocked}
-                            className={inputClassName}
-                            onChange={(v) =>
-                                onTimeSettingsChange({
-                                    ...timeSettings,
-                                    sente: { ...timeSettings.sente, mainMs: v * 1000 },
-                                })
-                            }
-                        />
-                    </label>
-                    <label htmlFor="mobile-sente-byoyomi" className={labelClassName}>
-                        <span className="text-xs text-muted-foreground">先手 秒読み(秒)</span>
-                        <NumericInput
-                            id="mobile-sente-byoyomi"
-                            value={Math.floor(timeSettings.sente.byoyomiMs / 1000)}
-                            disabled={settingsLocked}
-                            className={inputClassName}
-                            onChange={(v) =>
-                                onTimeSettingsChange({
-                                    ...timeSettings,
-                                    sente: { ...timeSettings.sente, byoyomiMs: v * 1000 },
-                                })
-                            }
-                        />
-                    </label>
                     <label htmlFor="mobile-gote-main" className={labelClassName}>
-                        <span className="text-xs text-muted-foreground">後手 持ち時間(秒)</span>
+                        <span className="text-xs text-muted-foreground">持ち時間(秒)</span>
                         <NumericInput
                             id="mobile-gote-main"
                             value={Math.floor(timeSettings.gote.mainMs / 1000)}
@@ -267,7 +264,7 @@ export function MobileSettingsSheet({
                         />
                     </label>
                     <label htmlFor="mobile-gote-byoyomi" className={labelClassName}>
-                        <span className="text-xs text-muted-foreground">後手 秒読み(秒)</span>
+                        <span className="text-xs text-muted-foreground">秒読み(秒)</span>
                         <NumericInput
                             id="mobile-gote-byoyomi"
                             value={Math.floor(timeSettings.gote.byoyomiMs / 1000)}
