@@ -229,6 +229,8 @@ interface UseEngineManagerReturn {
     retryEngine: (side: Player) => Promise<void>;
     /** リトライ中かどうか */
     isRetrying: Record<Player, boolean>;
+    /** エンジンターンの開始を試行する（手番がエンジンなら思考開始） */
+    tryStartEngineTurn: () => void;
 }
 
 export function formatEvent(event: EngineEvent, label: string): string {
@@ -832,8 +834,18 @@ export function useEngineManager({
         };
     }, [addErrorLog, disposeEngineForSide]);
 
-    // エンジンターンの自動開始
-    useEffect(() => {
+    /**
+     * エンジンターンの開始を試行する
+     *
+     * 現在の手番がエンジンの場合、エンジンの思考を開始する。
+     * 手が指された後、待った後など、Ref が同期的に更新される箇所から呼び出す。
+     * - 手が指された後 (handleMoveFromEngine, applyMoveForMatch, handlePassMove)
+     * - 待った後 (handleUndo)
+     *
+     * 注: 対局開始時 (resumeAutoPlay) は状態変更を伴うため、
+     * useEffect での自動開始に任せる。
+     */
+    const tryStartEngineTurn = useCallback(() => {
         if (!isMatchRunning || !positionReady) return;
         const side = positionRef.current.turn;
         if (!isEngineTurn(side)) return;
@@ -856,7 +868,6 @@ export function useEngineManager({
         });
     }, [
         addErrorLog,
-        engineReady, // エンジン停止後の再開トリガーに必要
         getEngineForSide,
         isEngineTurn,
         isMatchRunning,
@@ -865,6 +876,14 @@ export function useEngineManager({
         positionRef,
         startEngineTurn,
     ]);
+
+    // 対局開始時のエンジンターン自動開始
+    // isMatchRunning が true になった時点でエンジンの手番なら思考を開始
+    useEffect(() => {
+        if (isMatchRunning && positionReady) {
+            tryStartEngineTurn();
+        }
+    }, [isMatchRunning, positionReady, tryStartEngineTurn]);
 
     // 解析をキャンセルする
     const cancelAnalysis = useCallback(async () => {
@@ -1077,6 +1096,7 @@ export function useEngineManager({
         stopAllEngines,
         getEngineForSide,
         isEngineTurn,
+        tryStartEngineTurn,
         logEngineError: addErrorLog,
         isAnalyzing,
         analyzePosition,
