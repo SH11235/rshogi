@@ -443,13 +443,11 @@ impl SearchWorker {
     // NNUE ヘルパーメソッド（LayerStacks / HalfKP・HalfKA の分岐を隠蔽）
     // =========================================================================
 
-    /// NNUE 評価値を計算
+    /// NNUE 評価値を計算（パス権なし）
     ///
     /// ロードされた NNUE のアーキテクチャに応じて適切なアキュムレータと評価関数を使用。
-    /// パス権評価も加算する。
-    /// NNUE評価関数
-    /// 注意: パス権評価は含まない（TTに保存されるため、手数依存の評価を含めると不整合を起こす）
-    /// パス権評価は evaluate_static_eval 内で動的に追加される
+    /// パス権評価は手数依存のためここでは加算せず、静的評価補正後に毎回再計算して加える。
+    /// これにより TT/EvalHash（局面キーのみ）と整合し、再訪局面で古い手数のパス権評価を再利用しない。
     #[inline]
     fn nnue_evaluate(&mut self, pos: &Position) -> Value {
         evaluate_dispatch(pos, &mut self.nnue_stack)
@@ -1214,6 +1212,13 @@ impl SearchWorker {
                     continue;
                 }
                 ordered_moves.push(ext.mv);
+            }
+            // PASSが王手になる場合は quiet check として追加
+            if pos.can_pass()
+                && pos.gives_check(Move::PASS)
+                && !ordered_moves.contains(&Move::PASS)
+            {
+                ordered_moves.push(Move::PASS);
             }
         }
 
