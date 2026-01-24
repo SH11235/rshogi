@@ -1,7 +1,28 @@
-import { Buffer } from "node:buffer";
 import type { NnueMeta } from "@shogi/app-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTauriNnueStorage, type TauriNnueStorageOptions } from "./nnue-storage";
+
+type BufferLike = {
+    from: (data: string, encoding?: "binary") => { toString: (encoding: "base64") => string };
+};
+
+const fallbackBtoa = (data: string): string => {
+    const bufferCtor = (globalThis as { Buffer?: BufferLike }).Buffer;
+    if (!bufferCtor) {
+        throw new Error("Buffer is not available for base64 encoding");
+    }
+    return bufferCtor.from(data, "binary").toString("base64");
+};
+
+const encodeBase64 = (data: string): string => (globalThis.btoa ?? fallbackBtoa)(data);
+
+const bytesToBase64 = (bytes: Uint8Array): string => {
+    let binary = "";
+    for (const byte of bytes) {
+        binary += String.fromCharCode(byte);
+    }
+    return encodeBase64(binary);
+};
 
 function createLocalStorageMock(): Storage {
     const store = new Map<string, string>();
@@ -32,7 +53,7 @@ describe("nnue-storage", () => {
         originalBtoa = globalThis.btoa;
         globalThis.localStorage = createLocalStorageMock();
         if (!globalThis.btoa) {
-            globalThis.btoa = (data: string) => Buffer.from(data, "binary").toString("base64");
+            globalThis.btoa = fallbackBtoa;
         }
     });
 
@@ -82,7 +103,7 @@ describe("nnue-storage", () => {
         expect(payload.id).toBe(id);
         expect(payload.chunkIndex).toBe(0);
 
-        const expectedBase64 = Buffer.from(bytes).toString("base64");
+        const expectedBase64 = bytesToBase64(bytes);
         expect(payload.dataBase64).toBe(expectedBase64);
     });
 });
