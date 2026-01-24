@@ -15,13 +15,22 @@
 //! # サポートするアーキテクチャ
 //!
 //! | 型エイリアス | L1 | L2 | L3 | 活性化 |
-//! |-------------|-----|-----|-----|--------|
+//! |-------------|------|-----|-----|--------|
 //! | HalfKA256CReLU | 256 | 32 | 32 | CReLU |
 //! | HalfKA256SCReLU | 256 | 32 | 32 | SCReLU |
+//! | HalfKA256Pairwise | 256 | 32 | 32 | PairwiseCReLU |
 //! | HalfKA512CReLU | 512 | 8 | 96 | CReLU |
 //! | HalfKA512SCReLU | 512 | 8 | 96 | SCReLU |
+//! | HalfKA512Pairwise | 512 | 8 | 96 | PairwiseCReLU |
+//! | HalfKA512_32_32CReLU | 512 | 32 | 32 | CReLU |
+//! | HalfKA512_32_32SCReLU | 512 | 32 | 32 | SCReLU |
+//! | HalfKA512_32_32Pairwise | 512 | 32 | 32 | PairwiseCReLU |
 //! | HalfKA1024CReLU | 1024 | 8 | 96 | CReLU |
 //! | HalfKA1024SCReLU | 1024 | 8 | 96 | SCReLU |
+//! | HalfKA1024Pairwise | 1024 | 8 | 96 | PairwiseCReLU |
+//! | HalfKA1024_8_32CReLU | 1024 | 8 | 32 | CReLU |
+//! | HalfKA1024_8_32SCReLU | 1024 | 8 | 32 | SCReLU |
+//! | HalfKA1024_8_32Pairwise | 1024 | 8 | 32 | PairwiseCReLU |
 //!
 //! # 特徴量
 //!

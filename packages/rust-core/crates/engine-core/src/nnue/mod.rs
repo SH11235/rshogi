@@ -82,16 +82,17 @@ pub use network_layer_stacks::NetworkLayerStacks;
 pub use activation::{detect_activation_from_arch, CReLU, FtActivation, PairwiseCReLU, SCReLU};
 pub use network_halfka::{
     AccumulatorEntryHalfKA, AccumulatorHalfKA, AccumulatorStackHalfKA, AffineTransformHalfKA,
-    FeatureTransformerHalfKA, HalfKA1024CReLU, HalfKA1024Pairwise, HalfKA1024SCReLU,
-    HalfKA1024_8_32CReLU, HalfKA1024_8_32SCReLU, HalfKA256CReLU, HalfKA256Pairwise,
-    HalfKA256SCReLU, HalfKA512CReLU, HalfKA512Pairwise, HalfKA512SCReLU, NetworkHalfKA,
+    FeatureTransformerHalfKA, NetworkHalfKA,
 };
 pub use network_halfkp::{
     AccumulatorEntryHalfKP, AccumulatorHalfKP, AccumulatorStackHalfKP, AffineTransformHalfKP,
-    FeatureTransformerHalfKP, HalfKP256CReLU, HalfKP256Pairwise, HalfKP256SCReLU, HalfKP512CReLU,
-    HalfKP512Pairwise, HalfKP512SCReLU, HalfKP512_32_32CReLU, NetworkHalfKP,
+    FeatureTransformerHalfKP, NetworkHalfKP,
 };
 pub use spec::{Activation, ArchitectureSpec, FeatureSet as SpecFeatureSet};
+
+// 型エイリアス（HalfKA*/HalfKP* の全バリアント）
+// 新バリアント追加時は aliases.rs のみ更新すれば自動的に re-export される
+pub use aliases::*;
 
 // Phase 2: 外部 API 統一
 pub use evaluator::NNUEEvaluator;

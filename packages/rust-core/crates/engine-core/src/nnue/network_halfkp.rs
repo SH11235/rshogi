@@ -16,11 +16,19 @@
 //! # サポートするアーキテクチャ
 //!
 //! | 型エイリアス | L1 | L2 | L3 | 活性化 |
-//! |-------------|-----|-----|-----|--------|
+//! |-------------|------|-----|-----|--------|
 //! | HalfKP256CReLU | 256 | 32 | 32 | CReLU |
 //! | HalfKP256SCReLU | 256 | 32 | 32 | SCReLU |
 //! | HalfKP256Pairwise | 256 | 32 | 32 | PairwiseCReLU |
 //! | HalfKP512CReLU | 512 | 8 | 96 | CReLU |
+//! | HalfKP512SCReLU | 512 | 8 | 96 | SCReLU |
+//! | HalfKP512Pairwise | 512 | 8 | 96 | PairwiseCReLU |
+//! | HalfKP512_32_32CReLU | 512 | 32 | 32 | CReLU |
+//! | HalfKP512_32_32SCReLU | 512 | 32 | 32 | SCReLU |
+//! | HalfKP512_32_32Pairwise | 512 | 32 | 32 | PairwiseCReLU |
+//! | HalfKP1024_8_32CReLU | 1024 | 8 | 32 | CReLU |
+//! | HalfKP1024_8_32SCReLU | 1024 | 8 | 32 | SCReLU |
+//! | HalfKP1024_8_32Pairwise | 1024 | 8 | 32 | PairwiseCReLU |
 //!
 //! # 特徴量
 //!
