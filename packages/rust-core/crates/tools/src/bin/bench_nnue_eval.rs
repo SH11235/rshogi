@@ -5,12 +5,13 @@
 
 use std::hint::black_box;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use clap::Parser;
 
-use engine_core::nnue::{halfka::HalfKAStack, halfkp::HalfKPStack, NNUENetwork};
+use engine_core::nnue::{NNUEEvaluator, NNUENetwork};
 use engine_core::position::Position;
 
 /// NNUE評価ベンチマーク
@@ -73,10 +74,9 @@ impl BenchResult {
     }
 }
 
-/// HalfKA ベンチマーク（3バリアント階層構造対応）
-fn bench_halfka(
-    network: &NNUENetwork,
-    stack: &mut HalfKAStack,
+/// NNUEEvaluator を使用したベンチマーク
+fn bench_evaluator(
+    evaluator: &mut NNUEEvaluator,
     positions: &[Position],
     warmup: u64,
     iterations: u64,
@@ -85,24 +85,24 @@ fn bench_halfka(
     // ウォームアップ
     for i in 0..warmup {
         let pos = &positions[i as usize % positions.len()];
-        network.refresh_accumulator_halfka(pos, stack);
-        black_box(network.evaluate_halfka(pos, stack));
+        evaluator.refresh(pos);
+        black_box(evaluator.evaluate_only(pos));
     }
 
     // refresh_accumulator ベンチマーク
     let start = Instant::now();
     for i in 0..iterations {
         let pos = &positions[i as usize % positions.len()];
-        network.refresh_accumulator_halfka(pos, stack);
+        evaluator.refresh(pos);
     }
     let refresh_duration = start.elapsed();
 
     // evaluate ベンチマーク
-    network.refresh_accumulator_halfka(&positions[0], stack);
+    evaluator.refresh(&positions[0]);
     let start = Instant::now();
     for i in 0..iterations {
         let pos = &positions[i as usize % positions.len()];
-        black_box(network.evaluate_halfka(pos, stack));
+        black_box(evaluator.evaluate_only(pos));
     }
     let eval_duration = start.elapsed();
 
@@ -110,63 +110,8 @@ fn bench_halfka(
     let start = Instant::now();
     for i in 0..iterations {
         let pos = &positions[i as usize % positions.len()];
-        network.refresh_accumulator_halfka(pos, stack);
-        black_box(network.evaluate_halfka(pos, stack));
-    }
-    let total_duration = start.elapsed();
-
-    let refresh_ns = refresh_duration.as_nanos() as f64 / iterations as f64;
-    let eval_ns = eval_duration.as_nanos() as f64 / iterations as f64;
-    let total_ns = total_duration.as_nanos() as f64 / iterations as f64;
-
-    BenchResult {
-        arch_name: arch_name.to_string(),
-        refresh_ns_per_op: refresh_ns,
-        eval_ns_per_op: eval_ns,
-        total_ns_per_op: total_ns,
-        evals_per_sec: 1_000_000_000.0 / total_ns,
-    }
-}
-
-/// HalfKP ベンチマーク（3バリアント階層構造対応）
-fn bench_halfkp(
-    network: &NNUENetwork,
-    stack: &mut HalfKPStack,
-    positions: &[Position],
-    warmup: u64,
-    iterations: u64,
-    arch_name: &str,
-) -> BenchResult {
-    // ウォームアップ
-    for i in 0..warmup {
-        let pos = &positions[i as usize % positions.len()];
-        network.refresh_accumulator_halfkp(pos, stack);
-        black_box(network.evaluate_halfkp(pos, stack));
-    }
-
-    // refresh_accumulator ベンチマーク
-    let start = Instant::now();
-    for i in 0..iterations {
-        let pos = &positions[i as usize % positions.len()];
-        network.refresh_accumulator_halfkp(pos, stack);
-    }
-    let refresh_duration = start.elapsed();
-
-    // evaluate ベンチマーク
-    network.refresh_accumulator_halfkp(&positions[0], stack);
-    let start = Instant::now();
-    for i in 0..iterations {
-        let pos = &positions[i as usize % positions.len()];
-        black_box(network.evaluate_halfkp(pos, stack));
-    }
-    let eval_duration = start.elapsed();
-
-    // 結合ベンチマーク
-    let start = Instant::now();
-    for i in 0..iterations {
-        let pos = &positions[i as usize % positions.len()];
-        network.refresh_accumulator_halfkp(pos, stack);
-        black_box(network.evaluate_halfkp(pos, stack));
+        evaluator.refresh(pos);
+        black_box(evaluator.evaluate_only(pos));
     }
     let total_duration = start.elapsed();
 
@@ -200,25 +145,14 @@ fn main() -> Result<()> {
     println!("Test positions: {}", positions.len());
     println!();
     println!("Loading NNUE file: {}", cli.nnue_file.display());
-    let network = NNUENetwork::load(&cli.nnue_file)?;
+    let network = Arc::new(NNUENetwork::load(&cli.nnue_file)?);
     let arch_name = network.architecture_name();
     println!("Architecture: {arch_name}");
     println!();
 
-    // アーキテクチャに応じてベンチマーク実行（3バリアント階層構造）
-    let result = match &network {
-        NNUENetwork::HalfKA(halfka_net) => {
-            let mut stack = HalfKAStack::from_network(halfka_net);
-            bench_halfka(&network, &mut stack, &positions, cli.warmup, cli.iterations, arch_name)
-        }
-        NNUENetwork::HalfKP(halfkp_net) => {
-            let mut stack = HalfKPStack::from_network(halfkp_net);
-            bench_halfkp(&network, &mut stack, &positions, cli.warmup, cli.iterations, arch_name)
-        }
-        NNUENetwork::LayerStacks(_) => {
-            bail!("LayerStacks benchmark not implemented yet");
-        }
-    };
+    // NNUEEvaluator を作成してベンチマーク実行
+    let mut evaluator = NNUEEvaluator::new_with_position(Arc::clone(&network), &positions[0]);
+    let result = bench_evaluator(&mut evaluator, &positions, cli.warmup, cli.iterations, arch_name);
 
     result.print();
 

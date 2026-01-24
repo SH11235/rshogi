@@ -42,8 +42,8 @@ mod leb128;
 #[macro_use]
 pub mod macros;
 mod network;
-pub mod network_halfka;
-pub mod network_halfkp;
+pub(crate) mod network_halfka;
+pub(crate) mod network_halfkp;
 mod network_layer_stacks;
 pub mod prelude;
 pub mod spec;
@@ -78,21 +78,13 @@ pub use network::{
 };
 pub use network_layer_stacks::NetworkLayerStacks;
 
-// const generics 版統一実装
+// const generics 版統一実装（内部型は pub(crate) に隠蔽）
 pub use activation::{detect_activation_from_arch, CReLU, FtActivation, PairwiseCReLU, SCReLU};
-pub use network_halfka::{
-    AccumulatorEntryHalfKA, AccumulatorHalfKA, AccumulatorStackHalfKA, AffineTransformHalfKA,
-    FeatureTransformerHalfKA, NetworkHalfKA,
-};
-pub use network_halfkp::{
-    AccumulatorEntryHalfKP, AccumulatorHalfKP, AccumulatorStackHalfKP, AffineTransformHalfKP,
-    FeatureTransformerHalfKP, NetworkHalfKP,
-};
 pub use spec::{Activation, ArchitectureSpec, FeatureSet as SpecFeatureSet};
 
-// 型エイリアス（HalfKA*/HalfKP* の全バリアント）
-// 新バリアント追加時は aliases.rs のみ更新すれば自動的に re-export される
-pub use aliases::*;
+// 型エイリアス（HalfKA*/HalfKP* の全バリアント）は pub(crate) に隠蔽
+// 外部からは NNUEEvaluator を通じてのみ NNUE 評価を行う
+// 内部モジュールは crate::nnue::aliases 経由で直接インポート
 
 // Phase 2: 外部 API 統一
 pub use evaluator::NNUEEvaluator;

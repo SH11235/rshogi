@@ -169,6 +169,40 @@ impl NNUEEvaluator {
         self.ensure_accumulator_computed(pos);
 
         // 評価
+        self.evaluate_only(pos)
+    }
+
+    /// アキュムレータをフル再計算（ベンチマーク用）
+    ///
+    /// 通常は `reset()` を使用すること。
+    /// ベンチマークでアキュムレータ計算のみを測定したい場合に使用。
+    ///
+    /// # 引数
+    ///
+    /// - `pos`: 計算対象の局面
+    pub fn refresh(&mut self, pos: &Position) {
+        self.refresh_accumulator(pos);
+    }
+
+    /// アキュムレータ更新なしで評価のみ実行（ベンチマーク用）
+    ///
+    /// アキュムレータが計算済みであることが前提。
+    /// ベンチマークで評価部分のみを測定したい場合に使用。
+    ///
+    /// # 引数
+    ///
+    /// - `pos`: 評価対象の局面
+    ///
+    /// # 戻り値
+    ///
+    /// 局面の評価値（手番側から見た評価値）
+    ///
+    /// # 注意
+    ///
+    /// アキュムレータが未計算の場合、不正な評価値が返る。
+    /// 通常は `evaluate()` を使用すること。
+    #[inline(always)]
+    pub fn evaluate_only(&self, pos: &Position) -> Value {
         match (&*self.net, &self.stack) {
             (NNUENetwork::HalfKA(net), AccumulatorStackVariant::HalfKA(st)) => {
                 net.evaluate(pos, st)
