@@ -219,18 +219,17 @@ impl NNUENetwork {
                                 Ok(Self::HalfKA256Pairwise(Box::new(network)))
                             }
                             // 512x2-8-96 CReLU
-                            // HalfKA 512x2 は1バリアント（8-96）のみ
-                            (512, 8, 96, "CReLU") | (512, 0, 0, "CReLU") => {
+                            (512, 8, 96, "CReLU") => {
                                 let network = HalfKA512CReLU::read(reader)?;
                                 Ok(Self::HalfKA512CReLU(Box::new(network)))
                             }
                             // 512x2-8-96 SCReLU
-                            (512, 8, 96, "SCReLU") | (512, 0, 0, "SCReLU") => {
+                            (512, 8, 96, "SCReLU") => {
                                 let network = HalfKA512SCReLU::read(reader)?;
                                 Ok(Self::HalfKA512SCReLU(Box::new(network)))
                             }
                             // 512/2x2-8-96 PairwiseCReLU
-                            (512, 8, 96, "PairwiseCReLU") | (512, 0, 0, "PairwiseCReLU") => {
+                            (512, 8, 96, "PairwiseCReLU") => {
                                 let network = HalfKA512Pairwise::read(reader)?;
                                 Ok(Self::HalfKA512Pairwise(Box::new(network)))
                             }
@@ -256,88 +255,30 @@ impl NNUENetwork {
                                 let network = HalfKA1024_8_32SCReLU::read(reader)?;
                                 Ok(Self::HalfKA1024_8_32SCReLU(Box::new(network)))
                             }
-                            // L1=1024 で L2/L3 がパースできない場合のフォールバック
-                            //
-                            // 背景:
-                            // - nnue-pytorch形式: ヘッダーに AffineTransform[OUT<-IN] パターンが
-                            //   含まれるため、parse_arch_dimensions() で L2/L3 を抽出可能
-                            // - bullet-shogi形式(旧): ヘッダーに Network 記述がなく、l2/l3 フィールドも
-                            //   ない場合がある。この場合 L2=0, L3=0 となりパース失敗扱いになる
-                            //   例: "Features=HalfKA_hm[73305->1024x2],fv_scale=5,qa=127,qb=64,scale=1600"
-                            //
-                            // 対応方針:
-                            // - 1024x2 のみフォールバック実装（実際に問題が発生したアーキテクチャ）
-                            // - 512x2, 256x2 は現状1バリアントのみのため曖昧さがなくフォールバック不要
-                            // - bullet-shogi の新バージョンは l2/l3 フィールドを出力するため、
-                            //   今後の新規ファイルでは問題なし
-                            //
-                            // フォールバック順序: 8-96 → 8-32
-                            // 理由: NetworkHalfKA::read はEOF検証を行わないため、大きい方を
-                            // 先に試す必要がある。8-32 を先に試すと、8-96 ファイルでも途中まで
-                            // 読み込んで成功してしまい、誤った重みで評価が壊れる。
-                            // 8-96 を先に試せば、8-32 ファイルでは EOF エラーで失敗するため安全。
-                            (1024, 0, 0, "CReLU") => {
-                                // まず大きい方（8-96）を試す
-                                let start_pos = reader.stream_position()?;
-                                reader.seek(SeekFrom::Start(0))?;
-                                if let Ok(network) = HalfKA1024CReLU::read(reader) {
-                                    return Ok(Self::HalfKA1024CReLU(Box::new(network)));
-                                }
-                                // 失敗したら 8-32 を試す
-                                reader.seek(SeekFrom::Start(0))?;
-                                if let Ok(network) = HalfKA1024_8_32CReLU::read(reader) {
-                                    return Ok(Self::HalfKA1024_8_32CReLU(Box::new(network)));
-                                }
-                                // 両方失敗
-                                reader.seek(SeekFrom::Start(start_pos))?;
-                                Err(io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    format!(
-                                        "Failed to load HalfKA 1024x2 network: {arch_str}. \
-                                         Tried both 8-96 and 8-32 architectures."
-                                    ),
-                                ))
-                            }
-                            // SCReLU版も同様のフォールバック（詳細は上記 CReLU 版のコメント参照）
-                            (1024, 0, 0, "SCReLU") => {
-                                // まず大きい方（8-96）を試す
-                                let start_pos = reader.stream_position()?;
-                                reader.seek(SeekFrom::Start(0))?;
-                                if let Ok(network) = HalfKA1024SCReLU::read(reader) {
-                                    return Ok(Self::HalfKA1024SCReLU(Box::new(network)));
-                                }
-                                // 失敗したら 8-32 を試す
-                                reader.seek(SeekFrom::Start(0))?;
-                                if let Ok(network) = HalfKA1024_8_32SCReLU::read(reader) {
-                                    return Ok(Self::HalfKA1024_8_32SCReLU(Box::new(network)));
-                                }
-                                // 両方失敗
-                                reader.seek(SeekFrom::Start(start_pos))?;
-                                Err(io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    format!(
-                                        "Failed to load HalfKA 1024x2 SCReLU network: {arch_str}. \
-                                         Tried both 8-96 and 8-32 architectures."
-                                    ),
-                                ))
-                            }
-                            // Pairwise版も同様のフォールバック（1024は8-96のみ対応）
-                            (1024, 0, 0, "PairwiseCReLU") => {
-                                reader.seek(SeekFrom::Start(0))?;
-                                let network = HalfKA1024Pairwise::read(reader)?;
-                                Ok(Self::HalfKA1024Pairwise(Box::new(network)))
-                            }
                             _ => {
-                                // 未対応アーキテクチャ
-                                Err(io::Error::new(
-                                    io::ErrorKind::Unsupported,
-                                    format!(
-                                        "Unsupported HalfKA architecture: {arch_str}. \
-                                         Supported: {}. \
-                                         Detected: L1={l1}, L2={l2}, L3={l3}, activation={activation}",
-                                        Self::supported_halfka_specs()
-                                    ),
-                                ))
+                                // 旧形式ファイル検出（L2/L3 が 0 の場合）
+                                if l2 == 0 || l3 == 0 {
+                                    Err(io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        format!(
+                                            "HalfKA L1={l1} network missing L2/L3 dimensions in header. \
+                                             This is an old bullet-shogi format that is no longer supported. \
+                                             Please re-export the model with a newer version of bullet-shogi. \
+                                             Architecture string: {arch_str}"
+                                        ),
+                                    ))
+                                } else {
+                                    // 未対応アーキテクチャ
+                                    Err(io::Error::new(
+                                        io::ErrorKind::Unsupported,
+                                        format!(
+                                            "Unsupported HalfKA architecture: {arch_str}. \
+                                             Supported: {}. \
+                                             Detected: L1={l1}, L2={l2}, L3={l3}, activation={activation}",
+                                            Self::supported_halfka_specs()
+                                        ),
+                                    ))
+                                }
                             }
                         }
                     }
@@ -347,52 +288,60 @@ impl NNUENetwork {
                     let (_, l2, l3) = Self::parse_arch_dimensions(&arch_str);
                     match (l1, l2, l3, activation) {
                         // 256x2-32-32 CReLU
-                        // - (256, 32, 32): 完全一致
-                        // - (256, 0, 0): L2/L3パース失敗（古い/簡易フォーマット）
-                        // - (0, _, _): L1パース失敗（フォールバック）
-                        // HalfKP 256x2 は1バリアント（32-32）のみのため、
-                        // L2/L3が不明でもデフォルトで使用可能
-                        (256, 32, 32, "CReLU") | (256, 0, 0, "CReLU") | (0, _, _, "CReLU") => {
+                        (256, 32, 32, "CReLU") => {
                             let network = HalfKP256CReLU::read(reader)?;
                             Ok(Self::HalfKP256CReLU(Box::new(network)))
                         }
-                        // 256x2-32-32 SCReLU（同様のフォールバック）
-                        (256, 32, 32, "SCReLU") | (256, 0, 0, "SCReLU") | (0, _, _, "SCReLU") => {
+                        // 256x2-32-32 SCReLU
+                        (256, 32, 32, "SCReLU") => {
                             let network = HalfKP256SCReLU::read(reader)?;
                             Ok(Self::HalfKP256SCReLU(Box::new(network)))
                         }
                         // 256x2-32-32 PairwiseCReLU
-                        (256, 32, 32, "PairwiseCReLU") | (256, 0, 0, "PairwiseCReLU") => {
+                        (256, 32, 32, "PairwiseCReLU") => {
                             let network = HalfKP256Pairwise::read(reader)?;
                             Ok(Self::HalfKP256Pairwise(Box::new(network)))
                         }
                         // 512x2-8-96 CReLU
-                        // HalfKP 512x2 も1バリアント（8-96）のみ
-                        (512, 8, 96, "CReLU") | (512, 0, 0, "CReLU") => {
+                        (512, 8, 96, "CReLU") => {
                             let network = HalfKP512CReLU::read(reader)?;
                             Ok(Self::HalfKP512CReLU(Box::new(network)))
                         }
                         // 512x2-8-96 SCReLU
-                        (512, 8, 96, "SCReLU") | (512, 0, 0, "SCReLU") => {
+                        (512, 8, 96, "SCReLU") => {
                             let network = HalfKP512SCReLU::read(reader)?;
                             Ok(Self::HalfKP512SCReLU(Box::new(network)))
                         }
                         // 512x2-8-96 PairwiseCReLU
-                        (512, 8, 96, "PairwiseCReLU") | (512, 0, 0, "PairwiseCReLU") => {
+                        (512, 8, 96, "PairwiseCReLU") => {
                             let network = HalfKP512Pairwise::read(reader)?;
                             Ok(Self::HalfKP512Pairwise(Box::new(network)))
                         }
                         _ => {
-                            // 未対応アーキテクチャ
-                            Err(io::Error::new(
-                                io::ErrorKind::Unsupported,
-                                format!(
-                                    "Unsupported HalfKP architecture: {arch_str}. \
-                                     Supported: {}. \
-                                     Detected: L1={l1}, L2={l2}, L3={l3}, activation={activation}",
-                                    Self::supported_halfkp_specs()
-                                ),
-                            ))
+                            // 旧形式ファイル検出（L1/L2/L3 が 0 の場合）
+                            if l1 == 0 || l2 == 0 || l3 == 0 {
+                                Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!(
+                                        "HalfKP network missing L1/L2/L3 dimensions in header. \
+                                         This is an old format that is no longer supported. \
+                                         Please re-export the model with a newer version. \
+                                         Detected: L1={l1}, L2={l2}, L3={l3}. \
+                                         Architecture string: {arch_str}"
+                                    ),
+                                ))
+                            } else {
+                                // 未対応アーキテクチャ
+                                Err(io::Error::new(
+                                    io::ErrorKind::Unsupported,
+                                    format!(
+                                        "Unsupported HalfKP architecture: {arch_str}. \
+                                         Supported: {}. \
+                                         Detected: L1={l1}, L2={l2}, L3={l3}, activation={activation}",
+                                        Self::supported_halfkp_specs()
+                                    ),
+                                ))
+                            }
                         }
                     }
                 }
