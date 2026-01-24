@@ -12,7 +12,8 @@ import type { NnueDownloadProgress, NnueMeta, PresetConfig, PresetManifest } fro
 
 // モック fetch（各テスト後に復元）
 const mockFetch = vi.fn();
-let originalFetch: typeof fetch;
+const fetchCarrier = globalThis as { fetch?: typeof fetch };
+let originalFetch: typeof fetch | undefined;
 
 // テスト用のプリセット設定
 const createTestPreset = (overrides: Partial<PresetConfig> = {}): PresetConfig => ({
@@ -70,12 +71,16 @@ const createMockStorage = (overrides: Partial<NnueStorage> = {}): NnueStorage =>
 
 // fetch モックのセットアップと復元
 beforeEach(() => {
-    originalFetch = global.fetch;
-    global.fetch = mockFetch;
+    originalFetch = fetchCarrier.fetch;
+    fetchCarrier.fetch = mockFetch as typeof fetch;
 });
 
 afterEach(() => {
-    global.fetch = originalFetch;
+    if (originalFetch) {
+        fetchCarrier.fetch = originalFetch;
+    } else {
+        delete fetchCarrier.fetch;
+    }
 });
 
 // ReadableStream をモック
