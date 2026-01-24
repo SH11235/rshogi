@@ -1201,6 +1201,111 @@ pub fn is_nnue_initialized() -> bool {
     NETWORK.get().is_some()
 }
 
+// =============================================================================
+// フォーマット検出
+// =============================================================================
+
+/// NNUE フォーマット情報
+#[derive(Debug, Clone)]
+pub struct NnueFormatInfo {
+    /// アーキテクチャ名（例: "HalfKA1024", "LayerStacks", "HalfKP256"）
+    pub architecture: String,
+
+    /// L1 次元（例: 256, 512, 1024, 1536）
+    pub l1_dimension: u32,
+
+    /// L2 次元（例: 8, 32）
+    pub l2_dimension: u32,
+
+    /// L3 次元（例: 32, 96）
+    pub l3_dimension: u32,
+
+    /// 活性化関数（"CReLU" or "SCReLU"）
+    pub activation: String,
+
+    /// バージョンヘッダ（生の u32 値）
+    pub version: u32,
+
+    /// アーキテクチャ文字列（生の文字列）
+    pub arch_string: String,
+}
+
+/// NNUE ファイルのフォーマット情報を検出（ロードせずにヘッダのみ解析）
+///
+/// # Arguments
+/// * `bytes` - NNUE ファイルの先頭 1KB 以上のバイト列
+///
+/// # Returns
+/// * `Ok(NnueFormatInfo)` - フォーマット情報
+/// * `Err(io::Error)` - 不正なフォーマット
+pub fn detect_format(bytes: &[u8]) -> io::Result<NnueFormatInfo> {
+    if bytes.len() < 12 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "NNUE file too small (need at least 12 bytes for header)",
+        ));
+    }
+
+    // バージョンを読み取り
+    let version = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+
+    match version {
+        NNUE_VERSION | NNUE_VERSION_HALFKA => {
+            // ハッシュを読み飛ばし（4バイト）
+            // アーキテクチャ文字列長を読み取り
+            let arch_len = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
+
+            if arch_len == 0 || arch_len > MAX_ARCH_LEN {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Invalid arch string length: {arch_len}"),
+                ));
+            }
+
+            if bytes.len() < 12 + arch_len {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("NNUE file too small (need {} bytes for arch string)", 12 + arch_len),
+                ));
+            }
+
+            // アーキテクチャ文字列を読み取り
+            let arch_str = String::from_utf8_lossy(&bytes[12..12 + arch_len]).to_string();
+
+            // 活性化関数を検出
+            let activation = detect_activation_from_arch(&arch_str).to_string();
+
+            // L1, L2, L3 を解析
+            let (l1, l2, l3) = NNUENetwork::parse_arch_dimensions(&arch_str);
+
+            // アーキテクチャ名を決定
+            let architecture = if arch_str.contains("HalfKA") {
+                if arch_str.contains("->1536x2]") || arch_str.contains("LayerStacks") {
+                    "LayerStacks".to_string()
+                } else {
+                    format!("HalfKA{l1}")
+                }
+            } else {
+                format!("HalfKP{l1}")
+            };
+
+            Ok(NnueFormatInfo {
+                architecture,
+                l1_dimension: l1 as u32,
+                l2_dimension: l2 as u32,
+                l3_dimension: l3 as u32,
+                activation,
+                version,
+                arch_string: arch_str,
+            })
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Unknown NNUE version: 0x{version:08X}"),
+        )),
+    }
+}
+
 /// NNUEネットワークへの参照を取得（初期化されていない場合はNone）
 ///
 /// AccumulatorStackVariant の初期化・更新に使用。
