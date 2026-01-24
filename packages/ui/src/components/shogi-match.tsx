@@ -2925,11 +2925,52 @@ export function ShogiMatch({
                                 open={isDisplaySettingsOpen}
                                 onOpenChange={setIsDisplaySettingsOpen}
                             >
-                                <DialogContent style={{ width: "min(400px, calc(100% - 24px))" }}>
+                                <DialogContent style={{ width: "min(450px, calc(100% - 24px))" }}>
                                     <DialogHeader>
                                         <DialogTitle>表示設定</DialogTitle>
                                     </DialogHeader>
-                                    <div className="flex flex-col gap-3 pt-2">
+                                    <div className="flex flex-col gap-4 pt-2">
+                                        {/* マス内座標表示 */}
+                                        <div className="flex flex-col gap-2">
+                                            <span className="text-sm font-medium">
+                                                マス内座標表示
+                                            </span>
+                                            <div className="flex gap-2">
+                                                {(
+                                                    [
+                                                        { value: "none", label: "なし" },
+                                                        { value: "sfen", label: "SFEN (5e)" },
+                                                        {
+                                                            value: "japanese",
+                                                            label: "日本式 (５五)",
+                                                        },
+                                                    ] as const
+                                                ).map((opt) => (
+                                                    <button
+                                                        key={opt.value}
+                                                        type="button"
+                                                        onClick={() =>
+                                                            setDisplaySettings({
+                                                                ...displaySettings,
+                                                                squareNotation: opt.value,
+                                                            })
+                                                        }
+                                                        className={`px-3 py-1.5 rounded text-sm transition-colors ${
+                                                            displaySettings.squareNotation ===
+                                                            opt.value
+                                                                ? "bg-wafuu-kincha text-white"
+                                                                : "bg-wafuu-washi text-wafuu-sumi hover:bg-wafuu-border border border-wafuu-border"
+                                                        }`}
+                                                    >
+                                                        {opt.label}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+
+                                        <div className="h-px bg-wafuu-border" />
+
+                                        {/* チェックボックス項目 */}
                                         <label className="flex items-center gap-3 text-sm cursor-pointer">
                                             <input
                                                 type="checkbox"
@@ -2942,7 +2983,7 @@ export function ShogiMatch({
                                                 }
                                                 className="w-4 h-4"
                                             />
-                                            <span>盤外ラベル表示</span>
+                                            <span>盤外ラベル表示（筋・段）</span>
                                         </label>
                                         <label className="flex items-center gap-3 text-sm cursor-pointer">
                                             <input
@@ -2957,6 +2998,20 @@ export function ShogiMatch({
                                                 className="w-4 h-4"
                                             />
                                             <span>最終手を強調</span>
+                                        </label>
+                                        <label className="flex items-center gap-3 text-sm cursor-pointer">
+                                            <input
+                                                type="checkbox"
+                                                checked={displaySettings.showKifuEval}
+                                                onChange={(e) =>
+                                                    setDisplaySettings({
+                                                        ...displaySettings,
+                                                        showKifuEval: e.target.checked,
+                                                    })
+                                                }
+                                                className="w-4 h-4"
+                                            />
+                                            <span>棋譜パネルに評価値を表示</span>
                                         </label>
                                         <label className="flex items-center gap-3 text-sm cursor-pointer">
                                             <input
