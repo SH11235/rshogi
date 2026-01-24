@@ -168,6 +168,11 @@ impl NNUENetwork {
                 let mut arch = vec![0u8; arch_len];
                 reader.read_exact(&mut arch)?;
                 let arch_str = String::from_utf8_lossy(&arch);
+                // 実ファイルの例:
+                // - Features=HalfKP[125388->256x2],fv_scale=16,qa=127,qb=64,scale=508
+                // - Features=HalfKA_hm[73305->256x2],fv_scale=16,qa=127,qb=64,scale=508
+                // - Features=HalfKA_hm[73305->512x2],fv_scale=5,qa=127,qb=64,scale=1600
+                // - Features=HalfKA_hm[73305->1024x2],fv_scale=5,qa=127,qb=64,scale=1600
 
                 // 位置を戻して全体を読み込み
                 reader.seek(SeekFrom::Start(0))?;
