@@ -71,6 +71,7 @@ export function NnueSelectorDialog({
         importFromFile,
         importFromPath,
         deleteNnue,
+        updateDisplayName,
         clearError: clearStorageError,
         refreshList,
         capabilities,
@@ -161,6 +162,13 @@ export function NnueSelectorDialog({
         [deleteNnue, selectedNnueId, select],
     );
 
+    const handleDisplayNameChange = useCallback(
+        async (id: string, newName: string) => {
+            await updateDisplayName(id, newName);
+        },
+        [updateDisplayName],
+    );
+
     const handleConfirm = useCallback(() => {
         // 選択を確定して閉じる（実際のロードは useEngineManager 側で行う）
         onNnueChange?.(selectedNnueId);
@@ -223,6 +231,7 @@ export function NnueSelectorDialog({
                         onDelete={handleDelete}
                         deletingId={deletingId}
                         disabled={isOperationInProgress}
+                        onDisplayNameChange={handleDisplayNameChange}
                     />
 
                     {/* プリセット一覧（manifestUrl が設定されている場合のみ） */}

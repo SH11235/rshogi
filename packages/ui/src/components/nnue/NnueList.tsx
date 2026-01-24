@@ -15,6 +15,8 @@ export interface NnueListProps {
     deletingId?: string | null;
     /** 操作無効化 */
     disabled?: boolean;
+    /** 表示名変更時のコールバック */
+    onDisplayNameChange?: (id: string, newName: string) => Promise<void>;
 }
 
 /**
@@ -29,6 +31,7 @@ export function NnueList({
     onDelete,
     deletingId,
     disabled = false,
+    onDisplayNameChange,
 }: NnueListProps): ReactElement {
     const groupName = useId();
     const presets = nnueList.filter((m) => m.source === "preset");
@@ -114,6 +117,11 @@ export function NnueList({
                             showDelete={true}
                             isDeleting={deletingId === meta.id}
                             disabled={disabled}
+                            onDisplayNameChange={
+                                onDisplayNameChange
+                                    ? (newName) => onDisplayNameChange(meta.id, newName)
+                                    : undefined
+                            }
                         />
                     ))}
                 </>
