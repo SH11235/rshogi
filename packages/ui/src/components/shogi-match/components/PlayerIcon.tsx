@@ -47,25 +47,45 @@ export function PlayerIcon({
     const colorClass = side === "sente" ? "text-wafuu-shu" : "text-wafuu-ai";
     const borderColorClass = side === "sente" ? "ring-wafuu-shu" : "ring-wafuu-ai";
     const marker = side === "sente" ? "☗" : "☖";
+    const aiAlt = side === "sente" ? "先手AI" : "後手AI";
+    const aiTitle = side === "sente" ? "先手" : "後手";
+    const aiIconSrc = "/ramu.jpeg";
 
     if (isAI) {
         const canZoom = enableZoom;
+        const aiImage = (
+            <img
+                src={aiIconSrc}
+                alt={aiAlt}
+                title={aiTitle}
+                className={cn(
+                    "rounded-full object-cover",
+                    config.icon,
+                    showBorder && "ring-2",
+                    showBorder && borderColorClass,
+                    canZoom && "cursor-pointer hover:opacity-80 transition-opacity",
+                    className,
+                )}
+            />
+        );
         return (
             <>
-                <img
-                    src="/ramu.jpeg"
-                    alt={side === "sente" ? "先手AI" : "後手AI"}
-                    title={side === "sente" ? "先手" : "後手"}
-                    onClick={canZoom ? () => setIsZoomOpen(true) : undefined}
-                    className={cn(
-                        "rounded-full object-cover",
-                        config.icon,
-                        showBorder && "ring-2",
-                        showBorder && borderColorClass,
-                        canZoom && "cursor-pointer hover:opacity-80 transition-opacity",
-                        className,
-                    )}
-                />
+                {canZoom ? (
+                    <button
+                        type="button"
+                        className={cn(
+                            "inline-flex rounded-full border-0 bg-transparent p-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+                            borderColorClass,
+                        )}
+                        onClick={() => setIsZoomOpen(true)}
+                        aria-label={`${aiAlt}を拡大表示`}
+                        aria-expanded={isZoomOpen}
+                    >
+                        {aiImage}
+                    </button>
+                ) : (
+                    aiImage
+                )}
                 {canZoom && (
                     <Dialog open={isZoomOpen} onOpenChange={setIsZoomOpen}>
                         <DialogContent
@@ -77,7 +97,7 @@ export function PlayerIcon({
                         >
                             <div className="flex flex-col items-center gap-3">
                                 <img
-                                    src="/ramu.jpeg"
+                                    src={aiIconSrc}
                                     alt="ラム"
                                     className="w-full max-w-[360px] rounded-lg object-cover"
                                 />

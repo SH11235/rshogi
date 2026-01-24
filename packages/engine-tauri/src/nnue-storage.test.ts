@@ -1,5 +1,5 @@
-import type { NnueMeta } from "@shogi/app-core";
 import { Buffer } from "node:buffer";
+import type { NnueMeta } from "@shogi/app-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTauriNnueStorage, type TauriNnueStorageOptions } from "./nnue-storage";
 
