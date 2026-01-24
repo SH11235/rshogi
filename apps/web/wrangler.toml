@@ -1,5 +1,5 @@
 name = "ramu-shogi"
-compatibility_date = "2025-09-01"
+compatibility_date = "2026-01-20"
 
 # Workerエントリーポイント（COOPヘッダー追加用）
 main = "./worker/index.ts"
@@ -9,3 +9,9 @@ directory = "./dist"
 binding = "ASSETS"
 # SPA用設定: 404時にindex.htmlを返す
 not_found_handling = "single-page-application"
+
+
+[env.stg]
+name = "ramu-shogi-stg"
+# staging用の環境変数/Binding/DB等を分ける
+# vars = { ... }
