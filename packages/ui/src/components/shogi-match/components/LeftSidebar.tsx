@@ -59,6 +59,7 @@ const ANALYSIS_TIME_OPTIONS = [
     { value: 3000, label: "3秒" },
 ];
 
+const EVAL_FILE_MANAGER_LABEL = "評価関数ファイル管理";
 const sectionClassName = "flex flex-col gap-3";
 const sectionTitleClassName = "text-sm font-semibold text-wafuu-sumi";
 const labelClassName = "flex flex-col gap-1 text-xs text-muted-foreground";
@@ -177,7 +178,7 @@ export function LeftSidebar({
                             <SelectItem value="material">
                                 <span className="flex items-center gap-1.5">
                                     <PlayerIcon side="sente" isAI showBorder={false} size="xs" />
-                                    Material
+                                    簡易AI（駒得）
                                 </span>
                             </SelectItem>
                             {nnueList.map((nnue) => (
@@ -278,7 +279,7 @@ export function LeftSidebar({
                 className="w-full text-left px-3 py-2 rounded-lg text-sm text-wafuu-sumi bg-wafuu-washi border-2 border-wafuu-border shadow-sm hover:shadow-md hover:-translate-y-0.5 hover:border-wafuu-kincha transition-all flex items-center gap-2"
             >
                 <span>📁</span>
-                <span>NNUE 管理...</span>
+                <span>{EVAL_FILE_MANAGER_LABEL}...</span>
             </button>
 
             {/* 分析設定 */}
@@ -294,7 +295,7 @@ export function LeftSidebar({
                             onClick={onOpenNnueManager}
                             className="text-wafuu-ai hover:underline"
                         >
-                            NNUE管理
+                            {EVAL_FILE_MANAGER_LABEL}
                         </button>
                         から追加）
                     </span>
@@ -308,7 +309,7 @@ export function LeftSidebar({
                             <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                            <SelectItem value="material">Material</SelectItem>
+                            <SelectItem value="material">簡易AI（駒得）</SelectItem>
                             {nnueList.map((nnue) => (
                                 <SelectItem key={nnue.id} value={nnue.id}>
                                     {nnue.displayName}

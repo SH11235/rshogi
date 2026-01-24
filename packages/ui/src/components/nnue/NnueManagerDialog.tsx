@@ -196,7 +196,7 @@ export function NnueManagerDialog({
                 }}
             >
                 <DialogHeader>
-                    <DialogTitle>NNUE ファイル管理</DialogTitle>
+                    <DialogTitle>評価関数（NNUE) ファイル管理</DialogTitle>
                 </DialogHeader>
 
                 <div
