@@ -1026,15 +1026,15 @@ mod tests {
         let mut output = [0u8; SIZE];
 
         // テストデータを生成（WEIGHT_SCALE_BITS = 6 でシフトされることを考慮）
-        for i in 0..SIZE {
-            input[i] = (i as i32) * 4 * 64; // 0, 256, 512, ... (シフト後 0, 4, 8, ...)
+        for (i, value) in input.iter_mut().enumerate() {
+            *value = (i as i32) * 4 * 64; // 0, 256, 512, ... (シフト後 0, 4, 8, ...)
         }
 
         PairwiseCReLU::activate_i32_to_u8(&input, &mut output);
 
         // CReLUと同じ動作を検証
-        for i in 0..SIZE {
-            let expected = (input[i] >> WEIGHT_SCALE_BITS).clamp(0, 127) as u8;
+        for (i, value) in input.iter().enumerate() {
+            let expected = (value >> WEIGHT_SCALE_BITS).clamp(0, 127) as u8;
             assert_eq!(
                 output[i], expected,
                 "mismatch at index {i}: expected {expected}, got {}",
