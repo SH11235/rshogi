@@ -1,6 +1,7 @@
 import type { Player } from "@shogi/app-core";
 import { cn } from "@shogi/design-system";
-import type { ReactElement } from "react";
+import { type ReactElement, useState } from "react";
+import { Dialog, DialogContent } from "../../dialog";
 
 type IconSize = "xs" | "sm" | "md" | "lg" | "xl";
 
@@ -23,12 +24,15 @@ interface PlayerIconProps {
     className?: string;
     /** AI時に色付き枠を表示するか（デフォルト: true） */
     showBorder?: boolean;
+    /** クリックで拡大表示を有効にするか（AI時のみ有効） */
+    enableZoom?: boolean;
 }
 
 /**
  * プレイヤーアイコン
  * - 人間: ☗（先手）/ ☖（後手）を色付きで表示
  * - AI: ラムアイコンを色付き枠で表示（showBorder=falseで枠なし）
+ * - enableZoom=trueの場合、AIアイコンクリックで拡大表示
  */
 export function PlayerIcon({
     side,
@@ -36,26 +40,52 @@ export function PlayerIcon({
     size = "md",
     className,
     showBorder = true,
+    enableZoom = false,
 }: PlayerIconProps): ReactElement {
+    const [isZoomOpen, setIsZoomOpen] = useState(false);
     const config = SIZE_CONFIG[size];
     const colorClass = side === "sente" ? "text-wafuu-shu" : "text-wafuu-ai";
     const borderColorClass = side === "sente" ? "ring-wafuu-shu" : "ring-wafuu-ai";
     const marker = side === "sente" ? "☗" : "☖";
 
     if (isAI) {
+        const canZoom = enableZoom;
         return (
-            <img
-                src="/ramu.jpeg"
-                alt={side === "sente" ? "先手AI" : "後手AI"}
-                title={side === "sente" ? "先手" : "後手"}
-                className={cn(
-                    "rounded-full object-cover",
-                    config.icon,
-                    showBorder && "ring-2",
-                    showBorder && borderColorClass,
-                    className,
+            <>
+                <img
+                    src="/ramu.jpeg"
+                    alt={side === "sente" ? "先手AI" : "後手AI"}
+                    title={side === "sente" ? "先手" : "後手"}
+                    onClick={canZoom ? () => setIsZoomOpen(true) : undefined}
+                    className={cn(
+                        "rounded-full object-cover",
+                        config.icon,
+                        showBorder && "ring-2",
+                        showBorder && borderColorClass,
+                        canZoom && "cursor-pointer hover:opacity-80 transition-opacity",
+                        className,
+                    )}
+                />
+                {canZoom && (
+                    <Dialog open={isZoomOpen} onOpenChange={setIsZoomOpen}>
+                        <DialogContent
+                            style={{
+                                width: "auto",
+                                maxWidth: "min(90vw, 400px)",
+                                padding: "16px",
+                            }}
+                        >
+                            <div className="flex flex-col items-center gap-3">
+                                <img
+                                    src="/ramu.jpeg"
+                                    alt="ラム"
+                                    className="w-full max-w-[360px] rounded-lg object-cover"
+                                />
+                            </div>
+                        </DialogContent>
+                    </Dialog>
                 )}
-            />
+            </>
         );
     }
 

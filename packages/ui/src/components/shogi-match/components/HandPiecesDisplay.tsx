@@ -159,7 +159,13 @@ export function HandPiecesDisplay({
             )}
         >
             {/* 先手/後手マーカー - 固定幅で左端に配置 */}
-            <PlayerIcon side={owner} isAI={isAI} size={iconSize} className="shrink-0" />
+            <PlayerIcon
+                side={owner}
+                isAI={isAI}
+                size={iconSize}
+                className="shrink-0"
+                enableZoom={isAI}
+            />
             {/* 持ち駒コンテナ - 駒だけが詰まる */}
             <div className={cn("flex items-center relative", containerConfig.piecesContainer)}>
                 {/* 横幅/高さ確保用のダミー要素 */}
