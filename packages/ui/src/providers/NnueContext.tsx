@@ -1,9 +1,22 @@
-import type { NnueStorage } from "@shogi/app-core";
-import { createContext, type ReactNode, useContext } from "react";
+import type { NnueMeta, NnueStorage } from "@shogi/app-core";
+import { NnueError } from "@shogi/app-core";
+import { createContext, type ReactNode, useCallback, useContext, useEffect, useState } from "react";
 
 export interface NnueContextValue {
     /** NNUE ストレージ実装 */
     storage: NnueStorage;
+    /** NNUE メタデータ一覧（共有状態） */
+    nnueList: NnueMeta[];
+    /** 一覧読み込み中かどうか */
+    isLoading: boolean;
+    /** 直近のエラー */
+    error: NnueError | null;
+    /** 一覧を再取得 */
+    refreshList: () => Promise<void>;
+    /** ストレージ使用量 */
+    storageUsage: { used: number; quota?: number } | null;
+    /** エラーをクリア */
+    clearError: () => void;
 }
 
 const NnueContext = createContext<NnueContextValue | null>(null);
@@ -18,6 +31,7 @@ export interface NnueProviderProps {
  * NNUE ストレージを提供する Provider
  *
  * Web と Desktop で異なる NnueStorage 実装を注入できる。
+ * nnueList は Context レベルで共有され、全てのコンポーネントで同期される。
  *
  * @example
  * ```tsx
@@ -33,7 +47,55 @@ export interface NnueProviderProps {
  * ```
  */
 export function NnueProvider({ storage, children }: NnueProviderProps): ReactNode {
-    return <NnueContext.Provider value={{ storage }}>{children}</NnueContext.Provider>;
+    const [nnueList, setNnueList] = useState<NnueMeta[]>([]);
+    const [isLoading, setIsLoading] = useState(true);
+    const [error, setError] = useState<NnueError | null>(null);
+    const [storageUsage, setStorageUsage] = useState<{ used: number; quota?: number } | null>(null);
+
+    const refreshList = useCallback(async () => {
+        setIsLoading(true);
+        try {
+            const [list, usage] = await Promise.all([storage.listMeta(), storage.getUsage()]);
+            // ソート: 作成日時の新しい順
+            list.sort((a, b) => b.createdAt - a.createdAt);
+            setNnueList(list);
+            setStorageUsage(usage);
+            setError(null);
+        } catch (e) {
+            const err =
+                e instanceof NnueError
+                    ? e
+                    : new NnueError("NNUE_STORAGE_FAILED", "NNUE 一覧の取得に失敗しました", e);
+            setError(err);
+        } finally {
+            setIsLoading(false);
+        }
+    }, [storage]);
+
+    const clearError = useCallback(() => {
+        setError(null);
+    }, []);
+
+    // 初回マウント時に一覧を取得
+    useEffect(() => {
+        void refreshList();
+    }, [refreshList]);
+
+    return (
+        <NnueContext.Provider
+            value={{
+                storage,
+                nnueList,
+                isLoading,
+                error,
+                refreshList,
+                storageUsage,
+                clearError,
+            }}
+        >
+            {children}
+        </NnueContext.Provider>
+    );
 }
 
 /**

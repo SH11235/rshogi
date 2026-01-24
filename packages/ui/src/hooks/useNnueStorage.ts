@@ -1,6 +1,6 @@
 import type { NnueMeta, NnueStorageCapabilities } from "@shogi/app-core";
 import { NnueError } from "@shogi/app-core";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { useNnueContextOptional } from "../providers/NnueContext";
 
 export interface UseNnueStorageReturn {
@@ -30,6 +30,7 @@ export interface UseNnueStorageReturn {
  * NNUE ストレージを操作するフック
  *
  * NnueProvider 経由で注入された NnueStorage を React 状態として管理する。
+ * nnueList は Context レベルで共有され、全てのコンポーネントで同期される。
  * NnueProvider の外で使用すると、空の状態を返す。
  */
 export function useNnueStorage(): UseNnueStorageReturn {
@@ -37,35 +38,29 @@ export function useNnueStorage(): UseNnueStorageReturn {
     const storage = context?.storage ?? null;
     const capabilities = storage?.capabilities ?? null;
 
-    const [nnueList, setNnueList] = useState<NnueMeta[]>([]);
-    const [isLoading, setIsLoading] = useState(false);
-    const [error, setError] = useState<NnueError | null>(null);
-    const [storageUsage, setStorageUsage] = useState<{ used: number; quota?: number } | null>(null);
+    // Context から共有状態を取得
+    const nnueList = context?.nnueList ?? [];
+    const contextIsLoading = context?.isLoading ?? false;
+    const contextError = context?.error ?? null;
+    const contextRefreshList = context?.refreshList;
+    const storageUsage = context?.storageUsage ?? null;
+    const contextClearError = context?.clearError;
+
+    // ローカルの操作中状態（インポート・削除の進行中）
+    const [isOperating, setIsOperating] = useState(false);
+    const [localError, setLocalError] = useState<NnueError | null>(null);
+
+    // isLoading は Context のローディング状態とローカルの操作状態を組み合わせ
+    const isLoading = contextIsLoading || isOperating;
+
+    // エラーはローカルエラーを優先、なければ Context のエラー
+    const error = localError ?? contextError;
 
     const refreshList = useCallback(async () => {
-        if (!storage) return;
-        setIsLoading(true);
-        try {
-            const [list, usage] = await Promise.all([storage.listMeta(), storage.getUsage()]);
-            // ソート: 作成日時の新しい順
-            list.sort((a, b) => b.createdAt - a.createdAt);
-            setNnueList(list);
-            setStorageUsage(usage);
-            setError(null);
-        } catch (e) {
-            const err =
-                e instanceof NnueError
-                    ? e
-                    : new NnueError("NNUE_STORAGE_FAILED", "NNUE 一覧の取得に失敗しました", e);
-            setError(err);
-        } finally {
-            setIsLoading(false);
+        if (contextRefreshList) {
+            await contextRefreshList();
         }
-    }, [storage]);
-
-    useEffect(() => {
-        void refreshList();
-    }, [refreshList]);
+    }, [contextRefreshList]);
 
     const importFromFile = useCallback(
         async (file: File): Promise<NnueMeta> => {
@@ -83,7 +78,8 @@ export function useNnueStorage(): UseNnueStorageReturn {
                     null,
                 );
             }
-            setIsLoading(true);
+            setIsOperating(true);
+            setLocalError(null);
             try {
                 const arrayBuffer = await file.arrayBuffer();
                 const data = new Uint8Array(arrayBuffer);
@@ -97,7 +93,6 @@ export function useNnueStorage(): UseNnueStorageReturn {
                 const existing = await storage.listByContentHash(hash);
                 if (existing.length > 0) {
                     // 既存のものを返す（重複保存しない）
-                    setError(null);
                     return existing[0];
                 }
 
@@ -107,7 +102,7 @@ export function useNnueStorage(): UseNnueStorageReturn {
                 // メタデータを作成
                 const meta: NnueMeta = {
                     id,
-                    displayName: file.name.replace(/\.nnue$/i, ""),
+                    displayName: file.name.replace(/\.(nnue|bin)$/i, ""),
                     originalFileName: file.name,
                     size: data.byteLength,
                     contentHashSha256: hash,
@@ -119,7 +114,6 @@ export function useNnueStorage(): UseNnueStorageReturn {
                 // 保存
                 await storage.save(id, data, meta);
                 await refreshList();
-                setError(null);
                 return meta;
             } catch (e) {
                 const err =
@@ -130,10 +124,10 @@ export function useNnueStorage(): UseNnueStorageReturn {
                               "NNUE のインポートに失敗しました",
                               e,
                           );
-                setError(err);
+                setLocalError(err);
                 throw err;
             } finally {
-                setIsLoading(false);
+                setIsOperating(false);
             }
         },
         [storage, refreshList],
@@ -155,11 +149,11 @@ export function useNnueStorage(): UseNnueStorageReturn {
                     null,
                 );
             }
-            setIsLoading(true);
+            setIsOperating(true);
+            setLocalError(null);
             try {
                 const meta = await storage.importFromPath(srcPath, displayName);
                 await refreshList();
-                setError(null);
                 return meta;
             } catch (e) {
                 const err =
@@ -170,10 +164,10 @@ export function useNnueStorage(): UseNnueStorageReturn {
                               "NNUE のインポートに失敗しました",
                               e,
                           );
-                setError(err);
+                setLocalError(err);
                 throw err;
             } finally {
-                setIsLoading(false);
+                setIsOperating(false);
             }
         },
         [storage, refreshList],
@@ -188,28 +182,29 @@ export function useNnueStorage(): UseNnueStorageReturn {
                     null,
                 );
             }
-            setIsLoading(true);
+            setIsOperating(true);
+            setLocalError(null);
             try {
                 await storage.delete(id);
                 await refreshList();
-                setError(null);
             } catch (e) {
                 const err =
                     e instanceof NnueError
                         ? e
                         : new NnueError("NNUE_DELETE_FAILED", "NNUE の削除に失敗しました", e);
-                setError(err);
+                setLocalError(err);
                 throw err;
             } finally {
-                setIsLoading(false);
+                setIsOperating(false);
             }
         },
         [storage, refreshList],
     );
 
     const clearError = useCallback(() => {
-        setError(null);
-    }, []);
+        setLocalError(null);
+        contextClearError?.();
+    }, [contextClearError]);
 
     return {
         nnueList,
