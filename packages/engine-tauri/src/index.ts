@@ -12,6 +12,16 @@ import {
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
 
+// NNUE ストレージ
+export {
+    calculateNnueHash,
+    createTauriNnueStorage,
+    getNnuePath,
+    importNnue,
+    importNnueFromPath,
+    type TauriNnueStorageOptions,
+} from "./nnue-storage";
+
 export type InvokeFn = typeof tauriInvoke;
 export type ListenFn = typeof tauriListen;
 
@@ -269,6 +279,46 @@ export function createTauriEngineClient(options: TauriEngineClientOptions = {}):
         },
         getThreadInfo(): ThreadInfo {
             return cachedThreadInfo ?? defaultThreadInfo;
+        },
+        async reset(): Promise<void> {
+            // モック使用中の場合はモックをリセット
+            if (usingMock) {
+                await mock.dispose();
+                usingMock = false;
+                detachMockSubscriptions();
+            }
+
+            // 進行中の検索を停止
+            try {
+                await ipc.invoke("engine_stop");
+            } catch {
+                // ignore stop errors during reset
+            }
+
+            // イベントリスナーを解除（再登録は init 後に行う）
+            if (unlisten) {
+                try {
+                    unlisten();
+                } catch {
+                    // ignore unlisten errors during reset
+                }
+                unlisten = null;
+            }
+
+            // キャッシュをクリア
+            cachedThreadInfo = null;
+
+            // Note: init() は呼び出し側が明示的に呼ぶ必要がある
+        },
+        async loadNnue(nnueId: string): Promise<void> {
+            return runOrMock(
+                async () => {
+                    await ipc.invoke("engine_load_nnue", { nnueId });
+                },
+                async () => {
+                    // モックではNNUEロードは no-op
+                },
+            );
         },
     };
 }

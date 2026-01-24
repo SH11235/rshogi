@@ -46,6 +46,7 @@ export const DialogContent = forwardRef<
         <DialogPortal>
             <DialogOverlay className={overlayClassName} style={overlayStyle} />
             <DialogPrimitive.Content
+                aria-describedby={undefined}
                 style={{
                     position: "fixed",
                     top: "50%",

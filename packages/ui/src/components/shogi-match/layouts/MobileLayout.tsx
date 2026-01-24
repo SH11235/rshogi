@@ -6,7 +6,6 @@ import { BottomSheet } from "../components/BottomSheet";
 import { ClockDisplay } from "../components/ClockDisplay";
 import { EvalGraph } from "../components/EvalGraph";
 import { PausedModeControls, PlayingModeControls } from "../components/GameModeControls";
-import type { EngineOption, SideSetting } from "../components/MatchSettingsPanel";
 import { MobileBoardSection } from "../components/MobileBoardSection";
 import { type KifuMove, MobileKifuBar } from "../components/MobileKifuBar";
 import { MobileNavigation } from "../components/MobileNavigation";
@@ -16,10 +15,12 @@ import { PassButton, type PassDisabledReason } from "../components/PassButton";
 import type { ClockSettings, TickState } from "../hooks/useClockManager";
 import type {
     DisplaySettings,
+    EngineOption,
     GameMode,
     Message,
     PassRightsSettings,
     PromotionSelection,
+    SideSetting,
 } from "../types";
 import type { EvalHistory, KifMove as FullKifMove } from "../utils/kifFormat";
 
@@ -131,6 +132,7 @@ interface MobileLayoutProps {
         owner: Player;
         hand: PositionState["hands"]["sente"] | PositionState["hands"]["gote"];
         isActive: boolean;
+        isAI: boolean;
     };
 
     // Ref
@@ -277,7 +279,6 @@ export function MobileLayout({
             <header className="flex-shrink-0 pt-1">
                 <ClockDisplay
                     clocks={clocks}
-                    sides={sides}
                     isRunning={isMatchRunning}
                     centerContent={
                         <>
@@ -512,8 +513,8 @@ export function MobileLayout({
 
             {/* 設定BottomSheet */}
             <BottomSheet
-                isOpen={isSettingsOpen}
-                onClose={() => setIsSettingsOpen(false)}
+                open={isSettingsOpen}
+                onOpenChange={setIsSettingsOpen}
                 title="設定"
                 height="auto"
             >
@@ -551,8 +552,10 @@ export function MobileLayout({
 
             {/* 手詳細BottomSheet（検討モード用） */}
             <MoveDetailBottomSheet
-                isOpen={selectedMoveForDetail !== null}
-                onClose={handleMoveDetailClose}
+                open={selectedMoveForDetail !== null}
+                onOpenChange={(open) => {
+                    if (!open) handleMoveDetailClose();
+                }}
                 move={selectedMoveForDetail}
                 position={selectedMovePosition}
                 onAddBranch={onAddPvAsBranch}
@@ -562,8 +565,8 @@ export function MobileLayout({
 
             {/* 棋譜詳細BottomSheet（評価値グラフ + 棋譜バー） */}
             <BottomSheet
-                isOpen={isKifuDetailOpen}
-                onClose={() => setIsKifuDetailOpen(false)}
+                open={isKifuDetailOpen}
+                onOpenChange={setIsKifuDetailOpen}
                 title="棋譜詳細"
                 height="half"
             >

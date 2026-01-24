@@ -1,4 +1,32 @@
 import type { Piece, Square } from "@shogi/app-core";
+import type { EngineClient, SkillLevelSettings } from "@shogi/engine-client";
+
+/**
+ * プレイヤーの役割
+ */
+type SideRole = "human" | "engine";
+
+/**
+ * 先手/後手の設定
+ */
+export type SideSetting = {
+    role: SideRole;
+    engineId?: string;
+    /** 使用する NNUE ID（null = Material評価、undefined = 未設定） */
+    nnueId?: string | null;
+    /** エンジンの強さ設定（role="engine"時のみ有効） */
+    skillLevel?: SkillLevelSettings;
+};
+
+/**
+ * エンジン選択肢
+ */
+export type EngineOption = {
+    id: string;
+    label: string;
+    createClient: () => EngineClient;
+    kind?: "internal" | "external";
+};
 
 /**
  * 成り判定の結果を表す型
@@ -99,7 +127,7 @@ export interface PassRightsSettings {
 export const DEFAULT_PASS_RIGHTS_SETTINGS: PassRightsSettings = {
     enabled: false,
     initialCount: 2,
-    confirmDialogThresholdMs: 3_000,
+    confirmDialogThresholdMs: 10_000,
 };
 
 /**

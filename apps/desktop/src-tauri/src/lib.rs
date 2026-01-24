@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -11,7 +12,10 @@ use engine_core::search::{
 use engine_core::types::json::{BoardStateJson, ReplayResultJson};
 use engine_core::types::{Color, Move, Value};
 use serde::{Deserialize, Serialize};
-use tauri::{Emitter, State, Window};
+use sha2::{Digest, Sha256};
+use tauri::{AppHandle, Emitter, Manager, State, Window};
+use tokio::io::AsyncReadExt;
+use uuid::Uuid;
 
 const ENGINE_EVENT: &str = "engine://event";
 const SEARCH_STACK_SIZE: usize = 64 * 1024 * 1024;
@@ -845,10 +849,457 @@ pub fn board_to_sfen_for_test(board: BoardStateJson) -> Result<String, String> {
     board_to_sfen_impl(board)
 }
 
+// ============================================================
+// NNUE ファイル管理
+// ============================================================
+
+/// NNUE ファイルの保存ディレクトリを取得
+fn get_nnue_dir(app: &AppHandle) -> PathBuf {
+    app.path()
+        .app_data_dir()
+        .expect("failed to get app data dir")
+        .join("nnue")
+}
+
+fn validate_nnue_id(id: &str) -> Result<String, String> {
+    let parsed = Uuid::parse_str(id).map_err(|_| "Invalid NNUE id".to_string())?;
+    let normalized = parsed.to_string();
+    if !id.eq_ignore_ascii_case(&normalized) {
+        return Err("Invalid NNUE id".to_string());
+    }
+    Ok(normalized)
+}
+
+fn nnue_path_with_id(app: &AppHandle, normalized_id: &str, ext: &str) -> PathBuf {
+    get_nnue_dir(app).join(format!("{normalized_id}.{ext}"))
+}
+
+fn ensure_path_within_dir(dir: &Path, path: &Path) -> Result<(), String> {
+    let dir = dir
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve NNUE base dir: {e}"))?;
+    let path = path
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve NNUE path: {e}"))?;
+    if !path.starts_with(&dir) {
+        return Err("NNUE path escapes base dir".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ensure_path_within_dir, validate_nnue_id};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{nanos}-{n}"))
+    }
+
+    #[test]
+    fn validate_nnue_id_accepts_canonical_uuid() {
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        let result = validate_nnue_id(id).expect("expected valid uuid");
+        assert_eq!(result, id);
+    }
+
+    #[test]
+    fn validate_nnue_id_normalizes_case() {
+        let id = "550E8400-E29B-41D4-A716-446655440000";
+        let result = validate_nnue_id(id).expect("expected valid uuid");
+        assert_eq!(result, "550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn validate_nnue_id_rejects_non_canonical_uuid() {
+        let id = "urn:uuid:550e8400-e29b-41d4-a716-446655440000";
+        assert!(validate_nnue_id(id).is_err());
+    }
+
+    #[test]
+    fn validate_nnue_id_rejects_path_traversal() {
+        let id = "../550e8400-e29b-41d4-a716-446655440000";
+        assert!(validate_nnue_id(id).is_err());
+    }
+
+    #[test]
+    fn ensure_path_within_dir_accepts_child_path() {
+        let base = unique_temp_dir("nnue-base");
+        fs::create_dir_all(&base).expect("failed to create base dir");
+        let inside = base.join("inside.nnue");
+        fs::write(&inside, b"test").expect("failed to write file");
+
+        assert!(ensure_path_within_dir(&base, &inside).is_ok());
+
+        let _ = fs::remove_file(&inside);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn ensure_path_within_dir_rejects_outside_path() {
+        let base = unique_temp_dir("nnue-base");
+        let outside_dir = unique_temp_dir("nnue-outside");
+        fs::create_dir_all(&base).expect("failed to create base dir");
+        fs::create_dir_all(&outside_dir).expect("failed to create outside dir");
+        let outside = outside_dir.join("outside.nnue");
+        fs::write(&outside, b"test").expect("failed to write file");
+
+        assert!(ensure_path_within_dir(&base, &outside).is_err());
+
+        let _ = fs::remove_file(&outside);
+        let _ = fs::remove_dir_all(&outside_dir);
+        let _ = fs::remove_dir_all(&base);
+    }
+}
+
+/// NNUE インポート結果
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NnueImportResult {
+    id: String,
+    size: u64,
+    path: String,
+}
+
+/// NNUE インポートの引数
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportNnueFromPathArgs {
+    src_path: String,
+    id: String,
+}
+
+/// ユーザーが選択したファイルを app_data にコピー
+/// ⚠️ Vec<u8> でバイト列を渡さない（IPC のオーバーヘッドを避ける）
+/// ⚠️ 一時ファイル経由で原子的にコピー（途中失敗でゴミファイルが残らない）
+#[tauri::command]
+async fn import_nnue_from_path(
+    app: AppHandle,
+    args: ImportNnueFromPathArgs,
+) -> Result<NnueImportResult, String> {
+    let ImportNnueFromPathArgs { src_path, id } = args;
+    let normalized_id = validate_nnue_id(&id)?;
+    let dir = get_nnue_dir(&app);
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| format!("Failed to create NNUE directory: {e}"))?;
+
+    let temp_path = nnue_path_with_id(&app, &normalized_id, "tmp");
+    let dest_path = nnue_path_with_id(&app, &normalized_id, "nnue");
+
+    // 1. 一時ファイルにコピー（途中で失敗しても .nnue は残らない）
+    if let Err(e) = tokio::fs::copy(&src_path, &temp_path).await {
+        // 失敗時は一時ファイルを削除（存在する場合）
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(format!("Failed to copy NNUE file: {e}"));
+    }
+
+    // 2. 一時ファイルを本番パスにリネーム（ほぼ原子的）
+    // ⚠️ Windows では rename が既存ファイルを上書きできないため、先に削除
+    #[cfg(target_os = "windows")]
+    if dest_path.exists() {
+        let _ = tokio::fs::remove_file(&dest_path).await;
+    }
+
+    if let Err(e) = tokio::fs::rename(&temp_path, &dest_path).await {
+        // リネーム失敗時は一時ファイルを削除
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(format!("Failed to finalize NNUE file: {e}"));
+    }
+
+    // メタデータ取得
+    let metadata = tokio::fs::metadata(&dest_path)
+        .await
+        .map_err(|e| format!("Failed to get file metadata: {e}"))?;
+
+    Ok(NnueImportResult {
+        id: normalized_id,
+        size: metadata.len(),
+        path: dest_path.to_string_lossy().into_owned(),
+    })
+}
+
+/// NNUE ファイルのパスを取得
+#[tauri::command]
+fn get_nnue_path(app: AppHandle, id: String) -> Result<String, String> {
+    let normalized_id = validate_nnue_id(&id)?;
+    let path = nnue_path_with_id(&app, &normalized_id, "nnue");
+    if !path.exists() {
+        return Err(format!("NNUE not found: {normalized_id}"));
+    }
+    ensure_path_within_dir(&get_nnue_dir(&app), &path)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// NNUE ファイルを削除
+#[tauri::command]
+async fn delete_nnue(app: AppHandle, id: String) -> Result<(), String> {
+    let normalized_id = validate_nnue_id(&id)?;
+    let path = nnue_path_with_id(&app, &normalized_id, "nnue");
+    if path.exists() {
+        ensure_path_within_dir(&get_nnue_dir(&app), &path)?;
+        tokio::fs::remove_file(&path)
+            .await
+            .map_err(|e| format!("Failed to delete NNUE file: {e}"))?;
+    }
+    Ok(())
+}
+
+/// SHA-256 ハッシュを計算（検証用）
+/// ⚠️ ストリーム方式で計算（72MB 丸読みを避ける）
+#[tauri::command]
+async fn calculate_nnue_hash(app: AppHandle, id: String) -> Result<String, String> {
+    let normalized_id = validate_nnue_id(&id)?;
+    let path = nnue_path_with_id(&app, &normalized_id, "nnue");
+    if !path.exists() {
+        return Err(format!("NNUE not found: {normalized_id}"));
+    }
+    ensure_path_within_dir(&get_nnue_dir(&app), &path)?;
+    let mut file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|e| format!("Failed to open NNUE file: {e}"))?;
+
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024]; // 64KB バッファ
+
+    loop {
+        let n = file
+            .read(&mut buffer)
+            .await
+            .map_err(|e| format!("Failed to read NNUE file: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+
+    let hash = hasher.finalize();
+    Ok(hex::encode(hash))
+}
+
+/// NNUE ファイル一覧を取得
+#[tauri::command]
+async fn list_nnue_files(app: AppHandle) -> Result<Vec<String>, String> {
+    let dir = get_nnue_dir(&app);
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries = tokio::fs::read_dir(&dir)
+        .await
+        .map_err(|e| format!("Failed to read NNUE directory: {e}"))?;
+
+    let mut ids = Vec::new();
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| format!("Failed to read directory entry: {e}"))?
+    {
+        let path = entry.path();
+        if let Some(ext) = path.extension() {
+            if ext == "nnue" {
+                if let Some(stem) = path.file_stem() {
+                    ids.push(stem.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+
+    Ok(ids)
+}
+
+/// NNUE チャンク保存の引数
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveNnueChunkArgs {
+    id: String,
+    chunk_index: u32,
+    data_base64: String,
+}
+
+/// NNUE チャンクを保存（大きいファイル対応）
+/// チャンクごとに base64 エンコードされたデータを受け取り、一時ファイルに追記
+#[tauri::command]
+async fn save_nnue_chunk(app: AppHandle, args: SaveNnueChunkArgs) -> Result<(), String> {
+    let SaveNnueChunkArgs {
+        id,
+        chunk_index,
+        data_base64,
+    } = args;
+    let normalized_id = validate_nnue_id(&id)?;
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use tokio::io::AsyncWriteExt;
+
+    let dir = get_nnue_dir(&app);
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| format!("Failed to create NNUE directory: {e}"))?;
+
+    // base64 デコード
+    let data = STANDARD
+        .decode(&data_base64)
+        .map_err(|e| format!("Failed to decode base64 data: {e}"))?;
+
+    let temp_path = nnue_path_with_id(&app, &normalized_id, "tmp");
+    let index_path = nnue_path_with_id(&app, &normalized_id, "idx");
+
+    // チャンク順序の検証
+    if chunk_index == 0 {
+        // 最初のチャンク: 一時ファイルを新規作成、インデックスファイルも作成
+        if temp_path.exists() {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+        }
+        if index_path.exists() {
+            let _ = tokio::fs::remove_file(&index_path).await;
+        }
+        tokio::fs::write(&temp_path, &data)
+            .await
+            .map_err(|e| format!("Failed to write first chunk: {e}"))?;
+        tokio::fs::write(&index_path, b"1")
+            .await
+            .map_err(|e| format!("Failed to write index file: {e}"))?;
+    } else {
+        // 後続のチャンク: インデックスを検証して追記
+        let expected_index = tokio::fs::read_to_string(&index_path)
+            .await
+            .map_err(|e| format!("Failed to read index file (chunk order error?): {e}"))?
+            .parse::<u32>()
+            .map_err(|e| format!("Invalid index file: {e}"))?;
+
+        if chunk_index != expected_index {
+            return Err(format!(
+                "Chunk order mismatch: expected {}, got {}",
+                expected_index, chunk_index
+            ));
+        }
+
+        // 追記
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&temp_path)
+            .await
+            .map_err(|e| format!("Failed to open temp file for append: {e}"))?;
+
+        file.write_all(&data)
+            .await
+            .map_err(|e| format!("Failed to append chunk: {e}"))?;
+
+        // インデックスを更新
+        tokio::fs::write(&index_path, (chunk_index + 1).to_string())
+            .await
+            .map_err(|e| format!("Failed to update index file: {e}"))?;
+    }
+
+    Ok(())
+}
+
+/// NNUE 保存を完了（一時ファイルを正式ファイルにリネーム）
+#[tauri::command]
+async fn finalize_nnue_save(app: AppHandle, id: String) -> Result<NnueImportResult, String> {
+    let normalized_id = validate_nnue_id(&id)?;
+    let temp_path = nnue_path_with_id(&app, &normalized_id, "tmp");
+    let index_path = nnue_path_with_id(&app, &normalized_id, "idx");
+    let dest_path = nnue_path_with_id(&app, &normalized_id, "nnue");
+
+    // 一時ファイルの存在確認
+    if !temp_path.exists() {
+        return Err(format!("Temp file not found: {normalized_id}"));
+    }
+
+    // ファイルサイズ確認（0バイト対策）
+    let metadata = tokio::fs::metadata(&temp_path)
+        .await
+        .map_err(|e| format!("Failed to get temp file metadata: {e}"))?;
+
+    if metadata.len() == 0 {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        let _ = tokio::fs::remove_file(&index_path).await;
+        return Err("Temp file is empty".to_string());
+    }
+
+    // Windows では既存ファイルを先に削除
+    #[cfg(target_os = "windows")]
+    if dest_path.exists() {
+        let _ = tokio::fs::remove_file(&dest_path).await;
+    }
+
+    // リネーム（原子的）
+    if let Err(e) = tokio::fs::rename(&temp_path, &dest_path).await {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        let _ = tokio::fs::remove_file(&index_path).await;
+        return Err(format!("Failed to finalize NNUE file: {e}"));
+    }
+
+    // インデックスファイルを削除
+    let _ = tokio::fs::remove_file(&index_path).await;
+
+    Ok(NnueImportResult {
+        id: normalized_id,
+        size: metadata.len(),
+        path: dest_path.to_string_lossy().into_owned(),
+    })
+}
+
+/// NNUE 保存を中止（一時ファイルを削除）
+#[tauri::command]
+async fn abort_nnue_save(app: AppHandle, id: String) -> Result<(), String> {
+    let normalized_id = validate_nnue_id(&id)?;
+    let temp_path = nnue_path_with_id(&app, &normalized_id, "tmp");
+    let index_path = nnue_path_with_id(&app, &normalized_id, "idx");
+
+    let _ = tokio::fs::remove_file(&temp_path).await;
+    let _ = tokio::fs::remove_file(&index_path).await;
+
+    Ok(())
+}
+
+/// NNUE ロードコマンドの引数
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EngineLoadNnueArgs {
+    nnue_id: String,
+}
+
+/// NNUE をエンジンにロード
+/// ⚠️ NNUE は OnceLock で管理されているため、一度ロードすると変更不可
+/// 変更するにはアプリの再起動が必要
+#[tauri::command]
+fn engine_load_nnue(app: AppHandle, args: EngineLoadNnueArgs) -> Result<(), String> {
+    use engine_core::nnue::{init_nnue, is_nnue_initialized};
+
+    // 既に NNUE が初期化済みの場合はエラー
+    if is_nnue_initialized() {
+        return Err("NNUE is already loaded. Restart the app to change NNUE.".to_string());
+    }
+
+    // ID からパスを取得
+    let normalized_id = validate_nnue_id(&args.nnue_id)?;
+    let nnue_path = nnue_path_with_id(&app, &normalized_id, "nnue");
+
+    if !nnue_path.exists() {
+        return Err(format!("NNUE not found: {normalized_id}"));
+    }
+
+    ensure_path_within_dir(&get_nnue_dir(&app), &nnue_path)?;
+
+    // NNUE をロード
+    init_nnue(&nnue_path).map_err(|e| format!("Failed to load NNUE: {e}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(EngineState::default())
         .invoke_handler(tauri::generate_handler![
             engine_init,
@@ -858,10 +1309,20 @@ pub fn run() {
             engine_option,
             engine_legal_moves,
             engine_thread_info,
+            engine_load_nnue,
             get_initial_board,
             parse_sfen_to_board,
             board_to_sfen,
-            engine_replay_moves_strict
+            engine_replay_moves_strict,
+            // NNUE 管理
+            import_nnue_from_path,
+            get_nnue_path,
+            delete_nnue,
+            calculate_nnue_hash,
+            list_nnue_files,
+            save_nnue_chunk,
+            finalize_nnue_save,
+            abort_nnue_save
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

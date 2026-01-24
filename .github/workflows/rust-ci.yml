@@ -134,9 +134,11 @@ jobs:
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
+            libsoup-3.0-dev \
             libssl-dev \
             pkg-config \
             build-essential \
+            patchelf \
             curl \
             wget \
             file
@@ -204,9 +206,11 @@ jobs:
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
+            libsoup-3.0-dev \
             libssl-dev \
             pkg-config \
             build-essential \
+            patchelf \
             curl \
             wget \
             file

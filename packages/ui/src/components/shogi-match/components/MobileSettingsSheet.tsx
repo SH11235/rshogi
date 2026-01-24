@@ -2,8 +2,13 @@ import type { SkillLevelSettings } from "@shogi/engine-client";
 import { type ReactElement, useEffect, useState } from "react";
 import { Switch } from "../../switch";
 import type { ClockSettings } from "../hooks/useClockManager";
-import type { DisplaySettings, PassRightsSettings, SquareNotation } from "../types";
-import type { EngineOption, SideSetting } from "./MatchSettingsPanel";
+import type {
+    DisplaySettings,
+    EngineOption,
+    PassRightsSettings,
+    SideSetting,
+    SquareNotation,
+} from "../types";
 import { SkillLevelSelector } from "./SkillLevelSelector";
 
 type SideKey = "sente" | "gote";
@@ -167,11 +172,30 @@ export function MobileSettingsSheet({
                 </div>
             )}
 
+            {/* 先手/後手ラベル + 入替ボタン */}
+            <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-1 mb-1">
+                <div className="text-sm font-semibold text-wafuu-shu text-center">☗先手</div>
+                <button
+                    type="button"
+                    onClick={() => {
+                        onSidesChange({ sente: sides.gote, gote: sides.sente });
+                        onTimeSettingsChange({
+                            sente: timeSettings.gote,
+                            gote: timeSettings.sente,
+                        });
+                    }}
+                    disabled={settingsLocked}
+                    title="先手と後手の設定を入れ替える"
+                    className="px-2 py-1 text-base text-muted-foreground hover:text-primary hover:bg-primary/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                    ⇄
+                </button>
+                <div className="text-sm font-semibold text-wafuu-ai text-center">☖後手</div>
+            </div>
             {/* 先手/後手設定（PC版と同じ2列レイアウト） */}
             <div className="grid grid-cols-2 gap-3 [&>div]:min-w-0">
                 {/* 先手側 */}
                 <div className="flex flex-col gap-2 border-r border-border pr-3">
-                    <div className="text-sm font-semibold text-wafuu-shu">☗先手</div>
                     <label className={labelClassName}>
                         <span className="text-xs text-muted-foreground">プレイヤー</span>
                         <select
@@ -231,7 +255,6 @@ export function MobileSettingsSheet({
                 </div>
                 {/* 後手側 */}
                 <div className="flex flex-col gap-2">
-                    <div className="text-sm font-semibold text-wafuu-ai">☖後手</div>
                     <label className={labelClassName}>
                         <span className="text-xs text-muted-foreground">プレイヤー</span>
                         <select

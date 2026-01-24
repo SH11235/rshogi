@@ -325,6 +325,14 @@ export interface EngineClient {
      * Optional - only implemented by wasm backend.
      */
     getBackendStatus?(): EngineBackendStatus;
+    /**
+     * NNUE をロードする
+     * @param nnueId NNUE の ID（各プラットフォームで解釈）
+     * - Web: IndexedDB の ID
+     * - Desktop: ファイルシステムの ID（パスに変換）
+     * Optional - only implemented by wasm/tauri backends.
+     */
+    loadNnue?(nnueId: string): Promise<void>;
 }
 
 /**
