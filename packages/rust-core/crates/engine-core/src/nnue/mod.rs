@@ -25,6 +25,7 @@ mod accumulator;
 mod accumulator_layer_stacks;
 mod accumulator_stack_variant;
 pub mod activation;
+pub mod aliases;
 mod bona_piece;
 mod bona_piece_halfka;
 mod constants;
@@ -32,13 +33,19 @@ mod diff;
 mod feature_transformer;
 mod feature_transformer_layer_stacks;
 pub mod features;
+pub mod halfka;
+pub mod halfkp;
 mod layer_stacks;
 mod layers;
 mod leb128;
+#[macro_use]
+pub mod macros;
 mod network;
 pub mod network_halfka;
 pub mod network_halfkp;
 mod network_layer_stacks;
+pub mod prelude;
+pub mod spec;
 
 pub use accumulator::{
     Accumulator, AccumulatorStack, ChangedPiece, DirtyPiece, HandChange, StackEntry,
@@ -83,3 +90,4 @@ pub use network_halfkp::{
     FeatureTransformerHalfKP, HalfKP256CReLU, HalfKP256Pairwise, HalfKP256SCReLU, HalfKP512CReLU,
     HalfKP512Pairwise, HalfKP512SCReLU, HalfKP512_32_32CReLU, NetworkHalfKP,
 };
+pub use spec::{Activation, ArchitectureSpec, FeatureSet as SpecFeatureSet};

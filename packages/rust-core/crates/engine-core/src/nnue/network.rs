@@ -4,26 +4,26 @@
 //! - **HalfKP**: classic NNUE（水匠/tanuki互換）
 //! - **HalfKA_hm^**: nnue-pytorch互換（Half-Mirror + Factorization）
 //!
-//! 評価値計算フロー:
-//! - `FeatureTransformer` で特徴量を 512 次元に変換
-//! - `AffineTransform` + `ClippedReLU` を 2 層適用して 32→32 と圧縮
-//! - 出力層（32→1）で整数スコアを得て `FV_SCALE` でスケーリングし `Value` に変換
-//! - グローバルな `NETWORK` にロードし、`evaluate` から利用する
+//! # 階層構造（3バリアント）
+//!
+//! ```text
+//! NNUENetwork
+//! ├── HalfKA(HalfKANetwork)   // L256/L512/L1024 を内包
+//! ├── HalfKP(HalfKPNetwork)   // L256/L512 を内包
+//! └── LayerStacks(Box<NetworkLayerStacks>)
+//! ```
+//!
+//! **「Accumulator は L1 だけで決まる」** を活用し、L2/L3/活性化の追加時に
+//! このファイルの変更は最小限で済む。
 
 use super::accumulator_layer_stacks::AccumulatorStackLayerStacks;
 use super::accumulator_stack_variant::AccumulatorStackVariant;
 use super::activation::detect_activation_from_arch;
 use super::constants::{MAX_ARCH_LEN, NNUE_VERSION, NNUE_VERSION_HALFKA};
-use super::network_halfka::{
-    AccumulatorHalfKA, AccumulatorStackHalfKA, HalfKA1024CReLU, HalfKA1024Pairwise,
-    HalfKA1024SCReLU, HalfKA1024_8_32CReLU, HalfKA1024_8_32SCReLU, HalfKA256CReLU,
-    HalfKA256Pairwise, HalfKA256SCReLU, HalfKA512CReLU, HalfKA512Pairwise, HalfKA512SCReLU,
-};
-use super::network_halfkp::{
-    AccumulatorHalfKP, AccumulatorStackHalfKP, HalfKP256CReLU, HalfKP256Pairwise, HalfKP256SCReLU,
-    HalfKP512CReLU, HalfKP512Pairwise, HalfKP512SCReLU,
-};
+use super::halfka::{HalfKANetwork, HalfKAStack};
+use super::halfkp::{HalfKPNetwork, HalfKPStack};
 use super::network_layer_stacks::NetworkLayerStacks;
+use super::spec::Activation;
 #[cfg(not(feature = "tournament"))]
 use crate::eval::material;
 use crate::position::Position;
@@ -72,72 +72,33 @@ pub fn set_fv_scale_override(value: i32) {
 // NNUENetwork - アーキテクチャを抽象化するenum
 // =============================================================================
 
-/// NNUEネットワーク（HalfKPまたはHalfKA_hm^をラップ）
+/// NNUEネットワーク（3バリアント階層構造）
 ///
-/// const generics 版の統一実装を使用。各バリアントは活性化関数ごとに分かれる。
+/// **「Accumulator は L1 だけで決まる」** を活用した設計:
+/// - HalfKA(HalfKANetwork): L256/L512/L1024 を内包
+/// - HalfKP(HalfKPNetwork): L256/L512 を内包
+/// - LayerStacks: 1536次元 + 9バケット
 ///
-/// # サポートするアーキテクチャ
-///
-/// - HalfKP 256x2-32-32 (CReLU/SCReLU)
-/// - HalfKP 512x2-8-96 (CReLU/SCReLU)
-/// - HalfKA 256x2-32-32 (CReLU/SCReLU)
-/// - HalfKA 512x2-8-96 (CReLU/SCReLU)
-/// - HalfKA 1024x2-8-96 (CReLU/SCReLU)
-/// - HalfKA 1024x2-8-32 (CReLU/SCReLU)
-/// - LayerStacks 1536x2 + 9バケット
+/// L2/L3/活性化の追加時、このenumの変更は不要。
+/// 詳細は `halfka/` や `halfkp/` のモジュールで管理される。
 pub enum NNUENetwork {
-    /// HalfKP 256x2-32-32 CReLU (const generics版)
-    HalfKP256CReLU(Box<HalfKP256CReLU>),
-    /// HalfKP 256x2-32-32 SCReLU (const generics版)
-    HalfKP256SCReLU(Box<HalfKP256SCReLU>),
-    /// HalfKP 256/2x2-32-32 PairwiseCReLU (const generics版)
-    HalfKP256Pairwise(Box<HalfKP256Pairwise>),
-    /// HalfKP 512x2-8-96 CReLU (const generics版)
-    HalfKP512CReLU(Box<HalfKP512CReLU>),
-    /// HalfKP 512x2-8-96 SCReLU (const generics版)
-    HalfKP512SCReLU(Box<HalfKP512SCReLU>),
-    /// HalfKP 512/2x2-8-96 PairwiseCReLU (const generics版)
-    HalfKP512Pairwise(Box<HalfKP512Pairwise>),
-    /// HalfKA_hm^ 256x2-32-32 CReLU (const generics版)
-    HalfKA256CReLU(Box<HalfKA256CReLU>),
-    /// HalfKA_hm^ 256x2-32-32 SCReLU (const generics版)
-    HalfKA256SCReLU(Box<HalfKA256SCReLU>),
-    /// HalfKA_hm^ 256/2x2-32-32 PairwiseCReLU (const generics版)
-    HalfKA256Pairwise(Box<HalfKA256Pairwise>),
-    /// HalfKA_hm^ 512x2-8-96 CReLU (const generics版)
-    HalfKA512CReLU(Box<HalfKA512CReLU>),
-    /// HalfKA_hm^ 512x2-8-96 SCReLU (const generics版)
-    HalfKA512SCReLU(Box<HalfKA512SCReLU>),
-    /// HalfKA_hm^ 512/2x2-8-96 PairwiseCReLU (const generics版)
-    HalfKA512Pairwise(Box<HalfKA512Pairwise>),
-    /// HalfKA_hm^ 1024x2-8-96 CReLU (const generics版)
-    HalfKA1024CReLU(Box<HalfKA1024CReLU>),
-    /// HalfKA_hm^ 1024x2-8-96 SCReLU (const generics版)
-    HalfKA1024SCReLU(Box<HalfKA1024SCReLU>),
-    /// HalfKA_hm^ 1024/2x2-8-96 PairwiseCReLU (const generics版)
-    HalfKA1024Pairwise(Box<HalfKA1024Pairwise>),
-    /// HalfKA_hm^ 1024x2-8-32 CReLU (const generics版)
-    HalfKA1024_8_32CReLU(Box<HalfKA1024_8_32CReLU>),
-    /// HalfKA_hm^ 1024x2-8-32 SCReLU (const generics版)
-    HalfKA1024_8_32SCReLU(Box<HalfKA1024_8_32SCReLU>),
+    /// HalfKA 特徴量セット（L256/L512/L1024）
+    HalfKA(HalfKANetwork),
+    /// HalfKP 特徴量セット（L256/L512）
+    HalfKP(HalfKPNetwork),
     /// LayerStacks（1536次元 + 9バケット）
     LayerStacks(Box<NetworkLayerStacks>),
 }
 
 impl NNUENetwork {
     /// HalfKP でサポートされているアーキテクチャ一覧
-    ///
-    /// 新しいバリアント追加時は `architecture_spec()` と合わせて更新すること。
-    pub fn supported_halfkp_specs() -> &'static str {
-        "256x2-32-32, 512x2-8-96"
+    pub fn supported_halfkp_specs() -> Vec<super::spec::ArchitectureSpec> {
+        HalfKPNetwork::supported_specs()
     }
 
     /// HalfKA でサポートされているアーキテクチャ一覧
-    ///
-    /// 新しいバリアント追加時は `architecture_spec()` と合わせて更新すること。
-    /// 注: LayerStacks は実験段階のため含まない。
-    pub fn supported_halfka_specs() -> &'static str {
-        "256x2-32-32, 512x2-8-96, 1024x2-8-96, 1024x2-8-32"
+    pub fn supported_halfka_specs() -> Vec<super::spec::ArchitectureSpec> {
+        HalfKANetwork::supported_specs()
     }
 
     /// ファイルから読み込み（バージョン自動判別）
@@ -148,19 +109,17 @@ impl NNUENetwork {
     }
 
     /// リーダーから読み込み（バージョン自動判別）
+    ///
+    /// アーキテクチャ文字列をパースし、適切なバリアントに委譲する。
     pub fn read<R: Read + Seek>(reader: &mut R) -> io::Result<Self> {
         // バージョンを読み取り
         let mut buf4 = [0u8; 4];
         reader.read_exact(&mut buf4)?;
         let version = u32::from_le_bytes(buf4);
 
-        // nnue-pytorch は NNUE_VERSION (0x7AF32F16) を使用するが、
-        // アーキテクチャ文字列が "HalfKA" を含む場合は HalfKA_hm^ として扱う。
-        // NNUE_VERSION_HALFKA (0x7AF32F20) も HalfKA_hm^ として扱う。
         match version {
             NNUE_VERSION | NNUE_VERSION_HALFKA => {
                 // アーキテクチャ文字列を先に読んで判別する
-
                 // ハッシュを読み飛ばし
                 reader.read_exact(&mut buf4)?;
 
@@ -178,172 +137,36 @@ impl NNUENetwork {
                 let mut arch = vec![0u8; arch_len];
                 reader.read_exact(&mut arch)?;
                 let arch_str = String::from_utf8_lossy(&arch);
-                // 実ファイルの例:
-                // - Features=HalfKP[125388->256x2],fv_scale=16,qa=127,qb=64,scale=508
-                // - Features=HalfKA_hm[73305->256x2],fv_scale=16,qa=127,qb=64,scale=508
-                // - Features=HalfKA_hm[73305->512x2],fv_scale=5,qa=127,qb=64,scale=1600
-                // - Features=HalfKA_hm[73305->1024x2],fv_scale=5,qa=127,qb=64,scale=1600
 
                 // 位置を戻して全体を読み込み
                 reader.seek(SeekFrom::Start(0))?;
 
-                // 活性化関数を検出 ("CReLU", "SCReLU", "PairwiseCReLU")
-                let activation = detect_activation_from_arch(&arch_str);
+                // 活性化関数を検出
+                let activation_str = detect_activation_from_arch(&arch_str);
+                let activation = match activation_str {
+                    "SCReLU" => Activation::SCReLU,
+                    "PairwiseCReLU" => Activation::PairwiseCReLU,
+                    _ => Activation::CReLU,
+                };
 
-                // アーキテクチャを判別
-                // HalfKA_hm 系の判定（アーキテクチャ文字列に "HalfKA" を含む）
+                // アーキテクチャを判別して適切なバリアントに委譲
                 if arch_str.contains("HalfKA") {
-                    // HalfKA_hm^ には複数のアーキテクチャがある:
-                    // - LayerStacks (1536次元 + 9バケット)
-                    // - HalfKA512 (512x2-8-96)
-                    // - HalfKA1024 (1024x2-8-96)
+                    // LayerStacks 判定
                     if arch_str.contains("->1536x2]") || arch_str.contains("LayerStacks") {
-                        // LayerStacks (1536次元)
                         let network = NetworkLayerStacks::read(reader)?;
                         Ok(Self::LayerStacks(Box::new(network)))
                     } else {
-                        // L1, L2, L3 をパースして判定
+                        // HalfKANetwork に委譲
                         let (l1, l2, l3) = Self::parse_arch_dimensions(&arch_str);
-                        match (l1, l2, l3, activation) {
-                            // 256x2-32-32
-                            (256, 32, 32, "CReLU") => {
-                                let network = HalfKA256CReLU::read(reader)?;
-                                Ok(Self::HalfKA256CReLU(Box::new(network)))
-                            }
-                            (256, 32, 32, "SCReLU") => {
-                                let network = HalfKA256SCReLU::read(reader)?;
-                                Ok(Self::HalfKA256SCReLU(Box::new(network)))
-                            }
-                            (256, 32, 32, "PairwiseCReLU") => {
-                                let network = HalfKA256Pairwise::read(reader)?;
-                                Ok(Self::HalfKA256Pairwise(Box::new(network)))
-                            }
-                            // 512x2-8-96 CReLU
-                            (512, 8, 96, "CReLU") => {
-                                let network = HalfKA512CReLU::read(reader)?;
-                                Ok(Self::HalfKA512CReLU(Box::new(network)))
-                            }
-                            // 512x2-8-96 SCReLU
-                            (512, 8, 96, "SCReLU") => {
-                                let network = HalfKA512SCReLU::read(reader)?;
-                                Ok(Self::HalfKA512SCReLU(Box::new(network)))
-                            }
-                            // 512/2x2-8-96 PairwiseCReLU
-                            (512, 8, 96, "PairwiseCReLU") => {
-                                let network = HalfKA512Pairwise::read(reader)?;
-                                Ok(Self::HalfKA512Pairwise(Box::new(network)))
-                            }
-                            // 1024x2-8-96
-                            (1024, 8, 96, "CReLU") => {
-                                let network = HalfKA1024CReLU::read(reader)?;
-                                Ok(Self::HalfKA1024CReLU(Box::new(network)))
-                            }
-                            (1024, 8, 96, "SCReLU") => {
-                                let network = HalfKA1024SCReLU::read(reader)?;
-                                Ok(Self::HalfKA1024SCReLU(Box::new(network)))
-                            }
-                            (1024, 8, 96, "PairwiseCReLU") => {
-                                let network = HalfKA1024Pairwise::read(reader)?;
-                                Ok(Self::HalfKA1024Pairwise(Box::new(network)))
-                            }
-                            // 1024x2-8-32
-                            (1024, 8, 32, "CReLU") => {
-                                let network = HalfKA1024_8_32CReLU::read(reader)?;
-                                Ok(Self::HalfKA1024_8_32CReLU(Box::new(network)))
-                            }
-                            (1024, 8, 32, "SCReLU") => {
-                                let network = HalfKA1024_8_32SCReLU::read(reader)?;
-                                Ok(Self::HalfKA1024_8_32SCReLU(Box::new(network)))
-                            }
-                            _ => {
-                                // 旧形式ファイル検出（L2/L3 が 0 の場合）
-                                if l2 == 0 || l3 == 0 {
-                                    Err(io::Error::new(
-                                        io::ErrorKind::InvalidData,
-                                        format!(
-                                            "HalfKA L1={l1} network missing L2/L3 dimensions in header. \
-                                             This is an old bullet-shogi format that is no longer supported. \
-                                             Please re-export the model with a newer version of bullet-shogi. \
-                                             Architecture string: {arch_str}"
-                                        ),
-                                    ))
-                                } else {
-                                    // 未対応アーキテクチャ
-                                    Err(io::Error::new(
-                                        io::ErrorKind::Unsupported,
-                                        format!(
-                                            "Unsupported HalfKA architecture: {arch_str}. \
-                                             Supported: {}. \
-                                             Detected: L1={l1}, L2={l2}, L3={l3}, activation={activation}",
-                                            Self::supported_halfka_specs()
-                                        ),
-                                    ))
-                                }
-                            }
-                        }
+                        let network = HalfKANetwork::read(reader, l1, l2, l3, activation)?;
+                        Ok(Self::HalfKA(network))
                     }
                 } else {
-                    // HalfKP: L1をパースして活性化関数と組み合わせて判定
+                    // HalfKPNetwork に委譲
                     let l1 = Self::parse_halfkp_l1(&arch_str);
                     let (_, l2, l3) = Self::parse_arch_dimensions(&arch_str);
-                    match (l1, l2, l3, activation) {
-                        // 256x2-32-32 CReLU
-                        (256, 32, 32, "CReLU") => {
-                            let network = HalfKP256CReLU::read(reader)?;
-                            Ok(Self::HalfKP256CReLU(Box::new(network)))
-                        }
-                        // 256x2-32-32 SCReLU
-                        (256, 32, 32, "SCReLU") => {
-                            let network = HalfKP256SCReLU::read(reader)?;
-                            Ok(Self::HalfKP256SCReLU(Box::new(network)))
-                        }
-                        // 256x2-32-32 PairwiseCReLU
-                        (256, 32, 32, "PairwiseCReLU") => {
-                            let network = HalfKP256Pairwise::read(reader)?;
-                            Ok(Self::HalfKP256Pairwise(Box::new(network)))
-                        }
-                        // 512x2-8-96 CReLU
-                        (512, 8, 96, "CReLU") => {
-                            let network = HalfKP512CReLU::read(reader)?;
-                            Ok(Self::HalfKP512CReLU(Box::new(network)))
-                        }
-                        // 512x2-8-96 SCReLU
-                        (512, 8, 96, "SCReLU") => {
-                            let network = HalfKP512SCReLU::read(reader)?;
-                            Ok(Self::HalfKP512SCReLU(Box::new(network)))
-                        }
-                        // 512x2-8-96 PairwiseCReLU
-                        (512, 8, 96, "PairwiseCReLU") => {
-                            let network = HalfKP512Pairwise::read(reader)?;
-                            Ok(Self::HalfKP512Pairwise(Box::new(network)))
-                        }
-                        _ => {
-                            // 旧形式ファイル検出（L1/L2/L3 が 0 の場合）
-                            if l1 == 0 || l2 == 0 || l3 == 0 {
-                                Err(io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    format!(
-                                        "HalfKP network missing L1/L2/L3 dimensions in header. \
-                                         This is an old format that is no longer supported. \
-                                         Please re-export the model with a newer version. \
-                                         Detected: L1={l1}, L2={l2}, L3={l3}. \
-                                         Architecture string: {arch_str}"
-                                    ),
-                                ))
-                            } else {
-                                // 未対応アーキテクチャ
-                                Err(io::Error::new(
-                                    io::ErrorKind::Unsupported,
-                                    format!(
-                                        "Unsupported HalfKP architecture: {arch_str}. \
-                                         Supported: {}. \
-                                         Detected: L1={l1}, L2={l2}, L3={l3}, activation={activation}",
-                                        Self::supported_halfkp_specs()
-                                    ),
-                                ))
-                            }
-                        }
-                    }
+                    let network = HalfKPNetwork::read(reader, l1, l2, l3, activation)?;
+                    Ok(Self::HalfKP(network))
                 }
             }
             _ => Err(io::Error::new(
@@ -475,214 +298,55 @@ impl NNUENetwork {
         Self::read(&mut cursor)
     }
 
-    /// 評価値を計算（LayerStacks用）
-    ///
-    /// # Panics
-    ///
-    /// LayerStacks 以外のアーキテクチャで呼び出された場合にパニックします。
-    // TODO: Result<Value, EvaluationError> を返すように変更する
-    pub fn evaluate_layer_stacks(
-        &self,
-        pos: &Position,
-        acc: &super::accumulator_layer_stacks::AccumulatorLayerStacks,
-    ) -> Value {
-        match self {
-            Self::LayerStacks(net) => net.evaluate(pos, acc),
-            _ => unreachable!(
-                "BUG: evaluate_layer_stacks() called on non-LayerStacks architecture: {:?}",
-                self.architecture_name()
-            ),
-        }
-    }
-
-    /// 評価値を計算（HalfKA256用 - const generics版）
-    ///
-    /// # Panics
-    ///
-    /// HalfKA256CReLU/HalfKA256SCReLU 以外のアーキテクチャで呼び出された場合にパニックします。
-    pub fn evaluate_halfka_256(&self, pos: &Position, acc: &AccumulatorHalfKA<256>) -> Value {
-        match self {
-            Self::HalfKA256CReLU(net) => net.evaluate(pos, acc),
-            Self::HalfKA256SCReLU(net) => net.evaluate(pos, acc),
-            Self::HalfKA256Pairwise(net) => net.evaluate(pos, acc),
-            _ => unreachable!(
-                "BUG: evaluate_halfka_256() called on non-HalfKA256 architecture: {:?}",
-                self.architecture_name()
-            ),
-        }
-    }
-
-    /// 評価値を計算（HalfKA512用 - const generics版）
-    ///
-    /// # Panics
-    ///
-    /// HalfKA512CReLU/HalfKA512SCReLU/HalfKA512Pairwise 以外のアーキテクチャで呼び出された場合にパニックします。
-    pub fn evaluate_halfka_512(&self, pos: &Position, acc: &AccumulatorHalfKA<512>) -> Value {
-        match self {
-            Self::HalfKA512CReLU(net) => net.evaluate(pos, acc),
-            Self::HalfKA512SCReLU(net) => net.evaluate(pos, acc),
-            Self::HalfKA512Pairwise(net) => net.evaluate(pos, acc),
-            _ => unreachable!(
-                "BUG: evaluate_halfka_512() called on non-HalfKA512 architecture: {:?}",
-                self.architecture_name()
-            ),
-        }
-    }
-
-    /// 評価値を計算（HalfKA1024用 - const generics版）
-    ///
-    /// # Panics
-    ///
-    /// HalfKA1024CReLU/HalfKA1024SCReLU/HalfKA1024Pairwise 以外のアーキテクチャで呼び出された場合にパニックします。
-    pub fn evaluate_halfka_1024(&self, pos: &Position, acc: &AccumulatorHalfKA<1024>) -> Value {
-        match self {
-            Self::HalfKA1024CReLU(net) => net.evaluate(pos, acc),
-            Self::HalfKA1024SCReLU(net) => net.evaluate(pos, acc),
-            Self::HalfKA1024Pairwise(net) => net.evaluate(pos, acc),
-            _ => unreachable!(
-                "BUG: evaluate_halfka_1024() called on non-HalfKA1024 architecture: {:?}",
-                self.architecture_name()
-            ),
-        }
-    }
-
-    /// 評価値を計算（HalfKA1024_8_32用 - const generics版）
-    ///
-    /// # Panics
-    ///
-    /// HalfKA1024_8_32CReLU/HalfKA1024_8_32SCReLU 以外のアーキテクチャで呼び出された場合にパニックします。
-    pub fn evaluate_halfka_1024_8_32(
-        &self,
-        pos: &Position,
-        acc: &AccumulatorHalfKA<1024>,
-    ) -> Value {
-        match self {
-            Self::HalfKA1024_8_32CReLU(net) => net.evaluate(pos, acc),
-            Self::HalfKA1024_8_32SCReLU(net) => net.evaluate(pos, acc),
-            _ => unreachable!(
-                "BUG: evaluate_halfka_1024_8_32() called on non-HalfKA1024_8_32 architecture: {:?}",
-                self.architecture_name()
-            ),
-        }
-    }
-
-    /// 評価値を計算（HalfKP256用 - const generics版）
-    ///
-    /// # Panics
-    ///
-    /// HalfKP256CReLU/HalfKP256SCReLU/HalfKP256Pairwise 以外のアーキテクチャで呼び出された場合にパニックします。
-    pub fn evaluate_halfkp_256(&self, pos: &Position, acc: &AccumulatorHalfKP<256>) -> Value {
-        match self {
-            Self::HalfKP256CReLU(net) => net.evaluate(pos, acc),
-            Self::HalfKP256SCReLU(net) => net.evaluate(pos, acc),
-            Self::HalfKP256Pairwise(net) => net.evaluate(pos, acc),
-            _ => unreachable!(
-                "BUG: evaluate_halfkp_256() called on non-HalfKP256 architecture: {:?}",
-                self.architecture_name()
-            ),
-        }
-    }
-
-    /// 評価値を計算（HalfKP512用 - const generics版）
-    ///
-    /// # Panics
-    ///
-    /// HalfKP512CReLU/HalfKP512SCReLU/HalfKP512Pairwise 以外のアーキテクチャで呼び出された場合にパニックします。
-    pub fn evaluate_halfkp_512(&self, pos: &Position, acc: &AccumulatorHalfKP<512>) -> Value {
-        match self {
-            Self::HalfKP512CReLU(net) => net.evaluate(pos, acc),
-            Self::HalfKP512SCReLU(net) => net.evaluate(pos, acc),
-            Self::HalfKP512Pairwise(net) => net.evaluate(pos, acc),
-            _ => unreachable!(
-                "BUG: evaluate_halfkp_512() called on non-HalfKP512 architecture: {:?}",
-                self.architecture_name()
-            ),
-        }
-    }
-
     /// LayerStacks アーキテクチャかどうか
     pub fn is_layer_stacks(&self) -> bool {
         matches!(self, Self::LayerStacks(_))
     }
 
-    /// HalfKA256 アーキテクチャかどうか
-    pub fn is_halfka_256(&self) -> bool {
-        matches!(
-            self,
-            Self::HalfKA256CReLU(_) | Self::HalfKA256SCReLU(_) | Self::HalfKA256Pairwise(_)
-        )
+    /// HalfKA アーキテクチャかどうか
+    pub fn is_halfka(&self) -> bool {
+        matches!(self, Self::HalfKA(_))
     }
 
-    /// HalfKA512 アーキテクチャかどうか
-    pub fn is_halfka_512(&self) -> bool {
-        matches!(
-            self,
-            Self::HalfKA512CReLU(_) | Self::HalfKA512SCReLU(_) | Self::HalfKA512Pairwise(_)
-        )
+    /// HalfKP アーキテクチャかどうか
+    pub fn is_halfkp(&self) -> bool {
+        matches!(self, Self::HalfKP(_))
     }
 
-    /// HalfKA1024 アーキテクチャかどうか
-    pub fn is_halfka_1024(&self) -> bool {
-        matches!(
-            self,
-            Self::HalfKA1024CReLU(_) | Self::HalfKA1024SCReLU(_) | Self::HalfKA1024Pairwise(_)
-        )
+    /// L1 サイズを取得
+    pub fn l1_size(&self) -> usize {
+        match self {
+            Self::HalfKA(net) => net.l1_size(),
+            Self::HalfKP(net) => net.l1_size(),
+            Self::LayerStacks(_) => 1536,
+        }
     }
 
-    /// HalfKA1024_8_32 アーキテクチャかどうか
-    pub fn is_halfka_1024_8_32(&self) -> bool {
-        matches!(self, Self::HalfKA1024_8_32CReLU(_) | Self::HalfKA1024_8_32SCReLU(_))
-    }
-
-    /// アーキテクチャ名を取得（例: "HalfKP256CReLU"）
+    /// アーキテクチャ名を取得
     pub fn architecture_name(&self) -> &'static str {
         match self {
-            Self::HalfKP256CReLU(_) => "HalfKP256CReLU",
-            Self::HalfKP256SCReLU(_) => "HalfKP256SCReLU",
-            Self::HalfKP256Pairwise(_) => "HalfKP256Pairwise",
-            Self::HalfKP512CReLU(_) => "HalfKP512CReLU",
-            Self::HalfKP512SCReLU(_) => "HalfKP512SCReLU",
-            Self::HalfKP512Pairwise(_) => "HalfKP512Pairwise",
-            Self::HalfKA256CReLU(_) => "HalfKA256CReLU",
-            Self::HalfKA256SCReLU(_) => "HalfKA256SCReLU",
-            Self::HalfKA256Pairwise(_) => "HalfKA256Pairwise",
-            Self::HalfKA512CReLU(_) => "HalfKA512CReLU",
-            Self::HalfKA512SCReLU(_) => "HalfKA512SCReLU",
-            Self::HalfKA512Pairwise(_) => "HalfKA512Pairwise",
-            Self::HalfKA1024CReLU(_) => "HalfKA1024CReLU",
-            Self::HalfKA1024SCReLU(_) => "HalfKA1024SCReLU",
-            Self::HalfKA1024Pairwise(_) => "HalfKA1024Pairwise",
-            Self::HalfKA1024_8_32CReLU(_) => "HalfKA1024_8_32CReLU",
-            Self::HalfKA1024_8_32SCReLU(_) => "HalfKA1024_8_32SCReLU",
+            Self::HalfKA(net) => net.architecture_name(),
+            Self::HalfKP(net) => net.architecture_name(),
             Self::LayerStacks(_) => "LayerStacks",
         }
     }
 
-    /// アーキテクチャ仕様を取得（例: "256x2-32-32"）
-    ///
-    /// `supported_halfkp_specs()` / `supported_halfka_specs()` と整合性を保つこと。
-    /// 新しいバリアント追加時はここも更新が必要（exhaustive matchで警告される）。
-    pub fn architecture_spec(&self) -> &'static str {
+    /// アーキテクチャ仕様を取得
+    pub fn architecture_spec(&self) -> super::spec::ArchitectureSpec {
         match self {
-            Self::HalfKP256CReLU(_) | Self::HalfKP256SCReLU(_) | Self::HalfKP256Pairwise(_) => {
-                "256x2-32-32"
-            }
-            Self::HalfKP512CReLU(_) | Self::HalfKP512SCReLU(_) | Self::HalfKP512Pairwise(_) => {
-                "512x2-8-96"
-            }
-            Self::HalfKA256CReLU(_) | Self::HalfKA256SCReLU(_) | Self::HalfKA256Pairwise(_) => {
-                "256x2-32-32"
-            }
-            Self::HalfKA512CReLU(_) | Self::HalfKA512SCReLU(_) | Self::HalfKA512Pairwise(_) => {
-                "512x2-8-96"
-            }
-            Self::HalfKA1024CReLU(_) | Self::HalfKA1024SCReLU(_) | Self::HalfKA1024Pairwise(_) => {
-                "1024x2-8-96"
-            }
-            Self::HalfKA1024_8_32CReLU(_) | Self::HalfKA1024_8_32SCReLU(_) => "1024x2-8-32",
-            Self::LayerStacks(_) => "LayerStacks(1536x2)",
+            Self::HalfKA(net) => net.architecture_spec(),
+            Self::HalfKP(net) => net.architecture_spec(),
+            Self::LayerStacks(_) => super::spec::ArchitectureSpec::new(
+                super::spec::FeatureSet::LayerStacks,
+                1536,
+                0,
+                0,
+                Activation::CReLU,
+            ),
         }
     }
+
+    // LayerStacks 用のメソッド（LayerStacks のみ維持）
 
     /// 差分計算を使わずにAccumulatorを計算（LayerStacks用）
     pub fn refresh_accumulator_layer_stacks(
@@ -693,73 +357,6 @@ impl NNUENetwork {
         match self {
             Self::LayerStacks(net) => net.refresh_accumulator(pos, acc),
             _ => panic!("This method is only for LayerStacks architecture."),
-        }
-    }
-
-    /// 差分計算を使わずにAccumulatorを計算（HalfKA256用 - const generics版）
-    pub fn refresh_accumulator_halfka_256(&self, pos: &Position, acc: &mut AccumulatorHalfKA<256>) {
-        match self {
-            Self::HalfKA256CReLU(net) => net.refresh_accumulator(pos, acc),
-            Self::HalfKA256SCReLU(net) => net.refresh_accumulator(pos, acc),
-            Self::HalfKA256Pairwise(net) => net.refresh_accumulator(pos, acc),
-            _ => panic!("This method is only for HalfKA256 architecture."),
-        }
-    }
-
-    /// 差分計算を使わずにAccumulatorを計算（HalfKA512用 - const generics版）
-    pub fn refresh_accumulator_halfka_512(&self, pos: &Position, acc: &mut AccumulatorHalfKA<512>) {
-        match self {
-            Self::HalfKA512CReLU(net) => net.refresh_accumulator(pos, acc),
-            Self::HalfKA512SCReLU(net) => net.refresh_accumulator(pos, acc),
-            Self::HalfKA512Pairwise(net) => net.refresh_accumulator(pos, acc),
-            _ => panic!("This method is only for HalfKA512 architecture."),
-        }
-    }
-
-    /// 差分計算を使わずにAccumulatorを計算（HalfKA1024用 - const generics版）
-    pub fn refresh_accumulator_halfka_1024(
-        &self,
-        pos: &Position,
-        acc: &mut AccumulatorHalfKA<1024>,
-    ) {
-        match self {
-            Self::HalfKA1024CReLU(net) => net.refresh_accumulator(pos, acc),
-            Self::HalfKA1024SCReLU(net) => net.refresh_accumulator(pos, acc),
-            Self::HalfKA1024Pairwise(net) => net.refresh_accumulator(pos, acc),
-            _ => panic!("This method is only for HalfKA1024 architecture."),
-        }
-    }
-
-    /// 差分計算を使わずにAccumulatorを計算（HalfKA1024_8_32用 - const generics版）
-    pub fn refresh_accumulator_halfka_1024_8_32(
-        &self,
-        pos: &Position,
-        acc: &mut AccumulatorHalfKA<1024>,
-    ) {
-        match self {
-            Self::HalfKA1024_8_32CReLU(net) => net.refresh_accumulator(pos, acc),
-            Self::HalfKA1024_8_32SCReLU(net) => net.refresh_accumulator(pos, acc),
-            _ => panic!("This method is only for HalfKA1024_8_32 architecture."),
-        }
-    }
-
-    /// 差分計算を使わずにAccumulatorを計算（HalfKP256用 - const generics版）
-    pub fn refresh_accumulator_halfkp_256(&self, pos: &Position, acc: &mut AccumulatorHalfKP<256>) {
-        match self {
-            Self::HalfKP256CReLU(net) => net.refresh_accumulator(pos, acc),
-            Self::HalfKP256SCReLU(net) => net.refresh_accumulator(pos, acc),
-            Self::HalfKP256Pairwise(net) => net.refresh_accumulator(pos, acc),
-            _ => panic!("This method is only for HalfKP256 architecture."),
-        }
-    }
-
-    /// 差分計算を使わずにAccumulatorを計算（HalfKP512用 - const generics版）
-    pub fn refresh_accumulator_halfkp_512(&self, pos: &Position, acc: &mut AccumulatorHalfKP<512>) {
-        match self {
-            Self::HalfKP512CReLU(net) => net.refresh_accumulator(pos, acc),
-            Self::HalfKP512SCReLU(net) => net.refresh_accumulator(pos, acc),
-            Self::HalfKP512Pairwise(net) => net.refresh_accumulator(pos, acc),
-            _ => panic!("This method is only for HalfKP512 architecture."),
         }
     }
 
@@ -777,107 +374,6 @@ impl NNUENetwork {
         }
     }
 
-    /// 差分計算でAccumulatorを更新（HalfKA256用 - const generics版）
-    pub fn update_accumulator_halfka_256(
-        &self,
-        pos: &Position,
-        dirty_piece: &super::accumulator::DirtyPiece,
-        acc: &mut AccumulatorHalfKA<256>,
-        prev_acc: &AccumulatorHalfKA<256>,
-    ) {
-        match self {
-            Self::HalfKA256CReLU(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
-            Self::HalfKA256SCReLU(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
-            Self::HalfKA256Pairwise(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
-            _ => panic!("This method is only for HalfKA256 architecture."),
-        }
-    }
-
-    /// 差分計算でAccumulatorを更新（HalfKA512用 - const generics版）
-    pub fn update_accumulator_halfka_512(
-        &self,
-        pos: &Position,
-        dirty_piece: &super::accumulator::DirtyPiece,
-        acc: &mut AccumulatorHalfKA<512>,
-        prev_acc: &AccumulatorHalfKA<512>,
-    ) {
-        match self {
-            Self::HalfKA512CReLU(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
-            Self::HalfKA512SCReLU(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
-            Self::HalfKA512Pairwise(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
-            _ => panic!("This method is only for HalfKA512 architecture."),
-        }
-    }
-
-    /// 差分計算でAccumulatorを更新（HalfKA1024用 - const generics版）
-    pub fn update_accumulator_halfka_1024(
-        &self,
-        pos: &Position,
-        dirty_piece: &super::accumulator::DirtyPiece,
-        acc: &mut AccumulatorHalfKA<1024>,
-        prev_acc: &AccumulatorHalfKA<1024>,
-    ) {
-        match self {
-            Self::HalfKA1024CReLU(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
-            Self::HalfKA1024SCReLU(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
-            Self::HalfKA1024Pairwise(net) => {
-                net.update_accumulator(pos, dirty_piece, acc, prev_acc)
-            }
-            _ => panic!("This method is only for HalfKA1024 architecture."),
-        }
-    }
-
-    /// 差分計算でAccumulatorを更新（HalfKA1024_8_32用 - const generics版）
-    pub fn update_accumulator_halfka_1024_8_32(
-        &self,
-        pos: &Position,
-        dirty_piece: &super::accumulator::DirtyPiece,
-        acc: &mut AccumulatorHalfKA<1024>,
-        prev_acc: &AccumulatorHalfKA<1024>,
-    ) {
-        match self {
-            Self::HalfKA1024_8_32CReLU(net) => {
-                net.update_accumulator(pos, dirty_piece, acc, prev_acc)
-            }
-            Self::HalfKA1024_8_32SCReLU(net) => {
-                net.update_accumulator(pos, dirty_piece, acc, prev_acc)
-            }
-            _ => panic!("This method is only for HalfKA1024_8_32 architecture."),
-        }
-    }
-
-    /// 差分計算でAccumulatorを更新（HalfKP256用 - const generics版）
-    pub fn update_accumulator_halfkp_256(
-        &self,
-        pos: &Position,
-        dirty_piece: &super::accumulator::DirtyPiece,
-        acc: &mut AccumulatorHalfKP<256>,
-        prev_acc: &AccumulatorHalfKP<256>,
-    ) {
-        match self {
-            Self::HalfKP256CReLU(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
-            Self::HalfKP256SCReLU(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
-            Self::HalfKP256Pairwise(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
-            _ => panic!("This method is only for HalfKP256 architecture."),
-        }
-    }
-
-    /// 差分計算でAccumulatorを更新（HalfKP512用 - const generics版）
-    pub fn update_accumulator_halfkp_512(
-        &self,
-        pos: &Position,
-        dirty_piece: &super::accumulator::DirtyPiece,
-        acc: &mut AccumulatorHalfKP<512>,
-        prev_acc: &AccumulatorHalfKP<512>,
-    ) {
-        match self {
-            Self::HalfKP512CReLU(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
-            Self::HalfKP512SCReLU(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
-            Self::HalfKP512Pairwise(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
-            _ => panic!("This method is only for HalfKP512 architecture."),
-        }
-    }
-
     /// 複数手分の差分を適用してアキュムレータを更新（LayerStacks用）
     pub fn forward_update_incremental_layer_stacks(
         &self,
@@ -891,204 +387,101 @@ impl NNUENetwork {
         }
     }
 
-    /// 複数手分の差分を適用してアキュムレータを更新（HalfKA256用 - const generics版）
-    pub fn forward_update_incremental_halfka_256(
+    /// 評価値を計算（LayerStacks用）
+    pub fn evaluate_layer_stacks(
         &self,
         pos: &Position,
-        stack: &mut AccumulatorStackHalfKA<256>,
+        acc: &super::accumulator_layer_stacks::AccumulatorLayerStacks,
+    ) -> Value {
+        match self {
+            Self::LayerStacks(net) => net.evaluate(pos, acc),
+            _ => panic!("This method is only for LayerStacks architecture."),
+        }
+    }
+
+    /// HalfKA アキュムレータをフル再計算
+    pub fn refresh_accumulator_halfka(&self, pos: &Position, stack: &mut HalfKAStack) {
+        match self {
+            Self::HalfKA(net) => net.refresh_accumulator(pos, stack),
+            _ => panic!("This method is only for HalfKA architecture."),
+        }
+    }
+
+    /// HalfKA 差分更新
+    pub fn update_accumulator_halfka(
+        &self,
+        pos: &Position,
+        dirty: &super::accumulator::DirtyPiece,
+        stack: &mut HalfKAStack,
+        source_idx: usize,
+    ) {
+        match self {
+            Self::HalfKA(net) => net.update_accumulator(pos, dirty, stack, source_idx),
+            _ => panic!("This method is only for HalfKA architecture."),
+        }
+    }
+
+    /// HalfKA 前方差分更新
+    pub fn forward_update_incremental_halfka(
+        &self,
+        pos: &Position,
+        stack: &mut HalfKAStack,
         source_idx: usize,
     ) -> bool {
         match self {
-            Self::HalfKA256CReLU(net) => net.forward_update_incremental(pos, stack, source_idx),
-            Self::HalfKA256SCReLU(net) => net.forward_update_incremental(pos, stack, source_idx),
-            Self::HalfKA256Pairwise(net) => net.forward_update_incremental(pos, stack, source_idx),
-            _ => panic!("This method is only for HalfKA256 architecture."),
+            Self::HalfKA(net) => net.forward_update_incremental(pos, stack, source_idx),
+            _ => panic!("This method is only for HalfKA architecture."),
         }
     }
 
-    /// 複数手分の差分を適用してアキュムレータを更新（HalfKA512用 - const generics版）
-    pub fn forward_update_incremental_halfka_512(
+    /// HalfKA 評価
+    pub fn evaluate_halfka(&self, pos: &Position, stack: &HalfKAStack) -> Value {
+        match self {
+            Self::HalfKA(net) => net.evaluate(pos, stack),
+            _ => panic!("This method is only for HalfKA architecture."),
+        }
+    }
+
+    /// HalfKP アキュムレータをフル再計算
+    pub fn refresh_accumulator_halfkp(&self, pos: &Position, stack: &mut HalfKPStack) {
+        match self {
+            Self::HalfKP(net) => net.refresh_accumulator(pos, stack),
+            _ => panic!("This method is only for HalfKP architecture."),
+        }
+    }
+
+    /// HalfKP 差分更新
+    pub fn update_accumulator_halfkp(
         &self,
         pos: &Position,
-        stack: &mut AccumulatorStackHalfKA<512>,
+        dirty: &super::accumulator::DirtyPiece,
+        stack: &mut HalfKPStack,
+        source_idx: usize,
+    ) {
+        match self {
+            Self::HalfKP(net) => net.update_accumulator(pos, dirty, stack, source_idx),
+            _ => panic!("This method is only for HalfKP architecture."),
+        }
+    }
+
+    /// HalfKP 前方差分更新
+    pub fn forward_update_incremental_halfkp(
+        &self,
+        pos: &Position,
+        stack: &mut HalfKPStack,
         source_idx: usize,
     ) -> bool {
         match self {
-            Self::HalfKA512CReLU(net) => net.forward_update_incremental(pos, stack, source_idx),
-            Self::HalfKA512SCReLU(net) => net.forward_update_incremental(pos, stack, source_idx),
-            Self::HalfKA512Pairwise(net) => net.forward_update_incremental(pos, stack, source_idx),
-            _ => panic!("This method is only for HalfKA512 architecture."),
+            Self::HalfKP(net) => net.forward_update_incremental(pos, stack, source_idx),
+            _ => panic!("This method is only for HalfKP architecture."),
         }
     }
 
-    /// 複数手分の差分を適用してアキュムレータを更新（HalfKA1024用 - const generics版）
-    pub fn forward_update_incremental_halfka_1024(
-        &self,
-        pos: &Position,
-        stack: &mut AccumulatorStackHalfKA<1024>,
-        source_idx: usize,
-    ) -> bool {
+    /// HalfKP 評価
+    pub fn evaluate_halfkp(&self, pos: &Position, stack: &HalfKPStack) -> Value {
         match self {
-            Self::HalfKA1024CReLU(net) => net.forward_update_incremental(pos, stack, source_idx),
-            Self::HalfKA1024SCReLU(net) => net.forward_update_incremental(pos, stack, source_idx),
-            Self::HalfKA1024Pairwise(net) => net.forward_update_incremental(pos, stack, source_idx),
-            _ => panic!("This method is only for HalfKA1024 architecture."),
-        }
-    }
-
-    /// 複数手分の差分を適用してアキュムレータを更新（HalfKA1024_8_32用 - const generics版）
-    pub fn forward_update_incremental_halfka_1024_8_32(
-        &self,
-        pos: &Position,
-        stack: &mut AccumulatorStackHalfKA<1024>,
-        source_idx: usize,
-    ) -> bool {
-        match self {
-            Self::HalfKA1024_8_32CReLU(net) => {
-                net.forward_update_incremental(pos, stack, source_idx)
-            }
-            Self::HalfKA1024_8_32SCReLU(net) => {
-                net.forward_update_incremental(pos, stack, source_idx)
-            }
-            _ => panic!("This method is only for HalfKA1024_8_32 architecture."),
-        }
-    }
-
-    /// 複数手分の差分を適用してアキュムレータを更新（HalfKP256用 - const generics版）
-    pub fn forward_update_incremental_halfkp_256(
-        &self,
-        pos: &Position,
-        stack: &mut AccumulatorStackHalfKP<256>,
-        source_idx: usize,
-    ) -> bool {
-        match self {
-            Self::HalfKP256CReLU(net) => net.forward_update_incremental(pos, stack, source_idx),
-            Self::HalfKP256SCReLU(net) => net.forward_update_incremental(pos, stack, source_idx),
-            Self::HalfKP256Pairwise(net) => net.forward_update_incremental(pos, stack, source_idx),
-            _ => panic!("This method is only for HalfKP256 architecture."),
-        }
-    }
-
-    /// 複数手分の差分を適用してアキュムレータを更新（HalfKP512用 - const generics版）
-    pub fn forward_update_incremental_halfkp_512(
-        &self,
-        pos: &Position,
-        stack: &mut AccumulatorStackHalfKP<512>,
-        source_idx: usize,
-    ) -> bool {
-        match self {
-            Self::HalfKP512CReLU(net) => net.forward_update_incremental(pos, stack, source_idx),
-            Self::HalfKP512SCReLU(net) => net.forward_update_incremental(pos, stack, source_idx),
-            Self::HalfKP512Pairwise(net) => net.forward_update_incremental(pos, stack, source_idx),
-            _ => panic!("This method is only for HalfKP512 architecture."),
-        }
-    }
-
-    /// HalfKA256 用の新しいアキュムレータを作成
-    pub fn new_accumulator_halfka_256(&self) -> AccumulatorHalfKA<256> {
-        match self {
-            Self::HalfKA256CReLU(net) => net.new_accumulator(),
-            Self::HalfKA256SCReLU(net) => net.new_accumulator(),
-            _ => panic!("This method is only for HalfKA256 architecture."),
-        }
-    }
-
-    /// HalfKA256 用の新しいアキュムレータスタックを作成
-    pub fn new_accumulator_stack_halfka_256(&self) -> AccumulatorStackHalfKA<256> {
-        match self {
-            Self::HalfKA256CReLU(net) => net.new_accumulator_stack(),
-            Self::HalfKA256SCReLU(net) => net.new_accumulator_stack(),
-            _ => panic!("This method is only for HalfKA256 architecture."),
-        }
-    }
-
-    /// HalfKA512 用の新しいアキュムレータを作成
-    pub fn new_accumulator_halfka_512(&self) -> AccumulatorHalfKA<512> {
-        match self {
-            Self::HalfKA512CReLU(net) => net.new_accumulator(),
-            Self::HalfKA512SCReLU(net) => net.new_accumulator(),
-            _ => panic!("This method is only for HalfKA512 architecture."),
-        }
-    }
-
-    /// HalfKA512 用の新しいアキュムレータスタックを作成
-    pub fn new_accumulator_stack_halfka_512(&self) -> AccumulatorStackHalfKA<512> {
-        match self {
-            Self::HalfKA512CReLU(net) => net.new_accumulator_stack(),
-            Self::HalfKA512SCReLU(net) => net.new_accumulator_stack(),
-            _ => panic!("This method is only for HalfKA512 architecture."),
-        }
-    }
-
-    /// HalfKA1024 用の新しいアキュムレータを作成
-    pub fn new_accumulator_halfka_1024(&self) -> AccumulatorHalfKA<1024> {
-        match self {
-            Self::HalfKA1024CReLU(net) => net.new_accumulator(),
-            Self::HalfKA1024SCReLU(net) => net.new_accumulator(),
-            _ => panic!("This method is only for HalfKA1024 architecture."),
-        }
-    }
-
-    /// HalfKA1024 用の新しいアキュムレータスタックを作成
-    pub fn new_accumulator_stack_halfka_1024(&self) -> AccumulatorStackHalfKA<1024> {
-        match self {
-            Self::HalfKA1024CReLU(net) => net.new_accumulator_stack(),
-            Self::HalfKA1024SCReLU(net) => net.new_accumulator_stack(),
-            _ => panic!("This method is only for HalfKA1024 architecture."),
-        }
-    }
-
-    /// HalfKA1024_8_32 用の新しいアキュムレータを作成
-    pub fn new_accumulator_halfka_1024_8_32(&self) -> AccumulatorHalfKA<1024> {
-        match self {
-            Self::HalfKA1024_8_32CReLU(net) => net.new_accumulator(),
-            Self::HalfKA1024_8_32SCReLU(net) => net.new_accumulator(),
-            _ => panic!("This method is only for HalfKA1024_8_32 architecture."),
-        }
-    }
-
-    /// HalfKA1024_8_32 用の新しいアキュムレータスタックを作成
-    pub fn new_accumulator_stack_halfka_1024_8_32(&self) -> AccumulatorStackHalfKA<1024> {
-        match self {
-            Self::HalfKA1024_8_32CReLU(net) => net.new_accumulator_stack(),
-            Self::HalfKA1024_8_32SCReLU(net) => net.new_accumulator_stack(),
-            _ => panic!("This method is only for HalfKA1024_8_32 architecture."),
-        }
-    }
-
-    /// HalfKP256 用の新しいアキュムレータを作成
-    pub fn new_accumulator_halfkp_256(&self) -> AccumulatorHalfKP<256> {
-        match self {
-            Self::HalfKP256CReLU(net) => net.new_accumulator(),
-            Self::HalfKP256SCReLU(net) => net.new_accumulator(),
-            _ => panic!("This method is only for HalfKP256 architecture."),
-        }
-    }
-
-    /// HalfKP256 用の新しいアキュムレータスタックを作成
-    pub fn new_accumulator_stack_halfkp_256(&self) -> AccumulatorStackHalfKP<256> {
-        match self {
-            Self::HalfKP256CReLU(net) => net.new_accumulator_stack(),
-            Self::HalfKP256SCReLU(net) => net.new_accumulator_stack(),
-            _ => panic!("This method is only for HalfKP256 architecture."),
-        }
-    }
-
-    /// HalfKP512 用の新しいアキュムレータを作成
-    pub fn new_accumulator_halfkp_512(&self) -> AccumulatorHalfKP<512> {
-        match self {
-            Self::HalfKP512CReLU(net) => net.new_accumulator(),
-            Self::HalfKP512SCReLU(net) => net.new_accumulator(),
-            _ => panic!("This method is only for HalfKP512 architecture."),
-        }
-    }
-
-    /// HalfKP512 用の新しいアキュムレータスタックを作成
-    pub fn new_accumulator_stack_halfkp_512(&self) -> AccumulatorStackHalfKP<512> {
-        match self {
-            Self::HalfKP512CReLU(net) => net.new_accumulator_stack(),
-            Self::HalfKP512SCReLU(net) => net.new_accumulator_stack(),
-            _ => panic!("This method is only for HalfKP512 architecture."),
+            Self::HalfKP(net) => net.evaluate(pos, stack),
+            _ => panic!("This method is only for HalfKP architecture."),
         }
     }
 }
@@ -1206,25 +599,22 @@ fn update_and_evaluate_layer_stacks(
     network.evaluate_layer_stacks(pos, acc_ref)
 }
 
-/// HalfKA256 アキュムレータを更新して評価（内部実装）
+/// HalfKA アキュムレータを更新して評価（内部実装）
 #[inline]
-fn update_and_evaluate_halfka_256(
+fn update_and_evaluate_halfka(
     network: &NNUENetwork,
     pos: &Position,
-    stack: &mut AccumulatorStackHalfKA<256>,
+    stack: &mut HalfKAStack,
 ) -> Value {
     // アキュムレータの更新
-    let current_entry = stack.current();
-    if !current_entry.accumulator.computed_accumulation {
+    if !stack.is_current_computed() {
         let mut updated = false;
 
         // 1. 直前局面で差分更新を試行
-        if let Some(prev_idx) = current_entry.previous {
-            let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
-            if prev_computed {
-                let dirty_piece = stack.current().dirty_piece;
-                let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
-                network.update_accumulator_halfka_256(pos, &dirty_piece, current_acc, prev_acc);
+        if let Some(prev_idx) = stack.current_previous() {
+            if stack.is_entry_computed(prev_idx) {
+                let dirty = stack.current_dirty_piece();
+                network.update_accumulator_halfka(pos, &dirty, stack, prev_idx);
                 updated = true;
             }
         }
@@ -1232,41 +622,36 @@ fn update_and_evaluate_halfka_256(
         // 2. 失敗なら祖先探索 + 複数手差分更新を試行
         if !updated {
             if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
-                updated = network.forward_update_incremental_halfka_256(pos, stack, source_idx);
+                updated = network.forward_update_incremental_halfka(pos, stack, source_idx);
             }
         }
 
         // 3. それでも失敗なら全計算
         if !updated {
-            let acc = &mut stack.current_mut().accumulator;
-            network.refresh_accumulator_halfka_256(pos, acc);
+            network.refresh_accumulator_halfka(pos, stack);
         }
     }
 
     // 評価
-    let acc_ref = &stack.current().accumulator;
-    network.evaluate_halfka_256(pos, acc_ref)
+    network.evaluate_halfka(pos, stack)
 }
 
-/// HalfKA512 アキュムレータを更新して評価（内部実装）
+/// HalfKP アキュムレータを更新して評価（内部実装）
 #[inline]
-fn update_and_evaluate_halfka_512(
+fn update_and_evaluate_halfkp(
     network: &NNUENetwork,
     pos: &Position,
-    stack: &mut AccumulatorStackHalfKA<512>,
+    stack: &mut HalfKPStack,
 ) -> Value {
     // アキュムレータの更新
-    let current_entry = stack.current();
-    if !current_entry.accumulator.computed_accumulation {
+    if !stack.is_current_computed() {
         let mut updated = false;
 
         // 1. 直前局面で差分更新を試行
-        if let Some(prev_idx) = current_entry.previous {
-            let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
-            if prev_computed {
-                let dirty_piece = stack.current().dirty_piece;
-                let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
-                network.update_accumulator_halfka_512(pos, &dirty_piece, current_acc, prev_acc);
+        if let Some(prev_idx) = stack.current_previous() {
+            if stack.is_entry_computed(prev_idx) {
+                let dirty = stack.current_dirty_piece();
+                network.update_accumulator_halfkp(pos, &dirty, stack, prev_idx);
                 updated = true;
             }
         }
@@ -1274,194 +659,18 @@ fn update_and_evaluate_halfka_512(
         // 2. 失敗なら祖先探索 + 複数手差分更新を試行
         if !updated {
             if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
-                updated = network.forward_update_incremental_halfka_512(pos, stack, source_idx);
+                updated = network.forward_update_incremental_halfkp(pos, stack, source_idx);
             }
         }
 
         // 3. それでも失敗なら全計算
         if !updated {
-            let acc = &mut stack.current_mut().accumulator;
-            network.refresh_accumulator_halfka_512(pos, acc);
+            network.refresh_accumulator_halfkp(pos, stack);
         }
     }
 
     // 評価
-    let acc_ref = &stack.current().accumulator;
-    network.evaluate_halfka_512(pos, acc_ref)
-}
-
-/// HalfKA1024 アキュムレータを更新して評価（内部実装）
-#[inline]
-fn update_and_evaluate_halfka_1024(
-    network: &NNUENetwork,
-    pos: &Position,
-    stack: &mut AccumulatorStackHalfKA<1024>,
-) -> Value {
-    // アキュムレータの更新
-    let current_entry = stack.current();
-    if !current_entry.accumulator.computed_accumulation {
-        let mut updated = false;
-
-        // 1. 直前局面で差分更新を試行
-        if let Some(prev_idx) = current_entry.previous {
-            let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
-            if prev_computed {
-                let dirty_piece = stack.current().dirty_piece;
-                let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
-                network.update_accumulator_halfka_1024(pos, &dirty_piece, current_acc, prev_acc);
-                updated = true;
-            }
-        }
-
-        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
-        if !updated {
-            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
-                updated = network.forward_update_incremental_halfka_1024(pos, stack, source_idx);
-            }
-        }
-
-        // 3. それでも失敗なら全計算
-        if !updated {
-            let acc = &mut stack.current_mut().accumulator;
-            network.refresh_accumulator_halfka_1024(pos, acc);
-        }
-    }
-
-    // 評価
-    let acc_ref = &stack.current().accumulator;
-    network.evaluate_halfka_1024(pos, acc_ref)
-}
-
-/// HalfKA1024_8_32 アキュムレータを更新して評価（内部実装）
-#[inline]
-fn update_and_evaluate_halfka_1024_8_32(
-    network: &NNUENetwork,
-    pos: &Position,
-    stack: &mut AccumulatorStackHalfKA<1024>,
-) -> Value {
-    // アキュムレータの更新
-    let current_entry = stack.current();
-    if !current_entry.accumulator.computed_accumulation {
-        let mut updated = false;
-
-        // 1. 直前局面で差分更新を試行
-        if let Some(prev_idx) = current_entry.previous {
-            let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
-            if prev_computed {
-                let dirty_piece = stack.current().dirty_piece;
-                let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
-                network.update_accumulator_halfka_1024_8_32(
-                    pos,
-                    &dirty_piece,
-                    current_acc,
-                    prev_acc,
-                );
-                updated = true;
-            }
-        }
-
-        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
-        if !updated {
-            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
-                updated =
-                    network.forward_update_incremental_halfka_1024_8_32(pos, stack, source_idx);
-            }
-        }
-
-        // 3. それでも失敗なら全計算
-        if !updated {
-            let acc = &mut stack.current_mut().accumulator;
-            network.refresh_accumulator_halfka_1024_8_32(pos, acc);
-        }
-    }
-
-    // 評価
-    let acc_ref = &stack.current().accumulator;
-    network.evaluate_halfka_1024_8_32(pos, acc_ref)
-}
-
-/// HalfKP256 アキュムレータを更新して評価（内部実装）
-#[inline]
-fn update_and_evaluate_halfkp_256(
-    network: &NNUENetwork,
-    pos: &Position,
-    stack: &mut AccumulatorStackHalfKP<256>,
-) -> Value {
-    // アキュムレータの更新
-    let current_entry = stack.current();
-    if !current_entry.accumulator.computed_accumulation {
-        let mut updated = false;
-
-        // 1. 直前局面で差分更新を試行
-        if let Some(prev_idx) = current_entry.previous {
-            let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
-            if prev_computed {
-                let dirty_piece = stack.current().dirty_piece;
-                let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
-                network.update_accumulator_halfkp_256(pos, &dirty_piece, current_acc, prev_acc);
-                updated = true;
-            }
-        }
-
-        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
-        if !updated {
-            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
-                updated = network.forward_update_incremental_halfkp_256(pos, stack, source_idx);
-            }
-        }
-
-        // 3. それでも失敗なら全計算
-        if !updated {
-            let acc = &mut stack.current_mut().accumulator;
-            network.refresh_accumulator_halfkp_256(pos, acc);
-        }
-    }
-
-    // 評価
-    let acc_ref = &stack.current().accumulator;
-    network.evaluate_halfkp_256(pos, acc_ref)
-}
-
-/// HalfKP512 アキュムレータを更新して評価（内部実装）
-#[inline]
-fn update_and_evaluate_halfkp_512(
-    network: &NNUENetwork,
-    pos: &Position,
-    stack: &mut AccumulatorStackHalfKP<512>,
-) -> Value {
-    // アキュムレータの更新
-    let current_entry = stack.current();
-    if !current_entry.accumulator.computed_accumulation {
-        let mut updated = false;
-
-        // 1. 直前局面で差分更新を試行
-        if let Some(prev_idx) = current_entry.previous {
-            let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
-            if prev_computed {
-                let dirty_piece = stack.current().dirty_piece;
-                let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
-                network.update_accumulator_halfkp_512(pos, &dirty_piece, current_acc, prev_acc);
-                updated = true;
-            }
-        }
-
-        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
-        if !updated {
-            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
-                updated = network.forward_update_incremental_halfkp_512(pos, stack, source_idx);
-            }
-        }
-
-        // 3. それでも失敗なら全計算
-        if !updated {
-            let acc = &mut stack.current_mut().accumulator;
-            network.refresh_accumulator_halfkp_512(pos, acc);
-        }
-    }
-
-    // 評価
-    let acc_ref = &stack.current().accumulator;
-    network.evaluate_halfkp_512(pos, acc_ref)
+    network.evaluate_halfkp(pos, stack)
 }
 
 /// ロードされたNNUEがLayerStacksアーキテクチャかどうか
@@ -1471,17 +680,17 @@ pub fn is_layer_stacks_loaded() -> bool {
 
 /// ロードされたNNUEがHalfKA256アーキテクチャかどうか
 pub fn is_halfka_256_loaded() -> bool {
-    NETWORK.get().map(|n| n.is_halfka_256()).unwrap_or(false)
+    NETWORK.get().map(|n| n.is_halfka() && n.l1_size() == 256).unwrap_or(false)
 }
 
 /// ロードされたNNUEがHalfKA512アーキテクチャかどうか
 pub fn is_halfka_512_loaded() -> bool {
-    NETWORK.get().map(|n| n.is_halfka_512()).unwrap_or(false)
+    NETWORK.get().map(|n| n.is_halfka() && n.l1_size() == 512).unwrap_or(false)
 }
 
 /// ロードされたNNUEがHalfKA1024アーキテクチャかどうか
 pub fn is_halfka_1024_loaded() -> bool {
-    NETWORK.get().map(|n| n.is_halfka_1024()).unwrap_or(false)
+    NETWORK.get().map(|n| n.is_halfka() && n.l1_size() == 1024).unwrap_or(false)
 }
 
 /// 局面を評価（LayerStacks用）
@@ -1538,19 +747,13 @@ pub fn evaluate_dispatch(pos: &Position, stack: &mut AccumulatorStackVariant) ->
         return material::evaluate_material(pos);
     };
 
-    // バリアントに応じて適切な評価関数を呼び出し
+    // バリアントに応じて適切な評価関数を呼び出し（3バリアント）
     match stack {
         AccumulatorStackVariant::LayerStacks(s) => {
             update_and_evaluate_layer_stacks(network, pos, s)
         }
-        AccumulatorStackVariant::HalfKA256(s) => update_and_evaluate_halfka_256(network, pos, s),
-        AccumulatorStackVariant::HalfKA512(s) => update_and_evaluate_halfka_512(network, pos, s),
-        AccumulatorStackVariant::HalfKA1024(s) => update_and_evaluate_halfka_1024(network, pos, s),
-        AccumulatorStackVariant::HalfKA1024_8_32(s) => {
-            update_and_evaluate_halfka_1024_8_32(network, pos, s)
-        }
-        AccumulatorStackVariant::HalfKP256(s) => update_and_evaluate_halfkp_256(network, pos, s),
-        AccumulatorStackVariant::HalfKP512(s) => update_and_evaluate_halfkp_512(network, pos, s),
+        AccumulatorStackVariant::HalfKA(s) => update_and_evaluate_halfka(network, pos, s),
+        AccumulatorStackVariant::HalfKP(s) => update_and_evaluate_halfkp(network, pos, s),
     }
 }
 

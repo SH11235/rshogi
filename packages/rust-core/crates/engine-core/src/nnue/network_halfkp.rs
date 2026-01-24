@@ -207,6 +207,49 @@ impl<const L1: usize> AccumulatorStackHalfKP<L1> {
         &mut self.entries[self.current_idx]
     }
 
+    /// 現在の Accumulator を取得
+    ///
+    /// `define_l1_variants!` マクロから使用される。
+    #[inline]
+    pub fn top(&self) -> &AccumulatorHalfKP<L1> {
+        &self.entries[self.current_idx].accumulator
+    }
+
+    /// 現在の Accumulator を取得（可変）
+    ///
+    /// `define_l1_variants!` マクロから使用される。
+    #[inline]
+    pub fn top_mut(&mut self) -> &mut AccumulatorHalfKP<L1> {
+        &mut self.entries[self.current_idx].accumulator
+    }
+
+    /// 現在と source の Accumulator を同時取得（差分更新用）
+    ///
+    /// # 引数
+    /// - `source_idx`: source エントリの絶対インデックス
+    ///
+    /// # 戻り値
+    /// `(現在の Accumulator への可変参照, source の Accumulator への不変参照)`
+    ///
+    /// # 契約
+    /// - `source_idx < self.current_idx` でなければならない
+    /// - 範囲外の場合は panic（ホットパスなので Option 不使用）
+    ///
+    /// `define_l1_variants!` マクロから使用される。
+    #[inline]
+    pub fn top_and_source(
+        &mut self,
+        source_idx: usize,
+    ) -> (&mut AccumulatorHalfKP<L1>, &AccumulatorHalfKP<L1>) {
+        let current_idx = self.current_idx;
+        debug_assert!(
+            source_idx < current_idx,
+            "source_idx ({source_idx}) must be < current_idx ({current_idx})"
+        );
+        let (left, right) = self.entries.split_at_mut(current_idx);
+        (&mut right[0].accumulator, &left[source_idx].accumulator)
+    }
+
     /// プッシュ
     pub fn push(&mut self, dirty_piece: DirtyPiece) {
         let prev_idx = self.current_idx;

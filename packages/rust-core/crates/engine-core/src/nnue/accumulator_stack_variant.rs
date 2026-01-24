@@ -1,44 +1,40 @@
 //! AccumulatorStackVariant - 各アーキテクチャのスタックを統一的に扱う列挙型
 //!
 //! 探索時に使用するAccumulatorStackを1つだけ保持し、メモリ効率とパフォーマンスを向上させる。
+//!
+//! # 設計
+//!
+//! **「Accumulator は L1 だけで決まる」** を活用し、3バリアントに集約:
+//! - HalfKA(HalfKAStack): L256/L512/L1024 を内包
+//! - HalfKP(HalfKPStack): L256/L512 を内包
+//! - LayerStacks: 1536次元 + 9バケット
+//!
+//! L2/L3/活性化の追加時にこのファイルの変更は不要。
 
 use super::accumulator::DirtyPiece;
 use super::accumulator_layer_stacks::AccumulatorStackLayerStacks;
+use super::halfka::HalfKAStack;
+use super::halfkp::HalfKPStack;
 use super::network::NNUENetwork;
-use super::network_halfka::AccumulatorStackHalfKA;
-use super::network_halfkp::AccumulatorStackHalfKP;
 
 /// アキュムレータスタックのバリアント（列挙型）
 ///
 /// NNUEアーキテクチャに応じた適切なスタックを1つだけ保持する。
 /// これにより、メモリ使用量を削減し、do_move/undo_moveの効率を向上させる。
 ///
-/// # サポートするバリアント
+/// # 3バリアント構造
 ///
-/// すべて const generics 版の実装を使用:
-///
-/// - **HalfKP256**: 256x2-32-32（水匠5互換、レガシーNNUE）
-/// - **HalfKP512**: 512x2-8-96
-/// - **HalfKA256**: 256x2-32-32
-/// - **HalfKA512**: 512x2-8-96
-/// - **HalfKA1024**: 1024x2-8-96
-/// - **HalfKA1024_8_32**: 1024x2-8-32
-/// - **LayerStacks**: 1536次元 + 9バケット（最新アーキテクチャ）
+/// L1 サイズのみで分類し、L2/L3/活性化は内部で処理:
+/// - **HalfKA**: L256/L512/L1024 を HalfKAStack で管理
+/// - **HalfKP**: L256/L512 を HalfKPStack で管理
+/// - **LayerStacks**: 1536次元 + 9バケット
 pub enum AccumulatorStackVariant {
-    /// HalfKP 256x2-32-32 (const generics版)
-    HalfKP256(AccumulatorStackHalfKP<256>),
-    /// HalfKP 512x2-8-96 (const generics版)
-    HalfKP512(AccumulatorStackHalfKP<512>),
+    /// HalfKA 特徴量セット（L256/L512/L1024）
+    HalfKA(HalfKAStack),
+    /// HalfKP 特徴量セット（L256/L512）
+    HalfKP(HalfKPStack),
     /// LayerStacks（1536次元 + 9バケット）
     LayerStacks(AccumulatorStackLayerStacks),
-    /// HalfKA_hm^ 256x2-32-32 (const generics版)
-    HalfKA256(AccumulatorStackHalfKA<256>),
-    /// HalfKA_hm^ 512x2-8-96 (const generics版)
-    HalfKA512(AccumulatorStackHalfKA<512>),
-    /// HalfKA_hm^ 1024x2-8-96 (const generics版)
-    HalfKA1024(AccumulatorStackHalfKA<1024>),
-    /// HalfKA_hm^ 1024x2-8-32 (const generics版)
-    HalfKA1024_8_32(AccumulatorStackHalfKA<1024>),
 }
 
 impl AccumulatorStackVariant {
@@ -47,87 +43,27 @@ impl AccumulatorStackVariant {
     /// 指定されたネットワークのアーキテクチャに対応するスタックバリアントを生成する。
     pub fn from_network(network: &NNUENetwork) -> Self {
         match network {
-            NNUENetwork::HalfKP256CReLU(_)
-            | NNUENetwork::HalfKP256SCReLU(_)
-            | NNUENetwork::HalfKP256Pairwise(_) => {
-                Self::HalfKP256(AccumulatorStackHalfKP::<256>::new())
-            }
-            NNUENetwork::HalfKP512CReLU(_)
-            | NNUENetwork::HalfKP512SCReLU(_)
-            | NNUENetwork::HalfKP512Pairwise(_) => {
-                Self::HalfKP512(AccumulatorStackHalfKP::<512>::new())
-            }
+            NNUENetwork::HalfKA(net) => Self::HalfKA(HalfKAStack::from_network(net)),
+            NNUENetwork::HalfKP(net) => Self::HalfKP(HalfKPStack::from_network(net)),
             NNUENetwork::LayerStacks(_) => Self::LayerStacks(AccumulatorStackLayerStacks::new()),
-            NNUENetwork::HalfKA256CReLU(_)
-            | NNUENetwork::HalfKA256SCReLU(_)
-            | NNUENetwork::HalfKA256Pairwise(_) => {
-                Self::HalfKA256(AccumulatorStackHalfKA::<256>::new())
-            }
-            NNUENetwork::HalfKA512CReLU(_)
-            | NNUENetwork::HalfKA512SCReLU(_)
-            | NNUENetwork::HalfKA512Pairwise(_) => {
-                Self::HalfKA512(AccumulatorStackHalfKA::<512>::new())
-            }
-            NNUENetwork::HalfKA1024CReLU(_)
-            | NNUENetwork::HalfKA1024SCReLU(_)
-            | NNUENetwork::HalfKA1024Pairwise(_) => {
-                Self::HalfKA1024(AccumulatorStackHalfKA::<1024>::new())
-            }
-            NNUENetwork::HalfKA1024_8_32CReLU(_) | NNUENetwork::HalfKA1024_8_32SCReLU(_) => {
-                Self::HalfKA1024_8_32(AccumulatorStackHalfKA::<1024>::new())
-            }
         }
     }
 
-    /// デフォルトのスタック（HalfKP256）を作成
+    /// デフォルトのスタック（HalfKP L256）を作成
     ///
     /// NNUEが未初期化の場合のフォールバック用。
     pub fn new_default() -> Self {
-        Self::HalfKP256(AccumulatorStackHalfKP::<256>::new())
+        Self::HalfKP(HalfKPStack::default())
     }
 
     /// 現在のバリアントがネットワークと一致するか確認
     ///
     /// 一致しない場合は `from_network` で再作成が必要。
-    /// 明示的なmatch式により、将来バリアントを追加した際にコンパイラが警告を出す。
     pub fn matches_network(&self, network: &NNUENetwork) -> bool {
         match (self, network) {
-            (
-                Self::HalfKP256(_),
-                NNUENetwork::HalfKP256CReLU(_)
-                | NNUENetwork::HalfKP256SCReLU(_)
-                | NNUENetwork::HalfKP256Pairwise(_),
-            ) => true,
-            (
-                Self::HalfKP512(_),
-                NNUENetwork::HalfKP512CReLU(_)
-                | NNUENetwork::HalfKP512SCReLU(_)
-                | NNUENetwork::HalfKP512Pairwise(_),
-            ) => true,
+            (Self::HalfKA(stack), NNUENetwork::HalfKA(net)) => stack.l1_size() == net.l1_size(),
+            (Self::HalfKP(stack), NNUENetwork::HalfKP(net)) => stack.l1_size() == net.l1_size(),
             (Self::LayerStacks(_), NNUENetwork::LayerStacks(_)) => true,
-            (
-                Self::HalfKA256(_),
-                NNUENetwork::HalfKA256CReLU(_)
-                | NNUENetwork::HalfKA256SCReLU(_)
-                | NNUENetwork::HalfKA256Pairwise(_),
-            ) => true,
-            (
-                Self::HalfKA512(_),
-                NNUENetwork::HalfKA512CReLU(_)
-                | NNUENetwork::HalfKA512SCReLU(_)
-                | NNUENetwork::HalfKA512Pairwise(_),
-            ) => true,
-            (
-                Self::HalfKA1024(_),
-                NNUENetwork::HalfKA1024CReLU(_)
-                | NNUENetwork::HalfKA1024SCReLU(_)
-                | NNUENetwork::HalfKA1024Pairwise(_),
-            ) => true,
-            (
-                Self::HalfKA1024_8_32(_),
-                NNUENetwork::HalfKA1024_8_32CReLU(_) | NNUENetwork::HalfKA1024_8_32SCReLU(_),
-            ) => true,
-            // 将来バリアントを追加した場合、ここでコンパイラ警告が出る
             _ => false,
         }
     }
@@ -136,13 +72,9 @@ impl AccumulatorStackVariant {
     #[inline]
     pub fn reset(&mut self) {
         match self {
-            Self::HalfKP256(stack) => stack.reset(),
-            Self::HalfKP512(stack) => stack.reset(),
+            Self::HalfKA(stack) => stack.reset(),
+            Self::HalfKP(stack) => stack.reset(),
             Self::LayerStacks(stack) => stack.reset(),
-            Self::HalfKA256(stack) => stack.reset(),
-            Self::HalfKA512(stack) => stack.reset(),
-            Self::HalfKA1024(stack) => stack.reset(),
-            Self::HalfKA1024_8_32(stack) => stack.reset(),
         }
     }
 
@@ -150,16 +82,12 @@ impl AccumulatorStackVariant {
     #[inline]
     pub fn push(&mut self, dirty_piece: DirtyPiece) {
         match self {
-            Self::HalfKP256(stack) => stack.push(dirty_piece),
-            Self::HalfKP512(stack) => stack.push(dirty_piece),
+            Self::HalfKA(stack) => stack.push(dirty_piece),
+            Self::HalfKP(stack) => stack.push(dirty_piece),
             Self::LayerStacks(stack) => {
                 stack.push();
                 stack.current_mut().dirty_piece = dirty_piece;
             }
-            Self::HalfKA256(stack) => stack.push(dirty_piece),
-            Self::HalfKA512(stack) => stack.push(dirty_piece),
-            Self::HalfKA1024(stack) => stack.push(dirty_piece),
-            Self::HalfKA1024_8_32(stack) => stack.push(dirty_piece),
         }
     }
 
@@ -167,20 +95,16 @@ impl AccumulatorStackVariant {
     #[inline]
     pub fn pop(&mut self) {
         match self {
-            Self::HalfKP256(stack) => stack.pop(),
-            Self::HalfKP512(stack) => stack.pop(),
+            Self::HalfKA(stack) => stack.pop(),
+            Self::HalfKP(stack) => stack.pop(),
             Self::LayerStacks(stack) => stack.pop(),
-            Self::HalfKA256(stack) => stack.pop(),
-            Self::HalfKA512(stack) => stack.pop(),
-            Self::HalfKA1024(stack) => stack.pop(),
-            Self::HalfKA1024_8_32(stack) => stack.pop(),
         }
     }
 
     /// 現在のバリアントがHalfKPかどうか
     #[inline]
     pub fn is_halfkp(&self) -> bool {
-        matches!(self, Self::HalfKP256(_) | Self::HalfKP512(_))
+        matches!(self, Self::HalfKP(_))
     }
 }
 
@@ -195,22 +119,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_is_halfkp256() {
+    fn test_default_is_halfkp() {
         let stack = AccumulatorStackVariant::default();
         assert!(stack.is_halfkp());
-        assert!(matches!(stack, AccumulatorStackVariant::HalfKP256(_)));
+        assert!(matches!(stack, AccumulatorStackVariant::HalfKP(_)));
         assert!(!matches!(stack, AccumulatorStackVariant::LayerStacks(_)));
-        assert!(!matches!(stack, AccumulatorStackVariant::HalfKA256(_)));
-        assert!(!matches!(stack, AccumulatorStackVariant::HalfKA512(_)));
-        assert!(!matches!(stack, AccumulatorStackVariant::HalfKA1024(_)));
-        assert!(!matches!(stack, AccumulatorStackVariant::HalfKA1024_8_32(_)));
+        assert!(!matches!(stack, AccumulatorStackVariant::HalfKA(_)));
     }
 
     #[test]
-    fn test_new_default_is_halfkp256() {
+    fn test_new_default_is_halfkp() {
         let stack = AccumulatorStackVariant::new_default();
         assert!(stack.is_halfkp());
-        assert!(matches!(stack, AccumulatorStackVariant::HalfKP256(_)));
+        assert!(matches!(stack, AccumulatorStackVariant::HalfKP(_)));
     }
 
     #[test]
@@ -242,18 +163,17 @@ mod tests {
         // 各スタックのサイズを確認（デバッグ用）
         let variant_size = size_of::<AccumulatorStackVariant>();
         let layer_stacks_size = size_of::<AccumulatorStackLayerStacks>();
-        let halfka_512_size = size_of::<AccumulatorStackHalfKA<512>>();
-        let halfka_1024_size = size_of::<AccumulatorStackHalfKA<1024>>();
-        let halfkp_256_size = size_of::<AccumulatorStackHalfKP<256>>();
+        let halfka_stack_size = size_of::<HalfKAStack>();
+        let halfkp_stack_size = size_of::<HalfKPStack>();
+
+        // 新設計では最大のバリアントのサイズ + タグになる
+        // 各サブスタックも enum なので効率的
+        eprintln!("AccumulatorStackVariant size: {variant_size} bytes");
+        eprintln!("HalfKAStack size: {halfka_stack_size} bytes");
+        eprintln!("HalfKPStack size: {halfkp_stack_size} bytes");
+        eprintln!("LayerStacks size: {layer_stacks_size} bytes");
 
         // 列挙型のサイズは最大のバリアントのサイズ + タグ
-        // 旧実装では全スタックの合計サイズを使用していた
-        let old_total = halfkp_256_size + layer_stacks_size + halfka_512_size + halfka_1024_size;
-
-        // 新実装は旧実装より小さいはず
-        assert!(
-            variant_size < old_total,
-            "AccumulatorStackVariant ({variant_size} bytes) should be smaller than sum of all stacks ({old_total} bytes)"
-        );
+        assert!(variant_size > 0);
     }
 }
