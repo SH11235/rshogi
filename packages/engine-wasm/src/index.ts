@@ -101,6 +101,14 @@ function classifyErrorCode(error: unknown): EngineErrorCode {
     return "WASM_INIT_FAILED";
 }
 
+/**
+ * NNUE ロード元の種別
+ */
+export type NnueLoadSource =
+    | { type: "idb"; id: string } // IndexedDB から
+    | { type: "url"; url: string } // URL から fetch
+    | { type: "bytes"; bytes: Uint8Array }; // 直接バイト列（transferable）
+
 type WorkerCommand =
     | {
           type: "init";
@@ -119,7 +127,8 @@ type WorkerCommand =
     | { type: "search"; params: SearchParams; requestId?: string }
     | { type: "stop"; requestId?: string }
     | { type: "dispose"; requestId?: string }
-    | { type: "setOption"; name: string; value: string | number | boolean; requestId?: string };
+    | { type: "setOption"; name: string; value: string | number | boolean; requestId?: string }
+    | { type: "loadNnue"; source: NnueLoadSource; requestId?: string };
 
 type WorkerCommandPayload =
     | { type: "init"; opts?: WasmEngineInitOptions; wasmModule?: WasmModuleSource }
@@ -133,14 +142,17 @@ type WorkerCommandPayload =
     | { type: "search"; params: SearchParams }
     | { type: "stop" }
     | { type: "dispose" }
-    | { type: "setOption"; name: string; value: string | number | boolean };
+    | { type: "setOption"; name: string; value: string | number | boolean }
+    | { type: "loadNnue"; source: NnueLoadSource };
 
 type WorkerAck = { type: "ack"; requestId: string; error?: string };
 
 type WorkerMessage =
     | { type: "event"; payload: EngineEvent }
     | { type: "events"; payload: EngineEvent[] }
-    | WorkerAck;
+    | WorkerAck
+    | { type: "nnueLoadProgress"; loaded: number; total: number }
+    | { type: "nnueLoaded"; size: number };
 
 function defaultWorkerFactory(kind: WorkerKind): Worker {
     // IMPORTANT: Vite requires `new URL(..., import.meta.url)` to be used directly
@@ -166,6 +178,9 @@ function collectTransfers(command: WorkerCommand): Transferable[] {
         if (command.wasmModule instanceof Uint8Array) {
             return [command.wasmModule.buffer];
         }
+    }
+    if (command.type === "loadNnue" && command.source.type === "bytes") {
+        return [command.source.bytes.buffer];
     }
     return [];
 }
@@ -203,11 +218,52 @@ const DEFAULT_WORKER_TIMEOUT_MS = 30_000; // Worker リクエストのタイム�
 // - Conservative limit of 4 balances performance gains with stability
 const MAX_WASM_THREADS = 4;
 
-export function createWasmEngineClient(options: WasmEngineClientOptions = {}): EngineClient {
+/**
+ * NNUE ロード進捗イベント
+ */
+export interface NnueLoadProgressEvent {
+    type: "progress";
+    loaded: number;
+    total: number;
+}
+
+/**
+ * NNUE ロード完了イベント
+ */
+export interface NnueLoadedEvent {
+    type: "loaded";
+    size: number;
+}
+
+/**
+ * NNUE ロードイベント
+ */
+export type NnueLoadEvent = NnueLoadProgressEvent | NnueLoadedEvent;
+
+/**
+ * NNUE ロードイベントハンドラー
+ */
+export type NnueLoadEventHandler = (event: NnueLoadEvent) => void;
+
+/**
+ * Wasm エンジンクライアントの拡張インターフェース
+ * NNUE ロード進捗の購読機能を追加
+ */
+export interface WasmEngineClient extends EngineClient {
+    /**
+     * NNUE ロードイベントを購読
+     * @param handler イベントハンドラー
+     * @returns 購読解除関数
+     */
+    subscribeNnueLoad(handler: NnueLoadEventHandler): () => void;
+}
+
+export function createWasmEngineClient(options: WasmEngineClientOptions = {}): WasmEngineClient {
     // NOTE: stopMode のデフォルトは "terminate"。"cooperative" は未実装のため内部で terminate にフォールバックする。
     const stopMode: EngineStopMode = options.stopMode ?? "terminate";
     const mock = createMockEngineClient();
     const listeners = new Set<EngineEventHandler>();
+    const nnueLoadListeners = new Set<NnueLoadEventHandler>();
     const logWarningsToConsole = options.logWarningsToConsole ?? false;
 
     let backend: BackendKind = options.useMock ? "mock" : "single";
@@ -235,6 +291,12 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
 
     const pendingOptions = new Map<string, string | number | boolean>();
     const warnedReasons = new Set<string>();
+
+    const emitNnueLoad = (event: NnueLoadEvent) => {
+        for (const handler of nnueLoadListeners) {
+            handler(event);
+        }
+    };
 
     const emit = (event: EngineEvent) => {
         if (event.type === "error" && event.severity !== "warning") {
@@ -486,6 +548,22 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
                 for (const event of data.payload) {
                     emit(event);
                 }
+                return;
+            }
+            if (data?.type === "nnueLoadProgress") {
+                emitNnueLoad({
+                    type: "progress",
+                    loaded: data.loaded,
+                    total: data.total,
+                });
+                return;
+            }
+            if (data?.type === "nnueLoaded") {
+                emitNnueLoad({
+                    type: "loaded",
+                    size: data.size,
+                });
+                return;
             }
         };
 
@@ -798,6 +876,13 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
             listeners.add(handler);
             return () => listeners.delete(handler);
         },
+        /**
+         * NNUE ロードイベントを購読
+         */
+        subscribeNnueLoad(handler: NnueLoadEventHandler) {
+            nnueLoadListeners.add(handler);
+            return () => nnueLoadListeners.delete(handler);
+        },
         async dispose() {
             if (backend === "mock") {
                 await mock.dispose();
@@ -814,6 +899,7 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
             replaceWorker("engine worker disposed");
             detachMock();
             listeners.clear();
+            nnueLoadListeners.clear();
             lastPosition = null;
             lastInitOpts = undefined;
             pendingOptions.clear();
@@ -884,13 +970,39 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): E
                 ...cachedStaticThreadInfo,
             };
         },
+        async loadNnue(nnueId: string): Promise<void> {
+            if (backend === "mock") {
+                // モックではNNUEロードは no-op
+                return;
+            }
+            if (backend === "error") {
+                throw new Error(
+                    "エンジンはエラー状態です。init()を呼び出してリトライしてください。",
+                );
+            }
+            await ensureReady();
+            if (!worker) {
+                // モックフォールバック時は no-op
+                return;
+            }
+            await postToWorkerAwait({
+                type: "loadNnue",
+                source: { type: "idb", id: nnueId },
+            });
+        },
     };
 }
 
+// NNUE フォーマット検出 API
 export {
+    detect_nnue_format,
+    is_nnue_compatible,
     wasm_board_to_sfen,
     wasm_get_initial_board,
     wasm_get_legal_moves,
     wasm_parse_sfen_to_board,
     wasm_replay_moves_strict,
 } from "../pkg/engine_wasm.js";
+
+// NNUE ストレージ
+export { createIndexedDBNnueStorage, requestPersistentStorage } from "./nnue";

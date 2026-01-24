@@ -14,6 +14,7 @@ type HandInfo = {
     owner: Player;
     hand: PositionState["hands"]["sente"] | PositionState["hands"]["gote"];
     isActive: boolean;
+    isAI: boolean;
 };
 
 interface MobileBoardSectionProps {
@@ -152,6 +153,7 @@ export const MobileBoardSection = memo(function MobileBoardSection({
                     }
                     flipBoard={flipBoard}
                     size={isEditModeActive ? "compact" : "medium"}
+                    isAI={topHand.isAI}
                 />
                 {/* パス権表示（上側プレイヤー） */}
                 {passRightsSettings?.enabled &&
@@ -224,6 +226,7 @@ export const MobileBoardSection = memo(function MobileBoardSection({
                     }
                     flipBoard={flipBoard}
                     size={isEditModeActive ? "compact" : "medium"}
+                    isAI={bottomHand.isAI}
                 />
                 {/* パス権表示（下側プレイヤー） */}
                 {passRightsSettings?.enabled &&

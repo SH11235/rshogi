@@ -10,5 +10,5 @@
         }
     },
     "ignoreDependencies": ["wasm-opt"],
-    "ignore": ["apps/desktop/src-tauri/target/**"]
+    "ignore": ["apps/desktop/src-tauri/target/**", "apps/web/worker/index.ts"]
 }

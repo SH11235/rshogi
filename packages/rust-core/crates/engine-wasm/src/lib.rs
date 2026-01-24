@@ -8,7 +8,7 @@ use std::io::ErrorKind;
 
 use engine_core::eval::set_eval_hash_enabled;
 use engine_core::movegen::{generate_legal_with_pass, MoveList};
-use engine_core::nnue::init_nnue_from_bytes;
+use engine_core::nnue::{detect_format, init_nnue_from_bytes};
 use engine_core::position::{Position, SFEN_HIRATE};
 use engine_core::search::{LimitsType, Search, SearchInfo, SearchResult, SkillOptions};
 use engine_core::types::json::BoardStateJson;
@@ -529,6 +529,58 @@ pub fn load_model(bytes: &[u8]) -> Result<(), JsValue> {
         })
         .map_err(|err| JsValue::from_str(&err.to_string()))?;
     Ok(())
+}
+
+/// NNUE フォーマット情報（JS 向け）
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NnueFormatInfoJs {
+    /// アーキテクチャ名（例: "HalfKA1024", "LayerStacks"）
+    architecture: String,
+
+    /// L1 次元（例: 256, 512, 1024, 1536）
+    l1_dimension: u32,
+
+    /// L2 次元（例: 8, 32）
+    l2_dimension: u32,
+
+    /// L3 次元（例: 32, 96）
+    l3_dimension: u32,
+
+    /// 活性化関数（"CReLU" or "SCReLU"）
+    activation: String,
+
+    /// バージョンヘッダ（16進数文字列）
+    version_header: String,
+}
+
+/// NNUE ファイルのフォーマット情報を検出（ロードせずにヘッダのみ解析）
+///
+/// # Arguments
+/// * `bytes` - NNUE ファイルの先頭 1KB 以上のバイト列
+///
+/// # Returns
+/// * フォーマット情報を含む JS オブジェクト
+#[wasm_bindgen]
+pub fn detect_nnue_format(bytes: &[u8]) -> Result<JsValue, JsValue> {
+    let info = detect_format(bytes).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let result = NnueFormatInfoJs {
+        architecture: info.architecture,
+        l1_dimension: info.l1_dimension,
+        l2_dimension: info.l2_dimension,
+        l3_dimension: info.l3_dimension,
+        activation: info.activation,
+        version_header: format!("0x{:08X}", info.version),
+    };
+
+    swb::to_value(&result).map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
+}
+
+/// NNUE ファイルが現在のエンジンと互換性があるか確認
+#[wasm_bindgen]
+pub fn is_nnue_compatible(bytes: &[u8]) -> bool {
+    detect_format(bytes).is_ok()
 }
 
 #[wasm_bindgen]

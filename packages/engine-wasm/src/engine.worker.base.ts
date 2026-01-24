@@ -1,3 +1,4 @@
+import { NNUE_DB_NAME, NNUE_DB_VERSION, NNUE_PROGRESS_THROTTLE_MS } from "@shogi/app-core";
 import type { EngineEvent, EngineInitOptions, SearchParams } from "@shogi/engine-client";
 
 type WasmModuleSource = WebAssembly.Module | ArrayBuffer | Uint8Array | string | URL;
@@ -38,6 +39,14 @@ type InitCommand = CommandBase & {
     wasmModule?: WasmModuleSource;
 };
 
+/**
+ * NNUE ロード元の種別
+ */
+type NnueLoadSource =
+    | { type: "idb"; id: string } // IndexedDB から
+    | { type: "url"; url: string } // URL から fetch
+    | { type: "bytes"; bytes: Uint8Array }; // 直接バイト列（transferable）
+
 type WorkerCommand =
     | InitCommand
     | (CommandBase & {
@@ -50,13 +59,146 @@ type WorkerCommand =
     | (CommandBase & { type: "search"; params: SearchParams })
     | (CommandBase & { type: "stop" })
     | (CommandBase & { type: "dispose" })
-    | (CommandBase & { type: "setOption"; name: string; value: string | number | boolean });
+    | (CommandBase & { type: "setOption"; name: string; value: string | number | boolean })
+    | (CommandBase & { type: "loadNnue"; source: NnueLoadSource });
 
 type ModelCache = { uri: string; bytes: Uint8Array };
 
 type AckMessage = { type: "ack"; requestId: string; error?: string };
 
 const INFO_THROTTLE_MS = 50;
+
+/**
+ * Worker 内で IndexedDB から NNUE バイナリを読み込む
+ * メモリ効率のため、事前確保方式で stream 読み込み
+ */
+async function loadNnueFromIndexedDB(
+    id: string,
+    onProgress: (loaded: number, total: number) => void,
+): Promise<Uint8Array> {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open(NNUE_DB_NAME, NNUE_DB_VERSION);
+
+        request.onerror = () => reject(new Error(`IndexedDB open failed: ${request.error}`));
+
+        request.onsuccess = () => {
+            const db = request.result;
+            const tx = db.transaction("nnue-blobs", "readonly");
+            const store = tx.objectStore("nnue-blobs");
+            const getRequest = store.get(id);
+
+            getRequest.onerror = () => reject(new Error(`Failed to get NNUE: ${getRequest.error}`));
+
+            getRequest.onsuccess = async () => {
+                const blob = getRequest.result as Blob | undefined;
+                if (!blob) {
+                    reject(new Error(`NNUE not found: ${id}`));
+                    return;
+                }
+
+                try {
+                    // 事前にサイズが分かるので、最初から最終バッファを確保
+                    const result = new Uint8Array(blob.size);
+                    const reader = blob.stream().getReader();
+                    let offset = 0;
+                    let lastProgressTime = 0;
+
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+
+                        // 逐次コピー（chunks配列を持たない）
+                        result.set(value, offset);
+                        offset += value.length;
+
+                        // 進捗通知（スロットリング）
+                        const now = Date.now();
+                        if (now - lastProgressTime > NNUE_PROGRESS_THROTTLE_MS) {
+                            onProgress(offset, blob.size);
+                            lastProgressTime = now;
+                        }
+                    }
+
+                    // 最終進捗を通知
+                    onProgress(blob.size, blob.size);
+                    resolve(result);
+                } catch (error) {
+                    reject(error);
+                }
+            };
+        };
+
+        request.onupgradeneeded = (event) => {
+            // Worker から開く場合でも DB が存在しない可能性があるため、
+            // indexed-db.ts と同じスキーマでストアを作成する
+            const db = (event.target as IDBOpenDBRequest).result;
+            if (!db.objectStoreNames.contains("nnue-blobs")) {
+                db.createObjectStore("nnue-blobs");
+            }
+            if (!db.objectStoreNames.contains("nnue-meta")) {
+                const metaStore = db.createObjectStore("nnue-meta", { keyPath: "id" });
+                metaStore.createIndex("by-source", "source");
+                metaStore.createIndex("by-created", "createdAt");
+                metaStore.createIndex("by-preset-key", "presetKey");
+                metaStore.createIndex("by-content-hash", "contentHashSha256");
+            }
+        };
+    });
+}
+
+/**
+ * URL から NNUE をストリーム読み込み
+ */
+async function loadNnueFromUrl(
+    url: string,
+    onProgress: (loaded: number, total: number) => void,
+): Promise<Uint8Array> {
+    const res = await fetch(url);
+    if (!res.ok) {
+        throw new Error(`Failed to fetch NNUE from ${url}: ${res.status} ${res.statusText}`);
+    }
+
+    const contentLength = res.headers.get("content-length");
+    const total = contentLength ? Number.parseInt(contentLength, 10) : 0;
+
+    if (!res.body) {
+        // Fallback: body が ReadableStream でない場合
+        const buffer = await res.arrayBuffer();
+        onProgress(buffer.byteLength, buffer.byteLength);
+        return new Uint8Array(buffer);
+    }
+
+    // Stream 読み込み
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let loaded = 0;
+    let lastProgressTime = 0;
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        chunks.push(value);
+        loaded += value.length;
+
+        const now = Date.now();
+        if (now - lastProgressTime > NNUE_PROGRESS_THROTTLE_MS) {
+            onProgress(loaded, total);
+            lastProgressTime = now;
+        }
+    }
+
+    // チャンクを結合
+    const result = new Uint8Array(loaded);
+    let offset = 0;
+    for (const chunk of chunks) {
+        result.set(chunk, offset);
+        offset += chunk.length;
+    }
+
+    onProgress(loaded, total);
+    return result;
+}
 
 export function createEngineWorker(bindings: WasmWorkerBindings) {
     const ctx: {
@@ -192,6 +334,46 @@ export function createEngineWorker(bindings: WasmWorkerBindings) {
         }
     }
 
+    /**
+     * NNUE ロード進捗を通知
+     */
+    function postNnueProgress(loaded: number, total: number) {
+        ctx.postMessage({
+            type: "nnueLoadProgress",
+            loaded,
+            total,
+        });
+    }
+
+    /**
+     * NNUE をロード
+     */
+    async function handleLoadNnue(source: NnueLoadSource): Promise<void> {
+        let bytes: Uint8Array;
+
+        switch (source.type) {
+            case "idb":
+                bytes = await loadNnueFromIndexedDB(source.id, postNnueProgress);
+                break;
+            case "url":
+                bytes = await loadNnueFromUrl(source.url, postNnueProgress);
+                break;
+            case "bytes":
+                bytes = source.bytes;
+                postNnueProgress(bytes.length, bytes.length);
+                break;
+        }
+
+        // Wasm にロード
+        await bindings.loadModel(bytes);
+
+        // 成功通知
+        ctx.postMessage({
+            type: "nnueLoaded",
+            size: bytes.length,
+        });
+    }
+
     let commandQueue: Promise<void> = Promise.resolve();
 
     async function handleCommand(command: WorkerCommand) {
@@ -240,6 +422,11 @@ export function createEngineWorker(bindings: WasmWorkerBindings) {
                         bindings.disposeEngine();
                         engineInitialized = false;
                     }
+                    postAck(requestId);
+                    break;
+                case "loadNnue":
+                    await ensureModule(lastInit?.wasmModule);
+                    await handleLoadNnue(command.source);
                     postAck(requestId);
                     break;
                 default:

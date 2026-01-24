@@ -2,6 +2,7 @@ import type { PieceType, Player, PositionState } from "@shogi/app-core";
 import { cn } from "@shogi/design-system";
 import type { ReactElement } from "react";
 import { PIECE_CAP, PIECE_LABELS } from "../utils/constants";
+import { PlayerIcon } from "./PlayerIcon";
 
 const HAND_ORDER: PieceType[] = ["R", "B", "G", "S", "N", "L", "P"];
 
@@ -127,6 +128,8 @@ interface HandPiecesDisplayProps {
     flipBoard?: boolean;
     /** サイズ: compact=編集用, medium=モバイル対局用, normal=PC用 */
     size?: HandPieceSize;
+    /** AIプレイヤーかどうか */
+    isAI?: boolean;
 }
 
 export function HandPiecesDisplay({
@@ -142,13 +145,12 @@ export function HandPiecesDisplay({
     onDecrement,
     flipBoard = false,
     size = "normal",
+    isAI = false,
 }: HandPiecesDisplayProps): ReactElement {
-    // 先手/後手マーカー（☗=U+2617, ☖=U+2616）
-    const ownerMarker = owner === "sente" ? "☗" : "☖";
-    // 先手: 朱色、後手: 藍色（wafuuテーマ）
-    const markerColorClass = owner === "sente" ? "text-wafuu-shu" : "text-wafuu-ai";
     const containerConfig = CONTAINER_SIZE_CONFIG[size];
     const isCompactLayout = size === "compact" || size === "medium";
+    // PlayerIcon用のサイズマッピング
+    const iconSize = size === "compact" ? "xs" : size === "medium" ? "sm" : "lg";
 
     return (
         <div
@@ -157,16 +159,13 @@ export function HandPiecesDisplay({
             )}
         >
             {/* 先手/後手マーカー - 固定幅で左端に配置 */}
-            <span
-                className={cn(
-                    markerColorClass,
-                    "font-bold select-none shrink-0",
-                    containerConfig.marker,
-                )}
-                title={owner === "sente" ? "先手" : "後手"}
-            >
-                {ownerMarker}
-            </span>
+            <PlayerIcon
+                side={owner}
+                isAI={isAI}
+                size={iconSize}
+                className="shrink-0"
+                enableZoom={isAI}
+            />
             {/* 持ち駒コンテナ - 駒だけが詰まる */}
             <div className={cn("flex items-center relative", containerConfig.piecesContainer)}>
                 {/* 横幅/高さ確保用のダミー要素 */}

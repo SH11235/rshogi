@@ -25,6 +25,7 @@
         "test": "vitest"
     },
     "dependencies": {
+        "@shogi/app-core": "workspace:*",
         "@shogi/engine-client": "workspace:*"
     },
     "peerDependencies": {
