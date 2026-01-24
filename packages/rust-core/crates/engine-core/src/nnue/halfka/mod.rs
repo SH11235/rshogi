@@ -192,12 +192,13 @@ pub enum HalfKAStack {
 
 impl HalfKAStack {
     /// ネットワークに対応するスタックを生成
+    ///
+    /// バリアントマッチを使用し、新しい L1 追加時にコンパイル時に漏れ検知。
     pub fn from_network(net: &HalfKANetwork) -> Self {
-        match net.l1_size() {
-            256 => Self::L256(AccumulatorStackHalfKA::<256>::new()),
-            512 => Self::L512(AccumulatorStackHalfKA::<512>::new()),
-            1024 => Self::L1024(AccumulatorStackHalfKA::<1024>::new()),
-            _ => unreachable!(),
+        match net {
+            HalfKANetwork::L256(_) => Self::L256(AccumulatorStackHalfKA::<256>::new()),
+            HalfKANetwork::L512(_) => Self::L512(AccumulatorStackHalfKA::<512>::new()),
+            HalfKANetwork::L1024(_) => Self::L1024(AccumulatorStackHalfKA::<1024>::new()),
         }
     }
 

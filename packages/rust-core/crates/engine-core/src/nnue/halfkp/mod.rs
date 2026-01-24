@@ -167,11 +167,13 @@ pub enum HalfKPStack {
 
 impl HalfKPStack {
     /// ネットワークに対応するスタックを生成
+    /// ネットワークに対応するスタックを生成
+    ///
+    /// バリアントマッチを使用し、新しい L1 追加時にコンパイル時に漏れ検知。
     pub fn from_network(net: &HalfKPNetwork) -> Self {
-        match net.l1_size() {
-            256 => Self::L256(AccumulatorStackHalfKP::<256>::new()),
-            512 => Self::L512(AccumulatorStackHalfKP::<512>::new()),
-            _ => unreachable!(),
+        match net {
+            HalfKPNetwork::L256(_) => Self::L256(AccumulatorStackHalfKP::<256>::new()),
+            HalfKPNetwork::L512(_) => Self::L512(AccumulatorStackHalfKP::<512>::new()),
         }
     }
 
