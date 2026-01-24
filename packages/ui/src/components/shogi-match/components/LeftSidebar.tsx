@@ -154,7 +154,7 @@ export function LeftSidebar({
         });
     };
 
-    const sideColumn = (side: SideKey, label: string, colorClass: string, hasBorder: boolean) => {
+    const sideColumn = (side: SideKey, hasBorder: boolean) => {
         const setting = sides[side];
         const selectorValue = getSelectorValue(setting);
 
@@ -162,7 +162,6 @@ export function LeftSidebar({
             <div
                 className={`flex flex-col gap-2 ${hasBorder ? "border-r-2 border-wafuu-sumi/20 pr-3" : "pl-3"}`}
             >
-                <div className={`text-xs font-semibold ${colorClass}`}>{label}</div>
                 <div className={labelClassName}>
                     <span>プレイヤー</span>
                     <Select
@@ -245,10 +244,30 @@ export function LeftSidebar({
                         <span>対局中は変更不可</span>
                     </div>
                 )}
+                {/* 先手/後手ラベル + 入替ボタン */}
+                <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-1 mb-1">
+                    <div className="text-xs font-semibold text-wafuu-shu text-center">☗先手</div>
+                    <button
+                        type="button"
+                        onClick={() => {
+                            onSidesChange({ sente: sides.gote, gote: sides.sente });
+                            onTimeSettingsChange({
+                                sente: timeSettings.gote,
+                                gote: timeSettings.sente,
+                            });
+                        }}
+                        disabled={settingsLocked}
+                        title="先手と後手の設定を入れ替える"
+                        className="px-1.5 py-0.5 text-sm text-muted-foreground hover:text-wafuu-kincha hover:bg-wafuu-kincha/10 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        ⇄
+                    </button>
+                    <div className="text-xs font-semibold text-wafuu-ai text-center">☖後手</div>
+                </div>
                 {/* 先手/後手設定 */}
                 <div className="grid grid-cols-2">
-                    {sideColumn("sente", "☗先手", "text-wafuu-shu", true)}
-                    {sideColumn("gote", "☖後手", "text-wafuu-ai", false)}
+                    {sideColumn("sente", true)}
+                    {sideColumn("gote", false)}
                 </div>
 
                 {/* 変則ルール */}
