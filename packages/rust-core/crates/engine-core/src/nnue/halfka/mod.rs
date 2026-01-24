@@ -117,6 +117,11 @@ impl HalfKANetwork {
     /// ファイルから読み込み
     ///
     /// L1/L2/L3/活性化に基づいて適切なバリアントを選択。
+    ///
+    /// # エラー
+    ///
+    /// - L2/L3 が 0 の場合（旧 bullet-shogi 形式）: 明確なエラーメッセージを返す
+    /// - サポートされていない L1 の場合: エラーを返す
     pub fn read<R: std::io::Read + std::io::Seek>(
         reader: &mut R,
         l1: usize,
@@ -124,6 +129,18 @@ impl HalfKANetwork {
         l3: usize,
         activation: Activation,
     ) -> std::io::Result<Self> {
+        // 旧形式フォールバック削除: L2/L3 が 0 の場合はエラー
+        if l2 == 0 || l3 == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "HalfKA L1={l1} network missing L2/L3 dimensions in header. \
+                     This is an old bullet-shogi format that is no longer supported. \
+                     Please re-export the model with a newer version of bullet-shogi."
+                ),
+            ));
+        }
+
         match l1 {
             256 => {
                 let net = HalfKAL256::read(reader, l2, l3, activation)?;
