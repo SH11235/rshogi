@@ -30,11 +30,12 @@ mod bona_piece;
 mod bona_piece_halfka;
 mod constants;
 mod diff;
+mod evaluator;
 mod feature_transformer;
 mod feature_transformer_layer_stacks;
 pub mod features;
-pub mod halfka;
-pub mod halfkp;
+pub(crate) mod halfka;
+pub(crate) mod halfkp;
 mod layer_stacks;
 mod layers;
 mod leb128;
@@ -91,3 +92,6 @@ pub use network_halfkp::{
     HalfKP512Pairwise, HalfKP512SCReLU, HalfKP512_32_32CReLU, NetworkHalfKP,
 };
 pub use spec::{Activation, ArchitectureSpec, FeatureSet as SpecFeatureSet};
+
+// Phase 2: 外部 API 統一
+pub use evaluator::NNUEEvaluator;
