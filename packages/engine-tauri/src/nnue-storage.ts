@@ -14,7 +14,17 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
  * base64 変換後は約 1.33MB
  */
 const CHUNK_SIZE = 1 * 1024 * 1024;
-const latin1Decoder = new TextDecoder("latin1");
+const BINARY_STRING_CHUNK_SIZE = 0x8000;
+
+// バイナリ文字列はバイトをそのまま保持できる方法で生成する
+function bytesToBinaryString(bytes: Uint8Array): string {
+    let result = "";
+    for (let i = 0; i < bytes.length; i += BINARY_STRING_CHUNK_SIZE) {
+        const slice = bytes.subarray(i, i + BINARY_STRING_CHUNK_SIZE);
+        result += String.fromCharCode(...slice);
+    }
+    return result;
+}
 
 /**
  * Uint8Array の一部を base64 文字列に変換
@@ -22,7 +32,7 @@ const latin1Decoder = new TextDecoder("latin1");
  */
 function chunkToBase64(bytes: Uint8Array, offset: number, length: number): string {
     const chunk = bytes.subarray(offset, offset + length);
-    return btoa(latin1Decoder.decode(chunk));
+    return btoa(bytesToBinaryString(chunk));
 }
 
 type InvokeFn = typeof tauriInvoke;
