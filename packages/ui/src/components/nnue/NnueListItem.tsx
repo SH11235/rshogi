@@ -1,7 +1,8 @@
 import type { NnueMeta } from "@shogi/app-core";
 import { cn } from "@shogi/design-system";
-import { type ReactElement, useId } from "react";
+import { type ReactElement, useCallback, useId, useRef, useState } from "react";
 import { Button } from "../button";
+import { Input } from "../input";
 
 export interface NnueListItemProps {
     /** NNUE メタデータ */
@@ -22,6 +23,8 @@ export interface NnueListItemProps {
     name?: string;
     /** 選択機能を有効にするか（デフォルト: true） */
     selectable?: boolean;
+    /** 表示名変更時のコールバック（指定時、インライン編集が有効になる） */
+    onDisplayNameChange?: (newName: string) => Promise<void>;
 }
 
 function formatSize(bytes: number): string {
@@ -43,10 +46,61 @@ export function NnueListItem({
     disabled = false,
     name,
     selectable = true,
+    onDisplayNameChange,
 }: NnueListItemProps): ReactElement {
     const isPreset = meta.source === "preset";
     const canDelete = showDelete && !isPreset && onDelete;
+    const canEdit = !isPreset && onDisplayNameChange;
     const inputId = useId();
+    const editInputRef = useRef<HTMLInputElement>(null);
+
+    // 編集状態
+    const [isEditing, setIsEditing] = useState(false);
+    const [editValue, setEditValue] = useState(meta.displayName);
+    const [isSaving, setIsSaving] = useState(false);
+
+    const startEditing = useCallback(() => {
+        if (!canEdit || disabled) return;
+        setEditValue(meta.displayName);
+        setIsEditing(true);
+        // 次のレンダリング後にフォーカス
+        setTimeout(() => editInputRef.current?.select(), 0);
+    }, [canEdit, disabled, meta.displayName]);
+
+    const cancelEditing = useCallback(() => {
+        setIsEditing(false);
+        setEditValue(meta.displayName);
+    }, [meta.displayName]);
+
+    const saveDisplayName = useCallback(async () => {
+        if (!onDisplayNameChange) return;
+        const trimmed = editValue.trim();
+        if (trimmed === "" || trimmed === meta.displayName) {
+            cancelEditing();
+            return;
+        }
+        setIsSaving(true);
+        try {
+            await onDisplayNameChange(trimmed);
+            setIsEditing(false);
+        } catch {
+            // エラーは親コンポーネントで処理される
+        } finally {
+            setIsSaving(false);
+        }
+    }, [onDisplayNameChange, editValue, meta.displayName, cancelEditing]);
+
+    const handleKeyDown = useCallback(
+        (e: React.KeyboardEvent) => {
+            if (e.key === "Enter") {
+                e.preventDefault();
+                void saveDisplayName();
+            } else if (e.key === "Escape") {
+                cancelEditing();
+            }
+        },
+        [saveDisplayName, cancelEditing],
+    );
 
     // 選択機能が無効な場合のスタイル
     const containerStyle = selectable
@@ -181,16 +235,55 @@ export function NnueListItem({
                             marginBottom: "4px",
                         }}
                     >
-                        <span
-                            style={{
-                                fontWeight: 500,
-                                overflow: "hidden",
-                                textOverflow: "ellipsis",
-                                whiteSpace: "nowrap",
-                            }}
-                        >
-                            {meta.displayName}
-                        </span>
+                        {isEditing ? (
+                            <Input
+                                ref={editInputRef}
+                                value={editValue}
+                                onChange={(e) => setEditValue(e.target.value)}
+                                onBlur={() => void saveDisplayName()}
+                                onKeyDown={handleKeyDown}
+                                disabled={isSaving}
+                                className="h-7 text-sm font-medium"
+                                style={{ maxWidth: "200px" }}
+                            />
+                        ) : canEdit ? (
+                            <button
+                                type="button"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    startEditing();
+                                }}
+                                disabled={disabled}
+                                style={{
+                                    fontWeight: 500,
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                    whiteSpace: "nowrap",
+                                    background: "none",
+                                    border: "none",
+                                    padding: "2px 4px",
+                                    margin: "-2px -4px",
+                                    borderRadius: "4px",
+                                    cursor: disabled ? "not-allowed" : "pointer",
+                                    textAlign: "left",
+                                }}
+                                className="hover:bg-muted/50"
+                                title="クリックして編集"
+                            >
+                                {meta.displayName}
+                            </button>
+                        ) : (
+                            <span
+                                style={{
+                                    fontWeight: 500,
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                    whiteSpace: "nowrap",
+                                }}
+                            >
+                                {meta.displayName}
+                            </span>
+                        )}
                         {isPreset && (
                             <span
                                 style={{

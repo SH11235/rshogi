@@ -24,8 +24,6 @@ export interface NnueManagerDialogProps {
  * NNUE ストレージ使用量と注意事項を表示するコンポーネント
  */
 function NnueStorageInfo({ totalSize }: { totalSize: number }): ReactElement {
-    const [isExpanded, setIsExpanded] = useState(false);
-
     return (
         <div
             style={{
@@ -35,65 +33,39 @@ function NnueStorageInfo({ totalSize }: { totalSize: number }): ReactElement {
         >
             <div
                 style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "flex-end",
-                    gap: "6px",
+                    padding: "12px",
+                    borderRadius: "6px",
+                    backgroundColor: "hsl(var(--muted, 0 0% 96%))",
+                    fontSize: "13px",
                 }}
             >
-                <span>NNUE 使用量: {(totalSize / (1024 * 1024)).toFixed(1)} MB</span>
-                <button
-                    type="button"
-                    onClick={() => setIsExpanded(!isExpanded)}
-                    style={{
-                        display: "inline-flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        width: "16px",
-                        height: "16px",
-                        padding: 0,
-                        border: "none",
-                        borderRadius: "50%",
-                        backgroundColor: "hsl(var(--muted, 0 0% 96%))",
-                        color: "hsl(var(--muted-foreground, 0 0% 45%))",
-                        cursor: "pointer",
-                        fontSize: "11px",
-                        fontWeight: 600,
-                    }}
-                    aria-label="ストレージについての情報"
-                    aria-expanded={isExpanded}
-                >
-                    ?
-                </button>
-            </div>
-            {isExpanded && (
                 <div
                     style={{
-                        marginTop: "8px",
-                        padding: "12px",
-                        borderRadius: "6px",
-                        backgroundColor: "hsl(var(--muted, 0 0% 96%))",
-                        fontSize: "13px",
+                        fontWeight: 600,
+                        marginBottom: "8px",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
                     }}
                 >
-                    <div style={{ fontWeight: 600, marginBottom: "8px" }}>ストレージについて</div>
-                    <ul
-                        style={{
-                            margin: 0,
-                            paddingLeft: "16px",
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: "6px",
-                        }}
-                    >
-                        <li>NNUE ファイルはブラウザのストレージに保存されます</li>
-                        <li>
-                            ブラウザの設定やストレージ不足により、自動削除される可能性があります
-                        </li>
-                        <li>大量のファイルをインポートするとストレージを消費します</li>
-                    </ul>
+                    <span>ストレージについて</span>
+                    <span style={{ fontWeight: 400 }}>
+                        使用量: {(totalSize / (1024 * 1024)).toFixed(1)} MB
+                    </span>
                 </div>
-            )}
+                <div
+                    style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "6px",
+                    }}
+                >
+                    <p style={{ margin: 0 }}>NNUE ファイルはブラウザのストレージに保存されます。</p>
+                    <p style={{ margin: 0 }}>
+                        ブラウザの設定やストレージ不足により、自動削除される可能性があります。
+                    </p>
+                </div>
+            </div>
         </div>
     );
 }
@@ -117,6 +89,7 @@ export function NnueManagerDialog({
         importFromFile,
         importFromPath,
         deleteNnue,
+        updateDisplayName,
         clearError: clearStorageError,
         refreshList,
         capabilities,
@@ -187,6 +160,13 @@ export function NnueManagerDialog({
         [deleteNnue],
     );
 
+    const handleDisplayNameChange = useCallback(
+        async (id: string, newName: string) => {
+            await updateDisplayName(id, newName);
+        },
+        [updateDisplayName],
+    );
+
     const handleClose = useCallback(() => {
         onOpenChange(false);
     }, [onOpenChange]);
@@ -254,6 +234,9 @@ export function NnueManagerDialog({
                                     onDelete={() => handleDelete(meta.id)}
                                     isDeleting={deletingId === meta.id}
                                     disabled={isOperationInProgress}
+                                    onDisplayNameChange={(newName) =>
+                                        handleDisplayNameChange(meta.id, newName)
+                                    }
                                 />
                             ))}
                         </div>
@@ -337,7 +320,7 @@ export function NnueManagerDialog({
                     />
                 </div>
 
-                <DialogFooter>
+                <DialogFooter style={{ justifyContent: "center" }}>
                     <Button onClick={handleClose}>閉じる</Button>
                 </DialogFooter>
             </DialogContent>

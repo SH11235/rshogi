@@ -127,7 +127,7 @@ export interface PassRightsSettings {
 export const DEFAULT_PASS_RIGHTS_SETTINGS: PassRightsSettings = {
     enabled: false,
     initialCount: 2,
-    confirmDialogThresholdMs: 3_000,
+    confirmDialogThresholdMs: 10_000,
 };
 
 /**

@@ -18,6 +18,8 @@ export interface UseNnueStorageReturn {
     importFromPath: (srcPath: string, displayName?: string) => Promise<NnueMeta>;
     /** NNUE を削除 */
     deleteNnue: (id: string) => Promise<void>;
+    /** NNUE の表示名を更新 */
+    updateDisplayName: (id: string, displayName: string) => Promise<void>;
     /** エラーをクリア */
     clearError: () => void;
     /** ストレージ使用量 */
@@ -201,6 +203,31 @@ export function useNnueStorage(): UseNnueStorageReturn {
         [storage, refreshList],
     );
 
+    const updateDisplayName = useCallback(
+        async (id: string, displayName: string) => {
+            if (!storage) {
+                throw new NnueError(
+                    "NNUE_STORAGE_FAILED",
+                    "NnueProvider が設定されていません",
+                    null,
+                );
+            }
+            setLocalError(null);
+            try {
+                await storage.updateMeta(id, { displayName });
+                await refreshList();
+            } catch (e) {
+                const err =
+                    e instanceof NnueError
+                        ? e
+                        : new NnueError("NNUE_STORAGE_FAILED", "表示名の更新に失敗しました", e);
+                setLocalError(err);
+                throw err;
+            }
+        },
+        [storage, refreshList],
+    );
+
     const clearError = useCallback(() => {
         setLocalError(null);
         contextClearError?.();
@@ -214,6 +241,7 @@ export function useNnueStorage(): UseNnueStorageReturn {
         importFromFile,
         importFromPath,
         deleteNnue,
+        updateDisplayName,
         clearError,
         storageUsage,
         capabilities,
