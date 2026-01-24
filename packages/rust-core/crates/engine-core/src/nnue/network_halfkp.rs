@@ -938,15 +938,16 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKP<INPUT, OUTPU
 ///
 /// # 型パラメータ
 /// - `L1`: FT出力次元（片側）
-/// - `L1_INPUT`: L1層の入力次元（= L1 * 2、両視点結合）
+/// - `FT_OUT`: FT出力次元（両視点連結、常に L1 * 2）
+/// - `L1_INPUT`: L1層の入力次元
+///   - CReLU/SCReLU: L1 * 2（活性化後も次元維持）
+///   - Pairwise: L1（Pairwise乗算で次元半減）
 /// - `L2`: 隠れ層1の出力次元
 /// - `L3`: 隠れ層2の出力次元
 /// - `A`: 活性化関数（FtActivation trait を実装する型）
-///
-/// # 注意
-/// `L1_INPUT` は `L1 * 2` である必要がある。
 pub struct NetworkHalfKP<
     const L1: usize,
+    const FT_OUT: usize,
     const L1_INPUT: usize,
     const L2: usize,
     const L3: usize,
@@ -968,11 +969,28 @@ pub struct NetworkHalfKP<
     _activation: PhantomData<A>,
 }
 
-impl<const L1: usize, const L1_INPUT: usize, const L2: usize, const L3: usize, A: FtActivation>
-    NetworkHalfKP<L1, L1_INPUT, L2, L3, A>
+impl<
+        const L1: usize,
+        const FT_OUT: usize,
+        const L1_INPUT: usize,
+        const L2: usize,
+        const L3: usize,
+        A: FtActivation,
+    > NetworkHalfKP<L1, FT_OUT, L1_INPUT, L2, L3, A>
 {
-    /// コンパイル時制約: L1_INPUT == L1 * 2
-    const _ASSERT_L1_INPUT: () = assert!(L1_INPUT == L1 * 2, "L1_INPUT must equal L1 * 2");
+    /// コンパイル時制約
+    ///
+    /// - `FT_OUT == L1 * 2`: FT出力は常に両視点の連結
+    /// - `L1_INPUT`:
+    ///   - CReLU/SCReLU: `L1 * 2`（活性化後も次元維持）
+    ///   - Pairwise: `L1`（Pairwise乗算で次元半減）
+    const _ASSERT_DIMS: () = {
+        assert!(FT_OUT == L1 * 2, "FT_OUT must equal L1 * 2");
+        assert!(
+            L1_INPUT == L1 * 2 || L1_INPUT == L1,
+            "L1_INPUT must equal L1 * 2 (CReLU/SCReLU) or L1 (Pairwise)"
+        );
+    };
 
     /// ファイルから読み込み
     pub fn read<R: Read + Seek>(reader: &mut R) -> io::Result<Self> {
@@ -1071,11 +1089,13 @@ impl<const L1: usize, const L1_INPUT: usize, const L2: usize, const L3: usize, A
     /// 最適化: スタック配列 + 64バイトアラインメントで SIMD 効率を最大化
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorHalfKP<L1>) -> Value {
         // Feature Transformer 出力（生のi16値）- 64バイトアライン
-        let mut ft_out_i16 = AlignedGeneric([0i16; L1_INPUT]);
+        // FT出力は常に FT_OUT（= L1 * 2、両視点の連結）
+        let mut ft_out_i16 = AlignedGeneric([0i16; FT_OUT]);
         self.feature_transformer
             .transform_raw(acc, pos.side_to_move(), &mut ft_out_i16.0);
 
         // 活性化関数適用 (i16 → u8) - 64バイトアライン
+        // 活性化後のサイズは L1_INPUT（CReLU: L1*2、Pairwise: L1）
         let mut transformed = AlignedGeneric([0u8; L1_INPUT]);
         A::activate_i16_to_u8(&ft_out_i16.0, &mut transformed.0, self.qa);
 
@@ -1197,25 +1217,27 @@ fn parse_fv_scale_from_arch(arch_str: &str) -> Option<i32> {
 
 use super::activation::{CReLU, PairwiseCReLU, SCReLU};
 
-// L1=256: L1_INPUT=512
+// L1=256, FT_OUT=512
+// CReLU/SCReLU: L1_INPUT=512, Pairwise: L1_INPUT=256
 /// HalfKP 256x2-32-32 CReLU
-pub type HalfKP256CReLU = NetworkHalfKP<256, 512, 32, 32, CReLU>;
+pub type HalfKP256CReLU = NetworkHalfKP<256, 512, 512, 32, 32, CReLU>;
 /// HalfKP 256x2-32-32 SCReLU
-pub type HalfKP256SCReLU = NetworkHalfKP<256, 512, 32, 32, SCReLU>;
-/// HalfKP 256x2-32-32 PairwiseCReLU
-pub type HalfKP256Pairwise = NetworkHalfKP<256, 512, 32, 32, PairwiseCReLU>;
+pub type HalfKP256SCReLU = NetworkHalfKP<256, 512, 512, 32, 32, SCReLU>;
+/// HalfKP 256/2x2-32-32 PairwiseCReLU (L1入力=256, Pairwise乗算で次元半減)
+pub type HalfKP256Pairwise = NetworkHalfKP<256, 512, 256, 32, 32, PairwiseCReLU>;
 
-// L1=512: L1_INPUT=1024
+// L1=512, FT_OUT=1024
+// CReLU/SCReLU: L1_INPUT=1024, Pairwise: L1_INPUT=512
 /// HalfKP 512x2-8-96 CReLU
-pub type HalfKP512CReLU = NetworkHalfKP<512, 1024, 8, 96, CReLU>;
+pub type HalfKP512CReLU = NetworkHalfKP<512, 1024, 1024, 8, 96, CReLU>;
 /// HalfKP 512x2-8-96 SCReLU
-pub type HalfKP512SCReLU = NetworkHalfKP<512, 1024, 8, 96, SCReLU>;
-/// HalfKP 512x2-8-96 PairwiseCReLU
-pub type HalfKP512Pairwise = NetworkHalfKP<512, 1024, 8, 96, PairwiseCReLU>;
+pub type HalfKP512SCReLU = NetworkHalfKP<512, 1024, 1024, 8, 96, SCReLU>;
+/// HalfKP 512/2x2-8-96 PairwiseCReLU (L1入力=512, Pairwise乗算で次元半減)
+pub type HalfKP512Pairwise = NetworkHalfKP<512, 1024, 512, 8, 96, PairwiseCReLU>;
 
-// L1=512, L2=32, L3=32: L1_INPUT=1024
+// L1=512, FT_OUT=1024, L2=32, L3=32
 /// HalfKP 512x2-32-32 CReLU
-pub type HalfKP512_32_32CReLU = NetworkHalfKP<512, 1024, 32, 32, CReLU>;
+pub type HalfKP512_32_32CReLU = NetworkHalfKP<512, 1024, 1024, 32, 32, CReLU>;
 
 // =============================================================================
 // テスト

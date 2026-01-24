@@ -47,20 +47,30 @@ impl AccumulatorStackVariant {
     /// 指定されたネットワークのアーキテクチャに対応するスタックバリアントを生成する。
     pub fn from_network(network: &NNUENetwork) -> Self {
         match network {
-            NNUENetwork::HalfKP256CReLU(_) | NNUENetwork::HalfKP256SCReLU(_) => {
+            NNUENetwork::HalfKP256CReLU(_)
+            | NNUENetwork::HalfKP256SCReLU(_)
+            | NNUENetwork::HalfKP256Pairwise(_) => {
                 Self::HalfKP256(AccumulatorStackHalfKP::<256>::new())
             }
-            NNUENetwork::HalfKP512CReLU(_) | NNUENetwork::HalfKP512SCReLU(_) => {
+            NNUENetwork::HalfKP512CReLU(_)
+            | NNUENetwork::HalfKP512SCReLU(_)
+            | NNUENetwork::HalfKP512Pairwise(_) => {
                 Self::HalfKP512(AccumulatorStackHalfKP::<512>::new())
             }
             NNUENetwork::LayerStacks(_) => Self::LayerStacks(AccumulatorStackLayerStacks::new()),
-            NNUENetwork::HalfKA256CReLU(_) | NNUENetwork::HalfKA256SCReLU(_) => {
+            NNUENetwork::HalfKA256CReLU(_)
+            | NNUENetwork::HalfKA256SCReLU(_)
+            | NNUENetwork::HalfKA256Pairwise(_) => {
                 Self::HalfKA256(AccumulatorStackHalfKA::<256>::new())
             }
-            NNUENetwork::HalfKA512CReLU(_) | NNUENetwork::HalfKA512SCReLU(_) => {
+            NNUENetwork::HalfKA512CReLU(_)
+            | NNUENetwork::HalfKA512SCReLU(_)
+            | NNUENetwork::HalfKA512Pairwise(_) => {
                 Self::HalfKA512(AccumulatorStackHalfKA::<512>::new())
             }
-            NNUENetwork::HalfKA1024CReLU(_) | NNUENetwork::HalfKA1024SCReLU(_) => {
+            NNUENetwork::HalfKA1024CReLU(_)
+            | NNUENetwork::HalfKA1024SCReLU(_)
+            | NNUENetwork::HalfKA1024Pairwise(_) => {
                 Self::HalfKA1024(AccumulatorStackHalfKA::<1024>::new())
             }
             NNUENetwork::HalfKA1024_8_32CReLU(_) | NNUENetwork::HalfKA1024_8_32SCReLU(_) => {
@@ -84,24 +94,34 @@ impl AccumulatorStackVariant {
         match (self, network) {
             (
                 Self::HalfKP256(_),
-                NNUENetwork::HalfKP256CReLU(_) | NNUENetwork::HalfKP256SCReLU(_),
+                NNUENetwork::HalfKP256CReLU(_)
+                | NNUENetwork::HalfKP256SCReLU(_)
+                | NNUENetwork::HalfKP256Pairwise(_),
             ) => true,
             (
                 Self::HalfKP512(_),
-                NNUENetwork::HalfKP512CReLU(_) | NNUENetwork::HalfKP512SCReLU(_),
+                NNUENetwork::HalfKP512CReLU(_)
+                | NNUENetwork::HalfKP512SCReLU(_)
+                | NNUENetwork::HalfKP512Pairwise(_),
             ) => true,
             (Self::LayerStacks(_), NNUENetwork::LayerStacks(_)) => true,
             (
                 Self::HalfKA256(_),
-                NNUENetwork::HalfKA256CReLU(_) | NNUENetwork::HalfKA256SCReLU(_),
+                NNUENetwork::HalfKA256CReLU(_)
+                | NNUENetwork::HalfKA256SCReLU(_)
+                | NNUENetwork::HalfKA256Pairwise(_),
             ) => true,
             (
                 Self::HalfKA512(_),
-                NNUENetwork::HalfKA512CReLU(_) | NNUENetwork::HalfKA512SCReLU(_),
+                NNUENetwork::HalfKA512CReLU(_)
+                | NNUENetwork::HalfKA512SCReLU(_)
+                | NNUENetwork::HalfKA512Pairwise(_),
             ) => true,
             (
                 Self::HalfKA1024(_),
-                NNUENetwork::HalfKA1024CReLU(_) | NNUENetwork::HalfKA1024SCReLU(_),
+                NNUENetwork::HalfKA1024CReLU(_)
+                | NNUENetwork::HalfKA1024SCReLU(_)
+                | NNUENetwork::HalfKA1024Pairwise(_),
             ) => true,
             (
                 Self::HalfKA1024_8_32(_),

@@ -15,8 +15,9 @@
 //! | サフィックス | 活性化関数 |
 //! |-------------|-----------|
 //! | なし | CReLU |
-//! | `-PairwiseCReLU` | PairwiseCReLU |
+//! | `-Pairwise` | PairwiseCReLU |
 //! | `-SCReLU` | SCReLU |
+//! | `-SCReLU-Pairwise` | (未対応: SCReLU + Pairwise) |
 
 use super::constants::WEIGHT_SCALE_BITS;
 
@@ -306,12 +307,16 @@ impl FtActivation for PairwiseCReLU {
 
     #[inline]
     fn activate_i32_to_u8(input: &[i32], output: &mut [u8]) {
-        debug_assert_eq!(input.len(), output.len() * 2);
-        pairwise_crelu_i32_to_u8(input, output);
+        // 中間層では通常のCReLUを使用（bullet-shogiと同じ）
+        // Pairwiseは最初のFT層のみに適用
+        debug_assert_eq!(input.len(), output.len());
+        crelu_i32_to_u8(input, output);
     }
 
     fn header_suffix() -> &'static str {
-        "-PairwiseCReLU"
+        // bullet-shogi は "-Pairwise" を出力するため、これに対応
+        // （nnue-pytorch は "-PairwiseCReLU" を出力する可能性あり）
+        "-Pairwise"
     }
 
     fn name() -> &'static str {
@@ -320,21 +325,62 @@ impl FtActivation for PairwiseCReLU {
 }
 
 /// PairwiseCReLU: i16 → u8
+///
+/// Dual perspective 対応: 入力は [stm[0..L1], ntm[0..L1]] の形式。
+/// 各視点に対して個別に pairwise 乗算を適用:
+/// - stm: input[j] * input[j + L1/2] → output[0..L1/2]
+/// - ntm: input[L1+j] * input[L1+j + L1/2] → output[L1/2..L1]
 fn pairwise_crelu_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16) {
-    let half = input.len() / 2;
-    debug_assert_eq!(output.len(), half, "output length must be half of input length");
+    let ft_out = input.len(); // = L1 * 2 (全入力サイズ)
+    let l1 = ft_out / 2; // = L1 (各視点のサイズ)
+    let quarter = l1 / 2; // = L1/2 (pairwise後の各視点サイズ)
 
-    // qa >= 255 の場合は shift=9, そうでなければ shift=7
+    debug_assert_eq!(output.len(), l1, "output length must be L1 (= input.len() / 2)");
+
+    // シフト量: (QA * QA) >> SHIFT で L1入力スケールを決定
+    // Pairwise 乗算のスケーリング:
+    // 学習時: pairwise 後の出力は [0, 1] (f32、正規化済み)
+    // 推論時: (a * b) を正規化するには適切なシフトが必要
+    //
+    // Reckless/Stockfish互換スケーリング:
+    // - QA=255: shift=9 → (255*255)>>9 = 127 → 出力 [0, 127]
+    // - QA=127: shift=7 → (127*127)>>7 = 126 → 出力 [0, 126]
+    //
     // SIMD シフト命令は定数が必要なため、分岐して処理
     if qa >= 255 {
-        pairwise_crelu_i16_to_u8_inner::<255, 9>(input, output, half);
+        // STM perspective: input[0..l1] → output[0..quarter]
+        pairwise_crelu_i16_to_u8_inner::<255, 9, 127>(
+            &input[0..l1],
+            &mut output[0..quarter],
+            quarter,
+        );
+        // NTM perspective: input[l1..ft_out] → output[quarter..l1]
+        pairwise_crelu_i16_to_u8_inner::<255, 9, 127>(
+            &input[l1..ft_out],
+            &mut output[quarter..l1],
+            quarter,
+        );
     } else {
-        pairwise_crelu_i16_to_u8_inner::<127, 7>(input, output, half);
+        pairwise_crelu_i16_to_u8_inner::<127, 7, 126>(
+            &input[0..l1],
+            &mut output[0..quarter],
+            quarter,
+        );
+        pairwise_crelu_i16_to_u8_inner::<127, 7, 126>(
+            &input[l1..ft_out],
+            &mut output[quarter..l1],
+            quarter,
+        );
     }
 }
 
-/// PairwiseCReLU i16 → u8 の内部実装（const generics でシフト量を固定）
-fn pairwise_crelu_i16_to_u8_inner<const QA: i32, const SHIFT: i32>(
+/// PairwiseCReLU i16 → u8 の内部実装（const generics でシフト量と最大出力を固定）
+///
+/// # 型パラメータ
+/// - `QA`: クリッピング閾値（255 または 127）
+/// - `SHIFT`: シフト量（QA=255なら9、QA=127なら7）
+/// - `MAX_OUT`: 最大出力値（QA=255なら127、QA=127なら126）
+fn pairwise_crelu_i16_to_u8_inner<const QA: i32, const SHIFT: i32, const MAX_OUT: i32>(
     input: &[i16],
     output: &mut [u8],
     half: usize,
@@ -362,7 +408,7 @@ fn pairwise_crelu_i16_to_u8_inner<const QA: i32, const SHIFT: i32>(
                 use std::arch::x86_64::*;
                 let zero = _mm256_setzero_si256();
                 let max_clamp = _mm256_set1_epi32(QA);
-                let max_out = _mm256_set1_epi32(127);
+                let max_out = _mm256_set1_epi32(MAX_OUT);
 
                 let a_ptr = input.as_ptr();
                 let b_ptr = input.as_ptr().add(half);
@@ -407,7 +453,7 @@ fn pairwise_crelu_i16_to_u8_inner<const QA: i32, const SHIFT: i32>(
                 use std::arch::x86_64::*;
                 let zero = _mm_setzero_si128();
                 let max_clamp = _mm_set1_epi32(QA);
-                let max_out = _mm_set1_epi32(127);
+                let max_out = _mm_set1_epi32(MAX_OUT);
 
                 let a_ptr = input.as_ptr().add(processed);
                 let b_ptr = input.as_ptr().add(half + processed);
@@ -445,13 +491,15 @@ fn pairwise_crelu_i16_to_u8_inner<const QA: i32, const SHIFT: i32>(
     for j in processed..half {
         let a = i32::from(input[j]).clamp(0, QA);
         let b = i32::from(input[j + half]).clamp(0, QA);
-        output[j] = ((a * b) >> SHIFT).min(127) as u8;
+        output[j] = ((a * b) >> SHIFT).min(MAX_OUT) as u8;
     }
 }
 
 /// PairwiseCReLU: i32 → u8
 ///
 /// 中間層では固定のスケーリングを使用（QB=64相当、shift=7）
+/// 注: 現在は中間層でCReLUを使用しているため未使用
+#[allow(dead_code)]
 fn pairwise_crelu_i32_to_u8(input: &[i32], output: &mut [u8]) {
     let half = input.len() / 2;
     debug_assert_eq!(output.len(), half, "output length must be half of input length");
@@ -648,14 +696,19 @@ fn screlu_i32_to_u8(input: &[i32], output: &mut [u8]) {
 /// アーキテクチャ文字列から活性化関数を検出
 ///
 /// # 戻り値
-/// - `Some("CReLU")`: サフィックスなし
-/// - `Some("PairwiseCReLU")`: `-PairwiseCReLU` サフィックス
-/// - `Some("SCReLU")`: `-SCReLU` サフィックス
+/// - `"CReLU"`: サフィックスなし
+/// - `"PairwiseCReLU"`: `-Pairwise` / `-PairwiseCReLU` サフィックス
+/// - `"SCReLU"`: `-SCReLU` サフィックス
+/// - `"SCReLU-Pairwise"`: `-SCReLU-Pairwise`（現状 rust-core は未対応）
 pub fn detect_activation_from_arch(arch_str: &str) -> &'static str {
-    if arch_str.contains(SCReLU::header_suffix()) {
-        SCReLU::name()
+    // NOTE: 長い識別子を先に判定しないと誤検出する
+    // 例: "-SCReLU-Pairwise" は "-SCReLU" と "-Pairwise" の両方を含む。
+    if arch_str.contains("-SCReLU-Pairwise") {
+        "SCReLU-Pairwise"
     } else if arch_str.contains(PairwiseCReLU::header_suffix()) {
         PairwiseCReLU::name()
+    } else if arch_str.contains(SCReLU::header_suffix()) {
+        SCReLU::name()
     } else {
         CReLU::name()
     }
@@ -668,6 +721,29 @@ pub fn detect_activation_from_arch(arch_str: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_detect_activation_from_arch() {
+        assert_eq!(detect_activation_from_arch("Features=HalfKA_hm[73305->512x2]"), "CReLU");
+        assert_eq!(
+            detect_activation_from_arch("Features=HalfKA_hm[73305->512x2]-SCReLU"),
+            "SCReLU"
+        );
+        assert_eq!(
+            detect_activation_from_arch("Features=HalfKA_hm[73305->512/2x2]-Pairwise"),
+            "PairwiseCReLU"
+        );
+        // "PairwiseCReLU" の識別子は "-Pairwise" なので nnue-pytorch の "-PairwiseCReLU" も拾える
+        assert_eq!(
+            detect_activation_from_arch("Features=HalfKA_hm[73305->512/2x2]-PairwiseCReLU"),
+            "PairwiseCReLU"
+        );
+        // "-SCReLU-Pairwise" は未対応なので誤って SCReLU や Pairwise と判定しない
+        assert_eq!(
+            detect_activation_from_arch("Features=HalfKA_hm[73305->512/2x2]-SCReLU-Pairwise"),
+            "SCReLU-Pairwise"
+        );
+    }
 
     #[test]
     fn test_crelu_i16_to_u8() {
@@ -701,22 +777,45 @@ mod tests {
     }
 
     #[test]
-    fn test_pairwise_crelu_i16_to_u8() {
-        // 入力: [a0, a1, a2, a3, b0, b1, b2, b3]
-        // 出力: [a0*b0, a1*b1, a2*b2, a3*b3] >> 7
+    fn test_pairwise_crelu_i16_to_u8_qa127() {
+        // Dual perspective 対応 (QA=127):
+        // 入力: [stm0, stm1, stm2, stm3, ntm0, ntm1, ntm2, ntm3]
+        // STM pairwise: stm[j] * stm[j + 2] for j in 0..2
+        // NTM pairwise: ntm[j] * ntm[j + 2] for j in 0..2
+        // 出力: [stm_pair0, stm_pair1, ntm_pair0, ntm_pair1]
         let input = [64i16, 100, 127, 0, 64, 50, 127, 100];
         let mut output = [0u8; 4];
 
         PairwiseCReLU::activate_i16_to_u8(&input, &mut output, 127);
 
-        // (64 * 64) >> 7 = 4096 >> 7 = 32
-        assert_eq!(output[0], 32);
-        // (100 * 50) >> 7 = 5000 >> 7 = 39
-        assert_eq!(output[1], 39);
-        // (127 * 127) >> 7 = 16129 >> 7 = 126
-        assert_eq!(output[2], 126);
-        // (0 * 100) >> 7 = 0
-        assert_eq!(output[3], 0);
+        // STM: (64 * 127) >> 7 = 8128 >> 7 = 63
+        assert_eq!(output[0], 63);
+        // STM: (100 * 0) >> 7 = 0
+        assert_eq!(output[1], 0);
+        // NTM: (64 * 127) >> 7 = 8128 >> 7 = 63
+        assert_eq!(output[2], 63);
+        // NTM: (50 * 100) >> 7 = 5000 >> 7 = 39
+        assert_eq!(output[3], 39);
+    }
+
+    #[test]
+    fn test_pairwise_crelu_i16_to_u8_qa255() {
+        // Dual perspective 対応 (QA=255):
+        // QA=255の場合、クランプは[0, 255]、シフトは9、max_out=127
+        // 注: shift=8 (出力254) を試したが、実測で悪化したため shift=9 を維持
+        let input = [128i16, 200, 255, 0, 128, 100, 255, 200];
+        let mut output = [0u8; 4];
+
+        PairwiseCReLU::activate_i16_to_u8(&input, &mut output, 255);
+
+        // STM: (128 * 255) >> 9 = 32640 >> 9 = 63
+        assert_eq!(output[0], 63);
+        // STM: (200 * 0) >> 9 = 0
+        assert_eq!(output[1], 0);
+        // NTM: (128 * 255) >> 9 = 32640 >> 9 = 63
+        assert_eq!(output[2], 63);
+        // NTM: (100 * 200) >> 9 = 20000 >> 9 = 39
+        assert_eq!(output[3], 39);
     }
 
     #[test]
@@ -754,31 +853,20 @@ mod tests {
 
     #[test]
     fn test_pairwise_crelu_i32_to_u8() {
+        // PairwiseCReLUの中間層（i32 → u8）は通常のCReLUを使用
         // WEIGHT_SCALE_BITS = 6
-        // 入力: [a0, a1, a2, a3, b0, b1, b2, b3]
-        // 出力: [(a >> 6) * (b >> 6) >> 7]
-        let input = [
-            64 * 64i32,
-            64 * 100,
-            64 * 127,
-            0,
-            64 * 64,
-            64 * 50,
-            64 * 127,
-            64 * 100,
-        ];
-        let mut output = [0u8; 4];
+        let input = [0i32, 64, 128, 8192, -64, 64 * 100];
+        let mut output = [0u8; 6];
 
         PairwiseCReLU::activate_i32_to_u8(&input, &mut output);
 
-        // (64 * 64) >> 7 = 32
-        assert_eq!(output[0], 32);
-        // (100 * 50) >> 7 = 39
-        assert_eq!(output[1], 39);
-        // (127 * 127) >> 7 = 126
-        assert_eq!(output[2], 126);
-        // (0 * 100) >> 7 = 0
-        assert_eq!(output[3], 0);
+        // CReLUと同じ動作
+        assert_eq!(output[0], 0); // 0 >> 6 = 0
+        assert_eq!(output[1], 1); // 64 >> 6 = 1
+        assert_eq!(output[2], 2); // 128 >> 6 = 2
+        assert_eq!(output[3], 127); // 8192 >> 6 = 128 → clamped to 127
+        assert_eq!(output[4], 0); // -64 >> 6 = -1 → clamped to 0
+        assert_eq!(output[5], 100); // 6400 >> 6 = 100
     }
 
     #[test]
@@ -804,55 +892,117 @@ mod tests {
         assert_eq!(output[4], 0); // negative → 0
     }
 
-    /// SIMD パスを通る大きなサイズでのテスト
+    /// 実際のネットワークサイズ（L1=512、FT_OUT=1024）でのテスト (QA=255)
     #[test]
-    fn test_pairwise_crelu_simd_path() {
-        // AVX2: 8要素、SSE: 4要素のチャンクを処理するため、16要素以上必要
-        const HALF: usize = 32;
-        let mut input = [0i16; HALF * 2];
-        let mut output = [0u8; HALF];
+    fn test_pairwise_crelu_actual_network_size() {
+        // v47: L1=512, FT_OUT=1024, QA=255
+        const L1: usize = 512;
+        const QUARTER: usize = L1 / 2; // 256
+        let mut input = [0i16; L1 * 2]; // 1024 elements
+        let mut output = [0u8; L1]; // 512 elements
 
-        // テストデータを生成
-        for i in 0..HALF {
-            input[i] = (i as i16) * 4; // a: 0, 4, 8, ...
-            input[i + HALF] = 100 - (i as i16) * 2; // b: 100, 98, 96, ...
+        // テストデータを生成（FT accumulatorをシミュレート）
+        // STM: input[0..L1]
+        // NTM: input[L1..L1*2]
+        for i in 0..L1 {
+            // 実際の値は -32768 ~ 32767 の範囲だが、CReLU後は [0, QA] にクリップされる
+            input[i] = (((i * 7) % 256) as i16).wrapping_sub(50).max(0).min(255); // STM
+            input[i + L1] = (((i * 11) % 256) as i16).wrapping_sub(30).max(0).min(255);
+            // NTM
         }
 
-        PairwiseCReLU::activate_i16_to_u8(&input, &mut output, 127);
+        PairwiseCReLU::activate_i16_to_u8(&input, &mut output, 255);
 
-        // スカラー実装と比較して検証
-        for i in 0..HALF {
-            let a = (input[i] as i32).clamp(0, 127);
-            let b = (input[i + HALF] as i32).clamp(0, 127);
-            let expected = ((a * b) >> 7).min(127) as u8;
+        // Dual perspective 検証 (QA=255, shift=9, max_out=127):
+        // STM pairwise: input[j] * input[j + QUARTER] >> 9 for j in 0..QUARTER
+        for i in 0..QUARTER {
+            let a = (input[i] as i32).clamp(0, 255);
+            let b = (input[i + QUARTER] as i32).clamp(0, 255);
+            let expected = ((a * b) >> 9).min(127) as u8;
             assert_eq!(
                 output[i], expected,
-                "mismatch at index {i}: expected {expected}, got {}",
+                "STM mismatch at index {i}: expected {expected}, got {}, a={a}, b={b}",
                 output[i]
+            );
+        }
+        // NTM pairwise: input[L1+j] * input[L1+j + QUARTER] >> 9 for j in 0..QUARTER
+        for i in 0..QUARTER {
+            let a = (input[L1 + i] as i32).clamp(0, 255);
+            let b = (input[L1 + i + QUARTER] as i32).clamp(0, 255);
+            let expected = ((a * b) >> 9).min(127) as u8;
+            assert_eq!(
+                output[QUARTER + i],
+                expected,
+                "NTM mismatch at index {i}: expected {expected}, got {}, a={a}, b={b}",
+                output[QUARTER + i]
             );
         }
     }
 
-    /// i32版 SIMD パスのテスト
+    /// SIMD パスを通る大きなサイズでのテスト (dual perspective対応)
+    #[test]
+    fn test_pairwise_crelu_simd_path() {
+        // AVX2: 8要素、SSE: 4要素のチャンクを処理するため、16要素以上必要
+        // dual perspective: 入力は [stm[0..L1], ntm[0..L1]] の形式
+        // L1 = 32 とする (各視点32要素、合計64要素の入力 → 32要素の出力)
+        const L1: usize = 32;
+        const QUARTER: usize = L1 / 2; // 各視点のpairwise後サイズ
+        let mut input = [0i16; L1 * 2];
+        let mut output = [0u8; L1];
+
+        // テストデータを生成
+        // STM: input[0..L1]
+        // NTM: input[L1..L1*2]
+        for i in 0..L1 {
+            input[i] = (i as i16) * 4; // STM: 0, 4, 8, ...
+            input[i + L1] = 100 - (i as i16) * 2; // NTM: 100, 98, 96, ...
+        }
+
+        PairwiseCReLU::activate_i16_to_u8(&input, &mut output, 127);
+
+        // Dual perspective 検証:
+        // STM pairwise: input[j] * input[j + QUARTER] for j in 0..QUARTER
+        for i in 0..QUARTER {
+            let a = (input[i] as i32).clamp(0, 127);
+            let b = (input[i + QUARTER] as i32).clamp(0, 127);
+            let expected = ((a * b) >> 7).min(127) as u8;
+            assert_eq!(
+                output[i], expected,
+                "STM mismatch at index {i}: expected {expected}, got {}",
+                output[i]
+            );
+        }
+        // NTM pairwise: input[L1+j] * input[L1+j + QUARTER] for j in 0..QUARTER
+        for i in 0..QUARTER {
+            let a = (input[L1 + i] as i32).clamp(0, 127);
+            let b = (input[L1 + i + QUARTER] as i32).clamp(0, 127);
+            let expected = ((a * b) >> 7).min(127) as u8;
+            assert_eq!(
+                output[QUARTER + i],
+                expected,
+                "NTM mismatch at index {i}: expected {expected}, got {}",
+                output[QUARTER + i]
+            );
+        }
+    }
+
+    /// i32版 SIMD パスのテスト（PairwiseCReLUの中間層は通常のCReLUを使用）
     #[test]
     fn test_pairwise_crelu_i32_simd_path() {
-        const HALF: usize = 32;
-        let mut input = [0i32; HALF * 2];
-        let mut output = [0u8; HALF];
+        const SIZE: usize = 64;
+        let mut input = [0i32; SIZE];
+        let mut output = [0u8; SIZE];
 
         // テストデータを生成（WEIGHT_SCALE_BITS = 6 でシフトされることを考慮）
-        for i in 0..HALF {
-            input[i] = (i as i32) * 4 * 64; // a: 0, 4, 8, ... (シフト後)
-            input[i + HALF] = (100 - (i as i32) * 2) * 64; // b: 100, 98, 96, ...
+        for i in 0..SIZE {
+            input[i] = (i as i32) * 4 * 64; // 0, 256, 512, ... (シフト後 0, 4, 8, ...)
         }
 
         PairwiseCReLU::activate_i32_to_u8(&input, &mut output);
 
-        // スカラー実装と比較して検証
-        for i in 0..HALF {
-            let a = (input[i] >> WEIGHT_SCALE_BITS).clamp(0, 127);
-            let b = (input[i + HALF] >> WEIGHT_SCALE_BITS).clamp(0, 127);
-            let expected = ((a * b) >> 7).min(127) as u8;
+        // CReLUと同じ動作を検証
+        for i in 0..SIZE {
+            let expected = (input[i] >> WEIGHT_SCALE_BITS).clamp(0, 127) as u8;
             assert_eq!(
                 output[i], expected,
                 "mismatch at index {i}: expected {expected}, got {}",
