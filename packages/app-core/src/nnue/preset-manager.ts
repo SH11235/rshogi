@@ -14,6 +14,7 @@ import type {
     PresetManifest,
     PresetStatus,
 } from "./types";
+import { generateNnueId } from "./utils";
 
 /**
  * プリセットダウンロード進捗ハンドラー
@@ -202,7 +203,7 @@ export async function downloadPreset(
     });
 
     // ID を生成
-    const id = crypto.randomUUID();
+    const id = generateNnueId();
 
     // メタデータを作成
     const meta: NnueMeta = {

@@ -8,3 +8,4 @@ export * from "./manager";
 export * from "./preset-manager";
 export * from "./storage";
 export * from "./types";
+export * from "./utils";

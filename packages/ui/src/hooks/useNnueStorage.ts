@@ -1,5 +1,9 @@
-import type { NnueMeta, NnueStorageCapabilities } from "@shogi/app-core";
-import { NnueError } from "@shogi/app-core";
+import {
+    generateNnueId,
+    NnueError,
+    type NnueMeta,
+    type NnueStorageCapabilities,
+} from "@shogi/app-core";
 import { useCallback, useState } from "react";
 import { useNnueContextOptional } from "../providers/NnueContext";
 
@@ -99,7 +103,7 @@ export function useNnueStorage(): UseNnueStorageReturn {
                 }
 
                 // ID を生成
-                const id = crypto.randomUUID();
+                const id = generateNnueId();
 
                 // メタデータを作成
                 const meta: NnueMeta = {

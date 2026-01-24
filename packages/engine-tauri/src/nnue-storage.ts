@@ -6,7 +6,7 @@
  * - メタデータは localStorage に保存（軽量なため）
  */
 
-import type { NnueMeta, NnueStorage } from "@shogi/app-core";
+import { generateNnueId, type NnueMeta, type NnueStorage } from "@shogi/app-core";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 
 /**
@@ -165,7 +165,7 @@ export function createTauriNnueStorage(options: TauriNnueStorageOptions = {}): N
         },
 
         async importFromPath(srcPath: string, displayName?: string): Promise<NnueMeta> {
-            const id = crypto.randomUUID();
+            const id = generateNnueId();
 
             // ファイルをコピー
             const result = await importNnueFromPath(srcPath, id, { invoke });
@@ -256,7 +256,7 @@ export async function importNnue(
     options: { invoke?: InvokeFn } = {},
 ): Promise<NnueMeta> {
     const invoke = options.invoke ?? tauriInvoke;
-    const id = crypto.randomUUID();
+    const id = generateNnueId();
 
     // ファイルをコピー
     const result = await importNnueFromPath(srcPath, id, { invoke });
