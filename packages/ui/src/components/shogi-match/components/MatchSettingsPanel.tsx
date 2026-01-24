@@ -1,29 +1,16 @@
 import type { NnueMeta } from "@shogi/app-core";
-import type { EngineClient, SkillLevelSettings } from "@shogi/engine-client";
+import type { SkillLevelSettings } from "@shogi/engine-client";
 import { type ReactElement, useId } from "react";
 import { Input } from "../../input";
 import { Switch } from "../../switch";
 import type { ClockSettings } from "../hooks/useClockManager";
-import type { PassRightsSettings } from "../types";
+import type { EngineOption, PassRightsSettings, SideSetting } from "../types";
 import { SkillLevelSelector } from "./SkillLevelSelector";
 
+// 型を再エクスポート（後方互換性のため）
+export type { EngineOption, SideSetting };
+
 type SideKey = "sente" | "gote";
-
-type SideRole = "human" | "engine";
-
-export type SideSetting = {
-    role: SideRole;
-    engineId?: string;
-    /** エンジンの強さ設定（role="engine"時のみ有効） */
-    skillLevel?: SkillLevelSettings;
-};
-
-export type EngineOption = {
-    id: string;
-    label: string;
-    createClient: () => EngineClient;
-    kind?: "internal" | "external";
-};
 
 interface MatchSettingsPanelProps {
     // 設定値
