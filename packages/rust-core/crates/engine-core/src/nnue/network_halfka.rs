@@ -30,6 +30,7 @@
 
 use std::io::{self, Read, Seek};
 use std::marker::PhantomData;
+use std::sync::OnceLock;
 
 use super::accumulator::{Aligned, AlignedBox, DirtyPiece, IndexList, MAX_PATH_LENGTH};
 use super::activation::FtActivation;
@@ -38,6 +39,12 @@ use super::features::{FeatureSet, HalfKA_hmFeatureSet};
 use super::network::{get_fv_scale_override, parse_fv_scale_from_arch};
 use crate::position::Position;
 use crate::types::{Color, Value};
+
+#[inline]
+fn nnue_debug_enabled() -> bool {
+    static NNUE_DEBUG: OnceLock<bool> = OnceLock::new();
+    *NNUE_DEBUG.get_or_init(|| std::env::var("NNUE_DEBUG").is_ok())
+}
 
 // =============================================================================
 // SIMD ヘルパー関数
@@ -885,17 +892,16 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKA<INPUT, OUTPU
 ///
 /// # 型パラメータ
 /// - `L1`: FT出力次元（片側）
-/// - `L1_INPUT`: L1層の入力次元（= L1 * 2、両視点結合）
+/// - `FT_OUT`: FT出力次元（両視点連結、常に L1 * 2）
+/// - `L1_INPUT`: L1層の入力次元
+///   - CReLU/SCReLU: L1 * 2（活性化後も次元維持）
+///   - Pairwise: L1（Pairwise乗算で次元半減）
 /// - `L2`: 隠れ層1の出力次元
 /// - `L3`: 隠れ層2の出力次元
 /// - `A`: 活性化関数（FtActivation trait を実装する型）
-///
-/// # 注意
-/// `L1_INPUT` は `L1 * 2` である必要がある。
-/// Rust の const generics では `{ L1 * 2 }` を型パラメータ位置で使用できないため、
-/// 明示的に `L1_INPUT` として渡す必要がある。
 pub struct NetworkHalfKA<
     const L1: usize,
+    const FT_OUT: usize,
     const L1_INPUT: usize,
     const L2: usize,
     const L3: usize,
@@ -917,11 +923,28 @@ pub struct NetworkHalfKA<
     _activation: PhantomData<A>,
 }
 
-impl<const L1: usize, const L1_INPUT: usize, const L2: usize, const L3: usize, A: FtActivation>
-    NetworkHalfKA<L1, L1_INPUT, L2, L3, A>
+impl<
+        const L1: usize,
+        const FT_OUT: usize,
+        const L1_INPUT: usize,
+        const L2: usize,
+        const L3: usize,
+        A: FtActivation,
+    > NetworkHalfKA<L1, FT_OUT, L1_INPUT, L2, L3, A>
 {
-    /// コンパイル時制約: L1_INPUT == L1 * 2
-    const _ASSERT_L1_INPUT: () = assert!(L1_INPUT == L1 * 2, "L1_INPUT must equal L1 * 2");
+    /// コンパイル時制約
+    ///
+    /// - `FT_OUT == L1 * 2`: FT出力は常に両視点の連結
+    /// - `L1_INPUT`:
+    ///   - CReLU/SCReLU: `L1 * 2`（活性化後も次元維持）
+    ///   - Pairwise: `L1`（Pairwise乗算で次元半減）
+    const _ASSERT_DIMS: () = {
+        assert!(FT_OUT == L1 * 2, "FT_OUT must equal L1 * 2");
+        assert!(
+            L1_INPUT == L1 * 2 || L1_INPUT == L1,
+            "L1_INPUT must equal L1 * 2 (CReLU/SCReLU) or L1 (Pairwise)"
+        );
+    };
 
     /// ファイルから読み込み
     pub fn read<R: Read + Seek>(reader: &mut R) -> io::Result<Self> {
@@ -1035,18 +1058,49 @@ impl<const L1: usize, const L1_INPUT: usize, const L2: usize, const L3: usize, A
     ///
     /// 最適化: スタック配列 + 64バイトアラインメントで SIMD 効率を最大化
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorHalfKA<L1>) -> Value {
+        let debug = nnue_debug_enabled();
+
         // Feature Transformer 出力（生のi16値）- 64バイトアライン
-        let mut ft_out_i16 = Aligned([0i16; L1_INPUT]);
+        // FT出力は常に FT_OUT（= L1 * 2、両視点の連結）
+        let mut ft_out_i16 = Aligned([0i16; FT_OUT]);
         self.feature_transformer
             .transform_raw(acc, pos.side_to_move(), &mut ft_out_i16.0);
 
+        if debug {
+            let ft_min = ft_out_i16.0.iter().min().copied().unwrap_or(0);
+            let ft_max = ft_out_i16.0.iter().max().copied().unwrap_or(0);
+            let ft_sum: i64 = ft_out_i16.0.iter().map(|&x| x as i64).sum();
+            eprintln!(
+                "[DEBUG] FT output: min={ft_min}, max={ft_max}, sum={ft_sum}, len={}",
+                ft_out_i16.0.len()
+            );
+            eprintln!("[DEBUG] FT[0..8]: {:?}", &ft_out_i16.0[0..8]);
+        }
+
         // 活性化関数適用 (i16 → u8) - 64バイトアライン
+        // 活性化後のサイズは L1_INPUT（CReLU: L1*2、Pairwise: L1）
         let mut transformed = Aligned([0u8; L1_INPUT]);
         A::activate_i16_to_u8(&ft_out_i16.0, &mut transformed.0, self.qa);
+
+        if debug {
+            let t_min = transformed.0.iter().min().copied().unwrap_or(0);
+            let t_max = transformed.0.iter().max().copied().unwrap_or(0);
+            let t_sum: u64 = transformed.0.iter().map(|&x| x as u64).sum();
+            eprintln!("[DEBUG] After activation ({} i16→u8): min={t_min}, max={t_max}, sum={t_sum}, len={}", A::name(), transformed.0.len());
+            eprintln!("[DEBUG] transformed[0..16]: {:?}", &transformed.0[0..16]);
+        }
 
         // l1 層 - 64バイトアライン
         let mut l1_out = Aligned([0i32; L2]);
         self.l1.propagate(&transformed.0, &mut l1_out.0);
+
+        if debug {
+            eprintln!("[DEBUG] L1 output: {:?}", &l1_out.0);
+            eprintln!(
+                "[DEBUG] L1 biases[0..8]: {:?}",
+                &self.l1.biases[0..8.min(self.l1.biases.len())]
+            );
+        }
 
         // デバッグ: L1出力の範囲チェック
         #[cfg(debug_assertions)]
@@ -1152,35 +1206,38 @@ fn parse_qa_from_arch(arch_str: &str) -> Option<i16> {
 
 use super::activation::{CReLU, PairwiseCReLU, SCReLU};
 
-// L1=256: L1_INPUT=512
+// L1=256, FT_OUT=512
+// CReLU/SCReLU: L1_INPUT=512, Pairwise: L1_INPUT=256
 /// HalfKA 256x2-32-32 CReLU
-pub type HalfKA256CReLU = NetworkHalfKA<256, 512, 32, 32, CReLU>;
+pub type HalfKA256CReLU = NetworkHalfKA<256, 512, 512, 32, 32, CReLU>;
 /// HalfKA 256x2-32-32 SCReLU
-pub type HalfKA256SCReLU = NetworkHalfKA<256, 512, 32, 32, SCReLU>;
-/// HalfKA 256x2-32-32 PairwiseCReLU
-pub type HalfKA256Pairwise = NetworkHalfKA<256, 512, 32, 32, PairwiseCReLU>;
+pub type HalfKA256SCReLU = NetworkHalfKA<256, 512, 512, 32, 32, SCReLU>;
+/// HalfKA 256/2x2-32-32 PairwiseCReLU (L1入力=256, Pairwise乗算で次元半減)
+pub type HalfKA256Pairwise = NetworkHalfKA<256, 512, 256, 32, 32, PairwiseCReLU>;
 
-// L1=512: L1_INPUT=1024
+// L1=512, FT_OUT=1024
+// CReLU/SCReLU: L1_INPUT=1024, Pairwise: L1_INPUT=512
 /// HalfKA 512x2-8-96 CReLU
-pub type HalfKA512CReLU = NetworkHalfKA<512, 1024, 8, 96, CReLU>;
+pub type HalfKA512CReLU = NetworkHalfKA<512, 1024, 1024, 8, 96, CReLU>;
 /// HalfKA 512x2-8-96 SCReLU
-pub type HalfKA512SCReLU = NetworkHalfKA<512, 1024, 8, 96, SCReLU>;
-/// HalfKA 512x2-8-96 PairwiseCReLU
-pub type HalfKA512Pairwise = NetworkHalfKA<512, 1024, 8, 96, PairwiseCReLU>;
+pub type HalfKA512SCReLU = NetworkHalfKA<512, 1024, 1024, 8, 96, SCReLU>;
+/// HalfKA 512/2x2-8-96 PairwiseCReLU (L1入力=512, Pairwise乗算で次元半減)
+pub type HalfKA512Pairwise = NetworkHalfKA<512, 1024, 512, 8, 96, PairwiseCReLU>;
 
-// L1=1024: L1_INPUT=2048
+// L1=1024, FT_OUT=2048
+// CReLU/SCReLU: L1_INPUT=2048, Pairwise: L1_INPUT=1024
 /// HalfKA 1024x2-8-96 CReLU
-pub type HalfKA1024CReLU = NetworkHalfKA<1024, 2048, 8, 96, CReLU>;
+pub type HalfKA1024CReLU = NetworkHalfKA<1024, 2048, 2048, 8, 96, CReLU>;
 /// HalfKA 1024x2-8-96 SCReLU
-pub type HalfKA1024SCReLU = NetworkHalfKA<1024, 2048, 8, 96, SCReLU>;
-/// HalfKA 1024x2-8-96 PairwiseCReLU
-pub type HalfKA1024Pairwise = NetworkHalfKA<1024, 2048, 8, 96, PairwiseCReLU>;
+pub type HalfKA1024SCReLU = NetworkHalfKA<1024, 2048, 2048, 8, 96, SCReLU>;
+/// HalfKA 1024/2x2-8-96 PairwiseCReLU (L1入力=1024, Pairwise乗算で次元半減)
+pub type HalfKA1024Pairwise = NetworkHalfKA<1024, 2048, 1024, 8, 96, PairwiseCReLU>;
 
-// L1=1024, L2=8, L3=32
+// L1=1024, FT_OUT=2048, L2=8, L3=32
 /// HalfKA 1024x2-8-32 CReLU
-pub type HalfKA1024_8_32CReLU = NetworkHalfKA<1024, 2048, 8, 32, CReLU>;
+pub type HalfKA1024_8_32CReLU = NetworkHalfKA<1024, 2048, 2048, 8, 32, CReLU>;
 /// HalfKA 1024x2-8-32 SCReLU
-pub type HalfKA1024_8_32SCReLU = NetworkHalfKA<1024, 2048, 8, 32, SCReLU>;
+pub type HalfKA1024_8_32SCReLU = NetworkHalfKA<1024, 2048, 2048, 8, 32, SCReLU>;
 
 // =============================================================================
 // テスト
