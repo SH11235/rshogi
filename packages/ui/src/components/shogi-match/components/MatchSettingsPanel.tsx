@@ -1,6 +1,6 @@
+import type { NnueMeta } from "@shogi/app-core";
 import type { EngineClient, SkillLevelSettings } from "@shogi/engine-client";
 import { type ReactElement, useId } from "react";
-import { Button } from "../../button";
 import { Input } from "../../input";
 import { Switch } from "../../switch";
 import type { ClockSettings } from "../hooks/useClockManager";
@@ -40,10 +40,12 @@ interface MatchSettingsPanelProps {
     uiEngineOptions: EngineOption[];
 
     // NNUE 設定（オプション）
-    /** NNUE 選択ダイアログを開くコールバック */
-    onOpenNnueSelector?: () => void;
-    /** 現在選択中の NNUE 表示名（null = デフォルト） */
-    currentNnueDisplayName?: string | null;
+    /** NNUE 一覧 */
+    nnueList?: NnueMeta[];
+    /** 対局用に選択中の NNUE ID（null = デフォルト） */
+    matchNnueId?: string | null;
+    /** 対局用 NNUE ID の変更ハンドラ */
+    onMatchNnueIdChange?: (id: string | null) => void;
 
     // 制約
     settingsLocked: boolean;
@@ -63,8 +65,9 @@ export function MatchSettingsPanel({
     passRightsSettings,
     onPassRightsSettingsChange,
     uiEngineOptions,
-    onOpenNnueSelector,
-    currentNnueDisplayName,
+    nnueList,
+    matchNnueId,
+    onMatchNnueIdChange,
     settingsLocked,
 }: MatchSettingsPanelProps): ReactElement {
     const timeInputIdPrefix = useId();
@@ -222,27 +225,30 @@ export function MatchSettingsPanel({
                 </div>
 
                 {/* NNUE 設定（エンジン使用時のみ） */}
-                {onOpenNnueSelector &&
+                {nnueList &&
+                    onMatchNnueIdChange &&
                     (sides.sente.role === "engine" || sides.gote.role === "engine") && (
                         <>
                             <div className="h-px bg-[hsl(var(--border,0_0%_86%))]" />
                             <div className="flex flex-col gap-2">
-                                <div className="text-xs font-semibold text-[hsl(var(--wafuu-sumi))]">
+                                <label className={labelClassName}>
                                     NNUE 評価関数
-                                </div>
-                                <div className="flex items-center justify-between gap-2">
-                                    <span className="truncate text-xs text-muted-foreground">
-                                        {currentNnueDisplayName ?? "デフォルト"}
-                                    </span>
-                                    <Button
-                                        variant="outline"
-                                        size="sm"
-                                        onClick={onOpenNnueSelector}
+                                    <select
+                                        value={matchNnueId ?? ""}
+                                        onChange={(e) =>
+                                            onMatchNnueIdChange(e.target.value || null)
+                                        }
                                         disabled={settingsLocked}
+                                        className={selectClassName}
                                     >
-                                        変更...
-                                    </Button>
-                                </div>
+                                        <option value="">デフォルト</option>
+                                        {nnueList.map((nnue) => (
+                                            <option key={nnue.id} value={nnue.id}>
+                                                {nnue.displayName}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </label>
                             </div>
                         </>
                     )}

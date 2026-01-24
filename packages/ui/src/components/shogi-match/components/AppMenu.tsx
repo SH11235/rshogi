@@ -1,3 +1,4 @@
+import type { NnueMeta } from "@shogi/app-core";
 import { detectParallelism } from "@shogi/app-core";
 import type { ReactElement } from "react";
 import { useState } from "react";
@@ -14,6 +15,14 @@ interface AppMenuProps {
     analysisSettings?: AnalysisSettings;
     /** 解析設定変更ハンドラ（オプション） */
     onAnalysisSettingsChange?: (settings: AnalysisSettings) => void;
+    /** NNUE 一覧 */
+    nnueList?: NnueMeta[];
+    /** 分析用 NNUE ID */
+    analysisNnueId?: string | null;
+    /** 分析用 NNUE ID の変更ハンドラ */
+    onAnalysisNnueIdChange?: (id: string | null) => void;
+    /** NNUE 管理ダイアログを開くコールバック */
+    onOpenNnueManager?: () => void;
 }
 
 const NOTATION_OPTIONS: { value: SquareNotation; label: string; example: string }[] = [
@@ -53,6 +62,10 @@ export function AppMenu({
     onSettingsChange,
     analysisSettings,
     onAnalysisSettingsChange,
+    nnueList,
+    analysisNnueId,
+    onAnalysisNnueIdChange,
+    onOpenNnueManager,
 }: AppMenuProps): ReactElement {
     const [isOpen, setIsOpen] = useState(false);
     const parallelismConfig = detectParallelism();
@@ -286,7 +299,45 @@ export function AppMenu({
                                 <div className="text-xs text-muted-foreground mt-1">
                                     検出コア数: {parallelismConfig.detectedConcurrency}
                                 </div>
+
+                                {/* 分析用 NNUE 選択 */}
+                                {nnueList && onAnalysisNnueIdChange && (
+                                    <div className="flex items-center gap-2 text-[13px] mt-2">
+                                        <span className="text-wafuu-sumi min-w-[80px]">NNUE:</span>
+                                        <select
+                                            value={analysisNnueId ?? ""}
+                                            onChange={(e) =>
+                                                onAnalysisNnueIdChange(e.target.value || null)
+                                            }
+                                            className="flex-1 px-2 py-1 rounded text-xs bg-wafuu-washi text-wafuu-sumi border border-wafuu-border"
+                                        >
+                                            <option value="">デフォルト</option>
+                                            {nnueList.map((nnue) => (
+                                                <option key={nnue.id} value={nnue.id}>
+                                                    {nnue.displayName}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                )}
                             </div>
+                        </>
+                    )}
+
+                    {/* NNUE 管理 */}
+                    {onOpenNnueManager && (
+                        <>
+                            <div className="border-t border-wafuu-border my-2" />
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    onOpenNnueManager();
+                                    setIsOpen(false);
+                                }}
+                                className="w-full text-left px-2 py-2 rounded text-[13px] text-wafuu-sumi hover:bg-wafuu-border transition-colors"
+                            >
+                                NNUE 管理...
+                            </button>
                         </>
                     )}
                 </div>

@@ -9,9 +9,9 @@ export interface PresetListItemProps {
     /** プリセットと状態 */
     preset: PresetWithStatus;
     /** 選択されているか */
-    isSelected: boolean;
+    isSelected?: boolean;
     /** 選択時のコールバック（ダウンロード済みの場合のみ有効） */
-    onSelect: (nnueId: string) => void;
+    onSelect?: (nnueId: string) => void;
     /** ダウンロード時のコールバック */
     onDownload: (presetKey: string) => void;
     /** ダウンロード中かどうか */
@@ -20,6 +20,8 @@ export interface PresetListItemProps {
     downloadProgress: NnueDownloadProgress | null;
     /** 無効化 */
     disabled?: boolean;
+    /** 選択機能を有効にするか（デフォルト: true） */
+    selectable?: boolean;
 }
 
 function formatSize(bytes: number): string {
@@ -48,20 +50,22 @@ function getPhaseLabel(phase: NnueDownloadProgress["phase"]): string {
  */
 export function PresetListItem({
     preset,
-    isSelected,
+    isSelected = false,
     onSelect,
     onDownload,
     isDownloading,
     downloadProgress,
     disabled = false,
+    selectable = true,
 }: PresetListItemProps): ReactElement {
     const { config, status } = preset;
     const { meta: downloadedMeta } = getDownloadedMeta(preset);
-    const canSelect = downloadedMeta !== null;
+    // 選択可能: selectable が true かつダウンロード済み
+    const canSelect = selectable && downloadedMeta !== null;
 
     const handleChange = () => {
         if (disabled || isDownloading) return;
-        if (canSelect && downloadedMeta) {
+        if (canSelect && downloadedMeta && onSelect) {
             onSelect(downloadedMeta.id);
         }
     };

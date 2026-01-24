@@ -45,7 +45,7 @@ import { applyDropResult, DragGhost, type DropResult, usePieceDnd } from "./shog
 export type { EngineOption };
 
 import { useNnueStorage } from "../hooks/useNnueStorage";
-import { NnueSelectorDialog } from "./nnue";
+import { NnueManagerDialog } from "./nnue/NnueManagerDialog";
 import { AppMenu } from "./shogi-match/components/AppMenu";
 import { type ClockSettings, useClockManager } from "./shogi-match/hooks/useClockManager";
 import { useEngineManager } from "./shogi-match/hooks/useEngineManager";
@@ -394,41 +394,49 @@ export function ShogiMatch({
     // 設定モーダルの表示状態
     const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
 
-    // NNUE 選択ダイアログの状態
-    const [isNnueSelectorOpen, setIsNnueSelectorOpen] = useState(false);
-    const [selectedNnueId, setSelectedNnueId] = useLocalStorage<string | null>(
-        "shogi:selectedNnueId",
+    // NNUE 管理ダイアログの状態
+    const [isNnueManagerOpen, setIsNnueManagerOpen] = useState(false);
+
+    // 対局用 NNUE ID
+    const [matchNnueId, setMatchNnueId] = useLocalStorage<string | null>("shogi:matchNnueId", null);
+    // 分析用 NNUE ID
+    const [analysisNnueId, setAnalysisNnueId] = useLocalStorage<string | null>(
+        "shogi:analysisNnueId",
         null,
     );
 
-    // NNUE ストレージから一覧を取得（表示名の取得に使用）
+    // NNUE ストレージから一覧を取得
     const { nnueList, isLoading: isNnueListLoading } = useNnueStorage();
-    const selectedNnueDisplayName = useMemo(() => {
-        if (!selectedNnueId) return null;
-        const found = nnueList.find((n) => n.id === selectedNnueId);
-        return found?.displayName ?? null;
-    }, [selectedNnueId, nnueList]);
 
     // 選択された NNUE が削除された場合はリセット
     // isLoading 中はリストが空でも待機（初期ロード完了後に判定）
     useEffect(() => {
-        if (selectedNnueId && !isNnueListLoading) {
-            const exists = nnueList.some((n) => n.id === selectedNnueId);
-            if (!exists) {
-                setSelectedNnueId(null);
+        if (!isNnueListLoading) {
+            if (matchNnueId && !nnueList.some((n) => n.id === matchNnueId)) {
+                setMatchNnueId(null);
+            }
+            if (analysisNnueId && !nnueList.some((n) => n.id === analysisNnueId)) {
+                setAnalysisNnueId(null);
             }
         }
-    }, [selectedNnueId, nnueList, isNnueListLoading, setSelectedNnueId]);
+    }, [
+        matchNnueId,
+        analysisNnueId,
+        nnueList,
+        isNnueListLoading,
+        setMatchNnueId,
+        setAnalysisNnueId,
+    ]);
 
-    // NNUE 変更時に一括解析をリセット（プール破棄に伴う UI 同期）
-    const prevSelectedNnueIdRef = useRef(selectedNnueId);
+    // 分析用 NNUE 変更時に一括解析をリセット（プール破棄に伴う UI 同期）
+    const prevAnalysisNnueIdRef = useRef(analysisNnueId);
     useEffect(() => {
-        if (prevSelectedNnueIdRef.current !== selectedNnueId) {
-            prevSelectedNnueIdRef.current = selectedNnueId;
+        if (prevAnalysisNnueIdRef.current !== analysisNnueId) {
+            prevAnalysisNnueIdRef.current = analysisNnueId;
             // 一括解析中なら UI をリセット
             setBatchAnalysis(null);
         }
-    }, [selectedNnueId]);
+    }, [analysisNnueId]);
 
     // positionRef を先に定義（コールバックで使用するため）
     const positionRef = useRef<PositionState>(position);
@@ -787,7 +795,7 @@ export function ShogiMatch({
         onMatchEnd: endMatch,
         onEvalUpdate: handleEvalUpdate,
         maxLogs,
-        nnueId: selectedNnueId,
+        nnueId: matchNnueId,
     });
     stopAllEnginesRef.current = stopAllEngines;
 
@@ -823,7 +831,7 @@ export function ShogiMatch({
         onError: (ply, error) => {
             console.error(`解析エラー (ply=${ply}):`, error);
         },
-        nnueId: selectedNnueId,
+        nnueId: analysisNnueId,
     });
 
     // キーボード・ホイールナビゲーション用のgoForward（分岐対応）
@@ -2400,6 +2408,10 @@ export function ShogiMatch({
                         onSettingsChange={setDisplaySettings}
                         analysisSettings={analysisSettings}
                         onAnalysisSettingsChange={setAnalysisSettings}
+                        nnueList={nnueList}
+                        analysisNnueId={analysisNnueId}
+                        onAnalysisNnueIdChange={setAnalysisNnueId}
+                        onOpenNnueManager={() => setIsNnueManagerOpen(true)}
                     />
                 </div>
             )}
@@ -2863,8 +2875,9 @@ export function ShogiMatch({
                                     onPassRightsSettingsChange={handlePassRightsSettingsChange}
                                     uiEngineOptions={uiEngineOptions}
                                     settingsLocked={settingsLocked}
-                                    onOpenNnueSelector={() => setIsNnueSelectorOpen(true)}
-                                    currentNnueDisplayName={selectedNnueDisplayName}
+                                    nnueList={nnueList}
+                                    matchNnueId={matchNnueId}
+                                    onMatchNnueIdChange={setMatchNnueId}
                                 />
 
                                 {/* インポート */}
@@ -2887,16 +2900,12 @@ export function ShogiMatch({
                             </div>
                         </SettingsModal>
 
-                        {/* NNUE 選択ダイアログ */}
-                        <NnueSelectorDialog
-                            open={isNnueSelectorOpen}
-                            onOpenChange={setIsNnueSelectorOpen}
-                            currentNnueId={selectedNnueId}
-                            onNnueChange={setSelectedNnueId}
-                            isEngineInitialized={isMatchRunning}
+                        {/* NNUE ファイル管理ダイアログ */}
+                        <NnueManagerDialog
+                            open={isNnueManagerOpen}
+                            onOpenChange={setIsNnueManagerOpen}
                             manifestUrl={manifestUrl}
                             onRequestFilePath={onRequestNnueFilePath}
-                            isAnalyzing={isAnalyzing || batchAnalysis?.isRunning === true}
                         />
                     </div>
                 </section>
