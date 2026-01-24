@@ -236,7 +236,7 @@ export function LeftSidebar({
                     {sideColumn("gote", "☖後手", "text-wafuu-ai", false)}
                 </div>
 
-                {/* パス権設定 */}
+                {/* 変則ルール */}
                 {passRightsSettings && onPassRightsSettingsChange && (
                     <button
                         type="button"
@@ -244,12 +244,12 @@ export function LeftSidebar({
                         disabled={settingsLocked}
                         className="w-full text-left px-3 py-2 rounded-lg text-sm text-wafuu-sumi bg-wafuu-washi border-2 border-wafuu-border shadow-sm hover:shadow-md hover:-translate-y-0.5 hover:border-wafuu-kincha transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:shadow-sm disabled:hover:translate-y-0 disabled:hover:border-wafuu-border flex items-center gap-2"
                     >
-                        <span>⏭️</span>
+                        <span>🎲</span>
                         <span>
-                            パス権設定...
+                            変則ルール...
                             {passRightsSettings.enabled && (
                                 <span className="ml-2 text-xs text-muted-foreground">
-                                    (有効: {passRightsSettings.initialCount}回)
+                                    (パス権: {passRightsSettings.initialCount}回)
                                 </span>
                             )}
                         </span>

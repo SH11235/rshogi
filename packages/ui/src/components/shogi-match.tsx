@@ -2602,26 +2602,26 @@ export function ShogiMatch({
                                                         flipBoard={flipBoard}
                                                     />
                                                     {/* パス権表示（上側プレイヤー） */}
-                                                    {passRightsSettings?.enabled &&
-                                                        passRightsSettings.initialCount > 0 &&
-                                                        position.passRights && (
-                                                            <div className="flex justify-end mt-1">
-                                                                <PassRightsDisplay
-                                                                    remaining={
-                                                                        position.passRights[
-                                                                            info.owner
-                                                                        ]
-                                                                    }
-                                                                    max={
-                                                                        passRightsSettings.initialCount
-                                                                    }
-                                                                    isActive={
-                                                                        position.turn === info.owner
-                                                                    }
-                                                                    compact
-                                                                />
-                                                            </div>
-                                                        )}
+                                                    {passRightsSettings && (
+                                                        <div className="flex justify-end mt-1">
+                                                            <PassRightsDisplay
+                                                                remaining={
+                                                                    position.passRights?.[
+                                                                        info.owner
+                                                                    ] ?? 0
+                                                                }
+                                                                max={
+                                                                    passRightsSettings.enabled
+                                                                        ? passRightsSettings.initialCount
+                                                                        : 0
+                                                                }
+                                                                isActive={
+                                                                    position.turn === info.owner
+                                                                }
+                                                                compact
+                                                            />
+                                                        </div>
+                                                    )}
                                                 </div>
                                             );
                                         })()}
@@ -2697,26 +2697,26 @@ export function ShogiMatch({
                                                         flipBoard={flipBoard}
                                                     />
                                                     {/* パス権表示（下側プレイヤー） */}
-                                                    {passRightsSettings?.enabled &&
-                                                        passRightsSettings.initialCount > 0 &&
-                                                        position.passRights && (
-                                                            <div className="flex justify-start mt-1 w-full">
-                                                                <PassRightsDisplay
-                                                                    remaining={
-                                                                        position.passRights[
-                                                                            info.owner
-                                                                        ]
-                                                                    }
-                                                                    max={
-                                                                        passRightsSettings.initialCount
-                                                                    }
-                                                                    isActive={
-                                                                        position.turn === info.owner
-                                                                    }
-                                                                    compact
-                                                                />
-                                                            </div>
-                                                        )}
+                                                    {passRightsSettings && (
+                                                        <div className="flex justify-start mt-1 w-full">
+                                                            <PassRightsDisplay
+                                                                remaining={
+                                                                    position.passRights?.[
+                                                                        info.owner
+                                                                    ] ?? 0
+                                                                }
+                                                                max={
+                                                                    passRightsSettings.enabled
+                                                                        ? passRightsSettings.initialCount
+                                                                        : 0
+                                                                }
+                                                                isActive={
+                                                                    position.turn === info.owner
+                                                                }
+                                                                compact
+                                                            />
+                                                        </div>
+                                                    )}
                                                 </>
                                             );
                                         })()}
@@ -2976,7 +2976,7 @@ export function ShogiMatch({
                                 </DialogContent>
                             </Dialog>
 
-                            {/* パス権設定ダイアログ */}
+                            {/* 変則ルールダイアログ */}
                             {passRightsSettings && (
                                 <Dialog
                                     open={isPassRightsSettingsOpen}
@@ -2986,125 +2986,125 @@ export function ShogiMatch({
                                         style={{ width: "min(400px, calc(100% - 24px))" }}
                                     >
                                         <DialogHeader>
-                                            <DialogTitle>パス権設定</DialogTitle>
+                                            <DialogTitle>変則ルール</DialogTitle>
                                         </DialogHeader>
                                         <div className="flex flex-col gap-4 pt-2">
-                                            {/* パス権有効/無効 */}
-                                            <div className="flex items-center justify-between">
-                                                <label
-                                                    htmlFor="pass-rights-toggle"
-                                                    className="text-sm"
+                                            {/* パス権セクション */}
+                                            <div className="flex flex-col gap-3 p-3 rounded-lg border border-wafuu-border bg-wafuu-washi/50">
+                                                <div className="flex items-center justify-between">
+                                                    <span className="text-sm font-medium">
+                                                        パス権
+                                                    </span>
+                                                    <Switch
+                                                        id="pass-rights-toggle"
+                                                        checked={passRightsSettings.enabled}
+                                                        onCheckedChange={(checked) =>
+                                                            handlePassRightsSettingsChange({
+                                                                ...passRightsSettings,
+                                                                enabled: checked,
+                                                            })
+                                                        }
+                                                        disabled={settingsLocked}
+                                                    />
+                                                </div>
+                                                <p className="text-xs text-muted-foreground">
+                                                    王手されていない時に手番をパスできます
+                                                </p>
+
+                                                {/* 初期パス権数 */}
+                                                <div
+                                                    className={`flex flex-col gap-2 ${!passRightsSettings.enabled ? "opacity-50" : ""}`}
                                                 >
-                                                    パス権を有効にする
-                                                </label>
-                                                <Switch
-                                                    id="pass-rights-toggle"
-                                                    checked={passRightsSettings.enabled}
-                                                    onCheckedChange={(checked) =>
-                                                        handlePassRightsSettingsChange({
-                                                            ...passRightsSettings,
-                                                            enabled: checked,
-                                                        })
-                                                    }
-                                                    disabled={settingsLocked}
-                                                />
-                                            </div>
-
-                                            {passRightsSettings.enabled && (
-                                                <>
-                                                    {/* 初期パス権数 */}
-                                                    <div className="flex flex-col gap-2">
-                                                        <span className="text-sm">
-                                                            初期パス権数
+                                                    <span className="text-sm">初期パス権数</span>
+                                                    <div className="flex items-center gap-2">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() =>
+                                                                handlePassRightsSettingsChange({
+                                                                    ...passRightsSettings,
+                                                                    initialCount: Math.max(
+                                                                        0,
+                                                                        passRightsSettings.initialCount -
+                                                                            1,
+                                                                    ),
+                                                                })
+                                                            }
+                                                            disabled={
+                                                                settingsLocked ||
+                                                                !passRightsSettings.enabled ||
+                                                                passRightsSettings.initialCount <= 0
+                                                            }
+                                                            className="flex h-8 w-8 items-center justify-center rounded border border-[hsl(var(--border,0_0%_86%))] bg-[hsl(var(--card,0_0%_100%))] text-sm disabled:opacity-50"
+                                                        >
+                                                            -
+                                                        </button>
+                                                        <span className="w-8 text-center text-sm font-semibold">
+                                                            {passRightsSettings.initialCount}
                                                         </span>
-                                                        <div className="flex items-center gap-2">
-                                                            <button
-                                                                type="button"
-                                                                onClick={() =>
-                                                                    handlePassRightsSettingsChange({
-                                                                        ...passRightsSettings,
-                                                                        initialCount: Math.max(
+                                                        <button
+                                                            type="button"
+                                                            onClick={() =>
+                                                                handlePassRightsSettingsChange({
+                                                                    ...passRightsSettings,
+                                                                    initialCount: Math.min(
+                                                                        10,
+                                                                        passRightsSettings.initialCount +
+                                                                            1,
+                                                                    ),
+                                                                })
+                                                            }
+                                                            disabled={
+                                                                settingsLocked ||
+                                                                !passRightsSettings.enabled ||
+                                                                passRightsSettings.initialCount >=
+                                                                    10
+                                                            }
+                                                            className="flex h-8 w-8 items-center justify-center rounded border border-[hsl(var(--border,0_0%_86%))] bg-[hsl(var(--card,0_0%_100%))] text-sm disabled:opacity-50"
+                                                        >
+                                                            +
+                                                        </button>
+                                                    </div>
+                                                </div>
+
+                                                {/* パス確認ダイアログしきい値 */}
+                                                <div
+                                                    className={`flex flex-col gap-2 ${!passRightsSettings.enabled ? "opacity-50" : ""}`}
+                                                >
+                                                    <span className="text-sm">
+                                                        パス確認ダイアログしきい値（ms）
+                                                    </span>
+                                                    <div className="flex items-center gap-2">
+                                                        <input
+                                                            type="number"
+                                                            min={0}
+                                                            step={500}
+                                                            value={
+                                                                passRightsSettings.confirmDialogThresholdMs
+                                                            }
+                                                            onChange={(e) =>
+                                                                handlePassRightsSettingsChange({
+                                                                    ...passRightsSettings,
+                                                                    confirmDialogThresholdMs:
+                                                                        Math.max(
                                                                             0,
-                                                                            passRightsSettings.initialCount -
-                                                                                1,
+                                                                            Number(
+                                                                                e.target.value,
+                                                                            ) || 0,
                                                                         ),
-                                                                    })
-                                                                }
-                                                                disabled={
-                                                                    settingsLocked ||
-                                                                    passRightsSettings.initialCount <=
-                                                                        0
-                                                                }
-                                                                className="flex h-8 w-8 items-center justify-center rounded border border-[hsl(var(--border,0_0%_86%))] bg-[hsl(var(--card,0_0%_100%))] text-sm disabled:opacity-50"
-                                                            >
-                                                                -
-                                                            </button>
-                                                            <span className="w-8 text-center text-sm font-semibold">
-                                                                {passRightsSettings.initialCount}
-                                                            </span>
-                                                            <button
-                                                                type="button"
-                                                                onClick={() =>
-                                                                    handlePassRightsSettingsChange({
-                                                                        ...passRightsSettings,
-                                                                        initialCount: Math.min(
-                                                                            10,
-                                                                            passRightsSettings.initialCount +
-                                                                                1,
-                                                                        ),
-                                                                    })
-                                                                }
-                                                                disabled={
-                                                                    settingsLocked ||
-                                                                    passRightsSettings.initialCount >=
-                                                                        10
-                                                                }
-                                                                className="flex h-8 w-8 items-center justify-center rounded border border-[hsl(var(--border,0_0%_86%))] bg-[hsl(var(--card,0_0%_100%))] text-sm disabled:opacity-50"
-                                                            >
-                                                                +
-                                                            </button>
-                                                        </div>
-                                                    </div>
-
-                                                    {/* パス確認ダイアログしきい値 */}
-                                                    <div className="flex flex-col gap-2">
-                                                        <span className="text-sm">
-                                                            パス確認ダイアログしきい値（ms）
+                                                                })
+                                                            }
+                                                            disabled={
+                                                                settingsLocked ||
+                                                                !passRightsSettings.enabled
+                                                            }
+                                                            className="w-28 rounded border border-[hsl(var(--border,0_0%_86%))] bg-[hsl(var(--card,0_0%_100%))] px-2 py-1 text-sm disabled:opacity-50"
+                                                        />
+                                                        <span className="text-xs text-muted-foreground">
+                                                            0で即時、時間が多ければ確認
                                                         </span>
-                                                        <div className="flex items-center gap-2">
-                                                            <input
-                                                                type="number"
-                                                                min={0}
-                                                                step={500}
-                                                                value={
-                                                                    passRightsSettings.confirmDialogThresholdMs
-                                                                }
-                                                                onChange={(e) =>
-                                                                    handlePassRightsSettingsChange({
-                                                                        ...passRightsSettings,
-                                                                        confirmDialogThresholdMs:
-                                                                            Math.max(
-                                                                                0,
-                                                                                Number(
-                                                                                    e.target.value,
-                                                                                ) || 0,
-                                                                            ),
-                                                                    })
-                                                                }
-                                                                disabled={settingsLocked}
-                                                                className="w-28 rounded border border-[hsl(var(--border,0_0%_86%))] bg-[hsl(var(--card,0_0%_100%))] px-2 py-1 text-sm"
-                                                            />
-                                                            <span className="text-xs text-muted-foreground">
-                                                                0で即時、時間が多ければ確認
-                                                            </span>
-                                                        </div>
                                                     </div>
-                                                </>
-                                            )}
-
-                                            <p className="text-xs text-muted-foreground">
-                                                王手されていない時に手番をパスできます
-                                            </p>
+                                                </div>
+                                            </div>
                                         </div>
                                     </DialogContent>
                                 </Dialog>

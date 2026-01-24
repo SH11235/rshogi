@@ -33,10 +33,19 @@ export function PassRightsDisplay({
     isActive = false,
     compact = false,
     className,
-}: PassRightsDisplayProps): ReactElement | null {
-    // パス権が0の場合は非表示
+}: PassRightsDisplayProps): ReactElement {
+    // パス権が0の場合は同じ高さのプレースホルダーを返す（レイアウトシフト防止）
     if (max === 0) {
-        return null;
+        return (
+            <div
+                className={cn(
+                    "flex items-center gap-1 invisible",
+                    compact ? "h-2" : "h-5",
+                    className,
+                )}
+                aria-hidden="true"
+            />
+        );
     }
 
     // ドットのレンダリング（固定ID配列を使用してlintエラーを回避）
