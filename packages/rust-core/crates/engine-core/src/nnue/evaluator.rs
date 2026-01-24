@@ -12,12 +12,8 @@
 //! // ネットワークを読み込み
 //! let network = Arc::new(NNUENetwork::load("model.nnue")?);
 //!
-//! // 評価器を作成（局面を指定して初期化、推奨）
+//! // 評価器を作成（局面を指定して初期化）
 //! let mut evaluator = NNUEEvaluator::new_with_position(network, &position);
-//!
-//! // または局面なしで作成（後で reset() を呼ぶ必要あり）
-//! let mut evaluator = NNUEEvaluator::new(network);
-//! evaluator.reset(&position);
 //!
 //! // 評価
 //! let value = evaluator.evaluate(&position);
@@ -53,36 +49,16 @@ use crate::types::Value;
 /// - `net` は `Arc` で共有（並列探索で複数スレッドが同じ重みを参照）
 /// - `stack` はスレッド/探索文脈ごとに独立
 ///
-/// # 契約
+/// # 使用方法
 ///
-/// - `new()` で作成した場合、`reset()` を呼んでから `evaluate()` を使用すること
-/// - `new_with_position()` で作成した場合は即座に `evaluate()` 可能
+/// `new_with_position()` で局面を指定して作成し、即座に `evaluate()` 可能。
 pub struct NNUEEvaluator {
     net: Arc<NNUENetwork>,
     stack: AccumulatorStackVariant,
 }
 
 impl NNUEEvaluator {
-    /// ネットワークから評価器を作成
-    ///
-    /// # 契約
-    ///
-    /// - 作成後、`reset()` を呼んでから `evaluate()` を使用すること
-    /// - 未初期化の accumulator を読むと不正な評価値が返る可能性がある
-    ///
-    /// # 例
-    ///
-    /// ```ignore
-    /// let mut evaluator = NNUEEvaluator::new(network);
-    /// evaluator.reset(&position);  // 必ず reset を呼ぶ
-    /// let value = evaluator.evaluate(&position);
-    /// ```
-    pub fn new(net: Arc<NNUENetwork>) -> Self {
-        let stack = AccumulatorStackVariant::from_network(&net);
-        Self { net, stack }
-    }
-
-    /// 局面を指定して評価器を作成（推奨）
+    /// 局面を指定して評価器を作成
     ///
     /// 内部で `reset()` を呼び出すため、即座に `evaluate()` 可能。
     ///
@@ -93,7 +69,8 @@ impl NNUEEvaluator {
     /// let value = evaluator.evaluate(&position);  // 即座に評価可能
     /// ```
     pub fn new_with_position(net: Arc<NNUENetwork>, pos: &Position) -> Self {
-        let mut evaluator = Self::new(net);
+        let stack = AccumulatorStackVariant::from_network(&net);
+        let mut evaluator = Self { net, stack };
         evaluator.reset(pos);
         evaluator
     }
@@ -390,7 +367,6 @@ impl NNUEEvaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::position::SFEN_HIRATE;
 
     /// NNUEEvaluator の基本的な構築テスト
     ///
