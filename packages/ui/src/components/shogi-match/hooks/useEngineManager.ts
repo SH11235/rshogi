@@ -524,12 +524,10 @@ export function useEngineManager({
                 await client.init();
 
                 // NNUE をロード（指定されている場合）
+                // ⚠️ Desktop では OnceLock により一度ロードした NNUE は変更不可
+                // 失敗時は throw してユーザーに通知する（アプリ再起動が必要な場合がある）
                 if (nnueId && client.loadNnue) {
-                    try {
-                        await client.loadNnue(nnueId);
-                    } catch (error) {
-                        console.warn(`Failed to load NNUE on retry (${nnueId}):`, error);
-                    }
+                    await client.loadNnue(nnueId);
                 }
 
                 // Skill Level 設定の適用（リトライ時も再適用）
@@ -724,13 +722,10 @@ export function useEngineManager({
                     await client.init();
 
                     // NNUE をロード（指定されている場合）
+                    // ⚠️ Desktop では OnceLock により一度ロードした NNUE は変更不可
+                    // 失敗時は throw してユーザーに通知する（アプリ再起動が必要な場合がある）
                     if (nnueId && client.loadNnue) {
-                        try {
-                            await client.loadNnue(nnueId);
-                        } catch (error) {
-                            console.warn(`Failed to load NNUE (${nnueId}):`, error);
-                            // NNUE ロード失敗はエラーにせず、デフォルト評価関数で続行
-                        }
+                        await client.loadNnue(nnueId);
                     }
 
                     // Skill Level 設定の適用
@@ -989,12 +984,10 @@ export function useEngineManager({
                     await client.init();
 
                     // NNUE をロード（指定されている場合）
+                    // ⚠️ Desktop では OnceLock により一度ロードした NNUE は変更不可
+                    // 失敗時は throw してユーザーに通知する（アプリ再起動が必要な場合がある）
                     if (nnueId && client.loadNnue) {
-                        try {
-                            await client.loadNnue(nnueId);
-                        } catch (error) {
-                            console.warn(`Failed to load NNUE for analysis (${nnueId}):`, error);
-                        }
+                        await client.loadNnue(nnueId);
                     }
                 } catch (error) {
                     addErrorLog(`エンジン初期化エラー: ${String(error)}`);
