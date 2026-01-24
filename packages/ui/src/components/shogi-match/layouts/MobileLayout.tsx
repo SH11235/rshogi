@@ -512,8 +512,8 @@ export function MobileLayout({
 
             {/* 設定BottomSheet */}
             <BottomSheet
-                isOpen={isSettingsOpen}
-                onClose={() => setIsSettingsOpen(false)}
+                open={isSettingsOpen}
+                onOpenChange={setIsSettingsOpen}
                 title="設定"
                 height="auto"
             >
@@ -551,8 +551,10 @@ export function MobileLayout({
 
             {/* 手詳細BottomSheet（検討モード用） */}
             <MoveDetailBottomSheet
-                isOpen={selectedMoveForDetail !== null}
-                onClose={handleMoveDetailClose}
+                open={selectedMoveForDetail !== null}
+                onOpenChange={(open) => {
+                    if (!open) handleMoveDetailClose();
+                }}
                 move={selectedMoveForDetail}
                 position={selectedMovePosition}
                 onAddBranch={onAddPvAsBranch}
@@ -562,8 +564,8 @@ export function MobileLayout({
 
             {/* 棋譜詳細BottomSheet（評価値グラフ + 棋譜バー） */}
             <BottomSheet
-                isOpen={isKifuDetailOpen}
-                onClose={() => setIsKifuDetailOpen(false)}
+                open={isKifuDetailOpen}
+                onOpenChange={setIsKifuDetailOpen}
                 title="棋譜詳細"
                 height="half"
             >

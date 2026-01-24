@@ -2849,8 +2849,8 @@ export function ShogiMatch({
 
                         {/* 設定モーダル */}
                         <SettingsModal
-                            isOpen={isSettingsModalOpen}
-                            onClose={() => setIsSettingsModalOpen(false)}
+                            open={isSettingsModalOpen}
+                            onOpenChange={setIsSettingsModalOpen}
                         >
                             <div className="flex flex-col gap-6 min-w-[400px]">
                                 {/* 対局設定 */}

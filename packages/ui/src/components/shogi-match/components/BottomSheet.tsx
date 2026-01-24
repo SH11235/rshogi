@@ -1,12 +1,19 @@
+/**
+ * スマホ向けボトムシートコンポーネント
+ *
+ * 設定パネルなどを下からスライドして表示する
+ * Radix UI Dialog を使用してz-index管理を統一
+ */
+
 import { cn } from "@shogi/design-system";
 import type { ReactElement, ReactNode } from "react";
-import { useEffect, useRef } from "react";
+import { Dialog, DialogClose, DialogOverlay, DialogPortal } from "../../dialog";
 
 interface BottomSheetProps {
     /** シートを開くかどうか */
-    isOpen: boolean;
-    /** 閉じる時のコールバック */
-    onClose: () => void;
+    open: boolean;
+    /** 開閉状態変更時のコールバック */
+    onOpenChange: (open: boolean) => void;
     /** タイトル */
     title: string;
     /** コンテンツ */
@@ -15,10 +22,10 @@ interface BottomSheetProps {
     height?: "half" | "full" | "auto";
 }
 
-const heightClasses = {
-    half: "h-[50vh]",
-    full: "h-[85vh]",
-    auto: "max-h-[85vh]",
+const heightStyles = {
+    half: { height: "50vh" },
+    full: { height: "85vh" },
+    auto: { maxHeight: "85vh" },
 } as const;
 
 /**
@@ -26,131 +33,60 @@ const heightClasses = {
  * 設定パネルなどを下からスライドして表示する
  */
 export function BottomSheet({
-    isOpen,
-    onClose,
+    open,
+    onOpenChange,
     title,
     children,
     height = "auto",
-}: BottomSheetProps): ReactElement | null {
-    const sheetRef = useRef<HTMLDivElement>(null);
-    const closeButtonRef = useRef<HTMLButtonElement>(null);
-
-    // ESCキーで閉じる
-    useEffect(() => {
-        if (!isOpen) return;
-
-        const handleKeyDown = (e: KeyboardEvent) => {
-            if (e.key === "Escape") {
-                onClose();
-            }
-        };
-
-        document.addEventListener("keydown", handleKeyDown);
-        return () => document.removeEventListener("keydown", handleKeyDown);
-    }, [isOpen, onClose]);
-
-    // フォーカストラップ（アクセシビリティ対応）
-    useEffect(() => {
-        if (!isOpen || !sheetRef.current) return;
-
-        const sheet = sheetRef.current;
-        const focusableElements = sheet.querySelectorAll<HTMLElement>(
-            'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-        );
-        const firstFocusable = focusableElements[0];
-        const lastFocusable = focusableElements[focusableElements.length - 1];
-
-        // シートが開いたら閉じるボタンにフォーカス（input/selectへのフォーカスはiOSでズームを引き起こすため避ける）
-        closeButtonRef.current?.focus();
-
-        const handleTabKey = (e: KeyboardEvent) => {
-            if (e.key !== "Tab") return;
-
-            if (e.shiftKey) {
-                if (document.activeElement === firstFocusable) {
-                    e.preventDefault();
-                    lastFocusable?.focus();
-                }
-            } else {
-                if (document.activeElement === lastFocusable) {
-                    e.preventDefault();
-                    firstFocusable?.focus();
-                }
-            }
-        };
-
-        document.addEventListener("keydown", handleTabKey);
-        return () => document.removeEventListener("keydown", handleTabKey);
-    }, [isOpen]);
-
-    // 背景スクロールを無効化
-    useEffect(() => {
-        if (isOpen) {
-            const originalOverflow = document.body.style.overflow;
-            document.body.style.overflow = "hidden";
-            return () => {
-                document.body.style.overflow = originalOverflow;
-            };
-        }
-    }, [isOpen]);
-
-    if (!isOpen) return null;
-
+}: BottomSheetProps): ReactElement {
     return (
-        <>
-            {/* オーバーレイ */}
-            <div
-                className="fixed inset-0 bg-black/50 z-[999]"
-                onClick={onClose}
-                aria-hidden="true"
-            />
-
-            {/* シート本体 */}
-            <div
-                ref={sheetRef}
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby="bottom-sheet-title"
-                className={cn(
-                    "fixed bottom-0 left-0 right-0 z-[1000]",
-                    "w-screen",
-                    "bg-background rounded-t-2xl",
-                    "overflow-x-hidden overflow-y-auto",
-                    // iOS pull-to-refresh との干渉を防ぐ
-                    "overscroll-contain touch-pan-y",
-                    "transition-transform duration-300 ease-out",
-                    "animate-in slide-in-from-bottom",
-                    heightClasses[height],
-                )}
-            >
-                {/* ドラッグハンドル（装飾） */}
-                <div className="flex justify-center py-2 sticky top-0 bg-background">
-                    <div className="w-10 h-1 bg-muted rounded-full" />
-                </div>
-
-                {/* ヘッダー */}
+        <Dialog open={open} onOpenChange={onOpenChange}>
+            <DialogPortal>
+                <DialogOverlay />
                 <div
-                    id="bottom-sheet-title"
-                    className="px-4 pb-3 border-b border-border font-semibold text-lg"
+                    data-state={open ? "open" : "closed"}
+                    className={cn(
+                        "fixed bottom-0 left-0 right-0 z-50",
+                        "w-screen",
+                        "bg-background rounded-t-2xl",
+                        "overflow-x-hidden overflow-y-auto",
+                        "overscroll-contain touch-pan-y",
+                        "duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out",
+                        "data-[state=closed]:fade-out data-[state=open]:fade-in",
+                        "data-[state=closed]:slide-out-to-bottom data-[state=open]:slide-in-from-bottom",
+                    )}
+                    style={{
+                        ...heightStyles[height],
+                        display: "flex",
+                        flexDirection: "column",
+                    }}
                 >
-                    {title}
-                </div>
+                    {/* ドラッグハンドル（装飾） */}
+                    <div className="flex justify-center py-2 sticky top-0 bg-background z-10">
+                        <div className="w-10 h-1 bg-muted rounded-full" />
+                    </div>
 
-                {/* コンテンツ */}
-                <div className="p-4 max-w-full">{children}</div>
+                    {/* ヘッダー */}
+                    <div className="px-4 pb-3 border-b border-border font-semibold text-lg">
+                        {title}
+                    </div>
 
-                {/* 閉じるボタン */}
-                <div className="sticky bottom-0 p-4 bg-background border-t border-border">
-                    <button
-                        ref={closeButtonRef}
-                        type="button"
-                        onClick={onClose}
-                        className="w-full py-3 rounded-lg bg-muted hover:bg-muted/80 font-medium transition-colors"
-                    >
-                        閉じる
-                    </button>
+                    {/* コンテンツ */}
+                    <div className="p-4 max-w-full flex-1 overflow-auto">{children}</div>
+
+                    {/* 閉じるボタン */}
+                    <div className="sticky bottom-0 p-4 bg-background border-t border-border">
+                        <DialogClose asChild>
+                            <button
+                                type="button"
+                                className="w-full py-3 rounded-lg bg-muted hover:bg-muted/80 font-medium transition-colors"
+                            >
+                                閉じる
+                            </button>
+                        </DialogClose>
+                    </div>
                 </div>
-            </div>
-        </>
+            </DialogPortal>
+        </Dialog>
     );
 }

@@ -14,9 +14,9 @@ import { BottomSheet } from "./BottomSheet";
 
 interface MoveDetailBottomSheetProps {
     /** シートを開くかどうか */
-    isOpen: boolean;
-    /** 閉じる時のコールバック */
-    onClose: () => void;
+    open: boolean;
+    /** 開閉状態変更時のコールバック */
+    onOpenChange: (open: boolean) => void;
     /** 表示する手の情報 */
     move: KifMove | null;
     /** 対応する局面（手が指された後の局面） */
@@ -155,14 +155,15 @@ function MobilePvCandidateItem({
  * スマホ向け指し手詳細BottomSheet
  */
 export function MoveDetailBottomSheet({
-    isOpen,
-    onClose,
+    open,
+    onOpenChange,
     move,
     position,
     onAddBranch,
     onPreview,
     isOnMainLine = true,
 }: MoveDetailBottomSheetProps): ReactElement | null {
+    const handleClose = () => onOpenChange(false);
     // 複数PVがある場合はリストで表示、なければ従来の単一PVを使用
     const pvList = useMemo((): PvEvalInfo[] => {
         if (!move) return [];
@@ -205,8 +206,8 @@ export function MoveDetailBottomSheet({
 
     return (
         <BottomSheet
-            isOpen={isOpen}
-            onClose={onClose}
+            open={open}
+            onOpenChange={onOpenChange}
             title={`${move.ply}手目の候補`}
             height="auto"
         >
@@ -247,7 +248,7 @@ export function MoveDetailBottomSheet({
                                 ply={move.ply}
                                 onAddBranch={onAddBranch}
                                 onPreview={onPreview}
-                                onClose={onClose}
+                                onClose={handleClose}
                                 isOnMainLine={isOnMainLine}
                             />
                         ))}
