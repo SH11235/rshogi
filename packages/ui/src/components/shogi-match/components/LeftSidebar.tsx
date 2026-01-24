@@ -192,8 +192,8 @@ export function LeftSidebar({
                         />
                     )}
                 </div>
-                <label className={labelClassName}>
-                    持ち時間(秒)
+                <div className={labelClassName}>
+                    <span>持ち時間(秒)</span>
                     <Input
                         type="number"
                         min={0}
@@ -203,9 +203,9 @@ export function LeftSidebar({
                         className={inputClassName}
                         onChange={(e) => handleTimeChange(side, "mainMs", e.target.value)}
                     />
-                </label>
-                <label className={labelClassName}>
-                    秒読み(秒)
+                </div>
+                <div className={labelClassName}>
+                    <span>秒読み(秒)</span>
                     <Input
                         type="number"
                         min={0}
@@ -215,7 +215,7 @@ export function LeftSidebar({
                         className={inputClassName}
                         onChange={(e) => handleTimeChange(side, "byoyomiMs", e.target.value)}
                     />
-                </label>
+                </div>
             </div>
         );
     };
