@@ -310,6 +310,16 @@ export function createTauriEngineClient(options: TauriEngineClientOptions = {}):
 
             // Note: init() は呼び出し側が明示的に呼ぶ必要がある
         },
+        async loadNnue(nnueId: string): Promise<void> {
+            return runOrMock(
+                async () => {
+                    await ipc.invoke("engine_load_nnue", { nnueId });
+                },
+                async () => {
+                    // モックではNNUEロードは no-op
+                },
+            );
+        },
     };
 }
 

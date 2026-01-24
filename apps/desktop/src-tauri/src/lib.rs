@@ -1262,6 +1262,39 @@ async fn abort_nnue_save(app: AppHandle, id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// NNUE ロードコマンドの引数
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EngineLoadNnueArgs {
+    nnue_id: String,
+}
+
+/// NNUE をエンジンにロード
+/// ⚠️ NNUE は OnceLock で管理されているため、一度ロードすると変更不可
+/// 変更するにはアプリの再起動が必要
+#[tauri::command]
+fn engine_load_nnue(app: AppHandle, args: EngineLoadNnueArgs) -> Result<(), String> {
+    use engine_core::nnue::{init_nnue, is_nnue_initialized};
+
+    // 既に NNUE が初期化済みの場合はエラー
+    if is_nnue_initialized() {
+        return Err("NNUE is already loaded. Restart the app to change NNUE.".to_string());
+    }
+
+    // ID からパスを取得
+    let normalized_id = validate_nnue_id(&args.nnue_id)?;
+    let nnue_path = nnue_path_with_id(&app, &normalized_id, "nnue");
+
+    if !nnue_path.exists() {
+        return Err(format!("NNUE not found: {normalized_id}"));
+    }
+
+    ensure_path_within_dir(&get_nnue_dir(&app), &nnue_path)?;
+
+    // NNUE をロード
+    init_nnue(&nnue_path).map_err(|e| format!("Failed to load NNUE: {e}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1276,6 +1309,7 @@ pub fn run() {
             engine_option,
             engine_legal_moves,
             engine_thread_info,
+            engine_load_nnue,
             get_initial_board,
             parse_sfen_to_board,
             board_to_sfen,

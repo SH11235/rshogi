@@ -970,6 +970,26 @@ export function createWasmEngineClient(options: WasmEngineClientOptions = {}): W
                 ...cachedStaticThreadInfo,
             };
         },
+        async loadNnue(nnueId: string): Promise<void> {
+            if (backend === "mock") {
+                // モックではNNUEロードは no-op
+                return;
+            }
+            if (backend === "error") {
+                throw new Error(
+                    "エンジンはエラー状態です。init()を呼び出してリトライしてください。",
+                );
+            }
+            await ensureReady();
+            if (!worker) {
+                // モックフォールバック時は no-op
+                return;
+            }
+            await postToWorkerAwait({
+                type: "loadNnue",
+                source: { type: "idb", id: nnueId },
+            });
+        },
     };
 }
 

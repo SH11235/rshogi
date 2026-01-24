@@ -159,6 +159,8 @@ interface UseEngineManagerProps {
     onEvalUpdate?: (ply: number, event: EngineInfoEvent) => void;
     /** ログの最大件数 */
     maxLogs?: number;
+    /** 使用する NNUE の ID（null = デフォルト） */
+    nnueId?: string | null;
 }
 
 /** 解析リクエストパラメータ */
@@ -329,6 +331,7 @@ export function useEngineManager({
     onMatchEnd,
     onEvalUpdate,
     maxLogs = 80,
+    nnueId,
 }: UseEngineManagerProps): UseEngineManagerReturn {
     const [engineReady, setEngineReady] = useState<Record<Player, boolean>>({
         sente: false,
@@ -520,6 +523,15 @@ export function useEngineManager({
                 // Retry initialization
                 await client.init();
 
+                // NNUE をロード（指定されている場合）
+                if (nnueId && client.loadNnue) {
+                    try {
+                        await client.loadNnue(nnueId);
+                    } catch (error) {
+                        console.warn(`Failed to load NNUE on retry (${nnueId}):`, error);
+                    }
+                }
+
                 // Skill Level 設定の適用（リトライ時も再適用）
                 const skillSettings = sides[side].skillLevel;
                 if (skillSettings) {
@@ -549,7 +561,7 @@ export function useEngineManager({
                 setIsRetrying((prev) => ({ ...prev, [side]: false }));
             }
         },
-        [addErrorLog, sides],
+        [addErrorLog, nnueId, sides],
     );
 
     const applyMoveFromEngine = useCallback(
@@ -711,6 +723,16 @@ export function useEngineManager({
                 if (!engineState.ready) {
                     await client.init();
 
+                    // NNUE をロード（指定されている場合）
+                    if (nnueId && client.loadNnue) {
+                        try {
+                            await client.loadNnue(nnueId);
+                        } catch (error) {
+                            console.warn(`Failed to load NNUE (${nnueId}):`, error);
+                            // NNUE ロード失敗はエラーにせず、デフォルト評価関数で続行
+                        }
+                    }
+
                     // Skill Level 設定の適用
                     const skillSettings = setting.skillLevel;
                     if (skillSettings) {
@@ -737,6 +759,7 @@ export function useEngineManager({
             engineMap,
             engineOptions,
             movesRef,
+            nnueId,
             passRightsSettings,
             sides,
             startSfen,
@@ -964,6 +987,15 @@ export function useEngineManager({
                     client = engineOpt.createClient();
                     analysisState.client = client;
                     await client.init();
+
+                    // NNUE をロード（指定されている場合）
+                    if (nnueId && client.loadNnue) {
+                        try {
+                            await client.loadNnue(nnueId);
+                        } catch (error) {
+                            console.warn(`Failed to load NNUE for analysis (${nnueId}):`, error);
+                        }
+                    }
                 } catch (error) {
                     addErrorLog(`エンジン初期化エラー: ${String(error)}`);
                     analysisState.ply = null;
@@ -1072,11 +1104,23 @@ export function useEngineManager({
             isAnalyzing,
             isMatchRunning,
             maxLogs,
+            nnueId,
             passRightsSettings,
             onEvalUpdate,
             sides,
         ],
     );
+
+    // nnueId が変更された時に解析エンジンを破棄（次回解析開始時に新しい NNUE でロード）
+    const prevNnueIdRef = useRef(nnueId);
+    useEffect(() => {
+        if (prevNnueIdRef.current !== nnueId) {
+            prevNnueIdRef.current = nnueId;
+            disposeAnalysisEngine().catch((error) => {
+                console.error("Failed to dispose analysis engine on nnueId change:", error);
+            });
+        }
+    }, [disposeAnalysisEngine, nnueId]);
 
     // アンマウント時に解析エンジンも破棄
     useEffect(() => {

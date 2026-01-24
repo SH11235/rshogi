@@ -39,6 +39,8 @@ interface UseEnginePoolOptions {
     onComplete?: () => void;
     /** エラー時のコールバック */
     onError?: (ply: number, error: Error) => void;
+    /** 使用する NNUE の ID（null = デフォルト） */
+    nnueId?: string | null;
 }
 
 /**
@@ -69,7 +71,8 @@ interface EngineWorker {
  * 複数のエンジンインスタンスを並列で使用して一括解析を行う
  */
 export function useEnginePool(options: UseEnginePoolOptions): EnginePoolHandle {
-    const { createClient, workerCount, onProgress, onResult, onComplete, onError } = options;
+    const { createClient, workerCount, onProgress, onResult, onComplete, onError, nnueId } =
+        options;
 
     const [isRunning, setIsRunning] = useState(false);
     const [progress, setProgress] = useState<BatchAnalysisProgress | null>(null);
@@ -222,6 +225,19 @@ export function useEnginePool(options: UseEnginePoolOptions): EnginePoolHandle {
             try {
                 const client = createClient();
                 await client.init();
+
+                // NNUE をロード（指定されている場合）
+                if (nnueId && client.loadNnue) {
+                    try {
+                        await client.loadNnue(nnueId);
+                    } catch (error) {
+                        console.warn(
+                            `Failed to load NNUE for pool worker ${i} (${nnueId}):`,
+                            error,
+                        );
+                    }
+                }
+
                 workers.push({
                     client,
                     handle: null,
@@ -254,7 +270,7 @@ export function useEnginePool(options: UseEnginePoolOptions): EnginePoolHandle {
 
         state.workers = workers;
         state.initialized = true;
-    }, [createClient, workerCount]);
+    }, [createClient, nnueId, workerCount]);
 
     // 一括解析を開始する
     const start = useCallback(
@@ -337,6 +353,15 @@ export function useEnginePool(options: UseEnginePoolOptions): EnginePoolHandle {
         state.workers = [];
         state.initialized = false;
     }, [cancel]);
+
+    // nnueId が変更された時にプールを破棄（次回一括解析開始時に新しい NNUE でロード）
+    const prevNnueIdRef = useRef(nnueId);
+    useEffect(() => {
+        if (prevNnueIdRef.current !== nnueId) {
+            prevNnueIdRef.current = nnueId;
+            void dispose();
+        }
+    }, [dispose, nnueId]);
 
     // マウント時の初期化とアンマウント時のクリーンアップ
     // React 18 Strict Mode では2回実行されるため、mountedRef で状態を追跡

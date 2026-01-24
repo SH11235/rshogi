@@ -396,15 +396,39 @@ export function ShogiMatch({
 
     // NNUE 選択ダイアログの状態
     const [isNnueSelectorOpen, setIsNnueSelectorOpen] = useState(false);
-    const [selectedNnueId, setSelectedNnueId] = useState<string | null>(null);
+    const [selectedNnueId, setSelectedNnueId] = useLocalStorage<string | null>(
+        "shogi:selectedNnueId",
+        null,
+    );
 
     // NNUE ストレージから一覧を取得（表示名の取得に使用）
-    const { nnueList } = useNnueStorage();
+    const { nnueList, isLoading: isNnueListLoading } = useNnueStorage();
     const selectedNnueDisplayName = useMemo(() => {
         if (!selectedNnueId) return null;
         const found = nnueList.find((n) => n.id === selectedNnueId);
         return found?.displayName ?? null;
     }, [selectedNnueId, nnueList]);
+
+    // 選択された NNUE が削除された場合はリセット
+    // isLoading 中はリストが空でも待機（初期ロード完了後に判定）
+    useEffect(() => {
+        if (selectedNnueId && !isNnueListLoading) {
+            const exists = nnueList.some((n) => n.id === selectedNnueId);
+            if (!exists) {
+                setSelectedNnueId(null);
+            }
+        }
+    }, [selectedNnueId, nnueList, isNnueListLoading, setSelectedNnueId]);
+
+    // NNUE 変更時に一括解析をリセット（プール破棄に伴う UI 同期）
+    const prevSelectedNnueIdRef = useRef(selectedNnueId);
+    useEffect(() => {
+        if (prevSelectedNnueIdRef.current !== selectedNnueId) {
+            prevSelectedNnueIdRef.current = selectedNnueId;
+            // 一括解析中なら UI をリセット
+            setBatchAnalysis(null);
+        }
+    }, [selectedNnueId]);
 
     // positionRef を先に定義（コールバックで使用するため）
     const positionRef = useRef<PositionState>(position);
@@ -763,6 +787,7 @@ export function ShogiMatch({
         onMatchEnd: endMatch,
         onEvalUpdate: handleEvalUpdate,
         maxLogs,
+        nnueId: selectedNnueId,
     });
     stopAllEnginesRef.current = stopAllEngines;
 
@@ -798,6 +823,7 @@ export function ShogiMatch({
         onError: (ply, error) => {
             console.error(`解析エラー (ply=${ply}):`, error);
         },
+        nnueId: selectedNnueId,
     });
 
     // キーボード・ホイールナビゲーション用のgoForward（分岐対応）
@@ -2870,6 +2896,7 @@ export function ShogiMatch({
                             isEngineInitialized={isMatchRunning}
                             manifestUrl={manifestUrl}
                             onRequestFilePath={onRequestNnueFilePath}
+                            isAnalyzing={isAnalyzing || batchAnalysis?.isRunning === true}
                         />
                     </div>
                 </section>
