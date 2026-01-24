@@ -25,7 +25,7 @@ function chunkToBase64(bytes: Uint8Array, offset: number, length: number): strin
     return btoa(latin1Decoder.decode(chunk));
 }
 
-export type InvokeFn = typeof tauriInvoke;
+type InvokeFn = typeof tauriInvoke;
 
 export interface TauriNnueStorageOptions {
     /**

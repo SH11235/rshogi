@@ -4,7 +4,7 @@ import type { EngineClient, SkillLevelSettings } from "@shogi/engine-client";
 /**
  * プレイヤーの役割
  */
-export type SideRole = "human" | "engine";
+type SideRole = "human" | "engine";
 
 /**
  * 先手/後手の設定

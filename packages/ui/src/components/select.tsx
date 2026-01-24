@@ -152,13 +152,4 @@ const SelectSeparator = forwardRef<
     );
 });
 
-export {
-    Select,
-    SelectContent,
-    SelectGroup,
-    SelectItem,
-    SelectLabel,
-    SelectSeparator,
-    SelectTrigger,
-    SelectValue,
-};
+export { Select, SelectContent, SelectItem, SelectTrigger, SelectValue };

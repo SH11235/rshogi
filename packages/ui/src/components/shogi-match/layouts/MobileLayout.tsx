@@ -131,6 +131,7 @@ interface MobileLayoutProps {
         owner: Player;
         hand: PositionState["hands"]["sente"] | PositionState["hands"]["gote"];
         isActive: boolean;
+        isAI: boolean;
     };
 
     // Ref
@@ -277,7 +278,6 @@ export function MobileLayout({
             <header className="flex-shrink-0 pt-1">
                 <ClockDisplay
                     clocks={clocks}
-                    sides={sides}
                     isRunning={isMatchRunning}
                     centerContent={
                         <>

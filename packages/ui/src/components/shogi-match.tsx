@@ -33,6 +33,7 @@ import type { EngineOption, SideSetting } from "./shogi-match/components/MatchSe
 import { MoveDetailPanel } from "./shogi-match/components/MoveDetailPanel";
 import type { PassDisabledReason } from "./shogi-match/components/PassButton";
 import { PassRightsDisplay } from "./shogi-match/components/PassRightsDisplay";
+import { PlayerIcon } from "./shogi-match/components/PlayerIcon";
 import { PvPreviewDialog } from "./shogi-match/components/PvPreviewDialog";
 import { SettingsModal } from "./shogi-match/components/SettingsModal";
 import { applyDropResult, DragGhost, type DropResult, usePieceDnd } from "./shogi-match/dnd";
@@ -199,6 +200,8 @@ interface PlayerHandSectionProps {
     onDecrement?: (piece: PieceType) => void;
     /** 盤面反転状態 */
     flipBoard?: boolean;
+    /** AIプレイヤーかどうか */
+    isAI?: boolean;
 }
 
 function PlayerHandSection({
@@ -213,6 +216,7 @@ function PlayerHandSection({
     onIncrement,
     onDecrement,
     flipBoard,
+    isAI,
 }: PlayerHandSectionProps): ReactElement {
     return (
         <div data-zone={`hand-${owner}`} className="w-full">
@@ -228,6 +232,7 @@ function PlayerHandSection({
                 onIncrement={onIncrement}
                 onDecrement={onDecrement}
                 flipBoard={flipBoard}
+                isAI={isAI}
             />
         </div>
     );
@@ -519,6 +524,7 @@ export function ShogiMatch({
                 owner,
                 hand: owner === "sente" ? position.hands.sente : position.hands.gote,
                 isActive: isActiveInReview || isActiveInMatch,
+                isAI: sides[owner].role === "engine",
             };
         },
         [flipBoard, isReviewMode, isEditMode, position.turn, position.hands, sides],
@@ -2516,11 +2522,7 @@ export function ShogiMatch({
                                         className={`flex flex-col gap-2 items-center ${isDraggingPiece ? "touch-none" : ""}`}
                                     >
                                         {/* 時間管理（将棋盤の上） */}
-                                        <ClockDisplay
-                                            clocks={clocks}
-                                            sides={sides}
-                                            isRunning={isMatchRunning}
-                                        />
+                                        <ClockDisplay clocks={clocks} isRunning={isMatchRunning} />
 
                                         {/* 盤の上側の持ち駒（通常:後手、反転時:先手） */}
                                         {(() => {
@@ -2543,20 +2545,17 @@ export function ShogiMatch({
 
                                                         {/* 手番表示 */}
                                                         <output
-                                                            className={`${TEXT_CLASSES.mutedSecondary} whitespace-nowrap`}
+                                                            className={`${TEXT_CLASSES.mutedSecondary} whitespace-nowrap flex items-center gap-1`}
                                                         >
                                                             手番:{" "}
-                                                            <span
-                                                                className={`font-semibold text-[18px] ${
-                                                                    position.turn === "sente"
-                                                                        ? "text-wafuu-shu"
-                                                                        : "text-wafuu-ai"
-                                                                }`}
-                                                            >
-                                                                {position.turn === "sente"
-                                                                    ? "☗"
-                                                                    : "☖"}
-                                                            </span>
+                                                            <PlayerIcon
+                                                                side={position.turn}
+                                                                isAI={
+                                                                    sides[position.turn].role ===
+                                                                    "engine"
+                                                                }
+                                                                size="lg"
+                                                            />
                                                         </output>
 
                                                         {/* 反転ボタン */}
@@ -2600,6 +2599,7 @@ export function ShogiMatch({
                                                             handleDecrementHand(info.owner, piece)
                                                         }
                                                         flipBoard={flipBoard}
+                                                        isAI={info.isAI}
                                                     />
                                                     {/* パス権表示（上側プレイヤー） */}
                                                     {passRightsSettings && (
@@ -2695,6 +2695,7 @@ export function ShogiMatch({
                                                             handleDecrementHand(info.owner, piece)
                                                         }
                                                         flipBoard={flipBoard}
+                                                        isAI={info.isAI}
                                                     />
                                                     {/* パス権表示（下側プレイヤー） */}
                                                     {passRightsSettings && (

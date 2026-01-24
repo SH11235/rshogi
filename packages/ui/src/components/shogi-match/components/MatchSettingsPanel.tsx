@@ -44,7 +44,7 @@ const inputClassName =
     "border border-[hsl(var(--border,0_0%_86%))] bg-[hsl(var(--card,0_0%_100%))] text-sm";
 const labelClassName = "flex flex-col gap-1 text-xs text-muted-foreground";
 
-export function MatchSettingsPanel({
+function MatchSettingsPanel({
     sides,
     onSidesChange,
     timeSettings,

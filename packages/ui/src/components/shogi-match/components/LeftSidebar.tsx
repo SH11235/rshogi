@@ -6,6 +6,7 @@ import { Input } from "../../input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../select";
 import type { ClockSettings } from "../hooks/useClockManager";
 import type { AnalysisSettings, PassRightsSettings, SideSetting } from "../types";
+import { PlayerIcon } from "./PlayerIcon";
 import { SkillLevelSelector } from "./SkillLevelSelector";
 
 type SideKey = "sente" | "gote";
@@ -173,10 +174,23 @@ export function LeftSidebar({
                         </SelectTrigger>
                         <SelectContent>
                             <SelectItem value="human">人間</SelectItem>
-                            <SelectItem value="material">Material</SelectItem>
+                            <SelectItem value="material">
+                                <span className="flex items-center gap-1.5">
+                                    <PlayerIcon side="sente" isAI showBorder={false} size="xs" />
+                                    Material
+                                </span>
+                            </SelectItem>
                             {nnueList.map((nnue) => (
                                 <SelectItem key={nnue.id} value={`nnue:${nnue.id}`}>
-                                    {nnue.displayName}
+                                    <span className="flex items-center gap-1.5">
+                                        <PlayerIcon
+                                            side="sente"
+                                            isAI
+                                            showBorder={false}
+                                            size="xs"
+                                        />
+                                        {nnue.displayName}
+                                    </span>
                                 </SelectItem>
                             ))}
                         </SelectContent>
