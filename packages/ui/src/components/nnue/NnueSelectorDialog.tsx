@@ -1,4 +1,4 @@
-import { type ReactElement, useCallback, useEffect, useState } from "react";
+import { type ReactElement, useCallback, useEffect, useMemo, useState } from "react";
 import { useNnueSelector } from "../../hooks/useNnueSelector";
 import { useNnueStorage } from "../../hooks/useNnueStorage";
 import { usePresetManager } from "../../hooks/usePresetManager";
@@ -30,6 +30,84 @@ export interface NnueSelectorDialogProps {
 }
 
 /**
+ * NNUE ストレージ使用量と注意事項を表示するコンポーネント
+ */
+function NnueStorageInfo({ totalSize }: { totalSize: number }): ReactElement {
+    const [isExpanded, setIsExpanded] = useState(false);
+
+    return (
+        <div
+            style={{
+                fontSize: "12px",
+                color: "hsl(var(--muted-foreground, 0 0% 45%))",
+            }}
+        >
+            <div
+                style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "flex-end",
+                    gap: "6px",
+                }}
+            >
+                <span>NNUE 使用量: {(totalSize / (1024 * 1024)).toFixed(1)} MB</span>
+                <button
+                    type="button"
+                    onClick={() => setIsExpanded(!isExpanded)}
+                    style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        width: "16px",
+                        height: "16px",
+                        padding: 0,
+                        border: "none",
+                        borderRadius: "50%",
+                        backgroundColor: "hsl(var(--muted, 0 0% 96%))",
+                        color: "hsl(var(--muted-foreground, 0 0% 45%))",
+                        cursor: "pointer",
+                        fontSize: "11px",
+                        fontWeight: 600,
+                    }}
+                    aria-label="ストレージについての情報"
+                    aria-expanded={isExpanded}
+                >
+                    ?
+                </button>
+            </div>
+            {isExpanded && (
+                <div
+                    style={{
+                        marginTop: "8px",
+                        padding: "12px",
+                        borderRadius: "6px",
+                        backgroundColor: "hsl(var(--muted, 0 0% 96%))",
+                        fontSize: "13px",
+                    }}
+                >
+                    <div style={{ fontWeight: 600, marginBottom: "8px" }}>ストレージについて</div>
+                    <ul
+                        style={{
+                            margin: 0,
+                            paddingLeft: "16px",
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "6px",
+                        }}
+                    >
+                        <li>NNUE ファイルはブラウザのストレージに保存されます</li>
+                        <li>
+                            ブラウザの設定やストレージ不足により、自動削除される可能性があります
+                        </li>
+                        <li>大量のファイルをインポートするとストレージを消費します</li>
+                    </ul>
+                </div>
+            )}
+        </div>
+    );
+}
+
+/**
  * NNUE 選択モーダル
  *
  * NNUE 一覧表示、インポート、削除、選択を一つのモーダルで提供する。
@@ -52,7 +130,6 @@ export function NnueSelectorDialog({
         importFromPath,
         deleteNnue,
         clearError: clearStorageError,
-        storageUsage,
         refreshList,
         capabilities,
     } = useNnueStorage();
@@ -162,6 +239,12 @@ export function NnueSelectorDialog({
     // 解析中は NNUE 変更を許可しない（暗黙のキャンセルを防ぐため）
     const isConfirmDisabled = isOperationInProgress || isAnalyzing;
 
+    // NNUE ファイルの合計サイズを計算
+    const totalNnueSize = useMemo(
+        () => nnueList.reduce((sum, meta) => sum + meta.size, 0),
+        [nnueList],
+    );
+
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
             <DialogContent
@@ -260,20 +343,8 @@ export function NnueSelectorDialog({
                         />
                     )}
 
-                    {/* ストレージ使用量 */}
-                    {storageUsage && (
-                        <div
-                            style={{
-                                fontSize: "12px",
-                                color: "hsl(var(--muted-foreground, 0 0% 45%))",
-                                textAlign: "right",
-                            }}
-                        >
-                            使用量: {(storageUsage.used / (1024 * 1024)).toFixed(1)} MB
-                            {storageUsage.quota &&
-                                ` / ${(storageUsage.quota / (1024 * 1024)).toFixed(0)} MB`}
-                        </div>
-                    )}
+                    {/* NNUE 使用量 */}
+                    <NnueStorageInfo totalSize={totalNnueSize} />
 
                     {/* 進捗オーバーレイ */}
                     <NnueProgressOverlay

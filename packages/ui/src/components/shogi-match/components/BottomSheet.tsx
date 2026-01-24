@@ -25,7 +25,9 @@ interface BottomSheetProps {
 const heightStyles = {
     half: { height: "50vh" },
     full: { height: "85vh" },
-    auto: { maxHeight: "85vh" },
+    // auto の場合も height を設定し、内部の flex レイアウトを機能させる
+    // コンテンツが少ない場合は min-content で縮み、多い場合は 85vh でスクロール
+    auto: { height: "auto", maxHeight: "85vh" },
 } as const;
 
 /**
@@ -72,7 +74,8 @@ export function BottomSheet({
                     </div>
 
                     {/* コンテンツ */}
-                    <div className="p-4 max-w-full flex-1 overflow-auto">{children}</div>
+                    {/* min-h-0 は flexbox 内でスクロールを機能させるために必要 */}
+                    <div className="p-4 max-w-full flex-1 min-h-0 overflow-auto">{children}</div>
 
                     {/* 閉じるボタン */}
                     <div className="sticky bottom-0 p-4 bg-background border-t border-border">

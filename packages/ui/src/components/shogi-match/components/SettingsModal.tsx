@@ -74,7 +74,10 @@ export function SettingsModal({ open, onOpenChange, children }: SettingsModalPro
                 </DialogHeader>
 
                 {/* コンテンツ */}
-                <div style={{ padding: "24px", overflow: "auto", flex: 1 }}>{children}</div>
+                {/* minHeight: 0 は flexbox 内でスクロールを機能させるために必要 */}
+                <div style={{ padding: "24px", overflow: "auto", flex: 1, minHeight: 0 }}>
+                    {children}
+                </div>
             </DialogContent>
         </Dialog>
     );
