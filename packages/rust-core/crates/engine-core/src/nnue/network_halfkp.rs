@@ -1281,6 +1281,19 @@ pub type HalfKP512Pairwise = NetworkHalfKP<512, 1024, 512, 8, 96, PairwiseCReLU>
 // L1=512, FT_OUT=1024, L2=32, L3=32
 /// HalfKP 512x2-32-32 CReLU
 pub type HalfKP512_32_32CReLU = NetworkHalfKP<512, 1024, 1024, 32, 32, CReLU>;
+/// HalfKP 512x2-32-32 SCReLU
+pub type HalfKP512_32_32SCReLU = NetworkHalfKP<512, 1024, 1024, 32, 32, SCReLU>;
+/// HalfKP 512/2x2-32-32 PairwiseCReLU (L1入力=512, Pairwise乗算で次元半減)
+pub type HalfKP512_32_32Pairwise = NetworkHalfKP<512, 1024, 512, 32, 32, PairwiseCReLU>;
+
+// L1=1024, FT_OUT=2048, L2=8, L3=32
+// CReLU/SCReLU: L1_INPUT=2048, Pairwise: L1_INPUT=1024
+/// HalfKP 1024x2-8-32 CReLU
+pub type HalfKP1024_8_32CReLU = NetworkHalfKP<1024, 2048, 2048, 8, 32, CReLU>;
+/// HalfKP 1024x2-8-32 SCReLU
+pub type HalfKP1024_8_32SCReLU = NetworkHalfKP<1024, 2048, 2048, 8, 32, SCReLU>;
+/// HalfKP 1024/2x2-8-32 PairwiseCReLU (L1入力=1024, Pairwise乗算で次元半減)
+pub type HalfKP1024_8_32Pairwise = NetworkHalfKP<1024, 2048, 1024, 8, 32, PairwiseCReLU>;
 
 // =============================================================================
 // テスト

@@ -10,16 +10,24 @@
 //! │   ├── CReLU_32_32
 //! │   ├── SCReLU_32_32
 //! │   └── Pairwise_32_32
-//! └── L512(HalfKPL512)
-//!     ├── CReLU_8_96
-//!     ├── SCReLU_8_96
-//!     ├── Pairwise_8_96
-//!     └── CReLU_32_32
+//! ├── L512(HalfKPL512)
+//! │   ├── CReLU_8_96
+//! │   ├── SCReLU_8_96
+//! │   ├── Pairwise_8_96
+//! │   ├── CReLU_32_32
+//! │   ├── SCReLU_32_32
+//! │   └── Pairwise_32_32
+//! └── L1024(HalfKPL1024)
+//!     ├── CReLU_8_32
+//!     ├── SCReLU_8_32
+//!     └── Pairwise_8_32
 //! ```
 
+mod l1024;
 mod l256;
 mod l512;
 
+pub use l1024::HalfKPL1024;
 pub use l256::HalfKPL256;
 pub use l512::HalfKPL512;
 
@@ -36,6 +44,7 @@ use crate::types::Value;
 pub enum HalfKPNetwork {
     L256(HalfKPL256),
     L512(HalfKPL512),
+    L1024(HalfKPL1024),
 }
 
 impl HalfKPNetwork {
@@ -45,6 +54,7 @@ impl HalfKPNetwork {
         match (self, stack) {
             (Self::L256(net), HalfKPStack::L256(st)) => net.evaluate(pos, st),
             (Self::L512(net), HalfKPStack::L512(st)) => net.evaluate(pos, st),
+            (Self::L1024(net), HalfKPStack::L1024(st)) => net.evaluate(pos, st),
             _ => unreachable!("L1 mismatch: network={}, stack={}", self.l1_size(), stack.l1_size()),
         }
     }
@@ -55,6 +65,7 @@ impl HalfKPNetwork {
         match (self, stack) {
             (Self::L256(net), HalfKPStack::L256(st)) => net.refresh_accumulator(pos, st),
             (Self::L512(net), HalfKPStack::L512(st)) => net.refresh_accumulator(pos, st),
+            (Self::L1024(net), HalfKPStack::L1024(st)) => net.refresh_accumulator(pos, st),
             _ => unreachable!("L1 mismatch"),
         }
     }
@@ -75,6 +86,9 @@ impl HalfKPNetwork {
             (Self::L512(net), HalfKPStack::L512(st)) => {
                 net.update_accumulator(pos, dirty, st, source_idx)
             }
+            (Self::L1024(net), HalfKPStack::L1024(st)) => {
+                net.update_accumulator(pos, dirty, st, source_idx)
+            }
             _ => unreachable!("L1 mismatch"),
         }
     }
@@ -92,6 +106,9 @@ impl HalfKPNetwork {
                 net.forward_update_incremental(pos, st, source_idx)
             }
             (Self::L512(net), HalfKPStack::L512(st)) => {
+                net.forward_update_incremental(pos, st, source_idx)
+            }
+            (Self::L1024(net), HalfKPStack::L1024(st)) => {
                 net.forward_update_incremental(pos, st, source_idx)
             }
             _ => unreachable!("L1 mismatch"),
@@ -117,6 +134,10 @@ impl HalfKPNetwork {
                 let net = HalfKPL512::read(reader, l2, l3, activation)?;
                 Ok(Self::L512(net))
             }
+            1024 => {
+                let net = HalfKPL1024::read(reader, l2, l3, activation)?;
+                Ok(Self::L1024(net))
+            }
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Unsupported HalfKP L1: {l1}"),
@@ -129,6 +150,7 @@ impl HalfKPNetwork {
         match self {
             Self::L256(_) => 256,
             Self::L512(_) => 512,
+            Self::L1024(_) => 1024,
         }
     }
 
@@ -137,6 +159,7 @@ impl HalfKPNetwork {
         match self {
             Self::L256(net) => net.architecture_name(),
             Self::L512(net) => net.architecture_name(),
+            Self::L1024(net) => net.architecture_name(),
         }
     }
 
@@ -145,6 +168,7 @@ impl HalfKPNetwork {
         match self {
             Self::L256(net) => net.architecture_spec(),
             Self::L512(net) => net.architecture_spec(),
+            Self::L1024(net) => net.architecture_spec(),
         }
     }
 
@@ -153,6 +177,7 @@ impl HalfKPNetwork {
         let mut specs = Vec::new();
         specs.extend_from_slice(HalfKPL256::SUPPORTED_SPECS);
         specs.extend_from_slice(HalfKPL512::SUPPORTED_SPECS);
+        specs.extend_from_slice(HalfKPL1024::SUPPORTED_SPECS);
         specs
     }
 }
@@ -163,10 +188,10 @@ impl HalfKPNetwork {
 pub enum HalfKPStack {
     L256(AccumulatorStackHalfKP<256>),
     L512(AccumulatorStackHalfKP<512>),
+    L1024(AccumulatorStackHalfKP<1024>),
 }
 
 impl HalfKPStack {
-    /// ネットワークに対応するスタックを生成
     /// ネットワークに対応するスタックを生成
     ///
     /// バリアントマッチを使用し、新しい L1 追加時にコンパイル時に漏れ検知。
@@ -174,6 +199,7 @@ impl HalfKPStack {
         match net {
             HalfKPNetwork::L256(_) => Self::L256(AccumulatorStackHalfKP::<256>::new()),
             HalfKPNetwork::L512(_) => Self::L512(AccumulatorStackHalfKP::<512>::new()),
+            HalfKPNetwork::L1024(_) => Self::L1024(AccumulatorStackHalfKP::<1024>::new()),
         }
     }
 
@@ -182,6 +208,7 @@ impl HalfKPStack {
         match self {
             Self::L256(_) => 256,
             Self::L512(_) => 512,
+            Self::L1024(_) => 1024,
         }
     }
 
@@ -190,6 +217,7 @@ impl HalfKPStack {
         match self {
             Self::L256(s) => s.reset(),
             Self::L512(s) => s.reset(),
+            Self::L1024(s) => s.reset(),
         }
     }
 
@@ -198,6 +226,7 @@ impl HalfKPStack {
         match self {
             Self::L256(s) => s.push(dirty),
             Self::L512(s) => s.push(dirty),
+            Self::L1024(s) => s.push(dirty),
         }
     }
 
@@ -206,6 +235,7 @@ impl HalfKPStack {
         match self {
             Self::L256(s) => s.pop(),
             Self::L512(s) => s.pop(),
+            Self::L1024(s) => s.pop(),
         }
     }
 
@@ -214,6 +244,7 @@ impl HalfKPStack {
         match self {
             Self::L256(s) => s.current_index(),
             Self::L512(s) => s.current_index(),
+            Self::L1024(s) => s.current_index(),
         }
     }
 
@@ -222,6 +253,7 @@ impl HalfKPStack {
         match self {
             Self::L256(s) => s.find_usable_accumulator(),
             Self::L512(s) => s.find_usable_accumulator(),
+            Self::L1024(s) => s.find_usable_accumulator(),
         }
     }
 
@@ -231,6 +263,7 @@ impl HalfKPStack {
         match self {
             Self::L256(s) => s.current().accumulator.computed_accumulation,
             Self::L512(s) => s.current().accumulator.computed_accumulation,
+            Self::L1024(s) => s.current().accumulator.computed_accumulation,
         }
     }
 
@@ -240,6 +273,7 @@ impl HalfKPStack {
         match self {
             Self::L256(s) => s.current().previous,
             Self::L512(s) => s.current().previous,
+            Self::L1024(s) => s.current().previous,
         }
     }
 
@@ -249,6 +283,7 @@ impl HalfKPStack {
         match self {
             Self::L256(s) => s.entry_at(idx).accumulator.computed_accumulation,
             Self::L512(s) => s.entry_at(idx).accumulator.computed_accumulation,
+            Self::L1024(s) => s.entry_at(idx).accumulator.computed_accumulation,
         }
     }
 
@@ -258,6 +293,7 @@ impl HalfKPStack {
         match self {
             Self::L256(s) => s.current().dirty_piece,
             Self::L512(s) => s.current().dirty_piece,
+            Self::L1024(s) => s.current().dirty_piece,
         }
     }
 }
@@ -280,13 +316,16 @@ mod tests {
 
         let stack = HalfKPStack::L512(AccumulatorStackHalfKP::<512>::new());
         assert_eq!(stack.l1_size(), 512);
+
+        let stack = HalfKPStack::L1024(AccumulatorStackHalfKP::<1024>::new());
+        assert_eq!(stack.l1_size(), 1024);
     }
 
     #[test]
     fn test_supported_specs_combined() {
         let specs = HalfKPNetwork::supported_specs();
-        // 256: 3, 512: 4
-        assert_eq!(specs.len(), 7);
+        // 256: 3, 512: 6, 1024: 3
+        assert_eq!(specs.len(), 12);
 
         // 全て HalfKP
         for spec in &specs {

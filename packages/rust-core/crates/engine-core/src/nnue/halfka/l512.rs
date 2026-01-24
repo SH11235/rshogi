@@ -7,7 +7,10 @@ use crate::position::Position;
 use crate::types::Value;
 
 // 型エイリアスを aliases 経由でインポート
-use crate::nnue::aliases::{HalfKA512CReLU, HalfKA512Pairwise, HalfKA512SCReLU};
+use crate::nnue::aliases::{
+    HalfKA512CReLU, HalfKA512Pairwise, HalfKA512SCReLU, HalfKA512_32_32CReLU,
+    HalfKA512_32_32Pairwise, HalfKA512_32_32SCReLU,
+};
 
 crate::define_l1_variants!(
     enum HalfKAL512,
@@ -17,11 +20,14 @@ crate::define_l1_variants!(
     stack AccumulatorStackHalfKA<512>,
 
     variants {
+        // L2=8, L3=96
         (8,  96, CReLU,         "CReLU")    => CReLU8x96      : HalfKA512CReLU,
         (8,  96, SCReLU,        "SCReLU")   => SCReLU8x96     : HalfKA512SCReLU,
         (8,  96, PairwiseCReLU, "Pairwise") => Pairwise8x96   : HalfKA512Pairwise,
-        // 将来の追加はここに1行追加するだけ:
-        // (32, 32, CReLU,         "CReLU")    => CReLU32x32   : HalfKA512_32_32CReLU,
+        // L2=32, L3=32
+        (32, 32, CReLU,         "CReLU")    => CReLU32x32     : HalfKA512_32_32CReLU,
+        (32, 32, SCReLU,        "SCReLU")   => SCReLU32x32    : HalfKA512_32_32SCReLU,
+        (32, 32, PairwiseCReLU, "Pairwise") => Pairwise32x32  : HalfKA512_32_32Pairwise,
     }
 );
 
@@ -31,7 +37,7 @@ mod tests {
 
     #[test]
     fn test_supported_specs() {
-        assert_eq!(HalfKAL512::SUPPORTED_SPECS.len(), 3);
+        assert_eq!(HalfKAL512::SUPPORTED_SPECS.len(), 6);
 
         let spec = &HalfKAL512::SUPPORTED_SPECS[0];
         assert_eq!(spec.feature_set, FeatureSet::HalfKA);

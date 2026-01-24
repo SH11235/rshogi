@@ -9,7 +9,7 @@ use crate::types::Value;
 // 型エイリアスを aliases 経由でインポート
 use crate::nnue::aliases::{
     HalfKA1024CReLU, HalfKA1024Pairwise, HalfKA1024SCReLU, HalfKA1024_8_32CReLU,
-    HalfKA1024_8_32SCReLU,
+    HalfKA1024_8_32Pairwise, HalfKA1024_8_32SCReLU,
 };
 
 crate::define_l1_variants!(
@@ -27,7 +27,7 @@ crate::define_l1_variants!(
         // L2=8, L3=32 バリアント
         (8,  32, CReLU,         "CReLU")    => CReLU8x32     : HalfKA1024_8_32CReLU,
         (8,  32, SCReLU,        "SCReLU")   => SCReLU8x32    : HalfKA1024_8_32SCReLU,
-        // 将来の追加はここに1行追加するだけ
+        (8,  32, PairwiseCReLU, "Pairwise") => Pairwise8x32  : HalfKA1024_8_32Pairwise,
     }
 );
 
@@ -37,7 +37,7 @@ mod tests {
 
     #[test]
     fn test_supported_specs() {
-        assert_eq!(HalfKAL1024::SUPPORTED_SPECS.len(), 5);
+        assert_eq!(HalfKAL1024::SUPPORTED_SPECS.len(), 6);
 
         // 8-96 CReLU
         let spec = &HalfKAL1024::SUPPORTED_SPECS[0];
