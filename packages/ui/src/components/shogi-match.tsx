@@ -29,7 +29,6 @@ import { HandPiecesDisplay } from "./shogi-match/components/HandPiecesDisplay";
 import { KifuImportPanel } from "./shogi-match/components/KifuImportPanel";
 import { KifuPanel } from "./shogi-match/components/KifuPanel";
 import { MatchControls } from "./shogi-match/components/MatchControls";
-import type { EngineOption, SideSetting } from "./shogi-match/components/MatchSettingsPanel";
 import { MoveDetailPanel } from "./shogi-match/components/MoveDetailPanel";
 import type { PassDisabledReason } from "./shogi-match/components/PassButton";
 import { PassRightsDisplay } from "./shogi-match/components/PassRightsDisplay";
@@ -37,10 +36,6 @@ import { PlayerIcon } from "./shogi-match/components/PlayerIcon";
 import { PvPreviewDialog } from "./shogi-match/components/PvPreviewDialog";
 import { SettingsModal } from "./shogi-match/components/SettingsModal";
 import { applyDropResult, DragGhost, type DropResult, usePieceDnd } from "./shogi-match/dnd";
-
-// EngineOption 型を外部に再エクスポート
-export type { EngineOption };
-
 import { useNnueStorage } from "../hooks/useNnueStorage";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./dialog";
 import { NnueManagerDialog } from "./nnue/NnueManagerDialog";
@@ -61,10 +56,12 @@ import {
     DEFAULT_DISPLAY_SETTINGS,
     DEFAULT_PASS_RIGHTS_SETTINGS,
     type DisplaySettings,
+    type EngineOption,
     type GameMode,
     type Message,
     type PassRightsSettings,
     type PromotionSelection,
+    type SideSetting,
 } from "./shogi-match/types";
 import {
     addToHand,

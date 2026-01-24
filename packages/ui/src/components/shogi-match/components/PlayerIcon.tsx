@@ -5,12 +5,12 @@ import { Dialog, DialogContent } from "../../dialog";
 
 type IconSize = "xs" | "sm" | "md" | "lg" | "xl";
 
-const SIZE_CONFIG: Record<IconSize, { icon: string; text: string }> = {
-    xs: { icon: "w-4 h-4", text: "text-sm" },
-    sm: { icon: "w-5 h-5", text: "text-base" },
-    md: { icon: "w-6 h-6", text: "text-lg" },
-    lg: { icon: "w-8 h-8", text: "text-xl" },
-    xl: { icon: "w-10 h-10", text: "text-2xl" },
+const SIZE_CONFIG: Record<IconSize, { icon: string; text: string; container: string }> = {
+    xs: { icon: "w-4 h-4", text: "text-sm", container: "w-4 h-4" },
+    sm: { icon: "w-5 h-5", text: "text-base", container: "w-5 h-5" },
+    md: { icon: "w-6 h-6", text: "text-lg", container: "w-6 h-6" },
+    lg: { icon: "w-8 h-8", text: "text-xl", container: "w-8 h-8" },
+    xl: { icon: "w-10 h-10", text: "text-2xl", container: "w-10 h-10" },
 };
 
 interface PlayerIconProps {
@@ -91,7 +91,13 @@ export function PlayerIcon({
 
     return (
         <span
-            className={cn("font-bold select-none", config.text, colorClass, className)}
+            className={cn(
+                "inline-flex items-center justify-center font-bold select-none",
+                config.container,
+                config.text,
+                colorClass,
+                className,
+            )}
             title={side === "sente" ? "先手" : "後手"}
         >
             {marker}

@@ -10,7 +10,6 @@ import type { ComponentPropsWithoutRef, ComponentRef, ReactElement } from "react
 import { forwardRef } from "react";
 
 const Select = SelectPrimitive.Root;
-const SelectGroup = SelectPrimitive.Group;
 const SelectValue = SelectPrimitive.Value;
 
 const SelectTrigger = forwardRef<
@@ -123,32 +122,6 @@ const SelectItem = forwardRef<
             </span>
             <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
         </SelectPrimitive.Item>
-    );
-});
-
-const SelectLabel = forwardRef<
-    ComponentRef<typeof SelectPrimitive.Label>,
-    ComponentPropsWithoutRef<typeof SelectPrimitive.Label>
->(function SelectLabel({ className, ...props }, ref): ReactElement {
-    return (
-        <SelectPrimitive.Label
-            className={cn("py-1.5 pl-8 pr-2 text-xs font-semibold", className)}
-            ref={ref}
-            {...props}
-        />
-    );
-});
-
-const SelectSeparator = forwardRef<
-    ComponentRef<typeof SelectPrimitive.Separator>,
-    ComponentPropsWithoutRef<typeof SelectPrimitive.Separator>
->(function SelectSeparator({ className, ...props }, ref): ReactElement {
-    return (
-        <SelectPrimitive.Separator
-            className={cn("-mx-1 my-1 h-px bg-wafuu-border", className)}
-            ref={ref}
-            {...props}
-        />
     );
 });
 

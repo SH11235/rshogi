@@ -12,3 +12,4 @@ export * from "./components/spinner";
 export * from "./components/tooltip";
 export * from "./hooks";
 export * from "./providers/NnueContext";
+export * from "./components/shogi-match/types";

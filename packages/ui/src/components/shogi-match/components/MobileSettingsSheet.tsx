@@ -2,8 +2,13 @@ import type { SkillLevelSettings } from "@shogi/engine-client";
 import { type ReactElement, useEffect, useState } from "react";
 import { Switch } from "../../switch";
 import type { ClockSettings } from "../hooks/useClockManager";
-import type { DisplaySettings, PassRightsSettings, SquareNotation } from "../types";
-import type { EngineOption, SideSetting } from "./MatchSettingsPanel";
+import type {
+    DisplaySettings,
+    EngineOption,
+    PassRightsSettings,
+    SideSetting,
+    SquareNotation,
+} from "../types";
 import { SkillLevelSelector } from "./SkillLevelSelector";
 
 type SideKey = "sente" | "gote";

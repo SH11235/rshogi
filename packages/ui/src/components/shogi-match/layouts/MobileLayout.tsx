@@ -6,7 +6,6 @@ import { BottomSheet } from "../components/BottomSheet";
 import { ClockDisplay } from "../components/ClockDisplay";
 import { EvalGraph } from "../components/EvalGraph";
 import { PausedModeControls, PlayingModeControls } from "../components/GameModeControls";
-import type { EngineOption, SideSetting } from "../components/MatchSettingsPanel";
 import { MobileBoardSection } from "../components/MobileBoardSection";
 import { type KifuMove, MobileKifuBar } from "../components/MobileKifuBar";
 import { MobileNavigation } from "../components/MobileNavigation";
@@ -16,10 +15,12 @@ import { PassButton, type PassDisabledReason } from "../components/PassButton";
 import type { ClockSettings, TickState } from "../hooks/useClockManager";
 import type {
     DisplaySettings,
+    EngineOption,
     GameMode,
     Message,
     PassRightsSettings,
     PromotionSelection,
+    SideSetting,
 } from "../types";
 import type { EvalHistory, KifMove as FullKifMove } from "../utils/kifFormat";
 
