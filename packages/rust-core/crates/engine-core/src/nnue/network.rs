@@ -15,13 +15,13 @@ use super::accumulator_stack_variant::AccumulatorStackVariant;
 use super::activation::detect_activation_from_arch;
 use super::constants::{MAX_ARCH_LEN, NNUE_VERSION, NNUE_VERSION_HALFKA};
 use super::network_halfka::{
-    AccumulatorHalfKA, AccumulatorStackHalfKA, HalfKA1024CReLU, HalfKA1024SCReLU,
-    HalfKA1024_8_32CReLU, HalfKA1024_8_32SCReLU, HalfKA256CReLU, HalfKA256SCReLU, HalfKA512CReLU,
-    HalfKA512SCReLU,
+    AccumulatorHalfKA, AccumulatorStackHalfKA, HalfKA1024CReLU, HalfKA1024Pairwise,
+    HalfKA1024SCReLU, HalfKA1024_8_32CReLU, HalfKA1024_8_32SCReLU, HalfKA256CReLU,
+    HalfKA256Pairwise, HalfKA256SCReLU, HalfKA512CReLU, HalfKA512Pairwise, HalfKA512SCReLU,
 };
 use super::network_halfkp::{
-    AccumulatorHalfKP, AccumulatorStackHalfKP, HalfKP256CReLU, HalfKP256SCReLU, HalfKP512CReLU,
-    HalfKP512SCReLU,
+    AccumulatorHalfKP, AccumulatorStackHalfKP, HalfKP256CReLU, HalfKP256Pairwise, HalfKP256SCReLU,
+    HalfKP512CReLU, HalfKP512Pairwise, HalfKP512SCReLU,
 };
 use super::network_layer_stacks::NetworkLayerStacks;
 #[cfg(not(feature = "tournament"))]
@@ -90,22 +90,32 @@ pub enum NNUENetwork {
     HalfKP256CReLU(Box<HalfKP256CReLU>),
     /// HalfKP 256x2-32-32 SCReLU (const generics版)
     HalfKP256SCReLU(Box<HalfKP256SCReLU>),
+    /// HalfKP 256/2x2-32-32 PairwiseCReLU (const generics版)
+    HalfKP256Pairwise(Box<HalfKP256Pairwise>),
     /// HalfKP 512x2-8-96 CReLU (const generics版)
     HalfKP512CReLU(Box<HalfKP512CReLU>),
     /// HalfKP 512x2-8-96 SCReLU (const generics版)
     HalfKP512SCReLU(Box<HalfKP512SCReLU>),
+    /// HalfKP 512/2x2-8-96 PairwiseCReLU (const generics版)
+    HalfKP512Pairwise(Box<HalfKP512Pairwise>),
     /// HalfKA_hm^ 256x2-32-32 CReLU (const generics版)
     HalfKA256CReLU(Box<HalfKA256CReLU>),
     /// HalfKA_hm^ 256x2-32-32 SCReLU (const generics版)
     HalfKA256SCReLU(Box<HalfKA256SCReLU>),
+    /// HalfKA_hm^ 256/2x2-32-32 PairwiseCReLU (const generics版)
+    HalfKA256Pairwise(Box<HalfKA256Pairwise>),
     /// HalfKA_hm^ 512x2-8-96 CReLU (const generics版)
     HalfKA512CReLU(Box<HalfKA512CReLU>),
     /// HalfKA_hm^ 512x2-8-96 SCReLU (const generics版)
     HalfKA512SCReLU(Box<HalfKA512SCReLU>),
+    /// HalfKA_hm^ 512/2x2-8-96 PairwiseCReLU (const generics版)
+    HalfKA512Pairwise(Box<HalfKA512Pairwise>),
     /// HalfKA_hm^ 1024x2-8-96 CReLU (const generics版)
     HalfKA1024CReLU(Box<HalfKA1024CReLU>),
     /// HalfKA_hm^ 1024x2-8-96 SCReLU (const generics版)
     HalfKA1024SCReLU(Box<HalfKA1024SCReLU>),
+    /// HalfKA_hm^ 1024/2x2-8-96 PairwiseCReLU (const generics版)
+    HalfKA1024Pairwise(Box<HalfKA1024Pairwise>),
     /// HalfKA_hm^ 1024x2-8-32 CReLU (const generics版)
     HalfKA1024_8_32CReLU(Box<HalfKA1024_8_32CReLU>),
     /// HalfKA_hm^ 1024x2-8-32 SCReLU (const generics版)
@@ -177,8 +187,8 @@ impl NNUENetwork {
                 // 位置を戻して全体を読み込み
                 reader.seek(SeekFrom::Start(0))?;
 
-                // 活性化関数を検出
-                let use_screlu = detect_activation_from_arch(&arch_str) == "SCReLU";
+                // 活性化関数を検出 ("CReLU", "SCReLU", "PairwiseCReLU")
+                let activation = detect_activation_from_arch(&arch_str);
 
                 // アーキテクチャを判別
                 // HalfKA_hm 系の判定（アーキテクチャ文字列に "HalfKA" を含む）
@@ -194,39 +204,55 @@ impl NNUENetwork {
                     } else {
                         // L1, L2, L3 をパースして判定
                         let (l1, l2, l3) = Self::parse_arch_dimensions(&arch_str);
-                        match (l1, l2, l3, use_screlu) {
-                            (256, 32, 32, false) => {
+                        match (l1, l2, l3, activation) {
+                            // 256x2-32-32
+                            (256, 32, 32, "CReLU") => {
                                 let network = HalfKA256CReLU::read(reader)?;
                                 Ok(Self::HalfKA256CReLU(Box::new(network)))
                             }
-                            (256, 32, 32, true) => {
+                            (256, 32, 32, "SCReLU") => {
                                 let network = HalfKA256SCReLU::read(reader)?;
                                 Ok(Self::HalfKA256SCReLU(Box::new(network)))
                             }
+                            (256, 32, 32, "PairwiseCReLU") => {
+                                let network = HalfKA256Pairwise::read(reader)?;
+                                Ok(Self::HalfKA256Pairwise(Box::new(network)))
+                            }
                             // 512x2-8-96 CReLU
                             // HalfKA 512x2 は1バリアント（8-96）のみ
-                            (512, 8, 96, false) | (512, 0, 0, false) => {
+                            (512, 8, 96, "CReLU") | (512, 0, 0, "CReLU") => {
                                 let network = HalfKA512CReLU::read(reader)?;
                                 Ok(Self::HalfKA512CReLU(Box::new(network)))
                             }
                             // 512x2-8-96 SCReLU
-                            (512, 8, 96, true) | (512, 0, 0, true) => {
+                            (512, 8, 96, "SCReLU") | (512, 0, 0, "SCReLU") => {
                                 let network = HalfKA512SCReLU::read(reader)?;
                                 Ok(Self::HalfKA512SCReLU(Box::new(network)))
                             }
-                            (1024, 8, 96, false) => {
+                            // 512/2x2-8-96 PairwiseCReLU
+                            (512, 8, 96, "PairwiseCReLU") | (512, 0, 0, "PairwiseCReLU") => {
+                                let network = HalfKA512Pairwise::read(reader)?;
+                                Ok(Self::HalfKA512Pairwise(Box::new(network)))
+                            }
+                            // 1024x2-8-96
+                            (1024, 8, 96, "CReLU") => {
                                 let network = HalfKA1024CReLU::read(reader)?;
                                 Ok(Self::HalfKA1024CReLU(Box::new(network)))
                             }
-                            (1024, 8, 96, true) => {
+                            (1024, 8, 96, "SCReLU") => {
                                 let network = HalfKA1024SCReLU::read(reader)?;
                                 Ok(Self::HalfKA1024SCReLU(Box::new(network)))
                             }
-                            (1024, 8, 32, false) => {
+                            (1024, 8, 96, "PairwiseCReLU") => {
+                                let network = HalfKA1024Pairwise::read(reader)?;
+                                Ok(Self::HalfKA1024Pairwise(Box::new(network)))
+                            }
+                            // 1024x2-8-32
+                            (1024, 8, 32, "CReLU") => {
                                 let network = HalfKA1024_8_32CReLU::read(reader)?;
                                 Ok(Self::HalfKA1024_8_32CReLU(Box::new(network)))
                             }
-                            (1024, 8, 32, true) => {
+                            (1024, 8, 32, "SCReLU") => {
                                 let network = HalfKA1024_8_32SCReLU::read(reader)?;
                                 Ok(Self::HalfKA1024_8_32SCReLU(Box::new(network)))
                             }
@@ -250,7 +276,7 @@ impl NNUENetwork {
                             // 先に試す必要がある。8-32 を先に試すと、8-96 ファイルでも途中まで
                             // 読み込んで成功してしまい、誤った重みで評価が壊れる。
                             // 8-96 を先に試せば、8-32 ファイルでは EOF エラーで失敗するため安全。
-                            (1024, 0, 0, false) => {
+                            (1024, 0, 0, "CReLU") => {
                                 // まず大きい方（8-96）を試す
                                 let start_pos = reader.stream_position()?;
                                 reader.seek(SeekFrom::Start(0))?;
@@ -273,7 +299,7 @@ impl NNUENetwork {
                                 ))
                             }
                             // SCReLU版も同様のフォールバック（詳細は上記 CReLU 版のコメント参照）
-                            (1024, 0, 0, true) => {
+                            (1024, 0, 0, "SCReLU") => {
                                 // まず大きい方（8-96）を試す
                                 let start_pos = reader.stream_position()?;
                                 reader.seek(SeekFrom::Start(0))?;
@@ -295,9 +321,14 @@ impl NNUENetwork {
                                     ),
                                 ))
                             }
+                            // Pairwise版も同様のフォールバック（1024は8-96のみ対応）
+                            (1024, 0, 0, "PairwiseCReLU") => {
+                                reader.seek(SeekFrom::Start(0))?;
+                                let network = HalfKA1024Pairwise::read(reader)?;
+                                Ok(Self::HalfKA1024Pairwise(Box::new(network)))
+                            }
                             _ => {
                                 // 未対応アーキテクチャ
-                                let activation = if use_screlu { "SCReLU" } else { "CReLU" };
                                 Err(io::Error::new(
                                     io::ErrorKind::Unsupported,
                                     format!(
@@ -314,36 +345,45 @@ impl NNUENetwork {
                     // HalfKP: L1をパースして活性化関数と組み合わせて判定
                     let l1 = Self::parse_halfkp_l1(&arch_str);
                     let (_, l2, l3) = Self::parse_arch_dimensions(&arch_str);
-                    match (l1, l2, l3, use_screlu) {
+                    match (l1, l2, l3, activation) {
                         // 256x2-32-32 CReLU
                         // - (256, 32, 32): 完全一致
                         // - (256, 0, 0): L2/L3パース失敗（古い/簡易フォーマット）
                         // - (0, _, _): L1パース失敗（フォールバック）
                         // HalfKP 256x2 は1バリアント（32-32）のみのため、
                         // L2/L3が不明でもデフォルトで使用可能
-                        (256, 32, 32, false) | (256, 0, 0, false) | (0, _, _, false) => {
+                        (256, 32, 32, "CReLU") | (256, 0, 0, "CReLU") | (0, _, _, "CReLU") => {
                             let network = HalfKP256CReLU::read(reader)?;
                             Ok(Self::HalfKP256CReLU(Box::new(network)))
                         }
                         // 256x2-32-32 SCReLU（同様のフォールバック）
-                        (256, 32, 32, true) | (256, 0, 0, true) | (0, _, _, true) => {
+                        (256, 32, 32, "SCReLU") | (256, 0, 0, "SCReLU") | (0, _, _, "SCReLU") => {
                             let network = HalfKP256SCReLU::read(reader)?;
                             Ok(Self::HalfKP256SCReLU(Box::new(network)))
                         }
+                        // 256x2-32-32 PairwiseCReLU
+                        (256, 32, 32, "PairwiseCReLU") | (256, 0, 0, "PairwiseCReLU") => {
+                            let network = HalfKP256Pairwise::read(reader)?;
+                            Ok(Self::HalfKP256Pairwise(Box::new(network)))
+                        }
                         // 512x2-8-96 CReLU
                         // HalfKP 512x2 も1バリアント（8-96）のみ
-                        (512, 8, 96, false) | (512, 0, 0, false) => {
+                        (512, 8, 96, "CReLU") | (512, 0, 0, "CReLU") => {
                             let network = HalfKP512CReLU::read(reader)?;
                             Ok(Self::HalfKP512CReLU(Box::new(network)))
                         }
                         // 512x2-8-96 SCReLU
-                        (512, 8, 96, true) | (512, 0, 0, true) => {
+                        (512, 8, 96, "SCReLU") | (512, 0, 0, "SCReLU") => {
                             let network = HalfKP512SCReLU::read(reader)?;
                             Ok(Self::HalfKP512SCReLU(Box::new(network)))
                         }
+                        // 512x2-8-96 PairwiseCReLU
+                        (512, 8, 96, "PairwiseCReLU") | (512, 0, 0, "PairwiseCReLU") => {
+                            let network = HalfKP512Pairwise::read(reader)?;
+                            Ok(Self::HalfKP512Pairwise(Box::new(network)))
+                        }
                         _ => {
                             // 未対応アーキテクチャ
-                            let activation = if use_screlu { "SCReLU" } else { "CReLU" };
                             Err(io::Error::new(
                                 io::ErrorKind::Unsupported,
                                 format!(
@@ -371,11 +411,17 @@ impl NNUENetwork {
     /// 戻り値: (L1, L2, L3)
     /// パース失敗時はデフォルト値 (0, 0, 0) を返す
     fn parse_arch_dimensions(arch_str: &str) -> (usize, usize, usize) {
-        // L1: "->NNNx2]" パターンを探す
+        // L1: "->NNNx2]" または "->NNN/2x2]" (Pairwise) パターンを探す
         let l1 = if let Some(idx) = arch_str.find("x2]") {
             let before = &arch_str[..idx];
             if let Some(arrow_idx) = before.rfind("->") {
-                let num_str = &before[arrow_idx + 2..];
+                let after_arrow = &before[arrow_idx + 2..];
+                // Pairwise形式 "512/2" の場合は "/" で終端、通常形式なら全体が数値
+                let num_str = if let Some(slash_idx) = after_arrow.find('/') {
+                    &after_arrow[..slash_idx]
+                } else {
+                    after_arrow
+                };
                 num_str.parse::<usize>().unwrap_or(0)
             } else {
                 0
@@ -449,20 +495,27 @@ impl NNUENetwork {
     ///
     /// パース失敗時は 0 を返す
     fn parse_halfkp_l1(arch_str: &str) -> usize {
-        // "[NNNx2]" パターンを探す
-        if let Some(idx) = arch_str.find("x2]") {
-            let before = &arch_str[..idx];
-            if let Some(start) = before.rfind(|c: char| !c.is_ascii_digit()) {
-                let num_str = &before[start + 1..];
-                return num_str.parse().unwrap_or(0);
-            }
-        }
-        // "->NNN" パターンを探す
+        // "->NNN" または "->NNN/2" (Pairwise) パターンを探す
         if let Some(idx) = arch_str.find("->") {
             let after = &arch_str[idx + 2..];
             let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
             let num_str = &after[..end];
             return num_str.parse().unwrap_or(0);
+        }
+        // "[NNNx2]" または "[NNN/2x2]" パターンを探す
+        if let Some(idx) = arch_str.find("x2]") {
+            let before = &arch_str[..idx];
+            // Pairwise形式 "512/2" の場合
+            if let Some(slash_idx) = before.rfind('/') {
+                let num_part = &before[..slash_idx];
+                if let Some(start) = num_part.rfind(|c: char| !c.is_ascii_digit()) {
+                    let num_str = &num_part[start + 1..];
+                    return num_str.parse().unwrap_or(0);
+                }
+            } else if let Some(start) = before.rfind(|c: char| !c.is_ascii_digit()) {
+                let num_str = &before[start + 1..];
+                return num_str.parse().unwrap_or(0);
+            }
         }
         0
     }
@@ -502,6 +555,7 @@ impl NNUENetwork {
         match self {
             Self::HalfKA256CReLU(net) => net.evaluate(pos, acc),
             Self::HalfKA256SCReLU(net) => net.evaluate(pos, acc),
+            Self::HalfKA256Pairwise(net) => net.evaluate(pos, acc),
             _ => unreachable!(
                 "BUG: evaluate_halfka_256() called on non-HalfKA256 architecture: {:?}",
                 self.architecture_name()
@@ -513,11 +567,12 @@ impl NNUENetwork {
     ///
     /// # Panics
     ///
-    /// HalfKA512CReLU/HalfKA512SCReLU 以外のアーキテクチャで呼び出された場合にパニックします。
+    /// HalfKA512CReLU/HalfKA512SCReLU/HalfKA512Pairwise 以外のアーキテクチャで呼び出された場合にパニックします。
     pub fn evaluate_halfka_512(&self, pos: &Position, acc: &AccumulatorHalfKA<512>) -> Value {
         match self {
             Self::HalfKA512CReLU(net) => net.evaluate(pos, acc),
             Self::HalfKA512SCReLU(net) => net.evaluate(pos, acc),
+            Self::HalfKA512Pairwise(net) => net.evaluate(pos, acc),
             _ => unreachable!(
                 "BUG: evaluate_halfka_512() called on non-HalfKA512 architecture: {:?}",
                 self.architecture_name()
@@ -529,11 +584,12 @@ impl NNUENetwork {
     ///
     /// # Panics
     ///
-    /// HalfKA1024CReLU/HalfKA1024SCReLU 以外のアーキテクチャで呼び出された場合にパニックします。
+    /// HalfKA1024CReLU/HalfKA1024SCReLU/HalfKA1024Pairwise 以外のアーキテクチャで呼び出された場合にパニックします。
     pub fn evaluate_halfka_1024(&self, pos: &Position, acc: &AccumulatorHalfKA<1024>) -> Value {
         match self {
             Self::HalfKA1024CReLU(net) => net.evaluate(pos, acc),
             Self::HalfKA1024SCReLU(net) => net.evaluate(pos, acc),
+            Self::HalfKA1024Pairwise(net) => net.evaluate(pos, acc),
             _ => unreachable!(
                 "BUG: evaluate_halfka_1024() called on non-HalfKA1024 architecture: {:?}",
                 self.architecture_name()
@@ -565,11 +621,12 @@ impl NNUENetwork {
     ///
     /// # Panics
     ///
-    /// HalfKP256CReLU/HalfKP256SCReLU 以外のアーキテクチャで呼び出された場合にパニックします。
+    /// HalfKP256CReLU/HalfKP256SCReLU/HalfKP256Pairwise 以外のアーキテクチャで呼び出された場合にパニックします。
     pub fn evaluate_halfkp_256(&self, pos: &Position, acc: &AccumulatorHalfKP<256>) -> Value {
         match self {
             Self::HalfKP256CReLU(net) => net.evaluate(pos, acc),
             Self::HalfKP256SCReLU(net) => net.evaluate(pos, acc),
+            Self::HalfKP256Pairwise(net) => net.evaluate(pos, acc),
             _ => unreachable!(
                 "BUG: evaluate_halfkp_256() called on non-HalfKP256 architecture: {:?}",
                 self.architecture_name()
@@ -581,11 +638,12 @@ impl NNUENetwork {
     ///
     /// # Panics
     ///
-    /// HalfKP512CReLU/HalfKP512SCReLU 以外のアーキテクチャで呼び出された場合にパニックします。
+    /// HalfKP512CReLU/HalfKP512SCReLU/HalfKP512Pairwise 以外のアーキテクチャで呼び出された場合にパニックします。
     pub fn evaluate_halfkp_512(&self, pos: &Position, acc: &AccumulatorHalfKP<512>) -> Value {
         match self {
             Self::HalfKP512CReLU(net) => net.evaluate(pos, acc),
             Self::HalfKP512SCReLU(net) => net.evaluate(pos, acc),
+            Self::HalfKP512Pairwise(net) => net.evaluate(pos, acc),
             _ => unreachable!(
                 "BUG: evaluate_halfkp_512() called on non-HalfKP512 architecture: {:?}",
                 self.architecture_name()
@@ -600,17 +658,26 @@ impl NNUENetwork {
 
     /// HalfKA256 アーキテクチャかどうか
     pub fn is_halfka_256(&self) -> bool {
-        matches!(self, Self::HalfKA256CReLU(_) | Self::HalfKA256SCReLU(_))
+        matches!(
+            self,
+            Self::HalfKA256CReLU(_) | Self::HalfKA256SCReLU(_) | Self::HalfKA256Pairwise(_)
+        )
     }
 
     /// HalfKA512 アーキテクチャかどうか
     pub fn is_halfka_512(&self) -> bool {
-        matches!(self, Self::HalfKA512CReLU(_) | Self::HalfKA512SCReLU(_))
+        matches!(
+            self,
+            Self::HalfKA512CReLU(_) | Self::HalfKA512SCReLU(_) | Self::HalfKA512Pairwise(_)
+        )
     }
 
     /// HalfKA1024 アーキテクチャかどうか
     pub fn is_halfka_1024(&self) -> bool {
-        matches!(self, Self::HalfKA1024CReLU(_) | Self::HalfKA1024SCReLU(_))
+        matches!(
+            self,
+            Self::HalfKA1024CReLU(_) | Self::HalfKA1024SCReLU(_) | Self::HalfKA1024Pairwise(_)
+        )
     }
 
     /// HalfKA1024_8_32 アーキテクチャかどうか
@@ -623,14 +690,19 @@ impl NNUENetwork {
         match self {
             Self::HalfKP256CReLU(_) => "HalfKP256CReLU",
             Self::HalfKP256SCReLU(_) => "HalfKP256SCReLU",
+            Self::HalfKP256Pairwise(_) => "HalfKP256Pairwise",
             Self::HalfKP512CReLU(_) => "HalfKP512CReLU",
             Self::HalfKP512SCReLU(_) => "HalfKP512SCReLU",
+            Self::HalfKP512Pairwise(_) => "HalfKP512Pairwise",
             Self::HalfKA256CReLU(_) => "HalfKA256CReLU",
             Self::HalfKA256SCReLU(_) => "HalfKA256SCReLU",
+            Self::HalfKA256Pairwise(_) => "HalfKA256Pairwise",
             Self::HalfKA512CReLU(_) => "HalfKA512CReLU",
             Self::HalfKA512SCReLU(_) => "HalfKA512SCReLU",
+            Self::HalfKA512Pairwise(_) => "HalfKA512Pairwise",
             Self::HalfKA1024CReLU(_) => "HalfKA1024CReLU",
             Self::HalfKA1024SCReLU(_) => "HalfKA1024SCReLU",
+            Self::HalfKA1024Pairwise(_) => "HalfKA1024Pairwise",
             Self::HalfKA1024_8_32CReLU(_) => "HalfKA1024_8_32CReLU",
             Self::HalfKA1024_8_32SCReLU(_) => "HalfKA1024_8_32SCReLU",
             Self::LayerStacks(_) => "LayerStacks",
@@ -643,11 +715,21 @@ impl NNUENetwork {
     /// 新しいバリアント追加時はここも更新が必要（exhaustive matchで警告される）。
     pub fn architecture_spec(&self) -> &'static str {
         match self {
-            Self::HalfKP256CReLU(_) | Self::HalfKP256SCReLU(_) => "256x2-32-32",
-            Self::HalfKP512CReLU(_) | Self::HalfKP512SCReLU(_) => "512x2-8-96",
-            Self::HalfKA256CReLU(_) | Self::HalfKA256SCReLU(_) => "256x2-32-32",
-            Self::HalfKA512CReLU(_) | Self::HalfKA512SCReLU(_) => "512x2-8-96",
-            Self::HalfKA1024CReLU(_) | Self::HalfKA1024SCReLU(_) => "1024x2-8-96",
+            Self::HalfKP256CReLU(_) | Self::HalfKP256SCReLU(_) | Self::HalfKP256Pairwise(_) => {
+                "256x2-32-32"
+            }
+            Self::HalfKP512CReLU(_) | Self::HalfKP512SCReLU(_) | Self::HalfKP512Pairwise(_) => {
+                "512x2-8-96"
+            }
+            Self::HalfKA256CReLU(_) | Self::HalfKA256SCReLU(_) | Self::HalfKA256Pairwise(_) => {
+                "256x2-32-32"
+            }
+            Self::HalfKA512CReLU(_) | Self::HalfKA512SCReLU(_) | Self::HalfKA512Pairwise(_) => {
+                "512x2-8-96"
+            }
+            Self::HalfKA1024CReLU(_) | Self::HalfKA1024SCReLU(_) | Self::HalfKA1024Pairwise(_) => {
+                "1024x2-8-96"
+            }
             Self::HalfKA1024_8_32CReLU(_) | Self::HalfKA1024_8_32SCReLU(_) => "1024x2-8-32",
             Self::LayerStacks(_) => "LayerStacks(1536x2)",
         }
@@ -670,6 +752,7 @@ impl NNUENetwork {
         match self {
             Self::HalfKA256CReLU(net) => net.refresh_accumulator(pos, acc),
             Self::HalfKA256SCReLU(net) => net.refresh_accumulator(pos, acc),
+            Self::HalfKA256Pairwise(net) => net.refresh_accumulator(pos, acc),
             _ => panic!("This method is only for HalfKA256 architecture."),
         }
     }
@@ -679,6 +762,7 @@ impl NNUENetwork {
         match self {
             Self::HalfKA512CReLU(net) => net.refresh_accumulator(pos, acc),
             Self::HalfKA512SCReLU(net) => net.refresh_accumulator(pos, acc),
+            Self::HalfKA512Pairwise(net) => net.refresh_accumulator(pos, acc),
             _ => panic!("This method is only for HalfKA512 architecture."),
         }
     }
@@ -692,6 +776,7 @@ impl NNUENetwork {
         match self {
             Self::HalfKA1024CReLU(net) => net.refresh_accumulator(pos, acc),
             Self::HalfKA1024SCReLU(net) => net.refresh_accumulator(pos, acc),
+            Self::HalfKA1024Pairwise(net) => net.refresh_accumulator(pos, acc),
             _ => panic!("This method is only for HalfKA1024 architecture."),
         }
     }
@@ -714,6 +799,7 @@ impl NNUENetwork {
         match self {
             Self::HalfKP256CReLU(net) => net.refresh_accumulator(pos, acc),
             Self::HalfKP256SCReLU(net) => net.refresh_accumulator(pos, acc),
+            Self::HalfKP256Pairwise(net) => net.refresh_accumulator(pos, acc),
             _ => panic!("This method is only for HalfKP256 architecture."),
         }
     }
@@ -723,6 +809,7 @@ impl NNUENetwork {
         match self {
             Self::HalfKP512CReLU(net) => net.refresh_accumulator(pos, acc),
             Self::HalfKP512SCReLU(net) => net.refresh_accumulator(pos, acc),
+            Self::HalfKP512Pairwise(net) => net.refresh_accumulator(pos, acc),
             _ => panic!("This method is only for HalfKP512 architecture."),
         }
     }
@@ -752,6 +839,7 @@ impl NNUENetwork {
         match self {
             Self::HalfKA256CReLU(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
             Self::HalfKA256SCReLU(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
+            Self::HalfKA256Pairwise(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
             _ => panic!("This method is only for HalfKA256 architecture."),
         }
     }
@@ -767,6 +855,7 @@ impl NNUENetwork {
         match self {
             Self::HalfKA512CReLU(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
             Self::HalfKA512SCReLU(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
+            Self::HalfKA512Pairwise(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
             _ => panic!("This method is only for HalfKA512 architecture."),
         }
     }
@@ -782,6 +871,9 @@ impl NNUENetwork {
         match self {
             Self::HalfKA1024CReLU(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
             Self::HalfKA1024SCReLU(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
+            Self::HalfKA1024Pairwise(net) => {
+                net.update_accumulator(pos, dirty_piece, acc, prev_acc)
+            }
             _ => panic!("This method is only for HalfKA1024 architecture."),
         }
     }
@@ -816,6 +908,7 @@ impl NNUENetwork {
         match self {
             Self::HalfKP256CReLU(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
             Self::HalfKP256SCReLU(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
+            Self::HalfKP256Pairwise(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
             _ => panic!("This method is only for HalfKP256 architecture."),
         }
     }
@@ -831,6 +924,7 @@ impl NNUENetwork {
         match self {
             Self::HalfKP512CReLU(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
             Self::HalfKP512SCReLU(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
+            Self::HalfKP512Pairwise(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
             _ => panic!("This method is only for HalfKP512 architecture."),
         }
     }
@@ -858,6 +952,7 @@ impl NNUENetwork {
         match self {
             Self::HalfKA256CReLU(net) => net.forward_update_incremental(pos, stack, source_idx),
             Self::HalfKA256SCReLU(net) => net.forward_update_incremental(pos, stack, source_idx),
+            Self::HalfKA256Pairwise(net) => net.forward_update_incremental(pos, stack, source_idx),
             _ => panic!("This method is only for HalfKA256 architecture."),
         }
     }
@@ -872,6 +967,7 @@ impl NNUENetwork {
         match self {
             Self::HalfKA512CReLU(net) => net.forward_update_incremental(pos, stack, source_idx),
             Self::HalfKA512SCReLU(net) => net.forward_update_incremental(pos, stack, source_idx),
+            Self::HalfKA512Pairwise(net) => net.forward_update_incremental(pos, stack, source_idx),
             _ => panic!("This method is only for HalfKA512 architecture."),
         }
     }
@@ -886,6 +982,7 @@ impl NNUENetwork {
         match self {
             Self::HalfKA1024CReLU(net) => net.forward_update_incremental(pos, stack, source_idx),
             Self::HalfKA1024SCReLU(net) => net.forward_update_incremental(pos, stack, source_idx),
+            Self::HalfKA1024Pairwise(net) => net.forward_update_incremental(pos, stack, source_idx),
             _ => panic!("This method is only for HalfKA1024 architecture."),
         }
     }
@@ -918,6 +1015,7 @@ impl NNUENetwork {
         match self {
             Self::HalfKP256CReLU(net) => net.forward_update_incremental(pos, stack, source_idx),
             Self::HalfKP256SCReLU(net) => net.forward_update_incremental(pos, stack, source_idx),
+            Self::HalfKP256Pairwise(net) => net.forward_update_incremental(pos, stack, source_idx),
             _ => panic!("This method is only for HalfKP256 architecture."),
         }
     }
@@ -932,6 +1030,7 @@ impl NNUENetwork {
         match self {
             Self::HalfKP512CReLU(net) => net.forward_update_incremental(pos, stack, source_idx),
             Self::HalfKP512SCReLU(net) => net.forward_update_incremental(pos, stack, source_idx),
+            Self::HalfKP512Pairwise(net) => net.forward_update_incremental(pos, stack, source_idx),
             _ => panic!("This method is only for HalfKP512 architecture."),
         }
     }
@@ -1688,6 +1787,14 @@ mod tests {
         // L1のみ取得できる場合 (L2/L3 は 0)
         let arch = "Features=HalfKP[125388->256x2]";
         assert_eq!(NNUENetwork::parse_arch_dimensions(arch), (256, 0, 0));
+
+        // Pairwise 形式 (512/2x2 = 出力512、Pairwise乗算で256に縮小)
+        let arch = "Features=HalfKA_hm[73305->512/2x2]-Pairwise,fv_scale=10,l1_input=512,l2=8,l3=96,qa=255,qb=64,scale=1600,pairwise=true";
+        assert_eq!(NNUENetwork::parse_arch_dimensions(arch), (512, 8, 96));
+
+        // Pairwise 形式 (256/2x2)
+        let arch = "Features=HalfKA_hm[73305->256/2x2]-Pairwise,fv_scale=10,l1_input=256,l2=32,l3=32,qa=255,qb=64";
+        assert_eq!(NNUENetwork::parse_arch_dimensions(arch), (256, 32, 32));
 
         // 何も取得できない場合
         assert_eq!(NNUENetwork::parse_arch_dimensions("unknown"), (0, 0, 0));
