@@ -10,26 +10,26 @@ use crate::types::Value;
 
 // 型エイリアスを aliases 経由でインポート
 use crate::nnue::aliases::{
-    HalfKA512CReLU, HalfKA512Pairwise, HalfKA512SCReLU, HalfKA512_32_32CReLU,
-    HalfKA512_32_32Pairwise, HalfKA512_32_32SCReLU,
+    HalfKA_hm512CReLU, HalfKA_hm512Pairwise, HalfKA_hm512SCReLU, HalfKA_hm512_32_32CReLU,
+    HalfKA_hm512_32_32Pairwise, HalfKA_hm512_32_32SCReLU,
 };
 
 crate::define_l1_variants!(
-    enum HalfKAL512,
+    enum HalfKA_hm_L512,
     feature_set HalfKA_hm,
     l1 512,
-    acc crate::nnue::network_halfka::AccumulatorHalfKA<512>,
+    acc crate::nnue::network_halfka_hm::AccumulatorHalfKA_hm<512>,
     stack AccumulatorStackHalfKA_hm<512>,
 
     variants {
         // L2=8, L3=96
-        (8,  96, CReLU,         "CReLU")    => CReLU8x96      : HalfKA512CReLU,
-        (8,  96, SCReLU,        "SCReLU")   => SCReLU8x96     : HalfKA512SCReLU,
-        (8,  96, PairwiseCReLU, "Pairwise") => Pairwise8x96   : HalfKA512Pairwise,
+        (8,  96, CReLU,         "CReLU")    => CReLU8x96      : HalfKA_hm512CReLU,
+        (8,  96, SCReLU,        "SCReLU")   => SCReLU8x96     : HalfKA_hm512SCReLU,
+        (8,  96, PairwiseCReLU, "Pairwise") => Pairwise8x96   : HalfKA_hm512Pairwise,
         // L2=32, L3=32
-        (32, 32, CReLU,         "CReLU")    => CReLU32x32     : HalfKA512_32_32CReLU,
-        (32, 32, SCReLU,        "SCReLU")   => SCReLU32x32    : HalfKA512_32_32SCReLU,
-        (32, 32, PairwiseCReLU, "Pairwise") => Pairwise32x32  : HalfKA512_32_32Pairwise,
+        (32, 32, CReLU,         "CReLU")    => CReLU32x32     : HalfKA_hm512_32_32CReLU,
+        (32, 32, SCReLU,        "SCReLU")   => SCReLU32x32    : HalfKA_hm512_32_32SCReLU,
+        (32, 32, PairwiseCReLU, "Pairwise") => Pairwise32x32  : HalfKA_hm512_32_32Pairwise,
     }
 );
 
@@ -39,9 +39,9 @@ mod tests {
 
     #[test]
     fn test_supported_specs() {
-        assert_eq!(HalfKAL512::SUPPORTED_SPECS.len(), 6);
+        assert_eq!(HalfKA_hm_L512::SUPPORTED_SPECS.len(), 6);
 
-        let spec = &HalfKAL512::SUPPORTED_SPECS[0];
+        let spec = &HalfKA_hm_L512::SUPPORTED_SPECS[0];
         assert_eq!(spec.feature_set, FeatureSet::HalfKA_hm);
         assert_eq!(spec.l1, 512);
         assert_eq!(spec.l2, 8);
@@ -51,7 +51,7 @@ mod tests {
 
     #[test]
     fn test_l1_size() {
-        for spec in HalfKAL512::SUPPORTED_SPECS {
+        for spec in HalfKA_hm_L512::SUPPORTED_SPECS {
             assert_eq!(spec.l1, 512);
         }
     }
@@ -59,7 +59,7 @@ mod tests {
     /// マクロ生成: architecture_name() の命名規則テスト
     #[test]
     fn test_architecture_name_format() {
-        for spec in HalfKAL512::SUPPORTED_SPECS {
+        for spec in HalfKA_hm_L512::SUPPORTED_SPECS {
             let name = spec.name();
             assert!(
                 name.starts_with("HalfKA_hm-512-"),
@@ -71,7 +71,7 @@ mod tests {
     /// マクロ生成: 活性化関数の output_dim_divisor テスト
     #[test]
     fn test_activation_output_dim_divisor() {
-        for spec in HalfKAL512::SUPPORTED_SPECS {
+        for spec in HalfKA_hm_L512::SUPPORTED_SPECS {
             match spec.activation {
                 Activation::CReLU | Activation::SCReLU => {
                     assert_eq!(spec.activation.output_dim_divisor(), 1);
@@ -87,7 +87,7 @@ mod tests {
     #[test]
     fn test_multiple_l2_l3_combinations() {
         let combinations: Vec<_> =
-            HalfKAL512::SUPPORTED_SPECS.iter().map(|s| (s.l2, s.l3)).collect();
+            HalfKA_hm_L512::SUPPORTED_SPECS.iter().map(|s| (s.l2, s.l3)).collect();
 
         // L2=8, L3=96 と L2=32, L3=32 の2パターン
         assert!(combinations.contains(&(8, 96)), "Should support L2=8, L3=96");
@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn test_all_activations_present() {
         let activations: Vec<_> =
-            HalfKAL512::SUPPORTED_SPECS.iter().map(|s| s.activation).collect();
+            HalfKA_hm_L512::SUPPORTED_SPECS.iter().map(|s| s.activation).collect();
 
         assert!(activations.contains(&Activation::CReLU));
         assert!(activations.contains(&Activation::SCReLU));

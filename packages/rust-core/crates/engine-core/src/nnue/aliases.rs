@@ -3,7 +3,7 @@
 //! 新しいアーキテクチャ追加時に、型エイリアスをここに追加するだけで
 //! prelude.rs 経由で halfka/*.rs や halfkp/*.rs から利用可能になる。
 
-// HalfKA 型エイリアス
+// HalfKA_hm 型エイリアス
 pub use crate::nnue::network_halfka_hm::{
     // L1=1024, L2=8, L3=96
     HalfKA_hm1024CReLU,

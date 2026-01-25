@@ -10,26 +10,26 @@ use crate::types::Value;
 
 // 型エイリアスを aliases 経由でインポート
 use crate::nnue::aliases::{
-    HalfKA1024CReLU, HalfKA1024Pairwise, HalfKA1024SCReLU, HalfKA1024_8_32CReLU,
-    HalfKA1024_8_32Pairwise, HalfKA1024_8_32SCReLU,
+    HalfKA_hm1024CReLU, HalfKA_hm1024Pairwise, HalfKA_hm1024SCReLU, HalfKA_hm1024_8_32CReLU,
+    HalfKA_hm1024_8_32Pairwise, HalfKA_hm1024_8_32SCReLU,
 };
 
 crate::define_l1_variants!(
     enum HalfKA_hm_L1024,
     feature_set HalfKA_hm,
     l1 1024,
-    acc crate::nnue::network_halfka_hm::AccumulatorHalfKA<1024>,
+    acc crate::nnue::network_halfka_hm::AccumulatorHalfKA_hm<1024>,
     stack AccumulatorStackHalfKA_hm<1024>,
 
     variants {
         // L2=8, L3=96 バリアント
-        (8,  96, CReLU,         "CReLU")    => CReLU8x96     : HalfKA1024CReLU,
-        (8,  96, SCReLU,        "SCReLU")   => SCReLU8x96    : HalfKA1024SCReLU,
-        (8,  96, PairwiseCReLU, "Pairwise") => Pairwise8x96  : HalfKA1024Pairwise,
+        (8,  96, CReLU,         "CReLU")    => CReLU8x96     : HalfKA_hm1024CReLU,
+        (8,  96, SCReLU,        "SCReLU")   => SCReLU8x96    : HalfKA_hm1024SCReLU,
+        (8,  96, PairwiseCReLU, "Pairwise") => Pairwise8x96  : HalfKA_hm1024Pairwise,
         // L2=8, L3=32 バリアント
-        (8,  32, CReLU,         "CReLU")    => CReLU8x32     : HalfKA1024_8_32CReLU,
-        (8,  32, SCReLU,        "SCReLU")   => SCReLU8x32    : HalfKA1024_8_32SCReLU,
-        (8,  32, PairwiseCReLU, "Pairwise") => Pairwise8x32  : HalfKA1024_8_32Pairwise,
+        (8,  32, CReLU,         "CReLU")    => CReLU8x32     : HalfKA_hm1024_8_32CReLU,
+        (8,  32, SCReLU,        "SCReLU")   => SCReLU8x32    : HalfKA_hm1024_8_32SCReLU,
+        (8,  32, PairwiseCReLU, "Pairwise") => Pairwise8x32  : HalfKA_hm1024_8_32Pairwise,
     }
 );
 

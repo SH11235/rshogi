@@ -9,7 +9,7 @@
 //!
 //! # const generics 版統一実装
 //!
-//! `NetworkHalfKA<L1, L2, L3, A>` で複数のアーキテクチャに対応:
+//! `NetworkHalfKA_hm<L1, L2, L3, A>` で複数のアーキテクチャに対応:
 //! - L1: FT出力次元（256, 512, 1024）
 //! - L2: 隠れ層1出力次元（8, 32）
 //! - L3: 隠れ層2出力次元（32, 96）
@@ -57,8 +57,8 @@ pub use accumulator_layer_stacks::{
 pub use accumulator_stack_variant::AccumulatorStackVariant;
 pub use bona_piece::{halfkp_index, BonaPiece, FE_END};
 pub use bona_piece_halfka_hm::{
-    halfka_index, is_hm_mirror, king_bucket, pack_bonapiece, BonaPieceHalfKA, E_KING, FE_HAND_END,
-    FE_OLD_END, F_KING, PIECE_INPUTS,
+    halfka_index, is_hm_mirror, king_bucket, pack_bonapiece, BonaPieceHalfKA_hm, E_KING,
+    FE_HAND_END, FE_OLD_END, F_KING, PIECE_INPUTS,
 };
 pub use constants::*;
 pub use diff::get_changed_features;
@@ -73,8 +73,8 @@ pub use layer_stacks::{
 pub use layers::{AffineTransform, ClippedReLU};
 pub use network::{
     detect_format, evaluate_dispatch, evaluate_layer_stacks, get_fv_scale_override, get_network,
-    init_nnue, init_nnue_from_bytes, is_halfka_1024_loaded, is_halfka_256_loaded,
-    is_halfka_512_loaded, is_layer_stacks_loaded, is_nnue_initialized, set_fv_scale_override,
+    init_nnue, init_nnue_from_bytes, is_halfka_hm_1024_loaded, is_halfka_hm_256_loaded,
+    is_halfka_hm_512_loaded, is_layer_stacks_loaded, is_nnue_initialized, set_fv_scale_override,
     NNUENetwork, NnueFormatInfo,
 };
 pub use network_layer_stacks::NetworkLayerStacks;

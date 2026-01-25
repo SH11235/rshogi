@@ -76,7 +76,7 @@ pub fn king_bonapiece(sq_index: usize, is_friend: bool) -> BonaPiece {
 //   e_king: 1629..1710
 
 // =============================================================================
-// BonaPieceHalfKA (既存BonaPieceのラッパー)
+// BonaPieceHalfKA_hm (HalfKA_hm 用BonaPieceのラッパー)
 // =============================================================================
 
 use super::bona_piece::BonaPiece;
@@ -85,7 +85,8 @@ use super::bona_piece::BonaPiece;
 ///
 /// 内部的にはHalfKPと同じBonaPieceを使用するが、
 /// pack_bonapiece関数で適切に変換する。
-pub type BonaPieceHalfKA = BonaPiece;
+#[allow(non_camel_case_types)]
+pub type BonaPieceHalfKA_hm = BonaPiece;
 
 // =============================================================================
 // pack_bonapiece - HalfKA_hm^用パッキング
@@ -98,7 +99,7 @@ pub type BonaPieceHalfKA = BonaPiece;
 /// 2. 盤上駒（>=90）: hm_mirrorが必要な場合はマス目を反転
 /// 3. 敵王（>=e_king）: -81してf_king平面に揃える
 #[inline]
-pub fn pack_bonapiece(bp: BonaPieceHalfKA, hm_mirror: bool) -> usize {
+pub fn pack_bonapiece(bp: BonaPieceHalfKA_hm, hm_mirror: bool) -> usize {
     let mut pp = bp.value() as usize;
 
     // 手駒はミラー不要

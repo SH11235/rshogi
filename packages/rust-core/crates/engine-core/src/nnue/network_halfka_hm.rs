@@ -1,4 +1,4 @@
-//! NetworkHalfKA - const generics ベースの HalfKA ネットワーク統一実装
+//! NetworkHalfKA_hm - const generics ベースの HalfKA_hm ネットワーク統一実装
 //!
 //! HalfKA_hm^ 特徴量を使用し、L1/L2/L3 のサイズと活性化関数を型パラメータで切り替え可能にした実装。
 //!
@@ -16,21 +16,21 @@
 //!
 //! | 型エイリアス | L1 | L2 | L3 | 活性化 |
 //! |-------------|------|-----|-----|--------|
-//! | HalfKA256CReLU | 256 | 32 | 32 | CReLU |
-//! | HalfKA256SCReLU | 256 | 32 | 32 | SCReLU |
-//! | HalfKA256Pairwise | 256 | 32 | 32 | PairwiseCReLU |
-//! | HalfKA512CReLU | 512 | 8 | 96 | CReLU |
-//! | HalfKA512SCReLU | 512 | 8 | 96 | SCReLU |
-//! | HalfKA512Pairwise | 512 | 8 | 96 | PairwiseCReLU |
-//! | HalfKA512_32_32CReLU | 512 | 32 | 32 | CReLU |
-//! | HalfKA512_32_32SCReLU | 512 | 32 | 32 | SCReLU |
-//! | HalfKA512_32_32Pairwise | 512 | 32 | 32 | PairwiseCReLU |
-//! | HalfKA1024CReLU | 1024 | 8 | 96 | CReLU |
-//! | HalfKA1024SCReLU | 1024 | 8 | 96 | SCReLU |
-//! | HalfKA1024Pairwise | 1024 | 8 | 96 | PairwiseCReLU |
-//! | HalfKA1024_8_32CReLU | 1024 | 8 | 32 | CReLU |
-//! | HalfKA1024_8_32SCReLU | 1024 | 8 | 32 | SCReLU |
-//! | HalfKA1024_8_32Pairwise | 1024 | 8 | 32 | PairwiseCReLU |
+//! | HalfKA_hm256CReLU | 256 | 32 | 32 | CReLU |
+//! | HalfKA_hm256SCReLU | 256 | 32 | 32 | SCReLU |
+//! | HalfKA_hm256Pairwise | 256 | 32 | 32 | PairwiseCReLU |
+//! | HalfKA_hm512CReLU | 512 | 8 | 96 | CReLU |
+//! | HalfKA_hm512SCReLU | 512 | 8 | 96 | SCReLU |
+//! | HalfKA_hm512Pairwise | 512 | 8 | 96 | PairwiseCReLU |
+//! | HalfKA_hm512_32_32CReLU | 512 | 32 | 32 | CReLU |
+//! | HalfKA_hm512_32_32SCReLU | 512 | 32 | 32 | SCReLU |
+//! | HalfKA_hm512_32_32Pairwise | 512 | 32 | 32 | PairwiseCReLU |
+//! | HalfKA_hm1024CReLU | 1024 | 8 | 96 | CReLU |
+//! | HalfKA_hm1024SCReLU | 1024 | 8 | 96 | SCReLU |
+//! | HalfKA_hm1024Pairwise | 1024 | 8 | 96 | PairwiseCReLU |
+//! | HalfKA_hm1024_8_32CReLU | 1024 | 8 | 32 | CReLU |
+//! | HalfKA_hm1024_8_32SCReLU | 1024 | 8 | 32 | SCReLU |
+//! | HalfKA_hm1024_8_32Pairwise | 1024 | 8 | 32 | PairwiseCReLU |
 //!
 //! # 特徴量
 //!
@@ -119,11 +119,11 @@ unsafe fn m128_add_dpbusd_epi32(
 }
 
 // =============================================================================
-// AccumulatorHalfKA - const generics 版アキュムレータ
+// AccumulatorHalfKA_hm - const generics 版アキュムレータ
 // =============================================================================
 
-/// HalfKA アキュムレータ
-/// HalfKA アキュムレータ
+/// HalfKA_hm アキュムレータ
+/// HalfKA_hm アキュムレータ
 ///
 /// # 最適化に関する注意
 ///
@@ -131,7 +131,7 @@ unsafe fn m128_add_dpbusd_epi32(
 /// `add_weights`/`sub_weights` に渡される引数が `&mut [i16]`（スライス）となるため、
 /// 固定サイズ配列を使用する場合と比較してコンパイラ最適化が効きにくい。
 ///
-/// ただし、HalfKA系（L1=512, 1024）ではL1サイズが大きいため境界チェックの
+/// ただし、HalfKA_hm系（L1=512, 1024）ではL1サイズが大きいため境界チェックの
 /// 相対的オーバーヘッドが小さく、ベンチマーク上は改善が見られる。
 ///
 /// ## 改善案（オプション）
@@ -387,7 +387,7 @@ impl<const L1: usize> Default for AccumulatorStackHalfKA_hm<L1> {
 // FeatureTransformerHalfKA_hm - const generics 版 Feature Transformer
 // =============================================================================
 
-/// HalfKA Feature Transformer
+/// HalfKA_hm Feature Transformer
 #[allow(non_camel_case_types)]
 pub struct FeatureTransformerHalfKA_hm<const L1: usize> {
     /// バイアス [L1]
@@ -942,10 +942,10 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKA_hm<INPUT, OU
 }
 
 // =============================================================================
-// NetworkHalfKA - const generics 版統一ネットワーク
+// NetworkHalfKA_hm - const generics 版統一ネットワーク
 // =============================================================================
 
-/// HalfKA ネットワーク（const generics 版）
+/// HalfKA_hm ネットワーク（const generics 版）
 ///
 /// # 型パラメータ
 /// - `L1`: FT出力次元（片側）
@@ -1165,7 +1165,7 @@ impl<
         for (i, &v) in l1_out.0.iter().enumerate() {
             debug_assert!(
                 v.abs() < 1_000_000,
-                "L1 output[{i}] = {v} is out of expected range (NetworkHalfKA<{}, {}, {}, {}>)",
+                "L1 output[{i}] = {v} is out of expected range (NetworkHalfKA_hm<{}, {}, {}, {}>)",
                 L1,
                 L2,
                 L3,
@@ -1186,7 +1186,7 @@ impl<
         for (i, &v) in l2_out.0.iter().enumerate() {
             debug_assert!(
                 v.abs() < 1_000_000,
-                "L2 output[{i}] = {v} is out of expected range (NetworkHalfKA<{}, {}, {}, {}>)",
+                "L2 output[{i}] = {v} is out of expected range (NetworkHalfKA_hm<{}, {}, {}, {}>)",
                 L1,
                 L2,
                 L3,
@@ -1210,7 +1210,7 @@ impl<
         #[cfg(debug_assertions)]
         debug_assert!(
             eval.abs() < 50_000,
-            "Final evaluation {eval} is out of expected range (NetworkHalfKA<{}, {}, {}, {}>). Raw output: {}",
+            "Final evaluation {eval} is out of expected range (NetworkHalfKA_hm<{}, {}, {}, {}>). Raw output: {}",
             L1,
             L2,
             L3,
@@ -1266,45 +1266,45 @@ use super::activation::{CReLU, PairwiseCReLU, SCReLU};
 
 // L1=256, FT_OUT=512
 // CReLU/SCReLU: L1_INPUT=512, Pairwise: L1_INPUT=256
-/// HalfKA 256x2-32-32 CReLU
+/// HalfKA_hm 256x2-32-32 CReLU
 pub type HalfKA_hm256CReLU = NetworkHalfKA_hm<256, 512, 512, 32, 32, CReLU>;
-/// HalfKA 256x2-32-32 SCReLU
+/// HalfKA_hm 256x2-32-32 SCReLU
 pub type HalfKA_hm256SCReLU = NetworkHalfKA_hm<256, 512, 512, 32, 32, SCReLU>;
-/// HalfKA 256/2x2-32-32 PairwiseCReLU (L1入力=256, Pairwise乗算で次元半減)
+/// HalfKA_hm 256/2x2-32-32 PairwiseCReLU (L1入力=256, Pairwise乗算で次元半減)
 pub type HalfKA_hm256Pairwise = NetworkHalfKA_hm<256, 512, 256, 32, 32, PairwiseCReLU>;
 
 // L1=512, FT_OUT=1024, L2=8, L3=96
 // CReLU/SCReLU: L1_INPUT=1024, Pairwise: L1_INPUT=512
-/// HalfKA 512x2-8-96 CReLU
+/// HalfKA_hm 512x2-8-96 CReLU
 pub type HalfKA_hm512CReLU = NetworkHalfKA_hm<512, 1024, 1024, 8, 96, CReLU>;
-/// HalfKA 512x2-8-96 SCReLU
+/// HalfKA_hm 512x2-8-96 SCReLU
 pub type HalfKA_hm512SCReLU = NetworkHalfKA_hm<512, 1024, 1024, 8, 96, SCReLU>;
-/// HalfKA 512/2x2-8-96 PairwiseCReLU (L1入力=512, Pairwise乗算で次元半減)
+/// HalfKA_hm 512/2x2-8-96 PairwiseCReLU (L1入力=512, Pairwise乗算で次元半減)
 pub type HalfKA_hm512Pairwise = NetworkHalfKA_hm<512, 1024, 512, 8, 96, PairwiseCReLU>;
 
 // L1=512, FT_OUT=1024, L2=32, L3=32
-/// HalfKA 512x2-32-32 CReLU
+/// HalfKA_hm 512x2-32-32 CReLU
 pub type HalfKA_hm512_32_32CReLU = NetworkHalfKA_hm<512, 1024, 1024, 32, 32, CReLU>;
-/// HalfKA 512x2-32-32 SCReLU
+/// HalfKA_hm 512x2-32-32 SCReLU
 pub type HalfKA_hm512_32_32SCReLU = NetworkHalfKA_hm<512, 1024, 1024, 32, 32, SCReLU>;
-/// HalfKA 512/2x2-32-32 PairwiseCReLU (L1入力=512, Pairwise乗算で次元半減)
+/// HalfKA_hm 512/2x2-32-32 PairwiseCReLU (L1入力=512, Pairwise乗算で次元半減)
 pub type HalfKA_hm512_32_32Pairwise = NetworkHalfKA_hm<512, 1024, 512, 32, 32, PairwiseCReLU>;
 
 // L1=1024, FT_OUT=2048, L2=8, L3=96
 // CReLU/SCReLU: L1_INPUT=2048, Pairwise: L1_INPUT=1024
-/// HalfKA 1024x2-8-96 CReLU
+/// HalfKA_hm 1024x2-8-96 CReLU
 pub type HalfKA_hm1024CReLU = NetworkHalfKA_hm<1024, 2048, 2048, 8, 96, CReLU>;
-/// HalfKA 1024x2-8-96 SCReLU
+/// HalfKA_hm 1024x2-8-96 SCReLU
 pub type HalfKA_hm1024SCReLU = NetworkHalfKA_hm<1024, 2048, 2048, 8, 96, SCReLU>;
-/// HalfKA 1024/2x2-8-96 PairwiseCReLU (L1入力=1024, Pairwise乗算で次元半減)
+/// HalfKA_hm 1024/2x2-8-96 PairwiseCReLU (L1入力=1024, Pairwise乗算で次元半減)
 pub type HalfKA_hm1024Pairwise = NetworkHalfKA_hm<1024, 2048, 1024, 8, 96, PairwiseCReLU>;
 
 // L1=1024, FT_OUT=2048, L2=8, L3=32
-/// HalfKA 1024x2-8-32 CReLU
+/// HalfKA_hm 1024x2-8-32 CReLU
 pub type HalfKA_hm1024_8_32CReLU = NetworkHalfKA_hm<1024, 2048, 2048, 8, 32, CReLU>;
-/// HalfKA 1024x2-8-32 SCReLU
+/// HalfKA_hm 1024x2-8-32 SCReLU
 pub type HalfKA_hm1024_8_32SCReLU = NetworkHalfKA_hm<1024, 2048, 2048, 8, 32, SCReLU>;
-/// HalfKA 1024/2x2-8-32 PairwiseCReLU (L1入力=1024, Pairwise乗算で次元半減)
+/// HalfKA_hm 1024/2x2-8-32 PairwiseCReLU (L1入力=1024, Pairwise乗算で次元半減)
 pub type HalfKA_hm1024_8_32Pairwise = NetworkHalfKA_hm<1024, 2048, 1024, 8, 32, PairwiseCReLU>;
 
 // =============================================================================
