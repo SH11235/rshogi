@@ -447,12 +447,31 @@ export function ShogiMatch({
     const [isPassRightsSettingsOpen, setIsPassRightsSettingsOpen] = useState(false);
 
     // 対局用 NNUE ID
-    const [matchNnueId, setMatchNnueId] = useLocalStorage<string | null>("shogi:matchNnueId", null);
+    const [senteNnueId, setSenteNnueId] = useLocalStorage<string | null>("shogi:senteNnueId", null);
+    const [goteNnueId, setGoteNnueId] = useLocalStorage<string | null>("shogi:goteNnueId", null);
     // 分析用 NNUE ID
     const [analysisNnueId, setAnalysisNnueId] = useLocalStorage<string | null>(
         "shogi:analysisNnueId",
         null,
     );
+    useEffect(() => {
+        if (typeof window === "undefined") return;
+        if (senteNnueId !== null || goteNnueId !== null) return;
+        const legacyKey = "shogi:matchNnueId";
+        const stored = localStorage.getItem(legacyKey);
+        if (stored === null) return;
+        try {
+            const parsed = JSON.parse(stored) as string | null;
+            if (parsed) {
+                setSenteNnueId(parsed);
+                setGoteNnueId(parsed);
+            }
+        } catch (error) {
+            console.warn(`Failed to parse localStorage key "${legacyKey}":`, error);
+        } finally {
+            localStorage.removeItem(legacyKey);
+        }
+    }, [goteNnueId, senteNnueId, setGoteNnueId, setSenteNnueId]);
 
     // NNUE ストレージから一覧を取得
     const { nnueList, isLoading: isNnueListLoading } = useNnueStorage();
@@ -461,19 +480,24 @@ export function ShogiMatch({
     // isLoading 中はリストが空でも待機（初期ロード完了後に判定）
     useEffect(() => {
         if (!isNnueListLoading) {
-            if (matchNnueId && !nnueList.some((n) => n.id === matchNnueId)) {
-                setMatchNnueId(null);
+            if (senteNnueId && !nnueList.some((n) => n.id === senteNnueId)) {
+                setSenteNnueId(null);
+            }
+            if (goteNnueId && !nnueList.some((n) => n.id === goteNnueId)) {
+                setGoteNnueId(null);
             }
             if (analysisNnueId && !nnueList.some((n) => n.id === analysisNnueId)) {
                 setAnalysisNnueId(null);
             }
         }
     }, [
-        matchNnueId,
+        senteNnueId,
+        goteNnueId,
         analysisNnueId,
         nnueList,
         isNnueListLoading,
-        setMatchNnueId,
+        setSenteNnueId,
+        setGoteNnueId,
         setAnalysisNnueId,
     ]);
 
@@ -855,7 +879,8 @@ export function ShogiMatch({
         onMatchEnd: endMatch,
         onEvalUpdate: handleEvalUpdate,
         maxLogs,
-        nnueId: matchNnueId,
+        senteNnueId,
+        goteNnueId,
         analysisNnueId,
     });
     stopAllEnginesRef.current = stopAllEngines;
@@ -2573,8 +2598,10 @@ export function ShogiMatch({
                             settingsLocked={settingsLocked}
                             internalEngineId={engineOptions[0]?.id ?? "wasm"}
                             nnueList={nnueList}
-                            matchNnueId={matchNnueId}
-                            onMatchNnueIdChange={setMatchNnueId}
+                            senteNnueId={senteNnueId}
+                            onSenteNnueIdChange={setSenteNnueId}
+                            goteNnueId={goteNnueId}
+                            onGoteNnueIdChange={setGoteNnueId}
                             analysisSettings={analysisSettings}
                             onAnalysisSettingsChange={setAnalysisSettings}
                             analysisNnueId={analysisNnueId}

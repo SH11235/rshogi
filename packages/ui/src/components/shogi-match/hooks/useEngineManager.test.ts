@@ -165,6 +165,8 @@ describe("useEngineManager", () => {
                 onMoveFromEngine,
                 onMatchEnd,
                 maxLogs: 10,
+                senteNnueId: null,
+                goteNnueId: null,
             }),
         );
     };
