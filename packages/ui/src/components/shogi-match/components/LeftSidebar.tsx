@@ -21,6 +21,9 @@ interface LeftSidebarProps {
     onPassRightsSettingsChange?: (settings: PassRightsSettings) => void;
     settingsLocked: boolean;
 
+    // 内蔵エンジンのID（engineOptionsの最初のIDを渡す）
+    internalEngineId: string;
+
     // NNUE 一覧
     nnueList: NnueMeta[];
 
@@ -77,6 +80,7 @@ export function LeftSidebar({
     passRightsSettings,
     onPassRightsSettingsChange,
     settingsLocked,
+    internalEngineId,
     nnueList,
     matchNnueId,
     onMatchNnueIdChange,
@@ -115,7 +119,7 @@ export function LeftSidebar({
                 ...sides,
                 [side]: {
                     role: "engine",
-                    engineId: "internal",
+                    engineId: internalEngineId,
                     skillLevel: currentSetting.skillLevel,
                 },
             });
@@ -126,7 +130,7 @@ export function LeftSidebar({
                 ...sides,
                 [side]: {
                     role: "engine",
-                    engineId: "internal",
+                    engineId: internalEngineId,
                     skillLevel: currentSetting.skillLevel,
                 },
             });

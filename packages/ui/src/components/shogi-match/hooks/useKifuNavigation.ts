@@ -25,6 +25,7 @@ import {
     goToStart as goToStartTree,
     isRewound as isRewoundTree,
     type KifuEval,
+    type KifuNode,
     type KifuTree,
     type PreferredPathCache,
     promoteToMainLine as promoteToMainLineTree,
@@ -118,6 +119,10 @@ interface UseKifuNavigationResult {
     recordEvalByPly: (ply: number, event: EngineInfoEvent) => void;
     /** 評価値を記録（ノードIDで指定、分岐内のノード用） */
     recordEvalByNodeId: (nodeId: string, event: EngineInfoEvent) => void;
+    /** 評価値をクリア（手数で指定、再解析用） */
+    clearEvalByPly: (ply: number) => void;
+    /** 評価値をクリア（ノードIDで指定、再解析用） */
+    clearEvalByNodeId: (nodeId: string) => void;
     /** PVを分岐として追加（onAddedは分岐が追加された場合にのみ呼ばれる） */
     addPvAsBranch: (
         ply: number,
@@ -392,10 +397,12 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
                     // 1. 既存の評価値がない場合
                     // 2. 新しい探索深さが既存より深い場合
                     // 3. 既存にPVがなく、新しいデータにPVがある場合
+                    const existingPvMissing = !existing?.pv || existing.pv.length === 0;
+                    const newPvAvailable = !!(event.pv && event.pv.length > 0);
                     const shouldUpdate =
                         !existing ||
                         (event.depth !== undefined && (existing.depth ?? 0) < event.depth) ||
-                        (!existing.pv && event.pv && event.pv.length > 0);
+                        (existingPvMissing && newPvAvailable);
 
                     if (shouldUpdate) {
                         updated = setNodeEval(updated, nodeId, evalData);
@@ -433,10 +440,12 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
                 const updatedNode = updated.nodes.get(nodeId);
                 if (updatedNode) {
                     const existing = updatedNode.eval;
+                    const existingPvMissing = !existing?.pv || existing.pv.length === 0;
+                    const newPvAvailable = !!(event.pv && event.pv.length > 0);
                     const shouldUpdate =
                         !existing ||
                         (event.depth !== undefined && (existing.depth ?? 0) < event.depth) ||
-                        (!existing.pv && event.pv && event.pv.length > 0);
+                        (existingPvMissing && newPvAvailable);
 
                     if (shouldUpdate) {
                         updated = setNodeEval(updated, nodeId, evalData);
@@ -445,6 +454,56 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
             }
 
             return updated;
+        });
+    }, []);
+
+    /**
+     * 評価値をクリア（手数で指定、再解析用）
+     * 既存の評価値を削除して、新しい解析結果で上書きできるようにする
+     */
+    const clearEvalByPly = useCallback((ply: number) => {
+        setTree((prev) => {
+            let nodeId = findNodeByPlyInCurrentPath(prev, ply);
+            if (!nodeId) {
+                nodeId = findNodeByPlyInMainLine(prev, ply);
+            }
+            if (!nodeId) return prev;
+
+            const node = prev.nodes.get(nodeId);
+            if (!node) return prev;
+
+            // evalとmultiPvEvalsをクリア
+            const updatedNode: KifuNode = {
+                ...node,
+                eval: undefined,
+                multiPvEvals: undefined,
+            };
+
+            const newNodes = new Map(prev.nodes);
+            newNodes.set(nodeId, updatedNode);
+
+            return { ...prev, nodes: newNodes };
+        });
+    }, []);
+
+    /**
+     * 評価値をクリア（ノードIDで指定、再解析用）
+     */
+    const clearEvalByNodeId = useCallback((nodeId: string) => {
+        setTree((prev) => {
+            const node = prev.nodes.get(nodeId);
+            if (!node) return prev;
+
+            const updatedNode: KifuNode = {
+                ...node,
+                eval: undefined,
+                multiPvEvals: undefined,
+            };
+
+            const newNodes = new Map(prev.nodes);
+            newNodes.set(nodeId, updatedNode);
+
+            return { ...prev, nodes: newNodes };
         });
     }, []);
 
@@ -770,6 +829,8 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
         addMove,
         recordEvalByPly,
         recordEvalByNodeId,
+        clearEvalByPly,
+        clearEvalByNodeId,
         addPvAsBranch,
         reset,
         getMovesArray,

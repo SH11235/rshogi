@@ -352,11 +352,10 @@ function ExpandedMoveDetails({
 }): ReactElement {
     // 複数PVがある場合はリストで表示、なければ従来の単一PVを使用
     const pvList = useMemo((): PvEvalInfo[] => {
-        // multiPvEvalsがある場合はそれを使用
-        if (move.multiPvEvals && move.multiPvEvals.length > 0) {
-            return move.multiPvEvals;
+        const multiPv = (move.multiPvEvals ?? []).filter((pv) => pv?.pv && pv.pv.length > 0);
+        if (multiPv.length > 0) {
+            return multiPv;
         }
-        // 従来の単一PVからフォールバック
         if (move.pv && move.pv.length > 0) {
             return [
                 {
@@ -472,29 +471,36 @@ function ExpandedMoveDetails({
                 </div>
             )}
 
-            {/* 読み筋がない場合は解析ボタンを表示 */}
-            {!hasPv && onAnalyze && (
-                <div className="space-y-2">
-                    <div className="text-[11px] text-muted-foreground">読み筋がありません</div>
+            {/* 解析ボタン */}
+            {onAnalyze && (
+                <div className={hasPv ? "pt-2 border-t border-border mt-2" : "space-y-2"}>
+                    {!hasPv && (
+                        <div className="text-[11px] text-muted-foreground mb-2">
+                            読み筋がありません
+                        </div>
+                    )}
                     <button
                         type="button"
                         onClick={() => onAnalyze(move.ply)}
                         disabled={isThisPlyAnalyzing}
-                        className="
+                        className={`
                             w-full px-3 py-2 text-[12px]
-                            bg-primary text-primary-foreground
-                            hover:bg-primary/90
                             disabled:opacity-50 disabled:cursor-not-allowed
                             rounded border border-border
                             transition-colors cursor-pointer
-                        "
+                            ${
+                                hasPv
+                                    ? "bg-muted hover:bg-muted/80 text-foreground"
+                                    : "bg-primary text-primary-foreground hover:bg-primary/90"
+                            }
+                        `}
                     >
                         {isThisPlyAnalyzing ? (
                             <span>解析中...</span>
                         ) : (
                             <>
-                                <span className="mr-1">🔍</span>
-                                この局面を解析する
+                                <span className="mr-1">{hasPv ? "🔄" : "🔍"}</span>
+                                {hasPv ? "再解析する" : "この局面を解析する"}
                             </>
                         )}
                     </button>
@@ -1710,22 +1716,24 @@ export function KifuPanel({
                                                         {evalText}
                                                     </span>
                                                 )}
-                                                {/* 解析ボタン（評価値がない場合に表示） */}
-                                                {onAnalyzeNode &&
-                                                    !evalText &&
-                                                    analyzingPly !== node.ply && (
-                                                        <button
-                                                            type="button"
-                                                            className="text-[10px] px-1.5 py-0.5 rounded bg-muted hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
-                                                            onClick={(e) => {
-                                                                e.stopPropagation();
-                                                                onAnalyzeNode(node.nodeId);
-                                                            }}
-                                                            title="この手を解析"
-                                                        >
-                                                            解析
-                                                        </button>
-                                                    )}
+                                                {/* 解析ボタン */}
+                                                {onAnalyzeNode && analyzingPly !== node.ply && (
+                                                    <button
+                                                        type="button"
+                                                        className="text-[10px] px-1.5 py-0.5 rounded bg-muted hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            onAnalyzeNode(node.nodeId);
+                                                        }}
+                                                        title={
+                                                            evalText
+                                                                ? "この手を再解析"
+                                                                : "この手を解析"
+                                                        }
+                                                    >
+                                                        {evalText ? "再解析" : "解析"}
+                                                    </button>
+                                                )}
                                                 {analyzingPly === node.ply && (
                                                     <span className="text-[10px] text-muted-foreground animate-pulse">
                                                         解析中...
@@ -1766,7 +1774,10 @@ export function KifuPanel({
                                 // この手に対応する局面（手が指された後の局面）
                                 const position = positionHistory?.[index];
                                 // PVがあるかどうか
-                                const hasPv = move.pv && move.pv.length > 0;
+                                const hasMultiPv =
+                                    move.multiPvEvals?.some((pv) => pv?.pv && pv.pv.length > 0) ??
+                                    false;
+                                const hasPv = (move.pv && move.pv.length > 0) || hasMultiPv;
                                 // 詳細を展開するか（PVがあるか、解析機能がある場合）
                                 const canExpand = position && (hasPv || onAnalyzePly);
                                 // この行が詳細展開中か

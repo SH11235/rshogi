@@ -159,8 +159,10 @@ interface UseEngineManagerProps {
     onEvalUpdate?: (ply: number, event: EngineInfoEvent) => void;
     /** ログの最大件数 */
     maxLogs?: number;
-    /** 使用する NNUE の ID（null = デフォルト） */
+    /** 対局用 NNUE の ID（null = デフォルト） */
     nnueId?: string | null;
+    /** 分析用 NNUE の ID（null = デフォルト） */
+    analysisNnueId?: string | null;
 }
 
 /** 解析リクエストパラメータ */
@@ -332,6 +334,7 @@ export function useEngineManager({
     onEvalUpdate,
     maxLogs = 80,
     nnueId,
+    analysisNnueId,
 }: UseEngineManagerProps): UseEngineManagerReturn {
     const [engineReady, setEngineReady] = useState<Record<Player, boolean>>({
         sente: false,
@@ -983,11 +986,11 @@ export function useEngineManager({
                     analysisState.client = client;
                     await client.init();
 
-                    // NNUE をロード（指定されている場合）
+                    // 分析用 NNUE をロード（指定されている場合）
                     // ⚠️ Desktop では OnceLock により一度ロードした NNUE は変更不可
                     // 失敗時は throw してユーザーに通知する（アプリ再起動が必要な場合がある）
-                    if (nnueId && client.loadNnue) {
-                        await client.loadNnue(nnueId);
+                    if (analysisNnueId && client.loadNnue) {
+                        await client.loadNnue(analysisNnueId);
                     }
                 } catch (error) {
                     addErrorLog(`エンジン初期化エラー: ${String(error)}`);
@@ -1092,28 +1095,28 @@ export function useEngineManager({
         },
         [
             addErrorLog,
+            analysisNnueId,
             cancelAnalysis,
             engineOptions,
             isAnalyzing,
             isMatchRunning,
             maxLogs,
-            nnueId,
             passRightsSettings,
             onEvalUpdate,
             sides,
         ],
     );
 
-    // nnueId が変更された時に解析エンジンを破棄（次回解析開始時に新しい NNUE でロード）
-    const prevNnueIdRef = useRef(nnueId);
+    // analysisNnueId が変更された時に解析エンジンを破棄（次回解析開始時に新しい NNUE でロード）
+    const prevAnalysisNnueIdRef = useRef(analysisNnueId);
     useEffect(() => {
-        if (prevNnueIdRef.current !== nnueId) {
-            prevNnueIdRef.current = nnueId;
+        if (prevAnalysisNnueIdRef.current !== analysisNnueId) {
+            prevAnalysisNnueIdRef.current = analysisNnueId;
             disposeAnalysisEngine().catch((error) => {
-                console.error("Failed to dispose analysis engine on nnueId change:", error);
+                console.error("Failed to dispose analysis engine on analysisNnueId change:", error);
             });
         }
-    }, [disposeAnalysisEngine, nnueId]);
+    }, [disposeAnalysisEngine, analysisNnueId]);
 
     // アンマウント時に解析エンジンも破棄
     useEffect(() => {

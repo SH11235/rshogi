@@ -33,7 +33,7 @@ import { KifuImportPanel } from "./shogi-match/components/KifuImportPanel";
 import { KifuPanel } from "./shogi-match/components/KifuPanel";
 import { LeftSidebar } from "./shogi-match/components/LeftSidebar";
 import { MatchControls } from "./shogi-match/components/MatchControls";
-import { MoveDetailPanel } from "./shogi-match/components/MoveDetailPanel";
+import { MoveDetailWindow } from "./shogi-match/components/MoveDetailWindow";
 import type { PassDisabledReason } from "./shogi-match/components/PassButton";
 import { PassRightsDisplay } from "./shogi-match/components/PassRightsDisplay";
 import { PlayerIcon } from "./shogi-match/components/PlayerIcon";
@@ -107,6 +107,39 @@ export interface ShogiMatchProps {
 const DEFAULT_BYOYOMI_MS = 5_000; // デフォルト秒読み時間（5秒）
 const DEFAULT_MAX_LOGS = 80; // ログ履歴の最大保持件数
 const TOOLTIP_DELAY_DURATION_MS = 120; // ツールチップ表示遅延
+// 旧バージョンの「秒」保存値をmsに復元するためのしきい値
+const LEGACY_TIME_THRESHOLD_MS = 1000;
+
+function normalizeTimeValueMs(value: number, fallback: number): number {
+    if (!Number.isFinite(value)) return fallback;
+    if (value < 0) return fallback;
+    if (value > 0 && value < LEGACY_TIME_THRESHOLD_MS) {
+        return value * 1000;
+    }
+    return Math.trunc(value);
+}
+
+function normalizeTimeSettings(settings: ClockSettings, defaults: ClockSettings): ClockSettings {
+    return {
+        sente: {
+            mainMs: normalizeTimeValueMs(settings.sente.mainMs, defaults.sente.mainMs),
+            byoyomiMs: normalizeTimeValueMs(settings.sente.byoyomiMs, defaults.sente.byoyomiMs),
+        },
+        gote: {
+            mainMs: normalizeTimeValueMs(settings.gote.mainMs, defaults.gote.mainMs),
+            byoyomiMs: normalizeTimeValueMs(settings.gote.byoyomiMs, defaults.gote.byoyomiMs),
+        },
+    };
+}
+
+function isSameTimeSettings(a: ClockSettings, b: ClockSettings): boolean {
+    return (
+        a.sente.mainMs === b.sente.mainMs &&
+        a.sente.byoyomiMs === b.sente.byoyomiMs &&
+        a.gote.mainMs === b.gote.mainMs &&
+        a.gote.byoyomiMs === b.gote.byoyomiMs
+    );
+}
 
 /**
  * パス権設定と棋譜からgetLegalMovesのオプションを生成するヘルパー関数
@@ -314,13 +347,23 @@ export function ShogiMatch({
     const [gameResult, setGameResult] = useState<GameResult | null>(null);
     const [showResultDialog, setShowResultDialog] = useState(false);
     const [flipBoard, setFlipBoard] = useState(false);
-    const [timeSettings, setTimeSettings] = useLocalStorage<ClockSettings>(
-        "shogi-match-time-settings",
-        {
+    const defaultTimeSettings = useMemo(
+        () => ({
             sente: { mainMs: initialMainTimeMs, byoyomiMs: initialByoyomiMs },
             gote: { mainMs: initialMainTimeMs, byoyomiMs: initialByoyomiMs },
-        },
+        }),
+        [initialMainTimeMs, initialByoyomiMs],
     );
+    const [timeSettings, setTimeSettings] = useLocalStorage<ClockSettings>(
+        "shogi-match-time-settings",
+        defaultTimeSettings,
+    );
+    useEffect(() => {
+        const normalized = normalizeTimeSettings(timeSettings, defaultTimeSettings);
+        if (!isSameTimeSettings(normalized, timeSettings)) {
+            setTimeSettings(normalized);
+        }
+    }, [defaultTimeSettings, setTimeSettings, timeSettings]);
     const [isMatchRunning, setIsMatchRunning] = useState(false);
     const [isEditMode, setIsEditMode] = useState(true);
     const [isPaused, setIsPaused] = useState(false);
@@ -386,9 +429,9 @@ export function ShogiMatch({
     } | null>(null);
     // 選択中の分岐ノードID（キーボードナビゲーション用）
     const [selectedBranchNodeId, setSelectedBranchNodeId] = useState<string | null>(null);
-    // 選択中の手の詳細（右パネル表示用）
-    const [selectedMoveDetail, setSelectedMoveDetail] = useState<{
-        move: KifMove;
+    // 選択中の手の詳細（右パネル表示用）- plyで管理し、最新のmoveは都度取得
+    const [selectedMoveDetailPly, setSelectedMoveDetailPly] = useState<{
+        ply: number;
         position: PositionState;
     } | null>(null);
     // 設定モーダルの表示状態
@@ -493,8 +536,18 @@ export function ShogiMatch({
         branchMarkers,
         recordEvalByPly,
         recordEvalByNodeId,
+        clearEvalByPly,
+        clearEvalByNodeId,
         addPvAsBranch,
     } = navigation;
+
+    // 選択中の手の詳細を最新のkifMovesから取得
+    const selectedMoveDetail = useMemo(() => {
+        if (!selectedMoveDetailPly) return null;
+        const move = kifMoves.find((m) => m.ply === selectedMoveDetailPly.ply);
+        if (!move) return null;
+        return { move, position: selectedMoveDetailPly.position };
+    }, [selectedMoveDetailPly, kifMoves]);
 
     // 後手が人間の場合は盤面を反転して手前側に表示
     useEffect(() => {
@@ -803,6 +856,7 @@ export function ShogiMatch({
         onEvalUpdate: handleEvalUpdate,
         maxLogs,
         nnueId: matchNnueId,
+        analysisNnueId,
     });
     stopAllEnginesRef.current = stopAllEngines;
 
@@ -2033,6 +2087,9 @@ export function ShogiMatch({
             // （ply 1 = 1手目を指した後の局面 = moves[0]まで適用した局面）
             const movesForPly = kifMoves.slice(0, ply).map((m) => m.usiMove);
 
+            // 再解析のために既存の評価値をクリア
+            clearEvalByPly(ply);
+
             setAnalyzingState({ type: "by-ply", ply });
             void analyzePosition({
                 sfen: startSfen,
@@ -2042,7 +2099,7 @@ export function ShogiMatch({
                 depth: 20, // 最大深さ20
             });
         },
-        [kifMoves, analyzePosition, startSfen],
+        [kifMoves, analyzePosition, startSfen, clearEvalByPly],
     );
 
     // 分岐内のノードを解析するコールバック
@@ -2059,6 +2116,9 @@ export function ShogiMatch({
                 setMessage({ text: "指定されたノードが見つかりません", type: "error" });
                 return;
             }
+
+            // 再解析のために既存の評価値をクリア
+            clearEvalByNodeId(nodeId);
 
             try {
                 // ルートからこのノードまでのパスを取得
@@ -2089,7 +2149,7 @@ export function ShogiMatch({
                 setAnalyzingState(ANALYZING_STATE_NONE);
             }
         },
-        [navigation.tree, analyzePosition, startSfen],
+        [navigation.tree, analyzePosition, startSfen, clearEvalByNodeId],
     );
 
     // 単発解析完了時の処理
@@ -2261,9 +2321,9 @@ export function ShogiMatch({
     const handleMoveDetailSelect = useCallback(
         (move: KifMove | null, pos: PositionState | null) => {
             if (move && pos) {
-                setSelectedMoveDetail({ move, position: pos });
+                setSelectedMoveDetailPly({ ply: move.ply, position: pos });
             } else {
-                setSelectedMoveDetail(null);
+                setSelectedMoveDetailPly(null);
             }
         },
         [],
@@ -2407,6 +2467,22 @@ export function ShogiMatch({
                 />
             )}
 
+            {/* 手の詳細ウィンドウ（ドラッグ移動可能） */}
+            {selectedMoveDetail && (
+                <MoveDetailWindow
+                    move={selectedMoveDetail.move}
+                    position={selectedMoveDetail.position}
+                    onAddBranch={handleAddPvAsBranch}
+                    onPreview={handlePreviewPv}
+                    onAnalyze={handleAnalyzePly}
+                    isAnalyzing={isAnalyzing}
+                    analyzingPly={analyzingState.type !== "none" ? analyzingState.ply : undefined}
+                    kifuTree={navigation.tree}
+                    onClose={() => setSelectedMoveDetailPly(null)}
+                    isOnMainLine={navigation.state.isOnMainLine}
+                />
+            )}
+
             {/* モバイル時はMobileLayout、PC時は3列レイアウト */}
             {isMobile ? (
                 <MobileLayout
@@ -2495,6 +2571,7 @@ export function ShogiMatch({
                             passRightsSettings={passRightsSettings}
                             onPassRightsSettingsChange={handlePassRightsSettingsChange}
                             settingsLocked={settingsLocked}
+                            internalEngineId={engineOptions[0]?.id ?? "wasm"}
                             nnueList={nnueList}
                             matchNnueId={matchNnueId}
                             onMatchNnueIdChange={setMatchNnueId}
@@ -2851,36 +2928,6 @@ export function ShogiMatch({
                                         isOnMainLine={navigation.state.isOnMainLine}
                                         onMoveDetailSelect={handleMoveDetailSelect}
                                     />
-
-                                    {/* 詳細ドロワー（棋譜パネルの右側にスライドイン） */}
-                                    <div
-                                        className={`
-                                        absolute top-0 left-full z-50
-                                        transform transition-transform duration-300 ease-out
-                                        ${selectedMoveDetail ? "translate-x-0" : "-translate-x-full opacity-0 pointer-events-none"}
-                                    `}
-                                    >
-                                        <div className="pl-2">
-                                            {selectedMoveDetail && (
-                                                <MoveDetailPanel
-                                                    move={selectedMoveDetail.move}
-                                                    position={selectedMoveDetail.position}
-                                                    onAddBranch={handleAddPvAsBranch}
-                                                    onPreview={handlePreviewPv}
-                                                    onAnalyze={handleAnalyzePly}
-                                                    isAnalyzing={isAnalyzing}
-                                                    analyzingPly={
-                                                        analyzingState.type !== "none"
-                                                            ? analyzingState.ply
-                                                            : undefined
-                                                    }
-                                                    kifuTree={navigation.tree}
-                                                    onClose={() => setSelectedMoveDetail(null)}
-                                                    isOnMainLine={navigation.state.isOnMainLine}
-                                                />
-                                            )}
-                                        </div>
-                                    </div>
                                 </div>
                             </div>
 

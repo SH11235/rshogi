@@ -254,36 +254,42 @@ export function NnueManagerDialog({
                     )}
 
                     {/* プリセット一覧（manifestUrl が設定されている場合のみ） */}
-                    {isPresetConfigured && presets.length > 0 && (
-                        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-                            <div
-                                style={{
-                                    fontSize: "12px",
-                                    fontWeight: 500,
-                                    color: "hsl(var(--muted-foreground, 0 0% 45%))",
-                                    marginTop: "8px",
-                                    marginBottom: "4px",
-                                }}
-                            >
-                                ダウンロード可能なプリセット
+                    {/* 最新版ダウンロード済みのものは除外（インポート済みに表示されるため） */}
+                    {isPresetConfigured &&
+                        presets.filter((p) => p.status !== "latest").length > 0 && (
+                            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                                <div
+                                    style={{
+                                        fontSize: "12px",
+                                        fontWeight: 500,
+                                        color: "hsl(var(--muted-foreground, 0 0% 45%))",
+                                        marginTop: "8px",
+                                        marginBottom: "4px",
+                                    }}
+                                >
+                                    ダウンロード可能なプリセット
+                                </div>
+                                {presets
+                                    .filter((p) => p.status !== "latest")
+                                    .map((preset) => (
+                                        <PresetListItem
+                                            key={preset.config.presetKey}
+                                            preset={preset}
+                                            selectable={false}
+                                            onDownload={downloadPreset}
+                                            isDownloading={
+                                                downloadingKey === preset.config.presetKey
+                                            }
+                                            downloadProgress={
+                                                downloadingKey === preset.config.presetKey
+                                                    ? downloadProgress
+                                                    : null
+                                            }
+                                            disabled={isOperationInProgress}
+                                        />
+                                    ))}
                             </div>
-                            {presets.map((preset) => (
-                                <PresetListItem
-                                    key={preset.config.presetKey}
-                                    preset={preset}
-                                    selectable={false}
-                                    onDownload={downloadPreset}
-                                    isDownloading={downloadingKey === preset.config.presetKey}
-                                    downloadProgress={
-                                        downloadingKey === preset.config.presetKey
-                                            ? downloadProgress
-                                            : null
-                                    }
-                                    disabled={isOperationInProgress}
-                                />
-                            ))}
-                        </div>
-                    )}
+                        )}
 
                     {/* プリセット読み込み中 */}
                     {isPresetConfigured && isPresetsLoading && (

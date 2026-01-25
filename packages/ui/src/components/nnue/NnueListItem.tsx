@@ -13,7 +13,7 @@ export interface NnueListItemProps {
     onSelect?: () => void;
     /** 削除時のコールバック */
     onDelete?: () => void;
-    /** 削除ボタンを表示するか（プリセットは削除不可） */
+    /** 削除ボタンを表示するか（プリセットも削除可・再ダウンロード可能） */
     showDelete?: boolean;
     /** 削除中かどうか */
     isDeleting?: boolean;
@@ -49,7 +49,7 @@ export function NnueListItem({
     onDisplayNameChange,
 }: NnueListItemProps): ReactElement {
     const isPreset = meta.source === "preset";
-    const canDelete = showDelete && !isPreset && onDelete;
+    const canDelete = showDelete && onDelete;
     const canEdit = !isPreset && onDisplayNameChange;
     const inputId = useId();
     const editInputRef = useRef<HTMLInputElement>(null);
@@ -175,16 +175,70 @@ export function NnueListItem({
                                     marginBottom: "4px",
                                 }}
                             >
-                                <span
-                                    style={{
-                                        fontWeight: 500,
-                                        overflow: "hidden",
-                                        textOverflow: "ellipsis",
-                                        whiteSpace: "nowrap",
-                                    }}
-                                >
-                                    {meta.displayName}
-                                </span>
+                                {isEditing ? (
+                                    <Input
+                                        ref={editInputRef}
+                                        value={editValue}
+                                        onChange={(e) => setEditValue(e.target.value)}
+                                        onBlur={() => void saveDisplayName()}
+                                        onKeyDown={handleKeyDown}
+                                        disabled={isSaving}
+                                        className="h-7 text-sm font-medium"
+                                        style={{ maxWidth: "200px" }}
+                                        onClick={(e) => e.stopPropagation()}
+                                    />
+                                ) : (
+                                    <span
+                                        style={{
+                                            fontWeight: 500,
+                                            overflow: "hidden",
+                                            textOverflow: "ellipsis",
+                                            whiteSpace: "nowrap",
+                                        }}
+                                    >
+                                        {meta.displayName}
+                                    </span>
+                                )}
+                                {canEdit && !isEditing && (
+                                    <button
+                                        type="button"
+                                        onClick={(e) => {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            startEditing();
+                                        }}
+                                        disabled={disabled}
+                                        style={{
+                                            background: "none",
+                                            border: "none",
+                                            padding: "4px",
+                                            cursor: disabled ? "not-allowed" : "pointer",
+                                            color: "hsl(var(--muted-foreground, 0 0% 45%))",
+                                            display: "flex",
+                                            alignItems: "center",
+                                            borderRadius: "4px",
+                                            flexShrink: 0,
+                                        }}
+                                        className="hover:bg-muted/50 hover:text-foreground"
+                                        title="表示名を編集"
+                                        aria-label="表示名を編集"
+                                    >
+                                        <svg
+                                            width="14"
+                                            height="14"
+                                            viewBox="0 0 24 24"
+                                            fill="none"
+                                            stroke="currentColor"
+                                            strokeWidth="2"
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                            aria-hidden="true"
+                                        >
+                                            <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                                            <path d="m15 5 4 4" />
+                                        </svg>
+                                    </button>
+                                )}
                                 {isPreset && (
                                     <span
                                         style={{
