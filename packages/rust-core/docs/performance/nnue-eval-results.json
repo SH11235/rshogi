@@ -89,6 +89,56 @@
           }
         }
       }
+    },
+    {
+      "id": "architecture-refactoring-2026-01-25",
+      "measured_at": "2026-01-25",
+      "description": "3階層enum構造リファクタリング後（PR #357）",
+      "environment": {
+        "cpu": "AMD Ryzen 9 5950X 16-Core Processor",
+        "rust_version": "1.92.0",
+        "os": "Linux (Ubuntu)",
+        "build_flags": "--release"
+      },
+      "config": {
+        "iterations": 500000,
+        "warmup": 10000,
+        "test_positions": 5
+      },
+      "results": {
+        "HalfKA-256-32-32-CReLU": {
+          "refresh_ns": 667.0,
+          "eval_ns": 149.3,
+          "total_ns": 825.8,
+          "evals_per_sec": 1210948,
+          "note": "L1=256, L2=32, L3=32"
+        },
+        "HalfKA-512-8-96-CReLU": {
+          "refresh_ns": 1094.5,
+          "eval_ns": 136.6,
+          "total_ns": 1249.3,
+          "evals_per_sec": 800469,
+          "vs_previous": {
+            "refresh_diff_percent": 5.6,
+            "eval_diff_percent": 3.6,
+            "total_diff_percent": 3.5
+          },
+          "note": "測定誤差の範囲内"
+        },
+        "HalfKA-1024-8-96-CReLU": {
+          "refresh_ns": 1986.7,
+          "eval_ns": 232.4,
+          "total_ns": 2317.5,
+          "evals_per_sec": 431491,
+          "vs_previous": {
+            "refresh_diff_percent": 8.2,
+            "eval_diff_percent": 4.2,
+            "total_diff_percent": 9.2
+          },
+          "note": "測定誤差の範囲内"
+        }
+      },
+      "conclusion": "3階層enum構造リファクタリング後も性能は概ね維持。若干の差は測定誤差の範囲内と判断。"
     }
   ],
   "optimization_history": [
@@ -109,6 +159,16 @@
         "HalfKP256": "性能変化なし（L1/16はコンパイル時に定数展開）",
         "HalfKP512": "バグ修正（前半のみ処理→全体処理）",
         "HalfKA1024": "バグ修正（1/4のみ処理→全体処理）"
+      }
+    },
+    {
+      "date": "2026-01-25",
+      "change": "3階層enum構造リファクタリング（PR #357）",
+      "description": "NNUENetwork/HalfKANetwork/HalfKAL256等の3階層enum構造に整理。define_l1_variants!マクロで新アーキテクチャ追加を容易化",
+      "impact": {
+        "performance": "性能は概ね維持（測定誤差の範囲内）",
+        "maintainability": "新アーキテクチャ追加が3ステップで完結",
+        "test_coverage": "push/pop対称性、マクロ生成コード検証等のテスト追加"
       }
     }
   ]

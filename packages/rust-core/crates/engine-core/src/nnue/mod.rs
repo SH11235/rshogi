@@ -25,20 +25,28 @@ mod accumulator;
 mod accumulator_layer_stacks;
 mod accumulator_stack_variant;
 pub mod activation;
+pub mod aliases;
 mod bona_piece;
 mod bona_piece_halfka;
 mod constants;
 mod diff;
+mod evaluator;
 mod feature_transformer;
 mod feature_transformer_layer_stacks;
 pub mod features;
+pub(crate) mod halfka;
+pub(crate) mod halfkp;
 mod layer_stacks;
 mod layers;
 mod leb128;
+#[macro_use]
+pub mod macros;
 mod network;
-pub mod network_halfka;
-pub mod network_halfkp;
+pub(crate) mod network_halfka;
+pub(crate) mod network_halfkp;
 mod network_layer_stacks;
+pub mod prelude;
+pub mod spec;
 
 pub use accumulator::{
     Accumulator, AccumulatorStack, ChangedPiece, DirtyPiece, HandChange, StackEntry,
@@ -71,16 +79,13 @@ pub use network::{
 };
 pub use network_layer_stacks::NetworkLayerStacks;
 
-// const generics 版統一実装
+// const generics 版統一実装（内部型は pub(crate) に隠蔽）
 pub use activation::{detect_activation_from_arch, CReLU, FtActivation, PairwiseCReLU, SCReLU};
-pub use network_halfka::{
-    AccumulatorEntryHalfKA, AccumulatorHalfKA, AccumulatorStackHalfKA, AffineTransformHalfKA,
-    FeatureTransformerHalfKA, HalfKA1024CReLU, HalfKA1024Pairwise, HalfKA1024SCReLU,
-    HalfKA1024_8_32CReLU, HalfKA1024_8_32SCReLU, HalfKA256CReLU, HalfKA256Pairwise,
-    HalfKA256SCReLU, HalfKA512CReLU, HalfKA512Pairwise, HalfKA512SCReLU, NetworkHalfKA,
-};
-pub use network_halfkp::{
-    AccumulatorEntryHalfKP, AccumulatorHalfKP, AccumulatorStackHalfKP, AffineTransformHalfKP,
-    FeatureTransformerHalfKP, HalfKP256CReLU, HalfKP256Pairwise, HalfKP256SCReLU, HalfKP512CReLU,
-    HalfKP512Pairwise, HalfKP512SCReLU, HalfKP512_32_32CReLU, NetworkHalfKP,
-};
+pub use spec::{Activation, ArchitectureSpec, FeatureSet as SpecFeatureSet};
+
+// 型エイリアス（HalfKA*/HalfKP* の全バリアント）は pub(crate) に隠蔽
+// 外部からは NNUEEvaluator を通じてのみ NNUE 評価を行う
+// 内部モジュールは crate::nnue::aliases 経由で直接インポート
+
+// Phase 2: 外部 API 統一
+pub use evaluator::NNUEEvaluator;
