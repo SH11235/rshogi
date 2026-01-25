@@ -272,6 +272,7 @@ export function MobileLayout({
 
     // 編集モード判定を事前計算（MobileBoardSectionに渡す）
     const isEditModeActive = isEditMode && !isMatchRunning;
+    const hideEmptyHandPieces = gameMode === "playing" || gameMode === "paused";
 
     return (
         <div className="fixed inset-0 flex flex-col gap-1 w-full h-dvh overflow-hidden px-2 bg-background">
@@ -310,6 +311,7 @@ export function MobileLayout({
                     displaySettings={displaySettings}
                     isEditModeActive={isEditModeActive}
                     isMatchRunning={isMatchRunning}
+                    hideEmptyHandPieces={hideEmptyHandPieces}
                     editFromSquare={editFromSquare}
                     candidateNote={candidateNote}
                     onSquareSelect={onSquareSelect}
@@ -456,9 +458,10 @@ export function MobileLayout({
                     /* 編集モード: 対局開始 + 平手に戻すボタン */
                     <div className="flex flex-col gap-1.5 flex-shrink-0">
                         <div className="flex flex-col gap-0.5 text-center text-muted-foreground">
-                            <div className="text-sm">盤面をタップして編集</div>
+                            <div className="text-sm">盤面をタップ / 長押し・ドラッグで編集</div>
                             <div className="text-[10px] opacity-80">
-                                ダブルタップ: 成切替 / 盤外へ: 削除
+                                ダブルタップ: 成切替 / 盤外へ: 削除 /
+                                手駒を長押し・ドラッグで盤に追加
                             </div>
                         </div>
                         <div className="flex justify-center gap-3 py-2">

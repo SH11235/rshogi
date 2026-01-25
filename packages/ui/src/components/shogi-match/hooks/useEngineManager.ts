@@ -428,6 +428,25 @@ export function useEngineManager({
         [sides],
     );
 
+    useEffect(() => {
+        for (const side of ["sente", "gote"] as Player[]) {
+            const setting = sides[side];
+            if (setting.role !== "engine") continue;
+            if (!setting.skillLevel) continue;
+
+            const engineState = engineStatesRef.current[side];
+            if (!engineState.client || !engineState.ready) continue;
+
+            const selectedId = setting.engineId ?? engineOptions[0]?.id;
+            if (!selectedId || engineState.selectedId !== selectedId) continue;
+
+            void applySkillLevelSettings(engineState.client, setting.skillLevel).catch((error) => {
+                const errorMsg = error instanceof Error ? error.message : String(error);
+                addErrorLog(`Skill Level 設定に失敗 (${side}): ${errorMsg}`);
+            });
+        }
+    }, [addErrorLog, engineOptions, sides]);
+
     const disposeEngineForSide = useCallback(
         async (side: Player) => {
             const engineState = engineStatesRef.current[side];

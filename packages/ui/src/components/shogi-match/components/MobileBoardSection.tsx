@@ -39,6 +39,8 @@ interface MobileBoardSectionProps {
     isEditModeActive: boolean;
     /** 対局中かどうか（持ち駒表示の制御に使用） */
     isMatchRunning: boolean;
+    /** 0枚の駒を隠すか（対局中・一時停止時に使用） */
+    hideEmptyHandPieces: boolean;
     editFromSquare: Square | null;
     candidateNote: string | null;
 
@@ -93,6 +95,7 @@ export const MobileBoardSection = memo(function MobileBoardSection({
     displaySettings,
     isEditModeActive,
     isMatchRunning,
+    hideEmptyHandPieces,
     editFromSquare,
     candidateNote,
     onSquareSelect,
@@ -141,6 +144,7 @@ export const MobileBoardSection = memo(function MobileBoardSection({
                     onPiecePointerDown={isEditModeActive ? onHandPiecePointerDown : undefined}
                     isEditMode={isEditModeActive}
                     isMatchRunning={isMatchRunning}
+                    hideEmptyPieces={hideEmptyHandPieces}
                     onIncrement={
                         onIncrementHand
                             ? (piece) => onIncrementHand(topHand.owner, piece)
@@ -152,7 +156,7 @@ export const MobileBoardSection = memo(function MobileBoardSection({
                             : undefined
                     }
                     flipBoard={flipBoard}
-                    size={isEditModeActive ? "compact" : "medium"}
+                    size={isEditModeActive ? "edit" : "medium"}
                     isAI={topHand.isAI}
                 />
                 {/* パス権表示（上側プレイヤー） */}
@@ -214,6 +218,7 @@ export const MobileBoardSection = memo(function MobileBoardSection({
                     onPiecePointerDown={isEditModeActive ? onHandPiecePointerDown : undefined}
                     isEditMode={isEditModeActive}
                     isMatchRunning={isMatchRunning}
+                    hideEmptyPieces={hideEmptyHandPieces}
                     onIncrement={
                         onIncrementHand
                             ? (piece) => onIncrementHand(bottomHand.owner, piece)
@@ -225,7 +230,7 @@ export const MobileBoardSection = memo(function MobileBoardSection({
                             : undefined
                     }
                     flipBoard={flipBoard}
-                    size={isEditModeActive ? "compact" : "medium"}
+                    size={isEditModeActive ? "edit" : "medium"}
                     isAI={bottomHand.isAI}
                 />
                 {/* パス権表示（下側プレイヤー） */}
