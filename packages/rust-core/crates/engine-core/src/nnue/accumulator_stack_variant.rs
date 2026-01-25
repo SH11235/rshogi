@@ -13,7 +13,7 @@
 
 use super::accumulator::DirtyPiece;
 use super::accumulator_layer_stacks::AccumulatorStackLayerStacks;
-use super::halfka::HalfKAStack;
+use super::halfka_hm::HalfKAStack;
 use super::halfkp::HalfKPStack;
 use super::network::NNUENetwork;
 
@@ -214,11 +214,11 @@ mod tests {
     /// 各 L1 サイズでスタックが正しく作成されることを確認
     #[test]
     fn test_halfka_stack_l1_sizes() {
-        use crate::nnue::network_halfka::AccumulatorStackHalfKA;
+        use crate::nnue::network_halfka_hm::AccumulatorStackHalfKA_hm;
 
-        let l256_stack = HalfKAStack::L256(AccumulatorStackHalfKA::<256>::new());
-        let l512_stack = HalfKAStack::L512(AccumulatorStackHalfKA::<512>::new());
-        let l1024_stack = HalfKAStack::L1024(AccumulatorStackHalfKA::<1024>::new());
+        let l256_stack = HalfKAStack::L256(AccumulatorStackHalfKA_hm::<256>::new());
+        let l512_stack = HalfKAStack::L512(AccumulatorStackHalfKA_hm::<512>::new());
+        let l1024_stack = HalfKAStack::L1024(AccumulatorStackHalfKA_hm::<1024>::new());
 
         assert_eq!(l256_stack.l1_size(), 256);
         assert_eq!(l512_stack.l1_size(), 512);

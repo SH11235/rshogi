@@ -14,7 +14,7 @@
 use super::{Feature, TriggerEvent};
 use crate::nnue::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES};
 use crate::nnue::bona_piece::{BonaPiece, PIECE_BASE};
-use crate::nnue::bona_piece_halfka::{
+use crate::nnue::bona_piece_halfka_hm::{
     halfka_index, is_hm_mirror, king_bonapiece, king_bucket, pack_bonapiece,
 };
 use crate::nnue::constants::HALFKA_HM_DIMENSIONS;
