@@ -17,6 +17,7 @@
         "lint:affected": "turbo lint --filter='[HEAD~1]'",
         "knip": "knip",
         "knip:ci": "knip --reporter json",
+        "knip:libs": "knip --include-entry-exports",
         "lint:rust": "pnpm lint:rust:core && pnpm lint:rust:tauri",
         "lint:rust:core": "cd packages/rust-core && cargo clippy --workspace --all-targets -- -D warnings",
         "lint:rust:tauri": "cd apps/desktop/src-tauri && cargo clippy --workspace --all-targets -- -D warnings",
