@@ -94,6 +94,20 @@ pub const HALFKA_HM_DIMENSIONS: usize = BASE_INPUTS_HALFKA; // 73,305
 /// この定数は互換性エラー検出のために定義。
 pub const HALFKA_HM_DIMENSIONS_FACTORIZED: usize = BASE_INPUTS_HALFKA + PIECE_INPUTS_HALFKA; // 74,934
 
+// =============================================================================
+// HalfKA（非ミラー）アーキテクチャ用定数（Hisui 仕様）
+// =============================================================================
+
+/// HalfKA（非ミラー）の入力平面数
+///
+/// Hisui の学習設定: 1548 + 81 * 2 = 1710
+pub const HALFKA_PLANES: usize = 1548 + 81 * 2;
+
+/// HalfKA（非ミラー）の総入力次元数
+///
+/// 81（玉位置）× 1710（入力平面）
+pub const HALFKA_DIMENSIONS: usize = HALFKA_PLANES * 81; // 138,510
+
 /// 隠れ層1の次元数（YaneuraOu classic）
 pub const HIDDEN1_DIMENSIONS: usize = 32;
 

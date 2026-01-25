@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! NNUENetwork
-//! ├── HalfKA(HalfKANetwork)   // L256/L512/L1024 を内包
+//! ├── HalfKA(HalfKANetwork)   // HalfKA_hm: L256/L512/L1024 を内包
 //! ├── HalfKP(HalfKPNetwork)   // L256/L512 を内包
 //! └── LayerStacks(Box<NetworkLayerStacks>)
 //! ```
@@ -20,10 +20,10 @@ use super::accumulator_layer_stacks::AccumulatorStackLayerStacks;
 use super::accumulator_stack_variant::AccumulatorStackVariant;
 use super::activation::detect_activation_from_arch;
 use super::constants::{MAX_ARCH_LEN, NNUE_VERSION, NNUE_VERSION_HALFKA};
-use super::halfka::{HalfKANetwork, HalfKAStack};
+use super::halfka_hm::{HalfKANetwork, HalfKAStack};
 use super::halfkp::{HalfKPNetwork, HalfKPStack};
 use super::network_layer_stacks::NetworkLayerStacks;
-use super::spec::Activation;
+use super::spec::{Activation, FeatureSet};
 #[cfg(not(feature = "tournament"))]
 use crate::eval::material;
 use crate::position::Position;
@@ -82,7 +82,7 @@ pub fn set_fv_scale_override(value: i32) {
 /// L2/L3/活性化の追加時、このenumの変更は不要。
 /// 詳細は `halfka/` や `halfkp/` のモジュールで管理される。
 pub enum NNUENetwork {
-    /// HalfKA 特徴量セット（L256/L512/L1024）
+    /// HalfKA_hm 特徴量セット（L256/L512/L1024）
     HalfKA(HalfKANetwork),
     /// HalfKP 特徴量セット（L256/L512）
     HalfKP(HalfKPNetwork),
@@ -149,24 +149,30 @@ impl NNUENetwork {
                     _ => Activation::CReLU,
                 };
 
+                let parsed = super::spec::parse_architecture(&arch_str).map_err(|msg| {
+                    io::Error::new(io::ErrorKind::InvalidData, msg)
+                })?;
+
                 // アーキテクチャを判別して適切なバリアントに委譲
-                if arch_str.contains("HalfKA") {
-                    // LayerStacks 判定
-                    if arch_str.contains("->1536x2]") || arch_str.contains("LayerStacks") {
+                match parsed.feature_set {
+                    FeatureSet::LayerStacks => {
                         let network = NetworkLayerStacks::read(reader)?;
                         Ok(Self::LayerStacks(Box::new(network)))
-                    } else {
-                        // HalfKANetwork に委譲
-                        let (l1, l2, l3) = Self::parse_arch_dimensions(&arch_str);
-                        let network = HalfKANetwork::read(reader, l1, l2, l3, activation)?;
+                    }
+                    FeatureSet::HalfKA_hm => {
+                        let network =
+                            HalfKANetwork::read(reader, parsed.l1, parsed.l2, parsed.l3, activation)?;
                         Ok(Self::HalfKA(network))
                     }
-                } else {
-                    // HalfKPNetwork に委譲
-                    let l1 = Self::parse_halfkp_l1(&arch_str);
-                    let (_, l2, l3) = Self::parse_arch_dimensions(&arch_str);
-                    let network = HalfKPNetwork::read(reader, l1, l2, l3, activation)?;
-                    Ok(Self::HalfKP(network))
+                    FeatureSet::HalfKA => Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "HalfKA (non-mirror) architecture is not supported yet.",
+                    )),
+                    FeatureSet::HalfKP => {
+                        let network =
+                            HalfKPNetwork::read(reader, parsed.l1, parsed.l2, parsed.l3, activation)?;
+                        Ok(Self::HalfKP(network))
+                    }
                 }
             }
             _ => Err(io::Error::new(
@@ -176,120 +182,6 @@ impl NNUENetwork {
                 ),
             )),
         }
-    }
-
-    /// アーキテクチャ文字列から L1, L2, L3 を抽出
-    ///
-    /// 戻り値: (L1, L2, L3)
-    /// パース失敗時はデフォルト値 (0, 0, 0) を返す
-    fn parse_arch_dimensions(arch_str: &str) -> (usize, usize, usize) {
-        // L1: "->NNNx2]" または "->NNN/2x2]" (Pairwise) パターンを探す
-        let l1 = if let Some(idx) = arch_str.find("x2]") {
-            let before = &arch_str[..idx];
-            if let Some(arrow_idx) = before.rfind("->") {
-                let after_arrow = &before[arrow_idx + 2..];
-                // Pairwise形式 "512/2" の場合は "/" で終端、通常形式なら全体が数値
-                let num_str = if let Some(slash_idx) = after_arrow.find('/') {
-                    &after_arrow[..slash_idx]
-                } else {
-                    after_arrow
-                };
-                num_str.parse::<usize>().unwrap_or(0)
-            } else {
-                0
-            }
-        } else {
-            0
-        };
-
-        // L2, L3: AffineTransform[OUT<-IN] パターンを探す
-        // 例: AffineTransform[8<-1024] → L2=8
-        //     AffineTransform[96<-8] → L3=96
-        let mut layers: Vec<(usize, usize)> = Vec::new();
-        let pattern = "AffineTransform[";
-
-        let mut search_start = 0;
-        while let Some(start) = arch_str[search_start..].find(pattern) {
-            let abs_start = search_start + start + pattern.len();
-            if let Some(end) = arch_str[abs_start..].find(']') {
-                let content = &arch_str[abs_start..abs_start + end];
-                if let Some(arrow_idx) = content.find("<-") {
-                    let out_str = &content[..arrow_idx];
-                    let in_str = &content[arrow_idx + 2..];
-                    if let (Ok(out), Ok(inp)) = (out_str.parse::<usize>(), in_str.parse::<usize>())
-                    {
-                        layers.push((out, inp));
-                    }
-                }
-                search_start = abs_start + end;
-            } else {
-                break;
-            }
-        }
-
-        // 1. まず bullet-shogi 形式 "l2=8,l3=96" を優先的にパース
-        //    明示的に指定された値を尊重する
-        let mut l2 = 0usize;
-        let mut l3 = 0usize;
-        for part in arch_str.split(',') {
-            if let Some(val_str) = part.strip_prefix("l2=") {
-                if let Ok(val) = val_str.parse::<usize>() {
-                    l2 = val;
-                }
-            } else if let Some(val_str) = part.strip_prefix("l3=") {
-                if let Ok(val) = val_str.parse::<usize>() {
-                    l3 = val;
-                }
-            }
-        }
-
-        // 2. l2/l3 が取得できなかった場合、AffineTransform パターンでフォールバック
-        //    nnue-pytorch のネストされた構造では、出力に近い順に並ぶ
-        //    例: AffineTransform[1<-96](ClippedReLU[96](AffineTransform[96<-8](...)))
-        //    パース結果: [1<-96], [96<-8], [8<-1024]
-        //    逆順にして入力側から: [8<-1024] (L2), [96<-8] (L3), [1<-96] (output)
-        if l2 == 0 || l3 == 0 {
-            layers.reverse();
-            if layers.len() >= 3 {
-                if l2 == 0 {
-                    l2 = layers[0].0;
-                }
-                if l3 == 0 {
-                    l3 = layers[1].0;
-                }
-            }
-        }
-
-        (l1, l2, l3)
-    }
-
-    /// HalfKP アーキテクチャ文字列から L1 を抽出
-    ///
-    /// パース失敗時は 0 を返す
-    fn parse_halfkp_l1(arch_str: &str) -> usize {
-        // "->NNN" または "->NNN/2" (Pairwise) パターンを探す
-        if let Some(idx) = arch_str.find("->") {
-            let after = &arch_str[idx + 2..];
-            let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
-            let num_str = &after[..end];
-            return num_str.parse().unwrap_or(0);
-        }
-        // "[NNNx2]" または "[NNN/2x2]" パターンを探す
-        if let Some(idx) = arch_str.find("x2]") {
-            let before = &arch_str[..idx];
-            // Pairwise形式 "512/2" の場合
-            if let Some(slash_idx) = before.rfind('/') {
-                let num_part = &before[..slash_idx];
-                if let Some(start) = num_part.rfind(|c: char| !c.is_ascii_digit()) {
-                    let num_str = &num_part[start + 1..];
-                    return num_str.parse().unwrap_or(0);
-                }
-            } else if let Some(start) = before.rfind(|c: char| !c.is_ascii_digit()) {
-                let num_str = &before[start + 1..];
-                return num_str.parse().unwrap_or(0);
-            }
-        }
-        0
     }
 
     /// バイト列から読み込み（バージョン自動判別）
@@ -550,7 +442,7 @@ pub fn is_nnue_initialized() -> bool {
 /// NNUE フォーマット情報
 #[derive(Debug, Clone)]
 pub struct NnueFormatInfo {
-    /// アーキテクチャ名（例: "HalfKA1024", "LayerStacks", "HalfKP256"）
+    /// アーキテクチャ名（例: "HalfKA_hm1024", "LayerStacks", "HalfKP256"）
     pub architecture: String,
 
     /// L1 次元（例: 256, 512, 1024, 1536）
@@ -617,25 +509,22 @@ pub fn detect_format(bytes: &[u8]) -> io::Result<NnueFormatInfo> {
             // 活性化関数を検出
             let activation = detect_activation_from_arch(&arch_str).to_string();
 
-            // L1, L2, L3 を解析
-            let (l1, l2, l3) = NNUENetwork::parse_arch_dimensions(&arch_str);
+            let parsed = super::spec::parse_architecture(&arch_str)
+                .map_err(|msg| io::Error::new(io::ErrorKind::InvalidData, msg))?;
 
             // アーキテクチャ名を決定
-            let architecture = if arch_str.contains("HalfKA") {
-                if arch_str.contains("->1536x2]") || arch_str.contains("LayerStacks") {
-                    "LayerStacks".to_string()
-                } else {
-                    format!("HalfKA{l1}")
-                }
-            } else {
-                format!("HalfKP{l1}")
+            let architecture = match parsed.feature_set {
+                FeatureSet::LayerStacks => "LayerStacks".to_string(),
+                FeatureSet::HalfKA_hm => format!("HalfKA_hm{}", parsed.l1),
+                FeatureSet::HalfKA => format!("HalfKA{}", parsed.l1),
+                FeatureSet::HalfKP => format!("HalfKP{}", parsed.l1),
             };
 
             Ok(NnueFormatInfo {
                 architecture,
-                l1_dimension: l1 as u32,
-                l2_dimension: l2 as u32,
-                l3_dimension: l3 as u32,
+                l1_dimension: parsed.l1 as u32,
+                l2_dimension: parsed.l2 as u32,
+                l3_dimension: parsed.l3 as u32,
                 activation,
                 version,
                 arch_string: arch_str,
@@ -1015,46 +904,5 @@ mod tests {
         // プレフィックスが部分一致する場合（マッチしない）
         assert_eq!(parse_fv_scale_from_arch("my_fv_scale=16"), None);
         assert_eq!(parse_fv_scale_from_arch("fv_scale_v2=16"), None);
-    }
-
-    /// parse_arch_dimensions のユニットテスト
-    #[test]
-    fn test_parse_arch_dimensions() {
-        // nnue-pytorch 形式 (ネスト構造、出力→入力の順)
-        // 実際のファイル例: "Network=AffineTransform[1<-96](ClippedReLU[96](AffineTransform[96<-8](...)))"
-        let arch = "Features=HalfKA_hm[73305->512x2],Network=AffineTransform[1<-96](ClippedReLU[96](AffineTransform[96<-8](ClippedReLU[8](AffineTransform[8<-1024](InputSlice[1024(0:1024)])))))";
-        assert_eq!(NNUENetwork::parse_arch_dimensions(arch), (512, 8, 96));
-
-        // nnue-pytorch 形式 (1024次元)
-        let arch = "Features=HalfKA_hm[73305->1024x2],Network=AffineTransform[1<-96](ClippedReLU[96](AffineTransform[96<-8](ClippedReLU[8](AffineTransform[8<-2048](InputSlice[2048(0:2048)])))))";
-        assert_eq!(NNUENetwork::parse_arch_dimensions(arch), (1024, 8, 96));
-
-        // bullet-shogi 形式 (l2=, l3= パターン)
-        let arch = "Features=HalfKA_hm^[73305->512x2]-SCReLU,fv_scale=13,l2=8,l3=96,qa=127,qb=64";
-        assert_eq!(NNUENetwork::parse_arch_dimensions(arch), (512, 8, 96));
-
-        // bullet-shogi 形式 (1024次元)
-        let arch = "Features=HalfKA_hm^[73305->1024x2]-SCReLU,fv_scale=16,l2=8,l3=96,qa=127,qb=64";
-        assert_eq!(NNUENetwork::parse_arch_dimensions(arch), (1024, 8, 96));
-
-        // bullet-shogi 形式 (256次元, 32-32)
-        let arch = "Features=HalfKA_hm^[73305->256x2]-SCReLU,fv_scale=13,l2=32,l3=32,qa=127,qb=64";
-        assert_eq!(NNUENetwork::parse_arch_dimensions(arch), (256, 32, 32));
-
-        // L1のみ取得できる場合 (L2/L3 は 0)
-        let arch = "Features=HalfKP[125388->256x2]";
-        assert_eq!(NNUENetwork::parse_arch_dimensions(arch), (256, 0, 0));
-
-        // Pairwise 形式 (512/2x2 = 出力512、Pairwise乗算で256に縮小)
-        let arch = "Features=HalfKA_hm[73305->512/2x2]-Pairwise,fv_scale=10,l1_input=512,l2=8,l3=96,qa=255,qb=64,scale=1600,pairwise=true";
-        assert_eq!(NNUENetwork::parse_arch_dimensions(arch), (512, 8, 96));
-
-        // Pairwise 形式 (256/2x2)
-        let arch = "Features=HalfKA_hm[73305->256/2x2]-Pairwise,fv_scale=10,l1_input=256,l2=32,l3=32,qa=255,qb=64";
-        assert_eq!(NNUENetwork::parse_arch_dimensions(arch), (256, 32, 32));
-
-        // 何も取得できない場合
-        assert_eq!(NNUENetwork::parse_arch_dimensions("unknown"), (0, 0, 0));
-        assert_eq!(NNUENetwork::parse_arch_dimensions(""), (0, 0, 0));
     }
 }
