@@ -67,6 +67,10 @@ const preset: Omit<Config, "content"> = {
                     "outer-border": "hsl(var(--shogi-outer-border))",
                     "cell-light": "hsl(var(--shogi-cell-light))",
                     "cell-dark": "hsl(var(--shogi-cell-dark))",
+                    "piece-text": "hsl(var(--shogi-piece-text))",
+                    "piece-bg": "hsl(var(--shogi-piece-bg))",
+                    "piece-bg-dark": "hsl(var(--shogi-piece-bg-dark))",
+                    "coord-text": "hsl(var(--shogi-coord-text))",
                 },
             },
             borderRadius: {

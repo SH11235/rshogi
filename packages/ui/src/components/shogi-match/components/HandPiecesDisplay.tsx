@@ -61,14 +61,14 @@ function PieceToken({
     return (
         <span
             className={cn(
-                "relative inline-flex items-center justify-center leading-none tracking-tight text-[#3a2a16]",
+                "relative inline-flex items-center justify-center leading-none tracking-tight text-shogi-piece-text",
                 config.text,
                 shouldRotate && "-rotate-180",
             )}
         >
             <span
                 className={cn(
-                    "rounded-[8px] bg-[#fdf6ec]/90 shadow-[0_3px_6px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)]",
+                    "rounded-[8px] bg-shogi-piece-bg/90 shadow-[0_3px_6px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)]",
                     config.padding,
                 )}
             >

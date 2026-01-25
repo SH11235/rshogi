@@ -69,8 +69,8 @@ export const DragGhost = forwardRef<HTMLDivElement, DragGhostProps>(function Dra
             <div
                 className={cn(
                     "relative flex h-11 w-11 items-center justify-center",
-                    "rounded-lg border border-[#c08a3d]",
-                    "bg-[radial-gradient(circle_at_30%_20%,#fdf6ec,#e8d4b8)]",
+                    "rounded-lg border border-shogi-outer-border",
+                    "bg-[radial-gradient(circle_at_30%_20%,hsl(var(--shogi-piece-bg)),hsl(var(--shogi-piece-bg-dark)))]",
                     "shadow-[0_8px_24px_rgba(0,0,0,0.35),0_4px_8px_rgba(0,0,0,0.2)]",
                     "transform-gpu",
                     shouldFlip && "-rotate-180",
@@ -86,7 +86,7 @@ export const DragGhost = forwardRef<HTMLDivElement, DragGhostProps>(function Dra
                     <span
                         className={cn(
                             "text-lg font-bold leading-none tracking-tight",
-                            "text-[#3a2a16]",
+                            "text-shogi-piece-text",
                             "drop-shadow-[0_1px_1px_rgba(255,255,255,0.8)]",
                         )}
                     >
@@ -99,7 +99,7 @@ export const DragGhost = forwardRef<HTMLDivElement, DragGhostProps>(function Dra
                     <span
                         className={cn(
                             "absolute -right-0.5 -top-0.5",
-                            "rounded-full bg-[#f06c3c] px-1",
+                            "rounded-full bg-wafuu-shu px-1",
                             "text-[8px] font-bold text-white",
                             "shadow-sm",
                         )}

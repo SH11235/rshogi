@@ -196,7 +196,7 @@ export function ShogiBoard({
                                         {cell.piece ? (
                                             <span
                                                 className={cn(
-                                                    "relative flex h-full w-full items-center justify-center text-[18px] leading-none tracking-tight text-[#3a2a16]",
+                                                    "relative flex h-full w-full items-center justify-center text-[18px] leading-none tracking-tight text-shogi-piece-text",
                                                     flipBoard
                                                         ? cell.piece.owner === "sente" &&
                                                               "-rotate-180"
@@ -204,7 +204,7 @@ export function ShogiBoard({
                                                               "-rotate-180",
                                                 )}
                                             >
-                                                <span className="rounded-[10px] bg-[#fdf6ec]/90 px-2 py-[6px] shadow-[0_4px_8px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)]">
+                                                <span className="rounded-[10px] bg-shogi-piece-bg/90 px-2 py-[6px] shadow-[0_4px_8px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)]">
                                                     {PIECE_LABELS[cell.piece.type] ??
                                                         cell.piece.type}
                                                 </span>
@@ -216,7 +216,7 @@ export function ShogiBoard({
                                             </span>
                                         ) : null}
                                         {squareNotation !== "none" && (
-                                            <span className="pointer-events-none absolute left-1 top-1 text-[9px] font-medium text-[#9a7b4a]">
+                                            <span className="pointer-events-none absolute left-1 top-1 text-[9px] font-medium text-shogi-coord-text">
                                                 {formatSquare(cell.id, squareNotation)}
                                             </span>
                                         )}
@@ -268,7 +268,7 @@ export function ShogiBoard({
                                                     }
                                                 }}
                                                 aria-label="成らない"
-                                                className="flex-1 rounded-b-md bg-gradient-to-b from-[#4a90e2] to-[#357abd] text-[12px] font-bold text-white shadow-lg transition-all hover:scale-105 hover:shadow-xl active:scale-95 focus:outline-none focus:ring-2 focus:ring-white focus:ring-offset-2"
+                                                className="flex-1 rounded-b-md bg-gradient-to-b from-wafuu-ai to-wafuu-ai/80 text-[12px] font-bold text-white shadow-lg transition-all hover:scale-105 hover:shadow-xl active:scale-95 focus:outline-none focus:ring-2 focus:ring-white focus:ring-offset-2"
                                             >
                                                 不成
                                             </button>
