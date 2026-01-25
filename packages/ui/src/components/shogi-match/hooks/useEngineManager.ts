@@ -235,6 +235,8 @@ interface UseEngineManagerReturn {
     retryEngine: (side: Player) => Promise<void>;
     /** リトライ中かどうか */
     isRetrying: Record<Player, boolean>;
+    /** NNUE切替によるエンジン再起動中かどうか */
+    isEngineRestarting: boolean;
 }
 
 export function formatEvent(event: EngineEvent, label: string): string {
@@ -357,6 +359,10 @@ export function useEngineManager({
         gote: null,
     });
     const [isRetrying, setIsRetrying] = useState<Record<Player, boolean>>({
+        sente: false,
+        gote: false,
+    });
+    const [isNnueRestarting, setIsNnueRestarting] = useState<Record<Player, boolean>>({
         sente: false,
         gote: false,
     });
@@ -586,6 +592,76 @@ export function useEngineManager({
             }
         },
         [addErrorLog, senteNnueId, goteNnueId, sides],
+    );
+
+    const restartEngineForNnueChange = useCallback(
+        async (side: Player) => {
+            const engineState = engineStatesRef.current[side];
+            if (!engineState.client) return;
+
+            const searchState = searchStatesRef.current[side];
+            if (searchState.pending) {
+                addErrorLog(`再起動中です (${side})`);
+                return;
+            }
+
+            setIsNnueRestarting((prev) => ({ ...prev, [side]: true }));
+            searchState.pending = true;
+
+            try {
+                const client = engineState.client;
+                if ("reset" in client && typeof client.reset === "function") {
+                    await client.reset();
+                }
+
+                setEngineErrorDetails((prev) => ({
+                    ...prev,
+                    [side]: null,
+                }));
+                setEngineStatus((prev) => ({ ...prev, [side]: "idle" }));
+                engineState.ready = false;
+
+                await client.init();
+
+                const nnueId = side === "sente" ? senteNnueId : goteNnueId;
+                if (nnueId && client.loadNnue) {
+                    await client.loadNnue(nnueId);
+                }
+
+                const skillSettings = sides[side].skillLevel;
+                if (skillSettings) {
+                    await applySkillLevelSettings(client, skillSettings);
+                }
+
+                await client.loadPosition(
+                    startSfen,
+                    movesRef.current,
+                    buildPassRightsOption(passRightsSettings, movesRef.current),
+                );
+
+                engineState.ready = true;
+                setEngineReady((prev) => ({ ...prev, [side]: true }));
+            } catch (error) {
+                const errorMsg = error instanceof Error ? error.message : String(error);
+                addErrorLog(`再起動失敗 (${side}): ${errorMsg}`);
+                setEngineStatus((prev) => ({ ...prev, [side]: "error" }));
+
+                const errorInfo = getEngineErrorInfo("WASM_INIT_FAILED");
+                setEngineErrorDetails((prev) => ({
+                    ...prev,
+                    [side]: {
+                        hasError: true,
+                        errorCode: "WASM_INIT_FAILED",
+                        errorMessage: errorMsg,
+                        canRetry: errorInfo.canRetry,
+                    },
+                }));
+            } finally {
+                searchState.pending = false;
+                setIsNnueRestarting((prev) => ({ ...prev, [side]: false }));
+            }
+        },
+        [addErrorLog, goteNnueId, movesRef, passRightsSettings, senteNnueId, sides, startSfen],
     );
 
     const applyMoveFromEngine = useCallback(
@@ -1143,6 +1219,31 @@ export function useEngineManager({
         }
     }, [disposeAnalysisEngine, analysisNnueId]);
 
+    const prevMatchNnueIdsRef = useRef<{
+        sente: string | null | undefined;
+        gote: string | null | undefined;
+    }>({
+        sente: senteNnueId,
+        gote: goteNnueId,
+    });
+    useEffect(() => {
+        const prev = prevMatchNnueIdsRef.current;
+        const next = { sente: senteNnueId, gote: goteNnueId };
+        if (isMatchRunning) return;
+
+        (["sente", "gote"] as Player[]).forEach((side) => {
+            if (prev[side] === next[side]) return;
+            if (sides[side].role !== "engine") return;
+
+            const engineState = engineStatesRef.current[side];
+            if (!engineState.client || !engineState.ready) return;
+
+            void restartEngineForNnueChange(side);
+        });
+
+        prevMatchNnueIdsRef.current = next;
+    }, [goteNnueId, isMatchRunning, restartEngineForNnueChange, senteNnueId, sides]);
+
     // アンマウント時に解析エンジンも破棄
     useEffect(() => {
         return () => {
@@ -1167,5 +1268,6 @@ export function useEngineManager({
         engineErrorDetails,
         retryEngine,
         isRetrying,
+        isEngineRestarting: isNnueRestarting.sente || isNnueRestarting.gote,
     };
 }

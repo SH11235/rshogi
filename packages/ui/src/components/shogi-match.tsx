@@ -21,6 +21,7 @@ import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNnueStorage } from "../hooks/useNnueStorage";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./dialog";
+import { EngineRestartingOverlay } from "./nnue/EngineRestartingOverlay";
 import { NnueManagerDialog } from "./nnue/NnueManagerDialog";
 import type { ShogiBoardCell } from "./shogi-board";
 import { ShogiBoard } from "./shogi-board";
@@ -862,6 +863,7 @@ export function ShogiMatch({
         engineErrorDetails,
         retryEngine,
         isRetrying,
+        isEngineRestarting,
     } = useEngineManager({
         sides,
         engineOptions,
@@ -2416,6 +2418,8 @@ export function ShogiMatch({
                 dndState={dndController.state}
                 ownerOrientation={flipBoard ? "gote" : "sente"}
             />
+
+            <EngineRestartingOverlay visible={isEngineRestarting} />
 
             {/* 勝敗表示ダイアログ */}
             <GameResultDialog
