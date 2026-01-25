@@ -181,7 +181,7 @@ export function usePresetManager(options: UsePresetManagerOptions = {}): UsePres
                 setDownloadProgress(null);
             }
         },
-        [manager, storage, downloadingKey, refresh, onDownloadComplete],
+        [manager, storage, downloadingKey, refresh, onDownloadComplete, validatePresetMeta],
     );
 
     const clearError = useCallback(() => {

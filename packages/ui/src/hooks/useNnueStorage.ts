@@ -1,7 +1,7 @@
 import {
     generateNnueId,
-    NnueError,
     NNUE_HEADER_SIZE,
+    NnueError,
     type NnueMeta,
     type NnueStorageCapabilities,
 } from "@shogi/app-core";
