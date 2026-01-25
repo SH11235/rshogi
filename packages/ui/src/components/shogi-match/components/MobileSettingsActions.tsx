@@ -47,7 +47,9 @@ export function MobileSettingsActions({
                     title="評価関数ファイル管理"
                     aria-label="評価関数ファイル管理を開く"
                 >
-                    📁
+                    <span role="img" aria-label="フォルダ">
+                        📁
+                    </span>
                 </button>
             )}
 
