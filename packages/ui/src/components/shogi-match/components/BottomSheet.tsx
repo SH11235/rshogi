@@ -7,7 +7,7 @@
 
 import { cn } from "@shogi/design-system";
 import type { ReactElement, ReactNode } from "react";
-import { Dialog, DialogClose, DialogOverlay, DialogPortal } from "../../dialog";
+import { Dialog, DialogClose, DialogContent } from "../../dialog";
 
 interface BottomSheetProps {
     /** シートを開くかどうか */
@@ -43,53 +43,64 @@ export function BottomSheet({
 }: BottomSheetProps): ReactElement {
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
-            <DialogPortal>
-                <DialogOverlay />
-                <div
-                    data-state={open ? "open" : "closed"}
-                    className={cn(
-                        "fixed bottom-0 left-0 right-0 z-50",
-                        "w-screen",
-                        "bg-background rounded-t-2xl",
-                        "overflow-x-hidden overflow-y-auto",
-                        "overscroll-contain touch-pan-y",
-                        "duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out",
-                        "data-[state=closed]:fade-out data-[state=open]:fade-in",
-                        "data-[state=closed]:slide-out-to-bottom data-[state=open]:slide-in-from-bottom",
-                    )}
-                    style={{
-                        ...heightStyles[height],
-                        display: "flex",
-                        flexDirection: "column",
-                    }}
-                >
-                    {/* ドラッグハンドル（装飾） */}
-                    <div className="flex justify-center py-2 sticky top-0 bg-background z-10">
-                        <div className="w-10 h-1 bg-muted rounded-full" />
-                    </div>
-
-                    {/* ヘッダー */}
-                    <div className="px-4 pb-3 border-b border-border font-semibold text-lg">
-                        {title}
-                    </div>
-
-                    {/* コンテンツ */}
-                    {/* min-h-0 は flexbox 内でスクロールを機能させるために必要 */}
-                    <div className="p-4 max-w-full flex-1 min-h-0 overflow-auto">{children}</div>
-
-                    {/* 閉じるボタン */}
-                    <div className="sticky bottom-0 p-4 bg-background border-t border-border">
-                        <DialogClose asChild>
-                            <button
-                                type="button"
-                                className="w-full py-3 rounded-lg bg-muted hover:bg-muted/80 font-medium transition-colors"
-                            >
-                                閉じる
-                            </button>
-                        </DialogClose>
-                    </div>
+            <DialogContent
+                data-state={open ? "open" : "closed"}
+                className={cn(
+                    "fixed bottom-0 left-0 right-0 z-50",
+                    "w-screen",
+                    "bg-background rounded-t-2xl",
+                    "overflow-hidden",
+                    "duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out",
+                    "data-[state=closed]:fade-out data-[state=open]:fade-in",
+                    "data-[state=closed]:slide-out-to-bottom data-[state=open]:slide-in-from-bottom",
+                )}
+                style={{
+                    ...heightStyles[height],
+                    top: "auto",
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    transform: "none",
+                    width: "100%",
+                    maxWidth: "100%",
+                    padding: 0,
+                    border: "none",
+                    borderRadius: "16px 16px 0 0",
+                    overflow: "hidden",
+                    display: "flex",
+                    flexDirection: "column",
+                }}
+            >
+                {/* ドラッグハンドル（装飾） */}
+                <div className="flex justify-center py-2 bg-background">
+                    <div className="w-10 h-1 bg-muted rounded-full" />
                 </div>
-            </DialogPortal>
+
+                {/* ヘッダー */}
+                <div className="px-4 pb-3 border-b border-border font-semibold text-lg">
+                    {title}
+                </div>
+
+                {/* コンテンツ */}
+                <div
+                    className="px-4 pt-4 max-w-full flex-1 min-h-0 overflow-y-auto overscroll-contain touch-pan-y"
+                    style={{ WebkitOverflowScrolling: "touch" }}
+                >
+                    {children}
+                </div>
+
+                {/* 閉じるボタン */}
+                <div className="px-4 pt-4 pb-[calc(1rem+env(safe-area-inset-bottom))] bg-background border-t border-border">
+                    <DialogClose asChild>
+                        <button
+                            type="button"
+                            className="w-full py-3 rounded-lg bg-muted hover:bg-muted/80 font-medium transition-colors"
+                        >
+                            閉じる
+                        </button>
+                    </DialogClose>
+                </div>
+            </DialogContent>
         </Dialog>
     );
 }

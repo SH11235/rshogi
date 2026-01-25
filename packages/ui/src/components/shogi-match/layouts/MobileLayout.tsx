@@ -516,7 +516,7 @@ export function MobileLayout({
                 open={isSettingsOpen}
                 onOpenChange={setIsSettingsOpen}
                 title="設定"
-                height="auto"
+                height="full"
             >
                 <MobileSettingsSheet
                     sides={sides}
