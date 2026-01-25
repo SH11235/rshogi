@@ -388,14 +388,7 @@ export function ShogiMatch({
         DEFAULT_ANALYSIS_SETTINGS,
     );
     const analysisSettings = useMemo(() => {
-        const merged = { ...DEFAULT_ANALYSIS_SETTINGS, ...storedAnalysisSettings };
-        // 旧設定 autoAnalyzeBranch からの移行処理
-        // autoAnalyzeMode が未設定で autoAnalyzeBranch が存在する場合、マッピングする
-        const stored = storedAnalysisSettings as unknown as Record<string, unknown>;
-        if (!("autoAnalyzeMode" in stored) && "autoAnalyzeBranch" in stored) {
-            merged.autoAnalyzeMode = stored.autoAnalyzeBranch ? "delayed" : "off";
-        }
-        return merged;
+        return { ...DEFAULT_ANALYSIS_SETTINGS, ...storedAnalysisSettings };
     }, [storedAnalysisSettings]);
     // パス権設定
     const [passRightsSettings, setPassRightsSettings] = useLocalStorage<PassRightsSettings>(
@@ -2271,40 +2264,6 @@ export function ShogiMatch({
         [navigation.tree, startSfen, analysisSettings, enginePool],
     );
 
-    // 分岐作成時の自動解析
-    useEffect(() => {
-        if (!lastAddedBranchInfo || analysisSettings.autoAnalyzeMode === "off") {
-            return;
-        }
-
-        const runAnalysis = () => {
-            // ply + firstMove から分岐のnodeIdを見つける
-            const branches = getAllBranches(navigation.tree);
-            const branch = branches.find((b) => {
-                if (b.ply !== lastAddedBranchInfo.ply) return false;
-                const node = navigation.tree.nodes.get(b.nodeId);
-                return node?.usiMove === lastAddedBranchInfo.firstMove;
-            });
-            if (branch) {
-                handleAnalyzeBranch(branch.nodeId);
-            }
-        };
-
-        if (analysisSettings.autoAnalyzeMode === "immediate") {
-            // 即時モード: すぐに解析開始
-            runAnalysis();
-        } else {
-            // delayedモード: 3秒後に解析開始（操作が続けばリセット）
-            const timerId = setTimeout(runAnalysis, 3000);
-            return () => clearTimeout(timerId);
-        }
-    }, [
-        lastAddedBranchInfo,
-        analysisSettings.autoAnalyzeMode,
-        handleAnalyzeBranch,
-        navigation.tree,
-    ]);
-
     // 一括解析をキャンセル
     const handleCancelBatchAnalysis = useCallback(() => {
         void enginePool.cancel();
@@ -2502,6 +2461,9 @@ export function ShogiMatch({
                     onAnalyze={handleAnalyzePly}
                     isAnalyzing={isAnalyzing}
                     analyzingPly={analyzingState.type !== "none" ? analyzingState.ply : undefined}
+                    analysisNnueId={analysisNnueId}
+                    onAnalysisNnueIdChange={setAnalysisNnueId}
+                    nnueList={nnueList}
                     kifuTree={navigation.tree}
                     onClose={() => setSelectedMoveDetailPly(null)}
                     isOnMainLine={navigation.state.isOnMainLine}
@@ -2946,6 +2908,9 @@ export function ShogiMatch({
                                         onCancelBatchAnalysis={handleCancelBatchAnalysis}
                                         analysisSettings={analysisSettings}
                                         onAnalysisSettingsChange={setAnalysisSettings}
+                                        analysisNnueId={analysisNnueId}
+                                        onAnalysisNnueIdChange={setAnalysisNnueId}
+                                        nnueList={nnueList}
                                         kifuTree={navigation.tree}
                                         onNodeClick={navigation.goToNodeById}
                                         onBranchSwitch={navigation.switchBranchAtNode}

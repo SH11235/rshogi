@@ -4,14 +4,14 @@
  * 棋譜をKIF形式（日本語表記）で表示し、評価値も合わせて表示する
  */
 
-import type { KifuTree, PositionState } from "@shogi/app-core";
+import type { KifuTree, NnueMeta, PositionState } from "@shogi/app-core";
 import { detectParallelism } from "@shogi/app-core";
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Popover, PopoverContent, PopoverTrigger } from "../../popover";
 import { Switch } from "../../switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../../tooltip";
-import type { AnalysisSettings, AutoAnalyzeMode } from "../types";
+import type { AnalysisSettings } from "../types";
 import type { BranchSummary, FlatTreeNode, PvMainLineComparison } from "../utils/branchTreeUtils";
 import {
     comparePvWithMainLine,
@@ -122,6 +122,10 @@ interface KifuPanelProps {
     analysisSettings?: AnalysisSettings;
     /** 解析設定変更コールバック */
     onAnalysisSettingsChange?: (settings: AnalysisSettings) => void;
+    /** 分析用 NNUE */
+    analysisNnueId?: string | null;
+    onAnalysisNnueIdChange?: (id: string | null) => void;
+    nnueList?: NnueMeta[];
     /** 棋譜ツリー（ツリービュー用） */
     kifuTree?: KifuTree;
     /** ノードクリック時のコールバック（ツリービュー用） */
@@ -335,6 +339,9 @@ function ExpandedMoveDetails({
     isAnalyzing,
     analyzingPly,
     kifuTree,
+    analysisNnueId,
+    onAnalysisNnueIdChange,
+    nnueList,
     onCollapse,
     isOnMainLine = true,
 }: {
@@ -346,6 +353,9 @@ function ExpandedMoveDetails({
     isAnalyzing?: boolean;
     analyzingPly?: number;
     kifuTree?: KifuTree;
+    analysisNnueId?: string | null;
+    onAnalysisNnueIdChange?: (id: string | null) => void;
+    nnueList?: NnueMeta[];
     onCollapse: () => void;
     /** 現在位置がメインライン上にあるか（falseの場合はPV分岐追加を無効化） */
     isOnMainLine?: boolean;
@@ -386,6 +396,8 @@ function ExpandedMoveDetails({
 
     const hasPv = pvList.length > 0;
     const hasMultiplePv = pvList.length > 1;
+    const nnueOptions = nnueList ?? [];
+    const showNnueSelector = analysisNnueId !== undefined && !!onAnalysisNnueIdChange;
 
     return (
         <section
@@ -473,11 +485,32 @@ function ExpandedMoveDetails({
 
             {/* 解析ボタン */}
             {onAnalyze && (
-                <div className={hasPv ? "pt-2 border-t border-border mt-2" : "space-y-2"}>
+                <div className={hasPv ? "pt-2 border-t border-border mt-2 space-y-2" : "space-y-2"}>
                     {!hasPv && (
                         <div className="text-[11px] text-muted-foreground mb-2">
                             読み筋がありません
                         </div>
+                    )}
+                    {showNnueSelector && (
+                        <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
+                            <span>分析NNUE</span>
+                            <select
+                                value={analysisNnueId ?? "material"}
+                                onChange={(e) =>
+                                    onAnalysisNnueIdChange?.(
+                                        e.target.value === "material" ? null : e.target.value,
+                                    )
+                                }
+                                className="w-full px-2 py-1 text-xs rounded border border-border bg-background"
+                            >
+                                <option value="material">簡易AI（駒得）</option>
+                                {nnueOptions.map((nnue) => (
+                                    <option key={nnue.id} value={nnue.id}>
+                                        {nnue.displayName}
+                                    </option>
+                                ))}
+                            </select>
+                        </label>
                     )}
                     <button
                         type="button"
@@ -796,6 +829,10 @@ function BatchAnalysisDropdown({
     onStartBatchAnalysis,
     onStartTreeBatchAnalysis,
     hasBranches,
+    isRunning,
+    analysisNnueId,
+    onAnalysisNnueIdChange,
+    nnueList,
 }: {
     movesWithoutPv: number;
     analysisSettings: AnalysisSettings;
@@ -803,10 +840,16 @@ function BatchAnalysisDropdown({
     onStartBatchAnalysis: () => void;
     onStartTreeBatchAnalysis?: (options?: { mainLineOnly?: boolean }) => void;
     hasBranches: boolean;
+    isRunning?: boolean;
+    analysisNnueId?: string | null;
+    onAnalysisNnueIdChange?: (id: string | null) => void;
+    nnueList?: NnueMeta[];
 }): ReactElement {
     const [isOpen, setIsOpen] = useState(false);
     const [analysisTarget, setAnalysisTarget] = useState<AnalysisTarget>("mainOnly");
     const parallelismConfig = detectParallelism();
+    const nnueOptions = nnueList ?? [];
+    const showNnueSelector = analysisNnueId !== undefined && !!onAnalysisNnueIdChange;
 
     const handleParallelWorkersChange = (value: number) => {
         onAnalysisSettingsChange({
@@ -831,7 +874,7 @@ function BatchAnalysisDropdown({
         }
     };
 
-    const isDisabled = movesWithoutPv === 0;
+    const isDisabled = movesWithoutPv === 0 || isRunning === true;
 
     return (
         <Popover open={isOpen} onOpenChange={isDisabled ? undefined : setIsOpen}>
@@ -845,13 +888,14 @@ function BatchAnalysisDropdown({
                             : "cursor-pointer bg-primary/10 text-primary border-primary/30 hover:bg-primary/20"
                     }`}
                     aria-label={
-                        isDisabled ? "解析対象の手がありません" : `一括解析: ${movesWithoutPv}手`
+                        isRunning
+                            ? "一括解析中"
+                            : isDisabled
+                              ? "解析対象の手がありません"
+                              : `一括解析: ${movesWithoutPv}手`
                     }
                 >
-                    ⚡{/* 自動解析有効時のインジケーター */}
-                    {!isDisabled && analysisSettings.autoAnalyzeMode !== "off" && (
-                        <span className="absolute -top-1 -right-1 w-2 h-2 bg-[hsl(var(--wafuu-kin))] rounded-full" />
-                    )}
+                    ⚡
                 </button>
             </PopoverTrigger>
             <PopoverContent side="bottom" align="end" className="w-64 p-3">
@@ -860,43 +904,27 @@ function BatchAnalysisDropdown({
                     <div className="text-xs text-muted-foreground">
                         読み筋がない{movesWithoutPv}手を解析します
                     </div>
-
-                    {/* 分岐作成時の自動解析オプション */}
-                    <div
-                        className={`p-2 rounded-lg border transition-colors ${
-                            analysisSettings.autoAnalyzeMode !== "off"
-                                ? "bg-[hsl(var(--wafuu-kin)/0.1)] border-[hsl(var(--wafuu-kin)/0.3)]"
-                                : "bg-muted/30 border-border"
-                        }`}
-                    >
+                    {showNnueSelector && (
                         <div className="space-y-1.5">
-                            <div className="text-xs font-medium text-foreground">
-                                分岐作成時の自動解析
-                            </div>
+                            <div className="text-xs font-medium text-foreground">分析NNUE</div>
                             <select
-                                value={analysisSettings.autoAnalyzeMode}
+                                value={analysisNnueId ?? "material"}
                                 onChange={(e) =>
-                                    onAnalysisSettingsChange({
-                                        ...analysisSettings,
-                                        autoAnalyzeMode: e.target.value as AutoAnalyzeMode,
-                                    })
+                                    onAnalysisNnueIdChange?.(
+                                        e.target.value === "material" ? null : e.target.value,
+                                    )
                                 }
                                 className="w-full px-2 py-1 text-xs rounded border border-border bg-background"
                             >
-                                <option value="off">オフ</option>
-                                <option value="delayed">操作が落ち着いてから</option>
-                                <option value="immediate">すぐに解析</option>
+                                <option value="material">簡易AI（駒得）</option>
+                                {nnueOptions.map((nnue) => (
+                                    <option key={nnue.id} value={nnue.id}>
+                                        {nnue.displayName}
+                                    </option>
+                                ))}
                             </select>
-                            <div className="text-[10px] text-muted-foreground">
-                                {analysisSettings.autoAnalyzeMode === "off" &&
-                                    "手動で解析ボタンを押したときのみ"}
-                                {analysisSettings.autoAnalyzeMode === "delayed" &&
-                                    "分岐入力後、数秒待ってから解析開始"}
-                                {analysisSettings.autoAnalyzeMode === "immediate" &&
-                                    "分岐作成と同時に解析開始（電池消費大）"}
-                            </div>
                         </div>
-                    </div>
+                    )}
 
                     {/* 解析対象の選択（分岐がある場合のみ表示） */}
                     {hasBranches && onStartTreeBatchAnalysis && (
@@ -1042,6 +1070,9 @@ export function KifuPanel({
     onCancelBatchAnalysis,
     analysisSettings,
     onAnalysisSettingsChange,
+    analysisNnueId,
+    onAnalysisNnueIdChange,
+    nnueList,
     kifuTree,
     onNodeClick,
     onBranchSwitch: _onBranchSwitch,
@@ -1374,26 +1405,26 @@ export function KifuPanel({
                             </label>
                         )}
                         {/* 一括解析ボタン（ドロップダウン） - 常に表示してレイアウトシフトを防止 */}
-                        {onStartBatchAnalysis &&
-                            kifMoves.length > 0 &&
-                            !batchAnalysis?.isRunning &&
-                            analysisSettings &&
-                            onAnalysisSettingsChange && (
-                                <BatchAnalysisDropdown
-                                    movesWithoutPv={movesWithoutPv}
-                                    analysisSettings={analysisSettings}
-                                    onAnalysisSettingsChange={onAnalysisSettingsChange}
-                                    onStartBatchAnalysis={onStartBatchAnalysis}
-                                    onStartTreeBatchAnalysis={onStartTreeBatchAnalysis}
-                                    hasBranches={
-                                        kifuTree
-                                            ? Array.from(kifuTree.nodes.values()).some(
-                                                  (n) => n.children.length > 1,
-                                              )
-                                            : false
-                                    }
-                                />
-                            )}
+                        {onStartBatchAnalysis && analysisSettings && onAnalysisSettingsChange && (
+                            <BatchAnalysisDropdown
+                                movesWithoutPv={movesWithoutPv}
+                                analysisSettings={analysisSettings}
+                                onAnalysisSettingsChange={onAnalysisSettingsChange}
+                                onStartBatchAnalysis={onStartBatchAnalysis}
+                                onStartTreeBatchAnalysis={onStartTreeBatchAnalysis}
+                                hasBranches={
+                                    kifuTree
+                                        ? Array.from(kifuTree.nodes.values()).some(
+                                              (n) => n.children.length > 1,
+                                          )
+                                        : false
+                                }
+                                isRunning={batchAnalysis?.isRunning ?? false}
+                                analysisNnueId={analysisNnueId}
+                                onAnalysisNnueIdChange={onAnalysisNnueIdChange}
+                                nnueList={nnueList}
+                            />
+                        )}
                         {/* KIFコピーボタン（アイコン） */}
                         {onCopyKif && kifMoves.length > 0 && (
                             <Tooltip>
@@ -1894,6 +1925,9 @@ export function KifuPanel({
                                                 isAnalyzing={isAnalyzing}
                                                 analyzingPly={analyzingPly}
                                                 kifuTree={kifuTree}
+                                                analysisNnueId={analysisNnueId}
+                                                onAnalysisNnueIdChange={onAnalysisNnueIdChange}
+                                                nnueList={nnueList}
                                                 onCollapse={() => setExpandedMoveDetail(null)}
                                                 isOnMainLine={isOnMainLine}
                                             />

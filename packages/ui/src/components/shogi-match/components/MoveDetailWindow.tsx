@@ -6,7 +6,7 @@
  * 四隅＋四辺からリサイズ可能
  */
 
-import type { KifuTree, PositionState } from "@shogi/app-core";
+import type { KifuTree, NnueMeta, PositionState } from "@shogi/app-core";
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -32,6 +32,10 @@ interface MoveDetailWindowProps {
     isAnalyzing?: boolean;
     /** 現在解析中の手数 */
     analyzingPly?: number;
+    /** 分析用 NNUE */
+    analysisNnueId?: string | null;
+    onAnalysisNnueIdChange?: (id: string | null) => void;
+    nnueList?: NnueMeta[];
     /** 棋譜ツリー（分岐追加の重複チェック用） */
     kifuTree?: KifuTree;
     /** ウィンドウを閉じるコールバック */
@@ -315,6 +319,9 @@ export function MoveDetailWindow({
     onAnalyze,
     isAnalyzing,
     analyzingPly,
+    analysisNnueId,
+    onAnalysisNnueIdChange,
+    nnueList,
     kifuTree,
     onClose,
     isOnMainLine = true,
@@ -518,6 +525,8 @@ export function MoveDetailWindow({
 
     const hasPv = pvList.length > 0;
     const hasMultiplePv = pvList.length > 1;
+    const nnueOptions = nnueList ?? [];
+    const showNnueSelector = analysisNnueId !== undefined && !!onAnalysisNnueIdChange;
 
     return (
         <div
@@ -597,11 +606,36 @@ export function MoveDetailWindow({
 
                 {/* 解析ボタン */}
                 {onAnalyze && (
-                    <div className={hasPv ? "pt-2 border-t border-border mt-2" : "space-y-2"}>
+                    <div
+                        className={
+                            hasPv ? "pt-2 border-t border-border mt-2 space-y-2" : "space-y-2"
+                        }
+                    >
                         {!hasPv && (
                             <div className="text-[11px] text-muted-foreground mb-2">
                                 読み筋がありません
                             </div>
+                        )}
+                        {showNnueSelector && (
+                            <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
+                                <span>分析NNUE</span>
+                                <select
+                                    value={analysisNnueId ?? "material"}
+                                    onChange={(e) =>
+                                        onAnalysisNnueIdChange?.(
+                                            e.target.value === "material" ? null : e.target.value,
+                                        )
+                                    }
+                                    className="w-full px-2 py-1 text-xs rounded border border-border bg-background"
+                                >
+                                    <option value="material">簡易AI（駒得）</option>
+                                    {nnueOptions.map((nnue) => (
+                                        <option key={nnue.id} value={nnue.id}>
+                                            {nnue.displayName}
+                                        </option>
+                                    ))}
+                                </select>
+                            </label>
                         )}
                         <button
                             type="button"
