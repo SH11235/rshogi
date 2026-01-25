@@ -1,21 +1,25 @@
-import type { LastMove, PieceType, Player, PositionState, Square } from "@shogi/app-core";
+import type { LastMove, NnueMeta, PieceType, Player, PositionState, Square } from "@shogi/app-core";
 import type { ReactElement, RefObject } from "react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import type { ShogiBoardCell } from "../../shogi-board";
-import { BottomSheet } from "../components/BottomSheet";
+import {
+    BottomSheet,
+    GLASS_SURFACE_BLUR_PX,
+    GLASS_SURFACE_OPACITY,
+} from "../components/BottomSheet";
 import { ClockDisplay } from "../components/ClockDisplay";
 import { EvalGraph } from "../components/EvalGraph";
 import { PausedModeControls, PlayingModeControls } from "../components/GameModeControls";
 import { MobileBoardSection } from "../components/MobileBoardSection";
 import { type KifuMove, MobileKifuBar } from "../components/MobileKifuBar";
 import { MobileNavigation } from "../components/MobileNavigation";
+import { MobileSettingsActions } from "../components/MobileSettingsActions";
 import { MobileSettingsSheet } from "../components/MobileSettingsSheet";
 import { MoveDetailBottomSheet } from "../components/MoveDetailBottomSheet";
 import { PassButton, type PassDisabledReason } from "../components/PassButton";
 import type { ClockSettings, TickState } from "../hooks/useClockManager";
 import type {
     DisplaySettings,
-    EngineOption,
     GameMode,
     Message,
     PassRightsSettings,
@@ -102,8 +106,15 @@ interface MobileLayoutProps {
     onSidesChange: (sides: { sente: SideSetting; gote: SideSetting }) => void;
     timeSettings: ClockSettings;
     onTimeSettingsChange: (settings: ClockSettings) => void;
-    uiEngineOptions: EngineOption[];
+    internalEngineId: string;
+    nnueList: NnueMeta[];
+    senteNnueId: string | null;
+    onSenteNnueIdChange: (id: string | null) => void;
+    goteNnueId: string | null;
+    onGoteNnueIdChange: (id: string | null) => void;
     settingsLocked: boolean;
+    /** 評価関数ファイル管理を開く */
+    onOpenNnueManager?: () => void;
 
     // パス権設定（オプション）
     passRightsSettings?: PassRightsSettings;
@@ -206,8 +217,14 @@ export function MobileLayout({
     onSidesChange,
     timeSettings,
     onTimeSettingsChange,
-    uiEngineOptions,
+    internalEngineId,
+    nnueList,
+    senteNnueId,
+    onSenteNnueIdChange,
+    goteNnueId,
+    onGoteNnueIdChange,
     settingsLocked,
+    onOpenNnueManager,
     passRightsSettings,
     onPassRightsSettingsChange,
     onPassMove,
@@ -231,7 +248,7 @@ export function MobileLayout({
     // 設定BottomSheetの状態
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
-    // 棋譜詳細BottomSheetの状態（評価値グラフ + 棋譜バー）
+    // 評価値グラフの表示状態（盤面上オーバーレイ）
     const [isKifuDetailOpen, setIsKifuDetailOpen] = useState(false);
 
     // 手詳細BottomSheetの状態
@@ -266,12 +283,67 @@ export function MobileLayout({
         setSelectedMovePosition(null);
     }, []);
 
+    const graphOverlayRef = useRef<HTMLDivElement>(null);
+    const graphDragRef = useRef({
+        active: false,
+        startX: 0,
+        startY: 0,
+        originX: 0,
+        originY: 0,
+    });
+    const [graphOffset, setGraphOffset] = useState({ x: 0, y: 0 });
+
+    const handleGraphPointerDown = useCallback(
+        (e: React.PointerEvent<HTMLDivElement>) => {
+            if (e.button !== 0) return;
+            e.preventDefault();
+            e.currentTarget.setPointerCapture(e.pointerId);
+            graphDragRef.current = {
+                active: true,
+                startX: e.clientX,
+                startY: e.clientY,
+                originX: graphOffset.x,
+                originY: graphOffset.y,
+            };
+        },
+        [graphOffset.x, graphOffset.y],
+    );
+
+    const handleGraphPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+        const state = graphDragRef.current;
+        if (!state.active) return;
+        const overlay = graphOverlayRef.current;
+        if (!overlay) return;
+
+        const deltaX = e.clientX - state.startX;
+        const deltaY = e.clientY - state.startY;
+        const width = overlay.offsetWidth;
+        const height = overlay.offsetHeight;
+        const basePadding = 8;
+        const minX = -basePadding;
+        const minY = -basePadding;
+        const maxX = Math.max(minX, window.innerWidth - basePadding - width);
+        const maxY = Math.max(minY, window.innerHeight - basePadding - height);
+        const nextX = Math.min(maxX, Math.max(minX, state.originX + deltaX));
+        const nextY = Math.min(maxY, Math.max(minY, state.originY + deltaY));
+
+        setGraphOffset({ x: nextX, y: nextY });
+    }, []);
+
+    const handleGraphPointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+        if (!graphDragRef.current.active) return;
+        graphDragRef.current.active = false;
+        e.currentTarget.releasePointerCapture(e.pointerId);
+    }, []);
+
     // 持ち駒情報を事前計算（useMemoで安定させてReact.memoを有効にする）
     const topHand = useMemo(() => getHandInfo("top"), [getHandInfo]);
     const bottomHand = useMemo(() => getHandInfo("bottom"), [getHandInfo]);
 
     // 編集モード判定を事前計算（MobileBoardSectionに渡す）
     const isEditModeActive = isEditMode && !isMatchRunning;
+    const hideEmptyHandPieces = gameMode === "playing" || gameMode === "paused";
+    const shouldShowFloatingSettings = !(isReviewMode && totalPly > 0);
 
     return (
         <div className="fixed inset-0 flex flex-col gap-1 w-full h-dvh overflow-hidden px-2 bg-background">
@@ -299,7 +371,7 @@ export function MobileLayout({
             </header>
 
             {/* === 盤面セクション: 固定サイズ、縮小しない === */}
-            <main className="flex-shrink-0">
+            <main className="flex-shrink-0 relative">
                 <MobileBoardSection
                     grid={grid}
                     position={position}
@@ -310,6 +382,7 @@ export function MobileLayout({
                     displaySettings={displaySettings}
                     isEditModeActive={isEditModeActive}
                     isMatchRunning={isMatchRunning}
+                    hideEmptyHandPieces={hideEmptyHandPieces}
                     editFromSquare={editFromSquare}
                     candidateNote={candidateNote}
                     onSquareSelect={onSquareSelect}
@@ -328,6 +401,43 @@ export function MobileLayout({
                     passRights={position.passRights}
                     turn={position.turn}
                 />
+                {isReviewMode && isKifuDetailOpen && (
+                    <div className="absolute left-2 right-2 top-2 z-30">
+                        <div
+                            ref={graphOverlayRef}
+                            className="rounded-xl border border-border/60 shadow-sm px-3 py-2 touch-none"
+                            style={{
+                                backgroundColor: `hsl(var(--background, 0 0% 100%) / ${GLASS_SURFACE_OPACITY})`,
+                                backdropFilter: `blur(${GLASS_SURFACE_BLUR_PX}px)`,
+                                transform: `translate(${graphOffset.x}px, ${graphOffset.y}px)`,
+                            }}
+                            onPointerDown={handleGraphPointerDown}
+                            onPointerMove={handleGraphPointerMove}
+                            onPointerUp={handleGraphPointerUp}
+                            onPointerCancel={handleGraphPointerUp}
+                            role="dialog"
+                            aria-label="評価値グラフ"
+                        >
+                            <div className="flex items-start justify-end mb-2">
+                                <button
+                                    type="button"
+                                    onClick={() => setIsKifuDetailOpen(false)}
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                    className="px-2 py-1 rounded text-sm text-muted-foreground hover:bg-muted/60 hover:text-foreground transition-colors"
+                                    aria-label="評価値グラフを閉じる"
+                                >
+                                    ✕
+                                </button>
+                            </div>
+                            <EvalGraph
+                                evalHistory={evalHistory}
+                                currentPly={currentPly}
+                                compact
+                                height={80}
+                            />
+                        </div>
+                    </div>
+                )}
             </main>
 
             {/* === コントロール: 残りの高さを使う、必要に応じて縮小 === */}
@@ -417,6 +527,17 @@ export function MobileLayout({
                 ) : isReviewMode ? (
                     /* 検討モード: 評価値 + ナビゲーション + 詳細ボタン（コンパクト） */
                     <div className="flex flex-col gap-1 flex-shrink-0">
+                        {kifMoves && kifMoves.length > 0 && (
+                            <MobileKifuBar
+                                moves={kifMoves}
+                                currentPly={currentPly}
+                                onPlySelect={
+                                    fullKifMoves && positionHistory
+                                        ? handlePlySelectWithDetail
+                                        : onPlySelect
+                                }
+                            />
+                        )}
                         {/* 現在の評価値（コンパクト表示） */}
                         <div className="flex items-center justify-center gap-2 text-sm">
                             <span className="text-muted-foreground">評価:</span>
@@ -432,10 +553,15 @@ export function MobileLayout({
                             {/* 詳細ボタン */}
                             <button
                                 type="button"
-                                onClick={() => setIsKifuDetailOpen(true)}
-                                className="px-2 py-0.5 text-xs bg-muted rounded hover:bg-muted/80 active:scale-95 transition-all"
+                                onClick={() => setIsKifuDetailOpen((prev) => !prev)}
+                                aria-pressed={isKifuDetailOpen}
+                                className={`px-2 py-0.5 text-xs rounded active:scale-95 transition-all ${
+                                    isKifuDetailOpen
+                                        ? "bg-primary text-primary-foreground"
+                                        : "bg-muted hover:bg-muted/80"
+                                }`}
                             >
-                                📊 詳細
+                                📊 グラフ
                             </button>
                         </div>
 
@@ -449,6 +575,7 @@ export function MobileLayout({
                                 onToStart={onToStart}
                                 onToEnd={onToEnd}
                                 onSettingsClick={() => setIsSettingsOpen(true)}
+                                onNnueManagerClick={onOpenNnueManager}
                             />
                         )}
                     </div>
@@ -456,9 +583,10 @@ export function MobileLayout({
                     /* 編集モード: 対局開始 + 平手に戻すボタン */
                     <div className="flex flex-col gap-1.5 flex-shrink-0">
                         <div className="flex flex-col gap-0.5 text-center text-muted-foreground">
-                            <div className="text-sm">盤面をタップして編集</div>
+                            <div className="text-sm">盤面をタップ / 長押し・ドラッグで編集</div>
                             <div className="text-[10px] opacity-80">
-                                ダブルタップ: 成切替 / 盤外へ: 削除
+                                ダブルタップ: 成切替 / 盤外へ: 削除 /
+                                手駒を長押し・ドラッグで盤に追加
                             </div>
                         </div>
                         <div className="flex justify-center gap-3 py-2">
@@ -487,28 +615,14 @@ export function MobileLayout({
 
             {/* FAB: 設定ボタン（右下固定）
                 検討モードで棋譜がある場合は、ナビゲーションバーに設定ボタンがあるので非表示 */}
-            {!(isReviewMode && totalPly > 0) && (
-                <button
-                    type="button"
-                    onClick={() => setIsSettingsOpen(true)}
-                    className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] right-4 w-9 h-9 rounded-full bg-background/60 backdrop-blur-sm border border-border/30 shadow-sm flex items-center justify-center text-muted-foreground/70 hover:text-muted-foreground hover:bg-background/80 active:scale-95 transition-all z-40"
-                    aria-label="対局設定を開く"
-                >
-                    <svg
-                        width="20"
-                        height="20"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        aria-hidden="true"
-                    >
-                        <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
-                        <circle cx="12" cy="12" r="3" />
-                    </svg>
-                </button>
+            {shouldShowFloatingSettings && (
+                <div className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] right-4 flex items-center gap-2 z-40">
+                    <MobileSettingsActions
+                        variant="fab"
+                        onSettingsClick={() => setIsSettingsOpen(true)}
+                        onNnueManagerClick={onOpenNnueManager}
+                    />
+                </div>
             )}
 
             {/* 設定BottomSheet */}
@@ -516,14 +630,19 @@ export function MobileLayout({
                 open={isSettingsOpen}
                 onOpenChange={setIsSettingsOpen}
                 title="設定"
-                height="auto"
+                height="full"
             >
                 <MobileSettingsSheet
                     sides={sides}
                     onSidesChange={onSidesChange}
                     timeSettings={timeSettings}
                     onTimeSettingsChange={onTimeSettingsChange}
-                    uiEngineOptions={uiEngineOptions}
+                    internalEngineId={internalEngineId}
+                    nnueList={nnueList}
+                    senteNnueId={senteNnueId}
+                    onSenteNnueIdChange={onSenteNnueIdChange}
+                    goteNnueId={goteNnueId}
+                    onGoteNnueIdChange={onGoteNnueIdChange}
                     settingsLocked={settingsLocked}
                     passRightsSettings={passRightsSettings}
                     onPassRightsSettingsChange={onPassRightsSettingsChange}
@@ -562,56 +681,6 @@ export function MobileLayout({
                 onPreview={onPreviewPv}
                 isOnMainLine={isOnMainLine}
             />
-
-            {/* 棋譜詳細BottomSheet（評価値グラフ + 棋譜バー） */}
-            <BottomSheet
-                open={isKifuDetailOpen}
-                onOpenChange={setIsKifuDetailOpen}
-                title="棋譜詳細"
-                height="half"
-            >
-                <div className="flex flex-col gap-3 px-2">
-                    {/* 評価値グラフ */}
-                    <div>
-                        <div className="flex items-center gap-2 mb-2">
-                            <span className="text-sm text-muted-foreground">評価値グラフ</span>
-                            <span className="text-sm font-mono tabular-nums">
-                                {evalMate !== undefined
-                                    ? evalMate > 0
-                                        ? `詰み${evalMate}手`
-                                        : `詰まされ${Math.abs(evalMate)}手`
-                                    : evalCp !== undefined
-                                      ? `${evalCp > 0 ? "+" : ""}${(evalCp / 100).toFixed(1)}`
-                                      : "-"}
-                            </span>
-                        </div>
-                        <EvalGraph
-                            evalHistory={evalHistory}
-                            currentPly={currentPly}
-                            compact
-                            height={80}
-                        />
-                    </div>
-
-                    {/* 棋譜バー */}
-                    {kifMoves && kifMoves.length > 0 && (
-                        <div>
-                            <div className="text-sm text-muted-foreground mb-2">棋譜</div>
-                            <MobileKifuBar
-                                moves={kifMoves}
-                                currentPly={currentPly}
-                                onPlySelect={(ply) => {
-                                    if (fullKifMoves && positionHistory) {
-                                        handlePlySelectWithDetail(ply);
-                                    } else {
-                                        onPlySelect?.(ply);
-                                    }
-                                }}
-                            />
-                        </div>
-                    )}
-                </div>
-            </BottomSheet>
         </div>
     );
 }

@@ -1,5 +1,6 @@
 import { cn } from "@shogi/design-system";
 import type { ReactElement } from "react";
+import { MobileSettingsActions } from "./MobileSettingsActions";
 
 interface MobileNavigationProps {
     /** 現在の手数 */
@@ -18,6 +19,8 @@ interface MobileNavigationProps {
     disabled?: boolean;
     /** 設定ボタンクリック（指定時は右端に設定ボタンを表示） */
     onSettingsClick?: () => void;
+    /** 評価関数ファイル管理ボタンクリック（指定時は設定ボタンの左に表示） */
+    onNnueManagerClick?: () => void;
 }
 
 /**
@@ -32,6 +35,7 @@ export function MobileNavigation({
     onToEnd,
     disabled = false,
     onSettingsClick,
+    onNnueManagerClick,
 }: MobileNavigationProps): ReactElement {
     const canGoBack = currentPly > 0;
     const canGoForward = currentPly < totalPly;
@@ -115,23 +119,11 @@ export function MobileNavigation({
                 ⏭
             </button>
 
-            {/* 設定ボタン（検討モード時にFABの代わりに表示） */}
-            {onSettingsClick && (
-                <button
-                    type="button"
-                    onClick={onSettingsClick}
-                    className={cn(
-                        "w-10 h-10 flex items-center justify-center rounded-lg text-lg",
-                        "bg-primary text-primary-foreground",
-                        "shadow-md transition-all",
-                        "hover:bg-primary/90 active:scale-95",
-                    )}
-                    title="設定"
-                    aria-label="設定を開く"
-                >
-                    ⚙️
-                </button>
-            )}
+            <MobileSettingsActions
+                variant="navigation"
+                onSettingsClick={onSettingsClick}
+                onNnueManagerClick={onNnueManagerClick}
+            />
         </div>
     );
 }

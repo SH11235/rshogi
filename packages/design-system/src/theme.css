@@ -46,6 +46,10 @@
         --shogi-outer-border: 32 53% 49%; /* 外枠 #c08a3d */
         --shogi-cell-light: 34 56% 87%; /* マス目（明） #f3e1c7 */
         --shogi-cell-dark: 35 49% 80%; /* マス目（暗） #ead2ac */
+        --shogi-piece-text: 34 40% 16%; /* 駒文字 #3a2a16 */
+        --shogi-piece-bg: 39 73% 97%; /* 駒背景 #fdf6ec */
+        --shogi-piece-bg-dark: 33 36% 81%; /* 駒背景（暗） #e8d4b8 */
+        --shogi-coord-text: 37 33% 45%; /* 座標文字 #9a7b4a */
 
         /* レイアウト */
         --panel-width: 400px; /* 右サイドパネルの幅 */

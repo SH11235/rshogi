@@ -6,8 +6,8 @@ import { PlayerIcon } from "./PlayerIcon";
 
 const HAND_ORDER: PieceType[] = ["R", "B", "G", "S", "N", "L", "P"];
 
-/** サイズ設定: compact=編集用, medium=モバイル対局用, normal=PC用 */
-type HandPieceSize = "compact" | "medium" | "normal";
+/** サイズ設定: compact=編集用(小), edit=編集用(中), medium=モバイル対局用, normal=PC用 */
+type HandPieceSize = "compact" | "edit" | "medium" | "normal";
 
 const SIZE_CONFIG = {
     compact: {
@@ -17,8 +17,15 @@ const SIZE_CONFIG = {
         badgePos: "-bottom-0.5 -right-0.5",
         badgePosRotated: "-left-0.5 -top-0.5 rotate-180",
     },
+    edit: {
+        text: "text-[16px]",
+        padding: "px-1 py-1",
+        badgeSize: "min-w-[11px] text-[9px]",
+        badgePos: "-bottom-0.5 -right-0.5",
+        badgePosRotated: "-left-0.5 -top-0.5 rotate-180",
+    },
     medium: {
-        text: "text-[14px]",
+        text: "text-[16px]",
         padding: "px-1.5 py-1",
         badgeSize: "min-w-[12px] text-[9px]",
         badgePos: "-bottom-0.5 -right-0.5",
@@ -54,14 +61,14 @@ function PieceToken({
     return (
         <span
             className={cn(
-                "relative inline-flex items-center justify-center leading-none tracking-tight text-[#3a2a16]",
+                "relative inline-flex items-center justify-center leading-none tracking-tight text-shogi-piece-text",
                 config.text,
                 shouldRotate && "-rotate-180",
             )}
         >
             <span
                 className={cn(
-                    "rounded-[8px] bg-[#fdf6ec]/90 shadow-[0_3px_6px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)]",
+                    "rounded-[8px] bg-shogi-piece-bg/90 shadow-[0_3px_6px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)]",
                     config.padding,
                 )}
             >
@@ -90,16 +97,29 @@ const CONTAINER_SIZE_CONFIG = {
         piecesContainer: "flex-nowrap gap-0",
         marker: "text-sm w-4",
         buttonPadding: "p-0.5",
+        adjusterButton: "h-4 w-5",
+        rowMinHeight: "min-h-[28px]",
+    },
+    edit: {
+        piecesContainer: "flex-nowrap gap-0",
+        marker: "text-base w-5",
+        buttonPadding: "p-0.5",
+        adjusterButton: "h-4 w-4",
+        rowMinHeight: "min-h-[32px]",
     },
     medium: {
         piecesContainer: "flex-nowrap gap-0.5",
         marker: "text-base w-5",
         buttonPadding: "p-0.5",
+        adjusterButton: "h-4 w-5",
+        rowMinHeight: "min-h-[34px]",
     },
     normal: {
         piecesContainer: "flex-wrap gap-0.5",
         marker: "text-xl w-7",
         buttonPadding: "p-0.5",
+        adjusterButton: "h-4 w-5",
+        rowMinHeight: "",
     },
 } as const;
 
@@ -120,13 +140,15 @@ interface HandPiecesDisplayProps {
     isEditMode?: boolean;
     /** 対局中かどうか（対局中のみ持ち駒がない駒を非表示にする） */
     isMatchRunning?: boolean;
+    /** 0枚の駒を非表示にするか（編集モード時は常に表示） */
+    hideEmptyPieces?: boolean;
     /** 持ち駒を増やす（編集モード用） */
     onIncrement?: (piece: PieceType) => void;
     /** 持ち駒を減らす（編集モード用） */
     onDecrement?: (piece: PieceType) => void;
     /** 盤面反転状態 */
     flipBoard?: boolean;
-    /** サイズ: compact=編集用, medium=モバイル対局用, normal=PC用 */
+    /** サイズ: compact=編集用(小), edit=編集用(中), medium=モバイル対局用, normal=PC用 */
     size?: HandPieceSize;
     /** AIプレイヤーかどうか */
     isAI?: boolean;
@@ -141,6 +163,7 @@ export function HandPiecesDisplay({
     onPiecePointerDown,
     isEditMode = false,
     isMatchRunning = false,
+    hideEmptyPieces,
     onIncrement,
     onDecrement,
     flipBoard = false,
@@ -148,14 +171,16 @@ export function HandPiecesDisplay({
     isAI = false,
 }: HandPiecesDisplayProps): ReactElement {
     const containerConfig = CONTAINER_SIZE_CONFIG[size];
-    const isCompactLayout = size === "compact" || size === "medium";
+    const isCompactLayout = size === "compact" || size === "edit" || size === "medium";
     // PlayerIcon用のサイズマッピング
-    const iconSize = size === "compact" ? "xs" : size === "medium" ? "sm" : "lg";
+    const iconSize = size === "compact" ? "xs" : size === "medium" || size === "edit" ? "sm" : "lg";
+    const shouldHideEmptyPieces = hideEmptyPieces ?? (isMatchRunning && !isEditMode);
 
     return (
         <div
             className={cn(
                 "flex items-center justify-start w-full rounded-md border border-border/50 bg-muted/30 px-1",
+                containerConfig.rowMinHeight,
             )}
         >
             {/* 先手/後手マーカー - 固定幅で左端に配置 */}
@@ -196,25 +221,7 @@ export function HandPiecesDisplay({
                             </div>
                         ))}
                     </div>
-                ) : (
-                    // モバイル版: 高さ確保用の1つの駒
-                    <div className="invisible" aria-hidden="true">
-                        <div
-                            className={cn(
-                                "border-2 border-transparent rounded-lg",
-                                containerConfig.buttonPadding,
-                            )}
-                        >
-                            <PieceToken
-                                pieceType="P"
-                                owner={owner}
-                                count={0}
-                                flipBoard={flipBoard}
-                                size={size}
-                            />
-                        </div>
-                    </div>
-                )}
+                ) : null}
 
                 {/* 実際の駒（PC版は absolute で左寄せ、モバイル版は通常フロー） */}
                 <div
@@ -237,7 +244,7 @@ export function HandPiecesDisplay({
 
                         // 対局中は持っている駒だけ詰めて表示
                         // 対局前（!isMatchRunning）は編集のために全ての駒を表示する
-                        if (isMatchRunning && !isEditMode && count === 0) {
+                        if (shouldHideEmptyPieces && count === 0) {
                             return null;
                         }
 
@@ -299,7 +306,8 @@ export function HandPiecesDisplay({
                                             disabled={!isEditMode || count >= maxCount}
                                             aria-label={`${PIECE_LABELS[piece]}を増やす`}
                                             className={cn(
-                                                "flex h-4 w-5 items-center justify-center rounded-t border border-b-0 border-[hsl(var(--border))] text-xs font-bold leading-none",
+                                                "flex items-center justify-center rounded-t border border-b-0 border-[hsl(var(--border))] text-xs font-bold leading-none",
+                                                containerConfig.adjusterButton,
                                                 count < maxCount
                                                     ? "cursor-pointer bg-[hsl(var(--wafuu-washi))] text-[hsl(var(--wafuu-sumi))] opacity-100"
                                                     : "cursor-not-allowed bg-[hsl(var(--muted))] text-[hsl(var(--muted-foreground))] opacity-40",
@@ -313,7 +321,8 @@ export function HandPiecesDisplay({
                                             disabled={!isEditMode || count <= 0}
                                             aria-label={`${PIECE_LABELS[piece]}を減らす`}
                                             className={cn(
-                                                "flex h-4 w-5 items-center justify-center rounded-b border border-[hsl(var(--border))] text-xs font-bold leading-none",
+                                                "flex items-center justify-center rounded-b border border-[hsl(var(--border))] text-xs font-bold leading-none",
+                                                containerConfig.adjusterButton,
                                                 count > 0
                                                     ? "cursor-pointer bg-[hsl(var(--wafuu-washi))] text-[hsl(var(--wafuu-sumi))] opacity-100"
                                                     : "cursor-not-allowed bg-[hsl(var(--muted))] text-[hsl(var(--muted-foreground))] opacity-40",

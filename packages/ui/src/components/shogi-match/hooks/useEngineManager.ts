@@ -160,7 +160,9 @@ interface UseEngineManagerProps {
     /** ログの最大件数 */
     maxLogs?: number;
     /** 対局用 NNUE の ID（null = デフォルト） */
-    nnueId?: string | null;
+    senteNnueId?: string | null;
+    /** 対局用 NNUE の ID（null = デフォルト） */
+    goteNnueId?: string | null;
     /** 分析用 NNUE の ID（null = デフォルト） */
     analysisNnueId?: string | null;
 }
@@ -333,7 +335,8 @@ export function useEngineManager({
     onMatchEnd,
     onEvalUpdate,
     maxLogs = 80,
-    nnueId,
+    senteNnueId,
+    goteNnueId,
     analysisNnueId,
 }: UseEngineManagerProps): UseEngineManagerReturn {
     const [engineReady, setEngineReady] = useState<Record<Player, boolean>>({
@@ -424,6 +427,25 @@ export function useEngineManager({
         },
         [sides],
     );
+
+    useEffect(() => {
+        for (const side of ["sente", "gote"] as Player[]) {
+            const setting = sides[side];
+            if (setting.role !== "engine") continue;
+            if (!setting.skillLevel) continue;
+
+            const engineState = engineStatesRef.current[side];
+            if (!engineState.client || !engineState.ready) continue;
+
+            const selectedId = setting.engineId ?? engineOptions[0]?.id;
+            if (!selectedId || engineState.selectedId !== selectedId) continue;
+
+            void applySkillLevelSettings(engineState.client, setting.skillLevel).catch((error) => {
+                const errorMsg = error instanceof Error ? error.message : String(error);
+                addErrorLog(`Skill Level 設定に失敗 (${side}): ${errorMsg}`);
+            });
+        }
+    }, [addErrorLog, engineOptions, sides]);
 
     const disposeEngineForSide = useCallback(
         async (side: Player) => {
@@ -529,6 +551,7 @@ export function useEngineManager({
                 // NNUE をロード（指定されている場合）
                 // ⚠️ Desktop では OnceLock により一度ロードした NNUE は変更不可
                 // 失敗時は throw してユーザーに通知する（アプリ再起動が必要な場合がある）
+                const nnueId = side === "sente" ? senteNnueId : goteNnueId;
                 if (nnueId && client.loadNnue) {
                     await client.loadNnue(nnueId);
                 }
@@ -562,7 +585,7 @@ export function useEngineManager({
                 setIsRetrying((prev) => ({ ...prev, [side]: false }));
             }
         },
-        [addErrorLog, nnueId, sides],
+        [addErrorLog, senteNnueId, goteNnueId, sides],
     );
 
     const applyMoveFromEngine = useCallback(
@@ -727,6 +750,7 @@ export function useEngineManager({
                     // NNUE をロード（指定されている場合）
                     // ⚠️ Desktop では OnceLock により一度ロードした NNUE は変更不可
                     // 失敗時は throw してユーザーに通知する（アプリ再起動が必要な場合がある）
+                    const nnueId = side === "sente" ? senteNnueId : goteNnueId;
                     if (nnueId && client.loadNnue) {
                         await client.loadNnue(nnueId);
                     }
@@ -757,8 +781,9 @@ export function useEngineManager({
             engineMap,
             engineOptions,
             movesRef,
-            nnueId,
             passRightsSettings,
+            senteNnueId,
+            goteNnueId,
             sides,
             startSfen,
         ],

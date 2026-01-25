@@ -72,7 +72,6 @@ import {
 import {
     collectBranchAnalysisJobs,
     collectTreeAnalysisJobs,
-    getAllBranches,
 } from "./shogi-match/utils/branchTreeUtils";
 import { isPromotable, PIECE_CAP, PIECE_LABELS } from "./shogi-match/utils/constants";
 import { exportToKifString, type KifMove } from "./shogi-match/utils/kifFormat";
@@ -224,6 +223,8 @@ interface PlayerHandSectionProps {
     isEditMode?: boolean;
     /** 対局中かどうか */
     isMatchRunning?: boolean;
+    /** 0枚の駒を非表示にするか */
+    hideEmptyPieces?: boolean;
     /** 持ち駒を増やす（編集モード用） */
     onIncrement?: (piece: PieceType) => void;
     /** 持ち駒を減らす（編集モード用） */
@@ -243,6 +244,7 @@ function PlayerHandSection({
     onPiecePointerDown,
     isEditMode,
     isMatchRunning,
+    hideEmptyPieces,
     onIncrement,
     onDecrement,
     flipBoard,
@@ -259,6 +261,7 @@ function PlayerHandSection({
                 onPiecePointerDown={onPiecePointerDown}
                 isEditMode={isEditMode}
                 isMatchRunning={isMatchRunning}
+                hideEmptyPieces={hideEmptyPieces}
                 onIncrement={onIncrement}
                 onDecrement={onDecrement}
                 flipBoard={flipBoard}
@@ -367,6 +370,8 @@ export function ShogiMatch({
     const [isMatchRunning, setIsMatchRunning] = useState(false);
     const [isEditMode, setIsEditMode] = useState(true);
     const [isPaused, setIsPaused] = useState(false);
+    // モバイル判定
+    const isMobile = useIsMobile();
     // 検討モード: 編集モードでも対局中でも一時停止中でもない状態
     // 自由に棋譜を閲覧し、分岐を作成できる
     const isReviewMode = !isEditMode && !isMatchRunning && !isPaused;
@@ -388,14 +393,7 @@ export function ShogiMatch({
         DEFAULT_ANALYSIS_SETTINGS,
     );
     const analysisSettings = useMemo(() => {
-        const merged = { ...DEFAULT_ANALYSIS_SETTINGS, ...storedAnalysisSettings };
-        // 旧設定 autoAnalyzeBranch からの移行処理
-        // autoAnalyzeMode が未設定で autoAnalyzeBranch が存在する場合、マッピングする
-        const stored = storedAnalysisSettings as unknown as Record<string, unknown>;
-        if (!("autoAnalyzeMode" in stored) && "autoAnalyzeBranch" in stored) {
-            merged.autoAnalyzeMode = stored.autoAnalyzeBranch ? "delayed" : "off";
-        }
-        return merged;
+        return { ...DEFAULT_ANALYSIS_SETTINGS, ...storedAnalysisSettings };
     }, [storedAnalysisSettings]);
     // パス権設定
     const [passRightsSettings, setPassRightsSettings] = useLocalStorage<PassRightsSettings>(
@@ -447,12 +445,31 @@ export function ShogiMatch({
     const [isPassRightsSettingsOpen, setIsPassRightsSettingsOpen] = useState(false);
 
     // 対局用 NNUE ID
-    const [matchNnueId, setMatchNnueId] = useLocalStorage<string | null>("shogi:matchNnueId", null);
+    const [senteNnueId, setSenteNnueId] = useLocalStorage<string | null>("shogi:senteNnueId", null);
+    const [goteNnueId, setGoteNnueId] = useLocalStorage<string | null>("shogi:goteNnueId", null);
     // 分析用 NNUE ID
     const [analysisNnueId, setAnalysisNnueId] = useLocalStorage<string | null>(
         "shogi:analysisNnueId",
         null,
     );
+    useEffect(() => {
+        if (typeof window === "undefined") return;
+        if (senteNnueId !== null || goteNnueId !== null) return;
+        const legacyKey = "shogi:matchNnueId";
+        const stored = localStorage.getItem(legacyKey);
+        if (stored === null) return;
+        try {
+            const parsed = JSON.parse(stored) as string | null;
+            if (parsed) {
+                setSenteNnueId(parsed);
+                setGoteNnueId(parsed);
+            }
+        } catch (error) {
+            console.warn(`Failed to parse localStorage key "${legacyKey}":`, error);
+        } finally {
+            localStorage.removeItem(legacyKey);
+        }
+    }, [goteNnueId, senteNnueId, setGoteNnueId, setSenteNnueId]);
 
     // NNUE ストレージから一覧を取得
     const { nnueList, isLoading: isNnueListLoading } = useNnueStorage();
@@ -461,19 +478,24 @@ export function ShogiMatch({
     // isLoading 中はリストが空でも待機（初期ロード完了後に判定）
     useEffect(() => {
         if (!isNnueListLoading) {
-            if (matchNnueId && !nnueList.some((n) => n.id === matchNnueId)) {
-                setMatchNnueId(null);
+            if (senteNnueId && !nnueList.some((n) => n.id === senteNnueId)) {
+                setSenteNnueId(null);
+            }
+            if (goteNnueId && !nnueList.some((n) => n.id === goteNnueId)) {
+                setGoteNnueId(null);
             }
             if (analysisNnueId && !nnueList.some((n) => n.id === analysisNnueId)) {
                 setAnalysisNnueId(null);
             }
         }
     }, [
-        matchNnueId,
+        senteNnueId,
+        goteNnueId,
         analysisNnueId,
         nnueList,
         isNnueListLoading,
-        setMatchNnueId,
+        setSenteNnueId,
+        setGoteNnueId,
         setAnalysisNnueId,
     ]);
 
@@ -855,7 +877,8 @@ export function ShogiMatch({
         onMatchEnd: endMatch,
         onEvalUpdate: handleEvalUpdate,
         maxLogs,
-        nnueId: matchNnueId,
+        senteNnueId,
+        goteNnueId,
         analysisNnueId,
     });
     stopAllEnginesRef.current = stopAllEngines;
@@ -1158,14 +1181,6 @@ export function ShogiMatch({
             movesRef.current = [];
         }
 
-        // 盤面セクションにスクロール
-        setTimeout(() => {
-            boardSectionRef.current?.scrollIntoView({
-                behavior: "smooth",
-                block: "start",
-            });
-        }, 100);
-
         // エンジン管理は useEngineManager フックが自動的に処理する
         setIsMatchRunning(true);
         // ターン開始時刻をリセット
@@ -1191,6 +1206,7 @@ export function ShogiMatch({
           : isPaused
             ? "paused"
             : "reviewing";
+    const hideEmptyHandPieces = gameMode === "playing" || gameMode === "paused";
 
     const finalizeEditedPosition = async () => {
         if (isMatchRunning) return;
@@ -2246,40 +2262,6 @@ export function ShogiMatch({
         [navigation.tree, startSfen, analysisSettings, enginePool],
     );
 
-    // 分岐作成時の自動解析
-    useEffect(() => {
-        if (!lastAddedBranchInfo || analysisSettings.autoAnalyzeMode === "off") {
-            return;
-        }
-
-        const runAnalysis = () => {
-            // ply + firstMove から分岐のnodeIdを見つける
-            const branches = getAllBranches(navigation.tree);
-            const branch = branches.find((b) => {
-                if (b.ply !== lastAddedBranchInfo.ply) return false;
-                const node = navigation.tree.nodes.get(b.nodeId);
-                return node?.usiMove === lastAddedBranchInfo.firstMove;
-            });
-            if (branch) {
-                handleAnalyzeBranch(branch.nodeId);
-            }
-        };
-
-        if (analysisSettings.autoAnalyzeMode === "immediate") {
-            // 即時モード: すぐに解析開始
-            runAnalysis();
-        } else {
-            // delayedモード: 3秒後に解析開始（操作が続けばリセット）
-            const timerId = setTimeout(runAnalysis, 3000);
-            return () => clearTimeout(timerId);
-        }
-    }, [
-        lastAddedBranchInfo,
-        analysisSettings.autoAnalyzeMode,
-        handleAnalyzeBranch,
-        navigation.tree,
-    ]);
-
     // 一括解析をキャンセル
     const handleCancelBatchAnalysis = useCallback(() => {
         void enginePool.cancel();
@@ -2424,17 +2406,7 @@ export function ShogiMatch({
     const candidateNote = positionReady ? null : "局面を読み込み中です。";
     const isDraggingPiece = isEditMode && dndController.state.isDragging;
 
-    // モバイル判定
-    const isMobile = useIsMobile();
-
-    const uiEngineOptions = useMemo(() => {
-        // 内蔵エンジンの A/B スロットは UI に露出させず、単一の「内蔵エンジン」として扱う。
-        const internal = engineOptions.find((opt) => opt.kind === "internal") ?? engineOptions[0];
-        const externals = engineOptions.filter((opt) => opt.kind === "external");
-        const list: EngineOption[] = [];
-        if (internal) list.push({ ...internal, id: internal.id, label: "内蔵エンジン" });
-        return [...list, ...externals];
-    }, [engineOptions]);
+    const internalEngineId = engineOptions[0]?.id ?? "wasm";
 
     return (
         <TooltipProvider delayDuration={TOOLTIP_DELAY_DURATION_MS}>
@@ -2467,6 +2439,14 @@ export function ShogiMatch({
                 />
             )}
 
+            {/* NNUE ファイル管理ダイアログ */}
+            <NnueManagerDialog
+                open={isNnueManagerOpen}
+                onOpenChange={setIsNnueManagerOpen}
+                manifestUrl={manifestUrl}
+                onRequestFilePath={onRequestNnueFilePath}
+            />
+
             {/* 手の詳細ウィンドウ（ドラッグ移動可能） */}
             {selectedMoveDetail && (
                 <MoveDetailWindow
@@ -2477,6 +2457,9 @@ export function ShogiMatch({
                     onAnalyze={handleAnalyzePly}
                     isAnalyzing={isAnalyzing}
                     analyzingPly={analyzingState.type !== "none" ? analyzingState.ply : undefined}
+                    analysisNnueId={analysisNnueId}
+                    onAnalysisNnueIdChange={setAnalysisNnueId}
+                    nnueList={nnueList}
                     kifuTree={navigation.tree}
                     onClose={() => setSelectedMoveDetailPly(null)}
                     isOnMainLine={navigation.state.isOnMainLine}
@@ -2542,8 +2525,14 @@ export function ShogiMatch({
                     onSidesChange={setSides}
                     timeSettings={timeSettings}
                     onTimeSettingsChange={setTimeSettings}
-                    uiEngineOptions={uiEngineOptions}
+                    internalEngineId={internalEngineId}
+                    nnueList={nnueList}
+                    senteNnueId={senteNnueId}
+                    onSenteNnueIdChange={setSenteNnueId}
+                    goteNnueId={goteNnueId}
+                    onGoteNnueIdChange={setGoteNnueId}
                     settingsLocked={settingsLocked}
+                    onOpenNnueManager={() => setIsNnueManagerOpen(true)}
                     // パス権設定
                     passRightsSettings={passRightsSettings}
                     onPassRightsSettingsChange={handlePassRightsSettingsChange}
@@ -2571,10 +2560,12 @@ export function ShogiMatch({
                             passRightsSettings={passRightsSettings}
                             onPassRightsSettingsChange={handlePassRightsSettingsChange}
                             settingsLocked={settingsLocked}
-                            internalEngineId={engineOptions[0]?.id ?? "wasm"}
+                            internalEngineId={internalEngineId}
                             nnueList={nnueList}
-                            matchNnueId={matchNnueId}
-                            onMatchNnueIdChange={setMatchNnueId}
+                            senteNnueId={senteNnueId}
+                            onSenteNnueIdChange={setSenteNnueId}
+                            goteNnueId={goteNnueId}
+                            onGoteNnueIdChange={setGoteNnueId}
                             analysisSettings={analysisSettings}
                             onAnalysisSettingsChange={setAnalysisSettings}
                             analysisNnueId={analysisNnueId}
@@ -2666,6 +2657,7 @@ export function ShogiMatch({
                                                         }
                                                         isEditMode={isEditMode && !isMatchRunning}
                                                         isMatchRunning={isMatchRunning}
+                                                        hideEmptyPieces={hideEmptyHandPieces}
                                                         onIncrement={(piece) =>
                                                             handleIncrementHand(info.owner, piece)
                                                         }
@@ -2762,6 +2754,7 @@ export function ShogiMatch({
                                                         }
                                                         isEditMode={isEditMode && !isMatchRunning}
                                                         isMatchRunning={isMatchRunning}
+                                                        hideEmptyPieces={hideEmptyHandPieces}
                                                         onIncrement={(piece) =>
                                                             handleIncrementHand(info.owner, piece)
                                                         }
@@ -2919,6 +2912,9 @@ export function ShogiMatch({
                                         onCancelBatchAnalysis={handleCancelBatchAnalysis}
                                         analysisSettings={analysisSettings}
                                         onAnalysisSettingsChange={setAnalysisSettings}
+                                        analysisNnueId={analysisNnueId}
+                                        onAnalysisNnueIdChange={setAnalysisNnueId}
+                                        nnueList={nnueList}
                                         kifuTree={navigation.tree}
                                         onNodeClick={navigation.goToNodeById}
                                         onBranchSwitch={navigation.switchBranchAtNode}
@@ -2956,14 +2952,6 @@ export function ShogiMatch({
                                     )}
                                 </div>
                             </SettingsModal>
-
-                            {/* NNUE ファイル管理ダイアログ */}
-                            <NnueManagerDialog
-                                open={isNnueManagerOpen}
-                                onOpenChange={setIsNnueManagerOpen}
-                                manifestUrl={manifestUrl}
-                                onRequestFilePath={onRequestNnueFilePath}
-                            />
 
                             {/* 表示設定ダイアログ */}
                             <Dialog

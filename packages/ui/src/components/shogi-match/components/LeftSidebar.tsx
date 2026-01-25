@@ -27,9 +27,11 @@ interface LeftSidebarProps {
     // NNUE 一覧
     nnueList: NnueMeta[];
 
-    // 対局用 NNUE（先手・後手で共通）
-    matchNnueId: string | null;
-    onMatchNnueIdChange: (id: string | null) => void;
+    // 対局用 NNUE（先手・後手）
+    senteNnueId: string | null;
+    onSenteNnueIdChange: (id: string | null) => void;
+    goteNnueId: string | null;
+    onGoteNnueIdChange: (id: string | null) => void;
 
     // 分析設定
     analysisSettings: AnalysisSettings;
@@ -82,8 +84,10 @@ export function LeftSidebar({
     settingsLocked,
     internalEngineId,
     nnueList,
-    matchNnueId,
-    onMatchNnueIdChange,
+    senteNnueId,
+    onSenteNnueIdChange,
+    goteNnueId,
+    onGoteNnueIdChange,
     analysisSettings,
     onAnalysisSettingsChange,
     analysisNnueId,
@@ -95,15 +99,22 @@ export function LeftSidebar({
     const parallelismConfig = detectParallelism();
 
     // プレイヤー選択の値を生成: "human", "material", "nnue:{nnueId}"
-    // matchNnueId を使用（先手・後手で共通の NNUE を使用）
-    const getSelectorValue = (setting: SideSetting): string => {
+    const getSelectorValue = (side: SideKey, setting: SideSetting): string => {
         if (setting.role === "human") return "human";
-        if (matchNnueId === null) return "material";
-        return `nnue:${matchNnueId}`;
+        const nnueId = side === "sente" ? senteNnueId : goteNnueId;
+        if (nnueId === null) return "material";
+        return `nnue:${nnueId}`;
     };
 
     const handlePlayerChange = (side: SideKey, value: string) => {
         const currentSetting = sides[side];
+        const updateNnueId = (nextId: string | null) => {
+            if (side === "sente") {
+                onSenteNnueIdChange(nextId);
+            } else {
+                onGoteNnueIdChange(nextId);
+            }
+        };
         if (value === "human") {
             onSidesChange({
                 ...sides,
@@ -114,7 +125,7 @@ export function LeftSidebar({
                 },
             });
         } else if (value === "material") {
-            onMatchNnueIdChange(null);
+            updateNnueId(null);
             onSidesChange({
                 ...sides,
                 [side]: {
@@ -125,7 +136,7 @@ export function LeftSidebar({
             });
         } else if (value.startsWith("nnue:")) {
             const nnueId = value.slice("nnue:".length);
-            onMatchNnueIdChange(nnueId);
+            updateNnueId(nnueId);
             onSidesChange({
                 ...sides,
                 [side]: {
@@ -160,7 +171,7 @@ export function LeftSidebar({
 
     const sideColumn = (side: SideKey, hasBorder: boolean) => {
         const setting = sides[side];
-        const selectorValue = getSelectorValue(setting);
+        const selectorValue = getSelectorValue(side, setting);
 
         return (
             <div
@@ -259,6 +270,8 @@ export function LeftSidebar({
                                 sente: timeSettings.gote,
                                 gote: timeSettings.sente,
                             });
+                            onSenteNnueIdChange(goteNnueId);
+                            onGoteNnueIdChange(senteNnueId);
                         }}
                         disabled={settingsLocked}
                         title="先手と後手の設定を入れ替える"
