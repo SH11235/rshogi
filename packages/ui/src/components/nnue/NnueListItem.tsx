@@ -49,7 +49,7 @@ export function NnueListItem({
     onDisplayNameChange,
 }: NnueListItemProps): ReactElement {
     const isPreset = meta.source === "preset";
-    const canDelete = showDelete && !isPreset && onDelete;
+    const canDelete = showDelete && onDelete;
     const canEdit = !isPreset && onDisplayNameChange;
     const inputId = useId();
     const editInputRef = useRef<HTMLInputElement>(null);

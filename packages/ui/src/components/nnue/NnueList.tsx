@@ -84,7 +84,7 @@ export function NnueList({
                             onSelect={() => onSelect(meta.id)}
                             name={groupName}
                             onDelete={onDelete ? () => onDelete(meta.id) : undefined}
-                            showDelete={false}
+                            showDelete={true}
                             isDeleting={deletingId === meta.id}
                             disabled={disabled}
                         />
