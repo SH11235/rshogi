@@ -34,8 +34,10 @@ const heightStyles = {
     // コンテンツが少ない場合は min-content で縮み、多い場合は 85vh でスクロール
     auto: { height: "auto", maxHeight: "85vh" },
 } as const;
-const GLASS_SURFACE_OPACITY = 0.05;
-const GLASS_SURFACE_BLUR_PX = 1;
+// Glass surface tuning for mobile overlays/sheets.
+// Lower opacity + lower blur makes the board more visible behind the surface.
+export const GLASS_SURFACE_OPACITY = 0.05;
+export const GLASS_SURFACE_BLUR_PX = 1;
 
 /**
  * スマホ向けボトムシートコンポーネント
@@ -66,6 +68,7 @@ export function BottomSheet({
         <Dialog open={open} onOpenChange={onOpenChange}>
             <DialogContent
                 overlayStyle={overlayStyle}
+                onOpenAutoFocus={(event) => event.preventDefault()}
                 data-state={open ? "open" : "closed"}
                 className={cn(
                     "fixed bottom-0 left-0 right-0 z-50",

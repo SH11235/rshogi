@@ -1,8 +1,12 @@
 import type { LastMove, NnueMeta, PieceType, Player, PositionState, Square } from "@shogi/app-core";
 import type { ReactElement, RefObject } from "react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import type { ShogiBoardCell } from "../../shogi-board";
-import { BottomSheet } from "../components/BottomSheet";
+import {
+    BottomSheet,
+    GLASS_SURFACE_BLUR_PX,
+    GLASS_SURFACE_OPACITY,
+} from "../components/BottomSheet";
 import { ClockDisplay } from "../components/ClockDisplay";
 import { EvalGraph } from "../components/EvalGraph";
 import { PausedModeControls, PlayingModeControls } from "../components/GameModeControls";
@@ -244,7 +248,7 @@ export function MobileLayout({
     // 設定BottomSheetの状態
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
-    // 棋譜詳細BottomSheetの状態（評価値グラフ + 棋譜バー）
+    // 評価値グラフの表示状態（盤面上オーバーレイ）
     const [isKifuDetailOpen, setIsKifuDetailOpen] = useState(false);
 
     // 手詳細BottomSheetの状態
@@ -277,6 +281,59 @@ export function MobileLayout({
     const handleMoveDetailClose = useCallback(() => {
         setSelectedMoveForDetail(null);
         setSelectedMovePosition(null);
+    }, []);
+
+    const graphOverlayRef = useRef<HTMLDivElement>(null);
+    const graphDragRef = useRef({
+        active: false,
+        startX: 0,
+        startY: 0,
+        originX: 0,
+        originY: 0,
+    });
+    const [graphOffset, setGraphOffset] = useState({ x: 0, y: 0 });
+
+    const handleGraphPointerDown = useCallback(
+        (e: React.PointerEvent<HTMLDivElement>) => {
+            if (e.button !== 0) return;
+            e.preventDefault();
+            e.currentTarget.setPointerCapture(e.pointerId);
+            graphDragRef.current = {
+                active: true,
+                startX: e.clientX,
+                startY: e.clientY,
+                originX: graphOffset.x,
+                originY: graphOffset.y,
+            };
+        },
+        [graphOffset.x, graphOffset.y],
+    );
+
+    const handleGraphPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+        const state = graphDragRef.current;
+        if (!state.active) return;
+        const overlay = graphOverlayRef.current;
+        if (!overlay) return;
+
+        const deltaX = e.clientX - state.startX;
+        const deltaY = e.clientY - state.startY;
+        const width = overlay.offsetWidth;
+        const height = overlay.offsetHeight;
+        const basePadding = 8;
+        const minX = -basePadding;
+        const minY = -basePadding;
+        const maxX = Math.max(minX, window.innerWidth - basePadding - width);
+        const maxY = Math.max(minY, window.innerHeight - basePadding - height);
+        const nextX = Math.min(maxX, Math.max(minX, state.originX + deltaX));
+        const nextY = Math.min(maxY, Math.max(minY, state.originY + deltaY));
+
+        setGraphOffset({ x: nextX, y: nextY });
+    }, []);
+
+    const handleGraphPointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+        if (!graphDragRef.current.active) return;
+        graphDragRef.current.active = false;
+        e.currentTarget.releasePointerCapture(e.pointerId);
     }, []);
 
     // 持ち駒情報を事前計算（useMemoで安定させてReact.memoを有効にする）
@@ -314,7 +371,7 @@ export function MobileLayout({
             </header>
 
             {/* === 盤面セクション: 固定サイズ、縮小しない === */}
-            <main className="flex-shrink-0">
+            <main className="flex-shrink-0 relative">
                 <MobileBoardSection
                     grid={grid}
                     position={position}
@@ -344,6 +401,43 @@ export function MobileLayout({
                     passRights={position.passRights}
                     turn={position.turn}
                 />
+                {isReviewMode && isKifuDetailOpen && (
+                    <div className="absolute left-2 right-2 top-2 z-30">
+                        <div
+                            ref={graphOverlayRef}
+                            className="rounded-xl border border-border/60 shadow-sm px-3 py-2 touch-none"
+                            style={{
+                                backgroundColor: `hsl(var(--background, 0 0% 100%) / ${GLASS_SURFACE_OPACITY})`,
+                                backdropFilter: `blur(${GLASS_SURFACE_BLUR_PX}px)`,
+                                transform: `translate(${graphOffset.x}px, ${graphOffset.y}px)`,
+                            }}
+                            onPointerDown={handleGraphPointerDown}
+                            onPointerMove={handleGraphPointerMove}
+                            onPointerUp={handleGraphPointerUp}
+                            onPointerCancel={handleGraphPointerUp}
+                            role="dialog"
+                            aria-label="評価値グラフ"
+                        >
+                            <div className="flex items-start justify-end mb-2">
+                                <button
+                                    type="button"
+                                    onClick={() => setIsKifuDetailOpen(false)}
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                    className="px-2 py-1 rounded text-sm text-muted-foreground hover:bg-muted/60 hover:text-foreground transition-colors"
+                                    aria-label="評価値グラフを閉じる"
+                                >
+                                    ✕
+                                </button>
+                            </div>
+                            <EvalGraph
+                                evalHistory={evalHistory}
+                                currentPly={currentPly}
+                                compact
+                                height={80}
+                            />
+                        </div>
+                    </div>
+                )}
             </main>
 
             {/* === コントロール: 残りの高さを使う、必要に応じて縮小 === */}
@@ -459,10 +553,15 @@ export function MobileLayout({
                             {/* 詳細ボタン */}
                             <button
                                 type="button"
-                                onClick={() => setIsKifuDetailOpen(true)}
-                                className="px-2 py-0.5 text-xs bg-muted rounded hover:bg-muted/80 active:scale-95 transition-all"
+                                onClick={() => setIsKifuDetailOpen((prev) => !prev)}
+                                aria-pressed={isKifuDetailOpen}
+                                className={`px-2 py-0.5 text-xs rounded active:scale-95 transition-all ${
+                                    isKifuDetailOpen
+                                        ? "bg-primary text-primary-foreground"
+                                        : "bg-muted hover:bg-muted/80"
+                                }`}
                             >
-                                📊 詳細
+                                📊 グラフ
                             </button>
                         </div>
 
@@ -582,58 +681,6 @@ export function MobileLayout({
                 onPreview={onPreviewPv}
                 isOnMainLine={isOnMainLine}
             />
-
-            {/* 棋譜詳細BottomSheet（評価値グラフ + 棋譜バー） */}
-            <BottomSheet
-                open={isKifuDetailOpen}
-                onOpenChange={setIsKifuDetailOpen}
-                title="棋譜詳細"
-                height="half"
-                overlay="transparent"
-                surface="glass"
-            >
-                <div className="flex flex-col gap-3 px-2">
-                    {/* 評価値グラフ */}
-                    <div>
-                        <div className="flex items-center gap-2 mb-2">
-                            <span className="text-sm text-muted-foreground">評価値グラフ</span>
-                            <span className="text-sm font-mono tabular-nums">
-                                {evalMate !== undefined
-                                    ? evalMate > 0
-                                        ? `詰み${evalMate}手`
-                                        : `詰まされ${Math.abs(evalMate)}手`
-                                    : evalCp !== undefined
-                                      ? `${evalCp > 0 ? "+" : ""}${(evalCp / 100).toFixed(1)}`
-                                      : "-"}
-                            </span>
-                        </div>
-                        <EvalGraph
-                            evalHistory={evalHistory}
-                            currentPly={currentPly}
-                            compact
-                            height={80}
-                        />
-                    </div>
-
-                    {/* 棋譜バー */}
-                    {kifMoves && kifMoves.length > 0 && (
-                        <div>
-                            <div className="text-sm text-muted-foreground mb-2">棋譜</div>
-                            <MobileKifuBar
-                                moves={kifMoves}
-                                currentPly={currentPly}
-                                onPlySelect={(ply) => {
-                                    if (fullKifMoves && positionHistory) {
-                                        handlePlySelectWithDetail(ply);
-                                    } else {
-                                        onPlySelect?.(ply);
-                                    }
-                                }}
-                            />
-                        </div>
-                    )}
-                </div>
-            </BottomSheet>
         </div>
     );
 }
