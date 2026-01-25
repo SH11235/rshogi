@@ -159,11 +159,11 @@ interface UseEngineManagerProps {
     onEvalUpdate?: (ply: number, event: EngineInfoEvent) => void;
     /** ログの最大件数 */
     maxLogs?: number;
-    /** 対局用 NNUE の ID（null = デフォルト） */
+    /** 対局用 NNUE の ID（null = NNUEなし（Material評価）） */
     senteNnueId?: string | null;
-    /** 対局用 NNUE の ID（null = デフォルト） */
+    /** 対局用 NNUE の ID（null = NNUEなし（Material評価）） */
     goteNnueId?: string | null;
-    /** 分析用 NNUE の ID（null = デフォルト） */
+    /** 分析用 NNUE の ID（null = NNUEなし（Material評価）） */
     analysisNnueId?: string | null;
 }
 

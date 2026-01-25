@@ -1,5 +1,6 @@
 import {
     createPresetManager,
+    NNUE_HEADER_SIZE,
     type NnueDownloadProgress,
     NnueError,
     type NnueMeta,
@@ -49,6 +50,7 @@ export function usePresetManager(options: UsePresetManagerOptions = {}): UsePres
     const { manifestUrl, autoFetch = true, onDownloadComplete } = options;
     const context = useNnueContextOptional();
     const storage = context?.storage ?? null;
+    const validateNnueHeader = context?.validateNnueHeader ?? null;
 
     const [presets, setPresets] = useState<PresetWithStatus[]>([]);
     const [isLoading, setIsLoading] = useState(false);
@@ -98,6 +100,25 @@ export function usePresetManager(options: UsePresetManagerOptions = {}): UsePres
         }
     }, [autoFetch, manager, refresh]);
 
+    const validatePresetMeta = useCallback(
+        async (meta: NnueMeta) => {
+            if (!storage || !validateNnueHeader) return;
+            if (!storage.capabilities.supportsLoad || !storage.load) return;
+
+            try {
+                const data = await storage.load(meta.id);
+                const header = data.subarray(0, Math.min(NNUE_HEADER_SIZE, data.byteLength));
+                const result = await validateNnueHeader(header);
+                if (result.isCompatible && result.format) {
+                    await storage.updateMeta(meta.id, { format: result.format });
+                }
+            } catch {
+                // 検証失敗時はフォーマット情報を更新しない
+            }
+        },
+        [storage, validateNnueHeader],
+    );
+
     // プリセットをダウンロード
     const download = useCallback(
         async (presetKey: string): Promise<NnueMeta | undefined> => {
@@ -128,20 +149,23 @@ export function usePresetManager(options: UsePresetManagerOptions = {}): UsePres
                 const isDuplicate = await manager.isDuplicate(presetKey);
                 if (isDuplicate) {
                     // 既に同じハッシュのファイルがある場合は既存のメタを取得
-                    await refresh();
                     const manifest = await manager.getManifest();
                     const preset = manifest.presets.find((p) => p.presetKey === presetKey);
                     if (preset && storage) {
                         const existing = await storage.listByContentHash(preset.sha256);
                         if (existing.length > 0) {
+                            await validatePresetMeta(existing[0]);
+                            await refresh();
                             onDownloadComplete?.(existing[0]);
                             return existing[0];
                         }
                     }
+                    await refresh();
                     return undefined;
                 }
 
                 const meta = await manager.download(presetKey);
+                await validatePresetMeta(meta);
                 await refresh();
                 onDownloadComplete?.(meta);
                 return meta;

@@ -531,6 +531,46 @@ pub fn load_model(bytes: &[u8]) -> Result<(), JsValue> {
     Ok(())
 }
 
+#[wasm_bindgen]
+pub fn alloc_nnue_buffer(len: usize) -> *mut u8 {
+    if len == 0 {
+        return std::ptr::null_mut();
+    }
+    let mut buf = vec![0u8; len];
+    let ptr = buf.as_mut_ptr();
+    std::mem::forget(buf);
+    ptr
+}
+
+#[wasm_bindgen]
+pub fn load_model_from_ptr(ptr: *mut u8, len: usize) -> Result<(), JsValue> {
+    if ptr.is_null() || len == 0 {
+        return Err(JsValue::from_str("invalid NNUE buffer"));
+    }
+
+    let buf = unsafe { Vec::from_raw_parts(ptr, len, len) };
+    init_nnue_from_bytes(&buf)
+        .or_else(|err| {
+            if err.kind() == ErrorKind::AlreadyExists {
+                Ok(())
+            } else {
+                Err(err)
+            }
+        })
+        .map_err(|err| JsValue::from_str(&err.to_string()))?;
+    Ok(())
+}
+
+#[wasm_bindgen]
+pub fn free_nnue_buffer(ptr: *mut u8, len: usize) {
+    if ptr.is_null() || len == 0 {
+        return;
+    }
+    unsafe {
+        drop(Vec::from_raw_parts(ptr, len, len));
+    }
+}
+
 /// NNUE フォーマット情報（JS 向け）
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
