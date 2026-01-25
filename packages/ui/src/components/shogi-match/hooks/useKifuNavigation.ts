@@ -25,6 +25,7 @@ import {
     goToStart as goToStartTree,
     isRewound as isRewoundTree,
     type KifuEval,
+    type KifuNode,
     type KifuTree,
     type PreferredPathCache,
     promoteToMainLine as promoteToMainLineTree,
@@ -118,6 +119,10 @@ interface UseKifuNavigationResult {
     recordEvalByPly: (ply: number, event: EngineInfoEvent) => void;
     /** 評価値を記録（ノードIDで指定、分岐内のノード用） */
     recordEvalByNodeId: (nodeId: string, event: EngineInfoEvent) => void;
+    /** 評価値をクリア（手数で指定、再解析用） */
+    clearEvalByPly: (ply: number) => void;
+    /** 評価値をクリア（ノードIDで指定、再解析用） */
+    clearEvalByNodeId: (nodeId: string) => void;
     /** PVを分岐として追加（onAddedは分岐が追加された場合にのみ呼ばれる） */
     addPvAsBranch: (
         ply: number,
@@ -453,6 +458,56 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
     }, []);
 
     /**
+     * 評価値をクリア（手数で指定、再解析用）
+     * 既存の評価値を削除して、新しい解析結果で上書きできるようにする
+     */
+    const clearEvalByPly = useCallback((ply: number) => {
+        setTree((prev) => {
+            let nodeId = findNodeByPlyInCurrentPath(prev, ply);
+            if (!nodeId) {
+                nodeId = findNodeByPlyInMainLine(prev, ply);
+            }
+            if (!nodeId) return prev;
+
+            const node = prev.nodes.get(nodeId);
+            if (!node) return prev;
+
+            // evalとmultiPvEvalsをクリア
+            const updatedNode: KifuNode = {
+                ...node,
+                eval: undefined,
+                multiPvEvals: undefined,
+            };
+
+            const newNodes = new Map(prev.nodes);
+            newNodes.set(nodeId, updatedNode);
+
+            return { ...prev, nodes: newNodes };
+        });
+    }, []);
+
+    /**
+     * 評価値をクリア（ノードIDで指定、再解析用）
+     */
+    const clearEvalByNodeId = useCallback((nodeId: string) => {
+        setTree((prev) => {
+            const node = prev.nodes.get(nodeId);
+            if (!node) return prev;
+
+            const updatedNode: KifuNode = {
+                ...node,
+                eval: undefined,
+                multiPvEvals: undefined,
+            };
+
+            const newNodes = new Map(prev.nodes);
+            newNodes.set(nodeId, updatedNode);
+
+            return { ...prev, nodes: newNodes };
+        });
+    }, []);
+
+    /**
      * PVを分岐として追加
      * 指定された手数のノードにPVを分岐として追加する
      * @param ply 分岐を追加する手数
@@ -774,6 +829,8 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
         addMove,
         recordEvalByPly,
         recordEvalByNodeId,
+        clearEvalByPly,
+        clearEvalByNodeId,
         addPvAsBranch,
         reset,
         getMovesArray,

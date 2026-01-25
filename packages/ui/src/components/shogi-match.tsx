@@ -429,9 +429,9 @@ export function ShogiMatch({
     } | null>(null);
     // 選択中の分岐ノードID（キーボードナビゲーション用）
     const [selectedBranchNodeId, setSelectedBranchNodeId] = useState<string | null>(null);
-    // 選択中の手の詳細（右パネル表示用）
-    const [selectedMoveDetail, setSelectedMoveDetail] = useState<{
-        move: KifMove;
+    // 選択中の手の詳細（右パネル表示用）- plyで管理し、最新のmoveは都度取得
+    const [selectedMoveDetailPly, setSelectedMoveDetailPly] = useState<{
+        ply: number;
         position: PositionState;
     } | null>(null);
     // 設定モーダルの表示状態
@@ -536,8 +536,18 @@ export function ShogiMatch({
         branchMarkers,
         recordEvalByPly,
         recordEvalByNodeId,
+        clearEvalByPly,
+        clearEvalByNodeId,
         addPvAsBranch,
     } = navigation;
+
+    // 選択中の手の詳細を最新のkifMovesから取得
+    const selectedMoveDetail = useMemo(() => {
+        if (!selectedMoveDetailPly) return null;
+        const move = kifMoves.find((m) => m.ply === selectedMoveDetailPly.ply);
+        if (!move) return null;
+        return { move, position: selectedMoveDetailPly.position };
+    }, [selectedMoveDetailPly, kifMoves]);
 
     // 後手が人間の場合は盤面を反転して手前側に表示
     useEffect(() => {
@@ -2077,6 +2087,9 @@ export function ShogiMatch({
             // （ply 1 = 1手目を指した後の局面 = moves[0]まで適用した局面）
             const movesForPly = kifMoves.slice(0, ply).map((m) => m.usiMove);
 
+            // 再解析のために既存の評価値をクリア
+            clearEvalByPly(ply);
+
             setAnalyzingState({ type: "by-ply", ply });
             void analyzePosition({
                 sfen: startSfen,
@@ -2086,7 +2099,7 @@ export function ShogiMatch({
                 depth: 20, // 最大深さ20
             });
         },
-        [kifMoves, analyzePosition, startSfen],
+        [kifMoves, analyzePosition, startSfen, clearEvalByPly],
     );
 
     // 分岐内のノードを解析するコールバック
@@ -2103,6 +2116,9 @@ export function ShogiMatch({
                 setMessage({ text: "指定されたノードが見つかりません", type: "error" });
                 return;
             }
+
+            // 再解析のために既存の評価値をクリア
+            clearEvalByNodeId(nodeId);
 
             try {
                 // ルートからこのノードまでのパスを取得
@@ -2133,7 +2149,7 @@ export function ShogiMatch({
                 setAnalyzingState(ANALYZING_STATE_NONE);
             }
         },
-        [navigation.tree, analyzePosition, startSfen],
+        [navigation.tree, analyzePosition, startSfen, clearEvalByNodeId],
     );
 
     // 単発解析完了時の処理
@@ -2305,9 +2321,9 @@ export function ShogiMatch({
     const handleMoveDetailSelect = useCallback(
         (move: KifMove | null, pos: PositionState | null) => {
             if (move && pos) {
-                setSelectedMoveDetail({ move, position: pos });
+                setSelectedMoveDetailPly({ ply: move.ply, position: pos });
             } else {
-                setSelectedMoveDetail(null);
+                setSelectedMoveDetailPly(null);
             }
         },
         [],
@@ -2462,7 +2478,7 @@ export function ShogiMatch({
                     isAnalyzing={isAnalyzing}
                     analyzingPly={analyzingState.type !== "none" ? analyzingState.ply : undefined}
                     kifuTree={navigation.tree}
-                    onClose={() => setSelectedMoveDetail(null)}
+                    onClose={() => setSelectedMoveDetailPly(null)}
                     isOnMainLine={navigation.state.isOnMainLine}
                 />
             )}

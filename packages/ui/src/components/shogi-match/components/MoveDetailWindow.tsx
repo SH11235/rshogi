@@ -1,8 +1,9 @@
 /**
- * 手の詳細ウィンドウ（ドラッグ移動可能）
+ * 手の詳細ウィンドウ（ドラッグ・リサイズ可能）
  *
  * 非モーダル：背景操作をブロックしない
  * ヘッダー部分をドラッグして移動可能
+ * 四隅＋四辺からリサイズ可能
  */
 
 import type { KifuTree, PositionState } from "@shogi/app-core";
@@ -44,8 +45,29 @@ interface Position {
     y: number;
 }
 
-const WINDOW_WIDTH = 320;
-const WINDOW_HEIGHT_ESTIMATE = 400;
+interface Size {
+    width: number;
+    height: number;
+}
+
+/** ドラッグモード: none=なし, move=移動, resize-XX=リサイズ（隅・辺） */
+type DragMode =
+    | "none"
+    | "move"
+    | "resize-n"
+    | "resize-s"
+    | "resize-e"
+    | "resize-w"
+    | "resize-ne"
+    | "resize-nw"
+    | "resize-se"
+    | "resize-sw";
+
+const DEFAULT_WIDTH = 320;
+const DEFAULT_HEIGHT = 400;
+const MIN_WIDTH = 280;
+const MIN_HEIGHT = 200;
+const EDGE_HANDLE_SIZE = 6;
 
 /**
  * 単一のPV候補を表示するコンポーネント
@@ -283,7 +305,7 @@ function PvCandidateItem({
 }
 
 /**
- * 手の詳細ウィンドウ（ドラッグ移動可能）
+ * 手の詳細ウィンドウ（ドラッグ・リサイズ可能）
  */
 export function MoveDetailWindow({
     move,
@@ -301,24 +323,39 @@ export function MoveDetailWindow({
     const [windowPosition, setWindowPosition] = useState<Position>(() => ({
         x:
             typeof window !== "undefined"
-                ? Math.max(50, window.innerWidth - WINDOW_WIDTH - 100)
+                ? Math.max(50, window.innerWidth - DEFAULT_WIDTH - 100)
                 : 100,
         y: typeof window !== "undefined" ? 100 : 100,
     }));
+    const [size, setSize] = useState<Size>({ width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT });
 
-    const isDragging = useRef(false);
+    const dragMode = useRef<DragMode>("none");
     const dragStart = useRef<Position>({ x: 0, y: 0 });
     const initialPosition = useRef<Position>({ x: 0, y: 0 });
+    const initialSize = useRef<Size>({ width: 0, height: 0 });
 
-    // ドラッグ開始
+    // ドラッグ開始（移動）
     const handleMoveStart = useCallback(
         (e: React.MouseEvent) => {
             e.preventDefault();
-            isDragging.current = true;
+            dragMode.current = "move";
             dragStart.current = { x: e.clientX, y: e.clientY };
             initialPosition.current = { ...windowPosition };
         },
         [windowPosition],
+    );
+
+    // リサイズ開始（共通）
+    const createResizeHandler = useCallback(
+        (mode: DragMode) => (e: React.MouseEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+            dragMode.current = mode;
+            dragStart.current = { x: e.clientX, y: e.clientY };
+            initialPosition.current = { ...windowPosition };
+            initialSize.current = { ...size };
+        },
+        [windowPosition, size],
     );
 
     // Escキーでウィンドウを閉じる
@@ -336,24 +373,104 @@ export function MoveDetailWindow({
     // マウス移動・終了のグローバルハンドラ
     useEffect(() => {
         const handleMouseMove = (e: MouseEvent) => {
-            if (!isDragging.current) return;
+            if (dragMode.current === "none") return;
 
             const deltaX = e.clientX - dragStart.current.x;
             const deltaY = e.clientY - dragStart.current.y;
 
-            const newX = initialPosition.current.x + deltaX;
-            const newY = initialPosition.current.y + deltaY;
-            const maxX = window.innerWidth - WINDOW_WIDTH;
-            const maxY = window.innerHeight - WINDOW_HEIGHT_ESTIMATE;
-
-            setWindowPosition({
-                x: Math.max(0, Math.min(newX, maxX)),
-                y: Math.max(0, Math.min(newY, maxY)),
-            });
+            if (dragMode.current === "move") {
+                const newX = initialPosition.current.x + deltaX;
+                const newY = initialPosition.current.y + deltaY;
+                const maxX = window.innerWidth - size.width;
+                const maxY = window.innerHeight - size.height;
+                setWindowPosition({
+                    x: Math.max(0, Math.min(newX, maxX)),
+                    y: Math.max(0, Math.min(newY, maxY)),
+                });
+            } else if (dragMode.current === "resize-e") {
+                const newWidth = initialSize.current.width + deltaX;
+                const maxWidth = window.innerWidth - windowPosition.x;
+                setSize((prev) => ({
+                    ...prev,
+                    width: Math.max(MIN_WIDTH, Math.min(newWidth, maxWidth)),
+                }));
+            } else if (dragMode.current === "resize-w") {
+                const newX = initialPosition.current.x + deltaX;
+                const maxX = initialPosition.current.x + initialSize.current.width - MIN_WIDTH;
+                const clampedX = Math.max(0, Math.min(newX, maxX));
+                const clampedWidth =
+                    initialPosition.current.x + initialSize.current.width - clampedX;
+                setSize((prev) => ({ ...prev, width: Math.max(MIN_WIDTH, clampedWidth) }));
+                setWindowPosition((prev) => ({ ...prev, x: clampedX }));
+            } else if (dragMode.current === "resize-s") {
+                const newHeight = initialSize.current.height + deltaY;
+                const maxHeight = window.innerHeight - windowPosition.y;
+                setSize((prev) => ({
+                    ...prev,
+                    height: Math.max(MIN_HEIGHT, Math.min(newHeight, maxHeight)),
+                }));
+            } else if (dragMode.current === "resize-n") {
+                const newY = initialPosition.current.y + deltaY;
+                const maxY = initialPosition.current.y + initialSize.current.height - MIN_HEIGHT;
+                const clampedY = Math.max(0, Math.min(newY, maxY));
+                const clampedHeight =
+                    initialPosition.current.y + initialSize.current.height - clampedY;
+                setSize((prev) => ({ ...prev, height: Math.max(MIN_HEIGHT, clampedHeight) }));
+                setWindowPosition((prev) => ({ ...prev, y: clampedY }));
+            } else if (dragMode.current === "resize-se") {
+                const newWidth = initialSize.current.width + deltaX;
+                const newHeight = initialSize.current.height + deltaY;
+                const maxWidth = window.innerWidth - windowPosition.x;
+                const maxHeight = window.innerHeight - windowPosition.y;
+                setSize({
+                    width: Math.max(MIN_WIDTH, Math.min(newWidth, maxWidth)),
+                    height: Math.max(MIN_HEIGHT, Math.min(newHeight, maxHeight)),
+                });
+            } else if (dragMode.current === "resize-ne") {
+                const newWidth = initialSize.current.width + deltaX;
+                const newY = initialPosition.current.y + deltaY;
+                const maxWidth = window.innerWidth - windowPosition.x;
+                const clampedWidth = Math.max(MIN_WIDTH, Math.min(newWidth, maxWidth));
+                const maxY = initialPosition.current.y + initialSize.current.height - MIN_HEIGHT;
+                const clampedY = Math.max(0, Math.min(newY, maxY));
+                const clampedHeight =
+                    initialPosition.current.y + initialSize.current.height - clampedY;
+                setSize({ width: clampedWidth, height: Math.max(MIN_HEIGHT, clampedHeight) });
+                setWindowPosition((prev) => ({ ...prev, y: clampedY }));
+            } else if (dragMode.current === "resize-sw") {
+                const newX = initialPosition.current.x + deltaX;
+                const newHeight = initialSize.current.height + deltaY;
+                const maxX = initialPosition.current.x + initialSize.current.width - MIN_WIDTH;
+                const clampedX = Math.max(0, Math.min(newX, maxX));
+                const clampedWidth =
+                    initialPosition.current.x + initialSize.current.width - clampedX;
+                const maxHeight = window.innerHeight - windowPosition.y;
+                setSize({
+                    width: Math.max(MIN_WIDTH, clampedWidth),
+                    height: Math.max(MIN_HEIGHT, Math.min(newHeight, maxHeight)),
+                });
+                setWindowPosition((prev) => ({ ...prev, x: clampedX }));
+            } else if (dragMode.current === "resize-nw") {
+                const newX = initialPosition.current.x + deltaX;
+                const newY = initialPosition.current.y + deltaY;
+                const maxX = initialPosition.current.x + initialSize.current.width - MIN_WIDTH;
+                const clampedX = Math.max(0, Math.min(newX, maxX));
+                const clampedWidth =
+                    initialPosition.current.x + initialSize.current.width - clampedX;
+                const maxY = initialPosition.current.y + initialSize.current.height - MIN_HEIGHT;
+                const clampedY = Math.max(0, Math.min(newY, maxY));
+                const clampedHeight =
+                    initialPosition.current.y + initialSize.current.height - clampedY;
+                setSize({
+                    width: Math.max(MIN_WIDTH, clampedWidth),
+                    height: Math.max(MIN_HEIGHT, clampedHeight),
+                });
+                setWindowPosition({ x: clampedX, y: clampedY });
+            }
         };
 
         const handleMouseUp = () => {
-            isDragging.current = false;
+            dragMode.current = "none";
         };
 
         document.addEventListener("mousemove", handleMouseMove);
@@ -363,7 +480,7 @@ export function MoveDetailWindow({
             document.removeEventListener("mousemove", handleMouseMove);
             document.removeEventListener("mouseup", handleMouseUp);
         };
-    }, []);
+    }, [size.width, size.height, windowPosition.x, windowPosition.y]);
 
     // 複数PVがある場合はリストで表示、なければ従来の単一PVを使用
     const pvList = useMemo((): PvEvalInfo[] => {
@@ -408,8 +525,8 @@ export function MoveDetailWindow({
             style={{
                 left: windowPosition.x,
                 top: windowPosition.y,
-                width: WINDOW_WIDTH,
-                maxHeight: "80vh",
+                width: size.width,
+                height: size.height,
             }}
         >
             {/* ヘッダー（ドラッグハンドル） */}
@@ -520,6 +637,60 @@ export function MoveDetailWindow({
                         この手には詳細情報がありません
                     </div>
                 )}
+            </div>
+
+            {/* リサイズハンドル - マウス操作専用のためアクセシビリティツリーから除外 */}
+            <div
+                className="absolute top-0 left-3 right-3 cursor-ns-resize"
+                style={{ height: EDGE_HANDLE_SIZE }}
+                onMouseDown={createResizeHandler("resize-n")}
+                aria-hidden="true"
+            />
+            <div
+                className="absolute bottom-0 left-3 right-3 cursor-ns-resize"
+                style={{ height: EDGE_HANDLE_SIZE }}
+                onMouseDown={createResizeHandler("resize-s")}
+                aria-hidden="true"
+            />
+            <div
+                className="absolute left-0 top-3 bottom-3 cursor-ew-resize"
+                style={{ width: EDGE_HANDLE_SIZE }}
+                onMouseDown={createResizeHandler("resize-w")}
+                aria-hidden="true"
+            />
+            <div
+                className="absolute right-0 top-3 bottom-3 cursor-ew-resize"
+                style={{ width: EDGE_HANDLE_SIZE }}
+                onMouseDown={createResizeHandler("resize-e")}
+                aria-hidden="true"
+            />
+            <div
+                className="absolute left-0 top-0 w-3 h-3 cursor-nwse-resize"
+                onMouseDown={createResizeHandler("resize-nw")}
+                aria-hidden="true"
+            >
+                <div className="absolute left-1 top-1 w-2 h-2 border-l-2 border-t-2 border-muted-foreground opacity-50" />
+            </div>
+            <div
+                className="absolute right-0 top-0 w-3 h-3 cursor-nesw-resize"
+                onMouseDown={createResizeHandler("resize-ne")}
+                aria-hidden="true"
+            >
+                <div className="absolute right-1 top-1 w-2 h-2 border-r-2 border-t-2 border-muted-foreground opacity-50" />
+            </div>
+            <div
+                className="absolute left-0 bottom-0 w-3 h-3 cursor-nesw-resize"
+                onMouseDown={createResizeHandler("resize-sw")}
+                aria-hidden="true"
+            >
+                <div className="absolute left-1 bottom-1 w-2 h-2 border-l-2 border-b-2 border-muted-foreground opacity-50" />
+            </div>
+            <div
+                className="absolute right-0 bottom-0 w-3 h-3 cursor-nwse-resize"
+                onMouseDown={createResizeHandler("resize-se")}
+                aria-hidden="true"
+            >
+                <div className="absolute right-1 bottom-1 w-2 h-2 border-r-2 border-b-2 border-muted-foreground opacity-50" />
             </div>
         </div>
     );
