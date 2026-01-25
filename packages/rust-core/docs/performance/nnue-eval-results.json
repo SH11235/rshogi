@@ -25,13 +25,13 @@
           "total_ns": 672.4,
           "evals_per_sec": 1487128
         },
-        "HalfKA512_512x2-8-96_static": {
+        "HalfKA_hm512_512x2-8-96_static": {
           "refresh_ns": 1100.2,
           "eval_ns": 348.5,
           "total_ns": 1427.5,
           "evals_per_sec": 700521
         },
-        "HalfKA1024_1024x2-8-96_static": {
+        "HalfKA_hm1024_1024x2-8-96_static": {
           "refresh_ns": 2231.6,
           "eval_ns": 418.5,
           "total_ns": 2591.6,
@@ -66,7 +66,7 @@
             "total_diff_percent": -1.8
           }
         },
-        "HalfKA512_const_generics": {
+        "HalfKA_hm512_const_generics": {
           "refresh_ns": 1036.1,
           "eval_ns": 131.8,
           "total_ns": 1207.3,
@@ -77,7 +77,7 @@
             "total_diff_percent": -15
           }
         },
-        "HalfKA1024_const_generics": {
+        "HalfKA_hm1024_const_generics": {
           "refresh_ns": 1836.2,
           "eval_ns": 223.1,
           "total_ns": 2121.4,
@@ -106,14 +106,14 @@
         "test_positions": 5
       },
       "results": {
-        "HalfKA-256-32-32-CReLU": {
+        "HalfKA_hm-256-32-32-CReLU": {
           "refresh_ns": 667.0,
           "eval_ns": 149.3,
           "total_ns": 825.8,
           "evals_per_sec": 1210948,
           "note": "L1=256, L2=32, L3=32"
         },
-        "HalfKA-512-8-96-CReLU": {
+        "HalfKA_hm-512-8-96-CReLU": {
           "refresh_ns": 1094.5,
           "eval_ns": 136.6,
           "total_ns": 1249.3,
@@ -125,7 +125,7 @@
           },
           "note": "測定誤差の範囲内"
         },
-        "HalfKA-1024-8-96-CReLU": {
+        "HalfKA_hm-1024-8-96-CReLU": {
           "refresh_ns": 1986.7,
           "eval_ns": 232.4,
           "total_ns": 2317.5,
@@ -158,13 +158,13 @@
       "impact": {
         "HalfKP256": "性能変化なし（L1/16はコンパイル時に定数展開）",
         "HalfKP512": "バグ修正（前半のみ処理→全体処理）",
-        "HalfKA1024": "バグ修正（1/4のみ処理→全体処理）"
+        "HalfKA_hm1024": "バグ修正（1/4のみ処理→全体処理）"
       }
     },
     {
       "date": "2026-01-25",
       "change": "3階層enum構造リファクタリング（PR #357）",
-      "description": "NNUENetwork/HalfKANetwork/HalfKAL256等の3階層enum構造に整理。define_l1_variants!マクロで新アーキテクチャ追加を容易化",
+      "description": "NNUENetwork/HalfKA_hmNetwork/HalfKA_hm_L256等の3階層enum構造に整理。define_l1_variants!マクロで新アーキテクチャ追加を容易化",
       "impact": {
         "performance": "性能は概ね維持（測定誤差の範囲内）",
         "maintainability": "新アーキテクチャ追加が3ステップで完結",
