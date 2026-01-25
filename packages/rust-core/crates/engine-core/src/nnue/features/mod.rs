@@ -146,9 +146,9 @@ impl FeatureSet for HalfKPFeatureSet {
 ///
 /// Half-Mirror King + All pieces with Factorization
 #[allow(non_camel_case_types)]
-pub struct HalfKA_hmFeatureSet;
+pub struct HalfKA_hm_FeatureSet;
 
-impl FeatureSet for HalfKA_hmFeatureSet {
+impl FeatureSet for HalfKA_hm_FeatureSet {
     const DIMENSIONS: usize = HalfKA_hm::DIMENSIONS;
     const MAX_ACTIVE: usize = HalfKA_hm::MAX_ACTIVE;
     const REFRESH_TRIGGERS: &'static [TriggerEvent] = &[TriggerEvent::FriendKingMoved];

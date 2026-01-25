@@ -7,7 +7,7 @@ use super::accumulator::{Aligned, AlignedBox};
 use super::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES};
 use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLayerStacks};
 use super::constants::{HALFKA_HM_DIMENSIONS, NNUE_PYTORCH_L1};
-use super::features::{FeatureSet, HalfKA_hmFeatureSet};
+use super::features::{FeatureSet, HalfKA_hm_FeatureSet};
 use super::leb128::read_compressed_tensor_i16;
 use crate::position::Position;
 use crate::types::Color;
@@ -108,7 +108,7 @@ impl FeatureTransformerLayerStacks {
     ) {
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
-            let reset = HalfKA_hmFeatureSet::needs_refresh(dirty_piece, perspective);
+            let reset = HalfKA_hm_FeatureSet::needs_refresh(dirty_piece, perspective);
 
             if reset {
                 // 玉が移動した場合は全計算
@@ -121,7 +121,7 @@ impl FeatureTransformerLayerStacks {
                 }
             } else {
                 // 差分更新
-                let (removed, added) = HalfKA_hmFeatureSet::collect_changed_indices(
+                let (removed, added) = HalfKA_hm_FeatureSet::collect_changed_indices(
                     dirty_piece,
                     perspective,
                     pos.king_square(perspective),
@@ -176,7 +176,7 @@ impl FeatureTransformerLayerStacks {
                 );
 
                 let king_sq = pos.king_square(perspective);
-                let (removed, added) = HalfKA_hmFeatureSet::collect_changed_indices(
+                let (removed, added) = HalfKA_hm_FeatureSet::collect_changed_indices(
                     &dirty_piece,
                     perspective,
                     king_sq,
@@ -206,7 +206,7 @@ impl FeatureTransformerLayerStacks {
         pos: &Position,
         perspective: Color,
     ) -> IndexList<MAX_ACTIVE_FEATURES> {
-        HalfKA_hmFeatureSet::collect_active_indices(pos, perspective)
+        HalfKA_hm_FeatureSet::collect_active_indices(pos, perspective)
     }
 
     /// 重みを累積値に加算

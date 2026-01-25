@@ -1,4 +1,7 @@
-//! NetworkHalfKA - const generics ベースの HalfKA ネットワーク統一実装
+// NOTE: 公式表記(HalfKA_hm)をenum名に保持するため、非CamelCaseを許可する。
+#![allow(non_camel_case_types)]
+
+//! NetworkHalfKA_hm - const generics ベースの HalfKA_hm ネットワーク統一実装
 //!
 //! HalfKA_hm^ 特徴量を使用し、L1/L2/L3 のサイズと活性化関数を型パラメータで切り替え可能にした実装。
 //!
@@ -16,21 +19,21 @@
 //!
 //! | 型エイリアス | L1 | L2 | L3 | 活性化 |
 //! |-------------|------|-----|-----|--------|
-//! | HalfKA256CReLU | 256 | 32 | 32 | CReLU |
-//! | HalfKA256SCReLU | 256 | 32 | 32 | SCReLU |
-//! | HalfKA256Pairwise | 256 | 32 | 32 | PairwiseCReLU |
-//! | HalfKA512CReLU | 512 | 8 | 96 | CReLU |
-//! | HalfKA512SCReLU | 512 | 8 | 96 | SCReLU |
-//! | HalfKA512Pairwise | 512 | 8 | 96 | PairwiseCReLU |
-//! | HalfKA512_32_32CReLU | 512 | 32 | 32 | CReLU |
-//! | HalfKA512_32_32SCReLU | 512 | 32 | 32 | SCReLU |
-//! | HalfKA512_32_32Pairwise | 512 | 32 | 32 | PairwiseCReLU |
-//! | HalfKA1024CReLU | 1024 | 8 | 96 | CReLU |
-//! | HalfKA1024SCReLU | 1024 | 8 | 96 | SCReLU |
-//! | HalfKA1024Pairwise | 1024 | 8 | 96 | PairwiseCReLU |
-//! | HalfKA1024_8_32CReLU | 1024 | 8 | 32 | CReLU |
-//! | HalfKA1024_8_32SCReLU | 1024 | 8 | 32 | SCReLU |
-//! | HalfKA1024_8_32Pairwise | 1024 | 8 | 32 | PairwiseCReLU |
+//! | HalfKA_hm256CReLU | 256 | 32 | 32 | CReLU |
+//! | HalfKA_hm256SCReLU | 256 | 32 | 32 | SCReLU |
+//! | HalfKA_hm256Pairwise | 256 | 32 | 32 | PairwiseCReLU |
+//! | HalfKA_hm512CReLU | 512 | 8 | 96 | CReLU |
+//! | HalfKA_hm512SCReLU | 512 | 8 | 96 | SCReLU |
+//! | HalfKA_hm512Pairwise | 512 | 8 | 96 | PairwiseCReLU |
+//! | HalfKA_hm512_32_32CReLU | 512 | 32 | 32 | CReLU |
+//! | HalfKA_hm512_32_32SCReLU | 512 | 32 | 32 | SCReLU |
+//! | HalfKA_hm512_32_32Pairwise | 512 | 32 | 32 | PairwiseCReLU |
+//! | HalfKA_hm1024CReLU | 1024 | 8 | 96 | CReLU |
+//! | HalfKA_hm1024SCReLU | 1024 | 8 | 96 | SCReLU |
+//! | HalfKA_hm1024Pairwise | 1024 | 8 | 96 | PairwiseCReLU |
+//! | HalfKA_hm1024_8_32CReLU | 1024 | 8 | 32 | CReLU |
+//! | HalfKA_hm1024_8_32SCReLU | 1024 | 8 | 32 | SCReLU |
+//! | HalfKA_hm1024_8_32Pairwise | 1024 | 8 | 32 | PairwiseCReLU |
 //!
 //! # 特徴量
 //!
@@ -44,7 +47,7 @@ use std::sync::OnceLock;
 use super::accumulator::{Aligned, AlignedBox, DirtyPiece, IndexList, MAX_PATH_LENGTH};
 use super::activation::FtActivation;
 use super::constants::{FV_SCALE_HALFKA, HALFKA_HM_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION_HALFKA};
-use super::features::{FeatureSet, HalfKA_hmFeatureSet};
+use super::features::{FeatureSet, HalfKA_hm_FeatureSet};
 use super::network::{get_fv_scale_override, parse_fv_scale_from_arch};
 use crate::position::Position;
 use crate::types::{Color, Value};
@@ -119,11 +122,11 @@ unsafe fn m128_add_dpbusd_epi32(
 }
 
 // =============================================================================
-// AccumulatorHalfKA - const generics 版アキュムレータ
+// AccumulatorHalfKA_hm - const generics 版アキュムレータ
 // =============================================================================
 
-/// HalfKA アキュムレータ
-/// HalfKA アキュムレータ
+/// HalfKA_hm アキュムレータ
+/// HalfKA_hm アキュムレータ
 ///
 /// # 最適化に関する注意
 ///
@@ -131,7 +134,7 @@ unsafe fn m128_add_dpbusd_epi32(
 /// `add_weights`/`sub_weights` に渡される引数が `&mut [i16]`（スライス）となるため、
 /// 固定サイズ配列を使用する場合と比較してコンパイラ最適化が効きにくい。
 ///
-/// ただし、HalfKA系（L1=512, 1024）ではL1サイズが大きいため境界チェックの
+/// ただし、HalfKA_hm系（L1=512, 1024）ではL1サイズが大きいため境界チェックの
 /// 相対的オーバーヘッドが小さく、ベンチマーク上は改善が見られる。
 ///
 /// ## 改善案（オプション）
@@ -143,14 +146,14 @@ unsafe fn m128_add_dpbusd_epi32(
 ///
 /// 参考: HalfKP（L1=256）では元のfeature_transformer.rsが `Aligned<[i16; 256]>` を
 /// 使用していたため、動的スライスへの変更で約17%の性能低下が見られた。
-pub struct AccumulatorHalfKA<const L1: usize> {
+pub struct AccumulatorHalfKA_hm<const L1: usize> {
     /// アキュムレータバッファ [perspective][L1]
     pub accumulation: [AlignedBox<i16>; 2],
     /// 計算済みフラグ
     pub computed_accumulation: bool,
 }
 
-impl<const L1: usize> AccumulatorHalfKA<L1> {
+impl<const L1: usize> AccumulatorHalfKA_hm<L1> {
     /// 新規作成
     pub fn new() -> Self {
         Self {
@@ -167,13 +170,13 @@ impl<const L1: usize> AccumulatorHalfKA<L1> {
     }
 }
 
-impl<const L1: usize> Default for AccumulatorHalfKA<L1> {
+impl<const L1: usize> Default for AccumulatorHalfKA_hm<L1> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<const L1: usize> Clone for AccumulatorHalfKA<L1> {
+impl<const L1: usize> Clone for AccumulatorHalfKA_hm<L1> {
     fn clone(&self) -> Self {
         Self {
             accumulation: [self.accumulation[0].clone(), self.accumulation[1].clone()],
@@ -183,28 +186,28 @@ impl<const L1: usize> Clone for AccumulatorHalfKA<L1> {
 }
 
 // =============================================================================
-// AccumulatorStackHalfKA - アキュムレータスタック
+// AccumulatorStackHalfKA_hm - アキュムレータスタック
 // =============================================================================
 
 /// スタックエントリ
-pub struct AccumulatorEntryHalfKA<const L1: usize> {
-    pub accumulator: AccumulatorHalfKA<L1>,
+pub struct AccumulatorEntryHalfKA_hm<const L1: usize> {
+    pub accumulator: AccumulatorHalfKA_hm<L1>,
     pub dirty_piece: DirtyPiece,
     pub previous: Option<usize>,
 }
 
 /// アキュムレータスタック
-pub struct AccumulatorStackHalfKA<const L1: usize> {
-    entries: Vec<AccumulatorEntryHalfKA<L1>>,
+pub struct AccumulatorStackHalfKA_hm<const L1: usize> {
+    entries: Vec<AccumulatorEntryHalfKA_hm<L1>>,
     current_idx: usize,
 }
 
-impl<const L1: usize> AccumulatorStackHalfKA<L1> {
+impl<const L1: usize> AccumulatorStackHalfKA_hm<L1> {
     /// 新規作成
     pub fn new() -> Self {
         let mut entries = Vec::with_capacity(128);
-        entries.push(AccumulatorEntryHalfKA {
-            accumulator: AccumulatorHalfKA::new(),
+        entries.push(AccumulatorEntryHalfKA_hm {
+            accumulator: AccumulatorHalfKA_hm::new(),
             dirty_piece: DirtyPiece::default(),
             previous: None,
         });
@@ -215,12 +218,12 @@ impl<const L1: usize> AccumulatorStackHalfKA<L1> {
     }
 
     /// 現在のエントリを取得
-    pub fn current(&self) -> &AccumulatorEntryHalfKA<L1> {
+    pub fn current(&self) -> &AccumulatorEntryHalfKA_hm<L1> {
         &self.entries[self.current_idx]
     }
 
     /// 現在のエントリを取得（可変）
-    pub fn current_mut(&mut self) -> &mut AccumulatorEntryHalfKA<L1> {
+    pub fn current_mut(&mut self) -> &mut AccumulatorEntryHalfKA_hm<L1> {
         &mut self.entries[self.current_idx]
     }
 
@@ -228,7 +231,7 @@ impl<const L1: usize> AccumulatorStackHalfKA<L1> {
     ///
     /// `define_l1_variants!` マクロから使用される。
     #[inline]
-    pub fn top(&self) -> &AccumulatorHalfKA<L1> {
+    pub fn top(&self) -> &AccumulatorHalfKA_hm<L1> {
         &self.entries[self.current_idx].accumulator
     }
 
@@ -236,7 +239,7 @@ impl<const L1: usize> AccumulatorStackHalfKA<L1> {
     ///
     /// `define_l1_variants!` マクロから使用される。
     #[inline]
-    pub fn top_mut(&mut self) -> &mut AccumulatorHalfKA<L1> {
+    pub fn top_mut(&mut self) -> &mut AccumulatorHalfKA_hm<L1> {
         &mut self.entries[self.current_idx].accumulator
     }
 
@@ -257,7 +260,7 @@ impl<const L1: usize> AccumulatorStackHalfKA<L1> {
     pub fn top_and_source(
         &mut self,
         source_idx: usize,
-    ) -> (&mut AccumulatorHalfKA<L1>, &AccumulatorHalfKA<L1>) {
+    ) -> (&mut AccumulatorHalfKA_hm<L1>, &AccumulatorHalfKA_hm<L1>) {
         let current_idx = self.current_idx;
         debug_assert!(
             source_idx < current_idx,
@@ -271,8 +274,8 @@ impl<const L1: usize> AccumulatorStackHalfKA<L1> {
     pub fn push(&mut self, dirty_piece: DirtyPiece) {
         let prev_idx = self.current_idx;
         self.current_idx = self.entries.len();
-        self.entries.push(AccumulatorEntryHalfKA {
-            accumulator: AccumulatorHalfKA::new(),
+        self.entries.push(AccumulatorEntryHalfKA_hm {
+            accumulator: AccumulatorHalfKA_hm::new(),
             dirty_piece,
             previous: Some(prev_idx),
         });
@@ -325,12 +328,12 @@ impl<const L1: usize> AccumulatorStackHalfKA<L1> {
     }
 
     /// 指定インデックスのエントリを取得
-    pub fn entry_at(&self, idx: usize) -> &AccumulatorEntryHalfKA<L1> {
+    pub fn entry_at(&self, idx: usize) -> &AccumulatorEntryHalfKA_hm<L1> {
         &self.entries[idx]
     }
 
     /// 指定インデックスのエントリを取得（可変）
-    pub fn entry_at_mut(&mut self, idx: usize) -> &mut AccumulatorEntryHalfKA<L1> {
+    pub fn entry_at_mut(&mut self, idx: usize) -> &mut AccumulatorEntryHalfKA_hm<L1> {
         &mut self.entries[idx]
     }
 
@@ -338,7 +341,7 @@ impl<const L1: usize> AccumulatorStackHalfKA<L1> {
     pub fn get_prev_and_current_accumulators(
         &mut self,
         prev_idx: usize,
-    ) -> (&AccumulatorHalfKA<L1>, &mut AccumulatorHalfKA<L1>) {
+    ) -> (&AccumulatorHalfKA_hm<L1>, &mut AccumulatorHalfKA_hm<L1>) {
         let current_idx = self.current_idx;
         if prev_idx < current_idx {
             let (left, right) = self.entries.split_at_mut(current_idx);
@@ -374,25 +377,25 @@ impl<const L1: usize> AccumulatorStackHalfKA<L1> {
     }
 }
 
-impl<const L1: usize> Default for AccumulatorStackHalfKA<L1> {
+impl<const L1: usize> Default for AccumulatorStackHalfKA_hm<L1> {
     fn default() -> Self {
         Self::new()
     }
 }
 
 // =============================================================================
-// FeatureTransformerHalfKA - const generics 版 Feature Transformer
+// FeatureTransformerHalfKA_hm - const generics 版 Feature Transformer
 // =============================================================================
 
-/// HalfKA Feature Transformer
-pub struct FeatureTransformerHalfKA<const L1: usize> {
+/// HalfKA_hm Feature Transformer
+pub struct FeatureTransformerHalfKA_hm<const L1: usize> {
     /// バイアス [L1]
     pub biases: Vec<i16>,
     /// 重み [input_dimensions][L1]
     pub weights: AlignedBox<i16>,
 }
 
-impl<const L1: usize> FeatureTransformerHalfKA<L1> {
+impl<const L1: usize> FeatureTransformerHalfKA_hm<L1> {
     /// ファイルから読み込み
     pub fn read<R: Read>(reader: &mut R) -> io::Result<Self> {
         let input_dim = HALFKA_HM_DIMENSIONS;
@@ -417,14 +420,14 @@ impl<const L1: usize> FeatureTransformerHalfKA<L1> {
     }
 
     /// Accumulatorをリフレッシュ
-    pub fn refresh_accumulator(&self, pos: &Position, acc: &mut AccumulatorHalfKA<L1>) {
+    pub fn refresh_accumulator(&self, pos: &Position, acc: &mut AccumulatorHalfKA_hm<L1>) {
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
             let accumulation = &mut acc.accumulation[p];
 
             accumulation.copy_from_slice(&self.biases);
 
-            let active_indices = HalfKA_hmFeatureSet::collect_active_indices(pos, perspective);
+            let active_indices = HalfKA_hm_FeatureSet::collect_active_indices(pos, perspective);
             for &index in active_indices.iter() {
                 self.add_weights(accumulation, index);
             }
@@ -438,21 +441,21 @@ impl<const L1: usize> FeatureTransformerHalfKA<L1> {
         &self,
         pos: &Position,
         dirty_piece: &DirtyPiece,
-        acc: &mut AccumulatorHalfKA<L1>,
-        prev_acc: &AccumulatorHalfKA<L1>,
+        acc: &mut AccumulatorHalfKA_hm<L1>,
+        prev_acc: &AccumulatorHalfKA_hm<L1>,
     ) {
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
-            let reset = HalfKA_hmFeatureSet::needs_refresh(dirty_piece, perspective);
+            let reset = HalfKA_hm_FeatureSet::needs_refresh(dirty_piece, perspective);
 
             if reset {
                 acc.accumulation[p].copy_from_slice(&self.biases);
-                let active_indices = HalfKA_hmFeatureSet::collect_active_indices(pos, perspective);
+                let active_indices = HalfKA_hm_FeatureSet::collect_active_indices(pos, perspective);
                 for &index in active_indices.iter() {
                     self.add_weights(&mut acc.accumulation[p], index);
                 }
             } else {
-                let (removed, added) = HalfKA_hmFeatureSet::collect_changed_indices(
+                let (removed, added) = HalfKA_hm_FeatureSet::collect_changed_indices(
                     dirty_piece,
                     perspective,
                     pos.king_square(perspective),
@@ -476,7 +479,7 @@ impl<const L1: usize> FeatureTransformerHalfKA<L1> {
     pub fn forward_update_incremental(
         &self,
         pos: &Position,
-        stack: &mut AccumulatorStackHalfKA<L1>,
+        stack: &mut AccumulatorStackHalfKA_hm<L1>,
         source_idx: usize,
     ) -> bool {
         let Some(path) = stack.collect_path(source_idx) else {
@@ -502,7 +505,7 @@ impl<const L1: usize> FeatureTransformerHalfKA<L1> {
                 );
 
                 let king_sq = pos.king_square(perspective);
-                let (removed, added) = HalfKA_hmFeatureSet::collect_changed_indices(
+                let (removed, added) = HalfKA_hm_FeatureSet::collect_changed_indices(
                     &dirty_piece,
                     perspective,
                     king_sq,
@@ -633,7 +636,7 @@ impl<const L1: usize> FeatureTransformerHalfKA<L1> {
     /// 活性化関数は呼び出し側で適用する。
     pub fn transform_raw(
         &self,
-        acc: &AccumulatorHalfKA<L1>,
+        acc: &AccumulatorHalfKA_hm<L1>,
         side_to_move: Color,
         output: &mut [i16],
     ) {
@@ -648,7 +651,7 @@ impl<const L1: usize> FeatureTransformerHalfKA<L1> {
 }
 
 // =============================================================================
-// AffineTransformHalfKA - const generics 版アフィン変換（ループ逆転最適化版）
+// AffineTransformHalfKA_hm - const generics 版アフィン変換（ループ逆転最適化版）
 // =============================================================================
 
 /// アフィン変換層（ループ逆転最適化 + スクランブル重み形式）
@@ -656,14 +659,14 @@ impl<const L1: usize> FeatureTransformerHalfKA<L1> {
 /// YaneuraOu/Stockfish スタイルの SIMD 最適化を実装。
 /// 重みはスクランブル形式 `weights[input_chunk][output][4]` で保持し、
 /// ループ逆転により入力をブロードキャストして全出力に同時適用する。
-pub struct AffineTransformHalfKA<const INPUT: usize, const OUTPUT: usize> {
+pub struct AffineTransformHalfKA_hm<const INPUT: usize, const OUTPUT: usize> {
     /// バイアス [OUTPUT]
     pub biases: [i32; OUTPUT],
     /// 重み（スクランブル形式、64バイトアライン）
     pub weights: AlignedBox<i8>,
 }
 
-impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKA<INPUT, OUTPUT> {
+impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKA_hm<INPUT, OUTPUT> {
     /// パディング済み入力次元（32の倍数）
     const PADDED_INPUT: usize = INPUT.div_ceil(32) * 32;
 
@@ -937,10 +940,10 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKA<INPUT, OUTPU
 }
 
 // =============================================================================
-// NetworkHalfKA - const generics 版統一ネットワーク
+// NetworkHalfKA_hm - const generics 版統一ネットワーク
 // =============================================================================
 
-/// HalfKA ネットワーク（const generics 版）
+/// HalfKA_hm ネットワーク（const generics 版）
 ///
 /// # 型パラメータ
 /// - `L1`: FT出力次元（片側）
@@ -951,7 +954,7 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKA<INPUT, OUTPU
 /// - `L2`: 隠れ層1の出力次元
 /// - `L3`: 隠れ層2の出力次元
 /// - `A`: 活性化関数（FtActivation trait を実装する型）
-pub struct NetworkHalfKA<
+pub struct NetworkHalfKA_hm<
     const L1: usize,
     const FT_OUT: usize,
     const L1_INPUT: usize,
@@ -960,13 +963,13 @@ pub struct NetworkHalfKA<
     A: FtActivation,
 > {
     /// Feature Transformer (入力 → L1)
-    pub feature_transformer: FeatureTransformerHalfKA<L1>,
+    pub feature_transformer: FeatureTransformerHalfKA_hm<L1>,
     /// 隠れ層1: L1_INPUT → L2
-    pub l1: AffineTransformHalfKA<L1_INPUT, L2>,
+    pub l1: AffineTransformHalfKA_hm<L1_INPUT, L2>,
     /// 隠れ層2: L2 → L3
-    pub l2: AffineTransformHalfKA<L2, L3>,
+    pub l2: AffineTransformHalfKA_hm<L2, L3>,
     /// 出力層: L3 → 1
-    pub output: AffineTransformHalfKA<L3, 1>,
+    pub output: AffineTransformHalfKA_hm<L3, 1>,
     /// 評価値スケーリング係数
     pub fv_scale: i32,
     /// QA値（クリッピング閾値）
@@ -982,7 +985,7 @@ impl<
         const L2: usize,
         const L3: usize,
         A: FtActivation,
-    > NetworkHalfKA<L1, FT_OUT, L1_INPUT, L2, L3, A>
+    > NetworkHalfKA_hm<L1, FT_OUT, L1_INPUT, L2, L3, A>
 {
     /// コンパイル時制約
     ///
@@ -1055,19 +1058,19 @@ impl<
         reader.read_exact(&mut buf4)?;
 
         // Feature Transformer
-        let feature_transformer = FeatureTransformerHalfKA::read(reader)?;
+        let feature_transformer = FeatureTransformerHalfKA_hm::read(reader)?;
 
         // FC layers ハッシュ
         reader.read_exact(&mut buf4)?;
 
         // l1: L1*2 → L2
-        let l1 = AffineTransformHalfKA::read(reader)?;
+        let l1 = AffineTransformHalfKA_hm::read(reader)?;
 
         // l2: L2 → L3
-        let l2 = AffineTransformHalfKA::read(reader)?;
+        let l2 = AffineTransformHalfKA_hm::read(reader)?;
 
         // output: L3 → 1
-        let output = AffineTransformHalfKA::read(reader)?;
+        let output = AffineTransformHalfKA_hm::read(reader)?;
 
         Ok(Self {
             feature_transformer,
@@ -1081,7 +1084,7 @@ impl<
     }
 
     /// Accumulator をリフレッシュ
-    pub fn refresh_accumulator(&self, pos: &Position, acc: &mut AccumulatorHalfKA<L1>) {
+    pub fn refresh_accumulator(&self, pos: &Position, acc: &mut AccumulatorHalfKA_hm<L1>) {
         self.feature_transformer.refresh_accumulator(pos, acc);
     }
 
@@ -1090,8 +1093,8 @@ impl<
         &self,
         pos: &Position,
         dirty_piece: &DirtyPiece,
-        acc: &mut AccumulatorHalfKA<L1>,
-        prev_acc: &AccumulatorHalfKA<L1>,
+        acc: &mut AccumulatorHalfKA_hm<L1>,
+        prev_acc: &AccumulatorHalfKA_hm<L1>,
     ) {
         self.feature_transformer.update_accumulator(pos, dirty_piece, acc, prev_acc);
     }
@@ -1100,7 +1103,7 @@ impl<
     pub fn forward_update_incremental(
         &self,
         pos: &Position,
-        stack: &mut AccumulatorStackHalfKA<L1>,
+        stack: &mut AccumulatorStackHalfKA_hm<L1>,
         source_idx: usize,
     ) -> bool {
         self.feature_transformer.forward_update_incremental(pos, stack, source_idx)
@@ -1109,7 +1112,7 @@ impl<
     /// 評価値を計算
     ///
     /// 最適化: スタック配列 + 64バイトアラインメントで SIMD 効率を最大化
-    pub fn evaluate(&self, pos: &Position, acc: &AccumulatorHalfKA<L1>) -> Value {
+    pub fn evaluate(&self, pos: &Position, acc: &AccumulatorHalfKA_hm<L1>) -> Value {
         let debug = nnue_debug_enabled();
 
         // Feature Transformer 出力（生のi16値）- 64バイトアライン
@@ -1159,7 +1162,7 @@ impl<
         for (i, &v) in l1_out.0.iter().enumerate() {
             debug_assert!(
                 v.abs() < 1_000_000,
-                "L1 output[{i}] = {v} is out of expected range (NetworkHalfKA<{}, {}, {}, {}>)",
+                "L1 output[{i}] = {v} is out of expected range (NetworkHalfKA_hm<{}, {}, {}, {}>)",
                 L1,
                 L2,
                 L3,
@@ -1180,7 +1183,7 @@ impl<
         for (i, &v) in l2_out.0.iter().enumerate() {
             debug_assert!(
                 v.abs() < 1_000_000,
-                "L2 output[{i}] = {v} is out of expected range (NetworkHalfKA<{}, {}, {}, {}>)",
+                "L2 output[{i}] = {v} is out of expected range (NetworkHalfKA_hm<{}, {}, {}, {}>)",
                 L1,
                 L2,
                 L3,
@@ -1204,7 +1207,7 @@ impl<
         #[cfg(debug_assertions)]
         debug_assert!(
             eval.abs() < 50_000,
-            "Final evaluation {eval} is out of expected range (NetworkHalfKA<{}, {}, {}, {}>). Raw output: {}",
+            "Final evaluation {eval} is out of expected range (NetworkHalfKA_hm<{}, {}, {}, {}>). Raw output: {}",
             L1,
             L2,
             L3,
@@ -1221,13 +1224,13 @@ impl<
     }
 
     /// 新しい Accumulator を作成
-    pub fn new_accumulator(&self) -> AccumulatorHalfKA<L1> {
-        AccumulatorHalfKA::new()
+    pub fn new_accumulator(&self) -> AccumulatorHalfKA_hm<L1> {
+        AccumulatorHalfKA_hm::new()
     }
 
     /// 新しい AccumulatorStack を作成
-    pub fn new_accumulator_stack(&self) -> AccumulatorStackHalfKA<L1> {
-        AccumulatorStackHalfKA::new()
+    pub fn new_accumulator_stack(&self) -> AccumulatorStackHalfKA_hm<L1> {
+        AccumulatorStackHalfKA_hm::new()
     }
 
     /// アーキテクチャ名を取得
@@ -1260,46 +1263,46 @@ use super::activation::{CReLU, PairwiseCReLU, SCReLU};
 
 // L1=256, FT_OUT=512
 // CReLU/SCReLU: L1_INPUT=512, Pairwise: L1_INPUT=256
-/// HalfKA 256x2-32-32 CReLU
-pub type HalfKA256CReLU = NetworkHalfKA<256, 512, 512, 32, 32, CReLU>;
-/// HalfKA 256x2-32-32 SCReLU
-pub type HalfKA256SCReLU = NetworkHalfKA<256, 512, 512, 32, 32, SCReLU>;
-/// HalfKA 256/2x2-32-32 PairwiseCReLU (L1入力=256, Pairwise乗算で次元半減)
-pub type HalfKA256Pairwise = NetworkHalfKA<256, 512, 256, 32, 32, PairwiseCReLU>;
+/// HalfKA_hm 256x2-32-32 CReLU
+pub type HalfKA_hm256CReLU = NetworkHalfKA_hm<256, 512, 512, 32, 32, CReLU>;
+/// HalfKA_hm 256x2-32-32 SCReLU
+pub type HalfKA_hm256SCReLU = NetworkHalfKA_hm<256, 512, 512, 32, 32, SCReLU>;
+/// HalfKA_hm 256/2x2-32-32 PairwiseCReLU (L1入力=256, Pairwise乗算で次元半減)
+pub type HalfKA_hm256Pairwise = NetworkHalfKA_hm<256, 512, 256, 32, 32, PairwiseCReLU>;
 
 // L1=512, FT_OUT=1024, L2=8, L3=96
 // CReLU/SCReLU: L1_INPUT=1024, Pairwise: L1_INPUT=512
-/// HalfKA 512x2-8-96 CReLU
-pub type HalfKA512CReLU = NetworkHalfKA<512, 1024, 1024, 8, 96, CReLU>;
-/// HalfKA 512x2-8-96 SCReLU
-pub type HalfKA512SCReLU = NetworkHalfKA<512, 1024, 1024, 8, 96, SCReLU>;
-/// HalfKA 512/2x2-8-96 PairwiseCReLU (L1入力=512, Pairwise乗算で次元半減)
-pub type HalfKA512Pairwise = NetworkHalfKA<512, 1024, 512, 8, 96, PairwiseCReLU>;
+/// HalfKA_hm 512x2-8-96 CReLU
+pub type HalfKA_hm512CReLU = NetworkHalfKA_hm<512, 1024, 1024, 8, 96, CReLU>;
+/// HalfKA_hm 512x2-8-96 SCReLU
+pub type HalfKA_hm512SCReLU = NetworkHalfKA_hm<512, 1024, 1024, 8, 96, SCReLU>;
+/// HalfKA_hm 512/2x2-8-96 PairwiseCReLU (L1入力=512, Pairwise乗算で次元半減)
+pub type HalfKA_hm512Pairwise = NetworkHalfKA_hm<512, 1024, 512, 8, 96, PairwiseCReLU>;
 
 // L1=512, FT_OUT=1024, L2=32, L3=32
-/// HalfKA 512x2-32-32 CReLU
-pub type HalfKA512_32_32CReLU = NetworkHalfKA<512, 1024, 1024, 32, 32, CReLU>;
-/// HalfKA 512x2-32-32 SCReLU
-pub type HalfKA512_32_32SCReLU = NetworkHalfKA<512, 1024, 1024, 32, 32, SCReLU>;
-/// HalfKA 512/2x2-32-32 PairwiseCReLU (L1入力=512, Pairwise乗算で次元半減)
-pub type HalfKA512_32_32Pairwise = NetworkHalfKA<512, 1024, 512, 32, 32, PairwiseCReLU>;
+/// HalfKA_hm 512x2-32-32 CReLU
+pub type HalfKA_hm512_32_32CReLU = NetworkHalfKA_hm<512, 1024, 1024, 32, 32, CReLU>;
+/// HalfKA_hm 512x2-32-32 SCReLU
+pub type HalfKA_hm512_32_32SCReLU = NetworkHalfKA_hm<512, 1024, 1024, 32, 32, SCReLU>;
+/// HalfKA_hm 512/2x2-32-32 PairwiseCReLU (L1入力=512, Pairwise乗算で次元半減)
+pub type HalfKA_hm512_32_32Pairwise = NetworkHalfKA_hm<512, 1024, 512, 32, 32, PairwiseCReLU>;
 
 // L1=1024, FT_OUT=2048, L2=8, L3=96
 // CReLU/SCReLU: L1_INPUT=2048, Pairwise: L1_INPUT=1024
-/// HalfKA 1024x2-8-96 CReLU
-pub type HalfKA1024CReLU = NetworkHalfKA<1024, 2048, 2048, 8, 96, CReLU>;
-/// HalfKA 1024x2-8-96 SCReLU
-pub type HalfKA1024SCReLU = NetworkHalfKA<1024, 2048, 2048, 8, 96, SCReLU>;
-/// HalfKA 1024/2x2-8-96 PairwiseCReLU (L1入力=1024, Pairwise乗算で次元半減)
-pub type HalfKA1024Pairwise = NetworkHalfKA<1024, 2048, 1024, 8, 96, PairwiseCReLU>;
+/// HalfKA_hm 1024x2-8-96 CReLU
+pub type HalfKA_hm1024CReLU = NetworkHalfKA_hm<1024, 2048, 2048, 8, 96, CReLU>;
+/// HalfKA_hm 1024x2-8-96 SCReLU
+pub type HalfKA_hm1024SCReLU = NetworkHalfKA_hm<1024, 2048, 2048, 8, 96, SCReLU>;
+/// HalfKA_hm 1024/2x2-8-96 PairwiseCReLU (L1入力=1024, Pairwise乗算で次元半減)
+pub type HalfKA_hm1024Pairwise = NetworkHalfKA_hm<1024, 2048, 1024, 8, 96, PairwiseCReLU>;
 
 // L1=1024, FT_OUT=2048, L2=8, L3=32
-/// HalfKA 1024x2-8-32 CReLU
-pub type HalfKA1024_8_32CReLU = NetworkHalfKA<1024, 2048, 2048, 8, 32, CReLU>;
-/// HalfKA 1024x2-8-32 SCReLU
-pub type HalfKA1024_8_32SCReLU = NetworkHalfKA<1024, 2048, 2048, 8, 32, SCReLU>;
-/// HalfKA 1024/2x2-8-32 PairwiseCReLU (L1入力=1024, Pairwise乗算で次元半減)
-pub type HalfKA1024_8_32Pairwise = NetworkHalfKA<1024, 2048, 1024, 8, 32, PairwiseCReLU>;
+/// HalfKA_hm 1024x2-8-32 CReLU
+pub type HalfKA_hm1024_8_32CReLU = NetworkHalfKA_hm<1024, 2048, 2048, 8, 32, CReLU>;
+/// HalfKA_hm 1024x2-8-32 SCReLU
+pub type HalfKA_hm1024_8_32SCReLU = NetworkHalfKA_hm<1024, 2048, 2048, 8, 32, SCReLU>;
+/// HalfKA_hm 1024/2x2-8-32 PairwiseCReLU (L1入力=1024, Pairwise乗算で次元半減)
+pub type HalfKA_hm1024_8_32Pairwise = NetworkHalfKA_hm<1024, 2048, 1024, 8, 32, PairwiseCReLU>;
 
 // =============================================================================
 // テスト
@@ -1311,7 +1314,7 @@ mod tests {
 
     #[test]
     fn test_accumulator_halfka_256() {
-        let mut acc = AccumulatorHalfKA::<256>::new();
+        let mut acc = AccumulatorHalfKA_hm::<256>::new();
         assert_eq!(acc.accumulation[0].len(), 256);
         assert!(!acc.computed_accumulation);
 
@@ -1325,24 +1328,24 @@ mod tests {
 
     #[test]
     fn test_accumulator_halfka_512() {
-        let acc = AccumulatorHalfKA::<512>::new();
+        let acc = AccumulatorHalfKA_hm::<512>::new();
         assert_eq!(acc.accumulation[0].len(), 512);
     }
 
     #[test]
     fn test_accumulator_halfka_1024() {
-        let acc = AccumulatorHalfKA::<1024>::new();
+        let acc = AccumulatorHalfKA_hm::<1024>::new();
         assert_eq!(acc.accumulation[0].len(), 1024);
     }
 
     #[test]
     fn test_padded_input() {
-        assert_eq!(AffineTransformHalfKA::<8, 96>::PADDED_INPUT, 32);
-        assert_eq!(AffineTransformHalfKA::<32, 96>::PADDED_INPUT, 32);
-        assert_eq!(AffineTransformHalfKA::<33, 96>::PADDED_INPUT, 64);
-        assert_eq!(AffineTransformHalfKA::<96, 1>::PADDED_INPUT, 96);
-        assert_eq!(AffineTransformHalfKA::<1024, 8>::PADDED_INPUT, 1024);
-        assert_eq!(AffineTransformHalfKA::<2048, 8>::PADDED_INPUT, 2048);
+        assert_eq!(AffineTransformHalfKA_hm::<8, 96>::PADDED_INPUT, 32);
+        assert_eq!(AffineTransformHalfKA_hm::<32, 96>::PADDED_INPUT, 32);
+        assert_eq!(AffineTransformHalfKA_hm::<33, 96>::PADDED_INPUT, 64);
+        assert_eq!(AffineTransformHalfKA_hm::<96, 1>::PADDED_INPUT, 96);
+        assert_eq!(AffineTransformHalfKA_hm::<1024, 8>::PADDED_INPUT, 1024);
+        assert_eq!(AffineTransformHalfKA_hm::<2048, 8>::PADDED_INPUT, 2048);
     }
 
     #[test]
@@ -1355,8 +1358,8 @@ mod tests {
     #[test]
     fn test_type_aliases() {
         // 型エイリアスがコンパイルできることを確認
-        fn _check_halfka_256_crelu(_: HalfKA256CReLU) {}
-        fn _check_halfka_512_screlu(_: HalfKA512SCReLU) {}
-        fn _check_halfka_1024_pairwise(_: HalfKA1024Pairwise) {}
+        fn _check_halfka_256_crelu(_: HalfKA_hm256CReLU) {}
+        fn _check_halfka_512_screlu(_: HalfKA_hm512SCReLU) {}
+        fn _check_halfka_1024_pairwise(_: HalfKA_hm1024Pairwise) {}
     }
 }
