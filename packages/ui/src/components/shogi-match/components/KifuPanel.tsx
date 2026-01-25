@@ -352,11 +352,10 @@ function ExpandedMoveDetails({
 }): ReactElement {
     // 複数PVがある場合はリストで表示、なければ従来の単一PVを使用
     const pvList = useMemo((): PvEvalInfo[] => {
-        // multiPvEvalsがある場合はそれを使用
-        if (move.multiPvEvals && move.multiPvEvals.length > 0) {
-            return move.multiPvEvals;
+        const multiPv = (move.multiPvEvals ?? []).filter((pv) => pv?.pv && pv.pv.length > 0);
+        if (multiPv.length > 0) {
+            return multiPv;
         }
-        // 従来の単一PVからフォールバック
         if (move.pv && move.pv.length > 0) {
             return [
                 {
@@ -1766,7 +1765,10 @@ export function KifuPanel({
                                 // この手に対応する局面（手が指された後の局面）
                                 const position = positionHistory?.[index];
                                 // PVがあるかどうか
-                                const hasPv = move.pv && move.pv.length > 0;
+                                const hasMultiPv =
+                                    move.multiPvEvals?.some((pv) => pv?.pv && pv.pv.length > 0) ??
+                                    false;
+                                const hasPv = (move.pv && move.pv.length > 0) || hasMultiPv;
                                 // 詳細を展開するか（PVがあるか、解析機能がある場合）
                                 const canExpand = position && (hasPv || onAnalyzePly);
                                 // この行が詳細展開中か

@@ -168,11 +168,10 @@ export function MoveDetailBottomSheet({
     const pvList = useMemo((): PvEvalInfo[] => {
         if (!move) return [];
 
-        // multiPvEvalsがある場合はそれを使用
-        if (move.multiPvEvals && move.multiPvEvals.length > 0) {
-            return move.multiPvEvals;
+        const multiPv = (move.multiPvEvals ?? []).filter((pv) => pv?.pv && pv.pv.length > 0);
+        if (multiPv.length > 0) {
+            return multiPv;
         }
-        // 従来の単一PVからフォールバック
         if (move.pv && move.pv.length > 0) {
             return [
                 {

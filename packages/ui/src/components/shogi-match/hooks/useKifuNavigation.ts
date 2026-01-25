@@ -392,10 +392,12 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
                     // 1. 既存の評価値がない場合
                     // 2. 新しい探索深さが既存より深い場合
                     // 3. 既存にPVがなく、新しいデータにPVがある場合
+                    const existingPvMissing = !existing?.pv || existing.pv.length === 0;
+                    const newPvAvailable = !!(event.pv && event.pv.length > 0);
                     const shouldUpdate =
                         !existing ||
                         (event.depth !== undefined && (existing.depth ?? 0) < event.depth) ||
-                        (!existing.pv && event.pv && event.pv.length > 0);
+                        (existingPvMissing && newPvAvailable);
 
                     if (shouldUpdate) {
                         updated = setNodeEval(updated, nodeId, evalData);
@@ -433,10 +435,12 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
                 const updatedNode = updated.nodes.get(nodeId);
                 if (updatedNode) {
                     const existing = updatedNode.eval;
+                    const existingPvMissing = !existing?.pv || existing.pv.length === 0;
+                    const newPvAvailable = !!(event.pv && event.pv.length > 0);
                     const shouldUpdate =
                         !existing ||
                         (event.depth !== undefined && (existing.depth ?? 0) < event.depth) ||
-                        (!existing.pv && event.pv && event.pv.length > 0);
+                        (existingPvMissing && newPvAvailable);
 
                     if (shouldUpdate) {
                         updated = setNodeEval(updated, nodeId, evalData);
