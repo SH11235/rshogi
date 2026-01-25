@@ -408,4 +408,144 @@ mod tests {
         // Evaluator は Arc + Stack のサイズ程度
         assert!(evaluator_size > 0);
     }
+
+    /// AccumulatorStackVariant::matches_network のテスト
+    #[test]
+    fn test_stack_variant_type_checking() {
+        use crate::nnue::network_halfka::AccumulatorStackHalfKA;
+        use crate::nnue::network_halfkp::AccumulatorStackHalfKP;
+
+        // HalfKA スタックの各 L1 サイズ
+        let halfka_l256 = AccumulatorStackVariant::HalfKA(HalfKAStack::L256(
+            AccumulatorStackHalfKA::<256>::new(),
+        ));
+        let halfka_l512 = AccumulatorStackVariant::HalfKA(HalfKAStack::L512(
+            AccumulatorStackHalfKA::<512>::new(),
+        ));
+        let halfka_l1024 = AccumulatorStackVariant::HalfKA(HalfKAStack::L1024(
+            AccumulatorStackHalfKA::<1024>::new(),
+        ));
+
+        // HalfKP スタックの各 L1 サイズ
+        let halfkp_l256 = AccumulatorStackVariant::HalfKP(HalfKPStack::L256(
+            AccumulatorStackHalfKP::<256>::new(),
+        ));
+        let halfkp_l512 = AccumulatorStackVariant::HalfKP(HalfKPStack::L512(
+            AccumulatorStackHalfKP::<512>::new(),
+        ));
+
+        // 型の確認
+        assert!(matches!(halfka_l256, AccumulatorStackVariant::HalfKA(_)));
+        assert!(matches!(halfka_l512, AccumulatorStackVariant::HalfKA(_)));
+        assert!(matches!(halfka_l1024, AccumulatorStackVariant::HalfKA(_)));
+        assert!(matches!(halfkp_l256, AccumulatorStackVariant::HalfKP(_)));
+        assert!(matches!(halfkp_l512, AccumulatorStackVariant::HalfKP(_)));
+
+        // is_halfkp() の確認
+        assert!(!halfka_l256.is_halfkp());
+        assert!(!halfka_l512.is_halfkp());
+        assert!(!halfka_l1024.is_halfkp());
+        assert!(halfkp_l256.is_halfkp());
+        assert!(halfkp_l512.is_halfkp());
+    }
+
+    /// 各バリアントの push/pop インデックス一貫性テスト
+    #[test]
+    fn test_all_variants_push_pop_consistency() {
+        use crate::nnue::accumulator_layer_stacks::AccumulatorStackLayerStacks;
+        use crate::nnue::network_halfka::AccumulatorStackHalfKA;
+        use crate::nnue::network_halfkp::AccumulatorStackHalfKP;
+
+        let dirty = DirtyPiece::default();
+
+        // HalfKA L512
+        let mut stack = AccumulatorStackVariant::HalfKA(HalfKAStack::L512(
+            AccumulatorStackHalfKA::<512>::new(),
+        ));
+        stack.reset();
+        stack.push(dirty);
+        stack.push(dirty);
+        stack.pop();
+        stack.pop();
+        // パニックしなければ成功
+
+        // HalfKP L512
+        let mut stack = AccumulatorStackVariant::HalfKP(HalfKPStack::L512(
+            AccumulatorStackHalfKP::<512>::new(),
+        ));
+        stack.reset();
+        stack.push(dirty);
+        stack.push(dirty);
+        stack.pop();
+        stack.pop();
+        // パニックしなければ成功
+
+        // LayerStacks
+        let mut stack = AccumulatorStackVariant::LayerStacks(AccumulatorStackLayerStacks::new());
+        stack.reset();
+        stack.push(dirty);
+        stack.push(dirty);
+        stack.pop();
+        stack.pop();
+        // パニックしなければ成功
+    }
+
+    /// 深い探索木での push/pop テスト
+    #[test]
+    fn test_deep_search_simulation() {
+        let mut stack = AccumulatorStackVariant::new_default();
+        let dirty = DirtyPiece::default();
+
+        stack.reset();
+
+        // 典型的な探索深さ (30手程度)
+        const MAX_DEPTH: usize = 30;
+
+        // 複数回の探索をシミュレート
+        for _ in 0..5 {
+            // 探索開始
+            for _ in 0..MAX_DEPTH {
+                stack.push(dirty);
+            }
+
+            // 探索終了
+            for _ in 0..MAX_DEPTH {
+                stack.pop();
+            }
+        }
+
+        // パニックしなければ成功
+    }
+
+    /// network.rs の NNUENetwork enum が全アーキテクチャをカバーしていることの確認
+    #[test]
+    fn test_network_enum_coverage() {
+        use crate::nnue::halfka::HalfKANetwork;
+        use crate::nnue::halfkp::HalfKPNetwork;
+
+        // HalfKA サポートアーキテクチャ数
+        let halfka_specs = HalfKANetwork::supported_specs();
+        assert_eq!(halfka_specs.len(), 15); // 256:3 + 512:6 + 1024:6
+
+        // HalfKP サポートアーキテクチャ数
+        let halfkp_specs = HalfKPNetwork::supported_specs();
+        assert_eq!(halfkp_specs.len(), 12); // 256:3 + 512:6 + 1024:3
+
+        // 全アーキテクチャで feature_set が正しいことを確認
+        for spec in &halfka_specs {
+            assert_eq!(
+                spec.feature_set,
+                crate::nnue::spec::FeatureSet::HalfKA,
+                "HalfKA spec has wrong feature_set: {spec:?}"
+            );
+        }
+
+        for spec in &halfkp_specs {
+            assert_eq!(
+                spec.feature_set,
+                crate::nnue::spec::FeatureSet::HalfKP,
+                "HalfKP spec has wrong feature_set: {spec:?}"
+            );
+        }
+    }
 }

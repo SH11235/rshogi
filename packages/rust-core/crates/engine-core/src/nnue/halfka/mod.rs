@@ -349,4 +349,92 @@ mod tests {
             assert_eq!(spec.feature_set, FeatureSet::HalfKA);
         }
     }
+
+    /// push/pop の対称性と状態の一貫性テスト（L256）
+    #[test]
+    fn test_push_pop_index_consistency_l256() {
+        let mut stack = HalfKAStack::L256(AccumulatorStackHalfKA::<256>::new());
+        let dirty = DirtyPiece::default();
+
+        stack.reset();
+        let initial_index = stack.current_index();
+
+        stack.push(dirty);
+        assert_eq!(stack.current_index(), initial_index + 1);
+
+        stack.push(dirty);
+        assert_eq!(stack.current_index(), initial_index + 2);
+
+        stack.pop();
+        assert_eq!(stack.current_index(), initial_index + 1);
+
+        stack.pop();
+        assert_eq!(stack.current_index(), initial_index);
+    }
+
+    /// push/pop の対称性と状態の一貫性テスト（L512）
+    #[test]
+    fn test_push_pop_index_consistency_l512() {
+        let mut stack = HalfKAStack::L512(AccumulatorStackHalfKA::<512>::new());
+        let dirty = DirtyPiece::default();
+
+        stack.reset();
+        let initial_index = stack.current_index();
+
+        stack.push(dirty);
+        assert_eq!(stack.current_index(), initial_index + 1);
+
+        stack.pop();
+        assert_eq!(stack.current_index(), initial_index);
+    }
+
+    /// push/pop の対称性と状態の一貫性テスト（L1024）
+    #[test]
+    fn test_push_pop_index_consistency_l1024() {
+        let mut stack = HalfKAStack::L1024(AccumulatorStackHalfKA::<1024>::new());
+        let dirty = DirtyPiece::default();
+
+        stack.reset();
+        let initial_index = stack.current_index();
+
+        stack.push(dirty);
+        assert_eq!(stack.current_index(), initial_index + 1);
+
+        stack.pop();
+        assert_eq!(stack.current_index(), initial_index);
+    }
+
+    /// deep push/pop テスト（探索木の深さをシミュレート）
+    #[test]
+    fn test_deep_push_pop() {
+        let mut stack = HalfKAStack::default();
+        let dirty = DirtyPiece::default();
+
+        stack.reset();
+        let initial_index = stack.current_index();
+
+        // 探索木の深さをシミュレート
+        const DEPTH: usize = 30;
+
+        for i in 0..DEPTH {
+            stack.push(dirty);
+            assert_eq!(stack.current_index(), initial_index + i + 1);
+        }
+
+        for i in (0..DEPTH).rev() {
+            stack.pop();
+            assert_eq!(stack.current_index(), initial_index + i);
+        }
+    }
+
+    /// アーキテクチャの仕様一覧の一貫性テスト
+    #[test]
+    fn test_architecture_spec_consistency() {
+        for spec in HalfKANetwork::supported_specs() {
+            assert_eq!(spec.feature_set, FeatureSet::HalfKA);
+            assert!(spec.l1 == 256 || spec.l1 == 512 || spec.l1 == 1024);
+            assert!(spec.l2 > 0 && spec.l2 <= 128);
+            assert!(spec.l3 > 0 && spec.l3 <= 128);
+        }
+    }
 }

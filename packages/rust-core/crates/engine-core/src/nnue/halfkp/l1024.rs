@@ -47,4 +47,51 @@ mod tests {
             assert_eq!(spec.l1, 1024);
         }
     }
+
+    /// マクロ生成: architecture_name() の命名規則テスト
+    #[test]
+    fn test_architecture_name_format() {
+        for spec in HalfKPL1024::SUPPORTED_SPECS {
+            let name = spec.name();
+            assert!(
+                name.starts_with("HalfKP-1024-"),
+                "Architecture name should start with 'HalfKP-1024-', got: {name}"
+            );
+        }
+    }
+
+    /// マクロ生成: 活性化関数の output_dim_divisor テスト
+    #[test]
+    fn test_activation_output_dim_divisor() {
+        for spec in HalfKPL1024::SUPPORTED_SPECS {
+            match spec.activation {
+                Activation::CReLU | Activation::SCReLU => {
+                    assert_eq!(spec.activation.output_dim_divisor(), 1);
+                }
+                Activation::PairwiseCReLU => {
+                    assert_eq!(spec.activation.output_dim_divisor(), 2);
+                }
+            }
+        }
+    }
+
+    /// マクロ生成: すべての活性化タイプがサポートされていることを確認
+    #[test]
+    fn test_all_activations_present() {
+        let activations: Vec<_> =
+            HalfKPL1024::SUPPORTED_SPECS.iter().map(|s| s.activation).collect();
+
+        assert!(activations.contains(&Activation::CReLU));
+        assert!(activations.contains(&Activation::SCReLU));
+        assert!(activations.contains(&Activation::PairwiseCReLU));
+    }
+
+    /// マクロ生成: L2/L3 の妥当な範囲チェック
+    #[test]
+    fn test_l2_l3_valid_range() {
+        for spec in HalfKPL1024::SUPPORTED_SPECS {
+            assert!(spec.l2 > 0 && spec.l2 <= 128, "L2 should be in range (0, 128]");
+            assert!(spec.l3 > 0 && spec.l3 <= 128, "L3 should be in range (0, 128]");
+        }
+    }
 }

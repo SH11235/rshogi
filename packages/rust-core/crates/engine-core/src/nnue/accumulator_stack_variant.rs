@@ -156,6 +156,110 @@ mod tests {
         // パニックしなければ成功
     }
 
+    /// push/pop の対称性と状態の一貫性テスト
+    ///
+    /// 各バリアントで push/pop 後にスタックインデックスが正しいことを確認
+    #[test]
+    fn test_push_pop_index_consistency_halfkp() {
+        let mut stack = HalfKPStack::default();
+        let dirty = DirtyPiece::default();
+
+        stack.reset();
+        let initial_index = stack.current_index();
+
+        // push でインデックスが増加
+        stack.push(dirty);
+        assert_eq!(stack.current_index(), initial_index + 1);
+
+        stack.push(dirty);
+        assert_eq!(stack.current_index(), initial_index + 2);
+
+        stack.push(dirty);
+        assert_eq!(stack.current_index(), initial_index + 3);
+
+        // pop でインデックスが減少
+        stack.pop();
+        assert_eq!(stack.current_index(), initial_index + 2);
+
+        stack.pop();
+        assert_eq!(stack.current_index(), initial_index + 1);
+
+        stack.pop();
+        assert_eq!(stack.current_index(), initial_index);
+    }
+
+    #[test]
+    fn test_push_pop_index_consistency_halfka() {
+        let mut stack = HalfKAStack::default();
+        let dirty = DirtyPiece::default();
+
+        stack.reset();
+        let initial_index = stack.current_index();
+
+        // push でインデックスが増加
+        stack.push(dirty);
+        assert_eq!(stack.current_index(), initial_index + 1);
+
+        stack.push(dirty);
+        assert_eq!(stack.current_index(), initial_index + 2);
+
+        // pop でインデックスが減少
+        stack.pop();
+        assert_eq!(stack.current_index(), initial_index + 1);
+
+        stack.pop();
+        assert_eq!(stack.current_index(), initial_index);
+    }
+
+    /// 各 L1 サイズでスタックが正しく作成されることを確認
+    #[test]
+    fn test_halfka_stack_l1_sizes() {
+        use crate::nnue::network_halfka::AccumulatorStackHalfKA;
+
+        let l256_stack = HalfKAStack::L256(AccumulatorStackHalfKA::<256>::new());
+        let l512_stack = HalfKAStack::L512(AccumulatorStackHalfKA::<512>::new());
+        let l1024_stack = HalfKAStack::L1024(AccumulatorStackHalfKA::<1024>::new());
+
+        assert_eq!(l256_stack.l1_size(), 256);
+        assert_eq!(l512_stack.l1_size(), 512);
+        assert_eq!(l1024_stack.l1_size(), 1024);
+    }
+
+    #[test]
+    fn test_halfkp_stack_l1_sizes() {
+        use crate::nnue::network_halfkp::AccumulatorStackHalfKP;
+
+        let l256_stack = HalfKPStack::L256(AccumulatorStackHalfKP::<256>::new());
+        let l512_stack = HalfKPStack::L512(AccumulatorStackHalfKP::<512>::new());
+        let l1024_stack = HalfKPStack::L1024(AccumulatorStackHalfKP::<1024>::new());
+
+        assert_eq!(l256_stack.l1_size(), 256);
+        assert_eq!(l512_stack.l1_size(), 512);
+        assert_eq!(l1024_stack.l1_size(), 1024);
+    }
+
+    /// deep push/pop テスト（探索木の深さをシミュレート）
+    #[test]
+    fn test_deep_push_pop() {
+        let mut stack = AccumulatorStackVariant::new_default();
+        let dirty = DirtyPiece::default();
+
+        stack.reset();
+
+        // 探索木の深さをシミュレート（典型的な深さ 20-30 程度）
+        const DEPTH: usize = 30;
+
+        for _ in 0..DEPTH {
+            stack.push(dirty);
+        }
+
+        for _ in 0..DEPTH {
+            stack.pop();
+        }
+
+        // パニックしなければ成功
+    }
+
     #[test]
     fn test_variant_size() {
         use std::mem::size_of;

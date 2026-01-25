@@ -47,4 +47,71 @@ mod tests {
             assert_eq!(spec.l1, 256);
         }
     }
+
+    /// マクロ生成: architecture_name() の命名規則テスト
+    #[test]
+    fn test_architecture_name_format() {
+        for spec in HalfKAL256::SUPPORTED_SPECS {
+            let name = spec.name();
+            // HalfKA-256-L2-L3-Activation 形式
+            assert!(
+                name.starts_with("HalfKA-256-"),
+                "Architecture name should start with 'HalfKA-256-', got: {name}"
+            );
+        }
+    }
+
+    /// マクロ生成: 活性化関数の output_dim_divisor が正しく設定されているかテスト
+    #[test]
+    fn test_activation_output_dim_divisor() {
+        for spec in HalfKAL256::SUPPORTED_SPECS {
+            match spec.activation {
+                Activation::CReLU | Activation::SCReLU => {
+                    assert_eq!(
+                        spec.activation.output_dim_divisor(),
+                        1,
+                        "CReLU/SCReLU should have divisor 1"
+                    );
+                }
+                Activation::PairwiseCReLU => {
+                    assert_eq!(
+                        spec.activation.output_dim_divisor(),
+                        2,
+                        "PairwiseCReLU should have divisor 2"
+                    );
+                }
+            }
+        }
+    }
+
+    /// マクロ生成: すべての活性化タイプがサポートされていることを確認
+    #[test]
+    fn test_all_activations_present() {
+        let activations: Vec<_> =
+            HalfKAL256::SUPPORTED_SPECS.iter().map(|s| s.activation).collect();
+
+        assert!(activations.contains(&Activation::CReLU), "CReLU should be supported");
+        assert!(activations.contains(&Activation::SCReLU), "SCReLU should be supported");
+        assert!(
+            activations.contains(&Activation::PairwiseCReLU),
+            "PairwiseCReLU should be supported"
+        );
+    }
+
+    /// マクロ生成: L2/L3 の妥当な範囲チェック
+    #[test]
+    fn test_l2_l3_valid_range() {
+        for spec in HalfKAL256::SUPPORTED_SPECS {
+            assert!(
+                spec.l2 > 0 && spec.l2 <= 128,
+                "L2 should be in range (0, 128], got: {}",
+                spec.l2
+            );
+            assert!(
+                spec.l3 > 0 && spec.l3 <= 128,
+                "L3 should be in range (0, 128], got: {}",
+                spec.l3
+            );
+        }
+    }
 }

@@ -53,4 +53,53 @@ mod tests {
             assert_eq!(spec.l1, 512);
         }
     }
+
+    /// マクロ生成: architecture_name() の命名規則テスト
+    #[test]
+    fn test_architecture_name_format() {
+        for spec in HalfKAL512::SUPPORTED_SPECS {
+            let name = spec.name();
+            assert!(
+                name.starts_with("HalfKA-512-"),
+                "Architecture name should start with 'HalfKA-512-', got: {name}"
+            );
+        }
+    }
+
+    /// マクロ生成: 活性化関数の output_dim_divisor テスト
+    #[test]
+    fn test_activation_output_dim_divisor() {
+        for spec in HalfKAL512::SUPPORTED_SPECS {
+            match spec.activation {
+                Activation::CReLU | Activation::SCReLU => {
+                    assert_eq!(spec.activation.output_dim_divisor(), 1);
+                }
+                Activation::PairwiseCReLU => {
+                    assert_eq!(spec.activation.output_dim_divisor(), 2);
+                }
+            }
+        }
+    }
+
+    /// マクロ生成: L2/L3 の組み合わせが複数あることを確認
+    #[test]
+    fn test_multiple_l2_l3_combinations() {
+        let combinations: Vec<_> =
+            HalfKAL512::SUPPORTED_SPECS.iter().map(|s| (s.l2, s.l3)).collect();
+
+        // L2=8, L3=96 と L2=32, L3=32 の2パターン
+        assert!(combinations.contains(&(8, 96)), "Should support L2=8, L3=96");
+        assert!(combinations.contains(&(32, 32)), "Should support L2=32, L3=32");
+    }
+
+    /// マクロ生成: すべての活性化タイプがサポートされていることを確認
+    #[test]
+    fn test_all_activations_present() {
+        let activations: Vec<_> =
+            HalfKAL512::SUPPORTED_SPECS.iter().map(|s| s.activation).collect();
+
+        assert!(activations.contains(&Activation::CReLU));
+        assert!(activations.contains(&Activation::SCReLU));
+        assert!(activations.contains(&Activation::PairwiseCReLU));
+    }
 }
