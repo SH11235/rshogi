@@ -83,6 +83,7 @@ pub fn set_fv_scale_override(value: i32) {
 /// 詳細は `halfka/` や `halfkp/` のモジュールで管理される。
 pub enum NNUENetwork {
     /// HalfKA_hm 特徴量セット（L256/L512/L1024）
+    #[allow(non_camel_case_types)]
     HalfKA_hm(HalfKA_hmNetwork),
     /// HalfKP 特徴量セット（L256/L512）
     HalfKP(HalfKPNetwork),

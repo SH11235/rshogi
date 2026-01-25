@@ -1,3 +1,6 @@
+// NOTE: 公式表記(HalfKA_hm)をenum名に保持するため、非CamelCaseを許可する。
+#![allow(non_camel_case_types)]
+
 //! HalfKA_hm アーキテクチャ階層
 //!
 //! L1 サイズごとにモジュールを分割し、L2/L3/活性化の組み合わせを enum で表現。

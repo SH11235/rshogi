@@ -1,3 +1,6 @@
+// NOTE: 公式表記(HalfKA_hm)をenum名に保持するため、非CamelCaseを許可する。
+#![allow(non_camel_case_types)]
+
 //! NetworkHalfKA_hm - const generics ベースの HalfKA_hm ネットワーク統一実装
 //!
 //! HalfKA_hm^ 特徴量を使用し、L1/L2/L3 のサイズと活性化関数を型パラメータで切り替え可能にした実装。
@@ -143,7 +146,6 @@ unsafe fn m128_add_dpbusd_epi32(
 ///
 /// 参考: HalfKP（L1=256）では元のfeature_transformer.rsが `Aligned<[i16; 256]>` を
 /// 使用していたため、動的スライスへの変更で約17%の性能低下が見られた。
-#[allow(non_camel_case_types)]
 pub struct AccumulatorHalfKA_hm<const L1: usize> {
     /// アキュムレータバッファ [perspective][L1]
     pub accumulation: [AlignedBox<i16>; 2],
@@ -188,7 +190,6 @@ impl<const L1: usize> Clone for AccumulatorHalfKA_hm<L1> {
 // =============================================================================
 
 /// スタックエントリ
-#[allow(non_camel_case_types)]
 pub struct AccumulatorEntryHalfKA_hm<const L1: usize> {
     pub accumulator: AccumulatorHalfKA_hm<L1>,
     pub dirty_piece: DirtyPiece,
@@ -196,7 +197,6 @@ pub struct AccumulatorEntryHalfKA_hm<const L1: usize> {
 }
 
 /// アキュムレータスタック
-#[allow(non_camel_case_types)]
 pub struct AccumulatorStackHalfKA_hm<const L1: usize> {
     entries: Vec<AccumulatorEntryHalfKA_hm<L1>>,
     current_idx: usize,
@@ -388,7 +388,6 @@ impl<const L1: usize> Default for AccumulatorStackHalfKA_hm<L1> {
 // =============================================================================
 
 /// HalfKA_hm Feature Transformer
-#[allow(non_camel_case_types)]
 pub struct FeatureTransformerHalfKA_hm<const L1: usize> {
     /// バイアス [L1]
     pub biases: Vec<i16>,
@@ -660,7 +659,6 @@ impl<const L1: usize> FeatureTransformerHalfKA_hm<L1> {
 /// YaneuraOu/Stockfish スタイルの SIMD 最適化を実装。
 /// 重みはスクランブル形式 `weights[input_chunk][output][4]` で保持し、
 /// ループ逆転により入力をブロードキャストして全出力に同時適用する。
-#[allow(non_camel_case_types)]
 pub struct AffineTransformHalfKA_hm<const INPUT: usize, const OUTPUT: usize> {
     /// バイアス [OUTPUT]
     pub biases: [i32; OUTPUT],
@@ -956,7 +954,6 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKA_hm<INPUT, OU
 /// - `L2`: 隠れ層1の出力次元
 /// - `L3`: 隠れ層2の出力次元
 /// - `A`: 活性化関数（FtActivation trait を実装する型）
-#[allow(non_camel_case_types)]
 pub struct NetworkHalfKA_hm<
     const L1: usize,
     const FT_OUT: usize,
