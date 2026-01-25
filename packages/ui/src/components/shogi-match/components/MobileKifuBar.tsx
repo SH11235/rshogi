@@ -1,6 +1,6 @@
 import { cn } from "@shogi/design-system";
 import type { ReactElement } from "react";
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
 export interface KifuMove {
     /** 手数（1から始まる） */
@@ -41,6 +41,12 @@ export function MobileKifuBar({
             container.scrollTo({ left: scrollLeft, behavior: "smooth" });
         }
     }, []);
+    useEffect(() => {
+        if (currentPly !== 0) return;
+        if (!containerRef.current) return;
+        // 0手目は未選択扱いなので、先頭まで戻す
+        containerRef.current.scrollTo({ left: 0, behavior: "smooth" });
+    }, [currentPly]);
 
     if (moves.length === 0) {
         return (
@@ -57,7 +63,7 @@ export function MobileKifuBar({
             style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
         >
             {moves.map((move) => {
-                const isCurrent = move.ply === currentPly;
+                const isCurrent = currentPly > 0 && move.ply === currentPly;
                 return (
                     <button
                         key={move.ply}

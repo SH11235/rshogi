@@ -1,5 +1,6 @@
 import { cn } from "@shogi/design-system";
 import type { ReactElement } from "react";
+import { MobileSettingsActions } from "./MobileSettingsActions";
 
 interface MobileNavigationProps {
     /** 現在の手数 */
@@ -118,41 +119,11 @@ export function MobileNavigation({
                 ⏭
             </button>
 
-            {/* 評価関数ファイル管理ボタン（検討モード時にFABの代わりに表示） */}
-            {onNnueManagerClick && (
-                <button
-                    type="button"
-                    onClick={onNnueManagerClick}
-                    className={cn(
-                        "w-10 h-10 flex items-center justify-center rounded-lg text-lg",
-                        "border border-border bg-background",
-                        "transition-colors",
-                        "hover:bg-muted active:bg-muted/80",
-                    )}
-                    title="評価関数ファイル管理"
-                    aria-label="評価関数ファイル管理を開く"
-                >
-                    📁
-                </button>
-            )}
-
-            {/* 設定ボタン（検討モード時にFABの代わりに表示） */}
-            {onSettingsClick && (
-                <button
-                    type="button"
-                    onClick={onSettingsClick}
-                    className={cn(
-                        "w-10 h-10 flex items-center justify-center rounded-lg text-lg",
-                        "bg-primary text-primary-foreground",
-                        "shadow-md transition-all",
-                        "hover:bg-primary/90 active:scale-95",
-                    )}
-                    title="設定"
-                    aria-label="設定を開く"
-                >
-                    ⚙️
-                </button>
-            )}
+            <MobileSettingsActions
+                variant="navigation"
+                onSettingsClick={onSettingsClick}
+                onNnueManagerClick={onNnueManagerClick}
+            />
         </div>
     );
 }
