@@ -16,11 +16,19 @@
 //! # サポートするアーキテクチャ
 //!
 //! | 型エイリアス | L1 | L2 | L3 | 活性化 |
-//! |-------------|-----|-----|-----|--------|
+//! |-------------|------|-----|-----|--------|
 //! | HalfKP256CReLU | 256 | 32 | 32 | CReLU |
 //! | HalfKP256SCReLU | 256 | 32 | 32 | SCReLU |
 //! | HalfKP256Pairwise | 256 | 32 | 32 | PairwiseCReLU |
 //! | HalfKP512CReLU | 512 | 8 | 96 | CReLU |
+//! | HalfKP512SCReLU | 512 | 8 | 96 | SCReLU |
+//! | HalfKP512Pairwise | 512 | 8 | 96 | PairwiseCReLU |
+//! | HalfKP512_32_32CReLU | 512 | 32 | 32 | CReLU |
+//! | HalfKP512_32_32SCReLU | 512 | 32 | 32 | SCReLU |
+//! | HalfKP512_32_32Pairwise | 512 | 32 | 32 | PairwiseCReLU |
+//! | HalfKP1024_8_32CReLU | 1024 | 8 | 32 | CReLU |
+//! | HalfKP1024_8_32SCReLU | 1024 | 8 | 32 | SCReLU |
+//! | HalfKP1024_8_32Pairwise | 1024 | 8 | 32 | PairwiseCReLU |
 //!
 //! # 特徴量
 //!
@@ -205,6 +213,49 @@ impl<const L1: usize> AccumulatorStackHalfKP<L1> {
     /// 現在のエントリを取得（可変）
     pub fn current_mut(&mut self) -> &mut AccumulatorEntryHalfKP<L1> {
         &mut self.entries[self.current_idx]
+    }
+
+    /// 現在の Accumulator を取得
+    ///
+    /// `define_l1_variants!` マクロから使用される。
+    #[inline]
+    pub fn top(&self) -> &AccumulatorHalfKP<L1> {
+        &self.entries[self.current_idx].accumulator
+    }
+
+    /// 現在の Accumulator を取得（可変）
+    ///
+    /// `define_l1_variants!` マクロから使用される。
+    #[inline]
+    pub fn top_mut(&mut self) -> &mut AccumulatorHalfKP<L1> {
+        &mut self.entries[self.current_idx].accumulator
+    }
+
+    /// 現在と source の Accumulator を同時取得（差分更新用）
+    ///
+    /// # 引数
+    /// - `source_idx`: source エントリの絶対インデックス
+    ///
+    /// # 戻り値
+    /// `(現在の Accumulator への可変参照, source の Accumulator への不変参照)`
+    ///
+    /// # 契約
+    /// - `source_idx < self.current_idx` でなければならない
+    /// - 範囲外の場合は panic（ホットパスなので Option 不使用）
+    ///
+    /// `define_l1_variants!` マクロから使用される。
+    #[inline]
+    pub fn top_and_source(
+        &mut self,
+        source_idx: usize,
+    ) -> (&mut AccumulatorHalfKP<L1>, &AccumulatorHalfKP<L1>) {
+        let current_idx = self.current_idx;
+        debug_assert!(
+            source_idx < current_idx,
+            "source_idx ({source_idx}) must be < current_idx ({current_idx})"
+        );
+        let (left, right) = self.entries.split_at_mut(current_idx);
+        (&mut right[0].accumulator, &left[source_idx].accumulator)
     }
 
     /// プッシュ
@@ -1238,6 +1289,19 @@ pub type HalfKP512Pairwise = NetworkHalfKP<512, 1024, 512, 8, 96, PairwiseCReLU>
 // L1=512, FT_OUT=1024, L2=32, L3=32
 /// HalfKP 512x2-32-32 CReLU
 pub type HalfKP512_32_32CReLU = NetworkHalfKP<512, 1024, 1024, 32, 32, CReLU>;
+/// HalfKP 512x2-32-32 SCReLU
+pub type HalfKP512_32_32SCReLU = NetworkHalfKP<512, 1024, 1024, 32, 32, SCReLU>;
+/// HalfKP 512/2x2-32-32 PairwiseCReLU (L1入力=512, Pairwise乗算で次元半減)
+pub type HalfKP512_32_32Pairwise = NetworkHalfKP<512, 1024, 512, 32, 32, PairwiseCReLU>;
+
+// L1=1024, FT_OUT=2048, L2=8, L3=32
+// CReLU/SCReLU: L1_INPUT=2048, Pairwise: L1_INPUT=1024
+/// HalfKP 1024x2-8-32 CReLU
+pub type HalfKP1024_8_32CReLU = NetworkHalfKP<1024, 2048, 2048, 8, 32, CReLU>;
+/// HalfKP 1024x2-8-32 SCReLU
+pub type HalfKP1024_8_32SCReLU = NetworkHalfKP<1024, 2048, 2048, 8, 32, SCReLU>;
+/// HalfKP 1024/2x2-8-32 PairwiseCReLU (L1入力=1024, Pairwise乗算で次元半減)
+pub type HalfKP1024_8_32Pairwise = NetworkHalfKP<1024, 2048, 1024, 8, 32, PairwiseCReLU>;
 
 // =============================================================================
 // テスト
