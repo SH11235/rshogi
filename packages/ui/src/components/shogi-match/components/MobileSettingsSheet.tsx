@@ -1,14 +1,9 @@
+import type { NnueMeta } from "@shogi/app-core";
 import type { SkillLevelSettings } from "@shogi/engine-client";
 import { type ReactElement, useEffect, useState } from "react";
 import { Switch } from "../../switch";
 import type { ClockSettings } from "../hooks/useClockManager";
-import type {
-    DisplaySettings,
-    EngineOption,
-    PassRightsSettings,
-    SideSetting,
-    SquareNotation,
-} from "../types";
+import type { DisplaySettings, PassRightsSettings, SideSetting, SquareNotation } from "../types";
 import { SkillLevelSelector } from "./SkillLevelSelector";
 
 type SideKey = "sente" | "gote";
@@ -81,7 +76,12 @@ interface MobileSettingsSheetProps {
     onPassRightsSettingsChange?: (settings: PassRightsSettings) => void;
 
     // エンジン情報
-    uiEngineOptions: EngineOption[];
+    internalEngineId: string;
+    nnueList: NnueMeta[];
+    senteNnueId: string | null;
+    onSenteNnueIdChange: (id: string | null) => void;
+    goteNnueId: string | null;
+    onGoteNnueIdChange: (id: string | null) => void;
 
     // 状態
     settingsLocked: boolean;
@@ -121,7 +121,12 @@ export function MobileSettingsSheet({
     onTimeSettingsChange,
     passRightsSettings,
     onPassRightsSettingsChange,
-    uiEngineOptions,
+    internalEngineId,
+    nnueList,
+    senteNnueId,
+    onSenteNnueIdChange,
+    goteNnueId,
+    onGoteNnueIdChange,
     settingsLocked,
     isMatchRunning,
     onStartMatch,
@@ -131,25 +136,46 @@ export function MobileSettingsSheet({
     onDisplaySettingsChange,
 }: MobileSettingsSheetProps): ReactElement {
     // 選択肢の値を生成: "human" または "engine:{engineId}"
-    const getSelectorValue = (setting: SideSetting): string => {
+    const getSelectorValue = (side: SideKey, setting: SideSetting): string => {
         if (setting.role === "human") return "human";
-        return `engine:${setting.engineId ?? uiEngineOptions[0]?.id ?? ""}`;
+        const nnueId = side === "sente" ? senteNnueId : goteNnueId;
+        if (nnueId === null) return "material";
+        return `nnue:${nnueId}`;
     };
 
     const handleSelectorChange = (side: SideKey, value: string) => {
         const currentSetting = sides[side];
+        const updateNnueId = (nextId: string | null) => {
+            if (side === "sente") {
+                onSenteNnueIdChange(nextId);
+            } else {
+                onGoteNnueIdChange(nextId);
+            }
+        };
+
         if (value === "human") {
             onSidesChange({
                 ...sides,
                 [side]: { role: "human", engineId: undefined, skillLevel: undefined },
             });
-        } else if (value.startsWith("engine:")) {
-            const engineId = value.slice("engine:".length);
+        } else if (value === "material") {
+            updateNnueId(null);
             onSidesChange({
                 ...sides,
                 [side]: {
                     role: "engine",
-                    engineId,
+                    engineId: internalEngineId,
+                    skillLevel: currentSetting.skillLevel,
+                },
+            });
+        } else if (value.startsWith("nnue:")) {
+            const nnueId = value.slice("nnue:".length);
+            updateNnueId(nnueId);
+            onSidesChange({
+                ...sides,
+                [side]: {
+                    role: "engine",
+                    engineId: internalEngineId,
                     skillLevel: currentSetting.skillLevel,
                 },
             });
@@ -199,15 +225,16 @@ export function MobileSettingsSheet({
                     <label className={labelClassName}>
                         <span className="text-xs text-muted-foreground">プレイヤー</span>
                         <select
-                            value={getSelectorValue(sides.sente)}
+                            value={getSelectorValue("sente", sides.sente)}
                             onChange={(e) => handleSelectorChange("sente", e.target.value)}
                             disabled={settingsLocked}
                             className={selectClassName}
                         >
                             <option value="human">人間</option>
-                            {uiEngineOptions.map((opt) => (
-                                <option key={opt.id} value={`engine:${opt.id}`}>
-                                    {opt.label}
+                            <option value="material">簡易AI（駒得）</option>
+                            {nnueList.map((nnue) => (
+                                <option key={nnue.id} value={`nnue:${nnue.id}`}>
+                                    {nnue.displayName}
                                 </option>
                             ))}
                         </select>
@@ -258,15 +285,16 @@ export function MobileSettingsSheet({
                     <label className={labelClassName}>
                         <span className="text-xs text-muted-foreground">プレイヤー</span>
                         <select
-                            value={getSelectorValue(sides.gote)}
+                            value={getSelectorValue("gote", sides.gote)}
                             onChange={(e) => handleSelectorChange("gote", e.target.value)}
                             disabled={settingsLocked}
                             className={selectClassName}
                         >
                             <option value="human">人間</option>
-                            {uiEngineOptions.map((opt) => (
-                                <option key={opt.id} value={`engine:${opt.id}`}>
-                                    {opt.label}
+                            <option value="material">簡易AI（駒得）</option>
+                            {nnueList.map((nnue) => (
+                                <option key={nnue.id} value={`nnue:${nnue.id}`}>
+                                    {nnue.displayName}
                                 </option>
                             ))}
                         </select>

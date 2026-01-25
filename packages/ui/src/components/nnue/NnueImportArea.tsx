@@ -1,6 +1,6 @@
 import type { NnueStorageCapabilities } from "@shogi/app-core";
 import type { ReactElement } from "react";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
     AlertDialog,
     AlertDialogAction,
@@ -51,6 +51,11 @@ export function NnueImportArea({
     const inputRef = useRef<HTMLInputElement>(null);
     const [isDragOver, setIsDragOver] = useState(false);
     const [pendingFile, setPendingFile] = useState<File | null>(null);
+    const isCoarsePointer = useMemo(() => {
+        if (typeof window === "undefined") return false;
+        if (typeof window.matchMedia !== "function") return false;
+        return window.matchMedia("(pointer: coarse)").matches;
+    }, []);
 
     // capability とコールバックの両方が必要
     const canFileImport = capabilities.supportsFileImport && Boolean(onFileSelect);
@@ -135,7 +140,9 @@ export function NnueImportArea({
 
     // メッセージも capability とコールバックの両方で判定
     const dropMessage = canFileImport
-        ? "NNUE ファイルをドラッグ＆ドロップ"
+        ? isCoarsePointer
+            ? ""
+            : "NNUE ファイルをドラッグ＆ドロップ"
         : "ファイル選択ボタンをクリック";
 
     return (

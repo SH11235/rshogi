@@ -327,7 +327,9 @@ export function NnueManagerDialog({
                 </div>
 
                 <DialogFooter style={{ justifyContent: "center" }}>
-                    <Button onClick={handleClose}>閉じる</Button>
+                    <Button variant="secondary" onClick={handleClose}>
+                        閉じる
+                    </Button>
                 </DialogFooter>
             </DialogContent>
         </Dialog>

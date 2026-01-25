@@ -1,7 +1,7 @@
 import type { Player } from "@shogi/app-core";
 import { cn } from "@shogi/design-system";
 import { type ReactElement, useState } from "react";
-import { Dialog, DialogContent } from "../../dialog";
+import { Dialog, DialogContent, DialogTitle } from "../../dialog";
 
 type IconSize = "xs" | "sm" | "md" | "lg" | "xl";
 
@@ -95,6 +95,7 @@ export function PlayerIcon({
                                 padding: "16px",
                             }}
                         >
+                            <DialogTitle className="sr-only">{aiAlt}を拡大表示</DialogTitle>
                             <div className="flex flex-col items-center gap-3">
                                 <img
                                     src={aiIconSrc}

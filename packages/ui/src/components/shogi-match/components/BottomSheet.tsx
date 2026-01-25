@@ -7,7 +7,8 @@
 
 import { cn } from "@shogi/design-system";
 import type { ReactElement, ReactNode } from "react";
-import { Dialog, DialogClose, DialogContent } from "../../dialog";
+import { Button } from "../../button";
+import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from "../../dialog";
 
 interface BottomSheetProps {
     /** シートを開くかどうか */
@@ -77,9 +78,9 @@ export function BottomSheet({
                 </div>
 
                 {/* ヘッダー */}
-                <div className="px-4 pb-3 border-b border-border font-semibold text-lg">
-                    {title}
-                </div>
+                <DialogHeader className="px-4 pb-3 border-b border-border">
+                    <DialogTitle className="font-semibold text-lg">{title}</DialogTitle>
+                </DialogHeader>
 
                 {/* コンテンツ */}
                 <div
@@ -92,12 +93,9 @@ export function BottomSheet({
                 {/* 閉じるボタン */}
                 <div className="px-4 pt-4 pb-[calc(1rem+env(safe-area-inset-bottom))] bg-background border-t border-border">
                     <DialogClose asChild>
-                        <button
-                            type="button"
-                            className="w-full py-3 rounded-lg bg-muted hover:bg-muted/80 font-medium transition-colors"
-                        >
+                        <Button type="button" variant="secondary" className="w-full">
                             閉じる
-                        </button>
+                        </Button>
                     </DialogClose>
                 </div>
             </DialogContent>

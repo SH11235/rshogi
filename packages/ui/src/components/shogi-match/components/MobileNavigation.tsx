@@ -18,6 +18,8 @@ interface MobileNavigationProps {
     disabled?: boolean;
     /** 設定ボタンクリック（指定時は右端に設定ボタンを表示） */
     onSettingsClick?: () => void;
+    /** 評価関数ファイル管理ボタンクリック（指定時は設定ボタンの左に表示） */
+    onNnueManagerClick?: () => void;
 }
 
 /**
@@ -32,6 +34,7 @@ export function MobileNavigation({
     onToEnd,
     disabled = false,
     onSettingsClick,
+    onNnueManagerClick,
 }: MobileNavigationProps): ReactElement {
     const canGoBack = currentPly > 0;
     const canGoForward = currentPly < totalPly;
@@ -114,6 +117,24 @@ export function MobileNavigation({
             >
                 ⏭
             </button>
+
+            {/* 評価関数ファイル管理ボタン（検討モード時にFABの代わりに表示） */}
+            {onNnueManagerClick && (
+                <button
+                    type="button"
+                    onClick={onNnueManagerClick}
+                    className={cn(
+                        "w-10 h-10 flex items-center justify-center rounded-lg text-lg",
+                        "border border-border bg-background",
+                        "transition-colors",
+                        "hover:bg-muted active:bg-muted/80",
+                    )}
+                    title="評価関数ファイル管理"
+                    aria-label="評価関数ファイル管理を開く"
+                >
+                    📁
+                </button>
+            )}
 
             {/* 設定ボタン（検討モード時にFABの代わりに表示） */}
             {onSettingsClick && (
