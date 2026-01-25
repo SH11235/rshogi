@@ -303,7 +303,7 @@ TTにLarge Pages（2MB HugePages）を導入し、prefetchタイミングを前�
 | リグレッション前（7c020c02） | 779,548 | 100% | **目標値** |
 | リグレッション後（4f26b576） | 670,982 | 86.1% | HalfKA_hm対応追加 |
 | main（現在） | 666,604 | 85.5% | - |
-| nnue-architecture | **676,686** | **86.8%** | HalfKA512/1024静的対応 |
+| nnue-architecture | **676,686** | **86.8%** | HalfKA_hm512/1024静的対応 |
 
 ### リグレッション原因
 
@@ -329,7 +329,7 @@ for i in 1..=count {
 
 #### 2. 評価パスの分岐追加（約3%影響）
 
-`evaluate_dispatch`でHalfKA/LayerStacks判定を毎回実行:
+`evaluate_dispatch`でHalfKA_hm/LayerStacks判定を毎回実行:
 ```rust
 if network.is_layer_stacks() { ... }
 else if network.is_halfka_dynamic() { ... }
