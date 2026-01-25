@@ -13,7 +13,7 @@ export interface NnueListItemProps {
     onSelect?: () => void;
     /** 削除時のコールバック */
     onDelete?: () => void;
-    /** 削除ボタンを表示するか（プリセットは削除不可） */
+    /** 削除ボタンを表示するか（プリセットも削除可・再ダウンロード可能） */
     showDelete?: boolean;
     /** 削除中かどうか */
     isDeleting?: boolean;
