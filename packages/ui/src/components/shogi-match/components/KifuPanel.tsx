@@ -471,29 +471,36 @@ function ExpandedMoveDetails({
                 </div>
             )}
 
-            {/* 読み筋がない場合は解析ボタンを表示 */}
-            {!hasPv && onAnalyze && (
-                <div className="space-y-2">
-                    <div className="text-[11px] text-muted-foreground">読み筋がありません</div>
+            {/* 解析ボタン */}
+            {onAnalyze && (
+                <div className={hasPv ? "pt-2 border-t border-border mt-2" : "space-y-2"}>
+                    {!hasPv && (
+                        <div className="text-[11px] text-muted-foreground mb-2">
+                            読み筋がありません
+                        </div>
+                    )}
                     <button
                         type="button"
                         onClick={() => onAnalyze(move.ply)}
                         disabled={isThisPlyAnalyzing}
-                        className="
+                        className={`
                             w-full px-3 py-2 text-[12px]
-                            bg-primary text-primary-foreground
-                            hover:bg-primary/90
                             disabled:opacity-50 disabled:cursor-not-allowed
                             rounded border border-border
                             transition-colors cursor-pointer
-                        "
+                            ${
+                                hasPv
+                                    ? "bg-muted hover:bg-muted/80 text-foreground"
+                                    : "bg-primary text-primary-foreground hover:bg-primary/90"
+                            }
+                        `}
                     >
                         {isThisPlyAnalyzing ? (
                             <span>解析中...</span>
                         ) : (
                             <>
-                                <span className="mr-1">🔍</span>
-                                この局面を解析する
+                                <span className="mr-1">{hasPv ? "🔄" : "🔍"}</span>
+                                {hasPv ? "再解析する" : "この局面を解析する"}
                             </>
                         )}
                     </button>
@@ -1709,22 +1716,24 @@ export function KifuPanel({
                                                         {evalText}
                                                     </span>
                                                 )}
-                                                {/* 解析ボタン（評価値がない場合に表示） */}
-                                                {onAnalyzeNode &&
-                                                    !evalText &&
-                                                    analyzingPly !== node.ply && (
-                                                        <button
-                                                            type="button"
-                                                            className="text-[10px] px-1.5 py-0.5 rounded bg-muted hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
-                                                            onClick={(e) => {
-                                                                e.stopPropagation();
-                                                                onAnalyzeNode(node.nodeId);
-                                                            }}
-                                                            title="この手を解析"
-                                                        >
-                                                            解析
-                                                        </button>
-                                                    )}
+                                                {/* 解析ボタン */}
+                                                {onAnalyzeNode && analyzingPly !== node.ply && (
+                                                    <button
+                                                        type="button"
+                                                        className="text-[10px] px-1.5 py-0.5 rounded bg-muted hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            onAnalyzeNode(node.nodeId);
+                                                        }}
+                                                        title={
+                                                            evalText
+                                                                ? "この手を再解析"
+                                                                : "この手を解析"
+                                                        }
+                                                    >
+                                                        {evalText ? "再解析" : "解析"}
+                                                    </button>
+                                                )}
                                                 {analyzingPly === node.ply && (
                                                     <span className="text-[10px] text-muted-foreground animate-pulse">
                                                         解析中...

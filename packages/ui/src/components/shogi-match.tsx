@@ -33,7 +33,7 @@ import { KifuImportPanel } from "./shogi-match/components/KifuImportPanel";
 import { KifuPanel } from "./shogi-match/components/KifuPanel";
 import { LeftSidebar } from "./shogi-match/components/LeftSidebar";
 import { MatchControls } from "./shogi-match/components/MatchControls";
-import { MoveDetailPanel } from "./shogi-match/components/MoveDetailPanel";
+import { MoveDetailWindow } from "./shogi-match/components/MoveDetailWindow";
 import type { PassDisabledReason } from "./shogi-match/components/PassButton";
 import { PassRightsDisplay } from "./shogi-match/components/PassRightsDisplay";
 import { PlayerIcon } from "./shogi-match/components/PlayerIcon";
@@ -846,6 +846,7 @@ export function ShogiMatch({
         onEvalUpdate: handleEvalUpdate,
         maxLogs,
         nnueId: matchNnueId,
+        analysisNnueId,
     });
     stopAllEnginesRef.current = stopAllEngines;
 
@@ -2450,6 +2451,22 @@ export function ShogiMatch({
                 />
             )}
 
+            {/* 手の詳細ウィンドウ（ドラッグ移動可能） */}
+            {selectedMoveDetail && (
+                <MoveDetailWindow
+                    move={selectedMoveDetail.move}
+                    position={selectedMoveDetail.position}
+                    onAddBranch={handleAddPvAsBranch}
+                    onPreview={handlePreviewPv}
+                    onAnalyze={handleAnalyzePly}
+                    isAnalyzing={isAnalyzing}
+                    analyzingPly={analyzingState.type !== "none" ? analyzingState.ply : undefined}
+                    kifuTree={navigation.tree}
+                    onClose={() => setSelectedMoveDetail(null)}
+                    isOnMainLine={navigation.state.isOnMainLine}
+                />
+            )}
+
             {/* モバイル時はMobileLayout、PC時は3列レイアウト */}
             {isMobile ? (
                 <MobileLayout
@@ -2895,36 +2912,6 @@ export function ShogiMatch({
                                         isOnMainLine={navigation.state.isOnMainLine}
                                         onMoveDetailSelect={handleMoveDetailSelect}
                                     />
-
-                                    {/* 詳細ドロワー（棋譜パネルの右側にスライドイン） */}
-                                    <div
-                                        className={`
-                                        absolute top-0 left-full z-50
-                                        transform transition-transform duration-300 ease-out
-                                        ${selectedMoveDetail ? "translate-x-0" : "-translate-x-full opacity-0 pointer-events-none"}
-                                    `}
-                                    >
-                                        <div className="pl-2">
-                                            {selectedMoveDetail && (
-                                                <MoveDetailPanel
-                                                    move={selectedMoveDetail.move}
-                                                    position={selectedMoveDetail.position}
-                                                    onAddBranch={handleAddPvAsBranch}
-                                                    onPreview={handlePreviewPv}
-                                                    onAnalyze={handleAnalyzePly}
-                                                    isAnalyzing={isAnalyzing}
-                                                    analyzingPly={
-                                                        analyzingState.type !== "none"
-                                                            ? analyzingState.ply
-                                                            : undefined
-                                                    }
-                                                    kifuTree={navigation.tree}
-                                                    onClose={() => setSelectedMoveDetail(null)}
-                                                    isOnMainLine={navigation.state.isOnMainLine}
-                                                />
-                                            )}
-                                        </div>
-                                    </div>
                                 </div>
                             </div>
 
