@@ -884,6 +884,17 @@ pub fn generate_legal(pos: &Position, list: &mut MoveList) {
 }
 
 /// 合法手を生成（不成含む）
+/// 合法手を生成（不成含む）
+///
+/// `generate_legal()` と異なり、成ることが可能な駒が敵陣に移動する際に、
+/// 成る手だけでなく成らない手も生成します。
+///
+/// # 使用目的
+/// - UI での指し手選択肢の表示（ユーザーが不成を選択できるようにする）
+/// - 棋譜再生時の指し手検証（不成の指し手も合法として認識する）
+///
+/// # 注意
+/// 探索エンジンでの使用は非推奨です。探索では `generate_legal()` を使用してください。
 pub fn generate_legal_all(pos: &Position, list: &mut MoveList) {
     let mut buffer = ExtMoveBuffer::new();
     generate_with_type(pos, crate::movegen::GenType::LegalAll, &mut buffer, None);
