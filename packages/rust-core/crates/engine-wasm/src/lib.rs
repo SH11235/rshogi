@@ -531,9 +531,41 @@ pub fn load_model(bytes: &[u8]) -> Result<(), JsValue> {
     Ok(())
 }
 
+/// NNUE バッファの最大サイズ（500MB）
+const MAX_NNUE_SIZE: usize = 500 * 1024 * 1024;
+
+/// NNUE モデル用のバッファを確保する
+///
+/// JavaScript から Wasm メモリに直接書き込むためのバッファを確保します。
+/// 確保したメモリは [`load_model_from_ptr`] または [`free_nnue_buffer`] で解放する必要があります。
+///
+/// # Arguments
+///
+/// * `len` - 確保するバイト数
+///
+/// # Returns
+///
+/// 確保したメモリ領域へのポインタ。失敗時は null ポインタを返します。
+///
+/// # Safety
+///
+/// 返されたポインタは以下のいずれかの方法で解放する必要があります：
+/// - [`load_model_from_ptr`] に渡す（所有権が移譲され、自動的に解放される）
+/// - [`free_nnue_buffer`] を呼び出す
+///
+/// # Example (JavaScript)
+///
+/// ```javascript
+/// const len = nnueData.byteLength;
+/// const ptr = alloc_nnue_buffer(len);
+/// if (ptr === 0) {
+///     throw new Error("Failed to allocate NNUE buffer");
+/// }
+/// // ptr にデータをコピーして load_model_from_ptr を呼び出す
+/// ```
 #[wasm_bindgen]
 pub fn alloc_nnue_buffer(len: usize) -> *mut u8 {
-    if len == 0 {
+    if len == 0 || len > MAX_NNUE_SIZE {
         return std::ptr::null_mut();
     }
     let mut buf = vec![0u8; len];
@@ -542,10 +574,59 @@ pub fn alloc_nnue_buffer(len: usize) -> *mut u8 {
     ptr
 }
 
+/// NNUE モデルをポインタから直接ロードする
+///
+/// [`alloc_nnue_buffer`] で確保したメモリ領域から NNUE モデルをロードします。
+/// この関数は渡されたポインタの所有権を取得し、成功・失敗に関わらず
+/// メモリを自動的に解放します。
+///
+/// # Arguments
+///
+/// * `ptr` - [`alloc_nnue_buffer`] で確保されたメモリ領域へのポインタ
+/// * `len` - データのバイト長（[`alloc_nnue_buffer`] に渡した値と同じ）
+///
+/// # Safety
+///
+/// - `ptr` は [`alloc_nnue_buffer(len)`] の戻り値でなければなりません
+/// - この関数は `ptr` の所有権を取得し、`Vec::from_raw_parts` を使用して
+///   メモリを管理します
+/// - 成功・失敗に関わらず、呼び出し側は `ptr` を再度使用してはいけません
+/// - 失敗した場合でも、メモリは自動的に解放されます
+///
+/// # Errors
+///
+/// - `ptr` が null の場合
+/// - `len` が 0 の場合
+/// - `len` が最大サイズ（500MB）を超える場合
+/// - NNUE データのロードに失敗した場合
+///
+/// # Example (JavaScript)
+///
+/// ```javascript
+/// const len = nnueData.byteLength;
+/// const ptr = alloc_nnue_buffer(len);
+/// try {
+///     const target = new Uint8Array(memory.buffer, ptr, len);
+///     target.set(nnueData);
+///     load_model_from_ptr(ptr, len); // ptr の所有権を移譲
+/// } catch (e) {
+///     // エラー時も自動的にメモリは解放される
+///     // free_nnue_buffer を呼ぶ必要はない
+/// }
+/// ```
 #[wasm_bindgen]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn load_model_from_ptr(ptr: *mut u8, len: usize) -> Result<(), JsValue> {
     if ptr.is_null() || len == 0 {
         return Err(JsValue::from_str("invalid NNUE buffer"));
+    }
+
+    if len > MAX_NNUE_SIZE {
+        // ポインタが有効な場合は解放してからエラーを返す
+        unsafe {
+            drop(Vec::from_raw_parts(ptr, len, len));
+        }
+        return Err(JsValue::from_str("NNUE buffer too large (max 500MB)"));
     }
 
     let buf = unsafe { Vec::from_raw_parts(ptr, len, len) };
@@ -561,7 +642,24 @@ pub fn load_model_from_ptr(ptr: *mut u8, len: usize) -> Result<(), JsValue> {
     Ok(())
 }
 
+/// NNUE バッファを解放する
+///
+/// [`alloc_nnue_buffer`] で確保したメモリを解放します。
+/// [`load_model_from_ptr`] を呼び出さずにバッファを破棄する場合に使用します。
+///
+/// # Arguments
+///
+/// * `ptr` - [`alloc_nnue_buffer`] で確保されたメモリ領域へのポインタ
+/// * `len` - バッファのバイト長（[`alloc_nnue_buffer`] に渡した値と同じ）
+///
+/// # Safety
+///
+/// - `ptr` は [`alloc_nnue_buffer(len)`] の戻り値でなければなりません
+/// - 同じポインタに対して複数回呼び出してはいけません
+/// - [`load_model_from_ptr`] に渡したポインタに対して呼び出してはいけません
+///   （二重解放になります）
 #[wasm_bindgen]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn free_nnue_buffer(ptr: *mut u8, len: usize) {
     if ptr.is_null() || len == 0 {
         return;

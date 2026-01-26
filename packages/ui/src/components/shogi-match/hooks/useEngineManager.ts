@@ -513,13 +513,95 @@ export function useEngineManager({
         );
     }, [disposeEngineForSide]);
 
+    /**
+     * エンジン再初期化の共通処理
+     *
+     * @param side - 対象プレイヤー
+     * @param options.loadPosition - 初期化後に現在の局面をロードするか
+     * @param options.errorLogPrefix - エラーログのプレフィックス
+     * @returns 成功時 true、失敗時 false
+     */
+    const reinitializeEngineCore = useCallback(
+        async (
+            side: Player,
+            options: {
+                loadPosition: boolean;
+                errorLogPrefix: string;
+            },
+        ): Promise<boolean> => {
+            const engineState = engineStatesRef.current[side];
+            const client = engineState.client;
+            if (!client) return false;
+
+            try {
+                // クライアントのリセット（サポートされている場合）
+                if ("reset" in client && typeof client.reset === "function") {
+                    await client.reset();
+                }
+
+                // エラー状態をクリア
+                setEngineErrorDetails((prev) => ({
+                    ...prev,
+                    [side]: null,
+                }));
+                setEngineStatus((prev) => ({ ...prev, [side]: "idle" }));
+                engineState.ready = false;
+
+                // エンジン初期化
+                await client.init();
+
+                // NNUE をロード（指定されている場合）
+                // ⚠️ Desktop では OnceLock により一度ロードした NNUE は変更不可
+                // 失敗時は throw してユーザーに通知する（アプリ再起動が必要な場合がある）
+                const nnueId = side === "sente" ? senteNnueId : goteNnueId;
+                if (nnueId && client.loadNnue) {
+                    await client.loadNnue(nnueId);
+                }
+
+                // Skill Level 設定の適用
+                const skillSettings = sides[side].skillLevel;
+                if (skillSettings) {
+                    await applySkillLevelSettings(client, skillSettings);
+                }
+
+                // 局面のロード（オプション）
+                if (options.loadPosition) {
+                    await client.loadPosition(
+                        startSfen,
+                        movesRef.current,
+                        buildPassRightsOption(passRightsSettings, movesRef.current),
+                    );
+                }
+
+                engineState.ready = true;
+                setEngineReady((prev) => ({ ...prev, [side]: true }));
+                return true;
+            } catch (error) {
+                const errorMsg = error instanceof Error ? error.message : String(error);
+                addErrorLog(`${options.errorLogPrefix} (${side}): ${errorMsg}`);
+                setEngineStatus((prev) => ({ ...prev, [side]: "error" }));
+
+                const errorInfo = getEngineErrorInfo("WASM_INIT_FAILED");
+                setEngineErrorDetails((prev) => ({
+                    ...prev,
+                    [side]: {
+                        hasError: true,
+                        errorCode: "WASM_INIT_FAILED",
+                        errorMessage: errorMsg,
+                        canRetry: errorInfo.canRetry,
+                    },
+                }));
+                return false;
+            }
+        },
+        [addErrorLog, goteNnueId, movesRef, passRightsSettings, senteNnueId, sides, startSfen],
+    );
+
     const retryEngine = useCallback(
         async (side: Player) => {
             const engineState = engineStatesRef.current[side];
             if (!engineState.client) return;
 
-            // Check pending state first, before setting isRetrying
-            // This prevents isRetrying from getting stuck if we return early
             const searchState = searchStatesRef.current[side];
             if (searchState.pending) {
                 addErrorLog(`リトライ中です (${side})`);
@@ -533,67 +615,35 @@ export function useEngineManager({
                 }
                 return { ...prev, [side]: true };
             });
-
             searchState.pending = true;
 
             try {
-                // Call reset() if the client supports it
-                const client = engineState.client;
-                if ("reset" in client && typeof client.reset === "function") {
-                    await client.reset();
-                }
-
-                // Clear error state before retry
-                setEngineErrorDetails((prev) => ({
-                    ...prev,
-                    [side]: null,
-                }));
-                setEngineStatus((prev) => ({ ...prev, [side]: "idle" }));
-                engineState.ready = false;
-
-                // Retry initialization
-                await client.init();
-
-                // NNUE をロード（指定されている場合）
-                // ⚠️ Desktop では OnceLock により一度ロードした NNUE は変更不可
-                // 失敗時は throw してユーザーに通知する（アプリ再起動が必要な場合がある）
-                const nnueId = side === "sente" ? senteNnueId : goteNnueId;
-                if (nnueId && client.loadNnue) {
-                    await client.loadNnue(nnueId);
-                }
-
-                // Skill Level 設定の適用（リトライ時も再適用）
-                const skillSettings = sides[side].skillLevel;
-                if (skillSettings) {
-                    await applySkillLevelSettings(client, skillSettings);
-                }
-
-                engineState.ready = true;
-                setEngineReady((prev) => ({ ...prev, [side]: true }));
-            } catch (error) {
-                const errorMsg = error instanceof Error ? error.message : String(error);
-                addErrorLog(`リトライ失敗 (${side}): ${errorMsg}`);
-                setEngineStatus((prev) => ({ ...prev, [side]: "error" }));
-
-                // Update error details on retry failure
-                const errorInfo = getEngineErrorInfo("WASM_INIT_FAILED");
-                setEngineErrorDetails((prev) => ({
-                    ...prev,
-                    [side]: {
-                        hasError: true,
-                        errorCode: "WASM_INIT_FAILED",
-                        errorMessage: errorMsg,
-                        canRetry: errorInfo.canRetry,
-                    },
-                }));
+                await reinitializeEngineCore(side, {
+                    loadPosition: false,
+                    errorLogPrefix: "リトライ失敗",
+                });
             } finally {
                 searchState.pending = false;
                 setIsRetrying((prev) => ({ ...prev, [side]: false }));
             }
         },
-        [addErrorLog, senteNnueId, goteNnueId, sides],
+        [addErrorLog, reinitializeEngineCore],
     );
 
+    /**
+     * NNUE変更に伴うエンジン再起動
+     *
+     * 対局停止中にNNUE IDが変更された場合、エンジンをリセットして
+     * 新しいNNUEをロードし直します。
+     *
+     * @remarks
+     * - 対局中は呼び出されません（useEffect内で isMatchRunning をチェック）
+     * - Desktop版では OnceLock により一度ロードしたNNUEは変更不可のため、
+     *   アプリ再起動が必要になる場合があります
+     * - エラー時はユーザーに通知され、エンジンは error 状態になります
+     *
+     * @param side - 再起動対象のプレイヤー（'sente' | 'gote'）
+     */
     const restartEngineForNnueChange = useCallback(
         async (side: Player) => {
             const engineState = engineStatesRef.current[side];
@@ -609,59 +659,16 @@ export function useEngineManager({
             searchState.pending = true;
 
             try {
-                const client = engineState.client;
-                if ("reset" in client && typeof client.reset === "function") {
-                    await client.reset();
-                }
-
-                setEngineErrorDetails((prev) => ({
-                    ...prev,
-                    [side]: null,
-                }));
-                setEngineStatus((prev) => ({ ...prev, [side]: "idle" }));
-                engineState.ready = false;
-
-                await client.init();
-
-                const nnueId = side === "sente" ? senteNnueId : goteNnueId;
-                if (nnueId && client.loadNnue) {
-                    await client.loadNnue(nnueId);
-                }
-
-                const skillSettings = sides[side].skillLevel;
-                if (skillSettings) {
-                    await applySkillLevelSettings(client, skillSettings);
-                }
-
-                await client.loadPosition(
-                    startSfen,
-                    movesRef.current,
-                    buildPassRightsOption(passRightsSettings, movesRef.current),
-                );
-
-                engineState.ready = true;
-                setEngineReady((prev) => ({ ...prev, [side]: true }));
-            } catch (error) {
-                const errorMsg = error instanceof Error ? error.message : String(error);
-                addErrorLog(`再起動失敗 (${side}): ${errorMsg}`);
-                setEngineStatus((prev) => ({ ...prev, [side]: "error" }));
-
-                const errorInfo = getEngineErrorInfo("WASM_INIT_FAILED");
-                setEngineErrorDetails((prev) => ({
-                    ...prev,
-                    [side]: {
-                        hasError: true,
-                        errorCode: "WASM_INIT_FAILED",
-                        errorMessage: errorMsg,
-                        canRetry: errorInfo.canRetry,
-                    },
-                }));
+                await reinitializeEngineCore(side, {
+                    loadPosition: true,
+                    errorLogPrefix: "再起動失敗",
+                });
             } finally {
                 searchState.pending = false;
                 setIsNnueRestarting((prev) => ({ ...prev, [side]: false }));
             }
         },
-        [addErrorLog, goteNnueId, movesRef, passRightsSettings, senteNnueId, sides, startSfen],
+        [addErrorLog, reinitializeEngineCore],
     );
 
     const applyMoveFromEngine = useCallback(
@@ -1232,7 +1239,12 @@ export function useEngineManager({
         if (isMatchRunning) return;
 
         (["sente", "gote"] as Player[]).forEach((side) => {
+            // 同一値の場合はスキップ
             if (prev[side] === next[side]) return;
+
+            // NNUEなし→なしの場合もスキップ（undefined/null 間の変更は実質的に同じ）
+            if (!prev[side] && !next[side]) return;
+
             if (sides[side].role !== "engine") return;
 
             const engineState = engineStatesRef.current[side];
