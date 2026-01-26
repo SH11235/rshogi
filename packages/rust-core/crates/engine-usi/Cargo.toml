@@ -1,11 +1,14 @@
 [package]
-name = "engine-usi"
+name = "rshogi-usi"
 version = "0.1.0"
 edition = "2021"
 authors = ["sh11235"]
-description = "USI protocol interface for shogi engine"
+description = "USI protocol implementation for rshogi engine"
 license = "MIT"
-repository = "https://github.com/sh11235/shogi"
+repository = "https://github.com/sh11235/rshogi"
+keywords = ["shogi", "usi", "japanese-chess", "engine", "protocol"]
+categories = ["games", "game-engines"]
+readme = "README.md"
 
 [dependencies]
 # Workspace dependencies
@@ -18,10 +21,10 @@ log.workspace = true
 env_logger.workspace = true
 
 # Local dependencies
-engine-core = { path = "../engine-core" }
+rshogi-core = { version = "0.1", path = "../engine-core" }
 
 [[bin]]
-name = "engine-usi"
+name = "rshogi-usi"
 path = "src/main.rs"
 
 [dev-dependencies]

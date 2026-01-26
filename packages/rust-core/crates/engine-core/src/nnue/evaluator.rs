@@ -7,7 +7,7 @@
 //!
 //! ```ignore
 //! use std::sync::Arc;
-//! use engine_core::nnue::{NNUENetwork, NNUEEvaluator};
+//! use rshogi_core::nnue::{NNUENetwork, NNUEEvaluator};
 //!
 //! // ネットワークを読み込み
 //! let network = Arc::new(NNUENetwork::load("model.nnue")?);

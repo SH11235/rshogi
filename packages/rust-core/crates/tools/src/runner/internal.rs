@@ -6,11 +6,11 @@ use std::thread;
 use anyhow::{Context, Result};
 
 #[cfg(feature = "diagnostics")]
-use engine_core::eval::{eval_hash_stats, reset_eval_hash_stats};
-use engine_core::eval::{set_eval_hash_enabled, set_material_level, MaterialLevel};
-use engine_core::nnue::init_nnue;
-use engine_core::position::Position;
-use engine_core::search::{LimitsType, Search, SearchInfo};
+use rshogi_core::eval::{eval_hash_stats, reset_eval_hash_stats};
+use rshogi_core::eval::{set_eval_hash_enabled, set_material_level, MaterialLevel};
+use rshogi_core::nnue::init_nnue;
+use rshogi_core::position::Position;
+use rshogi_core::search::{LimitsType, Search, SearchInfo};
 
 use crate::config::{BenchmarkConfig, LimitType};
 use crate::positions::load_positions;

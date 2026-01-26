@@ -29,7 +29,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use engine_core::position::Position;
+use rshogi_core::position::Position;
 use tools::packed_sfen::{unpack_sfen, PackedSfenValue};
 
 #[derive(Parser)]

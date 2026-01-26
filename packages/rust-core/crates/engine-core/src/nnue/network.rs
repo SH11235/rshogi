@@ -27,7 +27,6 @@ use super::halfka_hm::{HalfKA_hmNetwork, HalfKA_hmStack};
 use super::halfkp::{HalfKPNetwork, HalfKPStack};
 use super::network_layer_stacks::NetworkLayerStacks;
 use super::spec::{Activation, FeatureSet};
-#[cfg(not(feature = "tournament"))]
 use crate::eval::material;
 use crate::position::Position;
 use crate::types::Value;
@@ -811,21 +810,9 @@ pub fn is_halfka_1024_loaded() -> bool {
 /// 局面を評価（LayerStacks用）
 ///
 /// AccumulatorStackLayerStacks を使って差分更新し、計算済みなら再利用する。
-///
-/// # フォールバック動作
-/// - 通常ビルド: NNUEが初期化されていない場合は駒得評価にフォールバック
-/// - tournamentビルド: NNUEが初期化されていない場合はパニック
+/// NNUEが初期化されていない場合は駒得評価にフォールバックする。
 pub fn evaluate_layer_stacks(pos: &Position, stack: &mut AccumulatorStackLayerStacks) -> Value {
-    // tournamentビルド: NNUEが必須（フォールバックなし）
-    #[cfg(feature = "tournament")]
-    let network = NETWORK.get().expect(
-        "NNUE network is not initialized. \
-         Tournament build requires NNUE to be loaded before evaluation. \
-         Call init_nnue() or init_nnue_from_bytes() first.",
-    );
-
-    // 通常ビルド: NNUEがなければMaterial評価にフォールバック
-    #[cfg(not(feature = "tournament"))]
+    // NNUEがなければMaterial評価にフォールバック
     let Some(network) = NETWORK.get() else {
         return material::evaluate_material(pos);
     };
@@ -843,21 +830,9 @@ pub fn evaluate_layer_stacks(pos: &Position, stack: &mut AccumulatorStackLayerSt
 ///
 /// AccumulatorStackVariant を受け取り、内部のバリアントに応じて
 /// 適切な評価関数を呼び出す。
-///
-/// # フォールバック動作
-/// - 通常ビルド: NNUEが初期化されていない場合は駒得評価にフォールバック
-/// - tournamentビルド: NNUEが初期化されていない場合はパニック
+/// NNUEが初期化されていない場合は駒得評価にフォールバックする。
 pub fn evaluate_dispatch(pos: &Position, stack: &mut AccumulatorStackVariant) -> Value {
-    // tournamentビルド: NNUEが必須（フォールバックなし）
-    #[cfg(feature = "tournament")]
-    let network = NETWORK.get().expect(
-        "NNUE network is not initialized. \
-         Tournament build requires NNUE to be loaded before evaluation. \
-         Call init_nnue() or init_nnue_from_bytes() first.",
-    );
-
-    // 通常ビルド: NNUEがなければMaterial評価にフォールバック
-    #[cfg(not(feature = "tournament"))]
+    // NNUEがなければMaterial評価にフォールバック
     let Some(network) = NETWORK.get() else {
         return material::evaluate_material(pos);
     };
@@ -879,9 +854,7 @@ mod tests {
     use crate::position::SFEN_HIRATE;
 
     /// NNUEが初期化されていない場合のフォールバック動作をテスト
-    /// tournamentビルドではフォールバックがないため、このテストはスキップ
     #[test]
-    #[cfg(not(feature = "tournament"))]
     fn test_evaluate_fallback() {
         let mut pos = Position::new();
         pos.set_sfen(SFEN_HIRATE).unwrap();
@@ -897,7 +870,6 @@ mod tests {
     /// AccumulatorStackVariant を使った評価のテスト
     /// NNUEが未初期化でもフォールバックで評価が動作することを確認
     #[test]
-    #[cfg(not(feature = "tournament"))]
     fn test_accumulator_stack_variant_fallback() {
         let mut pos = Position::new();
         pos.set_sfen(SFEN_HIRATE).unwrap();

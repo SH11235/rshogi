@@ -28,9 +28,9 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use engine_core::nnue::init_nnue;
-use engine_core::position::Position;
-use engine_core::search::{LimitsType, Search, SearchInfo};
+use rshogi_core::nnue::init_nnue;
+use rshogi_core::position::Position;
+use rshogi_core::search::{LimitsType, Search, SearchInfo};
 
 #[derive(Parser)]
 #[command(

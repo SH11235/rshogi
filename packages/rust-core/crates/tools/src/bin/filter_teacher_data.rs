@@ -43,7 +43,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use engine_core::position::Position;
+use rshogi_core::position::Position;
 use tools::packed_sfen::{unpack_sfen, PackedSfenValue};
 
 /// 教師データのフィルタリングツール

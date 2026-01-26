@@ -11,8 +11,8 @@ use std::time::Instant;
 use anyhow::Result;
 use clap::Parser;
 
-use engine_core::nnue::{NNUEEvaluator, NNUENetwork};
-use engine_core::position::Position;
+use rshogi_core::nnue::{NNUEEvaluator, NNUENetwork};
+use rshogi_core::position::Position;
 
 /// NNUE評価ベンチマーク
 #[derive(Parser, Debug)]

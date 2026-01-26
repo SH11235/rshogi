@@ -8,16 +8,16 @@ use std::sync::Arc;
 use std::thread;
 
 use anyhow::Result;
-use engine_core::eval::{
+use rshogi_core::eval::{
     set_eval_hash_enabled, set_material_level, set_pass_move_bonus, set_pass_right_value_phased,
     MaterialLevel, DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE,
 };
-use engine_core::nnue::{
+use rshogi_core::nnue::{
     evaluate_dispatch, get_network, init_nnue, set_fv_scale_override, AccumulatorStackVariant,
 };
-use engine_core::position::Position;
-use engine_core::search::{LimitsType, Search, SearchInfo, SearchResult};
-use engine_core::types::Move;
+use rshogi_core::position::Position;
+use rshogi_core::search::{LimitsType, Search, SearchInfo, SearchResult};
+use rshogi_core::types::Move;
 use serde_json::json;
 
 /// エンジン名
@@ -44,7 +44,7 @@ struct UsiEngine {
     /// MultiPV値
     multi_pv: usize,
     /// Skill Level オプション
-    skill_options: engine_core::search::SkillOptions,
+    skill_options: rshogi_core::search::SkillOptions,
     /// 探索スレッドのハンドル
     search_thread: Option<thread::JoinHandle<(Search, SearchResult)>>,
     /// 探索停止用のフラグ（探索スレッドと共有）
@@ -82,7 +82,7 @@ impl UsiEngine {
             eval_hash_size_mb,
             use_eval_hash,
             multi_pv: 1,
-            skill_options: engine_core::search::SkillOptions::default(),
+            skill_options: rshogi_core::search::SkillOptions::default(),
             search_thread: None,
             stop_flag: None,
             ponderhit_flag: None,

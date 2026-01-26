@@ -10,7 +10,7 @@ repository = "https://github.com/sh11235/shogi"
 [features]
 default = []
 # 診断ログ（EvalHashヒット率など）
-diagnostics = ["engine-core/diagnostics"]
+diagnostics = ["rshogi-core/diagnostics"]
 
 [dependencies]
 # Workspace dependencies
@@ -24,7 +24,7 @@ env_logger.workspace = true
 log.workspace = true
 
 # Local dependencies
-engine-core = { path = "../engine-core" }
+rshogi-core = { path = "../engine-core" }
 
 # Additional dependencies
 sysinfo = "0.37"

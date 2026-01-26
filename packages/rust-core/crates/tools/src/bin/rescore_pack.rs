@@ -48,9 +48,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
 
-use engine_core::nnue::init_nnue;
-use engine_core::position::Position;
-use engine_core::search::{LimitsType, Search};
+use rshogi_core::nnue::init_nnue;
+use rshogi_core::position::Position;
+use rshogi_core::search::{LimitsType, Search};
 use tools::packed_sfen::{pack_position, unpack_sfen, PackedSfenValue};
 use tools::qsearch_pv::{qsearch_with_pv_nnue, NnueStacks};
 
@@ -950,7 +950,7 @@ fn process_record_with_search(
     }
     limits.set_start_time();
 
-    let search_result = search.go(&mut pos, limits, None::<fn(&engine_core::search::SearchInfo)>);
+    let search_result = search.go(&mut pos, limits, None::<fn(&rshogi_core::search::SearchInfo)>);
 
     // 探索結果のスコアを取得（STM視点）
     let raw_score: i32 = search_result.score.into();

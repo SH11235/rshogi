@@ -384,45 +384,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "engine-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "getrandom 0.3.4",
- "libc",
- "log",
- "once_cell",
- "rand",
- "rand_xoshiro",
- "rayon",
- "serde",
- "web-time",
- "windows-sys 0.60.2",
-]
-
-[[package]]
-name = "engine-usi"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "chrono",
- "clap",
- "engine-core",
- "env_logger",
- "log",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "engine-wasm"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
- "engine-core",
  "getrandom 0.3.4",
  "js-sys",
+ "rshogi-core",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
@@ -1411,6 +1379,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "rshogi-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "getrandom 0.3.4",
+ "libc",
+ "log",
+ "once_cell",
+ "rand",
+ "rand_xoshiro",
+ "rayon",
+ "serde",
+ "web-time",
+ "windows-sys 0.60.2",
+]
+
+[[package]]
+name = "rshogi-usi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "chrono",
+ "clap",
+ "env_logger",
+ "log",
+ "rshogi-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rustix"
 version = "1.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1778,7 +1778,6 @@ dependencies = [
  "chrono",
  "clap",
  "ctrlc",
- "engine-core",
  "env_logger",
  "flate2",
  "glob",
@@ -1788,6 +1787,7 @@ dependencies = [
  "rand_chacha",
  "rayon",
  "reqwest",
+ "rshogi-core",
  "serde",
  "serde_json",
  "sysinfo",

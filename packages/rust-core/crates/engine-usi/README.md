@@ -1,42 +1,45 @@
-# engine-usi
+# rshogi-usi
 
-USIプロトコルエンジンと、自己対局ハーネス（`engine_selfplay`）を含むクレートです。
+USI (Universal Shogi Interface) protocol implementation for the rshogi engine.
 
-## 自己対局ハーネスの使い方
+## Features
 
-バイナリ: `engine_selfplay`
+- **Full USI protocol support** - Compatible with GUI applications like ShogiGUI, Shogidokoro, etc.
+- **NNUE evaluation** - High-quality position evaluation using neural networks
+- **Configurable options** - Thread count, hash size, time management parameters
+- **Cross-platform** - Works on Windows, macOS, and Linux
 
-主なオプション:
-- `--games` 対局数（デフォルト1）
-- `--max-moves` 最大手数（plies、デフォルト512）
-- 時間設定: `--btime --wtime --binc --winc --byoyomi`
-- USIオプション: `--threads --hash-mb --network-delay --network-delay2 --minimum-thinking-time --slowmover --ponder`
-- 入力局面: `--startpos-file <file>` または `--sfen <sfen>`（未指定なら平手）
-- ログ: `--log-info` で info.jsonl を出力
-- 出力先: `--out <path>`（未指定なら `runs/selfplay/<timestamp>-selfplay.jsonl`）
-- エンジン指定: 共通バイナリは `--engine-path`、先手/後手で分ける場合は `--engine-path-black` / `--engine-path-white`（未指定時は実行ディレクトリ近辺や `engine-usi` を探索）
+## Installation
 
-### よく使うコマンド例
+```bash
+cargo install rshogi-usi
+```
 
-- 1秒秒読みで数をこなす（infoログなし、デフォルト出力先）  
-  `cargo run -p engine-usi --bin engine_selfplay -- --games 10 --max-moves 300 --byoyomi 1000`
+Or build from source:
 
-- 5秒秒読み + network-delay2=1120、infoログ付きで指定パスに出力  
-  `cargo run -p engine-usi --bin engine_selfplay -- --games 2 --max-moves 300 --byoyomi 5000 --network-delay2 1120 --log-info --out runs/selfplay/byoyomi5s.jsonl`
+```bash
+cargo build --release -p rshogi-usi
+```
 
-- 特定SFENの再現（startposファイルを用意して1局だけ）  
-  `cargo run -p engine-usi --bin engine_selfplay -- --games 1 --max-moves 300 --byoyomi 5000 --startpos-file sfen.txt --log-info`
+## Usage
 
-- 先手・後手で別エンジンを指定して対局（片方を旧バージョンにして差分確認などに）
-`cargo run -p engine-usi --bin engine_selfplay --release -- --games 10 --max-moves 200 --byoyomi 1000 --threads 1 --hash-mb 256 --engine-path-black target_before/release/engine-usi --engine-path-white target/release/engine-usi`
-`cargo run -p engine-usi --bin engine_selfplay --release -- --games 10 --max-moves 200 --byoyomi 1000 --threads 1 --hash-mb 256 --engine-path-black target/release/engine-usi --engine-path-white target_before/release/engine-usi`
+Run the engine directly:
 
-### 出力ファイル
+```bash
+rshogi-usi
+```
 
-- 対局ログ: JSONL（デフォルト `runs/selfplay/<timestamp>-selfplay.jsonl`）
-  - 1行目: `meta`
-    - `engine_cmd` に per-side のパス/ソース/引数（`path_black`/`path_white` など）が記録されます
-  - 各手: `move`（sfen_before, move_usi, elapsed_ms, think_limit_ms, timed_out など）
-  - 終局: `result`（outcome, reason, plies）
-- infoログ（`--log-info`有効時）: 同名 `.info.jsonl`
-- KIF: 同名 `.kif`（複数局なら `_gXX.kif` 分割）
+The engine will start in USI mode, waiting for commands from stdin.
+
+### USI Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `Threads` | Number of search threads | 1 |
+| `USI_Hash` | Hash table size in MB | 256 |
+| `NetworkDelay` | Network delay compensation (ms) | 0 |
+| `NetworkDelay2` | Additional delay for uncertain situations | 0 |
+
+## License
+
+MIT License
