@@ -1,6 +1,11 @@
-import type { NnueMeta, NnueStorage } from "@shogi/app-core";
+import type { NnueFormat, NnueMeta, NnueStorage } from "@shogi/app-core";
 import { NnueError } from "@shogi/app-core";
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useState } from "react";
+
+export interface NnueHeaderValidationResult {
+    format?: NnueFormat;
+    isCompatible: boolean;
+}
 
 export interface NnueContextValue {
     /** NNUE ストレージ実装 */
@@ -17,6 +22,8 @@ export interface NnueContextValue {
     storageUsage: { used: number; quota?: number } | null;
     /** エラーをクリア */
     clearError: () => void;
+    /** NNUE ヘッダ検証（任意） */
+    validateNnueHeader?: (header: Uint8Array) => Promise<NnueHeaderValidationResult>;
 }
 
 const NnueContext = createContext<NnueContextValue | null>(null);
@@ -24,6 +31,8 @@ const NnueContext = createContext<NnueContextValue | null>(null);
 export interface NnueProviderProps {
     /** NNUE ストレージ実装 */
     storage: NnueStorage;
+    /** NNUE ヘッダ検証（任意） */
+    validateNnueHeader?: (header: Uint8Array) => Promise<NnueHeaderValidationResult>;
     children: ReactNode;
 }
 
@@ -46,7 +55,11 @@ export interface NnueProviderProps {
  * <NnueProvider storage={storage}>...</NnueProvider>
  * ```
  */
-export function NnueProvider({ storage, children }: NnueProviderProps): ReactNode {
+export function NnueProvider({
+    storage,
+    validateNnueHeader,
+    children,
+}: NnueProviderProps): ReactNode {
     const [nnueList, setNnueList] = useState<NnueMeta[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<NnueError | null>(null);
@@ -91,6 +104,7 @@ export function NnueProvider({ storage, children }: NnueProviderProps): ReactNod
                 refreshList,
                 storageUsage,
                 clearError,
+                validateNnueHeader,
             }}
         >
             {children}

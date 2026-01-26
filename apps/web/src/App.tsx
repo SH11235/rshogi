@@ -1,4 +1,10 @@
-import { createIndexedDBNnueStorage, createWasmEngineClient } from "@shogi/engine-wasm";
+import type { NnueFormat } from "@shogi/app-core";
+import {
+    createIndexedDBNnueStorage,
+    createWasmEngineClient,
+    detect_nnue_format,
+    is_nnue_compatible,
+} from "@shogi/engine-wasm";
 import type { EngineOption } from "@shogi/ui";
 import { EngineControlPanel, NnueProvider, ShogiMatch, useDevMode } from "@shogi/ui";
 
@@ -28,15 +34,19 @@ const panelEngine = createEngineClient();
 
 // Web版のストレージも同期的に初期化可能
 const nnueStorage = createIndexedDBNnueStorage();
-
 // NNUE プリセット manifest.json の URL（環境変数で設定）
 const nnueManifestUrl = import.meta.env.VITE_NNUE_MANIFEST_URL as string | undefined;
+
+const validateNnueHeader = async (header: Uint8Array) => ({
+    format: detect_nnue_format(header) as NnueFormat,
+    isCompatible: is_nnue_compatible(header),
+});
 
 function App() {
     const isDevMode = useDevMode();
 
     return (
-        <NnueProvider storage={nnueStorage}>
+        <NnueProvider storage={nnueStorage} validateNnueHeader={validateNnueHeader}>
             <main className="mx-auto flex max-w-[1100px] flex-col gap-3 md:px-5">
                 <ShogiMatch
                     engineOptions={engineOptions}

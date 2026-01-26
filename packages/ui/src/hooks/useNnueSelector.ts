@@ -3,7 +3,7 @@ import { useCallback, useState } from "react";
 export interface UseNnueSelectorReturn {
     /** モーダルが開いているか */
     isOpen: boolean;
-    /** 選択中の NNUE ID（null = デフォルト） */
+    /** 選択中の NNUE ID（null = NNUEなし（Material評価）） */
     selectedNnueId: string | null;
     /** モーダルを開く */
     open: () => void;
