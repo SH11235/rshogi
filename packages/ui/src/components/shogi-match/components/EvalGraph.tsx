@@ -125,38 +125,64 @@ export function EvalGraph({
         return computeNiceScale(maxAbs, minScale);
     }, [evalHistory, minScale]);
 
-    // ポイントの計算（null値を除外して連続した区間ごとにセグメントを生成）
+    // ポイントの計算（先手・後手を分離して別々のセグメントを生成）
     // viewBox="0 0 100 height" なので x は 0-100 の数値、y はピクセル値
-    const lineSegments = useMemo(() => {
-        if (evalHistory.length === 0) return [];
+    const { senteSegments, goteSegments } = useMemo(() => {
+        if (evalHistory.length === 0) return { senteSegments: [], goteSegments: [] };
 
         const maxPly = Math.max(evalHistory.length - 1, 1);
-        const segments: string[][] = [];
-        let currentSegment: string[] = [];
+        const sente: string[][] = [];
+        const gote: string[][] = [];
+        let currentSenteSegment: string[] = [];
+        let currentGoteSegment: string[] = [];
 
         evalHistory.forEach((entry, index) => {
             const hasValue = entry.evalCp !== null || entry.evalMate !== null;
+            // ply=0は初期局面（評価値0）、ply奇数は先手の手、ply偶数は後手の手
+            const isSenteMove = entry.ply % 2 === 1;
+
             if (hasValue) {
                 const x = (index / maxPly) * 100;
                 const y =
                     padding.top +
                     evalToYWithScale(entry.evalCp, entry.evalMate, graphHeight, scaleMax);
-                currentSegment.push(`${x},${y}`);
+                const point = `${x},${y}`;
+
+                if (index === 0) {
+                    // 初期局面（ply=0）は両方に追加
+                    currentSenteSegment.push(point);
+                    currentGoteSegment.push(point);
+                } else if (isSenteMove) {
+                    currentSenteSegment.push(point);
+                } else {
+                    currentGoteSegment.push(point);
+                }
             } else {
                 // null値で区切り
-                if (currentSegment.length > 0) {
-                    segments.push(currentSegment);
-                    currentSegment = [];
+                if (index === 0 || entry.ply % 2 === 1) {
+                    if (currentSenteSegment.length > 0) {
+                        sente.push(currentSenteSegment);
+                        currentSenteSegment = [];
+                    }
+                }
+                if (index === 0 || entry.ply % 2 === 0) {
+                    if (currentGoteSegment.length > 0) {
+                        gote.push(currentGoteSegment);
+                        currentGoteSegment = [];
+                    }
                 }
             }
         });
 
         // 最後のセグメントを追加
-        if (currentSegment.length > 0) {
-            segments.push(currentSegment);
+        if (currentSenteSegment.length > 0) {
+            sente.push(currentSenteSegment);
+        }
+        if (currentGoteSegment.length > 0) {
+            gote.push(currentGoteSegment);
         }
 
-        return segments;
+        return { senteSegments: sente, goteSegments: gote };
     }, [evalHistory, graphHeight, scaleMax]);
 
     // 現在位置のマーカー
@@ -171,45 +197,6 @@ export function EvalGraph({
 
         return { x, y };
     }, [currentPly, evalHistory, graphHeight, scaleMax]);
-
-    // 塗りつぶし領域のパス（null値を除外）
-    const fillPath = useMemo(() => {
-        if (evalHistory.length === 0) return "";
-
-        const maxPly = Math.max(evalHistory.length - 1, 1);
-        const centerY = padding.top + graphHeight / 2;
-
-        // 有効な値のみを抽出
-        const validPoints = evalHistory
-            .map((entry, index) => {
-                const hasValue = entry.evalCp !== null || entry.evalMate !== null;
-                if (!hasValue) return null;
-
-                const x = (index / maxPly) * 100;
-                const y =
-                    padding.top +
-                    evalToYWithScale(entry.evalCp, entry.evalMate, graphHeight, scaleMax);
-                return { x, y };
-            })
-            .filter((p): p is { x: number; y: number } => p !== null);
-
-        if (validPoints.length === 0) return "";
-
-        // 上半分（先手有利）のパス
-        const upperPath = validPoints
-            .map((p, i) => {
-                const y = Math.min(p.y, centerY);
-                return `${i === 0 ? "M" : "L"} ${p.x} ${y}`;
-            })
-            .join(" ");
-
-        // 最後の点から中央線へ、そして最初の点まで戻る
-        const lastPoint = validPoints[validPoints.length - 1];
-        const firstPoint = validPoints[0];
-        const upperClose = `L ${lastPoint.x} ${centerY} L ${firstPoint.x} ${centerY} Z`;
-
-        return upperPath + upperClose;
-    }, [evalHistory, graphHeight, scaleMax]);
 
     // Y軸の目盛り値（センチポーン → 表示用）
     const yAxisLabels = useMemo(() => {
@@ -266,22 +253,25 @@ export function EvalGraph({
                     />
                 ))}
 
-                {/* 塗りつぶし領域（先手有利部分） */}
-                {fillPath && (
-                    <path
-                        d={fillPath}
-                        fill="hsl(var(--wafuu-shu, 350 80% 45%) / 0.15)"
-                        stroke="none"
-                    />
-                )}
-
-                {/* 評価値ライン（連続した区間ごとに描画） */}
-                {lineSegments.map((segment) => (
+                {/* 評価値ライン（先手：朱色） */}
+                {senteSegments.map((segment) => (
                     <polyline
-                        key={`seg-${segment[0]}`}
+                        key={`sente-${segment[0]}`}
                         points={segment.join(" ")}
                         fill="none"
-                        stroke="hsl(var(--wafuu-shu, 350 80% 45%))"
+                        stroke="hsl(var(--wafuu-shu, 10 75% 50%))"
+                        strokeWidth="2"
+                        vectorEffect="non-scaling-stroke"
+                    />
+                ))}
+
+                {/* 評価値ライン（後手：藍色） */}
+                {goteSegments.map((segment) => (
+                    <polyline
+                        key={`gote-${segment[0]}`}
+                        points={segment.join(" ")}
+                        fill="none"
+                        stroke="hsl(var(--wafuu-ai, 210 55% 45%))"
                         strokeWidth="2"
                         vectorEffect="non-scaling-stroke"
                     />
@@ -426,16 +416,25 @@ export function EvalGraph({
                 vectorEffect="non-scaling-stroke"
             />
 
-            {/* 塗りつぶし領域（先手有利部分） */}
-            {fillPath && <path d={fillPath} fill="hsl(var(--wafuu-shu) / 0.15)" stroke="none" />}
-
-            {/* 評価値ライン（連続した区間ごとに描画） */}
-            {lineSegments.map((segment) => (
+            {/* 評価値ライン（先手：朱色） */}
+            {senteSegments.map((segment) => (
                 <polyline
-                    key={`seg-${segment[0]}`}
+                    key={`sente-${segment[0]}`}
                     points={segment.join(" ")}
                     fill="none"
                     stroke="hsl(var(--wafuu-shu))"
+                    strokeWidth="2"
+                    vectorEffect="non-scaling-stroke"
+                />
+            ))}
+
+            {/* 評価値ライン（後手：藍色） */}
+            {goteSegments.map((segment) => (
+                <polyline
+                    key={`gote-${segment[0]}`}
+                    points={segment.join(" ")}
+                    fill="none"
+                    stroke="hsl(var(--wafuu-ai))"
                     strokeWidth="2"
                     vectorEffect="non-scaling-stroke"
                 />
