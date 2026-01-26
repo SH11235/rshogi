@@ -3,16 +3,37 @@
 //! YaneuraOu の FeatureSet/Feature 構造に準拠した特徴量定義。
 //! 将来の sfnn 対応を見据えた拡張可能な設計。
 
+mod half_ka;
 mod half_ka_hm;
 mod half_kp;
 
+pub use half_ka::HalfKA;
 pub use half_ka_hm::HalfKA_hm;
 pub use half_kp::HalfKP;
 
 use super::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES};
 use super::diff::ChangedFeatures;
 use crate::position::Position;
-use crate::types::{Color, Square};
+use crate::types::{Color, PieceType, Square};
+
+/// 盤上の駒種（King除外）
+///
+/// すべてのFeatureで共通の駒種定義を使用する。
+pub(crate) const BOARD_PIECE_TYPES: [PieceType; 13] = [
+    PieceType::Pawn,
+    PieceType::Lance,
+    PieceType::Knight,
+    PieceType::Silver,
+    PieceType::Gold,
+    PieceType::Bishop,
+    PieceType::Rook,
+    PieceType::ProPawn,
+    PieceType::ProLance,
+    PieceType::ProKnight,
+    PieceType::ProSilver,
+    PieceType::Horse,
+    PieceType::Dragon,
+];
 
 // =============================================================================
 // TriggerEvent - リフレッシュトリガー
@@ -178,6 +199,46 @@ impl FeatureSet for HalfKA_hm_FeatureSet {
             &mut removed,
             &mut added,
         );
+        (removed, added)
+    }
+
+    #[inline]
+    fn needs_refresh(dirty_piece: &DirtyPiece, perspective: Color) -> bool {
+        dirty_piece.king_moved[perspective.index()]
+    }
+}
+
+// =============================================================================
+// HalfKAFeatureSet - HalfKA NNUE 用の FeatureSet
+// =============================================================================
+
+/// HalfKA 用の FeatureSet（non-mirror）
+pub struct HalfKAFeatureSet;
+
+impl FeatureSet for HalfKAFeatureSet {
+    const DIMENSIONS: usize = HalfKA::DIMENSIONS;
+    const MAX_ACTIVE: usize = HalfKA::MAX_ACTIVE;
+    const REFRESH_TRIGGERS: &'static [TriggerEvent] = &[TriggerEvent::FriendKingMoved];
+
+    #[inline]
+    fn collect_active_indices(
+        pos: &Position,
+        perspective: Color,
+    ) -> IndexList<MAX_ACTIVE_FEATURES> {
+        let mut active = IndexList::new();
+        HalfKA::append_active_indices(pos, perspective, &mut active);
+        active
+    }
+
+    #[inline]
+    fn collect_changed_indices(
+        dirty_piece: &DirtyPiece,
+        perspective: Color,
+        king_sq: Square,
+    ) -> ChangedFeatures {
+        let mut removed = IndexList::new();
+        let mut added = IndexList::new();
+        HalfKA::append_changed_indices(dirty_piece, perspective, king_sq, &mut removed, &mut added);
         (removed, added)
     }
 

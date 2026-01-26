@@ -3,29 +3,11 @@
 //! 自玉位置×駒配置（BonaPiece）の組み合わせで特徴量を表現する。
 //! YaneuraOu の HalfKP<Friend> に相当する。
 
-use super::{Feature, TriggerEvent};
+use super::{Feature, TriggerEvent, BOARD_PIECE_TYPES};
 use crate::nnue::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES};
 use crate::nnue::bona_piece::{bona_piece_from_base, halfkp_index, BonaPiece, FE_END, PIECE_BASE};
 use crate::position::Position;
 use crate::types::{Color, PieceType, Square};
-
-/// 盤上の駒種（King除外）
-/// append_active_indices で使用する定数配列
-const BOARD_PIECE_TYPES: [PieceType; 13] = [
-    PieceType::Pawn,
-    PieceType::Lance,
-    PieceType::Knight,
-    PieceType::Silver,
-    PieceType::Gold,
-    PieceType::Bishop,
-    PieceType::Rook,
-    PieceType::ProPawn,
-    PieceType::ProLance,
-    PieceType::ProKnight,
-    PieceType::ProSilver,
-    PieceType::Horse,
-    PieceType::Dragon,
-];
 
 /// HalfKP<Friend> 特徴量
 ///

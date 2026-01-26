@@ -4,7 +4,8 @@
 //!
 //! # 設計
 //!
-//! **「Accumulator は L1 だけで決まる」** を活用し、3バリアントに集約:
+//! **「Accumulator は L1 だけで決まる」** を活用し、4バリアントに集約:
+//! - HalfKA(HalfKAStack): L256/L512/L1024 を内包
 //! - HalfKA_hm(HalfKA_hmStack): L256/L512/L1024 を内包
 //! - HalfKP(HalfKPStack): L256/L512 を内包
 //! - LayerStacks: 1536次元 + 9バケット
@@ -13,6 +14,7 @@
 
 use super::accumulator::DirtyPiece;
 use super::accumulator_layer_stacks::AccumulatorStackLayerStacks;
+use super::halfka::HalfKAStack;
 use super::halfka_hm::HalfKA_hmStack;
 use super::halfkp::HalfKPStack;
 use super::network::NNUENetwork;
@@ -22,14 +24,17 @@ use super::network::NNUENetwork;
 /// NNUEアーキテクチャに応じた適切なスタックを1つだけ保持する。
 /// これにより、メモリ使用量を削減し、do_move/undo_moveの効率を向上させる。
 ///
-/// # 3バリアント構造
+/// # 4バリアント構造
 ///
 /// L1 サイズのみで分類し、L2/L3/活性化は内部で処理:
+/// - **HalfKA**: L256/L512/L1024 を HalfKAStack で管理
 /// - **HalfKA_hm**: L256/L512/L1024 を HalfKA_hmStack で管理
 /// - **HalfKP**: L256/L512 を HalfKPStack で管理
 /// - **LayerStacks**: 1536次元 + 9バケット
 #[allow(non_camel_case_types)]
 pub enum AccumulatorStackVariant {
+    /// HalfKA 特徴量セット（L256/L512/L1024）
+    HalfKA(HalfKAStack),
     /// HalfKA_hm 特徴量セット（L256/L512/L1024）
     HalfKA_hm(HalfKA_hmStack),
     /// HalfKP 特徴量セット（L256/L512）
@@ -44,6 +49,7 @@ impl AccumulatorStackVariant {
     /// 指定されたネットワークのアーキテクチャに対応するスタックバリアントを生成する。
     pub fn from_network(network: &NNUENetwork) -> Self {
         match network {
+            NNUENetwork::HalfKA(net) => Self::HalfKA(HalfKAStack::from_network(net)),
             NNUENetwork::HalfKA_hm(net) => Self::HalfKA_hm(HalfKA_hmStack::from_network(net)),
             NNUENetwork::HalfKP(net) => Self::HalfKP(HalfKPStack::from_network(net)),
             NNUENetwork::LayerStacks(_) => Self::LayerStacks(AccumulatorStackLayerStacks::new()),
@@ -62,6 +68,7 @@ impl AccumulatorStackVariant {
     /// 一致しない場合は `from_network` で再作成が必要。
     pub fn matches_network(&self, network: &NNUENetwork) -> bool {
         match (self, network) {
+            (Self::HalfKA(stack), NNUENetwork::HalfKA(net)) => stack.l1_size() == net.l1_size(),
             (Self::HalfKA_hm(stack), NNUENetwork::HalfKA_hm(net)) => {
                 stack.l1_size() == net.l1_size()
             }
@@ -75,6 +82,7 @@ impl AccumulatorStackVariant {
     #[inline]
     pub fn reset(&mut self) {
         match self {
+            Self::HalfKA(stack) => stack.reset(),
             Self::HalfKA_hm(stack) => stack.reset(),
             Self::HalfKP(stack) => stack.reset(),
             Self::LayerStacks(stack) => stack.reset(),
@@ -85,6 +93,7 @@ impl AccumulatorStackVariant {
     #[inline]
     pub fn push(&mut self, dirty_piece: DirtyPiece) {
         match self {
+            Self::HalfKA(stack) => stack.push(dirty_piece),
             Self::HalfKA_hm(stack) => stack.push(dirty_piece),
             Self::HalfKP(stack) => stack.push(dirty_piece),
             Self::LayerStacks(stack) => {
@@ -98,6 +107,7 @@ impl AccumulatorStackVariant {
     #[inline]
     pub fn pop(&mut self) {
         match self {
+            Self::HalfKA(stack) => stack.pop(),
             Self::HalfKA_hm(stack) => stack.pop(),
             Self::HalfKP(stack) => stack.pop(),
             Self::LayerStacks(stack) => stack.pop(),
@@ -127,6 +137,7 @@ mod tests {
         assert!(stack.is_halfkp());
         assert!(matches!(stack, AccumulatorStackVariant::HalfKP(_)));
         assert!(!matches!(stack, AccumulatorStackVariant::LayerStacks(_)));
+        assert!(!matches!(stack, AccumulatorStackVariant::HalfKA(_)));
         assert!(!matches!(stack, AccumulatorStackVariant::HalfKA_hm(_)));
     }
 
