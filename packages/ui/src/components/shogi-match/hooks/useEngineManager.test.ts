@@ -384,10 +384,20 @@ describe("useEngineManager - NNUE restart", () => {
         expect(mockClient.init).toHaveBeenCalled();
         const initCallCount = mockClient.init.mock.calls.length;
 
-        // 対局を停止してからNNUE ID を変更
-        rerender({
-            senteNnueSelection: createNnueSelection("nnue-2"),
-            isMatchRunning: false,
+        // Step 1: 対局を停止
+        await act(async () => {
+            rerender({
+                senteNnueSelection: createNnueSelection("nnue-1"),
+                isMatchRunning: false,
+            });
+        });
+
+        // Step 2: NNUE ID を変更
+        await act(async () => {
+            rerender({
+                senteNnueSelection: createNnueSelection("nnue-2"),
+                isMatchRunning: false,
+            });
         });
 
         // useEffect が実行されるのを待つ
@@ -453,7 +463,9 @@ describe("useEngineManager - NNUE restart", () => {
         const resetCallCount = mockClient.reset.mock.calls.length;
 
         // undefined → NnueSelection(null) に変更（どちらも「NNUEなし」を意味）
-        rerender({ senteNnueSelection: createNnueSelection(null) });
+        await act(async () => {
+            rerender({ senteNnueSelection: createNnueSelection(null) });
+        });
 
         await act(async () => {
             await Promise.resolve();
@@ -516,7 +528,9 @@ describe("useEngineManager - NNUE restart", () => {
         const resetCallCount = mockClient.reset.mock.calls.length;
 
         // NNUE ID を変更
-        rerender({ senteNnueSelection: createNnueSelection("nnue-2") });
+        await act(async () => {
+            rerender({ senteNnueSelection: createNnueSelection("nnue-2") });
+        });
 
         await act(async () => {
             await Promise.resolve();
