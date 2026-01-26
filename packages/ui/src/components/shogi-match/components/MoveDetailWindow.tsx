@@ -22,6 +22,12 @@ import {
 } from "../utils/branchTreeUtils";
 import type { KifMove, PvDisplayMove, PvEvalInfo } from "../utils/kifFormat";
 import { convertPvToDisplay, formatEval, getEvalTooltipInfo } from "../utils/kifFormat";
+import {
+    buildNnueOptions,
+    parseNnueSelectionValue,
+    toNnueSelectionValue,
+    toOptionValue,
+} from "../utils/nnueSelectionUtils";
 
 interface MoveDetailWindowProps {
     /** 選択された手 */
@@ -537,39 +543,13 @@ export function MoveDetailWindow({
     const hasMultiplePv = pvList.length > 1;
 
     // NNUE選択肢を構築（プリセット + カスタムNNUE）
-    const nnueOptions = useMemo(() => {
-        const options: Array<{ type: "preset" | "custom"; key: string; label: string }> = [];
-        // プリセット一覧
-        for (const preset of presets ?? []) {
-            const isDownloaded = nnueList?.some(
-                (n) => n.source === "preset" && n.presetKey === preset.presetKey,
-            );
-            options.push({
-                type: "preset",
-                key: preset.presetKey,
-                label: isDownloaded ? preset.displayName : `${preset.displayName} (要DL)`,
-            });
-        }
-        // カスタムNNUE（プリセット以外）
-        for (const nnue of nnueList ?? []) {
-            if (nnue.source !== "preset") {
-                options.push({
-                    type: "custom",
-                    key: nnue.id,
-                    label: nnue.displayName,
-                });
-            }
-        }
-        return options;
-    }, [presets, nnueList]);
+    const nnueOptions = useMemo(() => buildNnueOptions({ presets, nnueList }), [presets, nnueList]);
 
     // 現在の選択値を計算
-    const selectedValue = useMemo(() => {
-        if (!analysisNnueSelection) return "material";
-        if (analysisNnueSelection.presetKey) return `preset:${analysisNnueSelection.presetKey}`;
-        if (analysisNnueSelection.nnueId) return `custom:${analysisNnueSelection.nnueId}`;
-        return "material";
-    }, [analysisNnueSelection]);
+    const selectedValue = useMemo(
+        () => toNnueSelectionValue(analysisNnueSelection),
+        [analysisNnueSelection],
+    );
 
     const showNnueSelector = analysisNnueSelection !== undefined && !!onAnalysisNnueSelectionChange;
 
@@ -666,33 +646,16 @@ export function MoveDetailWindow({
                                 <span>分析NNUE</span>
                                 <select
                                     value={selectedValue}
-                                    onChange={(e) => {
-                                        const val = e.target.value;
-                                        if (val === "material") {
-                                            onAnalysisNnueSelectionChange?.({
-                                                presetKey: null,
-                                                nnueId: null,
-                                            });
-                                        } else if (val.startsWith("preset:")) {
-                                            onAnalysisNnueSelectionChange?.({
-                                                presetKey: val.slice(7),
-                                                nnueId: null,
-                                            });
-                                        } else if (val.startsWith("custom:")) {
-                                            onAnalysisNnueSelectionChange?.({
-                                                presetKey: null,
-                                                nnueId: val.slice(7),
-                                            });
-                                        }
-                                    }}
+                                    onChange={(e) =>
+                                        onAnalysisNnueSelectionChange?.(
+                                            parseNnueSelectionValue(e.target.value),
+                                        )
+                                    }
                                     className="w-full px-2 py-1 text-xs rounded border border-border bg-background"
                                 >
                                     <option value="material">簡易AI（駒得）</option>
                                     {nnueOptions.map((opt) => (
-                                        <option
-                                            key={`${opt.type}:${opt.key}`}
-                                            value={`${opt.type}:${opt.key}`}
-                                        >
+                                        <option key={toOptionValue(opt)} value={toOptionValue(opt)}>
                                             {opt.label}
                                         </option>
                                     ))}

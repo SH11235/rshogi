@@ -613,6 +613,30 @@ export function ShogiMatch({
         setAnalysisNnueSelection,
     ]);
 
+    // manifestUrl 未指定でプリセット選択中の場合、駒得評価にフォールバック
+    // （プリセットはダウンロードできないため）
+    useEffect(() => {
+        if (!manifestUrl) {
+            if (analysisNnueSelection.presetKey) {
+                setAnalysisNnueSelection({ presetKey: null, nnueId: null });
+            }
+            if (senteNnueSelection.presetKey) {
+                setSenteNnueSelection({ presetKey: null, nnueId: null });
+            }
+            if (goteNnueSelection.presetKey) {
+                setGoteNnueSelection({ presetKey: null, nnueId: null });
+            }
+        }
+    }, [
+        manifestUrl,
+        analysisNnueSelection.presetKey,
+        senteNnueSelection.presetKey,
+        goteNnueSelection.presetKey,
+        setAnalysisNnueSelection,
+        setSenteNnueSelection,
+        setGoteNnueSelection,
+    ]);
+
     // 分析用 NNUE 変更時に一括解析をリセット（プール破棄に伴う UI 同期）
     const prevAnalysisNnueSelectionRef = useRef(analysisNnueSelection);
     useEffect(() => {
@@ -2314,13 +2338,17 @@ export function ShogiMatch({
     }, [isAnalyzing, analyzingState.type]);
 
     // 一括解析を開始（並列処理）- 本譜のみ
-    const handleStartBatchAnalysis = useCallback(() => {
+    const handleStartBatchAnalysis = useCallback(async () => {
         // PVがない手を抽出
         const targetPlies = kifMoves.filter((m) => !m.pv || m.pv.length === 0).map((m) => m.ply);
 
         if (targetPlies.length === 0) {
             return; // 解析対象がない
         }
+
+        // 未DLプリセットの場合はダウンロード
+        // resolveNnue内でダウンロード完了時にrefreshNnueListが呼ばれ、nnueListが更新される
+        const resolvedNnueId = await resolveNnue(analysisNnueSelection);
 
         // ジョブを生成
         const jobs: AnalysisJob[] = targetPlies.map((ply) => ({
@@ -2331,13 +2359,13 @@ export function ShogiMatch({
             depth: analysisSettings.batchAnalysisDepth,
         }));
 
-        // 並列一括解析を開始
-        enginePool.start(jobs);
-    }, [kifMoves, startSfen, analysisSettings, enginePool]);
+        // 並列一括解析を開始（resolvedNnueIdを直接渡す）
+        enginePool.start(jobs, { nnueId: resolvedNnueId });
+    }, [kifMoves, startSfen, analysisSettings, enginePool, resolveNnue, analysisNnueSelection]);
 
     // ツリー全体（分岐含む）の一括解析を開始
     const handleStartTreeBatchAnalysis = useCallback(
-        (options?: { mainLineOnly?: boolean }) => {
+        async (options?: { mainLineOnly?: boolean }) => {
             const tree = navigation.tree;
             if (!tree) return;
 
@@ -2353,6 +2381,9 @@ export function ShogiMatch({
                 return;
             }
 
+            // 未DLプリセットの場合はダウンロード
+            const resolvedNnueId = await resolveNnue(analysisNnueSelection);
+
             // AnalysisJob形式に変換
             const jobs: AnalysisJob[] = treeJobs.map((job) => ({
                 ply: job.ply,
@@ -2363,15 +2394,22 @@ export function ShogiMatch({
                 nodeId: job.nodeId, // 分岐解析用にnodeIdを保持
             }));
 
-            // 並列一括解析を開始
-            enginePool.start(jobs);
+            // 並列一括解析を開始（resolvedNnueIdを直接渡す）
+            enginePool.start(jobs, { nnueId: resolvedNnueId });
         },
-        [navigation.tree, startSfen, analysisSettings, enginePool],
+        [
+            navigation.tree,
+            startSfen,
+            analysisSettings,
+            enginePool,
+            resolveNnue,
+            analysisNnueSelection,
+        ],
     );
 
     // 特定の分岐を一括解析
     const handleAnalyzeBranch = useCallback(
-        (branchNodeId: string) => {
+        async (branchNodeId: string) => {
             const tree = navigation.tree;
             if (!tree) return;
 
@@ -2384,6 +2422,9 @@ export function ShogiMatch({
                 return;
             }
 
+            // 未DLプリセットの場合はダウンロード
+            const resolvedNnueId = await resolveNnue(analysisNnueSelection);
+
             // AnalysisJob形式に変換
             const jobs: AnalysisJob[] = branchJobs.map((job) => ({
                 ply: job.ply,
@@ -2394,10 +2435,17 @@ export function ShogiMatch({
                 nodeId: job.nodeId,
             }));
 
-            // 並列一括解析を開始
-            enginePool.start(jobs);
+            // 並列一括解析を開始（resolvedNnueIdを直接渡す）
+            enginePool.start(jobs, { nnueId: resolvedNnueId });
         },
-        [navigation.tree, startSfen, analysisSettings, enginePool],
+        [
+            navigation.tree,
+            startSfen,
+            analysisSettings,
+            enginePool,
+            resolveNnue,
+            analysisNnueSelection,
+        ],
     );
 
     // 一括解析をキャンセル
