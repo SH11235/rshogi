@@ -1,13 +1,15 @@
-//! NetworkHalfKP - const generics ベースの HalfKP ネットワーク統一実装
+// NOTE: 公式表記(HalfKA)をenum名に保持するため、非CamelCaseを許可する。
+#![allow(non_camel_case_types)]
+
+//! NetworkHalfKA - const generics ベースの HalfKA ネットワーク統一実装
 //!
-//! HalfKP 特徴量を使用し、L1/L2/L3 のサイズと活性化関数を型パラメータで切り替え可能にした実装。
+//! HalfKA 特徴量を使用し、L1/L2/L3 のサイズと活性化関数を型パラメータで切り替え可能にした実装。
 //!
 //! # 設計
 //!
 //! ```text
-//! NetworkHalfKP<L1, L1_INPUT, L2, L3, A>
+//! Network<L1, L2, L3, A>
 //!   L1: FT出力次元（片側）
-//!   L1_INPUT: L1層の入力次元（= L1 * 2、両視点結合）
 //!   L2: 隠れ層1の出力次元
 //!   L3: 隠れ層2の出力次元
 //!   A: FtActivation trait を実装する活性化関数型
@@ -17,36 +19,44 @@
 //!
 //! | 型エイリアス | L1 | L2 | L3 | 活性化 |
 //! |-------------|------|-----|-----|--------|
-//! | HalfKP256CReLU | 256 | 32 | 32 | CReLU |
-//! | HalfKP256SCReLU | 256 | 32 | 32 | SCReLU |
-//! | HalfKP256Pairwise | 256 | 32 | 32 | PairwiseCReLU |
-//! | HalfKP512CReLU | 512 | 8 | 96 | CReLU |
-//! | HalfKP512SCReLU | 512 | 8 | 96 | SCReLU |
-//! | HalfKP512Pairwise | 512 | 8 | 96 | PairwiseCReLU |
-//! | HalfKP512_32_32CReLU | 512 | 32 | 32 | CReLU |
-//! | HalfKP512_32_32SCReLU | 512 | 32 | 32 | SCReLU |
-//! | HalfKP512_32_32Pairwise | 512 | 32 | 32 | PairwiseCReLU |
-//! | HalfKP1024_8_32CReLU | 1024 | 8 | 32 | CReLU |
-//! | HalfKP1024_8_32SCReLU | 1024 | 8 | 32 | SCReLU |
-//! | HalfKP1024_8_32Pairwise | 1024 | 8 | 32 | PairwiseCReLU |
+//! | HalfKA256CReLU | 256 | 32 | 32 | CReLU |
+//! | HalfKA256SCReLU | 256 | 32 | 32 | SCReLU |
+//! | HalfKA256Pairwise | 256 | 32 | 32 | PairwiseCReLU |
+//! | HalfKA512CReLU | 512 | 8 | 96 | CReLU |
+//! | HalfKA512SCReLU | 512 | 8 | 96 | SCReLU |
+//! | HalfKA512Pairwise | 512 | 8 | 96 | PairwiseCReLU |
+//! | HalfKA512_32_32CReLU | 512 | 32 | 32 | CReLU |
+//! | HalfKA512_32_32SCReLU | 512 | 32 | 32 | SCReLU |
+//! | HalfKA512_32_32Pairwise | 512 | 32 | 32 | PairwiseCReLU |
+//! | HalfKA1024CReLU | 1024 | 8 | 96 | CReLU |
+//! | HalfKA1024SCReLU | 1024 | 8 | 96 | SCReLU |
+//! | HalfKA1024Pairwise | 1024 | 8 | 96 | PairwiseCReLU |
+//! | HalfKA1024_8_32CReLU | 1024 | 8 | 32 | CReLU |
+//! | HalfKA1024_8_32SCReLU | 1024 | 8 | 32 | SCReLU |
+//! | HalfKA1024_8_32Pairwise | 1024 | 8 | 32 | PairwiseCReLU |
 //!
 //! # 特徴量
 //!
-//! - 入力次元: 125,388 (81キング位置 × 1,548 BonaPiece)
-//! - 従来の classic NNUE（水匠/tanuki互換）
+//! - 入力次元: 138,510 (81キング位置 × 1,710駒入力)
+//! - coalesce済みモデル専用（nnue-pytorch serialize.py でエクスポート）
 
 use std::io::{self, Read, Seek};
 use std::marker::PhantomData;
+use std::sync::OnceLock;
 
-use super::accumulator::{
-    Aligned as AlignedGeneric, AlignedBox, DirtyPiece, IndexList, MAX_PATH_LENGTH,
-};
+use super::accumulator::{Aligned, AlignedBox, DirtyPiece, IndexList, MAX_PATH_LENGTH};
 use super::activation::FtActivation;
-use super::constants::{FV_SCALE, HALFKP_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION};
-use super::features::{FeatureSet, HalfKPFeatureSet};
-use super::network::get_fv_scale_override;
+use super::constants::{FV_SCALE_HALFKA, HALFKA_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION_HALFKA};
+use super::features::{FeatureSet, HalfKAFeatureSet};
+use super::network::{get_fv_scale_override, parse_fv_scale_from_arch};
 use crate::position::Position;
 use crate::types::{Color, Value};
+
+#[inline]
+fn nnue_debug_enabled() -> bool {
+    static NNUE_DEBUG: OnceLock<bool> = OnceLock::new();
+    *NNUE_DEBUG.get_or_init(|| std::env::var("NNUE_DEBUG").is_ok())
+}
 
 // =============================================================================
 // SIMD ヘルパー関数
@@ -112,90 +122,92 @@ unsafe fn m128_add_dpbusd_epi32(
 }
 
 // =============================================================================
-// AccumulatorHalfKP - const generics 版アキュムレータ
+// AccumulatorHalfKA - const generics 版アキュムレータ
 // =============================================================================
 
-/// 64バイトアラインされた固定サイズ i16 配列（static版Alignedと同等）
-#[repr(C, align(64))]
-#[derive(Clone, Copy)]
-pub struct AlignedI16<const N: usize>(pub [i16; N]);
-
-impl<const N: usize> Default for AlignedI16<N> {
-    fn default() -> Self {
-        Self([0i16; N])
-    }
-}
-
-/// HalfKP アキュムレータ
+/// HalfKA アキュムレータ
+/// HalfKA アキュムレータ
 ///
-/// static版Accumulatorと同じくインライン配列を使用し、ポインタ間接参照を排除。
-/// - 境界チェックのコンパイル時排除
-/// - ループの完全展開
-/// - SIMD命令の最適な配置
-/// - キャッシュ効率の向上
-#[repr(C, align(64))]
-pub struct AccumulatorHalfKP<const L1: usize> {
-    /// アキュムレータバッファ [perspective][L1]（64バイトアライン、インライン）
-    pub accumulation: [AlignedI16<L1>; 2],
+/// # 最適化に関する注意
+///
+/// 現在の実装では `accumulation` に `AlignedBox<i16>`（動的ヒープメモリ）を使用している。
+/// `add_weights`/`sub_weights` に渡される引数が `&mut [i16]`（スライス）となるため、
+/// 固定サイズ配列を使用する場合と比較してコンパイラ最適化が効きにくい。
+///
+/// ただし、HalfKA系（L1=512, 1024）ではL1サイズが大きいため境界チェックの
+/// 相対的オーバーヘッドが小さく、ベンチマーク上は改善が見られる。
+///
+/// ## 改善案（オプション）
+///
+/// さらなる最適化が必要な場合、固定サイズ配列への変更を検討：
+/// ```ignore
+/// pub accumulation: [Box<[i16; L1]>; 2],
+/// ```
+///
+/// 参考: HalfKP（L1=256）では元のfeature_transformer.rsが `Aligned<[i16; 256]>` を
+/// 使用していたため、動的スライスへの変更で約17%の性能低下が見られた。
+pub struct AccumulatorHalfKA<const L1: usize> {
+    /// アキュムレータバッファ [perspective][L1]
+    pub accumulation: [AlignedBox<i16>; 2],
     /// 計算済みフラグ
     pub computed_accumulation: bool,
 }
 
-impl<const L1: usize> AccumulatorHalfKP<L1> {
+impl<const L1: usize> AccumulatorHalfKA<L1> {
     /// 新規作成
     pub fn new() -> Self {
         Self {
-            accumulation: [AlignedI16::default(), AlignedI16::default()],
+            accumulation: [AlignedBox::new_zeroed(L1), AlignedBox::new_zeroed(L1)],
             computed_accumulation: false,
         }
     }
 
     /// クリア
     pub fn clear(&mut self) {
-        self.accumulation[0].0.fill(0);
-        self.accumulation[1].0.fill(0);
+        self.accumulation[0].fill(0);
+        self.accumulation[1].fill(0);
         self.computed_accumulation = false;
     }
 }
 
-impl<const L1: usize> Default for AccumulatorHalfKP<L1> {
+impl<const L1: usize> Default for AccumulatorHalfKA<L1> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<const L1: usize> Clone for AccumulatorHalfKP<L1> {
+impl<const L1: usize> Clone for AccumulatorHalfKA<L1> {
     fn clone(&self) -> Self {
         Self {
-            accumulation: self.accumulation,
+            accumulation: [self.accumulation[0].clone(), self.accumulation[1].clone()],
             computed_accumulation: self.computed_accumulation,
         }
     }
 }
 
 // =============================================================================
-// AccumulatorStackHalfKP - アキュムレータスタック
+// AccumulatorStackHalfKA - アキュムレータスタック
 // =============================================================================
 
 /// スタックエントリ
-pub struct AccumulatorEntryHalfKP<const L1: usize> {
-    pub accumulator: AccumulatorHalfKP<L1>,
+pub struct AccumulatorEntryHalfKA<const L1: usize> {
+    pub accumulator: AccumulatorHalfKA<L1>,
     pub dirty_piece: DirtyPiece,
     pub previous: Option<usize>,
 }
 
 /// アキュムレータスタック
-pub struct AccumulatorStackHalfKP<const L1: usize> {
-    entries: Vec<AccumulatorEntryHalfKP<L1>>,
+pub struct AccumulatorStackHalfKA<const L1: usize> {
+    entries: Vec<AccumulatorEntryHalfKA<L1>>,
     current_idx: usize,
 }
 
-impl<const L1: usize> AccumulatorStackHalfKP<L1> {
+impl<const L1: usize> AccumulatorStackHalfKA<L1> {
     /// 新規作成
     pub fn new() -> Self {
         let mut entries = Vec::with_capacity(128);
-        entries.push(AccumulatorEntryHalfKP {
-            accumulator: AccumulatorHalfKP::new(),
+        entries.push(AccumulatorEntryHalfKA {
+            accumulator: AccumulatorHalfKA::new(),
             dirty_piece: DirtyPiece::default(),
             previous: None,
         });
@@ -206,12 +218,12 @@ impl<const L1: usize> AccumulatorStackHalfKP<L1> {
     }
 
     /// 現在のエントリを取得
-    pub fn current(&self) -> &AccumulatorEntryHalfKP<L1> {
+    pub fn current(&self) -> &AccumulatorEntryHalfKA<L1> {
         &self.entries[self.current_idx]
     }
 
     /// 現在のエントリを取得（可変）
-    pub fn current_mut(&mut self) -> &mut AccumulatorEntryHalfKP<L1> {
+    pub fn current_mut(&mut self) -> &mut AccumulatorEntryHalfKA<L1> {
         &mut self.entries[self.current_idx]
     }
 
@@ -219,7 +231,7 @@ impl<const L1: usize> AccumulatorStackHalfKP<L1> {
     ///
     /// `define_l1_variants!` マクロから使用される。
     #[inline]
-    pub fn top(&self) -> &AccumulatorHalfKP<L1> {
+    pub fn top(&self) -> &AccumulatorHalfKA<L1> {
         &self.entries[self.current_idx].accumulator
     }
 
@@ -227,7 +239,7 @@ impl<const L1: usize> AccumulatorStackHalfKP<L1> {
     ///
     /// `define_l1_variants!` マクロから使用される。
     #[inline]
-    pub fn top_mut(&mut self) -> &mut AccumulatorHalfKP<L1> {
+    pub fn top_mut(&mut self) -> &mut AccumulatorHalfKA<L1> {
         &mut self.entries[self.current_idx].accumulator
     }
 
@@ -248,7 +260,7 @@ impl<const L1: usize> AccumulatorStackHalfKP<L1> {
     pub fn top_and_source(
         &mut self,
         source_idx: usize,
-    ) -> (&mut AccumulatorHalfKP<L1>, &AccumulatorHalfKP<L1>) {
+    ) -> (&mut AccumulatorHalfKA<L1>, &AccumulatorHalfKA<L1>) {
         let current_idx = self.current_idx;
         debug_assert!(
             source_idx < current_idx,
@@ -262,8 +274,8 @@ impl<const L1: usize> AccumulatorStackHalfKP<L1> {
     pub fn push(&mut self, dirty_piece: DirtyPiece) {
         let prev_idx = self.current_idx;
         self.current_idx = self.entries.len();
-        self.entries.push(AccumulatorEntryHalfKP {
-            accumulator: AccumulatorHalfKP::new(),
+        self.entries.push(AccumulatorEntryHalfKA {
+            accumulator: AccumulatorHalfKA::new(),
             dirty_piece,
             previous: Some(prev_idx),
         });
@@ -316,12 +328,12 @@ impl<const L1: usize> AccumulatorStackHalfKP<L1> {
     }
 
     /// 指定インデックスのエントリを取得
-    pub fn entry_at(&self, idx: usize) -> &AccumulatorEntryHalfKP<L1> {
+    pub fn entry_at(&self, idx: usize) -> &AccumulatorEntryHalfKA<L1> {
         &self.entries[idx]
     }
 
     /// 指定インデックスのエントリを取得（可変）
-    pub fn entry_at_mut(&mut self, idx: usize) -> &mut AccumulatorEntryHalfKP<L1> {
+    pub fn entry_at_mut(&mut self, idx: usize) -> &mut AccumulatorEntryHalfKA<L1> {
         &mut self.entries[idx]
     }
 
@@ -329,14 +341,15 @@ impl<const L1: usize> AccumulatorStackHalfKP<L1> {
     pub fn get_prev_and_current_accumulators(
         &mut self,
         prev_idx: usize,
-    ) -> (&AccumulatorHalfKP<L1>, &mut AccumulatorHalfKP<L1>) {
+    ) -> (&AccumulatorHalfKA<L1>, &mut AccumulatorHalfKA<L1>) {
         let current_idx = self.current_idx;
-        debug_assert!(
-            prev_idx < current_idx,
-            "prev_idx ({prev_idx}) must be < cur_idx ({current_idx})"
-        );
-        let (left, right) = self.entries.split_at_mut(current_idx);
-        (&left[prev_idx].accumulator, &mut right[0].accumulator)
+        if prev_idx < current_idx {
+            let (left, right) = self.entries.split_at_mut(current_idx);
+            (&left[prev_idx].accumulator, &mut right[0].accumulator)
+        } else {
+            let (left, right) = self.entries.split_at_mut(prev_idx);
+            (&right[0].accumulator, &mut left[current_idx].accumulator)
+        }
     }
 
     /// 現在のインデックスを取得
@@ -364,36 +377,33 @@ impl<const L1: usize> AccumulatorStackHalfKP<L1> {
     }
 }
 
-impl<const L1: usize> Default for AccumulatorStackHalfKP<L1> {
+impl<const L1: usize> Default for AccumulatorStackHalfKA<L1> {
     fn default() -> Self {
         Self::new()
     }
 }
 
 // =============================================================================
-// FeatureTransformerHalfKP - const generics 版 Feature Transformer
+// FeatureTransformerHalfKA - const generics 版 Feature Transformer
 // =============================================================================
 
-/// HalfKP Feature Transformer
-///
-/// static版と同じくbiasesをインラインで保持し、ポインタ間接参照を排除。
-#[repr(C, align(64))]
-pub struct FeatureTransformerHalfKP<const L1: usize> {
-    /// バイアス [L1]（64バイトアラインメント、インライン）
-    pub biases: AlignedI16<L1>,
+/// HalfKA Feature Transformer
+pub struct FeatureTransformerHalfKA<const L1: usize> {
+    /// バイアス [L1]
+    pub biases: Vec<i16>,
     /// 重み [input_dimensions][L1]
     pub weights: AlignedBox<i16>,
 }
 
-impl<const L1: usize> FeatureTransformerHalfKP<L1> {
+impl<const L1: usize> FeatureTransformerHalfKA<L1> {
     /// ファイルから読み込み
     pub fn read<R: Read>(reader: &mut R) -> io::Result<Self> {
-        let input_dim = HALFKP_DIMENSIONS;
+        let input_dim = HALFKA_DIMENSIONS;
 
-        // バイアスを読み込み（64バイトアラインメント、インライン）
-        let mut biases = AlignedI16::<L1>::default();
+        // バイアスを読み込み
+        let mut biases = vec![0i16; L1];
         let mut buf = [0u8; 2];
-        for bias in biases.0.iter_mut() {
+        for bias in biases.iter_mut() {
             reader.read_exact(&mut buf)?;
             *bias = i16::from_le_bytes(buf);
         }
@@ -410,15 +420,14 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
     }
 
     /// Accumulatorをリフレッシュ
-    pub fn refresh_accumulator(&self, pos: &Position, acc: &mut AccumulatorHalfKP<L1>) {
+    pub fn refresh_accumulator(&self, pos: &Position, acc: &mut AccumulatorHalfKA<L1>) {
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
-            let accumulation = &mut acc.accumulation[p].0;
+            let accumulation = &mut acc.accumulation[p];
 
-            // biases を accumulation にコピー（SIMD 最適化版）
-            self.copy_biases_to_accumulation(accumulation);
+            accumulation.copy_from_slice(&self.biases);
 
-            let active_indices = HalfKPFeatureSet::collect_active_indices(pos, perspective);
+            let active_indices = HalfKAFeatureSet::collect_active_indices(pos, perspective);
             for &index in active_indices.iter() {
                 self.add_weights(accumulation, index);
             }
@@ -427,85 +436,38 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
         acc.computed_accumulation = true;
     }
 
-    /// biases を accumulation にコピー（SIMD 最適化版）
-    ///
-    /// AVX2: 16 i16/レジスタ → L1 / 16 チャンク
-    /// SSE2: 8 i16/レジスタ → L1 / 8 チャンク
-    #[inline]
-    fn copy_biases_to_accumulation(&self, accumulation: &mut [i16; L1]) {
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-        {
-            unsafe {
-                use std::arch::x86_64::*;
-                let dst_ptr = accumulation.as_mut_ptr() as *mut __m256i;
-                let src_ptr = self.biases.0.as_ptr() as *const __m256i;
-
-                // L1 / 16 はコンパイル時に定数展開される
-                for i in 0..(L1 / 16) {
-                    let src_vec = _mm256_load_si256(src_ptr.add(i));
-                    _mm256_store_si256(dst_ptr.add(i), src_vec);
-                }
-            }
-            return;
-        }
-
-        #[cfg(all(
-            target_arch = "x86_64",
-            target_feature = "sse2",
-            not(target_feature = "avx2")
-        ))]
-        {
-            unsafe {
-                use std::arch::x86_64::*;
-                let dst_ptr = accumulation.as_mut_ptr() as *mut __m128i;
-                let src_ptr = self.biases.0.as_ptr() as *const __m128i;
-
-                for i in 0..(L1 / 8) {
-                    let src_vec = _mm_load_si128(src_ptr.add(i));
-                    _mm_store_si128(dst_ptr.add(i), src_vec);
-                }
-            }
-            return;
-        }
-
-        #[allow(unreachable_code)]
-        {
-            accumulation.copy_from_slice(&self.biases.0);
-        }
-    }
-
     /// 差分更新
     pub fn update_accumulator(
         &self,
         pos: &Position,
         dirty_piece: &DirtyPiece,
-        acc: &mut AccumulatorHalfKP<L1>,
-        prev_acc: &AccumulatorHalfKP<L1>,
+        acc: &mut AccumulatorHalfKA<L1>,
+        prev_acc: &AccumulatorHalfKA<L1>,
     ) {
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
-            let reset = HalfKPFeatureSet::needs_refresh(dirty_piece, perspective);
+            let reset = HalfKAFeatureSet::needs_refresh(dirty_piece, perspective);
 
             if reset {
-                self.copy_biases_to_accumulation(&mut acc.accumulation[p].0);
-                let active_indices = HalfKPFeatureSet::collect_active_indices(pos, perspective);
+                acc.accumulation[p].copy_from_slice(&self.biases);
+                let active_indices = HalfKAFeatureSet::collect_active_indices(pos, perspective);
                 for &index in active_indices.iter() {
-                    self.add_weights(&mut acc.accumulation[p].0, index);
+                    self.add_weights(&mut acc.accumulation[p], index);
                 }
             } else {
-                let (removed, added) = HalfKPFeatureSet::collect_changed_indices(
+                let (removed, added) = HalfKAFeatureSet::collect_changed_indices(
                     dirty_piece,
                     perspective,
                     pos.king_square(perspective),
                 );
 
-                acc.accumulation[p].0.copy_from_slice(&prev_acc.accumulation[p].0);
+                acc.accumulation[p].copy_from_slice(&prev_acc.accumulation[p]);
 
                 for &index in removed.iter() {
-                    self.sub_weights(&mut acc.accumulation[p].0, index);
+                    self.sub_weights(&mut acc.accumulation[p], index);
                 }
                 for &index in added.iter() {
-                    self.add_weights(&mut acc.accumulation[p].0, index);
+                    self.add_weights(&mut acc.accumulation[p], index);
                 }
             }
         }
@@ -517,7 +479,7 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
     pub fn forward_update_incremental(
         &self,
         pos: &Position,
-        stack: &mut AccumulatorStackHalfKP<L1>,
+        stack: &mut AccumulatorStackHalfKA<L1>,
         source_idx: usize,
     ) -> bool {
         let Some(path) = stack.collect_path(source_idx) else {
@@ -528,7 +490,7 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
         {
             let (source_acc, current_acc) = stack.get_prev_and_current_accumulators(source_idx);
             for p in 0..2 {
-                current_acc.accumulation[p].0.copy_from_slice(&source_acc.accumulation[p].0);
+                current_acc.accumulation[p].copy_from_slice(&source_acc.accumulation[p]);
             }
         }
 
@@ -544,11 +506,10 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
 
                 let king_sq = pos.king_square(perspective);
                 let (removed, added) =
-                    HalfKPFeatureSet::collect_changed_indices(&dirty_piece, perspective, king_sq);
+                    HalfKAFeatureSet::collect_changed_indices(&dirty_piece, perspective, king_sq);
 
                 let p = perspective as usize;
-                let accumulation =
-                    &mut stack.entry_at_mut(current_idx).accumulator.accumulation[p].0;
+                let accumulation = &mut stack.entry_at_mut(current_idx).accumulator.accumulation[p];
 
                 for &index in removed.iter() {
                     self.sub_weights(accumulation, index);
@@ -564,12 +525,8 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
     }
 
     /// 重みを加算（SIMD最適化版）
-    ///
-    /// 元の feature_transformer.rs と同じパターンを使用。
-    /// AVX2: 16 i16/レジスタ → L1 / 16 チャンク
-    /// SSE2: 8 i16/レジスタ → L1 / 8 チャンク
     #[inline]
-    fn add_weights(&self, accumulation: &mut [i16; L1], index: usize) {
+    fn add_weights(&self, accumulation: &mut [i16], index: usize) {
         let offset = index * L1;
         let weights = &self.weights[offset..offset + L1];
 
@@ -579,9 +536,9 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
                 use std::arch::x86_64::*;
                 let acc_ptr = accumulation.as_mut_ptr();
                 let weight_ptr = weights.as_ptr();
+                let num_chunks = L1 / 16;
 
-                // L1 / 16 はコンパイル時に定数展開される
-                for i in 0..(L1 / 16) {
+                for i in 0..num_chunks {
                     let acc_vec = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
                     let weight_vec = _mm256_load_si256(weight_ptr.add(i * 16) as *const __m256i);
                     let result = _mm256_add_epi16(acc_vec, weight_vec);
@@ -601,8 +558,9 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
                 use std::arch::x86_64::*;
                 let acc_ptr = accumulation.as_mut_ptr();
                 let weight_ptr = weights.as_ptr();
+                let num_chunks = L1 / 8;
 
-                for i in 0..(L1 / 8) {
+                for i in 0..num_chunks {
                     let acc_vec = _mm_load_si128(acc_ptr.add(i * 8) as *const __m128i);
                     let weight_vec = _mm_load_si128(weight_ptr.add(i * 8) as *const __m128i);
                     let result = _mm_add_epi16(acc_vec, weight_vec);
@@ -619,12 +577,8 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
     }
 
     /// 重みを減算（SIMD最適化版）
-    ///
-    /// 元の feature_transformer.rs と同じパターンを使用。
-    /// AVX2: 16 i16/レジスタ → L1 / 16 チャンク
-    /// SSE2: 8 i16/レジスタ → L1 / 8 チャンク
     #[inline]
-    fn sub_weights(&self, accumulation: &mut [i16; L1], index: usize) {
+    fn sub_weights(&self, accumulation: &mut [i16], index: usize) {
         let offset = index * L1;
         let weights = &self.weights[offset..offset + L1];
 
@@ -634,9 +588,9 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
                 use std::arch::x86_64::*;
                 let acc_ptr = accumulation.as_mut_ptr();
                 let weight_ptr = weights.as_ptr();
+                let num_chunks = L1 / 16;
 
-                // L1 / 16 はコンパイル時に定数展開される
-                for i in 0..(L1 / 16) {
+                for i in 0..num_chunks {
                     let acc_vec = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
                     let weight_vec = _mm256_load_si256(weight_ptr.add(i * 16) as *const __m256i);
                     let result = _mm256_sub_epi16(acc_vec, weight_vec);
@@ -656,8 +610,9 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
                 use std::arch::x86_64::*;
                 let acc_ptr = accumulation.as_mut_ptr();
                 let weight_ptr = weights.as_ptr();
+                let num_chunks = L1 / 8;
 
-                for i in 0..(L1 / 8) {
+                for i in 0..num_chunks {
                     let acc_vec = _mm_load_si128(acc_ptr.add(i * 8) as *const __m128i);
                     let weight_vec = _mm_load_si128(weight_ptr.add(i * 8) as *const __m128i);
                     let result = _mm_sub_epi16(acc_vec, weight_vec);
@@ -678,7 +633,7 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
     /// 活性化関数は呼び出し側で適用する。
     pub fn transform_raw(
         &self,
-        acc: &AccumulatorHalfKP<L1>,
+        acc: &AccumulatorHalfKA<L1>,
         side_to_move: Color,
         output: &mut [i16],
     ) {
@@ -686,14 +641,14 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
 
         for (p, &perspective) in perspectives.iter().enumerate() {
             let out_offset = L1 * p;
-            let accumulation = &acc.accumulation[perspective as usize].0;
+            let accumulation = &acc.accumulation[perspective as usize];
             output[out_offset..out_offset + L1].copy_from_slice(accumulation);
         }
     }
 }
 
 // =============================================================================
-// AffineTransformHalfKP - const generics 版アフィン変換（ループ逆転最適化版）
+// AffineTransformHalfKA - const generics 版アフィン変換（ループ逆転最適化版）
 // =============================================================================
 
 /// アフィン変換層（ループ逆転最適化 + スクランブル重み形式）
@@ -701,14 +656,14 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
 /// YaneuraOu/Stockfish スタイルの SIMD 最適化を実装。
 /// 重みはスクランブル形式 `weights[input_chunk][output][4]` で保持し、
 /// ループ逆転により入力をブロードキャストして全出力に同時適用する。
-pub struct AffineTransformHalfKP<const INPUT: usize, const OUTPUT: usize> {
+pub struct AffineTransformHalfKA<const INPUT: usize, const OUTPUT: usize> {
     /// バイアス [OUTPUT]
     pub biases: [i32; OUTPUT],
     /// 重み（スクランブル形式、64バイトアライン）
     pub weights: AlignedBox<i8>,
 }
 
-impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKP<INPUT, OUTPUT> {
+impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKA<INPUT, OUTPUT> {
     /// パディング済み入力次元（32の倍数）
     const PADDED_INPUT: usize = INPUT.div_ceil(32) * 32;
 
@@ -982,10 +937,10 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKP<INPUT, OUTPU
 }
 
 // =============================================================================
-// NetworkHalfKP - const generics 版統一ネットワーク
+// NetworkHalfKA - const generics 版統一ネットワーク
 // =============================================================================
 
-/// HalfKP ネットワーク（const generics 版）
+/// HalfKA ネットワーク（const generics 版）
 ///
 /// # 型パラメータ
 /// - `L1`: FT出力次元（片側）
@@ -996,7 +951,7 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKP<INPUT, OUTPU
 /// - `L2`: 隠れ層1の出力次元
 /// - `L3`: 隠れ層2の出力次元
 /// - `A`: 活性化関数（FtActivation trait を実装する型）
-pub struct NetworkHalfKP<
+pub struct NetworkHalfKA<
     const L1: usize,
     const FT_OUT: usize,
     const L1_INPUT: usize,
@@ -1005,13 +960,13 @@ pub struct NetworkHalfKP<
     A: FtActivation,
 > {
     /// Feature Transformer (入力 → L1)
-    pub feature_transformer: FeatureTransformerHalfKP<L1>,
+    pub feature_transformer: FeatureTransformerHalfKA<L1>,
     /// 隠れ層1: L1_INPUT → L2
-    pub l1: AffineTransformHalfKP<L1_INPUT, L2>,
+    pub l1: AffineTransformHalfKA<L1_INPUT, L2>,
     /// 隠れ層2: L2 → L3
-    pub l2: AffineTransformHalfKP<L2, L3>,
+    pub l2: AffineTransformHalfKA<L2, L3>,
     /// 出力層: L3 → 1
-    pub output: AffineTransformHalfKP<L3, 1>,
+    pub output: AffineTransformHalfKA<L3, 1>,
     /// 評価値スケーリング係数
     pub fv_scale: i32,
     /// QA値（クリッピング閾値）
@@ -1027,7 +982,7 @@ impl<
         const L2: usize,
         const L3: usize,
         A: FtActivation,
-    > NetworkHalfKP<L1, FT_OUT, L1_INPUT, L2, L3, A>
+    > NetworkHalfKA<L1, FT_OUT, L1_INPUT, L2, L3, A>
 {
     /// コンパイル時制約
     ///
@@ -1050,7 +1005,7 @@ impl<
         reader.read_exact(&mut buf4)?;
         let version = u32::from_le_bytes(buf4);
 
-        if version != NNUE_VERSION {
+        if version != 0x7AF32F16 && version != NNUE_VERSION_HALFKA {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unknown NNUE version: {version:#x}"),
@@ -1074,8 +1029,24 @@ impl<
 
         let arch_str = String::from_utf8_lossy(&arch);
 
+        // Factorizedモデル（未coalesce）の検出
+        if arch_str.contains("Factorizer") {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Unsupported model format: factorized (non-coalesced) HalfKA^ model detected.\n\
+                     This engine only supports coalesced models (138,510 dimensions).\n\
+                     Factorized models are for training only.\n\n\
+                     To fix: Re-export the model using nnue-pytorch serialize.py:\n\
+                       python serialize.py model.ckpt output.nnue\n\n\
+                     The serialize.py script automatically coalesces factor weights.\n\
+                     Architecture string: {arch_str}"
+                ),
+            ));
+        }
+
         // FV_SCALE 検出
-        let fv_scale = parse_fv_scale_from_arch(&arch_str).unwrap_or(FV_SCALE);
+        let fv_scale = parse_fv_scale_from_arch(&arch_str).unwrap_or(FV_SCALE_HALFKA);
 
         // QA 検出（デフォルト 127）
         let qa = parse_qa_from_arch(&arch_str).unwrap_or(127);
@@ -1084,19 +1055,19 @@ impl<
         reader.read_exact(&mut buf4)?;
 
         // Feature Transformer
-        let feature_transformer = FeatureTransformerHalfKP::read(reader)?;
+        let feature_transformer = FeatureTransformerHalfKA::read(reader)?;
 
         // FC layers ハッシュ
         reader.read_exact(&mut buf4)?;
 
-        // l1: L1_INPUT → L2
-        let l1 = AffineTransformHalfKP::read(reader)?;
+        // l1: L1*2 → L2
+        let l1 = AffineTransformHalfKA::read(reader)?;
 
         // l2: L2 → L3
-        let l2 = AffineTransformHalfKP::read(reader)?;
+        let l2 = AffineTransformHalfKA::read(reader)?;
 
         // output: L3 → 1
-        let output = AffineTransformHalfKP::read(reader)?;
+        let output = AffineTransformHalfKA::read(reader)?;
 
         Ok(Self {
             feature_transformer,
@@ -1110,7 +1081,7 @@ impl<
     }
 
     /// Accumulator をリフレッシュ
-    pub fn refresh_accumulator(&self, pos: &Position, acc: &mut AccumulatorHalfKP<L1>) {
+    pub fn refresh_accumulator(&self, pos: &Position, acc: &mut AccumulatorHalfKA<L1>) {
         self.feature_transformer.refresh_accumulator(pos, acc);
     }
 
@@ -1119,8 +1090,8 @@ impl<
         &self,
         pos: &Position,
         dirty_piece: &DirtyPiece,
-        acc: &mut AccumulatorHalfKP<L1>,
-        prev_acc: &AccumulatorHalfKP<L1>,
+        acc: &mut AccumulatorHalfKA<L1>,
+        prev_acc: &AccumulatorHalfKA<L1>,
     ) {
         self.feature_transformer.update_accumulator(pos, dirty_piece, acc, prev_acc);
     }
@@ -1129,7 +1100,7 @@ impl<
     pub fn forward_update_incremental(
         &self,
         pos: &Position,
-        stack: &mut AccumulatorStackHalfKP<L1>,
+        stack: &mut AccumulatorStackHalfKA<L1>,
         source_idx: usize,
     ) -> bool {
         self.feature_transformer.forward_update_incremental(pos, stack, source_idx)
@@ -1138,28 +1109,57 @@ impl<
     /// 評価値を計算
     ///
     /// 最適化: スタック配列 + 64バイトアラインメントで SIMD 効率を最大化
-    pub fn evaluate(&self, pos: &Position, acc: &AccumulatorHalfKP<L1>) -> Value {
+    pub fn evaluate(&self, pos: &Position, acc: &AccumulatorHalfKA<L1>) -> Value {
+        let debug = nnue_debug_enabled();
+
         // Feature Transformer 出力（生のi16値）- 64バイトアライン
         // FT出力は常に FT_OUT（= L1 * 2、両視点の連結）
-        let mut ft_out_i16 = AlignedGeneric([0i16; FT_OUT]);
+        let mut ft_out_i16 = Aligned([0i16; FT_OUT]);
         self.feature_transformer
             .transform_raw(acc, pos.side_to_move(), &mut ft_out_i16.0);
 
+        if debug {
+            let ft_min = ft_out_i16.0.iter().min().copied().unwrap_or(0);
+            let ft_max = ft_out_i16.0.iter().max().copied().unwrap_or(0);
+            let ft_sum: i64 = ft_out_i16.0.iter().map(|&x| x as i64).sum();
+            eprintln!(
+                "[DEBUG] FT output: min={ft_min}, max={ft_max}, sum={ft_sum}, len={}",
+                ft_out_i16.0.len()
+            );
+            eprintln!("[DEBUG] FT[0..8]: {:?}", &ft_out_i16.0[0..8]);
+        }
+
         // 活性化関数適用 (i16 → u8) - 64バイトアライン
         // 活性化後のサイズは L1_INPUT（CReLU: L1*2、Pairwise: L1）
-        let mut transformed = AlignedGeneric([0u8; L1_INPUT]);
+        let mut transformed = Aligned([0u8; L1_INPUT]);
         A::activate_i16_to_u8(&ft_out_i16.0, &mut transformed.0, self.qa);
 
+        if debug {
+            let t_min = transformed.0.iter().min().copied().unwrap_or(0);
+            let t_max = transformed.0.iter().max().copied().unwrap_or(0);
+            let t_sum: u64 = transformed.0.iter().map(|&x| x as u64).sum();
+            eprintln!("[DEBUG] After activation ({} i16→u8): min={t_min}, max={t_max}, sum={t_sum}, len={}", A::name(), transformed.0.len());
+            eprintln!("[DEBUG] transformed[0..16]: {:?}", &transformed.0[0..16]);
+        }
+
         // l1 層 - 64バイトアライン
-        let mut l1_out = AlignedGeneric([0i32; L2]);
+        let mut l1_out = Aligned([0i32; L2]);
         self.l1.propagate(&transformed.0, &mut l1_out.0);
+
+        if debug {
+            eprintln!("[DEBUG] L1 output: {:?}", &l1_out.0);
+            eprintln!(
+                "[DEBUG] L1 biases[0..8]: {:?}",
+                &self.l1.biases[0..8.min(self.l1.biases.len())]
+            );
+        }
 
         // デバッグ: L1出力の範囲チェック
         #[cfg(debug_assertions)]
         for (i, &v) in l1_out.0.iter().enumerate() {
             debug_assert!(
                 v.abs() < 1_000_000,
-                "L1 output[{i}] = {v} is out of expected range (NetworkHalfKP<{}, {}, {}, {}>)",
+                "L1 output[{i}] = {v} is out of expected range (NetworkHalfKA<{}, {}, {}, {}>)",
                 L1,
                 L2,
                 L3,
@@ -1168,11 +1168,11 @@ impl<
         }
 
         // 活性化関数適用 (i32 → u8) - 64バイトアライン
-        let mut l1_relu = AlignedGeneric([0u8; L2]);
+        let mut l1_relu = Aligned([0u8; L2]);
         A::activate_i32_to_u8(&l1_out.0, &mut l1_relu.0);
 
         // l2 層 - 64バイトアライン
-        let mut l2_out = AlignedGeneric([0i32; L3]);
+        let mut l2_out = Aligned([0i32; L3]);
         self.l2.propagate(&l1_relu.0, &mut l2_out.0);
 
         // デバッグ: L2出力の範囲チェック
@@ -1180,7 +1180,7 @@ impl<
         for (i, &v) in l2_out.0.iter().enumerate() {
             debug_assert!(
                 v.abs() < 1_000_000,
-                "L2 output[{i}] = {v} is out of expected range (NetworkHalfKP<{}, {}, {}, {}>)",
+                "L2 output[{i}] = {v} is out of expected range (NetworkHalfKA<{}, {}, {}, {}>)",
                 L1,
                 L2,
                 L3,
@@ -1189,7 +1189,7 @@ impl<
         }
 
         // 活性化関数適用 (i32 → u8) - 64バイトアライン
-        let mut l2_relu = AlignedGeneric([0u8; L3]);
+        let mut l2_relu = Aligned([0u8; L3]);
         A::activate_i32_to_u8(&l2_out.0, &mut l2_relu.0);
 
         // output 層
@@ -1204,7 +1204,7 @@ impl<
         #[cfg(debug_assertions)]
         debug_assert!(
             eval.abs() < 50_000,
-            "Final evaluation {eval} is out of expected range (NetworkHalfKP<{}, {}, {}, {}>). Raw output: {}",
+            "Final evaluation {eval} is out of expected range (NetworkHalfKA<{}, {}, {}, {}>). Raw output: {}",
             L1,
             L2,
             L3,
@@ -1221,18 +1221,18 @@ impl<
     }
 
     /// 新しい Accumulator を作成
-    pub fn new_accumulator(&self) -> AccumulatorHalfKP<L1> {
-        AccumulatorHalfKP::new()
+    pub fn new_accumulator(&self) -> AccumulatorHalfKA<L1> {
+        AccumulatorHalfKA::new()
     }
 
     /// 新しい AccumulatorStack を作成
-    pub fn new_accumulator_stack(&self) -> AccumulatorStackHalfKP<L1> {
-        AccumulatorStackHalfKP::new()
+    pub fn new_accumulator_stack(&self) -> AccumulatorStackHalfKA<L1> {
+        AccumulatorStackHalfKA::new()
     }
 
     /// アーキテクチャ名を取得
     pub fn architecture_name(&self) -> String {
-        format!("HalfKP{}x2-{}-{}-{}", L1, L2, L3, A::name())
+        format!("HalfKA^{}x2-{}-{}-{}", L1, L2, L3, A::name())
     }
 }
 
@@ -1242,19 +1242,9 @@ impl<
 
 /// アーキテクチャ文字列から QA 値をパース
 fn parse_qa_from_arch(arch_str: &str) -> Option<i16> {
+    // "qa=N" パターンを探す
     if let Some(start) = arch_str.find("qa=") {
         let rest = &arch_str[start + 3..];
-        let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
-        rest[..end].parse().ok()
-    } else {
-        None
-    }
-}
-
-/// アーキテクチャ文字列から FV_SCALE をパース
-fn parse_fv_scale_from_arch(arch_str: &str) -> Option<i32> {
-    if let Some(start) = arch_str.find("fv_scale=") {
-        let rest = &arch_str[start + 9..];
         let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
         rest[..end].parse().ok()
     } else {
@@ -1270,38 +1260,46 @@ use super::activation::{CReLU, PairwiseCReLU, SCReLU};
 
 // L1=256, FT_OUT=512
 // CReLU/SCReLU: L1_INPUT=512, Pairwise: L1_INPUT=256
-/// HalfKP 256x2-32-32 CReLU
-pub type HalfKP256CReLU = NetworkHalfKP<256, 512, 512, 32, 32, CReLU>;
-/// HalfKP 256x2-32-32 SCReLU
-pub type HalfKP256SCReLU = NetworkHalfKP<256, 512, 512, 32, 32, SCReLU>;
-/// HalfKP 256/2x2-32-32 PairwiseCReLU (L1入力=256, Pairwise乗算で次元半減)
-pub type HalfKP256Pairwise = NetworkHalfKP<256, 512, 256, 32, 32, PairwiseCReLU>;
+/// HalfKA 256x2-32-32 CReLU
+pub type HalfKA256CReLU = NetworkHalfKA<256, 512, 512, 32, 32, CReLU>;
+/// HalfKA 256x2-32-32 SCReLU
+pub type HalfKA256SCReLU = NetworkHalfKA<256, 512, 512, 32, 32, SCReLU>;
+/// HalfKA 256/2x2-32-32 PairwiseCReLU (L1入力=256, Pairwise乗算で次元半減)
+pub type HalfKA256Pairwise = NetworkHalfKA<256, 512, 256, 32, 32, PairwiseCReLU>;
 
-// L1=512, FT_OUT=1024
+// L1=512, FT_OUT=1024, L2=8, L3=96
 // CReLU/SCReLU: L1_INPUT=1024, Pairwise: L1_INPUT=512
-/// HalfKP 512x2-8-96 CReLU
-pub type HalfKP512CReLU = NetworkHalfKP<512, 1024, 1024, 8, 96, CReLU>;
-/// HalfKP 512x2-8-96 SCReLU
-pub type HalfKP512SCReLU = NetworkHalfKP<512, 1024, 1024, 8, 96, SCReLU>;
-/// HalfKP 512/2x2-8-96 PairwiseCReLU (L1入力=512, Pairwise乗算で次元半減)
-pub type HalfKP512Pairwise = NetworkHalfKP<512, 1024, 512, 8, 96, PairwiseCReLU>;
+/// HalfKA 512x2-8-96 CReLU
+pub type HalfKA512CReLU = NetworkHalfKA<512, 1024, 1024, 8, 96, CReLU>;
+/// HalfKA 512x2-8-96 SCReLU
+pub type HalfKA512SCReLU = NetworkHalfKA<512, 1024, 1024, 8, 96, SCReLU>;
+/// HalfKA 512/2x2-8-96 PairwiseCReLU (L1入力=512, Pairwise乗算で次元半減)
+pub type HalfKA512Pairwise = NetworkHalfKA<512, 1024, 512, 8, 96, PairwiseCReLU>;
 
 // L1=512, FT_OUT=1024, L2=32, L3=32
-/// HalfKP 512x2-32-32 CReLU
-pub type HalfKP512_32_32CReLU = NetworkHalfKP<512, 1024, 1024, 32, 32, CReLU>;
-/// HalfKP 512x2-32-32 SCReLU
-pub type HalfKP512_32_32SCReLU = NetworkHalfKP<512, 1024, 1024, 32, 32, SCReLU>;
-/// HalfKP 512/2x2-32-32 PairwiseCReLU (L1入力=512, Pairwise乗算で次元半減)
-pub type HalfKP512_32_32Pairwise = NetworkHalfKP<512, 1024, 512, 32, 32, PairwiseCReLU>;
+/// HalfKA 512x2-32-32 CReLU
+pub type HalfKA512_32_32CReLU = NetworkHalfKA<512, 1024, 1024, 32, 32, CReLU>;
+/// HalfKA 512x2-32-32 SCReLU
+pub type HalfKA512_32_32SCReLU = NetworkHalfKA<512, 1024, 1024, 32, 32, SCReLU>;
+/// HalfKA 512/2x2-32-32 PairwiseCReLU (L1入力=512, Pairwise乗算で次元半減)
+pub type HalfKA512_32_32Pairwise = NetworkHalfKA<512, 1024, 512, 32, 32, PairwiseCReLU>;
+
+// L1=1024, FT_OUT=2048, L2=8, L3=96
+// CReLU/SCReLU: L1_INPUT=2048, Pairwise: L1_INPUT=1024
+/// HalfKA 1024x2-8-96 CReLU
+pub type HalfKA1024CReLU = NetworkHalfKA<1024, 2048, 2048, 8, 96, CReLU>;
+/// HalfKA 1024x2-8-96 SCReLU
+pub type HalfKA1024SCReLU = NetworkHalfKA<1024, 2048, 2048, 8, 96, SCReLU>;
+/// HalfKA 1024/2x2-8-96 PairwiseCReLU (L1入力=1024, Pairwise乗算で次元半減)
+pub type HalfKA1024Pairwise = NetworkHalfKA<1024, 2048, 1024, 8, 96, PairwiseCReLU>;
 
 // L1=1024, FT_OUT=2048, L2=8, L3=32
-// CReLU/SCReLU: L1_INPUT=2048, Pairwise: L1_INPUT=1024
-/// HalfKP 1024x2-8-32 CReLU
-pub type HalfKP1024_8_32CReLU = NetworkHalfKP<1024, 2048, 2048, 8, 32, CReLU>;
-/// HalfKP 1024x2-8-32 SCReLU
-pub type HalfKP1024_8_32SCReLU = NetworkHalfKP<1024, 2048, 2048, 8, 32, SCReLU>;
-/// HalfKP 1024/2x2-8-32 PairwiseCReLU (L1入力=1024, Pairwise乗算で次元半減)
-pub type HalfKP1024_8_32Pairwise = NetworkHalfKP<1024, 2048, 1024, 8, 32, PairwiseCReLU>;
+/// HalfKA 1024x2-8-32 CReLU
+pub type HalfKA1024_8_32CReLU = NetworkHalfKA<1024, 2048, 2048, 8, 32, CReLU>;
+/// HalfKA 1024x2-8-32 SCReLU
+pub type HalfKA1024_8_32SCReLU = NetworkHalfKA<1024, 2048, 2048, 8, 32, SCReLU>;
+/// HalfKA 1024/2x2-8-32 PairwiseCReLU (L1入力=1024, Pairwise乗算で次元半減)
+pub type HalfKA1024_8_32Pairwise = NetworkHalfKA<1024, 2048, 1024, 8, 32, PairwiseCReLU>;
 
 // =============================================================================
 // テスト
@@ -1312,77 +1310,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_accumulator_halfkp_256() {
-        let mut acc = AccumulatorHalfKP::<256>::new();
-        assert_eq!(acc.accumulation[0].0.len(), 256);
+    fn test_accumulator_halfka_256() {
+        let mut acc = AccumulatorHalfKA::<256>::new();
+        assert_eq!(acc.accumulation[0].len(), 256);
         assert!(!acc.computed_accumulation);
 
-        acc.accumulation[0].0[0] = 100;
+        acc.accumulation[0][0] = 100;
         acc.computed_accumulation = true;
 
         let cloned = acc.clone();
-        assert_eq!(cloned.accumulation[0].0[0], 100);
+        assert_eq!(cloned.accumulation[0][0], 100);
         assert!(cloned.computed_accumulation);
     }
 
     #[test]
-    fn test_accumulator_halfkp_512() {
-        let acc = AccumulatorHalfKP::<512>::new();
-        assert_eq!(acc.accumulation[0].0.len(), 512);
+    fn test_accumulator_halfka_512() {
+        let acc = AccumulatorHalfKA::<512>::new();
+        assert_eq!(acc.accumulation[0].len(), 512);
+    }
+
+    #[test]
+    fn test_accumulator_halfka_1024() {
+        let acc = AccumulatorHalfKA::<1024>::new();
+        assert_eq!(acc.accumulation[0].len(), 1024);
     }
 
     #[test]
     fn test_padded_input() {
-        assert_eq!(AffineTransformHalfKP::<512, 32>::PADDED_INPUT, 512);
-        assert_eq!(AffineTransformHalfKP::<32, 32>::PADDED_INPUT, 32);
-        assert_eq!(AffineTransformHalfKP::<32, 1>::PADDED_INPUT, 32);
+        assert_eq!(AffineTransformHalfKA::<8, 96>::PADDED_INPUT, 32);
+        assert_eq!(AffineTransformHalfKA::<32, 96>::PADDED_INPUT, 32);
+        assert_eq!(AffineTransformHalfKA::<33, 96>::PADDED_INPUT, 64);
+        assert_eq!(AffineTransformHalfKA::<96, 1>::PADDED_INPUT, 96);
+        assert_eq!(AffineTransformHalfKA::<1024, 8>::PADDED_INPUT, 1024);
+        assert_eq!(AffineTransformHalfKA::<2048, 8>::PADDED_INPUT, 2048);
     }
 
     #[test]
     fn test_parse_qa_from_arch() {
-        // bullet-shogi 形式（qa= を含む）の仮定ケース
+        // bullet-shogi 形式（qa= を含む）
         assert_eq!(
             parse_qa_from_arch(
-                "Features=HalfKP(Friend)[125388->256x2],fv_scale=24,l2=32,l3=32,qa=255"
+                "Features=HalfKA[138510->512x2],fv_scale=16,l1_input=1024,l2=8,l3=96,qa=255,qb=64"
             ),
             Some(255)
         );
         assert_eq!(
             parse_qa_from_arch(
-                "Features=HalfKP(Friend)[125388->256x2],fv_scale=24,l2=32,l3=32,qa=127"
+                "Features=HalfKA[138510->512x2],fv_scale=16,l1_input=1024,l2=8,l3=96,qa=127,qb=64"
             ),
             Some(127)
         );
         // nnue-pytorch 形式（qa= を含まない → None でデフォルト値 127 を使用）
-        // 実際のファイル例: suisho5.bin
         assert_eq!(
-            parse_qa_from_arch(
-                "Features=HalfKP(Friend)[125388->256x2],Network=AffineTransform[1<-32]"
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn test_parse_fv_scale_from_arch() {
-        // bullet-shogi 形式（fv_scale= を含む）の仮定ケース
-        assert_eq!(
-            parse_fv_scale_from_arch(
-                "Features=HalfKP(Friend)[125388->256x2],fv_scale=24,l2=32,l3=32"
-            ),
-            Some(24)
-        );
-        assert_eq!(
-            parse_fv_scale_from_arch(
-                "Features=HalfKP(Friend)[125388->256x2],fv_scale=16,l2=32,l3=32"
-            ),
-            Some(16)
-        );
-        // nnue-pytorch 形式（fv_scale= を含まない → None でデフォルト値を使用）
-        assert_eq!(
-            parse_fv_scale_from_arch(
-                "Features=HalfKP(Friend)[125388->256x2],Network=AffineTransform[1<-32]"
-            ),
+            parse_qa_from_arch("Features=HalfKA[138510->512x2],Network=AffineTransform[1<-96]"),
             None
         );
     }
@@ -1390,7 +1370,8 @@ mod tests {
     #[test]
     fn test_type_aliases() {
         // 型エイリアスがコンパイルできることを確認
-        fn _check_halfkp_256_crelu(_: HalfKP256CReLU) {}
-        fn _check_halfkp_512_screlu(_: HalfKP512SCReLU) {}
+        fn _check_halfka_256_crelu(_: HalfKA256CReLU) {}
+        fn _check_halfka_512_screlu(_: HalfKA512SCReLU) {}
+        fn _check_halfka_1024_pairwise(_: HalfKA1024Pairwise) {}
     }
 }

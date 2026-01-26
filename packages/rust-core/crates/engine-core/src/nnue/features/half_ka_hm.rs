@@ -11,7 +11,7 @@
 //!
 //! 参考実装: nnue-pytorch training_data_loader.cpp, serialize.py
 
-use super::{Feature, TriggerEvent};
+use super::{Feature, TriggerEvent, BOARD_PIECE_TYPES};
 use crate::nnue::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES};
 use crate::nnue::bona_piece::{BonaPiece, PIECE_BASE};
 use crate::nnue::bona_piece_halfka_hm::{
@@ -20,23 +20,6 @@ use crate::nnue::bona_piece_halfka_hm::{
 use crate::nnue::constants::HALFKA_HM_DIMENSIONS;
 use crate::position::Position;
 use crate::types::{Color, PieceType, Square};
-
-/// 盤上の駒種（King除外）
-const BOARD_PIECE_TYPES: [PieceType; 13] = [
-    PieceType::Pawn,
-    PieceType::Lance,
-    PieceType::Knight,
-    PieceType::Silver,
-    PieceType::Gold,
-    PieceType::Bishop,
-    PieceType::Rook,
-    PieceType::ProPawn,
-    PieceType::ProLance,
-    PieceType::ProKnight,
-    PieceType::ProSilver,
-    PieceType::Horse,
-    PieceType::Dragon,
-];
 
 /// HalfKA_hm^ 特徴量
 ///
@@ -49,15 +32,14 @@ impl Feature for HalfKA_hm {
     /// 特徴量の次元数: BASE (45×1629) = 73,305
     const DIMENSIONS: usize = HALFKA_HM_DIMENSIONS;
 
-    /// 同時にアクティブになる最大数（合法局面での理論上限）
+    /// 同時にアクティブになる最大数（初期局面での値）
     ///
-    /// 将棋の合法局面では駒の総数は40個固定:
-    /// - 盤上駒（王含む）+ 手駒 = 40
+    /// 初期局面（手駒なし）: 盤上38駒 + 両王2 = 40
+    /// 手駒がある場合: 40 + 手駒枚数（各手駒が1特徴量ずつ追加される）
     ///
-    /// coalesce済みモデルでは各駒が1特徴量なので MAX_ACTIVE = 40。
+    /// 例: 歩3枚を持っている場合 → 「歩1枚目」「歩2枚目」「歩3枚目」の3特徴量
     ///
-    /// 注意: この値は理論上限。実際のIndexListは`MAX_ACTIVE_FEATURES = 54`を使用し、
-    /// テスト用の非合法局面（駒数超過）にも対応できる安全マージンを持つ。
+    /// 実際のIndexListは`MAX_ACTIVE_FEATURES = 54`を使用し、安全マージンを持つ。
     const MAX_ACTIVE: usize = 40;
 
     /// 自玉が動いた場合に全計算

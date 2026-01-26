@@ -673,7 +673,7 @@ pub fn free_nnue_buffer(ptr: *mut u8, len: usize) {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct NnueFormatInfoJs {
-    /// アーキテクチャ名（例: "HalfKA_hm1024", "LayerStacks"）
+    /// アーキテクチャ名（例: "HalfKA1024", "HalfKA_hm1024", "LayerStacks"）
     architecture: String,
 
     /// L1 次元（例: 256, 512, 1024, 1536）

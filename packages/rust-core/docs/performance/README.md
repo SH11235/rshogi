@@ -18,6 +18,7 @@
 |----------|------|
 | [nnue-benchmark-methodology.md](./nnue-benchmark-methodology.md) | NNUE評価関数のマイクロベンチマーク方法 |
 | [nnue-eval-results.json](./nnue-eval-results.json) | NNUE評価関数のベンチマーク結果（機械可読） |
+| [enum-dispatch-overhead.md](./enum-dispatch-overhead.md) | enum + match ディスパッチのパフォーマンス特性（GAT との比較） |
 
 ---
 
