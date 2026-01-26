@@ -1,5 +1,6 @@
 import {
     generateNnueId,
+    NNUE_HEADER_SIZE,
     NnueError,
     type NnueMeta,
     type NnueStorageCapabilities,
@@ -43,6 +44,7 @@ export function useNnueStorage(): UseNnueStorageReturn {
     const context = useNnueContextOptional();
     const storage = context?.storage ?? null;
     const capabilities = storage?.capabilities ?? null;
+    const validateNnueHeader = context?.validateNnueHeader ?? null;
 
     // Context から共有状態を取得
     const nnueList = context?.nnueList ?? [];
@@ -90,6 +92,34 @@ export function useNnueStorage(): UseNnueStorageReturn {
                 const arrayBuffer = await file.arrayBuffer();
                 const data = new Uint8Array(arrayBuffer);
 
+                let format: NnueMeta["format"] | undefined;
+                if (validateNnueHeader) {
+                    try {
+                        const header = data.subarray(
+                            0,
+                            Math.min(NNUE_HEADER_SIZE, data.byteLength),
+                        );
+                        const result = await validateNnueHeader(header);
+                        if (!result.isCompatible) {
+                            throw new NnueError(
+                                "NNUE_INCOMPATIBLE",
+                                "このエンジンは指定された NNUE 形式に対応していません",
+                            );
+                        }
+                        format = result.format;
+                    } catch (e) {
+                        const err =
+                            e instanceof NnueError
+                                ? e
+                                : new NnueError(
+                                      "NNUE_INVALID_FORMAT",
+                                      "このファイルは NNUE 形式ではありません",
+                                      e,
+                                  );
+                        throw err;
+                    }
+                }
+
                 // SHA-256 ハッシュを計算
                 const hashBuffer = await crypto.subtle.digest("SHA-256", data);
                 const hashArray = Array.from(new Uint8Array(hashBuffer));
@@ -98,8 +128,14 @@ export function useNnueStorage(): UseNnueStorageReturn {
                 // 重複チェック
                 const existing = await storage.listByContentHash(hash);
                 if (existing.length > 0) {
+                    const existingMeta = existing[0];
+                    if (format && !existingMeta.format) {
+                        await storage.updateMeta(existingMeta.id, { format });
+                        await refreshList();
+                        return { ...existingMeta, format };
+                    }
                     // 既存のものを返す（重複保存しない）
-                    return existing[0];
+                    return existingMeta;
                 }
 
                 // ID を生成
@@ -115,6 +151,7 @@ export function useNnueStorage(): UseNnueStorageReturn {
                     source: "user-uploaded",
                     createdAt: Date.now(),
                     verified: false,
+                    format,
                 };
 
                 // 保存
@@ -136,7 +173,7 @@ export function useNnueStorage(): UseNnueStorageReturn {
                 setIsOperating(false);
             }
         },
-        [storage, refreshList],
+        [storage, refreshList, validateNnueHeader],
     );
 
     const importFromPath = useCallback(

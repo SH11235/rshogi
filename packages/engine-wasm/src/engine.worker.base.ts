@@ -31,6 +31,20 @@ type WasmWorkerBindings = {
     defaultWasmModuleUrl?: URL;
 };
 
+type DirectWriteWasmExports = {
+    memory?: WebAssembly.Memory;
+    alloc_nnue_buffer?: (len: number) => number;
+    load_model_from_ptr?: (ptr: number, len: number) => void;
+    free_nnue_buffer?: (ptr: number, len: number) => void;
+};
+
+type DirectWriteBindings = {
+    memory: WebAssembly.Memory;
+    allocNnueBuffer: (len: number) => number;
+    loadModelFromPtr: (ptr: number, len: number) => void;
+    freeNnueBuffer: (ptr: number, len: number) => void;
+};
+
 type CommandBase = { requestId?: string };
 
 type InitCommand = CommandBase & {
@@ -64,18 +78,115 @@ type WorkerCommand =
 
 type ModelCache = { uri: string; bytes: Uint8Array };
 
+type NnueLoadResult = { kind: "bytes"; bytes: Uint8Array } | { kind: "direct"; size: number };
+
 type AckMessage = { type: "ack"; requestId: string; error?: string };
 
 const INFO_THROTTLE_MS = 50;
 
-/**
- * Worker 内で IndexedDB から NNUE バイナリを読み込む
- * メモリ効率のため、事前確保方式で stream 読み込み
- */
-async function loadNnueFromIndexedDB(
-    id: string,
+async function streamReaderToBuffer(
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    target: Uint8Array,
+    total: number,
     onProgress: (loaded: number, total: number) => void,
-): Promise<Uint8Array> {
+): Promise<void> {
+    let offset = 0;
+    let lastProgressTime = 0;
+
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!value) continue;
+
+            if (offset + value.length > target.length) {
+                throw new Error(`Stream exceeds buffer: ${offset + value.length}/${target.length}`);
+            }
+
+            target.set(value, offset);
+            offset += value.length;
+
+            const now = Date.now();
+            if (now - lastProgressTime > NNUE_PROGRESS_THROTTLE_MS) {
+                onProgress(offset, total);
+                lastProgressTime = now;
+            }
+        }
+    } finally {
+        reader.releaseLock();
+    }
+
+    if (offset !== total) {
+        throw new Error(`Incomplete stream: ${offset}/${total} bytes`);
+    }
+
+    onProgress(total, total);
+}
+
+async function streamBlobToBuffer(
+    blob: Blob,
+    target: Uint8Array,
+    onProgress: (loaded: number, total: number) => void,
+): Promise<void> {
+    const reader = blob.stream().getReader();
+    await streamReaderToBuffer(reader, target, blob.size, onProgress);
+}
+
+async function loadNnueWithDirectWrite(
+    total: number,
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    directWrite: DirectWriteBindings,
+    onProgress: (loaded: number, total: number) => void,
+): Promise<number> {
+    if (total <= 0) {
+        throw new Error(`Invalid NNUE size: ${total}`);
+    }
+
+    const ptr = directWrite.allocNnueBuffer(total);
+    if (!ptr) {
+        throw new Error("Failed to allocate NNUE buffer");
+    }
+
+    let consumed = false;
+    try {
+        const target = new Uint8Array(directWrite.memory.buffer, ptr >>> 0, total);
+        await streamReaderToBuffer(reader, target, total, onProgress);
+        consumed = true;
+        directWrite.loadModelFromPtr(ptr, total);
+        return total;
+    } finally {
+        if (!consumed) {
+            directWrite.freeNnueBuffer(ptr, total);
+        }
+    }
+}
+
+function loadNnueBytesWithDirectWrite(bytes: Uint8Array, directWrite: DirectWriteBindings): number {
+    const total = bytes.length;
+    if (total <= 0) {
+        throw new Error(`Invalid NNUE size: ${total}`);
+    }
+
+    const ptr = directWrite.allocNnueBuffer(total);
+    if (!ptr) {
+        throw new Error("Failed to allocate NNUE buffer");
+    }
+
+    let consumed = false;
+    try {
+        const target = new Uint8Array(directWrite.memory.buffer, ptr >>> 0, total);
+        target.set(bytes);
+        consumed = true;
+        directWrite.loadModelFromPtr(ptr, total);
+        return total;
+    } finally {
+        if (!consumed) {
+            directWrite.freeNnueBuffer(ptr, total);
+        }
+    }
+}
+
+async function fetchNnueBlobFromIndexedDB(id: string): Promise<Blob> {
     return new Promise((resolve, reject) => {
         const request = indexedDB.open(NNUE_DB_NAME, NNUE_DB_VERSION);
 
@@ -89,42 +200,13 @@ async function loadNnueFromIndexedDB(
 
             getRequest.onerror = () => reject(new Error(`Failed to get NNUE: ${getRequest.error}`));
 
-            getRequest.onsuccess = async () => {
+            getRequest.onsuccess = () => {
                 const blob = getRequest.result as Blob | undefined;
                 if (!blob) {
                     reject(new Error(`NNUE not found: ${id}`));
                     return;
                 }
-
-                try {
-                    // 事前にサイズが分かるので、最初から最終バッファを確保
-                    const result = new Uint8Array(blob.size);
-                    const reader = blob.stream().getReader();
-                    let offset = 0;
-                    let lastProgressTime = 0;
-
-                    while (true) {
-                        const { done, value } = await reader.read();
-                        if (done) break;
-
-                        // 逐次コピー（chunks配列を持たない）
-                        result.set(value, offset);
-                        offset += value.length;
-
-                        // 進捗通知（スロットリング）
-                        const now = Date.now();
-                        if (now - lastProgressTime > NNUE_PROGRESS_THROTTLE_MS) {
-                            onProgress(offset, blob.size);
-                            lastProgressTime = now;
-                        }
-                    }
-
-                    // 最終進捗を通知
-                    onProgress(blob.size, blob.size);
-                    resolve(result);
-                } catch (error) {
-                    reject(error);
-                }
+                resolve(blob);
             };
         };
 
@@ -147,12 +229,39 @@ async function loadNnueFromIndexedDB(
 }
 
 /**
+ * Worker 内で IndexedDB から NNUE バイナリを読み込む
+ * メモリ効率のため、事前確保方式で stream 読み込み
+ */
+async function loadNnueFromIndexedDB(
+    id: string,
+    onProgress: (loaded: number, total: number) => void,
+    directWrite?: DirectWriteBindings | null,
+): Promise<NnueLoadResult> {
+    const blob = await fetchNnueBlobFromIndexedDB(id);
+
+    if (directWrite) {
+        const size = await loadNnueWithDirectWrite(
+            blob.size,
+            blob.stream().getReader(),
+            directWrite,
+            onProgress,
+        );
+        return { kind: "direct", size };
+    }
+
+    const result = new Uint8Array(blob.size);
+    await streamBlobToBuffer(blob, result, onProgress);
+    return { kind: "bytes", bytes: result };
+}
+
+/**
  * URL から NNUE をストリーム読み込み
  */
 async function loadNnueFromUrl(
     url: string,
     onProgress: (loaded: number, total: number) => void,
-): Promise<Uint8Array> {
+    directWrite?: DirectWriteBindings | null,
+): Promise<NnueLoadResult> {
     const res = await fetch(url);
     if (!res.ok) {
         throw new Error(`Failed to fetch NNUE from ${url}: ${res.status} ${res.statusText}`);
@@ -161,34 +270,54 @@ async function loadNnueFromUrl(
     const contentLength = res.headers.get("content-length");
     const total = contentLength ? Number.parseInt(contentLength, 10) : 0;
 
+    if (directWrite && res.body && total > 0) {
+        const size = await loadNnueWithDirectWrite(
+            total,
+            res.body.getReader(),
+            directWrite,
+            onProgress,
+        );
+        return { kind: "direct", size };
+    }
+
     if (!res.body) {
         // Fallback: body が ReadableStream でない場合
         const buffer = await res.arrayBuffer();
         onProgress(buffer.byteLength, buffer.byteLength);
-        return new Uint8Array(buffer);
+        return { kind: "bytes", bytes: new Uint8Array(buffer) };
     }
 
-    // Stream 読み込み
+    if (total > 0) {
+        const result = new Uint8Array(total);
+        await streamReaderToBuffer(res.body.getReader(), result, total, onProgress);
+        return { kind: "bytes", bytes: result };
+    }
+
+    // Stream 読み込み（総サイズ不明）
     const reader = res.body.getReader();
     const chunks: Uint8Array[] = [];
     let loaded = 0;
     let lastProgressTime = 0;
 
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!value) continue;
 
-        chunks.push(value);
-        loaded += value.length;
+            chunks.push(value);
+            loaded += value.length;
 
-        const now = Date.now();
-        if (now - lastProgressTime > NNUE_PROGRESS_THROTTLE_MS) {
-            onProgress(loaded, total);
-            lastProgressTime = now;
+            const now = Date.now();
+            if (now - lastProgressTime > NNUE_PROGRESS_THROTTLE_MS) {
+                onProgress(loaded, total);
+                lastProgressTime = now;
+            }
         }
+    } finally {
+        reader.releaseLock();
     }
 
-    // チャンクを結合
     const result = new Uint8Array(loaded);
     let offset = 0;
     for (const chunk of chunks) {
@@ -197,7 +326,7 @@ async function loadNnueFromUrl(
     }
 
     onProgress(loaded, total);
-    return result;
+    return { kind: "bytes", bytes: result };
 }
 
 export function createEngineWorker(bindings: WasmWorkerBindings) {
@@ -214,6 +343,7 @@ export function createEngineWorker(bindings: WasmWorkerBindings) {
     let lastInit: InitCommand | null = null;
     let moduleReady: Promise<void> | null = null;
     let threadPoolReady: Promise<void> | null = null;
+    let wasmExports: DirectWriteWasmExports | null = null;
 
     let lastInfoPostedAt = Number.NEGATIVE_INFINITY;
     const pendingInfoByPv = new Map<number, EngineEvent>();
@@ -269,13 +399,29 @@ export function createEngineWorker(bindings: WasmWorkerBindings) {
         flushEvents();
     };
 
+    function getDirectWriteBindings(): DirectWriteBindings | null {
+        if (!wasmExports) return null;
+        const memory = wasmExports.memory;
+        const alloc = wasmExports.alloc_nnue_buffer;
+        const loadFromPtr = wasmExports.load_model_from_ptr;
+        const free = wasmExports.free_nnue_buffer;
+        if (!memory || !alloc || !loadFromPtr || !free) return null;
+        return {
+            memory,
+            allocNnueBuffer: alloc,
+            loadModelFromPtr: loadFromPtr,
+            freeNnueBuffer: free,
+        };
+    }
+
     async function ensureModule(wasmModule?: WasmModuleSource) {
         if (!moduleReady) {
             const input =
                 wasmModule ??
                 bindings.defaultWasmModuleUrl ??
                 new URL("../pkg/engine_wasm_bg.wasm", import.meta.url);
-            moduleReady = bindings.initWasm({ module_or_path: input }).then(() => {
+            moduleReady = bindings.initWasm({ module_or_path: input }).then((exports) => {
+                wasmExports = exports as DirectWriteWasmExports;
                 bindings.setEventHandler((event: EngineEvent) => postEvent(event));
             });
         }
@@ -349,28 +495,40 @@ export function createEngineWorker(bindings: WasmWorkerBindings) {
      * NNUE をロード
      */
     async function handleLoadNnue(source: NnueLoadSource): Promise<void> {
-        let bytes: Uint8Array;
+        const directWrite = getDirectWriteBindings();
+        let result: NnueLoadResult;
 
         switch (source.type) {
             case "idb":
-                bytes = await loadNnueFromIndexedDB(source.id, postNnueProgress);
+                result = await loadNnueFromIndexedDB(source.id, postNnueProgress, directWrite);
                 break;
             case "url":
-                bytes = await loadNnueFromUrl(source.url, postNnueProgress);
+                result = await loadNnueFromUrl(source.url, postNnueProgress, directWrite);
                 break;
             case "bytes":
-                bytes = source.bytes;
-                postNnueProgress(bytes.length, bytes.length);
+                if (directWrite) {
+                    const size = loadNnueBytesWithDirectWrite(source.bytes, directWrite);
+                    result = { kind: "direct", size };
+                } else {
+                    result = { kind: "bytes", bytes: source.bytes };
+                }
+                postNnueProgress(source.bytes.length, source.bytes.length);
                 break;
         }
 
-        // Wasm にロード
-        await bindings.loadModel(bytes);
+        let size = 0;
+        if (result.kind === "bytes") {
+            size = result.bytes.length;
+            // Wasm にロード
+            await bindings.loadModel(result.bytes);
+        } else {
+            size = result.size;
+        }
 
         // 成功通知
         ctx.postMessage({
             type: "nnueLoaded",
-            size: bytes.length,
+            size,
         });
     }
 

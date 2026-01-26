@@ -33,6 +33,23 @@ function formatSize(bytes: number): string {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function getArchitectureLabel(meta: NnueMeta): string | null {
+    if (!meta.format) return null;
+    const raw = meta.format.architecture?.trim();
+    if (!raw || raw.toLowerCase() === "unknown") return "不明";
+    return raw;
+}
+
+function getValidationStatus(meta: NnueMeta): { label: string; color: string } {
+    if (meta.format) {
+        return { label: "形式確認済み", color: "hsl(var(--success, 142 76% 36%))" };
+    }
+    return {
+        label: "未確認（動作保証なし）",
+        color: "hsl(var(--warning, 38 92% 50%))",
+    };
+}
+
 /**
  * NNUE 一覧の個々のアイテム
  */
@@ -53,6 +70,8 @@ export function NnueListItem({
     const canEdit = !isPreset && onDisplayNameChange;
     const inputId = useId();
     const editInputRef = useRef<HTMLInputElement>(null);
+    const validationStatus = getValidationStatus(meta);
+    const architectureLabel = getArchitectureLabel(meta);
 
     // 編集状態
     const [isEditing, setIsEditing] = useState(false);
@@ -263,16 +282,21 @@ export function NnueListItem({
                                 }}
                             >
                                 <span>{formatSize(meta.size)}</span>
-                                {meta.verified ? (
-                                    <span style={{ color: "hsl(var(--success, 142 76% 36%))" }}>
-                                        検証済み
-                                    </span>
-                                ) : (
-                                    <span style={{ color: "hsl(var(--warning, 38 92% 50%))" }}>
-                                        未検証
-                                    </span>
-                                )}
+                                <span style={{ color: validationStatus.color }}>
+                                    {validationStatus.label}
+                                </span>
                             </div>
+                            {architectureLabel && (
+                                <div
+                                    style={{
+                                        marginTop: "4px",
+                                        fontSize: "12px",
+                                        color: "hsl(var(--muted-foreground, 0 0% 45%))",
+                                    }}
+                                >
+                                    アーキテクチャ: {architectureLabel}
+                                </div>
+                            )}
                         </div>
                     </label>
                 </>
@@ -362,14 +386,21 @@ export function NnueListItem({
                         }}
                     >
                         <span>{formatSize(meta.size)}</span>
-                        {meta.verified ? (
-                            <span style={{ color: "hsl(var(--success, 142 76% 36%))" }}>
-                                検証済み
-                            </span>
-                        ) : (
-                            <span style={{ color: "hsl(var(--warning, 38 92% 50%))" }}>未検証</span>
-                        )}
+                        <span style={{ color: validationStatus.color }}>
+                            {validationStatus.label}
+                        </span>
                     </div>
+                    {architectureLabel && (
+                        <div
+                            style={{
+                                marginTop: "4px",
+                                fontSize: "12px",
+                                color: "hsl(var(--muted-foreground, 0 0% 45%))",
+                            }}
+                        >
+                            アーキテクチャ: {architectureLabel}
+                        </div>
+                    )}
                 </div>
             )}
 

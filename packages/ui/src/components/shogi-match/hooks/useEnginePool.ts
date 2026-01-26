@@ -39,7 +39,7 @@ interface UseEnginePoolOptions {
     onComplete?: () => void;
     /** エラー時のコールバック */
     onError?: (ply: number, error: Error) => void;
-    /** 使用する NNUE の ID（null = デフォルト） */
+    /** 使用する NNUE の ID（null = NNUEなし（Material評価）） */
     nnueId?: string | null;
 }
 
