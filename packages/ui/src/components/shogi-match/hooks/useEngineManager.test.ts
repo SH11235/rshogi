@@ -316,7 +316,7 @@ describe("useEngineManager - NNUE restart", () => {
         const onMoveFromEngine = vi.fn();
         const onMatchEnd = vi.fn().mockResolvedValue(undefined);
 
-        const { result, rerender } = renderHook(
+        const { rerender } = renderHook(
             ({ senteNnueId }: { senteNnueId: string | null }) =>
                 useEngineManager({
                     sides: {
@@ -402,7 +402,7 @@ describe("useEngineManager - NNUE restart", () => {
                     senteNnueId,
                     goteNnueId: null,
                 }),
-            { initialProps: { senteNnueId: undefined } },
+            { initialProps: { senteNnueId: undefined as string | null | undefined } },
         );
 
         // 初期化を待つ
