@@ -4,7 +4,13 @@
  * 棋譜をKIF形式（日本語表記）で表示し、評価値も合わせて表示する
  */
 
-import type { KifuTree, NnueMeta, PositionState } from "@shogi/app-core";
+import type {
+    KifuTree,
+    NnueMeta,
+    NnueSelection,
+    PositionState,
+    PresetConfig,
+} from "@shogi/app-core";
 import { detectParallelism } from "@shogi/app-core";
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -122,10 +128,13 @@ interface KifuPanelProps {
     analysisSettings?: AnalysisSettings;
     /** 解析設定変更コールバック */
     onAnalysisSettingsChange?: (settings: AnalysisSettings) => void;
-    /** 分析用 NNUE */
-    analysisNnueId?: string | null;
-    onAnalysisNnueIdChange?: (id: string | null) => void;
+    /** 分析用 NNUE 選択 */
+    analysisNnueSelection?: NnueSelection;
+    onAnalysisNnueSelectionChange?: (selection: NnueSelection) => void;
+    /** ダウンロード済み NNUE 一覧 */
     nnueList?: NnueMeta[];
+    /** プリセット一覧（未ダウンロードも含む） */
+    presets?: PresetConfig[];
     /** 棋譜ツリー（ツリービュー用） */
     kifuTree?: KifuTree;
     /** ノードクリック時のコールバック（ツリービュー用） */
@@ -339,9 +348,10 @@ function ExpandedMoveDetails({
     isAnalyzing,
     analyzingPly,
     kifuTree,
-    analysisNnueId,
-    onAnalysisNnueIdChange,
+    analysisNnueSelection,
+    onAnalysisNnueSelectionChange,
     nnueList,
+    presets,
     onCollapse,
     isOnMainLine = true,
 }: {
@@ -353,9 +363,10 @@ function ExpandedMoveDetails({
     isAnalyzing?: boolean;
     analyzingPly?: number;
     kifuTree?: KifuTree;
-    analysisNnueId?: string | null;
-    onAnalysisNnueIdChange?: (id: string | null) => void;
+    analysisNnueSelection?: NnueSelection;
+    onAnalysisNnueSelectionChange?: (selection: NnueSelection) => void;
     nnueList?: NnueMeta[];
+    presets?: PresetConfig[];
     onCollapse: () => void;
     /** 現在位置がメインライン上にあるか（falseの場合はPV分岐追加を無効化） */
     isOnMainLine?: boolean;
@@ -396,8 +407,43 @@ function ExpandedMoveDetails({
 
     const hasPv = pvList.length > 0;
     const hasMultiplePv = pvList.length > 1;
-    const nnueOptions = nnueList ?? [];
-    const showNnueSelector = analysisNnueId !== undefined && !!onAnalysisNnueIdChange;
+
+    // NNUE選択肢を構築（プリセット + カスタムNNUE）
+    const nnueOptions = useMemo(() => {
+        const options: Array<{ type: "preset" | "custom"; key: string; label: string }> = [];
+        // プリセット一覧
+        for (const preset of presets ?? []) {
+            const isDownloaded = nnueList?.some(
+                (n) => n.source === "preset" && n.presetKey === preset.presetKey,
+            );
+            options.push({
+                type: "preset",
+                key: preset.presetKey,
+                label: isDownloaded ? preset.displayName : `${preset.displayName} (要DL)`,
+            });
+        }
+        // カスタムNNUE（プリセット以外）
+        for (const nnue of nnueList ?? []) {
+            if (nnue.source !== "preset") {
+                options.push({
+                    type: "custom",
+                    key: nnue.id,
+                    label: nnue.displayName,
+                });
+            }
+        }
+        return options;
+    }, [presets, nnueList]);
+
+    // 現在の選択値を計算
+    const selectedValue = useMemo(() => {
+        if (!analysisNnueSelection) return "material";
+        if (analysisNnueSelection.presetKey) return `preset:${analysisNnueSelection.presetKey}`;
+        if (analysisNnueSelection.nnueId) return `custom:${analysisNnueSelection.nnueId}`;
+        return "material";
+    }, [analysisNnueSelection]);
+
+    const showNnueSelector = analysisNnueSelection !== undefined && !!onAnalysisNnueSelectionChange;
 
     return (
         <section
@@ -495,18 +541,35 @@ function ExpandedMoveDetails({
                         <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
                             <span>分析NNUE</span>
                             <select
-                                value={analysisNnueId ?? "material"}
-                                onChange={(e) =>
-                                    onAnalysisNnueIdChange?.(
-                                        e.target.value === "material" ? null : e.target.value,
-                                    )
-                                }
+                                value={selectedValue}
+                                onChange={(e) => {
+                                    const val = e.target.value;
+                                    if (val === "material") {
+                                        onAnalysisNnueSelectionChange?.({
+                                            presetKey: null,
+                                            nnueId: null,
+                                        });
+                                    } else if (val.startsWith("preset:")) {
+                                        onAnalysisNnueSelectionChange?.({
+                                            presetKey: val.slice(7),
+                                            nnueId: null,
+                                        });
+                                    } else if (val.startsWith("custom:")) {
+                                        onAnalysisNnueSelectionChange?.({
+                                            presetKey: null,
+                                            nnueId: val.slice(7),
+                                        });
+                                    }
+                                }}
                                 className="w-full px-2 py-1 text-xs rounded border border-border bg-background"
                             >
                                 <option value="material">簡易AI（駒得）</option>
-                                {nnueOptions.map((nnue) => (
-                                    <option key={nnue.id} value={nnue.id}>
-                                        {nnue.displayName}
+                                {nnueOptions.map((opt) => (
+                                    <option
+                                        key={`${opt.type}:${opt.key}`}
+                                        value={`${opt.type}:${opt.key}`}
+                                    >
+                                        {opt.label}
                                     </option>
                                 ))}
                             </select>
@@ -830,9 +893,10 @@ function BatchAnalysisDropdown({
     onStartTreeBatchAnalysis,
     hasBranches,
     isRunning,
-    analysisNnueId,
-    onAnalysisNnueIdChange,
+    analysisNnueSelection,
+    onAnalysisNnueSelectionChange,
     nnueList,
+    presets,
 }: {
     movesWithoutPv: number;
     analysisSettings: AnalysisSettings;
@@ -841,15 +905,51 @@ function BatchAnalysisDropdown({
     onStartTreeBatchAnalysis?: (options?: { mainLineOnly?: boolean }) => void;
     hasBranches: boolean;
     isRunning?: boolean;
-    analysisNnueId?: string | null;
-    onAnalysisNnueIdChange?: (id: string | null) => void;
+    analysisNnueSelection?: NnueSelection;
+    onAnalysisNnueSelectionChange?: (selection: NnueSelection) => void;
     nnueList?: NnueMeta[];
+    presets?: PresetConfig[];
 }): ReactElement {
     const [isOpen, setIsOpen] = useState(false);
     const [analysisTarget, setAnalysisTarget] = useState<AnalysisTarget>("mainOnly");
     const parallelismConfig = detectParallelism();
-    const nnueOptions = nnueList ?? [];
-    const showNnueSelector = analysisNnueId !== undefined && !!onAnalysisNnueIdChange;
+
+    // NNUE選択肢を構築（プリセット + カスタムNNUE）
+    const nnueOptions = useMemo(() => {
+        const options: Array<{ type: "preset" | "custom"; key: string; label: string }> = [];
+        // プリセット一覧
+        for (const preset of presets ?? []) {
+            const isDownloaded = nnueList?.some(
+                (n) => n.source === "preset" && n.presetKey === preset.presetKey,
+            );
+            options.push({
+                type: "preset",
+                key: preset.presetKey,
+                label: isDownloaded ? preset.displayName : `${preset.displayName} (要DL)`,
+            });
+        }
+        // カスタムNNUE（プリセット以外）
+        for (const nnue of nnueList ?? []) {
+            if (nnue.source !== "preset") {
+                options.push({
+                    type: "custom",
+                    key: nnue.id,
+                    label: nnue.displayName,
+                });
+            }
+        }
+        return options;
+    }, [presets, nnueList]);
+
+    // 現在の選択値を計算
+    const selectedValue = useMemo(() => {
+        if (!analysisNnueSelection) return "material";
+        if (analysisNnueSelection.presetKey) return `preset:${analysisNnueSelection.presetKey}`;
+        if (analysisNnueSelection.nnueId) return `custom:${analysisNnueSelection.nnueId}`;
+        return "material";
+    }, [analysisNnueSelection]);
+
+    const showNnueSelector = analysisNnueSelection !== undefined && !!onAnalysisNnueSelectionChange;
 
     const handleParallelWorkersChange = (value: number) => {
         onAnalysisSettingsChange({
@@ -908,18 +1008,35 @@ function BatchAnalysisDropdown({
                         <div className="space-y-1.5">
                             <div className="text-xs font-medium text-foreground">分析NNUE</div>
                             <select
-                                value={analysisNnueId ?? "material"}
-                                onChange={(e) =>
-                                    onAnalysisNnueIdChange?.(
-                                        e.target.value === "material" ? null : e.target.value,
-                                    )
-                                }
+                                value={selectedValue}
+                                onChange={(e) => {
+                                    const val = e.target.value;
+                                    if (val === "material") {
+                                        onAnalysisNnueSelectionChange?.({
+                                            presetKey: null,
+                                            nnueId: null,
+                                        });
+                                    } else if (val.startsWith("preset:")) {
+                                        onAnalysisNnueSelectionChange?.({
+                                            presetKey: val.slice(7),
+                                            nnueId: null,
+                                        });
+                                    } else if (val.startsWith("custom:")) {
+                                        onAnalysisNnueSelectionChange?.({
+                                            presetKey: null,
+                                            nnueId: val.slice(7),
+                                        });
+                                    }
+                                }}
                                 className="w-full px-2 py-1 text-xs rounded border border-border bg-background"
                             >
                                 <option value="material">簡易AI（駒得）</option>
-                                {nnueOptions.map((nnue) => (
-                                    <option key={nnue.id} value={nnue.id}>
-                                        {nnue.displayName}
+                                {nnueOptions.map((opt) => (
+                                    <option
+                                        key={`${opt.type}:${opt.key}`}
+                                        value={`${opt.type}:${opt.key}`}
+                                    >
+                                        {opt.label}
                                     </option>
                                 ))}
                             </select>
@@ -1070,9 +1187,10 @@ export function KifuPanel({
     onCancelBatchAnalysis,
     analysisSettings,
     onAnalysisSettingsChange,
-    analysisNnueId,
-    onAnalysisNnueIdChange,
+    analysisNnueSelection,
+    onAnalysisNnueSelectionChange,
     nnueList,
+    presets,
     kifuTree,
     onNodeClick,
     onBranchSwitch: _onBranchSwitch,
@@ -1420,9 +1538,10 @@ export function KifuPanel({
                                         : false
                                 }
                                 isRunning={batchAnalysis?.isRunning ?? false}
-                                analysisNnueId={analysisNnueId}
-                                onAnalysisNnueIdChange={onAnalysisNnueIdChange}
+                                analysisNnueSelection={analysisNnueSelection}
+                                onAnalysisNnueSelectionChange={onAnalysisNnueSelectionChange}
                                 nnueList={nnueList}
+                                presets={presets}
                             />
                         )}
                         {/* KIFコピーボタン（アイコン） */}
@@ -1925,9 +2044,12 @@ export function KifuPanel({
                                                 isAnalyzing={isAnalyzing}
                                                 analyzingPly={analyzingPly}
                                                 kifuTree={kifuTree}
-                                                analysisNnueId={analysisNnueId}
-                                                onAnalysisNnueIdChange={onAnalysisNnueIdChange}
+                                                analysisNnueSelection={analysisNnueSelection}
+                                                onAnalysisNnueSelectionChange={
+                                                    onAnalysisNnueSelectionChange
+                                                }
                                                 nnueList={nnueList}
+                                                presets={presets}
                                                 onCollapse={() => setExpandedMoveDetail(null)}
                                                 isOnMainLine={isOnMainLine}
                                             />

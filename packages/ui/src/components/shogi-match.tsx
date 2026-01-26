@@ -3,8 +3,9 @@ import {
     type BoardState,
     boardToMatrix,
     cloneBoard,
+    createDefaultNnueSelection,
     createEmptyHands,
-    DEFAULT_NNUE_SELECTION,
+    DEFAULT_PRESET_KEY,
     type GameResult,
     getAllSquares,
     getPathToNode,
@@ -319,6 +320,16 @@ function deriveLastMove(move: string | undefined): LastMove | undefined {
     return { from: parsed.from, to: parsed.to, promotes: parsed.promote };
 }
 
+// 環境変数からデフォルトプリセットキーを取得（フォールバック: DEFAULT_PRESET_KEY）
+const ENV_DEFAULT_PRESET_KEY =
+    (typeof import.meta !== "undefined" &&
+        import.meta.env &&
+        (import.meta.env.VITE_DEFAULT_NNUE_PRESET as string | undefined)) ||
+    DEFAULT_PRESET_KEY;
+
+// デフォルトの NNUE 選択（環境変数のプリセットキーを使用）
+const DEFAULT_NNUE_SELECTION = createDefaultNnueSelection(ENV_DEFAULT_PRESET_KEY);
+
 export function ShogiMatch({
     engineOptions,
     defaultSides = {
@@ -631,23 +642,8 @@ export function ShogiMatch({
         return null;
     }, [analysisNnueSelection, nnueList]);
 
-    // 子コンポーネント用の setter（analysisNnueId から NnueSelection に変換）
-    const setAnalysisNnueId = useCallback(
-        (nnueId: string | null) => {
-            if (nnueId === null) {
-                setAnalysisNnueSelection({ presetKey: null, nnueId: null });
-            } else {
-                // nnueList から対応する NNUE を探して preset かどうか判定
-                const nnue = nnueList.find((n) => n.id === nnueId);
-                if (nnue?.source === "preset" && nnue.presetKey) {
-                    setAnalysisNnueSelection({ presetKey: nnue.presetKey, nnueId: null });
-                } else {
-                    setAnalysisNnueSelection({ presetKey: null, nnueId });
-                }
-            }
-        },
-        [nnueList, setAnalysisNnueSelection],
-    );
+    // プリセット設定のみを抽出（UIコンポーネント用）
+    const presetConfigs = useMemo(() => presets.map((p) => p.config), [presets]);
 
     // positionRef を先に定義（コールバックで使用するため）
     const positionRef = useRef<PositionState>(position);
@@ -2608,9 +2604,10 @@ export function ShogiMatch({
                     onAnalyze={handleAnalyzePly}
                     isAnalyzing={isAnalyzing}
                     analyzingPly={analyzingState.type !== "none" ? analyzingState.ply : undefined}
-                    analysisNnueId={analysisNnueId}
-                    onAnalysisNnueIdChange={setAnalysisNnueId}
+                    analysisNnueSelection={analysisNnueSelection}
+                    onAnalysisNnueSelectionChange={setAnalysisNnueSelection}
                     nnueList={nnueList}
+                    presets={presetConfigs}
                     kifuTree={navigation.tree}
                     onClose={() => setSelectedMoveDetailPly(null)}
                     isOnMainLine={navigation.state.isOnMainLine}
@@ -3065,9 +3062,10 @@ export function ShogiMatch({
                                         onCancelBatchAnalysis={handleCancelBatchAnalysis}
                                         analysisSettings={analysisSettings}
                                         onAnalysisSettingsChange={setAnalysisSettings}
-                                        analysisNnueId={analysisNnueId}
-                                        onAnalysisNnueIdChange={setAnalysisNnueId}
+                                        analysisNnueSelection={analysisNnueSelection}
+                                        onAnalysisNnueSelectionChange={setAnalysisNnueSelection}
                                         nnueList={nnueList}
+                                        presets={presetConfigs}
                                         kifuTree={navigation.tree}
                                         onNodeClick={navigation.goToNodeById}
                                         onBranchSwitch={navigation.switchBranchAtNode}

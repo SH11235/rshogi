@@ -6,7 +6,13 @@
  * 四隅＋四辺からリサイズ可能
  */
 
-import type { KifuTree, NnueMeta, PositionState } from "@shogi/app-core";
+import type {
+    KifuTree,
+    NnueMeta,
+    NnueSelection,
+    PositionState,
+    PresetConfig,
+} from "@shogi/app-core";
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -32,10 +38,13 @@ interface MoveDetailWindowProps {
     isAnalyzing?: boolean;
     /** 現在解析中の手数 */
     analyzingPly?: number;
-    /** 分析用 NNUE */
-    analysisNnueId?: string | null;
-    onAnalysisNnueIdChange?: (id: string | null) => void;
+    /** 分析用 NNUE 選択 */
+    analysisNnueSelection?: NnueSelection;
+    onAnalysisNnueSelectionChange?: (selection: NnueSelection) => void;
+    /** ダウンロード済み NNUE 一覧 */
     nnueList?: NnueMeta[];
+    /** プリセット一覧（未ダウンロードも含む） */
+    presets?: PresetConfig[];
     /** 棋譜ツリー（分岐追加の重複チェック用） */
     kifuTree?: KifuTree;
     /** ウィンドウを閉じるコールバック */
@@ -319,9 +328,10 @@ export function MoveDetailWindow({
     onAnalyze,
     isAnalyzing,
     analyzingPly,
-    analysisNnueId,
-    onAnalysisNnueIdChange,
+    analysisNnueSelection,
+    onAnalysisNnueSelectionChange,
     nnueList,
+    presets,
     kifuTree,
     onClose,
     isOnMainLine = true,
@@ -525,8 +535,43 @@ export function MoveDetailWindow({
 
     const hasPv = pvList.length > 0;
     const hasMultiplePv = pvList.length > 1;
-    const nnueOptions = nnueList ?? [];
-    const showNnueSelector = analysisNnueId !== undefined && !!onAnalysisNnueIdChange;
+
+    // NNUE選択肢を構築（プリセット + カスタムNNUE）
+    const nnueOptions = useMemo(() => {
+        const options: Array<{ type: "preset" | "custom"; key: string; label: string }> = [];
+        // プリセット一覧
+        for (const preset of presets ?? []) {
+            const isDownloaded = nnueList?.some(
+                (n) => n.source === "preset" && n.presetKey === preset.presetKey,
+            );
+            options.push({
+                type: "preset",
+                key: preset.presetKey,
+                label: isDownloaded ? preset.displayName : `${preset.displayName} (要DL)`,
+            });
+        }
+        // カスタムNNUE（プリセット以外）
+        for (const nnue of nnueList ?? []) {
+            if (nnue.source !== "preset") {
+                options.push({
+                    type: "custom",
+                    key: nnue.id,
+                    label: nnue.displayName,
+                });
+            }
+        }
+        return options;
+    }, [presets, nnueList]);
+
+    // 現在の選択値を計算
+    const selectedValue = useMemo(() => {
+        if (!analysisNnueSelection) return "material";
+        if (analysisNnueSelection.presetKey) return `preset:${analysisNnueSelection.presetKey}`;
+        if (analysisNnueSelection.nnueId) return `custom:${analysisNnueSelection.nnueId}`;
+        return "material";
+    }, [analysisNnueSelection]);
+
+    const showNnueSelector = analysisNnueSelection !== undefined && !!onAnalysisNnueSelectionChange;
 
     return (
         <div
@@ -620,18 +665,35 @@ export function MoveDetailWindow({
                             <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
                                 <span>分析NNUE</span>
                                 <select
-                                    value={analysisNnueId ?? "material"}
-                                    onChange={(e) =>
-                                        onAnalysisNnueIdChange?.(
-                                            e.target.value === "material" ? null : e.target.value,
-                                        )
-                                    }
+                                    value={selectedValue}
+                                    onChange={(e) => {
+                                        const val = e.target.value;
+                                        if (val === "material") {
+                                            onAnalysisNnueSelectionChange?.({
+                                                presetKey: null,
+                                                nnueId: null,
+                                            });
+                                        } else if (val.startsWith("preset:")) {
+                                            onAnalysisNnueSelectionChange?.({
+                                                presetKey: val.slice(7),
+                                                nnueId: null,
+                                            });
+                                        } else if (val.startsWith("custom:")) {
+                                            onAnalysisNnueSelectionChange?.({
+                                                presetKey: null,
+                                                nnueId: val.slice(7),
+                                            });
+                                        }
+                                    }}
                                     className="w-full px-2 py-1 text-xs rounded border border-border bg-background"
                                 >
                                     <option value="material">簡易AI（駒得）</option>
-                                    {nnueOptions.map((nnue) => (
-                                        <option key={nnue.id} value={nnue.id}>
-                                            {nnue.displayName}
+                                    {nnueOptions.map((opt) => (
+                                        <option
+                                            key={`${opt.type}:${opt.key}`}
+                                            value={`${opt.type}:${opt.key}`}
+                                        >
+                                            {opt.label}
                                         </option>
                                     ))}
                                 </select>
