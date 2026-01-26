@@ -161,6 +161,31 @@ async function loadNnueWithDirectWrite(
     }
 }
 
+function loadNnueBytesWithDirectWrite(bytes: Uint8Array, directWrite: DirectWriteBindings): number {
+    const total = bytes.length;
+    if (total <= 0) {
+        throw new Error(`Invalid NNUE size: ${total}`);
+    }
+
+    const ptr = directWrite.allocNnueBuffer(total);
+    if (!ptr) {
+        throw new Error("Failed to allocate NNUE buffer");
+    }
+
+    let consumed = false;
+    try {
+        const target = new Uint8Array(directWrite.memory.buffer, ptr >>> 0, total);
+        target.set(bytes);
+        consumed = true;
+        directWrite.loadModelFromPtr(ptr, total);
+        return total;
+    } finally {
+        if (!consumed) {
+            directWrite.freeNnueBuffer(ptr, total);
+        }
+    }
+}
+
 async function fetchNnueBlobFromIndexedDB(id: string): Promise<Blob> {
     return new Promise((resolve, reject) => {
         const request = indexedDB.open(NNUE_DB_NAME, NNUE_DB_VERSION);
@@ -481,7 +506,12 @@ export function createEngineWorker(bindings: WasmWorkerBindings) {
                 result = await loadNnueFromUrl(source.url, postNnueProgress, directWrite);
                 break;
             case "bytes":
-                result = { kind: "bytes", bytes: source.bytes };
+                if (directWrite) {
+                    const size = loadNnueBytesWithDirectWrite(source.bytes, directWrite);
+                    result = { kind: "direct", size };
+                } else {
+                    result = { kind: "bytes", bytes: source.bytes };
+                }
                 postNnueProgress(source.bytes.length, source.bytes.length);
                 break;
         }
