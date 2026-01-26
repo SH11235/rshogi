@@ -918,6 +918,21 @@ pub fn generate_legal_with_pass(pos: &Position, list: &mut MoveList) {
 }
 
 /// パス手を含む合法手を生成（不成含む）
+/// パス手を含む合法手を生成（不成含む）
+///
+/// `generate_legal_all()` の結果に加えて、パス可能な場合は `Move::PASS` を追加します。
+///
+/// # 使用条件
+/// - パス権ルールが有効な場合のみ PASS が生成される
+/// - 王手中はパス不可（can_pass() が false を返す）
+///
+/// # 使用目的
+/// - UI での指し手選択肢の表示（不成とパスの両方を含む）
+/// - 棋譜再生時の指し手検証（不成とパスの両方を合法として認識）
+///
+/// # 注意
+/// 探索の qsearch (静止探索) では使用しないこと。
+/// qsearch では駒取り手のみを生成すべきであり、PASS や不成は不要。
 pub fn generate_legal_all_with_pass(pos: &Position, list: &mut MoveList) {
     generate_legal_all(pos, list);
 
