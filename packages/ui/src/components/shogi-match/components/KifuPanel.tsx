@@ -37,7 +37,7 @@ import {
 import { KifuNavigationToolbar } from "./KifuNavigationToolbar";
 
 /** 表示モード */
-type ViewMode = "main" | "branches" | "selectedBranch";
+export type KifuViewMode = "main" | "branches" | "selectedBranch";
 
 /** ネストされた分岐のインデント幅（px） */
 const NEST_INDENT_PX = 16;
@@ -139,6 +139,8 @@ interface KifuPanelProps {
     onAnalysisNnueSelectionChange?: (selection: NnueSelection) => void;
     /** ダウンロード済み NNUE 一覧 */
     nnueList?: NnueMeta[];
+    /** NNUE 一覧読み込み中フラグ */
+    isNnueListLoading?: boolean;
     /** プリセット一覧（未ダウンロードも含む） */
     presets?: PresetConfig[];
     /** 棋譜ツリー（ツリービュー用） */
@@ -159,6 +161,8 @@ interface KifuPanelProps {
     onLastAddedBranchHandled?: () => void;
     /** 選択中の分岐が変更されたときのコールバック（キーボードナビゲーション用） */
     onSelectedBranchChange?: (branchNodeId: string | null) => void;
+    /** ビューモード変更時のコールバック（評価値グラフ切り替え用） */
+    onViewModeChange?: (mode: KifuViewMode) => void;
     /** 現在位置がメインライン上にあるか（PV分岐追加の制御用） */
     isOnMainLine?: boolean;
     /** 手の詳細を選択したときのコールバック（右パネル表示用） */
@@ -357,6 +361,7 @@ function ExpandedMoveDetails({
     analysisNnueSelection,
     onAnalysisNnueSelectionChange,
     nnueList,
+    isNnueListLoading,
     presets,
     onCollapse,
     isOnMainLine = true,
@@ -372,6 +377,7 @@ function ExpandedMoveDetails({
     analysisNnueSelection?: NnueSelection;
     onAnalysisNnueSelectionChange?: (selection: NnueSelection) => void;
     nnueList?: NnueMeta[];
+    isNnueListLoading?: boolean;
     presets?: PresetConfig[];
     onCollapse: () => void;
     /** 現在位置がメインライン上にあるか（falseの場合はPV分岐追加を無効化） */
@@ -415,7 +421,10 @@ function ExpandedMoveDetails({
     const hasMultiplePv = pvList.length > 1;
 
     // NNUE選択肢を構築（プリセット + カスタムNNUE）
-    const nnueOptions = useMemo(() => buildNnueOptions({ presets, nnueList }), [presets, nnueList]);
+    const nnueOptions = useMemo(
+        () => buildNnueOptions({ presets, nnueList, isNnueListLoading }),
+        [presets, nnueList, isNnueListLoading],
+    );
 
     // 現在の選択値を計算
     const selectedValue = useMemo(
@@ -859,6 +868,7 @@ function BatchAnalysisDropdown({
     analysisNnueSelection,
     onAnalysisNnueSelectionChange,
     nnueList,
+    isNnueListLoading,
     presets,
 }: {
     movesWithoutPv: number;
@@ -871,6 +881,7 @@ function BatchAnalysisDropdown({
     analysisNnueSelection?: NnueSelection;
     onAnalysisNnueSelectionChange?: (selection: NnueSelection) => void;
     nnueList?: NnueMeta[];
+    isNnueListLoading?: boolean;
     presets?: PresetConfig[];
 }): ReactElement {
     const [isOpen, setIsOpen] = useState(false);
@@ -878,7 +889,10 @@ function BatchAnalysisDropdown({
     const parallelismConfig = detectParallelism();
 
     // NNUE選択肢を構築（プリセット + カスタムNNUE）
-    const nnueOptions = useMemo(() => buildNnueOptions({ presets, nnueList }), [presets, nnueList]);
+    const nnueOptions = useMemo(
+        () => buildNnueOptions({ presets, nnueList, isNnueListLoading }),
+        [presets, nnueList, isNnueListLoading],
+    );
 
     // 現在の選択値を計算
     const selectedValue = useMemo(
@@ -1110,6 +1124,7 @@ export function KifuPanel({
     analysisNnueSelection,
     onAnalysisNnueSelectionChange,
     nnueList,
+    isNnueListLoading,
     presets,
     kifuTree,
     onNodeClick,
@@ -1119,6 +1134,7 @@ export function KifuPanel({
     lastAddedBranchInfo,
     onLastAddedBranchHandled,
     onSelectedBranchChange,
+    onViewModeChange,
     isOnMainLine = true,
     onMoveDetailSelect,
 }: KifuPanelProps): ReactElement {
@@ -1127,9 +1143,19 @@ export function KifuPanel({
     const currentRowRef = useRef<HTMLElement>(null);
     const [copySuccess, setCopySuccess] = useState(false);
     const [hintDismissed, setHintDismissed] = useState(false);
-    const [viewMode, setViewMode] = useState<ViewMode>("main");
+    const [viewMode, setViewMode] = useState<KifuViewMode>("main");
     // 選択中の分岐情報
     const [selectedBranch, setSelectedBranch] = useState<SelectedBranch | null>(null);
+
+    // viewMode変更時に親に通知するラッパー（通知は一箇所に集約）
+    const setViewModeWithNotify = useCallback(
+        (newMode: KifuViewMode) => {
+            setViewMode(newMode);
+            onViewModeChange?.(newMode);
+        },
+        [onViewModeChange],
+    );
+
     // 本譜ビューのスクロール位置を保存
     const mainScrollPositionRef = useRef<number>(0);
 
@@ -1213,20 +1239,21 @@ export function KifuPanel({
                 nodeId: branchInList.nodeId,
                 tabLabel: branchInList.tabLabel,
             });
-            setViewMode("selectedBranch");
+            setViewModeWithNotify("selectedBranch");
             // 処理完了を通知
             onLastAddedBranchHandled?.();
         }
-    }, [lastAddedBranchInfo, branches, kifuTree, onLastAddedBranchHandled]);
+    }, [lastAddedBranchInfo, branches, kifuTree, onLastAddedBranchHandled, setViewModeWithNotify]);
 
     // 分岐がなくなった場合は本譜ビューに戻す＆分岐状態をクリア
     useEffect(() => {
         if (branches.length === 0 && viewMode !== "main") {
-            setViewMode("main");
+            setViewModeWithNotify("main");
             setSelectedBranch(null);
         }
-    }, [branches.length, viewMode]);
+    }, [branches.length, viewMode, setViewModeWithNotify]);
 
+    // 選択中の分岐が変更されたら親に通知（キーボードナビゲーション用）
     // 選択中の分岐が変更されたら親に通知（キーボードナビゲーション用）
     useEffect(() => {
         // selectedBranchビューで分岐が選択されている場合のみnodeIdを通知
@@ -1237,7 +1264,7 @@ export function KifuPanel({
     }, [viewMode, selectedBranch, onSelectedBranchChange]);
 
     // 前回のビューモードを追跡するref
-    const prevViewModeRef = useRef<ViewMode>(viewMode);
+    const prevViewModeRef = useRef<KifuViewMode>(viewMode);
 
     // main → 非main への遷移時にスクロール位置を保存
     useEffect(() => {
@@ -1250,19 +1277,20 @@ export function KifuPanel({
         prevViewModeRef.current = viewMode;
     }, [viewMode]);
 
-    // ビューモード切り替えハンドラ
-    const handleViewModeChange = useCallback((newMode: ViewMode) => {
-        setViewMode(newMode);
-    }, []);
+    // ビューモード切り替えハンドラ（ラッパー関数をそのまま使用）
+    const handleViewModeChange = setViewModeWithNotify;
 
     // 分岐を選択するハンドラ
-    const handleSelectBranch = useCallback((branch: BranchSummary) => {
-        setSelectedBranch({
-            nodeId: branch.nodeId,
-            tabLabel: branch.tabLabel,
-        });
-        setViewMode("selectedBranch");
-    }, []);
+    const handleSelectBranch = useCallback(
+        (branch: BranchSummary) => {
+            setSelectedBranch({
+                nodeId: branch.nodeId,
+                tabLabel: branch.tabLabel,
+            });
+            setViewModeWithNotify("selectedBranch");
+        },
+        [setViewModeWithNotify],
+    );
 
     // インライン分岐クリック時のハンドラ（ノードに移動して分岐ビューに切り替え）
     const handleInlineBranchClick = useCallback(
@@ -1274,9 +1302,9 @@ export function KifuPanel({
                 nodeId: branch.nodeId,
                 tabLabel: branch.tabLabel,
             });
-            setViewMode("selectedBranch");
+            setViewModeWithNotify("selectedBranch");
         },
-        [onNodeClick],
+        [onNodeClick, setViewModeWithNotify],
     );
 
     // 本譜ビューに戻ったときにスクロール位置を復元
@@ -1461,6 +1489,7 @@ export function KifuPanel({
                                 analysisNnueSelection={analysisNnueSelection}
                                 onAnalysisNnueSelectionChange={onAnalysisNnueSelectionChange}
                                 nnueList={nnueList}
+                                isNnueListLoading={isNnueListLoading}
                                 presets={presets}
                             />
                         )}
@@ -1969,6 +1998,7 @@ export function KifuPanel({
                                                     onAnalysisNnueSelectionChange
                                                 }
                                                 nnueList={nnueList}
+                                                isNnueListLoading={isNnueListLoading}
                                                 presets={presets}
                                                 onCollapse={() => setExpandedMoveDetail(null)}
                                                 isOnMainLine={isOnMainLine}

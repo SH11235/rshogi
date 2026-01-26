@@ -1,8 +1,17 @@
-import type { GameResult, Player } from "@shogi/app-core";
+import type { GameResult, NnueSelection, Player } from "@shogi/app-core";
 import type { EngineEvent } from "@shogi/engine-client";
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { determineBestmoveAction, formatEvent, useEngineManager } from "./useEngineManager";
+
+// テスト用のNnueSelection作成ヘルパー
+const createNnueSelection = (nnueId: string | null): NnueSelection => ({
+    presetKey: null,
+    nnueId,
+});
+
+// テスト用のresolveNnueモック
+const createMockResolveNnue = () => vi.fn(async (selection: NnueSelection) => selection.nnueId);
 
 describe("formatEvent", () => {
     it("bestmove イベントを正しくフォーマットする", () => {
@@ -165,8 +174,9 @@ describe("useEngineManager", () => {
                 onMoveFromEngine,
                 onMatchEnd,
                 maxLogs: 10,
-                senteNnueId: null,
-                goteNnueId: null,
+                senteNnueSelection: createNnueSelection(null),
+                goteNnueSelection: createNnueSelection(null),
+                resolveNnue: createMockResolveNnue(),
             }),
         );
     };
@@ -315,9 +325,10 @@ describe("useEngineManager - NNUE restart", () => {
         const movesRef = { current: [] as string[] };
         const onMoveFromEngine = vi.fn();
         const onMatchEnd = vi.fn().mockResolvedValue(undefined);
+        const resolveNnue = createMockResolveNnue();
 
         const { rerender } = renderHook(
-            ({ senteNnueId }: { senteNnueId: string | null }) =>
+            ({ senteNnueSelection }: { senteNnueSelection: NnueSelection }) =>
                 useEngineManager({
                     sides: {
                         sente: { role: "engine", engineId: "engine1" },
@@ -340,10 +351,11 @@ describe("useEngineManager - NNUE restart", () => {
                     onMoveFromEngine,
                     onMatchEnd,
                     maxLogs: 10,
-                    senteNnueId,
-                    goteNnueId: null,
+                    senteNnueSelection,
+                    goteNnueSelection: createNnueSelection(null),
+                    resolveNnue,
                 }),
-            { initialProps: { senteNnueId: "nnue-1" } },
+            { initialProps: { senteNnueSelection: createNnueSelection("nnue-1") } },
         );
 
         // 初期化を待つ
@@ -356,7 +368,7 @@ describe("useEngineManager - NNUE restart", () => {
         const initCallCount = mockClient.init.mock.calls.length;
 
         // NNUE ID を変更
-        rerender({ senteNnueId: "nnue-2" });
+        rerender({ senteNnueSelection: createNnueSelection("nnue-2") });
 
         // useEffect が実行されるのを待つ
         await act(async () => {
@@ -374,9 +386,10 @@ describe("useEngineManager - NNUE restart", () => {
         const movesRef = { current: [] as string[] };
         const onMoveFromEngine = vi.fn();
         const onMatchEnd = vi.fn().mockResolvedValue(undefined);
+        const resolveNnue = createMockResolveNnue();
 
         const { rerender } = renderHook(
-            ({ senteNnueId }: { senteNnueId: string | null | undefined }) =>
+            ({ senteNnueSelection }: { senteNnueSelection: NnueSelection | undefined }) =>
                 useEngineManager({
                     sides: {
                         sente: { role: "engine", engineId: "engine1" },
@@ -399,10 +412,11 @@ describe("useEngineManager - NNUE restart", () => {
                     onMoveFromEngine,
                     onMatchEnd,
                     maxLogs: 10,
-                    senteNnueId,
-                    goteNnueId: null,
+                    senteNnueSelection,
+                    goteNnueSelection: createNnueSelection(null),
+                    resolveNnue,
                 }),
-            { initialProps: { senteNnueId: undefined as string | null | undefined } },
+            { initialProps: { senteNnueSelection: undefined as NnueSelection | undefined } },
         );
 
         // 初期化を待つ
@@ -412,8 +426,8 @@ describe("useEngineManager - NNUE restart", () => {
 
         const resetCallCount = mockClient.reset.mock.calls.length;
 
-        // undefined → null に変更（どちらも「NNUEなし」を意味）
-        rerender({ senteNnueId: null });
+        // undefined → NnueSelection(null) に変更（どちらも「NNUEなし」を意味）
+        rerender({ senteNnueSelection: createNnueSelection(null) });
 
         await act(async () => {
             await Promise.resolve();
@@ -429,9 +443,10 @@ describe("useEngineManager - NNUE restart", () => {
         const movesRef = { current: [] as string[] };
         const onMoveFromEngine = vi.fn();
         const onMatchEnd = vi.fn().mockResolvedValue(undefined);
+        const resolveNnue = createMockResolveNnue();
 
         const { rerender } = renderHook(
-            ({ senteNnueId }: { senteNnueId: string | null }) =>
+            ({ senteNnueSelection }: { senteNnueSelection: NnueSelection }) =>
                 useEngineManager({
                     sides: {
                         sente: { role: "engine", engineId: "engine1" },
@@ -454,10 +469,11 @@ describe("useEngineManager - NNUE restart", () => {
                     onMoveFromEngine,
                     onMatchEnd,
                     maxLogs: 10,
-                    senteNnueId,
-                    goteNnueId: null,
+                    senteNnueSelection,
+                    goteNnueSelection: createNnueSelection(null),
+                    resolveNnue,
                 }),
-            { initialProps: { senteNnueId: "nnue-1" } },
+            { initialProps: { senteNnueSelection: createNnueSelection("nnue-1") } },
         );
 
         // 初期化を待つ
@@ -468,7 +484,7 @@ describe("useEngineManager - NNUE restart", () => {
         const resetCallCount = mockClient.reset.mock.calls.length;
 
         // NNUE ID を変更
-        rerender({ senteNnueId: "nnue-2" });
+        rerender({ senteNnueSelection: createNnueSelection("nnue-2") });
 
         await act(async () => {
             await Promise.resolve();

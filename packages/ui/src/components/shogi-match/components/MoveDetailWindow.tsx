@@ -49,6 +49,8 @@ interface MoveDetailWindowProps {
     onAnalysisNnueSelectionChange?: (selection: NnueSelection) => void;
     /** ダウンロード済み NNUE 一覧 */
     nnueList?: NnueMeta[];
+    /** NNUE 一覧読み込み中フラグ */
+    isNnueListLoading?: boolean;
     /** プリセット一覧（未ダウンロードも含む） */
     presets?: PresetConfig[];
     /** 棋譜ツリー（分岐追加の重複チェック用） */
@@ -337,6 +339,7 @@ export function MoveDetailWindow({
     analysisNnueSelection,
     onAnalysisNnueSelectionChange,
     nnueList,
+    isNnueListLoading,
     presets,
     kifuTree,
     onClose,
@@ -543,7 +546,10 @@ export function MoveDetailWindow({
     const hasMultiplePv = pvList.length > 1;
 
     // NNUE選択肢を構築（プリセット + カスタムNNUE）
-    const nnueOptions = useMemo(() => buildNnueOptions({ presets, nnueList }), [presets, nnueList]);
+    const nnueOptions = useMemo(
+        () => buildNnueOptions({ presets, nnueList, isNnueListLoading }),
+        [presets, nnueList, isNnueListLoading],
+    );
 
     // 現在の選択値を計算
     const selectedValue = useMemo(

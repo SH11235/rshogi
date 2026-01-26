@@ -37,7 +37,7 @@ import { EvalPanel } from "./shogi-match/components/EvalPanel";
 import { GameResultDialog } from "./shogi-match/components/GameResultDialog";
 import { HandPiecesDisplay } from "./shogi-match/components/HandPiecesDisplay";
 import { KifuImportPanel } from "./shogi-match/components/KifuImportPanel";
-import { KifuPanel } from "./shogi-match/components/KifuPanel";
+import { KifuPanel, type KifuViewMode } from "./shogi-match/components/KifuPanel";
 import { LeftSidebar } from "./shogi-match/components/LeftSidebar";
 import { MatchControls } from "./shogi-match/components/MatchControls";
 import { MoveDetailWindow } from "./shogi-match/components/MoveDetailWindow";
@@ -444,6 +444,8 @@ export function ShogiMatch({
     } | null>(null);
     // 選択中の分岐ノードID（キーボードナビゲーション用）
     const [selectedBranchNodeId, setSelectedBranchNodeId] = useState<string | null>(null);
+    // 棋譜パネルの表示モード（評価値グラフ切り替え用）
+    const [kifuViewMode, setKifuViewMode] = useState<KifuViewMode>("main");
     // 選択中の手の詳細（右パネル表示用）- plyで管理し、最新のmoveは都度取得
     const [selectedMoveDetailPly, setSelectedMoveDetailPly] = useState<{
         ply: number;
@@ -565,7 +567,7 @@ export function ShogiMatch({
     });
 
     // プリセット一覧を取得
-    const { presets } = usePresetManager({
+    const { presets, isLoading: isPresetsLoading } = usePresetManager({
         manifestUrl,
         autoFetch: true,
         onDownloadComplete: () => {
@@ -613,28 +615,89 @@ export function ShogiMatch({
         setAnalysisNnueSelection,
     ]);
 
-    // manifestUrl 未指定でプリセット選択中の場合、駒得評価にフォールバック
-    // （プリセットはダウンロードできないため）
+    // manifestUrl 未指定でプリセット選択中の場合のフォールバック
+    // ただし、nnueList に該当プリセットがダウンロード済みで存在する場合はリセットしない
     useEffect(() => {
-        if (!manifestUrl) {
-            if (analysisNnueSelection.presetKey) {
-                setAnalysisNnueSelection({ presetKey: null, nnueId: null });
-            }
-            if (senteNnueSelection.presetKey) {
-                setSenteNnueSelection({ presetKey: null, nnueId: null });
-            }
-            if (goteNnueSelection.presetKey) {
-                setGoteNnueSelection({ presetKey: null, nnueId: null });
-            }
+        // manifestUrl が指定されている場合は処理不要
+        if (manifestUrl) return;
+        // nnueList 読み込み中は待機
+        if (isNnueListLoading) return;
+
+        const shouldReset = (presetKey: string | null): boolean => {
+            if (!presetKey) return false;
+            // nnueList に該当プリセットがダウンロード済みで存在するかチェック
+            const existsInList = nnueList.some(
+                (n) => n.source === "preset" && n.presetKey === presetKey,
+            );
+            // 存在しない場合のみリセット対象
+            return !existsInList;
+        };
+
+        if (shouldReset(analysisNnueSelection.presetKey)) {
+            setAnalysisNnueSelection({ presetKey: null, nnueId: null });
+        }
+        if (shouldReset(senteNnueSelection.presetKey)) {
+            setSenteNnueSelection({ presetKey: null, nnueId: null });
+        }
+        if (shouldReset(goteNnueSelection.presetKey)) {
+            setGoteNnueSelection({ presetKey: null, nnueId: null });
         }
     }, [
         manifestUrl,
+        isNnueListLoading,
+        nnueList,
         analysisNnueSelection.presetKey,
         senteNnueSelection.presetKey,
         goteNnueSelection.presetKey,
         setAnalysisNnueSelection,
         setSenteNnueSelection,
         setGoteNnueSelection,
+    ]);
+
+    // 選択中の presetKey がマニフェストに存在しない場合のバリデーション
+    // - presets が存在すれば先頭のプリセットにフォールバック
+    // - presets が空なら駒得にフォールバック
+    // ※ manifestUrl 未指定時は別の useEffect で nnueList ベースの処理を行うためスキップ
+    useEffect(() => {
+        // manifestUrl 未指定の場合は別の useEffect で処理するためスキップ
+        if (!manifestUrl) return;
+        // プリセット読み込み中は待機
+        if (isPresetsLoading) return;
+
+        const validateAndFix = (
+            selection: NnueSelection,
+            setSelection: (s: NnueSelection) => void,
+        ) => {
+            // presetKey が設定されていない場合はバリデーション不要
+            if (!selection.presetKey) return;
+
+            // presets が空の場合は駒得にフォールバック
+            if (presets.length === 0) {
+                setSelection({ presetKey: null, nnueId: null });
+                return;
+            }
+
+            // presetKey が presets に存在するかチェック
+            const exists = presets.some((p) => p.config.presetKey === selection.presetKey);
+            if (!exists) {
+                // 先頭のプリセットにフォールバック
+                setSelection({ presetKey: presets[0].config.presetKey, nnueId: null });
+            }
+        };
+
+        validateAndFix(senteNnueSelection, setSenteNnueSelection);
+        validateAndFix(goteNnueSelection, setGoteNnueSelection);
+        validateAndFix(analysisNnueSelection, setAnalysisNnueSelection);
+    }, [
+        manifestUrl,
+        isPresetsLoading,
+        presets,
+        senteNnueSelection,
+        goteNnueSelection,
+        analysisNnueSelection,
+        setSenteNnueSelection,
+        setGoteNnueSelection,
+        setAnalysisNnueSelection,
     ]);
 
     // 分析用 NNUE 変更時に一括解析をリセット（プール破棄に伴う UI 同期）
@@ -713,6 +776,7 @@ export function ShogiMatch({
     const {
         kifMoves,
         evalHistory,
+        mainLineEvalHistory,
         boardHistory,
         positionHistory,
         branchMarkers,
@@ -722,6 +786,13 @@ export function ShogiMatch({
         clearEvalByNodeId,
         addPvAsBranch,
     } = navigation;
+
+    // 評価値グラフ用: ビューモードに応じて本譜 or 分岐の評価履歴を選択
+    const displayEvalHistory = useMemo(() => {
+        // "main" モード時は本譜の評価値を表示
+        // "branches" や "selectedBranch" モード時は現在の経路（分岐含む）の評価値を表示
+        return kifuViewMode === "main" ? mainLineEvalHistory : evalHistory;
+    }, [kifuViewMode, mainLineEvalHistory, evalHistory]);
 
     // 選択中の手の詳細を最新のkifMovesから取得
     const selectedMoveDetail = useMemo(() => {
@@ -2655,6 +2726,7 @@ export function ShogiMatch({
                     analysisNnueSelection={analysisNnueSelection}
                     onAnalysisNnueSelectionChange={setAnalysisNnueSelection}
                     nnueList={nnueList}
+                    isNnueListLoading={isNnueListLoading}
                     presets={presetConfigs}
                     kifuTree={navigation.tree}
                     onClose={() => setSelectedMoveDetailPly(null)}
@@ -2702,7 +2774,7 @@ export function ShogiMatch({
                     onToStart={navigation.goToStart}
                     onToEnd={navigation.goToEnd}
                     // 評価値
-                    evalHistory={evalHistory}
+                    evalHistory={displayEvalHistory}
                     evalCp={evalHistory[navigation.state.currentPly]?.evalCp ?? undefined}
                     evalMate={evalHistory[navigation.state.currentPly]?.evalMate ?? undefined}
                     // 対局コントロール
@@ -3034,7 +3106,7 @@ export function ShogiMatch({
                             <div className="flex flex-col gap-2 shrink-0 pt-16">
                                 {/* 評価値グラフパネル（折りたたみ） */}
                                 <EvalPanel
-                                    evalHistory={evalHistory}
+                                    evalHistory={displayEvalHistory}
                                     currentPly={navigation.state.currentPly}
                                     onPlySelect={handlePlySelect}
                                     defaultOpen={false}
@@ -3089,6 +3161,7 @@ export function ShogiMatch({
                                             setLastAddedBranchInfo(null)
                                         }
                                         onSelectedBranchChange={setSelectedBranchNodeId}
+                                        onViewModeChange={setKifuViewMode}
                                         onAnalyzePly={handleAnalyzePly}
                                         isAnalyzing={isAnalyzing}
                                         analyzingPly={
@@ -3113,6 +3186,7 @@ export function ShogiMatch({
                                         analysisNnueSelection={analysisNnueSelection}
                                         onAnalysisNnueSelectionChange={setAnalysisNnueSelection}
                                         nnueList={nnueList}
+                                        isNnueListLoading={isNnueListLoading}
                                         presets={presetConfigs}
                                         kifuTree={navigation.tree}
                                         onNodeClick={navigation.goToNodeById}

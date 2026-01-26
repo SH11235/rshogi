@@ -245,8 +245,8 @@ export interface NnueSelection {
 /**
  * デフォルトプリセットキー（フォールバック値）
  *
- * 環境変数 VITE_DEFAULT_NNUE_PRESET で上書き可能。
- * manifest.json に存在するプリセットキーを指定する必要がある。
+ * UI層で環境変数等により上書きされる場合がある。
+ * 実際のデフォルト決定ロジックは各アプリケーション（Web/Desktop）で行う。
  */
 export const DEFAULT_PRESET_KEY = "ramu";
 

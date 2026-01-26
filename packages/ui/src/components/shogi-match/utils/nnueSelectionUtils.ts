@@ -31,15 +31,19 @@ export interface NnueOption {
 export function buildNnueOptions(params: {
     presets: PresetConfig[] | undefined;
     nnueList: NnueMeta[] | undefined;
+    /** nnueList 読み込み中フラグ（読み込み中は (要DL) を付けない） */
+    isNnueListLoading?: boolean;
 }): NnueOption[] {
-    const { presets, nnueList } = params;
+    const { presets, nnueList, isNnueListLoading = false } = params;
     const options: NnueOption[] = [];
 
     // プリセット一覧
     for (const preset of presets ?? []) {
-        const isDownloaded = nnueList?.some(
-            (n) => n.source === "preset" && n.presetKey === preset.presetKey,
-        );
+        // nnueList 読み込み中の場合は (要DL) を付けない
+        const isDownloaded =
+            isNnueListLoading ||
+            nnueList?.some((n) => n.source === "preset" && n.presetKey === preset.presetKey) ===
+                true;
         options.push({
             type: "preset",
             key: preset.presetKey,
