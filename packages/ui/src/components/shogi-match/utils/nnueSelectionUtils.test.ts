@@ -130,6 +130,32 @@ describe("nnueSelectionUtils", () => {
 
             expect(options).toHaveLength(0);
         });
+
+        it("isNnueListLoading=trueの場合は(要DL)を付けない", () => {
+            const options = buildNnueOptions({
+                presets: mockPresets,
+                nnueList: [], // 空でも読み込み中なら (要DL) を付けない
+                isNnueListLoading: true,
+            });
+
+            expect(options).toHaveLength(2);
+            // 読み込み中なので (要DL) が付かない
+            expect(options.every((o) => !o.label.includes("(要DL)"))).toBe(true);
+            expect(options[0].label).toBe("らむ");
+            expect(options[1].label).toBe("たぬき");
+        });
+
+        it("isNnueListLoading=falseの場合は通常通り(要DL)を付ける", () => {
+            const options = buildNnueOptions({
+                presets: mockPresets,
+                nnueList: [],
+                isNnueListLoading: false,
+            });
+
+            expect(options).toHaveLength(2);
+            // 読み込み完了で空なので全て (要DL) が付く
+            expect(options.every((o) => o.label.includes("(要DL)"))).toBe(true);
+        });
     });
 
     describe("toNnueSelectionValue", () => {

@@ -504,8 +504,9 @@ export function useEngineManager({
             engineState.selectedId = null;
             engineState.ready = false;
 
-            setEngineReady((prev) => ({ ...prev, [side]: false }));
-            setEngineStatus((prev) => ({ ...prev, [side]: "idle" }));
+            // 値が変わるときだけ更新（同値更新での再レンダーを防ぐ）
+            setEngineReady((prev) => (prev[side] === false ? prev : { ...prev, [side]: false }));
+            setEngineStatus((prev) => (prev[side] === "idle" ? prev : { ...prev, [side]: "idle" }));
         },
         [addErrorLog],
     );
