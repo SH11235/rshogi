@@ -217,14 +217,6 @@ export function createTauriNnueStorage(options: TauriNnueStorageOptions = {}): N
 }
 
 /**
- * NNUE ファイルのパスを取得
- */
-async function getNnuePath(id: string, options: { invoke?: InvokeFn } = {}): Promise<string> {
-    const invoke = options.invoke ?? tauriInvoke;
-    return invoke<string>("get_nnue_path", { id });
-}
-
-/**
  * NNUE ファイルのハッシュを計算
  */
 async function calculateNnueHash(id: string, options: { invoke?: InvokeFn } = {}): Promise<string> {
@@ -247,45 +239,4 @@ async function importNnueFromPath(
         srcPath,
         id,
     });
-}
-
-/**
- * NNUE ファイルをインポートしてメタデータを作成
- * @param srcPath ソースファイルのパス
- * @param displayName 表示名（省略時はファイル名）
- */
-async function importNnue(
-    srcPath: string,
-    displayName?: string,
-    options: { invoke?: InvokeFn } = {},
-): Promise<NnueMeta> {
-    const invoke = options.invoke ?? tauriInvoke;
-    const id = generateNnueId();
-
-    // ファイルをコピー
-    const result = await importNnueFromPath(srcPath, id, { invoke });
-
-    // SHA-256 計算
-    const hash = await calculateNnueHash(id, { invoke });
-
-    // ファイル名を抽出
-    const fileName = srcPath.split(/[/\\]/).pop() ?? "unknown.nnue";
-
-    const meta: NnueMeta = {
-        id,
-        displayName: displayName ?? fileName,
-        originalFileName: fileName,
-        size: result.size,
-        contentHashSha256: hash,
-        source: "user-uploaded",
-        createdAt: Date.now(),
-        verified: false,
-    };
-
-    // メタデータを保存
-    const metaCache = loadMetaFromStorage();
-    metaCache.set(id, meta);
-    saveMetaToStorage(metaCache);
-
-    return meta;
 }

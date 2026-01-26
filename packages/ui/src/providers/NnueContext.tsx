@@ -113,19 +113,6 @@ export function NnueProvider({
 }
 
 /**
- * NnueContext を取得するフック
- *
- * NnueProvider の外で使用するとエラーを投げる。
- */
-function useNnueContext(): NnueContextValue {
-    const context = useContext(NnueContext);
-    if (!context) {
-        throw new Error("useNnueContext must be used within a NnueProvider");
-    }
-    return context;
-}
-
-/**
  * NnueContext を取得するフック（Optional版）
  *
  * NnueProvider の外で使用した場合は null を返す。

@@ -5,7 +5,6 @@ import { forwardRef } from "react";
 
 export const Popover = PopoverPrimitive.Root;
 export const PopoverTrigger = PopoverPrimitive.Trigger;
-const PopoverAnchor = PopoverPrimitive.Anchor;
 
 export const PopoverContent = forwardRef<
     ComponentRef<typeof PopoverPrimitive.Content>,
@@ -29,5 +28,3 @@ export const PopoverContent = forwardRef<
         </PopoverPrimitive.Portal>
     );
 });
-
-const PopoverClose = PopoverPrimitive.Close;

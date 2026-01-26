@@ -52,4 +52,3 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
 });
 
 export { buttonVariants };
-const buttonStyles = buttonVariants;
