@@ -535,20 +535,23 @@ export function ShogiMatch({
         }
     }, [setSenteNnueSelection, setGoteNnueSelection, setAnalysisNnueSelection]);
 
-    // NNUE 遅延ローダー
-    const {
-        resolveNnue,
-        isDownloading: isNnueDownloading,
-        downloadProgress: nnueDownloadProgress,
-        downloadingPresetName,
-    } = useLazyNnueLoader({ manifestUrl });
-
     // NNUE ストレージから一覧を取得
     const {
         nnueList,
         isLoading: isNnueListLoading,
         refreshList: refreshNnueList,
     } = useNnueStorage();
+
+    // NNUE 遅延ローダー
+    const {
+        resolveNnue,
+        isDownloading: isNnueDownloading,
+        downloadProgress: nnueDownloadProgress,
+        downloadingPresetName,
+    } = useLazyNnueLoader({
+        manifestUrl,
+        onDownloadComplete: refreshNnueList,
+    });
 
     // プリセット一覧を取得
     const { presets } = usePresetManager({

@@ -31,6 +31,8 @@ interface UseLazyNnueLoaderReturn {
 interface UseLazyNnueLoaderOptions {
     /** manifest.json の URL */
     manifestUrl?: string;
+    /** ダウンロード完了時のコールバック */
+    onDownloadComplete?: () => void;
 }
 
 /**
@@ -40,7 +42,7 @@ interface UseLazyNnueLoaderOptions {
  * プリセット指定の場合、IndexedDB に無ければダウンロードする。
  */
 export function useLazyNnueLoader(options: UseLazyNnueLoaderOptions = {}): UseLazyNnueLoaderReturn {
-    const { manifestUrl } = options;
+    const { manifestUrl, onDownloadComplete } = options;
     const context = useNnueContextOptional();
     const storage = context?.storage ?? null;
     const validateNnueHeader = context?.validateNnueHeader ?? null;
@@ -145,6 +147,10 @@ export function useLazyNnueLoader(options: UseLazyNnueLoaderOptions = {}): UseLa
                 setIsDownloading(false);
                 setDownloadProgress(null);
                 setDownloadingPresetName(null);
+
+                // ダウンロード完了を通知（nnueList の更新など）
+                onDownloadComplete?.();
+
                 return meta.id;
             } catch (e) {
                 const err =
@@ -165,7 +171,7 @@ export function useLazyNnueLoader(options: UseLazyNnueLoaderOptions = {}): UseLa
                 return selection.nnueId;
             }
         },
-        [manager, storage, validateNnueHeader],
+        [manager, storage, validateNnueHeader, onDownloadComplete],
     );
 
     const clearError = useCallback(() => {
