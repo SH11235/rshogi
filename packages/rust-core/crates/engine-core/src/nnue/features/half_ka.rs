@@ -223,16 +223,29 @@ impl Feature for HalfKA {
             }
         }
 
-        // 手駒の変化を処理
-        for dp in dirty_piece.hands(perspective) {
-            let bp_old = dp.old_piece;
-            if bp_old != BonaPiece::ZERO {
-                let _ = removed.push(halfka_index(k_index, bp_old.value() as usize));
-            }
-
-            let bp_new = dp.new_piece;
-            if bp_new != BonaPiece::ZERO {
-                let _ = added.push(halfka_index(k_index, bp_new.value() as usize));
+        // 手駒の変化を反映
+        // HalfKAでは手駒の枚数分すべての特徴量がアクティブになる設計
+        // 例: 歩3枚 → 歩1枚目、歩2枚目、歩3枚目の3つの特徴量がすべてアクティブ
+        // したがって差分更新では:
+        // - 増加時: 増えた分だけ追加（既存はそのまま維持）
+        // - 減少時: 減った分だけ削除（残る分は維持）
+        for hc in dirty_piece.hand_changes() {
+            if hc.old_count < hc.new_count {
+                // 枚数増加: old_count+1 から new_count までの特徴量を追加
+                for i in (hc.old_count + 1)..=hc.new_count {
+                    let bp = BonaPiece::from_hand_piece(perspective, hc.owner, hc.piece_type, i);
+                    if bp != BonaPiece::ZERO {
+                        let _ = added.push(halfka_index(k_index, bp.value() as usize));
+                    }
+                }
+            } else if hc.old_count > hc.new_count {
+                // 枚数減少: new_count+1 から old_count までの特徴量を削除
+                for i in (hc.new_count + 1)..=hc.old_count {
+                    let bp = BonaPiece::from_hand_piece(perspective, hc.owner, hc.piece_type, i);
+                    if bp != BonaPiece::ZERO {
+                        let _ = removed.push(halfka_index(k_index, bp.value() as usize));
+                    }
+                }
             }
         }
     }
