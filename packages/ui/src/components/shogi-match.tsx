@@ -3,12 +3,15 @@ import {
     type BoardState,
     boardToMatrix,
     cloneBoard,
+    createDefaultNnueSelection,
     createEmptyHands,
+    DEFAULT_PRESET_KEY,
     type GameResult,
     getAllSquares,
     getPathToNode,
     getPositionService,
     type LastMove,
+    type NnueSelection,
     type Piece,
     type PieceType,
     type Player,
@@ -19,9 +22,12 @@ import {
 } from "@shogi/app-core";
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useLazyNnueLoader } from "../hooks/useLazyNnueLoader";
 import { useNnueStorage } from "../hooks/useNnueStorage";
+import { usePresetManager } from "../hooks/usePresetManager";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./dialog";
 import { EngineRestartingOverlay } from "./nnue/EngineRestartingOverlay";
+import { NnueDownloadOverlay } from "./nnue/NnueDownloadOverlay";
 import { NnueManagerDialog } from "./nnue/NnueManagerDialog";
 import type { ShogiBoardCell } from "./shogi-board";
 import { ShogiBoard } from "./shogi-board";
@@ -31,7 +37,7 @@ import { EvalPanel } from "./shogi-match/components/EvalPanel";
 import { GameResultDialog } from "./shogi-match/components/GameResultDialog";
 import { HandPiecesDisplay } from "./shogi-match/components/HandPiecesDisplay";
 import { KifuImportPanel } from "./shogi-match/components/KifuImportPanel";
-import { KifuPanel } from "./shogi-match/components/KifuPanel";
+import { KifuPanel, type KifuViewMode } from "./shogi-match/components/KifuPanel";
 import { LeftSidebar } from "./shogi-match/components/LeftSidebar";
 import { MatchControls } from "./shogi-match/components/MatchControls";
 import { MoveDetailWindow } from "./shogi-match/components/MoveDetailWindow";
@@ -101,6 +107,8 @@ interface ShogiMatchProps {
     manifestUrl?: string;
     /** Desktop 用: NNUE ファイル選択ダイアログを開いてパスを取得するコールバック */
     onRequestNnueFilePath?: () => Promise<string | null>;
+    /** デフォルトの NNUE プリセットキー（未指定時は DEFAULT_PRESET_KEY） */
+    defaultNnuePresetKey?: string;
 }
 
 // デフォルト値の定数
@@ -327,7 +335,13 @@ export function ShogiMatch({
     isDevMode = false,
     manifestUrl,
     onRequestNnueFilePath,
+    defaultNnuePresetKey,
 }: ShogiMatchProps): ReactElement {
+    // デフォルトの NNUE 選択（props のプリセットキーを使用、未指定時は DEFAULT_PRESET_KEY）
+    const defaultNnueSelection = useMemo(
+        () => createDefaultNnueSelection(defaultNnuePresetKey ?? DEFAULT_PRESET_KEY),
+        [defaultNnuePresetKey],
+    );
     const emptyBoard = useMemo<BoardState>(
         () => Object.fromEntries(getAllSquares().map((sq) => [sq, null])) as BoardState,
         [],
@@ -428,6 +442,8 @@ export function ShogiMatch({
     } | null>(null);
     // 選択中の分岐ノードID（キーボードナビゲーション用）
     const [selectedBranchNodeId, setSelectedBranchNodeId] = useState<string | null>(null);
+    // 棋譜パネルの表示モード（評価値グラフ切り替え用）
+    const [kifuViewMode, setKifuViewMode] = useState<KifuViewMode>("main");
     // 選択中の手の詳細（右パネル表示用）- plyで管理し、最新のmoveは都度取得
     const [selectedMoveDetailPly, setSelectedMoveDetailPly] = useState<{
         ply: number;
@@ -445,70 +461,296 @@ export function ShogiMatch({
     // パス権設定ダイアログの状態
     const [isPassRightsSettingsOpen, setIsPassRightsSettingsOpen] = useState(false);
 
-    // 対局用 NNUE ID
-    const [senteNnueId, setSenteNnueId] = useLocalStorage<string | null>("shogi:senteNnueId", null);
-    const [goteNnueId, setGoteNnueId] = useLocalStorage<string | null>("shogi:goteNnueId", null);
-    // 分析用 NNUE ID
-    const [analysisNnueId, setAnalysisNnueId] = useLocalStorage<string | null>(
-        "shogi:analysisNnueId",
-        null,
+    // 対局用 NNUE 選択
+    const [senteNnueSelection, setSenteNnueSelection] = useLocalStorage<NnueSelection>(
+        "shogi:senteNnueSelection",
+        defaultNnueSelection,
     );
+    const [goteNnueSelection, setGoteNnueSelection] = useLocalStorage<NnueSelection>(
+        "shogi:goteNnueSelection",
+        defaultNnueSelection,
+    );
+    // 分析用 NNUE 選択
+    const [analysisNnueSelection, setAnalysisNnueSelection] = useLocalStorage<NnueSelection>(
+        "shogi:analysisNnueSelection",
+        defaultNnueSelection,
+    );
+
+    // 旧キーからのマイグレーション
     useEffect(() => {
         if (typeof window === "undefined") return;
-        if (senteNnueId !== null || goteNnueId !== null) return;
-        const legacyKey = "shogi:matchNnueId";
-        const stored = localStorage.getItem(legacyKey);
-        if (stored === null) return;
-        try {
-            const parsed = JSON.parse(stored) as string | null;
-            if (parsed) {
-                setSenteNnueId(parsed);
-                setGoteNnueId(parsed);
+
+        // 旧 senteNnueId からの移行
+        const oldSenteKey = "shogi:senteNnueId";
+        const oldSenteStored = localStorage.getItem(oldSenteKey);
+        if (oldSenteStored !== null) {
+            try {
+                const parsed = JSON.parse(oldSenteStored) as string | null;
+                if (parsed) {
+                    const newSelection = { presetKey: null, nnueId: parsed };
+                    setSenteNnueSelection(newSelection);
+                    void restartEngineForNnueRef.current?.("sente", newSelection);
+                }
+            } catch (error) {
+                console.warn(`Failed to parse localStorage key "${oldSenteKey}":`, error);
+            } finally {
+                localStorage.removeItem(oldSenteKey);
             }
-        } catch (error) {
-            console.warn(`Failed to parse localStorage key "${legacyKey}":`, error);
-        } finally {
-            localStorage.removeItem(legacyKey);
         }
-    }, [goteNnueId, senteNnueId, setGoteNnueId, setSenteNnueId]);
+
+        // 旧 goteNnueId からの移行
+        const oldGoteKey = "shogi:goteNnueId";
+        const oldGoteStored = localStorage.getItem(oldGoteKey);
+        if (oldGoteStored !== null) {
+            try {
+                const parsed = JSON.parse(oldGoteStored) as string | null;
+                if (parsed) {
+                    const newSelection = { presetKey: null, nnueId: parsed };
+                    setGoteNnueSelection(newSelection);
+                    void restartEngineForNnueRef.current?.("gote", newSelection);
+                }
+            } catch (error) {
+                console.warn(`Failed to parse localStorage key "${oldGoteKey}":`, error);
+            } finally {
+                localStorage.removeItem(oldGoteKey);
+            }
+        }
+
+        // 旧 analysisNnueId からの移行
+        const oldAnalysisKey = "shogi:analysisNnueId";
+        const oldAnalysisStored = localStorage.getItem(oldAnalysisKey);
+        if (oldAnalysisStored !== null) {
+            try {
+                const parsed = JSON.parse(oldAnalysisStored) as string | null;
+                if (parsed) {
+                    setAnalysisNnueSelection({ presetKey: null, nnueId: parsed });
+                }
+            } catch (error) {
+                console.warn(`Failed to parse localStorage key "${oldAnalysisKey}":`, error);
+            } finally {
+                localStorage.removeItem(oldAnalysisKey);
+            }
+        }
+
+        // さらに古い matchNnueId からの移行
+        const legacyKey = "shogi:matchNnueId";
+        const legacyStored = localStorage.getItem(legacyKey);
+        if (legacyStored !== null) {
+            try {
+                const parsed = JSON.parse(legacyStored) as string | null;
+                if (parsed) {
+                    setSenteNnueSelection({ presetKey: null, nnueId: parsed });
+                    setGoteNnueSelection({ presetKey: null, nnueId: parsed });
+                }
+            } catch (error) {
+                console.warn(`Failed to parse localStorage key "${legacyKey}":`, error);
+            } finally {
+                localStorage.removeItem(legacyKey);
+            }
+        }
+    }, [setSenteNnueSelection, setGoteNnueSelection, setAnalysisNnueSelection]);
 
     // NNUE ストレージから一覧を取得
-    const { nnueList, isLoading: isNnueListLoading } = useNnueStorage();
+    const {
+        nnueList,
+        isLoading: isNnueListLoading,
+        refreshList: refreshNnueList,
+    } = useNnueStorage();
 
-    // 選択された NNUE が削除された場合はリセット
+    // NNUE 遅延ローダー
+    const {
+        resolveNnue,
+        isDownloading: isNnueDownloading,
+        downloadProgress: nnueDownloadProgress,
+        downloadingPresetName,
+    } = useLazyNnueLoader({
+        manifestUrl,
+        onDownloadComplete: refreshNnueList,
+    });
+
+    // プリセット一覧を取得
+    const { presets, isLoading: isPresetsLoading } = usePresetManager({
+        manifestUrl,
+        autoFetch: true,
+        onDownloadComplete: () => {
+            // ダウンロード完了時にストレージを更新
+            void refreshNnueList();
+        },
+    });
+
+    // 選択された NNUE（カスタムの場合）が削除された場合はデフォルトにリセット
+    // プリセット選択の場合は削除チェック不要（未ダウンロードでも選択可能）
     // isLoading 中はリストが空でも待機（初期ロード完了後に判定）
     useEffect(() => {
         if (!isNnueListLoading) {
-            if (senteNnueId && !nnueList.some((n) => n.id === senteNnueId)) {
-                setSenteNnueId(null);
+            // カスタム NNUE（presetKey が null）で nnueId が設定されている場合のみチェック
+            if (
+                senteNnueSelection.presetKey === null &&
+                senteNnueSelection.nnueId &&
+                !nnueList.some((n) => n.id === senteNnueSelection.nnueId)
+            ) {
+                setSenteNnueSelection(defaultNnueSelection);
+                void restartEngineForNnueRef.current?.("sente", defaultNnueSelection);
             }
-            if (goteNnueId && !nnueList.some((n) => n.id === goteNnueId)) {
-                setGoteNnueId(null);
+            if (
+                goteNnueSelection.presetKey === null &&
+                goteNnueSelection.nnueId &&
+                !nnueList.some((n) => n.id === goteNnueSelection.nnueId)
+            ) {
+                setGoteNnueSelection(defaultNnueSelection);
+                void restartEngineForNnueRef.current?.("gote", defaultNnueSelection);
             }
-            if (analysisNnueId && !nnueList.some((n) => n.id === analysisNnueId)) {
-                setAnalysisNnueId(null);
+            if (
+                analysisNnueSelection.presetKey === null &&
+                analysisNnueSelection.nnueId &&
+                !nnueList.some((n) => n.id === analysisNnueSelection.nnueId)
+            ) {
+                setAnalysisNnueSelection(defaultNnueSelection);
             }
         }
     }, [
-        senteNnueId,
-        goteNnueId,
-        analysisNnueId,
+        senteNnueSelection,
+        goteNnueSelection,
+        analysisNnueSelection,
         nnueList,
         isNnueListLoading,
-        setSenteNnueId,
-        setGoteNnueId,
-        setAnalysisNnueId,
+        setSenteNnueSelection,
+        setGoteNnueSelection,
+        setAnalysisNnueSelection,
+    ]);
+
+    // manifestUrl 未指定でプリセット選択中の場合のフォールバック
+    // ただし、nnueList に該当プリセットがダウンロード済みで存在する場合はリセットしない
+    useEffect(() => {
+        // manifestUrl が指定されている場合は処理不要
+        if (manifestUrl) return;
+        // nnueList 読み込み中は待機
+        if (isNnueListLoading) return;
+
+        const shouldReset = (presetKey: string | null): boolean => {
+            if (!presetKey) return false;
+            // nnueList に該当プリセットがダウンロード済みで存在するかチェック
+            const existsInList = nnueList.some(
+                (n) => n.source === "preset" && n.presetKey === presetKey,
+            );
+            // 存在しない場合のみリセット対象
+            return !existsInList;
+        };
+
+        if (shouldReset(analysisNnueSelection.presetKey)) {
+            setAnalysisNnueSelection({ presetKey: null, nnueId: null });
+        }
+        if (shouldReset(senteNnueSelection.presetKey)) {
+            const newSelection = { presetKey: null, nnueId: null };
+            setSenteNnueSelection(newSelection);
+            void restartEngineForNnueRef.current?.("sente", newSelection);
+        }
+        if (shouldReset(goteNnueSelection.presetKey)) {
+            const newSelection = { presetKey: null, nnueId: null };
+            setGoteNnueSelection(newSelection);
+            void restartEngineForNnueRef.current?.("gote", newSelection);
+        }
+    }, [
+        manifestUrl,
+        isNnueListLoading,
+        nnueList,
+        analysisNnueSelection.presetKey,
+        senteNnueSelection.presetKey,
+        goteNnueSelection.presetKey,
+        setAnalysisNnueSelection,
+        setSenteNnueSelection,
+        setGoteNnueSelection,
+    ]);
+
+    // 選択中の presetKey がマニフェストに存在しない場合のバリデーション
+    // - presets が存在すれば先頭のプリセットにフォールバック
+    // - presets が空なら駒得にフォールバック
+    // ※ manifestUrl 未指定時は別の useEffect で nnueList ベースの処理を行うためスキップ
+    useEffect(() => {
+        // manifestUrl 未指定の場合は別の useEffect で処理するためスキップ
+        if (!manifestUrl) return;
+        // プリセット読み込み中は待機
+        if (isPresetsLoading) return;
+
+        const validateAndFix = (
+            selection: NnueSelection,
+            setSelection: (s: NnueSelection) => void,
+        ): NnueSelection | null => {
+            // presetKey が設定されていない場合はバリデーション不要
+            if (!selection.presetKey) return null;
+
+            // presets が空の場合は駒得にフォールバック
+            if (presets.length === 0) {
+                const newSelection = { presetKey: null, nnueId: null };
+                setSelection(newSelection);
+                return newSelection;
+            }
+
+            // presetKey が presets に存在するかチェック
+            const exists = presets.some((p) => p.config.presetKey === selection.presetKey);
+            if (!exists) {
+                // 先頭のプリセットにフォールバック
+                const newSelection = { presetKey: presets[0].config.presetKey, nnueId: null };
+                setSelection(newSelection);
+                return newSelection;
+            }
+            return null;
+        };
+
+        const newSenteSelection = validateAndFix(senteNnueSelection, setSenteNnueSelection);
+        const newGoteSelection = validateAndFix(goteNnueSelection, setGoteNnueSelection);
+        validateAndFix(analysisNnueSelection, setAnalysisNnueSelection);
+
+        // 選択が変更された場合、対局用エンジンを再起動
+        if (newSenteSelection) {
+            restartEngineForNnueRef.current?.("sente", newSenteSelection);
+        }
+        if (newGoteSelection) {
+            restartEngineForNnueRef.current?.("gote", newGoteSelection);
+        }
+    }, [
+        manifestUrl,
+        isPresetsLoading,
+        presets,
+        senteNnueSelection,
+        goteNnueSelection,
+        analysisNnueSelection,
+        setSenteNnueSelection,
+        setGoteNnueSelection,
+        setAnalysisNnueSelection,
     ]);
 
     // 分析用 NNUE 変更時に一括解析をリセット（プール破棄に伴う UI 同期）
-    const prevAnalysisNnueIdRef = useRef(analysisNnueId);
+    const prevAnalysisNnueSelectionRef = useRef(analysisNnueSelection);
     useEffect(() => {
-        if (prevAnalysisNnueIdRef.current !== analysisNnueId) {
-            prevAnalysisNnueIdRef.current = analysisNnueId;
+        const prev = prevAnalysisNnueSelectionRef.current;
+        if (
+            prev.presetKey !== analysisNnueSelection.presetKey ||
+            prev.nnueId !== analysisNnueSelection.nnueId
+        ) {
+            prevAnalysisNnueSelectionRef.current = analysisNnueSelection;
             // 一括解析中なら UI をリセット
             setBatchAnalysis(null);
         }
-    }, [analysisNnueId]);
+    }, [analysisNnueSelection]);
+
+    // 分析用 NNUE ID の導出（子コンポーネント用）
+    // preset 選択時は nnueList からダウンロード済みの NNUE を探す
+    const analysisNnueId = useMemo(() => {
+        if (analysisNnueSelection.nnueId) {
+            return analysisNnueSelection.nnueId;
+        }
+        if (analysisNnueSelection.presetKey) {
+            const presetNnue = nnueList.find(
+                (n) => n.source === "preset" && n.presetKey === analysisNnueSelection.presetKey,
+            );
+            return presetNnue?.id ?? null;
+        }
+        return null;
+    }, [analysisNnueSelection, nnueList]);
+
+    // プリセット設定のみを抽出（UIコンポーネント用）
+    const presetConfigs = useMemo(() => presets.map((p) => p.config), [presets]);
 
     // positionRef を先に定義（コールバックで使用するため）
     const positionRef = useRef<PositionState>(position);
@@ -554,6 +796,7 @@ export function ShogiMatch({
     const {
         kifMoves,
         evalHistory,
+        mainLineEvalHistory,
         boardHistory,
         positionHistory,
         branchMarkers,
@@ -563,6 +806,13 @@ export function ShogiMatch({
         clearEvalByNodeId,
         addPvAsBranch,
     } = navigation;
+
+    // 評価値グラフ用: ビューモードに応じて本譜 or 分岐の評価履歴を選択
+    const displayEvalHistory = useMemo(() => {
+        // "main" モード時は本譜の評価値を表示
+        // "branches" や "selectedBranch" モード時は現在の経路（分岐含む）の評価値を表示
+        return kifuViewMode === "main" ? mainLineEvalHistory : evalHistory;
+    }, [kifuViewMode, mainLineEvalHistory, evalHistory]);
 
     // 選択中の手の詳細を最新のkifMovesから取得
     const selectedMoveDetail = useMemo(() => {
@@ -689,6 +939,10 @@ export function ShogiMatch({
     }, []);
 
     const stopAllEnginesRef = useRef<() => Promise<void>>(async () => {});
+    // NNUE再起動用のref（useEffectからアクセスするため）
+    const restartEngineForNnueRef = useRef<
+        ((side: Player, selection?: NnueSelection) => Promise<void>) | null
+    >(null);
 
     // 時計管理フックを使用
     const { clocks, clocksRef, resetClocks, updateClocksForNextTurn, stopTicking, startTicking } =
@@ -851,7 +1105,7 @@ export function ShogiMatch({
         [recordEvalByPly, recordEvalByNodeId],
     );
 
-    // エンジン管理フックを使用
+    // エンジン管理フックを使用（明示API経由で制御）
     const {
         eventLogs,
         errorLogs,
@@ -864,6 +1118,8 @@ export function ShogiMatch({
         retryEngine,
         isRetrying,
         isEngineRestarting,
+        disposeEngine,
+        restartEngineForNnue,
     } = useEngineManager({
         sides,
         engineOptions,
@@ -879,11 +1135,46 @@ export function ShogiMatch({
         onMatchEnd: endMatch,
         onEvalUpdate: handleEvalUpdate,
         maxLogs,
-        senteNnueId,
-        goteNnueId,
-        analysisNnueId,
+        senteNnueSelection,
+        goteNnueSelection,
+        analysisNnueSelection,
+        resolveNnue,
     });
     stopAllEnginesRef.current = stopAllEngines;
+    restartEngineForNnueRef.current = restartEngineForNnue;
+
+    // role変更時にエンジンを破棄するラッパー
+    const handleSidesChange = useCallback(
+        (newSides: { sente: SideSetting; gote: SideSetting }) => {
+            // role が engine から human に変わった場合はエンジンを破棄
+            for (const side of ["sente", "gote"] as const) {
+                if (sides[side].role === "engine" && newSides[side].role !== "engine") {
+                    void disposeEngine(side);
+                }
+            }
+            setSides(newSides);
+        },
+        [disposeEngine, setSides, sides],
+    );
+
+    // NNUE選択変更時にエンジンを再起動するラッパー
+    const handleSenteNnueSelectionChange = useCallback(
+        (newSelection: NnueSelection) => {
+            setSenteNnueSelection(newSelection);
+            // 新しいselectionを明示的に渡す（state更新前に参照されるのを防ぐ）
+            void restartEngineForNnue("sente", newSelection);
+        },
+        [restartEngineForNnue, setSenteNnueSelection],
+    );
+
+    const handleGoteNnueSelectionChange = useCallback(
+        (newSelection: NnueSelection) => {
+            setGoteNnueSelection(newSelection);
+            // 新しいselectionを明示的に渡す（state更新前に参照されるのを防ぐ）
+            void restartEngineForNnue("gote", newSelection);
+        },
+        [restartEngineForNnue, setGoteNnueSelection],
+    );
 
     // 並列一括解析用のエンジンプール
     const engineOpt = engineOptions[0]; // デフォルトのエンジンオプションを使用
@@ -2178,13 +2469,17 @@ export function ShogiMatch({
     }, [isAnalyzing, analyzingState.type]);
 
     // 一括解析を開始（並列処理）- 本譜のみ
-    const handleStartBatchAnalysis = useCallback(() => {
+    const handleStartBatchAnalysis = useCallback(async () => {
         // PVがない手を抽出
         const targetPlies = kifMoves.filter((m) => !m.pv || m.pv.length === 0).map((m) => m.ply);
 
         if (targetPlies.length === 0) {
             return; // 解析対象がない
         }
+
+        // 未DLプリセットの場合はダウンロード
+        // resolveNnue内でダウンロード完了時にrefreshNnueListが呼ばれ、nnueListが更新される
+        const resolvedNnueId = await resolveNnue(analysisNnueSelection);
 
         // ジョブを生成
         const jobs: AnalysisJob[] = targetPlies.map((ply) => ({
@@ -2195,13 +2490,13 @@ export function ShogiMatch({
             depth: analysisSettings.batchAnalysisDepth,
         }));
 
-        // 並列一括解析を開始
-        enginePool.start(jobs);
-    }, [kifMoves, startSfen, analysisSettings, enginePool]);
+        // 並列一括解析を開始（resolvedNnueIdを直接渡す）
+        enginePool.start(jobs, { nnueId: resolvedNnueId });
+    }, [kifMoves, startSfen, analysisSettings, enginePool, resolveNnue, analysisNnueSelection]);
 
     // ツリー全体（分岐含む）の一括解析を開始
     const handleStartTreeBatchAnalysis = useCallback(
-        (options?: { mainLineOnly?: boolean }) => {
+        async (options?: { mainLineOnly?: boolean }) => {
             const tree = navigation.tree;
             if (!tree) return;
 
@@ -2217,6 +2512,9 @@ export function ShogiMatch({
                 return;
             }
 
+            // 未DLプリセットの場合はダウンロード
+            const resolvedNnueId = await resolveNnue(analysisNnueSelection);
+
             // AnalysisJob形式に変換
             const jobs: AnalysisJob[] = treeJobs.map((job) => ({
                 ply: job.ply,
@@ -2227,15 +2525,22 @@ export function ShogiMatch({
                 nodeId: job.nodeId, // 分岐解析用にnodeIdを保持
             }));
 
-            // 並列一括解析を開始
-            enginePool.start(jobs);
+            // 並列一括解析を開始（resolvedNnueIdを直接渡す）
+            enginePool.start(jobs, { nnueId: resolvedNnueId });
         },
-        [navigation.tree, startSfen, analysisSettings, enginePool],
+        [
+            navigation.tree,
+            startSfen,
+            analysisSettings,
+            enginePool,
+            resolveNnue,
+            analysisNnueSelection,
+        ],
     );
 
     // 特定の分岐を一括解析
     const handleAnalyzeBranch = useCallback(
-        (branchNodeId: string) => {
+        async (branchNodeId: string) => {
             const tree = navigation.tree;
             if (!tree) return;
 
@@ -2248,6 +2553,9 @@ export function ShogiMatch({
                 return;
             }
 
+            // 未DLプリセットの場合はダウンロード
+            const resolvedNnueId = await resolveNnue(analysisNnueSelection);
+
             // AnalysisJob形式に変換
             const jobs: AnalysisJob[] = branchJobs.map((job) => ({
                 ply: job.ply,
@@ -2258,10 +2566,17 @@ export function ShogiMatch({
                 nodeId: job.nodeId,
             }));
 
-            // 並列一括解析を開始
-            enginePool.start(jobs);
+            // 並列一括解析を開始（resolvedNnueIdを直接渡す）
+            enginePool.start(jobs, { nnueId: resolvedNnueId });
         },
-        [navigation.tree, startSfen, analysisSettings, enginePool],
+        [
+            navigation.tree,
+            startSfen,
+            analysisSettings,
+            enginePool,
+            resolveNnue,
+            analysisNnueSelection,
+        ],
     );
 
     // 一括解析をキャンセル
@@ -2421,6 +2736,13 @@ export function ShogiMatch({
 
             <EngineRestartingOverlay visible={isEngineRestarting} />
 
+            {/* NNUE ダウンロード中オーバーレイ */}
+            <NnueDownloadOverlay
+                visible={isNnueDownloading}
+                progress={nnueDownloadProgress}
+                presetName={downloadingPresetName}
+            />
+
             {/* 勝敗表示ダイアログ */}
             <GameResultDialog
                 result={gameResult}
@@ -2461,9 +2783,11 @@ export function ShogiMatch({
                     onAnalyze={handleAnalyzePly}
                     isAnalyzing={isAnalyzing}
                     analyzingPly={analyzingState.type !== "none" ? analyzingState.ply : undefined}
-                    analysisNnueId={analysisNnueId}
-                    onAnalysisNnueIdChange={setAnalysisNnueId}
+                    analysisNnueSelection={analysisNnueSelection}
+                    onAnalysisNnueSelectionChange={setAnalysisNnueSelection}
                     nnueList={nnueList}
+                    isNnueListLoading={isNnueListLoading}
+                    presets={presetConfigs}
                     kifuTree={navigation.tree}
                     onClose={() => setSelectedMoveDetailPly(null)}
                     isOnMainLine={navigation.state.isOnMainLine}
@@ -2510,7 +2834,7 @@ export function ShogiMatch({
                     onToStart={navigation.goToStart}
                     onToEnd={navigation.goToEnd}
                     // 評価値
-                    evalHistory={evalHistory}
+                    evalHistory={displayEvalHistory}
                     evalCp={evalHistory[navigation.state.currentPly]?.evalCp ?? undefined}
                     evalMate={evalHistory[navigation.state.currentPly]?.evalMate ?? undefined}
                     // 対局コントロール
@@ -2526,15 +2850,16 @@ export function ShogiMatch({
                     onEnterEditMode={isPaused ? enterEditModeFromPaused : undefined}
                     // 対局設定
                     sides={sides}
-                    onSidesChange={setSides}
+                    onSidesChange={handleSidesChange}
                     timeSettings={timeSettings}
                     onTimeSettingsChange={setTimeSettings}
                     internalEngineId={internalEngineId}
                     nnueList={nnueList}
-                    senteNnueId={senteNnueId}
-                    onSenteNnueIdChange={setSenteNnueId}
-                    goteNnueId={goteNnueId}
-                    onGoteNnueIdChange={setGoteNnueId}
+                    presets={presets}
+                    senteNnueSelection={senteNnueSelection}
+                    onSenteNnueSelectionChange={handleSenteNnueSelectionChange}
+                    goteNnueSelection={goteNnueSelection}
+                    onGoteNnueSelectionChange={handleGoteNnueSelectionChange}
                     settingsLocked={settingsLocked}
                     onOpenNnueManager={() => setIsNnueManagerOpen(true)}
                     // パス権設定
@@ -2558,7 +2883,7 @@ export function ShogiMatch({
                         {/* 左サイドバー */}
                         <LeftSidebar
                             sides={sides}
-                            onSidesChange={setSides}
+                            onSidesChange={handleSidesChange}
                             timeSettings={timeSettings}
                             onTimeSettingsChange={setTimeSettings}
                             passRightsSettings={passRightsSettings}
@@ -2566,14 +2891,15 @@ export function ShogiMatch({
                             settingsLocked={settingsLocked}
                             internalEngineId={internalEngineId}
                             nnueList={nnueList}
-                            senteNnueId={senteNnueId}
-                            onSenteNnueIdChange={setSenteNnueId}
-                            goteNnueId={goteNnueId}
-                            onGoteNnueIdChange={setGoteNnueId}
+                            presets={presets}
+                            senteNnueSelection={senteNnueSelection}
+                            onSenteNnueSelectionChange={handleSenteNnueSelectionChange}
+                            goteNnueSelection={goteNnueSelection}
+                            onGoteNnueSelectionChange={handleGoteNnueSelectionChange}
                             analysisSettings={analysisSettings}
                             onAnalysisSettingsChange={setAnalysisSettings}
-                            analysisNnueId={analysisNnueId}
-                            onAnalysisNnueIdChange={setAnalysisNnueId}
+                            analysisNnueSelection={analysisNnueSelection}
+                            onAnalysisNnueSelectionChange={setAnalysisNnueSelection}
                             onOpenNnueManager={() => setIsNnueManagerOpen(true)}
                             onOpenDisplaySettings={() => setIsDisplaySettingsOpen(true)}
                             onOpenPassRightsSettings={() => setIsPassRightsSettingsOpen(true)}
@@ -2840,7 +3166,7 @@ export function ShogiMatch({
                             <div className="flex flex-col gap-2 shrink-0 pt-16">
                                 {/* 評価値グラフパネル（折りたたみ） */}
                                 <EvalPanel
-                                    evalHistory={evalHistory}
+                                    evalHistory={displayEvalHistory}
                                     currentPly={navigation.state.currentPly}
                                     onPlySelect={handlePlySelect}
                                     defaultOpen={false}
@@ -2895,6 +3221,7 @@ export function ShogiMatch({
                                             setLastAddedBranchInfo(null)
                                         }
                                         onSelectedBranchChange={setSelectedBranchNodeId}
+                                        onViewModeChange={setKifuViewMode}
                                         onAnalyzePly={handleAnalyzePly}
                                         isAnalyzing={isAnalyzing}
                                         analyzingPly={
@@ -2916,9 +3243,11 @@ export function ShogiMatch({
                                         onCancelBatchAnalysis={handleCancelBatchAnalysis}
                                         analysisSettings={analysisSettings}
                                         onAnalysisSettingsChange={setAnalysisSettings}
-                                        analysisNnueId={analysisNnueId}
-                                        onAnalysisNnueIdChange={setAnalysisNnueId}
+                                        analysisNnueSelection={analysisNnueSelection}
+                                        onAnalysisNnueSelectionChange={setAnalysisNnueSelection}
                                         nnueList={nnueList}
+                                        isNnueListLoading={isNnueListLoading}
+                                        presets={presetConfigs}
                                         kifuTree={navigation.tree}
                                         onNodeClick={navigation.goToNodeById}
                                         onBranchSwitch={navigation.switchBranchAtNode}

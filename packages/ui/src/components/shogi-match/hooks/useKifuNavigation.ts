@@ -137,8 +137,10 @@ interface UseKifuNavigationResult {
     getMainLineMoves: () => string[];
     /** KIF形式の棋譜を取得 */
     kifMoves: KifMove[];
-    /** 評価値履歴を取得（グラフ用） */
+    /** 評価値履歴を取得（グラフ用、現在のライン） */
     evalHistory: EvalHistory[];
+    /** 本譜（メインライン）の評価値履歴を取得（グラフ用） */
+    mainLineEvalHistory: EvalHistory[];
     /** 盤面履歴を取得 */
     boardHistory: BoardState[];
     /** 局面履歴を取得（各手が指された後の局面） */
@@ -702,6 +704,28 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
         return path;
     }, [tree, currentLinePath]);
 
+    // 本譜（メインライン）のフルパスを計算（ルートから children[0] を辿る）
+    const mainLinePath = useMemo(() => {
+        const path: typeof tree.nodes extends Map<string, infer N> ? N[] : never[] = [];
+
+        // ルートノードから開始
+        const rootNode = tree.nodes.get(tree.rootId);
+        if (!rootNode) return path;
+
+        path.push(rootNode);
+
+        // children[0] を辿る
+        let nodeId: string | null = rootNode.children.length > 0 ? rootNode.children[0] : null;
+        while (nodeId !== null) {
+            const node = tree.nodes.get(nodeId);
+            if (!node) break;
+            path.push(node);
+            nodeId = node.children.length > 0 ? node.children[0] : null;
+        }
+
+        return path;
+    }, [tree]);
+
     // 盤面履歴を計算（フルラインから抽出、未来の手も含む）
     const boardHistory = useMemo((): BoardState[] => {
         const history: BoardState[] = [];
@@ -802,6 +826,26 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
         return history;
     }, [fullLinePath]);
 
+    // 本譜（メインライン）の評価値履歴を生成（グラフ用）
+    const mainLineEvalHistory = useMemo((): EvalHistory[] => {
+        const history: EvalHistory[] = [{ ply: 0, evalCp: 0, evalMate: null }];
+
+        for (const node of mainLinePath) {
+            // ルートはスキップ（ply: 0はすでに追加済み）
+            if (node.ply === 0) continue;
+
+            const normalizedEval = normalizeEvalToSentePerspective(node.eval, node.ply);
+
+            history.push({
+                ply: node.ply,
+                evalCp: normalizedEval.evalCp ?? null,
+                evalMate: normalizedEval.evalMate ?? null,
+            });
+        }
+
+        return history;
+    }, [mainLinePath]);
+
     // 分岐マーカーを計算（フルラインで分岐がある手数とその分岐数）
     const branchMarkers = useMemo((): Map<number, number> => {
         const markers = new Map<number, number>();
@@ -837,6 +881,7 @@ export function useKifuNavigation(options: UseKifuNavigationOptions): UseKifuNav
         getMainLineMoves: getMainLineMovesArray,
         kifMoves,
         evalHistory,
+        mainLineEvalHistory,
         boardHistory,
         positionHistory,
         branchMarkers,

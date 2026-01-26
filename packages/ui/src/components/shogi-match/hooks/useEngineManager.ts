@@ -1,4 +1,4 @@
-import type { GameResult, Player } from "@shogi/app-core";
+import type { GameResult, NnueSelection, Player } from "@shogi/app-core";
 import type {
     EngineClient,
     EngineErrorCode,
@@ -159,12 +159,14 @@ interface UseEngineManagerProps {
     onEvalUpdate?: (ply: number, event: EngineInfoEvent) => void;
     /** ログの最大件数 */
     maxLogs?: number;
-    /** 対局用 NNUE の ID（null = NNUEなし（Material評価）） */
-    senteNnueId?: string | null;
-    /** 対局用 NNUE の ID（null = NNUEなし（Material評価）） */
-    goteNnueId?: string | null;
-    /** 分析用 NNUE の ID（null = NNUEなし（Material評価）） */
-    analysisNnueId?: string | null;
+    /** 対局用 NNUE 選択（先手） */
+    senteNnueSelection?: NnueSelection;
+    /** 対局用 NNUE 選択（後手） */
+    goteNnueSelection?: NnueSelection;
+    /** 分析用 NNUE 選択 */
+    analysisNnueSelection?: NnueSelection;
+    /** NNUE を解決する関数（必要ならダウンロード） */
+    resolveNnue: (selection: NnueSelection) => Promise<string | null>;
 }
 
 /** 解析リクエストパラメータ */
@@ -237,6 +239,22 @@ interface UseEngineManagerReturn {
     isRetrying: Record<Player, boolean>;
     /** NNUE切替によるエンジン再起動中かどうか */
     isEngineRestarting: boolean;
+    /**
+     * 指定サイドのエンジンを破棄する
+     *
+     * role が "engine" から "human" に変更された際に呼び出してください。
+     */
+    disposeEngine: (side: Player) => Promise<void>;
+    /**
+     * NNUE変更に伴いエンジンを再起動する
+     *
+     * 対局停止中に NNUE 選択が変更された際に呼び出してください。
+     * 対局中は呼び出しても無視されます。
+     *
+     * @param side - 再起動対象のプレイヤー
+     * @param selection - 新しいNNUE選択（state更新前に呼ぶ場合は必須）
+     */
+    restartEngineForNnue: (side: Player, selection?: NnueSelection) => Promise<void>;
 }
 
 export function formatEvent(event: EngineEvent, label: string): string {
@@ -337,9 +355,10 @@ export function useEngineManager({
     onMatchEnd,
     onEvalUpdate,
     maxLogs = 80,
-    senteNnueId,
-    goteNnueId,
-    analysisNnueId,
+    senteNnueSelection,
+    goteNnueSelection,
+    analysisNnueSelection,
+    resolveNnue,
 }: UseEngineManagerProps): UseEngineManagerReturn {
     const [engineReady, setEngineReady] = useState<Record<Player, boolean>>({
         sente: false,
@@ -501,8 +520,9 @@ export function useEngineManager({
             engineState.selectedId = null;
             engineState.ready = false;
 
-            setEngineReady((prev) => ({ ...prev, [side]: false }));
-            setEngineStatus((prev) => ({ ...prev, [side]: "idle" }));
+            // 値が変わるときだけ更新（同値更新での再レンダーを防ぐ）
+            setEngineReady((prev) => (prev[side] === false ? prev : { ...prev, [side]: false }));
+            setEngineStatus((prev) => (prev[side] === "idle" ? prev : { ...prev, [side]: "idle" }));
         },
         [addErrorLog],
     );
@@ -527,6 +547,8 @@ export function useEngineManager({
             options: {
                 loadPosition: boolean;
                 errorLogPrefix: string;
+                /** 明示的に指定するNNUE選択（省略時はpropsの値を使用） */
+                nnueSelection?: NnueSelection;
             },
         ): Promise<boolean> => {
             const engineState = engineStatesRef.current[side];
@@ -553,9 +575,15 @@ export function useEngineManager({
                 // NNUE をロード（指定されている場合）
                 // ⚠️ Desktop では OnceLock により一度ロードした NNUE は変更不可
                 // 失敗時は throw してユーザーに通知する（アプリ再起動が必要な場合がある）
-                const nnueId = side === "sente" ? senteNnueId : goteNnueId;
-                if (nnueId && client.loadNnue) {
-                    await client.loadNnue(nnueId);
+                // 引数で明示的に指定された場合はそれを使用、なければpropsの値を使用
+                const selection =
+                    options.nnueSelection ??
+                    (side === "sente" ? senteNnueSelection : goteNnueSelection);
+                if (selection && (selection.presetKey || selection.nnueId) && client.loadNnue) {
+                    const resolvedNnueId = await resolveNnue(selection);
+                    if (resolvedNnueId) {
+                        await client.loadNnue(resolvedNnueId);
+                    }
                 }
 
                 // Skill Level 設定の適用
@@ -594,7 +622,16 @@ export function useEngineManager({
                 return false;
             }
         },
-        [addErrorLog, goteNnueId, movesRef, passRightsSettings, senteNnueId, sides, startSfen],
+        [
+            addErrorLog,
+            goteNnueSelection,
+            movesRef,
+            passRightsSettings,
+            resolveNnue,
+            senteNnueSelection,
+            sides,
+            startSfen,
+        ],
     );
 
     const retryEngine = useCallback(
@@ -637,15 +674,19 @@ export function useEngineManager({
      * 新しいNNUEをロードし直します。
      *
      * @remarks
-     * - 対局中は呼び出されません（useEffect内で isMatchRunning をチェック）
+     * - 対局中は内部で isMatchRunningRef をチェックして無視されます
      * - Desktop版では OnceLock により一度ロードしたNNUEは変更不可のため、
      *   アプリ再起動が必要になる場合があります
      * - エラー時はユーザーに通知され、エンジンは error 状態になります
      *
      * @param side - 再起動対象のプレイヤー（'sente' | 'gote'）
+     * @param selection - 新しいNNUE選択（明示的に渡すことでstate更新のタイミング問題を回避）
      */
     const restartEngineForNnueChange = useCallback(
-        async (side: Player) => {
+        async (side: Player, selection?: NnueSelection) => {
+            // 対局中は再起動しない
+            if (isMatchRunningRef.current) return;
+
             const engineState = engineStatesRef.current[side];
             if (!engineState.client) return;
 
@@ -662,6 +703,7 @@ export function useEngineManager({
                 await reinitializeEngineCore(side, {
                     loadPosition: true,
                     errorLogPrefix: "再起動失敗",
+                    nnueSelection: selection,
                 });
             } finally {
                 searchState.pending = false;
@@ -833,9 +875,12 @@ export function useEngineManager({
                     // NNUE をロード（指定されている場合）
                     // ⚠️ Desktop では OnceLock により一度ロードした NNUE は変更不可
                     // 失敗時は throw してユーザーに通知する（アプリ再起動が必要な場合がある）
-                    const nnueId = side === "sente" ? senteNnueId : goteNnueId;
-                    if (nnueId && client.loadNnue) {
-                        await client.loadNnue(nnueId);
+                    const selection = side === "sente" ? senteNnueSelection : goteNnueSelection;
+                    if (selection && (selection.presetKey || selection.nnueId) && client.loadNnue) {
+                        const resolvedNnueId = await resolveNnue(selection);
+                        if (resolvedNnueId) {
+                            await client.loadNnue(resolvedNnueId);
+                        }
                     }
 
                     // Skill Level 設定の適用
@@ -865,8 +910,9 @@ export function useEngineManager({
             engineOptions,
             movesRef,
             passRightsSettings,
-            senteNnueId,
-            goteNnueId,
+            resolveNnue,
+            senteNnueSelection,
+            goteNnueSelection,
             sides,
             startSfen,
         ],
@@ -956,17 +1002,6 @@ export function useEngineManager({
         },
         [clocksRef, ensureEngineReady, movesRef, passRightsSettings, positionReady, startSfen],
     );
-
-    // エンジンのrole変更時に破棄
-    useEffect(() => {
-        for (const side of ["sente", "gote"] as Player[]) {
-            if (sides[side].role === "engine") continue;
-            disposeEngineForSide(side).catch((error) => {
-                console.error(`Failed to dispose engine on role change for ${side}:`, error);
-                addErrorLog(`エンジン破棄に失敗 (${side}): ${String(error)}`);
-            });
-        }
-    }, [addErrorLog, disposeEngineForSide, sides]);
 
     // アンマウント時に全エンジンを破棄
     useEffect(() => {
@@ -1097,8 +1132,15 @@ export function useEngineManager({
                     // 分析用 NNUE をロード（指定されている場合）
                     // ⚠️ Desktop では OnceLock により一度ロードした NNUE は変更不可
                     // 失敗時は throw してユーザーに通知する（アプリ再起動が必要な場合がある）
-                    if (analysisNnueId && client.loadNnue) {
-                        await client.loadNnue(analysisNnueId);
+                    if (
+                        analysisNnueSelection &&
+                        (analysisNnueSelection.presetKey || analysisNnueSelection.nnueId) &&
+                        client.loadNnue
+                    ) {
+                        const resolvedNnueId = await resolveNnue(analysisNnueSelection);
+                        if (resolvedNnueId) {
+                            await client.loadNnue(resolvedNnueId);
+                        }
                     }
                 } catch (error) {
                     addErrorLog(`エンジン初期化エラー: ${String(error)}`);
@@ -1203,7 +1245,7 @@ export function useEngineManager({
         },
         [
             addErrorLog,
-            analysisNnueId,
+            analysisNnueSelection,
             cancelAnalysis,
             engineOptions,
             isAnalyzing,
@@ -1211,50 +1253,28 @@ export function useEngineManager({
             maxLogs,
             passRightsSettings,
             onEvalUpdate,
+            resolveNnue,
             sides,
         ],
     );
 
-    // analysisNnueId が変更された時に解析エンジンを破棄（次回解析開始時に新しい NNUE でロード）
-    const prevAnalysisNnueIdRef = useRef(analysisNnueId);
+    // analysisNnueSelection が変更された時に解析エンジンを破棄（次回解析開始時に新しい NNUE でロード）
+    const prevAnalysisNnueSelectionRef = useRef(analysisNnueSelection);
     useEffect(() => {
-        if (prevAnalysisNnueIdRef.current !== analysisNnueId) {
-            prevAnalysisNnueIdRef.current = analysisNnueId;
+        const prev = prevAnalysisNnueSelectionRef.current;
+        if (
+            prev?.presetKey !== analysisNnueSelection?.presetKey ||
+            prev?.nnueId !== analysisNnueSelection?.nnueId
+        ) {
+            prevAnalysisNnueSelectionRef.current = analysisNnueSelection;
             disposeAnalysisEngine().catch((error) => {
-                console.error("Failed to dispose analysis engine on analysisNnueId change:", error);
+                console.error(
+                    "Failed to dispose analysis engine on analysisNnueSelection change:",
+                    error,
+                );
             });
         }
-    }, [disposeAnalysisEngine, analysisNnueId]);
-
-    const prevMatchNnueIdsRef = useRef<{
-        sente: string | null | undefined;
-        gote: string | null | undefined;
-    }>({
-        sente: senteNnueId,
-        gote: goteNnueId,
-    });
-    useEffect(() => {
-        const prev = prevMatchNnueIdsRef.current;
-        const next = { sente: senteNnueId, gote: goteNnueId };
-        if (isMatchRunning) return;
-
-        (["sente", "gote"] as Player[]).forEach((side) => {
-            // 同一値の場合はスキップ
-            if (prev[side] === next[side]) return;
-
-            // NNUEなし→なしの場合もスキップ（undefined/null 間の変更は実質的に同じ）
-            if (!prev[side] && !next[side]) return;
-
-            if (sides[side].role !== "engine") return;
-
-            const engineState = engineStatesRef.current[side];
-            if (!engineState.client || !engineState.ready) return;
-
-            void restartEngineForNnueChange(side);
-        });
-
-        prevMatchNnueIdsRef.current = next;
-    }, [goteNnueId, isMatchRunning, restartEngineForNnueChange, senteNnueId, sides]);
+    }, [disposeAnalysisEngine, analysisNnueSelection]);
 
     // アンマウント時に解析エンジンも破棄
     useEffect(() => {
@@ -1281,5 +1301,7 @@ export function useEngineManager({
         retryEngine,
         isRetrying,
         isEngineRestarting: isNnueRestarting.sente || isNnueRestarting.gote,
+        disposeEngine: disposeEngineForSide,
+        restartEngineForNnue: restartEngineForNnueChange,
     };
 }

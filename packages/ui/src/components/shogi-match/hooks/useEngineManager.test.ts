@@ -1,8 +1,17 @@
-import type { GameResult, Player } from "@shogi/app-core";
+import type { GameResult, NnueSelection, Player } from "@shogi/app-core";
 import type { EngineEvent } from "@shogi/engine-client";
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { determineBestmoveAction, formatEvent, useEngineManager } from "./useEngineManager";
+
+// テスト用のNnueSelection作成ヘルパー
+const createNnueSelection = (nnueId: string | null): NnueSelection => ({
+    presetKey: null,
+    nnueId,
+});
+
+// テスト用のresolveNnueモック
+const createMockResolveNnue = () => vi.fn(async (selection: NnueSelection) => selection.nnueId);
 
 describe("formatEvent", () => {
     it("bestmove イベントを正しくフォーマットする", () => {
@@ -165,8 +174,9 @@ describe("useEngineManager", () => {
                 onMoveFromEngine,
                 onMatchEnd,
                 maxLogs: 10,
-                senteNnueId: null,
-                goteNnueId: null,
+                senteNnueSelection: createNnueSelection(null),
+                goteNnueSelection: createNnueSelection(null),
+                resolveNnue: createMockResolveNnue(),
             }),
         );
     };
@@ -310,40 +320,48 @@ describe("useEngineManager - NNUE restart", () => {
         vi.clearAllMocks();
     });
 
-    it("NNUE ID変更時にエンジンを再起動する", async () => {
+    it("NNUE ID変更時、明示APIでエンジンを再起動する", async () => {
         const mockClient = createMockEngineClient();
         const movesRef = { current: [] as string[] };
         const onMoveFromEngine = vi.fn();
         const onMatchEnd = vi.fn().mockResolvedValue(undefined);
+        const resolveNnue = createMockResolveNnue();
 
-        const { rerender } = renderHook(
-            ({ senteNnueId }: { senteNnueId: string | null }) =>
+        // propsを安定化（毎レンダーで新しいオブジェクトを生成しない）
+        const sides = {
+            sente: { role: "engine" as const, engineId: "engine1" },
+            gote: { role: "human" as const },
+        };
+        const engineOptions = [
+            {
+                id: "engine1",
+                label: "Engine 1",
+                createClient: () => mockClient.client,
+            },
+        ];
+        const clocksRef = createMockClocksRef();
+        const goteNnueSelection = createNnueSelection(null);
+
+        const { result, rerender } = renderHook(
+            ({ isMatchRunning }: { isMatchRunning: boolean }) =>
                 useEngineManager({
-                    sides: {
-                        sente: { role: "engine", engineId: "engine1" },
-                        gote: { role: "human" },
-                    },
-                    engineOptions: [
-                        {
-                            id: "engine1",
-                            label: "Engine 1",
-                            createClient: () => mockClient.client,
-                        },
-                    ],
+                    sides,
+                    engineOptions,
                     timeSettings,
-                    clocksRef: createMockClocksRef(),
+                    clocksRef,
                     startSfen: "startpos",
                     movesRef,
                     positionTurn: "sente",
-                    isMatchRunning: false,
+                    isMatchRunning,
                     positionReady: true,
                     onMoveFromEngine,
                     onMatchEnd,
                     maxLogs: 10,
-                    senteNnueId,
-                    goteNnueId: null,
+                    senteNnueSelection: createNnueSelection("nnue-1"),
+                    goteNnueSelection,
+                    resolveNnue,
                 }),
-            { initialProps: { senteNnueId: "nnue-1" } },
+            { initialProps: { isMatchRunning: true } },
         );
 
         // 初期化を待つ
@@ -355,13 +373,15 @@ describe("useEngineManager - NNUE restart", () => {
         expect(mockClient.init).toHaveBeenCalled();
         const initCallCount = mockClient.init.mock.calls.length;
 
-        // NNUE ID を変更
-        rerender({ senteNnueId: "nnue-2" });
-
-        // useEffect が実行されるのを待つ
+        // 対局を停止
         await act(async () => {
-            await Promise.resolve();
-            await Promise.resolve();
+            rerender({ isMatchRunning: false });
+        });
+
+        // 明示APIでNNUE変更を反映（親コンポーネントと同じパターン）
+        const newSelection = createNnueSelection("nnue-2");
+        await act(async () => {
+            await result.current.restartEngineForNnue("sente", newSelection);
         });
 
         // reset と init が追加で呼ばれることを確認
@@ -369,28 +389,35 @@ describe("useEngineManager - NNUE restart", () => {
         expect(mockClient.init.mock.calls.length).toBeGreaterThan(initCallCount);
     });
 
-    it("undefined→nullの変更時は再起動しない（NNUEなし→なし）", async () => {
+    it("props変更だけでは自動再起動しない（明示API呼び出しが必要）", async () => {
         const mockClient = createMockEngineClient();
         const movesRef = { current: [] as string[] };
         const onMoveFromEngine = vi.fn();
         const onMatchEnd = vi.fn().mockResolvedValue(undefined);
+        const resolveNnue = createMockResolveNnue();
+
+        // propsを安定化（毎レンダーで新しいオブジェクトを生成しない）
+        const sides = {
+            sente: { role: "engine" as const, engineId: "engine1" },
+            gote: { role: "human" as const },
+        };
+        const engineOptions = [
+            {
+                id: "engine1",
+                label: "Engine 1",
+                createClient: () => mockClient.client,
+            },
+        ];
+        const clocksRef = createMockClocksRef();
+        const goteNnueSelection = createNnueSelection(null);
 
         const { rerender } = renderHook(
-            ({ senteNnueId }: { senteNnueId: string | null | undefined }) =>
+            ({ senteNnueSelection }: { senteNnueSelection: NnueSelection | undefined }) =>
                 useEngineManager({
-                    sides: {
-                        sente: { role: "engine", engineId: "engine1" },
-                        gote: { role: "human" },
-                    },
-                    engineOptions: [
-                        {
-                            id: "engine1",
-                            label: "Engine 1",
-                            createClient: () => mockClient.client,
-                        },
-                    ],
+                    sides,
+                    engineOptions,
                     timeSettings,
-                    clocksRef: createMockClocksRef(),
+                    clocksRef,
                     startSfen: "startpos",
                     movesRef,
                     positionTurn: "sente",
@@ -399,10 +426,11 @@ describe("useEngineManager - NNUE restart", () => {
                     onMoveFromEngine,
                     onMatchEnd,
                     maxLogs: 10,
-                    senteNnueId,
-                    goteNnueId: null,
+                    senteNnueSelection,
+                    goteNnueSelection,
+                    resolveNnue,
                 }),
-            { initialProps: { senteNnueId: undefined as string | null | undefined } },
+            { initialProps: { senteNnueSelection: undefined as NnueSelection | undefined } },
         );
 
         // 初期化を待つ
@@ -412,70 +440,248 @@ describe("useEngineManager - NNUE restart", () => {
 
         const resetCallCount = mockClient.reset.mock.calls.length;
 
-        // undefined → null に変更（どちらも「NNUEなし」を意味）
-        rerender({ senteNnueId: null });
+        // undefined → NnueSelection(null) に変更（どちらも「NNUEなし」を意味）
+        await act(async () => {
+            rerender({ senteNnueSelection: createNnueSelection(null) });
+        });
 
         await act(async () => {
             await Promise.resolve();
             await Promise.resolve();
         });
 
-        // reset が追加で呼ばれないことを確認
+        // reset が追加で呼ばれないことを確認（props変更だけでは自動再起動しない）
         expect(mockClient.reset.mock.calls.length).toBe(resetCallCount);
     });
+});
 
-    it("対局中はNNUE変更時に再起動しない", async () => {
+describe("useEngineManager - 明示API", () => {
+    const timeSettings = {
+        sente: { mainMs: 1000, byoyomiMs: 500 },
+        gote: { mainMs: 1000, byoyomiMs: 500 },
+    };
+    const createMockClocksRef = () => ({
+        current: {
+            sente: { mainMs: 1000, byoyomiMs: 500 },
+            gote: { mainMs: 1000, byoyomiMs: 500 },
+            ticking: null as "sente" | "gote" | null,
+            lastUpdatedAt: Date.now(),
+        },
+    });
+
+    const createMockEngineClient = () => {
+        const listeners = new Set<(event: EngineEvent) => void>();
+        const subscribe = vi.fn((handler: (event: EngineEvent) => void) => {
+            listeners.add(handler);
+            return () => listeners.delete(handler);
+        });
+        const init = vi.fn().mockResolvedValue(undefined);
+        const loadPosition = vi.fn().mockResolvedValue(undefined);
+        const cancel = vi.fn().mockResolvedValue(undefined);
+        const search = vi.fn().mockResolvedValue({ cancel });
+        const stop = vi.fn().mockResolvedValue(undefined);
+        const dispose = vi.fn().mockResolvedValue(undefined);
+        const reset = vi.fn().mockResolvedValue(undefined);
+        const loadNnue = vi.fn().mockResolvedValue(undefined);
+
+        return {
+            client: {
+                init,
+                loadPosition,
+                search,
+                stop,
+                setOption: vi.fn().mockResolvedValue(undefined),
+                subscribe,
+                dispose,
+                reset,
+                loadNnue,
+            },
+            init,
+            reset,
+            loadNnue,
+            loadPosition,
+            stop,
+            dispose,
+        };
+    };
+
+    afterEach(() => {
+        vi.clearAllMocks();
+    });
+
+    it("disposeEngine を明示的に呼び出すとエンジンが破棄される", async () => {
         const mockClient = createMockEngineClient();
         const movesRef = { current: [] as string[] };
         const onMoveFromEngine = vi.fn();
         const onMatchEnd = vi.fn().mockResolvedValue(undefined);
+        const resolveNnue = createMockResolveNnue();
 
-        const { rerender } = renderHook(
-            ({ senteNnueId }: { senteNnueId: string | null }) =>
+        const sides = {
+            sente: { role: "engine" as const, engineId: "engine1" },
+            gote: { role: "human" as const },
+        };
+        const engineOptions = [
+            {
+                id: "engine1",
+                label: "Engine 1",
+                createClient: () => mockClient.client,
+            },
+        ];
+        const clocksRef = createMockClocksRef();
+
+        const { result } = renderHook(() =>
+            useEngineManager({
+                sides,
+                engineOptions,
+                timeSettings,
+                clocksRef,
+                startSfen: "startpos",
+                movesRef,
+                positionTurn: "sente",
+                isMatchRunning: true,
+                positionReady: true,
+                onMoveFromEngine,
+                onMatchEnd,
+                maxLogs: 10,
+                senteNnueSelection: createNnueSelection(null),
+                goteNnueSelection: createNnueSelection(null),
+                resolveNnue,
+            }),
+        );
+
+        await act(async () => {
+            await Promise.resolve();
+        });
+
+        // 明示的にdisposeEngineを呼び出す
+        await act(async () => {
+            await result.current.disposeEngine("sente");
+        });
+
+        // disposeが呼ばれたことを確認
+        expect(mockClient.dispose).toHaveBeenCalled();
+    });
+
+    it("restartEngineForNnue を明示的に呼び出すとエンジンが再起動される", async () => {
+        const mockClient = createMockEngineClient();
+        const movesRef = { current: [] as string[] };
+        const onMoveFromEngine = vi.fn();
+        const onMatchEnd = vi.fn().mockResolvedValue(undefined);
+        const resolveNnue = createMockResolveNnue();
+
+        const sides = {
+            sente: { role: "engine" as const, engineId: "engine1" },
+            gote: { role: "human" as const },
+        };
+        const engineOptions = [
+            {
+                id: "engine1",
+                label: "Engine 1",
+                createClient: () => mockClient.client,
+            },
+        ];
+        const clocksRef = createMockClocksRef();
+
+        const { result, rerender } = renderHook(
+            ({ isMatchRunning }: { isMatchRunning: boolean }) =>
                 useEngineManager({
-                    sides: {
-                        sente: { role: "engine", engineId: "engine1" },
-                        gote: { role: "human" },
-                    },
-                    engineOptions: [
-                        {
-                            id: "engine1",
-                            label: "Engine 1",
-                            createClient: () => mockClient.client,
-                        },
-                    ],
+                    sides,
+                    engineOptions,
                     timeSettings,
-                    clocksRef: createMockClocksRef(),
+                    clocksRef,
                     startSfen: "startpos",
                     movesRef,
                     positionTurn: "sente",
-                    isMatchRunning: true, // 対局中
+                    isMatchRunning,
                     positionReady: true,
                     onMoveFromEngine,
                     onMatchEnd,
                     maxLogs: 10,
-                    senteNnueId,
-                    goteNnueId: null,
+                    senteNnueSelection: createNnueSelection("nnue-1"),
+                    goteNnueSelection: createNnueSelection(null),
+                    resolveNnue,
                 }),
-            { initialProps: { senteNnueId: "nnue-1" } },
+            { initialProps: { isMatchRunning: true } },
         );
 
-        // 初期化を待つ
+        // エンジンを初期化
         await act(async () => {
             await Promise.resolve();
         });
 
+        expect(mockClient.init).toHaveBeenCalled();
+        const initCallCount = mockClient.init.mock.calls.length;
+
+        // 対局を停止
+        await act(async () => {
+            rerender({ isMatchRunning: false });
+        });
+
+        // 明示的にrestartEngineForNnueを呼び出す（新しいselectionを渡す）
+        const newSelection = createNnueSelection("nnue-2");
+        await act(async () => {
+            await result.current.restartEngineForNnue("sente", newSelection);
+        });
+
+        // resetとinitが追加で呼ばれたことを確認
+        expect(mockClient.reset).toHaveBeenCalled();
+        expect(mockClient.init.mock.calls.length).toBeGreaterThan(initCallCount);
+    });
+
+    it("restartEngineForNnue は対局中は無視される", async () => {
+        const mockClient = createMockEngineClient();
+        const movesRef = { current: [] as string[] };
+        const onMoveFromEngine = vi.fn();
+        const onMatchEnd = vi.fn().mockResolvedValue(undefined);
+        const resolveNnue = createMockResolveNnue();
+
+        const sides = {
+            sente: { role: "engine" as const, engineId: "engine1" },
+            gote: { role: "human" as const },
+        };
+        const engineOptions = [
+            {
+                id: "engine1",
+                label: "Engine 1",
+                createClient: () => mockClient.client,
+            },
+        ];
+        const clocksRef = createMockClocksRef();
+
+        const { result } = renderHook(() =>
+            useEngineManager({
+                sides,
+                engineOptions,
+                timeSettings,
+                clocksRef,
+                startSfen: "startpos",
+                movesRef,
+                positionTurn: "sente",
+                isMatchRunning: true, // 対局中
+                positionReady: true,
+                onMoveFromEngine,
+                onMatchEnd,
+                maxLogs: 10,
+                senteNnueSelection: createNnueSelection("nnue-1"),
+                goteNnueSelection: createNnueSelection(null),
+                resolveNnue,
+            }),
+        );
+
+        await act(async () => {
+            await Promise.resolve();
+        });
+
+        expect(mockClient.init).toHaveBeenCalled();
         const resetCallCount = mockClient.reset.mock.calls.length;
 
-        // NNUE ID を変更
-        rerender({ senteNnueId: "nnue-2" });
-
+        // 対局中にrestartEngineForNnueを呼び出す（selectionを渡す）
+        const newSelection = createNnueSelection("nnue-2");
         await act(async () => {
-            await Promise.resolve();
-            await Promise.resolve();
+            await result.current.restartEngineForNnue("sente", newSelection);
         });
 
-        // 対局中なので reset が追加で呼ばれないことを確認
+        // 対局中なのでresetは呼ばれない
         expect(mockClient.reset.mock.calls.length).toBe(resetCallCount);
     });
 });

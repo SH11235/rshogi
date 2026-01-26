@@ -1,4 +1,5 @@
-import type { NnueMeta } from "@shogi/app-core";
+import type { NnueMeta, NnueSelection, PresetWithStatus } from "@shogi/app-core";
+import { NONE_NNUE_SELECTION } from "@shogi/app-core";
 import type { SkillLevelSettings } from "@shogi/engine-client";
 import { type ReactElement, useEffect, useState } from "react";
 import { Switch } from "../../switch";
@@ -78,10 +79,11 @@ interface MobileSettingsSheetProps {
     // エンジン情報
     internalEngineId: string;
     nnueList: NnueMeta[];
-    senteNnueId: string | null;
-    onSenteNnueIdChange: (id: string | null) => void;
-    goteNnueId: string | null;
-    onGoteNnueIdChange: (id: string | null) => void;
+    presets: PresetWithStatus[];
+    senteNnueSelection: NnueSelection;
+    onSenteNnueSelectionChange: (selection: NnueSelection) => void;
+    goteNnueSelection: NnueSelection;
+    onGoteNnueSelectionChange: (selection: NnueSelection) => void;
 
     // 状態
     settingsLocked: boolean;
@@ -123,10 +125,11 @@ export function MobileSettingsSheet({
     onPassRightsSettingsChange,
     internalEngineId,
     nnueList,
-    senteNnueId,
-    onSenteNnueIdChange,
-    goteNnueId,
-    onGoteNnueIdChange,
+    presets,
+    senteNnueSelection,
+    onSenteNnueSelectionChange,
+    goteNnueSelection,
+    onGoteNnueSelectionChange,
     settingsLocked,
     isMatchRunning,
     onStartMatch,
@@ -135,21 +138,25 @@ export function MobileSettingsSheet({
     displaySettings,
     onDisplaySettingsChange,
 }: MobileSettingsSheetProps): ReactElement {
-    // 選択肢の値を生成: "human" または "engine:{engineId}"
+    // カスタム NNUE（プリセット以外）のフィルタリング
+    const customNnueList = nnueList.filter((n) => n.source !== "preset");
+
+    // 選択肢の値を生成: "human", "preset:{presetKey}", "nnue:{nnueId}", "material"
     const getSelectorValue = (side: SideKey, setting: SideSetting): string => {
         if (setting.role === "human") return "human";
-        const nnueId = side === "sente" ? senteNnueId : goteNnueId;
-        if (nnueId === null) return "material";
-        return `nnue:${nnueId}`;
+        const selection = side === "sente" ? senteNnueSelection : goteNnueSelection;
+        if (selection.presetKey) return `preset:${selection.presetKey}`;
+        if (selection.nnueId) return `nnue:${selection.nnueId}`;
+        return "material";
     };
 
     const handleSelectorChange = (side: SideKey, value: string) => {
         const currentSetting = sides[side];
-        const updateNnueId = (nextId: string | null) => {
+        const updateNnueSelection = (nextSelection: NnueSelection) => {
             if (side === "sente") {
-                onSenteNnueIdChange(nextId);
+                onSenteNnueSelectionChange(nextSelection);
             } else {
-                onGoteNnueIdChange(nextId);
+                onGoteNnueSelectionChange(nextSelection);
             }
         };
 
@@ -159,7 +166,18 @@ export function MobileSettingsSheet({
                 [side]: { role: "human", engineId: undefined, skillLevel: undefined },
             });
         } else if (value === "material") {
-            updateNnueId(null);
+            updateNnueSelection(NONE_NNUE_SELECTION);
+            onSidesChange({
+                ...sides,
+                [side]: {
+                    role: "engine",
+                    engineId: internalEngineId,
+                    skillLevel: currentSetting.skillLevel,
+                },
+            });
+        } else if (value.startsWith("preset:")) {
+            const presetKey = value.slice("preset:".length);
+            updateNnueSelection({ presetKey, nnueId: null });
             onSidesChange({
                 ...sides,
                 [side]: {
@@ -170,7 +188,7 @@ export function MobileSettingsSheet({
             });
         } else if (value.startsWith("nnue:")) {
             const nnueId = value.slice("nnue:".length);
-            updateNnueId(nnueId);
+            updateNnueSelection({ presetKey: null, nnueId });
             onSidesChange({
                 ...sides,
                 [side]: {
@@ -231,12 +249,22 @@ export function MobileSettingsSheet({
                             className={selectClassName}
                         >
                             <option value="human">人間</option>
-                            <option value="material">簡易AI（駒得）</option>
-                            {nnueList.map((nnue) => (
+                            {/* プリセット NNUE */}
+                            {presets.map((preset) => (
+                                <option
+                                    key={preset.config.presetKey}
+                                    value={`preset:${preset.config.presetKey}`}
+                                >
+                                    AI（{preset.config.displayName}）
+                                </option>
+                            ))}
+                            {/* カスタム NNUE */}
+                            {customNnueList.map((nnue) => (
                                 <option key={nnue.id} value={`nnue:${nnue.id}`}>
                                     {nnue.displayName}
                                 </option>
                             ))}
+                            <option value="material">簡易AI（駒得）</option>
                         </select>
                     </label>
                     {/* レイアウトシフト防止のため固定高さを確保 */}
@@ -291,12 +319,22 @@ export function MobileSettingsSheet({
                             className={selectClassName}
                         >
                             <option value="human">人間</option>
-                            <option value="material">簡易AI（駒得）</option>
-                            {nnueList.map((nnue) => (
+                            {/* プリセット NNUE */}
+                            {presets.map((preset) => (
+                                <option
+                                    key={preset.config.presetKey}
+                                    value={`preset:${preset.config.presetKey}`}
+                                >
+                                    AI（{preset.config.displayName}）
+                                </option>
+                            ))}
+                            {/* カスタム NNUE */}
+                            {customNnueList.map((nnue) => (
                                 <option key={nnue.id} value={`nnue:${nnue.id}`}>
                                     {nnue.displayName}
                                 </option>
                             ))}
+                            <option value="material">簡易AI（駒得）</option>
                         </select>
                     </label>
                     {/* レイアウトシフト防止のため固定高さを確保 */}

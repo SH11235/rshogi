@@ -44,6 +44,14 @@ interface UseEnginePoolOptions {
 }
 
 /**
+ * start関数のオプション
+ */
+interface StartOptions {
+    /** 使用するNNUE ID（指定するとoptions.nnueIdを上書き） */
+    nnueId?: string | null;
+}
+
+/**
  * エンジンプールのハンドル
  */
 interface EnginePoolHandle {
@@ -52,7 +60,7 @@ interface EnginePoolHandle {
     /** 現在の進捗 */
     progress: BatchAnalysisProgress | null;
     /** 一括解析を開始する */
-    start: (jobs: AnalysisJob[]) => void;
+    start: (jobs: AnalysisJob[], options?: StartOptions) => void;
     /** 一括解析をキャンセルする */
     cancel: () => Promise<void>;
     /** プールを破棄する */
@@ -89,6 +97,10 @@ export function useEnginePool(options: UseEnginePoolOptions): EnginePoolHandle {
         inProgress: Set<number>;
         cancelled: boolean;
         initialized: boolean;
+        /** start()で渡されたnnueId（options.nnueIdを上書き） */
+        overrideNnueId: string | null | undefined;
+        /** 初期化済みワーカーが使用しているNNUE ID（null=Material） */
+        currentNnueId: string | null | undefined;
     }>({
         workers: [],
         jobQueue: [],
@@ -97,6 +109,8 @@ export function useEnginePool(options: UseEnginePoolOptions): EnginePoolHandle {
         inProgress: new Set(),
         cancelled: false,
         initialized: false,
+        overrideNnueId: undefined,
+        currentNnueId: undefined,
     });
 
     // コールバックをrefで保持（依存配列の問題を回避）
@@ -220,6 +234,10 @@ export function useEnginePool(options: UseEnginePoolOptions): EnginePoolHandle {
         const state = stateRef.current;
         if (state.initialized) return;
 
+        // start()で渡されたnnueIdを優先、なければoptions.nnueIdを使用
+        const effectiveNnueId =
+            (state.overrideNnueId !== undefined ? state.overrideNnueId : nnueId) ?? null;
+
         const workers: EngineWorker[] = [];
         for (let i = 0; i < workerCount; i++) {
             try {
@@ -227,12 +245,12 @@ export function useEnginePool(options: UseEnginePoolOptions): EnginePoolHandle {
                 await client.init();
 
                 // NNUE をロード（指定されている場合）
-                if (nnueId && client.loadNnue) {
+                if (effectiveNnueId && client.loadNnue) {
                     try {
-                        await client.loadNnue(nnueId);
+                        await client.loadNnue(effectiveNnueId);
                     } catch (error) {
                         console.warn(
-                            `Failed to load NNUE for pool worker ${i} (${nnueId}):`,
+                            `Failed to load NNUE for pool worker ${i} (${effectiveNnueId}):`,
                             error,
                         );
                     }
@@ -270,11 +288,12 @@ export function useEnginePool(options: UseEnginePoolOptions): EnginePoolHandle {
 
         state.workers = workers;
         state.initialized = true;
+        state.currentNnueId = effectiveNnueId;
     }, [createClient, nnueId, workerCount]);
 
     // 一括解析を開始する
     const start = useCallback(
-        (jobs: AnalysisJob[]) => {
+        (jobs: AnalysisJob[], startOptions?: StartOptions) => {
             const state = stateRef.current;
 
             // 状態をリセット
@@ -284,11 +303,37 @@ export function useEnginePool(options: UseEnginePoolOptions): EnginePoolHandle {
             state.inProgress.clear();
             state.cancelled = false;
 
+            // start()で渡されたnnueIdを記録
+            state.overrideNnueId = startOptions?.nnueId;
+
+            const nextNnueId =
+                (state.overrideNnueId !== undefined ? state.overrideNnueId : nnueId) ?? null;
+            const currentNnueId = state.currentNnueId ?? null;
+
+            // NNUEが変わった場合のみ再初期化
+            const shouldReinitialize = state.initialized && nextNnueId !== currentNnueId;
+            if (shouldReinitialize) {
+                state.initialized = false;
+            }
+
             setIsRunning(true);
             updateProgress();
 
             // 遅延初期化してジョブを開始
             void (async () => {
+                // 再初期化が必要な場合は既存ワーカーを破棄
+                if (shouldReinitialize) {
+                    const disposePromises = state.workers.map(async (worker) => {
+                        try {
+                            await worker.client.dispose();
+                        } catch {
+                            // 無視
+                        }
+                    });
+                    await Promise.all(disposePromises);
+                    state.workers = [];
+                }
+
                 await initializeWorkers();
 
                 // 各ワーカーにジョブを割り当て
@@ -352,6 +397,7 @@ export function useEnginePool(options: UseEnginePoolOptions): EnginePoolHandle {
         await Promise.all(disposePromises);
         state.workers = [];
         state.initialized = false;
+        state.currentNnueId = undefined;
     }, [cancel]);
 
     // nnueId が変更された時にプールを破棄（次回一括解析開始時に新しい NNUE でロード）
