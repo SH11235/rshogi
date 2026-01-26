@@ -52,6 +52,7 @@ function App() {
                     engineOptions={engineOptions}
                     isDevMode={isDevMode}
                     manifestUrl={nnueManifestUrl}
+                    defaultNnuePresetKey={import.meta.env.VITE_DEFAULT_NNUE_PRESET}
                 />
                 {isDevMode && <EngineControlPanel engine={panelEngine} />}
             </main>

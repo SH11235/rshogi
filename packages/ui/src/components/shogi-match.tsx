@@ -107,6 +107,8 @@ interface ShogiMatchProps {
     manifestUrl?: string;
     /** Desktop 用: NNUE ファイル選択ダイアログを開いてパスを取得するコールバック */
     onRequestNnueFilePath?: () => Promise<string | null>;
+    /** デフォルトの NNUE プリセットキー（未指定時は DEFAULT_PRESET_KEY） */
+    defaultNnuePresetKey?: string;
 }
 
 // デフォルト値の定数
@@ -320,16 +322,6 @@ function deriveLastMove(move: string | undefined): LastMove | undefined {
     return { from: parsed.from, to: parsed.to, promotes: parsed.promote };
 }
 
-// 環境変数からデフォルトプリセットキーを取得（フォールバック: DEFAULT_PRESET_KEY）
-const ENV_DEFAULT_PRESET_KEY =
-    (typeof import.meta !== "undefined" &&
-        import.meta.env &&
-        (import.meta.env.VITE_DEFAULT_NNUE_PRESET as string | undefined)) ||
-    DEFAULT_PRESET_KEY;
-
-// デフォルトの NNUE 選択（環境変数のプリセットキーを使用）
-const DEFAULT_NNUE_SELECTION = createDefaultNnueSelection(ENV_DEFAULT_PRESET_KEY);
-
 export function ShogiMatch({
     engineOptions,
     defaultSides = {
@@ -343,7 +335,13 @@ export function ShogiMatch({
     isDevMode = false,
     manifestUrl,
     onRequestNnueFilePath,
+    defaultNnuePresetKey,
 }: ShogiMatchProps): ReactElement {
+    // デフォルトの NNUE 選択（props のプリセットキーを使用、未指定時は DEFAULT_PRESET_KEY）
+    const defaultNnueSelection = useMemo(
+        () => createDefaultNnueSelection(defaultNnuePresetKey ?? DEFAULT_PRESET_KEY),
+        [defaultNnuePresetKey],
+    );
     const emptyBoard = useMemo<BoardState>(
         () => Object.fromEntries(getAllSquares().map((sq) => [sq, null])) as BoardState,
         [],
@@ -466,16 +464,16 @@ export function ShogiMatch({
     // 対局用 NNUE 選択
     const [senteNnueSelection, setSenteNnueSelection] = useLocalStorage<NnueSelection>(
         "shogi:senteNnueSelection",
-        DEFAULT_NNUE_SELECTION,
+        defaultNnueSelection,
     );
     const [goteNnueSelection, setGoteNnueSelection] = useLocalStorage<NnueSelection>(
         "shogi:goteNnueSelection",
-        DEFAULT_NNUE_SELECTION,
+        defaultNnueSelection,
     );
     // 分析用 NNUE 選択
     const [analysisNnueSelection, setAnalysisNnueSelection] = useLocalStorage<NnueSelection>(
         "shogi:analysisNnueSelection",
-        DEFAULT_NNUE_SELECTION,
+        defaultNnueSelection,
     );
 
     // 旧キーからのマイグレーション
@@ -587,21 +585,21 @@ export function ShogiMatch({
                 senteNnueSelection.nnueId &&
                 !nnueList.some((n) => n.id === senteNnueSelection.nnueId)
             ) {
-                setSenteNnueSelection(DEFAULT_NNUE_SELECTION);
+                setSenteNnueSelection(defaultNnueSelection);
             }
             if (
                 goteNnueSelection.presetKey === null &&
                 goteNnueSelection.nnueId &&
                 !nnueList.some((n) => n.id === goteNnueSelection.nnueId)
             ) {
-                setGoteNnueSelection(DEFAULT_NNUE_SELECTION);
+                setGoteNnueSelection(defaultNnueSelection);
             }
             if (
                 analysisNnueSelection.presetKey === null &&
                 analysisNnueSelection.nnueId &&
                 !nnueList.some((n) => n.id === analysisNnueSelection.nnueId)
             ) {
-                setAnalysisNnueSelection(DEFAULT_NNUE_SELECTION);
+                setAnalysisNnueSelection(defaultNnueSelection);
             }
         }
     }, [

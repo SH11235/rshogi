@@ -53,6 +53,7 @@ function App() {
                     isDevMode={true}
                     manifestUrl={nnueManifestUrl}
                     onRequestNnueFilePath={requestNnueFilePath}
+                    defaultNnuePresetKey={import.meta.env.VITE_DEFAULT_NNUE_PRESET}
                 />
                 <EngineControlPanel engine={panelEngine} />
             </main>
