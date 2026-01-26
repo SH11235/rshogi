@@ -883,6 +883,16 @@ pub fn generate_legal(pos: &Position, list: &mut MoveList) {
     }
 }
 
+/// 合法手を生成（不成含む）
+pub fn generate_legal_all(pos: &Position, list: &mut MoveList) {
+    let mut buffer = ExtMoveBuffer::new();
+    generate_with_type(pos, crate::movegen::GenType::LegalAll, &mut buffer, None);
+
+    for ext in buffer.iter() {
+        list.push(ext.mv);
+    }
+}
+
 // ============================================================================
 // パス権対応の合法手生成
 // ============================================================================
@@ -900,6 +910,16 @@ pub fn generate_legal(pos: &Position, list: &mut MoveList) {
 /// qsearch では駒取り手のみを生成すべきであり、PASS は不要。
 pub fn generate_legal_with_pass(pos: &Position, list: &mut MoveList) {
     generate_legal(pos, list);
+
+    // パス可能な場合のみ追加
+    if pos.can_pass() {
+        list.push(Move::PASS);
+    }
+}
+
+/// パス手を含む合法手を生成（不成含む）
+pub fn generate_legal_all_with_pass(pos: &Position, list: &mut MoveList) {
+    generate_legal_all(pos, list);
 
     // パス可能な場合のみ追加
     if pos.can_pass() {
@@ -1275,6 +1295,23 @@ mod tests {
             .iter()
             .any(|ext| ext.mv.from() == from && !ext.mv.is_promotion());
         assert!(has_non_promo, "All モードでは不成も生成する");
+    }
+
+    #[test]
+    fn test_generate_legal_all_includes_bishop_non_promote() {
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/9/9/9/9/4B4/4K4 b - 1").unwrap();
+
+        let mut list = MoveList::new();
+        generate_legal_all(&pos, &mut list);
+
+        let from = pos
+            .pieces(Color::Black, PieceType::Bishop)
+            .iter()
+            .next()
+            .expect("角が存在しない");
+        let has_non_promo = list.iter().any(|m| m.from() == from && !m.is_promotion());
+        assert!(has_non_promo, "generate_legal_all は不成の角移動も含むべき");
     }
 
     #[test]
