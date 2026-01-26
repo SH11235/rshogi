@@ -2,7 +2,7 @@ import type { ReactElement } from "react";
 import { Progress } from "../progress";
 import { Spinner } from "../spinner";
 
-export interface NnueProgressOverlayProps {
+interface NnueProgressOverlayProps {
     /** 表示するかどうか */
     visible: boolean;
     /** 進捗値 (0-100)。undefined の場合は不確定モード */

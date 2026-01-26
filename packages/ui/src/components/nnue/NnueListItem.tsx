@@ -4,7 +4,7 @@ import { type ReactElement, useCallback, useId, useRef, useState } from "react";
 import { Button } from "../button";
 import { Input } from "../input";
 
-export interface NnueListItemProps {
+interface NnueListItemProps {
     /** NNUE メタデータ */
     meta: NnueMeta;
     /** 選択されているか */

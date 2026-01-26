@@ -103,7 +103,7 @@ export interface NnueMeta {
 /**
  * エンジン設定プロファイル
  */
-export interface EngineProfile {
+interface EngineProfile {
     /** 一意識別子（UUID v4） */
     id: string;
 

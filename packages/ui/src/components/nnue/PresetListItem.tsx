@@ -5,7 +5,7 @@ import { getDownloadedMeta } from "../../hooks/usePresetManager";
 import { Button } from "../button";
 import { Progress } from "../progress";
 
-export interface PresetListItemProps {
+interface PresetListItemProps {
     /** プリセットと状態 */
     preset: PresetWithStatus;
     /** 選択されているか */

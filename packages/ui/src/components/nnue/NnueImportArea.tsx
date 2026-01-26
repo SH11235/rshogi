@@ -13,7 +13,7 @@ import {
 } from "../alert-dialog";
 import { Button } from "../button";
 
-export interface NnueImportAreaProps {
+interface NnueImportAreaProps {
     /** ストレージの capability */
     capabilities: NnueStorageCapabilities;
     /** ファイル選択時のコールバック（File インポート: drag&drop + input） */

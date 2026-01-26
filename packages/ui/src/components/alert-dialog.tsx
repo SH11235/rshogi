@@ -6,9 +6,9 @@ import { buttonVariants } from "./button";
 
 export const AlertDialog = AlertDialogPrimitive.Root;
 export const AlertDialogTrigger = AlertDialogPrimitive.Trigger;
-export const AlertDialogPortal = AlertDialogPrimitive.Portal;
+const AlertDialogPortal = AlertDialogPrimitive.Portal;
 
-export const AlertDialogOverlay = forwardRef<
+const AlertDialogOverlay = forwardRef<
     ComponentRef<typeof AlertDialogPrimitive.Overlay>,
     ComponentPropsWithoutRef<typeof AlertDialogPrimitive.Overlay>
 >(function AlertDialogOverlay({ className, ...props }, ref): ReactElement {

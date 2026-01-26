@@ -3,7 +3,7 @@ import { cn } from "@shogi/design-system";
 import type { ComponentPropsWithoutRef, ComponentRef, ReactElement } from "react";
 import { forwardRef } from "react";
 
-export interface ProgressProps
+interface ProgressProps
     extends Omit<ComponentPropsWithoutRef<typeof ProgressPrimitive.Root>, "value"> {
     /** 進捗値 (0-100)。undefined の場合は不確定（indeterminate）モード */
     value?: number;

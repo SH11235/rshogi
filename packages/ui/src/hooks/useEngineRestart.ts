@@ -1,7 +1,7 @@
 import type { EngineClient, EngineInitOptions } from "@shogi/engine-client";
 import { useCallback, useState } from "react";
 
-export interface UseEngineRestartReturn {
+interface UseEngineRestartReturn {
     /** エンジン再起動中かどうか */
     isRestarting: boolean;
     /** 再起動エラー */
@@ -12,7 +12,7 @@ export interface UseEngineRestartReturn {
     clearError: () => void;
 }
 
-export interface UseEngineRestartOptions {
+interface UseEngineRestartOptions {
     /** エンジンクライアント */
     engine: EngineClient | null;
     /** 再起動完了後のコールバック */
@@ -26,7 +26,7 @@ export interface UseEngineRestartOptions {
  *
  * reset() → init() のシーケンスを実行し、状態を管理する。
  */
-export function useEngineRestart({
+function useEngineRestart({
     engine,
     onRestarted,
     onError,

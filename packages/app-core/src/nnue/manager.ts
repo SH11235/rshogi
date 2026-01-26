@@ -9,7 +9,7 @@ import type { NnueDownloadProgress, NnueFormat, NnueMeta, PresetUpdate } from ".
 /**
  * NNUE マネージャーインターフェース
  */
-export interface NnueManager {
+interface NnueManager {
     /**
      * ファイルから NNUE をインポート
      * @param file ファイルオブジェクト

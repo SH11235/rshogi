@@ -3,9 +3,9 @@ import { type ReactElement, useRef } from "react";
 import type { SquareNotation } from "./shogi-match/types";
 import { formatSquare, getBoardLabels } from "./shogi-match/utils/coordinateFormat";
 
-export type ShogiBoardOwner = "sente" | "gote";
+type ShogiBoardOwner = "sente" | "gote";
 
-export interface ShogiBoardPiece {
+interface ShogiBoardPiece {
     owner: ShogiBoardOwner;
     type: string;
     promoted?: boolean;
@@ -16,7 +16,7 @@ export interface ShogiBoardCell {
     piece: ShogiBoardPiece | null;
 }
 
-export interface ShogiBoardProps {
+interface ShogiBoardProps {
     grid: ShogiBoardCell[][];
     selectedSquare?: string | null;
     lastMove?: { from?: string | null; to?: string | null };

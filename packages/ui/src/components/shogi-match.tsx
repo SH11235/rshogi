@@ -84,7 +84,7 @@ import { TooltipProvider } from "./tooltip";
 
 type Selection = { kind: "square"; square: string } | { kind: "hand"; piece: PieceType };
 
-export interface ShogiMatchProps {
+interface ShogiMatchProps {
     engineOptions: EngineOption[];
     defaultSides?: { sente: SideSetting; gote: SideSetting };
     initialMainTimeMs?: number;

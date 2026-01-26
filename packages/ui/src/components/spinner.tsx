@@ -16,7 +16,7 @@ const spinnerVariants = cva("inline-block animate-spin rounded-full border-solid
     },
 });
 
-export interface SpinnerProps
+interface SpinnerProps
     extends HTMLAttributes<HTMLDivElement>,
         VariantProps<typeof spinnerVariants> {
     /** ローディング中のラベル（アクセシビリティ用） */
@@ -47,5 +47,3 @@ export function Spinner({
         </div>
     );
 }
-
-export { spinnerVariants };

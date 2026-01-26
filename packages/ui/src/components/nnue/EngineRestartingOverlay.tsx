@@ -1,7 +1,7 @@
 import type { ReactElement } from "react";
 import { Spinner } from "../spinner";
 
-export interface EngineRestartingOverlayProps {
+interface EngineRestartingOverlayProps {
     /** 表示するかどうか */
     visible: boolean;
 }

@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 
-export interface UseNnueSelectorReturn {
+interface UseNnueSelectorReturn {
     /** モーダルが開いているか */
     isOpen: boolean;
     /** 選択中の NNUE ID（null = NNUEなし（Material評価）） */
@@ -17,7 +17,7 @@ export interface UseNnueSelectorReturn {
     showRestartWarning: boolean;
 }
 
-export interface UseNnueSelectorOptions {
+interface UseNnueSelectorOptions {
     /** 現在エンジンで使用中の NNUE ID */
     currentNnueId: string | null;
     /** 選択確定時のコールバック */
@@ -29,7 +29,7 @@ export interface UseNnueSelectorOptions {
 /**
  * NNUE 選択モーダルの状態を管理するフック
  */
-export function useNnueSelector({
+function useNnueSelector({
     currentNnueId,
     onConfirm,
     isEngineInitialized = false,

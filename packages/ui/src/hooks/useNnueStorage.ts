@@ -8,7 +8,7 @@ import {
 import { useCallback, useState } from "react";
 import { useNnueContextOptional } from "../providers/NnueContext";
 
-export interface UseNnueStorageReturn {
+interface UseNnueStorageReturn {
     /** NNUE メタデータ一覧 */
     nnueList: NnueMeta[];
     /** 一覧読み込み中かどうか */

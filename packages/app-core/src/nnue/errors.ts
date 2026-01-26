@@ -1,7 +1,7 @@
 /**
  * NNUE エラーコード
  */
-export type NnueErrorCode =
+type NnueErrorCode =
     | "NNUE_NOT_FOUND"
     | "NNUE_INVALID_FORMAT"
     | "NNUE_INCOMPATIBLE"
@@ -33,7 +33,7 @@ export class NnueError extends Error {
 /**
  * エラーコードに対応するユーザー向けメッセージ（日本語）
  */
-export const NNUE_ERROR_MESSAGES: Record<NnueErrorCode, string> = {
+const NNUE_ERROR_MESSAGES: Record<NnueErrorCode, string> = {
     NNUE_NOT_FOUND: "NNUE ファイルが見つかりません",
     NNUE_INVALID_FORMAT: "このファイルは NNUE 形式ではありません",
     NNUE_INCOMPATIBLE: "このエンジンは指定された NNUE 形式に対応していません",

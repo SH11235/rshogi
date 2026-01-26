@@ -219,10 +219,7 @@ export function createTauriNnueStorage(options: TauriNnueStorageOptions = {}): N
 /**
  * NNUE ファイルのパスを取得
  */
-export async function getNnuePath(
-    id: string,
-    options: { invoke?: InvokeFn } = {},
-): Promise<string> {
+async function getNnuePath(id: string, options: { invoke?: InvokeFn } = {}): Promise<string> {
     const invoke = options.invoke ?? tauriInvoke;
     return invoke<string>("get_nnue_path", { id });
 }
@@ -230,10 +227,7 @@ export async function getNnuePath(
 /**
  * NNUE ファイルのハッシュを計算
  */
-export async function calculateNnueHash(
-    id: string,
-    options: { invoke?: InvokeFn } = {},
-): Promise<string> {
+async function calculateNnueHash(id: string, options: { invoke?: InvokeFn } = {}): Promise<string> {
     const invoke = options.invoke ?? tauriInvoke;
     return invoke<string>("calculate_nnue_hash", { id });
 }
@@ -243,7 +237,7 @@ export async function calculateNnueHash(
  * @param srcPath ソースファイルのパス
  * @param id 識別子（UUID）
  */
-export async function importNnueFromPath(
+async function importNnueFromPath(
     srcPath: string,
     id: string,
     options: { invoke?: InvokeFn } = {},
@@ -260,7 +254,7 @@ export async function importNnueFromPath(
  * @param srcPath ソースファイルのパス
  * @param displayName 表示名（省略時はファイル名）
  */
-export async function importNnue(
+async function importNnue(
     srcPath: string,
     displayName?: string,
     options: { invoke?: InvokeFn } = {},

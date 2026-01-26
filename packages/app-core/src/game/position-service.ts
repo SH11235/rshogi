@@ -11,18 +11,18 @@ import {
     type Square,
 } from "./board";
 
-export interface PieceJson {
+interface PieceJson {
     owner: Player;
     type: PieceType;
     promoted?: boolean;
 }
 
-export interface CellJson {
+interface CellJson {
     square: Square;
     piece: PieceJson | null;
 }
 
-export interface HandJson {
+interface HandJson {
     P?: number;
     L?: number;
     N?: number;
@@ -32,7 +32,7 @@ export interface HandJson {
     R?: number;
 }
 
-export interface HandsJson {
+interface HandsJson {
     sente: HandJson;
     gote: HandJson;
 }
@@ -40,7 +40,7 @@ export interface HandsJson {
 /**
  * パス権のJSON表現
  */
-export interface PassRightsJson {
+interface PassRightsJson {
     sente: number;
     gote: number;
 }

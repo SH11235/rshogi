@@ -203,7 +203,7 @@ export function createIndexedDBNnueStorage(): NnueStorage {
  * 永続ストレージをリクエスト
  * ユーザー操作（ボタンクリック等）に紐づけて実行すると許可率が上がる
  */
-export async function requestPersistentStorage(): Promise<{
+async function requestPersistentStorage(): Promise<{
     granted: boolean;
     usage: number;
     quota: number;

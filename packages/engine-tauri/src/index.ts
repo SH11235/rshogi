@@ -13,30 +13,23 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
 
 // NNUE ストレージ
-export {
-    calculateNnueHash,
-    createTauriNnueStorage,
-    getNnuePath,
-    importNnue,
-    importNnueFromPath,
-    type TauriNnueStorageOptions,
-} from "./nnue-storage";
+export { createTauriNnueStorage } from "./nnue-storage";
 
-export type InvokeFn = typeof tauriInvoke;
-export type ListenFn = typeof tauriListen;
+type InvokeFn = typeof tauriInvoke;
+type ListenFn = typeof tauriListen;
 
 export interface TauriIpc {
     invoke: InvokeFn;
     listen: ListenFn;
 }
-export interface LegalMovesParams {
+interface LegalMovesParams {
     sfen: string;
     moves?: string[];
     passRights?: { sente: number; gote: number };
     ipc?: Partial<TauriIpc>;
 }
 
-export interface TauriEngineClientOptions extends EngineInitOptions {
+interface TauriEngineClientOptions extends EngineInitOptions {
     /**
      * IPC 実装を差し替える場合に指定 (テスト用)。
      */

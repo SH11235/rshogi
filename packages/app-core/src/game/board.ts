@@ -3,8 +3,8 @@ import { getPositionService } from "./position-service-registry";
 export const BOARD_FILES = ["9", "8", "7", "6", "5", "4", "3", "2", "1"] as const;
 export const BOARD_RANKS = ["a", "b", "c", "d", "e", "f", "g", "h", "i"] as const;
 
-export type File = (typeof BOARD_FILES)[number];
-export type Rank = (typeof BOARD_RANKS)[number];
+type File = (typeof BOARD_FILES)[number];
+type Rank = (typeof BOARD_RANKS)[number];
 export type Square = `${File}${Rank}`;
 
 export type Player = "sente" | "gote";
@@ -17,13 +17,13 @@ export interface Piece {
 }
 
 export type BoardState = Record<Square, Piece | null>;
-export type Hand = Partial<Record<PieceType, number>>;
+type Hand = Partial<Record<PieceType, number>>;
 export interface Hands {
     sente: Hand;
     gote: Hand;
 }
 
-export type ParsedMove =
+type ParsedMove =
     | { kind: "move"; from: Square; to: Square; promote: boolean }
     | { kind: "drop"; to: Square; piece: PieceType }
     | { kind: "pass" };
@@ -103,12 +103,12 @@ export function createInitialPositionState(): PositionState {
     return clonePosition(fallback);
 }
 
-export async function createInitialBoardAsync(): Promise<BoardState> {
+async function createInitialBoardAsync(): Promise<BoardState> {
     const position = await ensureInitialPosition();
     return cloneBoard(position.board);
 }
 
-export async function createInitialPositionStateAsync(): Promise<PositionState> {
+async function createInitialPositionStateAsync(): Promise<PositionState> {
     const position = await ensureInitialPosition();
     return clonePosition(position);
 }
@@ -404,9 +404,9 @@ export function boardToMatrix(board: BoardState): BoardMatrix {
     );
 }
 
-export type BoardMatrix = Array<Array<{ square: Square; piece: Piece | null }>>;
+type BoardMatrix = Array<Array<{ square: Square; piece: Piece | null }>>;
 
-export function buildPositionString(moves: string[], sfen = "startpos"): string {
+function buildPositionString(moves: string[], sfen = "startpos"): string {
     if (!moves.length) {
         return sfen;
     }
@@ -414,7 +414,7 @@ export function buildPositionString(moves: string[], sfen = "startpos"): string 
     return `${sfen} moves ${moves.join(" ")}`;
 }
 
-export function isPlayerPiece(piece: Piece | null, player: Player): boolean {
+function isPlayerPiece(piece: Piece | null, player: Player): boolean {
     return Boolean(piece && piece.owner === player);
 }
 
