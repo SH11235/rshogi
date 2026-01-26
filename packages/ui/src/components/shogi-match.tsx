@@ -487,7 +487,9 @@ export function ShogiMatch({
             try {
                 const parsed = JSON.parse(oldSenteStored) as string | null;
                 if (parsed) {
-                    setSenteNnueSelection({ presetKey: null, nnueId: parsed });
+                    const newSelection = { presetKey: null, nnueId: parsed };
+                    setSenteNnueSelection(newSelection);
+                    void restartEngineForNnueRef.current?.("sente", newSelection);
                 }
             } catch (error) {
                 console.warn(`Failed to parse localStorage key "${oldSenteKey}":`, error);
@@ -503,7 +505,9 @@ export function ShogiMatch({
             try {
                 const parsed = JSON.parse(oldGoteStored) as string | null;
                 if (parsed) {
-                    setGoteNnueSelection({ presetKey: null, nnueId: parsed });
+                    const newSelection = { presetKey: null, nnueId: parsed };
+                    setGoteNnueSelection(newSelection);
+                    void restartEngineForNnueRef.current?.("gote", newSelection);
                 }
             } catch (error) {
                 console.warn(`Failed to parse localStorage key "${oldGoteKey}":`, error);
@@ -586,6 +590,7 @@ export function ShogiMatch({
                 !nnueList.some((n) => n.id === senteNnueSelection.nnueId)
             ) {
                 setSenteNnueSelection(defaultNnueSelection);
+                void restartEngineForNnueRef.current?.("sente", defaultNnueSelection);
             }
             if (
                 goteNnueSelection.presetKey === null &&
@@ -593,6 +598,7 @@ export function ShogiMatch({
                 !nnueList.some((n) => n.id === goteNnueSelection.nnueId)
             ) {
                 setGoteNnueSelection(defaultNnueSelection);
+                void restartEngineForNnueRef.current?.("gote", defaultNnueSelection);
             }
             if (
                 analysisNnueSelection.presetKey === null &&
@@ -635,10 +641,14 @@ export function ShogiMatch({
             setAnalysisNnueSelection({ presetKey: null, nnueId: null });
         }
         if (shouldReset(senteNnueSelection.presetKey)) {
-            setSenteNnueSelection({ presetKey: null, nnueId: null });
+            const newSelection = { presetKey: null, nnueId: null };
+            setSenteNnueSelection(newSelection);
+            void restartEngineForNnueRef.current?.("sente", newSelection);
         }
         if (shouldReset(goteNnueSelection.presetKey)) {
-            setGoteNnueSelection({ presetKey: null, nnueId: null });
+            const newSelection = { presetKey: null, nnueId: null };
+            setGoteNnueSelection(newSelection);
+            void restartEngineForNnueRef.current?.("gote", newSelection);
         }
     }, [
         manifestUrl,
@@ -665,27 +675,39 @@ export function ShogiMatch({
         const validateAndFix = (
             selection: NnueSelection,
             setSelection: (s: NnueSelection) => void,
-        ) => {
+        ): NnueSelection | null => {
             // presetKey が設定されていない場合はバリデーション不要
-            if (!selection.presetKey) return;
+            if (!selection.presetKey) return null;
 
             // presets が空の場合は駒得にフォールバック
             if (presets.length === 0) {
-                setSelection({ presetKey: null, nnueId: null });
-                return;
+                const newSelection = { presetKey: null, nnueId: null };
+                setSelection(newSelection);
+                return newSelection;
             }
 
             // presetKey が presets に存在するかチェック
             const exists = presets.some((p) => p.config.presetKey === selection.presetKey);
             if (!exists) {
                 // 先頭のプリセットにフォールバック
-                setSelection({ presetKey: presets[0].config.presetKey, nnueId: null });
+                const newSelection = { presetKey: presets[0].config.presetKey, nnueId: null };
+                setSelection(newSelection);
+                return newSelection;
             }
+            return null;
         };
 
-        validateAndFix(senteNnueSelection, setSenteNnueSelection);
-        validateAndFix(goteNnueSelection, setGoteNnueSelection);
+        const newSenteSelection = validateAndFix(senteNnueSelection, setSenteNnueSelection);
+        const newGoteSelection = validateAndFix(goteNnueSelection, setGoteNnueSelection);
         validateAndFix(analysisNnueSelection, setAnalysisNnueSelection);
+
+        // 選択が変更された場合、対局用エンジンを再起動
+        if (newSenteSelection) {
+            restartEngineForNnueRef.current?.("sente", newSenteSelection);
+        }
+        if (newGoteSelection) {
+            restartEngineForNnueRef.current?.("gote", newGoteSelection);
+        }
     }, [
         manifestUrl,
         isPresetsLoading,
@@ -917,6 +939,10 @@ export function ShogiMatch({
     }, []);
 
     const stopAllEnginesRef = useRef<() => Promise<void>>(async () => {});
+    // NNUE再起動用のref（useEffectからアクセスするため）
+    const restartEngineForNnueRef = useRef<
+        ((side: Player, selection?: NnueSelection) => Promise<void>) | null
+    >(null);
 
     // 時計管理フックを使用
     const { clocks, clocksRef, resetClocks, updateClocksForNextTurn, stopTicking, startTicking } =
@@ -1115,6 +1141,7 @@ export function ShogiMatch({
         resolveNnue,
     });
     stopAllEnginesRef.current = stopAllEngines;
+    restartEngineForNnueRef.current = restartEngineForNnue;
 
     // role変更時にエンジンを破棄するラッパー
     const handleSidesChange = useCallback(

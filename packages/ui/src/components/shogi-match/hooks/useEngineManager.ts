@@ -240,13 +240,13 @@ interface UseEngineManagerReturn {
     /** NNUE切替によるエンジン再起動中かどうか */
     isEngineRestarting: boolean;
     /**
-     * 指定サイドのエンジンを破棄する（manualControl: true 時に使用）
+     * 指定サイドのエンジンを破棄する
      *
      * role が "engine" から "human" に変更された際に呼び出してください。
      */
     disposeEngine: (side: Player) => Promise<void>;
     /**
-     * NNUE変更に伴いエンジンを再起動する（manualControl: true 時に使用）
+     * NNUE変更に伴いエンジンを再起動する
      *
      * 対局停止中に NNUE 選択が変更された際に呼び出してください。
      * 対局中は呼び出しても無視されます。
@@ -674,7 +674,7 @@ export function useEngineManager({
      * 新しいNNUEをロードし直します。
      *
      * @remarks
-     * - 対局中は呼び出されません（useEffect内で isMatchRunning をチェック）
+     * - 対局中は内部で isMatchRunningRef をチェックして無視されます
      * - Desktop版では OnceLock により一度ロードしたNNUEは変更不可のため、
      *   アプリ再起動が必要になる場合があります
      * - エラー時はユーザーに通知され、エンジンは error 状態になります
