@@ -1347,9 +1347,24 @@ mod tests {
 
     #[test]
     fn test_parse_qa_from_arch() {
-        assert_eq!(parse_qa_from_arch("HalfKA^512x2-8-96-qa=255"), Some(255));
-        assert_eq!(parse_qa_from_arch("HalfKA^512x2-8-96-qa=127"), Some(127));
-        assert_eq!(parse_qa_from_arch("HalfKA^512x2-8-96"), None);
+        // bullet-shogi 形式（qa= を含む）
+        assert_eq!(
+            parse_qa_from_arch(
+                "Features=HalfKA[138510->512x2],fv_scale=16,l1_input=1024,l2=8,l3=96,qa=255,qb=64"
+            ),
+            Some(255)
+        );
+        assert_eq!(
+            parse_qa_from_arch(
+                "Features=HalfKA[138510->512x2],fv_scale=16,l1_input=1024,l2=8,l3=96,qa=127,qb=64"
+            ),
+            Some(127)
+        );
+        // nnue-pytorch 形式（qa= を含まない → None でデフォルト値 127 を使用）
+        assert_eq!(
+            parse_qa_from_arch("Features=HalfKA[138510->512x2],Network=AffineTransform[1<-96]"),
+            None
+        );
     }
 
     #[test]

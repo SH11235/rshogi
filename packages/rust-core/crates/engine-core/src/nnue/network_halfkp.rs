@@ -1340,16 +1340,51 @@ mod tests {
 
     #[test]
     fn test_parse_qa_from_arch() {
-        assert_eq!(parse_qa_from_arch("HalfKP256x2-32-32-qa=255"), Some(255));
-        assert_eq!(parse_qa_from_arch("HalfKP256x2-32-32-qa=127"), Some(127));
-        assert_eq!(parse_qa_from_arch("HalfKP256x2-32-32"), None);
+        // bullet-shogi 形式（qa= を含む）の仮定ケース
+        assert_eq!(
+            parse_qa_from_arch(
+                "Features=HalfKP(Friend)[125388->256x2],fv_scale=24,l2=32,l3=32,qa=255"
+            ),
+            Some(255)
+        );
+        assert_eq!(
+            parse_qa_from_arch(
+                "Features=HalfKP(Friend)[125388->256x2],fv_scale=24,l2=32,l3=32,qa=127"
+            ),
+            Some(127)
+        );
+        // nnue-pytorch 形式（qa= を含まない → None でデフォルト値 127 を使用）
+        // 実際のファイル例: suisho5.bin
+        assert_eq!(
+            parse_qa_from_arch(
+                "Features=HalfKP(Friend)[125388->256x2],Network=AffineTransform[1<-32]"
+            ),
+            None
+        );
     }
 
     #[test]
     fn test_parse_fv_scale_from_arch() {
-        assert_eq!(parse_fv_scale_from_arch("HalfKP256x2-32-32-fv_scale=24"), Some(24));
-        assert_eq!(parse_fv_scale_from_arch("HalfKP256x2-32-32-fv_scale=16"), Some(16));
-        assert_eq!(parse_fv_scale_from_arch("HalfKP256x2-32-32"), None);
+        // bullet-shogi 形式（fv_scale= を含む）の仮定ケース
+        assert_eq!(
+            parse_fv_scale_from_arch(
+                "Features=HalfKP(Friend)[125388->256x2],fv_scale=24,l2=32,l3=32"
+            ),
+            Some(24)
+        );
+        assert_eq!(
+            parse_fv_scale_from_arch(
+                "Features=HalfKP(Friend)[125388->256x2],fv_scale=16,l2=32,l3=32"
+            ),
+            Some(16)
+        );
+        // nnue-pytorch 形式（fv_scale= を含まない → None でデフォルト値を使用）
+        assert_eq!(
+            parse_fv_scale_from_arch(
+                "Features=HalfKP(Friend)[125388->256x2],Network=AffineTransform[1<-32]"
+            ),
+            None
+        );
     }
 
     #[test]
