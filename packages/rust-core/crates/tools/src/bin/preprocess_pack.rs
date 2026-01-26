@@ -30,8 +30,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use std::cell::RefCell;
 
-use engine_core::nnue::init_nnue;
-use engine_core::position::Position;
+use rshogi_core::nnue::init_nnue;
+use rshogi_core::position::Position;
 use tools::packed_sfen::{pack_position, unpack_sfen, PackedSfenValue};
 use tools::qsearch_pv::{
     qsearch_with_pv, qsearch_with_pv_nnue, MaterialEvaluator, NnueStacks, QsearchResult,
@@ -490,7 +490,7 @@ fn finalize_result(
     pos: &mut Position,
     psv: &PackedSfenValue,
     result: QsearchResult,
-    original_stm: engine_core::types::Color,
+    original_stm: rshogi_core::types::Color,
     opts: ProcessOptions,
     stacks: Option<&mut NnueStacks>,
 ) -> ProcessResult {

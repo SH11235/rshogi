@@ -47,8 +47,8 @@
 //! 4. 盤上の駒 (ハフマン符号化): 81マス分（玉のマスはスキップ）
 //! 5. 手駒 (ハフマン符号化): 残りビットで表現
 
-use engine_core::position::Position;
-use engine_core::types::{Color, Hand, Move, Piece, PieceType, Square};
+use rshogi_core::position::Position;
+use rshogi_core::types::{Color, Hand, Move, Piece, PieceType, Square};
 
 /// PackedSfenValue (40バイト)
 #[derive(Debug, Clone, Copy)]

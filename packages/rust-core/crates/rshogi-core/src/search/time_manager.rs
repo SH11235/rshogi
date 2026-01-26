@@ -558,7 +558,7 @@ impl TimeManagement {
         }
 
         debug!(
-            target: "engine_core::search",
+            target: "rshogi_core::search",
             "apply_iteration_timing: elapsed={}ms total_time={:.3} max_time={} min_time={} stop_threshold={:?} search_end={} nodes_effort={:.1} depth={} ponder={} final_push={} single_move_limit={} stop_on_ponderhit={}",
             effective_elapsed,
             total_time,
@@ -669,7 +669,7 @@ impl TimeManagement {
         // 外部からの停止要求
         if self.stop.load(Ordering::Relaxed) {
             debug!(
-                target: "engine_core::search",
+                target: "rshogi_core::search",
                 "stop check: external stop elapsed={} effective_elapsed={} search_end={} last_stop_threshold={:?} max_time={}",
                 elapsed,
                 effective_elapsed,
@@ -694,7 +694,7 @@ impl TimeManagement {
         if self.search_end > 0 {
             if elapsed >= self.search_end {
                 debug!(
-                    target: "engine_core::search",
+                    target: "rshogi_core::search",
                     "stop check: search_end reached elapsed={} search_end={}",
                     elapsed,
                     self.search_end
@@ -708,7 +708,7 @@ impl TimeManagement {
         if let Some(threshold) = self.last_stop_threshold {
             if effective_elapsed >= threshold {
                 debug!(
-                    target: "engine_core::search",
+                    target: "rshogi_core::search",
                     "stop check: last_stop_threshold reached effective_elapsed={} threshold={}",
                     effective_elapsed,
                     threshold
@@ -720,7 +720,7 @@ impl TimeManagement {
         // 最大時間を超えた（セーフティ）
         if effective_elapsed >= self.maximum_time {
             debug!(
-                target: "engine_core::search",
+                target: "rshogi_core::search",
                 "stop check: maximum_time reached effective_elapsed={} max_time={}",
                 effective_elapsed,
                 self.maximum_time

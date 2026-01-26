@@ -12,7 +12,7 @@
 //!
 //! ```rust,ignore
 //! use tools::qsearch_pv::{qsearch_with_pv, QsearchResult, Evaluator, MaterialEvaluator};
-//! use engine_core::position::Position;
+//! use rshogi_core::position::Position;
 //!
 //! let mut pos = Position::new();
 //! pos.set_hirate();
@@ -22,13 +22,13 @@
 //! println!("Score: {}, PV length: {}", result.value, result.pv.len());
 //! ```
 
-use engine_core::eval::material::evaluate_material;
-use engine_core::movegen::{generate_legal, MoveList};
-use engine_core::nnue::{
+use rshogi_core::eval::material::evaluate_material;
+use rshogi_core::movegen::{generate_legal, MoveList};
+use rshogi_core::nnue::{
     evaluate_dispatch, get_network, is_nnue_initialized, AccumulatorStackVariant, DirtyPiece,
 };
-use engine_core::position::Position;
-use engine_core::types::{Move, Value};
+use rshogi_core::position::Position;
+use rshogi_core::types::{Move, Value};
 use std::cell::RefCell;
 
 /// qsearch結果

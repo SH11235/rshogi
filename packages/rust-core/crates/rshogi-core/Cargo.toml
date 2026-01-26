@@ -1,11 +1,14 @@
 [package]
-name = "engine-core"
+name = "rshogi-core"
 version = "0.1.0"
 edition = "2021"
 authors = ["sh11235"]
-description = "Shogi engine core library"
+description = "A high-performance shogi engine core library with NNUE evaluation"
 license = "MIT"
-repository = "https://github.com/sh11235/shogi"
+repository = "https://github.com/sh11235/rshogi"
+keywords = ["shogi", "japanese-chess", "game", "engine", "nnue"]
+categories = ["games", "game-engines"]
+readme = "README.md"
 
 [dependencies]
 # Workspace dependencies
@@ -55,19 +58,7 @@ wasm-threads = ["rayon"]
 # YaneuraOu DEEP相当のデフォルト遅延設定を使う
 # GPU/ネットワーク待ちが長い環境向けの遅延マージン(400/1400ms)プリセットを有効化する
 deep = []
-# 大会用ビルド: Material評価を削除し、NNUEを必須とする
-# - Material評価コードを完全に削除（バイナリサイズ削減）
-# - NNUEがロードされていない場合はパニック
-# - Wasm buildでも使用可能
-# - デスクトップ配布用リリースビルドで推奨
-#
-# 注意: tournamentフィーチャーを有効にする場合、
-# アプリケーション起動時にNNUEの初期化が必須。
-# 初期化忘れはpanicを引き起こす。
-#
-# 使用例: cargo build --release --features tournament
-tournament = []
 
 [lib]
-name = "engine_core"
+name = "rshogi_core"
 path = "src/lib.rs"

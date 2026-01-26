@@ -3,11 +3,11 @@
 //! JSONL形式の教師データを読み込み、学習用のバッチを生成する。
 
 use anyhow::{Context, Result};
-use engine_core::nnue::{halfkp_index, BonaPiece};
-use engine_core::position::Position;
-use engine_core::types::{Color, PieceType, Square};
 use rand::seq::SliceRandom;
 use rand::Rng;
+use rshogi_core::nnue::{halfkp_index, BonaPiece};
+use rshogi_core::position::Position;
+use rshogi_core::types::{Color, PieceType, Square};
 use serde::Deserialize;
 use std::fs::File;
 use std::io::{BufRead, BufReader};

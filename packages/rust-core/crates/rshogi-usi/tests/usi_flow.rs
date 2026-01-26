@@ -4,7 +4,7 @@ use std::process::Command;
 /// `go`→`stop`→`quit` で bestmove が返って終了することを確認
 #[test]
 fn stop_then_quit_outputs_bestmove() {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("engine-usi"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("rshogi-usi"));
     let mut child = cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -27,7 +27,7 @@ fn stop_then_quit_outputs_bestmove() {
 /// `go`→`gameover`→`quit` で探索を停止しつつ bestmove を返すこと
 #[test]
 fn gameover_outputs_bestmove() {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("engine-usi"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("rshogi-usi"));
     let mut child = cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -50,7 +50,7 @@ fn gameover_outputs_bestmove() {
 /// `go`→即`quit` でも bestmove が返って終了すること
 #[test]
 fn quit_outputs_bestmove() {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("engine-usi"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("rshogi-usi"));
     let mut child = cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -73,7 +73,7 @@ fn quit_outputs_bestmove() {
 /// `go ponder`→`ponderhit`→`quit` で bestmove が返ること
 #[test]
 fn ponderhit_outputs_bestmove() {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("engine-usi"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("rshogi-usi"));
     let mut child = cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
