@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/rshogi-core",
     "crates/rshogi-usi",
-    "crates/engine-wasm",
     "crates/tools",
 ]
 
