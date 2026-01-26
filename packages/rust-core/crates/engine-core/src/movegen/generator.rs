@@ -883,6 +883,27 @@ pub fn generate_legal(pos: &Position, list: &mut MoveList) {
     }
 }
 
+/// 合法手を生成（不成含む）
+/// 合法手を生成（不成含む）
+///
+/// `generate_legal()` と異なり、成ることが可能な駒が敵陣に移動する際に、
+/// 成る手だけでなく成らない手も生成します。
+///
+/// # 使用目的
+/// - UI での指し手選択肢の表示（ユーザーが不成を選択できるようにする）
+/// - 棋譜再生時の指し手検証（不成の指し手も合法として認識する）
+///
+/// # 注意
+/// 探索エンジンでの使用は非推奨です。探索では `generate_legal()` を使用してください。
+pub fn generate_legal_all(pos: &Position, list: &mut MoveList) {
+    let mut buffer = ExtMoveBuffer::new();
+    generate_with_type(pos, crate::movegen::GenType::LegalAll, &mut buffer, None);
+
+    for ext in buffer.iter() {
+        list.push(ext.mv);
+    }
+}
+
 // ============================================================================
 // パス権対応の合法手生成
 // ============================================================================
@@ -900,6 +921,31 @@ pub fn generate_legal(pos: &Position, list: &mut MoveList) {
 /// qsearch では駒取り手のみを生成すべきであり、PASS は不要。
 pub fn generate_legal_with_pass(pos: &Position, list: &mut MoveList) {
     generate_legal(pos, list);
+
+    // パス可能な場合のみ追加
+    if pos.can_pass() {
+        list.push(Move::PASS);
+    }
+}
+
+/// パス手を含む合法手を生成（不成含む）
+/// パス手を含む合法手を生成（不成含む）
+///
+/// `generate_legal_all()` の結果に加えて、パス可能な場合は `Move::PASS` を追加します。
+///
+/// # 使用条件
+/// - パス権ルールが有効な場合のみ PASS が生成される
+/// - 王手中はパス不可（can_pass() が false を返す）
+///
+/// # 使用目的
+/// - UI での指し手選択肢の表示（不成とパスの両方を含む）
+/// - 棋譜再生時の指し手検証（不成とパスの両方を合法として認識）
+///
+/// # 注意
+/// 探索の qsearch (静止探索) では使用しないこと。
+/// qsearch では駒取り手のみを生成すべきであり、PASS や不成は不要。
+pub fn generate_legal_all_with_pass(pos: &Position, list: &mut MoveList) {
+    generate_legal_all(pos, list);
 
     // パス可能な場合のみ追加
     if pos.can_pass() {
@@ -1275,6 +1321,23 @@ mod tests {
             .iter()
             .any(|ext| ext.mv.from() == from && !ext.mv.is_promotion());
         assert!(has_non_promo, "All モードでは不成も生成する");
+    }
+
+    #[test]
+    fn test_generate_legal_all_includes_bishop_non_promote() {
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/9/9/9/9/4B4/4K4 b - 1").unwrap();
+
+        let mut list = MoveList::new();
+        generate_legal_all(&pos, &mut list);
+
+        let from = pos
+            .pieces(Color::Black, PieceType::Bishop)
+            .iter()
+            .next()
+            .expect("角が存在しない");
+        let has_non_promo = list.iter().any(|m| m.from() == from && !m.is_promotion());
+        assert!(has_non_promo, "generate_legal_all は不成の角移動も含むべき");
     }
 
     #[test]
