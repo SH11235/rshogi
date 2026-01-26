@@ -24,7 +24,7 @@ env_logger.workspace = true
 log.workspace = true
 
 # Local dependencies
-rshogi-core = { path = "../engine-core" }
+rshogi-core = { path = "../rshogi-core" }
 
 # Additional dependencies
 sysinfo = "0.37"

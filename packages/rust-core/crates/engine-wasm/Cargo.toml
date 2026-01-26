@@ -10,7 +10,7 @@ description = "Wasm bindings for the shogi engine core"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-rshogi-core = { path = "../engine-core" }
+rshogi-core = { path = "../rshogi-core" }
 wasm-bindgen = { version = "0.2.106", features = ["serde-serialize"] }
 wasm-bindgen-rayon = { version = "1.2", optional = true }
 js-sys = "0.3.83"

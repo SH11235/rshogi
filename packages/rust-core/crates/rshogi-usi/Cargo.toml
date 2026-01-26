@@ -21,7 +21,7 @@ log.workspace = true
 env_logger.workspace = true
 
 # Local dependencies
-rshogi-core = { version = "0.1", path = "../engine-core" }
+rshogi-core = { version = "0.1", path = "../rshogi-core" }
 
 [[bin]]
 name = "rshogi-usi"
