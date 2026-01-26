@@ -226,3 +226,33 @@ export interface PresetManifest {
  * プリセットの状態
  */
 export type PresetStatus = "latest" | "update-available" | "not-downloaded";
+
+/**
+ * NNUE 選択状態
+ *
+ * プリセット指定とカスタムNNUE指定を区別するための型。
+ * - presetKey が設定されている場合: プリセットを使用（遅延ダウンロード対応）
+ * - presetKey が null で nnueId が設定されている場合: カスタムNNUEを使用
+ * - 両方 null の場合: NNUEなし（駒得評価）
+ */
+export interface NnueSelection {
+    /** プリセットキー（優先、これが設定されていればプリセット使用） */
+    presetKey: string | null;
+    /** カスタムNNUEのID（presetKeyがnullの場合に使用） */
+    nnueId: string | null;
+}
+
+/** デフォルトプリセットキー */
+export const DEFAULT_PRESET_KEY = "ramu";
+
+/** デフォルトのNNUE選択（最初のプリセット） */
+export const DEFAULT_NNUE_SELECTION: NnueSelection = {
+    presetKey: DEFAULT_PRESET_KEY,
+    nnueId: null,
+};
+
+/** NNUEなし（駒得評価）の選択 */
+export const NONE_NNUE_SELECTION: NnueSelection = {
+    presetKey: null,
+    nnueId: null,
+};

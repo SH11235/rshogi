@@ -1,4 +1,13 @@
-import type { LastMove, NnueMeta, PieceType, Player, PositionState, Square } from "@shogi/app-core";
+import type {
+    LastMove,
+    NnueMeta,
+    NnueSelection,
+    PieceType,
+    Player,
+    PositionState,
+    PresetWithStatus,
+    Square,
+} from "@shogi/app-core";
 import type { ReactElement, RefObject } from "react";
 import { useCallback, useMemo, useRef, useState } from "react";
 import type { ShogiBoardCell } from "../../shogi-board";
@@ -108,10 +117,11 @@ interface MobileLayoutProps {
     onTimeSettingsChange: (settings: ClockSettings) => void;
     internalEngineId: string;
     nnueList: NnueMeta[];
-    senteNnueId: string | null;
-    onSenteNnueIdChange: (id: string | null) => void;
-    goteNnueId: string | null;
-    onGoteNnueIdChange: (id: string | null) => void;
+    presets: PresetWithStatus[];
+    senteNnueSelection: NnueSelection;
+    onSenteNnueSelectionChange: (selection: NnueSelection) => void;
+    goteNnueSelection: NnueSelection;
+    onGoteNnueSelectionChange: (selection: NnueSelection) => void;
     settingsLocked: boolean;
     /** 評価関数ファイル管理を開く */
     onOpenNnueManager?: () => void;
@@ -219,10 +229,11 @@ export function MobileLayout({
     onTimeSettingsChange,
     internalEngineId,
     nnueList,
-    senteNnueId,
-    onSenteNnueIdChange,
-    goteNnueId,
-    onGoteNnueIdChange,
+    presets,
+    senteNnueSelection,
+    onSenteNnueSelectionChange,
+    goteNnueSelection,
+    onGoteNnueSelectionChange,
     settingsLocked,
     onOpenNnueManager,
     passRightsSettings,
@@ -639,10 +650,11 @@ export function MobileLayout({
                     onTimeSettingsChange={onTimeSettingsChange}
                     internalEngineId={internalEngineId}
                     nnueList={nnueList}
-                    senteNnueId={senteNnueId}
-                    onSenteNnueIdChange={onSenteNnueIdChange}
-                    goteNnueId={goteNnueId}
-                    onGoteNnueIdChange={onGoteNnueIdChange}
+                    presets={presets}
+                    senteNnueSelection={senteNnueSelection}
+                    onSenteNnueSelectionChange={onSenteNnueSelectionChange}
+                    goteNnueSelection={goteNnueSelection}
+                    onGoteNnueSelectionChange={onGoteNnueSelectionChange}
                     settingsLocked={settingsLocked}
                     passRightsSettings={passRightsSettings}
                     onPassRightsSettingsChange={onPassRightsSettingsChange}

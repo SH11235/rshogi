@@ -4,11 +4,13 @@ import {
     boardToMatrix,
     cloneBoard,
     createEmptyHands,
+    DEFAULT_NNUE_SELECTION,
     type GameResult,
     getAllSquares,
     getPathToNode,
     getPositionService,
     type LastMove,
+    type NnueSelection,
     type Piece,
     type PieceType,
     type Player,
@@ -19,9 +21,12 @@ import {
 } from "@shogi/app-core";
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useLazyNnueLoader } from "../hooks/useLazyNnueLoader";
 import { useNnueStorage } from "../hooks/useNnueStorage";
+import { usePresetManager } from "../hooks/usePresetManager";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./dialog";
 import { EngineRestartingOverlay } from "./nnue/EngineRestartingOverlay";
+import { NnueDownloadOverlay } from "./nnue/NnueDownloadOverlay";
 import { NnueManagerDialog } from "./nnue/NnueManagerDialog";
 import type { ShogiBoardCell } from "./shogi-board";
 import { ShogiBoard } from "./shogi-board";
@@ -445,70 +450,201 @@ export function ShogiMatch({
     // パス権設定ダイアログの状態
     const [isPassRightsSettingsOpen, setIsPassRightsSettingsOpen] = useState(false);
 
-    // 対局用 NNUE ID
-    const [senteNnueId, setSenteNnueId] = useLocalStorage<string | null>("shogi:senteNnueId", null);
-    const [goteNnueId, setGoteNnueId] = useLocalStorage<string | null>("shogi:goteNnueId", null);
-    // 分析用 NNUE ID
-    const [analysisNnueId, setAnalysisNnueId] = useLocalStorage<string | null>(
-        "shogi:analysisNnueId",
-        null,
+    // 対局用 NNUE 選択
+    const [senteNnueSelection, setSenteNnueSelection] = useLocalStorage<NnueSelection>(
+        "shogi:senteNnueSelection",
+        DEFAULT_NNUE_SELECTION,
     );
+    const [goteNnueSelection, setGoteNnueSelection] = useLocalStorage<NnueSelection>(
+        "shogi:goteNnueSelection",
+        DEFAULT_NNUE_SELECTION,
+    );
+    // 分析用 NNUE 選択
+    const [analysisNnueSelection, setAnalysisNnueSelection] = useLocalStorage<NnueSelection>(
+        "shogi:analysisNnueSelection",
+        DEFAULT_NNUE_SELECTION,
+    );
+
+    // 旧キーからのマイグレーション
     useEffect(() => {
         if (typeof window === "undefined") return;
-        if (senteNnueId !== null || goteNnueId !== null) return;
-        const legacyKey = "shogi:matchNnueId";
-        const stored = localStorage.getItem(legacyKey);
-        if (stored === null) return;
-        try {
-            const parsed = JSON.parse(stored) as string | null;
-            if (parsed) {
-                setSenteNnueId(parsed);
-                setGoteNnueId(parsed);
+
+        // 旧 senteNnueId からの移行
+        const oldSenteKey = "shogi:senteNnueId";
+        const oldSenteStored = localStorage.getItem(oldSenteKey);
+        if (oldSenteStored !== null) {
+            try {
+                const parsed = JSON.parse(oldSenteStored) as string | null;
+                if (parsed) {
+                    setSenteNnueSelection({ presetKey: null, nnueId: parsed });
+                }
+            } catch (error) {
+                console.warn(`Failed to parse localStorage key "${oldSenteKey}":`, error);
+            } finally {
+                localStorage.removeItem(oldSenteKey);
             }
-        } catch (error) {
-            console.warn(`Failed to parse localStorage key "${legacyKey}":`, error);
-        } finally {
-            localStorage.removeItem(legacyKey);
         }
-    }, [goteNnueId, senteNnueId, setGoteNnueId, setSenteNnueId]);
+
+        // 旧 goteNnueId からの移行
+        const oldGoteKey = "shogi:goteNnueId";
+        const oldGoteStored = localStorage.getItem(oldGoteKey);
+        if (oldGoteStored !== null) {
+            try {
+                const parsed = JSON.parse(oldGoteStored) as string | null;
+                if (parsed) {
+                    setGoteNnueSelection({ presetKey: null, nnueId: parsed });
+                }
+            } catch (error) {
+                console.warn(`Failed to parse localStorage key "${oldGoteKey}":`, error);
+            } finally {
+                localStorage.removeItem(oldGoteKey);
+            }
+        }
+
+        // 旧 analysisNnueId からの移行
+        const oldAnalysisKey = "shogi:analysisNnueId";
+        const oldAnalysisStored = localStorage.getItem(oldAnalysisKey);
+        if (oldAnalysisStored !== null) {
+            try {
+                const parsed = JSON.parse(oldAnalysisStored) as string | null;
+                if (parsed) {
+                    setAnalysisNnueSelection({ presetKey: null, nnueId: parsed });
+                }
+            } catch (error) {
+                console.warn(`Failed to parse localStorage key "${oldAnalysisKey}":`, error);
+            } finally {
+                localStorage.removeItem(oldAnalysisKey);
+            }
+        }
+
+        // さらに古い matchNnueId からの移行
+        const legacyKey = "shogi:matchNnueId";
+        const legacyStored = localStorage.getItem(legacyKey);
+        if (legacyStored !== null) {
+            try {
+                const parsed = JSON.parse(legacyStored) as string | null;
+                if (parsed) {
+                    setSenteNnueSelection({ presetKey: null, nnueId: parsed });
+                    setGoteNnueSelection({ presetKey: null, nnueId: parsed });
+                }
+            } catch (error) {
+                console.warn(`Failed to parse localStorage key "${legacyKey}":`, error);
+            } finally {
+                localStorage.removeItem(legacyKey);
+            }
+        }
+    }, [setSenteNnueSelection, setGoteNnueSelection, setAnalysisNnueSelection]);
+
+    // NNUE 遅延ローダー
+    const {
+        resolveNnue,
+        isDownloading: isNnueDownloading,
+        downloadProgress: nnueDownloadProgress,
+        downloadingPresetName,
+    } = useLazyNnueLoader({ manifestUrl });
 
     // NNUE ストレージから一覧を取得
-    const { nnueList, isLoading: isNnueListLoading } = useNnueStorage();
+    const {
+        nnueList,
+        isLoading: isNnueListLoading,
+        refreshList: refreshNnueList,
+    } = useNnueStorage();
 
-    // 選択された NNUE が削除された場合はリセット
+    // プリセット一覧を取得
+    const { presets } = usePresetManager({
+        manifestUrl,
+        autoFetch: true,
+        onDownloadComplete: () => {
+            // ダウンロード完了時にストレージを更新
+            void refreshNnueList();
+        },
+    });
+
+    // 選択された NNUE（カスタムの場合）が削除された場合はデフォルトにリセット
+    // プリセット選択の場合は削除チェック不要（未ダウンロードでも選択可能）
     // isLoading 中はリストが空でも待機（初期ロード完了後に判定）
     useEffect(() => {
         if (!isNnueListLoading) {
-            if (senteNnueId && !nnueList.some((n) => n.id === senteNnueId)) {
-                setSenteNnueId(null);
+            // カスタム NNUE（presetKey が null）で nnueId が設定されている場合のみチェック
+            if (
+                senteNnueSelection.presetKey === null &&
+                senteNnueSelection.nnueId &&
+                !nnueList.some((n) => n.id === senteNnueSelection.nnueId)
+            ) {
+                setSenteNnueSelection(DEFAULT_NNUE_SELECTION);
             }
-            if (goteNnueId && !nnueList.some((n) => n.id === goteNnueId)) {
-                setGoteNnueId(null);
+            if (
+                goteNnueSelection.presetKey === null &&
+                goteNnueSelection.nnueId &&
+                !nnueList.some((n) => n.id === goteNnueSelection.nnueId)
+            ) {
+                setGoteNnueSelection(DEFAULT_NNUE_SELECTION);
             }
-            if (analysisNnueId && !nnueList.some((n) => n.id === analysisNnueId)) {
-                setAnalysisNnueId(null);
+            if (
+                analysisNnueSelection.presetKey === null &&
+                analysisNnueSelection.nnueId &&
+                !nnueList.some((n) => n.id === analysisNnueSelection.nnueId)
+            ) {
+                setAnalysisNnueSelection(DEFAULT_NNUE_SELECTION);
             }
         }
     }, [
-        senteNnueId,
-        goteNnueId,
-        analysisNnueId,
+        senteNnueSelection,
+        goteNnueSelection,
+        analysisNnueSelection,
         nnueList,
         isNnueListLoading,
-        setSenteNnueId,
-        setGoteNnueId,
-        setAnalysisNnueId,
+        setSenteNnueSelection,
+        setGoteNnueSelection,
+        setAnalysisNnueSelection,
     ]);
 
     // 分析用 NNUE 変更時に一括解析をリセット（プール破棄に伴う UI 同期）
-    const prevAnalysisNnueIdRef = useRef(analysisNnueId);
+    const prevAnalysisNnueSelectionRef = useRef(analysisNnueSelection);
     useEffect(() => {
-        if (prevAnalysisNnueIdRef.current !== analysisNnueId) {
-            prevAnalysisNnueIdRef.current = analysisNnueId;
+        const prev = prevAnalysisNnueSelectionRef.current;
+        if (
+            prev.presetKey !== analysisNnueSelection.presetKey ||
+            prev.nnueId !== analysisNnueSelection.nnueId
+        ) {
+            prevAnalysisNnueSelectionRef.current = analysisNnueSelection;
             // 一括解析中なら UI をリセット
             setBatchAnalysis(null);
         }
-    }, [analysisNnueId]);
+    }, [analysisNnueSelection]);
+
+    // 分析用 NNUE ID の導出（子コンポーネント用）
+    // preset 選択時は nnueList からダウンロード済みの NNUE を探す
+    const analysisNnueId = useMemo(() => {
+        if (analysisNnueSelection.nnueId) {
+            return analysisNnueSelection.nnueId;
+        }
+        if (analysisNnueSelection.presetKey) {
+            const presetNnue = nnueList.find(
+                (n) => n.source === "preset" && n.presetKey === analysisNnueSelection.presetKey,
+            );
+            return presetNnue?.id ?? null;
+        }
+        return null;
+    }, [analysisNnueSelection, nnueList]);
+
+    // 子コンポーネント用の setter（analysisNnueId から NnueSelection に変換）
+    const setAnalysisNnueId = useCallback(
+        (nnueId: string | null) => {
+            if (nnueId === null) {
+                setAnalysisNnueSelection({ presetKey: null, nnueId: null });
+            } else {
+                // nnueList から対応する NNUE を探して preset かどうか判定
+                const nnue = nnueList.find((n) => n.id === nnueId);
+                if (nnue?.source === "preset" && nnue.presetKey) {
+                    setAnalysisNnueSelection({ presetKey: nnue.presetKey, nnueId: null });
+                } else {
+                    setAnalysisNnueSelection({ presetKey: null, nnueId });
+                }
+            }
+        },
+        [nnueList, setAnalysisNnueSelection],
+    );
 
     // positionRef を先に定義（コールバックで使用するため）
     const positionRef = useRef<PositionState>(position);
@@ -879,9 +1015,10 @@ export function ShogiMatch({
         onMatchEnd: endMatch,
         onEvalUpdate: handleEvalUpdate,
         maxLogs,
-        senteNnueId,
-        goteNnueId,
-        analysisNnueId,
+        senteNnueSelection,
+        goteNnueSelection,
+        analysisNnueSelection,
+        resolveNnue,
     });
     stopAllEnginesRef.current = stopAllEngines;
 
@@ -2421,6 +2558,13 @@ export function ShogiMatch({
 
             <EngineRestartingOverlay visible={isEngineRestarting} />
 
+            {/* NNUE ダウンロード中オーバーレイ */}
+            <NnueDownloadOverlay
+                visible={isNnueDownloading}
+                progress={nnueDownloadProgress}
+                presetName={downloadingPresetName}
+            />
+
             {/* 勝敗表示ダイアログ */}
             <GameResultDialog
                 result={gameResult}
@@ -2531,10 +2675,11 @@ export function ShogiMatch({
                     onTimeSettingsChange={setTimeSettings}
                     internalEngineId={internalEngineId}
                     nnueList={nnueList}
-                    senteNnueId={senteNnueId}
-                    onSenteNnueIdChange={setSenteNnueId}
-                    goteNnueId={goteNnueId}
-                    onGoteNnueIdChange={setGoteNnueId}
+                    presets={presets}
+                    senteNnueSelection={senteNnueSelection}
+                    onSenteNnueSelectionChange={setSenteNnueSelection}
+                    goteNnueSelection={goteNnueSelection}
+                    onGoteNnueSelectionChange={setGoteNnueSelection}
                     settingsLocked={settingsLocked}
                     onOpenNnueManager={() => setIsNnueManagerOpen(true)}
                     // パス権設定
@@ -2566,14 +2711,15 @@ export function ShogiMatch({
                             settingsLocked={settingsLocked}
                             internalEngineId={internalEngineId}
                             nnueList={nnueList}
-                            senteNnueId={senteNnueId}
-                            onSenteNnueIdChange={setSenteNnueId}
-                            goteNnueId={goteNnueId}
-                            onGoteNnueIdChange={setGoteNnueId}
+                            presets={presets}
+                            senteNnueSelection={senteNnueSelection}
+                            onSenteNnueSelectionChange={setSenteNnueSelection}
+                            goteNnueSelection={goteNnueSelection}
+                            onGoteNnueSelectionChange={setGoteNnueSelection}
                             analysisSettings={analysisSettings}
                             onAnalysisSettingsChange={setAnalysisSettings}
-                            analysisNnueId={analysisNnueId}
-                            onAnalysisNnueIdChange={setAnalysisNnueId}
+                            analysisNnueSelection={analysisNnueSelection}
+                            onAnalysisNnueSelectionChange={setAnalysisNnueSelection}
                             onOpenNnueManager={() => setIsNnueManagerOpen(true)}
                             onOpenDisplaySettings={() => setIsDisplaySettingsOpen(true)}
                             onOpenPassRightsSettings={() => setIsPassRightsSettingsOpen(true)}

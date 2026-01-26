@@ -1,5 +1,5 @@
-import type { NnueMeta } from "@shogi/app-core";
-import { detectParallelism } from "@shogi/app-core";
+import type { NnueMeta, NnueSelection, PresetWithStatus } from "@shogi/app-core";
+import { detectParallelism, NONE_NNUE_SELECTION } from "@shogi/app-core";
 import type { SkillLevelSettings } from "@shogi/engine-client";
 import type { ReactElement } from "react";
 import { Input } from "../../input";
@@ -24,20 +24,23 @@ interface LeftSidebarProps {
     // 内蔵エンジンのID（engineOptionsの最初のIDを渡す）
     internalEngineId: string;
 
-    // NNUE 一覧
+    // NNUE 一覧（ダウンロード済みカスタム NNUE）
     nnueList: NnueMeta[];
 
-    // 対局用 NNUE（先手・後手）
-    senteNnueId: string | null;
-    onSenteNnueIdChange: (id: string | null) => void;
-    goteNnueId: string | null;
-    onGoteNnueIdChange: (id: string | null) => void;
+    // プリセット一覧
+    presets: PresetWithStatus[];
+
+    // 対局用 NNUE 選択（先手・後手）
+    senteNnueSelection: NnueSelection;
+    onSenteNnueSelectionChange: (selection: NnueSelection) => void;
+    goteNnueSelection: NnueSelection;
+    onGoteNnueSelectionChange: (selection: NnueSelection) => void;
 
     // 分析設定
     analysisSettings: AnalysisSettings;
     onAnalysisSettingsChange: (settings: AnalysisSettings) => void;
-    analysisNnueId: string | null;
-    onAnalysisNnueIdChange: (id: string | null) => void;
+    analysisNnueSelection: NnueSelection;
+    onAnalysisNnueSelectionChange: (selection: NnueSelection) => void;
 
     // NNUE 管理
     onOpenNnueManager: () => void;
@@ -84,35 +87,40 @@ export function LeftSidebar({
     settingsLocked,
     internalEngineId,
     nnueList,
-    senteNnueId,
-    onSenteNnueIdChange,
-    goteNnueId,
-    onGoteNnueIdChange,
+    presets,
+    senteNnueSelection,
+    onSenteNnueSelectionChange,
+    goteNnueSelection,
+    onGoteNnueSelectionChange,
     analysisSettings,
     onAnalysisSettingsChange,
-    analysisNnueId,
-    onAnalysisNnueIdChange,
+    analysisNnueSelection,
+    onAnalysisNnueSelectionChange,
     onOpenNnueManager,
     onOpenDisplaySettings,
     onOpenPassRightsSettings,
 }: LeftSidebarProps): ReactElement {
     const parallelismConfig = detectParallelism();
 
-    // プレイヤー選択の値を生成: "human", "material", "nnue:{nnueId}"
+    // カスタム NNUE（プリセット以外）のフィルタリング
+    const customNnueList = nnueList.filter((n) => n.source !== "preset");
+
+    // プレイヤー選択の値を生成: "human", "material", "preset:{presetKey}", "nnue:{nnueId}"
     const getSelectorValue = (side: SideKey, setting: SideSetting): string => {
         if (setting.role === "human") return "human";
-        const nnueId = side === "sente" ? senteNnueId : goteNnueId;
-        if (nnueId === null) return "material";
-        return `nnue:${nnueId}`;
+        const selection = side === "sente" ? senteNnueSelection : goteNnueSelection;
+        if (selection.presetKey) return `preset:${selection.presetKey}`;
+        if (selection.nnueId) return `nnue:${selection.nnueId}`;
+        return "material";
     };
 
     const handlePlayerChange = (side: SideKey, value: string) => {
         const currentSetting = sides[side];
-        const updateNnueId = (nextId: string | null) => {
+        const updateNnueSelection = (nextSelection: NnueSelection) => {
             if (side === "sente") {
-                onSenteNnueIdChange(nextId);
+                onSenteNnueSelectionChange(nextSelection);
             } else {
-                onGoteNnueIdChange(nextId);
+                onGoteNnueSelectionChange(nextSelection);
             }
         };
         if (value === "human") {
@@ -125,7 +133,18 @@ export function LeftSidebar({
                 },
             });
         } else if (value === "material") {
-            updateNnueId(null);
+            updateNnueSelection(NONE_NNUE_SELECTION);
+            onSidesChange({
+                ...sides,
+                [side]: {
+                    role: "engine",
+                    engineId: internalEngineId,
+                    skillLevel: currentSetting.skillLevel,
+                },
+            });
+        } else if (value.startsWith("preset:")) {
+            const presetKey = value.slice("preset:".length);
+            updateNnueSelection({ presetKey, nnueId: null });
             onSidesChange({
                 ...sides,
                 [side]: {
@@ -136,7 +155,7 @@ export function LeftSidebar({
             });
         } else if (value.startsWith("nnue:")) {
             const nnueId = value.slice("nnue:".length);
-            updateNnueId(nnueId);
+            updateNnueSelection({ presetKey: null, nnueId });
             onSidesChange({
                 ...sides,
                 [side]: {
@@ -189,13 +208,25 @@ export function LeftSidebar({
                         </SelectTrigger>
                         <SelectContent>
                             <SelectItem value="human">人間</SelectItem>
-                            <SelectItem value="material">
-                                <span className="flex items-center gap-1.5">
-                                    <PlayerIcon side="sente" isAI showBorder={false} size="xs" />
-                                    簡易AI（駒得）
-                                </span>
-                            </SelectItem>
-                            {nnueList.map((nnue) => (
+                            {/* プリセット NNUE（未ダウンロードでも選択可能） */}
+                            {presets.map((preset) => (
+                                <SelectItem
+                                    key={preset.config.presetKey}
+                                    value={`preset:${preset.config.presetKey}`}
+                                >
+                                    <span className="flex items-center gap-1.5">
+                                        <PlayerIcon
+                                            side="sente"
+                                            isAI
+                                            showBorder={false}
+                                            size="xs"
+                                        />
+                                        AI（{preset.config.displayName}）
+                                    </span>
+                                </SelectItem>
+                            ))}
+                            {/* カスタム NNUE（ダウンロード済み） */}
+                            {customNnueList.map((nnue) => (
                                 <SelectItem key={nnue.id} value={`nnue:${nnue.id}`}>
                                     <span className="flex items-center gap-1.5">
                                         <PlayerIcon
@@ -208,6 +239,12 @@ export function LeftSidebar({
                                     </span>
                                 </SelectItem>
                             ))}
+                            <SelectItem value="material">
+                                <span className="flex items-center gap-1.5">
+                                    <PlayerIcon side="sente" isAI showBorder={false} size="xs" />
+                                    簡易AI（駒得）
+                                </span>
+                            </SelectItem>
                         </SelectContent>
                     </Select>
                 </div>
@@ -270,8 +307,8 @@ export function LeftSidebar({
                                 sente: timeSettings.gote,
                                 gote: timeSettings.sente,
                             });
-                            onSenteNnueIdChange(goteNnueId);
-                            onGoteNnueIdChange(senteNnueId);
+                            onSenteNnueSelectionChange(goteNnueSelection);
+                            onGoteNnueSelectionChange(senteNnueSelection);
                         }}
                         disabled={settingsLocked}
                         title="先手と後手の設定を入れ替える"
@@ -336,21 +373,45 @@ export function LeftSidebar({
                         から追加）
                     </span>
                     <Select
-                        value={analysisNnueId ?? "material"}
-                        onValueChange={(value) =>
-                            onAnalysisNnueIdChange(value === "material" ? null : value)
+                        value={
+                            analysisNnueSelection.presetKey
+                                ? `preset:${analysisNnueSelection.presetKey}`
+                                : analysisNnueSelection.nnueId
+                                  ? `nnue:${analysisNnueSelection.nnueId}`
+                                  : "material"
                         }
+                        onValueChange={(value) => {
+                            if (value === "material") {
+                                onAnalysisNnueSelectionChange(NONE_NNUE_SELECTION);
+                            } else if (value.startsWith("preset:")) {
+                                const presetKey = value.slice("preset:".length);
+                                onAnalysisNnueSelectionChange({ presetKey, nnueId: null });
+                            } else if (value.startsWith("nnue:")) {
+                                const nnueId = value.slice("nnue:".length);
+                                onAnalysisNnueSelectionChange({ presetKey: null, nnueId });
+                            }
+                        }}
                     >
                         <SelectTrigger>
                             <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                            <SelectItem value="material">簡易AI（駒得）</SelectItem>
-                            {nnueList.map((nnue) => (
-                                <SelectItem key={nnue.id} value={nnue.id}>
+                            {/* プリセット NNUE */}
+                            {presets.map((preset) => (
+                                <SelectItem
+                                    key={preset.config.presetKey}
+                                    value={`preset:${preset.config.presetKey}`}
+                                >
+                                    {preset.config.displayName}
+                                </SelectItem>
+                            ))}
+                            {/* カスタム NNUE */}
+                            {customNnueList.map((nnue) => (
+                                <SelectItem key={nnue.id} value={`nnue:${nnue.id}`}>
                                     {nnue.displayName}
                                 </SelectItem>
                             ))}
+                            <SelectItem value="material">簡易AI（駒得）</SelectItem>
                         </SelectContent>
                     </Select>
                 </div>
