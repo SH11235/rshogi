@@ -14,12 +14,9 @@ use crate::types::{Color, Square};
 // 定数定義（YaneuraOu evaluate.h準拠、DISTINGUISH_GOLDS無効）
 // =============================================================================
 
-/// 手駒領域の終端
-pub const FE_HAND_END: usize = 90;
-
-/// 盤上駒領域の終端（玉を除く）
-/// e_dragon + 81 = 1467 + 81 = 1548
-pub const FE_OLD_END: usize = 1548;
+// HalfKAのBonaPieceレイアウト参照用の定数（ロジックでは直接使わない）
+// const FE_HAND_END: usize = 90;
+// const FE_OLD_END: usize = 1548; // e_dragon + 81 = 1467 + 81
 
 /// 先手王の開始位置
 pub const F_KING: usize = 1548;
@@ -85,8 +82,6 @@ mod tests {
 
     #[test]
     fn test_constants() {
-        assert_eq!(FE_HAND_END, 90);
-        assert_eq!(FE_OLD_END, 1548);
         assert_eq!(F_KING, 1548);
         assert_eq!(E_KING, 1629);
         assert_eq!(PIECE_INPUTS, 1710);

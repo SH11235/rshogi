@@ -14,7 +14,26 @@ pub use half_kp::HalfKP;
 use super::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES};
 use super::diff::ChangedFeatures;
 use crate::position::Position;
-use crate::types::{Color, Square};
+use crate::types::{Color, PieceType, Square};
+
+/// 盤上の駒種（King除外）
+///
+/// すべてのFeatureで共通の駒種定義を使用する。
+pub(crate) const BOARD_PIECE_TYPES: [PieceType; 13] = [
+    PieceType::Pawn,
+    PieceType::Lance,
+    PieceType::Knight,
+    PieceType::Silver,
+    PieceType::Gold,
+    PieceType::Bishop,
+    PieceType::Rook,
+    PieceType::ProPawn,
+    PieceType::ProLance,
+    PieceType::ProKnight,
+    PieceType::ProSilver,
+    PieceType::Horse,
+    PieceType::Dragon,
+];
 
 // =============================================================================
 // TriggerEvent - リフレッシュトリガー

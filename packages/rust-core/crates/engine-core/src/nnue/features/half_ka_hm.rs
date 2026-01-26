@@ -11,7 +11,7 @@
 //!
 //! 参考実装: nnue-pytorch training_data_loader.cpp, serialize.py
 
-use super::{Feature, TriggerEvent};
+use super::{Feature, TriggerEvent, BOARD_PIECE_TYPES};
 use crate::nnue::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES};
 use crate::nnue::bona_piece::{BonaPiece, PIECE_BASE};
 use crate::nnue::bona_piece_halfka_hm::{
@@ -20,23 +20,6 @@ use crate::nnue::bona_piece_halfka_hm::{
 use crate::nnue::constants::HALFKA_HM_DIMENSIONS;
 use crate::position::Position;
 use crate::types::{Color, PieceType, Square};
-
-/// 盤上の駒種（King除外）
-const BOARD_PIECE_TYPES: [PieceType; 13] = [
-    PieceType::Pawn,
-    PieceType::Lance,
-    PieceType::Knight,
-    PieceType::Silver,
-    PieceType::Gold,
-    PieceType::Bishop,
-    PieceType::Rook,
-    PieceType::ProPawn,
-    PieceType::ProLance,
-    PieceType::ProKnight,
-    PieceType::ProSilver,
-    PieceType::Horse,
-    PieceType::Dragon,
-];
 
 /// HalfKA_hm^ 特徴量
 ///

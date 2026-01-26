@@ -9,30 +9,13 @@
 //! 注意: nnue-pytorchのcoalesce済みモデル専用。
 //! Factorizationの重みはBase側に畳み込み済みのため、推論時はBaseのみで計算する。
 
-use super::{Feature, TriggerEvent};
+use super::{Feature, TriggerEvent, BOARD_PIECE_TYPES};
 use crate::nnue::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES};
-use crate::nnue::bona_piece::{BonaPiece, PIECE_BASE};
-use crate::nnue::bona_piece_halfka::{halfka_index, king_bonapiece, king_index};
+use crate::nnue::bona_piece::PIECE_BASE;
+use crate::nnue::bona_piece_halfka::{halfka_index, king_bonapiece, king_index, BonaPieceHalfKA};
 use crate::nnue::constants::HALFKA_DIMENSIONS;
 use crate::position::Position;
 use crate::types::{Color, PieceType, Square};
-
-/// 盤上の駒種（King除外）
-const BOARD_PIECE_TYPES: [PieceType; 13] = [
-    PieceType::Pawn,
-    PieceType::Lance,
-    PieceType::Knight,
-    PieceType::Silver,
-    PieceType::Gold,
-    PieceType::Bishop,
-    PieceType::Rook,
-    PieceType::ProPawn,
-    PieceType::ProLance,
-    PieceType::ProKnight,
-    PieceType::ProSilver,
-    PieceType::Horse,
-    PieceType::Dragon,
-];
 
 /// HalfKA 特徴量
 ///
@@ -88,7 +71,7 @@ impl Feature for HalfKA {
                     };
 
                     // BonaPieceを生成
-                    let bp = BonaPiece::new(base + sq_index as u16);
+                    let bp = BonaPieceHalfKA::new(base + sq_index as u16);
 
                     // Base特徴量（coalesce済みモデルではこれのみ）
                     // 合法局面では溢れないため戻り値を無視
@@ -143,8 +126,8 @@ impl Feature for HalfKA {
                 }
                 // 手駒の枚数分、すべての特徴量を追加
                 for i in 1..=count {
-                    let bp = BonaPiece::from_hand_piece(perspective, owner, pt, i);
-                    if bp != BonaPiece::ZERO {
+                    let bp = BonaPieceHalfKA::from_hand_piece(perspective, owner, pt, i);
+                    if bp != BonaPieceHalfKA::ZERO {
                         // Base特徴量（coalesce済みモデルではこれのみ）
                         // 合法局面では溢れないため戻り値を無視
                         let _ = active.push(halfka_index(k_index, bp.value() as usize));
@@ -186,10 +169,10 @@ impl Feature for HalfKA {
                         let is_friend = dp.color == perspective;
                         king_bonapiece(sq_index, is_friend)
                     } else {
-                        BonaPiece::from_piece_square(dp.old_piece, sq, perspective)
+                        BonaPieceHalfKA::from_piece_square(dp.old_piece, sq, perspective)
                     };
 
-                    if bp != BonaPiece::ZERO {
+                    if bp != BonaPieceHalfKA::ZERO {
                         // 合法局面では溢れないため戻り値を無視
                         let _ = removed.push(halfka_index(k_index, bp.value() as usize));
                     }
@@ -212,10 +195,10 @@ impl Feature for HalfKA {
                         let is_friend = dp.color == perspective;
                         king_bonapiece(sq_index, is_friend)
                     } else {
-                        BonaPiece::from_piece_square(dp.new_piece, sq, perspective)
+                        BonaPieceHalfKA::from_piece_square(dp.new_piece, sq, perspective)
                     };
 
-                    if bp != BonaPiece::ZERO {
+                    if bp != BonaPieceHalfKA::ZERO {
                         // 合法局面では溢れないため戻り値を無視
                         let _ = added.push(halfka_index(k_index, bp.value() as usize));
                     }
@@ -233,16 +216,18 @@ impl Feature for HalfKA {
             if hc.old_count < hc.new_count {
                 // 枚数増加: old_count+1 から new_count までの特徴量を追加
                 for i in (hc.old_count + 1)..=hc.new_count {
-                    let bp = BonaPiece::from_hand_piece(perspective, hc.owner, hc.piece_type, i);
-                    if bp != BonaPiece::ZERO {
+                    let bp =
+                        BonaPieceHalfKA::from_hand_piece(perspective, hc.owner, hc.piece_type, i);
+                    if bp != BonaPieceHalfKA::ZERO {
                         let _ = added.push(halfka_index(k_index, bp.value() as usize));
                     }
                 }
             } else if hc.old_count > hc.new_count {
                 // 枚数減少: new_count+1 から old_count までの特徴量を削除
                 for i in (hc.new_count + 1)..=hc.old_count {
-                    let bp = BonaPiece::from_hand_piece(perspective, hc.owner, hc.piece_type, i);
-                    if bp != BonaPiece::ZERO {
+                    let bp =
+                        BonaPieceHalfKA::from_hand_piece(perspective, hc.owner, hc.piece_type, i);
+                    if bp != BonaPieceHalfKA::ZERO {
                         let _ = removed.push(halfka_index(k_index, bp.value() as usize));
                     }
                 }
