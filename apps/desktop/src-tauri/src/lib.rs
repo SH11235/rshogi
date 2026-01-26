@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use engine_core::movegen::{generate_legal_with_pass, MoveList};
+use engine_core::movegen::{generate_legal_all_with_pass, generate_legal_with_pass, MoveList};
 use engine_core::position::{Position, SFEN_HIRATE};
 use engine_core::search::{
     LimitsType, Search, SearchInfo, SearchResult, SkillOptions, TimeOptions,
@@ -298,7 +298,6 @@ fn spawn_search(
     eprintln!("spawn_search: position SFEN = {}", position.to_sfen());
 
     // Generate legal moves to debug
-    use engine_core::movegen::{generate_legal_with_pass, MoveList};
     let mut legal_moves = MoveList::new();
     generate_legal_with_pass(&position, &mut legal_moves);
     eprintln!("spawn_search: legal moves count = {}", legal_moves.len());
@@ -752,7 +751,7 @@ fn engine_legal_moves(
 ) -> Result<Vec<String>, String> {
     let position = parse_position(&sfen, moves, pass_rights)?;
     let mut list = MoveList::new();
-    generate_legal_with_pass(&position, &mut list);
+    generate_legal_all_with_pass(&position, &mut list);
     let usi_moves = list.as_slice().iter().map(|mv| mv.to_usi()).collect();
     Ok(usi_moves)
 }
