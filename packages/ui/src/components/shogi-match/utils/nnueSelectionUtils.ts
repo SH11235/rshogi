@@ -19,7 +19,7 @@ export const NNUE_VALUE_PREFIX = {
 /**
  * NNUE選択肢の型
  */
-export interface NnueOption {
+interface NnueOption {
     type: "preset" | "custom";
     key: string;
     label: string;

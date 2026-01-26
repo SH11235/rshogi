@@ -46,7 +46,7 @@ interface UseEnginePoolOptions {
 /**
  * start関数のオプション
  */
-export interface StartOptions {
+interface StartOptions {
     /** 使用するNNUE ID（指定するとoptions.nnueIdを上書き） */
     nnueId?: string | null;
 }
