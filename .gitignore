@@ -1,54 +1,71 @@
-# Logs
-logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
+# Rust
+.cargo/config.toml
+.cargo/config.local.toml
+.cargo/registry/
+target/
 
-node_modules
-dist
-dist-ssr
-*.local
+# Coverage reports
+tarpaulin-report.html
+cobertura.xml
+coverage/
+*.profraw
+*.profdata
+
+# Profiling outputs
+flamegraph.svg
+see_profile.svg
+perf.data
+perf.data.old
+perf_*.data
+perf_*.data.old
+perf_results/
+
+# Benchmark artifacts
+benchmark_results/
+
+# Evaluation function files (large binary files)
+eval/*
+!eval/.gitkeep
+!eval/README.md
+
+# Ignore tool-generated manifests under run outputs
+runs/
+
+# Avoid re-introducing accidentally generated manifest in tools crate root
+crates/tools/manifest.json
+
+# Game logs
+taikyoku-log/
+
+# Reports (local work logs)
+docs/reports/
+
+# Perf script config (personal settings)
+scripts/perf.conf
+
+# Local documents
+docs/experiment-archive/
+docs/bullet/
+pr_summaries/
+
+# Private memo
+memo/
+docs/archive/
+
+# Data files
+data/
+
+# Logs
+logs/
+*.log
 
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
-.idea
+.idea/
 .DS_Store
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
-
-.turbo/
-
-# TypeScript build info
-*.tsbuildinfo
-tsconfig.tsbuildinfo
-vite.config.d.ts
-
-*storybook.log
-storybook-static
-
-# Playwright
-playwright-report/
-playwright/.cache/
-test-results/
-
-# Coverage
-packages/web/coverage/
-
-# private memo
-memo/
-docs/archive/
-
-_shared/*
-
-runs_local/
-.serena/
-
-packages/engine-wasm/pkg/
-packages/engine-wasm/pkg-threaded/

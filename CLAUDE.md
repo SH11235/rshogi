@@ -1,6 +1,6 @@
-# CLAUDE.md for Rust Core
+# CLAUDE.md
 
-This file provides guidance to Claude Code when working with Rust code in this directory.
+This file provides guidance to Claude Code when working with this repository.
 
 ## Core Development Principles
 

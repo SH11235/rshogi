@@ -3,7 +3,9 @@ name: Rust CI
 on:
   push:
     paths:
-      - 'packages/rust-core/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/rust-ci.yml'
   pull_request:
   workflow_dispatch:
@@ -15,10 +17,6 @@ env:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
-defaults:
-  run:
-    working-directory: packages/rust-core
 
 jobs:
   changes:
@@ -33,17 +31,17 @@ jobs:
         with:
           filters: |
             rust_code:
-              - 'packages/rust-core/Cargo.toml'
-              - 'packages/rust-core/Cargo.lock'
-              - 'packages/rust-core/build.rs'
-              - 'packages/rust-core/crates/**'
-              - 'packages/rust-core/.cargo/**'
-              - '!packages/rust-core/docs/**'
-              - '!packages/rust-core/runs/**'
-              - '!packages/rust-core/logs/**'
-              - '!packages/rust-core/target/**'
-              - '!packages/rust-core/data/**'
-              - '!packages/rust-core/memo/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'build.rs'
+              - 'crates/**'
+              - '.cargo/**'
+              - '!docs/**'
+              - '!runs/**'
+              - '!logs/**'
+              - '!target/**'
+              - '!data/**'
+              - '!memo/**'
               - '!**/*.md'
               - '!**/*.mdx'
 
@@ -82,7 +80,6 @@ jobs:
         run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "packages/rust-core -> target"
           cache-on-failure: true
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -111,7 +108,6 @@ jobs:
         run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "packages/rust-core -> target"
           cache-on-failure: true
       - name: Run tests
         run: cargo test --release --workspace -- --test-threads=2
