@@ -1081,7 +1081,7 @@ export function ShogiMatch({
         [recordEvalByPly, recordEvalByNodeId],
     );
 
-    // エンジン管理フックを使用
+    // エンジン管理フックを使用（明示API経由で制御）
     const {
         eventLogs,
         errorLogs,
@@ -1094,6 +1094,8 @@ export function ShogiMatch({
         retryEngine,
         isRetrying,
         isEngineRestarting,
+        disposeEngine,
+        restartEngineForNnue,
     } = useEngineManager({
         sides,
         engineOptions,
@@ -1115,6 +1117,39 @@ export function ShogiMatch({
         resolveNnue,
     });
     stopAllEnginesRef.current = stopAllEngines;
+
+    // role変更時にエンジンを破棄するラッパー
+    const handleSidesChange = useCallback(
+        (newSides: { sente: SideSetting; gote: SideSetting }) => {
+            // role が engine から human に変わった場合はエンジンを破棄
+            for (const side of ["sente", "gote"] as const) {
+                if (sides[side].role === "engine" && newSides[side].role !== "engine") {
+                    void disposeEngine(side);
+                }
+            }
+            setSides(newSides);
+        },
+        [disposeEngine, setSides, sides],
+    );
+
+    // NNUE選択変更時にエンジンを再起動するラッパー
+    const handleSenteNnueSelectionChange = useCallback(
+        (newSelection: NnueSelection) => {
+            setSenteNnueSelection(newSelection);
+            // 新しいselectionを明示的に渡す（state更新前に参照されるのを防ぐ）
+            void restartEngineForNnue("sente", newSelection);
+        },
+        [restartEngineForNnue, setSenteNnueSelection],
+    );
+
+    const handleGoteNnueSelectionChange = useCallback(
+        (newSelection: NnueSelection) => {
+            setGoteNnueSelection(newSelection);
+            // 新しいselectionを明示的に渡す（state更新前に参照されるのを防ぐ）
+            void restartEngineForNnue("gote", newSelection);
+        },
+        [restartEngineForNnue, setGoteNnueSelection],
+    );
 
     // 並列一括解析用のエンジンプール
     const engineOpt = engineOptions[0]; // デフォルトのエンジンオプションを使用
@@ -2790,16 +2825,16 @@ export function ShogiMatch({
                     onEnterEditMode={isPaused ? enterEditModeFromPaused : undefined}
                     // 対局設定
                     sides={sides}
-                    onSidesChange={setSides}
+                    onSidesChange={handleSidesChange}
                     timeSettings={timeSettings}
                     onTimeSettingsChange={setTimeSettings}
                     internalEngineId={internalEngineId}
                     nnueList={nnueList}
                     presets={presets}
                     senteNnueSelection={senteNnueSelection}
-                    onSenteNnueSelectionChange={setSenteNnueSelection}
+                    onSenteNnueSelectionChange={handleSenteNnueSelectionChange}
                     goteNnueSelection={goteNnueSelection}
-                    onGoteNnueSelectionChange={setGoteNnueSelection}
+                    onGoteNnueSelectionChange={handleGoteNnueSelectionChange}
                     settingsLocked={settingsLocked}
                     onOpenNnueManager={() => setIsNnueManagerOpen(true)}
                     // パス権設定
@@ -2823,7 +2858,7 @@ export function ShogiMatch({
                         {/* 左サイドバー */}
                         <LeftSidebar
                             sides={sides}
-                            onSidesChange={setSides}
+                            onSidesChange={handleSidesChange}
                             timeSettings={timeSettings}
                             onTimeSettingsChange={setTimeSettings}
                             passRightsSettings={passRightsSettings}
@@ -2833,9 +2868,9 @@ export function ShogiMatch({
                             nnueList={nnueList}
                             presets={presets}
                             senteNnueSelection={senteNnueSelection}
-                            onSenteNnueSelectionChange={setSenteNnueSelection}
+                            onSenteNnueSelectionChange={handleSenteNnueSelectionChange}
                             goteNnueSelection={goteNnueSelection}
-                            onGoteNnueSelectionChange={setGoteNnueSelection}
+                            onGoteNnueSelectionChange={handleGoteNnueSelectionChange}
                             analysisSettings={analysisSettings}
                             onAnalysisSettingsChange={setAnalysisSettings}
                             analysisNnueSelection={analysisNnueSelection}
