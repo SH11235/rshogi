@@ -5,7 +5,7 @@
 /**
  * 並列処理の設定情報
  */
-export interface ParallelismConfig {
+interface ParallelismConfig {
     /** 絶対上限（Wasm制約: 4） */
     maxWorkers: number;
     /** 検出されたハードウェア並列数 */

@@ -19,12 +19,12 @@ import { generateNnueId } from "./utils";
 /**
  * プリセットダウンロード進捗ハンドラー
  */
-export type PresetProgressHandler = (progress: NnueDownloadProgress) => void;
+type PresetProgressHandler = (progress: NnueDownloadProgress) => void;
 
 /**
  * プリセットマネージャーのオプション
  */
-export interface PresetManagerOptions {
+interface PresetManagerOptions {
     /** manifest.json の URL */
     manifestUrl: string;
     /** NNUE ストレージ */

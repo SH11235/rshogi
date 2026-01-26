@@ -2,7 +2,7 @@ import { getNnueErrorMessage, NnueError } from "@shogi/app-core";
 import type { ReactElement } from "react";
 import { Button } from "../button";
 
-export interface NnueErrorAlertProps {
+interface NnueErrorAlertProps {
     /** エラー */
     error: NnueError | Error | null;
     /** 閉じるボタン押下時のコールバック */

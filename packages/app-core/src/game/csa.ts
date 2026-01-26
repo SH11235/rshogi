@@ -51,7 +51,7 @@ const PROMOTED_FROM_CODE: Record<string, PieceType | undefined> = {
     RY: "R",
 };
 
-export interface CsaMetadata {
+interface CsaMetadata {
     senteName?: string;
     goteName?: string;
 }

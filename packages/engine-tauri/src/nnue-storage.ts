@@ -217,23 +217,9 @@ export function createTauriNnueStorage(options: TauriNnueStorageOptions = {}): N
 }
 
 /**
- * NNUE ファイルのパスを取得
- */
-export async function getNnuePath(
-    id: string,
-    options: { invoke?: InvokeFn } = {},
-): Promise<string> {
-    const invoke = options.invoke ?? tauriInvoke;
-    return invoke<string>("get_nnue_path", { id });
-}
-
-/**
  * NNUE ファイルのハッシュを計算
  */
-export async function calculateNnueHash(
-    id: string,
-    options: { invoke?: InvokeFn } = {},
-): Promise<string> {
+async function calculateNnueHash(id: string, options: { invoke?: InvokeFn } = {}): Promise<string> {
     const invoke = options.invoke ?? tauriInvoke;
     return invoke<string>("calculate_nnue_hash", { id });
 }
@@ -243,7 +229,7 @@ export async function calculateNnueHash(
  * @param srcPath ソースファイルのパス
  * @param id 識別子（UUID）
  */
-export async function importNnueFromPath(
+async function importNnueFromPath(
     srcPath: string,
     id: string,
     options: { invoke?: InvokeFn } = {},
@@ -253,45 +239,4 @@ export async function importNnueFromPath(
         srcPath,
         id,
     });
-}
-
-/**
- * NNUE ファイルをインポートしてメタデータを作成
- * @param srcPath ソースファイルのパス
- * @param displayName 表示名（省略時はファイル名）
- */
-export async function importNnue(
-    srcPath: string,
-    displayName?: string,
-    options: { invoke?: InvokeFn } = {},
-): Promise<NnueMeta> {
-    const invoke = options.invoke ?? tauriInvoke;
-    const id = generateNnueId();
-
-    // ファイルをコピー
-    const result = await importNnueFromPath(srcPath, id, { invoke });
-
-    // SHA-256 計算
-    const hash = await calculateNnueHash(id, { invoke });
-
-    // ファイル名を抽出
-    const fileName = srcPath.split(/[/\\]/).pop() ?? "unknown.nnue";
-
-    const meta: NnueMeta = {
-        id,
-        displayName: displayName ?? fileName,
-        originalFileName: fileName,
-        size: result.size,
-        contentHashSha256: hash,
-        source: "user-uploaded",
-        createdAt: Date.now(),
-        verified: false,
-    };
-
-    // メタデータを保存
-    const metaCache = loadMetaFromStorage();
-    metaCache.set(id, meta);
-    saveMetaToStorage(metaCache);
-
-    return meta;
 }

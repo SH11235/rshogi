@@ -3,7 +3,7 @@ import type { Player } from "./board";
 /**
  * 終局理由
  */
-export type GameEndReason =
+type GameEndReason =
     | { kind: "time_expired"; loser: Player }
     | { kind: "resignation"; loser: Player }
     | { kind: "checkmate"; loser: Player }

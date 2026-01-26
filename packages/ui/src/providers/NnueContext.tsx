@@ -2,12 +2,12 @@ import type { NnueFormat, NnueMeta, NnueStorage } from "@shogi/app-core";
 import { NnueError } from "@shogi/app-core";
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useState } from "react";
 
-export interface NnueHeaderValidationResult {
+interface NnueHeaderValidationResult {
     format?: NnueFormat;
     isCompatible: boolean;
 }
 
-export interface NnueContextValue {
+interface NnueContextValue {
     /** NNUE ストレージ実装 */
     storage: NnueStorage;
     /** NNUE メタデータ一覧（共有状態） */
@@ -28,7 +28,7 @@ export interface NnueContextValue {
 
 const NnueContext = createContext<NnueContextValue | null>(null);
 
-export interface NnueProviderProps {
+interface NnueProviderProps {
     /** NNUE ストレージ実装 */
     storage: NnueStorage;
     /** NNUE ヘッダ検証（任意） */
@@ -110,19 +110,6 @@ export function NnueProvider({
             {children}
         </NnueContext.Provider>
     );
-}
-
-/**
- * NnueContext を取得するフック
- *
- * NnueProvider の外で使用するとエラーを投げる。
- */
-export function useNnueContext(): NnueContextValue {
-    const context = useContext(NnueContext);
-    if (!context) {
-        throw new Error("useNnueContext must be used within a NnueProvider");
-    }
-    return context;
 }
 
 /**

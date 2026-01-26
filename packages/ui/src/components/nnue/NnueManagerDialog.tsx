@@ -9,7 +9,7 @@ import { NnueListItem } from "./NnueListItem";
 import { NnueProgressOverlay } from "./NnueProgressOverlay";
 import { PresetListItem } from "./PresetListItem";
 
-export interface NnueManagerDialogProps {
+interface NnueManagerDialogProps {
     /** モーダルが開いているか */
     open: boolean;
     /** モーダルを閉じる時のコールバック */

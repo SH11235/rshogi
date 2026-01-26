@@ -9,16 +9,16 @@ import {
     useState,
 } from "react";
 
-export type Theme = "light" | "dark";
-export type ThemePreference = Theme | "system";
+type Theme = "light" | "dark";
+type ThemePreference = Theme | "system";
 
-export interface ThemeContextValue {
+interface ThemeContextValue {
     theme: ThemePreference;
     resolvedTheme: Theme;
     setTheme: (value: ThemePreference) => void;
 }
 
-export interface ThemeProviderProps {
+interface ThemeProviderProps {
     children: ReactNode;
     defaultTheme?: ThemePreference;
     storageKey?: string;

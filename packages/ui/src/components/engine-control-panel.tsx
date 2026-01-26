@@ -46,13 +46,13 @@ type UsiOptionDefinition = {
     note?: string;
 };
 
-export type EnginePosition = {
+type EnginePosition = {
     label?: string;
     sfen: string;
     moves?: string[];
 };
 
-export interface EngineControlPanelProps {
+interface EngineControlPanelProps {
     engine: EngineClient;
     position?: EnginePosition;
     triggerLabel?: string;

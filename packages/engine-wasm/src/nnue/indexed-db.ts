@@ -198,26 +198,3 @@ export function createIndexedDBNnueStorage(): NnueStorage {
         },
     };
 }
-
-/**
- * 永続ストレージをリクエスト
- * ユーザー操作（ボタンクリック等）に紐づけて実行すると許可率が上がる
- */
-export async function requestPersistentStorage(): Promise<{
-    granted: boolean;
-    usage: number;
-    quota: number;
-}> {
-    if (!navigator.storage?.persist) {
-        return { granted: false, usage: 0, quota: 0 };
-    }
-
-    const granted = await navigator.storage.persist();
-    const estimate = await navigator.storage.estimate();
-
-    return {
-        granted,
-        usage: estimate.usage ?? 0,
-        quota: estimate.quota ?? 0,
-    };
-}

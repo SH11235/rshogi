@@ -1,4 +1,4 @@
-export type EngineBackend = "native" | "wasm" | "external-usi";
+type EngineBackend = "native" | "wasm" | "external-usi";
 
 export type EngineStopMode = "terminate" | "cooperative";
 
@@ -24,7 +24,7 @@ export const SKILL_LEVEL_MAX = 20;
 /**
  * SkillLevelSettings のバリデーション結果
  */
-export interface SkillLevelValidationResult {
+interface SkillLevelValidationResult {
     valid: boolean;
     errors: string[];
 }
@@ -125,13 +125,13 @@ export interface EngineInfoEvent {
     hashfull?: number;
 }
 
-export interface EngineBestMoveEvent {
+interface EngineBestMoveEvent {
     type: "bestmove";
     move: string;
     ponder?: string;
 }
 
-export type EngineErrorSeverity = "warning" | "error" | "fatal";
+type EngineErrorSeverity = "warning" | "error" | "fatal";
 
 /**
  * Well-known error codes for type-safe error handling.
@@ -166,7 +166,7 @@ export type EngineErrorCode =
 /**
  * エラーコードに対応するユーザー向け情報
  */
-export interface EngineErrorInfo {
+interface EngineErrorInfo {
     /** ユーザー向けメッセージ */
     userMessage: string;
     /** 考えられる原因 */
@@ -263,7 +263,7 @@ export function getEngineErrorInfo(code: EngineErrorCode | undefined): EngineErr
 /** Backend status for error state management */
 export type EngineBackendStatus = "ready" | "error" | "mock";
 
-export interface EngineErrorEvent {
+interface EngineErrorEvent {
     type: "error";
     message: string;
     severity?: EngineErrorSeverity;

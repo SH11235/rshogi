@@ -10,7 +10,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNnueContextOptional } from "../providers/NnueContext";
 
-export interface UsePresetManagerReturn {
+interface UsePresetManagerReturn {
     /** プリセット一覧（状態付き） */
     presets: PresetWithStatus[];
     /** manifest 読み込み中 */
@@ -31,7 +31,7 @@ export interface UsePresetManagerReturn {
     isConfigured: boolean;
 }
 
-export interface UsePresetManagerOptions {
+interface UsePresetManagerOptions {
     /** manifest.json の URL */
     manifestUrl?: string;
     /** プリセット一覧を自動取得するか */

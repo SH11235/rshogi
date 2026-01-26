@@ -16,7 +16,7 @@ import initWasmModule from "../pkg/engine_wasm.js";
 
 type WasmModuleSource = WebAssembly.Module | ArrayBuffer | Uint8Array | string | URL;
 
-export interface WasmEngineInitOptions extends EngineInitOptions {
+interface WasmEngineInitOptions extends EngineInitOptions {
     /**
      * Optional preloaded wasm module or URL. When omitted, the worker is expected to fetch it.
      */
@@ -31,7 +31,7 @@ export interface WasmEngineInitOptions extends EngineInitOptions {
     multiPv?: number;
 }
 
-export interface WasmEngineClientOptions {
+interface WasmEngineClientOptions {
     stopMode?: EngineStopMode;
     /**
      * Optional Worker factory. Receives the desired worker kind.
@@ -104,7 +104,7 @@ function classifyErrorCode(error: unknown): EngineErrorCode {
 /**
  * NNUE ロード元の種別
  */
-export type NnueLoadSource =
+type NnueLoadSource =
     | { type: "idb"; id: string } // IndexedDB から
     | { type: "url"; url: string } // URL から fetch
     | { type: "bytes"; bytes: Uint8Array }; // 直接バイト列（transferable）
@@ -221,7 +221,7 @@ const MAX_WASM_THREADS = 4;
 /**
  * NNUE ロード進捗イベント
  */
-export interface NnueLoadProgressEvent {
+interface NnueLoadProgressEvent {
     type: "progress";
     loaded: number;
     total: number;
@@ -230,7 +230,7 @@ export interface NnueLoadProgressEvent {
 /**
  * NNUE ロード完了イベント
  */
-export interface NnueLoadedEvent {
+interface NnueLoadedEvent {
     type: "loaded";
     size: number;
 }
@@ -238,18 +238,18 @@ export interface NnueLoadedEvent {
 /**
  * NNUE ロードイベント
  */
-export type NnueLoadEvent = NnueLoadProgressEvent | NnueLoadedEvent;
+type NnueLoadEvent = NnueLoadProgressEvent | NnueLoadedEvent;
 
 /**
  * NNUE ロードイベントハンドラー
  */
-export type NnueLoadEventHandler = (event: NnueLoadEvent) => void;
+type NnueLoadEventHandler = (event: NnueLoadEvent) => void;
 
 /**
  * Wasm エンジンクライアントの拡張インターフェース
  * NNUE ロード進捗の購読機能を追加
  */
-export interface WasmEngineClient extends EngineClient {
+interface WasmEngineClient extends EngineClient {
     /**
      * NNUE ロードイベントを購読
      * @param handler イベントハンドラー
@@ -1005,4 +1005,4 @@ export {
 } from "../pkg/engine_wasm.js";
 
 // NNUE ストレージ
-export { createIndexedDBNnueStorage, requestPersistentStorage } from "./nnue";
+export { createIndexedDBNnueStorage } from "./nnue";

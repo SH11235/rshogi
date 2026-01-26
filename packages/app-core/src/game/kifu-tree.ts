@@ -5,7 +5,7 @@
  */
 
 import type { BoardState, PositionState } from "./board";
-import { applyMoveWithState, cloneBoard } from "./board";
+import { cloneBoard } from "./board";
 
 /** 評価値情報 */
 export interface KifuEval {
@@ -105,13 +105,6 @@ export function createKifuTree(startPosition: PositionState, startSfen: string):
         currentNodeId: rootId,
         startSfen,
     };
-}
-
-/**
- * ノードを取得（存在しない場合はundefined）
- */
-export function getNode(tree: KifuTree, nodeId: string): KifuNode | undefined {
-    return tree.nodes.get(nodeId);
 }
 
 /**
@@ -845,50 +838,4 @@ export function findNodeByPlyInMainLine(tree: KifuTree, ply: number): string | n
     }
 
     return null;
-}
-
-/** addMovesSilentlyの結果型 */
-export interface AddMovesSilentlyResult {
-    tree: KifuTree;
-    success: boolean;
-    failedAt?: number;
-}
-
-/**
- * 複数の指し手を一括で追加（既存の棋譜をインポートする場合など）
- */
-export function addMovesSilently(
-    tree: KifuTree,
-    moves: string[],
-    initialPosition: PositionState,
-): AddMovesSilentlyResult {
-    let currentTree = tree;
-    let position = initialPosition;
-
-    for (let i = 0; i < moves.length; i++) {
-        const move = moves[i];
-        const result = applyMoveWithState(position, move, { validateTurn: false });
-        if (!result.ok) {
-            return { tree: currentTree, success: false, failedAt: i };
-        }
-        currentTree = addMove(currentTree, move, result.next);
-        position = result.next;
-    }
-
-    return { tree: currentTree, success: true };
-}
-
-/**
- * ツリーのクローンを作成（ディープコピー）
- * ノードオブジェクトも複製し、元ツリーとの参照共有を防ぐ
- */
-export function cloneKifuTree(tree: KifuTree): KifuTree {
-    const newNodes = new Map<string, KifuNode>();
-    for (const [id, node] of tree.nodes) {
-        newNodes.set(id, { ...node, children: [...node.children] });
-    }
-    return {
-        ...tree,
-        nodes: newNodes,
-    };
 }
