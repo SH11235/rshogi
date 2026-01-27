@@ -7,8 +7,6 @@
 全計測をまとめて実行し、ドキュメントを更新する場合:
 
 ```bash
-cd packages/rust-core
-
 # 1. 全計測を実行（sudo権限が必要）
 ./scripts/perf_all.sh
 
@@ -59,8 +57,6 @@ vim scripts/perf.conf
 ## 使用方法
 
 ```bash
-cd packages/rust-core
-
 # 基本的なホットスポット特定
 ./scripts/perf_profile.sh
 

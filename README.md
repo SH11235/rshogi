@@ -23,7 +23,7 @@ Rust で書かれた将棋エンジンです。
 ## クレート構成
 
 ```
-packages/rust-core/crates/
+crates/
 ├── rshogi-core/    # エンジンコアライブラリ
 ├── rshogi-usi/     # USI実行バイナリ
 └── tools/          # 開発・学習用ツール群
@@ -62,8 +62,6 @@ rshogi-core = "0.1"
 ## ビルド
 
 ```bash
-cd packages/rust-core
-
 # ビルド
 cargo build --release
 
