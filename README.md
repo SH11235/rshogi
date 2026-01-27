@@ -72,6 +72,10 @@ cargo test
 cargo build --release --features simd_avx2
 ```
 
+## このエンジンを使用したアプリ
+
+- [Ramu Shogi](https://ramu-shogi.sh11235.com/) - Web 将棋アプリ
+
 ## ライセンス
 
 MIT License - 詳細は [LICENSE](LICENSE) を参照してください。
