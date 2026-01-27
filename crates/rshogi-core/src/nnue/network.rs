@@ -186,8 +186,53 @@ impl NNUENetwork {
                         Ok(Self::HalfKA(network))
                     }
                     FeatureSet::HalfKP => {
-                        let network =
-                            HalfKPNetwork::read(reader, parsed.l1, parsed.l2, parsed.l3, activation)?;
+                        // HalfKP の場合、ヘッダー文字列が不正確なことがある（nnue-pytorch がハードコード）
+                        // L2/L3 が 0 または明らかに不正（256/256 など）の場合、FT hash から L1 を検出し
+                        // ファイルサイズから L2/L3 を特定する
+                        let (l1, l2, l3) = if parsed.l2 == 0
+                            || parsed.l3 == 0
+                            || (parsed.l2 == 256 && parsed.l3 == 256)
+                        {
+                            // FT hash から L1 を検出
+                            // FT hash の位置: 12 + arch_len
+                            let ft_hash_offset = (12 + arch_len) as u64;
+                            reader.seek(SeekFrom::Start(ft_hash_offset))?;
+                            reader.read_exact(&mut buf4)?;
+                            let ft_hash = u32::from_le_bytes(buf4);
+
+                            let detected_l1 =
+                                super::spec::detect_halfkp_l1_from_ft_hash(ft_hash).ok_or_else(
+                                    || {
+                                        io::Error::new(
+                                            io::ErrorKind::InvalidData,
+                                            format!(
+                                            "Unknown HalfKP FT hash: {ft_hash:#x}. \
+                                             Header L1={}, L2={}, L3={} appears incorrect. \
+                                             Known L1 values: 256, 512, 768, 1024",
+                                            parsed.l1, parsed.l2, parsed.l3
+                                        ),
+                                        )
+                                    },
+                                )?;
+
+                            // ファイルサイズから L2/L3 を検出
+                            let file_size = reader.seek(SeekFrom::End(0))?;
+                            let (l2, l3) = super::spec::detect_halfkp_l2_l3_from_size(
+                                detected_l1,
+                                file_size,
+                                arch_len,
+                            )
+                            .unwrap_or_else(|| super::spec::default_halfkp_l2_l3(detected_l1));
+
+                            // 位置を戻す
+                            reader.seek(SeekFrom::Start(0))?;
+
+                            (detected_l1, l2, l3)
+                        } else {
+                            (parsed.l1, parsed.l2, parsed.l3)
+                        };
+
+                        let network = HalfKPNetwork::read(reader, l1, l2, l3, activation)?;
                         Ok(Self::HalfKP(network))
                     }
                 }
@@ -998,5 +1043,70 @@ mod tests {
         // プレフィックスが部分一致する場合（マッチしない）
         assert_eq!(parse_fv_scale_from_arch("my_fv_scale=16"), None);
         assert_eq!(parse_fv_scale_from_arch("fv_scale_v2=16"), None);
+    }
+
+    /// HalfKP 768x2-16-64 ファイルの読み込みテスト
+    ///
+    /// nnue-pytorch がハードコードした不正確なヘッダーを持つファイルを
+    /// FT hash を使って正しく読み込めることを確認する。
+    ///
+    /// 実行方法:
+    /// ```bash
+    /// cargo test test_nnue_halfkp_768_auto_detect -- --ignored
+    /// ```
+    #[test]
+    #[ignore]
+    fn test_nnue_halfkp_768_auto_detect() {
+        // ワークスペースルートからの相対パス
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("Failed to find workspace root");
+        let default_path = workspace_root
+            .join("eval/halfkp_768x2-16-64_crelu/AobaNNUE_HalfKP_768x2_16_64_FV_SCALE_40.bin");
+        let path =
+            std::env::var("NNUE_HALFKP_768_FILE").unwrap_or_else(|_| default_path.display().to_string());
+
+        let network = match NNUENetwork::load(&path) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("Skipping test: {e}");
+                return;
+            }
+        };
+
+        // HalfKP として認識されることを確認
+        assert!(network.is_halfkp(), "File should be detected as HalfKP");
+
+        // L1=768 が検出されることを確認
+        assert_eq!(network.l1_size(), 768, "L1 should be 768");
+
+        // アーキテクチャ仕様を確認
+        let spec = network.architecture_spec();
+        assert_eq!(spec.l1, 768, "spec.l1 should be 768");
+        assert_eq!(spec.l2, 16, "spec.l2 should be 16");
+        assert_eq!(spec.l3, 64, "spec.l3 should be 64");
+
+        eprintln!("Successfully loaded HalfKP 768x2-16-64 network");
+        eprintln!("Architecture name: {}", network.architecture_name());
+
+        // HalfKP 用の評価が動作することを確認
+        let mut pos = crate::position::Position::new();
+        pos.set_sfen(SFEN_HIRATE).unwrap();
+
+        // HalfKPStack を作成して評価
+        use crate::nnue::halfkp::HalfKPStack;
+        let mut stack = HalfKPStack::from_network(match &network {
+            NNUENetwork::HalfKP(net) => net,
+            _ => unreachable!(),
+        });
+
+        network.refresh_accumulator_halfkp(&pos, &mut stack);
+        let value = network.evaluate_halfkp(&pos, &stack);
+
+        eprintln!("HalfKP 768 evaluate: {}", value.raw());
+
+        // 評価値が妥当な範囲内
+        assert!(value.raw().abs() < 10000, "Evaluation {} is out of expected range", value.raw());
     }
 }

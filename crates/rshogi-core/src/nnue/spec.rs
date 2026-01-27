@@ -322,6 +322,148 @@ pub fn parse_architecture(arch_str: &str) -> Result<ParsedArchitecture, String> 
     })
 }
 
+// =============================================================================
+// HalfKP FT hash からの L1 検出
+// =============================================================================
+
+/// HalfKP の FT hash から L1 を検出
+///
+/// nnue-pytorch がハードコードしたアーキテクチャ文字列は不正確なことがある。
+/// FT hash は L1 から一意に計算可能なため、これを使って実際の L1 を検出する。
+///
+/// # 計算式
+///
+/// ```text
+/// FT hash = HALFKP_HASH ^ (L1 * 2)
+/// HALFKP_HASH = 0x5D69D5B8 (HalfKP(Friend) のベースハッシュ)
+/// ```
+///
+/// # 引数
+/// - `ft_hash`: ファイルの offset 196-200 から読んだ FT hash
+///
+/// # 戻り値
+/// - `Some(L1)`: 一致する L1 が見つかった
+/// - `None`: 既知の L1 と一致しない
+pub fn detect_halfkp_l1_from_ft_hash(ft_hash: u32) -> Option<usize> {
+    // HalfKP(Friend) のベースハッシュ
+    // nnue-pytorch での計算: hash ^= self.L1 * 2
+    const HALFKP_HASH: u32 = 0x5D69D5B8;
+
+    // 既知の L1 値
+    const KNOWN_L1_VALUES: &[usize] = &[256, 512, 768, 1024];
+
+    for &l1 in KNOWN_L1_VALUES {
+        let expected_ft_hash = HALFKP_HASH ^ (l1 as u32 * 2);
+        if ft_hash == expected_ft_hash {
+            return Some(l1);
+        }
+    }
+    None
+}
+
+/// L1 に対応するデフォルトの L2/L3 を取得
+///
+/// nnue-pytorch 形式のファイルで L2/L3 がハードコードされている場合、
+/// L1 から最も一般的な L2/L3 の組み合わせを推測する。
+///
+/// # 既知の組み合わせ
+///
+/// | L1 | L2 | L3 | 備考 |
+/// |------|----|----|------|
+/// | 256 | 32 | 32 | suisho5 互換 |
+/// | 512 | 8 | 96 | 一般的 |
+/// | 768 | 16 | 64 | AobaNNUE 形式 |
+/// | 1024 | 8 | 32 | 一般的 |
+pub fn default_halfkp_l2_l3(l1: usize) -> (usize, usize) {
+    match l1 {
+        256 => (32, 32),
+        512 => (8, 96),
+        768 => (16, 64),
+        1024 => (8, 32),
+        _ => (32, 32), // フォールバック
+    }
+}
+
+/// HalfKP ファイルの期待サイズを計算
+///
+/// L1/L2/L3 から期待されるファイルサイズを計算して検証に使用する。
+///
+/// # バイナリレイアウト (nnue-pytorch 形式、hash あり)
+///
+/// | オフセット | サイズ | 内容 |
+/// |-----------|--------|------|
+/// | 0 | 4 B | VERSION |
+/// | 4 | 4 B | ネットワークハッシュ |
+/// | 8 | 4 B | description長さ |
+/// | 12 | N B | description文字列 |
+/// | 12+N | 4 B | FT hash |
+/// | 16+N | L1*2 B | FT bias |
+/// | 16+N+L1*2 | 125388*L1*2 B | FT weight |
+/// | ... | 4 B | Network hash |
+/// | ... | L2*4 B | l1 bias |
+/// | ... | ceil(L1*2/32)*32*L2 B | l1 weight |
+/// | ... | L3*4 B | l2 bias |
+/// | ... | ceil(L2/32)*32*L3 B | l2 weight |
+/// | ... | 4 B | output bias |
+/// | ... | L3 B | output weight |
+pub fn expected_halfkp_file_size(l1: usize, l2: usize, l3: usize, arch_len: usize) -> u64 {
+    const HALFKP_DIMENSIONS: usize = 125388;
+
+    // 32 の倍数に切り上げ
+    fn pad32(n: usize) -> usize {
+        n.div_ceil(32) * 32
+    }
+
+    let header = 12 + arch_len; // version + hash + arch_len + arch_str
+    let ft_hash = 4;
+    let ft_bias = l1 * 2;
+    let ft_weight = HALFKP_DIMENSIONS * l1 * 2;
+    let network_hash = 4;
+    let l1_bias = l2 * 4;
+    let l1_weight = pad32(l1 * 2) * l2;
+    let l2_bias = l3 * 4;
+    let l2_weight = pad32(l2) * l3;
+    let output_bias = 4;
+    let output_weight = l3;
+
+    (header
+        + ft_hash
+        + ft_bias
+        + ft_weight
+        + network_hash
+        + l1_bias
+        + l1_weight
+        + l2_bias
+        + l2_weight
+        + output_bias
+        + output_weight) as u64
+}
+
+/// ファイルサイズから L2/L3 を検出
+///
+/// L1 が判明している場合、ファイルサイズを使って L2/L3 を特定する。
+pub fn detect_halfkp_l2_l3_from_size(
+    l1: usize,
+    file_size: u64,
+    arch_len: usize,
+) -> Option<(usize, usize)> {
+    // 既知の L2/L3 の組み合わせ（L1 ごと）
+    let candidates: &[(usize, usize)] = match l1 {
+        256 => &[(32, 32)],
+        512 => &[(8, 96), (32, 32)],
+        768 => &[(16, 64)],
+        1024 => &[(8, 32), (8, 96)],
+        _ => return None,
+    };
+
+    for &(l2, l3) in candidates {
+        if expected_halfkp_file_size(l1, l2, l3, arch_len) == file_size {
+            return Some((l2, l3));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,5 +593,66 @@ mod tests {
         // 何も取得できない場合
         assert_eq!(parse_arch_dimensions("unknown"), (0, 0, 0));
         assert_eq!(parse_arch_dimensions(""), (0, 0, 0));
+    }
+
+    // =============================================================================
+    // FT hash 検出テスト
+    // =============================================================================
+
+    #[test]
+    fn test_detect_halfkp_l1_from_ft_hash() {
+        // 既知の L1 値に対する期待される FT hash
+        // HALFKP_HASH = 0x5D69D5B8
+        // FT hash = HALFKP_HASH ^ (L1 * 2)
+
+        // L1=256: 0x5D69D5B8 ^ 512 = 0x5D69D5B8 ^ 0x200 = 0x5D69D7B8
+        assert_eq!(detect_halfkp_l1_from_ft_hash(0x5D69D7B8), Some(256));
+
+        // L1=512: 0x5D69D5B8 ^ 1024 = 0x5D69D5B8 ^ 0x400 = 0x5D69D1B8
+        assert_eq!(detect_halfkp_l1_from_ft_hash(0x5D69D1B8), Some(512));
+
+        // L1=768: 0x5D69D5B8 ^ 1536 = 0x5D69D5B8 ^ 0x600 = 0x5D69D3B8
+        // nn_bin_info.md で確認済みの値
+        assert_eq!(detect_halfkp_l1_from_ft_hash(0x5D69D3B8), Some(768));
+
+        // L1=1024: 0x5D69D5B8 ^ 2048 = 0x5D69D5B8 ^ 0x800 = 0x5D69DDB8
+        assert_eq!(detect_halfkp_l1_from_ft_hash(0x5D69DDB8), Some(1024));
+
+        // 不明な FT hash
+        assert_eq!(detect_halfkp_l1_from_ft_hash(0x12345678), None);
+        assert_eq!(detect_halfkp_l1_from_ft_hash(0), None);
+    }
+
+    #[test]
+    fn test_default_halfkp_l2_l3() {
+        assert_eq!(default_halfkp_l2_l3(256), (32, 32));
+        assert_eq!(default_halfkp_l2_l3(512), (8, 96));
+        assert_eq!(default_halfkp_l2_l3(768), (16, 64));
+        assert_eq!(default_halfkp_l2_l3(1024), (8, 32));
+        // 不明な L1 はフォールバック
+        assert_eq!(default_halfkp_l2_l3(999), (32, 32));
+    }
+
+    #[test]
+    fn test_expected_halfkp_file_size() {
+        // L1=768, L2=16, L3=64, arch_len=184 の場合
+        // nn_bin_info.md で確認済み: 192,624,720 bytes
+        let size = expected_halfkp_file_size(768, 16, 64, 184);
+        assert_eq!(size, 192_624_720);
+    }
+
+    #[test]
+    fn test_detect_halfkp_l2_l3_from_size() {
+        // L1=768, file_size=192,624,720, arch_len=184
+        let result = detect_halfkp_l2_l3_from_size(768, 192_624_720, 184);
+        assert_eq!(result, Some((16, 64)));
+
+        // ファイルサイズが一致しない場合
+        let result = detect_halfkp_l2_l3_from_size(768, 12345, 184);
+        assert_eq!(result, None);
+
+        // 不明な L1
+        let result = detect_halfkp_l2_l3_from_size(999, 12345, 184);
+        assert_eq!(result, None);
     }
 }
