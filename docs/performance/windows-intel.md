@@ -74,7 +74,7 @@
 PowerShellまたはコマンドプロンプトで実行:
 
 ```powershell
-cd packages/rust-core
+# リポジトリルートで実行
 
 # NNUE有効時
 $env:RUSTFLAGS="-C target-cpu=native"
@@ -93,7 +93,7 @@ cargo run -p tools --bin benchmark --release -- `
 Git Bashの場合:
 
 ```bash
-cd packages/rust-core
+# リポジトリルートで実行
 
 # NNUE有効時
 RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release -- \

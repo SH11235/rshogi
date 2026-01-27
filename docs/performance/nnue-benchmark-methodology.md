@@ -29,7 +29,7 @@ const-generics ベースの NNUE ネットワーク実装の性能を測定し�
 ### ビルド
 
 ```bash
-cd packages/rust-core
+# リポジトリルートで実行
 
 # AVX2を有効化してリリースビルド
 RUSTFLAGS="-C target-cpu=native" cargo build --release --bin bench_nnue_eval

@@ -594,7 +594,7 @@ direct=66.5% | ancestor=9.4% | prev_nc=24.0%
 ### 使用例
 
 ```bash
-cd packages/rust-core
+# リポジトリルートで実行
 
 # NNUE有効時（推奨）
 ./scripts/perf_profile_nnue.sh --movetime 5000
@@ -610,7 +610,7 @@ sudo perf report -i perf_nnue.data
 ### ベンチマーク（NPS計測）
 
 ```bash
-cd packages/rust-core
+# リポジトリルートで実行
 # --nnue-file オプションはperf.confで指定で省略可能
 # --nnue-file オプションを指定したときはperf.conf の設定をオーバライド
 RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release -- \
@@ -627,7 +627,7 @@ RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release --
 ### PGOビルド（本番デプロイ用）
 
 ```bash
-cd packages/rust-core
+# リポジトリルートで実行
 
 # PGOビルド実行（約3分）- Full LTO + PGOで最大性能
 ./scripts/build_pgo.sh
