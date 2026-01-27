@@ -1,7 +1,5 @@
 //! # engine-core
 //!
-//! YaneuraOu準拠の将棋エンジンコアライブラリ。
-//!
 //! ## モジュール構成
 //!
 //! - `types`: 基本型（Color, Square, Piece, Move, Value, etc.）

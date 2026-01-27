@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 authors = ["sh11235"]
 description = "Performance benchmarking and analysis tools for shogi engine"
-license = "MIT"
-repository = "https://github.com/sh11235/shogi"
+license = "GPL-3.0-only"
+repository = "https://github.com/SH11235/rshogi"
 
 [features]
 default = []

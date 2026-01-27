@@ -4,7 +4,7 @@ Rust で書かれた将棋エンジンです。
 
 [![Crates.io](https://img.shields.io/crates/v/rshogi-core.svg)](https://crates.io/crates/rshogi-core)
 [![Documentation](https://docs.rs/rshogi-core/badge.svg)](https://docs.rs/rshogi-core)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
 ## 特徴
 
@@ -76,6 +76,10 @@ cargo build --release --features simd_avx2
 
 - [Ramu Shogi](https://ramu-shogi.sh11235.com/) - Web 将棋アプリ
 
+## 参考・影響
+
+本プロジェクトは将棋エンジン [YaneuraOu](https://github.com/yaneurao/YaneuraOu) およびチェスエンジン [Stockfish](https://github.com/official-stockfish/Stockfish) を参考にしています。
+
 ## ライセンス
 
-MIT License - 詳細は [LICENSE](LICENSE) を参照してください。
+GPL-3.0-only License - 詳細は [LICENSE](LICENSE) を参照してください。

@@ -42,4 +42,9 @@ The engine will start in USI mode, waiting for commands from stdin.
 
 ## License
 
-MIT License
+GPL-3.0-only License
+
+## 参考・影響 / Acknowledgements
+
+本プロジェクトは将棋エンジン [YaneuraOu](https://github.com/yaneurao/YaneuraOu) およびチェスエンジン [Stockfish](https://github.com/official-stockfish/Stockfish) を参考にしています。
+アルゴリズムや評価のアイデアに影響を受けていますが、実装と構成は独自です。
