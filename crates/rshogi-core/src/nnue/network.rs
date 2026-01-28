@@ -119,23 +119,25 @@ impl NNUENetwork {
         Self::read(&mut reader)
     }
 
-    /// リーダーから読み込み（バージョン自動判別）
+    /// リーダーから読み込み（ファイルサイズ優先の自動判別）
     ///
-    /// アーキテクチャ文字列をパースし、適切なバリアントに委譲する。
+    /// ファイルサイズからアーキテクチャを一意に検出し、適切なバリアントに委譲する。
+    /// ヘッダーの description 文字列は活性化関数の検出にのみ使用する。
     pub fn read<R: Read + Seek>(reader: &mut R) -> io::Result<Self> {
-        // バージョンを読み取り
+        // 1. ファイルサイズを取得
+        let file_size = reader.seek(SeekFrom::End(0))?;
+        reader.seek(SeekFrom::Start(0))?;
+
+        // 2. VERSION を読む
         let mut buf4 = [0u8; 4];
         reader.read_exact(&mut buf4)?;
         let version = u32::from_le_bytes(buf4);
 
         match version {
             NNUE_VERSION | NNUE_VERSION_HALFKA => {
-                // アーキテクチャ文字列を先に読んで判別する
-                // ハッシュを読み飛ばし
-                reader.read_exact(&mut buf4)?;
-
-                // アーキテクチャ文字列長を読み取り
-                reader.read_exact(&mut buf4)?;
+                // 3. hash と arch_len を読む
+                reader.read_exact(&mut buf4)?; // ネットワークハッシュ
+                reader.read_exact(&mut buf4)?; // arch_len
                 let arch_len = u32::from_le_bytes(buf4) as usize;
                 if arch_len == 0 || arch_len > MAX_ARCH_LEN {
                     return Err(io::Error::new(
@@ -144,13 +146,10 @@ impl NNUENetwork {
                     ));
                 }
 
-                // アーキテクチャ文字列を読み取り
+                // アーキテクチャ文字列を読む（活性化関数・FeatureSet 検出用）
                 let mut arch = vec![0u8; arch_len];
                 reader.read_exact(&mut arch)?;
                 let arch_str = String::from_utf8_lossy(&arch);
-
-                // 位置を戻して全体を読み込み
-                reader.seek(SeekFrom::Start(0))?;
 
                 // 活性化関数を検出
                 let activation_str = detect_activation_from_arch(&arch_str);
@@ -160,80 +159,71 @@ impl NNUENetwork {
                     _ => Activation::CReLU,
                 };
 
+                // ヘッダーから FeatureSet を取得（検出のヒントに使用）
                 let parsed = super::spec::parse_architecture(&arch_str).map_err(|msg| {
                     io::Error::new(io::ErrorKind::InvalidData, msg)
                 })?;
 
-                // アーキテクチャを判別して適切なバリアントに委譲
-                match parsed.feature_set {
-                    FeatureSet::LayerStacks => {
-                        let network = NetworkLayerStacks::read(reader)?;
-                        Ok(Self::LayerStacks(Box::new(network)))
-                    }
+                // LayerStacks は特殊処理（ファイルサイズ検出の対象外）
+                if parsed.feature_set == FeatureSet::LayerStacks {
+                    reader.seek(SeekFrom::Start(0))?;
+                    let network = NetworkLayerStacks::read(reader)?;
+                    return Ok(Self::LayerStacks(Box::new(network)));
+                }
+
+                // 4. ファイルサイズからアーキテクチャを検出
+                let detection = super::spec::detect_architecture_from_size(
+                    file_size,
+                    arch_len,
+                    Some(parsed.feature_set),
+                )
+                .ok_or_else(|| {
+                    // 検出失敗時は候補を表示
+                    let candidates =
+                        super::spec::list_candidate_architectures(file_size, arch_len);
+                    let candidates_str: Vec<String> = candidates
+                        .iter()
+                        .take(5)
+                        .map(|(spec, diff)| format!("{} (diff: {:+})", spec.name(), diff))
+                        .collect();
+
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "Unknown architecture: file_size={}, arch_len={}, feature_set={}. \
+                             Closest candidates: [{}]",
+                            file_size,
+                            arch_len,
+                            parsed.feature_set,
+                            candidates_str.join(", ")
+                        ),
+                    )
+                })?;
+
+                // 位置を戻して読み込み
+                reader.seek(SeekFrom::Start(0))?;
+
+                // 5. 検出したアーキテクチャで読み込み
+                let l1 = detection.spec.l1;
+                let l2 = detection.spec.l2;
+                let l3 = detection.spec.l3;
+
+                match detection.spec.feature_set {
                     FeatureSet::HalfKA_hm => {
-                        let network = HalfKA_hmNetwork::read(
-                            reader,
-                            parsed.l1,
-                            parsed.l2,
-                            parsed.l3,
-                            activation,
-                        )?;
+                        let network = HalfKA_hmNetwork::read(reader, l1, l2, l3, activation)?;
                         Ok(Self::HalfKA_hm(network))
                     }
                     FeatureSet::HalfKA => {
-                        let network =
-                            HalfKANetwork::read(reader, parsed.l1, parsed.l2, parsed.l3, activation)?;
+                        let network = HalfKANetwork::read(reader, l1, l2, l3, activation)?;
                         Ok(Self::HalfKA(network))
                     }
                     FeatureSet::HalfKP => {
-                        // HalfKP の場合、ヘッダー文字列が不正確なことがある（nnue-pytorch がハードコード）
-                        // L2/L3 が 0 または明らかに不正（256/256 など）の場合、FT hash から L1 を検出し
-                        // ファイルサイズから L2/L3 を特定する
-                        let (l1, l2, l3) = if parsed.l2 == 0
-                            || parsed.l3 == 0
-                            || (parsed.l2 == 256 && parsed.l3 == 256)
-                        {
-                            // FT hash から L1 を検出
-                            // FT hash の位置: 12 + arch_len
-                            let ft_hash_offset = (12 + arch_len) as u64;
-                            reader.seek(SeekFrom::Start(ft_hash_offset))?;
-                            reader.read_exact(&mut buf4)?;
-                            let ft_hash = u32::from_le_bytes(buf4);
-
-                            let detected_l1 =
-                                super::spec::detect_halfkp_l1_from_ft_hash(ft_hash).ok_or_else(
-                                    || {
-                                        io::Error::new(
-                                            io::ErrorKind::InvalidData,
-                                            format!(
-                                            "Unknown HalfKP FT hash: {ft_hash:#x}. \
-                                             Header L1={}, L2={}, L3={} appears incorrect. \
-                                             Known L1 values: 256, 512, 768, 1024",
-                                            parsed.l1, parsed.l2, parsed.l3
-                                        ),
-                                        )
-                                    },
-                                )?;
-
-                            // ファイルサイズから L2/L3 を検出
-                            let file_size = reader.seek(SeekFrom::End(0))?;
-                            let (l2, l3) = super::spec::detect_halfkp_l2_l3_from_size(
-                                detected_l1,
-                                file_size,
-                                arch_len,
-                            )
-                            .unwrap_or_else(|| super::spec::default_halfkp_l2_l3(detected_l1));
-
-                            // 位置を戻す
-                            reader.seek(SeekFrom::Start(0))?;
-
-                            (detected_l1, l2, l3)
-                        } else {
-                            (parsed.l1, parsed.l2, parsed.l3)
-                        };
-
                         let network = HalfKPNetwork::read(reader, l1, l2, l3, activation)?;
                         Ok(Self::HalfKP(network))
+                    }
+                    FeatureSet::LayerStacks => {
+                        // 上で処理済みなのでここには来ない
+                        unreachable!()
                     }
                 }
             }
@@ -1064,8 +1054,8 @@ mod tests {
             .expect("Failed to find workspace root");
         let default_path = workspace_root
             .join("eval/halfkp_768x2-16-64_crelu/AobaNNUE_HalfKP_768x2_16_64_FV_SCALE_40.bin");
-        let path =
-            std::env::var("NNUE_HALFKP_768_FILE").unwrap_or_else(|_| default_path.display().to_string());
+        let path = std::env::var("NNUE_HALFKP_768_FILE")
+            .unwrap_or_else(|_| default_path.display().to_string());
 
         let network = match NNUENetwork::load(&path) {
             Ok(n) => n,
@@ -1105,6 +1095,193 @@ mod tests {
         let value = network.evaluate_halfkp(&pos, &stack);
 
         eprintln!("HalfKP 768 evaluate: {}", value.raw());
+
+        // 評価値が妥当な範囲内
+        assert!(value.raw().abs() < 10000, "Evaluation {} is out of expected range", value.raw());
+    }
+
+    /// HalfKA_hm 256x2-32-32 ファイルの読み込みテスト
+    ///
+    /// nnue-pytorch 形式のファイルを FT hash を使って正しく読み込めることを確認する。
+    ///
+    /// 実行方法:
+    /// ```bash
+    /// cargo test test_nnue_halfka_hm_256_auto_detect -- --ignored
+    /// ```
+    #[test]
+    #[ignore]
+    fn test_nnue_halfka_hm_256_auto_detect() {
+        // ワークスペースルートからの相対パス
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("Failed to find workspace root");
+        let default_path = workspace_root.join("eval/halfka_hm_256x2-32-32_crelu/v28_epoch65.nnue");
+        let path = std::env::var("NNUE_HALFKA_HM_256_FILE")
+            .unwrap_or_else(|_| default_path.display().to_string());
+
+        let network = match NNUENetwork::load(&path) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("Skipping test: {e}");
+                return;
+            }
+        };
+
+        // HalfKA_hm として認識されることを確認
+        assert!(network.is_halfka_hm(), "File should be detected as HalfKA_hm");
+
+        // L1=256 が検出されることを確認
+        assert_eq!(network.l1_size(), 256, "L1 should be 256");
+
+        // アーキテクチャ仕様を確認
+        let spec = network.architecture_spec();
+        assert_eq!(spec.l1, 256, "spec.l1 should be 256");
+        assert_eq!(spec.l2, 32, "spec.l2 should be 32");
+        assert_eq!(spec.l3, 32, "spec.l3 should be 32");
+
+        eprintln!("Successfully loaded HalfKA_hm 256x2-32-32 network");
+        eprintln!("Architecture name: {}", network.architecture_name());
+
+        // HalfKA_hm 用の評価が動作することを確認
+        let mut pos = crate::position::Position::new();
+        pos.set_sfen(SFEN_HIRATE).unwrap();
+
+        // HalfKA_hmStack を作成して評価
+        use crate::nnue::halfka_hm::HalfKA_hmStack;
+        let mut stack = HalfKA_hmStack::from_network(match &network {
+            NNUENetwork::HalfKA_hm(net) => net,
+            _ => unreachable!(),
+        });
+
+        network.refresh_accumulator_halfka_hm(&pos, &mut stack);
+        let value = network.evaluate_halfka_hm(&pos, &stack);
+
+        eprintln!("HalfKA_hm 256 evaluate: {}", value.raw());
+
+        // 評価値が妥当な範囲内
+        assert!(value.raw().abs() < 10000, "Evaluation {} is out of expected range", value.raw());
+    }
+
+    /// HalfKA_hm 1024x2-8-96 ファイルの読み込みテスト
+    ///
+    /// 実行方法:
+    /// ```bash
+    /// cargo test test_nnue_halfka_hm_1024_auto_detect -- --ignored
+    /// ```
+    #[test]
+    #[ignore]
+    fn test_nnue_halfka_hm_1024_auto_detect() {
+        // ワークスペースルートからの相対パス
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("Failed to find workspace root");
+        let default_path = workspace_root.join("eval/halfka_hm_1024x2-8-96_crelu/epoch20_v2.nnue");
+        let path = std::env::var("NNUE_HALFKA_HM_1024_FILE")
+            .unwrap_or_else(|_| default_path.display().to_string());
+
+        let network = match NNUENetwork::load(&path) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("Skipping test: {e}");
+                return;
+            }
+        };
+
+        // HalfKA_hm として認識されることを確認
+        assert!(network.is_halfka_hm(), "File should be detected as HalfKA_hm");
+
+        // L1=1024 が検出されることを確認
+        assert_eq!(network.l1_size(), 1024, "L1 should be 1024");
+
+        // アーキテクチャ仕様を確認
+        let spec = network.architecture_spec();
+        assert_eq!(spec.l1, 1024, "spec.l1 should be 1024");
+        assert_eq!(spec.l2, 8, "spec.l2 should be 8");
+        assert_eq!(spec.l3, 96, "spec.l3 should be 96");
+
+        eprintln!("Successfully loaded HalfKA_hm 1024x2-8-96 network");
+        eprintln!("Architecture name: {}", network.architecture_name());
+
+        // HalfKA_hm 用の評価が動作することを確認
+        let mut pos = crate::position::Position::new();
+        pos.set_sfen(SFEN_HIRATE).unwrap();
+
+        // HalfKA_hmStack を作成して評価
+        use crate::nnue::halfka_hm::HalfKA_hmStack;
+        let mut stack = HalfKA_hmStack::from_network(match &network {
+            NNUENetwork::HalfKA_hm(net) => net,
+            _ => unreachable!(),
+        });
+
+        network.refresh_accumulator_halfka_hm(&pos, &mut stack);
+        let value = network.evaluate_halfka_hm(&pos, &stack);
+
+        eprintln!("HalfKA_hm 1024 evaluate: {}", value.raw());
+
+        // 評価値が妥当な範囲内
+        assert!(value.raw().abs() < 10000, "Evaluation {} is out of expected range", value.raw());
+    }
+
+    /// HalfKP 256x2-32-32 ファイル (suisho5.bin) の読み込みテスト
+    ///
+    /// ファイルサイズベースの検出で正しく読み込めることを確認する。
+    ///
+    /// 実行方法:
+    /// ```bash
+    /// cargo test test_nnue_halfkp_256_suisho5 -- --ignored
+    /// ```
+    #[test]
+    #[ignore]
+    fn test_nnue_halfkp_256_suisho5() {
+        // ワークスペースルートからの相対パス
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("Failed to find workspace root");
+        let default_path = workspace_root.join("eval/halfkp_256x2-32-32_crelu/suisho5.bin");
+        let path = std::env::var("NNUE_HALFKP_256_FILE")
+            .unwrap_or_else(|_| default_path.display().to_string());
+
+        let network = match NNUENetwork::load(&path) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("Skipping test: {e}");
+                return;
+            }
+        };
+
+        // HalfKP として認識されることを確認
+        assert!(network.is_halfkp(), "File should be detected as HalfKP");
+
+        // L1=256 が検出されることを確認
+        assert_eq!(network.l1_size(), 256, "L1 should be 256");
+
+        // アーキテクチャ仕様を確認
+        let spec = network.architecture_spec();
+        assert_eq!(spec.l1, 256, "spec.l1 should be 256");
+        assert_eq!(spec.l2, 32, "spec.l2 should be 32");
+        assert_eq!(spec.l3, 32, "spec.l3 should be 32");
+
+        eprintln!("Successfully loaded HalfKP 256x2-32-32 network (suisho5)");
+        eprintln!("Architecture name: {}", network.architecture_name());
+
+        // HalfKP 用の評価が動作することを確認
+        let mut pos = crate::position::Position::new();
+        pos.set_sfen(SFEN_HIRATE).unwrap();
+
+        // HalfKPStack を作成して評価
+        use crate::nnue::halfkp::HalfKPStack;
+        let mut stack = HalfKPStack::from_network(match &network {
+            NNUENetwork::HalfKP(net) => net,
+            _ => unreachable!(),
+        });
+
+        network.refresh_accumulator_halfkp(&pos, &mut stack);
+        let value = network.evaluate_halfkp(&pos, &stack);
+
+        eprintln!("HalfKP 256 evaluate: {}", value.raw());
 
         // 評価値が妥当な範囲内
         assert!(value.raw().abs() < 10000, "Evaluation {} is out of expected range", value.raw());
