@@ -2,16 +2,16 @@
 
 ## 概要
 
-rshogi は NNUE ファイルのアーキテクチャ（L1/L2/L3）を自動検出する。
-nnue-pytorch でエクスポートされたファイルはヘッダーのアーキテクチャ文字列がハードコードされており、
-実際のモデル構造と一致しない場合がある。この問題を FT hash とファイルサイズを使って解決する。
+rshogi は NNUE ファイルのアーキテクチャ（FeatureSet, L1, L2, L3）を**ファイルサイズから一意に検出**する。
+ヘッダーの description 文字列は活性化関数の検出にのみ使用し、L1/L2/L3 の判定には使用しない。
+
+これにより、nnue-pytorch がハードコードした不正確なヘッダーを持つファイルでも正しく読み込める。
 
 ## 背景
 
 ### nnue-pytorch のハードコード問題
 
-nodchip/nnue-pytorch の将棋用ブランチでは、`serialize.py` がアーキテクチャ文字列をハードコードしている。
-これは 2021年〜2025年 の全ブランチで一貫している:
+nodchip/nnue-pytorch の将棋用ブランチでは、`serialize.py` がアーキテクチャ文字列をハードコードしている:
 
 ```python
 # serialize.py (shogi.* ブランチ全て)
@@ -24,108 +24,86 @@ description += b"Network=AffineTransform[1<-256](ClippedReLU[256]..."
 | shogi.2024-05-21.halfkp_768x2-8-96 | 768x2-8-96 | 256x2-256-256 |
 | shogi.2025-07-28.halfkp_768x2-8-96 | 768x2-8-96 | 256x2-256-256 |
 
-※ master ブランチ（チェス用）では `--description` オプションで指定可能だが、将棋開発では使われていない。
-
 ### bullet-shogi の場合（正しいヘッダー出力）
 
 [bullet-shogi](https://github.com/SH11235/bullet-shogi/tree/shogi-support) では、
-アーキテクチャ文字列を実際のパラメータから動的に生成するため、この問題は発生しない:
+アーキテクチャ文字列を実際のパラメータから動的に生成するため、この問題は発生しない。
 
-```rust
-// examples/shogi_simple.rs (shogi-support ブランチ)
-let arch_str = format!(
-    "Features={}[{}->{}]{},fv_scale={},l1_input={},l2={},l3={},qa={},qb={},scale={},pairwise={}",
-    feature_name, input_size, l0_suffix, activation_suffix,
-    fv_scale, l1_input_dim, l2_size, l3_size, qa, qb, args.scale, pairwise_enabled
-);
-```
+## 検出アルゴリズム
 
-bullet-shogi でエクスポートしたファイルは、ヘッダーに正しい L1/L2/L3 が記載されるため、
-rshogi は通常のヘッダーパースで正しく読み込める（FT hash による検出は不要）。
+### 基本方針
 
-### 問題の例
+**ファイルサイズからアーキテクチャを一意に検出する。**
 
-`AobaNNUE_HalfKP_768x2_16_64_FV_SCALE_40.bin` を読み込もうとすると:
+アーキテクチャ（FeatureSet, L1, L2, L3）が決まれば、network_payload（純粋なネットワークデータサイズ）は一意に決まる。
+逆に、network_payload からアーキテクチャを逆引きできる。
+
+### network_payload の定義
 
 ```
-Unsupported HalfKP L1=256 architecture: L2=256, L3=256, activation=CReLU
+network_payload = FT_bias + FT_weight + l1_bias + l1_weight + l2_bias + l2_weight + output_bias + output_weight
 ```
 
-## 解決策
+これはヘッダー (12 + arch_len) と hash (0 or 8) を除いた純粋なネットワークデータ。
 
-### FT hash による L1 検出
-
-FT hash は L1 から一意に計算可能:
+### ファイル構造
 
 ```
-FT hash = HALFKP_HASH ^ (L1 * 2)
-HALFKP_HASH = 0x5D69D5B8  // HalfKP(Friend) のベースハッシュ
+ヘッダー付き + hash有り: file_size = 12 + arch_len + 8 + network_payload
+ヘッダー付き + hash無し: file_size = 12 + arch_len + network_payload
 ```
 
-| L1 | 計算式 | FT hash |
-|----|--------|---------|
-| 256 | 0x5D69D5B8 ^ 512 | 0x5D69D7B8 |
-| 512 | 0x5D69D5B8 ^ 1024 | 0x5D69D1B8 |
-| 768 | 0x5D69D5B8 ^ 1536 | 0x5D69D3B8 |
-| 1024 | 0x5D69D5B8 ^ 2048 | 0x5D69DDB8 |
-
-### ファイルサイズによる L2/L3 検出
-
-L1 が判明すれば、ファイルサイズから L2/L3 を特定できる。
-
-#### ファイルサイズ計算式
+### 検出フロー
 
 ```
-header = 12 + arch_len  // version(4) + hash(4) + arch_len(4) + arch_str
-ft_hash = 4
-ft_bias = L1 * 2
-ft_weight = 125388 * L1 * 2
-network_hash = 4
-l1_bias = L2 * 4
-l1_weight = pad32(L1 * 2) * L2
-l2_bias = L3 * 4
-l2_weight = pad32(L2) * L3
-output_bias = 4
-output_weight = L3
-
-total = sum(above)
+1. file_size を取得
+2. VERSION を読む（0x7AF32F16 or 0x7AF32F17）
+3. arch_len を読む（offset 8-12）
+4. base = file_size - 12 - arch_len を計算
+5. 全サポートアーキテクチャに対して期待 network_payload と比較
+   - base == expected_payload     → hash無し形式
+   - base == expected_payload + 8 → hash有り形式
+6. 一致したアーキテクチャで読み込み
+7. 活性化関数はヘッダー文字列から検出（-SCReLU, -Pairwise など）
 ```
 
-※ `pad32(n) = ceil(n / 32) * 32`
+### 厳密性
 
-#### 既知の組み合わせ
+- ファイルサイズは 1 バイト単位で正確
+- 「±8B」ではなく「+0B または +8B」のみ許容
+- 不一致の場合はエラー（未知のアーキテクチャ）
 
-| L1 | L2 | L3 | ファイルサイズ (arch_len=184) |
-|----|----|----|------------------------------|
-| 256 | 32 | 32 | 64,280,784 |
-| 512 | 8 | 96 | 128,556,784 |
-| 512 | 32 | 32 | 128,558,576 |
-| 768 | 16 | 64 | 192,624,720 |
-| 1024 | 8 | 32 | 256,902,768 |
-| 1024 | 8 | 96 | 256,904,816 |
+## サポートアーキテクチャ
 
-## 検出フロー
+### HalfKP
 
-```
-1. ヘッダーをパース
-   - parse_architecture() で L1/L2/L3 を取得
+| L1 | L2 | L3 | network_payload |
+|----|----|----|-----------------|
+| 256 | 32 | 32 | 64,216,868 |
+| 512 | 8 | 96 | 128,410,128 |
+| 512 | 32 | 32 | 128,432,432 |
+| 768 | 16 | 64 | 192,624,516 |
+| 1024 | 8 | 32 | 256,814,288 |
+| 1024 | 8 | 96 | 256,816,656 |
 
-2. ヘッダーが不正確か判定
-   - L2 == 0 または L3 == 0
-   - L2 == 256 かつ L3 == 256 (nnue-pytorch のハードコード値)
+### HalfKA_hm
 
-3. 不正確な場合、FT hash から L1 を検出
-   - offset = 12 + arch_len
-   - 既知の L1 値 (256, 512, 768, 1024) で期待 FT hash を計算
-   - 一致する L1 を採用
+| L1 | L2 | L3 | network_payload |
+|----|----|----|-----------------|
+| 256 | 32 | 32 | 37,550,372 |
+| 256 | 8 | 96 | 37,537,988 |
+| 512 | 8 | 96 | 75,077,124 |
+| 512 | 32 | 32 | 75,099,428 |
+| 1024 | 8 | 96 | 150,150,660 |
+| 1024 | 8 | 32 | 150,148,292 |
 
-4. ファイルサイズから L2/L3 を検出
-   - 検出した L1 に対応する既知の L2/L3 候補を列挙
-   - 各候補でファイルサイズを計算し、実際のサイズと照合
-   - 一致すれば採用、一致しなければデフォルト値を使用
+### HalfKA
 
-5. 検出したアーキテクチャでネットワークを読み込み
-```
+| L1 | L2 | L3 | network_payload |
+|----|----|----|-----------------|
+| 256 | 32 | 32 | 70,934,692 |
+| 512 | 8 | 96 | 141,846,868 |
+| 1024 | 8 | 96 | 283,690,500 |
 
 ## 実装
 
@@ -133,79 +111,83 @@ total = sum(above)
 
 | ファイル | 役割 |
 |---------|------|
-| `crates/rshogi-core/src/nnue/spec.rs` | L1/L2/L3 検出関数 |
-| `crates/rshogi-core/src/nnue/network.rs` | 読み込みロジック |
+| `crates/rshogi-core/src/nnue/spec.rs` | network_payload 計算、検出関数 |
+| `crates/rshogi-core/src/nnue/network.rs` | 読み込みエントリーポイント |
 
 ### 主要関数
 
 ```rust
-// spec.rs
+// network_payload を計算
+pub const fn network_payload_halfkp(l1: usize, l2: usize, l3: usize) -> u64
+pub const fn network_payload_halfka_hm(l1: usize, l2: usize, l3: usize) -> u64
+pub const fn network_payload_halfka(l1: usize, l2: usize, l3: usize) -> u64
 
-/// FT hash から L1 を検出
-pub fn detect_halfkp_l1_from_ft_hash(ft_hash: u32) -> Option<usize>
-
-/// L1 に対応するデフォルトの L2/L3 を取得
-pub fn default_halfkp_l2_l3(l1: usize) -> (usize, usize)
-
-/// ファイルサイズから L2/L3 を検出
-pub fn detect_halfkp_l2_l3_from_size(
-    l1: usize,
+// ファイルサイズからアーキテクチャを検出
+pub fn detect_architecture_from_size(
     file_size: u64,
     arch_len: usize,
-) -> Option<(usize, usize)>
-
-/// 期待されるファイルサイズを計算
-pub fn expected_halfkp_file_size(
-    l1: usize,
-    l2: usize,
-    l3: usize,
-    arch_len: usize,
-) -> u64
-```
-
-### network.rs での使用
-
-```rust
-FeatureSet::HalfKP => {
-    let (l1, l2, l3) = if parsed.l2 == 0
-        || parsed.l3 == 0
-        || (parsed.l2 == 256 && parsed.l3 == 256)
-    {
-        // FT hash から L1 を検出
-        let ft_hash = /* read from file */;
-        let detected_l1 = detect_halfkp_l1_from_ft_hash(ft_hash)?;
-
-        // ファイルサイズから L2/L3 を検出
-        let file_size = /* get file size */;
-        let (l2, l3) = detect_halfkp_l2_l3_from_size(detected_l1, file_size, arch_len)
-            .unwrap_or_else(|| default_halfkp_l2_l3(detected_l1));
-
-        (detected_l1, l2, l3)
-    } else {
-        (parsed.l1, parsed.l2, parsed.l3)
-    };
-
-    HalfKPNetwork::read(reader, l1, l2, l3, activation)?
-}
+    feature_set_hint: Option<FeatureSet>,
+) -> Option<ArchDetectionResult>
 ```
 
 ## 新しいアーキテクチャの追加
 
 新しい L1/L2/L3 の組み合わせをサポートする場合:
 
-1. `halfkp/l{L1}.rs` に型エイリアスを追加（または新規作成）
-2. `spec.rs` の `detect_halfkp_l2_l3_from_size()` に候補を追加
+1. `halfkp/l{L1}.rs` または対応するモジュールに型エイリアスを追加
+2. `spec.rs` の `KNOWN_PAYLOADS` テーブルにエントリを追加
 
 ```rust
-let candidates: &[(usize, usize)] = match l1 {
-    256 => &[(32, 32)],
-    512 => &[(8, 96), (32, 32)],
-    768 => &[(16, 64)],           // ← 新規
-    1024 => &[(8, 32), (8, 96)],
-    _ => return None,
-};
+const KNOWN_PAYLOADS: &[(FeatureSet, usize, usize, usize, u64)] = &[
+    // 既存エントリ...
+    (FeatureSet::HalfKP, 768, 8, 96, network_payload_halfkp(768, 8, 96)), // 新規
+];
 ```
+
+## 対応状況
+
+| Feature Set | 自動検出 | 備考 |
+|-------------|----------|------|
+| HalfKP | ✓ あり | ファイルサイズで検出 |
+| HalfKA_hm | ✓ あり | ファイルサイズで検出 |
+| HalfKA | ✓ あり | ファイルサイズで検出 |
+| LayerStacks | - | 固定アーキテクチャ（ヘッダーで判定） |
+
+## FT hash について（参考情報）
+
+以前のバージョンでは FT hash を使って L1 を検出していたが、現在は使用していない。
+ファイルサイズで一意に決まるため、FT hash のチェックは不要。
+
+ただし、FT hash の情報は以下の通り:
+
+### HalfKP
+
+```
+FT hash = 0x5D69D5B8 ^ (L1 * 2)
+```
+
+| L1 | FT hash |
+|----|---------|
+| 256 | 0x5D69D7B8 |
+| 512 | 0x5D69D1B8 |
+| 768 | 0x5D69D3B8 |
+| 1024 | 0x5D69DDB8 |
+
+### HalfKA_hm / HalfKA
+
+```
+FT hash = 0x5F134CB8 ^ (L1 * 2)
+```
+
+| L1 | FT hash |
+|----|---------|
+| 256 | 0x5F134EB8 |
+| 512 | 0x5F1348B8 |
+| 1024 | 0x5F1344B8 |
+
+**Note:** bullet-shogi 生成ファイルは FT hash = 0 だが、ファイルサイズで検出可能。
 
 ## 参考
 
 - [AobaNNUE](https://github.com/yssaya/AobaNNUE) - HalfKP 768x2-16-64 の出典
+- [bullet-shogi](https://github.com/SH11235/bullet-shogi) - 正しいヘッダーを出力する学習器
