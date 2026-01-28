@@ -47,7 +47,7 @@ const MIN_THINK_MS: u64 = 10;
 #[command(
     author,
     version,
-    about = "engine-usi selfplay harness (engine vs engine)"
+    about = "rshogi-usi selfplay harness (engine vs engine)"
 )]
 struct Cli {
     /// Number of games to run
@@ -1836,7 +1836,7 @@ fn main() -> Result<()> {
                     .path
                     .file_name()
                     .and_then(|s| s.to_str())
-                    .unwrap_or("engine-usi")
+                    .unwrap_or("rshogi-usi")
                     .to_string(),
                 usi_options: black_usi_opts.clone(),
                 threads: threads_black,
@@ -1848,7 +1848,7 @@ fn main() -> Result<()> {
                     .path
                     .file_name()
                     .and_then(|s| s.to_str())
-                    .unwrap_or("engine-usi")
+                    .unwrap_or("rshogi-usi")
                     .to_string(),
                 usi_options: white_usi_opts.clone(),
                 threads: threads_white,
@@ -2003,20 +2003,20 @@ fn resolve_engine_path(cli: &Cli) -> ResolvedEnginePath {
         }
     }
     ResolvedEnginePath {
-        path: PathBuf::from("engine-usi"),
+        path: PathBuf::from("rshogi-usi"),
         source: "fallback",
     }
 }
 
 fn find_engine_in_dir(dir: &Path) -> Option<ResolvedEnginePath> {
     #[cfg(windows)]
-    let release_names = ["engine-usi.exe"];
+    let release_names = ["rshogi-usi.exe"];
     #[cfg(not(windows))]
-    let release_names = ["engine-usi"];
+    let release_names = ["rshogi-usi"];
     #[cfg(windows)]
-    let debug_names = ["engine-usi-debug.exe"];
+    let debug_names = ["rshogi-usi-debug.exe"];
     #[cfg(not(windows))]
-    let debug_names = ["engine-usi-debug"];
+    let debug_names = ["rshogi-usi-debug"];
 
     for name in release_names {
         let candidate = dir.join(name);
@@ -2741,7 +2741,7 @@ fn format_mm_ss(ms: u64) -> String {
 
 /// エンジン設定を人間可読な形式でフォーマットする
 fn format_engine_settings(engine: &ResolvedEnginePath, usi_options: &[String]) -> String {
-    let engine_name = engine.path.file_name().and_then(|s| s.to_str()).unwrap_or("engine-usi");
+    let engine_name = engine.path.file_name().and_then(|s| s.to_str()).unwrap_or("rshogi-usi");
 
     if usi_options.is_empty() {
         format!("{engine_name} (default)")
