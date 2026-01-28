@@ -505,8 +505,8 @@ pub fn list_candidate_architectures(
         })
         .collect();
 
-    // 差分の絶対値でソート
-    candidates.sort_by_key(|(_, diff)| diff.abs());
+    // 差分の絶対値でソート（安定性不要のため unstable 使用）
+    candidates.sort_unstable_by_key(|(_, diff)| diff.abs());
 
     // 上位10件を返す
     candidates.truncate(10);
