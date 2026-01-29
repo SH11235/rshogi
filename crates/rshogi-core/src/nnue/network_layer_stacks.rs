@@ -24,7 +24,7 @@
 //! - bucket = f_index + e_index (0-8)
 
 use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLayerStacks};
-use super::constants::{MAX_ARCH_LEN, NNUE_PYTORCH_L1, NNUE_VERSION_HALFKA};
+use super::constants::{MAX_ARCH_LEN, NNUE_PYTORCH_L1, NNUE_VERSION, NNUE_VERSION_HALFKA};
 use super::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
 use super::layer_stacks::{compute_bucket_index, sqr_clipped_relu_transform, LayerStacks};
 use crate::position::Position;
@@ -43,6 +43,9 @@ pub struct NetworkLayerStacks {
     pub feature_transformer: FeatureTransformerLayerStacks,
     /// LayerStacks (9バケット)
     pub layer_stacks: LayerStacks,
+    /// FV_SCALE (評価値のスケーリング係数)
+    /// bullet-shogi: 16 (8128/508), nnue-pytorch: 600
+    fv_scale: i32,
 }
 
 impl NetworkLayerStacks {
@@ -60,11 +63,12 @@ impl NetworkLayerStacks {
         reader.read_exact(&mut buf4)?;
         let version = u32::from_le_bytes(buf4);
 
-        if version != NNUE_VERSION_HALFKA {
+        // bullet-shogi は NNUE_VERSION (0x7AF32F16) を使用することがある
+        if version != NNUE_VERSION_HALFKA && version != NNUE_VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "Invalid NNUE version for nnue-pytorch: {version:#x}, expected {NNUE_VERSION_HALFKA:#x}"
+                    "Invalid NNUE version for LayerStacks: {version:#x}, expected {NNUE_VERSION_HALFKA:#x} or {NNUE_VERSION:#x}"
                 ),
             ));
         }
@@ -102,23 +106,43 @@ impl NetworkLayerStacks {
             ));
         }
 
-        // Feature transformer hash を読み飛ばす
-        reader.read_exact(&mut buf4)?;
-        let _ft_hash = u32::from_le_bytes(buf4);
+        // bullet-shogi 形式の検出
+        // bullet-shogi は "-LayerStack" (単数形) と "l0=", "buckets=" パラメータを使用
+        // nnue-pytorch は "LayerStacks" (複数形) を使用し、FT hash を含む
+        let is_bullet_shogi_format = arch_str.contains("-LayerStack,") || arch_str.contains("l0=");
 
-        // Feature Transformer を読み込み（圧縮形式を自動検出）
-        let feature_transformer = FeatureTransformerLayerStacks::read_leb128(reader)?;
+        // fv_scale をパース
+        // bullet-shogi: "fv_scale=16" が arch_str に含まれる
+        // nnue-pytorch: fv_scale が含まれない場合は 600 (デフォルト)
+        let fv_scale = parse_fv_scale(&arch_str);
 
-        // LayerStacks を読み込み（FC層は常に非圧縮）
-        let layer_stacks = LayerStacks::read(reader)?;
+        let (feature_transformer, layer_stacks) = if is_bullet_shogi_format {
+            // bullet-shogi 形式: FT hash なし、非圧縮、LayerStacks も独自形式
+            // FT 重みは [output_dim][input_dim] で保存されているため転置が必要
+            let ft = FeatureTransformerLayerStacks::read_bullet_shogi(reader)?;
+            let ls = LayerStacks::read_bullet_shogi(reader)?;
+            (ft, ls)
+        } else {
+            // nnue-pytorch 形式: FT hash あり、LEB128 圧縮
+            reader.read_exact(&mut buf4)?;
+            let _ft_hash = u32::from_le_bytes(buf4);
+            let ft = FeatureTransformerLayerStacks::read_leb128(reader)?;
+            let ls = LayerStacks::read(reader)?;
+            (ft, ls)
+        };
 
         // EOF検証: 余りデータがないことを確認
         // factorizedモデル（非coalesced）を誤って読んだ場合、
         // 余りデータが発生する可能性がある。
-        let mut probe = [0u8; 1];
+        // bullet-shogi は 64 バイト境界までパディング ("bullet" 文字列) を追加するため、
+        // bullet-shogi 形式の場合は最大 63 バイトの余りを許容する。
+        let mut probe = [0u8; 64];
         match reader.read(&mut probe) {
             Ok(0) => {
                 // EOF到達 - 正常（coalesce済みモデル）
+            }
+            Ok(n) if is_bullet_shogi_format && n < 64 => {
+                // bullet-shogi のパディング (最大 63 バイト) - 正常
             }
             Ok(_) => {
                 // 余りデータあり - おそらくfactorizedモデル
@@ -144,18 +168,19 @@ impl NetworkLayerStacks {
         // 診断ログを出力
         #[cfg(feature = "diagnostics")]
         {
-            Self::log_load_diagnostics(&feature_transformer, &layer_stacks);
+            Self::log_load_diagnostics(&feature_transformer, &layer_stacks, fv_scale);
         }
 
         Ok(Self {
             feature_transformer,
             layer_stacks,
+            fv_scale,
         })
     }
 
     /// 読み込み時の診断ログを出力
     #[cfg(feature = "diagnostics")]
-    fn log_load_diagnostics(ft: &FeatureTransformerLayerStacks, ls: &LayerStacks) {
+    fn log_load_diagnostics(ft: &FeatureTransformerLayerStacks, ls: &LayerStacks, fv_scale: i32) {
         // FT統計
         let bias_sum: i64 = ft.biases.0.iter().map(|&x| x as i64).sum();
         let weight_min = ft.weights.iter().copied().min().unwrap_or(0);
@@ -163,6 +188,7 @@ impl NetworkLayerStacks {
         let weight_nonzero: usize = ft.weights.iter().filter(|&&x| x != 0).count();
         let weight_total = ft.weights.len();
 
+        info!("[NNUE Load] fv_scale: {fv_scale}");
         info!("[NNUE Load] FT bias sum: {bias_sum}");
         info!("[NNUE Load] FT weight: min={weight_min}, max={weight_max}");
         info!(
@@ -202,8 +228,9 @@ impl NetworkLayerStacks {
             crate::nnue::layer_stacks::compute_king_ranks(side_to_move, f_king, e_king);
         let bucket_index = compute_bucket_index(f_rank, e_rank);
 
-        // LayerStacks で評価
-        let score = self.layer_stacks.evaluate(bucket_index, &transformed);
+        // LayerStacks で評価 (raw score を fv_scale で割る)
+        let raw_score = self.layer_stacks.evaluate_raw(bucket_index, &transformed);
+        let score = raw_score / self.fv_scale;
 
         Value::new(score)
     }
@@ -263,9 +290,10 @@ impl NetworkLayerStacks {
         info!("[NNUE Eval] l1_out (16 elements): {l1_out:?}");
         info!("[NNUE Eval] l1_skip: {l1_skip}");
         info!("[NNUE Eval] raw_score (with skip): {raw_score}");
+        info!("[NNUE Eval] fv_scale: {}", self.fv_scale);
 
-        let score = raw_score / super::constants::NNUE_PYTORCH_NNUE2SCORE;
-        let score_float = raw_score as f64 / super::constants::NNUE_PYTORCH_NNUE2SCORE as f64;
+        let score = raw_score / self.fv_scale;
+        let score_float = raw_score as f64 / self.fv_scale as f64;
         info!("[NNUE Eval] score: {score} (float: {score_float:.4})");
 
         Value::new(score)
@@ -295,6 +323,22 @@ impl NetworkLayerStacks {
         source_idx: usize,
     ) -> bool {
         self.feature_transformer.forward_update_incremental(pos, stack, source_idx)
+    }
+}
+
+/// arch_str から fv_scale をパース
+///
+/// bullet-shogi 形式: "fv_scale=16" のようなパラメータが含まれる
+/// nnue-pytorch 形式: fv_scale が含まれない場合は 600 (NNUE_PYTORCH_NNUE2SCORE)
+fn parse_fv_scale(arch_str: &str) -> i32 {
+    use super::constants::NNUE_PYTORCH_NNUE2SCORE;
+
+    if let Some(start) = arch_str.find("fv_scale=") {
+        let rest = &arch_str[start + 9..];
+        let end = rest.find(',').unwrap_or(rest.len());
+        rest[..end].parse::<i32>().unwrap_or(NNUE_PYTORCH_NNUE2SCORE)
+    } else {
+        NNUE_PYTORCH_NNUE2SCORE
     }
 }
 

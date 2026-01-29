@@ -138,18 +138,27 @@ impl LayerStackBucket {
 
         // ClippedReLU + Sqr for first 15 elements, then concat with original
         // l1x_ = clamp(cat([pow(l1x_, 2) * (127/128), l1x_]), 0, 1)
-        // 量子化: i32 >> 6 → clamp(0, 127)
+        //
+        // bullet-shogi 量子化:
+        // - L1 入力: [0, 127] (pairwise_mul 後)
+        // - L1 weight: QB = 64 で量子化
+        // - L1 bias: 127 * QB = 8128 で量子化
+        // - L1 出力: output_int / (127 * QB) = output_float
+        //
+        // スケールダウン: / 64 = >> 6
+        // 次層入力 = clamp(y_int / 64, 0, 127) where y_int = y_float * 8128
         let mut l2_input = [0u8; LAYER_STACK_L2_IN]; // 30
 
         for i in 0..NNUE_PYTORCH_L2 {
             // 15
-            let val = l1_out[i] >> 6; // WEIGHT_SCALE_BITS
-            let clamped = val.clamp(0, 127) as u8;
+            let val = l1_out[i] >> 6; // / 64
 
-            // 二乗部分: (clamped^2) * (127/128) ≈ (clamped^2) >> 7
-            let sqr = ((clamped as u32 * clamped as u32) >> 7).min(127) as u8;
-            l2_input[i] = sqr; // 最初の15要素: 二乗
-            l2_input[NNUE_PYTORCH_L2 + i] = clamped; // 次の15要素: 元の値
+            // sfnnwop/Stockfish 互換: 二乗を先に計算してからクランプ
+            // 負の値も二乗で正になるため情報が保持される
+            let sqr_scaled = ((val * val) >> 7).clamp(0, 127) as u8;
+            let raw_clamped = val.clamp(0, 127) as u8;
+            l2_input[i] = sqr_scaled; // 最初の15要素: 二乗
+            l2_input[NNUE_PYTORCH_L2 + i] = raw_clamped; // 次の15要素: 元の値
         }
 
         // L2: 30 → 32
@@ -157,6 +166,7 @@ impl LayerStackBucket {
         self.propagate_l2(&l2_input, &mut l2_out);
 
         // ClippedReLU
+        // L2 出力も同様に / 64 = >> 6
         let mut l2_relu = [0u8; NNUE_PYTORCH_L3];
         for i in 0..NNUE_PYTORCH_L3 {
             let val = l2_out[i] >> 6;
@@ -218,15 +228,15 @@ impl LayerStackBucket {
         // Split: [15, 1]
         let l1_skip = l1_out[NNUE_PYTORCH_L2]; // index 15
 
-        // ClippedReLU + Sqr for first 15 elements
+        // sfnnwop/Stockfish 互換: 二乗を先に計算してからクランプ
+        // L1 出力: / 64 = >> 6
         let mut l2_input = [0u8; LAYER_STACK_L2_IN];
         for i in 0..NNUE_PYTORCH_L2 {
             let val = l1_out[i] >> 6;
-            let clamped = val.clamp(0, 127) as u8;
-            // (clamped^2) * (127/128) ≈ (clamped^2) >> 7
-            let sqr = ((clamped as u32 * clamped as u32) >> 7).min(127) as u8;
-            l2_input[i] = sqr;
-            l2_input[NNUE_PYTORCH_L2 + i] = clamped;
+            let sqr_scaled = ((val * val) >> 7).clamp(0, 127) as u8;
+            let raw_clamped = val.clamp(0, 127) as u8;
+            l2_input[i] = sqr_scaled;
+            l2_input[NNUE_PYTORCH_L2 + i] = raw_clamped;
         }
 
         // L2: 30 → 32
@@ -234,6 +244,7 @@ impl LayerStackBucket {
         self.propagate_l2(&l2_input, &mut l2_out);
 
         // ClippedReLU
+        // L2 出力も同様に / 64 = >> 6
         let mut l2_relu = [0u8; NNUE_PYTORCH_L3];
         for i in 0..NNUE_PYTORCH_L3 {
             let val = l2_out[i] >> 6;
@@ -291,6 +302,118 @@ impl LayerStacks {
 
             // バケットを読み込み（常に非圧縮形式）
             *bucket = LayerStackBucket::read(reader)?;
+        }
+
+        Ok(stacks)
+    }
+
+    /// bullet-shogi 形式から読み込み
+    ///
+    /// bullet-shogi は LayerStack の全バケット分を連続して保存し、
+    /// weight は転置されている。
+    ///
+    /// 形式:
+    /// - Network hash (4 bytes)
+    /// - L1 biases: i32 × (BUCKETS × L1_OUT)
+    /// - L1 weights: i8 × (L1_IN × BUCKETS × L1_OUT) - transposed
+    /// - L2 biases: i32 × (BUCKETS × L2_OUT)
+    /// - L2 weights: i8 × (L2_IN × BUCKETS × L2_OUT) - transposed
+    /// - L3 biases: i32 × BUCKETS
+    /// - L3 weights: i8 × (L3_IN × BUCKETS) - transposed
+    pub fn read_bullet_shogi<R: Read>(reader: &mut R) -> io::Result<Self> {
+        let mut stacks = Self::new();
+        let mut buf4 = [0u8; 4];
+
+        // Network hash を読み飛ばす
+        reader.read_exact(&mut buf4)?;
+
+        // L1 biases: 全バケット分をまとめて読み込み
+        for bucket_idx in 0..NUM_LAYER_STACK_BUCKETS {
+            for out_idx in 0..LAYER_STACK_L1_OUT {
+                reader.read_exact(&mut buf4)?;
+                stacks.buckets[bucket_idx].l1_biases[out_idx] = i32::from_le_bytes(buf4);
+            }
+        }
+
+        // L1 weights: transposed [L1_IN][BUCKETS × L1_OUT]
+        // bullet-shogi: weights[in_idx * (BUCKETS * L1_OUT) + bucket * L1_OUT + out_idx]
+        // rshogi: bucket.weights[out_idx * PADDED_INPUT + in_idx]
+        {
+            let total_weights = NNUE_PYTORCH_L1 * NUM_LAYER_STACK_BUCKETS * LAYER_STACK_L1_OUT;
+            let mut temp = vec![0i8; total_weights];
+            let mut temp_buf = vec![0u8; total_weights];
+            reader.read_exact(&mut temp_buf)?;
+            for (i, &b) in temp_buf.iter().enumerate() {
+                temp[i] = b as i8;
+            }
+
+            // 転置しながら各バケットに分配
+            for in_idx in 0..NNUE_PYTORCH_L1 {
+                for bucket_idx in 0..NUM_LAYER_STACK_BUCKETS {
+                    for out_idx in 0..LAYER_STACK_L1_OUT {
+                        let src_idx = in_idx * (NUM_LAYER_STACK_BUCKETS * LAYER_STACK_L1_OUT)
+                            + bucket_idx * LAYER_STACK_L1_OUT
+                            + out_idx;
+                        let dst_idx = out_idx * LayerStackBucket::L1_PADDED_INPUT + in_idx;
+                        stacks.buckets[bucket_idx].l1_weights[dst_idx] = temp[src_idx];
+                    }
+                }
+            }
+        }
+
+        // L2 biases: 全バケット分をまとめて読み込み
+        for bucket_idx in 0..NUM_LAYER_STACK_BUCKETS {
+            for out_idx in 0..NNUE_PYTORCH_L3 {
+                reader.read_exact(&mut buf4)?;
+                stacks.buckets[bucket_idx].l2_biases[out_idx] = i32::from_le_bytes(buf4);
+            }
+        }
+
+        // L2 weights: transposed [L2_IN][BUCKETS × L2_OUT]
+        {
+            let total_weights = LAYER_STACK_L2_IN * NUM_LAYER_STACK_BUCKETS * NNUE_PYTORCH_L3;
+            let mut temp = vec![0i8; total_weights];
+            let mut temp_buf = vec![0u8; total_weights];
+            reader.read_exact(&mut temp_buf)?;
+            for (i, &b) in temp_buf.iter().enumerate() {
+                temp[i] = b as i8;
+            }
+
+            for in_idx in 0..LAYER_STACK_L2_IN {
+                for bucket_idx in 0..NUM_LAYER_STACK_BUCKETS {
+                    for out_idx in 0..NNUE_PYTORCH_L3 {
+                        let src_idx = in_idx * (NUM_LAYER_STACK_BUCKETS * NNUE_PYTORCH_L3)
+                            + bucket_idx * NNUE_PYTORCH_L3
+                            + out_idx;
+                        let dst_idx = out_idx * LayerStackBucket::L2_PADDED_INPUT + in_idx;
+                        stacks.buckets[bucket_idx].l2_weights[dst_idx] = temp[src_idx];
+                    }
+                }
+            }
+        }
+
+        // L3 (output) biases: 全バケット分をまとめて読み込み
+        for bucket_idx in 0..NUM_LAYER_STACK_BUCKETS {
+            reader.read_exact(&mut buf4)?;
+            stacks.buckets[bucket_idx].output_bias = i32::from_le_bytes(buf4);
+        }
+
+        // L3 (output) weights: transposed [L3_IN][BUCKETS]
+        {
+            let total_weights = NNUE_PYTORCH_L3 * NUM_LAYER_STACK_BUCKETS;
+            let mut temp = vec![0i8; total_weights];
+            let mut temp_buf = vec![0u8; total_weights];
+            reader.read_exact(&mut temp_buf)?;
+            for (i, &b) in temp_buf.iter().enumerate() {
+                temp[i] = b as i8;
+            }
+
+            for in_idx in 0..NNUE_PYTORCH_L3 {
+                for bucket_idx in 0..NUM_LAYER_STACK_BUCKETS {
+                    let src_idx = in_idx * NUM_LAYER_STACK_BUCKETS + bucket_idx;
+                    stacks.buckets[bucket_idx].output_weights[in_idx] = temp[src_idx];
+                }
+            }
         }
 
         Ok(stacks)
@@ -366,17 +489,25 @@ pub fn sqr_clipped_relu_transform(
 
     // 前半768要素: us_acc[0..768] * us_acc[768..1536]
     // 後半768要素: them_acc[0..768] * them_acc[768..1536]
+    //
+    // sfnnwop/Stockfish 互換 (QA=127):
+    // - CReLU: clamp(0, 127)
+    // - pairwise_mul: (a * b) で [0, 127²]
+    // - スケール: * (127/128) ≈ >> 7
+    // - 出力: [0, 127]
+    const QA: i32 = 127;
+
     for i in 0..half {
         // us側
-        let us_a = (us_acc[i] as i32).clamp(0, 127) as u32;
-        let us_b = (us_acc[half + i] as i32).clamp(0, 127) as u32;
+        let us_a = (us_acc[i] as i32).clamp(0, QA) as u32;
+        let us_b = (us_acc[half + i] as i32).clamp(0, QA) as u32;
         // (a * b) * (127/128) ≈ (a * b) >> 7
         let us_prod = ((us_a * us_b) >> 7).min(127);
         output[i] = us_prod as u8;
 
         // them側
-        let them_a = (them_acc[i] as i32).clamp(0, 127) as u32;
-        let them_b = (them_acc[half + i] as i32).clamp(0, 127) as u32;
+        let them_a = (them_acc[i] as i32).clamp(0, QA) as u32;
+        let them_b = (them_acc[half + i] as i32).clamp(0, QA) as u32;
         let them_prod = ((them_a * them_b) >> 7).min(127);
         output[half + i] = them_prod as u8;
     }
@@ -560,7 +691,7 @@ mod tests {
             "all zeros input should produce all zeros output"
         );
 
-        // 最大値テスト: 127 * 127 >> 7 = 16129 >> 7 = 126
+        // 最大値テスト: QA=127 (sfnnwop 互換) の場合、(127 * 127) >> 7 = 126
         let half = NNUE_PYTORCH_L1 / 2;
         for i in 0..half {
             us_acc[i] = 127;
@@ -571,7 +702,7 @@ mod tests {
 
         sqr_clipped_relu_transform(&us_acc, &them_acc, &mut output);
 
-        // 期待値: (127 * 127) >> 7 = 126
+        // 期待値: (127 * 127) >> 7 = 16129 >> 7 = 126
         for (i, &val) in output.iter().enumerate().take(NNUE_PYTORCH_L1) {
             assert_eq!(val, 126, "max input should produce 126 at index {i}");
         }

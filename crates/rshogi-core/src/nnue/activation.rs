@@ -276,6 +276,45 @@ fn crelu_i32_to_u8(input: &[i32], output: &mut [u8]) {
         }
     }
 
+    // WASM SIMD128: 8要素ずつ処理
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        let remaining = input.len() - processed;
+        let num_chunks = remaining / 8;
+        if num_chunks > 0 {
+            unsafe {
+                use std::arch::wasm32::*;
+
+                let zero = i8x16_splat(0);
+                let in_ptr = input.as_ptr().add(processed) as *const v128;
+                let out_ptr = output.as_mut_ptr().add(processed) as *mut i64;
+
+                for i in 0..num_chunks {
+                    // 8個のi32をロード（2つのv128）
+                    let in0 = v128_load(in_ptr.add(i * 2));
+                    let in1 = v128_load(in_ptr.add(i * 2 + 1));
+
+                    // 右シフト
+                    let shifted0 = i32x4_shr(in0, WEIGHT_SCALE_BITS as u32);
+                    let shifted1 = i32x4_shr(in1, WEIGHT_SCALE_BITS as u32);
+
+                    // i32 → i16 にパック（飽和）
+                    let words = i16x8_narrow_i32x4(shifted0, shifted1);
+
+                    // i16 → i8 にパック（飽和、下位8バイトが有効）
+                    let bytes = i8x16_narrow_i16x8(words, words);
+
+                    // max(0, x) でクランプ
+                    let result = i8x16_max(bytes, zero);
+
+                    // 下位8バイトを書き出し
+                    *out_ptr.add(i) = i64x2_extract_lane::<0>(result);
+                }
+            }
+            processed += num_chunks * 8;
+        }
+    }
+
     // スカラーフォールバック
     for i in processed..input.len() {
         let shifted = input[i] >> WEIGHT_SCALE_BITS;
@@ -417,14 +456,16 @@ fn pairwise_crelu_i16_to_u8_inner<const QA: i32, const SHIFT: i32, const MAX_OUT
     // SIMD 有効環境: processed は SIMD 処理で更新される
     #[cfg(any(
         all(target_arch = "x86_64", target_feature = "avx2"),
-        all(target_arch = "x86_64", target_feature = "sse4.1")
+        all(target_arch = "x86_64", target_feature = "sse4.1"),
+        all(target_arch = "wasm32", target_feature = "simd128")
     ))]
     let mut processed = 0usize;
 
     // SIMD 無効環境: processed は常に 0（全要素をスカラー処理）
     #[cfg(not(any(
         all(target_arch = "x86_64", target_feature = "avx2"),
-        all(target_arch = "x86_64", target_feature = "sse4.1")
+        all(target_arch = "x86_64", target_feature = "sse4.1"),
+        all(target_arch = "wasm32", target_feature = "simd128")
     )))]
     let processed = 0usize;
 
@@ -505,6 +546,56 @@ fn pairwise_crelu_i16_to_u8_inner<const QA: i32, const SHIFT: i32, const MAX_OUT
                     let packed8 = _mm_packus_epi16(packed16, packed16);
 
                     let val = _mm_cvtsi128_si32(packed8) as u32;
+                    std::ptr::copy_nonoverlapping(
+                        &val as *const u32 as *const u8,
+                        out_ptr.add(i * 4),
+                        4,
+                    );
+                }
+            }
+            processed += num_chunks * 4;
+        }
+    }
+
+    // WASM SIMD128: 4要素ずつ処理
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        let remaining = half - processed;
+        let num_chunks = remaining / 4;
+        if num_chunks > 0 {
+            unsafe {
+                use std::arch::wasm32::*;
+
+                let zero = i32x4_splat(0);
+                let max_clamp = i32x4_splat(QA);
+                let max_out = i32x4_splat(MAX_OUT);
+
+                let a_ptr = input.as_ptr().add(processed);
+                let b_ptr = input.as_ptr().add(half + processed);
+                let out_ptr = output.as_mut_ptr().add(processed);
+
+                for i in 0..num_chunks {
+                    // i16を4要素ロードしてi32に拡張
+                    let a_i16 = v128_load64_zero(a_ptr.add(i * 4) as *const u64);
+                    let b_i16 = v128_load64_zero(b_ptr.add(i * 4) as *const u64);
+                    let a = i32x4_extend_low_i16x8(a_i16);
+                    let b = i32x4_extend_low_i16x8(b_i16);
+
+                    // クランプ: max(0, min(x, QA))
+                    let a_clamped = i32x4_min(i32x4_max(a, zero), max_clamp);
+                    let b_clamped = i32x4_min(i32x4_max(b, zero), max_clamp);
+
+                    // 乗算してシフト
+                    let product = i32x4_mul(a_clamped, b_clamped);
+                    let shifted = i32x4_shr(product, SHIFT as u32);
+                    let result = i32x4_min(shifted, max_out);
+
+                    // i32 → i16 → u8 にパック
+                    let packed16 = i16x8_narrow_i32x4(result, result);
+                    let packed8 = u8x16_narrow_i16x8(packed16, packed16);
+
+                    // 下位4バイトを書き出し
+                    let val = u32x4_extract_lane::<0>(packed8);
                     std::ptr::copy_nonoverlapping(
                         &val as *const u32 as *const u8,
                         out_ptr.add(i * 4),

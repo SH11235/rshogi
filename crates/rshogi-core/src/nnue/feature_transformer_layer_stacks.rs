@@ -32,7 +32,9 @@ pub struct FeatureTransformerLayerStacks {
 }
 
 impl FeatureTransformerLayerStacks {
-    /// ファイルから読み込み（非圧縮形式）
+    /// ファイルから読み込み（非圧縮形式、nnue-pytorch互換）
+    ///
+    /// 重みの配置: [input_dim][output_dim] = [73305][1536]
     pub fn read<R: Read>(reader: &mut R) -> io::Result<Self> {
         // バイアスを読み込み
         let mut biases = [0i16; NNUE_PYTORCH_L1];
@@ -48,6 +50,50 @@ impl FeatureTransformerLayerStacks {
         for weight in weights.iter_mut() {
             reader.read_exact(&mut buf)?;
             *weight = i16::from_le_bytes(buf);
+        }
+
+        Ok(Self {
+            biases: Aligned(biases),
+            weights,
+        })
+    }
+
+    /// bullet-shogi 形式から読み込み（転置が必要）
+    ///
+    /// bullet-shogi は重みを [output_dim][input_dim] = [1536][73305] で保存。
+    /// rshogi は [input_dim][output_dim] = [73305][1536] を期待。
+    /// 読み込み後に転置を行う。
+    pub fn read_bullet_shogi<R: Read>(reader: &mut R) -> io::Result<Self> {
+        // FT hash を読み飛ばす（bullet-shogi は ft_hash=0 を出力する）
+        let mut buf4 = [0u8; 4];
+        reader.read_exact(&mut buf4)?;
+
+        // バイアスを読み込み
+        let mut biases = [0i16; NNUE_PYTORCH_L1];
+        let mut buf = [0u8; 2];
+        for bias in biases.iter_mut() {
+            reader.read_exact(&mut buf)?;
+            *bias = i16::from_le_bytes(buf);
+        }
+
+        // 重みを読み込み（bullet-shogi形式: [output_dim][input_dim]）
+        let weight_size = HALFKA_HM_DIMENSIONS * NNUE_PYTORCH_L1;
+        let mut temp = vec![0i16; weight_size];
+        for weight in temp.iter_mut() {
+            reader.read_exact(&mut buf)?;
+            *weight = i16::from_le_bytes(buf);
+        }
+
+        // 転置: [output_dim][input_dim] → [input_dim][output_dim]
+        // ソース: temp[output * INPUT_DIM + input]
+        // デスト: weights[input * OUTPUT_DIM + output]
+        let mut weights = AlignedBox::new_zeroed(weight_size);
+        for output in 0..NNUE_PYTORCH_L1 {
+            for input in 0..HALFKA_HM_DIMENSIONS {
+                let src_idx = output * HALFKA_HM_DIMENSIONS + input;
+                let dst_idx = input * NNUE_PYTORCH_L1 + output;
+                weights[dst_idx] = temp[src_idx];
+            }
         }
 
         Ok(Self {
