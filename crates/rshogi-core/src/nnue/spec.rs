@@ -392,6 +392,11 @@ pub struct ArchDetectionResult {
     pub spec: ArchitectureSpec,
     /// hash が含まれているか (true = +8B)
     pub has_hash: bool,
+    /// bullet-shogi rust-core フォーマットかどうか
+    ///
+    /// bullet-shogi は ft_hash(4) + network_hash(4) + 64バイトパディング(最大63) を追加する。
+    /// このフラグが true の場合、追加のパディングバイトが含まれている。
+    pub is_bullet_format: bool,
 }
 
 /// サポートされているアーキテクチャの network_payload テーブル
@@ -437,8 +442,11 @@ const KNOWN_PAYLOADS: &[(FeatureSet, usize, usize, usize, u64)] = &[
 /// # 判定ロジック
 /// ```text
 /// base = file_size - 12 - arch_len
-/// base == expected_payload     → hash無し
-/// base == expected_payload + 8 → hash有り
+/// base == expected_payload         → hash無し（nnue-pytorch 形式）
+/// base == expected_payload + 8     → hash有り（nnue-pytorch 形式）
+/// base in [expected_payload + 8, expected_payload + 8 + 63]
+///                                  → bullet-shogi rust-core 形式
+///                                    (ft_hash + network_hash + 64バイトパディング)
 /// ```
 pub fn detect_architecture_from_size(
     file_size: u64,
@@ -460,19 +468,34 @@ pub fn detect_architecture_from_size(
             }
         }
 
-        // hash無しでチェック
+        // hash無しでチェック（nnue-pytorch 形式）
         if base == expected_payload {
             return Some(ArchDetectionResult {
                 spec: ArchitectureSpec::new(feature_set, l1, l2, l3, Activation::CReLU),
                 has_hash: false,
+                is_bullet_format: false,
             });
         }
 
-        // hash有り (+8B) でチェック
+        // hash有り (+8B) でチェック（nnue-pytorch 形式）
         if base == expected_payload + 8 {
             return Some(ArchDetectionResult {
                 spec: ArchitectureSpec::new(feature_set, l1, l2, l3, Activation::CReLU),
                 has_hash: true,
+                is_bullet_format: false,
+            });
+        }
+
+        // bullet-shogi rust-core 形式でチェック
+        // ft_hash(4) + network_hash(4) + 64バイトアライメントパディング(1-63)
+        // base は expected_payload + 9 から expected_payload + 8 + 63 の範囲
+        // (パディング0は上の nnue-pytorch 形式で既にマッチ済み)
+        let bullet_base = expected_payload + 8; // ft_hash + network_hash
+        if base > bullet_base && base <= bullet_base + 63 {
+            return Some(ArchDetectionResult {
+                spec: ArchitectureSpec::new(feature_set, l1, l2, l3, Activation::CReLU),
+                has_hash: true,
+                is_bullet_format: true,
             });
         }
     }
@@ -699,6 +722,7 @@ mod tests {
         assert_eq!(result.spec.l2, 16);
         assert_eq!(result.spec.l3, 64);
         assert!(result.has_hash);
+        assert!(!result.is_bullet_format);
     }
 
     #[test]
@@ -713,6 +737,7 @@ mod tests {
         assert_eq!(result.spec.l2, 32);
         assert_eq!(result.spec.l3, 32);
         assert!(result.has_hash);
+        assert!(!result.is_bullet_format);
     }
 
     #[test]
@@ -724,6 +749,7 @@ mod tests {
         assert_eq!(result.spec.l1, 768);
         assert_eq!(result.spec.l2, 16);
         assert_eq!(result.spec.l3, 64);
+        assert!(!result.is_bullet_format);
     }
 
     #[test]
@@ -745,5 +771,99 @@ mod tests {
         assert_eq!(result.spec.l2, 16);
         assert_eq!(result.spec.l3, 64);
         assert!(!result.has_hash); // hash無し
+        assert!(!result.is_bullet_format);
+    }
+
+    // =============================================================================
+    // bullet-shogi rust-core フォーマット検出テスト
+    // =============================================================================
+
+    #[test]
+    fn test_detect_bullet_shogi_halfka_512_8_96() {
+        // bullet-shogi v56 quantised.bin (HalfKA 512-8-96)
+        // file_size = 141,847,232, arch_len = 105
+        //
+        // bullet-shogi rust-core フォーマット:
+        // - header: 12 + 105 = 117
+        // - ft_hash: 4
+        // - l0b: 512 * 2 = 1024 (i16)
+        // - l0w: 138510 * 512 * 2 = 141,834,240 (i16)
+        // - network_hash: 4
+        // - l1b: 8 * 4 = 32 (i32)
+        // - l1w: 8 * 1024 = 8,192 (i8)
+        // - l2b: 96 * 4 = 384 (i32)
+        // - l2w: 96 * 32 = 3,072 (i8)
+        // - outb: 4 (i32)
+        // - outw: 96 (i8)
+        // - padding: 63 (64バイトアライメント)
+        // total = 141,847,232
+        let result = detect_architecture_from_size(141_847_232, 105, Some(FeatureSet::HalfKA));
+        assert!(result.is_some(), "bullet-shogi HalfKA 512-8-96 should be detected");
+        let result = result.unwrap();
+        assert_eq!(result.spec.feature_set, FeatureSet::HalfKA);
+        assert_eq!(result.spec.l1, 512);
+        assert_eq!(result.spec.l2, 8);
+        assert_eq!(result.spec.l3, 96);
+        assert!(result.has_hash);
+        assert!(result.is_bullet_format, "Should be detected as bullet-shogi format");
+    }
+
+    #[test]
+    fn test_detect_bullet_shogi_various_paddings() {
+        // bullet-shogi は 64 バイトアライメントパディングを使用
+        // パディングが 0〜63 バイトの範囲で検出できることを確認
+
+        // HalfKA 512-8-96 の network_payload を計算
+        let payload = network_payload_halfka(512, 8, 96);
+        let arch_len = 100usize;
+        let header_size = 12 + arch_len as u64;
+
+        // パディング 0 (hash有り、nnue-pytorch 形式)
+        let file_size_no_padding = header_size + payload + 8;
+        let result =
+            detect_architecture_from_size(file_size_no_padding, arch_len, Some(FeatureSet::HalfKA));
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert_eq!(result.spec.l1, 512);
+        assert!(!result.is_bullet_format, "padding=0 should be nnue-pytorch format");
+
+        // パディング 1〜63 (bullet-shogi 形式)
+        for padding in 1..64u64 {
+            let file_size_with_padding = header_size + payload + 8 + padding;
+            let result = detect_architecture_from_size(
+                file_size_with_padding,
+                arch_len,
+                Some(FeatureSet::HalfKA),
+            );
+            assert!(result.is_some(), "Should detect with padding={padding}");
+            let result = result.unwrap();
+            assert_eq!(result.spec.l1, 512, "L1 should be 512 with padding={padding}");
+            assert!(result.is_bullet_format, "padding={padding} should be bullet-shogi format");
+        }
+
+        // パディング 64 以上は検出されない
+        let file_size_too_much_padding = header_size + payload + 8 + 64;
+        let result = detect_architecture_from_size(
+            file_size_too_much_padding,
+            arch_len,
+            Some(FeatureSet::HalfKA),
+        );
+        assert!(result.is_none(), "padding=64 should not be detected");
+    }
+
+    #[test]
+    fn test_network_payload_halfka() {
+        // HalfKA 512-8-96 の検証
+        let payload = network_payload_halfka(512, 8, 96);
+        // ft_bias = 512 * 2 = 1024
+        // ft_weight = 138510 * 512 * 2 = 141,834,240
+        // l1_bias = 8 * 4 = 32
+        // l1_weight = pad32(1024) * 8 = 8,192
+        // l2_bias = 96 * 4 = 384
+        // l2_weight = pad32(8) * 96 = 3,072
+        // output_bias = 4
+        // output_weight = 96
+        // total = 141,847,044
+        assert_eq!(payload, 141_847_044);
     }
 }
