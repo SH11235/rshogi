@@ -427,7 +427,13 @@ fn collect_best_thread_result(
     let best_rm = worker.root_moves.iter().find(|rm| rm.mv() == best_move);
 
     let ponder_move = best_rm
-        .and_then(|rm| if rm.pv.len() > 1 { Some(rm.pv[1]) } else { None })
+        .and_then(|rm| {
+            if rm.pv.len() > 1 {
+                Some(rm.pv[1])
+            } else {
+                None
+            }
+        })
         .unwrap_or(Move::NONE);
 
     let score = best_rm
