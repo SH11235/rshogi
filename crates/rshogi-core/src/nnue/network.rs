@@ -567,15 +567,27 @@ pub struct NnueFormatInfo {
     pub arch_string: String,
 }
 
-/// NNUE ファイルのフォーマット情報を検出（ロードせずにヘッダのみ解析）
+/// NNUE ファイルのフォーマット情報を検出（ファイルサイズベースの自動判定）
+///
+/// nnue-pytorch が生成するファイルはヘッダーに不正確なアーキテクチャ情報を
+/// 含むことがあるため、ファイルサイズから正確なアーキテクチャを検出する。
 ///
 /// # Arguments
 /// * `bytes` - NNUE ファイルの先頭 1KB 以上のバイト列
+/// * `file_size` - ファイル全体のサイズ（ファイルサイズベースの検出に必要）
 ///
 /// # Returns
 /// * `Ok(NnueFormatInfo)` - フォーマット情報
 /// * `Err(io::Error)` - 不正なフォーマット
-pub fn detect_format(bytes: &[u8]) -> io::Result<NnueFormatInfo> {
+///
+/// # Examples
+/// ```ignore
+/// let bytes = std::fs::read("model.bin")?;
+/// let file_size = bytes.len() as u64;
+/// let info = detect_format(&bytes[..1024], file_size)?;
+/// println!("Architecture: {}", info.architecture);
+/// ```
+pub fn detect_format(bytes: &[u8], file_size: u64) -> io::Result<NnueFormatInfo> {
     if bytes.len() < 12 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -609,25 +621,45 @@ pub fn detect_format(bytes: &[u8]) -> io::Result<NnueFormatInfo> {
             // アーキテクチャ文字列を読み取り
             let arch_str = String::from_utf8_lossy(&bytes[12..12 + arch_len]).to_string();
 
-            // 活性化関数を検出
+            // 活性化関数を検出（ヘッダーから）
             let activation = detect_activation_from_arch(&arch_str).to_string();
 
+            // ヘッダーから FeatureSet を取得（検出のヒントに使用）
             let parsed = super::spec::parse_architecture(&arch_str)
                 .map_err(|msg| io::Error::new(io::ErrorKind::InvalidData, msg))?;
 
+            // ファイルサイズからアーキテクチャを検出（L1/L2/L3 の正確な値を取得）
+            let (l1, l2, l3, feature_set) = if let Some(detection) =
+                super::spec::detect_architecture_from_size(
+                    file_size,
+                    arch_len,
+                    Some(parsed.feature_set),
+                ) {
+                // ファイルサイズベースの検出成功
+                (
+                    detection.spec.l1,
+                    detection.spec.l2,
+                    detection.spec.l3,
+                    detection.spec.feature_set,
+                )
+            } else {
+                // フォールバック: ヘッダーのパース結果を使用
+                (parsed.l1, parsed.l2, parsed.l3, parsed.feature_set)
+            };
+
             // アーキテクチャ名を決定
-            let architecture = match parsed.feature_set {
+            let architecture = match feature_set {
                 FeatureSet::LayerStacks => "LayerStacks".to_string(),
-                FeatureSet::HalfKA_hm => format!("HalfKA_hm{}", parsed.l1),
-                FeatureSet::HalfKA => format!("HalfKA{}", parsed.l1),
-                FeatureSet::HalfKP => format!("HalfKP{}", parsed.l1),
+                FeatureSet::HalfKA_hm => format!("HalfKA_hm{}", l1),
+                FeatureSet::HalfKA => format!("HalfKA{}", l1),
+                FeatureSet::HalfKP => format!("HalfKP{}", l1),
             };
 
             Ok(NnueFormatInfo {
                 architecture,
-                l1_dimension: parsed.l1 as u32,
-                l2_dimension: parsed.l2 as u32,
-                l3_dimension: parsed.l3 as u32,
+                l1_dimension: l1 as u32,
+                l2_dimension: l2 as u32,
+                l3_dimension: l3 as u32,
                 activation,
                 version,
                 arch_string: arch_str,
@@ -958,6 +990,46 @@ mod tests {
 
         // 評価値が妥当な範囲内
         assert!(value.raw().abs() < 1000);
+    }
+
+    /// detect_format のファイルサイズベース検出テスト
+    ///
+    /// AobaNNUE.bin のようにヘッダーが不正確なファイルでも
+    /// ファイルサイズから正確なアーキテクチャを検出できることを確認する。
+    ///
+    /// 実行方法:
+    /// ```bash
+    /// NNUE_AOBA_FILE=/path/to/AobaNNUE.bin cargo test test_detect_format_aoba -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore]
+    fn test_detect_format_aoba() {
+        let path = std::env::var("NNUE_AOBA_FILE").unwrap_or_else(|_| "AobaNNUE.bin".to_string());
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("Skipping test: {e}");
+                return;
+            }
+        };
+
+        let file_size = bytes.len() as u64;
+        let info = detect_format(&bytes, file_size).expect("Failed to detect format");
+
+        eprintln!("File: {path}");
+        eprintln!("Architecture: {}", info.architecture);
+        eprintln!(
+            "L1: {}, L2: {}, L3: {}",
+            info.l1_dimension, info.l2_dimension, info.l3_dimension
+        );
+        eprintln!("Activation: {}", info.activation);
+        eprintln!("Arch string (header): {}", info.arch_string);
+
+        // AobaNNUE.bin はヘッダーで 256 を主張するが、実際は 768-16-64
+        assert_eq!(info.architecture, "HalfKP768", "Should detect HalfKP768, not HalfKP256");
+        assert_eq!(info.l1_dimension, 768);
+        assert_eq!(info.l2_dimension, 16);
+        assert_eq!(info.l3_dimension, 64);
     }
 
     /// parse_fv_scale_from_arch のユニットテスト
