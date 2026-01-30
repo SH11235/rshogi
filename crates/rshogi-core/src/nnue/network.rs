@@ -567,19 +567,47 @@ pub struct NnueFormatInfo {
     pub arch_string: String,
 }
 
-/// NNUE ファイルのフォーマット情報を検出（ロードせずにヘッダのみ解析）
+/// NNUE ファイルのフォーマット情報を検出（ファイルサイズベースの自動判定）
+///
+/// nnue-pytorch が生成するファイルはヘッダーに不正確なアーキテクチャ情報を
+/// 含むことがあるため、ファイルサイズから正確なアーキテクチャを検出する。
+///
+/// # 検出ロジック
+/// 1. ヘッダーから FeatureSet と活性化関数を取得（ヒントとして使用）
+/// 2. ファイルサイズから L1/L2/L3 を一意に検出（優先）
+/// 3. 検出失敗時はヘッダーのパース結果にフォールバック（精度低下の可能性あり）
 ///
 /// # Arguments
-/// * `bytes` - NNUE ファイルの先頭 1KB 以上のバイト列
+/// * `bytes` - NNUE ファイルの先頭バイト列（ヘッダー + アーキテクチャ文字列を含む）
+/// * `file_size` - ファイル全体のサイズ（バイト単位）
 ///
 /// # Returns
-/// * `Ok(NnueFormatInfo)` - フォーマット情報
-/// * `Err(io::Error)` - 不正なフォーマット
-pub fn detect_format(bytes: &[u8]) -> io::Result<NnueFormatInfo> {
-    if bytes.len() < 12 {
+/// * `Ok(NnueFormatInfo)` - 検出されたフォーマット情報
+/// * `Err(io::Error)` - ヘッダー解析失敗または不正なフォーマット
+///
+/// # Errors
+/// - `InvalidData`: ファイルサイズ不足、不正なヘッダー、またはアーキテクチャ文字列長
+///
+/// # Examples
+/// ```ignore
+/// let bytes = std::fs::read("model.bin")?;
+/// let file_size = bytes.len() as u64;
+/// let info = detect_format(&bytes, file_size)?;
+/// println!("Detected: {} (L1={}, L2={}, L3={})",
+///          info.architecture, info.l1_dimension, info.l2_dimension, info.l3_dimension);
+/// ```
+pub fn detect_format(bytes: &[u8], file_size: u64) -> io::Result<NnueFormatInfo> {
+    // 最小ヘッダーサイズ: version(4) + hash(4) + arch_len(4)
+    const MIN_HEADER_SIZE: usize = 12;
+
+    if bytes.len() < MIN_HEADER_SIZE {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "NNUE file too small (need at least 12 bytes for header)",
+            format!(
+                "NNUE file too small: {} bytes (need at least {} for header)",
+                bytes.len(),
+                MIN_HEADER_SIZE
+            ),
         ));
     }
 
@@ -588,46 +616,86 @@ pub fn detect_format(bytes: &[u8]) -> io::Result<NnueFormatInfo> {
 
     match version {
         NNUE_VERSION | NNUE_VERSION_HALFKA => {
-            // ハッシュを読み飛ばし（4バイト）
             // アーキテクチャ文字列長を読み取り
             let arch_len = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
 
+            // arch_len の妥当性をチェック（バッファオーバーリード防止）
             if arch_len == 0 || arch_len > MAX_ARCH_LEN {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("Invalid arch string length: {arch_len}"),
+                    format!("Invalid arch string length: {} (max: {})", arch_len, MAX_ARCH_LEN),
                 ));
             }
 
-            if bytes.len() < 12 + arch_len {
+            // 必要なバイト数をチェック
+            let required_size = MIN_HEADER_SIZE + arch_len;
+            if bytes.len() < required_size {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("NNUE file too small (need {} bytes for arch string)", 12 + arch_len),
+                    format!(
+                        "NNUE file too small: {} bytes (need {} for arch string)",
+                        bytes.len(),
+                        required_size
+                    ),
                 ));
             }
 
             // アーキテクチャ文字列を読み取り
             let arch_str = String::from_utf8_lossy(&bytes[12..12 + arch_len]).to_string();
 
-            // 活性化関数を検出
+            // 活性化関数を検出（ヘッダーから）
             let activation = detect_activation_from_arch(&arch_str).to_string();
 
+            // ヘッダーから FeatureSet を取得（検出のヒントに使用）
             let parsed = super::spec::parse_architecture(&arch_str)
                 .map_err(|msg| io::Error::new(io::ErrorKind::InvalidData, msg))?;
 
+            // ファイルサイズからアーキテクチャを検出（L1/L2/L3 の正確な値を取得）
+            let (l1, l2, l3, feature_set, used_file_size_detection) = if let Some(detection) =
+                super::spec::detect_architecture_from_size(
+                    file_size,
+                    arch_len,
+                    Some(parsed.feature_set),
+                ) {
+                // ファイルサイズベースの検出成功
+                (
+                    detection.spec.l1,
+                    detection.spec.l2,
+                    detection.spec.l3,
+                    detection.spec.feature_set,
+                    true,
+                )
+            } else {
+                // フォールバック: ヘッダーのパース結果を使用
+                // 注意: ヘッダーが不正確な場合、誤った結果になる可能性がある
+                (parsed.l1, parsed.l2, parsed.l3, parsed.feature_set, false)
+            };
+
+            // フォールバック時は警告情報をログ出力（デバッグビルド時のみ）
+            #[cfg(debug_assertions)]
+            if !used_file_size_detection {
+                eprintln!(
+                    "Warning: File size detection failed for size={}. \
+                     Falling back to header parsing (may be inaccurate).",
+                    file_size
+                );
+            }
+            // used_file_size_detection を使用済みとしてマーク（リリースビルドでの警告抑制）
+            let _ = used_file_size_detection;
+
             // アーキテクチャ名を決定
-            let architecture = match parsed.feature_set {
+            let architecture = match feature_set {
                 FeatureSet::LayerStacks => "LayerStacks".to_string(),
-                FeatureSet::HalfKA_hm => format!("HalfKA_hm{}", parsed.l1),
-                FeatureSet::HalfKA => format!("HalfKA{}", parsed.l1),
-                FeatureSet::HalfKP => format!("HalfKP{}", parsed.l1),
+                FeatureSet::HalfKA_hm => format!("HalfKA_hm{}", l1),
+                FeatureSet::HalfKA => format!("HalfKA{}", l1),
+                FeatureSet::HalfKP => format!("HalfKP{}", l1),
             };
 
             Ok(NnueFormatInfo {
                 architecture,
-                l1_dimension: parsed.l1 as u32,
-                l2_dimension: parsed.l2 as u32,
-                l3_dimension: parsed.l3 as u32,
+                l1_dimension: l1 as u32,
+                l2_dimension: l2 as u32,
+                l3_dimension: l3 as u32,
                 activation,
                 version,
                 arch_string: arch_str,
@@ -958,6 +1026,136 @@ mod tests {
 
         // 評価値が妥当な範囲内
         assert!(value.raw().abs() < 1000);
+    }
+
+    /// detect_format のファイルサイズベース検出テスト
+    ///
+    /// AobaNNUE.bin のようにヘッダーが不正確なファイルでも
+    /// ファイルサイズから正確なアーキテクチャを検出できることを確認する。
+    ///
+    /// 実行方法:
+    /// ```bash
+    /// NNUE_AOBA_FILE=/path/to/AobaNNUE.bin cargo test test_detect_format_aoba -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore]
+    fn test_detect_format_aoba() {
+        let path = std::env::var("NNUE_AOBA_FILE").unwrap_or_else(|_| "AobaNNUE.bin".to_string());
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("Skipping test: {e}");
+                return;
+            }
+        };
+
+        let file_size = bytes.len() as u64;
+        let info = detect_format(&bytes, file_size).expect("Failed to detect format");
+
+        eprintln!("File: {path}");
+        eprintln!("Architecture: {}", info.architecture);
+        eprintln!(
+            "L1: {}, L2: {}, L3: {}",
+            info.l1_dimension, info.l2_dimension, info.l3_dimension
+        );
+        eprintln!("Activation: {}", info.activation);
+        eprintln!("Arch string (header): {}", info.arch_string);
+
+        // AobaNNUE.bin はヘッダーで 256 を主張するが、実際は 768-16-64
+        assert_eq!(
+            info.architecture, "HalfKP768",
+            "Should detect HalfKP768 from file size, not HalfKP256 from header"
+        );
+        assert_eq!(info.l1_dimension, 768, "L1 should be 768, not 256 from header");
+        assert_eq!(info.l2_dimension, 16, "L2 should be 16");
+        assert_eq!(info.l3_dimension, 64, "L3 should be 64");
+        // ヘッダーが不正確であることを確認（256 を主張している）
+        assert!(
+            info.arch_string.contains("256"),
+            "Header should claim 256, but file size detection should override it"
+        );
+    }
+
+    /// detect_format のフォールバックテスト
+    ///
+    /// ファイルサイズベースの検出が失敗した場合に、
+    /// ヘッダーのパース結果にフォールバックすることを確認する。
+    #[test]
+    fn test_detect_format_fallback_to_header() {
+        // 架空のファイルサイズ（既知のアーキテクチャと一致しない）
+        let unknown_file_size = 12345678u64;
+
+        // 有効なヘッダーを持つバイト列を作成
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&NNUE_VERSION_HALFKA.to_le_bytes()); // version
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // hash
+
+        let arch_str = "Features=HalfKA_hm[73305->512x2],l2=8,l3=96";
+        let arch_len = arch_str.len() as u32;
+        bytes.extend_from_slice(&arch_len.to_le_bytes());
+        bytes.extend_from_slice(arch_str.as_bytes());
+
+        let info =
+            detect_format(&bytes, unknown_file_size).expect("Should fallback to header parsing");
+
+        // ヘッダーからパースした値が使われることを確認
+        assert_eq!(info.architecture, "HalfKA_hm512");
+        assert_eq!(info.l1_dimension, 512);
+        assert_eq!(info.l2_dimension, 8);
+        assert_eq!(info.l3_dimension, 96);
+    }
+
+    /// detect_format のエラーハンドリングテスト
+    #[test]
+    fn test_detect_format_error_cases() {
+        // ケース1: ファイルサイズが小さすぎる
+        let bytes = vec![0u8; 5];
+        let result = detect_format(&bytes, 5);
+        assert!(result.is_err(), "Should fail for too small file");
+        assert!(
+            result.unwrap_err().to_string().contains("too small"),
+            "Error message should mention 'too small'"
+        );
+
+        // ケース2: arch_len = 0（不正）
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&NNUE_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // arch_len = 0
+        let result = detect_format(&bytes, 100);
+        assert!(result.is_err(), "Should fail for arch_len = 0");
+        assert!(
+            result.unwrap_err().to_string().contains("Invalid arch string length"),
+            "Error message should mention invalid arch string length"
+        );
+
+        // ケース3: arch_len が MAX_ARCH_LEN を超える
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&NNUE_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&(MAX_ARCH_LEN as u32 + 1).to_le_bytes());
+        let result = detect_format(&bytes, 100);
+        assert!(result.is_err(), "Should fail for arch_len > MAX_ARCH_LEN");
+
+        // ケース4: バッファが arch_len 分のデータを含まない
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&NNUE_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&100u32.to_le_bytes()); // arch_len = 100
+                                                        // bytes は 12 バイトのみ、arch_str 用のデータがない
+        let result = detect_format(&bytes, 1000);
+        assert!(result.is_err(), "Should fail when buffer is too small for arch_str");
+
+        // ケース5: 不正なバージョン
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xDEADBEEFu32.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 100]);
+        let result = detect_format(&bytes, 112);
+        assert!(result.is_err(), "Should fail for unknown version");
+        assert!(
+            result.unwrap_err().to_string().contains("Unknown NNUE version"),
+            "Error message should mention unknown version"
+        );
     }
 
     /// parse_fv_scale_from_arch のユニットテスト
