@@ -14,8 +14,6 @@ pub enum FeatureSet {
     HalfKA_hm,
     /// HalfKA (非ミラー)
     HalfKA,
-    /// LayerStacks (実験的)
-    LayerStacks,
 }
 
 impl FeatureSet {
@@ -25,7 +23,6 @@ impl FeatureSet {
             Self::HalfKP => "HalfKP",
             Self::HalfKA_hm => "HalfKA_hm",
             Self::HalfKA => "HalfKA",
-            Self::LayerStacks => "LayerStacks",
         }
     }
 }
@@ -166,11 +163,6 @@ pub fn parse_feature_input_dimensions(arch_str: &str) -> Option<usize> {
 pub fn parse_feature_set_from_arch(arch_str: &str) -> Result<FeatureSet, String> {
     use super::constants::{HALFKA_DIMENSIONS, HALFKA_HM_DIMENSIONS};
 
-    // "LayerStack" (単数形) と "LayerStacks" (複数形) の両方を検出
-    // bullet-shogi は "-LayerStack" サフィックスを使用
-    if arch_str.contains("LayerStack") {
-        return Ok(FeatureSet::LayerStacks);
-    }
     if arch_str.contains("HalfKP") {
         return Ok(FeatureSet::HalfKP);
     }
@@ -524,7 +516,6 @@ mod tests {
         assert_eq!(FeatureSet::HalfKP.as_str(), "HalfKP");
         assert_eq!(FeatureSet::HalfKA_hm.as_str(), "HalfKA_hm");
         assert_eq!(FeatureSet::HalfKA.as_str(), "HalfKA");
-        assert_eq!(FeatureSet::LayerStacks.as_str(), "LayerStacks");
     }
 
     #[test]

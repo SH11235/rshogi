@@ -118,40 +118,6 @@ pub const HIDDEN2_DIMENSIONS: usize = 32;
 pub const OUTPUT_DIMENSIONS: usize = 1;
 
 // =============================================================================
-// nnue-pytorch LayerStacks アーキテクチャ用定数
-// =============================================================================
-
-/// nnue-pytorch の Feature Transformer 出力次元数（片方の視点）
-pub const NNUE_PYTORCH_L1: usize = 1536;
-
-/// nnue-pytorch の L2 次元数
-pub const NNUE_PYTORCH_L2: usize = 15;
-
-/// nnue-pytorch の L3 次元数
-pub const NNUE_PYTORCH_L3: usize = 32;
-
-/// LayerStacks のバケット数
-pub const NUM_LAYER_STACK_BUCKETS: usize = 9;
-
-/// LayerStacks L1層の出力次元数（L2 + 1 = 16）
-pub const LAYER_STACK_L1_OUT: usize = NNUE_PYTORCH_L2 + 1; // 16
-
-/// LayerStacks L2層の入力次元数（L2 * 2 = 30）
-pub const LAYER_STACK_L2_IN: usize = NNUE_PYTORCH_L2 * 2; // 30
-
-/// nnue-pytorch の評価値スケーリング
-pub const NNUE_PYTORCH_NNUE2SCORE: i32 = 600;
-
-/// nnue-pytorch の隠れ層重みスケール
-pub const NNUE_PYTORCH_WEIGHT_SCALE_HIDDEN: i32 = 64;
-
-/// nnue-pytorch の出力層重みスケール
-pub const NNUE_PYTORCH_WEIGHT_SCALE_OUT: i32 = 16;
-
-/// nnue-pytorch の量子化単位
-pub const NNUE_PYTORCH_QUANTIZED_ONE: i32 = 127;
-
-// =============================================================================
 // SCReLU (Squared Clipped ReLU) 用定数
 // =============================================================================
 

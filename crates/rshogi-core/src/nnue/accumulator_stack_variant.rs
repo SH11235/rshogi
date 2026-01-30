@@ -4,16 +4,14 @@
 //!
 //! # 設計
 //!
-//! **「Accumulator は L1 だけで決まる」** を活用し、4バリアントに集約:
+//! **「Accumulator は L1 だけで決まる」** を活用し、3バリアントに集約:
 //! - HalfKA(HalfKAStack): L256/L512/L1024 を内包
 //! - HalfKA_hm(HalfKA_hmStack): L256/L512/L1024 を内包
 //! - HalfKP(HalfKPStack): L256/L512 を内包
-//! - LayerStacks: 1536次元 + 9バケット
 //!
 //! L2/L3/活性化の追加時にこのファイルの変更は不要。
 
 use super::accumulator::DirtyPiece;
-use super::accumulator_layer_stacks::AccumulatorStackLayerStacks;
 use super::halfka::HalfKAStack;
 use super::halfka_hm::HalfKA_hmStack;
 use super::halfkp::HalfKPStack;
@@ -24,13 +22,12 @@ use super::network::NNUENetwork;
 /// NNUEアーキテクチャに応じた適切なスタックを1つだけ保持する。
 /// これにより、メモリ使用量を削減し、do_move/undo_moveの効率を向上させる。
 ///
-/// # 4バリアント構造
+/// # 3バリアント構造
 ///
 /// L1 サイズのみで分類し、L2/L3/活性化は内部で処理:
 /// - **HalfKA**: L256/L512/L1024 を HalfKAStack で管理
 /// - **HalfKA_hm**: L256/L512/L1024 を HalfKA_hmStack で管理
 /// - **HalfKP**: L256/L512 を HalfKPStack で管理
-/// - **LayerStacks**: 1536次元 + 9バケット
 #[allow(non_camel_case_types)]
 pub enum AccumulatorStackVariant {
     /// HalfKA 特徴量セット（L256/L512/L1024）
@@ -39,8 +36,6 @@ pub enum AccumulatorStackVariant {
     HalfKA_hm(HalfKA_hmStack),
     /// HalfKP 特徴量セット（L256/L512）
     HalfKP(HalfKPStack),
-    /// LayerStacks（1536次元 + 9バケット）
-    LayerStacks(AccumulatorStackLayerStacks),
 }
 
 impl AccumulatorStackVariant {
@@ -52,7 +47,6 @@ impl AccumulatorStackVariant {
             NNUENetwork::HalfKA(net) => Self::HalfKA(HalfKAStack::from_network(net)),
             NNUENetwork::HalfKA_hm(net) => Self::HalfKA_hm(HalfKA_hmStack::from_network(net)),
             NNUENetwork::HalfKP(net) => Self::HalfKP(HalfKPStack::from_network(net)),
-            NNUENetwork::LayerStacks(_) => Self::LayerStacks(AccumulatorStackLayerStacks::new()),
         }
     }
 
@@ -73,7 +67,6 @@ impl AccumulatorStackVariant {
                 stack.l1_size() == net.l1_size()
             }
             (Self::HalfKP(stack), NNUENetwork::HalfKP(net)) => stack.l1_size() == net.l1_size(),
-            (Self::LayerStacks(_), NNUENetwork::LayerStacks(_)) => true,
             _ => false,
         }
     }
@@ -85,7 +78,6 @@ impl AccumulatorStackVariant {
             Self::HalfKA(stack) => stack.reset(),
             Self::HalfKA_hm(stack) => stack.reset(),
             Self::HalfKP(stack) => stack.reset(),
-            Self::LayerStacks(stack) => stack.reset(),
         }
     }
 
@@ -96,10 +88,6 @@ impl AccumulatorStackVariant {
             Self::HalfKA(stack) => stack.push(dirty_piece),
             Self::HalfKA_hm(stack) => stack.push(dirty_piece),
             Self::HalfKP(stack) => stack.push(dirty_piece),
-            Self::LayerStacks(stack) => {
-                stack.push();
-                stack.current_mut().dirty_piece = dirty_piece;
-            }
         }
     }
 
@@ -110,7 +98,6 @@ impl AccumulatorStackVariant {
             Self::HalfKA(stack) => stack.pop(),
             Self::HalfKA_hm(stack) => stack.pop(),
             Self::HalfKP(stack) => stack.pop(),
-            Self::LayerStacks(stack) => stack.pop(),
         }
     }
 
@@ -136,7 +123,6 @@ mod tests {
         let stack = AccumulatorStackVariant::default();
         assert!(stack.is_halfkp());
         assert!(matches!(stack, AccumulatorStackVariant::HalfKP(_)));
-        assert!(!matches!(stack, AccumulatorStackVariant::LayerStacks(_)));
         assert!(!matches!(stack, AccumulatorStackVariant::HalfKA(_)));
         assert!(!matches!(stack, AccumulatorStackVariant::HalfKA_hm(_)));
     }
@@ -280,7 +266,6 @@ mod tests {
 
         // 各スタックのサイズを確認（デバッグ用）
         let variant_size = size_of::<AccumulatorStackVariant>();
-        let layer_stacks_size = size_of::<AccumulatorStackLayerStacks>();
         let halfka_stack_size = size_of::<HalfKA_hmStack>();
         let halfkp_stack_size = size_of::<HalfKPStack>();
 
@@ -289,7 +274,6 @@ mod tests {
         eprintln!("AccumulatorStackVariant size: {variant_size} bytes");
         eprintln!("HalfKA_hmStack size: {halfka_stack_size} bytes");
         eprintln!("HalfKPStack size: {halfkp_stack_size} bytes");
-        eprintln!("LayerStacks size: {layer_stacks_size} bytes");
 
         // 列挙型のサイズは最大のバリアントのサイズ + タグ
         assert!(variant_size > 0);

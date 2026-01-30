@@ -30,7 +30,6 @@
 use std::sync::Arc;
 
 use super::accumulator::DirtyPiece;
-use super::accumulator_layer_stacks::AccumulatorStackLayerStacks;
 use super::accumulator_stack_variant::AccumulatorStackVariant;
 use super::halfka::HalfKAStack;
 use super::halfka_hm::HalfKA_hmStack;
@@ -191,9 +190,6 @@ impl NNUEEvaluator {
             (NNUENetwork::HalfKP(net), AccumulatorStackVariant::HalfKP(st)) => {
                 net.evaluate(pos, st)
             }
-            (NNUENetwork::LayerStacks(net), AccumulatorStackVariant::LayerStacks(st)) => {
-                net.evaluate(pos, &st.current().accumulator)
-            }
             _ => unreachable!("Network/Stack type mismatch"),
         }
     }
@@ -238,9 +234,6 @@ impl NNUEEvaluator {
             (NNUENetwork::HalfKP(net), AccumulatorStackVariant::HalfKP(st)) => {
                 net.refresh_accumulator(pos, st);
             }
-            (NNUENetwork::LayerStacks(net), AccumulatorStackVariant::LayerStacks(st)) => {
-                net.refresh_accumulator(pos, &mut st.current_mut().accumulator);
-            }
             _ => unreachable!("Network/Stack type mismatch"),
         }
     }
@@ -256,9 +249,6 @@ impl NNUEEvaluator {
             }
             (NNUENetwork::HalfKP(net), AccumulatorStackVariant::HalfKP(st)) => {
                 Self::update_halfkp_accumulator(net, pos, st);
-            }
-            (NNUENetwork::LayerStacks(net), AccumulatorStackVariant::LayerStacks(st)) => {
-                Self::update_layer_stacks_accumulator(net, pos, st);
             }
             _ => unreachable!("Network/Stack type mismatch"),
         }
@@ -366,45 +356,6 @@ impl NNUEEvaluator {
         // 3. それでも失敗なら全計算
         if !updated {
             net.refresh_accumulator(pos, stack);
-        }
-    }
-
-    /// LayerStacks アキュムレータを更新
-    #[inline]
-    fn update_layer_stacks_accumulator(
-        net: &super::network_layer_stacks::NetworkLayerStacks,
-        pos: &Position,
-        stack: &mut AccumulatorStackLayerStacks,
-    ) {
-        let current_entry = stack.current();
-        if current_entry.accumulator.computed_accumulation {
-            return;
-        }
-
-        let mut updated = false;
-
-        // 1. 直前局面で差分更新を試行
-        if let Some(prev_idx) = current_entry.previous {
-            let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
-            if prev_computed {
-                let dirty_piece = stack.current().dirty_piece;
-                let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
-                net.update_accumulator(pos, &dirty_piece, current_acc, prev_acc);
-                updated = true;
-            }
-        }
-
-        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
-        if !updated {
-            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
-                updated = net.forward_update_incremental(pos, stack, source_idx);
-            }
-        }
-
-        // 3. それでも失敗なら全計算
-        if !updated {
-            let acc = &mut stack.current_mut().accumulator;
-            net.refresh_accumulator(pos, acc);
         }
     }
 }
@@ -518,7 +469,6 @@ mod tests {
     /// 各バリアントの push/pop インデックス一貫性テスト
     #[test]
     fn test_all_variants_push_pop_consistency() {
-        use crate::nnue::accumulator_layer_stacks::AccumulatorStackLayerStacks;
         use crate::nnue::network_halfka::AccumulatorStackHalfKA;
         use crate::nnue::network_halfka_hm::AccumulatorStackHalfKA_hm;
         use crate::nnue::network_halfkp::AccumulatorStackHalfKP;
@@ -552,15 +502,6 @@ mod tests {
         let mut stack = AccumulatorStackVariant::HalfKP(HalfKPStack::L512(
             AccumulatorStackHalfKP::<512>::new(),
         ));
-        stack.reset();
-        stack.push(dirty);
-        stack.push(dirty);
-        stack.pop();
-        stack.pop();
-        // パニックしなければ成功
-
-        // LayerStacks
-        let mut stack = AccumulatorStackVariant::LayerStacks(AccumulatorStackLayerStacks::new());
         stack.reset();
         stack.push(dirty);
         stack.push(dirty);

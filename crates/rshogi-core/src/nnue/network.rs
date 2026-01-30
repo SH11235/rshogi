@@ -5,27 +5,24 @@
 //! - **HalfKA**: nnue-pytorch互換（Non-mirror）
 //! - **HalfKA_hm^**: nnue-pytorch互換（Half-Mirror + Factorization）
 //!
-//! # 階層構造（4バリアント）
+//! # 階層構造（3バリアント）
 //!
 //! ```text
 //! NNUENetwork
 //! ├── HalfKA(HalfKANetwork)   // L256/L512/L1024 を内包
 //! ├── HalfKA_hm(HalfKA_hmNetwork)   // L256/L512/L1024 を内包
-//! ├── HalfKP(HalfKPNetwork)   // L256/L512 を内包
-//! └── LayerStacks(Box<NetworkLayerStacks>)
+//! └── HalfKP(HalfKPNetwork)   // L256/L512 を内包
 //! ```
 //!
 //! **「Accumulator は L1 だけで決まる」** を活用し、L2/L3/活性化の追加時に
 //! このファイルの変更は最小限で済む。
 
-use super::accumulator_layer_stacks::AccumulatorStackLayerStacks;
 use super::accumulator_stack_variant::AccumulatorStackVariant;
 use super::activation::detect_activation_from_arch;
 use super::constants::{MAX_ARCH_LEN, NNUE_VERSION, NNUE_VERSION_HALFKA};
 use super::halfka::{HalfKANetwork, HalfKAStack};
 use super::halfka_hm::{HalfKA_hmNetwork, HalfKA_hmStack};
 use super::halfkp::{HalfKPNetwork, HalfKPStack};
-use super::network_layer_stacks::NetworkLayerStacks;
 use super::spec::{Activation, FeatureSet};
 use crate::eval::material;
 use crate::position::Position;
@@ -74,13 +71,12 @@ pub fn set_fv_scale_override(value: i32) {
 // NNUENetwork - アーキテクチャを抽象化するenum
 // =============================================================================
 
-/// NNUEネットワーク（4バリアント階層構造）
+/// NNUEネットワーク（3バリアント階層構造）
 ///
 /// **「Accumulator は L1 だけで決まる」** を活用した設計:
 /// - HalfKA(HalfKANetwork): L256/L512/L1024 を内包
 /// - HalfKA_hm(HalfKA_hmNetwork): L256/L512/L1024 を内包
 /// - HalfKP(HalfKPNetwork): L256/L512 を内包
-/// - LayerStacks: 1536次元 + 9バケット
 ///
 /// L2/L3/活性化の追加時、このenumの変更は不要。
 /// 詳細は `halfka/` や `halfkp/` のモジュールで管理される。
@@ -92,8 +88,6 @@ pub enum NNUENetwork {
     HalfKA_hm(HalfKA_hmNetwork),
     /// HalfKP 特徴量セット（L256/L512）
     HalfKP(HalfKPNetwork),
-    /// LayerStacks（1536次元 + 9バケット）
-    LayerStacks(Box<NetworkLayerStacks>),
 }
 
 impl NNUENetwork {
@@ -164,13 +158,6 @@ impl NNUENetwork {
                     io::Error::new(io::ErrorKind::InvalidData, msg)
                 })?;
 
-                // LayerStacks は特殊処理（ファイルサイズ検出の対象外）
-                if parsed.feature_set == FeatureSet::LayerStacks {
-                    reader.seek(SeekFrom::Start(0))?;
-                    let network = NetworkLayerStacks::read(reader)?;
-                    return Ok(Self::LayerStacks(Box::new(network)));
-                }
-
                 // 4. ファイルサイズからアーキテクチャを検出
                 let detection = super::spec::detect_architecture_from_size(
                     file_size,
@@ -221,10 +208,6 @@ impl NNUENetwork {
                         let network = HalfKPNetwork::read(reader, l1, l2, l3, activation)?;
                         Ok(Self::HalfKP(network))
                     }
-                    FeatureSet::LayerStacks => {
-                        // 上で処理済みなのでここには来ない
-                        unreachable!()
-                    }
                 }
             }
             _ => Err(io::Error::new(
@@ -240,11 +223,6 @@ impl NNUENetwork {
     pub fn from_bytes(bytes: &[u8]) -> io::Result<Self> {
         let mut cursor = Cursor::new(bytes);
         Self::read(&mut cursor)
-    }
-
-    /// LayerStacks アーキテクチャかどうか
-    pub fn is_layer_stacks(&self) -> bool {
-        matches!(self, Self::LayerStacks(_))
     }
 
     /// HalfKA アーキテクチャかどうか
@@ -268,7 +246,6 @@ impl NNUENetwork {
             Self::HalfKA(net) => net.l1_size(),
             Self::HalfKA_hm(net) => net.l1_size(),
             Self::HalfKP(net) => net.l1_size(),
-            Self::LayerStacks(_) => 1536,
         }
     }
 
@@ -278,7 +255,6 @@ impl NNUENetwork {
             Self::HalfKA(net) => net.architecture_name(),
             Self::HalfKA_hm(net) => net.architecture_name(),
             Self::HalfKP(net) => net.architecture_name(),
-            Self::LayerStacks(_) => "LayerStacks",
         }
     }
 
@@ -288,66 +264,6 @@ impl NNUENetwork {
             Self::HalfKA(net) => net.architecture_spec(),
             Self::HalfKA_hm(net) => net.architecture_spec(),
             Self::HalfKP(net) => net.architecture_spec(),
-            Self::LayerStacks(_) => super::spec::ArchitectureSpec::new(
-                super::spec::FeatureSet::LayerStacks,
-                1536,
-                0,
-                0,
-                Activation::CReLU,
-            ),
-        }
-    }
-
-    // LayerStacks 用のメソッド（LayerStacks のみ維持）
-
-    /// 差分計算を使わずにAccumulatorを計算（LayerStacks用）
-    pub fn refresh_accumulator_layer_stacks(
-        &self,
-        pos: &Position,
-        acc: &mut super::accumulator_layer_stacks::AccumulatorLayerStacks,
-    ) {
-        match self {
-            Self::LayerStacks(net) => net.refresh_accumulator(pos, acc),
-            _ => panic!("This method is only for LayerStacks architecture."),
-        }
-    }
-
-    /// 差分計算でAccumulatorを更新（LayerStacks用）
-    pub fn update_accumulator_layer_stacks(
-        &self,
-        pos: &Position,
-        dirty_piece: &super::accumulator::DirtyPiece,
-        acc: &mut super::accumulator_layer_stacks::AccumulatorLayerStacks,
-        prev_acc: &super::accumulator_layer_stacks::AccumulatorLayerStacks,
-    ) {
-        match self {
-            Self::LayerStacks(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
-            _ => panic!("This method is only for LayerStacks architecture."),
-        }
-    }
-
-    /// 複数手分の差分を適用してアキュムレータを更新（LayerStacks用）
-    pub fn forward_update_incremental_layer_stacks(
-        &self,
-        pos: &Position,
-        stack: &mut AccumulatorStackLayerStacks,
-        source_idx: usize,
-    ) -> bool {
-        match self {
-            Self::LayerStacks(net) => net.forward_update_incremental(pos, stack, source_idx),
-            _ => panic!("This method is only for LayerStacks architecture."),
-        }
-    }
-
-    /// 評価値を計算（LayerStacks用）
-    pub fn evaluate_layer_stacks(
-        &self,
-        pos: &Position,
-        acc: &super::accumulator_layer_stacks::AccumulatorLayerStacks,
-    ) -> Value {
-        match self {
-            Self::LayerStacks(net) => net.evaluate(pos, acc),
-            _ => panic!("This method is only for LayerStacks architecture."),
         }
     }
 
@@ -617,7 +533,6 @@ pub fn detect_format(bytes: &[u8]) -> io::Result<NnueFormatInfo> {
 
             // アーキテクチャ名を決定
             let architecture = match parsed.feature_set {
-                FeatureSet::LayerStacks => "LayerStacks".to_string(),
                 FeatureSet::HalfKA_hm => format!("HalfKA_hm{}", parsed.l1),
                 FeatureSet::HalfKA => format!("HalfKA{}", parsed.l1),
                 FeatureSet::HalfKP => format!("HalfKP{}", parsed.l1),
@@ -650,51 +565,6 @@ pub fn get_network() -> Option<&'static NNUENetwork> {
 // =============================================================================
 // 内部ヘルパー関数（ロジック集約用）
 // =============================================================================
-
-/// LayerStacks アキュムレータを更新して評価（内部実装）
-///
-/// `evaluate_layer_stacks` と `evaluate_dispatch` から呼び出される共通ロジック。
-/// network は既に取得済みで、アーキテクチャチェックも完了していることが前提。
-#[inline]
-fn update_and_evaluate_layer_stacks(
-    network: &NNUENetwork,
-    pos: &Position,
-    stack: &mut AccumulatorStackLayerStacks,
-) -> Value {
-    // アキュムレータの更新
-    let current_entry = stack.current();
-    if !current_entry.accumulator.computed_accumulation {
-        let mut updated = false;
-
-        // 1. 直前局面で差分更新を試行
-        if let Some(prev_idx) = current_entry.previous {
-            let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
-            if prev_computed {
-                let dirty_piece = stack.current().dirty_piece;
-                let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
-                network.update_accumulator_layer_stacks(pos, &dirty_piece, current_acc, prev_acc);
-                updated = true;
-            }
-        }
-
-        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
-        if !updated {
-            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
-                updated = network.forward_update_incremental_layer_stacks(pos, stack, source_idx);
-            }
-        }
-
-        // 3. それでも失敗なら全計算
-        if !updated {
-            let acc = &mut stack.current_mut().accumulator;
-            network.refresh_accumulator_layer_stacks(pos, acc);
-        }
-    }
-
-    // 評価
-    let acc_ref = &stack.current().accumulator;
-    network.evaluate_layer_stacks(pos, acc_ref)
-}
 
 /// HalfKA_hm アキュムレータを更新して評価（内部実装）
 #[inline]
@@ -807,11 +677,6 @@ fn update_and_evaluate_halfkp(
     network.evaluate_halfkp(pos, stack)
 }
 
-/// ロードされたNNUEがLayerStacksアーキテクチャかどうか
-pub fn is_layer_stacks_loaded() -> bool {
-    NETWORK.get().map(|n| n.is_layer_stacks()).unwrap_or(false)
-}
-
 /// ロードされたNNUEがHalfKA_hm256アーキテクチャかどうか
 pub fn is_halfka_hm_256_loaded() -> bool {
     NETWORK.get().map(|n| n.is_halfka_hm() && n.l1_size() == 256).unwrap_or(false)
@@ -842,25 +707,6 @@ pub fn is_halfka_1024_loaded() -> bool {
     NETWORK.get().map(|n| n.is_halfka() && n.l1_size() == 1024).unwrap_or(false)
 }
 
-/// 局面を評価（LayerStacks用）
-///
-/// AccumulatorStackLayerStacks を使って差分更新し、計算済みなら再利用する。
-/// NNUEが初期化されていない場合は駒得評価にフォールバックする。
-pub fn evaluate_layer_stacks(pos: &Position, stack: &mut AccumulatorStackLayerStacks) -> Value {
-    // NNUEがなければMaterial評価にフォールバック
-    let Some(network) = NETWORK.get() else {
-        return material::evaluate_material(pos);
-    };
-
-    // LayerStacks 以外はエラー
-    if !network.is_layer_stacks() {
-        panic!("Non-LayerStacks architecture detected. Use evaluate() with AccumulatorStack.");
-    }
-
-    // 内部ヘルパー関数を呼び出し
-    update_and_evaluate_layer_stacks(network, pos, stack)
-}
-
 /// アーキテクチャに応じて適切な評価関数を呼び出す
 ///
 /// AccumulatorStackVariant を受け取り、内部のバリアントに応じて
@@ -872,11 +718,8 @@ pub fn evaluate_dispatch(pos: &Position, stack: &mut AccumulatorStackVariant) ->
         return material::evaluate_material(pos);
     };
 
-    // バリアントに応じて適切な評価関数を呼び出し（4バリアント）
+    // バリアントに応じて適切な評価関数を呼び出し（3バリアント）
     match stack {
-        AccumulatorStackVariant::LayerStacks(s) => {
-            update_and_evaluate_layer_stacks(network, pos, s)
-        }
         AccumulatorStackVariant::HalfKA(s) => update_and_evaluate_halfka(network, pos, s),
         AccumulatorStackVariant::HalfKA_hm(s) => update_and_evaluate_halfka_hm(network, pos, s),
         AccumulatorStackVariant::HalfKP(s) => update_and_evaluate_halfkp(network, pos, s),
@@ -919,45 +762,6 @@ mod tests {
         // フォールバックの駒得評価は手番に依存して符号が変わる可能性があるが、
         // ここでは「評価が成功した」ことのみ検証する。
         let _ = (value1, value2);
-    }
-
-    /// NNUENetwork のアーキテクチャ自動検出テスト
-    ///
-    /// 外部NNUEファイルが必要なため通常はスキップ。
-    /// 実行方法: `NNUE_TEST_FILE=/path/to/file.nnue cargo test test_nnue_network_auto_detect_layer_stacks -- --ignored`
-    ///
-    /// テスト結果 (epoch82.nnue):
-    /// - LayerStacks として正しく認識される
-    /// - 評価値: 0 (学習初期のモデル)
-    #[test]
-    #[ignore]
-    fn test_nnue_network_auto_detect_layer_stacks() {
-        let path = std::env::var("NNUE_TEST_FILE")
-            .unwrap_or_else(|_| "/path/to/your/layer_stacks.nnue".to_string());
-        let network = match NNUENetwork::load(path) {
-            Ok(n) => n,
-            Err(e) => {
-                eprintln!("Skipping test: {e}");
-                return;
-            }
-        };
-
-        // LayerStacks として認識されることを確認
-        assert!(network.is_layer_stacks(), "epoch82.nnue should be detected as LayerStacks");
-        assert_eq!(network.architecture_name(), "LayerStacks");
-
-        // LayerStacks 用の評価が動作することを確認
-        let mut pos = crate::position::Position::new();
-        pos.set_sfen(SFEN_HIRATE).unwrap();
-
-        let mut acc = crate::nnue::AccumulatorLayerStacks::new();
-        network.refresh_accumulator_layer_stacks(&pos, &mut acc);
-
-        let value = network.evaluate_layer_stacks(&pos, &acc);
-        eprintln!("LayerStacks evaluate: {}", value.raw());
-
-        // 評価値が妥当な範囲内
-        assert!(value.raw().abs() < 1000);
     }
 
     /// parse_fv_scale_from_arch のユニットテスト

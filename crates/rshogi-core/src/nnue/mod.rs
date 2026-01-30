@@ -23,7 +23,6 @@
 //! - NNUE 未初期化時のフォールバック駒得評価
 
 mod accumulator;
-mod accumulator_layer_stacks;
 mod accumulator_stack_variant;
 pub mod activation;
 pub mod aliases;
@@ -34,12 +33,10 @@ mod constants;
 mod diff;
 mod evaluator;
 mod feature_transformer;
-mod feature_transformer_layer_stacks;
 pub mod features;
 pub(crate) mod halfka;
 pub(crate) mod halfka_hm;
 pub(crate) mod halfkp;
-mod layer_stacks;
 mod layers;
 mod leb128;
 #[macro_use]
@@ -48,15 +45,11 @@ mod network;
 pub(crate) mod network_halfka;
 pub(crate) mod network_halfka_hm;
 pub(crate) mod network_halfkp;
-mod network_layer_stacks;
 pub mod prelude;
 pub mod spec;
 
 pub use accumulator::{
     Accumulator, AccumulatorStack, ChangedPiece, DirtyPiece, HandChange, StackEntry,
-};
-pub use accumulator_layer_stacks::{
-    AccumulatorLayerStacks, AccumulatorStackLayerStacks, StackEntryLayerStacks,
 };
 pub use accumulator_stack_variant::AccumulatorStackVariant;
 pub use bona_piece::{halfkp_index, BonaPiece, FE_END};
@@ -67,23 +60,17 @@ pub use bona_piece_halfka_hm::{
 pub use constants::*;
 pub use diff::get_changed_features;
 pub use feature_transformer::FeatureTransformer;
-pub use feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
 pub use features::{
     Feature, FeatureSet, HalfKA, HalfKAFeatureSet, HalfKA_hm, HalfKA_hm_FeatureSet, HalfKP,
     HalfKPFeatureSet, TriggerEvent,
 };
-pub use layer_stacks::{
-    compute_bucket_index, sqr_clipped_relu_transform, LayerStackBucket, LayerStacks,
-};
 pub use layers::{AffineTransform, ClippedReLU};
 pub use network::{
-    detect_format, evaluate_dispatch, evaluate_layer_stacks, get_fv_scale_override, get_network,
-    init_nnue, init_nnue_from_bytes, is_halfka_1024_loaded, is_halfka_256_loaded,
-    is_halfka_512_loaded, is_halfka_hm_1024_loaded, is_halfka_hm_256_loaded,
-    is_halfka_hm_512_loaded, is_layer_stacks_loaded, is_nnue_initialized, set_fv_scale_override,
-    NNUENetwork, NnueFormatInfo,
+    detect_format, evaluate_dispatch, get_fv_scale_override, get_network, init_nnue,
+    init_nnue_from_bytes, is_halfka_1024_loaded, is_halfka_256_loaded, is_halfka_512_loaded,
+    is_halfka_hm_1024_loaded, is_halfka_hm_256_loaded, is_halfka_hm_512_loaded,
+    is_nnue_initialized, set_fv_scale_override, NNUENetwork, NnueFormatInfo,
 };
-pub use network_layer_stacks::NetworkLayerStacks;
 
 // const generics 版統一実装（内部型は pub(crate) に隠蔽）
 pub use activation::{detect_activation_from_arch, CReLU, FtActivation, PairwiseCReLU, SCReLU};
