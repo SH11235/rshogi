@@ -4,10 +4,11 @@
 //!
 //! # 設計
 //!
-//! **「Accumulator は L1 だけで決まる」** を活用し、3バリアントに集約:
+//! **「Accumulator は L1 だけで決まる」** を活用し、4バリアントに集約:
 //! - HalfKA(HalfKAStack): L256/L512/L1024 を内包
 //! - HalfKA_hm(HalfKA_hmStack): L256/L512/L1024 を内包
 //! - HalfKP(HalfKPStack): L256/L512 を内包
+//! - LayerStacks(LayerStackStack): Product Pooling + LayerStack アーキテクチャ
 //!
 //! L2/L3/活性化の追加時にこのファイルの変更は不要。
 
@@ -15,6 +16,7 @@ use super::accumulator::DirtyPiece;
 use super::halfka::HalfKAStack;
 use super::halfka_hm::HalfKA_hmStack;
 use super::halfkp::HalfKPStack;
+use super::layerstack::LayerStackStack;
 use super::network::NNUENetwork;
 
 /// アキュムレータスタックのバリアント（列挙型）
@@ -22,12 +24,13 @@ use super::network::NNUENetwork;
 /// NNUEアーキテクチャに応じた適切なスタックを1つだけ保持する。
 /// これにより、メモリ使用量を削減し、do_move/undo_moveの効率を向上させる。
 ///
-/// # 3バリアント構造
+/// # 4バリアント構造
 ///
 /// L1 サイズのみで分類し、L2/L3/活性化は内部で処理:
 /// - **HalfKA**: L256/L512/L1024 を HalfKAStack で管理
 /// - **HalfKA_hm**: L256/L512/L1024 を HalfKA_hmStack で管理
 /// - **HalfKP**: L256/L512 を HalfKPStack で管理
+/// - **LayerStacks**: Product Pooling + LayerStack を LayerStackStack で管理
 #[allow(non_camel_case_types)]
 pub enum AccumulatorStackVariant {
     /// HalfKA 特徴量セット（L256/L512/L1024）
@@ -36,6 +39,8 @@ pub enum AccumulatorStackVariant {
     HalfKA_hm(HalfKA_hmStack),
     /// HalfKP 特徴量セット（L256/L512）
     HalfKP(HalfKPStack),
+    /// LayerStack アーキテクチャ（L1536）
+    LayerStacks(LayerStackStack),
 }
 
 impl AccumulatorStackVariant {
@@ -47,6 +52,7 @@ impl AccumulatorStackVariant {
             NNUENetwork::HalfKA(net) => Self::HalfKA(HalfKAStack::from_network(net)),
             NNUENetwork::HalfKA_hm(net) => Self::HalfKA_hm(HalfKA_hmStack::from_network(net)),
             NNUENetwork::HalfKP(net) => Self::HalfKP(HalfKPStack::from_network(net)),
+            NNUENetwork::LayerStacks(net) => Self::LayerStacks(LayerStackStack::from_network(net)),
         }
     }
 
@@ -67,6 +73,9 @@ impl AccumulatorStackVariant {
                 stack.l1_size() == net.l1_size()
             }
             (Self::HalfKP(stack), NNUENetwork::HalfKP(net)) => stack.l1_size() == net.l1_size(),
+            (Self::LayerStacks(stack), NNUENetwork::LayerStacks(net)) => {
+                stack.l1_size() == net.l1_size()
+            }
             _ => false,
         }
     }
@@ -78,6 +87,7 @@ impl AccumulatorStackVariant {
             Self::HalfKA(stack) => stack.reset(),
             Self::HalfKA_hm(stack) => stack.reset(),
             Self::HalfKP(stack) => stack.reset(),
+            Self::LayerStacks(stack) => stack.reset(),
         }
     }
 
@@ -88,6 +98,7 @@ impl AccumulatorStackVariant {
             Self::HalfKA(stack) => stack.push(dirty_piece),
             Self::HalfKA_hm(stack) => stack.push(dirty_piece),
             Self::HalfKP(stack) => stack.push(dirty_piece),
+            Self::LayerStacks(stack) => stack.push(dirty_piece),
         }
     }
 
@@ -98,6 +109,7 @@ impl AccumulatorStackVariant {
             Self::HalfKA(stack) => stack.pop(),
             Self::HalfKA_hm(stack) => stack.pop(),
             Self::HalfKP(stack) => stack.pop(),
+            Self::LayerStacks(stack) => stack.pop(),
         }
     }
 
@@ -105,6 +117,12 @@ impl AccumulatorStackVariant {
     #[inline]
     pub fn is_halfkp(&self) -> bool {
         matches!(self, Self::HalfKP(_))
+    }
+
+    /// 現在のバリアントがLayerStacksかどうか
+    #[inline]
+    pub fn is_layer_stacks(&self) -> bool {
+        matches!(self, Self::LayerStacks(_))
     }
 }
 

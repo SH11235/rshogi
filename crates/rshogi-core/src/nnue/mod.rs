@@ -7,6 +7,7 @@
 //! - **HalfKP**: 従来のclassic NNUE（水匠/tanuki互換）
 //! - **HalfKA**: nnue-pytorch互換（Non-mirror）
 //! - **HalfKA_hm^**: nnue-pytorch互換（Half-Mirror + Factorization）
+//! - **LayerStack**: 氷彗互換アーキテクチャ（Product Pooling + LayerStacks）
 //!
 //! # const generics 版統一実装
 //!
@@ -38,6 +39,7 @@ pub(crate) mod halfka;
 pub(crate) mod halfka_hm;
 pub(crate) mod halfkp;
 mod layers;
+pub mod layerstack;
 mod leb128;
 #[macro_use]
 pub mod macros;
