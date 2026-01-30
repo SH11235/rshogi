@@ -1,6 +1,6 @@
 [package]
 name = "rshogi-core"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["sh11235"]
 description = "A high-performance shogi engine core library with NNUE evaluation"
