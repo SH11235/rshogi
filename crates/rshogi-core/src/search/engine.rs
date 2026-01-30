@@ -159,6 +159,8 @@ pub struct SearchResult {
     pub depth: Depth,
     /// 探索ノード数
     pub nodes: u64,
+    /// Principal Variation（読み筋）
+    pub pv: Vec<Move>,
 }
 
 // =============================================================================
@@ -374,6 +376,7 @@ struct BestThreadResult {
     nodes: u64,
     best_previous_score: Option<Value>,
     best_previous_average_score: Option<Value>,
+    pv: Vec<Move>,
 }
 
 fn collect_best_thread_result(
@@ -402,6 +405,7 @@ fn collect_best_thread_result(
             nodes,
             best_previous_score,
             best_previous_average_score,
+            pv: Vec::new(),
         };
     }
 
@@ -420,25 +424,17 @@ fn collect_best_thread_result(
         }
     }
 
-    let ponder_move = worker
-        .root_moves
-        .iter()
-        .find(|rm| rm.mv() == best_move)
-        .and_then(|rm| {
-            if rm.pv.len() > 1 {
-                Some(rm.pv[1])
-            } else {
-                None
-            }
-        })
+    let best_rm = worker.root_moves.iter().find(|rm| rm.mv() == best_move);
+
+    let ponder_move = best_rm
+        .and_then(|rm| if rm.pv.len() > 1 { Some(rm.pv[1]) } else { None })
         .unwrap_or(Move::NONE);
 
-    let score = worker
-        .root_moves
-        .iter()
-        .find(|rm| rm.mv() == best_move)
+    let score = best_rm
         .map(|rm| rm.score)
         .unwrap_or(worker.root_moves.get(0).map(|rm| rm.score).unwrap_or(Value::ZERO));
+
+    let pv = best_rm.map(|rm| rm.pv.clone()).unwrap_or_default();
 
     BestThreadResult {
         best_move,
@@ -448,6 +444,7 @@ fn collect_best_thread_result(
         nodes,
         best_previous_score,
         best_previous_average_score,
+        pv,
     }
 }
 
@@ -864,6 +861,7 @@ impl Search {
                         // and aspiration window initialization, matching native behavior.
                         best_previous_score: Some(r.best_score),
                         best_previous_average_score: Some(r.best_score),
+                        pv: Vec::new(), // Cannot get PV from helper in Wasm
                     }
                 })
             };
@@ -889,6 +887,7 @@ impl Search {
             nodes: _best_nodes,
             best_previous_score,
             best_previous_average_score,
+            pv,
         } = best_result;
         let total_nodes = {
             let main_nodes = self.worker.as_ref().map(|w| w.nodes).unwrap_or(0);
@@ -925,6 +924,7 @@ impl Search {
             score,
             depth: completed_depth,
             nodes: total_nodes,
+            pv,
         }
     }
 
