@@ -407,6 +407,7 @@ pub struct ArchDetectionResult {
 const KNOWN_PAYLOADS: &[(FeatureSet, usize, usize, usize, u64)] = &[
     // HalfKP
     (FeatureSet::HalfKP, 256, 32, 32, network_payload_halfkp(256, 32, 32)),
+    (FeatureSet::HalfKP, 512, 8, 64, network_payload_halfkp(512, 8, 64)),
     (FeatureSet::HalfKP, 512, 8, 96, network_payload_halfkp(512, 8, 96)),
     (FeatureSet::HalfKP, 512, 32, 32, network_payload_halfkp(512, 32, 32)),
     (FeatureSet::HalfKP, 768, 16, 64, network_payload_halfkp(768, 16, 64)),

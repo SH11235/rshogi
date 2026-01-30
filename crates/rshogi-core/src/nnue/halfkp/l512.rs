@@ -9,7 +9,8 @@ use crate::types::Value;
 // 型エイリアスを aliases 経由でインポート
 use crate::nnue::aliases::{
     HalfKP512CReLU, HalfKP512Pairwise, HalfKP512SCReLU, HalfKP512_32_32CReLU,
-    HalfKP512_32_32Pairwise, HalfKP512_32_32SCReLU,
+    HalfKP512_32_32Pairwise, HalfKP512_32_32SCReLU, HalfKP512_8_64CReLU, HalfKP512_8_64Pairwise,
+    HalfKP512_8_64SCReLU,
 };
 
 crate::define_l1_variants!(
@@ -20,6 +21,10 @@ crate::define_l1_variants!(
     stack AccumulatorStackHalfKP<512>,
 
     variants {
+        // L2=8, L3=64 バリアント
+        (8,  64, CReLU,         "CReLU")    => CReLU8x64     : HalfKP512_8_64CReLU,
+        (8,  64, SCReLU,        "SCReLU")   => SCReLU8x64    : HalfKP512_8_64SCReLU,
+        (8,  64, PairwiseCReLU, "Pairwise") => Pairwise8x64  : HalfKP512_8_64Pairwise,
         // L2=8, L3=96 バリアント
         (8,  96, CReLU,         "CReLU")    => CReLU8x96     : HalfKP512CReLU,
         (8,  96, SCReLU,        "SCReLU")   => SCReLU8x96    : HalfKP512SCReLU,
@@ -37,20 +42,20 @@ mod tests {
 
     #[test]
     fn test_supported_specs() {
-        assert_eq!(HalfKPL512::SUPPORTED_SPECS.len(), 6);
+        assert_eq!(HalfKPL512::SUPPORTED_SPECS.len(), 9);
 
-        // 8-96 CReLU
+        // 8-64 CReLU
         let spec = &HalfKPL512::SUPPORTED_SPECS[0];
         assert_eq!(spec.feature_set, FeatureSet::HalfKP);
         assert_eq!(spec.l1, 512);
         assert_eq!(spec.l2, 8);
-        assert_eq!(spec.l3, 96);
+        assert_eq!(spec.l3, 64);
         assert_eq!(spec.activation, Activation::CReLU);
 
-        // 32-32 CReLU
+        // 8-96 CReLU
         let spec = &HalfKPL512::SUPPORTED_SPECS[3];
-        assert_eq!(spec.l2, 32);
-        assert_eq!(spec.l3, 32);
+        assert_eq!(spec.l2, 8);
+        assert_eq!(spec.l3, 96);
     }
 
     #[test]
@@ -93,6 +98,7 @@ mod tests {
         let combinations: Vec<_> =
             HalfKPL512::SUPPORTED_SPECS.iter().map(|s| (s.l2, s.l3)).collect();
 
+        assert!(combinations.contains(&(8, 64)), "Should support L2=8, L3=64");
         assert!(combinations.contains(&(8, 96)), "Should support L2=8, L3=96");
         assert!(combinations.contains(&(32, 32)), "Should support L2=32, L3=32");
     }

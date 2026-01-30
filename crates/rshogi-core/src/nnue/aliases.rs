@@ -69,6 +69,10 @@ pub use crate::nnue::network_halfkp::{
     HalfKP512_32_32CReLU,
     HalfKP512_32_32Pairwise,
     HalfKP512_32_32SCReLU,
+    // L1=512, L2=8, L3=64
+    HalfKP512_8_64CReLU,
+    HalfKP512_8_64Pairwise,
+    HalfKP512_8_64SCReLU,
     // L1=768, L2=16, L3=64
     HalfKP768CReLU,
     HalfKP768Pairwise,
