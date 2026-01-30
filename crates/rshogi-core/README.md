@@ -23,22 +23,23 @@ rshogi-core = "0.1"
 ## Usage
 
 ```rust
-use rshogi_core::{Position, SearchOptions, Engine};
+use rshogi_core::position::{Position, SFEN_HIRATE};
+use rshogi_core::search::{Search, LimitsType};
 
 // Create a new position (starting position)
-let mut pos = Position::default();
+let mut pos = Position::new();
+pos.set_sfen(SFEN_HIRATE).unwrap();
 
-// Create engine and search
-let mut engine = Engine::new();
-engine.set_position(pos);
+// Create search engine (transposition table size: 64MB)
+let mut search = Search::new(64);
 
-let options = SearchOptions {
-    depth: Some(10),
-    ..Default::default()
-};
+// Set search limits
+let mut limits = LimitsType::new();
+limits.depth = 10;
 
-let result = engine.search(&options);
-println!("Best move: {}", result.best_move);
+// Run search
+let result = search.go(&mut pos, limits, None::<fn(&_)>);
+println!("Best move: {}", result.best_move.to_usi());
 ```
 
 ## License
