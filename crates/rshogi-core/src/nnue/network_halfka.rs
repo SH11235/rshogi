@@ -1262,6 +1262,10 @@ use super::activation::CReLU;
 /// HalfKA 256x2-32-32 CReLU
 pub type HalfKA256CReLU = NetworkHalfKA<256, 512, 512, 32, 32, CReLU>;
 
+// L1=512, FT_OUT=1024, L2=8, L3=64
+/// HalfKA 512x2-8-64 CReLU
+pub type HalfKA512_8_64CReLU = NetworkHalfKA<512, 1024, 1024, 8, 64, CReLU>;
+
 // L1=512, FT_OUT=1024, L2=8, L3=96
 /// HalfKA 512x2-8-96 CReLU
 pub type HalfKA512CReLU = NetworkHalfKA<512, 1024, 1024, 8, 96, CReLU>;
@@ -1270,6 +1274,10 @@ pub type HalfKA512CReLU = NetworkHalfKA<512, 1024, 1024, 8, 96, CReLU>;
 /// HalfKA 512x2-32-32 CReLU
 pub type HalfKA512_32_32CReLU = NetworkHalfKA<512, 1024, 1024, 32, 32, CReLU>;
 
+// L1=1024, FT_OUT=2048, L2=8, L3=64
+/// HalfKA 1024x2-8-64 CReLU
+pub type HalfKA1024_8_64CReLU = NetworkHalfKA<1024, 2048, 2048, 8, 64, CReLU>;
+
 // L1=1024, FT_OUT=2048, L2=8, L3=96
 /// HalfKA 1024x2-8-96 CReLU
 pub type HalfKA1024CReLU = NetworkHalfKA<1024, 2048, 2048, 8, 96, CReLU>;
@@ -1277,6 +1285,10 @@ pub type HalfKA1024CReLU = NetworkHalfKA<1024, 2048, 2048, 8, 96, CReLU>;
 // L1=1024, FT_OUT=2048, L2=8, L3=32
 /// HalfKA 1024x2-8-32 CReLU
 pub type HalfKA1024_8_32CReLU = NetworkHalfKA<1024, 2048, 2048, 8, 32, CReLU>;
+
+// L1=768, FT_OUT=1536, L2=16, L3=64
+/// HalfKA 768x2-16-64 CReLU
+pub type HalfKA768CReLU = NetworkHalfKA<768, 1536, 1536, 16, 64, CReLU>;
 
 // =============================================================================
 // テスト

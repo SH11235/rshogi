@@ -1287,9 +1287,12 @@ pub type HalfKP512_8_64CReLU = NetworkHalfKP<512, 1024, 1024, 8, 64, CReLU>;
 pub type HalfKP512_32_32CReLU = NetworkHalfKP<512, 1024, 1024, 32, 32, CReLU>;
 
 // L1=1024, FT_OUT=2048, L2=8, L3=32
-// CReLU/SCReLU: L1_INPUT=2048, Pairwise: L1_INPUT=1024
 /// HalfKP 1024x2-8-32 CReLU
 pub type HalfKP1024_8_32CReLU = NetworkHalfKP<1024, 2048, 2048, 8, 32, CReLU>;
+
+// L1=1024, FT_OUT=2048, L2=8, L3=64
+/// HalfKP 1024x2-8-64 CReLU
+pub type HalfKP1024_8_64CReLU = NetworkHalfKP<1024, 2048, 2048, 8, 64, CReLU>;
 
 // L1=768, FT_OUT=1536, L2=16, L3=64
 // CReLU/SCReLU: L1_INPUT=1536, Pairwise: L1_INPUT=768

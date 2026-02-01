@@ -605,15 +605,15 @@ mod tests {
 
         // HalfKA サポートアーキテクチャ数
         let halfka_specs = HalfKANetwork::supported_specs();
-        assert_eq!(halfka_specs.len(), 5); // 256:1 + 512:2 + 1024:2
+        assert_eq!(halfka_specs.len(), 8); // 256:1 + 512:3 + 768:1 + 1024:3
 
         // HalfKA_hm サポートアーキテクチャ数
         let halfka_hm_specs = HalfKA_hmNetwork::supported_specs();
-        assert_eq!(halfka_hm_specs.len(), 5); // 256:1 + 512:2 + 1024:2
+        assert_eq!(halfka_hm_specs.len(), 8); // 256:1 + 512:3 + 768:1 + 1024:3
 
         // HalfKP サポートアーキテクチャ数
         let halfkp_specs = HalfKPNetwork::supported_specs();
-        assert_eq!(halfkp_specs.len(), 6); // 256:1 + 512:3 + 768:1 + 1024:1
+        assert_eq!(halfkp_specs.len(), 7); // 256:1 + 512:3 + 768:1 + 1024:2
 
         // 全アーキテクチャで feature_set が正しいことを確認
         for spec in &halfka_specs {
