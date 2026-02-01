@@ -1266,59 +1266,35 @@ fn parse_fv_scale_from_arch(arch_str: &str) -> Option<i32> {
 // 型エイリアス
 // =============================================================================
 
-use super::activation::{CReLU, PairwiseCReLU, SCReLU};
+use super::activation::CReLU;
 
 // L1=256, FT_OUT=512
 // CReLU/SCReLU: L1_INPUT=512, Pairwise: L1_INPUT=256
 /// HalfKP 256x2-32-32 CReLU
 pub type HalfKP256CReLU = NetworkHalfKP<256, 512, 512, 32, 32, CReLU>;
-/// HalfKP 256x2-32-32 SCReLU
-pub type HalfKP256SCReLU = NetworkHalfKP<256, 512, 512, 32, 32, SCReLU>;
-/// HalfKP 256/2x2-32-32 PairwiseCReLU (L1入力=256, Pairwise乗算で次元半減)
-pub type HalfKP256Pairwise = NetworkHalfKP<256, 512, 256, 32, 32, PairwiseCReLU>;
 
 // L1=512, FT_OUT=1024
 // CReLU/SCReLU: L1_INPUT=1024, Pairwise: L1_INPUT=512
 /// HalfKP 512x2-8-96 CReLU
 pub type HalfKP512CReLU = NetworkHalfKP<512, 1024, 1024, 8, 96, CReLU>;
-/// HalfKP 512x2-8-96 SCReLU
-pub type HalfKP512SCReLU = NetworkHalfKP<512, 1024, 1024, 8, 96, SCReLU>;
-/// HalfKP 512/2x2-8-96 PairwiseCReLU (L1入力=512, Pairwise乗算で次元半減)
-pub type HalfKP512Pairwise = NetworkHalfKP<512, 1024, 512, 8, 96, PairwiseCReLU>;
 
 // L1=512, FT_OUT=1024, L2=8, L3=64
 /// HalfKP 512x2-8-64 CReLU
 pub type HalfKP512_8_64CReLU = NetworkHalfKP<512, 1024, 1024, 8, 64, CReLU>;
-/// HalfKP 512x2-8-64 SCReLU
-pub type HalfKP512_8_64SCReLU = NetworkHalfKP<512, 1024, 1024, 8, 64, SCReLU>;
-/// HalfKP 512/2x2-8-64 PairwiseCReLU (L1入力=512, Pairwise乗算で次元半減)
-pub type HalfKP512_8_64Pairwise = NetworkHalfKP<512, 1024, 512, 8, 64, PairwiseCReLU>;
 
 // L1=512, FT_OUT=1024, L2=32, L3=32
 /// HalfKP 512x2-32-32 CReLU
 pub type HalfKP512_32_32CReLU = NetworkHalfKP<512, 1024, 1024, 32, 32, CReLU>;
-/// HalfKP 512x2-32-32 SCReLU
-pub type HalfKP512_32_32SCReLU = NetworkHalfKP<512, 1024, 1024, 32, 32, SCReLU>;
-/// HalfKP 512/2x2-32-32 PairwiseCReLU (L1入力=512, Pairwise乗算で次元半減)
-pub type HalfKP512_32_32Pairwise = NetworkHalfKP<512, 1024, 512, 32, 32, PairwiseCReLU>;
 
 // L1=1024, FT_OUT=2048, L2=8, L3=32
 // CReLU/SCReLU: L1_INPUT=2048, Pairwise: L1_INPUT=1024
 /// HalfKP 1024x2-8-32 CReLU
 pub type HalfKP1024_8_32CReLU = NetworkHalfKP<1024, 2048, 2048, 8, 32, CReLU>;
-/// HalfKP 1024x2-8-32 SCReLU
-pub type HalfKP1024_8_32SCReLU = NetworkHalfKP<1024, 2048, 2048, 8, 32, SCReLU>;
-/// HalfKP 1024/2x2-8-32 PairwiseCReLU (L1入力=1024, Pairwise乗算で次元半減)
-pub type HalfKP1024_8_32Pairwise = NetworkHalfKP<1024, 2048, 1024, 8, 32, PairwiseCReLU>;
 
 // L1=768, FT_OUT=1536, L2=16, L3=64
 // CReLU/SCReLU: L1_INPUT=1536, Pairwise: L1_INPUT=768
 /// HalfKP 768x2-16-64 CReLU
 pub type HalfKP768CReLU = NetworkHalfKP<768, 1536, 1536, 16, 64, CReLU>;
-/// HalfKP 768x2-16-64 SCReLU
-pub type HalfKP768SCReLU = NetworkHalfKP<768, 1536, 1536, 16, 64, SCReLU>;
-/// HalfKP 768/2x2-16-64 PairwiseCReLU (L1入力=768, Pairwise乗算で次元半減)
-pub type HalfKP768Pairwise = NetworkHalfKP<768, 1536, 768, 16, 64, PairwiseCReLU>;
 
 // =============================================================================
 // テスト
@@ -1408,6 +1384,6 @@ mod tests {
     fn test_type_aliases() {
         // 型エイリアスがコンパイルできることを確認
         fn _check_halfkp_256_crelu(_: HalfKP256CReLU) {}
-        fn _check_halfkp_512_screlu(_: HalfKP512SCReLU) {}
+        fn _check_halfkp_512_crelu(_: HalfKP512CReLU) {}
     }
 }

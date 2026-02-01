@@ -9,7 +9,7 @@ use crate::position::Position;
 use crate::types::Value;
 
 // 型エイリアスを aliases 経由でインポート
-use crate::nnue::aliases::{HalfKA256CReLU, HalfKA256Pairwise, HalfKA256SCReLU};
+use crate::nnue::aliases::HalfKA256CReLU;
 
 crate::define_l1_variants!(
     enum HalfKA_L256,
@@ -20,8 +20,6 @@ crate::define_l1_variants!(
 
     variants {
         (32, 32, CReLU,         "CReLU")    => CReLU32x32        : HalfKA256CReLU,
-        (32, 32, SCReLU,        "SCReLU")   => SCReLU32x32       : HalfKA256SCReLU,
-        (32, 32, PairwiseCReLU, "Pairwise") => Pairwise32x32     : HalfKA256Pairwise,
     }
 );
 
@@ -31,7 +29,7 @@ mod tests {
 
     #[test]
     fn test_supported_specs() {
-        assert_eq!(HalfKA_L256::SUPPORTED_SPECS.len(), 3);
+        assert_eq!(HalfKA_L256::SUPPORTED_SPECS.len(), 1);
 
         let spec = &HalfKA_L256::SUPPORTED_SPECS[0];
         assert_eq!(spec.feature_set, FeatureSet::HalfKA);
@@ -67,37 +65,9 @@ mod tests {
     #[test]
     fn test_activation_output_dim_divisor() {
         for spec in HalfKA_L256::SUPPORTED_SPECS {
-            match spec.activation {
-                Activation::CReLU | Activation::SCReLU => {
-                    assert_eq!(
-                        spec.activation.output_dim_divisor(),
-                        1,
-                        "CReLU/SCReLU should have divisor 1"
-                    );
-                }
-                Activation::PairwiseCReLU => {
-                    assert_eq!(
-                        spec.activation.output_dim_divisor(),
-                        2,
-                        "PairwiseCReLU should have divisor 2"
-                    );
-                }
-            }
+            assert_eq!(spec.activation, Activation::CReLU);
+            assert_eq!(spec.activation.output_dim_divisor(), 1);
         }
-    }
-
-    /// マクロ生成: すべての活性化タイプがサポートされていることを確認
-    #[test]
-    fn test_all_activations_present() {
-        let activations: Vec<_> =
-            HalfKA_L256::SUPPORTED_SPECS.iter().map(|s| s.activation).collect();
-
-        assert!(activations.contains(&Activation::CReLU), "CReLU should be supported");
-        assert!(activations.contains(&Activation::SCReLU), "SCReLU should be supported");
-        assert!(
-            activations.contains(&Activation::PairwiseCReLU),
-            "PairwiseCReLU should be supported"
-        );
     }
 
     /// マクロ生成: L2/L3 の妥当な範囲チェック

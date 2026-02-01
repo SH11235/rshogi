@@ -344,8 +344,8 @@ mod tests {
     #[test]
     fn test_supported_specs_combined() {
         let specs = HalfKA_hmNetwork::supported_specs();
-        // 256: 3, 512: 6, 1024: 6
-        assert_eq!(specs.len(), 15);
+        // 256: 1, 512: 2, 1024: 2
+        assert_eq!(specs.len(), 5);
 
         // 全て HalfKA_hm
         for spec in &specs {

@@ -7,7 +7,7 @@ use crate::position::Position;
 use crate::types::Value;
 
 // 型エイリアスを aliases 経由でインポート
-use crate::nnue::aliases::{HalfKP1024_8_32CReLU, HalfKP1024_8_32Pairwise, HalfKP1024_8_32SCReLU};
+use crate::nnue::aliases::HalfKP1024_8_32CReLU;
 
 crate::define_l1_variants!(
     enum HalfKPL1024,
@@ -19,8 +19,6 @@ crate::define_l1_variants!(
     variants {
         // L2=8, L3=32 バリアント
         (8,  32, CReLU,         "CReLU")    => CReLU8x32     : HalfKP1024_8_32CReLU,
-        (8,  32, SCReLU,        "SCReLU")   => SCReLU8x32    : HalfKP1024_8_32SCReLU,
-        (8,  32, PairwiseCReLU, "Pairwise") => Pairwise8x32  : HalfKP1024_8_32Pairwise,
     }
 );
 
@@ -30,7 +28,7 @@ mod tests {
 
     #[test]
     fn test_supported_specs() {
-        assert_eq!(HalfKPL1024::SUPPORTED_SPECS.len(), 3);
+        assert_eq!(HalfKPL1024::SUPPORTED_SPECS.len(), 1);
 
         // 8-32 CReLU
         let spec = &HalfKPL1024::SUPPORTED_SPECS[0];
@@ -64,26 +62,9 @@ mod tests {
     #[test]
     fn test_activation_output_dim_divisor() {
         for spec in HalfKPL1024::SUPPORTED_SPECS {
-            match spec.activation {
-                Activation::CReLU | Activation::SCReLU => {
-                    assert_eq!(spec.activation.output_dim_divisor(), 1);
-                }
-                Activation::PairwiseCReLU => {
-                    assert_eq!(spec.activation.output_dim_divisor(), 2);
-                }
-            }
+            assert_eq!(spec.activation, Activation::CReLU);
+            assert_eq!(spec.activation.output_dim_divisor(), 1);
         }
-    }
-
-    /// マクロ生成: すべての活性化タイプがサポートされていることを確認
-    #[test]
-    fn test_all_activations_present() {
-        let activations: Vec<_> =
-            HalfKPL1024::SUPPORTED_SPECS.iter().map(|s| s.activation).collect();
-
-        assert!(activations.contains(&Activation::CReLU));
-        assert!(activations.contains(&Activation::SCReLU));
-        assert!(activations.contains(&Activation::PairwiseCReLU));
     }
 
     /// マクロ生成: L2/L3 の妥当な範囲チェック
