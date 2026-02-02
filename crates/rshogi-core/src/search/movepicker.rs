@@ -32,7 +32,7 @@ use super::{
 };
 use crate::movegen::{ExtMove, ExtMoveBuffer};
 use crate::position::Position;
-use crate::types::{Depth, Move, Piece, PieceType, Value, DEPTH_QS};
+use crate::types::{Color, Depth, Move, Piece, PieceType, Value, DEPTH_QS};
 
 // =============================================================================
 // Stage（指し手生成の段階）
@@ -115,9 +115,14 @@ impl Stage {
 ///
 /// 探索中に指し手を効率的に順序付けして返す。
 /// History統計を参照してスコアリングを行う。
+///
+/// ## 借用問題の解決
+///
+/// `MovePicker`は`Position`への参照をフィールドとして保持しない。
+/// 代わりに、`next_move()`メソッドで`Position`への参照を受け取る。
+/// これにより、探索ループ内で`pos.do_move()`を呼び出す際の借用問題を回避できる。
 pub struct MovePicker<'a> {
-    // 参照
-    pos: &'a Position,
+    // History参照
     main_history: &'a ButterflyHistory,
     low_ply_history: &'a LowPlyHistory,
     capture_history: &'a CapturePieceToHistory,
@@ -134,6 +139,10 @@ pub struct MovePicker<'a> {
     skip_quiets: bool,
     generate_all_legal_moves: bool,
 
+    // 初期化時にキャッシュする情報
+    side_to_move: Color,
+    pawn_history_index: usize,
+
     // 指し手バッファ（MaybeUninitにより初期化コストゼロ）
     moves: ExtMoveBuffer,
     cur: usize,
@@ -148,8 +157,10 @@ pub struct MovePicker<'a> {
 
 impl<'a> MovePicker<'a> {
     /// 通常探索・静止探索用コンストラクタ
+    ///
+    /// `pos`は初期化時のみ使用し、フィールドとして保持しない。
     pub fn new(
-        pos: &'a Position,
+        pos: &Position,
         tt_move: Move,
         depth: Depth,
         main_history: &'a ButterflyHistory,
@@ -184,7 +195,6 @@ impl<'a> MovePicker<'a> {
         };
 
         Self {
-            pos,
             main_history,
             low_ply_history,
             capture_history,
@@ -197,6 +207,8 @@ impl<'a> MovePicker<'a> {
             ply,
             skip_quiets: false,
             generate_all_legal_moves,
+            side_to_move: pos.side_to_move(),
+            pawn_history_index: pos.pawn_history_index(),
             moves: ExtMoveBuffer::new(),
             cur: 0,
             end_cur: 0,
@@ -209,7 +221,7 @@ impl<'a> MovePicker<'a> {
 
     /// 王手回避専用コンストラクタ（シンプル版）
     pub fn new_evasions(
-        pos: &'a Position,
+        pos: &Position,
         tt_move: Move,
         main_history: &'a ButterflyHistory,
         low_ply_history: &'a LowPlyHistory,
@@ -229,7 +241,6 @@ impl<'a> MovePicker<'a> {
             };
 
         Self {
-            pos,
             main_history,
             low_ply_history,
             capture_history,
@@ -242,6 +253,8 @@ impl<'a> MovePicker<'a> {
             ply,
             skip_quiets: false,
             generate_all_legal_moves,
+            side_to_move: pos.side_to_move(),
+            pawn_history_index: pos.pawn_history_index(),
             moves: ExtMoveBuffer::new(),
             cur: 0,
             end_cur: 0,
@@ -254,7 +267,7 @@ impl<'a> MovePicker<'a> {
 
     /// ProbCut専用コンストラクタ
     pub fn new_probcut(
-        pos: &'a Position,
+        pos: &Position,
         tt_move: Move,
         threshold: Value,
         main_history: &'a ButterflyHistory,
@@ -278,7 +291,6 @@ impl<'a> MovePicker<'a> {
         };
 
         Self {
-            pos,
             main_history,
             low_ply_history,
             capture_history,
@@ -291,6 +303,8 @@ impl<'a> MovePicker<'a> {
             ply,
             skip_quiets: false,
             generate_all_legal_moves,
+            side_to_move: pos.side_to_move(),
+            pawn_history_index: pos.pawn_history_index(),
             moves: ExtMoveBuffer::new(),
             cur: 0,
             end_cur: 0,
@@ -301,15 +315,28 @@ impl<'a> MovePicker<'a> {
         }
     }
 
-    /// 静かな手をスキップ
-    pub fn skip_quiet_moves(&mut self) {
+    /// quiet手の生成をスキップ（LMP条件成立時に呼び出す）
+    ///
+    /// skip_quietsフラグを設定し、現在のステージに応じて遷移先を調整する。
+    /// QuietInit/GoodQuietステージにいる場合はBadCaptureに即座に遷移する。
+    pub fn skip_quiets(&mut self) {
         self.skip_quiets = true;
+        // 現在のステージに応じて遷移先を調整
+        match self.stage {
+            Stage::QuietInit | Stage::GoodQuiet => {
+                self.stage = Stage::BadCapture;
+            }
+            _ => {}
+        }
     }
 
     /// 次の指し手を返す
     ///
     /// 指し手が尽きたら `Move::NONE` を返す。
-    pub fn next_move(&mut self) -> Move {
+    ///
+    /// ## 引数
+    /// - `pos`: 現在の局面への参照（各呼び出しで一時的に借用）
+    pub fn next_move(&mut self, pos: &Position) -> Move {
         loop {
             match self.stage {
                 // ==============================
@@ -336,10 +363,10 @@ impl<'a> MovePicker<'a> {
                             crate::movegen::GenType::CapturesProPlusAll
                         };
                         let mut buf = ExtMoveBuffer::new();
-                        crate::movegen::generate_with_type(self.pos, gen_type, &mut buf, None);
+                        crate::movegen::generate_with_type(pos, gen_type, &mut buf, None);
                         let mut c = 0;
                         for ext in buf.iter() {
-                            if self.pos.is_capture(ext.mv) {
+                            if pos.is_capture(ext.mv) {
                                 self.moves.set(c, ExtMove::new(ext.mv, 0));
                                 c += 1;
                             }
@@ -350,7 +377,7 @@ impl<'a> MovePicker<'a> {
                         // ProbCut: 捕獲手生成
                         let mut buf = ExtMoveBuffer::new();
                         crate::movegen::generate_with_type(
-                            self.pos,
+                            pos,
                             crate::movegen::GenType::CapturesProPlus,
                             &mut buf,
                             None,
@@ -358,7 +385,7 @@ impl<'a> MovePicker<'a> {
                         // 捕獲手のみフィルタ
                         let mut tmp_count = 0usize;
                         for ext in buf.iter() {
-                            if self.pos.is_capture(ext.mv) {
+                            if pos.is_capture(ext.mv) {
                                 self.moves.set(tmp_count, ExtMove::new(ext.mv, 0));
                                 tmp_count += 1;
                             }
@@ -366,12 +393,12 @@ impl<'a> MovePicker<'a> {
                         self.moves.set_len(tmp_count);
                         tmp_count
                     } else {
-                        self.pos.generate_captures(&mut self.moves)
+                        pos.generate_captures(&mut self.moves)
                     };
                     self.end_cur = count;
                     self.end_captures = count;
 
-                    self.score_captures();
+                    self.score_captures(pos);
                     partial_insertion_sort(self.moves.as_mut_slice(), self.end_cur, i32::MIN);
 
                     self.stage = self.stage.next();
@@ -381,10 +408,15 @@ impl<'a> MovePicker<'a> {
                 // 良い捕獲手を返す
                 // ==============================
                 Stage::GoodCapture => {
-                    if let Some(m) = self.select_good_capture() {
+                    if let Some(m) = self.select_good_capture(pos) {
                         return m;
                     }
-                    self.stage = Stage::QuietInit;
+                    // skip_quietsフラグがある場合はquiet手をスキップしてBadCaptureへ
+                    if self.skip_quiets {
+                        self.stage = Stage::BadCapture;
+                    } else {
+                        self.stage = Stage::QuietInit;
+                    }
                 }
 
                 // ==============================
@@ -396,28 +428,28 @@ impl<'a> MovePicker<'a> {
                         let count = if self.generate_all_legal_moves {
                             let mut buf = ExtMoveBuffer::new();
                             crate::movegen::generate_with_type(
-                                self.pos,
+                                pos,
                                 crate::movegen::GenType::QuietsAll,
                                 &mut buf,
                                 None,
                             );
                             let mut c = 0;
                             for ext in buf.iter() {
-                                if !self.pos.is_capture(ext.mv) {
+                                if !pos.is_capture(ext.mv) {
                                     self.moves.set(self.end_captures + c, ExtMove::new(ext.mv, 0));
                                     c += 1;
                                 }
                             }
                             c
                         } else {
-                            self.pos.generate_quiets(&mut self.moves, self.end_captures)
+                            pos.generate_quiets(&mut self.moves, self.end_captures)
                         };
                         self.end_cur = self.end_captures + count;
                         self.end_generated = self.end_cur;
                         self.moves.set_len(self.end_cur);
 
                         self.cur = self.end_captures;
-                        self.score_quiets();
+                        self.score_quiets(pos);
 
                         // ハイブリッド方式: 深さベースの閾値で部分ソート
                         // -3560はYaneuraOuの経験的な定数で、depth=1で-3560、depth=10で-35600となる
@@ -446,7 +478,7 @@ impl<'a> MovePicker<'a> {
                         // partial_insertion_sortで前方に集められた閾値以上の手を返す
                         // end_good_quietsまでが閾値以上の手（ソート済み）
                         self.end_cur = self.end_good_quiets;
-                        if let Some(m) = self.select(|_, _| true) {
+                        if let Some(m) = self.select_simple() {
                             return m;
                         }
                     }
@@ -461,7 +493,7 @@ impl<'a> MovePicker<'a> {
                 // 悪い捕獲手を返す
                 // ==============================
                 Stage::BadCapture => {
-                    if let Some(m) = self.select(|_, _| true) {
+                    if let Some(m) = self.select_simple() {
                         return m;
                     }
 
@@ -478,7 +510,7 @@ impl<'a> MovePicker<'a> {
                 Stage::BadQuiet => {
                     if !self.skip_quiets {
                         // end_good_quiets以降が閾値未満の手（未ソート）
-                        if let Some(m) = self.select(|_, _| true) {
+                        if let Some(m) = self.select_simple() {
                             return m;
                         }
                     }
@@ -493,7 +525,7 @@ impl<'a> MovePicker<'a> {
                     let count = if self.generate_all_legal_moves {
                         let mut buf = ExtMoveBuffer::new();
                         crate::movegen::generate_with_type(
-                            self.pos,
+                            pos,
                             crate::movegen::GenType::EvasionsAll,
                             &mut buf,
                             None,
@@ -505,13 +537,13 @@ impl<'a> MovePicker<'a> {
                         self.moves.set_len(gen_count);
                         gen_count
                     } else {
-                        self.pos.generate_evasions_ext(&mut self.moves)
+                        pos.generate_evasions_ext(&mut self.moves)
                     };
                     self.cur = 0;
                     self.end_cur = count;
                     self.end_generated = count;
 
-                    self.score_evasions();
+                    self.score_evasions(pos);
                     partial_insertion_sort(self.moves.as_mut_slice(), self.end_cur, i32::MIN);
 
                     self.stage = Stage::Evasion;
@@ -521,14 +553,14 @@ impl<'a> MovePicker<'a> {
                 // 回避手を返す
                 // ==============================
                 Stage::Evasion => {
-                    return self.select(|_, _| true).unwrap_or(Move::NONE);
+                    return self.select_simple().unwrap_or(Move::NONE);
                 }
 
                 // ==============================
                 // 静止探索用捕獲手を返す
                 // ==============================
                 Stage::QCapture => {
-                    return self.select(|_, _| true).unwrap_or(Move::NONE);
+                    return self.select_simple().unwrap_or(Move::NONE);
                 }
 
                 // ==============================
@@ -536,9 +568,7 @@ impl<'a> MovePicker<'a> {
                 // ==============================
                 Stage::ProbCut => {
                     if let Some(th) = self.probcut_threshold {
-                        return self
-                            .select(|s, ext| s.pos.see_ge(ext.mv, th))
-                            .unwrap_or(Move::NONE);
+                        return self.select_probcut(pos, th).unwrap_or(Move::NONE);
                     }
                     return Move::NONE;
                 }
@@ -551,14 +581,14 @@ impl<'a> MovePicker<'a> {
     // =========================================================================
 
     /// 捕獲手のスコアを計算
-    fn score_captures(&mut self) {
+    fn score_captures(&mut self, pos: &Position) {
         for i in self.cur..self.end_cur {
             let ext = self.moves.get(i);
             let m = ext.mv;
             let to = m.to();
             let pc = m.moved_piece_after();
             let pt = pc.piece_type();
-            let captured = self.pos.piece_on(to);
+            let captured = pos.piece_on(to);
             let captured_pt = captured.piece_type();
 
             // MVV + CaptureHistory + 王手ボーナス
@@ -566,7 +596,7 @@ impl<'a> MovePicker<'a> {
             value += 7 * piece_value(captured);
 
             // 王手になるマスへの移動にボーナス
-            if self.pos.check_squares(pt).contains(to) {
+            if pos.check_squares(pt).contains(to) {
                 value += 1024;
             }
 
@@ -575,9 +605,9 @@ impl<'a> MovePicker<'a> {
     }
 
     /// 静かな手のスコアを計算
-    fn score_quiets(&mut self) {
-        let us = self.pos.side_to_move();
-        let pawn_idx = self.pos.pawn_history_index();
+    fn score_quiets(&mut self, pos: &Position) {
+        let us = self.side_to_move;
+        let pawn_idx = self.pawn_history_index;
 
         for i in self.cur..self.end_cur {
             let ext = self.moves.get(i);
@@ -602,7 +632,7 @@ impl<'a> MovePicker<'a> {
             }
 
             // 王手ボーナス
-            if self.pos.check_squares(pt).contains(to) && self.pos.see_ge(m, Value::new(-75)) {
+            if pos.check_squares(pt).contains(to) && pos.see_ge(m, Value::new(-75)) {
                 value += 16384;
             }
 
@@ -617,8 +647,8 @@ impl<'a> MovePicker<'a> {
     }
 
     /// 回避手のスコアを計算
-    fn score_evasions(&mut self) {
-        let us = self.pos.side_to_move();
+    fn score_evasions(&mut self, pos: &Position) {
+        let us = self.side_to_move;
 
         for i in self.cur..self.end_cur {
             let ext = self.moves.get(i);
@@ -626,9 +656,9 @@ impl<'a> MovePicker<'a> {
             let to = m.to();
             let pc = m.moved_piece_after();
 
-            if self.pos.is_capture(m) {
+            if pos.is_capture(m) {
                 // 捕獲手は駒価値 + 大きなボーナス
-                let captured = self.pos.piece_on(to);
+                let captured = pos.piece_on(to);
                 self.moves.set_value(i, piece_value(captured) + (1 << 28));
             } else {
                 // 静かな手はHistory
@@ -652,7 +682,7 @@ impl<'a> MovePicker<'a> {
     // =========================================================================
 
     /// 良い捕獲手を選択（SEE >= threshold）
-    fn select_good_capture(&mut self) -> Option<Move> {
+    fn select_good_capture(&mut self, pos: &Position) -> Option<Move> {
         while self.cur < self.end_cur {
             let ext = self.moves.get(self.cur);
             self.cur += 1;
@@ -664,7 +694,7 @@ impl<'a> MovePicker<'a> {
 
             // SEEで閾値以上の手のみ
             let threshold = Value::new(-ext.value / 18);
-            if self.pos.see_ge(ext.mv, threshold) {
+            if pos.see_ge(ext.mv, threshold) {
                 return Some(ext.mv);
             } else {
                 // 悪い捕獲手は後回し
@@ -675,11 +705,8 @@ impl<'a> MovePicker<'a> {
         None
     }
 
-    /// 条件を満たす次の手を選択
-    fn select<F>(&mut self, filter: F) -> Option<Move>
-    where
-        F: Fn(&Self, &ExtMove) -> bool,
-    {
+    /// シンプルな手の選択（TT手スキップのみ）
+    fn select_simple(&mut self) -> Option<Move> {
         while self.cur < self.end_cur {
             let ext = self.moves.get(self.cur);
             self.cur += 1;
@@ -689,7 +716,23 @@ impl<'a> MovePicker<'a> {
                 continue;
             }
 
-            if filter(self, &ext) {
+            return Some(ext.mv);
+        }
+        None
+    }
+
+    /// ProbCut用の手の選択（SEE閾値チェック）
+    fn select_probcut(&mut self, pos: &Position, threshold: Value) -> Option<Move> {
+        while self.cur < self.end_cur {
+            let ext = self.moves.get(self.cur);
+            self.cur += 1;
+
+            // TT手は既に返したのでスキップ
+            if ext.mv == self.tt_move {
+                continue;
+            }
+
+            if pos.see_ge(ext.mv, threshold) {
                 return Some(ext.mv);
             }
         }
@@ -697,12 +740,27 @@ impl<'a> MovePicker<'a> {
     }
 }
 
-// Iteratorトレイトの実装
-impl Iterator for MovePicker<'_> {
+/// MovePickerとPositionを組み合わせたイテレータアダプタ
+///
+/// `MovePicker`は`Position`への参照をフィールドとして保持しないため、
+/// イテレータとして使用する場合は`Position`を一緒に保持する必要がある。
+pub struct MovePickerIter<'a> {
+    picker: MovePicker<'a>,
+    pos: &'a Position,
+}
+
+impl<'a> MovePickerIter<'a> {
+    /// 新しいイテレータを作成
+    pub fn new(picker: MovePicker<'a>, pos: &'a Position) -> Self {
+        Self { picker, pos }
+    }
+}
+
+impl Iterator for MovePickerIter<'_> {
     type Item = Move;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let m = self.next_move();
+        let m = self.picker.next_move(self.pos);
         if m == Move::NONE {
             None
         } else {

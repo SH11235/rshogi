@@ -23,6 +23,11 @@ env_logger.workspace = true
 # Local dependencies
 rshogi-core = { version = "0.1", path = "../rshogi-core" }
 
+[features]
+default = []
+# 探索統計収集（枝刈り発生回数等のカウント）
+search-stats = ["rshogi-core/search-stats"]
+
 [[bin]]
 name = "rshogi-usi"
 path = "src/main.rs"

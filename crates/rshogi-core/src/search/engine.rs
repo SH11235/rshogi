@@ -161,6 +161,8 @@ pub struct SearchResult {
     pub nodes: u64,
     /// Principal Variation（読み筋）
     pub pv: Vec<Move>,
+    /// 探索統計レポート（search-stats feature有効時のみ内容あり）
+    pub stats_report: String,
 }
 
 // =============================================================================
@@ -924,6 +926,9 @@ impl Search {
         self.best_previous_average_score = best_previous_average_score;
         self.last_game_ply = Some(ply);
 
+        // 探索統計レポートを取得（search-stats feature有効時のみ内容あり）
+        let stats_report = self.worker.as_ref().map(|w| w.get_stats_report()).unwrap_or_default();
+
         SearchResult {
             best_move,
             ponder_move,
@@ -931,6 +936,7 @@ impl Search {
             depth: completed_depth,
             nodes: total_nodes,
             pv,
+            stats_report,
         }
     }
 

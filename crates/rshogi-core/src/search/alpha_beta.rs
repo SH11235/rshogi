@@ -75,10 +75,9 @@ fn to_corrected_static_eval(unadjusted: Value, correction_value: i32) -> Value {
     Value::new(corrected.clamp(Value::MATED_IN_MAX_PLY.raw() + 1, Value::MATE_IN_MAX_PLY.raw() - 1))
 }
 
-/// LMR用のreduction配列（YaneuraOu準拠の1次元テーブル）
+/// LMR用のreduction配列
 type Reductions = [i32; 64];
 
-// YaneuraOuのreduction式で用いる定数（yaneuraou-search.cpp:3163-3170,4759）
 const REDUCTION_DELTA_SCALE: i32 = 731;
 const REDUCTION_NON_IMPROVING_MULT: i32 = 216;
 const REDUCTION_NON_IMPROVING_DIV: i32 = 512;
@@ -88,7 +87,6 @@ const REDUCTION_BASE_OFFSET: i32 = 1089;
 /// 初回アクセス時に自動初期化されるため、get()呼び出しが不要
 static REDUCTIONS: LazyLock<Reductions> = LazyLock::new(|| {
     let mut table: Reductions = [0; 64];
-    // YaneuraOu: reductions[i] = int(2782 / 128.0 * log(i)) （yaneuraou-search.cpp:1818）
     for (i, value) in table.iter_mut().enumerate().skip(1) {
         *value = (2782.0 / 128.0 * (i as f64).ln()) as i32;
     }
@@ -111,12 +109,315 @@ fn reduction(imp: bool, depth: i32, move_count: i32, delta: i32, root_delta: i32
     let root_delta = root_delta.max(1);
     let delta = delta.max(0);
 
-    // YaneuraOuのreduction式（yaneuraou-search.cpp:3163-3170,4759）
     // 1024倍スケールで返す。ttPv加算は呼び出し側で行う。
     reduction_scale - delta * REDUCTION_DELTA_SCALE / root_delta
         + (!imp as i32) * reduction_scale * REDUCTION_NON_IMPROVING_MULT
             / REDUCTION_NON_IMPROVING_DIV
         + REDUCTION_BASE_OFFSET
+}
+
+// =============================================================================
+// 探索統計（search-stats feature有効時のみ）
+// =============================================================================
+
+/// 深度別統計の最大深度
+#[cfg(feature = "search-stats")]
+const STATS_MAX_DEPTH: usize = 32;
+
+/// 探索統計カウンタ
+///
+/// 各枝刈りの発生回数を記録し、チューニングやデバッグに使用する。
+/// `search-stats` featureが有効な場合のみコンパイルされる。
+#[cfg(feature = "search-stats")]
+#[derive(Debug, Clone)]
+pub struct SearchStats {
+    /// 総ノード数（探索関数の呼び出し回数）
+    pub nodes_searched: u64,
+    /// LMR適用回数
+    pub lmr_applied: u64,
+    /// LMRによる再探索回数
+    pub lmr_research: u64,
+    /// Move Loop内の枝刈り回数（LMP, Futility, SEE, History等の合計）
+    pub move_loop_pruned: u64,
+    /// Futility Pruning（静的評価による枝刈り）回数
+    pub futility_pruned: u64,
+    /// NMP（Null Move Pruning）試行回数
+    pub nmp_attempted: u64,
+    /// NMPによる枝刈り成功回数
+    pub nmp_cutoff: u64,
+    /// Razoring適用回数
+    pub razoring_applied: u64,
+    /// ProbCut試行回数
+    pub probcut_attempted: u64,
+    /// ProbCutによる枝刈り成功回数
+    pub probcut_cutoff: u64,
+    /// Singular Extension適用回数
+    pub singular_extension: u64,
+    /// Multi-Cut発動回数
+    pub multi_cut: u64,
+    /// TT（置換表）カットオフ回数
+    pub tt_cutoff: u64,
+    /// 深度別ノード数（depth 0-31）
+    pub nodes_by_depth: [u64; STATS_MAX_DEPTH],
+    /// 深度別TTカットオフ数
+    pub tt_cutoff_by_depth: [u64; STATS_MAX_DEPTH],
+    /// 深度別TTプローブ数
+    pub tt_probe_by_depth: [u64; STATS_MAX_DEPTH],
+    /// 深度別TTヒット数
+    pub tt_hit_by_depth: [u64; STATS_MAX_DEPTH],
+    /// 深度別TT深度不足でカットオフ失敗
+    pub tt_fail_depth_by_depth: [u64; STATS_MAX_DEPTH],
+    /// 深度別TTバウンド不適合でカットオフ失敗
+    pub tt_fail_bound_by_depth: [u64; STATS_MAX_DEPTH],
+    /// LMRでdepth 1に遷移したノード数（親の深度別）
+    pub lmr_to_depth1_from: [u64; STATS_MAX_DEPTH],
+    /// depth 1での全子ノード数（統計用）
+    pub depth1_children_total: u64,
+    /// depth 1でTTカットオフされた子ノード数
+    pub depth1_children_tt_cut: u64,
+    /// 深度別TT書き込み数
+    pub tt_write_by_depth: [u64; STATS_MAX_DEPTH],
+    /// 深度別Razoring適用回数
+    pub razoring_by_depth: [u64; STATS_MAX_DEPTH],
+    /// 深度別Futility Pruning適用回数
+    pub futility_by_depth: [u64; STATS_MAX_DEPTH],
+    /// 深度別NMPカットオフ回数
+    pub nmp_cutoff_by_depth: [u64; STATS_MAX_DEPTH],
+    /// 深度別first move cutoff回数（Move Ordering品質）
+    pub first_move_cutoff_by_depth: [u64; STATS_MAX_DEPTH],
+    /// 深度別カットオフ回数（first move cutoff rate計算用）
+    pub cutoff_by_depth: [u64; STATS_MAX_DEPTH],
+    /// 深度別のカットオフ時move_count合計（平均計算用）
+    pub move_count_sum_by_depth: [u64; STATS_MAX_DEPTH],
+    /// LMR削減量（r/1024）のヒストグラム（0-15+）
+    pub lmr_reduction_histogram: [u64; 16],
+    /// LMR適用後の新深度別ノード数
+    pub lmr_new_depth_histogram: [u64; STATS_MAX_DEPTH],
+}
+
+#[cfg(feature = "search-stats")]
+impl Default for SearchStats {
+    fn default() -> Self {
+        Self {
+            nodes_searched: 0,
+            lmr_applied: 0,
+            lmr_research: 0,
+            move_loop_pruned: 0,
+            futility_pruned: 0,
+            nmp_attempted: 0,
+            nmp_cutoff: 0,
+            razoring_applied: 0,
+            probcut_attempted: 0,
+            probcut_cutoff: 0,
+            singular_extension: 0,
+            multi_cut: 0,
+            tt_cutoff: 0,
+            nodes_by_depth: [0; STATS_MAX_DEPTH],
+            tt_cutoff_by_depth: [0; STATS_MAX_DEPTH],
+            tt_probe_by_depth: [0; STATS_MAX_DEPTH],
+            tt_hit_by_depth: [0; STATS_MAX_DEPTH],
+            tt_fail_depth_by_depth: [0; STATS_MAX_DEPTH],
+            tt_fail_bound_by_depth: [0; STATS_MAX_DEPTH],
+            lmr_to_depth1_from: [0; STATS_MAX_DEPTH],
+            depth1_children_total: 0,
+            depth1_children_tt_cut: 0,
+            tt_write_by_depth: [0; STATS_MAX_DEPTH],
+            razoring_by_depth: [0; STATS_MAX_DEPTH],
+            futility_by_depth: [0; STATS_MAX_DEPTH],
+            nmp_cutoff_by_depth: [0; STATS_MAX_DEPTH],
+            first_move_cutoff_by_depth: [0; STATS_MAX_DEPTH],
+            cutoff_by_depth: [0; STATS_MAX_DEPTH],
+            move_count_sum_by_depth: [0; STATS_MAX_DEPTH],
+            lmr_reduction_histogram: [0; 16],
+            lmr_new_depth_histogram: [0; STATS_MAX_DEPTH],
+        }
+    }
+}
+
+#[cfg(feature = "search-stats")]
+impl SearchStats {
+    /// 統計をリセット
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// 統計をフォーマットして文字列として返す
+    pub fn format_report(&self) -> String {
+        let mut report = String::new();
+        report.push_str("=== Search Statistics ===\n");
+        report.push_str(&format!("Nodes searched:      {:>12}\n", self.nodes_searched));
+        report.push_str(&format!("TT cutoffs:          {:>12}\n", self.tt_cutoff));
+        report.push_str("--- Pre-Move Pruning ---\n");
+        report.push_str(&format!("NMP attempted:       {:>12}\n", self.nmp_attempted));
+        report.push_str(&format!("NMP cutoffs:         {:>12}\n", self.nmp_cutoff));
+        report.push_str(&format!("Razoring:            {:>12}\n", self.razoring_applied));
+        report.push_str(&format!("Futility (static):   {:>12}\n", self.futility_pruned));
+        report.push_str(&format!("ProbCut attempted:   {:>12}\n", self.probcut_attempted));
+        report.push_str(&format!("ProbCut cutoffs:     {:>12}\n", self.probcut_cutoff));
+        report.push_str("--- Move Loop ---\n");
+        report.push_str(&format!("Move loop pruned:    {:>12}\n", self.move_loop_pruned));
+        report.push_str(&format!("LMR applied:         {:>12}\n", self.lmr_applied));
+        report.push_str(&format!("LMR re-search:       {:>12}\n", self.lmr_research));
+        report.push_str("--- Extensions ---\n");
+        report.push_str(&format!("Singular extension:  {:>12}\n", self.singular_extension));
+        report.push_str(&format!("Multi-cut:           {:>12}\n", self.multi_cut));
+        // 深度別ノード数（ノード数が0より大きい深度のみ表示）
+        report.push_str("--- Nodes by Depth ---\n");
+        for (d, &count) in self.nodes_by_depth.iter().enumerate() {
+            if count > 0 {
+                let tt_cut = self.tt_cutoff_by_depth[d];
+                let tt_rate = if count > 0 {
+                    (tt_cut as f64 / count as f64 * 100.0) as u32
+                } else {
+                    0
+                };
+                report.push_str(&format!(
+                    "  depth {:>2}: {:>10} nodes, {:>8} TT cuts ({:>2}%)\n",
+                    d, count, tt_cut, tt_rate
+                ));
+            }
+        }
+        // TT詳細統計（depth 1のみ詳細表示）
+        report.push_str("--- TT Details (depth 1) ---\n");
+        let probe = self.tt_probe_by_depth[1];
+        let hit = self.tt_hit_by_depth[1];
+        let cut = self.tt_cutoff_by_depth[1];
+        let fail_depth = self.tt_fail_depth_by_depth[1];
+        let fail_bound = self.tt_fail_bound_by_depth[1];
+        if probe > 0 {
+            report.push_str(&format!(
+                "  Probes: {}, Hits: {} ({:.1}%), Cuts: {} ({:.1}%)\n",
+                probe,
+                hit,
+                hit as f64 / probe as f64 * 100.0,
+                cut,
+                cut as f64 / probe as f64 * 100.0
+            ));
+            report
+                .push_str(&format!("  Fail reasons: depth={}, bound={}\n", fail_depth, fail_bound));
+        }
+        // depth 1への遷移元分析
+        report.push_str("--- LMR to Depth 1 Sources ---\n");
+        for (d, &count) in self.lmr_to_depth1_from.iter().enumerate() {
+            if count > 0 {
+                report.push_str(&format!("  from depth {:>2}: {:>8} nodes\n", d, count));
+            }
+        }
+        // TT書き込み統計
+        report.push_str("--- TT Writes by Depth ---\n");
+        for (d, &count) in self.tt_write_by_depth.iter().enumerate() {
+            if count > 0 {
+                let probe = self.tt_probe_by_depth[d];
+                let ratio = if probe > 0 {
+                    format!("{:.1}x", count as f64 / probe as f64)
+                } else {
+                    "-".to_string()
+                };
+                report.push_str(&format!(
+                    "  depth {:>2}: {:>8} writes (probe ratio: {})\n",
+                    d, count, ratio
+                ));
+            }
+        }
+        // 早期リターン統計（depth別）
+        report.push_str("--- Early Return by Depth ---\n");
+        for d in 0..STATS_MAX_DEPTH {
+            let razoring = self.razoring_by_depth[d];
+            let futility = self.futility_by_depth[d];
+            let nmp = self.nmp_cutoff_by_depth[d];
+            let nodes = self.nodes_by_depth[d];
+            if razoring > 0 || futility > 0 || nmp > 0 {
+                report.push_str(&format!(
+                    "  depth {:>2}: razoring={:>6}, futility={:>6}, nmp={:>6} (nodes={})\n",
+                    d, razoring, futility, nmp, nodes
+                ));
+            }
+        }
+        // Move Ordering品質統計（depth別）
+        report.push_str("--- Move Ordering Quality (First Move Cutoff Rate) ---\n");
+        for d in 0..STATS_MAX_DEPTH {
+            let first_cut = self.first_move_cutoff_by_depth[d];
+            let total_cut = self.cutoff_by_depth[d];
+            if total_cut > 0 {
+                let rate = first_cut as f64 / total_cut as f64 * 100.0;
+                report.push_str(&format!(
+                    "  depth {:>2}: {:>6}/{:>6} ({:>5.1}%)\n",
+                    d, first_cut, total_cut, rate
+                ));
+            }
+        }
+        // カットオフ時のmove_count平均（depth別）
+        report.push_str("--- Average Move Count at Cutoff ---\n");
+        for d in 0..STATS_MAX_DEPTH {
+            let total_cut = self.cutoff_by_depth[d];
+            let move_count_sum = self.move_count_sum_by_depth[d];
+            if total_cut > 0 {
+                let avg = move_count_sum as f64 / total_cut as f64;
+                report.push_str(&format!(
+                    "  depth {:>2}: {:>6.2} avg ({} cutoffs)\n",
+                    d, avg, total_cut
+                ));
+            }
+        }
+        // LMR削減量のヒストグラム
+        report.push_str("--- LMR Reduction Histogram (r/1024) ---\n");
+        for (r, &count) in self.lmr_reduction_histogram.iter().enumerate() {
+            if count > 0 {
+                let label = if r == 15 {
+                    "15+".to_string()
+                } else {
+                    format!("{:>2}", r)
+                };
+                report.push_str(&format!(
+                    "  r={}: {:>8} ({:>5.1}%)\n",
+                    label,
+                    count,
+                    count as f64 / self.lmr_applied as f64 * 100.0
+                ));
+            }
+        }
+        // LMR適用後の新深度別ノード数
+        report.push_str("--- LMR New Depth Distribution ---\n");
+        for d in 0..STATS_MAX_DEPTH {
+            let count = self.lmr_new_depth_histogram[d];
+            if count > 0 {
+                report.push_str(&format!(
+                    "  new_depth {:>2}: {:>8} ({:>5.1}%)\n",
+                    d,
+                    count,
+                    count as f64 / self.lmr_applied as f64 * 100.0
+                ));
+            }
+        }
+        report
+    }
+}
+
+/// 統計カウンタをインクリメントするマクロ（feature有効時のみ実行）
+#[cfg(feature = "search-stats")]
+macro_rules! inc_stat {
+    ($self:expr, $field:ident) => {
+        $self.stats.$field += 1;
+    };
+}
+
+#[cfg(not(feature = "search-stats"))]
+macro_rules! inc_stat {
+    ($self:expr, $field:ident) => {};
+}
+
+/// 深度別統計をカウントするマクロ（feature有効時のみ実行）
+#[cfg(feature = "search-stats")]
+macro_rules! inc_stat_by_depth {
+    ($self:expr, $field:ident, $depth:expr) => {
+        let d = ($depth as usize).min(STATS_MAX_DEPTH - 1);
+        $self.stats.$field[d] += 1;
+    };
+}
+
+#[cfg(not(feature = "search-stats"))]
+macro_rules! inc_stat_by_depth {
+    ($self:expr, $field:ident, $depth:expr) => {};
 }
 
 /// 置換表プローブの結果をまとめたコンテキスト
@@ -200,7 +501,7 @@ struct Step14Context<'a> {
 
 /// 探索用のワーカー状態
 ///
-/// YaneuraOu準拠: Workerはゲーム全体で再利用される。
+/// Workerはゲーム全体で再利用される。
 /// 履歴統計は直接メンバとして保持し、usinewgameでクリア、goでは保持。
 pub struct SearchWorker {
     /// 置換表への共有参照（Arc）
@@ -213,7 +514,7 @@ pub struct SearchWorker {
     pub thread_id: usize,
 
     // =========================================================================
-    // 履歴統計（YaneuraOu準拠: 直接メンバとして保持）
+    // 履歴統計（直接メンバとして保持）
     // =========================================================================
     // HistoryTablesを単一のヒープ領域として確保し、履歴テーブルを連続配置する。
     // `Box::new_zeroed` で一括確保することで、巨大配列のスタック確保を避ける。
@@ -221,7 +522,7 @@ pub struct SearchWorker {
     /// 履歴/統計テーブル群
     pub history: Box<HistoryTables>,
 
-    /// ContinuationHistoryのsentinel（YaneuraOu方式）
+    /// ContinuationHistoryのsentinel
     pub cont_history_sentinel: NonNull<PieceToHistory>,
 
     // =========================================================================
@@ -242,13 +543,13 @@ pub struct SearchWorker {
     /// ルート深さ
     pub root_depth: Depth,
 
-    /// ルートでのウィンドウ幅（beta - alpha）。YaneuraOuのLMRスケール用。
+    /// ルートでのウィンドウ幅（beta - alpha）。LMRスケール用。
     pub root_delta: i32,
 
     /// 探索完了済み深さ
     pub completed_depth: Depth,
 
-    /// 全合法手生成フラグ（YaneuraOu互換）
+    /// 全合法手生成フラグ
     pub generate_all_legal_moves: bool,
 
     /// 最善手
@@ -259,11 +560,11 @@ pub struct SearchWorker {
 
     /// 最善手変更カウンター（PV安定性判断用）
     ///
-    /// YaneuraOu準拠: move_count > 1 && !pvIdx の時にインクリメント
+    /// move_count > 1 && !pvIdx の時にインクリメント
     /// 反復深化の各世代で /= 2 して減衰させる
     pub best_move_changes: f64,
 
-    /// 引き分けまでの最大手数（YaneuraOu準拠）
+    /// 引き分けまでの最大手数
     pub max_moves_to_draw: i32,
 
     /// Null Move Pruning の Verification Search 用フラグ
@@ -280,10 +581,17 @@ pub struct SearchWorker {
     pub nnue_stack: AccumulatorStackVariant,
 
     // =========================================================================
-    // 頻度制御（YaneuraOu準拠）
+    // 頻度制御
     // =========================================================================
     /// check_abort呼び出しカウンター（512回に1回チェック）
     calls_cnt: i32,
+
+    // =========================================================================
+    // 探索統計（search-stats feature有効時のみ）
+    // =========================================================================
+    /// 枝刈り発生回数等の統計カウンタ
+    #[cfg(feature = "search-stats")]
+    pub stats: SearchStats,
 }
 
 impl SearchWorker {
@@ -324,9 +632,34 @@ impl SearchWorker {
             nnue_stack: AccumulatorStackVariant::new_default(), // prepare_search() で適切なバリアントに更新
             // 頻度制御
             calls_cnt: 0,
+            // 探索統計（feature有効時のみ）
+            #[cfg(feature = "search-stats")]
+            stats: SearchStats::default(),
         });
         worker.reset_cont_history_ptrs();
         worker
+    }
+
+    /// 探索統計をリセット（search-stats feature有効時のみ）
+    #[cfg(feature = "search-stats")]
+    pub fn reset_stats(&mut self) {
+        self.stats.reset();
+    }
+
+    /// 探索統計をリセット（search-stats feature無効時はno-op）
+    #[cfg(not(feature = "search-stats"))]
+    pub fn reset_stats(&mut self) {}
+
+    /// 探索統計のレポートを取得（search-stats feature有効時のみ）
+    #[cfg(feature = "search-stats")]
+    pub fn get_stats_report(&self) -> String {
+        self.stats.format_report()
+    }
+
+    /// 探索統計のレポートを取得（search-stats feature無効時は空文字列）
+    #[cfg(not(feature = "search-stats"))]
+    pub fn get_stats_report(&self) -> String {
+        String::new()
     }
 
     #[inline]
@@ -674,6 +1007,12 @@ impl SearchWorker {
         };
         let tt_capture = tt_move.is_some() && pos.is_capture(tt_move);
 
+        // TT統計収集
+        inc_stat_by_depth!(self, tt_probe_by_depth, depth);
+        if tt_hit {
+            inc_stat_by_depth!(self, tt_hit_by_depth, depth);
+        }
+
         // excludedMoveがある場合はカットオフしない（YaneuraOu準拠）
         if !pv_node
             && excluded_move.is_none()
@@ -683,6 +1022,16 @@ impl SearchWorker {
             && tt_data.bound.can_cutoff(tt_value, beta)
         {
             return ProbeOutcome::Cutoff(tt_value);
+        }
+
+        // TTカットオフ失敗理由の統計
+        #[cfg(feature = "search-stats")]
+        if !pv_node && excluded_move.is_none() && tt_hit && tt_value != Value::NONE {
+            if tt_data.depth < depth {
+                inc_stat_by_depth!(self, tt_fail_depth_by_depth, depth);
+            } else if !tt_data.bound.can_cutoff(tt_value, beta) {
+                inc_stat_by_depth!(self, tt_fail_bound_by_depth, depth);
+            }
         }
 
         // 1手詰め判定（置換表未ヒット時のみ、Rootでは実施しない）
@@ -702,6 +1051,7 @@ impl SearchWorker {
                     Value::NONE,
                     self.tt.generation(),
                 );
+                inc_stat_by_depth!(self, tt_write_by_depth, stored_depth);
                 return ProbeOutcome::Cutoff(value);
             }
         }
@@ -831,6 +1181,8 @@ impl SearchWorker {
                     time_manager,
                 );
                 if value <= alpha {
+                    inc_stat!(self, razoring_applied);
+                    inc_stat_by_depth!(self, razoring_by_depth, depth);
                     return Some(value);
                 }
             }
@@ -839,10 +1191,11 @@ impl SearchWorker {
     }
 
     /// Futility pruning
+    // 2026-02-02: 深さ制限をYaneuraOu準拠に調整（8→14、探索深度改善のため）
     fn try_futility_pruning(&self, params: FutilityParams) -> Option<Value> {
         if !params.pv_node
             && !params.in_check
-            && params.depth <= 8
+            && params.depth < 14
             && params.static_eval != Value::NONE
         {
             let futility_mult =
@@ -924,6 +1277,7 @@ impl SearchWorker {
             && !prev_is_pass
         // 連続パスを禁止
         {
+            inc_stat!(self, nmp_attempted);
             // Null move dynamic reduction based on depth（YaneuraOu準拠）
             let r = 7 + depth / 3;
 
@@ -969,6 +1323,8 @@ impl SearchWorker {
             if null_value >= beta && !null_value.is_win() {
                 // 浅い探索 or 既にVerification Search中 → そのままreturn
                 if self.nmp_min_ply != 0 || depth < 16 {
+                    inc_stat!(self, nmp_cutoff);
+                    inc_stat_by_depth!(self, nmp_cutoff_by_depth, depth);
                     return (Some(null_value), improving);
                 }
 
@@ -990,6 +1346,8 @@ impl SearchWorker {
                 self.nmp_min_ply = 0;
 
                 if v >= beta {
+                    inc_stat!(self, nmp_cutoff);
+                    inc_stat_by_depth!(self, nmp_cutoff_by_depth, depth);
                     return (Some(null_value), improving);
                 }
             }
@@ -1041,10 +1399,12 @@ impl SearchWorker {
         let dynamic_reduction = (static_eval - beta).raw() / 300;
         let probcut_depth = (depth - 5 - dynamic_reduction).max(0);
 
+        inc_stat!(self, probcut_attempted);
+
         // 固定長バッファに収集（借用チェッカーの制約回避）
         let probcut_moves = {
             let cont_tables = self.cont_history_tables(ply);
-            let mp = MovePicker::new_probcut(
+            let mut mp = MovePicker::new_probcut(
                 pos,
                 tt_ctx.mv,
                 threshold,
@@ -1059,7 +1419,11 @@ impl SearchWorker {
 
             let mut buf = [Move::NONE; crate::movegen::MAX_MOVES];
             let mut len = 0;
-            for mv in mp {
+            loop {
+                let mv = mp.next_move(pos);
+                if mv == Move::NONE {
+                    break;
+                }
                 buf[len] = mv;
                 len += 1;
             }
@@ -1115,6 +1479,7 @@ impl SearchWorker {
             pos.undo_move(mv);
 
             if value >= prob_beta {
+                inc_stat!(self, probcut_cutoff);
                 let stored_depth = (probcut_depth + 1).max(1);
                 tt_ctx.result.write(
                     tt_ctx.key,
@@ -1126,6 +1491,7 @@ impl SearchWorker {
                     unadjusted_static_eval,
                     self.tt.generation(),
                 );
+                inc_stat_by_depth!(self, tt_write_by_depth, stored_depth);
 
                 if value.raw().abs() < Value::INFINITE.raw() {
                     return Some(value - (prob_beta - beta));
@@ -1179,7 +1545,7 @@ impl SearchWorker {
         }
 
         let cont_tables = self.cont_history_tables(ply);
-        let mp = MovePicker::new(
+        let mut mp = MovePicker::new(
             pos,
             tt_move,
             depth,
@@ -1192,10 +1558,12 @@ impl SearchWorker {
             self.generate_all_legal_moves,
         );
 
-        for mv in mp {
-            if mv.is_some() {
-                ordered_moves.push(mv);
+        loop {
+            let mv = mp.next_move(pos);
+            if mv == Move::NONE {
+                break;
             }
+            ordered_moves.push(mv);
         }
 
         // qsearchでは捕獲以外のチェックも生成（YaneuraOu準拠）
@@ -1767,6 +2135,8 @@ impl SearchWorker {
         limits: &LimitsType,
         time_manager: &mut TimeManagement,
     ) -> Value {
+        inc_stat!(self, nodes_searched);
+        inc_stat_by_depth!(self, nodes_by_depth, depth);
         let pv_node = NT == NodeType::PV as u8 || NT == NodeType::Root as u8;
         let mut depth = depth;
         let in_check = pos.in_check();
@@ -1828,7 +2198,11 @@ impl SearchWorker {
             excluded_move,
         ) {
             ProbeOutcome::Continue(ctx) => ctx,
-            ProbeOutcome::Cutoff(value) => return value,
+            ProbeOutcome::Cutoff(value) => {
+                inc_stat!(self, tt_cutoff);
+                inc_stat_by_depth!(self, tt_cutoff_by_depth, depth);
+                return value;
+            }
         };
         let tt_move = tt_ctx.mv;
         let tt_value = tt_ctx.value;
@@ -1891,6 +2265,8 @@ impl SearchWorker {
             pv_node,
             in_check,
         }) {
+            inc_stat!(self, futility_pruned);
+            inc_stat_by_depth!(self, futility_by_depth, depth);
             return v;
         }
 
@@ -2029,6 +2405,7 @@ impl SearchWorker {
                 self.stack[ply as usize].excluded_move = Move::NONE;
 
                 if singular_value < singular_beta {
+                    inc_stat!(self, singular_extension);
                     // Singular確定 → 延長量を計算
                     // 補正履歴の寄与（abs(correctionValue)/249096）を margin に加算
                     let corr_val_adj = eval_ctx.correction_value.abs() / 249_096;
@@ -2046,6 +2423,7 @@ impl SearchWorker {
                     depth += 1;
                 } else if singular_value >= beta && !singular_value.is_mate_score() {
                     // Multi-Cut: 他の手もfail highする場合は枝刈り
+                    inc_stat!(self, multi_cut);
                     return singular_value;
                 } else if tt_value >= beta {
                     // Negative Extension: ttMoveが特別でない場合
@@ -2094,6 +2472,7 @@ impl SearchWorker {
                 Step14Outcome::Skip {
                     best_value: updated,
                 } => {
+                    inc_stat!(self, move_loop_pruned);
                     if let Some(v) = updated {
                         best_value = v;
                     }
@@ -2227,11 +2606,31 @@ impl SearchWorker {
             // 探索
             // =============================================================
             let mut value = if depth >= 2 && move_count > 1 {
+                inc_stat!(self, lmr_applied);
                 let d = (std::cmp::max(
                     1,
                     std::cmp::min(new_depth - r / 1024, new_depth + 1 + pv_node as i32),
                 ) + pv_node as i32)
                     .max(1);
+
+                // LMR統計: 削減量と新深度を記録
+                #[cfg(feature = "search-stats")]
+                {
+                    // r/1024のヒストグラム（15以上は15+にまとめる）
+                    let reduction = (r / 1024).max(0) as usize;
+                    let reduction_idx = reduction.min(15);
+                    self.stats.lmr_reduction_histogram[reduction_idx] += 1;
+                    // 新深度のヒストグラム
+                    let new_depth_idx = (d as usize).min(STATS_MAX_DEPTH - 1);
+                    self.stats.lmr_new_depth_histogram[new_depth_idx] += 1;
+                }
+
+                // depth 1への遷移を追跡
+                #[cfg(feature = "search-stats")]
+                if d == 1 {
+                    let parent_depth_idx = (depth as usize).min(STATS_MAX_DEPTH - 1);
+                    self.stats.lmr_to_depth1_from[parent_depth_idx] += 1;
+                }
 
                 let reduction_from_parent = (depth - 1) - d;
                 self.stack[ply as usize].reduction = reduction_from_parent;
@@ -2254,6 +2653,7 @@ impl SearchWorker {
                     new_depth += do_deeper as i32 - do_shallower as i32;
 
                     if new_depth > d {
+                        inc_stat!(self, lmr_research);
                         value = -self.search_node::<{ NodeType::NonPV as u8 }>(
                             pos,
                             new_depth,
@@ -2397,6 +2797,17 @@ impl SearchWorker {
                     if value >= beta {
                         // cutoffCntインクリメント条件 (extension<2 || PvNode) をベータカット時に加算で近似。
                         self.stack[ply as usize].cutoff_cnt += 1;
+                        // Move Ordering品質統計
+                        inc_stat_by_depth!(self, cutoff_by_depth, depth);
+                        if move_count == 1 {
+                            inc_stat_by_depth!(self, first_move_cutoff_by_depth, depth);
+                        }
+                        // カットオフ時のmove_count統計
+                        #[cfg(feature = "search-stats")]
+                        {
+                            let d = (depth as usize).min(STATS_MAX_DEPTH - 1);
+                            self.stats.move_count_sum_by_depth[d] += move_count as u64;
+                        }
                         break;
                     }
                 }
@@ -2790,6 +3201,7 @@ impl SearchWorker {
                 eval_ctx.unadjusted_static_eval,
                 self.tt.generation(),
             );
+            inc_stat_by_depth!(self, tt_write_by_depth, depth);
         }
 
         best_value
@@ -2928,6 +3340,7 @@ impl SearchWorker {
                     unadjusted_static_eval,
                     self.tt.generation(),
                 );
+                inc_stat_by_depth!(self, tt_write_by_depth, 0);
             }
             return v;
         }
@@ -2960,7 +3373,7 @@ impl SearchWorker {
             let mut buf_moves = OrderedMovesBuffer::new();
 
             {
-                let mp = if in_check {
+                let mut mp = if in_check {
                     MovePicker::new_evasions(
                         pos,
                         tt_move,
@@ -2987,7 +3400,11 @@ impl SearchWorker {
                     )
                 };
 
-                for mv in mp {
+                loop {
+                    let mv = mp.next_move(pos);
+                    if mv == Move::NONE {
+                        break;
+                    }
                     buf_moves.push(mv);
                 }
             }
@@ -3160,6 +3577,7 @@ impl SearchWorker {
             unadjusted_static_eval,
             self.tt.generation(),
         );
+        inc_stat_by_depth!(self, tt_write_by_depth, 0);
 
         best_value
     }
