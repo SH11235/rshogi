@@ -412,21 +412,25 @@ const KNOWN_PAYLOADS: &[(FeatureSet, usize, usize, usize, u64)] = &[
     (FeatureSet::HalfKP, 512, 32, 32, network_payload_halfkp(512, 32, 32)),
     (FeatureSet::HalfKP, 768, 16, 64, network_payload_halfkp(768, 16, 64)),
     (FeatureSet::HalfKP, 1024, 8, 32, network_payload_halfkp(1024, 8, 32)),
-    (FeatureSet::HalfKP, 1024, 8, 96, network_payload_halfkp(1024, 8, 96)),
+    (FeatureSet::HalfKP, 1024, 8, 64, network_payload_halfkp(1024, 8, 64)),
     // HalfKA_hm
     (FeatureSet::HalfKA_hm, 256, 32, 32, network_payload_halfka_hm(256, 32, 32)),
-    (FeatureSet::HalfKA_hm, 256, 8, 96, network_payload_halfka_hm(256, 8, 96)),
+    (FeatureSet::HalfKA_hm, 512, 8, 64, network_payload_halfka_hm(512, 8, 64)),
     (FeatureSet::HalfKA_hm, 512, 8, 96, network_payload_halfka_hm(512, 8, 96)),
     (FeatureSet::HalfKA_hm, 512, 32, 32, network_payload_halfka_hm(512, 32, 32)),
-    (FeatureSet::HalfKA_hm, 1024, 8, 96, network_payload_halfka_hm(1024, 8, 96)),
+    (FeatureSet::HalfKA_hm, 768, 16, 64, network_payload_halfka_hm(768, 16, 64)),
     (FeatureSet::HalfKA_hm, 1024, 8, 32, network_payload_halfka_hm(1024, 8, 32)),
+    (FeatureSet::HalfKA_hm, 1024, 8, 64, network_payload_halfka_hm(1024, 8, 64)),
+    (FeatureSet::HalfKA_hm, 1024, 8, 96, network_payload_halfka_hm(1024, 8, 96)),
     // HalfKA
     (FeatureSet::HalfKA, 256, 32, 32, network_payload_halfka(256, 32, 32)),
-    (FeatureSet::HalfKA, 256, 8, 96, network_payload_halfka(256, 8, 96)),
+    (FeatureSet::HalfKA, 512, 8, 64, network_payload_halfka(512, 8, 64)),
     (FeatureSet::HalfKA, 512, 8, 96, network_payload_halfka(512, 8, 96)),
     (FeatureSet::HalfKA, 512, 32, 32, network_payload_halfka(512, 32, 32)),
-    (FeatureSet::HalfKA, 1024, 8, 96, network_payload_halfka(1024, 8, 96)),
+    (FeatureSet::HalfKA, 768, 16, 64, network_payload_halfka(768, 16, 64)),
     (FeatureSet::HalfKA, 1024, 8, 32, network_payload_halfka(1024, 8, 32)),
+    (FeatureSet::HalfKA, 1024, 8, 64, network_payload_halfka(1024, 8, 64)),
+    (FeatureSet::HalfKA, 1024, 8, 96, network_payload_halfka(1024, 8, 96)),
 ];
 
 /// ファイルサイズと arch_len からアーキテクチャを検出
