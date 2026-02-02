@@ -1256,50 +1256,39 @@ fn parse_qa_from_arch(arch_str: &str) -> Option<i16> {
 // 型エイリアス
 // =============================================================================
 
-use super::activation::{CReLU, PairwiseCReLU, SCReLU};
+use super::activation::CReLU;
 
 // L1=256, FT_OUT=512
-// CReLU/SCReLU: L1_INPUT=512, Pairwise: L1_INPUT=256
 /// HalfKA 256x2-32-32 CReLU
 pub type HalfKA256CReLU = NetworkHalfKA<256, 512, 512, 32, 32, CReLU>;
-/// HalfKA 256x2-32-32 SCReLU
-pub type HalfKA256SCReLU = NetworkHalfKA<256, 512, 512, 32, 32, SCReLU>;
-/// HalfKA 256/2x2-32-32 PairwiseCReLU (L1入力=256, Pairwise乗算で次元半減)
-pub type HalfKA256Pairwise = NetworkHalfKA<256, 512, 256, 32, 32, PairwiseCReLU>;
+
+// L1=512, FT_OUT=1024, L2=8, L3=64
+/// HalfKA 512x2-8-64 CReLU
+pub type HalfKA512_8_64CReLU = NetworkHalfKA<512, 1024, 1024, 8, 64, CReLU>;
 
 // L1=512, FT_OUT=1024, L2=8, L3=96
-// CReLU/SCReLU: L1_INPUT=1024, Pairwise: L1_INPUT=512
 /// HalfKA 512x2-8-96 CReLU
 pub type HalfKA512CReLU = NetworkHalfKA<512, 1024, 1024, 8, 96, CReLU>;
-/// HalfKA 512x2-8-96 SCReLU
-pub type HalfKA512SCReLU = NetworkHalfKA<512, 1024, 1024, 8, 96, SCReLU>;
-/// HalfKA 512/2x2-8-96 PairwiseCReLU (L1入力=512, Pairwise乗算で次元半減)
-pub type HalfKA512Pairwise = NetworkHalfKA<512, 1024, 512, 8, 96, PairwiseCReLU>;
 
 // L1=512, FT_OUT=1024, L2=32, L3=32
 /// HalfKA 512x2-32-32 CReLU
 pub type HalfKA512_32_32CReLU = NetworkHalfKA<512, 1024, 1024, 32, 32, CReLU>;
-/// HalfKA 512x2-32-32 SCReLU
-pub type HalfKA512_32_32SCReLU = NetworkHalfKA<512, 1024, 1024, 32, 32, SCReLU>;
-/// HalfKA 512/2x2-32-32 PairwiseCReLU (L1入力=512, Pairwise乗算で次元半減)
-pub type HalfKA512_32_32Pairwise = NetworkHalfKA<512, 1024, 512, 32, 32, PairwiseCReLU>;
+
+// L1=1024, FT_OUT=2048, L2=8, L3=64
+/// HalfKA 1024x2-8-64 CReLU
+pub type HalfKA1024_8_64CReLU = NetworkHalfKA<1024, 2048, 2048, 8, 64, CReLU>;
 
 // L1=1024, FT_OUT=2048, L2=8, L3=96
-// CReLU/SCReLU: L1_INPUT=2048, Pairwise: L1_INPUT=1024
 /// HalfKA 1024x2-8-96 CReLU
 pub type HalfKA1024CReLU = NetworkHalfKA<1024, 2048, 2048, 8, 96, CReLU>;
-/// HalfKA 1024x2-8-96 SCReLU
-pub type HalfKA1024SCReLU = NetworkHalfKA<1024, 2048, 2048, 8, 96, SCReLU>;
-/// HalfKA 1024/2x2-8-96 PairwiseCReLU (L1入力=1024, Pairwise乗算で次元半減)
-pub type HalfKA1024Pairwise = NetworkHalfKA<1024, 2048, 1024, 8, 96, PairwiseCReLU>;
 
 // L1=1024, FT_OUT=2048, L2=8, L3=32
 /// HalfKA 1024x2-8-32 CReLU
 pub type HalfKA1024_8_32CReLU = NetworkHalfKA<1024, 2048, 2048, 8, 32, CReLU>;
-/// HalfKA 1024x2-8-32 SCReLU
-pub type HalfKA1024_8_32SCReLU = NetworkHalfKA<1024, 2048, 2048, 8, 32, SCReLU>;
-/// HalfKA 1024/2x2-8-32 PairwiseCReLU (L1入力=1024, Pairwise乗算で次元半減)
-pub type HalfKA1024_8_32Pairwise = NetworkHalfKA<1024, 2048, 1024, 8, 32, PairwiseCReLU>;
+
+// L1=768, FT_OUT=1536, L2=16, L3=64
+/// HalfKA 768x2-16-64 CReLU
+pub type HalfKA768CReLU = NetworkHalfKA<768, 1536, 1536, 16, 64, CReLU>;
 
 // =============================================================================
 // テスト
@@ -1371,7 +1360,7 @@ mod tests {
     fn test_type_aliases() {
         // 型エイリアスがコンパイルできることを確認
         fn _check_halfka_256_crelu(_: HalfKA256CReLU) {}
-        fn _check_halfka_512_screlu(_: HalfKA512SCReLU) {}
-        fn _check_halfka_1024_pairwise(_: HalfKA1024Pairwise) {}
+        fn _check_halfka_512_crelu(_: HalfKA512CReLU) {}
+        fn _check_halfka_1024_crelu(_: HalfKA1024CReLU) {}
     }
 }

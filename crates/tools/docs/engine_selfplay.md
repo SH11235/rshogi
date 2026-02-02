@@ -6,8 +6,10 @@ USIエンジン同士の自己対局ツール。対局ログの記録と、NNUE�
 
 ```bash
 # 10局対局（デフォルトで学習データも出力）
-cargo run -p tools --release --bin engine_selfplay -- \
-  --games 10 --byoyomi 1000
+cargo run -p tools --bin engine_selfplay --release -- \
+  --games 100 --byoyomi 1000 --threads 2 --hash-mb 256 \
+  --usi-option-black "MaterialLevel=9" \
+  --usi-option-white "EvalFile=./eval/halfkp_256x2-32-32_crelu/suisho5.bin"
 ```
 
 ## 出力ファイル
@@ -117,6 +119,44 @@ cargo run -p tools --release --bin engine_selfplay -- \
 cargo run -p tools --release --bin engine_selfplay -- \
   --games 10 --byoyomi 1000 \
   --startpos-file sfen.txt
+```
+
+### YaneuraOuエンジンを使用した評価
+
+YaneuraOuエンジンを使用する場合は、`--engine-path-*` でバイナリを指定し、`--usi-option-*` で `EvalDir` を設定します。
+
+**注意**: YaneuraOuは `EvalFile` ではなく `EvalDir` オプションを使用し、指定ディレクトリ内の `nn.bin` を読み込みます。
+
+```bash
+# 自作モデル vs 外部モデル（YaneuraOu同士）
+cargo run -p tools --bin engine_selfplay --release -- \
+  --games 50 --byoyomi 1000 --threads 2 --hash-mb 256 \
+  --engine-path-black /path/to/yaneuraou/YaneuraOu-halfkahm_512x2-8-64 \
+  --engine-path-white /path/to/yaneuraou/YaneuraOu-halfkp_768x2-16-64 \
+  --usi-option-black "EvalDir=eval/my_model" \
+  --usi-option-white "EvalDir=eval/AobaNNUE"
+```
+
+```bash
+# rshogi vs YaneuraOu（エンジン実装の比較）
+cargo run -p tools --bin engine_selfplay --release -- \
+  --games 50 --byoyomi 1000 --threads 2 --hash-mb 256 \
+  --engine-path-black /path/to/rshogi-usi \
+  --engine-path-white /path/to/yaneuraou/YaneuraOu-halfkp_768x2-16-64 \
+  --usi-option-black "EvalFile=/path/to/my_model.bin" \
+  --usi-option-white "EvalDir=eval/AobaNNUE"
+```
+
+**ディレクトリ構造例（YaneuraOu用）:**
+
+```
+yaneuraou/
+├── YaneuraOu-halfkahm_512x2-8-64   # バイナリ
+├── YaneuraOu-halfkp_768x2-16-64    # バイナリ
+└── eval/
+    ├── my_model/nn.bin             # 自作モデル
+    ├── AobaNNUE/nn.bin             # 外部モデル
+    └── suisho5/nn.bin              # 外部モデル
 ```
 
 ## 出力例

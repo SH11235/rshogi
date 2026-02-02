@@ -28,10 +28,12 @@
 mod l1024;
 mod l256;
 mod l512;
+mod l768;
 
 pub use l1024::HalfKA_hm_L1024;
 pub use l256::HalfKA_hm_L256;
 pub use l512::HalfKA_hm_L512;
+pub use l768::HalfKA_hm_L768;
 
 use crate::nnue::accumulator::DirtyPiece;
 use crate::nnue::network_halfka_hm::AccumulatorStackHalfKA_hm;
@@ -46,6 +48,7 @@ use crate::types::Value;
 pub enum HalfKA_hmNetwork {
     L256(HalfKA_hm_L256),
     L512(HalfKA_hm_L512),
+    L768(HalfKA_hm_L768),
     L1024(HalfKA_hm_L1024),
 }
 
@@ -56,6 +59,7 @@ impl HalfKA_hmNetwork {
         match (self, stack) {
             (Self::L256(net), HalfKA_hmStack::L256(st)) => net.evaluate(pos, st),
             (Self::L512(net), HalfKA_hmStack::L512(st)) => net.evaluate(pos, st),
+            (Self::L768(net), HalfKA_hmStack::L768(st)) => net.evaluate(pos, st),
             (Self::L1024(net), HalfKA_hmStack::L1024(st)) => net.evaluate(pos, st),
             _ => unreachable!("L1 mismatch: network={}, stack={}", self.l1_size(), stack.l1_size()),
         }
@@ -67,6 +71,7 @@ impl HalfKA_hmNetwork {
         match (self, stack) {
             (Self::L256(net), HalfKA_hmStack::L256(st)) => net.refresh_accumulator(pos, st),
             (Self::L512(net), HalfKA_hmStack::L512(st)) => net.refresh_accumulator(pos, st),
+            (Self::L768(net), HalfKA_hmStack::L768(st)) => net.refresh_accumulator(pos, st),
             (Self::L1024(net), HalfKA_hmStack::L1024(st)) => net.refresh_accumulator(pos, st),
             _ => unreachable!("L1 mismatch"),
         }
@@ -86,6 +91,9 @@ impl HalfKA_hmNetwork {
                 net.update_accumulator(pos, dirty, st, source_idx)
             }
             (Self::L512(net), HalfKA_hmStack::L512(st)) => {
+                net.update_accumulator(pos, dirty, st, source_idx)
+            }
+            (Self::L768(net), HalfKA_hmStack::L768(st)) => {
                 net.update_accumulator(pos, dirty, st, source_idx)
             }
             (Self::L1024(net), HalfKA_hmStack::L1024(st)) => {
@@ -108,6 +116,9 @@ impl HalfKA_hmNetwork {
                 net.forward_update_incremental(pos, st, source_idx)
             }
             (Self::L512(net), HalfKA_hmStack::L512(st)) => {
+                net.forward_update_incremental(pos, st, source_idx)
+            }
+            (Self::L768(net), HalfKA_hmStack::L768(st)) => {
                 net.forward_update_incremental(pos, st, source_idx)
             }
             (Self::L1024(net), HalfKA_hmStack::L1024(st)) => {
@@ -153,6 +164,10 @@ impl HalfKA_hmNetwork {
                 let net = HalfKA_hm_L512::read(reader, l2, l3, activation)?;
                 Ok(Self::L512(net))
             }
+            768 => {
+                let net = HalfKA_hm_L768::read(reader, l2, l3, activation)?;
+                Ok(Self::L768(net))
+            }
             1024 => {
                 let net = HalfKA_hm_L1024::read(reader, l2, l3, activation)?;
                 Ok(Self::L1024(net))
@@ -169,6 +184,7 @@ impl HalfKA_hmNetwork {
         match self {
             Self::L256(_) => 256,
             Self::L512(_) => 512,
+            Self::L768(_) => 768,
             Self::L1024(_) => 1024,
         }
     }
@@ -178,6 +194,7 @@ impl HalfKA_hmNetwork {
         match self {
             Self::L256(net) => net.architecture_name(),
             Self::L512(net) => net.architecture_name(),
+            Self::L768(net) => net.architecture_name(),
             Self::L1024(net) => net.architecture_name(),
         }
     }
@@ -187,6 +204,7 @@ impl HalfKA_hmNetwork {
         match self {
             Self::L256(net) => net.architecture_spec(),
             Self::L512(net) => net.architecture_spec(),
+            Self::L768(net) => net.architecture_spec(),
             Self::L1024(net) => net.architecture_spec(),
         }
     }
@@ -196,6 +214,7 @@ impl HalfKA_hmNetwork {
         let mut specs = Vec::new();
         specs.extend_from_slice(HalfKA_hm_L256::SUPPORTED_SPECS);
         specs.extend_from_slice(HalfKA_hm_L512::SUPPORTED_SPECS);
+        specs.extend_from_slice(HalfKA_hm_L768::SUPPORTED_SPECS);
         specs.extend_from_slice(HalfKA_hm_L1024::SUPPORTED_SPECS);
         specs
     }
@@ -207,6 +226,7 @@ impl HalfKA_hmNetwork {
 pub enum HalfKA_hmStack {
     L256(AccumulatorStackHalfKA_hm<256>),
     L512(AccumulatorStackHalfKA_hm<512>),
+    L768(AccumulatorStackHalfKA_hm<768>),
     L1024(AccumulatorStackHalfKA_hm<1024>),
 }
 
@@ -218,6 +238,7 @@ impl HalfKA_hmStack {
         match net {
             HalfKA_hmNetwork::L256(_) => Self::L256(AccumulatorStackHalfKA_hm::<256>::new()),
             HalfKA_hmNetwork::L512(_) => Self::L512(AccumulatorStackHalfKA_hm::<512>::new()),
+            HalfKA_hmNetwork::L768(_) => Self::L768(AccumulatorStackHalfKA_hm::<768>::new()),
             HalfKA_hmNetwork::L1024(_) => Self::L1024(AccumulatorStackHalfKA_hm::<1024>::new()),
         }
     }
@@ -227,6 +248,7 @@ impl HalfKA_hmStack {
         match self {
             Self::L256(_) => 256,
             Self::L512(_) => 512,
+            Self::L768(_) => 768,
             Self::L1024(_) => 1024,
         }
     }
@@ -236,6 +258,7 @@ impl HalfKA_hmStack {
         match self {
             Self::L256(s) => s.reset(),
             Self::L512(s) => s.reset(),
+            Self::L768(s) => s.reset(),
             Self::L1024(s) => s.reset(),
         }
     }
@@ -245,6 +268,7 @@ impl HalfKA_hmStack {
         match self {
             Self::L256(s) => s.push(dirty),
             Self::L512(s) => s.push(dirty),
+            Self::L768(s) => s.push(dirty),
             Self::L1024(s) => s.push(dirty),
         }
     }
@@ -254,6 +278,7 @@ impl HalfKA_hmStack {
         match self {
             Self::L256(s) => s.pop(),
             Self::L512(s) => s.pop(),
+            Self::L768(s) => s.pop(),
             Self::L1024(s) => s.pop(),
         }
     }
@@ -263,6 +288,7 @@ impl HalfKA_hmStack {
         match self {
             Self::L256(s) => s.current_index(),
             Self::L512(s) => s.current_index(),
+            Self::L768(s) => s.current_index(),
             Self::L1024(s) => s.current_index(),
         }
     }
@@ -272,6 +298,7 @@ impl HalfKA_hmStack {
         match self {
             Self::L256(s) => s.find_usable_accumulator(),
             Self::L512(s) => s.find_usable_accumulator(),
+            Self::L768(s) => s.find_usable_accumulator(),
             Self::L1024(s) => s.find_usable_accumulator(),
         }
     }
@@ -282,6 +309,7 @@ impl HalfKA_hmStack {
         match self {
             Self::L256(s) => s.current().accumulator.computed_accumulation,
             Self::L512(s) => s.current().accumulator.computed_accumulation,
+            Self::L768(s) => s.current().accumulator.computed_accumulation,
             Self::L1024(s) => s.current().accumulator.computed_accumulation,
         }
     }
@@ -292,6 +320,7 @@ impl HalfKA_hmStack {
         match self {
             Self::L256(s) => s.current().previous,
             Self::L512(s) => s.current().previous,
+            Self::L768(s) => s.current().previous,
             Self::L1024(s) => s.current().previous,
         }
     }
@@ -302,6 +331,7 @@ impl HalfKA_hmStack {
         match self {
             Self::L256(s) => s.entry_at(idx).accumulator.computed_accumulation,
             Self::L512(s) => s.entry_at(idx).accumulator.computed_accumulation,
+            Self::L768(s) => s.entry_at(idx).accumulator.computed_accumulation,
             Self::L1024(s) => s.entry_at(idx).accumulator.computed_accumulation,
         }
     }
@@ -312,6 +342,7 @@ impl HalfKA_hmStack {
         match self {
             Self::L256(s) => s.current().dirty_piece,
             Self::L512(s) => s.current().dirty_piece,
+            Self::L768(s) => s.current().dirty_piece,
             Self::L1024(s) => s.current().dirty_piece,
         }
     }
@@ -344,8 +375,8 @@ mod tests {
     #[test]
     fn test_supported_specs_combined() {
         let specs = HalfKA_hmNetwork::supported_specs();
-        // 256: 3, 512: 6, 1024: 6
-        assert_eq!(specs.len(), 15);
+        // 256: 1, 512: 3, 768: 1, 1024: 3
+        assert_eq!(specs.len(), 8);
 
         // 全て HalfKA_hm
         for spec in &specs {
@@ -435,7 +466,7 @@ mod tests {
     fn test_architecture_spec_consistency() {
         for spec in HalfKA_hmNetwork::supported_specs() {
             assert_eq!(spec.feature_set, FeatureSet::HalfKA_hm);
-            assert!(spec.l1 == 256 || spec.l1 == 512 || spec.l1 == 1024);
+            assert!(spec.l1 == 256 || spec.l1 == 512 || spec.l1 == 768 || spec.l1 == 1024);
             assert!(spec.l2 > 0 && spec.l2 <= 128);
             assert!(spec.l3 > 0 && spec.l3 <= 128);
         }

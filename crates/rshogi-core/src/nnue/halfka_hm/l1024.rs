@@ -9,10 +9,7 @@ use crate::position::Position;
 use crate::types::Value;
 
 // 型エイリアスを aliases 経由でインポート
-use crate::nnue::aliases::{
-    HalfKA_hm1024CReLU, HalfKA_hm1024Pairwise, HalfKA_hm1024SCReLU, HalfKA_hm1024_8_32CReLU,
-    HalfKA_hm1024_8_32Pairwise, HalfKA_hm1024_8_32SCReLU,
-};
+use crate::nnue::aliases::{HalfKA_hm1024CReLU, HalfKA_hm1024_8_32CReLU, HalfKA_hm1024_8_64CReLU};
 
 crate::define_l1_variants!(
     enum HalfKA_hm_L1024,
@@ -22,14 +19,12 @@ crate::define_l1_variants!(
     stack AccumulatorStackHalfKA_hm<1024>,
 
     variants {
+        // L2=8, L3=64 バリアント
+        (8,  64, CReLU,         "CReLU")    => CReLU8x64     : HalfKA_hm1024_8_64CReLU,
         // L2=8, L3=96 バリアント
         (8,  96, CReLU,         "CReLU")    => CReLU8x96     : HalfKA_hm1024CReLU,
-        (8,  96, SCReLU,        "SCReLU")   => SCReLU8x96    : HalfKA_hm1024SCReLU,
-        (8,  96, PairwiseCReLU, "Pairwise") => Pairwise8x96  : HalfKA_hm1024Pairwise,
         // L2=8, L3=32 バリアント
         (8,  32, CReLU,         "CReLU")    => CReLU8x32     : HalfKA_hm1024_8_32CReLU,
-        (8,  32, SCReLU,        "SCReLU")   => SCReLU8x32    : HalfKA_hm1024_8_32SCReLU,
-        (8,  32, PairwiseCReLU, "Pairwise") => Pairwise8x32  : HalfKA_hm1024_8_32Pairwise,
     }
 );
 
@@ -39,18 +34,23 @@ mod tests {
 
     #[test]
     fn test_supported_specs() {
-        assert_eq!(HalfKA_hm_L1024::SUPPORTED_SPECS.len(), 6);
+        assert_eq!(HalfKA_hm_L1024::SUPPORTED_SPECS.len(), 3);
 
-        // 8-96 CReLU
+        // 8-64 CReLU
         let spec = &HalfKA_hm_L1024::SUPPORTED_SPECS[0];
         assert_eq!(spec.feature_set, FeatureSet::HalfKA_hm);
         assert_eq!(spec.l1, 1024);
         assert_eq!(spec.l2, 8);
-        assert_eq!(spec.l3, 96);
+        assert_eq!(spec.l3, 64);
         assert_eq!(spec.activation, Activation::CReLU);
 
+        // 8-96 CReLU
+        let spec = &HalfKA_hm_L1024::SUPPORTED_SPECS[1];
+        assert_eq!(spec.l2, 8);
+        assert_eq!(spec.l3, 96);
+
         // 8-32 CReLU
-        let spec = &HalfKA_hm_L1024::SUPPORTED_SPECS[3];
+        let spec = &HalfKA_hm_L1024::SUPPORTED_SPECS[2];
         assert_eq!(spec.l2, 8);
         assert_eq!(spec.l3, 32);
     }
@@ -78,14 +78,8 @@ mod tests {
     #[test]
     fn test_activation_output_dim_divisor() {
         for spec in HalfKA_hm_L1024::SUPPORTED_SPECS {
-            match spec.activation {
-                Activation::CReLU | Activation::SCReLU => {
-                    assert_eq!(spec.activation.output_dim_divisor(), 1);
-                }
-                Activation::PairwiseCReLU => {
-                    assert_eq!(spec.activation.output_dim_divisor(), 2);
-                }
-            }
+            assert_eq!(spec.activation, Activation::CReLU);
+            assert_eq!(spec.activation.output_dim_divisor(), 1);
         }
     }
 
@@ -95,19 +89,8 @@ mod tests {
         let combinations: Vec<_> =
             HalfKA_hm_L1024::SUPPORTED_SPECS.iter().map(|s| (s.l2, s.l3)).collect();
 
-        // L2=8, L3=96 と L2=8, L3=32 の2パターン
+        assert!(combinations.contains(&(8, 64)), "Should support L2=8, L3=64");
         assert!(combinations.contains(&(8, 96)), "Should support L2=8, L3=96");
         assert!(combinations.contains(&(8, 32)), "Should support L2=8, L3=32");
-    }
-
-    /// マクロ生成: すべての活性化タイプがサポートされていることを確認
-    #[test]
-    fn test_all_activations_present() {
-        let activations: Vec<_> =
-            HalfKA_hm_L1024::SUPPORTED_SPECS.iter().map(|s| s.activation).collect();
-
-        assert!(activations.contains(&Activation::CReLU));
-        assert!(activations.contains(&Activation::SCReLU));
-        assert!(activations.contains(&Activation::PairwiseCReLU));
     }
 }
