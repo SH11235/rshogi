@@ -3,6 +3,18 @@
 //! 探索中に指し手を効率的に順序付けして返すコンポーネント。
 //! Alpha-Beta探索の効率を最大化するため、カットオフを起こしやすい手を先に返す。
 //!
+//! ## Lazy Generation
+//!
+//! MovePickerは指し手を段階的に生成する（lazy generation）。
+//! LMP等の枝刈り条件が成立したら、`skip_quiets()`を呼び出すことで
+//! 残りのquiet手の生成をスキップできる。
+//!
+//! ## History参照を保持しない設計
+//!
+//! 再帰呼び出し時の参照エイリアス問題を避けるため、MovePickerはHistory参照を
+//! フィールドとして保持しない。代わりに、`next_move()`メソッドでHistoryTables
+//! への参照を受け取る。
+//!
 //! ## Stage
 //!
 //! 指し手生成は複数の段階（Stage）に分けて行われる：
@@ -26,10 +38,7 @@
 //! 2. QCaptureInit - 捕獲手の生成
 //! 3. QCapture - 捕獲手
 
-use super::{
-    ButterflyHistory, CapturePieceToHistory, LowPlyHistory, PawnHistory, PieceToHistory,
-    LOW_PLY_HISTORY_SIZE,
-};
+use super::{HistoryTables, PieceToHistory, LOW_PLY_HISTORY_SIZE};
 use crate::movegen::{ExtMove, ExtMoveBuffer};
 use crate::position::Position;
 use crate::types::{Color, Depth, Move, Piece, PieceType, Value, DEPTH_QS};
@@ -111,23 +120,39 @@ impl Stage {
 // MovePicker
 // =============================================================================
 
-/// 指し手オーダリング器
+/// 指し手オーダリング器（History参照を保持しない設計）
 ///
 /// 探索中に指し手を効率的に順序付けして返す。
 /// History統計を参照してスコアリングを行う。
 ///
 /// ## 借用問題の解決
 ///
-/// `MovePicker`は`Position`への参照をフィールドとして保持しない。
-/// 代わりに、`next_move()`メソッドで`Position`への参照を受け取る。
-/// これにより、探索ループ内で`pos.do_move()`を呼び出す際の借用問題を回避できる。
-pub struct MovePicker<'a> {
-    // History参照
-    main_history: &'a ButterflyHistory,
-    low_ply_history: &'a LowPlyHistory,
-    capture_history: &'a CapturePieceToHistory,
-    continuation_history: [&'a PieceToHistory; 6],
-    pawn_history: &'a PawnHistory,
+/// `MovePicker`は`Position`や`HistoryTables`への参照をフィールドとして保持しない。
+/// 代わりに、`next_move()`メソッドでこれらの参照を受け取る。
+/// これにより、探索ループ内で`pos.do_move()`を呼び出す際や、
+/// 再帰呼び出し時のHistory参照エイリアス問題を回避できる。
+///
+/// ## 使用パターン
+///
+/// ```ignore
+/// let mut mp = MovePicker::new(pos, tt_move, depth, ply, cont_hist, generate_all);
+/// loop {
+///     let mv = ctx.history.with_read(|h| mp.next_move(pos, h));
+///     if mv == Move::NONE { break; }
+///     // LMPチェック
+///     if lmp_condition && mp.is_quiet_stage() && !is_capture {
+///         mp.skip_quiets();
+///         continue;
+///     }
+///     // 再帰（この時点で &HistoryTables は存在しない）
+///     let value = search_node(...);
+/// }
+/// ```
+pub struct MovePicker {
+    // History参照は保持しない（next_move時に渡す）
+
+    // ContinuationHistory参照（スコアリング用、ply毎に異なるため保持）
+    continuation_history: [*const PieceToHistory; 6],
 
     // 状態
     stage: Stage,
@@ -155,20 +180,22 @@ pub struct MovePicker<'a> {
     end_good_quiets: usize,
 }
 
-impl<'a> MovePicker<'a> {
-    /// 通常探索・静止探索用コンストラクタ
+impl MovePicker {
+    /// 通常探索・静止探索用コンストラクタ（History参照を保持しない）
     ///
     /// `pos`は初期化時のみ使用し、フィールドとして保持しない。
+    /// `continuation_history`はスコアリング時に使用するため、ポインタとして保持する。
+    ///
+    /// # Safety
+    ///
+    /// `continuation_history`のポインタは、MovePickerのライフタイム中有効でなければならない。
+    /// これは探索ノード内でのみMovePickerを使用することで保証される。
     pub fn new(
         pos: &Position,
         tt_move: Move,
         depth: Depth,
-        main_history: &'a ButterflyHistory,
-        low_ply_history: &'a LowPlyHistory,
-        capture_history: &'a CapturePieceToHistory,
-        continuation_history: [&'a PieceToHistory; 6],
-        pawn_history: &'a PawnHistory,
         ply: i32,
+        continuation_history: [&PieceToHistory; 6],
         generate_all_legal_moves: bool,
     ) -> Self {
         let stage = if pos.in_check() {
@@ -195,11 +222,14 @@ impl<'a> MovePicker<'a> {
         };
 
         Self {
-            main_history,
-            low_ply_history,
-            capture_history,
-            continuation_history,
-            pawn_history,
+            continuation_history: [
+                continuation_history[0] as *const _,
+                continuation_history[1] as *const _,
+                continuation_history[2] as *const _,
+                continuation_history[3] as *const _,
+                continuation_history[4] as *const _,
+                continuation_history[5] as *const _,
+            ],
             stage,
             tt_move,
             probcut_threshold: None,
@@ -223,12 +253,8 @@ impl<'a> MovePicker<'a> {
     pub fn new_evasions(
         pos: &Position,
         tt_move: Move,
-        main_history: &'a ButterflyHistory,
-        low_ply_history: &'a LowPlyHistory,
-        capture_history: &'a CapturePieceToHistory,
-        continuation_history: [&'a PieceToHistory; 6],
-        pawn_history: &'a PawnHistory,
         ply: i32,
+        continuation_history: [&PieceToHistory; 6],
         generate_all_legal_moves: bool,
     ) -> Self {
         debug_assert!(pos.in_check());
@@ -241,11 +267,14 @@ impl<'a> MovePicker<'a> {
             };
 
         Self {
-            main_history,
-            low_ply_history,
-            capture_history,
-            continuation_history,
-            pawn_history,
+            continuation_history: [
+                continuation_history[0] as *const _,
+                continuation_history[1] as *const _,
+                continuation_history[2] as *const _,
+                continuation_history[3] as *const _,
+                continuation_history[4] as *const _,
+                continuation_history[5] as *const _,
+            ],
             stage,
             tt_move,
             probcut_threshold: None,
@@ -270,12 +299,8 @@ impl<'a> MovePicker<'a> {
         pos: &Position,
         tt_move: Move,
         threshold: Value,
-        main_history: &'a ButterflyHistory,
-        low_ply_history: &'a LowPlyHistory,
-        capture_history: &'a CapturePieceToHistory,
-        continuation_history: [&'a PieceToHistory; 6],
-        pawn_history: &'a PawnHistory,
         ply: i32,
+        continuation_history: [&PieceToHistory; 6],
         generate_all_legal_moves: bool,
     ) -> Self {
         debug_assert!(!pos.in_check());
@@ -291,11 +316,14 @@ impl<'a> MovePicker<'a> {
         };
 
         Self {
-            main_history,
-            low_ply_history,
-            capture_history,
-            continuation_history,
-            pawn_history,
+            continuation_history: [
+                continuation_history[0] as *const _,
+                continuation_history[1] as *const _,
+                continuation_history[2] as *const _,
+                continuation_history[3] as *const _,
+                continuation_history[4] as *const _,
+                continuation_history[5] as *const _,
+            ],
             stage,
             tt_move,
             probcut_threshold: Some(threshold),
@@ -319,15 +347,31 @@ impl<'a> MovePicker<'a> {
     ///
     /// skip_quietsフラグを設定し、現在のステージに応じて遷移先を調整する。
     /// QuietInit/GoodQuietステージにいる場合はBadCaptureに即座に遷移する。
+    /// **bad capturesは残す**（quietのみスキップ）
     pub fn skip_quiets(&mut self) {
         self.skip_quiets = true;
         // 現在のステージに応じて遷移先を調整
         match self.stage {
             Stage::QuietInit | Stage::GoodQuiet => {
-                self.stage = Stage::BadCapture;
+                self.stage = Stage::BadCapture; // BadCaptureは残す
             }
             _ => {}
         }
+    }
+
+    /// 現在のステージがquiet段階かどうかを返す
+    ///
+    /// LMP発火条件の判定に使用する。quiet段階（QuietInit, GoodQuiet, BadQuiet）で
+    /// のみLMPを発火させ、captureは残す。
+    #[inline]
+    pub fn is_quiet_stage(&self) -> bool {
+        matches!(self.stage, Stage::QuietInit | Stage::GoodQuiet | Stage::BadQuiet)
+    }
+
+    /// 現在のステージを取得（デバッグ用）
+    #[inline]
+    pub fn stage(&self) -> Stage {
+        self.stage
     }
 
     /// 次の指し手を返す
@@ -336,7 +380,14 @@ impl<'a> MovePicker<'a> {
     ///
     /// ## 引数
     /// - `pos`: 現在の局面への参照（各呼び出しで一時的に借用）
-    pub fn next_move(&mut self, pos: &Position) -> Move {
+    /// - `history`: HistoryTablesへの参照（スコアリング時に使用）
+    ///
+    /// ## 使用パターン
+    ///
+    /// ```ignore
+    /// let mv = ctx.history.with_read(|h| mp.next_move(pos, h));
+    /// ```
+    pub fn next_move(&mut self, pos: &Position, history: &HistoryTables) -> Move {
         loop {
             match self.stage {
                 // ==============================
@@ -398,7 +449,7 @@ impl<'a> MovePicker<'a> {
                     self.end_cur = count;
                     self.end_captures = count;
 
-                    self.score_captures(pos);
+                    self.score_captures(pos, history);
                     partial_insertion_sort(self.moves.as_mut_slice(), self.end_cur, i32::MIN);
 
                     self.stage = self.stage.next();
@@ -449,7 +500,7 @@ impl<'a> MovePicker<'a> {
                         self.moves.set_len(self.end_cur);
 
                         self.cur = self.end_captures;
-                        self.score_quiets(pos);
+                        self.score_quiets(pos, history);
 
                         // ハイブリッド方式: 深さベースの閾値で部分ソート
                         // -3560はYaneuraOuの経験的な定数で、depth=1で-3560、depth=10で-35600となる
@@ -543,7 +594,7 @@ impl<'a> MovePicker<'a> {
                     self.end_cur = count;
                     self.end_generated = count;
 
-                    self.score_evasions(pos);
+                    self.score_evasions(pos, history);
                     partial_insertion_sort(self.moves.as_mut_slice(), self.end_cur, i32::MIN);
 
                     self.stage = Stage::Evasion;
@@ -580,8 +631,15 @@ impl<'a> MovePicker<'a> {
     // スコアリング
     // =========================================================================
 
+    /// ContinuationHistory参照を取得（unsafeだがMovePickerライフタイム中は有効）
+    #[inline]
+    fn cont_history(&self, idx: usize) -> &PieceToHistory {
+        // SAFETY: MovePickerのライフタイム中、continuation_historyポインタは有効
+        unsafe { &*self.continuation_history[idx] }
+    }
+
     /// 捕獲手のスコアを計算
-    fn score_captures(&mut self, pos: &Position) {
+    fn score_captures(&mut self, pos: &Position, history: &HistoryTables) {
         for i in self.cur..self.end_cur {
             let ext = self.moves.get(i);
             let m = ext.mv;
@@ -592,7 +650,7 @@ impl<'a> MovePicker<'a> {
             let captured_pt = captured.piece_type();
 
             // MVV + CaptureHistory + 王手ボーナス
-            let mut value = self.capture_history.get(pc, to, captured_pt) as i32;
+            let mut value = history.capture_history.get(pc, to, captured_pt) as i32;
             value += 7 * piece_value(captured);
 
             // 王手になるマスへの移動にボーナス
@@ -605,7 +663,7 @@ impl<'a> MovePicker<'a> {
     }
 
     /// 静かな手のスコアを計算
-    fn score_quiets(&mut self, pos: &Position) {
+    fn score_quiets(&mut self, pos: &Position, history: &HistoryTables) {
         let us = self.side_to_move;
         let pawn_idx = self.pawn_history_index;
 
@@ -618,16 +676,16 @@ impl<'a> MovePicker<'a> {
             let mut value = 0i32;
 
             // ButterflyHistory (×2)
-            value += 2 * self.main_history.get(us, m) as i32;
+            value += 2 * history.main_history.get(us, m) as i32;
 
             // PawnHistory (×2)
-            value += 2 * self.pawn_history.get(pawn_idx, pc, to) as i32;
+            value += 2 * history.pawn_history.get(pawn_idx, pc, to) as i32;
 
             // ContinuationHistory (6個のうち5個を使用)
             // インデックス4 (ply-5) はスキップ: YaneuraOu準拠で、ply-5は統計的に有効性が低いため除外
             // 参照: yaneuraou-search.cpp の continuationHistory 配列の使用箇所
             for (idx, weight) in [(0, 1), (1, 1), (2, 1), (3, 1), (5, 1)] {
-                let ch = self.continuation_history[idx];
+                let ch = self.cont_history(idx);
                 value += weight * ch.get(pc, to) as i32;
             }
 
@@ -639,7 +697,7 @@ impl<'a> MovePicker<'a> {
             // LowPlyHistory
             if self.ply < LOW_PLY_HISTORY_SIZE as i32 {
                 let ply_idx = self.ply as usize;
-                value += 8 * self.low_ply_history.get(ply_idx, m) as i32 / (1 + self.ply);
+                value += 8 * history.low_ply_history.get(ply_idx, m) as i32 / (1 + self.ply);
             }
 
             self.moves.set_value(i, value);
@@ -647,7 +705,7 @@ impl<'a> MovePicker<'a> {
     }
 
     /// 回避手のスコアを計算
-    fn score_evasions(&mut self, pos: &Position) {
+    fn score_evasions(&mut self, pos: &Position, history: &HistoryTables) {
         let us = self.side_to_move;
 
         for i in self.cur..self.end_cur {
@@ -662,14 +720,14 @@ impl<'a> MovePicker<'a> {
                 self.moves.set_value(i, piece_value(captured) + (1 << 28));
             } else {
                 // 静かな手はHistory
-                let mut value = self.main_history.get(us, m) as i32;
+                let mut value = history.main_history.get(us, m) as i32;
 
-                let ch = self.continuation_history[0];
+                let ch = self.cont_history(0);
                 value += ch.get(pc, to) as i32;
 
                 if self.ply < LOW_PLY_HISTORY_SIZE as i32 {
                     let ply_idx = self.ply as usize;
-                    value += 2 * self.low_ply_history.get(ply_idx, m) as i32 / (1 + self.ply);
+                    value += 2 * history.low_ply_history.get(ply_idx, m) as i32 / (1 + self.ply);
                 }
 
                 self.moves.set_value(i, value);
@@ -740,34 +798,8 @@ impl<'a> MovePicker<'a> {
     }
 }
 
-/// MovePickerとPositionを組み合わせたイテレータアダプタ
-///
-/// `MovePicker`は`Position`への参照をフィールドとして保持しないため、
-/// イテレータとして使用する場合は`Position`を一緒に保持する必要がある。
-pub struct MovePickerIter<'a> {
-    picker: MovePicker<'a>,
-    pos: &'a Position,
-}
-
-impl<'a> MovePickerIter<'a> {
-    /// 新しいイテレータを作成
-    pub fn new(picker: MovePicker<'a>, pos: &'a Position) -> Self {
-        Self { picker, pos }
-    }
-}
-
-impl Iterator for MovePickerIter<'_> {
-    type Item = Move;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let m = self.picker.next_move(self.pos);
-        if m == Move::NONE {
-            None
-        } else {
-            Some(m)
-        }
-    }
-}
+// MovePickerIter は History 参照を引数で渡す新しい設計では使用できないため削除
+// 代わりに、探索ループ内で直接 mp.next_move(pos, history) を呼び出す
 
 // =============================================================================
 // ユーティリティ関数

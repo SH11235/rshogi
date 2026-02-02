@@ -1408,19 +1408,15 @@ impl SearchWorker {
                 pos,
                 tt_ctx.mv,
                 threshold,
-                &self.history.main_history,
-                &self.history.low_ply_history,
-                &self.history.capture_history,
-                cont_tables,
-                &self.history.pawn_history,
                 ply,
+                cont_tables,
                 self.generate_all_legal_moves,
             );
 
             let mut buf = [Move::NONE; crate::movegen::MAX_MOVES];
             let mut len = 0;
             loop {
-                let mv = mp.next_move(pos);
+                let mv = mp.next_move(pos, &self.history);
                 if mv == Move::NONE {
                     break;
                 }
@@ -1522,99 +1518,8 @@ impl SearchWorker {
         None
     }
 
-    /// 指し手生成（TT手優先、qsearch用チェック生成など含む）
-    ///
-    /// 固定長バッファを使用してヒープ割り当てを回避する。
-    fn generate_ordered_moves(
-        &self,
-        pos: &mut Position,
-        tt_move: Move,
-        depth: Depth,
-        in_check: bool,
-        ply: i32,
-    ) -> (OrderedMovesBuffer, Move) {
-        let mut ordered_moves = OrderedMovesBuffer::new();
-        let mut tt_move = tt_move;
-
-        // qsearch/ProbCut互換: 捕獲フェーズではTT手もcapture_stageで制約
-        if depth <= DEPTH_QS
-            && tt_move.is_some()
-            && (!pos.capture_stage(tt_move) && !pos.gives_check(tt_move) || depth < -16)
-        {
-            tt_move = Move::NONE;
-        }
-
-        let cont_tables = self.cont_history_tables(ply);
-        let mut mp = MovePicker::new(
-            pos,
-            tt_move,
-            depth,
-            &self.history.main_history,
-            &self.history.low_ply_history,
-            &self.history.capture_history,
-            cont_tables,
-            &self.history.pawn_history,
-            ply,
-            self.generate_all_legal_moves,
-        );
-
-        loop {
-            let mv = mp.next_move(pos);
-            if mv == Move::NONE {
-                break;
-            }
-            ordered_moves.push(mv);
-        }
-
-        // qsearchでは捕獲以外のチェックも生成（YaneuraOu準拠）
-        if !in_check && depth == DEPTH_QS {
-            let mut buf = crate::movegen::ExtMoveBuffer::new();
-            let gen_type = if self.generate_all_legal_moves {
-                crate::movegen::GenType::QuietChecksAll
-            } else {
-                crate::movegen::GenType::QuietChecks
-            };
-            crate::movegen::generate_with_type(pos, gen_type, &mut buf, None);
-            for ext in buf.iter() {
-                if ordered_moves.contains(&ext.mv) {
-                    continue;
-                }
-                ordered_moves.push(ext.mv);
-            }
-            // PASSが王手になる場合は quiet check として追加
-            if pos.can_pass() && pos.gives_check(Move::PASS) && !ordered_moves.contains(&Move::PASS)
-            {
-                ordered_moves.push(Move::PASS);
-            }
-        }
-
-        // depth <= -5 なら recaptures のみに絞る
-        // ただし前手がPASSの場合は to() が未定義なのでスキップ
-        let prev_move = self.stack[(ply - 1) as usize].current_move;
-        if depth <= -5 && ply >= 1 && prev_move.is_normal() {
-            let mut buf = crate::movegen::ExtMoveBuffer::new();
-            let rec_sq = prev_move.to();
-            let gen_type = if self.generate_all_legal_moves {
-                crate::movegen::GenType::RecapturesAll
-            } else {
-                crate::movegen::GenType::Recaptures
-            };
-            crate::movegen::generate_with_type(pos, gen_type, &mut buf, Some(rec_sq));
-            ordered_moves.clear();
-            for ext in buf.iter() {
-                ordered_moves.push(ext.mv);
-            }
-        }
-
-        // PASS は最低優先度（探索最後に試す）
-        // 静止探索 (depth <= DEPTH_QS) では PASS を追加しない
-        // TT手としてPASSが既に追加されている場合は重複を避ける
-        if depth > DEPTH_QS && pos.can_pass() && !ordered_moves.contains(&Move::PASS) {
-            ordered_moves.push(Move::PASS);
-        }
-
-        (ordered_moves, tt_move)
-    }
+    // generate_ordered_moves は廃止され、探索ループ内で MovePicker を直接使用する
+    // (lazy generation 対応)
 
     /// Step14 の枝刈り（進行可否を返す）
     fn step14_pruning(&self, ctx: Step14Context<'_>) -> Step14Outcome {
@@ -2316,7 +2221,7 @@ impl SearchWorker {
         }
 
         // =================================================================
-        // 指し手ループ
+        // 指し手ループ（lazy generation）
         // =================================================================
         let mut best_value = Value::new(-32001);
         let mut best_move = Move::NONE;
@@ -2325,14 +2230,34 @@ impl SearchWorker {
         let mut captures_tried = SearchedMoveList::new();
         let mover = pos.side_to_move();
 
-        let (ordered_moves, tt_move) =
-            self.generate_ordered_moves(pos, tt_move, depth, in_check, ply);
+        // qsearch/ProbCut互換: 捕獲フェーズではTT手もcapture_stageで制約
+        let tt_move = if depth <= DEPTH_QS
+            && tt_move.is_some()
+            && (!pos.capture_stage(tt_move) && !pos.gives_check(tt_move) || depth < -16)
+        {
+            Move::NONE
+        } else {
+            tt_move
+        };
+
+        // MovePickerを作成（lazy generation）
+        let cont_tables = self.cont_history_tables(ply);
+        let mut mp =
+            MovePicker::new(pos, tt_move, depth, ply, cont_tables, self.generate_all_legal_moves);
 
         // Singular Extension用の変数
         let tt_pv = self.stack[ply as usize].tt_pv;
         let root_node = NT == NodeType::Root as u8;
 
-        for mv in ordered_moves.iter() {
+        // LMPが発火したかどうか
+        let mut lmp_triggered = false;
+
+        loop {
+            // 次の手を取得（lazy generation）
+            let mv = mp.next_move(pos, &self.history);
+            if mv == Move::NONE {
+                break;
+            }
             // Singular Extension用の除外手をスキップ（YaneuraOu準拠）
             if mv == excluded_move {
                 continue;
@@ -2482,12 +2407,19 @@ impl SearchWorker {
             }
 
             // =============================================================
-            // Late Move Pruning
+            // Late Move Pruning（lazy generation対応）
             // =============================================================
             // パス手はLMPの対象外（ボーナス評価のため探索する必要がある）
+            // LMP条件成立時: quiet stageの場合は skip_quiets() を呼び出して残りのquiet手をスキップ
+            //               ただしcaptureは残す
             if !pv_node && !in_check && !is_capture && !mv.is_pass() {
                 let lmp_limit = (3 + depth * depth) / (2 - improving as i32);
                 if move_count >= lmp_limit {
+                    if !lmp_triggered && mp.is_quiet_stage() {
+                        // LMP発火: 残りのquiet手をスキップ（bad capturesは残す）
+                        mp.skip_quiets();
+                        lmp_triggered = true;
+                    }
                     continue;
                 }
             }
@@ -3377,12 +3309,8 @@ impl SearchWorker {
                     MovePicker::new_evasions(
                         pos,
                         tt_move,
-                        &self.history.main_history,
-                        &self.history.low_ply_history,
-                        &self.history.capture_history,
-                        cont_tables,
-                        &self.history.pawn_history,
                         ply,
+                        cont_tables,
                         self.generate_all_legal_moves,
                     )
                 } else {
@@ -3390,18 +3318,14 @@ impl SearchWorker {
                         pos,
                         tt_move,
                         DEPTH_QS,
-                        &self.history.main_history,
-                        &self.history.low_ply_history,
-                        &self.history.capture_history,
-                        cont_tables,
-                        &self.history.pawn_history,
                         ply,
+                        cont_tables,
                         self.generate_all_legal_moves,
                     )
                 };
 
                 loop {
-                    let mv = mp.next_move(pos);
+                    let mv = mp.next_move(pos, &self.history);
                     if mv == Move::NONE {
                         break;
                     }
