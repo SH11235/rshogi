@@ -1177,12 +1177,6 @@ impl SearchWorker {
             depth -= 1;
         }
 
-        // TT move がない場合の IIR（YaneuraOu OLD_CODE相当: PvNode/cutNodeで早期にdepthを減少）
-        // !allNode = pv_node || cut_node
-        if (pv_node || cut_node) && depth >= 6 && tt_move.is_none() && prior_reduction <= 3 {
-            depth -= 1;
-        }
-
         if let Some(v) = try_razoring::<NT, _>(
             st,
             ctx,
