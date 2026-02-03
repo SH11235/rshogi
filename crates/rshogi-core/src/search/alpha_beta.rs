@@ -1182,7 +1182,7 @@ impl SearchWorker {
             depth -= 1;
         }
 
-        if let Some(v) = try_razoring::<NT, _>(
+        if let Some(v) = try_razoring::<NT>(
             st,
             ctx,
             pos,
@@ -1195,7 +1195,6 @@ impl SearchWorker {
             eval_ctx.static_eval,
             limits,
             time_manager,
-            |_, _, _, _, _, _, _, _, _, _| Value::ZERO, // 未使用コールバック
         ) {
             return v;
         }

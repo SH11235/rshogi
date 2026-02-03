@@ -207,7 +207,7 @@ pub(super) fn step14_pruning(
 /// 評価値が非常に低い場合、通常探索をスキップして静止探索の値を返す。
 #[allow(clippy::too_many_arguments)]
 #[inline]
-pub(super) fn try_razoring<const NT: u8, F>(
+pub(super) fn try_razoring<const NT: u8>(
     st: &mut SearchState,
     ctx: &SearchContext<'_>,
     pos: &mut Position,
@@ -220,22 +220,7 @@ pub(super) fn try_razoring<const NT: u8, F>(
     static_eval: Value,
     limits: &LimitsType,
     time_manager: &mut TimeManagement,
-    _search_node: F, // 未使用、将来の拡張用
-) -> Option<Value>
-where
-    F: Fn(
-        &mut SearchState,
-        &SearchContext<'_>,
-        &mut Position,
-        Depth,
-        Value,
-        Value,
-        i32,
-        bool,
-        &LimitsType,
-        &mut TimeManagement,
-    ) -> Value,
-{
+) -> Option<Value> {
     // depth <= 3 の浅い探索で、静的評価値が alpha より十分低い場合
     if !pv_node && !in_check && depth <= 3 {
         let razoring_threshold = alpha - Value::new(200 * depth);
