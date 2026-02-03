@@ -101,7 +101,21 @@ impl FtActivation for CReLU {
 
 /// CReLU: i16 → u8（SIMD最適化版）
 fn crelu_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16) {
+    // SIMD 有効環境: processed は SIMD 処理で更新される
+    #[cfg(any(
+        all(target_arch = "x86_64", target_feature = "avx2"),
+        all(target_arch = "x86_64", target_feature = "sse2"),
+        all(target_arch = "wasm32", target_feature = "simd128")
+    ))]
     let mut processed = 0;
+
+    // SIMD 無効環境: processed は常に 0（全要素をスカラー処理）
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_feature = "avx2"),
+        all(target_arch = "x86_64", target_feature = "sse2"),
+        all(target_arch = "wasm32", target_feature = "simd128")
+    )))]
+    let processed = 0;
 
     // AVX2: 32要素ずつ処理
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
@@ -132,11 +146,7 @@ fn crelu_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16) {
     }
 
     // SSE2: 8要素ずつ処理
-    #[cfg(all(
-        target_arch = "x86_64",
-        target_feature = "sse2",
-        not(target_feature = "avx2")
-    ))]
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
     {
         let remaining = input.len() - processed;
         let num_chunks = remaining / 16;
@@ -182,7 +192,7 @@ fn crelu_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16) {
                     let v = v128_load(in_ptr.add(i * 8) as *const v128);
                     let clamped = i16x8_min(i16x8_max(v, zero), max_val);
                     let packed = u8x16_narrow_i16x8(clamped, clamped);
-                    v128_store64_lane::<0>(out_ptr.add(i * 8) as *mut v128, packed);
+                    v128_store64_lane::<0>(packed, out_ptr.add(i * 8) as *mut u64);
                 }
             }
             processed += num_chunks * 8;
@@ -199,7 +209,19 @@ fn crelu_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16) {
 ///
 /// 中間層では固定で 0-127 にクランプする（u8 出力のため）
 fn crelu_i32_to_u8(input: &[i32], output: &mut [u8]) {
+    // SIMD 有効環境: processed は SIMD 処理で更新される
+    #[cfg(any(
+        all(target_arch = "x86_64", target_feature = "avx2"),
+        all(target_arch = "x86_64", target_feature = "sse2")
+    ))]
     let mut processed = 0;
+
+    // SIMD 無効環境: processed は常に 0（全要素をスカラー処理）
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_feature = "avx2"),
+        all(target_arch = "x86_64", target_feature = "sse2")
+    )))]
+    let processed = 0;
 
     // AVX2: 32要素ずつ処理
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
@@ -417,14 +439,18 @@ fn pairwise_crelu_i16_to_u8_inner<const QA: i32, const SHIFT: i32, const MAX_OUT
     // SIMD 有効環境: processed は SIMD 処理で更新される
     #[cfg(any(
         all(target_arch = "x86_64", target_feature = "avx2"),
-        all(target_arch = "x86_64", target_feature = "sse4.1")
+        all(target_arch = "x86_64", target_feature = "sse4.1"),
+        all(target_arch = "x86_64", target_feature = "sse2"),
+        all(target_arch = "wasm32", target_feature = "simd128")
     ))]
     let mut processed = 0usize;
 
     // SIMD 無効環境: processed は常に 0（全要素をスカラー処理）
     #[cfg(not(any(
         all(target_arch = "x86_64", target_feature = "avx2"),
-        all(target_arch = "x86_64", target_feature = "sse4.1")
+        all(target_arch = "x86_64", target_feature = "sse4.1"),
+        all(target_arch = "x86_64", target_feature = "sse2"),
+        all(target_arch = "wasm32", target_feature = "simd128")
     )))]
     let processed = 0usize;
 
@@ -516,6 +542,144 @@ fn pairwise_crelu_i16_to_u8_inner<const QA: i32, const SHIFT: i32, const MAX_OUT
         }
     }
 
+    // SSE2: 4要素ずつ処理（SSE4.1未対応環境）
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "sse2",
+        not(target_feature = "sse4.1")
+    ))]
+    {
+        let remaining = half - processed;
+        let num_chunks = remaining / 4;
+        if num_chunks > 0 {
+            unsafe {
+                use std::arch::x86_64::*;
+                let zero = _mm_setzero_si128();
+                let max_clamp = _mm_set1_epi32(QA);
+                let max_out = _mm_set1_epi32(MAX_OUT);
+
+                let a_ptr = input.as_ptr().add(processed);
+                let b_ptr = input.as_ptr().add(half + processed);
+                let out_ptr = output.as_mut_ptr().add(processed);
+
+                for i in 0..num_chunks {
+                    // i16を4要素ロードしてi32に拡張（SSE2での手動実装）
+                    let a_i16 = _mm_loadl_epi64(a_ptr.add(i * 4) as *const __m128i);
+                    let b_i16 = _mm_loadl_epi64(b_ptr.add(i * 4) as *const __m128i);
+
+                    // 符号拡張: unpacklo with sign extension
+                    let a_sign = _mm_cmpgt_epi16(zero, a_i16);
+                    let a = _mm_unpacklo_epi16(a_i16, a_sign);
+                    let b_sign = _mm_cmpgt_epi16(zero, b_i16);
+                    let b = _mm_unpacklo_epi16(b_i16, b_sign);
+
+                    // max(a, 0)
+                    let a_gt_zero = _mm_cmpgt_epi32(a, zero);
+                    let a_max_zero = _mm_and_si128(a, a_gt_zero);
+
+                    // min(a_max_zero, max_clamp)
+                    let a_lt_clamp = _mm_cmpgt_epi32(max_clamp, a_max_zero);
+                    let a_clamped = _mm_or_si128(
+                        _mm_and_si128(a_max_zero, a_lt_clamp),
+                        _mm_andnot_si128(a_lt_clamp, max_clamp),
+                    );
+
+                    // max(b, 0)
+                    let b_gt_zero = _mm_cmpgt_epi32(b, zero);
+                    let b_max_zero = _mm_and_si128(b, b_gt_zero);
+
+                    // min(b_max_zero, max_clamp)
+                    let b_lt_clamp = _mm_cmpgt_epi32(max_clamp, b_max_zero);
+                    let b_clamped = _mm_or_si128(
+                        _mm_and_si128(b_max_zero, b_lt_clamp),
+                        _mm_andnot_si128(b_lt_clamp, max_clamp),
+                    );
+
+                    // 32bit乗算（SSE2での手動実装）
+                    // 注意: a_clamped, b_clamped は [0, QA] の範囲にクランプ済みのため、
+                    // 符号なし乗算 (_mm_mul_epu32) を使用可能
+                    let a_lo = a_clamped;
+                    let b_lo = b_clamped;
+                    let a_hi = _mm_srli_epi64(a_clamped, 32);
+                    let b_hi = _mm_srli_epi64(b_clamped, 32);
+
+                    // 偶数要素の乗算
+                    let lo_product = _mm_mul_epu32(a_lo, b_lo);
+                    // 奇数要素の乗算
+                    let hi_product = _mm_mul_epu32(a_hi, b_hi);
+
+                    // 結果を組み立てる
+                    let lo_shifted = _mm_shuffle_epi32(lo_product, 0b00_00_10_00);
+                    let hi_shifted = _mm_shuffle_epi32(hi_product, 0b00_00_10_00);
+                    let product = _mm_unpacklo_epi32(lo_shifted, hi_shifted);
+
+                    // シフトして min(result, max_out)
+                    let shifted = _mm_srai_epi32(product, SHIFT);
+                    let result_lt_max = _mm_cmpgt_epi32(max_out, shifted);
+                    let result = _mm_or_si128(
+                        _mm_and_si128(shifted, result_lt_max),
+                        _mm_andnot_si128(result_lt_max, max_out),
+                    );
+
+                    let packed16 = _mm_packs_epi32(result, result);
+                    let packed8 = _mm_packus_epi16(packed16, packed16);
+
+                    let val = _mm_cvtsi128_si32(packed8) as u32;
+                    std::ptr::copy_nonoverlapping(
+                        &val as *const u32 as *const u8,
+                        out_ptr.add(i * 4),
+                        4,
+                    );
+                }
+            }
+            processed += num_chunks * 4;
+        }
+    }
+
+    // WASM SIMD128: 4要素ずつ処理
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        let remaining = half - processed;
+        let num_chunks = remaining / 4;
+        if num_chunks > 0 {
+            unsafe {
+                use std::arch::wasm32::*;
+                let zero = i32x4_splat(0);
+                let max_clamp = i32x4_splat(QA);
+                let max_out = i32x4_splat(MAX_OUT);
+
+                let a_ptr = input.as_ptr().add(processed);
+                let b_ptr = input.as_ptr().add(half + processed);
+                let out_ptr = output.as_mut_ptr().add(processed);
+
+                for i in 0..num_chunks {
+                    // i16を4要素ロード（64bitとして）
+                    let a_i64 = v128_load64_zero(a_ptr.add(i * 4) as *const u64);
+                    let b_i64 = v128_load64_zero(b_ptr.add(i * 4) as *const u64);
+                    // i16 → i32拡張
+                    let a = i32x4_extend_low_i16x8(a_i64);
+                    let b = i32x4_extend_low_i16x8(b_i64);
+
+                    // クランプ
+                    let a_clamped = i32x4_min(i32x4_max(a, zero), max_clamp);
+                    let b_clamped = i32x4_min(i32x4_max(b, zero), max_clamp);
+
+                    // 乗算してシフト
+                    let product = i32x4_mul(a_clamped, b_clamped);
+                    let result = i32x4_min(i32x4_shr(product, SHIFT as u32), max_out);
+
+                    // i32 → i16 → u8 にナロー
+                    let narrow16 = i16x8_narrow_i32x4(result, result);
+                    let narrow8 = u8x16_narrow_i16x8(narrow16, narrow16);
+
+                    // 下位4バイトを書き込む
+                    v128_store32_lane::<0>(narrow8, out_ptr.add(i * 4) as *mut u32);
+                }
+            }
+            processed += num_chunks * 4;
+        }
+    }
+
     // スカラーフォールバック
     for j in processed..half {
         let a = i32::from(input[j]).clamp(0, QA);
@@ -536,14 +700,18 @@ fn pairwise_crelu_i32_to_u8(input: &[i32], output: &mut [u8]) {
     // SIMD 有効環境: processed は SIMD 処理で更新される
     #[cfg(any(
         all(target_arch = "x86_64", target_feature = "avx2"),
-        all(target_arch = "x86_64", target_feature = "sse4.1")
+        all(target_arch = "x86_64", target_feature = "sse4.1"),
+        all(target_arch = "x86_64", target_feature = "sse2"),
+        all(target_arch = "wasm32", target_feature = "simd128")
     ))]
     let mut processed = 0usize;
 
     // SIMD 無効環境: processed は常に 0（全要素をスカラー処理）
     #[cfg(not(any(
         all(target_arch = "x86_64", target_feature = "avx2"),
-        all(target_arch = "x86_64", target_feature = "sse4.1")
+        all(target_arch = "x86_64", target_feature = "sse4.1"),
+        all(target_arch = "x86_64", target_feature = "sse2"),
+        all(target_arch = "wasm32", target_feature = "simd128")
     )))]
     let processed = 0usize;
 
@@ -637,6 +805,135 @@ fn pairwise_crelu_i32_to_u8(input: &[i32], output: &mut [u8]) {
         }
     }
 
+    // SSE2: 4要素ずつ処理（SSE4.1未対応環境）
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "sse2",
+        not(target_feature = "sse4.1")
+    ))]
+    {
+        let remaining = half - processed;
+        let num_chunks = remaining / 4;
+        if num_chunks > 0 {
+            unsafe {
+                use std::arch::x86_64::*;
+                let zero = _mm_setzero_si128();
+                let max_val = _mm_set1_epi32(127);
+
+                let a_ptr = input.as_ptr().add(processed);
+                let b_ptr = input.as_ptr().add(half + processed);
+                let out_ptr = output.as_mut_ptr().add(processed);
+
+                for i in 0..num_chunks {
+                    let a = _mm_loadu_si128(a_ptr.add(i * 4) as *const __m128i);
+                    let b = _mm_loadu_si128(b_ptr.add(i * 4) as *const __m128i);
+
+                    // シフト
+                    let a_shifted = _mm_srai_epi32(a, WEIGHT_SCALE_BITS as i32);
+                    let b_shifted = _mm_srai_epi32(b, WEIGHT_SCALE_BITS as i32);
+
+                    // max(a_shifted, 0)
+                    let a_gt_zero = _mm_cmpgt_epi32(a_shifted, zero);
+                    let a_max_zero = _mm_and_si128(a_shifted, a_gt_zero);
+
+                    // min(a_max_zero, max_val)
+                    let a_lt_max = _mm_cmpgt_epi32(max_val, a_max_zero);
+                    let a_clamped = _mm_or_si128(
+                        _mm_and_si128(a_max_zero, a_lt_max),
+                        _mm_andnot_si128(a_lt_max, max_val),
+                    );
+
+                    // max(b_shifted, 0)
+                    let b_gt_zero = _mm_cmpgt_epi32(b_shifted, zero);
+                    let b_max_zero = _mm_and_si128(b_shifted, b_gt_zero);
+
+                    // min(b_max_zero, max_val)
+                    let b_lt_max = _mm_cmpgt_epi32(max_val, b_max_zero);
+                    let b_clamped = _mm_or_si128(
+                        _mm_and_si128(b_max_zero, b_lt_max),
+                        _mm_andnot_si128(b_lt_max, max_val),
+                    );
+
+                    // 32bit乗算（SSE2での手動実装）
+                    // 注意: a_clamped, b_clamped は [0, 127] の範囲にクランプ済みのため、
+                    // 符号なし乗算 (_mm_mul_epu32) を使用可能
+                    let a_lo = a_clamped;
+                    let b_lo = b_clamped;
+                    let a_hi = _mm_srli_epi64(a_clamped, 32);
+                    let b_hi = _mm_srli_epi64(b_clamped, 32);
+
+                    let lo_product = _mm_mul_epu32(a_lo, b_lo);
+                    let hi_product = _mm_mul_epu32(a_hi, b_hi);
+
+                    let lo_shifted = _mm_shuffle_epi32(lo_product, 0b00_00_10_00);
+                    let hi_shifted = _mm_shuffle_epi32(hi_product, 0b00_00_10_00);
+                    let product = _mm_unpacklo_epi32(lo_shifted, hi_shifted);
+
+                    // シフトして min(result, max_val)
+                    let shifted = _mm_srai_epi32(product, 7);
+                    let result_lt_max = _mm_cmpgt_epi32(max_val, shifted);
+                    let result = _mm_or_si128(
+                        _mm_and_si128(shifted, result_lt_max),
+                        _mm_andnot_si128(result_lt_max, max_val),
+                    );
+
+                    let packed16 = _mm_packs_epi32(result, result);
+                    let packed8 = _mm_packus_epi16(packed16, packed16);
+
+                    let val = _mm_cvtsi128_si32(packed8) as u32;
+                    std::ptr::copy_nonoverlapping(
+                        &val as *const u32 as *const u8,
+                        out_ptr.add(i * 4),
+                        4,
+                    );
+                }
+            }
+            processed += num_chunks * 4;
+        }
+    }
+
+    // WASM SIMD128: 4要素ずつ処理
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        let remaining = half - processed;
+        let num_chunks = remaining / 4;
+        if num_chunks > 0 {
+            unsafe {
+                use std::arch::wasm32::*;
+                let zero = i32x4_splat(0);
+                let max_val = i32x4_splat(127);
+
+                let a_ptr = input.as_ptr().add(processed);
+                let b_ptr = input.as_ptr().add(half + processed);
+                let out_ptr = output.as_mut_ptr().add(processed);
+
+                for i in 0..num_chunks {
+                    // i32を4要素ロード
+                    let a = v128_load(a_ptr.add(i * 4) as *const v128);
+                    let b = v128_load(b_ptr.add(i * 4) as *const v128);
+
+                    // シフトしてクランプ
+                    let a_shifted = i32x4_shr(a, WEIGHT_SCALE_BITS as u32);
+                    let b_shifted = i32x4_shr(b, WEIGHT_SCALE_BITS as u32);
+                    let a_clamped = i32x4_min(i32x4_max(a_shifted, zero), max_val);
+                    let b_clamped = i32x4_min(i32x4_max(b_shifted, zero), max_val);
+
+                    // 乗算してシフト
+                    let product = i32x4_mul(a_clamped, b_clamped);
+                    let result = i32x4_min(i32x4_shr(product, 7), max_val);
+
+                    // i32 → i16 → u8 にナロー
+                    let narrow16 = i16x8_narrow_i32x4(result, result);
+                    let narrow8 = u8x16_narrow_i16x8(narrow16, narrow16);
+
+                    // 下位4バイトを書き込む
+                    v128_store32_lane::<0>(narrow8, out_ptr.add(i * 4) as *mut u32);
+                }
+            }
+            processed += num_chunks * 4;
+        }
+    }
+
     // スカラーフォールバック
     for j in processed..half {
         let a = (input[j] >> WEIGHT_SCALE_BITS).clamp(0, 127);
@@ -685,16 +982,208 @@ impl FtActivation for SCReLU {
 /// SCReLU: i16 → u8
 ///
 /// シフト量が qa に依存するため、SIMD 版は qa=127 と qa=255 で分岐して実装。
-/// 現時点ではシンプルなスカラー実装のみ。
 fn screlu_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16) {
     debug_assert_eq!(input.len(), output.len(), "input and output must have same length");
-    let qa_i32 = qa as i32;
-    let shift = if qa >= 255 { 9 } else { 7 };
 
-    // スカラー実装
-    for i in 0..input.len() {
-        let clamped = i32::from(input[i]).clamp(0, qa_i32);
-        output[i] = ((clamped * clamped) >> shift).min(127) as u8;
+    // const genericsでQA/SHIFTを分岐してSIMD最適化
+    if qa >= 255 {
+        screlu_i16_to_u8_inner::<255, 9>(input, output);
+    } else {
+        screlu_i16_to_u8_inner::<127, 7>(input, output);
+    }
+}
+
+/// SCReLU i16 → u8 の内部実装（const generics でシフト量を固定）
+///
+/// # 型パラメータ
+/// - `QA`: クリッピング閾値（255 または 127）
+/// - `SHIFT`: シフト量（QA=255なら9、QA=127なら7）
+fn screlu_i16_to_u8_inner<const QA: i32, const SHIFT: i32>(input: &[i16], output: &mut [u8]) {
+    // コンパイル時アサーション: 定数パラメータの整合性を保証
+    const {
+        assert!(
+            (QA == 127 && SHIFT == 7) || (QA == 255 && SHIFT == 9),
+            "Invalid QA/SHIFT combination"
+        );
+    }
+
+    // SIMD 有効環境: processed は SIMD 処理で更新される
+    #[cfg(any(
+        all(target_arch = "x86_64", target_feature = "avx2"),
+        all(target_arch = "x86_64", target_feature = "sse2"),
+        all(target_arch = "wasm32", target_feature = "simd128")
+    ))]
+    let mut processed = 0;
+
+    // SIMD 無効環境: processed は常に 0（全要素をスカラー処理）
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_feature = "avx2"),
+        all(target_arch = "x86_64", target_feature = "sse2"),
+        all(target_arch = "wasm32", target_feature = "simd128")
+    )))]
+    let processed = 0;
+
+    // AVX2: 8要素ずつ処理（i16→i32拡張が必要）
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        let num_chunks = input.len() / 8;
+        if num_chunks > 0 {
+            unsafe {
+                use std::arch::x86_64::*;
+                let zero = _mm256_setzero_si256();
+                let max_clamp = _mm256_set1_epi32(QA);
+                let max_out = _mm256_set1_epi32(127);
+
+                let in_ptr = input.as_ptr();
+                let out_ptr = output.as_mut_ptr();
+
+                for i in 0..num_chunks {
+                    // i16を8要素ロードしてi32に拡張
+                    let v_i16 = _mm_loadu_si128(in_ptr.add(i * 8) as *const __m128i);
+                    let v = _mm256_cvtepi16_epi32(v_i16);
+
+                    // クランプ
+                    let clamped = _mm256_min_epi32(_mm256_max_epi32(v, zero), max_clamp);
+
+                    // 二乗
+                    let squared = _mm256_mullo_epi32(clamped, clamped);
+
+                    // シフトしてクランプ
+                    let result = _mm256_min_epi32(_mm256_srai_epi32(squared, SHIFT), max_out);
+
+                    // i32 → i16 → u8 にパック
+                    let packed16 = _mm256_packs_epi32(result, result);
+                    let packed8 = _mm256_packus_epi16(packed16, packed16);
+
+                    // 結果を取り出して書き込む
+                    let lo = _mm256_castsi256_si128(packed8);
+                    let hi = _mm256_extracti128_si256(packed8, 1);
+                    let combined = _mm_unpacklo_epi32(lo, hi);
+                    _mm_storel_epi64(out_ptr.add(i * 8) as *mut __m128i, combined);
+                }
+            }
+            processed = num_chunks * 8;
+        }
+    }
+
+    // SSE2: 4要素ずつ処理
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+    {
+        let remaining = input.len() - processed;
+        let num_chunks = remaining / 4;
+        if num_chunks > 0 {
+            unsafe {
+                use std::arch::x86_64::*;
+                let zero = _mm_setzero_si128();
+                let max_clamp = _mm_set1_epi32(QA);
+                let max_out = _mm_set1_epi32(127);
+
+                let in_ptr = input.as_ptr().add(processed);
+                let out_ptr = output.as_mut_ptr().add(processed);
+
+                for i in 0..num_chunks {
+                    // i16を4要素ロードしてi32に拡張
+                    let v_i16 = _mm_loadl_epi64(in_ptr.add(i * 4) as *const __m128i);
+
+                    #[cfg(target_feature = "sse4.1")]
+                    let v = _mm_cvtepi16_epi32(v_i16);
+
+                    #[cfg(not(target_feature = "sse4.1"))]
+                    let v = {
+                        // SSE2での符号拡張: unpacklo with sign extension
+                        let sign_mask = _mm_cmpgt_epi16(zero, v_i16);
+                        _mm_unpacklo_epi16(v_i16, sign_mask)
+                    };
+
+                    // クランプ
+                    let clamped = _mm_min_epi32(_mm_max_epi32(v, zero), max_clamp);
+
+                    // 二乗
+                    #[cfg(target_feature = "sse4.1")]
+                    let squared = _mm_mullo_epi32(clamped, clamped);
+
+                    #[cfg(not(target_feature = "sse4.1"))]
+                    let squared = {
+                        // SSE2での32bit乗算を手動実装
+                        // 注意: clamped は [0, QA] の範囲にクランプ済みのため、
+                        // 符号なし乗算 (_mm_mul_epu32) を使用可能
+                        let a_lo = clamped;
+                        let a_hi = _mm_srli_epi64(clamped, 32); // 32bitシフトで奇数要素を取得
+                        let lo_lo = _mm_mul_epu32(a_lo, a_lo);
+                        let hi_hi = _mm_mul_epu32(a_hi, a_hi);
+                        let lo_lo_shifted = _mm_shuffle_epi32(lo_lo, 0b00_00_10_00);
+                        let hi_hi_shifted = _mm_shuffle_epi32(hi_hi, 0b00_00_10_00);
+                        _mm_unpacklo_epi32(lo_lo_shifted, hi_hi_shifted)
+                    };
+
+                    // シフトしてクランプ
+                    let shifted = _mm_srai_epi32(squared, SHIFT);
+                    let result = _mm_min_epi32(shifted, max_out);
+
+                    // i32 → i16 → u8 にパック
+                    let packed16 = _mm_packs_epi32(result, result);
+                    let packed8 = _mm_packus_epi16(packed16, packed16);
+
+                    // 下位4バイトを書き込む
+                    let val = _mm_cvtsi128_si32(packed8) as u32;
+                    std::ptr::copy_nonoverlapping(
+                        &val as *const u32 as *const u8,
+                        out_ptr.add(i * 4),
+                        4,
+                    );
+                }
+            }
+            processed += num_chunks * 4;
+        }
+    }
+
+    // WASM SIMD128: 4要素ずつ処理
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        let remaining = input.len() - processed;
+        let num_chunks = remaining / 4;
+        if num_chunks > 0 {
+            unsafe {
+                use std::arch::wasm32::*;
+                let zero = i32x4_splat(0);
+                let max_clamp = i32x4_splat(QA);
+                let max_out = i32x4_splat(127);
+
+                let in_ptr = input.as_ptr().add(processed);
+                let out_ptr = output.as_mut_ptr().add(processed);
+
+                for i in 0..num_chunks {
+                    // i16を4要素ロード（64bitとして）
+                    let v_i64 = v128_load64_zero(in_ptr.add(i * 4) as *const u64);
+                    // i16 → i32拡張
+                    let v = i32x4_extend_low_i16x8(v_i64);
+
+                    // クランプ
+                    let clamped = i32x4_min(i32x4_max(v, zero), max_clamp);
+
+                    // 二乗
+                    let squared = i32x4_mul(clamped, clamped);
+
+                    // シフトしてクランプ
+                    let shifted = i32x4_shr(squared, SHIFT as u32);
+                    let result = i32x4_min(shifted, max_out);
+
+                    // i32 → i16 → u8 にナロー
+                    let narrow16 = i16x8_narrow_i32x4(result, result);
+                    let narrow8 = u8x16_narrow_i16x8(narrow16, narrow16);
+
+                    // 下位4バイトを書き込む
+                    v128_store32_lane::<0>(narrow8, out_ptr.add(i * 4) as *mut u32);
+                }
+            }
+            processed += num_chunks * 4;
+        }
+    }
+
+    // スカラーフォールバック
+    for i in processed..input.len() {
+        let clamped = i32::from(input[i]).clamp(0, QA);
+        output[i] = ((clamped * clamped) >> SHIFT).min(127) as u8;
     }
 }
 
@@ -709,9 +1198,169 @@ fn screlu_i32_to_u8(input: &[i32], output: &mut [u8]) {
     use super::constants::SCRELU_QB;
     debug_assert_eq!(input.len(), output.len(), "input and output must have same length");
 
-    // スカラー実装（SIMD最適化は必要に応じて追加）
-    for (i, &v) in input.iter().enumerate() {
-        let shifted = v >> WEIGHT_SCALE_BITS;
+    // SIMD 有効環境: processed は SIMD 処理で更新される
+    #[cfg(any(
+        all(target_arch = "x86_64", target_feature = "avx2"),
+        all(target_arch = "x86_64", target_feature = "sse2"),
+        all(target_arch = "wasm32", target_feature = "simd128")
+    ))]
+    let mut processed = 0;
+
+    // SIMD 無効環境: processed は常に 0（全要素をスカラー処理）
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_feature = "avx2"),
+        all(target_arch = "x86_64", target_feature = "sse2"),
+        all(target_arch = "wasm32", target_feature = "simd128")
+    )))]
+    let processed = 0;
+
+    // AVX2: 8要素ずつ処理
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        let num_chunks = input.len() / 8;
+        if num_chunks > 0 {
+            unsafe {
+                use std::arch::x86_64::*;
+                let zero = _mm256_setzero_si256();
+                let max_clamp = _mm256_set1_epi32(127);
+                let _qb = _mm256_set1_epi32(SCRELU_QB);
+
+                let in_ptr = input.as_ptr();
+                let out_ptr = output.as_mut_ptr();
+
+                for i in 0..num_chunks {
+                    // i32を8要素ロード
+                    let v = _mm256_loadu_si256(in_ptr.add(i * 8) as *const __m256i);
+
+                    // シフトしてクランプ
+                    let shifted = _mm256_srai_epi32(v, WEIGHT_SCALE_BITS as i32);
+                    let clamped = _mm256_min_epi32(_mm256_max_epi32(shifted, zero), max_clamp);
+
+                    // 二乗
+                    let squared = _mm256_mullo_epi32(clamped, clamped);
+
+                    // QB（64）で除算してクランプ
+                    // Note: 整数除算は遅いため、右シフトに変換（QB=64=2^6）
+                    let result = _mm256_min_epi32(_mm256_srli_epi32(squared, 6), max_clamp);
+
+                    // i32 → i16 → u8 にパック
+                    let packed16 = _mm256_packs_epi32(result, result);
+                    let packed8 = _mm256_packus_epi16(packed16, packed16);
+
+                    // 結果を取り出して書き込む
+                    let lo = _mm256_castsi256_si128(packed8);
+                    let hi = _mm256_extracti128_si256(packed8, 1);
+                    let combined = _mm_unpacklo_epi32(lo, hi);
+                    _mm_storel_epi64(out_ptr.add(i * 8) as *mut __m128i, combined);
+                }
+            }
+            processed = num_chunks * 8;
+        }
+    }
+
+    // SSE2: 4要素ずつ処理
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+    {
+        let remaining = input.len() - processed;
+        let num_chunks = remaining / 4;
+        if num_chunks > 0 {
+            unsafe {
+                use std::arch::x86_64::*;
+                let zero = _mm_setzero_si128();
+                let max_clamp = _mm_set1_epi32(127);
+
+                let in_ptr = input.as_ptr().add(processed);
+                let out_ptr = output.as_mut_ptr().add(processed);
+
+                for i in 0..num_chunks {
+                    // i32を4要素ロード
+                    let v = _mm_loadu_si128(in_ptr.add(i * 4) as *const __m128i);
+
+                    // シフトしてクランプ
+                    let shifted = _mm_srai_epi32(v, WEIGHT_SCALE_BITS as i32);
+                    let clamped = _mm_min_epi32(_mm_max_epi32(shifted, zero), max_clamp);
+
+                    // 二乗
+                    #[cfg(target_feature = "sse4.1")]
+                    let squared = _mm_mullo_epi32(clamped, clamped);
+
+                    #[cfg(not(target_feature = "sse4.1"))]
+                    let squared = {
+                        // SSE2での32bit乗算を手動実装
+                        // 注意: clamped は [0, 127] の範囲にクランプ済みのため、
+                        // 符号なし乗算 (_mm_mul_epu32) を使用可能
+                        let a_lo = clamped;
+                        let a_hi = _mm_srli_epi64(clamped, 32); // 32bitシフトで奇数要素を取得
+                        let lo_lo = _mm_mul_epu32(a_lo, a_lo);
+                        let hi_hi = _mm_mul_epu32(a_hi, a_hi);
+                        let lo_lo_shifted = _mm_shuffle_epi32(lo_lo, 0b00_00_10_00);
+                        let hi_hi_shifted = _mm_shuffle_epi32(hi_hi, 0b00_00_10_00);
+                        _mm_unpacklo_epi32(lo_lo_shifted, hi_hi_shifted)
+                    };
+
+                    // QB（64）で除算してクランプ（右シフト6bit）
+                    let result = _mm_min_epi32(_mm_srli_epi32(squared, 6), max_clamp);
+
+                    // i32 → i16 → u8 にパック
+                    let packed16 = _mm_packs_epi32(result, result);
+                    let packed8 = _mm_packus_epi16(packed16, packed16);
+
+                    // 下位4バイトを書き込む
+                    let val = _mm_cvtsi128_si32(packed8) as u32;
+                    std::ptr::copy_nonoverlapping(
+                        &val as *const u32 as *const u8,
+                        out_ptr.add(i * 4),
+                        4,
+                    );
+                }
+            }
+            processed += num_chunks * 4;
+        }
+    }
+
+    // WASM SIMD128: 4要素ずつ処理
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        let remaining = input.len() - processed;
+        let num_chunks = remaining / 4;
+        if num_chunks > 0 {
+            unsafe {
+                use std::arch::wasm32::*;
+                let zero = i32x4_splat(0);
+                let max_clamp = i32x4_splat(127);
+
+                let in_ptr = input.as_ptr().add(processed);
+                let out_ptr = output.as_mut_ptr().add(processed);
+
+                for i in 0..num_chunks {
+                    // i32を4要素ロード
+                    let v = v128_load(in_ptr.add(i * 4) as *const v128);
+
+                    // シフトしてクランプ
+                    let shifted = i32x4_shr(v, WEIGHT_SCALE_BITS as u32);
+                    let clamped = i32x4_min(i32x4_max(shifted, zero), max_clamp);
+
+                    // 二乗
+                    let squared = i32x4_mul(clamped, clamped);
+
+                    // QB（64）で除算してクランプ（右シフト6bit）
+                    let result = i32x4_min(u32x4_shr(squared, 6), max_clamp);
+
+                    // i32 → i16 → u8 にナロー
+                    let narrow16 = i16x8_narrow_i32x4(result, result);
+                    let narrow8 = u8x16_narrow_i16x8(narrow16, narrow16);
+
+                    // 下位4バイトを書き込む
+                    v128_store32_lane::<0>(narrow8, out_ptr.add(i * 4) as *mut u32);
+                }
+            }
+            processed += num_chunks * 4;
+        }
+    }
+
+    // スカラーフォールバック
+    for i in processed..input.len() {
+        let shifted = input[i] >> WEIGHT_SCALE_BITS;
         let clamped = shifted.clamp(0, 127);
         let squared = clamped * clamped;
         output[i] = (squared / SCRELU_QB).min(127) as u8;
