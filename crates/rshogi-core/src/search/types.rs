@@ -336,6 +336,12 @@ impl OrderedMovesBuffer {
         let index = index.min(self.len);
         // index以降を1つ後ろにシフト
         if index < self.len {
+            // SAFETY: ptr::copy の安全性:
+            // - src: buf[index..len] は初期化済み（len までが有効な要素）
+            // - dst: buf[index+1..len+1] は len < CAPACITY より配列範囲内
+            // - 要素数 (len - index) は非負（index <= len より保証）
+            // - Move は Copy トレイトを持ち、ビット単位コピーが安全
+            // - 重複領域の場合も copy は正しく処理する
             unsafe {
                 std::ptr::copy(
                     self.buf.as_ptr().add(index),
