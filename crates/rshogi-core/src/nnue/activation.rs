@@ -596,7 +596,8 @@ fn pairwise_crelu_i16_to_u8_inner<const QA: i32, const SHIFT: i32, const MAX_OUT
                     );
 
                     // 32bit乗算（SSE2での手動実装）
-                    // a * b を計算（下位32bitのみ）
+                    // 注意: a_clamped, b_clamped は [0, QA] の範囲にクランプ済みのため、
+                    // 符号なし乗算 (_mm_mul_epu32) を使用可能
                     let a_lo = a_clamped;
                     let b_lo = b_clamped;
                     let a_hi = _mm_srli_epi64(a_clamped, 32);
@@ -854,6 +855,8 @@ fn pairwise_crelu_i32_to_u8(input: &[i32], output: &mut [u8]) {
                     );
 
                     // 32bit乗算（SSE2での手動実装）
+                    // 注意: a_clamped, b_clamped は [0, 127] の範囲にクランプ済みのため、
+                    // 符号なし乗算 (_mm_mul_epu32) を使用可能
                     let a_lo = a_clamped;
                     let b_lo = b_clamped;
                     let a_hi = _mm_srli_epi64(a_clamped, 32);
@@ -1102,7 +1105,8 @@ fn screlu_i16_to_u8_inner<const QA: i32, const SHIFT: i32>(input: &[i16], output
                     #[cfg(not(target_feature = "sse4.1"))]
                     let squared = {
                         // SSE2での32bit乗算を手動実装
-                        // x * y = (x_lo * y_lo) + ((x_lo * y_hi + x_hi * y_lo) << 16)
+                        // 注意: clamped は [0, QA] の範囲にクランプ済みのため、
+                        // 符号なし乗算 (_mm_mul_epu32) を使用可能
                         let a_lo = clamped;
                         let a_hi = _mm_srli_epi64(clamped, 16);
                         let lo_lo = _mm_mul_epu32(a_lo, a_lo);
@@ -1283,6 +1287,8 @@ fn screlu_i32_to_u8(input: &[i32], output: &mut [u8]) {
                     #[cfg(not(target_feature = "sse4.1"))]
                     let squared = {
                         // SSE2での32bit乗算を手動実装
+                        // 注意: clamped は [0, 127] の範囲にクランプ済みのため、
+                        // 符号なし乗算 (_mm_mul_epu32) を使用可能
                         let a_lo = clamped;
                         let a_hi = _mm_srli_epi64(clamped, 16);
                         let lo_lo = _mm_mul_epu32(a_lo, a_lo);
