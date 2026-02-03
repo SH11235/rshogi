@@ -13,7 +13,7 @@ use super::search_helpers::{
     check_abort, clear_cont_history_for_null, cont_history_ref, cont_history_tables, nnue_evaluate,
     nnue_pop, nnue_push, set_cont_history_for_move,
 };
-use super::stats::inc_stat_by_depth;
+use super::stats::{inc_stat, inc_stat_by_depth};
 use super::types::{draw_value, value_from_tt, value_to_tt, NodeType, OrderedMovesBuffer};
 use super::{LimitsType, MovePicker, TimeManagement};
 
@@ -32,6 +32,20 @@ pub(super) fn qsearch<const NT: u8>(
 ) -> Value {
     let pv_node = NT == NodeType::PV as u8;
     let in_check = pos.in_check();
+
+    // 静止探索統計
+    inc_stat!(st, qs_nodes);
+    #[cfg(feature = "search-stats")]
+    {
+        // depth を 0, -1, -2, ... から 0, 1, 2, ... にマップ
+        let depth_idx = (-depth).max(0) as usize;
+        if depth_idx < super::stats::STATS_MAX_DEPTH {
+            st.stats.qs_nodes_by_depth[depth_idx] += 1;
+        }
+        if in_check {
+            st.stats.qs_in_check_nodes += 1;
+        }
+    }
 
     if ply >= MAX_PLY {
         return if in_check {
@@ -80,12 +94,18 @@ pub(super) fn qsearch<const NT: u8>(
         Value::NONE
     };
 
+    // TT ヒット統計
+    if tt_hit {
+        inc_stat!(st, qs_tt_hit);
+    }
+
     if !pv_node
         && tt_hit
         && tt_data.depth >= DEPTH_QS
         && tt_value != Value::NONE
         && tt_data.bound.can_cutoff(tt_value, beta)
     {
+        inc_stat!(st, qs_tt_cutoff);
         return tt_value;
     }
 
@@ -136,6 +156,7 @@ pub(super) fn qsearch<const NT: u8>(
     }
 
     if !in_check && best_value >= beta {
+        inc_stat!(st, qs_stand_pat_cutoff);
         let mut v = best_value;
         if !v.is_mate_score() {
             v = Value::new((v.raw() + beta.raw()) / 2);
@@ -247,6 +268,12 @@ pub(super) fn qsearch<const NT: u8>(
         buf_moves
     };
 
+    // 生成された手の数を記録
+    #[cfg(feature = "search-stats")]
+    {
+        st.stats.qs_moves_generated += ordered_moves.len() as u64;
+    }
+
     let mut move_count = 0;
 
     for mv in ordered_moves.iter() {
@@ -267,6 +294,7 @@ pub(super) fn qsearch<const NT: u8>(
         }
 
         if !in_check && capture && !pos.see_ge(mv, Value::ZERO) {
+            inc_stat!(st, qs_see_pruned);
             continue;
         }
 
@@ -278,17 +306,20 @@ pub(super) fn qsearch<const NT: u8>(
                 && futility_base != Value::NONE
             {
                 if move_count > 2 {
+                    inc_stat!(st, qs_futility_pruned);
                     continue;
                 }
 
                 let futility_value = futility_base + Value::new(piece_value(pos.piece_on(mv.to())));
 
                 if futility_value <= alpha {
+                    inc_stat!(st, qs_futility_pruned);
                     best_value = best_value.max(futility_value);
                     continue;
                 }
 
                 if !pos.see_ge(mv, alpha - futility_base) {
+                    inc_stat!(st, qs_futility_pruned);
                     best_value = best_value.min(alpha.min(futility_base));
                     continue;
                 }
@@ -302,16 +333,21 @@ pub(super) fn qsearch<const NT: u8>(
                     h.pawn_history.get(pawn_idx, pos.moved_piece(mv), mv.to()) as i32
                 });
                 if cont_score + pawn_score <= 5868 {
+                    inc_stat!(st, qs_history_pruned);
                     continue;
                 }
             }
 
             if !pos.see_ge(mv, Value::new(-74)) {
+                inc_stat!(st, qs_see_margin_pruned);
                 continue;
             }
         }
 
         st.stack[ply as usize].current_move = mv;
+
+        // 実際に探索された手をカウント
+        inc_stat!(st, qs_moves_searched);
 
         let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, ctx.tt);
         nnue_push(st, dirty_piece);

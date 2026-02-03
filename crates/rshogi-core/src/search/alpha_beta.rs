@@ -1609,6 +1609,22 @@ impl SearchWorker {
                     st.stats.lmr_to_depth1_from[parent_depth_idx] += 1;
                 }
 
+                // cut_node 分析
+                #[cfg(feature = "search-stats")]
+                {
+                    if cut_node {
+                        st.stats.lmr_cut_node_applied += 1;
+                        if d == 1 {
+                            st.stats.lmr_cut_node_to_depth1 += 1;
+                        }
+                    } else {
+                        st.stats.lmr_non_cut_node_applied += 1;
+                        if d == 1 {
+                            st.stats.lmr_non_cut_node_to_depth1 += 1;
+                        }
+                    }
+                }
+
                 let reduction_from_parent = (depth - 1) - d;
                 st.stack[ply as usize].reduction = reduction_from_parent;
                 let mut value = -Self::search_node::<{ NodeType::NonPV as u8 }>(

@@ -75,6 +75,46 @@ pub struct SearchStats {
     pub lmr_reduction_histogram: [u64; 16],
     /// LMR適用後の新深度別ノード数
     pub lmr_new_depth_histogram: [u64; STATS_MAX_DEPTH],
+
+    // =============================================================================
+    // 静止探索（qsearch）統計
+    // =============================================================================
+    /// 静止探索ノード数
+    pub qs_nodes: u64,
+    /// 静止探索 TT ヒット数
+    pub qs_tt_hit: u64,
+    /// 静止探索 TT カットオフ数
+    pub qs_tt_cutoff: u64,
+    /// stand pat（静的評価で即時 beta カット）回数
+    pub qs_stand_pat_cutoff: u64,
+    /// 生成された手の総数
+    pub qs_moves_generated: u64,
+    /// 実際に探索された手の数
+    pub qs_moves_searched: u64,
+    /// SEE による枝刈り数（capture && !see_ge(0)）
+    pub qs_see_pruned: u64,
+    /// Futility Pruning 数（静止探索内）
+    pub qs_futility_pruned: u64,
+    /// History による枝刈り数（cont_score + pawn_score <= 5868）
+    pub qs_history_pruned: u64,
+    /// SEE マージンによる枝刈り数（!see_ge(-74)）
+    pub qs_see_margin_pruned: u64,
+    /// 深度別ノード数（depth 0, -1, -2, ... を 0, 1, 2, ... にマップ）
+    pub qs_nodes_by_depth: [u64; STATS_MAX_DEPTH],
+    /// 王手回避時のノード数
+    pub qs_in_check_nodes: u64,
+
+    // =============================================================================
+    // LMR cut_node 分析
+    // =============================================================================
+    /// cut_node での LMR 適用回数
+    pub lmr_cut_node_applied: u64,
+    /// cut_node での LMR depth 1 遷移回数
+    pub lmr_cut_node_to_depth1: u64,
+    /// 非 cut_node での LMR 適用回数
+    pub lmr_non_cut_node_applied: u64,
+    /// 非 cut_node での LMR depth 1 遷移回数
+    pub lmr_non_cut_node_to_depth1: u64,
 }
 
 #[cfg(feature = "search-stats")]
@@ -112,6 +152,24 @@ impl Default for SearchStats {
             move_count_sum_by_depth: [0; STATS_MAX_DEPTH],
             lmr_reduction_histogram: [0; 16],
             lmr_new_depth_histogram: [0; STATS_MAX_DEPTH],
+            // qsearch 統計
+            qs_nodes: 0,
+            qs_tt_hit: 0,
+            qs_tt_cutoff: 0,
+            qs_stand_pat_cutoff: 0,
+            qs_moves_generated: 0,
+            qs_moves_searched: 0,
+            qs_see_pruned: 0,
+            qs_futility_pruned: 0,
+            qs_history_pruned: 0,
+            qs_see_margin_pruned: 0,
+            qs_nodes_by_depth: [0; STATS_MAX_DEPTH],
+            qs_in_check_nodes: 0,
+            // LMR cut_node 分析
+            lmr_cut_node_applied: 0,
+            lmr_cut_node_to_depth1: 0,
+            lmr_non_cut_node_applied: 0,
+            lmr_non_cut_node_to_depth1: 0,
         }
     }
 }
@@ -271,6 +329,93 @@ impl SearchStats {
                 ));
             }
         }
+
+        // =============================================================================
+        // 静止探索（qsearch）統計
+        // =============================================================================
+        report.push_str("--- Quiescence Search Statistics ---\n");
+        report.push_str(&format!("QS nodes:            {:>12}\n", self.qs_nodes));
+        if self.qs_nodes > 0 {
+            let qs_nodes = self.qs_nodes as f64;
+            report.push_str(&format!(
+                "  In-check nodes:    {:>12} ({:.1}%)\n",
+                self.qs_in_check_nodes,
+                self.qs_in_check_nodes as f64 / qs_nodes * 100.0
+            ));
+            report.push_str(&format!(
+                "  TT hit:            {:>12} ({:.1}%)\n",
+                self.qs_tt_hit,
+                self.qs_tt_hit as f64 / qs_nodes * 100.0
+            ));
+            report.push_str(&format!(
+                "  TT cutoff:         {:>12} ({:.1}%)\n",
+                self.qs_tt_cutoff,
+                self.qs_tt_cutoff as f64 / qs_nodes * 100.0
+            ));
+            report.push_str(&format!(
+                "  Stand-pat cutoff:  {:>12} ({:.1}%)\n",
+                self.qs_stand_pat_cutoff,
+                self.qs_stand_pat_cutoff as f64 / qs_nodes * 100.0
+            ));
+            report.push_str(&format!(
+                "  Moves generated:   {:>12} ({:.1} avg/node)\n",
+                self.qs_moves_generated,
+                self.qs_moves_generated as f64 / qs_nodes
+            ));
+            report.push_str(&format!(
+                "  Moves searched:    {:>12} ({:.1} avg/node)\n",
+                self.qs_moves_searched,
+                self.qs_moves_searched as f64 / qs_nodes
+            ));
+        }
+        // 静止探索内の枝刈り統計
+        let qs_total_pruned = self.qs_see_pruned
+            + self.qs_futility_pruned
+            + self.qs_history_pruned
+            + self.qs_see_margin_pruned;
+        if qs_total_pruned > 0 {
+            report.push_str("  --- QS Pruning ---\n");
+            report.push_str(&format!("    SEE (capture):   {:>12}\n", self.qs_see_pruned));
+            report.push_str(&format!("    Futility:        {:>12}\n", self.qs_futility_pruned));
+            report.push_str(&format!("    History:         {:>12}\n", self.qs_history_pruned));
+            report.push_str(&format!("    SEE margin:      {:>12}\n", self.qs_see_margin_pruned));
+        }
+        // 静止探索の深度別ノード数
+        report.push_str("  --- QS Nodes by Depth ---\n");
+        for d in 0..STATS_MAX_DEPTH {
+            let count = self.qs_nodes_by_depth[d];
+            if count > 0 {
+                report.push_str(&format!(
+                    "    depth {:>3}: {:>10} ({:.1}%)\n",
+                    -(d as i32),
+                    count,
+                    count as f64 / self.qs_nodes as f64 * 100.0
+                ));
+            }
+        }
+
+        // =============================================================================
+        // LMR cut_node 分析
+        // =============================================================================
+        report.push_str("--- LMR Cut Node Analysis ---\n");
+        if self.lmr_cut_node_applied > 0 {
+            let cut_rate =
+                self.lmr_cut_node_to_depth1 as f64 / self.lmr_cut_node_applied as f64 * 100.0;
+            report.push_str(&format!(
+                "  cut_node:     {:>8} LMR, {:>8} to d1 ({:.1}%)\n",
+                self.lmr_cut_node_applied, self.lmr_cut_node_to_depth1, cut_rate
+            ));
+        }
+        if self.lmr_non_cut_node_applied > 0 {
+            let non_cut_rate = self.lmr_non_cut_node_to_depth1 as f64
+                / self.lmr_non_cut_node_applied as f64
+                * 100.0;
+            report.push_str(&format!(
+                "  non_cut_node: {:>8} LMR, {:>8} to d1 ({:.1}%)\n",
+                self.lmr_non_cut_node_applied, self.lmr_non_cut_node_to_depth1, non_cut_rate
+            ));
+        }
+
         report
     }
 }
