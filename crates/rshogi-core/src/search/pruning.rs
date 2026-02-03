@@ -116,12 +116,26 @@ pub(super) fn step14_pruning(
                 ) as i32
             });
 
-            if !step_ctx.gives_check && lmr_depth < 7 && !step_ctx.in_check {
-                // step_ctx doesn't have static_eval, so we skip this check
-                // This is a simplification - the full implementation would need static_eval
+            // Futility pruning for captures (駒取り手に対するfutility枝刈り)
+            if !step_ctx.gives_check
+                && lmr_depth < 7
+                && !step_ctx.in_check
+                && step_ctx.static_eval != Value::NONE
+            {
+                use super::movepicker::piece_value;
+                let captured_value = piece_value(captured);
+                let futility_value = step_ctx.static_eval.raw()
+                    + 231
+                    + 211 * lmr_depth.max(0)
+                    + captured_value
+                    + 130 * capt_hist / 1024;
+                if futility_value <= step_ctx.alpha.raw() {
+                    return Step14Outcome::Skip { best_value: None };
+                }
             }
 
-            let margin = (158 * step_ctx.depth + capt_hist / 31).clamp(0, 283 * step_ctx.depth);
+            // SEE based pruning for captures (157 * depth + captHist / 29)
+            let margin = (157 * step_ctx.depth + capt_hist / 29).max(0);
             if !step_ctx.pos.see_ge(step_ctx.mv, Value::new(-margin)) {
                 return Step14Outcome::Skip { best_value: None };
             }
@@ -136,13 +150,45 @@ pub(super) fn step14_pruning(
                 .with_read(|h| h.main_history.get(step_ctx.mover, step_ctx.mv) as i32);
             let hist_score = 2 * main_hist + cont_hist_0 + cont_hist_1;
 
-            if lmr_depth < 12 && hist_score < -5000 * step_ctx.depth {
+            // Continuation history based pruning (YaneuraOu: -4312 * depth)
+            if lmr_depth < 12 && hist_score < -4312 * step_ctx.depth {
                 return Step14Outcome::Skip { best_value: None };
             }
 
+            // Futility pruning for quiet moves (親ノードでの枝刈り)
+            let no_best_move = step_ctx.tt_move.is_none();
+            let lmr_depth_clamped = lmr_depth.max(0);
+            let futility_value = step_ctx.static_eval.raw()
+                + 47
+                + 171 * no_best_move as i32
+                + 134 * lmr_depth_clamped
+                + 90 * (step_ctx.static_eval > step_ctx.alpha) as i32;
+
             if !step_ctx.in_check
-                && lmr_depth <= 4
-                && !step_ctx.pos.see_ge(step_ctx.mv, Value::new(-60 * lmr_depth))
+                && lmr_depth < 11
+                && futility_value <= step_ctx.alpha.raw()
+                && step_ctx.static_eval != Value::NONE
+            {
+                // YaneuraOu準拠: bestValueをfutilityValueで更新する条件
+                // if (bestValue <= futilityValue && !is_decisive(bestValue) && !is_win(futilityValue))
+                let futility_val = Value::new(futility_value);
+                if step_ctx.best_value <= futility_val
+                    && !step_ctx.best_value.is_mate_score()
+                    && !futility_val.is_win()
+                {
+                    return Step14Outcome::Skip {
+                        best_value: Some(futility_val),
+                    };
+                }
+                return Step14Outcome::Skip { best_value: None };
+            }
+
+            // SEE pruning for quiet moves (YaneuraOu: -27 * lmrDepth * lmrDepth)
+            if !step_ctx.in_check
+                && lmr_depth_clamped > 0
+                && !step_ctx
+                    .pos
+                    .see_ge(step_ctx.mv, Value::new(-27 * lmr_depth_clamped * lmr_depth_clamped))
             {
                 return Step14Outcome::Skip { best_value: None };
             }
