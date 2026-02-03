@@ -13,9 +13,7 @@ use crate::nnue::{evaluate_dispatch, get_network, AccumulatorStackVariant, Dirty
 use crate::position::Position;
 use crate::search::PieceToHistory;
 use crate::tt::{ProbeResult, TTData, TranspositionTable};
-use crate::types::{
-    Bound, Color, Depth, Move, Piece, PieceType, Square, Value, DEPTH_QS, MAX_PLY,
-};
+use crate::types::{Bound, Color, Depth, Move, Piece, PieceType, Square, Value, DEPTH_QS, MAX_PLY};
 
 use super::history::{
     capture_malus, continuation_history_bonus_with_offset, low_ply_history_bonus,
@@ -26,18 +24,14 @@ use super::history::{
 };
 use super::movepicker::piece_value;
 use super::types::{
-    init_stack_array, value_from_tt, value_to_tt, ContHistKey, NodeType, RootMoves, SearchedMoveList, StackArray, STACK_SIZE,
+    init_stack_array, value_from_tt, value_to_tt, ContHistKey, NodeType, RootMoves,
+    SearchedMoveList, StackArray, STACK_SIZE,
 };
 use super::{LimitsType, MovePicker, TimeManagement};
 
 // =============================================================================
 // 定数
 // =============================================================================
-
-/// Futility margin（depth × 係数）
-///
-/// YaneuraOu準拠での基準係数。枝刈りでtt未ヒットのカットノードは係数を少し下げる。
-const FUTILITY_MARGIN_BASE: i32 = 90;
 
 /// IIR関連のしきい値（yaneuraou-search.cpp:2769-2774 由来）
 const IIR_PRIOR_REDUCTION_THRESHOLD_SHALLOW: i32 = 1;
@@ -129,14 +123,14 @@ use super::stats::{SearchStats, STATS_MAX_DEPTH};
 /// 置換表プローブの結果をまとめたコンテキスト
 ///
 /// TTプローブ後の即時カットオフ判定や、後続の枝刈りロジックで使用される。
-struct TTContext {
-    key: u64,
-    result: ProbeResult,
-    data: TTData,
-    hit: bool,
-    mv: Move,
-    value: Value,
-    capture: bool,
+pub(super) struct TTContext {
+    pub(super) key: u64,
+    pub(super) result: ProbeResult,
+    pub(super) data: TTData,
+    pub(super) hit: bool,
+    pub(super) mv: Move,
+    pub(super) value: Value,
+    pub(super) capture: bool,
 }
 
 /// 置換表プローブの結果（続行 or カットオフ）
@@ -159,7 +153,7 @@ struct EvalContext {
 }
 
 /// Step14の枝刈り判定結果
-enum Step14Outcome {
+pub(super) enum Step14Outcome {
     /// 枝刈りする（best_value を更新する場合のみ付随）
     Skip { best_value: Option<Value> },
     /// 続行し、lmr_depth を返す
@@ -168,37 +162,37 @@ enum Step14Outcome {
 
 /// Futility判定に必要な情報をまとめたパラメータ
 #[derive(Clone, Copy)]
-struct FutilityParams {
-    depth: Depth,
-    beta: Value,
-    static_eval: Value,
-    correction_value: i32,
-    improving: bool,
-    opponent_worsening: bool,
-    cut_node: bool,
-    tt_hit: bool,
-    pv_node: bool,
-    in_check: bool,
+pub(super) struct FutilityParams {
+    pub(super) depth: Depth,
+    pub(super) beta: Value,
+    pub(super) static_eval: Value,
+    pub(super) correction_value: i32,
+    pub(super) improving: bool,
+    pub(super) opponent_worsening: bool,
+    pub(super) cut_node: bool,
+    pub(super) tt_hit: bool,
+    pub(super) pv_node: bool,
+    pub(super) in_check: bool,
 }
 
 /// Step14 の枝刈りに必要な文脈
-struct Step14Context<'a> {
-    pos: &'a Position,
-    mv: Move,
-    depth: Depth,
-    ply: i32,
-    improving: bool,
-    best_move: Move,
-    best_value: Value,
-    alpha: Value,
-    in_check: bool,
-    gives_check: bool,
-    is_capture: bool,
-    lmr_depth: i32,
-    mover: Color,
-    move_count: i32,
-    cont_history_1: &'a PieceToHistory,
-    cont_history_2: &'a PieceToHistory,
+pub(super) struct Step14Context<'a> {
+    pub(super) pos: &'a Position,
+    pub(super) mv: Move,
+    pub(super) depth: Depth,
+    pub(super) ply: i32,
+    pub(super) improving: bool,
+    pub(super) best_move: Move,
+    pub(super) best_value: Value,
+    pub(super) alpha: Value,
+    pub(super) in_check: bool,
+    pub(super) gives_check: bool,
+    pub(super) is_capture: bool,
+    pub(super) lmr_depth: i32,
+    pub(super) mover: Color,
+    pub(super) move_count: i32,
+    pub(super) cont_history_1: &'a PieceToHistory,
+    pub(super) cont_history_2: &'a PieceToHistory,
 }
 
 // =============================================================================
@@ -863,460 +857,6 @@ impl SearchWorker {
         }
     }
 
-    /// Razoring
-    #[allow(clippy::too_many_arguments)]
-    fn try_razoring<const NT: u8>(
-        &mut self,
-        pos: &mut Position,
-        depth: Depth,
-        alpha: Value,
-        beta: Value,
-        ply: i32,
-        pv_node: bool,
-        in_check: bool,
-        static_eval: Value,
-        limits: &LimitsType,
-        time_manager: &mut TimeManagement,
-    ) -> Option<Value> {
-        if !pv_node && !in_check && depth <= 3 {
-            let razoring_threshold = alpha - Value::new(200 * depth);
-            if static_eval < razoring_threshold {
-                let value = self.qsearch::<{ NodeType::NonPV as u8 }>(
-                    pos,
-                    DEPTH_QS,
-                    alpha,
-                    beta,
-                    ply,
-                    limits,
-                    time_manager,
-                );
-                if value <= alpha {
-                    inc_stat!(self, razoring_applied);
-                    inc_stat_by_depth!(self, razoring_by_depth, depth);
-                    return Some(value);
-                }
-            }
-        }
-        None
-    }
-
-    /// Futility pruning
-    // 2026-02-02: 深さ制限をYaneuraOu準拠に調整（8→14、探索深度改善のため）
-    fn try_futility_pruning(&self, params: FutilityParams) -> Option<Value> {
-        if !params.pv_node
-            && !params.in_check
-            && params.depth < 14
-            && params.static_eval != Value::NONE
-        {
-            let futility_mult =
-                FUTILITY_MARGIN_BASE - 20 * (params.cut_node && !params.tt_hit) as i32;
-            let futility_margin = Value::new(
-                futility_mult * params.depth
-                    - (params.improving as i32) * futility_mult * 2
-                    - (params.opponent_worsening as i32) * futility_mult / 3
-                    + (params.correction_value.abs() / 171_290),
-            );
-
-            if params.static_eval - futility_margin >= params.beta {
-                return Some(params.static_eval);
-            }
-        }
-        None
-    }
-
-    /// Null move pruning with Verification Search（Stockfish/YaneuraOu準拠）
-    ///
-    /// NMPは、自分の手番で「何もしない（パス）」という仮想的な手を打ち、
-    /// それでも優勢なら探索を打ち切る枝刈り技術。
-    ///
-    /// Verification Search（深度 >= 16 の場合）:
-    /// - NMPの結果が正しいかを検証するため、NMPを無効化して再探索
-    /// - Zugzwang（動かなければならないこと自体が不利な局面）対策
-    #[allow(clippy::too_many_arguments)]
-    fn try_null_move_pruning<const NT: u8>(
-        &mut self,
-        pos: &mut Position,
-        depth: Depth,
-        beta: Value,
-        ply: i32,
-        cut_node: bool,
-        in_check: bool,
-        static_eval: Value,
-        mut improving: bool,
-        excluded_move: Move,
-        limits: &LimitsType,
-        time_manager: &mut TimeManagement,
-    ) -> (Option<Value>, bool) {
-        // Stockfish/YaneuraOu準拠のNMP条件:
-        // - ply >= 1（スタックアクセスの安全性）
-        // - Singular Extension中でない（excludedMoveが設定されていない）
-        // - cutNodeである（!pv_nodeではなく、より厳密な条件）
-        // - 王手されていない
-        // - 評価値がマージン付きでbetaを超える（beta - 18 * depth + 390）
-        // - ply >= nmp_min_ply（Verification Search中のNMP制限）
-        // - betaが負けスコアでない
-        // - 前回の手が有効な手（NONE/NULLでない）（連続NullMove禁止）
-        //
-        // 注: Stockfishでは non_pawn_material(us) チェックがあるが、
-        //     YaneuraOuでは将棋で使用していない（#if STOCKFISHで囲まれている）。
-        //     チェスでは Pawn endgame の Zugzwang 対策だが、
-        //     将棋は持ち駒があるため Pawn だけの終盤は存在しない。
-        //     将来検証する場合: && pos.non_pawn_material(pos.side_to_move())
-
-        // ply >= 1 のガード（防御的プログラミング）
-        // 実際には search_root から search_node を呼ぶ際に常に ply=1 から開始するため、
-        // ply=0 でこの関数が呼ばれることはないが、将来の変更に備えて明示的にガードする。
-        if ply < 1 {
-            return (None, improving);
-        }
-
-        let margin = 18 * depth - 390;
-        let prev_move = self.stack[(ply - 1) as usize].current_move;
-        // YaneuraOu準拠: prev_move != Move::null() のみをチェック
-        // Move::NONEのチェックは不要（root直下でNMPを無効化してしまう）
-        // YaneuraOuではASSERT_LV3で検証しているのみ
-        // NMP条件に加えて、連続パスの禁止（prev_move が PASS でないこと）
-        let prev_is_pass = prev_move.is_pass();
-        if excluded_move.is_none()
-            && cut_node
-            && !in_check
-            && static_eval >= beta - Value::new(margin)
-            && ply >= self.nmp_min_ply
-            && !beta.is_loss()
-            && !prev_move.is_null()
-            && !prev_is_pass
-        // 連続パスを禁止
-        {
-            inc_stat!(self, nmp_attempted);
-            // Null move dynamic reduction based on depth（YaneuraOu準拠）
-            let r = 7 + depth / 3;
-
-            // パス権ルールが有効かつパス可能な場合は、実際のパス手を使用
-            // これにより、パス権の消費が正しく反映され、評価もより正確になる
-            let use_pass = pos.is_pass_rights_enabled() && pos.can_pass();
-
-            // YaneuraOu準拠: NullMove探索前にcurrent_moveとcont_hist_keyを設定
-            // これにより再帰呼び出し先で連続NullMoveが禁止され、
-            // continuation historyの不正参照を防ぐ
-            if use_pass {
-                self.stack[ply as usize].current_move = Move::PASS;
-            } else {
-                self.stack[ply as usize].current_move = Move::NULL;
-            }
-            self.clear_cont_history_for_null(ply);
-
-            // パス手または NullMove を実行
-            if use_pass {
-                pos.do_pass_move();
-            } else {
-                pos.do_null_move_with_prefetch(self.tt.as_ref());
-            }
-            self.nnue_push(DirtyPiece::new()); // パス/null moveでは駒の移動なし
-            let null_value = -self.search_node::<{ NodeType::NonPV as u8 }>(
-                pos,
-                depth - r,
-                -beta,
-                -beta + Value::new(1),
-                ply + 1,
-                false, // cutNode = false（NullMove後は相手番なので）
-                limits,
-                time_manager,
-            );
-            self.nnue_pop();
-            if use_pass {
-                pos.undo_pass_move();
-            } else {
-                pos.undo_null_move();
-            }
-
-            // Do not return unproven mate scores（勝ちスコアは信頼しない）
-            if null_value >= beta && !null_value.is_win() {
-                // 浅い探索 or 既にVerification Search中 → そのままreturn
-                if self.nmp_min_ply != 0 || depth < 16 {
-                    inc_stat!(self, nmp_cutoff);
-                    inc_stat_by_depth!(self, nmp_cutoff_by_depth, depth);
-                    return (Some(null_value), improving);
-                }
-
-                // Verification Search: 深い探索でZugzwangを検出
-                // NMPを無効化（nmp_min_plyを設定）して再探索
-                self.nmp_min_ply = ply + 3 * (depth - r) / 4;
-
-                let v = self.search_node::<{ NodeType::NonPV as u8 }>(
-                    pos,
-                    depth - r,
-                    beta - Value::new(1),
-                    beta,
-                    ply,
-                    false, // cutNode = false（Verification SearchはcutNodeにしない）
-                    limits,
-                    time_manager,
-                );
-
-                self.nmp_min_ply = 0;
-
-                if v >= beta {
-                    inc_stat!(self, nmp_cutoff);
-                    inc_stat_by_depth!(self, nmp_cutoff_by_depth, depth);
-                    return (Some(null_value), improving);
-                }
-            }
-        }
-
-        // improving の更新（Stockfish/YaneuraOu: NMPの後で更新）
-        if !in_check && static_eval != Value::NONE {
-            improving |= static_eval >= beta;
-        }
-
-        (None, improving)
-    }
-
-    /// ProbCut（YaneuraOu準拠）
-    #[allow(clippy::too_many_arguments)]
-    fn try_probcut(
-        &mut self,
-        pos: &mut Position,
-        depth: Depth,
-        beta: Value,
-        improving: bool,
-        tt_ctx: &TTContext,
-        ply: i32,
-        static_eval: Value,
-        unadjusted_static_eval: Value,
-        in_check: bool,
-        limits: &LimitsType,
-        time_manager: &mut TimeManagement,
-    ) -> Option<Value> {
-        if in_check || depth < 3 || static_eval == Value::NONE {
-            return None;
-        }
-
-        let prob_beta = beta + Value::new(215 - 60 * improving as i32);
-        if beta.is_mate_score()
-            || (tt_ctx.hit
-                && tt_ctx.value != Value::NONE
-                && tt_ctx.value < prob_beta
-                && !tt_ctx.value.is_mate_score())
-        {
-            return None;
-        }
-
-        let threshold = prob_beta - static_eval;
-        if threshold <= Value::ZERO {
-            return None;
-        }
-
-        let dynamic_reduction = (static_eval - beta).raw() / 300;
-        let probcut_depth = (depth - 5 - dynamic_reduction).max(0);
-
-        inc_stat!(self, probcut_attempted);
-
-        // 固定長バッファに収集（借用チェッカーの制約回避）
-        let probcut_moves = {
-            let cont_tables = self.cont_history_tables(ply);
-            let mut mp = MovePicker::new_probcut(
-                pos,
-                tt_ctx.mv,
-                threshold,
-                ply,
-                cont_tables,
-                self.generate_all_legal_moves,
-            );
-
-            let mut buf = [Move::NONE; crate::movegen::MAX_MOVES];
-            let mut len = 0;
-            loop {
-                let mv = mp.next_move(pos, &self.history);
-                if mv == Move::NONE {
-                    break;
-                }
-                buf[len] = mv;
-                len += 1;
-            }
-            (buf, len)
-        };
-        let (buf, len) = probcut_moves;
-
-        // YaneuraOu準拠: 全捕獲手を試す
-        for &mv in buf[..len].iter() {
-            if !pos.is_legal(mv) {
-                continue;
-            }
-
-            let gives_check = pos.gives_check(mv);
-            let is_capture = pos.is_capture(mv);
-            let cont_hist_piece = mv.moved_piece_after();
-            let cont_hist_to = mv.to();
-
-            self.stack[ply as usize].current_move = mv;
-            let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, self.tt.as_ref());
-            self.nnue_push(dirty_piece);
-            self.nodes += 1;
-            self.set_cont_history_for_move(
-                ply,
-                in_check,
-                is_capture,
-                cont_hist_piece,
-                cont_hist_to,
-            );
-            let mut value = -self.qsearch::<{ NodeType::NonPV as u8 }>(
-                pos,
-                DEPTH_QS,
-                -prob_beta,
-                -prob_beta + Value::new(1),
-                ply + 1,
-                limits,
-                time_manager,
-            );
-
-            if value >= prob_beta && probcut_depth > 0 {
-                value = -self.search_node::<{ NodeType::NonPV as u8 }>(
-                    pos,
-                    probcut_depth,
-                    -prob_beta,
-                    -prob_beta + Value::new(1),
-                    ply + 1,
-                    true,
-                    limits,
-                    time_manager,
-                );
-            }
-            self.nnue_pop();
-            pos.undo_move(mv);
-
-            if value >= prob_beta {
-                inc_stat!(self, probcut_cutoff);
-                let stored_depth = (probcut_depth + 1).max(1);
-                tt_ctx.result.write(
-                    tt_ctx.key,
-                    value_to_tt(value, ply),
-                    self.stack[ply as usize].tt_pv,
-                    Bound::Lower,
-                    stored_depth,
-                    mv,
-                    unadjusted_static_eval,
-                    self.tt.generation(),
-                );
-                inc_stat_by_depth!(self, tt_write_by_depth, stored_depth);
-
-                if value.raw().abs() < Value::INFINITE.raw() {
-                    return Some(value - (prob_beta - beta));
-                }
-                return Some(value);
-            }
-        }
-
-        None
-    }
-
-    /// Small ProbCut
-    #[inline]
-    fn try_small_probcut(&self, depth: Depth, beta: Value, tt_ctx: &TTContext) -> Option<Value> {
-        if depth >= 1 {
-            let sp_beta = beta + Value::new(417);
-            if tt_ctx.hit
-                && tt_ctx.data.bound == Bound::Lower
-                && tt_ctx.data.depth >= depth - 4
-                && tt_ctx.value != Value::NONE
-                && tt_ctx.value >= sp_beta
-                && !tt_ctx.value.is_mate_score()
-                && !beta.is_mate_score()
-            {
-                return Some(sp_beta);
-            }
-        }
-        None
-    }
-
-    // generate_ordered_moves は廃止され、探索ループ内で MovePicker を直接使用する
-    // (lazy generation 対応)
-
-    /// Step14 の枝刈り（進行可否を返す）
-    fn step14_pruning(&self, ctx: Step14Context<'_>) -> Step14Outcome {
-        // パス手は枝刈りの対象外（ボーナス評価のため探索する必要がある）
-        if ctx.mv.is_pass() {
-            return Step14Outcome::Continue;
-        }
-
-        let mut lmr_depth = ctx.lmr_depth;
-
-        if ctx.ply != 0 && !ctx.best_value.is_loss() {
-            let lmp_denominator = 2 - ctx.improving as i32;
-            debug_assert!(lmp_denominator > 0, "LMP denominator must be positive");
-            let lmp_limit = (3 + ctx.depth * ctx.depth) / lmp_denominator;
-            if ctx.move_count >= lmp_limit && !ctx.is_capture && !ctx.gives_check {
-                return Step14Outcome::Skip { best_value: None };
-            }
-
-            if ctx.is_capture || ctx.gives_check {
-                let captured = ctx.pos.piece_on(ctx.mv.to());
-                let capt_hist = self.history.capture_history.get_with_captured_piece(
-                    ctx.mv.moved_piece_after(),
-                    ctx.mv.to(),
-                    captured,
-                ) as i32;
-
-                if !ctx.gives_check && lmr_depth < 7 && !ctx.in_check {
-                    let futility_value = self.stack[ctx.ply as usize].static_eval
-                        + Value::new(232 + 224 * lmr_depth)
-                        + Value::new(piece_value(captured))
-                        + Value::new(131 * capt_hist / 1024);
-                    if futility_value <= ctx.alpha {
-                        return Step14Outcome::Skip { best_value: None };
-                    }
-                }
-
-                let margin = (158 * ctx.depth + capt_hist / 31).clamp(0, 283 * ctx.depth);
-                if !ctx.pos.see_ge(ctx.mv, Value::new(-margin)) {
-                    return Step14Outcome::Skip { best_value: None };
-                }
-            } else {
-                let mut history = 0;
-                history += ctx.cont_history_1.get(ctx.mv.moved_piece_after(), ctx.mv.to()) as i32;
-                history += ctx.cont_history_2.get(ctx.mv.moved_piece_after(), ctx.mv.to()) as i32;
-                history += self.history.pawn_history.get(
-                    ctx.pos.pawn_history_index(),
-                    ctx.mv.moved_piece_after(),
-                    ctx.mv.to(),
-                ) as i32;
-
-                if history < -4361 * ctx.depth {
-                    return Step14Outcome::Skip { best_value: None };
-                }
-
-                history += 71 * self.history.main_history.get(ctx.mover, ctx.mv) as i32 / 32;
-                lmr_depth += history / 3233;
-
-                let base_futility = if ctx.best_move.is_some() { 46 } else { 230 };
-                let futility_value = self.stack[ctx.ply as usize].static_eval
-                    + Value::new(base_futility + 131 * lmr_depth)
-                    + Value::new(
-                        91 * (self.stack[ctx.ply as usize].static_eval > ctx.alpha) as i32,
-                    );
-
-                if !ctx.in_check && lmr_depth < 11 && futility_value <= ctx.alpha {
-                    if ctx.best_value <= futility_value
-                        && !ctx.best_value.is_mate_score()
-                        && !futility_value.is_win()
-                    {
-                        return Step14Outcome::Skip {
-                            best_value: Some(futility_value),
-                        };
-                    }
-                    return Step14Outcome::Skip { best_value: None };
-                }
-
-                lmr_depth = lmr_depth.max(0);
-                // lmr_depth は探索深さ由来で十数〜数十程度に収まるため i32 乗算でオーバーフローしない
-                if !ctx.pos.see_ge(ctx.mv, Value::new(-26 * lmr_depth * lmr_depth)) {
-                    return Step14Outcome::Skip { best_value: None };
-                }
-            }
-        }
-
-        Step14Outcome::Continue
-    }
-
     /// 探索のメインエントリーポイント
     ///
     /// 反復深化で指定された深さまで探索する。
@@ -1739,7 +1279,7 @@ impl SearchWorker {
     /// NTは NodeType を const genericで受け取る（コンパイル時最適化）
     /// cut_node は「βカットが期待される（ゼロウィンドウの非PVなど）」ときに true を渡す。
     /// 再探索やPV探索では all_node 扱いにするため false を渡す（YaneuraOuのcutNode引き渡しと対応）。
-    fn search_node<const NT: u8>(
+    pub(super) fn search_node<const NT: u8>(
         &mut self,
         pos: &mut Position,
         depth: Depth,

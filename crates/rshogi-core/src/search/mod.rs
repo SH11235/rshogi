@@ -15,6 +15,7 @@ mod engine;
 mod history;
 mod limits;
 mod movepicker;
+mod pruning;
 mod qsearch;
 mod skill;
 mod thread;
