@@ -262,6 +262,28 @@ where
     let margin = 18 * depth - 390;
     let prev_move = st.stack[(ply - 1) as usize].current_move;
     let prev_is_pass = prev_move.is_pass();
+
+    // NMPスキップ理由の統計収集（search-stats feature 有効時のみ）
+    #[cfg(feature = "search-stats")]
+    {
+        // 候補ノード: excluded_move.is_none() && ply >= nmp_min_ply && !beta.is_loss()
+        // これらは基本的な前提条件
+        if excluded_move.is_none() && ply >= st.nmp_min_ply && !beta.is_loss() {
+            st.stats.nmp_candidate_nodes += 1;
+            if !cut_node {
+                st.stats.nmp_skip_not_cut_node += 1;
+            } else if in_check {
+                st.stats.nmp_skip_in_check += 1;
+            } else if static_eval < beta - Value::new(margin) {
+                st.stats.nmp_skip_eval_low += 1;
+            } else if prev_move.is_null() || prev_is_pass {
+                st.stats.nmp_skip_prev_null += 1;
+            }
+        } else if excluded_move.is_some() {
+            st.stats.nmp_skip_excluded += 1;
+        }
+    }
+
     if excluded_move.is_none()
         && cut_node
         && !in_check

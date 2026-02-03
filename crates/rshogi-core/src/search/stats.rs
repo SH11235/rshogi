@@ -27,6 +27,18 @@ pub struct SearchStats {
     pub nmp_attempted: u64,
     /// NMPによる枝刈り成功回数
     pub nmp_cutoff: u64,
+    /// NMPスキップ理由: cut_node == false
+    pub nmp_skip_not_cut_node: u64,
+    /// NMPスキップ理由: in_check
+    pub nmp_skip_in_check: u64,
+    /// NMPスキップ理由: static_eval < beta - margin
+    pub nmp_skip_eval_low: u64,
+    /// NMPスキップ理由: excluded_move あり
+    pub nmp_skip_excluded: u64,
+    /// NMPスキップ理由: prev_move が null/pass
+    pub nmp_skip_prev_null: u64,
+    /// NMP候補ノード数（cut_node && !in_check && !excluded のノード）
+    pub nmp_candidate_nodes: u64,
     /// Razoring適用回数
     pub razoring_applied: u64,
     /// ProbCut試行回数
@@ -128,6 +140,12 @@ impl Default for SearchStats {
             futility_pruned: 0,
             nmp_attempted: 0,
             nmp_cutoff: 0,
+            nmp_skip_not_cut_node: 0,
+            nmp_skip_in_check: 0,
+            nmp_skip_eval_low: 0,
+            nmp_skip_excluded: 0,
+            nmp_skip_prev_null: 0,
+            nmp_candidate_nodes: 0,
             razoring_applied: 0,
             probcut_attempted: 0,
             probcut_cutoff: 0,
@@ -190,6 +208,17 @@ impl SearchStats {
         report.push_str("--- Pre-Move Pruning ---\n");
         report.push_str(&format!("NMP attempted:       {:>12}\n", self.nmp_attempted));
         report.push_str(&format!("NMP cutoffs:         {:>12}\n", self.nmp_cutoff));
+        if self.nmp_candidate_nodes > 0 {
+            let success_rate = self.nmp_cutoff as f64 / self.nmp_attempted.max(1) as f64 * 100.0;
+            report.push_str(&format!("NMP success rate:    {:>11.1}%\n", success_rate));
+            report.push_str("  --- NMP Skip Reasons ---\n");
+            report.push_str(&format!("  Candidate nodes:   {:>12}\n", self.nmp_candidate_nodes));
+            report.push_str(&format!("  Skip (not cut):    {:>12}\n", self.nmp_skip_not_cut_node));
+            report.push_str(&format!("  Skip (in check):   {:>12}\n", self.nmp_skip_in_check));
+            report.push_str(&format!("  Skip (eval low):   {:>12}\n", self.nmp_skip_eval_low));
+            report.push_str(&format!("  Skip (excluded):   {:>12}\n", self.nmp_skip_excluded));
+            report.push_str(&format!("  Skip (prev null):  {:>12}\n", self.nmp_skip_prev_null));
+        }
         report.push_str(&format!("Razoring:            {:>12}\n", self.razoring_applied));
         report.push_str(&format!("Futility (static):   {:>12}\n", self.futility_pruned));
         report.push_str(&format!("ProbCut attempted:   {:>12}\n", self.probcut_attempted));
