@@ -14,7 +14,7 @@ use crate::position::Position;
 use crate::search::PieceToHistory;
 use crate::tt::{ProbeResult, TTData, TranspositionTable};
 use crate::types::{
-    Bound, Color, Depth, Move, Piece, PieceType, Square, Value, DEPTH_QS, DEPTH_UNSEARCHED, MAX_PLY,
+    Bound, Color, Depth, Move, Piece, PieceType, Square, Value, DEPTH_QS, MAX_PLY,
 };
 
 use super::history::{
@@ -26,8 +26,7 @@ use super::history::{
 };
 use super::movepicker::piece_value;
 use super::types::{
-    draw_value, init_stack_array, value_from_tt, value_to_tt, ContHistKey, NodeType,
-    OrderedMovesBuffer, RootMoves, SearchedMoveList, StackArray, STACK_SIZE,
+    init_stack_array, value_from_tt, value_to_tt, ContHistKey, NodeType, RootMoves, SearchedMoveList, StackArray, STACK_SIZE,
 };
 use super::{LimitsType, MovePicker, TimeManagement};
 
@@ -53,7 +52,7 @@ const DRAW_JITTER_MASK: u64 = 0x2;
 const DRAW_JITTER_OFFSET: i32 = -1; // VALUE_DRAW(0) 周辺に ±1 の揺らぎを入れる
 
 #[inline]
-fn draw_jitter(nodes: u64) -> i32 {
+pub(super) fn draw_jitter(nodes: u64) -> i32 {
     // YaneuraOu: value_draw(nodes) = VALUE_DRAW - 1 + (nodes & 0x2)
     // 千日手盲点を避けるため、VALUE_DRAW(0) を ±1 にばらつかせる。
     ((nodes & DRAW_JITTER_MASK) as i32) + DRAW_JITTER_OFFSET
@@ -70,7 +69,7 @@ fn msb(x: i32) -> i32 {
 
 /// 補正履歴を適用した静的評価に変換（詰みスコア領域に入り込まないようにクリップ）
 #[inline]
-fn to_corrected_static_eval(unadjusted: Value, correction_value: i32) -> Value {
+pub(super) fn to_corrected_static_eval(unadjusted: Value, correction_value: i32) -> Value {
     let corrected = unadjusted.raw() + correction_value / 131_072;
     Value::new(corrected.clamp(Value::MATED_IN_MAX_PLY.raw() + 1, Value::MATE_IN_MAX_PLY.raw() - 1))
 }
@@ -122,309 +121,10 @@ pub(crate) fn reduction(
         + REDUCTION_BASE_OFFSET
 }
 
-// =============================================================================
-// 探索統計（search-stats feature有効時のみ）
-// =============================================================================
-
-/// 深度別統計の最大深度
+// stats モジュールからマクロをインポート
+use super::stats::{inc_stat, inc_stat_by_depth};
 #[cfg(feature = "search-stats")]
-const STATS_MAX_DEPTH: usize = 32;
-
-/// 探索統計カウンタ
-///
-/// 各枝刈りの発生回数を記録し、チューニングやデバッグに使用する。
-/// `search-stats` featureが有効な場合のみコンパイルされる。
-#[cfg(feature = "search-stats")]
-#[derive(Debug, Clone)]
-pub struct SearchStats {
-    /// 総ノード数（探索関数の呼び出し回数）
-    pub nodes_searched: u64,
-    /// LMR適用回数
-    pub lmr_applied: u64,
-    /// LMRによる再探索回数
-    pub lmr_research: u64,
-    /// Move Loop内の枝刈り回数（LMP, Futility, SEE, History等の合計）
-    pub move_loop_pruned: u64,
-    /// Futility Pruning（静的評価による枝刈り）回数
-    pub futility_pruned: u64,
-    /// NMP（Null Move Pruning）試行回数
-    pub nmp_attempted: u64,
-    /// NMPによる枝刈り成功回数
-    pub nmp_cutoff: u64,
-    /// Razoring適用回数
-    pub razoring_applied: u64,
-    /// ProbCut試行回数
-    pub probcut_attempted: u64,
-    /// ProbCutによる枝刈り成功回数
-    pub probcut_cutoff: u64,
-    /// Singular Extension適用回数
-    pub singular_extension: u64,
-    /// Multi-Cut発動回数
-    pub multi_cut: u64,
-    /// TT（置換表）カットオフ回数
-    pub tt_cutoff: u64,
-    /// 深度別ノード数（depth 0-31）
-    pub nodes_by_depth: [u64; STATS_MAX_DEPTH],
-    /// 深度別TTカットオフ数
-    pub tt_cutoff_by_depth: [u64; STATS_MAX_DEPTH],
-    /// 深度別TTプローブ数
-    pub tt_probe_by_depth: [u64; STATS_MAX_DEPTH],
-    /// 深度別TTヒット数
-    pub tt_hit_by_depth: [u64; STATS_MAX_DEPTH],
-    /// 深度別TT深度不足でカットオフ失敗
-    pub tt_fail_depth_by_depth: [u64; STATS_MAX_DEPTH],
-    /// 深度別TTバウンド不適合でカットオフ失敗
-    pub tt_fail_bound_by_depth: [u64; STATS_MAX_DEPTH],
-    /// LMRでdepth 1に遷移したノード数（親の深度別）
-    pub lmr_to_depth1_from: [u64; STATS_MAX_DEPTH],
-    /// depth 1での全子ノード数（統計用）
-    pub depth1_children_total: u64,
-    /// depth 1でTTカットオフされた子ノード数
-    pub depth1_children_tt_cut: u64,
-    /// 深度別TT書き込み数
-    pub tt_write_by_depth: [u64; STATS_MAX_DEPTH],
-    /// 深度別Razoring適用回数
-    pub razoring_by_depth: [u64; STATS_MAX_DEPTH],
-    /// 深度別Futility Pruning適用回数
-    pub futility_by_depth: [u64; STATS_MAX_DEPTH],
-    /// 深度別NMPカットオフ回数
-    pub nmp_cutoff_by_depth: [u64; STATS_MAX_DEPTH],
-    /// 深度別first move cutoff回数（Move Ordering品質）
-    pub first_move_cutoff_by_depth: [u64; STATS_MAX_DEPTH],
-    /// 深度別カットオフ回数（first move cutoff rate計算用）
-    pub cutoff_by_depth: [u64; STATS_MAX_DEPTH],
-    /// 深度別のカットオフ時move_count合計（平均計算用）
-    pub move_count_sum_by_depth: [u64; STATS_MAX_DEPTH],
-    /// LMR削減量（r/1024）のヒストグラム（0-15+）
-    pub lmr_reduction_histogram: [u64; 16],
-    /// LMR適用後の新深度別ノード数
-    pub lmr_new_depth_histogram: [u64; STATS_MAX_DEPTH],
-}
-
-#[cfg(feature = "search-stats")]
-impl Default for SearchStats {
-    fn default() -> Self {
-        Self {
-            nodes_searched: 0,
-            lmr_applied: 0,
-            lmr_research: 0,
-            move_loop_pruned: 0,
-            futility_pruned: 0,
-            nmp_attempted: 0,
-            nmp_cutoff: 0,
-            razoring_applied: 0,
-            probcut_attempted: 0,
-            probcut_cutoff: 0,
-            singular_extension: 0,
-            multi_cut: 0,
-            tt_cutoff: 0,
-            nodes_by_depth: [0; STATS_MAX_DEPTH],
-            tt_cutoff_by_depth: [0; STATS_MAX_DEPTH],
-            tt_probe_by_depth: [0; STATS_MAX_DEPTH],
-            tt_hit_by_depth: [0; STATS_MAX_DEPTH],
-            tt_fail_depth_by_depth: [0; STATS_MAX_DEPTH],
-            tt_fail_bound_by_depth: [0; STATS_MAX_DEPTH],
-            lmr_to_depth1_from: [0; STATS_MAX_DEPTH],
-            depth1_children_total: 0,
-            depth1_children_tt_cut: 0,
-            tt_write_by_depth: [0; STATS_MAX_DEPTH],
-            razoring_by_depth: [0; STATS_MAX_DEPTH],
-            futility_by_depth: [0; STATS_MAX_DEPTH],
-            nmp_cutoff_by_depth: [0; STATS_MAX_DEPTH],
-            first_move_cutoff_by_depth: [0; STATS_MAX_DEPTH],
-            cutoff_by_depth: [0; STATS_MAX_DEPTH],
-            move_count_sum_by_depth: [0; STATS_MAX_DEPTH],
-            lmr_reduction_histogram: [0; 16],
-            lmr_new_depth_histogram: [0; STATS_MAX_DEPTH],
-        }
-    }
-}
-
-#[cfg(feature = "search-stats")]
-impl SearchStats {
-    /// 統計をリセット
-    pub fn reset(&mut self) {
-        *self = Self::default();
-    }
-
-    /// 統計をフォーマットして文字列として返す
-    pub fn format_report(&self) -> String {
-        let mut report = String::new();
-        report.push_str("=== Search Statistics ===\n");
-        report.push_str(&format!("Nodes searched:      {:>12}\n", self.nodes_searched));
-        report.push_str(&format!("TT cutoffs:          {:>12}\n", self.tt_cutoff));
-        report.push_str("--- Pre-Move Pruning ---\n");
-        report.push_str(&format!("NMP attempted:       {:>12}\n", self.nmp_attempted));
-        report.push_str(&format!("NMP cutoffs:         {:>12}\n", self.nmp_cutoff));
-        report.push_str(&format!("Razoring:            {:>12}\n", self.razoring_applied));
-        report.push_str(&format!("Futility (static):   {:>12}\n", self.futility_pruned));
-        report.push_str(&format!("ProbCut attempted:   {:>12}\n", self.probcut_attempted));
-        report.push_str(&format!("ProbCut cutoffs:     {:>12}\n", self.probcut_cutoff));
-        report.push_str("--- Move Loop ---\n");
-        report.push_str(&format!("Move loop pruned:    {:>12}\n", self.move_loop_pruned));
-        report.push_str(&format!("LMR applied:         {:>12}\n", self.lmr_applied));
-        report.push_str(&format!("LMR re-search:       {:>12}\n", self.lmr_research));
-        report.push_str("--- Extensions ---\n");
-        report.push_str(&format!("Singular extension:  {:>12}\n", self.singular_extension));
-        report.push_str(&format!("Multi-cut:           {:>12}\n", self.multi_cut));
-        // 深度別ノード数（ノード数が0より大きい深度のみ表示）
-        report.push_str("--- Nodes by Depth ---\n");
-        for (d, &count) in self.nodes_by_depth.iter().enumerate() {
-            if count > 0 {
-                let tt_cut = self.tt_cutoff_by_depth[d];
-                let tt_rate = if count > 0 {
-                    (tt_cut as f64 / count as f64 * 100.0) as u32
-                } else {
-                    0
-                };
-                report.push_str(&format!(
-                    "  depth {:>2}: {:>10} nodes, {:>8} TT cuts ({:>2}%)\n",
-                    d, count, tt_cut, tt_rate
-                ));
-            }
-        }
-        // TT詳細統計（depth 1のみ詳細表示）
-        report.push_str("--- TT Details (depth 1) ---\n");
-        let probe = self.tt_probe_by_depth[1];
-        let hit = self.tt_hit_by_depth[1];
-        let cut = self.tt_cutoff_by_depth[1];
-        let fail_depth = self.tt_fail_depth_by_depth[1];
-        let fail_bound = self.tt_fail_bound_by_depth[1];
-        if probe > 0 {
-            report.push_str(&format!(
-                "  Probes: {}, Hits: {} ({:.1}%), Cuts: {} ({:.1}%)\n",
-                probe,
-                hit,
-                hit as f64 / probe as f64 * 100.0,
-                cut,
-                cut as f64 / probe as f64 * 100.0
-            ));
-            report
-                .push_str(&format!("  Fail reasons: depth={}, bound={}\n", fail_depth, fail_bound));
-        }
-        // depth 1への遷移元分析
-        report.push_str("--- LMR to Depth 1 Sources ---\n");
-        for (d, &count) in self.lmr_to_depth1_from.iter().enumerate() {
-            if count > 0 {
-                report.push_str(&format!("  from depth {:>2}: {:>8} nodes\n", d, count));
-            }
-        }
-        // TT書き込み統計
-        report.push_str("--- TT Writes by Depth ---\n");
-        for (d, &count) in self.tt_write_by_depth.iter().enumerate() {
-            if count > 0 {
-                let probe = self.tt_probe_by_depth[d];
-                let ratio = if probe > 0 {
-                    format!("{:.1}x", count as f64 / probe as f64)
-                } else {
-                    "-".to_string()
-                };
-                report.push_str(&format!(
-                    "  depth {:>2}: {:>8} writes (probe ratio: {})\n",
-                    d, count, ratio
-                ));
-            }
-        }
-        // 早期リターン統計（depth別）
-        report.push_str("--- Early Return by Depth ---\n");
-        for d in 0..STATS_MAX_DEPTH {
-            let razoring = self.razoring_by_depth[d];
-            let futility = self.futility_by_depth[d];
-            let nmp = self.nmp_cutoff_by_depth[d];
-            let nodes = self.nodes_by_depth[d];
-            if razoring > 0 || futility > 0 || nmp > 0 {
-                report.push_str(&format!(
-                    "  depth {:>2}: razoring={:>6}, futility={:>6}, nmp={:>6} (nodes={})\n",
-                    d, razoring, futility, nmp, nodes
-                ));
-            }
-        }
-        // Move Ordering品質統計（depth別）
-        report.push_str("--- Move Ordering Quality (First Move Cutoff Rate) ---\n");
-        for d in 0..STATS_MAX_DEPTH {
-            let first_cut = self.first_move_cutoff_by_depth[d];
-            let total_cut = self.cutoff_by_depth[d];
-            if total_cut > 0 {
-                let rate = first_cut as f64 / total_cut as f64 * 100.0;
-                report.push_str(&format!(
-                    "  depth {:>2}: {:>6}/{:>6} ({:>5.1}%)\n",
-                    d, first_cut, total_cut, rate
-                ));
-            }
-        }
-        // カットオフ時のmove_count平均（depth別）
-        report.push_str("--- Average Move Count at Cutoff ---\n");
-        for d in 0..STATS_MAX_DEPTH {
-            let total_cut = self.cutoff_by_depth[d];
-            let move_count_sum = self.move_count_sum_by_depth[d];
-            if total_cut > 0 {
-                let avg = move_count_sum as f64 / total_cut as f64;
-                report.push_str(&format!(
-                    "  depth {:>2}: {:>6.2} avg ({} cutoffs)\n",
-                    d, avg, total_cut
-                ));
-            }
-        }
-        // LMR削減量のヒストグラム
-        report.push_str("--- LMR Reduction Histogram (r/1024) ---\n");
-        for (r, &count) in self.lmr_reduction_histogram.iter().enumerate() {
-            if count > 0 {
-                let label = if r == 15 {
-                    "15+".to_string()
-                } else {
-                    format!("{:>2}", r)
-                };
-                report.push_str(&format!(
-                    "  r={}: {:>8} ({:>5.1}%)\n",
-                    label,
-                    count,
-                    count as f64 / self.lmr_applied as f64 * 100.0
-                ));
-            }
-        }
-        // LMR適用後の新深度別ノード数
-        report.push_str("--- LMR New Depth Distribution ---\n");
-        for d in 0..STATS_MAX_DEPTH {
-            let count = self.lmr_new_depth_histogram[d];
-            if count > 0 {
-                report.push_str(&format!(
-                    "  new_depth {:>2}: {:>8} ({:>5.1}%)\n",
-                    d,
-                    count,
-                    count as f64 / self.lmr_applied as f64 * 100.0
-                ));
-            }
-        }
-        report
-    }
-}
-
-/// 統計カウンタをインクリメントするマクロ（feature有効時のみ実行）
-#[cfg(feature = "search-stats")]
-macro_rules! inc_stat {
-    ($self:expr, $field:ident) => {
-        $self.stats.$field += 1;
-    };
-}
-
-#[cfg(not(feature = "search-stats"))]
-macro_rules! inc_stat {
-    ($self:expr, $field:ident) => {};
-}
-
-/// 深度別統計をカウントするマクロ（feature有効時のみ実行）
-#[cfg(feature = "search-stats")]
-macro_rules! inc_stat_by_depth {
-    ($self:expr, $field:ident, $depth:expr) => {
-        let d = ($depth as usize).min(STATS_MAX_DEPTH - 1);
-        $self.stats.$field[d] += 1;
-    };
-}
-
-#[cfg(not(feature = "search-stats"))]
-macro_rules! inc_stat_by_depth {
-    ($self:expr, $field:ident, $depth:expr) => {};
-}
+use super::stats::{SearchStats, STATS_MAX_DEPTH};
 
 /// 置換表プローブの結果をまとめたコンテキスト
 ///
@@ -680,13 +380,13 @@ impl SearchWorker {
     }
 
     #[inline]
-    fn cont_history_ref(&self, ply: i32, back: i32) -> &PieceToHistory {
+    pub(super) fn cont_history_ref(&self, ply: i32, back: i32) -> &PieceToHistory {
         let ptr = self.cont_history_ptr(ply, back);
         unsafe { ptr.as_ref() }
     }
 
     #[inline]
-    fn cont_history_tables(&self, ply: i32) -> [&PieceToHistory; 6] {
+    pub(super) fn cont_history_tables(&self, ply: i32) -> [&PieceToHistory; 6] {
         [
             self.cont_history_ref(ply, 1),
             self.cont_history_ref(ply, 2),
@@ -705,7 +405,7 @@ impl SearchWorker {
     }
 
     #[inline]
-    fn set_cont_history_for_move(
+    pub(super) fn set_cont_history_for_move(
         &mut self,
         ply: i32,
         in_check: bool,
@@ -724,7 +424,7 @@ impl SearchWorker {
     }
 
     #[inline]
-    fn clear_cont_history_for_null(&mut self, ply: i32) {
+    pub(super) fn clear_cont_history_for_null(&mut self, ply: i32) {
         self.stack[ply as usize].cont_history_ptr = self.cont_history_sentinel;
         self.stack[ply as usize].cont_hist_key = None;
     }
@@ -788,26 +488,30 @@ impl SearchWorker {
     /// パス権評価は手数依存のためここでは加算せず、静的評価補正後に毎回再計算して加える。
     /// これにより TT/EvalHash（局面キーのみ）と整合し、再訪局面で古い手数のパス権評価を再利用しない。
     #[inline]
-    fn nnue_evaluate(&mut self, pos: &Position) -> Value {
+    pub(super) fn nnue_evaluate(&mut self, pos: &Position) -> Value {
         evaluate_dispatch(pos, &mut self.nnue_stack)
     }
 
     /// NNUE アキュムレータスタックを push
     #[inline]
-    fn nnue_push(&mut self, dirty_piece: DirtyPiece) {
+    pub(super) fn nnue_push(&mut self, dirty_piece: DirtyPiece) {
         self.nnue_stack.push(dirty_piece);
     }
 
     /// NNUE アキュムレータスタックを pop
     #[inline]
-    fn nnue_pop(&mut self) {
+    pub(super) fn nnue_pop(&mut self) {
         self.nnue_stack.pop();
     }
 
     /// 中断チェック
     /// YaneuraOu準拠: 512回に1回だけ実際のチェックを行う
     #[inline]
-    fn check_abort(&mut self, limits: &LimitsType, time_manager: &mut TimeManagement) -> bool {
+    pub(super) fn check_abort(
+        &mut self,
+        limits: &LimitsType,
+        time_manager: &mut TimeManagement,
+    ) -> bool {
         // すでにabortフラグが立っている場合は即座に返す
         if self.abort {
             #[cfg(debug_assertions)]
@@ -886,7 +590,7 @@ impl SearchWorker {
 
     /// 補正履歴から静的評価の補正値を算出（YaneuraOu準拠）
     #[inline]
-    fn correction_value(&self, pos: &Position, ply: i32) -> i32 {
+    pub(super) fn correction_value(&self, pos: &Position, ply: i32) -> i32 {
         let us = pos.side_to_move();
         let pawn_idx = (pos.pawn_key() as usize) & (CORRECTION_HISTORY_SIZE - 1);
         let minor_idx = (pos.minor_piece_key() as usize) & (CORRECTION_HISTORY_SIZE - 1);
@@ -3141,373 +2845,6 @@ impl SearchWorker {
             );
             inc_stat_by_depth!(self, tt_write_by_depth, depth);
         }
-
-        best_value
-    }
-
-    /// 静止探索
-    fn qsearch<const NT: u8>(
-        &mut self,
-        pos: &mut Position,
-        depth: Depth,
-        alpha: Value,
-        beta: Value,
-        ply: i32,
-        limits: &LimitsType,
-        time_manager: &mut TimeManagement,
-    ) -> Value {
-        let pv_node = NT == NodeType::PV as u8;
-        let in_check = pos.in_check();
-
-        if ply >= MAX_PLY {
-            return if in_check {
-                Value::ZERO
-            } else {
-                self.nnue_evaluate(pos)
-            };
-        }
-
-        if pv_node && self.sel_depth < ply + 1 {
-            self.sel_depth = ply + 1;
-        }
-
-        if self.check_abort(limits, time_manager) {
-            return Value::ZERO;
-        }
-
-        let rep_state = pos.repetition_state(ply);
-        if rep_state.is_repetition() || rep_state.is_superior_inferior() {
-            let v = draw_value(rep_state, pos.side_to_move());
-            if v != Value::NONE {
-                if v == Value::DRAW {
-                    let jittered = Value::new(v.raw() + draw_jitter(self.nodes));
-                    return value_from_tt(jittered, ply);
-                }
-                return value_from_tt(v, ply);
-            }
-        }
-
-        // 引き分け手数ルール（YaneuraOu準拠、MaxMovesToDrawオプション）
-        if self.max_moves_to_draw > 0 && pos.game_ply() > self.max_moves_to_draw {
-            return Value::new(Value::DRAW.raw() + draw_jitter(self.nodes));
-        }
-
-        let key = pos.key();
-        let tt_result = self.tt.probe(key, pos);
-        let tt_hit = tt_result.found;
-        let tt_data = tt_result.data;
-        let pv_hit = tt_hit && tt_data.is_pv;
-        self.stack[ply as usize].tt_hit = tt_hit;
-        self.stack[ply as usize].tt_pv = pv_hit;
-        let mut tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
-        let tt_value = if tt_hit {
-            value_from_tt(tt_data.value, ply)
-        } else {
-            Value::NONE
-        };
-
-        if !pv_node
-            && tt_hit
-            && tt_data.depth >= DEPTH_QS
-            && tt_value != Value::NONE
-            && tt_data.bound.can_cutoff(tt_value, beta)
-        {
-            return tt_value;
-        }
-
-        let mut best_move = Move::NONE;
-
-        let correction_value = self.correction_value(pos, ply);
-        let mut unadjusted_static_eval = Value::NONE;
-        let mut static_eval = if in_check {
-            Value::NONE
-        } else if tt_hit && tt_data.eval != Value::NONE {
-            unadjusted_static_eval = tt_data.eval;
-            unadjusted_static_eval
-        } else {
-            // 置換表に無いときだけ簡易1手詰め判定を行う
-            if !tt_hit {
-                let mate_move = pos.mate_1ply();
-                if mate_move.is_some() {
-                    return Value::mate_in(ply + 1);
-                }
-            }
-            unadjusted_static_eval = self.nnue_evaluate(pos);
-            unadjusted_static_eval
-        };
-
-        if !in_check && unadjusted_static_eval != Value::NONE {
-            static_eval = to_corrected_static_eval(unadjusted_static_eval, correction_value);
-            // パス権評価を動的に追加（TTには保存されないので手数依存でもOK）
-            static_eval += evaluate_pass_rights(pos, pos.game_ply() as u16);
-        }
-
-        self.stack[ply as usize].static_eval = static_eval;
-
-        let mut alpha = alpha;
-        let mut best_value = if in_check {
-            Value::mated_in(ply)
-        } else {
-            static_eval
-        };
-
-        if !in_check && tt_hit && tt_value != Value::NONE && !tt_value.is_mate_score() {
-            let improves = (tt_value > best_value && tt_data.bound == Bound::Lower)
-                || (tt_value < best_value && tt_data.bound == Bound::Upper);
-            if improves {
-                best_value = tt_value;
-                static_eval = tt_value;
-                self.stack[ply as usize].static_eval = static_eval;
-            }
-        }
-
-        if !in_check && best_value >= beta {
-            let mut v = best_value;
-            if !v.is_mate_score() {
-                v = Value::new((v.raw() + beta.raw()) / 2);
-            }
-            if !tt_hit {
-                // YaneuraOu: pvHitを使用
-                tt_result.write(
-                    key,
-                    value_to_tt(v, ply),
-                    pv_hit,
-                    Bound::Lower,
-                    DEPTH_UNSEARCHED,
-                    Move::NONE,
-                    unadjusted_static_eval,
-                    self.tt.generation(),
-                );
-                inc_stat_by_depth!(self, tt_write_by_depth, 0);
-            }
-            return v;
-        }
-
-        if !in_check && best_value > alpha {
-            alpha = best_value;
-        }
-
-        let futility_base = if in_check {
-            Value::NONE
-        } else {
-            static_eval + Value::new(352)
-        };
-
-        if depth <= DEPTH_QS
-            && tt_move.is_some()
-            && ((!pos.capture_stage(tt_move) && !pos.gives_check(tt_move)) || depth < -16)
-        {
-            tt_move = Move::NONE;
-        }
-
-        let prev_move = if ply >= 1 {
-            self.stack[(ply - 1) as usize].current_move
-        } else {
-            Move::NONE
-        };
-
-        let ordered_moves = {
-            let cont_tables = self.cont_history_tables(ply);
-            let mut buf_moves = OrderedMovesBuffer::new();
-
-            {
-                let mut mp = if in_check {
-                    MovePicker::new_evasions(
-                        pos,
-                        tt_move,
-                        ply,
-                        cont_tables,
-                        self.generate_all_legal_moves,
-                    )
-                } else {
-                    MovePicker::new(
-                        pos,
-                        tt_move,
-                        DEPTH_QS,
-                        ply,
-                        cont_tables,
-                        self.generate_all_legal_moves,
-                    )
-                };
-
-                loop {
-                    let mv = mp.next_move(pos, &self.history);
-                    if mv == Move::NONE {
-                        break;
-                    }
-                    buf_moves.push(mv);
-                }
-            }
-
-            if !in_check && depth == DEPTH_QS {
-                let mut buf = crate::movegen::ExtMoveBuffer::new();
-                let gen_type = if self.generate_all_legal_moves {
-                    crate::movegen::GenType::QuietChecksAll
-                } else {
-                    crate::movegen::GenType::QuietChecks
-                };
-                crate::movegen::generate_with_type(pos, gen_type, &mut buf, None);
-                for ext in buf.iter() {
-                    if buf_moves.contains(&ext.mv) {
-                        continue;
-                    }
-                    buf_moves.push(ext.mv);
-                }
-            }
-
-            if !in_check && depth <= -5 && ply >= 1 && prev_move.is_normal() {
-                let mut buf = crate::movegen::ExtMoveBuffer::new();
-                let rec_sq = prev_move.to();
-                let gen_type = if self.generate_all_legal_moves {
-                    crate::movegen::GenType::RecapturesAll
-                } else {
-                    crate::movegen::GenType::Recaptures
-                };
-                crate::movegen::generate_with_type(pos, gen_type, &mut buf, Some(rec_sq));
-                buf_moves.clear();
-                for ext in buf.iter() {
-                    buf_moves.push(ext.mv);
-                }
-            }
-
-            buf_moves
-        };
-
-        let mut move_count = 0;
-
-        for mv in ordered_moves.iter() {
-            // 静止探索では PASS は対象外（TT手として来る可能性があるため明示的にスキップ）
-            if mv.is_pass() {
-                continue;
-            }
-
-            if !pos.is_legal(mv) {
-                continue;
-            }
-
-            let gives_check = pos.gives_check(mv);
-            let capture = pos.capture_stage(mv);
-
-            if !in_check && depth <= DEPTH_QS && !capture && !gives_check {
-                continue;
-            }
-
-            if !in_check && capture && !pos.see_ge(mv, Value::ZERO) {
-                continue;
-            }
-
-            move_count += 1;
-
-            if !best_value.is_loss() {
-                if !gives_check
-                    && (!prev_move.is_normal() || mv.to() != prev_move.to())
-                    && futility_base != Value::NONE
-                {
-                    if move_count > 2 {
-                        continue;
-                    }
-
-                    let futility_value =
-                        futility_base + Value::new(piece_value(pos.piece_on(mv.to())));
-
-                    if futility_value <= alpha {
-                        best_value = best_value.max(futility_value);
-                        continue;
-                    }
-
-                    if !pos.see_ge(mv, alpha - futility_base) {
-                        best_value = best_value.min(alpha.min(futility_base));
-                        continue;
-                    }
-                }
-                if !capture {
-                    let mut cont_score = 0;
-
-                    // ss-1の参照（ContinuationHistory直結）
-                    cont_score +=
-                        self.cont_history_ref(ply, 1).get(mv.moved_piece_after(), mv.to()) as i32;
-
-                    let pawn_idx = pos.pawn_history_index();
-                    cont_score +=
-                        self.history.pawn_history.get(pawn_idx, pos.moved_piece(mv), mv.to())
-                            as i32;
-                    if cont_score <= 5868 {
-                        continue;
-                    }
-                }
-
-                if !pos.see_ge(mv, Value::new(-74)) {
-                    continue;
-                }
-            }
-
-            self.stack[ply as usize].current_move = mv;
-
-            let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, self.tt.as_ref());
-            self.nnue_push(dirty_piece);
-            self.nodes += 1;
-
-            // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う
-            if mv.is_pass() {
-                self.clear_cont_history_for_null(ply);
-            } else {
-                let cont_hist_pc = mv.moved_piece_after();
-                let cont_hist_to = mv.to();
-                self.set_cont_history_for_move(ply, in_check, capture, cont_hist_pc, cont_hist_to);
-            }
-
-            let value =
-                -self.qsearch::<NT>(pos, depth - 1, -beta, -alpha, ply + 1, limits, time_manager);
-
-            self.nnue_pop();
-            pos.undo_move(mv);
-
-            if self.abort {
-                return Value::ZERO;
-            }
-
-            if value > best_value {
-                best_value = value;
-                best_move = mv;
-
-                if value > alpha {
-                    alpha = value;
-
-                    if value >= beta {
-                        break;
-                    }
-                }
-            }
-        }
-
-        if in_check && move_count == 0 {
-            return Value::mated_in(ply);
-        }
-
-        if !best_value.is_mate_score() && best_value > beta {
-            best_value = Value::new((best_value.raw() + beta.raw()) / 2);
-        }
-
-        let bound = if best_value >= beta {
-            Bound::Lower
-        } else if pv_node && best_move.is_some() {
-            Bound::Exact
-        } else {
-            Bound::Upper
-        };
-
-        // YaneuraOu: pvHitを使用
-        tt_result.write(
-            key,
-            value_to_tt(best_value, ply),
-            pv_hit,
-            bound,
-            DEPTH_QS,
-            best_move,
-            unadjusted_static_eval,
-            self.tt.generation(),
-        );
-        inc_stat_by_depth!(self, tt_write_by_depth, 0);
 
         best_value
     }

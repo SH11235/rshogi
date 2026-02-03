@@ -8,11 +8,14 @@
 //! - 静止探索（Quiescence Search）
 //! - 各種枝刈り（NMP, LMR, Futility, SEE, Razoring, Singular Extension）
 
+mod stats;
+
 mod alpha_beta;
 mod engine;
 mod history;
 mod limits;
 mod movepicker;
+mod qsearch;
 mod skill;
 mod thread;
 mod time_manager;
@@ -29,6 +32,8 @@ pub use history::*;
 pub use limits::*;
 pub use movepicker::*;
 pub use skill::*;
+#[cfg(feature = "search-stats")]
+pub use stats::SearchStats;
 pub use thread::*;
 pub use time_manager::*;
 pub use time_options::*;
