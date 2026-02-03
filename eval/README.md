@@ -26,8 +26,11 @@
 | halfkp_256x2-32-32_crelu_pairwise/ | HalfKP | 256 | 32 | 32 | CReLU+Pairwise |
 | halfkp_512x2-8-64_crelu/ | HalfKP | 512 | 8 | 64 | CReLU |
 | halfka_hm_256x2-32-32_crelu/ | HalfKA_hm | 256 | 32 | 32 | CReLU |
+| halfka_hm_512x2-8-64_crelu/ | HalfKA_hm | 512 | 8 | 64 | CReLU |
 | halfka_hm_512x2-8-96_crelu/ | HalfKA_hm | 512 | 8 | 96 | CReLU |
 | halfka_hm_512x2-8-96_crelu_pairwise/ | HalfKA_hm | 512 | 8 | 96 | CReLU+Pairwise |
+| halfka_hm_768x2-16-64_crelu/ | HalfKA_hm | 768 | 16 | 64 | CReLU |
+| halfka_hm_1024x2-8-64_crelu/ | HalfKA_hm | 1024 | 8 | 64 | CReLU |
 | halfka_hm_1024x2-8-96_crelu/ | HalfKA_hm | 1024 | 8 | 96 | CReLU |
 
 ## ベンチマーク実行例
