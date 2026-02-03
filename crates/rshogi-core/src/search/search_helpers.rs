@@ -150,6 +150,11 @@ pub(super) fn cont_history_ref<'a>(
     back: i32,
 ) -> &'a PieceToHistory {
     let ptr = cont_history_ptr(st, ctx, ply, back);
+    // SAFETY: cont_history_ptrは常に有効なNonNullポインタを返す
+    // - ply >= back の場合: st.stack[(ply-back)].cont_history_ptr から取得
+    //   スタックエントリは SearchState のライフタイム 'a で有効
+    // - ply < back の場合: ctx.cont_history_sentinel（静的に確保されたsentinel）
+    // いずれの場合もポインタは 'a の間有効であり、参照への変換は安全
     unsafe { ptr.as_ref() }
 }
 

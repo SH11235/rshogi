@@ -353,7 +353,11 @@ impl MovePicker {
         // 現在のステージに応じて遷移先を調整
         match self.stage {
             Stage::QuietInit | Stage::GoodQuiet => {
-                self.stage = Stage::BadCapture; // BadCaptureは残す
+                // BadCapture範囲にcur/end_curを再初期化してから遷移
+                // これがないと、GoodQuiet中で発火した場合に残りのquietが返されてしまう
+                self.cur = 0;
+                self.end_cur = self.end_bad_captures;
+                self.stage = Stage::BadCapture;
             }
             _ => {}
         }

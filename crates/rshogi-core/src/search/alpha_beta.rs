@@ -470,6 +470,8 @@ impl SearchWorker {
         self.state.best_move_changes = 0.0;
         self.state.nmp_min_ply = 0;
         self.state.root_moves.clear();
+        // 探索統計をリセット（1回のgo毎にリセット）
+        self.reset_stats();
         // YaneuraOu準拠: low_ply_historyのみクリア
         self.history.with_write(|h| h.low_ply_history.clear());
         // NNUE AccumulatorStack: ネットワークに応じたバリアントに更新・リセット
