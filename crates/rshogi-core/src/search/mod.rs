@@ -12,9 +12,13 @@ mod stats;
 
 mod alpha_beta;
 mod engine;
+mod eval_helpers;
 mod history;
 mod limits;
 mod movepicker;
+mod pruning;
+mod qsearch;
+mod search_helpers;
 mod skill;
 mod thread;
 mod time_manager;

@@ -8,8 +8,8 @@
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-use crate::eval::{evaluate_pass_rights, get_scaled_pass_move_bonus, EvalHash};
-use crate::nnue::{evaluate_dispatch, get_network, AccumulatorStackVariant, DirtyPiece};
+use crate::eval::{get_scaled_pass_move_bonus, EvalHash};
+use crate::nnue::{get_network, AccumulatorStackVariant, DirtyPiece};
 use crate::position::Position;
 use crate::search::PieceToHistory;
 use crate::tt::{ProbeResult, TTData, TranspositionTable};
@@ -18,16 +18,26 @@ use crate::types::{Bound, Color, Depth, Move, Piece, PieceType, Square, Value, D
 use super::history::{
     capture_malus, continuation_history_bonus_with_offset, low_ply_history_bonus,
     pawn_history_bonus, quiet_malus, stat_bonus, HistoryCell, CONTINUATION_HISTORY_NEAR_PLY_OFFSET,
-    CONTINUATION_HISTORY_WEIGHTS, CORRECTION_HISTORY_LIMIT, CORRECTION_HISTORY_SIZE,
-    LOW_PLY_HISTORY_SIZE, PRIOR_CAPTURE_COUNTERMOVE_BONUS, TT_MOVE_HISTORY_BONUS,
-    TT_MOVE_HISTORY_MALUS,
+    CONTINUATION_HISTORY_WEIGHTS, CORRECTION_HISTORY_LIMIT, LOW_PLY_HISTORY_SIZE,
+    PRIOR_CAPTURE_COUNTERMOVE_BONUS, TT_MOVE_HISTORY_BONUS, TT_MOVE_HISTORY_MALUS,
 };
 use super::movepicker::piece_value;
 use super::types::{
-    init_stack_array, value_from_tt, value_to_tt, ContHistKey, NodeType, RootMoves,
-    SearchedMoveList, StackArray, STACK_SIZE,
+    init_stack_array, value_to_tt, ContHistKey, NodeType, RootMoves, SearchedMoveList, StackArray,
+    STACK_SIZE,
 };
 use super::{LimitsType, MovePicker, TimeManagement};
+
+use super::eval_helpers::{compute_eval_context, probe_transposition, update_correction_history};
+use super::pruning::{
+    step14_pruning, try_futility_pruning, try_null_move_pruning, try_probcut, try_razoring,
+    try_small_probcut,
+};
+use super::qsearch::qsearch;
+use super::search_helpers::{
+    check_abort, clear_cont_history_for_null, cont_history_ref, cont_history_tables, nnue_evaluate,
+    nnue_pop, nnue_push, set_cont_history_for_move, take_prior_reduction,
+};
 
 // =============================================================================
 // 定数
@@ -134,7 +144,7 @@ pub(super) struct TTContext {
 }
 
 /// 置換表プローブの結果（続行 or カットオフ）
-enum ProbeOutcome {
+pub(super) enum ProbeOutcome {
     /// 探索続行（TTContext付き）
     Continue(TTContext),
     /// 即時カットオフ値
@@ -142,14 +152,14 @@ enum ProbeOutcome {
 }
 
 /// 静的評価まわりの情報をまとめたコンテキスト
-struct EvalContext {
-    static_eval: Value,
-    unadjusted_static_eval: Value,
-    correction_value: i32,
+pub(super) struct EvalContext {
+    pub(super) static_eval: Value,
+    pub(super) unadjusted_static_eval: Value,
+    pub(super) correction_value: i32,
     /// 2手前と比較して局面が改善しているか
-    improving: bool,
+    pub(super) improving: bool,
     /// 相手側の局面が悪化しているか
-    opponent_worsening: bool,
+    pub(super) opponent_worsening: bool,
 }
 
 /// Step14の枝刈り判定結果
@@ -1044,1273 +1054,6 @@ impl SearchWorker {
         )
     }
 
-    // =========================================================================
-    // 関連関数版ヘルパー（search_node から使用）
-    // =========================================================================
-
-    /// 中断チェック（関連関数版）
-    #[inline]
-    fn check_abort_impl(
-        st: &mut SearchState,
-        ctx: &SearchContext<'_>,
-        limits: &LimitsType,
-        time_manager: &mut TimeManagement,
-    ) -> bool {
-        // すでにabortフラグが立っている場合は即座に返す
-        if st.abort {
-            #[cfg(debug_assertions)]
-            eprintln!("check_abort: abort flag already set");
-            return true;
-        }
-
-        // 頻度制御：512回に1回だけ実際のチェックを行う（YaneuraOu準拠）
-        st.calls_cnt -= 1;
-        if st.calls_cnt > 0 {
-            return false;
-        }
-        // カウンターをリセット
-        st.calls_cnt = if limits.nodes > 0 {
-            std::cmp::min(512, (limits.nodes / 1024) as i32).max(1)
-        } else {
-            512
-        };
-
-        // 外部からの停止要求
-        if time_manager.stop_requested() {
-            #[cfg(debug_assertions)]
-            eprintln!("check_abort: stop requested");
-            st.abort = true;
-            return true;
-        }
-
-        // ノード数制限チェック
-        if limits.nodes > 0 && st.nodes >= limits.nodes {
-            #[cfg(debug_assertions)]
-            eprintln!("check_abort: node limit reached nodes={} limit={}", st.nodes, limits.nodes);
-            st.abort = true;
-            return true;
-        }
-
-        // 時間制限チェック（main threadのみ）
-        // YaneuraOu準拠の2フェーズロジック
-        if ctx.thread_id == 0 {
-            // ponderhit フラグをポーリングし、検知したら通常探索へ切り替える
-            if time_manager.take_ponderhit() {
-                time_manager.on_ponderhit();
-            }
-
-            let elapsed = time_manager.elapsed();
-            let elapsed_effective = time_manager.elapsed_from_ponderhit();
-
-            // フェーズ1: search_end 設定済み → 即座に停止
-            if time_manager.search_end() > 0 && elapsed >= time_manager.search_end() {
-                #[cfg(debug_assertions)]
-                eprintln!(
-                    "check_abort: search_end reached elapsed={} search_end={}",
-                    elapsed,
-                    time_manager.search_end()
-                );
-                st.abort = true;
-                return true;
-            }
-
-            // フェーズ2: search_end 未設定 → maximum超過 or stop_on_ponderhit で設定
-            // ただし ponder 中は停止判定を行わない（YO準拠）
-            if !time_manager.is_pondering()
-                && time_manager.search_end() == 0
-                && limits.use_time_management()
-                && (elapsed_effective > time_manager.maximum() || time_manager.stop_on_ponderhit())
-            {
-                time_manager.set_search_end(elapsed);
-                // 注: ここでは停止せず、次のチェックで秒境界で停止
-            }
-        }
-
-        false
-    }
-
-    /// NNUE 評価（関連関数版）
-    #[inline]
-    fn nnue_evaluate_impl(st: &mut SearchState, pos: &Position) -> Value {
-        evaluate_dispatch(pos, &mut st.nnue_stack)
-    }
-
-    /// NNUE push（関連関数版）
-    #[inline]
-    fn nnue_push_impl(st: &mut SearchState, dirty_piece: DirtyPiece) {
-        st.nnue_stack.push(dirty_piece);
-    }
-
-    /// NNUE pop（関連関数版）
-    #[inline]
-    fn nnue_pop_impl(st: &mut SearchState) {
-        st.nnue_stack.pop();
-    }
-
-    /// ContinuationHistory ポインタを取得（関連関数版）
-    #[inline]
-    fn cont_history_ptr_impl(
-        st: &SearchState,
-        ctx: &SearchContext<'_>,
-        ply: i32,
-        back: i32,
-    ) -> NonNull<PieceToHistory> {
-        debug_assert!(ply >= 0 && (ply as usize) < STACK_SIZE, "ply out of bounds: {ply}");
-        debug_assert!(back >= 0, "back must be non-negative: {back}");
-        if ply >= back {
-            st.stack[(ply - back) as usize].cont_history_ptr
-        } else {
-            ctx.cont_history_sentinel
-        }
-    }
-
-    /// ContinuationHistory 参照を取得（関連関数版）
-    #[inline]
-    fn cont_history_ref_impl<'a>(
-        st: &'a SearchState,
-        ctx: &SearchContext<'_>,
-        ply: i32,
-        back: i32,
-    ) -> &'a PieceToHistory {
-        let ptr = Self::cont_history_ptr_impl(st, ctx, ply, back);
-        unsafe { ptr.as_ref() }
-    }
-
-    /// ContinuationHistory テーブル配列を取得（関連関数版）
-    #[inline]
-    fn cont_history_tables_impl<'a>(
-        st: &'a SearchState,
-        ctx: &SearchContext<'_>,
-        ply: i32,
-    ) -> [&'a PieceToHistory; 6] {
-        [
-            Self::cont_history_ref_impl(st, ctx, ply, 1),
-            Self::cont_history_ref_impl(st, ctx, ply, 2),
-            Self::cont_history_ref_impl(st, ctx, ply, 3),
-            Self::cont_history_ref_impl(st, ctx, ply, 4),
-            Self::cont_history_ref_impl(st, ctx, ply, 5),
-            Self::cont_history_ref_impl(st, ctx, ply, 6),
-        ]
-    }
-
-    /// ContinuationHistory を設定（関連関数版）
-    #[inline]
-    fn set_cont_history_for_move_impl(
-        st: &mut SearchState,
-        ctx: &SearchContext<'_>,
-        ply: i32,
-        in_check: bool,
-        capture: bool,
-        piece: Piece,
-        to: Square,
-    ) {
-        debug_assert!(ply >= 0 && (ply as usize) < STACK_SIZE, "ply out of bounds: {ply}");
-        let in_check_idx = in_check as usize;
-        let capture_idx = capture as usize;
-        let table = ctx.history.with_read(|h| {
-            NonNull::from(h.continuation_history[in_check_idx][capture_idx].get_table(piece, to))
-        });
-        st.stack[ply as usize].cont_history_ptr = table;
-        st.stack[ply as usize].cont_hist_key = Some(ContHistKey::new(in_check, capture, piece, to));
-    }
-
-    /// ContinuationHistory をクリア（null move用）（関連関数版）
-    #[inline]
-    fn clear_cont_history_for_null_impl(st: &mut SearchState, ctx: &SearchContext<'_>, ply: i32) {
-        st.stack[ply as usize].cont_history_ptr = ctx.cont_history_sentinel;
-        st.stack[ply as usize].cont_hist_key = None;
-    }
-
-    /// 補正履歴から静的評価の補正値を算出（関連関数版）
-    #[inline]
-    fn correction_value_impl(
-        st: &SearchState,
-        ctx: &SearchContext<'_>,
-        pos: &Position,
-        ply: i32,
-    ) -> i32 {
-        let us = pos.side_to_move();
-        let pawn_idx = (pos.pawn_key() as usize) & (CORRECTION_HISTORY_SIZE - 1);
-        let minor_idx = (pos.minor_piece_key() as usize) & (CORRECTION_HISTORY_SIZE - 1);
-        let non_pawn_idx_w =
-            (pos.non_pawn_key(Color::White) as usize) & (CORRECTION_HISTORY_SIZE - 1);
-        let non_pawn_idx_b =
-            (pos.non_pawn_key(Color::Black) as usize) & (CORRECTION_HISTORY_SIZE - 1);
-
-        // continuation_value 用の事前計算
-        let cont_params = if ply >= 2 {
-            let prev_move = st.stack[(ply - 1) as usize].current_move;
-            if prev_move.is_normal() {
-                st.stack[(ply - 2) as usize].cont_hist_key.map(|prev2_key| {
-                    let pc = pos.piece_on(prev_move.to());
-                    (prev2_key.piece, prev2_key.to, pc, prev_move.to())
-                })
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        ctx.history.with_read(|h| {
-            let pcv = h.correction_history.pawn_value(pawn_idx, us) as i32;
-            let micv = h.correction_history.minor_value(minor_idx, us) as i32;
-            let wnpcv =
-                h.correction_history.non_pawn_value(non_pawn_idx_w, Color::White, us) as i32;
-            let bnpcv =
-                h.correction_history.non_pawn_value(non_pawn_idx_b, Color::Black, us) as i32;
-
-            let cntcv = cont_params
-                .map(|(piece, to, pc, prev_to)| {
-                    h.correction_history.continuation_value(piece, to, pc, prev_to) as i32
-                })
-                .unwrap_or(0);
-
-            8867 * pcv + 8136 * micv + 10_757 * (wnpcv + bnpcv) + 7232 * cntcv
-        })
-    }
-
-    /// 補正履歴の更新（関連関数版）
-    #[inline]
-    fn update_correction_history_impl(
-        st: &SearchState,
-        ctx: &SearchContext<'_>,
-        pos: &Position,
-        ply: i32,
-        bonus: i32,
-    ) {
-        let us = pos.side_to_move();
-        let pawn_idx = (pos.pawn_key() as usize) & (CORRECTION_HISTORY_SIZE - 1);
-        let minor_idx = (pos.minor_piece_key() as usize) & (CORRECTION_HISTORY_SIZE - 1);
-        let non_pawn_idx_w =
-            (pos.non_pawn_key(Color::White) as usize) & (CORRECTION_HISTORY_SIZE - 1);
-        let non_pawn_idx_b =
-            (pos.non_pawn_key(Color::Black) as usize) & (CORRECTION_HISTORY_SIZE - 1);
-
-        // continuation_update 用の事前計算
-        let cont_params = if ply >= 2 {
-            let prev_move = st.stack[(ply - 1) as usize].current_move;
-            if prev_move.is_normal() {
-                st.stack[(ply - 2) as usize].cont_hist_key.map(|prev2_key| {
-                    let pc = pos.piece_on(prev_move.to());
-                    (prev2_key.piece, prev2_key.to, pc, prev_move.to())
-                })
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        const NON_PAWN_WEIGHT: i32 = 165;
-
-        ctx.history.with_write(|h| {
-            h.correction_history.update_pawn(pawn_idx, us, bonus);
-            h.correction_history.update_minor(minor_idx, us, bonus * 153 / 128);
-            h.correction_history.update_non_pawn(
-                non_pawn_idx_w,
-                Color::White,
-                us,
-                bonus * NON_PAWN_WEIGHT / 128,
-            );
-            h.correction_history.update_non_pawn(
-                non_pawn_idx_b,
-                Color::Black,
-                us,
-                bonus * NON_PAWN_WEIGHT / 128,
-            );
-
-            if let Some((piece, to, pc, prev_to)) = cont_params {
-                h.correction_history
-                    .update_continuation(piece, to, pc, prev_to, bonus * 153 / 128);
-            }
-        });
-    }
-
-    /// 親ノードのreductionを取得してクリア（関連関数版）
-    #[inline]
-    fn take_prior_reduction_impl(st: &mut SearchState, ply: i32) -> i32 {
-        if ply >= 1 {
-            let parent_idx = (ply - 1) as usize;
-            let pr = st.stack[parent_idx].reduction;
-            st.stack[parent_idx].reduction = 0;
-            pr
-        } else {
-            0
-        }
-    }
-
-    /// 置換表プローブ（関連関数版）
-    #[allow(clippy::too_many_arguments)]
-    fn probe_transposition_impl<const NT: u8>(
-        st: &mut SearchState,
-        ctx: &SearchContext<'_>,
-        pos: &mut Position,
-        depth: Depth,
-        beta: Value,
-        ply: i32,
-        pv_node: bool,
-        in_check: bool,
-        excluded_move: Move,
-    ) -> ProbeOutcome {
-        let key = pos.key();
-        let tt_result = ctx.tt.probe(key, pos);
-        let tt_hit = tt_result.found;
-        let tt_data = tt_result.data;
-
-        st.stack[ply as usize].tt_hit = tt_hit;
-        // excludedMoveがある場合は前回のttPvを維持（YaneuraOu準拠）
-        st.stack[ply as usize].tt_pv = if excluded_move.is_some() {
-            st.stack[ply as usize].tt_pv
-        } else {
-            pv_node || (tt_hit && tt_data.is_pv)
-        };
-
-        let tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
-        let tt_value = if tt_hit {
-            value_from_tt(tt_data.value, ply)
-        } else {
-            Value::NONE
-        };
-        let tt_capture = tt_move.is_some() && pos.is_capture(tt_move);
-
-        // TT統計収集
-        inc_stat_by_depth!(st, tt_probe_by_depth, depth);
-        if tt_hit {
-            inc_stat_by_depth!(st, tt_hit_by_depth, depth);
-        }
-
-        // excludedMoveがある場合はカットオフしない（YaneuraOu準拠）
-        if !pv_node
-            && excluded_move.is_none()
-            && tt_hit
-            && tt_data.depth >= depth
-            && tt_value != Value::NONE
-            && tt_data.bound.can_cutoff(tt_value, beta)
-        {
-            return ProbeOutcome::Cutoff(tt_value);
-        }
-
-        // TTカットオフ失敗理由の統計
-        #[cfg(feature = "search-stats")]
-        if !pv_node && excluded_move.is_none() && tt_hit && tt_value != Value::NONE {
-            if tt_data.depth < depth {
-                inc_stat_by_depth!(st, tt_fail_depth_by_depth, depth);
-            } else if !tt_data.bound.can_cutoff(tt_value, beta) {
-                inc_stat_by_depth!(st, tt_fail_bound_by_depth, depth);
-            }
-        }
-
-        // 1手詰め判定（置換表未ヒット時のみ、Rootでは実施しない）
-        // excludedMoveがある場合も実施しない（詰みがあればsingular前にbeta cutするため）
-        if NT != NodeType::Root as u8 && !in_check && !tt_hit && excluded_move.is_none() {
-            let mate_move = pos.mate_1ply();
-            if mate_move.is_some() {
-                let value = Value::mate_in(ply + 1);
-                let stored_depth = (depth + 6).min(MAX_PLY - 1);
-                tt_result.write(
-                    key,
-                    value,
-                    st.stack[ply as usize].tt_pv,
-                    Bound::Exact,
-                    stored_depth,
-                    mate_move,
-                    Value::NONE,
-                    ctx.tt.generation(),
-                );
-                inc_stat_by_depth!(st, tt_write_by_depth, stored_depth);
-                return ProbeOutcome::Cutoff(value);
-            }
-        }
-
-        ProbeOutcome::Continue(TTContext {
-            key,
-            result: tt_result,
-            data: tt_data,
-            hit: tt_hit,
-            mv: tt_move,
-            value: tt_value,
-            capture: tt_capture,
-        })
-    }
-
-    /// 静的評価と補正値の計算（関連関数版）
-    fn compute_eval_context_impl(
-        st: &mut SearchState,
-        ctx: &SearchContext<'_>,
-        pos: &mut Position,
-        ply: i32,
-        in_check: bool,
-        tt_ctx: &TTContext,
-        excluded_move: Move,
-    ) -> EvalContext {
-        let correction_value = Self::correction_value_impl(st, ctx, pos, ply);
-
-        // excludedMoveがある場合は、前回のstatic_evalをそのまま使用（YaneuraOu準拠）
-        if excluded_move.is_some() {
-            let static_eval = st.stack[ply as usize].static_eval;
-            let improving = if ply >= 2 && !in_check && static_eval != Value::NONE {
-                static_eval > st.stack[(ply - 2) as usize].static_eval
-            } else {
-                false
-            };
-            let opponent_worsening = if ply >= 1 && static_eval != Value::NONE {
-                let prev_eval = st.stack[(ply - 1) as usize].static_eval;
-                prev_eval != Value::NONE && static_eval > -prev_eval
-            } else {
-                false
-            };
-            return EvalContext {
-                static_eval,
-                unadjusted_static_eval: static_eval, // excludedMove時は未補正値も同じ
-                correction_value,
-                improving,
-                opponent_worsening,
-            };
-        }
-
-        let mut unadjusted_static_eval = Value::NONE;
-        let mut static_eval = if in_check {
-            Value::NONE
-        } else if tt_ctx.hit && tt_ctx.data.eval != Value::NONE {
-            unadjusted_static_eval = tt_ctx.data.eval;
-            unadjusted_static_eval
-        } else {
-            unadjusted_static_eval = Self::nnue_evaluate_impl(st, pos);
-            unadjusted_static_eval
-        };
-
-        if !in_check && unadjusted_static_eval != Value::NONE {
-            static_eval = to_corrected_static_eval(unadjusted_static_eval, correction_value);
-            // パス権評価を動的に追加（TTには保存されないので手数依存でもOK）
-            static_eval += evaluate_pass_rights(pos, pos.game_ply() as u16);
-        }
-
-        if !in_check
-            && tt_ctx.hit
-            && tt_ctx.value != Value::NONE
-            && !tt_ctx.value.is_mate_score()
-            && ((tt_ctx.value > static_eval && tt_ctx.data.bound == Bound::Lower)
-                || (tt_ctx.value < static_eval && tt_ctx.data.bound == Bound::Upper))
-        {
-            static_eval = tt_ctx.value;
-        }
-
-        st.stack[ply as usize].static_eval = static_eval;
-
-        let improving = if ply >= 2 && !in_check {
-            static_eval > st.stack[(ply - 2) as usize].static_eval
-        } else {
-            false
-        };
-        let opponent_worsening = if ply >= 1 && static_eval != Value::NONE {
-            let prev_eval = st.stack[(ply - 1) as usize].static_eval;
-            prev_eval != Value::NONE && static_eval > -prev_eval
-        } else {
-            false
-        };
-
-        EvalContext {
-            static_eval,
-            unadjusted_static_eval,
-            correction_value,
-            improving,
-            opponent_worsening,
-        }
-    }
-
-    /// Futility pruning（関連関数版）
-    #[inline]
-    fn try_futility_pruning_impl(params: FutilityParams) -> Option<Value> {
-        const FUTILITY_MARGIN_BASE: i32 = 90;
-        if !params.pv_node
-            && !params.in_check
-            && params.depth < 14
-            && params.static_eval != Value::NONE
-        {
-            let futility_mult =
-                FUTILITY_MARGIN_BASE - 20 * (params.cut_node && !params.tt_hit) as i32;
-            let futility_margin = Value::new(
-                futility_mult * params.depth
-                    - (params.improving as i32) * futility_mult * 2
-                    - (params.opponent_worsening as i32) * futility_mult / 3
-                    + (params.correction_value.abs() / 171_290),
-            );
-
-            if params.static_eval - futility_margin >= params.beta {
-                return Some(params.static_eval);
-            }
-        }
-        None
-    }
-
-    /// Small ProbCut（関連関数版）
-    #[inline]
-    fn try_small_probcut_impl(depth: Depth, beta: Value, tt_ctx: &TTContext) -> Option<Value> {
-        if depth >= 1 {
-            let sp_beta = beta + Value::new(417);
-            if tt_ctx.hit
-                && tt_ctx.data.bound == Bound::Lower
-                && tt_ctx.data.depth >= depth - 4
-                && tt_ctx.value != Value::NONE
-                && tt_ctx.value >= sp_beta
-                && !tt_ctx.value.is_mate_score()
-                && !beta.is_mate_score()
-            {
-                return Some(sp_beta);
-            }
-        }
-        None
-    }
-
-    /// Step14 の枝刈り（関連関数版）
-    #[inline]
-    fn step14_pruning_impl(ctx: &SearchContext<'_>, step_ctx: Step14Context<'_>) -> Step14Outcome {
-        if step_ctx.mv.is_pass() {
-            return Step14Outcome::Continue;
-        }
-
-        let lmr_depth = step_ctx.lmr_depth;
-
-        if step_ctx.ply != 0 && !step_ctx.best_value.is_loss() {
-            let lmp_denominator = 2 - step_ctx.improving as i32;
-            debug_assert!(lmp_denominator > 0, "LMP denominator must be positive");
-            let lmp_limit = (3 + step_ctx.depth * step_ctx.depth) / lmp_denominator;
-            if step_ctx.move_count >= lmp_limit && !step_ctx.is_capture && !step_ctx.gives_check {
-                return Step14Outcome::Skip { best_value: None };
-            }
-
-            if step_ctx.is_capture || step_ctx.gives_check {
-                let captured = step_ctx.pos.piece_on(step_ctx.mv.to());
-                let capt_hist = ctx.history.with_read(|h| {
-                    h.capture_history.get_with_captured_piece(
-                        step_ctx.mv.moved_piece_after(),
-                        step_ctx.mv.to(),
-                        captured,
-                    ) as i32
-                });
-
-                if !step_ctx.gives_check && lmr_depth < 7 && !step_ctx.in_check {
-                    // step_ctx doesn't have static_eval, so we skip this check
-                    // This is a simplification - the full implementation would need static_eval
-                }
-
-                let margin = (158 * step_ctx.depth + capt_hist / 31).clamp(0, 283 * step_ctx.depth);
-                if !step_ctx.pos.see_ge(step_ctx.mv, Value::new(-margin)) {
-                    return Step14Outcome::Skip { best_value: None };
-                }
-            } else {
-                // Quiet moves
-                let moved_piece = step_ctx.mv.moved_piece_after();
-                let to_sq = step_ctx.mv.to();
-                let cont_hist_0 = step_ctx.cont_history_1.get(moved_piece, to_sq) as i32;
-                let cont_hist_1 = step_ctx.cont_history_2.get(moved_piece, to_sq) as i32;
-                let main_hist = ctx
-                    .history
-                    .with_read(|h| h.main_history.get(step_ctx.mover, step_ctx.mv) as i32);
-                let hist_score = 2 * main_hist + cont_hist_0 + cont_hist_1;
-
-                if lmr_depth < 12 && hist_score < -5000 * step_ctx.depth {
-                    return Step14Outcome::Skip { best_value: None };
-                }
-
-                if !step_ctx.in_check
-                    && lmr_depth <= 4
-                    && !step_ctx.pos.see_ge(step_ctx.mv, Value::new(-60 * lmr_depth))
-                {
-                    return Step14Outcome::Skip { best_value: None };
-                }
-            }
-        }
-
-        Step14Outcome::Continue
-    }
-
-    /// 静止探索（関連関数版）
-    #[allow(clippy::too_many_arguments)]
-    fn qsearch_impl<const NT: u8>(
-        st: &mut SearchState,
-        ctx: &SearchContext<'_>,
-        pos: &mut Position,
-        depth: Depth,
-        alpha: Value,
-        beta: Value,
-        ply: i32,
-        limits: &LimitsType,
-        time_manager: &mut TimeManagement,
-    ) -> Value {
-        use super::types::{draw_value, OrderedMovesBuffer};
-        use crate::eval::evaluate_pass_rights;
-        use crate::types::DEPTH_UNSEARCHED;
-
-        let pv_node = NT == NodeType::PV as u8;
-        let in_check = pos.in_check();
-
-        if ply >= MAX_PLY {
-            return if in_check {
-                Value::ZERO
-            } else {
-                Self::nnue_evaluate_impl(st, pos)
-            };
-        }
-
-        if pv_node && st.sel_depth < ply + 1 {
-            st.sel_depth = ply + 1;
-        }
-
-        if Self::check_abort_impl(st, ctx, limits, time_manager) {
-            return Value::ZERO;
-        }
-
-        let rep_state = pos.repetition_state(ply);
-        if rep_state.is_repetition() || rep_state.is_superior_inferior() {
-            let v = draw_value(rep_state, pos.side_to_move());
-            if v != Value::NONE {
-                if v == Value::DRAW {
-                    let jittered = Value::new(v.raw() + draw_jitter(st.nodes));
-                    return value_from_tt(jittered, ply);
-                }
-                return value_from_tt(v, ply);
-            }
-        }
-
-        // 引き分け手数ルール（YaneuraOu準拠、MaxMovesToDrawオプション）
-        if ctx.max_moves_to_draw > 0 && pos.game_ply() > ctx.max_moves_to_draw {
-            return Value::new(Value::DRAW.raw() + draw_jitter(st.nodes));
-        }
-
-        let key = pos.key();
-        let tt_result = ctx.tt.probe(key, pos);
-        let tt_hit = tt_result.found;
-        let tt_data = tt_result.data;
-        let pv_hit = tt_hit && tt_data.is_pv;
-        st.stack[ply as usize].tt_hit = tt_hit;
-        st.stack[ply as usize].tt_pv = pv_hit;
-        let mut tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
-        let tt_value = if tt_hit {
-            value_from_tt(tt_data.value, ply)
-        } else {
-            Value::NONE
-        };
-
-        if !pv_node
-            && tt_hit
-            && tt_data.depth >= DEPTH_QS
-            && tt_value != Value::NONE
-            && tt_data.bound.can_cutoff(tt_value, beta)
-        {
-            return tt_value;
-        }
-
-        let mut best_move = Move::NONE;
-
-        let correction_value = Self::correction_value_impl(st, ctx, pos, ply);
-        let mut unadjusted_static_eval = Value::NONE;
-        let mut static_eval = if in_check {
-            Value::NONE
-        } else if tt_hit && tt_data.eval != Value::NONE {
-            unadjusted_static_eval = tt_data.eval;
-            unadjusted_static_eval
-        } else {
-            // 置換表に無いときだけ簡易1手詰め判定を行う
-            if !tt_hit {
-                let mate_move = pos.mate_1ply();
-                if mate_move.is_some() {
-                    return Value::mate_in(ply + 1);
-                }
-            }
-            unadjusted_static_eval = Self::nnue_evaluate_impl(st, pos);
-            unadjusted_static_eval
-        };
-
-        if !in_check && unadjusted_static_eval != Value::NONE {
-            static_eval = to_corrected_static_eval(unadjusted_static_eval, correction_value);
-            // パス権評価を動的に追加（TTには保存されないので手数依存でもOK）
-            static_eval += evaluate_pass_rights(pos, pos.game_ply() as u16);
-        }
-
-        st.stack[ply as usize].static_eval = static_eval;
-
-        let mut alpha = alpha;
-        let mut best_value = if in_check {
-            Value::mated_in(ply)
-        } else {
-            static_eval
-        };
-
-        if !in_check && tt_hit && tt_value != Value::NONE && !tt_value.is_mate_score() {
-            let improves = (tt_value > best_value && tt_data.bound == Bound::Lower)
-                || (tt_value < best_value && tt_data.bound == Bound::Upper);
-            if improves {
-                best_value = tt_value;
-                static_eval = tt_value;
-                st.stack[ply as usize].static_eval = static_eval;
-            }
-        }
-
-        if !in_check && best_value >= beta {
-            let mut v = best_value;
-            if !v.is_mate_score() {
-                v = Value::new((v.raw() + beta.raw()) / 2);
-            }
-            if !tt_hit {
-                // YaneuraOu: pvHitを使用
-                tt_result.write(
-                    key,
-                    value_to_tt(v, ply),
-                    pv_hit,
-                    Bound::Lower,
-                    DEPTH_UNSEARCHED,
-                    Move::NONE,
-                    unadjusted_static_eval,
-                    ctx.tt.generation(),
-                );
-                inc_stat_by_depth!(st, tt_write_by_depth, 0);
-            }
-            return v;
-        }
-
-        if !in_check && best_value > alpha {
-            alpha = best_value;
-        }
-
-        let futility_base = if in_check {
-            Value::NONE
-        } else {
-            static_eval + Value::new(352)
-        };
-
-        if depth <= DEPTH_QS
-            && tt_move.is_some()
-            && ((!pos.capture_stage(tt_move) && !pos.gives_check(tt_move)) || depth < -16)
-        {
-            tt_move = Move::NONE;
-        }
-
-        let prev_move = if ply >= 1 {
-            st.stack[(ply - 1) as usize].current_move
-        } else {
-            Move::NONE
-        };
-
-        let ordered_moves = {
-            let cont_tables = Self::cont_history_tables_impl(st, ctx, ply);
-            let mut buf_moves = OrderedMovesBuffer::new();
-
-            {
-                let mut mp = if in_check {
-                    MovePicker::new_evasions(
-                        pos,
-                        tt_move,
-                        ply,
-                        cont_tables,
-                        ctx.generate_all_legal_moves,
-                    )
-                } else {
-                    MovePicker::new(
-                        pos,
-                        tt_move,
-                        DEPTH_QS,
-                        ply,
-                        cont_tables,
-                        ctx.generate_all_legal_moves,
-                    )
-                };
-
-                loop {
-                    let mv = ctx.history.with_read(|h| mp.next_move(pos, h));
-                    if mv == Move::NONE {
-                        break;
-                    }
-                    buf_moves.push(mv);
-                }
-            }
-
-            if !in_check && depth == DEPTH_QS {
-                let mut buf = crate::movegen::ExtMoveBuffer::new();
-                let gen_type = if ctx.generate_all_legal_moves {
-                    crate::movegen::GenType::QuietChecksAll
-                } else {
-                    crate::movegen::GenType::QuietChecks
-                };
-                crate::movegen::generate_with_type(pos, gen_type, &mut buf, None);
-                for ext in buf.iter() {
-                    if buf_moves.contains(&ext.mv) {
-                        continue;
-                    }
-                    buf_moves.push(ext.mv);
-                }
-            }
-
-            if !in_check && depth <= -5 && ply >= 1 && prev_move.is_normal() {
-                let mut buf = crate::movegen::ExtMoveBuffer::new();
-                let rec_sq = prev_move.to();
-                let gen_type = if ctx.generate_all_legal_moves {
-                    crate::movegen::GenType::RecapturesAll
-                } else {
-                    crate::movegen::GenType::Recaptures
-                };
-                crate::movegen::generate_with_type(pos, gen_type, &mut buf, Some(rec_sq));
-                buf_moves.clear();
-                for ext in buf.iter() {
-                    buf_moves.push(ext.mv);
-                }
-            }
-
-            buf_moves
-        };
-
-        let mut move_count = 0;
-
-        for mv in ordered_moves.iter() {
-            // 静止探索では PASS は対象外（TT手として来る可能性があるため明示的にスキップ）
-            if mv.is_pass() {
-                continue;
-            }
-
-            if !pos.is_legal(mv) {
-                continue;
-            }
-
-            let gives_check = pos.gives_check(mv);
-            let capture = pos.capture_stage(mv);
-
-            if !in_check && depth <= DEPTH_QS && !capture && !gives_check {
-                continue;
-            }
-
-            if !in_check && capture && !pos.see_ge(mv, Value::ZERO) {
-                continue;
-            }
-
-            move_count += 1;
-
-            if !best_value.is_loss() {
-                if !gives_check
-                    && (!prev_move.is_normal() || mv.to() != prev_move.to())
-                    && futility_base != Value::NONE
-                {
-                    use super::movepicker::piece_value;
-                    if move_count > 2 {
-                        continue;
-                    }
-
-                    let futility_value =
-                        futility_base + Value::new(piece_value(pos.piece_on(mv.to())));
-
-                    if futility_value <= alpha {
-                        best_value = best_value.max(futility_value);
-                        continue;
-                    }
-
-                    if !pos.see_ge(mv, alpha - futility_base) {
-                        best_value = best_value.min(alpha.min(futility_base));
-                        continue;
-                    }
-                }
-                if !capture {
-                    let cont_score = Self::cont_history_ref_impl(st, ctx, ply, 1)
-                        .get(mv.moved_piece_after(), mv.to())
-                        as i32;
-
-                    let pawn_idx = pos.pawn_history_index();
-                    let pawn_score = ctx.history.with_read(|h| {
-                        h.pawn_history.get(pawn_idx, pos.moved_piece(mv), mv.to()) as i32
-                    });
-                    if cont_score + pawn_score <= 5868 {
-                        continue;
-                    }
-                }
-
-                if !pos.see_ge(mv, Value::new(-74)) {
-                    continue;
-                }
-            }
-
-            st.stack[ply as usize].current_move = mv;
-
-            let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, ctx.tt);
-            Self::nnue_push_impl(st, dirty_piece);
-            st.nodes += 1;
-
-            // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う
-            if mv.is_pass() {
-                Self::clear_cont_history_for_null_impl(st, ctx, ply);
-            } else {
-                let cont_hist_pc = mv.moved_piece_after();
-                let cont_hist_to = mv.to();
-                Self::set_cont_history_for_move_impl(
-                    st,
-                    ctx,
-                    ply,
-                    in_check,
-                    capture,
-                    cont_hist_pc,
-                    cont_hist_to,
-                );
-            }
-
-            let value = -Self::qsearch_impl::<NT>(
-                st,
-                ctx,
-                pos,
-                depth - 1,
-                -beta,
-                -alpha,
-                ply + 1,
-                limits,
-                time_manager,
-            );
-
-            Self::nnue_pop_impl(st);
-            pos.undo_move(mv);
-
-            if st.abort {
-                return Value::ZERO;
-            }
-
-            if value > best_value {
-                best_value = value;
-                best_move = mv;
-
-                if value > alpha {
-                    alpha = value;
-
-                    if value >= beta {
-                        break;
-                    }
-                }
-            }
-        }
-
-        if in_check && move_count == 0 {
-            return Value::mated_in(ply);
-        }
-
-        if !best_value.is_mate_score() && best_value > beta {
-            best_value = Value::new((best_value.raw() + beta.raw()) / 2);
-        }
-
-        let bound = if best_value >= beta {
-            Bound::Lower
-        } else if pv_node && best_move.is_some() {
-            Bound::Exact
-        } else {
-            Bound::Upper
-        };
-
-        // YaneuraOu: pvHitを使用
-        tt_result.write(
-            key,
-            value_to_tt(best_value, ply),
-            pv_hit,
-            bound,
-            DEPTH_QS,
-            best_move,
-            unadjusted_static_eval,
-            ctx.tt.generation(),
-        );
-        inc_stat_by_depth!(st, tt_write_by_depth, 0);
-
-        best_value
-    }
-
-    /// Razoring（関連関数版）
-    #[allow(clippy::too_many_arguments)]
-    #[inline]
-    fn try_razoring_impl<const NT: u8>(
-        st: &mut SearchState,
-        ctx: &SearchContext<'_>,
-        pos: &mut Position,
-        depth: Depth,
-        alpha: Value,
-        beta: Value,
-        ply: i32,
-        pv_node: bool,
-        in_check: bool,
-        static_eval: Value,
-        limits: &LimitsType,
-        time_manager: &mut TimeManagement,
-    ) -> Option<Value> {
-        if !pv_node && !in_check && depth <= 3 {
-            let razoring_threshold = alpha - Value::new(200 * depth);
-            if static_eval < razoring_threshold {
-                let value = Self::qsearch_impl::<{ NodeType::NonPV as u8 }>(
-                    st,
-                    ctx,
-                    pos,
-                    DEPTH_QS,
-                    alpha,
-                    beta,
-                    ply,
-                    limits,
-                    time_manager,
-                );
-                if value <= alpha {
-                    inc_stat!(st, razoring_applied);
-                    inc_stat_by_depth!(st, razoring_by_depth, depth);
-                    return Some(value);
-                }
-            }
-        }
-        None
-    }
-
-    /// Null move pruning（関連関数版）
-    #[allow(clippy::too_many_arguments)]
-    #[inline]
-    fn try_null_move_pruning_impl<const NT: u8>(
-        st: &mut SearchState,
-        ctx: &SearchContext<'_>,
-        pos: &mut Position,
-        depth: Depth,
-        beta: Value,
-        ply: i32,
-        cut_node: bool,
-        in_check: bool,
-        static_eval: Value,
-        mut improving: bool,
-        excluded_move: Move,
-        limits: &LimitsType,
-        time_manager: &mut TimeManagement,
-    ) -> (Option<Value>, bool) {
-        // ply >= 1 のガード（防御的プログラミング）
-        if ply < 1 {
-            return (None, improving);
-        }
-
-        let margin = 18 * depth - 390;
-        let prev_move = st.stack[(ply - 1) as usize].current_move;
-        let prev_is_pass = prev_move.is_pass();
-        if excluded_move.is_none()
-            && cut_node
-            && !in_check
-            && static_eval >= beta - Value::new(margin)
-            && ply >= st.nmp_min_ply
-            && !beta.is_loss()
-            && !prev_move.is_null()
-            && !prev_is_pass
-        {
-            inc_stat!(st, nmp_attempted);
-            let r = 7 + depth / 3;
-
-            let use_pass = pos.is_pass_rights_enabled() && pos.can_pass();
-
-            if use_pass {
-                st.stack[ply as usize].current_move = Move::PASS;
-            } else {
-                st.stack[ply as usize].current_move = Move::NULL;
-            }
-            Self::clear_cont_history_for_null_impl(st, ctx, ply);
-
-            if use_pass {
-                pos.do_pass_move();
-            } else {
-                pos.do_null_move_with_prefetch(ctx.tt);
-            }
-            Self::nnue_push_impl(st, DirtyPiece::new());
-            let null_value = -Self::search_node::<{ NodeType::NonPV as u8 }>(
-                st,
-                ctx,
-                pos,
-                depth - r,
-                -beta,
-                -beta + Value::new(1),
-                ply + 1,
-                false,
-                limits,
-                time_manager,
-            );
-            Self::nnue_pop_impl(st);
-            if use_pass {
-                pos.undo_pass_move();
-            } else {
-                pos.undo_null_move();
-            }
-
-            if null_value >= beta && !null_value.is_win() {
-                if st.nmp_min_ply != 0 || depth < 16 {
-                    inc_stat!(st, nmp_cutoff);
-                    inc_stat_by_depth!(st, nmp_cutoff_by_depth, depth);
-                    return (Some(null_value), improving);
-                }
-
-                st.nmp_min_ply = ply + 3 * (depth - r) / 4;
-
-                let v = Self::search_node::<{ NodeType::NonPV as u8 }>(
-                    st,
-                    ctx,
-                    pos,
-                    depth - r,
-                    beta - Value::new(1),
-                    beta,
-                    ply,
-                    false,
-                    limits,
-                    time_manager,
-                );
-
-                st.nmp_min_ply = 0;
-
-                if v >= beta {
-                    inc_stat!(st, nmp_cutoff);
-                    inc_stat_by_depth!(st, nmp_cutoff_by_depth, depth);
-                    return (Some(null_value), improving);
-                }
-            }
-        }
-
-        if !in_check && static_eval != Value::NONE {
-            improving |= static_eval >= beta;
-        }
-
-        (None, improving)
-    }
-
-    /// ProbCut（関連関数版）
-    #[allow(clippy::too_many_arguments)]
-    #[inline]
-    fn try_probcut_impl(
-        st: &mut SearchState,
-        ctx: &SearchContext<'_>,
-        pos: &mut Position,
-        depth: Depth,
-        beta: Value,
-        improving: bool,
-        tt_ctx: &TTContext,
-        ply: i32,
-        static_eval: Value,
-        unadjusted_static_eval: Value,
-        in_check: bool,
-        limits: &LimitsType,
-        time_manager: &mut TimeManagement,
-    ) -> Option<Value> {
-        if in_check || depth < 3 || static_eval == Value::NONE {
-            return None;
-        }
-
-        let prob_beta = beta + Value::new(215 - 60 * improving as i32);
-        if beta.is_mate_score()
-            || (tt_ctx.hit
-                && tt_ctx.value != Value::NONE
-                && tt_ctx.value < prob_beta
-                && !tt_ctx.value.is_mate_score())
-        {
-            return None;
-        }
-
-        let threshold = prob_beta - static_eval;
-        if threshold <= Value::ZERO {
-            return None;
-        }
-
-        let dynamic_reduction = (static_eval - beta).raw() / 300;
-        let probcut_depth = (depth - 5 - dynamic_reduction).max(0);
-
-        inc_stat!(st, probcut_attempted);
-
-        let cont_tables = Self::cont_history_tables_impl(st, ctx, ply);
-        let probcut_moves = {
-            let mut mp = MovePicker::new_probcut(
-                pos,
-                tt_ctx.mv,
-                threshold,
-                ply,
-                cont_tables,
-                ctx.generate_all_legal_moves,
-            );
-
-            let mut buf = [Move::NONE; crate::movegen::MAX_MOVES];
-            let mut len = 0;
-            loop {
-                let mv = ctx.history.with_read(|h| mp.next_move(pos, h));
-                if mv == Move::NONE {
-                    break;
-                }
-                buf[len] = mv;
-                len += 1;
-            }
-            (buf, len)
-        };
-        let (buf, len) = probcut_moves;
-
-        for &mv in buf[..len].iter() {
-            if !pos.is_legal(mv) {
-                continue;
-            }
-
-            let gives_check = pos.gives_check(mv);
-            let is_capture = pos.is_capture(mv);
-            let cont_hist_piece = mv.moved_piece_after();
-            let cont_hist_to = mv.to();
-
-            st.stack[ply as usize].current_move = mv;
-            let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, ctx.tt);
-            Self::nnue_push_impl(st, dirty_piece);
-            st.nodes += 1;
-            Self::set_cont_history_for_move_impl(
-                st,
-                ctx,
-                ply,
-                in_check,
-                is_capture,
-                cont_hist_piece,
-                cont_hist_to,
-            );
-            let mut value = -Self::qsearch_impl::<{ NodeType::NonPV as u8 }>(
-                st,
-                ctx,
-                pos,
-                DEPTH_QS,
-                -prob_beta,
-                -prob_beta + Value::new(1),
-                ply + 1,
-                limits,
-                time_manager,
-            );
-
-            if value >= prob_beta && probcut_depth > 0 {
-                value = -Self::search_node::<{ NodeType::NonPV as u8 }>(
-                    st,
-                    ctx,
-                    pos,
-                    probcut_depth,
-                    -prob_beta,
-                    -prob_beta + Value::new(1),
-                    ply + 1,
-                    true,
-                    limits,
-                    time_manager,
-                );
-            }
-            Self::nnue_pop_impl(st);
-            pos.undo_move(mv);
-
-            if value >= prob_beta {
-                inc_stat!(st, probcut_cutoff);
-                let stored_depth = (probcut_depth + 1).max(1);
-                tt_ctx.result.write(
-                    tt_ctx.key,
-                    value_to_tt(value, ply),
-                    st.stack[ply as usize].tt_pv,
-                    Bound::Lower,
-                    stored_depth,
-                    mv,
-                    unadjusted_static_eval,
-                    ctx.tt.generation(),
-                );
-                inc_stat_by_depth!(st, tt_write_by_depth, stored_depth);
-
-                if value.raw().abs() < Value::INFINITE.raw() {
-                    return Some(value - (prob_beta - beta));
-                }
-                return Some(value);
-            }
-        }
-
-        None
-    }
-
     /// 通常探索ノード（関連関数版）
     ///
     /// NTは NodeType を const genericで受け取る（コンパイル時最適化）
@@ -2339,17 +1082,7 @@ impl SearchWorker {
 
         // 深さが0以下なら静止探索へ
         if depth <= DEPTH_QS {
-            return Self::qsearch_impl::<NT>(
-                st,
-                ctx,
-                pos,
-                depth,
-                alpha,
-                beta,
-                ply,
-                limits,
-                time_manager,
-            );
+            return qsearch::<NT>(st, ctx, pos, depth, alpha, beta, ply, limits, time_manager);
         }
 
         // 最大深さチェック
@@ -2357,7 +1090,7 @@ impl SearchWorker {
             return if in_check {
                 Value::ZERO
             } else {
-                Self::nnue_evaluate_impl(st, pos)
+                nnue_evaluate(st, pos)
             };
         }
 
@@ -2367,7 +1100,7 @@ impl SearchWorker {
         }
 
         // 中断チェック
-        if Self::check_abort_impl(st, ctx, limits, time_manager) {
+        if check_abort(st, ctx, limits, time_manager) {
             return Value::ZERO;
         }
 
@@ -2384,14 +1117,14 @@ impl SearchWorker {
             st.stack[(ply + 1) as usize].pv.clear();
         }
 
-        let prior_reduction = Self::take_prior_reduction_impl(st, ply);
+        let prior_reduction = take_prior_reduction(st, ply);
         st.stack[ply as usize].reduction = 0;
 
         // Singular Extension用の除外手を取得
         let excluded_move = st.stack[ply as usize].excluded_move;
 
         // 置換表プローブ（即時カットオフ含む）
-        let tt_ctx = match Self::probe_transposition_impl::<NT>(
+        let tt_ctx = match probe_transposition::<NT>(
             st,
             ctx,
             pos,
@@ -2416,8 +1149,7 @@ impl SearchWorker {
         let tt_capture = tt_ctx.capture;
 
         // 静的評価
-        let eval_ctx =
-            Self::compute_eval_context_impl(st, ctx, pos, ply, in_check, &tt_ctx, excluded_move);
+        let eval_ctx = compute_eval_context(st, ctx, pos, ply, in_check, &tt_ctx, excluded_move);
         let mut improving = eval_ctx.improving;
         let opponent_worsening = eval_ctx.opponent_worsening;
 
@@ -2444,7 +1176,7 @@ impl SearchWorker {
             depth -= 1;
         }
 
-        if let Some(v) = Self::try_razoring_impl::<NT>(
+        if let Some(v) = try_razoring::<NT, _>(
             st,
             ctx,
             pos,
@@ -2457,11 +1189,12 @@ impl SearchWorker {
             eval_ctx.static_eval,
             limits,
             time_manager,
+            |_, _, _, _, _, _, _, _, _, _| Value::ZERO, // 未使用コールバック
         ) {
             return v;
         }
 
-        if let Some(v) = Self::try_futility_pruning_impl(FutilityParams {
+        if let Some(v) = try_futility_pruning(FutilityParams {
             depth,
             beta,
             static_eval: eval_ctx.static_eval,
@@ -2478,7 +1211,7 @@ impl SearchWorker {
             return v;
         }
 
-        let (null_value, improving_after_null) = Self::try_null_move_pruning_impl::<NT>(
+        let (null_value, improving_after_null) = try_null_move_pruning::<NT, _>(
             st,
             ctx,
             pos,
@@ -2492,6 +1225,7 @@ impl SearchWorker {
             excluded_move,
             limits,
             time_manager,
+            Self::search_node::<{ NodeType::NonPV as u8 }>,
         );
         if let Some(v) = null_value {
             return v;
@@ -2505,7 +1239,7 @@ impl SearchWorker {
             depth -= 1;
         }
 
-        if let Some(v) = Self::try_probcut_impl(
+        if let Some(v) = try_probcut(
             st,
             ctx,
             pos,
@@ -2519,11 +1253,12 @@ impl SearchWorker {
             in_check,
             limits,
             time_manager,
+            Self::search_node::<{ NodeType::NonPV as u8 }>,
         ) {
             return v;
         }
 
-        if let Some(v) = Self::try_small_probcut_impl(depth, beta, &tt_ctx) {
+        if let Some(v) = try_small_probcut(depth, beta, &tt_ctx) {
             return v;
         }
 
@@ -2548,7 +1283,7 @@ impl SearchWorker {
         };
 
         // MovePickerを作成（lazy generation）
-        let cont_tables = Self::cont_history_tables_impl(st, ctx, ply);
+        let cont_tables = cont_history_tables(st, ctx, ply);
         let mut mp =
             MovePicker::new(pos, tt_move, depth, ply, cont_tables, ctx.generate_all_legal_moves);
 
@@ -2575,7 +1310,7 @@ impl SearchWorker {
             if !pos.is_legal(mv) {
                 continue;
             }
-            if Self::check_abort_impl(st, ctx, limits, time_manager) {
+            if check_abort(st, ctx, limits, time_manager) {
                 return Value::ZERO;
             }
 
@@ -2696,11 +1431,11 @@ impl SearchWorker {
                 lmr_depth,
                 mover,
                 move_count,
-                cont_history_1: Self::cont_history_ref_impl(st, ctx, ply, 1),
-                cont_history_2: Self::cont_history_ref_impl(st, ctx, ply, 2),
+                cont_history_1: cont_history_ref(st, ctx, ply, 1),
+                cont_history_2: cont_history_ref(st, ctx, ply, 2),
             };
 
-            match Self::step14_pruning_impl(ctx, step14_ctx) {
+            match step14_pruning(ctx, step14_ctx) {
                 Step14Outcome::Skip {
                     best_value: updated,
                 } => {
@@ -2750,18 +1485,18 @@ impl SearchWorker {
             st.stack[ply as usize].current_move = mv;
 
             let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, ctx.tt);
-            Self::nnue_push_impl(st, dirty_piece);
+            nnue_push(st, dirty_piece);
             st.nodes += 1;
 
             // YaneuraOu方式: ContHistKey/ContinuationHistoryを設定
             // ⚠ in_checkは親ノードの王手状態を使用（gives_checkではない）
             // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う
             if mv.is_pass() {
-                Self::clear_cont_history_for_null_impl(st, ctx, ply);
+                clear_cont_history_for_null(st, ctx, ply);
             } else {
                 let cont_hist_piece = mv.moved_piece_after();
                 let cont_hist_to = mv.to();
-                Self::set_cont_history_for_move_impl(
+                set_cont_history_for_move(
                     st,
                     ctx,
                     ply,
@@ -2837,10 +1572,8 @@ impl SearchWorker {
             } else {
                 let moved_piece = mv.moved_piece_after();
                 let main_hist = ctx.history.with_read(|h| h.main_history.get(mover, mv) as i32);
-                let cont0 =
-                    Self::cont_history_ref_impl(st, ctx, ply, 1).get(moved_piece, mv.to()) as i32;
-                let cont1 =
-                    Self::cont_history_ref_impl(st, ctx, ply, 2).get(moved_piece, mv.to()) as i32;
+                let cont0 = cont_history_ref(st, ctx, ply, 1).get(moved_piece, mv.to()) as i32;
+                let cont1 = cont_history_ref(st, ctx, ply, 2).get(moved_piece, mv.to()) as i32;
                 2 * main_hist + cont0 + cont1
             };
             st.stack[ply as usize].stat_score = stat_score;
@@ -3022,7 +1755,7 @@ impl SearchWorker {
                     time_manager,
                 )
             };
-            Self::nnue_pop_impl(st);
+            nnue_pop(st);
             pos.undo_move(mv);
 
             // パス手評価ボーナス: パス手を実行した場合、評価値にボーナスを加算
@@ -3456,7 +2189,7 @@ impl SearchWorker {
             {
                 let bonus = ((best_value.raw() - static_eval.raw()) * depth / 8)
                     .clamp(-CORRECTION_HISTORY_LIMIT / 4, CORRECTION_HISTORY_LIMIT / 4);
-                Self::update_correction_history_impl(st, ctx, pos, ply, bonus);
+                update_correction_history(st, ctx, pos, ply, bonus);
             }
         }
 
