@@ -334,8 +334,9 @@ impl Bitboard {
             let shuffled = _mm_shufflehi_epi16(swapped_bytes, 0b00_01_10_11);
             let shuffled = _mm_shufflelo_epi16(shuffled, 0b00_01_10_11);
 
-            // ステップ3: 上位64bitと下位64bitを入れ替え、32bit単位で反転
-            let shuffled = _mm_shuffle_epi32(shuffled, 0b00_01_10_11);
+            // ステップ3: 64bitハーフを入れ替え
+            // [w0,w1,w2,w3 | w4,w5,w6,w7] → [w4,w5,w6,w7 | w0,w1,w2,w3]
+            let shuffled = _mm_shuffle_epi32(shuffled, 0b01_00_11_10);
 
             let p: [u64; 2] = std::mem::transmute(shuffled);
             Bitboard { p }

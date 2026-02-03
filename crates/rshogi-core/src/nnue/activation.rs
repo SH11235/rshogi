@@ -1108,7 +1108,7 @@ fn screlu_i16_to_u8_inner<const QA: i32, const SHIFT: i32>(input: &[i16], output
                         // 注意: clamped は [0, QA] の範囲にクランプ済みのため、
                         // 符号なし乗算 (_mm_mul_epu32) を使用可能
                         let a_lo = clamped;
-                        let a_hi = _mm_srli_epi64(clamped, 16);
+                        let a_hi = _mm_srli_epi64(clamped, 32); // 32bitシフトで奇数要素を取得
                         let lo_lo = _mm_mul_epu32(a_lo, a_lo);
                         let hi_hi = _mm_mul_epu32(a_hi, a_hi);
                         let lo_lo_shifted = _mm_shuffle_epi32(lo_lo, 0b00_00_10_00);
@@ -1290,7 +1290,7 @@ fn screlu_i32_to_u8(input: &[i32], output: &mut [u8]) {
                         // 注意: clamped は [0, 127] の範囲にクランプ済みのため、
                         // 符号なし乗算 (_mm_mul_epu32) を使用可能
                         let a_lo = clamped;
-                        let a_hi = _mm_srli_epi64(clamped, 16);
+                        let a_hi = _mm_srli_epi64(clamped, 32); // 32bitシフトで奇数要素を取得
                         let lo_lo = _mm_mul_epu32(a_lo, a_lo);
                         let hi_hi = _mm_mul_epu32(a_hi, a_hi);
                         let lo_lo_shifted = _mm_shuffle_epi32(lo_lo, 0b00_00_10_00);
