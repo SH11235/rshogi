@@ -310,7 +310,42 @@ impl Bitboard {
             Bitboard { p }
         }
 
-        #[cfg(not(all(target_arch = "x86_64", target_feature = "ssse3")))]
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "sse2",
+            not(target_feature = "ssse3")
+        ))]
+        unsafe {
+            use std::arch::x86_64::*;
+            let m = std::mem::transmute::<[u64; 2], __m128i>(self.p);
+
+            // SSE2でのバイト順反転実装
+            // 目標: [b15, b14, ..., b1, b0] → [b0, b1, ..., b14, b15]
+
+            // ステップ1: 各u16内のバイトを入れ替え（ビット単位シャッフル）
+            // [b15,b14, b13,b12, ..., b1,b0] → [b14,b15, b12,b13, ..., b0,b1]
+            let mask = _mm_set1_epi16(0x00FFu16 as i16);
+            let lo = _mm_and_si128(m, mask);
+            let hi = _mm_andnot_si128(mask, m);
+            let swapped_bytes = _mm_or_si128(_mm_slli_epi16(lo, 8), _mm_srli_epi16(hi, 8));
+
+            // ステップ2: 16bit単位で並び順を反転
+            // [w7,w6,w5,w4,w3,w2,w1,w0] → [w0,w1,w2,w3,w4,w5,w6,w7]
+            let shuffled = _mm_shufflehi_epi16(swapped_bytes, 0b00_01_10_11);
+            let shuffled = _mm_shufflelo_epi16(shuffled, 0b00_01_10_11);
+
+            // ステップ3: 64bitハーフを入れ替え
+            // [w0,w1,w2,w3 | w4,w5,w6,w7] → [w4,w5,w6,w7 | w0,w1,w2,w3]
+            let shuffled = _mm_shuffle_epi32(shuffled, 0b01_00_11_10);
+
+            let p: [u64; 2] = std::mem::transmute(shuffled);
+            Bitboard { p }
+        }
+
+        #[cfg(not(any(
+            all(target_arch = "x86_64", target_feature = "ssse3"),
+            all(target_arch = "x86_64", target_feature = "sse2")
+        )))]
         {
             Bitboard::from_u64_pair(self.p[1].swap_bytes(), self.p[0].swap_bytes())
         }
