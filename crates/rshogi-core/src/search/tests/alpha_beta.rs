@@ -95,7 +95,7 @@ fn test_sentinel_initialization() {
     );
 
     // 全てのスタックエントリがsentinelで初期化されていることを確認
-    for (i, stack) in worker.stack.iter().enumerate() {
+    for (i, stack) in worker.state.stack.iter().enumerate() {
         assert_eq!(
             stack.cont_history_ptr, sentinel,
             "stack[{i}].cont_history_ptr should be initialized to sentinel"

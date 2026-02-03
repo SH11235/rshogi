@@ -113,13 +113,13 @@ impl SearchWorker {
         }
 
         let margin = 18 * depth - 390;
-        let prev_move = self.stack[(ply - 1) as usize].current_move;
+        let prev_move = self.state.stack[(ply - 1) as usize].current_move;
         let prev_is_pass = prev_move.is_pass();
         if excluded_move.is_none()
             && cut_node
             && !in_check
             && static_eval >= beta - Value::new(margin)
-            && ply >= self.nmp_min_ply
+            && ply >= self.state.nmp_min_ply
             && !beta.is_loss()
             && !prev_move.is_null()
             && !prev_is_pass
@@ -130,9 +130,9 @@ impl SearchWorker {
             let use_pass = pos.is_pass_rights_enabled() && pos.can_pass();
 
             if use_pass {
-                self.stack[ply as usize].current_move = Move::PASS;
+                self.state.stack[ply as usize].current_move = Move::PASS;
             } else {
-                self.stack[ply as usize].current_move = Move::NULL;
+                self.state.stack[ply as usize].current_move = Move::NULL;
             }
             self.clear_cont_history_for_null(ply);
 
@@ -160,13 +160,13 @@ impl SearchWorker {
             }
 
             if null_value >= beta && !null_value.is_win() {
-                if self.nmp_min_ply != 0 || depth < 16 {
+                if self.state.nmp_min_ply != 0 || depth < 16 {
                     inc_stat!(self, nmp_cutoff);
                     inc_stat_by_depth!(self, nmp_cutoff_by_depth, depth);
                     return (Some(null_value), improving);
                 }
 
-                self.nmp_min_ply = ply + 3 * (depth - r) / 4;
+                self.state.nmp_min_ply = ply + 3 * (depth - r) / 4;
 
                 let v = self.search_node::<{ NodeType::NonPV as u8 }>(
                     pos,
@@ -179,7 +179,7 @@ impl SearchWorker {
                     time_manager,
                 );
 
-                self.nmp_min_ply = 0;
+                self.state.nmp_min_ply = 0;
 
                 if v >= beta {
                     inc_stat!(self, nmp_cutoff);
@@ -272,10 +272,10 @@ impl SearchWorker {
             let cont_hist_piece = mv.moved_piece_after();
             let cont_hist_to = mv.to();
 
-            self.stack[ply as usize].current_move = mv;
+            self.state.stack[ply as usize].current_move = mv;
             let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, self.tt.as_ref());
             self.nnue_push(dirty_piece);
-            self.nodes += 1;
+            self.state.nodes += 1;
             self.set_cont_history_for_move(
                 ply,
                 in_check,
@@ -314,7 +314,7 @@ impl SearchWorker {
                 tt_ctx.result.write(
                     tt_ctx.key,
                     value_to_tt(value, ply),
-                    self.stack[ply as usize].tt_pv,
+                    self.state.stack[ply as usize].tt_pv,
                     Bound::Lower,
                     stored_depth,
                     mv,
@@ -383,7 +383,7 @@ impl SearchWorker {
                 ) as i32;
 
                 if !ctx.gives_check && lmr_depth < 7 && !ctx.in_check {
-                    let futility_value = self.stack[ctx.ply as usize].static_eval
+                    let futility_value = self.state.stack[ctx.ply as usize].static_eval
                         + Value::new(232 + 224 * lmr_depth)
                         + Value::new(piece_value(captured))
                         + Value::new(131 * capt_hist / 1024);
@@ -414,10 +414,10 @@ impl SearchWorker {
                 lmr_depth += history / 3233;
 
                 let base_futility = if ctx.best_move.is_some() { 46 } else { 230 };
-                let futility_value = self.stack[ctx.ply as usize].static_eval
+                let futility_value = self.state.stack[ctx.ply as usize].static_eval
                     + Value::new(base_futility + 131 * lmr_depth)
                     + Value::new(
-                        91 * (self.stack[ctx.ply as usize].static_eval > ctx.alpha) as i32,
+                        91 * (self.state.stack[ctx.ply as usize].static_eval > ctx.alpha) as i32,
                     );
 
                 if !ctx.in_check && lmr_depth < 11 && futility_value <= ctx.alpha {

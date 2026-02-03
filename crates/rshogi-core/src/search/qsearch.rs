@@ -36,8 +36,8 @@ impl SearchWorker {
             };
         }
 
-        if pv_node && self.sel_depth < ply + 1 {
-            self.sel_depth = ply + 1;
+        if pv_node && self.state.sel_depth < ply + 1 {
+            self.state.sel_depth = ply + 1;
         }
 
         if self.check_abort(limits, time_manager) {
@@ -49,7 +49,7 @@ impl SearchWorker {
             let v = draw_value(rep_state, pos.side_to_move());
             if v != Value::NONE {
                 if v == Value::DRAW {
-                    let jittered = Value::new(v.raw() + draw_jitter(self.nodes));
+                    let jittered = Value::new(v.raw() + draw_jitter(self.state.nodes));
                     return value_from_tt(jittered, ply);
                 }
                 return value_from_tt(v, ply);
@@ -58,7 +58,7 @@ impl SearchWorker {
 
         // 引き分け手数ルール（YaneuraOu準拠、MaxMovesToDrawオプション）
         if self.max_moves_to_draw > 0 && pos.game_ply() > self.max_moves_to_draw {
-            return Value::new(Value::DRAW.raw() + draw_jitter(self.nodes));
+            return Value::new(Value::DRAW.raw() + draw_jitter(self.state.nodes));
         }
 
         let key = pos.key();
@@ -66,8 +66,8 @@ impl SearchWorker {
         let tt_hit = tt_result.found;
         let tt_data = tt_result.data;
         let pv_hit = tt_hit && tt_data.is_pv;
-        self.stack[ply as usize].tt_hit = tt_hit;
-        self.stack[ply as usize].tt_pv = pv_hit;
+        self.state.stack[ply as usize].tt_hit = tt_hit;
+        self.state.stack[ply as usize].tt_pv = pv_hit;
         let mut tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
         let tt_value = if tt_hit {
             value_from_tt(tt_data.value, ply)
@@ -111,7 +111,7 @@ impl SearchWorker {
             static_eval += evaluate_pass_rights(pos, pos.game_ply() as u16);
         }
 
-        self.stack[ply as usize].static_eval = static_eval;
+        self.state.stack[ply as usize].static_eval = static_eval;
 
         let mut alpha = alpha;
         let mut best_value = if in_check {
@@ -126,7 +126,7 @@ impl SearchWorker {
             if improves {
                 best_value = tt_value;
                 static_eval = tt_value;
-                self.stack[ply as usize].static_eval = static_eval;
+                self.state.stack[ply as usize].static_eval = static_eval;
             }
         }
 
@@ -170,7 +170,7 @@ impl SearchWorker {
         }
 
         let prev_move = if ply >= 1 {
-            self.stack[(ply - 1) as usize].current_move
+            self.state.stack[(ply - 1) as usize].current_move
         } else {
             Move::NONE
         };
@@ -310,11 +310,11 @@ impl SearchWorker {
                 }
             }
 
-            self.stack[ply as usize].current_move = mv;
+            self.state.stack[ply as usize].current_move = mv;
 
             let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, self.tt.as_ref());
             self.nnue_push(dirty_piece);
-            self.nodes += 1;
+            self.state.nodes += 1;
 
             // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う
             if mv.is_pass() {
@@ -331,7 +331,7 @@ impl SearchWorker {
             self.nnue_pop();
             pos.undo_move(mv);
 
-            if self.abort {
+            if self.state.abort {
                 return Value::ZERO;
             }
 

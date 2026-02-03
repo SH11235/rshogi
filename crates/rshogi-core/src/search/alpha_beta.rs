@@ -196,6 +196,170 @@ pub(super) struct Step14Context<'a> {
 }
 
 // =============================================================================
+// SearchContext / SearchState
+// =============================================================================
+
+/// 探索中に変化しない共有データ
+///
+/// 探索の各ノードで共有される不変の参照群。
+/// TimeManagement と LimitsType は可変アクセスが必要なため、別途引数として渡す。
+pub struct SearchContext<'a> {
+    /// 置換表への参照
+    pub tt: &'a TranspositionTable,
+    /// 評価ハッシュへの参照
+    pub eval_hash: &'a EvalHash,
+    /// 履歴テーブルへの参照
+    pub history: &'a HistoryTables,
+    /// ContinuationHistoryのsentinel
+    pub cont_history_sentinel: NonNull<PieceToHistory>,
+    /// 全合法手生成フラグ
+    pub generate_all_legal_moves: bool,
+    /// 引き分けまでの最大手数
+    pub max_moves_to_draw: i32,
+    /// スレッドID（0=main）
+    pub thread_id: usize,
+}
+
+/// 探索中に変化する状態
+///
+/// 各探索スレッドが持つ可変状態。
+pub struct SearchState {
+    /// 探索ノード数
+    pub nodes: u64,
+    /// 探索スタック
+    pub stack: StackArray,
+    /// ルートでのウィンドウ幅（beta - alpha）。LMRスケール用。
+    pub root_delta: i32,
+    /// 中断フラグ
+    pub abort: bool,
+    /// 選択的深さ
+    pub sel_depth: i32,
+    /// ルート深さ
+    pub root_depth: Depth,
+    /// 完了済み深さ
+    pub completed_depth: Depth,
+    /// 最善手
+    pub best_move: Move,
+    /// 最善手変更カウンター（PV安定性判断用）
+    pub best_move_changes: f64,
+    /// Null Move Pruning の Verification Search 用フラグ
+    pub nmp_min_ply: i32,
+    /// ルート手
+    pub root_moves: RootMoves,
+    /// NNUE Accumulator スタック
+    pub nnue_stack: AccumulatorStackVariant,
+    /// check_abort呼び出しカウンター
+    pub calls_cnt: i32,
+    /// 探索統計（search-stats feature有効時のみ）
+    #[cfg(feature = "search-stats")]
+    pub stats: SearchStats,
+}
+
+impl SearchState {
+    /// 新しい SearchState を作成
+    pub fn new() -> Self {
+        Self {
+            nodes: 0,
+            stack: init_stack_array(),
+            root_delta: 1,
+            abort: false,
+            sel_depth: 0,
+            root_depth: 0,
+            completed_depth: 0,
+            best_move: Move::NONE,
+            best_move_changes: 0.0,
+            nmp_min_ply: 0,
+            root_moves: RootMoves::new(),
+            nnue_stack: AccumulatorStackVariant::new_default(),
+            calls_cnt: 0,
+            #[cfg(feature = "search-stats")]
+            stats: SearchStats::default(),
+        }
+    }
+
+    /// NNUE 評価値を計算
+    #[inline]
+    pub(super) fn nnue_evaluate(&mut self, pos: &Position) -> Value {
+        evaluate_dispatch(pos, &mut self.nnue_stack)
+    }
+
+    /// NNUE アキュムレータスタックを push
+    #[inline]
+    pub(super) fn nnue_push(&mut self, dirty_piece: DirtyPiece) {
+        self.nnue_stack.push(dirty_piece);
+    }
+
+    /// NNUE アキュムレータスタックを pop
+    #[inline]
+    pub(super) fn nnue_pop(&mut self) {
+        self.nnue_stack.pop();
+    }
+
+    /// 中断チェック
+    #[inline]
+    pub(super) fn check_abort(
+        &mut self,
+        ctx: &SearchContext<'_>,
+        limits: &LimitsType,
+        time_manager: &mut TimeManagement,
+    ) -> bool {
+        if self.abort {
+            return true;
+        }
+
+        self.calls_cnt -= 1;
+        if self.calls_cnt > 0 {
+            return false;
+        }
+        self.calls_cnt = if limits.nodes > 0 {
+            std::cmp::min(512, (limits.nodes / 1024) as i32).max(1)
+        } else {
+            512
+        };
+
+        if time_manager.stop_requested() {
+            self.abort = true;
+            return true;
+        }
+
+        if limits.nodes > 0 && self.nodes >= limits.nodes {
+            self.abort = true;
+            return true;
+        }
+
+        if ctx.thread_id == 0 {
+            if time_manager.take_ponderhit() {
+                time_manager.on_ponderhit();
+            }
+
+            let elapsed = time_manager.elapsed();
+            let elapsed_effective = time_manager.elapsed_from_ponderhit();
+
+            if time_manager.search_end() > 0 && elapsed >= time_manager.search_end() {
+                self.abort = true;
+                return true;
+            }
+
+            if !time_manager.is_pondering()
+                && time_manager.search_end() == 0
+                && limits.use_time_management()
+                && (elapsed_effective > time_manager.maximum() || time_manager.stop_on_ponderhit())
+            {
+                time_manager.set_search_end(elapsed);
+            }
+        }
+
+        false
+    }
+}
+
+impl Default for SearchState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// =============================================================================
 // SearchWorker
 // =============================================================================
 
@@ -203,95 +367,40 @@ pub(super) struct Step14Context<'a> {
 ///
 /// Workerはゲーム全体で再利用される。
 /// 履歴統計は直接メンバとして保持し、usinewgameでクリア、goでは保持。
+///
+/// SearchContext（不変データ）と SearchState（可変状態）に分離された設計。
+/// - Context用フィールド: tt, eval_hash, history, cont_history_sentinel, generate_all_legal_moves, max_moves_to_draw, thread_id
+/// - State: 探索中に変化するフィールドを SearchState として保持
 pub struct SearchWorker {
+    // =========================================================================
+    // Context用フィールド（探索中に変化しない）
+    // =========================================================================
     /// 置換表への共有参照（Arc）
     pub tt: Arc<TranspositionTable>,
 
     /// 評価ハッシュへの共有参照（Arc）
     pub eval_hash: Arc<EvalHash>,
 
-    /// スレッドID（0=main）
-    pub thread_id: usize,
-
-    // =========================================================================
-    // 履歴統計（直接メンバとして保持）
-    // =========================================================================
-    // HistoryTablesを単一のヒープ領域として確保し、履歴テーブルを連続配置する。
-    // `Box::new_zeroed` で一括確保することで、巨大配列のスタック確保を避ける。
-    // =========================================================================
     /// 履歴/統計テーブル群
     pub history: Box<HistoryTables>,
 
     /// ContinuationHistoryのsentinel
     pub cont_history_sentinel: NonNull<PieceToHistory>,
 
-    // =========================================================================
-    // 探索状態（毎回リセット）
-    // =========================================================================
-    /// ルート手
-    pub root_moves: RootMoves,
-
-    /// 探索スタック
-    pub stack: StackArray,
-
-    /// 探索ノード数
-    pub nodes: u64,
-
-    /// 選択的深さ
-    pub sel_depth: i32,
-
-    /// ルート深さ
-    pub root_depth: Depth,
-
-    /// ルートでのウィンドウ幅（beta - alpha）。LMRスケール用。
-    pub root_delta: i32,
-
-    /// 探索完了済み深さ
-    pub completed_depth: Depth,
-
     /// 全合法手生成フラグ
     pub generate_all_legal_moves: bool,
-
-    /// 最善手
-    pub best_move: Move,
-
-    /// 中断フラグ
-    pub abort: bool,
-
-    /// 最善手変更カウンター（PV安定性判断用）
-    ///
-    /// move_count > 1 && !pvIdx の時にインクリメント
-    /// 反復深化の各世代で /= 2 して減衰させる
-    pub best_move_changes: f64,
 
     /// 引き分けまでの最大手数
     pub max_moves_to_draw: i32,
 
-    /// Null Move Pruning の Verification Search 用フラグ
-    ///
-    /// Stockfish/YaneuraOu準拠: Verification Search中は、
-    /// `ply >= nmp_min_ply` の条件でNMPを制限する。
-    /// 深い探索（depth >= 16）でZugzwangを検出して再探索する仕組み。
-    pub nmp_min_ply: i32,
-
-    /// NNUE Accumulator スタック（統合型）
-    ///
-    /// 探索時のNNUE差分更新用。Position.do_move/undo_moveと同期してpush/popする。
-    /// アーキテクチャに応じて適切なスタックを1つだけ保持し、メモリ効率を向上。
-    pub nnue_stack: AccumulatorStackVariant,
+    /// スレッドID（0=main）
+    pub thread_id: usize,
 
     // =========================================================================
-    // 頻度制御
+    // 探索状態（SearchState）
     // =========================================================================
-    /// check_abort呼び出しカウンター（512回に1回チェック）
-    calls_cnt: i32,
-
-    // =========================================================================
-    // 探索統計（search-stats feature有効時のみ）
-    // =========================================================================
-    /// 枝刈り発生回数等の統計カウンタ
-    #[cfg(feature = "search-stats")]
-    pub stats: SearchStats,
+    /// 探索中に変化する状態
+    pub state: SearchState,
 }
 
 impl SearchWorker {
@@ -311,39 +420,49 @@ impl SearchWorker {
         let mut worker = Box::new(Self {
             tt,
             eval_hash,
-            thread_id,
-            // 履歴統計の初期化
             history,
             cont_history_sentinel,
-            // 探索状態の初期化
-            root_moves: RootMoves::new(),
-            stack: init_stack_array(),
-            nodes: 0,
-            sel_depth: 0,
-            root_depth: 0,
-            root_delta: 1,
-            completed_depth: 0,
             generate_all_legal_moves: false,
-            best_move: Move::NONE,
-            abort: false,
-            best_move_changes: 0.0,
             max_moves_to_draw,
-            nmp_min_ply: 0,
-            nnue_stack: AccumulatorStackVariant::new_default(), // prepare_search() で適切なバリアントに更新
-            // 頻度制御
-            calls_cnt: 0,
-            // 探索統計（feature有効時のみ）
-            #[cfg(feature = "search-stats")]
-            stats: SearchStats::default(),
+            thread_id,
+            state: SearchState::new(),
         });
         worker.reset_cont_history_ptrs();
         worker
     }
 
+    /// SearchContext を作成
+    ///
+    /// 探索中に変化しない共有データへの参照をまとめる。
+    #[inline]
+    pub fn create_context(&self) -> SearchContext<'_> {
+        SearchContext {
+            tt: &self.tt,
+            eval_hash: &self.eval_hash,
+            history: &self.history,
+            cont_history_sentinel: self.cont_history_sentinel,
+            generate_all_legal_moves: self.generate_all_legal_moves,
+            max_moves_to_draw: self.max_moves_to_draw,
+            thread_id: self.thread_id,
+        }
+    }
+
+    /// SearchState への可変参照を取得
+    #[inline]
+    pub fn state_mut(&mut self) -> &mut SearchState {
+        &mut self.state
+    }
+
+    /// SearchState への参照を取得
+    #[inline]
+    pub fn state(&self) -> &SearchState {
+        &self.state
+    }
+
     /// 探索統計をリセット（search-stats feature有効時のみ）
     #[cfg(feature = "search-stats")]
     pub fn reset_stats(&mut self) {
-        self.stats.reset();
+        self.state.stats.reset();
     }
 
     /// 探索統計をリセット（search-stats feature無効時はno-op）
@@ -353,7 +472,7 @@ impl SearchWorker {
     /// 探索統計のレポートを取得（search-stats feature有効時のみ）
     #[cfg(feature = "search-stats")]
     pub fn get_stats_report(&self) -> String {
-        self.stats.format_report()
+        self.state.stats.format_report()
     }
 
     /// 探索統計のレポートを取得（search-stats feature無効時は空文字列）
@@ -367,7 +486,7 @@ impl SearchWorker {
         debug_assert!(ply >= 0 && (ply as usize) < STACK_SIZE, "ply out of bounds: {ply}");
         debug_assert!(back >= 0, "back must be non-negative: {back}");
         if ply >= back {
-            self.stack[(ply - back) as usize].cont_history_ptr
+            self.state.stack[(ply - back) as usize].cont_history_ptr
         } else {
             self.cont_history_sentinel
         }
@@ -393,7 +512,7 @@ impl SearchWorker {
 
     fn reset_cont_history_ptrs(&mut self) {
         let sentinel = self.cont_history_sentinel;
-        for stack in self.stack.iter_mut() {
+        for stack in self.state.stack.iter_mut() {
             stack.cont_history_ptr = sentinel;
         }
     }
@@ -412,15 +531,15 @@ impl SearchWorker {
         let capture_idx = capture as usize;
         let table =
             self.history.continuation_history[in_check_idx][capture_idx].get_table(piece, to);
-        self.stack[ply as usize].cont_history_ptr = NonNull::from(table);
-        self.stack[ply as usize].cont_hist_key =
+        self.state.stack[ply as usize].cont_history_ptr = NonNull::from(table);
+        self.state.stack[ply as usize].cont_hist_key =
             Some(ContHistKey::new(in_check, capture, piece, to));
     }
 
     #[inline]
     pub(super) fn clear_cont_history_for_null(&mut self, ply: i32) {
-        self.stack[ply as usize].cont_history_ptr = self.cont_history_sentinel;
-        self.stack[ply as usize].cont_hist_key = None;
+        self.state.stack[ply as usize].cont_history_ptr = self.cont_history_sentinel;
+        self.state.stack[ply as usize].cont_hist_key = None;
     }
 
     /// usinewgameで呼び出し：全履歴をクリア（YaneuraOu Worker::clear()相当）
@@ -430,33 +549,33 @@ impl SearchWorker {
 
     /// goで呼び出し：探索状態のリセット（履歴はクリアしない、YaneuraOu準拠）
     pub fn prepare_search(&mut self) {
-        self.nodes = 0;
-        self.sel_depth = 0;
-        self.root_depth = 0;
-        self.root_delta = 1;
-        self.completed_depth = 0;
-        self.best_move = Move::NONE;
-        self.abort = false;
-        self.best_move_changes = 0.0;
-        self.nmp_min_ply = 0;
-        self.root_moves.clear();
+        self.state.nodes = 0;
+        self.state.sel_depth = 0;
+        self.state.root_depth = 0;
+        self.state.root_delta = 1;
+        self.state.completed_depth = 0;
+        self.state.best_move = Move::NONE;
+        self.state.abort = false;
+        self.state.best_move_changes = 0.0;
+        self.state.nmp_min_ply = 0;
+        self.state.root_moves.clear();
         // YaneuraOu準拠: low_ply_historyのみクリア
         self.history.low_ply_history.clear();
         // NNUE AccumulatorStack: ネットワークに応じたバリアントに更新・リセット
         if let Some(network) = get_network() {
             // バリアントがネットワークと一致しない場合は再作成
-            if !self.nnue_stack.matches_network(network) {
-                self.nnue_stack = AccumulatorStackVariant::from_network(network);
+            if !self.state.nnue_stack.matches_network(network) {
+                self.state.nnue_stack = AccumulatorStackVariant::from_network(network);
             } else {
-                self.nnue_stack.reset();
+                self.state.nnue_stack.reset();
             }
         } else {
             // NNUE未初期化の場合はデフォルト（HalfKP）でリセット
-            self.nnue_stack.reset();
+            self.state.nnue_stack.reset();
         }
         // check_abort頻度制御カウンターをリセット
         // これにより新しい探索開始時に即座に停止チェックが行われる
-        self.calls_cnt = 0;
+        self.state.calls_cnt = 0;
     }
 
     /// best_move_changes を半減（世代減衰）
@@ -464,7 +583,7 @@ impl SearchWorker {
     /// YaneuraOu準拠: 反復深化の各世代終了時に呼び出して、
     /// 古い情報の重みを低くする
     pub fn decay_best_move_changes(&mut self) {
-        self.best_move_changes /= 2.0;
+        self.state.best_move_changes /= 2.0;
     }
 
     /// 全合法手生成モードの設定（YaneuraOu互換）
@@ -483,19 +602,19 @@ impl SearchWorker {
     /// これにより TT/EvalHash（局面キーのみ）と整合し、再訪局面で古い手数のパス権評価を再利用しない。
     #[inline]
     pub(super) fn nnue_evaluate(&mut self, pos: &Position) -> Value {
-        evaluate_dispatch(pos, &mut self.nnue_stack)
+        evaluate_dispatch(pos, &mut self.state.nnue_stack)
     }
 
     /// NNUE アキュムレータスタックを push
     #[inline]
     pub(super) fn nnue_push(&mut self, dirty_piece: DirtyPiece) {
-        self.nnue_stack.push(dirty_piece);
+        self.state.nnue_stack.push(dirty_piece);
     }
 
     /// NNUE アキュムレータスタックを pop
     #[inline]
     pub(super) fn nnue_pop(&mut self) {
-        self.nnue_stack.pop();
+        self.state.nnue_stack.pop();
     }
 
     /// 中断チェック
@@ -507,19 +626,19 @@ impl SearchWorker {
         time_manager: &mut TimeManagement,
     ) -> bool {
         // すでにabortフラグが立っている場合は即座に返す
-        if self.abort {
+        if self.state.abort {
             #[cfg(debug_assertions)]
             eprintln!("check_abort: abort flag already set");
             return true;
         }
 
         // 頻度制御：512回に1回だけ実際のチェックを行う（YaneuraOu準拠）
-        self.calls_cnt -= 1;
-        if self.calls_cnt > 0 {
+        self.state.calls_cnt -= 1;
+        if self.state.calls_cnt > 0 {
             return false;
         }
         // カウンターをリセット
-        self.calls_cnt = if limits.nodes > 0 {
+        self.state.calls_cnt = if limits.nodes > 0 {
             std::cmp::min(512, (limits.nodes / 1024) as i32).max(1)
         } else {
             512
@@ -529,18 +648,18 @@ impl SearchWorker {
         if time_manager.stop_requested() {
             #[cfg(debug_assertions)]
             eprintln!("check_abort: stop requested");
-            self.abort = true;
+            self.state.abort = true;
             return true;
         }
 
         // ノード数制限チェック
-        if limits.nodes > 0 && self.nodes >= limits.nodes {
+        if limits.nodes > 0 && self.state.nodes >= limits.nodes {
             #[cfg(debug_assertions)]
             eprintln!(
                 "check_abort: node limit reached nodes={} limit={}",
-                self.nodes, limits.nodes
+                self.state.nodes, limits.nodes
             );
-            self.abort = true;
+            self.state.abort = true;
             return true;
         }
 
@@ -563,7 +682,7 @@ impl SearchWorker {
                     elapsed,
                     time_manager.search_end()
                 );
-                self.abort = true;
+                self.state.abort = true;
                 return true;
             }
 
@@ -602,9 +721,9 @@ impl SearchWorker {
 
         let mut cntcv = 0;
         if ply >= 2 {
-            let prev_move = self.stack[(ply - 1) as usize].current_move;
+            let prev_move = self.state.stack[(ply - 1) as usize].current_move;
             if prev_move.is_normal() {
-                if let Some(prev2_key) = self.stack[(ply - 2) as usize].cont_hist_key {
+                if let Some(prev2_key) = self.state.stack[(ply - 2) as usize].cont_hist_key {
                     let pc = pos.piece_on(prev_move.to());
                     cntcv = self.history.correction_history.continuation_value(
                         prev2_key.piece,
@@ -648,9 +767,9 @@ impl SearchWorker {
         );
 
         if ply >= 2 {
-            let prev_move = self.stack[(ply - 1) as usize].current_move;
+            let prev_move = self.state.stack[(ply - 1) as usize].current_move;
             if prev_move.is_normal() {
-                if let Some(prev2_key) = self.stack[(ply - 2) as usize].cont_hist_key {
+                if let Some(prev2_key) = self.state.stack[(ply - 2) as usize].cont_hist_key {
                     let pc = pos.piece_on(prev_move.to());
                     self.history.correction_history.update_continuation(
                         prev2_key.piece,
@@ -669,8 +788,8 @@ impl SearchWorker {
     fn take_prior_reduction(&mut self, ply: i32) -> i32 {
         if ply >= 1 {
             let parent_idx = (ply - 1) as usize;
-            let pr = self.stack[parent_idx].reduction;
-            self.stack[parent_idx].reduction = 0;
+            let pr = self.state.stack[parent_idx].reduction;
+            self.state.stack[parent_idx].reduction = 0;
             pr
         } else {
             0
@@ -695,10 +814,10 @@ impl SearchWorker {
         let tt_hit = tt_result.found;
         let tt_data = tt_result.data;
 
-        self.stack[ply as usize].tt_hit = tt_hit;
+        self.state.stack[ply as usize].tt_hit = tt_hit;
         // excludedMoveがある場合は前回のttPvを維持（YaneuraOu準拠）
-        self.stack[ply as usize].tt_pv = if excluded_move.is_some() {
-            self.stack[ply as usize].tt_pv
+        self.state.stack[ply as usize].tt_pv = if excluded_move.is_some() {
+            self.state.stack[ply as usize].tt_pv
         } else {
             pv_node || (tt_hit && tt_data.is_pv)
         };
@@ -748,7 +867,7 @@ impl SearchWorker {
                 tt_result.write(
                     key,
                     value,
-                    self.stack[ply as usize].tt_pv,
+                    self.state.stack[ply as usize].tt_pv,
                     Bound::Exact,
                     stored_depth,
                     mate_move,
@@ -786,14 +905,14 @@ impl SearchWorker {
 
         // excludedMoveがある場合は、前回のstatic_evalをそのまま使用（YaneuraOu準拠）
         if excluded_move.is_some() {
-            let static_eval = self.stack[ply as usize].static_eval;
+            let static_eval = self.state.stack[ply as usize].static_eval;
             let improving = if ply >= 2 && !in_check && static_eval != Value::NONE {
-                static_eval > self.stack[(ply - 2) as usize].static_eval
+                static_eval > self.state.stack[(ply - 2) as usize].static_eval
             } else {
                 false
             };
             let opponent_worsening = if ply >= 1 && static_eval != Value::NONE {
-                let prev_eval = self.stack[(ply - 1) as usize].static_eval;
+                let prev_eval = self.state.stack[(ply - 1) as usize].static_eval;
                 prev_eval != Value::NONE && static_eval > -prev_eval
             } else {
                 false
@@ -834,15 +953,15 @@ impl SearchWorker {
             static_eval = tt_ctx.value;
         }
 
-        self.stack[ply as usize].static_eval = static_eval;
+        self.state.stack[ply as usize].static_eval = static_eval;
 
         let improving = if ply >= 2 && !in_check {
-            static_eval > self.stack[(ply - 2) as usize].static_eval
+            static_eval > self.state.stack[(ply - 2) as usize].static_eval
         } else {
             false
         };
         let opponent_worsening = if ply >= 1 && static_eval != Value::NONE {
-            let prev_eval = self.stack[(ply - 1) as usize].static_eval;
+            let prev_eval = self.state.stack[(ply - 1) as usize].static_eval;
             prev_eval != Value::NONE && static_eval > -prev_eval
         } else {
             false
@@ -868,31 +987,31 @@ impl SearchWorker {
         time_manager: &mut TimeManagement,
     ) {
         // ルート手を初期化
-        self.root_moves = RootMoves::from_legal_moves(pos, &limits.search_moves);
+        self.state.root_moves = RootMoves::from_legal_moves(pos, &limits.search_moves);
 
-        if self.root_moves.is_empty() {
+        if self.state.root_moves.is_empty() {
             // 合法手がない場合
-            self.best_move = Move::NONE;
+            self.state.best_move = Move::NONE;
             return;
         }
 
         // 反復深化
         for d in 1..=depth {
-            if self.abort {
+            if self.state.abort {
                 break;
             }
 
             // イテレーション開始時にeffortをリセット
-            for rm in self.root_moves.iter_mut() {
+            for rm in self.state.root_moves.iter_mut() {
                 rm.effort = 0.0;
             }
 
-            self.root_depth = d;
-            self.sel_depth = 0;
+            self.state.root_depth = d;
+            self.state.sel_depth = 0;
 
             // Aspiration Window
             let prev_score = if d > 1 {
-                self.root_moves[0].score
+                self.state.root_moves[0].score
             } else {
                 Value::new(-32001)
             };
@@ -912,7 +1031,7 @@ impl SearchWorker {
             loop {
                 let score = self.search_root(pos, d, alpha, beta, limits, time_manager);
 
-                if self.abort {
+                if self.state.abort {
                     break;
                 }
 
@@ -931,9 +1050,9 @@ impl SearchWorker {
                 );
             }
 
-            if !self.abort {
-                self.completed_depth = d;
-                self.best_move = self.root_moves[0].mv();
+            if !self.state.abort {
+                self.state.completed_depth = d;
+                self.state.best_move = self.state.root_moves[0].mv();
             }
         }
     }
@@ -948,42 +1067,42 @@ impl SearchWorker {
         limits: &LimitsType,
         time_manager: &mut TimeManagement,
     ) -> Value {
-        self.root_delta = (beta.raw() - alpha.raw()).abs().max(1);
+        self.state.root_delta = (beta.raw() - alpha.raw()).abs().max(1);
 
         let mut alpha = alpha;
         let mut best_value = Value::new(-32001);
         let mut pv_idx = 0;
         let root_in_check = pos.in_check();
 
-        self.stack[0].in_check = root_in_check;
-        self.stack[0].cont_history_ptr = self.cont_history_sentinel;
-        self.stack[0].cont_hist_key = None;
+        self.state.stack[0].in_check = root_in_check;
+        self.state.stack[0].cont_history_ptr = self.cont_history_sentinel;
+        self.state.stack[0].cont_hist_key = None;
 
         // PVをクリアして前回探索の残留を防ぐ
         // NOTE: YaneuraOuでは (ss+1)->pv = pv でポインタを新配列に向け、ss->pv[0] = Move::none() でクリア
         //       Vecベースの実装では明示的なclear()で同等の効果を得る
-        self.stack[0].pv.clear();
-        self.stack[1].pv.clear();
+        self.state.stack[0].pv.clear();
+        self.state.stack[1].pv.clear();
 
-        for rm_idx in 0..self.root_moves.len() {
+        for rm_idx in 0..self.state.root_moves.len() {
             if self.check_abort(limits, time_manager) {
                 return Value::ZERO;
             }
 
             // 各手ごとにsel_depthをリセット（YaneuraOu準拠）
-            self.sel_depth = 0;
+            self.state.sel_depth = 0;
 
-            let mv = self.root_moves[rm_idx].mv();
+            let mv = self.state.root_moves[rm_idx].mv();
             let gives_check = pos.gives_check(mv);
             let is_capture = pos.is_capture(mv);
 
-            let nodes_before = self.nodes;
+            let nodes_before = self.state.nodes;
 
             // 探索
             let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, self.tt.as_ref());
             self.nnue_push(dirty_piece);
-            self.nodes += 1;
-            self.stack[0].current_move = mv;
+            self.state.nodes += 1;
+            self.state.stack[0].current_move = mv;
 
             // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う
             if mv.is_pass() {
@@ -1046,19 +1165,19 @@ impl SearchWorker {
             pos.undo_move(mv);
 
             // この手に費やしたノード数をeffortに積算
-            let nodes_delta = self.nodes.saturating_sub(nodes_before);
-            self.root_moves[rm_idx].effort += nodes_delta as f64;
+            let nodes_delta = self.state.nodes.saturating_sub(nodes_before);
+            self.state.root_moves[rm_idx].effort += nodes_delta as f64;
 
-            if self.abort {
+            if self.state.abort {
                 return Value::ZERO;
             }
 
             // スコア更新（この手の探索で到達したsel_depthを記録）
             let mut updated_alpha = rm_idx == 0; // 先頭手は維持（YO準拠）
             {
-                let rm = &mut self.root_moves[rm_idx];
+                let rm = &mut self.state.root_moves[rm_idx];
                 rm.score = value;
-                rm.sel_depth = self.sel_depth;
+                rm.sel_depth = self.state.sel_depth;
                 rm.accumulate_score_stats(value);
             }
 
@@ -1070,7 +1189,7 @@ impl SearchWorker {
                     // moveCount > 1 && !pvIdx の条件
                     // (Multi-PV未実装なので pvIdx は常に0)
                     if rm_idx > 0 {
-                        self.best_move_changes += 1.0;
+                        self.state.best_move_changes += 1.0;
                     }
 
                     alpha = value;
@@ -1078,8 +1197,8 @@ impl SearchWorker {
                     updated_alpha = true;
 
                     // PVを更新
-                    self.root_moves[rm_idx].pv.truncate(1);
-                    self.root_moves[rm_idx].pv.extend_from_slice(&self.stack[1].pv);
+                    self.state.root_moves[rm_idx].pv.truncate(1);
+                    self.state.root_moves[rm_idx].pv.extend_from_slice(&self.state.stack[1].pv);
 
                     if value >= beta {
                         break;
@@ -1089,13 +1208,13 @@ impl SearchWorker {
 
             // α未更新の手はスコアを -INFINITE に落として順序維持（YO準拠）
             if !updated_alpha {
-                self.root_moves[rm_idx].score = Value::new(-Value::INFINITE.raw());
+                self.state.root_moves[rm_idx].score = Value::new(-Value::INFINITE.raw());
             }
         }
 
         // 最善手を先頭に移動
-        self.root_moves.move_to_front(pv_idx);
-        self.root_moves.sort();
+        self.state.root_moves.move_to_front(pv_idx);
+        self.state.root_moves.sort();
 
         best_value
     }
@@ -1123,43 +1242,43 @@ impl SearchWorker {
         limits: &LimitsType,
         time_manager: &mut TimeManagement,
     ) -> Value {
-        self.root_delta = (beta.raw() - alpha.raw()).abs().max(1);
+        self.state.root_delta = (beta.raw() - alpha.raw()).abs().max(1);
 
         let mut alpha = alpha;
         let mut best_value = Value::new(-32001);
         let mut best_rm_idx = pv_idx;
         let root_in_check = pos.in_check();
 
-        self.stack[0].in_check = root_in_check;
-        self.stack[0].cont_history_ptr = self.cont_history_sentinel;
-        self.stack[0].cont_hist_key = None;
+        self.state.stack[0].in_check = root_in_check;
+        self.state.stack[0].cont_history_ptr = self.cont_history_sentinel;
+        self.state.stack[0].cont_hist_key = None;
 
         // PVをクリアして前回探索の残留を防ぐ
         // NOTE: YaneuraOuでは (ss+1)->pv = pv でポインタを新配列に向け、ss->pv[0] = Move::none() でクリア
         //       Vecベースの実装では明示的なclear()で同等の効果を得る
-        self.stack[0].pv.clear();
-        self.stack[1].pv.clear();
+        self.state.stack[0].pv.clear();
+        self.state.stack[1].pv.clear();
 
         // pv_idx以降の手のみを探索
-        for rm_idx in pv_idx..self.root_moves.len() {
+        for rm_idx in pv_idx..self.state.root_moves.len() {
             if self.check_abort(limits, time_manager) {
                 return Value::ZERO;
             }
 
             // 各手ごとにsel_depthをリセット
-            self.sel_depth = 0;
+            self.state.sel_depth = 0;
 
-            let mv = self.root_moves[rm_idx].mv();
+            let mv = self.state.root_moves[rm_idx].mv();
             let gives_check = pos.gives_check(mv);
             let is_capture = pos.is_capture(mv);
 
-            let nodes_before = self.nodes;
+            let nodes_before = self.state.nodes;
 
             // 探索
             let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, self.tt.as_ref());
             self.nnue_push(dirty_piece);
-            self.nodes += 1;
-            self.stack[0].current_move = mv;
+            self.state.nodes += 1;
+            self.state.stack[0].current_move = mv;
 
             // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う
             if mv.is_pass() {
@@ -1222,19 +1341,19 @@ impl SearchWorker {
             pos.undo_move(mv);
 
             // この手に費やしたノード数をeffortに積算
-            let nodes_delta = self.nodes.saturating_sub(nodes_before);
-            self.root_moves[rm_idx].effort += nodes_delta as f64;
+            let nodes_delta = self.state.nodes.saturating_sub(nodes_before);
+            self.state.root_moves[rm_idx].effort += nodes_delta as f64;
 
-            if self.abort {
+            if self.state.abort {
                 return Value::ZERO;
             }
 
             // スコア更新
             let mut updated_alpha = rm_idx == pv_idx; // PVラインの先頭は維持
             {
-                let rm = &mut self.root_moves[rm_idx];
+                let rm = &mut self.state.root_moves[rm_idx];
                 rm.score = value;
-                rm.sel_depth = self.sel_depth;
+                rm.sel_depth = self.state.sel_depth;
                 rm.accumulate_score_stats(value);
             }
 
@@ -1245,7 +1364,7 @@ impl SearchWorker {
                     // best_move_changesのカウント（2番目以降の手で更新された場合）
                     // MultiPVでは pv_idx == 0（第1PVライン）のみカウントする
                     if pv_idx == 0 && rm_idx > pv_idx {
-                        self.best_move_changes += 1.0;
+                        self.state.best_move_changes += 1.0;
                     }
 
                     alpha = value;
@@ -1253,8 +1372,8 @@ impl SearchWorker {
                     updated_alpha = true;
 
                     // PVを更新
-                    self.root_moves[rm_idx].pv.truncate(1);
-                    self.root_moves[rm_idx].pv.extend_from_slice(&self.stack[1].pv);
+                    self.state.root_moves[rm_idx].pv.truncate(1);
+                    self.state.root_moves[rm_idx].pv.extend_from_slice(&self.state.stack[1].pv);
 
                     if value >= beta {
                         break;
@@ -1264,12 +1383,12 @@ impl SearchWorker {
 
             // α未更新の手は -INFINITE で前回順序を保持（YO準拠）
             if !updated_alpha {
-                self.root_moves[rm_idx].score = Value::new(-Value::INFINITE.raw());
+                self.state.root_moves[rm_idx].score = Value::new(-Value::INFINITE.raw());
             }
         }
 
         // 最善手をpv_idxの位置に移動
-        self.root_moves.move_to_index(best_rm_idx, pv_idx);
+        self.state.root_moves.move_to_index(best_rm_idx, pv_idx);
 
         best_value
     }
@@ -1279,6 +1398,9 @@ impl SearchWorker {
     /// NTは NodeType を const genericで受け取る（コンパイル時最適化）
     /// cut_node は「βカットが期待される（ゼロウィンドウの非PVなど）」ときに true を渡す。
     /// 再探索やPV探索では all_node 扱いにするため false を渡す（YaneuraOuのcutNode引き渡しと対応）。
+    ///
+    /// SearchState（可変状態）と SearchContext（不変参照）を分離した設計。
+    /// 内部で st = &mut self.state を使用し、将来的な完全分離への移行を準備。
     pub(super) fn search_node<const NT: u8>(
         &mut self,
         pos: &mut Position,
@@ -1290,6 +1412,8 @@ impl SearchWorker {
         limits: &LimitsType,
         time_manager: &mut TimeManagement,
     ) -> Value {
+        // SearchContext/SearchState 分離設計: search_node 内では st, ctx を使用
+        // （現在は self 経由でアクセスしているが、将来的に分離予定）
         inc_stat!(self, nodes_searched);
         inc_stat_by_depth!(self, nodes_by_depth, depth);
         let pv_node = NT == NodeType::PV as u8 || NT == NodeType::Root as u8;
@@ -1314,8 +1438,8 @@ impl SearchWorker {
         }
 
         // 選択的深さを更新
-        if pv_node && self.sel_depth < ply + 1 {
-            self.sel_depth = ply + 1;
+        if pv_node && self.state.sel_depth < ply + 1 {
+            self.state.sel_depth = ply + 1;
         }
 
         // 中断チェック
@@ -1324,23 +1448,23 @@ impl SearchWorker {
         }
 
         // スタック設定
-        self.stack[ply as usize].in_check = in_check;
-        self.stack[ply as usize].move_count = 0;
-        self.stack[(ply + 1) as usize].cutoff_cnt = 0;
+        self.state.stack[ply as usize].in_check = in_check;
+        self.state.stack[ply as usize].move_count = 0;
+        self.state.stack[(ply + 1) as usize].cutoff_cnt = 0;
 
         // PVノードの場合、PVをクリアして前回探索の残留を防ぐ
         // NOTE: YaneuraOuでは (ss+1)->pv = pv でポインタを新配列に向け、ss->pv[0] = Move::none() でクリア
         //       Vecベースの実装では明示的なclear()で同等の効果を得る
         if pv_node {
-            self.stack[ply as usize].pv.clear();
-            self.stack[(ply + 1) as usize].pv.clear();
+            self.state.stack[ply as usize].pv.clear();
+            self.state.stack[(ply + 1) as usize].pv.clear();
         }
 
         let prior_reduction = self.take_prior_reduction(ply);
-        self.stack[ply as usize].reduction = 0;
+        self.state.stack[ply as usize].reduction = 0;
 
         // Singular Extension用の除外手を取得
-        let excluded_move = self.stack[ply as usize].excluded_move;
+        let excluded_move = self.state.stack[ply as usize].excluded_move;
 
         // 置換表プローブ（即時カットオフ含む）
         let tt_ctx = match self.probe_transposition::<NT>(
@@ -1385,9 +1509,9 @@ impl SearchWorker {
             && depth >= 2
             && ply >= 1
             && eval_ctx.static_eval != Value::NONE
-            && self.stack[(ply - 1) as usize].static_eval != Value::NONE
+            && self.state.stack[(ply - 1) as usize].static_eval != Value::NONE
             // Value は ±32002 程度なので i32 加算でオーバーフローしない
-            && eval_ctx.static_eval + self.stack[(ply - 1) as usize].static_eval
+            && eval_ctx.static_eval + self.state.stack[(ply - 1) as usize].static_eval
                 > Value::new(IIR_EVAL_SUM_THRESHOLD)
         {
             depth -= 1;
@@ -1496,7 +1620,7 @@ impl SearchWorker {
             MovePicker::new(pos, tt_move, depth, ply, cont_tables, self.generate_all_legal_moves);
 
         // Singular Extension用の変数
-        let tt_pv = self.stack[ply as usize].tt_pv;
+        let tt_pv = self.state.stack[ply as usize].tt_pv;
         let root_node = NT == NodeType::Root as u8;
 
         // LMPが発火したかどうか
@@ -1523,14 +1647,15 @@ impl SearchWorker {
             }
 
             move_count += 1;
-            self.stack[ply as usize].move_count = move_count;
+            self.state.stack[ply as usize].move_count = move_count;
 
             let is_capture = pos.is_capture(mv);
             let gives_check = pos.gives_check(mv);
 
             // quietの指し手の連続回数（YaneuraOu: quietMoveStreak）
-            self.stack[(ply + 1) as usize].quiet_move_streak = if !is_capture && !gives_check {
-                self.stack[ply as usize].quiet_move_streak + 1
+            self.state.stack[(ply + 1) as usize].quiet_move_streak = if !is_capture && !gives_check
+            {
+                self.state.stack[ply as usize].quiet_move_streak + 1
             } else {
                 0
             };
@@ -1566,7 +1691,7 @@ impl SearchWorker {
                 // - tt_hit: 同じ局面なので同じ値になる
                 // - move_count: ローカル変数で管理しているため影響なし
                 // - その他: ヒューリスティック用途のため多少の誤差は許容される
-                self.stack[ply as usize].excluded_move = mv;
+                self.state.stack[ply as usize].excluded_move = mv;
                 let singular_value = self.search_node::<{ NodeType::NonPV as u8 }>(
                     pos,
                     singular_depth,
@@ -1577,7 +1702,7 @@ impl SearchWorker {
                     limits,
                     time_manager,
                 );
-                self.stack[ply as usize].excluded_move = Move::NONE;
+                self.state.stack[ply as usize].excluded_move = Move::NONE;
 
                 if singular_value < singular_beta {
                     inc_stat!(self, singular_extension);
@@ -1615,10 +1740,11 @@ impl SearchWorker {
             // Reduction計算とStep14の枝刈り
             // =============================================================
             let delta = (beta.raw() - alpha.raw()).max(0);
-            let mut r = reduction(improving, depth, move_count, delta, self.root_delta.max(1));
+            let mut r =
+                reduction(improving, depth, move_count, delta, self.state.root_delta.max(1));
 
             // YaneuraOu: ttPvなら reduction を少し増やす（yaneuraou-search.cpp:3168-3170）
-            if self.stack[ply as usize].tt_pv {
+            if self.state.stack[ply as usize].tt_pv {
                 r += 931;
             }
 
@@ -1690,11 +1816,11 @@ impl SearchWorker {
             }
 
             // 指し手を実行
-            self.stack[ply as usize].current_move = mv;
+            self.state.stack[ply as usize].current_move = mv;
 
             let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, self.tt.as_ref());
             self.nnue_push(dirty_piece);
-            self.nodes += 1;
+            self.state.nodes += 1;
 
             // YaneuraOu方式: ContHistKey/ContinuationHistoryを設定
             // ⚠ in_checkは親ノードの王手状態を使用（gives_checkではない）
@@ -1733,7 +1859,7 @@ impl SearchWorker {
             let tt_value_higher = tt_hit && tt_value != Value::NONE && tt_value > alpha;
             let tt_depth_ge = tt_hit && tt_data.depth >= depth;
 
-            if self.stack[ply as usize].tt_pv {
+            if self.state.stack[ply as usize].tt_pv {
                 r -= 2510
                     + (pv_node as i32) * 963
                     + (tt_value_higher as i32) * 916
@@ -1753,11 +1879,11 @@ impl SearchWorker {
                 r += 1402 - 39 * msb_depth;
             }
 
-            if self.stack[(ply + 1) as usize].cutoff_cnt > 2 {
+            if self.state.stack[(ply + 1) as usize].cutoff_cnt > 2 {
                 r += 925 + 33 * msb_depth + (all_node as i32) * (701 + 224 * msb_depth);
             }
 
-            r += self.stack[(ply + 1) as usize].quiet_move_streak * 51;
+            r += self.state.stack[(ply + 1) as usize].quiet_move_streak * 51;
 
             if mv == tt_move {
                 r -= 2121 + 28 * msb_depth;
@@ -1781,7 +1907,7 @@ impl SearchWorker {
                 let cont1 = self.cont_history_ref(ply, 2).get(moved_piece, mv.to()) as i32;
                 2 * main_hist + cont0 + cont1
             };
-            self.stack[ply as usize].stat_score = stat_score;
+            self.state.stack[ply as usize].stat_score = stat_score;
             r -= stat_score * (729 - 12 * msb_depth) / 8192;
 
             // =============================================================
@@ -1801,21 +1927,21 @@ impl SearchWorker {
                     // r/1024のヒストグラム（15以上は15+にまとめる）
                     let reduction = (r / 1024).max(0) as usize;
                     let reduction_idx = reduction.min(15);
-                    self.stats.lmr_reduction_histogram[reduction_idx] += 1;
+                    self.state.stats.lmr_reduction_histogram[reduction_idx] += 1;
                     // 新深度のヒストグラム
                     let new_depth_idx = (d as usize).min(STATS_MAX_DEPTH - 1);
-                    self.stats.lmr_new_depth_histogram[new_depth_idx] += 1;
+                    self.state.stats.lmr_new_depth_histogram[new_depth_idx] += 1;
                 }
 
                 // depth 1への遷移を追跡
                 #[cfg(feature = "search-stats")]
                 if d == 1 {
                     let parent_depth_idx = (depth as usize).min(STATS_MAX_DEPTH - 1);
-                    self.stats.lmr_to_depth1_from[parent_depth_idx] += 1;
+                    self.state.stats.lmr_to_depth1_from[parent_depth_idx] += 1;
                 }
 
                 let reduction_from_parent = (depth - 1) - d;
-                self.stack[ply as usize].reduction = reduction_from_parent;
+                self.state.stack[ply as usize].reduction = reduction_from_parent;
                 let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
                     pos,
                     d,
@@ -1826,7 +1952,7 @@ impl SearchWorker {
                     limits,
                     time_manager,
                 );
-                self.stack[ply as usize].reduction = 0;
+                self.state.stack[ply as usize].reduction = 0;
 
                 if value > alpha {
                     let do_deeper =
@@ -1856,14 +1982,14 @@ impl SearchWorker {
                         const CONTHIST_BONUSES: &[(i32, i32)] =
                             &[(1, 1108), (2, 652), (3, 273), (4, 572), (5, 126), (6, 449)];
                         for &(offset, weight) in CONTHIST_BONUSES {
-                            if self.stack[ply as usize].in_check && offset > 2 {
+                            if self.state.stack[ply as usize].in_check && offset > 2 {
                                 break;
                             }
                             let idx = ply - offset;
                             if idx < 0 {
                                 break;
                             }
-                            if let Some(key) = self.stack[idx as usize].cont_hist_key {
+                            if let Some(key) = self.state.stack[idx as usize].cont_hist_key {
                                 let in_check_idx = key.in_check as usize;
                                 let capture_idx = key.capture as usize;
                                 let bonus = 1412 * weight / 1024 + if offset < 2 { 80 } else { 0 };
@@ -1882,7 +2008,7 @@ impl SearchWorker {
                 }
 
                 if pv_node && (move_count == 1 || value > alpha) {
-                    self.stack[ply as usize].reduction = 0;
+                    self.state.stack[ply as usize].reduction = 0;
                     -self.search_node::<{ NodeType::PV as u8 }>(
                         pos,
                         depth - 1,
@@ -1898,7 +2024,7 @@ impl SearchWorker {
                 }
             } else if !pv_node || move_count > 1 {
                 // Zero window search
-                self.stack[ply as usize].reduction = 0;
+                self.state.stack[ply as usize].reduction = 0;
                 let mut value = -self.search_node::<{ NodeType::NonPV as u8 }>(
                     pos,
                     depth - 1,
@@ -1909,10 +2035,10 @@ impl SearchWorker {
                     limits,
                     time_manager,
                 );
-                self.stack[ply as usize].reduction = 0;
+                self.state.stack[ply as usize].reduction = 0;
 
                 if pv_node && value > alpha && value < beta {
-                    self.stack[ply as usize].reduction = 0;
+                    self.state.stack[ply as usize].reduction = 0;
                     value = -self.search_node::<{ NodeType::PV as u8 }>(
                         pos,
                         depth - 1,
@@ -1923,13 +2049,13 @@ impl SearchWorker {
                         limits,
                         time_manager,
                     );
-                    self.stack[ply as usize].reduction = 0;
+                    self.state.stack[ply as usize].reduction = 0;
                 }
 
                 value
             } else {
                 // Full window search
-                self.stack[ply as usize].reduction = 0;
+                self.state.stack[ply as usize].reduction = 0;
                 -self.search_node::<{ NodeType::PV as u8 }>(
                     pos,
                     depth - 1,
@@ -1955,7 +2081,7 @@ impl SearchWorker {
                 }
             }
 
-            if self.abort {
+            if self.state.abort {
                 return Value::ZERO;
             }
 
@@ -1972,13 +2098,13 @@ impl SearchWorker {
                     // PV更新
                     if pv_node {
                         // 借用チェッカーの制約を避けるためクローン
-                        let child_pv = self.stack[(ply + 1) as usize].pv.clone();
-                        self.stack[ply as usize].update_pv(mv, &child_pv);
+                        let child_pv = self.state.stack[(ply + 1) as usize].pv.clone();
+                        self.state.stack[ply as usize].update_pv(mv, &child_pv);
                     }
 
                     if value >= beta {
                         // cutoffCntインクリメント条件 (extension<2 || PvNode) をベータカット時に加算で近似。
-                        self.stack[ply as usize].cutoff_cnt += 1;
+                        self.state.stack[ply as usize].cutoff_cnt += 1;
                         // Move Ordering品質統計
                         inc_stat_by_depth!(self, cutoff_by_depth, depth);
                         if move_count == 1 {
@@ -1988,7 +2114,7 @@ impl SearchWorker {
                         #[cfg(feature = "search-stats")]
                         {
                             let d = (depth as usize).min(STATS_MAX_DEPTH - 1);
-                            self.stats.move_count_sum_by_depth[d] += move_count as u64;
+                            self.state.stats.move_count_sum_by_depth[d] += move_count as u64;
                         }
                         break;
                     }
@@ -2063,7 +2189,7 @@ impl SearchWorker {
                     }
                     if ply >= ply_back as i32 {
                         let prev_ply = (ply - ply_back as i32) as usize;
-                        if let Some(key) = self.stack[prev_ply].cont_hist_key {
+                        if let Some(key) = self.state.stack[prev_ply].cont_hist_key {
                             let in_check_idx = key.in_check as usize;
                             let capture_idx = key.capture as usize;
                             let weighted_bonus = continuation_history_bonus_with_offset(
@@ -2117,7 +2243,7 @@ impl SearchWorker {
                             }
                             if ply >= ply_back as i32 {
                                 let prev_ply = (ply - ply_back as i32) as usize;
-                                if let Some(key) = self.stack[prev_ply].cont_hist_key {
+                                if let Some(key) = self.state.stack[prev_ply].cont_hist_key {
                                     let in_check_idx = key.in_check as usize;
                                     let capture_idx = key.capture as usize;
                                     let weighted_malus = continuation_history_bonus_with_offset(
@@ -2169,20 +2295,20 @@ impl SearchWorker {
             // 処理: update_continuation_histories(ss - 1, pos.piece_on(prevSq), prevSq, -captureMalus * 622 / 1024)
             if ply >= 1 {
                 let prev_ply = (ply - 1) as usize;
-                let prev_move_count = self.stack[prev_ply].move_count;
-                let prev_tt_hit = self.stack[prev_ply].tt_hit;
+                let prev_move_count = self.state.stack[prev_ply].move_count;
+                let prev_tt_hit = self.state.stack[prev_ply].tt_hit;
                 // YaneuraOu: !pos.captured_piece() = 現在の局面で駒が取られていない
                 if prev_move_count == 1 + (prev_tt_hit as i32)
                     && pos.captured_piece() == Piece::NONE
                 {
-                    if let Some(key) = self.stack[prev_ply].cont_hist_key {
+                    if let Some(key) = self.state.stack[prev_ply].cont_hist_key {
                         let prev_sq = key.to;
                         let prev_piece = pos.piece_on(prev_sq);
                         // YaneuraOu: update_continuation_histories(ss - 1, ...)を呼ぶ
                         // = 過去1-6手分全てに weight と +80 オフセット付きで更新
                         let penalty_base = -cap_malus * 622 / 1024;
                         // YaneuraOu: update_continuation_histories(ss - 1, ...) で (ss - 1)->inCheck を参照
-                        let prev_in_check = self.stack[prev_ply].in_check;
+                        let prev_in_check = self.state.stack[prev_ply].in_check;
                         let prev_max_ply_back = if prev_in_check { 2 } else { 6 };
 
                         for &(ply_back, weight) in CONTINUATION_HISTORY_WEIGHTS.iter() {
@@ -2193,7 +2319,7 @@ impl SearchWorker {
                             let target_ply = ply - 1 - ply_back as i32;
                             if target_ply >= 0 {
                                 if let Some(target_key) =
-                                    self.stack[target_ply as usize].cont_hist_key
+                                    self.state.stack[target_ply as usize].cont_hist_key
                                 {
                                     let in_check_idx = target_key.in_check as usize;
                                     let capture_idx = target_key.capture as usize;
@@ -2233,18 +2359,18 @@ impl SearchWorker {
         // =================================================================
         else if ply >= 1 {
             let prev_ply = (ply - 1) as usize;
-            if let Some(prev_key) = self.stack[prev_ply].cont_hist_key {
+            if let Some(prev_key) = self.state.stack[prev_ply].cont_hist_key {
                 let prior_capture = prev_key.capture;
                 let prev_sq = prev_key.to;
 
                 if !prior_capture {
                     // Prior quiet countermove bonus
                     // YaneuraOu: yaneuraou-search.cpp:3945-3966
-                    let parent_stat_score = self.stack[prev_ply].stat_score;
-                    let parent_move_count = self.stack[prev_ply].move_count;
-                    let parent_in_check = self.stack[prev_ply].in_check;
-                    let parent_static_eval = self.stack[prev_ply].static_eval;
-                    let static_eval = self.stack[ply as usize].static_eval;
+                    let parent_stat_score = self.state.stack[prev_ply].stat_score;
+                    let parent_move_count = self.state.stack[prev_ply].move_count;
+                    let parent_in_check = self.state.stack[prev_ply].in_check;
+                    let parent_static_eval = self.state.stack[prev_ply].static_eval;
+                    let static_eval = self.state.stack[ply as usize].static_eval;
 
                     // bonusScale計算（YaneuraOu準拠）
                     let mut bonus_scale: i32 = -228;
@@ -2282,7 +2408,8 @@ impl SearchWorker {
                         // ss - 1 からさらに ply_back 手前 = ply - 1 - ply_back
                         let target_ply = ply - 1 - ply_back as i32;
                         if target_ply >= 0 {
-                            if let Some(target_key) = self.stack[target_ply as usize].cont_hist_key
+                            if let Some(target_key) =
+                                self.state.stack[target_ply as usize].cont_hist_key
                             {
                                 let in_check_idx = target_key.in_check as usize;
                                 let capture_idx = target_key.capture as usize;
@@ -2306,7 +2433,7 @@ impl SearchWorker {
 
                     // main history更新
                     // YaneuraOu: mainHistory[~us][((ss - 1)->currentMove).raw()] << scaledBonus * 220 / 32768
-                    let prev_move = self.stack[prev_ply].current_move;
+                    let prev_move = self.state.stack[prev_ply].current_move;
                     let main_bonus = scaled_bonus * 220 / 32768;
                     // 注: 前の手なので手番は!pos.side_to_move()
                     let opponent = !pos.side_to_move();
@@ -2349,7 +2476,7 @@ impl SearchWorker {
 
         // CorrectionHistoryの更新（YaneuraOu準拠）
         if !in_check && best_move.is_some() && !pos.is_capture(best_move) {
-            let static_eval = self.stack[ply as usize].static_eval;
+            let static_eval = self.state.stack[ply as usize].static_eval;
             if static_eval != Value::NONE
                 && ((best_value < static_eval && best_value < beta) || best_value > static_eval)
             {
