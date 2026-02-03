@@ -27,23 +27,33 @@ use super::{LimitsType, MovePicker, TimeManagement};
 // =============================================================================
 
 /// Futility margin の基準係数
-const FUTILITY_MARGIN_BASE: i32 = 90;
+const FUTILITY_MARGIN_BASE: i32 = 91;
+const FUTILITY_MARGIN_TT_BONUS: i32 = 21;
 
 /// Futility pruning
 #[inline]
 pub(super) fn try_futility_pruning(params: FutilityParams) -> Option<Value> {
-    if !params.pv_node && !params.in_check && params.depth < 14 && params.static_eval != Value::NONE
+    if !params.pv_node
+        && !params.in_check
+        && params.depth < 14
+        && params.static_eval != Value::NONE
+        && params.static_eval >= params.beta
+        && !params.beta.is_loss()
+        && !params.static_eval.is_win()
+        && (!params.tt_move_exists || params.tt_capture)
     {
-        let futility_mult = FUTILITY_MARGIN_BASE - 20 * (params.cut_node && !params.tt_hit) as i32;
+        let futility_mult =
+            FUTILITY_MARGIN_BASE - FUTILITY_MARGIN_TT_BONUS * (!params.tt_hit) as i32;
         let futility_margin = Value::new(
             futility_mult * params.depth
-                - (params.improving as i32) * futility_mult * 2
-                - (params.opponent_worsening as i32) * futility_mult / 3
-                + (params.correction_value.abs() / 171_290),
+                - (params.improving as i32) * futility_mult * 2094 / 1024
+                - (params.opponent_worsening as i32) * futility_mult * 1324 / 4096
+                + (params.correction_value.abs() / 158_105),
         );
 
         if params.static_eval - futility_margin >= params.beta {
-            return Some(params.static_eval);
+            // YaneuraOu: return (2 * beta + eval) / 3
+            return Some(Value::new((2 * params.beta.raw() + params.static_eval.raw()) / 3));
         }
     }
     None
@@ -148,7 +158,7 @@ pub(super) fn step14_pruning(
 
 /// Razoring
 ///
-/// search_node を呼び出すため、search_node への参照を引数で受け取る。
+/// 評価値が非常に低い場合、通常探索をスキップして静止探索の値を返す。
 #[allow(clippy::too_many_arguments)]
 #[inline]
 pub(super) fn try_razoring<const NT: u8, F>(
@@ -180,6 +190,7 @@ where
         &mut TimeManagement,
     ) -> Value,
 {
+    // depth <= 3 の浅い探索で、静的評価値が alpha より十分低い場合
     if !pv_node && !in_check && depth <= 3 {
         let razoring_threshold = alpha - Value::new(200 * depth);
         if static_eval < razoring_threshold {

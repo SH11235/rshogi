@@ -179,8 +179,9 @@ pub(super) struct FutilityParams {
     pub(super) correction_value: i32,
     pub(super) improving: bool,
     pub(super) opponent_worsening: bool,
-    pub(super) cut_node: bool,
     pub(super) tt_hit: bool,
+    pub(super) tt_move_exists: bool, // TT に手が保存されているか
+    pub(super) tt_capture: bool,     // TT の手が駒取りか
     pub(super) pv_node: bool,
     pub(super) in_check: bool,
 }
@@ -1146,7 +1147,7 @@ impl SearchWorker {
         let tt_value = tt_ctx.value;
         let tt_hit = tt_ctx.hit;
         let tt_data = tt_ctx.data;
-        let tt_capture = tt_ctx.capture;
+        let _tt_capture = tt_ctx.capture;
 
         // 静的評価
         let eval_ctx = compute_eval_context(st, ctx, pos, ply, in_check, &tt_ctx, excluded_move);
@@ -1176,8 +1177,8 @@ impl SearchWorker {
             depth -= 1;
         }
 
-        // TT move がない場合の IIR
-        // allNode = !PvNode && !cutNode なので !allNode = pv_node || cut_node
+        // TT move がない場合の IIR（YaneuraOu OLD_CODE相当: PvNode/cutNodeで早期にdepthを減少）
+        // !allNode = pv_node || cut_node
         if (pv_node || cut_node) && depth >= 6 && tt_move.is_none() && prior_reduction <= 3 {
             depth -= 1;
         }
@@ -1200,6 +1201,9 @@ impl SearchWorker {
             return v;
         }
 
+        // TT の手が駒取りかどうか判定
+        let tt_capture = tt_move.is_some() && pos.is_capture(tt_move);
+
         if let Some(v) = try_futility_pruning(FutilityParams {
             depth,
             beta,
@@ -1207,8 +1211,9 @@ impl SearchWorker {
             correction_value: eval_ctx.correction_value,
             improving,
             opponent_worsening,
-            cut_node,
             tt_hit,
+            tt_move_exists: tt_move.is_some(),
+            tt_capture,
             pv_node,
             in_check,
         }) {
@@ -1239,8 +1244,6 @@ impl SearchWorker {
         improving = improving_after_null;
 
         // Internal Iterative Reductions（improving再計算後に実施）
-        // YaneuraOu準拠: !allNode && depth>=6 && !ttMove && priorReduction<=3
-        // （yaneuraou-search.cpp:2912-2919）
         if !all_node && depth >= 6 && tt_move.is_none() && prior_reduction <= 3 {
             depth -= 1;
         }
@@ -1306,7 +1309,7 @@ impl SearchWorker {
             if mv == Move::NONE {
                 break;
             }
-            // Singular Extension用の除外手をスキップ（YaneuraOu準拠）
+            // Singular Extension用の除外手をスキップ
             if mv == excluded_move {
                 continue;
             }
@@ -1417,7 +1420,7 @@ impl SearchWorker {
             let delta = (beta.raw() - alpha.raw()).max(0);
             let mut r = reduction(improving, depth, move_count, delta, st.root_delta.max(1));
 
-            // YaneuraOu: ttPvなら reduction を少し増やす（yaneuraou-search.cpp:3168-3170）
+            // YaneuraOu: ttPvなら reduction を少し増やす
             if st.stack[ply as usize].tt_pv {
                 r += 931;
             }
