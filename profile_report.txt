@@ -1,0 +1,21 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 625K of event 'cycles:P'
+# Event count (approx.): 2842689286001
+#
+# Overhead  Command     Shared Object      Symbol                                                                                                             
+# ........  ..........  .................  ...................................................................................................................
+#
+    90.70%  rshogi-usi  rshogi-usi         [.] rshogi_core::nnue::network::NNUENetwork::evaluate_halfkp
+     1.09%  rshogi-usi  rshogi-usi         [.] rshogi_core::nnue::network_halfkp::FeatureTransformerHalfKP<_>::refresh_accumulator
+     0.81%  rshogi-usi  rshogi-usi         [.] rshogi_core::nnue::network_halfkp::FeatureTransformerHalfKP<_>::update_accumulator
+     0.77%  rshogi-usi  rshogi-usi         [.] rshogi_core::search::alpha_beta::SearchWorker::search_node
+     0.50%  rshogi-usi  rshogi-usi         [.] rshogi_core::search::movepicker::MovePicker::next_move
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

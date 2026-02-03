@@ -202,6 +202,9 @@ pub(super) struct Step14Context<'a> {
     pub(super) move_count: i32,
     pub(super) cont_history_1: &'a PieceToHistory,
     pub(super) cont_history_2: &'a PieceToHistory,
+    pub(super) static_eval: Value,
+    pub(super) alpha: Value,
+    pub(super) tt_move: Move, // bestMove判定用
 }
 
 // =============================================================================
@@ -1436,6 +1439,9 @@ impl SearchWorker {
                 move_count,
                 cont_history_1: cont_history_ref(st, ctx, ply, 1),
                 cont_history_2: cont_history_ref(st, ctx, ply, 2),
+                static_eval: eval_ctx.static_eval,
+                alpha,
+                tt_move,
             };
 
             match step14_pruning(ctx, step14_ctx) {
@@ -2113,9 +2119,9 @@ impl SearchWorker {
                             as i32;
                     bonus_scale = bonus_scale.max(0);
 
-                    // 値域: bonus_scale ∈ [0, ~913], min(...) ∈ [52, 1365] (depth>=1)
-                    // 最大値 1365 * 913 ≈ 1.2M << i32::MAX なのでオーバーフローなし
-                    let scaled_bonus = (144 * depth - 92).min(1365) * bonus_scale;
+                    // 値域: bonus_scale ≥ 0, min(...) ∈ [52, 1365] (depth>=1)
+                    // i64で計算してオーバーフローを防止
+                    let scaled_bonus = (144 * depth - 92).min(1365) as i64 * bonus_scale as i64;
 
                     // continuation history更新
                     // YaneuraOu: update_continuation_histories(ss - 1, pos.piece_on(prevSq), prevSq, scaledBonus * 400 / 32768)
@@ -2123,19 +2129,19 @@ impl SearchWorker {
                     //     この時点で prev_piece != NONE が保証される
                     let prev_piece = pos.piece_on(prev_sq);
                     let prev_max_ply_back = if parent_in_check { 2 } else { 6 };
-                    let cont_bonus = scaled_bonus * 400 / 32768;
+                    let cont_bonus = (scaled_bonus * 400 / 32768) as i32;
 
                     // main history更新
                     // YaneuraOu: mainHistory[~us][((ss - 1)->currentMove).raw()] << scaledBonus * 220 / 32768
                     let prev_move = st.stack[prev_ply].current_move;
-                    let main_bonus = scaled_bonus * 220 / 32768;
+                    let main_bonus = (scaled_bonus * 220 / 32768) as i32;
                     // 注: 前の手なので手番は!pos.side_to_move()
                     let opponent = !pos.side_to_move();
 
                     // pawn history更新（歩以外かつ成りでない場合）
                     // YaneuraOu: if (type_of(pos.piece_on(prevSq)) != PAWN && ((ss - 1)->currentMove).type_of() != PROMOTION)
                     let pawn_key_idx = pos.pawn_history_index();
-                    let pawn_bonus = scaled_bonus * 1164 / 32768;
+                    let pawn_bonus = (scaled_bonus * 1164 / 32768) as i32;
                     let update_pawn =
                         prev_piece.piece_type() != PieceType::Pawn && !prev_move.is_promotion();
 
