@@ -102,17 +102,3 @@ fn test_sentinel_initialization() {
         );
     }
 }
-
-#[test]
-fn test_cont_history_ptr_returns_sentinel_for_negative_offset() {
-    let tt = Arc::new(TranspositionTable::new(16));
-    let eval_hash = Arc::new(EvalHash::new(1));
-    let worker = SearchWorker::new(tt, eval_hash, 0, 0);
-
-    // ply < back の場合はsentinelを返すことを確認
-    let ptr = worker.cont_history_ptr(0, 1);
-    assert_eq!(ptr, worker.cont_history_sentinel);
-
-    let ptr = worker.cont_history_ptr(3, 5);
-    assert_eq!(ptr, worker.cont_history_sentinel);
-}
