@@ -81,10 +81,10 @@ pub(super) fn to_corrected_static_eval(unadjusted: Value, correction_value: i32)
 /// LMR用のreduction配列
 type Reductions = [i32; 64];
 
-const REDUCTION_DELTA_SCALE: i32 = 731;
-const REDUCTION_NON_IMPROVING_MULT: i32 = 216;
+const REDUCTION_DELTA_SCALE: i32 = 757;
+const REDUCTION_NON_IMPROVING_MULT: i32 = 218;
 const REDUCTION_NON_IMPROVING_DIV: i32 = 512;
-const REDUCTION_BASE_OFFSET: i32 = 1089;
+const REDUCTION_BASE_OFFSET: i32 = 1200;
 
 /// Reduction配列（LazyLockによる遅延初期化）
 /// 初回アクセス時に自動初期化されるため、get()呼び出しが不要

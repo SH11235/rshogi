@@ -280,11 +280,11 @@ impl SearchStats {
 // =============================================================================
 
 /// 統計カウンタをインクリメントするマクロ（feature有効時のみ実行）
-/// SearchWorker から呼び出される（self.state.stats へアクセス）
+/// SearchState への参照を受け取り、stats フィールドへアクセス
 #[cfg(feature = "search-stats")]
 macro_rules! inc_stat {
-    ($self:expr, $field:ident) => {
-        $self.state.stats.$field += 1;
+    ($st:expr, $field:ident) => {
+        $st.stats.$field += 1;
     };
 }
 
@@ -294,12 +294,12 @@ macro_rules! inc_stat {
 }
 
 /// 深度別統計をカウントするマクロ（feature有効時のみ実行）
-/// SearchWorker から呼び出される（self.state.stats へアクセス）
+/// SearchState への参照を受け取り、stats フィールドへアクセス
 #[cfg(feature = "search-stats")]
 macro_rules! inc_stat_by_depth {
-    ($self:expr, $field:ident, $depth:expr) => {
+    ($st:expr, $field:ident, $depth:expr) => {
         let d = ($depth as usize).min($crate::search::stats::STATS_MAX_DEPTH - 1);
-        $self.state.stats.$field[d] += 1;
+        $st.stats.$field[d] += 1;
     };
 }
 
