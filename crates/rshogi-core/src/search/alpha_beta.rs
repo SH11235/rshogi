@@ -1179,9 +1179,7 @@ impl SearchWorker {
             let prev_ply = (ply - 1) as usize;
             let prev_move = st.stack[prev_ply].current_move;
             let prev_in_check = st.stack[prev_ply].in_check;
-            let prior_capture = st.stack[prev_ply]
-                .cont_hist_key
-                .is_some_and(|k| k.capture);
+            let prior_capture = st.stack[prev_ply].cont_hist_key.is_some_and(|k| k.capture);
 
             if prev_move.is_normal()
                 && !prev_in_check
@@ -1202,8 +1200,7 @@ impl SearchWorker {
                     // pawnHistory 更新（追加条件: !ttHit && 駒種 != 歩 && 成りでない）
                     if !tt_hit {
                         let prev_piece = pos.piece_on(prev_sq);
-                        if prev_piece.piece_type() != PieceType::Pawn && !prev_move.is_promotion()
-                        {
+                        if prev_piece.piece_type() != PieceType::Pawn && !prev_move.is_promotion() {
                             let pawn_idx = pos.pawn_history_index();
                             h.pawn_history.update(pawn_idx, prev_piece, prev_sq, eval_diff * 14);
                         }
