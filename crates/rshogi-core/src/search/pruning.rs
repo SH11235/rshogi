@@ -99,12 +99,7 @@ pub(super) fn step14_pruning(
     let lmr_depth = step_ctx.lmr_depth;
 
     if step_ctx.ply != 0 && !step_ctx.best_value.is_loss() {
-        let lmp_denominator = 2 - step_ctx.improving as i32;
-        debug_assert!(lmp_denominator > 0, "LMP denominator must be positive");
-        let lmp_limit = (3 + step_ctx.depth * step_ctx.depth) / lmp_denominator;
-        if step_ctx.move_count >= lmp_limit && !step_ctx.is_capture && !step_ctx.gives_check {
-            return Step14Outcome::Skip { best_value: None };
-        }
+        // LMPはalpha_beta.rsで処理するため、ここでは行わない
 
         if step_ctx.is_capture || step_ctx.gives_check {
             let captured = step_ctx.pos.piece_on(step_ctx.mv.to());

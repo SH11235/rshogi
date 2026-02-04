@@ -192,14 +192,12 @@ pub(super) struct Step14Context<'a> {
     pub(super) mv: Move,
     pub(super) depth: Depth,
     pub(super) ply: i32,
-    pub(super) improving: bool,
     pub(super) best_value: Value,
     pub(super) in_check: bool,
     pub(super) gives_check: bool,
     pub(super) is_capture: bool,
     pub(super) lmr_depth: i32,
     pub(super) mover: Color,
-    pub(super) move_count: i32,
     pub(super) cont_history_1: &'a PieceToHistory,
     pub(super) cont_history_2: &'a PieceToHistory,
     pub(super) static_eval: Value,
@@ -1425,19 +1423,34 @@ impl SearchWorker {
 
             let lmr_depth = new_depth - r / 1024;
 
+            // =============================================================
+            // LMP（Step14の前）
+            // =============================================================
+            // moveCount >= limitのとき、quiet手をスキップ
+            // YaneuraOu: skip_quiet_moves()のみでcontinueしないが、
+            // rshogiはStep14の条件が緩いため、continueも追加
+            if !pv_node && !in_check && !is_capture && !best_value.is_loss() && !mv.is_pass() {
+                let lmp_limit = (3 + depth * depth) / (2 - improving as i32);
+                if move_count >= lmp_limit {
+                    if !lmp_triggered && mp.is_quiet_stage() {
+                        mp.skip_quiets();
+                        lmp_triggered = true;
+                    }
+                    continue;
+                }
+            }
+
             let step14_ctx = Step14Context {
                 pos,
                 mv,
                 depth,
                 ply,
-                improving,
                 best_value,
                 in_check,
                 gives_check,
                 is_capture,
                 lmr_depth,
                 mover,
-                move_count,
                 cont_history_1: cont_history_ref(st, ctx, ply, 1),
                 cont_history_2: cont_history_ref(st, ctx, ply, 2),
                 static_eval: eval_ctx.static_eval,
@@ -1456,24 +1469,6 @@ impl SearchWorker {
                     continue;
                 }
                 Step14Outcome::Continue => {}
-            }
-
-            // =============================================================
-            // Late Move Pruning（lazy generation対応）
-            // =============================================================
-            // パス手はLMPの対象外（ボーナス評価のため探索する必要がある）
-            // LMP条件成立時: quiet stageの場合は skip_quiets() を呼び出して残りのquiet手をスキップ
-            //               ただしcaptureは残す
-            if !pv_node && !in_check && !is_capture && !mv.is_pass() {
-                let lmp_limit = (3 + depth * depth) / (2 - improving as i32);
-                if move_count >= lmp_limit {
-                    if !lmp_triggered && mp.is_quiet_stage() {
-                        // LMP発火: 残りのquiet手をスキップ（bad capturesは残す）
-                        mp.skip_quiets();
-                        lmp_triggered = true;
-                    }
-                    continue;
-                }
             }
 
             // =============================================================
