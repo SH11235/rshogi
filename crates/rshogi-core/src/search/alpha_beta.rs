@@ -1399,11 +1399,14 @@ impl SearchWorker {
                     // Singular確定 → 延長量を計算
                     // 補正履歴の寄与（abs(correctionValue)/249096）を margin に加算
                     let corr_val_adj = eval_ctx.correction_value.abs() / 249_096;
-                    let double_margin =
-                        4 + 205 * pv_node as i32 - 223 * !tt_capture as i32 - corr_val_adj;
+                    // YaneuraOu準拠: plyがrootDepthを超える場合はマージンを減らす
+                    let double_margin = 4 + 205 * pv_node as i32 - 223 * !tt_capture as i32
+                        - corr_val_adj
+                        - (ply > st.root_depth) as i32 * 45;
                     let triple_margin = 80 + 276 * pv_node as i32 - 249 * !tt_capture as i32
                         + 86 * tt_pv as i32
-                        - corr_val_adj;
+                        - corr_val_adj
+                        - (ply * 2 > st.root_depth * 3) as i32 * 52;
 
                     extension = 1
                         + (singular_value < singular_beta - Value::new(double_margin)) as i32
@@ -1605,9 +1608,10 @@ impl SearchWorker {
             // =============================================================
             let mut value = if depth >= 2 && move_count > 1 {
                 inc_stat!(st, lmr_applied);
+                // YaneuraOu準拠: d = max(1, min(newDepth - r/1024, newDepth + 2)) + PvNode
                 let d = (std::cmp::max(
                     1,
-                    std::cmp::min(new_depth - r / 1024, new_depth + 1 + pv_node as i32),
+                    std::cmp::min(new_depth - r / 1024, new_depth + 2),
                 ) + pv_node as i32)
                     .max(1);
 
