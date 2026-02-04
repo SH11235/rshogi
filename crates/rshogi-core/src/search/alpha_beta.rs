@@ -1173,6 +1173,45 @@ impl SearchWorker {
         let mut improving = eval_ctx.improving;
         let opponent_worsening = eval_ctx.opponent_worsening;
 
+        // evalDiff によるヒストリ更新（YaneuraOu準拠: yaneuraou-search.cpp:2752-2758）
+        // 条件: (ss-1)->currentMove が有効 && !(ss-1)->inCheck && !priorCapture
+        if ply >= 1 {
+            let prev_ply = (ply - 1) as usize;
+            let prev_move = st.stack[prev_ply].current_move;
+            let prev_in_check = st.stack[prev_ply].in_check;
+            let prior_capture = st.stack[prev_ply]
+                .cont_hist_key
+                .is_some_and(|k| k.capture);
+
+            if prev_move.is_normal()
+                && !prev_in_check
+                && !prior_capture
+                && eval_ctx.static_eval != Value::NONE
+                && st.stack[prev_ply].static_eval != Value::NONE
+            {
+                let prev_eval = st.stack[prev_ply].static_eval.raw();
+                let curr_eval = eval_ctx.static_eval.raw();
+                let eval_diff = (-(prev_eval + curr_eval)).clamp(-200, 156) + 58;
+                let opponent = !pos.side_to_move();
+                let prev_sq = prev_move.to();
+
+                ctx.history.with_write(|h| {
+                    // mainHistory 更新: evalDiff * 9
+                    h.main_history.update(opponent, prev_move, eval_diff * 9);
+
+                    // pawnHistory 更新（追加条件: !ttHit && 駒種 != 歩 && 成りでない）
+                    if !tt_hit {
+                        let prev_piece = pos.piece_on(prev_sq);
+                        if prev_piece.piece_type() != PieceType::Pawn && !prev_move.is_promotion()
+                        {
+                            let pawn_idx = pos.pawn_history_index();
+                            h.pawn_history.update(pawn_idx, prev_piece, prev_sq, eval_diff * 14);
+                        }
+                    }
+                });
+            }
+        }
+
         // priorReduction に応じた深さ調整（yaneuraou-search.cpp:2769-2774）
         if prior_reduction
             >= if depth < IIR_DEPTH_BOUNDARY {
@@ -1399,9 +1438,13 @@ impl SearchWorker {
                     // Singular確定 → 延長量を計算
                     // 補正履歴の寄与（abs(correctionValue)/249096）を margin に加算
                     let corr_val_adj = eval_ctx.correction_value.abs() / 249_096;
+                    // YaneuraOu準拠: TTMoveHistoryをdoubleMarginに組み込み
+                    let tt_move_hist = ctx.history.with_read(|h| h.tt_move_history.get() as i32);
                     // YaneuraOu準拠: plyがrootDepthを超える場合はマージンを減らす
-                    let double_margin = 4 + 205 * pv_node as i32 - 223 * !tt_capture as i32
+                    let double_margin = 4 + 205 * pv_node as i32
+                        - 223 * !tt_capture as i32
                         - corr_val_adj
+                        - 921 * tt_move_hist / 127649
                         - (ply > st.root_depth) as i32 * 45;
                     let triple_margin = 80 + 276 * pv_node as i32 - 249 * !tt_capture as i32
                         + 86 * tt_pv as i32
@@ -1416,6 +1459,11 @@ impl SearchWorker {
                     depth += 1;
                 } else if singular_value >= beta && !singular_value.is_mate_score() {
                     // Multi-Cut: 他の手もfail highする場合は枝刈り
+                    // YaneuraOu準拠: TTMoveHistoryを更新
+                    ctx.history.with_write(|h| {
+                        h.tt_move_history
+                            .update(super::tt_history::TTMoveHistory::multi_cut_bonus(depth));
+                    });
                     inc_stat!(st, multi_cut);
                     return singular_value;
                 } else if tt_value >= beta {
@@ -1609,10 +1657,8 @@ impl SearchWorker {
             let mut value = if depth >= 2 && move_count > 1 {
                 inc_stat!(st, lmr_applied);
                 // YaneuraOu準拠: d = max(1, min(newDepth - r/1024, newDepth + 2)) + PvNode
-                let d = (std::cmp::max(
-                    1,
-                    std::cmp::min(new_depth - r / 1024, new_depth + 2),
-                ) + pv_node as i32)
+                let d = (std::cmp::max(1, std::cmp::min(new_depth - r / 1024, new_depth + 2))
+                    + pv_node as i32)
                     .max(1);
 
                 // LMR統計: 削減量と新深度を記録
@@ -2086,17 +2132,15 @@ impl SearchWorker {
                 }
             }
 
-            // TTMoveHistory更新（非PVノードのみ）
+            // TTMoveHistory更新（非PVノードのみ、YaneuraOu準拠）
+            // YaneuraOu: ttMoveHistory << (bestMove == ttData.move ? 809 : -865)
             if !pv_node && tt_move.is_some() {
-                if best_move == tt_move {
-                    ctx.history.with_write(|h| {
-                        h.tt_move_history.update(ply as usize, TT_MOVE_HISTORY_BONUS)
-                    });
+                let bonus = if best_move == tt_move {
+                    TT_MOVE_HISTORY_BONUS
                 } else {
-                    ctx.history.with_write(|h| {
-                        h.tt_move_history.update(ply as usize, TT_MOVE_HISTORY_MALUS)
-                    });
-                }
+                    TT_MOVE_HISTORY_MALUS
+                };
+                ctx.history.with_write(|h| h.tt_move_history.update(bonus));
             }
         }
         // =================================================================

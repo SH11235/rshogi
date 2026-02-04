@@ -130,9 +130,12 @@ pub(super) fn step14_pruning(
             }
 
             // SEE based pruning for captures (157 * depth + captHist / 29)
-            let margin = (157 * step_ctx.depth + capt_hist / 29).max(0);
-            if !step_ctx.pos.see_ge(step_ctx.mv, Value::new(-margin)) {
-                return Step14Outcome::Skip { best_value: None };
+            // YaneuraOu準拠: alpha >= VALUE_DRAW 条件を追加
+            if step_ctx.alpha >= Value::DRAW {
+                let margin = (157 * step_ctx.depth + capt_hist / 29).max(0);
+                if !step_ctx.pos.see_ge(step_ctx.mv, Value::new(-margin)) {
+                    return Step14Outcome::Skip { best_value: None };
+                }
             }
         } else {
             // Quiet moves
