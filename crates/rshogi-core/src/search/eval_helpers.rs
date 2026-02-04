@@ -10,7 +10,7 @@ use super::alpha_beta::{
     to_corrected_static_eval, EvalContext, ProbeOutcome, SearchContext, SearchState, TTContext,
 };
 use super::history::CORRECTION_HISTORY_SIZE;
-use super::search_helpers::nnue_evaluate;
+use super::search_helpers::{ensure_nnue_accumulator, nnue_evaluate};
 use super::stats::inc_stat_by_depth;
 use super::types::{value_from_tt, NodeType};
 
@@ -260,6 +260,9 @@ pub(super) fn compute_eval_context(
     let mut static_eval = if in_check {
         Value::NONE
     } else if tt_ctx.hit && tt_ctx.data.eval != Value::NONE {
+        // TTヒット時: 評価値はTTから取得するが、次のノードの差分更新のために
+        // アキュムレータだけは計算しておく（YaneuraOu/Stockfish互換）
+        ensure_nnue_accumulator(st, pos);
         unadjusted_static_eval = tt_ctx.data.eval;
         unadjusted_static_eval
     } else {
