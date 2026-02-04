@@ -145,22 +145,20 @@ pub(super) fn step14_pruning(
             let cont_hist_1 = step_ctx.cont_history_2.get(moved_piece, to_sq) as i32;
             let (main_hist, pawn_hist) = ctx.history.with_read(|h| {
                 let mh = h.main_history.get(step_ctx.mover, step_ctx.mv) as i32;
-                let ph = h
-                    .pawn_history
-                    .get(step_ctx.pawn_history_index, moved_piece, to_sq)
-                    as i32;
+                let ph = h.pawn_history.get(step_ctx.pawn_history_index, moved_piece, to_sq) as i32;
                 (mh, ph)
             });
             // YaneuraOu準拠: pawnHistoryを含めたhistory計算
             let hist_score = 2 * main_hist + cont_hist_0 + cont_hist_1 + pawn_hist;
 
-            // YaneuraOu準拠: lmrDepth調整 (yaneuraou-search.cpp:3252-3254)
-            let lmr_depth = lmr_depth + hist_score / 3220;
-
             // Continuation history based pruning (YaneuraOu: -4312 * depth)
-            if lmr_depth < 12 && hist_score < -4312 * step_ctx.depth {
+            // YaneuraOu準拠: lmrDepth調整より先に判定する
+            if hist_score < -4312 * step_ctx.depth {
                 return Step14Outcome::Skip { best_value: None };
             }
+
+            // YaneuraOu準拠: lmrDepth調整 (枝刈りされなかった場合のみ実行)
+            let lmr_depth = lmr_depth + hist_score / 3220;
 
             // Futility pruning for quiet moves (親ノードでの枝刈り)
             let no_best_move = step_ctx.tt_move.is_none();
