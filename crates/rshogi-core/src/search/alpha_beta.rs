@@ -202,7 +202,8 @@ pub(super) struct Step14Context<'a> {
     pub(super) cont_history_2: &'a PieceToHistory,
     pub(super) static_eval: Value,
     pub(super) alpha: Value,
-    pub(super) tt_move: Move, // bestMove判定用
+    pub(super) tt_move: Move,             // bestMove判定用
+    pub(super) pawn_history_index: usize, // pawnHistory用インデックス
 }
 
 // =============================================================================
@@ -1520,6 +1521,7 @@ impl SearchWorker {
                 static_eval: eval_ctx.static_eval,
                 alpha,
                 tt_move,
+                pawn_history_index: pos.pawn_history_index(),
             };
 
             match step14_pruning(ctx, step14_ctx) {

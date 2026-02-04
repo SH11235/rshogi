@@ -143,10 +143,19 @@ pub(super) fn step14_pruning(
             let to_sq = step_ctx.mv.to();
             let cont_hist_0 = step_ctx.cont_history_1.get(moved_piece, to_sq) as i32;
             let cont_hist_1 = step_ctx.cont_history_2.get(moved_piece, to_sq) as i32;
-            let main_hist = ctx
-                .history
-                .with_read(|h| h.main_history.get(step_ctx.mover, step_ctx.mv) as i32);
-            let hist_score = 2 * main_hist + cont_hist_0 + cont_hist_1;
+            let (main_hist, pawn_hist) = ctx.history.with_read(|h| {
+                let mh = h.main_history.get(step_ctx.mover, step_ctx.mv) as i32;
+                let ph = h
+                    .pawn_history
+                    .get(step_ctx.pawn_history_index, moved_piece, to_sq)
+                    as i32;
+                (mh, ph)
+            });
+            // YaneuraOu準拠: pawnHistoryを含めたhistory計算
+            let hist_score = 2 * main_hist + cont_hist_0 + cont_hist_1 + pawn_hist;
+
+            // YaneuraOu準拠: lmrDepth調整 (yaneuraou-search.cpp:3252-3254)
+            let lmr_depth = lmr_depth + hist_score / 3220;
 
             // Continuation history based pruning (YaneuraOu: -4312 * depth)
             if lmr_depth < 12 && hist_score < -4312 * step_ctx.depth {
