@@ -1112,12 +1112,14 @@ impl<
     /// 評価値を計算
     ///
     /// 最適化: スタック配列 + 64バイトアラインメントで SIMD 効率を最大化
+    /// 各配列はMaybeUninitで確保し、直後のtransform/propagateで全要素が上書きされる。
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorHalfKA_hm<L1>) -> Value {
         let debug = nnue_debug_enabled();
 
+        // SAFETY: 各配列は直後のtransform_raw/activate/propagateで全要素が上書きされる
         // Feature Transformer 出力（生のi16値）- 64バイトアライン
         // FT出力は常に FT_OUT（= L1 * 2、両視点の連結）
-        let mut ft_out_i16 = Aligned([0i16; FT_OUT]);
+        let mut ft_out_i16: Aligned<[i16; FT_OUT]> = unsafe { Aligned::new_uninit() };
         self.feature_transformer
             .transform_raw(acc, pos.side_to_move(), &mut ft_out_i16.0);
 
@@ -1134,7 +1136,7 @@ impl<
 
         // 活性化関数適用 (i16 → u8) - 64バイトアライン
         // 活性化後のサイズは L1_INPUT（CReLU: L1*2、Pairwise: L1）
-        let mut transformed = Aligned([0u8; L1_INPUT]);
+        let mut transformed: Aligned<[u8; L1_INPUT]> = unsafe { Aligned::new_uninit() };
         A::activate_i16_to_u8(&ft_out_i16.0, &mut transformed.0, self.qa);
 
         if debug {
@@ -1146,7 +1148,7 @@ impl<
         }
 
         // l1 層 - 64バイトアライン
-        let mut l1_out = Aligned([0i32; L2]);
+        let mut l1_out: Aligned<[i32; L2]> = unsafe { Aligned::new_uninit() };
         self.l1.propagate(&transformed.0, &mut l1_out.0);
 
         if debug {
@@ -1171,11 +1173,11 @@ impl<
         }
 
         // 活性化関数適用 (i32 → u8) - 64バイトアライン
-        let mut l1_relu = Aligned([0u8; L2]);
+        let mut l1_relu: Aligned<[u8; L2]> = unsafe { Aligned::new_uninit() };
         A::activate_i32_to_u8(&l1_out.0, &mut l1_relu.0);
 
         // l2 層 - 64バイトアライン
-        let mut l2_out = Aligned([0i32; L3]);
+        let mut l2_out: Aligned<[i32; L3]> = unsafe { Aligned::new_uninit() };
         self.l2.propagate(&l1_relu.0, &mut l2_out.0);
 
         // デバッグ: L2出力の範囲チェック
@@ -1192,10 +1194,10 @@ impl<
         }
 
         // 活性化関数適用 (i32 → u8) - 64バイトアライン
-        let mut l2_relu = Aligned([0u8; L3]);
+        let mut l2_relu: Aligned<[u8; L3]> = unsafe { Aligned::new_uninit() };
         A::activate_i32_to_u8(&l2_out.0, &mut l2_relu.0);
 
-        // output 層
+        // output 層（4バイトなのでゼロ初期化のコストは無視可能）
         let mut output = [0i32; 1];
         self.output.propagate(&l2_relu.0, &mut output);
 
