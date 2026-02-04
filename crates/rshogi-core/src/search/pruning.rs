@@ -151,10 +151,19 @@ pub(super) fn step14_pruning(
 
             // YaneuraOu準拠: Continuation history（mainHistoryを含まない）
             // yaneuraou-search.cpp:3273-3276
+            //
+            // 【実装メモ: df8d771d】
+            // 旧実装(00c06b7f)では hist_score = 2*main_hist + cont0 + cont1 + pawn_hist で判定していた。
+            // YaneuraOu準拠に修正した結果:
+            // - ノード数: 1.3-2.2倍増加（枝刈りが緩くなった）
+            // - 自己対局: 48.25% vs 00c06b7f（200局, 秒読み2秒）
+            // mainHistoryは通常負（悪い手）のため、含めると過剰に枝刈りしていた。
+            // YaneuraOu準拠で正しいが、NPS差により時間制限下では不利。
+            // NPS改善後に再評価予定。
+            // 詳細: docs/step14_implementation_issues.md（localファイルでgit管理外）
             let cont_history = cont_hist_0 + cont_hist_1 + pawn_hist;
 
             // Continuation history based pruning (YaneuraOu: -4312 * depth)
-            // 注: mainHistoryはこの判定に含めない（YaneuraOu準拠）
             if cont_history < -4312 * step_ctx.depth {
                 return Step14Outcome::Skip { best_value: None };
             }
