@@ -1083,6 +1083,7 @@ impl SearchWorker {
         // YaneuraOuのallNode定義: !(PvNode || cutNode)（yaneuraou-search.cpp:1854付近）
         let all_node = !(pv_node || cut_node);
         let mut alpha = alpha;
+        let mut beta = beta;
 
         // 深さが0以下なら静止探索へ
         if depth <= DEPTH_QS {
@@ -1106,6 +1107,21 @@ impl SearchWorker {
         // 中断チェック
         if check_abort(st, ctx, limits, time_manager) {
             return Value::ZERO;
+        }
+
+        // =====================================================================
+        // Step 3. Mate Distance Pruning
+        // =====================================================================
+        // 詰みまでの手数による枝刈り。
+        // - 現在のplyで詰まされる場合のスコア(mated_in(ply))より低いalphaは意味がない
+        // - 次の手で詰ます場合のスコア(mate_in(ply+1))より高いbetaは意味がない
+        // - 補正後にalpha >= betaなら即座にカット
+        if NT != NodeType::Root as u8 {
+            alpha = alpha.max(Value::mated_in(ply));
+            beta = beta.min(Value::mate_in(ply + 1));
+            if alpha >= beta {
+                return alpha;
+            }
         }
 
         // スタック設定
