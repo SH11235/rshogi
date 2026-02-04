@@ -37,7 +37,7 @@ use super::halfka_hm::HalfKA_hmStack;
 use super::halfkp::HalfKPStack;
 use super::network::NNUENetwork;
 use super::spec::ArchitectureSpec;
-use super::stats::{count_already_computed, count_refresh, count_update};
+use super::stats::{count_already_computed, count_forward_update, count_refresh, count_update};
 use crate::position::Position;
 use crate::types::Value;
 
@@ -279,7 +279,7 @@ impl NNUEEvaluator {
 
         let mut updated = false;
 
-        // 直前局面で差分更新を試行
+        // 1. 直前局面で差分更新を試行
         if let Some(prev_idx) = stack.current_previous() {
             if stack.is_entry_computed(prev_idx) {
                 let dirty = stack.current_dirty_piece();
@@ -289,7 +289,17 @@ impl NNUEEvaluator {
             }
         }
 
-        // 失敗なら全計算
+        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
+        if !updated {
+            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+                updated = net.forward_update_incremental(pos, stack, source_idx);
+                if updated {
+                    count_forward_update!();
+                }
+            }
+        }
+
+        // 3. それでも失敗なら全計算
         if !updated {
             net.refresh_accumulator(pos, stack);
             count_refresh!();
@@ -310,7 +320,7 @@ impl NNUEEvaluator {
 
         let mut updated = false;
 
-        // 直前局面で差分更新を試行
+        // 1. 直前局面で差分更新を試行
         if let Some(prev_idx) = stack.current_previous() {
             if stack.is_entry_computed(prev_idx) {
                 let dirty = stack.current_dirty_piece();
@@ -320,7 +330,17 @@ impl NNUEEvaluator {
             }
         }
 
-        // 失敗なら全計算
+        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
+        if !updated {
+            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+                updated = net.forward_update_incremental(pos, stack, source_idx);
+                if updated {
+                    count_forward_update!();
+                }
+            }
+        }
+
+        // 3. それでも失敗なら全計算
         if !updated {
             net.refresh_accumulator(pos, stack);
             count_refresh!();
@@ -341,7 +361,7 @@ impl NNUEEvaluator {
 
         let mut updated = false;
 
-        // 直前局面で差分更新を試行
+        // 1. 直前局面で差分更新を試行
         if let Some(prev_idx) = stack.current_previous() {
             if stack.is_entry_computed(prev_idx) {
                 let dirty = stack.current_dirty_piece();
@@ -351,7 +371,17 @@ impl NNUEEvaluator {
             }
         }
 
-        // 失敗なら全計算
+        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
+        if !updated {
+            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+                updated = net.forward_update_incremental(pos, stack, source_idx);
+                if updated {
+                    count_forward_update!();
+                }
+            }
+        }
+
+        // 3. それでも失敗なら全計算
         if !updated {
             net.refresh_accumulator(pos, stack);
             count_refresh!();
@@ -373,7 +403,7 @@ impl NNUEEvaluator {
 
         let mut updated = false;
 
-        // 直前局面で差分更新を試行
+        // 1. 直前局面で差分更新を試行
         if let Some(prev_idx) = current_entry.previous {
             let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
             if prev_computed {
@@ -382,6 +412,16 @@ impl NNUEEvaluator {
                 net.update_accumulator(pos, &dirty_piece, current_acc, prev_acc);
                 count_update!();
                 updated = true;
+            }
+        }
+
+        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
+        if !updated {
+            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+                updated = net.forward_update_incremental(pos, stack, source_idx);
+                if updated {
+                    count_forward_update!();
+                }
             }
         }
 

@@ -247,6 +247,20 @@ macro_rules! count_update {
     () => {};
 }
 
+/// forward_update カウント（feature有効時のみ）
+#[cfg(feature = "nnue-stats")]
+macro_rules! count_forward_update {
+    () => {
+        $crate::nnue::stats::NNUE_STATS.count_forward_update()
+    };
+}
+
+/// forward_update カウント（no-op）
+#[cfg(not(feature = "nnue-stats"))]
+macro_rules! count_forward_update {
+    () => {};
+}
+
 /// already_computed カウント（feature有効時のみ）
 #[cfg(feature = "nnue-stats")]
 macro_rules! count_already_computed {
@@ -262,5 +276,6 @@ macro_rules! count_already_computed {
 }
 
 pub(crate) use count_already_computed;
+pub(crate) use count_forward_update;
 pub(crate) use count_refresh;
 pub(crate) use count_update;

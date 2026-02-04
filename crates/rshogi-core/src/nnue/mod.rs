@@ -78,9 +78,9 @@ pub use layer_stacks::{
 };
 pub use layers::{AffineTransform, ClippedReLU};
 pub use network::{
-    detect_format, ensure_accumulator_computed, evaluate_dispatch, evaluate_layer_stacks,
-    get_fv_scale_override, get_network, init_nnue, init_nnue_from_bytes, is_halfka_1024_loaded,
-    is_halfka_256_loaded, is_halfka_512_loaded, is_halfka_hm_1024_loaded, is_halfka_hm_256_loaded,
+    detect_format, evaluate_dispatch, evaluate_layer_stacks, get_fv_scale_override, get_network,
+    init_nnue, init_nnue_from_bytes, is_halfka_1024_loaded, is_halfka_256_loaded,
+    is_halfka_512_loaded, is_halfka_hm_1024_loaded, is_halfka_hm_256_loaded,
     is_halfka_hm_512_loaded, is_layer_stacks_loaded, is_nnue_initialized, set_fv_scale_override,
     NNUENetwork, NnueFormatInfo,
 };
