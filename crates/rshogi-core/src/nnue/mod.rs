@@ -51,6 +51,7 @@ pub(crate) mod network_halfkp;
 mod network_layer_stacks;
 pub mod prelude;
 pub mod spec;
+pub mod stats;
 
 pub use accumulator::{
     Accumulator, AccumulatorStack, ChangedPiece, DirtyPiece, HandChange, StackEntry,
@@ -95,3 +96,6 @@ pub use spec::{Activation, ArchitectureSpec, FeatureSet as SpecFeatureSet};
 
 // Phase 2: 外部 API 統一
 pub use evaluator::NNUEEvaluator;
+
+// 統計カウンタ（デバッグ・チューニング用）
+pub use stats::{get_nnue_stats, print_nnue_stats, reset_nnue_stats, NnueStatsSnapshot};
