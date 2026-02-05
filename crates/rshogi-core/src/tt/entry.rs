@@ -1,18 +1,23 @@
 //! 置換表エントリー
 //!
-//! TTEntry: 10バイトのコンパクトなエントリ構造
+//! TTEntry: 16バイトのコンパクトなエントリ構造（64bitキー対応）
 //! TTData: 読み取り用のデータ構造
+//!
+//! # 64bitキーの採用理由
+//! 16bitキーでは衝突確率が高く、異なる局面のデータを誤って使用する問題があった。
+//! 64bitキーに拡張することで衝突確率を大幅に低減（2^16 → 2^64）。
+//! YaneuraOuの拡張方式に準拠。
 
 use super::{GENERATION_CYCLE, GENERATION_MASK};
 use crate::types::{Bound, Move, Value, DEPTH_ENTRY_OFFSET};
 
 /// 置換表エントリー
-/// メモリ効率のため、フィールドを詰め込む（10バイト）
+/// 64bitキーを使用し、衝突確率を低減（16バイト）
 #[derive(Clone, Copy, Default)]
-#[repr(C, packed)]
+#[repr(C)]
 pub struct TTEntry {
-    /// ハッシュキーの一部（衝突検出用）
-    key16: u16,
+    /// ハッシュキー（64bit、衝突検出用）
+    key64: u64,
     /// 探索深さ（DEPTH_OFFSETを引いた値）
     depth8: u8,
     /// generation(5bit) | pv(1bit) | bound(2bit)
@@ -25,15 +30,15 @@ pub struct TTEntry {
     eval16: i16,
 }
 
-// エントリサイズが10バイトであることを保証
-const _: () = assert!(std::mem::size_of::<TTEntry>() == 10);
+// エントリサイズが16バイトであることを保証
+const _: () = assert!(std::mem::size_of::<TTEntry>() == 16);
 
 impl TTEntry {
     /// 新しい空のエントリを作成
     #[inline]
     pub const fn new() -> Self {
         Self {
-            key16: 0,
+            key64: 0,
             depth8: 0,
             gen_bound8: 0,
             move16: 0,
@@ -48,10 +53,10 @@ impl TTEntry {
         self.depth8 != 0
     }
 
-    /// キーを取得
+    /// 64bitキーを取得
     #[inline]
-    pub fn key16(&self) -> u16 {
-        self.key16
+    pub fn key64(&self) -> u64 {
+        self.key64
     }
 
     /// 深さを取得（DEPTH_ENTRY_OFFSETを加算）
@@ -87,7 +92,7 @@ impl TTEntry {
     /// YaneuraOu/Stockfishの実装に準拠。
     pub fn save(
         &mut self,
-        key16: u16,
+        key64: u64,
         value: Value,
         is_pv: bool,
         bound: Bound,
@@ -97,7 +102,7 @@ impl TTEntry {
         generation8: u8,
     ) {
         // 新しい手がない場合は古い手を保持
-        if mv != Move::NONE || key16 != self.key16 {
+        if mv != Move::NONE || key64 != self.key64 {
             self.move16 = mv.to_u16();
         }
 
@@ -108,13 +113,13 @@ impl TTEntry {
         // - 古いエントリ
         let d8 = depth - DEPTH_ENTRY_OFFSET;
         if bound == Bound::Exact
-            || key16 != self.key16
+            || key64 != self.key64
             || d8 + 2 * (is_pv as i32) > self.depth8 as i32 - 4
             || self.relative_age(generation8) != 0
         {
             debug_assert!(d8 > 0 && d8 < 256);
 
-            self.key16 = key16;
+            self.key64 = key64;
             self.depth8 = d8 as u8;
             self.gen_bound8 = generation8 | ((is_pv as u8) << 2) | bound as u8;
             self.value16 = value.raw() as i16;
@@ -181,14 +186,14 @@ mod tests {
     fn test_tt_entry_new() {
         let entry = TTEntry::new();
         assert!(!entry.is_occupied());
-        assert_eq!(entry.key16(), 0);
+        assert_eq!(entry.key64(), 0);
     }
 
     #[test]
     fn test_tt_entry_save_and_read() {
         let mut entry = TTEntry::new();
 
-        let key = 0x1234u16;
+        let key = 0x123456789ABCDEFu64;
         let value = Value::new(100);
         let eval = Value::new(-50);
         let depth = 10;
@@ -202,7 +207,7 @@ mod tests {
         entry.save(key, value, is_pv, bound, depth, mv, eval, gen);
 
         assert!(entry.is_occupied());
-        assert_eq!(entry.key16(), key);
+        assert_eq!(entry.key64(), key);
 
         let data = entry.read();
         assert_eq!(data.value.raw(), 100);
@@ -227,7 +232,7 @@ mod tests {
     #[test]
     fn test_tt_entry_decay_non_exact() {
         let mut entry = TTEntry::new();
-        let key = 0x1234u16;
+        let key = 0x123456789ABCDEFu64;
 
         // 深いLower境界を保存
         entry.save(key, Value::ZERO, false, Bound::Lower, 8, Move::NONE, Value::ZERO, 0);

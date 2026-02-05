@@ -148,16 +148,31 @@ pub(super) fn step14_pruning(
                 let ph = h.pawn_history.get(step_ctx.pawn_history_index, moved_piece, to_sq) as i32;
                 (mh, ph)
             });
-            // YaneuraOu準拠: pawnHistoryを含めたhistory計算
-            let hist_score = 2 * main_hist + cont_hist_0 + cont_hist_1 + pawn_hist;
+
+            // YaneuraOu準拠: Continuation history（mainHistoryを含まない）
+            // yaneuraou-search.cpp:3273-3276
+            //
+            // 【実装メモ: df8d771d】
+            // 旧実装(00c06b7f)では hist_score = 2*main_hist + cont0 + cont1 + pawn_hist で判定していた。
+            // YaneuraOu準拠に修正した結果:
+            // - ノード数: 1.3-2.2倍増加（枝刈りが緩くなった）
+            // - 自己対局: 48.25% vs 00c06b7f（200局, 秒読み2秒）
+            // mainHistoryは通常負（悪い手）のため、含めると過剰に枝刈りしていた。
+            // YaneuraOu準拠で正しいが、NPS差により時間制限下では不利。
+            // NPS改善後に再評価予定。
+            // 詳細: docs/step14_implementation_issues.md（localファイルでgit管理外）
+            let cont_history = cont_hist_0 + cont_hist_1 + pawn_hist;
 
             // Continuation history based pruning (YaneuraOu: -4312 * depth)
-            // YaneuraOu準拠: lmrDepth調整より先に判定する
-            if hist_score < -4312 * step_ctx.depth {
+            if cont_history < -4312 * step_ctx.depth {
                 return Step14Outcome::Skip { best_value: None };
             }
 
-            // YaneuraOu準拠: lmrDepth調整 (枝刈りされなかった場合のみ実行)
+            // YaneuraOu準拠: mainHistoryは pruning判定後に追加
+            // yaneuraou-search.cpp:3283: history += 76 * mainHistory / 32
+            let hist_score = cont_history + 76 * main_hist / 32;
+
+            // lmrDepth調整 (枝刈りされなかった場合のみ実行)
             let lmr_depth = lmr_depth + hist_score / 3220;
 
             // Futility pruning for quiet moves (親ノードでの枝刈り)

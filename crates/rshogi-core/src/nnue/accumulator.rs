@@ -133,6 +133,24 @@ impl<const N: usize> Default for IndexList<N> {
 #[derive(Clone, Copy)]
 pub struct Aligned<T: Copy>(pub T);
 
+impl<T: Copy> Aligned<T> {
+    /// 未初期化のAlignedを作成（ゼロ初期化をスキップ）
+    ///
+    /// # Safety
+    ///
+    /// 呼び出し側が使用前に全要素を初期化する責任を持つ。
+    /// evaluate関数内で使用され、直後にtransform/propagateで全要素が上書きされる。
+    ///
+    /// この関数はパフォーマンス最適化のため、整数配列の初期化をスキップする。
+    /// Clippy警告(uninit_assumed_init)を許可しているが、これは呼び出し直後に
+    /// 全要素が上書きされることが保証されているため安全である。
+    #[inline]
+    #[allow(clippy::uninit_assumed_init)]
+    pub unsafe fn new_uninit() -> Self {
+        std::mem::MaybeUninit::uninit().assume_init()
+    }
+}
+
 impl<T: Default + Copy> Default for Aligned<T> {
     fn default() -> Self {
         Self(T::default())

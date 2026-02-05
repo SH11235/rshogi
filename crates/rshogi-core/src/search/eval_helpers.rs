@@ -10,7 +10,7 @@ use super::alpha_beta::{
     to_corrected_static_eval, EvalContext, ProbeOutcome, SearchContext, SearchState, TTContext,
 };
 use super::history::CORRECTION_HISTORY_SIZE;
-use super::search_helpers::nnue_evaluate;
+use super::search_helpers::{ensure_nnue_accumulator, nnue_evaluate};
 use super::stats::inc_stat_by_depth;
 use super::types::{value_from_tt, NodeType};
 
@@ -221,6 +221,9 @@ pub(super) fn probe_transposition<const NT: u8>(
 // =============================================================================
 
 /// 静的評価と補正値の計算
+///
+/// # 引数
+/// - `pv_node`: PVノードかどうか。PVノードでは必ずNNUE評価を実行する（YaneuraOu準拠）
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compute_eval_context(
     st: &mut SearchState,
@@ -228,6 +231,7 @@ pub(super) fn compute_eval_context(
     pos: &mut Position,
     ply: i32,
     in_check: bool,
+    pv_node: bool,
     tt_ctx: &TTContext,
     excluded_move: Move,
 ) -> EvalContext {
@@ -257,12 +261,18 @@ pub(super) fn compute_eval_context(
     }
 
     let mut unadjusted_static_eval = Value::NONE;
+    // YaneuraOu準拠: TTからのeval取得 + PvNodeでは必ずevaluate()
+    // yaneuraou-search.cpp:2680-2706 参照
+    // 「🌈 これ書かないとR70ぐらい弱くなる。」
     let mut static_eval = if in_check {
         Value::NONE
-    } else if tt_ctx.hit && tt_ctx.data.eval != Value::NONE {
+    } else if tt_ctx.hit && tt_ctx.data.eval != Value::NONE && !pv_node {
+        // TTヒット && eval有効 && 非PVノード → TTからevalを取得
+        ensure_nnue_accumulator(st, pos);
         unadjusted_static_eval = tt_ctx.data.eval;
         unadjusted_static_eval
     } else {
+        // PVノード または TTミス/eval無効 → 常にNNUE評価
         unadjusted_static_eval = nnue_evaluate(st, pos);
         unadjusted_static_eval
     };

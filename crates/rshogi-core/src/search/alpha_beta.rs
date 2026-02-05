@@ -1170,7 +1170,8 @@ impl SearchWorker {
         let _tt_capture = tt_ctx.capture;
 
         // 静的評価
-        let eval_ctx = compute_eval_context(st, ctx, pos, ply, in_check, &tt_ctx, excluded_move);
+        let eval_ctx =
+            compute_eval_context(st, ctx, pos, ply, in_check, pv_node, &tt_ctx, excluded_move);
         let mut improving = eval_ctx.improving;
         let opponent_worsening = eval_ctx.opponent_worsening;
 
@@ -1190,15 +1191,23 @@ impl SearchWorker {
             {
                 let prev_eval = st.stack[prev_ply].static_eval.raw();
                 let curr_eval = eval_ctx.static_eval.raw();
+                // YaneuraOu/Stockfish準拠: 評価値の変化に基づくヒストリ更新
+                // -(prev + curr): 相手の手で自分の評価が良くなったかを測定
+                // clamp(-200, 156) + 58: 学習済みパラメータで正規化
                 let eval_diff = (-(prev_eval + curr_eval)).clamp(-200, 156) + 58;
                 let opponent = !pos.side_to_move();
                 let prev_sq = prev_move.to();
 
                 ctx.history.with_write(|h| {
-                    // mainHistory 更新: evalDiff * 9
+                    // mainHistory 更新: evalDiff * 9 (YaneuraOu準拠)
                     h.main_history.update(opponent, prev_move, eval_diff * 9);
 
-                    // pawnHistory 更新（追加条件: !ttHit && 駒種 != 歩 && 成りでない）
+                    // pawnHistory 更新 (YaneuraOu準拠: yaneuraou-search.cpp:2754-2757)
+                    // 条件:
+                    // - !ttHit: TTヒット時はスキップ（既に十分な情報がある）
+                    // - piece != Pawn: 「pawnHistory」は歩の配置に対する駒の評価履歴
+                    //   （歩自体の手は対象外、駒を動かしたときの評価）
+                    // - !promotion: 成り手は駒種が変わるため対象外
                     if !tt_hit {
                         let prev_piece = pos.piece_on(prev_sq);
                         if prev_piece.piece_type() != PieceType::Pawn && !prev_move.is_promotion() {
@@ -1434,16 +1443,18 @@ impl SearchWorker {
                 if singular_value < singular_beta {
                     inc_stat!(st, singular_extension);
                     // Singular確定 → 延長量を計算
-                    // 補正履歴の寄与（abs(correctionValue)/249096）を margin に加算
+                    // YaneuraOu/Stockfish学習済みパラメータ（yaneuraou-search.cpp:3404-3411）
                     let corr_val_adj = eval_ctx.correction_value.abs() / 249_096;
-                    // YaneuraOu準拠: TTMoveHistoryをdoubleMarginに組み込み
                     let tt_move_hist = ctx.history.with_read(|h| h.tt_move_history.get() as i32);
-                    // YaneuraOu準拠: plyがrootDepthを超える場合はマージンを減らす
+                    // double_margin: 2手延長の閾値
+                    //   base(4) + PVボーナス(205) - 非駒取りペナルティ(223)
+                    //   - 補正値 - TTMove履歴 - 深い探索ペナルティ(45)
                     let double_margin = 4 + 205 * pv_node as i32
                         - 223 * !tt_capture as i32
                         - corr_val_adj
                         - 921 * tt_move_hist / 127649
                         - (ply > st.root_depth) as i32 * 45;
+                    // triple_margin: 3手延長の閾値
                     let triple_margin = 80 + 276 * pv_node as i32 - 249 * !tt_capture as i32
                         + 86 * tt_pv as i32
                         - corr_val_adj
@@ -1656,9 +1667,9 @@ impl SearchWorker {
             let mut value = if depth >= 2 && move_count > 1 {
                 inc_stat!(st, lmr_applied);
                 // YaneuraOu準拠: d = max(1, min(newDepth - r/1024, newDepth + 2)) + PvNode
-                let d = (std::cmp::max(1, std::cmp::min(new_depth - r / 1024, new_depth + 2))
-                    + pv_node as i32)
-                    .max(1);
+                // 内側のmax(1, ...)で1以上が保証され、pv_node(0or1)加算で減ることはない
+                let d = std::cmp::max(1, std::cmp::min(new_depth - r / 1024, new_depth + 2))
+                    + pv_node as i32;
 
                 // LMR統計: 削減量と新深度を記録
                 #[cfg(feature = "search-stats")]

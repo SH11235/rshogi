@@ -15,10 +15,11 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 /// クラスター構造
 /// 同じハッシュインデックスに対して複数のエントリを持つ
-#[repr(C, align(32))]
+/// 64bitキー対応: 16bytes × 3 = 48bytes（キャッシュライン64バイトに収まる）
+#[repr(C, align(64))]
 pub struct Cluster {
     entries: [TTEntry; CLUSTER_SIZE],
-    _padding: [u8; 2], // 10 * 3 + 2 = 32 bytes
+    _padding: [u8; 16], // 16 * 3 + 16 = 64 bytes
 }
 
 impl Cluster {
@@ -26,7 +27,7 @@ impl Cluster {
     const fn new() -> Self {
         Self {
             entries: [TTEntry::new(); CLUSTER_SIZE],
-            _padding: [0; 2],
+            _padding: [0; 16],
         }
     }
 }
@@ -46,8 +47,8 @@ impl Clone for Cluster {
     }
 }
 
-// クラスターは32バイトであることを保証
-const _: () = assert!(std::mem::size_of::<Cluster>() == 32);
+// クラスターは64バイトであることを保証（キャッシュラインサイズ）
+const _: () = assert!(std::mem::size_of::<Cluster>() == 64);
 
 struct ClusterTable {
     alloc: Allocation,
@@ -169,15 +170,14 @@ impl TranspositionTable {
         self.generation8.load(Ordering::Relaxed)
     }
 
-    /// 置換表を検索
+    /// 置換表を検索（64bitキーでマッチング）
     pub fn probe(&self, key: u64, pos: &Position) -> ProbeResult {
         let side_to_move = pos.side_to_move();
         let cluster = self.first_entry(key, side_to_move);
-        let key16 = key as u16;
 
-        // クラスター内を検索
+        // クラスター内を検索（64bitキーで完全マッチング）
         for entry in &cluster.entries {
-            if entry.key16() == key16 {
+            if entry.key64() == key {
                 let mut data = entry.read();
 
                 if data.mv != Move::NONE {
@@ -192,7 +192,6 @@ impl TranspositionTable {
                     found: entry.is_occupied(),
                     data,
                     writer: entry as *const _ as *mut _,
-                    key16,
                 };
             }
         }
@@ -216,7 +215,6 @@ impl TranspositionTable {
             found: false,
             data: TTData::EMPTY,
             writer: replace,
-            key16,
         }
     }
 
@@ -289,12 +287,10 @@ pub struct ProbeResult {
     pub data: TTData,
     /// 書き込み用エントリ
     writer: *mut TTEntry,
-    /// キー（書き込み時に使用）
-    key16: u16,
 }
 
 impl ProbeResult {
-    /// エントリに書き込む
+    /// エントリに書き込む（64bitキー対応）
     ///
     /// # Safety
     /// writerポインタが有効であることを前提とする
@@ -309,9 +305,9 @@ impl ProbeResult {
         eval: Value,
         generation8: u8,
     ) {
-        debug_assert_eq!(self.key16, key as u16);
+        // SAFETY: writerはprobe()で取得した有効なポインタ
         unsafe {
-            (*self.writer).save(self.key16, value, is_pv, bound, depth, mv, eval, generation8);
+            (*self.writer).save(key, value, is_pv, bound, depth, mv, eval, generation8);
         }
     }
 }
@@ -454,7 +450,7 @@ mod tests {
 
     #[test]
     fn test_cluster_size() {
-        // クラスターは32バイト
-        assert_eq!(std::mem::size_of::<Cluster>(), 32);
+        // クラスターは64バイト（キャッシュラインサイズ）
+        assert_eq!(std::mem::size_of::<Cluster>(), 64);
     }
 }

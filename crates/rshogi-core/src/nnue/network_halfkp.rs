@@ -150,6 +150,25 @@ impl<const L1: usize> AccumulatorHalfKP<L1> {
         }
     }
 
+    /// 未初期化で作成（ゼロ初期化をスキップ）
+    ///
+    /// # Safety
+    ///
+    /// 呼び出し側が使用前にaccumulationを初期化する責任を持つ。
+    /// AccumulatorStackHalfKP::push()で使用され、直後にrefresh_accumulatorか
+    /// update_accumulatorで全要素が上書きされる。
+    ///
+    /// Clippy警告(uninit_assumed_init)を許可しているが、これは呼び出し直後に
+    /// 全要素が上書きされることが保証されているため安全である。
+    #[inline]
+    #[allow(clippy::uninit_assumed_init)]
+    pub unsafe fn new_uninit() -> Self {
+        Self {
+            accumulation: std::mem::MaybeUninit::uninit().assume_init(),
+            computed_accumulation: false,
+        }
+    }
+
     /// クリア
     pub fn clear(&mut self) {
         self.accumulation[0].0.fill(0);
@@ -259,11 +278,16 @@ impl<const L1: usize> AccumulatorStackHalfKP<L1> {
     }
 
     /// プッシュ
+    ///
+    /// アキュムレータは未初期化で作成される。呼び出し側が直後に
+    /// refresh_accumulatorかupdate_accumulatorを呼ぶ責任を持つ。
     pub fn push(&mut self, dirty_piece: DirtyPiece) {
         let prev_idx = self.current_idx;
         self.current_idx = self.entries.len();
+        // SAFETY: push後は必ずrefresh_accumulatorかupdate_accumulatorが呼ばれ、
+        // accumulationの全要素が上書きされる
         self.entries.push(AccumulatorEntryHalfKP {
-            accumulator: AccumulatorHalfKP::new(),
+            accumulator: unsafe { AccumulatorHalfKP::new_uninit() },
             dirty_piece,
             previous: Some(prev_idx),
         });
@@ -1138,20 +1162,23 @@ impl<
     /// 評価値を計算
     ///
     /// 最適化: スタック配列 + 64バイトアラインメントで SIMD 効率を最大化
+    /// 各配列はMaybeUninitで確保し、直後のtransform/propagateで全要素が上書きされる。
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorHalfKP<L1>) -> Value {
+        // SAFETY: 各配列は直後のtransform_raw/activate/propagateで全要素が上書きされる
         // Feature Transformer 出力（生のi16値）- 64バイトアライン
         // FT出力は常に FT_OUT（= L1 * 2、両視点の連結）
-        let mut ft_out_i16 = AlignedGeneric([0i16; FT_OUT]);
+        let mut ft_out_i16: AlignedGeneric<[i16; FT_OUT]> = unsafe { AlignedGeneric::new_uninit() };
         self.feature_transformer
             .transform_raw(acc, pos.side_to_move(), &mut ft_out_i16.0);
 
         // 活性化関数適用 (i16 → u8) - 64バイトアライン
         // 活性化後のサイズは L1_INPUT（CReLU: L1*2、Pairwise: L1）
-        let mut transformed = AlignedGeneric([0u8; L1_INPUT]);
+        let mut transformed: AlignedGeneric<[u8; L1_INPUT]> =
+            unsafe { AlignedGeneric::new_uninit() };
         A::activate_i16_to_u8(&ft_out_i16.0, &mut transformed.0, self.qa);
 
         // l1 層 - 64バイトアライン
-        let mut l1_out = AlignedGeneric([0i32; L2]);
+        let mut l1_out: AlignedGeneric<[i32; L2]> = unsafe { AlignedGeneric::new_uninit() };
         self.l1.propagate(&transformed.0, &mut l1_out.0);
 
         // デバッグ: L1出力の範囲チェック
@@ -1168,11 +1195,11 @@ impl<
         }
 
         // 活性化関数適用 (i32 → u8) - 64バイトアライン
-        let mut l1_relu = AlignedGeneric([0u8; L2]);
+        let mut l1_relu: AlignedGeneric<[u8; L2]> = unsafe { AlignedGeneric::new_uninit() };
         A::activate_i32_to_u8(&l1_out.0, &mut l1_relu.0);
 
         // l2 層 - 64バイトアライン
-        let mut l2_out = AlignedGeneric([0i32; L3]);
+        let mut l2_out: AlignedGeneric<[i32; L3]> = unsafe { AlignedGeneric::new_uninit() };
         self.l2.propagate(&l1_relu.0, &mut l2_out.0);
 
         // デバッグ: L2出力の範囲チェック
@@ -1189,10 +1216,10 @@ impl<
         }
 
         // 活性化関数適用 (i32 → u8) - 64バイトアライン
-        let mut l2_relu = AlignedGeneric([0u8; L3]);
+        let mut l2_relu: AlignedGeneric<[u8; L3]> = unsafe { AlignedGeneric::new_uninit() };
         A::activate_i32_to_u8(&l2_out.0, &mut l2_relu.0);
 
-        // output 層
+        // output 層（4バイトなのでゼロ初期化のコストは無視可能）
         let mut output = [0i32; 1];
         self.output.propagate(&l2_relu.0, &mut output);
 

@@ -27,6 +27,7 @@ use super::halfka_hm::{HalfKA_hmNetwork, HalfKA_hmStack};
 use super::halfkp::{HalfKPNetwork, HalfKPStack};
 use super::network_layer_stacks::NetworkLayerStacks;
 use super::spec::{Activation, FeatureSet};
+use super::stats::{count_already_computed, count_refresh, count_update};
 use crate::eval::material;
 use crate::position::Position;
 use crate::types::Value;
@@ -948,6 +949,154 @@ pub fn evaluate_dispatch(pos: &Position, stack: &mut AccumulatorStackVariant) ->
         AccumulatorStackVariant::HalfKA(s) => update_and_evaluate_halfka(network, pos, s),
         AccumulatorStackVariant::HalfKA_hm(s) => update_and_evaluate_halfka_hm(network, pos, s),
         AccumulatorStackVariant::HalfKP(s) => update_and_evaluate_halfkp(network, pos, s),
+    }
+}
+
+/// アキュムレータを計算済みにする（評価値の計算はしない）
+///
+/// TTヒット時など、評価値はTTから取得するが、
+/// 次のノードの差分更新のためにアキュムレータだけは計算しておく必要がある場合に使用。
+/// YaneuraOu/Stockfish互換の動作を実現する。
+pub fn ensure_accumulator_computed(pos: &Position, stack: &mut AccumulatorStackVariant) {
+    // NNUEがなければ何もしない
+    let Some(network) = NETWORK.get() else {
+        return;
+    };
+
+    // バリアントに応じてアキュムレータを更新（評価はしない）
+    match stack {
+        AccumulatorStackVariant::LayerStacks(s) => {
+            update_accumulator_only_layer_stacks(network, pos, s);
+        }
+        AccumulatorStackVariant::HalfKA(s) => {
+            update_accumulator_only_halfka(network, pos, s);
+        }
+        AccumulatorStackVariant::HalfKA_hm(s) => {
+            update_accumulator_only_halfka_hm(network, pos, s);
+        }
+        AccumulatorStackVariant::HalfKP(s) => {
+            update_accumulator_only_halfkp(network, pos, s);
+        }
+    }
+}
+
+/// LayerStacks アキュムレータを更新のみ（評価なし）
+#[inline]
+fn update_accumulator_only_layer_stacks(
+    network: &NNUENetwork,
+    pos: &Position,
+    stack: &mut AccumulatorStackLayerStacks,
+) {
+    let current_entry = stack.current();
+    if current_entry.accumulator.computed_accumulation {
+        count_already_computed!();
+        return;
+    }
+
+    let mut updated = false;
+
+    // 直前局面で差分更新を試行
+    if let Some(prev_idx) = current_entry.previous {
+        let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
+        if prev_computed {
+            let dirty_piece = stack.current().dirty_piece;
+            let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
+            network.update_accumulator_layer_stacks(pos, &dirty_piece, current_acc, prev_acc);
+            count_update!();
+            updated = true;
+        }
+    }
+
+    // 失敗なら全計算
+    if !updated {
+        let acc = &mut stack.current_mut().accumulator;
+        network.refresh_accumulator_layer_stacks(pos, acc);
+        count_refresh!();
+    }
+}
+
+/// HalfKA_hm アキュムレータを更新のみ（評価なし）
+#[inline]
+fn update_accumulator_only_halfka_hm(
+    network: &NNUENetwork,
+    pos: &Position,
+    stack: &mut HalfKA_hmStack,
+) {
+    if stack.is_current_computed() {
+        count_already_computed!();
+        return;
+    }
+
+    let mut updated = false;
+
+    // 直前局面で差分更新を試行
+    if let Some(prev_idx) = stack.current_previous() {
+        if stack.is_entry_computed(prev_idx) {
+            let dirty = stack.current_dirty_piece();
+            network.update_accumulator_halfka_hm(pos, &dirty, stack, prev_idx);
+            count_update!();
+            updated = true;
+        }
+    }
+
+    // 失敗なら全計算
+    if !updated {
+        network.refresh_accumulator_halfka_hm(pos, stack);
+        count_refresh!();
+    }
+}
+
+/// HalfKA アキュムレータを更新のみ（評価なし）
+#[inline]
+fn update_accumulator_only_halfka(network: &NNUENetwork, pos: &Position, stack: &mut HalfKAStack) {
+    if stack.is_current_computed() {
+        count_already_computed!();
+        return;
+    }
+
+    let mut updated = false;
+
+    // 直前局面で差分更新を試行
+    if let Some(prev_idx) = stack.current_previous() {
+        if stack.is_entry_computed(prev_idx) {
+            let dirty = stack.current_dirty_piece();
+            network.update_accumulator_halfka(pos, &dirty, stack, prev_idx);
+            count_update!();
+            updated = true;
+        }
+    }
+
+    // 失敗なら全計算
+    if !updated {
+        network.refresh_accumulator_halfka(pos, stack);
+        count_refresh!();
+    }
+}
+
+/// HalfKP アキュムレータを更新のみ（評価なし）
+#[inline]
+fn update_accumulator_only_halfkp(network: &NNUENetwork, pos: &Position, stack: &mut HalfKPStack) {
+    if stack.is_current_computed() {
+        count_already_computed!();
+        return;
+    }
+
+    let mut updated = false;
+
+    // 直前局面で差分更新を試行
+    if let Some(prev_idx) = stack.current_previous() {
+        if stack.is_entry_computed(prev_idx) {
+            let dirty = stack.current_dirty_piece();
+            network.update_accumulator_halfkp(pos, &dirty, stack, prev_idx);
+            count_update!();
+            updated = true;
+        }
+    }
+
+    // 失敗なら全計算
+    if !updated {
+        network.refresh_accumulator_halfkp(pos, stack);
+        count_refresh!();
     }
 }
 

@@ -42,6 +42,12 @@ impl TTMoveHistory {
     /// Multi-cut時の更新ボーナスを計算
     ///
     /// YaneuraOu準拠: `max(-400 - 100 * depth, -4000)`
+    ///
+    /// Multi-cutはTT手が実際には最善でなかったことを示すため、
+    /// 負のボーナス（ペナルティ）を与える。深いほどペナルティ大。
+    /// - depth=0: -400
+    /// - depth=10: -1400
+    /// - depth=36+: -4000（下限）
     #[inline]
     pub fn multi_cut_bonus(depth: i32) -> i32 {
         (TT_MOVE_HISTORY_MULTI_CUT_BASE + TT_MOVE_HISTORY_MULTI_CUT_DEPTH_MULT * depth)
