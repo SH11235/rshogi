@@ -309,8 +309,19 @@ impl TimeManagement {
         let increment = limits.increment(us);
         let byoyomi = limits.byoyomi_time(us);
 
+        // 秒読みモードかどうかを先に判定（持ち時間が秒読みの1.2倍未満）
+        let is_byoyomi_mode = byoyomi > 0 && time_left < (byoyomi as f64 * 1.2) as TimePoint;
+
         // NetworkDelay2 を考慮した今回の残り時間
-        self.remain_time = (time_left + increment + byoyomi - self.network_delay2).max(100);
+        // 秒読みモードでは、秒読み時間から network_delay（短い方）を引く
+        // 持ち時間モードでは、合計時間から network_delay2 を引く
+        self.remain_time = if is_byoyomi_mode {
+            // 秒読みモード: byoyomi + time_left から network_delay を引く
+            (time_left + byoyomi - self.network_delay).max(100)
+        } else {
+            // 持ち時間モード: 従来通り network_delay2 を引く
+            (time_left + increment + byoyomi - self.network_delay2).max(100)
+        };
 
         // rtime 指定時はランダム化した固定時間を使用
         if limits.rtime > 0 {
@@ -406,7 +417,7 @@ impl TimeManagement {
 
         // 秒読みモードでかつ持ち時間が少ない場合は使い切る
         self.is_final_push = false;
-        if byoyomi > 0 && time_left < (byoyomi as f64 * 1.2) as TimePoint {
+        if is_byoyomi_mode {
             self.minimum_time = byoyomi + time_left;
             self.optimum_time = byoyomi + time_left;
             self.maximum_time = byoyomi + time_left;
@@ -1223,10 +1234,10 @@ mod tests {
 
         tm.init(&limits, Color::Black, 0, 256);
 
-        // YaneuraOu: remain_time = 5000 - 1120 = 3880
-        assert_eq!(tm.optimum(), 3880);
-        assert_eq!(tm.maximum(), 3880);
-        assert_eq!(tm.minimum(), 3880);
+        // 秒読みモードでは network_delay (120ms) を使用: 5000 - 120 = 4880
+        assert_eq!(tm.optimum(), 4880);
+        assert_eq!(tm.maximum(), 4880);
+        assert_eq!(tm.minimum(), 4880);
     }
 
     #[test]

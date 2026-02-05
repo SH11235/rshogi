@@ -404,10 +404,11 @@ fn test_final_push_byoyomi_entry() {
 
     // minimumTime = optimumTime = maximumTime = byoyomi + time_left
     // ただし round_up() と remain_time でクランプされる
-    // remain_time = 5000 + 10000 - 1120 = 13880
-    assert_eq!(tm.minimum(), 13880);
-    assert_eq!(tm.optimum(), 13880);
-    assert_eq!(tm.maximum(), 13880);
+    // 秒読みモードでは network_delay (120) を使用:
+    // remain_time = 5000 + 10000 - 120 = 14880
+    assert_eq!(tm.minimum(), 14880);
+    assert_eq!(tm.optimum(), 14880);
+    assert_eq!(tm.maximum(), 14880);
 }
 
 /// 秒読み判定: 秒読みだが持ち時間が十分
