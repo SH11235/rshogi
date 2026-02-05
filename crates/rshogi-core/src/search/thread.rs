@@ -757,6 +757,7 @@ mod imp {
                         // Collect result after search completes
                         // Extract top N moves for skill-based selection (typically 4 when skill enabled)
                         let top_moves: Vec<(Move, Value)> = worker
+                            .state
                             .root_moves
                             .iter()
                             .take(4) // multi_pv is at least 4 when skill is enabled
@@ -764,11 +765,12 @@ mod imp {
                             .collect();
                         let result = HelperResult {
                             thread_id,
-                            nodes: worker.nodes,
-                            best_move_changes: worker.best_move_changes,
-                            completed_depth: worker.completed_depth,
-                            best_move: worker.best_move,
+                            nodes: worker.state.nodes,
+                            best_move_changes: worker.state.best_move_changes,
+                            completed_depth: worker.state.completed_depth,
+                            best_move: worker.state.best_move,
                             best_score: worker
+                                .state
                                 .root_moves
                                 .get(0)
                                 .map(|rm| rm.score)
