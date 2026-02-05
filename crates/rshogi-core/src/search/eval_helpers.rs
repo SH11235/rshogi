@@ -257,7 +257,8 @@ pub(super) fn compute_eval_context(
     }
 
     let mut unadjusted_static_eval = Value::NONE;
-    // デバッグ: TTからのeval取得を無効化（key16衝突の影響を排除）
+    // 64bitキー + TTからのeval取得なし（原因切り分け用）
+    // クラスターサイズ変更の影響を確認するため、暫定対策と同じ条件でテスト
     let mut static_eval = if in_check {
         Value::NONE
     } else {

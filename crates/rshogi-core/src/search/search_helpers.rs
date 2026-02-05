@@ -112,7 +112,11 @@ pub(super) fn nnue_evaluate(st: &mut SearchState, pos: &Position) -> Value {
 ///
 /// TTヒット時など、評価値はTTから取得するが、
 /// 次のノードの差分更新のためにアキュムレータだけは計算しておく必要がある場合に使用。
+///
+/// 注: 現在はTTからのeval取得を無効化しているため未使用。
+/// 将来の調査のために残してある。
 #[inline]
+#[allow(dead_code)]
 pub(super) fn ensure_nnue_accumulator(st: &mut SearchState, pos: &Position) {
     ensure_accumulator_computed(pos, &mut st.nnue_stack)
 }
