@@ -99,12 +99,7 @@ pub(super) fn step14_pruning(
     let lmr_depth = step_ctx.lmr_depth;
 
     if step_ctx.ply != 0 && !step_ctx.best_value.is_loss() {
-        let lmp_denominator = 2 - step_ctx.improving as i32;
-        debug_assert!(lmp_denominator > 0, "LMP denominator must be positive");
-        let lmp_limit = (3 + step_ctx.depth * step_ctx.depth) / lmp_denominator;
-        if step_ctx.move_count >= lmp_limit && !step_ctx.is_capture && !step_ctx.gives_check {
-            return Step14Outcome::Skip { best_value: None };
-        }
+        // LMPはalpha_beta.rsで処理するため、ここでは行わない
 
         if step_ctx.is_capture || step_ctx.gives_check {
             let captured = step_ctx.pos.piece_on(step_ctx.mv.to());
@@ -135,9 +130,12 @@ pub(super) fn step14_pruning(
             }
 
             // SEE based pruning for captures (157 * depth + captHist / 29)
-            let margin = (157 * step_ctx.depth + capt_hist / 29).max(0);
-            if !step_ctx.pos.see_ge(step_ctx.mv, Value::new(-margin)) {
-                return Step14Outcome::Skip { best_value: None };
+            // YaneuraOu準拠: alpha >= VALUE_DRAW 条件を追加
+            if step_ctx.alpha >= Value::DRAW {
+                let margin = (157 * step_ctx.depth + capt_hist / 29).max(0);
+                if !step_ctx.pos.see_ge(step_ctx.mv, Value::new(-margin)) {
+                    return Step14Outcome::Skip { best_value: None };
+                }
             }
         } else {
             // Quiet moves
@@ -145,15 +143,37 @@ pub(super) fn step14_pruning(
             let to_sq = step_ctx.mv.to();
             let cont_hist_0 = step_ctx.cont_history_1.get(moved_piece, to_sq) as i32;
             let cont_hist_1 = step_ctx.cont_history_2.get(moved_piece, to_sq) as i32;
-            let main_hist = ctx
-                .history
-                .with_read(|h| h.main_history.get(step_ctx.mover, step_ctx.mv) as i32);
-            let hist_score = 2 * main_hist + cont_hist_0 + cont_hist_1;
+            let (main_hist, pawn_hist) = ctx.history.with_read(|h| {
+                let mh = h.main_history.get(step_ctx.mover, step_ctx.mv) as i32;
+                let ph = h.pawn_history.get(step_ctx.pawn_history_index, moved_piece, to_sq) as i32;
+                (mh, ph)
+            });
+
+            // YaneuraOu準拠: Continuation history（mainHistoryを含まない）
+            // yaneuraou-search.cpp:3273-3276
+            //
+            // 【実装メモ: df8d771d】
+            // 旧実装(00c06b7f)では hist_score = 2*main_hist + cont0 + cont1 + pawn_hist で判定していた。
+            // YaneuraOu準拠に修正した結果:
+            // - ノード数: 1.3-2.2倍増加（枝刈りが緩くなった）
+            // - 自己対局: 48.25% vs 00c06b7f（200局, 秒読み2秒）
+            // mainHistoryは通常負（悪い手）のため、含めると過剰に枝刈りしていた。
+            // YaneuraOu準拠で正しいが、NPS差により時間制限下では不利。
+            // NPS改善後に再評価予定。
+            // 詳細: docs/step14_implementation_issues.md（localファイルでgit管理外）
+            let cont_history = cont_hist_0 + cont_hist_1 + pawn_hist;
 
             // Continuation history based pruning (YaneuraOu: -4312 * depth)
-            if lmr_depth < 12 && hist_score < -4312 * step_ctx.depth {
+            if cont_history < -4312 * step_ctx.depth {
                 return Step14Outcome::Skip { best_value: None };
             }
+
+            // YaneuraOu準拠: mainHistoryは pruning判定後に追加
+            // yaneuraou-search.cpp:3283: history += 76 * mainHistory / 32
+            let hist_score = cont_history + 76 * main_hist / 32;
+
+            // lmrDepth調整 (枝刈りされなかった場合のみ実行)
+            let lmr_depth = lmr_depth + hist_score / 3220;
 
             // Futility pruning for quiet moves (親ノードでの枝刈り)
             let no_best_move = step_ctx.tt_move.is_none();

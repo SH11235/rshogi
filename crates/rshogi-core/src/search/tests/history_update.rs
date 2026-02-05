@@ -85,16 +85,15 @@ fn continuation_history_updates_on_quiet_best() {
 #[test]
 fn tt_move_history_positive_update() {
     let mut history = TTMoveHistory::new();
-    let ply = 5;
 
     // 初期値は0
-    assert_eq!(history.get(ply), 0);
+    assert_eq!(history.get(), 0);
 
     // 正のボーナスを適用
-    history.update(ply, TT_MOVE_HISTORY_BONUS);
+    history.update(TT_MOVE_HISTORY_BONUS);
 
     // 値が正になっていることを確認
-    let value = history.get(ply);
+    let value = history.get();
     assert!(
         value > 0,
         "TTMoveHistory should be positive after +{TT_MOVE_HISTORY_BONUS} bonus, got {value}"
@@ -105,20 +104,19 @@ fn tt_move_history_positive_update() {
 #[test]
 fn tt_move_history_negative_update() {
     let mut history = TTMoveHistory::new();
-    let ply = 5;
 
     // まず正の値を蓄積
     for _ in 0..5 {
-        history.update(ply, TT_MOVE_HISTORY_BONUS);
+        history.update(TT_MOVE_HISTORY_BONUS);
     }
-    let before = history.get(ply);
+    let before = history.get();
     assert!(before > 0, "History should be positive before malus");
 
     // 負のボーナスを適用
-    history.update(ply, TT_MOVE_HISTORY_MALUS);
+    history.update(TT_MOVE_HISTORY_MALUS);
 
     // 値が減少していることを確認
-    let after = history.get(ply);
+    let after = history.get();
     assert!(
         after < before,
         "TTMoveHistory should decrease after {TT_MOVE_HISTORY_MALUS} malus"

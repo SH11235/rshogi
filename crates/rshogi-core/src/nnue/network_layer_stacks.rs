@@ -23,6 +23,7 @@
 //! - 相手玉の段: 0-2 → 0, 3-5 → 1, 6-8 → 2
 //! - bucket = f_index + e_index (0-8)
 
+use super::accumulator::Aligned;
 use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLayerStacks};
 use super::constants::{MAX_ARCH_LEN, NNUE_PYTORCH_L1, NNUE_VERSION_HALFKA};
 use super::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
@@ -182,6 +183,8 @@ impl NetworkLayerStacks {
     }
 
     /// 評価値を計算
+    ///
+    /// 配列はMaybeUninitで確保し、直後のsqr_clipped_relu_transformで全要素が上書きされる。
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorLayerStacks) -> Value {
         let side_to_move = pos.side_to_move();
 
@@ -192,8 +195,9 @@ impl NetworkLayerStacks {
             (acc.get(Color::White as usize), acc.get(Color::Black as usize))
         };
 
-        let mut transformed = [0u8; NNUE_PYTORCH_L1];
-        sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed);
+        // SAFETY: 直後のsqr_clipped_relu_transformで全要素が上書きされる
+        let mut transformed: Aligned<[u8; NNUE_PYTORCH_L1]> = unsafe { Aligned::new_uninit() };
+        sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
 
         // バケットインデックスを計算（両玉の段に基づく）
         let f_king = pos.king_square(side_to_move);
@@ -203,7 +207,7 @@ impl NetworkLayerStacks {
         let bucket_index = compute_bucket_index(f_rank, e_rank);
 
         // LayerStacks で評価
-        let score = self.layer_stacks.evaluate(bucket_index, &transformed);
+        let score = self.layer_stacks.evaluate(bucket_index, &transformed.0);
 
         Value::new(score)
     }

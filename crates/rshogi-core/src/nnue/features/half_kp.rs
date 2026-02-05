@@ -104,6 +104,13 @@ impl Feature for HalfKP {
         removed: &mut IndexList<MAX_CHANGED_FEATURES>,
         added: &mut IndexList<MAX_CHANGED_FEATURES>,
     ) {
+        // 玉のマスを後手視点では反転（append_active_indicesと同様）
+        let king_sq = if perspective == Color::Black {
+            king_sq
+        } else {
+            king_sq.inverse()
+        };
+
         // 盤上駒の変化を処理
         for dp in dirty_piece.pieces() {
             // 盤上から消える側（old）

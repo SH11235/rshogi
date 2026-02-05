@@ -27,6 +27,8 @@ rshogi-core = { version = "0.1", path = "../rshogi-core" }
 default = []
 # 探索統計収集（枝刈り発生回数等のカウント）
 search-stats = ["rshogi-core/search-stats"]
+# NNUE統計収集（refresh/update比率等のカウント）
+nnue-stats = ["rshogi-core/nnue-stats"]
 
 [[bin]]
 name = "rshogi-usi"

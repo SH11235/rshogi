@@ -192,19 +192,18 @@ pub(super) struct Step14Context<'a> {
     pub(super) mv: Move,
     pub(super) depth: Depth,
     pub(super) ply: i32,
-    pub(super) improving: bool,
     pub(super) best_value: Value,
     pub(super) in_check: bool,
     pub(super) gives_check: bool,
     pub(super) is_capture: bool,
     pub(super) lmr_depth: i32,
     pub(super) mover: Color,
-    pub(super) move_count: i32,
     pub(super) cont_history_1: &'a PieceToHistory,
     pub(super) cont_history_2: &'a PieceToHistory,
     pub(super) static_eval: Value,
     pub(super) alpha: Value,
-    pub(super) tt_move: Move, // bestMove判定用
+    pub(super) tt_move: Move,             // bestMove判定用
+    pub(super) pawn_history_index: usize, // pawnHistory用インデックス
 }
 
 // =============================================================================
@@ -1085,6 +1084,7 @@ impl SearchWorker {
         // YaneuraOuのallNode定義: !(PvNode || cutNode)（yaneuraou-search.cpp:1854付近）
         let all_node = !(pv_node || cut_node);
         let mut alpha = alpha;
+        let mut beta = beta;
 
         // 深さが0以下なら静止探索へ
         if depth <= DEPTH_QS {
@@ -1108,6 +1108,21 @@ impl SearchWorker {
         // 中断チェック
         if check_abort(st, ctx, limits, time_manager) {
             return Value::ZERO;
+        }
+
+        // =====================================================================
+        // Step 3. Mate Distance Pruning
+        // =====================================================================
+        // 詰みまでの手数による枝刈り。
+        // - 現在のplyで詰まされる場合のスコア(mated_in(ply))より低いalphaは意味がない
+        // - 次の手で詰ます場合のスコア(mate_in(ply+1))より高いbetaは意味がない
+        // - 補正後にalpha >= betaなら即座にカット
+        if NT != NodeType::Root as u8 {
+            alpha = alpha.max(Value::mated_in(ply));
+            beta = beta.min(Value::mate_in(ply + 1));
+            if alpha >= beta {
+                return alpha;
+            }
         }
 
         // スタック設定
@@ -1155,9 +1170,54 @@ impl SearchWorker {
         let _tt_capture = tt_ctx.capture;
 
         // 静的評価
-        let eval_ctx = compute_eval_context(st, ctx, pos, ply, in_check, &tt_ctx, excluded_move);
+        let eval_ctx =
+            compute_eval_context(st, ctx, pos, ply, in_check, pv_node, &tt_ctx, excluded_move);
         let mut improving = eval_ctx.improving;
         let opponent_worsening = eval_ctx.opponent_worsening;
+
+        // evalDiff によるヒストリ更新（YaneuraOu準拠: yaneuraou-search.cpp:2752-2758）
+        // 条件: (ss-1)->currentMove が有効 && !(ss-1)->inCheck && !priorCapture
+        if ply >= 1 {
+            let prev_ply = (ply - 1) as usize;
+            let prev_move = st.stack[prev_ply].current_move;
+            let prev_in_check = st.stack[prev_ply].in_check;
+            let prior_capture = st.stack[prev_ply].cont_hist_key.is_some_and(|k| k.capture);
+
+            if prev_move.is_normal()
+                && !prev_in_check
+                && !prior_capture
+                && eval_ctx.static_eval != Value::NONE
+                && st.stack[prev_ply].static_eval != Value::NONE
+            {
+                let prev_eval = st.stack[prev_ply].static_eval.raw();
+                let curr_eval = eval_ctx.static_eval.raw();
+                // YaneuraOu/Stockfish準拠: 評価値の変化に基づくヒストリ更新
+                // -(prev + curr): 相手の手で自分の評価が良くなったかを測定
+                // clamp(-200, 156) + 58: 学習済みパラメータで正規化
+                let eval_diff = (-(prev_eval + curr_eval)).clamp(-200, 156) + 58;
+                let opponent = !pos.side_to_move();
+                let prev_sq = prev_move.to();
+
+                ctx.history.with_write(|h| {
+                    // mainHistory 更新: evalDiff * 9 (YaneuraOu準拠)
+                    h.main_history.update(opponent, prev_move, eval_diff * 9);
+
+                    // pawnHistory 更新 (YaneuraOu準拠: yaneuraou-search.cpp:2754-2757)
+                    // 条件:
+                    // - !ttHit: TTヒット時はスキップ（既に十分な情報がある）
+                    // - piece != Pawn: 「pawnHistory」は歩の配置に対する駒の評価履歴
+                    //   （歩自体の手は対象外、駒を動かしたときの評価）
+                    // - !promotion: 成り手は駒種が変わるため対象外
+                    if !tt_hit {
+                        let prev_piece = pos.piece_on(prev_sq);
+                        if prev_piece.piece_type() != PieceType::Pawn && !prev_move.is_promotion() {
+                            let pawn_idx = pos.pawn_history_index();
+                            h.pawn_history.update(pawn_idx, prev_piece, prev_sq, eval_diff * 14);
+                        }
+                    }
+                });
+            }
+        }
 
         // priorReduction に応じた深さ調整（yaneuraou-search.cpp:2769-2774）
         if prior_reduction
@@ -1383,13 +1443,22 @@ impl SearchWorker {
                 if singular_value < singular_beta {
                     inc_stat!(st, singular_extension);
                     // Singular確定 → 延長量を計算
-                    // 補正履歴の寄与（abs(correctionValue)/249096）を margin に加算
+                    // YaneuraOu/Stockfish学習済みパラメータ（yaneuraou-search.cpp:3404-3411）
                     let corr_val_adj = eval_ctx.correction_value.abs() / 249_096;
-                    let double_margin =
-                        4 + 205 * pv_node as i32 - 223 * !tt_capture as i32 - corr_val_adj;
+                    let tt_move_hist = ctx.history.with_read(|h| h.tt_move_history.get() as i32);
+                    // double_margin: 2手延長の閾値
+                    //   base(4) + PVボーナス(205) - 非駒取りペナルティ(223)
+                    //   - 補正値 - TTMove履歴 - 深い探索ペナルティ(45)
+                    let double_margin = 4 + 205 * pv_node as i32
+                        - 223 * !tt_capture as i32
+                        - corr_val_adj
+                        - 921 * tt_move_hist / 127649
+                        - (ply > st.root_depth) as i32 * 45;
+                    // triple_margin: 3手延長の閾値
                     let triple_margin = 80 + 276 * pv_node as i32 - 249 * !tt_capture as i32
                         + 86 * tt_pv as i32
-                        - corr_val_adj;
+                        - corr_val_adj
+                        - (ply * 2 > st.root_depth * 3) as i32 * 52;
 
                     extension = 1
                         + (singular_value < singular_beta - Value::new(double_margin)) as i32
@@ -1399,6 +1468,11 @@ impl SearchWorker {
                     depth += 1;
                 } else if singular_value >= beta && !singular_value.is_mate_score() {
                     // Multi-Cut: 他の手もfail highする場合は枝刈り
+                    // YaneuraOu準拠: TTMoveHistoryを更新
+                    ctx.history.with_write(|h| {
+                        h.tt_move_history
+                            .update(super::tt_history::TTMoveHistory::multi_cut_bonus(depth));
+                    });
                     inc_stat!(st, multi_cut);
                     return singular_value;
                 } else if tt_value >= beta {
@@ -1425,24 +1499,40 @@ impl SearchWorker {
 
             let lmr_depth = new_depth - r / 1024;
 
+            // =============================================================
+            // LMP（Step14の前）
+            // =============================================================
+            // moveCount >= limitのとき、quiet手をスキップ
+            // YaneuraOu: skip_quiet_moves()のみでcontinueしないが、
+            // rshogiはStep14の条件が緩いため、continueも追加
+            if !pv_node && !in_check && !is_capture && !best_value.is_loss() && !mv.is_pass() {
+                let lmp_limit = (3 + depth * depth) / (2 - improving as i32);
+                if move_count >= lmp_limit {
+                    if !lmp_triggered && mp.is_quiet_stage() {
+                        mp.skip_quiets();
+                        lmp_triggered = true;
+                    }
+                    continue;
+                }
+            }
+
             let step14_ctx = Step14Context {
                 pos,
                 mv,
                 depth,
                 ply,
-                improving,
                 best_value,
                 in_check,
                 gives_check,
                 is_capture,
                 lmr_depth,
                 mover,
-                move_count,
                 cont_history_1: cont_history_ref(st, ctx, ply, 1),
                 cont_history_2: cont_history_ref(st, ctx, ply, 2),
                 static_eval: eval_ctx.static_eval,
                 alpha,
                 tt_move,
+                pawn_history_index: pos.pawn_history_index(),
             };
 
             match step14_pruning(ctx, step14_ctx) {
@@ -1456,24 +1546,6 @@ impl SearchWorker {
                     continue;
                 }
                 Step14Outcome::Continue => {}
-            }
-
-            // =============================================================
-            // Late Move Pruning（lazy generation対応）
-            // =============================================================
-            // パス手はLMPの対象外（ボーナス評価のため探索する必要がある）
-            // LMP条件成立時: quiet stageの場合は skip_quiets() を呼び出して残りのquiet手をスキップ
-            //               ただしcaptureは残す
-            if !pv_node && !in_check && !is_capture && !mv.is_pass() {
-                let lmp_limit = (3 + depth * depth) / (2 - improving as i32);
-                if move_count >= lmp_limit {
-                    if !lmp_triggered && mp.is_quiet_stage() {
-                        // LMP発火: 残りのquiet手をスキップ（bad capturesは残す）
-                        mp.skip_quiets();
-                        lmp_triggered = true;
-                    }
-                    continue;
-                }
             }
 
             // =============================================================
@@ -1594,11 +1666,10 @@ impl SearchWorker {
             // =============================================================
             let mut value = if depth >= 2 && move_count > 1 {
                 inc_stat!(st, lmr_applied);
-                let d = (std::cmp::max(
-                    1,
-                    std::cmp::min(new_depth - r / 1024, new_depth + 1 + pv_node as i32),
-                ) + pv_node as i32)
-                    .max(1);
+                // YaneuraOu準拠: d = max(1, min(newDepth - r/1024, newDepth + 2)) + PvNode
+                // 内側のmax(1, ...)で1以上が保証され、pv_node(0or1)加算で減ることはない
+                let d = std::cmp::max(1, std::cmp::min(new_depth - r / 1024, new_depth + 2))
+                    + pv_node as i32;
 
                 // LMR統計: 削減量と新深度を記録
                 #[cfg(feature = "search-stats")]
@@ -2071,17 +2142,15 @@ impl SearchWorker {
                 }
             }
 
-            // TTMoveHistory更新（非PVノードのみ）
+            // TTMoveHistory更新（非PVノードのみ、YaneuraOu準拠）
+            // YaneuraOu: ttMoveHistory << (bestMove == ttData.move ? 809 : -865)
             if !pv_node && tt_move.is_some() {
-                if best_move == tt_move {
-                    ctx.history.with_write(|h| {
-                        h.tt_move_history.update(ply as usize, TT_MOVE_HISTORY_BONUS)
-                    });
+                let bonus = if best_move == tt_move {
+                    TT_MOVE_HISTORY_BONUS
                 } else {
-                    ctx.history.with_write(|h| {
-                        h.tt_move_history.update(ply as usize, TT_MOVE_HISTORY_MALUS)
-                    });
-                }
+                    TT_MOVE_HISTORY_MALUS
+                };
+                ctx.history.with_write(|h| h.tt_move_history.update(bonus));
             }
         }
         // =================================================================

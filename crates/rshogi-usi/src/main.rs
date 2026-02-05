@@ -13,7 +13,8 @@ use rshogi_core::eval::{
     MaterialLevel, DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE,
 };
 use rshogi_core::nnue::{
-    evaluate_dispatch, get_network, init_nnue, set_fv_scale_override, AccumulatorStackVariant,
+    evaluate_dispatch, get_network, init_nnue, print_nnue_stats, set_fv_scale_override,
+    AccumulatorStackVariant,
 };
 use rshogi_core::position::Position;
 use rshogi_core::search::{LimitsType, Search, SearchInfo, SearchResult};
@@ -128,6 +129,8 @@ impl UsiEngine {
             }
             "quit" => {
                 self.cmd_stop();
+                // NNUE統計を出力（nnue-stats feature有効時のみ実際に出力）
+                print_nnue_stats();
                 return Ok(false);
             }
             "gameover" => {

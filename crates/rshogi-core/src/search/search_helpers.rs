@@ -4,7 +4,7 @@
 
 use std::ptr::NonNull;
 
-use crate::nnue::{evaluate_dispatch, DirtyPiece};
+use crate::nnue::{ensure_accumulator_computed, evaluate_dispatch, DirtyPiece};
 use crate::position::Position;
 use crate::search::PieceToHistory;
 use crate::types::{Piece, Square, Value};
@@ -106,6 +106,15 @@ pub(super) fn check_abort(
 #[inline]
 pub(super) fn nnue_evaluate(st: &mut SearchState, pos: &Position) -> Value {
     evaluate_dispatch(pos, &mut st.nnue_stack)
+}
+
+/// NNUE アキュムレータを計算済みにする（評価値の計算はしない）
+///
+/// TTヒット時など、評価値はTTから取得するが、
+/// 次のノードの差分更新のためにアキュムレータだけは計算しておく必要がある場合に使用。
+#[inline]
+pub(super) fn ensure_nnue_accumulator(st: &mut SearchState, pos: &Position) {
+    ensure_accumulator_computed(pos, &mut st.nnue_stack)
 }
 
 /// NNUE push
