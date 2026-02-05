@@ -263,6 +263,21 @@ pub(super) fn compute_eval_context(
         // TTヒット時: 評価値はTTから取得するが、次のノードの差分更新のために
         // アキュムレータだけは計算しておく（YaneuraOu/Stockfish互換）
         ensure_nnue_accumulator(st, pos);
+
+        // デバッグ: ensure後に評価して、TTの値と比較
+        #[cfg(feature = "search-stats")]
+        {
+            let computed_eval = nnue_evaluate(st, pos);
+            let tt_eval = tt_ctx.data.eval;
+            let diff = (computed_eval.raw() - tt_eval.raw()).abs();
+            if diff > 10 {
+                eprintln!(
+                    "[NNUE MISMATCH] TT eval={}, computed eval={}, diff={}",
+                    tt_eval.raw(), computed_eval.raw(), diff
+                );
+            }
+        }
+
         unadjusted_static_eval = tt_ctx.data.eval;
         unadjusted_static_eval
     } else {
