@@ -264,12 +264,93 @@ pub(super) fn compute_eval_context(
     // YaneuraOu準拠: TTからのeval取得 + PvNodeでは必ずevaluate()
     // yaneuraou-search.cpp:2680-2706 参照
     // 「🌈 これ書かないとR70ぐらい弱くなる。」
+
+    // デバッグ: TTヒット時のeval状態を確認
+    #[cfg(feature = "search-stats")]
+    {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static TT_EVAL_VALID: AtomicU64 = AtomicU64::new(0);
+        static TT_EVAL_NONE: AtomicU64 = AtomicU64::new(0);
+        static TT_MISS: AtomicU64 = AtomicU64::new(0);
+        static TT_PV_NODE: AtomicU64 = AtomicU64::new(0);
+
+        if !in_check {
+            if tt_ctx.hit {
+                if tt_ctx.data.eval != Value::NONE {
+                    if !pv_node {
+                        TT_EVAL_VALID.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        TT_PV_NODE.fetch_add(1, Ordering::Relaxed);
+                    }
+                } else {
+                    TT_EVAL_NONE.fetch_add(1, Ordering::Relaxed);
+                }
+            } else {
+                TT_MISS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        // 一定間隔でログ出力
+        let total = TT_EVAL_VALID.load(Ordering::Relaxed)
+            + TT_EVAL_NONE.load(Ordering::Relaxed)
+            + TT_MISS.load(Ordering::Relaxed)
+            + TT_PV_NODE.load(Ordering::Relaxed);
+        if total > 0 && total % 100000 == 0 {
+            eprintln!(
+                "[TT-EVAL-DEBUG] valid={}, none={}, miss={}, pv={}",
+                TT_EVAL_VALID.load(Ordering::Relaxed),
+                TT_EVAL_NONE.load(Ordering::Relaxed),
+                TT_MISS.load(Ordering::Relaxed),
+                TT_PV_NODE.load(Ordering::Relaxed),
+            );
+        }
+    }
+
     let mut static_eval = if in_check {
         Value::NONE
     } else if tt_ctx.hit && tt_ctx.data.eval != Value::NONE && !pv_node {
         // TTヒット && eval有効 && 非PVノード → TTからevalを取得
         ensure_nnue_accumulator(st, pos);
         unadjusted_static_eval = tt_ctx.data.eval;
+
+        // デバッグ: TTから取得したevalとNNUE評価を比較
+        #[cfg(feature = "search-stats")]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static EVAL_MATCH: AtomicU64 = AtomicU64::new(0);
+            static EVAL_MISMATCH: AtomicU64 = AtomicU64::new(0);
+
+            let nnue_eval = nnue_evaluate(st, pos);
+            if unadjusted_static_eval == nnue_eval {
+                EVAL_MATCH.fetch_add(1, Ordering::Relaxed);
+            } else {
+                EVAL_MISMATCH.fetch_add(1, Ordering::Relaxed);
+                // 不一致時の差分を出力（最初の10回のみ）
+                static MISMATCH_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
+                let log_count = MISMATCH_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+                if log_count < 10 {
+                    eprintln!(
+                        "[EVAL-MISMATCH] tt_eval={}, nnue_eval={}, diff={}",
+                        unadjusted_static_eval.raw(),
+                        nnue_eval.raw(),
+                        (unadjusted_static_eval.raw() - nnue_eval.raw()).abs()
+                    );
+                }
+            }
+
+            let m = EVAL_MATCH.load(Ordering::Relaxed);
+            let mm = EVAL_MISMATCH.load(Ordering::Relaxed);
+            let total = m + mm;
+            // 毎回出力（デバッグ用）
+            if total == 1 || total == 100 || total == 1000 || total == 5000 || total == 10000 || total == 18000 {
+                eprintln!(
+                    "[EVAL-COMPARE] match={}, mismatch={} (mismatch rate: {:.2}%)",
+                    m, mm,
+                    if total > 0 { mm as f64 / total as f64 * 100.0 } else { 0.0 },
+                );
+            }
+        }
+
         unadjusted_static_eval
     } else {
         // PVノード または TTミス/eval無効 → 常にNNUE評価
