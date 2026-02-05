@@ -295,7 +295,7 @@ pub(super) fn compute_eval_context(
             + TT_EVAL_NONE.load(Ordering::Relaxed)
             + TT_MISS.load(Ordering::Relaxed)
             + TT_PV_NODE.load(Ordering::Relaxed);
-        if total > 0 && total % 100000 == 0 {
+        if total > 0 && total.is_multiple_of(100000) {
             eprintln!(
                 "[TT-EVAL-DEBUG] valid={}, none={}, miss={}, pv={}",
                 TT_EVAL_VALID.load(Ordering::Relaxed),
@@ -342,11 +342,22 @@ pub(super) fn compute_eval_context(
             let mm = EVAL_MISMATCH.load(Ordering::Relaxed);
             let total = m + mm;
             // 毎回出力（デバッグ用）
-            if total == 1 || total == 100 || total == 1000 || total == 5000 || total == 10000 || total == 18000 {
+            if total == 1
+                || total == 100
+                || total == 1000
+                || total == 5000
+                || total == 10000
+                || total == 18000
+            {
                 eprintln!(
                     "[EVAL-COMPARE] match={}, mismatch={} (mismatch rate: {:.2}%)",
-                    m, mm,
-                    if total > 0 { mm as f64 / total as f64 * 100.0 } else { 0.0 },
+                    m,
+                    mm,
+                    if total > 0 {
+                        mm as f64 / total as f64 * 100.0
+                    } else {
+                        0.0
+                    },
                 );
             }
         }
