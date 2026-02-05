@@ -742,19 +742,22 @@ fn update_and_evaluate_layer_stacks(
                 let dirty_piece = stack.current().dirty_piece;
                 let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
                 network.update_accumulator_layer_stacks(pos, &dirty_piece, current_acc, prev_acc);
-                count_update!();
                 updated = true;
             }
         }
 
-        // 2. 失敗なら全計算
+        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
+        if !updated {
+            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+                updated = network.forward_update_incremental_layer_stacks(pos, stack, source_idx);
+            }
+        }
+
+        // 3. それでも失敗なら全計算
         if !updated {
             let acc = &mut stack.current_mut().accumulator;
             network.refresh_accumulator_layer_stacks(pos, acc);
-            count_refresh!();
         }
-    } else {
-        count_already_computed!();
     }
 
     // 評価
@@ -773,23 +776,26 @@ fn update_and_evaluate_halfka_hm(
     if !stack.is_current_computed() {
         let mut updated = false;
 
-        // 直前局面で差分更新を試行
+        // 1. 直前局面で差分更新を試行
         if let Some(prev_idx) = stack.current_previous() {
             if stack.is_entry_computed(prev_idx) {
                 let dirty = stack.current_dirty_piece();
                 network.update_accumulator_halfka_hm(pos, &dirty, stack, prev_idx);
-                count_update!();
                 updated = true;
             }
         }
 
-        // 失敗なら全計算
+        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
+        if !updated {
+            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+                updated = network.forward_update_incremental_halfka_hm(pos, stack, source_idx);
+            }
+        }
+
+        // 3. それでも失敗なら全計算
         if !updated {
             network.refresh_accumulator_halfka_hm(pos, stack);
-            count_refresh!();
         }
-    } else {
-        count_already_computed!();
     }
 
     // 評価
@@ -807,23 +813,26 @@ fn update_and_evaluate_halfka(
     if !stack.is_current_computed() {
         let mut updated = false;
 
-        // 直前局面で差分更新を試行
+        // 1. 直前局面で差分更新を試行
         if let Some(prev_idx) = stack.current_previous() {
             if stack.is_entry_computed(prev_idx) {
                 let dirty = stack.current_dirty_piece();
                 network.update_accumulator_halfka(pos, &dirty, stack, prev_idx);
-                count_update!();
                 updated = true;
             }
         }
 
-        // 失敗なら全計算
+        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
+        if !updated {
+            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+                updated = network.forward_update_incremental_halfka(pos, stack, source_idx);
+            }
+        }
+
+        // 3. それでも失敗なら全計算
         if !updated {
             network.refresh_accumulator_halfka(pos, stack);
-            count_refresh!();
         }
-    } else {
-        count_already_computed!();
     }
 
     // 評価
@@ -841,23 +850,26 @@ fn update_and_evaluate_halfkp(
     if !stack.is_current_computed() {
         let mut updated = false;
 
-        // 直前局面で差分更新を試行
+        // 1. 直前局面で差分更新を試行
         if let Some(prev_idx) = stack.current_previous() {
             if stack.is_entry_computed(prev_idx) {
                 let dirty = stack.current_dirty_piece();
                 network.update_accumulator_halfkp(pos, &dirty, stack, prev_idx);
-                count_update!();
                 updated = true;
             }
         }
 
-        // 失敗なら全計算
+        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
+        if !updated {
+            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+                updated = network.forward_update_incremental_halfkp(pos, stack, source_idx);
+            }
+        }
+
+        // 3. それでも失敗なら全計算
         if !updated {
             network.refresh_accumulator_halfkp(pos, stack);
-            count_refresh!();
         }
-    } else {
-        count_already_computed!();
     }
 
     // 評価
