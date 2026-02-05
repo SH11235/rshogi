@@ -1548,21 +1548,6 @@ impl SearchWorker {
                 Step14Outcome::Continue => {}
             }
 
-            // =============================================================
-            // SEE Pruning
-            // =============================================================
-            // パス手はSEE Pruningの対象外（SEEは駒交換の評価でありパスには適用不可）
-            if !pv_node && depth <= 8 && !in_check && !mv.is_pass() {
-                let see_threshold = if is_capture {
-                    Value::new(-20 * depth * depth)
-                } else {
-                    Value::new(-50 * depth)
-                };
-                if !pos.see_ge(mv, see_threshold) {
-                    continue;
-                }
-            }
-
             // 指し手を実行
             st.stack[ply as usize].current_move = mv;
 
