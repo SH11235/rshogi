@@ -310,16 +310,18 @@ impl TimeManagement {
         let byoyomi = limits.byoyomi_time(us);
 
         // 秒読みモードかどうかを先に判定（持ち時間が秒読みの1.2倍未満）
-        let is_byoyomi_mode = byoyomi > 0 && time_left < (byoyomi as f64 * 1.2) as TimePoint;
+        // increment > 0 の場合はフィッシャールールなので秒読みモードにしない
+        let is_byoyomi_mode =
+            byoyomi > 0 && increment == 0 && time_left < (byoyomi as f64 * 1.2) as TimePoint;
 
         // NetworkDelay2 を考慮した今回の残り時間
-        // 秒読みモードでは、秒読み時間から network_delay（短い方）を引く
-        // 持ち時間モードでは、合計時間から network_delay2 を引く
+        // 秒読みモードでは network_delay（短い方）を引く
+        // 持ち時間モード/フィッシャールールでは network_delay2 を引く
         self.remain_time = if is_byoyomi_mode {
             // 秒読みモード: byoyomi + time_left から network_delay を引く
             (time_left + byoyomi - self.network_delay).max(100)
         } else {
-            // 持ち時間モード: 従来通り network_delay2 を引く
+            // 持ち時間モード/フィッシャールール: 従来通り network_delay2 を引く
             (time_left + increment + byoyomi - self.network_delay2).max(100)
         };
 
