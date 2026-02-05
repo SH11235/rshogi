@@ -1170,7 +1170,8 @@ impl SearchWorker {
         let _tt_capture = tt_ctx.capture;
 
         // 静的評価
-        let eval_ctx = compute_eval_context(st, ctx, pos, ply, in_check, &tt_ctx, excluded_move);
+        let eval_ctx =
+            compute_eval_context(st, ctx, pos, ply, in_check, pv_node, &tt_ctx, excluded_move);
         let mut improving = eval_ctx.improving;
         let opponent_worsening = eval_ctx.opponent_worsening;
 
