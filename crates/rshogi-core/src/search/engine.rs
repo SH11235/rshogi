@@ -161,6 +161,8 @@ pub struct SearchResult {
     pub nodes: u64,
     /// Principal Variation（読み筋）
     pub pv: Vec<Move>,
+    /// 探索統計レポート（search-stats feature有効時のみ内容あり）
+    pub stats_report: String,
 }
 
 // =============================================================================
@@ -237,7 +239,7 @@ struct WorkerSummary {
 impl From<&SearchWorker> for WorkerSummary {
     fn from(w: &SearchWorker) -> Self {
         Self {
-            best_move_changes: w.best_move_changes,
+            best_move_changes: w.state.best_move_changes,
         }
     }
 }
@@ -306,10 +308,10 @@ struct ThreadSummary {
 
 impl ThreadSummary {
     fn from_worker(id: usize, worker: &SearchWorker) -> Option<Self> {
-        worker.root_moves.get(0).map(|rm| Self {
+        worker.state.root_moves.get(0).map(|rm| Self {
             id,
             score: rm.score,
-            completed_depth: worker.completed_depth,
+            completed_depth: worker.state.completed_depth,
         })
     }
 }
@@ -385,10 +387,10 @@ fn collect_best_thread_result(
     skill_enabled: bool,
     skill: &mut Skill,
 ) -> BestThreadResult {
-    let completed_depth = worker.completed_depth;
-    let nodes = worker.nodes;
-    let best_previous_score = worker.root_moves.get(0).map(|rm| rm.score);
-    let best_previous_average_score = worker.root_moves.get(0).map(|rm| {
+    let completed_depth = worker.state.completed_depth;
+    let nodes = worker.state.nodes;
+    let best_previous_score = worker.state.root_moves.get(0).map(|rm| rm.score);
+    let best_previous_average_score = worker.state.root_moves.get(0).map(|rm| {
         if rm.average_score.raw() == -Value::INFINITE.raw() {
             rm.score
         } else {
@@ -396,7 +398,7 @@ fn collect_best_thread_result(
         }
     });
 
-    if worker.root_moves.is_empty() {
+    if worker.state.root_moves.is_empty() {
         return BestThreadResult {
             best_move: Move::NONE,
             ponder_move: Move::NONE,
@@ -413,18 +415,18 @@ fn collect_best_thread_result(
     if skill_enabled {
         effective_multi_pv = effective_multi_pv.max(4);
     }
-    effective_multi_pv = effective_multi_pv.min(worker.root_moves.len());
+    effective_multi_pv = effective_multi_pv.min(worker.state.root_moves.len());
 
-    let mut best_move = worker.best_move;
+    let mut best_move = worker.state.best_move;
     if skill_enabled && effective_multi_pv > 0 {
         let mut rng = rand::rng();
-        let best = skill.pick_best(&worker.root_moves, effective_multi_pv, &mut rng);
+        let best = skill.pick_best(&worker.state.root_moves, effective_multi_pv, &mut rng);
         if best != Move::NONE {
             best_move = best;
         }
     }
 
-    let best_rm = worker.root_moves.iter().find(|rm| rm.mv() == best_move);
+    let best_rm = worker.state.root_moves.iter().find(|rm| rm.mv() == best_move);
 
     let ponder_move = best_rm
         .and_then(|rm| {
@@ -438,7 +440,7 @@ fn collect_best_thread_result(
 
     let score = best_rm
         .map(|rm| rm.score)
-        .unwrap_or(worker.root_moves.get(0).map(|rm| rm.score).unwrap_or(Value::ZERO));
+        .unwrap_or(worker.state.root_moves.get(0).map(|rm| rm.score).unwrap_or(Value::ZERO));
 
     let pv = best_rm.map(|rm| rm.pv.clone()).unwrap_or_default();
 
@@ -896,13 +898,13 @@ impl Search {
             pv,
         } = best_result;
         let total_nodes = {
-            let main_nodes = self.worker.as_ref().map(|w| w.nodes).unwrap_or(0);
+            let main_nodes = self.worker.as_ref().map(|w| w.state.nodes).unwrap_or(0);
 
             // Native: Use helper_threads() to get node counts
             #[cfg(not(target_arch = "wasm32"))]
             let helper_nodes =
                 self.thread_pool.helper_threads().iter().fold(0u64, |acc, thread| {
-                    acc.saturating_add(thread.with_worker(|worker| worker.nodes))
+                    acc.saturating_add(thread.with_worker(|worker| worker.state.nodes))
                 });
 
             // Wasm with wasm-threads: Use helper_nodes() to get node counts
@@ -924,6 +926,9 @@ impl Search {
         self.best_previous_average_score = best_previous_average_score;
         self.last_game_ply = Some(ply);
 
+        // 探索統計レポートを取得（search-stats feature有効時のみ内容あり）
+        let stats_report = self.worker.as_ref().map(|w| w.get_stats_report()).unwrap_or_default();
+
         SearchResult {
             best_move,
             ponder_move,
@@ -931,6 +936,7 @@ impl Search {
             depth: completed_depth,
             nodes: total_nodes,
             pv,
+            stats_report,
         }
     }
 
@@ -955,10 +961,10 @@ impl Search {
         let mut worker = self.worker.take().expect("worker should be available");
 
         // ルート手を初期化
-        worker.root_moves = super::RootMoves::from_legal_moves(pos, &limits.search_moves);
+        worker.state.root_moves = super::RootMoves::from_legal_moves(pos, &limits.search_moves);
 
-        if worker.root_moves.is_empty() {
-            worker.best_move = Move::NONE;
+        if worker.state.root_moves.is_empty() {
+            worker.state.best_move = Move::NONE;
             #[cfg(debug_assertions)]
             eprintln!(
                 "search_with_callback: root_moves is empty (search_moves_len={}, side_to_move={:?})",
@@ -972,12 +978,12 @@ impl Search {
         #[cfg(debug_assertions)]
         eprintln!(
             "search_with_callback: root_moves_len={} first_move={}",
-            worker.root_moves.len(),
-            worker.root_moves.get(0).map(|rm| rm.mv().to_usi()).unwrap_or_default()
+            worker.state.root_moves.len(),
+            worker.state.root_moves.get(0).map(|rm| rm.mv().to_usi()).unwrap_or_default()
         );
 
         // 合法手が1つの場合は500ms上限を適用（YaneuraOu準拠）
-        if worker.root_moves.len() == 1 {
+        if worker.state.root_moves.len() == 1 {
             time_manager.apply_single_move_limit();
         }
 
@@ -986,7 +992,7 @@ impl Search {
         if skill_enabled {
             effective_multi_pv = effective_multi_pv.max(4);
         }
-        effective_multi_pv = effective_multi_pv.min(worker.root_moves.len());
+        effective_multi_pv = effective_multi_pv.min(worker.state.root_moves.len());
 
         // 中断時にPVを巻き戻すための保持
         let mut last_best_pv = vec![Move::NONE];
@@ -1000,7 +1006,7 @@ impl Search {
                 eprintln!(
                     "search_with_callback: depth={} nodes={} search_end={} max_time={} stop_requested={}",
                     depth,
-                    worker.nodes,
+                    worker.state.nodes,
                     time_manager.search_end(),
                     time_manager.maximum(),
                     time_manager.stop_requested()
@@ -1011,7 +1017,7 @@ impl Search {
                 self.search_again_counter += 1;
             }
 
-            if worker.abort {
+            if worker.state.abort {
                 break;
             }
 
@@ -1030,8 +1036,8 @@ impl Search {
             // YaneuraOu準拠: 詰みを読みきった場合の早期終了
             // 詰みまでの手数の2.5倍以上の深さを探索したら終了
             // MultiPV=1の時のみ適用（MultiPV>1では全候補を探索する必要がある）
-            if effective_multi_pv == 1 && depth > 1 && !worker.root_moves.is_empty() {
-                let best_value = worker.root_moves[0].score;
+            if effective_multi_pv == 1 && depth > 1 && !worker.state.root_moves.is_empty() {
+                let best_value = worker.state.root_moves[0].score;
 
                 if limits.mate == 0 {
                     if proven_mate_depth_exceeded(best_value, depth) {
@@ -1039,8 +1045,8 @@ impl Search {
                     }
                 } else if mate_within_limit(
                     best_value,
-                    worker.root_moves[0].score_lower_bound,
-                    worker.root_moves[0].score_upper_bound,
+                    worker.state.root_moves[0].score_lower_bound,
+                    worker.state.root_moves[0].score_upper_bound,
                     limits.mate,
                 ) {
                     time_manager.request_stop();
@@ -1050,19 +1056,19 @@ impl Search {
 
             let search_depth = depth;
 
-            worker.root_depth = search_depth;
-            worker.sel_depth = 0;
+            worker.state.root_depth = search_depth;
+            worker.state.sel_depth = 0;
 
             // MultiPVループ（YaneuraOu準拠）
             let mut processed_pv = 0;
             for pv_idx in 0..effective_multi_pv {
-                if worker.abort {
+                if worker.state.abort {
                     break;
                 }
 
                 // Aspiration Window（average/mean_squaredベース）
                 let (mut alpha, mut beta, mut delta) =
-                    compute_aspiration_window(&worker.root_moves[pv_idx], worker.thread_id);
+                    compute_aspiration_window(&worker.state.root_moves[pv_idx], worker.thread_id);
                 let mut failed_high_cnt = 0;
 
                 // Aspiration Windowループ
@@ -1087,7 +1093,7 @@ impl Search {
                         )
                     };
 
-                    if worker.abort {
+                    if worker.state.abort {
                         break;
                     }
 
@@ -1112,15 +1118,15 @@ impl Search {
                 }
 
                 // 安定ソート [pv_idx..]
-                worker.root_moves.stable_sort_range(pv_idx, worker.root_moves.len());
+                worker.state.root_moves.stable_sort_range(pv_idx, worker.state.root_moves.len());
                 // 📝 YaneuraOu行1477-1483: 探索済みのPVライン全体も安定ソートして順位を保つ
-                worker.root_moves.stable_sort_range(0, pv_idx + 1);
+                worker.state.root_moves.stable_sort_range(0, pv_idx + 1);
                 processed_pv = pv_idx + 1;
             }
 
             // 🆕 MultiPVループ完了後の最終ソート（YaneuraOu行1499）
-            if !worker.abort && effective_multi_pv > 1 {
-                worker.root_moves.stable_sort_range(0, effective_multi_pv);
+            if !worker.state.abort && effective_multi_pv > 1 {
+                worker.state.root_moves.stable_sort_range(0, effective_multi_pv);
             }
 
             // info出力は深さごとにまとめて行う（GUI詰まり防止のYO仕様）
@@ -1144,7 +1150,7 @@ impl Search {
                 #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
                 let helper_nodes = 0u64;
 
-                let total_nodes = worker.nodes.saturating_add(helper_nodes);
+                let total_nodes = worker.state.nodes.saturating_add(helper_nodes);
                 let nps = if time_ms > 0 {
                     total_nodes.saturating_mul(1000) / time_ms
                 } else {
@@ -1154,13 +1160,13 @@ impl Search {
                 for pv_idx in 0..processed_pv {
                     let info = SearchInfo {
                         depth,
-                        sel_depth: worker.root_moves[pv_idx].sel_depth,
-                        score: worker.root_moves[pv_idx].score,
+                        sel_depth: worker.state.root_moves[pv_idx].sel_depth,
+                        score: worker.state.root_moves[pv_idx].score,
                         nodes: total_nodes,
                         time_ms,
                         nps,
                         hashfull: self.tt.hashfull(3) as u32,
-                        pv: worker.root_moves[pv_idx].pv.clone(),
+                        pv: worker.state.root_moves[pv_idx].pv.clone(),
                         multi_pv: pv_idx + 1, // 1-indexed
                     };
 
@@ -1169,38 +1175,38 @@ impl Search {
             }
 
             // Depth完了後の処理
-            if !worker.abort {
-                worker.completed_depth = search_depth;
-                worker.best_move = worker.root_moves[0].mv();
-                if worker.best_move != self.last_best_move {
-                    self.last_best_move = worker.best_move;
+            if !worker.state.abort {
+                worker.state.completed_depth = search_depth;
+                worker.state.best_move = worker.state.root_moves[0].mv();
+                if worker.state.best_move != self.last_best_move {
+                    self.last_best_move = worker.state.best_move;
                     self.last_best_move_depth = depth;
                 }
 
                 // 🆕 YaneuraOu準拠: previous_scoreを次のiterationのためにシード
                 // （YaneuraOu行1267-1270: rm.previousScore = rm.score）
-                for rm in worker.root_moves.iter_mut() {
+                for rm in worker.state.root_moves.iter_mut() {
                     rm.previous_score = rm.score;
                 }
 
                 // 評価変動・timeReduction・最善手不安定性をまとめて適用（YaneuraOu準拠）
                 // 借用チェッカー対策: workerから必要な値をすべてローカルにコピー
                 let summary = WorkerSummary::from(&*worker);
-                let best_value = if worker.root_moves.is_empty() {
+                let best_value = if worker.state.root_moves.is_empty() {
                     Value::ZERO
                 } else {
-                    worker.root_moves[0].score
+                    worker.state.root_moves[0].score
                 };
-                let completed_depth = worker.completed_depth;
-                let effort = if worker.root_moves.is_empty() {
+                let completed_depth = worker.state.completed_depth;
+                let effort = if worker.state.root_moves.is_empty() {
                     0.0
                 } else {
-                    worker.root_moves[0].effort
+                    worker.state.root_moves[0].effort
                 };
-                let nodes = worker.nodes;
-                let root_moves_len = worker.root_moves.len();
+                let nodes = worker.state.nodes;
+                let root_moves_len = worker.state.root_moves.len();
                 let best_move_changes = summary.best_move_changes;
-                worker.best_move_changes = 0.0; // 先にリセット
+                worker.state.best_move_changes = 0.0; // 先にリセット
 
                 // Native: Use helper_threads() to collect best_move_changes
                 #[cfg(not(target_arch = "wasm32"))]
@@ -1274,18 +1280,18 @@ impl Search {
                 self.tot_best_move_changes = tot_best_move_changes;
 
                 // PVが変わったときのみ last_best_* を更新（YO準拠）
-                if !worker.root_moves[0].pv.is_empty()
-                    && worker.root_moves[0].pv[0] != last_best_pv[0]
+                if !worker.state.root_moves[0].pv.is_empty()
+                    && worker.state.root_moves[0].pv[0] != last_best_pv[0]
                 {
-                    last_best_pv = worker.root_moves[0].pv.clone();
-                    last_best_score = worker.root_moves[0].score;
+                    last_best_pv = worker.state.root_moves[0].pv.clone();
+                    last_best_score = worker.state.root_moves[0].score;
                     last_best_move_depth = depth;
                 }
 
                 // YaneuraOu準拠: 詰みスコアが見つかっていたら早期終了
                 // MultiPV=1の時のみ適用
-                if effective_multi_pv == 1 && depth > 1 && !worker.root_moves.is_empty() {
-                    let best_value = worker.root_moves[0].score;
+                if effective_multi_pv == 1 && depth > 1 && !worker.state.root_moves.is_empty() {
+                    let best_value = worker.state.root_moves[0].score;
 
                     if limits.mate == 0 {
                         if proven_mate_depth_exceeded(best_value, depth) {
@@ -1293,8 +1299,8 @@ impl Search {
                         }
                     } else if mate_within_limit(
                         best_value,
-                        worker.root_moves[0].score_lower_bound,
-                        worker.root_moves[0].score_upper_bound,
+                        worker.state.root_moves[0].score_lower_bound,
+                        worker.state.root_moves[0].score_upper_bound,
                         limits.mate,
                     ) {
                         time_manager.request_stop();
@@ -1305,14 +1311,17 @@ impl Search {
         }
 
         // 中断した探索で信頼できないPVになった場合のフォールバック（YO準拠）
-        if worker.abort && !worker.root_moves.is_empty() && worker.root_moves[0].score.is_loss() {
+        if worker.state.abort
+            && !worker.state.root_moves.is_empty()
+            && worker.state.root_moves[0].score.is_loss()
+        {
             let head = last_best_pv.first().copied().unwrap_or(Move::NONE);
             if head != Move::NONE {
-                if let Some(idx) = worker.root_moves.find(head) {
-                    worker.root_moves.move_to_front(idx);
-                    worker.root_moves[0].pv = last_best_pv;
-                    worker.root_moves[0].score = last_best_score;
-                    worker.completed_depth = last_best_move_depth;
+                if let Some(idx) = worker.state.root_moves.find(head) {
+                    worker.state.root_moves.move_to_front(idx);
+                    worker.state.root_moves[0].pv = last_best_pv;
+                    worker.state.root_moves[0].score = last_best_score;
+                    worker.state.completed_depth = last_best_move_depth;
                 }
             }
         }
@@ -1345,15 +1354,15 @@ where
 {
     on_start();
 
-    worker.root_moves = super::RootMoves::from_legal_moves(pos, &limits.search_moves);
+    worker.state.root_moves = super::RootMoves::from_legal_moves(pos, &limits.search_moves);
 
-    if worker.root_moves.is_empty() {
-        worker.best_move = Move::NONE;
+    if worker.state.root_moves.is_empty() {
+        worker.state.best_move = Move::NONE;
         return 0;
     }
 
     // 合法手が1つの場合は500ms上限を適用（YaneuraOu準拠）
-    if worker.root_moves.len() == 1 {
+    if worker.state.root_moves.len() == 1 {
         time_manager.apply_single_move_limit();
     }
 
@@ -1361,7 +1370,7 @@ where
     if skill_enabled {
         effective_multi_pv = effective_multi_pv.max(4);
     }
-    effective_multi_pv = effective_multi_pv.min(worker.root_moves.len());
+    effective_multi_pv = effective_multi_pv.min(worker.state.root_moves.len());
 
     let mut last_best_pv = vec![Move::NONE];
     let mut last_best_score = Value::new(-Value::INFINITE.raw());
@@ -1370,12 +1379,12 @@ where
     let search_again_counter = 0;
 
     for depth in 1..=max_depth {
-        if worker.abort {
+        if worker.state.abort {
             break;
         }
 
-        if effective_multi_pv == 1 && depth > 1 && !worker.root_moves.is_empty() {
-            let best_value = worker.root_moves[0].score;
+        if effective_multi_pv == 1 && depth > 1 && !worker.state.root_moves.is_empty() {
+            let best_value = worker.state.root_moves[0].score;
 
             if limits.mate == 0 {
                 if proven_mate_depth_exceeded(best_value, depth) {
@@ -1383,8 +1392,8 @@ where
                 }
             } else if mate_within_limit(
                 best_value,
-                worker.root_moves[0].score_lower_bound,
-                worker.root_moves[0].score_upper_bound,
+                worker.state.root_moves[0].score_lower_bound,
+                worker.state.root_moves[0].score_upper_bound,
                 limits.mate,
             ) {
                 break;
@@ -1393,16 +1402,16 @@ where
 
         let search_depth = depth;
 
-        worker.root_depth = search_depth;
-        worker.sel_depth = 0;
+        worker.state.root_depth = search_depth;
+        worker.state.sel_depth = 0;
 
         for pv_idx in 0..effective_multi_pv {
-            if worker.abort {
+            if worker.state.abort {
                 break;
             }
 
             let (mut alpha, mut beta, mut delta) =
-                compute_aspiration_window(&worker.root_moves[pv_idx], worker.thread_id);
+                compute_aspiration_window(&worker.state.root_moves[pv_idx], worker.thread_id);
             let mut failed_high_cnt = 0;
 
             loop {
@@ -1422,7 +1431,7 @@ where
                     )
                 };
 
-                if worker.abort {
+                if worker.state.abort {
                     break;
                 }
 
@@ -1446,35 +1455,36 @@ where
                 );
             }
 
-            worker.root_moves.stable_sort_range(pv_idx, worker.root_moves.len());
-            worker.root_moves.stable_sort_range(0, pv_idx + 1);
+            worker.state.root_moves.stable_sort_range(pv_idx, worker.state.root_moves.len());
+            worker.state.root_moves.stable_sort_range(0, pv_idx + 1);
         }
 
-        if !worker.abort && effective_multi_pv > 1 {
-            worker.root_moves.stable_sort_range(0, effective_multi_pv);
+        if !worker.state.abort && effective_multi_pv > 1 {
+            worker.state.root_moves.stable_sort_range(0, effective_multi_pv);
         }
 
-        if !worker.abort {
-            worker.completed_depth = search_depth;
-            worker.best_move = worker.root_moves[0].mv();
+        if !worker.state.abort {
+            worker.state.completed_depth = search_depth;
+            worker.state.best_move = worker.state.root_moves[0].mv();
 
-            for rm in worker.root_moves.iter_mut() {
+            for rm in worker.state.root_moves.iter_mut() {
                 rm.previous_score = rm.score;
             }
 
-            let best_move_changes = worker.best_move_changes;
-            worker.best_move_changes = 0.0;
-            on_depth_complete(worker.nodes, best_move_changes);
+            let best_move_changes = worker.state.best_move_changes;
+            worker.state.best_move_changes = 0.0;
+            on_depth_complete(worker.state.nodes, best_move_changes);
 
-            if !worker.root_moves[0].pv.is_empty() && worker.root_moves[0].pv[0] != last_best_pv[0]
+            if !worker.state.root_moves[0].pv.is_empty()
+                && worker.state.root_moves[0].pv[0] != last_best_pv[0]
             {
-                last_best_pv = worker.root_moves[0].pv.clone();
-                last_best_score = worker.root_moves[0].score;
+                last_best_pv = worker.state.root_moves[0].pv.clone();
+                last_best_score = worker.state.root_moves[0].score;
                 last_best_move_depth = search_depth;
             }
 
-            if effective_multi_pv == 1 && depth > 1 && !worker.root_moves.is_empty() {
-                let best_value = worker.root_moves[0].score;
+            if effective_multi_pv == 1 && depth > 1 && !worker.state.root_moves.is_empty() {
+                let best_value = worker.state.root_moves[0].score;
 
                 if limits.mate == 0 {
                     if proven_mate_depth_exceeded(best_value, depth) {
@@ -1482,8 +1492,8 @@ where
                     }
                 } else if mate_within_limit(
                     best_value,
-                    worker.root_moves[0].score_lower_bound,
-                    worker.root_moves[0].score_upper_bound,
+                    worker.state.root_moves[0].score_lower_bound,
+                    worker.state.root_moves[0].score_upper_bound,
                     limits.mate,
                 ) {
                     break;
@@ -1492,14 +1502,17 @@ where
         }
     }
 
-    if worker.abort && !worker.root_moves.is_empty() && worker.root_moves[0].score.is_loss() {
+    if worker.state.abort
+        && !worker.state.root_moves.is_empty()
+        && worker.state.root_moves[0].score.is_loss()
+    {
         let head = last_best_pv.first().copied().unwrap_or(Move::NONE);
         if head != Move::NONE {
-            if let Some(idx) = worker.root_moves.find(head) {
-                worker.root_moves.move_to_front(idx);
-                worker.root_moves[0].pv = last_best_pv;
-                worker.root_moves[0].score = last_best_score;
-                worker.completed_depth = last_best_move_depth;
+            if let Some(idx) = worker.state.root_moves.find(head) {
+                worker.state.root_moves.move_to_front(idx);
+                worker.state.root_moves[0].pv = last_best_pv;
+                worker.state.root_moves[0].score = last_best_score;
+                worker.state.completed_depth = last_best_move_depth;
             }
         }
     }
@@ -1606,7 +1619,7 @@ mod tests {
                 let tt = Arc::new(TranspositionTable::new(16));
                 let eval_hash = Arc::new(EvalHash::new(1));
                 let mut worker = SearchWorker::new(tt, eval_hash, DEFAULT_MAX_MOVES_TO_DRAW, 0);
-                worker.best_move_changes = 3.5;
+                worker.state.best_move_changes = 3.5;
 
                 let summary = WorkerSummary::from(&*worker);
                 assert!(

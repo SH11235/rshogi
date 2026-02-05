@@ -584,6 +584,14 @@ impl UsiEngine {
                         }),
                     );
 
+                    // 探索統計レポートを出力（search-stats feature有効時のみ内容あり）
+                    if !result.stats_report.is_empty() {
+                        for line in result.stats_report.lines() {
+                            println!("info string {line}");
+                        }
+                        std::io::stdout().flush().ok();
+                    }
+
                     let best_usi = if result.best_move != Move::NONE {
                         result.best_move.to_usi()
                     } else {

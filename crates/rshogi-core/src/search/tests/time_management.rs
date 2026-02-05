@@ -175,7 +175,7 @@ fn test_worker_best_move_changes_initial_value() {
 
             let worker = SearchWorker::new(tt, eval_hash, DEFAULT_MAX_MOVES_TO_DRAW, 0);
 
-            assert_eq!(worker.best_move_changes, 0.0, "初期値は0.0であるべき");
+            assert_eq!(worker.state.best_move_changes, 0.0, "初期値は0.0であるべき");
         })
         .unwrap()
         .join()
@@ -198,10 +198,10 @@ fn test_worker_best_move_changes_decay() {
             let eval_hash = Arc::new(EvalHash::new(1));
 
             let mut worker = SearchWorker::new(tt, eval_hash, DEFAULT_MAX_MOVES_TO_DRAW, 0);
-            worker.best_move_changes = 4.0;
+            worker.state.best_move_changes = 4.0;
             worker.decay_best_move_changes();
 
-            assert_eq!(worker.best_move_changes, 2.0, "decay後は半減（4.0 → 2.0）すべき");
+            assert_eq!(worker.state.best_move_changes, 2.0, "decay後は半減（4.0 → 2.0）すべき");
         })
         .unwrap()
         .join()

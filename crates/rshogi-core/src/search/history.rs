@@ -10,6 +10,11 @@
 //! - `ContinuationHistory`: [prev_pc][prev_to][pc][to] -> score
 //! - `PawnHistory`: [pawn_key_idx][piece][to] -> score
 //! - `CounterMoveHistory`: [piece][square] -> Move
+//! - `HistoryCell`: 内部可変性ラッパー（参照リークを型で封じる）
+
+use std::cell::UnsafeCell;
+use std::marker::PhantomData;
+use std::rc::Rc;
 
 use crate::types::{Color, Move, Piece, PieceType, Square};
 
@@ -724,6 +729,107 @@ impl HistoryTables {
 }
 
 // =============================================================================
+// HistoryCell（内部可変性ラッパー）
+// =============================================================================
+
+/// History用の内部可変ラッパー
+///
+/// 参照を外部に漏らさないために `with_read`/`with_write` を使用する。
+/// これにより「束縛禁止」を型レベルで強制できる。
+///
+/// ## 安全性
+///
+/// - 参照はクロージャ内に閉じ込められ、外部に漏れない
+/// - `PhantomData<Rc<()>>` により `!Send` を強制（単一スレッド保証）
+/// - 再帰呼び出し時の参照エイリアス問題を設計で防止
+///
+/// ## 使用パターン
+///
+/// ```ignore
+/// let mv = ctx.history.with_read(|h| mp.next_move(pos, h));
+/// // この時点で &HistoryTables は存在しない（型で保証）
+/// let value = search_node(st, ctx, pos, ...);
+/// ```
+pub struct HistoryCell {
+    inner: UnsafeCell<HistoryTables>,
+    /// `!Send` を強制するためのマーカー（単一スレッド保証）
+    _marker: PhantomData<Rc<()>>,
+}
+
+impl HistoryCell {
+    /// 新しいHistoryCellを作成
+    pub fn new(history: HistoryTables) -> Self {
+        Self {
+            inner: UnsafeCell::new(history),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Boxから作成（大きな配列のスタック確保を避ける）
+    ///
+    /// # Safety
+    ///
+    /// ゼロ初期化されたメモリでHistoryCellを構築する。
+    /// 内部のHistoryTablesはゼロ初期化が有効な型のみで構成されている。
+    pub fn new_boxed() -> Box<Self> {
+        // SAFETY: HistoryCellはUnsafeCell<HistoryTables>とPhantomDataで構成
+        // UnsafeCell<T>はTと同じレイアウトを持ち、HistoryTablesはゼロ初期化が有効
+        // PhantomDataはサイズ0のマーカー型でゼロ初期化は無害
+        // new_zeroedで直接ヒープに確保し、スタックオーバーフローを回避
+        let cell = unsafe { Box::<Self>::new_zeroed().assume_init() };
+        // correction_historyは初期値が0ではないので再初期化が必要
+        cell.with_write(|h| h.correction_history.fill_initial_values());
+        cell
+    }
+
+    /// 読み取りアクセス（クロージャ内に参照を閉じ込める）
+    ///
+    /// 参照はクロージャ内でのみ有効。外部に漏れないため、
+    /// 再帰呼び出し時に親の参照が残存する問題を型で防止できる。
+    ///
+    /// # Safety
+    ///
+    /// このメソッドは内部でunsafeを使用するが、以下の不変条件により安全：
+    /// - 参照はクロージャ内に閉じ込められ、外部に漏れない
+    /// - 設計上、`with_read`中に`with_write`を呼ばない
+    #[inline]
+    pub fn with_read<R>(&self, f: impl FnOnce(&HistoryTables) -> R) -> R {
+        // SAFETY: 参照はクロージャ内に閉じる（型で保証）
+        // MovePickerループ内でのみ使用し、再帰呼び出し時には参照は存在しない
+        unsafe { f(&*self.inner.get()) }
+    }
+
+    /// 書き込みアクセス（クロージャ内に参照を閉じ込める）
+    ///
+    /// # Safety
+    ///
+    /// このメソッドは内部でunsafeを使用するが、以下の不変条件により安全：
+    /// - MovePickerループ外でのみ呼ぶ（設計で保証）
+    /// - 参照はクロージャ内に閉じ込められる
+    #[inline]
+    pub fn with_write<R>(&self, f: impl FnOnce(&mut HistoryTables) -> R) -> R {
+        // SAFETY: MovePickerループ外でのみ呼ぶ（設計で保証）
+        // ノード末尾でHistory更新時に使用
+        unsafe { f(&mut *self.inner.get()) }
+    }
+
+    /// 内部の HistoryTables への可変参照を取得（初期化用）
+    ///
+    /// # Safety
+    ///
+    /// 探索中は使用しないこと。初期化やクリア時のみ使用。
+    #[inline]
+    pub fn get_mut(&mut self) -> &mut HistoryTables {
+        self.inner.get_mut()
+    }
+
+    /// すべての履歴テーブルをクリア
+    pub fn clear(&mut self) {
+        self.inner.get_mut().clear();
+    }
+}
+
+// =============================================================================
 // ボーナス計算（YaneuraOu準拠）
 // =============================================================================
 
@@ -986,5 +1092,51 @@ mod tests {
         // NONEの場合はindex=0を使う
         let captured_none = Piece::NONE;
         assert_eq!(history.get_with_captured_piece(pc, to, captured_none), 0);
+    }
+
+    #[test]
+    fn test_history_cell_with_read() {
+        // HistoryTablesは大きいのでnew_boxedを使用
+        let cell = HistoryCell::new_boxed();
+
+        // with_readでクロージャ内で参照を使用
+        let value =
+            cell.with_read(|h| h.main_history.get(Color::Black, Move::from_usi("7g7f").unwrap()));
+        assert_eq!(value, 0);
+    }
+
+    #[test]
+    fn test_history_cell_with_write() {
+        // HistoryTablesは大きいのでnew_boxedを使用
+        let cell = HistoryCell::new_boxed();
+        let mv = Move::from_usi("7g7f").unwrap();
+
+        // with_writeで更新
+        cell.with_write(|h| {
+            h.main_history.update(Color::Black, mv, 100);
+        });
+
+        // 更新が反映されていることを確認
+        let value = cell.with_read(|h| h.main_history.get(Color::Black, mv));
+        assert!(value > 0);
+    }
+
+    #[test]
+    fn test_history_cell_clear() {
+        // HistoryTablesは大きいのでnew_boxedを使用
+        let mut cell = HistoryCell::new_boxed();
+        let mv = Move::from_usi("7g7f").unwrap();
+
+        // 更新
+        cell.with_write(|h| {
+            h.main_history.update(Color::Black, mv, 100);
+        });
+
+        // クリア
+        cell.clear();
+
+        // クリア後は0に戻る
+        let value = cell.with_read(|h| h.main_history.get(Color::Black, mv));
+        assert_eq!(value, 0);
     }
 }
