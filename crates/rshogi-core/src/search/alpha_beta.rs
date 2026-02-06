@@ -51,28 +51,17 @@ const IIR_EVAL_SUM_THRESHOLD: i32 = 177;
 
 use std::sync::LazyLock;
 
-/// 引き分けスコアに揺らぎを与える（YaneuraOu準拠）
 const DRAW_JITTER_MASK: u64 = 0x2;
 const DRAW_JITTER_OFFSET: i32 = -1; // VALUE_DRAW(0) 周辺に ±1 の揺らぎを入れる
 
 #[inline]
 pub(super) fn draw_jitter(nodes: u64) -> i32 {
-    // YaneuraOu: value_draw(nodes) = VALUE_DRAW - 1 + (nodes & 0x2)
     // 千日手盲点を避けるため、VALUE_DRAW(0) を ±1 にばらつかせる。
     ((nodes & DRAW_JITTER_MASK) as i32) + DRAW_JITTER_OFFSET
 }
 
-/// depthに対するmsb（YaneuraOuのlm r補正用）
 #[inline]
-fn msb(x: i32) -> i32 {
-    if x <= 0 {
-        return 0;
-    }
-    31 - x.leading_zeros() as i32
-}
-
 /// 補正履歴を適用した静的評価に変換（詰みスコア領域に入り込まないようにクリップ）
-#[inline]
 pub(super) fn to_corrected_static_eval(unadjusted: Value, correction_value: i32) -> Value {
     let corrected = unadjusted.raw() + correction_value / 131_072;
     Value::new(corrected.clamp(Value::MATED_IN_MAX_PLY.raw() + 1, Value::MATE_IN_MAX_PLY.raw() - 1))
@@ -91,7 +80,7 @@ const REDUCTION_BASE_OFFSET: i32 = 1200;
 static REDUCTIONS: LazyLock<Reductions> = LazyLock::new(|| {
     let mut table: Reductions = [0; 64];
     for (i, value) in table.iter_mut().enumerate().skip(1) {
-        *value = (2782.0 / 128.0 * (i as f64).ln()) as i32;
+        *value = (2809.0 / 128.0 * (i as f64).ln()) as i32;
     }
     table
 });
@@ -1504,13 +1493,6 @@ impl SearchWorker {
             let is_capture = pos.is_capture(mv);
             let gives_check = pos.gives_check(mv);
 
-            // quietの指し手の連続回数（YaneuraOu: quietMoveStreak）
-            st.stack[(ply + 1) as usize].quiet_move_streak = if !is_capture && !gives_check {
-                st.stack[ply as usize].quiet_move_streak + 1
-            } else {
-                0
-            };
-
             let mut new_depth = depth - 1;
             let mut extension = 0i32;
 
@@ -1608,7 +1590,7 @@ impl SearchWorker {
 
             // YaneuraOu: ttPvなら reduction を少し増やす
             if st.stack[ply as usize].tt_pv {
-                r += 931;
+                r += 946;
             }
 
             let lmr_depth = new_depth - r / 1024;
@@ -1701,42 +1683,44 @@ impl SearchWorker {
             // =============================================================
             // Late Move Reduction (LMR)
             // =============================================================
-            let msb_depth = msb(depth);
+            // YaneuraOu準拠: ttPv大型補正（yaneuraou-search.cpp:3521-3523）
             let tt_value_higher = tt_hit && tt_value != Value::NONE && tt_value > alpha;
             let tt_depth_ge = tt_hit && tt_data.depth >= depth;
 
             if st.stack[ply as usize].tt_pv {
-                r -= 2510
-                    + (pv_node as i32) * 963
-                    + (tt_value_higher as i32) * 916
-                    + (tt_depth_ge as i32) * (943 + (cut_node as i32) * 1180);
+                r -= 2618
+                    + (pv_node as i32) * 991
+                    + (tt_value_higher as i32) * 903
+                    + (tt_depth_ge as i32) * (978 + (cut_node as i32) * 1051);
             }
 
-            r += 679 - 6 * msb_depth;
-            r -= move_count * (67 - 2 * msb_depth);
-            r -= eval_ctx.correction_value.abs() / 27_160;
+            // YaneuraOu準拠: 基本調整群（yaneuraou-search.cpp:3528-3532）
+            r += 843;
+            r -= move_count * 66;
+            r -= eval_ctx.correction_value.abs() / 30_450;
 
+            // YaneuraOu準拠: cut_node（yaneuraou-search.cpp:3545-3546）
             if cut_node {
                 let no_tt_move = !tt_hit || tt_move.is_none();
-                r += 2998 + 2 * msb_depth + (948 + 14 * msb_depth) * (no_tt_move as i32);
+                r += 3094 + 1056 * (no_tt_move as i32);
             }
 
+            // YaneuraOu準拠: ttCapture（yaneuraou-search.cpp:3551-3552）
             if tt_capture {
-                r += 1402 - 39 * msb_depth;
+                r += 1415;
             }
 
+            // YaneuraOu準拠: cutoffCnt（yaneuraou-search.cpp:3557-3558）
             if st.stack[(ply + 1) as usize].cutoff_cnt > 2 {
-                r += 925 + 33 * msb_depth + (all_node as i32) * (701 + 224 * msb_depth);
+                r += 1051 + (all_node as i32) * 814;
             }
 
-            r += st.stack[(ply + 1) as usize].quiet_move_streak * 51;
-
+            // YaneuraOu準拠: ttMove（yaneuraou-search.cpp:3563-3564）
             if mv == tt_move {
-                r -= 2121 + 28 * msb_depth;
+                r -= 2018;
             }
 
-            // statScoreによる補正
-            // PASS は history が未定義のため stat_score = 0 とし、還元を控えめに
+            // YaneuraOu準拠: statScore（yaneuraou-search.cpp:3566-3579）
             let stat_score = if mv.is_pass() {
                 0 // PASS は history がないので還元補正なし
             } else if is_capture {
@@ -1746,7 +1730,7 @@ impl SearchWorker {
                 let hist = ctx
                     .history
                     .with_read(|h| h.capture_history.get(moved_piece, mv.to(), captured_pt) as i32);
-                782 * piece_value(captured) / 128 + hist
+                803 * piece_value(captured) / 128 + hist
             } else {
                 let moved_piece = mv.moved_piece_after();
                 let main_hist = ctx.history.with_read(|h| h.main_history.get(mover, mv) as i32);
@@ -1755,7 +1739,7 @@ impl SearchWorker {
                 2 * main_hist + cont0 + cont1
             };
             st.stack[ply as usize].stat_score = stat_score;
-            r -= stat_score * (729 - 12 * msb_depth) / 8192;
+            r -= stat_score * 794 / 8192;
 
             // =============================================================
             // 探索
