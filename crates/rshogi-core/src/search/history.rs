@@ -835,34 +835,25 @@ impl HistoryCell {
 
 /// History更新用のボーナスを計算
 ///
-/// YaneuraOu準拠: `min(170*depth-87, 1598) + 332*(bestMove == ttMove)`
+/// YaneuraOu準拠: `min(121*depth-77, 1633) + 375*(bestMove == ttMove)`
 /// - `is_tt_move`: bestMoveがTT手と一致する場合はtrue
 #[inline]
 pub fn stat_bonus(depth: i32, is_tt_move: bool) -> i32 {
-    let base = (170 * depth - 87).min(1598);
+    let base = (121 * depth - 77).min(1633);
     if is_tt_move {
-        base + 332
+        base + 375
     } else {
         base
     }
 }
 
-/// Quiet手用のマイナスボーナス（ペナルティ）を計算
+/// マイナスボーナス（ペナルティ）を計算
 ///
-/// YaneuraOu準拠: `min(743*depth-180, 2287) - 33*quietsSearched.size()`
+/// YaneuraOu準拠: `min(825*depth-196, 2159) - 16*moveCount`
+/// quiet/capture 共通で使用。
 #[inline]
-pub fn quiet_malus(depth: i32, quiets_count: usize) -> i32 {
-    let base = (743 * depth - 180).min(2287);
-    base - 33 * quiets_count as i32
-}
-
-/// 捕獲手用のマイナスボーナス（ペナルティ）を計算
-///
-/// YaneuraOu準拠: `min(708*depth-148, 2287) - 29*capturesSearched.size()`
-#[inline]
-pub fn capture_malus(depth: i32, captures_count: usize) -> i32 {
-    let base = (708 * depth - 148).min(2287);
-    base - 29 * captures_count as i32
+pub fn stat_malus(depth: i32, move_count: i32) -> i32 {
+    (825 * depth - 196).min(2159) - 16 * move_count
 }
 
 // 後方互換性のため旧APIも残す（非推奨）
@@ -871,13 +862,6 @@ pub fn capture_malus(depth: i32, captures_count: usize) -> i32 {
 #[inline]
 pub fn stat_bonus_old(depth: i32) -> i32 {
     (130 * depth - 103).min(1652)
-}
-
-/// マイナスボーナス（ペナルティ）を計算（旧API、非推奨）
-#[deprecated(note = "Use quiet_malus(depth, quiets_count) instead")]
-#[inline]
-pub fn stat_malus(depth: i32) -> i32 {
-    (303 * depth - 273).min(1352)
 }
 
 // =============================================================================
@@ -1040,36 +1024,25 @@ mod tests {
 
     #[test]
     fn test_stat_bonus() {
-        // YaneuraOu準拠: min(170*depth-87, 1598) + 332*(is_tt_move)
-        // depth=1, is_tt_move=false: 170*1-87 = 83
-        assert_eq!(stat_bonus(1, false), 83);
-        // depth=1, is_tt_move=true: 83 + 332 = 415
-        assert_eq!(stat_bonus(1, true), 415);
-        // depth=20: min(170*20-87, 1598) = min(3313, 1598) = 1598
-        assert_eq!(stat_bonus(20, false), 1598);
-        assert_eq!(stat_bonus(20, true), 1598 + 332);
+        // YaneuraOu準拠: min(121*depth-77, 1633) + 375*(is_tt_move)
+        // depth=1, is_tt_move=false: 121*1-77 = 44
+        assert_eq!(stat_bonus(1, false), 44);
+        // depth=1, is_tt_move=true: 44 + 375 = 419
+        assert_eq!(stat_bonus(1, true), 419);
+        // depth=20: min(121*20-77, 1633) = min(2343, 1633) = 1633
+        assert_eq!(stat_bonus(20, false), 1633);
+        assert_eq!(stat_bonus(20, true), 1633 + 375);
     }
 
     #[test]
-    fn test_quiet_malus() {
-        // YaneuraOu準拠: min(743*depth-180, 2287) - 33*quiets_count
-        // depth=1, quiets_count=0: 743*1-180 = 563
-        assert_eq!(quiet_malus(1, 0), 563);
-        // depth=1, quiets_count=10: 563 - 33*10 = 563 - 330 = 233
-        assert_eq!(quiet_malus(1, 10), 233);
-        // depth=10: min(743*10-180, 2287) = min(7250, 2287) = 2287
-        assert_eq!(quiet_malus(10, 0), 2287);
-    }
-
-    #[test]
-    fn test_capture_malus() {
-        // YaneuraOu準拠: min(708*depth-148, 2287) - 29*captures_count
-        // depth=1, captures_count=0: 708*1-148 = 560
-        assert_eq!(capture_malus(1, 0), 560);
-        // depth=1, captures_count=5: 560 - 29*5 = 560 - 145 = 415
-        assert_eq!(capture_malus(1, 5), 415);
-        // depth=10: min(708*10-148, 2287) = min(6932, 2287) = 2287
-        assert_eq!(capture_malus(10, 0), 2287);
+    fn test_stat_malus() {
+        // YaneuraOu準拠: min(825*depth-196, 2159) - 16*moveCount
+        // depth=1, moveCount=0: 825*1-196 = 629
+        assert_eq!(stat_malus(1, 0), 629);
+        // depth=1, moveCount=10: 629 - 16*10 = 469
+        assert_eq!(stat_malus(1, 10), 469);
+        // depth=10, moveCount=0: min(825*10-196, 2159) = min(8054, 2159) = 2159
+        assert_eq!(stat_malus(10, 0), 2159);
     }
 
     #[test]

@@ -16,10 +16,10 @@ use crate::tt::{ProbeResult, TTData, TranspositionTable};
 use crate::types::{Bound, Color, Depth, Move, Piece, PieceType, Square, Value, DEPTH_QS, MAX_PLY};
 
 use super::history::{
-    capture_malus, continuation_history_bonus_with_offset, low_ply_history_bonus,
-    pawn_history_bonus, quiet_malus, stat_bonus, HistoryCell, CONTINUATION_HISTORY_NEAR_PLY_OFFSET,
-    CONTINUATION_HISTORY_WEIGHTS, CORRECTION_HISTORY_LIMIT, LOW_PLY_HISTORY_SIZE,
-    PRIOR_CAPTURE_COUNTERMOVE_BONUS, TT_MOVE_HISTORY_BONUS, TT_MOVE_HISTORY_MALUS,
+    continuation_history_bonus_with_offset, low_ply_history_bonus, pawn_history_bonus, stat_bonus,
+    stat_malus, HistoryCell, CONTINUATION_HISTORY_NEAR_PLY_OFFSET, CONTINUATION_HISTORY_WEIGHTS,
+    CORRECTION_HISTORY_LIMIT, LOW_PLY_HISTORY_SIZE, PRIOR_CAPTURE_COUNTERMOVE_BONUS,
+    TT_MOVE_HISTORY_BONUS, TT_MOVE_HISTORY_MALUS,
 };
 use super::movepicker::piece_value;
 use super::types::{
@@ -2030,10 +2030,10 @@ impl SearchWorker {
         if best_move.is_some() && !best_move.is_pass() {
             let is_best_capture = pos.is_capture(best_move);
             let is_tt_move = best_move == tt_move;
-            // YaneuraOu準拠: bonus = min(170*depth-87, 1598) + 332*(bestMove==ttMove)
+            // YaneuraOu準拠: bonus = min(121*depth-77, 1633) + 375*(bestMove==ttMove)
             let bonus = stat_bonus(depth, is_tt_move);
-            // YaneuraOu準拠: quietMalus = min(743*depth-180, 2287) - 33*quietsSearched.size()
-            let malus = quiet_malus(depth, quiets_tried.len());
+            // YaneuraOu準拠: malus = min(825*depth-196, 2159) - 16*moveCount
+            let malus = stat_malus(depth, move_count);
             let us = pos.side_to_move();
             let pawn_key_idx = pos.pawn_history_index();
 
@@ -2158,9 +2158,7 @@ impl SearchWorker {
                 });
             }
 
-            // YaneuraOu: 他の捕獲手へのペナルティ（capture best以外の全捕獲手）
-            // captureMalus = min(708*depth-148, 2287) - 29*capturesSearched.size()
-            let cap_malus = capture_malus(depth, captures_tried.len());
+            // YaneuraOu準拠: 他の捕獲手へのペナルティもmalusを共通使用
             ctx.history.with_write(|h| {
                 for &m in captures_tried.iter() {
                     if m != best_move {
@@ -2173,12 +2171,7 @@ impl SearchWorker {
                         let to = m.to();
                         let captured_pt = pos.piece_on(to).piece_type();
                         // YaneuraOu: captureHistory << -captureMalus * 1431 / 1024
-                        h.capture_history.update(
-                            cont_pc,
-                            to,
-                            captured_pt,
-                            -cap_malus * 1431 / 1024,
-                        );
+                        h.capture_history.update(cont_pc, to, captured_pt, -malus * 1397 / 1024);
                     }
                 }
             });
@@ -2199,7 +2192,7 @@ impl SearchWorker {
                         let prev_piece = pos.piece_on(prev_sq);
                         // YaneuraOu: update_continuation_histories(ss - 1, ...)を呼ぶ
                         // = 過去1-6手分全てに weight と +80 オフセット付きで更新
-                        let penalty_base = -cap_malus * 622 / 1024;
+                        let penalty_base = -malus * 614 / 1024;
                         // YaneuraOu: update_continuation_histories(ss - 1, ...) で (ss - 1)->inCheck を参照
                         let prev_in_check = st.stack[prev_ply].in_check;
                         let prev_max_ply_back = if prev_in_check { 2 } else { 6 };
