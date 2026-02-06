@@ -241,27 +241,23 @@ pub(super) fn try_razoring<const NT: u8>(
     limits: &LimitsType,
     time_manager: &mut TimeManagement,
 ) -> Option<Value> {
-    // depth <= 3 の浅い探索で、静的評価値が alpha より十分低い場合
-    if !pv_node && !in_check && depth <= 3 {
-        let razoring_threshold = alpha - Value::new(200 * depth);
-        if static_eval < razoring_threshold {
-            let value = qsearch::<{ NodeType::NonPV as u8 }>(
-                st,
-                ctx,
-                pos,
-                DEPTH_QS,
-                alpha,
-                beta,
-                ply,
-                limits,
-                time_manager,
-            );
-            if value <= alpha {
-                inc_stat!(st, razoring_applied);
-                inc_stat_by_depth!(st, razoring_by_depth, depth);
-                return Some(value);
-            }
-        }
+    // YaneuraOu準拠: 評価値が非常に低い場合、通常探索をスキップしてqsearch値を返す
+    // マージン: 514 + 294 * depth² (二次マージン、depth制限なし)
+    if !pv_node && !in_check && static_eval < alpha - Value::new(514 + 294 * depth * depth) {
+        let value = qsearch::<{ NodeType::NonPV as u8 }>(
+            st,
+            ctx,
+            pos,
+            DEPTH_QS,
+            alpha,
+            beta,
+            ply,
+            limits,
+            time_manager,
+        );
+        inc_stat!(st, razoring_applied);
+        inc_stat_by_depth!(st, razoring_by_depth, depth);
+        return Some(value);
     }
     None
 }
