@@ -163,9 +163,9 @@ pub(super) fn probe_transposition<const NT: u8>(
         inc_stat_by_depth!(st, tt_hit_by_depth, depth);
     }
 
-    // excludedMoveがある場合はカットオフしない（YaneuraOu準拠: yaneuraou-search.cpp:2331-2337）
-    // 差異1: depth比較を動的閾値に変更 — fail-high時は tt_data.depth > depth を要求
-    // 差異2: cutNode条件追加 — depth<=5でノードタイプと矛盾するカットオフを抑制
+    // YaneuraOu準拠のTTカットオフ条件（yaneuraou-search.cpp:2331-2337）
+    // - fail-high時は tt_data.depth > depth を要求（fail-low時は >= depth）
+    // - depth<=5ではcutNodeとTT値の方向が一致する場合のみカットオフ許可
     let tt_value_lte_beta = tt_value != Value::NONE && tt_value.raw() <= beta.raw();
     if !pv_node
         && excluded_move.is_none()
