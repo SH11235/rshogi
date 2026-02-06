@@ -526,14 +526,12 @@ impl MovePicker {
                 }
 
                 // ==============================
-                // 良い静かな手を返す（閾値以上のスコア、ソート済み）
+                // 良い静かな手を返す（YaneuraOu準拠: value > GOOD_QUIET_THRESHOLD）
                 // ==============================
                 Stage::GoodQuiet => {
                     if !self.skip_quiets {
-                        // partial_insertion_sortで前方に集められた閾値以上の手を返す
-                        // end_good_quietsまでが閾値以上の手（ソート済み）
                         self.end_cur = self.end_good_quiets;
-                        if let Some(m) = self.select_simple() {
+                        if let Some(m) = self.select_good_quiet() {
                             return m;
                         }
                     }
@@ -552,20 +550,20 @@ impl MovePicker {
                         return m;
                     }
 
-                    // 悪い静かな手の準備（end_good_quietsから開始）
-                    // バグ修正: 正確にend_good_quietsの位置から開始
-                    self.cur = self.end_good_quiets;
+                    // YaneuraOu準拠: endCapturesからquiet手全体を再走査
+                    self.cur = self.end_captures;
                     self.end_cur = self.end_generated;
                     self.stage = Stage::BadQuiet;
                 }
 
                 // ==============================
-                // 悪い静かな手を返す（閾値未満のスコア、未ソート）
+                // 悪い静かな手を返す（YaneuraOu準拠: value <= GOOD_QUIET_THRESHOLD）
                 // ==============================
                 Stage::BadQuiet => {
                     if !self.skip_quiets {
-                        // end_good_quiets以降が閾値未満の手（未ソート）
-                        if let Some(m) = self.select_simple() {
+                        // YaneuraOu準拠: endCaptures から全quiet手を再走査し、
+                        // value <= GOOD_QUIET_THRESHOLD の手のみ返す
+                        if let Some(m) = self.select_bad_quiet() {
                             return m;
                         }
                     }
@@ -762,6 +760,42 @@ impl MovePicker {
                 // 悪い捕獲手は後回し
                 self.moves.swap(self.end_bad_captures, self.cur - 1);
                 self.end_bad_captures += 1;
+            }
+        }
+        None
+    }
+
+    /// GoodQuiet用: value > GOOD_QUIET_THRESHOLD の手のみ返す（YaneuraOu準拠）
+    fn select_good_quiet(&mut self) -> Option<Move> {
+        const GOOD_QUIET_THRESHOLD: i32 = -14000;
+        while self.cur < self.end_cur {
+            let ext = self.moves.get(self.cur);
+            self.cur += 1;
+
+            if ext.mv == self.tt_move {
+                continue;
+            }
+
+            if ext.value > GOOD_QUIET_THRESHOLD {
+                return Some(ext.mv);
+            }
+        }
+        None
+    }
+
+    /// BadQuiet用: value <= GOOD_QUIET_THRESHOLD の手のみ返す（YaneuraOu準拠）
+    fn select_bad_quiet(&mut self) -> Option<Move> {
+        const GOOD_QUIET_THRESHOLD: i32 = -14000;
+        while self.cur < self.end_cur {
+            let ext = self.moves.get(self.cur);
+            self.cur += 1;
+
+            if ext.mv == self.tt_move {
+                continue;
+            }
+
+            if ext.value <= GOOD_QUIET_THRESHOLD {
+                return Some(ext.mv);
             }
         }
         None
