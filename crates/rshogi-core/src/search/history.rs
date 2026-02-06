@@ -25,7 +25,7 @@ use super::tt_history::TTMoveHistory;
 // =============================================================================
 
 /// PawnHistoryのサイズ（2のべき乗）
-pub const PAWN_HISTORY_SIZE: usize = 512;
+pub const PAWN_HISTORY_SIZE: usize = 8192;
 
 /// CorrectionHistoryのサイズ（2のべき乗）
 pub const CORRECTION_HISTORY_SIZE: usize = 32768;
@@ -456,7 +456,7 @@ impl Default for ContinuationHistory {
 ///
 /// 歩の陣形に対する履歴。
 ///
-/// PERF: 約2.3MB。HistoryTables内の連続領域に配置するため配列で保持する。
+/// PERF: 約39MB。HistoryTables内の連続領域に配置するため配列で保持する。
 pub struct PawnHistory {
     table: [[[StatsEntry<8192>; Square::NUM]; PIECE_NUM]; PAWN_HISTORY_SIZE],
 }
