@@ -1413,8 +1413,8 @@ impl SearchWorker {
                 && tt_data.bound.is_lower_or_exact()
                 && tt_data.depth >= depth - 3
             {
-                // singularBeta = ttValue - (56 + 79 * (ttPv && !PvNode)) * depth / 58
-                let singular_beta_margin = (56 + 79 * (tt_pv && !pv_node) as i32) * depth / 58;
+                // YaneuraOu準拠: singularBeta = ttValue - (56 + 81 * (ttPv && !PvNode)) * depth / 60
+                let singular_beta_margin = (56 + 81 * (tt_pv && !pv_node) as i32) * depth / 60;
                 let singular_beta = tt_value - Value::new(singular_beta_margin);
                 let singular_depth = new_depth / 2;
 
@@ -1444,19 +1444,16 @@ impl SearchWorker {
                     inc_stat!(st, singular_extension);
                     // Singular確定 → 延長量を計算
                     // YaneuraOu/Stockfish学習済みパラメータ（yaneuraou-search.cpp:3404-3411）
-                    let corr_val_adj = eval_ctx.correction_value.abs() / 249_096;
+                    // YaneuraOu準拠パラメータ (yaneuraou-search.cpp:3419-3423)
+                    let corr_val_adj = eval_ctx.correction_value.abs() / 229_958;
                     let tt_move_hist = ctx.history.with_read(|h| h.tt_move_history.get() as i32);
-                    // double_margin: 2手延長の閾値
-                    //   base(4) + PVボーナス(205) - 非駒取りペナルティ(223)
-                    //   - 補正値 - TTMove履歴 - 深い探索ペナルティ(45)
-                    let double_margin = 4 + 205 * pv_node as i32
-                        - 223 * !tt_capture as i32
+                    let double_margin = -4 + 198 * pv_node as i32
+                        - 212 * !tt_capture as i32
                         - corr_val_adj
                         - 921 * tt_move_hist / 127649
                         - (ply > st.root_depth) as i32 * 45;
-                    // triple_margin: 3手延長の閾値
-                    let triple_margin = 80 + 276 * pv_node as i32 - 249 * !tt_capture as i32
-                        + 86 * tt_pv as i32
+                    let triple_margin = 76 + 308 * pv_node as i32 - 250 * !tt_capture as i32
+                        + 92 * tt_pv as i32
                         - corr_val_adj
                         - (ply * 2 > st.root_depth * 3) as i32 * 52;
 
