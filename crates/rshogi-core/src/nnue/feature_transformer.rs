@@ -262,8 +262,40 @@ impl FeatureTransformer {
 
         let weights = &self.weights[offset..offset + TRANSFORMED_FEATURE_DIMENSIONS];
 
+        // AVX-512: 512bit = 32 x i16
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+        {
+            // SAFETY:
+            // - weights: AlignedBoxで64バイトアライン、各行は512バイト(64の倍数)
+            // - accumulation: Aligned<[i16; 256]>で64バイトアライン
+            // - 256要素 = 32要素 × 8回のループで完全にカバー
+            unsafe {
+                use std::arch::x86_64::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let weight_ptr = weights.as_ptr();
+
+                #[allow(clippy::manual_is_multiple_of)]
+                {
+                    debug_assert!(acc_ptr as usize % 64 == 0, "accumulation not 64-byte aligned");
+                    debug_assert!(weight_ptr as usize % 64 == 0, "weights not 64-byte aligned");
+                }
+
+                for i in 0..8 {
+                    let acc_vec = _mm512_load_si512(acc_ptr.add(i * 32) as *const i32);
+                    let weight_vec = _mm512_load_si512(weight_ptr.add(i * 32) as *const i32);
+                    let result = _mm512_add_epi16(acc_vec, weight_vec);
+                    _mm512_store_si512(acc_ptr.add(i * 32) as *mut i32, result);
+                }
+            }
+            return;
+        }
+
         // AVX2: 256bit = 16 x i16
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            not(target_feature = "avx512f")
+        ))]
         {
             // SAFETY:
             // - weights: AlignedBoxで64バイトアライン、各行は512バイト(64の倍数)
@@ -372,8 +404,40 @@ impl FeatureTransformer {
 
         let weights = &self.weights[offset..offset + TRANSFORMED_FEATURE_DIMENSIONS];
 
+        // AVX-512: 512bit = 32 x i16
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+        {
+            // SAFETY:
+            // - weights: AlignedBoxで64バイトアライン、各行は512バイト(64の倍数)
+            // - accumulation: Aligned<[i16; 256]>で64バイトアライン
+            // - 256要素 = 32要素 × 8回のループで完全にカバー
+            unsafe {
+                use std::arch::x86_64::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let weight_ptr = weights.as_ptr();
+
+                #[allow(clippy::manual_is_multiple_of)]
+                {
+                    debug_assert!(acc_ptr as usize % 64 == 0, "accumulation not 64-byte aligned");
+                    debug_assert!(weight_ptr as usize % 64 == 0, "weights not 64-byte aligned");
+                }
+
+                for i in 0..8 {
+                    let acc_vec = _mm512_load_si512(acc_ptr.add(i * 32) as *const i32);
+                    let weight_vec = _mm512_load_si512(weight_ptr.add(i * 32) as *const i32);
+                    let result = _mm512_sub_epi16(acc_vec, weight_vec);
+                    _mm512_store_si512(acc_ptr.add(i * 32) as *mut i32, result);
+                }
+            }
+            return;
+        }
+
         // AVX2: 256bit = 16 x i16
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            not(target_feature = "avx512f")
+        ))]
         {
             // SAFETY:
             // - weights: AlignedBoxで64バイトアライン、各行は512バイト(64の倍数)
@@ -404,7 +468,8 @@ impl FeatureTransformer {
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "sse2",
-            not(target_feature = "avx2")
+            not(target_feature = "avx2"),
+            not(target_feature = "avx512f")
         ))]
         {
             // SAFETY: 同上（16バイトアライン）
