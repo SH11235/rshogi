@@ -1502,17 +1502,14 @@ impl SearchWorker {
             // =============================================================
             // LMP（Step14の前）
             // =============================================================
-            // moveCount >= limitのとき、quiet手をスキップ
-            // YaneuraOu: skip_quiet_moves()のみでcontinueしないが、
-            // rshogiはStep14の条件が緩いため、continueも追加
-            if !pv_node && !in_check && !is_capture && !best_value.is_loss() && !mv.is_pass() {
+            // moveCount >= limitのとき、quiet手の生成をスキップ
+            // YaneuraOu準拠: skip_quiet_moves()のみ、continueしない。
+            // 現在の手はStep14の枝刈りで判定される。
+            if !root_node && !best_value.is_loss() {
                 let lmp_limit = (3 + depth * depth) / (2 - improving as i32);
-                if move_count >= lmp_limit {
-                    if !lmp_triggered && mp.is_quiet_stage() {
-                        mp.skip_quiets();
-                        lmp_triggered = true;
-                    }
-                    continue;
+                if move_count >= lmp_limit && !lmp_triggered {
+                    mp.skip_quiets();
+                    lmp_triggered = true;
                 }
             }
 
