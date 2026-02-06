@@ -112,11 +112,9 @@ pub(super) fn step14_pruning(
             });
 
             // Futility pruning for captures (駒取り手に対するfutility枝刈り)
-            if !step_ctx.gives_check
-                && lmr_depth < 7
-                && !step_ctx.in_check
-                && step_ctx.static_eval != Value::NONE
-            {
+            // YaneuraOu準拠: !in_check/static_eval!=NONEガードなし
+            // (VALUE_NONE=32002によりfutilityValueが常にalpha超えのため暗黙的に安全)
+            if !step_ctx.gives_check && lmr_depth < 7 {
                 use super::movepicker::piece_value;
                 let captured_value = piece_value(captured);
                 let futility_value = step_ctx.static_eval.raw()
@@ -184,11 +182,8 @@ pub(super) fn step14_pruning(
                 + 134 * lmr_depth_clamped
                 + 90 * (step_ctx.static_eval > step_ctx.alpha) as i32;
 
-            if !step_ctx.in_check
-                && lmr_depth < 11
-                && futility_value <= step_ctx.alpha.raw()
-                && step_ctx.static_eval != Value::NONE
-            {
+            // YaneuraOu準拠: static_eval!=NONEガードなし（!in_check + VALUE_NONEで暗黙的に安全）
+            if !step_ctx.in_check && lmr_depth < 11 && futility_value <= step_ctx.alpha.raw() {
                 // YaneuraOu準拠: bestValueをfutilityValueで更新する条件
                 // if (bestValue <= futilityValue && !is_decisive(bestValue) && !is_win(futilityValue))
                 let futility_val = Value::new(futility_value);
@@ -204,11 +199,11 @@ pub(super) fn step14_pruning(
             }
 
             // SEE pruning for quiet moves (YaneuraOu: -27 * lmrDepth * lmrDepth)
-            if !step_ctx.in_check
-                && lmr_depth_clamped > 0
-                && !step_ctx
-                    .pos
-                    .see_ge(step_ctx.mv, Value::new(-27 * lmr_depth_clamped * lmr_depth_clamped))
+            // YaneuraOu準拠: !in_check/lmrDepth>0ガードなし
+            // lmrDepth=0時はthreshold=0でSEE<0の手を枝刈り
+            if !step_ctx
+                .pos
+                .see_ge(step_ctx.mv, Value::new(-27 * lmr_depth_clamped * lmr_depth_clamped))
             {
                 return Step14Outcome::Skip { best_value: None };
             }
