@@ -2153,8 +2153,14 @@ impl SearchWorker {
             } else {
                 // 捕獲手がbest: captureHistoryを更新
                 let captured_pt = pos.piece_on(best_to).piece_type();
+                // YaneuraOu準拠: captureHistory best moveにスケーリング適用（yaneuraou-search.cpp:4983）
                 ctx.history.with_write(|h| {
-                    h.capture_history.update(best_cont_pc, best_to, captured_pt, bonus)
+                    h.capture_history.update(
+                        best_cont_pc,
+                        best_to,
+                        captured_pt,
+                        bonus * 1482 / 1024,
+                    )
                 });
             }
 
