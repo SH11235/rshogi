@@ -147,8 +147,12 @@ pub(super) struct TTContext {
 pub(super) enum ProbeOutcome {
     /// 探索続行（TTContext付き）
     Continue(TTContext),
-    /// 即時カットオフ値
-    Cutoff(Value),
+    /// 即時カットオフ値（ヒストリ更新用情報付き）
+    Cutoff {
+        value: Value,
+        tt_move: Move,
+        tt_capture: bool,
+    },
 }
 
 /// 静的評価まわりの情報をまとめたコンテキスト
@@ -1155,11 +1159,124 @@ impl SearchWorker {
             pv_node,
             in_check,
             excluded_move,
+            cut_node,
         ) {
             ProbeOutcome::Continue(c) => c,
-            ProbeOutcome::Cutoff(value) => {
+            ProbeOutcome::Cutoff {
+                value,
+                tt_move: cutoff_tt_move,
+                tt_capture: cutoff_tt_capture,
+            } => {
                 inc_stat!(st, tt_cutoff);
                 inc_stat_by_depth!(st, tt_cutoff_by_depth, depth);
+
+                // YaneuraOu準拠: TTカットオフ時のヒストリ更新（yaneuraou-search.cpp:2347-2389）
+                if cutoff_tt_move.is_some() && value.raw() >= beta.raw() {
+                    // quiet ttMoveがfail-highした場合、quiet_historiesを更新
+                    if !cutoff_tt_capture {
+                        let bonus = (130 * depth - 71).min(1043);
+                        let us = pos.side_to_move();
+                        let moved_pc = pos.moved_piece(cutoff_tt_move);
+                        let cont_pc = if cutoff_tt_move.is_promotion() {
+                            moved_pc.promote().unwrap_or(moved_pc)
+                        } else {
+                            moved_pc
+                        };
+                        let to = cutoff_tt_move.to();
+                        let max_ply_back = if in_check { 2 } else { 6 };
+                        let pawn_key_idx = pos.pawn_history_index();
+
+                        ctx.history.with_write(|h| {
+                            h.main_history.update(us, cutoff_tt_move, bonus);
+
+                            if ply < LOW_PLY_HISTORY_SIZE as i32 {
+                                h.low_ply_history.update(
+                                    ply as usize,
+                                    cutoff_tt_move,
+                                    low_ply_history_bonus(bonus),
+                                );
+                            }
+
+                            for &(ply_back, weight) in CONTINUATION_HISTORY_WEIGHTS.iter() {
+                                if ply_back > max_ply_back {
+                                    continue;
+                                }
+                                if ply >= ply_back as i32 {
+                                    let prev_ply = (ply - ply_back as i32) as usize;
+                                    if let Some(key) = st.stack[prev_ply].cont_hist_key {
+                                        let in_check_idx = key.in_check as usize;
+                                        let capture_idx = key.capture as usize;
+                                        let weighted_bonus = continuation_history_bonus_with_offset(
+                                            bonus * weight / 1024,
+                                            ply_back,
+                                        );
+                                        h.continuation_history[in_check_idx][capture_idx].update(
+                                            key.piece,
+                                            key.to,
+                                            cont_pc,
+                                            to,
+                                            weighted_bonus,
+                                        );
+                                    }
+                                }
+                            }
+
+                            h.pawn_history.update(
+                                pawn_key_idx,
+                                cont_pc,
+                                to,
+                                pawn_history_bonus(bonus),
+                            );
+                        });
+                    }
+
+                    // 1手前の早期quiet手へのペナルティ
+                    // YaneuraOu: prevSq != SQ_NONE && (ss-1)->moveCount <= 4 && !priorCapture
+                    if ply >= 1 {
+                        let prev_ply = (ply - 1) as usize;
+                        let prev_move_count = st.stack[prev_ply].move_count;
+                        let prior_capture =
+                            st.stack[prev_ply].cont_hist_key.is_some_and(|k| k.capture);
+                        if let Some(prev_key) = st.stack[prev_ply].cont_hist_key {
+                            if prev_move_count <= 4 && !prior_capture {
+                                let prev_sq = prev_key.to;
+                                let prev_piece = pos.piece_on(prev_sq);
+                                let max_prev_ply_back =
+                                    if st.stack[prev_ply].in_check { 2 } else { 6 };
+                                ctx.history.with_write(|h| {
+                                    for &(ply_back, weight) in CONTINUATION_HISTORY_WEIGHTS.iter() {
+                                        if ply_back > max_prev_ply_back {
+                                            continue;
+                                        }
+                                        let target_ply_i = prev_ply as i32 - ply_back as i32;
+                                        if target_ply_i >= 0 {
+                                            if let Some(target_key) =
+                                                st.stack[target_ply_i as usize].cont_hist_key
+                                            {
+                                                let in_check_idx = target_key.in_check as usize;
+                                                let capture_idx = target_key.capture as usize;
+                                                let weighted_penalty =
+                                                    continuation_history_bonus_with_offset(
+                                                        -2142 * weight / 1024,
+                                                        ply_back,
+                                                    );
+                                                h.continuation_history[in_check_idx][capture_idx]
+                                                    .update(
+                                                        target_key.piece,
+                                                        target_key.to,
+                                                        prev_piece,
+                                                        prev_sq,
+                                                        weighted_penalty,
+                                                    );
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+
                 return value;
             }
         };
