@@ -2050,26 +2050,26 @@ impl SearchWorker {
             let max_ply_back = if in_check { 2 } else { 6 };
 
             if !is_best_capture {
-                // Quiet手がbest: update_quiet_histories(bestMove, bonus * 978 / 1024)相当
-                // YaneuraOu準拠: bonus * 978 / 1024をベースに各historyを更新
-                let scaled_bonus = bonus * 978 / 1024;
+                // Quiet手がbest: update_quiet_histories(bestMove, bonus * 881 / 1024)相当
+                // YaneuraOu準拠: bonus * 881 / 1024をベースに各historyを更新
+                let scaled_bonus = bonus * 881 / 1024;
 
                 // 他のquiet手にはペナルティ
-                // YaneuraOu: update_quiet_histories(move, -quietMalus * 1115 / 1024)
-                let scaled_malus = malus * 1115 / 1024;
+                // YaneuraOu: update_quiet_histories(move, -quietMalus * 1083 / 1024)
+                let scaled_malus = malus * 1083 / 1024;
 
                 // History更新をまとめて実行
                 ctx.history.with_write(|h| {
                     // MainHistory: そのまま渡す
                     h.main_history.update(us, best_move, scaled_bonus);
 
-                    // LowPlyHistory: bonus * 771 / 1024 + 40
+                    // LowPlyHistory: bonus * 761 / 1024
                     if ply < LOW_PLY_HISTORY_SIZE as i32 {
                         let low_ply_bonus = low_ply_history_bonus(scaled_bonus);
                         h.low_ply_history.update(ply as usize, best_move, low_ply_bonus);
                     }
 
-                    // ContinuationHistory: bonus * (bonus > 0 ? 979 : 842) / 1024 + weight + 80*(i<2)
+                    // ContinuationHistory: bonus * 955 / 1024 + weight + 88*(i<2)
                     for &(ply_back, weight) in CONTINUATION_HISTORY_WEIGHTS.iter() {
                         if ply_back > max_ply_back {
                             continue;
@@ -2094,7 +2094,7 @@ impl SearchWorker {
                         }
                     }
 
-                    // PawnHistory: bonus * 704 / 1024 + 70
+                    // PawnHistory: bonus * (pos ? 850 : 550) / 1024
                     let pawn_bonus = pawn_history_bonus(scaled_bonus);
                     h.pawn_history.update(pawn_key_idx, best_cont_pc, best_to, pawn_bonus);
 

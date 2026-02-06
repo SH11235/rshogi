@@ -62,23 +62,19 @@ pub const TT_MOVE_HISTORY_MALUS: i32 = -848;
 /// YaneuraOu準拠: 1,2,3,4,5,6手前の指し手と現在の指し手のペアを更新。
 /// 王手中は1,2手前のみ更新。
 pub const CONTINUATION_HISTORY_WEIGHTS: [(usize, i32); 6] =
-    [(1, 1108), (2, 652), (3, 273), (4, 572), (5, 126), (6, 449)];
+    [(1, 1157), (2, 648), (3, 288), (4, 576), (5, 140), (6, 441)];
 
 /// update_quiet_histories用のlowPlyHistory倍率
-pub const LOW_PLY_HISTORY_MULTIPLIER: i32 = 771;
-pub const LOW_PLY_HISTORY_OFFSET: i32 = 40;
+pub const LOW_PLY_HISTORY_MULTIPLIER: i32 = 761;
+pub const LOW_PLY_HISTORY_OFFSET: i32 = 0;
 
-/// update_quiet_histories用のcontinuationHistory倍率（正のボーナス時）
-pub const CONTINUATION_HISTORY_POS_MULTIPLIER: i32 = 979;
-/// update_quiet_histories用のcontinuationHistory倍率（負のボーナス時）
-pub const CONTINUATION_HISTORY_NEG_MULTIPLIER: i32 = 842;
+/// update_quiet_histories用のcontinuationHistory倍率（正負共通）
+pub const CONTINUATION_HISTORY_MULTIPLIER: i32 = 955;
 
 /// update_quiet_histories用のpawnHistory倍率（正のボーナス時）
-pub const PAWN_HISTORY_POS_MULTIPLIER: i32 = 704;
+pub const PAWN_HISTORY_POS_MULTIPLIER: i32 = 850;
 /// update_quiet_histories用のpawnHistory倍率（負のボーナス時）
-pub const PAWN_HISTORY_NEG_MULTIPLIER: i32 = 439;
-/// update_quiet_histories用のpawnHistoryオフセット
-pub const PAWN_HISTORY_OFFSET: i32 = 70;
+pub const PAWN_HISTORY_NEG_MULTIPLIER: i32 = 550;
 
 /// ContinuationHistory近接ply（1,2手前）へのオフセット
 /// YaneuraOu: update_continuation_histories で (bonus * weight / 1024) + 88 * (i < 2)
@@ -876,14 +872,10 @@ pub fn low_ply_history_bonus(bonus: i32) -> i32 {
 
 /// ContinuationHistory用のボーナスを計算（YaneuraOu準拠）
 ///
-/// 正のボーナスと負のボーナスで倍率が異なる。
+/// 正負共通の倍率を使用。
 #[inline]
 pub fn continuation_history_bonus(bonus: i32) -> i32 {
-    if bonus > 0 {
-        bonus * CONTINUATION_HISTORY_POS_MULTIPLIER / 1024
-    } else {
-        bonus * CONTINUATION_HISTORY_NEG_MULTIPLIER / 1024
-    }
+    bonus * CONTINUATION_HISTORY_MULTIPLIER / 1024
 }
 
 /// ContinuationHistory近接ply（1,2手前）用のオフセット込みボーナスを計算
@@ -903,15 +895,13 @@ pub fn continuation_history_bonus_with_offset(bonus: i32, ply_back: usize) -> i3
 
 /// PawnHistory用のボーナスを計算（YaneuraOu準拠）
 ///
-/// YaneuraOu準拠: オフセットは常に加算（負のボーナス時もペナルティを緩める）
-/// `(bonus * (bonus > 0 ? 704 : 439) / 1024) + 70`
+/// `bonus * (bonus > 0 ? 850 : 550) / 1024`
 #[inline]
 pub fn pawn_history_bonus(bonus: i32) -> i32 {
     if bonus > 0 {
-        bonus * PAWN_HISTORY_POS_MULTIPLIER / 1024 + PAWN_HISTORY_OFFSET
+        bonus * PAWN_HISTORY_POS_MULTIPLIER / 1024
     } else {
-        // YaneuraOu: 負のボーナスでも+70を加算してペナルティを緩める
-        bonus * PAWN_HISTORY_NEG_MULTIPLIER / 1024 + PAWN_HISTORY_OFFSET
+        bonus * PAWN_HISTORY_NEG_MULTIPLIER / 1024
     }
 }
 
