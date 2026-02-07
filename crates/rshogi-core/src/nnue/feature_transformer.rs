@@ -262,8 +262,13 @@ impl FeatureTransformer {
 
         let weights = &self.weights[offset..offset + TRANSFORMED_FEATURE_DIMENSIONS];
 
-        // AVX-512: 512bit = 32 x i16
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+        // AVX-512 BW: 512bit = 32 x i16
+        // _mm512_add_epi16はAVX-512BW命令のためavx512bwが必要
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
         {
             // SAFETY:
             // - weights: AlignedBoxで64バイトアライン、各行は512バイト(64の倍数)
@@ -294,7 +299,7 @@ impl FeatureTransformer {
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "avx2",
-            not(target_feature = "avx512f")
+            not(target_feature = "avx512bw")
         ))]
         {
             // SAFETY:
@@ -404,8 +409,13 @@ impl FeatureTransformer {
 
         let weights = &self.weights[offset..offset + TRANSFORMED_FEATURE_DIMENSIONS];
 
-        // AVX-512: 512bit = 32 x i16
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+        // AVX-512 BW: 512bit = 32 x i16
+        // _mm512_sub_epi16はAVX-512BW命令のためavx512bwが必要
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
         {
             // SAFETY:
             // - weights: AlignedBoxで64バイトアライン、各行は512バイト(64の倍数)
@@ -436,7 +446,7 @@ impl FeatureTransformer {
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "avx2",
-            not(target_feature = "avx512f")
+            not(target_feature = "avx512bw")
         ))]
         {
             // SAFETY:
@@ -469,7 +479,7 @@ impl FeatureTransformer {
             target_arch = "x86_64",
             target_feature = "sse2",
             not(target_feature = "avx2"),
-            not(target_feature = "avx512f")
+            not(target_feature = "avx512bw")
         ))]
         {
             // SAFETY: 同上（16バイトアライン）
