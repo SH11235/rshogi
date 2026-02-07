@@ -15,11 +15,11 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 /// クラスター構造
 /// 同じハッシュインデックスに対して複数のエントリを持つ
-/// 64bitキー対応: 16bytes × 3 = 48bytes（キャッシュライン64バイトに収まる）
-#[repr(C, align(64))]
+/// YaneuraOu（CLUSTER_SIZE=3）準拠: 10bytes × 3 + 2padding = 32bytes
+#[repr(C, align(32))]
 pub struct Cluster {
     entries: [TTEntry; CLUSTER_SIZE],
-    _padding: [u8; 16], // 16 * 3 + 16 = 64 bytes
+    _padding: [u8; 2], // 10 * 3 + 2 = 32 bytes
 }
 
 impl Cluster {
@@ -27,7 +27,7 @@ impl Cluster {
     const fn new() -> Self {
         Self {
             entries: [TTEntry::new(); CLUSTER_SIZE],
-            _padding: [0; 16],
+            _padding: [0; 2],
         }
     }
 }
@@ -47,8 +47,8 @@ impl Clone for Cluster {
     }
 }
 
-// クラスターは64バイトであることを保証（キャッシュラインサイズ）
-const _: () = assert!(std::mem::size_of::<Cluster>() == 64);
+// クラスターは32バイトであることを保証（YaneuraOu CLUSTER_SIZE=3 準拠）
+const _: () = assert!(std::mem::size_of::<Cluster>() == 32);
 
 struct ClusterTable {
     alloc: Allocation,
@@ -170,14 +170,15 @@ impl TranspositionTable {
         self.generation8.load(Ordering::Relaxed)
     }
 
-    /// 置換表を検索（64bitキーでマッチング）
+    /// 置換表を検索（クラスター内は16bitキーでマッチング）
     pub fn probe(&self, key: u64, pos: &Position) -> ProbeResult {
         let side_to_move = pos.side_to_move();
         let cluster = self.first_entry(key, side_to_move);
+        let key16 = key as u16;
 
-        // クラスター内を検索（64bitキーで完全マッチング）
+        // クラスター内を検索（下位16bitキーでマッチング）
         for entry in &cluster.entries {
-            if entry.key64() == key {
+            if entry.key16() == key16 {
                 let mut data = entry.read();
 
                 if data.mv != Move::NONE {
@@ -290,7 +291,7 @@ pub struct ProbeResult {
 }
 
 impl ProbeResult {
-    /// エントリに書き込む（64bitキー対応）
+    /// エントリに書き込む（内部で16bitに切り詰め）
     ///
     /// # Safety
     /// writerポインタが有効であることを前提とする
@@ -450,7 +451,7 @@ mod tests {
 
     #[test]
     fn test_cluster_size() {
-        // クラスターは64バイト（キャッシュラインサイズ）
-        assert_eq!(std::mem::size_of::<Cluster>(), 64);
+        // クラスターは32バイト（YaneuraOu CLUSTER_SIZE=3 準拠）
+        assert_eq!(std::mem::size_of::<Cluster>(), 32);
     }
 }
