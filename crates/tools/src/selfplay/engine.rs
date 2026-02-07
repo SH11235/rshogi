@@ -126,7 +126,8 @@ impl EngineProcess {
     }
 
     pub fn new_game(&mut self) -> Result<()> {
-        self.write_line("usinewgame")
+        self.write_line("usinewgame")?;
+        self.sync_ready()
     }
 
     /// 探索を実行する。

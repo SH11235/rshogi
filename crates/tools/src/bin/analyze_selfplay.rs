@@ -59,6 +59,9 @@ struct EngineCommandMeta {
 #[derive(Deserialize)]
 struct ResultLog {
     outcome: String,
+    /// 勝者のエンジンラベル（tournament.rs が出力、旧形式では None）
+    #[serde(default)]
+    winner: Option<String>,
 }
 
 /// summary JSONLの行
@@ -254,11 +257,24 @@ fn parse_normal_file(path: &str) -> Result<FileResult> {
         } else if trimmed.contains("\"type\":\"result\"") {
             let result: ResultLog = serde_json::from_str(trimmed)
                 .with_context(|| format!("resultパースエラー: {path}"))?;
-            match result.outcome.as_str() {
-                "black_win" => black_wins += 1,
-                "white_win" => white_wins += 1,
-                "draw" => draws += 1,
-                _ => {}
+            if let Some(ref winner) = result.winner {
+                // winner フィールドあり: エンジン名で集計（tournament.rs 形式）
+                let winner_id = extract_engine_id(winner);
+                if winner_id == black {
+                    black_wins += 1;
+                } else if winner_id == white {
+                    white_wins += 1;
+                }
+                // winner が black/white どちらにも一致しない場合は無視
+                // （通常起こらない）
+            } else {
+                // winner なし: 旧形式または引分
+                match result.outcome.as_str() {
+                    "black_win" => black_wins += 1,
+                    "white_win" => white_wins += 1,
+                    "draw" => draws += 1,
+                    _ => {}
+                }
             }
         }
         // move行・metrics行等はスキップ

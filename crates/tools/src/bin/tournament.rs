@@ -11,6 +11,7 @@
 ///   --games 100 --byoyomi 2000 --concurrency 4 \
 ///   --out-dir runs/selfplay/tournament-001
 /// ```
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -67,6 +68,11 @@ struct Cli {
     /// Additional USI options (format: "Name=Value", can be repeated)
     #[arg(long = "usi-option", num_args = 1..)]
     usi_options: Option<Vec<String>>,
+
+    /// Per-engine USI options (format: "INDEX:Name=Value", can be repeated).
+    /// Overrides --usi-option for that engine (not merged).
+    #[arg(long = "engine-usi-option", num_args = 1..)]
+    engine_usi_options: Option<Vec<String>>,
 
     /// Maximum plies per game
     #[arg(long, default_value_t = 512)]
@@ -140,6 +146,8 @@ struct ResultLogEntry<'a> {
     outcome: &'a str,
     reason: &'a str,
     plies: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    winner: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -209,7 +217,7 @@ impl PairWriter {
 
 struct WorkerConfig {
     engine_paths: Vec<PathBuf>,
-    usi_options: Vec<String>,
+    engine_usi_options: Vec<Vec<String>>,
     threads: usize,
     hash_mb: u32,
     max_moves: u32,
@@ -226,7 +234,7 @@ fn worker_main(
 ) {
     let WorkerConfig {
         engine_paths,
-        usi_options,
+        engine_usi_options,
         threads,
         hash_mb,
         max_moves,
@@ -248,7 +256,7 @@ fn worker_main(
             minimum_thinking_time: None,
             slowmover: None,
             ponder: false,
-            usi_options: usi_options.clone(),
+            usi_options: engine_usi_options[i].clone(),
         };
         match EngineProcess::spawn(&cfg, label) {
             Ok(ep) => engines.push(ep),
@@ -353,8 +361,29 @@ fn main() -> Result<()> {
     fs::create_dir_all(&cli.out_dir)
         .with_context(|| format!("failed to create {}", cli.out_dir.display()))?;
 
-    let usi_options = cli.usi_options.clone().unwrap_or_default();
+    let common_usi_options = cli.usi_options.clone().unwrap_or_default();
     let n = cli.engines.len();
+
+    // per-engine オプションを解析: HashMap<usize, Vec<String>>
+    let mut per_engine_usi: HashMap<usize, Vec<String>> = HashMap::new();
+    if let Some(opts) = &cli.engine_usi_options {
+        for opt in opts {
+            let (idx_str, kv) = opt
+                .split_once(':')
+                .with_context(|| format!("invalid --engine-usi-option format: {opt}"))?;
+            let idx: usize =
+                idx_str.parse().with_context(|| format!("invalid engine index: {idx_str}"))?;
+            if idx >= n {
+                bail!("--engine-usi-option index {idx} out of range (0..{n})");
+            }
+            per_engine_usi.entry(idx).or_default().push(kv.to_string());
+        }
+    }
+
+    // エンジンごとの最終オプションリストを構築
+    let engine_usi_options: Vec<Vec<String>> = (0..n)
+        .map(|i| per_engine_usi.remove(&i).unwrap_or_else(|| common_usi_options.clone()))
+        .collect();
     let timestamp = Local::now();
     let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -410,11 +439,9 @@ fn main() -> Result<()> {
     );
 
     // ペア別のファイルライターを準備し、meta行を書き出す
-    let mut pair_writers: std::collections::HashMap<(usize, usize), PairWriter> =
-        std::collections::HashMap::new();
+    let mut pair_writers: HashMap<(usize, usize), PairWriter> = HashMap::new();
     // ペアごとのゲームカウンター
-    let mut pair_game_count: std::collections::HashMap<(usize, usize), u32> =
-        std::collections::HashMap::new();
+    let mut pair_game_count: HashMap<(usize, usize), u32> = HashMap::new();
 
     for i in 0..n {
         for j in (i + 1)..n {
@@ -459,7 +486,7 @@ fn main() -> Result<()> {
     let mut handles = Vec::new();
     for _ in 0..cli.concurrency {
         let engine_paths = cli.engines.clone();
-        let usi_opts = usi_options.clone();
+        let usi_opts = engine_usi_options.clone();
         let threads = cli.threads;
         let hash_mb = cli.hash_mb;
         let max_moves = cli.max_moves;
@@ -480,7 +507,7 @@ fn main() -> Result<()> {
             worker_main(
                 WorkerConfig {
                     engine_paths,
-                    usi_options: usi_opts,
+                    engine_usi_options: usi_opts,
                     threads,
                     hash_mb,
                     max_moves,
@@ -498,8 +525,7 @@ fn main() -> Result<()> {
     drop(result_tx);
 
     // 勝敗カウンター: pair_key → (wins_i, wins_j, draws) (i < j)
-    let mut pair_stats: std::collections::HashMap<(usize, usize), (u32, u32, u32)> =
-        std::collections::HashMap::new();
+    let mut pair_stats: HashMap<(usize, usize), (u32, u32, u32)> = HashMap::new();
     for i in 0..n {
         for j in (i + 1)..n {
             pair_stats.insert((i, j), (0, 0, 0));
@@ -520,6 +546,7 @@ fn main() -> Result<()> {
                     Ok(result) => {
                         process_result(
                             &result,
+                            &cli.engines,
                             &mut pair_writers,
                             &mut pair_stats,
                             &mut pair_game_count,
@@ -550,6 +577,7 @@ fn main() -> Result<()> {
                         if let Ok(result) = result {
                             process_result(
                                 &result,
+                                &cli.engines,
                                 &mut pair_writers,
                                 &mut pair_stats,
                                 &mut pair_game_count,
@@ -599,9 +627,10 @@ fn main() -> Result<()> {
 
 fn process_result(
     result: &MatchResult,
-    pair_writers: &mut std::collections::HashMap<(usize, usize), PairWriter>,
-    pair_stats: &mut std::collections::HashMap<(usize, usize), (u32, u32, u32)>,
-    pair_game_count: &mut std::collections::HashMap<(usize, usize), u32>,
+    engines: &[PathBuf],
+    pair_writers: &mut HashMap<(usize, usize), PairWriter>,
+    pair_stats: &mut HashMap<(usize, usize), (u32, u32, u32)>,
+    pair_game_count: &mut HashMap<(usize, usize), u32>,
 ) -> Result<()> {
     let bi = result.ticket.black_idx;
     let wi = result.ticket.white_idx;
@@ -632,12 +661,22 @@ fn process_result(
             };
             pw.write_json(&entry)?;
         }
+        let winner = match result.outcome {
+            GameOutcome::BlackWin => {
+                Some(engine_label_from_path(&engines[result.ticket.black_idx]))
+            }
+            GameOutcome::WhiteWin => {
+                Some(engine_label_from_path(&engines[result.ticket.white_idx]))
+            }
+            GameOutcome::Draw | GameOutcome::InProgress => None,
+        };
         let result_entry = ResultLogEntry {
             kind: "result",
             game_id,
             outcome: result.outcome.label(),
             reason: &result.reason,
             plies: result.plies,
+            winner,
         };
         pw.write_json(&result_entry)?;
         pw.flush()?;
@@ -672,7 +711,7 @@ fn process_result(
 fn print_progress(
     completed: u32,
     total: u32,
-    pair_stats: &std::collections::HashMap<(usize, usize), (u32, u32, u32)>,
+    pair_stats: &HashMap<(usize, usize), (u32, u32, u32)>,
     engines: &[PathBuf],
     start_time: Instant,
 ) {
@@ -708,10 +747,7 @@ fn print_progress(
     }
 }
 
-fn print_final_table(
-    pair_stats: &std::collections::HashMap<(usize, usize), (u32, u32, u32)>,
-    engines: &[PathBuf],
-) {
+fn print_final_table(pair_stats: &HashMap<(usize, usize), (u32, u32, u32)>, engines: &[PathBuf]) {
     println!();
     for (&(i, j), &(wi, wj, d)) in pair_stats {
         let total_pair = wi + wj + d;
