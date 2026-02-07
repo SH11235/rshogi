@@ -1,23 +1,24 @@
 //! 置換表エントリー
 //!
-//! TTEntry: 16バイトのコンパクトなエントリ構造（64bitキー対応）
+//! TTEntry: 10バイトのコンパクトなエントリ構造（YaneuraOu CLUSTER_SIZE=3 準拠）
 //! TTData: 読み取り用のデータ構造
 //!
-//! # 64bitキーの採用理由
-//! 16bitキーでは衝突確率が高く、異なる局面のデータを誤って使用する問題があった。
-//! 64bitキーに拡張することで衝突確率を大幅に低減（2^16 → 2^64）。
-//! YaneuraOuの拡張方式に準拠。
+//! # 16bitキーの採用
+//! YaneuraOu（CLUSTER_SIZE=3）準拠で16bitキーを使用。
+//! クラスターインデックスは64bitキーの上位ビットで決定し、
+//! クラスター内マッチングに下位16bitを使用する。
+//! 衝突確率は 3/65536 ≈ 0.005% と十分低く、Move合法性検証が二重チェックとして機能する。
 
 use super::{GENERATION_CYCLE, GENERATION_MASK};
 use crate::types::{Bound, Move, Value, DEPTH_ENTRY_OFFSET};
 
 /// 置換表エントリー
-/// 64bitキーを使用し、衝突確率を低減（16バイト）
+/// YaneuraOu（CLUSTER_SIZE=3）準拠の10バイト構造
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
 pub struct TTEntry {
-    /// ハッシュキー（64bit、衝突検出用）
-    key64: u64,
+    /// ハッシュキー下位16bit（クラスター内マッチング用）
+    key16: u16,
     /// 探索深さ（DEPTH_OFFSETを引いた値）
     depth8: u8,
     /// generation(5bit) | pv(1bit) | bound(2bit)
@@ -30,15 +31,15 @@ pub struct TTEntry {
     eval16: i16,
 }
 
-// エントリサイズが16バイトであることを保証
-const _: () = assert!(std::mem::size_of::<TTEntry>() == 16);
+// エントリサイズが10バイトであることを保証
+const _: () = assert!(std::mem::size_of::<TTEntry>() == 10);
 
 impl TTEntry {
     /// 新しい空のエントリを作成
     #[inline]
     pub const fn new() -> Self {
         Self {
-            key64: 0,
+            key16: 0,
             depth8: 0,
             gen_bound8: 0,
             move16: 0,
@@ -53,10 +54,10 @@ impl TTEntry {
         self.depth8 != 0
     }
 
-    /// 64bitキーを取得
+    /// 16bitキーを取得（クラスター内マッチング用）
     #[inline]
-    pub fn key64(&self) -> u64 {
-        self.key64
+    pub fn key16(&self) -> u16 {
+        self.key16
     }
 
     /// 深さを取得（DEPTH_ENTRY_OFFSETを加算）
@@ -101,8 +102,10 @@ impl TTEntry {
         eval: Value,
         generation8: u8,
     ) {
+        let k16 = key64 as u16;
+
         // 新しい手がない場合は古い手を保持
-        if mv != Move::NONE || key64 != self.key64 {
+        if mv != Move::NONE || k16 != self.key16 {
             self.move16 = mv.to_u16();
         }
 
@@ -113,13 +116,13 @@ impl TTEntry {
         // - 古いエントリ
         let d8 = depth - DEPTH_ENTRY_OFFSET;
         if bound == Bound::Exact
-            || key64 != self.key64
+            || k16 != self.key16
             || d8 + 2 * (is_pv as i32) > self.depth8 as i32 - 4
             || self.relative_age(generation8) != 0
         {
             debug_assert!(d8 > 0 && d8 < 256);
 
-            self.key64 = key64;
+            self.key16 = k16;
             self.depth8 = d8 as u8;
             self.gen_bound8 = generation8 | ((is_pv as u8) << 2) | bound as u8;
             self.value16 = value.raw() as i16;
@@ -186,7 +189,7 @@ mod tests {
     fn test_tt_entry_new() {
         let entry = TTEntry::new();
         assert!(!entry.is_occupied());
-        assert_eq!(entry.key64(), 0);
+        assert_eq!(entry.key16(), 0);
     }
 
     #[test]
@@ -207,7 +210,7 @@ mod tests {
         entry.save(key, value, is_pv, bound, depth, mv, eval, gen);
 
         assert!(entry.is_occupied());
-        assert_eq!(entry.key64(), key);
+        assert_eq!(entry.key16(), key as u16);
 
         let data = entry.read();
         assert_eq!(data.value.raw(), 100);
