@@ -32,6 +32,7 @@ reqwest = { version = "0.12", features = ["blocking"] }
 walkdir = "2.5"
 url = "2.5"
 rayon = "1.10"
+crossbeam-channel = "0.5"
 ctrlc = "3.4"
 indicatif = "0.18"
 rand = "0.9"
