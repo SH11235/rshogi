@@ -138,9 +138,6 @@ pub struct Stack {
 
     /// このノードでのreduction量
     pub reduction: i32,
-
-    /// quietな手が連続した回数
-    pub quiet_move_streak: i32,
 }
 
 impl Default for Stack {
@@ -161,7 +158,6 @@ impl Default for Stack {
             tt_hit: false,
             cutoff_cnt: 0,
             reduction: 0,
-            quiet_move_streak: 0,
         }
     }
 }

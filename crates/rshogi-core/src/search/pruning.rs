@@ -112,11 +112,9 @@ pub(super) fn step14_pruning(
             });
 
             // Futility pruning for captures (駒取り手に対するfutility枝刈り)
-            if !step_ctx.gives_check
-                && lmr_depth < 7
-                && !step_ctx.in_check
-                && step_ctx.static_eval != Value::NONE
-            {
+            // YaneuraOu準拠: !in_check/static_eval!=NONEガードなし
+            // (VALUE_NONE=32002によりfutilityValueが常にalpha超えのため暗黙的に安全)
+            if !step_ctx.gives_check && lmr_depth < 7 {
                 use super::movepicker::piece_value;
                 let captured_value = piece_value(captured);
                 let futility_value = step_ctx.static_eval.raw()
@@ -184,11 +182,8 @@ pub(super) fn step14_pruning(
                 + 134 * lmr_depth_clamped
                 + 90 * (step_ctx.static_eval > step_ctx.alpha) as i32;
 
-            if !step_ctx.in_check
-                && lmr_depth < 11
-                && futility_value <= step_ctx.alpha.raw()
-                && step_ctx.static_eval != Value::NONE
-            {
+            // YaneuraOu準拠: static_eval!=NONEガードなし（!in_check + VALUE_NONEで暗黙的に安全）
+            if !step_ctx.in_check && lmr_depth < 11 && futility_value <= step_ctx.alpha.raw() {
                 // YaneuraOu準拠: bestValueをfutilityValueで更新する条件
                 // if (bestValue <= futilityValue && !is_decisive(bestValue) && !is_win(futilityValue))
                 let futility_val = Value::new(futility_value);
@@ -204,11 +199,11 @@ pub(super) fn step14_pruning(
             }
 
             // SEE pruning for quiet moves (YaneuraOu: -27 * lmrDepth * lmrDepth)
-            if !step_ctx.in_check
-                && lmr_depth_clamped > 0
-                && !step_ctx
-                    .pos
-                    .see_ge(step_ctx.mv, Value::new(-27 * lmr_depth_clamped * lmr_depth_clamped))
+            // YaneuraOu準拠: !in_check/lmrDepth>0ガードなし
+            // lmrDepth=0時はthreshold=0でSEE<0の手を枝刈り
+            if !step_ctx
+                .pos
+                .see_ge(step_ctx.mv, Value::new(-27 * lmr_depth_clamped * lmr_depth_clamped))
             {
                 return Step14Outcome::Skip { best_value: None };
             }
@@ -241,27 +236,23 @@ pub(super) fn try_razoring<const NT: u8>(
     limits: &LimitsType,
     time_manager: &mut TimeManagement,
 ) -> Option<Value> {
-    // depth <= 3 の浅い探索で、静的評価値が alpha より十分低い場合
-    if !pv_node && !in_check && depth <= 3 {
-        let razoring_threshold = alpha - Value::new(200 * depth);
-        if static_eval < razoring_threshold {
-            let value = qsearch::<{ NodeType::NonPV as u8 }>(
-                st,
-                ctx,
-                pos,
-                DEPTH_QS,
-                alpha,
-                beta,
-                ply,
-                limits,
-                time_manager,
-            );
-            if value <= alpha {
-                inc_stat!(st, razoring_applied);
-                inc_stat_by_depth!(st, razoring_by_depth, depth);
-                return Some(value);
-            }
-        }
+    // YaneuraOu準拠: 評価値が非常に低い場合、通常探索をスキップしてqsearch値を返す
+    // マージン: 514 + 294 * depth² (二次マージン、depth制限なし)
+    if !pv_node && !in_check && static_eval < alpha - Value::new(514 + 294 * depth * depth) {
+        let value = qsearch::<{ NodeType::NonPV as u8 }>(
+            st,
+            ctx,
+            pos,
+            DEPTH_QS,
+            alpha,
+            beta,
+            ply,
+            limits,
+            time_manager,
+        );
+        inc_stat!(st, razoring_applied);
+        inc_stat_by_depth!(st, razoring_by_depth, depth);
+        return Some(value);
     }
     None
 }

@@ -25,7 +25,7 @@ use super::tt_history::TTMoveHistory;
 // =============================================================================
 
 /// PawnHistoryのサイズ（2のべき乗）
-pub const PAWN_HISTORY_SIZE: usize = 512;
+pub const PAWN_HISTORY_SIZE: usize = 8192;
 
 /// CorrectionHistoryのサイズ（2のべき乗）
 pub const CORRECTION_HISTORY_SIZE: usize = 32768;
@@ -62,23 +62,19 @@ pub const TT_MOVE_HISTORY_MALUS: i32 = -848;
 /// YaneuraOu準拠: 1,2,3,4,5,6手前の指し手と現在の指し手のペアを更新。
 /// 王手中は1,2手前のみ更新。
 pub const CONTINUATION_HISTORY_WEIGHTS: [(usize, i32); 6] =
-    [(1, 1108), (2, 652), (3, 273), (4, 572), (5, 126), (6, 449)];
+    [(1, 1157), (2, 648), (3, 288), (4, 576), (5, 140), (6, 441)];
 
 /// update_quiet_histories用のlowPlyHistory倍率
-pub const LOW_PLY_HISTORY_MULTIPLIER: i32 = 771;
-pub const LOW_PLY_HISTORY_OFFSET: i32 = 40;
+pub const LOW_PLY_HISTORY_MULTIPLIER: i32 = 761;
+pub const LOW_PLY_HISTORY_OFFSET: i32 = 0;
 
-/// update_quiet_histories用のcontinuationHistory倍率（正のボーナス時）
-pub const CONTINUATION_HISTORY_POS_MULTIPLIER: i32 = 979;
-/// update_quiet_histories用のcontinuationHistory倍率（負のボーナス時）
-pub const CONTINUATION_HISTORY_NEG_MULTIPLIER: i32 = 842;
+/// update_quiet_histories用のcontinuationHistory倍率（正負共通）
+pub const CONTINUATION_HISTORY_MULTIPLIER: i32 = 955;
 
 /// update_quiet_histories用のpawnHistory倍率（正のボーナス時）
-pub const PAWN_HISTORY_POS_MULTIPLIER: i32 = 704;
+pub const PAWN_HISTORY_POS_MULTIPLIER: i32 = 850;
 /// update_quiet_histories用のpawnHistory倍率（負のボーナス時）
-pub const PAWN_HISTORY_NEG_MULTIPLIER: i32 = 439;
-/// update_quiet_histories用のpawnHistoryオフセット
-pub const PAWN_HISTORY_OFFSET: i32 = 70;
+pub const PAWN_HISTORY_NEG_MULTIPLIER: i32 = 550;
 
 /// ContinuationHistory近接ply（1,2手前）へのオフセット
 /// YaneuraOu: update_continuation_histories で (bonus * weight / 1024) + 88 * (i < 2)
@@ -456,7 +452,7 @@ impl Default for ContinuationHistory {
 ///
 /// 歩の陣形に対する履歴。
 ///
-/// PERF: 約2.3MB。HistoryTables内の連続領域に配置するため配列で保持する。
+/// PERF: 約39MB。HistoryTables内の連続領域に配置するため配列で保持する。
 pub struct PawnHistory {
     table: [[[StatsEntry<8192>; Square::NUM]; PIECE_NUM]; PAWN_HISTORY_SIZE],
 }
@@ -835,34 +831,25 @@ impl HistoryCell {
 
 /// History更新用のボーナスを計算
 ///
-/// YaneuraOu準拠: `min(170*depth-87, 1598) + 332*(bestMove == ttMove)`
+/// YaneuraOu準拠: `min(121*depth-77, 1633) + 375*(bestMove == ttMove)`
 /// - `is_tt_move`: bestMoveがTT手と一致する場合はtrue
 #[inline]
 pub fn stat_bonus(depth: i32, is_tt_move: bool) -> i32 {
-    let base = (170 * depth - 87).min(1598);
+    let base = (121 * depth - 77).min(1633);
     if is_tt_move {
-        base + 332
+        base + 375
     } else {
         base
     }
 }
 
-/// Quiet手用のマイナスボーナス（ペナルティ）を計算
+/// マイナスボーナス（ペナルティ）を計算
 ///
-/// YaneuraOu準拠: `min(743*depth-180, 2287) - 33*quietsSearched.size()`
+/// YaneuraOu準拠: `min(825*depth-196, 2159) - 16*moveCount`
+/// quiet/capture 共通で使用。
 #[inline]
-pub fn quiet_malus(depth: i32, quiets_count: usize) -> i32 {
-    let base = (743 * depth - 180).min(2287);
-    base - 33 * quiets_count as i32
-}
-
-/// 捕獲手用のマイナスボーナス（ペナルティ）を計算
-///
-/// YaneuraOu準拠: `min(708*depth-148, 2287) - 29*capturesSearched.size()`
-#[inline]
-pub fn capture_malus(depth: i32, captures_count: usize) -> i32 {
-    let base = (708 * depth - 148).min(2287);
-    base - 29 * captures_count as i32
+pub fn stat_malus(depth: i32, move_count: i32) -> i32 {
+    (825 * depth - 196).min(2159) - 16 * move_count
 }
 
 // 後方互換性のため旧APIも残す（非推奨）
@@ -871,13 +858,6 @@ pub fn capture_malus(depth: i32, captures_count: usize) -> i32 {
 #[inline]
 pub fn stat_bonus_old(depth: i32) -> i32 {
     (130 * depth - 103).min(1652)
-}
-
-/// マイナスボーナス（ペナルティ）を計算（旧API、非推奨）
-#[deprecated(note = "Use quiet_malus(depth, quiets_count) instead")]
-#[inline]
-pub fn stat_malus(depth: i32) -> i32 {
-    (303 * depth - 273).min(1352)
 }
 
 // =============================================================================
@@ -892,14 +872,10 @@ pub fn low_ply_history_bonus(bonus: i32) -> i32 {
 
 /// ContinuationHistory用のボーナスを計算（YaneuraOu準拠）
 ///
-/// 正のボーナスと負のボーナスで倍率が異なる。
+/// 正負共通の倍率を使用。
 #[inline]
 pub fn continuation_history_bonus(bonus: i32) -> i32 {
-    if bonus > 0 {
-        bonus * CONTINUATION_HISTORY_POS_MULTIPLIER / 1024
-    } else {
-        bonus * CONTINUATION_HISTORY_NEG_MULTIPLIER / 1024
-    }
+    bonus * CONTINUATION_HISTORY_MULTIPLIER / 1024
 }
 
 /// ContinuationHistory近接ply（1,2手前）用のオフセット込みボーナスを計算
@@ -919,15 +895,13 @@ pub fn continuation_history_bonus_with_offset(bonus: i32, ply_back: usize) -> i3
 
 /// PawnHistory用のボーナスを計算（YaneuraOu準拠）
 ///
-/// YaneuraOu準拠: オフセットは常に加算（負のボーナス時もペナルティを緩める）
-/// `(bonus * (bonus > 0 ? 704 : 439) / 1024) + 70`
+/// `bonus * (bonus > 0 ? 850 : 550) / 1024`
 #[inline]
 pub fn pawn_history_bonus(bonus: i32) -> i32 {
     if bonus > 0 {
-        bonus * PAWN_HISTORY_POS_MULTIPLIER / 1024 + PAWN_HISTORY_OFFSET
+        bonus * PAWN_HISTORY_POS_MULTIPLIER / 1024
     } else {
-        // YaneuraOu: 負のボーナスでも+70を加算してペナルティを緩める
-        bonus * PAWN_HISTORY_NEG_MULTIPLIER / 1024 + PAWN_HISTORY_OFFSET
+        bonus * PAWN_HISTORY_NEG_MULTIPLIER / 1024
     }
 }
 
@@ -1040,36 +1014,25 @@ mod tests {
 
     #[test]
     fn test_stat_bonus() {
-        // YaneuraOu準拠: min(170*depth-87, 1598) + 332*(is_tt_move)
-        // depth=1, is_tt_move=false: 170*1-87 = 83
-        assert_eq!(stat_bonus(1, false), 83);
-        // depth=1, is_tt_move=true: 83 + 332 = 415
-        assert_eq!(stat_bonus(1, true), 415);
-        // depth=20: min(170*20-87, 1598) = min(3313, 1598) = 1598
-        assert_eq!(stat_bonus(20, false), 1598);
-        assert_eq!(stat_bonus(20, true), 1598 + 332);
+        // YaneuraOu準拠: min(121*depth-77, 1633) + 375*(is_tt_move)
+        // depth=1, is_tt_move=false: 121*1-77 = 44
+        assert_eq!(stat_bonus(1, false), 44);
+        // depth=1, is_tt_move=true: 44 + 375 = 419
+        assert_eq!(stat_bonus(1, true), 419);
+        // depth=20: min(121*20-77, 1633) = min(2343, 1633) = 1633
+        assert_eq!(stat_bonus(20, false), 1633);
+        assert_eq!(stat_bonus(20, true), 1633 + 375);
     }
 
     #[test]
-    fn test_quiet_malus() {
-        // YaneuraOu準拠: min(743*depth-180, 2287) - 33*quiets_count
-        // depth=1, quiets_count=0: 743*1-180 = 563
-        assert_eq!(quiet_malus(1, 0), 563);
-        // depth=1, quiets_count=10: 563 - 33*10 = 563 - 330 = 233
-        assert_eq!(quiet_malus(1, 10), 233);
-        // depth=10: min(743*10-180, 2287) = min(7250, 2287) = 2287
-        assert_eq!(quiet_malus(10, 0), 2287);
-    }
-
-    #[test]
-    fn test_capture_malus() {
-        // YaneuraOu準拠: min(708*depth-148, 2287) - 29*captures_count
-        // depth=1, captures_count=0: 708*1-148 = 560
-        assert_eq!(capture_malus(1, 0), 560);
-        // depth=1, captures_count=5: 560 - 29*5 = 560 - 145 = 415
-        assert_eq!(capture_malus(1, 5), 415);
-        // depth=10: min(708*10-148, 2287) = min(6932, 2287) = 2287
-        assert_eq!(capture_malus(10, 0), 2287);
+    fn test_stat_malus() {
+        // YaneuraOu準拠: min(825*depth-196, 2159) - 16*moveCount
+        // depth=1, moveCount=0: 825*1-196 = 629
+        assert_eq!(stat_malus(1, 0), 629);
+        // depth=1, moveCount=10: 629 - 16*10 = 469
+        assert_eq!(stat_malus(1, 10), 469);
+        // depth=10, moveCount=0: min(825*10-196, 2159) = min(8054, 2159) = 2159
+        assert_eq!(stat_malus(10, 0), 2159);
     }
 
     #[test]

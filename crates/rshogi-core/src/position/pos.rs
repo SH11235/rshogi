@@ -721,27 +721,6 @@ impl Position {
         }
     }
 
-    /// パス権を設定（ハッシュ更新込み）
-    ///
-    /// 差分更新により冪等性を保証（同じ値で2回呼んでもkeyは変わらない）
-    #[allow(dead_code)] // Phase 3 で使用予定
-    pub(crate) fn set_pass_rights(&mut self, color: Color, count: u8) {
-        let count = count.min(15);
-        let st = self.cur_state_mut();
-
-        let old_black = st.get_pass_rights(Color::Black);
-        let old_white = st.get_pass_rights(Color::White);
-
-        st.set_pass_rights_internal(color, count);
-
-        let new_black = st.get_pass_rights(Color::Black);
-        let new_white = st.get_pass_rights(Color::White);
-
-        // Zobrist差分更新（冪等性保証）
-        st.board_key ^= zobrist_pass_rights(old_black, old_white);
-        st.board_key ^= zobrist_pass_rights(new_black, new_white);
-    }
-
     /// 両者のパス権をまとめて設定（初期化用）
     ///
     /// 差分更新により冪等性を保証（同じ値で2回呼んでもkeyは変わらない）

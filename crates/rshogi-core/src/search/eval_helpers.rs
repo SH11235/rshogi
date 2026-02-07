@@ -134,6 +134,7 @@ pub(super) fn probe_transposition<const NT: u8>(
     pv_node: bool,
     in_check: bool,
     excluded_move: Move,
+    cut_node: bool,
 ) -> ProbeOutcome {
     let key = pos.key();
     let tt_result = ctx.tt.probe(key, pos);
@@ -162,21 +163,29 @@ pub(super) fn probe_transposition<const NT: u8>(
         inc_stat_by_depth!(st, tt_hit_by_depth, depth);
     }
 
-    // excludedMoveがある場合はカットオフしない（YaneuraOu準拠）
+    // YaneuraOu準拠のTTカットオフ条件（yaneuraou-search.cpp:2331-2337）
+    // - fail-high時は tt_data.depth > depth を要求（fail-low時は >= depth）
+    // - depth<=5ではcutNodeとTT値の方向が一致する場合のみカットオフ許可
+    let tt_value_lte_beta = tt_value != Value::NONE && tt_value.raw() <= beta.raw();
     if !pv_node
         && excluded_move.is_none()
         && tt_hit
-        && tt_data.depth >= depth
+        && tt_data.depth > depth - tt_value_lte_beta as i32
         && tt_value != Value::NONE
         && tt_data.bound.can_cutoff(tt_value, beta)
+        && (cut_node == (tt_value.raw() >= beta.raw()) || depth > 5)
     {
-        return ProbeOutcome::Cutoff(tt_value);
+        return ProbeOutcome::Cutoff {
+            value: tt_value,
+            tt_move,
+            tt_capture,
+        };
     }
 
     // TTカットオフ失敗理由の統計
     #[cfg(feature = "search-stats")]
     if !pv_node && excluded_move.is_none() && tt_hit && tt_value != Value::NONE {
-        if tt_data.depth < depth {
+        if tt_data.depth <= depth - tt_value_lte_beta as i32 {
             inc_stat_by_depth!(st, tt_fail_depth_by_depth, depth);
         } else if !tt_data.bound.can_cutoff(tt_value, beta) {
             inc_stat_by_depth!(st, tt_fail_bound_by_depth, depth);
@@ -201,7 +210,12 @@ pub(super) fn probe_transposition<const NT: u8>(
                 ctx.tt.generation(),
             );
             inc_stat_by_depth!(st, tt_write_by_depth, stored_depth);
-            return ProbeOutcome::Cutoff(value);
+            // 1手詰めカットオフではヒストリ更新不要（mate_moveは特殊）
+            return ProbeOutcome::Cutoff {
+                value,
+                tt_move: Move::NONE,
+                tt_capture: false,
+            };
         }
     }
 

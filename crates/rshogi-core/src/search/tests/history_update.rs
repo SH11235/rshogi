@@ -162,12 +162,12 @@ fn continuation_history_basic_update() {
 fn continuation_history_weights_are_correct() {
     // YaneuraOu準拠の重み
     assert_eq!(CONTINUATION_HISTORY_WEIGHTS.len(), 6);
-    assert_eq!(CONTINUATION_HISTORY_WEIGHTS[0], (1, 1108));
-    assert_eq!(CONTINUATION_HISTORY_WEIGHTS[1], (2, 652));
-    assert_eq!(CONTINUATION_HISTORY_WEIGHTS[2], (3, 273));
-    assert_eq!(CONTINUATION_HISTORY_WEIGHTS[3], (4, 572));
-    assert_eq!(CONTINUATION_HISTORY_WEIGHTS[4], (5, 126));
-    assert_eq!(CONTINUATION_HISTORY_WEIGHTS[5], (6, 449));
+    assert_eq!(CONTINUATION_HISTORY_WEIGHTS[0], (1, 1157));
+    assert_eq!(CONTINUATION_HISTORY_WEIGHTS[1], (2, 648));
+    assert_eq!(CONTINUATION_HISTORY_WEIGHTS[2], (3, 288));
+    assert_eq!(CONTINUATION_HISTORY_WEIGHTS[3], (4, 576));
+    assert_eq!(CONTINUATION_HISTORY_WEIGHTS[4], (5, 140));
+    assert_eq!(CONTINUATION_HISTORY_WEIGHTS[5], (6, 441));
 }
 
 /// ContinuationHistory: 複数ply更新の重み付けをテスト
@@ -192,7 +192,7 @@ fn continuation_history_weighted_updates() {
         cont_hist.update(prev_pc, prev_to, pc, to, adjusted_bonus);
     }
 
-    // 1手前（weight=1108）の更新が最も大きいはず
+    // 1手前（weight=1157）の更新が最も大きいはず
     // SAFETY: 1と5は有効なSquareインデックス
     let sq_1 = unsafe { Square::from_u8_unchecked(1) };
     let sq_5 = unsafe { Square::from_u8_unchecked(5) };
@@ -201,7 +201,7 @@ fn continuation_history_weighted_updates() {
 
     assert!(
         value_1_ply > value_5_ply,
-        "1 ply back (weight=1108) should have higher value than 5 ply back (weight=126)"
+        "1 ply back (weight=1157) should have higher value than 5 ply back (weight=140)"
     );
 }
 

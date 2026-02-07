@@ -21,6 +21,10 @@ impl Value {
     /// 無限大
     pub const INFINITE: Value = Value(32001);
     /// 無効値
+    ///
+    /// 注意: pruning.rs の futility pruning では、`static_eval == NONE` のとき
+    /// futility_value が十分大きくなり枝刈り条件が成立しないことに依存している。
+    /// この値を変更する場合は pruning.rs の安全性を再検証すること。
     pub const NONE: Value = Value(32002);
 
     /// 最大探索深度内での詰みスコア
