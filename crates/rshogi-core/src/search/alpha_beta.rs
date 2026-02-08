@@ -1523,22 +1523,27 @@ impl SearchWorker {
             // Singular Extension（YaneuraOu準拠）
             // =============================================================
             // singular延長をするnodeであるか判定
-            // 条件: !rootNode && move == ttMove && !excludedMove && depth >= 6 + ttPv
+            // 条件: !rootNode && move == ttMove && !excludedMove
             //       && is_valid(ttValue) && !is_decisive(ttValue) && (ttBound & BOUND_LOWER)
-            //       && ttDepth >= depth - 3
+            //       && depth/ttDepth 条件（係数は tune_params 参照）
             if !root_node
                 && mv == tt_move
                 && excluded_move.is_none()
-                && depth >= 6 + tt_pv as i32
+                && depth
+                    >= ctx.tune_params.singular_min_depth_base
+                        + ctx.tune_params.singular_min_depth_tt_pv_add * tt_pv as i32
                 && tt_value != Value::NONE
                 && !tt_value.is_mate_score()
                 && tt_data.bound.is_lower_or_exact()
-                && tt_data.depth >= depth - 3
+                && tt_data.depth >= depth - ctx.tune_params.singular_tt_depth_margin
             {
-                // YaneuraOu準拠: singularBeta = ttValue - (56 + 81 * (ttPv && !PvNode)) * depth / 60
-                let singular_beta_margin = (56 + 81 * (tt_pv && !pv_node) as i32) * depth / 60;
+                let singular_beta_margin = (ctx.tune_params.singular_beta_margin_base
+                    + ctx.tune_params.singular_beta_margin_tt_pv_non_pv_add
+                        * (tt_pv && !pv_node) as i32)
+                    * depth
+                    / ctx.tune_params.singular_beta_margin_div;
                 let singular_beta = tt_value - Value::new(singular_beta_margin);
-                let singular_depth = new_depth / 2;
+                let singular_depth = new_depth / ctx.tune_params.singular_depth_div;
 
                 // ttMoveを除外して浅い探索を実行
                 // 注: YaneuraOu準拠で同じplyで再帰呼び出しを行う（do_moveせず同一局面で探索）
@@ -1567,17 +1572,26 @@ impl SearchWorker {
                     // Singular確定 → 延長量を計算
                     // YaneuraOu/Stockfish学習済みパラメータ（yaneuraou-search.cpp:3404-3411）
                     // YaneuraOu準拠パラメータ (yaneuraou-search.cpp:3419-3423)
-                    let corr_val_adj = eval_ctx.correction_value.abs() / 229_958;
+                    let corr_val_adj =
+                        eval_ctx.correction_value.abs() / ctx.tune_params.singular_corr_val_adj_div;
                     let tt_move_hist = ctx.history.with_read(|h| h.tt_move_history.get() as i32);
-                    let double_margin = -4 + 198 * pv_node as i32
-                        - 212 * !tt_capture as i32
+                    let double_margin = ctx.tune_params.singular_double_margin_base
+                        + ctx.tune_params.singular_double_margin_pv_node * pv_node as i32
+                        + ctx.tune_params.singular_double_margin_non_tt_capture
+                            * !tt_capture as i32
                         - corr_val_adj
-                        - 921 * tt_move_hist / 127649
-                        - (ply > st.root_depth) as i32 * 45;
-                    let triple_margin = 76 + 308 * pv_node as i32 - 250 * !tt_capture as i32
-                        + 92 * tt_pv as i32
+                        + ctx.tune_params.singular_double_margin_tt_move_hist_mult * tt_move_hist
+                            / ctx.tune_params.singular_double_margin_tt_move_hist_div
+                        - (ply > st.root_depth) as i32
+                            * ctx.tune_params.singular_double_margin_late_ply_penalty;
+                    let triple_margin = ctx.tune_params.singular_triple_margin_base
+                        + ctx.tune_params.singular_triple_margin_pv_node * pv_node as i32
+                        + ctx.tune_params.singular_triple_margin_non_tt_capture
+                            * !tt_capture as i32
+                        + ctx.tune_params.singular_triple_margin_tt_pv * tt_pv as i32
                         - corr_val_adj
-                        - (ply * 2 > st.root_depth * 3) as i32 * 52;
+                        - (ply * 2 > st.root_depth * 3) as i32
+                            * ctx.tune_params.singular_triple_margin_late_ply_penalty;
 
                     extension = 1
                         + (singular_value < singular_beta - Value::new(double_margin)) as i32
@@ -1596,9 +1610,9 @@ impl SearchWorker {
                     return singular_value;
                 } else if tt_value >= beta {
                     // Negative Extension: ttMoveが特別でない場合
-                    extension = -3;
+                    extension = ctx.tune_params.singular_negative_extension_tt_fail_high;
                 } else if cut_node {
-                    extension = -2;
+                    extension = ctx.tune_params.singular_negative_extension_cut_node;
                 }
             }
 
@@ -1867,12 +1881,19 @@ impl SearchWorker {
                     if !mv.is_pass() {
                         let moved_piece = mv.moved_piece_after();
                         let to_sq = mv.to();
-                        const CONTHIST_BONUSES: &[(i32, i32)] =
-                            &[(1, 1108), (2, 652), (3, 273), (4, 572), (5, 126), (6, 449)];
-                        for &(offset, weight) in CONTHIST_BONUSES {
+                        for offset in 1..=6 {
                             if st.stack[ply as usize].in_check && offset > 2 {
                                 break;
                             }
+                            let weight = match offset {
+                                1 => ctx.tune_params.fail_high_continuation_weight_1,
+                                2 => ctx.tune_params.fail_high_continuation_weight_2,
+                                3 => ctx.tune_params.fail_high_continuation_weight_3,
+                                4 => ctx.tune_params.fail_high_continuation_weight_4,
+                                5 => ctx.tune_params.fail_high_continuation_weight_5,
+                                6 => ctx.tune_params.fail_high_continuation_weight_6,
+                                _ => 0,
+                            };
                             let idx = ply - offset;
                             if idx < 0 {
                                 break;
@@ -1880,7 +1901,13 @@ impl SearchWorker {
                             if let Some(key) = st.stack[idx as usize].cont_hist_key {
                                 let in_check_idx = key.in_check as usize;
                                 let capture_idx = key.capture as usize;
-                                let bonus = 1412 * weight / 1024 + if offset < 2 { 80 } else { 0 };
+                                let bonus =
+                                    ctx.tune_params.fail_high_continuation_base_num * weight / 1024
+                                        + if offset < 2 {
+                                            ctx.tune_params.fail_high_continuation_near_ply_offset
+                                        } else {
+                                            0
+                                        };
                                 ctx.history.with_write(|h| {
                                     h.continuation_history[in_check_idx][capture_idx].update(
                                         key.piece,

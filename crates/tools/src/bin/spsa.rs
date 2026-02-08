@@ -1,4 +1,4 @@
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
@@ -7,6 +7,8 @@ use chrono::Utc;
 use clap::Parser;
 use rand::prelude::IndexedRandom;
 use rand::Rng;
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 use tools::selfplay::game::{run_game, GameConfig, MoveEvent};
 use tools::selfplay::time_control::TimeControl;
@@ -67,6 +69,22 @@ struct Cli {
     /// 既存メタデータから反復番号を再開する
     #[arg(long, default_value_t = false)]
     resume: bool,
+
+    /// 反復統計CSVの出力先（resume時は追記）
+    #[arg(long)]
+    stats_csv: Option<PathBuf>,
+
+    /// 反復統計のseed横断集計CSV（平均・分散）
+    #[arg(long)]
+    stats_aggregate_csv: Option<PathBuf>,
+
+    /// 乱数seed（単一）
+    #[arg(long, conflicts_with = "seeds")]
+    seed: Option<u64>,
+
+    /// 乱数seed一覧（カンマ区切り）
+    #[arg(long, value_delimiter = ',', num_args = 1.., conflicts_with = "seed")]
+    seeds: Option<Vec<u64>>,
 
     /// エンジンバイナリパス（未指定時: target/release/rshogi-usi）
     #[arg(long)]
@@ -148,8 +166,183 @@ struct ResumeMetaData {
     schedule: ScheduleConfig,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct IterationStats {
+    iteration: u32,
+    seed: u64,
+    games: u32,
+    plus_wins: u32,
+    minus_wins: u32,
+    draws: u32,
+    step_sum: f64,
+    grad_scale: f64,
+    a_t: f64,
+    c_t: f64,
+    active_params: usize,
+    avg_abs_shift: f64,
+    updated_params: usize,
+    avg_abs_update: f64,
+    max_abs_update: f64,
+    total_games: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AggregateIterationStats {
+    iteration: u32,
+    seed_count: usize,
+    games_per_seed: u32,
+    step_sum_mean: f64,
+    step_sum_variance: f64,
+    grad_scale_mean: f64,
+    grad_scale_variance: f64,
+    plus_wins_mean: f64,
+    plus_wins_variance: f64,
+    minus_wins_mean: f64,
+    minus_wins_variance: f64,
+    draws_mean: f64,
+    draws_variance: f64,
+    total_games: usize,
+}
+
 fn default_meta_path(params_path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.meta.json", params_path.display()))
+}
+
+fn write_stats_csv_header(writer: &mut BufWriter<File>) -> Result<()> {
+    writeln!(
+        writer,
+        "iteration,seed,games,plus_wins,minus_wins,draws,step_sum,grad_scale,a_t,c_t,active_params,\
+         avg_abs_shift,updated_params,avg_abs_update,max_abs_update,total_games"
+    )?;
+    Ok(())
+}
+
+fn write_stats_aggregate_csv_header(writer: &mut BufWriter<File>) -> Result<()> {
+    writeln!(
+        writer,
+        "iteration,seeds,games_per_seed,step_sum_mean,step_sum_variance,grad_scale_mean,grad_scale_variance,\
+         plus_wins_mean,plus_wins_variance,minus_wins_mean,minus_wins_variance,draws_mean,draws_variance,total_games"
+    )?;
+    Ok(())
+}
+
+fn open_stats_csv_writer(path: &Path, resume: bool) -> Result<BufWriter<File>> {
+    let write_header = if resume {
+        if !path.exists() {
+            true
+        } else {
+            std::fs::metadata(path)
+                .with_context(|| format!("failed to stat {}", path.display()))?
+                .len()
+                == 0
+        }
+    } else {
+        true
+    };
+    let file = if resume {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .with_context(|| format!("failed to open {} for append", path.display()))?
+    } else {
+        OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .with_context(|| format!("failed to create {}", path.display()))?
+    };
+    let mut writer = BufWriter::new(file);
+    if write_header {
+        write_stats_csv_header(&mut writer)?;
+        writer.flush()?;
+    }
+    Ok(writer)
+}
+
+fn open_stats_aggregate_csv_writer(path: &Path, resume: bool) -> Result<BufWriter<File>> {
+    let write_header = if resume {
+        if !path.exists() {
+            true
+        } else {
+            std::fs::metadata(path)
+                .with_context(|| format!("failed to stat {}", path.display()))?
+                .len()
+                == 0
+        }
+    } else {
+        true
+    };
+    let file = if resume {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .with_context(|| format!("failed to open {} for append", path.display()))?
+    } else {
+        OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .with_context(|| format!("failed to create {}", path.display()))?
+    };
+    let mut writer = BufWriter::new(file);
+    if write_header {
+        write_stats_aggregate_csv_header(&mut writer)?;
+        writer.flush()?;
+    }
+    Ok(writer)
+}
+
+fn write_stats_csv_row(writer: &mut BufWriter<File>, stats: IterationStats) -> Result<()> {
+    writeln!(
+        writer,
+        "{},{},{},{},{},{},{:+.6},{:+.6},{:.6},{:.6},{},{:.6},{},{:.6},{:.6},{}",
+        stats.iteration,
+        stats.seed,
+        stats.games,
+        stats.plus_wins,
+        stats.minus_wins,
+        stats.draws,
+        stats.step_sum,
+        stats.grad_scale,
+        stats.a_t,
+        stats.c_t,
+        stats.active_params,
+        stats.avg_abs_shift,
+        stats.updated_params,
+        stats.avg_abs_update,
+        stats.max_abs_update,
+        stats.total_games
+    )?;
+    Ok(())
+}
+
+fn write_stats_aggregate_csv_row(
+    writer: &mut BufWriter<File>,
+    stats: AggregateIterationStats,
+) -> Result<()> {
+    writeln!(
+        writer,
+        "{},{},{},{:+.6},{:.6},{:+.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{}",
+        stats.iteration,
+        stats.seed_count,
+        stats.games_per_seed,
+        stats.step_sum_mean,
+        stats.step_sum_variance,
+        stats.grad_scale_mean,
+        stats.grad_scale_variance,
+        stats.plus_wins_mean,
+        stats.plus_wins_variance,
+        stats.minus_wins_mean,
+        stats.minus_wins_variance,
+        stats.draws_mean,
+        stats.draws_variance,
+        stats.total_games
+    )?;
+    Ok(())
 }
 
 fn load_meta(path: &Path) -> Result<ResumeMetaData> {
@@ -345,6 +538,38 @@ fn pick_startpos<'a>(
     }
 }
 
+fn resolve_seeds(cli: &Cli) -> Vec<u64> {
+    if let Some(seeds) = &cli.seeds {
+        return seeds.clone();
+    }
+    if let Some(seed) = cli.seed {
+        return vec![seed];
+    }
+    let mut rng = rand::rng();
+    vec![rng.random()]
+}
+
+fn mean_and_variance(values: &[f64]) -> (f64, f64) {
+    if values.is_empty() {
+        return (0.0, 0.0);
+    }
+    let mean = values.iter().copied().sum::<f64>() / values.len() as f64;
+    let variance = values
+        .iter()
+        .map(|value| {
+            let diff = value - mean;
+            diff * diff
+        })
+        .sum::<f64>()
+        / values.len() as f64;
+    (mean, variance)
+}
+
+fn seed_for_iteration(base_seed: u64, iteration_index: u32) -> u64 {
+    let iter_term = (iteration_index as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    base_seed ^ iter_term
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .target(env_logger::Target::Stderr)
@@ -369,6 +594,11 @@ fn main() -> Result<()> {
     if cli.a_offset < 0.0 {
         bail!("--a-offset must be >= 0");
     }
+    let seed_values = resolve_seeds(&cli);
+    if seed_values.is_empty() {
+        bail!("at least one seed is required");
+    }
+    println!("using base seeds: {:?}", seed_values);
 
     let engine_path = resolve_engine_path(&cli)?;
     let engine_args = cli.engine_args.clone().unwrap_or_default();
@@ -409,6 +639,25 @@ fn main() -> Result<()> {
     let end_iteration = start_iteration
         .checked_add(cli.iterations)
         .context("iteration index overflow")?;
+    let aggregate_csv_path = if let Some(path) = &cli.stats_aggregate_csv {
+        Some(path.clone())
+    } else if seed_values.len() > 1 {
+        cli.stats_csv
+            .as_ref()
+            .map(|path| PathBuf::from(format!("{}.aggregate.csv", path.display())))
+    } else {
+        None
+    };
+    let mut stats_csv_writer = if let Some(path) = &cli.stats_csv {
+        Some(open_stats_csv_writer(path, cli.resume)?)
+    } else {
+        None
+    };
+    let mut stats_aggregate_csv_writer = if let Some(path) = aggregate_csv_path.as_deref() {
+        Some(open_stats_aggregate_csv_writer(path, cli.resume)?)
+    } else {
+        None
+    };
 
     let (start_positions, _) =
         load_start_positions(cli.startpos_file.as_deref(), cli.sfen.as_deref(), None, None)?;
@@ -436,100 +685,209 @@ fn main() -> Result<()> {
     };
     let tc = TimeControl::new(0, 0, 0, 0, cli.byoyomi);
 
-    let mut rng = rand::rng();
-
     for iter in start_iteration..end_iteration {
         let (a_t, c_t) = schedule_values(schedule, iter);
-        let shifts: Vec<f64> = params
-            .iter()
-            .map(|p| {
+        let mut grad_sums = vec![0.0f64; params.len()];
+        let mut seed_step_sums = Vec::with_capacity(seed_values.len());
+        let mut seed_grad_scales = Vec::with_capacity(seed_values.len());
+        let mut seed_plus_wins = Vec::with_capacity(seed_values.len());
+        let mut seed_minus_wins = Vec::with_capacity(seed_values.len());
+        let mut seed_draws = Vec::with_capacity(seed_values.len());
+        let mut seed_rows = Vec::with_capacity(seed_values.len());
+
+        for (seed_idx, base_seed) in seed_values.iter().copied().enumerate() {
+            let iter_seed = seed_for_iteration(base_seed, iter);
+            let mut rng = ChaCha8Rng::seed_from_u64(iter_seed);
+            let shifts: Vec<f64> = params
+                .iter()
+                .map(|p| {
+                    if p.not_used {
+                        0.0
+                    } else if rng.random_bool(0.5) {
+                        p.step * cli.scale * c_t
+                    } else {
+                        -p.step * cli.scale * c_t
+                    }
+                })
+                .collect();
+
+            let plus_values: Vec<f64> = params
+                .iter()
+                .zip(shifts.iter())
+                .map(|(p, s)| clamped_value(p, p.value + s))
+                .collect();
+            let minus_values: Vec<f64> = params
+                .iter()
+                .zip(shifts.iter())
+                .map(|(p, s)| clamped_value(p, p.value - s))
+                .collect();
+
+            let mut active_params = 0usize;
+            let mut abs_shift_sum = 0.0f64;
+            for (p, &shift) in params.iter().zip(shifts.iter()) {
                 if p.not_used {
-                    0.0
-                } else if rng.random_bool(0.5) {
-                    p.step * cli.scale * c_t
-                } else {
-                    -p.step * cli.scale * c_t
+                    continue;
                 }
-            })
-            .collect();
-
-        let plus_values: Vec<f64> = params
-            .iter()
-            .zip(shifts.iter())
-            .map(|(p, s)| clamped_value(p, p.value + s))
-            .collect();
-        let minus_values: Vec<f64> = params
-            .iter()
-            .zip(shifts.iter())
-            .map(|(p, s)| clamped_value(p, p.value - s))
-            .collect();
-
-        let mut step_sum = 0.0f64;
-
-        for game_idx in 0..cli.games_per_iteration {
-            let plus_is_black = game_idx % 2 == 0;
-            if plus_is_black {
-                apply_parameter_vector(&mut plus_engine, &params, &plus_values)?;
-                apply_parameter_vector(&mut minus_engine, &params, &minus_values)?;
-            } else {
-                apply_parameter_vector(&mut plus_engine, &params, &minus_values)?;
-                apply_parameter_vector(&mut minus_engine, &params, &plus_values)?;
+                active_params += 1;
+                abs_shift_sum += shift.abs();
             }
-            plus_engine.new_game()?;
-            minus_engine.new_game()?;
-
-            let start_pos =
-                pick_startpos(&start_positions, &mut rng, cli.random_startpos, total_games)?;
-            total_games += 1;
-
-            let mut on_move = |_event: &MoveEvent| {};
-            let result = if plus_is_black {
-                run_game(
-                    &mut plus_engine,
-                    &mut minus_engine,
-                    start_pos,
-                    tc,
-                    &game_cfg,
-                    total_games as u32,
-                    &mut on_move,
-                    None,
-                )?
+            let avg_abs_shift = if active_params > 0 {
+                abs_shift_sum / active_params as f64
             } else {
-                run_game(
-                    &mut minus_engine,
-                    &mut plus_engine,
-                    start_pos,
-                    tc,
-                    &game_cfg,
-                    total_games as u32,
-                    &mut on_move,
-                    None,
-                )?
+                0.0
             };
 
-            let plus_score = plus_score_from_outcome(result.outcome, plus_is_black);
-            step_sum += plus_score;
-            println!(
-                "iter={} game={}/{} plus_is_black={} outcome={} plus_score={:+.1}",
-                iter + 1,
-                game_idx + 1,
-                cli.games_per_iteration,
-                plus_is_black,
-                result.outcome.label(),
-                plus_score
-            );
+            let mut step_sum = 0.0f64;
+            let mut plus_wins = 0u32;
+            let mut minus_wins = 0u32;
+            let mut draws = 0u32;
+
+            for game_idx in 0..cli.games_per_iteration {
+                let plus_is_black = game_idx % 2 == 0;
+                if plus_is_black {
+                    apply_parameter_vector(&mut plus_engine, &params, &plus_values)?;
+                    apply_parameter_vector(&mut minus_engine, &params, &minus_values)?;
+                } else {
+                    apply_parameter_vector(&mut plus_engine, &params, &minus_values)?;
+                    apply_parameter_vector(&mut minus_engine, &params, &plus_values)?;
+                }
+                plus_engine.new_game()?;
+                minus_engine.new_game()?;
+
+                let start_pos =
+                    pick_startpos(&start_positions, &mut rng, cli.random_startpos, total_games)?;
+                total_games += 1;
+
+                let mut on_move = |_event: &MoveEvent| {};
+                let result = if plus_is_black {
+                    run_game(
+                        &mut plus_engine,
+                        &mut minus_engine,
+                        start_pos,
+                        tc,
+                        &game_cfg,
+                        total_games as u32,
+                        &mut on_move,
+                        None,
+                    )?
+                } else {
+                    run_game(
+                        &mut minus_engine,
+                        &mut plus_engine,
+                        start_pos,
+                        tc,
+                        &game_cfg,
+                        total_games as u32,
+                        &mut on_move,
+                        None,
+                    )?
+                };
+
+                let plus_score = plus_score_from_outcome(result.outcome, plus_is_black);
+                step_sum += plus_score;
+                if plus_score > 0.0 {
+                    plus_wins += 1;
+                } else if plus_score < 0.0 {
+                    minus_wins += 1;
+                } else {
+                    draws += 1;
+                }
+                println!(
+                    "iter={} seed={}/{}({}) game={}/{} plus_is_black={} outcome={} plus_score={:+.1}",
+                    iter + 1,
+                    seed_idx + 1,
+                    seed_values.len(),
+                    base_seed,
+                    game_idx + 1,
+                    cli.games_per_iteration,
+                    plus_is_black,
+                    result.outcome.label(),
+                    plus_score
+                );
+            }
+
+            let grad_scale = step_sum / cli.games_per_iteration as f64;
+            if c_t > f64::EPSILON {
+                for (idx, (p, &shift)) in params.iter().zip(shifts.iter()).enumerate() {
+                    if p.not_used || p.step.abs() <= f64::EPSILON {
+                        continue;
+                    }
+                    let direction = if shift >= 0.0 { 1.0 } else { -1.0 };
+                    let grad = grad_scale * direction / (p.step.abs() * cli.scale * c_t);
+                    grad_sums[idx] += grad;
+                }
+            }
+
+            seed_step_sums.push(step_sum);
+            seed_grad_scales.push(grad_scale);
+            seed_plus_wins.push(plus_wins as f64);
+            seed_minus_wins.push(minus_wins as f64);
+            seed_draws.push(draws as f64);
+
+            seed_rows.push(IterationStats {
+                iteration: iter + 1,
+                seed: base_seed,
+                games: cli.games_per_iteration,
+                plus_wins,
+                minus_wins,
+                draws,
+                step_sum,
+                grad_scale,
+                a_t,
+                c_t,
+                active_params,
+                avg_abs_shift,
+                updated_params: 0,
+                avg_abs_update: 0.0,
+                max_abs_update: 0.0,
+                total_games: 0,
+            });
         }
 
-        let grad_scale = step_sum / cli.games_per_iteration as f64;
-        for (p, &shift) in params.iter_mut().zip(shifts.iter()) {
+        let grad_scale = if seed_values.is_empty() {
+            0.0
+        } else {
+            seed_grad_scales.iter().copied().sum::<f64>() / seed_values.len() as f64
+        };
+        let mut updated_params = 0usize;
+        let mut abs_update_sum = 0.0f64;
+        let mut max_abs_update = 0.0f64;
+        for (idx, p) in params.iter_mut().enumerate() {
             if p.not_used || p.step.abs() <= f64::EPSILON || c_t <= f64::EPSILON {
                 continue;
             }
-            let direction = if shift >= 0.0 { 1.0 } else { -1.0 };
-            let grad = grad_scale * direction / (p.step.abs() * cli.scale * c_t);
+            let before = p.value;
+            let grad = grad_sums[idx] / seed_values.len() as f64;
             let updated = clamped_value(p, p.value + a_t * p.delta * grad * cli.mobility);
             p.value = if p.is_int { updated.round() } else { updated };
+            let abs_update = (p.value - before).abs();
+            updated_params += 1;
+            abs_update_sum += abs_update;
+            if abs_update > max_abs_update {
+                max_abs_update = abs_update;
+            }
         }
+        let avg_abs_update = if updated_params > 0 {
+            abs_update_sum / updated_params as f64
+        } else {
+            0.0
+        };
+        if let Some(writer) = stats_csv_writer.as_mut() {
+            for row in &mut seed_rows {
+                row.updated_params = updated_params;
+                row.avg_abs_update = avg_abs_update;
+                row.max_abs_update = max_abs_update;
+                row.total_games = total_games;
+                write_stats_csv_row(writer, *row)?;
+            }
+            writer.flush()?;
+        }
+
+        let (step_sum_mean, step_sum_variance) = mean_and_variance(&seed_step_sums);
+        let (grad_scale_mean, grad_scale_variance) = mean_and_variance(&seed_grad_scales);
+        let (plus_wins_mean, plus_wins_variance) = mean_and_variance(&seed_plus_wins);
+        let (minus_wins_mean, minus_wins_variance) = mean_and_variance(&seed_minus_wins);
+        let (draws_mean, draws_variance) = mean_and_variance(&seed_draws);
 
         write_params(&cli.params, &params)?;
         let meta = ResumeMetaData {
@@ -537,7 +895,7 @@ fn main() -> Result<()> {
             params_file: cli.params.display().to_string(),
             completed_iterations: iter + 1,
             total_games,
-            last_step_sum: step_sum,
+            last_step_sum: step_sum_mean,
             last_grad_scale: grad_scale,
             last_a_t: a_t,
             last_c_t: c_t,
@@ -546,15 +904,41 @@ fn main() -> Result<()> {
         };
         save_meta(&meta_path, &meta)?;
         println!(
-            "iter={} step_sum={:+.3} grad_scale={:+.3} a_t={:.6} c_t={:.6} checkpoint={} meta={}",
+            "iter={} seeds={} step_sum_mean={:+.3} step_sum_var={:.6} grad_scale_mean={:+.3} \
+             grad_scale_var={:.6} a_t={:.6} c_t={:.6} checkpoint={} meta={}",
             iter + 1,
-            step_sum,
-            grad_scale,
+            seed_values.len(),
+            step_sum_mean,
+            step_sum_variance,
+            grad_scale_mean,
+            grad_scale_variance,
             a_t,
             c_t,
             cli.params.display(),
             meta_path.display()
         );
+        if let Some(writer) = stats_aggregate_csv_writer.as_mut() {
+            write_stats_aggregate_csv_row(
+                writer,
+                AggregateIterationStats {
+                    iteration: iter + 1,
+                    seed_count: seed_values.len(),
+                    games_per_seed: cli.games_per_iteration,
+                    step_sum_mean,
+                    step_sum_variance,
+                    grad_scale_mean,
+                    grad_scale_variance,
+                    plus_wins_mean,
+                    plus_wins_variance,
+                    minus_wins_mean,
+                    minus_wins_variance,
+                    draws_mean,
+                    draws_variance,
+                    total_games,
+                },
+            )?;
+            writer.flush()?;
+        }
     }
 
     Ok(())

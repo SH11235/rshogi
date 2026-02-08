@@ -96,6 +96,49 @@ pub struct SearchTuneParams {
     /// LMR再探索: shallower判定しきい値
     pub lmr_research_shallower_threshold: i32,
 
+    /// Singular Extension: 発火判定の深さベース
+    pub singular_min_depth_base: i32,
+    /// Singular Extension: 発火判定の ttPv 加算係数
+    pub singular_min_depth_tt_pv_add: i32,
+    /// Singular Extension: TT depth 条件の緩和量（`tt_depth >= depth - x` の x）
+    pub singular_tt_depth_margin: i32,
+    /// Singular Extension: singular beta のベース係数
+    pub singular_beta_margin_base: i32,
+    /// Singular Extension: singular beta の `ttPv && !pvNode` 係数
+    pub singular_beta_margin_tt_pv_non_pv_add: i32,
+    /// Singular Extension: singular beta の除算係数
+    pub singular_beta_margin_div: i32,
+    /// Singular Extension: 除外探索深さの除算係数（`new_depth / x`）
+    pub singular_depth_div: i32,
+    /// Singular Extension: double margin のベース項
+    pub singular_double_margin_base: i32,
+    /// Singular Extension: double margin の pv_node 係数
+    pub singular_double_margin_pv_node: i32,
+    /// Singular Extension: double margin の `!tt_capture` 係数
+    pub singular_double_margin_non_tt_capture: i32,
+    /// Singular Extension: correction value 補正の除算係数
+    pub singular_corr_val_adj_div: i32,
+    /// Singular Extension: double margin の tt_move_history 係数
+    pub singular_double_margin_tt_move_hist_mult: i32,
+    /// Singular Extension: double margin の tt_move_history 除算係数
+    pub singular_double_margin_tt_move_hist_div: i32,
+    /// Singular Extension: double margin の late ply 減点
+    pub singular_double_margin_late_ply_penalty: i32,
+    /// Singular Extension: triple margin のベース項
+    pub singular_triple_margin_base: i32,
+    /// Singular Extension: triple margin の pv_node 係数
+    pub singular_triple_margin_pv_node: i32,
+    /// Singular Extension: triple margin の `!tt_capture` 係数
+    pub singular_triple_margin_non_tt_capture: i32,
+    /// Singular Extension: triple margin の tt_pv 係数
+    pub singular_triple_margin_tt_pv: i32,
+    /// Singular Extension: triple margin の late ply 減点
+    pub singular_triple_margin_late_ply_penalty: i32,
+    /// Singular Extension: `tt_value >= beta` 時の負延長量
+    pub singular_negative_extension_tt_fail_high: i32,
+    /// Singular Extension: cut node 時の負延長量
+    pub singular_negative_extension_cut_node: i32,
+
     /// Futility: 基本マージン係数
     pub futility_margin_base: i32,
     /// Futility: TT非ヒット時の減算係数
@@ -178,6 +221,22 @@ pub struct SearchTuneParams {
     pub continuation_history_weight_5: i32,
     /// continuationHistory更新重み（6手前）
     pub continuation_history_weight_6: i32,
+    /// fail-high後 continuationHistory 更新のベース分子（/1024）
+    pub fail_high_continuation_base_num: i32,
+    /// fail-high後 continuationHistory 更新の近接オフセット（1手前のみ）
+    pub fail_high_continuation_near_ply_offset: i32,
+    /// fail-high後 continuationHistory 更新重み（1手前）
+    pub fail_high_continuation_weight_1: i32,
+    /// fail-high後 continuationHistory 更新重み（2手前）
+    pub fail_high_continuation_weight_2: i32,
+    /// fail-high後 continuationHistory 更新重み（3手前）
+    pub fail_high_continuation_weight_3: i32,
+    /// fail-high後 continuationHistory 更新重み（4手前）
+    pub fail_high_continuation_weight_4: i32,
+    /// fail-high後 continuationHistory 更新重み（5手前）
+    pub fail_high_continuation_weight_5: i32,
+    /// fail-high後 continuationHistory 更新重み（6手前）
+    pub fail_high_continuation_weight_6: i32,
     /// pawnHistory正ボーナス倍率（/1024）
     pub pawn_history_pos_multiplier: i32,
     /// pawnHistory負ボーナス倍率（/1024）
@@ -371,6 +430,132 @@ const SPSA_OPTION_SPECS: &[SearchTuneOptionSpec] = &[
         default: 9,
         min: -1024,
         max: 1024,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_SINGULAR_MIN_DEPTH_BASE",
+        default: 6,
+        min: 0,
+        max: 64,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_SINGULAR_MIN_DEPTH_TT_PV_ADD",
+        default: 1,
+        min: 0,
+        max: 8,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_SINGULAR_TT_DEPTH_MARGIN",
+        default: 3,
+        min: 0,
+        max: 16,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_SINGULAR_BETA_MARGIN_BASE",
+        default: 56,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_SINGULAR_BETA_MARGIN_TT_PV_NON_PV_ADD",
+        default: 81,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_SINGULAR_BETA_MARGIN_DIV",
+        default: 60,
+        min: 1,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_SINGULAR_DEPTH_DIV",
+        default: 2,
+        min: 1,
+        max: 16,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_SINGULAR_DOUBLE_MARGIN_BASE",
+        default: -4,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_SINGULAR_DOUBLE_MARGIN_PV_NODE",
+        default: 198,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_SINGULAR_DOUBLE_MARGIN_NON_TT_CAPTURE",
+        default: -212,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_SINGULAR_CORR_VAL_ADJ_DIV",
+        default: 229_958,
+        min: 1,
+        max: 1_000_000,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_SINGULAR_DOUBLE_MARGIN_TT_MOVE_HIST_MULT",
+        default: -921,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_SINGULAR_DOUBLE_MARGIN_TT_MOVE_HIST_DIV",
+        default: 127_649,
+        min: 1,
+        max: 1_000_000,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_SINGULAR_DOUBLE_MARGIN_LATE_PLY_PENALTY",
+        default: 45,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_SINGULAR_TRIPLE_MARGIN_BASE",
+        default: 76,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_SINGULAR_TRIPLE_MARGIN_PV_NODE",
+        default: 308,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_SINGULAR_TRIPLE_MARGIN_NON_TT_CAPTURE",
+        default: -250,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_SINGULAR_TRIPLE_MARGIN_TT_PV",
+        default: 92,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_SINGULAR_TRIPLE_MARGIN_LATE_PLY_PENALTY",
+        default: 52,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_SINGULAR_NEGATIVE_EXTENSION_TT_FAIL_HIGH",
+        default: -3,
+        min: -8,
+        max: 0,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_SINGULAR_NEGATIVE_EXTENSION_CUT_NODE",
+        default: -2,
+        min: -8,
+        max: 0,
     },
     SearchTuneOptionSpec {
         usi_name: "SPSA_FUTILITY_MARGIN_BASE",
@@ -601,6 +786,54 @@ const SPSA_OPTION_SPECS: &[SearchTuneOptionSpec] = &[
         max: 4096,
     },
     SearchTuneOptionSpec {
+        usi_name: "SPSA_FAIL_HIGH_CONT_BASE_NUM",
+        default: 1412,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_FAIL_HIGH_CONT_NEAR_PLY_OFFSET",
+        default: 80,
+        min: -1024,
+        max: 1024,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_FAIL_HIGH_CONT_WEIGHT_1",
+        default: 1108,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_FAIL_HIGH_CONT_WEIGHT_2",
+        default: 652,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_FAIL_HIGH_CONT_WEIGHT_3",
+        default: 273,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_FAIL_HIGH_CONT_WEIGHT_4",
+        default: 572,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_FAIL_HIGH_CONT_WEIGHT_5",
+        default: 126,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_FAIL_HIGH_CONT_WEIGHT_6",
+        default: 449,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
         usi_name: "SPSA_PAWN_HISTORY_POS_MULTIPLIER",
         default: 850,
         min: 0,
@@ -665,6 +898,27 @@ impl Default for SearchTuneParams {
             lmr_research_deeper_base: 43,
             lmr_research_deeper_depth_mul: 2,
             lmr_research_shallower_threshold: 9,
+            singular_min_depth_base: 6,
+            singular_min_depth_tt_pv_add: 1,
+            singular_tt_depth_margin: 3,
+            singular_beta_margin_base: 56,
+            singular_beta_margin_tt_pv_non_pv_add: 81,
+            singular_beta_margin_div: 60,
+            singular_depth_div: 2,
+            singular_double_margin_base: -4,
+            singular_double_margin_pv_node: 198,
+            singular_double_margin_non_tt_capture: -212,
+            singular_corr_val_adj_div: 229_958,
+            singular_double_margin_tt_move_hist_mult: -921,
+            singular_double_margin_tt_move_hist_div: 127_649,
+            singular_double_margin_late_ply_penalty: 45,
+            singular_triple_margin_base: 76,
+            singular_triple_margin_pv_node: 308,
+            singular_triple_margin_non_tt_capture: -250,
+            singular_triple_margin_tt_pv: 92,
+            singular_triple_margin_late_ply_penalty: 52,
+            singular_negative_extension_tt_fail_high: -3,
+            singular_negative_extension_cut_node: -2,
             futility_margin_base: 91,
             futility_margin_tt_bonus: 21,
             futility_improving_scale: 2094,
@@ -703,6 +957,14 @@ impl Default for SearchTuneParams {
             continuation_history_weight_4: 576,
             continuation_history_weight_5: 140,
             continuation_history_weight_6: 441,
+            fail_high_continuation_base_num: 1412,
+            fail_high_continuation_near_ply_offset: 80,
+            fail_high_continuation_weight_1: 1108,
+            fail_high_continuation_weight_2: 652,
+            fail_high_continuation_weight_3: 273,
+            fail_high_continuation_weight_4: 572,
+            fail_high_continuation_weight_5: 126,
+            fail_high_continuation_weight_6: 449,
             pawn_history_pos_multiplier: 850,
             pawn_history_neg_multiplier: 550,
             tt_move_history_bonus: 811,
@@ -796,6 +1058,82 @@ impl SearchTuneParams {
             -1024,
             1024
         );
+        try_apply!("SPSA_SINGULAR_MIN_DEPTH_BASE", singular_min_depth_base, 0, 64);
+        try_apply!("SPSA_SINGULAR_MIN_DEPTH_TT_PV_ADD", singular_min_depth_tt_pv_add, 0, 8);
+        try_apply!("SPSA_SINGULAR_TT_DEPTH_MARGIN", singular_tt_depth_margin, 0, 16);
+        try_apply!("SPSA_SINGULAR_BETA_MARGIN_BASE", singular_beta_margin_base, -4096, 4096);
+        try_apply!(
+            "SPSA_SINGULAR_BETA_MARGIN_TT_PV_NON_PV_ADD",
+            singular_beta_margin_tt_pv_non_pv_add,
+            -4096,
+            4096
+        );
+        try_apply!("SPSA_SINGULAR_BETA_MARGIN_DIV", singular_beta_margin_div, 1, 4096);
+        try_apply!("SPSA_SINGULAR_DEPTH_DIV", singular_depth_div, 1, 16);
+        try_apply!("SPSA_SINGULAR_DOUBLE_MARGIN_BASE", singular_double_margin_base, -4096, 4096);
+        try_apply!(
+            "SPSA_SINGULAR_DOUBLE_MARGIN_PV_NODE",
+            singular_double_margin_pv_node,
+            -4096,
+            4096
+        );
+        try_apply!(
+            "SPSA_SINGULAR_DOUBLE_MARGIN_NON_TT_CAPTURE",
+            singular_double_margin_non_tt_capture,
+            -4096,
+            4096
+        );
+        try_apply!("SPSA_SINGULAR_CORR_VAL_ADJ_DIV", singular_corr_val_adj_div, 1, 1_000_000);
+        try_apply!(
+            "SPSA_SINGULAR_DOUBLE_MARGIN_TT_MOVE_HIST_MULT",
+            singular_double_margin_tt_move_hist_mult,
+            -4096,
+            4096
+        );
+        try_apply!(
+            "SPSA_SINGULAR_DOUBLE_MARGIN_TT_MOVE_HIST_DIV",
+            singular_double_margin_tt_move_hist_div,
+            1,
+            1_000_000
+        );
+        try_apply!(
+            "SPSA_SINGULAR_DOUBLE_MARGIN_LATE_PLY_PENALTY",
+            singular_double_margin_late_ply_penalty,
+            -4096,
+            4096
+        );
+        try_apply!("SPSA_SINGULAR_TRIPLE_MARGIN_BASE", singular_triple_margin_base, -4096, 4096);
+        try_apply!(
+            "SPSA_SINGULAR_TRIPLE_MARGIN_PV_NODE",
+            singular_triple_margin_pv_node,
+            -4096,
+            4096
+        );
+        try_apply!(
+            "SPSA_SINGULAR_TRIPLE_MARGIN_NON_TT_CAPTURE",
+            singular_triple_margin_non_tt_capture,
+            -4096,
+            4096
+        );
+        try_apply!("SPSA_SINGULAR_TRIPLE_MARGIN_TT_PV", singular_triple_margin_tt_pv, -4096, 4096);
+        try_apply!(
+            "SPSA_SINGULAR_TRIPLE_MARGIN_LATE_PLY_PENALTY",
+            singular_triple_margin_late_ply_penalty,
+            -4096,
+            4096
+        );
+        try_apply!(
+            "SPSA_SINGULAR_NEGATIVE_EXTENSION_TT_FAIL_HIGH",
+            singular_negative_extension_tt_fail_high,
+            -8,
+            0
+        );
+        try_apply!(
+            "SPSA_SINGULAR_NEGATIVE_EXTENSION_CUT_NODE",
+            singular_negative_extension_cut_node,
+            -8,
+            0
+        );
         try_apply!("SPSA_FUTILITY_MARGIN_BASE", futility_margin_base, 0, 1024);
         try_apply!("SPSA_FUTILITY_MARGIN_TT_BONUS", futility_margin_tt_bonus, 0, 512);
         try_apply!("SPSA_FUTILITY_IMPROVING_SCALE", futility_improving_scale, 0, 4096);
@@ -839,6 +1177,19 @@ impl SearchTuneParams {
         try_apply!("SPSA_CONT_HISTORY_WEIGHT_4", continuation_history_weight_4, -4096, 4096);
         try_apply!("SPSA_CONT_HISTORY_WEIGHT_5", continuation_history_weight_5, -4096, 4096);
         try_apply!("SPSA_CONT_HISTORY_WEIGHT_6", continuation_history_weight_6, -4096, 4096);
+        try_apply!("SPSA_FAIL_HIGH_CONT_BASE_NUM", fail_high_continuation_base_num, -4096, 4096);
+        try_apply!(
+            "SPSA_FAIL_HIGH_CONT_NEAR_PLY_OFFSET",
+            fail_high_continuation_near_ply_offset,
+            -1024,
+            1024
+        );
+        try_apply!("SPSA_FAIL_HIGH_CONT_WEIGHT_1", fail_high_continuation_weight_1, -4096, 4096);
+        try_apply!("SPSA_FAIL_HIGH_CONT_WEIGHT_2", fail_high_continuation_weight_2, -4096, 4096);
+        try_apply!("SPSA_FAIL_HIGH_CONT_WEIGHT_3", fail_high_continuation_weight_3, -4096, 4096);
+        try_apply!("SPSA_FAIL_HIGH_CONT_WEIGHT_4", fail_high_continuation_weight_4, -4096, 4096);
+        try_apply!("SPSA_FAIL_HIGH_CONT_WEIGHT_5", fail_high_continuation_weight_5, -4096, 4096);
+        try_apply!("SPSA_FAIL_HIGH_CONT_WEIGHT_6", fail_high_continuation_weight_6, -4096, 4096);
         try_apply!("SPSA_PAWN_HISTORY_POS_MULTIPLIER", pawn_history_pos_multiplier, 0, 2048);
         try_apply!("SPSA_PAWN_HISTORY_NEG_MULTIPLIER", pawn_history_neg_multiplier, 0, 2048);
         try_apply!("SPSA_TT_MOVE_BONUS", tt_move_history_bonus, -8192, 8192);
