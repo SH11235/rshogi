@@ -55,6 +55,46 @@ pub struct SearchTuneParams {
     pub lmr_reduction_non_improving_div: i32,
     /// LMR: ベースオフセット
     pub lmr_reduction_base_offset: i32,
+    /// LMR Step16: ttPv時の加算
+    pub lmr_ttpv_add: i32,
+    /// LMR Step16: ttPv時減算のベース値
+    pub lmr_step16_ttpv_sub_base: i32,
+    /// LMR Step16: ttPv時減算の pv_node 係数
+    pub lmr_step16_ttpv_sub_pv_node: i32,
+    /// LMR Step16: ttPv時減算の tt_value_higher 係数
+    pub lmr_step16_ttpv_sub_tt_value: i32,
+    /// LMR Step16: ttPv時減算の tt_depth_ge ベース係数
+    pub lmr_step16_ttpv_sub_tt_depth: i32,
+    /// LMR Step16: ttPv時減算の tt_depth_ge かつ cut_node 追加係数
+    pub lmr_step16_ttpv_sub_cut_node: i32,
+    /// LMR Step16: 基本加算
+    pub lmr_step16_base_add: i32,
+    /// LMR Step16: move_count 乗算係数
+    pub lmr_step16_move_count_mul: i32,
+    /// LMR Step16: correction_value 補正の分母
+    pub lmr_step16_correction_div: i32,
+    /// LMR Step16: cut_node時の加算
+    pub lmr_step16_cut_node_add: i32,
+    /// LMR Step16: cut_node時 no_tt_move の追加加算
+    pub lmr_step16_cut_node_no_tt_add: i32,
+    /// LMR Step16: tt_capture 時の加算
+    pub lmr_step16_tt_capture_add: i32,
+    /// LMR Step16: cutoff_cnt>2 時の加算
+    pub lmr_step16_cutoff_count_add: i32,
+    /// LMR Step16: cutoff_cnt>2 かつ all_node 時の追加加算
+    pub lmr_step16_cutoff_count_all_node_add: i32,
+    /// LMR Step16: tt_move 一致時の減算
+    pub lmr_step16_tt_move_penalty: i32,
+    /// LMR Step16: capture stat の駒価値スケール分子（/128）
+    pub lmr_step16_capture_stat_scale_num: i32,
+    /// LMR Step16: stat_score 補正の分子（/8192）
+    pub lmr_step16_stat_score_scale_num: i32,
+    /// LMR再探索: deeper判定のベース値（43 + 2*depth の43）
+    pub lmr_research_deeper_base: i32,
+    /// LMR再探索: deeper判定の depth 係数（43 + 2*depth の2）
+    pub lmr_research_deeper_depth_mul: i32,
+    /// LMR再探索: shallower判定しきい値
+    pub lmr_research_shallower_threshold: i32,
 
     /// Futility: 基本マージン係数
     pub futility_margin_base: i32,
@@ -101,6 +141,47 @@ pub struct SearchTuneParams {
 
     /// QSearch: futility ベース
     pub qsearch_futility_base: i32,
+
+    /// stat bonus: depth 係数（121）
+    pub stat_bonus_depth_mult: i32,
+    /// stat bonus: オフセット（-77）
+    pub stat_bonus_offset: i32,
+    /// stat bonus: 上限値（1633）
+    pub stat_bonus_max: i32,
+    /// stat bonus: TT手一致時の加算（375）
+    pub stat_bonus_tt_bonus: i32,
+    /// stat malus: depth 係数（825）
+    pub stat_malus_depth_mult: i32,
+    /// stat malus: オフセット（-196）
+    pub stat_malus_offset: i32,
+    /// stat malus: 上限値（2159）
+    pub stat_malus_max: i32,
+    /// stat malus: move_count 係数（16）
+    pub stat_malus_move_count_mult: i32,
+    /// lowPlyHistory ボーナス倍率（/1024）
+    pub low_ply_history_multiplier: i32,
+    /// lowPlyHistory ボーナスオフセット
+    pub low_ply_history_offset: i32,
+    /// continuationHistory ボーナス倍率（/1024）
+    pub continuation_history_multiplier: i32,
+    /// continuationHistory 近接plyオフセット
+    pub continuation_history_near_ply_offset: i32,
+    /// continuationHistory更新重み（1手前）
+    pub continuation_history_weight_1: i32,
+    /// continuationHistory更新重み（2手前）
+    pub continuation_history_weight_2: i32,
+    /// continuationHistory更新重み（3手前）
+    pub continuation_history_weight_3: i32,
+    /// continuationHistory更新重み（4手前）
+    pub continuation_history_weight_4: i32,
+    /// continuationHistory更新重み（5手前）
+    pub continuation_history_weight_5: i32,
+    /// continuationHistory更新重み（6手前）
+    pub continuation_history_weight_6: i32,
+    /// pawnHistory正ボーナス倍率（/1024）
+    pub pawn_history_pos_multiplier: i32,
+    /// pawnHistory負ボーナス倍率（/1024）
+    pub pawn_history_neg_multiplier: i32,
 
     /// TTMoveHistory: best==tt 時の更新量
     pub tt_move_history_bonus: i32,
@@ -170,6 +251,126 @@ const SPSA_OPTION_SPECS: &[SearchTuneOptionSpec] = &[
         default: 1200,
         min: -8192,
         max: 8192,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LMR_TTPV_ADD",
+        default: 946,
+        min: -8192,
+        max: 8192,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LMR_STEP16_TTPV_SUB_BASE",
+        default: 2618,
+        min: -8192,
+        max: 8192,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LMR_STEP16_TTPV_SUB_PV_NODE",
+        default: 991,
+        min: -8192,
+        max: 8192,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LMR_STEP16_TTPV_SUB_TT_VALUE",
+        default: 903,
+        min: -8192,
+        max: 8192,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LMR_STEP16_TTPV_SUB_TT_DEPTH",
+        default: 978,
+        min: -8192,
+        max: 8192,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LMR_STEP16_TTPV_SUB_CUT_NODE",
+        default: 1051,
+        min: -8192,
+        max: 8192,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LMR_STEP16_BASE_ADD",
+        default: 843,
+        min: -8192,
+        max: 8192,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LMR_STEP16_MOVE_COUNT_MUL",
+        default: 66,
+        min: -1024,
+        max: 1024,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LMR_STEP16_CORRECTION_DIV",
+        default: 30_450,
+        min: 1,
+        max: 1_000_000,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LMR_STEP16_CUT_NODE_ADD",
+        default: 3094,
+        min: -8192,
+        max: 8192,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LMR_STEP16_CUT_NODE_NO_TT_ADD",
+        default: 1056,
+        min: -8192,
+        max: 8192,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LMR_STEP16_TT_CAPTURE_ADD",
+        default: 1415,
+        min: -8192,
+        max: 8192,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LMR_STEP16_CUTOFF_COUNT_ADD",
+        default: 1051,
+        min: -8192,
+        max: 8192,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LMR_STEP16_CUTOFF_COUNT_ALL_NODE_ADD",
+        default: 814,
+        min: -8192,
+        max: 8192,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LMR_STEP16_TT_MOVE_PENALTY",
+        default: 2018,
+        min: -8192,
+        max: 8192,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LMR_STEP16_CAPTURE_STAT_SCALE_NUM",
+        default: 803,
+        min: 0,
+        max: 8192,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LMR_STEP16_STAT_SCORE_SCALE_NUM",
+        default: 794,
+        min: 0,
+        max: 8192,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LMR_RESEARCH_DEEPER_BASE",
+        default: 43,
+        min: -1024,
+        max: 1024,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LMR_RESEARCH_DEEPER_DEPTH_MUL",
+        default: 2,
+        min: -64,
+        max: 64,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LMR_RESEARCH_SHALLOWER_THRESHOLD",
+        default: 9,
+        min: -1024,
+        max: 1024,
     },
     SearchTuneOptionSpec {
         usi_name: "SPSA_FUTILITY_MARGIN_BASE",
@@ -292,6 +493,126 @@ const SPSA_OPTION_SPECS: &[SearchTuneOptionSpec] = &[
         max: 4096,
     },
     SearchTuneOptionSpec {
+        usi_name: "SPSA_STAT_BONUS_DEPTH_MULT",
+        default: 121,
+        min: 0,
+        max: 2048,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_STAT_BONUS_OFFSET",
+        default: -77,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_STAT_BONUS_MAX",
+        default: 1633,
+        min: 1,
+        max: 8192,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_STAT_BONUS_TT_BONUS",
+        default: 375,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_STAT_MALUS_DEPTH_MULT",
+        default: 825,
+        min: 0,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_STAT_MALUS_OFFSET",
+        default: -196,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_STAT_MALUS_MAX",
+        default: 2159,
+        min: 1,
+        max: 8192,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_STAT_MALUS_MOVE_COUNT_MULT",
+        default: 16,
+        min: 0,
+        max: 512,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LOW_PLY_HISTORY_MULTIPLIER",
+        default: 761,
+        min: 0,
+        max: 2048,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LOW_PLY_HISTORY_OFFSET",
+        default: 0,
+        min: -2048,
+        max: 2048,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_CONT_HISTORY_MULTIPLIER",
+        default: 955,
+        min: 0,
+        max: 2048,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_CONT_HISTORY_NEAR_PLY_OFFSET",
+        default: 88,
+        min: -1024,
+        max: 1024,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_CONT_HISTORY_WEIGHT_1",
+        default: 1157,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_CONT_HISTORY_WEIGHT_2",
+        default: 648,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_CONT_HISTORY_WEIGHT_3",
+        default: 288,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_CONT_HISTORY_WEIGHT_4",
+        default: 576,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_CONT_HISTORY_WEIGHT_5",
+        default: 140,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_CONT_HISTORY_WEIGHT_6",
+        default: 441,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_PAWN_HISTORY_POS_MULTIPLIER",
+        default: 850,
+        min: 0,
+        max: 2048,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_PAWN_HISTORY_NEG_MULTIPLIER",
+        default: 550,
+        min: 0,
+        max: 2048,
+    },
+    SearchTuneOptionSpec {
         usi_name: "SPSA_TT_MOVE_BONUS",
         default: 811,
         min: -8192,
@@ -324,6 +645,26 @@ impl Default for SearchTuneParams {
             lmr_reduction_non_improving_mult: 218,
             lmr_reduction_non_improving_div: 512,
             lmr_reduction_base_offset: 1200,
+            lmr_ttpv_add: 946,
+            lmr_step16_ttpv_sub_base: 2618,
+            lmr_step16_ttpv_sub_pv_node: 991,
+            lmr_step16_ttpv_sub_tt_value: 903,
+            lmr_step16_ttpv_sub_tt_depth: 978,
+            lmr_step16_ttpv_sub_cut_node: 1051,
+            lmr_step16_base_add: 843,
+            lmr_step16_move_count_mul: 66,
+            lmr_step16_correction_div: 30_450,
+            lmr_step16_cut_node_add: 3094,
+            lmr_step16_cut_node_no_tt_add: 1056,
+            lmr_step16_tt_capture_add: 1415,
+            lmr_step16_cutoff_count_add: 1051,
+            lmr_step16_cutoff_count_all_node_add: 814,
+            lmr_step16_tt_move_penalty: 2018,
+            lmr_step16_capture_stat_scale_num: 803,
+            lmr_step16_stat_score_scale_num: 794,
+            lmr_research_deeper_base: 43,
+            lmr_research_deeper_depth_mul: 2,
+            lmr_research_shallower_threshold: 9,
             futility_margin_base: 91,
             futility_margin_tt_bonus: 21,
             futility_improving_scale: 2094,
@@ -344,6 +685,26 @@ impl Default for SearchTuneParams {
             probcut_dynamic_reduction_div: 300,
             probcut_depth_base: 5,
             qsearch_futility_base: 352,
+            stat_bonus_depth_mult: 121,
+            stat_bonus_offset: -77,
+            stat_bonus_max: 1633,
+            stat_bonus_tt_bonus: 375,
+            stat_malus_depth_mult: 825,
+            stat_malus_offset: -196,
+            stat_malus_max: 2159,
+            stat_malus_move_count_mult: 16,
+            low_ply_history_multiplier: 761,
+            low_ply_history_offset: 0,
+            continuation_history_multiplier: 955,
+            continuation_history_near_ply_offset: 88,
+            continuation_history_weight_1: 1157,
+            continuation_history_weight_2: 648,
+            continuation_history_weight_3: 288,
+            continuation_history_weight_4: 576,
+            continuation_history_weight_5: 140,
+            continuation_history_weight_6: 441,
+            pawn_history_pos_multiplier: 850,
+            pawn_history_neg_multiplier: 550,
             tt_move_history_bonus: 811,
             tt_move_history_malus: -848,
             prior_capture_countermove_bonus: 964,
@@ -361,6 +722,14 @@ impl SearchTuneParams {
     ///
     /// 不明な option 名の場合は `None` を返す。
     pub fn set_from_usi_name(&mut self, name: &str, value: i32) -> Option<SearchTuneSetResult> {
+        macro_rules! try_apply {
+            ($name:literal, $field:ident, $min:expr, $max:expr) => {
+                if name == $name {
+                    return Some(apply(&mut self.$field, value, $min, $max));
+                }
+            };
+        }
+
         fn apply(dst: &mut i32, value: i32, min: i32, max: i32) -> SearchTuneSetResult {
             let applied = value.clamp(min, max);
             *dst = applied;
@@ -372,88 +741,111 @@ impl SearchTuneParams {
             }
         }
 
-        match name {
-            "SPSA_IIR_SHALLOW" => {
-                Some(apply(&mut self.iir_prior_reduction_threshold_shallow, value, 0, 8))
-            }
-            "SPSA_IIR_DEEP" => {
-                Some(apply(&mut self.iir_prior_reduction_threshold_deep, value, 0, 16))
-            }
-            "SPSA_IIR_DEPTH_BOUNDARY" => Some(apply(&mut self.iir_depth_boundary, value, 1, 64)),
-            "SPSA_IIR_EVAL_SUM" => Some(apply(&mut self.iir_eval_sum_threshold, value, 0, 5000)),
-            "SPSA_DRAW_JITTER_MASK" => Some(apply(&mut self.draw_jitter_mask, value, 0, 31)),
-            "SPSA_DRAW_JITTER_OFFSET" => Some(apply(&mut self.draw_jitter_offset, value, -16, 16)),
-            "SPSA_LMR_DELTA_SCALE" => {
-                Some(apply(&mut self.lmr_reduction_delta_scale, value, 0, 4096))
-            }
-            "SPSA_LMR_NON_IMPROVING_MULT" => {
-                Some(apply(&mut self.lmr_reduction_non_improving_mult, value, 0, 4096))
-            }
-            "SPSA_LMR_NON_IMPROVING_DIV" => {
-                Some(apply(&mut self.lmr_reduction_non_improving_div, value, 1, 4096))
-            }
-            "SPSA_LMR_BASE_OFFSET" => {
-                Some(apply(&mut self.lmr_reduction_base_offset, value, -8192, 8192))
-            }
-            "SPSA_FUTILITY_MARGIN_BASE" => {
-                Some(apply(&mut self.futility_margin_base, value, 0, 1024))
-            }
-            "SPSA_FUTILITY_MARGIN_TT_BONUS" => {
-                Some(apply(&mut self.futility_margin_tt_bonus, value, 0, 512))
-            }
-            "SPSA_FUTILITY_IMPROVING_SCALE" => {
-                Some(apply(&mut self.futility_improving_scale, value, 0, 4096))
-            }
-            "SPSA_FUTILITY_OPP_WORSENING_SCALE" => {
-                Some(apply(&mut self.futility_opponent_worsening_scale, value, 0, 4096))
-            }
-            "SPSA_FUTILITY_CORRECTION_DIV" => {
-                Some(apply(&mut self.futility_correction_div, value, 1, 1_000_000))
-            }
-            "SPSA_SMALL_PROBCUT_MARGIN" => {
-                Some(apply(&mut self.small_probcut_margin, value, 0, 2048))
-            }
-            "SPSA_RAZORING_BASE" => Some(apply(&mut self.razoring_margin_base, value, 0, 4096)),
-            "SPSA_RAZORING_DEPTH2" => {
-                Some(apply(&mut self.razoring_margin_depth2_coeff, value, 0, 4096))
-            }
-            "SPSA_NMP_MARGIN_DEPTH_MULT" => {
-                Some(apply(&mut self.nmp_margin_depth_mult, value, 0, 256))
-            }
-            "SPSA_NMP_MARGIN_OFFSET" => {
-                Some(apply(&mut self.nmp_margin_offset, value, -4096, 4096))
-            }
-            "SPSA_NMP_REDUCTION_BASE" => Some(apply(&mut self.nmp_reduction_base, value, 1, 32)),
-            "SPSA_NMP_REDUCTION_DEPTH_DIV" => {
-                Some(apply(&mut self.nmp_reduction_depth_div, value, 1, 32))
-            }
-            "SPSA_NMP_VERIFICATION_DEPTH" => {
-                Some(apply(&mut self.nmp_verification_depth_threshold, value, 1, 128))
-            }
-            "SPSA_NMP_MIN_PLY_NUM" => Some(apply(&mut self.nmp_min_ply_update_num, value, 1, 32)),
-            "SPSA_NMP_MIN_PLY_DEN" => Some(apply(&mut self.nmp_min_ply_update_den, value, 1, 32)),
-            "SPSA_PROBCUT_BETA_MARGIN" => {
-                Some(apply(&mut self.probcut_beta_margin_base, value, 0, 2048))
-            }
-            "SPSA_PROBCUT_IMPROVING_SUB" => {
-                Some(apply(&mut self.probcut_beta_improving_sub, value, 0, 1024))
-            }
-            "SPSA_PROBCUT_DYNAMIC_DIV" => {
-                Some(apply(&mut self.probcut_dynamic_reduction_div, value, 1, 4096))
-            }
-            "SPSA_PROBCUT_DEPTH_BASE" => Some(apply(&mut self.probcut_depth_base, value, 1, 32)),
-            "SPSA_QS_FUTILITY_BASE" => Some(apply(&mut self.qsearch_futility_base, value, 0, 4096)),
-            "SPSA_TT_MOVE_BONUS" => {
-                Some(apply(&mut self.tt_move_history_bonus, value, -8192, 8192))
-            }
-            "SPSA_TT_MOVE_MALUS" => {
-                Some(apply(&mut self.tt_move_history_malus, value, -8192, 8192))
-            }
-            "SPSA_PRIOR_CAPTURE_CM_BONUS" => {
-                Some(apply(&mut self.prior_capture_countermove_bonus, value, -8192, 8192))
-            }
-            _ => None,
-        }
+        try_apply!("SPSA_IIR_SHALLOW", iir_prior_reduction_threshold_shallow, 0, 8);
+        try_apply!("SPSA_IIR_DEEP", iir_prior_reduction_threshold_deep, 0, 16);
+        try_apply!("SPSA_IIR_DEPTH_BOUNDARY", iir_depth_boundary, 1, 64);
+        try_apply!("SPSA_IIR_EVAL_SUM", iir_eval_sum_threshold, 0, 5000);
+        try_apply!("SPSA_DRAW_JITTER_MASK", draw_jitter_mask, 0, 31);
+        try_apply!("SPSA_DRAW_JITTER_OFFSET", draw_jitter_offset, -16, 16);
+        try_apply!("SPSA_LMR_DELTA_SCALE", lmr_reduction_delta_scale, 0, 4096);
+        try_apply!("SPSA_LMR_NON_IMPROVING_MULT", lmr_reduction_non_improving_mult, 0, 4096);
+        try_apply!("SPSA_LMR_NON_IMPROVING_DIV", lmr_reduction_non_improving_div, 1, 4096);
+        try_apply!("SPSA_LMR_BASE_OFFSET", lmr_reduction_base_offset, -8192, 8192);
+        try_apply!("SPSA_LMR_TTPV_ADD", lmr_ttpv_add, -8192, 8192);
+        try_apply!("SPSA_LMR_STEP16_TTPV_SUB_BASE", lmr_step16_ttpv_sub_base, -8192, 8192);
+        try_apply!("SPSA_LMR_STEP16_TTPV_SUB_PV_NODE", lmr_step16_ttpv_sub_pv_node, -8192, 8192);
+        try_apply!("SPSA_LMR_STEP16_TTPV_SUB_TT_VALUE", lmr_step16_ttpv_sub_tt_value, -8192, 8192);
+        try_apply!("SPSA_LMR_STEP16_TTPV_SUB_TT_DEPTH", lmr_step16_ttpv_sub_tt_depth, -8192, 8192);
+        try_apply!("SPSA_LMR_STEP16_TTPV_SUB_CUT_NODE", lmr_step16_ttpv_sub_cut_node, -8192, 8192);
+        try_apply!("SPSA_LMR_STEP16_BASE_ADD", lmr_step16_base_add, -8192, 8192);
+        try_apply!("SPSA_LMR_STEP16_MOVE_COUNT_MUL", lmr_step16_move_count_mul, -1024, 1024);
+        try_apply!("SPSA_LMR_STEP16_CORRECTION_DIV", lmr_step16_correction_div, 1, 1_000_000);
+        try_apply!("SPSA_LMR_STEP16_CUT_NODE_ADD", lmr_step16_cut_node_add, -8192, 8192);
+        try_apply!(
+            "SPSA_LMR_STEP16_CUT_NODE_NO_TT_ADD",
+            lmr_step16_cut_node_no_tt_add,
+            -8192,
+            8192
+        );
+        try_apply!("SPSA_LMR_STEP16_TT_CAPTURE_ADD", lmr_step16_tt_capture_add, -8192, 8192);
+        try_apply!("SPSA_LMR_STEP16_CUTOFF_COUNT_ADD", lmr_step16_cutoff_count_add, -8192, 8192);
+        try_apply!(
+            "SPSA_LMR_STEP16_CUTOFF_COUNT_ALL_NODE_ADD",
+            lmr_step16_cutoff_count_all_node_add,
+            -8192,
+            8192
+        );
+        try_apply!("SPSA_LMR_STEP16_TT_MOVE_PENALTY", lmr_step16_tt_move_penalty, -8192, 8192);
+        try_apply!(
+            "SPSA_LMR_STEP16_CAPTURE_STAT_SCALE_NUM",
+            lmr_step16_capture_stat_scale_num,
+            0,
+            8192
+        );
+        try_apply!(
+            "SPSA_LMR_STEP16_STAT_SCORE_SCALE_NUM",
+            lmr_step16_stat_score_scale_num,
+            0,
+            8192
+        );
+        try_apply!("SPSA_LMR_RESEARCH_DEEPER_BASE", lmr_research_deeper_base, -1024, 1024);
+        try_apply!("SPSA_LMR_RESEARCH_DEEPER_DEPTH_MUL", lmr_research_deeper_depth_mul, -64, 64);
+        try_apply!(
+            "SPSA_LMR_RESEARCH_SHALLOWER_THRESHOLD",
+            lmr_research_shallower_threshold,
+            -1024,
+            1024
+        );
+        try_apply!("SPSA_FUTILITY_MARGIN_BASE", futility_margin_base, 0, 1024);
+        try_apply!("SPSA_FUTILITY_MARGIN_TT_BONUS", futility_margin_tt_bonus, 0, 512);
+        try_apply!("SPSA_FUTILITY_IMPROVING_SCALE", futility_improving_scale, 0, 4096);
+        try_apply!("SPSA_FUTILITY_OPP_WORSENING_SCALE", futility_opponent_worsening_scale, 0, 4096);
+        try_apply!("SPSA_FUTILITY_CORRECTION_DIV", futility_correction_div, 1, 1_000_000);
+        try_apply!("SPSA_SMALL_PROBCUT_MARGIN", small_probcut_margin, 0, 2048);
+        try_apply!("SPSA_RAZORING_BASE", razoring_margin_base, 0, 4096);
+        try_apply!("SPSA_RAZORING_DEPTH2", razoring_margin_depth2_coeff, 0, 4096);
+        try_apply!("SPSA_NMP_MARGIN_DEPTH_MULT", nmp_margin_depth_mult, 0, 256);
+        try_apply!("SPSA_NMP_MARGIN_OFFSET", nmp_margin_offset, -4096, 4096);
+        try_apply!("SPSA_NMP_REDUCTION_BASE", nmp_reduction_base, 1, 32);
+        try_apply!("SPSA_NMP_REDUCTION_DEPTH_DIV", nmp_reduction_depth_div, 1, 32);
+        try_apply!("SPSA_NMP_VERIFICATION_DEPTH", nmp_verification_depth_threshold, 1, 128);
+        try_apply!("SPSA_NMP_MIN_PLY_NUM", nmp_min_ply_update_num, 1, 32);
+        try_apply!("SPSA_NMP_MIN_PLY_DEN", nmp_min_ply_update_den, 1, 32);
+        try_apply!("SPSA_PROBCUT_BETA_MARGIN", probcut_beta_margin_base, 0, 2048);
+        try_apply!("SPSA_PROBCUT_IMPROVING_SUB", probcut_beta_improving_sub, 0, 1024);
+        try_apply!("SPSA_PROBCUT_DYNAMIC_DIV", probcut_dynamic_reduction_div, 1, 4096);
+        try_apply!("SPSA_PROBCUT_DEPTH_BASE", probcut_depth_base, 1, 32);
+        try_apply!("SPSA_QS_FUTILITY_BASE", qsearch_futility_base, 0, 4096);
+        try_apply!("SPSA_STAT_BONUS_DEPTH_MULT", stat_bonus_depth_mult, 0, 2048);
+        try_apply!("SPSA_STAT_BONUS_OFFSET", stat_bonus_offset, -4096, 4096);
+        try_apply!("SPSA_STAT_BONUS_MAX", stat_bonus_max, 1, 8192);
+        try_apply!("SPSA_STAT_BONUS_TT_BONUS", stat_bonus_tt_bonus, -4096, 4096);
+        try_apply!("SPSA_STAT_MALUS_DEPTH_MULT", stat_malus_depth_mult, 0, 4096);
+        try_apply!("SPSA_STAT_MALUS_OFFSET", stat_malus_offset, -4096, 4096);
+        try_apply!("SPSA_STAT_MALUS_MAX", stat_malus_max, 1, 8192);
+        try_apply!("SPSA_STAT_MALUS_MOVE_COUNT_MULT", stat_malus_move_count_mult, 0, 512);
+        try_apply!("SPSA_LOW_PLY_HISTORY_MULTIPLIER", low_ply_history_multiplier, 0, 2048);
+        try_apply!("SPSA_LOW_PLY_HISTORY_OFFSET", low_ply_history_offset, -2048, 2048);
+        try_apply!("SPSA_CONT_HISTORY_MULTIPLIER", continuation_history_multiplier, 0, 2048);
+        try_apply!(
+            "SPSA_CONT_HISTORY_NEAR_PLY_OFFSET",
+            continuation_history_near_ply_offset,
+            -1024,
+            1024
+        );
+        try_apply!("SPSA_CONT_HISTORY_WEIGHT_1", continuation_history_weight_1, -4096, 4096);
+        try_apply!("SPSA_CONT_HISTORY_WEIGHT_2", continuation_history_weight_2, -4096, 4096);
+        try_apply!("SPSA_CONT_HISTORY_WEIGHT_3", continuation_history_weight_3, -4096, 4096);
+        try_apply!("SPSA_CONT_HISTORY_WEIGHT_4", continuation_history_weight_4, -4096, 4096);
+        try_apply!("SPSA_CONT_HISTORY_WEIGHT_5", continuation_history_weight_5, -4096, 4096);
+        try_apply!("SPSA_CONT_HISTORY_WEIGHT_6", continuation_history_weight_6, -4096, 4096);
+        try_apply!("SPSA_PAWN_HISTORY_POS_MULTIPLIER", pawn_history_pos_multiplier, 0, 2048);
+        try_apply!("SPSA_PAWN_HISTORY_NEG_MULTIPLIER", pawn_history_neg_multiplier, 0, 2048);
+        try_apply!("SPSA_TT_MOVE_BONUS", tt_move_history_bonus, -8192, 8192);
+        try_apply!("SPSA_TT_MOVE_MALUS", tt_move_history_malus, -8192, 8192);
+        try_apply!("SPSA_PRIOR_CAPTURE_CM_BONUS", prior_capture_countermove_bonus, -8192, 8192);
+
+        None
     }
 }
 

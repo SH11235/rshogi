@@ -3,9 +3,11 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use chrono::Utc;
 use clap::Parser;
 use rand::prelude::IndexedRandom;
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use tools::selfplay::game::{run_game, GameConfig, MoveEvent};
 use tools::selfplay::time_control::TimeControl;
 use tools::selfplay::{
@@ -13,6 +15,7 @@ use tools::selfplay::{
 };
 
 const PARAM_NOT_USED_MARKER: &str = "[[NOT USED]]";
+const META_FORMAT_VERSION: u32 = 1;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "SPSA tuner for USI engines")]
@@ -36,6 +39,34 @@ struct Cli {
     /// 更新移動量スケール
     #[arg(long, default_value_t = 1.0)]
     mobility: f64,
+
+    /// A系列の a（a_t = a / (A + t)^alpha）
+    #[arg(long, default_value_t = 0.2)]
+    a: f64,
+
+    /// A系列の A（a_t = a / (A + t)^alpha）
+    #[arg(long = "a-offset", default_value_t = 50.0)]
+    a_offset: f64,
+
+    /// A系列の alpha（a_t = a / (A + t)^alpha）
+    #[arg(long, default_value_t = 0.602)]
+    alpha: f64,
+
+    /// c系列の c（c_t = c / t^gamma）
+    #[arg(long, default_value_t = 1.0)]
+    c: f64,
+
+    /// c系列の gamma（c_t = c / t^gamma）
+    #[arg(long, default_value_t = 0.101)]
+    gamma: f64,
+
+    /// 再開メタデータファイル（既定: <params>.meta.json）
+    #[arg(long)]
+    meta_file: Option<PathBuf>,
+
+    /// 既存メタデータから反復番号を再開する
+    #[arg(long, default_value_t = false)]
+    resume: bool,
 
     /// エンジンバイナリパス（未指定時: target/release/rshogi-usi）
     #[arg(long)]
@@ -90,6 +121,60 @@ struct SpsaParam {
     delta: f64,
     comment: String,
     not_used: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+struct ScheduleConfig {
+    a: f64,
+    a_offset: f64,
+    alpha: f64,
+    c: f64,
+    gamma: f64,
+    scale: f64,
+    mobility: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ResumeMetaData {
+    format_version: u32,
+    params_file: String,
+    completed_iterations: u32,
+    total_games: usize,
+    last_step_sum: f64,
+    last_grad_scale: f64,
+    last_a_t: f64,
+    last_c_t: f64,
+    updated_at_utc: String,
+    schedule: ScheduleConfig,
+}
+
+fn default_meta_path(params_path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.meta.json", params_path.display()))
+}
+
+fn load_meta(path: &Path) -> Result<ResumeMetaData> {
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let meta = serde_json::from_reader(reader)
+        .with_context(|| format!("failed to parse JSON {}", path.display()))?;
+    Ok(meta)
+}
+
+fn save_meta(path: &Path, meta: &ResumeMetaData) -> Result<()> {
+    let file =
+        File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+    let writer = BufWriter::new(file);
+    serde_json::to_writer_pretty(writer, meta)
+        .with_context(|| format!("failed to write JSON {}", path.display()))?;
+    Ok(())
+}
+
+#[inline]
+fn schedule_values(config: ScheduleConfig, iteration_index: u32) -> (f64, f64) {
+    let t = iteration_index as f64 + 1.0;
+    let a_t = config.a / (config.a_offset + t).powf(config.alpha);
+    let c_t = config.c / t.powf(config.gamma);
+    (a_t, c_t)
 }
 
 fn parse_param_line(line: &str, line_no: usize) -> Result<Option<SpsaParam>> {
@@ -272,10 +357,58 @@ fn main() -> Result<()> {
     if cli.iterations == 0 {
         bail!("--iterations must be >= 1");
     }
+    if cli.scale <= 0.0 {
+        bail!("--scale must be > 0");
+    }
+    if cli.a <= 0.0 || cli.c <= 0.0 {
+        bail!("--a and --c must be > 0");
+    }
+    if cli.alpha <= 0.0 || cli.gamma <= 0.0 {
+        bail!("--alpha and --gamma must be > 0");
+    }
+    if cli.a_offset < 0.0 {
+        bail!("--a-offset must be >= 0");
+    }
 
     let engine_path = resolve_engine_path(&cli)?;
     let engine_args = cli.engine_args.clone().unwrap_or_default();
     let mut params = read_params(&cli.params)?;
+    let schedule = ScheduleConfig {
+        a: cli.a,
+        a_offset: cli.a_offset,
+        alpha: cli.alpha,
+        c: cli.c,
+        gamma: cli.gamma,
+        scale: cli.scale,
+        mobility: cli.mobility,
+    };
+    let meta_path = cli.meta_file.clone().unwrap_or_else(|| default_meta_path(&cli.params));
+    let (start_iteration, mut total_games) = if cli.resume {
+        let meta = load_meta(&meta_path).with_context(|| {
+            format!("--resume was set but metadata load failed: {}", meta_path.display())
+        })?;
+        if meta.format_version != META_FORMAT_VERSION {
+            bail!(
+                "unsupported meta format version {} in {}",
+                meta.format_version,
+                meta_path.display()
+            );
+        }
+        if meta.schedule != schedule {
+            eprintln!(
+                "warning: schedule differs from metadata. continuing with current CLI values \
+                 (meta={}, cli={:?})",
+                meta_path.display(),
+                schedule
+            );
+        }
+        (meta.completed_iterations, meta.total_games)
+    } else {
+        (0, 0)
+    };
+    let end_iteration = start_iteration
+        .checked_add(cli.iterations)
+        .context("iteration index overflow")?;
 
     let (start_positions, _) =
         load_start_positions(cli.startpos_file.as_deref(), cli.sfen.as_deref(), None, None)?;
@@ -304,18 +437,18 @@ fn main() -> Result<()> {
     let tc = TimeControl::new(0, 0, 0, 0, cli.byoyomi);
 
     let mut rng = rand::rng();
-    let mut total_games = 0usize;
 
-    for iter in 0..cli.iterations {
+    for iter in start_iteration..end_iteration {
+        let (a_t, c_t) = schedule_values(schedule, iter);
         let shifts: Vec<f64> = params
             .iter()
             .map(|p| {
                 if p.not_used {
                     0.0
                 } else if rng.random_bool(0.5) {
-                    p.step
+                    p.step * cli.scale * c_t
                 } else {
-                    -p.step
+                    -p.step * cli.scale * c_t
                 }
             })
             .collect();
@@ -323,12 +456,12 @@ fn main() -> Result<()> {
         let plus_values: Vec<f64> = params
             .iter()
             .zip(shifts.iter())
-            .map(|(p, s)| clamped_value(p, p.value + s * cli.scale))
+            .map(|(p, s)| clamped_value(p, p.value + s))
             .collect();
         let minus_values: Vec<f64> = params
             .iter()
             .zip(shifts.iter())
-            .map(|(p, s)| clamped_value(p, p.value - s * cli.scale))
+            .map(|(p, s)| clamped_value(p, p.value - s))
             .collect();
 
         let mut step_sum = 0.0f64;
@@ -389,20 +522,38 @@ fn main() -> Result<()> {
 
         let grad_scale = step_sum / cli.games_per_iteration as f64;
         for (p, &shift) in params.iter_mut().zip(shifts.iter()) {
-            if p.not_used {
+            if p.not_used || p.step.abs() <= f64::EPSILON || c_t <= f64::EPSILON {
                 continue;
             }
-            let updated = clamped_value(p, p.value + shift * grad_scale * p.delta * cli.mobility);
+            let direction = if shift >= 0.0 { 1.0 } else { -1.0 };
+            let grad = grad_scale * direction / (p.step.abs() * cli.scale * c_t);
+            let updated = clamped_value(p, p.value + a_t * p.delta * grad * cli.mobility);
             p.value = if p.is_int { updated.round() } else { updated };
         }
 
         write_params(&cli.params, &params)?;
+        let meta = ResumeMetaData {
+            format_version: META_FORMAT_VERSION,
+            params_file: cli.params.display().to_string(),
+            completed_iterations: iter + 1,
+            total_games,
+            last_step_sum: step_sum,
+            last_grad_scale: grad_scale,
+            last_a_t: a_t,
+            last_c_t: c_t,
+            updated_at_utc: Utc::now().to_rfc3339(),
+            schedule,
+        };
+        save_meta(&meta_path, &meta)?;
         println!(
-            "iter={} step_sum={:+.3} grad_scale={:+.3} checkpoint={}",
+            "iter={} step_sum={:+.3} grad_scale={:+.3} a_t={:.6} c_t={:.6} checkpoint={} meta={}",
             iter + 1,
             step_sum,
             grad_scale,
-            cli.params.display()
+            a_t,
+            c_t,
+            cli.params.display(),
+            meta_path.display()
         );
     }
 

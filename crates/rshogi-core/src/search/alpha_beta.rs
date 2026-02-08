@@ -16,9 +16,9 @@ use crate::tt::{ProbeResult, TTData, TranspositionTable};
 use crate::types::{Bound, Color, Depth, Move, Piece, PieceType, Square, Value, DEPTH_QS, MAX_PLY};
 
 use super::history::{
-    continuation_history_bonus_with_offset, low_ply_history_bonus, pawn_history_bonus, stat_bonus,
-    stat_malus, HistoryCell, HistoryTables, CONTINUATION_HISTORY_NEAR_PLY_OFFSET,
-    CONTINUATION_HISTORY_WEIGHTS, CORRECTION_HISTORY_LIMIT, LOW_PLY_HISTORY_SIZE,
+    continuation_history_bonus_with_offset, continuation_history_weight, low_ply_history_bonus,
+    pawn_history_bonus, stat_bonus, stat_malus, HistoryCell, HistoryTables,
+    CORRECTION_HISTORY_LIMIT, LOW_PLY_HISTORY_SIZE,
 };
 use super::movepicker::piece_value;
 use super::types::{
@@ -70,6 +70,7 @@ pub(super) fn to_corrected_static_eval(unadjusted: Value, correction_value: i32)
 fn update_continuation_histories(
     h: &mut HistoryTables,
     stack: &StackArray,
+    tune_params: &SearchTuneParams,
     base_ply: i32,
     in_check: bool,
     pc: Piece,
@@ -77,17 +78,21 @@ fn update_continuation_histories(
     bonus: i32,
 ) {
     let max_ply_back = if in_check { 2 } else { 6 };
-    for &(ply_back, weight) in CONTINUATION_HISTORY_WEIGHTS.iter() {
+    for ply_back in 1..=6 {
         if ply_back > max_ply_back {
             continue;
         }
+        let weight = continuation_history_weight(tune_params, ply_back);
         let target_ply = base_ply - ply_back as i32;
         if target_ply >= 0 {
             if let Some(key) = stack[target_ply as usize].cont_hist_key {
                 let in_check_idx = key.in_check as usize;
                 let capture_idx = key.capture as usize;
-                let weighted_bonus =
-                    continuation_history_bonus_with_offset(bonus * weight / 1024, ply_back);
+                let weighted_bonus = continuation_history_bonus_with_offset(
+                    bonus * weight / 1024,
+                    ply_back,
+                    tune_params,
+                );
                 h.continuation_history[in_check_idx][capture_idx].update(
                     key.piece,
                     key.to,
@@ -107,6 +112,7 @@ fn update_continuation_histories(
 fn update_quiet_histories(
     h: &mut HistoryTables,
     stack: &StackArray,
+    tune_params: &SearchTuneParams,
     pos: &Position,
     ply: i32,
     in_check: bool,
@@ -117,7 +123,8 @@ fn update_quiet_histories(
     h.main_history.update(us, mv, bonus);
 
     if ply < LOW_PLY_HISTORY_SIZE as i32 {
-        h.low_ply_history.update(ply as usize, mv, low_ply_history_bonus(bonus));
+        h.low_ply_history
+            .update(ply as usize, mv, low_ply_history_bonus(bonus, tune_params));
     }
 
     let moved_pc = pos.moved_piece(mv);
@@ -128,10 +135,11 @@ fn update_quiet_histories(
     };
     let to = mv.to();
 
-    update_continuation_histories(h, stack, ply, in_check, cont_pc, to, bonus);
+    update_continuation_histories(h, stack, tune_params, ply, in_check, cont_pc, to, bonus);
 
     let pawn_key_idx = pos.pawn_history_index();
-    h.pawn_history.update(pawn_key_idx, cont_pc, to, pawn_history_bonus(bonus));
+    h.pawn_history
+        .update(pawn_key_idx, cont_pc, to, pawn_history_bonus(bonus, tune_params));
 }
 
 /// LMR用のreduction配列
@@ -1240,6 +1248,7 @@ impl SearchWorker {
                             update_quiet_histories(
                                 h,
                                 &st.stack,
+                                &ctx.tune_params,
                                 pos,
                                 ply,
                                 in_check,
@@ -1264,6 +1273,7 @@ impl SearchWorker {
                                     update_continuation_histories(
                                         h,
                                         &st.stack,
+                                        &ctx.tune_params,
                                         ply - 1,
                                         prev_in_check,
                                         prev_piece,
@@ -1610,7 +1620,7 @@ impl SearchWorker {
 
             // YaneuraOu: ttPvなら reduction を少し増やす
             if st.stack[ply as usize].tt_pv {
-                r += 946;
+                r += ctx.tune_params.lmr_ttpv_add;
             }
 
             let lmr_depth = new_depth - r / 1024;
@@ -1708,36 +1718,40 @@ impl SearchWorker {
             let tt_depth_ge = tt_hit && tt_data.depth >= depth;
 
             if st.stack[ply as usize].tt_pv {
-                r -= 2618
-                    + (pv_node as i32) * 991
-                    + (tt_value_higher as i32) * 903
-                    + (tt_depth_ge as i32) * (978 + (cut_node as i32) * 1051);
+                r -= ctx.tune_params.lmr_step16_ttpv_sub_base
+                    + (pv_node as i32) * ctx.tune_params.lmr_step16_ttpv_sub_pv_node
+                    + (tt_value_higher as i32) * ctx.tune_params.lmr_step16_ttpv_sub_tt_value
+                    + (tt_depth_ge as i32)
+                        * (ctx.tune_params.lmr_step16_ttpv_sub_tt_depth
+                            + (cut_node as i32) * ctx.tune_params.lmr_step16_ttpv_sub_cut_node);
             }
 
             // YaneuraOu準拠: 基本調整群（yaneuraou-search.cpp:3528-3532）
-            r += 843;
-            r -= move_count * 66;
-            r -= eval_ctx.correction_value.abs() / 30_450;
+            r += ctx.tune_params.lmr_step16_base_add;
+            r -= move_count * ctx.tune_params.lmr_step16_move_count_mul;
+            r -= eval_ctx.correction_value.abs() / ctx.tune_params.lmr_step16_correction_div.max(1);
 
             // YaneuraOu準拠: cut_node（yaneuraou-search.cpp:3545-3546）
             if cut_node {
                 let no_tt_move = !tt_hit || tt_move.is_none();
-                r += 3094 + 1056 * (no_tt_move as i32);
+                r += ctx.tune_params.lmr_step16_cut_node_add
+                    + ctx.tune_params.lmr_step16_cut_node_no_tt_add * (no_tt_move as i32);
             }
 
             // YaneuraOu準拠: ttCapture（yaneuraou-search.cpp:3551-3552）
             if tt_capture {
-                r += 1415;
+                r += ctx.tune_params.lmr_step16_tt_capture_add;
             }
 
             // YaneuraOu準拠: cutoffCnt（yaneuraou-search.cpp:3557-3558）
             if st.stack[(ply + 1) as usize].cutoff_cnt > 2 {
-                r += 1051 + (all_node as i32) * 814;
+                r += ctx.tune_params.lmr_step16_cutoff_count_add
+                    + (all_node as i32) * ctx.tune_params.lmr_step16_cutoff_count_all_node_add;
             }
 
             // YaneuraOu準拠: ttMove（yaneuraou-search.cpp:3563-3564）
             if mv == tt_move {
-                r -= 2018;
+                r -= ctx.tune_params.lmr_step16_tt_move_penalty;
             }
 
             // YaneuraOu準拠: statScore（yaneuraou-search.cpp:3566-3579）
@@ -1750,7 +1764,8 @@ impl SearchWorker {
                 let hist = ctx
                     .history
                     .with_read(|h| h.capture_history.get(moved_piece, mv.to(), captured_pt) as i32);
-                803 * piece_value(captured) / 128 + hist
+                ctx.tune_params.lmr_step16_capture_stat_scale_num * piece_value(captured) / 128
+                    + hist
             } else {
                 let moved_piece = mv.moved_piece_after();
                 let main_hist = ctx.history.with_read(|h| h.main_history.get(mover, mv) as i32);
@@ -1759,7 +1774,7 @@ impl SearchWorker {
                 2 * main_hist + cont0 + cont1
             };
             st.stack[ply as usize].stat_score = stat_score;
-            r -= stat_score * 794 / 8192;
+            r -= stat_score * ctx.tune_params.lmr_step16_stat_score_scale_num / 8192;
 
             // =============================================================
             // 探索
@@ -1823,9 +1838,12 @@ impl SearchWorker {
                 st.stack[ply as usize].reduction = 0;
 
                 if value > alpha {
+                    let deeper_threshold = ctx.tune_params.lmr_research_deeper_base
+                        + ctx.tune_params.lmr_research_deeper_depth_mul * new_depth;
                     let do_deeper =
-                        d < new_depth && value > (best_value + Value::new(43 + 2 * new_depth));
-                    let do_shallower = value < best_value + Value::new(9);
+                        d < new_depth && value > (best_value + Value::new(deeper_threshold));
+                    let do_shallower = value
+                        < best_value + Value::new(ctx.tune_params.lmr_research_shallower_threshold);
                     new_depth += do_deeper as i32 - do_shallower as i32;
 
                     if new_depth > d {
@@ -2035,9 +2053,9 @@ impl SearchWorker {
             let is_best_capture = pos.is_capture(best_move);
             let is_tt_move = best_move == tt_move;
             // YaneuraOu準拠: bonus = min(121*depth-77, 1633) + 375*(bestMove==ttMove)
-            let bonus = stat_bonus(depth, is_tt_move);
+            let bonus = stat_bonus(depth, is_tt_move, &ctx.tune_params);
             // YaneuraOu準拠: malus = min(825*depth-196, 2159) - 16*moveCount
-            let malus = stat_malus(depth, move_count);
+            let malus = stat_malus(depth, move_count, &ctx.tune_params);
             let us = pos.side_to_move();
             let pawn_key_idx = pos.pawn_history_index();
 
@@ -2069,15 +2087,16 @@ impl SearchWorker {
 
                     // LowPlyHistory: bonus * 761 / 1024
                     if ply < LOW_PLY_HISTORY_SIZE as i32 {
-                        let low_ply_bonus = low_ply_history_bonus(scaled_bonus);
+                        let low_ply_bonus = low_ply_history_bonus(scaled_bonus, &ctx.tune_params);
                         h.low_ply_history.update(ply as usize, best_move, low_ply_bonus);
                     }
 
                     // ContinuationHistory: bonus * 955 / 1024 + weight + 88*(i<2)
-                    for &(ply_back, weight) in CONTINUATION_HISTORY_WEIGHTS.iter() {
+                    for ply_back in 1..=6 {
                         if ply_back > max_ply_back {
                             continue;
                         }
+                        let weight = continuation_history_weight(&ctx.tune_params, ply_back);
                         if ply >= ply_back as i32 {
                             let prev_ply = (ply - ply_back as i32) as usize;
                             if let Some(key) = st.stack[prev_ply].cont_hist_key {
@@ -2086,6 +2105,7 @@ impl SearchWorker {
                                 let weighted_bonus = continuation_history_bonus_with_offset(
                                     scaled_bonus * weight / 1024,
                                     ply_back,
+                                    &ctx.tune_params,
                                 );
                                 h.continuation_history[in_check_idx][capture_idx].update(
                                     key.piece,
@@ -2099,7 +2119,7 @@ impl SearchWorker {
                     }
 
                     // PawnHistory: bonus * (pos ? 850 : 550) / 1024
-                    let pawn_bonus = pawn_history_bonus(scaled_bonus);
+                    let pawn_bonus = pawn_history_bonus(scaled_bonus, &ctx.tune_params);
                     h.pawn_history.update(pawn_key_idx, best_cont_pc, best_to, pawn_bonus);
 
                     // 他のquiet手にはペナルティ
@@ -2110,7 +2130,8 @@ impl SearchWorker {
 
                             // LowPlyHistory（現行欠落していたので追加）
                             if ply < LOW_PLY_HISTORY_SIZE as i32 {
-                                let low_ply_malus = low_ply_history_bonus(-scaled_malus);
+                                let low_ply_malus =
+                                    low_ply_history_bonus(-scaled_malus, &ctx.tune_params);
                                 h.low_ply_history.update(ply as usize, m, low_ply_malus);
                             }
 
@@ -2124,10 +2145,12 @@ impl SearchWorker {
                             let to = m.to();
 
                             // ContinuationHistoryへのペナルティ
-                            for &(ply_back, weight) in CONTINUATION_HISTORY_WEIGHTS.iter() {
+                            for ply_back in 1..=6 {
                                 if ply_back > max_ply_back {
                                     continue;
                                 }
+                                let weight =
+                                    continuation_history_weight(&ctx.tune_params, ply_back);
                                 if ply >= ply_back as i32 {
                                     let prev_ply = (ply - ply_back as i32) as usize;
                                     if let Some(key) = st.stack[prev_ply].cont_hist_key {
@@ -2136,6 +2159,7 @@ impl SearchWorker {
                                         let weighted_malus = continuation_history_bonus_with_offset(
                                             -scaled_malus * weight / 1024,
                                             ply_back,
+                                            &ctx.tune_params,
                                         );
                                         h.continuation_history[in_check_idx][capture_idx].update(
                                             key.piece,
@@ -2149,7 +2173,7 @@ impl SearchWorker {
                             }
 
                             // PawnHistoryへのペナルティ
-                            let pawn_malus = pawn_history_bonus(-scaled_malus);
+                            let pawn_malus = pawn_history_bonus(-scaled_malus, &ctx.tune_params);
                             h.pawn_history.update(pawn_key_idx, cont_pc, to, pawn_malus);
                         }
                     }
@@ -2208,10 +2232,12 @@ impl SearchWorker {
                         let prev_max_ply_back = if prev_in_check { 2 } else { 6 };
 
                         ctx.history.with_write(|h| {
-                            for &(ply_back, weight) in CONTINUATION_HISTORY_WEIGHTS.iter() {
+                            for ply_back in 1..=6 {
                                 if ply_back > prev_max_ply_back {
                                     continue;
                                 }
+                                let weight =
+                                    continuation_history_weight(&ctx.tune_params, ply_back);
                                 // ss - 1 からさらに ply_back 手前 = ply - 1 - ply_back
                                 let target_ply = ply - 1 - ply_back as i32;
                                 if target_ply >= 0 {
@@ -2222,7 +2248,7 @@ impl SearchWorker {
                                         let capture_idx = target_key.capture as usize;
                                         let weighted_penalty = penalty_base * weight / 1024
                                             + if ply_back <= 2 {
-                                                CONTINUATION_HISTORY_NEAR_PLY_OFFSET
+                                                ctx.tune_params.continuation_history_near_ply_offset
                                             } else {
                                                 0
                                             };
@@ -2315,10 +2341,11 @@ impl SearchWorker {
                         prev_piece.piece_type() != PieceType::Pawn && !prev_move.is_promotion();
 
                     ctx.history.with_write(|h| {
-                        for &(ply_back, weight) in CONTINUATION_HISTORY_WEIGHTS.iter() {
+                        for ply_back in 1..=6 {
                             if ply_back > prev_max_ply_back {
                                 continue;
                             }
+                            let weight = continuation_history_weight(&ctx.tune_params, ply_back);
                             // ss - 1 からさらに ply_back 手前 = ply - 1 - ply_back
                             let target_ply = ply - 1 - ply_back as i32;
                             if target_ply >= 0 {
@@ -2329,7 +2356,7 @@ impl SearchWorker {
                                     let capture_idx = target_key.capture as usize;
                                     let weighted_bonus = cont_bonus * weight / 1024
                                         + if ply_back <= 2 {
-                                            CONTINUATION_HISTORY_NEAR_PLY_OFFSET
+                                            ctx.tune_params.continuation_history_near_ply_offset
                                         } else {
                                             0
                                         };
