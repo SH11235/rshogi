@@ -19,14 +19,13 @@ use super::history::{
     continuation_history_bonus_with_offset, low_ply_history_bonus, pawn_history_bonus, stat_bonus,
     stat_malus, HistoryCell, HistoryTables, CONTINUATION_HISTORY_NEAR_PLY_OFFSET,
     CONTINUATION_HISTORY_WEIGHTS, CORRECTION_HISTORY_LIMIT, LOW_PLY_HISTORY_SIZE,
-    PRIOR_CAPTURE_COUNTERMOVE_BONUS, TT_MOVE_HISTORY_BONUS, TT_MOVE_HISTORY_MALUS,
 };
 use super::movepicker::piece_value;
 use super::types::{
     init_stack_array, value_to_tt, ContHistKey, NodeType, RootMoves, SearchedMoveList, StackArray,
     STACK_SIZE,
 };
-use super::{LimitsType, MovePicker, TimeManagement};
+use super::{LimitsType, MovePicker, SearchTuneParams, TimeManagement};
 
 use super::eval_helpers::{compute_eval_context, probe_transposition, update_correction_history};
 use super::pruning::{
@@ -43,21 +42,13 @@ use super::search_helpers::{
 // 定数
 // =============================================================================
 
-/// IIR関連のしきい値（yaneuraou-search.cpp:2769-2774 由来）
-const IIR_PRIOR_REDUCTION_THRESHOLD_SHALLOW: i32 = 1;
-const IIR_PRIOR_REDUCTION_THRESHOLD_DEEP: i32 = 3;
-const IIR_DEPTH_BOUNDARY: Depth = 10;
-const IIR_EVAL_SUM_THRESHOLD: i32 = 177;
-
 use std::sync::LazyLock;
 
-const DRAW_JITTER_MASK: u64 = 0x2;
-const DRAW_JITTER_OFFSET: i32 = -1; // VALUE_DRAW(0) 周辺に ±1 の揺らぎを入れる
-
 #[inline]
-pub(super) fn draw_jitter(nodes: u64) -> i32 {
+pub(super) fn draw_jitter(nodes: u64, tune_params: &SearchTuneParams) -> i32 {
     // 千日手盲点を避けるため、VALUE_DRAW(0) を ±1 にばらつかせる。
-    ((nodes & DRAW_JITTER_MASK) as i32) + DRAW_JITTER_OFFSET
+    let mask = tune_params.draw_jitter_mask.max(0) as u64;
+    ((nodes & mask) as i32) + tune_params.draw_jitter_offset
 }
 
 #[inline]
@@ -146,11 +137,6 @@ fn update_quiet_histories(
 /// LMR用のreduction配列
 type Reductions = [i32; 64];
 
-const REDUCTION_DELTA_SCALE: i32 = 757;
-const REDUCTION_NON_IMPROVING_MULT: i32 = 218;
-const REDUCTION_NON_IMPROVING_DIV: i32 = 512;
-const REDUCTION_BASE_OFFSET: i32 = 1200;
-
 /// Reduction配列（LazyLockによる遅延初期化）
 /// 初回アクセス時に自動初期化されるため、get()呼び出しが不要
 static REDUCTIONS: LazyLock<Reductions> = LazyLock::new(|| {
@@ -166,6 +152,7 @@ static REDUCTIONS: LazyLock<Reductions> = LazyLock::new(|| {
 /// LazyLockにより初回アクセス時に自動初期化されるため、panicしない。
 #[inline]
 pub(crate) fn reduction(
+    tune_params: &SearchTuneParams,
     imp: bool,
     depth: i32,
     move_count: i32,
@@ -184,10 +171,10 @@ pub(crate) fn reduction(
     let delta = delta.max(0);
 
     // 1024倍スケールで返す。ttPv加算は呼び出し側で行う。
-    reduction_scale - delta * REDUCTION_DELTA_SCALE / root_delta
-        + (!imp as i32) * reduction_scale * REDUCTION_NON_IMPROVING_MULT
-            / REDUCTION_NON_IMPROVING_DIV
-        + REDUCTION_BASE_OFFSET
+    reduction_scale - delta * tune_params.lmr_reduction_delta_scale / root_delta
+        + (!imp as i32) * reduction_scale * tune_params.lmr_reduction_non_improving_mult
+            / tune_params.lmr_reduction_non_improving_div.max(1)
+        + tune_params.lmr_reduction_base_offset
 }
 
 // stats モジュールからマクロをインポート
@@ -298,6 +285,8 @@ pub struct SearchContext<'a> {
     pub max_moves_to_draw: i32,
     /// スレッドID（0=main）
     pub thread_id: usize,
+    /// SPSA向け探索係数
+    pub tune_params: SearchTuneParams,
 }
 
 /// 探索中に変化する状態
@@ -401,6 +390,9 @@ pub struct SearchWorker {
     /// スレッドID（0=main）
     pub thread_id: usize,
 
+    /// SPSA向け探索係数
+    pub search_tune_params: SearchTuneParams,
+
     // =========================================================================
     // 探索状態（SearchState）
     // =========================================================================
@@ -417,6 +409,7 @@ impl SearchWorker {
         eval_hash: Arc<EvalHash>,
         max_moves_to_draw: i32,
         thread_id: usize,
+        search_tune_params: SearchTuneParams,
     ) -> Box<Self> {
         let history = HistoryCell::new_boxed();
         // HistoryCell経由でsentinelポインタを取得
@@ -432,6 +425,7 @@ impl SearchWorker {
             generate_all_legal_moves: false,
             max_moves_to_draw,
             thread_id,
+            search_tune_params,
             state: SearchState::new(),
         });
         worker.reset_cont_history_ptrs();
@@ -451,6 +445,7 @@ impl SearchWorker {
             generate_all_legal_moves: self.generate_all_legal_moves,
             max_moves_to_draw: self.max_moves_to_draw,
             thread_id: self.thread_id,
+            tune_params: self.search_tune_params,
         }
     }
 
@@ -1113,6 +1108,7 @@ impl SearchWorker {
             generate_all_legal_moves: self.generate_all_legal_moves,
             max_moves_to_draw: self.max_moves_to_draw,
             thread_id: self.thread_id,
+            tune_params: self.search_tune_params,
         };
         Self::search_node::<NT>(
             &mut self.state,
@@ -1341,10 +1337,10 @@ impl SearchWorker {
 
         // priorReduction に応じた深さ調整（yaneuraou-search.cpp:2769-2774）
         if prior_reduction
-            >= if depth < IIR_DEPTH_BOUNDARY {
-                IIR_PRIOR_REDUCTION_THRESHOLD_SHALLOW
+            >= if depth < ctx.tune_params.iir_depth_boundary {
+                ctx.tune_params.iir_prior_reduction_threshold_shallow
             } else {
-                IIR_PRIOR_REDUCTION_THRESHOLD_DEEP
+                ctx.tune_params.iir_prior_reduction_threshold_deep
             }
             && !opponent_worsening
         {
@@ -1357,7 +1353,7 @@ impl SearchWorker {
             && st.stack[(ply - 1) as usize].static_eval != Value::NONE
             // Value は ±32002 程度なので i32 加算でオーバーフローしない
             && eval_ctx.static_eval + st.stack[(ply - 1) as usize].static_eval
-                > Value::new(IIR_EVAL_SUM_THRESHOLD)
+                > Value::new(ctx.tune_params.iir_eval_sum_threshold)
         {
             depth -= 1;
         }
@@ -1382,19 +1378,22 @@ impl SearchWorker {
         // TT の手が駒取りかどうか判定
         let tt_capture = tt_move.is_some() && pos.is_capture(tt_move);
 
-        if let Some(v) = try_futility_pruning(FutilityParams {
-            depth,
-            beta,
-            static_eval: eval_ctx.static_eval,
-            correction_value: eval_ctx.correction_value,
-            improving,
-            opponent_worsening,
-            tt_hit,
-            tt_move_exists: tt_move.is_some(),
-            tt_capture,
-            pv_node,
-            in_check,
-        }) {
+        if let Some(v) = try_futility_pruning(
+            FutilityParams {
+                depth,
+                beta,
+                static_eval: eval_ctx.static_eval,
+                correction_value: eval_ctx.correction_value,
+                improving,
+                opponent_worsening,
+                tt_hit,
+                tt_move_exists: tt_move.is_some(),
+                tt_capture,
+                pv_node,
+                in_check,
+            },
+            &ctx.tune_params,
+        ) {
             inc_stat!(st, futility_pruned);
             inc_stat_by_depth!(st, futility_by_depth, depth);
             return v;
@@ -1445,7 +1444,7 @@ impl SearchWorker {
             return v;
         }
 
-        if let Some(v) = try_small_probcut(depth, beta, &tt_ctx) {
+        if let Some(v) = try_small_probcut(depth, beta, &tt_ctx, &ctx.tune_params) {
             return v;
         }
 
@@ -1600,7 +1599,14 @@ impl SearchWorker {
             // Reduction計算とStep14の枝刈り
             // =============================================================
             let delta = (beta.raw() - alpha.raw()).max(0);
-            let mut r = reduction(improving, depth, move_count, delta, st.root_delta.max(1));
+            let mut r = reduction(
+                &ctx.tune_params,
+                improving,
+                depth,
+                move_count,
+                delta,
+                st.root_delta.max(1),
+            );
 
             // YaneuraOu: ttPvなら reduction を少し増やす
             if st.stack[ply as usize].tt_pv {
@@ -2239,9 +2245,9 @@ impl SearchWorker {
             // YaneuraOu: ttMoveHistory << (bestMove == ttData.move ? 809 : -865)
             if !pv_node && tt_move.is_some() {
                 let bonus = if best_move == tt_move {
-                    TT_MOVE_HISTORY_BONUS
+                    ctx.tune_params.tt_move_history_bonus
                 } else {
-                    TT_MOVE_HISTORY_MALUS
+                    ctx.tune_params.tt_move_history_malus
                 };
                 ctx.history.with_write(|h| h.tt_move_history.update(bonus));
             }
@@ -2361,7 +2367,7 @@ impl SearchWorker {
                                 prev_piece,
                                 prev_sq,
                                 captured_piece.piece_type(),
-                                PRIOR_CAPTURE_COUNTERMOVE_BONUS,
+                                ctx.tune_params.prior_capture_countermove_bonus,
                             );
                         });
                     }

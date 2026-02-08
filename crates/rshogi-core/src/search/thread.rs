@@ -13,7 +13,7 @@ mod imp {
     use crate::types::Depth;
 
     use crate::search::engine::{search_helper, SearchProgress};
-    use crate::search::{LimitsType, SearchWorker, TimeManagement, TimeOptions};
+    use crate::search::{LimitsType, SearchTuneParams, SearchWorker, TimeManagement, TimeOptions};
 
     const SEARCH_STACK_SIZE: usize = 64 * 1024 * 1024;
 
@@ -22,6 +22,7 @@ mod imp {
         stop: Arc<AtomicBool>,
         ponderhit: Arc<AtomicBool>,
         eval_hash: Arc<EvalHash>,
+        search_tune_params: SearchTuneParams,
     }
 
     impl ThreadPool {
@@ -32,14 +33,16 @@ mod imp {
             stop: Arc<AtomicBool>,
             ponderhit: Arc<AtomicBool>,
             max_moves_to_draw: i32,
+            search_tune_params: SearchTuneParams,
         ) -> Self {
             let mut pool = Self {
                 threads: Vec::new(),
                 stop,
                 ponderhit,
                 eval_hash: Arc::clone(&eval_hash),
+                search_tune_params,
             };
-            pool.set_num_threads(num_threads, tt, eval_hash, max_moves_to_draw);
+            pool.set_num_threads(num_threads, tt, eval_hash, max_moves_to_draw, search_tune_params);
             pool
         }
 
@@ -49,16 +52,19 @@ mod imp {
             tt: Arc<TranspositionTable>,
             eval_hash: Arc<EvalHash>,
             max_moves_to_draw: i32,
+            search_tune_params: SearchTuneParams,
         ) {
             let helper_count = num_threads.saturating_sub(1);
             if helper_count == self.threads.len() {
                 self.eval_hash = eval_hash;
+                self.search_tune_params = search_tune_params;
                 return;
             }
 
             self.wait_for_search_finished();
             self.threads.clear();
             self.eval_hash = Arc::clone(&eval_hash);
+            self.search_tune_params = search_tune_params;
 
             for id in 1..=helper_count {
                 self.threads.push(Thread::new(
@@ -68,6 +74,7 @@ mod imp {
                     Arc::clone(&self.stop),
                     Arc::clone(&self.ponderhit),
                     max_moves_to_draw,
+                    search_tune_params,
                 ));
             }
         }
@@ -92,6 +99,7 @@ mod imp {
                     max_depth,
                     time_options,
                     max_moves_to_draw,
+                    search_tune_params: self.search_tune_params,
                     skill_enabled,
                 });
             }
@@ -126,6 +134,15 @@ mod imp {
                 let eval_hash = Arc::clone(&eval_hash);
                 thread.with_worker(|worker| {
                     worker.eval_hash = eval_hash;
+                });
+            }
+        }
+
+        pub fn update_search_tune_params(&mut self, search_tune_params: SearchTuneParams) {
+            self.search_tune_params = search_tune_params;
+            for thread in &self.threads {
+                thread.with_worker(|worker| {
+                    worker.search_tune_params = search_tune_params;
                 });
             }
         }
@@ -167,6 +184,7 @@ mod imp {
         max_depth: Depth,
         time_options: TimeOptions,
         max_moves_to_draw: i32,
+        search_tune_params: SearchTuneParams,
         skill_enabled: bool,
     }
 
@@ -184,8 +202,10 @@ mod imp {
             stop: Arc<AtomicBool>,
             ponderhit: Arc<AtomicBool>,
             max_moves_to_draw: i32,
+            search_tune_params: SearchTuneParams,
         ) -> Self {
-            let worker = SearchWorker::new(tt, eval_hash, max_moves_to_draw, id);
+            let worker =
+                SearchWorker::new(tt, eval_hash, max_moves_to_draw, id, search_tune_params);
             let progress = Arc::new(SearchProgress::new());
             let inner = Arc::new(ThreadInner {
                 worker: Mutex::new(worker),
@@ -298,6 +318,7 @@ mod imp {
                     inner.progress.reset();
                     let mut worker = inner.worker.lock().unwrap();
                     worker.max_moves_to_draw = task.max_moves_to_draw;
+                    worker.search_tune_params = task.search_tune_params;
                     worker.prepare_search();
 
                     let mut pos = task.pos;
@@ -352,7 +373,7 @@ mod imp {
     use crate::tt::TranspositionTable;
     use crate::types::Depth;
 
-    use crate::search::{LimitsType, TimeOptions};
+    use crate::search::{LimitsType, SearchTuneParams, TimeOptions};
 
     /// Stub ThreadPool for single-threaded Wasm builds.
     /// All methods are no-ops since there are no helper threads.
@@ -369,6 +390,7 @@ mod imp {
             stop: Arc<AtomicBool>,
             ponderhit: Arc<AtomicBool>,
             _max_moves_to_draw: i32,
+            _search_tune_params: SearchTuneParams,
         ) -> Self {
             // num_threads is ignored; single-threaded mode has no helpers
             Self {
@@ -383,6 +405,7 @@ mod imp {
             _tt: Arc<TranspositionTable>,
             _eval_hash: Arc<EvalHash>,
             _max_moves_to_draw: i32,
+            _search_tune_params: SearchTuneParams,
         ) {
             // No-op: single-threaded mode ignores thread count
         }
@@ -412,6 +435,10 @@ mod imp {
         }
 
         pub fn update_eval_hash(&mut self, _eval_hash: Arc<EvalHash>) {
+            // No-op: no helper thread workers to update
+        }
+
+        pub fn update_search_tune_params(&mut self, _search_tune_params: SearchTuneParams) {
             // No-op: no helper thread workers to update
         }
 
@@ -518,7 +545,7 @@ mod imp {
     use crate::types::{Depth, Move, Value};
 
     use crate::search::engine::search_helper;
-    use crate::search::{LimitsType, SearchWorker, TimeManagement, TimeOptions};
+    use crate::search::{LimitsType, SearchTuneParams, SearchWorker, TimeManagement, TimeOptions};
 
     // Thread-local storage for SearchWorker instances.
     // Each Rayon worker thread gets its own SearchWorker on first use.
@@ -590,6 +617,7 @@ mod imp {
         stop: Arc<AtomicBool>,
         ponderhit: Arc<AtomicBool>,
         max_moves_to_draw: i32,
+        search_tune_params: SearchTuneParams,
         /// Counter for pending helper thread tasks.
         /// Decremented when each helper thread completes its search.
         pending_tasks: Arc<AtomicUsize>,
@@ -609,6 +637,7 @@ mod imp {
             stop: Arc<AtomicBool>,
             ponderhit: Arc<AtomicBool>,
             max_moves_to_draw: i32,
+            search_tune_params: SearchTuneParams,
         ) -> Self {
             let num_threads = num_threads.max(1);
             let helper_count = num_threads.saturating_sub(1);
@@ -621,6 +650,7 @@ mod imp {
                 stop,
                 ponderhit,
                 max_moves_to_draw,
+                search_tune_params,
                 pending_tasks: Arc::new(AtomicUsize::new(0)),
                 helper_results: Arc::new(Mutex::new(Vec::new())),
                 helper_progress,
@@ -633,6 +663,7 @@ mod imp {
             tt: Arc<TranspositionTable>,
             eval_hash: Arc<EvalHash>,
             max_moves_to_draw: i32,
+            search_tune_params: SearchTuneParams,
         ) {
             let num_threads = num_threads.max(1);
             let helper_count = num_threads.saturating_sub(1);
@@ -644,6 +675,7 @@ mod imp {
             self.tt = tt;
             self.eval_hash = eval_hash;
             self.max_moves_to_draw = max_moves_to_draw;
+            self.search_tune_params = search_tune_params;
         }
 
         /// Start helper threads for LazySMP parallel search.
@@ -684,6 +716,7 @@ mod imp {
             if helper_count == 0 {
                 return;
             }
+            let search_tune_params = self.search_tune_params;
 
             // Release ordering ensures that all preceding writes (helper_results.clear(),
             // progress.reset(), etc.) are visible to helper threads before they start.
@@ -722,6 +755,7 @@ mod imp {
                                 Arc::clone(&eval_hash),
                                 max_moves_to_draw,
                                 thread_id,
+                                search_tune_params,
                             ));
                         }
 
@@ -731,6 +765,7 @@ mod imp {
                         worker.tt = Arc::clone(&tt);
                         worker.eval_hash = Arc::clone(&eval_hash);
                         worker.max_moves_to_draw = max_moves_to_draw;
+                        worker.search_tune_params = search_tune_params;
                         worker.prepare_search();
 
                         let mut search_pos = pos_clone;
@@ -858,6 +893,10 @@ mod imp {
             // Thread-local workers will get the updated EvalHash reference when start_thinking
             // calls worker.eval_hash = Arc::clone(&eval_hash) for each helper.
             self.eval_hash = eval_hash;
+        }
+
+        pub fn update_search_tune_params(&mut self, search_tune_params: SearchTuneParams) {
+            self.search_tune_params = search_tune_params;
         }
 
         pub fn helper_threads(&self) -> &[Thread] {

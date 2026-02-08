@@ -22,17 +22,12 @@ use super::stats::{inc_stat, inc_stat_by_depth};
 use super::types::{value_to_tt, NodeType};
 use super::{LimitsType, MovePicker, TimeManagement};
 
-// =============================================================================
-// Futility Pruning
-// =============================================================================
-
-/// Futility margin の基準係数
-const FUTILITY_MARGIN_BASE: i32 = 91;
-const FUTILITY_MARGIN_TT_BONUS: i32 = 21;
-
 /// Futility pruning
 #[inline]
-pub(super) fn try_futility_pruning(params: FutilityParams) -> Option<Value> {
+pub(super) fn try_futility_pruning(
+    params: FutilityParams,
+    tune_params: &super::SearchTuneParams,
+) -> Option<Value> {
     if !params.pv_node
         && !params.in_check
         && params.depth < 14
@@ -42,13 +37,17 @@ pub(super) fn try_futility_pruning(params: FutilityParams) -> Option<Value> {
         && !params.static_eval.is_win()
         && (!params.tt_move_exists || params.tt_capture)
     {
-        let futility_mult =
-            FUTILITY_MARGIN_BASE - FUTILITY_MARGIN_TT_BONUS * (!params.tt_hit) as i32;
+        let futility_mult = tune_params.futility_margin_base
+            - tune_params.futility_margin_tt_bonus * (!params.tt_hit) as i32;
         let futility_margin = Value::new(
             futility_mult * params.depth
-                - (params.improving as i32) * futility_mult * 2094 / 1024
-                - (params.opponent_worsening as i32) * futility_mult * 1324 / 4096
-                + (params.correction_value.abs() / 158_105),
+                - (params.improving as i32) * futility_mult * tune_params.futility_improving_scale
+                    / 1024
+                - (params.opponent_worsening as i32)
+                    * futility_mult
+                    * tune_params.futility_opponent_worsening_scale
+                    / 4096
+                + (params.correction_value.abs() / tune_params.futility_correction_div.max(1)),
         );
 
         if params.static_eval - futility_margin >= params.beta {
@@ -65,9 +64,14 @@ pub(super) fn try_futility_pruning(params: FutilityParams) -> Option<Value> {
 
 /// Small ProbCut
 #[inline]
-pub(super) fn try_small_probcut(depth: Depth, beta: Value, tt_ctx: &TTContext) -> Option<Value> {
+pub(super) fn try_small_probcut(
+    depth: Depth,
+    beta: Value,
+    tt_ctx: &TTContext,
+    tune_params: &super::SearchTuneParams,
+) -> Option<Value> {
     if depth >= 1 {
-        let sp_beta = beta + Value::new(417);
+        let sp_beta = beta + Value::new(tune_params.small_probcut_margin);
         if tt_ctx.hit
             && tt_ctx.data.bound == Bound::Lower
             && tt_ctx.data.depth >= depth - 4
@@ -237,8 +241,15 @@ pub(super) fn try_razoring<const NT: u8>(
     time_manager: &mut TimeManagement,
 ) -> Option<Value> {
     // YaneuraOu準拠: 評価値が非常に低い場合、通常探索をスキップしてqsearch値を返す
-    // マージン: 514 + 294 * depth² (二次マージン、depth制限なし)
-    if !pv_node && !in_check && static_eval < alpha - Value::new(514 + 294 * depth * depth) {
+    if !pv_node
+        && !in_check
+        && static_eval
+            < alpha
+                - Value::new(
+                    ctx.tune_params.razoring_margin_base
+                        + ctx.tune_params.razoring_margin_depth2_coeff * depth * depth,
+                )
+    {
         let value = qsearch::<{ NodeType::NonPV as u8 }>(
             st,
             ctx,
@@ -301,7 +312,7 @@ where
         return (None, improving);
     }
 
-    let margin = 18 * depth - 390;
+    let margin = ctx.tune_params.nmp_margin_depth_mult * depth + ctx.tune_params.nmp_margin_offset;
     let prev_move = st.stack[(ply - 1) as usize].current_move;
     let prev_is_pass = prev_move.is_pass();
 
@@ -336,7 +347,8 @@ where
         && !prev_is_pass
     {
         inc_stat!(st, nmp_attempted);
-        let r = 7 + depth / 3;
+        let r = ctx.tune_params.nmp_reduction_base
+            + depth / ctx.tune_params.nmp_reduction_depth_div.max(1);
 
         let use_pass = pos.is_pass_rights_enabled() && pos.can_pass();
 
@@ -373,13 +385,15 @@ where
         }
 
         if null_value >= beta && !null_value.is_win() {
-            if st.nmp_min_ply != 0 || depth < 16 {
+            if st.nmp_min_ply != 0 || depth < ctx.tune_params.nmp_verification_depth_threshold {
                 inc_stat!(st, nmp_cutoff);
                 inc_stat_by_depth!(st, nmp_cutoff_by_depth, depth);
                 return (Some(null_value), improving);
             }
 
-            st.nmp_min_ply = ply + 3 * (depth - r) / 4;
+            st.nmp_min_ply = ply
+                + ctx.tune_params.nmp_min_ply_update_num * (depth - r)
+                    / ctx.tune_params.nmp_min_ply_update_den.max(1);
 
             let v = search_node(
                 st,
@@ -454,7 +468,11 @@ where
         return None;
     }
 
-    let prob_beta = beta + Value::new(215 - 60 * improving as i32);
+    let prob_beta = beta
+        + Value::new(
+            ctx.tune_params.probcut_beta_margin_base
+                - ctx.tune_params.probcut_beta_improving_sub * improving as i32,
+        );
     if beta.is_mate_score()
         || (tt_ctx.hit
             && tt_ctx.value != Value::NONE
@@ -469,8 +487,9 @@ where
         return None;
     }
 
-    let dynamic_reduction = (static_eval - beta).raw() / 300;
-    let probcut_depth = (depth - 5 - dynamic_reduction).max(0);
+    let dynamic_reduction =
+        (static_eval - beta).raw() / ctx.tune_params.probcut_dynamic_reduction_div.max(1);
+    let probcut_depth = (depth - ctx.tune_params.probcut_depth_base - dynamic_reduction).max(0);
 
     inc_stat!(st, probcut_attempted);
 
