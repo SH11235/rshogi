@@ -241,6 +241,47 @@ pub struct SearchTuneParams {
     pub pawn_history_pos_multiplier: i32,
     /// pawnHistory負ボーナス倍率（/1024）
     pub pawn_history_neg_multiplier: i32,
+    /// update_all_stats: quiet best更新のスケール分子（/1024）
+    pub update_all_stats_quiet_bonus_scale_num: i32,
+    /// update_all_stats: quiet malus更新のスケール分子（/1024）
+    pub update_all_stats_quiet_malus_scale_num: i32,
+    /// update_all_stats: capture best更新のスケール分子（/1024）
+    pub update_all_stats_capture_bonus_scale_num: i32,
+    /// update_all_stats: capture malus更新のスケール分子（/1024）
+    pub update_all_stats_capture_malus_scale_num: i32,
+    /// update_all_stats: quiet early refutation penaltyのスケール分子（/1024）
+    pub update_all_stats_early_refutation_penalty_scale_num: i32,
+
+    /// prior quiet countermove: bonusScaleベース値
+    pub prior_quiet_countermove_bonus_scale_base: i32,
+    /// prior quiet countermove: parent stat score 除算係数
+    pub prior_quiet_countermove_parent_stat_div: i32,
+    /// prior quiet countermove: depth項の乗算係数
+    pub prior_quiet_countermove_depth_mul: i32,
+    /// prior quiet countermove: depth項の上限値
+    pub prior_quiet_countermove_depth_cap: i32,
+    /// prior quiet countermove: move_count 条件成立時の加算値
+    pub prior_quiet_countermove_move_count_bonus: i32,
+    /// prior quiet countermove: 現在ノード static_eval 条件成立時の加算値
+    pub prior_quiet_countermove_eval_bonus: i32,
+    /// prior quiet countermove: 現在ノード static_eval マージン
+    pub prior_quiet_countermove_eval_margin: i32,
+    /// prior quiet countermove: 親ノード static_eval 条件成立時の加算値
+    pub prior_quiet_countermove_parent_eval_bonus: i32,
+    /// prior quiet countermove: 親ノード static_eval マージン
+    pub prior_quiet_countermove_parent_eval_margin: i32,
+    /// prior quiet countermove: scaled_bonus式の depth 係数
+    pub prior_quiet_countermove_scaled_depth_mul: i32,
+    /// prior quiet countermove: scaled_bonus式のオフセット
+    pub prior_quiet_countermove_scaled_offset: i32,
+    /// prior quiet countermove: scaled_bonus式の上限
+    pub prior_quiet_countermove_scaled_cap: i32,
+    /// prior quiet countermove: continuation 出力係数分子（/32768）
+    pub prior_quiet_countermove_cont_scale_num: i32,
+    /// prior quiet countermove: main 出力係数分子（/32768）
+    pub prior_quiet_countermove_main_scale_num: i32,
+    /// prior quiet countermove: pawn 出力係数分子（/32768）
+    pub prior_quiet_countermove_pawn_scale_num: i32,
 
     /// TTMoveHistory: best==tt 時の更新量
     pub tt_move_history_bonus: i32,
@@ -846,6 +887,126 @@ const SPSA_OPTION_SPECS: &[SearchTuneOptionSpec] = &[
         max: 2048,
     },
     SearchTuneOptionSpec {
+        usi_name: "SPSA_UPDATE_ALL_QUIET_BONUS_SCALE_NUM",
+        default: 881,
+        min: 0,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_UPDATE_ALL_QUIET_MALUS_SCALE_NUM",
+        default: 1083,
+        min: 0,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_UPDATE_ALL_CAPTURE_BONUS_SCALE_NUM",
+        default: 1482,
+        min: 0,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_UPDATE_ALL_CAPTURE_MALUS_SCALE_NUM",
+        default: 1397,
+        min: 0,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_UPDATE_ALL_EARLY_REFUTE_PENALTY_SCALE_NUM",
+        default: 614,
+        min: 0,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_PRIOR_QUIET_CM_BONUS_SCALE_BASE",
+        default: -228,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_PRIOR_QUIET_CM_PARENT_STAT_DIV",
+        default: 104,
+        min: 1,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_PRIOR_QUIET_CM_DEPTH_MUL",
+        default: 63,
+        min: -1024,
+        max: 1024,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_PRIOR_QUIET_CM_DEPTH_CAP",
+        default: 508,
+        min: 0,
+        max: 8192,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_PRIOR_QUIET_CM_MOVE_COUNT_BONUS",
+        default: 184,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_PRIOR_QUIET_CM_EVAL_BONUS",
+        default: 143,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_PRIOR_QUIET_CM_EVAL_MARGIN",
+        default: 92,
+        min: 0,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_PRIOR_QUIET_CM_PARENT_EVAL_BONUS",
+        default: 149,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_PRIOR_QUIET_CM_PARENT_EVAL_MARGIN",
+        default: 70,
+        min: 0,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_PRIOR_QUIET_CM_SCALED_DEPTH_MUL",
+        default: 144,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_PRIOR_QUIET_CM_SCALED_OFFSET",
+        default: -92,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_PRIOR_QUIET_CM_SCALED_CAP",
+        default: 1365,
+        min: 0,
+        max: 32768,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_PRIOR_QUIET_CM_CONT_SCALE_NUM",
+        default: 400,
+        min: -32768,
+        max: 32768,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_PRIOR_QUIET_CM_MAIN_SCALE_NUM",
+        default: 220,
+        min: -32768,
+        max: 32768,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_PRIOR_QUIET_CM_PAWN_SCALE_NUM",
+        default: 1164,
+        min: -32768,
+        max: 32768,
+    },
+    SearchTuneOptionSpec {
         usi_name: "SPSA_TT_MOVE_BONUS",
         default: 811,
         min: -8192,
@@ -967,6 +1128,26 @@ impl Default for SearchTuneParams {
             fail_high_continuation_weight_6: 449,
             pawn_history_pos_multiplier: 850,
             pawn_history_neg_multiplier: 550,
+            update_all_stats_quiet_bonus_scale_num: 881,
+            update_all_stats_quiet_malus_scale_num: 1083,
+            update_all_stats_capture_bonus_scale_num: 1482,
+            update_all_stats_capture_malus_scale_num: 1397,
+            update_all_stats_early_refutation_penalty_scale_num: 614,
+            prior_quiet_countermove_bonus_scale_base: -228,
+            prior_quiet_countermove_parent_stat_div: 104,
+            prior_quiet_countermove_depth_mul: 63,
+            prior_quiet_countermove_depth_cap: 508,
+            prior_quiet_countermove_move_count_bonus: 184,
+            prior_quiet_countermove_eval_bonus: 143,
+            prior_quiet_countermove_eval_margin: 92,
+            prior_quiet_countermove_parent_eval_bonus: 149,
+            prior_quiet_countermove_parent_eval_margin: 70,
+            prior_quiet_countermove_scaled_depth_mul: 144,
+            prior_quiet_countermove_scaled_offset: -92,
+            prior_quiet_countermove_scaled_cap: 1365,
+            prior_quiet_countermove_cont_scale_num: 400,
+            prior_quiet_countermove_main_scale_num: 220,
+            prior_quiet_countermove_pawn_scale_num: 1164,
             tt_move_history_bonus: 811,
             tt_move_history_malus: -848,
             prior_capture_countermove_bonus: 964,
@@ -1192,6 +1373,106 @@ impl SearchTuneParams {
         try_apply!("SPSA_FAIL_HIGH_CONT_WEIGHT_6", fail_high_continuation_weight_6, -4096, 4096);
         try_apply!("SPSA_PAWN_HISTORY_POS_MULTIPLIER", pawn_history_pos_multiplier, 0, 2048);
         try_apply!("SPSA_PAWN_HISTORY_NEG_MULTIPLIER", pawn_history_neg_multiplier, 0, 2048);
+        try_apply!(
+            "SPSA_UPDATE_ALL_QUIET_BONUS_SCALE_NUM",
+            update_all_stats_quiet_bonus_scale_num,
+            0,
+            4096
+        );
+        try_apply!(
+            "SPSA_UPDATE_ALL_QUIET_MALUS_SCALE_NUM",
+            update_all_stats_quiet_malus_scale_num,
+            0,
+            4096
+        );
+        try_apply!(
+            "SPSA_UPDATE_ALL_CAPTURE_BONUS_SCALE_NUM",
+            update_all_stats_capture_bonus_scale_num,
+            0,
+            4096
+        );
+        try_apply!(
+            "SPSA_UPDATE_ALL_CAPTURE_MALUS_SCALE_NUM",
+            update_all_stats_capture_malus_scale_num,
+            0,
+            4096
+        );
+        try_apply!(
+            "SPSA_UPDATE_ALL_EARLY_REFUTE_PENALTY_SCALE_NUM",
+            update_all_stats_early_refutation_penalty_scale_num,
+            0,
+            4096
+        );
+        try_apply!(
+            "SPSA_PRIOR_QUIET_CM_BONUS_SCALE_BASE",
+            prior_quiet_countermove_bonus_scale_base,
+            -4096,
+            4096
+        );
+        try_apply!(
+            "SPSA_PRIOR_QUIET_CM_PARENT_STAT_DIV",
+            prior_quiet_countermove_parent_stat_div,
+            1,
+            4096
+        );
+        try_apply!("SPSA_PRIOR_QUIET_CM_DEPTH_MUL", prior_quiet_countermove_depth_mul, -1024, 1024);
+        try_apply!("SPSA_PRIOR_QUIET_CM_DEPTH_CAP", prior_quiet_countermove_depth_cap, 0, 8192);
+        try_apply!(
+            "SPSA_PRIOR_QUIET_CM_MOVE_COUNT_BONUS",
+            prior_quiet_countermove_move_count_bonus,
+            -4096,
+            4096
+        );
+        try_apply!(
+            "SPSA_PRIOR_QUIET_CM_EVAL_BONUS",
+            prior_quiet_countermove_eval_bonus,
+            -4096,
+            4096
+        );
+        try_apply!("SPSA_PRIOR_QUIET_CM_EVAL_MARGIN", prior_quiet_countermove_eval_margin, 0, 4096);
+        try_apply!(
+            "SPSA_PRIOR_QUIET_CM_PARENT_EVAL_BONUS",
+            prior_quiet_countermove_parent_eval_bonus,
+            -4096,
+            4096
+        );
+        try_apply!(
+            "SPSA_PRIOR_QUIET_CM_PARENT_EVAL_MARGIN",
+            prior_quiet_countermove_parent_eval_margin,
+            0,
+            4096
+        );
+        try_apply!(
+            "SPSA_PRIOR_QUIET_CM_SCALED_DEPTH_MUL",
+            prior_quiet_countermove_scaled_depth_mul,
+            -4096,
+            4096
+        );
+        try_apply!(
+            "SPSA_PRIOR_QUIET_CM_SCALED_OFFSET",
+            prior_quiet_countermove_scaled_offset,
+            -4096,
+            4096
+        );
+        try_apply!("SPSA_PRIOR_QUIET_CM_SCALED_CAP", prior_quiet_countermove_scaled_cap, 0, 32768);
+        try_apply!(
+            "SPSA_PRIOR_QUIET_CM_CONT_SCALE_NUM",
+            prior_quiet_countermove_cont_scale_num,
+            -32768,
+            32768
+        );
+        try_apply!(
+            "SPSA_PRIOR_QUIET_CM_MAIN_SCALE_NUM",
+            prior_quiet_countermove_main_scale_num,
+            -32768,
+            32768
+        );
+        try_apply!(
+            "SPSA_PRIOR_QUIET_CM_PAWN_SCALE_NUM",
+            prior_quiet_countermove_pawn_scale_num,
+            -32768,
+            32768
+        );
         try_apply!("SPSA_TT_MOVE_BONUS", tt_move_history_bonus, -8192, 8192);
         try_apply!("SPSA_TT_MOVE_MALUS", tt_move_history_malus, -8192, 8192);
         try_apply!("SPSA_PRIOR_CAPTURE_CM_BONUS", prior_capture_countermove_bonus, -8192, 8192);

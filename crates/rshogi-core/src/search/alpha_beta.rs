@@ -2101,11 +2101,13 @@ impl SearchWorker {
             if !is_best_capture {
                 // Quiet手がbest: update_quiet_histories(bestMove, bonus * 881 / 1024)相当
                 // YaneuraOu準拠: bonus * 881 / 1024をベースに各historyを更新
-                let scaled_bonus = bonus * 881 / 1024;
+                let scaled_bonus =
+                    bonus * ctx.tune_params.update_all_stats_quiet_bonus_scale_num / 1024;
 
                 // 他のquiet手にはペナルティ
                 // YaneuraOu: update_quiet_histories(move, -quietMalus * 1083 / 1024)
-                let scaled_malus = malus * 1083 / 1024;
+                let scaled_malus =
+                    malus * ctx.tune_params.update_all_stats_quiet_malus_scale_num / 1024;
 
                 // History更新をまとめて実行
                 ctx.history.with_write(|h| {
@@ -2214,7 +2216,7 @@ impl SearchWorker {
                         best_cont_pc,
                         best_to,
                         captured_pt,
-                        bonus * 1482 / 1024,
+                        bonus * ctx.tune_params.update_all_stats_capture_bonus_scale_num / 1024,
                     )
                 });
             }
@@ -2232,7 +2234,13 @@ impl SearchWorker {
                         let to = m.to();
                         let captured_pt = pos.piece_on(to).piece_type();
                         // YaneuraOu: captureHistory << -captureMalus * 1431 / 1024
-                        h.capture_history.update(cont_pc, to, captured_pt, -malus * 1397 / 1024);
+                        h.capture_history.update(
+                            cont_pc,
+                            to,
+                            captured_pt,
+                            -malus * ctx.tune_params.update_all_stats_capture_malus_scale_num
+                                / 1024,
+                        );
                     }
                 }
             });
@@ -2253,7 +2261,9 @@ impl SearchWorker {
                         let prev_piece = pos.piece_on(prev_sq);
                         // YaneuraOu: update_continuation_histories(ss - 1, ...)を呼ぶ
                         // = 過去1-6手分全てに weight と +80 オフセット付きで更新
-                        let penalty_base = -malus * 614 / 1024;
+                        let penalty_base = -malus
+                            * ctx.tune_params.update_all_stats_early_refutation_penalty_scale_num
+                            / 1024;
                         // YaneuraOu: update_continuation_histories(ss - 1, ...) で (ss - 1)->inCheck を参照
                         let prev_in_check = st.stack[prev_ply].in_check;
                         let prev_max_ply_back = if prev_in_check { 2 } else { 6 };
@@ -2325,25 +2335,40 @@ impl SearchWorker {
                     let static_eval = st.stack[ply as usize].static_eval;
 
                     // bonusScale計算（YaneuraOu準拠）
-                    let mut bonus_scale: i32 = -228;
-                    bonus_scale -= parent_stat_score / 104;
-                    bonus_scale += (63 * depth).min(508);
-                    bonus_scale += 184 * (parent_move_count > 8) as i32;
-                    bonus_scale += 143
+                    let mut bonus_scale: i32 =
+                        ctx.tune_params.prior_quiet_countermove_bonus_scale_base;
+                    bonus_scale -= parent_stat_score
+                        / ctx.tune_params.prior_quiet_countermove_parent_stat_div.max(1);
+                    bonus_scale += (ctx.tune_params.prior_quiet_countermove_depth_mul * depth)
+                        .min(ctx.tune_params.prior_quiet_countermove_depth_cap);
+                    bonus_scale += ctx.tune_params.prior_quiet_countermove_move_count_bonus
+                        * (parent_move_count > 8) as i32;
+                    bonus_scale += ctx.tune_params.prior_quiet_countermove_eval_bonus
                         * (!in_check
                             && static_eval != Value::NONE
-                            && best_value <= static_eval - Value::new(92))
-                            as i32;
-                    bonus_scale += 149
+                            && best_value
+                                <= static_eval
+                                    - Value::new(
+                                        ctx.tune_params.prior_quiet_countermove_eval_margin,
+                                    )) as i32;
+                    bonus_scale += ctx.tune_params.prior_quiet_countermove_parent_eval_bonus
                         * (!parent_in_check
                             && parent_static_eval != Value::NONE
-                            && best_value <= -parent_static_eval - Value::new(70))
-                            as i32;
+                            && best_value
+                                <= -parent_static_eval
+                                    - Value::new(
+                                        ctx.tune_params.prior_quiet_countermove_parent_eval_margin,
+                                    )) as i32;
                     bonus_scale = bonus_scale.max(0);
 
                     // 値域: bonus_scale ≥ 0, min(...) ∈ [52, 1365] (depth>=1)
                     // i64で計算してオーバーフローを防止
-                    let scaled_bonus = (144 * depth - 92).min(1365) as i64 * bonus_scale as i64;
+                    let scaled_bonus = (ctx.tune_params.prior_quiet_countermove_scaled_depth_mul
+                        * depth
+                        + ctx.tune_params.prior_quiet_countermove_scaled_offset)
+                        .min(ctx.tune_params.prior_quiet_countermove_scaled_cap)
+                        as i64
+                        * bonus_scale as i64;
 
                     // continuation history更新
                     // YaneuraOu: update_continuation_histories(ss - 1, pos.piece_on(prevSq), prevSq, scaledBonus * 400 / 32768)
@@ -2351,19 +2376,25 @@ impl SearchWorker {
                     //     この時点で prev_piece != NONE が保証される
                     let prev_piece = pos.piece_on(prev_sq);
                     let prev_max_ply_back = if parent_in_check { 2 } else { 6 };
-                    let cont_bonus = (scaled_bonus * 400 / 32768) as i32;
+                    let cont_bonus = (scaled_bonus
+                        * ctx.tune_params.prior_quiet_countermove_cont_scale_num as i64
+                        / 32768) as i32;
 
                     // main history更新
                     // YaneuraOu: mainHistory[~us][((ss - 1)->currentMove).raw()] << scaledBonus * 220 / 32768
                     let prev_move = st.stack[prev_ply].current_move;
-                    let main_bonus = (scaled_bonus * 220 / 32768) as i32;
+                    let main_bonus = (scaled_bonus
+                        * ctx.tune_params.prior_quiet_countermove_main_scale_num as i64
+                        / 32768) as i32;
                     // 注: 前の手なので手番は!pos.side_to_move()
                     let opponent = !pos.side_to_move();
 
                     // pawn history更新（歩以外かつ成りでない場合）
                     // YaneuraOu: if (type_of(pos.piece_on(prevSq)) != PAWN && ((ss - 1)->currentMove).type_of() != PROMOTION)
                     let pawn_key_idx = pos.pawn_history_index();
-                    let pawn_bonus = (scaled_bonus * 1164 / 32768) as i32;
+                    let pawn_bonus = (scaled_bonus
+                        * ctx.tune_params.prior_quiet_countermove_pawn_scale_num as i64
+                        / 32768) as i32;
                     let update_pawn =
                         prev_piece.piece_type() != PieceType::Pawn && !prev_move.is_promotion();
 
