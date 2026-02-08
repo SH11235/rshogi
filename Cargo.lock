@@ -1749,6 +1749,7 @@ dependencies = [
  "rand",
  "rand_chacha",
  "rayon",
+ "regex",
  "reqwest",
  "rshogi-core",
  "serde",
