@@ -1,29 +1,22 @@
-use std::collections::{BTreeMap, HashSet};
-use std::ffi::OsString;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::Local;
 use clap::Parser;
 use rand::prelude::IndexedRandom;
 use rshogi_core::movegen::is_legal_with_pass;
-use rshogi_core::position::{Position, SFEN_HIRATE};
+use rshogi_core::position::Position;
 use rshogi_core::types::{Color, Move, PieceType, Square};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tools::packed_sfen::{move_to_move16, pack_position, PackedSfenValue};
-
-const ENGINE_READY_TIMEOUT: Duration = Duration::from_secs(30);
-const ENGINE_QUIT_TIMEOUT: Duration = Duration::from_millis(300);
-const ENGINE_QUIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
-// 残り約40手を想定して1手あたりの持ち時間を配分する。
-const TIME_ALLOCATION_MOVES: u64 = 40;
-const MIN_THINK_MS: u64 = 10;
+use tools::selfplay::{
+    build_position, load_start_positions, parse_position_line, side_label, EngineConfig,
+    EngineProcess, EvalLog, GameOutcome, SearchRequest, TimeControl,
+};
 
 /// engine-usi 同士の自己対局ハーネス。時間管理と info ログ収集を最小限に実装する。
 ///
@@ -325,7 +318,7 @@ struct MoveLog {
     move_usi: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     raw_move_usi: Option<String>,
-    engine: &'static str,
+    engine: String,
     elapsed_ms: u64,
     think_limit_ms: u64,
     timed_out: bool,
@@ -619,26 +612,6 @@ impl TrainingDataCollector {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Default)]
-struct EvalLog {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    score_cp: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    score_mate: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    depth: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    seldepth: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    nodes: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    time_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    nps: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pv: Option<Vec<String>>,
-}
-
 #[derive(Serialize)]
 struct InfoLogEntry<'a> {
     #[serde(rename = "type")]
@@ -682,525 +655,6 @@ impl InfoLogger {
     }
 }
 
-#[derive(Default, Clone)]
-struct InfoSnapshot {
-    score_cp: Option<i32>,
-    score_mate: Option<i32>,
-    depth: Option<u32>,
-    seldepth: Option<u32>,
-    nodes: Option<u64>,
-    time_ms: Option<u64>,
-    nps: Option<u64>,
-    pv: Vec<String>,
-}
-
-impl InfoSnapshot {
-    /// info 行を解析し、multipv=1 の情報を保持する。
-    fn update_from_line(&mut self, line: &str) {
-        let tokens: Vec<&str> = line.split_whitespace().collect();
-        if tokens.first().copied() != Some("info") {
-            return;
-        }
-        let mut multipv = 1u32;
-        let mut idx = 1;
-        while idx + 1 < tokens.len() {
-            if tokens[idx] == "multipv" {
-                multipv = tokens[idx + 1].parse::<u32>().unwrap_or(1);
-                break;
-            }
-            idx += 1;
-        }
-        if multipv != 1 {
-            return;
-        }
-        let mut i = 1;
-        while i < tokens.len() {
-            match tokens[i] {
-                "depth" => {
-                    if i + 1 < tokens.len() {
-                        self.depth = tokens[i + 1].parse::<u32>().ok();
-                        i += 1;
-                    }
-                }
-                "seldepth" => {
-                    if i + 1 < tokens.len() {
-                        self.seldepth = tokens[i + 1].parse::<u32>().ok();
-                        i += 1;
-                    }
-                }
-                "nodes" => {
-                    if i + 1 < tokens.len() {
-                        self.nodes = tokens[i + 1].parse::<u64>().ok();
-                        i += 1;
-                    }
-                }
-                "time" => {
-                    if i + 1 < tokens.len() {
-                        self.time_ms = tokens[i + 1].parse::<u64>().ok();
-                        i += 1;
-                    }
-                }
-                "nps" => {
-                    if i + 1 < tokens.len() {
-                        self.nps = tokens[i + 1].parse::<u64>().ok();
-                        i += 1;
-                    }
-                }
-                "score" => {
-                    if i + 2 < tokens.len() {
-                        match tokens[i + 1] {
-                            "cp" => {
-                                self.score_cp = tokens[i + 2].parse::<i32>().ok();
-                                self.score_mate = None;
-                                i += 2;
-                            }
-                            "mate" => {
-                                self.score_mate = tokens[i + 2].parse::<i32>().ok();
-                                self.score_cp = None;
-                                i += 2;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                "pv" => {
-                    let mut pv = Vec::new();
-                    let mut j = i + 1;
-                    while j < tokens.len() {
-                        pv.push(tokens[j].to_string());
-                        j += 1;
-                    }
-                    if !pv.is_empty() {
-                        self.pv = pv;
-                    }
-                    break;
-                }
-                _ => {}
-            }
-            i += 1;
-        }
-    }
-
-    fn into_eval_log(self) -> Option<EvalLog> {
-        if self.score_cp.is_none()
-            && self.score_mate.is_none()
-            && self.depth.is_none()
-            && self.seldepth.is_none()
-            && self.nodes.is_none()
-            && self.time_ms.is_none()
-            && self.nps.is_none()
-            && self.pv.is_empty()
-        {
-            return None;
-        }
-        Some(EvalLog {
-            score_cp: self.score_cp,
-            score_mate: self.score_mate,
-            depth: self.depth,
-            seldepth: self.seldepth,
-            nodes: self.nodes,
-            time_ms: self.time_ms,
-            nps: self.nps,
-            pv: if self.pv.is_empty() {
-                None
-            } else {
-                Some(self.pv)
-            },
-        })
-    }
-}
-
-#[derive(Clone, Copy)]
-struct TimeArgs {
-    btime: u64,
-    wtime: u64,
-    byoyomi: u64,
-    binc: u64,
-    winc: u64,
-}
-
-/// USI 互換の時間管理を最低限行うヘルパー。
-#[derive(Clone, Copy)]
-struct TimeControl {
-    black_time: u64,
-    white_time: u64,
-    black_inc: u64,
-    white_inc: u64,
-    byoyomi: u64,
-}
-
-impl TimeControl {
-    fn new(cli: &Cli) -> Self {
-        Self {
-            black_time: cli.btime,
-            white_time: cli.wtime,
-            black_inc: cli.binc,
-            white_inc: cli.winc,
-            byoyomi: cli.byoyomi,
-        }
-    }
-
-    fn time_args(&self) -> TimeArgs {
-        TimeArgs {
-            btime: self.black_time,
-            wtime: self.white_time,
-            byoyomi: self.byoyomi,
-            binc: self.black_inc,
-            winc: self.white_inc,
-        }
-    }
-
-    /// 残り時間を分割して1手あたりの思考上限を決める。
-    fn think_limit_ms(&self, side: Color) -> u64 {
-        let remaining = self.remaining(side);
-        let inc = self.increment_for(side);
-        if self.byoyomi > 0 {
-            let available = remaining.saturating_add(self.byoyomi);
-            let per_move_budget = remaining / TIME_ALLOCATION_MOVES;
-            let candidate = self.byoyomi.saturating_add(per_move_budget);
-            let lower = self.byoyomi.max(MIN_THINK_MS.min(available));
-            return candidate.clamp(lower, available);
-        }
-        let per_move_budget = remaining / TIME_ALLOCATION_MOVES;
-        let candidate = per_move_budget.saturating_add(inc);
-        let lower = MIN_THINK_MS.min(remaining);
-        candidate.clamp(lower, remaining)
-    }
-
-    fn remaining(&self, side: Color) -> u64 {
-        if side == Color::Black {
-            self.black_time
-        } else {
-            self.white_time
-        }
-    }
-
-    fn increment_for(&self, side: Color) -> u64 {
-        if side == Color::Black {
-            self.black_inc
-        } else {
-            self.white_inc
-        }
-    }
-
-    fn update_after_move(&mut self, side: Color, elapsed_ms: u64) {
-        if side == Color::Black {
-            self.black_time = self.updated_time(self.black_time, self.black_inc, elapsed_ms);
-        } else {
-            self.white_time = self.updated_time(self.white_time, self.white_inc, elapsed_ms);
-        }
-    }
-
-    fn updated_time(&self, current: u64, inc: u64, elapsed_ms: u64) -> u64 {
-        let mut next = current;
-        if self.byoyomi > 0 {
-            let over = elapsed_ms.saturating_sub(self.byoyomi);
-            next = next.saturating_sub(over);
-        } else {
-            next = next.saturating_sub(elapsed_ms);
-        }
-        next = next.saturating_add(inc);
-        next
-    }
-}
-
-/// エンジンプロセス起動時の設定。
-struct EngineConfig {
-    path: PathBuf,
-    args: Vec<String>,
-    threads: usize,
-    hash_mb: u32,
-    network_delay: Option<i64>,
-    network_delay2: Option<i64>,
-    minimum_thinking_time: Option<i64>,
-    slowmover: Option<i32>,
-    ponder: bool,
-    /// 追加のUSIオプション (Name=Value 形式)
-    usi_options: Vec<String>,
-}
-
-/// 1本のエンジンに対する入出力をカプセル化する。
-struct EngineProcess {
-    child: Child,
-    stdin: BufWriter<ChildStdin>,
-    rx: Receiver<String>,
-    opt_names: HashSet<String>,
-    label: &'static str,
-}
-
-impl EngineProcess {
-    fn spawn(cfg: &EngineConfig, label: &'static str) -> Result<Self> {
-        let mut cmd = Command::new(&cfg.path);
-        if !cfg.args.is_empty() {
-            cmd.args(&cfg.args);
-        }
-        let mut child = cmd
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .with_context(|| format!("failed to spawn engine at {}", cfg.path.display()))?;
-        let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
-        let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
-        let (tx, rx) = mpsc::channel::<String>();
-        std::thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                match line {
-                    Ok(l) => {
-                        if tx.send(l).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        let mut proc = Self {
-            child,
-            stdin: BufWriter::new(stdin),
-            rx,
-            opt_names: HashSet::new(),
-            label,
-        };
-        proc.initialize(cfg)?;
-        Ok(proc)
-    }
-
-    fn initialize(&mut self, cfg: &EngineConfig) -> Result<()> {
-        self.write_line("usi")?;
-        loop {
-            let line = self.recv_line(ENGINE_READY_TIMEOUT)?;
-            if let Some(rest) = line.strip_prefix("option ") {
-                if let Some(name) = parse_option_name(rest) {
-                    self.opt_names.insert(name);
-                }
-            } else if line == "usiok" {
-                break;
-            }
-        }
-        self.set_option_if_available("Threads", &cfg.threads.to_string())?;
-        let hash = cfg.hash_mb.to_string();
-        self.set_option_if_available("USI_Hash", &hash)?;
-        self.set_option_if_available("Hash", &hash)?;
-        if let Some(v) = cfg.network_delay {
-            self.set_option_if_available("NetworkDelay", &v.to_string())?;
-        }
-        if let Some(v) = cfg.network_delay2 {
-            self.set_option_if_available("NetworkDelay2", &v.to_string())?;
-        }
-        if let Some(v) = cfg.minimum_thinking_time {
-            self.set_option_if_available("MinimumThinkingTime", &v.to_string())?;
-        }
-        if let Some(v) = cfg.slowmover {
-            self.set_option_if_available("SlowMover", &v.to_string())?;
-        }
-        if self.opt_names.contains("USI_Ponder") || self.opt_names.contains("Ponder") {
-            let name = if self.opt_names.contains("USI_Ponder") {
-                "USI_Ponder"
-            } else {
-                "Ponder"
-            };
-            self.set_option_if_available(name, if cfg.ponder { "true" } else { "false" })?;
-        }
-        // 追加のUSIオプションを設定
-        for opt in &cfg.usi_options {
-            if let Some((name, value)) = opt.split_once('=') {
-                self.set_option_if_available(name.trim(), value.trim())?;
-            } else {
-                // "=" がない場合はオプション名のみとみなし、値なしで送る
-                self.write_line(&format!("setoption name {}", opt.trim()))?;
-            }
-        }
-        self.sync_ready()?;
-        self.write_line("usinewgame")?;
-        Ok(())
-    }
-
-    fn new_game(&mut self) -> Result<()> {
-        self.write_line("usinewgame")
-    }
-
-    fn search(
-        &mut self,
-        req: &SearchRequest<'_>,
-        info_logger: &mut Option<InfoLogger>,
-    ) -> Result<SearchOutcome> {
-        // パス権がある場合は passrights を付加
-        let position_cmd = if let Some((b, w)) = req.pass_rights {
-            format!("position sfen {} passrights {} {}", req.sfen, b, w)
-        } else {
-            format!("position sfen {}", req.sfen)
-        };
-        self.write_line(&position_cmd)?;
-        let time_args = &req.time_args;
-        self.write_line(&format!(
-            "go btime {} wtime {} byoyomi {} binc {} winc {}",
-            time_args.btime, time_args.wtime, time_args.byoyomi, time_args.binc, time_args.winc
-        ))?;
-
-        let start = Instant::now();
-        let soft_limit =
-            Duration::from_millis(req.think_limit_ms.saturating_add(req.timeout_margin_ms));
-        let hard_limit = soft_limit + Duration::from_millis(req.timeout_margin_ms);
-        let mut stop_sent = false;
-        let mut snapshot = InfoSnapshot::default();
-
-        loop {
-            let elapsed = start.elapsed();
-            let deadline = if stop_sent { hard_limit } else { soft_limit };
-            if elapsed >= deadline {
-                if !stop_sent {
-                    self.write_line("stop")?;
-                    stop_sent = true;
-                    continue;
-                }
-                return Ok(SearchOutcome {
-                    bestmove: None,
-                    elapsed_ms: duration_to_millis(elapsed),
-                    timed_out: true,
-                    eval: snapshot.into_eval_log(),
-                });
-            }
-
-            let remaining = deadline.saturating_sub(elapsed);
-            match self.rx.recv_timeout(remaining) {
-                Ok(line) => {
-                    if line.starts_with("info") {
-                        snapshot.update_from_line(&line);
-                        if let Some(logger) = info_logger.as_mut() {
-                            logger.log(InfoLogEntry {
-                                kind: "info",
-                                game_id: req.game_id,
-                                ply: req.ply,
-                                side_to_move: side_label(req.side),
-                                engine: req.engine_label,
-                                line: &line,
-                            })?;
-                        }
-                        continue;
-                    }
-                    if let Some(rest) = line.strip_prefix("bestmove ") {
-                        let mut parts = rest.split_whitespace();
-                        let mv = parts.next().unwrap_or_default().to_string();
-                        let elapsed_ms = duration_to_millis(start.elapsed());
-                        let timed_out =
-                            elapsed_ms > req.think_limit_ms.saturating_add(req.timeout_margin_ms);
-                        return Ok(SearchOutcome {
-                            bestmove: Some(mv),
-                            elapsed_ms,
-                            timed_out,
-                            eval: snapshot.into_eval_log(),
-                        });
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    if !stop_sent {
-                        self.write_line("stop")?;
-                        stop_sent = true;
-                    } else {
-                        let elapsed_ms = duration_to_millis(start.elapsed());
-                        return Ok(SearchOutcome {
-                            bestmove: None,
-                            elapsed_ms,
-                            timed_out: true,
-                            eval: snapshot.into_eval_log(),
-                        });
-                    }
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    bail!("{}: engine exited unexpectedly", self.label);
-                }
-            }
-        }
-    }
-
-    fn sync_ready(&mut self) -> Result<()> {
-        self.write_line("isready")?;
-        loop {
-            let line = self.recv_line(ENGINE_READY_TIMEOUT)?;
-            if line == "readyok" {
-                break;
-            }
-        }
-        Ok(())
-    }
-
-    fn recv_line(&self, timeout: Duration) -> Result<String> {
-        self.rx
-            .recv_timeout(timeout)
-            .map_err(|_| anyhow!("{}: engine read timeout", self.label))
-    }
-
-    fn set_option_if_available(&mut self, name: &str, value: &str) -> Result<()> {
-        if self.opt_names.is_empty() || self.opt_names.contains(name) {
-            self.write_line(&format!("setoption name {} value {}", name, value))?;
-        }
-        Ok(())
-    }
-
-    fn write_line(&mut self, msg: &str) -> Result<()> {
-        self.stdin.write_all(msg.as_bytes())?;
-        self.stdin.write_all(b"\n")?;
-        self.stdin.flush()?;
-        Ok(())
-    }
-}
-
-impl Drop for EngineProcess {
-    fn drop(&mut self) {
-        let _ = self.write_line("quit");
-        let deadline = Instant::now() + ENGINE_QUIT_TIMEOUT;
-        while Instant::now() < deadline {
-            if let Ok(Some(_)) = self.child.try_wait() {
-                return;
-            }
-            std::thread::sleep(ENGINE_QUIT_POLL_INTERVAL);
-        }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-struct SearchRequest<'a> {
-    sfen: &'a str,
-    time_args: TimeArgs,
-    think_limit_ms: u64,
-    timeout_margin_ms: u64,
-    game_id: u32,
-    ply: u32,
-    side: Color,
-    engine_label: &'static str,
-    /// パス権利（先手, 後手）: Someの場合はpassrightsキーワードで送信
-    pass_rights: Option<(u8, u8)>,
-}
-
-struct SearchOutcome {
-    bestmove: Option<String>,
-    elapsed_ms: u64,
-    timed_out: bool,
-    eval: Option<EvalLog>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum GameOutcome {
-    InProgress,
-    BlackWin,
-    WhiteWin,
-    Draw,
-}
-
-impl GameOutcome {
-    fn label(self) -> &'static str {
-        match self {
-            GameOutcome::InProgress => "in_progress",
-            GameOutcome::BlackWin => "black_win",
-            GameOutcome::WhiteWin => "white_win",
-            GameOutcome::Draw => "draw",
-        }
-    }
-}
-
 fn main() -> Result<()> {
     let mut cli = Cli::parse();
 
@@ -1218,7 +672,6 @@ fn main() -> Result<()> {
         cli.usi_options_black.clone().unwrap_or_else(|| common_usi_opts_early.clone());
     let white_usi_opts_early =
         cli.usi_options_white.clone().unwrap_or_else(|| common_usi_opts_early.clone());
-    // engine-usi は value == "true" || value == "1" で解釈するため両方検出する
     let is_pass_rights_enabled_early = |o: &str| {
         o == "PassRights=true"
             || o == "PassRights = true"
@@ -1229,7 +682,6 @@ fn main() -> Result<()> {
         black_usi_opts_early.iter().any(|o| is_pass_rights_enabled_early(o))
             || white_usi_opts_early.iter().any(|o| is_pass_rights_enabled_early(o));
 
-    // USIオプションから InitialPassCount を解析
     let parse_initial_pass_count_early = |opts: &[String]| -> Option<u8> {
         for opt in opts {
             if let Some(val) = opt.strip_prefix("InitialPassCount=") {
@@ -1245,8 +697,6 @@ fn main() -> Result<()> {
         .or_else(|| parse_initial_pass_count_early(&white_usi_opts_early))
         .unwrap_or(2);
 
-    // load_start_positions 用のパス権初期値
-    // 片側だけCLIで指定された場合、未指定側はデフォルト値で補完
     let pass_rights_cli_specified =
         cli.pass_rights_black.is_some() || cli.pass_rights_white.is_some();
     let load_pass_black = if pass_rights_cli_specified || pass_rights_via_usi_early {
@@ -1383,9 +833,6 @@ fn main() -> Result<()> {
         }
     }
 
-    // USIオプションで PassRights=true/1 が設定されているかを検出
-    // （--pass-rights-* 未指定でも --usi-options PassRights=true で有効化される場合に対応）
-    // engine-usi は value == "true" || value == "1" で解釈するため両方検出する
     let is_pass_rights_enabled = |o: &str| {
         o == "PassRights=true"
             || o == "PassRights = true"
@@ -1395,7 +842,6 @@ fn main() -> Result<()> {
     let pass_rights_via_usi = black_usi_opts.iter().any(|o| is_pass_rights_enabled(o))
         || white_usi_opts.iter().any(|o| is_pass_rights_enabled(o));
 
-    // USIオプションから InitialPassCount を解析（エンジン設定と同期するため）
     let parse_initial_pass_count = |opts: &[String]| -> Option<u8> {
         for opt in opts {
             if let Some(val) = opt.strip_prefix("InitialPassCount=") {
@@ -1409,9 +855,8 @@ fn main() -> Result<()> {
     };
     let usi_initial_pass_count = parse_initial_pass_count(&black_usi_opts)
         .or_else(|| parse_initial_pass_count(&white_usi_opts))
-        .unwrap_or(2); // USI未指定時のデフォルト値
+        .unwrap_or(2);
 
-    // ドライバ側のパス権有効化フラグ（CLIオプションまたはUSIオプションで有効）
     let pass_rights_enabled =
         cli.pass_rights_black.is_some() || cli.pass_rights_white.is_some() || pass_rights_via_usi;
 
@@ -1428,7 +873,7 @@ fn main() -> Result<()> {
             ponder: cli.ponder,
             usi_options: black_usi_opts.clone(),
         },
-        "black",
+        "black".to_string(),
     )?;
     let mut white = EngineProcess::spawn(
         &EngineConfig {
@@ -1443,7 +888,7 @@ fn main() -> Result<()> {
             ponder: cli.ponder,
             usi_options: white_usi_opts.clone(),
         },
-        "white",
+        "white".to_string(),
     )?;
 
     let meta = MetaLog {
@@ -1521,8 +966,6 @@ fn main() -> Result<()> {
         } else {
             &start_defs[(game_idx as usize) % start_defs.len()]
         };
-        // パス権の初期値（CLIオプション > USIオプションの InitialPassCount）
-        // ドライバ側の Position 初期化用
         let pass_black = if pass_rights_enabled {
             Some(cli.pass_rights_black.unwrap_or(usi_initial_pass_count))
         } else {
@@ -1534,7 +977,7 @@ fn main() -> Result<()> {
             None
         };
         let mut pos = build_position(parsed, pass_black, pass_white)?;
-        let mut tc = TimeControl::new(&cli);
+        let mut tc = TimeControl::new(cli.btime, cli.wtime, cli.binc, cli.winc, cli.byoyomi);
         let mut outcome = GameOutcome::InProgress;
         let mut outcome_reason = "max_moves";
         let mut plies_played = 0u32;
@@ -1562,7 +1005,6 @@ fn main() -> Result<()> {
             };
             let sfen_before = pos.to_sfen();
             let think_limit_ms = tc.think_limit_ms(side);
-            // パス権が有効な場合、現在のパス権を取得
             let pass_rights = if pass_rights_enabled {
                 Some((pos.pass_rights(Color::Black), pos.pass_rights(Color::White)))
             } else {
@@ -1576,10 +1018,31 @@ fn main() -> Result<()> {
                 game_id: game_idx + 1,
                 ply: plies_played,
                 side,
-                engine_label,
+                engine_label: engine_label.to_string(),
                 pass_rights,
             };
-            let search = engine.search(&req, &mut info_logger)?;
+            // InfoLogger をクロージャ経由で渡す
+            type InfoCb<'a> = Box<dyn FnMut(&str, &SearchRequest<'_>) + 'a>;
+            let mut info_cb: Option<InfoCb<'_>> = if info_logger.is_some() {
+                Some(Box::new(|line: &str, req: &SearchRequest<'_>| {
+                    if let Some(ref mut logger) = info_logger {
+                        let _ = logger.log(InfoLogEntry {
+                            kind: "info",
+                            game_id: req.game_id,
+                            ply: req.ply,
+                            side_to_move: side_label(req.side),
+                            engine: &req.engine_label,
+                            line,
+                        });
+                    }
+                }))
+            } else {
+                None
+            };
+            let search = engine.search(
+                &req,
+                info_cb.as_mut().map(|b| b.as_mut() as &mut dyn FnMut(&str, &SearchRequest<'_>)),
+            )?;
 
             let timed_out = search.timed_out;
             let mut move_usi = search.bestmove.clone().unwrap_or_else(|| "none".to_string());
@@ -1683,7 +1146,7 @@ fn main() -> Result<()> {
                 sfen_before,
                 move_usi,
                 raw_move_usi,
-                engine: engine_label,
+                engine: engine_label.to_string(),
                 elapsed_ms,
                 think_limit_ms,
                 timed_out,
@@ -2039,314 +1502,33 @@ fn find_engine_in_dir(dir: &Path) -> Option<ResolvedEnginePath> {
     None
 }
 
-fn load_start_positions(
-    file: Option<&Path>,
-    sfen: Option<&str>,
-    pass_rights_black: Option<u8>,
-    pass_rights_white: Option<u8>,
-) -> Result<(Vec<ParsedPosition>, Vec<String>)> {
-    match (file, sfen) {
-        (Some(_), Some(_)) => {
-            bail!("--startpos-file and --sfen cannot be used together");
-        }
-        (Some(path), None) => {
-            let file =
-                File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-            let reader = BufReader::new(file);
-            let mut positions = Vec::new();
-            let mut commands = Vec::new();
-            for (idx, line) in reader.lines().enumerate() {
-                let line = line?;
-                let trimmed = line.trim();
-                if trimmed.is_empty() || trimmed.starts_with('#') {
-                    continue;
-                }
-                // position形式または生のSFEN形式の両方をサポート
-                let parsed = parse_position_line(trimmed)
-                    .or_else(|_| parse_sfen_only(trimmed))
-                    .with_context(|| {
-                        format!("invalid position syntax on line {}: {}", idx + 1, trimmed)
-                    })?;
-                build_position(&parsed, pass_rights_black, pass_rights_white)?;
-                let cmd = describe_position(&parsed);
-                positions.push(parsed);
-                commands.push(cmd);
-            }
-            if positions.is_empty() {
-                bail!("no usable positions found in {}", path.display());
-            }
-            Ok((positions, commands))
-        }
-        (None, Some(sfen_arg)) => {
-            let parsed = parse_position_line(sfen_arg).or_else(|_| parse_sfen_only(sfen_arg))?;
-            build_position(&parsed, pass_rights_black, pass_rights_white)?;
-            let cmd = describe_position(&parsed);
-            Ok((vec![parsed], vec![cmd]))
-        }
-        (None, None) => {
-            let parsed = ParsedPosition {
-                startpos: true,
-                sfen: None,
-                moves: Vec::new(),
-            };
-            Ok((vec![parsed], vec!["position startpos".to_string()]))
-        }
+fn eval_label(eval: Option<&EvalLog>) -> String {
+    let Some(eval) = eval else {
+        return "?".to_string();
+    };
+    if let Some(mate) = eval.score_mate {
+        return format!("mate{mate}");
     }
+    if let Some(cp) = eval.score_cp {
+        return format!("{cp:+}");
+    }
+    "?".to_string()
 }
 
-/// USI position 行を分解した結果。
-struct ParsedPosition {
-    startpos: bool,
-    sfen: Option<String>,
-    moves: Vec<String>,
-}
+/// エンジン設定を人間可読な形式でフォーマットする
+fn format_engine_settings(engine: &ResolvedEnginePath, usi_options: &[String]) -> String {
+    let engine_name = engine.path.file_name().and_then(|s| s.to_str()).unwrap_or("rshogi-usi");
 
-/// `position ...` 形式の行をパースする。
-fn parse_position_line(line: &str) -> Result<ParsedPosition> {
-    let mut tokens = line.split_whitespace().peekable();
-    if tokens.peek().is_some_and(|tok| *tok == "position") {
-        tokens.next();
-    }
-    match tokens.next() {
-        Some("startpos") => {
-            let moves = parse_moves(tokens)?;
-            Ok(ParsedPosition {
-                startpos: true,
-                sfen: None,
-                moves,
-            })
-        }
-        Some("sfen") => {
-            let mut sfen_tokens = Vec::new();
-            while let Some(token) = tokens.peek() {
-                if *token == "moves" {
-                    break;
-                }
-                sfen_tokens.push(tokens.next().unwrap().to_string());
-            }
-            if sfen_tokens.is_empty() {
-                bail!("missing SFEN payload");
-            }
-            let moves = parse_moves(tokens)?;
-            Ok(ParsedPosition {
-                startpos: false,
-                sfen: Some(sfen_tokens.join(" ")),
-                moves,
-            })
-        }
-        other => bail!("expected 'startpos' or 'sfen' after 'position', got {:?}", other),
-    }
-}
-
-/// sfen 文字列だけが渡されたときの簡易パーサ。
-fn parse_sfen_only(line: &str) -> Result<ParsedPosition> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        bail!("empty SFEN");
-    }
-    Ok(ParsedPosition {
-        startpos: false,
-        sfen: Some(trimmed.to_string()),
-        moves: Vec::new(),
-    })
-}
-
-/// moves トークン以降を USI 形式の指し手列として回収する。
-fn parse_moves<'a, I>(iter: I) -> Result<Vec<String>>
-where
-    I: Iterator<Item = &'a str>,
-{
-    let mut iter = iter.peekable();
-    match iter.peek() {
-        Some(&"moves") => {
-            iter.next();
-            Ok(iter.map(|mv| mv.to_string()).collect())
-        }
-        Some(other) => bail!("expected 'moves' before move list, got '{other}'"),
-        None => Ok(Vec::new()),
-    }
-}
-
-fn build_position(
-    parsed: &ParsedPosition,
-    pass_rights_black: Option<u8>,
-    pass_rights_white: Option<u8>,
-) -> Result<Position> {
-    let mut pos = Position::new();
-    if parsed.startpos {
-        pos.set_sfen(SFEN_HIRATE)?;
-    } else if let Some(sfen) = &parsed.sfen {
-        pos.set_sfen(sfen)?;
+    if usi_options.is_empty() {
+        format!("{engine_name} (default)")
     } else {
-        bail!("missing sfen payload");
-    }
-    // パス権利を有効化（先手または後手の少なくとも一方が指定されている場合）
-    if pass_rights_black.is_some() || pass_rights_white.is_some() {
-        let black = pass_rights_black.unwrap_or(0);
-        let white = pass_rights_white.unwrap_or(0);
-        pos.enable_pass_rights(black, white);
-    }
-    for mv_str in &parsed.moves {
-        let mv = Move::from_usi(mv_str)
-            .ok_or_else(|| anyhow!("invalid move in start position: {mv_str}"))?;
-        if !is_legal_with_pass(&pos, mv) {
-            bail!("illegal move '{mv_str}' in start position");
-        }
-        let gives_check = if mv.is_pass() {
-            false
-        } else {
-            pos.gives_check(mv)
-        };
-        pos.do_move(mv, gives_check);
-    }
-    Ok(pos)
-}
-
-fn describe_position(parsed: &ParsedPosition) -> String {
-    let mut buf = OsString::from("position ");
-    if parsed.startpos {
-        buf.push("startpos");
-    } else if let Some(sfen) = &parsed.sfen {
-        buf.push("sfen ");
-        buf.push(sfen);
-    }
-    if !parsed.moves.is_empty() {
-        buf.push(" moves ");
-        buf.push(parsed.moves.join(" "));
-    }
-    buf.to_string_lossy().to_string()
-}
-
-fn parse_option_name(line: &str) -> Option<String> {
-    let mut tokens = line.split_whitespace().peekable();
-    while let Some(tok) = tokens.next() {
-        if tok == "name" {
-            let mut parts = Vec::new();
-            while let Some(next) = tokens.peek() {
-                if *next == "type" {
-                    break;
-                }
-                parts.push(tokens.next().unwrap().to_string());
-            }
-            if !parts.is_empty() {
-                return Some(parts.join(" "));
-            }
-        }
-    }
-    None
-}
-
-fn side_label(color: Color) -> char {
-    if color == Color::Black {
-        'b'
-    } else {
-        'w'
+        format!("{engine_name} [{}]", usi_options.join(", "))
     }
 }
 
-fn duration_to_millis(d: Duration) -> u64 {
-    d.as_millis().min(u128::from(u64::MAX)) as u64
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use anyhow::Result as AnyResult;
-    use clap::Parser;
-    use std::path::PathBuf;
-
-    #[test]
-    fn time_control_allocates_fractional_budget() -> AnyResult<()> {
-        let mut cli = Cli::parse_from(["engine_selfplay"]);
-        cli.btime = 60_000;
-        cli.wtime = 60_000;
-        cli.byoyomi = 1_000;
-        let tc = TimeControl::new(&cli);
-        assert_eq!(tc.think_limit_ms(Color::Black), 2_500);
-        assert_eq!(tc.updated_time(60_000, 0, 1_500), 59_500);
-
-        cli.byoyomi = 0;
-        cli.binc = 1_000;
-        let tc_inc = TimeControl::new(&cli);
-        assert_eq!(tc_inc.think_limit_ms(Color::Black), 2_500);
-        assert_eq!(tc_inc.updated_time(5_000, 1_000, 4_000), 2_000);
-        Ok(())
-    }
-
-    #[test]
-    fn resolve_engine_paths_uses_per_side_when_provided() {
-        let cli = Cli::parse_from([
-            "engine_selfplay",
-            "--engine-path-black",
-            "/path/to/black",
-            "--engine-path-white",
-            "/path/to/white",
-        ]);
-        let paths = resolve_engine_paths(&cli);
-        assert_eq!(paths.black.path, PathBuf::from("/path/to/black"));
-        assert_eq!(paths.white.path, PathBuf::from("/path/to/white"));
-        assert_eq!(paths.black.source, "cli:black");
-        assert_eq!(paths.white.source, "cli:white");
-    }
-
-    #[test]
-    fn resolve_engine_paths_uses_shared_when_per_side_missing() {
-        let cli = Cli::parse_from([
-            "engine_selfplay",
-            "--engine-path",
-            "/shared/path/engine-usi",
-        ]);
-        let paths = resolve_engine_paths(&cli);
-        assert_eq!(paths.black.path, PathBuf::from("/shared/path/engine-usi"));
-        assert_eq!(paths.white.path, PathBuf::from("/shared/path/engine-usi"));
-        assert_eq!(paths.black.source, "cli");
-        assert_eq!(paths.white.source, "cli");
-    }
-
-    #[test]
-    fn info_snapshot_parses_primary_pv() {
-        let mut snap = InfoSnapshot::default();
-        snap.update_from_line(
-            "info depth 10 seldepth 12 nodes 12345 time 67 nps 890 score cp 34 pv 7g7f 3c3d",
-        );
-        assert_eq!(snap.depth, Some(10));
-        assert_eq!(snap.seldepth, Some(12));
-        assert_eq!(snap.nodes, Some(12_345));
-        assert_eq!(snap.time_ms, Some(67));
-        assert_eq!(snap.nps, Some(890));
-        assert_eq!(snap.score_cp, Some(34));
-        assert_eq!(snap.score_mate, None);
-        assert_eq!(snap.pv, vec!["7g7f".to_string(), "3c3d".to_string()]);
-
-        // multipv != 1 は無視される
-        snap.update_from_line("info multipv 2 depth 20 score cp 100 pv 2g2f");
-        assert_eq!(snap.depth, Some(10));
-    }
-
-    #[test]
-    fn parse_position_line_covers_startpos_and_sfen() -> AnyResult<()> {
-        let parsed = parse_position_line("position startpos moves 7g7f 3c3d")?;
-        assert!(parsed.startpos);
-        assert_eq!(parsed.moves, vec!["7g7f", "3c3d"]);
-
-        let sfen_line = "position sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1 moves 7g7f";
-        let parsed_sfen = parse_position_line(sfen_line)?;
-        assert!(!parsed_sfen.startpos);
-        assert_eq!(parsed_sfen.moves, vec!["7g7f"]);
-        assert!(parsed_sfen.sfen.as_deref().is_some_and(|s| s.starts_with("lnsgkgsnl")));
-
-        let parsed_sfen_only =
-            parse_sfen_only("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")?;
-        assert!(parsed_sfen_only.sfen.is_some());
-        assert!(parsed_sfen_only.moves.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn parse_position_line_rejects_missing_moves_keyword() {
-        assert!(parse_position_line("position startpos 7g7f").is_err());
-    }
-}
+// ---------------------------------------------------------------------------
+// KIF 変換
+// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct GameLog {
@@ -2528,7 +1710,6 @@ fn start_position_for_game(
     };
 
     // random_startpos の場合は moves[0].sfen_before を優先
-    // （meta.start_positions からの game_id % len() による選択は実際の対局と一致しないため）
     let use_moves_first = meta.map(|m| m.settings.random_startpos).unwrap_or(false);
 
     if !use_moves_first {
@@ -2536,11 +1717,9 @@ fn start_position_for_game(
             if !meta.start_positions.is_empty() {
                 let idx = ((game_id - 1) as usize) % meta.start_positions.len();
                 if let Ok((mut pos, _)) = start_position_from_command(&meta.start_positions[idx]) {
-                    // パス手があればパス権利を有効化（metaの設定値を使用）
                     if has_pass {
                         pos.enable_pass_rights(pass_black, pass_white);
                     }
-                    // SFENは正しいパス権値で再生成
                     let sfen = pos.to_sfen();
                     return Some((pos, sfen));
                 }
@@ -2550,7 +1729,6 @@ fn start_position_for_game(
     moves.first().and_then(|m| {
         let mut pos = Position::new();
         pos.set_sfen(&m.sfen_before).ok()?;
-        // パス手があればパス権利を有効化（metaの設定値を使用）
         if has_pass {
             pos.enable_pass_rights(pass_black, pass_white);
         }
@@ -2561,7 +1739,6 @@ fn start_position_for_game(
 
 fn start_position_from_command(cmd: &str) -> Result<(Position, String)> {
     let parsed = parse_position_line(cmd)?;
-    // パス手が含まれていればパス権利を有効化
     let has_pass = parsed.moves.iter().any(|m| m == "pass");
     let (pass_black, pass_white) = if has_pass {
         (Some(15), Some(15))
@@ -2719,35 +1896,11 @@ fn write_eval_comments<W: Write>(writer: &mut W, eval: Option<&EvalLog>) -> Resu
     Ok(())
 }
 
-fn eval_label(eval: Option<&EvalLog>) -> String {
-    let Some(eval) = eval else {
-        return "?".to_string();
-    };
-    if let Some(mate) = eval.score_mate {
-        return format!("mate{mate}");
-    }
-    if let Some(cp) = eval.score_cp {
-        return format!("{cp:+}");
-    }
-    "?".to_string()
-}
-
 fn format_mm_ss(ms: u64) -> String {
     let secs = ms / 1000;
     let m = secs / 60;
     let s = secs % 60;
     format!("{:>2}:{:02}", m, s)
-}
-
-/// エンジン設定を人間可読な形式でフォーマットする
-fn format_engine_settings(engine: &ResolvedEnginePath, usi_options: &[String]) -> String {
-    let engine_name = engine.path.file_name().and_then(|s| s.to_str()).unwrap_or("rshogi-usi");
-
-    if usi_options.is_empty() {
-        format!("{engine_name} (default)")
-    } else {
-        format!("{engine_name} [{}]", usi_options.join(", "))
-    }
 }
 
 fn format_hh_mm_ss(ms: u64) -> String {
@@ -2756,4 +1909,42 @@ fn format_hh_mm_ss(ms: u64) -> String {
     let m = (secs / 60) % 60;
     let s = secs % 60;
     format!("{:02}:{:02}:{:02}", h, m, s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use clap::Parser;
+    use std::path::PathBuf;
+
+    #[test]
+    fn resolve_engine_paths_uses_per_side_when_provided() {
+        let cli = Cli::parse_from([
+            "engine_selfplay",
+            "--engine-path-black",
+            "/path/to/black",
+            "--engine-path-white",
+            "/path/to/white",
+        ]);
+        let paths = resolve_engine_paths(&cli);
+        assert_eq!(paths.black.path, PathBuf::from("/path/to/black"));
+        assert_eq!(paths.white.path, PathBuf::from("/path/to/white"));
+        assert_eq!(paths.black.source, "cli:black");
+        assert_eq!(paths.white.source, "cli:white");
+    }
+
+    #[test]
+    fn resolve_engine_paths_uses_shared_when_per_side_missing() {
+        let cli = Cli::parse_from([
+            "engine_selfplay",
+            "--engine-path",
+            "/shared/path/engine-usi",
+        ]);
+        let paths = resolve_engine_paths(&cli);
+        assert_eq!(paths.black.path, PathBuf::from("/shared/path/engine-usi"));
+        assert_eq!(paths.white.path, PathBuf::from("/shared/path/engine-usi"));
+        assert_eq!(paths.black.source, "cli");
+        assert_eq!(paths.white.source, "cli");
+    }
 }

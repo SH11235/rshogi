@@ -2,7 +2,9 @@
 //!
 //! best_move_changes（PV安定性判断）と合法手1つの500ms上限のテスト
 
-use crate::search::{LimitsType, TimeManagement, TimeOptions, DEFAULT_MAX_MOVES_TO_DRAW};
+use crate::search::{
+    LimitsType, SearchTuneParams, TimeManagement, TimeOptions, DEFAULT_MAX_MOVES_TO_DRAW,
+};
 use crate::time::Instant;
 use crate::types::Color;
 use std::sync::atomic::AtomicBool;
@@ -173,7 +175,13 @@ fn test_worker_best_move_changes_initial_value() {
             let tt = Arc::new(TranspositionTable::new(16));
             let eval_hash = Arc::new(EvalHash::new(1));
 
-            let worker = SearchWorker::new(tt, eval_hash, DEFAULT_MAX_MOVES_TO_DRAW, 0);
+            let worker = SearchWorker::new(
+                tt,
+                eval_hash,
+                DEFAULT_MAX_MOVES_TO_DRAW,
+                0,
+                SearchTuneParams::default(),
+            );
 
             assert_eq!(worker.state.best_move_changes, 0.0, "初期値は0.0であるべき");
         })
@@ -197,7 +205,13 @@ fn test_worker_best_move_changes_decay() {
             let tt = Arc::new(TranspositionTable::new(16));
             let eval_hash = Arc::new(EvalHash::new(1));
 
-            let mut worker = SearchWorker::new(tt, eval_hash, DEFAULT_MAX_MOVES_TO_DRAW, 0);
+            let mut worker = SearchWorker::new(
+                tt,
+                eval_hash,
+                DEFAULT_MAX_MOVES_TO_DRAW,
+                0,
+                SearchTuneParams::default(),
+            );
             worker.state.best_move_changes = 4.0;
             worker.decay_best_move_changes();
 

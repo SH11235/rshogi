@@ -15,7 +15,10 @@ use super::time_manager::{
     calculate_falling_eval, calculate_time_reduction, normalize_nodes_effort,
     DEFAULT_MAX_MOVES_TO_DRAW,
 };
-use super::{LimitsType, RootMove, SearchWorker, Skill, SkillOptions, ThreadPool, TimeManagement};
+use super::{
+    LimitsType, RootMove, SearchTuneParams, SearchWorker, Skill, SkillOptions, ThreadPool,
+    TimeManagement,
+};
 use crate::position::Position;
 use crate::tt::TranspositionTable;
 use crate::types::{Depth, Move, Value, MAX_PLY};
@@ -229,6 +232,8 @@ pub struct Search {
 
     /// 引き分けまでの最大手数（YaneuraOu準拠のエンジンオプション）
     max_moves_to_draw: i32,
+    /// SPSA向け探索係数
+    search_tune_params: SearchTuneParams,
 }
 
 /// ワーカーから集約する軽量サマリ（並列探索を見据えて追加）
@@ -529,6 +534,7 @@ impl Search {
         let stop = Arc::new(AtomicBool::new(false));
         let ponderhit_flag = Arc::new(AtomicBool::new(false));
         let max_moves_to_draw = DEFAULT_MAX_MOVES_TO_DRAW;
+        let search_tune_params = SearchTuneParams::default();
         let thread_pool = ThreadPool::new(
             1,
             Arc::clone(&tt),
@@ -536,6 +542,7 @@ impl Search {
             Arc::clone(&stop),
             Arc::clone(&ponderhit_flag),
             max_moves_to_draw,
+            search_tune_params,
         );
 
         Self {
@@ -564,6 +571,7 @@ impl Search {
             increase_depth: true,
             search_again_counter: 0,
             max_moves_to_draw,
+            search_tune_params,
         }
     }
 
@@ -694,12 +702,39 @@ impl Search {
             Arc::clone(&self.tt),
             Arc::clone(&self.eval_hash),
             self.max_moves_to_draw,
+            self.search_tune_params,
         );
     }
 
     /// 探索スレッド数を取得
     pub fn num_threads(&self) -> usize {
         self.num_threads
+    }
+
+    /// 探索チューニングパラメータを取得
+    pub fn search_tune_params(&self) -> SearchTuneParams {
+        self.search_tune_params
+    }
+
+    /// 探索チューニングパラメータを一括設定
+    pub fn set_search_tune_params(&mut self, params: SearchTuneParams) {
+        self.search_tune_params = params;
+        if let Some(worker) = &mut self.worker {
+            worker.search_tune_params = params;
+        }
+        self.thread_pool.update_search_tune_params(params);
+    }
+
+    /// 探索チューニング項目を1つ更新（USI option名ベース）
+    pub fn set_search_tune_option(
+        &mut self,
+        name: &str,
+        value: i32,
+    ) -> Option<super::SearchTuneSetResult> {
+        let mut params = self.search_tune_params;
+        let result = params.set_from_usi_name(name, value)?;
+        self.set_search_tune_params(params);
+        Some(result)
     }
 
     /// 探索を実行
@@ -745,12 +780,14 @@ impl Search {
         let tt_clone = Arc::clone(&self.tt);
         let eval_hash_clone = Arc::clone(&self.eval_hash);
         let max_moves = self.max_moves_to_draw;
-        let worker = self
-            .worker
-            .get_or_insert_with(|| SearchWorker::new(tt_clone, eval_hash_clone, max_moves, 0));
+        let search_tune_params = self.search_tune_params;
+        let worker = self.worker.get_or_insert_with(|| {
+            SearchWorker::new(tt_clone, eval_hash_clone, max_moves, 0, search_tune_params)
+        });
 
         // setoptionで変更された可能性があるため、最新値を反映
         worker.max_moves_to_draw = self.max_moves_to_draw;
+        worker.search_tune_params = self.search_tune_params;
 
         // 探索状態のリセット（履歴はクリアしない、YaneuraOu準拠）
         worker.prepare_search();
@@ -1618,7 +1655,13 @@ mod tests {
             .spawn(|| {
                 let tt = Arc::new(TranspositionTable::new(16));
                 let eval_hash = Arc::new(EvalHash::new(1));
-                let mut worker = SearchWorker::new(tt, eval_hash, DEFAULT_MAX_MOVES_TO_DRAW, 0);
+                let mut worker = SearchWorker::new(
+                    tt,
+                    eval_hash,
+                    DEFAULT_MAX_MOVES_TO_DRAW,
+                    0,
+                    SearchTuneParams::default(),
+                );
                 worker.state.best_move_changes = 3.5;
 
                 let summary = WorkerSummary::from(&*worker);

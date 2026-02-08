@@ -19,6 +19,7 @@ use std::rc::Rc;
 use crate::types::{Color, Move, Piece, PieceType, Square};
 
 use super::tt_history::TTMoveHistory;
+use super::tune_params::SearchTuneParams;
 
 // =============================================================================
 // 定数
@@ -834,10 +835,11 @@ impl HistoryCell {
 /// YaneuraOu準拠: `min(121*depth-77, 1633) + 375*(bestMove == ttMove)`
 /// - `is_tt_move`: bestMoveがTT手と一致する場合はtrue
 #[inline]
-pub fn stat_bonus(depth: i32, is_tt_move: bool) -> i32 {
-    let base = (121 * depth - 77).min(1633);
+pub fn stat_bonus(depth: i32, is_tt_move: bool, tune_params: &SearchTuneParams) -> i32 {
+    let base = (tune_params.stat_bonus_depth_mult * depth + tune_params.stat_bonus_offset)
+        .min(tune_params.stat_bonus_max);
     if is_tt_move {
-        base + 375
+        base + tune_params.stat_bonus_tt_bonus
     } else {
         base
     }
@@ -848,13 +850,15 @@ pub fn stat_bonus(depth: i32, is_tt_move: bool) -> i32 {
 /// YaneuraOu準拠: `min(825*depth-196, 2159) - 16*moveCount`
 /// quiet/capture 共通で使用。
 #[inline]
-pub fn stat_malus(depth: i32, move_count: i32) -> i32 {
-    (825 * depth - 196).min(2159) - 16 * move_count
+pub fn stat_malus(depth: i32, move_count: i32, tune_params: &SearchTuneParams) -> i32 {
+    (tune_params.stat_malus_depth_mult * depth + tune_params.stat_malus_offset)
+        .min(tune_params.stat_malus_max)
+        - tune_params.stat_malus_move_count_mult * move_count
 }
 
 // 後方互換性のため旧APIも残す（非推奨）
 /// History更新用のボーナスを計算（旧API、非推奨）
-#[deprecated(note = "Use stat_bonus(depth, is_tt_move) instead")]
+#[deprecated(note = "Use stat_bonus(depth, is_tt_move, tune_params) instead")]
 #[inline]
 pub fn stat_bonus_old(depth: i32) -> i32 {
     (130 * depth - 103).min(1652)
@@ -866,28 +870,48 @@ pub fn stat_bonus_old(depth: i32) -> i32 {
 
 /// LowPlyHistory用のボーナスを計算（YaneuraOu準拠）
 #[inline]
-pub fn low_ply_history_bonus(bonus: i32) -> i32 {
-    bonus * LOW_PLY_HISTORY_MULTIPLIER / 1024 + LOW_PLY_HISTORY_OFFSET
+pub fn low_ply_history_bonus(bonus: i32, tune_params: &SearchTuneParams) -> i32 {
+    bonus * tune_params.low_ply_history_multiplier / 1024 + tune_params.low_ply_history_offset
 }
 
 /// ContinuationHistory用のボーナスを計算（YaneuraOu準拠）
 ///
 /// 正負共通の倍率を使用。
 #[inline]
-pub fn continuation_history_bonus(bonus: i32) -> i32 {
-    bonus * CONTINUATION_HISTORY_MULTIPLIER / 1024
+pub fn continuation_history_bonus(bonus: i32, tune_params: &SearchTuneParams) -> i32 {
+    bonus * tune_params.continuation_history_multiplier / 1024
+}
+
+/// ContinuationHistory更新重みを取得する。
+///
+/// `ply_back` は 1..=6 を想定する。範囲外は0を返す。
+#[inline]
+pub fn continuation_history_weight(tune_params: &SearchTuneParams, ply_back: usize) -> i32 {
+    match ply_back {
+        1 => tune_params.continuation_history_weight_1,
+        2 => tune_params.continuation_history_weight_2,
+        3 => tune_params.continuation_history_weight_3,
+        4 => tune_params.continuation_history_weight_4,
+        5 => tune_params.continuation_history_weight_5,
+        6 => tune_params.continuation_history_weight_6,
+        _ => 0,
+    }
 }
 
 /// ContinuationHistory近接ply（1,2手前）用のオフセット込みボーナスを計算
 ///
 /// YaneuraOu準拠: オフセットは常に加算（負のボーナス時もペナルティを緩める）
-/// `(bonus * weight / 1024) + 80 * (i < 2)`
+/// `(bonus * weight / 1024) + near_ply_offset * (i < 2)`
 #[inline]
-pub fn continuation_history_bonus_with_offset(bonus: i32, ply_back: usize) -> i32 {
-    let base = continuation_history_bonus(bonus);
+pub fn continuation_history_bonus_with_offset(
+    bonus: i32,
+    ply_back: usize,
+    tune_params: &SearchTuneParams,
+) -> i32 {
+    let base = continuation_history_bonus(bonus, tune_params);
     if ply_back <= 2 {
         // YaneuraOu: 負のボーナスでも+80を加算してペナルティを緩める
-        base + CONTINUATION_HISTORY_NEAR_PLY_OFFSET
+        base + tune_params.continuation_history_near_ply_offset
     } else {
         base
     }
@@ -897,11 +921,11 @@ pub fn continuation_history_bonus_with_offset(bonus: i32, ply_back: usize) -> i3
 ///
 /// `bonus * (bonus > 0 ? 850 : 550) / 1024`
 #[inline]
-pub fn pawn_history_bonus(bonus: i32) -> i32 {
+pub fn pawn_history_bonus(bonus: i32, tune_params: &SearchTuneParams) -> i32 {
     if bonus > 0 {
-        bonus * PAWN_HISTORY_POS_MULTIPLIER / 1024
+        bonus * tune_params.pawn_history_pos_multiplier / 1024
     } else {
-        bonus * PAWN_HISTORY_NEG_MULTIPLIER / 1024
+        bonus * tune_params.pawn_history_neg_multiplier / 1024
     }
 }
 
@@ -1014,25 +1038,27 @@ mod tests {
 
     #[test]
     fn test_stat_bonus() {
+        let tune = SearchTuneParams::default();
         // YaneuraOu準拠: min(121*depth-77, 1633) + 375*(is_tt_move)
         // depth=1, is_tt_move=false: 121*1-77 = 44
-        assert_eq!(stat_bonus(1, false), 44);
+        assert_eq!(stat_bonus(1, false, &tune), 44);
         // depth=1, is_tt_move=true: 44 + 375 = 419
-        assert_eq!(stat_bonus(1, true), 419);
+        assert_eq!(stat_bonus(1, true, &tune), 419);
         // depth=20: min(121*20-77, 1633) = min(2343, 1633) = 1633
-        assert_eq!(stat_bonus(20, false), 1633);
-        assert_eq!(stat_bonus(20, true), 1633 + 375);
+        assert_eq!(stat_bonus(20, false, &tune), 1633);
+        assert_eq!(stat_bonus(20, true, &tune), 1633 + 375);
     }
 
     #[test]
     fn test_stat_malus() {
+        let tune = SearchTuneParams::default();
         // YaneuraOu準拠: min(825*depth-196, 2159) - 16*moveCount
         // depth=1, moveCount=0: 825*1-196 = 629
-        assert_eq!(stat_malus(1, 0), 629);
+        assert_eq!(stat_malus(1, 0, &tune), 629);
         // depth=1, moveCount=10: 629 - 16*10 = 469
-        assert_eq!(stat_malus(1, 10), 469);
+        assert_eq!(stat_malus(1, 10, &tune), 469);
         // depth=10, moveCount=0: min(825*10-196, 2159) = min(8054, 2159) = 2159
-        assert_eq!(stat_malus(10, 0), 2159);
+        assert_eq!(stat_malus(10, 0, &tune), 2159);
     }
 
     #[test]
