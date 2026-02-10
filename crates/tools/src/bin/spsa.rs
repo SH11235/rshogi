@@ -5,10 +5,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use clap::Parser;
-use rand::prelude::IndexedRandom;
+use crossbeam_channel::unbounded;
 use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tools::selfplay::game::{run_game, GameConfig, MoveEvent};
 use tools::selfplay::time_control::TimeControl;
@@ -33,6 +34,10 @@ struct Cli {
     /// 1イテレーションあたり対局数（偶数必須）
     #[arg(long, default_value_t = 2)]
     games_per_iteration: u32,
+
+    /// 対局並列数（worker数）
+    #[arg(long, default_value_t = 1)]
+    concurrency: usize,
 
     /// 摂動スケール
     #[arg(long, default_value_t = 1.0)]
@@ -70,6 +75,10 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     resume: bool,
 
+    /// resume時にmetaのschedule不一致を許可する
+    #[arg(long, default_value_t = false)]
+    force_schedule: bool,
+
     /// 反復統計CSVの出力先（resume時は追記）
     #[arg(long)]
     stats_csv: Option<PathBuf>,
@@ -77,6 +86,10 @@ struct Cli {
     /// 反復統計のseed横断集計CSV（平均・分散）
     #[arg(long)]
     stats_aggregate_csv: Option<PathBuf>,
+
+    /// 反復ごとのパラメータ値履歴CSV（wide形式）
+    #[arg(long)]
+    param_values_csv: Option<PathBuf>,
 
     /// 乱数seed（単一）
     #[arg(long, conflicts_with = "seeds")]
@@ -93,6 +106,10 @@ struct Cli {
     /// エンジン追加引数
     #[arg(long, num_args = 1..)]
     engine_args: Option<Vec<String>>,
+
+    /// 追加USIオプション（Name=Value形式、複数指定可）
+    #[arg(long = "usi-option", num_args = 1..)]
+    usi_options: Option<Vec<String>>,
 
     /// Threads option
     #[arg(long, default_value_t = 1)]
@@ -118,6 +135,10 @@ struct Cli {
     #[arg(long)]
     startpos_file: Option<PathBuf>,
 
+    /// --startpos-file の指定を必須化する
+    #[arg(long, default_value_t = false)]
+    require_startpos_file: bool,
+
     /// 単一開始局面（position行またはSFEN）
     #[arg(long)]
     sfen: Option<String>,
@@ -125,6 +146,22 @@ struct Cli {
     /// 開始局面をランダム選択
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     random_startpos: bool,
+
+    /// チューニング対象パラメータ名を正規表現で限定する
+    #[arg(long)]
+    active_only_regex: Option<String>,
+
+    /// 早期停止: avg_abs_update の閾値（以下で条件成立）
+    #[arg(long)]
+    early_stop_avg_abs_update_threshold: Option<f64>,
+
+    /// 早期停止: grad_scale_variance の閾値（以下で条件成立）
+    #[arg(long)]
+    early_stop_grad_scale_variance_threshold: Option<f64>,
+
+    /// 早期停止: 条件連続成立回数（0で無効）
+    #[arg(long, default_value_t = 0)]
+    early_stop_patience: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -204,8 +241,86 @@ struct AggregateIterationStats {
     total_games: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct GameTask {
+    game_idx: u32,
+    plus_is_black: bool,
+    start_pos_index: usize,
+    game_id: u32,
+}
+
+#[derive(Clone, Copy)]
+struct GameTaskResult {
+    game_idx: u32,
+    plus_is_black: bool,
+    plus_score: f64,
+    outcome: GameOutcome,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SeedGameStats {
+    step_sum: f64,
+    plus_wins: u32,
+    minus_wins: u32,
+    draws: u32,
+}
+
+struct SeedRunContext<'a> {
+    concurrency: usize,
+    base_cfg: &'a EngineConfig,
+    params: &'a [SpsaParam],
+    plus_values: &'a [f64],
+    minus_values: &'a [f64],
+    start_positions: &'a [ParsedPosition],
+    start_pos_indices: &'a [usize],
+    game_cfg: &'a GameConfig,
+    tc: TimeControl,
+    total_games_start: usize,
+    iteration: u32,
+    seed_idx: usize,
+    seed_count: usize,
+    base_seed: u64,
+    active_only_regex: Option<&'a Regex>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct EarlyStopConfig {
+    avg_abs_update_threshold: f64,
+    grad_scale_variance_threshold: f64,
+    patience: u32,
+}
+
 fn default_meta_path(params_path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.meta.json", params_path.display()))
+}
+
+fn schedule_matches(lhs: ScheduleConfig, rhs: ScheduleConfig) -> bool {
+    const EPS: f64 = 1e-12;
+    (lhs.a - rhs.a).abs() <= EPS
+        && (lhs.a_offset - rhs.a_offset).abs() <= EPS
+        && (lhs.alpha - rhs.alpha).abs() <= EPS
+        && (lhs.c - rhs.c).abs() <= EPS
+        && (lhs.gamma - rhs.gamma).abs() <= EPS
+        && (lhs.scale - rhs.scale).abs() <= EPS
+        && (lhs.mobility - rhs.mobility).abs() <= EPS
+}
+
+fn is_param_active(param: &SpsaParam, active_only_regex: Option<&Regex>) -> bool {
+    if param.not_used {
+        return false;
+    }
+    if let Some(re) = active_only_regex {
+        return re.is_match(&param.name);
+    }
+    true
+}
+
+fn format_param_value_for_csv(param: &SpsaParam) -> String {
+    if param.is_int {
+        format!("{}", param.value.round() as i64)
+    } else {
+        format!("{:.6}", param.value)
+    }
 }
 
 fn write_stats_csv_header(writer: &mut BufWriter<File>) -> Result<()> {
@@ -223,6 +338,15 @@ fn write_stats_aggregate_csv_header(writer: &mut BufWriter<File>) -> Result<()> 
         "iteration,seeds,games_per_seed,step_sum_mean,step_sum_variance,grad_scale_mean,grad_scale_variance,\
          plus_wins_mean,plus_wins_variance,minus_wins_mean,minus_wins_variance,draws_mean,draws_variance,total_games"
     )?;
+    Ok(())
+}
+
+fn write_param_values_csv_header(writer: &mut BufWriter<File>, params: &[SpsaParam]) -> Result<()> {
+    write!(writer, "iteration")?;
+    for param in params {
+        write!(writer, ",{}", param.name)?;
+    }
+    writeln!(writer)?;
     Ok(())
 }
 
@@ -296,6 +420,45 @@ fn open_stats_aggregate_csv_writer(path: &Path, resume: bool) -> Result<BufWrite
     Ok(writer)
 }
 
+fn open_param_values_csv_writer(
+    path: &Path,
+    resume: bool,
+    params: &[SpsaParam],
+) -> Result<BufWriter<File>> {
+    let write_header = if resume {
+        if !path.exists() {
+            true
+        } else {
+            std::fs::metadata(path)
+                .with_context(|| format!("failed to stat {}", path.display()))?
+                .len()
+                == 0
+        }
+    } else {
+        true
+    };
+    let file = if resume {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .with_context(|| format!("failed to open {} for append", path.display()))?
+    } else {
+        OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .with_context(|| format!("failed to create {}", path.display()))?
+    };
+    let mut writer = BufWriter::new(file);
+    if write_header {
+        write_param_values_csv_header(&mut writer, params)?;
+        writer.flush()?;
+    }
+    Ok(writer)
+}
+
 fn write_stats_csv_row(writer: &mut BufWriter<File>, stats: IterationStats) -> Result<()> {
     writeln!(
         writer,
@@ -342,6 +505,19 @@ fn write_stats_aggregate_csv_row(
         stats.draws_variance,
         stats.total_games
     )?;
+    Ok(())
+}
+
+fn write_param_values_csv_row(
+    writer: &mut BufWriter<File>,
+    iteration: u32,
+    params: &[SpsaParam],
+) -> Result<()> {
+    write!(writer, "{iteration}")?;
+    for param in params {
+        write!(writer, ",{}", format_param_value_for_csv(param))?;
+    }
+    writeln!(writer)?;
     Ok(())
 }
 
@@ -494,9 +670,10 @@ fn apply_parameter_vector(
     engine: &mut EngineProcess,
     params: &[SpsaParam],
     values: &[f64],
+    active_only_regex: Option<&Regex>,
 ) -> Result<()> {
     for (p, &v) in params.iter().zip(values.iter()) {
-        if p.not_used {
+        if !is_param_active(p, active_only_regex) {
             continue;
         }
         engine.set_option_if_available(&p.name, &option_value_string(p, v))?;
@@ -525,16 +702,19 @@ fn plus_score_from_outcome(outcome: GameOutcome, plus_is_black: bool) -> f64 {
     }
 }
 
-fn pick_startpos<'a>(
-    start_positions: &'a [ParsedPosition],
+fn pick_startpos_index(
+    start_positions_len: usize,
     rng: &mut impl rand::Rng,
     random: bool,
     game_index: usize,
-) -> Result<&'a ParsedPosition> {
+) -> Result<usize> {
+    if start_positions_len == 0 {
+        bail!("no start positions available");
+    }
     if random {
-        start_positions.choose(rng).context("no start positions available")
+        Ok(rng.random_range(0..start_positions_len))
     } else {
-        Ok(&start_positions[game_index % start_positions.len()])
+        Ok(game_index % start_positions_len)
     }
 }
 
@@ -570,6 +750,204 @@ fn seed_for_iteration(base_seed: u64, iteration_index: u32) -> u64 {
     base_seed ^ iter_term
 }
 
+fn duplicate_engine_config(cfg: &EngineConfig) -> EngineConfig {
+    EngineConfig {
+        path: cfg.path.clone(),
+        args: cfg.args.clone(),
+        threads: cfg.threads,
+        hash_mb: cfg.hash_mb,
+        network_delay: cfg.network_delay,
+        network_delay2: cfg.network_delay2,
+        minimum_thinking_time: cfg.minimum_thinking_time,
+        slowmover: cfg.slowmover,
+        ponder: cfg.ponder,
+        usi_options: cfg.usi_options.clone(),
+    }
+}
+
+fn run_seed_games_parallel(ctx: SeedRunContext<'_>) -> Result<SeedGameStats> {
+    let SeedRunContext {
+        concurrency,
+        base_cfg,
+        params,
+        plus_values,
+        minus_values,
+        start_positions,
+        start_pos_indices,
+        game_cfg,
+        tc,
+        total_games_start,
+        iteration,
+        seed_idx,
+        seed_count,
+        base_seed,
+        active_only_regex,
+    } = ctx;
+
+    let game_count = start_pos_indices.len();
+    if game_count == 0 {
+        return Ok(SeedGameStats {
+            step_sum: 0.0,
+            plus_wins: 0,
+            minus_wins: 0,
+            draws: 0,
+        });
+    }
+    let worker_count = concurrency.clamp(1, game_count);
+    let (task_tx, task_rx) = unbounded::<GameTask>();
+    let (result_tx, result_rx) = unbounded::<Result<GameTaskResult>>();
+
+    std::thread::scope(|scope| -> Result<SeedGameStats> {
+        for worker_idx in 0..worker_count {
+            let task_rx = task_rx.clone();
+            let result_tx = result_tx.clone();
+            let worker_cfg = duplicate_engine_config(base_cfg);
+            let worker_label = format!("seed{}_worker{}", seed_idx + 1, worker_idx + 1);
+            scope.spawn(move || {
+                let mut plus_engine =
+                    match EngineProcess::spawn(&worker_cfg, format!("plus_{worker_label}")) {
+                        Ok(engine) => engine,
+                        Err(err) => {
+                            let _ = result_tx.send(Err(err));
+                            return;
+                        }
+                    };
+                let mut minus_engine =
+                    match EngineProcess::spawn(&worker_cfg, format!("minus_{worker_label}")) {
+                        Ok(engine) => engine,
+                        Err(err) => {
+                            let _ = result_tx.send(Err(err));
+                            return;
+                        }
+                    };
+                for task in task_rx {
+                    let result = (|| -> Result<GameTaskResult> {
+                        if task.plus_is_black {
+                            apply_parameter_vector(
+                                &mut plus_engine,
+                                params,
+                                plus_values,
+                                active_only_regex,
+                            )?;
+                            apply_parameter_vector(
+                                &mut minus_engine,
+                                params,
+                                minus_values,
+                                active_only_regex,
+                            )?;
+                        } else {
+                            apply_parameter_vector(
+                                &mut plus_engine,
+                                params,
+                                minus_values,
+                                active_only_regex,
+                            )?;
+                            apply_parameter_vector(
+                                &mut minus_engine,
+                                params,
+                                plus_values,
+                                active_only_regex,
+                            )?;
+                        }
+                        plus_engine.new_game()?;
+                        minus_engine.new_game()?;
+
+                        let start_pos = &start_positions[task.start_pos_index];
+                        let mut on_move = |_event: &MoveEvent| {};
+                        let result = if task.plus_is_black {
+                            run_game(
+                                &mut plus_engine,
+                                &mut minus_engine,
+                                start_pos,
+                                tc,
+                                game_cfg,
+                                task.game_id,
+                                &mut on_move,
+                                None,
+                            )?
+                        } else {
+                            run_game(
+                                &mut minus_engine,
+                                &mut plus_engine,
+                                start_pos,
+                                tc,
+                                game_cfg,
+                                task.game_id,
+                                &mut on_move,
+                                None,
+                            )?
+                        };
+                        let plus_score =
+                            plus_score_from_outcome(result.outcome, task.plus_is_black);
+                        Ok(GameTaskResult {
+                            game_idx: task.game_idx,
+                            plus_is_black: task.plus_is_black,
+                            plus_score,
+                            outcome: result.outcome,
+                        })
+                    })();
+                    if result_tx.send(result).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(task_rx);
+        drop(result_tx);
+
+        for (idx, &start_pos_index) in start_pos_indices.iter().enumerate() {
+            let game_idx = u32::try_from(idx).context("game index overflow")?;
+            let game_id = u32::try_from(total_games_start + idx + 1).context("game id overflow")?;
+            task_tx
+                .send(GameTask {
+                    game_idx,
+                    plus_is_black: idx % 2 == 0,
+                    start_pos_index,
+                    game_id,
+                })
+                .context("failed to dispatch game task")?;
+        }
+        drop(task_tx);
+
+        let mut step_sum = 0.0f64;
+        let mut plus_wins = 0u32;
+        let mut minus_wins = 0u32;
+        let mut draws = 0u32;
+
+        for _ in 0..game_count {
+            let result =
+                result_rx.recv().context("failed to receive game result from worker")??;
+            step_sum += result.plus_score;
+            if result.plus_score > 0.0 {
+                plus_wins += 1;
+            } else if result.plus_score < 0.0 {
+                minus_wins += 1;
+            } else {
+                draws += 1;
+            }
+            println!(
+                "iter={} seed={}/{}({}) game={}/{} plus_is_black={} outcome={} plus_score={:+.1}",
+                iteration,
+                seed_idx + 1,
+                seed_count,
+                base_seed,
+                result.game_idx + 1,
+                game_count,
+                result.plus_is_black,
+                result.outcome.label(),
+                result.plus_score
+            );
+        }
+
+        Ok(SeedGameStats {
+            step_sum,
+            plus_wins,
+            minus_wins,
+            draws,
+        })
+    })
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .target(env_logger::Target::Stderr)
@@ -581,6 +959,9 @@ fn main() -> Result<()> {
     }
     if cli.iterations == 0 {
         bail!("--iterations must be >= 1");
+    }
+    if cli.concurrency == 0 {
+        bail!("--concurrency must be >= 1");
     }
     if cli.scale <= 0.0 {
         bail!("--scale must be > 0");
@@ -594,6 +975,43 @@ fn main() -> Result<()> {
     if cli.a_offset < 0.0 {
         bail!("--a-offset must be >= 0");
     }
+    if let Some(v) = cli.early_stop_avg_abs_update_threshold {
+        if v < 0.0 {
+            bail!("--early-stop-avg-abs-update-threshold must be >= 0");
+        }
+    }
+    if let Some(v) = cli.early_stop_grad_scale_variance_threshold {
+        if v < 0.0 {
+            bail!("--early-stop-grad-scale-variance-threshold must be >= 0");
+        }
+    }
+    let early_stop_config = match (
+        cli.early_stop_avg_abs_update_threshold,
+        cli.early_stop_grad_scale_variance_threshold,
+        cli.early_stop_patience,
+    ) {
+        (None, None, 0) => None,
+        (Some(avg), Some(var), patience) if patience > 0 => Some(EarlyStopConfig {
+            avg_abs_update_threshold: avg,
+            grad_scale_variance_threshold: var,
+            patience,
+        }),
+        _ => {
+            bail!(
+                "early stopを有効化するには \
+                 --early-stop-avg-abs-update-threshold, \
+                 --early-stop-grad-scale-variance-threshold, \
+                 --early-stop-patience(>0) を全て指定してください"
+            );
+        }
+    };
+
+    let active_only_regex = cli
+        .active_only_regex
+        .as_deref()
+        .map(Regex::new)
+        .transpose()
+        .context("invalid --active-only-regex")?;
     let seed_values = resolve_seeds(&cli);
     if seed_values.is_empty() {
         bail!("at least one seed is required");
@@ -624,13 +1042,24 @@ fn main() -> Result<()> {
                 meta_path.display()
             );
         }
-        if meta.schedule != schedule {
-            eprintln!(
-                "warning: schedule differs from metadata. continuing with current CLI values \
-                 (meta={}, cli={:?})",
-                meta_path.display(),
-                schedule
-            );
+        if !schedule_matches(meta.schedule, schedule) {
+            if cli.force_schedule {
+                eprintln!(
+                    "warning: schedule differs from metadata but continuing due to --force-schedule \
+                     (meta={}, meta_schedule={:?}, cli_schedule={:?})",
+                    meta_path.display(),
+                    meta.schedule,
+                    schedule
+                );
+            } else {
+                bail!(
+                    "schedule mismatch with {}. use --force-schedule to override \
+                     (meta_schedule={:?}, cli_schedule={:?})",
+                    meta_path.display(),
+                    meta.schedule,
+                    schedule
+                );
+            }
         }
         (meta.completed_iterations, meta.total_games)
     } else {
@@ -658,9 +1087,34 @@ fn main() -> Result<()> {
     } else {
         None
     };
+    let mut param_values_csv_writer = if let Some(path) = &cli.param_values_csv {
+        Some(open_param_values_csv_writer(path, cli.resume, &params)?)
+    } else {
+        None
+    };
+
+    if cli.startpos_file.is_none() {
+        if cli.require_startpos_file {
+            bail!("--require-startpos-file was set but --startpos-file was not provided");
+        }
+        eprintln!(
+            "warning: --startpos-file is not specified. opening diversity may be insufficient"
+        );
+    }
 
     let (start_positions, _) =
         load_start_positions(cli.startpos_file.as_deref(), cli.sfen.as_deref(), None, None)?;
+    let active_param_count = params
+        .iter()
+        .filter(|param| is_param_active(param, active_only_regex.as_ref()))
+        .count();
+    if active_param_count == 0 {
+        bail!(
+            "no active parameters (active_only_regex={:?}, not_used filtering may have excluded all)",
+            cli.active_only_regex
+        );
+    }
+    println!("active params: {active_param_count}/{}", params.len());
 
     let base_cfg = EngineConfig {
         path: engine_path,
@@ -672,11 +1126,8 @@ fn main() -> Result<()> {
         minimum_thinking_time: None,
         slowmover: None,
         ponder: false,
-        usi_options: Vec::new(),
+        usi_options: cli.usi_options.clone().unwrap_or_default(),
     };
-
-    let mut plus_engine = EngineProcess::spawn(&base_cfg, "plus".to_string())?;
-    let mut minus_engine = EngineProcess::spawn(&base_cfg, "minus".to_string())?;
 
     let game_cfg = GameConfig {
         max_moves: cli.max_moves,
@@ -684,6 +1135,7 @@ fn main() -> Result<()> {
         pass_rights: None,
     };
     let tc = TimeControl::new(0, 0, 0, 0, cli.byoyomi);
+    let mut early_stop_consecutive = 0u32;
 
     for iter in start_iteration..end_iteration {
         let (a_t, c_t) = schedule_values(schedule, iter);
@@ -701,7 +1153,7 @@ fn main() -> Result<()> {
             let shifts: Vec<f64> = params
                 .iter()
                 .map(|p| {
-                    if p.not_used {
+                    if !is_param_active(p, active_only_regex.as_ref()) {
                         0.0
                     } else if rng.random_bool(0.5) {
                         p.step * cli.scale * c_t
@@ -725,7 +1177,7 @@ fn main() -> Result<()> {
             let mut active_params = 0usize;
             let mut abs_shift_sum = 0.0f64;
             for (p, &shift) in params.iter().zip(shifts.iter()) {
-                if p.not_used {
+                if !is_param_active(p, active_only_regex.as_ref()) {
                     continue;
                 }
                 active_params += 1;
@@ -736,80 +1188,47 @@ fn main() -> Result<()> {
             } else {
                 0.0
             };
-
-            let mut step_sum = 0.0f64;
-            let mut plus_wins = 0u32;
-            let mut minus_wins = 0u32;
-            let mut draws = 0u32;
-
-            for game_idx in 0..cli.games_per_iteration {
-                let plus_is_black = game_idx % 2 == 0;
-                if plus_is_black {
-                    apply_parameter_vector(&mut plus_engine, &params, &plus_values)?;
-                    apply_parameter_vector(&mut minus_engine, &params, &minus_values)?;
-                } else {
-                    apply_parameter_vector(&mut plus_engine, &params, &minus_values)?;
-                    apply_parameter_vector(&mut minus_engine, &params, &plus_values)?;
-                }
-                plus_engine.new_game()?;
-                minus_engine.new_game()?;
-
-                let start_pos =
-                    pick_startpos(&start_positions, &mut rng, cli.random_startpos, total_games)?;
-                total_games += 1;
-
-                let mut on_move = |_event: &MoveEvent| {};
-                let result = if plus_is_black {
-                    run_game(
-                        &mut plus_engine,
-                        &mut minus_engine,
-                        start_pos,
-                        tc,
-                        &game_cfg,
-                        total_games as u32,
-                        &mut on_move,
-                        None,
-                    )?
-                } else {
-                    run_game(
-                        &mut minus_engine,
-                        &mut plus_engine,
-                        start_pos,
-                        tc,
-                        &game_cfg,
-                        total_games as u32,
-                        &mut on_move,
-                        None,
-                    )?
-                };
-
-                let plus_score = plus_score_from_outcome(result.outcome, plus_is_black);
-                step_sum += plus_score;
-                if plus_score > 0.0 {
-                    plus_wins += 1;
-                } else if plus_score < 0.0 {
-                    minus_wins += 1;
-                } else {
-                    draws += 1;
-                }
-                println!(
-                    "iter={} seed={}/{}({}) game={}/{} plus_is_black={} outcome={} plus_score={:+.1}",
-                    iter + 1,
-                    seed_idx + 1,
-                    seed_values.len(),
-                    base_seed,
-                    game_idx + 1,
-                    cli.games_per_iteration,
-                    plus_is_black,
-                    result.outcome.label(),
-                    plus_score
-                );
+            let seed_total_games_start = total_games;
+            let mut start_pos_indices = Vec::with_capacity(cli.games_per_iteration as usize);
+            for game_idx in 0..cli.games_per_iteration as usize {
+                start_pos_indices.push(pick_startpos_index(
+                    start_positions.len(),
+                    &mut rng,
+                    cli.random_startpos,
+                    seed_total_games_start + game_idx,
+                )?);
             }
+            let seed_game_stats = run_seed_games_parallel(SeedRunContext {
+                concurrency: cli.concurrency,
+                base_cfg: &base_cfg,
+                params: &params,
+                plus_values: &plus_values,
+                minus_values: &minus_values,
+                start_positions: &start_positions,
+                start_pos_indices: &start_pos_indices,
+                game_cfg: &game_cfg,
+                tc,
+                total_games_start: seed_total_games_start,
+                iteration: iter + 1,
+                seed_idx,
+                seed_count: seed_values.len(),
+                base_seed,
+                active_only_regex: active_only_regex.as_ref(),
+            })?;
+            total_games = total_games
+                .checked_add(cli.games_per_iteration as usize)
+                .context("total_games overflow")?;
+            let step_sum = seed_game_stats.step_sum;
+            let plus_wins = seed_game_stats.plus_wins;
+            let minus_wins = seed_game_stats.minus_wins;
+            let draws = seed_game_stats.draws;
 
             let grad_scale = step_sum / cli.games_per_iteration as f64;
             if c_t > f64::EPSILON {
                 for (idx, (p, &shift)) in params.iter().zip(shifts.iter()).enumerate() {
-                    if p.not_used || p.step.abs() <= f64::EPSILON {
+                    if !is_param_active(p, active_only_regex.as_ref())
+                        || p.step.abs() <= f64::EPSILON
+                    {
                         continue;
                     }
                     let direction = if shift >= 0.0 { 1.0 } else { -1.0 };
@@ -853,7 +1272,10 @@ fn main() -> Result<()> {
         let mut abs_update_sum = 0.0f64;
         let mut max_abs_update = 0.0f64;
         for (idx, p) in params.iter_mut().enumerate() {
-            if p.not_used || p.step.abs() <= f64::EPSILON || c_t <= f64::EPSILON {
+            if !is_param_active(p, active_only_regex.as_ref())
+                || p.step.abs() <= f64::EPSILON
+                || c_t <= f64::EPSILON
+            {
                 continue;
             }
             let before = p.value;
@@ -890,6 +1312,10 @@ fn main() -> Result<()> {
         let (draws_mean, draws_variance) = mean_and_variance(&seed_draws);
 
         write_params(&cli.params, &params)?;
+        if let Some(writer) = param_values_csv_writer.as_mut() {
+            write_param_values_csv_row(writer, iter + 1, &params)?;
+            writer.flush()?;
+        }
         let meta = ResumeMetaData {
             format_version: META_FORMAT_VERSION,
             params_file: cli.params.display().to_string(),
@@ -938,6 +1364,33 @@ fn main() -> Result<()> {
                 },
             )?;
             writer.flush()?;
+        }
+
+        if let Some(config) = early_stop_config {
+            let early_stop_hit = avg_abs_update <= config.avg_abs_update_threshold
+                && grad_scale_variance <= config.grad_scale_variance_threshold;
+            if early_stop_hit {
+                early_stop_consecutive = early_stop_consecutive.saturating_add(1);
+            } else {
+                early_stop_consecutive = 0;
+            }
+            println!(
+                "iter={} early_stop_hit={} consecutive={}/{} thresholds(avg_abs_update<={:.6}, grad_scale_variance<={:.6})",
+                iter + 1,
+                early_stop_hit,
+                early_stop_consecutive,
+                config.patience,
+                config.avg_abs_update_threshold,
+                config.grad_scale_variance_threshold
+            );
+            if early_stop_consecutive >= config.patience {
+                println!(
+                    "early stop triggered at iter={} (consecutive={})",
+                    iter + 1,
+                    early_stop_consecutive
+                );
+                break;
+            }
         }
     }
 
