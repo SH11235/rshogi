@@ -28,7 +28,7 @@ pub(super) fn try_futility_pruning(
     params: FutilityParams,
     tune_params: &super::SearchTuneParams,
 ) -> Option<Value> {
-    if !params.pv_node
+    if !params.tt_pv
         && !params.in_check
         && params.depth < 14
         && params.static_eval != Value::NONE
@@ -73,7 +73,7 @@ pub(super) fn try_small_probcut(
     if depth >= 1 {
         let sp_beta = beta + Value::new(tune_params.small_probcut_margin);
         if tt_ctx.hit
-            && tt_ctx.data.bound == Bound::Lower
+            && tt_ctx.data.bound.is_lower_or_exact()
             && tt_ctx.data.depth >= depth - 4
             && tt_ctx.value != Value::NONE
             && tt_ctx.value >= sp_beta
@@ -446,6 +446,7 @@ pub(super) fn try_probcut<F>(
     static_eval: Value,
     unadjusted_static_eval: Value,
     in_check: bool,
+    cut_node: bool,
     limits: &LimitsType,
     time_manager: &mut TimeManagement,
     search_node: F,
@@ -562,7 +563,7 @@ where
                 -prob_beta,
                 -prob_beta + Value::new(1),
                 ply + 1,
-                true,
+                !cut_node,
                 limits,
                 time_manager,
             );
@@ -585,10 +586,9 @@ where
             );
             inc_stat_by_depth!(st, tt_write_by_depth, stored_depth);
 
-            if value.raw().abs() < Value::INFINITE.raw() {
+            if !value.is_mate_score() {
                 return Some(value - (prob_beta - beta));
             }
-            return Some(value);
         }
     }
 

@@ -246,7 +246,7 @@ pub(super) struct FutilityParams {
     pub(super) tt_hit: bool,
     pub(super) tt_move_exists: bool, // TT に手が保存されているか
     pub(super) tt_capture: bool,     // TT の手が駒取りか
-    pub(super) pv_node: bool,
+    pub(super) tt_pv: bool,
     pub(super) in_check: bool,
 }
 
@@ -1399,7 +1399,7 @@ impl SearchWorker {
                 tt_hit,
                 tt_move_exists: tt_move.is_some(),
                 tt_capture,
-                pv_node,
+                tt_pv: st.stack[ply as usize].tt_pv,
                 in_check,
             },
             &ctx.tune_params,
@@ -1447,6 +1447,7 @@ impl SearchWorker {
             eval_ctx.static_eval,
             eval_ctx.unadjusted_static_eval,
             in_check,
+            cut_node,
             limits,
             time_manager,
             Self::search_node::<{ NodeType::NonPV as u8 }>,
@@ -1835,7 +1836,7 @@ impl SearchWorker {
                     }
                 }
 
-                let reduction_from_parent = (depth - 1) - d;
+                let reduction_from_parent = new_depth - d;
                 st.stack[ply as usize].reduction = reduction_from_parent;
                 let mut value = -Self::search_node::<{ NodeType::NonPV as u8 }>(
                     st,
@@ -1935,7 +1936,7 @@ impl SearchWorker {
                         st,
                         ctx,
                         pos,
-                        depth - 1,
+                        new_depth,
                         -beta,
                         -alpha,
                         ply + 1,
@@ -1948,12 +1949,19 @@ impl SearchWorker {
                 }
             } else if !pv_node || move_count > 1 {
                 // Zero window search
+                let mut non_lmr_depth = new_depth;
+                if tt_move.is_none() {
+                    r += 1118;
+                }
+                non_lmr_depth -= (r > 3212) as i32;
+                non_lmr_depth -= (r > 4784 && new_depth > 2) as i32;
+
                 st.stack[ply as usize].reduction = 0;
                 let mut value = -Self::search_node::<{ NodeType::NonPV as u8 }>(
                     st,
                     ctx,
                     pos,
-                    depth - 1,
+                    non_lmr_depth,
                     -alpha - Value::new(1),
                     -alpha,
                     ply + 1,
@@ -1969,7 +1977,7 @@ impl SearchWorker {
                         st,
                         ctx,
                         pos,
-                        depth - 1,
+                        new_depth,
                         -beta,
                         -alpha,
                         ply + 1,
@@ -1988,7 +1996,7 @@ impl SearchWorker {
                     st,
                     ctx,
                     pos,
-                    depth - 1,
+                    new_depth,
                     -beta,
                     -alpha,
                     ply + 1,
