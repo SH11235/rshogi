@@ -93,6 +93,12 @@ struct FileResult {
     white_wins: u32,
     draws: u32,
     done: u32,
+    /// meta.black エンジンが先手として対局した数・勝数
+    a_sente_games: u32,
+    a_sente_wins: u32,
+    /// meta.white エンジンが先手として対局した数・勝数
+    b_sente_games: u32,
+    b_sente_wins: u32,
 }
 
 /// 対戦カード（先手, 後手）ごとの集計
@@ -104,6 +110,12 @@ struct MatchupStats {
     white_wins: u32,
     draws: u32,
     files: u32,
+    /// meta.black エンジンの先手対局数・先手勝ち数
+    a_sente_games: u32,
+    a_sente_wins: u32,
+    /// meta.white エンジンの先手対局数・先手勝ち数
+    b_sente_games: u32,
+    b_sente_wins: u32,
 }
 
 /// エンジン別の集計
@@ -113,6 +125,12 @@ struct EngineStats {
     wins: u32,
     losses: u32,
     draws: u32,
+    /// 先手時の対局数・勝数
+    sente_games: u32,
+    sente_wins: u32,
+    /// 後手時の対局数・勝数
+    gote_games: u32,
+    gote_wins: u32,
 }
 
 /// 直接対決の集計（先後合算、正規化済み）
@@ -221,6 +239,11 @@ fn parse_summary_file(path: &str) -> Result<FileResult> {
             white_wins: summary.white_wins,
             draws: summary.draws,
             done,
+            // summary形式では先後別情報なし
+            a_sente_games: 0,
+            a_sente_wins: 0,
+            b_sente_games: 0,
+            b_sente_wins: 0,
         });
     }
     bail!("空のsummaryファイル: {path}");
@@ -238,6 +261,11 @@ fn parse_normal_file(path: &str) -> Result<FileResult> {
     let mut white_wins: u32 = 0;
     let mut draws: u32 = 0;
     let mut meta_parsed = false;
+    // per-engine sente/gote stats (a = meta.black engine, b = meta.white engine)
+    let mut a_sente_games: u32 = 0;
+    let mut a_sente_wins: u32 = 0;
+    let mut b_sente_games: u32 = 0;
+    let mut b_sente_wins: u32 = 0;
 
     for line in reader.lines() {
         let line = line?;
@@ -265,8 +293,34 @@ fn parse_normal_file(path: &str) -> Result<FileResult> {
                 } else if winner_id == white {
                     white_wins += 1;
                 }
-                // winner が black/white どちらにも一致しない場合は無視
-                // （通常起こらない）
+                // outcome + winner から各対局の先手/後手を判定
+                // outcome="black_win" → 先手が勝ち → winner が先手だった
+                // outcome="white_win" → 後手が勝ち → winner が後手だった
+                match result.outcome.as_str() {
+                    "black_win" => {
+                        // winner が先手
+                        if winner_id == black {
+                            a_sente_games += 1;
+                            a_sente_wins += 1;
+                        } else if winner_id == white {
+                            b_sente_games += 1;
+                            b_sente_wins += 1;
+                        }
+                        // 敗者は後手
+                        // (後手 games は done - sente_games で算出)
+                    }
+                    "white_win" => {
+                        // winner が後手 → 敗者が先手
+                        if winner_id == black {
+                            // black engine が後手で勝ち → white engine が先手で負け
+                            b_sente_games += 1;
+                        } else if winner_id == white {
+                            // white engine が後手で勝ち → black engine が先手で負け
+                            a_sente_games += 1;
+                        }
+                    }
+                    _ => {}
+                }
             } else {
                 // winner なし: 旧形式または引分
                 match result.outcome.as_str() {
@@ -289,6 +343,10 @@ fn parse_normal_file(path: &str) -> Result<FileResult> {
         white_wins,
         draws,
         done,
+        a_sente_games,
+        a_sente_wins,
+        b_sente_games,
+        b_sente_wins,
     })
 }
 
@@ -382,6 +440,10 @@ fn main() -> Result<()> {
                 stats.white_wins += result.white_wins;
                 stats.draws += result.draws;
                 stats.files += 1;
+                stats.a_sente_games += result.a_sente_games;
+                stats.a_sente_wins += result.a_sente_wins;
+                stats.b_sente_games += result.b_sente_games;
+                stats.b_sente_wins += result.b_sente_wins;
                 engine_ids.insert(result.black);
                 engine_ids.insert(result.white);
                 valid_files += 1;
@@ -412,17 +474,26 @@ fn main() -> Result<()> {
     // エンジン別集計
     let mut engines: BTreeMap<String, EngineStats> = BTreeMap::new();
     for ((b, w), v) in &matchups {
+        // b = meta.black engine (= "a"), w = meta.white engine (= "b")
         let be = engines.entry(b.clone()).or_default();
         be.wins += v.black_wins;
         be.losses += v.white_wins;
         be.draws += v.draws;
         be.games += v.done;
+        be.sente_games += v.a_sente_games;
+        be.sente_wins += v.a_sente_wins;
+        be.gote_games += v.done - v.a_sente_games; // 引分で先後不明分は除外済み
+        be.gote_wins += v.black_wins - v.a_sente_wins;
 
         let we = engines.entry(w.clone()).or_default();
         we.wins += v.white_wins;
         we.losses += v.black_wins;
         we.draws += v.draws;
         we.games += v.done;
+        we.sente_games += v.b_sente_games;
+        we.sente_wins += v.b_sente_wins;
+        we.gote_games += v.done - v.b_sente_games;
+        we.gote_wins += v.white_wins - v.b_sente_wins;
     }
 
     // 直接対決集計（先後合算、正規化キー: 辞書順で小さい方がleft）
@@ -512,9 +583,29 @@ fn print_text(
     for (id, s) in &engine_list {
         let name = labels.get(*id).map_or(id.as_str(), |s| s.as_str());
         let wr = win_rate(s.wins, s.losses, s.draws);
+        let sente_wr = if s.sente_games > 0 {
+            s.sente_wins as f64 / s.sente_games as f64 * 100.0
+        } else {
+            0.0
+        };
+        let gote_wr = if s.gote_games > 0 {
+            s.gote_wins as f64 / s.gote_games as f64 * 100.0
+        } else {
+            0.0
+        };
+        let sente_str = if s.sente_games > 0 {
+            format!("先手:{:.1}%({}/{})", sente_wr, s.sente_wins, s.sente_games)
+        } else {
+            "先手:-".to_string()
+        };
+        let gote_str = if s.gote_games > 0 {
+            format!("後手:{:.1}%({}/{})", gote_wr, s.gote_wins, s.gote_games)
+        } else {
+            "後手:-".to_string()
+        };
         println!(
-            "  {:16} | {:3}局完了 | 勝:{:3} 負:{:3} 引分:{:2} | 勝率:{:.1}%",
-            name, s.games, s.wins, s.losses, s.draws, wr
+            "  {:16} | {:3}局完了 | 勝:{:3} 負:{:3} 引分:{:2} | 勝率:{:.1}% ({} {})",
+            name, s.games, s.wins, s.losses, s.draws, wr, sente_str, gote_str
         );
     }
 
