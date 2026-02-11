@@ -490,7 +490,9 @@ where
 
     let dynamic_reduction =
         (static_eval - beta).raw() / ctx.tune_params.probcut_dynamic_reduction_div.max(1);
-    let probcut_depth = (depth - ctx.tune_params.probcut_depth_base - dynamic_reduction).max(0);
+    // YaneuraOu準拠: std::clamp(depth - 5 - ..., 0, depth) で上限もクランプ
+    let probcut_depth =
+        (depth - ctx.tune_params.probcut_depth_base - dynamic_reduction).clamp(0, depth);
 
     inc_stat!(st, probcut_attempted);
 

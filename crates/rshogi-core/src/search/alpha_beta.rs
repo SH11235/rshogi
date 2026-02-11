@@ -1924,10 +1924,7 @@ impl SearchWorker {
                     // cutoffCntインクリメント条件 (extension<2 || PvNode) をベータカット時に加算で近似。
                     // ※ Extension導入後は extension<2 を実際の延長量で判定する形に差し替えること。
                 } else if value > alpha && value < best_value + Value::new(9) {
-                    #[allow(unused_assignments)]
-                    {
-                        new_depth -= 1;
-                    }
+                    new_depth -= 1;
                 }
 
                 if pv_node && (move_count == 1 || value > alpha) {
@@ -2478,6 +2475,16 @@ impl SearchWorker {
                     .clamp(-CORRECTION_HISTORY_LIMIT / 4, CORRECTION_HISTORY_LIMIT / 4);
                 update_correction_history(st, ctx, pos, ply, bonus);
             }
+        }
+
+        // =================================================================
+        // ttPv の上方伝播（YaneuraOu準拠: yaneuraou-search.cpp:4007-4008）
+        // =================================================================
+        // fail low 時、親ノードが PV ライン上だったなら現ノードも PV ライン上として扱う。
+        // これにより LMR の reduction 調整や Futility Pruning の抑制が適切に機能する。
+        if best_value <= alpha {
+            st.stack[ply as usize].tt_pv =
+                st.stack[ply as usize].tt_pv || st.stack[(ply - 1) as usize].tt_pv;
         }
 
         // =================================================================
