@@ -4,6 +4,7 @@
 
 use crate::eval::EvalHash;
 use crate::time::Instant;
+use std::collections::HashMap;
 // AtomicU64 is only needed for native multi-threaded builds.
 // Wasm Rayon model doesn't use SearchProgress.
 #[cfg(not(target_arch = "wasm32"))]
@@ -309,19 +310,135 @@ struct ThreadSummary {
     id: usize,
     score: Value,
     completed_depth: Depth,
+    best_move: Move,
+    pv_len: usize,
 }
 
 impl ThreadSummary {
     fn from_worker(id: usize, worker: &SearchWorker) -> Option<Self> {
-        worker.state.root_moves.get(0).map(|rm| Self {
-            id,
-            score: rm.score,
-            completed_depth: worker.state.completed_depth,
+        worker.state.root_moves.get(0).map(|rm| {
+            let best_move = rm.pv.first().copied().unwrap_or_else(|| rm.mv());
+            Self {
+                id,
+                score: rm.score,
+                completed_depth: worker.state.completed_depth,
+                best_move,
+                pv_len: rm.pv.len(),
+            }
         })
     }
 }
 
-fn get_best_thread_id(main_worker: &SearchWorker, thread_pool: &ThreadPool) -> usize {
+#[inline]
+fn thread_voting_value(summary: &ThreadSummary, min_score: Value) -> i64 {
+    (summary.score.raw() - min_score.raw() + 14) as i64 * summary.completed_depth as i64
+}
+
+#[inline]
+fn is_proven_loss(score: Value) -> bool {
+    score != Value::new(-Value::INFINITE.raw()) && score.is_loss()
+}
+
+fn select_best_summary_index(summaries: &[ThreadSummary]) -> usize {
+    if summaries.is_empty() {
+        return 0;
+    }
+
+    let min_score =
+        summaries.iter().map(|s| s.score).min_by_key(|s| s.raw()).unwrap_or(Value::ZERO);
+
+    let mut votes = HashMap::with_capacity(2 * summaries.len());
+    for summary in summaries {
+        *votes.entry(summary.best_move).or_insert(0i64) += thread_voting_value(summary, min_score);
+    }
+
+    let mut best_idx = 0usize;
+    for (idx, summary) in summaries.iter().enumerate() {
+        let best = &summaries[best_idx];
+        let best_vote = *votes.get(&best.best_move).unwrap_or(&0);
+        let new_vote = *votes.get(&summary.best_move).unwrap_or(&0);
+
+        let best_in_proven_win = best.score.is_win();
+        let new_in_proven_win = summary.score.is_win();
+        let best_in_proven_loss = is_proven_loss(best.score);
+        let new_in_proven_loss = is_proven_loss(summary.score);
+
+        let better_voting_value = thread_voting_value(summary, min_score)
+            * (summary.pv_len > 2) as i64
+            > thread_voting_value(best, min_score) * (best.pv_len > 2) as i64;
+
+        if best_in_proven_win {
+            if summary.score > best.score {
+                best_idx = idx;
+            }
+        } else if best_in_proven_loss {
+            if new_in_proven_loss && summary.score < best.score {
+                best_idx = idx;
+            }
+        } else if new_in_proven_win
+            || new_in_proven_loss
+            || (!summary.score.is_loss()
+                && (new_vote > best_vote || (new_vote == best_vote && better_voting_value)))
+        {
+            best_idx = idx;
+        }
+    }
+
+    // main threadと異なる手をhelper 1本だけが強く主張している場合は、
+    // outlierに引っ張られて不自然な手を返しやすいためmainを優先する。
+    if best_idx != 0 {
+        let main = &summaries[0];
+        let selected = &summaries[best_idx];
+        if selected.best_move != main.best_move && !selected.score.is_mate_score() {
+            let support_count =
+                summaries.iter().filter(|s| s.best_move == selected.best_move).count();
+            if support_count < 2 {
+                return 0;
+            }
+        }
+    }
+
+    best_idx
+}
+
+#[inline]
+fn best_thread_debug_enabled() -> bool {
+    std::env::var("RSHOGI_DEBUG_BEST_THREAD")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "on" | "ON"))
+        .unwrap_or(false)
+}
+
+fn emit_best_thread_debug(
+    summaries: &[ThreadSummary],
+    votes: &HashMap<Move, i64>,
+    selected_id: usize,
+    applied: bool,
+) {
+    println!(
+        "info string [best_thread] applied={} selected_id={} threads={}",
+        applied,
+        selected_id,
+        summaries.len()
+    );
+
+    for summary in summaries {
+        let vote = votes.get(&summary.best_move).copied().unwrap_or(0);
+        println!(
+            "info string [best_thread] id={} depth={} score={} move={} pv_len={} vote={}",
+            summary.id,
+            summary.completed_depth,
+            summary.score.raw(),
+            summary.best_move.to_usi(),
+            summary.pv_len,
+            vote
+        );
+    }
+}
+
+fn collect_thread_summaries(
+    main_worker: &SearchWorker,
+    thread_pool: &ThreadPool,
+) -> Vec<ThreadSummary> {
     let mut summaries = Vec::new();
     if let Some(summary) = ThreadSummary::from_worker(0, main_worker) {
         summaries.push(summary);
@@ -344,6 +461,9 @@ fn get_best_thread_id(main_worker: &SearchWorker, thread_pool: &ThreadPool) -> u
             id: result.thread_id,
             score: result.best_score,
             completed_depth: result.completed_depth,
+            best_move: result.best_move,
+            // Wasm helper結果にはPV長がないため、切り詰め判定を不利にしない値を与える。
+            pv_len: 3,
         });
     }
 
@@ -351,28 +471,44 @@ fn get_best_thread_id(main_worker: &SearchWorker, thread_pool: &ThreadPool) -> u
     #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
     let _ = thread_pool;
 
+    summaries
+}
+
+fn should_use_best_thread_selection(limits: &LimitsType, skill_enabled: bool) -> bool {
+    // YaneuraOu準拠:
+    // - MultiPV=1
+    // - go depth/mate では使わない
+    // - Skill有効時は使わない
+    limits.multi_pv == 1 && limits.depth == 0 && limits.mate == 0 && !skill_enabled
+}
+
+fn get_best_thread_id(
+    main_worker: &SearchWorker,
+    thread_pool: &ThreadPool,
+    use_best_thread: bool,
+    debug: bool,
+) -> usize {
+    let summaries = collect_thread_summaries(main_worker, thread_pool);
     if summaries.is_empty() {
         return 0;
     }
 
-    if let Some(win) = summaries.iter().find(|s| s.score.is_win()) {
-        return win.id;
+    let min_score =
+        summaries.iter().map(|s| s.score).min_by_key(|s| s.raw()).unwrap_or(Value::ZERO);
+    let mut votes = HashMap::with_capacity(2 * summaries.len());
+    for summary in &summaries {
+        *votes.entry(summary.best_move).or_insert(0i64) += thread_voting_value(summary, min_score);
     }
 
-    let min_score = summaries.iter().map(|s| s.score.raw()).min().unwrap_or(0);
+    let candidate_idx = select_best_summary_index(&summaries);
+    let candidate_id = summaries[candidate_idx].id;
+    let selected_id = if use_best_thread { candidate_id } else { 0 };
 
-    let mut best_id = summaries[0].id;
-    let mut best_value = i64::MIN;
-    for summary in summaries {
-        let vote_value =
-            (summary.score.raw() - min_score + 14) as i64 * summary.completed_depth as i64;
-        if vote_value > best_value {
-            best_value = vote_value;
-            best_id = summary.id;
-        }
+    if debug {
+        emit_best_thread_debug(&summaries, &votes, selected_id, use_best_thread);
     }
 
-    best_id
+    selected_id
 }
 
 struct BestThreadResult {
@@ -842,12 +978,16 @@ impl Search {
             self.thread_pool.wait_for_search_finished();
         }
 
+        let use_best_thread =
+            self.num_threads > 1 && should_use_best_thread_selection(&limits, skill_enabled);
+        let debug_best_thread = best_thread_debug_enabled();
+
         let best_thread_id = {
             let worker = self
                 .worker
                 .as_ref()
                 .expect("worker should be initialized by search_with_callback");
-            get_best_thread_id(worker, &self.thread_pool)
+            get_best_thread_id(worker, &self.thread_pool, use_best_thread, debug_best_thread)
         };
 
         let best_result = if best_thread_id == 0 {
@@ -1645,6 +1785,160 @@ mod tests {
         let (sum, threads) = aggregate_best_move_changes(&[1.0, 2.0, 3.0]);
         assert!((sum - 6.0).abs() < 1e-9, "sum should be 6.0, got {sum}");
         assert_eq!(threads, 3);
+    }
+
+    #[test]
+    fn test_should_use_best_thread_selection_yaneuraou_conditions() {
+        let mut limits = LimitsType::default();
+        assert!(should_use_best_thread_selection(&limits, false));
+
+        limits.depth = 8;
+        assert!(
+            !should_use_best_thread_selection(&limits, false),
+            "go depth ではbest thread選抜を使わない"
+        );
+
+        limits.depth = 0;
+        limits.mate = 3;
+        assert!(
+            !should_use_best_thread_selection(&limits, false),
+            "go mate ではbest thread選抜を使わない"
+        );
+
+        limits.mate = 0;
+        limits.multi_pv = 2;
+        assert!(
+            !should_use_best_thread_selection(&limits, false),
+            "MultiPV>1 ではbest thread選抜を使わない"
+        );
+
+        limits.multi_pv = 1;
+        assert!(
+            !should_use_best_thread_selection(&limits, true),
+            "Skill有効時はbest thread選抜を使わない"
+        );
+    }
+
+    #[test]
+    fn test_select_best_summary_index_prefers_move_vote_over_single_outlier() {
+        let m_2g2f = Move::from_usi("2g2f").expect("valid move");
+        let m_6i7h = Move::from_usi("6i7h").expect("valid move");
+        let summaries = vec![
+            ThreadSummary {
+                id: 0,
+                score: Value::new(30),
+                completed_depth: 10,
+                best_move: m_2g2f,
+                pv_len: 4,
+            },
+            ThreadSummary {
+                id: 1,
+                score: Value::new(28),
+                completed_depth: 9,
+                best_move: m_2g2f,
+                pv_len: 4,
+            },
+            ThreadSummary {
+                id: 2,
+                score: Value::new(90),
+                completed_depth: 1,
+                best_move: m_6i7h,
+                pv_len: 4,
+            },
+        ];
+
+        let idx = select_best_summary_index(&summaries);
+        assert_eq!(summaries[idx].best_move, m_2g2f);
+    }
+
+    #[test]
+    fn test_select_best_summary_index_prefers_shorter_win_line() {
+        let m_2g2f = Move::from_usi("2g2f").expect("valid move");
+        let m_7g7f = Move::from_usi("7g7f").expect("valid move");
+        let summaries = vec![
+            ThreadSummary {
+                id: 0,
+                score: Value::mate_in(7),
+                completed_depth: 12,
+                best_move: m_2g2f,
+                pv_len: 4,
+            },
+            ThreadSummary {
+                id: 1,
+                score: Value::mate_in(5),
+                completed_depth: 8,
+                best_move: m_7g7f,
+                pv_len: 4,
+            },
+        ];
+
+        let idx = select_best_summary_index(&summaries);
+        assert_eq!(idx, 1, "勝ち筋同士ではより短手数の詰みを優先する");
+    }
+
+    #[test]
+    fn test_select_best_summary_index_rejects_single_helper_outlier_move() {
+        let m_2g2f = Move::from_usi("2g2f").expect("valid move");
+        let m_6i7h = Move::from_usi("6i7h").expect("valid move");
+        let m_7g7f = Move::from_usi("7g7f").expect("valid move");
+        let summaries = vec![
+            ThreadSummary {
+                id: 0,
+                score: Value::new(35),
+                completed_depth: 8,
+                best_move: m_2g2f,
+                pv_len: 6,
+            },
+            ThreadSummary {
+                id: 1,
+                score: Value::new(180),
+                completed_depth: 8,
+                best_move: m_6i7h,
+                pv_len: 6,
+            },
+            ThreadSummary {
+                id: 2,
+                score: Value::new(34),
+                completed_depth: 8,
+                best_move: m_7g7f,
+                pv_len: 6,
+            },
+        ];
+
+        let idx = select_best_summary_index(&summaries);
+        assert_eq!(idx, 0, "helper単独の外れ値手ではmain threadを優先する");
+    }
+
+    #[test]
+    fn test_select_best_summary_index_allows_helper_when_supported_by_multiple_threads() {
+        let m_2g2f = Move::from_usi("2g2f").expect("valid move");
+        let m_6i7h = Move::from_usi("6i7h").expect("valid move");
+        let summaries = vec![
+            ThreadSummary {
+                id: 0,
+                score: Value::new(35),
+                completed_depth: 8,
+                best_move: m_2g2f,
+                pv_len: 6,
+            },
+            ThreadSummary {
+                id: 1,
+                score: Value::new(120),
+                completed_depth: 8,
+                best_move: m_6i7h,
+                pv_len: 6,
+            },
+            ThreadSummary {
+                id: 2,
+                score: Value::new(110),
+                completed_depth: 8,
+                best_move: m_6i7h,
+                pv_len: 6,
+            },
+        ];
+
+        let idx = select_best_summary_index(&summaries);
+        assert_eq!(summaries[idx].best_move, m_6i7h);
     }
 
     #[test]
