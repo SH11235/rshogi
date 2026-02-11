@@ -262,6 +262,7 @@ fn worker_main(
             Ok(ep) => engines.push(ep),
             Err(e) => {
                 eprintln!("worker: failed to spawn engine {i} ({}): {e}", path.display());
+                shutdown.store(true, Ordering::Relaxed);
                 return;
             }
         }
@@ -344,6 +345,9 @@ fn main() -> Result<()> {
 
     if cli.engines.len() < 2 {
         bail!("at least 2 engines are required");
+    }
+    if cli.concurrency == 0 {
+        bail!("--concurrency must be at least 1");
     }
 
     // バイナリ存在確認
@@ -456,7 +460,7 @@ fn main() -> Result<()> {
                 kind: "meta".to_string(),
                 timestamp: timestamp.to_rfc3339(),
                 settings: MetaSettings {
-                    games: cli.games,
+                    games: cli.games * 2, // 各方向 cli.games 局、双方向で合計
                     max_moves: cli.max_moves,
                     byoyomi: cli.byoyomi,
                     timeout_margin_ms: cli.timeout_margin_ms,
