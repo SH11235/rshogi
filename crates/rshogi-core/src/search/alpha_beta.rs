@@ -1921,8 +1921,7 @@ impl SearchWorker {
                             }
                         }
                     }
-                    // cutoffCntインクリメント条件 (extension<2 || PvNode) をベータカット時に加算で近似。
-                    // ※ Extension導入後は extension<2 を実際の延長量で判定する形に差し替えること。
+                    // beta cutoff 時の cutoff_cnt 更新は Step 20 のスコア更新で実施
                 } else if value > alpha && value < best_value + Value::new(9) {
                     new_depth -= 1;
                 }
@@ -2038,8 +2037,8 @@ impl SearchWorker {
                     }
 
                     if value >= beta {
-                        // cutoffCntインクリメント条件 (extension<2 || PvNode) をベータカット時に加算で近似。
-                        st.stack[ply as usize].cutoff_cnt += 1;
+                        // extension < 2 または PvNode の場合のみインクリメント
+                        st.stack[ply as usize].cutoff_cnt += (extension < 2 || pv_node) as i32;
                         // Move Ordering品質統計
                         inc_stat_by_depth!(st, cutoff_by_depth, depth);
                         if move_count == 1 {
