@@ -36,7 +36,7 @@ use super::pruning::{
 };
 use super::qsearch::qsearch;
 use super::search_helpers::{
-    check_abort, clear_cont_history_for_null, cont_history_ref, cont_history_tables, nnue_evaluate,
+    check_abort, clear_cont_history_for_null, cont_history_ptr, cont_history_tables, nnue_evaluate,
     nnue_pop, nnue_push, set_cont_history_for_move, take_prior_reduction,
 };
 use super::tt_sanity::{helper_tt_write_enabled_for_depth, maybe_trace_tt_write, TtWriteTrace};
@@ -52,6 +52,19 @@ pub(super) fn draw_jitter(nodes: u64, tune_params: &SearchTuneParams) -> i32 {
     // 千日手盲点を避けるため、VALUE_DRAW(0) を ±1 にばらつかせる。
     let mask = tune_params.draw_jitter_mask.max(0) as u64;
     ((nodes & mask) as i32) + tune_params.draw_jitter_offset
+}
+
+#[inline]
+fn root_stat_score_zero_enabled() -> bool {
+    static ROOT_STAT_SCORE_ZERO: LazyLock<bool> = LazyLock::new(|| {
+        std::env::var("RSHOGI_ROOT_STAT_SCORE_ZERO")
+            .map(|v| {
+                let s = v.trim();
+                !s.is_empty() && s != "0" && !s.eq_ignore_ascii_case("false")
+            })
+            .unwrap_or(false)
+    });
+    *ROOT_STAT_SCORE_ZERO
 }
 
 #[inline]
@@ -898,6 +911,27 @@ impl SearchWorker {
             // YOではsearch<Root>内でLMRが適用される。rootのPvNode+ttPvでは
             // reductionが大きく負になるため、zero-window検証がnewDepthより深くなる。
             let mut new_depth = depth - 1;
+            // YaneuraOu準拠: rootでも全手で statScore を設定してから子ノードを探索する。
+            // (moveCount==1 ではLMR補正には使われないが、子ノード側の統計参照で使われる)
+            let root_stat_score = if root_stat_score_zero_enabled() || mv.is_pass() {
+                0
+            } else if is_capture {
+                let captured = pos.captured_piece();
+                let captured_pt = captured.piece_type();
+                let moved_piece = mv.moved_piece_after();
+                let hist = self
+                    .history
+                    .with_read(|h| h.capture_history.get(moved_piece, mv.to(), captured_pt) as i32);
+                self.search_tune_params.lmr_step16_capture_stat_scale_num * piece_value(captured)
+                    / 128
+                    + hist
+            } else {
+                let mover = !pos.side_to_move();
+                let main_hist = self.history.with_read(|h| h.main_history.get(mover, mv) as i32);
+                // ply=0 では contHist は sentinel（実質0）になる。
+                2 * main_hist
+            };
+            self.state.stack[0].stat_score = root_stat_score;
             let value = if rm_idx == 0 {
                 // 第1手: full depth PV search (Step 19)
                 -self.search_node_wrapper::<{ NodeType::PV as u8 }>(
@@ -945,25 +979,7 @@ impl SearchWorker {
                         r -= tune.lmr_step16_tt_move_penalty;
                     }
 
-                    // statScore（YO準拠）
-                    let stat_score = if mv.is_pass() {
-                        0
-                    } else if is_capture {
-                        let captured = pos.captured_piece();
-                        let captured_pt = captured.piece_type();
-                        let moved_piece = mv.moved_piece_after();
-                        let hist = self.history.with_read(|h| {
-                            h.capture_history.get(moved_piece, mv.to(), captured_pt) as i32
-                        });
-                        tune.lmr_step16_capture_stat_scale_num * piece_value(captured) / 128 + hist
-                    } else {
-                        let mover = !pos.side_to_move();
-                        let main_hist =
-                            self.history.with_read(|h| h.main_history.get(mover, mv) as i32);
-                        // ply=0 では contHist は sentinel（実質0）になる。
-                        2 * main_hist
-                    };
-                    self.state.stack[0].stat_score = stat_score;
+                    let stat_score = self.state.stack[0].stat_score;
                     r -= stat_score * tune.lmr_step16_stat_score_scale_num / 8192;
 
                     // d計算 (YO: max(1, min(newDepth - r/1024, newDepth + 2)) + PvNode)
@@ -1828,6 +1844,9 @@ impl SearchWorker {
 
         // MovePickerを作成（lazy generation）
         let cont_tables = cont_history_tables(st, ctx, ply);
+        // YaneuraOu準拠: contHist[0], contHist[1] の参照元はノード先頭で固定する。
+        let cont_hist_ptr_1 = cont_history_ptr(st, ctx, ply, 1);
+        let cont_hist_ptr_2 = cont_history_ptr(st, ctx, ply, 2);
         let mut mp =
             MovePicker::new(pos, tt_move, depth, ply, cont_tables, ctx.generate_all_legal_moves);
 
@@ -2012,8 +2031,10 @@ impl SearchWorker {
                 is_capture,
                 lmr_depth,
                 mover,
-                cont_history_1: cont_history_ref(st, ctx, ply, 1),
-                cont_history_2: cont_history_ref(st, ctx, ply, 2),
+                // SAFETY: cont_history_ptr() が返すポインタは探索中有効。
+                cont_history_1: unsafe { cont_hist_ptr_1.as_ref() },
+                // SAFETY: cont_history_ptr() が返すポインタは探索中有効。
+                cont_history_2: unsafe { cont_hist_ptr_2.as_ref() },
                 static_eval: eval_ctx.static_eval,
                 alpha,
                 best_move,
@@ -2132,8 +2153,10 @@ impl SearchWorker {
             } else {
                 let moved_piece = mv.moved_piece_after();
                 let main_hist = ctx.history.with_read(|h| h.main_history.get(mover, mv) as i32);
-                let cont0 = cont_history_ref(st, ctx, ply, 1).get(moved_piece, mv.to()) as i32;
-                let cont1 = cont_history_ref(st, ctx, ply, 2).get(moved_piece, mv.to()) as i32;
+                // SAFETY: cont_history_ptr() が返すポインタは探索中有効。
+                let cont0 = unsafe { cont_hist_ptr_1.as_ref() }.get(moved_piece, mv.to()) as i32;
+                // SAFETY: cont_history_ptr() が返すポインタは探索中有効。
+                let cont1 = unsafe { cont_hist_ptr_2.as_ref() }.get(moved_piece, mv.to()) as i32;
                 2 * main_hist + cont0 + cont1
             };
             st.stack[ply as usize].stat_score = stat_score;
