@@ -154,23 +154,7 @@ pub(super) fn probe_transposition<const NT: u8>(
         pv_node || (tt_hit && tt_data.is_pv)
     };
 
-    let mut tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
-    if tt_move.is_some() && !pos.pseudo_legal_with_all(tt_move, ctx.generate_all_legal_moves) {
-        maybe_log_invalid_tt_data(InvalidTtLog {
-            reason: "invalid_move",
-            stage: "ab_probe",
-            thread_id: ctx.thread_id,
-            ply,
-            key,
-            depth: tt_data.depth,
-            bound: tt_data.bound,
-            tt_move,
-            stored_value: tt_data.value,
-            converted_value: Value::NONE,
-            eval: tt_data.eval,
-        });
-        tt_move = Move::NONE;
-    }
+    let tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
     let mut tt_value = if tt_hit {
         value_from_tt(tt_data.value, ply)
     } else {
