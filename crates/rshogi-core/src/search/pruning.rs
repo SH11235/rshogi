@@ -419,7 +419,9 @@ where
         }
     }
 
-    if !in_check && static_eval != Value::NONE {
+    // YaneuraOu準拠: Step10直前の improving 再計算は VALUE_NONE を含めて評価する。
+    // in-check ノードは YO ではこの経路に入らないため、現実装では !in_check のみ維持する。
+    if !in_check {
         improving |= static_eval >= beta;
     }
 
@@ -486,9 +488,6 @@ where
     }
 
     let threshold = prob_beta - static_eval;
-    if threshold <= Value::ZERO {
-        return None;
-    }
 
     let dynamic_reduction =
         (static_eval - beta).raw() / ctx.tune_params.probcut_dynamic_reduction_div.max(1);

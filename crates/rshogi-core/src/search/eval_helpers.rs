@@ -346,17 +346,19 @@ pub(super) fn compute_eval_context(
     // excludedMoveがある場合は、前回のstatic_evalをそのまま使用（YaneuraOu準拠）
     if excluded_move.is_some() {
         let static_eval = st.stack[ply as usize].static_eval;
-        let improving = if ply >= 2 && !in_check && static_eval != Value::NONE {
-            static_eval > st.stack[(ply - 2) as usize].static_eval
+        // YaneuraOu準拠: improving/opponentWorsening は VALUE_NONE を含めた生比較で算出する。
+        let prev2_eval = if ply >= 2 {
+            st.stack[(ply - 2) as usize].static_eval
         } else {
-            false
+            Value::NONE
         };
-        let opponent_worsening = if ply >= 1 && static_eval != Value::NONE {
-            let prev_eval = st.stack[(ply - 1) as usize].static_eval;
-            prev_eval != Value::NONE && static_eval > -prev_eval
+        let prev_eval = if ply >= 1 {
+            st.stack[(ply - 1) as usize].static_eval
         } else {
-            false
+            Value::NONE
         };
+        let improving = static_eval > prev2_eval;
+        let opponent_worsening = static_eval > -prev_eval;
         return EvalContext {
             eval: static_eval,
             static_eval,
@@ -536,20 +538,22 @@ pub(super) fn compute_eval_context(
         eval = tt_ctx.value;
     }
 
-    // YO準拠: improving / opponentWorsening は ss->staticEval ベースで計算する。
+    // YO準拠: improving / opponentWorsening は ss->staticEval ベースで
+    // VALUE_NONE を含めた生比較で計算する。
     st.stack[ply as usize].static_eval = static_eval;
 
-    let improving = if ply >= 2 && !in_check {
-        static_eval > st.stack[(ply - 2) as usize].static_eval
+    let prev2_eval = if ply >= 2 {
+        st.stack[(ply - 2) as usize].static_eval
     } else {
-        false
+        Value::NONE
     };
-    let opponent_worsening = if ply >= 1 && static_eval != Value::NONE {
-        let prev_eval = st.stack[(ply - 1) as usize].static_eval;
-        prev_eval != Value::NONE && static_eval > -prev_eval
+    let prev_eval = if ply >= 1 {
+        st.stack[(ply - 1) as usize].static_eval
     } else {
-        false
+        Value::NONE
     };
+    let improving = static_eval > prev2_eval;
+    let opponent_worsening = static_eval > -prev_eval;
 
     EvalContext {
         eval,

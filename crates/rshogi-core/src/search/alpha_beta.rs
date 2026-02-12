@@ -1127,7 +1127,7 @@ impl SearchWorker {
         {
             let best_move_for_stats = self.state.root_moves[pv_idx].mv();
             if best_move_for_stats.is_some() && !best_move_for_stats.is_pass() {
-                let is_best_capture = pos.is_capture(best_move_for_stats);
+                let is_best_capture = pos.capture_stage(best_move_for_stats);
                 let is_tt_move = best_move_for_stats == tt_move_root;
                 let tune = self.search_tune_params;
                 let bonus = stat_bonus(depth, is_tt_move, &tune);
