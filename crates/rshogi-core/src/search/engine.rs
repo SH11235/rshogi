@@ -103,9 +103,8 @@ pub(crate) fn compute_aspiration_window(rm: &RootMove, thread_id: usize) -> (Val
     let mean_sq = mean_sq.min((Value::INFINITE.raw() as i64) * (Value::INFINITE.raw() as i64));
 
     let thread_offset = (thread_id % 8) as i32;
-    let score_factor = rm.average_score.raw().abs() / 9000;
-    let delta_raw =
-        5 + thread_offset + score_factor + (mean_sq / 11131).min(i32::MAX as i64) as i32;
+    // YaneuraOu: delta = 5 + threadIdx % 8 + abs(meanSquaredScore) / 9000
+    let delta_raw = 5 + thread_offset + (mean_sq / 9000).min(i32::MAX as i64) as i32;
     let delta = Value::new(delta_raw);
     let alpha_raw = (rm.average_score.raw() - delta.raw()).max(-Value::INFINITE.raw());
     let beta_raw = (rm.average_score.raw() + delta.raw()).min(Value::INFINITE.raw());
@@ -228,6 +227,8 @@ pub struct Search {
     last_game_ply: Option<i32>,
     /// 次のiterationで深さを伸ばすかどうか（YaneuraOu準拠）
     increase_depth: bool,
+    /// helperスレッドと共有するincrease_depthフラグ（YaneuraOu準拠: main_manager()->increaseDepth）
+    increase_depth_shared: Arc<AtomicBool>,
     /// 深さを伸ばせなかった回数（aspiration時の調整に使用）
     search_again_counter: i32,
 
@@ -404,6 +405,13 @@ fn select_best_summary_index(summaries: &[ThreadSummary]) -> usize {
 #[inline]
 fn best_thread_debug_enabled() -> bool {
     std::env::var("RSHOGI_DEBUG_BEST_THREAD")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "on" | "ON"))
+        .unwrap_or(false)
+}
+
+#[inline]
+fn helper_search_disabled() -> bool {
+    std::env::var("RSHOGI_DISABLE_HELPER_SEARCH")
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "on" | "ON"))
         .unwrap_or(false)
 }
@@ -629,6 +637,7 @@ impl Search {
         self.tot_best_move_changes = 0.0;
         self.last_game_ply = Some(ply);
         self.increase_depth = true;
+        self.increase_depth_shared.store(true, Ordering::Relaxed);
         self.search_again_counter = 0;
     }
 
@@ -669,6 +678,7 @@ impl Search {
         let eval_hash = Arc::new(EvalHash::new(DEFAULT_EVAL_HASH_SIZE_MB));
         let stop = Arc::new(AtomicBool::new(false));
         let ponderhit_flag = Arc::new(AtomicBool::new(false));
+        let increase_depth_shared = Arc::new(AtomicBool::new(true));
         let max_moves_to_draw = DEFAULT_MAX_MOVES_TO_DRAW;
         let search_tune_params = SearchTuneParams::default();
         let thread_pool = ThreadPool::new(
@@ -677,6 +687,7 @@ impl Search {
             Arc::clone(&eval_hash),
             Arc::clone(&stop),
             Arc::clone(&ponderhit_flag),
+            Arc::clone(&increase_depth_shared),
             max_moves_to_draw,
             search_tune_params,
         );
@@ -705,6 +716,7 @@ impl Search {
             previous_time_reduction: 0.85,
             last_game_ply: None,
             increase_depth: true,
+            increase_depth_shared,
             search_again_counter: 0,
             max_moves_to_draw,
             search_tune_params,
@@ -927,6 +939,7 @@ impl Search {
 
         // 探索状態のリセット（履歴はクリアしない、YaneuraOu準拠）
         worker.prepare_search();
+        worker.allow_tt_write = true;
 
         // 探索深さを決定
         let max_depth = if limits.depth > 0 {
@@ -939,11 +952,18 @@ impl Search {
         let mut skill = Skill::from_options(&self.skill_options);
         let skill_enabled = skill.enabled();
 
-        if self.num_threads > 1 {
+        // デバッグ用の helper 有効化制御
+        // go depth/go mate を含め helper を有効化する。
+        // 追加の切り分けは環境変数 RSHOGI_DISABLE_HELPER_SEARCH で行う。
+        let helper_search_enabled = self.num_threads > 1 && !helper_search_disabled();
+
+        if helper_search_enabled {
+            // YaneuraOu準拠: helper は go depth 指定時も main の stop まで探索を継続する。
+            let helper_max_depth = if limits.depth > 0 { MAX_PLY } else { max_depth };
             self.thread_pool.start_thinking(
                 pos,
                 limits.clone(),
-                max_depth,
+                helper_max_depth,
                 self.time_options,
                 self.max_moves_to_draw,
                 skill_enabled,
@@ -973,7 +993,7 @@ impl Search {
             }
         };
 
-        if self.num_threads > 1 {
+        if helper_search_enabled {
             self.stop.store(true, Ordering::SeqCst);
             self.thread_pool.wait_for_search_finished();
         }
@@ -1132,6 +1152,7 @@ impl Search {
     {
         // 深さペーシングの状態を初期化
         self.increase_depth = true;
+        self.increase_depth_shared.store(true, Ordering::Relaxed);
         self.search_again_counter = 0;
 
         // workerを一時的に取り出す（借用チェッカー対策）
@@ -1283,6 +1304,7 @@ impl Search {
                         failed_high_cnt = 0;
                         time_manager.reset_stop_on_ponderhit();
                     } else if score >= beta {
+                        alpha = Value::new((beta.raw() - delta.raw()).max(alpha.raw()));
                         beta = Value::new(
                             score.raw().saturating_add(delta.raw()).min(Value::INFINITE.raw()),
                         );
@@ -1449,6 +1471,8 @@ impl Search {
                     // YaneuraOu準拠: 次iterationで深さを伸ばすかの判定
                     self.increase_depth =
                         time_manager.is_pondering() || elapsed_time <= total_time * 0.5138;
+                    // helperスレッドと共有（YaneuraOu準拠: main_manager()->increaseDepth）
+                    self.increase_depth_shared.store(self.increase_depth, Ordering::Relaxed);
 
                     // 状態更新
                     self.update_time_factor_state(best_value, tot_best_move_changes);
@@ -1522,6 +1546,7 @@ fn search_helper_impl<F1, F2>(
     time_manager: &mut TimeManagement,
     max_depth: Depth,
     skill_enabled: bool,
+    increase_depth_shared: &AtomicBool,
     on_start: F1,
     mut on_depth_complete: F2,
 ) -> usize
@@ -1529,6 +1554,9 @@ where
     F1: FnOnce(),
     F2: FnMut(u64, f64),
 {
+    // 恒久修正評価のため、go depth/go mate を含め helper からのTT書き込みを有効にする。
+    worker.allow_tt_write = true;
+
     on_start();
 
     worker.state.root_moves = super::RootMoves::from_legal_moves(pos, &limits.search_moves);
@@ -1553,11 +1581,18 @@ where
     let mut last_best_score = Value::new(-Value::INFINITE.raw());
     let mut last_best_move_depth = 0;
 
-    let search_again_counter = 0;
+    // YaneuraOu準拠: helperもmainのincreaseDepthを参照してsearchAgainCounterを更新
+    let mut search_again_counter = 0;
 
     for depth in 1..=max_depth {
         if worker.state.abort {
             break;
+        }
+
+        // YaneuraOu準拠: main_manager()->increaseDepthがfalseならカウンタ増加
+        // (yaneuraou-search.cpp:1319-1321)
+        if depth > 1 && !increase_depth_shared.load(Ordering::Relaxed) {
+            search_again_counter += 1;
         }
 
         if effective_multi_pv == 1 && depth > 1 && !worker.state.root_moves.is_empty() {
@@ -1619,6 +1654,7 @@ where
                     );
                     failed_high_cnt = 0;
                 } else if score >= beta {
+                    alpha = Value::new((beta.raw() - delta.raw()).max(alpha.raw()));
                     beta = Value::new(
                         score.raw().saturating_add(delta.raw()).min(Value::INFINITE.raw()),
                     );
@@ -1707,6 +1743,7 @@ pub(crate) fn search_helper(
     max_depth: Depth,
     skill_enabled: bool,
     progress: Option<&SearchProgress>,
+    increase_depth_shared: &AtomicBool,
 ) -> usize {
     search_helper_impl(
         worker,
@@ -1715,6 +1752,7 @@ pub(crate) fn search_helper(
         time_manager,
         max_depth,
         skill_enabled,
+        increase_depth_shared,
         || {
             if let Some(p) = progress {
                 p.reset();
@@ -1738,6 +1776,7 @@ pub(crate) fn search_helper(
     max_depth: Depth,
     skill_enabled: bool,
     progress: Option<&super::thread::HelperProgress>,
+    increase_depth_shared: &AtomicBool,
 ) -> usize {
     search_helper_impl(
         worker,
@@ -1746,6 +1785,7 @@ pub(crate) fn search_helper(
         time_manager,
         max_depth,
         skill_enabled,
+        increase_depth_shared,
         || {
             if let Some(p) = progress {
                 p.reset();

@@ -37,6 +37,7 @@ use super::search_helpers::{
     check_abort, clear_cont_history_for_null, cont_history_ref, cont_history_tables, nnue_evaluate,
     nnue_pop, nnue_push, set_cont_history_for_move, take_prior_reduction,
 };
+use super::tt_sanity::{helper_tt_write_enabled_for_depth, maybe_trace_tt_write, TtWriteTrace};
 
 // =============================================================================
 // 定数
@@ -217,6 +218,9 @@ pub(super) enum ProbeOutcome {
 
 /// 静的評価まわりの情報をまとめたコンテキスト
 pub(super) struct EvalContext {
+    /// TT境界情報で補正済みの評価値（YOの `eval` 相当）
+    pub(super) eval: Value,
+    /// 局面の静的評価（YOの `ss->staticEval` 相当）
     pub(super) static_eval: Value,
     pub(super) unadjusted_static_eval: Value,
     pub(super) correction_value: i32,
@@ -293,6 +297,8 @@ pub struct SearchContext<'a> {
     pub max_moves_to_draw: i32,
     /// スレッドID（0=main）
     pub thread_id: usize,
+    /// この探索でTT書き込みを許可するか
+    pub allow_tt_write: bool,
     /// SPSA向け探索係数
     pub tune_params: SearchTuneParams,
 }
@@ -398,6 +404,9 @@ pub struct SearchWorker {
     /// スレッドID（0=main）
     pub thread_id: usize,
 
+    /// このワーカーでTT書き込みを許可するか
+    pub allow_tt_write: bool,
+
     /// SPSA向け探索係数
     pub search_tune_params: SearchTuneParams,
 
@@ -433,6 +442,7 @@ impl SearchWorker {
             generate_all_legal_moves: false,
             max_moves_to_draw,
             thread_id,
+            allow_tt_write: true,
             search_tune_params,
             state: SearchState::new(),
         });
@@ -453,6 +463,7 @@ impl SearchWorker {
             generate_all_legal_moves: self.generate_all_legal_moves,
             max_moves_to_draw: self.max_moves_to_draw,
             thread_id: self.thread_id,
+            allow_tt_write: self.allow_tt_write,
             tune_params: self.search_tune_params,
         }
     }
@@ -843,8 +854,8 @@ impl SearchWorker {
                     time_manager,
                 );
 
-                // Re-search if needed
-                if value > alpha && value < beta {
+                // YaneuraOu準拠: PvNodeでalphaを超えたら再探索（value<beta条件は付けない）
+                if value > alpha {
                     value = -self.search_node_wrapper::<{ NodeType::PV as u8 }>(
                         pos,
                         depth - 1,
@@ -1019,8 +1030,8 @@ impl SearchWorker {
                     time_manager,
                 );
 
-                // Re-search if needed
-                if value > alpha && value < beta {
+                // YaneuraOu準拠: PvNodeでalphaを超えたら再探索（value<beta条件は付けない）
+                if value > alpha {
                     value = -self.search_node_wrapper::<{ NodeType::PV as u8 }>(
                         pos,
                         depth - 1,
@@ -1116,6 +1127,7 @@ impl SearchWorker {
             generate_all_legal_moves: self.generate_all_legal_moves,
             max_moves_to_draw: self.max_moves_to_draw,
             thread_id: self.thread_id,
+            allow_tt_write: self.allow_tt_write,
             tune_params: self.search_tune_params,
         };
         Self::search_node::<NT>(
@@ -1201,7 +1213,9 @@ impl SearchWorker {
         // スタック設定
         st.stack[ply as usize].in_check = in_check;
         st.stack[ply as usize].move_count = 0;
-        st.stack[(ply + 1) as usize].cutoff_cnt = 0;
+        // YaneuraOu準拠: (ss+2)->cutoffCnt = 0（祖父ノードがリセット）
+        // 兄弟ノード間で cutoff_cnt が蓄積されるように ply+2 を初期化する
+        st.stack[(ply + 2) as usize].cutoff_cnt = 0;
 
         // PVノードの場合、PVをクリアして前回探索の残留を防ぐ
         // NOTE: YaneuraOuでは (ss+1)->pv = pv でポインタを新配列に向け、ss->pv[0] = Move::none() でクリア
@@ -1378,7 +1392,7 @@ impl SearchWorker {
             ply,
             pv_node,
             in_check,
-            eval_ctx.static_eval,
+            eval_ctx.eval,
             limits,
             time_manager,
         ) {
@@ -1392,7 +1406,7 @@ impl SearchWorker {
             FutilityParams {
                 depth,
                 beta,
-                static_eval: eval_ctx.static_eval,
+                static_eval: eval_ctx.eval,
                 correction_value: eval_ctx.correction_value,
                 improving,
                 opponent_worsening,
@@ -1633,7 +1647,7 @@ impl SearchWorker {
                 st.root_delta.max(1),
             );
 
-            // YaneuraOu: ttPvなら reduction を少し増やす
+            // YaneuraOu準拠: ttPv時にreductionを増やす (yaneuraou-search.cpp:3215-3216)
             if st.stack[ply as usize].tt_pv {
                 r += ctx.tune_params.lmr_ttpv_add;
             }
@@ -1728,9 +1742,10 @@ impl SearchWorker {
             // =============================================================
             // Late Move Reduction (LMR)
             // =============================================================
-            // YaneuraOu準拠: ttPv大型補正（yaneuraou-search.cpp:3521-3523）
-            let tt_value_higher = tt_hit && tt_value != Value::NONE && tt_value > alpha;
-            let tt_depth_ge = tt_hit && tt_data.depth >= depth;
+            // YaneuraOu準拠: ttPv大型補正（yaneuraou-search.cpp:3519-3521）
+            // !ttHit時はtt_value=VALUE_NONE(32002)でほぼtrue、tt_data.depthはスロット残値
+            let tt_value_higher = tt_value > alpha;
+            let tt_depth_ge = tt_data.depth >= depth;
 
             if st.stack[ply as usize].tt_pv {
                 r -= ctx.tune_params.lmr_step16_ttpv_sub_base
@@ -1967,7 +1982,9 @@ impl SearchWorker {
                 );
                 st.stack[ply as usize].reduction = 0;
 
-                if pv_node && value > alpha && value < beta {
+                // YaneuraOu Step18準拠:
+                // PvNodeでは zero-window で alpha を超えたら full PV再探索する。
+                if pv_node && value > alpha {
                     st.stack[ply as usize].reduction = 0;
                     value = -Self::search_node::<{ NodeType::PV as u8 }>(
                         st,
@@ -2027,8 +2044,6 @@ impl SearchWorker {
 
                 if value > alpha {
                     best_move = mv;
-                    alpha = value;
-
                     // PV更新
                     if pv_node {
                         // 借用チェッカーの制約を避けるためクローン
@@ -2052,6 +2067,12 @@ impl SearchWorker {
                         }
                         break;
                     }
+                    // YaneuraOu準拠: fail-high しなかったとき、後続手に対して探索深さをやや下げる。
+                    if depth > 2 && depth < 14 && !value.is_mate_score() {
+                        depth -= 2;
+                    }
+                    // YaneuraOu準拠: fail-high しなかった場合のみ alpha を更新する。
+                    alpha = value;
                 }
             }
         }
@@ -2073,6 +2094,12 @@ impl SearchWorker {
                 // ステイルメイト（将棋では通常発生しないがパスがない場合）
                 return Value::ZERO;
             }
+        }
+
+        // YaneuraOu準拠: fail-high のときは lower bound の過大化を抑えるため
+        // best_value を beta 側へ寄せてから後段の更新に渡す。
+        if best_value >= beta && !best_value.is_mate_score() && !alpha.is_mate_score() {
+            best_value = Value::new((best_value.raw() * depth + beta.raw()) / (depth + 1).max(1));
         }
 
         // =================================================================
@@ -2499,18 +2526,44 @@ impl SearchWorker {
             } else {
                 Bound::Upper
             };
+            let stored_depth = if move_count != 0 {
+                depth
+            } else {
+                (depth + 6).min(MAX_PLY - 1)
+            };
 
-            tt_ctx.result.write(
-                tt_ctx.key,
-                value_to_tt(best_value, ply),
-                pv_node,
-                bound,
-                depth,
-                best_move,
-                eval_ctx.unadjusted_static_eval,
-                ctx.tt.generation(),
-            );
-            inc_stat_by_depth!(st, tt_write_by_depth, depth);
+            if ctx.allow_tt_write
+                && helper_tt_write_enabled_for_depth(ctx.thread_id, bound, stored_depth)
+            {
+                maybe_trace_tt_write(TtWriteTrace {
+                    stage: "ab_store",
+                    thread_id: ctx.thread_id,
+                    ply,
+                    key: tt_ctx.key,
+                    depth: stored_depth,
+                    bound,
+                    is_pv: st.stack[ply as usize].tt_pv,
+                    tt_move: best_move,
+                    stored_value: value_to_tt(best_value, ply),
+                    eval: eval_ctx.unadjusted_static_eval,
+                    root_move: if ply >= 1 {
+                        st.stack[0].current_move
+                    } else {
+                        Move::NONE
+                    },
+                });
+                tt_ctx.result.write(
+                    tt_ctx.key,
+                    value_to_tt(best_value, ply),
+                    st.stack[ply as usize].tt_pv,
+                    bound,
+                    stored_depth,
+                    best_move,
+                    eval_ctx.unadjusted_static_eval,
+                    ctx.tt.generation(),
+                );
+                inc_stat_by_depth!(st, tt_write_by_depth, stored_depth);
+            }
         }
 
         best_value

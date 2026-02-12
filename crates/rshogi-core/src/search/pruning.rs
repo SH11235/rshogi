@@ -19,6 +19,7 @@ use super::search_helpers::{
     set_cont_history_for_move,
 };
 use super::stats::{inc_stat, inc_stat_by_depth};
+use super::tt_sanity::{helper_tt_write_enabled_for_depth, maybe_trace_tt_write, TtWriteTrace};
 use super::types::{value_to_tt, NodeType};
 use super::{LimitsType, MovePicker, TimeManagement};
 
@@ -576,17 +577,38 @@ where
         if value >= prob_beta {
             inc_stat!(st, probcut_cutoff);
             let stored_depth = (probcut_depth + 1).max(1);
-            tt_ctx.result.write(
-                tt_ctx.key,
-                value_to_tt(value, ply),
-                st.stack[ply as usize].tt_pv,
-                Bound::Lower,
-                stored_depth,
-                mv,
-                unadjusted_static_eval,
-                ctx.tt.generation(),
-            );
-            inc_stat_by_depth!(st, tt_write_by_depth, stored_depth);
+            if ctx.allow_tt_write
+                && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::Lower, stored_depth)
+            {
+                maybe_trace_tt_write(TtWriteTrace {
+                    stage: "probcut_store",
+                    thread_id: ctx.thread_id,
+                    ply,
+                    key: tt_ctx.key,
+                    depth: stored_depth,
+                    bound: Bound::Lower,
+                    is_pv: st.stack[ply as usize].tt_pv,
+                    tt_move: mv,
+                    stored_value: value_to_tt(value, ply),
+                    eval: unadjusted_static_eval,
+                    root_move: if ply >= 1 {
+                        st.stack[0].current_move
+                    } else {
+                        Move::NONE
+                    },
+                });
+                tt_ctx.result.write(
+                    tt_ctx.key,
+                    value_to_tt(value, ply),
+                    st.stack[ply as usize].tt_pv,
+                    Bound::Lower,
+                    stored_depth,
+                    mv,
+                    unadjusted_static_eval,
+                    ctx.tt.generation(),
+                );
+                inc_stat_by_depth!(st, tt_write_by_depth, stored_depth);
+            }
 
             if !value.is_mate_score() {
                 return Some(value - (prob_beta - beta));

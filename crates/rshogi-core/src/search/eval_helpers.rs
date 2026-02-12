@@ -4,7 +4,7 @@
 
 use crate::eval::evaluate_pass_rights;
 use crate::position::Position;
-use crate::types::{Bound, Color, Depth, Move, Value, MAX_PLY};
+use crate::types::{Bound, Color, Depth, Move, Value, DEPTH_UNSEARCHED, MAX_PLY};
 
 use super::alpha_beta::{
     to_corrected_static_eval, EvalContext, ProbeOutcome, SearchContext, SearchState, TTContext,
@@ -12,6 +12,11 @@ use super::alpha_beta::{
 use super::history::CORRECTION_HISTORY_SIZE;
 use super::search_helpers::{ensure_nnue_accumulator, nnue_evaluate};
 use super::stats::inc_stat_by_depth;
+use super::tt_sanity::{
+    helper_tt_write_enabled_for_depth, is_valid_tt_eval, is_valid_tt_stored_value,
+    maybe_log_invalid_tt_data, maybe_trace_tt_cutoff, maybe_trace_tt_probe, maybe_trace_tt_write,
+    InvalidTtLog, TtCutoffTrace, TtProbeTrace, TtWriteTrace,
+};
 use super::types::{value_from_tt, NodeType};
 
 // =============================================================================
@@ -139,7 +144,7 @@ pub(super) fn probe_transposition<const NT: u8>(
     let key = pos.key();
     let tt_result = ctx.tt.probe(key, pos);
     let tt_hit = tt_result.found;
-    let tt_data = tt_result.data;
+    let mut tt_data = tt_result.data;
 
     st.stack[ply as usize].tt_hit = tt_hit;
     // excludedMoveがある場合は前回のttPvを維持（YaneuraOu準拠）
@@ -149,12 +154,78 @@ pub(super) fn probe_transposition<const NT: u8>(
         pv_node || (tt_hit && tt_data.is_pv)
     };
 
-    let tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
-    let tt_value = if tt_hit {
+    let mut tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
+    if tt_move.is_some() && !pos.pseudo_legal_with_all(tt_move, ctx.generate_all_legal_moves) {
+        maybe_log_invalid_tt_data(InvalidTtLog {
+            reason: "invalid_move",
+            stage: "ab_probe",
+            thread_id: ctx.thread_id,
+            ply,
+            key,
+            depth: tt_data.depth,
+            bound: tt_data.bound,
+            tt_move,
+            stored_value: tt_data.value,
+            converted_value: Value::NONE,
+            eval: tt_data.eval,
+        });
+        tt_move = Move::NONE;
+    }
+    let mut tt_value = if tt_hit {
         value_from_tt(tt_data.value, ply)
     } else {
         Value::NONE
     };
+    if tt_hit && !is_valid_tt_stored_value(tt_data.value) {
+        maybe_log_invalid_tt_data(InvalidTtLog {
+            reason: "invalid_value",
+            stage: "ab_probe",
+            thread_id: ctx.thread_id,
+            ply,
+            key,
+            depth: tt_data.depth,
+            bound: tt_data.bound,
+            tt_move,
+            stored_value: tt_data.value,
+            converted_value: tt_value,
+            eval: tt_data.eval,
+        });
+        tt_value = Value::NONE;
+    }
+    if tt_hit && !is_valid_tt_eval(tt_data.eval) {
+        maybe_log_invalid_tt_data(InvalidTtLog {
+            reason: "invalid_eval",
+            stage: "ab_probe",
+            thread_id: ctx.thread_id,
+            ply,
+            key,
+            depth: tt_data.depth,
+            bound: tt_data.bound,
+            tt_move,
+            stored_value: tt_data.value,
+            converted_value: tt_value,
+            eval: tt_data.eval,
+        });
+        tt_data.eval = Value::NONE;
+    }
+    maybe_trace_tt_probe(TtProbeTrace {
+        stage: "ab_probe",
+        thread_id: ctx.thread_id,
+        ply,
+        key,
+        hit: tt_hit,
+        depth: tt_data.depth,
+        bound: tt_data.bound,
+        tt_move,
+        stored_value: tt_data.value,
+        converted_value: tt_value,
+        eval: tt_data.eval,
+        root_move: if ply >= 1 {
+            st.stack[0].current_move
+        } else {
+            Move::NONE
+        },
+    });
     let tt_capture = tt_move.is_some() && pos.is_capture(tt_move);
 
     // TT統計収集
@@ -175,6 +246,22 @@ pub(super) fn probe_transposition<const NT: u8>(
         && tt_data.bound.can_cutoff(tt_value, beta)
         && (cut_node == (tt_value.raw() >= beta.raw()) || depth > 5)
     {
+        maybe_trace_tt_cutoff(TtCutoffTrace {
+            stage: "ab_probe_cutoff",
+            thread_id: ctx.thread_id,
+            ply,
+            key,
+            search_depth: depth,
+            depth: tt_data.depth,
+            bound: tt_data.bound,
+            value: tt_value,
+            beta,
+            root_move: if ply >= 1 {
+                st.stack[0].current_move
+            } else {
+                Move::NONE
+            },
+        });
         return ProbeOutcome::Cutoff {
             value: tt_value,
             tt_move,
@@ -199,17 +286,38 @@ pub(super) fn probe_transposition<const NT: u8>(
         if mate_move.is_some() {
             let value = Value::mate_in(ply + 1);
             let stored_depth = (depth + 6).min(MAX_PLY - 1);
-            tt_result.write(
-                key,
-                value,
-                st.stack[ply as usize].tt_pv,
-                Bound::Exact,
-                stored_depth,
-                mate_move,
-                Value::NONE,
-                ctx.tt.generation(),
-            );
-            inc_stat_by_depth!(st, tt_write_by_depth, stored_depth);
+            if ctx.allow_tt_write
+                && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::Exact, stored_depth)
+            {
+                maybe_trace_tt_write(TtWriteTrace {
+                    stage: "ab_mate1_store",
+                    thread_id: ctx.thread_id,
+                    ply,
+                    key,
+                    depth: stored_depth,
+                    bound: Bound::Exact,
+                    is_pv: st.stack[ply as usize].tt_pv,
+                    tt_move: mate_move,
+                    stored_value: value,
+                    eval: Value::NONE,
+                    root_move: if ply >= 1 {
+                        st.stack[0].current_move
+                    } else {
+                        Move::NONE
+                    },
+                });
+                tt_result.write(
+                    key,
+                    value,
+                    st.stack[ply as usize].tt_pv,
+                    Bound::Exact,
+                    stored_depth,
+                    mate_move,
+                    Value::NONE,
+                    ctx.tt.generation(),
+                );
+                inc_stat_by_depth!(st, tt_write_by_depth, stored_depth);
+            }
             // 1手詰めカットオフではヒストリ更新不要（mate_moveは特殊）
             return ProbeOutcome::Cutoff {
                 value,
@@ -266,6 +374,7 @@ pub(super) fn compute_eval_context(
             false
         };
         return EvalContext {
+            eval: static_eval,
             static_eval,
             unadjusted_static_eval: static_eval, // excludedMove時は未補正値も同じ
             correction_value: corr_value,
@@ -389,16 +498,55 @@ pub(super) fn compute_eval_context(
         static_eval += evaluate_pass_rights(pos, pos.game_ply() as u16);
     }
 
+    // YO準拠: TTミス時は eval のみを BOUND_NONE/DEPTH_UNSEARCHED で保存する。
     if !in_check
-        && tt_ctx.hit
-        && tt_ctx.value != Value::NONE
-        && !tt_ctx.value.is_mate_score()
-        && ((tt_ctx.value > static_eval && tt_ctx.data.bound == Bound::Lower)
-            || (tt_ctx.value < static_eval && tt_ctx.data.bound == Bound::Upper))
+        && !tt_ctx.hit
+        && ctx.allow_tt_write
+        && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::None, DEPTH_UNSEARCHED)
     {
-        static_eval = tt_ctx.value;
+        maybe_trace_tt_write(TtWriteTrace {
+            stage: "ab_eval_store_none",
+            thread_id: ctx.thread_id,
+            ply,
+            key: tt_ctx.key,
+            depth: DEPTH_UNSEARCHED,
+            bound: Bound::None,
+            is_pv: st.stack[ply as usize].tt_pv,
+            tt_move: Move::NONE,
+            stored_value: Value::NONE,
+            eval: unadjusted_static_eval,
+            root_move: if ply >= 1 {
+                st.stack[0].current_move
+            } else {
+                Move::NONE
+            },
+        });
+        tt_ctx.result.write(
+            tt_ctx.key,
+            Value::NONE,
+            st.stack[ply as usize].tt_pv,
+            Bound::None,
+            DEPTH_UNSEARCHED,
+            Move::NONE,
+            unadjusted_static_eval,
+            ctx.tt.generation(),
+        );
+        inc_stat_by_depth!(st, tt_write_by_depth, 0);
     }
 
+    // YOの `eval` 相当: static_eval をベースに、TT境界値で補正する。
+    let mut eval = static_eval;
+    if !in_check && tt_ctx.hit && tt_ctx.value != Value::NONE && {
+        if tt_ctx.value > eval {
+            tt_ctx.data.bound.is_lower_or_exact()
+        } else {
+            matches!(tt_ctx.data.bound, Bound::Upper | Bound::Exact)
+        }
+    } {
+        eval = tt_ctx.value;
+    }
+
+    // YO準拠: improving / opponentWorsening は ss->staticEval ベースで計算する。
     st.stack[ply as usize].static_eval = static_eval;
 
     let improving = if ply >= 2 && !in_check {
@@ -414,6 +562,7 @@ pub(super) fn compute_eval_context(
     };
 
     EvalContext {
+        eval,
         static_eval,
         unadjusted_static_eval,
         correction_value: corr_value,
