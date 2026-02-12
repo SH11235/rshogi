@@ -146,12 +146,15 @@ fn update_quiet_histories(
 }
 
 /// LMR用のreduction配列
-type Reductions = [i32; 64];
+///
+/// YaneuraOu準拠で `MAX_MOVES` 長を使う。
+/// move_count が 64 を超える局面でも reduction が頭打ちにならないようにする。
+type Reductions = [i32; crate::movegen::MAX_MOVES];
 
 /// Reduction配列（LazyLockによる遅延初期化）
 /// 初回アクセス時に自動初期化されるため、get()呼び出しが不要
 static REDUCTIONS: LazyLock<Reductions> = LazyLock::new(|| {
-    let mut table: Reductions = [0; 64];
+    let mut table: Reductions = [0; crate::movegen::MAX_MOVES];
     for (i, value) in table.iter_mut().enumerate().skip(1) {
         *value = (2809.0 / 128.0 * (i as f64).ln()) as i32;
     }
@@ -174,8 +177,9 @@ pub(crate) fn reduction(
         return 0;
     }
 
-    let d = depth.clamp(1, 63) as usize;
-    let mc = move_count.clamp(1, 63) as usize;
+    let max_idx = (crate::movegen::MAX_MOVES as i32) - 1;
+    let d = depth.clamp(1, max_idx) as usize;
+    let mc = move_count.clamp(1, max_idx) as usize;
     // LazyLockにより直接アクセス可能（get()不要）
     let reduction_scale = REDUCTIONS[d] * REDUCTIONS[mc];
     let root_delta = root_delta.max(1);
@@ -941,12 +945,23 @@ impl SearchWorker {
                         r -= tune.lmr_step16_tt_move_penalty;
                     }
 
-                    // statScore (rootではcontHistがsentinelのため main_history のみ)
-                    let stat_score = if !mv.is_pass() && !is_capture {
-                        let mover = !pos.side_to_move();
-                        2 * self.history.with_read(|h| h.main_history.get(mover, mv) as i32)
-                    } else {
+                    // statScore（YO準拠）
+                    let stat_score = if mv.is_pass() {
                         0
+                    } else if is_capture {
+                        let captured = pos.captured_piece();
+                        let captured_pt = captured.piece_type();
+                        let moved_piece = mv.moved_piece_after();
+                        let hist = self.history.with_read(|h| {
+                            h.capture_history.get(moved_piece, mv.to(), captured_pt) as i32
+                        });
+                        tune.lmr_step16_capture_stat_scale_num * piece_value(captured) / 128 + hist
+                    } else {
+                        let mover = !pos.side_to_move();
+                        let main_hist =
+                            self.history.with_read(|h| h.main_history.get(mover, mv) as i32);
+                        // ply=0 では contHist は sentinel（実質0）になる。
+                        2 * main_hist
                     };
                     self.state.stack[0].stat_score = stat_score;
                     r -= stat_score * tune.lmr_step16_stat_score_scale_num / 8192;
@@ -1548,6 +1563,8 @@ impl SearchWorker {
 
         // Singular Extension用の除外手を取得
         let excluded_move = st.stack[ply as usize].excluded_move;
+        // YaneuraOu準拠: priorCapture は「1手前が捕獲手か」を局面状態から判定
+        let prior_capture = pos.captured_piece().is_some();
 
         // 置換表プローブ（即時カットオフ含む）
         let tt_ctx = match probe_transposition::<NT>(
@@ -1595,25 +1612,23 @@ impl SearchWorker {
                     if ply >= 1 {
                         let prev_ply = (ply - 1) as usize;
                         let prev_move_count = st.stack[prev_ply].move_count;
-                        let prior_capture =
-                            st.stack[prev_ply].cont_hist_key.is_some_and(|k| k.capture);
-                        if let Some(prev_key) = st.stack[prev_ply].cont_hist_key {
-                            if prev_move_count <= 4 && !prior_capture {
-                                let prev_piece = pos.piece_on(prev_key.to);
-                                let prev_in_check = st.stack[prev_ply].in_check;
-                                ctx.history.with_write(|h| {
-                                    update_continuation_histories(
-                                        h,
-                                        &st.stack,
-                                        &ctx.tune_params,
-                                        ply - 1,
-                                        prev_in_check,
-                                        prev_piece,
-                                        prev_key.to,
-                                        -2142,
-                                    );
-                                });
-                            }
+                        let prev_move = st.stack[prev_ply].current_move;
+                        if prev_move.is_normal() && prev_move_count <= 4 && !prior_capture {
+                            let prev_sq = prev_move.to();
+                            let prev_piece = pos.piece_on(prev_sq);
+                            let prev_in_check = st.stack[prev_ply].in_check;
+                            ctx.history.with_write(|h| {
+                                update_continuation_histories(
+                                    h,
+                                    &st.stack,
+                                    &ctx.tune_params,
+                                    ply - 1,
+                                    prev_in_check,
+                                    prev_piece,
+                                    prev_sq,
+                                    -2142,
+                                );
+                            });
                         }
                     }
                 }
@@ -1639,7 +1654,6 @@ impl SearchWorker {
             let prev_ply = (ply - 1) as usize;
             let prev_move = st.stack[prev_ply].current_move;
             let prev_in_check = st.stack[prev_ply].in_check;
-            let prior_capture = st.stack[prev_ply].cont_hist_key.is_some_and(|k| k.capture);
 
             if prev_move.is_normal()
                 && !prev_in_check
