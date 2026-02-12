@@ -437,6 +437,25 @@ pub struct SearchWorker {
 }
 
 impl SearchWorker {
+    /// root quiet手の statScore を計算する（YO Step16 準拠）。
+    ///
+    /// YO の root では `contHist[0/1]` が sentinel を指すため、
+    /// `2 * mainHistory + contHist0 + contHist1` は
+    /// `2 * mainHistory + 2 * sentinel_contHistory` と等価になる。
+    #[inline]
+    fn root_quiet_stat_score(&self, mover: Color, mv: Move) -> i32 {
+        let moved_piece = mv.moved_piece_after();
+        let to_sq = mv.to();
+        let main_hist = self.history.with_read(|h| h.main_history.get(mover, mv) as i32);
+        // SAFETY:
+        // - `cont_history_sentinel` は `SearchWorker::new()` で HistoryCell 内部テーブルを指して初期化される。
+        // - HistoryCell の実体は SearchWorker のライフタイム中に再配置されない。
+        // - ここでは読み取り専用で参照し、可変参照とは同時に保持しない。
+        let cont_hist =
+            unsafe { self.cont_history_sentinel.as_ref() }.get(moved_piece, to_sq) as i32;
+        2 * main_hist + cont_hist + cont_hist
+    }
+
     /// 新しいSearchWorkerを作成（YaneuraOu準拠: isreadyまたは最初のgo時）
     ///
     /// Box化してヒープに配置し、スタックオーバーフローを防ぐ。
@@ -927,9 +946,7 @@ impl SearchWorker {
                     + hist
             } else {
                 let mover = !pos.side_to_move();
-                let main_hist = self.history.with_read(|h| h.main_history.get(mover, mv) as i32);
-                // ply=0 では contHist は sentinel（実質0）になる。
-                2 * main_hist
+                self.root_quiet_stat_score(mover, mv)
             };
             self.state.stack[0].stat_score = root_stat_score;
             let value = if rm_idx == 0 {
@@ -1321,11 +1338,22 @@ impl SearchWorker {
         // YaneuraOu準拠: root探索開始時の初期化
         self.state.stack[0].stat_score = 0;
         self.state.stack[2].cutoff_cnt = 0;
-        let _ = self.init_root_static_eval(pos, root_in_check);
+        let (_root_unadjusted_static_eval, root_correction_value) =
+            self.init_root_static_eval(pos, root_in_check);
         // YaneuraOu準拠: rootでもTT probeを行い、ttHit/ttPvを更新
         let key = pos.key();
         let tt_result = self.tt.probe(key, pos);
-        self.state.stack[0].tt_hit = tt_result.found;
+        let tt_hit = tt_result.found;
+        let tt_data = tt_result.data;
+        // rootNode && pvIdx 経路では rootMoves[pv_idx] を ttMove 相当として扱う。
+        let tt_move_root = self.state.root_moves[pv_idx].mv();
+        let tt_value_root = if tt_hit {
+            value_from_tt(tt_data.value, 0)
+        } else {
+            Value::NONE
+        };
+        let tt_capture_root = tt_move_root.is_some() && pos.capture_stage(tt_move_root);
+        self.state.stack[0].tt_hit = tt_hit;
         self.state.stack[0].tt_pv = true;
 
         // PVをクリアして前回探索の残留を防ぐ
@@ -1362,8 +1390,7 @@ impl SearchWorker {
                     + hist
             } else {
                 let mover = !pos.side_to_move();
-                let main_hist = self.history.with_read(|h| h.main_history.get(mover, mv) as i32);
-                2 * main_hist
+                self.root_quiet_stat_score(mover, mv)
             };
 
             let nodes_before = self.state.nodes;
@@ -1389,11 +1416,13 @@ impl SearchWorker {
                 );
             }
 
+            let mut new_depth = depth - 1;
+
             // PVS: 最初の手（このPVラインの候補）はPV探索
             let value = if rm_idx == pv_idx {
                 -self.search_node_wrapper::<{ NodeType::PV as u8 }>(
                     pos,
-                    depth - 1,
+                    new_depth,
                     -beta,
                     -alpha,
                     1,
@@ -1402,10 +1431,57 @@ impl SearchWorker {
                     time_manager,
                 )
             } else {
-                // それ以降はZero Window Search
+                // YaneuraOu準拠: rootNode && pvIdx 経路でも Step17/18 の LMR を適用する。
+                let (d, deeper_base, deeper_mul, shallower_thr) = {
+                    let tune = &self.search_tune_params;
+                    let delta = (beta.raw() - alpha.raw()).abs().max(1);
+                    let root_delta = self.state.root_delta.max(1);
+                    // root (ply 0) では improving = false (ply < 2)
+                    let mut r =
+                        reduction(tune, false, depth, (rm_idx + 1) as i32, delta, root_delta);
+
+                    // ttPv調整（rootでは常にttPv=true, PvNode=true, cutNode=false）
+                    let tt_value_higher = (tt_value_root > alpha) as i32;
+                    let tt_depth_ge = (tt_data.depth >= depth) as i32;
+                    r -= tune.lmr_step16_ttpv_sub_base
+                        + tune.lmr_step16_ttpv_sub_pv_node
+                        + tt_value_higher * tune.lmr_step16_ttpv_sub_tt_value
+                        + tt_depth_ge * tune.lmr_step16_ttpv_sub_tt_depth;
+
+                    // 基本調整
+                    r += tune.lmr_step16_base_add;
+                    r -= (rm_idx + 1) as i32 * tune.lmr_step16_move_count_mul;
+                    r -= root_correction_value.abs() / tune.lmr_step16_correction_div.max(1);
+
+                    if tt_capture_root {
+                        r += tune.lmr_step16_tt_capture_add;
+                    }
+                    if self.state.stack[1].cutoff_cnt > 2 {
+                        r += tune.lmr_step16_cutoff_count_add;
+                    }
+                    if mv == tt_move_root {
+                        r -= tune.lmr_step16_tt_move_penalty;
+                    }
+
+                    let stat_score = self.state.stack[0].stat_score;
+                    r -= stat_score * tune.lmr_step16_stat_score_scale_num / 8192;
+
+                    // d計算 (YO: max(1, min(newDepth - r/1024, newDepth + 2)) + PvNode)
+                    let d =
+                        std::cmp::max(1, std::cmp::min(new_depth - r / 1024, new_depth + 2)) + 1; // +1 for PvNode
+                    (
+                        d,
+                        tune.lmr_research_deeper_base,
+                        tune.lmr_research_deeper_depth_mul,
+                        tune.lmr_research_shallower_threshold,
+                    )
+                };
+
+                // Step 17: LMR zero-window search
+                self.state.stack[0].reduction = new_depth - d;
                 let mut value = -self.search_node_wrapper::<{ NodeType::NonPV as u8 }>(
                     pos,
-                    depth - 1,
+                    d,
                     -alpha - Value::new(1),
                     -alpha,
                     1,
@@ -1413,12 +1489,35 @@ impl SearchWorker {
                     limits,
                     time_manager,
                 );
+                self.state.stack[0].reduction = 0;
+
+                // LMR fail high後の deeper/shallower 調整
+                if value > alpha {
+                    let deeper_threshold = deeper_base + deeper_mul * new_depth;
+                    let do_deeper =
+                        d < new_depth && value > (best_value + Value::new(deeper_threshold));
+                    let do_shallower = value < best_value + Value::new(shallower_thr);
+                    new_depth += do_deeper as i32 - do_shallower as i32;
+
+                    if new_depth > d {
+                        value = -self.search_node_wrapper::<{ NodeType::NonPV as u8 }>(
+                            pos,
+                            new_depth,
+                            -alpha - Value::new(1),
+                            -alpha,
+                            1,
+                            false,
+                            limits,
+                            time_manager,
+                        );
+                    }
+                }
 
                 // YaneuraOu準拠: PvNodeでalphaを超えたら再探索（value<beta条件は付けない）
                 if value > alpha {
                     value = -self.search_node_wrapper::<{ NodeType::PV as u8 }>(
                         pos,
-                        depth - 1,
+                        new_depth,
                         -beta,
                         -alpha,
                         1,

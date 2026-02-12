@@ -909,8 +909,8 @@ pub fn continuation_history_bonus_with_offset(
     tune_params: &SearchTuneParams,
 ) -> i32 {
     let base = continuation_history_bonus(bonus, tune_params);
-    if ply_back <= 2 {
-        // YaneuraOu: 負のボーナスでも+80を加算してペナルティを緩める
+    if ply_back < 2 {
+        // YaneuraOu準拠: 88 * (i < 2) → offset=1のみ近接plyオフセットを加算
         base + tune_params.continuation_history_near_ply_offset
     } else {
         base

@@ -175,8 +175,7 @@ pub struct MovePicker {
     end_bad_captures: usize,
     end_captures: usize,
     end_generated: usize,
-    /// 良い静かな手の終了位置（partial_insertion_sortの閾値以上の手の数）
-    /// QuietInitで設定し、GoodQuiet/BadQuietで使用
+    /// partial_insertion_sort の sorted 領域末尾位置（未使用だが YO 構造保持用）
     end_good_quiets: usize,
 }
 
@@ -344,22 +343,9 @@ impl MovePicker {
 
     /// quiet手の生成をスキップ（LMP条件成立時に呼び出す）
     ///
-    /// skip_quietsフラグを設定し、現在のステージに応じて遷移先を調整する。
-    /// QuietInit/GoodQuietステージにいる場合はBadCaptureに即座に遷移する。
-    /// **bad capturesは残す**（quietのみスキップ）
+    /// YaneuraOu準拠: フラグのみ設定する。実際のステージ遷移は next_move() 側で処理される。
     pub fn skip_quiets(&mut self) {
         self.skip_quiets = true;
-        // 現在のステージに応じて遷移先を調整
-        match self.stage {
-            Stage::QuietInit | Stage::GoodQuiet => {
-                // BadCapture範囲にcur/end_curを再初期化してから遷移
-                // これがないと、GoodQuiet中で発火した場合に残りのquietが返されてしまう
-                self.cur = 0;
-                self.end_cur = self.end_bad_captures;
-                self.stage = Stage::BadCapture;
-            }
-            _ => {}
-        }
     }
 
     /// 現在のステージがquiet段階かどうかを返す
@@ -443,12 +429,9 @@ impl MovePicker {
                     if let Some(m) = self.select_good_capture(pos) {
                         return m;
                     }
-                    // skip_quietsフラグがある場合はquiet手をスキップしてBadCaptureへ
-                    if self.skip_quiets {
-                        self.stage = Stage::BadCapture;
-                    } else {
-                        self.stage = Stage::QuietInit;
-                    }
+                    // YaneuraOu準拠: 常に QuietInit へ遷移。skip_quiets は
+                    // QuietInit/GoodQuiet/BadQuiet 側で判定する。
+                    self.stage = Stage::QuietInit;
                 }
 
                 // ==============================
@@ -481,19 +464,17 @@ impl MovePicker {
                         self.cur = self.end_captures;
                         self.score_quiets(pos, history);
 
-                        // ハイブリッド方式: 深さベースの閾値で部分ソート
-                        // -3560はYaneuraOuの経験的な定数で、depth=1で-3560、depth=10で-35600となる
-                        // 深さが浅いほど多くの手をソート（閾値が高い）、深いほど少ない手のみソート（閾値が低い）
-                        // partial_insertion_sortは閾値以上の手を先頭に集めてソートし、その数を返す
+                        // YaneuraOu準拠: 深さベースの閾値で部分ソート
+                        // -3560 * depth で depth が浅いほど閾値が高く、多くの手がソート対象
                         let limit = -3560 * self.depth;
                         let quiet_count = self.end_cur - self.end_captures;
-                        let good_count = partial_insertion_sort(
+                        let sorted_end = partial_insertion_sort(
                             &mut self.moves.as_mut_slice()[self.end_captures..],
                             quiet_count,
                             limit,
                         );
-                        // 閾値以上の手の終了位置を保存（GoodQuiet/BadQuietで使用）
-                        self.end_good_quiets = self.end_captures + good_count;
+                        // sorted 領域末尾位置（現在は実運用で未参照）
+                        self.end_good_quiets = self.end_captures + sorted_end;
                     } else {
                         self.end_good_quiets = self.end_captures;
                     }
@@ -809,100 +790,45 @@ impl MovePicker {
 // ユーティリティ関数
 // =============================================================================
 
-/// 挿入ソートからPDQSortに切り替えるしきい値
-///
-/// 小さい配列では挿入ソートが高速だが、大きい配列ではPDQSort（O(n log n)）が
-/// 挿入ソート（O(n²)）より高速。将棋の平均合法手数は約100手のため、
-/// 大半のケースでPDQSortが適用される。
-///
-/// 16という値は、一般的なソートアルゴリズムの実装（std::sort等）で
-/// 挿入ソートへのフォールバック閾値として広く使われている値。
-/// Rust標準ライブラリのPDQSortも内部で同様の閾値を使用している。
-const SORT_SWITCH_THRESHOLD: usize = 16;
-
 /// 部分ソート（ハイブリッド方式）
 ///
-/// `limit` 以上のスコアの手だけを降順でソートする。
-/// 閾値以上の手を先頭に集めてから、その部分だけをソートする。
+/// YaneuraOu準拠の部分挿入ソート。
+///
+/// `limit` 以上のスコアの手を先頭に集め、降順でソートする。
+/// 先頭要素（index 0）を初期 sorted 領域とみなし、index 1 から走査する。
 ///
 /// ## 戻り値
-/// 閾値以上の手の数（good_count）を返す。
-/// - `limit == i32::MIN`の場合は全要素ソートされ、`end`を返す
-/// - それ以外の場合は閾値以上の手の数を返す
-///
-/// ## 境界条件
-/// - `value >= limit`: 閾値以上の手として先頭に配置される
-/// - `value < limit`: 閾値未満の手として後方に配置される
+/// sorted 領域の末尾インデックス（sorted_end）を返す。
+/// sorted 領域は `[0, sorted_end]`（inclusive）。
+/// - `end <= 1` の場合は 0 を返す（ソート不要）
 ///
 /// ## 計算量
-/// - 閾値以上の手が多い場合: PDQSort O(k log k)
-/// - 閾値以上の手が少ない場合: 挿入ソート O(k²)
-/// - 全体の計算量: O(n) + O(k log k) または O(n) + O(k²)
+/// - 挿入ソート相当
 fn partial_insertion_sort(moves: &mut [ExtMove], end: usize, limit: i32) -> usize {
-    if end == 0 {
-        return 0;
-    }
-    // 1手の場合もlimit判定を行う
-    if end == 1 {
-        return if moves[0].value >= limit { 1 } else { 0 };
-    }
-
-    let slice = &mut moves[..end];
-
-    // limit = i32::MIN の場合は全要素ソート
-    if limit == i32::MIN {
-        if end > SORT_SWITCH_THRESHOLD {
-            slice.sort_unstable_by(|a, b| b.value.cmp(&a.value));
-        } else {
-            // 小さい配列は挿入ソート
-            for i in 1..end {
-                let tmp = slice[i];
-                let mut j = i;
-                while j > 0 && slice[j - 1].value < tmp.value {
-                    slice[j] = slice[j - 1];
-                    j -= 1;
-                }
-                slice[j] = tmp;
+    // YaneuraOu: movepick.cpp partial_insertion_sort()
+    //   for (ExtMove *sortedEnd = begin, *p = begin + 1; p < end; ++p)
+    //       if (p->value >= limit) {
+    //           ExtMove tmp = *p, *q;
+    //           *p = *++sortedEnd;
+    //           for (q = sortedEnd; q != begin && *(q - 1) < tmp; --q)
+    //               *q = *(q - 1);
+    //           *q = tmp;
+    //       }
+    let mut sorted_end: usize = 0;
+    for p in 1..end {
+        if moves[p].value >= limit {
+            let tmp = moves[p];
+            sorted_end += 1;
+            moves[p] = moves[sorted_end];
+            let mut q = sorted_end;
+            while q > 0 && moves[q - 1].value < tmp.value {
+                moves[q] = moves[q - 1];
+                q -= 1;
             }
-        }
-        return end;
-    }
-
-    // ハイブリッド方式: 閾値以上の手を先頭に集めてからソート
-
-    // 1. 閾値以上の手を先頭に集める（O(n)）
-    let mut good_count = 0;
-    for i in 0..end {
-        if slice[i].value >= limit {
-            slice.swap(i, good_count);
-            good_count += 1;
+            moves[q] = tmp;
         }
     }
-
-    // 閾値以上の手がない場合は終了
-    if good_count == 0 {
-        return 0;
-    }
-
-    // 2. 閾値以上の手の部分だけをソート
-    let good_slice = &mut slice[..good_count];
-    if good_count > SORT_SWITCH_THRESHOLD {
-        // 多い場合はPDQSort O(k log k)
-        good_slice.sort_unstable_by(|a, b| b.value.cmp(&a.value));
-    } else {
-        // 少ない場合は挿入ソート O(k²)
-        for i in 1..good_count {
-            let tmp = good_slice[i];
-            let mut j = i;
-            while j > 0 && good_slice[j - 1].value < tmp.value {
-                good_slice[j] = good_slice[j - 1];
-                j -= 1;
-            }
-            good_slice[j] = tmp;
-        }
-    }
-
-    good_count
+    sorted_end
 }
 
 /// 駒の価値（MVV用）
@@ -955,6 +881,7 @@ mod tests {
 
     #[test]
     fn test_partial_insertion_sort() {
+        // YaneuraOu準拠: index 0 を初期 sorted 領域とし、index 1 から走査
         let mut moves = vec![
             ExtMove::new(Move::NONE, 100),
             ExtMove::new(Move::NONE, 50),
@@ -963,12 +890,12 @@ mod tests {
             ExtMove::new(Move::NONE, 150),
         ];
 
-        // limit=100でソート
         let len = moves.len();
-        let good_count = partial_insertion_sort(&mut moves, len, 100);
+        let sorted_end = partial_insertion_sort(&mut moves, len, 100);
 
-        // 100以上の手が先頭にソートされている
-        assert_eq!(good_count, 3); // 100, 150, 200 の3つ
+        // index 1 以降で >= 100 の手は 200, 150 の2つ → sorted_end=2
+        assert_eq!(sorted_end, 2);
+        // sorted 領域 [0..=2] が降順
         assert_eq!(moves[0].value, 200);
         assert_eq!(moves[1].value, 150);
         assert_eq!(moves[2].value, 100);
@@ -984,28 +911,26 @@ mod tests {
         ];
 
         let len = moves.len();
-        let good_count = partial_insertion_sort(&mut moves, len, 100);
+        let sorted_end = partial_insertion_sort(&mut moves, len, 100);
 
-        // limit=100 の場合、value >= 100 の手が閾値以上
-        assert_eq!(good_count, 2); // 100と101の2つ
-                                   // 閾値以上の手がソートされて先頭に
+        // index 1 以降で >= 100: 100, 101 の2つ → sorted_end=2
+        assert_eq!(sorted_end, 2);
         assert_eq!(moves[0].value, 101);
         assert_eq!(moves[1].value, 100);
-        // 閾値未満の手は後方に
         assert_eq!(moves[2].value, 99);
     }
 
     #[test]
     fn test_partial_insertion_sort_large_array() {
-        // SORT_SWITCH_THRESHOLD(16)を超える配列
+        // 20要素の配列
         let mut moves: Vec<ExtMove> = (0..20).map(|i| ExtMove::new(Move::NONE, i * 10)).collect();
 
         let len = moves.len();
-        // limit=100: 100以上の手は 100, 110, 120, ..., 190 の10個
-        let good_count = partial_insertion_sort(&mut moves, len, 100);
+        // limit=100: index 1 以降で >= 100 の手は 100, 110, ..., 190 の10個
+        let sorted_end = partial_insertion_sort(&mut moves, len, 100);
 
-        assert_eq!(good_count, 10);
-        // 閾値以上の手がソートされて先頭に（降順）
+        assert_eq!(sorted_end, 10);
+        // sorted 領域先頭に降順配置
         assert_eq!(moves[0].value, 190);
         assert_eq!(moves[1].value, 180);
         assert_eq!(moves[9].value, 100);
@@ -1021,9 +946,9 @@ mod tests {
         ];
 
         let len = moves.len();
-        let good_count = partial_insertion_sort(&mut moves, len, 100);
+        let sorted_end = partial_insertion_sort(&mut moves, len, 100);
 
-        assert_eq!(good_count, 0);
+        assert_eq!(sorted_end, 0);
         // 順序は変わらない（swapは発生しない）
     }
 
@@ -1037,9 +962,10 @@ mod tests {
         ];
 
         let len = moves.len();
-        let good_count = partial_insertion_sort(&mut moves, len, 50);
+        let sorted_end = partial_insertion_sort(&mut moves, len, 50);
 
-        assert_eq!(good_count, 3);
+        // index 1 以降で >= 50: 200, 150 の2つ → sorted_end=2
+        assert_eq!(sorted_end, 2);
         // 全てソートされる（降順）
         assert_eq!(moves[0].value, 200);
         assert_eq!(moves[1].value, 150);
@@ -1057,10 +983,11 @@ mod tests {
         ];
 
         let len = moves.len();
-        let good_count = partial_insertion_sort(&mut moves, len, i32::MIN);
+        let sorted_end = partial_insertion_sort(&mut moves, len, i32::MIN);
 
-        assert_eq!(good_count, 4); // 全要素が「閾値以上」
-                                   // 全体がソートされる（降順）
+        // index 1 以降の全3要素が >= i32::MIN → sorted_end=3
+        assert_eq!(sorted_end, 3);
+        // 全体がソートされる（降順）
         assert_eq!(moves[0].value, 200);
         assert_eq!(moves[1].value, 50);
         assert_eq!(moves[2].value, 0);
@@ -1071,22 +998,21 @@ mod tests {
     fn test_partial_insertion_sort_empty() {
         // 空配列
         let mut moves: Vec<ExtMove> = vec![];
-        let good_count = partial_insertion_sort(&mut moves, 0, 100);
-        assert_eq!(good_count, 0);
+        let sorted_end = partial_insertion_sort(&mut moves, 0, 100);
+        assert_eq!(sorted_end, 0);
     }
 
     #[test]
     fn test_partial_insertion_sort_single_element() {
-        // 1要素の配列
+        // 1要素の配列: ループ 1..1 は実行されない → sorted_end=0
         let mut moves = vec![ExtMove::new(Move::NONE, 150)];
-        let good_count = partial_insertion_sort(&mut moves, 1, 100);
-        assert_eq!(good_count, 1);
+        let sorted_end = partial_insertion_sort(&mut moves, 1, 100);
+        assert_eq!(sorted_end, 0);
         assert_eq!(moves[0].value, 150);
 
-        // 閾値未満の1要素: limit判定を正しく行う
         let mut moves2 = vec![ExtMove::new(Move::NONE, 50)];
-        let good_count2 = partial_insertion_sort(&mut moves2, 1, 100);
-        assert_eq!(good_count2, 0); // 50 < 100 なので閾値未満、good_count=0
+        let sorted_end2 = partial_insertion_sort(&mut moves2, 1, 100);
+        assert_eq!(sorted_end2, 0);
     }
 
     #[test]
@@ -1098,37 +1024,30 @@ mod tests {
         assert_eq!(piece_value(Piece::W_DRAGON), 1395);
     }
 
-    /// end_good_quietsの境界が正しく設定されることを検証
-    ///
-    /// バグ修正の検証: partial_insertion_sortで閾値以上の手を前に集めた後、
-    /// good_countが正しく返され、GoodQuiet/BadQuietの境界が正確に設定される
+    /// partial_insertion_sort のソート順が YO と同型であることを検証
     #[test]
-    fn test_end_good_quiets_boundary() {
-        // partial_insertion_sortで閾値以上の手を前に集めた後、
-        // end_good_quietsが正しく設定されることを検証
+    fn test_partial_insertion_sort_order() {
+        // YaneuraOu準拠: index 0 は初期 sorted 領域、index 1 以降を走査
         let mut moves = vec![
-            ExtMove::new(Move::NONE, 100),  // 閾値以上 (100 >= 0)
-            ExtMove::new(Move::NONE, -200), // 閾値未満 (-200 < 0)
-            ExtMove::new(Move::NONE, 50),   // 閾値以上 (50 >= 0)
-            ExtMove::new(Move::NONE, 200),  // 閾値以上 (200 >= 0)
-            ExtMove::new(Move::NONE, -100), // 閾値未満 (-100 < 0)
+            ExtMove::new(Move::NONE, 100),  // index 0: 初期 sorted 領域
+            ExtMove::new(Move::NONE, -200), // index 1: < 0, skip
+            ExtMove::new(Move::NONE, 50),   // index 2: >= 0, sorted_end=1
+            ExtMove::new(Move::NONE, 200),  // index 3: >= 0, sorted_end=2
+            ExtMove::new(Move::NONE, -100), // index 4: < 0, skip
         ];
 
-        // limit=0でソート
         let len = moves.len();
-        let good_count = partial_insertion_sort(&mut moves, len, 0);
+        let sorted_end = partial_insertion_sort(&mut moves, len, 0);
 
-        // 閾値(0)以上の手は100, 50, 200の3つ
-        assert_eq!(good_count, 3);
+        // index 1 以降で >= 0 の手は 50, 200 の2つ
+        assert_eq!(sorted_end, 2);
 
-        // 最初のgood_count個が閾値以上
-        for (i, m) in moves.iter().enumerate().take(good_count) {
-            assert!(m.value >= 0, "Move at index {i} should have value >= 0, got {}", m.value);
-        }
-
-        // good_count以降が閾値未満
-        for (i, m) in moves.iter().enumerate().skip(good_count) {
-            assert!(m.value < 0, "Move at index {i} should have value < 0, got {}", m.value);
-        }
+        // sorted 領域 [0..=2] は降順
+        assert_eq!(moves[0].value, 200);
+        assert_eq!(moves[1].value, 100);
+        assert_eq!(moves[2].value, 50);
+        // 残りは閾値未満
+        assert!(moves[3].value < 0);
+        assert!(moves[4].value < 0);
     }
 }
