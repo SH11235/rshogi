@@ -919,8 +919,9 @@ pub(crate) fn piece_value(pc: Piece) -> i32 {
         Gold | ProPawn | ProLance | ProKnight | ProSilver => 540,
         Bishop => 855,
         Rook => 990,
-        Horse => 1089,  // Bishop + King
-        Dragon => 1224, // Rook + King
+        // YaneuraOu Eval::PieceValue 準拠
+        Horse => 945,
+        Dragon => 1395,
         King => 15000,
     }
 }
@@ -1093,7 +1094,8 @@ mod tests {
         assert_eq!(piece_value(Piece::B_PAWN), 90);
         assert_eq!(piece_value(Piece::W_GOLD), 540);
         assert_eq!(piece_value(Piece::B_ROOK), 990);
-        assert_eq!(piece_value(Piece::W_DRAGON), 1224);
+        assert_eq!(piece_value(Piece::W_HORSE), 945);
+        assert_eq!(piece_value(Piece::W_DRAGON), 1395);
     }
 
     /// end_good_quietsの境界が正しく設定されることを検証

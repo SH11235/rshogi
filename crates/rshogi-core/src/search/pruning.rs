@@ -478,12 +478,9 @@ where
             ctx.tune_params.probcut_beta_margin_base
                 - ctx.tune_params.probcut_beta_improving_sub * improving as i32,
         );
-    if beta.is_mate_score()
-        || (tt_ctx.hit
-            && tt_ctx.value != Value::NONE
-            && tt_ctx.value < prob_beta
-            && !tt_ctx.value.is_mate_score())
-    {
+    // YaneuraOu準拠: ttData.value が有効で probCutBeta 未満なら probCut を試さない。
+    // hit フラグや mate 判定で追加ガードしない。
+    if beta.is_mate_score() || (tt_ctx.value != Value::NONE && tt_ctx.value < prob_beta) {
         return None;
     }
 

@@ -154,7 +154,9 @@ pub(super) fn probe_transposition<const NT: u8>(
         pv_node || (tt_hit && tt_data.is_pv)
     };
 
-    let tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
+    // YaneuraOu準拠: alpha-beta では ttHit で ttMove を潰さない。
+    // probe() 側で to_move 変換に失敗した手は除外済み。
+    let tt_move = tt_data.mv;
     let mut tt_value = if tt_hit {
         value_from_tt(tt_data.value, ply)
     } else {
