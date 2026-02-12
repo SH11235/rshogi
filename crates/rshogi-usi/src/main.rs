@@ -17,7 +17,7 @@ use rshogi_core::nnue::{
     AccumulatorStackVariant,
 };
 use rshogi_core::position::Position;
-use rshogi_core::search::{LimitsType, Search, SearchInfo, SearchResult};
+use rshogi_core::search::{LimitsType, Search, SearchInfo, SearchResult, SearchTuneParams};
 use rshogi_core::types::Move;
 use serde_json::json;
 
@@ -183,6 +183,12 @@ impl UsiEngine {
         println!("option name PassMoveBonus type spin default 0 min -1000 max 1000");
         println!("option name PassRightValueEarly type spin default {DEFAULT_PASS_RIGHT_VALUE_EARLY} min 0 max 500");
         println!("option name PassRightValueLate type spin default {DEFAULT_PASS_RIGHT_VALUE_LATE} min 0 max 500");
+        for spec in SearchTuneParams::option_specs() {
+            println!(
+                "option name {} type spin default {} min {} max {}",
+                spec.usi_name, spec.default, spec.min, spec.max
+            );
+        }
         println!("usiok");
     }
 
@@ -253,6 +259,27 @@ impl UsiEngine {
         }
 
         // オプションを適用
+        if name.starts_with("SPSA_") {
+            let parsed = match value.parse::<i32>() {
+                Ok(v) => v,
+                Err(_) => {
+                    eprintln!("info string Warning: invalid SPSA value '{}'", value);
+                    return;
+                }
+            };
+            if let Some(search) = self.search.as_mut() {
+                if let Some(result) = search.set_search_tune_option(name.as_str(), parsed) {
+                    if result.clamped {
+                        eprintln!(
+                            "info string Warning: {}={} is out of range, clamped to {} ({}..{})",
+                            name, parsed, result.applied, result.min, result.max
+                        );
+                    }
+                    return;
+                }
+            }
+        }
+
         match name.as_str() {
             "USI_Hash" => {
                 if let Ok(size) = value.parse::<usize>() {

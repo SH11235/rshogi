@@ -48,6 +48,7 @@ pub mod positions;
 pub mod qsearch_pv;
 pub mod report;
 pub mod runner;
+pub mod selfplay;
 pub mod system;
 mod utils;
 

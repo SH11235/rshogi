@@ -24,6 +24,7 @@ mod thread;
 mod time_manager;
 mod time_options;
 mod tt_history;
+mod tune_params;
 mod types;
 
 #[cfg(test)]
@@ -41,4 +42,5 @@ pub use thread::*;
 pub use time_manager::*;
 pub use time_options::*;
 pub use tt_history::*;
+pub use tune_params::*;
 pub use types::*;
