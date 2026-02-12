@@ -308,7 +308,6 @@ impl MovePicker {
         let stage = if tt_move.is_some()
             && pos.is_capture(tt_move)
             && pos.pseudo_legal_with_all(tt_move, generate_all_legal_moves)
-            && pos.see_ge(tt_move, threshold)
         {
             Stage::ProbCutTT
         } else {

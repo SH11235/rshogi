@@ -448,6 +448,7 @@ pub(super) fn try_probcut<F>(
     unadjusted_static_eval: Value,
     in_check: bool,
     cut_node: bool,
+    excluded_move: Move,
     limits: &LimitsType,
     time_manager: &mut TimeManagement,
     search_node: F,
@@ -523,6 +524,9 @@ where
     let (buf, len) = probcut_moves;
 
     for &mv in buf[..len].iter() {
+        if mv == excluded_move {
+            continue;
+        }
         if !pos.is_legal(mv) {
             continue;
         }
