@@ -226,7 +226,7 @@ pub(super) fn probe_transposition<const NT: u8>(
             Move::NONE
         },
     });
-    let tt_capture = tt_move.is_some() && pos.is_capture(tt_move);
+    let tt_capture = tt_move.is_some() && pos.capture_stage(tt_move);
 
     // TT統計収集
     inc_stat_by_depth!(st, tt_probe_by_depth, depth);
@@ -430,7 +430,13 @@ pub(super) fn compute_eval_context(
     // yaneuraou-search.cpp:2680-2706 参照
     // 「🌈 これ書かないとR70ぐらい弱くなる。」
     let mut static_eval = if in_check {
-        Value::NONE
+        // YaneuraOu準拠: in-check では (ss-2)->staticEval を継承する。
+        // root直下 (ply < 2) は参照先がないため VALUE_NONE を使う。
+        if ply >= 2 {
+            st.stack[(ply - 2) as usize].static_eval
+        } else {
+            Value::NONE
+        }
     } else if tt_ctx.hit && tt_ctx.data.eval != Value::NONE && !pv_node {
         // TTヒット && eval有効 && 非PVノード → TTからevalを取得
         ensure_nnue_accumulator(st, pos);

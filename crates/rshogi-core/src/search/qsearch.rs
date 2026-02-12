@@ -91,7 +91,8 @@ pub(super) fn qsearch<const NT: u8>(
     let mut tt_data = tt_result.data;
     let pv_hit = tt_hit && tt_data.is_pv;
     st.stack[ply as usize].tt_hit = tt_hit;
-    st.stack[ply as usize].tt_pv = pv_hit;
+    // YaneuraOu準拠: qsearch では ss->ttPv に上書きしない (yaneuraou-search.cpp:4289)
+    // pv_hit はローカル変数のみで使用
     let mut tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
     if tt_move.is_some() && !pos.pseudo_legal_with_all(tt_move, ctx.generate_all_legal_moves) {
         maybe_log_invalid_tt_data(InvalidTtLog {
@@ -221,7 +222,7 @@ pub(super) fn qsearch<const NT: u8>(
                         key,
                         depth: DEPTH_QS,
                         bound: Bound::Exact,
-                        is_pv: st.stack[ply as usize].tt_pv,
+                        is_pv: pv_hit,
                         tt_move: mate_move,
                         stored_value: mate_value,
                         eval: unadjusted_static_eval,
@@ -234,7 +235,7 @@ pub(super) fn qsearch<const NT: u8>(
                     tt_result.write(
                         key,
                         mate_value,
-                        st.stack[ply as usize].tt_pv,
+                        pv_hit,
                         Bound::Exact,
                         DEPTH_QS,
                         mate_move,

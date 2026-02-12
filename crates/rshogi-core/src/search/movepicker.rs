@@ -527,10 +527,12 @@ impl MovePicker {
 
                 // ==============================
                 // 良い静かな手を返す（YaneuraOu準拠: value > GOOD_QUIET_THRESHOLD）
+                // partial_insertion_sortで高スコア手が先頭に来るが、
+                // YaneuraOu同様に全quiet手を走査してthreshold超の手を返す
                 // ==============================
                 Stage::GoodQuiet => {
                     if !self.skip_quiets {
-                        self.end_cur = self.end_good_quiets;
+                        self.end_cur = self.end_generated;
                         if let Some(m) = self.select_good_quiet() {
                             return m;
                         }
