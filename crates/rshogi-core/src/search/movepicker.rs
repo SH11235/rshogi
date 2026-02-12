@@ -306,7 +306,7 @@ impl MovePicker {
         debug_assert!(!pos.in_check());
 
         let stage = if tt_move.is_some()
-            && pos.is_capture(tt_move)
+            && pos.capture_stage(tt_move)
             && pos.pseudo_legal_with_all(tt_move, generate_all_legal_moves)
         {
             Stage::ProbCutTT
@@ -407,47 +407,25 @@ impl MovePicker {
                 Stage::CaptureInit | Stage::QCaptureInit | Stage::ProbCutInit => {
                     self.cur = 0;
                     self.end_bad_captures = 0;
+                    self.moves.clear();
 
-                    // 捕獲手を生成
+                    // YaneuraOu準拠: CaptureInit/QCaptureInit/ProbCutInit は同じ capture 生成を使う
                     let count = if self.generate_all_legal_moves {
-                        // All指定時は生成タイプを切り替え
-                        let gen_type = if matches!(self.stage, Stage::ProbCutInit) {
-                            crate::movegen::GenType::CapturesAll
-                        } else {
-                            crate::movegen::GenType::CapturesProPlusAll
-                        };
-                        let mut buf = ExtMoveBuffer::new();
-                        crate::movegen::generate_with_type(pos, gen_type, &mut buf, None);
-                        let mut c = 0;
-                        for ext in buf.iter() {
-                            if pos.is_capture(ext.mv) {
-                                self.moves.set(c, ExtMove::new(ext.mv, 0));
-                                c += 1;
-                            }
-                        }
-                        self.moves.set_len(c);
-                        c
-                    } else if matches!(self.stage, Stage::ProbCutInit) {
-                        // ProbCut: 捕獲手生成
-                        let mut buf = ExtMoveBuffer::new();
                         crate::movegen::generate_with_type(
                             pos,
-                            crate::movegen::GenType::CapturesProPlus,
-                            &mut buf,
+                            crate::movegen::GenType::CapturesAll,
+                            &mut self.moves,
                             None,
                         );
-                        // 捕獲手のみフィルタ
-                        let mut tmp_count = 0usize;
-                        for ext in buf.iter() {
-                            if pos.is_capture(ext.mv) {
-                                self.moves.set(tmp_count, ExtMove::new(ext.mv, 0));
-                                tmp_count += 1;
-                            }
-                        }
-                        self.moves.set_len(tmp_count);
-                        tmp_count
+                        self.moves.len()
                     } else {
-                        pos.generate_captures(&mut self.moves)
+                        crate::movegen::generate_with_type(
+                            pos,
+                            crate::movegen::GenType::Captures,
+                            &mut self.moves,
+                            None,
+                        );
+                        self.moves.len()
                     };
                     self.end_cur = count;
                     self.end_captures = count;
@@ -489,10 +467,8 @@ impl MovePicker {
                             );
                             let mut c = 0;
                             for ext in buf.iter() {
-                                if !pos.is_capture(ext.mv) {
-                                    self.moves.set(self.end_captures + c, ExtMove::new(ext.mv, 0));
-                                    c += 1;
-                                }
+                                self.moves.set(self.end_captures + c, ExtMove::new(ext.mv, 0));
+                                c += 1;
                             }
                             c
                         } else {
@@ -648,18 +624,12 @@ impl MovePicker {
             let m = ext.mv;
             let to = m.to();
             let pc = m.moved_piece_after();
-            let pt = pc.piece_type();
             let captured = pos.piece_on(to);
             let captured_pt = captured.piece_type();
 
             // MVV + CaptureHistory + 王手ボーナス
             let mut value = history.capture_history.get(pc, to, captured_pt) as i32;
             value += 7 * piece_value(captured);
-
-            // 王手になるマスへの移動にボーナス
-            if pos.check_squares(pt).contains(to) {
-                value += 1024;
-            }
 
             self.moves.set_value(i, value);
         }
@@ -717,7 +687,7 @@ impl MovePicker {
             let to = m.to();
             let pc = m.moved_piece_after();
 
-            if pos.is_capture(m) {
+            if pos.capture_stage(m) {
                 // 捕獲手は駒価値 + 大きなボーナス
                 let captured = pos.piece_on(to);
                 self.moves.set_value(i, piece_value(captured) + (1 << 28));
@@ -727,11 +697,6 @@ impl MovePicker {
 
                 let ch = self.cont_history(0);
                 value += ch.get(pc, to) as i32;
-
-                if self.ply < LOW_PLY_HISTORY_SIZE as i32 {
-                    let ply_idx = self.ply as usize;
-                    value += 2 * history.low_ply_history.get(ply_idx, m) as i32 / (1 + self.ply);
-                }
 
                 self.moves.set_value(i, value);
             }
