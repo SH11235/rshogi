@@ -28,6 +28,9 @@
 ///   --engine-usi-option "1:EvalDir=/mnt/nvme1/development/rshogi/eval/halfkp_256x2-32-32_crelu" \
 ///   --engine-usi-option "1:BookFile=no_book" \
 ///   --engine-usi-option "1:MinimumThinkingTime=0" \
+///   --engine-usi-option "1:NetworkDelay=0" \
+///   --engine-usi-option "1:NetworkDelay2=0" \
+///   --engine-usi-option "1:RoundUpToFullSecond=false" \
 ///   --out-dir "runs/selfplay/$(date +%Y%m%d_%H%M%S)-rshogi-vs-yaneuraou-suisho5"
 /// ```
 use std::collections::HashMap;
