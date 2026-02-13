@@ -5,6 +5,7 @@
 ///
 /// # 使用例
 ///
+/// 同一バイナリで異なる評価関数を比較（--engine-label 必須）:
 /// ```shell
 /// cargo run -p tools --release --bin tournament -- \
 ///   --engine target/release/rshogi-usi --engine-label nnue-v60 \
@@ -12,6 +13,22 @@
 ///   --games 50 --byoyomi 500 --threads 2 \
 ///   --engine-usi-option "0:EvalFile=eval/halfka_hm_512x2-8-64_crelu/v60.bin" \
 ///   --out-dir "runs/selfplay/$(date +%Y%m%d_%H%M%S)-nnue-v60-vs-material9"
+/// ```
+///
+/// rshogi vs YaneuraOu（suisho5, HalfKP 256x2-32-32, FV_SCALE=24）:
+/// ```shell
+/// cargo build --release -p rshogi-usi && \
+/// cargo run -p tools --release --bin tournament -- \
+///   --concurrency 8 \
+///   --engine target/release/rshogi-usi --engine-label rshogi \
+///   --engine /mnt/nvme1/development/YaneuraOu/source/YaneuraOu-halfkp_256x2-32-32 --engine-label yaneuraou \
+///   --games 50 --byoyomi 500 --threads 2 \
+///   --usi-option "FV_SCALE=24" \
+///   --engine-usi-option "0:EvalFile=eval/halfkp_256x2-32-32_crelu/suisho5.bin" \
+///   --engine-usi-option "1:EvalDir=/mnt/nvme1/development/rshogi/eval/halfkp_256x2-32-32_crelu" \
+///   --engine-usi-option "1:BookFile=no_book" \
+///   --engine-usi-option "1:MinimumThinkingTime=0" \
+///   --out-dir "runs/selfplay/$(date +%Y%m%d_%H%M%S)-rshogi-vs-yaneuraou-suisho5"
 /// ```
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -393,6 +410,20 @@ fn main() -> Result<()> {
         }
         cli.engine_labels.clone()
     };
+
+    // ラベルの重複チェック
+    {
+        let mut seen: HashMap<&str, usize> = HashMap::new();
+        for (i, label) in engine_labels.iter().enumerate() {
+            if let Some(prev) = seen.insert(label.as_str(), i) {
+                bail!(
+                    "ラベル '{}' が重複しています (engines[{prev}] と engines[{i}])。\n\
+                     各エンジンには一意のラベルを指定してください。",
+                    label
+                );
+            }
+        }
+    }
 
     // 開始局面のロード
     let (start_defs, start_commands) =
