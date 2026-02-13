@@ -39,17 +39,22 @@ pub(super) fn correction_value(
     let non_pawn_idx_w = (pos.non_pawn_key(Color::White) as usize) & (CORRECTION_HISTORY_SIZE - 1);
     let non_pawn_idx_b = (pos.non_pawn_key(Color::Black) as usize) & (CORRECTION_HISTORY_SIZE - 1);
 
-    // continuation_value 用の事前計算
-    let cont_params = if ply >= 2 {
-        let prev_move = st.stack[(ply - 1) as usize].current_move;
-        if prev_move.is_normal() {
-            st.stack[(ply - 2) as usize].cont_hist_key.map(|prev2_key| {
-                let pc = pos.piece_on(prev_move.to());
-                (prev2_key.piece, prev2_key.to, pc, prev_move.to())
-            })
-        } else {
-            None
-        }
+    // YO準拠: (ss-1)->currentMove を使って continuation correction を参照
+    let prev_move = if ply >= 1 {
+        st.stack[(ply - 1) as usize].current_move
+    } else {
+        Move::NONE
+    };
+    let move_ok = prev_move.is_normal();
+
+    // continuation correction 用キー: (ss-2) と (ss-4) の2段階（YO準拠）
+    let cont_key_2 = if move_ok && ply >= 2 {
+        st.stack[(ply - 2) as usize].cont_hist_key
+    } else {
+        None
+    };
+    let cont_key_4 = if move_ok && ply >= 4 {
+        st.stack[(ply - 4) as usize].cont_hist_key
     } else {
         None
     };
@@ -60,13 +65,24 @@ pub(super) fn correction_value(
         let wnpcv = h.correction_history.non_pawn_value(non_pawn_idx_w, Color::White, us) as i32;
         let bnpcv = h.correction_history.non_pawn_value(non_pawn_idx_b, Color::Black, us) as i32;
 
-        let cntcv = cont_params
-            .map(|(piece, to, pc, prev_to)| {
-                h.correction_history.continuation_value(piece, to, pc, prev_to) as i32
+        // YO準拠: move無効またはcont_hist_key無しの場合はデフォルト値8
+        let cv2 = cont_key_2
+            .map(|key| {
+                let pc = pos.piece_on(prev_move.to());
+                h.correction_history.continuation_value(key.piece, key.to, pc, prev_move.to())
+                    as i32
             })
-            .unwrap_or(0);
+            .unwrap_or(8);
+        let cv4 = cont_key_4
+            .map(|key| {
+                let pc = pos.piece_on(prev_move.to());
+                h.correction_history.continuation_value(key.piece, key.to, pc, prev_move.to())
+                    as i32
+            })
+            .unwrap_or(8);
+        let cntcv = cv2 + cv4;
 
-        8867 * pcv + 8136 * micv + 10_757 * (wnpcv + bnpcv) + 7232 * cntcv
+        9536 * pcv + 8494 * micv + 10_132 * (wnpcv + bnpcv) + 7156 * cntcv
     })
 }
 
@@ -85,17 +101,29 @@ pub(super) fn update_correction_history(
     let non_pawn_idx_w = (pos.non_pawn_key(Color::White) as usize) & (CORRECTION_HISTORY_SIZE - 1);
     let non_pawn_idx_b = (pos.non_pawn_key(Color::Black) as usize) & (CORRECTION_HISTORY_SIZE - 1);
 
-    // continuation_update 用の事前計算
-    let cont_params = if ply >= 2 {
-        let prev_move = st.stack[(ply - 1) as usize].current_move;
-        if prev_move.is_normal() {
-            st.stack[(ply - 2) as usize].cont_hist_key.map(|prev2_key| {
-                let pc = pos.piece_on(prev_move.to());
-                (prev2_key.piece, prev2_key.to, pc, prev_move.to())
-            })
-        } else {
-            None
-        }
+    // YO準拠: (ss-1)->currentMove を使って continuation correction を更新
+    let prev_move = if ply >= 1 {
+        st.stack[(ply - 1) as usize].current_move
+    } else {
+        Move::NONE
+    };
+    let move_ok = prev_move.is_normal();
+
+    // (ss-2) context
+    let cont_params_2 = if move_ok && ply >= 2 {
+        st.stack[(ply - 2) as usize].cont_hist_key.map(|key| {
+            let pc = pos.piece_on(prev_move.to());
+            (key.piece, key.to, pc, prev_move.to())
+        })
+    } else {
+        None
+    };
+    // (ss-4) context
+    let cont_params_4 = if move_ok && ply >= 4 {
+        st.stack[(ply - 4) as usize].cont_hist_key.map(|key| {
+            let pc = pos.piece_on(prev_move.to());
+            (key.piece, key.to, pc, prev_move.to())
+        })
     } else {
         None
     };
@@ -104,7 +132,7 @@ pub(super) fn update_correction_history(
 
     ctx.history.with_write(|h| {
         h.correction_history.update_pawn(pawn_idx, us, bonus);
-        h.correction_history.update_minor(minor_idx, us, bonus * 153 / 128);
+        h.correction_history.update_minor(minor_idx, us, bonus * 156 / 128);
         h.correction_history.update_non_pawn(
             non_pawn_idx_w,
             Color::White,
@@ -118,9 +146,15 @@ pub(super) fn update_correction_history(
             bonus * NON_PAWN_WEIGHT / 128,
         );
 
-        if let Some((piece, to, pc, prev_to)) = cont_params {
+        // YO準拠: continuation(ss-2) 重み 137/128
+        if let Some((piece, to, pc, prev_to)) = cont_params_2 {
             h.correction_history
-                .update_continuation(piece, to, pc, prev_to, bonus * 153 / 128);
+                .update_continuation(piece, to, pc, prev_to, bonus * 137 / 128);
+        }
+        // YO準拠: continuation(ss-4) 重み 64/128
+        if let Some((piece, to, pc, prev_to)) = cont_params_4 {
+            h.correction_history
+                .update_continuation(piece, to, pc, prev_to, bonus * 64 / 128);
         }
     });
 }

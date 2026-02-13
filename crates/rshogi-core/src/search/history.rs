@@ -603,7 +603,7 @@ impl CorrectionHistory {
 
     fn fill_initial_values(&mut self) {
         for entry in self.pawn.iter_mut().flatten() {
-            entry.set(5);
+            entry.set(0);
         }
         for entry in self.minor.iter_mut().flatten() {
             entry.set(0);
