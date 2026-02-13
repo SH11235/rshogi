@@ -8,8 +8,8 @@ use super::board_effect::{
 use super::state::StateInfo;
 use super::zobrist::{zobrist_hand, zobrist_pass_rights, zobrist_psq, zobrist_side};
 use crate::bitboard::{
-    bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect, knight_effect,
-    lance_effect, pawn_effect, rook_effect, silver_effect, Bitboard,
+    bishop_effect, dragon_effect, gold_effect, horse_effect, knight_effect, lance_effect,
+    lance_step_effect, pawn_effect, rook_effect, silver_effect, Bitboard,
 };
 use crate::eval::material::{hand_piece_value, material_needs_board_effects, signed_piece_value};
 use crate::nnue::{ChangedPiece, DirtyPiece, HandChange};
@@ -60,6 +60,8 @@ pub struct Position {
     bishop_horse_bb: Bitboard,
     /// 飛・龍（Rook | Dragon）
     rook_dragon_bb: Bitboard,
+    /// Horse | Dragon | King（SILVER_HDK / GOLDS_HDK 計算用）
+    hdk_bb: Bitboard,
 
     // === 手駒 ===
     /// 手駒 [Color]
@@ -131,6 +133,7 @@ impl Position {
             golds_bb: Bitboard::EMPTY,
             bishop_horse_bb: Bitboard::EMPTY,
             rook_dragon_bb: Bitboard::EMPTY,
+            hdk_bb: Bitboard::EMPTY,
             hand: [Hand::EMPTY; Color::NUM],
             state_stack: vec![StateInfo::new()],
             state_idx: 0,
@@ -240,6 +243,12 @@ impl Position {
     #[inline]
     const fn is_rook_like(pt: PieceType) -> bool {
         matches!(pt, PieceType::Rook | PieceType::Dragon)
+    }
+
+    /// 駒種が馬・龍・玉かどうか（HDK合成Bitboard用）
+    #[inline]
+    const fn is_hdk(pt: PieceType) -> bool {
+        matches!(pt, PieceType::Horse | PieceType::Dragon | PieceType::King)
     }
 
     /// 金相当の駒のBitboard（先後両方）
@@ -477,63 +486,42 @@ impl Position {
     }
 
     /// 指定マスに利いている駒（占有指定）
+    ///
+    /// Apery/YaneuraOu式: silverEffect で HDK の斜め近接利き、
+    /// goldEffect で HDK の直線近接利きを捕捉し、
+    /// 個別の king_effect / horse近接 / dragon近接 を不要にする。
+    /// また rook_effect を再利用して lance_effect の個別スライド計算を省略。
     pub fn attackers_to_occ(&self, sq: Square, occupied: Bitboard) -> Bitboard {
-        // 各駒種から逆方向に利きを求める
-        // 例: sqに歩で利いている駒 = sqから後手の歩の利き方向にある先手の歩
-        //     sqに後手歩で利いている駒 = sqから先手の歩の利き方向にある後手の歩
+        let silver_hdk = self.pieces_pt(PieceType::Silver) | self.hdk_bb;
+        let golds_hdk = self.golds_bb | self.hdk_bb;
 
-        let b_pawn = pawn_effect(Color::White, sq) & self.pieces(Color::Black, PieceType::Pawn);
-        let w_pawn = pawn_effect(Color::Black, sq) & self.pieces(Color::White, PieceType::Pawn);
+        // 先手の攻め駒: 後手方向の effect で逆引き → pieces_c(Black) でフィルタ
+        let black_attackers = ((pawn_effect(Color::White, sq) & self.pieces_pt(PieceType::Pawn))
+            | (knight_effect(Color::White, sq) & self.pieces_pt(PieceType::Knight))
+            | (silver_effect(Color::White, sq) & silver_hdk)
+            | (gold_effect(Color::White, sq) & golds_hdk))
+            & self.pieces_c(Color::Black);
 
-        let b_knight =
-            knight_effect(Color::White, sq) & self.pieces(Color::Black, PieceType::Knight);
-        let w_knight =
-            knight_effect(Color::Black, sq) & self.pieces(Color::White, PieceType::Knight);
+        // 後手の攻め駒: 先手方向の effect で逆引き → pieces_c(White) でフィルタ
+        let white_attackers = ((pawn_effect(Color::Black, sq) & self.pieces_pt(PieceType::Pawn))
+            | (knight_effect(Color::Black, sq) & self.pieces_pt(PieceType::Knight))
+            | (silver_effect(Color::Black, sq) & silver_hdk)
+            | (gold_effect(Color::Black, sq) & golds_hdk))
+            & self.pieces_c(Color::White);
 
-        let b_silver =
-            silver_effect(Color::White, sq) & self.pieces(Color::Black, PieceType::Silver);
-        let w_silver =
-            silver_effect(Color::Black, sq) & self.pieces(Color::White, PieceType::Silver);
-
-        // 金の動きをする駒 - 事前計算済みのgolds_c()を使用
-        let b_gold = gold_effect(Color::White, sq) & self.golds_c(Color::Black);
-        let w_gold = gold_effect(Color::Black, sq) & self.golds_c(Color::White);
-
-        let king = king_effect(sq)
-            & (self.pieces(Color::Black, PieceType::King)
-                | self.pieces(Color::White, PieceType::King));
-
-        // 遠方駒
-        let b_lance =
-            lance_effect(Color::White, sq, occupied) & self.pieces(Color::Black, PieceType::Lance);
-        let w_lance =
-            lance_effect(Color::Black, sq, occupied) & self.pieces(Color::White, PieceType::Lance);
-
-        // 角・馬 - 事前計算済みのbishop_horse_bbを使用
+        // 角・馬のスライド利き
         let bishop = bishop_effect(sq, occupied) & self.bishop_horse_bb;
 
-        // 飛・龍 - 事前計算済みのrook_dragon_bbを使用
-        let rook = rook_effect(sq, occupied) & self.rook_dragon_bb;
+        // 飛・龍 + 香: rookEffect を再利用して lance_effect の個別計算を省略
+        let rook_eff = rook_effect(sq, occupied);
+        let rook_lance = rook_eff
+            & (self.rook_dragon_bb
+                | (lance_step_effect(Color::White, sq)
+                    & self.pieces(Color::Black, PieceType::Lance))
+                | (lance_step_effect(Color::Black, sq)
+                    & self.pieces(Color::White, PieceType::Lance)));
 
-        // 馬・龍の近接利き
-        let horse = king_effect(sq) & self.pieces_pt(PieceType::Horse);
-        let dragon = king_effect(sq) & self.pieces_pt(PieceType::Dragon);
-
-        b_pawn
-            | w_pawn
-            | b_knight
-            | w_knight
-            | b_silver
-            | w_silver
-            | b_gold
-            | w_gold
-            | king
-            | b_lance
-            | w_lance
-            | bishop
-            | rook
-            | horse
-            | dragon
+        black_attackers | white_attackers | bishop | rook_lance
     }
 
     /// 指定マスに利いている指定手番の駒
@@ -621,6 +609,9 @@ impl Position {
         } else if Self::is_rook_like(pt) {
             self.rook_dragon_bb.set(sq);
         }
+        if Self::is_hdk(pt) {
+            self.hdk_bb.set(sq);
+        }
     }
 
     /// 盤面から駒を取り除く
@@ -646,6 +637,9 @@ impl Position {
             self.bishop_horse_bb.clear(sq);
         } else if Self::is_rook_like(pt) {
             self.rook_dragon_bb.clear(sq);
+        }
+        if Self::is_hdk(pt) {
+            self.hdk_bb.clear(sq);
         }
     }
 
@@ -2195,6 +2189,12 @@ mod tests {
         // rook_dragon_bbの整合性チェック
         let expected_rd = pos.pieces_pt(PieceType::Rook) | pos.pieces_pt(PieceType::Dragon);
         assert_eq!(pos.rook_dragon(), expected_rd, "rook_dragon_bb mismatch");
+
+        // hdk_bbの整合性チェック
+        let expected_hdk = pos.pieces_pt(PieceType::Horse)
+            | pos.pieces_pt(PieceType::Dragon)
+            | pos.pieces_pt(PieceType::King);
+        assert_eq!(pos.hdk_bb, expected_hdk, "hdk_bb mismatch");
     }
 
     /// 指し手実行・取り消し後も合成Bitboardの整合性が維持されることを確認
@@ -2223,6 +2223,11 @@ mod tests {
 
             let expected_rd = pos.pieces_pt(PieceType::Rook) | pos.pieces_pt(PieceType::Dragon);
             assert_eq!(pos.rook_dragon(), expected_rd, "rook_dragon_bb mismatch after {mv_str}");
+
+            let expected_hdk = pos.pieces_pt(PieceType::Horse)
+                | pos.pieces_pt(PieceType::Dragon)
+                | pos.pieces_pt(PieceType::King);
+            assert_eq!(pos.hdk_bb, expected_hdk, "hdk_bb mismatch after {mv_str}");
         }
 
         // undo_moveでも整合性維持を確認
@@ -2250,6 +2255,11 @@ mod tests {
                 expected_rd,
                 "rook_dragon_bb mismatch after undo {mv_str}"
             );
+
+            let expected_hdk = pos.pieces_pt(PieceType::Horse)
+                | pos.pieces_pt(PieceType::Dragon)
+                | pos.pieces_pt(PieceType::King);
+            assert_eq!(pos.hdk_bb, expected_hdk, "hdk_bb mismatch after undo {mv_str}");
         }
     }
 

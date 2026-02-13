@@ -222,6 +222,13 @@ fn init_qugiy_step_effect() -> [[Bitboard; Square::NUM]; 6] {
     table
 }
 
+/// 盤上の駒を考慮しない香の利きレイ（方向別ルックアップテーブル）
+/// YaneuraOu の lanceStepEffect 相当
+#[inline]
+pub fn lance_step_effect(color: Color, sq: Square) -> Bitboard {
+    slider_attacks().lance_step_effect[color.index()][sq.index()]
+}
+
 /// 香の利きを計算（Qugiyアルゴリズム）
 #[inline]
 pub fn lance_effect(color: Color, sq: Square, occupied: Bitboard) -> Bitboard {
