@@ -53,6 +53,10 @@ struct MetaSettings {
 struct EngineCommandMeta {
     path_black: String,
     path_white: String,
+    #[serde(default)]
+    label_black: Option<String>,
+    #[serde(default)]
+    label_white: Option<String>,
 }
 
 /// 通常JSONLのresult行
@@ -279,8 +283,14 @@ fn parse_normal_file(path: &str) -> Result<FileResult> {
             let meta: MetaLog = serde_json::from_str(trimmed)
                 .with_context(|| format!("metaパースエラー: {path}"))?;
             games = meta.settings.games;
-            black = extract_engine_id(&meta.engine_cmd.path_black);
-            white = extract_engine_id(&meta.engine_cmd.path_white);
+            black = meta
+                .engine_cmd
+                .label_black
+                .unwrap_or_else(|| extract_engine_id(&meta.engine_cmd.path_black));
+            white = meta
+                .engine_cmd
+                .label_white
+                .unwrap_or_else(|| extract_engine_id(&meta.engine_cmd.path_white));
             meta_parsed = true;
         } else if trimmed.contains("\"type\":\"result\"") {
             let result: ResultLog = serde_json::from_str(trimmed)
