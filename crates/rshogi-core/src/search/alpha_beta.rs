@@ -2613,9 +2613,9 @@ impl SearchWorker {
                     best_move = mv;
                     // PV更新
                     if pv_node {
-                        // split_at_mut で安全に両方のスタックエントリにアクセス
-                        let (left, right) = st.stack.split_at_mut((ply + 1) as usize);
-                        left[ply as usize].pv.update(mv, right[0].pv.as_slice());
+                        // 借用チェッカーの制約を避けるためクローン
+                        let child_pv = st.stack[(ply + 1) as usize].pv.clone();
+                        st.stack[ply as usize].update_pv(mv, &child_pv);
                     }
 
                     if value >= beta {
