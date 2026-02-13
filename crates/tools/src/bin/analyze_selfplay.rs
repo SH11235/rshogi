@@ -53,6 +53,10 @@ struct MetaSettings {
 struct EngineCommandMeta {
     path_black: String,
     path_white: String,
+    #[serde(default)]
+    label_black: Option<String>,
+    #[serde(default)]
+    label_white: Option<String>,
 }
 
 /// 通常JSONLのresult行
@@ -279,15 +283,27 @@ fn parse_normal_file(path: &str) -> Result<FileResult> {
             let meta: MetaLog = serde_json::from_str(trimmed)
                 .with_context(|| format!("metaパースエラー: {path}"))?;
             games = meta.settings.games;
-            black = extract_engine_id(&meta.engine_cmd.path_black);
-            white = extract_engine_id(&meta.engine_cmd.path_white);
+            black = meta
+                .engine_cmd
+                .label_black
+                .unwrap_or_else(|| extract_engine_id(&meta.engine_cmd.path_black));
+            white = meta
+                .engine_cmd
+                .label_white
+                .unwrap_or_else(|| extract_engine_id(&meta.engine_cmd.path_white));
             meta_parsed = true;
         } else if trimmed.contains("\"type\":\"result\"") {
             let result: ResultLog = serde_json::from_str(trimmed)
                 .with_context(|| format!("resultパースエラー: {path}"))?;
             if let Some(ref winner) = result.winner {
                 // winner フィールドあり: エンジン名で集計（tournament.rs 形式）
-                let winner_id = extract_engine_id(winner);
+                // meta にラベルがある場合は winner もラベルそのままなので正規化不要。
+                // 旧形式（ラベルなし）では winner がパス由来なので extract_engine_id で正規化。
+                let winner_id = if meta_parsed && (black == *winner || white == *winner) {
+                    winner.clone()
+                } else {
+                    extract_engine_id(winner)
+                };
                 if winner_id == black {
                     black_wins += 1;
                 } else if winner_id == white {
