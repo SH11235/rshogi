@@ -774,7 +774,11 @@ mod imp {
 
                         let worker = worker_opt.as_mut().unwrap();
 
-                        // Update worker state for this search
+                        // Update worker state for this search.
+                        // thread_id must be updated because Rayon may assign
+                        // this task to a different pool thread than last time,
+                        // and the thread_local worker retains the old thread_id.
+                        worker.thread_id = thread_id;
                         worker.tt = Arc::clone(&tt);
                         worker.eval_hash = Arc::clone(&eval_hash);
                         worker.max_moves_to_draw = max_moves_to_draw;
