@@ -482,7 +482,8 @@ fn main() -> Result<()> {
         be.games += v.done;
         be.sente_games += v.a_sente_games;
         be.sente_wins += v.a_sente_wins;
-        be.gote_games += v.done - v.a_sente_games; // 引分で先後不明分は除外済み
+        // 相手(w)が先手の局数 = 自分(b)が後手の局数
+        be.gote_games += v.b_sente_games;
         be.gote_wins += v.black_wins - v.a_sente_wins;
 
         let we = engines.entry(w.clone()).or_default();
@@ -492,7 +493,8 @@ fn main() -> Result<()> {
         we.games += v.done;
         we.sente_games += v.b_sente_games;
         we.sente_wins += v.b_sente_wins;
-        we.gote_games += v.done - v.b_sente_games;
+        // 相手(b)が先手の局数 = 自分(w)が後手の局数
+        we.gote_games += v.a_sente_games;
         we.gote_wins += v.white_wins - v.b_sente_wins;
     }
 
