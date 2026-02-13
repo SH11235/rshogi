@@ -338,7 +338,7 @@ impl Position {
     // SEE (Static Exchange Evaluation)
     // =========================================================================
 
-    /// SEE >= threshold かどうかを判定
+    /// SEE >= threshold かどうかを判定（YO準拠: 成りボーナスを考慮しない）
     ///
     /// 指し手の静的駒交換評価が閾値以上かどうかを高速に判定する。
     pub fn see_ge(&self, m: Move, threshold: Value) -> bool {
@@ -350,36 +350,22 @@ impl Position {
         let from = m.from();
         let to = m.to();
 
-        // 取られる駒の価値
-        let captured_value = if self.piece_on(to).is_some() {
-            see_piece_value(self.piece_on(to).piece_type())
+        // 取られる駒の価値（YO準拠: 成りボーナスは加算しない）
+        let captured = self.piece_on(to);
+        let captured_value = if captured.is_some() {
+            see_piece_value(captured.piece_type())
         } else {
             0
         };
-
-        // 成りのボーナス
-        let promotion_bonus = if m.is_promotion() {
-            let pt = self.piece_on(from).piece_type();
-            see_piece_value(pt.promote().unwrap_or(pt)) - see_piece_value(pt)
-        } else {
-            0
-        };
-
-        // 最初の交換後のバランス
-        let mut balance = captured_value + promotion_bonus - threshold.raw();
+        let mut balance = captured_value - threshold.raw();
 
         // 既にマイナスなら失敗
         if balance < 0 {
             return false;
         }
 
-        // 次に取られる駒の価値
-        let next_victim = if m.is_promotion() {
-            let pt = self.piece_on(from).piece_type();
-            see_piece_value(pt.promote().unwrap_or(pt))
-        } else {
-            see_piece_value(self.piece_on(from).piece_type())
-        };
+        // 次に取られる駒の価値（YO準拠: 成り前の価値を使用）
+        let next_victim = see_piece_value(self.piece_on(from).piece_type());
 
         // 駒を取られても閾値を超えるか
         balance -= next_victim;
@@ -482,44 +468,76 @@ impl Position {
         stm != self.side_to_move()
     }
 
-    /// 最も価値の低い攻撃駒を探す
+    /// 最も価値の低い攻撃駒を探す（YO準拠: 成りは考慮しない）
     fn least_valuable_attacker(
         &self,
         attackers: Bitboard,
         stm: Color,
-        to: Square,
+        _to: Square,
         _occupied: Bitboard,
     ) -> (Square, i32) {
-        // 価値の低い順にチェック
+        // YO準拠: 価値の低い順にチェック（成り考慮なし）
+        // Pawn(90) → Lance(315) → Knight(405) → Silver(495)
+        // → GOLDS(540): Gold,ProPawn,ProLance,ProKnight,ProSilver
+        // → Bishop(855) → Horse(945) → Rook(990) → Dragon(1395) → King
+
+        // Pawn
+        let bb = attackers & self.pieces(stm, PieceType::Pawn);
+        if !bb.is_empty() {
+            return (bb.lsb().unwrap(), see_piece_value(PieceType::Pawn));
+        }
+        // Lance
+        let bb = attackers & self.pieces(stm, PieceType::Lance);
+        if !bb.is_empty() {
+            return (bb.lsb().unwrap(), see_piece_value(PieceType::Lance));
+        }
+        // Knight
+        let bb = attackers & self.pieces(stm, PieceType::Knight);
+        if !bb.is_empty() {
+            return (bb.lsb().unwrap(), see_piece_value(PieceType::Knight));
+        }
+        // Silver (495 < Gold 540)
+        let bb = attackers & self.pieces(stm, PieceType::Silver);
+        if !bb.is_empty() {
+            return (bb.lsb().unwrap(), see_piece_value(PieceType::Silver));
+        }
+        // GOLDS (Gold, ProPawn, ProLance, ProKnight, ProSilver) — すべて540
         for pt in [
-            PieceType::Pawn,
-            PieceType::Lance,
-            PieceType::Knight,
+            PieceType::Gold,
             PieceType::ProPawn,
             PieceType::ProLance,
             PieceType::ProKnight,
-            PieceType::Silver,
             PieceType::ProSilver,
-            PieceType::Gold,
-            PieceType::Bishop,
-            PieceType::Rook,
-            PieceType::Horse,
-            PieceType::Dragon,
-            PieceType::King,
         ] {
             let bb = attackers & self.pieces(stm, pt);
             if !bb.is_empty() {
-                let sq = bb.lsb().unwrap();
-
-                // 成りの可能性を考慮した価値
-                let value = if can_promote_on(stm, sq, to) && pt.can_promote() {
-                    see_piece_value(pt.promote().unwrap())
-                } else {
-                    see_piece_value(pt)
-                };
-
-                return (sq, value);
+                return (bb.lsb().unwrap(), see_piece_value(PieceType::Gold));
             }
+        }
+        // Bishop
+        let bb = attackers & self.pieces(stm, PieceType::Bishop);
+        if !bb.is_empty() {
+            return (bb.lsb().unwrap(), see_piece_value(PieceType::Bishop));
+        }
+        // Horse (945)
+        let bb = attackers & self.pieces(stm, PieceType::Horse);
+        if !bb.is_empty() {
+            return (bb.lsb().unwrap(), see_piece_value(PieceType::Horse));
+        }
+        // Rook (990)
+        let bb = attackers & self.pieces(stm, PieceType::Rook);
+        if !bb.is_empty() {
+            return (bb.lsb().unwrap(), see_piece_value(PieceType::Rook));
+        }
+        // Dragon
+        let bb = attackers & self.pieces(stm, PieceType::Dragon);
+        if !bb.is_empty() {
+            return (bb.lsb().unwrap(), see_piece_value(PieceType::Dragon));
+        }
+        // King
+        let bb = attackers & self.pieces(stm, PieceType::King);
+        if !bb.is_empty() {
+            return (bb.lsb().unwrap(), see_piece_value(PieceType::King));
         }
 
         unreachable!(
@@ -532,7 +550,7 @@ impl Position {
 // ヘルパー関数
 // =============================================================================
 
-/// SEE用の駒価値
+/// SEE用の駒価値（YO準拠）
 fn see_piece_value(pt: PieceType) -> i32 {
     use PieceType::*;
     match pt {
@@ -542,18 +560,10 @@ fn see_piece_value(pt: PieceType) -> i32 {
         Silver => 495,
         Gold | ProPawn | ProLance | ProKnight | ProSilver => 540,
         Bishop => 855,
+        Horse => 945,
         Rook => 990,
-        Horse => 1089,
-        Dragon => 1224,
+        Dragon => 1395,
         King => 15000,
-    }
-}
-
-/// 成れるマスかどうか
-fn can_promote_on(us: Color, from: Square, to: Square) -> bool {
-    match us {
-        Color::Black => to.rank().index() < 3 || from.rank().index() < 3,
-        Color::White => to.rank().index() > 5 || from.rank().index() > 5,
     }
 }
 

@@ -199,11 +199,13 @@ pub struct LowPlyHistory {
 }
 
 impl LowPlyHistory {
-    /// 新しいLowPlyHistoryを作成
+    /// 新しいLowPlyHistoryを作成（YO準拠: 初期値97）
     pub fn new() -> Self {
-        Self {
+        let mut lph = Self {
             table: [[StatsEntry::default(); FROM_TO_SIZE]; LOW_PLY_HISTORY_SIZE],
-        }
+        };
+        lph.clear();
+        lph
     }
 
     /// 値を取得
@@ -224,11 +226,11 @@ impl LowPlyHistory {
         }
     }
 
-    /// クリア
+    /// クリア（YO準拠: 初期値97）
     pub fn clear(&mut self) {
         for ply_table in &mut self.table {
             for entry in ply_table.iter_mut() {
-                entry.set(0);
+                entry.set(97);
             }
         }
     }
@@ -1007,9 +1009,12 @@ mod tests {
         let mut history = LowPlyHistory::new();
         let mv = Move::from_usi("7g7f").unwrap();
 
+        // YO準拠: 初期値97
+        assert_eq!(history.get(0, mv), 97);
+
         history.update(0, mv, 100);
-        assert!(history.get(0, mv) > 0);
-        assert_eq!(history.get(1, mv), 0);
+        assert!(history.get(0, mv) > 97);
+        assert_eq!(history.get(1, mv), 97);
 
         // 範囲外のplyは0を返す
         assert_eq!(history.get(LOW_PLY_HISTORY_SIZE, mv), 0);

@@ -10,8 +10,8 @@ use super::alpha_beta::{draw_jitter, to_corrected_static_eval, SearchContext, Se
 use super::eval_helpers::correction_value;
 use super::movepicker::piece_value;
 use super::search_helpers::{
-    check_abort, clear_cont_history_for_null, cont_history_ref, cont_history_tables, nnue_evaluate,
-    nnue_pop, nnue_push, set_cont_history_for_move,
+    check_abort, clear_cont_history_for_null, cont_history_tables, nnue_evaluate, nnue_pop,
+    nnue_push, set_cont_history_for_move,
 };
 use super::stats::{inc_stat, inc_stat_by_depth};
 #[cfg(feature = "tt-trace")]
@@ -463,25 +463,16 @@ pub(super) fn qsearch<const NT: u8>(
 
                 if !pos.see_ge(mv, alpha - futility_base) {
                     inc_stat!(st, qs_futility_pruned);
-                    best_value = best_value.min(alpha.min(futility_base));
+                    best_value = alpha.min(futility_base);
                     continue;
                 }
             }
+            // YaneuraOu準拠: qsearchでは非捕獲手をすべてスキップ
             if !capture {
-                let cont_score =
-                    cont_history_ref(st, ctx, ply, 1).get(mv.moved_piece_after(), mv.to()) as i32;
-
-                let pawn_idx = pos.pawn_history_index();
-                let pawn_score = ctx.history.with_read(|h| {
-                    h.pawn_history.get(pawn_idx, pos.moved_piece(mv), mv.to()) as i32
-                });
-                if cont_score + pawn_score <= 5868 {
-                    inc_stat!(st, qs_history_pruned);
-                    continue;
-                }
+                continue;
             }
 
-            if !pos.see_ge(mv, Value::new(-74)) {
+            if !pos.see_ge(mv, Value::new(-78)) {
                 inc_stat!(st, qs_see_margin_pruned);
                 continue;
             }

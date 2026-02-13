@@ -310,7 +310,7 @@ pub struct SearchContext<'a> {
     /// この探索でTT書き込みを許可するか
     pub allow_tt_write: bool,
     /// SPSA向け探索係数
-    pub tune_params: SearchTuneParams,
+    pub tune_params: &'a SearchTuneParams,
 }
 
 /// 探索中に変化する状態
@@ -493,7 +493,7 @@ impl SearchWorker {
             max_moves_to_draw: self.max_moves_to_draw,
             thread_id: self.thread_id,
             allow_tt_write: self.allow_tt_write,
-            tune_params: self.search_tune_params,
+            tune_params: &self.search_tune_params,
         }
     }
 
@@ -1282,7 +1282,7 @@ impl SearchWorker {
                 max_moves_to_draw: self.max_moves_to_draw,
                 thread_id: self.thread_id,
                 allow_tt_write: self.allow_tt_write,
-                tune_params: self.search_tune_params,
+                tune_params: &self.search_tune_params,
             };
             update_correction_history(&self.state, &ctx, pos, 0, bonus);
         }
@@ -1608,7 +1608,7 @@ impl SearchWorker {
             max_moves_to_draw: self.max_moves_to_draw,
             thread_id: self.thread_id,
             allow_tt_write: self.allow_tt_write,
-            tune_params: self.search_tune_params,
+            tune_params: &self.search_tune_params,
         };
         Self::search_node::<NT>(
             &mut self.state,
