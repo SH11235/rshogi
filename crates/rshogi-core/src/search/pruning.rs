@@ -19,6 +19,7 @@ use super::search_helpers::{
     set_cont_history_for_move,
 };
 use super::stats::{inc_stat, inc_stat_by_depth};
+#[cfg(feature = "tt-trace")]
 use super::tt_sanity::{helper_tt_write_enabled_for_depth, maybe_trace_tt_write, TtWriteTrace};
 use super::types::{value_to_tt, NodeType};
 use super::{LimitsType, MovePicker, TimeManagement};
@@ -577,9 +578,13 @@ where
         if value >= prob_beta {
             inc_stat!(st, probcut_cutoff);
             let stored_depth = (probcut_depth + 1).max(1);
-            if ctx.allow_tt_write
-                && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::Lower, stored_depth)
-            {
+            #[cfg(feature = "tt-trace")]
+            let allow_write = ctx.allow_tt_write
+                && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::Lower, stored_depth);
+            #[cfg(not(feature = "tt-trace"))]
+            let allow_write = ctx.allow_tt_write;
+            if allow_write {
+                #[cfg(feature = "tt-trace")]
                 maybe_trace_tt_write(TtWriteTrace {
                     stage: "probcut_store",
                     thread_id: ctx.thread_id,

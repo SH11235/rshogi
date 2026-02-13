@@ -39,6 +39,7 @@ use super::search_helpers::{
     check_abort, clear_cont_history_for_null, cont_history_ptr, cont_history_tables, nnue_evaluate,
     nnue_pop, nnue_push, set_cont_history_for_move, take_prior_reduction,
 };
+#[cfg(feature = "tt-trace")]
 use super::tt_sanity::{helper_tt_write_enabled_for_depth, maybe_trace_tt_write, TtWriteTrace};
 
 // =============================================================================
@@ -3052,9 +3053,13 @@ impl SearchWorker {
                 (depth + 6).min(MAX_PLY - 1)
             };
 
-            if ctx.allow_tt_write
-                && helper_tt_write_enabled_for_depth(ctx.thread_id, bound, stored_depth)
-            {
+            #[cfg(feature = "tt-trace")]
+            let allow_write = ctx.allow_tt_write
+                && helper_tt_write_enabled_for_depth(ctx.thread_id, bound, stored_depth);
+            #[cfg(not(feature = "tt-trace"))]
+            let allow_write = ctx.allow_tt_write;
+            if allow_write {
+                #[cfg(feature = "tt-trace")]
                 maybe_trace_tt_write(TtWriteTrace {
                     stage: "ab_store",
                     thread_id: ctx.thread_id,

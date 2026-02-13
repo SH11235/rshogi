@@ -14,11 +14,13 @@ use super::search_helpers::{
     nnue_pop, nnue_push, set_cont_history_for_move,
 };
 use super::stats::{inc_stat, inc_stat_by_depth};
+#[cfg(feature = "tt-trace")]
 use super::tt_sanity::{
-    helper_tt_write_enabled_for_depth, is_valid_tt_eval, is_valid_tt_stored_value,
-    maybe_log_invalid_tt_data, maybe_trace_tt_cutoff, maybe_trace_tt_probe, maybe_trace_tt_write,
-    InvalidTtLog, TtCutoffTrace, TtProbeTrace, TtWriteTrace,
+    helper_tt_write_enabled_for_depth, maybe_log_invalid_tt_data, maybe_trace_tt_cutoff,
+    maybe_trace_tt_probe, maybe_trace_tt_write, InvalidTtLog, TtCutoffTrace, TtProbeTrace,
+    TtWriteTrace,
 };
+use super::tt_sanity::{is_valid_tt_eval, is_valid_tt_stored_value};
 use super::types::{draw_value, value_from_tt, value_to_tt, NodeType, OrderedMovesBuffer};
 use super::{LimitsType, MovePicker, TimeManagement};
 
@@ -100,6 +102,7 @@ pub(super) fn qsearch<const NT: u8>(
         Value::NONE
     };
     if tt_hit && !is_valid_tt_stored_value(tt_data.value) {
+        #[cfg(feature = "tt-trace")]
         maybe_log_invalid_tt_data(InvalidTtLog {
             reason: "invalid_value",
             stage: "qsearch_probe",
@@ -116,6 +119,7 @@ pub(super) fn qsearch<const NT: u8>(
         tt_value = Value::NONE;
     }
     if tt_hit && !is_valid_tt_eval(tt_data.eval) {
+        #[cfg(feature = "tt-trace")]
         maybe_log_invalid_tt_data(InvalidTtLog {
             reason: "invalid_eval",
             stage: "qsearch_probe",
@@ -131,6 +135,7 @@ pub(super) fn qsearch<const NT: u8>(
         });
         tt_data.eval = Value::NONE;
     }
+    #[cfg(feature = "tt-trace")]
     maybe_trace_tt_probe(TtProbeTrace {
         stage: "qsearch_probe",
         thread_id: ctx.thread_id,
@@ -161,6 +166,7 @@ pub(super) fn qsearch<const NT: u8>(
         && tt_value != Value::NONE
         && tt_data.bound.can_cutoff(tt_value, beta)
     {
+        #[cfg(feature = "tt-trace")]
         maybe_trace_tt_cutoff(TtCutoffTrace {
             stage: "qsearch_cutoff",
             thread_id: ctx.thread_id,
@@ -196,9 +202,13 @@ pub(super) fn qsearch<const NT: u8>(
             let mate_move = pos.mate_1ply();
             if mate_move.is_some() {
                 let mate_value = Value::mate_in(ply + 1);
-                if ctx.allow_tt_write
-                    && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::Exact, DEPTH_QS)
-                {
+                #[cfg(feature = "tt-trace")]
+                let allow_write = ctx.allow_tt_write
+                    && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::Exact, DEPTH_QS);
+                #[cfg(not(feature = "tt-trace"))]
+                let allow_write = ctx.allow_tt_write;
+                if allow_write {
+                    #[cfg(feature = "tt-trace")]
                     maybe_trace_tt_write(TtWriteTrace {
                         stage: "qsearch_mate1_store",
                         thread_id: ctx.thread_id,
@@ -271,9 +281,13 @@ pub(super) fn qsearch<const NT: u8>(
         if !tt_hit {
             // YaneuraOu準拠: stand pat cutoff 時は ttPv=false で保存
             // (yaneuraou-search.cpp:4454)
-            if ctx.allow_tt_write
-                && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::Lower, DEPTH_UNSEARCHED)
-            {
+            #[cfg(feature = "tt-trace")]
+            let allow_write = ctx.allow_tt_write
+                && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::Lower, DEPTH_UNSEARCHED);
+            #[cfg(not(feature = "tt-trace"))]
+            let allow_write = ctx.allow_tt_write;
+            if allow_write {
+                #[cfg(feature = "tt-trace")]
                 maybe_trace_tt_write(TtWriteTrace {
                     stage: "qsearch_stand_pat_store",
                     thread_id: ctx.thread_id,
@@ -531,7 +545,13 @@ pub(super) fn qsearch<const NT: u8>(
     };
 
     // YaneuraOu: pvHitを使用
-    if ctx.allow_tt_write && helper_tt_write_enabled_for_depth(ctx.thread_id, bound, DEPTH_QS) {
+    #[cfg(feature = "tt-trace")]
+    let allow_write =
+        ctx.allow_tt_write && helper_tt_write_enabled_for_depth(ctx.thread_id, bound, DEPTH_QS);
+    #[cfg(not(feature = "tt-trace"))]
+    let allow_write = ctx.allow_tt_write;
+    if allow_write {
+        #[cfg(feature = "tt-trace")]
         maybe_trace_tt_write(TtWriteTrace {
             stage: "qsearch_store",
             thread_id: ctx.thread_id,

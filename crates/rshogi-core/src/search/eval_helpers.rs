@@ -12,11 +12,13 @@ use super::alpha_beta::{
 use super::history::CORRECTION_HISTORY_SIZE;
 use super::search_helpers::{ensure_nnue_accumulator, nnue_evaluate};
 use super::stats::inc_stat_by_depth;
+#[cfg(feature = "tt-trace")]
 use super::tt_sanity::{
-    helper_tt_write_enabled_for_depth, is_valid_tt_eval, is_valid_tt_stored_value,
-    maybe_log_invalid_tt_data, maybe_trace_tt_cutoff, maybe_trace_tt_probe, maybe_trace_tt_write,
-    InvalidTtLog, TtCutoffTrace, TtProbeTrace, TtWriteTrace,
+    helper_tt_write_enabled_for_depth, maybe_log_invalid_tt_data, maybe_trace_tt_cutoff,
+    maybe_trace_tt_probe, maybe_trace_tt_write, InvalidTtLog, TtCutoffTrace, TtProbeTrace,
+    TtWriteTrace,
 };
+use super::tt_sanity::{is_valid_tt_eval, is_valid_tt_stored_value};
 use super::types::{value_from_tt, NodeType};
 
 // =============================================================================
@@ -163,6 +165,7 @@ pub(super) fn probe_transposition<const NT: u8>(
         Value::NONE
     };
     if tt_hit && !is_valid_tt_stored_value(tt_data.value) {
+        #[cfg(feature = "tt-trace")]
         maybe_log_invalid_tt_data(InvalidTtLog {
             reason: "invalid_value",
             stage: "ab_probe",
@@ -179,6 +182,7 @@ pub(super) fn probe_transposition<const NT: u8>(
         tt_value = Value::NONE;
     }
     if tt_hit && !is_valid_tt_eval(tt_data.eval) {
+        #[cfg(feature = "tt-trace")]
         maybe_log_invalid_tt_data(InvalidTtLog {
             reason: "invalid_eval",
             stage: "ab_probe",
@@ -194,6 +198,7 @@ pub(super) fn probe_transposition<const NT: u8>(
         });
         tt_data.eval = Value::NONE;
     }
+    #[cfg(feature = "tt-trace")]
     maybe_trace_tt_probe(TtProbeTrace {
         stage: "ab_probe",
         thread_id: ctx.thread_id,
@@ -232,6 +237,7 @@ pub(super) fn probe_transposition<const NT: u8>(
         && tt_data.bound.can_cutoff(tt_value, beta)
         && (cut_node == (tt_value.raw() >= beta.raw()) || depth > 5)
     {
+        #[cfg(feature = "tt-trace")]
         maybe_trace_tt_cutoff(TtCutoffTrace {
             stage: "ab_probe_cutoff",
             thread_id: ctx.thread_id,
@@ -272,9 +278,13 @@ pub(super) fn probe_transposition<const NT: u8>(
         if mate_move.is_some() {
             let value = Value::mate_in(ply + 1);
             let stored_depth = (depth + 6).min(MAX_PLY - 1);
-            if ctx.allow_tt_write
-                && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::Exact, stored_depth)
-            {
+            #[cfg(feature = "tt-trace")]
+            let allow_write = ctx.allow_tt_write
+                && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::Exact, stored_depth);
+            #[cfg(not(feature = "tt-trace"))]
+            let allow_write = ctx.allow_tt_write;
+            if allow_write {
+                #[cfg(feature = "tt-trace")]
                 maybe_trace_tt_write(TtWriteTrace {
                     stage: "ab_mate1_store",
                     thread_id: ctx.thread_id,
@@ -493,11 +503,15 @@ pub(super) fn compute_eval_context(
     }
 
     // YO準拠: TTミス時は eval のみを BOUND_NONE/DEPTH_UNSEARCHED で保存する。
-    if !in_check
+    #[cfg(feature = "tt-trace")]
+    let eval_allow_write = !in_check
         && !tt_ctx.hit
         && ctx.allow_tt_write
-        && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::None, DEPTH_UNSEARCHED)
-    {
+        && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::None, DEPTH_UNSEARCHED);
+    #[cfg(not(feature = "tt-trace"))]
+    let eval_allow_write = !in_check && !tt_ctx.hit && ctx.allow_tt_write;
+    if eval_allow_write {
+        #[cfg(feature = "tt-trace")]
         maybe_trace_tt_write(TtWriteTrace {
             stage: "ab_eval_store_none",
             thread_id: ctx.thread_id,
