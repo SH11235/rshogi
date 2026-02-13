@@ -7,6 +7,8 @@
 
 use std::mem::MaybeUninit;
 
+use std::ops::Deref;
+
 use crate::movegen::{generate_legal_with_pass, MoveList};
 use crate::position::Position;
 use crate::types::{Move, Piece, RepetitionState, Square, Value, MAX_PLY};
@@ -77,6 +79,79 @@ impl ContHistKey {
 }
 
 // =============================================================================
+// StackPv（固定長PV配列）
+// =============================================================================
+
+/// 固定長のPV（Principal Variation）配列
+///
+/// ヒープ割り当てを避けるため `[Move; MAX_PLY + 1]` で保持する。
+/// `Deref<Target=[Move]>` により透過的にスライスとしてアクセス可能。
+#[derive(Clone)]
+pub struct StackPv {
+    buf: [Move; MAX_PLY as usize + 1],
+    len: usize,
+}
+
+impl StackPv {
+    /// 空のStackPvを作成
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            buf: [Move::NONE; MAX_PLY as usize + 1],
+            len: 0,
+        }
+    }
+
+    /// PVをクリア
+    #[inline]
+    pub fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    /// PVを更新（best_moveを先頭に、child_pvを続ける）
+    #[inline]
+    pub fn update(&mut self, best_move: Move, child_pv: &[Move]) {
+        self.buf[0] = best_move;
+        let copy_len = child_pv.len().min(MAX_PLY as usize);
+        self.buf[1..1 + copy_len].copy_from_slice(&child_pv[..copy_len]);
+        self.len = 1 + copy_len;
+    }
+
+    /// スライスとして取得
+    #[inline]
+    pub fn as_slice(&self) -> &[Move] {
+        &self.buf[..self.len]
+    }
+
+    /// 現在の要素数
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// 空かどうか
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl Default for StackPv {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Deref for StackPv {
+    type Target = [Move];
+
+    #[inline]
+    fn deref(&self) -> &[Move] {
+        self.as_slice()
+    }
+}
+
+// =============================================================================
 // Stack（探索スタック）
 // =============================================================================
 
@@ -84,7 +159,7 @@ impl ContHistKey {
 #[derive(Clone)]
 pub struct Stack {
     /// PV（Principal Variation）
-    pub pv: Vec<Move>,
+    pub pv: StackPv,
 
     /// ContinuationHistoryへの参照インデックス（旧方式、互換性のため残す）
     pub cont_history_idx: usize,
@@ -143,7 +218,7 @@ pub struct Stack {
 impl Default for Stack {
     fn default() -> Self {
         Self {
-            pv: Vec::new(),
+            pv: StackPv::new(),
             cont_history_idx: 0,
             cont_history_ptr: NonNull::dangling(),
             cont_hist_key: None,
@@ -183,9 +258,7 @@ impl Stack {
 
     /// PVを更新（best_moveを先頭に、child_pvを続ける）
     pub fn update_pv(&mut self, best_move: Move, child_pv: &[Move]) {
-        self.pv.clear();
-        self.pv.push(best_move);
-        self.pv.extend_from_slice(child_pv);
+        self.pv.update(best_move, child_pv);
     }
 }
 

@@ -109,13 +109,15 @@ pub(super) fn step14_pruning(
 
         if step_ctx.is_capture || step_ctx.gives_check {
             let captured = step_ctx.pos.piece_on(step_ctx.mv.to());
-            let capt_hist = ctx.history.with_read(|h| {
+            // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
+            let capt_hist = {
+                let h = unsafe { ctx.history.as_ref_unchecked() };
                 h.capture_history.get_with_captured_piece(
                     step_ctx.mv.moved_piece_after(),
                     step_ctx.mv.to(),
                     captured,
                 ) as i32
-            });
+            };
 
             // Futility pruning for captures (駒取り手に対するfutility枝刈り)
             // YaneuraOu準拠: !in_check/static_eval!=NONEガードなし
@@ -147,11 +149,13 @@ pub(super) fn step14_pruning(
             let to_sq = step_ctx.mv.to();
             let cont_hist_0 = step_ctx.cont_history_1.get(moved_piece, to_sq) as i32;
             let cont_hist_1 = step_ctx.cont_history_2.get(moved_piece, to_sq) as i32;
-            let (main_hist, pawn_hist) = ctx.history.with_read(|h| {
+            // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
+            let (main_hist, pawn_hist) = {
+                let h = unsafe { ctx.history.as_ref_unchecked() };
                 let mh = h.main_history.get(step_ctx.mover, step_ctx.mv) as i32;
                 let ph = h.pawn_history.get(step_ctx.pawn_history_index, moved_piece, to_sq) as i32;
                 (mh, ph)
-            });
+            };
 
             // YaneuraOu準拠: Continuation history（mainHistoryを含まない）
             // yaneuraou-search.cpp:3273-3276
@@ -509,7 +513,11 @@ where
         let mut buf = [Move::NONE; crate::movegen::MAX_MOVES];
         let mut len = 0;
         loop {
-            let mv = ctx.history.with_read(|h| mp.next_move(pos, h));
+            // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
+            let mv = {
+                let h = unsafe { ctx.history.as_ref_unchecked() };
+                mp.next_move(pos, h)
+            };
             if mv == Move::NONE {
                 break;
             }

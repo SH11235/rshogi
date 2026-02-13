@@ -1029,7 +1029,7 @@ const SPSA_OPTION_SPECS: &[SearchTuneOptionSpec] = &[
 impl Default for SearchTuneParams {
     fn default() -> Self {
         Self {
-            iir_prior_reduction_threshold_shallow: 1,
+            iir_prior_reduction_threshold_shallow: 3,
             iir_prior_reduction_threshold_deep: 3,
             iir_depth_boundary: 10,
             iir_eval_sum_threshold: 177,
@@ -1147,9 +1147,9 @@ impl Default for SearchTuneParams {
             prior_quiet_countermove_scaled_cap: 1365,
             prior_quiet_countermove_cont_scale_num: 400,
             prior_quiet_countermove_main_scale_num: 220,
-            prior_quiet_countermove_pawn_scale_num: 1164,
-            tt_move_history_bonus: 811,
-            tt_move_history_malus: -848,
+            prior_quiet_countermove_pawn_scale_num: 1160,
+            tt_move_history_bonus: 809,
+            tt_move_history_malus: -865,
             prior_capture_countermove_bonus: 964,
         }
     }

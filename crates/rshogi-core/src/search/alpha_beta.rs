@@ -437,7 +437,9 @@ impl SearchWorker {
     fn root_quiet_stat_score(&self, mover: Color, mv: Move) -> i32 {
         let moved_piece = mv.moved_piece_after();
         let to_sq = mv.to();
-        let main_hist = self.history.with_read(|h| h.main_history.get(mover, mv) as i32);
+        // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
+        let main_hist =
+            unsafe { self.history.as_ref_unchecked() }.main_history.get(mover, mv) as i32;
         // SAFETY:
         // - `cont_history_sentinel` は `SearchWorker::new()` で HistoryCell 内部テーブルを指して初期化される。
         // - HistoryCell の実体は SearchWorker のライフタイム中に再配置されない。
@@ -459,9 +461,11 @@ impl SearchWorker {
     ) -> Box<Self> {
         let history = HistoryCell::new_boxed();
         // HistoryCell経由でsentinelポインタを取得
-        let cont_history_sentinel = history.with_read(|h| {
+        // SAFETY: 初期化時のみ使用、他の参照と同時保持しない
+        let cont_history_sentinel = {
+            let h = unsafe { history.as_ref_unchecked() };
             NonNull::from(h.continuation_history[0][0].get_table(Piece::NONE, Square::SQ_11))
-        });
+        };
 
         let mut worker = Box::new(Self {
             tt,
@@ -576,9 +580,11 @@ impl SearchWorker {
         debug_assert!(ply >= 0 && (ply as usize) < STACK_SIZE, "ply out of bounds: {ply}");
         let in_check_idx = in_check as usize;
         let capture_idx = capture as usize;
-        let table = self.history.with_read(|h| {
+        // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
+        let table = {
+            let h = unsafe { self.history.as_ref_unchecked() };
             NonNull::from(h.continuation_history[in_check_idx][capture_idx].get_table(piece, to))
-        });
+        };
         self.state.stack[ply as usize].cont_history_ptr = table;
         self.state.stack[ply as usize].cont_hist_key =
             Some(ContHistKey::new(in_check, capture, piece, to));
@@ -610,7 +616,8 @@ impl SearchWorker {
         // 探索統計をリセット（1回のgo毎にリセット）
         self.reset_stats();
         // YaneuraOu準拠: low_ply_historyのみクリア
-        self.history.with_write(|h| h.low_ply_history.clear());
+        // SAFETY: 探索開始前の初期化、他の参照と同時保持しない
+        unsafe { self.history.as_mut_unchecked() }.low_ply_history.clear();
         // NNUE AccumulatorStack: ネットワークに応じたバリアントに更新・リセット
         if let Some(network) = get_network() {
             // バリアントがネットワークと一致しない場合は再作成
@@ -930,9 +937,12 @@ impl SearchWorker {
                 let captured = pos.captured_piece();
                 let captured_pt = captured.piece_type();
                 let moved_piece = mv.moved_piece_after();
-                let hist = self
-                    .history
-                    .with_read(|h| h.capture_history.get(moved_piece, mv.to(), captured_pt) as i32);
+                // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
+                let hist = unsafe { self.history.as_ref_unchecked() }.capture_history.get(
+                    moved_piece,
+                    mv.to(),
+                    captured_pt,
+                ) as i32;
                 self.search_tune_params.lmr_step16_capture_stat_scale_num * piece_value(captured)
                     / 128
                     + hist
@@ -1157,7 +1167,9 @@ impl SearchWorker {
                     let scaled_bonus = bonus * tune.update_all_stats_quiet_bonus_scale_num / 1024;
                     let scaled_malus = malus * tune.update_all_stats_quiet_malus_scale_num / 1024;
 
-                    self.history.with_write(|h| {
+                    {
+                        // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
+                        let h = unsafe { self.history.as_mut_unchecked() };
                         // MainHistory
                         h.main_history.update(us, best_move_for_stats, scaled_bonus);
 
@@ -1193,23 +1205,27 @@ impl SearchWorker {
                                 h.pawn_history.update(pawn_key_idx, cont_pc, to, pawn_malus);
                             }
                         }
-                    });
+                    }
                 } else {
                     // Capture best: captureHistory更新 (yaneuraou-search.cpp:4980-4981)
                     let captured_pt = pos.piece_on(best_to).piece_type();
-                    self.history.with_write(|h| {
+                    {
+                        // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
+                        let h = unsafe { self.history.as_mut_unchecked() };
                         h.capture_history.update(
                             best_cont_pc,
                             best_to,
                             captured_pt,
                             bonus * tune.update_all_stats_capture_bonus_scale_num / 1024,
                         );
-                    });
+                    }
                 }
 
                 // 他の捕獲手にペナルティ (yaneuraou-search.cpp:4999-5011)
                 if !captures_tried.is_empty() {
-                    self.history.with_write(|h| {
+                    {
+                        // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
+                        let h = unsafe { self.history.as_mut_unchecked() };
                         for &m in captures_tried.iter() {
                             if m != best_move_for_stats {
                                 let moved_pc = pos.moved_piece(m);
@@ -1228,7 +1244,7 @@ impl SearchWorker {
                                 );
                             }
                         }
-                    });
+                    }
                 }
             }
         }
@@ -1400,9 +1416,12 @@ impl SearchWorker {
                 let captured = pos.captured_piece();
                 let captured_pt = captured.piece_type();
                 let moved_piece = mv.moved_piece_after();
-                let hist = self
-                    .history
-                    .with_read(|h| h.capture_history.get(moved_piece, mv.to(), captured_pt) as i32);
+                // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
+                let hist = unsafe { self.history.as_ref_unchecked() }.capture_history.get(
+                    moved_piece,
+                    mv.to(),
+                    captured_pt,
+                ) as i32;
                 self.search_tune_params.lmr_step16_capture_stat_scale_num * piece_value(captured)
                     / 128
                     + hist
@@ -1741,18 +1760,20 @@ impl SearchWorker {
                     // quiet ttMoveがfail-highした場合、quiet_historiesを更新
                     if !cutoff_tt_capture {
                         let bonus = (130 * depth - 71).min(1043);
-                        ctx.history.with_write(|h| {
+                        {
+                            // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
+                            let h = unsafe { ctx.history.as_mut_unchecked() };
                             update_quiet_histories(
                                 h,
                                 &st.stack,
-                                &ctx.tune_params,
+                                ctx.tune_params,
                                 pos,
                                 ply,
                                 in_check,
                                 cutoff_tt_move,
                                 bonus,
                             );
-                        });
+                        }
                     }
 
                     // 1手前の早期quiet手へのペナルティ
@@ -1765,18 +1786,20 @@ impl SearchWorker {
                             let prev_sq = prev_move.to();
                             let prev_piece = pos.piece_on(prev_sq);
                             let prev_in_check = st.stack[prev_ply].in_check;
-                            ctx.history.with_write(|h| {
+                            {
+                                // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
+                                let h = unsafe { ctx.history.as_mut_unchecked() };
                                 update_continuation_histories(
                                     h,
                                     &st.stack,
-                                    &ctx.tune_params,
+                                    ctx.tune_params,
                                     ply - 1,
                                     prev_in_check,
                                     prev_piece,
                                     prev_sq,
                                     -2142,
                                 );
-                            });
+                            }
                         }
                     }
                 }
@@ -1818,7 +1841,9 @@ impl SearchWorker {
                 let opponent = !pos.side_to_move();
                 let prev_sq = prev_move.to();
 
-                ctx.history.with_write(|h| {
+                {
+                    // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
+                    let h = unsafe { ctx.history.as_mut_unchecked() };
                     // mainHistory 更新: evalDiff * 9 (YaneuraOu準拠)
                     h.main_history.update(opponent, prev_move, eval_diff * 9);
 
@@ -1835,7 +1860,7 @@ impl SearchWorker {
                             h.pawn_history.update(pawn_idx, prev_piece, prev_sq, eval_diff * 14);
                         }
                     }
-                });
+                }
             }
         }
 
@@ -1896,7 +1921,7 @@ impl SearchWorker {
                 tt_pv: st.stack[ply as usize].tt_pv,
                 in_check,
             },
-            &ctx.tune_params,
+            ctx.tune_params,
         ) {
             inc_stat!(st, futility_pruned);
             inc_stat_by_depth!(st, futility_by_depth, depth);
@@ -1950,7 +1975,7 @@ impl SearchWorker {
             return v;
         }
 
-        if let Some(v) = try_small_probcut(depth, beta, &tt_ctx, &ctx.tune_params) {
+        if let Some(v) = try_small_probcut(depth, beta, &tt_ctx, ctx.tune_params) {
             return v;
         }
 
@@ -1991,7 +2016,11 @@ impl SearchWorker {
 
         loop {
             // 次の手を取得（lazy generation）
-            let mv = ctx.history.with_read(|h| mp.next_move(pos, h));
+            // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
+            let mv = {
+                let h = unsafe { ctx.history.as_ref_unchecked() };
+                mp.next_move(pos, h)
+            };
             if mv == Move::NONE {
                 break;
             }
@@ -2073,7 +2102,9 @@ impl SearchWorker {
                     // YaneuraOu準拠パラメータ (yaneuraou-search.cpp:3419-3423)
                     let corr_val_adj =
                         eval_ctx.correction_value.abs() / ctx.tune_params.singular_corr_val_adj_div;
-                    let tt_move_hist = ctx.history.with_read(|h| h.tt_move_history.get() as i32);
+                    // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
+                    let tt_move_hist =
+                        unsafe { ctx.history.as_ref_unchecked() }.tt_move_history.get() as i32;
                     let double_margin = ctx.tune_params.singular_double_margin_base
                         + ctx.tune_params.singular_double_margin_pv_node * pv_node as i32
                         + ctx.tune_params.singular_double_margin_non_tt_capture
@@ -2101,10 +2132,12 @@ impl SearchWorker {
                 } else if singular_value >= beta && !singular_value.is_mate_score() {
                     // Multi-Cut: 他の手もfail highする場合は枝刈り
                     // YaneuraOu準拠: TTMoveHistoryを更新
-                    ctx.history.with_write(|h| {
+                    {
+                        // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
+                        let h = unsafe { ctx.history.as_mut_unchecked() };
                         h.tt_move_history
                             .update(super::tt_history::TTMoveHistory::multi_cut_bonus(depth));
-                    });
+                    }
                     inc_stat!(st, multi_cut);
                     return singular_value;
                 } else if tt_value >= beta {
@@ -2123,7 +2156,7 @@ impl SearchWorker {
             // =============================================================
             let delta = (beta.raw() - alpha.raw()).max(0);
             let mut r = reduction(
-                &ctx.tune_params,
+                ctx.tune_params,
                 improving,
                 depth,
                 move_count,
@@ -2277,14 +2310,19 @@ impl SearchWorker {
                 let captured = pos.captured_piece();
                 let captured_pt = captured.piece_type();
                 let moved_piece = mv.moved_piece_after();
-                let hist = ctx
-                    .history
-                    .with_read(|h| h.capture_history.get(moved_piece, mv.to(), captured_pt) as i32);
+                // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
+                let hist = unsafe { ctx.history.as_ref_unchecked() }.capture_history.get(
+                    moved_piece,
+                    mv.to(),
+                    captured_pt,
+                ) as i32;
                 ctx.tune_params.lmr_step16_capture_stat_scale_num * piece_value(captured) / 128
                     + hist
             } else {
                 let moved_piece = mv.moved_piece_after();
-                let main_hist = ctx.history.with_read(|h| h.main_history.get(mover, mv) as i32);
+                // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
+                let main_hist =
+                    unsafe { ctx.history.as_ref_unchecked() }.main_history.get(mover, mv) as i32;
                 // SAFETY: cont_history_ptr() が返すポインタは探索中有効。
                 let cont0 = unsafe { cont_hist_ptr_1.as_ref() }.get(moved_piece, mv.to()) as i32;
                 // SAFETY: cont_history_ptr() が返すポインタは探索中有効。
@@ -2412,7 +2450,9 @@ impl SearchWorker {
                                         } else {
                                             0
                                         };
-                                ctx.history.with_write(|h| {
+                                {
+                                    // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
+                                    let h = unsafe { ctx.history.as_mut_unchecked() };
                                     h.continuation_history[in_check_idx][capture_idx].update(
                                         key.piece,
                                         key.to,
@@ -2420,7 +2460,7 @@ impl SearchWorker {
                                         to_sq,
                                         bonus,
                                     );
-                                });
+                                }
                             }
                         }
                     }
@@ -2573,9 +2613,9 @@ impl SearchWorker {
                     best_move = mv;
                     // PV更新
                     if pv_node {
-                        // 借用チェッカーの制約を避けるためクローン
-                        let child_pv = st.stack[(ply + 1) as usize].pv.clone();
-                        st.stack[ply as usize].update_pv(mv, &child_pv);
+                        // split_at_mut で安全に両方のスタックエントリにアクセス
+                        let (left, right) = st.stack.split_at_mut((ply + 1) as usize);
+                        left[ply as usize].pv.update(mv, right[0].pv.as_slice());
                     }
 
                     if value >= beta {
@@ -2638,9 +2678,9 @@ impl SearchWorker {
             let is_best_capture = pos.is_capture(best_move);
             let is_tt_move = best_move == tt_move;
             // YaneuraOu準拠: bonus = min(121*depth-77, 1633) + 375*(bestMove==ttMove)
-            let bonus = stat_bonus(depth, is_tt_move, &ctx.tune_params);
+            let bonus = stat_bonus(depth, is_tt_move, ctx.tune_params);
             // YaneuraOu準拠: malus = min(825*depth-196, 2159) - 16*moveCount
-            let malus = stat_malus(depth, move_count, &ctx.tune_params);
+            let malus = stat_malus(depth, move_count, ctx.tune_params);
             let us = pos.side_to_move();
             let pawn_key_idx = pos.pawn_history_index();
 
@@ -2668,13 +2708,15 @@ impl SearchWorker {
                     malus * ctx.tune_params.update_all_stats_quiet_malus_scale_num / 1024;
 
                 // History更新をまとめて実行
-                ctx.history.with_write(|h| {
+                {
+                    // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
+                    let h = unsafe { ctx.history.as_mut_unchecked() };
                     // MainHistory: そのまま渡す
                     h.main_history.update(us, best_move, scaled_bonus);
 
                     // LowPlyHistory: bonus * 761 / 1024
                     if ply < LOW_PLY_HISTORY_SIZE as i32 {
-                        let low_ply_bonus = low_ply_history_bonus(scaled_bonus, &ctx.tune_params);
+                        let low_ply_bonus = low_ply_history_bonus(scaled_bonus, ctx.tune_params);
                         h.low_ply_history.update(ply as usize, best_move, low_ply_bonus);
                     }
 
@@ -2686,7 +2728,7 @@ impl SearchWorker {
                         if ply_back > max_ply_back {
                             continue;
                         }
-                        let weight = continuation_history_weight(&ctx.tune_params, ply_back);
+                        let weight = continuation_history_weight(ctx.tune_params, ply_back);
                         if ply >= ply_back as i32 {
                             let prev_ply = (ply - ply_back as i32) as usize;
                             if let Some(key) = st.stack[prev_ply].cont_hist_key {
@@ -2695,7 +2737,7 @@ impl SearchWorker {
                                 let weighted_bonus = continuation_history_bonus_with_offset(
                                     cont_scaled_bonus * weight / 1024,
                                     ply_back,
-                                    &ctx.tune_params,
+                                    ctx.tune_params,
                                 );
                                 h.continuation_history[in_check_idx][capture_idx].update(
                                     key.piece,
@@ -2709,7 +2751,7 @@ impl SearchWorker {
                     }
 
                     // PawnHistory: bonus * (pos ? 850 : 550) / 1024
-                    let pawn_bonus = pawn_history_bonus(scaled_bonus, &ctx.tune_params);
+                    let pawn_bonus = pawn_history_bonus(scaled_bonus, ctx.tune_params);
                     h.pawn_history.update(pawn_key_idx, best_cont_pc, best_to, pawn_bonus);
 
                     // 他のquiet手にはペナルティ
@@ -2721,7 +2763,7 @@ impl SearchWorker {
                             // LowPlyHistory（現行欠落していたので追加）
                             if ply < LOW_PLY_HISTORY_SIZE as i32 {
                                 let low_ply_malus =
-                                    low_ply_history_bonus(-scaled_malus, &ctx.tune_params);
+                                    low_ply_history_bonus(-scaled_malus, ctx.tune_params);
                                 h.low_ply_history.update(ply as usize, m, low_ply_malus);
                             }
 
@@ -2743,8 +2785,7 @@ impl SearchWorker {
                                 if ply_back > max_ply_back {
                                     continue;
                                 }
-                                let weight =
-                                    continuation_history_weight(&ctx.tune_params, ply_back);
+                                let weight = continuation_history_weight(ctx.tune_params, ply_back);
                                 if ply >= ply_back as i32 {
                                     let prev_ply = (ply - ply_back as i32) as usize;
                                     if let Some(key) = st.stack[prev_ply].cont_hist_key {
@@ -2753,7 +2794,7 @@ impl SearchWorker {
                                         let weighted_malus = continuation_history_bonus_with_offset(
                                             cont_scaled_malus * weight / 1024,
                                             ply_back,
-                                            &ctx.tune_params,
+                                            ctx.tune_params,
                                         );
                                         h.continuation_history[in_check_idx][capture_idx].update(
                                             key.piece,
@@ -2767,27 +2808,31 @@ impl SearchWorker {
                             }
 
                             // PawnHistoryへのペナルティ
-                            let pawn_malus = pawn_history_bonus(-scaled_malus, &ctx.tune_params);
+                            let pawn_malus = pawn_history_bonus(-scaled_malus, ctx.tune_params);
                             h.pawn_history.update(pawn_key_idx, cont_pc, to, pawn_malus);
                         }
                     }
-                });
+                }
             } else {
                 // 捕獲手がbest: captureHistoryを更新
                 let captured_pt = pos.piece_on(best_to).piece_type();
                 // YaneuraOu準拠: captureHistory best moveにスケーリング適用（yaneuraou-search.cpp:4983）
-                ctx.history.with_write(|h| {
+                {
+                    // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
+                    let h = unsafe { ctx.history.as_mut_unchecked() };
                     h.capture_history.update(
                         best_cont_pc,
                         best_to,
                         captured_pt,
                         bonus * ctx.tune_params.update_all_stats_capture_bonus_scale_num / 1024,
-                    )
-                });
+                    );
+                }
             }
 
             // YaneuraOu準拠: 他の捕獲手へのペナルティもmalusを共通使用
-            ctx.history.with_write(|h| {
+            {
+                // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
+                let h = unsafe { ctx.history.as_mut_unchecked() };
                 for &m in captures_tried.iter() {
                     if m != best_move {
                         let moved_pc = pos.moved_piece(m);
@@ -2808,7 +2853,7 @@ impl SearchWorker {
                         );
                     }
                 }
-            });
+            }
 
             // YaneuraOu: quiet early refutationペナルティ
             // 条件: prevSq != SQ_NONE && (ss-1)->moveCount == 1 + (ss-1)->ttHit && !pos.captured_piece()
@@ -2833,13 +2878,14 @@ impl SearchWorker {
                         let prev_in_check = st.stack[prev_ply].in_check;
                         let prev_max_ply_back = if prev_in_check { 2 } else { 6 };
 
-                        ctx.history.with_write(|h| {
+                        {
+                            // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
+                            let h = unsafe { ctx.history.as_mut_unchecked() };
                             for ply_back in 1..=6 {
                                 if ply_back > prev_max_ply_back {
                                     continue;
                                 }
-                                let weight =
-                                    continuation_history_weight(&ctx.tune_params, ply_back);
+                                let weight = continuation_history_weight(ctx.tune_params, ply_back);
                                 // ss - 1 からさらに ply_back 手前 = ply - 1 - ply_back
                                 let target_ply = ply - 1 - ply_back as i32;
                                 if target_ply >= 0 {
@@ -2865,7 +2911,7 @@ impl SearchWorker {
                                     }
                                 }
                             }
-                        });
+                        }
                     }
                 }
             }
@@ -2878,7 +2924,8 @@ impl SearchWorker {
                 } else {
                     ctx.tune_params.tt_move_history_malus
                 };
-                ctx.history.with_write(|h| h.tt_move_history.update(bonus));
+                // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
+                unsafe { ctx.history.as_mut_unchecked() }.tt_move_history.update(bonus);
             }
         }
         // =================================================================
@@ -2964,12 +3011,14 @@ impl SearchWorker {
                     let update_pawn =
                         prev_piece.piece_type() != PieceType::Pawn && !prev_move.is_promotion();
 
-                    ctx.history.with_write(|h| {
+                    {
+                        // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
+                        let h = unsafe { ctx.history.as_mut_unchecked() };
                         for ply_back in 1..=6 {
                             if ply_back > prev_max_ply_back {
                                 continue;
                             }
-                            let weight = continuation_history_weight(&ctx.tune_params, ply_back);
+                            let weight = continuation_history_weight(ctx.tune_params, ply_back);
                             // ss - 1 からさらに ply_back 手前 = ply - 1 - ply_back
                             let target_ply = ply - 1 - ply_back as i32;
                             if target_ply >= 0 {
@@ -3001,7 +3050,7 @@ impl SearchWorker {
                         if update_pawn {
                             h.pawn_history.update(pawn_key_idx, prev_piece, prev_sq, pawn_bonus);
                         }
-                    });
+                    }
                 } else {
                     // Prior capture countermove bonus
                     // YaneuraOu: yaneuraou-search.cpp:3972-3977
@@ -3014,14 +3063,13 @@ impl SearchWorker {
                         "prior_capture is true but captured_piece is NONE"
                     );
                     if captured_piece != Piece::NONE {
-                        ctx.history.with_write(|h| {
-                            h.capture_history.update(
-                                prev_piece,
-                                prev_sq,
-                                captured_piece.piece_type(),
-                                ctx.tune_params.prior_capture_countermove_bonus,
-                            );
-                        });
+                        // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
+                        unsafe { ctx.history.as_mut_unchecked() }.capture_history.update(
+                            prev_piece,
+                            prev_sq,
+                            captured_piece.piece_type(),
+                            ctx.tune_params.prior_capture_countermove_bonus,
+                        );
                     }
                 }
             }

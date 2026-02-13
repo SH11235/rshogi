@@ -59,31 +59,29 @@ pub(super) fn correction_value(
         None
     };
 
-    ctx.history.with_read(|h| {
-        let pcv = h.correction_history.pawn_value(pawn_idx, us) as i32;
-        let micv = h.correction_history.minor_value(minor_idx, us) as i32;
-        let wnpcv = h.correction_history.non_pawn_value(non_pawn_idx_w, Color::White, us) as i32;
-        let bnpcv = h.correction_history.non_pawn_value(non_pawn_idx_b, Color::Black, us) as i32;
+    // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
+    let h = unsafe { ctx.history.as_ref_unchecked() };
+    let pcv = h.correction_history.pawn_value(pawn_idx, us) as i32;
+    let micv = h.correction_history.minor_value(minor_idx, us) as i32;
+    let wnpcv = h.correction_history.non_pawn_value(non_pawn_idx_w, Color::White, us) as i32;
+    let bnpcv = h.correction_history.non_pawn_value(non_pawn_idx_b, Color::Black, us) as i32;
 
-        // YO準拠: move無効またはcont_hist_key無しの場合はデフォルト値8
-        let cv2 = cont_key_2
-            .map(|key| {
-                let pc = pos.piece_on(prev_move.to());
-                h.correction_history.continuation_value(key.piece, key.to, pc, prev_move.to())
-                    as i32
-            })
-            .unwrap_or(8);
-        let cv4 = cont_key_4
-            .map(|key| {
-                let pc = pos.piece_on(prev_move.to());
-                h.correction_history.continuation_value(key.piece, key.to, pc, prev_move.to())
-                    as i32
-            })
-            .unwrap_or(8);
-        let cntcv = cv2 + cv4;
+    // YO準拠: move無効またはcont_hist_key無しの場合はデフォルト値8
+    let cv2 = cont_key_2
+        .map(|key| {
+            let pc = pos.piece_on(prev_move.to());
+            h.correction_history.continuation_value(key.piece, key.to, pc, prev_move.to()) as i32
+        })
+        .unwrap_or(8);
+    let cv4 = cont_key_4
+        .map(|key| {
+            let pc = pos.piece_on(prev_move.to());
+            h.correction_history.continuation_value(key.piece, key.to, pc, prev_move.to()) as i32
+        })
+        .unwrap_or(8);
+    let cntcv = cv2 + cv4;
 
-        9536 * pcv + 8494 * micv + 10_132 * (wnpcv + bnpcv) + 7156 * cntcv
-    })
+    9536 * pcv + 8494 * micv + 10_132 * (wnpcv + bnpcv) + 7156 * cntcv
 }
 
 /// 補正履歴の更新
@@ -130,33 +128,33 @@ pub(super) fn update_correction_history(
 
     const NON_PAWN_WEIGHT: i32 = 165;
 
-    ctx.history.with_write(|h| {
-        h.correction_history.update_pawn(pawn_idx, us, bonus);
-        h.correction_history.update_minor(minor_idx, us, bonus * 156 / 128);
-        h.correction_history.update_non_pawn(
-            non_pawn_idx_w,
-            Color::White,
-            us,
-            bonus * NON_PAWN_WEIGHT / 128,
-        );
-        h.correction_history.update_non_pawn(
-            non_pawn_idx_b,
-            Color::Black,
-            us,
-            bonus * NON_PAWN_WEIGHT / 128,
-        );
+    // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
+    let h = unsafe { ctx.history.as_mut_unchecked() };
+    h.correction_history.update_pawn(pawn_idx, us, bonus);
+    h.correction_history.update_minor(minor_idx, us, bonus * 156 / 128);
+    h.correction_history.update_non_pawn(
+        non_pawn_idx_w,
+        Color::White,
+        us,
+        bonus * NON_PAWN_WEIGHT / 128,
+    );
+    h.correction_history.update_non_pawn(
+        non_pawn_idx_b,
+        Color::Black,
+        us,
+        bonus * NON_PAWN_WEIGHT / 128,
+    );
 
-        // YO準拠: continuation(ss-2) 重み 137/128
-        if let Some((piece, to, pc, prev_to)) = cont_params_2 {
-            h.correction_history
-                .update_continuation(piece, to, pc, prev_to, bonus * 137 / 128);
-        }
-        // YO準拠: continuation(ss-4) 重み 64/128
-        if let Some((piece, to, pc, prev_to)) = cont_params_4 {
-            h.correction_history
-                .update_continuation(piece, to, pc, prev_to, bonus * 64 / 128);
-        }
-    });
+    // YO準拠: continuation(ss-2) 重み 137/128
+    if let Some((piece, to, pc, prev_to)) = cont_params_2 {
+        h.correction_history
+            .update_continuation(piece, to, pc, prev_to, bonus * 137 / 128);
+    }
+    // YO準拠: continuation(ss-4) 重み 64/128
+    if let Some((piece, to, pc, prev_to)) = cont_params_4 {
+        h.correction_history
+            .update_continuation(piece, to, pc, prev_to, bonus * 64 / 128);
+    }
 }
 
 // =============================================================================

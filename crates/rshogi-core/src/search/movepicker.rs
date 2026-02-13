@@ -137,7 +137,7 @@ impl Stage {
 /// ```ignore
 /// let mut mp = MovePicker::new(pos, tt_move, depth, ply, cont_hist, generate_all);
 /// loop {
-///     let mv = ctx.history.with_read(|h| mp.next_move(pos, h));
+///     let mv = { let h = unsafe { ctx.history.as_ref_unchecked() }; mp.next_move(pos, h) };
 ///     if mv == Move::NONE { break; }
 ///     // LMPチェック
 ///     if lmp_condition && mp.is_quiet_stage() && !is_capture {

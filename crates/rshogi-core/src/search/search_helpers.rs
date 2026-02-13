@@ -198,9 +198,11 @@ pub(super) fn set_cont_history_for_move(
     debug_assert!(ply >= 0 && (ply as usize) < STACK_SIZE, "ply out of bounds: {ply}");
     let in_check_idx = in_check as usize;
     let capture_idx = capture as usize;
-    let table = ctx.history.with_read(|h| {
+    // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
+    let table = {
+        let h = unsafe { ctx.history.as_ref_unchecked() };
         NonNull::from(h.continuation_history[in_check_idx][capture_idx].get_table(piece, to))
-    });
+    };
     st.stack[ply as usize].cont_history_ptr = table;
     st.stack[ply as usize].cont_hist_key = Some(ContHistKey::new(in_check, capture, piece, to));
 }

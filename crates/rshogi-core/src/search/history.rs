@@ -733,22 +733,13 @@ impl HistoryTables {
 
 /// History用の内部可変ラッパー
 ///
-/// 参照を外部に漏らさないために `with_read`/`with_write` を使用する。
-/// これにより「束縛禁止」を型レベルで強制できる。
+/// `UnsafeCell` で包み、`as_ref_unchecked`/`as_mut_unchecked` で直接参照を取得する。
 ///
 /// ## 安全性
 ///
-/// - 参照はクロージャ内に閉じ込められ、外部に漏れない
 /// - `PhantomData<Rc<()>>` により `!Send` を強制（単一スレッド保証）
-/// - 再帰呼び出し時の参照エイリアス問題を設計で防止
-///
-/// ## 使用パターン
-///
-/// ```ignore
-/// let mv = ctx.history.with_read(|h| mp.next_move(pos, h));
-/// // この時点で &HistoryTables は存在しない（型で保証）
-/// let value = search_node(st, ctx, pos, ...);
-/// ```
+/// - 呼び出し側で `&` と `&mut` の排他性を手動で保証する
+/// - 探索ループ内では読み取り参照のみ、ノード末尾で書き込み参照を使用する設計
 pub struct HistoryCell {
     inner: UnsafeCell<HistoryTables>,
     /// `!Send` を強制するためのマーカー（単一スレッド保証）
@@ -777,39 +768,32 @@ impl HistoryCell {
         // new_zeroedで直接ヒープに確保し、スタックオーバーフローを回避
         let cell = unsafe { Box::<Self>::new_zeroed().assume_init() };
         // correction_historyは初期値が0ではないので再初期化が必要
-        cell.with_write(|h| h.correction_history.fill_initial_values());
+        // SAFETY: 初期化時のみ使用、他の参照と同時保持しない
+        unsafe { cell.as_mut_unchecked() }.correction_history.fill_initial_values();
         cell
     }
 
-    /// 読み取りアクセス（クロージャ内に参照を閉じ込める）
-    ///
-    /// 参照はクロージャ内でのみ有効。外部に漏れないため、
-    /// 再帰呼び出し時に親の参照が残存する問題を型で防止できる。
+    /// 内部の HistoryTables への不変参照を直接取得
     ///
     /// # Safety
     ///
-    /// このメソッドは内部でunsafeを使用するが、以下の不変条件により安全：
-    /// - 参照はクロージャ内に閉じ込められ、外部に漏れない
-    /// - 設計上、`with_read`中に`with_write`を呼ばない
+    /// 返された参照の生存期間中に `as_mut_unchecked` を呼ばないこと。
+    /// 単一スレッド内で使用し、書き込み参照と同時に保持しないこと。
     #[inline]
-    pub fn with_read<R>(&self, f: impl FnOnce(&HistoryTables) -> R) -> R {
-        // SAFETY: 参照はクロージャ内に閉じる（型で保証）
-        // MovePickerループ内でのみ使用し、再帰呼び出し時には参照は存在しない
-        unsafe { f(&*self.inner.get()) }
+    pub unsafe fn as_ref_unchecked(&self) -> &HistoryTables {
+        &*self.inner.get()
     }
 
-    /// 書き込みアクセス（クロージャ内に参照を閉じ込める）
+    /// 内部の HistoryTables への可変参照を直接取得
     ///
     /// # Safety
     ///
-    /// このメソッドは内部でunsafeを使用するが、以下の不変条件により安全：
-    /// - MovePickerループ外でのみ呼ぶ（設計で保証）
-    /// - 参照はクロージャ内に閉じ込められる
+    /// 他の参照（`as_ref_unchecked` 含む）が存在しないこと。
+    /// 単一スレッド内で使用し、他の参照と同時に保持しないこと。
     #[inline]
-    pub fn with_write<R>(&self, f: impl FnOnce(&mut HistoryTables) -> R) -> R {
-        // SAFETY: MovePickerループ外でのみ呼ぶ（設計で保証）
-        // ノード末尾でHistory更新時に使用
-        unsafe { f(&mut *self.inner.get()) }
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn as_mut_unchecked(&self) -> &mut HistoryTables {
+        &mut *self.inner.get()
     }
 
     /// 内部の HistoryTables への可変参照を取得（初期化用）
@@ -856,14 +840,6 @@ pub fn stat_malus(depth: i32, move_count: i32, tune_params: &SearchTuneParams) -
     (tune_params.stat_malus_depth_mult * depth + tune_params.stat_malus_offset)
         .min(tune_params.stat_malus_max)
         - tune_params.stat_malus_move_count_mult * move_count
-}
-
-// 後方互換性のため旧APIも残す（非推奨）
-/// History更新用のボーナスを計算（旧API、非推奨）
-#[deprecated(note = "Use stat_bonus(depth, is_tt_move, tune_params) instead")]
-#[inline]
-pub fn stat_bonus_old(depth: i32) -> i32 {
-    (130 * depth - 103).min(1652)
 }
 
 // =============================================================================
@@ -1081,29 +1057,26 @@ mod tests {
     }
 
     #[test]
-    fn test_history_cell_with_read() {
+    fn test_history_cell_read() {
         // HistoryTablesは大きいのでnew_boxedを使用
         let cell = HistoryCell::new_boxed();
 
-        // with_readでクロージャ内で参照を使用
-        let value =
-            cell.with_read(|h| h.main_history.get(Color::Black, Move::from_usi("7g7f").unwrap()));
+        let value = unsafe { cell.as_ref_unchecked() }
+            .main_history
+            .get(Color::Black, Move::from_usi("7g7f").unwrap());
         assert_eq!(value, 0);
     }
 
     #[test]
-    fn test_history_cell_with_write() {
+    fn test_history_cell_write() {
         // HistoryTablesは大きいのでnew_boxedを使用
         let cell = HistoryCell::new_boxed();
         let mv = Move::from_usi("7g7f").unwrap();
 
-        // with_writeで更新
-        cell.with_write(|h| {
-            h.main_history.update(Color::Black, mv, 100);
-        });
+        unsafe { cell.as_mut_unchecked() }.main_history.update(Color::Black, mv, 100);
 
         // 更新が反映されていることを確認
-        let value = cell.with_read(|h| h.main_history.get(Color::Black, mv));
+        let value = unsafe { cell.as_ref_unchecked() }.main_history.get(Color::Black, mv);
         assert!(value > 0);
     }
 
@@ -1114,15 +1087,13 @@ mod tests {
         let mv = Move::from_usi("7g7f").unwrap();
 
         // 更新
-        cell.with_write(|h| {
-            h.main_history.update(Color::Black, mv, 100);
-        });
+        unsafe { cell.as_mut_unchecked() }.main_history.update(Color::Black, mv, 100);
 
         // クリア
         cell.clear();
 
         // クリア後は0に戻る
-        let value = cell.with_read(|h| h.main_history.get(Color::Black, mv));
+        let value = unsafe { cell.as_ref_unchecked() }.main_history.get(Color::Black, mv);
         assert_eq!(value, 0);
     }
 }

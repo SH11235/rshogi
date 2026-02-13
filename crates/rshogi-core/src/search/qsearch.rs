@@ -75,7 +75,7 @@ pub(super) fn qsearch<const NT: u8>(
         let v = draw_value(rep_state, pos.side_to_move());
         if v != Value::NONE {
             if v == Value::DRAW {
-                let jittered = Value::new(v.raw() + draw_jitter(st.nodes, &ctx.tune_params));
+                let jittered = Value::new(v.raw() + draw_jitter(st.nodes, ctx.tune_params));
                 return value_from_tt(jittered, ply);
             }
             return value_from_tt(v, ply);
@@ -84,7 +84,7 @@ pub(super) fn qsearch<const NT: u8>(
 
     // 引き分け手数ルール（YaneuraOu準拠、MaxMovesToDrawオプション）
     if ctx.max_moves_to_draw > 0 && pos.game_ply() > ctx.max_moves_to_draw {
-        return Value::new(Value::DRAW.raw() + draw_jitter(st.nodes, &ctx.tune_params));
+        return Value::new(Value::DRAW.raw() + draw_jitter(st.nodes, ctx.tune_params));
     }
 
     let key = pos.key();
@@ -369,7 +369,11 @@ pub(super) fn qsearch<const NT: u8>(
             };
 
             loop {
-                let mv = ctx.history.with_read(|h| mp.next_move(pos, h));
+                // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
+                let mv = {
+                    let h = unsafe { ctx.history.as_ref_unchecked() };
+                    mp.next_move(pos, h)
+                };
                 if mv == Move::NONE {
                     break;
                 }
