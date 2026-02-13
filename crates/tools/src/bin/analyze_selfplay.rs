@@ -297,7 +297,13 @@ fn parse_normal_file(path: &str) -> Result<FileResult> {
                 .with_context(|| format!("resultパースエラー: {path}"))?;
             if let Some(ref winner) = result.winner {
                 // winner フィールドあり: エンジン名で集計（tournament.rs 形式）
-                let winner_id = extract_engine_id(winner);
+                // meta にラベルがある場合は winner もラベルそのままなので正規化不要。
+                // 旧形式（ラベルなし）では winner がパス由来なので extract_engine_id で正規化。
+                let winner_id = if meta_parsed && (black == *winner || white == *winner) {
+                    winner.clone()
+                } else {
+                    extract_engine_id(winner)
+                };
                 if winner_id == black {
                     black_wins += 1;
                 } else if winner_id == white {
