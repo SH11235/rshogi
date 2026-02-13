@@ -56,19 +56,6 @@ pub(super) fn draw_jitter(nodes: u64, tune_params: &SearchTuneParams) -> i32 {
 }
 
 #[inline]
-fn root_stat_score_zero_enabled() -> bool {
-    static ROOT_STAT_SCORE_ZERO: LazyLock<bool> = LazyLock::new(|| {
-        std::env::var("RSHOGI_ROOT_STAT_SCORE_ZERO")
-            .map(|v| {
-                let s = v.trim();
-                !s.is_empty() && s != "0" && !s.eq_ignore_ascii_case("false")
-            })
-            .unwrap_or(false)
-    });
-    *ROOT_STAT_SCORE_ZERO
-}
-
-#[inline]
 /// 補正履歴を適用した静的評価に変換（詰みスコア領域に入り込まないようにクリップ）
 pub(super) fn to_corrected_static_eval(unadjusted: Value, correction_value: i32) -> Value {
     let corrected = unadjusted.raw() + correction_value / 131_072;
@@ -152,7 +139,10 @@ fn update_quiet_histories(
     };
     let to = mv.to();
 
-    update_continuation_histories(h, stack, tune_params, ply, in_check, cont_pc, to, bonus);
+    // YaneuraOu準拠: update_continuation_histories に渡す前に 955/1024 を適用
+    // (yaneuraou-search.cpp:5062: update_continuation_histories(ss, pc, to, bonus * 955 / 1024))
+    let cont_bonus = bonus * tune_params.continuation_history_multiplier / 1024;
+    update_continuation_histories(h, stack, tune_params, ply, in_check, cont_pc, to, cont_bonus);
 
     let pawn_key_idx = pos.pawn_history_index();
     h.pawn_history
@@ -933,7 +923,8 @@ impl SearchWorker {
             let mut new_depth = depth - 1;
             // YaneuraOu準拠: rootでも全手で statScore を設定してから子ノードを探索する。
             // (moveCount==1 ではLMR補正には使われないが、子ノード側の統計参照で使われる)
-            let root_stat_score = if root_stat_score_zero_enabled() || mv.is_pass() {
+            // YaneuraOu準拠: statScore（yaneuraou-search.cpp:3564-3572）
+            let root_stat_score = if mv.is_pass() {
                 0
             } else if is_capture {
                 let captured = pos.captured_piece();
@@ -1375,24 +1366,6 @@ impl SearchWorker {
             let mv = self.state.root_moves[rm_idx].mv();
             let gives_check = pos.gives_check(mv);
             let is_capture = pos.is_capture(mv);
-            // YaneuraOu準拠: 子ノード(ply=1)から参照される親move_count/stat_scoreを設定
-            self.state.stack[0].move_count = (rm_idx + 1) as i32;
-            self.state.stack[0].stat_score = if root_stat_score_zero_enabled() || mv.is_pass() {
-                0
-            } else if is_capture {
-                let captured = pos.captured_piece();
-                let captured_pt = captured.piece_type();
-                let moved_piece = mv.moved_piece_after();
-                let hist = self
-                    .history
-                    .with_read(|h| h.capture_history.get(moved_piece, mv.to(), captured_pt) as i32);
-                self.search_tune_params.lmr_step16_capture_stat_scale_num * piece_value(captured)
-                    / 128
-                    + hist
-            } else {
-                let mover = !pos.side_to_move();
-                self.root_quiet_stat_score(mover, mv)
-            };
 
             let nodes_before = self.state.nodes;
 
@@ -1401,6 +1374,8 @@ impl SearchWorker {
             self.nnue_push(dirty_piece);
             self.state.nodes += 1;
             self.state.stack[0].current_move = mv;
+            // YaneuraOu準拠: ss->moveCount = ++moveCount (yaneuraou-search.cpp:3160)
+            self.state.stack[0].move_count = (rm_idx + 1) as i32;
 
             // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う
             if mv.is_pass() {
@@ -1416,6 +1391,25 @@ impl SearchWorker {
                     cont_hist_to,
                 );
             }
+
+            // YaneuraOu準拠: statScore（yaneuraou-search.cpp:3564-3572）
+            // do_move 後に計算する（captured_piece() / side_to_move() は do_move 後の状態を参照）
+            self.state.stack[0].stat_score = if mv.is_pass() {
+                0
+            } else if is_capture {
+                let captured = pos.captured_piece();
+                let captured_pt = captured.piece_type();
+                let moved_piece = mv.moved_piece_after();
+                let hist = self
+                    .history
+                    .with_read(|h| h.capture_history.get(moved_piece, mv.to(), captured_pt) as i32);
+                self.search_tune_params.lmr_step16_capture_stat_scale_num * piece_value(captured)
+                    / 128
+                    + hist
+            } else {
+                let mover = !pos.side_to_move();
+                self.root_quiet_stat_score(mover, mv)
+            };
 
             let mut new_depth = depth - 1;
 
@@ -2684,7 +2678,10 @@ impl SearchWorker {
                         h.low_ply_history.update(ply as usize, best_move, low_ply_bonus);
                     }
 
-                    // ContinuationHistory: bonus * 955 / 1024 + weight + 88*(i<2)
+                    // ContinuationHistory: (bonus * 955 / 1024) * weight / 1024 + 88*(i<2)
+                    // YaneuraOu準拠: update_quiet_histories → update_continuation_histories
+                    let cont_scaled_bonus =
+                        scaled_bonus * ctx.tune_params.continuation_history_multiplier / 1024;
                     for ply_back in 1..=6 {
                         if ply_back > max_ply_back {
                             continue;
@@ -2696,7 +2693,7 @@ impl SearchWorker {
                                 let in_check_idx = key.in_check as usize;
                                 let capture_idx = key.capture as usize;
                                 let weighted_bonus = continuation_history_bonus_with_offset(
-                                    scaled_bonus * weight / 1024,
+                                    cont_scaled_bonus * weight / 1024,
                                     ply_back,
                                     &ctx.tune_params,
                                 );
@@ -2738,6 +2735,10 @@ impl SearchWorker {
                             let to = m.to();
 
                             // ContinuationHistoryへのペナルティ
+                            // YaneuraOu準拠: -malus * 1083/1024 * 955/1024 * weight/1024 + 88*(i<2)
+                            let cont_scaled_malus = -scaled_malus
+                                * ctx.tune_params.continuation_history_multiplier
+                                / 1024;
                             for ply_back in 1..=6 {
                                 if ply_back > max_ply_back {
                                     continue;
@@ -2750,7 +2751,7 @@ impl SearchWorker {
                                         let in_check_idx = key.in_check as usize;
                                         let capture_idx = key.capture as usize;
                                         let weighted_malus = continuation_history_bonus_with_offset(
-                                            -scaled_malus * weight / 1024,
+                                            cont_scaled_malus * weight / 1024,
                                             ply_back,
                                             &ctx.tune_params,
                                         );
@@ -2847,8 +2848,9 @@ impl SearchWorker {
                                     {
                                         let in_check_idx = target_key.in_check as usize;
                                         let capture_idx = target_key.capture as usize;
+                                        // YaneuraOu準拠: 88 * (i < 2) → ply_back=1 のみ
                                         let weighted_penalty = penalty_base * weight / 1024
-                                            + if ply_back <= 2 {
+                                            + if ply_back < 2 {
                                                 ctx.tune_params.continuation_history_near_ply_offset
                                             } else {
                                                 0
@@ -2976,8 +2978,9 @@ impl SearchWorker {
                                 {
                                     let in_check_idx = target_key.in_check as usize;
                                     let capture_idx = target_key.capture as usize;
+                                    // YaneuraOu準拠: 88 * (i < 2) → ply_back=1 のみ
                                     let weighted_bonus = cont_bonus * weight / 1024
-                                        + if ply_back <= 2 {
+                                        + if ply_back < 2 {
                                             ctx.tune_params.continuation_history_near_ply_offset
                                         } else {
                                             0
