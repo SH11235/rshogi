@@ -14,6 +14,8 @@
 
 mod board_effect;
 pub mod json_conversion;
+#[cfg(feature = "move-features")]
+mod move_features;
 mod movepicker_support;
 mod pos;
 mod sfen;
@@ -21,6 +23,8 @@ mod state;
 mod zobrist;
 
 pub(crate) use board_effect::BoardEffects;
+#[cfg(feature = "move-features")]
+pub use move_features::MoveFeatures;
 pub use pos::Position;
 pub use sfen::{SfenError, SFEN_HIRATE};
 pub use state::StateInfo;
