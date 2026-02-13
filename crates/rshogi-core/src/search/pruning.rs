@@ -19,6 +19,8 @@ use super::search_helpers::{
     set_cont_history_for_move,
 };
 use super::stats::{inc_stat, inc_stat_by_depth};
+#[cfg(feature = "tt-trace")]
+use super::tt_sanity::{helper_tt_write_enabled_for_depth, maybe_trace_tt_write, TtWriteTrace};
 use super::types::{value_to_tt, NodeType};
 use super::{LimitsType, MovePicker, TimeManagement};
 
@@ -123,7 +125,7 @@ pub(super) fn step14_pruning(
                 let captured_value = piece_value(captured);
                 let futility_value = step_ctx.static_eval.raw()
                     + 231
-                    + 211 * lmr_depth.max(0)
+                    + 211 * lmr_depth
                     + captured_value
                     + 130 * capt_hist / 1024;
                 if futility_value <= step_ctx.alpha.raw() {
@@ -178,12 +180,11 @@ pub(super) fn step14_pruning(
             let lmr_depth = lmr_depth + hist_score / 3220;
 
             // Futility pruning for quiet moves (親ノードでの枝刈り)
-            let no_best_move = step_ctx.tt_move.is_none();
-            let lmr_depth_clamped = lmr_depth.max(0);
+            let no_best_move = step_ctx.best_move.is_none();
             let futility_value = step_ctx.static_eval.raw()
                 + 47
                 + 171 * no_best_move as i32
-                + 134 * lmr_depth_clamped
+                + 134 * lmr_depth
                 + 90 * (step_ctx.static_eval > step_ctx.alpha) as i32;
 
             // YaneuraOu準拠: static_eval!=NONEガードなし（!in_check + VALUE_NONEで暗黙的に安全）
@@ -205,6 +206,7 @@ pub(super) fn step14_pruning(
             // SEE pruning for quiet moves (YaneuraOu: -27 * lmrDepth * lmrDepth)
             // YaneuraOu準拠: !in_check/lmrDepth>0ガードなし
             // lmrDepth=0時はthreshold=0でSEE<0の手を枝刈り
+            let lmr_depth_clamped = lmr_depth.max(0);
             if !step_ctx
                 .pos
                 .see_ge(step_ctx.mv, Value::new(-27 * lmr_depth_clamped * lmr_depth_clamped))
@@ -418,7 +420,9 @@ where
         }
     }
 
-    if !in_check && static_eval != Value::NONE {
+    // YaneuraOu準拠: Step10直前の improving 再計算は VALUE_NONE を含めて評価する。
+    // in-check ノードは YO ではこの経路に入らないため、現実装では !in_check のみ維持する。
+    if !in_check {
         improving |= static_eval >= beta;
     }
 
@@ -447,6 +451,7 @@ pub(super) fn try_probcut<F>(
     unadjusted_static_eval: Value,
     in_check: bool,
     cut_node: bool,
+    excluded_move: Move,
     limits: &LimitsType,
     time_manager: &mut TimeManagement,
     search_node: F,
@@ -474,19 +479,13 @@ where
             ctx.tune_params.probcut_beta_margin_base
                 - ctx.tune_params.probcut_beta_improving_sub * improving as i32,
         );
-    if beta.is_mate_score()
-        || (tt_ctx.hit
-            && tt_ctx.value != Value::NONE
-            && tt_ctx.value < prob_beta
-            && !tt_ctx.value.is_mate_score())
-    {
+    // YaneuraOu準拠: ttData.value が有効で probCutBeta 未満なら probCut を試さない。
+    // hit フラグや mate 判定で追加ガードしない。
+    if beta.is_mate_score() || (tt_ctx.value != Value::NONE && tt_ctx.value < prob_beta) {
         return None;
     }
 
     let threshold = prob_beta - static_eval;
-    if threshold <= Value::ZERO {
-        return None;
-    }
 
     let dynamic_reduction =
         (static_eval - beta).raw() / ctx.tune_params.probcut_dynamic_reduction_div.max(1);
@@ -522,6 +521,9 @@ where
     let (buf, len) = probcut_moves;
 
     for &mv in buf[..len].iter() {
+        if mv == excluded_move {
+            continue;
+        }
         if !pos.is_legal(mv) {
             continue;
         }
@@ -576,17 +578,42 @@ where
         if value >= prob_beta {
             inc_stat!(st, probcut_cutoff);
             let stored_depth = (probcut_depth + 1).max(1);
-            tt_ctx.result.write(
-                tt_ctx.key,
-                value_to_tt(value, ply),
-                st.stack[ply as usize].tt_pv,
-                Bound::Lower,
-                stored_depth,
-                mv,
-                unadjusted_static_eval,
-                ctx.tt.generation(),
-            );
-            inc_stat_by_depth!(st, tt_write_by_depth, stored_depth);
+            #[cfg(feature = "tt-trace")]
+            let allow_write = ctx.allow_tt_write
+                && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::Lower, stored_depth);
+            #[cfg(not(feature = "tt-trace"))]
+            let allow_write = ctx.allow_tt_write;
+            if allow_write {
+                #[cfg(feature = "tt-trace")]
+                maybe_trace_tt_write(TtWriteTrace {
+                    stage: "probcut_store",
+                    thread_id: ctx.thread_id,
+                    ply,
+                    key: tt_ctx.key,
+                    depth: stored_depth,
+                    bound: Bound::Lower,
+                    is_pv: st.stack[ply as usize].tt_pv,
+                    tt_move: mv,
+                    stored_value: value_to_tt(value, ply),
+                    eval: unadjusted_static_eval,
+                    root_move: if ply >= 1 {
+                        st.stack[0].current_move
+                    } else {
+                        Move::NONE
+                    },
+                });
+                tt_ctx.result.write(
+                    tt_ctx.key,
+                    value_to_tt(value, ply),
+                    st.stack[ply as usize].tt_pv,
+                    Bound::Lower,
+                    stored_depth,
+                    mv,
+                    unadjusted_static_eval,
+                    ctx.tt.generation(),
+                );
+                inc_stat_by_depth!(st, tt_write_by_depth, stored_depth);
+            }
 
             if !value.is_mate_score() {
                 return Some(value - (prob_beta - beta));

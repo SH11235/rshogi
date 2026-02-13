@@ -24,6 +24,7 @@ mod thread;
 mod time_manager;
 mod time_options;
 mod tt_history;
+mod tt_sanity;
 mod tune_params;
 mod types;
 

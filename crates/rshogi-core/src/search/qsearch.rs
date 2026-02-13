@@ -14,6 +14,13 @@ use super::search_helpers::{
     nnue_pop, nnue_push, set_cont_history_for_move,
 };
 use super::stats::{inc_stat, inc_stat_by_depth};
+#[cfg(feature = "tt-trace")]
+use super::tt_sanity::{
+    helper_tt_write_enabled_for_depth, maybe_log_invalid_tt_data, maybe_trace_tt_cutoff,
+    maybe_trace_tt_probe, maybe_trace_tt_write, InvalidTtLog, TtCutoffTrace, TtProbeTrace,
+    TtWriteTrace,
+};
+use super::tt_sanity::{is_valid_tt_eval, is_valid_tt_stored_value};
 use super::types::{draw_value, value_from_tt, value_to_tt, NodeType, OrderedMovesBuffer};
 use super::{LimitsType, MovePicker, TimeManagement};
 
@@ -83,16 +90,70 @@ pub(super) fn qsearch<const NT: u8>(
     let key = pos.key();
     let tt_result = ctx.tt.probe(key, pos);
     let tt_hit = tt_result.found;
-    let tt_data = tt_result.data;
+    let mut tt_data = tt_result.data;
     let pv_hit = tt_hit && tt_data.is_pv;
     st.stack[ply as usize].tt_hit = tt_hit;
-    st.stack[ply as usize].tt_pv = pv_hit;
+    // probe() で to_move 変換に失敗した手は除外済み。
+    // qsearch 側で pseudo-legal で再度潰さず、そのまま使用する。
     let mut tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
-    let tt_value = if tt_hit {
+    let mut tt_value = if tt_hit {
         value_from_tt(tt_data.value, ply)
     } else {
         Value::NONE
     };
+    if tt_hit && !is_valid_tt_stored_value(tt_data.value) {
+        #[cfg(feature = "tt-trace")]
+        maybe_log_invalid_tt_data(InvalidTtLog {
+            reason: "invalid_value",
+            stage: "qsearch_probe",
+            thread_id: ctx.thread_id,
+            ply,
+            key,
+            depth: tt_data.depth,
+            bound: tt_data.bound,
+            tt_move,
+            stored_value: tt_data.value,
+            converted_value: tt_value,
+            eval: tt_data.eval,
+        });
+        tt_value = Value::NONE;
+    }
+    if tt_hit && !is_valid_tt_eval(tt_data.eval) {
+        #[cfg(feature = "tt-trace")]
+        maybe_log_invalid_tt_data(InvalidTtLog {
+            reason: "invalid_eval",
+            stage: "qsearch_probe",
+            thread_id: ctx.thread_id,
+            ply,
+            key,
+            depth: tt_data.depth,
+            bound: tt_data.bound,
+            tt_move,
+            stored_value: tt_data.value,
+            converted_value: tt_value,
+            eval: tt_data.eval,
+        });
+        tt_data.eval = Value::NONE;
+    }
+    #[cfg(feature = "tt-trace")]
+    maybe_trace_tt_probe(TtProbeTrace {
+        stage: "qsearch_probe",
+        thread_id: ctx.thread_id,
+        ply,
+        key,
+        hit: tt_hit,
+        depth: tt_data.depth,
+        bound: tt_data.bound,
+        tt_move,
+        stored_value: tt_data.value,
+        converted_value: tt_value,
+        eval: tt_data.eval,
+        root_move: if ply >= 1 {
+            st.stack[0].current_move
+        } else {
+            Move::NONE
+        },
+    });
 
     // TT ヒット統計
     if tt_hit {
@@ -105,6 +166,23 @@ pub(super) fn qsearch<const NT: u8>(
         && tt_value != Value::NONE
         && tt_data.bound.can_cutoff(tt_value, beta)
     {
+        #[cfg(feature = "tt-trace")]
+        maybe_trace_tt_cutoff(TtCutoffTrace {
+            stage: "qsearch_cutoff",
+            thread_id: ctx.thread_id,
+            ply,
+            key,
+            search_depth: depth,
+            depth: tt_data.depth,
+            bound: tt_data.bound,
+            value: tt_value,
+            beta,
+            root_move: if ply >= 1 {
+                st.stack[0].current_move
+            } else {
+                Move::NONE
+            },
+        });
         inc_stat!(st, qs_tt_cutoff);
         return tt_value;
     }
@@ -123,7 +201,44 @@ pub(super) fn qsearch<const NT: u8>(
         if !tt_hit {
             let mate_move = pos.mate_1ply();
             if mate_move.is_some() {
-                return Value::mate_in(ply + 1);
+                let mate_value = Value::mate_in(ply + 1);
+                #[cfg(feature = "tt-trace")]
+                let allow_write = ctx.allow_tt_write
+                    && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::Exact, DEPTH_QS);
+                #[cfg(not(feature = "tt-trace"))]
+                let allow_write = ctx.allow_tt_write;
+                if allow_write {
+                    #[cfg(feature = "tt-trace")]
+                    maybe_trace_tt_write(TtWriteTrace {
+                        stage: "qsearch_mate1_store",
+                        thread_id: ctx.thread_id,
+                        ply,
+                        key,
+                        depth: DEPTH_QS,
+                        bound: Bound::Exact,
+                        is_pv: pv_hit,
+                        tt_move: mate_move,
+                        stored_value: mate_value,
+                        eval: unadjusted_static_eval,
+                        root_move: if ply >= 1 {
+                            st.stack[0].current_move
+                        } else {
+                            Move::NONE
+                        },
+                    });
+                    tt_result.write(
+                        key,
+                        mate_value,
+                        pv_hit,
+                        Bound::Exact,
+                        DEPTH_QS,
+                        mate_move,
+                        unadjusted_static_eval,
+                        ctx.tt.generation(),
+                    );
+                    inc_stat_by_depth!(st, tt_write_by_depth, 0);
+                }
+                return mate_value;
             }
         }
         unadjusted_static_eval = nnue_evaluate(st, pos);
@@ -146,12 +261,14 @@ pub(super) fn qsearch<const NT: u8>(
     };
 
     if !in_check && tt_hit && tt_value != Value::NONE && !tt_value.is_mate_score() {
-        let improves = (tt_value > best_value && tt_data.bound == Bound::Lower)
-            || (tt_value < best_value && tt_data.bound == Bound::Upper);
-        if improves {
+        // YO準拠: ttValue で補正するのは bestValue のみ。ss->staticEval は維持する。
+        let bound_matches = if tt_value > best_value {
+            tt_data.bound.is_lower_or_exact()
+        } else {
+            matches!(tt_data.bound, Bound::Upper | Bound::Exact)
+        };
+        if bound_matches {
             best_value = tt_value;
-            static_eval = tt_value;
-            st.stack[ply as usize].static_eval = static_eval;
         }
     }
 
@@ -162,18 +279,44 @@ pub(super) fn qsearch<const NT: u8>(
             v = Value::new((v.raw() + beta.raw()) / 2);
         }
         if !tt_hit {
-            // YaneuraOu: pvHitを使用
-            tt_result.write(
-                key,
-                value_to_tt(v, ply),
-                pv_hit,
-                Bound::Lower,
-                DEPTH_UNSEARCHED,
-                Move::NONE,
-                unadjusted_static_eval,
-                ctx.tt.generation(),
-            );
-            inc_stat_by_depth!(st, tt_write_by_depth, 0);
+            // YaneuraOu準拠: stand pat cutoff 時は ttPv=false で保存
+            // (yaneuraou-search.cpp:4454)
+            #[cfg(feature = "tt-trace")]
+            let allow_write = ctx.allow_tt_write
+                && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::Lower, DEPTH_UNSEARCHED);
+            #[cfg(not(feature = "tt-trace"))]
+            let allow_write = ctx.allow_tt_write;
+            if allow_write {
+                #[cfg(feature = "tt-trace")]
+                maybe_trace_tt_write(TtWriteTrace {
+                    stage: "qsearch_stand_pat_store",
+                    thread_id: ctx.thread_id,
+                    ply,
+                    key,
+                    depth: DEPTH_UNSEARCHED,
+                    bound: Bound::Lower,
+                    is_pv: false,
+                    tt_move: Move::NONE,
+                    stored_value: value_to_tt(v, ply),
+                    eval: unadjusted_static_eval,
+                    root_move: if ply >= 1 {
+                        st.stack[0].current_move
+                    } else {
+                        Move::NONE
+                    },
+                });
+                tt_result.write(
+                    key,
+                    value_to_tt(v, ply),
+                    false,
+                    Bound::Lower,
+                    DEPTH_UNSEARCHED,
+                    Move::NONE,
+                    unadjusted_static_eval,
+                    ctx.tt.generation(),
+                );
+                inc_stat_by_depth!(st, tt_write_by_depth, 0);
+            }
         }
         return v;
     }
@@ -377,11 +520,11 @@ pub(super) fn qsearch<const NT: u8>(
             best_move = mv;
 
             if value > alpha {
-                alpha = value;
-
                 if value >= beta {
                     break;
                 }
+                // YaneuraOu準拠: fail-high しなかった場合のみ alpha を更新する。
+                alpha = value;
             }
         }
     }
@@ -394,26 +537,50 @@ pub(super) fn qsearch<const NT: u8>(
         best_value = Value::new((best_value.raw() + beta.raw()) / 2);
     }
 
+    // YaneuraOu準拠: qsearchの結果は Exact としては保存しない。
     let bound = if best_value >= beta {
         Bound::Lower
-    } else if pv_node && best_move.is_some() {
-        Bound::Exact
     } else {
         Bound::Upper
     };
 
     // YaneuraOu: pvHitを使用
-    tt_result.write(
-        key,
-        value_to_tt(best_value, ply),
-        pv_hit,
-        bound,
-        DEPTH_QS,
-        best_move,
-        unadjusted_static_eval,
-        ctx.tt.generation(),
-    );
-    inc_stat_by_depth!(st, tt_write_by_depth, 0);
+    #[cfg(feature = "tt-trace")]
+    let allow_write =
+        ctx.allow_tt_write && helper_tt_write_enabled_for_depth(ctx.thread_id, bound, DEPTH_QS);
+    #[cfg(not(feature = "tt-trace"))]
+    let allow_write = ctx.allow_tt_write;
+    if allow_write {
+        #[cfg(feature = "tt-trace")]
+        maybe_trace_tt_write(TtWriteTrace {
+            stage: "qsearch_store",
+            thread_id: ctx.thread_id,
+            ply,
+            key,
+            depth: DEPTH_QS,
+            bound,
+            is_pv: pv_hit,
+            tt_move: best_move,
+            stored_value: value_to_tt(best_value, ply),
+            eval: unadjusted_static_eval,
+            root_move: if ply >= 1 {
+                st.stack[0].current_move
+            } else {
+                Move::NONE
+            },
+        });
+        tt_result.write(
+            key,
+            value_to_tt(best_value, ply),
+            pv_hit,
+            bound,
+            DEPTH_QS,
+            best_move,
+            unadjusted_static_eval,
+            ctx.tt.generation(),
+        );
+        inc_stat_by_depth!(st, tt_write_by_depth, 0);
+    }
 
     best_value
 }

@@ -74,7 +74,9 @@ impl TTEntry {
 
     /// エントリを読み取る
     pub fn read(&self) -> TTData {
-        let mv = Move::from_u16_checked(self.move16).unwrap_or(Move::NONE);
+        // YaneuraOu準拠:
+        // move16 はここで潰さずに生値を保持し、probe() 側の pos.to_move() で整合性検証する。
+        let mv = Move::from_u16(self.move16);
         TTData {
             mv,
             value: Value::new(self.value16 as i32),

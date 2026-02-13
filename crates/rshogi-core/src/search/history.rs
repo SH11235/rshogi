@@ -603,7 +603,7 @@ impl CorrectionHistory {
 
     fn fill_initial_values(&mut self) {
         for entry in self.pawn.iter_mut().flatten() {
-            entry.set(5);
+            entry.set(0);
         }
         for entry in self.minor.iter_mut().flatten() {
             entry.set(0);
@@ -874,14 +874,6 @@ pub fn low_ply_history_bonus(bonus: i32, tune_params: &SearchTuneParams) -> i32 
     bonus * tune_params.low_ply_history_multiplier / 1024 + tune_params.low_ply_history_offset
 }
 
-/// ContinuationHistory用のボーナスを計算（YaneuraOu準拠）
-///
-/// 正負共通の倍率を使用。
-#[inline]
-pub fn continuation_history_bonus(bonus: i32, tune_params: &SearchTuneParams) -> i32 {
-    bonus * tune_params.continuation_history_multiplier / 1024
-}
-
 /// ContinuationHistory更新重みを取得する。
 ///
 /// `ply_back` は 1..=6 を想定する。範囲外は0を返す。
@@ -898,22 +890,22 @@ pub fn continuation_history_weight(tune_params: &SearchTuneParams, ply_back: usi
     }
 }
 
-/// ContinuationHistory近接ply（1,2手前）用のオフセット込みボーナスを計算
+/// ContinuationHistory近接ply（1手前）用のオフセット込みボーナスを計算
 ///
-/// YaneuraOu準拠: オフセットは常に加算（負のボーナス時もペナルティを緩める）
-/// `(bonus * weight / 1024) + near_ply_offset * (i < 2)`
+/// YaneuraOu準拠: `(bonus * weight / 1024) + near_ply_offset * (i < 2)`
+/// 955/1024 倍率は呼び出し元で適用済みの bonus を受け取る（YO は `update_quiet_histories`
+/// 内で `bonus * 955 / 1024` してから `update_continuation_histories` に渡す構造）。
 #[inline]
 pub fn continuation_history_bonus_with_offset(
     bonus: i32,
     ply_back: usize,
     tune_params: &SearchTuneParams,
 ) -> i32 {
-    let base = continuation_history_bonus(bonus, tune_params);
-    if ply_back <= 2 {
-        // YaneuraOu: 負のボーナスでも+80を加算してペナルティを緩める
-        base + tune_params.continuation_history_near_ply_offset
+    if ply_back < 2 {
+        // YaneuraOu準拠: 88 * (i < 2) → ply_back=1 のみ近接plyオフセットを加算
+        bonus + tune_params.continuation_history_near_ply_offset
     } else {
-        base
+        bonus
     }
 }
 
