@@ -852,7 +852,6 @@ impl SearchWorker {
 
         let mut alpha = alpha;
         let mut best_value = Value::new(-32001);
-        let mut pv_idx = 0;
         let root_in_check = pos.in_check();
 
         self.state.stack[0].in_check = root_in_check;
@@ -905,6 +904,7 @@ impl SearchWorker {
             self.generate_all_legal_moves,
         );
 
+        let mut best_move = Move::NONE;
         let mut move_count = 0i32;
         loop {
             let mv = {
@@ -1182,8 +1182,8 @@ impl SearchWorker {
                 best_value = value;
 
                 if value > alpha {
+                    best_move = mv;
                     alpha = value;
-                    pv_idx = rm_idx;
 
                     if value >= beta {
                         break;
@@ -1194,6 +1194,16 @@ impl SearchWorker {
                     if depth > 2 && depth < 14 && !value.is_mate_score() {
                         depth -= 2;
                     }
+                }
+            }
+
+            // YaneuraOu準拠: 非best手のトラッキング (yaneuraou-search.cpp:3947-3955)
+            // bestMoveはループ中に更新されるため、alpha更新した手は除外される
+            if mv != best_move && !mv.is_pass() {
+                if is_capture {
+                    captures_tried.push(mv);
+                } else {
+                    quiets_tried.push(mv);
                 }
             }
         }
@@ -1207,13 +1217,14 @@ impl SearchWorker {
         }
 
         // =================================================================
-        // History更新（YaneuraOu準拠: update_all_stats, yaneuraou-search.cpp:3939-5012）
+        // History更新（YaneuraOu準拠: update_all_stats, yaneuraou-search.cpp:4000-4008）
         // =================================================================
-        // rootでもbest moveが存在する場合にhistoryを更新する
+        // alphaを超えるbestMoveが存在する場合のみhistoryを更新する
+        // fail-low（bestMove == NONE）の場合はスキップ（YO準拠）
         // 注: ply=0のためcontinuation historyの更新はスキップされる（ply < ply_back）
         // 注: prevSq == SQ_NONEのためfail-low countermove bonus/early refutation penaltyもスキップ
         {
-            let best_move_for_stats = self.state.root_moves[pv_idx].mv();
+            let best_move_for_stats = best_move;
             if best_move_for_stats.is_some() && !best_move_for_stats.is_pass() {
                 let is_best_capture = pos.capture_stage(best_move_for_stats);
                 let is_tt_move = best_move_for_stats == tt_move_root;
@@ -1321,7 +1332,8 @@ impl SearchWorker {
         // YaneuraOu準拠: ルートでもTTに保存する (yaneuraou-search.cpp:4034)
         // rootNode && !pvIdx (single-PV) かつ excludedMove なし → 常に save
         // NOTE: ソートはiterative deepening loop側（engine.rs の stable_sort_range）で実行する
-        let best_move = self.state.root_moves[pv_idx].mv();
+        // TT/CorrectionHistory: bestMoveはalphaを超えた手のみ（fail-low時はNONE）
+        // YaneuraOu準拠: bestMove == MOVE_NONE のとき TT bound は UPPER
         if self.allow_tt_write {
             let bound = if best_value >= beta {
                 Bound::Lower
@@ -2705,6 +2717,16 @@ impl SearchWorker {
                     }
                     // YaneuraOu準拠: fail-high しなかった場合のみ alpha を更新する。
                     alpha = value;
+                }
+            }
+
+            // YaneuraOu準拠: 非best手のトラッキング (yaneuraou-search.cpp:3947-3955)
+            // bestMoveはループ中に更新されるため、alpha更新した手は除外される
+            if mv != best_move && !mv.is_pass() {
+                if is_capture {
+                    captures_tried.push(mv);
+                } else {
+                    quiets_tried.push(mv);
                 }
             }
         }
