@@ -61,34 +61,6 @@ pub(super) fn try_futility_pruning(
 }
 
 // =============================================================================
-// Small ProbCut
-// =============================================================================
-
-/// Small ProbCut
-#[inline]
-pub(super) fn try_small_probcut(
-    depth: Depth,
-    beta: Value,
-    tt_ctx: &TTContext,
-    tune_params: &super::SearchTuneParams,
-) -> Option<Value> {
-    if depth >= 1 {
-        let sp_beta = beta + Value::new(tune_params.small_probcut_margin);
-        if tt_ctx.hit
-            && tt_ctx.data.bound.is_lower_or_exact()
-            && tt_ctx.data.depth >= depth - 4
-            && tt_ctx.value != Value::NONE
-            && tt_ctx.value >= sp_beta
-            && !tt_ctx.value.is_mate_score()
-            && !beta.is_mate_score()
-        {
-            return Some(sp_beta);
-        }
-    }
-    None
-}
-
-// =============================================================================
 // Step14 Pruning
 // =============================================================================
 

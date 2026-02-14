@@ -42,6 +42,25 @@ pub const LOW_PLY_HISTORY_SIZE: usize = 5;
 /// (81マス + 7種の駒打ち) × 81マス
 pub const FROM_TO_SIZE: usize = (Square::NUM + 7) * Square::NUM;
 
+// =============================================================================
+// History初期値定数 (YaneuraOu準拠)
+// =============================================================================
+// cf. yaneuraou-search.cpp Worker::clear()
+// 多くの履歴エントリは探索後に負の値になるため、
+// 開始値を「正しい」方向にシフトさせることでLMR/枝刈りの精度を上げる。
+
+/// mainHistory初期値 (YO: mainHistoryDefault = 68)
+const MAIN_HISTORY_INIT: i16 = 68;
+
+/// captureHistory初期値 (YO: captureHistory.fill(-689))
+const CAPTURE_HISTORY_INIT: i16 = -689;
+
+/// continuationHistory初期値 (YO: continuationHistory.fill(-529))
+pub const CONTINUATION_HISTORY_INIT: i16 = -529;
+
+/// pawnHistory初期値 (YO: pawnHistory.clear_range(-1238, ...))
+const PAWN_HISTORY_INIT: i16 = -1238;
+
 /// 駒種の数（PieceType::NUM相当）
 const PIECE_TYPE_NUM: usize = PieceType::NUM + 1; // None含む
 
@@ -171,11 +190,11 @@ impl ButterflyHistory {
         self.table[color.index()][mv.history_index()].update(bonus);
     }
 
-    /// クリア
+    /// クリア（YO準拠: 初期値68）
     pub fn clear(&mut self) {
         for color_table in &mut self.table {
             for entry in color_table.iter_mut() {
-                entry.set(0);
+                entry.set(MAIN_HISTORY_INIT);
             }
         }
     }
@@ -300,12 +319,12 @@ impl CapturePieceToHistory {
         self.table[pc.index()][to.index()][captured_pt as usize].update(bonus);
     }
 
-    /// クリア
+    /// クリア（YO準拠: 初期値-689）
     pub fn clear(&mut self) {
         for pc_table in self.table.iter_mut() {
             for sq_table in pc_table.iter_mut() {
                 for entry in sq_table.iter_mut() {
-                    entry.set(0);
+                    entry.set(CAPTURE_HISTORY_INIT);
                 }
             }
         }
@@ -350,11 +369,16 @@ impl PieceToHistory {
         self.table[pc.index()][to.index()].update(bonus);
     }
 
-    /// クリア
+    /// クリア（YO準拠: 初期値-529）
     pub fn clear(&mut self) {
+        self.fill(CONTINUATION_HISTORY_INIT);
+    }
+
+    /// 指定した値で全エントリを埋める
+    pub fn fill(&mut self, value: i16) {
         for pc_table in &mut self.table {
             for entry in pc_table.iter_mut() {
-                entry.set(0);
+                entry.set(value);
             }
         }
     }
@@ -489,12 +513,12 @@ impl PawnHistory {
         self.table[pawn_key_index][pc.index()][to.index()].update(bonus);
     }
 
-    /// クリア
+    /// クリア（YO準拠: 初期値-1238）
     pub fn clear(&mut self) {
         for pawn_table in self.table.iter_mut() {
             for pc_table in pawn_table.iter_mut() {
                 for entry in pc_table.iter_mut() {
-                    entry.set(0);
+                    entry.set(PAWN_HISTORY_INIT);
                 }
             }
         }
@@ -703,11 +727,12 @@ pub struct HistoryTables {
 impl HistoryTables {
     /// 新しいHistoryTablesを作成（ヒープ確保）
     ///
-    /// `Box::new_zeroed` で一括確保し、CorrectionHistoryのみ初期値を設定する。
+    /// `Box::new_zeroed` で一括確保し、YO準拠の初期値を設定する。
     pub fn new_boxed() -> Box<Self> {
         // SAFETY: 各テーブルは数値型のみで構成され、ゼロ初期化は常に有効。
         let mut history = unsafe { Box::<Self>::new_zeroed().assume_init() };
-        history.correction_history.fill_initial_values();
+        // YO準拠の初期値を全テーブルに設定
+        history.clear();
         history
     }
 
@@ -767,9 +792,9 @@ impl HistoryCell {
         // PhantomDataはサイズ0のマーカー型でゼロ初期化は無害
         // new_zeroedで直接ヒープに確保し、スタックオーバーフローを回避
         let cell = unsafe { Box::<Self>::new_zeroed().assume_init() };
-        // correction_historyは初期値が0ではないので再初期化が必要
+        // YO準拠の初期値を全テーブルに設定
         // SAFETY: 初期化時のみ使用、他の参照と同時保持しない
-        unsafe { cell.as_mut_unchecked() }.correction_history.fill_initial_values();
+        unsafe { cell.as_mut_unchecked() }.clear();
         cell
     }
 
@@ -1064,7 +1089,7 @@ mod tests {
         let value = unsafe { cell.as_ref_unchecked() }
             .main_history
             .get(Color::Black, Move::from_usi("7g7f").unwrap());
-        assert_eq!(value, 0);
+        assert_eq!(value, MAIN_HISTORY_INIT);
     }
 
     #[test]
@@ -1092,8 +1117,8 @@ mod tests {
         // クリア
         cell.clear();
 
-        // クリア後は0に戻る
+        // クリア後はYO準拠の初期値に戻る
         let value = unsafe { cell.as_ref_unchecked() }.main_history.get(Color::Black, mv);
-        assert_eq!(value, 0);
+        assert_eq!(value, MAIN_HISTORY_INIT);
     }
 }

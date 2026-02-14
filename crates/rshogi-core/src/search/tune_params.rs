@@ -150,9 +150,6 @@ pub struct SearchTuneParams {
     /// Futility: correction 絶対値補正の分母
     pub futility_correction_div: i32,
 
-    /// Small ProbCut: beta マージン
-    pub small_probcut_margin: i32,
-
     /// Razoring: ベースマージン
     pub razoring_margin_base: i32,
     /// Razoring: depth^2 係数
@@ -629,12 +626,6 @@ const SPSA_OPTION_SPECS: &[SearchTuneOptionSpec] = &[
         max: 1_000_000,
     },
     SearchTuneOptionSpec {
-        usi_name: "SPSA_SMALL_PROBCUT_MARGIN",
-        default: 418,
-        min: 0,
-        max: 2048,
-    },
-    SearchTuneOptionSpec {
         usi_name: "SPSA_RAZORING_BASE",
         default: 514,
         min: 0,
@@ -1032,7 +1023,7 @@ impl Default for SearchTuneParams {
             iir_prior_reduction_threshold_shallow: 3,
             iir_prior_reduction_threshold_deep: 3,
             iir_depth_boundary: 10,
-            iir_eval_sum_threshold: 177,
+            iir_eval_sum_threshold: 173,
             draw_jitter_mask: 2,
             draw_jitter_offset: -1,
             lmr_reduction_delta_scale: 757,
@@ -1085,7 +1076,6 @@ impl Default for SearchTuneParams {
             futility_improving_scale: 2094,
             futility_opponent_worsening_scale: 1324,
             futility_correction_div: 158_105,
-            small_probcut_margin: 418,
             razoring_margin_base: 514,
             razoring_margin_depth2_coeff: 294,
             nmp_margin_depth_mult: 18,
@@ -1320,7 +1310,6 @@ impl SearchTuneParams {
         try_apply!("SPSA_FUTILITY_IMPROVING_SCALE", futility_improving_scale, 0, 4096);
         try_apply!("SPSA_FUTILITY_OPP_WORSENING_SCALE", futility_opponent_worsening_scale, 0, 4096);
         try_apply!("SPSA_FUTILITY_CORRECTION_DIV", futility_correction_div, 1, 1_000_000);
-        try_apply!("SPSA_SMALL_PROBCUT_MARGIN", small_probcut_margin, 0, 2048);
         try_apply!("SPSA_RAZORING_BASE", razoring_margin_base, 0, 4096);
         try_apply!("SPSA_RAZORING_DEPTH2", razoring_margin_depth2_coeff, 0, 4096);
         try_apply!("SPSA_NMP_MARGIN_DEPTH_MULT", nmp_margin_depth_mult, 0, 256);

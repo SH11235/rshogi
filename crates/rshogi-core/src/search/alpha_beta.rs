@@ -34,7 +34,6 @@ use super::eval_helpers::{
 };
 use super::pruning::{
     step14_pruning, try_futility_pruning, try_null_move_pruning, try_probcut, try_razoring,
-    try_small_probcut,
 };
 use super::qsearch::qsearch;
 use super::search_helpers::{
@@ -969,10 +968,9 @@ impl SearchWorker {
                     limits,
                     time_manager,
                 )
-            } else {
-                // 第2手以降: LMR (Step 17) + PV re-search (Step 19)
-                // YOではsearch<Root>内でLMRが適用される。rootのPvNode+ttPvでは
-                // reductionが大きく負になるため、zero-window検証がnewDepthより深くなる。
+            } else if depth >= 2 && rm_idx >= 2 {
+                // YaneuraOu準拠: depth >= 2 && moveCount > 1 + rootNode (rootNode=true → moveCount > 2)
+                // 第3手以降(depth>=2時): LMR (Step 17) + PV re-search (Step 19)
                 let (d, deeper_base, deeper_mul, shallower_thr) = {
                     let tune = &self.search_tune_params;
                     let delta = (beta.raw() - alpha.raw()).abs().max(1);
@@ -1072,6 +1070,32 @@ impl SearchWorker {
                     );
                 }
 
+                value
+            } else {
+                // YaneuraOu準拠: LMR対象外の非第一手（第2手 or depth < 2）
+                // PVS: zero-window search → PV re-search
+                let mut value = -self.search_node_wrapper::<{ NodeType::NonPV as u8 }>(
+                    pos,
+                    new_depth,
+                    -alpha - Value::new(1),
+                    -alpha,
+                    1,
+                    true,
+                    limits,
+                    time_manager,
+                );
+                if value > alpha {
+                    value = -self.search_node_wrapper::<{ NodeType::PV as u8 }>(
+                        pos,
+                        new_depth,
+                        -beta,
+                        -alpha,
+                        1,
+                        false,
+                        limits,
+                        time_manager,
+                    );
+                }
                 value
             };
 
@@ -1978,10 +2002,6 @@ impl SearchWorker {
             time_manager,
             Self::search_node::<{ NodeType::NonPV as u8 }>,
         ) {
-            return v;
-        }
-
-        if let Some(v) = try_small_probcut(depth, beta, &tt_ctx, ctx.tune_params) {
             return v;
         }
 

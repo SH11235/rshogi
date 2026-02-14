@@ -94,11 +94,11 @@ fn test_sentinel_initialization() {
     // NonNullはnullにならないことが保証されているので、
     // 代わりにsafeにderefできることを確認（ポインタが有効なメモリを指していること）
     let sentinel_ref = unsafe { sentinel.as_ref() };
-    // PieceToHistoryテーブルはゼロ初期化されているはず
+    // PieceToHistoryテーブルはYO準拠の初期値(-529)で初期化されているはず
     assert_eq!(
         sentinel_ref.get(crate::types::Piece::B_PAWN, crate::types::Square::SQ_11),
-        0,
-        "sentinel table should be zero-initialized"
+        crate::search::history::CONTINUATION_HISTORY_INIT,
+        "sentinel table should be initialized with YO-standard value"
     );
 
     // 全てのスタックエントリがsentinelで初期化されていることを確認
