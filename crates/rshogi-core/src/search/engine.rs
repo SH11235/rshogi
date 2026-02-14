@@ -65,7 +65,7 @@ impl SearchInfo {
                 };
                 format!("mate {signed_ply}")
             } else {
-                format!("cp {}", self.score.raw())
+                format!("cp {}", self.score.to_cp())
             };
 
         let mut s = format!(
@@ -2170,7 +2170,8 @@ mod tests {
         assert!(usi.contains("depth 5"));
         assert!(usi.contains("seldepth 7"));
         assert!(usi.contains("multipv 1"));
-        assert!(usi.contains("score cp 123"));
+        // Value::new(123) → to_cp() = 100 * 123 / 90 = 136
+        assert!(usi.contains("score cp 136"));
         assert!(usi.contains("nodes 10000"));
     }
 
