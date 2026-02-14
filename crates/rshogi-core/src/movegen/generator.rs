@@ -234,142 +234,116 @@ fn generate_silver_moves(pos: &Position, target: Bitboard, buffer: &mut ExtMoveB
     }
 }
 
-/// 角の移動による指し手を生成
-fn generate_bishop_moves(
+/// 角+飛を1つの bitboard にまとめて生成（YaneuraOu GPM_BR 準拠）
+///
+/// YaneuraOu では角と飛を `pos.pieces(Us, BISHOP, ROOK)` で1つの bitboard に統合し、
+/// マスの小さい順（pop順）で反復する。rshogi でも同じ順序で生成する。
+fn generate_br_moves(
     pos: &Position,
     target: Bitboard,
     buffer: &mut ExtMoveBuffer,
     include_non_promotions: bool,
 ) {
     let us = pos.side_to_move();
-    let bishops = pos.pieces(us, PieceType::Bishop);
+    let pieces = pos.pieces(us, PieceType::Bishop) | pos.pieces(us, PieceType::Rook);
 
-    if bishops.is_empty() {
+    if pieces.is_empty() {
         return;
     }
 
     let promo_ranks = enemy_field(us);
     let occupied = pos.occupied();
 
-    for from in bishops.iter() {
-        let attacks = bishop_effect(from, occupied) & target;
+    for from in pieces.iter() {
+        let pc = pos.piece_on(from);
+        let pt = pc.piece_type();
+        let attacks = match pt {
+            PieceType::Bishop => bishop_effect(from, occupied),
+            PieceType::Rook => rook_effect(from, occupied),
+            _ => unreachable!(),
+        } & target;
         let from_in_promo = promo_ranks.contains(from);
-        let moved_pc = pos.piece_on(from);
 
         for to in attacks.iter() {
             let to_in_promo = promo_ranks.contains(to);
 
             if from_in_promo || to_in_promo {
-                // 成る手を生成
-                let promoted_pc = moved_pc.promote().unwrap();
+                let promoted_pc = pc.promote().unwrap();
                 add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
                 if include_non_promotions {
-                    add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
+                    add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
                 }
             } else {
-                // 敵陣に関係ない → 不成のみ
-                add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
+                add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
             }
         }
     }
 }
 
-/// 飛車の移動による指し手を生成
-fn generate_rook_moves(
-    pos: &Position,
-    target: Bitboard,
-    buffer: &mut ExtMoveBuffer,
-    include_non_promotions: bool,
-) {
+/// 金相当+馬+龍+玉を1つの bitboard にまとめて生成（YaneuraOu GPM_GHDK 準拠）
+///
+/// YaneuraOu では `pos.pieces(Us, GOLDS, HDK)` で金相当の駒・馬・龍・玉を
+/// 1つの bitboard に統合し、マスの小さい順（pop順）で反復する。
+fn generate_ghdk_moves(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuffer) {
     let us = pos.side_to_move();
-    let rooks = pos.pieces(us, PieceType::Rook);
-
-    if rooks.is_empty() {
-        return;
-    }
-
-    let promo_ranks = enemy_field(us);
     let occupied = pos.occupied();
 
-    for from in rooks.iter() {
-        let attacks = rook_effect(from, occupied) & target;
-        let from_in_promo = promo_ranks.contains(from);
-        let moved_pc = pos.piece_on(from);
-
-        for to in attacks.iter() {
-            let to_in_promo = promo_ranks.contains(to);
-
-            if from_in_promo || to_in_promo {
-                // 成る手を生成
-                let promoted_pc = moved_pc.promote().unwrap();
-                add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
-                if include_non_promotions {
-                    add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
-                }
-            } else {
-                // 敵陣に関係ない → 不成のみ
-                add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
-            }
-        }
-    }
-}
-
-/// 金相当の駒の移動を生成
-fn generate_gold_moves(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuffer) {
-    let us = pos.side_to_move();
-
-    // 金相当の駒（金、と、成香、成桂、成銀）- 事前計算済みのgolds_c()を使用
-    let golds = pos.golds_c(us);
-
-    for from in golds.iter() {
-        let attacks = gold_effect(us, from) & target;
-        let moved_pc = pos.piece_on(from);
-        for to in attacks.iter() {
-            add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
-        }
-    }
-}
-
-/// 馬の移動を生成
-fn generate_horse_moves(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuffer) {
-    let us = pos.side_to_move();
-    let horses = pos.pieces(us, PieceType::Horse);
-    let occupied = pos.occupied();
-
-    for from in horses.iter() {
-        let attacks = horse_effect(from, occupied) & target;
-        let moved_pc = pos.piece_on(from);
-        for to in attacks.iter() {
-            add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
-        }
-    }
-}
-
-/// 龍の移動を生成
-fn generate_dragon_moves(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuffer) {
-    let us = pos.side_to_move();
-    let dragons = pos.pieces(us, PieceType::Dragon);
-    let occupied = pos.occupied();
-
-    for from in dragons.iter() {
-        let attacks = dragon_effect(from, occupied) & target;
-        let moved_pc = pos.piece_on(from);
-        for to in attacks.iter() {
-            add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
-        }
-    }
-}
-
-/// 玉の移動を生成
-fn generate_king_moves(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuffer) {
-    let us = pos.side_to_move();
+    // 金相当の駒 + 馬 + 龍 + 玉 を1つの bitboard に統合
     let king_sq = pos.king_square(us);
+    let pieces = pos.golds_c(us)
+        | pos.pieces(us, PieceType::Horse)
+        | pos.pieces(us, PieceType::Dragon)
+        | Bitboard::from_square(king_sq);
 
-    let attacks = king_effect(king_sq) & target;
-    // 玉の駒情報（指し手に付加するため）
-    let moved_pc = pos.piece_on(king_sq);
-    for to in attacks.iter() {
-        add_move(buffer, Move::new_move_with_piece(king_sq, to, false, moved_pc));
+    for from in pieces.iter() {
+        let pc = pos.piece_on(from);
+        let pt = pc.piece_type();
+        let attacks = match pt {
+            PieceType::Gold
+            | PieceType::ProPawn
+            | PieceType::ProLance
+            | PieceType::ProKnight
+            | PieceType::ProSilver => gold_effect(us, from),
+            PieceType::Horse => horse_effect(from, occupied),
+            PieceType::Dragon => dragon_effect(from, occupied),
+            PieceType::King => king_effect(from),
+            _ => unreachable!(),
+        } & target;
+
+        for to in attacks.iter() {
+            add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
+        }
+    }
+}
+
+/// 金相当+馬+龍を1つの bitboard にまとめて生成（YaneuraOu GPM_GHD 準拠, 玉なし版）
+///
+/// 王手回避手の生成で使用。玉の移動は別途生成されるため含めない。
+fn generate_ghd_moves(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuffer) {
+    let us = pos.side_to_move();
+    let occupied = pos.occupied();
+
+    // 金相当の駒 + 馬 + 龍（玉は含めない）
+    let pieces =
+        pos.golds_c(us) | pos.pieces(us, PieceType::Horse) | pos.pieces(us, PieceType::Dragon);
+
+    for from in pieces.iter() {
+        let pc = pos.piece_on(from);
+        let pt = pc.piece_type();
+        let attacks = match pt {
+            PieceType::Gold
+            | PieceType::ProPawn
+            | PieceType::ProLance
+            | PieceType::ProKnight
+            | PieceType::ProSilver => gold_effect(us, from),
+            PieceType::Horse => horse_effect(from, occupied),
+            PieceType::Dragon => dragon_effect(from, occupied),
+            _ => unreachable!(),
+        } & target;
+
+        for to in attacks.iter() {
+            add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
+        }
     }
 }
 
@@ -477,17 +451,15 @@ fn generate_non_evasions_core(
     pawn_promo_mode: PromotionMode,
     include_drops: bool,
 ) {
-    // 駒の移動
+    // 駒の移動 (YaneuraOu movegen.cpp:generate_general 準拠の生成順序)
     generate_pawn_moves(pos, targets.pawn, buffer, pawn_promo_mode);
     generate_lance_moves(pos, targets.general, buffer, include_non_promotions);
     generate_knight_moves(pos, targets.general, buffer);
     generate_silver_moves(pos, targets.general, buffer);
-    generate_bishop_moves(pos, targets.general, buffer, include_non_promotions);
-    generate_rook_moves(pos, targets.general, buffer, include_non_promotions);
-    generate_gold_moves(pos, targets.general, buffer);
-    generate_horse_moves(pos, targets.general, buffer);
-    generate_dragon_moves(pos, targets.general, buffer);
-    generate_king_moves(pos, targets.general, buffer);
+    // 角+飛: GPM_BR — 1つの bitboard にまとめて pop 順で生成
+    generate_br_moves(pos, targets.general, buffer, include_non_promotions);
+    // 金相当+馬+龍+玉: GPM_GHDK — 1つの bitboard にまとめて pop 順で生成
+    generate_ghdk_moves(pos, targets.general, buffer);
 
     if include_drops {
         let drop_target = targets.drop & !pos.occupied();
@@ -573,16 +545,15 @@ fn generate_evasions_with_promos(
     let drop_target = between; // 合駒は間の升
     let move_target = between | Bitboard::from_square(checker_sq); // 移動は間 + 王手駒
 
-    // 玉以外の駒による移動（targetを制限）
+    // 玉以外の駒による移動（targetを制限, YO evasion準拠の生成順序）
     generate_pawn_moves(pos, move_target, buffer, pawn_promo_mode);
     generate_lance_moves(pos, move_target, buffer, include_non_promotions);
     generate_knight_moves(pos, move_target, buffer);
     generate_silver_moves(pos, move_target, buffer);
-    generate_bishop_moves(pos, move_target, buffer, include_non_promotions);
-    generate_rook_moves(pos, move_target, buffer, include_non_promotions);
-    generate_gold_moves(pos, move_target, buffer);
-    generate_horse_moves(pos, move_target, buffer);
-    generate_dragon_moves(pos, move_target, buffer);
+    // 角+飛: GPM_BR
+    generate_br_moves(pos, move_target, buffer, include_non_promotions);
+    // 金相当+馬+龍（玉なし）: GPM_GHD
+    generate_ghd_moves(pos, move_target, buffer);
 
     // 駒打ち（合駒のみ）
     if !drop_target.is_empty() {
