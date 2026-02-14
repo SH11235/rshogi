@@ -1470,7 +1470,7 @@ impl Search {
 
                     // YaneuraOu準拠: 次iterationで深さを伸ばすかの判定
                     self.increase_depth =
-                        time_manager.is_pondering() || elapsed_time <= total_time * 0.5138;
+                        time_manager.is_pondering() || elapsed_time <= total_time * 0.503;
                     // helperスレッドと共有（YaneuraOu準拠: main_manager()->increaseDepth）
                     self.increase_depth_shared.store(self.increase_depth, Ordering::Relaxed);
 
