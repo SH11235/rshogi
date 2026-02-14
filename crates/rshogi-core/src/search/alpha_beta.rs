@@ -8,7 +8,9 @@
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-use crate::eval::{evaluate_pass_rights, get_scaled_pass_move_bonus, EvalHash};
+#[cfg(not(feature = "search-no-pass-rules"))]
+use crate::eval::evaluate_pass_rights;
+use crate::eval::{get_scaled_pass_move_bonus, EvalHash};
 use crate::nnue::{get_network, AccumulatorStackVariant, DirtyPiece};
 use crate::position::Position;
 use crate::search::PieceToHistory;
@@ -519,8 +521,12 @@ impl SearchWorker {
         } else {
             let ctx = self.create_context();
             let corr = correction_value(&self.state, &ctx, pos, 0);
-            let eval = to_corrected_static_eval(unadjusted_static_eval, corr)
-                + evaluate_pass_rights(pos, pos.game_ply() as u16);
+            #[cfg(feature = "search-no-pass-rules")]
+            let pass_rights_eval = Value::ZERO;
+            #[cfg(not(feature = "search-no-pass-rules"))]
+            let pass_rights_eval = evaluate_pass_rights(pos, pos.game_ply() as u16);
+
+            let eval = to_corrected_static_eval(unadjusted_static_eval, corr) + pass_rights_eval;
             (eval, corr)
         };
         self.state.stack[0].static_eval = static_eval;
@@ -1857,7 +1863,7 @@ impl SearchWorker {
                         let prev_piece = pos.piece_on(prev_sq);
                         if prev_piece.piece_type() != PieceType::Pawn && !prev_move.is_promotion() {
                             let pawn_idx = pos.pawn_history_index();
-                            h.pawn_history.update(pawn_idx, prev_piece, prev_sq, eval_diff * 14);
+                            h.pawn_history.update(pawn_idx, prev_piece, prev_sq, eval_diff * 13);
                         }
                     }
                 }

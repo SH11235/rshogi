@@ -356,6 +356,9 @@ where
         let r = ctx.tune_params.nmp_reduction_base
             + depth / ctx.tune_params.nmp_reduction_depth_div.max(1);
 
+        #[cfg(feature = "search-no-pass-rules")]
+        let use_pass = false;
+        #[cfg(not(feature = "search-no-pass-rules"))]
         let use_pass = pos.is_pass_rights_enabled() && pos.can_pass();
 
         if use_pass {

@@ -44,7 +44,9 @@ rayon = { version = "1.10", optional = true }
 web-time = "1"
 
 [features]
-default = []
+# 探索経路では pass_rights / PASS NMP を無効化
+# Web/WASM で pass ルールを使う場合は default-features=false で無効化する。
+default = ["search-no-pass-rules"]
 # デバッグ機能
 debug = []
 # 探索統計収集（枝刈り発生回数等のカウント）
@@ -66,6 +68,8 @@ tt-trace = []
 # YaneuraOu DEEP相当のデフォルト遅延設定を使う
 # GPU/ネットワーク待ちが長い環境向けの遅延マージン(400/1400ms)プリセットを有効化する
 deep = []
+# 探索経路限定で pass_rights を無効化（Position/MoveGen の pass 機能は保持）
+search-no-pass-rules = []
 
 [lib]
 name = "rshogi_core"
