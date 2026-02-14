@@ -4,6 +4,7 @@
 
 use crate::eval::EvalHash;
 use crate::time::Instant;
+use std::collections::HashMap;
 // AtomicU64 is only needed for native multi-threaded builds.
 // Wasm Rayon model doesn't use SearchProgress.
 #[cfg(not(target_arch = "wasm32"))]
@@ -102,9 +103,8 @@ pub(crate) fn compute_aspiration_window(rm: &RootMove, thread_id: usize) -> (Val
     let mean_sq = mean_sq.min((Value::INFINITE.raw() as i64) * (Value::INFINITE.raw() as i64));
 
     let thread_offset = (thread_id % 8) as i32;
-    let score_factor = rm.average_score.raw().abs() / 9000;
-    let delta_raw =
-        5 + thread_offset + score_factor + (mean_sq / 11131).min(i32::MAX as i64) as i32;
+    // YaneuraOu: delta = 5 + threadIdx % 8 + abs(meanSquaredScore) / 9000
+    let delta_raw = 5 + thread_offset + (mean_sq / 9000).min(i32::MAX as i64) as i32;
     let delta = Value::new(delta_raw);
     let alpha_raw = (rm.average_score.raw() - delta.raw()).max(-Value::INFINITE.raw());
     let beta_raw = (rm.average_score.raw() + delta.raw()).min(Value::INFINITE.raw());
@@ -227,6 +227,8 @@ pub struct Search {
     last_game_ply: Option<i32>,
     /// 次のiterationで深さを伸ばすかどうか（YaneuraOu準拠）
     increase_depth: bool,
+    /// helperスレッドと共有するincrease_depthフラグ（YaneuraOu準拠: main_manager()->increaseDepth）
+    increase_depth_shared: Arc<AtomicBool>,
     /// 深さを伸ばせなかった回数（aspiration時の調整に使用）
     search_again_counter: i32,
 
@@ -309,19 +311,142 @@ struct ThreadSummary {
     id: usize,
     score: Value,
     completed_depth: Depth,
+    best_move: Move,
+    pv_len: usize,
 }
 
 impl ThreadSummary {
     fn from_worker(id: usize, worker: &SearchWorker) -> Option<Self> {
-        worker.state.root_moves.get(0).map(|rm| Self {
-            id,
-            score: rm.score,
-            completed_depth: worker.state.completed_depth,
+        worker.state.root_moves.get(0).map(|rm| {
+            let best_move = rm.pv.first().copied().unwrap_or_else(|| rm.mv());
+            Self {
+                id,
+                score: rm.score,
+                completed_depth: worker.state.completed_depth,
+                best_move,
+                pv_len: rm.pv.len(),
+            }
         })
     }
 }
 
-fn get_best_thread_id(main_worker: &SearchWorker, thread_pool: &ThreadPool) -> usize {
+#[inline]
+fn thread_voting_value(summary: &ThreadSummary, min_score: Value) -> i64 {
+    (summary.score.raw() - min_score.raw() + 14) as i64 * summary.completed_depth as i64
+}
+
+#[inline]
+fn is_proven_loss(score: Value) -> bool {
+    score != Value::new(-Value::INFINITE.raw()) && score.is_loss()
+}
+
+fn select_best_summary_index(summaries: &[ThreadSummary]) -> usize {
+    if summaries.is_empty() {
+        return 0;
+    }
+
+    let min_score =
+        summaries.iter().map(|s| s.score).min_by_key(|s| s.raw()).unwrap_or(Value::ZERO);
+
+    let mut votes = HashMap::with_capacity(2 * summaries.len());
+    for summary in summaries {
+        *votes.entry(summary.best_move).or_insert(0i64) += thread_voting_value(summary, min_score);
+    }
+
+    let mut best_idx = 0usize;
+    for (idx, summary) in summaries.iter().enumerate() {
+        let best = &summaries[best_idx];
+        let best_vote = *votes.get(&best.best_move).unwrap_or(&0);
+        let new_vote = *votes.get(&summary.best_move).unwrap_or(&0);
+
+        let best_in_proven_win = best.score.is_win();
+        let new_in_proven_win = summary.score.is_win();
+        let best_in_proven_loss = is_proven_loss(best.score);
+        let new_in_proven_loss = is_proven_loss(summary.score);
+
+        let better_voting_value = thread_voting_value(summary, min_score)
+            * (summary.pv_len > 2) as i64
+            > thread_voting_value(best, min_score) * (best.pv_len > 2) as i64;
+
+        if best_in_proven_win {
+            if summary.score > best.score {
+                best_idx = idx;
+            }
+        } else if best_in_proven_loss {
+            if new_in_proven_loss && summary.score < best.score {
+                best_idx = idx;
+            }
+        } else if new_in_proven_win
+            || new_in_proven_loss
+            || (!summary.score.is_loss()
+                && (new_vote > best_vote || (new_vote == best_vote && better_voting_value)))
+        {
+            best_idx = idx;
+        }
+    }
+
+    // main threadと異なる手をhelper 1本だけが強く主張している場合は、
+    // outlierに引っ張られて不自然な手を返しやすいためmainを優先する。
+    if best_idx != 0 {
+        let main = &summaries[0];
+        let selected = &summaries[best_idx];
+        if selected.best_move != main.best_move && !selected.score.is_mate_score() {
+            let support_count =
+                summaries.iter().filter(|s| s.best_move == selected.best_move).count();
+            if support_count < 2 {
+                return 0;
+            }
+        }
+    }
+
+    best_idx
+}
+
+#[inline]
+fn best_thread_debug_enabled() -> bool {
+    std::env::var("RSHOGI_DEBUG_BEST_THREAD")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "on" | "ON"))
+        .unwrap_or(false)
+}
+
+#[inline]
+fn helper_search_disabled() -> bool {
+    std::env::var("RSHOGI_DISABLE_HELPER_SEARCH")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "on" | "ON"))
+        .unwrap_or(false)
+}
+
+fn emit_best_thread_debug(
+    summaries: &[ThreadSummary],
+    votes: &HashMap<Move, i64>,
+    selected_id: usize,
+    applied: bool,
+) {
+    println!(
+        "info string [best_thread] applied={} selected_id={} threads={}",
+        applied,
+        selected_id,
+        summaries.len()
+    );
+
+    for summary in summaries {
+        let vote = votes.get(&summary.best_move).copied().unwrap_or(0);
+        println!(
+            "info string [best_thread] id={} depth={} score={} move={} pv_len={} vote={}",
+            summary.id,
+            summary.completed_depth,
+            summary.score.raw(),
+            summary.best_move.to_usi(),
+            summary.pv_len,
+            vote
+        );
+    }
+}
+
+fn collect_thread_summaries(
+    main_worker: &SearchWorker,
+    thread_pool: &ThreadPool,
+) -> Vec<ThreadSummary> {
     let mut summaries = Vec::new();
     if let Some(summary) = ThreadSummary::from_worker(0, main_worker) {
         summaries.push(summary);
@@ -344,6 +469,9 @@ fn get_best_thread_id(main_worker: &SearchWorker, thread_pool: &ThreadPool) -> u
             id: result.thread_id,
             score: result.best_score,
             completed_depth: result.completed_depth,
+            best_move: result.best_move,
+            // Wasm helper結果にはPV長がないため、切り詰め判定を不利にしない値を与える。
+            pv_len: 3,
         });
     }
 
@@ -351,28 +479,44 @@ fn get_best_thread_id(main_worker: &SearchWorker, thread_pool: &ThreadPool) -> u
     #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
     let _ = thread_pool;
 
+    summaries
+}
+
+fn should_use_best_thread_selection(limits: &LimitsType, skill_enabled: bool) -> bool {
+    // YaneuraOu準拠:
+    // - MultiPV=1
+    // - go depth/mate では使わない
+    // - Skill有効時は使わない
+    limits.multi_pv == 1 && limits.depth == 0 && limits.mate == 0 && !skill_enabled
+}
+
+fn get_best_thread_id(
+    main_worker: &SearchWorker,
+    thread_pool: &ThreadPool,
+    use_best_thread: bool,
+    debug: bool,
+) -> usize {
+    let summaries = collect_thread_summaries(main_worker, thread_pool);
     if summaries.is_empty() {
         return 0;
     }
 
-    if let Some(win) = summaries.iter().find(|s| s.score.is_win()) {
-        return win.id;
+    let min_score =
+        summaries.iter().map(|s| s.score).min_by_key(|s| s.raw()).unwrap_or(Value::ZERO);
+    let mut votes = HashMap::with_capacity(2 * summaries.len());
+    for summary in &summaries {
+        *votes.entry(summary.best_move).or_insert(0i64) += thread_voting_value(summary, min_score);
     }
 
-    let min_score = summaries.iter().map(|s| s.score.raw()).min().unwrap_or(0);
+    let candidate_idx = select_best_summary_index(&summaries);
+    let candidate_id = summaries[candidate_idx].id;
+    let selected_id = if use_best_thread { candidate_id } else { 0 };
 
-    let mut best_id = summaries[0].id;
-    let mut best_value = i64::MIN;
-    for summary in summaries {
-        let vote_value =
-            (summary.score.raw() - min_score + 14) as i64 * summary.completed_depth as i64;
-        if vote_value > best_value {
-            best_value = vote_value;
-            best_id = summary.id;
-        }
+    if debug {
+        emit_best_thread_debug(&summaries, &votes, selected_id, use_best_thread);
     }
 
-    best_id
+    selected_id
 }
 
 struct BestThreadResult {
@@ -493,6 +637,7 @@ impl Search {
         self.tot_best_move_changes = 0.0;
         self.last_game_ply = Some(ply);
         self.increase_depth = true;
+        self.increase_depth_shared.store(true, Ordering::Relaxed);
         self.search_again_counter = 0;
     }
 
@@ -533,6 +678,7 @@ impl Search {
         let eval_hash = Arc::new(EvalHash::new(DEFAULT_EVAL_HASH_SIZE_MB));
         let stop = Arc::new(AtomicBool::new(false));
         let ponderhit_flag = Arc::new(AtomicBool::new(false));
+        let increase_depth_shared = Arc::new(AtomicBool::new(true));
         let max_moves_to_draw = DEFAULT_MAX_MOVES_TO_DRAW;
         let search_tune_params = SearchTuneParams::default();
         let thread_pool = ThreadPool::new(
@@ -541,6 +687,7 @@ impl Search {
             Arc::clone(&eval_hash),
             Arc::clone(&stop),
             Arc::clone(&ponderhit_flag),
+            Arc::clone(&increase_depth_shared),
             max_moves_to_draw,
             search_tune_params,
         );
@@ -569,6 +716,7 @@ impl Search {
             previous_time_reduction: 0.85,
             last_game_ply: None,
             increase_depth: true,
+            increase_depth_shared,
             search_again_counter: 0,
             max_moves_to_draw,
             search_tune_params,
@@ -791,6 +939,7 @@ impl Search {
 
         // 探索状態のリセット（履歴はクリアしない、YaneuraOu準拠）
         worker.prepare_search();
+        worker.allow_tt_write = true;
 
         // 探索深さを決定
         let max_depth = if limits.depth > 0 {
@@ -803,11 +952,18 @@ impl Search {
         let mut skill = Skill::from_options(&self.skill_options);
         let skill_enabled = skill.enabled();
 
-        if self.num_threads > 1 {
+        // デバッグ用の helper 有効化制御
+        // go depth/go mate を含め helper を有効化する。
+        // 追加の切り分けは環境変数 RSHOGI_DISABLE_HELPER_SEARCH で行う。
+        let helper_search_enabled = self.num_threads > 1 && !helper_search_disabled();
+
+        if helper_search_enabled {
+            // YaneuraOu準拠: helper は go depth 指定時も main の stop まで探索を継続する。
+            let helper_max_depth = if limits.depth > 0 { MAX_PLY } else { max_depth };
             self.thread_pool.start_thinking(
                 pos,
                 limits.clone(),
-                max_depth,
+                helper_max_depth,
                 self.time_options,
                 self.max_moves_to_draw,
                 skill_enabled,
@@ -837,17 +993,21 @@ impl Search {
             }
         };
 
-        if self.num_threads > 1 {
+        if helper_search_enabled {
             self.stop.store(true, Ordering::SeqCst);
             self.thread_pool.wait_for_search_finished();
         }
+
+        let use_best_thread =
+            self.num_threads > 1 && should_use_best_thread_selection(&limits, skill_enabled);
+        let debug_best_thread = best_thread_debug_enabled();
 
         let best_thread_id = {
             let worker = self
                 .worker
                 .as_ref()
                 .expect("worker should be initialized by search_with_callback");
-            get_best_thread_id(worker, &self.thread_pool)
+            get_best_thread_id(worker, &self.thread_pool, use_best_thread, debug_best_thread)
         };
 
         let best_result = if best_thread_id == 0 {
@@ -992,6 +1152,7 @@ impl Search {
     {
         // 深さペーシングの状態を初期化
         self.increase_depth = true;
+        self.increase_depth_shared.store(true, Ordering::Relaxed);
         self.search_again_counter = 0;
 
         // workerを一時的に取り出す（借用チェッカー対策）
@@ -1143,6 +1304,7 @@ impl Search {
                         failed_high_cnt = 0;
                         time_manager.reset_stop_on_ponderhit();
                     } else if score >= beta {
+                        alpha = Value::new((beta.raw() - delta.raw()).max(alpha.raw()));
                         beta = Value::new(
                             score.raw().saturating_add(delta.raw()).min(Value::INFINITE.raw()),
                         );
@@ -1309,6 +1471,8 @@ impl Search {
                     // YaneuraOu準拠: 次iterationで深さを伸ばすかの判定
                     self.increase_depth =
                         time_manager.is_pondering() || elapsed_time <= total_time * 0.5138;
+                    // helperスレッドと共有（YaneuraOu準拠: main_manager()->increaseDepth）
+                    self.increase_depth_shared.store(self.increase_depth, Ordering::Relaxed);
 
                     // 状態更新
                     self.update_time_factor_state(best_value, tot_best_move_changes);
@@ -1382,6 +1546,7 @@ fn search_helper_impl<F1, F2>(
     time_manager: &mut TimeManagement,
     max_depth: Depth,
     skill_enabled: bool,
+    increase_depth_shared: &AtomicBool,
     on_start: F1,
     mut on_depth_complete: F2,
 ) -> usize
@@ -1389,6 +1554,9 @@ where
     F1: FnOnce(),
     F2: FnMut(u64, f64),
 {
+    // 恒久修正評価のため、go depth/go mate を含め helper からのTT書き込みを有効にする。
+    worker.allow_tt_write = true;
+
     on_start();
 
     worker.state.root_moves = super::RootMoves::from_legal_moves(pos, &limits.search_moves);
@@ -1413,11 +1581,18 @@ where
     let mut last_best_score = Value::new(-Value::INFINITE.raw());
     let mut last_best_move_depth = 0;
 
-    let search_again_counter = 0;
+    // YaneuraOu準拠: helperもmainのincreaseDepthを参照してsearchAgainCounterを更新
+    let mut search_again_counter = 0;
 
     for depth in 1..=max_depth {
         if worker.state.abort {
             break;
+        }
+
+        // YaneuraOu準拠: main_manager()->increaseDepthがfalseならカウンタ増加
+        // (yaneuraou-search.cpp:1319-1321)
+        if depth > 1 && !increase_depth_shared.load(Ordering::Relaxed) {
+            search_again_counter += 1;
         }
 
         if effective_multi_pv == 1 && depth > 1 && !worker.state.root_moves.is_empty() {
@@ -1479,6 +1654,7 @@ where
                     );
                     failed_high_cnt = 0;
                 } else if score >= beta {
+                    alpha = Value::new((beta.raw() - delta.raw()).max(alpha.raw()));
                     beta = Value::new(
                         score.raw().saturating_add(delta.raw()).min(Value::INFINITE.raw()),
                     );
@@ -1567,6 +1743,7 @@ pub(crate) fn search_helper(
     max_depth: Depth,
     skill_enabled: bool,
     progress: Option<&SearchProgress>,
+    increase_depth_shared: &AtomicBool,
 ) -> usize {
     search_helper_impl(
         worker,
@@ -1575,6 +1752,7 @@ pub(crate) fn search_helper(
         time_manager,
         max_depth,
         skill_enabled,
+        increase_depth_shared,
         || {
             if let Some(p) = progress {
                 p.reset();
@@ -1598,6 +1776,7 @@ pub(crate) fn search_helper(
     max_depth: Depth,
     skill_enabled: bool,
     progress: Option<&super::thread::HelperProgress>,
+    increase_depth_shared: &AtomicBool,
 ) -> usize {
     search_helper_impl(
         worker,
@@ -1606,6 +1785,7 @@ pub(crate) fn search_helper(
         time_manager,
         max_depth,
         skill_enabled,
+        increase_depth_shared,
         || {
             if let Some(p) = progress {
                 p.reset();
@@ -1645,6 +1825,160 @@ mod tests {
         let (sum, threads) = aggregate_best_move_changes(&[1.0, 2.0, 3.0]);
         assert!((sum - 6.0).abs() < 1e-9, "sum should be 6.0, got {sum}");
         assert_eq!(threads, 3);
+    }
+
+    #[test]
+    fn test_should_use_best_thread_selection_yaneuraou_conditions() {
+        let mut limits = LimitsType::default();
+        assert!(should_use_best_thread_selection(&limits, false));
+
+        limits.depth = 8;
+        assert!(
+            !should_use_best_thread_selection(&limits, false),
+            "go depth ではbest thread選抜を使わない"
+        );
+
+        limits.depth = 0;
+        limits.mate = 3;
+        assert!(
+            !should_use_best_thread_selection(&limits, false),
+            "go mate ではbest thread選抜を使わない"
+        );
+
+        limits.mate = 0;
+        limits.multi_pv = 2;
+        assert!(
+            !should_use_best_thread_selection(&limits, false),
+            "MultiPV>1 ではbest thread選抜を使わない"
+        );
+
+        limits.multi_pv = 1;
+        assert!(
+            !should_use_best_thread_selection(&limits, true),
+            "Skill有効時はbest thread選抜を使わない"
+        );
+    }
+
+    #[test]
+    fn test_select_best_summary_index_prefers_move_vote_over_single_outlier() {
+        let m_2g2f = Move::from_usi("2g2f").expect("valid move");
+        let m_6i7h = Move::from_usi("6i7h").expect("valid move");
+        let summaries = vec![
+            ThreadSummary {
+                id: 0,
+                score: Value::new(30),
+                completed_depth: 10,
+                best_move: m_2g2f,
+                pv_len: 4,
+            },
+            ThreadSummary {
+                id: 1,
+                score: Value::new(28),
+                completed_depth: 9,
+                best_move: m_2g2f,
+                pv_len: 4,
+            },
+            ThreadSummary {
+                id: 2,
+                score: Value::new(90),
+                completed_depth: 1,
+                best_move: m_6i7h,
+                pv_len: 4,
+            },
+        ];
+
+        let idx = select_best_summary_index(&summaries);
+        assert_eq!(summaries[idx].best_move, m_2g2f);
+    }
+
+    #[test]
+    fn test_select_best_summary_index_prefers_shorter_win_line() {
+        let m_2g2f = Move::from_usi("2g2f").expect("valid move");
+        let m_7g7f = Move::from_usi("7g7f").expect("valid move");
+        let summaries = vec![
+            ThreadSummary {
+                id: 0,
+                score: Value::mate_in(7),
+                completed_depth: 12,
+                best_move: m_2g2f,
+                pv_len: 4,
+            },
+            ThreadSummary {
+                id: 1,
+                score: Value::mate_in(5),
+                completed_depth: 8,
+                best_move: m_7g7f,
+                pv_len: 4,
+            },
+        ];
+
+        let idx = select_best_summary_index(&summaries);
+        assert_eq!(idx, 1, "勝ち筋同士ではより短手数の詰みを優先する");
+    }
+
+    #[test]
+    fn test_select_best_summary_index_rejects_single_helper_outlier_move() {
+        let m_2g2f = Move::from_usi("2g2f").expect("valid move");
+        let m_6i7h = Move::from_usi("6i7h").expect("valid move");
+        let m_7g7f = Move::from_usi("7g7f").expect("valid move");
+        let summaries = vec![
+            ThreadSummary {
+                id: 0,
+                score: Value::new(35),
+                completed_depth: 8,
+                best_move: m_2g2f,
+                pv_len: 6,
+            },
+            ThreadSummary {
+                id: 1,
+                score: Value::new(180),
+                completed_depth: 8,
+                best_move: m_6i7h,
+                pv_len: 6,
+            },
+            ThreadSummary {
+                id: 2,
+                score: Value::new(34),
+                completed_depth: 8,
+                best_move: m_7g7f,
+                pv_len: 6,
+            },
+        ];
+
+        let idx = select_best_summary_index(&summaries);
+        assert_eq!(idx, 0, "helper単独の外れ値手ではmain threadを優先する");
+    }
+
+    #[test]
+    fn test_select_best_summary_index_allows_helper_when_supported_by_multiple_threads() {
+        let m_2g2f = Move::from_usi("2g2f").expect("valid move");
+        let m_6i7h = Move::from_usi("6i7h").expect("valid move");
+        let summaries = vec![
+            ThreadSummary {
+                id: 0,
+                score: Value::new(35),
+                completed_depth: 8,
+                best_move: m_2g2f,
+                pv_len: 6,
+            },
+            ThreadSummary {
+                id: 1,
+                score: Value::new(120),
+                completed_depth: 8,
+                best_move: m_6i7h,
+                pv_len: 6,
+            },
+            ThreadSummary {
+                id: 2,
+                score: Value::new(110),
+                completed_depth: 8,
+                best_move: m_6i7h,
+                pv_len: 6,
+            },
+        ];
+
+        let idx = select_best_summary_index(&summaries);
+        assert_eq!(summaries[idx].best_move, m_6i7h);
     }
 
     #[test]

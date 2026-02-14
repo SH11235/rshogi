@@ -286,10 +286,10 @@ impl FeatureTransformer {
                 }
 
                 for i in 0..8 {
-                    let acc_vec = _mm512_load_si512(acc_ptr.add(i * 32) as *const i32);
-                    let weight_vec = _mm512_load_si512(weight_ptr.add(i * 32) as *const i32);
+                    let acc_vec = _mm512_load_si512(acc_ptr.add(i * 32) as *const __m512i);
+                    let weight_vec = _mm512_load_si512(weight_ptr.add(i * 32) as *const __m512i);
                     let result = _mm512_add_epi16(acc_vec, weight_vec);
-                    _mm512_store_si512(acc_ptr.add(i * 32) as *mut i32, result);
+                    _mm512_store_si512(acc_ptr.add(i * 32) as *mut __m512i, result);
                 }
             }
             return;
@@ -433,10 +433,10 @@ impl FeatureTransformer {
                 }
 
                 for i in 0..8 {
-                    let acc_vec = _mm512_load_si512(acc_ptr.add(i * 32) as *const i32);
-                    let weight_vec = _mm512_load_si512(weight_ptr.add(i * 32) as *const i32);
+                    let acc_vec = _mm512_load_si512(acc_ptr.add(i * 32) as *const __m512i);
+                    let weight_vec = _mm512_load_si512(weight_ptr.add(i * 32) as *const __m512i);
                     let result = _mm512_sub_epi16(acc_vec, weight_vec);
-                    _mm512_store_si512(acc_ptr.add(i * 32) as *mut i32, result);
+                    _mm512_store_si512(acc_ptr.add(i * 32) as *mut __m512i, result);
                 }
             }
             return;

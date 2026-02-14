@@ -21,6 +21,7 @@ mod imp {
         threads: Vec<Thread>,
         stop: Arc<AtomicBool>,
         ponderhit: Arc<AtomicBool>,
+        increase_depth_shared: Arc<AtomicBool>,
         eval_hash: Arc<EvalHash>,
         search_tune_params: SearchTuneParams,
     }
@@ -32,6 +33,7 @@ mod imp {
             eval_hash: Arc<EvalHash>,
             stop: Arc<AtomicBool>,
             ponderhit: Arc<AtomicBool>,
+            increase_depth_shared: Arc<AtomicBool>,
             max_moves_to_draw: i32,
             search_tune_params: SearchTuneParams,
         ) -> Self {
@@ -39,6 +41,7 @@ mod imp {
                 threads: Vec::new(),
                 stop,
                 ponderhit,
+                increase_depth_shared,
                 eval_hash: Arc::clone(&eval_hash),
                 search_tune_params,
             };
@@ -73,6 +76,7 @@ mod imp {
                     Arc::clone(&eval_hash),
                     Arc::clone(&self.stop),
                     Arc::clone(&self.ponderhit),
+                    Arc::clone(&self.increase_depth_shared),
                     max_moves_to_draw,
                     search_tune_params,
                 ));
@@ -164,6 +168,7 @@ mod imp {
         condvar: Condvar,
         stop: Arc<AtomicBool>,
         ponderhit: Arc<AtomicBool>,
+        increase_depth_shared: Arc<AtomicBool>,
         progress: Arc<SearchProgress>,
     }
 
@@ -201,6 +206,7 @@ mod imp {
             eval_hash: Arc<EvalHash>,
             stop: Arc<AtomicBool>,
             ponderhit: Arc<AtomicBool>,
+            increase_depth_shared: Arc<AtomicBool>,
             max_moves_to_draw: i32,
             search_tune_params: SearchTuneParams,
         ) -> Self {
@@ -217,6 +223,7 @@ mod imp {
                 condvar: Condvar::new(),
                 stop,
                 ponderhit,
+                increase_depth_shared,
                 progress,
             });
             let inner_clone = Arc::clone(&inner);
@@ -340,6 +347,7 @@ mod imp {
                         task.max_depth,
                         task.skill_enabled,
                         Some(&inner.progress),
+                        &inner.increase_depth_shared,
                     );
                 }
                 Some(ThreadTask::ClearHistories) => {
@@ -389,6 +397,7 @@ mod imp {
             _eval_hash: Arc<EvalHash>,
             stop: Arc<AtomicBool>,
             ponderhit: Arc<AtomicBool>,
+            _increase_depth_shared: Arc<AtomicBool>,
             _max_moves_to_draw: i32,
             _search_tune_params: SearchTuneParams,
         ) -> Self {
@@ -616,6 +625,7 @@ mod imp {
         eval_hash: Arc<EvalHash>,
         stop: Arc<AtomicBool>,
         ponderhit: Arc<AtomicBool>,
+        increase_depth_shared: Arc<AtomicBool>,
         max_moves_to_draw: i32,
         search_tune_params: SearchTuneParams,
         /// Counter for pending helper thread tasks.
@@ -636,6 +646,7 @@ mod imp {
             eval_hash: Arc<EvalHash>,
             stop: Arc<AtomicBool>,
             ponderhit: Arc<AtomicBool>,
+            increase_depth_shared: Arc<AtomicBool>,
             max_moves_to_draw: i32,
             search_tune_params: SearchTuneParams,
         ) -> Self {
@@ -649,6 +660,7 @@ mod imp {
                 eval_hash,
                 stop,
                 ponderhit,
+                increase_depth_shared,
                 max_moves_to_draw,
                 search_tune_params,
                 pending_tasks: Arc::new(AtomicUsize::new(0)),
@@ -735,6 +747,7 @@ mod imp {
             for thread_id in 1..=helper_count {
                 let stop = Arc::clone(&self.stop);
                 let ponderhit = Arc::clone(&self.ponderhit);
+                let increase_depth = Arc::clone(&self.increase_depth_shared);
                 let tt = Arc::clone(&self.tt);
                 let eval_hash = Arc::clone(&self.eval_hash);
                 let pending = Arc::clone(&self.pending_tasks);
@@ -761,7 +774,11 @@ mod imp {
 
                         let worker = worker_opt.as_mut().unwrap();
 
-                        // Update worker state for this search
+                        // Update worker state for this search.
+                        // thread_id must be updated because Rayon may assign
+                        // this task to a different pool thread than last time,
+                        // and the thread_local worker retains the old thread_id.
+                        worker.thread_id = thread_id;
                         worker.tt = Arc::clone(&tt);
                         worker.eval_hash = Arc::clone(&eval_hash);
                         worker.max_moves_to_draw = max_moves_to_draw;
@@ -787,6 +804,7 @@ mod imp {
                             max_depth,
                             skill_enabled,
                             Some(&*progress),
+                            &increase_depth,
                         );
 
                         // Collect result after search completes

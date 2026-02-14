@@ -1,6 +1,6 @@
 [package]
 name = "rshogi-core"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 authors = ["sh11235"]
 description = "A high-performance shogi engine core library with NNUE evaluation"
@@ -61,6 +61,10 @@ diagnostics = []
 wasm-threads = ["rayon"]
 # アプリ向け指し手特徴量抽出（解説生成等で使用）
 move-features = []
+# TT trace / helper TT write 制御（並列探索デバッグ用）
+# 有効時は環境変数で制御: RSHOGI_DEBUG_TT_TRACE, RSHOGI_DEBUG_TT_SANITY,
+# RSHOGI_DISABLE_HELPER_TT_WRITE, RSHOGI_TT_TRACE_ROOT_MOVE 等
+tt-trace = []
 # YaneuraOu DEEP相当のデフォルト遅延設定を使う
 # GPU/ネットワーク待ちが長い環境向けの遅延マージン(400/1400ms)プリセットを有効化する
 deep = []

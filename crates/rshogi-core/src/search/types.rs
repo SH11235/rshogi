@@ -702,7 +702,9 @@ impl std::ops::IndexMut<usize> for RootMoves {
 /// ルートからの手数を補正する必要がある。
 #[inline]
 pub fn value_to_tt(v: Value, ply: i32) -> Value {
-    if v.is_win() {
+    if v == Value::NONE {
+        Value::NONE
+    } else if v.is_win() {
         Value::new(v.raw() + ply)
     } else if v.is_loss() {
         Value::new(v.raw() - ply)
@@ -714,7 +716,9 @@ pub fn value_to_tt(v: Value, ply: i32) -> Value {
 /// TT値を探索用に変換（詰みスコアをroot基準からply基準に変換）
 #[inline]
 pub fn value_from_tt(v: Value, ply: i32) -> Value {
-    if v.is_win() {
+    if v == Value::NONE {
+        Value::NONE
+    } else if v.is_win() {
         Value::new(v.raw() - ply)
     } else if v.is_loss() {
         Value::new(v.raw() + ply)
@@ -876,6 +880,10 @@ mod tests {
         let converted = value_to_tt(loss, ply);
         let restored = value_from_tt(converted, ply);
         assert_eq!(restored.raw(), loss.raw());
+
+        // 無効値はそのまま保持される（YaneuraOu value_from_tt 準拠）
+        assert_eq!(value_to_tt(Value::NONE, ply), Value::NONE);
+        assert_eq!(value_from_tt(Value::NONE, ply), Value::NONE);
     }
 
     #[test]

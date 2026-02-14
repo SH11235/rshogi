@@ -289,6 +289,10 @@ impl Position {
     /// - 合法性までは保証しないが、明らかに不整合な手を弾く
     /// - 駒情報（moved_piece_after）を上位16bitに付加して返す
     pub fn to_move(&self, mv: Move) -> Option<Move> {
+        // 下位16bitの符号化を先に検証する。
+        // TT競合で壊れた move16 をここで弾き、probe() 側でcontinueできるようにする。
+        Move::from_u16_checked(mv.raw())?;
+
         if mv.is_none() {
             return Some(Move::NONE);
         }

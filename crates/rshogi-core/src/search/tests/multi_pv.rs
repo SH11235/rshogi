@@ -458,12 +458,12 @@ fn test_multi_pv_scores_sorted_desc() {
 fn test_aspiration_window_uses_average_and_mean_squared() {
     let mut rm = RootMove::new(Move::from_usi("7g7f").unwrap());
     rm.average_score = Value::new(120);
-    rm.mean_squared_score = Some(11131 * 10); // delta=5+10=15
+    rm.mean_squared_score = Some(11131 * 10); // abs(111310) / 9000 = 12, delta=5+0+12=17
 
     let (alpha, beta, delta) = compute_aspiration_window(&rm, 0);
-    assert_eq!(delta.raw(), 15);
-    assert_eq!(alpha.raw(), 105);
-    assert_eq!(beta.raw(), 135);
+    assert_eq!(delta.raw(), 17);
+    assert_eq!(alpha.raw(), 103);
+    assert_eq!(beta.raw(), 137);
 }
 
 /// 未シード時はフルウィンドウになる

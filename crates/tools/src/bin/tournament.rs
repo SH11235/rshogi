@@ -5,11 +5,30 @@
 ///
 /// # 使用例
 ///
-/// ```text
+/// 同一バイナリで異なる評価関数を比較（--engine-label 必須）:
+/// ```shell
 /// cargo run -p tools --release --bin tournament -- \
-///   --engine path/to/engine-a --engine path/to/engine-b \
-///   --games 100 --byoyomi 2000 --concurrency 4 \
-///   --out-dir runs/selfplay/tournament-001
+///   --engine target/release/rshogi-usi --engine-label nnue-v60 \
+///   --engine target/release/rshogi-usi --engine-label material \
+///   --games 50 --byoyomi 500 --threads 2 \
+///   --engine-usi-option "0:EvalFile=eval/halfka_hm_512x2-8-64_crelu/v60.bin" \
+///   --out-dir "runs/selfplay/$(date +%Y%m%d_%H%M%S)-nnue-v60-vs-material9"
+/// ```
+///
+/// rshogi vs YaneuraOu（suisho5, HalfKP 256x2-32-32, FV_SCALE=24）:
+/// ```shell
+/// cargo build --release -p rshogi-usi && \
+/// cargo run -p tools --release --bin tournament -- \
+///   --concurrency 8 \
+///   --engine target/release/rshogi-usi --engine-label rshogi \
+///   --engine /mnt/nvme1/development/YaneuraOu/source/YaneuraOu-halfkp_256x2-32-32 --engine-label yaneuraou \
+///   --games 50 --byoyomi 500 --threads 2 \
+///   --usi-option "FV_SCALE=24" \
+///   --engine-usi-option "0:EvalFile=eval/halfkp_256x2-32-32_crelu/suisho5.bin" \
+///   --engine-usi-option "1:EvalDir=/mnt/nvme1/development/rshogi/eval/halfkp_256x2-32-32_crelu" \
+///   --engine-usi-option "1:BookFile=no_book" \
+///   --engine-usi-option "1:MinimumThinkingTime=0" \
+///   --out-dir "runs/selfplay/$(date +%Y%m%d_%H%M%S)-rshogi-vs-yaneuraou-suisho5"
 /// ```
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -44,6 +63,11 @@ struct Cli {
     /// Engine binary paths (2 or more required)
     #[arg(long = "engine", required = true, num_args = 1)]
     engines: Vec<PathBuf>,
+
+    /// Engine labels (must match --engine count if specified).
+    /// Required when the same binary path appears more than once.
+    #[arg(long = "engine-label", num_args = 1)]
+    engine_labels: Vec<String>,
 
     /// Number of games per direction for each pair
     #[arg(long, default_value_t = 100)]
@@ -175,6 +199,8 @@ struct MetaSettings {
 struct EngineCommandMeta {
     path_black: String,
     path_white: String,
+    label_black: String,
+    label_white: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +243,7 @@ impl PairWriter {
 
 struct WorkerConfig {
     engine_paths: Vec<PathBuf>,
+    engine_labels: Vec<String>,
     engine_usi_options: Vec<Vec<String>>,
     threads: usize,
     hash_mb: u32,
@@ -234,6 +261,7 @@ fn worker_main(
 ) {
     let WorkerConfig {
         engine_paths,
+        engine_labels,
         engine_usi_options,
         threads,
         hash_mb,
@@ -245,7 +273,7 @@ fn worker_main(
     // ワーカー内で全エンジンを起動
     let mut engines: Vec<EngineProcess> = Vec::new();
     for (i, path) in engine_paths.iter().enumerate() {
-        let label = engine_label_from_path(path);
+        let label = engine_labels[i].clone();
         let cfg = EngineConfig {
             path: path.clone(),
             args: Vec::new(),
@@ -357,6 +385,46 @@ fn main() -> Result<()> {
         }
     }
 
+    let n = cli.engines.len();
+
+    // エンジンラベルの解決
+    let engine_labels: Vec<String> = if cli.engine_labels.is_empty() {
+        // ラベル未指定: 同一パスが重複していないか確認
+        let mut seen: HashMap<&Path, usize> = HashMap::new();
+        for (i, p) in cli.engines.iter().enumerate() {
+            if let Some(prev) = seen.insert(p.as_path(), i) {
+                bail!(
+                    "同一バイナリが複数指定されています (engines[{prev}] と engines[{i}]: {})。\n\
+                     --engine-label で各エンジンにラベルを付けてください。",
+                    p.display()
+                );
+            }
+        }
+        cli.engines.iter().map(|p| engine_label_from_path(p)).collect()
+    } else {
+        if cli.engine_labels.len() != n {
+            bail!(
+                "--engine-label の数 ({}) が --engine の数 ({n}) と一致しません",
+                cli.engine_labels.len()
+            );
+        }
+        cli.engine_labels.clone()
+    };
+
+    // ラベルの重複チェック
+    {
+        let mut seen: HashMap<&str, usize> = HashMap::new();
+        for (i, label) in engine_labels.iter().enumerate() {
+            if let Some(prev) = seen.insert(label.as_str(), i) {
+                bail!(
+                    "ラベル '{}' が重複しています (engines[{prev}] と engines[{i}])。\n\
+                     各エンジンには一意のラベルを指定してください。",
+                    label
+                );
+            }
+        }
+    }
+
     // 開始局面のロード
     let (start_defs, start_commands) =
         load_start_positions(cli.startpos_file.as_deref(), None, None, None)?;
@@ -366,7 +434,6 @@ fn main() -> Result<()> {
         .with_context(|| format!("failed to create {}", cli.out_dir.display()))?;
 
     let common_usi_options = cli.usi_options.clone().unwrap_or_default();
-    let n = cli.engines.len();
 
     // per-engine オプションを解析: HashMap<usize, Vec<String>>
     let mut per_engine_usi: HashMap<usize, Vec<String>> = HashMap::new();
@@ -449,9 +516,7 @@ fn main() -> Result<()> {
 
     for i in 0..n {
         for j in (i + 1)..n {
-            let black_label = engine_label_from_path(&cli.engines[i]);
-            let white_label = engine_label_from_path(&cli.engines[j]);
-            let filename = format!("{}-vs-{}.jsonl", black_label, white_label);
+            let filename = format!("{}-vs-{}.jsonl", engine_labels[i], engine_labels[j]);
             let path = cli.out_dir.join(&filename);
             let mut pw = PairWriter::new(&path)?;
 
@@ -470,6 +535,8 @@ fn main() -> Result<()> {
                 engine_cmd: EngineCommandMeta {
                     path_black: cli.engines[i].display().to_string(),
                     path_white: cli.engines[j].display().to_string(),
+                    label_black: engine_labels[i].clone(),
+                    label_white: engine_labels[j].clone(),
                 },
                 start_positions: start_commands.clone(),
                 output: path.display().to_string(),
@@ -490,6 +557,7 @@ fn main() -> Result<()> {
     let mut handles = Vec::new();
     for _ in 0..cli.concurrency {
         let engine_paths = cli.engines.clone();
+        let labels = engine_labels.clone();
         let usi_opts = engine_usi_options.clone();
         let threads = cli.threads;
         let hash_mb = cli.hash_mb;
@@ -511,6 +579,7 @@ fn main() -> Result<()> {
             worker_main(
                 WorkerConfig {
                     engine_paths,
+                    engine_labels: labels,
                     engine_usi_options: usi_opts,
                     threads,
                     hash_mb,
@@ -550,7 +619,7 @@ fn main() -> Result<()> {
                     Ok(result) => {
                         process_result(
                             &result,
-                            &cli.engines,
+                            &engine_labels,
                             &mut pair_writers,
                             &mut pair_stats,
                             &mut pair_game_count,
@@ -562,7 +631,7 @@ fn main() -> Result<()> {
                                 completed,
                                 total_games,
                                 &pair_stats,
-                                &cli.engines,
+                                &engine_labels,
                                 start_time,
                             );
                         }
@@ -581,7 +650,7 @@ fn main() -> Result<()> {
                         if let Ok(result) = result {
                             process_result(
                                 &result,
-                                &cli.engines,
+                                &engine_labels,
                                 &mut pair_writers,
                                 &mut pair_stats,
                                 &mut pair_game_count,
@@ -592,7 +661,7 @@ fn main() -> Result<()> {
                                     completed,
                                     total_games,
                                     &pair_stats,
-                                    &cli.engines,
+                                    &engine_labels,
                                     start_time,
                                 );
                             }
@@ -619,7 +688,7 @@ fn main() -> Result<()> {
     println!();
     println!("=== Tournament Complete ===");
     println!("Total: {} games in {:.1}s", completed, start_time.elapsed().as_secs_f64());
-    print_final_table(&pair_stats, &cli.engines);
+    print_final_table(&pair_stats, &engine_labels);
     println!("Output: {}", cli.out_dir.display());
     println!("===========================");
     Ok(())
@@ -631,7 +700,7 @@ fn main() -> Result<()> {
 
 fn process_result(
     result: &MatchResult,
-    engines: &[PathBuf],
+    engine_labels: &[String],
     pair_writers: &mut HashMap<(usize, usize), PairWriter>,
     pair_stats: &mut HashMap<(usize, usize), (u32, u32, u32)>,
     pair_game_count: &mut HashMap<(usize, usize), u32>,
@@ -666,12 +735,8 @@ fn process_result(
             pw.write_json(&entry)?;
         }
         let winner = match result.outcome {
-            GameOutcome::BlackWin => {
-                Some(engine_label_from_path(&engines[result.ticket.black_idx]))
-            }
-            GameOutcome::WhiteWin => {
-                Some(engine_label_from_path(&engines[result.ticket.white_idx]))
-            }
+            GameOutcome::BlackWin => Some(engine_labels[result.ticket.black_idx].clone()),
+            GameOutcome::WhiteWin => Some(engine_labels[result.ticket.white_idx].clone()),
             GameOutcome::Draw | GameOutcome::InProgress => None,
         };
         let result_entry = ResultLogEntry {
@@ -716,7 +781,7 @@ fn print_progress(
     completed: u32,
     total: u32,
     pair_stats: &HashMap<(usize, usize), (u32, u32, u32)>,
-    engines: &[PathBuf],
+    engine_labels: &[String],
     start_time: Instant,
 ) {
     let elapsed = start_time.elapsed().as_secs_f64();
@@ -737,8 +802,8 @@ fn print_progress(
         if total_pair == 0 {
             continue;
         }
-        let li = engine_label_from_path(&engines[i]);
-        let lj = engine_label_from_path(&engines[j]);
+        let li = &engine_labels[i];
+        let lj = &engine_labels[j];
         let wr = if total_pair > 0 {
             (wi as f64 + d as f64 * 0.5) / total_pair as f64 * 100.0
         } else {
@@ -751,15 +816,18 @@ fn print_progress(
     }
 }
 
-fn print_final_table(pair_stats: &HashMap<(usize, usize), (u32, u32, u32)>, engines: &[PathBuf]) {
+fn print_final_table(
+    pair_stats: &HashMap<(usize, usize), (u32, u32, u32)>,
+    engine_labels: &[String],
+) {
     println!();
     for (&(i, j), &(wi, wj, d)) in pair_stats {
         let total_pair = wi + wj + d;
         if total_pair == 0 {
             continue;
         }
-        let li = engine_label_from_path(&engines[i]);
-        let lj = engine_label_from_path(&engines[j]);
+        let li = &engine_labels[i];
+        let lj = &engine_labels[j];
         let score_i = wi as f64 + d as f64 * 0.5;
         let wr = score_i / total_pair as f64;
         let elo = if wr > 0.0 && wr < 1.0 {
