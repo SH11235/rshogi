@@ -28,8 +28,8 @@ use super::tune_params::SearchTuneParams;
 /// PawnHistoryのサイズ（2のべき乗）
 pub const PAWN_HISTORY_SIZE: usize = 8192;
 
-/// CorrectionHistoryのサイズ（2のべき乗）
-pub const CORRECTION_HISTORY_SIZE: usize = 32768;
+/// CorrectionHistoryのサイズ（2のべき乗、YaneuraOu準拠: uint16_t::MAX+1 = 65536）
+pub const CORRECTION_HISTORY_SIZE: usize = 65536;
 
 /// CorrectionHistoryの値の制限
 pub const CORRECTION_HISTORY_LIMIT: i32 = 1024;

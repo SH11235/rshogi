@@ -5,7 +5,7 @@
 #[cfg(not(feature = "search-no-pass-rules"))]
 use crate::eval::evaluate_pass_rights;
 use crate::position::Position;
-use crate::types::{Bound, Color, Depth, Move, Value, DEPTH_UNSEARCHED, MAX_PLY};
+use crate::types::{Bound, Color, Depth, Move, Piece, Square, Value, DEPTH_UNSEARCHED, MAX_PLY};
 
 use super::alpha_beta::{
     to_corrected_static_eval, EvalContext, ProbeOutcome, SearchContext, SearchState, TTContext,
@@ -20,7 +20,7 @@ use super::tt_sanity::{
     TtWriteTrace,
 };
 use super::tt_sanity::{is_valid_tt_eval, is_valid_tt_stored_value};
-use super::types::{value_from_tt, NodeType};
+use super::types::{value_from_tt, ContHistKey, NodeType};
 
 // =============================================================================
 // 補正履歴
@@ -49,13 +49,23 @@ pub(super) fn correction_value(
     let move_ok = prev_move.is_normal();
 
     // continuation correction 用キー: (ss-2) と (ss-4) の2段階（YO準拠）
-    let cont_key_2 = if move_ok && ply >= 2 {
-        st.stack[(ply - 2) as usize].cont_hist_key
+    // YO準拠: plyが小さい場合はsentinel（NO_PIECE, SQ_ZERO）テーブルを参照
+    let sentinel_key = ContHistKey::new(false, false, Piece::NONE, Square::SQ_11);
+    let cont_key_2 = if move_ok {
+        if ply >= 2 {
+            st.stack[(ply - 2) as usize].cont_hist_key
+        } else {
+            Some(sentinel_key)
+        }
     } else {
         None
     };
-    let cont_key_4 = if move_ok && ply >= 4 {
-        st.stack[(ply - 4) as usize].cont_hist_key
+    let cont_key_4 = if move_ok {
+        if ply >= 4 {
+            st.stack[(ply - 4) as usize].cont_hist_key
+        } else {
+            Some(sentinel_key)
+        }
     } else {
         None
     };
@@ -67,20 +77,26 @@ pub(super) fn correction_value(
     let wnpcv = h.correction_history.non_pawn_value(non_pawn_idx_w, Color::White, us) as i32;
     let bnpcv = h.correction_history.non_pawn_value(non_pawn_idx_b, Color::Black, us) as i32;
 
-    // YO準拠: move無効またはcont_hist_key無しの場合はデフォルト値8
-    let cv2 = cont_key_2
-        .map(|key| {
-            let pc = pos.piece_on(prev_move.to());
-            h.correction_history.continuation_value(key.piece, key.to, pc, prev_move.to()) as i32
-        })
-        .unwrap_or(8);
-    let cv4 = cont_key_4
-        .map(|key| {
-            let pc = pos.piece_on(prev_move.to());
-            h.correction_history.continuation_value(key.piece, key.to, pc, prev_move.to()) as i32
-        })
-        .unwrap_or(8);
-    let cntcv = cv2 + cv4;
+    // YO準拠: move無効の場合はcntcv全体が8（個別デフォルトの合計ではない）
+    let cntcv = if move_ok {
+        let cv2 = cont_key_2
+            .map(|key| {
+                let pc = pos.piece_on(prev_move.to());
+                h.correction_history.continuation_value(key.piece, key.to, pc, prev_move.to())
+                    as i32
+            })
+            .unwrap_or(8);
+        let cv4 = cont_key_4
+            .map(|key| {
+                let pc = pos.piece_on(prev_move.to());
+                h.correction_history.continuation_value(key.piece, key.to, pc, prev_move.to())
+                    as i32
+            })
+            .unwrap_or(8);
+        cv2 + cv4
+    } else {
+        8
+    };
 
     9536 * pcv + 8494 * micv + 10_132 * (wnpcv + bnpcv) + 7156 * cntcv
 }
@@ -108,20 +124,31 @@ pub(super) fn update_correction_history(
     };
     let move_ok = prev_move.is_normal();
 
-    // (ss-2) context
-    let cont_params_2 = if move_ok && ply >= 2 {
-        st.stack[(ply - 2) as usize].cont_hist_key.map(|key| {
+    // (ss-2) context — YO準拠: plyが小さい場合はsentinel（NO_PIECE, SQ_ZERO）テーブルを更新
+    let sentinel_key = ContHistKey::new(false, false, Piece::NONE, Square::SQ_11);
+    let cont_params_2 = if move_ok {
+        let key = if ply >= 2 {
+            st.stack[(ply - 2) as usize].cont_hist_key
+        } else {
+            Some(sentinel_key)
+        };
+        key.map(|k| {
             let pc = pos.piece_on(prev_move.to());
-            (key.piece, key.to, pc, prev_move.to())
+            (k.piece, k.to, pc, prev_move.to())
         })
     } else {
         None
     };
     // (ss-4) context
-    let cont_params_4 = if move_ok && ply >= 4 {
-        st.stack[(ply - 4) as usize].cont_hist_key.map(|key| {
+    let cont_params_4 = if move_ok {
+        let key = if ply >= 4 {
+            st.stack[(ply - 4) as usize].cont_hist_key
+        } else {
+            Some(sentinel_key)
+        };
+        key.map(|k| {
             let pc = pos.piece_on(prev_move.to());
-            (key.piece, key.to, pc, prev_move.to())
+            (k.piece, k.to, pc, prev_move.to())
         })
     } else {
         None

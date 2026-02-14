@@ -863,7 +863,6 @@ impl SearchWorker {
         self.state.stack[2].cutoff_cnt = 0;
         let (root_unadjusted_static_eval, root_correction_value) =
             self.init_root_static_eval(pos, root_in_check);
-
         // YaneuraOu準拠: ルートでもTTプローブを行う (yaneuraou-search.cpp:2257)
         let key = pos.key();
         let tt_result = self.tt.probe(key, pos);
@@ -1350,25 +1349,28 @@ impl SearchWorker {
         }
 
         // YaneuraOu準拠: rootでもCorrectionHistoryを更新する (yaneuraou-search.cpp:4048-4055)
-        if !(root_in_check || best_move.is_some() && pos.is_capture(best_move))
-            && (best_value > self.state.stack[0].static_eval) == best_move.is_some()
         {
-            let static_eval = self.state.stack[0].static_eval;
-            let divisor = if best_move.is_some() { 10 } else { 8 };
-            let bonus = ((best_value.raw() - static_eval.raw()) * depth / divisor)
-                .clamp(-CORRECTION_HISTORY_LIMIT / 4, CORRECTION_HISTORY_LIMIT / 4);
-            let ctx = SearchContext {
-                tt: &self.tt,
-                eval_hash: &self.eval_hash,
-                history: &self.history,
-                cont_history_sentinel: self.cont_history_sentinel,
-                generate_all_legal_moves: self.generate_all_legal_moves,
-                max_moves_to_draw: self.max_moves_to_draw,
-                thread_id: self.thread_id,
-                allow_tt_write: self.allow_tt_write,
-                tune_params: &self.search_tune_params,
-            };
-            update_correction_history(&self.state, &ctx, pos, 0, bonus);
+            let cond_check = !(root_in_check || best_move.is_some() && pos.is_capture(best_move));
+            let cond_eval = (best_value > self.state.stack[0].static_eval) == best_move.is_some();
+            let do_update = cond_check && cond_eval;
+            if do_update {
+                let static_eval = self.state.stack[0].static_eval;
+                let divisor = if best_move.is_some() { 10 } else { 8 };
+                let bonus = ((best_value.raw() - static_eval.raw()) * depth / divisor)
+                    .clamp(-CORRECTION_HISTORY_LIMIT / 4, CORRECTION_HISTORY_LIMIT / 4);
+                let ctx = SearchContext {
+                    tt: &self.tt,
+                    eval_hash: &self.eval_hash,
+                    history: &self.history,
+                    cont_history_sentinel: self.cont_history_sentinel,
+                    generate_all_legal_moves: self.generate_all_legal_moves,
+                    max_moves_to_draw: self.max_moves_to_draw,
+                    thread_id: self.thread_id,
+                    allow_tt_write: self.allow_tt_write,
+                    tune_params: &self.search_tune_params,
+                };
+                update_correction_history(&self.state, &ctx, pos, 0, bonus);
+            }
         }
 
         best_value
