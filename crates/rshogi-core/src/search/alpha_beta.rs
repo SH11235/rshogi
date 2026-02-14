@@ -1003,9 +1003,9 @@ impl SearchWorker {
                     limits,
                     time_manager,
                 )
-            } else if depth >= 2 && move_count >= 3 {
-                // YaneuraOu準拠: depth >= 2 && moveCount > 1 + rootNode (rootNode=true → moveCount > 2)
-                // 第3手以降(depth>=2時): LMR (Step 17) + PV re-search (Step 19)
+            } else if depth >= 2 && move_count >= 2 {
+                // YaneuraOu準拠: depth >= 2 && moveCount > 1 (yaneuraou-search.cpp:3636)
+                // 第2手以降(depth>=2時): LMR (Step 17) + PV re-search (Step 19)
                 let (d, deeper_base, deeper_mul, shallower_thr) = {
                     let tune = &self.search_tune_params;
                     let delta = (beta.raw() - alpha.raw()).abs().max(1);
@@ -1013,7 +1013,11 @@ impl SearchWorker {
                     // root (ply 0) では improving = false (ply < 2)
                     let mut r = reduction(tune, false, depth, move_count, delta, root_delta);
 
-                    // ttPv調整（rootでは常にttPv=true, PvNode=true, cutNode=false）
+                    // Step 13: ttPv加算 (yaneuraou-search.cpp:3259-3260)
+                    // rootでは常にttPv=true
+                    r += tune.lmr_ttpv_add;
+
+                    // Step 16: ttPv調整（rootでは常にttPv=true, PvNode=true, cutNode=false）
                     let tt_value_higher = (tt_value_root > alpha) as i32;
                     let tt_depth_ge = (tt_data.depth >= depth) as i32;
                     r -= tune.lmr_step16_ttpv_sub_base
@@ -1106,7 +1110,7 @@ impl SearchWorker {
 
                 value
             } else {
-                // YaneuraOu準拠: LMR対象外の非第一手（第2手 or depth < 2）
+                // YaneuraOu準拠: LMR対象外 (depth < 2) — Step 18
                 // PVS: zero-window search → PV re-search
                 let mut value = -self.search_node_wrapper::<{ NodeType::NonPV as u8 }>(
                     pos,
@@ -1516,7 +1520,10 @@ impl SearchWorker {
                     let mut r =
                         reduction(tune, false, depth, (rm_idx + 1) as i32, delta, root_delta);
 
-                    // ttPv調整（rootでは常にttPv=true, PvNode=true, cutNode=false）
+                    // Step 13: ttPv加算 (yaneuraou-search.cpp:3259-3260)
+                    r += tune.lmr_ttpv_add;
+
+                    // Step 16: ttPv調整（rootでは常にttPv=true, PvNode=true, cutNode=false）
                     let tt_value_higher = (tt_value_root > alpha) as i32;
                     let tt_depth_ge = (tt_data.depth >= depth) as i32;
                     r -= tune.lmr_step16_ttpv_sub_base

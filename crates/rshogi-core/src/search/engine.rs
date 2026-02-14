@@ -1291,6 +1291,13 @@ impl Search {
                         )
                     };
 
+                    // aspiration loop 内ソート (yaneuraou-search.cpp:1451)
+                    // fail-low/fail-high で再探索する前に root_moves を並べ替える
+                    worker
+                        .state
+                        .root_moves
+                        .stable_sort_range(pv_idx, worker.state.root_moves.len());
+
                     if worker.state.abort {
                         break;
                     }
@@ -1642,6 +1649,9 @@ where
                         time_manager,
                     )
                 };
+
+                // aspiration loop 内ソート (yaneuraou-search.cpp:1451)
+                worker.state.root_moves.stable_sort_range(pv_idx, worker.state.root_moves.len());
 
                 if worker.state.abort {
                     break;
