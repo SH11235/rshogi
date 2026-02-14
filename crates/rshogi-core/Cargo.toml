@@ -59,6 +59,8 @@ diagnostics = []
 # wasm-bindgen-rayon + rayon を使用した LazySMP 並列探索を有効化
 # 詳細は docs/wasm-multithreading-investigation.md を参照。
 wasm-threads = ["rayon"]
+# アプリ向け指し手特徴量抽出（解説生成等で使用）
+move-features = []
 # TT trace / helper TT write 制御（並列探索デバッグ用）
 # 有効時は環境変数で制御: RSHOGI_DEBUG_TT_TRACE, RSHOGI_DEBUG_TT_SANITY,
 # RSHOGI_DISABLE_HELPER_TT_WRITE, RSHOGI_TT_TRACE_ROOT_MOVE 等
