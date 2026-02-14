@@ -661,6 +661,13 @@ impl RootMoves {
         self.moves.iter().position(|rm| rm.mv() == mv)
     }
 
+    /// 開始インデックスを指定して手を検索
+    ///
+    /// YaneuraOuの `std::find(rootMoves.begin() + pvIdx, rootMoves.end(), move)` に対応。
+    pub fn find_from(&self, mv: Move, start: usize) -> Option<usize> {
+        self.moves[start..].iter().position(|rm| rm.mv() == mv).map(|i| i + start)
+    }
+
     /// 内部Vecへの参照
     pub fn as_slice(&self) -> &[RootMove] {
         &self.moves

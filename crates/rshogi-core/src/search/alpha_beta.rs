@@ -827,6 +827,10 @@ impl SearchWorker {
                 );
             }
 
+            // aspiration loop完了後にソート（YO: iterative deepening loop でのソートに対応）
+            let len = self.state.root_moves.len();
+            self.state.root_moves.stable_sort_range(0, len);
+
             if !self.state.abort {
                 self.state.completed_depth = d;
                 self.state.best_move = self.state.root_moves[0].mv();
@@ -888,18 +892,49 @@ impl SearchWorker {
         // YaneuraOu準拠: quietsSearched, capturesSearched のトラッキング
         let mut quiets_tried = SearchedMoveList::new();
         let mut captures_tried = SearchedMoveList::new();
-        let mut root_move_count = 0i32;
+        // YaneuraOu準拠: MovePicker でムーブ反復順序を決定 (yaneuraou-search.cpp:3111-3117)
+        // ply=0 では全 continuation history が sentinel
+        let sentinel_ref: &PieceToHistory = unsafe { self.cont_history_sentinel.as_ref() };
+        let cont_tables = [sentinel_ref; 6];
+        let mut mp = MovePicker::new(
+            pos,
+            tt_move_root,
+            depth,
+            0,
+            cont_tables,
+            self.generate_all_legal_moves,
+        );
 
-        for rm_idx in 0..self.state.root_moves.len() {
+        let mut move_count = 0i32;
+        loop {
+            let mv = {
+                let h = unsafe { self.history.as_ref_unchecked() };
+                mp.next_move(pos, h)
+            };
+            if mv == Move::NONE {
+                break;
+            }
+            if !pos.pseudo_legal(mv) {
+                continue;
+            }
+            if !pos.is_legal(mv) {
+                continue;
+            }
+
+            // rootMoves に含まれる手のみ処理 (YO: yaneuraou-search.cpp:3167-3175)
+            let rm_idx = match self.state.root_moves.find_from(mv, 0) {
+                Some(idx) => idx,
+                None => continue,
+            };
+
             if self.check_abort(limits, time_manager) {
                 return Value::ZERO;
             }
 
             // 各手ごとにsel_depthをリセット（YaneuraOu準拠）
             self.state.sel_depth = 0;
-            root_move_count = (rm_idx + 1) as i32;
+            move_count += 1;
 
-            let mv = self.state.root_moves[rm_idx].mv();
             let gives_check = pos.gives_check(mv);
             let is_capture = pos.is_capture(mv);
 
@@ -912,7 +947,7 @@ impl SearchWorker {
             self.state.stack[0].current_move = mv;
             // YaneuraOu準拠: ss->moveCount = ++moveCount (yaneuraou-search.cpp:3160)
             // 子ノード(ply 1)が(ss-1)->moveCountを参照するため設定必須
-            self.state.stack[0].move_count = (rm_idx + 1) as i32;
+            self.state.stack[0].move_count = move_count;
 
             // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う
             if mv.is_pass() {
@@ -956,7 +991,7 @@ impl SearchWorker {
                 self.root_quiet_stat_score(mover, mv)
             };
             self.state.stack[0].stat_score = root_stat_score;
-            let value = if rm_idx == 0 {
+            let value = if move_count == 1 {
                 // 第1手: full depth PV search (Step 19)
                 -self.search_node_wrapper::<{ NodeType::PV as u8 }>(
                     pos,
@@ -968,7 +1003,7 @@ impl SearchWorker {
                     limits,
                     time_manager,
                 )
-            } else if depth >= 2 && rm_idx >= 2 {
+            } else if depth >= 2 && move_count >= 3 {
                 // YaneuraOu準拠: depth >= 2 && moveCount > 1 + rootNode (rootNode=true → moveCount > 2)
                 // 第3手以降(depth>=2時): LMR (Step 17) + PV re-search (Step 19)
                 let (d, deeper_base, deeper_mul, shallower_thr) = {
@@ -976,8 +1011,7 @@ impl SearchWorker {
                     let delta = (beta.raw() - alpha.raw()).abs().max(1);
                     let root_delta = self.state.root_delta.max(1);
                     // root (ply 0) では improving = false (ply < 2)
-                    let mut r =
-                        reduction(tune, false, depth, (rm_idx + 1) as i32, delta, root_delta);
+                    let mut r = reduction(tune, false, depth, move_count, delta, root_delta);
 
                     // ttPv調整（rootでは常にttPv=true, PvNode=true, cutNode=false）
                     let tt_value_higher = (tt_value_root > alpha) as i32;
@@ -989,7 +1023,7 @@ impl SearchWorker {
 
                     // 基本調整
                     r += tune.lmr_step16_base_add;
-                    r -= (rm_idx + 1) as i32 * tune.lmr_step16_move_count_mul;
+                    r -= move_count * tune.lmr_step16_move_count_mul;
                     r -= root_correction_value.abs() / tune.lmr_step16_correction_div.max(1);
 
                     if tt_capture_root {
@@ -1122,7 +1156,6 @@ impl SearchWorker {
 
             // YaneuraOu準拠: Root move score/PV handling (yaneuraou-search.cpp:3727-3810)
             // moveCount == 1 (第1手) || value > alpha の場合にスコアとPVを更新
-            let move_count = (rm_idx + 1) as i32;
             if move_count == 1 || value > alpha {
                 let rm = &mut self.state.root_moves[rm_idx];
                 rm.score = value;
@@ -1160,6 +1193,8 @@ impl SearchWorker {
                 }
             }
         }
+
+        let root_move_count = move_count;
 
         // YaneuraOu準拠 (yaneuraou-search.cpp:3917-3918):
         // fail highの場合に最良値を調整する
@@ -1279,13 +1314,10 @@ impl SearchWorker {
             }
         }
 
-        // 最善手を先頭に移動
-        self.state.root_moves.move_to_front(pv_idx);
-        self.state.root_moves.sort();
-
         // YaneuraOu準拠: ルートでもTTに保存する (yaneuraou-search.cpp:4034)
         // rootNode && !pvIdx (single-PV) かつ excludedMove なし → 常に save
-        let best_move = self.state.root_moves[0].mv();
+        // NOTE: ソートはiterative deepening loop側（engine.rs の stable_sort_range）で実行する
+        let best_move = self.state.root_moves[pv_idx].mv();
         if self.allow_tt_write {
             let bound = if best_value >= beta {
                 Bound::Lower
