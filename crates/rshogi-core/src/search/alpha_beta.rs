@@ -2312,16 +2312,6 @@ impl SearchWorker {
                 );
             }
 
-            // 手の記録（YaneuraOu準拠: quietsSearched, capturesSearched）
-            // PASS は history_index() が未定義のため記録しない
-            if !mv.is_pass() {
-                if is_capture {
-                    captures_tried.push(mv);
-                } else {
-                    quiets_tried.push(mv);
-                }
-            }
-
             // 延長量をnew_depthに加算（YaneuraOu準拠: do_moveの後、yaneuraou-search.cpp:3482）
             new_depth += extension;
 
