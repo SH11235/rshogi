@@ -1148,16 +1148,6 @@ impl SearchWorker {
                 return Value::ZERO;
             }
 
-            // YaneuraOu準拠: 非best手のトラッキング (yaneuraou-search.cpp:3886-3893)
-            // PASSはhistory未定義のためスキップ
-            if !mv.is_pass() {
-                if is_capture {
-                    captures_tried.push(mv);
-                } else {
-                    quiets_tried.push(mv);
-                }
-            }
-
             // YaneuraOu準拠: Root move score/PV handling (yaneuraou-search.cpp:3727-3810)
             // moveCount == 1 (第1手) || value > alpha の場合にスコアとPVを更新
             if move_count == 1 || value > alpha {
