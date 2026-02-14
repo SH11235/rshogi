@@ -12,7 +12,8 @@ use crate::bitboard::{
     lance_step_effect, pawn_effect, rook_effect, silver_effect, Bitboard,
 };
 use crate::eval::material::{hand_piece_value, material_needs_board_effects, signed_piece_value};
-use crate::nnue::{ChangedPiece, DirtyPiece, HandChange};
+use crate::nnue::piece_list::PieceList;
+use crate::nnue::{ChangedBonaPiece, DirtyPiece, ExtBonaPiece};
 use crate::prefetch::{NoPrefetch, TtPrefetch};
 use crate::types::{
     Color, Hand, Move, Piece, PieceType, PieceTypeSet, RepetitionState, Square, Value,
@@ -80,6 +81,10 @@ pub struct Position {
     pub(super) king_square: [Square; Color::NUM],
     /// パス権ルールが有効かどうか
     pass_rights_enabled: bool,
+
+    // === PieceList (NNUE 高速化) ===
+    /// 全40駒の BonaPiece 管理テーブル
+    pub(super) piece_list: PieceList,
 }
 
 impl Position {
@@ -141,6 +146,7 @@ impl Position {
             side_to_move: Color::Black,
             king_square: [Square::SQ_11; Color::NUM],
             pass_rights_enabled: false,
+            piece_list: PieceList::new(),
         }
     }
 
@@ -285,6 +291,12 @@ impl Position {
     #[inline]
     pub fn king_square(&self, c: Color) -> Square {
         self.king_square[c.index()]
+    }
+
+    /// PieceList への参照を取得
+    #[inline]
+    pub fn piece_list(&self) -> &PieceList {
+        &self.piece_list
     }
 
     /// 手番を取得
@@ -850,39 +862,31 @@ impl Position {
                 );
             }
 
-            // DirtyPiece: 手駒の変化（us の pt が 1 減る）
-            let old_hand = self.hand[us.index()];
-            let old_count = old_hand.count(pt) as u8;
-            let new_count = old_count.saturating_sub(1);
-            // 合法手では溢れないため戻り値を無視
-            let _ = dirty_piece.push_hand_change(HandChange {
-                owner: us,
-                piece_type: pt,
-                old_count,
-                new_count,
-            });
+            // PieceList + DirtyPiece: 手駒 → 盤上
+            let old_count = self.hand[us.index()].count(pt) as u8;
+            let old_bp = ExtBonaPiece::from_hand(us, pt, old_count);
+            let piece_no = self.piece_list.piece_no_of_hand(old_bp.fb);
 
             // 手駒から減らす
             self.hand[us.index()] = self.hand[us.index()].sub(pt);
             new_state.hand_key = new_state.hand_key.wrapping_sub(zobrist_hand(us, pt));
-            // material_value: 打ち駒では手駒→盤上で価値は変化しない
 
             // 盤上に配置
             self.put_piece_internal(pc, to);
             new_state.board_key ^= zobrist_psq(pc, to);
             self.xor_partial_keys(&mut new_state, pc, to);
 
-            new_state.captured_piece = Piece::NONE;
+            let new_bp = ExtBonaPiece::from_board(pc, to);
+            self.piece_list.put_piece_on_board(piece_no, new_bp, to);
 
-            // DirtyPiece: 打ち駒（盤上に新しく現れる）
-            // 合法手では溢れないため戻り値を無視
-            let _ = dirty_piece.push_piece(ChangedPiece {
-                color: us,
-                old_piece: Piece::NONE,
-                old_sq: None,
-                new_piece: pc,
-                new_sq: Some(to),
-            });
+            dirty_piece.dirty_num = 1;
+            dirty_piece.piece_no[0] = piece_no;
+            dirty_piece.changed_piece[0] = ChangedBonaPiece {
+                old_piece: old_bp,
+                new_piece: new_bp,
+            };
+
+            new_state.captured_piece = Piece::NONE;
         } else {
             let from = m.from();
             let to = m.to();
@@ -891,7 +895,6 @@ impl Position {
             let pc = self.piece_on(from);
             let captured = self.piece_on(to);
 
-            // デバッグアサーション: 成りフラグが立っている場合、成れる駒種かをチェック
             debug_assert!(
                 !m.is_promote() || pc.piece_type().can_promote(),
                 "Cannot promote piece {pc:?} (type={:?}) at {from:?} with move {} in position {}\n\
@@ -940,6 +943,10 @@ impl Position {
                 }
             }
 
+            // PieceList: 動く駒の old BonaPiece を記録
+            let piece_no_moved = self.piece_list.piece_no_of_board(from);
+            let old_bp_moved = self.piece_list.bona_piece(piece_no_moved);
+
             // 駒を取る場合
             if captured.is_some() {
                 let captured_pt = captured.piece_type().unpromote();
@@ -950,6 +957,11 @@ impl Position {
                     m.to_usi(),
                     self.to_sfen()
                 );
+
+                // PieceList: 取られた駒の old BonaPiece を記録
+                let piece_no_cap = self.piece_list.piece_no_of_board(to);
+                let old_bp_cap = self.piece_list.bona_piece(piece_no_cap);
+
                 self.remove_piece_internal(to);
                 new_state.board_key ^= zobrist_psq(captured, to);
                 self.xor_partial_keys(&mut new_state, captured, to);
@@ -957,7 +969,7 @@ impl Position {
                 // material_value: 盤上から駒が消える
                 material_value -= signed_piece_value(captured);
 
-                // 手駒に追加（成駒は生駒に戻す）※手駒にならない駒種は無視
+                // 手駒に追加（成駒は生駒に戻す）
                 if matches!(
                     captured_pt,
                     PieceType::Pawn
@@ -968,24 +980,26 @@ impl Position {
                         | PieceType::Bishop
                         | PieceType::Rook
                 ) {
-                    // DirtyPiece: 手駒の変化（us の captured_pt が 1 増える）
-                    let old_hand = self.hand[us.index()];
-                    let old_count = old_hand.count(captured_pt) as u8;
-                    let new_count = old_count.saturating_add(1);
-                    // 合法手では溢れないため戻り値を無視
-                    let _ = dirty_piece.push_hand_change(HandChange {
-                        owner: us,
-                        piece_type: captured_pt,
-                        old_count,
-                        new_count,
-                    });
-
                     self.hand[us.index()] = self.hand[us.index()].add(captured_pt);
                     new_state.hand_key =
                         new_state.hand_key.wrapping_add(zobrist_hand(us, captured_pt));
-
                     material_value += hand_piece_value(us, captured_pt);
                 }
+
+                // PieceList: 取られた駒を手駒に移す
+                let new_count = self.hand[us.index()].count(captured_pt) as u8;
+                let new_bp_cap = ExtBonaPiece::from_hand(us, captured_pt, new_count);
+                self.piece_list.put_piece_on_hand(piece_no_cap, new_bp_cap);
+
+                // DirtyPiece: 取られた駒（[1]に記録）
+                dirty_piece.piece_no[1] = piece_no_cap;
+                dirty_piece.changed_piece[1] = ChangedBonaPiece {
+                    old_piece: old_bp_cap,
+                    new_piece: new_bp_cap,
+                };
+                dirty_piece.dirty_num = 2;
+            } else {
+                dirty_piece.dirty_num = 1;
             }
             new_state.captured_piece = captured;
 
@@ -1009,27 +1023,16 @@ impl Position {
                 dirty_piece.king_moved[us.index()] = true;
             }
 
-            // DirtyPiece: 移動した駒
-            // 合法手では溢れないため戻り値を無視
-            let _ = dirty_piece.push_piece(ChangedPiece {
-                color: us,
-                old_piece: pc,
-                old_sq: Some(from),
-                new_piece: moved_after_pc,
-                new_sq: Some(to),
-            });
+            // PieceList: 動いた駒を新位置に更新
+            let new_bp_moved = ExtBonaPiece::from_board(moved_after_pc, to);
+            self.piece_list.put_piece_on_board(piece_no_moved, new_bp_moved, to);
 
-            // DirtyPiece: 取った駒（盤上から消える）
-            if captured.is_some() {
-                // 合法手では溢れないため戻り値を無視
-                let _ = dirty_piece.push_piece(ChangedPiece {
-                    color: them,
-                    old_piece: captured,
-                    old_sq: Some(to),
-                    new_piece: Piece::NONE,
-                    new_sq: None,
-                });
-            }
+            // DirtyPiece: 動いた駒（[0]に記録）
+            dirty_piece.piece_no[0] = piece_no_moved;
+            dirty_piece.changed_piece[0] = ChangedBonaPiece {
+                old_piece: old_bp_moved,
+                new_piece: new_bp_moved,
+            };
         }
 
         // do_move直後にTTをprefetch（YaneuraOu準拠）
@@ -1182,10 +1185,17 @@ impl Position {
             let to = m.to();
             let moved_pc = self.piece_on(to);
 
+            // PieceList: 盤上 → 手駒に戻す
+            let piece_no = self.piece_list.piece_no_of_board(to);
+
             // 盤上から除去
             self.remove_piece_internal(to);
             // 手駒に戻す
             self.hand[us.index()] = self.hand[us.index()].add(pt);
+
+            let new_count = self.hand[us.index()].count(pt) as u8;
+            let hand_bp = ExtBonaPiece::from_hand(us, pt, new_count);
+            self.piece_list.put_piece_on_hand(piece_no, hand_bp);
 
             if update_board_effects {
                 let occupied_after = self.occupied();
@@ -1207,15 +1217,31 @@ impl Position {
                 moved_pc
             };
 
+            // PieceList: 動いた駒を from に戻す
+            let piece_no_moved = self.piece_list.piece_no_of_board(to);
+            let from_bp = ExtBonaPiece::from_board(original_pc, from);
+
             if captured.is_some() {
+                let cap_pt = captured.piece_type().unpromote();
+
+                // PieceList: 手駒から取られた駒を盤上に復元
+                let hand_count = self.hand[us.index()].count(cap_pt) as u8;
+                let hand_bp_fb =
+                    crate::nnue::BonaPiece::from_hand_piece(Color::Black, us, cap_pt, hand_count);
+                let piece_no_cap = self.piece_list.piece_no_of_hand(hand_bp_fb);
+                let cap_board_bp = ExtBonaPiece::from_board(captured, to);
+
                 // 駒を元の位置に戻す
                 self.remove_piece_internal(to);
                 self.put_piece_internal(captured, to);
                 // 手駒から除去
-                let cap_pt = captured.piece_type().unpromote();
                 self.hand[us.index()] = self.hand[us.index()].sub(cap_pt);
 
                 self.put_piece_internal(original_pc, from);
+
+                // PieceList 更新
+                self.piece_list.put_piece_on_board(piece_no_cap, cap_board_bp, to);
+                self.piece_list.put_piece_on_board(piece_no_moved, from_bp, from);
 
                 // 玉の移動を戻す
                 if original_pc.piece_type() == PieceType::King {
@@ -1239,6 +1265,9 @@ impl Position {
                 // 駒を元の位置に戻す
                 self.remove_piece_internal(to);
                 self.put_piece_internal(original_pc, from);
+
+                // PieceList 更新
+                self.piece_list.put_piece_on_board(piece_no_moved, from_bp, from);
 
                 // 玉の移動を戻す
                 if original_pc.piece_type() == PieceType::King {
@@ -1646,6 +1675,7 @@ mod tests {
         pos.put_piece(Piece::W_ROOK, rook);
         pos.put_piece(Piece::B_GOLD, blocker);
         pos.put_piece(Piece::B_KNIGHT, knight);
+        pos.init_piece_list();
 
         pos.update_blockers_and_pinners();
         pos.update_check_squares();
@@ -1688,6 +1718,7 @@ mod tests {
         pos.put_piece(Piece::B_ROOK, br);
         pos.put_piece(Piece::B_GOLD, b_blocker);
         pos.put_piece(Piece::W_PAWN, w_target);
+        pos.init_piece_list();
         pos.side_to_move = Color::Black;
         pos.update_blockers_and_pinners();
         pos.update_check_squares();
@@ -1717,6 +1748,7 @@ mod tests {
         pos.put_piece(Piece::W_KING, wk);
         pos.king_square[Color::White.index()] = wk;
         pos.put_piece(Piece::W_ROOK, wr);
+        pos.init_piece_list();
         pos.side_to_move = Color::Black;
         pos.update_blockers_and_pinners();
         pos.update_check_squares();
@@ -1830,6 +1862,7 @@ mod tests {
 
         // 先手に歩を持たせる
         pos.hand[Color::Black.index()] = pos.hand[Color::Black.index()].add(PieceType::Pawn);
+        pos.init_piece_list();
 
         // 5五歩打ち
         let to = Square::new(File::File5, Rank::Rank5);
@@ -1862,6 +1895,7 @@ mod tests {
         pos.put_piece(Piece::W_KING, sq51);
         pos.king_square[Color::Black.index()] = sq59;
         pos.king_square[Color::White.index()] = sq51;
+        pos.init_piece_list();
 
         // 7六歩
         let m = Move::new_move(sq77, sq76, false);
@@ -1894,6 +1928,7 @@ mod tests {
         pos.put_piece(Piece::W_KING, sq51);
         pos.king_square[Color::Black.index()] = sq59;
         pos.king_square[Color::White.index()] = sq51;
+        pos.init_piece_list();
 
         // 7五歩（取る）
         let m = Move::new_move(sq76, sq75, false);
@@ -1927,6 +1962,7 @@ mod tests {
         pos.put_piece(Piece::W_KING, sq51);
         pos.king_square[Color::Black.index()] = sq59;
         pos.king_square[Color::White.index()] = sq51;
+        pos.init_piece_list();
 
         // 2二歩成
         let m = Move::new_move(sq23, sq22, true);
@@ -1986,6 +2022,7 @@ mod tests {
         pos.king_square[Color::Black.index()] = b_king;
         pos.king_square[Color::White.index()] = w_king;
         pos.hand[Color::Black.index()] = pos.hand[Color::Black.index()].add(PieceType::Gold);
+        pos.init_piece_list();
         // check_squares の更新（gives_check() が正しく動作するために必要）
         pos.update_check_squares();
 

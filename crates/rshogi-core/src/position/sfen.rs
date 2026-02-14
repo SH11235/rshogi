@@ -1,6 +1,8 @@
 //! SFEN形式の解析・出力
 
 use crate::eval::material::compute_material_value;
+use crate::nnue::piece_list::piece_number_base;
+use crate::nnue::{ExtBonaPiece, PieceNumber};
 use crate::types::{Color, File, Piece, PieceType, Rank, Square};
 
 use super::pos::{is_minor_piece, Position};
@@ -75,6 +77,9 @@ impl Position {
         } else {
             self.game_ply = 1;
         }
+
+        // PieceList の初期化
+        self.init_piece_list();
 
         // ハッシュ値の計算
         self.compute_hash();
@@ -298,6 +303,56 @@ impl Position {
         result
     }
 
+    /// PieceList を盤面と手駒から初期化
+    ///
+    /// 駒種ごとに PieceNumber カウンタを管理し、盤面走査 → 手駒走査の順で構築する。
+    pub(crate) fn init_piece_list(&mut self) {
+        use crate::nnue::piece_list::PieceList;
+
+        self.piece_list = PieceList::new();
+
+        // 駒種ごとの PieceNumber カウンタ（[base_index] → 割り当て済み枚数）
+        // 8エントリ: 歩,香,桂,銀,金,角,飛,玉
+        let mut counters = [0u8; 8];
+
+        // 盤上の駒を走査
+        for sq_idx in 0..Square::NUM {
+            // SAFETY: sq_idx は 0..81 の範囲内
+            let sq = unsafe { Square::from_u8_unchecked(sq_idx as u8) };
+            let pc = self.piece_on(sq);
+            if pc.is_none() {
+                continue;
+            }
+
+            let pt = pc.piece_type();
+            let base = piece_number_base(pt);
+            let raw_pt = pt.unpromote() as u8;
+            let base_idx = super::sfen::pt_to_counter_index(raw_pt);
+            let piece_no = PieceNumber(base + counters[base_idx]);
+            counters[base_idx] += 1;
+
+            let bp = ExtBonaPiece::from_board(pc, sq);
+            self.piece_list.put_piece_on_board(piece_no, bp, sq);
+        }
+
+        // 手駒を走査
+        for color in [Color::Black, Color::White] {
+            for pt in PieceType::HAND_PIECES {
+                let count = self.hand[color.index()].count(pt) as u8;
+                for i in 1..=count {
+                    let base = piece_number_base(pt);
+                    let raw_pt = pt as u8;
+                    let base_idx = pt_to_counter_index(raw_pt);
+                    let piece_no = PieceNumber(base + counters[base_idx]);
+                    counters[base_idx] += 1;
+
+                    let bp = ExtBonaPiece::from_hand(color, pt, i);
+                    self.piece_list.put_piece_on_hand(piece_no, bp);
+                }
+            }
+        }
+    }
+
     /// ハッシュ値を計算
     pub(crate) fn compute_hash(&mut self) {
         let mut board_key = 0u64;
@@ -429,6 +484,25 @@ fn sfen_hand_char_to_piece(c: char) -> Result<(Color, PieceType), SfenError> {
     };
 
     Ok((color, pt))
+}
+
+/// PieceType(生駒) → counter配列のインデックスへの変換
+///
+/// Pawn(1)→0, Lance(2)→1, Knight(3)→2, Silver(4)→3,
+/// Bishop(5)→5, Rook(6)→6, Gold(7)→4, King(8)→7
+fn pt_to_counter_index(raw_pt: u8) -> usize {
+    const TABLE: [u8; 9] = [
+        u8::MAX, // 0: unused
+        0,       // 1: Pawn
+        1,       // 2: Lance
+        2,       // 3: Knight
+        3,       // 4: Silver
+        5,       // 5: Bishop
+        6,       // 6: Rook
+        4,       // 7: Gold
+        7,       // 8: King
+    ];
+    TABLE[raw_pt as usize] as usize
 }
 
 /// 手駒で持てる枚数の上限を返す

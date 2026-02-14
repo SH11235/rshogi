@@ -8,8 +8,10 @@
 //! AccumulatorStack は探索時の Accumulator と DirtyPiece を管理するスタック。
 //! StateInfo から Accumulator を分離し、do_move での初期化コストを削減する。
 
+use super::bona_piece::ExtBonaPiece;
 use super::constants::{NUM_REFRESH_TRIGGERS, TRANSFORMED_FEATURE_DIMENSIONS};
-use crate::types::{Color, Piece, PieceType, Square, Value, MAX_PLY};
+use super::piece_list::PieceNumber;
+use crate::types::{Color, Value, MAX_PLY};
 use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
@@ -328,38 +330,33 @@ impl Accumulator {
 }
 
 // =============================================================================
-// DirtyPiece - 差分更新用の駒移動情報
+// DirtyPiece - 差分更新用の駒移動情報（PieceNumber + ExtBonaPiece ベース）
 // =============================================================================
 
-/// 差分更新用の駒移動情報（固定長バッファでヒープ確保を回避）
+/// 差分更新用の駒移動情報（YaneuraOu 準拠の新形式）
+///
+/// PieceNumber で変化した駒を識別し、old/new の ExtBonaPiece ペアで
+/// 盤上駒・手駒の区別なく統一的に変化を表現する。
 #[derive(Clone, Copy)]
 pub struct DirtyPiece {
-    /// 変化した駒（最大3つ: 動いた駒 + 取られた駒）
-    pieces: [ChangedPiece; Self::MAX_PIECES],
-    /// 有効な pieces 要素数
-    pieces_len: u8,
-    /// 手駒の変化（最大2つ: 打ち駒 or 取り駒による変化）
-    hand_changes: [HandChange; Self::MAX_HAND_CHANGES],
-    /// 有効な hand_changes 要素数
-    hand_changes_len: u8,
+    /// 変化した駒の PieceNumber（最大2つ: 動いた駒 + 取られた/打った駒）
+    pub piece_no: [PieceNumber; 2],
+    /// old/new ExtBonaPiece ペア
+    pub changed_piece: [ChangedBonaPiece; 2],
+    /// 変化した駒数 (0, 1 or 2)
+    pub dirty_num: u8,
     /// 玉が動いたかどうか [Color]
     pub king_moved: [bool; Color::NUM],
 }
 
 impl DirtyPiece {
-    /// pieces の最大要素数
-    pub const MAX_PIECES: usize = 3;
-    /// hand_changes の最大要素数
-    pub const MAX_HAND_CHANGES: usize = 2;
-
-    /// 新しい DirtyPiece を作成
+    /// 新しい DirtyPiece を作成（変化なし）
     #[inline]
     pub const fn new() -> Self {
         Self {
-            pieces: [ChangedPiece::EMPTY; Self::MAX_PIECES],
-            pieces_len: 0,
-            hand_changes: [HandChange::EMPTY; Self::MAX_HAND_CHANGES],
-            hand_changes_len: 0,
+            piece_no: [PieceNumber::NONE; 2],
+            changed_piece: [ChangedBonaPiece::EMPTY; 2],
+            dirty_num: 0,
             king_moved: [false; Color::NUM],
         }
     }
@@ -367,55 +364,8 @@ impl DirtyPiece {
     /// 情報をクリア
     #[inline]
     pub fn clear(&mut self) {
-        self.pieces_len = 0;
-        self.hand_changes_len = 0;
+        self.dirty_num = 0;
         self.king_moved = [false; Color::NUM];
-    }
-
-    /// 駒変化を追加
-    ///
-    /// 容量を超える場合は追加を無視する（安全のため）。
-    /// 戻り値: 追加に成功した場合は true、容量オーバーで無視した場合は false
-    #[inline]
-    #[must_use]
-    pub fn push_piece(&mut self, piece: ChangedPiece) -> bool {
-        let idx = self.pieces_len as usize;
-        if idx >= Self::MAX_PIECES {
-            debug_assert!(false, "DirtyPiece::push_piece overflow: idx={idx}");
-            return false;
-        }
-        self.pieces[idx] = piece;
-        self.pieces_len += 1;
-        true
-    }
-
-    /// 手駒変化を追加
-    ///
-    /// 容量を超える場合は追加を無視する（安全のため）。
-    /// 戻り値: 追加に成功した場合は true、容量オーバーで無視した場合は false
-    #[inline]
-    #[must_use]
-    pub fn push_hand_change(&mut self, change: HandChange) -> bool {
-        let idx = self.hand_changes_len as usize;
-        if idx >= Self::MAX_HAND_CHANGES {
-            debug_assert!(false, "DirtyPiece::push_hand_change overflow: idx={idx}");
-            return false;
-        }
-        self.hand_changes[idx] = change;
-        self.hand_changes_len += 1;
-        true
-    }
-
-    /// 駒変化のスライスを取得
-    #[inline]
-    pub fn pieces(&self) -> &[ChangedPiece] {
-        &self.pieces[..self.pieces_len as usize]
-    }
-
-    /// 手駒変化のスライスを取得
-    #[inline]
-    pub fn hand_changes(&self) -> &[HandChange] {
-        &self.hand_changes[..self.hand_changes_len as usize]
     }
 }
 
@@ -425,48 +375,20 @@ impl Default for DirtyPiece {
     }
 }
 
-/// 1 駒分の変更情報
+/// 1 駒分の BonaPiece 変更情報（old → new）
 #[derive(Clone, Copy)]
-pub struct ChangedPiece {
-    /// 駒の色
-    pub color: Color,
-    /// 変更前の駒（盤上に無ければ Piece::NONE）
-    pub old_piece: Piece,
-    /// 変更前の位置（盤上に無ければ None）
-    pub old_sq: Option<Square>,
-    /// 変更後の駒（盤上に無ければ Piece::NONE）
-    pub new_piece: Piece,
-    /// 変更後の位置（盤上に無ければ None）
-    pub new_sq: Option<Square>,
+pub struct ChangedBonaPiece {
+    /// 変更前の ExtBonaPiece
+    pub old_piece: ExtBonaPiece,
+    /// 変更後の ExtBonaPiece
+    pub new_piece: ExtBonaPiece,
 }
 
-impl ChangedPiece {
-    /// 空の ChangedPiece（固定長配列の初期化用）
+impl ChangedBonaPiece {
+    /// 空の ChangedBonaPiece（固定長配列の初期化用）
     pub const EMPTY: Self = Self {
-        color: Color::Black,
-        old_piece: Piece::NONE,
-        old_sq: None,
-        new_piece: Piece::NONE,
-        new_sq: None,
-    };
-}
-
-/// 手駒の変化情報
-#[derive(Clone, Copy)]
-pub struct HandChange {
-    pub owner: Color,
-    pub piece_type: PieceType,
-    pub old_count: u8,
-    pub new_count: u8,
-}
-
-impl HandChange {
-    /// 空の HandChange（固定長配列の初期化用）
-    pub const EMPTY: Self = Self {
-        owner: Color::Black,
-        piece_type: PieceType::Pawn,
-        old_count: 0,
-        new_count: 0,
+        old_piece: ExtBonaPiece::ZERO,
+        new_piece: ExtBonaPiece::ZERO,
     };
 }
 
@@ -732,31 +654,9 @@ mod tests {
     #[test]
     fn test_dirty_piece_new() {
         let dp = DirtyPiece::new();
-        assert_eq!(dp.pieces().len(), 0);
-        assert_eq!(dp.hand_changes().len(), 0);
+        assert_eq!(dp.dirty_num, 0);
         assert!(!dp.king_moved[0]);
         assert!(!dp.king_moved[1]);
-    }
-
-    #[test]
-    fn test_dirty_piece_push() {
-        let mut dp = DirtyPiece::new();
-        let _ = dp.push_piece(ChangedPiece {
-            color: Color::Black,
-            old_piece: Piece::NONE,
-            old_sq: None,
-            new_piece: Piece::NONE,
-            new_sq: Some(Square::SQ_11),
-        });
-        assert_eq!(dp.pieces().len(), 1);
-
-        let _ = dp.push_hand_change(HandChange {
-            owner: Color::Black,
-            piece_type: PieceType::Pawn,
-            old_count: 1,
-            new_count: 0,
-        });
-        assert_eq!(dp.hand_changes().len(), 1);
     }
 
     #[test]

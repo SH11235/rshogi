@@ -18,37 +18,8 @@ use crate::types::{Color, Square};
 // const FE_HAND_END: usize = 90;
 // const FE_OLD_END: usize = 1548; // e_dragon + 81 = 1467 + 81
 
-/// 先手王の開始位置
-pub const F_KING: usize = 1548;
-
-/// 後手王の開始位置
-pub const E_KING: usize = 1629;
-
 /// HalfKAの入力平面数（1548 + 81 * 2 = 1710）
 pub const PIECE_INPUTS: usize = 1548 + 81 * 2;
-
-/// 王のBonaPieceを生成（HalfKA用）
-///
-/// HalfKAでは両方の王を特徴量に含める。
-/// - is_friend=true: F_KING + sq_index（自玉）
-/// - is_friend=false: E_KING + sq_index（敵玉）
-#[inline]
-pub fn king_bonapiece(sq_index: usize, is_friend: bool) -> BonaPiece {
-    let base = if is_friend { F_KING } else { E_KING };
-    BonaPiece::new((base + sq_index) as u16)
-}
-
-// =============================================================================
-// BonaPieceHalfKA (HalfKA 用BonaPieceのラッパー)
-// =============================================================================
-
-use super::bona_piece::BonaPiece;
-
-/// HalfKA用のBonaPiece
-///
-/// 内部的にはHalfKPと同じBonaPieceレイアウトを使用するが、
-/// 王の特徴量は king_bonapiece で追加する。
-pub type BonaPieceHalfKA = BonaPiece;
 
 // =============================================================================
 // HalfKAインデックス計算（Non-mirror）
@@ -82,8 +53,6 @@ mod tests {
 
     #[test]
     fn test_constants() {
-        assert_eq!(F_KING, 1548);
-        assert_eq!(E_KING, 1629);
         assert_eq!(PIECE_INPUTS, 1710);
     }
 

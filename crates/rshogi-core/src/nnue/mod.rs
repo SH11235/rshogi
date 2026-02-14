@@ -49,18 +49,17 @@ pub(crate) mod network_halfka;
 pub(crate) mod network_halfka_hm;
 pub(crate) mod network_halfkp;
 mod network_layer_stacks;
+pub mod piece_list;
 pub mod prelude;
 pub mod spec;
 pub mod stats;
 
-pub use accumulator::{
-    Accumulator, AccumulatorStack, ChangedPiece, DirtyPiece, HandChange, StackEntry,
-};
+pub use accumulator::{Accumulator, AccumulatorStack, ChangedBonaPiece, DirtyPiece, StackEntry};
 pub use accumulator_layer_stacks::{
     AccumulatorLayerStacks, AccumulatorStackLayerStacks, StackEntryLayerStacks,
 };
 pub use accumulator_stack_variant::AccumulatorStackVariant;
-pub use bona_piece::{halfkp_index, BonaPiece, FE_END};
+pub use bona_piece::{halfkp_index, BonaPiece, ExtBonaPiece, FE_END};
 pub use bona_piece_halfka_hm::{
     halfka_index, is_hm_mirror, king_bucket, pack_bonapiece, BonaPieceHalfKA_hm, E_KING,
     FE_HAND_END, FE_OLD_END, F_KING, PIECE_INPUTS,
@@ -85,6 +84,7 @@ pub use network::{
     NNUENetwork, NnueFormatInfo,
 };
 pub use network_layer_stacks::NetworkLayerStacks;
+pub use piece_list::{PieceList, PieceNumber};
 
 // const generics 版統一実装（内部型は pub(crate) に隠蔽）
 pub use activation::{detect_activation_from_arch, CReLU, FtActivation, PairwiseCReLU, SCReLU};
