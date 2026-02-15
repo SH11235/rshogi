@@ -1275,7 +1275,6 @@ impl Search {
                         - failed_high_cnt
                         - (3 * (self.search_again_counter + 1) / 4))
                         .max(1);
-
                     // pv_idx=0の場合は従来のsearch_rootを使用（後方互換性）
                     // pv_idx>0の場合のみsearch_root_for_pvを使用
                     let score = if pv_idx == 0 {

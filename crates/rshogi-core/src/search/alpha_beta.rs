@@ -1147,13 +1147,19 @@ impl SearchWorker {
                 return Value::ZERO;
             }
 
-            // YaneuraOu準拠: Root move score/PV handling (yaneuraou-search.cpp:3727-3810)
+            // YaneuraOu準拠: averageScore/meanSquaredScoreは全rootムーブに対して更新
+            // (yaneuraou-search.cpp:3842-3847 — if(moveCount==1||value>alpha)の外側)
+            {
+                let rm = &mut self.state.root_moves[rm_idx];
+                rm.accumulate_score_stats(value);
+            }
+
+            // YaneuraOu準拠: Root move score/PV handling (yaneuraou-search.cpp:3852-3906)
             // moveCount == 1 (第1手) || value > alpha の場合にスコアとPVを更新
             if move_count == 1 || value > alpha {
                 let rm = &mut self.state.root_moves[rm_idx];
                 rm.score = value;
                 rm.sel_depth = self.state.sel_depth;
-                rm.accumulate_score_stats(value);
                 // PVを更新（第1手はfail lowでも常に更新 — YO準拠）
                 rm.pv.truncate(1);
                 rm.pv.extend_from_slice(&self.state.stack[1].pv);
