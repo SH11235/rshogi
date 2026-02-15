@@ -357,9 +357,11 @@ impl Position {
     }
 
     /// 千日手/優劣局面判定（do_move 時に計算した情報を使用）
+    /// YaneuraOu準拠: repetition が負値（4回目以降）の場合は ply に関わらず常に検出する
+    /// （負値 < 正の ply で無条件 true になる設計）
     pub fn repetition_state(&self, ply: i32) -> RepetitionState {
         let rep = self.cur_state().repetition;
-        if rep != 0 && rep.abs() < ply {
+        if rep != 0 && rep < ply {
             return self.cur_state().repetition_type;
         }
 
@@ -1089,8 +1091,8 @@ impl Position {
         } else {
             new_state.continuous_check[us.index()] = 0;
         }
-        // 受け手側はリセット
-        new_state.continuous_check[them.index()] = 0;
+        // 受け手側は前の値をそのまま引き継ぐ（YaneuraOu準拠: memcpyで自動的にコピーされる）
+        // rshogi では partial_clone() で既にコピー済みなので、リセットしない
 
         // 5. 手番交代
         self.side_to_move = them;
@@ -1391,8 +1393,6 @@ impl Position {
         } else {
             new_state.continuous_check[us.index()] = 0;
         }
-        // 受け手側はリセット（do_moveと同様）
-        new_state.continuous_check[them.index()] = 0;
 
         // 7. 手番交代
         self.side_to_move = them;
@@ -1449,8 +1449,12 @@ impl Position {
         let mut repetition_type = RepetitionState::None;
 
         if max_back >= 4 {
-            let mut dist = 2;
-            let mut st_idx_opt = prev_idx_opt.and_then(|idx| self.state_stack[idx].previous);
+            // YaneuraOu準拠: 千日手は最短4手で成立するため4手前から比較開始
+            let mut dist = 4;
+            let mut st_idx_opt = prev_idx_opt
+                .and_then(|idx| self.state_stack[idx].previous) // 2手前
+                .and_then(|idx| self.state_stack[idx].previous) // 3手前
+                .and_then(|idx| self.state_stack[idx].previous); // 4手前
 
             while dist <= max_back {
                 if let Some(st_idx) = st_idx_opt {

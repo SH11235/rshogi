@@ -741,8 +741,11 @@ pub fn draw_value(state: RepetitionState, _stm: crate::types::Color) -> Value {
         RepetitionState::Draw => Value::DRAW,
         RepetitionState::Win => Value::MATE,
         RepetitionState::Lose => -Value::MATE,
-        RepetitionState::Superior => Value::MATE_IN_MAX_PLY,
-        RepetitionState::Inferior => Value::MATED_IN_MAX_PLY,
+        // YaneuraOu準拠: VALUE_SUPERIOR = VALUE_TB_WIN_IN_MAX_PLY - 1
+        // 詰みスコアの閾値より1小さい値を使い、is_win()/is_loss()に掛からないようにする。
+        // これにより value_from_tt/value_to_tt でのply補正が適用されない。
+        RepetitionState::Superior => Value::new(Value::MATE_IN_MAX_PLY.raw() - 1),
+        RepetitionState::Inferior => Value::new(Value::MATED_IN_MAX_PLY.raw() + 1),
         RepetitionState::None => Value::NONE,
     }
 }

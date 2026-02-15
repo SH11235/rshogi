@@ -77,7 +77,7 @@ pub(super) fn qsearch<const NT: u8>(
         if v != Value::NONE {
             if v == Value::DRAW {
                 let jittered = Value::new(v.raw() + draw_jitter(st.nodes, ctx.tune_params));
-                return value_from_tt(jittered, ply);
+                return jittered;
             }
             return value_from_tt(v, ply);
         }

@@ -1774,6 +1774,29 @@ impl SearchWorker {
         }
 
         // =====================================================================
+        // Step 2. Check for repetition (千日手チェック)
+        // =====================================================================
+        // YaneuraOu準拠: TTプローブの前に千日手を判定する (yaneuraou-search.cpp:2100)
+        if NT != NodeType::Root as u8 {
+            let rep_state = pos.repetition_state(ply);
+            if rep_state.is_repetition() || rep_state.is_superior_inferior() {
+                let v = draw_value(rep_state, pos.side_to_move());
+                if v != Value::NONE {
+                    if rep_state == RepetitionState::Draw {
+                        let jittered = Value::new(v.raw() + draw_jitter(st.nodes, ctx.tune_params));
+                        return jittered;
+                    }
+                    return value_from_tt(v, ply);
+                }
+            }
+
+            // 引き分け手数ルール（YaneuraOu準拠、MaxMovesToDrawオプション）
+            if ctx.max_moves_to_draw > 0 && pos.game_ply() > ctx.max_moves_to_draw {
+                return Value::new(Value::DRAW.raw() + draw_jitter(st.nodes, ctx.tune_params));
+            }
+        }
+
+        // =====================================================================
         // Step 3. Mate Distance Pruning
         // =====================================================================
         // 詰みまでの手数による枝刈り。
