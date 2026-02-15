@@ -598,6 +598,278 @@ pub fn generate_evasions(pos: &Position, buffer: &mut ExtMoveBuffer) -> usize {
     buffer.len()
 }
 
+/// 駒1枚の利きを返す
+#[inline]
+fn piece_effect(pt: PieceType, us: Color, from: Square, occupied: Bitboard) -> Bitboard {
+    match pt {
+        PieceType::Pawn => pawn_effect(us, from),
+        PieceType::Lance => lance_effect(us, from, occupied),
+        PieceType::Knight => knight_effect(us, from),
+        PieceType::Silver => silver_effect(us, from),
+        PieceType::Gold
+        | PieceType::ProPawn
+        | PieceType::ProLance
+        | PieceType::ProKnight
+        | PieceType::ProSilver => gold_effect(us, from),
+        PieceType::Bishop => bishop_effect(from, occupied),
+        PieceType::Rook => rook_effect(from, occupied),
+        PieceType::Horse => horse_effect(from, occupied),
+        PieceType::Dragon => dragon_effect(from, occupied),
+        PieceType::King => king_effect(from),
+    }
+}
+
+/// 1つの駒から指定targetへの移動手を生成（成り処理込み）
+/// YaneuraOu movegen.cpp の make_move_target_general 相当
+/// 開き王手用: targetは「pin_lineから外れた移動先」
+fn generate_moves_from_sq(
+    pos: &Position,
+    buffer: &mut ExtMoveBuffer,
+    from: Square,
+    target: Bitboard,
+    include_non_promotions: bool,
+    pawn_promo_mode: PromotionMode,
+) {
+    let us = pos.side_to_move();
+    let pc = pos.piece_on(from);
+    let pt = pc.piece_type();
+    let occupied = pos.occupied();
+    let effect = piece_effect(pt, us, from, occupied);
+    let attacks = effect & target;
+    if attacks.is_empty() {
+        return;
+    }
+
+    let promo_ranks = enemy_field(us);
+    let from_in_promo = promo_ranks.contains(from);
+
+    match pt {
+        PieceType::Pawn => {
+            let rank1 = rank1_bb(us);
+            for to in attacks.iter() {
+                let in_promo = promo_ranks.contains(to);
+                match (in_promo, pawn_promo_mode) {
+                    (true, PromotionMode::PromoteOnly) => {
+                        add_move(
+                            buffer,
+                            Move::new_move_with_piece(from, to, true, pc.promote().unwrap()),
+                        );
+                    }
+                    (true, PromotionMode::Both) => {
+                        add_move(
+                            buffer,
+                            Move::new_move_with_piece(from, to, true, pc.promote().unwrap()),
+                        );
+                        if !rank1.contains(to) {
+                            add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
+                        }
+                    }
+                    (false, _) => {
+                        add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
+                    }
+                }
+            }
+        }
+        PieceType::Lance => {
+            let rank1 = rank1_bb(us);
+            let rank12 = rank12_bb(us);
+            let non_promo_mask = if include_non_promotions {
+                !rank1
+            } else {
+                !rank12
+            };
+            let promoted_pc = pc.promote().unwrap();
+            // Pass 1: 成り手
+            for to in (attacks & promo_ranks).iter() {
+                add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
+            }
+            // Pass 2: 不成手
+            for to in (attacks & non_promo_mask).iter() {
+                add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
+            }
+        }
+        PieceType::Knight => {
+            let rank12 = rank12_bb(us);
+            let promoted_pc = pc.promote().unwrap();
+            for to in attacks.iter() {
+                if promo_ranks.contains(to) {
+                    add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
+                    if !rank12.contains(to) {
+                        add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
+                    }
+                } else {
+                    add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
+                }
+            }
+        }
+        PieceType::Silver => {
+            let promoted_pc = pc.promote().unwrap();
+            if from_in_promo {
+                for to in attacks.iter() {
+                    add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
+                    add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
+                }
+            } else {
+                for to in (attacks & promo_ranks).iter() {
+                    add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
+                    add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
+                }
+                for to in (attacks & !promo_ranks).iter() {
+                    add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
+                }
+            }
+        }
+        PieceType::Bishop | PieceType::Rook => {
+            let promoted_pc = pc.promote().unwrap();
+            if from_in_promo {
+                for to in attacks.iter() {
+                    add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
+                    if include_non_promotions {
+                        add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
+                    }
+                }
+            } else {
+                for to in (attacks & promo_ranks).iter() {
+                    add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
+                    if include_non_promotions {
+                        add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
+                    }
+                }
+                for to in (attacks & !promo_ranks).iter() {
+                    add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
+                }
+            }
+        }
+        // 成れない駒（金相当・馬・龍・玉）
+        _ => {
+            for to in attacks.iter() {
+                add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
+            }
+        }
+    }
+}
+
+/// 1つの駒から直接王手となる移動手のみ生成
+/// YaneuraOu movegen.cpp の make_move_check 準拠
+///
+/// 2パス方式:
+///   Pass 1 (成り): effect ∩ check_squares(promoted_pt) ∩ target → 成り手を生成
+///   Pass 2 (不成): effect ∩ check_squares(raw_pt) ∩ target → 不成手を生成
+/// 各パスは独立しており、同一マスに成り/不成の両方が出ることがある。
+fn generate_direct_check_from_sq(
+    pos: &Position,
+    buffer: &mut ExtMoveBuffer,
+    from: Square,
+    target: Bitboard,
+    include_non_promotions: bool,
+    pawn_promo_mode: PromotionMode,
+) {
+    let us = pos.side_to_move();
+    let pc = pos.piece_on(from);
+    let pt = pc.piece_type();
+    let occupied = pos.occupied();
+    let effect = piece_effect(pt, us, from, occupied);
+    let promo_ranks = enemy_field(us);
+    let from_in_promo = promo_ranks.contains(from);
+    if let Some(promoted_pt) = pt.promote() {
+        let promoted_pc = pc.promote().unwrap();
+        let check_sq_promoted = pos.check_squares(promoted_pt);
+        let check_sq_raw = pos.check_squares(pt);
+
+        // --- Pass 1: 成り王手 (YO: make_move_target_pro<..., true>) ---
+        // 成って王手になる移動先
+        let promo_dst = effect & check_sq_promoted & target;
+        // 成り条件: from か to が敵陣
+        let promo_dst = if from_in_promo {
+            promo_dst
+        } else {
+            promo_dst & promo_ranks
+        };
+
+        for to in promo_dst.iter() {
+            add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
+        }
+
+        // --- Pass 2: 不成王手 (YO: make_move_target_pro<..., false>) ---
+        // 不成で王手になる移動先
+        let nonpro_dst = effect & check_sq_raw & target;
+
+        match pt {
+            PieceType::Pawn => {
+                // YO make_move_target_pro<PAWN, false>:
+                //   All=false → !canPromote(Us, to) のみ生成
+                //   All=true  → rank_of(to) != RANK_1 のみ生成
+                let rank1 = rank1_bb(us);
+                let mask = match pawn_promo_mode {
+                    PromotionMode::PromoteOnly => !promo_ranks, // All=false: 非敵陣のみ
+                    PromotionMode::Both => !rank1,              // All=true: 1段目以外
+                };
+                for to in (nonpro_dst & mask).iter() {
+                    add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
+                }
+            }
+            PieceType::Lance => {
+                // YO make_move_target_pro<LANCE, false>:
+                //   All=false → rank >= 3 (先手) つまり !rank12
+                //   All=true  → rank != 1 つまり !rank1
+                let rank1 = rank1_bb(us);
+                let rank12 = rank12_bb(us);
+                let mask = if include_non_promotions {
+                    !rank1
+                } else {
+                    !rank12
+                };
+                for to in (nonpro_dst & mask).iter() {
+                    add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
+                }
+            }
+            PieceType::Knight => {
+                // YO make_move_target_pro<KNIGHT, false>:
+                //   rank >= 3 (先手) つまり !rank12。AllフラグはKNIGHTに影響しない
+                let rank12 = rank12_bb(us);
+                for to in (nonpro_dst & !rank12).iter() {
+                    add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
+                }
+            }
+            PieceType::Silver => {
+                // YO make_move_target_pro<SILVER, false>: 常に生成
+                for to in nonpro_dst.iter() {
+                    add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
+                }
+            }
+            PieceType::Bishop | PieceType::Rook => {
+                // YO make_move_target_pro<BISHOP/ROOK, false>:
+                //   !(canPromote(Us, from) || canPromote(Us, to)) || All
+                //   = 成れない位置、または All=true のとき不成を生成
+                let mask = if include_non_promotions {
+                    Bitboard::ALL // All=true: 常に生成
+                } else if from_in_promo {
+                    Bitboard::EMPTY // from が敵陣: 成り優先で不成は生成しない
+                } else {
+                    !promo_ranks // to が非敵陣のときのみ不成を生成
+                };
+                for to in (nonpro_dst & mask).iter() {
+                    add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
+                }
+            }
+            _ => unreachable!(),
+        }
+    } else {
+        // 成れない駒（金相当・馬・龍）: check_squares(pt) で直接マッチ
+        let check_sq = pos.check_squares(pt);
+        let dst = effect & check_sq & target;
+        for to in dst.iter() {
+            add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
+        }
+    }
+}
+
+/// 王手生成（YaneuraOu movegen.cpp generate_checks 準拠の順序）
+///
+/// 生成順序:
+/// 1. blockers (開き王手候補) を LSB 順に処理
+/// 2. 非 blocker の直接王手候補を LSB 順に処理
+/// 3. 駒打ち王手を PAWN, LANCE, KNIGHT, SILVER, GOLD, BISHOP, ROOK の順
 fn generate_checks(
     pos: &Position,
     buffer: &mut ExtMoveBuffer,
@@ -606,29 +878,115 @@ fn generate_checks(
     quiet_only: bool,
 ) {
     let us = pos.side_to_move();
-    let empties = !pos.occupied();
-    let targets = if quiet_only {
-        GenerateTargets::with_drop(empties, empties)
+    let them = !us;
+    let them_king = pos.king_square(them);
+    let occupied = pos.occupied();
+
+    let target = if quiet_only {
+        !occupied
     } else {
-        GenerateTargets::with_drop(!pos.pieces_c(us), empties)
+        !pos.pieces_c(us)
     };
 
-    let mut temp_buffer = ExtMoveBuffer::new();
-    generate_non_evasions_core(
-        pos,
-        &mut temp_buffer,
-        targets,
-        include_non_promotions,
-        pawn_promo_mode,
-        true,
-    );
+    // YaneuraOu準拠: y = blockers_for_king(Them) & pieces(Us)
+    let blockers = pos.blockers_for_king(them) & pos.pieces_c(us);
 
-    for ext in temp_buffer.iter() {
-        if quiet_only && pos.is_capture(ext.mv) {
-            continue;
+    // --- Phase 1: blockers (開き王手候補) を LSB 順に処理 ---
+    for from in blockers.iter() {
+        let pin_line = line_bb(them_king, from);
+
+        // 開き王手: pin_line から外れる移動先
+        let disc_target = target & !pin_line;
+        generate_moves_from_sq(
+            pos,
+            buffer,
+            from,
+            disc_target,
+            include_non_promotions,
+            pawn_promo_mode,
+        );
+
+        // blocker かつ直接王手候補でもある場合: pin_line 上の直接王手
+        let direct_on_line = target & pin_line;
+        if !direct_on_line.is_empty() {
+            generate_direct_check_from_sq(
+                pos,
+                buffer,
+                from,
+                direct_on_line,
+                include_non_promotions,
+                pawn_promo_mode,
+            );
         }
-        if pos.gives_check(ext.mv) {
-            buffer.push_move(ext.mv);
+    }
+
+    // --- Phase 2: 非 blocker の直接王手候補を LSB 順に処理 ---
+    // 自玉は除外（玉で直接王手は不可能/非合法）
+    let our_king_bb = Bitboard::from_square(pos.king_square(us));
+    let non_blockers = pos.pieces_c(us) & !blockers & !our_king_bb;
+    for from in non_blockers.iter() {
+        generate_direct_check_from_sq(
+            pos,
+            buffer,
+            from,
+            target,
+            include_non_promotions,
+            pawn_promo_mode,
+        );
+    }
+
+    // --- Phase 3: 駒打ち王手 (PAWN, LANCE, KNIGHT, SILVER, GOLD, BISHOP, ROOK 順) ---
+    let empties = !occupied;
+    let hand = pos.hand(us);
+
+    // 歩打ち王手
+    if hand.has(PieceType::Pawn) {
+        let check_target = pos.check_squares(PieceType::Pawn) & empties;
+        if !check_target.is_empty() {
+            // 歩の王手マスは1箇所のみ。二歩/打ち歩詰めチェックはis_legalで行う
+            let rank1 = rank1_bb(us);
+            let our_pawns = pos.pieces(us, PieceType::Pawn);
+            let valid = check_target & !rank1 & pawn_drop_mask(us, our_pawns);
+            let dropped_pc = crate::types::Piece::make(us, PieceType::Pawn);
+            for to in valid.iter() {
+                add_move(buffer, Move::new_drop_with_piece(PieceType::Pawn, to, dropped_pc));
+            }
+        }
+    }
+
+    // 香打ち王手
+    if hand.has(PieceType::Lance) {
+        let check_target = pos.check_squares(PieceType::Lance) & empties;
+        let rank1 = rank1_bb(us);
+        let dropped_pc = crate::types::Piece::make(us, PieceType::Lance);
+        for to in (check_target & !rank1).iter() {
+            add_move(buffer, Move::new_drop_with_piece(PieceType::Lance, to, dropped_pc));
+        }
+    }
+
+    // 桂打ち王手
+    if hand.has(PieceType::Knight) {
+        let check_target = pos.check_squares(PieceType::Knight) & empties;
+        let rank12 = rank12_bb(us);
+        let dropped_pc = crate::types::Piece::make(us, PieceType::Knight);
+        for to in (check_target & !rank12).iter() {
+            add_move(buffer, Move::new_drop_with_piece(PieceType::Knight, to, dropped_pc));
+        }
+    }
+
+    // 銀・金・角・飛打ち王手
+    for pt in [
+        PieceType::Silver,
+        PieceType::Gold,
+        PieceType::Bishop,
+        PieceType::Rook,
+    ] {
+        if hand.has(pt) {
+            let check_target = pos.check_squares(pt) & empties;
+            let dropped_pc = crate::types::Piece::make(us, pt);
+            for to in check_target.iter() {
+                add_move(buffer, Move::new_drop_with_piece(pt, to, dropped_pc));
+            }
         }
     }
 }
@@ -1578,5 +1936,88 @@ mod tests {
             list_without_pass.len() + 1,
             "With pass rights, legal move count should increase by 1"
         );
+    }
+
+    /// generate_checks が旧フィルタ方式と同じ手集合（順序は問わない）を生成するか検証
+    #[test]
+    fn test_generate_checks_set_matches_filter() {
+        use std::collections::HashSet;
+
+        let sfens = [
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            // 7g7f 後
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2",
+            // 中盤想定
+            "ln1gk2nl/1rs1g2b1/pppppp1pp/6p2/9/2P1P4/PP1P1PPPP/1B2G2R1/LNS1KGSNL b - 1",
+            // 手駒あり
+            "4k4/9/9/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b GS 1",
+            // 開き王手可能局面
+            "4k4/4r4/4S4/9/9/9/9/9/4K4 b - 1",
+        ];
+
+        for sfen in &sfens {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).unwrap();
+            if pos.in_check() {
+                continue;
+            }
+
+            for quiet_only in [true, false] {
+                for include_non_promo in [true, false] {
+                    let pawn_mode = if include_non_promo {
+                        PromotionMode::Both
+                    } else {
+                        PromotionMode::PromoteOnly
+                    };
+
+                    // 新コード
+                    let mut buf_new = ExtMoveBuffer::new();
+                    generate_checks(&pos, &mut buf_new, include_non_promo, pawn_mode, quiet_only);
+
+                    // 旧フィルタ方式
+                    let mut buf_old = ExtMoveBuffer::new();
+                    {
+                        let us = pos.side_to_move();
+                        let empties = !pos.occupied();
+                        let targets = if quiet_only {
+                            GenerateTargets::with_drop(empties, empties)
+                        } else {
+                            GenerateTargets::with_drop(!pos.pieces_c(us), empties)
+                        };
+                        let mut temp = ExtMoveBuffer::new();
+                        generate_non_evasions_core(
+                            &pos,
+                            &mut temp,
+                            targets,
+                            include_non_promo,
+                            pawn_mode,
+                            true,
+                        );
+                        for ext in temp.iter() {
+                            if quiet_only && pos.is_capture(ext.mv) {
+                                continue;
+                            }
+                            if pos.gives_check(ext.mv) {
+                                buf_old.push_move(ext.mv);
+                            }
+                        }
+                    }
+
+                    let set_new: HashSet<u16> =
+                        buf_new.as_slice().iter().map(|e| e.mv.raw()).collect();
+                    let set_old: HashSet<u16> =
+                        buf_old.as_slice().iter().map(|e| e.mv.raw()).collect();
+
+                    let missing: Vec<_> = set_old.difference(&set_new).collect();
+                    let extra: Vec<_> = set_new.difference(&set_old).collect();
+
+                    assert!(missing.is_empty() && extra.is_empty(),
+                        "sfen={sfen} quiet_only={quiet_only} include_non_promo={include_non_promo}\n\
+                         missing={missing:?} extra={extra:?}\n\
+                         new_count={} old_count={}",
+                        buf_new.len(), buf_old.len());
+                }
+            }
+        }
     }
 }

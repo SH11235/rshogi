@@ -2297,7 +2297,6 @@ impl SearchWorker {
             let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, ctx.tt);
             nnue_push(st, dirty_piece);
             st.nodes += 1;
-
             // YaneuraOu方式: ContHistKey/ContinuationHistoryを設定
             // ⚠ in_checkは親ノードの王手状態を使用（gives_checkではない）
             // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う

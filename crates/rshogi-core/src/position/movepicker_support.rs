@@ -338,9 +338,10 @@ impl Position {
     // SEE (Static Exchange Evaluation)
     // =========================================================================
 
-    /// SEE >= threshold かどうかを判定（YO準拠: 成りボーナスを考慮しない）
+    /// SEE >= threshold かどうかを判定（YO準拠: swap/resアルゴリズム）
     ///
-    /// 指し手の静的駒交換評価が閾値以上かどうかを高速に判定する。
+    /// YaneuraOu/Stockfish と同じアルゴリズムで静的駒交換評価を判定する。
+    /// 成りボーナスは考慮しない（YO準拠）。
     pub fn see_ge(&self, m: Move, threshold: Value) -> bool {
         // PASSは駒交換が発生しないので >= 0
         if m.is_pass() {
@@ -350,8 +351,8 @@ impl Position {
         let is_drop = m.is_drop();
         let to = m.to();
 
-        // 取られる駒の価値（YO準拠: 成りボーナスは加算しない）
-        // 駒打ちは空きマスに打つので captured_value = 0
+        // YO: swap = PieceValue[piece_on(to)] - threshold
+        // 取られる駒の価値（駒打ちは空きマスに打つので 0）
         let captured_value = if is_drop {
             0
         } else {
@@ -362,73 +363,81 @@ impl Position {
                 0
             }
         };
-        let mut balance = captured_value - threshold.raw();
+        let mut swap = captured_value - threshold.raw();
 
-        // 既にマイナスなら失敗
-        if balance < 0 {
+        // toの駒価値がthreshold未満 → 取り返されなくてもfalse
+        if swap < 0 {
             return false;
         }
 
-        // 次に取られる駒の価値（YO準拠: 成り前の価値を使用）
-        // 駒打ちの場合は打つ駒種の価値を使用
-        let next_victim = if is_drop {
+        // YO: swap = PieceValue[from_pt] - swap
+        // 動かす駒の価値（駒打ちは打つ駒種）
+        let from_value = if is_drop {
             see_piece_value(m.drop_piece_type())
         } else {
             see_piece_value(self.piece_on(m.from()).piece_type())
         };
+        swap = from_value - swap;
 
-        // 駒を取られても閾値を超えるか
-        balance -= next_victim;
-
-        if balance >= 0 {
+        // 動かす駒を取り返されても閾値以上 → true
+        if swap <= 0 {
             return true;
         }
 
-        // 詳細なSEE計算
-        // 駒打ちの場合は from = None（占有ビットのXORをスキップ）
-        let from = if is_drop { None } else { Some(m.from()) };
-        self.see_ge_detailed(to, from, balance, next_victim)
-    }
-
-    /// 詳細なSEE計算（再帰的な駒交換をシミュレート）
-    fn see_ge_detailed(
-        &self,
-        to: Square,
-        from: Option<Square>,
-        mut balance: i32,
-        mut victim_value: i32,
-    ) -> bool {
-        // 移動元と移動先の両方を占有から外す（x-ray攻撃を正しく検出するため）
-        // 駒打ちの場合は from がないので to のみ XOR（YO準拠: from = SQ_NB で無効化）
-        let mut occupied = if let Some(from_sq) = from {
-            self.occupied() ^ Bitboard::from_square(from_sq) ^ Bitboard::from_square(to)
-        } else {
+        // YO: occupied = pieces() ^ from ^ to
+        // 駒打ちの場合は from を無効化（XORしない）
+        let mut occupied = if is_drop {
             self.occupied() ^ Bitboard::from_square(to)
+        } else {
+            self.occupied() ^ Bitboard::from_square(m.from()) ^ Bitboard::from_square(to)
         };
-        let mut stm = !self.side_to_move(); // 相手の手番から開始
-
-        // 初期攻撃者集合（occupiedに依存）
-        let mut attackers = self.attackers_to_occ(to, occupied) & occupied;
+        let mut stm = self.side_to_move();
+        let mut attackers = self.attackers_to_occ(to, occupied);
+        let mut res = 1i32;
 
         loop {
-            // 次に to に利く最も価値の低い駒を探す
-            let our_attackers = attackers & self.pieces_c(stm);
+            stm = !stm;
+            attackers &= occupied;
 
-            if our_attackers.is_empty() {
-                // 取り返す駒がない → 現在の手番の負け
+            let mut stm_attackers = attackers & self.pieces_c(stm);
+            if stm_attackers.is_empty() {
                 break;
             }
 
-            // 最も価値の低い駒を選択
+            // YO: ピン処理 — ピンされた駒は攻撃に参加できない
+            // pinners(~stm): stmの玉をピンしている(!stm側の)駒
+            if !(self.state().pinners[(!stm).index()] & occupied).is_empty() {
+                stm_attackers &= !self.blockers_for_king(stm);
+                if stm_attackers.is_empty() {
+                    break;
+                }
+            }
+
+            res ^= 1;
+
+            // 最も価値の低い攻撃駒を選択
             let (attacker_sq, attacker_value) =
-                self.least_valuable_attacker(our_attackers, stm, to, occupied);
+                self.least_valuable_attacker(stm_attackers, stm, to, occupied);
 
-            // 駒を取り除く
-            let attacker_bb = Bitboard::from_square(attacker_sq);
-            attackers ^= attacker_bb;
-            occupied ^= attacker_bb;
+            // YO: swap = PieceValue[pt] - swap; if (swap < res) break;
+            swap = attacker_value - swap;
+            if swap < res {
+                break;
+            }
 
-            // attacker_sq が遮っていたラインの背後の利きを追加する（やねうら王 SEE と同様）
+            // 玉で取る場合の特別処理
+            if attacker_value == see_piece_value(PieceType::King) {
+                return if !(attackers & self.pieces_c(!stm)).is_empty() {
+                    res ^ 1 != 0
+                } else {
+                    res != 0
+                };
+            }
+
+            // 駒をoccupiedから取り除く
+            occupied ^= Bitboard::from_square(attacker_sq);
+
+            // X-ray攻撃の追加: attacker_sqが遮っていた背後の駒を追加
             if let Some(dir) = direct_of(to, attacker_sq) {
                 let ray = ray_effect(dir, to, occupied);
                 let extras = match dir {
@@ -451,32 +460,11 @@ impl Position {
                         ray & (self.pieces_pt(PieceType::Rook) | self.pieces_pt(PieceType::Dragon))
                     }
                 };
-                attackers |= extras & occupied;
+                attackers |= extras;
             }
-
-            // バランスを更新
-            balance = -balance - 1 - victim_value;
-            victim_value = attacker_value;
-
-            if balance >= 0 {
-                // pinされた駒でも、相手が玉なら勝ち確定
-                if attacker_value == see_piece_value(PieceType::King) {
-                    // 相手に取り返す駒があるかチェック
-                    let their_attackers = attackers & self.pieces_c(!stm);
-                    if !their_attackers.is_empty() {
-                        // 相手に取り返す駒がある場合は、バランスを反転
-                        stm = !stm;
-                        continue;
-                    }
-                }
-                break;
-            }
-
-            stm = !stm;
         }
 
-        // 最後に手番を持っていた側が勝ち
-        stm != self.side_to_move()
+        res != 0
     }
 
     /// 最も価値の低い攻撃駒を探す（YO準拠: 成りは考慮しない）
