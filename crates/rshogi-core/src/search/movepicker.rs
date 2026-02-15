@@ -462,6 +462,7 @@ impl MovePicker {
                         self.moves.set_len(self.end_cur);
 
                         self.cur = self.end_captures;
+
                         self.score_quiets(pos, history);
 
                         // YaneuraOu準拠: 深さベースの閾値で部分ソート
@@ -630,29 +631,40 @@ impl MovePicker {
             let mut value = 0i32;
 
             // ButterflyHistory (×2)
-            value += 2 * history.main_history.get(us, m) as i32;
+            let main_h = 2 * history.main_history.get(us, m) as i32;
+            value += main_h;
 
             // PawnHistory (×2)
-            value += 2 * history.pawn_history.get(pawn_idx, pc, to) as i32;
+            let pawn_h = 2 * history.pawn_history.get(pawn_idx, pc, to) as i32;
+            value += pawn_h;
 
             // ContinuationHistory (6個のうち5個を使用)
             // インデックス4 (ply-5) はスキップ: YaneuraOu準拠で、ply-5は統計的に有効性が低いため除外
             // 参照: yaneuraou-search.cpp の continuationHistory 配列の使用箇所
+            let mut cont_h = 0i32;
             for (idx, weight) in [(0, 1), (1, 1), (2, 1), (3, 1), (5, 1)] {
                 let ch = self.cont_history(idx);
-                value += weight * ch.get(pc, to) as i32;
+                cont_h += weight * ch.get(pc, to) as i32;
             }
+            value += cont_h;
 
             // 王手ボーナス
-            if pos.check_squares(pt).contains(to) && pos.see_ge(m, Value::new(-75)) {
-                value += 16384;
-            }
+            let check_bonus =
+                if pos.check_squares(pt).contains(to) && pos.see_ge(m, Value::new(-75)) {
+                    16384
+                } else {
+                    0
+                };
+            value += check_bonus;
 
             // LowPlyHistory
-            if self.ply < LOW_PLY_HISTORY_SIZE as i32 {
+            let low_ply_h = if self.ply < LOW_PLY_HISTORY_SIZE as i32 {
                 let ply_idx = self.ply as usize;
-                value += 8 * history.low_ply_history.get(ply_idx, m) as i32 / (1 + self.ply);
-            }
+                8 * history.low_ply_history.get(ply_idx, m) as i32 / (1 + self.ply)
+            } else {
+                0
+            };
+            value += low_ply_h;
 
             self.moves.set_value(i, value);
         }

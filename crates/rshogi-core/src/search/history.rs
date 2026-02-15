@@ -38,9 +38,9 @@ pub const CORRECTION_HISTORY_LIMIT: i32 = 1024;
 pub const LOW_PLY_HISTORY_SIZE: usize = 5;
 
 /// from_toインデックスのサイズ
-/// 将棋では from = SQUARE_NB + 0..6 で駒打ちを表す
-/// (81マス + 7種の駒打ち) × 81マス
-pub const FROM_TO_SIZE: usize = (Square::NUM + 7) * Square::NUM;
+/// YaneuraOu準拠: Move の下位16bit (raw値) をそのまま使用するため 2^16 = 65536。
+/// bit 0-6: to, bit 7-13: from/駒種, bit 14: 打ちフラグ, bit 15: 成りフラグ
+pub const FROM_TO_SIZE: usize = 1 << 16;
 
 // =============================================================================
 // History初期値定数 (YaneuraOu準拠)

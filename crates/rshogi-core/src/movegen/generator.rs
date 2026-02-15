@@ -146,24 +146,31 @@ fn generate_lance_moves(
     let rank1 = rank1_bb(us);
     let occupied = pos.occupied();
 
+    // YaneuraOu準拠: 成り手を先に全列挙、次に不成手を列挙 (2パス)
+    // All=false (include_non_promotions=false) でも3段目(後手なら7段目)不成は生成する
+    // 1段目不成は行き場がないため常に除外、2段目不成は All 時のみ
+    let rank12 = rank12_bb(us);
+    let non_promo_mask = if include_non_promotions {
+        !rank1
+    } else {
+        !rank12
+    };
+
     for from in lances.iter() {
         let attacks = lance_effect(us, from, occupied) & target;
         let moved_pc = pos.piece_on(from);
 
-        for to in attacks.iter() {
-            if promo_ranks.contains(to) {
-                // 成る手を生成
-                let promoted_pc = moved_pc.promote().unwrap();
-                add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
+        // Pass 1: 成り手 (敵陣内の移動先)
+        let promo_targets = attacks & promo_ranks;
+        let promoted_pc = moved_pc.promote().unwrap();
+        for to in promo_targets.iter() {
+            add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
+        }
 
-                // 不成（1段目でないとき）
-                if include_non_promotions && !rank1.contains(to) {
-                    add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
-                }
-            } else {
-                // 敵陣外 → 不成のみ
-                add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
-            }
+        // Pass 2: 不成手 (eligible な移動先)
+        let non_promo_targets = attacks & non_promo_mask;
+        for to in non_promo_targets.iter() {
+            add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
         }
     }
 }
@@ -219,17 +226,27 @@ fn generate_silver_moves(pos: &Position, target: Bitboard, buffer: &mut ExtMoveB
         let from_in_promo = promo_ranks.contains(from);
         let moved_pc = pos.piece_on(from);
 
-        for to in attacks.iter() {
-            let to_in_promo = promo_ranks.contains(to);
-
-            // 成る手（移動元または移動先が敵陣）
-            if from_in_promo || to_in_promo {
-                let promoted_pc = moved_pc.promote().unwrap();
+        if from_in_promo {
+            // 敵陣からなら全ての移動先で成れる (YO: enemy_field(Us) & from 分岐)
+            let promoted_pc = moved_pc.promote().unwrap();
+            for to in attacks.iter() {
                 add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
+                add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
             }
+        } else {
+            // 非敵陣: まず敵陣への移動(成り+不成り)、次に非敵陣への移動(不成りのみ)
+            // (YO: SILVER の target2/target 分割に準拠)
+            let promo_targets = attacks & promo_ranks;
+            let non_promo_targets = attacks & !promo_ranks;
 
-            // 不成
-            add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
+            let promoted_pc = moved_pc.promote().unwrap();
+            for to in promo_targets.iter() {
+                add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
+                add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
+            }
+            for to in non_promo_targets.iter() {
+                add_move(buffer, Move::new_move_with_piece(from, to, false, moved_pc));
+            }
         }
     }
 }
@@ -264,16 +281,29 @@ fn generate_br_moves(
         } & target;
         let from_in_promo = promo_ranks.contains(from);
 
-        for to in attacks.iter() {
-            let to_in_promo = promo_ranks.contains(to);
-
-            if from_in_promo || to_in_promo {
-                let promoted_pc = pc.promote().unwrap();
+        if from_in_promo {
+            // 移動元が敵陣なら全ての移動先で成れる (YO: canPromote(Us, from) 分岐)
+            let promoted_pc = pc.promote().unwrap();
+            for to in attacks.iter() {
                 add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
                 if include_non_promotions {
                     add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
                 }
-            } else {
+            }
+        } else {
+            // 移動元が非敵陣: まず敵陣への移動(成り)、次に非敵陣への移動(不成り)
+            // (YO: GPM_BR の target2/target 分割に準拠)
+            let promo_targets = attacks & promo_ranks;
+            let non_promo_targets = attacks & !promo_ranks;
+
+            let promoted_pc = pc.promote().unwrap();
+            for to in promo_targets.iter() {
+                add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
+                if include_non_promotions {
+                    add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
+                }
+            }
+            for to in non_promo_targets.iter() {
                 add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
             }
         }

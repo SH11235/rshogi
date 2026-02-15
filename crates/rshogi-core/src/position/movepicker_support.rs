@@ -342,20 +342,25 @@ impl Position {
     ///
     /// 指し手の静的駒交換評価が閾値以上かどうかを高速に判定する。
     pub fn see_ge(&self, m: Move, threshold: Value) -> bool {
-        // PASS/駒打ちは駒交換が発生しないので >= 0
-        if m.is_pass() || m.is_drop() {
+        // PASSは駒交換が発生しないので >= 0
+        if m.is_pass() {
             return threshold.raw() <= 0;
         }
 
-        let from = m.from();
+        let is_drop = m.is_drop();
         let to = m.to();
 
         // 取られる駒の価値（YO準拠: 成りボーナスは加算しない）
-        let captured = self.piece_on(to);
-        let captured_value = if captured.is_some() {
-            see_piece_value(captured.piece_type())
-        } else {
+        // 駒打ちは空きマスに打つので captured_value = 0
+        let captured_value = if is_drop {
             0
+        } else {
+            let captured = self.piece_on(to);
+            if captured.is_some() {
+                see_piece_value(captured.piece_type())
+            } else {
+                0
+            }
         };
         let mut balance = captured_value - threshold.raw();
 
@@ -365,7 +370,12 @@ impl Position {
         }
 
         // 次に取られる駒の価値（YO準拠: 成り前の価値を使用）
-        let next_victim = see_piece_value(self.piece_on(from).piece_type());
+        // 駒打ちの場合は打つ駒種の価値を使用
+        let next_victim = if is_drop {
+            see_piece_value(m.drop_piece_type())
+        } else {
+            see_piece_value(self.piece_on(m.from()).piece_type())
+        };
 
         // 駒を取られても閾値を超えるか
         balance -= next_victim;
@@ -375,6 +385,8 @@ impl Position {
         }
 
         // 詳細なSEE計算
+        // 駒打ちの場合は from = None（占有ビットのXORをスキップ）
+        let from = if is_drop { None } else { Some(m.from()) };
         self.see_ge_detailed(to, from, balance, next_victim)
     }
 
@@ -382,19 +394,18 @@ impl Position {
     fn see_ge_detailed(
         &self,
         to: Square,
-        from: Square,
+        from: Option<Square>,
         mut balance: i32,
         mut victim_value: i32,
     ) -> bool {
         // 移動元と移動先の両方を占有から外す（x-ray攻撃を正しく検出するため）
-        let mut occupied =
-            self.occupied() ^ Bitboard::from_square(from) ^ Bitboard::from_square(to);
+        // 駒打ちの場合は from がないので to のみ XOR（YO準拠: from = SQ_NB で無効化）
+        let mut occupied = if let Some(from_sq) = from {
+            self.occupied() ^ Bitboard::from_square(from_sq) ^ Bitboard::from_square(to)
+        } else {
+            self.occupied() ^ Bitboard::from_square(to)
+        };
         let mut stm = !self.side_to_move(); // 相手の手番から開始
-
-        debug_assert!(
-            self.piece_on(from).is_some(),
-            "see_ge_detailed called with empty from square"
-        );
 
         // 初期攻撃者集合（occupiedに依存）
         let mut attackers = self.attackers_to_occ(to, occupied) & occupied;

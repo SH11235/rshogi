@@ -1905,12 +1905,9 @@ impl SearchWorker {
             let prev_move = st.stack[prev_ply].current_move;
             let prev_in_check = st.stack[prev_ply].in_check;
 
-            if prev_move.is_normal()
-                && !prev_in_check
-                && !prior_capture
-                && eval_ctx.static_eval != Value::NONE
-                && st.stack[prev_ply].static_eval != Value::NONE
-            {
+            // YaneuraOu準拠: VALUE_NONEチェックは不要（YOは行わない）
+            // VALUE_NONEの場合はclampにより-200に制限されるため問題ない
+            if prev_move.is_normal() && !prev_in_check && !prior_capture {
                 let prev_eval = st.stack[prev_ply].static_eval.raw();
                 let curr_eval = eval_ctx.static_eval.raw();
                 // YaneuraOu/Stockfish準拠: 評価値の変化に基づくヒストリ更新

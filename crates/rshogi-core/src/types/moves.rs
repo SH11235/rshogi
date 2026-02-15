@@ -194,21 +194,14 @@ impl Move {
         self.0 != 0 && !self.is_null() && !self.is_pass()
     }
 
-    /// History用インデックス（0〜(81+7)*81-1）
-    /// 盤上のマスは 81 個（0〜80）
-    /// 「駒種の種類」が 7 個（歩〜飛）
-    /// 「from or 打ち駒種」×「to」の組み合わせ総数は (81 + 7) * 81 個
+    /// History用インデックス
+    ///
+    /// YaneuraOu準拠: `m.raw()` (下位16bit) をそのまま使用。
+    /// bit 0-6: to, bit 7-13: from/駒種, bit 14: 打ちフラグ, bit 15: 成りフラグ
+    /// 成り/不成りで別エントリになる（YO互換）。
     #[inline]
     pub const fn history_index(self) -> usize {
-        if self.is_drop() {
-            let piece_type_index = ((self.0 & Self::FROM_MASK) >> Self::FROM_SHIFT) as usize;
-            let to = (self.0 & Self::TO_MASK) as usize;
-            (81 + piece_type_index - 1) * 81 + to
-        } else {
-            let from = ((self.0 & Self::FROM_MASK) >> Self::FROM_SHIFT) as usize;
-            let to = (self.0 & Self::TO_MASK) as usize;
-            from * 81 + to
-        }
+        (self.0 & Self::LOWER_16BIT_MASK) as usize
     }
 
     /// 成りかどうか（is_promote のエイリアス）
@@ -506,22 +499,29 @@ mod tests {
 
     #[test]
     fn test_move_history_index() {
-        // 通常移動
+        // YaneuraOu準拠: history_index = m.raw() (下位16bit)
         let from = Square::new(File::File7, Rank::Rank7);
         let to = Square::new(File::File7, Rank::Rank6);
-        let m = Move::new_move(from, to, false);
-        let idx = m.history_index();
-        // File7 = 6 (0-indexed), Rank7 = 6, Rank6 = 5
-        // from = 6*9+6 = 60, to = 6*9+5 = 59
-        // index = 60 * 81 + 59
-        assert_eq!(idx, 60 * 81 + 59);
 
-        // 駒打ち（歩）
-        let m = Move::new_drop(PieceType::Pawn, to);
-        let idx = m.history_index();
-        // pt = 1, to = 59
-        // index = (81 + 1 - 1) * 81 + 59 = 81 * 81 + 59
-        assert_eq!(idx, 81 * 81 + 59);
+        // 通常移動（不成り）: raw = to + (from << 7)
+        let m = Move::new_move(from, to, false);
+        assert_eq!(m.history_index(), to.raw() as usize + ((from.raw() as usize) << 7));
+
+        // 通常移動（成り）: raw = to + (from << 7) + (1 << 15)
+        let m_promote = Move::new_move(from, to, true);
+        assert_eq!(
+            m_promote.history_index(),
+            to.raw() as usize + ((from.raw() as usize) << 7) + (1 << 15)
+        );
+        // 成り/不成りは別エントリ
+        assert_ne!(m.history_index(), m_promote.history_index());
+
+        // 駒打ち: raw = to + (pt << 7) + (1 << 14)
+        let m_drop = Move::new_drop(PieceType::Pawn, to);
+        assert_eq!(
+            m_drop.history_index(),
+            to.raw() as usize + (PieceType::Pawn.index() << 7) + (1 << 14)
+        );
     }
 
     #[test]
