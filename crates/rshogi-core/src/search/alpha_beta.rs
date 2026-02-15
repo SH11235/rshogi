@@ -1899,8 +1899,10 @@ impl SearchWorker {
         let opponent_worsening = eval_ctx.opponent_worsening;
 
         // evalDiff によるヒストリ更新（YaneuraOu準拠: yaneuraou-search.cpp:2752-2758）
-        // 条件: (ss-1)->currentMove が有効 && !(ss-1)->inCheck && !priorCapture
-        if ply >= 1 {
+        // YaneuraOu準拠: in_check時はこのブロック自体がスキップされる
+        // （YOではMOVES_LOOPにジャンプするため、ここに到達しない）
+        // 条件: !in_check && (ss-1)->currentMove が有効 && !(ss-1)->inCheck && !priorCapture
+        if !in_check && ply >= 1 {
             let prev_ply = (ply - 1) as usize;
             let prev_move = st.stack[prev_ply].current_move;
             let prev_in_check = st.stack[prev_ply].in_check;
@@ -1941,26 +1943,29 @@ impl SearchWorker {
         }
 
         // priorReduction に応じた深さ調整（yaneuraou-search.cpp:2769-2774）
-        if prior_reduction
-            >= if depth < ctx.tune_params.iir_depth_boundary {
-                ctx.tune_params.iir_prior_reduction_threshold_shallow
-            } else {
-                ctx.tune_params.iir_prior_reduction_threshold_deep
+        // YaneuraOu準拠: in_check時はMOVES_LOOPにジャンプするため、このブロックは実行されない
+        if !in_check {
+            if prior_reduction
+                >= if depth < ctx.tune_params.iir_depth_boundary {
+                    ctx.tune_params.iir_prior_reduction_threshold_shallow
+                } else {
+                    ctx.tune_params.iir_prior_reduction_threshold_deep
+                }
+                && !opponent_worsening
+            {
+                depth += 1;
             }
-            && !opponent_worsening
-        {
-            depth += 1;
-        }
-        if prior_reduction >= 2
-            && depth >= 2
-            && ply >= 1
-            && eval_ctx.static_eval != Value::NONE
-            && st.stack[(ply - 1) as usize].static_eval != Value::NONE
-            // Value は ±32002 程度なので i32 加算でオーバーフローしない
-            && eval_ctx.static_eval + st.stack[(ply - 1) as usize].static_eval
-                > Value::new(ctx.tune_params.iir_eval_sum_threshold)
-        {
-            depth -= 1;
+            if prior_reduction >= 2
+                && depth >= 2
+                && ply >= 1
+                && eval_ctx.static_eval != Value::NONE
+                && st.stack[(ply - 1) as usize].static_eval != Value::NONE
+                // Value は ±32002 程度なので i32 加算でオーバーフローしない
+                && eval_ctx.static_eval + st.stack[(ply - 1) as usize].static_eval
+                    > Value::new(ctx.tune_params.iir_eval_sum_threshold)
+            {
+                depth -= 1;
+            }
         }
 
         if let Some(v) = try_razoring::<NT>(
@@ -2026,7 +2031,8 @@ impl SearchWorker {
         improving = improving_after_null;
 
         // Internal Iterative Reductions（improving再計算後に実施）
-        if !all_node && depth >= 6 && tt_move.is_none() && prior_reduction <= 3 {
+        // YaneuraOu準拠: in_check時はMOVES_LOOPにジャンプするため、このブロックは実行されない
+        if !in_check && !all_node && depth >= 6 && tt_move.is_none() && prior_reduction <= 3 {
             depth -= 1;
         }
 
@@ -2297,6 +2303,7 @@ impl SearchWorker {
             let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, ctx.tt);
             nnue_push(st, dirty_piece);
             st.nodes += 1;
+
             // YaneuraOu方式: ContHistKey/ContinuationHistoryを設定
             // ⚠ in_checkは親ノードの王手状態を使用（gives_checkではない）
             // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う
