@@ -1,9 +1,9 @@
 //! 指し手生成器
 
 use crate::bitboard::{
-    between_bb, bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect,
-    knight_effect, lance_effect, line_bb, pawn_effect, rook_effect, silver_effect, Bitboard,
-    FILE_BB, RANK_BB,
+    between_bb, bishop_effect, check_candidate_bb, dragon_effect, gold_effect, horse_effect,
+    king_effect, knight_effect, lance_effect, line_bb, pawn_effect, rook_effect, silver_effect,
+    Bitboard, FILE_BB, RANK_BB,
 };
 use crate::position::Position;
 use crate::types::{Color, Move, PieceType, Square};
@@ -921,9 +921,22 @@ fn generate_checks(
     }
 
     // --- Phase 2: 非 blocker の直接王手候補を LSB 順に処理 ---
-    // 自玉は除外（玉で直接王手は不可能/非合法）
-    let our_king_bb = Bitboard::from_square(pos.king_square(us));
-    let non_blockers = pos.pieces_c(us) & !blockers & !our_king_bb;
+    // YaneuraOu準拠: check_candidate_bb で直接王手可能な駒のみフィルタ
+    let candidates = (pos.pieces(us, PieceType::Pawn)
+        & check_candidate_bb(us, PieceType::Pawn, them_king))
+        | (pos.pieces(us, PieceType::Lance)
+            & check_candidate_bb(us, PieceType::Lance, them_king))
+        | (pos.pieces(us, PieceType::Knight)
+            & check_candidate_bb(us, PieceType::Knight, them_king))
+        | (pos.pieces(us, PieceType::Silver)
+            & check_candidate_bb(us, PieceType::Silver, them_king))
+        | (pos.golds_c(us) & check_candidate_bb(us, PieceType::Gold, them_king))
+        | (pos.pieces(us, PieceType::Bishop)
+            & check_candidate_bb(us, PieceType::Bishop, them_king))
+        | (pos.rook_dragon() & pos.pieces_c(us)) // 飛・龍は全域候補
+        | (pos.pieces(us, PieceType::Horse)
+            & check_candidate_bb(us, PieceType::Horse, them_king));
+    let non_blockers = candidates & !blockers;
     for from in non_blockers.iter() {
         generate_direct_check_from_sq(
             pos,

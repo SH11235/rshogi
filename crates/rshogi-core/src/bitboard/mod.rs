@@ -8,12 +8,14 @@
 //! - 遠方駒の利き計算（香・角・飛・馬・龍、`between_bb` / `line_bb` など）
 
 mod bitboard256;
+mod check_candidate;
 mod core;
 mod sliders;
 mod tables;
 mod utils;
 
 pub use bitboard256::Bitboard256;
+pub use check_candidate::check_candidate_bb;
 pub use core::Bitboard;
 pub use core::BitboardIter;
 pub use sliders::*;
