@@ -427,32 +427,38 @@ fn generate_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuf
 }
 
 /// 歩以外の駒打ちを生成
+///
+/// YaneuraOu準拠の生成順序:
+/// - 外側ループ: マス（LSB順）
+/// - 内側ループ: 駒種（桂→香→銀→金→角→飛の順）
+/// - 段の制約でマスを3グループに分割:
+///   - 1段目: 香・桂以外
+///   - 2段目: 桂以外
+///   - 3〜9段目: 全駒種
 fn generate_non_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuffer) {
     let us = pos.side_to_move();
     let hand = pos.hand(us);
 
-    // 行き所のない駒の制約
-    let rank1 = rank1_bb(us);
-    let rank12 = rank12_bb(us);
     let empties = !pos.occupied();
+    let target = target & empties;
 
-    // 香（1段目には打てない）
-    if hand.has(PieceType::Lance) {
-        let dropped_pc = crate::types::Piece::make(us, PieceType::Lance);
-        for to in (target & empties & !rank1).iter() {
-            add_move(buffer, Move::new_drop_with_piece(PieceType::Lance, to, dropped_pc));
-        }
-    }
+    // YO準拠: 駒種配列を桂→香→銀→金→角→飛の順で構築
+    let dummy = (PieceType::Pawn, crate::types::Piece::make(us, PieceType::Pawn));
+    let mut drops = [dummy; 6];
+    let mut num = 0usize;
 
-    // 桂（1,2段目には打てない）
     if hand.has(PieceType::Knight) {
-        let dropped_pc = crate::types::Piece::make(us, PieceType::Knight);
-        for to in (target & empties & !rank12).iter() {
-            add_move(buffer, Move::new_drop_with_piece(PieceType::Knight, to, dropped_pc));
-        }
+        drops[num] = (PieceType::Knight, crate::types::Piece::make(us, PieceType::Knight));
+        num += 1;
     }
+    let next_to_knight = num;
 
-    // 銀・金・角・飛（どこでも打てる）
+    if hand.has(PieceType::Lance) {
+        drops[num] = (PieceType::Lance, crate::types::Piece::make(us, PieceType::Lance));
+        num += 1;
+    }
+    let next_to_lance = num;
+
     for pt in [
         PieceType::Silver,
         PieceType::Gold,
@@ -460,9 +466,55 @@ fn generate_non_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMov
         PieceType::Rook,
     ] {
         if hand.has(pt) {
-            let dropped_pc = crate::types::Piece::make(us, pt);
-            for to in (target & empties).iter() {
-                add_move(buffer, Move::new_drop_with_piece(pt, to, dropped_pc));
+            drops[num] = (pt, crate::types::Piece::make(us, pt));
+            num += 1;
+        }
+    }
+
+    if num == 0 {
+        return;
+    }
+
+    let drops = &drops[..num];
+
+    if next_to_lance == 0 {
+        // 香・桂を持っていない: 全マスに対して全駒種を生成
+        for to in target.iter() {
+            for &(pt, pc) in drops {
+                add_move(buffer, Move::new_drop_with_piece(pt, to, pc));
+            }
+        }
+    } else {
+        // 段による場合分け
+        let rank1 = rank1_bb(us);
+        let rank12 = rank12_bb(us);
+        let rank2_only = rank12 & !rank1;
+
+        // 1段目: 香・桂以外の駒のみ
+        let target1 = target & rank1;
+        if next_to_lance < num {
+            for to in target1.iter() {
+                for &(pt, pc) in &drops[next_to_lance..] {
+                    add_move(buffer, Move::new_drop_with_piece(pt, to, pc));
+                }
+            }
+        }
+
+        // 2段目: 桂以外の駒
+        let target2 = target & rank2_only;
+        if next_to_knight < num {
+            for to in target2.iter() {
+                for &(pt, pc) in &drops[next_to_knight..] {
+                    add_move(buffer, Move::new_drop_with_piece(pt, to, pc));
+                }
+            }
+        }
+
+        // 3〜9段目: 全駒種
+        let target3 = target & !rank12;
+        for to in target3.iter() {
+            for &(pt, pc) in drops {
+                add_move(buffer, Move::new_drop_with_piece(pt, to, pc));
             }
         }
     }
