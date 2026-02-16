@@ -1795,7 +1795,7 @@ impl SearchWorker {
 
         // 深さが0以下なら静止探索へ
         if depth <= DEPTH_QS {
-            return qsearch::<NT>(st, ctx, pos, depth, alpha, beta, ply, limits, time_manager);
+            return qsearch::<NT>(st, ctx, pos, alpha, beta, ply, limits, time_manager);
         }
 
         // 最大深さチェック

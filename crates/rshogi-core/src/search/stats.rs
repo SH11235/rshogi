@@ -111,8 +111,6 @@ pub struct SearchStats {
     pub qs_history_pruned: u64,
     /// SEE マージンによる枝刈り数（!see_ge(-74)）
     pub qs_see_margin_pruned: u64,
-    /// 深度別ノード数（depth 0, -1, -2, ... を 0, 1, 2, ... にマップ）
-    pub qs_nodes_by_depth: [u64; STATS_MAX_DEPTH],
     /// 王手回避時のノード数
     pub qs_in_check_nodes: u64,
 
@@ -181,7 +179,6 @@ impl Default for SearchStats {
             qs_futility_pruned: 0,
             qs_history_pruned: 0,
             qs_see_margin_pruned: 0,
-            qs_nodes_by_depth: [0; STATS_MAX_DEPTH],
             qs_in_check_nodes: 0,
             // LMR cut_node 分析
             lmr_cut_node_applied: 0,
@@ -409,20 +406,6 @@ impl SearchStats {
             report.push_str(&format!("    History:         {:>12}\n", self.qs_history_pruned));
             report.push_str(&format!("    SEE margin:      {:>12}\n", self.qs_see_margin_pruned));
         }
-        // 静止探索の深度別ノード数
-        report.push_str("  --- QS Nodes by Depth ---\n");
-        for d in 0..STATS_MAX_DEPTH {
-            let count = self.qs_nodes_by_depth[d];
-            if count > 0 {
-                report.push_str(&format!(
-                    "    depth {:>3}: {:>10} ({:.1}%)\n",
-                    -(d as i32),
-                    count,
-                    count as f64 / self.qs_nodes as f64 * 100.0
-                ));
-            }
-        }
-
         // =============================================================================
         // LMR cut_node 分析
         // =============================================================================

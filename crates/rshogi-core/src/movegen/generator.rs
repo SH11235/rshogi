@@ -861,18 +861,25 @@ fn generate_direct_check_from_sq(
                 }
             }
             PieceType::Lance => {
-                // YO make_move_target_pro<LANCE, false>:
-                //   All=false → rank >= 3 (先手) つまり !rank12
-                //   All=true  → rank != 1 つまり !rank1
-                let rank1 = rank1_bb(us);
-                let rank12 = rank12_bb(us);
-                let mask = if include_non_promotions {
-                    !rank1
-                } else {
-                    !rank12
-                };
-                for to in (nonpro_dst & mask).iter() {
-                    add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
+                // YO GEN_MOVE_LANCE_CHECK 不成パス:
+                // 同筋 かつ between_bb(from, ksq) 上の駒が1個以下のとき、
+                // 敵駒 & between_bb(from, ksq) & target が不成王手の対象
+                let them = !us;
+                let them_king = pos.king_square(them);
+                if from.file() == them_king.file()
+                    && !(between_bb(from, them_king) & occupied).more_than_one()
+                {
+                    let rank1 = rank1_bb(us);
+                    let rank12 = rank12_bb(us);
+                    let mask = if include_non_promotions {
+                        !rank1
+                    } else {
+                        !rank12
+                    };
+                    let dst = pos.pieces_c(them) & between_bb(from, them_king) & target & mask;
+                    for to in dst.iter() {
+                        add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
+                    }
                 }
             }
             PieceType::Knight => {
@@ -1008,13 +1015,15 @@ fn generate_checks(
     if hand.has(PieceType::Pawn) {
         let check_target = pos.check_squares(PieceType::Pawn) & empties;
         if !check_target.is_empty() {
-            // 歩の王手マスは1箇所のみ。二歩/打ち歩詰めチェックはis_legalで行う
+            // 歩の王手マスは1箇所のみ（YO準拠: 二歩+打ち歩詰めを生成時にフィルタ）
             let rank1 = rank1_bb(us);
             let our_pawns = pos.pieces(us, PieceType::Pawn);
             let valid = check_target & !rank1 & pawn_drop_mask(us, our_pawns);
             let dropped_pc = crate::types::Piece::make(us, PieceType::Pawn);
             for to in valid.iter() {
-                add_move(buffer, Move::new_drop_with_piece(PieceType::Pawn, to, dropped_pc));
+                if pos.legal_pawn_drop_check(to) {
+                    add_move(buffer, Move::new_drop_with_piece(PieceType::Pawn, to, dropped_pc));
+                }
             }
         }
     }
@@ -2063,6 +2072,13 @@ mod tests {
                                 continue;
                             }
                             if pos.gives_check(ext.mv) {
+                                // 打ち歩詰めを生成時にフィルタするので参照側も同様にフィルタ
+                                if ext.mv.is_drop()
+                                    && ext.mv.drop_piece_type() == PieceType::Pawn
+                                    && !pos.legal_pawn_drop_check(ext.mv.to())
+                                {
+                                    continue;
+                                }
                                 buf_old.push_move(ext.mv);
                             }
                         }

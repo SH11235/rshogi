@@ -8,7 +8,7 @@
 
 use crate::nnue::DirtyPiece;
 use crate::position::Position;
-use crate::types::{Bound, Depth, Move, Value, DEPTH_QS};
+use crate::types::{Bound, Depth, Move, Value};
 
 use super::alpha_beta::{
     FutilityParams, SearchContext, SearchState, Step14Context, Step14Outcome, TTContext,
@@ -232,7 +232,6 @@ pub(super) fn try_razoring<const NT: u8>(
             st,
             ctx,
             pos,
-            DEPTH_QS,
             alpha,
             beta,
             ply,
@@ -533,7 +532,6 @@ where
             st,
             ctx,
             pos,
-            DEPTH_QS,
             -prob_beta,
             -prob_beta + Value::new(1),
             ply + 1,

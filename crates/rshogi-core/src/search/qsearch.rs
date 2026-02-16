@@ -5,7 +5,7 @@
 #[cfg(not(feature = "search-no-pass-rules"))]
 use crate::eval::evaluate_pass_rights;
 use crate::position::Position;
-use crate::types::{Bound, Depth, Move, Value, DEPTH_QS, DEPTH_UNSEARCHED, MAX_PLY};
+use crate::types::{Bound, Move, Value, DEPTH_QS, DEPTH_UNSEARCHED, MAX_PLY};
 
 use super::alpha_beta::{draw_jitter, to_corrected_static_eval, SearchContext, SearchState};
 use super::eval_helpers::correction_value;
@@ -31,7 +31,6 @@ pub(super) fn qsearch<const NT: u8>(
     st: &mut SearchState,
     ctx: &SearchContext<'_>,
     pos: &mut Position,
-    depth: Depth,
     alpha: Value,
     beta: Value,
     ply: i32,
@@ -45,11 +44,6 @@ pub(super) fn qsearch<const NT: u8>(
     inc_stat!(st, qs_nodes);
     #[cfg(feature = "search-stats")]
     {
-        // depth を 0, -1, -2, ... から 0, 1, 2, ... にマップ
-        let depth_idx = (-depth).max(0) as usize;
-        if depth_idx < super::stats::STATS_MAX_DEPTH {
-            st.stats.qs_nodes_by_depth[depth_idx] += 1;
-        }
         if in_check {
             st.stats.qs_in_check_nodes += 1;
         }
@@ -173,7 +167,7 @@ pub(super) fn qsearch<const NT: u8>(
             thread_id: ctx.thread_id,
             ply,
             key,
-            search_depth: depth,
+            search_depth: DEPTH_QS,
             depth: tt_data.depth,
             bound: tt_data.bound,
             value: tt_value,
@@ -469,7 +463,7 @@ pub(super) fn qsearch<const NT: u8>(
         }
 
         let value =
-            -qsearch::<NT>(st, ctx, pos, depth - 1, -beta, -alpha, ply + 1, limits, time_manager);
+            -qsearch::<NT>(st, ctx, pos, -beta, -alpha, ply + 1, limits, time_manager);
 
         nnue_pop(st);
         pos.undo_move(mv);
