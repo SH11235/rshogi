@@ -462,8 +462,7 @@ pub(super) fn qsearch<const NT: u8>(
             set_cont_history_for_move(st, ctx, ply, in_check, capture, cont_hist_pc, cont_hist_to);
         }
 
-        let value =
-            -qsearch::<NT>(st, ctx, pos, -beta, -alpha, ply + 1, limits, time_manager);
+        let value = -qsearch::<NT>(st, ctx, pos, -beta, -alpha, ply + 1, limits, time_manager);
 
         nnue_pop(st);
         pos.undo_move(mv);
