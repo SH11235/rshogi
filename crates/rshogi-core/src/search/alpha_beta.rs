@@ -2022,12 +2022,11 @@ impl SearchWorker {
             {
                 depth += 1;
             }
+            // YaneuraOu準拠: VALUE_NONEガードなし (yaneuraou-search.cpp:2845)
+            // 王手時 staticEval = VALUE_NONE(32002) → 合計 > 173 で depth-- が発動する
             if prior_reduction >= 2
                 && depth >= 2
                 && ply >= 1
-                && eval_ctx.static_eval != Value::NONE
-                && st.stack[(ply - 1) as usize].static_eval != Value::NONE
-                // Value は ±32002 程度なので i32 加算でオーバーフローしない
                 && eval_ctx.static_eval + st.stack[(ply - 1) as usize].static_eval
                     > Value::new(ctx.tune_params.iir_eval_sum_threshold)
             {
@@ -2388,7 +2387,6 @@ impl SearchWorker {
 
             // 指し手を実行
             st.stack[ply as usize].current_move = mv;
-
             let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, ctx.tt);
             nnue_push(st, dirty_piece);
             st.nodes += 1;
@@ -3121,9 +3119,10 @@ impl SearchWorker {
                         .min(ctx.tune_params.prior_quiet_countermove_depth_cap);
                     bonus_scale += ctx.tune_params.prior_quiet_countermove_move_count_bonus
                         * (parent_move_count > 8) as i32;
+                    // YaneuraOu準拠: VALUE_NONEガードなし (yaneuraou-search.cpp:3956-3958)
+                    // 王手時 staticEval = VALUE_NONE(32002) → in_check=true で条件自体が偽
                     bonus_scale += ctx.tune_params.prior_quiet_countermove_eval_bonus
                         * (!in_check
-                            && static_eval != Value::NONE
                             && best_value
                                 <= static_eval
                                     - Value::new(
@@ -3131,7 +3130,6 @@ impl SearchWorker {
                                     )) as i32;
                     bonus_scale += ctx.tune_params.prior_quiet_countermove_parent_eval_bonus
                         * (!parent_in_check
-                            && parent_static_eval != Value::NONE
                             && best_value
                                 <= -parent_static_eval
                                     - Value::new(
