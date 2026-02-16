@@ -2257,6 +2257,11 @@ impl SearchWorker {
                 );
                 st.stack[ply as usize].excluded_move = Move::NONE;
 
+                // YaneuraOu準拠: SE再帰呼び出し内の上方伝播(yaneuraou-search.cpp:4033)により
+                // st.stack[ply].tt_pvが変更される可能性がある。YOではss->ttPvを直接参照するため
+                // 変更後の値が自動的に反映される。rshogiではローカル変数tt_pvの再読み込みが必要。
+                let tt_pv = st.stack[ply as usize].tt_pv;
+
                 if singular_value < singular_beta {
                     inc_stat!(st, singular_extension);
                     // Singular確定 → 延長量を計算
