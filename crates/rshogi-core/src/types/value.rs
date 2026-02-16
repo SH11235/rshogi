@@ -27,8 +27,8 @@ impl Value {
     /// この値を変更する場合は pruning.rs の安全性を再検証すること。
     pub const NONE: Value = Value(32002);
 
-    /// 最大探索深度内での詰みスコア
-    pub const MATE_IN_MAX_PLY: Value = Value(Self::MATE.0 - 128);
+    /// 最大探索深度内での詰みスコア (YaneuraOu準拠: MATE - MAX_PLY)
+    pub const MATE_IN_MAX_PLY: Value = Value(Self::MATE.0 - crate::types::depth::MAX_PLY);
     /// 最大探索深度内での詰まされスコア
     pub const MATED_IN_MAX_PLY: Value = Value(-Self::MATE_IN_MAX_PLY.0);
 

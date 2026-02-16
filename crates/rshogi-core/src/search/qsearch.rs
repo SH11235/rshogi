@@ -383,21 +383,9 @@ pub(super) fn qsearch<const NT: u8>(
             }
         }
 
-        if !in_check && depth == DEPTH_QS {
-            let mut buf = crate::movegen::ExtMoveBuffer::new();
-            let gen_type = if ctx.generate_all_legal_moves {
-                crate::movegen::GenType::QuietChecksAll
-            } else {
-                crate::movegen::GenType::QuietChecks
-            };
-            crate::movegen::generate_with_type(pos, gen_type, &mut buf, None);
-            for ext in buf.iter() {
-                if buf_moves.contains(&ext.mv) {
-                    continue;
-                }
-                buf_moves.push(ext.mv);
-            }
-        }
+        // YaneuraOu準拠: qsearchではquiet checksを生成しない
+        // YOのMovePicker qsearchステージは QSEARCH_TT → QCAPTURE_INIT → QCAPTURE のみ
+        // (movepick.cpp line 69)
 
         buf_moves
     };

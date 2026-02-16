@@ -478,7 +478,8 @@ impl Position {
         // YO準拠: 価値の低い順にチェック（成り考慮なし）
         // Pawn(90) → Lance(315) → Knight(405) → Silver(495)
         // → GOLDS(540): Gold,ProPawn,ProLance,ProKnight,ProSilver
-        // → Bishop(855) → Horse(945) → Rook(990) → Dragon(1395) → King
+        // → Bishop(855) → Rook(990) → Horse(945) → Dragon(1395) → King
+        // 注: Rook(990)がHorse(945)より先はYO準拠（価値昇順ではない）
 
         // Pawn
         let bb = attackers & self.pieces(stm, PieceType::Pawn);
@@ -513,20 +514,22 @@ impl Position {
                 return (bb.lsb().unwrap(), see_piece_value(PieceType::Gold));
             }
         }
-        // Bishop
+        // Bishop (855)
         let bb = attackers & self.pieces(stm, PieceType::Bishop);
         if !bb.is_empty() {
             return (bb.lsb().unwrap(), see_piece_value(PieceType::Bishop));
+        }
+        // YaneuraOu準拠: Rook(990) を Horse(945) より先に選択 (yaneuraou-search.cpp:2632-2669)
+        // 価値昇順ではないが、YOとのノード数一致のために順序を合わせる
+        // Rook (990)
+        let bb = attackers & self.pieces(stm, PieceType::Rook);
+        if !bb.is_empty() {
+            return (bb.lsb().unwrap(), see_piece_value(PieceType::Rook));
         }
         // Horse (945)
         let bb = attackers & self.pieces(stm, PieceType::Horse);
         if !bb.is_empty() {
             return (bb.lsb().unwrap(), see_piece_value(PieceType::Horse));
-        }
-        // Rook (990)
-        let bb = attackers & self.pieces(stm, PieceType::Rook);
-        if !bb.is_empty() {
-            return (bb.lsb().unwrap(), see_piece_value(PieceType::Rook));
         }
         // Dragon
         let bb = attackers & self.pieces(stm, PieceType::Dragon);
