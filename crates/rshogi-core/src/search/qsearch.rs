@@ -96,7 +96,7 @@ pub(super) fn qsearch<const NT: u8>(
     st.stack[ply as usize].tt_hit = tt_hit;
     // probe() で to_move 変換に失敗した手は除外済み。
     // qsearch 側で pseudo-legal で再度潰さず、そのまま使用する。
-    let mut tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
+    let tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
     let mut tt_value = if tt_hit {
         value_from_tt(tt_data.value, ply)
     } else {
@@ -335,12 +335,8 @@ pub(super) fn qsearch<const NT: u8>(
         static_eval + Value::new(ctx.tune_params.qsearch_futility_base)
     };
 
-    if depth <= DEPTH_QS
-        && tt_move.is_some()
-        && ((!pos.capture_stage(tt_move) && !pos.gives_check(tt_move)) || depth < -16)
-    {
-        tt_move = Move::NONE;
-    }
+    // YaneuraOu準拠: TT手のフィルタリングはMovePickerのpseudo_legalチェックに委ねる。
+    // 非capture非checkのTT手は moves loop の !capture → continue で除外される。
 
     let prev_move = if ply >= 1 {
         st.stack[(ply - 1) as usize].current_move
@@ -401,21 +397,6 @@ pub(super) fn qsearch<const NT: u8>(
             }
         }
 
-        if !in_check && depth <= -5 && ply >= 1 && prev_move.is_normal() {
-            let mut buf = crate::movegen::ExtMoveBuffer::new();
-            let rec_sq = prev_move.to();
-            let gen_type = if ctx.generate_all_legal_moves {
-                crate::movegen::GenType::RecapturesAll
-            } else {
-                crate::movegen::GenType::Recaptures
-            };
-            crate::movegen::generate_with_type(pos, gen_type, &mut buf, Some(rec_sq));
-            buf_moves.clear();
-            for ext in buf.iter() {
-                buf_moves.push(ext.mv);
-            }
-        }
-
         buf_moves
     };
 
@@ -440,15 +421,8 @@ pub(super) fn qsearch<const NT: u8>(
         let gives_check = pos.gives_check(mv);
         let capture = pos.capture_stage(mv);
 
-        if !in_check && depth <= DEPTH_QS && !capture && !gives_check {
-            continue;
-        }
-
-        if !in_check && capture && !pos.see_ge(mv, Value::ZERO) {
-            inc_stat!(st, qs_see_pruned);
-            continue;
-        }
-
+        // YaneuraOu準拠: moveCount は pruning の前にインクリメント。
+        // 非捕獲・非王手の TT 手もカウントに含める。
         move_count += 1;
 
         if !best_value.is_loss() {
@@ -516,9 +490,11 @@ pub(super) fn qsearch<const NT: u8>(
 
         if value > best_value {
             best_value = value;
-            best_move = mv;
 
             if value > alpha {
+                // YaneuraOu準拠: value > alpha のときのみ bestMove を更新
+                best_move = mv;
+
                 if value >= beta {
                     break;
                 }
