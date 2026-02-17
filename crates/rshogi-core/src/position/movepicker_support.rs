@@ -406,7 +406,9 @@ impl Position {
 
             // YO: ピン処理 — ピンされた駒は攻撃に参加できない
             // pinners(~stm): stmの玉をピンしている(!stm側の)駒
-            if !(self.state().pinners[(!stm).index()] & occupied).is_empty() {
+            // rshogi の pinners[c] は「!c側の駒がc側の王をピンしている」という意味なので、
+            // stm の王をピンしている駒を取得するには pinners[stm] を使う（YOは pinners[~stm]）
+            if !(self.state().pinners[stm.index()] & occupied).is_empty() {
                 stm_attackers &= !self.blockers_for_king(stm);
                 if stm_attackers.is_empty() {
                     break;
