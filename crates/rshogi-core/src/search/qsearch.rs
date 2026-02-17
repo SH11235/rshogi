@@ -254,8 +254,9 @@ pub(super) fn qsearch<const NT: u8>(
     st.stack[ply as usize].static_eval = static_eval;
 
     let mut alpha = alpha;
+    // in_check時は-VALUE_INFINITEで初期化
     let mut best_value = if in_check {
-        Value::mated_in(ply)
+        -Value::INFINITE
     } else {
         static_eval
     };

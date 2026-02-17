@@ -93,6 +93,12 @@ fn update_continuation_histories(
         let target_ply = base_ply - ply_back as i32;
         if target_ply >= 0 {
             if let Some(key) = stack[target_ply as usize].cont_hist_key {
+                // YO準拠: null move ply はスキップ
+                // YO: if (((ss - i)->currentMove).is_ok())
+                // null move では cont_hist_key.piece == NONE（sentinel）
+                if key.piece.is_none() {
+                    continue;
+                }
                 let in_check_idx = key.in_check as usize;
                 let capture_idx = key.capture as usize;
                 let weighted_bonus = continuation_history_bonus_with_offset(
