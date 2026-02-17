@@ -1369,14 +1369,6 @@ where
             loop {
                 let adjusted_depth =
                     (search_depth - failed_high_cnt - (3 * (search_again_counter + 1) / 4)).max(1);
-                if search_depth == 11 {
-                    eprintln!(
-                        "[asp-loop] d={} adj_d={} a={} b={} delta={} fhc={} sac={}",
-                        search_depth, adjusted_depth,
-                        alpha.raw(), beta.raw(), delta.raw(),
-                        failed_high_cnt, search_again_counter
-                    );
-                }
 
                 let score = if pv_idx == 0 {
                     worker.search_root(pos, adjusted_depth, alpha, beta, limits, time_manager)
@@ -1400,20 +1392,6 @@ where
                 }
 
                 // Window調整 (yaneuraou-search.cpp:1510-1526)
-                if search_depth == 11 {
-                    let result = if score <= alpha {
-                        "FAIL-LOW"
-                    } else if score >= beta {
-                        "FAIL-HIGH"
-                    } else {
-                        "OK"
-                    };
-                    eprintln!(
-                        "[asp-result] score={} a={} b={} nodes={} => {}",
-                        score.raw(), alpha.raw(), beta.raw(),
-                        worker.state.nodes, result
-                    );
-                }
                 if score <= alpha {
                     beta = alpha;
                     alpha = Value::new(

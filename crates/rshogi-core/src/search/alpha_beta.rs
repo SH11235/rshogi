@@ -1073,17 +1073,6 @@ impl SearchWorker {
             let nodes_delta = self.state.nodes.saturating_sub(nodes_before);
             self.state.root_moves[rm_idx].effort += nodes_delta as f64;
 
-            // デバッグトレース: root move 別ノード数（stderrに出力）
-            // YO準拠: rootDepthは反復深化の深さ（adjusted_depthではなくstate.root_depth）
-            eprintln!(
-                "TRACE rootDepth={} rm={} nodes={} value={} move={}",
-                self.state.root_depth,
-                move_count,
-                nodes_delta,
-                value.raw(),
-                mv.to_usi(),
-            );
-
             if self.state.abort {
                 return Value::ZERO;
             }
