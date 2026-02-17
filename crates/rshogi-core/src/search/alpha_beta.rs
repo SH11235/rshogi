@@ -861,8 +861,6 @@ impl SearchWorker {
                 return Value::ZERO;
             }
 
-            // 各手ごとにsel_depthをリセット（YaneuraOu準拠）
-            self.state.sel_depth = 0;
             move_count += 1;
 
             let gives_check = pos.gives_check(mv);
@@ -1402,9 +1400,6 @@ impl SearchWorker {
             if self.check_abort(limits, time_manager) {
                 return Value::ZERO;
             }
-
-            // 各手ごとにsel_depthをリセット
-            self.state.sel_depth = 0;
 
             let mv = self.state.root_moves[rm_idx].mv();
             let gives_check = pos.gives_check(mv);
