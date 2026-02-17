@@ -183,8 +183,15 @@ fn init_check_cand_bb() -> [[[Bitboard; 2]; PieceTypeCheck::NUM]; 81] {
             }
             table[idx][PieceTypeCheck::Silver as usize][c] = silver_bb;
 
-            // 金
-            table[idx][PieceTypeCheck::Gold as usize][c] = gold_effect(!us, sq_king);
+            // 金: 敵玉から金の金にある駒 (2-hop)
+            let mut gold_bb = Bitboard::EMPTY;
+            let mut gold_targets = gold_effect(!us, sq_king);
+            while gold_targets.is_not_empty() {
+                let to = gold_targets.pop();
+                gold_bb |= gold_effect(!us, to);
+            }
+            gold_bb &= !Bitboard::from_square(sq_king);
+            table[idx][PieceTypeCheck::Gold as usize][c] = gold_bb;
 
             // 角・飛は盤上無視の利き
             table[idx][PieceTypeCheck::Bishop as usize][c] =
