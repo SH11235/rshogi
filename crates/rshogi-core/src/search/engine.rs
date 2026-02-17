@@ -1275,6 +1275,18 @@ impl Search {
                         - failed_high_cnt
                         - (3 * (self.search_again_counter + 1) / 4))
                         .max(1);
+                    if search_depth == 11 {
+                        eprintln!(
+                            "[asp-loop] d={} adj_d={} a={} b={} delta={} fhc={} sac={}",
+                            search_depth,
+                            adjusted_depth,
+                            alpha.raw(),
+                            beta.raw(),
+                            delta.raw(),
+                            failed_high_cnt,
+                            self.search_again_counter
+                        );
+                    }
                     // pv_idx=0の場合は従来のsearch_rootを使用（後方互換性）
                     // pv_idx>0の場合のみsearch_root_for_pvを使用
                     let score = if pv_idx == 0 {
@@ -1303,6 +1315,23 @@ impl Search {
                     }
 
                     // Window調整
+                    if search_depth == 11 {
+                        let result = if score <= alpha {
+                            "FAIL-LOW"
+                        } else if score >= beta {
+                            "FAIL-HIGH"
+                        } else {
+                            "OK"
+                        };
+                        eprintln!(
+                            "[asp-result] score={} a={} b={} nodes={} => {}",
+                            score.raw(),
+                            alpha.raw(),
+                            beta.raw(),
+                            worker.state.nodes,
+                            result
+                        );
+                    }
                     if score <= alpha {
                         beta = alpha;
                         alpha = Value::new(

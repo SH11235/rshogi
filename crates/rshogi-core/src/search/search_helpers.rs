@@ -6,8 +6,9 @@ use std::ptr::NonNull;
 
 use crate::nnue::{ensure_accumulator_computed, evaluate_dispatch, DirtyPiece};
 use crate::position::Position;
+use crate::prefetch::TtPrefetch;
 use crate::search::PieceToHistory;
-use crate::types::{Piece, Square, Value};
+use crate::types::{Move, Piece, Square, Value};
 
 use super::alpha_beta::{SearchContext, SearchState};
 use super::types::{ContHistKey, STACK_SIZE};
@@ -115,6 +116,23 @@ pub(super) fn nnue_evaluate(st: &mut SearchState, pos: &Position) -> Value {
 #[inline]
 pub(super) fn ensure_nnue_accumulator(st: &mut SearchState, pos: &Position) {
     ensure_accumulator_computed(pos, &mut st.nnue_stack)
+}
+
+/// YO準拠: do_move + nodes++ + nnue_push をまとめたラッパー
+///
+/// YO では Worker::do_move() 内部で nodes++ と nnue push を行う。
+/// rshogi でも同等の一括処理を提供する。
+#[inline]
+pub(super) fn do_move_and_push<P: TtPrefetch>(
+    st: &mut SearchState,
+    pos: &mut Position,
+    mv: Move,
+    gives_check: bool,
+    prefetcher: &P,
+) {
+    let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, prefetcher);
+    st.nodes += 1;
+    st.nnue_stack.push(dirty_piece);
 }
 
 /// NNUE push

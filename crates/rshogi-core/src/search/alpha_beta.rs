@@ -11,7 +11,7 @@ use std::sync::Arc;
 #[cfg(not(feature = "search-no-pass-rules"))]
 use crate::eval::evaluate_pass_rights;
 use crate::eval::{get_scaled_pass_move_bonus, EvalHash};
-use crate::nnue::{get_network, AccumulatorStackVariant, DirtyPiece};
+use crate::nnue::{get_network, AccumulatorStackVariant};
 use crate::position::Position;
 use crate::search::PieceToHistory;
 use crate::tt::{ProbeResult, TTData, TranspositionTable};
@@ -39,8 +39,8 @@ use super::pruning::{
 };
 use super::qsearch::qsearch;
 use super::search_helpers::{
-    check_abort, clear_cont_history_for_null, cont_history_ptr, cont_history_tables, nnue_evaluate,
-    nnue_pop, nnue_push, set_cont_history_for_move, take_prior_reduction,
+    check_abort, clear_cont_history_for_null, cont_history_ptr, cont_history_tables,
+    do_move_and_push, nnue_evaluate, nnue_pop, set_cont_history_for_move, take_prior_reduction,
 };
 #[cfg(feature = "tt-trace")]
 use super::tt_sanity::{helper_tt_write_enabled_for_depth, maybe_trace_tt_write, TtWriteTrace};
@@ -666,12 +666,6 @@ impl SearchWorker {
     // NNUE ヘルパーメソッド（LayerStacks / HalfKP・HalfKA_hm の分岐を隠蔽）
     // =========================================================================
 
-    /// NNUE アキュムレータスタックを push
-    #[inline]
-    pub(super) fn nnue_push(&mut self, dirty_piece: DirtyPiece) {
-        self.state.nnue_stack.push(dirty_piece);
-    }
-
     /// NNUE アキュムレータスタックを pop
     #[inline]
     pub(super) fn nnue_pop(&mut self) {
@@ -760,91 +754,6 @@ impl SearchWorker {
         }
 
         false
-    }
-
-    /// 探索のメインエントリーポイント
-    ///
-    /// 反復深化で指定された深さまで探索する。
-    pub fn search(
-        &mut self,
-        pos: &mut Position,
-        depth: Depth,
-        limits: &LimitsType,
-        time_manager: &mut TimeManagement,
-    ) {
-        // ルート手を初期化
-        self.state.root_moves = RootMoves::from_legal_moves(pos, &limits.search_moves);
-
-        if self.state.root_moves.is_empty() {
-            // 合法手がない場合
-            self.state.best_move = Move::NONE;
-            return;
-        }
-
-        // 反復深化
-        for d in 1..=depth {
-            if self.state.abort {
-                break;
-            }
-
-            // イテレーション開始時にeffortをリセット
-            for rm in self.state.root_moves.iter_mut() {
-                rm.effort = 0.0;
-            }
-
-            self.state.root_depth = d;
-            self.state.sel_depth = 0;
-
-            // Aspiration Window
-            let prev_score = if d > 1 {
-                self.state.root_moves[0].score
-            } else {
-                Value::new(-32001)
-            };
-
-            let mut delta = Value::new(10);
-            let mut alpha = if d >= 4 {
-                Value::new(prev_score.raw().saturating_sub(delta.raw()).max(-32001))
-            } else {
-                Value::new(-32001)
-            };
-            let mut beta = if d >= 4 {
-                Value::new(prev_score.raw().saturating_add(delta.raw()).min(32001))
-            } else {
-                Value::new(32001)
-            };
-
-            loop {
-                let score = self.search_root(pos, d, alpha, beta, limits, time_manager);
-
-                if self.state.abort {
-                    break;
-                }
-
-                // Window調整
-                if score <= alpha {
-                    beta = Value::new((alpha.raw() + beta.raw()) / 2);
-                    alpha = Value::new(score.raw().saturating_sub(delta.raw()).max(-32001));
-                } else if score >= beta {
-                    beta = Value::new(score.raw().saturating_add(delta.raw()).min(32001));
-                } else {
-                    break;
-                }
-
-                delta = Value::new(
-                    delta.raw().saturating_add(delta.raw() / 3).min(Value::INFINITE.raw()),
-                );
-            }
-
-            // aspiration loop完了後にソート（YO: iterative deepening loop でのソートに対応）
-            let len = self.state.root_moves.len();
-            self.state.root_moves.stable_sort_range(0, len);
-
-            if !self.state.abort {
-                self.state.completed_depth = d;
-                self.state.best_move = self.state.root_moves[0].mv();
-            }
-        }
     }
 
     /// ルート探索
@@ -962,9 +871,7 @@ impl SearchWorker {
             let nodes_before = self.state.nodes;
 
             // 探索
-            let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, self.tt.as_ref());
-            self.nnue_push(dirty_piece);
-            self.state.nodes += 1;
+            do_move_and_push(&mut self.state, pos, mv, gives_check, self.tt.as_ref());
             self.state.stack[0].current_move = mv;
             // YaneuraOu準拠: ss->moveCount = ++moveCount (yaneuraou-search.cpp:3160)
             // 子ノード(ply 1)が(ss-1)->moveCountを参照するため設定必須
@@ -1165,6 +1072,17 @@ impl SearchWorker {
             // この手に費やしたノード数をeffortに積算
             let nodes_delta = self.state.nodes.saturating_sub(nodes_before);
             self.state.root_moves[rm_idx].effort += nodes_delta as f64;
+
+            // デバッグトレース: root move 別ノード数（stderrに出力）
+            // YO準拠: rootDepthは反復深化の深さ（adjusted_depthではなくstate.root_depth）
+            eprintln!(
+                "TRACE rootDepth={} rm={} nodes={} value={} move={}",
+                self.state.root_depth,
+                move_count,
+                nodes_delta,
+                value.raw(),
+                mv.to_usi(),
+            );
 
             if self.state.abort {
                 return Value::ZERO;
@@ -1506,9 +1424,7 @@ impl SearchWorker {
             let nodes_before = self.state.nodes;
 
             // 探索
-            let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, self.tt.as_ref());
-            self.nnue_push(dirty_piece);
-            self.state.nodes += 1;
+            do_move_and_push(&mut self.state, pos, mv, gives_check, self.tt.as_ref());
             self.state.stack[0].current_move = mv;
             // YaneuraOu準拠: ss->moveCount = ++moveCount (yaneuraou-search.cpp:3160)
             self.state.stack[0].move_count = (rm_idx + 1) as i32;
@@ -2393,9 +2309,7 @@ impl SearchWorker {
 
             // 指し手を実行
             st.stack[ply as usize].current_move = mv;
-            let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, ctx.tt);
-            nnue_push(st, dirty_piece);
-            st.nodes += 1;
+            do_move_and_push(st, pos, mv, gives_check, ctx.tt);
             // YaneuraOu方式: ContHistKey/ContinuationHistoryを設定
             // ⚠ in_checkは親ノードの王手状態を使用（gives_checkではない）
             // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う

@@ -15,7 +15,7 @@ use super::alpha_beta::{
 };
 use super::qsearch::qsearch;
 use super::search_helpers::{
-    clear_cont_history_for_null, cont_history_tables, nnue_pop, nnue_push,
+    clear_cont_history_for_null, cont_history_tables, do_move_and_push, nnue_pop, nnue_push,
     set_cont_history_for_move,
 };
 use super::stats::{inc_stat, inc_stat_by_depth};
@@ -516,9 +516,7 @@ where
         let cont_hist_to = mv.to();
 
         st.stack[ply as usize].current_move = mv;
-        let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, ctx.tt);
-        nnue_push(st, dirty_piece);
-        st.nodes += 1;
+        do_move_and_push(st, pos, mv, gives_check, ctx.tt);
         set_cont_history_for_move(
             st,
             ctx,
