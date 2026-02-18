@@ -1133,6 +1133,7 @@ fn main() -> Result<()> {
         max_moves: cli.max_moves,
         timeout_margin_ms: cli.timeout_margin_ms,
         pass_rights: None,
+        go_depth: None,
     };
     let tc = TimeControl::new(0, 0, 0, 0, cli.byoyomi);
     let mut early_stop_consecutive = 0u32;
