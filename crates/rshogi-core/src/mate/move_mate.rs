@@ -462,7 +462,6 @@ fn has_other_attacker(
 #[cfg(test)]
 mod tests {
     use crate::position::Position;
-    
 
     #[test]
     fn test_move_mate_compile() {

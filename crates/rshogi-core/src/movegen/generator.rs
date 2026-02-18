@@ -417,9 +417,18 @@ fn generate_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuf
 
     // 二歩のチェック
     let our_pawns = pos.pieces(us, PieceType::Pawn);
-    let valid_targets = valid_targets & pawn_drop_mask(us, our_pawns);
+    let mut valid_targets = valid_targets & pawn_drop_mask(us, our_pawns);
 
-    // 打ち歩詰めチェックは後でis_legalで行う
+    // YO準拠: 打ち歩詰めチェック — 王手になる升は玉の前の1升のみ事前特定して1回だけ判定
+    let them = !us;
+    let them_king = pos.king_square(them);
+    let pe = pawn_effect(them, them_king);
+    if let Some(to) = (pe & valid_targets).lsb() {
+        if !pos.legal_pawn_drop_check(to) {
+            valid_targets ^= pe;
+        }
+    }
+
     let dropped_pc = crate::types::Piece::make(us, PieceType::Pawn);
     for to in valid_targets.iter() {
         add_move(buffer, Move::new_drop_with_piece(PieceType::Pawn, to, dropped_pc));
@@ -443,6 +452,7 @@ fn generate_non_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMov
     let target = target & empties;
 
     // YO準拠: 駒種配列を桂→香→銀→金→角→飛の順で構築
+    // ダミー初期値として Pawn を使用（num 未満のインデックスのみ参照される）
     let dummy = (PieceType::Pawn, crate::types::Piece::make(us, PieceType::Pawn));
     let mut drops = [dummy; 6];
     let mut num = 0usize;
@@ -451,13 +461,13 @@ fn generate_non_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMov
         drops[num] = (PieceType::Knight, crate::types::Piece::make(us, PieceType::Knight));
         num += 1;
     }
-    let next_to_knight = num;
+    let next_to_knight = num; // 桂を除いたdropsの開始index
 
     if hand.has(PieceType::Lance) {
         drops[num] = (PieceType::Lance, crate::types::Piece::make(us, PieceType::Lance));
         num += 1;
     }
-    let next_to_lance = num;
+    let next_to_lance = num; // 香・桂を除いたdropsの開始index
 
     for pt in [
         PieceType::Silver,
@@ -861,25 +871,18 @@ fn generate_direct_check_from_sq(
                 }
             }
             PieceType::Lance => {
-                // YO GEN_MOVE_LANCE_CHECK 不成パス:
-                // 同筋 かつ between_bb(from, ksq) 上の駒が1個以下のとき、
-                // 敵駒 & between_bb(from, ksq) & target が不成王手の対象
-                let them = !us;
-                let them_king = pos.king_square(them);
-                if from.file() == them_king.file()
-                    && !(between_bb(from, them_king) & occupied).more_than_one()
-                {
-                    let rank1 = rank1_bb(us);
-                    let rank12 = rank12_bb(us);
-                    let mask = if include_non_promotions {
-                        !rank1
-                    } else {
-                        !rank12
-                    };
-                    let dst = pos.pieces_c(them) & between_bb(from, them_king) & target & mask;
-                    for to in dst.iter() {
-                        add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
-                    }
+                // YO make_move_target_pro<LANCE, false>:
+                //   All=false → rank >= 3 (先手) つまり !rank12
+                //   All=true  → rank != 1 つまり !rank1
+                let rank1 = rank1_bb(us);
+                let rank12 = rank12_bb(us);
+                let mask = if include_non_promotions {
+                    !rank1
+                } else {
+                    !rank12
+                };
+                for to in (nonpro_dst & mask).iter() {
+                    add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
                 }
             }
             PieceType::Knight => {
@@ -1011,19 +1014,20 @@ fn generate_checks(
     let empties = !occupied;
     let hand = pos.hand(us);
 
-    // 歩打ち王手
+    // 歩打ち王手（YO準拠: 二歩+打ち歩詰めをgenerate内で除外）
     if hand.has(PieceType::Pawn) {
         let check_target = pos.check_squares(PieceType::Pawn) & empties;
         if !check_target.is_empty() {
-            // 歩の王手マスは1箇所のみ（YO準拠: 二歩+打ち歩詰めを生成時にフィルタ）
             let rank1 = rank1_bb(us);
             let our_pawns = pos.pieces(us, PieceType::Pawn);
             let valid = check_target & !rank1 & pawn_drop_mask(us, our_pawns);
             let dropped_pc = crate::types::Piece::make(us, PieceType::Pawn);
             for to in valid.iter() {
-                if pos.legal_pawn_drop_check(to) {
-                    add_move(buffer, Move::new_drop_with_piece(PieceType::Pawn, to, dropped_pc));
+                // 歩の王手 = 必ず敵玉の頭なので打ち歩詰め判定が必要
+                if !pos.legal_pawn_drop_check(to) {
+                    continue;
                 }
+                add_move(buffer, Move::new_drop_with_piece(PieceType::Pawn, to, dropped_pc));
             }
         }
     }
@@ -1131,63 +1135,31 @@ pub fn generate_with_type(
             generate_non_evasions_core(pos, buffer, targets, true, PromotionMode::Both, true);
         }
         QuietsProMinus => {
-            let targets = GenerateTargets::with_drop(empties, empties);
-            // QUIETS_PRO_MINUS は「歩の静かな成りを含めない」以外は通常のQUIETSと同じ。
-            let mut temp_buffer = ExtMoveBuffer::new();
+            // YO準拠: targetPawn = ~enemy_field & empties で歩の敵陣成りを事前除外
+            let pawn_target = !enemy_field(us) & empties;
+            let targets = GenerateTargets {
+                general: empties,
+                pawn: pawn_target,
+                drop: empties,
+            };
             generate_non_evasions_core(
                 pos,
-                &mut temp_buffer,
+                buffer,
                 targets,
                 false,
                 PromotionMode::PromoteOnly,
                 true,
             );
-
-            // 歩の静かな成りを除外するためフィルタ
-            for ext in temp_buffer.iter() {
-                if pos.is_capture(ext.mv) {
-                    buffer.push_move(ext.mv);
-                    continue;
-                }
-                let from = ext.mv.from();
-                let to = ext.mv.to();
-                let pt = pos.piece_on(from).piece_type();
-                if !(pt == PieceType::Pawn
-                    && ext.mv.is_promotion()
-                    && enemy_field(pos.side_to_move()).contains(to))
-                {
-                    buffer.push_move(ext.mv);
-                }
-            }
         }
         QuietsProMinusAll => {
-            let targets = GenerateTargets::with_drop(empties, empties);
-            // QUIETS_PRO_MINUS_ALL も歩の静かな成りのみ除外（不成生成は許容）
-            let mut temp_buffer = ExtMoveBuffer::new();
-            generate_non_evasions_core(
-                pos,
-                &mut temp_buffer,
-                targets,
-                true,
-                PromotionMode::Both,
-                true,
-            );
-
-            for ext in temp_buffer.iter() {
-                if pos.is_capture(ext.mv) {
-                    buffer.push_move(ext.mv);
-                    continue;
-                }
-                let from = ext.mv.from();
-                let to = ext.mv.to();
-                let pt = pos.piece_on(from).piece_type();
-                if !(pt == PieceType::Pawn
-                    && ext.mv.is_promotion()
-                    && enemy_field(pos.side_to_move()).contains(to))
-                {
-                    buffer.push_move(ext.mv);
-                }
-            }
+            // YO準拠: targetPawn = ~enemy_field & empties で歩の敵陣成りを事前除外
+            let pawn_target = !enemy_field(us) & empties;
+            let targets = GenerateTargets {
+                general: empties,
+                pawn: pawn_target,
+                drop: empties,
+            };
+            generate_non_evasions_core(pos, buffer, targets, true, PromotionMode::Both, true);
         }
         Captures => {
             let targets = GenerateTargets::new(enemy);
@@ -1205,7 +1177,14 @@ pub fn generate_with_type(
             generate_non_evasions_core(pos, buffer, targets, true, PromotionMode::Both, false);
         }
         CapturesProPlus => {
-            let targets = GenerateTargets::new(enemy);
+            // YO準拠: targetPawn = (~pieces(Us) & enemy_field(Us)) | pieces(Them)
+            // 歩は取り手に加え、敵陣への静かな成りも生成する
+            let pawn_target = (!pos.pieces_c(us) & enemy_field(us)) | enemy;
+            let targets = GenerateTargets {
+                general: enemy,
+                pawn: pawn_target,
+                drop: enemy,
+            };
             generate_non_evasions_core(
                 pos,
                 buffer,
@@ -1216,7 +1195,12 @@ pub fn generate_with_type(
             );
         }
         CapturesProPlusAll => {
-            let targets = GenerateTargets::new(enemy);
+            let pawn_target = (!pos.pieces_c(us) & enemy_field(us)) | enemy;
+            let targets = GenerateTargets {
+                general: enemy,
+                pawn: pawn_target,
+                drop: enemy,
+            };
             generate_non_evasions_core(pos, buffer, targets, true, PromotionMode::Both, false);
         }
         Recaptures => {
@@ -2072,13 +2056,6 @@ mod tests {
                                 continue;
                             }
                             if pos.gives_check(ext.mv) {
-                                // 打ち歩詰めを生成時にフィルタするので参照側も同様にフィルタ
-                                if ext.mv.is_drop()
-                                    && ext.mv.drop_piece_type() == PieceType::Pawn
-                                    && !pos.legal_pawn_drop_check(ext.mv.to())
-                                {
-                                    continue;
-                                }
                                 buf_old.push_move(ext.mv);
                             }
                         }
