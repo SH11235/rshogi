@@ -2113,6 +2113,8 @@ impl SearchWorker {
 
             let mut new_depth = depth - 1;
             let mut extension = 0i32;
+            // YO準拠: reduction/LMP/Step14はSE前のdepthを使う（SE後のdepth++の影響を受けない）
+            let original_depth = depth;
 
             // =============================================================
             // Singular Extension（YaneuraOu準拠）
@@ -2230,7 +2232,7 @@ impl SearchWorker {
             let mut r = reduction(
                 ctx.tune_params,
                 improving,
-                depth,
+                original_depth,
                 move_count,
                 delta,
                 st.root_delta.max(1),
@@ -2250,7 +2252,7 @@ impl SearchWorker {
             // YaneuraOu準拠: skip_quiet_moves()のみ、continueしない。
             // 現在の手はStep14の枝刈りで判定される。
             if !root_node && !best_value.is_loss() {
-                let lmp_limit = (3 + depth * depth) / (2 - improving as i32);
+                let lmp_limit = (3 + original_depth * original_depth) / (2 - improving as i32);
                 if move_count >= lmp_limit && !lmp_triggered {
                     mp.skip_quiets();
                     lmp_triggered = true;
@@ -2260,7 +2262,7 @@ impl SearchWorker {
             let step14_ctx = Step14Context {
                 pos,
                 mv,
-                depth,
+                depth: original_depth,
                 ply,
                 best_value,
                 in_check,
@@ -2616,6 +2618,7 @@ impl SearchWorker {
                 {
                     new_depth = new_depth.max(1);
                 }
+
                 st.stack[ply as usize].reduction = 0;
                 -Self::search_node::<{ NodeType::PV as u8 }>(
                     st,
@@ -3148,8 +3151,12 @@ impl SearchWorker {
         // fail low 時、親ノードが PV ライン上だったなら現ノードも PV ライン上として扱う。
         // これにより LMR の reduction 調整や Futility Pruning の抑制が適切に機能する。
         if best_value <= alpha {
-            st.stack[ply as usize].tt_pv =
-                st.stack[ply as usize].tt_pv || st.stack[(ply - 1) as usize].tt_pv;
+            st.stack[ply as usize].tt_pv = st.stack[ply as usize].tt_pv
+                || if ply >= 1 {
+                    st.stack[(ply - 1) as usize].tt_pv
+                } else {
+                    false
+                };
         }
 
         // =================================================================

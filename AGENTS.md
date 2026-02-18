@@ -47,6 +47,7 @@
 - YO ソース正規パス: `/mnt/nvme1/development/YaneuraOu/source/`
 - 比較スキル: `.claude/skills/yo-compare/SKILL.md`
 - YaneuraOu と実装詳細差異があれば必ず修正して仕様を完全に一致させること
+- 推定をコードの差から追うのは難しいので必ず計測で該当範囲を絞り込んでからコード詳細を確認する事
 
 ### ビルド・計測の注意
 
