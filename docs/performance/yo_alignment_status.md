@@ -98,6 +98,19 @@
 - cp は完全一致（348cp）
 - 原因未特定（TT実装差、ムーブオーダリング差などの可能性）
 
+### d9 大幅乖離（未解決）
+
+| depth | rshogi | YO | 差 |
+|-------|--------|----|----|
+| d9 | **324cp / 5565 nodes / seldepth 16** | **100cp / 28161 nodes / seldepth 21** | cp: +224, nodes: -22596 |
+
+d9 PV（4手目 `6e7c` までは一致、その後分岐）:
+- rshogi: `7g7h 7c6a+ 5a6a 4h5g B*7g 5i4h 7g5e+ R*4a`
+- YO: `6a6b 7h7g 2b5e 7g6f B*7g 5i5h 5e6f 6g6f 7g6f+ B*1e G*4b`
+
+YO の seldepth=21 (rshogi=16より深い) から、YO がより深い反証を発見している。
+rshogi が d9 で 324cp と過大評価している原因を要調査。
+
 ## 修正済み（未コミット）
 
 ### can_king_escape の `to` 除外を YO 準拠に修正（startpos/line11818用）
@@ -114,6 +127,12 @@
 
 ## 次の調査ステップ
 
+### 優先度高: pos1 d9 乖離調査
+1. d9 で PV が分岐する白5手目 (`7g7h` vs `6a6b`) の原因を調査
+2. rshogi の seldepth=16 が YO の 21 より浅い理由を特定
+3. 4手後局面 (`7f7g+ 9a7c 7d7c 6e7c`) から d5-d6 で再比較し、早期乖離を確認
+
+### 優先度中: startpos/line11818 深い乖離
 1. 低 depth で差が出る局面を探す（start_sfens_ply32.txt から複数局面を depth 5-8 で比較）
 2. line11818 d13 の PV を 8手進めた局面で低 depth 比較（乖離が早期に出る可能性）
 3. 差が出る局面で root move 別ノード数比較し、分岐起点を特定
