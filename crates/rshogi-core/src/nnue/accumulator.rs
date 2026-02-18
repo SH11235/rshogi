@@ -698,8 +698,7 @@ mod tests {
         // 最初のエントリを計算済みにする
         stack.current_mut().accumulator.computed_accumulation = true;
 
-        // 2手進める（玉移動なし）
-        stack.push(DirtyPiece::new());
+        // 1手進める（玉移動なし）— MAX_DEPTH=1 なので深さ1まで
         stack.push(DirtyPiece::new());
 
         // 祖先探索
@@ -707,7 +706,22 @@ mod tests {
         assert!(result.is_some());
         let (idx, depth) = result.unwrap();
         assert_eq!(idx, 0);
-        assert_eq!(depth, 2);
+        assert_eq!(depth, 1);
+    }
+
+    #[test]
+    fn test_accumulator_stack_find_usable_exceeds_max_depth() {
+        let mut stack = AccumulatorStack::new();
+
+        // 最初のエントリを計算済みにする
+        stack.current_mut().accumulator.computed_accumulation = true;
+
+        // 2手進める — MAX_DEPTH=1 なので深さ2は探索上限超過
+        stack.push(DirtyPiece::new());
+        stack.push(DirtyPiece::new());
+
+        let result = stack.find_usable_accumulator();
+        assert!(result.is_none());
     }
 
     #[test]
