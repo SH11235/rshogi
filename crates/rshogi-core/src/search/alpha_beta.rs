@@ -2149,6 +2149,7 @@ impl SearchWorker {
                 // - tt_hit: 同じ局面なので同じ値になる
                 // - move_count: ローカル変数で管理しているため影響なし
                 // - その他: ヒューリスティック用途のため多少の誤差は許容される
+
                 st.stack[ply as usize].excluded_move = mv;
                 let singular_value = Self::search_node::<{ NodeType::NonPV as u8 }>(
                     st,
@@ -2717,37 +2718,38 @@ impl SearchWorker {
             }
         }
 
-        // =================================================================
-        // 詰み/ステイルメイト判定
-        // =================================================================
-        // YaneuraOu準拠: excludedMoveがある場合は、ttMoveが除外されているので
-        // 単にalphaを返す（詰みとは判定しない）
-        if move_count == 0 {
-            if excluded_move.is_some() {
-                return alpha;
-            }
-            // 合法手なし
-            if in_check {
-                // 詰み
-                return Value::mated_in(ply);
-            } else {
-                // ステイルメイト（将棋では通常発生しないがパスがない場合）
-                return Value::ZERO;
-            }
-        }
-
         // YaneuraOu準拠: fail-high のときは lower bound の過大化を抑えるため
         // best_value を beta 側へ寄せてから後段の更新に渡す。
+        // 注: moveCount check の前に実行する（YO準拠: yaneuraou-search.cpp:4005-4006）
         if best_value >= beta && !best_value.is_mate_score() && !alpha.is_mate_score() {
             best_value = Value::new((best_value.raw() * depth + beta.raw()) / (depth + 1).max(1));
         }
 
         // =================================================================
-        // History更新（YaneuraOu準拠: update_all_stats）
+        // 詰み/ステイルメイト判定 + History更新
         // =================================================================
-        // YaneuraOu: bestMoveがある場合は常にupdate_all_statsを呼ぶ
-        // PASS は history_index() が未定義のためスキップ
-        if best_move.is_some() && !best_move.is_pass() {
+        // YaneuraOu準拠: if-else チェイン（yaneuraou-search.cpp:4019-4077）
+        // moveCount == 0: bestValue を設定して関数末尾までフォールスルー
+        //   → tt_pv 伝播・TT store が正しく実行されるようにする（早期 return 禁止）
+        // else if bestMove: update_all_stats
+        // else if: prior countermove bonus
+        if move_count == 0 {
+            // YaneuraOu準拠: excludedMoveがある場合は単にalphaを返す（詰みとは判定しない）
+            // 合法手なし（将棋では in_check == true なら詰み）
+            best_value = if excluded_move.is_some() {
+                alpha
+            } else if in_check {
+                Value::mated_in(ply)
+            } else {
+                // ステイルメイト（将棋では通常発生しないがパスがない場合）
+                Value::ZERO
+            };
+        } else if best_move.is_some() && !best_move.is_pass() {
+            // =================================================================
+            // History更新（YaneuraOu準拠: update_all_stats）
+            // =================================================================
+            // YaneuraOu: bestMoveがある場合は常にupdate_all_statsを呼ぶ
+            // PASS は history_index() が未定義のためスキップ
             let is_best_capture = pos.is_capture(best_move);
             let is_tt_move = best_move == tt_move;
             // YaneuraOu準拠: bonus = min(121*depth-77, 1633) + 375*(bestMove==ttMove)
