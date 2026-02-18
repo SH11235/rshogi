@@ -2503,6 +2503,10 @@ impl SearchWorker {
                                 break;
                             }
                             if let Some(key) = st.stack[idx as usize].cont_hist_key {
+                                // YO準拠: null move ply はスキップ
+                                if key.piece.is_none() {
+                                    continue;
+                                }
                                 let in_check_idx = key.in_check as usize;
                                 let capture_idx = key.capture as usize;
                                 let bonus =
@@ -2807,6 +2811,10 @@ impl SearchWorker {
                         if ply >= ply_back as i32 {
                             let prev_ply = (ply - ply_back as i32) as usize;
                             if let Some(key) = st.stack[prev_ply].cont_hist_key {
+                                // YO準拠: null move ply はスキップ
+                                if key.piece.is_none() {
+                                    continue;
+                                }
                                 let in_check_idx = key.in_check as usize;
                                 let capture_idx = key.capture as usize;
                                 let weighted_bonus = continuation_history_bonus_with_offset(
@@ -2863,6 +2871,10 @@ impl SearchWorker {
                             if ply >= ply_back as i32 {
                                 let prev_ply = (ply - ply_back as i32) as usize;
                                 if let Some(key) = st.stack[prev_ply].cont_hist_key {
+                                    // YO準拠: null move ply はスキップ
+                                    if key.piece.is_none() {
+                                        continue;
+                                    }
                                     let in_check_idx = key.in_check as usize;
                                     let capture_idx = key.capture as usize;
                                     let weighted_malus = continuation_history_bonus_with_offset(
@@ -2963,6 +2975,10 @@ impl SearchWorker {
                                     if let Some(target_key) =
                                         st.stack[target_ply as usize].cont_hist_key
                                     {
+                                        // YO準拠: null move ply はスキップ
+                                        if target_key.piece.is_none() {
+                                            continue;
+                                        }
                                         let in_check_idx = target_key.in_check as usize;
                                         let capture_idx = target_key.capture as usize;
                                         // YaneuraOu準拠: 88 * (i < 2) → ply_back=1 のみ
