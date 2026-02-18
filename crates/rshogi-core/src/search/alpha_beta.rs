@@ -2117,6 +2117,27 @@ impl SearchWorker {
             let original_depth = depth;
 
             // =============================================================
+            // Reduction計算（YO準拠: SE前に計算。SE内でtt_pvが上書きされる前の値を使う）
+            // =============================================================
+            let delta = (beta.raw() - alpha.raw()).max(0);
+            let mut r = reduction(
+                ctx.tune_params,
+                improving,
+                original_depth,
+                move_count,
+                delta,
+                st.root_delta.max(1),
+            );
+
+            // YaneuraOu準拠: ttPv時にreductionを増やす (yaneuraou-search.cpp:3265-3266)
+            // SE前のtt_pvを使う必要がある（SE内のsearch_nodeがtt_pvを上書きする可能性がある）
+            if st.stack[ply as usize].tt_pv {
+                r += ctx.tune_params.lmr_ttpv_add;
+            }
+
+            let lmr_depth = new_depth - r / 1024;
+
+            // =============================================================
             // Singular Extension（YaneuraOu準拠）
             // =============================================================
             // singular延長をするnodeであるか判定
@@ -2222,29 +2243,6 @@ impl SearchWorker {
                     extension = ctx.tune_params.singular_negative_extension_cut_node;
                 }
             }
-
-            // 注: YaneuraOu準拠で、new_depth += extension はdo_moveの後で行う（3482行目）
-            // ここではextensionを保持しておき、枝刈りはextension反映前のnew_depthで判定
-
-            // =============================================================
-            // Reduction計算とStep14の枝刈り
-            // =============================================================
-            let delta = (beta.raw() - alpha.raw()).max(0);
-            let mut r = reduction(
-                ctx.tune_params,
-                improving,
-                original_depth,
-                move_count,
-                delta,
-                st.root_delta.max(1),
-            );
-
-            // YaneuraOu準拠: ttPv時にreductionを増やす (yaneuraou-search.cpp:3215-3216)
-            if st.stack[ply as usize].tt_pv {
-                r += ctx.tune_params.lmr_ttpv_add;
-            }
-
-            let lmr_depth = new_depth - r / 1024;
 
             // =============================================================
             // LMP（Step14の前）
