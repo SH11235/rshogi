@@ -521,7 +521,7 @@ impl AccumulatorStack {
     /// 戻り値: Some((計算済みエントリのインデックス, 経由する局面数))
     ///         両視点で玉移動がない範囲で計算済み祖先が見つかった場合
     pub fn find_usable_accumulator(&self) -> Option<(usize, usize)> {
-        const MAX_DEPTH: usize = 8;
+        const MAX_DEPTH: usize = 1;
 
         let current = &self.entries[self.current_idx];
 
