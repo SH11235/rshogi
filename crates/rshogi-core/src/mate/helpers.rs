@@ -1,8 +1,8 @@
 // 1手詰め探索用のヘルパー関数
 
 use crate::bitboard::{
-    bishop_effect, gold_effect, king_effect, knight_effect, lance_effect, pawn_effect, rook_effect,
-    silver_effect, Bitboard, FILE_BB,
+    bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect, knight_effect,
+    lance_effect, pawn_effect, rook_effect, silver_effect, Bitboard, FILE_BB,
 };
 use crate::mate::tables::check_around_bb;
 use crate::position::Position;
@@ -10,31 +10,35 @@ use crate::types::{Color, PieceType, Square};
 
 use super::aligned;
 
-/// Sliderの利きを列挙する（YO準拠: slideを引数で受け取り、Bishop/Horse・Rook/Dragonを統合）
+/// Sliderの利きを列挙する
 ///
 /// # Arguments
 /// * `pos` - 局面
 /// * `us` - 攻撃側の色
-/// * `slide` - 占有bitboard（利きの遮断計算用）
-pub fn attacks_slider(pos: &Position, us: Color, slide: Bitboard) -> Bitboard {
+pub fn attacks_slider(pos: &Position, us: Color) -> Bitboard {
+    let occ = pos.occupied();
     let mut sum = Bitboard::EMPTY;
 
     for from in pos.pieces(us, PieceType::Lance).iter() {
-        sum |= lance_effect(us, from, slide);
+        sum |= lance_effect(us, from, occ);
     }
-    // YO準拠: BISHOP_HORSE統合 — Slider利きのみ（bishopEffect）で十分
-    for from in (pos.pieces(us, PieceType::Bishop) | pos.pieces(us, PieceType::Horse)).iter() {
-        sum |= bishop_effect(from, slide);
+    for from in pos.pieces(us, PieceType::Bishop).iter() {
+        sum |= bishop_effect(from, occ);
     }
-    // YO準拠: ROOK_DRAGON統合 — Slider利きのみ（rookEffect）で十分
-    for from in (pos.pieces(us, PieceType::Rook) | pos.pieces(us, PieceType::Dragon)).iter() {
-        sum |= rook_effect(from, slide);
+    for from in pos.pieces(us, PieceType::Horse).iter() {
+        sum |= horse_effect(from, occ);
+    }
+    for from in pos.pieces(us, PieceType::Rook).iter() {
+        sum |= rook_effect(from, occ);
+    }
+    for from in pos.pieces(us, PieceType::Dragon).iter() {
+        sum |= dragon_effect(from, occ);
     }
 
     sum
 }
 
-/// Sliderの利きを列挙する（avoid升の駒を除外、YO準拠: bishopEffect/rookEffectのみ使用）
+/// Sliderの利きを列挙する（avoid升の駒を除外）
 ///
 /// # Arguments
 /// * `pos` - 局面
@@ -53,13 +57,13 @@ pub fn attacks_slider_avoiding(
     for from in (pos.pieces(us, PieceType::Lance) & avoid).iter() {
         sum |= lance_effect(us, from, occ);
     }
-    // YO準拠: BISHOP_HORSE統合 — Slider利き(bishopEffect)のみで十分
+    // YO準拠: BISHOP_HORSE統合 — Slider利きのみ(bishopEffect)で十分
     for from in
         ((pos.pieces(us, PieceType::Bishop) | pos.pieces(us, PieceType::Horse)) & avoid).iter()
     {
         sum |= bishop_effect(from, occ);
     }
-    // YO準拠: ROOK_DRAGON統合 — Slider利き(rookEffect)のみで十分
+    // YO準拠: ROOK_DRAGON統合 — Slider利きのみ(rookEffect)で十分
     for from in
         ((pos.pieces(us, PieceType::Rook) | pos.pieces(us, PieceType::Dragon)) & avoid).iter()
     {
@@ -180,8 +184,8 @@ pub fn can_king_escape(
 ) -> bool {
     let king_sq = pos.king_square(us);
     let slide = slide | Bitboard::from_square(to);
-    // YO準拠: toを逃げ先から除外（保守的近似）
-    let escape = king_effect(king_sq) & !(bb_avoid | Bitboard::from_square(to) | pos.pieces_c(us));
+    // toは王手駒のマスだが、王がそこに移動して駒を取ることで逃げられるため除外しない
+    let escape = king_effect(king_sq) & !(bb_avoid | pos.pieces_c(us));
 
     for dest in escape.iter() {
         let attacked = pos.attackers_to_occ(dest, slide) & pos.pieces_c(!us);
@@ -214,49 +218,10 @@ pub fn can_king_escape_with_from(
 ) -> bool {
     let king_sq = pos.king_square(us);
     let slide = (slide | Bitboard::from_square(to)) & !Bitboard::from_square(king_sq);
-    // YO準拠: toを逃げ先から除外（保守的近似）
-    let escape = king_effect(king_sq) & !(bb_avoid | Bitboard::from_square(to) | pos.pieces_c(us));
-
-    for dest in escape.iter() {
-        let attacked = pos.attackers_to_occ(dest, slide) & pos.pieces_c(!us);
-        let attacked_wo_from = attacked & !Bitboard::from_square(from);
-        if attacked_wo_from.is_empty() {
-            return true;
-        }
-    }
-    false
-}
-
-/// 玉がtoとbb_avoid以外の升に逃げられるか（fromから駒を除去、ただしtoには行ける）
-///
-/// YO準拠: can_king_escape_cangoto — 離し角/飛車等の高度な詰み判定で使用。
-/// can_king_escape_with_from との違いは、toを逃げ先から除外しない点。
-///
-/// # Arguments
-/// * `pos` - 局面
-/// * `us` - 玉の色
-/// * `from` - 駒を除去する升
-/// * `to` - 駒を移動する升（玉はここに逃げられる）
-/// * `bb_avoid` - 逃げられない升
-/// * `slide` - 占有bitboard
-///
-/// # Returns
-/// 逃げられる場合は`true`
-pub fn can_king_escape_cangoto(
-    pos: &Position,
-    us: Color,
-    from: Square,
-    to: Square,
-    bb_avoid: Bitboard,
-    slide: Bitboard,
-) -> bool {
-    let king_sq = pos.king_square(us);
-    let slide = (slide | Bitboard::from_square(to)) ^ Bitboard::from_square(king_sq);
-
-    // YO準拠: bb_avoidと自駒のないところから移動先を探す。ただしtoには行ける。
-    // pos.pieces_c(us)にはtoに自駒があることがあり、これは取られるものとして除外する。
-    let to_bb = Bitboard::from_square(to);
-    let escape = king_effect(king_sq) & (!(bb_avoid | pos.pieces_c(us)) | to_bb);
+    // toは王手駒が移動先で相手駒を取った場合、味方駒ではなくなる。
+    // 王がtoに移動して王手駒を取り返す逃げも考慮するため、toを味方駒から除外する。
+    let our_pieces = pos.pieces_c(us) & !Bitboard::from_square(to);
+    let escape = king_effect(king_sq) & !(bb_avoid | our_pieces);
 
     for dest in escape.iter() {
         let attacked = pos.attackers_to_occ(dest, slide) & pos.pieces_c(!us);
@@ -367,7 +332,7 @@ fn attacks_around_king_non_slider_in_avoiding(
     let mut sum = Bitboard::EMPTY;
     let avoid_bb = !Bitboard::from_square(avoid);
 
-    // YO準拠: 歩にはavoid_bbを適用しない（一括シフトで計算、avoid駒が歩でも除外しない）
+    // YO準拠: 歩はavoid_bbを適用しない（一括シフトで計算、avoid駒が歩でも除外しない）
     for from in pos.pieces(them, PieceType::Pawn).iter() {
         sum |= pawn_effect(them, from);
     }
