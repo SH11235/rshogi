@@ -102,7 +102,8 @@ unsafe fn hsum_i32_avx2(v: std::arch::x86_64::__m256i) -> i32 {
 ))]
 #[inline]
 unsafe fn hsum_i32_sse2(v: std::arch::x86_64::__m128i) -> i32 {
-    // SAFETY: 呼び出し側が ssse3 フィーチャを保証する
+    // SAFETY: 使用命令（_mm_unpackhi_epi64, _mm_add_epi32, _mm_shuffle_epi32,
+    // _mm_cvtsi128_si32）はすべて SSE2 命令。呼び出し側が sse2 フィーチャを保証する
     unsafe {
         use std::arch::x86_64::*;
         let hi64 = _mm_unpackhi_epi64(v, v);
