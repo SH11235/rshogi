@@ -74,6 +74,21 @@ impl ContHistKey {
             to,
         }
     }
+
+    /// null move 用の sentinel キーを返す。
+    ///
+    /// YaneuraOu準拠: null move ply では `Piece::NONE` + `Square::SQ_11` を
+    /// sentinel として格納し、continuation history 更新時に `piece.is_none()` で
+    /// スキップ判定する。
+    #[inline]
+    pub fn null_sentinel() -> Self {
+        Self {
+            in_check: false,
+            capture: false,
+            piece: Piece::NONE,
+            to: Square::SQ_11,
+        }
+    }
 }
 
 // =============================================================================

@@ -647,8 +647,7 @@ impl SearchWorker {
     #[inline]
     pub(super) fn clear_cont_history_for_null(&mut self, ply: i32) {
         self.state.stack[ply as usize].cont_history_ptr = self.cont_history_sentinel;
-        self.state.stack[ply as usize].cont_hist_key =
-            Some(ContHistKey::new(false, false, Piece::NONE, Square::SQ_11));
+        self.state.stack[ply as usize].cont_hist_key = Some(ContHistKey::null_sentinel());
     }
 
     /// usinewgameで呼び出し：全履歴をクリア（YaneuraOu Worker::clear()相当）
@@ -2088,6 +2087,7 @@ impl SearchWorker {
         // TTのLower boundが十分深く、probCutBeta以上の値を持つなら即座にカット。
         // in_check時もこのステップは実行される（YOではgoto moves_loopの先で実行）。
         {
+            // YaneuraOu準拠定数値
             let small_probcut_beta = beta + Value::new(418);
             if tt_data.bound.is_lower_or_exact()
                 && tt_data.depth >= depth - 4

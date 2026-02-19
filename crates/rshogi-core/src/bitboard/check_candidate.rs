@@ -46,6 +46,11 @@ fn pt_to_index(pt: PieceType) -> usize {
 ///
 /// ROOK/DRAGON は全域候補のため本テーブルに含めない。
 /// 呼び出し側で無条件に含める。
+///
+/// # Panics
+///
+/// `pt` が Pawn, Lance, Knight, Silver, Bishop, Horse, Gold 以外の場合 panic する。
+/// ROOK/DRAGON は全域候補のためテーブルに含まれず、呼び出し側で別途処理すること。
 #[inline]
 pub fn check_candidate_bb(us: Color, pt: PieceType, ksq: Square) -> Bitboard {
     check_candidate_table()[us.index()][pt_to_index(pt)][ksq.index()]

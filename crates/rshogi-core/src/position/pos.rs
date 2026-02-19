@@ -357,8 +357,12 @@ impl Position {
     }
 
     /// 千日手/優劣局面判定（do_move 時に計算した情報を使用）
-    /// YaneuraOu準拠: repetition が負値（4回目以降）の場合は ply に関わらず常に検出する
-    /// （負値 < 正の ply で無条件 true になる設計）
+    ///
+    /// YaneuraOu準拠: `rep < ply` で判定する（`rep.abs() < ply` ではない）。
+    /// - `rep > 0`: 通常の千日手。`rep` は何手前に同一局面があったかを表す。
+    ///   `rep < ply` でルートより前の局面との千日手を除外する。
+    /// - `rep < 0`: 連続王手の千日手（4回目以降）。負値は常に `ply`（正値）より小さいため
+    ///   無条件で検出される。`rep.abs()` にすると連続王手千日手を見逃す。
     pub fn repetition_state(&self, ply: i32) -> RepetitionState {
         let rep = self.cur_state().repetition;
         if rep != 0 && rep < ply {

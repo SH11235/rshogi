@@ -436,6 +436,10 @@ pub(super) fn qsearch<const NT: u8>(
 
                 if !pos.see_ge(mv, alpha - futility_base) {
                     inc_stat!(st, qs_futility_pruned);
+                    // YaneuraOu準拠: SEE で alpha - futility_base を下回った場合、
+                    // best_value を futility_base（楽観的上限）で更新する。
+                    // alpha.min() を取るのは、futility_base > alpha のケースで
+                    // best_value が alpha を超えないようにするため。
                     best_value = alpha.min(futility_base);
                     continue;
                 }

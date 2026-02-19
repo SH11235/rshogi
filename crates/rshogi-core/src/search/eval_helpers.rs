@@ -5,7 +5,7 @@
 #[cfg(not(feature = "search-no-pass-rules"))]
 use crate::eval::evaluate_pass_rights;
 use crate::position::Position;
-use crate::types::{Bound, Color, Depth, Move, Piece, Square, Value, DEPTH_UNSEARCHED, MAX_PLY};
+use crate::types::{Bound, Color, Depth, Move, Value, DEPTH_UNSEARCHED, MAX_PLY};
 
 use super::alpha_beta::{
     to_corrected_static_eval, EvalContext, ProbeOutcome, SearchContext, SearchState, TTContext,
@@ -50,7 +50,7 @@ pub(super) fn correction_value(
 
     // continuation correction 用キー: (ss-2) と (ss-4) の2段階（YO準拠）
     // YO準拠: plyが小さい場合はsentinel（NO_PIECE, SQ_ZERO）テーブルを参照
-    let sentinel_key = ContHistKey::new(false, false, Piece::NONE, Square::SQ_11);
+    let sentinel_key = ContHistKey::null_sentinel();
     let cont_key_2 = if move_ok {
         if ply >= 2 {
             st.stack[(ply - 2) as usize].cont_hist_key
@@ -125,7 +125,7 @@ pub(super) fn update_correction_history(
     let move_ok = prev_move.is_normal();
 
     // (ss-2) context — YO準拠: plyが小さい場合はsentinel（NO_PIECE, SQ_ZERO）テーブルを更新
-    let sentinel_key = ContHistKey::new(false, false, Piece::NONE, Square::SQ_11);
+    let sentinel_key = ContHistKey::null_sentinel();
     let cont_params_2 = if move_ok {
         let key = if ply >= 2 {
             st.stack[(ply - 2) as usize].cont_hist_key

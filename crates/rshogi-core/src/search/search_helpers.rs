@@ -232,8 +232,7 @@ pub(super) fn set_cont_history_for_move(
 #[inline]
 pub(super) fn clear_cont_history_for_null(st: &mut SearchState, ctx: &SearchContext<'_>, ply: i32) {
     st.stack[ply as usize].cont_history_ptr = ctx.cont_history_sentinel;
-    st.stack[ply as usize].cont_hist_key =
-        Some(ContHistKey::new(false, false, Piece::NONE, Square::SQ_11));
+    st.stack[ply as usize].cont_hist_key = Some(ContHistKey::null_sentinel());
 }
 
 // =============================================================================
