@@ -734,11 +734,18 @@ pub fn value_from_tt(v: Value, ply: i32) -> Value {
     }
 }
 
-/// 千日手/優劣局面を評価値に変換（YaneuraOu簡易版）
+/// 千日手/優劣局面を評価値に変換（YaneuraOu準拠）
+///
+/// draw_value_table は SearchContext.draw_value_table を渡す。
+/// REPETITION_DRAW の場合、drawValueTable[stm] を返す。
 #[inline]
-pub fn draw_value(state: RepetitionState, _stm: crate::types::Color) -> Value {
+pub fn draw_value(
+    state: RepetitionState,
+    stm: crate::types::Color,
+    draw_value_table: &[Value; 2],
+) -> Value {
     match state {
-        RepetitionState::Draw => Value::DRAW,
+        RepetitionState::Draw => draw_value_table[stm as usize],
         RepetitionState::Win => Value::MATE,
         RepetitionState::Lose => -Value::MATE,
         // YaneuraOu準拠: VALUE_SUPERIOR = VALUE_TB_WIN_IN_MAX_PLY - 1

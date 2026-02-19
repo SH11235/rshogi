@@ -67,7 +67,7 @@ pub(super) fn qsearch<const NT: u8>(
 
     let rep_state = pos.repetition_state(ply);
     if rep_state.is_repetition() || rep_state.is_superior_inferior() {
-        let v = draw_value(rep_state, pos.side_to_move());
+        let v = draw_value(rep_state, pos.side_to_move(), &ctx.draw_value_table);
         if v != Value::NONE {
             if v == Value::DRAW {
                 let jittered = Value::new(v.raw() + draw_jitter(st.nodes, ctx.tune_params));
@@ -78,8 +78,12 @@ pub(super) fn qsearch<const NT: u8>(
     }
 
     // 引き分け手数ルール（YaneuraOu準拠、MaxMovesToDrawオプション）
+    // YO: draw_value(REPETITION_DRAW, stm) + value_draw(nodes)
     if ctx.max_moves_to_draw > 0 && pos.game_ply() > ctx.max_moves_to_draw {
-        return Value::new(Value::DRAW.raw() + draw_jitter(st.nodes, ctx.tune_params));
+        return Value::new(
+            ctx.draw_value_table[pos.side_to_move() as usize].raw()
+                + draw_jitter(st.nodes, ctx.tune_params),
+        );
     }
 
     let key = pos.key();
