@@ -2637,6 +2637,7 @@ impl SearchWorker {
                 )
             };
             nnue_pop(st);
+
             pos.undo_move(mv);
 
             // パス手評価ボーナス: パス手を実行した場合、評価値にボーナスを加算
@@ -3111,6 +3112,10 @@ impl SearchWorker {
                                 if let Some(target_key) =
                                     st.stack[target_ply as usize].cont_hist_key
                                 {
+                                    // YO準拠: null move ply はスキップ
+                                    if target_key.piece.is_none() {
+                                        continue;
+                                    }
                                     let in_check_idx = target_key.in_check as usize;
                                     let capture_idx = target_key.capture as usize;
                                     // YaneuraOu準拠: 88 * (i < 2) → ply_back=1 のみ
