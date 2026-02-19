@@ -7,7 +7,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::Parser;
 
 /// PackedSfenValueのサイズ（バイト）

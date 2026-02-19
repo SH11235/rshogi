@@ -12,7 +12,7 @@ mod imp {
     use crate::tt::TranspositionTable;
     use crate::types::Depth;
 
-    use crate::search::engine::{search_helper, SearchProgress};
+    use crate::search::engine::{SearchProgress, search_helper};
     use crate::search::{LimitsType, SearchTuneParams, SearchWorker, TimeManagement, TimeOptions};
 
     const SEARCH_STACK_SIZE: usize = 64 * 1024 * 1024;
@@ -381,8 +381,8 @@ mod imp {
 // The main thread search runs directly in Search::go() without any parallel helpers.
 #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
 mod imp {
-    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
 
     use crate::eval::EvalHash;
     use crate::position::Position;

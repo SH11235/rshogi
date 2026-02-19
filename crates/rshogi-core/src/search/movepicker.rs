@@ -38,10 +38,10 @@
 //! 2. QCaptureInit - 捕獲手の生成
 //! 3. QCapture - 捕獲手
 
-use super::{HistoryTables, PieceToHistory, LOW_PLY_HISTORY_SIZE};
+use super::{HistoryTables, LOW_PLY_HISTORY_SIZE, PieceToHistory};
 use crate::movegen::{ExtMove, ExtMoveBuffer};
 use crate::position::Position;
-use crate::types::{Color, Depth, Move, Piece, PieceType, Value, DEPTH_QS};
+use crate::types::{Color, DEPTH_QS, Depth, Move, Piece, PieceType, Value};
 
 // =============================================================================
 // Stage（指し手生成の段階）

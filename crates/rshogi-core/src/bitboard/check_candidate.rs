@@ -93,7 +93,8 @@ fn king_eff(sq: Square) -> Bitboard {
 #[inline]
 unsafe fn make_square(file: i32, rank: i32) -> Square {
     debug_assert!((0..9).contains(&file) && (0..9).contains(&rank));
-    Square::from_u8_unchecked((file * 9 + rank) as u8)
+    // SAFETY: 呼び出し側が file: 0..=8, rank: 0..=8 を保証する
+    unsafe { Square::from_u8_unchecked((file * 9 + rank) as u8) }
 }
 
 fn init_check_candidate() -> [[[Bitboard; Square::NUM]; CHECK_CANDIDATE_NUM]; Color::NUM] {

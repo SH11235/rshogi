@@ -1,9 +1,9 @@
 //! 指し手生成器
 
 use crate::bitboard::{
-    between_bb, bishop_effect, check_candidate_bb, dragon_effect, gold_effect, horse_effect,
-    king_effect, knight_effect, lance_effect, line_bb, pawn_effect, rook_effect, silver_effect,
-    Bitboard, FILE_BB, RANK_BB,
+    Bitboard, FILE_BB, RANK_BB, between_bb, bishop_effect, check_candidate_bb, dragon_effect,
+    gold_effect, horse_effect, king_effect, knight_effect, lance_effect, line_bb, pawn_effect,
+    rook_effect, silver_effect,
 };
 use crate::position::Position;
 use crate::types::{Color, Move, PieceType, Square};
@@ -423,10 +423,10 @@ fn generate_pawn_drops(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuf
     let them = !us;
     let them_king = pos.king_square(them);
     let pe = pawn_effect(them, them_king);
-    if let Some(to) = (pe & valid_targets).lsb() {
-        if !pos.legal_pawn_drop_check(to) {
-            valid_targets ^= pe;
-        }
+    if let Some(to) = (pe & valid_targets).lsb()
+        && !pos.legal_pawn_drop_check(to)
+    {
+        valid_targets ^= pe;
     }
 
     let dropped_pc = crate::types::Piece::make(us, PieceType::Pawn);
@@ -2069,11 +2069,14 @@ mod tests {
                     let missing: Vec<_> = set_old.difference(&set_new).collect();
                     let extra: Vec<_> = set_new.difference(&set_old).collect();
 
-                    assert!(missing.is_empty() && extra.is_empty(),
+                    assert!(
+                        missing.is_empty() && extra.is_empty(),
                         "sfen={sfen} quiet_only={quiet_only} include_non_promo={include_non_promo}\n\
                          missing={missing:?} extra={extra:?}\n\
                          new_count={} old_count={}",
-                        buf_new.len(), buf_old.len());
+                        buf_new.len(),
+                        buf_old.len()
+                    );
                 }
             }
         }

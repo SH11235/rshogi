@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use crate::eval::EvalHash;
-use crate::search::alpha_beta::{reduction, SearchWorker};
 use crate::search::SearchTuneParams;
+use crate::search::alpha_beta::{SearchWorker, reduction};
 use crate::tt::TranspositionTable;
 
 #[test]

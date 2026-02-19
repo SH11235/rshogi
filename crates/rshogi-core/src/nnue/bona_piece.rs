@@ -330,11 +330,7 @@ impl BonaPiece {
             | PieceType::ProKnight
             | PieceType::ProSilver => {
                 // 金と成駒（金の動き）は同じカテゴリ
-                if is_friend {
-                    F_GOLD
-                } else {
-                    E_GOLD
-                }
+                if is_friend { F_GOLD } else { E_GOLD }
             }
             PieceType::Bishop => {
                 if is_friend {

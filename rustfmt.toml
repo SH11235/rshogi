@@ -9,7 +9,7 @@ max_width = 100
 use_field_init_shorthand = true
 
 # Edition (should match Cargo.toml)
-edition = "2021"
+edition = "2024"
 
 # Tab spaces
 tab_spaces = 4

@@ -5,7 +5,7 @@ use crate::nnue::piece_list::piece_number_base;
 use crate::nnue::{ExtBonaPiece, PieceNumber};
 use crate::types::{Color, File, Piece, PieceType, Rank, Square};
 
-use super::pos::{is_minor_piece, Position};
+use super::pos::{Position, is_minor_piece};
 use super::zobrist::{zobrist_hand, zobrist_no_pawns, zobrist_psq, zobrist_side};
 
 /// 平手初期局面のSFEN
@@ -64,7 +64,7 @@ impl Position {
                 return Err(SfenError::SideToMove(format!(
                     "Expected 'b' or 'w', got '{}'",
                     parts[1]
-                )))
+                )));
             }
         }
 

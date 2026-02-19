@@ -23,9 +23,9 @@
 //! ```
 
 use rshogi_core::eval::material::evaluate_material;
-use rshogi_core::movegen::{generate_legal, MoveList};
+use rshogi_core::movegen::{MoveList, generate_legal};
 use rshogi_core::nnue::{
-    evaluate_dispatch, get_network, is_nnue_initialized, AccumulatorStackVariant, DirtyPiece,
+    AccumulatorStackVariant, DirtyPiece, evaluate_dispatch, get_network, is_nnue_initialized,
 };
 use rshogi_core::position::Position;
 use rshogi_core::types::{Move, Value};

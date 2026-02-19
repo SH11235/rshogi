@@ -24,22 +24,25 @@ const fn padded_input(input_dim: usize) -> usize {
 ))]
 #[inline]
 unsafe fn hsum_i32_avx2(v: std::arch::x86_64::__m256i) -> i32 {
-    use std::arch::x86_64::*;
+    // SAFETY: 呼び出し側が avx2 フィーチャを保証する
+    unsafe {
+        use std::arch::x86_64::*;
 
-    // 上位128bitと下位128bitを加算
-    let hi = _mm256_extracti128_si256(v, 1);
-    let lo = _mm256_castsi256_si128(v);
-    let sum128 = _mm_add_epi32(lo, hi);
+        // 上位128bitと下位128bitを加算
+        let hi = _mm256_extracti128_si256(v, 1);
+        let lo = _mm256_castsi256_si128(v);
+        let sum128 = _mm_add_epi32(lo, hi);
 
-    // 64bit加算
-    let hi64 = _mm_unpackhi_epi64(sum128, sum128);
-    let sum64 = _mm_add_epi32(sum128, hi64);
+        // 64bit加算
+        let hi64 = _mm_unpackhi_epi64(sum128, sum128);
+        let sum64 = _mm_add_epi32(sum128, hi64);
 
-    // 32bit加算
-    let hi32 = _mm_shuffle_epi32(sum64, 1);
-    let sum32 = _mm_add_epi32(sum64, hi32);
+        // 32bit加算
+        let hi32 = _mm_shuffle_epi32(sum64, 1);
+        let sum32 = _mm_add_epi32(sum64, hi32);
 
-    _mm_cvtsi128_si32(sum32)
+        _mm_cvtsi128_si32(sum32)
+    }
 }
 
 /// AVX512-VNNI用 DPBUSD（512bit版）
@@ -54,8 +57,11 @@ unsafe fn m512_add_dpbusd_epi32(
     a: std::arch::x86_64::__m512i,
     b: std::arch::x86_64::__m512i,
 ) {
-    use std::arch::x86_64::*;
-    *acc = _mm512_dpbusd_epi32(*acc, a, b);
+    // SAFETY: 呼び出し側が avx512vnni フィーチャを保証する
+    unsafe {
+        use std::arch::x86_64::*;
+        *acc = _mm512_dpbusd_epi32(*acc, a, b);
+    }
 }
 
 /// AVX512用 DPBUSD エミュレーション（VNNI非対応時）
@@ -72,12 +78,15 @@ unsafe fn m512_add_dpbusd_epi32(
     a: std::arch::x86_64::__m512i,
     b: std::arch::x86_64::__m512i,
 ) {
-    use std::arch::x86_64::*;
-    // maddubs: u8×i8 → i16 (飽和加算)
-    let product = _mm512_maddubs_epi16(a, b);
-    // madd: i16×i16 → i32 (隣接ペアの積和)
-    let product32 = _mm512_madd_epi16(product, _mm512_set1_epi16(1));
-    *acc = _mm512_add_epi32(*acc, product32);
+    // SAFETY: 呼び出し側が avx512bw フィーチャを保証する
+    unsafe {
+        use std::arch::x86_64::*;
+        // maddubs: u8×i8 → i16 (飽和加算)
+        let product = _mm512_maddubs_epi16(a, b);
+        // madd: i16×i16 → i32 (隣接ペアの積和)
+        let product32 = _mm512_madd_epi16(product, _mm512_set1_epi16(1));
+        *acc = _mm512_add_epi32(*acc, product32);
+    }
 }
 
 /// AVX2用 DPBUSD エミュレーション（u8×i8→i32積和演算）
@@ -97,10 +106,13 @@ unsafe fn m256_add_dpbusd_epi32(
     a: std::arch::x86_64::__m256i,
     b: std::arch::x86_64::__m256i,
 ) {
-    use std::arch::x86_64::*;
-    let product = _mm256_maddubs_epi16(a, b);
-    let product32 = _mm256_madd_epi16(product, _mm256_set1_epi16(1));
-    *acc = _mm256_add_epi32(*acc, product32);
+    // SAFETY: 呼び出し側が avx2 フィーチャを保証する
+    unsafe {
+        use std::arch::x86_64::*;
+        let product = _mm256_maddubs_epi16(a, b);
+        let product32 = _mm256_madd_epi16(product, _mm256_set1_epi16(1));
+        *acc = _mm256_add_epi32(*acc, product32);
+    }
 }
 
 /// SSE2での水平加算（i32×4 → i32）
@@ -111,17 +123,20 @@ unsafe fn m256_add_dpbusd_epi32(
 ))]
 #[inline]
 unsafe fn hsum_i32_sse2(v: std::arch::x86_64::__m128i) -> i32 {
-    use std::arch::x86_64::*;
+    // SAFETY: 呼び出し側が sse2 フィーチャを保証する
+    unsafe {
+        use std::arch::x86_64::*;
 
-    // 64bit加算
-    let hi64 = _mm_unpackhi_epi64(v, v);
-    let sum64 = _mm_add_epi32(v, hi64);
+        // 64bit加算
+        let hi64 = _mm_unpackhi_epi64(v, v);
+        let sum64 = _mm_add_epi32(v, hi64);
 
-    // 32bit加算
-    let hi32 = _mm_shuffle_epi32(sum64, 1);
-    let sum32 = _mm_add_epi32(sum64, hi32);
+        // 32bit加算
+        let hi32 = _mm_shuffle_epi32(sum64, 1);
+        let sum32 = _mm_add_epi32(sum64, hi32);
 
-    _mm_cvtsi128_si32(sum32)
+        _mm_cvtsi128_si32(sum32)
+    }
 }
 
 /// SSSE3用 DPBUSD エミュレーション（u8×i8→i32積和演算）
@@ -137,10 +152,13 @@ unsafe fn m128_add_dpbusd_epi32(
     a: std::arch::x86_64::__m128i,
     b: std::arch::x86_64::__m128i,
 ) {
-    use std::arch::x86_64::*;
-    let product = _mm_maddubs_epi16(a, b); // SSSE3命令
-    let product32 = _mm_madd_epi16(product, _mm_set1_epi16(1));
-    *acc = _mm_add_epi32(*acc, product32);
+    // SAFETY: 呼び出し側が ssse3 フィーチャを保証する
+    unsafe {
+        use std::arch::x86_64::*;
+        let product = _mm_maddubs_epi16(a, b); // SSSE3命令
+        let product32 = _mm_madd_epi16(product, _mm_set1_epi16(1));
+        *acc = _mm_add_epi32(*acc, product32);
+    }
 }
 
 /// WASM SIMD128: u8×i8 の16要素内積を i32x4 に集約
@@ -151,21 +169,24 @@ unsafe fn dot_i8x16_u8i8_preexpanded(
     in_hi: std::arch::wasm32::v128,
     w_vec: std::arch::wasm32::v128,
 ) -> std::arch::wasm32::v128 {
-    use std::arch::wasm32::*;
-    let w_lo = i16x8_extend_low_i8x16(w_vec);
-    let w_hi = i16x8_extend_high_i8x16(w_vec);
+    // SAFETY: 呼び出し側が wasm32 simd128 フィーチャを保証する
+    unsafe {
+        use std::arch::wasm32::*;
+        let w_lo = i16x8_extend_low_i8x16(w_vec);
+        let w_hi = i16x8_extend_high_i8x16(w_vec);
 
-    let prod_lo = i16x8_mul(in_lo, w_lo);
-    let prod_hi = i16x8_mul(in_hi, w_hi);
+        let prod_lo = i16x8_mul(in_lo, w_lo);
+        let prod_hi = i16x8_mul(in_hi, w_hi);
 
-    let sum32_lo_lo = i32x4_extend_low_i16x8(prod_lo);
-    let sum32_lo_hi = i32x4_extend_high_i16x8(prod_lo);
-    let sum32_hi_lo = i32x4_extend_low_i16x8(prod_hi);
-    let sum32_hi_hi = i32x4_extend_high_i16x8(prod_hi);
+        let sum32_lo_lo = i32x4_extend_low_i16x8(prod_lo);
+        let sum32_lo_hi = i32x4_extend_high_i16x8(prod_lo);
+        let sum32_hi_lo = i32x4_extend_low_i16x8(prod_hi);
+        let sum32_hi_hi = i32x4_extend_high_i16x8(prod_hi);
 
-    let mut acc = i32x4_add(sum32_lo_lo, sum32_lo_hi);
-    acc = i32x4_add(acc, sum32_hi_lo);
-    i32x4_add(acc, sum32_hi_hi)
+        let mut acc = i32x4_add(sum32_lo_lo, sum32_lo_hi);
+        acc = i32x4_add(acc, sum32_hi_lo);
+        i32x4_add(acc, sum32_hi_hi)
+    }
 }
 
 /// WASM SIMD128: 入力ベクトルをu16拡張して内積を計算
@@ -175,21 +196,27 @@ unsafe fn dot_i8x16_u8i8(
     in_vec: std::arch::wasm32::v128,
     w_vec: std::arch::wasm32::v128,
 ) -> std::arch::wasm32::v128 {
-    use std::arch::wasm32::*;
-    let in_lo = i16x8_extend_low_u8x16(in_vec);
-    let in_hi = i16x8_extend_high_u8x16(in_vec);
-    dot_i8x16_u8i8_preexpanded(in_lo, in_hi, w_vec)
+    // SAFETY: 呼び出し側が wasm32 simd128 フィーチャを保証する
+    unsafe {
+        use std::arch::wasm32::*;
+        let in_lo = i16x8_extend_low_u8x16(in_vec);
+        let in_hi = i16x8_extend_high_u8x16(in_vec);
+        dot_i8x16_u8i8_preexpanded(in_lo, in_hi, w_vec)
+    }
 }
 
 /// WASM SIMD128: i32x4 の水平加算
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline]
 unsafe fn hsum_i32x4(v: std::arch::wasm32::v128) -> i32 {
-    use std::arch::wasm32::*;
-    i32x4_extract_lane::<0>(v)
-        + i32x4_extract_lane::<1>(v)
-        + i32x4_extract_lane::<2>(v)
-        + i32x4_extract_lane::<3>(v)
+    // SAFETY: 呼び出し側が wasm32 simd128 フィーチャを保証する
+    unsafe {
+        use std::arch::wasm32::*;
+        i32x4_extract_lane::<0>(v)
+            + i32x4_extract_lane::<1>(v)
+            + i32x4_extract_lane::<2>(v)
+            + i32x4_extract_lane::<3>(v)
+    }
 }
 
 /// WASM SIMD128: 2本のi32x4を水平加算（シャッフル + 加算）
@@ -199,8 +226,11 @@ unsafe fn hadd_i32x4(
     x0: std::arch::wasm32::v128,
     x1: std::arch::wasm32::v128,
 ) -> std::arch::wasm32::v128 {
-    use std::arch::wasm32::*;
-    i32x4_add(i32x4_shuffle::<0, 2, 4, 6>(x0, x1), i32x4_shuffle::<1, 3, 5, 7>(x0, x1))
+    // SAFETY: 呼び出し側が wasm32 simd128 フィーチャを保証する
+    unsafe {
+        use std::arch::wasm32::*;
+        i32x4_add(i32x4_shuffle::<0, 2, 4, 6>(x0, x1), i32x4_shuffle::<1, 3, 5, 7>(x0, x1))
+    }
 }
 
 /// WASM SIMD128: 4本のi32x4を水平加算して1本のi32x4に詰める
@@ -212,7 +242,8 @@ unsafe fn haddx4(
     z2: std::arch::wasm32::v128,
     z3: std::arch::wasm32::v128,
 ) -> std::arch::wasm32::v128 {
-    hadd_i32x4(hadd_i32x4(z0, z1), hadd_i32x4(z2, z3))
+    // SAFETY: 呼び出し側が wasm32 simd128 フィーチャを保証する
+    unsafe { hadd_i32x4(hadd_i32x4(z0, z1), hadd_i32x4(z2, z3)) }
 }
 
 /// アフィン変換層

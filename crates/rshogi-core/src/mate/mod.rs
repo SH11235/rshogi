@@ -7,7 +7,7 @@ pub mod move_mate;
 pub mod tables;
 
 use crate::bitboard::{
-    bishop_effect, king_effect, lance_effect, line_bb, rook_effect, Bitboard, RANK_BB,
+    Bitboard, RANK_BB, bishop_effect, king_effect, lance_effect, line_bb, rook_effect,
 };
 use crate::position::Position;
 use crate::types::{Color, Move, Square};

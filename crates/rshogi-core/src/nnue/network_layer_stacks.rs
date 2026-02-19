@@ -27,7 +27,7 @@ use super::accumulator::Aligned;
 use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLayerStacks};
 use super::constants::{MAX_ARCH_LEN, NNUE_PYTORCH_L1, NNUE_VERSION_HALFKA};
 use super::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
-use super::layer_stacks::{compute_bucket_index, sqr_clipped_relu_transform, LayerStacks};
+use super::layer_stacks::{LayerStacks, compute_bucket_index, sqr_clipped_relu_transform};
 use crate::position::Position;
 use crate::types::{Color, Value};
 #[cfg(feature = "diagnostics")]
@@ -422,7 +422,9 @@ mod tests {
         let second_half = &black_acc[768..1536];
         let first_positive: usize = first_half.iter().filter(|&&x| x > 0).count();
         let second_positive: usize = second_half.iter().filter(|&&x| x > 0).count();
-        eprintln!("First half positive: {first_positive}/768, Second half positive: {second_positive}/768");
+        eprintln!(
+            "First half positive: {first_positive}/768, Second half positive: {second_positive}/768"
+        );
 
         // ペア乗算で非ゼロになるペアの数
         let mut pairs_both_positive = 0usize;

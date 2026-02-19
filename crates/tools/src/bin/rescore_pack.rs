@@ -51,8 +51,8 @@ use std::thread;
 use rshogi_core::nnue::init_nnue;
 use rshogi_core::position::Position;
 use rshogi_core::search::{LimitsType, Search};
-use tools::packed_sfen::{pack_position, unpack_sfen, PackedSfenValue};
-use tools::qsearch_pv::{qsearch_with_pv_nnue, NnueStacks};
+use tools::packed_sfen::{PackedSfenValue, pack_position, unpack_sfen};
+use tools::qsearch_pv::{NnueStacks, qsearch_with_pv_nnue};
 
 /// 探索用スタックサイズ（64MB）
 const SEARCH_STACK_SIZE: usize = 64 * 1024 * 1024;

@@ -10,24 +10,24 @@ use std::sync::Arc;
 
 #[cfg(not(feature = "search-no-pass-rules"))]
 use crate::eval::evaluate_pass_rights;
-use crate::eval::{get_scaled_pass_move_bonus, EvalHash};
-use crate::nnue::{get_network, AccumulatorStackVariant};
+use crate::eval::{EvalHash, get_scaled_pass_move_bonus};
+use crate::nnue::{AccumulatorStackVariant, get_network};
 use crate::position::Position;
 use crate::search::PieceToHistory;
 use crate::tt::{ProbeResult, TTData, TranspositionTable};
 use crate::types::{
-    Bound, Color, Depth, Move, Piece, PieceType, RepetitionState, Square, Value, DEPTH_QS, MAX_PLY,
+    Bound, Color, DEPTH_QS, Depth, MAX_PLY, Move, Piece, PieceType, RepetitionState, Square, Value,
 };
 
 use super::history::{
+    CORRECTION_HISTORY_LIMIT, HistoryCell, HistoryTables, LOW_PLY_HISTORY_SIZE,
     continuation_history_bonus_with_offset, continuation_history_weight, low_ply_history_bonus,
-    pawn_history_bonus, stat_bonus, stat_malus, HistoryCell, HistoryTables,
-    CORRECTION_HISTORY_LIMIT, LOW_PLY_HISTORY_SIZE,
+    pawn_history_bonus, stat_bonus, stat_malus,
 };
 use super::movepicker::piece_value;
 use super::types::{
-    draw_value, init_stack_array, value_from_tt, value_to_tt, ContHistKey, NodeType, RootMoves,
-    SearchedMoveList, StackArray, SEARCHED_MOVES_CAPACITY, STACK_SIZE,
+    ContHistKey, NodeType, RootMoves, SEARCHED_MOVES_CAPACITY, STACK_SIZE, SearchedMoveList,
+    StackArray, draw_value, init_stack_array, value_from_tt, value_to_tt,
 };
 use super::{LimitsType, MovePicker, SearchTuneParams, TimeManagement};
 
@@ -43,7 +43,7 @@ use super::search_helpers::{
     do_move_and_push, nnue_evaluate, nnue_pop, set_cont_history_for_move, take_prior_reduction,
 };
 #[cfg(feature = "tt-trace")]
-use super::tt_sanity::{helper_tt_write_enabled_for_depth, maybe_trace_tt_write, TtWriteTrace};
+use super::tt_sanity::{TtWriteTrace, helper_tt_write_enabled_for_depth, maybe_trace_tt_write};
 
 // =============================================================================
 // 定数
@@ -96,29 +96,29 @@ fn update_continuation_histories(
         }
         let weight = continuation_history_weight(tune_params, ply_back);
         let target_ply = base_ply - ply_back as i32;
-        if target_ply >= 0 {
-            if let Some(key) = stack[target_ply as usize].cont_hist_key {
-                // YO準拠: null move ply はスキップ
-                // YO: if (((ss - i)->currentMove).is_ok())
-                // null move では cont_hist_key.piece == NONE（sentinel）
-                if key.piece.is_none() {
-                    continue;
-                }
-                let in_check_idx = key.in_check as usize;
-                let capture_idx = key.capture as usize;
-                let weighted_bonus = continuation_history_bonus_with_offset(
-                    bonus * weight / 1024,
-                    ply_back,
-                    tune_params,
-                );
-                h.continuation_history[in_check_idx][capture_idx].update(
-                    key.piece,
-                    key.to,
-                    pc,
-                    to,
-                    weighted_bonus,
-                );
+        if target_ply >= 0
+            && let Some(key) = stack[target_ply as usize].cont_hist_key
+        {
+            // YO準拠: null move ply はスキップ
+            // YO: if (((ss - i)->currentMove).is_ok())
+            // null move では cont_hist_key.piece == NONE（sentinel）
+            if key.piece.is_none() {
+                continue;
             }
+            let in_check_idx = key.in_check as usize;
+            let capture_idx = key.capture as usize;
+            let weighted_bonus = continuation_history_bonus_with_offset(
+                bonus * weight / 1024,
+                ply_back,
+                tune_params,
+            );
+            h.continuation_history[in_check_idx][capture_idx].update(
+                key.piece,
+                key.to,
+                pc,
+                to,
+                weighted_bonus,
+            );
         }
     }
 }
@@ -211,9 +211,9 @@ pub(crate) fn reduction(
 }
 
 // stats モジュールからマクロをインポート
-use super::stats::{inc_stat, inc_stat_by_depth};
 #[cfg(feature = "search-stats")]
-use super::stats::{SearchStats, STATS_MAX_DEPTH};
+use super::stats::{STATS_MAX_DEPTH, SearchStats};
+use super::stats::{inc_stat, inc_stat_by_depth};
 
 /// 置換表プローブの結果をまとめたコンテキスト
 ///
@@ -3001,62 +3001,55 @@ impl SearchWorker {
                 // YaneuraOu: !pos.captured_piece() = 現在の局面で駒が取られていない
                 if prev_move_count == 1 + (prev_tt_hit as i32)
                     && pos.captured_piece() == Piece::NONE
+                    && let Some(key) = st.stack[prev_ply].cont_hist_key
                 {
-                    if let Some(key) = st.stack[prev_ply].cont_hist_key {
-                        // YO準拠: null move ply はスキップ (prevSq != SQ_NONE)
-                        if !key.piece.is_none() {
-                            let prev_sq = key.to;
-                            let prev_piece = pos.piece_on(prev_sq);
-                            // YaneuraOu: update_continuation_histories(ss - 1, ...)を呼ぶ
-                            // = 過去1-6手分全てに weight と +80 オフセット付きで更新
-                            let penalty_base = -malus
-                                * ctx
-                                    .tune_params
-                                    .update_all_stats_early_refutation_penalty_scale_num
-                                / 1024;
-                            // YaneuraOu: update_continuation_histories(ss - 1, ...) で (ss - 1)->inCheck を参照
-                            let prev_in_check = st.stack[prev_ply].in_check;
-                            let prev_max_ply_back = if prev_in_check { 2 } else { 6 };
+                    // YO準拠: null move ply はスキップ (prevSq != SQ_NONE)
+                    if !key.piece.is_none() {
+                        let prev_sq = key.to;
+                        let prev_piece = pos.piece_on(prev_sq);
+                        // YaneuraOu: update_continuation_histories(ss - 1, ...)を呼ぶ
+                        // = 過去1-6手分全てに weight と +80 オフセット付きで更新
+                        let penalty_base = -malus
+                            * ctx.tune_params.update_all_stats_early_refutation_penalty_scale_num
+                            / 1024;
+                        // YaneuraOu: update_continuation_histories(ss - 1, ...) で (ss - 1)->inCheck を参照
+                        let prev_in_check = st.stack[prev_ply].in_check;
+                        let prev_max_ply_back = if prev_in_check { 2 } else { 6 };
 
-                            {
-                                // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
-                                let h = unsafe { ctx.history.as_mut_unchecked() };
-                                for ply_back in 1..=6 {
-                                    if ply_back > prev_max_ply_back {
+                        {
+                            // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
+                            let h = unsafe { ctx.history.as_mut_unchecked() };
+                            for ply_back in 1..=6 {
+                                if ply_back > prev_max_ply_back {
+                                    continue;
+                                }
+                                let weight = continuation_history_weight(ctx.tune_params, ply_back);
+                                // ss - 1 からさらに ply_back 手前 = ply - 1 - ply_back
+                                let target_ply = ply - 1 - ply_back as i32;
+                                if target_ply >= 0
+                                    && let Some(target_key) =
+                                        st.stack[target_ply as usize].cont_hist_key
+                                {
+                                    // YO準拠: null move ply はスキップ
+                                    if target_key.piece.is_none() {
                                         continue;
                                     }
-                                    let weight =
-                                        continuation_history_weight(ctx.tune_params, ply_back);
-                                    // ss - 1 からさらに ply_back 手前 = ply - 1 - ply_back
-                                    let target_ply = ply - 1 - ply_back as i32;
-                                    if target_ply >= 0 {
-                                        if let Some(target_key) =
-                                            st.stack[target_ply as usize].cont_hist_key
-                                        {
-                                            // YO準拠: null move ply はスキップ
-                                            if target_key.piece.is_none() {
-                                                continue;
-                                            }
-                                            let in_check_idx = target_key.in_check as usize;
-                                            let capture_idx = target_key.capture as usize;
-                                            // YaneuraOu準拠: 88 * (i < 2) → ply_back=1 のみ
-                                            let weighted_penalty = penalty_base * weight / 1024
-                                                + if ply_back < 2 {
-                                                    ctx.tune_params
-                                                        .continuation_history_near_ply_offset
-                                                } else {
-                                                    0
-                                                };
-                                            h.continuation_history[in_check_idx][capture_idx]
-                                                .update(
-                                                    target_key.piece,
-                                                    target_key.to,
-                                                    prev_piece,
-                                                    prev_sq,
-                                                    weighted_penalty,
-                                                );
-                                        }
-                                    }
+                                    let in_check_idx = target_key.in_check as usize;
+                                    let capture_idx = target_key.capture as usize;
+                                    // YaneuraOu準拠: 88 * (i < 2) → ply_back=1 のみ
+                                    let weighted_penalty = penalty_base * weight / 1024
+                                        + if ply_back < 2 {
+                                            ctx.tune_params.continuation_history_near_ply_offset
+                                        } else {
+                                            0
+                                        };
+                                    h.continuation_history[in_check_idx][capture_idx].update(
+                                        target_key.piece,
+                                        target_key.to,
+                                        prev_piece,
+                                        prev_sq,
+                                        weighted_penalty,
+                                    );
                                 }
                             }
                         }
@@ -3173,31 +3166,30 @@ impl SearchWorker {
                                 let weight = continuation_history_weight(ctx.tune_params, ply_back);
                                 // ss - 1 からさらに ply_back 手前 = ply - 1 - ply_back
                                 let target_ply = ply - 1 - ply_back as i32;
-                                if target_ply >= 0 {
-                                    if let Some(target_key) =
+                                if target_ply >= 0
+                                    && let Some(target_key) =
                                         st.stack[target_ply as usize].cont_hist_key
-                                    {
-                                        // YO準拠: null move ply はスキップ
-                                        if target_key.piece.is_none() {
-                                            continue;
-                                        }
-                                        let in_check_idx = target_key.in_check as usize;
-                                        let capture_idx = target_key.capture as usize;
-                                        // YaneuraOu準拠: 88 * (i < 2) → ply_back=1 のみ
-                                        let weighted_bonus = cont_bonus * weight / 1024
-                                            + if ply_back < 2 {
-                                                ctx.tune_params.continuation_history_near_ply_offset
-                                            } else {
-                                                0
-                                            };
-                                        h.continuation_history[in_check_idx][capture_idx].update(
-                                            target_key.piece,
-                                            target_key.to,
-                                            prev_piece,
-                                            prev_sq,
-                                            weighted_bonus,
-                                        );
+                                {
+                                    // YO準拠: null move ply はスキップ
+                                    if target_key.piece.is_none() {
+                                        continue;
                                     }
+                                    let in_check_idx = target_key.in_check as usize;
+                                    let capture_idx = target_key.capture as usize;
+                                    // YaneuraOu準拠: 88 * (i < 2) → ply_back=1 のみ
+                                    let weighted_bonus = cont_bonus * weight / 1024
+                                        + if ply_back < 2 {
+                                            ctx.tune_params.continuation_history_near_ply_offset
+                                        } else {
+                                            0
+                                        };
+                                    h.continuation_history[in_check_idx][capture_idx].update(
+                                        target_key.piece,
+                                        target_key.to,
+                                        prev_piece,
+                                        prev_sq,
+                                        weighted_bonus,
+                                    );
                                 }
                             }
 

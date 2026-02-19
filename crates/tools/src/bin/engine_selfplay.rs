@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::Local;
 use clap::Parser;
 use rand::prelude::IndexedRandom;
@@ -12,10 +12,10 @@ use rshogi_core::position::Position;
 use rshogi_core::types::{Color, Move, PieceType, Square};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tools::packed_sfen::{move_to_move16, pack_position, PackedSfenValue};
+use tools::packed_sfen::{PackedSfenValue, move_to_move16, pack_position};
 use tools::selfplay::{
-    build_position, load_start_positions, parse_position_line, side_label, EngineConfig,
-    EngineProcess, EvalLog, GameOutcome, SearchRequest, TimeControl,
+    EngineConfig, EngineProcess, EvalLog, GameOutcome, SearchRequest, TimeControl, build_position,
+    load_start_positions, parse_position_line, side_label,
 };
 
 /// engine-usi 同士の自己対局ハーネス。時間管理と info ログ収集を最小限に実装する。
@@ -466,12 +466,12 @@ struct TrainingDataCollector {
 
 impl TrainingDataCollector {
     fn new(path: &Path, skip_initial_ply: u32, skip_in_check: bool) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!("failed to create training data directory: {}", parent.display())
-                })?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create training data directory: {}", parent.display())
+            })?;
         }
         let file = File::create(path)
             .with_context(|| format!("failed to create training data file: {}", path.display()))?;
@@ -629,12 +629,12 @@ struct InfoLogger {
 
 impl InfoLogger {
     fn new(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!("failed to create info-log directory {}", parent.display())
-                })?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create info-log directory {}", parent.display())
+            })?;
         }
         let file = File::create(path)
             .with_context(|| format!("failed to create info log {}", path.display()))?;
@@ -720,11 +720,11 @@ fn main() -> Result<()> {
     let output_path = resolve_output_path(cli.out.as_deref(), &timestamp);
     let info_path = output_path.with_extension("info.jsonl");
 
-    if let Some(parent) = output_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
+    if let Some(parent) = output_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let mut writer = BufWriter::new(
         File::create(&output_path)
@@ -737,11 +737,11 @@ fn main() -> Result<()> {
     };
     let mut eval_writer = if cli.emit_eval_file {
         let eval_path = default_eval_path(&output_path);
-        if let Some(parent) = eval_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create {}", parent.display()))?;
-            }
+        if let Some(parent) = eval_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
         }
         Some(BufWriter::new(
             File::create(&eval_path)
@@ -752,11 +752,11 @@ fn main() -> Result<()> {
     };
     let mut metrics_writer = if cli.emit_metrics {
         let metrics_path = default_metrics_path(&output_path);
-        if let Some(parent) = metrics_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create {}", parent.display()))?;
-            }
+        if let Some(parent) = metrics_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
         }
         Some(BufWriter::new(
             File::create(&metrics_path)
@@ -1177,42 +1177,42 @@ fn main() -> Result<()> {
         };
         serde_json::to_writer(&mut writer, &result)?;
         writer.write_all(b"\n")?;
-        if cli.emit_eval_file {
-            if let Some(w) = eval_writer.as_mut() {
-                let start_cmd = &start_commands[(game_idx as usize) % start_commands.len()];
-                let moves_text = if move_list.is_empty() {
-                    String::new()
-                } else {
-                    format!(" moves {}", move_list.join(" "))
-                };
-                writeln!(w, "game {}: {}{}", game_idx + 1, start_cmd, moves_text)?;
-                if !eval_list.is_empty() {
-                    writeln!(w, "eval {}", eval_list.join(" "))?;
-                } else {
-                    writeln!(w, "eval")?;
-                }
-                writeln!(w)?;
+        if cli.emit_eval_file
+            && let Some(w) = eval_writer.as_mut()
+        {
+            let start_cmd = &start_commands[(game_idx as usize) % start_commands.len()];
+            let moves_text = if move_list.is_empty() {
+                String::new()
+            } else {
+                format!(" moves {}", move_list.join(" "))
+            };
+            writeln!(w, "game {}: {}{}", game_idx + 1, start_cmd, moves_text)?;
+            if !eval_list.is_empty() {
+                writeln!(w, "eval {}", eval_list.join(" "))?;
+            } else {
+                writeln!(w, "eval")?;
             }
+            writeln!(w)?;
         }
-        if cli.emit_metrics {
-            if let Some(w) = metrics_writer.as_mut() {
-                let metrics_log = MetricsLog {
-                    kind: "metrics",
-                    game_id: game_idx + 1,
-                    plies: plies_played,
-                    nodes_black: metrics.nodes_black,
-                    nodes_white: metrics.nodes_white,
-                    nodes_first60: metrics.nodes_first60,
-                    last_cp_black: metrics.last_cp_black,
-                    last_cp_white: metrics.last_cp_white,
-                    last_mate_black: metrics.last_mate_black,
-                    last_mate_white: metrics.last_mate_white,
-                    outcome: outcome.label().to_string(),
-                    reason: outcome_reason.to_string(),
-                };
-                serde_json::to_writer(&mut *w, &metrics_log)?;
-                w.write_all(b"\n")?;
-            }
+        if cli.emit_metrics
+            && let Some(w) = metrics_writer.as_mut()
+        {
+            let metrics_log = MetricsLog {
+                kind: "metrics",
+                game_id: game_idx + 1,
+                plies: plies_played,
+                nodes_black: metrics.nodes_black,
+                nodes_white: metrics.nodes_white,
+                nodes_first60: metrics.nodes_first60,
+                last_cp_black: metrics.last_cp_black,
+                last_cp_white: metrics.last_cp_white,
+                last_mate_black: metrics.last_mate_black,
+                last_mate_white: metrics.last_mate_white,
+                outcome: outcome.label().to_string(),
+                reason: outcome_reason.to_string(),
+            };
+            serde_json::to_writer(&mut *w, &metrics_log)?;
+            w.write_all(b"\n")?;
         }
         // 学習データの書き出し（勝敗を設定してから書き出す）
         if let Some(ref mut collector) = training_data_collector {
@@ -1459,12 +1459,11 @@ fn resolve_engine_path(cli: &Cli) -> ResolvedEnginePath {
             source: "cargo-env",
         };
     }
-    if let Ok(exec) = std::env::current_exe() {
-        if let Some(dir) = exec.parent() {
-            if let Some(found) = find_engine_in_dir(dir) {
-                return found;
-            }
-        }
+    if let Ok(exec) = std::env::current_exe()
+        && let Some(dir) = exec.parent()
+        && let Some(found) = find_engine_in_dir(dir)
+    {
+        return found;
     }
     ResolvedEnginePath {
         path: PathBuf::from("rshogi-usi"),
@@ -1679,10 +1678,10 @@ fn export_game_to_kif<W: Write>(
         .map(|r| r.plies)
         .or_else(|| game.moves.last().map(|m| m.ply))
         .unwrap_or(0);
-    if let Some(res) = game.result.as_ref() {
-        if res.reason != "max_moves" {
-            writeln!(writer, "**終了理由={}", res.reason)?;
-        }
+    if let Some(res) = game.result.as_ref()
+        && res.reason != "max_moves"
+    {
+        writeln!(writer, "**終了理由={}", res.reason)?;
     }
     let summary = match game.result.as_ref().map(|r| r.outcome.as_str()).unwrap_or("draw") {
         "black_win" => format!("まで{}手で先手の勝ち", final_plies),
@@ -1713,18 +1712,17 @@ fn start_position_for_game(
     // random_startpos の場合は moves[0].sfen_before を優先
     let use_moves_first = meta.map(|m| m.settings.random_startpos).unwrap_or(false);
 
-    if !use_moves_first {
-        if let Some(meta) = meta {
-            if !meta.start_positions.is_empty() {
-                let idx = ((game_id - 1) as usize) % meta.start_positions.len();
-                if let Ok((mut pos, _)) = start_position_from_command(&meta.start_positions[idx]) {
-                    if has_pass {
-                        pos.enable_pass_rights(pass_black, pass_white);
-                    }
-                    let sfen = pos.to_sfen();
-                    return Some((pos, sfen));
-                }
+    if !use_moves_first
+        && let Some(meta) = meta
+        && !meta.start_positions.is_empty()
+    {
+        let idx = ((game_id - 1) as usize) % meta.start_positions.len();
+        if let Ok((mut pos, _)) = start_position_from_command(&meta.start_positions[idx]) {
+            if has_pass {
+                pos.enable_pass_rights(pass_black, pass_white);
             }
+            let sfen = pos.to_sfen();
+            return Some((pos, sfen));
         }
     }
     moves.first().and_then(|m| {
@@ -1889,10 +1887,10 @@ fn write_eval_comments<W: Write>(writer: &mut W, eval: Option<&EvalLog>) -> Resu
     if let Some(nps) = eval.nps {
         writeln!(writer, "**NPS={}", nps)?;
     }
-    if let Some(pv) = eval.pv.as_ref() {
-        if !pv.is_empty() {
-            writeln!(writer, "**読み筋={}", pv.join(" "))?;
-        }
+    if let Some(pv) = eval.pv.as_ref()
+        && !pv.is_empty()
+    {
+        writeln!(writer, "**読み筋={}", pv.join(" "))?;
     }
     Ok(())
 }

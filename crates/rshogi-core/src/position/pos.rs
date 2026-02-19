@@ -1,15 +1,15 @@
 //! 局面（Position）
 
 use super::board_effect::{
-    compute_board_effects_and_long_effects, rewind_by_capturing_piece, rewind_by_dropping_piece,
-    rewind_by_no_capturing_piece, update_by_capturing_piece, update_by_dropping_piece,
-    update_by_no_capturing_piece, BoardEffects, LongEffects,
+    BoardEffects, LongEffects, compute_board_effects_and_long_effects, rewind_by_capturing_piece,
+    rewind_by_dropping_piece, rewind_by_no_capturing_piece, update_by_capturing_piece,
+    update_by_dropping_piece, update_by_no_capturing_piece,
 };
 use super::state::StateInfo;
 use super::zobrist::{zobrist_hand, zobrist_pass_rights, zobrist_psq, zobrist_side};
 use crate::bitboard::{
-    bishop_effect, dragon_effect, gold_effect, horse_effect, knight_effect, lance_effect,
-    lance_step_effect, pawn_effect, rook_effect, silver_effect, Bitboard,
+    Bitboard, bishop_effect, dragon_effect, gold_effect, horse_effect, knight_effect, lance_effect,
+    lance_step_effect, pawn_effect, rook_effect, silver_effect,
 };
 use crate::eval::material::{hand_piece_value, material_needs_board_effects, signed_piece_value};
 use crate::nnue::piece_list::PieceList;
@@ -1058,12 +1058,12 @@ impl Position {
             // - from, to, ksq が同一直線上にない（aligned でない）場合のみ開き王手
             if let Some(from_sq) = moved_from {
                 let prev_blockers = self.cur_state().blockers_for_king[them.index()];
-                if prev_blockers.contains(from_sq) && !crate::mate::aligned(from_sq, moved_to, ksq)
+                if prev_blockers.contains(from_sq)
+                    && !crate::mate::aligned(from_sq, moved_to, ksq)
+                    && let Some(dir) = crate::bitboard::direct_of(ksq, from_sq)
                 {
-                    if let Some(dir) = crate::bitboard::direct_of(ksq, from_sq) {
-                        let ray = crate::bitboard::direct_effect(from_sq, dir, self.occupied());
-                        checkers |= ray & self.pieces_c(us);
-                    }
+                    let ray = crate::bitboard::direct_effect(from_sq, dir, self.occupied());
+                    checkers |= ray & self.pieces_c(us);
                 }
             }
         }

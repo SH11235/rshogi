@@ -8,7 +8,7 @@ use anyhow::Result;
 use chrono::Local;
 use clap::{Parser, ValueEnum};
 
-use tools::{runner, BenchmarkConfig, EvalConfig, LimitType};
+use tools::{BenchmarkConfig, EvalConfig, LimitType, runner};
 
 /// 将棋エンジン汎用ベンチマークツール
 #[derive(Parser, Debug)]

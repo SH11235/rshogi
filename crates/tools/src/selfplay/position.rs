@@ -2,7 +2,7 @@ use std::ffi::OsString;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use rshogi_core::movegen::is_legal_with_pass;
 use rshogi_core::position::{Position, SFEN_HIRATE};
 use rshogi_core::types::Move;

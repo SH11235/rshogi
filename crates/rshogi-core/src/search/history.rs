@@ -806,7 +806,8 @@ impl HistoryCell {
     /// 単一スレッド内で使用し、書き込み参照と同時に保持しないこと。
     #[inline]
     pub unsafe fn as_ref_unchecked(&self) -> &HistoryTables {
-        &*self.inner.get()
+        // SAFETY: 呼び出し側が排他アクセスを保証する（他の参照が存在しないこと）
+        unsafe { &*self.inner.get() }
     }
 
     /// 内部の HistoryTables への可変参照を直接取得
@@ -818,7 +819,8 @@ impl HistoryCell {
     #[inline]
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn as_mut_unchecked(&self) -> &mut HistoryTables {
-        &mut *self.inner.get()
+        // SAFETY: 呼び出し側が排他アクセスを保証する（他の参照が存在しないこと）
+        unsafe { &mut *self.inner.get() }
     }
 
     /// 内部の HistoryTables への可変参照を取得（初期化用）

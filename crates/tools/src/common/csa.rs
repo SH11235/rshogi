@@ -1,6 +1,6 @@
 //! CSA形式の棋譜パーサ
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::fmt::Write as _;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

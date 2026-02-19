@@ -1,5 +1,5 @@
 use crate::eval::material::compute_material_value;
-use crate::movegen::{generate_legal_with_pass, MoveList};
+use crate::movegen::{MoveList, generate_legal_with_pass};
 use crate::types::json::{
     BoardStateJson, CellJson, HandJson, HandsJson, PieceJson, ReplayResultJson,
 };

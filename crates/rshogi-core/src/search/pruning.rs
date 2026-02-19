@@ -20,8 +20,8 @@ use super::search_helpers::{
 };
 use super::stats::{inc_stat, inc_stat_by_depth};
 #[cfg(feature = "tt-trace")]
-use super::tt_sanity::{helper_tt_write_enabled_for_depth, maybe_trace_tt_write, TtWriteTrace};
-use super::types::{value_to_tt, NodeType};
+use super::tt_sanity::{TtWriteTrace, helper_tt_write_enabled_for_depth, maybe_trace_tt_write};
+use super::types::{NodeType, value_to_tt};
 use super::{LimitsType, MovePicker, TimeManagement};
 
 /// Futility pruning

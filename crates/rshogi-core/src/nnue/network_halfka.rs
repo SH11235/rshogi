@@ -69,24 +69,30 @@ unsafe fn m256_add_dpbusd_epi32(
     a: std::arch::x86_64::__m256i,
     b: std::arch::x86_64::__m256i,
 ) {
-    use std::arch::x86_64::*;
-    let product = _mm256_maddubs_epi16(a, b);
-    let product32 = _mm256_madd_epi16(product, _mm256_set1_epi16(1));
-    *acc = _mm256_add_epi32(*acc, product32);
+    // SAFETY: 呼び出し側が avx2 フィーチャを保証する
+    unsafe {
+        use std::arch::x86_64::*;
+        let product = _mm256_maddubs_epi16(a, b);
+        let product32 = _mm256_madd_epi16(product, _mm256_set1_epi16(1));
+        *acc = _mm256_add_epi32(*acc, product32);
+    }
 }
 
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 #[inline]
 unsafe fn hsum_i32_avx2(v: std::arch::x86_64::__m256i) -> i32 {
-    use std::arch::x86_64::*;
-    let hi = _mm256_extracti128_si256(v, 1);
-    let lo = _mm256_castsi256_si128(v);
-    let sum128 = _mm_add_epi32(lo, hi);
-    let hi64 = _mm_unpackhi_epi64(sum128, sum128);
-    let sum64 = _mm_add_epi32(sum128, hi64);
-    let hi32 = _mm_shuffle_epi32(sum64, 1);
-    let sum32 = _mm_add_epi32(sum64, hi32);
-    _mm_cvtsi128_si32(sum32)
+    // SAFETY: 呼び出し側が avx2 フィーチャを保証する
+    unsafe {
+        use std::arch::x86_64::*;
+        let hi = _mm256_extracti128_si256(v, 1);
+        let lo = _mm256_castsi256_si128(v);
+        let sum128 = _mm_add_epi32(lo, hi);
+        let hi64 = _mm_unpackhi_epi64(sum128, sum128);
+        let sum64 = _mm_add_epi32(sum128, hi64);
+        let hi32 = _mm_shuffle_epi32(sum64, 1);
+        let sum32 = _mm_add_epi32(sum64, hi32);
+        _mm_cvtsi128_si32(sum32)
+    }
 }
 
 #[cfg(all(
@@ -96,12 +102,15 @@ unsafe fn hsum_i32_avx2(v: std::arch::x86_64::__m256i) -> i32 {
 ))]
 #[inline]
 unsafe fn hsum_i32_sse2(v: std::arch::x86_64::__m128i) -> i32 {
-    use std::arch::x86_64::*;
-    let hi64 = _mm_unpackhi_epi64(v, v);
-    let sum64 = _mm_add_epi32(v, hi64);
-    let hi32 = _mm_shuffle_epi32(sum64, 1);
-    let sum32 = _mm_add_epi32(sum64, hi32);
-    _mm_cvtsi128_si32(sum32)
+    // SAFETY: 呼び出し側が ssse3 フィーチャを保証する
+    unsafe {
+        use std::arch::x86_64::*;
+        let hi64 = _mm_unpackhi_epi64(v, v);
+        let sum64 = _mm_add_epi32(v, hi64);
+        let hi32 = _mm_shuffle_epi32(sum64, 1);
+        let sum32 = _mm_add_epi32(sum64, hi32);
+        _mm_cvtsi128_si32(sum32)
+    }
 }
 
 #[cfg(all(
@@ -115,10 +124,13 @@ unsafe fn m128_add_dpbusd_epi32(
     a: std::arch::x86_64::__m128i,
     b: std::arch::x86_64::__m128i,
 ) {
-    use std::arch::x86_64::*;
-    let product = _mm_maddubs_epi16(a, b);
-    let product32 = _mm_madd_epi16(product, _mm_set1_epi16(1));
-    *acc = _mm_add_epi32(*acc, product32);
+    // SAFETY: 呼び出し側が ssse3 フィーチャを保証する
+    unsafe {
+        use std::arch::x86_64::*;
+        let product = _mm_maddubs_epi16(a, b);
+        let product32 = _mm_madd_epi16(product, _mm_set1_epi16(1));
+        *acc = _mm_add_epi32(*acc, product32);
+    }
 }
 
 // =============================================================================
@@ -810,64 +822,68 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKA<INPUT, OUTPU
     #[inline]
     #[allow(clippy::needless_range_loop)]
     unsafe fn propagate_avx2_loop_inverted(&self, input: &[u8], output: &mut [i32; OUTPUT]) {
-        use std::arch::x86_64::*;
+        // SAFETY: 呼び出し側が avx2 フィーチャを保証する
+        unsafe {
+            use std::arch::x86_64::*;
 
-        // OUTPUT % 8 == 0 の場合のみループ逆転を使用
-        if OUTPUT.is_multiple_of(8) {
-            const MAX_REGS: usize = 128; // 最大 1024 出力まで対応
-            let num_regs = OUTPUT / 8;
-            debug_assert!(num_regs <= MAX_REGS);
+            // OUTPUT % 8 == 0 の場合のみループ逆転を使用
+            if OUTPUT.is_multiple_of(8) {
+                const MAX_REGS: usize = 128; // 最大 1024 出力まで対応
+                let num_regs = OUTPUT / 8;
+                debug_assert!(num_regs <= MAX_REGS);
 
-            // アキュムレータをバイアスで初期化
-            let mut acc = [_mm256_setzero_si256(); MAX_REGS];
-            let bias_ptr = self.biases.as_ptr() as *const __m256i;
-            for k in 0..num_regs {
-                acc[k] = _mm256_loadu_si256(bias_ptr.add(k));
-            }
-
-            let input32 = input.as_ptr() as *const i32;
-            let weights_ptr = self.weights.as_ptr();
-
-            // 外側ループ: 入力チャンク
-            for i in 0..Self::NUM_INPUT_CHUNKS {
-                // 入力4バイトを全レーンにブロードキャスト
-                let in_val = _mm256_set1_epi32(*input32.add(i));
-
-                // この入力チャンクに対応する重みの開始位置
-                // スクランブル形式: weights[input_chunk][output][4]
-                let col = weights_ptr.add(i * OUTPUT * Self::CHUNK_SIZE) as *const __m256i;
-
-                // 内側ループ: 全出力レジスタに積和演算
+                // アキュムレータをバイアスで初期化
+                let mut acc = [_mm256_setzero_si256(); MAX_REGS];
+                let bias_ptr = self.biases.as_ptr() as *const __m256i;
                 for k in 0..num_regs {
-                    m256_add_dpbusd_epi32(&mut acc[k], in_val, _mm256_load_si256(col.add(k)));
-                }
-            }
-
-            // 結果を出力
-            let out_ptr = output.as_mut_ptr() as *mut __m256i;
-            for k in 0..num_regs {
-                _mm256_storeu_si256(out_ptr.add(k), acc[k]);
-            }
-        } else {
-            // フォールバック: 標準ループ
-            output.copy_from_slice(&self.biases);
-            let num_chunks = Self::PADDED_INPUT / 32;
-            let input_ptr = input.as_ptr();
-            let weight_ptr = self.weights.as_ptr();
-
-            for (j, out) in output.iter_mut().enumerate() {
-                let mut acc_simd = _mm256_setzero_si256();
-                let row_offset = j * Self::PADDED_INPUT;
-
-                for chunk in 0..num_chunks {
-                    let in_vec = _mm256_loadu_si256(input_ptr.add(chunk * 32) as *const __m256i);
-                    let w_vec = _mm256_load_si256(
-                        weight_ptr.add(row_offset + chunk * 32) as *const __m256i
-                    );
-                    m256_add_dpbusd_epi32(&mut acc_simd, in_vec, w_vec);
+                    acc[k] = _mm256_loadu_si256(bias_ptr.add(k));
                 }
 
-                *out += hsum_i32_avx2(acc_simd);
+                let input32 = input.as_ptr() as *const i32;
+                let weights_ptr = self.weights.as_ptr();
+
+                // 外側ループ: 入力チャンク
+                for i in 0..Self::NUM_INPUT_CHUNKS {
+                    // 入力4バイトを全レーンにブロードキャスト
+                    let in_val = _mm256_set1_epi32(*input32.add(i));
+
+                    // この入力チャンクに対応する重みの開始位置
+                    // スクランブル形式: weights[input_chunk][output][4]
+                    let col = weights_ptr.add(i * OUTPUT * Self::CHUNK_SIZE) as *const __m256i;
+
+                    // 内側ループ: 全出力レジスタに積和演算
+                    for k in 0..num_regs {
+                        m256_add_dpbusd_epi32(&mut acc[k], in_val, _mm256_load_si256(col.add(k)));
+                    }
+                }
+
+                // 結果を出力
+                let out_ptr = output.as_mut_ptr() as *mut __m256i;
+                for k in 0..num_regs {
+                    _mm256_storeu_si256(out_ptr.add(k), acc[k]);
+                }
+            } else {
+                // フォールバック: 標準ループ
+                output.copy_from_slice(&self.biases);
+                let num_chunks = Self::PADDED_INPUT / 32;
+                let input_ptr = input.as_ptr();
+                let weight_ptr = self.weights.as_ptr();
+
+                for (j, out) in output.iter_mut().enumerate() {
+                    let mut acc_simd = _mm256_setzero_si256();
+                    let row_offset = j * Self::PADDED_INPUT;
+
+                    for chunk in 0..num_chunks {
+                        let in_vec =
+                            _mm256_loadu_si256(input_ptr.add(chunk * 32) as *const __m256i);
+                        let w_vec = _mm256_load_si256(
+                            weight_ptr.add(row_offset + chunk * 32) as *const __m256i
+                        );
+                        m256_add_dpbusd_epi32(&mut acc_simd, in_vec, w_vec);
+                    }
+
+                    *out += hsum_i32_avx2(acc_simd);
+                }
             }
         }
     }
@@ -880,57 +896,61 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKA<INPUT, OUTPU
     ))]
     #[inline]
     unsafe fn propagate_ssse3_loop_inverted(&self, input: &[u8], output: &mut [i32; OUTPUT]) {
-        use std::arch::x86_64::*;
+        // SAFETY: 呼び出し側が ssse3 フィーチャを保証する
+        unsafe {
+            use std::arch::x86_64::*;
 
-        // OUTPUT % 4 == 0 の場合のみループ逆転を使用
-        if OUTPUT % 4 == 0 && OUTPUT > 0 {
-            const MAX_REGS: usize = 256; // 最大 1024 出力まで対応
-            let num_regs = OUTPUT / 4;
-            debug_assert!(num_regs <= MAX_REGS);
+            // OUTPUT % 4 == 0 の場合のみループ逆転を使用
+            if OUTPUT % 4 == 0 && OUTPUT > 0 {
+                const MAX_REGS: usize = 256; // 最大 1024 出力まで対応
+                let num_regs = OUTPUT / 4;
+                debug_assert!(num_regs <= MAX_REGS);
 
-            // アキュムレータをバイアスで初期化
-            let mut acc = [_mm_setzero_si128(); MAX_REGS];
-            let bias_ptr = self.biases.as_ptr() as *const __m128i;
-            for k in 0..num_regs {
-                acc[k] = _mm_loadu_si128(bias_ptr.add(k));
-            }
-
-            let input32 = input.as_ptr() as *const i32;
-            let weights_ptr = self.weights.as_ptr();
-
-            // 外側ループ: 入力チャンク
-            for i in 0..Self::NUM_INPUT_CHUNKS {
-                let in_val = _mm_set1_epi32(*input32.add(i));
-                let col = weights_ptr.add(i * OUTPUT * Self::CHUNK_SIZE) as *const __m128i;
-
+                // アキュムレータをバイアスで初期化
+                let mut acc = [_mm_setzero_si128(); MAX_REGS];
+                let bias_ptr = self.biases.as_ptr() as *const __m128i;
                 for k in 0..num_regs {
-                    m128_add_dpbusd_epi32(&mut acc[k], in_val, _mm_load_si128(col.add(k)));
-                }
-            }
-
-            let out_ptr = output.as_mut_ptr() as *mut __m128i;
-            for k in 0..num_regs {
-                _mm_storeu_si128(out_ptr.add(k), acc[k]);
-            }
-        } else {
-            // フォールバック
-            output.copy_from_slice(&self.biases);
-            let num_chunks = Self::PADDED_INPUT / 16;
-            let input_ptr = input.as_ptr();
-            let weight_ptr = self.weights.as_ptr();
-
-            for (j, out) in output.iter_mut().enumerate() {
-                let mut acc_simd = _mm_setzero_si128();
-                let row_offset = j * Self::PADDED_INPUT;
-
-                for chunk in 0..num_chunks {
-                    let in_vec = _mm_loadu_si128(input_ptr.add(chunk * 16) as *const __m128i);
-                    let w_vec =
-                        _mm_load_si128(weight_ptr.add(row_offset + chunk * 16) as *const __m128i);
-                    m128_add_dpbusd_epi32(&mut acc_simd, in_vec, w_vec);
+                    acc[k] = _mm_loadu_si128(bias_ptr.add(k));
                 }
 
-                *out += hsum_i32_sse2(acc_simd);
+                let input32 = input.as_ptr() as *const i32;
+                let weights_ptr = self.weights.as_ptr();
+
+                // 外側ループ: 入力チャンク
+                for i in 0..Self::NUM_INPUT_CHUNKS {
+                    let in_val = _mm_set1_epi32(*input32.add(i));
+                    let col = weights_ptr.add(i * OUTPUT * Self::CHUNK_SIZE) as *const __m128i;
+
+                    for k in 0..num_regs {
+                        m128_add_dpbusd_epi32(&mut acc[k], in_val, _mm_load_si128(col.add(k)));
+                    }
+                }
+
+                let out_ptr = output.as_mut_ptr() as *mut __m128i;
+                for k in 0..num_regs {
+                    _mm_storeu_si128(out_ptr.add(k), acc[k]);
+                }
+            } else {
+                // フォールバック
+                output.copy_from_slice(&self.biases);
+                let num_chunks = Self::PADDED_INPUT / 16;
+                let input_ptr = input.as_ptr();
+                let weight_ptr = self.weights.as_ptr();
+
+                for (j, out) in output.iter_mut().enumerate() {
+                    let mut acc_simd = _mm_setzero_si128();
+                    let row_offset = j * Self::PADDED_INPUT;
+
+                    for chunk in 0..num_chunks {
+                        let in_vec = _mm_loadu_si128(input_ptr.add(chunk * 16) as *const __m128i);
+                        let w_vec = _mm_load_si128(
+                            weight_ptr.add(row_offset + chunk * 16) as *const __m128i
+                        );
+                        m128_add_dpbusd_epi32(&mut acc_simd, in_vec, w_vec);
+                    }
+
+                    *out += hsum_i32_sse2(acc_simd);
+                }
             }
         }
     }
@@ -976,13 +996,13 @@ pub struct NetworkHalfKA<
 }
 
 impl<
-        const L1: usize,
-        const FT_OUT: usize,
-        const L1_INPUT: usize,
-        const L2: usize,
-        const L3: usize,
-        A: FtActivation,
-    > NetworkHalfKA<L1, FT_OUT, L1_INPUT, L2, L3, A>
+    const L1: usize,
+    const FT_OUT: usize,
+    const L1_INPUT: usize,
+    const L2: usize,
+    const L3: usize,
+    A: FtActivation,
+> NetworkHalfKA<L1, FT_OUT, L1_INPUT, L2, L3, A>
 {
     /// コンパイル時制約
     ///
@@ -1140,7 +1160,11 @@ impl<
             let t_min = transformed.0.iter().min().copied().unwrap_or(0);
             let t_max = transformed.0.iter().max().copied().unwrap_or(0);
             let t_sum: u64 = transformed.0.iter().map(|&x| x as u64).sum();
-            eprintln!("[DEBUG] After activation ({} i16→u8): min={t_min}, max={t_max}, sum={t_sum}, len={}", A::name(), transformed.0.len());
+            eprintln!(
+                "[DEBUG] After activation ({} i16→u8): min={t_min}, max={t_max}, sum={t_sum}, len={}",
+                A::name(),
+                transformed.0.len()
+            );
             eprintln!("[DEBUG] transformed[0..16]: {:?}", &transformed.0[0..16]);
         }
 

@@ -3,11 +3,11 @@
 // YaneuraOu mate1ply_without_effect.cpp の移植（離し角・飛車は未対応）
 
 use crate::bitboard::{
-    bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect, knight_effect,
-    lance_effect, rook_effect, silver_effect, Bitboard, FILE_BB, RANK_BB,
+    Bitboard, FILE_BB, RANK_BB, bishop_effect, dragon_effect, gold_effect, horse_effect,
+    king_effect, knight_effect, lance_effect, rook_effect, silver_effect,
 };
 use crate::mate::helpers::{can_king_escape_with_from, can_piece_capture};
-use crate::mate::tables::{check_cand_bb, PieceTypeCheck};
+use crate::mate::tables::{PieceTypeCheck, check_cand_bb};
 use crate::mate::{
     aligned, bishop_step_effect, can_promote, cross45_step_effect, lance_step_effect,
     rook_step_effect,

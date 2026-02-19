@@ -76,11 +76,7 @@ impl Square {
     /// u8から生成（範囲チェックあり）
     #[inline]
     pub const fn from_u8(n: u8) -> Option<Square> {
-        if n < 81 {
-            Some(Square(n))
-        } else {
-            None
-        }
+        if n < 81 { Some(Square(n)) } else { None }
     }
 
     /// u8から生成（範囲チェックなし）
@@ -155,10 +151,13 @@ impl Square {
 
         let file = self.file().index() as i16 + df as i16;
         let rank = self.rank().index() as i16 + dr as i16;
-        if file >= 0 && file < 9 && rank >= 0 && rank < 9 {
-            if let (Some(f), Some(r)) = (File::from_u8(file as u8), Rank::from_u8(rank as u8)) {
-                return Some(Square::new(f, r));
-            }
+        if file >= 0
+            && file < 9
+            && rank >= 0
+            && rank < 9
+            && let (Some(f), Some(r)) = (File::from_u8(file as u8), Rank::from_u8(rank as u8))
+        {
+            return Some(Square::new(f, r));
         }
         None
     }

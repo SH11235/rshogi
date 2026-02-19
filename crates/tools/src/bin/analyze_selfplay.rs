@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 

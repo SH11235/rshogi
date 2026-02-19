@@ -37,23 +37,23 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Instant;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::Local;
 use clap::Parser as _;
 use crossbeam_channel as chan;
 use rand::prelude::IndexedRandom;
 use serde::Serialize;
 
-use tools::selfplay::game::{run_game, GameConfig, MoveEvent};
+use tools::selfplay::game::{GameConfig, MoveEvent, run_game};
 use tools::selfplay::time_control::TimeControl;
-use tools::selfplay::types::{side_label, EvalLog};
+use tools::selfplay::types::{EvalLog, side_label};
 use tools::selfplay::{
-    load_start_positions, EngineConfig, EngineProcess, GameOutcome, ParsedPosition,
+    EngineConfig, EngineProcess, GameOutcome, ParsedPosition, load_start_positions,
 };
 
 // ---------------------------------------------------------------------------

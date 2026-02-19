@@ -9,7 +9,7 @@ use crate::position::Position;
 use crate::types::Value;
 
 // 型エイリアスを aliases 経由でインポート
-use crate::nnue::aliases::{HalfKA_hm512CReLU, HalfKA_hm512_32_32CReLU, HalfKA_hm512_8_64CReLU};
+use crate::nnue::aliases::{HalfKA_hm512_8_64CReLU, HalfKA_hm512_32_32CReLU, HalfKA_hm512CReLU};
 
 crate::define_l1_variants!(
     enum HalfKA_hm_L512,

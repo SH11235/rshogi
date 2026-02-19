@@ -1,10 +1,10 @@
 use crate::search::{
+    ContHistKey, LimitsType, Search, SearchInfo, Stack,
     history::{
-        ContinuationHistory, PawnHistory, CONTINUATION_HISTORY_WEIGHTS, TT_MOVE_HISTORY_BONUS,
+        CONTINUATION_HISTORY_WEIGHTS, ContinuationHistory, PawnHistory, TT_MOVE_HISTORY_BONUS,
         TT_MOVE_HISTORY_MALUS,
     },
     tt_history::TTMoveHistory,
-    ContHistKey, LimitsType, Search, SearchInfo, Stack,
 };
 use crate::types::{Move, Piece, Square};
 

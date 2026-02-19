@@ -1,7 +1,7 @@
 // 駒打ちによる1手詰め判定（YaneuraOu移植）
 
 use crate::bitboard::{
-    gold_effect, king_effect, knight_effect, lance_effect, pawn_effect, silver_effect, Bitboard,
+    Bitboard, gold_effect, king_effect, knight_effect, lance_effect, pawn_effect, silver_effect,
 };
 use crate::mate::helpers::{can_king_escape, can_piece_capture};
 use crate::mate::{bishop_step_effect, cross45_step_effect, rook_step_effect};

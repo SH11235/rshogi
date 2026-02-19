@@ -26,11 +26,11 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rshogi_core::position::Position;
-use tools::packed_sfen::{unpack_sfen, PackedSfenValue};
+use tools::packed_sfen::{PackedSfenValue, unpack_sfen};
 
 #[derive(Parser)]
 #[command(
@@ -145,25 +145,27 @@ impl UsiEngine {
             self.stdout.read_line(&mut line)?;
             let trimmed = line.trim();
 
-            if trimmed.starts_with("info") && trimmed.contains("score cp") {
-                if let Some(cp_idx) = trimmed.find("score cp") {
-                    let rest = &trimmed[cp_idx + 9..];
-                    if let Some(end_idx) = rest.find(' ').or(Some(rest.len())) {
-                        if let Ok(cp) = rest[..end_idx].parse::<i32>() {
-                            score = Some(cp);
-                        }
-                    }
+            if trimmed.starts_with("info")
+                && trimmed.contains("score cp")
+                && let Some(cp_idx) = trimmed.find("score cp")
+            {
+                let rest = &trimmed[cp_idx + 9..];
+                if let Some(end_idx) = rest.find(' ').or(Some(rest.len()))
+                    && let Ok(cp) = rest[..end_idx].parse::<i32>()
+                {
+                    score = Some(cp);
                 }
             }
 
-            if trimmed.starts_with("info") && trimmed.contains("score mate") {
-                if let Some(mate_idx) = trimmed.find("score mate") {
-                    let rest = &trimmed[mate_idx + 11..];
-                    if let Some(end_idx) = rest.find(' ').or(Some(rest.len())) {
-                        if let Ok(mate_in) = rest[..end_idx].parse::<i32>() {
-                            score = Some(if mate_in > 0 { 31999 } else { -31999 });
-                        }
-                    }
+            if trimmed.starts_with("info")
+                && trimmed.contains("score mate")
+                && let Some(mate_idx) = trimmed.find("score mate")
+            {
+                let rest = &trimmed[mate_idx + 11..];
+                if let Some(end_idx) = rest.find(' ').or(Some(rest.len()))
+                    && let Ok(mate_in) = rest[..end_idx].parse::<i32>()
+                {
+                    score = Some(if mate_in > 0 { 31999 } else { -31999 });
                 }
             }
 

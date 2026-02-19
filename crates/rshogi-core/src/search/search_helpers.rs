@@ -4,7 +4,7 @@
 
 use std::ptr::NonNull;
 
-use crate::nnue::{ensure_accumulator_computed, evaluate_dispatch, DirtyPiece};
+use crate::nnue::{DirtyPiece, ensure_accumulator_computed, evaluate_dispatch};
 use crate::position::Position;
 use crate::prefetch::TtPrefetch;
 use crate::search::PieceToHistory;

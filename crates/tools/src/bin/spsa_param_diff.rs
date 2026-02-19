@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use regex::Regex;
 use rshogi_core::search::SearchTuneParams;
@@ -117,10 +117,10 @@ fn load_param_values_touched(
             let Ok(value) = parse_param_value_i32(value_text) else {
                 continue;
             };
-            if let Some(default_value) = defaults.get(name) {
-                if value != *default_value {
-                    touched.insert(name.clone());
-                }
+            if let Some(default_value) = defaults.get(name)
+                && value != *default_value
+            {
+                touched.insert(name.clone());
             }
         }
     }
@@ -140,10 +140,10 @@ fn main() -> Result<()> {
 
     let mut entries = Vec::<(String, DiffEntry)>::new();
     for (name, default) in &defaults {
-        if let Some(re) = &name_re {
-            if !re.is_match(name) {
-                continue;
-            }
+        if let Some(re) = &name_re
+            && !re.is_match(name)
+        {
+            continue;
         }
         let current_value = *current.get(name).unwrap_or(default);
         entries.push((

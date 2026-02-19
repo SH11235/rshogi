@@ -3,7 +3,7 @@ use rshogi_core::movegen::is_legal_with_pass;
 use rshogi_core::types::{Color, Move};
 
 use super::engine::EngineProcess;
-use super::position::{build_position, ParsedPosition};
+use super::position::{ParsedPosition, build_position};
 use super::time_control::TimeControl;
 use super::types::{EvalLog, GameOutcome, InfoCallback, SearchRequest};
 

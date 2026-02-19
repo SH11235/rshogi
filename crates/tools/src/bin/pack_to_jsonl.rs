@@ -27,7 +27,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use tools::packed_sfen::{move16_to_usi, unpack_sfen, PackedSfenValue};
+use tools::packed_sfen::{PackedSfenValue, move16_to_usi, unpack_sfen};
 
 #[derive(Parser)]
 #[command(

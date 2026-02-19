@@ -59,35 +59,35 @@ pub use accumulator_layer_stacks::{
     AccumulatorLayerStacks, AccumulatorStackLayerStacks, StackEntryLayerStacks,
 };
 pub use accumulator_stack_variant::AccumulatorStackVariant;
-pub use bona_piece::{halfkp_index, BonaPiece, ExtBonaPiece, FE_END};
+pub use bona_piece::{BonaPiece, ExtBonaPiece, FE_END, halfkp_index};
 pub use bona_piece_halfka_hm::{
-    halfka_index, is_hm_mirror, king_bucket, pack_bonapiece, BonaPieceHalfKA_hm, E_KING,
-    FE_HAND_END, FE_OLD_END, F_KING, PIECE_INPUTS,
+    BonaPieceHalfKA_hm, E_KING, F_KING, FE_HAND_END, FE_OLD_END, PIECE_INPUTS, halfka_index,
+    is_hm_mirror, king_bucket, pack_bonapiece,
 };
 pub use constants::*;
 pub use diff::get_changed_features;
 pub use feature_transformer::FeatureTransformer;
 pub use feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
 pub use features::{
-    Feature, FeatureSet, HalfKA, HalfKAFeatureSet, HalfKA_hm, HalfKA_hm_FeatureSet, HalfKP,
+    Feature, FeatureSet, HalfKA, HalfKA_hm, HalfKA_hm_FeatureSet, HalfKAFeatureSet, HalfKP,
     HalfKPFeatureSet, TriggerEvent,
 };
 pub use layer_stacks::{
-    compute_bucket_index, sqr_clipped_relu_transform, LayerStackBucket, LayerStacks,
+    LayerStackBucket, LayerStacks, compute_bucket_index, sqr_clipped_relu_transform,
 };
 pub use layers::{AffineTransform, ClippedReLU};
 pub use network::{
-    detect_format, ensure_accumulator_computed, evaluate_dispatch, evaluate_layer_stacks,
-    get_fv_scale_override, get_network, init_nnue, init_nnue_from_bytes, is_halfka_1024_loaded,
-    is_halfka_256_loaded, is_halfka_512_loaded, is_halfka_hm_1024_loaded, is_halfka_hm_256_loaded,
-    is_halfka_hm_512_loaded, is_layer_stacks_loaded, is_nnue_initialized, set_fv_scale_override,
-    NNUENetwork, NnueFormatInfo,
+    NNUENetwork, NnueFormatInfo, detect_format, ensure_accumulator_computed, evaluate_dispatch,
+    evaluate_layer_stacks, get_fv_scale_override, get_network, init_nnue, init_nnue_from_bytes,
+    is_halfka_256_loaded, is_halfka_512_loaded, is_halfka_1024_loaded, is_halfka_hm_256_loaded,
+    is_halfka_hm_512_loaded, is_halfka_hm_1024_loaded, is_layer_stacks_loaded, is_nnue_initialized,
+    set_fv_scale_override,
 };
 pub use network_layer_stacks::NetworkLayerStacks;
 pub use piece_list::{PieceList, PieceNumber};
 
 // const generics 版統一実装（内部型は pub(crate) に隠蔽）
-pub use activation::{detect_activation_from_arch, CReLU, FtActivation, PairwiseCReLU, SCReLU};
+pub use activation::{CReLU, FtActivation, PairwiseCReLU, SCReLU, detect_activation_from_arch};
 pub use spec::{Activation, ArchitectureSpec, FeatureSet as SpecFeatureSet};
 
 // 型エイリアス（HalfKA*/HalfKP* の全バリアント）は pub(crate) に隠蔽
@@ -98,4 +98,4 @@ pub use spec::{Activation, ArchitectureSpec, FeatureSet as SpecFeatureSet};
 pub use evaluator::NNUEEvaluator;
 
 // 統計カウンタ（デバッグ・チューニング用）
-pub use stats::{get_nnue_stats, print_nnue_stats, reset_nnue_stats, NnueStatsSnapshot};
+pub use stats::{NnueStatsSnapshot, get_nnue_stats, print_nnue_stats, reset_nnue_stats};
