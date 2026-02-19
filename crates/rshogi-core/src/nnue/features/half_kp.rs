@@ -6,7 +6,7 @@
 use super::Feature;
 use super::TriggerEvent;
 use crate::nnue::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES};
-use crate::nnue::bona_piece::{halfkp_index, BonaPiece, FE_END};
+use crate::nnue::bona_piece::{BonaPiece, FE_END, halfkp_index};
 use crate::nnue::piece_list::PieceNumber;
 use crate::position::Position;
 use crate::types::{Color, Square};

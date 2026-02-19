@@ -485,7 +485,7 @@ mod tests {
         assert!(bb.contains(Square::new(File::File5, Rank::Rank4))); // 前
         assert!(bb.contains(Square::new(File::File4, Rank::Rank4))); // 右前
         assert!(bb.contains(Square::new(File::File6, Rank::Rank4))); // 左前
-                                                                     // 斜め後ろ2マス
+        // 斜め後ろ2マス
         assert!(bb.contains(Square::new(File::File4, Rank::Rank6))); // 右後ろ
         assert!(bb.contains(Square::new(File::File6, Rank::Rank6))); // 左後ろ
     }
@@ -501,10 +501,10 @@ mod tests {
         assert!(bb.contains(Square::new(File::File5, Rank::Rank4))); // 前
         assert!(bb.contains(Square::new(File::File4, Rank::Rank4))); // 右前
         assert!(bb.contains(Square::new(File::File6, Rank::Rank4))); // 左前
-                                                                     // 左右
+        // 左右
         assert!(bb.contains(Square::new(File::File4, Rank::Rank5))); // 右
         assert!(bb.contains(Square::new(File::File6, Rank::Rank5))); // 左
-                                                                     // 後ろ
+        // 後ろ
         assert!(bb.contains(Square::new(File::File5, Rank::Rank6))); // 後ろ
     }
 

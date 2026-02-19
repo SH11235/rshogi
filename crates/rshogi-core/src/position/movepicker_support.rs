@@ -4,10 +4,10 @@
 
 use super::Position;
 use crate::bitboard::{
-    between_bb, bishop_effect, direct_of, gold_effect, king_effect, knight_effect, lance_effect,
-    pawn_effect, ray_effect, rook_effect, silver_effect, Bitboard, Direct,
+    Bitboard, Direct, between_bb, bishop_effect, direct_of, gold_effect, king_effect,
+    knight_effect, lance_effect, pawn_effect, ray_effect, rook_effect, silver_effect,
 };
-use crate::movegen::{generate_evasions, generate_with_type, ExtMoveBuffer, GenType};
+use crate::movegen::{ExtMoveBuffer, GenType, generate_evasions, generate_with_type};
 use crate::types::{Color, Move, Piece, PieceType, Square, Value};
 
 impl Position {

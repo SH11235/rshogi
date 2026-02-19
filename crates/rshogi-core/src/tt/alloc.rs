@@ -1,4 +1,4 @@
-use std::alloc::{handle_alloc_error, Layout};
+use std::alloc::{Layout, handle_alloc_error};
 use std::ptr::NonNull;
 
 #[cfg(not(windows))]
@@ -7,16 +7,16 @@ use std::alloc::{alloc, dealloc};
 use std::cmp::max;
 
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_SUCCESS};
+use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, GetLastError};
 #[cfg(windows)]
 use windows_sys::Win32::Security::{
-    AdjustTokenPrivileges, LookupPrivilegeValueA, OpenProcessToken, LUID, LUID_AND_ATTRIBUTES,
+    AdjustTokenPrivileges, LUID, LUID_AND_ATTRIBUTES, LookupPrivilegeValueA, OpenProcessToken,
     SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Memory::{
-    GetLargePageMinimum, VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_LARGE_PAGES, MEM_RELEASE,
-    MEM_RESERVE, PAGE_READWRITE,
+    GetLargePageMinimum, MEM_COMMIT, MEM_LARGE_PAGES, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
+    VirtualAlloc, VirtualFree,
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::GetCurrentProcess;

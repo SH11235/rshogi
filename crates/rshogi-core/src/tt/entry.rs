@@ -10,7 +10,7 @@
 //! 衝突確率は 3/65536 ≈ 0.005% と十分低く、Move合法性検証が二重チェックとして機能する。
 
 use super::{GENERATION_CYCLE, GENERATION_MASK};
-use crate::types::{Bound, Move, Value, DEPTH_ENTRY_OFFSET};
+use crate::types::{Bound, DEPTH_ENTRY_OFFSET, Move, Value};
 
 /// 置換表エントリー
 /// YaneuraOu（CLUSTER_SIZE=3）準拠の10バイト構造
@@ -207,9 +207,9 @@ mod tests {
         let mv = Move::new_move(from, to, false);
         let bound = Bound::Exact;
         let is_pv = true;
-        let gen = 8;
+        let generation = 8;
 
-        entry.save(key, value, is_pv, bound, depth, mv, eval, gen);
+        entry.save(key, value, is_pv, bound, depth, mv, eval, generation);
 
         assert!(entry.is_occupied());
         assert_eq!(entry.key16(), key as u16);

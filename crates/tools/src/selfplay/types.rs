@@ -201,11 +201,7 @@ impl GameOutcome {
 }
 
 pub fn side_label(color: Color) -> char {
-    if color == Color::Black {
-        'b'
-    } else {
-        'w'
-    }
+    if color == Color::Black { 'b' } else { 'w' }
 }
 
 pub fn duration_to_millis(d: Duration) -> u64 {

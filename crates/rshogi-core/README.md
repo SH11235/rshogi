@@ -17,7 +17,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rshogi-core = "0.1"
+rshogi-core = "0.2"
 ```
 
 ## Usage
@@ -49,4 +49,3 @@ GPL-3.0-only License
 ## 参考・影響 / Acknowledgements
 
 本クレートは将棋エンジン [YaneuraOu](https://github.com/yaneurao/YaneuraOu) およびチェスエンジン [Stockfish](https://github.com/official-stockfish/Stockfish) を参考にしています。
-アルゴリズムや評価のアイデアに影響を受けていますが、実装と構成は独自です。

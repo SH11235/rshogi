@@ -365,11 +365,7 @@ pub fn clipped_relu(x: f32) -> f32 {
 /// ClippedReLUの勾配
 #[inline]
 pub fn clipped_relu_grad(x: f32) -> f32 {
-    if x > 0.0 && x < 1.0 {
-        1.0
-    } else {
-        0.0
-    }
+    if x > 0.0 && x < 1.0 { 1.0 } else { 0.0 }
 }
 
 /// 学習可能なNNUEネットワーク

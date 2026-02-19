@@ -1,6 +1,7 @@
 use crate::bitboard::{
-    bishop_effect, direct_effect, direct_of, dragon_effect, gold_effect, horse_effect, king_effect,
-    knight_effect, lance_effect, pawn_effect, rook_effect, silver_effect, Bitboard, Direct,
+    Bitboard, Direct, bishop_effect, direct_effect, direct_of, dragon_effect, gold_effect,
+    horse_effect, king_effect, knight_effect, lance_effect, pawn_effect, rook_effect,
+    silver_effect,
 };
 use crate::types::{Color, Piece, PieceType, Square};
 

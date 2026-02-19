@@ -44,7 +44,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rshogi_core::position::Position;
-use tools::packed_sfen::{unpack_sfen, PackedSfenValue};
+use tools::packed_sfen::{PackedSfenValue, unpack_sfen};
 
 /// 教師データのフィルタリングツール
 #[derive(Parser)]
@@ -329,13 +329,13 @@ fn main() -> Result<()> {
     }
 
     // score_abs_max < score_clip の場合は意図しない可能性があるので警告
-    if let (Some(abs_max), Some(clip)) = (cli.score_abs_max, cli.score_clip) {
-        if abs_max < clip {
-            eprintln!(
-                "Note: --score-abs-max ({abs_max}) < --score-clip ({clip}).\n\
+    if let (Some(abs_max), Some(clip)) = (cli.score_abs_max, cli.score_clip)
+        && abs_max < clip
+    {
+        eprintln!(
+            "Note: --score-abs-max ({abs_max}) < --score-clip ({clip}).\n\
                  Records with |score| > {abs_max} will be dropped before clipping."
-            );
-        }
+        );
     }
 
     // Ctrl-Cハンドラを設定
@@ -527,19 +527,19 @@ fn process_file_sequential(
         stats.score_distribution.add(psv.score);
 
         // 手数フィルタ
-        if let Some(ply_min) = opts.ply_min {
-            if psv.game_ply < ply_min {
-                stats.filtered_ply_min += 1;
-                continue;
-            }
+        if let Some(ply_min) = opts.ply_min
+            && psv.game_ply < ply_min
+        {
+            stats.filtered_ply_min += 1;
+            continue;
         }
 
         // スコア絶対値フィルタ
-        if let Some(score_abs_max) = opts.score_abs_max {
-            if psv.score.unsigned_abs() > score_abs_max as u16 {
-                stats.filtered_score_abs_max += 1;
-                continue;
-            }
+        if let Some(score_abs_max) = opts.score_abs_max
+            && psv.score.unsigned_abs() > score_abs_max as u16
+        {
+            stats.filtered_score_abs_max += 1;
+            continue;
         }
 
         // フィルタ後のスコア統計
@@ -611,10 +611,10 @@ fn process_file_sequential(
         });
     }
 
-    if let Some(ref output_path) = cli.output {
-        if !cli.stats_only {
-            eprintln!("\nWrote {} records to {}", total_written, output_path.display());
-        }
+    if let Some(ref output_path) = cli.output
+        && !cli.stats_only
+    {
+        eprintln!("\nWrote {} records to {}", total_written, output_path.display());
     }
 
     Ok(stats)
@@ -816,10 +816,10 @@ fn process_file_parallel(cli: &Cli, process_count: u64, opts: FilterOptions) -> 
         });
     }
 
-    if let Some(ref output_path) = cli.output {
-        if !cli.stats_only {
-            eprintln!("\nWrote {} records to {}", total_written, output_path.display());
-        }
+    if let Some(ref output_path) = cli.output
+        && !cli.stats_only
+    {
+        eprintln!("\nWrote {} records to {}", total_written, output_path.display());
     }
 
     Ok(stats)
@@ -849,17 +849,17 @@ fn process_record_common<O>(
     let score_before = psv.score;
 
     // 手数フィルタ（最も軽量なので最初）
-    if let Some(ply_min) = opts.ply_min {
-        if psv.game_ply < ply_min {
-            return Err(FilterResult::FilteredPlyMin { score_before });
-        }
+    if let Some(ply_min) = opts.ply_min
+        && psv.game_ply < ply_min
+    {
+        return Err(FilterResult::FilteredPlyMin { score_before });
     }
 
     // スコア絶対値フィルタ
-    if let Some(score_abs_max) = opts.score_abs_max {
-        if psv.score.unsigned_abs() > score_abs_max as u16 {
-            return Err(FilterResult::FilteredScoreAbsMax { score_before });
-        }
+    if let Some(score_abs_max) = opts.score_abs_max
+        && psv.score.unsigned_abs() > score_abs_max as u16
+    {
+        return Err(FilterResult::FilteredScoreAbsMax { score_before });
     }
 
     // 王手フィルタ（重いので最後）
@@ -1011,12 +1011,11 @@ fn print_statistics(stats: &Statistics, opts: &FilterOptions, histogram_enabled:
         eprintln!("  Count: {}", dist.count);
         eprintln!("  Min: {}, Max: {}", dist.min, dist.max);
         eprintln!("  Average: {:.1}", dist.average());
-        if histogram_enabled {
-            if let (Some(p50), Some(p90), Some(p99)) =
+        if histogram_enabled
+            && let (Some(p50), Some(p90), Some(p99)) =
                 (dist.percentile(50.0), dist.percentile(90.0), dist.percentile(99.0))
-            {
-                eprintln!("  P50: {p50}, P90: {p90}, P99: {p99}");
-            }
+        {
+            eprintln!("  P50: {p50}, P90: {p90}, P99: {p99}");
         }
         let mate_pct = dist.mate_like as f64 / dist.count as f64 * 100.0;
         let high_pct = dist.high_score as f64 / dist.count as f64 * 100.0;
@@ -1038,14 +1037,14 @@ fn print_statistics(stats: &Statistics, opts: &FilterOptions, histogram_enabled:
         eprintln!("  Count: {}", dist_filtered.count);
         eprintln!("  Min: {}, Max: {}", dist_filtered.min, dist_filtered.max);
         eprintln!("  Average: {:.1}", dist_filtered.average());
-        if histogram_enabled {
-            if let (Some(p50), Some(p90), Some(p99)) = (
+        if histogram_enabled
+            && let (Some(p50), Some(p90), Some(p99)) = (
                 dist_filtered.percentile(50.0),
                 dist_filtered.percentile(90.0),
                 dist_filtered.percentile(99.0),
-            ) {
-                eprintln!("  P50: {p50}, P90: {p90}, P99: {p99}");
-            }
+            )
+        {
+            eprintln!("  P50: {p50}, P90: {p90}, P99: {p99}");
         }
         let mate_pct = dist_filtered.mate_like as f64 / dist_filtered.count as f64 * 100.0;
         let high_pct = dist_filtered.high_score as f64 / dist_filtered.count as f64 * 100.0;
@@ -1067,14 +1066,14 @@ fn print_statistics(stats: &Statistics, opts: &FilterOptions, histogram_enabled:
         eprintln!("  Count: {}", dist_clipped.count);
         eprintln!("  Min: {}, Max: {}", dist_clipped.min, dist_clipped.max);
         eprintln!("  Average: {:.1}", dist_clipped.average());
-        if histogram_enabled {
-            if let (Some(p50), Some(p90), Some(p99)) = (
+        if histogram_enabled
+            && let (Some(p50), Some(p90), Some(p99)) = (
                 dist_clipped.percentile(50.0),
                 dist_clipped.percentile(90.0),
                 dist_clipped.percentile(99.0),
-            ) {
-                eprintln!("  P50: {p50}, P90: {p90}, P99: {p99}");
-            }
+            )
+        {
+            eprintln!("  P50: {p50}, P90: {p90}, P99: {p99}");
         }
         let high_pct = dist_clipped.high_score as f64 / dist_clipped.count as f64 * 100.0;
         eprintln!(

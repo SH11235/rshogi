@@ -3,7 +3,7 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use regex::Regex;
 
@@ -134,23 +134,23 @@ fn main() -> Result<()> {
             continue;
         }
 
-        if let Some(caps) = LLR_RE.captures(line) {
-            if let Some(row_idx) = pending_idx.take() {
-                let llr = parse_capture_f64(&caps, 1, "llr")?;
-                let llr_lower = parse_capture_f64(&caps, 2, "llr_lower")?;
-                let llr_upper = parse_capture_f64(&caps, 3, "llr_upper")?;
-                let nelo_lower = parse_capture_f64(&caps, 4, "nelo_lower")?;
-                let nelo_upper = parse_capture_f64(&caps, 5, "nelo_upper")?;
-                let state = classify_sprt(llr, llr_lower, llr_upper).to_owned();
+        if let Some(caps) = LLR_RE.captures(line)
+            && let Some(row_idx) = pending_idx.take()
+        {
+            let llr = parse_capture_f64(&caps, 1, "llr")?;
+            let llr_lower = parse_capture_f64(&caps, 2, "llr_lower")?;
+            let llr_upper = parse_capture_f64(&caps, 3, "llr_upper")?;
+            let nelo_lower = parse_capture_f64(&caps, 4, "nelo_lower")?;
+            let nelo_upper = parse_capture_f64(&caps, 5, "nelo_upper")?;
+            let state = classify_sprt(llr, llr_lower, llr_upper).to_owned();
 
-                if let Some(row) = rows.get_mut(row_idx) {
-                    row.llr = Some(llr);
-                    row.llr_lower = Some(llr_lower);
-                    row.llr_upper = Some(llr_upper);
-                    row.nelo_lower = Some(nelo_lower);
-                    row.nelo_upper = Some(nelo_upper);
-                    row.sprt_state = state;
-                }
+            if let Some(row) = rows.get_mut(row_idx) {
+                row.llr = Some(llr);
+                row.llr_lower = Some(llr_lower);
+                row.llr_upper = Some(llr_upper);
+                row.nelo_lower = Some(nelo_lower);
+                row.nelo_upper = Some(nelo_upper);
+                row.sprt_state = state;
             }
         }
     }
@@ -159,11 +159,11 @@ fn main() -> Result<()> {
         bail!("no SPRT summary rows found in log: {}", cli.input_log.display());
     }
 
-    if let Some(parent) = output_csv.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
+    if let Some(parent) = output_csv.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
     }
 
     let out = File::create(&output_csv)

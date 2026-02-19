@@ -3,23 +3,23 @@
 //! 将棋GUIとの通信を行うUSIプロトコル実装。
 
 use std::io::{self, BufRead, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use anyhow::Result;
 use rshogi_core::eval::{
+    DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE, MaterialLevel,
     set_eval_hash_enabled, set_material_level, set_pass_move_bonus, set_pass_right_value_phased,
-    MaterialLevel, DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE,
 };
 use rshogi_core::nnue::{
-    evaluate_dispatch, get_network, init_nnue, print_nnue_stats, set_fv_scale_override,
-    AccumulatorStackVariant,
+    AccumulatorStackVariant, evaluate_dispatch, get_network, init_nnue, print_nnue_stats,
+    set_fv_scale_override,
 };
 use rshogi_core::position::Position;
 use rshogi_core::search::{
-    LimitsType, Search, SearchInfo, SearchResult, SearchTuneParams, DEFAULT_DRAW_VALUE_BLACK,
-    DEFAULT_DRAW_VALUE_WHITE,
+    DEFAULT_DRAW_VALUE_BLACK, DEFAULT_DRAW_VALUE_WHITE, LimitsType, Search, SearchInfo,
+    SearchResult, SearchTuneParams,
 };
 use rshogi_core::types::Move;
 use serde_json::json;
@@ -181,7 +181,9 @@ impl UsiEngine {
         println!("option name Skill Level type spin default 20 min 0 max 20");
         println!("option name UCI_LimitStrength type check default false");
         println!("option name UCI_Elo type spin default 0 min 0 max 4000");
-        println!("option name MaterialLevel type combo default 9 var 1 var 2 var 3 var 4 var 7 var 8 var 9");
+        println!(
+            "option name MaterialLevel type combo default 9 var 1 var 2 var 3 var 4 var 7 var 8 var 9"
+        );
         println!("option name EvalFile type string default <empty>");
         // FV_SCALE: 0=自動判定、1以上=指定値でオーバーライド
         // 水匠5等は24、YaneuraOuデフォルトは16
@@ -190,8 +192,12 @@ impl UsiEngine {
         println!("option name PassRights type check default false");
         println!("option name InitialPassCount type spin default 2 min 0 max 10");
         println!("option name PassMoveBonus type spin default 0 min -1000 max 1000");
-        println!("option name PassRightValueEarly type spin default {DEFAULT_PASS_RIGHT_VALUE_EARLY} min 0 max 500");
-        println!("option name PassRightValueLate type spin default {DEFAULT_PASS_RIGHT_VALUE_LATE} min 0 max 500");
+        println!(
+            "option name PassRightValueEarly type spin default {DEFAULT_PASS_RIGHT_VALUE_EARLY} min 0 max 500"
+        );
+        println!(
+            "option name PassRightValueLate type spin default {DEFAULT_PASS_RIGHT_VALUE_LATE} min 0 max 500"
+        );
         for spec in SearchTuneParams::option_specs() {
             println!(
                 "option name {} type spin default {} min {} max {}",
@@ -276,16 +282,16 @@ impl UsiEngine {
                     return;
                 }
             };
-            if let Some(search) = self.search.as_mut() {
-                if let Some(result) = search.set_search_tune_option(name.as_str(), parsed) {
-                    if result.clamped {
-                        eprintln!(
-                            "info string Warning: {}={} is out of range, clamped to {} ({}..{})",
-                            name, parsed, result.applied, result.min, result.max
-                        );
-                    }
-                    return;
+            if let Some(search) = self.search.as_mut()
+                && let Some(result) = search.set_search_tune_option(name.as_str(), parsed)
+            {
+                if result.clamped {
+                    eprintln!(
+                        "info string Warning: {}={} is out of range, clamped to {} ({}..{})",
+                        name, parsed, result.applied, result.min, result.max
+                    );
                 }
+                return;
             }
         }
 
@@ -300,102 +306,102 @@ impl UsiEngine {
                 }
             }
             "Threads" => {
-                if let Ok(num) = value.parse::<usize>() {
-                    if let Some(search) = self.search.as_mut() {
-                        search.set_num_threads(num);
-                    }
+                if let Ok(num) = value.parse::<usize>()
+                    && let Some(search) = self.search.as_mut()
+                {
+                    search.set_num_threads(num);
                 }
             }
             "NetworkDelay" => {
-                if let Ok(v) = value.parse::<i64>() {
-                    if let Some(search) = self.search.as_mut() {
-                        let mut opts = search.time_options();
-                        opts.network_delay = v;
-                        search.set_time_options(opts);
-                    }
+                if let Ok(v) = value.parse::<i64>()
+                    && let Some(search) = self.search.as_mut()
+                {
+                    let mut opts = search.time_options();
+                    opts.network_delay = v;
+                    search.set_time_options(opts);
                 }
             }
             "NetworkDelay2" => {
-                if let Ok(v) = value.parse::<i64>() {
-                    if let Some(search) = self.search.as_mut() {
-                        let mut opts = search.time_options();
-                        opts.network_delay2 = v;
-                        search.set_time_options(opts);
-                    }
+                if let Ok(v) = value.parse::<i64>()
+                    && let Some(search) = self.search.as_mut()
+                {
+                    let mut opts = search.time_options();
+                    opts.network_delay2 = v;
+                    search.set_time_options(opts);
                 }
             }
             "MinimumThinkingTime" => {
-                if let Ok(v) = value.parse::<i64>() {
-                    if let Some(search) = self.search.as_mut() {
-                        let mut opts = search.time_options();
-                        opts.minimum_thinking_time = v;
-                        search.set_time_options(opts);
-                    }
+                if let Ok(v) = value.parse::<i64>()
+                    && let Some(search) = self.search.as_mut()
+                {
+                    let mut opts = search.time_options();
+                    opts.minimum_thinking_time = v;
+                    search.set_time_options(opts);
                 }
             }
             "SlowMover" => {
-                if let Ok(v) = value.parse::<i32>() {
-                    if let Some(search) = self.search.as_mut() {
-                        let mut opts = search.time_options();
-                        opts.slow_mover = v;
-                        search.set_time_options(opts);
-                    }
+                if let Ok(v) = value.parse::<i32>()
+                    && let Some(search) = self.search.as_mut()
+                {
+                    let mut opts = search.time_options();
+                    opts.slow_mover = v;
+                    search.set_time_options(opts);
                 }
             }
             "USI_Ponder" => {
-                if let Ok(v) = value.parse::<bool>() {
-                    if let Some(search) = self.search.as_mut() {
-                        let mut opts = search.time_options();
-                        opts.usi_ponder = v;
-                        search.set_time_options(opts);
-                    }
+                if let Ok(v) = value.parse::<bool>()
+                    && let Some(search) = self.search.as_mut()
+                {
+                    let mut opts = search.time_options();
+                    opts.usi_ponder = v;
+                    search.set_time_options(opts);
                 }
             }
             "Stochastic_Ponder" => {
-                if let Ok(v) = value.parse::<bool>() {
-                    if let Some(search) = self.search.as_mut() {
-                        let mut opts = search.time_options();
-                        opts.stochastic_ponder = v;
-                        search.set_time_options(opts);
-                    }
+                if let Ok(v) = value.parse::<bool>()
+                    && let Some(search) = self.search.as_mut()
+                {
+                    let mut opts = search.time_options();
+                    opts.stochastic_ponder = v;
+                    search.set_time_options(opts);
                 }
             }
             "Skill Level" => {
-                if let Ok(v) = value.parse::<i32>() {
-                    if let Some(search) = self.search.as_mut() {
-                        let mut opts = self.skill_options;
-                        opts.skill_level = v.clamp(0, 20);
-                        self.skill_options = opts;
-                        search.set_skill_options(opts);
-                    }
+                if let Ok(v) = value.parse::<i32>()
+                    && let Some(search) = self.search.as_mut()
+                {
+                    let mut opts = self.skill_options;
+                    opts.skill_level = v.clamp(0, 20);
+                    self.skill_options = opts;
+                    search.set_skill_options(opts);
                 }
             }
             "UCI_LimitStrength" => {
-                if let Ok(v) = value.parse::<bool>() {
-                    if let Some(search) = self.search.as_mut() {
-                        let mut opts = self.skill_options;
-                        opts.uci_limit_strength = v;
-                        self.skill_options = opts;
-                        search.set_skill_options(opts);
-                    }
+                if let Ok(v) = value.parse::<bool>()
+                    && let Some(search) = self.search.as_mut()
+                {
+                    let mut opts = self.skill_options;
+                    opts.uci_limit_strength = v;
+                    self.skill_options = opts;
+                    search.set_skill_options(opts);
                 }
             }
             "UCI_Elo" => {
-                if let Ok(v) = value.parse::<i32>() {
-                    if let Some(search) = self.search.as_mut() {
-                        let mut opts = self.skill_options;
-                        opts.uci_elo = v;
-                        self.skill_options = opts;
-                        search.set_skill_options(opts);
-                    }
+                if let Ok(v) = value.parse::<i32>()
+                    && let Some(search) = self.search.as_mut()
+                {
+                    let mut opts = self.skill_options;
+                    opts.uci_elo = v;
+                    self.skill_options = opts;
+                    search.set_skill_options(opts);
                 }
             }
             "EvalHash" => {
-                if let Ok(size) = value.parse::<usize>() {
-                    if let Some(search) = self.search.as_mut() {
-                        search.resize_eval_hash(size);
-                        self.eval_hash_size_mb = size;
-                    }
+                if let Ok(size) = value.parse::<usize>()
+                    && let Some(search) = self.search.as_mut()
+                {
+                    search.resize_eval_hash(size);
+                    self.eval_hash_size_mb = size;
                 }
             }
             "UseEvalHash" => {
@@ -404,24 +410,24 @@ impl UsiEngine {
                 set_eval_hash_enabled(v);
             }
             "MaxMovesToDraw" => {
-                if let Ok(v) = value.parse::<i32>() {
-                    if let Some(search) = self.search.as_mut() {
-                        search.set_max_moves_to_draw(v);
-                    }
+                if let Ok(v) = value.parse::<i32>()
+                    && let Some(search) = self.search.as_mut()
+                {
+                    search.set_max_moves_to_draw(v);
                 }
             }
             "DrawValueBlack" => {
-                if let Ok(v) = value.parse::<i32>() {
-                    if let Some(search) = self.search.as_mut() {
-                        search.set_draw_value_black(v);
-                    }
+                if let Ok(v) = value.parse::<i32>()
+                    && let Some(search) = self.search.as_mut()
+                {
+                    search.set_draw_value_black(v);
                 }
             }
             "DrawValueWhite" => {
-                if let Ok(v) = value.parse::<i32>() {
-                    if let Some(search) = self.search.as_mut() {
-                        search.set_draw_value_white(v);
-                    }
+                if let Ok(v) = value.parse::<i32>()
+                    && let Some(search) = self.search.as_mut()
+                {
+                    search.set_draw_value_white(v);
                 }
             }
             "MultiPV" => {

@@ -87,7 +87,7 @@ pub trait FeatureSet {
 
     /// アクティブな特徴量インデックスを取得
     fn collect_active_indices(pos: &Position, perspective: Color)
-        -> IndexList<MAX_ACTIVE_FEATURES>;
+    -> IndexList<MAX_ACTIVE_FEATURES>;
 
     /// 変化した特徴量インデックスを取得
     fn collect_changed_indices(

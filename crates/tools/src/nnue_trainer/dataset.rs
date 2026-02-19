@@ -3,9 +3,9 @@
 //! JSONL形式の教師データを読み込み、学習用のバッチを生成する。
 
 use anyhow::{Context, Result};
-use rand::seq::SliceRandom;
 use rand::Rng;
-use rshogi_core::nnue::{halfkp_index, BonaPiece};
+use rand::seq::SliceRandom;
+use rshogi_core::nnue::{BonaPiece, halfkp_index};
 use rshogi_core::position::Position;
 use rshogi_core::types::{Color, PieceType, Square};
 use serde::Deserialize;
@@ -59,10 +59,10 @@ impl TrainingDataset {
         let mut samples = Vec::new();
 
         for (i, line) in reader.lines().enumerate() {
-            if let Some(lim) = limit {
-                if samples.len() >= lim {
-                    break;
-                }
+            if let Some(lim) = limit
+                && samples.len() >= lim
+            {
+                break;
             }
 
             let line = line.with_context(|| format!("Failed to read line {}", i + 1))?;

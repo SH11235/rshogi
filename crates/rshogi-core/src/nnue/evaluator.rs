@@ -280,13 +280,13 @@ impl NNUEEvaluator {
         let mut updated = false;
 
         // 直前局面で差分更新を試行
-        if let Some(prev_idx) = stack.current_previous() {
-            if stack.is_entry_computed(prev_idx) {
-                let dirty = stack.current_dirty_piece();
-                net.update_accumulator(pos, &dirty, stack, prev_idx);
-                count_update!();
-                updated = true;
-            }
+        if let Some(prev_idx) = stack.current_previous()
+            && stack.is_entry_computed(prev_idx)
+        {
+            let dirty = stack.current_dirty_piece();
+            net.update_accumulator(pos, &dirty, stack, prev_idx);
+            count_update!();
+            updated = true;
         }
 
         // 失敗なら全計算
@@ -311,13 +311,13 @@ impl NNUEEvaluator {
         let mut updated = false;
 
         // 直前局面で差分更新を試行
-        if let Some(prev_idx) = stack.current_previous() {
-            if stack.is_entry_computed(prev_idx) {
-                let dirty = stack.current_dirty_piece();
-                net.update_accumulator(pos, &dirty, stack, prev_idx);
-                count_update!();
-                updated = true;
-            }
+        if let Some(prev_idx) = stack.current_previous()
+            && stack.is_entry_computed(prev_idx)
+        {
+            let dirty = stack.current_dirty_piece();
+            net.update_accumulator(pos, &dirty, stack, prev_idx);
+            count_update!();
+            updated = true;
         }
 
         // 失敗なら全計算
@@ -342,13 +342,13 @@ impl NNUEEvaluator {
         let mut updated = false;
 
         // 直前局面で差分更新を試行
-        if let Some(prev_idx) = stack.current_previous() {
-            if stack.is_entry_computed(prev_idx) {
-                let dirty = stack.current_dirty_piece();
-                net.update_accumulator(pos, &dirty, stack, prev_idx);
-                count_update!();
-                updated = true;
-            }
+        if let Some(prev_idx) = stack.current_previous()
+            && stack.is_entry_computed(prev_idx)
+        {
+            let dirty = stack.current_dirty_piece();
+            net.update_accumulator(pos, &dirty, stack, prev_idx);
+            count_update!();
+            updated = true;
         }
 
         // 失敗なら全計算

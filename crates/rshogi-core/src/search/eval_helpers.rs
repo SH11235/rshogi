@@ -5,22 +5,21 @@
 #[cfg(not(feature = "search-no-pass-rules"))]
 use crate::eval::evaluate_pass_rights;
 use crate::position::Position;
-use crate::types::{Bound, Color, Depth, Move, Value, DEPTH_UNSEARCHED, MAX_PLY};
+use crate::types::{Bound, Color, DEPTH_UNSEARCHED, Depth, MAX_PLY, Move, Value};
 
 use super::alpha_beta::{
-    to_corrected_static_eval, EvalContext, ProbeOutcome, SearchContext, SearchState, TTContext,
+    EvalContext, ProbeOutcome, SearchContext, SearchState, TTContext, to_corrected_static_eval,
 };
 use super::history::CORRECTION_HISTORY_SIZE;
 use super::search_helpers::{ensure_nnue_accumulator, nnue_evaluate};
 use super::stats::inc_stat_by_depth;
 #[cfg(feature = "tt-trace")]
 use super::tt_sanity::{
-    helper_tt_write_enabled_for_depth, maybe_log_invalid_tt_data, maybe_trace_tt_cutoff,
-    maybe_trace_tt_probe, maybe_trace_tt_write, InvalidTtLog, TtCutoffTrace, TtProbeTrace,
-    TtWriteTrace,
+    InvalidTtLog, TtCutoffTrace, TtProbeTrace, TtWriteTrace, helper_tt_write_enabled_for_depth,
+    maybe_log_invalid_tt_data, maybe_trace_tt_cutoff, maybe_trace_tt_probe, maybe_trace_tt_write,
 };
 use super::tt_sanity::{is_valid_tt_eval, is_valid_tt_stored_value};
-use super::types::{value_from_tt, ContHistKey, NodeType};
+use super::types::{ContHistKey, NodeType, value_from_tt};
 
 // =============================================================================
 // 補正履歴

@@ -30,10 +30,10 @@ mod l256;
 mod l512;
 mod l768;
 
-pub use l1024::HalfKA_hm_L1024;
 pub use l256::HalfKA_hm_L256;
 pub use l512::HalfKA_hm_L512;
 pub use l768::HalfKA_hm_L768;
+pub use l1024::HalfKA_hm_L1024;
 
 use crate::nnue::accumulator::DirtyPiece;
 use crate::nnue::network_halfka_hm::AccumulatorStackHalfKA_hm;

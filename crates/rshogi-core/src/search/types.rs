@@ -7,9 +7,9 @@
 
 use std::mem::MaybeUninit;
 
-use crate::movegen::{generate_legal_with_pass, MoveList};
+use crate::movegen::{MoveList, generate_legal_with_pass};
 use crate::position::Position;
-use crate::types::{Move, Piece, RepetitionState, Square, Value, MAX_PLY};
+use crate::types::{MAX_PLY, Move, Piece, RepetitionState, Square, Value};
 
 use super::history::PieceToHistory;
 use std::ptr::NonNull;
@@ -980,7 +980,7 @@ mod tests {
         // 2回目以降は平均を取る
         rm.accumulate_score_stats(Value::new(-60));
         assert_eq!(rm.average_score.raw(), 20); // (100 + -60) / 2
-                                                // mean_squared_score は value * |value| を平均するため符号を保持する
+        // mean_squared_score は value * |value| を平均するため符号を保持する
         assert_eq!(rm.mean_squared_score, Some((10_000 - 3_600) / 2));
     }
 

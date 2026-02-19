@@ -11,8 +11,8 @@ use rand_chacha::ChaCha8Rng;
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 学習設定
 pub struct TrainConfig {
@@ -411,14 +411,14 @@ impl Trainer {
                         let (_, converged, should_restore) = self.newbob_state.update(vl, &path);
 
                         // 損失が悪化した場合、最良モデルをリストア
-                        if should_restore {
-                            if let Some(best_path) = self.newbob_state.best_model_path() {
-                                let best_path = best_path.to_string(); // Clone to avoid borrow issue
-                                eprintln!("  Restoring parameters from {best_path}");
-                                match self.restore_model(&best_path) {
-                                    Ok(()) => eprintln!("  Restored successfully"),
-                                    Err(e) => eprintln!("  Warning: failed to restore: {e}"),
-                                }
+                        if should_restore
+                            && let Some(best_path) = self.newbob_state.best_model_path()
+                        {
+                            let best_path = best_path.to_string(); // Clone to avoid borrow issue
+                            eprintln!("  Restoring parameters from {best_path}");
+                            match self.restore_model(&best_path) {
+                                Ok(()) => eprintln!("  Restored successfully"),
+                                Err(e) => eprintln!("  Warning: failed to restore: {e}"),
                             }
                         }
 

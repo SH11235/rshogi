@@ -1,8 +1,8 @@
 // 1手詰め探索用の初期化テーブル
 
 use crate::bitboard::{
-    bishop_effect, gold_effect, king_effect, knight_effect, lance_effect, pawn_effect, rook_effect,
-    silver_effect, Bitboard,
+    Bitboard, bishop_effect, gold_effect, king_effect, knight_effect, lance_effect, pawn_effect,
+    rook_effect, silver_effect,
 };
 use crate::mate::cross45_step_effect;
 use crate::types::{Color, File, PieceType, Rank, Square};
@@ -171,10 +171,10 @@ fn init_check_cand_bb() -> [[[Bitboard; 2]; PieceTypeCheck::NUM]; 81] {
                 if let Some(file_r) = File::from_u8((file_idx + 1) as u8) {
                     silver_bb |= Bitboard::from_square(Square::new(file_r, r3));
                 }
-                if file_idx > 0 {
-                    if let Some(file_l) = File::from_u8((file_idx - 1) as u8) {
-                        silver_bb |= Bitboard::from_square(Square::new(file_l, r3));
-                    }
+                if file_idx > 0
+                    && let Some(file_l) = File::from_u8((file_idx - 1) as u8)
+                {
+                    silver_bb |= Bitboard::from_square(Square::new(file_l, r3));
                 }
             }
             // 5段目のバックアタック桂
@@ -287,12 +287,12 @@ fn init_next_square() -> [[Option<Square>; 81]; 81] {
 
             let nf = f2 + df;
             let nr = r2 + dr;
-            if (0..=8).contains(&nf) && (0..=8).contains(&nr) {
-                if let (Some(file), Some(rank)) =
+            if (0..=8).contains(&nf)
+                && (0..=8).contains(&nr)
+                && let (Some(file), Some(rank)) =
                     (crate::types::File::from_u8(nf as u8), crate::types::Rank::from_u8(nr as u8))
-                {
-                    table[s1.index()][s2.index()] = Some(Square::new(file, rank));
-                }
+            {
+                table[s1.index()][s2.index()] = Some(Square::new(file, rank));
             }
         }
     }

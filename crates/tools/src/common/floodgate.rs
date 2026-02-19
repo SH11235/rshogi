@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use reqwest::blocking::Client;
-use reqwest::header::{HeaderValue, ACCEPT_ENCODING};
+use reqwest::header::{ACCEPT_ENCODING, HeaderValue};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};

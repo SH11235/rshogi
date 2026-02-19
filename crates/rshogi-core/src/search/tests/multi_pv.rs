@@ -254,8 +254,8 @@ fn test_no_early_exit_when_mated() {
 #[test]
 fn test_multi_pv_3_integration() {
     use crate::position::Position;
-    use crate::search::engine::{Search, SearchInfo};
     use crate::search::LimitsType;
+    use crate::search::engine::{Search, SearchInfo};
 
     run_with_large_stack(|| {
         let mut search = Search::new(16); // 16MB TT
@@ -313,8 +313,8 @@ fn test_multi_pv_3_integration() {
 #[test]
 fn test_multi_pv_1_outputs_multipv_field() {
     use crate::position::Position;
-    use crate::search::engine::{Search, SearchInfo};
     use crate::search::LimitsType;
+    use crate::search::engine::{Search, SearchInfo};
 
     run_with_large_stack(|| {
         let mut search = Search::new(16);
@@ -354,8 +354,8 @@ fn test_multi_pv_1_outputs_multipv_field() {
 #[test]
 fn test_multi_pv_clamped_to_legal_moves_integration() {
     use crate::position::Position;
-    use crate::search::engine::{Search, SearchInfo};
     use crate::search::LimitsType;
+    use crate::search::engine::{Search, SearchInfo};
 
     run_with_large_stack(|| {
         let mut search = Search::new(16);
@@ -403,8 +403,8 @@ fn test_multi_pv_clamped_to_legal_moves_integration() {
 #[test]
 fn test_multi_pv_scores_sorted_desc() {
     use crate::position::Position;
-    use crate::search::engine::{Search, SearchInfo};
     use crate::search::LimitsType;
+    use crate::search::engine::{Search, SearchInfo};
 
     run_with_large_stack(|| {
         let mut search = Search::new(16);
@@ -480,8 +480,8 @@ fn test_aspiration_window_defaults_to_full_window_when_unseeded() {
 #[test]
 fn test_multi_pv_outputs_once_per_depth() {
     use crate::position::Position;
-    use crate::search::engine::{Search, SearchInfo};
     use crate::search::LimitsType;
+    use crate::search::engine::{Search, SearchInfo};
 
     run_with_large_stack(|| {
         let mut search = Search::new(16);
@@ -527,8 +527,8 @@ fn test_multi_pv_outputs_once_per_depth() {
 #[test]
 fn test_previous_score_seeding() {
     use crate::position::Position;
-    use crate::search::engine::Search;
     use crate::search::LimitsType;
+    use crate::search::engine::Search;
 
     run_with_large_stack(|| {
         let mut search = Search::new(16);

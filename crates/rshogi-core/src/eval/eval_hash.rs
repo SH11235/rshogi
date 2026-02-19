@@ -102,7 +102,7 @@ mod stats {
 }
 
 #[cfg(feature = "diagnostics")]
-pub use stats::{eval_hash_stats, reset_eval_hash_stats, EvalHashStats};
+pub use stats::{EvalHashStats, eval_hash_stats, reset_eval_hash_stats};
 
 pub fn eval_hash_enabled() -> bool {
     USE_EVAL_HASH.load(Ordering::Relaxed)

@@ -246,10 +246,10 @@ pub fn parse_arch_dimensions(arch_str: &str) -> (usize, usize, usize) {
             if let Ok(val) = val_str.parse::<usize>() {
                 l2 = val;
             }
-        } else if let Some(val_str) = part.strip_prefix("l3=") {
-            if let Ok(val) = val_str.parse::<usize>() {
-                l3 = val;
-            }
+        } else if let Some(val_str) = part.strip_prefix("l3=")
+            && let Ok(val) = val_str.parse::<usize>()
+        {
+            l3 = val;
         }
     }
 
@@ -467,10 +467,10 @@ pub fn detect_architecture_from_size(
 
     for &(feature_set, l1, l2, l3, expected_payload) in KNOWN_PAYLOADS {
         // FeatureSet でフィルタリング（ヒントがある場合）
-        if let Some(hint) = feature_set_hint {
-            if feature_set != hint {
-                continue;
-            }
+        if let Some(hint) = feature_set_hint
+            && feature_set != hint
+        {
+            continue;
         }
 
         // hash無しでチェック（nnue-pytorch 形式）

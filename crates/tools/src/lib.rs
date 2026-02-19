@@ -54,6 +54,6 @@ mod utils;
 
 // 公開API
 pub use config::{BenchmarkConfig, EvalConfig, LimitType};
-pub use positions::{load_positions, DEFAULT_POSITIONS};
+pub use positions::{DEFAULT_POSITIONS, load_positions};
 pub use report::{Aggregate, BenchResult, BenchmarkReport, EvalInfo, ThreadResult};
-pub use system::{collect_system_info, SystemInfo};
+pub use system::{SystemInfo, collect_system_info};

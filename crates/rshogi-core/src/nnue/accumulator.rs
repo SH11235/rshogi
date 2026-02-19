@@ -11,8 +11,8 @@
 use super::bona_piece::ExtBonaPiece;
 use super::constants::{NUM_REFRESH_TRIGGERS, TRANSFORMED_FEATURE_DIMENSIONS};
 use super::piece_list::PieceNumber;
-use crate::types::{Color, Value, MAX_PLY};
-use std::alloc::{alloc_zeroed, dealloc, Layout};
+use crate::types::{Color, MAX_PLY, Value};
+use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
 
@@ -149,7 +149,8 @@ impl<T: Copy> Aligned<T> {
     #[inline]
     #[allow(clippy::uninit_assumed_init)]
     pub unsafe fn new_uninit() -> Self {
-        std::mem::MaybeUninit::uninit().assume_init()
+        // SAFETY: 呼び出し直後に全要素が上書きされることを呼び出し側が保証する
+        unsafe { std::mem::MaybeUninit::uninit().assume_init() }
     }
 }
 

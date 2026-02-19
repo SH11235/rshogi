@@ -17,11 +17,7 @@
 /// ```
 #[inline(always)]
 pub fn msb64(x: u64) -> u32 {
-    if x == 0 {
-        0
-    } else {
-        63 - x.leading_zeros()
-    }
+    if x == 0 { 0 } else { 63 - x.leading_zeros() }
 }
 
 #[cfg(test)]

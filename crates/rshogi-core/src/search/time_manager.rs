@@ -8,8 +8,8 @@ use crate::time::Instant;
 use crate::types::Color;
 use log::debug;
 use rand::Rng;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // =============================================================================
 // 定数
@@ -718,16 +718,16 @@ impl TimeManagement {
         }
 
         // total_time由来の直近閾値
-        if let Some(threshold) = self.last_stop_threshold {
-            if effective_elapsed >= threshold {
-                debug!(
-                    target: "rshogi_core::search",
-                    "stop check: last_stop_threshold reached effective_elapsed={} threshold={}",
-                    effective_elapsed,
-                    threshold
-                );
-                return true;
-            }
+        if let Some(threshold) = self.last_stop_threshold
+            && effective_elapsed >= threshold
+        {
+            debug!(
+                target: "rshogi_core::search",
+                "stop check: last_stop_threshold reached effective_elapsed={} threshold={}",
+                effective_elapsed,
+                threshold
+            );
+            return true;
         }
 
         // 最大時間を超えた（セーフティ）

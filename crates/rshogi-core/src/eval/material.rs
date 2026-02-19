@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 
 use crate::position::{BoardEffects, Position};
 use crate::types::{Color, Piece, PieceType, Square, Value};
@@ -357,11 +357,7 @@ fn king_pos_bonus(color: Color, sq: Square) -> i32 {
     };
     let idx = (8 - target_sq.file().index()) + target_sq.rank().index() * 9;
     let bonus = KING_POS_BONUS[idx];
-    if color == Color::Black {
-        bonus
-    } else {
-        -bonus
-    }
+    if color == Color::Black { bonus } else { -bonus }
 }
 
 fn direction_of(king: Square, sq: Square) -> usize {

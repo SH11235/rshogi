@@ -34,8 +34,8 @@ use crate::types::Value;
 use std::fs::File;
 use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 /// グローバルなNNUEネットワーク（HalfKP/HalfKA/HalfKA_hm^）
 static NETWORK: OnceLock<NNUENetwork> = OnceLock::new();
@@ -56,11 +56,7 @@ static FV_SCALE_OVERRIDE: AtomicI32 = AtomicI32::new(0);
 /// - `None`: 自動判定を使用（Network の fv_scale を使用）
 pub fn get_fv_scale_override() -> Option<i32> {
     let value = FV_SCALE_OVERRIDE.load(Ordering::Relaxed);
-    if value > 0 {
-        Some(value)
-    } else {
-        None
-    }
+    if value > 0 { Some(value) } else { None }
 }
 
 /// FV_SCALE オーバーライドを設定
@@ -161,9 +157,8 @@ impl NNUENetwork {
                 };
 
                 // ヘッダーから FeatureSet を取得（検出のヒントに使用）
-                let parsed = super::spec::parse_architecture(&arch_str).map_err(|msg| {
-                    io::Error::new(io::ErrorKind::InvalidData, msg)
-                })?;
+                let parsed = super::spec::parse_architecture(&arch_str)
+                    .map_err(|msg| io::Error::new(io::ErrorKind::InvalidData, msg))?;
 
                 // LayerStacks は特殊処理（ファイルサイズ検出の対象外）
                 if parsed.feature_set == FeatureSet::LayerStacks {
@@ -180,8 +175,7 @@ impl NNUENetwork {
                 )
                 .ok_or_else(|| {
                     // 検出失敗時は候補を表示
-                    let candidates =
-                        super::spec::list_candidate_architectures(file_size, arch_len);
+                    let candidates = super::spec::list_candidate_architectures(file_size, arch_len);
                     let candidates_str: Vec<String> = candidates
                         .iter()
                         .take(5)
@@ -747,10 +741,8 @@ fn update_and_evaluate_layer_stacks(
         }
 
         // 2. 失敗なら祖先探索 + 複数手差分更新を試行
-        if !updated {
-            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
-                updated = network.forward_update_incremental_layer_stacks(pos, stack, source_idx);
-            }
+        if !updated && let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+            updated = network.forward_update_incremental_layer_stacks(pos, stack, source_idx);
         }
 
         // 3. それでも失敗なら全計算
@@ -777,19 +769,17 @@ fn update_and_evaluate_halfka_hm(
         let mut updated = false;
 
         // 1. 直前局面で差分更新を試行
-        if let Some(prev_idx) = stack.current_previous() {
-            if stack.is_entry_computed(prev_idx) {
-                let dirty = stack.current_dirty_piece();
-                network.update_accumulator_halfka_hm(pos, &dirty, stack, prev_idx);
-                updated = true;
-            }
+        if let Some(prev_idx) = stack.current_previous()
+            && stack.is_entry_computed(prev_idx)
+        {
+            let dirty = stack.current_dirty_piece();
+            network.update_accumulator_halfka_hm(pos, &dirty, stack, prev_idx);
+            updated = true;
         }
 
         // 2. 失敗なら祖先探索 + 複数手差分更新を試行
-        if !updated {
-            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
-                updated = network.forward_update_incremental_halfka_hm(pos, stack, source_idx);
-            }
+        if !updated && let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+            updated = network.forward_update_incremental_halfka_hm(pos, stack, source_idx);
         }
 
         // 3. それでも失敗なら全計算
@@ -814,19 +804,17 @@ fn update_and_evaluate_halfka(
         let mut updated = false;
 
         // 1. 直前局面で差分更新を試行
-        if let Some(prev_idx) = stack.current_previous() {
-            if stack.is_entry_computed(prev_idx) {
-                let dirty = stack.current_dirty_piece();
-                network.update_accumulator_halfka(pos, &dirty, stack, prev_idx);
-                updated = true;
-            }
+        if let Some(prev_idx) = stack.current_previous()
+            && stack.is_entry_computed(prev_idx)
+        {
+            let dirty = stack.current_dirty_piece();
+            network.update_accumulator_halfka(pos, &dirty, stack, prev_idx);
+            updated = true;
         }
 
         // 2. 失敗なら祖先探索 + 複数手差分更新を試行
-        if !updated {
-            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
-                updated = network.forward_update_incremental_halfka(pos, stack, source_idx);
-            }
+        if !updated && let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+            updated = network.forward_update_incremental_halfka(pos, stack, source_idx);
         }
 
         // 3. それでも失敗なら全計算
@@ -851,19 +839,17 @@ fn update_and_evaluate_halfkp(
         let mut updated = false;
 
         // 1. 直前局面で差分更新を試行
-        if let Some(prev_idx) = stack.current_previous() {
-            if stack.is_entry_computed(prev_idx) {
-                let dirty = stack.current_dirty_piece();
-                network.update_accumulator_halfkp(pos, &dirty, stack, prev_idx);
-                updated = true;
-            }
+        if let Some(prev_idx) = stack.current_previous()
+            && stack.is_entry_computed(prev_idx)
+        {
+            let dirty = stack.current_dirty_piece();
+            network.update_accumulator_halfkp(pos, &dirty, stack, prev_idx);
+            updated = true;
         }
 
         // 2. 失敗なら祖先探索 + 複数手差分更新を試行
-        if !updated {
-            if let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
-                updated = network.forward_update_incremental_halfkp(pos, stack, source_idx);
-            }
+        if !updated && let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+            updated = network.forward_update_incremental_halfkp(pos, stack, source_idx);
         }
 
         // 3. それでも失敗なら全計算
@@ -1030,13 +1016,13 @@ fn update_accumulator_only_halfka_hm(
     let mut updated = false;
 
     // 直前局面で差分更新を試行
-    if let Some(prev_idx) = stack.current_previous() {
-        if stack.is_entry_computed(prev_idx) {
-            let dirty = stack.current_dirty_piece();
-            network.update_accumulator_halfka_hm(pos, &dirty, stack, prev_idx);
-            count_update!();
-            updated = true;
-        }
+    if let Some(prev_idx) = stack.current_previous()
+        && stack.is_entry_computed(prev_idx)
+    {
+        let dirty = stack.current_dirty_piece();
+        network.update_accumulator_halfka_hm(pos, &dirty, stack, prev_idx);
+        count_update!();
+        updated = true;
     }
 
     // 失敗なら全計算
@@ -1057,13 +1043,13 @@ fn update_accumulator_only_halfka(network: &NNUENetwork, pos: &Position, stack: 
     let mut updated = false;
 
     // 直前局面で差分更新を試行
-    if let Some(prev_idx) = stack.current_previous() {
-        if stack.is_entry_computed(prev_idx) {
-            let dirty = stack.current_dirty_piece();
-            network.update_accumulator_halfka(pos, &dirty, stack, prev_idx);
-            count_update!();
-            updated = true;
-        }
+    if let Some(prev_idx) = stack.current_previous()
+        && stack.is_entry_computed(prev_idx)
+    {
+        let dirty = stack.current_dirty_piece();
+        network.update_accumulator_halfka(pos, &dirty, stack, prev_idx);
+        count_update!();
+        updated = true;
     }
 
     // 失敗なら全計算
@@ -1084,13 +1070,13 @@ fn update_accumulator_only_halfkp(network: &NNUENetwork, pos: &Position, stack: 
     let mut updated = false;
 
     // 直前局面で差分更新を試行
-    if let Some(prev_idx) = stack.current_previous() {
-        if stack.is_entry_computed(prev_idx) {
-            let dirty = stack.current_dirty_piece();
-            network.update_accumulator_halfkp(pos, &dirty, stack, prev_idx);
-            count_update!();
-            updated = true;
-        }
+    if let Some(prev_idx) = stack.current_previous()
+        && stack.is_entry_computed(prev_idx)
+    {
+        let dirty = stack.current_dirty_piece();
+        network.update_accumulator_halfkp(pos, &dirty, stack, prev_idx);
+        count_update!();
+        updated = true;
     }
 
     // 失敗なら全計算
@@ -1291,7 +1277,7 @@ mod tests {
         bytes.extend_from_slice(&NNUE_VERSION.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes.extend_from_slice(&100u32.to_le_bytes()); // arch_len = 100
-                                                        // bytes は 12 バイトのみ、arch_str 用のデータがない
+        // bytes は 12 バイトのみ、arch_str 用のデータがない
         let result = detect_format(&bytes, 1000);
         assert!(result.is_err(), "Should fail when buffer is too small for arch_str");
 

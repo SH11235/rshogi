@@ -5,9 +5,9 @@ use std::thread;
 
 use anyhow::{Context, Result};
 
+use rshogi_core::eval::{MaterialLevel, set_eval_hash_enabled, set_material_level};
 #[cfg(feature = "diagnostics")]
 use rshogi_core::eval::{eval_hash_stats, reset_eval_hash_stats};
-use rshogi_core::eval::{set_eval_hash_enabled, set_material_level, MaterialLevel};
 use rshogi_core::nnue::init_nnue;
 use rshogi_core::position::Position;
 use rshogi_core::search::{LimitsType, Search, SearchInfo};

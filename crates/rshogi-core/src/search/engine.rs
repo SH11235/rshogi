@@ -7,22 +7,22 @@ use crate::time::Instant;
 use std::collections::HashMap;
 // AtomicU64 is only needed for native multi-threaded builds.
 // Wasm Rayon model doesn't use SearchProgress.
+use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 use super::time_manager::{
-    calculate_falling_eval, calculate_time_reduction, normalize_nodes_effort,
-    DEFAULT_MAX_MOVES_TO_DRAW,
+    DEFAULT_MAX_MOVES_TO_DRAW, calculate_falling_eval, calculate_time_reduction,
+    normalize_nodes_effort,
 };
 use super::{
-    LimitsType, RootMove, SearchTuneParams, SearchWorker, Skill, SkillOptions, ThreadPool,
-    TimeManagement, DEFAULT_DRAW_VALUE_BLACK, DEFAULT_DRAW_VALUE_WHITE,
+    DEFAULT_DRAW_VALUE_BLACK, DEFAULT_DRAW_VALUE_WHITE, LimitsType, RootMove, SearchTuneParams,
+    SearchWorker, Skill, SkillOptions, ThreadPool, TimeManagement,
 };
 use crate::position::Position;
 use crate::tt::TranspositionTable;
-use crate::types::{Depth, Move, Value, MAX_PLY};
+use crate::types::{Depth, MAX_PLY, Move, Value};
 
 // =============================================================================
 // SearchInfo - 探索情報（USI info出力用）
@@ -600,18 +600,18 @@ impl Search {
     /// 時間計測用のメトリクスを準備（対局/Go開始時）
     fn prepare_time_metrics(&mut self, ply: i32) {
         // 手番が変わっている場合はスコア符号を反転
-        if let Some(last_ply) = self.last_game_ply {
-            if (last_ply - ply).abs() & 1 == 1 {
-                if let Some(prev_score) = self.best_previous_score {
-                    if prev_score != Value::INFINITE {
-                        self.best_previous_score = Some(Value::new(-prev_score.raw()));
-                    }
-                }
-                if let Some(prev_avg) = self.best_previous_average_score {
-                    if prev_avg != Value::INFINITE {
-                        self.best_previous_average_score = Some(Value::new(-prev_avg.raw()));
-                    }
-                }
+        if let Some(last_ply) = self.last_game_ply
+            && (last_ply - ply).abs() & 1 == 1
+        {
+            if let Some(prev_score) = self.best_previous_score
+                && prev_score != Value::INFINITE
+            {
+                self.best_previous_score = Some(Value::new(-prev_score.raw()));
+            }
+            if let Some(prev_avg) = self.best_previous_average_score
+                && prev_avg != Value::INFINITE
+            {
+                self.best_previous_average_score = Some(Value::new(-prev_avg.raw()));
             }
         }
 
@@ -1473,48 +1473,48 @@ where
         }
 
         // メインのみ: info出力（GUI詰まり防止のYO仕様）
-        if let Some(ref ms) = main_state {
-            if processed_pv > 0 {
-                let elapsed = ms.start_time.elapsed();
-                let time_ms = elapsed.as_millis() as u64;
+        if let Some(ref ms) = main_state
+            && processed_pv > 0
+        {
+            let elapsed = ms.start_time.elapsed();
+            let time_ms = elapsed.as_millis() as u64;
 
-                // Native: Use helper_threads() to get node counts
-                #[cfg(not(target_arch = "wasm32"))]
-                let helper_nodes = ms
-                    .thread_pool
-                    .helper_threads()
-                    .iter()
-                    .fold(0u64, |acc, thread| acc.saturating_add(thread.nodes()));
+            // Native: Use helper_threads() to get node counts
+            #[cfg(not(target_arch = "wasm32"))]
+            let helper_nodes = ms
+                .thread_pool
+                .helper_threads()
+                .iter()
+                .fold(0u64, |acc, thread| acc.saturating_add(thread.nodes()));
 
-                // Wasm with wasm-threads: Use helper_nodes() for realtime node counts
-                #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
-                let helper_nodes = ms.thread_pool.helper_nodes();
+            // Wasm with wasm-threads: Use helper_nodes() for realtime node counts
+            #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+            let helper_nodes = ms.thread_pool.helper_nodes();
 
-                // Wasm without wasm-threads: No helper threads
-                #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
-                let helper_nodes = 0u64;
+            // Wasm without wasm-threads: No helper threads
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+            let helper_nodes = 0u64;
 
-                let total_nodes = worker.state.nodes.saturating_add(helper_nodes);
-                let nps = if time_ms > 0 {
-                    total_nodes.saturating_mul(1000) / time_ms
-                } else {
-                    0
+            let total_nodes = worker.state.nodes.saturating_add(helper_nodes);
+            let nps = if time_ms > 0 {
+                total_nodes.saturating_mul(1000) / time_ms
+            } else {
+                0
+            };
+
+            for pv_idx in 0..processed_pv {
+                let info = SearchInfo {
+                    depth,
+                    sel_depth: worker.state.root_moves[pv_idx].sel_depth,
+                    score: worker.state.root_moves[pv_idx].score,
+                    nodes: total_nodes,
+                    time_ms,
+                    nps,
+                    hashfull: ms.tt.hashfull(3) as u32,
+                    pv: worker.state.root_moves[pv_idx].pv.clone(),
+                    multi_pv: pv_idx + 1, // 1-indexed
                 };
-
-                for pv_idx in 0..processed_pv {
-                    let info = SearchInfo {
-                        depth,
-                        sel_depth: worker.state.root_moves[pv_idx].sel_depth,
-                        score: worker.state.root_moves[pv_idx].score,
-                        nodes: total_nodes,
-                        time_ms,
-                        nps,
-                        hashfull: ms.tt.hashfull(3) as u32,
-                        pv: worker.state.root_moves[pv_idx].pv.clone(),
-                        multi_pv: pv_idx + 1, // 1-indexed
-                    };
-                    on_info(&info);
-                }
+                on_info(&info);
             }
         }
 
@@ -1667,13 +1667,13 @@ where
         && worker.state.root_moves[0].score.is_loss()
     {
         let head = last_best_pv.first().copied().unwrap_or(Move::NONE);
-        if head != Move::NONE {
-            if let Some(idx) = worker.state.root_moves.find(head) {
-                worker.state.root_moves.move_to_front(idx);
-                worker.state.root_moves[0].pv = last_best_pv;
-                worker.state.root_moves[0].score = last_best_score;
-                worker.state.completed_depth = last_best_move_depth;
-            }
+        if head != Move::NONE
+            && let Some(idx) = worker.state.root_moves.find(head)
+        {
+            worker.state.root_moves.move_to_front(idx);
+            worker.state.root_moves[0].pv = last_best_pv;
+            worker.state.root_moves[0].score = last_best_score;
+            worker.state.completed_depth = last_best_move_depth;
         }
     }
 

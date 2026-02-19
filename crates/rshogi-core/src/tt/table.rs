@@ -394,10 +394,10 @@ mod tests {
 
         // オーバーフローしても正常に動作
         // generation は 8 の倍数で増加し、u8でwrapするので常に256未満
-        let gen = tt.generation();
+        let generation = tt.generation();
         // 300 * 8 = 2400, 2400 % 256 = 96
         // 正常に動作していることを確認（u8なので必ず0-255の範囲）
-        let _ = gen; // コンパイルが通れば正常
+        let _ = generation; // コンパイルが通れば正常
     }
 
     #[test]

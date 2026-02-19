@@ -26,6 +26,6 @@ pub(crate) use board_effect::BoardEffects;
 #[cfg(feature = "move-features")]
 pub use move_features::MoveFeatures;
 pub use pos::Position;
-pub use sfen::{SfenError, SFEN_HIRATE};
+pub use sfen::{SFEN_HIRATE, SfenError};
 pub use state::StateInfo;
-pub use zobrist::{zobrist_hand, zobrist_no_pawns, zobrist_psq, zobrist_side, ZOBRIST};
+pub use zobrist::{ZOBRIST, zobrist_hand, zobrist_no_pawns, zobrist_psq, zobrist_side};

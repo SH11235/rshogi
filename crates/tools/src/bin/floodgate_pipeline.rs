@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use tools::common::csa::parse_csa;
 use tools::common::dedup::DedupSet;
 use tools::common::floodgate as fg;
-use tools::common::io::{open_writer, Writer};
+use tools::common::io::{Writer, open_writer};
 use tools::common::sfen_ops::{canonicalize_4t_with_mirror, mirror_horizontal};
 
 #[derive(Parser)]
@@ -178,10 +178,10 @@ fn visit_csa_files(root: &Path) -> Result<Vec<PathBuf>> {
     for entry in walkdir::WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
         if entry.file_type().is_file() {
             let p = entry.path();
-            if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-                if ext.eq_ignore_ascii_case("csa") {
-                    files.push(p.to_path_buf());
-                }
+            if let Some(ext) = p.extension().and_then(|e| e.to_str())
+                && ext.eq_ignore_ascii_case("csa")
+            {
+                files.push(p.to_path_buf());
             }
         }
     }
@@ -349,11 +349,12 @@ fn maybe_write(
         written += 1;
 
         // optionally emit mirror as a separate line when not deduping-by-mirror
-        if emit_mirror && !mirror_dedup {
-            if let Some(ms) = mirror_horizontal(sfen) {
-                writeln!(out_w, "{ms}")?;
-                written += 1;
-            }
+        if emit_mirror
+            && !mirror_dedup
+            && let Some(ms) = mirror_horizontal(sfen)
+        {
+            writeln!(out_w, "{ms}")?;
+            written += 1;
         }
     }
     Ok(written)

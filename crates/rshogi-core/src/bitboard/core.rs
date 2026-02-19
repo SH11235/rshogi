@@ -222,11 +222,7 @@ impl Bitboard {
     /// - `1`: p[1]に属する（8-9筋、index >= 63）
     #[inline]
     pub const fn part(sq: Square) -> usize {
-        if sq.index() < 63 {
-            0
-        } else {
-            1
-        }
+        if sq.index() < 63 { 0 } else { 1 }
     }
 
     /// p[N]を取得（N = 0 or 1）

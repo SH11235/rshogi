@@ -5,9 +5,9 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 
-use super::types::{duration_to_millis, InfoCallback, InfoSnapshot, SearchOutcome, SearchRequest};
+use super::types::{InfoCallback, InfoSnapshot, SearchOutcome, SearchRequest, duration_to_millis};
 
 pub const ENGINE_READY_TIMEOUT: Duration = Duration::from_secs(30);
 pub const ENGINE_QUIT_TIMEOUT: Duration = Duration::from_millis(300);

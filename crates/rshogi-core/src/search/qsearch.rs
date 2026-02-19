@@ -5,9 +5,9 @@
 #[cfg(not(feature = "search-no-pass-rules"))]
 use crate::eval::evaluate_pass_rights;
 use crate::position::Position;
-use crate::types::{Bound, Move, Value, DEPTH_QS, DEPTH_UNSEARCHED, MAX_PLY};
+use crate::types::{Bound, DEPTH_QS, DEPTH_UNSEARCHED, MAX_PLY, Move, Value};
 
-use super::alpha_beta::{draw_jitter, to_corrected_static_eval, SearchContext, SearchState};
+use super::alpha_beta::{SearchContext, SearchState, draw_jitter, to_corrected_static_eval};
 use super::eval_helpers::correction_value;
 use super::movepicker::piece_value;
 use super::search_helpers::{
@@ -17,12 +17,11 @@ use super::search_helpers::{
 use super::stats::{inc_stat, inc_stat_by_depth};
 #[cfg(feature = "tt-trace")]
 use super::tt_sanity::{
-    helper_tt_write_enabled_for_depth, maybe_log_invalid_tt_data, maybe_trace_tt_cutoff,
-    maybe_trace_tt_probe, maybe_trace_tt_write, InvalidTtLog, TtCutoffTrace, TtProbeTrace,
-    TtWriteTrace,
+    InvalidTtLog, TtCutoffTrace, TtProbeTrace, TtWriteTrace, helper_tt_write_enabled_for_depth,
+    maybe_log_invalid_tt_data, maybe_trace_tt_cutoff, maybe_trace_tt_probe, maybe_trace_tt_write,
 };
 use super::tt_sanity::{is_valid_tt_eval, is_valid_tt_stored_value};
-use super::types::{draw_value, value_from_tt, value_to_tt, NodeType, OrderedMovesBuffer};
+use super::types::{NodeType, OrderedMovesBuffer, draw_value, value_from_tt, value_to_tt};
 use super::{LimitsType, MovePicker, TimeManagement};
 
 /// 静止探索

@@ -1,8 +1,8 @@
 // 1手詰め探索用のヘルパー関数
 
 use crate::bitboard::{
-    bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect, knight_effect,
-    lance_effect, pawn_effect, rook_effect, silver_effect, Bitboard, FILE_BB,
+    Bitboard, FILE_BB, bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect,
+    knight_effect, lance_effect, pawn_effect, rook_effect, silver_effect,
 };
 use crate::mate::tables::check_around_bb;
 use crate::position::Position;

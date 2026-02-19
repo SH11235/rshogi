@@ -28,10 +28,10 @@ mod l256;
 mod l512;
 mod l768;
 
-pub use l1024::HalfKPL1024;
 pub use l256::HalfKPL256;
 pub use l512::HalfKPL512;
 pub use l768::HalfKPL768;
+pub use l1024::HalfKPL1024;
 
 use crate::nnue::accumulator::DirtyPiece;
 use crate::nnue::network_halfkp::AccumulatorStackHalfKP;

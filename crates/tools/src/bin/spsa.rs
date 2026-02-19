@@ -2,7 +2,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use clap::Parser;
 use crossbeam_channel::unbounded;
@@ -11,10 +11,10 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use tools::selfplay::game::{run_game, GameConfig, MoveEvent};
+use tools::selfplay::game::{GameConfig, MoveEvent, run_game};
 use tools::selfplay::time_control::TimeControl;
 use tools::selfplay::{
-    load_start_positions, EngineConfig, EngineProcess, GameOutcome, ParsedPosition,
+    EngineConfig, EngineProcess, GameOutcome, ParsedPosition, load_start_positions,
 };
 
 const PARAM_NOT_USED_MARKER: &str = "[[NOT USED]]";
@@ -975,15 +975,15 @@ fn main() -> Result<()> {
     if cli.a_offset < 0.0 {
         bail!("--a-offset must be >= 0");
     }
-    if let Some(v) = cli.early_stop_avg_abs_update_threshold {
-        if v < 0.0 {
-            bail!("--early-stop-avg-abs-update-threshold must be >= 0");
-        }
+    if let Some(v) = cli.early_stop_avg_abs_update_threshold
+        && v < 0.0
+    {
+        bail!("--early-stop-avg-abs-update-threshold must be >= 0");
     }
-    if let Some(v) = cli.early_stop_grad_scale_variance_threshold {
-        if v < 0.0 {
-            bail!("--early-stop-grad-scale-variance-threshold must be >= 0");
-        }
+    if let Some(v) = cli.early_stop_grad_scale_variance_threshold
+        && v < 0.0
+    {
+        bail!("--early-stop-grad-scale-variance-threshold must be >= 0");
     }
     let early_stop_config = match (
         cli.early_stop_avg_abs_update_threshold,
