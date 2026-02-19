@@ -161,6 +161,8 @@ pub struct SearchRequest<'a> {
     pub engine_label: String,
     /// パス権利（先手, 後手）: Someの場合はpassrightsキーワードで送信
     pub pass_rights: Option<(u8, u8)>,
+    /// Some(n) の場合は `go depth n` を送信（byoyomiより優先）
+    pub go_depth: Option<u32>,
 }
 
 pub struct SearchOutcome {

@@ -3,11 +3,13 @@
 //! 自玉位置×駒配置（BonaPiece）の組み合わせで特徴量を表現する。
 //! YaneuraOu の HalfKP<Friend> に相当する。
 
-use super::{Feature, TriggerEvent, BOARD_PIECE_TYPES};
+use super::Feature;
+use super::TriggerEvent;
 use crate::nnue::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES};
-use crate::nnue::bona_piece::{bona_piece_from_base, halfkp_index, BonaPiece, FE_END, PIECE_BASE};
+use crate::nnue::bona_piece::{halfkp_index, BonaPiece, FE_END};
+use crate::nnue::piece_list::PieceNumber;
 use crate::position::Position;
-use crate::types::{Color, PieceType, Square};
+use crate::types::{Color, Square};
 
 /// HalfKP<Friend> 特徴量
 ///
@@ -27,16 +29,13 @@ impl Feature for HalfKP {
 
     /// アクティブな特徴量インデックスを追記
     ///
-    /// 盤上駒および手駒を HalfKP 特徴量に写像する。
-    /// bitboard 型別ループで高速化: piece_on() 呼び出しと match 分岐を削減。
+    /// PieceList を1回走査して全特徴量を生成する（玉除外）。
     #[inline]
     fn append_active_indices(
         pos: &Position,
         perspective: Color,
         active: &mut IndexList<MAX_ACTIVE_FEATURES>,
     ) {
-        // 玉のマスを取得（後手視点では反転）
-        // やねうら王と同様に、視点に応じたマス表現を使用
         let raw_king_sq = pos.king_square(perspective);
         let king_sq = if perspective == Color::Black {
             raw_king_sq
@@ -44,58 +43,24 @@ impl Feature for HalfKP {
             raw_king_sq.inverse()
         };
 
-        // 盤上の駒（駒種・色ごとにループ）
-        for color in [Color::Black, Color::White] {
-            let is_friend = (color == perspective) as usize;
+        // PieceList の 0..KING 番目を走査（玉除外）
+        let pieces = if perspective == Color::Black {
+            pos.piece_list().piece_list_fb()
+        } else {
+            pos.piece_list().piece_list_fw()
+        };
 
-            for &pt in &BOARD_PIECE_TYPES {
-                let base = PIECE_BASE[pt as usize][is_friend];
-                let bb = pos.pieces(color, pt);
-
-                for sq in bb.iter() {
-                    let sq_index = if perspective == Color::Black {
-                        sq.index()
-                    } else {
-                        sq.inverse().index()
-                    };
-                    let bp = bona_piece_from_base(sq_index, base);
-                    let index = halfkp_index(king_sq, bp);
-                    // 合法局面では溢れないため戻り値を無視
-                    let _ = active.push(index);
-                }
-            }
-        }
-
-        // 手駒の特徴量
-        // やねうら王では、手駒は「枚数分すべて」の特徴量を追加する
-        // 例: 歩を3枚持っている場合、1枚目・2枚目・3枚目の3つの特徴量を追加
-        for owner in [Color::Black, Color::White] {
-            for pt in [
-                PieceType::Pawn,
-                PieceType::Lance,
-                PieceType::Knight,
-                PieceType::Silver,
-                PieceType::Gold,
-                PieceType::Bishop,
-                PieceType::Rook,
-            ] {
-                let count = pos.hand(owner).count(pt) as u8;
-                // 手駒の枚数分、すべての特徴量を追加
-                for i in 1..=count {
-                    let bp = BonaPiece::from_hand_piece(perspective, owner, pt, i);
-                    if bp != BonaPiece::ZERO {
-                        let index = halfkp_index(king_sq, bp);
-                        // 合法局面では溢れないため戻り値を無視
-                        let _ = active.push(index);
-                    }
-                }
+        for bp in &pieces[..PieceNumber::KING as usize] {
+            if *bp != BonaPiece::ZERO {
+                let _ = active.push(halfkp_index(king_sq, *bp));
             }
         }
     }
 
     /// 変化した特徴量インデックスを追記
     ///
-    /// DirtyPieceから変化した特徴量を計算する。
+    /// DirtyPiece の ExtBonaPiece を直接使用する。
+    /// HalfKP では King の BonaPiece は FE_END 以上なので自動的にフィルタされる。
     #[inline]
     fn append_changed_indices(
         dirty_piece: &DirtyPiece,
@@ -104,60 +69,31 @@ impl Feature for HalfKP {
         removed: &mut IndexList<MAX_CHANGED_FEATURES>,
         added: &mut IndexList<MAX_CHANGED_FEATURES>,
     ) {
-        // 玉のマスを後手視点では反転（append_active_indicesと同様）
         let king_sq = if perspective == Color::Black {
             king_sq
         } else {
             king_sq.inverse()
         };
 
-        // 盤上駒の変化を処理
-        for dp in dirty_piece.pieces() {
-            // 盤上から消える側（old）
-            if dp.old_piece.is_some() {
-                if let Some(sq) = dp.old_sq {
-                    let bp = BonaPiece::from_piece_square(dp.old_piece, sq, perspective);
-                    if bp != BonaPiece::ZERO {
-                        // 合法局面では溢れないため戻り値を無視
-                        let _ = removed.push(halfkp_index(king_sq, bp));
-                    }
-                }
-            }
+        for i in 0..dirty_piece.dirty_num as usize {
+            let cp = &dirty_piece.changed_piece[i];
+            let old_bp = if perspective == Color::Black {
+                cp.old_piece.fb
+            } else {
+                cp.old_piece.fw
+            };
+            let new_bp = if perspective == Color::Black {
+                cp.new_piece.fb
+            } else {
+                cp.new_piece.fw
+            };
 
-            // 盤上に現れる側（new）
-            if dp.new_piece.is_some() {
-                if let Some(sq) = dp.new_sq {
-                    let bp = BonaPiece::from_piece_square(dp.new_piece, sq, perspective);
-                    if bp != BonaPiece::ZERO {
-                        // 合法局面では溢れないため戻り値を無視
-                        let _ = added.push(halfkp_index(king_sq, bp));
-                    }
-                }
+            // HalfKP: King の BonaPiece (>= FE_END) は除外
+            if old_bp != BonaPiece::ZERO && (old_bp.value() as usize) < FE_END {
+                let _ = removed.push(halfkp_index(king_sq, old_bp));
             }
-        }
-
-        // 手駒の変化を反映
-        // やねうら王では、手駒の変化は差分のみを処理する
-        // 例: 2枚→3枚: 3枚目を追加、3枚→2枚: 3枚目を削除
-        for hc in dirty_piece.hand_changes() {
-            if hc.old_count < hc.new_count {
-                // 増えた分を追加 (old_count+1 から new_count まで)
-                for i in (hc.old_count + 1)..=hc.new_count {
-                    let bp = BonaPiece::from_hand_piece(perspective, hc.owner, hc.piece_type, i);
-                    if bp != BonaPiece::ZERO {
-                        // 合法局面では溢れないため戻り値を無視
-                        let _ = added.push(halfkp_index(king_sq, bp));
-                    }
-                }
-            } else if hc.old_count > hc.new_count {
-                // 減った分を削除 (new_count+1 から old_count まで)
-                for i in (hc.new_count + 1)..=hc.old_count {
-                    let bp = BonaPiece::from_hand_piece(perspective, hc.owner, hc.piece_type, i);
-                    if bp != BonaPiece::ZERO {
-                        // 合法局面では溢れないため戻り値を無視
-                        let _ = removed.push(halfkp_index(king_sq, bp));
-                    }
-                }
+            if new_bp != BonaPiece::ZERO && (new_bp.value() as usize) < FE_END {
+                let _ = added.push(halfkp_index(king_sq, new_bp));
             }
         }
     }
@@ -166,9 +102,11 @@ impl Feature for HalfKP {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nnue::accumulator::{ChangedPiece, HandChange};
+    use crate::nnue::accumulator::{ChangedBonaPiece, DirtyPiece};
+    use crate::nnue::bona_piece::ExtBonaPiece;
+    use crate::nnue::piece_list::PieceNumber;
     use crate::position::Position;
-    use crate::types::{File, Piece, Rank};
+    use crate::types::{Color, File, Piece, PieceType, Rank, Square};
 
     #[test]
     fn test_halfkp_dimensions() {
@@ -253,14 +191,15 @@ mod tests {
         let sq_76 = Square::new(File::File7, Rank::Rank6);
         let king_sq = Square::new(File::File5, Rank::Rank9); // 5九
 
+        let old_bp = ExtBonaPiece::from_board(Piece::B_PAWN, sq_77);
+        let new_bp = ExtBonaPiece::from_board(Piece::B_PAWN, sq_76);
         let mut dirty_piece = DirtyPiece::new();
-        let _ = dirty_piece.push_piece(ChangedPiece {
-            color: Color::Black,
-            old_piece: Piece::B_PAWN,
-            old_sq: Some(sq_77),
-            new_piece: Piece::B_PAWN,
-            new_sq: Some(sq_76),
-        });
+        dirty_piece.dirty_num = 1;
+        dirty_piece.piece_no[0] = PieceNumber(0);
+        dirty_piece.changed_piece[0] = ChangedBonaPiece {
+            old_piece: old_bp,
+            new_piece: new_bp,
+        };
 
         let mut removed = IndexList::new();
         let mut added = IndexList::new();
@@ -292,24 +231,21 @@ mod tests {
         let king_sq = Square::new(File::File5, Rank::Rank9); // 5九
 
         let mut dirty_piece = DirtyPiece::new();
+        dirty_piece.dirty_num = 2;
 
-        // 動いた駒（先手の歩）
-        let _ = dirty_piece.push_piece(ChangedPiece {
-            color: Color::Black,
-            old_piece: Piece::B_PAWN,
-            old_sq: Some(sq_24),
-            new_piece: Piece::B_PAWN,
-            new_sq: Some(sq_23),
-        });
+        // [0]: 動いた駒（先手の歩: 2四→2三）
+        dirty_piece.piece_no[0] = PieceNumber(0);
+        dirty_piece.changed_piece[0] = ChangedBonaPiece {
+            old_piece: ExtBonaPiece::from_board(Piece::B_PAWN, sq_24),
+            new_piece: ExtBonaPiece::from_board(Piece::B_PAWN, sq_23),
+        };
 
-        // 取られた駒（後手の歩）- 盤上から消える
-        let _ = dirty_piece.push_piece(ChangedPiece {
-            color: Color::White,
-            old_piece: Piece::W_PAWN,
-            old_sq: Some(sq_23),
-            new_piece: Piece::NONE,
-            new_sq: None,
-        });
+        // [1]: 取られた駒（後手の歩: 盤上2三→先手の手駒へ）
+        dirty_piece.piece_no[1] = PieceNumber(1);
+        dirty_piece.changed_piece[1] = ChangedBonaPiece {
+            old_piece: ExtBonaPiece::from_board(Piece::W_PAWN, sq_23),
+            new_piece: ExtBonaPiece::from_hand(Color::Black, PieceType::Pawn, 1),
+        };
 
         let mut removed = IndexList::new();
         let mut added = IndexList::new();
@@ -322,26 +258,25 @@ mod tests {
             &mut added,
         );
 
-        // 2駒がremoved（元位置の歩 + 取られた歩）, 1駒がadded（新位置の歩）
+        // 新API: 各 changed_piece エントリが old/new ペアを持つ
+        // [0]: 移動駒 old(2四)→new(2三) → removed=1, added=1
+        // [1]: 捕獲駒 old(盤上2三)→new(手駒) → removed=1, added=1（手駒BonaPiece < FE_END）
         assert_eq!(removed.len(), 2);
-        assert_eq!(added.len(), 1);
+        assert_eq!(added.len(), 2);
     }
 
     #[test]
     fn test_append_changed_indices_drop() {
-        // 打ち込み: 手駒から盤上へ
+        // 打ち込み: 手駒から盤上へ（歩を5五に打つ、手駒は1枚持っていた）
         let king_sq = Square::new(File::File5, Rank::Rank9); // 5九
 
         let mut dirty_piece = DirtyPiece::new();
-
-        // 打った駒（盤上に現れる）
-        let _ = dirty_piece.push_piece(ChangedPiece {
-            color: Color::Black,
-            old_piece: Piece::NONE,
-            old_sq: None,
-            new_piece: Piece::B_PAWN,
-            new_sq: Some(Square::SQ_55),
-        });
+        dirty_piece.dirty_num = 1;
+        dirty_piece.piece_no[0] = PieceNumber(0);
+        dirty_piece.changed_piece[0] = ChangedBonaPiece {
+            old_piece: ExtBonaPiece::from_hand(Color::Black, PieceType::Pawn, 1),
+            new_piece: ExtBonaPiece::from_board(Piece::B_PAWN, Square::SQ_55),
+        };
 
         let mut removed = IndexList::new();
         let mut added = IndexList::new();
@@ -354,25 +289,24 @@ mod tests {
             &mut added,
         );
 
-        // 打ち込み: removed=0（盤上駒の変化なし）, added=1
-        assert_eq!(removed.len(), 0);
+        // 打ち込み: removed=1（手駒BonaPiece）, added=1（盤上BonaPiece）
+        assert_eq!(removed.len(), 1);
         assert_eq!(added.len(), 1);
     }
 
     #[test]
     fn test_append_changed_indices_hand_change() {
-        // 手駒変化: 取った駒が手駒になる
+        // 手駒変化: 歩を1枚取得（0→1）
+        // 新APIでは手駒変化もChangedBonaPieceで表現する
         let king_sq = Square::new(File::File5, Rank::Rank9); // 5九
 
         let mut dirty_piece = DirtyPiece::new();
-
-        // 手駒変化（歩を1枚取得: 0 → 1）
-        let _ = dirty_piece.push_hand_change(HandChange {
-            owner: Color::Black,
-            piece_type: PieceType::Pawn,
-            old_count: 0,
-            new_count: 1,
-        });
+        dirty_piece.dirty_num = 1;
+        dirty_piece.piece_no[0] = PieceNumber(0);
+        dirty_piece.changed_piece[0] = ChangedBonaPiece {
+            old_piece: ExtBonaPiece::ZERO, // 手駒0枚→ZEROとして表現
+            new_piece: ExtBonaPiece::from_hand(Color::Black, PieceType::Pawn, 1),
+        };
 
         let mut removed = IndexList::new();
         let mut added = IndexList::new();
@@ -385,24 +319,24 @@ mod tests {
             &mut added,
         );
 
-        // 手駒変化: removed=0（old_count=0）, added=1（new_count=1）
+        // 手駒変化: removed=0（old=ZERO→フィルタ）, added=1（new=手駒1枚目BonaPiece）
         assert_eq!(removed.len(), 0);
         assert_eq!(added.len(), 1);
     }
 
     #[test]
     fn test_append_changed_indices_hand_change_increment() {
-        // 手駒変化: 既存の手駒が増える（1 → 2）
+        // 手駒変化: 既存の手駒が増える（1→2）
+        // 新APIではold/new ExtBonaPieceペアとして表現
         let king_sq = Square::new(File::File5, Rank::Rank9); // 5九
 
         let mut dirty_piece = DirtyPiece::new();
-
-        let _ = dirty_piece.push_hand_change(HandChange {
-            owner: Color::Black,
-            piece_type: PieceType::Pawn,
-            old_count: 1,
-            new_count: 2,
-        });
+        dirty_piece.dirty_num = 1;
+        dirty_piece.piece_no[0] = PieceNumber(0);
+        dirty_piece.changed_piece[0] = ChangedBonaPiece {
+            old_piece: ExtBonaPiece::from_hand(Color::Black, PieceType::Pawn, 1),
+            new_piece: ExtBonaPiece::from_hand(Color::Black, PieceType::Pawn, 2),
+        };
 
         let mut removed = IndexList::new();
         let mut added = IndexList::new();
@@ -415,9 +349,8 @@ mod tests {
             &mut added,
         );
 
-        // 手駒が1→2に変化: removed=0（1枚目は有効なまま）, added=1（2枚目を追加）
-        // YaneuraOu形式では、2枚持っている場合は1枚目と2枚目の両方の特徴量が有効
-        assert_eq!(removed.len(), 0);
+        // 手駒が1→2: removed=1（1枚目のBonaPiece）, added=1（2枚目のBonaPiece）
+        assert_eq!(removed.len(), 1);
         assert_eq!(added.len(), 1);
     }
 

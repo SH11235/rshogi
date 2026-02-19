@@ -18,7 +18,7 @@ use super::time_manager::{
 };
 use super::{
     LimitsType, RootMove, SearchTuneParams, SearchWorker, Skill, SkillOptions, ThreadPool,
-    TimeManagement,
+    TimeManagement, DEFAULT_DRAW_VALUE_BLACK, DEFAULT_DRAW_VALUE_WHITE,
 };
 use crate::position::Position;
 use crate::tt::TranspositionTable;
@@ -65,7 +65,7 @@ impl SearchInfo {
                 };
                 format!("mate {signed_ply}")
             } else {
-                format!("cp {}", self.score.raw())
+                format!("cp {}", self.score.to_cp())
             };
 
         let mut s = format!(
@@ -234,21 +234,12 @@ pub struct Search {
 
     /// 引き分けまでの最大手数（YaneuraOu準拠のエンジンオプション）
     max_moves_to_draw: i32,
+    /// YaneuraOuオプション `DrawValueBlack`
+    draw_value_black: i32,
+    /// YaneuraOuオプション `DrawValueWhite`
+    draw_value_white: i32,
     /// SPSA向け探索係数
     search_tune_params: SearchTuneParams,
-}
-
-/// ワーカーから集約する軽量サマリ（並列探索を見据えて追加）
-struct WorkerSummary {
-    best_move_changes: f64,
-}
-
-impl From<&SearchWorker> for WorkerSummary {
-    fn from(w: &SearchWorker) -> Self {
-        Self {
-            best_move_changes: w.state.best_move_changes,
-        }
-    }
 }
 
 /// best_move_changes を集約する（並列探索対応のためのヘルパー）
@@ -641,34 +632,6 @@ impl Search {
         self.search_again_counter = 0;
     }
 
-    /// fallingEval / timeReduction / totBestMoveChanges を計算
-    ///
-    /// YaneuraOu準拠の式を簡略化して single thread で適用する。
-    fn compute_time_factors(
-        &self,
-        best_value: Value,
-        completed_depth: Depth,
-        tot_best_move_changes: f64,
-        thread_count: usize,
-    ) -> (f64, f64, f64, usize) {
-        // fallingEval
-        let prev_avg_raw = self.best_previous_average_score.unwrap_or(Value::INFINITE).raw();
-        let iter_val = self.iter_value[self.iter_idx];
-        let falling_eval = calculate_falling_eval(prev_avg_raw, iter_val.raw(), best_value.raw());
-
-        // timeReduction
-        let time_reduction = calculate_time_reduction(completed_depth, self.last_best_move_depth);
-
-        (falling_eval, time_reduction, tot_best_move_changes, thread_count)
-    }
-
-    /// 時間要因計算後の状態更新
-    fn update_time_factor_state(&mut self, best_value: Value, tot_best_move_changes: f64) {
-        self.iter_value[self.iter_idx] = best_value;
-        self.iter_idx = (self.iter_idx + 1) % self.iter_value.len();
-        self.tot_best_move_changes = tot_best_move_changes;
-    }
-
     /// 新しいSearchを作成
     ///
     /// # Arguments
@@ -719,6 +682,8 @@ impl Search {
             increase_depth_shared,
             search_again_counter: 0,
             max_moves_to_draw,
+            draw_value_black: DEFAULT_DRAW_VALUE_BLACK,
+            draw_value_white: DEFAULT_DRAW_VALUE_WHITE,
             search_tune_params,
         }
     }
@@ -834,6 +799,36 @@ impl Search {
         self.max_moves_to_draw
     }
 
+    /// YaneuraOuオプション `DrawValueBlack` を設定する。
+    ///
+    /// 有効範囲は `[-30000, 30000]`。
+    pub fn set_draw_value_black(&mut self, v: i32) {
+        self.draw_value_black = v.clamp(-30000, 30000);
+        if let Some(worker) = &mut self.worker {
+            worker.draw_value_black = self.draw_value_black;
+        }
+    }
+
+    /// 現在の `DrawValueBlack` を取得する。
+    pub fn draw_value_black(&self) -> i32 {
+        self.draw_value_black
+    }
+
+    /// YaneuraOuオプション `DrawValueWhite` を設定する。
+    ///
+    /// 有効範囲は `[-30000, 30000]`。
+    pub fn set_draw_value_white(&mut self, v: i32) {
+        self.draw_value_white = v.clamp(-30000, 30000);
+        if let Some(worker) = &mut self.worker {
+            worker.draw_value_white = self.draw_value_white;
+        }
+    }
+
+    /// 現在の `DrawValueWhite` を取得する。
+    pub fn draw_value_white(&self) -> i32 {
+        self.draw_value_white
+    }
+
     /// 探索スレッド数を設定
     pub fn set_num_threads(&mut self, num: usize) {
         // WASM builds without wasm-threads feature use single-threaded search only.
@@ -929,6 +924,8 @@ impl Search {
         let eval_hash_clone = Arc::clone(&self.eval_hash);
         let max_moves = self.max_moves_to_draw;
         let search_tune_params = self.search_tune_params;
+        let draw_value_black = self.draw_value_black;
+        let draw_value_white = self.draw_value_white;
         let worker = self.worker.get_or_insert_with(|| {
             SearchWorker::new(tt_clone, eval_hash_clone, max_moves, 0, search_tune_params)
         });
@@ -936,6 +933,8 @@ impl Search {
         // setoptionで変更された可能性があるため、最新値を反映
         worker.max_moves_to_draw = self.max_moves_to_draw;
         worker.search_tune_params = self.search_tune_params;
+        worker.draw_value_black = self.draw_value_black;
+        worker.draw_value_white = self.draw_value_white;
 
         // 探索状態のリセット（履歴はクリアしない、YaneuraOu準拠）
         worker.prepare_search();
@@ -966,6 +965,8 @@ impl Search {
                 helper_max_depth,
                 self.time_options,
                 self.max_moves_to_draw,
+                draw_value_black,
+                draw_value_white,
                 skill_enabled,
             );
         }
@@ -1158,184 +1159,328 @@ impl Search {
         // workerを一時的に取り出す（借用チェッカー対策）
         let mut worker = self.worker.take().expect("worker should be available");
 
-        // ルート手を初期化
-        worker.state.root_moves = super::RootMoves::from_legal_moves(pos, &limits.search_moves);
+        // MainThreadState を構築
+        let mut main_state = MainThreadState {
+            ponderhit_flag: &self.ponderhit_flag,
+            start_time: self.start_time.unwrap(),
+            tt: &self.tt,
+            thread_pool: &self.thread_pool,
+            increase_depth: self.increase_depth,
+            search_again_counter: self.search_again_counter,
+            best_previous_average_score: self.best_previous_average_score,
+            iter_value: self.iter_value,
+            iter_idx: self.iter_idx,
+            last_best_move: self.last_best_move,
+            last_best_move_depth: self.last_best_move_depth,
+            tot_best_move_changes: self.tot_best_move_changes,
+            increase_depth_shared: &self.increase_depth_shared,
+        };
 
-        if worker.state.root_moves.is_empty() {
-            worker.state.best_move = Move::NONE;
-            #[cfg(debug_assertions)]
+        let mut noop_progress = |_nodes: u64, _bmc: f64| {};
+        let result = iterative_deepening(
+            &mut worker,
+            pos,
+            limits,
+            time_manager,
+            max_depth,
+            skill_enabled,
+            &self.increase_depth_shared,
+            Some(&mut main_state),
+            &mut on_info,
+            &mut noop_progress,
+        );
+
+        // MainThreadState から書き戻し
+        self.increase_depth = main_state.increase_depth;
+        self.search_again_counter = main_state.search_again_counter;
+        self.iter_value = main_state.iter_value;
+        self.iter_idx = main_state.iter_idx;
+        self.last_best_move = main_state.last_best_move;
+        self.last_best_move_depth = main_state.last_best_move_depth;
+        self.tot_best_move_changes = main_state.tot_best_move_changes;
+
+        // workerを戻す
+        self.worker = Some(worker);
+
+        result
+    }
+}
+
+/// メインスレッド固有の可変状態（YO の SearchManager に対応）
+///
+/// `search_with_callback` 呼び出し前に `Search` のフィールドから構築し、
+/// 戻った後に書き戻す。
+struct MainThreadState<'a> {
+    ponderhit_flag: &'a AtomicBool,
+    start_time: Instant,
+    tt: &'a TranspositionTable,
+    thread_pool: &'a ThreadPool,
+    // owned (書き戻し対象)
+    increase_depth: bool,
+    search_again_counter: i32,
+    best_previous_average_score: Option<Value>,
+    iter_value: [Value; 4],
+    iter_idx: usize,
+    last_best_move: Move,
+    last_best_move_depth: Depth,
+    tot_best_move_changes: f64,
+    increase_depth_shared: &'a AtomicBool,
+}
+
+impl MainThreadState<'_> {
+    fn compute_time_factors(
+        &self,
+        best_value: Value,
+        completed_depth: Depth,
+        tot_best_move_changes: f64,
+        thread_count: usize,
+    ) -> (f64, f64, f64, usize) {
+        let prev_avg_raw = self.best_previous_average_score.unwrap_or(Value::INFINITE).raw();
+        let iter_val = self.iter_value[self.iter_idx];
+        let falling_eval = calculate_falling_eval(prev_avg_raw, iter_val.raw(), best_value.raw());
+        let time_reduction = calculate_time_reduction(completed_depth, self.last_best_move_depth);
+        (falling_eval, time_reduction, tot_best_move_changes, thread_count)
+    }
+
+    fn update_time_factor_state(&mut self, best_value: Value, tot_best_move_changes: f64) {
+        self.iter_value[self.iter_idx] = best_value;
+        self.iter_idx = (self.iter_idx + 1) % self.iter_value.len();
+        self.tot_best_move_changes = tot_best_move_changes;
+    }
+}
+
+/// YaneuraOu の iterative_deepening() に対応する統合反復深化ループ。
+///
+/// メインスレッドでは `main_state = Some(...)` で呼び出し、
+/// ヘルパースレッドでは `main_state = None` で呼び出す。
+/// YO の `if (mainThread)` パターンを `if let Some(ref mut ms) = main_state` で表現。
+fn iterative_deepening<FInfo, FProgress>(
+    worker: &mut SearchWorker,
+    pos: &mut Position,
+    limits: &LimitsType,
+    time_manager: &mut TimeManagement,
+    max_depth: Depth,
+    skill_enabled: bool,
+    increase_depth_shared: &AtomicBool,
+    mut main_state: Option<&mut MainThreadState>,
+    on_info: &mut FInfo,
+    on_progress: &mut FProgress,
+) -> usize
+where
+    FInfo: FnMut(&SearchInfo),
+    FProgress: FnMut(u64, f64),
+{
+    let is_main = main_state.is_some();
+
+    // ルート手を初期化
+    worker.state.root_moves = super::RootMoves::from_legal_moves(pos, &limits.search_moves);
+
+    if worker.state.root_moves.is_empty() {
+        worker.state.best_move = Move::NONE;
+        #[cfg(debug_assertions)]
+        if is_main {
             eprintln!(
-                "search_with_callback: root_moves is empty (search_moves_len={}, side_to_move={:?})",
+                "iterative_deepening: root_moves is empty (search_moves_len={}, side_to_move={:?})",
                 limits.search_moves.len(),
                 pos.side_to_move()
             );
-            self.worker = Some(worker);
-            return 0;
         }
+        return 0;
+    }
 
-        #[cfg(debug_assertions)]
+    #[cfg(debug_assertions)]
+    if is_main {
         eprintln!(
-            "search_with_callback: root_moves_len={} first_move={}",
+            "iterative_deepening: root_moves_len={} first_move={}",
             worker.state.root_moves.len(),
             worker.state.root_moves.get(0).map(|rm| rm.mv().to_usi()).unwrap_or_default()
         );
+    }
 
-        // 合法手が1つの場合は500ms上限を適用（YaneuraOu準拠）
-        if worker.state.root_moves.len() == 1 {
-            time_manager.apply_single_move_limit();
+    // 合法手が1つの場合は500ms上限を適用（YaneuraOu準拠）
+    if worker.state.root_moves.len() == 1 {
+        time_manager.apply_single_move_limit();
+    }
+
+    let mut effective_multi_pv = limits.multi_pv;
+    if skill_enabled {
+        effective_multi_pv = effective_multi_pv.max(4);
+    }
+    effective_multi_pv = effective_multi_pv.min(worker.state.root_moves.len());
+
+    // 中断時にPVを巻き戻すための保持
+    let mut last_best_pv = vec![Move::NONE];
+    let mut last_best_score = Value::new(-Value::INFINITE.raw());
+    let mut last_best_move_depth = 0;
+
+    // ヘルパー用のローカル search_again_counter
+    let mut local_search_again_counter: i32 = 0;
+
+    // 反復深化ループ (yaneuraou-search.cpp:1266)
+    for depth in 1..=max_depth {
+        if worker.state.abort {
+            break;
         }
 
-        let start = self.start_time.unwrap();
-        let mut effective_multi_pv = limits.multi_pv;
-        if skill_enabled {
-            effective_multi_pv = effective_multi_pv.max(4);
+        // search_again_counter 更新 (yaneuraou-search.cpp:1315-1319)
+        if depth > 1 {
+            let inc_depth = if let Some(ref ms) = main_state {
+                ms.increase_depth
+            } else {
+                increase_depth_shared.load(Ordering::Relaxed)
+            };
+            if !inc_depth {
+                if let Some(ref mut ms) = main_state {
+                    ms.search_again_counter += 1;
+                } else {
+                    local_search_again_counter += 1;
+                }
+            }
         }
-        effective_multi_pv = effective_multi_pv.min(worker.state.root_moves.len());
 
-        // 中断時にPVを巻き戻すための保持
-        let mut last_best_pv = vec![Move::NONE];
-        let mut last_best_score = Value::new(-Value::INFINITE.raw());
-        let mut last_best_move_depth = 0;
-
-        // 反復深化
-        for depth in 1..=max_depth {
-            #[cfg(debug_assertions)]
-            if depth <= 2 {
-                eprintln!(
-                    "search_with_callback: depth={} nodes={} search_end={} max_time={} stop_requested={}",
-                    depth,
-                    worker.state.nodes,
-                    time_manager.search_end(),
-                    time_manager.maximum(),
-                    time_manager.stop_requested()
-                );
-            }
-            // 前回のiterationで深さを伸ばせなかった場合のカウンター（YO準拠）
-            if depth > 1 && !self.increase_depth {
-                self.search_again_counter += 1;
-            }
-
-            if worker.state.abort {
-                break;
-            }
-
-            // ponderhitを検出した場合、時間再計算のみ行い探索は継続
-            if self.ponderhit_flag.swap(false, Ordering::Relaxed) {
+        // メインのみ: ponderhit検出、should_stop チェック
+        if let Some(ref ms) = main_state {
+            if ms.ponderhit_flag.swap(false, Ordering::Relaxed) {
                 time_manager.on_ponderhit();
             }
-
-            // YaneuraOu準拠: depth 2以降は、次の深さを探索する時間があるかチェック
-            // depth 1は必ず探索する（合法手が1つもない場合のresignを防ぐため）
             let is_pondering = time_manager.is_pondering();
             if depth > 1 && !is_pondering && time_manager.should_stop(depth) {
                 break;
             }
+        }
 
-            // YaneuraOu準拠: 詰みを読みきった場合の早期終了
-            // 詰みまでの手数の2.5倍以上の深さを探索したら終了
-            // MultiPV=1の時のみ適用（MultiPV>1では全候補を探索する必要がある）
-            if effective_multi_pv == 1 && depth > 1 && !worker.state.root_moves.is_empty() {
-                let best_value = worker.state.root_moves[0].score;
+        #[cfg(debug_assertions)]
+        if is_main && depth <= 2 {
+            eprintln!(
+                "iterative_deepening: depth={} nodes={} search_end={} max_time={} stop_requested={}",
+                depth,
+                worker.state.nodes,
+                time_manager.search_end(),
+                time_manager.maximum(),
+                time_manager.stop_requested()
+            );
+        }
 
-                if limits.mate == 0 {
-                    if proven_mate_depth_exceeded(best_value, depth) {
-                        break;
-                    }
-                } else if mate_within_limit(
-                    best_value,
-                    worker.state.root_moves[0].score_lower_bound,
-                    worker.state.root_moves[0].score_upper_bound,
-                    limits.mate,
-                ) {
-                    time_manager.request_stop();
+        // YaneuraOu準拠: 詰みを読みきった場合の早期終了 (yaneuraou-search.cpp:1618-1626)
+        if effective_multi_pv == 1 && depth > 1 && !worker.state.root_moves.is_empty() {
+            let best_value = worker.state.root_moves[0].score;
+
+            if limits.mate == 0 {
+                if proven_mate_depth_exceeded(best_value, depth) {
                     break;
                 }
+            } else if mate_within_limit(
+                best_value,
+                worker.state.root_moves[0].score_lower_bound,
+                worker.state.root_moves[0].score_upper_bound,
+                limits.mate,
+            ) {
+                // メインのみ request_stop (yaneuraou-search.cpp:1650)
+                if is_main {
+                    time_manager.request_stop();
+                }
+                break;
+            }
+        }
+
+        // メインのみ: if (!mainThread) continue; に対応する部分はループ末尾で処理
+
+        let search_depth = depth;
+        worker.state.root_depth = search_depth;
+        worker.state.sel_depth = 0;
+
+        let search_again_counter = if let Some(ref ms) = main_state {
+            ms.search_again_counter
+        } else {
+            local_search_again_counter
+        };
+
+        // MultiPVループ（YaneuraOu準拠: yaneuraou-search.cpp:1323）
+        let mut processed_pv = 0;
+        for pv_idx in 0..effective_multi_pv {
+            if worker.state.abort {
+                break;
             }
 
-            let search_depth = depth;
+            // Aspiration Window（average/mean_squaredベース）
+            let (mut alpha, mut beta, mut delta) =
+                compute_aspiration_window(&worker.state.root_moves[pv_idx], worker.thread_id);
+            let mut failed_high_cnt = 0;
 
-            worker.state.root_depth = search_depth;
-            worker.state.sel_depth = 0;
+            // Aspiration Windowループ (yaneuraou-search.cpp:1415)
+            loop {
+                let adjusted_depth =
+                    (search_depth - failed_high_cnt - (3 * (search_again_counter + 1) / 4)).max(1);
 
-            // MultiPVループ（YaneuraOu準拠）
-            let mut processed_pv = 0;
-            for pv_idx in 0..effective_multi_pv {
+                let score = if pv_idx == 0 {
+                    worker.search_root(pos, adjusted_depth, alpha, beta, limits, time_manager)
+                } else {
+                    worker.search_root_for_pv(
+                        pos,
+                        search_depth,
+                        alpha,
+                        beta,
+                        pv_idx,
+                        limits,
+                        time_manager,
+                    )
+                };
+
+                // aspiration loop 内ソート (yaneuraou-search.cpp:1451)
+                worker.state.root_moves.stable_sort_range(pv_idx, worker.state.root_moves.len());
+
                 if worker.state.abort {
                     break;
                 }
 
-                // Aspiration Window（average/mean_squaredベース）
-                let (mut alpha, mut beta, mut delta) =
-                    compute_aspiration_window(&worker.state.root_moves[pv_idx], worker.thread_id);
-                let mut failed_high_cnt = 0;
-
-                // Aspiration Windowループ
-                loop {
-                    let adjusted_depth = (search_depth
-                        - failed_high_cnt
-                        - (3 * (self.search_again_counter + 1) / 4))
-                        .max(1);
-                    // pv_idx=0の場合は従来のsearch_rootを使用（後方互換性）
-                    // pv_idx>0の場合のみsearch_root_for_pvを使用
-                    let score = if pv_idx == 0 {
-                        worker.search_root(pos, adjusted_depth, alpha, beta, limits, time_manager)
-                    } else {
-                        worker.search_root_for_pv(
-                            pos,
-                            search_depth,
-                            alpha,
-                            beta,
-                            pv_idx,
-                            limits,
-                            time_manager,
-                        )
-                    };
-
-                    if worker.state.abort {
-                        break;
-                    }
-
-                    // Window調整
-                    if score <= alpha {
-                        beta = alpha;
-                        alpha = Value::new(
-                            score.raw().saturating_sub(delta.raw()).max(-Value::INFINITE.raw()),
-                        );
-                        failed_high_cnt = 0;
+                // Window調整 (yaneuraou-search.cpp:1510-1526)
+                if score <= alpha {
+                    beta = alpha;
+                    alpha = Value::new(
+                        score.raw().saturating_sub(delta.raw()).max(-Value::INFINITE.raw()),
+                    );
+                    failed_high_cnt = 0;
+                    // メインのみ (yaneuraou-search.cpp:1517)
+                    if is_main {
                         time_manager.reset_stop_on_ponderhit();
-                    } else if score >= beta {
-                        alpha = Value::new((beta.raw() - delta.raw()).max(alpha.raw()));
-                        beta = Value::new(
-                            score.raw().saturating_add(delta.raw()).min(Value::INFINITE.raw()),
-                        );
-                        failed_high_cnt += 1;
-                    } else {
-                        break;
                     }
-
-                    delta = Value::new(delta.raw().saturating_add(delta.raw() / 3));
+                } else if score >= beta {
+                    alpha = Value::new((beta.raw() - delta.raw()).max(alpha.raw()));
+                    beta = Value::new(
+                        score.raw().saturating_add(delta.raw()).min(Value::INFINITE.raw()),
+                    );
+                    failed_high_cnt += 1;
+                } else {
+                    break;
                 }
 
-                // 安定ソート [pv_idx..]
-                worker.state.root_moves.stable_sort_range(pv_idx, worker.state.root_moves.len());
-                // 📝 YaneuraOu行1477-1483: 探索済みのPVライン全体も安定ソートして順位を保つ
-                worker.state.root_moves.stable_sort_range(0, pv_idx + 1);
-                processed_pv = pv_idx + 1;
+                // delta 更新 (yaneuraou-search.cpp:1528)
+                delta = Value::new(
+                    delta.raw().saturating_add(delta.raw() / 3).min(Value::INFINITE.raw()),
+                );
             }
 
-            // 🆕 MultiPVループ完了後の最終ソート（YaneuraOu行1499）
-            if !worker.state.abort && effective_multi_pv > 1 {
-                worker.state.root_moves.stable_sort_range(0, effective_multi_pv);
-            }
+            // 安定ソート [pv_idx..] (yaneuraou-search.cpp:1462)
+            worker.state.root_moves.stable_sort_range(pv_idx, worker.state.root_moves.len());
+            // 📝 YaneuraOu行1539: 探索済みのPVライン全体も安定ソートして順位を保つ
+            worker.state.root_moves.stable_sort_range(0, pv_idx + 1);
+            processed_pv = pv_idx + 1;
+        }
 
-            // info出力は深さごとにまとめて行う（GUI詰まり防止のYO仕様）
+        // MultiPVループ完了後の最終ソート（YaneuraOu行1499）
+        if !worker.state.abort && effective_multi_pv > 1 {
+            worker.state.root_moves.stable_sort_range(0, effective_multi_pv);
+        }
+
+        // メインのみ: info出力（GUI詰まり防止のYO仕様）
+        if let Some(ref ms) = main_state {
             if processed_pv > 0 {
-                let elapsed = start.elapsed();
+                let elapsed = ms.start_time.elapsed();
                 let time_ms = elapsed.as_millis() as u64;
 
                 // Native: Use helper_threads() to get node counts
                 #[cfg(not(target_arch = "wasm32"))]
-                let helper_nodes = self
+                let helper_nodes = ms
                     .thread_pool
                     .helper_threads()
                     .iter()
@@ -1343,7 +1488,7 @@ impl Search {
 
                 // Wasm with wasm-threads: Use helper_nodes() for realtime node counts
                 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
-                let helper_nodes = self.thread_pool.helper_nodes();
+                let helper_nodes = ms.thread_pool.helper_nodes();
 
                 // Wasm without wasm-threads: No helper threads
                 #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
@@ -1364,33 +1509,37 @@ impl Search {
                         nodes: total_nodes,
                         time_ms,
                         nps,
-                        hashfull: self.tt.hashfull(3) as u32,
+                        hashfull: ms.tt.hashfull(3) as u32,
                         pv: worker.state.root_moves[pv_idx].pv.clone(),
                         multi_pv: pv_idx + 1, // 1-indexed
                     };
-
                     on_info(&info);
                 }
             }
+        }
 
-            // Depth完了後の処理
-            if !worker.state.abort {
-                worker.state.completed_depth = search_depth;
-                worker.state.best_move = worker.state.root_moves[0].mv();
-                if worker.state.best_move != self.last_best_move {
-                    self.last_best_move = worker.state.best_move;
-                    self.last_best_move_depth = depth;
-                }
+        // Depth完了後の処理
+        if !worker.state.abort {
+            worker.state.completed_depth = search_depth;
+            worker.state.best_move = worker.state.root_moves[0].mv();
 
-                // 🆕 YaneuraOu準拠: previous_scoreを次のiterationのためにシード
-                // （YaneuraOu行1267-1270: rm.previousScore = rm.score）
-                for rm in worker.state.root_moves.iter_mut() {
-                    rm.previous_score = rm.score;
+            // YaneuraOu準拠: previous_scoreを次のiterationのためにシード
+            // （YaneuraOu行1304-1305: rm.previousScore = rm.score）
+            for rm in worker.state.root_moves.iter_mut() {
+                rm.previous_score = rm.score;
+            }
+
+            let best_move_changes = worker.state.best_move_changes;
+            worker.state.best_move_changes = 0.0;
+
+            if let Some(ref mut ms) = main_state {
+                // メインのみ: last_best_move 更新
+                if worker.state.best_move != ms.last_best_move {
+                    ms.last_best_move = worker.state.best_move;
+                    ms.last_best_move_depth = depth;
                 }
 
                 // 評価変動・timeReduction・最善手不安定性をまとめて適用（YaneuraOu準拠）
-                // 借用チェッカー対策: workerから必要な値をすべてローカルにコピー
-                let summary = WorkerSummary::from(&*worker);
                 let best_value = if worker.state.root_moves.is_empty() {
                     Value::ZERO
                 } else {
@@ -1404,13 +1553,11 @@ impl Search {
                 };
                 let nodes = worker.state.nodes;
                 let root_moves_len = worker.state.root_moves.len();
-                let best_move_changes = summary.best_move_changes;
-                worker.state.best_move_changes = 0.0; // 先にリセット
 
                 // Native: Use helper_threads() to collect best_move_changes
                 #[cfg(not(target_arch = "wasm32"))]
                 let (changes_sum, thread_count) = {
-                    let helper_threads = self.thread_pool.helper_threads();
+                    let helper_threads = ms.thread_pool.helper_threads();
                     let mut changes = Vec::with_capacity(helper_threads.len() + 1);
                     changes.push(best_move_changes);
                     for thread in helper_threads {
@@ -1422,7 +1569,7 @@ impl Search {
                 // Wasm with wasm-threads: Use helper_best_move_changes() for realtime values
                 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
                 let (changes_sum, thread_count) = {
-                    let helper_changes = self.thread_pool.helper_best_move_changes();
+                    let helper_changes = ms.thread_pool.helper_best_move_changes();
                     let mut changes = Vec::with_capacity(helper_changes.len() + 1);
                     changes.push(best_move_changes);
                     changes.extend(helper_changes);
@@ -1432,12 +1579,15 @@ impl Search {
                 // Wasm without wasm-threads: Only main thread
                 #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
                 let (changes_sum, thread_count) = (best_move_changes, 1);
-                let tot_best_move_changes = self.tot_best_move_changes / 2.0 + changes_sum;
+
+                // YO準拠: totBestMoveChanges /= 2 (yaneuraou-search.cpp:1294)
+                let tot_best_move_changes = ms.tot_best_move_changes / 2.0 + changes_sum;
+
                 if limits.use_time_management()
                     && !time_manager.stop_on_ponderhit()
                     && time_manager.search_end() == 0
                 {
-                    let (falling_eval, time_reduction, tot_changes, threads) = self
+                    let (falling_eval, time_reduction, tot_changes, threads) = ms
                         .compute_time_factors(
                             best_value,
                             completed_depth,
@@ -1451,10 +1601,8 @@ impl Search {
                         threads,
                     );
 
-                    // 実測 effort を正規化
                     let nodes_effort = normalize_nodes_effort(effort, nodes);
 
-                    // 合法手が1つの場合は使う時間そのものを500msに丸める（YaneuraOu準拠）
                     let total_time = if root_moves_len == 1 {
                         total_time.min(500.0)
                     } else {
@@ -1469,76 +1617,72 @@ impl Search {
                     );
 
                     // YaneuraOu準拠: 次iterationで深さを伸ばすかの判定
-                    self.increase_depth =
-                        time_manager.is_pondering() || elapsed_time <= total_time * 0.5138;
-                    // helperスレッドと共有（YaneuraOu準拠: main_manager()->increaseDepth）
-                    self.increase_depth_shared.store(self.increase_depth, Ordering::Relaxed);
+                    ms.increase_depth =
+                        time_manager.is_pondering() || elapsed_time <= total_time * 0.503;
+                    ms.increase_depth_shared.store(ms.increase_depth, Ordering::Relaxed);
 
-                    // 状態更新
-                    self.update_time_factor_state(best_value, tot_best_move_changes);
+                    ms.update_time_factor_state(best_value, tot_best_move_changes);
                 }
-                // tot_best_move_changes は decay 後の値を保持（時間管理を使わない場合も持ち回る）
-                self.tot_best_move_changes = tot_best_move_changes;
+                ms.tot_best_move_changes = tot_best_move_changes;
+            } else {
+                // ヘルパー: progress コールバック
+                on_progress(worker.state.nodes, best_move_changes);
+            }
 
-                // PVが変わったときのみ last_best_* を更新（YO準拠）
-                if !worker.state.root_moves[0].pv.is_empty()
-                    && worker.state.root_moves[0].pv[0] != last_best_pv[0]
-                {
-                    last_best_pv = worker.state.root_moves[0].pv.clone();
-                    last_best_score = worker.state.root_moves[0].score;
-                    last_best_move_depth = depth;
-                }
+            // PVが変わったときのみ last_best_* を更新（YO準拠）
+            if !worker.state.root_moves[0].pv.is_empty()
+                && worker.state.root_moves[0].pv[0] != last_best_pv[0]
+            {
+                last_best_pv = worker.state.root_moves[0].pv.clone();
+                last_best_score = worker.state.root_moves[0].score;
+                last_best_move_depth = depth;
+            }
 
-                // YaneuraOu準拠: 詰みスコアが見つかっていたら早期終了
-                // MultiPV=1の時のみ適用
-                if effective_multi_pv == 1 && depth > 1 && !worker.state.root_moves.is_empty() {
-                    let best_value = worker.state.root_moves[0].score;
+            // YaneuraOu準拠: 詰みスコアが見つかっていたら早期終了 (yaneuraou-search.cpp:1618-1626)
+            if effective_multi_pv == 1 && depth > 1 && !worker.state.root_moves.is_empty() {
+                let best_value = worker.state.root_moves[0].score;
 
-                    if limits.mate == 0 {
-                        if proven_mate_depth_exceeded(best_value, depth) {
-                            break;
-                        }
-                    } else if mate_within_limit(
-                        best_value,
-                        worker.state.root_moves[0].score_lower_bound,
-                        worker.state.root_moves[0].score_upper_bound,
-                        limits.mate,
-                    ) {
-                        time_manager.request_stop();
+                if limits.mate == 0 {
+                    if proven_mate_depth_exceeded(best_value, depth) {
                         break;
                     }
+                } else if mate_within_limit(
+                    best_value,
+                    worker.state.root_moves[0].score_lower_bound,
+                    worker.state.root_moves[0].score_upper_bound,
+                    limits.mate,
+                ) {
+                    if is_main {
+                        time_manager.request_stop();
+                    }
+                    break;
                 }
             }
         }
-
-        // 中断した探索で信頼できないPVになった場合のフォールバック（YO準拠）
-        if worker.state.abort
-            && !worker.state.root_moves.is_empty()
-            && worker.state.root_moves[0].score.is_loss()
-        {
-            let head = last_best_pv.first().copied().unwrap_or(Move::NONE);
-            if head != Move::NONE {
-                if let Some(idx) = worker.state.root_moves.find(head) {
-                    worker.state.root_moves.move_to_front(idx);
-                    worker.state.root_moves[0].pv = last_best_pv;
-                    worker.state.root_moves[0].score = last_best_score;
-                    worker.state.completed_depth = last_best_move_depth;
-                }
-            }
-        }
-
-        // workerを戻す
-        self.worker = Some(worker);
-
-        effective_multi_pv
     }
+
+    // 中断した探索で信頼できないPVになった場合のフォールバック（YO準拠）
+    if worker.state.abort
+        && !worker.state.root_moves.is_empty()
+        && worker.state.root_moves[0].score.is_loss()
+    {
+        let head = last_best_pv.first().copied().unwrap_or(Move::NONE);
+        if head != Move::NONE {
+            if let Some(idx) = worker.state.root_moves.find(head) {
+                worker.state.root_moves.move_to_front(idx);
+                worker.state.root_moves[0].pv = last_best_pv;
+                worker.state.root_moves[0].score = last_best_score;
+                worker.state.completed_depth = last_best_move_depth;
+            }
+        }
+    }
+
+    effective_multi_pv
 }
 
-// search_helper_impl is the core search logic used by helper threads.
-// Progress callbacks are passed as closures to allow platform-specific progress tracking.
+// search_helper_impl is a thin wrapper that calls iterative_deepening with main_state=None.
 // Only compiled for Native and Wasm with wasm-threads (single-threaded Wasm doesn't use helper threads).
 #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
-#[inline(always)]
 fn search_helper_impl<F1, F2>(
     worker: &mut SearchWorker,
     pos: &mut Position,
@@ -1559,178 +1703,19 @@ where
 
     on_start();
 
-    worker.state.root_moves = super::RootMoves::from_legal_moves(pos, &limits.search_moves);
-
-    if worker.state.root_moves.is_empty() {
-        worker.state.best_move = Move::NONE;
-        return 0;
-    }
-
-    // 合法手が1つの場合は500ms上限を適用（YaneuraOu準拠）
-    if worker.state.root_moves.len() == 1 {
-        time_manager.apply_single_move_limit();
-    }
-
-    let mut effective_multi_pv = limits.multi_pv;
-    if skill_enabled {
-        effective_multi_pv = effective_multi_pv.max(4);
-    }
-    effective_multi_pv = effective_multi_pv.min(worker.state.root_moves.len());
-
-    let mut last_best_pv = vec![Move::NONE];
-    let mut last_best_score = Value::new(-Value::INFINITE.raw());
-    let mut last_best_move_depth = 0;
-
-    // YaneuraOu準拠: helperもmainのincreaseDepthを参照してsearchAgainCounterを更新
-    let mut search_again_counter = 0;
-
-    for depth in 1..=max_depth {
-        if worker.state.abort {
-            break;
-        }
-
-        // YaneuraOu準拠: main_manager()->increaseDepthがfalseならカウンタ増加
-        // (yaneuraou-search.cpp:1319-1321)
-        if depth > 1 && !increase_depth_shared.load(Ordering::Relaxed) {
-            search_again_counter += 1;
-        }
-
-        if effective_multi_pv == 1 && depth > 1 && !worker.state.root_moves.is_empty() {
-            let best_value = worker.state.root_moves[0].score;
-
-            if limits.mate == 0 {
-                if proven_mate_depth_exceeded(best_value, depth) {
-                    break;
-                }
-            } else if mate_within_limit(
-                best_value,
-                worker.state.root_moves[0].score_lower_bound,
-                worker.state.root_moves[0].score_upper_bound,
-                limits.mate,
-            ) {
-                break;
-            }
-        }
-
-        let search_depth = depth;
-
-        worker.state.root_depth = search_depth;
-        worker.state.sel_depth = 0;
-
-        for pv_idx in 0..effective_multi_pv {
-            if worker.state.abort {
-                break;
-            }
-
-            let (mut alpha, mut beta, mut delta) =
-                compute_aspiration_window(&worker.state.root_moves[pv_idx], worker.thread_id);
-            let mut failed_high_cnt = 0;
-
-            loop {
-                let adjusted_depth =
-                    (search_depth - failed_high_cnt - (3 * (search_again_counter + 1) / 4)).max(1);
-                let score = if pv_idx == 0 {
-                    worker.search_root(pos, adjusted_depth, alpha, beta, limits, time_manager)
-                } else {
-                    worker.search_root_for_pv(
-                        pos,
-                        search_depth,
-                        alpha,
-                        beta,
-                        pv_idx,
-                        limits,
-                        time_manager,
-                    )
-                };
-
-                if worker.state.abort {
-                    break;
-                }
-
-                if score <= alpha {
-                    beta = alpha;
-                    alpha = Value::new(
-                        score.raw().saturating_sub(delta.raw()).max(-Value::INFINITE.raw()),
-                    );
-                    failed_high_cnt = 0;
-                } else if score >= beta {
-                    alpha = Value::new((beta.raw() - delta.raw()).max(alpha.raw()));
-                    beta = Value::new(
-                        score.raw().saturating_add(delta.raw()).min(Value::INFINITE.raw()),
-                    );
-                    failed_high_cnt += 1;
-                } else {
-                    break;
-                }
-
-                delta = Value::new(
-                    delta.raw().saturating_add(delta.raw() / 3).min(Value::INFINITE.raw()),
-                );
-            }
-
-            worker.state.root_moves.stable_sort_range(pv_idx, worker.state.root_moves.len());
-            worker.state.root_moves.stable_sort_range(0, pv_idx + 1);
-        }
-
-        if !worker.state.abort && effective_multi_pv > 1 {
-            worker.state.root_moves.stable_sort_range(0, effective_multi_pv);
-        }
-
-        if !worker.state.abort {
-            worker.state.completed_depth = search_depth;
-            worker.state.best_move = worker.state.root_moves[0].mv();
-
-            for rm in worker.state.root_moves.iter_mut() {
-                rm.previous_score = rm.score;
-            }
-
-            let best_move_changes = worker.state.best_move_changes;
-            worker.state.best_move_changes = 0.0;
-            on_depth_complete(worker.state.nodes, best_move_changes);
-
-            if !worker.state.root_moves[0].pv.is_empty()
-                && worker.state.root_moves[0].pv[0] != last_best_pv[0]
-            {
-                last_best_pv = worker.state.root_moves[0].pv.clone();
-                last_best_score = worker.state.root_moves[0].score;
-                last_best_move_depth = search_depth;
-            }
-
-            if effective_multi_pv == 1 && depth > 1 && !worker.state.root_moves.is_empty() {
-                let best_value = worker.state.root_moves[0].score;
-
-                if limits.mate == 0 {
-                    if proven_mate_depth_exceeded(best_value, depth) {
-                        break;
-                    }
-                } else if mate_within_limit(
-                    best_value,
-                    worker.state.root_moves[0].score_lower_bound,
-                    worker.state.root_moves[0].score_upper_bound,
-                    limits.mate,
-                ) {
-                    break;
-                }
-            }
-        }
-    }
-
-    if worker.state.abort
-        && !worker.state.root_moves.is_empty()
-        && worker.state.root_moves[0].score.is_loss()
-    {
-        let head = last_best_pv.first().copied().unwrap_or(Move::NONE);
-        if head != Move::NONE {
-            if let Some(idx) = worker.state.root_moves.find(head) {
-                worker.state.root_moves.move_to_front(idx);
-                worker.state.root_moves[0].pv = last_best_pv;
-                worker.state.root_moves[0].score = last_best_score;
-                worker.state.completed_depth = last_best_move_depth;
-            }
-        }
-    }
-
-    effective_multi_pv
+    let mut noop_info = |_info: &SearchInfo| {};
+    iterative_deepening(
+        worker,
+        pos,
+        limits,
+        time_manager,
+        max_depth,
+        skill_enabled,
+        increase_depth_shared,
+        None,
+        &mut noop_info,
+        &mut on_depth_complete,
+    )
 }
 
 // Native version: takes progress parameter for tracking helper thread statistics.
@@ -1982,34 +1967,6 @@ mod tests {
     }
 
     #[test]
-    fn test_worker_summary_from_worker() {
-        // SearchWorker はスタックを大きく消費するため、別スレッドで実行する。
-        std::thread::Builder::new()
-            .stack_size(STACK_SIZE)
-            .spawn(|| {
-                let tt = Arc::new(TranspositionTable::new(16));
-                let eval_hash = Arc::new(EvalHash::new(1));
-                let mut worker = SearchWorker::new(
-                    tt,
-                    eval_hash,
-                    DEFAULT_MAX_MOVES_TO_DRAW,
-                    0,
-                    SearchTuneParams::default(),
-                );
-                worker.state.best_move_changes = 3.5;
-
-                let summary = WorkerSummary::from(&*worker);
-                assert!(
-                    (summary.best_move_changes - 3.5).abs() < 1e-9,
-                    "best_move_changes should match"
-                );
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-
-    #[test]
     fn test_prepare_time_metrics_resets_iter_state() {
         std::thread::Builder::new()
             .stack_size(STACK_SIZE)
@@ -2070,6 +2027,28 @@ mod tests {
 
                 search.set_max_moves_to_draw(0);
                 assert_eq!(search.max_moves_to_draw(), DEFAULT_MAX_MOVES_TO_DRAW);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn test_set_draw_value_options() {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let mut search = Search::new(16);
+
+                search.set_draw_value_black(123);
+                search.set_draw_value_white(-456);
+                assert_eq!(search.draw_value_black(), 123);
+                assert_eq!(search.draw_value_white(), -456);
+
+                search.set_draw_value_black(40000);
+                search.set_draw_value_white(-40000);
+                assert_eq!(search.draw_value_black(), 30000);
+                assert_eq!(search.draw_value_white(), -30000);
             })
             .unwrap()
             .join()
@@ -2170,7 +2149,8 @@ mod tests {
         assert!(usi.contains("depth 5"));
         assert!(usi.contains("seldepth 7"));
         assert!(usi.contains("multipv 1"));
-        assert!(usi.contains("score cp 123"));
+        // Value::new(123) → to_cp() = 100 * 123 / 90 = 136
+        assert!(usi.contains("score cp 136"));
         assert!(usi.contains("nodes 10000"));
     }
 

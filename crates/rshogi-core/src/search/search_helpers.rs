@@ -6,8 +6,9 @@ use std::ptr::NonNull;
 
 use crate::nnue::{ensure_accumulator_computed, evaluate_dispatch, DirtyPiece};
 use crate::position::Position;
+use crate::prefetch::TtPrefetch;
 use crate::search::PieceToHistory;
-use crate::types::{Piece, Square, Value};
+use crate::types::{Move, Piece, Square, Value};
 
 use super::alpha_beta::{SearchContext, SearchState};
 use super::types::{ContHistKey, STACK_SIZE};
@@ -117,6 +118,23 @@ pub(super) fn ensure_nnue_accumulator(st: &mut SearchState, pos: &Position) {
     ensure_accumulator_computed(pos, &mut st.nnue_stack)
 }
 
+/// YO準拠: do_move + nodes++ + nnue_push をまとめたラッパー
+///
+/// YO では Worker::do_move() 内部で nodes++ と nnue push を行う。
+/// rshogi でも同等の一括処理を提供する。
+#[inline]
+pub(super) fn do_move_and_push<P: TtPrefetch>(
+    st: &mut SearchState,
+    pos: &mut Position,
+    mv: Move,
+    gives_check: bool,
+    prefetcher: &P,
+) {
+    let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, prefetcher);
+    st.nodes += 1;
+    st.nnue_stack.push(dirty_piece);
+}
+
 /// NNUE push
 #[inline]
 pub(super) fn nnue_push(st: &mut SearchState, dirty_piece: DirtyPiece) {
@@ -198,18 +216,23 @@ pub(super) fn set_cont_history_for_move(
     debug_assert!(ply >= 0 && (ply as usize) < STACK_SIZE, "ply out of bounds: {ply}");
     let in_check_idx = in_check as usize;
     let capture_idx = capture as usize;
-    let table = ctx.history.with_read(|h| {
+    // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
+    let table = {
+        let h = unsafe { ctx.history.as_ref_unchecked() };
         NonNull::from(h.continuation_history[in_check_idx][capture_idx].get_table(piece, to))
-    });
+    };
     st.stack[ply as usize].cont_history_ptr = table;
     st.stack[ply as usize].cont_hist_key = Some(ContHistKey::new(in_check, capture, piece, to));
 }
 
 /// ContinuationHistory をクリア（null move用）
+/// YaneuraOu準拠: sentinelテーブル(NO_PIECE, SQ_ZERO)を参照するようにする。
+/// cont_hist_keyをNoneにするとcorrection historyのcontinuation更新がスキップされてしまうため、
+/// sentinel keyを設定してYOと同じsentinelテーブルへの読み書きが行われるようにする。
 #[inline]
 pub(super) fn clear_cont_history_for_null(st: &mut SearchState, ctx: &SearchContext<'_>, ply: i32) {
     st.stack[ply as usize].cont_history_ptr = ctx.cont_history_sentinel;
-    st.stack[ply as usize].cont_hist_key = None;
+    st.stack[ply as usize].cont_hist_key = Some(ContHistKey::null_sentinel());
 }
 
 // =============================================================================

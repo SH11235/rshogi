@@ -57,25 +57,17 @@ pub fn attacks_slider_avoiding(
     for from in (pos.pieces(us, PieceType::Lance) & avoid).iter() {
         sum |= lance_effect(us, from, occ);
     }
+    // YO準拠: BISHOP_HORSE統合 — Slider利きのみ(bishopEffect)で十分
     for from in
         ((pos.pieces(us, PieceType::Bishop) | pos.pieces(us, PieceType::Horse)) & avoid).iter()
     {
-        let is_horse = pos.pieces(us, PieceType::Horse).contains(from);
-        sum |= if is_horse {
-            horse_effect(from, occ)
-        } else {
-            bishop_effect(from, occ)
-        };
+        sum |= bishop_effect(from, occ);
     }
+    // YO準拠: ROOK_DRAGON統合 — Slider利きのみ(rookEffect)で十分
     for from in
         ((pos.pieces(us, PieceType::Rook) | pos.pieces(us, PieceType::Dragon)) & avoid).iter()
     {
-        let is_dragon = pos.pieces(us, PieceType::Dragon).contains(from);
-        sum |= if is_dragon {
-            dragon_effect(from, occ)
-        } else {
-            rook_effect(from, occ)
-        };
+        sum |= rook_effect(from, occ);
     }
 
     sum
@@ -120,9 +112,7 @@ pub fn attacks_around_king_non_slider(pos: &Position, our_king: Color) -> Bitboa
         sum |= king_effect(from);
     }
 
-    // 盤面外は含まれないが、玉自身を除く
-    sum &= !Bitboard::from_square(pos.king_square(our_king));
-    // occは現在の占有。NonSliderなので遮断は考慮不要。
+    // YO準拠: 自玉位置の除外は行わない（呼び出し元で自然に除外される）
     sum
 }
 
@@ -194,7 +184,8 @@ pub fn can_king_escape(
 ) -> bool {
     let king_sq = pos.king_square(us);
     let slide = slide | Bitboard::from_square(to);
-    let escape = king_effect(king_sq) & !(bb_avoid | Bitboard::from_square(to) | pos.pieces_c(us));
+    // toは王手駒のマスだが、王がそこに移動して駒を取ることで逃げられるため除外しない
+    let escape = king_effect(king_sq) & !(bb_avoid | pos.pieces_c(us));
 
     for dest in escape.iter() {
         let attacked = pos.attackers_to_occ(dest, slide) & pos.pieces_c(!us);
@@ -227,7 +218,10 @@ pub fn can_king_escape_with_from(
 ) -> bool {
     let king_sq = pos.king_square(us);
     let slide = (slide | Bitboard::from_square(to)) & !Bitboard::from_square(king_sq);
-    let escape = king_effect(king_sq) & !(bb_avoid | Bitboard::from_square(to) | pos.pieces_c(us));
+    // toは王手駒が移動先で相手駒を取った場合、味方駒ではなくなる。
+    // 王がtoに移動して王手駒を取り返す逃げも考慮するため、toを味方駒から除外する。
+    let our_pieces = pos.pieces_c(us) & !Bitboard::from_square(to);
+    let escape = king_effect(king_sq) & !(bb_avoid | our_pieces);
 
     for dest in escape.iter() {
         let attacked = pos.attackers_to_occ(dest, slide) & pos.pieces_c(!us);
@@ -338,7 +332,8 @@ fn attacks_around_king_non_slider_in_avoiding(
     let mut sum = Bitboard::EMPTY;
     let avoid_bb = !Bitboard::from_square(avoid);
 
-    for from in (pos.pieces(them, PieceType::Pawn) & avoid_bb).iter() {
+    // YO準拠: 歩はavoid_bbを適用しない（一括シフトで計算、avoid駒が歩でも除外しない）
+    for from in pos.pieces(them, PieceType::Pawn).iter() {
         sum |= pawn_effect(them, from);
     }
     let knights = (pos.pieces(them, PieceType::Knight)

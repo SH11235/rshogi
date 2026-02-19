@@ -4,7 +4,7 @@
 pub type Depth = i32;
 
 /// 最大探索深度
-pub const MAX_PLY: Depth = 128;
+pub const MAX_PLY: Depth = 246;
 
 /// 静止探索の深さ
 pub const DEPTH_QS: Depth = 0;
@@ -17,7 +17,7 @@ pub const DEPTH_ENTRY_OFFSET: Depth = -3;
 
 // 定数間の関係をコンパイル時に検証する
 const _: () = {
-    assert!(MAX_PLY == 128);
+    assert!(MAX_PLY == 246);
     assert!(DEPTH_QS == 0);
     assert!(DEPTH_UNSEARCHED == -2);
     assert!(DEPTH_ENTRY_OFFSET == -3);

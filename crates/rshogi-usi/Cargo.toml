@@ -29,6 +29,8 @@ default = []
 search-stats = ["rshogi-core/search-stats"]
 # NNUE統計収集（refresh/update比率等のカウント）
 nnue-stats = ["rshogi-core/nnue-stats"]
+# TT書き込みトレースおよびhelper bound/depthフィルタ
+tt-trace = ["rshogi-core/tt-trace"]
 
 [[bin]]
 name = "rshogi-usi"

@@ -2,6 +2,7 @@
 //!
 //! 補正履歴、静的評価コンテキスト、置換表プローブ等。
 
+#[cfg(not(feature = "search-no-pass-rules"))]
 use crate::eval::evaluate_pass_rights;
 use crate::position::Position;
 use crate::types::{Bound, Color, Depth, Move, Value, DEPTH_UNSEARCHED, MAX_PLY};
@@ -19,7 +20,7 @@ use super::tt_sanity::{
     TtWriteTrace,
 };
 use super::tt_sanity::{is_valid_tt_eval, is_valid_tt_stored_value};
-use super::types::{value_from_tt, NodeType};
+use super::types::{value_from_tt, ContHistKey, NodeType};
 
 // =============================================================================
 // 補正履歴
@@ -48,24 +49,36 @@ pub(super) fn correction_value(
     let move_ok = prev_move.is_normal();
 
     // continuation correction 用キー: (ss-2) と (ss-4) の2段階（YO準拠）
-    let cont_key_2 = if move_ok && ply >= 2 {
-        st.stack[(ply - 2) as usize].cont_hist_key
+    // YO準拠: plyが小さい場合はsentinel（NO_PIECE, SQ_ZERO）テーブルを参照
+    let sentinel_key = ContHistKey::null_sentinel();
+    let cont_key_2 = if move_ok {
+        if ply >= 2 {
+            st.stack[(ply - 2) as usize].cont_hist_key
+        } else {
+            Some(sentinel_key)
+        }
     } else {
         None
     };
-    let cont_key_4 = if move_ok && ply >= 4 {
-        st.stack[(ply - 4) as usize].cont_hist_key
+    let cont_key_4 = if move_ok {
+        if ply >= 4 {
+            st.stack[(ply - 4) as usize].cont_hist_key
+        } else {
+            Some(sentinel_key)
+        }
     } else {
         None
     };
 
-    ctx.history.with_read(|h| {
-        let pcv = h.correction_history.pawn_value(pawn_idx, us) as i32;
-        let micv = h.correction_history.minor_value(minor_idx, us) as i32;
-        let wnpcv = h.correction_history.non_pawn_value(non_pawn_idx_w, Color::White, us) as i32;
-        let bnpcv = h.correction_history.non_pawn_value(non_pawn_idx_b, Color::Black, us) as i32;
+    // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
+    let h = unsafe { ctx.history.as_ref_unchecked() };
+    let pcv = h.correction_history.pawn_value(pawn_idx, us) as i32;
+    let micv = h.correction_history.minor_value(minor_idx, us) as i32;
+    let wnpcv = h.correction_history.non_pawn_value(non_pawn_idx_w, Color::White, us) as i32;
+    let bnpcv = h.correction_history.non_pawn_value(non_pawn_idx_b, Color::Black, us) as i32;
 
-        // YO準拠: move無効またはcont_hist_key無しの場合はデフォルト値8
+    // YO準拠: move無効の場合はcntcv全体が8（個別デフォルトの合計ではない）
+    let cntcv = if move_ok {
         let cv2 = cont_key_2
             .map(|key| {
                 let pc = pos.piece_on(prev_move.to());
@@ -80,10 +93,12 @@ pub(super) fn correction_value(
                     as i32
             })
             .unwrap_or(8);
-        let cntcv = cv2 + cv4;
+        cv2 + cv4
+    } else {
+        8
+    };
 
-        9536 * pcv + 8494 * micv + 10_132 * (wnpcv + bnpcv) + 7156 * cntcv
-    })
+    9536 * pcv + 8494 * micv + 10_132 * (wnpcv + bnpcv) + 7156 * cntcv
 }
 
 /// 補正履歴の更新
@@ -109,20 +124,31 @@ pub(super) fn update_correction_history(
     };
     let move_ok = prev_move.is_normal();
 
-    // (ss-2) context
-    let cont_params_2 = if move_ok && ply >= 2 {
-        st.stack[(ply - 2) as usize].cont_hist_key.map(|key| {
+    // (ss-2) context — YO準拠: plyが小さい場合はsentinel（NO_PIECE, SQ_ZERO）テーブルを更新
+    let sentinel_key = ContHistKey::null_sentinel();
+    let cont_params_2 = if move_ok {
+        let key = if ply >= 2 {
+            st.stack[(ply - 2) as usize].cont_hist_key
+        } else {
+            Some(sentinel_key)
+        };
+        key.map(|k| {
             let pc = pos.piece_on(prev_move.to());
-            (key.piece, key.to, pc, prev_move.to())
+            (k.piece, k.to, pc, prev_move.to())
         })
     } else {
         None
     };
     // (ss-4) context
-    let cont_params_4 = if move_ok && ply >= 4 {
-        st.stack[(ply - 4) as usize].cont_hist_key.map(|key| {
+    let cont_params_4 = if move_ok {
+        let key = if ply >= 4 {
+            st.stack[(ply - 4) as usize].cont_hist_key
+        } else {
+            Some(sentinel_key)
+        };
+        key.map(|k| {
             let pc = pos.piece_on(prev_move.to());
-            (key.piece, key.to, pc, prev_move.to())
+            (k.piece, k.to, pc, prev_move.to())
         })
     } else {
         None
@@ -130,33 +156,33 @@ pub(super) fn update_correction_history(
 
     const NON_PAWN_WEIGHT: i32 = 165;
 
-    ctx.history.with_write(|h| {
-        h.correction_history.update_pawn(pawn_idx, us, bonus);
-        h.correction_history.update_minor(minor_idx, us, bonus * 156 / 128);
-        h.correction_history.update_non_pawn(
-            non_pawn_idx_w,
-            Color::White,
-            us,
-            bonus * NON_PAWN_WEIGHT / 128,
-        );
-        h.correction_history.update_non_pawn(
-            non_pawn_idx_b,
-            Color::Black,
-            us,
-            bonus * NON_PAWN_WEIGHT / 128,
-        );
+    // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
+    let h = unsafe { ctx.history.as_mut_unchecked() };
+    h.correction_history.update_pawn(pawn_idx, us, bonus);
+    h.correction_history.update_minor(minor_idx, us, bonus * 156 / 128);
+    h.correction_history.update_non_pawn(
+        non_pawn_idx_w,
+        Color::White,
+        us,
+        bonus * NON_PAWN_WEIGHT / 128,
+    );
+    h.correction_history.update_non_pawn(
+        non_pawn_idx_b,
+        Color::Black,
+        us,
+        bonus * NON_PAWN_WEIGHT / 128,
+    );
 
-        // YO準拠: continuation(ss-2) 重み 137/128
-        if let Some((piece, to, pc, prev_to)) = cont_params_2 {
-            h.correction_history
-                .update_continuation(piece, to, pc, prev_to, bonus * 137 / 128);
-        }
-        // YO準拠: continuation(ss-4) 重み 64/128
-        if let Some((piece, to, pc, prev_to)) = cont_params_4 {
-            h.correction_history
-                .update_continuation(piece, to, pc, prev_to, bonus * 64 / 128);
-        }
-    });
+    // YO準拠: continuation(ss-2) 重み 137/128
+    if let Some((piece, to, pc, prev_to)) = cont_params_2 {
+        h.correction_history
+            .update_continuation(piece, to, pc, prev_to, bonus * 137 / 128);
+    }
+    // YO準拠: continuation(ss-4) 重み 64/128
+    if let Some((piece, to, pc, prev_to)) = cont_params_4 {
+        h.correction_history
+            .update_continuation(piece, to, pc, prev_to, bonus * 64 / 128);
+    }
 }
 
 // =============================================================================
@@ -533,7 +559,17 @@ pub(super) fn compute_eval_context(
     if !in_check && unadjusted_static_eval != Value::NONE {
         static_eval = to_corrected_static_eval(unadjusted_static_eval, corr_value);
         // パス権評価を動的に追加（TTには保存されないので手数依存でもOK）
-        static_eval += evaluate_pass_rights(pos, pos.game_ply() as u16);
+        let pass_rights_eval = {
+            #[cfg(feature = "search-no-pass-rules")]
+            {
+                Value::ZERO
+            }
+            #[cfg(not(feature = "search-no-pass-rules"))]
+            {
+                evaluate_pass_rights(pos, pos.game_ply() as u16)
+            }
+        };
+        static_eval += pass_rights_eval;
     }
 
     // YO準拠: TTミス時は eval のみを BOUND_NONE/DEPTH_UNSEARCHED で保存する。

@@ -90,6 +90,8 @@ mod imp {
             max_depth: Depth,
             time_options: TimeOptions,
             max_moves_to_draw: i32,
+            draw_value_black: i32,
+            draw_value_white: i32,
             skill_enabled: bool,
         ) {
             if self.threads.is_empty() {
@@ -103,6 +105,8 @@ mod imp {
                     max_depth,
                     time_options,
                     max_moves_to_draw,
+                    draw_value_black,
+                    draw_value_white,
                     search_tune_params: self.search_tune_params,
                     skill_enabled,
                 });
@@ -189,6 +193,8 @@ mod imp {
         max_depth: Depth,
         time_options: TimeOptions,
         max_moves_to_draw: i32,
+        draw_value_black: i32,
+        draw_value_white: i32,
         search_tune_params: SearchTuneParams,
         skill_enabled: bool,
     }
@@ -326,6 +332,8 @@ mod imp {
                     let mut worker = inner.worker.lock().unwrap();
                     worker.max_moves_to_draw = task.max_moves_to_draw;
                     worker.search_tune_params = task.search_tune_params;
+                    worker.draw_value_black = task.draw_value_black;
+                    worker.draw_value_white = task.draw_value_white;
                     worker.prepare_search();
 
                     let mut pos = task.pos;
@@ -426,6 +434,8 @@ mod imp {
             _max_depth: Depth,
             _time_options: TimeOptions,
             _max_moves_to_draw: i32,
+            _draw_value_black: i32,
+            _draw_value_white: i32,
             _skill_enabled: bool,
         ) {
             // No-op: no helper threads to start
@@ -705,6 +715,8 @@ mod imp {
             max_depth: Depth,
             time_options: TimeOptions,
             max_moves_to_draw: i32,
+            draw_value_black: i32,
+            draw_value_white: i32,
             skill_enabled: bool,
         ) {
             // Clear previous results before starting new search
@@ -782,6 +794,8 @@ mod imp {
                         worker.tt = Arc::clone(&tt);
                         worker.eval_hash = Arc::clone(&eval_hash);
                         worker.max_moves_to_draw = max_moves_to_draw;
+                        worker.draw_value_black = draw_value_black;
+                        worker.draw_value_white = draw_value_white;
                         worker.search_tune_params = search_tune_params;
                         worker.prepare_search();
 

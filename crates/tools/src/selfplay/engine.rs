@@ -148,15 +148,44 @@ impl EngineProcess {
         };
         self.write_line(&position_cmd)?;
         let time_args = &req.time_args;
-        self.write_line(&format!(
-            "go btime {} wtime {} byoyomi {} binc {} winc {}",
-            time_args.btime, time_args.wtime, time_args.byoyomi, time_args.binc, time_args.winc
-        ))?;
+        match req.go_depth {
+            Some(depth) if time_args.byoyomi > 0 => {
+                // 組み合わせモード: depth 目標 + byoyomi 上限
+                self.write_line(&format!(
+                    "go btime {} wtime {} byoyomi {} binc {} winc {} depth {}",
+                    time_args.btime,
+                    time_args.wtime,
+                    time_args.byoyomi,
+                    time_args.binc,
+                    time_args.winc,
+                    depth
+                ))?;
+            }
+            Some(depth) => {
+                // depth のみモード: タイムアウト無効
+                self.write_line(&format!("go depth {depth}"))?;
+            }
+            None => {
+                self.write_line(&format!(
+                    "go btime {} wtime {} byoyomi {} binc {} winc {}",
+                    time_args.btime,
+                    time_args.wtime,
+                    time_args.byoyomi,
+                    time_args.binc,
+                    time_args.winc
+                ))?;
+            }
+        }
 
         let start = Instant::now();
-        let soft_limit =
-            Duration::from_millis(req.think_limit_ms.saturating_add(req.timeout_margin_ms));
-        let hard_limit = soft_limit + Duration::from_millis(req.timeout_margin_ms);
+        // depth のみモード（byoyomi=0）ではタイムアウト無効、それ以外は byoyomi ベースで有効
+        let (soft_limit, hard_limit) = if req.go_depth.is_some() && time_args.byoyomi == 0 {
+            (Duration::MAX, Duration::MAX)
+        } else {
+            let s = Duration::from_millis(req.think_limit_ms.saturating_add(req.timeout_margin_ms));
+            let h = s + Duration::from_millis(req.timeout_margin_ms);
+            (s, h)
+        };
         let mut stop_sent = false;
         let mut snapshot = InfoSnapshot::default();
         let mut info_callback = info_callback;

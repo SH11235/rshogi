@@ -158,23 +158,96 @@ const _: () = {
     assert!(PIECE_BASE[PieceType::King as usize][1] == 0);
 };
 
-/// base offset から直接 BonaPiece を生成（高速パス用）
-///
-/// # Safety
-/// - `sq_index` は 0..=80 の範囲内であること
-/// - `base` は PIECE_BASE テーブルから取得した有効な値であること
-#[inline]
-pub fn bona_piece_from_base(sq_index: usize, base: u16) -> BonaPiece {
-    debug_assert!(sq_index <= 80, "sq_index out of range: {sq_index}");
-    debug_assert!((F_PAWN..=E_DRAGON).contains(&base), "base out of range: {base}");
-    BonaPiece::new(base + sq_index as u16)
-}
-
 /// fe_end: BonaPieceの最大値
 ///
 /// YaneuraOu の HalfKP 用定義に基づく。
 /// fe_end = e_dragon + 81 = 1467 + 81 = 1548
 pub const FE_END: usize = 1548;
+
+// =============================================================================
+// ExtBonaPiece - 先手視点/後手視点の BonaPiece ペア
+// =============================================================================
+
+/// 先手視点(fb)と後手視点(fw)の BonaPiece をペアで保持する構造体
+///
+/// YaneuraOu の ExtBonaPiece に相当。
+/// PieceList の各エントリおよび DirtyPiece の変化情報に使用する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ExtBonaPiece {
+    /// 先手視点の BonaPiece
+    pub fb: BonaPiece,
+    /// 後手視点の BonaPiece
+    pub fw: BonaPiece,
+}
+
+impl ExtBonaPiece {
+    /// ゼロ値（無効）
+    pub const ZERO: ExtBonaPiece = ExtBonaPiece {
+        fb: BonaPiece::ZERO,
+        fw: BonaPiece::ZERO,
+    };
+
+    /// 新しい ExtBonaPiece を作成
+    #[inline]
+    pub const fn new(fb: BonaPiece, fw: BonaPiece) -> Self {
+        Self { fb, fw }
+    }
+
+    /// 盤上駒から ExtBonaPiece を生成
+    ///
+    /// Piece と Square から、先手/後手両視点の BonaPiece を計算する。
+    /// King の場合は `bona_piece_halfka_hm` の定数を使用して King 用 BonaPiece を生成。
+    #[inline]
+    pub fn from_board(piece: Piece, sq: Square) -> Self {
+        if piece.is_none() {
+            return Self::ZERO;
+        }
+        let pt = piece.piece_type();
+        let color = piece.color();
+
+        if pt == PieceType::King {
+            // King 用 BonaPiece: HalfKA_hm の F_KING / E_KING を使用
+            use super::bona_piece_halfka_hm::{E_KING, F_KING};
+            let (fb, fw) = if color == Color::Black {
+                // 先手玉: fb = F_KING + sq, fw = E_KING + sq.inverse()
+                (
+                    BonaPiece::new(F_KING as u16 + sq.index() as u16),
+                    BonaPiece::new(E_KING as u16 + sq.inverse().index() as u16),
+                )
+            } else {
+                // 後手玉: fb = E_KING + sq, fw = F_KING + sq.inverse()
+                (
+                    BonaPiece::new(E_KING as u16 + sq.index() as u16),
+                    BonaPiece::new(F_KING as u16 + sq.inverse().index() as u16),
+                )
+            };
+            return Self { fb, fw };
+        }
+
+        let is_friend_black = (color == Color::Black) as usize;
+        let is_friend_white = (color == Color::White) as usize;
+        let base_fb = PIECE_BASE[pt as usize][is_friend_black];
+        let base_fw = PIECE_BASE[pt as usize][is_friend_white];
+
+        Self {
+            fb: BonaPiece::new(base_fb + sq.index() as u16),
+            fw: BonaPiece::new(base_fw + sq.inverse().index() as u16),
+        }
+    }
+
+    /// 手駒から ExtBonaPiece を生成
+    ///
+    /// 手駒の (owner, pt, count) から先手/後手両視点の BonaPiece を計算する。
+    #[inline]
+    pub fn from_hand(owner: Color, pt: PieceType, count: u8) -> Self {
+        if count == 0 {
+            return Self::ZERO;
+        }
+        let fb = BonaPiece::from_hand_piece(Color::Black, owner, pt, count);
+        let fw = BonaPiece::from_hand_piece(Color::White, owner, pt, count);
+        Self { fb, fw }
+    }
+}
 
 /// BonaPieceの定義
 /// 駒の種類と位置を一意に表現するインデックス
@@ -466,7 +539,7 @@ mod tests {
 
                 // PIECE_BASE テーブルからの結果
                 let base = PIECE_BASE[pt as usize][is_friend as usize];
-                let bp_new = bona_piece_from_base(0, base);
+                let bp_new = BonaPiece::new(base);
 
                 assert_eq!(
                     bp_old, bp_new,

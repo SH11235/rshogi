@@ -74,6 +74,21 @@ impl ContHistKey {
             to,
         }
     }
+
+    /// null move 用の sentinel キーを返す。
+    ///
+    /// YaneuraOu準拠: null move ply では `Piece::NONE` + `Square::SQ_11` を
+    /// sentinel として格納し、continuation history 更新時に `piece.is_none()` で
+    /// スキップ判定する。
+    #[inline]
+    pub fn null_sentinel() -> Self {
+        Self {
+            in_check: false,
+            capture: false,
+            piece: Piece::NONE,
+            to: Square::SQ_11,
+        }
+    }
 }
 
 // =============================================================================
@@ -661,6 +676,13 @@ impl RootMoves {
         self.moves.iter().position(|rm| rm.mv() == mv)
     }
 
+    /// 開始インデックスを指定して手を検索
+    ///
+    /// YaneuraOuの `std::find(rootMoves.begin() + pvIdx, rootMoves.end(), move)` に対応。
+    pub fn find_from(&self, mv: Move, start: usize) -> Option<usize> {
+        self.moves[start..].iter().position(|rm| rm.mv() == mv).map(|i| i + start)
+    }
+
     /// 内部Vecへの参照
     pub fn as_slice(&self) -> &[RootMove] {
         &self.moves
@@ -727,15 +749,25 @@ pub fn value_from_tt(v: Value, ply: i32) -> Value {
     }
 }
 
-/// 千日手/優劣局面を評価値に変換（YaneuraOu簡易版）
+/// 千日手/優劣局面を評価値に変換（YaneuraOu準拠）
+///
+/// draw_value_table は SearchContext.draw_value_table を渡す。
+/// REPETITION_DRAW の場合、drawValueTable[stm] を返す。
 #[inline]
-pub fn draw_value(state: RepetitionState, _stm: crate::types::Color) -> Value {
+pub fn draw_value(
+    state: RepetitionState,
+    stm: crate::types::Color,
+    draw_value_table: &[Value; 2],
+) -> Value {
     match state {
-        RepetitionState::Draw => Value::DRAW,
+        RepetitionState::Draw => draw_value_table[stm as usize],
         RepetitionState::Win => Value::MATE,
         RepetitionState::Lose => -Value::MATE,
-        RepetitionState::Superior => Value::MATE_IN_MAX_PLY,
-        RepetitionState::Inferior => Value::MATED_IN_MAX_PLY,
+        // YaneuraOu準拠: VALUE_SUPERIOR = VALUE_TB_WIN_IN_MAX_PLY - 1
+        // 詰みスコアの閾値より1小さい値を使い、is_win()/is_loss()に掛からないようにする。
+        // これにより value_from_tt/value_to_tt でのply補正が適用されない。
+        RepetitionState::Superior => Value::new(Value::MATE_IN_MAX_PLY.raw() - 1),
+        RepetitionState::Inferior => Value::new(Value::MATED_IN_MAX_PLY.raw() + 1),
         RepetitionState::None => Value::NONE,
     }
 }
@@ -884,6 +916,45 @@ mod tests {
         // 無効値はそのまま保持される（YaneuraOu value_from_tt 準拠）
         assert_eq!(value_to_tt(Value::NONE, ply), Value::NONE);
         assert_eq!(value_from_tt(Value::NONE, ply), Value::NONE);
+    }
+
+    #[test]
+    fn test_draw_value_draw_uses_table_by_side_to_move() {
+        let table = [Value::new(-1), Value::new(1)];
+        assert_eq!(
+            draw_value(RepetitionState::Draw, crate::types::Color::Black, &table),
+            Value::new(-1)
+        );
+        assert_eq!(
+            draw_value(RepetitionState::Draw, crate::types::Color::White, &table),
+            Value::new(1)
+        );
+    }
+
+    #[test]
+    fn test_draw_value_non_draw_states_are_not_table_dependent() {
+        let table = [Value::new(-123), Value::new(456)];
+
+        assert_eq!(
+            draw_value(RepetitionState::Win, crate::types::Color::Black, &table),
+            Value::MATE
+        );
+        assert_eq!(
+            draw_value(RepetitionState::Lose, crate::types::Color::White, &table),
+            -Value::MATE
+        );
+        assert_eq!(
+            draw_value(RepetitionState::Superior, crate::types::Color::Black, &table),
+            Value::new(Value::MATE_IN_MAX_PLY.raw() - 1)
+        );
+        assert_eq!(
+            draw_value(RepetitionState::Inferior, crate::types::Color::White, &table),
+            Value::new(Value::MATED_IN_MAX_PLY.raw() + 1)
+        );
+        assert_eq!(
+            draw_value(RepetitionState::None, crate::types::Color::Black, &table),
+            Value::NONE
+        );
     }
 
     #[test]

@@ -27,10 +27,16 @@ impl Value {
     /// この値を変更する場合は pruning.rs の安全性を再検証すること。
     pub const NONE: Value = Value(32002);
 
-    /// 最大探索深度内での詰みスコア
-    pub const MATE_IN_MAX_PLY: Value = Value(Self::MATE.0 - 128);
+    /// 最大探索深度内での詰みスコア (YaneuraOu準拠: MATE - MAX_PLY)
+    pub const MATE_IN_MAX_PLY: Value = Value(Self::MATE.0 - crate::types::depth::MAX_PLY);
     /// 最大探索深度内での詰まされスコア
     pub const MATED_IN_MAX_PLY: Value = Value(-Self::MATE_IN_MAX_PLY.0);
+
+    /// 歩の内部評価値（YaneuraOu準拠: PawnValue = 90）
+    ///
+    /// USI `score cp` 出力時に `100 * value / PAWN_VALUE` で正規化するために使用。
+    /// NNUEの内部スケールにおいて歩1枚 ≈ 90 に対応する。
+    pub const PAWN_VALUE: i32 = 90;
 
     /// 値から生成
     #[inline]
@@ -83,6 +89,28 @@ impl Value {
             self.0 + Self::MATE.0
         } else {
             0
+        }
+    }
+
+    /// 内部値をUSI centipawn値に変換（YaneuraOu準拠）
+    ///
+    /// `100 * value / PAWN_VALUE` で正規化。詰みスコアはそのまま返す。
+    #[inline]
+    pub const fn to_cp(self) -> i32 {
+        if self.0.abs() >= Self::MATE_IN_MAX_PLY.0 {
+            self.0
+        } else {
+            100 * self.0 / Self::PAWN_VALUE
+        }
+    }
+
+    /// USI centipawn値から内部値に変換（`to_cp`の逆変換）
+    #[inline]
+    pub const fn from_cp(cp: i32) -> Value {
+        if cp.abs() >= Self::MATE_IN_MAX_PLY.0 {
+            Value(cp)
+        } else {
+            Value(Self::PAWN_VALUE * cp / 100)
         }
     }
 }

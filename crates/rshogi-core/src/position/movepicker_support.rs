@@ -338,100 +338,108 @@ impl Position {
     // SEE (Static Exchange Evaluation)
     // =========================================================================
 
-    /// SEE >= threshold かどうかを判定
+    /// SEE >= threshold かどうかを判定（YO準拠: swap/resアルゴリズム）
     ///
-    /// 指し手の静的駒交換評価が閾値以上かどうかを高速に判定する。
+    /// YaneuraOu/Stockfish と同じアルゴリズムで静的駒交換評価を判定する。
+    /// 成りボーナスは考慮しない（YO準拠）。
     pub fn see_ge(&self, m: Move, threshold: Value) -> bool {
-        // PASS/駒打ちは駒交換が発生しないので >= 0
-        if m.is_pass() || m.is_drop() {
+        // PASSは駒交換が発生しないので >= 0
+        if m.is_pass() {
             return threshold.raw() <= 0;
         }
 
-        let from = m.from();
+        let is_drop = m.is_drop();
         let to = m.to();
 
-        // 取られる駒の価値
-        let captured_value = if self.piece_on(to).is_some() {
-            see_piece_value(self.piece_on(to).piece_type())
-        } else {
+        // YO: swap = PieceValue[piece_on(to)] - threshold
+        // 取られる駒の価値（駒打ちは空きマスに打つので 0）
+        let captured_value = if is_drop {
             0
-        };
-
-        // 成りのボーナス
-        let promotion_bonus = if m.is_promotion() {
-            let pt = self.piece_on(from).piece_type();
-            see_piece_value(pt.promote().unwrap_or(pt)) - see_piece_value(pt)
         } else {
-            0
+            let captured = self.piece_on(to);
+            if captured.is_some() {
+                see_piece_value(captured.piece_type())
+            } else {
+                0
+            }
         };
+        let mut swap = captured_value - threshold.raw();
 
-        // 最初の交換後のバランス
-        let mut balance = captured_value + promotion_bonus - threshold.raw();
-
-        // 既にマイナスなら失敗
-        if balance < 0 {
+        // toの駒価値がthreshold未満 → 取り返されなくてもfalse
+        if swap < 0 {
             return false;
         }
 
-        // 次に取られる駒の価値
-        let next_victim = if m.is_promotion() {
-            let pt = self.piece_on(from).piece_type();
-            see_piece_value(pt.promote().unwrap_or(pt))
+        // YO: swap = PieceValue[from_pt] - swap
+        // 動かす駒の価値（駒打ちは打つ駒種）
+        let from_value = if is_drop {
+            see_piece_value(m.drop_piece_type())
         } else {
-            see_piece_value(self.piece_on(from).piece_type())
+            see_piece_value(self.piece_on(m.from()).piece_type())
         };
+        swap = from_value - swap;
 
-        // 駒を取られても閾値を超えるか
-        balance -= next_victim;
-
-        if balance >= 0 {
+        // 動かす駒を取り返されても閾値以上 → true
+        if swap <= 0 {
             return true;
         }
 
-        // 詳細なSEE計算
-        self.see_ge_detailed(to, from, balance, next_victim)
-    }
-
-    /// 詳細なSEE計算（再帰的な駒交換をシミュレート）
-    fn see_ge_detailed(
-        &self,
-        to: Square,
-        from: Square,
-        mut balance: i32,
-        mut victim_value: i32,
-    ) -> bool {
-        // 移動元と移動先の両方を占有から外す（x-ray攻撃を正しく検出するため）
-        let mut occupied =
-            self.occupied() ^ Bitboard::from_square(from) ^ Bitboard::from_square(to);
-        let mut stm = !self.side_to_move(); // 相手の手番から開始
-
-        debug_assert!(
-            self.piece_on(from).is_some(),
-            "see_ge_detailed called with empty from square"
-        );
-
-        // 初期攻撃者集合（occupiedに依存）
-        let mut attackers = self.attackers_to_occ(to, occupied) & occupied;
+        // YO: occupied = pieces() ^ from ^ to
+        // 駒打ちの場合は from を無効化（XORしない）
+        let mut occupied = if is_drop {
+            self.occupied() ^ Bitboard::from_square(to)
+        } else {
+            self.occupied() ^ Bitboard::from_square(m.from()) ^ Bitboard::from_square(to)
+        };
+        let mut stm = self.side_to_move();
+        let mut attackers = self.attackers_to_occ(to, occupied);
+        let mut res = 1i32;
 
         loop {
-            // 次に to に利く最も価値の低い駒を探す
-            let our_attackers = attackers & self.pieces_c(stm);
+            stm = !stm;
+            attackers &= occupied;
 
-            if our_attackers.is_empty() {
-                // 取り返す駒がない → 現在の手番の負け
+            let mut stm_attackers = attackers & self.pieces_c(stm);
+            if stm_attackers.is_empty() {
                 break;
             }
 
-            // 最も価値の低い駒を選択
+            // YO: ピン処理 — ピンされた駒は攻撃に参加できない
+            // pinners(~stm): stmの玉をピンしている(!stm側の)駒
+            // rshogi の pinners[c] は「!c側の駒がc側の王をピンしている」という意味なので、
+            // stm の王をピンしている駒を取得するには pinners[stm] を使う（YOは pinners[~stm]）
+            if !(self.state().pinners[stm.index()] & occupied).is_empty() {
+                stm_attackers &= !self.blockers_for_king(stm);
+                if stm_attackers.is_empty() {
+                    break;
+                }
+            }
+
+            res ^= 1;
+
+            // 最も価値の低い攻撃駒を選択
             let (attacker_sq, attacker_value) =
-                self.least_valuable_attacker(our_attackers, stm, to, occupied);
+                self.least_valuable_attacker(stm_attackers, stm, to, occupied);
 
-            // 駒を取り除く
-            let attacker_bb = Bitboard::from_square(attacker_sq);
-            attackers ^= attacker_bb;
-            occupied ^= attacker_bb;
+            // YO: swap = PieceValue[pt] - swap; if (swap < res) break;
+            swap = attacker_value - swap;
+            if swap < res {
+                break;
+            }
 
-            // attacker_sq が遮っていたラインの背後の利きを追加する（やねうら王 SEE と同様）
+            // 玉で取る場合の特別処理
+            if attacker_value == see_piece_value(PieceType::King) {
+                return if !(attackers & self.pieces_c(!stm)).is_empty() {
+                    res ^ 1 != 0
+                } else {
+                    res != 0
+                };
+            }
+
+            // 駒をoccupiedから取り除く
+            occupied ^= Bitboard::from_square(attacker_sq);
+
+            // X-ray攻撃の追加: attacker_sqが遮っていた背後の駒を追加
             if let Some(dir) = direct_of(to, attacker_sq) {
                 let ray = ray_effect(dir, to, occupied);
                 let extras = match dir {
@@ -454,72 +462,86 @@ impl Position {
                         ray & (self.pieces_pt(PieceType::Rook) | self.pieces_pt(PieceType::Dragon))
                     }
                 };
-                attackers |= extras & occupied;
+                attackers |= extras;
             }
-
-            // バランスを更新
-            balance = -balance - 1 - victim_value;
-            victim_value = attacker_value;
-
-            if balance >= 0 {
-                // pinされた駒でも、相手が玉なら勝ち確定
-                if attacker_value == see_piece_value(PieceType::King) {
-                    // 相手に取り返す駒があるかチェック
-                    let their_attackers = attackers & self.pieces_c(!stm);
-                    if !their_attackers.is_empty() {
-                        // 相手に取り返す駒がある場合は、バランスを反転
-                        stm = !stm;
-                        continue;
-                    }
-                }
-                break;
-            }
-
-            stm = !stm;
         }
 
-        // 最後に手番を持っていた側が勝ち
-        stm != self.side_to_move()
+        res != 0
     }
 
-    /// 最も価値の低い攻撃駒を探す
+    /// 最も価値の低い攻撃駒を探す（YO準拠: 成りは考慮しない）
     fn least_valuable_attacker(
         &self,
         attackers: Bitboard,
         stm: Color,
-        to: Square,
+        _to: Square,
         _occupied: Bitboard,
     ) -> (Square, i32) {
-        // 価値の低い順にチェック
+        // YO準拠: 価値の低い順にチェック（成り考慮なし）
+        // Pawn(90) → Lance(315) → Knight(405) → Silver(495)
+        // → GOLDS(540): Gold,ProPawn,ProLance,ProKnight,ProSilver
+        // → Bishop(855) → Rook(990) → Horse(945) → Dragon(1395) → King
+        // 注: Rook(990)がHorse(945)より先はYO準拠（価値昇順ではない）
+
+        // Pawn
+        let bb = attackers & self.pieces(stm, PieceType::Pawn);
+        if !bb.is_empty() {
+            return (bb.lsb().unwrap(), see_piece_value(PieceType::Pawn));
+        }
+        // Lance
+        let bb = attackers & self.pieces(stm, PieceType::Lance);
+        if !bb.is_empty() {
+            return (bb.lsb().unwrap(), see_piece_value(PieceType::Lance));
+        }
+        // Knight
+        let bb = attackers & self.pieces(stm, PieceType::Knight);
+        if !bb.is_empty() {
+            return (bb.lsb().unwrap(), see_piece_value(PieceType::Knight));
+        }
+        // Silver (495 < Gold 540)
+        let bb = attackers & self.pieces(stm, PieceType::Silver);
+        if !bb.is_empty() {
+            return (bb.lsb().unwrap(), see_piece_value(PieceType::Silver));
+        }
+        // GOLDS (Gold, ProPawn, ProLance, ProKnight, ProSilver) — すべて540
         for pt in [
-            PieceType::Pawn,
-            PieceType::Lance,
-            PieceType::Knight,
+            PieceType::Gold,
             PieceType::ProPawn,
             PieceType::ProLance,
             PieceType::ProKnight,
-            PieceType::Silver,
             PieceType::ProSilver,
-            PieceType::Gold,
-            PieceType::Bishop,
-            PieceType::Rook,
-            PieceType::Horse,
-            PieceType::Dragon,
-            PieceType::King,
         ] {
             let bb = attackers & self.pieces(stm, pt);
             if !bb.is_empty() {
-                let sq = bb.lsb().unwrap();
-
-                // 成りの可能性を考慮した価値
-                let value = if can_promote_on(stm, sq, to) && pt.can_promote() {
-                    see_piece_value(pt.promote().unwrap())
-                } else {
-                    see_piece_value(pt)
-                };
-
-                return (sq, value);
+                return (bb.lsb().unwrap(), see_piece_value(PieceType::Gold));
             }
+        }
+        // Bishop (855)
+        let bb = attackers & self.pieces(stm, PieceType::Bishop);
+        if !bb.is_empty() {
+            return (bb.lsb().unwrap(), see_piece_value(PieceType::Bishop));
+        }
+        // YaneuraOu準拠: Rook(990) を Horse(945) より先に選択 (yaneuraou-search.cpp:2632-2669)
+        // 価値昇順ではないが、YOとのノード数一致のために順序を合わせる
+        // Rook (990)
+        let bb = attackers & self.pieces(stm, PieceType::Rook);
+        if !bb.is_empty() {
+            return (bb.lsb().unwrap(), see_piece_value(PieceType::Rook));
+        }
+        // Horse (945)
+        let bb = attackers & self.pieces(stm, PieceType::Horse);
+        if !bb.is_empty() {
+            return (bb.lsb().unwrap(), see_piece_value(PieceType::Horse));
+        }
+        // Dragon
+        let bb = attackers & self.pieces(stm, PieceType::Dragon);
+        if !bb.is_empty() {
+            return (bb.lsb().unwrap(), see_piece_value(PieceType::Dragon));
+        }
+        // King
+        let bb = attackers & self.pieces(stm, PieceType::King);
+        if !bb.is_empty() {
+            return (bb.lsb().unwrap(), see_piece_value(PieceType::King));
         }
 
         unreachable!(
@@ -532,7 +554,7 @@ impl Position {
 // ヘルパー関数
 // =============================================================================
 
-/// SEE用の駒価値
+/// SEE用の駒価値（YO準拠）
 fn see_piece_value(pt: PieceType) -> i32 {
     use PieceType::*;
     match pt {
@@ -542,18 +564,10 @@ fn see_piece_value(pt: PieceType) -> i32 {
         Silver => 495,
         Gold | ProPawn | ProLance | ProKnight | ProSilver => 540,
         Bishop => 855,
+        Horse => 945,
         Rook => 990,
-        Horse => 1089,
-        Dragon => 1224,
+        Dragon => 1395,
         King => 15000,
-    }
-}
-
-/// 成れるマスかどうか
-fn can_promote_on(us: Color, from: Square, to: Square) -> bool {
-    match us {
-        Color::Black => to.rank().index() < 3 || from.rank().index() < 3,
-        Color::White => to.rank().index() > 5 || from.rank().index() > 5,
     }
 }
 

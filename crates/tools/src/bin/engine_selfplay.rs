@@ -1020,6 +1020,7 @@ fn main() -> Result<()> {
                 side,
                 engine_label: engine_label.to_string(),
                 pass_rights,
+                go_depth: None,
             };
             // InfoLogger をクロージャ経由で渡す
             type InfoCb<'a> = Box<dyn FnMut(&str, &SearchRequest<'_>) + 'a>;

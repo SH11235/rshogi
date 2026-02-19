@@ -28,6 +28,9 @@
 ///   --engine-usi-option "1:EvalDir=/mnt/nvme1/development/rshogi/eval/halfkp_256x2-32-32_crelu" \
 ///   --engine-usi-option "1:BookFile=no_book" \
 ///   --engine-usi-option "1:MinimumThinkingTime=0" \
+///   --engine-usi-option "1:NetworkDelay=0" \
+///   --engine-usi-option "1:NetworkDelay2=0" \
+///   --engine-usi-option "1:RoundUpToFullSecond=false" \
 ///   --out-dir "runs/selfplay/$(date +%Y%m%d_%H%M%S)-rshogi-vs-yaneuraou-suisho5"
 /// ```
 use std::collections::HashMap;
@@ -117,6 +120,10 @@ struct Cli {
     /// Safety margin for timeout detection (ms)
     #[arg(long, default_value_t = 1000)]
     timeout_margin_ms: u64,
+
+    /// Depth limit per move. If specified, sends `go depth N` instead of `go byoyomi`.
+    #[arg(long)]
+    depth: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +200,8 @@ struct MetaSettings {
     timeout_margin_ms: u64,
     threads: usize,
     hash_mb: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    depth: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -250,6 +259,7 @@ struct WorkerConfig {
     max_moves: u32,
     timeout_margin_ms: u64,
     byoyomi: u64,
+    go_depth: Option<u32>,
     start_positions: Vec<ParsedPosition>,
 }
 
@@ -268,6 +278,7 @@ fn worker_main(
         max_moves,
         timeout_margin_ms,
         byoyomi,
+        go_depth,
         start_positions,
     } = cfg;
     // ワーカー内で全エンジンを起動
@@ -319,6 +330,7 @@ fn worker_main(
             max_moves,
             timeout_margin_ms,
             pass_rights: None,
+            go_depth,
         };
         let game_id = (ticket.id as u32) + 1;
 
@@ -531,6 +543,7 @@ fn main() -> Result<()> {
                     timeout_margin_ms: cli.timeout_margin_ms,
                     threads: cli.threads,
                     hash_mb: cli.hash_mb,
+                    depth: cli.depth,
                 },
                 engine_cmd: EngineCommandMeta {
                     path_black: cli.engines[i].display().to_string(),
@@ -564,6 +577,7 @@ fn main() -> Result<()> {
         let max_moves = cli.max_moves;
         let timeout_margin_ms = cli.timeout_margin_ms;
         let byoyomi = cli.byoyomi;
+        let go_depth = cli.depth;
         let start_positions: Vec<ParsedPosition> = start_defs
             .iter()
             .map(|p| ParsedPosition {
@@ -586,6 +600,7 @@ fn main() -> Result<()> {
                     max_moves,
                     timeout_margin_ms,
                     byoyomi,
+                    go_depth,
                     start_positions,
                 },
                 rx,

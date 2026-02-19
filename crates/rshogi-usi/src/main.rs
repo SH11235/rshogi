@@ -17,7 +17,10 @@ use rshogi_core::nnue::{
     AccumulatorStackVariant,
 };
 use rshogi_core::position::Position;
-use rshogi_core::search::{LimitsType, Search, SearchInfo, SearchResult, SearchTuneParams};
+use rshogi_core::search::{
+    LimitsType, Search, SearchInfo, SearchResult, SearchTuneParams, DEFAULT_DRAW_VALUE_BLACK,
+    DEFAULT_DRAW_VALUE_WHITE,
+};
 use rshogi_core::types::Move;
 use serde_json::json;
 
@@ -167,6 +170,12 @@ impl UsiEngine {
         println!("option name MinimumThinkingTime type spin default 2000 min 1000 max 100000");
         println!("option name SlowMover type spin default 100 min 1 max 1000");
         println!("option name MaxMovesToDraw type spin default 100000 min 0 max 100000");
+        println!(
+            "option name DrawValueBlack type spin default {DEFAULT_DRAW_VALUE_BLACK} min -30000 max 30000"
+        );
+        println!(
+            "option name DrawValueWhite type spin default {DEFAULT_DRAW_VALUE_WHITE} min -30000 max 30000"
+        );
         println!("option name EvalHash type spin default 256 min 0 max 4096");
         println!("option name UseEvalHash type check default true");
         println!("option name Skill Level type spin default 20 min 0 max 20");
@@ -398,6 +407,20 @@ impl UsiEngine {
                 if let Ok(v) = value.parse::<i32>() {
                     if let Some(search) = self.search.as_mut() {
                         search.set_max_moves_to_draw(v);
+                    }
+                }
+            }
+            "DrawValueBlack" => {
+                if let Ok(v) = value.parse::<i32>() {
+                    if let Some(search) = self.search.as_mut() {
+                        search.set_draw_value_black(v);
+                    }
+                }
+            }
+            "DrawValueWhite" => {
+                if let Ok(v) = value.parse::<i32>() {
+                    if let Some(search) = self.search.as_mut() {
+                        search.set_draw_value_white(v);
                     }
                 }
             }
@@ -898,6 +921,24 @@ mod tests {
 
                 let limits = engine.parse_go_options(&tokens);
                 assert_eq!(limits.mate, i32::MAX);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn setoption_draw_value_updates_search() {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let mut engine = UsiEngine::new();
+                engine.cmd_setoption(&["setoption", "name", "DrawValueBlack", "value", "123"]);
+                engine.cmd_setoption(&["setoption", "name", "DrawValueWhite", "value", "-456"]);
+
+                let search = engine.search.as_ref().expect("search exists");
+                assert_eq!(search.draw_value_black(), 123);
+                assert_eq!(search.draw_value_white(), -456);
             })
             .unwrap()
             .join()

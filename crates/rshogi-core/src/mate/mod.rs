@@ -152,4 +152,14 @@ mod tests {
         let new_mv = mate_by_new(sfen);
         assert!(new_mv.is_some());
     }
+
+    #[test]
+    fn test_move_mate_gold_like_2hop() {
+        // 後手番、7gのと金(ProPawn)が6hの金を取って王手→詰み
+        // check_cand_bb の Gold 2-hop 計算がないと検出できない
+        let sfen = "ln1gk2nl/1rs6/2pppp+R+B1/p7p/9/2P5P/P1+pP+bPP2/3G2S2/LN2KG1NL w GSs5p 38";
+        let mv = mate_by_new(sfen);
+        assert!(mv.is_some(), "mate_1ply should find 7g6h mate");
+        assert_eq!(mv.unwrap().to_usi(), "7g6h");
+    }
 }

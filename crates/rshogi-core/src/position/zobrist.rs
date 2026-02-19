@@ -9,32 +9,34 @@ pub struct Zobrist {
     pub side: u64,
     /// 駒×升 [Piece.index()][Square.index()]（盤外番兵分を+1確保）
     pub psq: [[u64; Square::NUM + 1]; 32],
-    /// 手駒（加算型）[Color][手駒用PieceType]
-    pub hand: [[u64; PieceType::HAND_NUM]; Color::NUM],
+    /// 手駒（加算型）[Color][PieceType index] — index 0は未使用
+    pub hand: [[u64; 8]; Color::NUM],
     /// 盤上に歩が一枚もない時のキー
     pub no_pawns: u64,
 }
 
 impl Zobrist {
-    /// テーブル初期化
+    /// テーブル初期化（YaneuraOu準拠のPRNGと生成順序）
     pub const fn init() -> Self {
         let mut zobrist = Zobrist {
             side: 0,
             psq: [[0; Square::NUM + 1]; 32],
-            hand: [[0; PieceType::HAND_NUM]; Color::NUM],
+            hand: [[0; 8]; Color::NUM],
             no_pawns: 0,
         };
 
-        // XorShift64で疑似乱数生成
-        let mut seed = 0x123456789ABCDEF0u64;
+        // YaneuraOu準拠: seed = 20151225, Xorshift64*, 1キーあたり4回呼び出し
+        let mut seed: u64 = 20151225;
 
         // 手番用
-        seed = xorshift64(seed);
-        zobrist.side = seed;
+        let (s, key) = next_key(seed);
+        seed = s;
+        zobrist.side = key;
 
         // 無歩時のキー
-        seed = xorshift64(seed);
-        zobrist.no_pawns = seed;
+        let (s, key) = next_key(seed);
+        seed = s;
+        zobrist.no_pawns = key;
 
         // 駒×升
         // pc == 0 (Piece::NONE) は常に0を保つためスキップ
@@ -42,30 +44,54 @@ impl Zobrist {
         while pc < 32 {
             let mut sq = 0;
             while sq < Square::NUM {
-                seed = xorshift64(seed);
-                zobrist.psq[pc][sq] = seed;
+                let (s, key) = next_key(seed);
+                seed = s;
+                zobrist.psq[pc][sq] = key;
                 sq += 1;
             }
             pc += 1;
         }
 
-        // 手駒（HAND_NUMぶんのみ生成）
+        // 手駒（PieceType raw値でインデックス、0はスキップ）
         let mut c = 0;
         while c < Color::NUM {
-            let mut pt = 0;
-            while pt < PieceType::HAND_NUM {
-                seed = xorshift64(seed);
-                zobrist.hand[c][pt] = seed;
-                pt += 1;
+            let mut pr = 1;
+            while pr < 8 {
+                let (s, key) = next_key(seed);
+                seed = s;
+                zobrist.hand[c][pr] = key;
+                pr += 1;
             }
             c += 1;
         }
+
+        // 最後のseed値は未使用だがPRNG状態保持のため意図的に保持
+        let _ = seed;
 
         zobrist
     }
 }
 
-/// XorShift64疑似乱数生成（const fn対応）
+/// Xorshift64* 疑似乱数生成（YaneuraOu準拠、const fn対応）
+/// shifts: 12, 25, 27 + multiply by 2685821657736338717
+const fn xorshift64_star(mut s: u64) -> (u64, u64) {
+    s ^= s >> 12;
+    s ^= s << 25;
+    s ^= s >> 27;
+    let value = s.wrapping_mul(2685821657736338717u64);
+    (s, value)
+}
+
+/// 4回PRNGを呼び、r1を返す（YaneuraOu準拠: 64bitモードでも4回呼んでPRNG状態を進める）
+const fn next_key(seed: u64) -> (u64, u64) {
+    let (s, r1) = xorshift64_star(seed);
+    let (s, _) = xorshift64_star(s);
+    let (s, _) = xorshift64_star(s);
+    let (s, _) = xorshift64_star(s);
+    (s, r1)
+}
+
+/// XorShift64疑似乱数生成（パス権用、const fn対応）
 const fn xorshift64(mut x: u64) -> u64 {
     x ^= x << 13;
     x ^= x >> 7;
@@ -91,21 +117,7 @@ pub fn zobrist_no_pawns() -> u64 {
 /// 手駒のハッシュを取得
 #[inline]
 pub fn zobrist_hand(color: Color, pt: PieceType) -> u64 {
-    let idx = hand_index(pt).expect("zobrist_hand called with non-hand piece");
-    ZOBRIST.hand[color.index()][idx]
-}
-
-const fn hand_index(pt: PieceType) -> Option<usize> {
-    match pt {
-        PieceType::Pawn => Some(0),
-        PieceType::Lance => Some(1),
-        PieceType::Knight => Some(2),
-        PieceType::Silver => Some(3),
-        PieceType::Gold => Some(4),
-        PieceType::Bishop => Some(5),
-        PieceType::Rook => Some(6),
-        _ => None,
-    }
+    ZOBRIST.hand[color.index()][pt.index()]
 }
 
 /// 手番のハッシュを取得

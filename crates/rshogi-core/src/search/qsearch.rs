@@ -2,16 +2,17 @@
 //!
 //! 王手や駒取りなど、局面が安定するまで探索を続ける。
 
+#[cfg(not(feature = "search-no-pass-rules"))]
 use crate::eval::evaluate_pass_rights;
 use crate::position::Position;
-use crate::types::{Bound, Depth, Move, Value, DEPTH_QS, DEPTH_UNSEARCHED, MAX_PLY};
+use crate::types::{Bound, Move, Value, DEPTH_QS, DEPTH_UNSEARCHED, MAX_PLY};
 
 use super::alpha_beta::{draw_jitter, to_corrected_static_eval, SearchContext, SearchState};
 use super::eval_helpers::correction_value;
 use super::movepicker::piece_value;
 use super::search_helpers::{
-    check_abort, clear_cont_history_for_null, cont_history_ref, cont_history_tables, nnue_evaluate,
-    nnue_pop, nnue_push, set_cont_history_for_move,
+    check_abort, clear_cont_history_for_null, cont_history_tables, do_move_and_push, nnue_evaluate,
+    nnue_pop, set_cont_history_for_move,
 };
 use super::stats::{inc_stat, inc_stat_by_depth};
 #[cfg(feature = "tt-trace")]
@@ -30,7 +31,6 @@ pub(super) fn qsearch<const NT: u8>(
     st: &mut SearchState,
     ctx: &SearchContext<'_>,
     pos: &mut Position,
-    depth: Depth,
     alpha: Value,
     beta: Value,
     ply: i32,
@@ -44,11 +44,6 @@ pub(super) fn qsearch<const NT: u8>(
     inc_stat!(st, qs_nodes);
     #[cfg(feature = "search-stats")]
     {
-        // depth を 0, -1, -2, ... から 0, 1, 2, ... にマップ
-        let depth_idx = (-depth).max(0) as usize;
-        if depth_idx < super::stats::STATS_MAX_DEPTH {
-            st.stats.qs_nodes_by_depth[depth_idx] += 1;
-        }
         if in_check {
             st.stats.qs_in_check_nodes += 1;
         }
@@ -72,19 +67,25 @@ pub(super) fn qsearch<const NT: u8>(
 
     let rep_state = pos.repetition_state(ply);
     if rep_state.is_repetition() || rep_state.is_superior_inferior() {
-        let v = draw_value(rep_state, pos.side_to_move());
+        let v = draw_value(rep_state, pos.side_to_move(), &ctx.draw_value_table);
         if v != Value::NONE {
-            if v == Value::DRAW {
-                let jittered = Value::new(v.raw() + draw_jitter(st.nodes, &ctx.tune_params));
-                return value_from_tt(jittered, ply);
+            // YaneuraOu準拠: REPETITION_DRAW は draw_value_table の値に関わらず
+            // draw_jitter(value_draw(nodes)) を加える。
+            if rep_state == crate::types::RepetitionState::Draw {
+                let jittered = Value::new(v.raw() + draw_jitter(st.nodes, ctx.tune_params));
+                return jittered;
             }
             return value_from_tt(v, ply);
         }
     }
 
     // 引き分け手数ルール（YaneuraOu準拠、MaxMovesToDrawオプション）
+    // YO: draw_value(REPETITION_DRAW, stm) + value_draw(nodes)
     if ctx.max_moves_to_draw > 0 && pos.game_ply() > ctx.max_moves_to_draw {
-        return Value::new(Value::DRAW.raw() + draw_jitter(st.nodes, &ctx.tune_params));
+        return Value::new(
+            ctx.draw_value_table[pos.side_to_move() as usize].raw()
+                + draw_jitter(st.nodes, ctx.tune_params),
+        );
     }
 
     let key = pos.key();
@@ -95,7 +96,7 @@ pub(super) fn qsearch<const NT: u8>(
     st.stack[ply as usize].tt_hit = tt_hit;
     // probe() で to_move 変換に失敗した手は除外済み。
     // qsearch 側で pseudo-legal で再度潰さず、そのまま使用する。
-    let mut tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
+    let tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
     let mut tt_value = if tt_hit {
         value_from_tt(tt_data.value, ply)
     } else {
@@ -172,7 +173,7 @@ pub(super) fn qsearch<const NT: u8>(
             thread_id: ctx.thread_id,
             ply,
             key,
-            search_depth: depth,
+            search_depth: DEPTH_QS,
             depth: tt_data.depth,
             bound: tt_data.bound,
             value: tt_value,
@@ -216,7 +217,8 @@ pub(super) fn qsearch<const NT: u8>(
                         key,
                         depth: DEPTH_QS,
                         bound: Bound::Exact,
-                        is_pv: pv_hit,
+                        // YaneuraOu準拠: mate1ではss->ttPvを使用 (yaneuraou-search.cpp:4473)
+                        is_pv: st.stack[ply as usize].tt_pv,
                         tt_move: mate_move,
                         stored_value: mate_value,
                         eval: unadjusted_static_eval,
@@ -226,10 +228,11 @@ pub(super) fn qsearch<const NT: u8>(
                             Move::NONE
                         },
                     });
+                    // YaneuraOu準拠: mate1ではss->ttPvを使用 (yaneuraou-search.cpp:4473)
                     tt_result.write(
                         key,
                         mate_value,
-                        pv_hit,
+                        st.stack[ply as usize].tt_pv,
                         Bound::Exact,
                         DEPTH_QS,
                         mate_move,
@@ -248,14 +251,18 @@ pub(super) fn qsearch<const NT: u8>(
     if !in_check && unadjusted_static_eval != Value::NONE {
         static_eval = to_corrected_static_eval(unadjusted_static_eval, corr_value);
         // パス権評価を動的に追加（TTには保存されないので手数依存でもOK）
-        static_eval += evaluate_pass_rights(pos, pos.game_ply() as u16);
+        #[cfg(not(feature = "search-no-pass-rules"))]
+        {
+            static_eval += evaluate_pass_rights(pos, pos.game_ply() as u16);
+        }
     }
 
     st.stack[ply as usize].static_eval = static_eval;
 
     let mut alpha = alpha;
+    // in_check時は-VALUE_INFINITEで初期化
     let mut best_value = if in_check {
-        Value::mated_in(ply)
+        -Value::INFINITE
     } else {
         static_eval
     };
@@ -331,12 +338,8 @@ pub(super) fn qsearch<const NT: u8>(
         static_eval + Value::new(ctx.tune_params.qsearch_futility_base)
     };
 
-    if depth <= DEPTH_QS
-        && tt_move.is_some()
-        && ((!pos.capture_stage(tt_move) && !pos.gives_check(tt_move)) || depth < -16)
-    {
-        tt_move = Move::NONE;
-    }
+    // YaneuraOu準拠: TT手のフィルタリングはMovePickerのpseudo_legalチェックに委ねる。
+    // 非capture非checkのTT手は moves loop の !capture → continue で除外される。
 
     let prev_move = if ply >= 1 {
         st.stack[(ply - 1) as usize].current_move
@@ -369,7 +372,11 @@ pub(super) fn qsearch<const NT: u8>(
             };
 
             loop {
-                let mv = ctx.history.with_read(|h| mp.next_move(pos, h));
+                // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
+                let mv = {
+                    let h = unsafe { ctx.history.as_ref_unchecked() };
+                    mp.next_move(pos, h)
+                };
                 if mv == Move::NONE {
                     break;
                 }
@@ -377,36 +384,9 @@ pub(super) fn qsearch<const NT: u8>(
             }
         }
 
-        if !in_check && depth == DEPTH_QS {
-            let mut buf = crate::movegen::ExtMoveBuffer::new();
-            let gen_type = if ctx.generate_all_legal_moves {
-                crate::movegen::GenType::QuietChecksAll
-            } else {
-                crate::movegen::GenType::QuietChecks
-            };
-            crate::movegen::generate_with_type(pos, gen_type, &mut buf, None);
-            for ext in buf.iter() {
-                if buf_moves.contains(&ext.mv) {
-                    continue;
-                }
-                buf_moves.push(ext.mv);
-            }
-        }
-
-        if !in_check && depth <= -5 && ply >= 1 && prev_move.is_normal() {
-            let mut buf = crate::movegen::ExtMoveBuffer::new();
-            let rec_sq = prev_move.to();
-            let gen_type = if ctx.generate_all_legal_moves {
-                crate::movegen::GenType::RecapturesAll
-            } else {
-                crate::movegen::GenType::Recaptures
-            };
-            crate::movegen::generate_with_type(pos, gen_type, &mut buf, Some(rec_sq));
-            buf_moves.clear();
-            for ext in buf.iter() {
-                buf_moves.push(ext.mv);
-            }
-        }
+        // YaneuraOu準拠: qsearchではquiet checksを生成しない
+        // YOのMovePicker qsearchステージは QSEARCH_TT → QCAPTURE_INIT → QCAPTURE のみ
+        // (movepick.cpp line 69)
 
         buf_moves
     };
@@ -432,15 +412,8 @@ pub(super) fn qsearch<const NT: u8>(
         let gives_check = pos.gives_check(mv);
         let capture = pos.capture_stage(mv);
 
-        if !in_check && depth <= DEPTH_QS && !capture && !gives_check {
-            continue;
-        }
-
-        if !in_check && capture && !pos.see_ge(mv, Value::ZERO) {
-            inc_stat!(st, qs_see_pruned);
-            continue;
-        }
-
+        // YaneuraOu準拠: moveCount は pruning の前にインクリメント。
+        // 非捕獲・非王手の TT 手もカウントに含める。
         move_count += 1;
 
         if !best_value.is_loss() {
@@ -463,25 +436,20 @@ pub(super) fn qsearch<const NT: u8>(
 
                 if !pos.see_ge(mv, alpha - futility_base) {
                     inc_stat!(st, qs_futility_pruned);
-                    best_value = best_value.min(alpha.min(futility_base));
+                    // YaneuraOu準拠: SEE で alpha - futility_base を下回った場合、
+                    // best_value を futility_base（楽観的上限）で更新する。
+                    // alpha.min() を取るのは、futility_base > alpha のケースで
+                    // best_value が alpha を超えないようにするため。
+                    best_value = alpha.min(futility_base);
                     continue;
                 }
             }
+            // YaneuraOu準拠: qsearchでは非捕獲手をすべてスキップ
             if !capture {
-                let cont_score =
-                    cont_history_ref(st, ctx, ply, 1).get(mv.moved_piece_after(), mv.to()) as i32;
-
-                let pawn_idx = pos.pawn_history_index();
-                let pawn_score = ctx.history.with_read(|h| {
-                    h.pawn_history.get(pawn_idx, pos.moved_piece(mv), mv.to()) as i32
-                });
-                if cont_score + pawn_score <= 5868 {
-                    inc_stat!(st, qs_history_pruned);
-                    continue;
-                }
+                continue;
             }
 
-            if !pos.see_ge(mv, Value::new(-74)) {
+            if !pos.see_ge(mv, Value::new(-78)) {
                 inc_stat!(st, qs_see_margin_pruned);
                 continue;
             }
@@ -492,9 +460,7 @@ pub(super) fn qsearch<const NT: u8>(
         // 実際に探索された手をカウント
         inc_stat!(st, qs_moves_searched);
 
-        let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, ctx.tt);
-        nnue_push(st, dirty_piece);
-        st.nodes += 1;
+        do_move_and_push(st, pos, mv, gives_check, ctx.tt);
 
         // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う
         if mv.is_pass() {
@@ -505,8 +471,7 @@ pub(super) fn qsearch<const NT: u8>(
             set_cont_history_for_move(st, ctx, ply, in_check, capture, cont_hist_pc, cont_hist_to);
         }
 
-        let value =
-            -qsearch::<NT>(st, ctx, pos, depth - 1, -beta, -alpha, ply + 1, limits, time_manager);
+        let value = -qsearch::<NT>(st, ctx, pos, -beta, -alpha, ply + 1, limits, time_manager);
 
         nnue_pop(st);
         pos.undo_move(mv);
@@ -517,9 +482,11 @@ pub(super) fn qsearch<const NT: u8>(
 
         if value > best_value {
             best_value = value;
-            best_move = mv;
 
             if value > alpha {
+                // YaneuraOu準拠: value > alpha のときのみ bestMove を更新
+                best_move = mv;
+
                 if value >= beta {
                     break;
                 }

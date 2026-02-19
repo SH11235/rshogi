@@ -28,8 +28,8 @@ use super::tune_params::SearchTuneParams;
 /// PawnHistoryのサイズ（2のべき乗）
 pub const PAWN_HISTORY_SIZE: usize = 8192;
 
-/// CorrectionHistoryのサイズ（2のべき乗）
-pub const CORRECTION_HISTORY_SIZE: usize = 32768;
+/// CorrectionHistoryのサイズ（2のべき乗、YaneuraOu準拠: uint16_t::MAX+1 = 65536）
+pub const CORRECTION_HISTORY_SIZE: usize = 65536;
 
 /// CorrectionHistoryの値の制限
 pub const CORRECTION_HISTORY_LIMIT: i32 = 1024;
@@ -38,9 +38,28 @@ pub const CORRECTION_HISTORY_LIMIT: i32 = 1024;
 pub const LOW_PLY_HISTORY_SIZE: usize = 5;
 
 /// from_toインデックスのサイズ
-/// 将棋では from = SQUARE_NB + 0..6 で駒打ちを表す
-/// (81マス + 7種の駒打ち) × 81マス
-pub const FROM_TO_SIZE: usize = (Square::NUM + 7) * Square::NUM;
+/// YaneuraOu準拠: Move の下位16bit (raw値) をそのまま使用するため 2^16 = 65536。
+/// bit 0-6: to, bit 7-13: from/駒種, bit 14: 打ちフラグ, bit 15: 成りフラグ
+pub const FROM_TO_SIZE: usize = 1 << 16;
+
+// =============================================================================
+// History初期値定数 (YaneuraOu準拠)
+// =============================================================================
+// cf. yaneuraou-search.cpp Worker::clear()
+// 多くの履歴エントリは探索後に負の値になるため、
+// 開始値を「正しい」方向にシフトさせることでLMR/枝刈りの精度を上げる。
+
+/// mainHistory初期値 (YO: mainHistoryDefault = 68)
+const MAIN_HISTORY_INIT: i16 = 68;
+
+/// captureHistory初期値 (YO: captureHistory.fill(-689))
+const CAPTURE_HISTORY_INIT: i16 = -689;
+
+/// continuationHistory初期値 (YO: continuationHistory.fill(-529))
+pub const CONTINUATION_HISTORY_INIT: i16 = -529;
+
+/// pawnHistory初期値 (YO: pawnHistory.clear_range(-1238, ...))
+const PAWN_HISTORY_INIT: i16 = -1238;
 
 /// 駒種の数（PieceType::NUM相当）
 const PIECE_TYPE_NUM: usize = PieceType::NUM + 1; // None含む
@@ -171,11 +190,11 @@ impl ButterflyHistory {
         self.table[color.index()][mv.history_index()].update(bonus);
     }
 
-    /// クリア
+    /// クリア（YO準拠: 初期値68）
     pub fn clear(&mut self) {
         for color_table in &mut self.table {
             for entry in color_table.iter_mut() {
-                entry.set(0);
+                entry.set(MAIN_HISTORY_INIT);
             }
         }
     }
@@ -199,11 +218,13 @@ pub struct LowPlyHistory {
 }
 
 impl LowPlyHistory {
-    /// 新しいLowPlyHistoryを作成
+    /// 新しいLowPlyHistoryを作成（YO準拠: 初期値97）
     pub fn new() -> Self {
-        Self {
+        let mut lph = Self {
             table: [[StatsEntry::default(); FROM_TO_SIZE]; LOW_PLY_HISTORY_SIZE],
-        }
+        };
+        lph.clear();
+        lph
     }
 
     /// 値を取得
@@ -224,11 +245,11 @@ impl LowPlyHistory {
         }
     }
 
-    /// クリア
+    /// クリア（YO準拠: 初期値97）
     pub fn clear(&mut self) {
         for ply_table in &mut self.table {
             for entry in ply_table.iter_mut() {
-                entry.set(0);
+                entry.set(97);
             }
         }
     }
@@ -298,12 +319,12 @@ impl CapturePieceToHistory {
         self.table[pc.index()][to.index()][captured_pt as usize].update(bonus);
     }
 
-    /// クリア
+    /// クリア（YO準拠: 初期値-689）
     pub fn clear(&mut self) {
         for pc_table in self.table.iter_mut() {
             for sq_table in pc_table.iter_mut() {
                 for entry in sq_table.iter_mut() {
-                    entry.set(0);
+                    entry.set(CAPTURE_HISTORY_INIT);
                 }
             }
         }
@@ -348,11 +369,16 @@ impl PieceToHistory {
         self.table[pc.index()][to.index()].update(bonus);
     }
 
-    /// クリア
+    /// クリア（YO準拠: 初期値-529）
     pub fn clear(&mut self) {
+        self.fill(CONTINUATION_HISTORY_INIT);
+    }
+
+    /// 指定した値で全エントリを埋める
+    pub fn fill(&mut self, value: i16) {
         for pc_table in &mut self.table {
             for entry in pc_table.iter_mut() {
-                entry.set(0);
+                entry.set(value);
             }
         }
     }
@@ -487,12 +513,12 @@ impl PawnHistory {
         self.table[pawn_key_index][pc.index()][to.index()].update(bonus);
     }
 
-    /// クリア
+    /// クリア（YO準拠: 初期値-1238）
     pub fn clear(&mut self) {
         for pawn_table in self.table.iter_mut() {
             for pc_table in pawn_table.iter_mut() {
                 for entry in pc_table.iter_mut() {
-                    entry.set(0);
+                    entry.set(PAWN_HISTORY_INIT);
                 }
             }
         }
@@ -701,11 +727,12 @@ pub struct HistoryTables {
 impl HistoryTables {
     /// 新しいHistoryTablesを作成（ヒープ確保）
     ///
-    /// `Box::new_zeroed` で一括確保し、CorrectionHistoryのみ初期値を設定する。
+    /// `Box::new_zeroed` で一括確保し、YO準拠の初期値を設定する。
     pub fn new_boxed() -> Box<Self> {
         // SAFETY: 各テーブルは数値型のみで構成され、ゼロ初期化は常に有効。
         let mut history = unsafe { Box::<Self>::new_zeroed().assume_init() };
-        history.correction_history.fill_initial_values();
+        // YO準拠の初期値を全テーブルに設定
+        history.clear();
         history
     }
 
@@ -731,22 +758,13 @@ impl HistoryTables {
 
 /// History用の内部可変ラッパー
 ///
-/// 参照を外部に漏らさないために `with_read`/`with_write` を使用する。
-/// これにより「束縛禁止」を型レベルで強制できる。
+/// `UnsafeCell` で包み、`as_ref_unchecked`/`as_mut_unchecked` で直接参照を取得する。
 ///
 /// ## 安全性
 ///
-/// - 参照はクロージャ内に閉じ込められ、外部に漏れない
 /// - `PhantomData<Rc<()>>` により `!Send` を強制（単一スレッド保証）
-/// - 再帰呼び出し時の参照エイリアス問題を設計で防止
-///
-/// ## 使用パターン
-///
-/// ```ignore
-/// let mv = ctx.history.with_read(|h| mp.next_move(pos, h));
-/// // この時点で &HistoryTables は存在しない（型で保証）
-/// let value = search_node(st, ctx, pos, ...);
-/// ```
+/// - 呼び出し側で `&` と `&mut` の排他性を手動で保証する
+/// - 探索ループ内では読み取り参照のみ、ノード末尾で書き込み参照を使用する設計
 pub struct HistoryCell {
     inner: UnsafeCell<HistoryTables>,
     /// `!Send` を強制するためのマーカー（単一スレッド保証）
@@ -774,40 +792,33 @@ impl HistoryCell {
         // PhantomDataはサイズ0のマーカー型でゼロ初期化は無害
         // new_zeroedで直接ヒープに確保し、スタックオーバーフローを回避
         let cell = unsafe { Box::<Self>::new_zeroed().assume_init() };
-        // correction_historyは初期値が0ではないので再初期化が必要
-        cell.with_write(|h| h.correction_history.fill_initial_values());
+        // YO準拠の初期値を全テーブルに設定
+        // SAFETY: 初期化時のみ使用、他の参照と同時保持しない
+        unsafe { cell.as_mut_unchecked() }.clear();
         cell
     }
 
-    /// 読み取りアクセス（クロージャ内に参照を閉じ込める）
-    ///
-    /// 参照はクロージャ内でのみ有効。外部に漏れないため、
-    /// 再帰呼び出し時に親の参照が残存する問題を型で防止できる。
+    /// 内部の HistoryTables への不変参照を直接取得
     ///
     /// # Safety
     ///
-    /// このメソッドは内部でunsafeを使用するが、以下の不変条件により安全：
-    /// - 参照はクロージャ内に閉じ込められ、外部に漏れない
-    /// - 設計上、`with_read`中に`with_write`を呼ばない
+    /// 返された参照の生存期間中に `as_mut_unchecked` を呼ばないこと。
+    /// 単一スレッド内で使用し、書き込み参照と同時に保持しないこと。
     #[inline]
-    pub fn with_read<R>(&self, f: impl FnOnce(&HistoryTables) -> R) -> R {
-        // SAFETY: 参照はクロージャ内に閉じる（型で保証）
-        // MovePickerループ内でのみ使用し、再帰呼び出し時には参照は存在しない
-        unsafe { f(&*self.inner.get()) }
+    pub unsafe fn as_ref_unchecked(&self) -> &HistoryTables {
+        &*self.inner.get()
     }
 
-    /// 書き込みアクセス（クロージャ内に参照を閉じ込める）
+    /// 内部の HistoryTables への可変参照を直接取得
     ///
     /// # Safety
     ///
-    /// このメソッドは内部でunsafeを使用するが、以下の不変条件により安全：
-    /// - MovePickerループ外でのみ呼ぶ（設計で保証）
-    /// - 参照はクロージャ内に閉じ込められる
+    /// 他の参照（`as_ref_unchecked` 含む）が存在しないこと。
+    /// 単一スレッド内で使用し、他の参照と同時に保持しないこと。
     #[inline]
-    pub fn with_write<R>(&self, f: impl FnOnce(&mut HistoryTables) -> R) -> R {
-        // SAFETY: MovePickerループ外でのみ呼ぶ（設計で保証）
-        // ノード末尾でHistory更新時に使用
-        unsafe { f(&mut *self.inner.get()) }
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn as_mut_unchecked(&self) -> &mut HistoryTables {
+        &mut *self.inner.get()
     }
 
     /// 内部の HistoryTables への可変参照を取得（初期化用）
@@ -854,14 +865,6 @@ pub fn stat_malus(depth: i32, move_count: i32, tune_params: &SearchTuneParams) -
     (tune_params.stat_malus_depth_mult * depth + tune_params.stat_malus_offset)
         .min(tune_params.stat_malus_max)
         - tune_params.stat_malus_move_count_mult * move_count
-}
-
-// 後方互換性のため旧APIも残す（非推奨）
-/// History更新用のボーナスを計算（旧API、非推奨）
-#[deprecated(note = "Use stat_bonus(depth, is_tt_move, tune_params) instead")]
-#[inline]
-pub fn stat_bonus_old(depth: i32) -> i32 {
-    (130 * depth - 103).min(1652)
 }
 
 // =============================================================================
@@ -1007,9 +1010,12 @@ mod tests {
         let mut history = LowPlyHistory::new();
         let mv = Move::from_usi("7g7f").unwrap();
 
+        // YO準拠: 初期値97
+        assert_eq!(history.get(0, mv), 97);
+
         history.update(0, mv, 100);
-        assert!(history.get(0, mv) > 0);
-        assert_eq!(history.get(1, mv), 0);
+        assert!(history.get(0, mv) > 97);
+        assert_eq!(history.get(1, mv), 97);
 
         // 範囲外のplyは0を返す
         assert_eq!(history.get(LOW_PLY_HISTORY_SIZE, mv), 0);
@@ -1076,29 +1082,26 @@ mod tests {
     }
 
     #[test]
-    fn test_history_cell_with_read() {
+    fn test_history_cell_read() {
         // HistoryTablesは大きいのでnew_boxedを使用
         let cell = HistoryCell::new_boxed();
 
-        // with_readでクロージャ内で参照を使用
-        let value =
-            cell.with_read(|h| h.main_history.get(Color::Black, Move::from_usi("7g7f").unwrap()));
-        assert_eq!(value, 0);
+        let value = unsafe { cell.as_ref_unchecked() }
+            .main_history
+            .get(Color::Black, Move::from_usi("7g7f").unwrap());
+        assert_eq!(value, MAIN_HISTORY_INIT);
     }
 
     #[test]
-    fn test_history_cell_with_write() {
+    fn test_history_cell_write() {
         // HistoryTablesは大きいのでnew_boxedを使用
         let cell = HistoryCell::new_boxed();
         let mv = Move::from_usi("7g7f").unwrap();
 
-        // with_writeで更新
-        cell.with_write(|h| {
-            h.main_history.update(Color::Black, mv, 100);
-        });
+        unsafe { cell.as_mut_unchecked() }.main_history.update(Color::Black, mv, 100);
 
         // 更新が反映されていることを確認
-        let value = cell.with_read(|h| h.main_history.get(Color::Black, mv));
+        let value = unsafe { cell.as_ref_unchecked() }.main_history.get(Color::Black, mv);
         assert!(value > 0);
     }
 
@@ -1109,15 +1112,13 @@ mod tests {
         let mv = Move::from_usi("7g7f").unwrap();
 
         // 更新
-        cell.with_write(|h| {
-            h.main_history.update(Color::Black, mv, 100);
-        });
+        unsafe { cell.as_mut_unchecked() }.main_history.update(Color::Black, mv, 100);
 
         // クリア
         cell.clear();
 
-        // クリア後は0に戻る
-        let value = cell.with_read(|h| h.main_history.get(Color::Black, mv));
-        assert_eq!(value, 0);
+        // クリア後はYO準拠の初期値に戻る
+        let value = unsafe { cell.as_ref_unchecked() }.main_history.get(Color::Black, mv);
+        assert_eq!(value, MAIN_HISTORY_INIT);
     }
 }

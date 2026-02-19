@@ -8,11 +8,12 @@ use super::board_effect::{
 use super::state::StateInfo;
 use super::zobrist::{zobrist_hand, zobrist_pass_rights, zobrist_psq, zobrist_side};
 use crate::bitboard::{
-    bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect, knight_effect,
-    lance_effect, pawn_effect, rook_effect, silver_effect, Bitboard,
+    bishop_effect, dragon_effect, gold_effect, horse_effect, knight_effect, lance_effect,
+    lance_step_effect, pawn_effect, rook_effect, silver_effect, Bitboard,
 };
 use crate::eval::material::{hand_piece_value, material_needs_board_effects, signed_piece_value};
-use crate::nnue::{ChangedPiece, DirtyPiece, HandChange};
+use crate::nnue::piece_list::PieceList;
+use crate::nnue::{ChangedBonaPiece, DirtyPiece, ExtBonaPiece};
 use crate::prefetch::{NoPrefetch, TtPrefetch};
 use crate::types::{
     Color, Hand, Move, Piece, PieceType, PieceTypeSet, RepetitionState, Square, Value,
@@ -60,6 +61,8 @@ pub struct Position {
     bishop_horse_bb: Bitboard,
     /// 飛・龍（Rook | Dragon）
     rook_dragon_bb: Bitboard,
+    /// Horse | Dragon | King（SILVER_HDK / GOLDS_HDK 計算用）
+    hdk_bb: Bitboard,
 
     // === 手駒 ===
     /// 手駒 [Color]
@@ -78,6 +81,10 @@ pub struct Position {
     pub(super) king_square: [Square; Color::NUM],
     /// パス権ルールが有効かどうか
     pass_rights_enabled: bool,
+
+    // === PieceList (NNUE 高速化) ===
+    /// 全40駒の BonaPiece 管理テーブル
+    pub(super) piece_list: PieceList,
 }
 
 impl Position {
@@ -131,6 +138,7 @@ impl Position {
             golds_bb: Bitboard::EMPTY,
             bishop_horse_bb: Bitboard::EMPTY,
             rook_dragon_bb: Bitboard::EMPTY,
+            hdk_bb: Bitboard::EMPTY,
             hand: [Hand::EMPTY; Color::NUM],
             state_stack: vec![StateInfo::new()],
             state_idx: 0,
@@ -138,6 +146,7 @@ impl Position {
             side_to_move: Color::Black,
             king_square: [Square::SQ_11; Color::NUM],
             pass_rights_enabled: false,
+            piece_list: PieceList::new(),
         }
     }
 
@@ -242,6 +251,12 @@ impl Position {
         matches!(pt, PieceType::Rook | PieceType::Dragon)
     }
 
+    /// 駒種が馬・龍・玉かどうか（HDK合成Bitboard用）
+    #[inline]
+    const fn is_hdk(pt: PieceType) -> bool {
+        matches!(pt, PieceType::Horse | PieceType::Dragon | PieceType::King)
+    }
+
     /// 金相当の駒のBitboard（先後両方）
     #[inline]
     pub fn golds(&self) -> Bitboard {
@@ -276,6 +291,12 @@ impl Position {
     #[inline]
     pub fn king_square(&self, c: Color) -> Square {
         self.king_square[c.index()]
+    }
+
+    /// PieceList への参照を取得
+    #[inline]
+    pub fn piece_list(&self) -> &PieceList {
+        &self.piece_list
     }
 
     /// 手番を取得
@@ -336,9 +357,15 @@ impl Position {
     }
 
     /// 千日手/優劣局面判定（do_move 時に計算した情報を使用）
+    ///
+    /// YaneuraOu準拠: `rep < ply` で判定する（`rep.abs() < ply` ではない）。
+    /// - `rep > 0`: 通常の千日手。`rep` は何手前に同一局面があったかを表す。
+    ///   `rep < ply` でルートより前の局面との千日手を除外する。
+    /// - `rep < 0`: 連続王手の千日手（4回目以降）。負値は常に `ply`（正値）より小さいため
+    ///   無条件で検出される。`rep.abs()` にすると連続王手千日手を見逃す。
     pub fn repetition_state(&self, ply: i32) -> RepetitionState {
         let rep = self.cur_state().repetition;
-        if rep != 0 && rep.abs() < ply {
+        if rep != 0 && rep < ply {
             return self.cur_state().repetition_type;
         }
 
@@ -477,63 +504,42 @@ impl Position {
     }
 
     /// 指定マスに利いている駒（占有指定）
+    ///
+    /// Apery/YaneuraOu式: silverEffect で HDK の斜め近接利き、
+    /// goldEffect で HDK の直線近接利きを捕捉し、
+    /// 個別の king_effect / horse近接 / dragon近接 を不要にする。
+    /// また rook_effect を再利用して lance_effect の個別スライド計算を省略。
     pub fn attackers_to_occ(&self, sq: Square, occupied: Bitboard) -> Bitboard {
-        // 各駒種から逆方向に利きを求める
-        // 例: sqに歩で利いている駒 = sqから後手の歩の利き方向にある先手の歩
-        //     sqに後手歩で利いている駒 = sqから先手の歩の利き方向にある後手の歩
+        let silver_hdk = self.pieces_pt(PieceType::Silver) | self.hdk_bb;
+        let golds_hdk = self.golds_bb | self.hdk_bb;
 
-        let b_pawn = pawn_effect(Color::White, sq) & self.pieces(Color::Black, PieceType::Pawn);
-        let w_pawn = pawn_effect(Color::Black, sq) & self.pieces(Color::White, PieceType::Pawn);
+        // 先手の攻め駒: 後手方向の effect で逆引き → pieces_c(Black) でフィルタ
+        let black_attackers = ((pawn_effect(Color::White, sq) & self.pieces_pt(PieceType::Pawn))
+            | (knight_effect(Color::White, sq) & self.pieces_pt(PieceType::Knight))
+            | (silver_effect(Color::White, sq) & silver_hdk)
+            | (gold_effect(Color::White, sq) & golds_hdk))
+            & self.pieces_c(Color::Black);
 
-        let b_knight =
-            knight_effect(Color::White, sq) & self.pieces(Color::Black, PieceType::Knight);
-        let w_knight =
-            knight_effect(Color::Black, sq) & self.pieces(Color::White, PieceType::Knight);
+        // 後手の攻め駒: 先手方向の effect で逆引き → pieces_c(White) でフィルタ
+        let white_attackers = ((pawn_effect(Color::Black, sq) & self.pieces_pt(PieceType::Pawn))
+            | (knight_effect(Color::Black, sq) & self.pieces_pt(PieceType::Knight))
+            | (silver_effect(Color::Black, sq) & silver_hdk)
+            | (gold_effect(Color::Black, sq) & golds_hdk))
+            & self.pieces_c(Color::White);
 
-        let b_silver =
-            silver_effect(Color::White, sq) & self.pieces(Color::Black, PieceType::Silver);
-        let w_silver =
-            silver_effect(Color::Black, sq) & self.pieces(Color::White, PieceType::Silver);
-
-        // 金の動きをする駒 - 事前計算済みのgolds_c()を使用
-        let b_gold = gold_effect(Color::White, sq) & self.golds_c(Color::Black);
-        let w_gold = gold_effect(Color::Black, sq) & self.golds_c(Color::White);
-
-        let king = king_effect(sq)
-            & (self.pieces(Color::Black, PieceType::King)
-                | self.pieces(Color::White, PieceType::King));
-
-        // 遠方駒
-        let b_lance =
-            lance_effect(Color::White, sq, occupied) & self.pieces(Color::Black, PieceType::Lance);
-        let w_lance =
-            lance_effect(Color::Black, sq, occupied) & self.pieces(Color::White, PieceType::Lance);
-
-        // 角・馬 - 事前計算済みのbishop_horse_bbを使用
+        // 角・馬のスライド利き
         let bishop = bishop_effect(sq, occupied) & self.bishop_horse_bb;
 
-        // 飛・龍 - 事前計算済みのrook_dragon_bbを使用
-        let rook = rook_effect(sq, occupied) & self.rook_dragon_bb;
+        // 飛・龍 + 香: rookEffect を再利用して lance_effect の個別計算を省略
+        let rook_eff = rook_effect(sq, occupied);
+        let rook_lance = rook_eff
+            & (self.rook_dragon_bb
+                | (lance_step_effect(Color::White, sq)
+                    & self.pieces(Color::Black, PieceType::Lance))
+                | (lance_step_effect(Color::Black, sq)
+                    & self.pieces(Color::White, PieceType::Lance)));
 
-        // 馬・龍の近接利き
-        let horse = king_effect(sq) & self.pieces_pt(PieceType::Horse);
-        let dragon = king_effect(sq) & self.pieces_pt(PieceType::Dragon);
-
-        b_pawn
-            | w_pawn
-            | b_knight
-            | w_knight
-            | b_silver
-            | w_silver
-            | b_gold
-            | w_gold
-            | king
-            | b_lance
-            | w_lance
-            | bishop
-            | rook
-            | horse
-            | dragon
+        black_attackers | white_attackers | bishop | rook_lance
     }
 
     /// 指定マスに利いている指定手番の駒
@@ -621,6 +627,9 @@ impl Position {
         } else if Self::is_rook_like(pt) {
             self.rook_dragon_bb.set(sq);
         }
+        if Self::is_hdk(pt) {
+            self.hdk_bb.set(sq);
+        }
     }
 
     /// 盤面から駒を取り除く
@@ -646,6 +655,9 @@ impl Position {
             self.bishop_horse_bb.clear(sq);
         } else if Self::is_rook_like(pt) {
             self.rook_dragon_bb.clear(sq);
+        }
+        if Self::is_hdk(pt) {
+            self.hdk_bb.clear(sq);
         }
     }
 
@@ -856,39 +868,31 @@ impl Position {
                 );
             }
 
-            // DirtyPiece: 手駒の変化（us の pt が 1 減る）
-            let old_hand = self.hand[us.index()];
-            let old_count = old_hand.count(pt) as u8;
-            let new_count = old_count.saturating_sub(1);
-            // 合法手では溢れないため戻り値を無視
-            let _ = dirty_piece.push_hand_change(HandChange {
-                owner: us,
-                piece_type: pt,
-                old_count,
-                new_count,
-            });
+            // PieceList + DirtyPiece: 手駒 → 盤上
+            let old_count = self.hand[us.index()].count(pt) as u8;
+            let old_bp = ExtBonaPiece::from_hand(us, pt, old_count);
+            let piece_no = self.piece_list.piece_no_of_hand(old_bp.fb);
 
             // 手駒から減らす
             self.hand[us.index()] = self.hand[us.index()].sub(pt);
             new_state.hand_key = new_state.hand_key.wrapping_sub(zobrist_hand(us, pt));
-            // material_value: 打ち駒では手駒→盤上で価値は変化しない
 
             // 盤上に配置
             self.put_piece_internal(pc, to);
             new_state.board_key ^= zobrist_psq(pc, to);
             self.xor_partial_keys(&mut new_state, pc, to);
 
-            new_state.captured_piece = Piece::NONE;
+            let new_bp = ExtBonaPiece::from_board(pc, to);
+            self.piece_list.put_piece_on_board(piece_no, new_bp, to);
 
-            // DirtyPiece: 打ち駒（盤上に新しく現れる）
-            // 合法手では溢れないため戻り値を無視
-            let _ = dirty_piece.push_piece(ChangedPiece {
-                color: us,
-                old_piece: Piece::NONE,
-                old_sq: None,
-                new_piece: pc,
-                new_sq: Some(to),
-            });
+            dirty_piece.dirty_num = 1;
+            dirty_piece.piece_no[0] = piece_no;
+            dirty_piece.changed_piece[0] = ChangedBonaPiece {
+                old_piece: old_bp,
+                new_piece: new_bp,
+            };
+
+            new_state.captured_piece = Piece::NONE;
         } else {
             let from = m.from();
             let to = m.to();
@@ -897,7 +901,6 @@ impl Position {
             let pc = self.piece_on(from);
             let captured = self.piece_on(to);
 
-            // デバッグアサーション: 成りフラグが立っている場合、成れる駒種かをチェック
             debug_assert!(
                 !m.is_promote() || pc.piece_type().can_promote(),
                 "Cannot promote piece {pc:?} (type={:?}) at {from:?} with move {} in position {}\n\
@@ -946,6 +949,10 @@ impl Position {
                 }
             }
 
+            // PieceList: 動く駒の old BonaPiece を記録
+            let piece_no_moved = self.piece_list.piece_no_of_board(from);
+            let old_bp_moved = self.piece_list.bona_piece(piece_no_moved);
+
             // 駒を取る場合
             if captured.is_some() {
                 let captured_pt = captured.piece_type().unpromote();
@@ -956,6 +963,11 @@ impl Position {
                     m.to_usi(),
                     self.to_sfen()
                 );
+
+                // PieceList: 取られた駒の old BonaPiece を記録
+                let piece_no_cap = self.piece_list.piece_no_of_board(to);
+                let old_bp_cap = self.piece_list.bona_piece(piece_no_cap);
+
                 self.remove_piece_internal(to);
                 new_state.board_key ^= zobrist_psq(captured, to);
                 self.xor_partial_keys(&mut new_state, captured, to);
@@ -963,7 +975,7 @@ impl Position {
                 // material_value: 盤上から駒が消える
                 material_value -= signed_piece_value(captured);
 
-                // 手駒に追加（成駒は生駒に戻す）※手駒にならない駒種は無視
+                // 手駒に追加（成駒は生駒に戻す）
                 if matches!(
                     captured_pt,
                     PieceType::Pawn
@@ -974,24 +986,26 @@ impl Position {
                         | PieceType::Bishop
                         | PieceType::Rook
                 ) {
-                    // DirtyPiece: 手駒の変化（us の captured_pt が 1 増える）
-                    let old_hand = self.hand[us.index()];
-                    let old_count = old_hand.count(captured_pt) as u8;
-                    let new_count = old_count.saturating_add(1);
-                    // 合法手では溢れないため戻り値を無視
-                    let _ = dirty_piece.push_hand_change(HandChange {
-                        owner: us,
-                        piece_type: captured_pt,
-                        old_count,
-                        new_count,
-                    });
-
                     self.hand[us.index()] = self.hand[us.index()].add(captured_pt);
                     new_state.hand_key =
                         new_state.hand_key.wrapping_add(zobrist_hand(us, captured_pt));
-
                     material_value += hand_piece_value(us, captured_pt);
                 }
+
+                // PieceList: 取られた駒を手駒に移す
+                let new_count = self.hand[us.index()].count(captured_pt) as u8;
+                let new_bp_cap = ExtBonaPiece::from_hand(us, captured_pt, new_count);
+                self.piece_list.put_piece_on_hand(piece_no_cap, new_bp_cap);
+
+                // DirtyPiece: 取られた駒（[1]に記録）
+                dirty_piece.piece_no[1] = piece_no_cap;
+                dirty_piece.changed_piece[1] = ChangedBonaPiece {
+                    old_piece: old_bp_cap,
+                    new_piece: new_bp_cap,
+                };
+                dirty_piece.dirty_num = 2;
+            } else {
+                dirty_piece.dirty_num = 1;
             }
             new_state.captured_piece = captured;
 
@@ -1015,27 +1029,16 @@ impl Position {
                 dirty_piece.king_moved[us.index()] = true;
             }
 
-            // DirtyPiece: 移動した駒
-            // 合法手では溢れないため戻り値を無視
-            let _ = dirty_piece.push_piece(ChangedPiece {
-                color: us,
-                old_piece: pc,
-                old_sq: Some(from),
-                new_piece: moved_after_pc,
-                new_sq: Some(to),
-            });
+            // PieceList: 動いた駒を新位置に更新
+            let new_bp_moved = ExtBonaPiece::from_board(moved_after_pc, to);
+            self.piece_list.put_piece_on_board(piece_no_moved, new_bp_moved, to);
 
-            // DirtyPiece: 取った駒（盤上から消える）
-            if captured.is_some() {
-                // 合法手では溢れないため戻り値を無視
-                let _ = dirty_piece.push_piece(ChangedPiece {
-                    color: them,
-                    old_piece: captured,
-                    old_sq: Some(to),
-                    new_piece: Piece::NONE,
-                    new_sq: None,
-                });
-            }
+            // DirtyPiece: 動いた駒（[0]に記録）
+            dirty_piece.piece_no[0] = piece_no_moved;
+            dirty_piece.changed_piece[0] = ChangedBonaPiece {
+                old_piece: old_bp_moved,
+                new_piece: new_bp_moved,
+            };
         }
 
         // do_move直後にTTをprefetch（YaneuraOu準拠）
@@ -1092,8 +1095,8 @@ impl Position {
         } else {
             new_state.continuous_check[us.index()] = 0;
         }
-        // 受け手側はリセット
-        new_state.continuous_check[them.index()] = 0;
+        // 受け手側は前の値をそのまま引き継ぐ（YaneuraOu準拠: memcpyで自動的にコピーされる）
+        // rshogi では partial_clone() で既にコピー済みなので、リセットしない
 
         // 5. 手番交代
         self.side_to_move = them;
@@ -1188,10 +1191,17 @@ impl Position {
             let to = m.to();
             let moved_pc = self.piece_on(to);
 
+            // PieceList: 盤上 → 手駒に戻す
+            let piece_no = self.piece_list.piece_no_of_board(to);
+
             // 盤上から除去
             self.remove_piece_internal(to);
             // 手駒に戻す
             self.hand[us.index()] = self.hand[us.index()].add(pt);
+
+            let new_count = self.hand[us.index()].count(pt) as u8;
+            let hand_bp = ExtBonaPiece::from_hand(us, pt, new_count);
+            self.piece_list.put_piece_on_hand(piece_no, hand_bp);
 
             if update_board_effects {
                 let occupied_after = self.occupied();
@@ -1213,15 +1223,31 @@ impl Position {
                 moved_pc
             };
 
+            // PieceList: 動いた駒を from に戻す
+            let piece_no_moved = self.piece_list.piece_no_of_board(to);
+            let from_bp = ExtBonaPiece::from_board(original_pc, from);
+
             if captured.is_some() {
+                let cap_pt = captured.piece_type().unpromote();
+
+                // PieceList: 手駒から取られた駒を盤上に復元
+                let hand_count = self.hand[us.index()].count(cap_pt) as u8;
+                let hand_bp_fb =
+                    crate::nnue::BonaPiece::from_hand_piece(Color::Black, us, cap_pt, hand_count);
+                let piece_no_cap = self.piece_list.piece_no_of_hand(hand_bp_fb);
+                let cap_board_bp = ExtBonaPiece::from_board(captured, to);
+
                 // 駒を元の位置に戻す
                 self.remove_piece_internal(to);
                 self.put_piece_internal(captured, to);
                 // 手駒から除去
-                let cap_pt = captured.piece_type().unpromote();
                 self.hand[us.index()] = self.hand[us.index()].sub(cap_pt);
 
                 self.put_piece_internal(original_pc, from);
+
+                // PieceList 更新
+                self.piece_list.put_piece_on_board(piece_no_cap, cap_board_bp, to);
+                self.piece_list.put_piece_on_board(piece_no_moved, from_bp, from);
 
                 // 玉の移動を戻す
                 if original_pc.piece_type() == PieceType::King {
@@ -1245,6 +1271,9 @@ impl Position {
                 // 駒を元の位置に戻す
                 self.remove_piece_internal(to);
                 self.put_piece_internal(original_pc, from);
+
+                // PieceList 更新
+                self.piece_list.put_piece_on_board(piece_no_moved, from_bp, from);
 
                 // 玉の移動を戻す
                 if original_pc.piece_type() == PieceType::King {
@@ -1368,8 +1397,6 @@ impl Position {
         } else {
             new_state.continuous_check[us.index()] = 0;
         }
-        // 受け手側はリセット（do_moveと同様）
-        new_state.continuous_check[them.index()] = 0;
 
         // 7. 手番交代
         self.side_to_move = them;
@@ -1426,8 +1453,12 @@ impl Position {
         let mut repetition_type = RepetitionState::None;
 
         if max_back >= 4 {
-            let mut dist = 2;
-            let mut st_idx_opt = prev_idx_opt.and_then(|idx| self.state_stack[idx].previous);
+            // YaneuraOu準拠: 千日手は最短4手で成立するため4手前から比較開始
+            let mut dist = 4;
+            let mut st_idx_opt = prev_idx_opt
+                .and_then(|idx| self.state_stack[idx].previous) // 2手前
+                .and_then(|idx| self.state_stack[idx].previous) // 3手前
+                .and_then(|idx| self.state_stack[idx].previous); // 4手前
 
             while dist <= max_back {
                 if let Some(st_idx) = st_idx_opt {
@@ -1652,6 +1683,7 @@ mod tests {
         pos.put_piece(Piece::W_ROOK, rook);
         pos.put_piece(Piece::B_GOLD, blocker);
         pos.put_piece(Piece::B_KNIGHT, knight);
+        pos.init_piece_list();
 
         pos.update_blockers_and_pinners();
         pos.update_check_squares();
@@ -1694,6 +1726,7 @@ mod tests {
         pos.put_piece(Piece::B_ROOK, br);
         pos.put_piece(Piece::B_GOLD, b_blocker);
         pos.put_piece(Piece::W_PAWN, w_target);
+        pos.init_piece_list();
         pos.side_to_move = Color::Black;
         pos.update_blockers_and_pinners();
         pos.update_check_squares();
@@ -1723,6 +1756,7 @@ mod tests {
         pos.put_piece(Piece::W_KING, wk);
         pos.king_square[Color::White.index()] = wk;
         pos.put_piece(Piece::W_ROOK, wr);
+        pos.init_piece_list();
         pos.side_to_move = Color::Black;
         pos.update_blockers_and_pinners();
         pos.update_check_squares();
@@ -1836,6 +1870,7 @@ mod tests {
 
         // 先手に歩を持たせる
         pos.hand[Color::Black.index()] = pos.hand[Color::Black.index()].add(PieceType::Pawn);
+        pos.init_piece_list();
 
         // 5五歩打ち
         let to = Square::new(File::File5, Rank::Rank5);
@@ -1868,6 +1903,7 @@ mod tests {
         pos.put_piece(Piece::W_KING, sq51);
         pos.king_square[Color::Black.index()] = sq59;
         pos.king_square[Color::White.index()] = sq51;
+        pos.init_piece_list();
 
         // 7六歩
         let m = Move::new_move(sq77, sq76, false);
@@ -1900,6 +1936,7 @@ mod tests {
         pos.put_piece(Piece::W_KING, sq51);
         pos.king_square[Color::Black.index()] = sq59;
         pos.king_square[Color::White.index()] = sq51;
+        pos.init_piece_list();
 
         // 7五歩（取る）
         let m = Move::new_move(sq76, sq75, false);
@@ -1933,6 +1970,7 @@ mod tests {
         pos.put_piece(Piece::W_KING, sq51);
         pos.king_square[Color::Black.index()] = sq59;
         pos.king_square[Color::White.index()] = sq51;
+        pos.init_piece_list();
 
         // 2二歩成
         let m = Move::new_move(sq23, sq22, true);
@@ -1992,6 +2030,7 @@ mod tests {
         pos.king_square[Color::Black.index()] = b_king;
         pos.king_square[Color::White.index()] = w_king;
         pos.hand[Color::Black.index()] = pos.hand[Color::Black.index()].add(PieceType::Gold);
+        pos.init_piece_list();
         // check_squares の更新（gives_check() が正しく動作するために必要）
         pos.update_check_squares();
 
@@ -2195,6 +2234,12 @@ mod tests {
         // rook_dragon_bbの整合性チェック
         let expected_rd = pos.pieces_pt(PieceType::Rook) | pos.pieces_pt(PieceType::Dragon);
         assert_eq!(pos.rook_dragon(), expected_rd, "rook_dragon_bb mismatch");
+
+        // hdk_bbの整合性チェック
+        let expected_hdk = pos.pieces_pt(PieceType::Horse)
+            | pos.pieces_pt(PieceType::Dragon)
+            | pos.pieces_pt(PieceType::King);
+        assert_eq!(pos.hdk_bb, expected_hdk, "hdk_bb mismatch");
     }
 
     /// 指し手実行・取り消し後も合成Bitboardの整合性が維持されることを確認
@@ -2223,6 +2268,11 @@ mod tests {
 
             let expected_rd = pos.pieces_pt(PieceType::Rook) | pos.pieces_pt(PieceType::Dragon);
             assert_eq!(pos.rook_dragon(), expected_rd, "rook_dragon_bb mismatch after {mv_str}");
+
+            let expected_hdk = pos.pieces_pt(PieceType::Horse)
+                | pos.pieces_pt(PieceType::Dragon)
+                | pos.pieces_pt(PieceType::King);
+            assert_eq!(pos.hdk_bb, expected_hdk, "hdk_bb mismatch after {mv_str}");
         }
 
         // undo_moveでも整合性維持を確認
@@ -2250,6 +2300,11 @@ mod tests {
                 expected_rd,
                 "rook_dragon_bb mismatch after undo {mv_str}"
             );
+
+            let expected_hdk = pos.pieces_pt(PieceType::Horse)
+                | pos.pieces_pt(PieceType::Dragon)
+                | pos.pieces_pt(PieceType::King);
+            assert_eq!(pos.hdk_bb, expected_hdk, "hdk_bb mismatch after undo {mv_str}");
         }
     }
 
