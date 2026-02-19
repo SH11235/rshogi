@@ -904,6 +904,45 @@ mod tests {
     }
 
     #[test]
+    fn test_draw_value_draw_uses_table_by_side_to_move() {
+        let table = [Value::new(-1), Value::new(1)];
+        assert_eq!(
+            draw_value(RepetitionState::Draw, crate::types::Color::Black, &table),
+            Value::new(-1)
+        );
+        assert_eq!(
+            draw_value(RepetitionState::Draw, crate::types::Color::White, &table),
+            Value::new(1)
+        );
+    }
+
+    #[test]
+    fn test_draw_value_non_draw_states_are_not_table_dependent() {
+        let table = [Value::new(-123), Value::new(456)];
+
+        assert_eq!(
+            draw_value(RepetitionState::Win, crate::types::Color::Black, &table),
+            Value::MATE
+        );
+        assert_eq!(
+            draw_value(RepetitionState::Lose, crate::types::Color::White, &table),
+            -Value::MATE
+        );
+        assert_eq!(
+            draw_value(RepetitionState::Superior, crate::types::Color::Black, &table),
+            Value::new(Value::MATE_IN_MAX_PLY.raw() - 1)
+        );
+        assert_eq!(
+            draw_value(RepetitionState::Inferior, crate::types::Color::White, &table),
+            Value::new(Value::MATED_IN_MAX_PLY.raw() + 1)
+        );
+        assert_eq!(
+            draw_value(RepetitionState::None, crate::types::Color::Black, &table),
+            Value::NONE
+        );
+    }
+
+    #[test]
     fn test_init_stack_array() {
         let stack = init_stack_array();
         assert_eq!(stack.len(), STACK_SIZE);

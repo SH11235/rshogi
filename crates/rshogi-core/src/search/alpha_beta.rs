@@ -51,6 +51,11 @@ use super::tt_sanity::{helper_tt_write_enabled_for_depth, maybe_trace_tt_write, 
 
 use std::sync::LazyLock;
 
+/// YaneuraOuオプション `DrawValueBlack` のデフォルト値。
+pub const DEFAULT_DRAW_VALUE_BLACK: i32 = -2;
+/// YaneuraOuオプション `DrawValueWhite` のデフォルト値。
+pub const DEFAULT_DRAW_VALUE_WHITE: i32 = -2;
+
 #[inline]
 pub(super) fn draw_jitter(nodes: u64, tune_params: &SearchTuneParams) -> i32 {
     // 千日手盲点を避けるため、VALUE_DRAW(0) を ±1 にばらつかせる。
@@ -432,6 +437,12 @@ pub struct SearchWorker {
     /// SPSA向け探索係数
     pub search_tune_params: SearchTuneParams,
 
+    /// YaneuraOuオプション `DrawValueBlack`。
+    pub draw_value_black: i32,
+
+    /// YaneuraOuオプション `DrawValueWhite`。
+    pub draw_value_white: i32,
+
     /// 千日手評価値テーブル (YaneuraOu DrawValueBlack/DrawValueWhite 準拠)
     /// drawValueTable[REPETITION_DRAW][Color] に相当。
     /// Color::Black = 0, Color::White = 1
@@ -494,6 +505,8 @@ impl SearchWorker {
             thread_id,
             allow_tt_write: true,
             search_tune_params,
+            draw_value_black: DEFAULT_DRAW_VALUE_BLACK,
+            draw_value_white: DEFAULT_DRAW_VALUE_WHITE,
             draw_value_table: [Value::ZERO; 2],
             state: SearchState::new(),
         });
@@ -554,6 +567,24 @@ impl SearchWorker {
     #[inline]
     pub fn state_mut(&mut self) -> &mut SearchState {
         &mut self.state
+    }
+
+    /// YaneuraOu準拠: ルート手番に応じて千日手評価値テーブルを初期化する。
+    ///
+    /// - `us == BLACK` のとき `DrawValueBlack` を使用
+    /// - `us == WHITE` のとき `DrawValueWhite` を使用
+    /// - `drawValueTable[REPETITION_DRAW][us] = +draw_value`
+    /// - `drawValueTable[REPETITION_DRAW][~us] = -draw_value`
+    #[inline]
+    fn init_draw_value_table(&mut self, us: Color) {
+        let draw_value_option = if us == Color::Black {
+            self.draw_value_black
+        } else {
+            self.draw_value_white
+        };
+        let dv = draw_value_option * Value::PAWN_VALUE / 100;
+        self.draw_value_table[us as usize] = Value::new(dv);
+        self.draw_value_table[(!us) as usize] = Value::new(-dv);
     }
 
     /// SearchState への参照を取得
@@ -776,17 +807,8 @@ impl SearchWorker {
         limits: &LimitsType,
         time_manager: &mut TimeManagement,
     ) -> Value {
-        // YaneuraOu準拠: 千日手評価値テーブルの初期化 (yaneuraou-search.cpp:789-796)
-        // DrawValueBlack/DrawValueWhite のデフォルト値は -2。
-        // draw_value = DrawValue * PawnValue / 100 = (-2) * 90 / 100 = -1
-        // root側 = +draw_value (引き分けに微小ペナルティ), 相手側 = -draw_value
-        {
-            let us = pos.side_to_move();
-            let draw_value_option: i32 = -2; // YO default: DrawValueBlack = DrawValueWhite = -2
-            let dv = draw_value_option * Value::PAWN_VALUE / 100;
-            self.draw_value_table[us as usize] = Value::new(dv);
-            self.draw_value_table[(!us) as usize] = Value::new(-dv);
-        }
+        // YaneuraOu準拠: 千日手評価値テーブルの初期化 (yaneuraou-search.cpp:758-764)
+        self.init_draw_value_table(pos.side_to_move());
 
         self.state.root_delta = (beta.raw() - alpha.raw()).abs().max(1);
 
@@ -1374,13 +1396,7 @@ impl SearchWorker {
         debug_assert!(pv_idx > 0);
 
         // YaneuraOu準拠: 千日手評価値テーブルの初期化
-        {
-            let us = pos.side_to_move();
-            let draw_value_option: i32 = -2;
-            let dv = draw_value_option * Value::PAWN_VALUE / 100;
-            self.draw_value_table[us as usize] = Value::new(dv);
-            self.draw_value_table[(!us) as usize] = Value::new(-dv);
-        }
+        self.init_draw_value_table(pos.side_to_move());
 
         self.state.root_delta = (beta.raw() - alpha.raw()).abs().max(1);
 

@@ -69,7 +69,9 @@ pub(super) fn qsearch<const NT: u8>(
     if rep_state.is_repetition() || rep_state.is_superior_inferior() {
         let v = draw_value(rep_state, pos.side_to_move(), &ctx.draw_value_table);
         if v != Value::NONE {
-            if v == Value::DRAW {
+            // YaneuraOu準拠: REPETITION_DRAW は draw_value_table の値に関わらず
+            // draw_jitter(value_draw(nodes)) を加える。
+            if rep_state == crate::types::RepetitionState::Draw {
                 let jittered = Value::new(v.raw() + draw_jitter(st.nodes, ctx.tune_params));
                 return jittered;
             }

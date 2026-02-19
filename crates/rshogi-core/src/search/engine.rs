@@ -18,7 +18,7 @@ use super::time_manager::{
 };
 use super::{
     LimitsType, RootMove, SearchTuneParams, SearchWorker, Skill, SkillOptions, ThreadPool,
-    TimeManagement,
+    TimeManagement, DEFAULT_DRAW_VALUE_BLACK, DEFAULT_DRAW_VALUE_WHITE,
 };
 use crate::position::Position;
 use crate::tt::TranspositionTable;
@@ -234,6 +234,10 @@ pub struct Search {
 
     /// 引き分けまでの最大手数（YaneuraOu準拠のエンジンオプション）
     max_moves_to_draw: i32,
+    /// YaneuraOuオプション `DrawValueBlack`
+    draw_value_black: i32,
+    /// YaneuraOuオプション `DrawValueWhite`
+    draw_value_white: i32,
     /// SPSA向け探索係数
     search_tune_params: SearchTuneParams,
 }
@@ -678,6 +682,8 @@ impl Search {
             increase_depth_shared,
             search_again_counter: 0,
             max_moves_to_draw,
+            draw_value_black: DEFAULT_DRAW_VALUE_BLACK,
+            draw_value_white: DEFAULT_DRAW_VALUE_WHITE,
             search_tune_params,
         }
     }
@@ -793,6 +799,36 @@ impl Search {
         self.max_moves_to_draw
     }
 
+    /// YaneuraOuオプション `DrawValueBlack` を設定する。
+    ///
+    /// 有効範囲は `[-30000, 30000]`。
+    pub fn set_draw_value_black(&mut self, v: i32) {
+        self.draw_value_black = v.clamp(-30000, 30000);
+        if let Some(worker) = &mut self.worker {
+            worker.draw_value_black = self.draw_value_black;
+        }
+    }
+
+    /// 現在の `DrawValueBlack` を取得する。
+    pub fn draw_value_black(&self) -> i32 {
+        self.draw_value_black
+    }
+
+    /// YaneuraOuオプション `DrawValueWhite` を設定する。
+    ///
+    /// 有効範囲は `[-30000, 30000]`。
+    pub fn set_draw_value_white(&mut self, v: i32) {
+        self.draw_value_white = v.clamp(-30000, 30000);
+        if let Some(worker) = &mut self.worker {
+            worker.draw_value_white = self.draw_value_white;
+        }
+    }
+
+    /// 現在の `DrawValueWhite` を取得する。
+    pub fn draw_value_white(&self) -> i32 {
+        self.draw_value_white
+    }
+
     /// 探索スレッド数を設定
     pub fn set_num_threads(&mut self, num: usize) {
         // WASM builds without wasm-threads feature use single-threaded search only.
@@ -888,6 +924,8 @@ impl Search {
         let eval_hash_clone = Arc::clone(&self.eval_hash);
         let max_moves = self.max_moves_to_draw;
         let search_tune_params = self.search_tune_params;
+        let draw_value_black = self.draw_value_black;
+        let draw_value_white = self.draw_value_white;
         let worker = self.worker.get_or_insert_with(|| {
             SearchWorker::new(tt_clone, eval_hash_clone, max_moves, 0, search_tune_params)
         });
@@ -895,6 +933,8 @@ impl Search {
         // setoptionで変更された可能性があるため、最新値を反映
         worker.max_moves_to_draw = self.max_moves_to_draw;
         worker.search_tune_params = self.search_tune_params;
+        worker.draw_value_black = self.draw_value_black;
+        worker.draw_value_white = self.draw_value_white;
 
         // 探索状態のリセット（履歴はクリアしない、YaneuraOu準拠）
         worker.prepare_search();
@@ -925,6 +965,8 @@ impl Search {
                 helper_max_depth,
                 self.time_options,
                 self.max_moves_to_draw,
+                draw_value_black,
+                draw_value_white,
                 skill_enabled,
             );
         }
@@ -1985,6 +2027,28 @@ mod tests {
 
                 search.set_max_moves_to_draw(0);
                 assert_eq!(search.max_moves_to_draw(), DEFAULT_MAX_MOVES_TO_DRAW);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn test_set_draw_value_options() {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let mut search = Search::new(16);
+
+                search.set_draw_value_black(123);
+                search.set_draw_value_white(-456);
+                assert_eq!(search.draw_value_black(), 123);
+                assert_eq!(search.draw_value_white(), -456);
+
+                search.set_draw_value_black(40000);
+                search.set_draw_value_white(-40000);
+                assert_eq!(search.draw_value_black(), 30000);
+                assert_eq!(search.draw_value_white(), -30000);
             })
             .unwrap()
             .join()
