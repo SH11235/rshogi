@@ -168,11 +168,11 @@ fn init_check_cand_bb() -> [[[Bitboard; 2]; PieceTypeCheck::NUM]; 81] {
                 silver_bb |= Bitboard::from_square(base);
                 silver_bb |= cross45_step_effect(base);
                 let file_idx = base.file().index() as i16;
-                if let Some(file_r) = File::from_u8((file_idx + 1) as u8) {
+                if let Some(file_r) = File::from_u8((file_idx + 2) as u8) {
                     silver_bb |= Bitboard::from_square(Square::new(file_r, r3));
                 }
-                if file_idx > 0
-                    && let Some(file_l) = File::from_u8((file_idx - 1) as u8)
+                if file_idx > 1
+                    && let Some(file_l) = File::from_u8((file_idx - 2) as u8)
                 {
                     silver_bb |= Bitboard::from_square(Square::new(file_l, r3));
                 }
@@ -321,6 +321,24 @@ mod tests {
             [Color::Black.index()];
         let sq_12 = Square::new(File::File1, Rank::Rank2);
         assert!(lance.contains(sq_12));
+    }
+
+    #[test]
+    fn test_check_cand_silver_includes_two_files_away_on_special_rank() {
+        // YO準拠: 4段目(先手)/6段目(後手)の特殊ケースで「2升隣」が含まれる。
+        // 先手視点: 玉5四 → 基準升5三の2升隣(7三,3三)が候補に入る。
+        let black_king = Square::new(File::File5, Rank::Rank4);
+        let black_silver = CHECK_CAND_BB[black_king.index()][PieceTypeCheck::Silver as usize]
+            [Color::Black.index()];
+        assert!(black_silver.contains(Square::new(File::File7, Rank::Rank3)));
+        assert!(black_silver.contains(Square::new(File::File3, Rank::Rank3)));
+
+        // 後手視点: 玉5六 → 基準升5七の2升隣(7七,3七)が候補に入る。
+        let white_king = Square::new(File::File5, Rank::Rank6);
+        let white_silver = CHECK_CAND_BB[white_king.index()][PieceTypeCheck::Silver as usize]
+            [Color::White.index()];
+        assert!(white_silver.contains(Square::new(File::File7, Rank::Rank7)));
+        assert!(white_silver.contains(Square::new(File::File3, Rank::Rank7)));
     }
 
     #[test]
