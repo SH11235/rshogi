@@ -130,17 +130,6 @@ pub(super) fn step14_pruning(
             };
 
             // YaneuraOu準拠: Continuation history（mainHistoryを含まない）
-            // yaneuraou-search.cpp:3273-3276
-            //
-            // 【実装メモ: df8d771d】
-            // 旧実装(00c06b7f)では hist_score = 2*main_hist + cont0 + cont1 + pawn_hist で判定していた。
-            // YaneuraOu準拠に修正した結果:
-            // - ノード数: 1.3-2.2倍増加（枝刈りが緩くなった）
-            // - 自己対局: 48.25% vs 00c06b7f（200局, 秒読み2秒）
-            // mainHistoryは通常負（悪い手）のため、含めると過剰に枝刈りしていた。
-            // YaneuraOu準拠で正しいが、NPS差により時間制限下では不利。
-            // NPS改善後に再評価予定。
-            // 詳細: docs/step14_implementation_issues.md（localファイルでgit管理外）
             let cont_history = cont_hist_0 + cont_hist_1 + pawn_hist;
 
             // Continuation history based pruning (YaneuraOu: -4312 * depth)
@@ -149,7 +138,6 @@ pub(super) fn step14_pruning(
             }
 
             // YaneuraOu準拠: mainHistoryは pruning判定後に追加
-            // yaneuraou-search.cpp:3283: history += 76 * mainHistory / 32
             let hist_score = cont_history + 76 * main_hist / 32;
 
             // lmrDepth調整 (枝刈りされなかった場合のみ実行)
@@ -166,7 +154,6 @@ pub(super) fn step14_pruning(
             // YaneuraOu準拠: static_eval!=NONEガードなし（!in_check + VALUE_NONEで暗黙的に安全）
             if !step_ctx.in_check && lmr_depth < 11 && futility_value <= step_ctx.alpha.raw() {
                 // YaneuraOu準拠: bestValueをfutilityValueで更新する条件
-                // if (bestValue <= futilityValue && !is_decisive(bestValue) && !is_win(futilityValue))
                 let futility_val = Value::new(futility_value);
                 if step_ctx.best_value <= futility_val
                     && !step_ctx.best_value.is_mate_score()
@@ -180,8 +167,6 @@ pub(super) fn step14_pruning(
             }
 
             // SEE pruning for quiet moves (YaneuraOu: -27 * lmrDepth * lmrDepth)
-            // YaneuraOu準拠: !in_check/lmrDepth>0ガードなし
-            // lmrDepth=0時はthreshold=0でSEE<0の手を枝刈り
             let lmr_depth_clamped = lmr_depth.max(0);
             if !step_ctx
                 .pos

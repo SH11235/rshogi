@@ -1082,10 +1082,45 @@ impl SearchWorker {
                 value
             } else {
                 // YaneuraOu準拠: LMR対象外 (depth < 2) — Step 18
+                // r を使った深さ補正を適用
+                let step18_depth = {
+                    let tune = &self.search_tune_params;
+                    let delta = (beta.raw() - alpha.raw()).abs().max(1);
+                    let root_delta = self.state.root_delta.max(1);
+                    let mut r =
+                        reduction(tune, root_improving, depth, move_count, delta, root_delta);
+                    r += tune.lmr_ttpv_add;
+                    let tt_value_higher = (tt_value_root > alpha) as i32;
+                    let tt_depth_ge = (tt_data.depth >= depth) as i32;
+                    r -= tune.lmr_step16_ttpv_sub_base
+                        + tune.lmr_step16_ttpv_sub_pv_node
+                        + tt_value_higher * tune.lmr_step16_ttpv_sub_tt_value
+                        + tt_depth_ge * tune.lmr_step16_ttpv_sub_tt_depth;
+                    r += tune.lmr_step16_base_add;
+                    r -= move_count * tune.lmr_step16_move_count_mul;
+                    r -= root_correction_value.abs() / tune.lmr_step16_correction_div.max(1);
+                    if tt_capture_root {
+                        r += tune.lmr_step16_tt_capture_add;
+                    }
+                    if self.state.stack[1].cutoff_cnt > 2 {
+                        r += tune.lmr_step16_cutoff_count_add;
+                    }
+                    if mv == tt_move_root {
+                        r -= tune.lmr_step16_tt_move_penalty;
+                    }
+                    let stat_score = self.state.stack[0].stat_score;
+                    r -= stat_score * tune.lmr_step16_stat_score_scale_num / 8192;
+                    // Step 18固有: ttMoveがない場合にrを増加 (yaneuraou-search.cpp:3727-3728)
+                    if tt_move_root.is_none() {
+                        r += 1118;
+                    }
+                    // 深さ補正 (yaneuraou-search.cpp:3748)
+                    new_depth - (r > 3212) as i32 - ((r > 4784 && new_depth > 2) as i32)
+                };
                 // PVS: zero-window search → PV re-search
                 let mut value = -self.search_node_wrapper::<{ NodeType::NonPV as u8 }>(
                     pos,
-                    new_depth,
+                    step18_depth,
                     -alpha - Value::new(1),
                     -alpha,
                     1,
@@ -1163,17 +1198,20 @@ impl SearchWorker {
 
                 if value + inc > alpha {
                     best_move = mv;
-                    alpha = value;
 
                     if value >= beta {
                         break;
                     }
 
-                    // YaneuraOu準拠 (yaneuraou-search.cpp:3866-3867):
+                    // YaneuraOu準拠 (yaneuraou-search.cpp:3953-3954):
                     // alpha改善後、以降の手の探索深さを削減する
                     if depth > 2 && depth < 14 && !value.is_mate_score() {
                         depth -= 2;
                     }
+
+                    // YaneuraOu準拠: alpha更新はbeta判定・depth減算の後
+                    // (yaneuraou-search.cpp:3957)
+                    alpha = value;
                 }
             }
 
@@ -1512,8 +1550,9 @@ impl SearchWorker {
                     limits,
                     time_manager,
                 )
-            } else {
-                // YaneuraOu準拠: rootNode && pvIdx 経路でも Step17/18 の LMR を適用する。
+            } else if depth >= 2 {
+                // YaneuraOu準拠: Step17 LMR (depth >= 2 && moveCount > 1)
+                // (yaneuraou-search.cpp:3657)
                 let (d, deeper_base, deeper_mul, shallower_thr) = {
                     let tune = &self.search_tune_params;
                     let delta = (beta.raw() - alpha.raw()).abs().max(1);
@@ -1618,6 +1657,73 @@ impl SearchWorker {
                     );
                 }
 
+                value
+            } else {
+                // YaneuraOu準拠: Step18 LMR対象外 (depth < 2) — r深さ補正
+                // (yaneuraou-search.cpp:3722-3749)
+                let step18_depth = {
+                    let tune = &self.search_tune_params;
+                    let delta = (beta.raw() - alpha.raw()).abs().max(1);
+                    let root_delta = self.state.root_delta.max(1);
+                    let mut r = reduction(
+                        tune,
+                        root_improving,
+                        depth,
+                        (rm_idx + 1) as i32,
+                        delta,
+                        root_delta,
+                    );
+                    r += tune.lmr_ttpv_add;
+                    let tt_value_higher = (tt_value_root > alpha) as i32;
+                    let tt_depth_ge = (tt_data.depth >= depth) as i32;
+                    r -= tune.lmr_step16_ttpv_sub_base
+                        + tune.lmr_step16_ttpv_sub_pv_node
+                        + tt_value_higher * tune.lmr_step16_ttpv_sub_tt_value
+                        + tt_depth_ge * tune.lmr_step16_ttpv_sub_tt_depth;
+                    r += tune.lmr_step16_base_add;
+                    r -= (rm_idx + 1) as i32 * tune.lmr_step16_move_count_mul;
+                    r -= root_correction_value.abs() / tune.lmr_step16_correction_div.max(1);
+                    if tt_capture_root {
+                        r += tune.lmr_step16_tt_capture_add;
+                    }
+                    if self.state.stack[1].cutoff_cnt > 2 {
+                        r += tune.lmr_step16_cutoff_count_add;
+                    }
+                    if mv == tt_move_root {
+                        r -= tune.lmr_step16_tt_move_penalty;
+                    }
+                    let stat_score = self.state.stack[0].stat_score;
+                    r -= stat_score * tune.lmr_step16_stat_score_scale_num / 8192;
+                    // Step 18固有: ttMoveがない場合にrを増加 (yaneuraou-search.cpp:3727-3728)
+                    if tt_move_root.is_none() {
+                        r += 1118;
+                    }
+                    // 深さ補正 (yaneuraou-search.cpp:3748)
+                    new_depth - (r > 3212) as i32 - ((r > 4784 && new_depth > 2) as i32)
+                };
+                // PVS: zero-window search → PV re-search
+                let mut value = -self.search_node_wrapper::<{ NodeType::NonPV as u8 }>(
+                    pos,
+                    step18_depth,
+                    -alpha - Value::new(1),
+                    -alpha,
+                    1,
+                    true,
+                    limits,
+                    time_manager,
+                );
+                if value > alpha {
+                    value = -self.search_node_wrapper::<{ NodeType::PV as u8 }>(
+                        pos,
+                        new_depth,
+                        -beta,
+                        -alpha,
+                        1,
+                        false,
+                        limits,
+                        time_manager,
+                    );
+                }
                 value
             };
 
@@ -1782,8 +1888,8 @@ impl SearchWorker {
                 let v = draw_value(rep_state, pos.side_to_move(), &ctx.draw_value_table);
                 if v != Value::NONE {
                     if rep_state == RepetitionState::Draw {
-                        let jittered = Value::new(v.raw() + draw_jitter(st.nodes, ctx.tune_params));
-                        return jittered;
+                        let jitter = draw_jitter(st.nodes, ctx.tune_params);
+                        return Value::new(v.raw() + jitter);
                     }
                     return value_from_tt(v, ply);
                 }

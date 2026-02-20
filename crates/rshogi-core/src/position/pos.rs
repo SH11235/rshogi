@@ -1605,10 +1605,15 @@ impl Position {
             | (bishop_effect(ksq, Bitboard::EMPTY) & bishop_bb)
             | (rook_effect(ksq, Bitboard::EMPTY) & rook_bb);
 
+        // YO準拠: スナイパー自身を占有から除外してbetween_bbを計算
+        // これにより同一ライン上の複数スナイパー（例: 王 歩 ^香 ^飛）を
+        // すべてピンナーとして正しく検出できる
+        let occupancy = occupied ^ (snipers & occupied);
+
         let mut blockers = Bitboard::EMPTY;
         let mut pinners = Bitboard::EMPTY;
         for sniper_sq in snipers.iter() {
-            let between = crate::bitboard::between_bb(ksq, sniper_sq) & occupied;
+            let between = crate::bitboard::between_bb(ksq, sniper_sq) & occupancy;
             if between.is_empty() || between.more_than_one() {
                 continue;
             }
@@ -1759,6 +1764,47 @@ mod tests {
             pos.compute_blockers_and_pinners(Color::Black, pos.occupied(), Bitboard::EMPTY);
         assert_eq!(pos.blockers_for_king(Color::Black), blockers_full);
         assert_eq!(pos.cur_state().pinners[Color::White.index()], pinners_full);
+    }
+
+    #[test]
+    fn test_blockers_pinners_detect_multiple_snipers_on_same_line() {
+        // 配置（先手玉5九）:
+        // 5八: 先手金（唯一の遮断駒）
+        // 5七: 後手香（内側スナイパー）
+        // 5一: 後手飛（外側スナイパー）
+        //
+        // YO準拠では occupancy から snipers を除外して between を見るため、
+        // 5七と5一の両方が pinner として検出される。
+        let mut pos = Position::new();
+        let bk = Square::new(File::File5, Rank::Rank9); // 5九
+        let wk = Square::new(File::File1, Rank::Rank1); // 後手玉（位置は任意）
+        let blocker = Square::new(File::File5, Rank::Rank8); // 5八
+        let w_lance = Square::new(File::File5, Rank::Rank7); // 5七
+        let w_rook = Square::new(File::File5, Rank::Rank1); // 5一
+
+        pos.put_piece(Piece::B_KING, bk);
+        pos.king_square[Color::Black.index()] = bk;
+        pos.put_piece(Piece::W_KING, wk);
+        pos.king_square[Color::White.index()] = wk;
+        pos.put_piece(Piece::B_GOLD, blocker);
+        pos.put_piece(Piece::W_LANCE, w_lance);
+        pos.put_piece(Piece::W_ROOK, w_rook);
+        pos.init_piece_list();
+
+        pos.update_blockers_and_pinners();
+
+        let blockers = pos.blockers_for_king(Color::Black);
+        let pinners = pos.cur_state().pinners[Color::Black.index()];
+
+        assert!(blockers.contains(blocker), "5八 should be detected as the single blocker");
+        assert!(
+            pinners.contains(w_lance),
+            "inner sniper (5七 lance) should be detected as pinner"
+        );
+        assert!(
+            pinners.contains(w_rook),
+            "outer sniper (5一 rook) should also be detected as pinner"
+        );
     }
 
     #[test]

@@ -71,8 +71,8 @@ pub(super) fn qsearch<const NT: u8>(
             // YaneuraOu準拠: REPETITION_DRAW は draw_value_table の値に関わらず
             // draw_jitter(value_draw(nodes)) を加える。
             if rep_state == crate::types::RepetitionState::Draw {
-                let jittered = Value::new(v.raw() + draw_jitter(st.nodes, ctx.tune_params));
-                return jittered;
+                let jitter = draw_jitter(st.nodes, ctx.tune_params);
+                return Value::new(v.raw() + jitter);
             }
             return value_from_tt(v, ply);
         }
