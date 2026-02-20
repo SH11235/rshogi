@@ -649,27 +649,13 @@ impl RootMoves {
             return;
         }
 
-        // インデックス付きソート: (元のindex, スコア)でソート
-        let mut indexed: Vec<(usize, Value, Value)> = self.moves[start..end]
-            .iter()
-            .enumerate()
-            .map(|(i, rm)| (start + i, rm.score, rm.previous_score))
-            .collect();
-
-        // スコア降順、同点ならprevious_score降順、それでも同点なら元のインデックス昇順（安定性）
-        indexed.sort_by(|a, b| match b.1.cmp(&a.1) {
-            std::cmp::Ordering::Equal => match b.2.cmp(&a.2) {
-                std::cmp::Ordering::Equal => a.0.cmp(&b.0),
-                ord => ord,
-            },
+        // YaneuraOu準拠:
+        //   std::stable_sort + RootMove::operator< (score, previousScore) と同型。
+        // Rustのslice::sort_byは安定ソートなので、両キー同値時は元順序を保持する。
+        self.moves[start..end].sort_by(|a, b| match b.score.cmp(&a.score) {
+            std::cmp::Ordering::Equal => b.previous_score.cmp(&a.previous_score),
             ord => ord,
         });
-
-        // ソート結果を適用
-        let sorted_moves: Vec<RootMove> =
-            indexed.iter().map(|(idx, _, _)| self.moves[*idx].clone()).collect();
-
-        self.moves[start..end].clone_from_slice(&sorted_moves);
     }
 
     /// 指定した手を含むか
