@@ -67,6 +67,9 @@ move-features = []
 # 有効時は環境変数で制御: RSHOGI_DEBUG_TT_TRACE, RSHOGI_DEBUG_TT_SANITY,
 # RSHOGI_DISABLE_HELPER_TT_WRITE, RSHOGI_TT_TRACE_ROOT_MOVE 等
 tt-trace = []
+# TT hit時の非PVノードで TT eval を再利用する（USE_LAZY_EVALUATE相当）
+# 無効時は YO 現行ビルド整合のため常に NNUE 再評価する
+use-lazy-evaluate = []
 # YaneuraOu DEEP相当のデフォルト遅延設定を使う
 # GPU/ネットワーク待ちが長い環境向けの遅延マージン(400/1400ms)プリセットを有効化する
 deep = []

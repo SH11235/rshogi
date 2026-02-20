@@ -4,7 +4,9 @@
 
 use std::ptr::NonNull;
 
-use crate::nnue::{DirtyPiece, ensure_accumulator_computed, evaluate_dispatch};
+#[cfg(feature = "use-lazy-evaluate")]
+use crate::nnue::ensure_accumulator_computed;
+use crate::nnue::{DirtyPiece, evaluate_dispatch};
 use crate::position::Position;
 use crate::prefetch::TtPrefetch;
 use crate::search::PieceToHistory;
@@ -111,8 +113,9 @@ pub(super) fn nnue_evaluate(st: &mut SearchState, pos: &Position) -> Value {
 
 /// NNUE アキュムレータを計算済みにする（評価値の計算はしない）
 ///
-/// TTヒット時など、評価値はTTから取得するが、
-/// 次のノードの差分更新のためにアキュムレータだけは計算しておく必要がある場合に使用。
+/// `use-lazy-evaluate` 有効時のみ使用する。
+/// TT eval を再利用する経路で、後続の差分更新の整合を保つために必要。
+#[cfg(feature = "use-lazy-evaluate")]
 #[inline]
 pub(super) fn ensure_nnue_accumulator(st: &mut SearchState, pos: &Position) {
     ensure_accumulator_computed(pos, &mut st.nnue_stack)
