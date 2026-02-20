@@ -585,22 +585,6 @@ impl Position {
         self.pinned_pieces_with_occupancy(them, occ, avoid_bb)
     }
 
-    /// from->toに動かした後の占有でのpin駒（やねうら王のpinned_pieces(Them, from, to)相当）
-    pub fn pinned_pieces_after_move(&self, them: Color, from: Square, to: Square) -> Bitboard {
-        let mut occ = self.occupied();
-        occ ^= Bitboard::from_square(from);
-        occ |= Bitboard::from_square(to);
-
-        let enemy = !them;
-        let enemy_removed = if self.piece_on(to).is_some() && self.piece_on(to).color() == enemy {
-            Bitboard::from_square(to)
-        } else {
-            Bitboard::EMPTY
-        };
-
-        self.pinned_pieces_with_occupancy(them, occ, enemy_removed)
-    }
-
     /// fromの駒を動かしたときに開き王手になるか（簡易判定）
     pub fn discovered(&self, from: Square, to: Square, ksq: Square, pinned: Bitboard) -> bool {
         pinned.contains(from) && !crate::mate::aligned(from, to, ksq)
@@ -1799,52 +1783,6 @@ mod tests {
 
         let all_black = pos.pieces_c_by_types(Color::Black, PieceTypeSet::ALL);
         assert_eq!(all_black.count(), 2);
-    }
-
-    #[test]
-    fn test_pinned_pieces_variants() {
-        let mut pos = Position::new();
-        // 玉と駒配置
-        let ksq = Square::new(File::File5, Rank::Rank9);
-        let rook_sq = Square::new(File::File5, Rank::Rank1);
-        let blocker_sq = Square::new(File::File5, Rank::Rank5);
-        pos.put_piece(Piece::B_KING, ksq);
-        pos.put_piece(Piece::W_ROOK, rook_sq);
-        pos.put_piece(Piece::B_GOLD, blocker_sq);
-        pos.king_square[Color::Black.index()] = ksq;
-        pos.king_square[Color::White.index()] = Square::new(File::File1, Rank::Rank1);
-
-        // 通常: blockerはpinされている
-        let pinned = pos.pinned_pieces_excluding(Color::Black, Square::SQ_11);
-        assert!(pinned.contains(blocker_sq));
-
-        // blockerを除去した占有でpinは消える
-        let pinned_removed = pos.pinned_pieces_excluding(Color::Black, blocker_sq);
-        assert!(pinned_removed.is_empty());
-
-        // rookを取った場合、pinは消える
-        let capture_sq = Square::new(File::File5, Rank::Rank2);
-        pos.put_piece(Piece::B_PAWN, capture_sq);
-        let pinned_after_capture = pos.pinned_pieces_after_move(Color::Black, capture_sq, rook_sq);
-        assert!(pinned_after_capture.is_empty());
-        // 以降の検証に影響しないよう除去
-        pos.remove_piece(capture_sq);
-
-        // pinners配列も更新される
-        pos.update_blockers_and_pinners();
-        assert!(pos.state().pinners[Color::Black.index()].contains(rook_sq));
-
-        // 敵駒が間にいる場合はpinnerにならない
-        let mut pos2 = Position::new();
-        pos2.put_piece(Piece::B_KING, ksq);
-        pos2.put_piece(Piece::W_ROOK, rook_sq);
-        let enemy_blocker = Square::new(File::File5, Rank::Rank4);
-        pos2.put_piece(Piece::W_GOLD, enemy_blocker);
-        pos2.king_square[Color::Black.index()] = ksq;
-        pos2.king_square[Color::White.index()] = Square::new(File::File1, Rank::Rank1);
-        pos2.update_blockers_and_pinners();
-        assert!(pos2.state().blockers_for_king[Color::Black.index()].contains(enemy_blocker));
-        assert!(!pos2.state().pinners[Color::Black.index()].contains(rook_sq));
     }
 
     #[test]
