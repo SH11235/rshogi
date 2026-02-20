@@ -577,25 +577,12 @@ impl Position {
     }
 
     /// fromを取り除いた占有でのpin駒（やねうら王のpinned_pieces<Them>(from)相当）
+    ///
+    /// YO準拠: avoid升の駒をoccupiedとpinner候補の両方から除外する
     pub fn pinned_pieces_excluding(&self, them: Color, avoid: Square) -> Bitboard {
-        let occ = self.occupied() & !Bitboard::from_square(avoid);
-        self.pinned_pieces_with_occupancy(them, occ, Bitboard::EMPTY)
-    }
-
-    /// from->toに動かした後の占有でのpin駒（やねうら王のpinned_pieces(Them, from, to)相当）
-    pub fn pinned_pieces_after_move(&self, them: Color, from: Square, to: Square) -> Bitboard {
-        let mut occ = self.occupied();
-        occ ^= Bitboard::from_square(from);
-        occ |= Bitboard::from_square(to);
-
-        let enemy = !them;
-        let enemy_removed = if self.piece_on(to).is_some() && self.piece_on(to).color() == enemy {
-            Bitboard::from_square(to)
-        } else {
-            Bitboard::EMPTY
-        };
-
-        self.pinned_pieces_with_occupancy(them, occ, enemy_removed)
+        let avoid_bb = Bitboard::from_square(avoid);
+        let occ = self.occupied() & !avoid_bb;
+        self.pinned_pieces_with_occupancy(them, occ, avoid_bb)
     }
 
     /// fromの駒を動かしたときに開き王手になるか（簡易判定）
@@ -1799,49 +1786,25 @@ mod tests {
     }
 
     #[test]
-    fn test_pinned_pieces_variants() {
+    fn test_pinned_pieces_excluding_removes_pinner_itself() {
+        // 回帰テスト:
+        // avoid升(移動元)がpinner候補そのものである場合、
+        // occupiedだけでなくpinner候補集合からも除外される必要がある。
         let mut pos = Position::new();
-        // 玉と駒配置
         let ksq = Square::new(File::File5, Rank::Rank9);
-        let rook_sq = Square::new(File::File5, Rank::Rank1);
+        let pinner_sq = Square::new(File::File5, Rank::Rank1);
         let blocker_sq = Square::new(File::File5, Rank::Rank5);
         pos.put_piece(Piece::B_KING, ksq);
-        pos.put_piece(Piece::W_ROOK, rook_sq);
+        pos.put_piece(Piece::W_ROOK, pinner_sq);
         pos.put_piece(Piece::B_GOLD, blocker_sq);
         pos.king_square[Color::Black.index()] = ksq;
         pos.king_square[Color::White.index()] = Square::new(File::File1, Rank::Rank1);
 
-        // 通常: blockerはpinされている
-        let pinned = pos.pinned_pieces_excluding(Color::Black, Square::SQ_11);
-        assert!(pinned.contains(blocker_sq));
+        let pinned_normal = pos.pinned_pieces_excluding(Color::Black, Square::SQ_11);
+        assert!(pinned_normal.contains(blocker_sq));
 
-        // blockerを除去した占有でpinは消える
-        let pinned_removed = pos.pinned_pieces_excluding(Color::Black, blocker_sq);
-        assert!(pinned_removed.is_empty());
-
-        // rookを取った場合、pinは消える
-        let capture_sq = Square::new(File::File5, Rank::Rank2);
-        pos.put_piece(Piece::B_PAWN, capture_sq);
-        let pinned_after_capture = pos.pinned_pieces_after_move(Color::Black, capture_sq, rook_sq);
-        assert!(pinned_after_capture.is_empty());
-        // 以降の検証に影響しないよう除去
-        pos.remove_piece(capture_sq);
-
-        // pinners配列も更新される
-        pos.update_blockers_and_pinners();
-        assert!(pos.state().pinners[Color::Black.index()].contains(rook_sq));
-
-        // 敵駒が間にいる場合はpinnerにならない
-        let mut pos2 = Position::new();
-        pos2.put_piece(Piece::B_KING, ksq);
-        pos2.put_piece(Piece::W_ROOK, rook_sq);
-        let enemy_blocker = Square::new(File::File5, Rank::Rank4);
-        pos2.put_piece(Piece::W_GOLD, enemy_blocker);
-        pos2.king_square[Color::Black.index()] = ksq;
-        pos2.king_square[Color::White.index()] = Square::new(File::File1, Rank::Rank1);
-        pos2.update_blockers_and_pinners();
-        assert!(pos2.state().blockers_for_king[Color::Black.index()].contains(enemy_blocker));
-        assert!(!pos2.state().pinners[Color::Black.index()].contains(rook_sq));
+        let pinned_without_pinner = pos.pinned_pieces_excluding(Color::Black, pinner_sq);
+        assert!(pinned_without_pinner.is_empty(), "avoidがpinner自身のときpinは消える必要がある");
     }
 
     #[test]

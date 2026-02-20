@@ -162,4 +162,15 @@ mod tests {
         assert!(mv.is_some(), "mate_1ply should find 7g6h mate");
         assert_eq!(mv.unwrap().to_usi(), "7g6h");
     }
+
+    #[test]
+    fn test_dragon_move_not_false_mate_when_avoid_is_pinner_square() {
+        // 回帰テスト:
+        // DRAGON近接王手判定で new_pin = pinned_pieces_excluding(them, from) を使う局面。
+        // avoid=from が pinner 候補から除外されないと、受け側の駒が偽pinとなり
+        // can_piece_capture が誤って失敗して偽の1手詰みを返しうる。
+        let sfen = "4k4/4g4/4+R1S2/9/9/9/9/9/K8 b - 1";
+        let mv = mate_by_new(sfen);
+        assert!(mv.is_none(), "この局面は受けがあるため mate_1ply は None であるべき");
+    }
 }
