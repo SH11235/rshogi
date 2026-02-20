@@ -94,12 +94,8 @@ impl SearchInfo {
 
 /// YaneuraOu準拠のaspiration windowを計算
 pub(crate) fn compute_aspiration_window(rm: &RootMove, thread_id: usize) -> (Value, Value, Value) {
-    // mean_squared_score がない場合は巨大なdeltaでフルウィンドウにする
-    let fallback = {
-        let inf = Value::INFINITE.raw() as i64;
-        inf * inf
-    };
-    let mean_sq = rm.mean_squared_score.unwrap_or(fallback).abs();
+    // YO準拠: 未シード時は sentinel(-INFINITE^2) を保持し、abs()後に巨大deltaになる。
+    let mean_sq = rm.mean_squared_score.abs();
     let mean_sq = mean_sq.min((Value::INFINITE.raw() as i64) * (Value::INFINITE.raw() as i64));
 
     let thread_offset = (thread_id % 8) as i32;

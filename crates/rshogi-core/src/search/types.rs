@@ -425,7 +425,8 @@ pub struct RootMove {
     /// 平均スコア
     pub average_score: Value,
     /// 二乗平均スコア（aspiration window用）
-    pub mean_squared_score: Option<i64>,
+    /// YaneuraOu準拠: 未シード時は `-INFINITE^2` sentinel を保持する。
+    pub mean_squared_score: i64,
     /// スコアの下界フラグ
     pub score_lower_bound: bool,
     /// スコアの上界フラグ
@@ -440,13 +441,17 @@ pub struct RootMove {
 }
 
 impl RootMove {
+    /// mean_squared_score の未シード状態を表す sentinel 値（YO準拠）
+    pub const MEAN_SQUARED_SENTINEL: i64 =
+        -(Value::INFINITE.raw() as i64) * (Value::INFINITE.raw() as i64);
+
     /// 指し手から新しいRootMoveを作成
     pub fn new(mv: Move) -> Self {
         Self {
             score: Value::new(-32001), // MINUS_INFINITE相当
             previous_score: Value::new(-32001),
             average_score: Value::new(-32001),
-            mean_squared_score: None,
+            mean_squared_score: Self::MEAN_SQUARED_SENTINEL,
             score_lower_bound: false,
             score_upper_bound: false,
             sel_depth: 0,
@@ -486,10 +491,11 @@ impl RootMove {
 
         // mean_squared_score: |value| * value を平均
         let sample = (value.raw() as i64) * (value.raw().abs() as i64);
-        self.mean_squared_score = Some(match self.mean_squared_score {
-            Some(prev) => (prev + sample) / 2,
-            None => sample,
-        });
+        self.mean_squared_score = if self.mean_squared_score != Self::MEAN_SQUARED_SENTINEL {
+            (self.mean_squared_score + sample) / 2
+        } else {
+            sample
+        };
     }
 }
 
@@ -975,13 +981,13 @@ mod tests {
         // 初回はそのまま反映
         rm.accumulate_score_stats(Value::new(100));
         assert_eq!(rm.average_score.raw(), 100);
-        assert_eq!(rm.mean_squared_score, Some(10_000));
+        assert_eq!(rm.mean_squared_score, 10_000);
 
         // 2回目以降は平均を取る
         rm.accumulate_score_stats(Value::new(-60));
         assert_eq!(rm.average_score.raw(), 20); // (100 + -60) / 2
         // mean_squared_score は value * |value| を平均するため符号を保持する
-        assert_eq!(rm.mean_squared_score, Some((10_000 - 3_600) / 2));
+        assert_eq!(rm.mean_squared_score, (10_000 - 3_600) / 2);
     }
 
     #[test]
