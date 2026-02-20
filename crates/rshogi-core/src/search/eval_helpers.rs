@@ -11,6 +11,8 @@ use super::alpha_beta::{
     EvalContext, ProbeOutcome, SearchContext, SearchState, TTContext, to_corrected_static_eval,
 };
 use super::history::CORRECTION_HISTORY_SIZE;
+#[cfg(feature = "use-lazy-evaluate")]
+use super::search_helpers::ensure_nnue_accumulator;
 use super::search_helpers::nnue_evaluate;
 use super::stats::inc_stat_by_depth;
 #[cfg(feature = "tt-trace")]
@@ -496,9 +498,19 @@ pub(super) fn compute_eval_context(
         }
     } else if tt_ctx.hit && tt_ctx.data.eval != Value::NONE && !pv_node {
         // TTヒット && eval有効 && 非PVノード
-        // YaneuraOu準拠: USE_LAZY_EVALUATE 未定義時は常に NNUE 再評価
-        // (TT eval は type-1 collision で別局面の値を持つことがあるため)
-        unadjusted_static_eval = nnue_evaluate(st, pos);
+        #[cfg(feature = "use-lazy-evaluate")]
+        {
+            // USE_LAZY_EVALUATE相当: TT eval を再利用する。
+            // 後続の差分更新に備え、アキュムレータだけは計算済みにしておく。
+            ensure_nnue_accumulator(st, pos);
+            unadjusted_static_eval = tt_ctx.data.eval;
+        }
+        #[cfg(not(feature = "use-lazy-evaluate"))]
+        {
+            // YO現行ビルド整合モード: 常に NNUE 再評価する。
+            // TT eval 再利用による type-1 collision 伝播を避ける。
+            unadjusted_static_eval = nnue_evaluate(st, pos);
+        }
         unadjusted_static_eval
     } else {
         // PVノード または TTミス/eval無効 → 常にNNUE評価

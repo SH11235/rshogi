@@ -4,6 +4,8 @@
 
 use std::ptr::NonNull;
 
+#[cfg(feature = "use-lazy-evaluate")]
+use crate::nnue::ensure_accumulator_computed;
 use crate::nnue::{DirtyPiece, evaluate_dispatch};
 use crate::position::Position;
 use crate::prefetch::TtPrefetch;
@@ -107,6 +109,16 @@ pub(super) fn check_abort(
 #[inline]
 pub(super) fn nnue_evaluate(st: &mut SearchState, pos: &Position) -> Value {
     evaluate_dispatch(pos, &mut st.nnue_stack)
+}
+
+/// NNUE アキュムレータを計算済みにする（評価値の計算はしない）
+///
+/// `use-lazy-evaluate` 有効時のみ使用する。
+/// TT eval を再利用する経路で、後続の差分更新の整合を保つために必要。
+#[cfg(feature = "use-lazy-evaluate")]
+#[inline]
+pub(super) fn ensure_nnue_accumulator(st: &mut SearchState, pos: &Position) {
+    ensure_accumulator_computed(pos, &mut st.nnue_stack)
 }
 
 /// YO準拠: do_move + nodes++ + nnue_push をまとめたラッパー
