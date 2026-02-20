@@ -1318,19 +1318,17 @@ where
             break;
         }
 
-        // search_again_counter 更新 (yaneuraou-search.cpp:1315-1319)
-        if depth > 1 {
-            let inc_depth = if let Some(ref ms) = main_state {
-                ms.increase_depth
+        // search_again_counter 更新
+        let inc_depth = if let Some(ref ms) = main_state {
+            ms.increase_depth
+        } else {
+            increase_depth_shared.load(Ordering::Relaxed)
+        };
+        if !inc_depth {
+            if let Some(ref mut ms) = main_state {
+                ms.search_again_counter += 1;
             } else {
-                increase_depth_shared.load(Ordering::Relaxed)
-            };
-            if !inc_depth {
-                if let Some(ref mut ms) = main_state {
-                    ms.search_again_counter += 1;
-                } else {
-                    local_search_again_counter += 1;
-                }
+                local_search_again_counter += 1;
             }
         }
 
