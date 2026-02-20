@@ -577,9 +577,12 @@ impl Position {
     }
 
     /// fromを取り除いた占有でのpin駒（やねうら王のpinned_pieces<Them>(from)相当）
+    ///
+    /// YO準拠: avoid升の駒をoccupiedとpinner候補の両方から除外する
     pub fn pinned_pieces_excluding(&self, them: Color, avoid: Square) -> Bitboard {
-        let occ = self.occupied() & !Bitboard::from_square(avoid);
-        self.pinned_pieces_with_occupancy(them, occ, Bitboard::EMPTY)
+        let avoid_bb = Bitboard::from_square(avoid);
+        let occ = self.occupied() & !avoid_bb;
+        self.pinned_pieces_with_occupancy(them, occ, avoid_bb)
     }
 
     /// from->toに動かした後の占有でのpin駒（やねうら王のpinned_pieces(Them, from, to)相当）
@@ -1842,6 +1845,28 @@ mod tests {
         pos2.update_blockers_and_pinners();
         assert!(pos2.state().blockers_for_king[Color::Black.index()].contains(enemy_blocker));
         assert!(!pos2.state().pinners[Color::Black.index()].contains(rook_sq));
+    }
+
+    #[test]
+    fn test_pinned_pieces_excluding_removes_pinner_itself() {
+        // 回帰テスト:
+        // avoid升(移動元)がpinner候補そのものである場合、
+        // occupiedだけでなくpinner候補集合からも除外される必要がある。
+        let mut pos = Position::new();
+        let ksq = Square::new(File::File5, Rank::Rank9);
+        let pinner_sq = Square::new(File::File5, Rank::Rank1);
+        let blocker_sq = Square::new(File::File5, Rank::Rank5);
+        pos.put_piece(Piece::B_KING, ksq);
+        pos.put_piece(Piece::W_ROOK, pinner_sq);
+        pos.put_piece(Piece::B_GOLD, blocker_sq);
+        pos.king_square[Color::Black.index()] = ksq;
+        pos.king_square[Color::White.index()] = Square::new(File::File1, Rank::Rank1);
+
+        let pinned_normal = pos.pinned_pieces_excluding(Color::Black, Square::SQ_11);
+        assert!(pinned_normal.contains(blocker_sq));
+
+        let pinned_without_pinner = pos.pinned_pieces_excluding(Color::Black, pinner_sq);
+        assert!(pinned_without_pinner.is_empty(), "avoidがpinner自身のときpinは消える必要がある");
     }
 
     #[test]
