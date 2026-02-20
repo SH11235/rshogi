@@ -250,12 +250,7 @@ fn init_check_around_bb() -> [[[Bitboard; 2]; PieceType::NUM + 1]; 81] {
                     bb |= cand;
                 }
 
-                // 斜め以遠(離し角)は除外（近接のみ）
-                bb &= king_effect(sq_king)
-                    | rook_effect(sq_king, Bitboard::EMPTY)
-                    | bishop_effect(sq_king, Bitboard::EMPTY);
-
-                // 玉自身の升は除外
+                // YO準拠: 玉自身の升のみ除外
                 bb &= !Bitboard::from_square(sq_king);
                 table[sq_king.index()][pt.index()][c] = bb;
             }
@@ -334,5 +329,54 @@ mod tests {
         let _ = &*CHECK_CAND_BB;
         let _ = &*CHECK_AROUND_BB;
         let _ = &*NEXT_SQUARE;
+    }
+
+    #[test]
+    fn test_check_around_bb_matches_yaneuraou_formula() {
+        for sq_king in Square::all() {
+            let around8 = king_effect(sq_king);
+            for &us in &[Color::Black, Color::White] {
+                for pt_idx in 1..=PieceType::NUM {
+                    let pt = PieceType::from_u8(pt_idx as u8).unwrap();
+                    let mut expected = Bitboard::EMPTY;
+
+                    for near in around8.iter() {
+                        let cand = match pt {
+                            PieceType::Pawn => pawn_effect(!us, near),
+                            PieceType::Lance => lance_effect(!us, near, Bitboard::EMPTY),
+                            PieceType::Knight => knight_effect(!us, near),
+                            PieceType::Silver => silver_effect(!us, near),
+                            PieceType::Bishop => bishop_effect(near, Bitboard::EMPTY),
+                            PieceType::Rook => rook_effect(near, Bitboard::EMPTY),
+                            PieceType::ProPawn
+                            | PieceType::ProLance
+                            | PieceType::ProKnight
+                            | PieceType::ProSilver
+                            | PieceType::Gold => gold_effect(!us, near),
+                            PieceType::Horse => {
+                                bishop_effect(near, Bitboard::EMPTY) | king_effect(near)
+                            }
+                            PieceType::Dragon => {
+                                rook_effect(near, Bitboard::EMPTY) | king_effect(near)
+                            }
+                            PieceType::King => king_effect(near),
+                        };
+                        expected |= cand;
+                    }
+
+                    expected &= !Bitboard::from_square(sq_king);
+
+                    let actual = CHECK_AROUND_BB[sq_king.index()][pt.index()][us.index()];
+                    assert_eq!(
+                        actual,
+                        expected,
+                        "CHECK_AROUND_BB mismatch: sq_king={} us={:?} pt={:?}",
+                        sq_king.to_usi(),
+                        us,
+                        pt
+                    );
+                }
+            }
+        }
     }
 }
