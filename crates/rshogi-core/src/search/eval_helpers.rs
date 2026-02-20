@@ -11,7 +11,7 @@ use super::alpha_beta::{
     EvalContext, ProbeOutcome, SearchContext, SearchState, TTContext, to_corrected_static_eval,
 };
 use super::history::CORRECTION_HISTORY_SIZE;
-use super::search_helpers::{ensure_nnue_accumulator, nnue_evaluate};
+use super::search_helpers::nnue_evaluate;
 use super::stats::inc_stat_by_depth;
 #[cfg(feature = "tt-trace")]
 use super::tt_sanity::{
@@ -495,59 +495,10 @@ pub(super) fn compute_eval_context(
             Value::NONE
         }
     } else if tt_ctx.hit && tt_ctx.data.eval != Value::NONE && !pv_node {
-        // TTヒット && eval有効 && 非PVノード → TTからevalを取得
-        ensure_nnue_accumulator(st, pos);
-        unadjusted_static_eval = tt_ctx.data.eval;
-
-        // デバッグ: TTから取得したevalとNNUE評価を比較
-        #[cfg(feature = "search-stats")]
-        {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static EVAL_MATCH: AtomicU64 = AtomicU64::new(0);
-            static EVAL_MISMATCH: AtomicU64 = AtomicU64::new(0);
-
-            let nnue_eval = nnue_evaluate(st, pos);
-            if unadjusted_static_eval == nnue_eval {
-                EVAL_MATCH.fetch_add(1, Ordering::Relaxed);
-            } else {
-                EVAL_MISMATCH.fetch_add(1, Ordering::Relaxed);
-                // 不一致時の差分を出力（最初の10回のみ）
-                static MISMATCH_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
-                let log_count = MISMATCH_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
-                if log_count < 10 {
-                    eprintln!(
-                        "[EVAL-MISMATCH] tt_eval={}, nnue_eval={}, diff={}",
-                        unadjusted_static_eval.raw(),
-                        nnue_eval.raw(),
-                        (unadjusted_static_eval.raw() - nnue_eval.raw()).abs()
-                    );
-                }
-            }
-
-            let m = EVAL_MATCH.load(Ordering::Relaxed);
-            let mm = EVAL_MISMATCH.load(Ordering::Relaxed);
-            let total = m + mm;
-            // 毎回出力（デバッグ用）
-            if total == 1
-                || total == 100
-                || total == 1000
-                || total == 5000
-                || total == 10000
-                || total == 18000
-            {
-                eprintln!(
-                    "[EVAL-COMPARE] match={}, mismatch={} (mismatch rate: {:.2}%)",
-                    m,
-                    mm,
-                    if total > 0 {
-                        mm as f64 / total as f64 * 100.0
-                    } else {
-                        0.0
-                    },
-                );
-            }
-        }
-
+        // TTヒット && eval有効 && 非PVノード
+        // YaneuraOu準拠: USE_LAZY_EVALUATE 未定義時は常に NNUE 再評価
+        // (TT eval は type-1 collision で別局面の値を持つことがあるため)
+        unadjusted_static_eval = nnue_evaluate(st, pos);
         unadjusted_static_eval
     } else {
         // PVノード または TTミス/eval無効 → 常にNNUE評価
