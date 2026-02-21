@@ -459,35 +459,28 @@ where
     inc_stat!(st, probcut_attempted);
 
     let cont_tables = cont_history_tables(st, ctx, ply);
-    let probcut_moves = {
-        let mut mp = MovePicker::new_probcut(
-            pos,
-            tt_ctx.mv,
-            threshold,
-            ply,
-            cont_tables,
-            ctx.generate_all_legal_moves,
-        );
+    let mut mp = MovePicker::new_probcut(
+        pos,
+        tt_ctx.mv,
+        threshold,
+        ply,
+        cont_tables,
+        ctx.generate_all_legal_moves,
+    );
 
-        let mut buf = [Move::NONE; crate::movegen::MAX_MOVES];
-        let mut len = 0;
-        loop {
+    // YaneuraOu準拠: 逐次 next_move 方式。
+    // バッファに事前 collect すると TT手の探索前にスコアリングが行われてしまい、
+    // captureHistory が TT手探索後と異なる時点の値でソートされるため、手の順序が狂う。
+    loop {
+        let mv = {
             // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
-            let mv = {
-                let h = unsafe { ctx.history.as_ref_unchecked() };
-                mp.next_move(pos, h)
-            };
-            if mv == Move::NONE {
-                break;
-            }
-            buf[len] = mv;
-            len += 1;
+            let h = unsafe { ctx.history.as_ref_unchecked() };
+            mp.next_move(pos, h)
+        };
+        if mv == Move::NONE {
+            break;
         }
-        (buf, len)
-    };
-    let (buf, len) = probcut_moves;
 
-    for &mv in buf[..len].iter() {
         if mv == excluded_move {
             continue;
         }
