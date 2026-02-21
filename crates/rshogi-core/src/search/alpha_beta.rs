@@ -1054,7 +1054,7 @@ impl SearchWorker {
                             -alpha - Value::new(1),
                             -alpha,
                             1,
-                            false,
+                            true,
                             limits,
                             time_manager,
                         );
@@ -1636,7 +1636,7 @@ impl SearchWorker {
                             -alpha - Value::new(1),
                             -alpha,
                             1,
-                            false,
+                            true,
                             limits,
                             time_manager,
                         );
