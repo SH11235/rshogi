@@ -447,47 +447,6 @@ pub(super) fn compute_eval_context(
 
     let mut unadjusted_static_eval = Value::NONE;
 
-    // デバッグ: TTヒット時のeval状態を確認
-    #[cfg(feature = "search-stats")]
-    {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static TT_EVAL_VALID: AtomicU64 = AtomicU64::new(0);
-        static TT_EVAL_NONE: AtomicU64 = AtomicU64::new(0);
-        static TT_MISS: AtomicU64 = AtomicU64::new(0);
-        static TT_PV_NODE: AtomicU64 = AtomicU64::new(0);
-
-        if !in_check {
-            if tt_ctx.hit {
-                if tt_ctx.data.eval != Value::NONE {
-                    if !pv_node {
-                        TT_EVAL_VALID.fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        TT_PV_NODE.fetch_add(1, Ordering::Relaxed);
-                    }
-                } else {
-                    TT_EVAL_NONE.fetch_add(1, Ordering::Relaxed);
-                }
-            } else {
-                TT_MISS.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-
-        // 一定間隔でログ出力
-        let total = TT_EVAL_VALID.load(Ordering::Relaxed)
-            + TT_EVAL_NONE.load(Ordering::Relaxed)
-            + TT_MISS.load(Ordering::Relaxed)
-            + TT_PV_NODE.load(Ordering::Relaxed);
-        if total > 0 && total.is_multiple_of(100000) {
-            eprintln!(
-                "[TT-EVAL-DEBUG] valid={}, none={}, miss={}, pv={}",
-                TT_EVAL_VALID.load(Ordering::Relaxed),
-                TT_EVAL_NONE.load(Ordering::Relaxed),
-                TT_MISS.load(Ordering::Relaxed),
-                TT_PV_NODE.load(Ordering::Relaxed),
-            );
-        }
-    }
-
     // YaneuraOu準拠: TTからのeval取得 + PvNodeでは必ずevaluate()
     // yaneuraou-search.cpp:2680-2706 参照
     // 「🌈 これ書かないとR70ぐらい弱くなる。」

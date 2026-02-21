@@ -1061,7 +1061,7 @@ impl SearchWorker {
                     }
                 }
 
-                // Post LMR continuation history updates (yaneuraou-search.cpp:3644)
+                // Post LMR continuation history updates
                 // YO: update_continuation_histories(ss, movedPiece, move.to_sq(), 1365)
                 // ply=0では (ss-i)->currentMove が全て無効のため全イテレーションがスキップされる（no-op）
 
@@ -1733,7 +1733,6 @@ impl SearchWorker {
             // この手に費やしたノード数をeffortに積算
             let nodes_delta = self.state.nodes.saturating_sub(nodes_before);
             self.state.root_moves[rm_idx].effort += nodes_delta as f64;
-
             if self.state.abort {
                 return Value::ZERO;
             }
