@@ -947,18 +947,18 @@ impl Search {
         let mut skill = Skill::from_options(&self.skill_options);
         let skill_enabled = skill.enabled();
 
-        // デバッグ用の helper 有効化制御
-        // go depth/go mate を含め helper を有効化する。
+        // YO準拠: helper探索は best-thread 選択を使う条件と揃える。
+        // (MultiPV=1 かつ go depth/go mate 以外、Skill無効)
         // 追加の切り分けは環境変数 RSHOGI_DISABLE_HELPER_SEARCH で行う。
-        let helper_search_enabled = self.num_threads > 1 && !helper_search_disabled();
+        let helper_search_enabled = self.num_threads > 1
+            && should_use_best_thread_selection(&limits, skill_enabled)
+            && !helper_search_disabled();
 
         if helper_search_enabled {
-            // YaneuraOu準拠: helper は go depth 指定時も main の stop まで探索を継続する。
-            let helper_max_depth = if limits.depth > 0 { MAX_PLY } else { max_depth };
             self.thread_pool.start_thinking(
                 pos,
                 limits.clone(),
-                helper_max_depth,
+                max_depth,
                 self.time_options,
                 self.max_moves_to_draw,
                 draw_value_black,
