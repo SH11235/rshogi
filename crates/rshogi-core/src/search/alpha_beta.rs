@@ -2297,7 +2297,56 @@ impl SearchWorker {
             let lmr_depth = new_depth - r / 1024;
 
             // =============================================================
-            // Singular Extension（YaneuraOu準拠）
+            // Step14 Pruning（YaneuraOu準拠: SEの前に実行）
+            // =============================================================
+            // YaneuraOu準拠: Step14 → SE の順序。
+            // SE内のsearch_nodeがtt_pvやstackを上書きする前にStep14の枝刈り判定を行う。
+
+            // LMP: moveCount >= limitのとき、quiet手の生成をスキップ
+            if !root_node && !best_value.is_loss() {
+                let lmp_limit = (3 + original_depth * original_depth) / (2 - improving as i32);
+                if move_count >= lmp_limit && !lmp_triggered {
+                    mp.skip_quiets();
+                    lmp_triggered = true;
+                }
+            }
+
+            let step14_ctx = Step14Context {
+                pos,
+                mv,
+                depth: original_depth,
+                ply,
+                best_value,
+                in_check,
+                gives_check,
+                is_capture,
+                lmr_depth,
+                mover,
+                // SAFETY: cont_history_ptr() が返すポインタは探索中有効。
+                cont_history_1: unsafe { cont_hist_ptr_1.as_ref() },
+                // SAFETY: cont_history_ptr() が返すポインタは探索中有効。
+                cont_history_2: unsafe { cont_hist_ptr_2.as_ref() },
+                static_eval: eval_ctx.static_eval,
+                alpha,
+                best_move,
+                pawn_history_index: pos.pawn_history_index(),
+            };
+
+            match step14_pruning(ctx, step14_ctx) {
+                Step14Outcome::Skip {
+                    best_value: updated,
+                } => {
+                    inc_stat!(st, move_loop_pruned);
+                    if let Some(v) = updated {
+                        best_value = v;
+                    }
+                    continue;
+                }
+                Step14Outcome::Continue => {}
+            }
+
+            // =============================================================
+            // Singular Extension（YaneuraOu準拠: Step14の後に実行）
             // =============================================================
             // singular延長をするnodeであるか判定
             // 条件: !rootNode && move == ttMove && !excludedMove
@@ -2401,54 +2450,6 @@ impl SearchWorker {
                 } else if cut_node {
                     extension = ctx.tune_params.singular_negative_extension_cut_node;
                 }
-            }
-
-            // =============================================================
-            // LMP（Step14の前）
-            // =============================================================
-            // moveCount >= limitのとき、quiet手の生成をスキップ
-            // YaneuraOu準拠: skip_quiet_moves()のみ、continueしない。
-            // 現在の手はStep14の枝刈りで判定される。
-            if !root_node && !best_value.is_loss() {
-                let lmp_limit = (3 + original_depth * original_depth) / (2 - improving as i32);
-                if move_count >= lmp_limit && !lmp_triggered {
-                    mp.skip_quiets();
-                    lmp_triggered = true;
-                }
-            }
-
-            let step14_ctx = Step14Context {
-                pos,
-                mv,
-                depth: original_depth,
-                ply,
-                best_value,
-                in_check,
-                gives_check,
-                is_capture,
-                lmr_depth,
-                mover,
-                // SAFETY: cont_history_ptr() が返すポインタは探索中有効。
-                cont_history_1: unsafe { cont_hist_ptr_1.as_ref() },
-                // SAFETY: cont_history_ptr() が返すポインタは探索中有効。
-                cont_history_2: unsafe { cont_hist_ptr_2.as_ref() },
-                static_eval: eval_ctx.static_eval,
-                alpha,
-                best_move,
-                pawn_history_index: pos.pawn_history_index(),
-            };
-
-            match step14_pruning(ctx, step14_ctx) {
-                Step14Outcome::Skip {
-                    best_value: updated,
-                } => {
-                    inc_stat!(st, move_loop_pruned);
-                    if let Some(v) = updated {
-                        best_value = v;
-                    }
-                    continue;
-                }
-                Step14Outcome::Continue => {}
             }
 
             // 指し手を実行
