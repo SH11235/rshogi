@@ -2500,7 +2500,7 @@ impl SearchWorker {
 
             // YaneuraOu準拠: cut_node（yaneuraou-search.cpp:3545-3546）
             if cut_node {
-                let no_tt_move = !tt_hit || tt_move.is_none();
+                let no_tt_move = tt_move.is_none();
                 r += ctx.tune_params.lmr_step16_cut_node_add
                     + ctx.tune_params.lmr_step16_cut_node_no_tt_add * (no_tt_move as i32);
             }
@@ -2912,7 +2912,7 @@ impl SearchWorker {
             // =================================================================
             // YaneuraOu: bestMoveがある場合は常にupdate_all_statsを呼ぶ
             // PASS は history_index() が未定義のためスキップ
-            let is_best_capture = pos.is_capture(best_move);
+            let is_best_capture = pos.capture_stage(best_move);
             let is_tt_move = best_move == tt_move;
             // YaneuraOu準拠: bonus = min(121*depth-77, 1633) + 375*(bestMove==ttMove)
             let bonus = stat_bonus(depth, is_tt_move, ctx.tune_params);
@@ -2998,6 +2998,15 @@ impl SearchWorker {
                     // YaneuraOu準拠: quiets_triedはbestMove追加段階で除外済みのため
                     // ペナルティループでの重複チェックは不要
                     for &m in quiets_tried.iter() {
+                        // ContinuationHistory/PawnHistoryで使う駒情報
+                        let moved_pc = pos.moved_piece(m);
+                        let cont_pc = if m.is_promotion() {
+                            moved_pc.promote().unwrap_or(moved_pc)
+                        } else {
+                            moved_pc
+                        };
+                        let to = m.to();
+
                         // MainHistory
                         h.main_history.update(us, m, -scaled_malus);
 
@@ -3007,15 +3016,6 @@ impl SearchWorker {
                                 low_ply_history_bonus(-scaled_malus, ctx.tune_params);
                             h.low_ply_history.update(ply as usize, m, low_ply_malus);
                         }
-
-                        // ContinuationHistory/PawnHistoryへのペナルティで必要な情報
-                        let moved_pc = pos.moved_piece(m);
-                        let cont_pc = if m.is_promotion() {
-                            moved_pc.promote().unwrap_or(moved_pc)
-                        } else {
-                            moved_pc
-                        };
-                        let to = m.to();
 
                         // ContinuationHistoryへのペナルティ
                         // YaneuraOu準拠: -malus * 1083/1024 * 955/1024 * weight/1024 + 88*(i<2)
