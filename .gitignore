@@ -40,6 +40,9 @@ taikyoku-log/
 # Reports (local work logs)
 docs/reports/
 
+# scripts results
+results/
+
 # Perf script config (personal settings)
 scripts/perf.conf
 
