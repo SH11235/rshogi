@@ -10,7 +10,7 @@
 | コア数 | 32 |
 | OS | Ubuntu (Linux 6.8.0) |
 | アーキテクチャ | x86_64 |
-| 計測日 | 2026-02-20 |
+| 計測日 | 2026-02-23 |
 
 ## 関連ドキュメント
 
@@ -32,21 +32,21 @@
 
 | 局面 | 説明 | Depth | NPS | bestmove |
 |:----:|------|:-----:|----:|----------|
-| 1 | 序盤（9手目） | 32 | 1,040,372 | 3g3f |
-| 2 | 中盤（詰将棋風） | 19 | 894,580 | B*6h |
-| 3 | 終盤（王手飛車） | 20 | 824,952 | N*4d |
-| 4 | 終盤（詰み筋） | 21 | 895,914 | S*2h |
-| **平均** | - | - | **913,955** | - |
+| 1 | 序盤（9手目） | 31 | 1,042,889 | 3g3f |
+| 2 | 中盤（詰将棋風） | 19 | 899,941 | B*6h |
+| 3 | 終盤（王手飛車） | 21 | 825,306 | N*4d |
+| 4 | 終盤（詰み筋） | 20 | 911,006 | N*2c |
+| **平均** | - | - | **919,786** | - |
 
 #### Material評価時（NNUE無効、MaterialLevel=9）
 
 | 局面 | 説明 | Depth | NPS | bestmove |
 |:----:|------|:-----:|----:|----------|
-| 1 | 序盤（9手目） | 26 | 673,263 | 5i6h |
-| 2 | 中盤（詰将棋風） | 18 | 636,543 | 8d7d |
-| 3 | 終盤（王手飛車） | 17 | 680,425 | G*6b |
-| 4 | 終盤（詰み筋） | 17 | 658,559 | G*1c |
-| **平均** | - | - | **662,198** | - |
+| 1 | 序盤（9手目） | 25 | 598,471 | 5i6h |
+| 2 | 中盤（詰将棋風） | 18 | 609,390 | 8d7d |
+| 3 | 終盤（王手飛車） | 18 | 626,166 | G*6b |
+| 4 | 終盤（詰み筋） | 18 | 639,059 | G*1c |
+| **平均** | - | - | **618,272** | - |
 
 ### VNNI効果測定（別端末: Intel Cascade Lake-X）
 
@@ -63,9 +63,9 @@
 
 | エンジン | NNUE NPS | Material NPS | 備考 |
 |---------|--------:|-------------:|------|
-| 本エンジン | 913,955 | 662,198 | `cargo build --release` |
+| 本エンジン | 919,786 | 618,272 | `cargo build --release` |
 | YaneuraOu | 1,118,219 | 1,545,172 | 参考値 |
-| **対YaneuraOu比** | **82%** | **43%** | - |
+| **対YaneuraOu比** | **82%** | **40%** | - |
 
 #### PGOビルド（本番用）
 
@@ -140,15 +140,15 @@
 
 | スレッド | NPS | スケール | 効率 |
 |---------|----:|--------:|-----:|
-| 1 | 662,197 | 1.00x | 100.0% |
-| 8 | 5,238,737 | 7.91x | **98.8%** |
+| 1 | 618,271 | 1.00x | 100.0% |
+| 8 | 4,817,742 | 7.79x | **97.4%** |
 
 ### NNUE評価
 
 | スレッド | NPS | スケール | 効率 |
 |---------|----:|--------:|-----:|
-| 1 | 913,951 | 1.00x | 100.0% |
-| 8 | 7,082,836 | 7.74x | **96.8%** |
+| 1 | 919,781 | 1.00x | 100.0% |
+| 8 | 6,888,447 | 7.48x | **93.6%** |
 
 ### 並列効率改善の経緯
 
@@ -173,24 +173,24 @@
 
 | 順位 | 関数 | CPU% | 状態 | 備考 |
 |------|------|------|------|------|
-| 1 | `refresh_accumulator` | 10.14% | - | NNUE全計算 |
-| 2 | `Network::evaluate` | 8.01% | - | NNUE推論メイン |
-| 3 | `search_node` | 7.75% | - | 探索メインループ |
-| 4 | `MovePicker::next_move` | 6.86% | 調査完了 | [詳細](#movepicker-調査完了) |
-| 5 | `attackers_to_occ` | 5.72% | - | 利き計算 |
-| 6 | `partial_insertion_sort` | 5.26% | 調査完了 | MovePicker内部（PDQSort最適化済み） |
-| 7 | `do_move_with_prefetch` | 4.50% | - | 指し手実行 |
-| 8 | `update_accumulator` | 4.05% | - | Accumulator差分更新 |
-| 9 | `check_move_mate` | 2.46% | - | 1手詰め判定 |
-| 10 | `update_check_squares` | 2.34% | - | 王手マス更新 |
+| 1 | `Network::evaluate` | 10.77% | - | NNUE推論メイン |
+| 2 | `refresh_accumulator` | 10.28% | - | NNUE全計算 |
+| 3 | `search_node` | 7.22% | - | 探索メインループ |
+| 4 | `MovePicker::next_move` | 6.82% | 調査完了 | [詳細](#movepicker-調査完了) |
+| 5 | `attackers_to_occ` | 5.82% | - | 利き計算 |
+| 6 | `partial_insertion_sort` | 5.34% | 調査完了 | MovePicker内部（PDQSort最適化済み） |
+| 7 | `do_move_with_prefetch` | 4.21% | - | 指し手実行 |
+| 8 | `update_accumulator` | 3.57% | - | Accumulator差分更新 |
+| 9 | `check_move_mate` | 2.63% | - | 1手詰め判定 |
+| 10 | `update_check_squares` | 2.27% | - | 王手マス更新 |
 
 #### NNUE関連の内訳
 
 | 関数 | CPU% | 説明 |
 |------|------|------|
-| `refresh_accumulator` | 10.14% | Accumulator全計算（差分更新失敗時） |
-| `Network::evaluate` | 8.01% | NNUE推論メイン |
-| `update_accumulator` | 4.05% | Accumulator差分更新 |
+| `Network::evaluate` | 10.77% | NNUE推論メイン |
+| `refresh_accumulator` | 10.28% | Accumulator全計算（差分更新失敗時） |
+| `update_accumulator` | 3.57% | Accumulator差分更新 |
 
 ### Material評価時（NNUE無効、release build）
 
@@ -198,16 +198,16 @@
 
 | 順位 | 関数 | CPU% | 備考 |
 |------|------|------|------|
-| 1 | `eval_lv7_like` | 20.64% | Material評価のメイン関数 |
-| 2 | `direction_of` | 13.69% | 方向計算 |
-| 3 | `search_node` | 5.23% | 探索メインループ |
-| 4 | `partial_insertion_sort` | 5.22% | MovePicker内部ソート |
-| 5 | `MovePicker::next_move` | 5.12% | 指し手選択 |
-| 6 | `attackers_to_occ` | 4.40% | 利き計算 |
-| 7 | `update_long_effect_from` | 3.93% | 長い利き更新 |
-| 8 | `do_move_with_prefetch` | 3.38% | 指し手実行 |
-| 9 | `check_move_mate` | 1.99% | 1手詰め判定 |
-| 10 | `update_check_squares` | 1.65% | 王手マス更新 |
+| 1 | `eval_lv7_like` | 24.71% | Material評価のメイン関数 |
+| 2 | `direction_of` | 16.74% | 方向計算 |
+| 3 | `partial_insertion_sort` | 4.96% | MovePicker内部ソート |
+| 4 | `MovePicker::next_move` | 4.43% | 指し手選択 |
+| 5 | `search_node` | 4.38% | 探索メインループ |
+| 6 | `attackers_to_occ` | 3.85% | 利き計算 |
+| 7 | `update_long_effect_from` | 3.50% | 長い利き更新 |
+| 8 | `do_move_with_prefetch` | 2.96% | 指し手実行 |
+| 9 | `check_move_mate` | 1.90% | 1手詰め判定 |
+| 10 | `update_check_squares` | 1.38% | 王手マス更新 |
 
 **注**: Material評価は1回の評価計算は軽量だが、評価精度が低いため枝刈りの効率が悪く、NPSはNNUEと同等かそれ以下になることが多い。
 
@@ -685,3 +685,4 @@ PGOビルドの処理フロー:
 | 2026-02-14 | 計測結果更新（NNUE: search_node 7.60%, Network::evaluate 7.41%, attackers_to_occ 6.94%, refresh 6.64%, MovePicker 6.50%、Material: eval_lv7_like 21.17%, direction_of 13.32%, partial_insertion_sort 5.71%）。NPS: NNUE平均 897,967（+0.2%、誤差範囲）、Material平均 647,945（+1.2%、誤差範囲）。並列効率: Material 99.6%、NNUE 94.2%（前回103.6%/96.9%からの変動は誤差範囲）。**ホットスポット順位変動**: NNUE側で`search_node`が1位（7.19%→7.60%）に浮上し`Network::evaluate`（7.26%→7.41%）と入れ替わり。Material側で`search_node`が5位（4.32%→4.95%）に上昇、`gives_check`（1.95%）が10位に新登場し`see_ge`がランク外に。bestmove変動: NNUE局面3がN*4d→5d6c+に変化、Material全局面のbestmoveが変動（fix-search-ttブランチでの探索ロジック調整・StackPvリバートの影響） |
 | 2026-02-14 | 計測結果更新（NNUE: refresh 8.25%, search_node 7.95%, Network::evaluate 7.89%, MovePicker 6.58%、Material: eval_lv7_like 20.13%, direction_of 13.82%, partial_insertion_sort 6.37%）。**NPS向上**: NNUE平均 953,116（**+6.1%**、897,967→953,116）、Material平均 661,453（+2.1%、647,945→661,453）。YaneuraOu比: NNUE 80%→**85%**、Material 42%→**43%**に改善。並列効率: Material 98.4%、NNUE 95.6%（誤差範囲）。**改善点**: PieceListリファクタリング（コミット33ad0628）によりNNUE特徴量インデックス取得が効率化。`append_active_indices`がランク外に（PieceList導入により`refresh_accumulator`に吸収、6.64%→8.25%）。**ホットスポット変動**: NNUE側で`refresh_accumulator`が1位に浮上（PieceListによる特徴量走査の統合）、`attackers_to_occ`が6.94%→5.37%に減少。Material側で`undo_move`（2.23%）が9位に新登場、`check_move_mate`（2.00%）がランク外に。bestmove変動: NNUE局面2が8d7d→B\*6h、局面3が5d6c+→N\*4d。Material局面1が5i5h→8h6f |
 | 2026-02-20 | 計測結果更新（NNUE: refresh 10.14%, Network::evaluate 8.01%, search_node 7.75%, MovePicker 6.86%、Material: eval_lv7_like 20.64%, direction_of 13.69%, search_node 5.23%）。**NPS低下**: NNUE平均 913,955（**-4.1%**、953,116→913,955）、Material平均 662,198（+0.1%、誤差範囲）。YaneuraOu比: NNUE 85%→**82%**、Material 43%（変化なし）。探索チューニング（#384「探索木をYaneuraOuに近づけるチューニング」）およびRust Edition 2024移行（#385）の影響。**ホットスポット変動**: NNUE側で`refresh_accumulator`が8.25%→10.14%に増加（探索木変化によりfull refresh頻度が上昇）、`Network::evaluate`が2位に浮上し`search_node`が3位に。Material側で`search_node`が3位に上昇（5.04%→5.23%）、`check_move_mate`（1.99%）と`update_check_squares`（1.65%）が新たにTop10入り、`undo_move`と`gives_check`がランク外に。並列効率: Material 98.8%、NNUE 96.8%（誤差範囲）。bestmove変動: NNUE局面4 G\*3c→S\*2h（depth 19→21）、Material局面1 8h6f→5i6h、局面4 N\*2c→G\*1c |
+| 2026-02-23 | 計測結果更新（NNUE: Network::evaluate 10.77%, refresh 10.28%, search_node 7.22%, MovePicker 6.82%、Material: eval_lv7_like 24.71%, direction_of 16.74%, partial_insertion_sort 4.96%）。NPS: NNUE平均 919,786（+0.6%、誤差範囲）、Material平均 618,272（**-6.6%**、662,198→618,272）。YaneuraOu比: NNUE 82%（変化なし）、Material 43%→**40%**に低下。fix-search-compare-with-yoブランチでの探索ロジック調整（SEE/mate修正等）の影響でMaterial評価のNPSが低下。並列効率: Material 97.4%（-1.4pt）、NNUE 93.6%（-3.2pt）に微低下。**ホットスポット順位変動**: NNUE側で`Network::evaluate`が1位に浮上（8.01%→10.77%）し`refresh_accumulator`（10.14%→10.28%）と入れ替わり。Material側で`eval_lv7_like`が20.64%→24.71%、`direction_of`が13.69%→16.74%に相対上昇（探索効率変化により評価関数の比率が増加）、`search_node`が3位→5位に低下。bestmove変動: NNUE局面4 S\*2h→N\*2c（depth 21→20） |
