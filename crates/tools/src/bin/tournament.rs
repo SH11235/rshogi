@@ -214,6 +214,23 @@ struct EngineCommandMeta {
     usi_options_white: Vec<String>,
 }
 
+#[derive(Serialize)]
+struct TournamentMeta {
+    timestamp: String,
+    settings: MetaSettings,
+    engines: Vec<EngineMetaEntry>,
+    start_positions: Vec<String>,
+    output_dir: String,
+}
+
+#[derive(Serialize)]
+struct EngineMetaEntry {
+    index: usize,
+    label: String,
+    path: String,
+    usi_options: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // ペア別ライター
 // ---------------------------------------------------------------------------
@@ -482,6 +499,34 @@ fn main() -> Result<()> {
             shutdown_clone.store(true, Ordering::Relaxed);
         })
         .ok();
+    }
+
+    // meta.json 書き出し
+    {
+        let tournament_meta = TournamentMeta {
+            timestamp: timestamp.to_rfc3339(),
+            settings: MetaSettings {
+                games: cli.games * 2,
+                max_moves: cli.max_moves,
+                byoyomi: cli.byoyomi,
+                timeout_margin_ms: cli.timeout_margin_ms,
+                threads: cli.threads,
+                hash_mb: cli.hash_mb,
+                depth: cli.depth,
+            },
+            engines: (0..n)
+                .map(|i| EngineMetaEntry {
+                    index: i,
+                    label: engine_labels[i].clone(),
+                    path: cli.engines[i].display().to_string(),
+                    usi_options: engine_usi_options[i].clone(),
+                })
+                .collect(),
+            start_positions: start_commands.clone(),
+            output_dir: cli.out_dir.display().to_string(),
+        };
+        let meta_file = File::create(cli.out_dir.join("meta.json"))?;
+        serde_json::to_writer_pretty(BufWriter::new(meta_file), &tournament_meta)?;
     }
 
     // 全ペア × games × 2方向のチケット生成
