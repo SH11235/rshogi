@@ -82,6 +82,9 @@ rshogi と YaneuraOu (YO) の両エンジンにデバッグログを挿入→ビ
 - 全 return 箇所への一括ログ追加（ノイズ過多で遅い）
 - 早い段階で静的コード差に寄りすぎる（まず実行時 first mismatch 固定）
 - `key16` 一致のみで TT hit 妥当性を結論づける（`fullkey + cluster/slot` が必要）
+- **`if-else if` チェインの途中にトレース用 `if` を挿入する**（チェインが壊れて探索ロジックが変わる。詳細は「デバッグコードで探索ロジックを壊さない」セクション参照）
+- **デバッグコード入りビルドで「一致した」と結論する**（クリーンビルドで再確認必須）
+- **pipe / file redirect でエンジンにコマンドを送る**（coproc 必須。詳細は「エンジン起動方法」セクション参照）
 
 ### Phase 1: 計測目標の明確化
 
@@ -785,6 +788,24 @@ avoid 駒（移動元の竜）が pinner 候補に残存し、相手の合駒可
 - YO は `USE_LAZY_EVALUATE` 未定義のため常に NNUE 再評価する設計
 - 5 点の eval 差が correction → evalDiff → history → pruning とカスケードし 12776 ノード差に増幅される
 
+### デバッグトレースが探索ロジックを破壊（2026-02-23 発見）
+
+**症状**: d=10 で RS=9836 vs YO=10040 のノード数差。d=1〜d=9 は完全一致
+**調査経路**:
+1. HW（History Write）トレースを両エンジンに追加し、mainHistory 全書き込みを seq 番号付きで比較
+2. seq=0〜242 完全一致、seq=243 で RS-only の BEST 書き込み（key=52e3205db7ab76bb, p=11, d=6, mv=4h3g）
+3. NK_ENTRY トレースで TT 状態を比較 → entry 時点で RS/YO 完全一致
+4. NK_MV トレースで mc=1 の探索値を比較 → **両方とも val=125 beta=125 でカットオフ**
+5. カットオフしているのに YO だけ BEST HW が出ない → update_all_stats が呼ばれていない
+6. コード確認 → YO に挿入した `YO_NODE_END` トレース用の `if` 文が `if (!moveCount) ... else if (bestMove)` チェインを壊していた
+**原因**: YO の `if (!moveCount)` と `else if (bestMove)` の間に `if (ply + depth == 17)` というトレース用 if を挿入。p=11, d=6 で条件が true になり、`else if (bestMove)` ブランチに入れず、`update_all_stats` がスキップされた
+**修正**: トレースコードを if-else チェインの外に配置
+**教訓**:
+- **デバッグコード自体がバグの原因になる**。特に C/C++ の `if-else if` チェインは `{}` の欠如と相まって脆い
+- 「乖離が解消された」と思ったら、**同一条件でクリーンビルド（git stash 後）でも一致するか必ず確認**すべき
+- d=10 レベルの浅い depth での乖離がデバッグコード由来だった場合、**深い depth にはまだ本来の乖離が残っている**（この局面では d=22 で -49927 の実乖離あり）
+- 調査専用のトレースコードは **最小限の `fprintf` + `return` なし** に限定し、制御フローに影響を与えない場所に配置する
+
 ### ProbCut バッファ collect バグ（2026-02-21 修正）
 
 **症状**: d=13 で -20829 のノード数差（RS=215173, YO=236002）。d=1〜d=12 は完全一致
@@ -803,6 +824,128 @@ avoid 駒（移動元の竜）が pinner 候補に残存し、相手の合駒可
 - 静的コード比較（yo-compare）では「同一式、異なるタイミング」のバグは発見不可能。計測データの差分が必須
 - PLY drill-down で main moves loop にログが出ない場合、**ProbCut/NullMove 等の pre-loop パス**を即座に確認すべき
 - PLY drill-down が p>=4 まで深い場合、A/B テスト（ProbCut 無効化）を先に試す方が効率的だった可能性あり
+
+## エンジン起動方法（coproc 必須）
+
+### pipe / file redirect は使用禁止
+
+エンジンにコマンドを送る方法は **bash coproc** 一択。
+他の方法は致命的な問題がある:
+
+| 方法 | 問題 |
+|------|------|
+| `echo "..." \| ./engine 2>file` | pipe のバッファリングで stdin が一括到着。stderr/stdout が混在する環境あり |
+| `./engine < input.txt 2>file` | ファイル入力は即座に EOF を送り、YO が `bestmove` 前に終了する（depth=1 で打ち切り） |
+| **`coproc ENG { ./engine 2>file; }`** | **正解。コマンドを逐次送信し、`bestmove` を待ってから `quit` を送れる** |
+
+### coproc テンプレート
+
+```bash
+run_engine() {
+  local engine="$1" label="$2" errfile="$3"
+  shift 3
+  coproc ENG { "$engine" 2>"$errfile"; }
+  local pid=$ENG_PID
+  echo "usi" >&${ENG[1]}
+  echo "setoption name USI_Hash value $HASH" >&${ENG[1]}
+  for opt in "$@"; do echo "$opt" >&${ENG[1]}; done
+  echo "isready" >&${ENG[1]}
+  while read -r line <&${ENG[0]}; do [[ "$line" == readyok* ]] && break; done
+  echo "usinewgame" >&${ENG[1]}
+  echo "position sfen $SFEN" >&${ENG[1]}
+  echo "go depth $DEPTH" >&${ENG[1]}
+  while read -r line <&${ENG[0]}; do [[ "$line" == bestmove* ]] && break; done
+  echo "$label done"
+  echo "quit" >&${ENG[1]}
+  wait "$pid" 2>/dev/null
+}
+```
+
+### YO 固有のオプション注意
+
+- YO は `EvalFile` を認識しない。`EvalDir` でディレクトリを指定するか、symlink `eval/nn.bin` を利用
+- `FV_SCALE=24`, `Threads=1`, `PvInterval=0` が YO 側の標準オプション
+
+## 環境変数ゲート型トレースの設計指針
+
+### LazyLock パターン（RS 推奨）
+
+ホットパスに挿入するトレースは `std::sync::LazyLock` で初回のみ環境変数を読む:
+
+```rust
+{
+    use std::sync::LazyLock;
+    static TARGET_KEY: LazyLock<Option<u64>> = LazyLock::new(|| {
+        std::env::var("RS_NODE_KEY").ok().and_then(|s| u64::from_str_radix(&s, 16).ok())
+    });
+    if let Some(target) = *TARGET_KEY && pos.key() == target {
+        eprintln!("...");
+    }
+}
+```
+
+環境変数が未設定なら **初回の Option::None 判定だけ** で以降ゼロコスト。
+
+### getenv パターン（YO）
+
+YO 側は `getenv()` が毎回呼ばれるため、**ホットパスでの性能影響に注意**:
+
+```cpp
+const char* nk_str = getenv("RS_NODE_KEY");
+if (nk_str) {
+    uint64_t target = strtoull(nk_str, nullptr, 16);
+    if ((uint64_t)pos.key() == target) {
+        fprintf(stderr, "...\n");
+    }
+}
+```
+
+大量トレース（HW_ALL 等）は static 変数でキャッシュする:
+
+```cpp
+static int hw_rd = -1;
+static bool hw_init = false;
+if (!hw_init) { hw_init = true; const char* e = getenv("RS_HW_RD"); if (e) hw_rd = atoi(e); }
+if (hw_rd < 0 || current_root_depth != hw_rd) return;
+```
+
+### デバッグコードで探索ロジックを壊さない
+
+**最重要ルール: if-else チェインの途中にトレースコードの `if` を挿入してはならない。**
+
+```cpp
+// ❌ 危険: トレースの if が else if チェインを壊す
+if (!moveCount)
+    bestValue = ...;
+
+if (trace_condition) {            // ← 新しい if
+    fprintf(stderr, "...\n");
+}
+else if (bestMove) {              // ← これは trace_condition の else になる！
+    update_all_stats(...);        //    moveCount > 0 && trace_condition のとき呼ばれない
+}
+
+// ✅ 安全: トレースはチェインの外に配置
+if (!moveCount)
+    bestValue = ...;
+
+if (trace_condition) {            // ← 独立した if（else なし）
+    fprintf(stderr, "...\n");
+}
+
+if (!moveCount)
+    ;  // already handled
+else if (bestMove) {              // ← 正しく分岐する
+    update_all_stats(...);
+}
+```
+
+**実例（2026-02-23 の失敗）**: `YO_NODE_END` トレースを `if (!moveCount)` と `else if (bestMove)` の間に挿入し、`update_all_stats` が呼ばれないケースを作った。d=10 の乖離が「解消された」と誤認し、30+ セッションを浪費。
+
+### 計測時はデバッグコードを除去する
+
+`compare_nodes` 等で大量局面を処理する場合、デバッグコードの有無で探索速度が変わる。
+特に YO の `getenv()` はホットパスで顕著。計測前に `git stash` でクリーンにすること。
 
 ## 調査方向の検証
 
