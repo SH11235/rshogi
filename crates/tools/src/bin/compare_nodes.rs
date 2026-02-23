@@ -99,6 +99,22 @@ struct Cli {
     /// 出力ディレクトリの親（デフォルト: results/）
     #[arg(long, default_value = "results")]
     output_base: PathBuf,
+
+    /// エンジンを局面間で使い回す（TT を蓄積させる対局内モードの再現）。
+    /// 有効時は逐次処理（workers=1 相当）になる。
+    ///
+    /// # 背景
+    ///
+    /// 対局フレームワークは対局開始時にのみ `usinewgame + isready` を送り、
+    /// 着手間では TT をリセットしない。そのため対局中は TT が蓄積し続け、
+    /// クリーン TT 状態（新規プロセス）とは探索挙動が異なる。
+    ///
+    /// # 用途
+    ///
+    /// - 対局中の TT 蓄積が bestmove 選択に与える影響の定量的計測
+    /// - 新規局面（クリーン TT）と連続対局局面の探索差異の分析
+    #[arg(long, default_value_t = false)]
+    reuse_engine: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +171,7 @@ struct Meta {
     sample: usize,
     seed: u64,
     total_positions: usize,
+    reuse_engine: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -461,6 +478,92 @@ fn process_position(
     })
 }
 
+/// エンジンを使い回しながら局面を逐次処理する（TT 蓄積モード）。
+///
+/// 対局フレームワークが対局中に行う処理を再現する:
+/// - エンジンを1回だけ起動し全局面で共有する（対局開始時の起動に相当）
+/// - 先頭局面の前に `usinewgame` を1回送る
+/// - 局面間に `usinewgame` も `isready` も送らない（TT は蓄積し続ける）
+///
+/// 注意: 並列化はせず逐次処理のみ。sfens の順序が TT 蓄積の内容に影響する。
+fn process_positions_reuse(
+    params_a: &EngineParams,
+    params_b: &EngineParams,
+    sfens: &[(usize, String)],
+    depth: u32,
+    pb: &indicatif::ProgressBar,
+) -> Vec<PositionResult> {
+    let mut engine_a = match params_a.spawn() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("エンジンA起動失敗: {e}");
+            return vec![];
+        }
+    };
+    let mut engine_b = match params_b.spawn() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("エンジンB起動失敗: {e}");
+            return vec![];
+        }
+    };
+
+    // 対局開始時と同様に usinewgame を1回送る
+    let _ = engine_a.send("usinewgame");
+    let _ = engine_b.send("usinewgame");
+
+    let mut results = Vec::with_capacity(sfens.len());
+
+    for (index, sfen) in sfens {
+        let start = std::time::Instant::now();
+
+        let result_a = match engine_a.search_depth(sfen, depth) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("position {index} エンジンA探索失敗: {e}");
+                pb.inc(1);
+                continue;
+            }
+        };
+        let result_b = match engine_b.search_depth(sfen, depth) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("position {index} エンジンB探索失敗: {e}");
+                pb.inc(1);
+                continue;
+            }
+        };
+
+        let elapsed_secs = start.elapsed().as_secs_f64();
+        let final_nodes_a = result_a.depths.last().map(|d| d.nodes).unwrap_or(0);
+        let final_nodes_b = result_b.depths.last().map(|d| d.nodes).unwrap_or(0);
+        let final_nodes_diff = final_nodes_a as i64 - final_nodes_b as i64;
+        let final_nodes_ratio = if final_nodes_b > 0 {
+            Some(final_nodes_a as f64 / final_nodes_b as f64)
+        } else {
+            None
+        };
+        let bestmove_match = result_a.bestmove == result_b.bestmove;
+
+        results.push(PositionResult {
+            index: *index,
+            sfen: sfen.clone(),
+            a_depths: result_a.depths,
+            b_depths: result_b.depths,
+            a_bestmove: result_a.bestmove,
+            b_bestmove: result_b.bestmove,
+            bestmove_match,
+            final_nodes_diff,
+            final_nodes_ratio,
+            elapsed_secs,
+        });
+
+        pb.inc(1);
+    }
+
+    results
+}
+
 // ---------------------------------------------------------------------------
 // サマリ出力
 // ---------------------------------------------------------------------------
@@ -476,6 +579,15 @@ fn write_summary(writer: &mut dyn Write, results: &[PositionResult], cli: &Cli) 
         writeln!(writer, "  オプション: {}", cli.options_b.join(", "))?;
     }
     writeln!(writer, "深度: {}, 局面数: {}", cli.depth, results.len())?;
+    writeln!(
+        writer,
+        "モード: {}",
+        if cli.reuse_engine {
+            "エンジン使い回し（TT蓄積・逐次）"
+        } else {
+            "局面ごと新規起動（TTリセット・並列）"
+        }
+    )?;
     if let Some(eval) = &cli.eval_a {
         writeln!(writer, "EvalFile(A): {}", eval.display())?;
     }
@@ -550,34 +662,40 @@ fn write_summary(writer: &mut dyn Write, results: &[PositionResult], cli: &Cli) 
     // 最終深度ノード数倍率の分布
     writeln!(writer, "--- 最終深度ノード数倍率(A/B)分布 ---")?;
     let mut bucket_low = 0; // < 0.9
-    let mut bucket_mid_low = 0; // 0.9 - 1.0
-    let mut bucket_mid_high = 0; // 1.0 - 1.1
+    let mut bucket_mid_low = 0; // 0.9 <= A/B < 1.0
+    let mut bucket_exact = 0; // A==B (完全一致)
+    let mut bucket_mid_high = 0; // 1.0 < A/B < 1.1
     let mut bucket_high = 0; // >= 1.1
     let mut no_ratio = 0;
 
     for r in results {
-        match r.final_nodes_ratio {
-            Some(ratio) => {
-                if ratio < 0.9 {
-                    bucket_low += 1;
-                } else if ratio < 1.0 {
-                    bucket_mid_low += 1;
-                } else if ratio < 1.1 {
-                    bucket_mid_high += 1;
-                } else {
-                    bucket_high += 1;
+        if r.final_nodes_diff == 0 {
+            bucket_exact += 1;
+        } else {
+            match r.final_nodes_ratio {
+                Some(ratio) => {
+                    if ratio < 0.9 {
+                        bucket_low += 1;
+                    } else if ratio < 1.0 {
+                        bucket_mid_low += 1;
+                    } else if ratio < 1.1 {
+                        bucket_mid_high += 1;
+                    } else {
+                        bucket_high += 1;
+                    }
                 }
+                None => no_ratio += 1,
             }
-            None => no_ratio += 1,
         }
     }
 
-    writeln!(writer, "  A/B < 0.9:         {:>4} 局面", bucket_low)?;
-    writeln!(writer, "  0.9 <= A/B < 1.0:  {:>4} 局面", bucket_mid_low)?;
-    writeln!(writer, "  1.0 <= A/B < 1.1:  {:>4} 局面", bucket_mid_high)?;
-    writeln!(writer, "  1.1 <= A/B:        {:>4} 局面", bucket_high)?;
+    writeln!(writer, "  A/B < 0.9:              {:>4} 局面", bucket_low)?;
+    writeln!(writer, "  0.9 <= A/B < 1.0:       {:>4} 局面", bucket_mid_low)?;
+    writeln!(writer, "  A/B = 1.0 (完全一致):   {:>4} 局面", bucket_exact)?;
+    writeln!(writer, "  1.0 < A/B < 1.1:        {:>4} 局面", bucket_mid_high)?;
+    writeln!(writer, "  1.1 <= A/B:             {:>4} 局面", bucket_high)?;
     if no_ratio > 0 {
-        writeln!(writer, "  (B=0で計算不能):   {:>4} 局面", no_ratio)?;
+        writeln!(writer, "  (B=0で計算不能):        {:>4} 局面", no_ratio)?;
     }
     writeln!(writer)?;
 
@@ -706,14 +824,12 @@ fn main() -> Result<()> {
         sample: cli.sample,
         seed: cli.seed,
         total_positions: sfens.len(),
+        reuse_engine: cli.reuse_engine,
     };
     {
         let meta_file = File::create(output_dir.join("meta.json"))?;
         serde_json::to_writer_pretty(BufWriter::new(meta_file), &meta)?;
     }
-
-    // rayon スレッドプール（ワークスティーリングで負荷を均等分散）
-    rayon::ThreadPoolBuilder::new().num_threads(workers).build_global().ok();
 
     let total = sfens.len();
 
@@ -743,23 +859,30 @@ fn main() -> Result<()> {
     });
     let depth = cli.depth;
 
-    // 局面単位で par_iter → 手が空いたワーカーが即座に次の局面を取得
-    let results: Vec<PositionResult> = sfens
-        .par_iter()
-        .filter_map(|(index, sfen)| {
-            match process_position(&params_a, &params_b, *index, sfen, depth) {
-                Ok(result) => {
-                    pb.inc(1);
-                    Some(result)
+    let results: Vec<PositionResult> = if cli.reuse_engine {
+        // TT蓄積モード: エンジンを使い回して逐次処理（--reuse-engine）。
+        process_positions_reuse(&params_a, &params_b, &sfens, depth, &pb)
+    } else {
+        // 通常モード: 局面ごとに新規プロセスを起動して並列処理。
+        // 各局面は対局開始時（usinewgame + isready）と同等のクリーンな TT から探索する。
+        rayon::ThreadPoolBuilder::new().num_threads(workers).build_global().ok();
+        sfens
+            .par_iter()
+            .filter_map(|(index, sfen)| {
+                match process_position(&params_a, &params_b, *index, sfen, depth) {
+                    Ok(result) => {
+                        pb.inc(1);
+                        Some(result)
+                    }
+                    Err(e) => {
+                        eprintln!("position {index} エラー: {e}");
+                        pb.inc(1);
+                        None
+                    }
                 }
-                Err(e) => {
-                    eprintln!("position {index} エラー: {e}");
-                    pb.inc(1);
-                    None
-                }
-            }
-        })
-        .collect();
+            })
+            .collect()
+    };
 
     pb.finish_with_message("完了");
     println!();
