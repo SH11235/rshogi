@@ -64,16 +64,16 @@
 | エンジン | NNUE NPS | Material NPS | 備考 |
 |---------|--------:|-------------:|------|
 | 本エンジン | 919,786 | 618,272 | `cargo build --release` |
-| YaneuraOu | 1,118,219 | 1,545,172 | 参考値 |
-| **対YaneuraOu比** | **82%** | **40%** | - |
+| YaneuraOu | 1,054,099 | 1,545,172 | 参考値（2026-02-23再計測） |
+| **対YaneuraOu比** | **87%** | **40%** | - |
 
 #### PGOビルド（本番用）
 
 | エンジン | NNUE NPS | 対YO比 | 備考 |
 |---------|--------:|-------:|------|
-| 本エンジン（PGO前） | 681,366 | 61% | ベースライン |
-| **本エンジン（PGO後）** | **723,855** | **65%** | **+6.2%向上** |
-| YaneuraOu | 1,118,219 | 100% | 参考値 |
+| 本エンジン（PGO前） | 919,786 | 87% | ベースライン |
+| **本エンジン（PGO後）** | **929,320** | **88%** | **+1.0%向上** |
+| YaneuraOu | 1,054,099 | 100% | 参考値（2026-02-23再計測） |
 
 ※ PGOビルド: `./scripts/build_pgo.sh`
 
@@ -685,4 +685,4 @@ PGOビルドの処理フロー:
 | 2026-02-14 | 計測結果更新（NNUE: search_node 7.60%, Network::evaluate 7.41%, attackers_to_occ 6.94%, refresh 6.64%, MovePicker 6.50%、Material: eval_lv7_like 21.17%, direction_of 13.32%, partial_insertion_sort 5.71%）。NPS: NNUE平均 897,967（+0.2%、誤差範囲）、Material平均 647,945（+1.2%、誤差範囲）。並列効率: Material 99.6%、NNUE 94.2%（前回103.6%/96.9%からの変動は誤差範囲）。**ホットスポット順位変動**: NNUE側で`search_node`が1位（7.19%→7.60%）に浮上し`Network::evaluate`（7.26%→7.41%）と入れ替わり。Material側で`search_node`が5位（4.32%→4.95%）に上昇、`gives_check`（1.95%）が10位に新登場し`see_ge`がランク外に。bestmove変動: NNUE局面3がN*4d→5d6c+に変化、Material全局面のbestmoveが変動（fix-search-ttブランチでの探索ロジック調整・StackPvリバートの影響） |
 | 2026-02-14 | 計測結果更新（NNUE: refresh 8.25%, search_node 7.95%, Network::evaluate 7.89%, MovePicker 6.58%、Material: eval_lv7_like 20.13%, direction_of 13.82%, partial_insertion_sort 6.37%）。**NPS向上**: NNUE平均 953,116（**+6.1%**、897,967→953,116）、Material平均 661,453（+2.1%、647,945→661,453）。YaneuraOu比: NNUE 80%→**85%**、Material 42%→**43%**に改善。並列効率: Material 98.4%、NNUE 95.6%（誤差範囲）。**改善点**: PieceListリファクタリング（コミット33ad0628）によりNNUE特徴量インデックス取得が効率化。`append_active_indices`がランク外に（PieceList導入により`refresh_accumulator`に吸収、6.64%→8.25%）。**ホットスポット変動**: NNUE側で`refresh_accumulator`が1位に浮上（PieceListによる特徴量走査の統合）、`attackers_to_occ`が6.94%→5.37%に減少。Material側で`undo_move`（2.23%）が9位に新登場、`check_move_mate`（2.00%）がランク外に。bestmove変動: NNUE局面2が8d7d→B\*6h、局面3が5d6c+→N\*4d。Material局面1が5i5h→8h6f |
 | 2026-02-20 | 計測結果更新（NNUE: refresh 10.14%, Network::evaluate 8.01%, search_node 7.75%, MovePicker 6.86%、Material: eval_lv7_like 20.64%, direction_of 13.69%, search_node 5.23%）。**NPS低下**: NNUE平均 913,955（**-4.1%**、953,116→913,955）、Material平均 662,198（+0.1%、誤差範囲）。YaneuraOu比: NNUE 85%→**82%**、Material 43%（変化なし）。探索チューニング（#384「探索木をYaneuraOuに近づけるチューニング」）およびRust Edition 2024移行（#385）の影響。**ホットスポット変動**: NNUE側で`refresh_accumulator`が8.25%→10.14%に増加（探索木変化によりfull refresh頻度が上昇）、`Network::evaluate`が2位に浮上し`search_node`が3位に。Material側で`search_node`が3位に上昇（5.04%→5.23%）、`check_move_mate`（1.99%）と`update_check_squares`（1.65%）が新たにTop10入り、`undo_move`と`gives_check`がランク外に。並列効率: Material 98.8%、NNUE 96.8%（誤差範囲）。bestmove変動: NNUE局面4 G\*3c→S\*2h（depth 19→21）、Material局面1 8h6f→5i6h、局面4 N\*2c→G\*1c |
-| 2026-02-23 | 計測結果更新（NNUE: Network::evaluate 10.77%, refresh 10.28%, search_node 7.22%, MovePicker 6.82%、Material: eval_lv7_like 24.71%, direction_of 16.74%, partial_insertion_sort 4.96%）。NPS: NNUE平均 919,786（+0.6%、誤差範囲）、Material平均 618,272（**-6.6%**、662,198→618,272）。YaneuraOu比: NNUE 82%（変化なし）、Material 43%→**40%**に低下。fix-search-compare-with-yoブランチでの探索ロジック調整（SEE/mate修正等）の影響でMaterial評価のNPSが低下。並列効率: Material 97.4%（-1.4pt）、NNUE 93.6%（-3.2pt）に微低下。**ホットスポット順位変動**: NNUE側で`Network::evaluate`が1位に浮上（8.01%→10.77%）し`refresh_accumulator`（10.14%→10.28%）と入れ替わり。Material側で`eval_lv7_like`が20.64%→24.71%、`direction_of`が13.69%→16.74%に相対上昇（探索効率変化により評価関数の比率が増加）、`search_node`が3位→5位に低下。bestmove変動: NNUE局面4 S\*2h→N\*2c（depth 21→20） |
+| 2026-02-23 | 計測結果更新（NNUE: Network::evaluate 10.77%, refresh 10.28%, search_node 7.22%, MovePicker 6.82%、Material: eval_lv7_like 24.71%, direction_of 16.74%, partial_insertion_sort 4.96%）。NPS: NNUE平均 919,786（+0.6%、誤差範囲）、Material平均 618,272（**-6.6%**、662,198→618,272）。YaneuraOu比: NNUE 82%（変化なし）、Material 43%→**40%**に低下。fix-search-compare-with-yoブランチでの探索ロジック調整（SEE/mate修正等）の影響でMaterial評価のNPSが低下。並列効率: Material 97.4%（-1.4pt）、NNUE 93.6%（-3.2pt）に微低下。**ホットスポット順位変動**: NNUE側で`Network::evaluate`が1位に浮上（8.01%→10.77%）し`refresh_accumulator`（10.14%→10.28%）と入れ替わり。Material側で`eval_lv7_like`が20.64%→24.71%、`direction_of`が13.69%→16.74%に相対上昇（探索効率変化により評価関数の比率が増加）、`search_node`が3位→5位に低下。bestmove変動: NNUE局面4 S\*2h→N\*2c（depth 21→20）。**YaneuraOu参考値再計測**: 同一nn.bin（suisho5.bin、md5一致確認済）・同一条件（tt=256MB, movetime=20000ms）でYO NPS再計測。1,118,219→1,054,099に低下（前回計測はtt=1024MB条件だった可能性）。対YO比: NNUE 82%→**87%**に改善（rshogi側の実質的な改善ではなく比較条件の是正）。**PGO再計測**: NNUEプロファイル収集に修正（`build_pgo.sh`がMaterial評価のみでプロファイル収集していた問題を修正）。Full LTO + PGO（production）ビルドでNNUE 929,320（PGO前比**+1.0%**）。前回計測（+6.2%）と比べてPGO効果が縮小。探索ロジック変更により分岐パターンが変化した可能性 |
