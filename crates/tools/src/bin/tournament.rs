@@ -210,6 +210,8 @@ struct EngineCommandMeta {
     path_white: String,
     label_black: String,
     label_white: String,
+    usi_options_black: Vec<String>,
+    usi_options_white: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -298,7 +300,9 @@ fn worker_main(
             usi_options: engine_usi_options[i].clone(),
         };
         match EngineProcess::spawn(&cfg, label) {
-            Ok(ep) => engines.push(ep),
+            Ok(ep) => {
+                engines.push(ep);
+            }
             Err(e) => {
                 eprintln!("worker: failed to spawn engine {i} ({}): {e}", path.display());
                 shutdown.store(true, Ordering::Relaxed);
@@ -550,6 +554,8 @@ fn main() -> Result<()> {
                     path_white: cli.engines[j].display().to_string(),
                     label_black: engine_labels[i].clone(),
                     label_white: engine_labels[j].clone(),
+                    usi_options_black: engine_usi_options[i].clone(),
+                    usi_options_white: engine_usi_options[j].clone(),
                 },
                 start_positions: start_commands.clone(),
                 output: path.display().to_string(),
