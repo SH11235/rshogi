@@ -507,7 +507,7 @@ impl Position {
         if !bb.is_empty() {
             return (bb.lsb().unwrap(), see_piece_value(PieceType::Bishop));
         }
-        // YaneuraOu準拠: Rook(990) を Horse(945) より先に選択 (yaneuraou-search.cpp:2632-2669)
+        // YaneuraOu準拠: Rook(990) を Horse(945) より先に選択
         // 価値昇順ではないが、YOとのノード数一致のために順序を合わせる
         // Rook (990)
         let bb = attackers & self.pieces(stm, PieceType::Rook);

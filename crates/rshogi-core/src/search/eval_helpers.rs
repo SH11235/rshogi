@@ -289,7 +289,7 @@ pub(super) fn probe_transposition<const NT: u8>(
         inc_stat_by_depth!(st, tt_hit_by_depth, depth);
     }
 
-    // YaneuraOu準拠のTTカットオフ条件（yaneuraou-search.cpp:2331-2337）
+    // YaneuraOu準拠のTTカットオフ条件
     // - fail-high時は tt_data.depth > depth を要求（fail-low時は >= depth）
     // - depth<=5ではcutNodeとTT値の方向が一致する場合のみカットオフ許可
     let tt_value_lte_beta = tt_value != Value::NONE && tt_value.raw() <= beta.raw();
@@ -448,7 +448,6 @@ pub(super) fn compute_eval_context(
     let mut unadjusted_static_eval = Value::NONE;
 
     // YaneuraOu準拠: TTからのeval取得 + PvNodeでは必ずevaluate()
-    // yaneuraou-search.cpp:2680-2706 参照
     // 「🌈 これ書かないとR70ぐらい弱くなる。」
     let mut static_eval = if in_check {
         // YaneuraOu準拠: in-check では (ss-2)->staticEval を継承する。

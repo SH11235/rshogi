@@ -216,7 +216,7 @@ pub(super) fn qsearch<const NT: u8>(
                         key,
                         depth: DEPTH_QS,
                         bound: Bound::Exact,
-                        // YaneuraOu準拠: mate1ではss->ttPvを使用 (yaneuraou-search.cpp:4473)
+                        // YaneuraOu準拠: mate1ではss->ttPvを使用
                         is_pv: st.stack[ply as usize].tt_pv,
                         tt_move: mate_move,
                         stored_value: mate_value,
@@ -227,7 +227,7 @@ pub(super) fn qsearch<const NT: u8>(
                             Move::NONE
                         },
                     });
-                    // YaneuraOu準拠: mate1ではss->ttPvを使用 (yaneuraou-search.cpp:4473)
+                    // YaneuraOu準拠: mate1ではss->ttPvを使用
                     tt_result.write(
                         key,
                         mate_value,
@@ -286,7 +286,6 @@ pub(super) fn qsearch<const NT: u8>(
         }
         if !tt_hit {
             // YaneuraOu準拠: stand pat cutoff 時は ttPv=false で保存
-            // (yaneuraou-search.cpp:4454)
             #[cfg(feature = "tt-trace")]
             let allow_write = ctx.allow_tt_write
                 && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::Lower, DEPTH_UNSEARCHED);

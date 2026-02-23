@@ -45,7 +45,7 @@ pub const FROM_TO_SIZE: usize = 1 << 16;
 // =============================================================================
 // History初期値定数 (YaneuraOu準拠)
 // =============================================================================
-// cf. yaneuraou-search.cpp Worker::clear()
+// cf. YaneuraOu Worker::clear()
 // 多くの履歴エントリは探索後に負の値になるため、
 // 開始値を「正しい」方向にシフトさせることでLMR/枝刈りの精度を上げる。
 
@@ -101,7 +101,6 @@ pub const PAWN_HISTORY_NEG_MULTIPLIER: i32 = 550;
 pub const CONTINUATION_HISTORY_NEAR_PLY_OFFSET: i32 = 88;
 
 /// Prior Capture Countermove Bonus（fail low時の前の捕獲手へのボーナス）
-/// YaneuraOu: yaneuraou-search.cpp:3976
 pub const PRIOR_CAPTURE_COUNTERMOVE_BONUS: i32 = 964;
 
 // =============================================================================
