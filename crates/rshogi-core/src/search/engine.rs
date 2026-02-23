@@ -94,12 +94,8 @@ impl SearchInfo {
 
 /// YaneuraOu準拠のaspiration windowを計算
 pub(crate) fn compute_aspiration_window(rm: &RootMove, thread_id: usize) -> (Value, Value, Value) {
-    // mean_squared_score がない場合は巨大なdeltaでフルウィンドウにする
-    let fallback = {
-        let inf = Value::INFINITE.raw() as i64;
-        inf * inf
-    };
-    let mean_sq = rm.mean_squared_score.unwrap_or(fallback).abs();
+    // YO準拠: 未シード時は sentinel(-INFINITE^2) を保持し、abs()後に巨大deltaになる。
+    let mean_sq = rm.mean_squared_score.abs();
     let mean_sq = mean_sq.min((Value::INFINITE.raw() as i64) * (Value::INFINITE.raw() as i64));
 
     let thread_offset = (thread_id % 8) as i32;
@@ -951,18 +947,17 @@ impl Search {
         let mut skill = Skill::from_options(&self.skill_options);
         let skill_enabled = skill.enabled();
 
-        // デバッグ用の helper 有効化制御
-        // go depth/go mate を含め helper を有効化する。
+        // YO準拠: helperスレッドは num_threads > 1 なら常に起動する。
+        // (MultiPV, go depth, go mate, Skill に関係なく起動)
+        // best-thread 選択の条件とは独立。
         // 追加の切り分けは環境変数 RSHOGI_DISABLE_HELPER_SEARCH で行う。
         let helper_search_enabled = self.num_threads > 1 && !helper_search_disabled();
 
         if helper_search_enabled {
-            // YaneuraOu準拠: helper は go depth 指定時も main の stop まで探索を継続する。
-            let helper_max_depth = if limits.depth > 0 { MAX_PLY } else { max_depth };
             self.thread_pool.start_thinking(
                 pos,
                 limits.clone(),
-                helper_max_depth,
+                max_depth,
                 self.time_options,
                 self.max_moves_to_draw,
                 draw_value_black,
@@ -1316,25 +1311,23 @@ where
     // ヘルパー用のローカル search_again_counter
     let mut local_search_again_counter: i32 = 0;
 
-    // 反復深化ループ (yaneuraou-search.cpp:1266)
+    // 反復深化ループ
     for depth in 1..=max_depth {
         if worker.state.abort {
             break;
         }
 
-        // search_again_counter 更新 (yaneuraou-search.cpp:1315-1319)
-        if depth > 1 {
-            let inc_depth = if let Some(ref ms) = main_state {
-                ms.increase_depth
+        // search_again_counter 更新
+        let inc_depth = if let Some(ref ms) = main_state {
+            ms.increase_depth
+        } else {
+            increase_depth_shared.load(Ordering::Relaxed)
+        };
+        if !inc_depth {
+            if let Some(ref mut ms) = main_state {
+                ms.search_again_counter += 1;
             } else {
-                increase_depth_shared.load(Ordering::Relaxed)
-            };
-            if !inc_depth {
-                if let Some(ref mut ms) = main_state {
-                    ms.search_again_counter += 1;
-                } else {
-                    local_search_again_counter += 1;
-                }
+                local_search_again_counter += 1;
             }
         }
 
@@ -1361,7 +1354,7 @@ where
             );
         }
 
-        // YaneuraOu準拠: 詰みを読みきった場合の早期終了 (yaneuraou-search.cpp:1618-1626)
+        // YaneuraOu準拠: 詰みを読みきった場合の早期終了
         if effective_multi_pv == 1 && depth > 1 && !worker.state.root_moves.is_empty() {
             let best_value = worker.state.root_moves[0].score;
 
@@ -1375,7 +1368,7 @@ where
                 worker.state.root_moves[0].score_upper_bound,
                 limits.mate,
             ) {
-                // メインのみ request_stop (yaneuraou-search.cpp:1650)
+                // メインのみ request_stop
                 if is_main {
                     time_manager.request_stop();
                 }
@@ -1395,7 +1388,7 @@ where
             local_search_again_counter
         };
 
-        // MultiPVループ（YaneuraOu準拠: yaneuraou-search.cpp:1323）
+        // MultiPVループ（YaneuraOu準拠）
         let mut processed_pv = 0;
         for pv_idx in 0..effective_multi_pv {
             if worker.state.abort {
@@ -1407,7 +1400,7 @@ where
                 compute_aspiration_window(&worker.state.root_moves[pv_idx], worker.thread_id);
             let mut failed_high_cnt = 0;
 
-            // Aspiration Windowループ (yaneuraou-search.cpp:1415)
+            // Aspiration Windowループ
             loop {
                 let adjusted_depth =
                     (search_depth - failed_high_cnt - (3 * (search_again_counter + 1) / 4)).max(1);
@@ -1426,21 +1419,21 @@ where
                     )
                 };
 
-                // aspiration loop 内ソート (yaneuraou-search.cpp:1451)
+                // aspiration loop 内ソート
                 worker.state.root_moves.stable_sort_range(pv_idx, worker.state.root_moves.len());
 
                 if worker.state.abort {
                     break;
                 }
 
-                // Window調整 (yaneuraou-search.cpp:1510-1526)
+                // Window調整
                 if score <= alpha {
                     beta = alpha;
                     alpha = Value::new(
                         score.raw().saturating_sub(delta.raw()).max(-Value::INFINITE.raw()),
                     );
                     failed_high_cnt = 0;
-                    // メインのみ (yaneuraou-search.cpp:1517)
+                    // メインのみ
                     if is_main {
                         time_manager.reset_stop_on_ponderhit();
                     }
@@ -1454,13 +1447,13 @@ where
                     break;
                 }
 
-                // delta 更新 (yaneuraou-search.cpp:1528)
+                // delta 更新
                 delta = Value::new(
                     delta.raw().saturating_add(delta.raw() / 3).min(Value::INFINITE.raw()),
                 );
             }
 
-            // 安定ソート [pv_idx..] (yaneuraou-search.cpp:1462)
+            // 安定ソート [pv_idx..]
             worker.state.root_moves.stable_sort_range(pv_idx, worker.state.root_moves.len());
             // 📝 YaneuraOu行1539: 探索済みのPVライン全体も安定ソートして順位を保つ
             worker.state.root_moves.stable_sort_range(0, pv_idx + 1);
@@ -1580,7 +1573,7 @@ where
                 #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
                 let (changes_sum, thread_count) = (best_move_changes, 1);
 
-                // YO準拠: totBestMoveChanges /= 2 (yaneuraou-search.cpp:1294)
+                // YO準拠: totBestMoveChanges /= 2
                 let tot_best_move_changes = ms.tot_best_move_changes / 2.0 + changes_sum;
 
                 if limits.use_time_management()
@@ -1638,7 +1631,7 @@ where
                 last_best_move_depth = depth;
             }
 
-            // YaneuraOu準拠: 詰みスコアが見つかっていたら早期終了 (yaneuraou-search.cpp:1618-1626)
+            // YaneuraOu準拠: 詰みスコアが見つかっていたら早期終了
             if effective_multi_pv == 1 && depth > 1 && !worker.state.root_moves.is_empty() {
                 let best_value = worker.state.root_moves[0].score;
 

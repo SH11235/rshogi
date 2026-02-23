@@ -179,8 +179,11 @@ impl EngineProcess {
 
         let start = Instant::now();
         // depth のみモード（byoyomi=0）ではタイムアウト無効、それ以外は byoyomi ベースで有効
+        // Duration::MAX は recv_timeout に渡すと timespec オーバーフローが起きるため、
+        // 十分大きな有限値（24 時間）を使う。
+        const NO_TIMEOUT: Duration = Duration::from_secs(86400);
         let (soft_limit, hard_limit) = if req.go_depth.is_some() && time_args.byoyomi == 0 {
-            (Duration::MAX, Duration::MAX)
+            (NO_TIMEOUT, NO_TIMEOUT)
         } else {
             let s = Duration::from_millis(req.think_limit_ms.saturating_add(req.timeout_margin_ms));
             let h = s + Duration::from_millis(req.timeout_margin_ms);
@@ -221,8 +224,12 @@ impl EngineProcess {
                         let mut parts = rest.split_whitespace();
                         let mv = parts.next().unwrap_or_default().to_string();
                         let elapsed_ms = duration_to_millis(start.elapsed());
-                        let timed_out =
-                            elapsed_ms > req.think_limit_ms.saturating_add(req.timeout_margin_ms);
+                        // depth のみモード（byoyomi=0）ではタイムアウト判定を無効にする
+                        let timed_out = if req.go_depth.is_some() && time_args.byoyomi == 0 {
+                            false
+                        } else {
+                            elapsed_ms > req.think_limit_ms.saturating_add(req.timeout_margin_ms)
+                        };
                         return Ok(SearchOutcome {
                             bestmove: Some(mv),
                             elapsed_ms,

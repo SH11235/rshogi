@@ -208,8 +208,11 @@ impl UsiEngine {
     }
 
     /// isreadyコマンド: 準備完了を通知
+    /// YaneuraOu準拠: isready 受信時にTTをクリアする
     fn cmd_isready(&mut self) {
-        // 必要な初期化があればここで行う
+        if let Some(search) = self.search.as_mut() {
+            search.clear_tt();
+        }
         self.maybe_report_large_pages();
         println!("readyok");
     }

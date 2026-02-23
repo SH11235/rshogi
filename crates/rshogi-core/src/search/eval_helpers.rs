@@ -50,27 +50,32 @@ pub(super) fn correction_value(
     let move_ok = prev_move.is_normal();
 
     // continuation correction 用キー: (ss-2) と (ss-4) の2段階（YO準拠）
-    // YO準拠: plyが小さい場合はsentinel（NO_PIECE, SQ_ZERO）テーブルを参照
+    // YO準拠: cont_hist_key が未設定(None)でも sentinel にフォールバックして参照する。
     let sentinel_key = ContHistKey::null_sentinel();
     let cont_key_2 = if move_ok {
         if ply >= 2 {
-            st.stack[(ply - 2) as usize].cont_hist_key
+            match st.stack[(ply - 2) as usize].cont_hist_key {
+                Some(key) => key,
+                None => sentinel_key,
+            }
         } else {
-            Some(sentinel_key)
+            sentinel_key
         }
     } else {
-        None
+        sentinel_key
     };
     let cont_key_4 = if move_ok {
         if ply >= 4 {
-            st.stack[(ply - 4) as usize].cont_hist_key
+            match st.stack[(ply - 4) as usize].cont_hist_key {
+                Some(key) => key,
+                None => sentinel_key,
+            }
         } else {
-            Some(sentinel_key)
+            sentinel_key
         }
     } else {
-        None
+        sentinel_key
     };
-
     // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
     let h = unsafe { ctx.history.as_ref_unchecked() };
     let pcv = h.correction_history.pawn_value(pawn_idx, us) as i32;
@@ -80,20 +85,19 @@ pub(super) fn correction_value(
 
     // YO準拠: move無効の場合はcntcv全体が8（個別デフォルトの合計ではない）
     let cntcv = if move_ok {
-        let cv2 = cont_key_2
-            .map(|key| {
-                let pc = pos.piece_on(prev_move.to());
-                h.correction_history.continuation_value(key.piece, key.to, pc, prev_move.to())
-                    as i32
-            })
-            .unwrap_or(8);
-        let cv4 = cont_key_4
-            .map(|key| {
-                let pc = pos.piece_on(prev_move.to());
-                h.correction_history.continuation_value(key.piece, key.to, pc, prev_move.to())
-                    as i32
-            })
-            .unwrap_or(8);
+        let pc = pos.piece_on(prev_move.to());
+        let cv2 = h.correction_history.continuation_value(
+            cont_key_2.piece,
+            cont_key_2.to,
+            pc,
+            prev_move.to(),
+        ) as i32;
+        let cv4 = h.correction_history.continuation_value(
+            cont_key_4.piece,
+            cont_key_4.to,
+            pc,
+            prev_move.to(),
+        ) as i32;
         cv2 + cv4
     } else {
         8
@@ -125,34 +129,23 @@ pub(super) fn update_correction_history(
     };
     let move_ok = prev_move.is_normal();
 
-    // (ss-2) context — YO準拠: plyが小さい場合はsentinel（NO_PIECE, SQ_ZERO）テーブルを更新
+    // (ss-2)/(ss-4) context — YO準拠: cont_hist_key が未設定(None)でも sentinel へフォールバック
     let sentinel_key = ContHistKey::null_sentinel();
-    let cont_params_2 = if move_ok {
-        let key = if ply >= 2 {
-            st.stack[(ply - 2) as usize].cont_hist_key
-        } else {
-            Some(sentinel_key)
-        };
-        key.map(|k| {
-            let pc = pos.piece_on(prev_move.to());
-            (k.piece, k.to, pc, prev_move.to())
-        })
+    let cont_key_2 = if ply >= 2 {
+        match st.stack[(ply - 2) as usize].cont_hist_key {
+            Some(key) => key,
+            None => sentinel_key,
+        }
     } else {
-        None
+        sentinel_key
     };
-    // (ss-4) context
-    let cont_params_4 = if move_ok {
-        let key = if ply >= 4 {
-            st.stack[(ply - 4) as usize].cont_hist_key
-        } else {
-            Some(sentinel_key)
-        };
-        key.map(|k| {
-            let pc = pos.piece_on(prev_move.to());
-            (k.piece, k.to, pc, prev_move.to())
-        })
+    let cont_key_4 = if ply >= 4 {
+        match st.stack[(ply - 4) as usize].cont_hist_key {
+            Some(key) => key,
+            None => sentinel_key,
+        }
     } else {
-        None
+        sentinel_key
     };
 
     const NON_PAWN_WEIGHT: i32 = 165;
@@ -174,15 +167,25 @@ pub(super) fn update_correction_history(
         bonus * NON_PAWN_WEIGHT / 128,
     );
 
-    // YO準拠: continuation(ss-2) 重み 137/128
-    if let Some((piece, to, pc, prev_to)) = cont_params_2 {
-        h.correction_history
-            .update_continuation(piece, to, pc, prev_to, bonus * 137 / 128);
-    }
-    // YO準拠: continuation(ss-4) 重み 64/128
-    if let Some((piece, to, pc, prev_to)) = cont_params_4 {
-        h.correction_history
-            .update_continuation(piece, to, pc, prev_to, bonus * 64 / 128);
+    // YO準拠: continuation(ss-2) 重み 137/128, (ss-4) 重み 64/128
+    // YO準拠: m.is_ok()のときはcontinuation correctionを常に更新（sentinelテーブル含む）
+    if move_ok {
+        let pc = pos.piece_on(prev_move.to());
+        let prev_to = prev_move.to();
+        h.correction_history.update_continuation(
+            cont_key_2.piece,
+            cont_key_2.to,
+            pc,
+            prev_to,
+            bonus * 137 / 128,
+        );
+        h.correction_history.update_continuation(
+            cont_key_4.piece,
+            cont_key_4.to,
+            pc,
+            prev_to,
+            bonus * 64 / 128,
+        );
     }
 }
 
@@ -286,7 +289,7 @@ pub(super) fn probe_transposition<const NT: u8>(
         inc_stat_by_depth!(st, tt_hit_by_depth, depth);
     }
 
-    // YaneuraOu準拠のTTカットオフ条件（yaneuraou-search.cpp:2331-2337）
+    // YaneuraOu準拠のTTカットオフ条件
     // - fail-high時は tt_data.depth > depth を要求（fail-low時は >= depth）
     // - depth<=5ではcutNodeとTT値の方向が一致する場合のみカットオフ許可
     let tt_value_lte_beta = tt_value != Value::NONE && tt_value.raw() <= beta.raw();
@@ -444,49 +447,7 @@ pub(super) fn compute_eval_context(
 
     let mut unadjusted_static_eval = Value::NONE;
 
-    // デバッグ: TTヒット時のeval状態を確認
-    #[cfg(feature = "search-stats")]
-    {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static TT_EVAL_VALID: AtomicU64 = AtomicU64::new(0);
-        static TT_EVAL_NONE: AtomicU64 = AtomicU64::new(0);
-        static TT_MISS: AtomicU64 = AtomicU64::new(0);
-        static TT_PV_NODE: AtomicU64 = AtomicU64::new(0);
-
-        if !in_check {
-            if tt_ctx.hit {
-                if tt_ctx.data.eval != Value::NONE {
-                    if !pv_node {
-                        TT_EVAL_VALID.fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        TT_PV_NODE.fetch_add(1, Ordering::Relaxed);
-                    }
-                } else {
-                    TT_EVAL_NONE.fetch_add(1, Ordering::Relaxed);
-                }
-            } else {
-                TT_MISS.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-
-        // 一定間隔でログ出力
-        let total = TT_EVAL_VALID.load(Ordering::Relaxed)
-            + TT_EVAL_NONE.load(Ordering::Relaxed)
-            + TT_MISS.load(Ordering::Relaxed)
-            + TT_PV_NODE.load(Ordering::Relaxed);
-        if total > 0 && total.is_multiple_of(100000) {
-            eprintln!(
-                "[TT-EVAL-DEBUG] valid={}, none={}, miss={}, pv={}",
-                TT_EVAL_VALID.load(Ordering::Relaxed),
-                TT_EVAL_NONE.load(Ordering::Relaxed),
-                TT_MISS.load(Ordering::Relaxed),
-                TT_PV_NODE.load(Ordering::Relaxed),
-            );
-        }
-    }
-
     // YaneuraOu準拠: TTからのeval取得 + PvNodeでは必ずevaluate()
-    // yaneuraou-search.cpp:2680-2706 参照
     // 「🌈 これ書かないとR70ぐらい弱くなる。」
     let mut static_eval = if in_check {
         // YaneuraOu準拠: in-check では (ss-2)->staticEval を継承する。

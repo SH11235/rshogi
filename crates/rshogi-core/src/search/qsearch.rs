@@ -71,8 +71,8 @@ pub(super) fn qsearch<const NT: u8>(
             // YaneuraOu準拠: REPETITION_DRAW は draw_value_table の値に関わらず
             // draw_jitter(value_draw(nodes)) を加える。
             if rep_state == crate::types::RepetitionState::Draw {
-                let jittered = Value::new(v.raw() + draw_jitter(st.nodes, ctx.tune_params));
-                return jittered;
+                let jitter = draw_jitter(st.nodes, ctx.tune_params);
+                return Value::new(v.raw() + jitter);
             }
             return value_from_tt(v, ply);
         }
@@ -216,7 +216,7 @@ pub(super) fn qsearch<const NT: u8>(
                         key,
                         depth: DEPTH_QS,
                         bound: Bound::Exact,
-                        // YaneuraOu準拠: mate1ではss->ttPvを使用 (yaneuraou-search.cpp:4473)
+                        // YaneuraOu準拠: mate1ではss->ttPvを使用
                         is_pv: st.stack[ply as usize].tt_pv,
                         tt_move: mate_move,
                         stored_value: mate_value,
@@ -227,7 +227,7 @@ pub(super) fn qsearch<const NT: u8>(
                             Move::NONE
                         },
                     });
-                    // YaneuraOu準拠: mate1ではss->ttPvを使用 (yaneuraou-search.cpp:4473)
+                    // YaneuraOu準拠: mate1ではss->ttPvを使用
                     tt_result.write(
                         key,
                         mate_value,
@@ -286,7 +286,6 @@ pub(super) fn qsearch<const NT: u8>(
         }
         if !tt_hit {
             // YaneuraOu準拠: stand pat cutoff 時は ttPv=false で保存
-            // (yaneuraou-search.cpp:4454)
             #[cfg(feature = "tt-trace")]
             let allow_write = ctx.allow_tt_write
                 && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::Lower, DEPTH_UNSEARCHED);

@@ -161,6 +161,33 @@ fn test_stable_sort_range() {
     assert_eq!(root_moves[3].pv[0], Move::from_usi("7g7f").unwrap());
 }
 
+/// score と previous_score が完全同値なら元順を保持する（安定ソート）
+#[test]
+fn test_stable_sort_range_keeps_input_order_when_all_keys_equal() {
+    let mv1 = Move::from_usi("7g7f").unwrap();
+    let mv2 = Move::from_usi("2g2f").unwrap();
+    let mv3 = Move::from_usi("5g5f").unwrap();
+    let mv4 = Move::from_usi("8h7g").unwrap();
+
+    let mut rm1 = RootMove::new(mv1);
+    let mut rm2 = RootMove::new(mv2);
+    let mut rm3 = RootMove::new(mv3);
+    let mut rm4 = RootMove::new(mv4);
+
+    for rm in [&mut rm1, &mut rm2, &mut rm3, &mut rm4] {
+        rm.score = Value::new(100);
+        rm.previous_score = Value::new(50);
+    }
+
+    let mut root_moves = RootMoves::from_vec(vec![rm1, rm2, rm3, rm4]);
+    root_moves.stable_sort_range(0, 4);
+
+    assert_eq!(root_moves[0].pv[0], mv1);
+    assert_eq!(root_moves[1].pv[0], mv2);
+    assert_eq!(root_moves[2].pv[0], mv3);
+    assert_eq!(root_moves[3].pv[0], mv4);
+}
+
 /// RootMoves.stable_sort_range()の範囲指定テスト
 #[test]
 fn test_stable_sort_range_partial() {
@@ -458,7 +485,7 @@ fn test_multi_pv_scores_sorted_desc() {
 fn test_aspiration_window_uses_average_and_mean_squared() {
     let mut rm = RootMove::new(Move::from_usi("7g7f").unwrap());
     rm.average_score = Value::new(120);
-    rm.mean_squared_score = Some(11131 * 10); // abs(111310) / 9000 = 12, delta=5+0+12=17
+    rm.mean_squared_score = 11131 * 10; // abs(111310) / 9000 = 12, delta=5+0+12=17
 
     let (alpha, beta, delta) = compute_aspiration_window(&rm, 0);
     assert_eq!(delta.raw(), 17);

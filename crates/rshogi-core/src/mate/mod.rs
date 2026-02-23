@@ -173,4 +173,38 @@ mod tests {
         let mv = mate_by_new(sfen);
         assert!(mv.is_none(), "この局面は受けがあるため mate_1ply は None であるべき");
     }
+
+    #[test]
+    fn test_knight_promotion_not_false_mate_when_unprotected() {
+        // 回帰テスト: 桂成りで金の動きの王手をかけるとき、
+        // 成った駒が他の味方駒に守られていなければ玉が取れるため詰みではない。
+        // has_other_attacker チェック欠落のバグ修正確認。
+        //
+        // 例: 先手桂が2七にいて、4一の白玉に3一成りで王手 → 他に利きなし → 玉が取れる
+        let sfen = "4k4/9/9/9/9/9/1N7/9/4K4 b - 1";
+        let mv = mate_by_new(sfen);
+        assert!(
+            mv.is_none(),
+            "桂成りが保護されていない場合、玉が取れるので詰みではない: {:?}",
+            mv
+        );
+    }
+
+    #[test]
+    fn test_knight_promotion_mate_when_protected() {
+        // 桂成りで金の動きの王手をかけるとき、
+        // 成った駒が他の味方駒に守られていれば玉は取れないので詰みの可能性がある。
+        // 具体的な詰み局面：先手桂3三→2一成り（金利きで1一の玉に王手）、
+        // 先手飛2二で2一を守る
+        //   - 2一: 成桂（飛で守られている → 玉は取れない）
+        //   - 1二: 飛2二の横利き
+        //   - 2二: 飛がいる
+        let sfen = "8k/7R1/6N2/9/9/9/9/9/4K4 b - 1";
+        let mv = mate_by_new(sfen);
+        assert!(
+            mv.is_some(),
+            "飛2二が2一を守っており退路も塞がっているため桂成りで詰み: {:?}",
+            mv
+        );
+    }
 }

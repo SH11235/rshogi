@@ -89,6 +89,13 @@ pub struct SearchTuneParams {
     pub lmr_step16_capture_stat_scale_num: i32,
     /// LMR Step16: stat_score 補正の分子（/8192）
     pub lmr_step16_stat_score_scale_num: i32,
+    /// Step18: ttMove なし時の r 加算値
+    pub step18_no_tt_move_r_add: i32,
+    /// Step18: 深度削減1段目の閾値（r > x で newDepth -1）
+    pub step18_depth_reduce_1_threshold: i32,
+    /// Step18: 深度削減2段目の閾値（r > x && newDepth > 2 で newDepth -2）
+    pub step18_depth_reduce_2_threshold: i32,
+
     /// LMR再探索: deeper判定のベース値（43 + 2*depth の43）
     pub lmr_research_deeper_base: i32,
     /// LMR再探索: deeper判定の depth 係数（43 + 2*depth の2）
@@ -1047,6 +1054,9 @@ impl Default for SearchTuneParams {
             lmr_step16_tt_move_penalty: 2018,
             lmr_step16_capture_stat_scale_num: 803,
             lmr_step16_stat_score_scale_num: 794,
+            step18_no_tt_move_r_add: 1118,
+            step18_depth_reduce_1_threshold: 3212,
+            step18_depth_reduce_2_threshold: 4784,
             lmr_research_deeper_base: 43,
             lmr_research_deeper_depth_mul: 2,
             lmr_research_shallower_threshold: 9,
@@ -1218,6 +1228,19 @@ impl SearchTuneParams {
         try_apply!(
             "SPSA_LMR_STEP16_STAT_SCORE_SCALE_NUM",
             lmr_step16_stat_score_scale_num,
+            0,
+            8192
+        );
+        try_apply!("SPSA_STEP18_NO_TT_MOVE_R_ADD", step18_no_tt_move_r_add, -4096, 4096);
+        try_apply!(
+            "SPSA_STEP18_DEPTH_REDUCE_1_THRESHOLD",
+            step18_depth_reduce_1_threshold,
+            0,
+            8192
+        );
+        try_apply!(
+            "SPSA_STEP18_DEPTH_REDUCE_2_THRESHOLD",
+            step18_depth_reduce_2_threshold,
             0,
             8192
         );
