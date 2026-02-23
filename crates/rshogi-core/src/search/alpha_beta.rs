@@ -21,8 +21,7 @@ use crate::types::{
 
 use super::history::{
     CORRECTION_HISTORY_LIMIT, HistoryCell, HistoryTables, LOW_PLY_HISTORY_SIZE,
-    continuation_history_bonus_with_offset, continuation_history_weight, low_ply_history_bonus,
-    pawn_history_bonus, stat_bonus, stat_malus,
+    continuation_history_weight, low_ply_history_bonus, pawn_history_bonus, stat_bonus, stat_malus,
 };
 use super::movepicker::piece_value;
 use super::types::{
@@ -79,6 +78,11 @@ pub(super) fn to_corrected_static_eval(unadjusted: Value, correction_value: i32)
 /// `base_ply`手目から見た過去1-6手との continuation history を更新する。
 /// 王手中は最初の2手前のみ（YaneuraOu: `if (ss->inCheck && i > 2) break`）。
 #[inline]
+/// continuation history を更新する（共通 weight テーブルを使用）。
+///
+/// YaneuraOu の `update_continuation_histories(ss, pc, to, bonus)` に相当。
+/// bonus は事前にスケーリング済みの値を渡す。
+/// 内部で `bonus * weight[i] / 1024 + offset(i)` を各 ply_back に適用する。
 fn update_continuation_histories(
     h: &mut HistoryTables,
     stack: &StackArray,
@@ -89,29 +93,56 @@ fn update_continuation_histories(
     to: Square,
     bonus: i32,
 ) {
+    update_continuation_histories_custom(
+        h,
+        stack,
+        base_ply,
+        in_check,
+        pc,
+        to,
+        bonus,
+        |ply_back| continuation_history_weight(tune_params, ply_back),
+        |ply_back| {
+            if ply_back < 2 {
+                tune_params.continuation_history_near_ply_offset
+            } else {
+                0
+            }
+        },
+    );
+}
+
+/// continuation history を更新する（カスタム weight/offset 関数を使用）。
+///
+/// fail-high 等で独自の重みテーブルを使いたい場合に使用する。
+fn update_continuation_histories_custom(
+    h: &mut HistoryTables,
+    stack: &StackArray,
+    base_ply: i32,
+    in_check: bool,
+    pc: Piece,
+    to: Square,
+    bonus: i32,
+    weight_fn: impl Fn(usize) -> i32,
+    offset_fn: impl Fn(usize) -> i32,
+) {
     let max_ply_back = if in_check { 2 } else { 6 };
     for ply_back in 1..=6 {
         if ply_back > max_ply_back {
             continue;
         }
-        let weight = continuation_history_weight(tune_params, ply_back);
+        let weight = weight_fn(ply_back);
         let target_ply = base_ply - ply_back as i32;
         if target_ply >= 0
             && let Some(key) = stack[target_ply as usize].cont_hist_key
         {
             // YO準拠: null move ply はスキップ
-            // YO: if (((ss - i)->currentMove).is_ok())
-            // null move では cont_hist_key.piece == NONE（sentinel）
             if key.piece.is_none() {
                 continue;
             }
             let in_check_idx = key.in_check as usize;
             let capture_idx = key.capture as usize;
-            let weighted_bonus = continuation_history_bonus_with_offset(
-                bonus * weight / 1024,
-                ply_back,
-                tune_params,
-            );
+            let weighted_bonus = bonus * weight / 1024 + offset_fn(ply_back);
             h.continuation_history[in_check_idx][capture_idx].update(
                 key.piece,
                 key.to,
@@ -2638,55 +2669,40 @@ impl SearchWorker {
                         );
                     }
 
-                    // YaneuraOu: fail high後にcontHistを更新 (yaneuraou-search.cpp:3614-3618)
+                    // YaneuraOu準拠: fail high後にcontHistを更新
+                    // YO: update_continuation_histories(ss, movedPiece, move.to_sq(), 1365)
                     // PASS は履歴の対象外なのでスキップ
                     if !mv.is_pass() {
                         let moved_piece = mv.moved_piece_after();
                         let to_sq = mv.to();
-                        for offset in 1..=6 {
-                            if st.stack[ply as usize].in_check && offset > 2 {
-                                break;
-                            }
-                            let weight = match offset {
-                                1 => ctx.tune_params.fail_high_continuation_weight_1,
-                                2 => ctx.tune_params.fail_high_continuation_weight_2,
-                                3 => ctx.tune_params.fail_high_continuation_weight_3,
-                                4 => ctx.tune_params.fail_high_continuation_weight_4,
-                                5 => ctx.tune_params.fail_high_continuation_weight_5,
-                                6 => ctx.tune_params.fail_high_continuation_weight_6,
+                        let tune = ctx.tune_params;
+                        // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
+                        let h = unsafe { ctx.history.as_mut_unchecked() };
+                        update_continuation_histories_custom(
+                            h,
+                            &st.stack,
+                            ply,
+                            st.stack[ply as usize].in_check,
+                            moved_piece,
+                            to_sq,
+                            tune.fail_high_continuation_base_num,
+                            |ply_back| match ply_back {
+                                1 => tune.fail_high_continuation_weight_1,
+                                2 => tune.fail_high_continuation_weight_2,
+                                3 => tune.fail_high_continuation_weight_3,
+                                4 => tune.fail_high_continuation_weight_4,
+                                5 => tune.fail_high_continuation_weight_5,
+                                6 => tune.fail_high_continuation_weight_6,
                                 _ => 0,
-                            };
-                            let idx = ply - offset;
-                            if idx < 0 {
-                                break;
-                            }
-                            if let Some(key) = st.stack[idx as usize].cont_hist_key {
-                                // YO準拠: null move ply はスキップ
-                                if key.piece.is_none() {
-                                    continue;
+                            },
+                            |ply_back| {
+                                if ply_back < 2 {
+                                    tune.fail_high_continuation_near_ply_offset
+                                } else {
+                                    0
                                 }
-                                let in_check_idx = key.in_check as usize;
-                                let capture_idx = key.capture as usize;
-                                let bonus =
-                                    ctx.tune_params.fail_high_continuation_base_num * weight / 1024
-                                        + if offset < 2 {
-                                            ctx.tune_params.fail_high_continuation_near_ply_offset
-                                        } else {
-                                            0
-                                        };
-                                {
-                                    // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
-                                    let h = unsafe { ctx.history.as_mut_unchecked() };
-                                    h.continuation_history[in_check_idx][capture_idx].update(
-                                        key.piece,
-                                        key.to,
-                                        moved_piece,
-                                        to_sq,
-                                        bonus,
-                                    );
-                                }
-                            }
-                        }
+                            },
+                        );
                     }
                     // beta cutoff 時の cutoff_cnt 更新は Step 20 のスコア更新で実施
                 } else if value > alpha && value < best_value + Value::new(9) {
@@ -2932,7 +2948,7 @@ impl SearchWorker {
             let best_to = best_move.to();
 
             // 王手中は1,2手前のみ
-            let max_ply_back = if in_check { 2 } else { 6 };
+            let _max_ply_back = if in_check { 2 } else { 6 };
 
             if !is_best_capture {
                 // Quiet手がbest: update_quiet_histories(bestMove, bonus * 881 / 1024)相当
@@ -2962,35 +2978,16 @@ impl SearchWorker {
                     // YaneuraOu準拠: update_quiet_histories → update_continuation_histories
                     let cont_scaled_bonus =
                         scaled_bonus * ctx.tune_params.continuation_history_multiplier / 1024;
-                    for ply_back in 1..=6 {
-                        if ply_back > max_ply_back {
-                            continue;
-                        }
-                        let weight = continuation_history_weight(ctx.tune_params, ply_back);
-                        if ply >= ply_back as i32 {
-                            let prev_ply = (ply - ply_back as i32) as usize;
-                            if let Some(key) = st.stack[prev_ply].cont_hist_key {
-                                // YO準拠: null move ply はスキップ
-                                if key.piece.is_none() {
-                                    continue;
-                                }
-                                let in_check_idx = key.in_check as usize;
-                                let capture_idx = key.capture as usize;
-                                let weighted_bonus = continuation_history_bonus_with_offset(
-                                    cont_scaled_bonus * weight / 1024,
-                                    ply_back,
-                                    ctx.tune_params,
-                                );
-                                h.continuation_history[in_check_idx][capture_idx].update(
-                                    key.piece,
-                                    key.to,
-                                    best_cont_pc,
-                                    best_to,
-                                    weighted_bonus,
-                                );
-                            }
-                        }
-                    }
+                    update_continuation_histories(
+                        h,
+                        &st.stack,
+                        ctx.tune_params,
+                        ply,
+                        in_check,
+                        best_cont_pc,
+                        best_to,
+                        cont_scaled_bonus,
+                    );
 
                     // PawnHistory: bonus * (pos ? 850 : 550) / 1024
                     let pawn_bonus = pawn_history_bonus(scaled_bonus, ctx.tune_params);
@@ -3022,35 +3019,16 @@ impl SearchWorker {
                         // YaneuraOu準拠: -malus * 1083/1024 * 955/1024 * weight/1024 + 88*(i<2)
                         let cont_scaled_malus =
                             -scaled_malus * ctx.tune_params.continuation_history_multiplier / 1024;
-                        for ply_back in 1..=6 {
-                            if ply_back > max_ply_back {
-                                continue;
-                            }
-                            let weight = continuation_history_weight(ctx.tune_params, ply_back);
-                            if ply >= ply_back as i32 {
-                                let prev_ply = (ply - ply_back as i32) as usize;
-                                if let Some(key) = st.stack[prev_ply].cont_hist_key {
-                                    // YO準拠: null move ply はスキップ
-                                    if key.piece.is_none() {
-                                        continue;
-                                    }
-                                    let in_check_idx = key.in_check as usize;
-                                    let capture_idx = key.capture as usize;
-                                    let weighted_malus = continuation_history_bonus_with_offset(
-                                        cont_scaled_malus * weight / 1024,
-                                        ply_back,
-                                        ctx.tune_params,
-                                    );
-                                    h.continuation_history[in_check_idx][capture_idx].update(
-                                        key.piece,
-                                        key.to,
-                                        cont_pc,
-                                        to,
-                                        weighted_malus,
-                                    );
-                                }
-                            }
-                        }
+                        update_continuation_histories(
+                            h,
+                            &st.stack,
+                            ctx.tune_params,
+                            ply,
+                            in_check,
+                            cont_pc,
+                            to,
+                            cont_scaled_malus,
+                        );
 
                         // PawnHistoryへのペナルティ
                         let pawn_malus = pawn_history_bonus(-scaled_malus, ctx.tune_params);
@@ -3120,44 +3098,20 @@ impl SearchWorker {
                             / 1024;
                         // YaneuraOu: update_continuation_histories(ss - 1, ...) で (ss - 1)->inCheck を参照
                         let prev_in_check = st.stack[prev_ply].in_check;
-                        let prev_max_ply_back = if prev_in_check { 2 } else { 6 };
 
                         {
                             // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
                             let h = unsafe { ctx.history.as_mut_unchecked() };
-                            for ply_back in 1..=6 {
-                                if ply_back > prev_max_ply_back {
-                                    continue;
-                                }
-                                let weight = continuation_history_weight(ctx.tune_params, ply_back);
-                                // ss - 1 からさらに ply_back 手前 = ply - 1 - ply_back
-                                let target_ply = ply - 1 - ply_back as i32;
-                                if target_ply >= 0
-                                    && let Some(target_key) =
-                                        st.stack[target_ply as usize].cont_hist_key
-                                {
-                                    // YO準拠: null move ply はスキップ
-                                    if target_key.piece.is_none() {
-                                        continue;
-                                    }
-                                    let in_check_idx = target_key.in_check as usize;
-                                    let capture_idx = target_key.capture as usize;
-                                    // YaneuraOu準拠: 88 * (i < 2) → ply_back=1 のみ
-                                    let weighted_penalty = penalty_base * weight / 1024
-                                        + if ply_back < 2 {
-                                            ctx.tune_params.continuation_history_near_ply_offset
-                                        } else {
-                                            0
-                                        };
-                                    h.continuation_history[in_check_idx][capture_idx].update(
-                                        target_key.piece,
-                                        target_key.to,
-                                        prev_piece,
-                                        prev_sq,
-                                        weighted_penalty,
-                                    );
-                                }
-                            }
+                            update_continuation_histories(
+                                h,
+                                &st.stack,
+                                ctx.tune_params,
+                                ply - 1,
+                                prev_in_check,
+                                prev_piece,
+                                prev_sq,
+                                penalty_base,
+                            );
                         }
                     }
                 }
@@ -3239,7 +3193,6 @@ impl SearchWorker {
                         // 注: prev_sq は cont_hist_key.to（do_move後に設定）なので、
                         //     この時点で prev_piece != NONE が保証される
                         let prev_piece = pos.piece_on(prev_sq);
-                        let prev_max_ply_back = if parent_in_check { 2 } else { 6 };
                         let cont_bonus = (scaled_bonus
                             * ctx.tune_params.prior_quiet_countermove_cont_scale_num as i64
                             / 32768) as i32;
@@ -3265,39 +3218,17 @@ impl SearchWorker {
                         {
                             // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
                             let h = unsafe { ctx.history.as_mut_unchecked() };
-                            for ply_back in 1..=6 {
-                                if ply_back > prev_max_ply_back {
-                                    continue;
-                                }
-                                let weight = continuation_history_weight(ctx.tune_params, ply_back);
-                                // ss - 1 からさらに ply_back 手前 = ply - 1 - ply_back
-                                let target_ply = ply - 1 - ply_back as i32;
-                                if target_ply >= 0
-                                    && let Some(target_key) =
-                                        st.stack[target_ply as usize].cont_hist_key
-                                {
-                                    // YO準拠: null move ply はスキップ
-                                    if target_key.piece.is_none() {
-                                        continue;
-                                    }
-                                    let in_check_idx = target_key.in_check as usize;
-                                    let capture_idx = target_key.capture as usize;
-                                    // YaneuraOu準拠: 88 * (i < 2) → ply_back=1 のみ
-                                    let weighted_bonus = cont_bonus * weight / 1024
-                                        + if ply_back < 2 {
-                                            ctx.tune_params.continuation_history_near_ply_offset
-                                        } else {
-                                            0
-                                        };
-                                    h.continuation_history[in_check_idx][capture_idx].update(
-                                        target_key.piece,
-                                        target_key.to,
-                                        prev_piece,
-                                        prev_sq,
-                                        weighted_bonus,
-                                    );
-                                }
-                            }
+                            // YaneuraOu: update_continuation_histories(ss - 1, ..., scaledBonus * 400 / 32768)
+                            update_continuation_histories(
+                                h,
+                                &st.stack,
+                                ctx.tune_params,
+                                ply - 1,
+                                parent_in_check,
+                                prev_piece,
+                                prev_sq,
+                                cont_bonus,
+                            );
 
                             h.main_history.update(opponent, prev_move, main_bonus);
 
