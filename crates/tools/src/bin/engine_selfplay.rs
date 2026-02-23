@@ -890,7 +890,6 @@ fn main() -> Result<()> {
         },
         "white".to_string(),
     )?;
-
     let meta = MetaLog {
         kind: "meta".to_string(),
         timestamp: timestamp.to_rfc3339(),
