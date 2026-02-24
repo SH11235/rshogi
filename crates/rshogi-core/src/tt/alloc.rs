@@ -1,17 +1,19 @@
-use std::alloc::{Layout, handle_alloc_error};
+use std::alloc::Layout;
 use std::ptr::NonNull;
 
 #[cfg(not(windows))]
 use std::alloc::{alloc, dealloc};
 #[cfg(not(windows))]
+use std::alloc::handle_alloc_error;
+#[cfg(not(windows))]
 use std::cmp::max;
 
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, GetLastError};
+use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, GetLastError, HANDLE, LUID};
 #[cfg(windows)]
 use windows_sys::Win32::Security::{
-    AdjustTokenPrivileges, LUID, LUID_AND_ATTRIBUTES, LookupPrivilegeValueA, OpenProcessToken,
-    SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+    AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueA, SE_PRIVILEGE_ENABLED,
+    TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Memory::{
@@ -19,7 +21,7 @@ use windows_sys::Win32::System::Memory::{
     VirtualAlloc, VirtualFree,
 };
 #[cfg(windows)]
-use windows_sys::Win32::System::Threading::GetCurrentProcess;
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AllocKind {
@@ -41,10 +43,11 @@ impl Allocation {
     pub(super) fn allocate(size: usize, alignment: usize) -> Self {
         #[cfg(windows)]
         {
+            debug_assert!(alignment.is_power_of_two(), "alignment must be power of two");
             if let Some(alloc) = try_alloc_large_pages(size) {
                 return alloc;
             }
-            return alloc_windows(size);
+            return alloc_windows(size, alignment);
         }
 
         #[cfg(not(windows))]
@@ -81,7 +84,7 @@ fn try_alloc_large_pages(size: usize) -> Option<Allocation> {
             return None;
         }
 
-        let mut token = 0;
+        let mut token: HANDLE = std::ptr::null_mut();
         if OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token)
             == 0
         {
@@ -94,7 +97,7 @@ fn try_alloc_large_pages(size: usize) -> Option<Allocation> {
         };
         if LookupPrivilegeValueA(
             std::ptr::null(),
-            b"SeLockMemoryPrivilege\0".as_ptr() as *const i8,
+            b"SeLockMemoryPrivilege\0".as_ptr(),
             &mut luid,
         ) == 0
         {
@@ -157,12 +160,13 @@ fn try_alloc_large_pages(size: usize) -> Option<Allocation> {
 }
 
 #[cfg(windows)]
-fn alloc_windows(size: usize) -> Allocation {
+fn alloc_windows(size: usize, alignment: usize) -> Allocation {
     unsafe {
         let ptr =
             VirtualAlloc(std::ptr::null_mut(), size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
         let ptr = NonNull::new(ptr as *mut u8).unwrap_or_else(|| {
-            std::alloc::handle_alloc_error(Layout::from_size_align(size, 4096).unwrap())
+            let align = alignment.max(4096);
+            std::alloc::handle_alloc_error(Layout::from_size_align(size, align).unwrap())
         });
         Allocation {
             ptr,
