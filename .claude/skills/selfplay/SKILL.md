@@ -69,7 +69,9 @@ cargo run -p tools --release --bin tournament -- \
 - `--report-interval`: N局ごとに進捗を表示（デフォルト10）。
 - `--engine-usi-option "INDEX:Name=Value"`: エンジン個別の USI オプション（0始まりインデックス）。
   指定したエンジンは共通 `--usi-option` が**完全に置換**される（マージではない）。
-- 出力は `{out-dir}/{label_i}-vs-{label_j}.jsonl` に自動生成される。
+- 出力は以下の2種類が `{out-dir}` に自動生成される:
+  - `{label_i}-vs-{label_j}.jsonl`: ペア別の棋譜ログ（各対局の指し手・評価値・結果）
+  - `meta.json`: 対局設定・エンジン情報をまとめたファイル。対局条件の確認・再現に利用可能。
 
 **注意:** `run_in_background: true` で起動し、`TaskOutput` で完了を監視すること。
 
@@ -92,13 +94,14 @@ cargo run -p tools --release --bin tournament -- \
 ### 4. 完了待ち・結果集計
 
 Background task の完了を `TaskOutput` で検知する。
-完了後、ディレクトリ内のファイルを指定して集計する:
+完了後、`analyze_selfplay` ツールで対局ログを集計しサマリを生成する:
 
 ```
 cargo run -p tools --release --bin analyze_selfplay -- runs/selfplay/{DIR}/*.jsonl
 ```
 
-以下の内容をマークダウンファイル（`docs/performance/` 配下）に出力する:
+`analyze_selfplay` は JSONL ファイルを読み込み、勝率・Elo差・手数分布などを集計して標準出力に表示する。
+この出力を元に、以下の内容をマークダウンファイル（`docs/performance/` 配下）に出力する:
 
 1. **対局条件**: 秒読み・スレッド・ハッシュ・対局数・NNUE
 2. **総合結果表**: 各カードの勝敗・勝率・Elo差
