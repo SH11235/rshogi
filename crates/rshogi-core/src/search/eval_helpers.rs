@@ -11,7 +11,7 @@ use super::alpha_beta::{
     EvalContext, ProbeOutcome, SearchContext, SearchState, TTContext, to_corrected_static_eval,
 };
 use super::history::CORRECTION_HISTORY_SIZE;
-use super::search_helpers::{ensure_nnue_accumulator, nnue_evaluate};
+use super::search_helpers::nnue_evaluate;
 use super::stats::inc_stat_by_depth;
 #[cfg(feature = "tt-trace")]
 use super::tt_sanity::{
@@ -453,9 +453,9 @@ pub(super) fn compute_eval_context(
             Value::NONE
         }
     } else if tt_ctx.hit && tt_ctx.data.eval != Value::NONE && !pv_node {
-        // TTヒット && eval有効 && 非PVノード → TTからevalを取得
-        ensure_nnue_accumulator(st, pos);
-        unadjusted_static_eval = tt_ctx.data.eval;
+        // TTヒット && eval有効 && 非PVノード
+        // TT eval 再利用による type-1 collision 伝播を避ける。
+        unadjusted_static_eval = nnue_evaluate(st, pos);
         unadjusted_static_eval
     } else {
         // PVノード または TTミス/eval無効 → 常にNNUE評価
