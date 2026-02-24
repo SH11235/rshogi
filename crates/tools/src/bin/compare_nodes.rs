@@ -203,11 +203,13 @@ impl ProgressWriter {
     /// 1局面の結果を追記し、必要に応じてサマリを更新する
     fn push(&mut self, result: PositionResult, cli: &Cli) {
         // jsonl に即時追記
-        if let Err(e) = serde_json::to_writer(&mut self.jsonl_writer, &result) {
+        let write_ok = serde_json::to_writer(&mut self.jsonl_writer, &result)
+            .map_err(|e| e.into())
+            .and_then(|()| self.jsonl_writer.write_all(b"\n"))
+            .and_then(|()| self.jsonl_writer.flush());
+        if let Err(e) = write_ok {
             eprintln!("jsonl 書き込みエラー: {e}");
         }
-        let _ = self.jsonl_writer.write_all(b"\n");
-        let _ = self.jsonl_writer.flush();
 
         self.results.push(result);
 
@@ -645,6 +647,12 @@ fn process_positions_reuse(
 // ---------------------------------------------------------------------------
 
 fn write_summary(writer: &mut dyn Write, results: &[PositionResult], cli: &Cli) -> Result<()> {
+    if results.is_empty() {
+        writeln!(writer, "=== ノード数比較サマリ ===")?;
+        writeln!(writer, "--- 結果がありません ---")?;
+        return Ok(());
+    }
+
     writeln!(writer, "=== ノード数比較サマリ ===")?;
     writeln!(writer, "エンジンA: {}", cli.engine_a.display())?;
     if !cli.options_a.is_empty() {
