@@ -2,9 +2,9 @@ use std::alloc::Layout;
 use std::ptr::NonNull;
 
 #[cfg(not(windows))]
-use std::alloc::{alloc, dealloc};
-#[cfg(not(windows))]
 use std::alloc::handle_alloc_error;
+#[cfg(not(windows))]
+use std::alloc::{alloc, dealloc};
 #[cfg(not(windows))]
 use std::cmp::max;
 
@@ -47,7 +47,7 @@ impl Allocation {
             if let Some(alloc) = try_alloc_large_pages(size) {
                 return alloc;
             }
-            return alloc_windows(size, alignment);
+            alloc_windows(size, alignment)
         }
 
         #[cfg(not(windows))]
@@ -73,7 +73,7 @@ fn align_up(value: usize, align: usize) -> usize {
         value.checked_add(align - 1).is_some(),
         "align_up overflow: value={value}, align={align}"
     );
-    (value + align - 1) / align * align
+    value.div_ceil(align) * align
 }
 
 #[cfg(windows)]
@@ -95,17 +95,15 @@ fn try_alloc_large_pages(size: usize) -> Option<Allocation> {
             LowPart: 0,
             HighPart: 0,
         };
-        if LookupPrivilegeValueA(
-            std::ptr::null(),
-            b"SeLockMemoryPrivilege\0".as_ptr(),
-            &mut luid,
-        ) == 0
+        let privilege_name = c"SeLockMemoryPrivilege";
+        if LookupPrivilegeValueA(std::ptr::null(), privilege_name.as_ptr() as *const u8, &mut luid)
+            == 0
         {
             CloseHandle(token);
             return None;
         }
 
-        let mut tp = TOKEN_PRIVILEGES {
+        let tp = TOKEN_PRIVILEGES {
             PrivilegeCount: 1,
             Privileges: [LUID_AND_ATTRIBUTES {
                 Luid: luid,
@@ -126,7 +124,7 @@ fn try_alloc_large_pages(size: usize) -> Option<Allocation> {
 
         // AdjustTokenPrivileges が非ゼロを返しても ERROR_SUCCESS でない場合は
         // 部分的な失敗（ERROR_NOT_ALL_ASSIGNED等）を意味するためチェック
-        if AdjustTokenPrivileges(token, 0, &mut tp, prev_len, &mut prev_tp, &mut prev_len) == 0
+        if AdjustTokenPrivileges(token, 0, &tp, prev_len, &mut prev_tp, &mut prev_len) == 0
             || GetLastError() != ERROR_SUCCESS
         {
             CloseHandle(token);
@@ -141,14 +139,7 @@ fn try_alloc_large_pages(size: usize) -> Option<Allocation> {
             PAGE_READWRITE,
         );
 
-        AdjustTokenPrivileges(
-            token,
-            0,
-            &mut prev_tp,
-            0,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        AdjustTokenPrivileges(token, 0, &prev_tp, 0, std::ptr::null_mut(), std::ptr::null_mut());
         CloseHandle(token);
 
         let ptr = NonNull::new(ptr as *mut u8)?;
