@@ -136,7 +136,7 @@ fn update_continuation_histories_custom(
         if target_ply >= 0
             && let Some(key) = stack[target_ply as usize].cont_hist_key
         {
-            // YO準拠: null move ply はスキップ
+            // null move ply はスキップ
             if key.piece.is_none() {
                 continue;
             }
@@ -154,7 +154,7 @@ fn update_continuation_histories_custom(
     }
 }
 
-/// YaneuraOu準拠: quiet手のhistoryを一括更新
+/// quiet手のhistoryを一括更新
 ///
 /// MainHistory, LowPlyHistory, ContinuationHistory, PawnHistoryを更新する。
 #[inline]
@@ -184,7 +184,7 @@ fn update_quiet_histories(
     };
     let to = mv.to();
 
-    // YaneuraOu準拠: update_continuation_histories に渡す前に 955/1024 を適用
+    // update_continuation_histories に渡す前に 955/1024 を適用
     let cont_bonus = bonus * tune_params.continuation_history_multiplier / 1024;
     update_continuation_histories(h, stack, tune_params, ply, in_check, cont_pc, to, cont_bonus);
 
@@ -195,7 +195,6 @@ fn update_quiet_histories(
 
 /// LMR用のreduction配列
 ///
-/// YaneuraOu準拠で `MAX_MOVES` 長を使う。
 /// move_count が 64 を超える局面でも reduction が頭打ちにならないようにする。
 type Reductions = [i32; crate::movegen::MAX_MOVES];
 
@@ -507,7 +506,7 @@ impl SearchWorker {
         2 * main_hist + cont_hist + cont_hist
     }
 
-    /// 新しいSearchWorkerを作成（YaneuraOu準拠: isreadyまたは最初のgo時）
+    /// 新しいSearchWorkerを作成（isreadyまたは最初のgo時）
     ///
     /// Box化してヒープに配置し、スタックオーバーフローを防ぐ。
     pub fn new(
@@ -599,7 +598,7 @@ impl SearchWorker {
         &mut self.state
     }
 
-    /// YaneuraOu準拠: ルート手番に応じて千日手評価値テーブルを初期化する。
+    /// ルート手番に応じて千日手評価値テーブルを初期化する。
     ///
     /// - `us == BLACK` のとき `DrawValueBlack` を使用
     /// - `us == WHITE` のとき `DrawValueWhite` を使用
@@ -699,7 +698,7 @@ impl SearchWorker {
         self.state.root_moves.clear();
         // 探索統計をリセット（1回のgo毎にリセット）
         self.reset_stats();
-        // YaneuraOu準拠: low_ply_historyのみクリア
+        // low_ply_historyのみクリア
         // SAFETY: 探索開始前の初期化、他の参照と同時保持しない
         unsafe { self.history.as_mut_unchecked() }.low_ply_history.clear();
         // NNUE AccumulatorStack: ネットワークに応じたバリアントに更新・リセット
@@ -721,7 +720,7 @@ impl SearchWorker {
 
     /// best_move_changes を半減（世代減衰）
     ///
-    /// YaneuraOu準拠: 反復深化の各世代終了時に呼び出して、
+    /// 反復深化の各世代終了時に呼び出して、
     /// 古い情報の重みを低くする
     pub fn decay_best_move_changes(&mut self) {
         self.state.best_move_changes /= 2.0;
@@ -743,7 +742,7 @@ impl SearchWorker {
     }
 
     /// 中断チェック
-    /// YaneuraOu準拠: 512回に1回だけ実際のチェックを行う
+    /// 512回に1回だけ実際のチェックを行う
     #[inline]
     pub(super) fn check_abort(
         &mut self,
@@ -789,7 +788,7 @@ impl SearchWorker {
         }
 
         // 時間制限チェック（main threadのみ）
-        // YaneuraOu準拠の2フェーズロジック
+        // 2フェーズロジック
         if self.thread_id == 0 {
             // ponderhit フラグをポーリングし、検知したら通常探索へ切り替える
             if time_manager.take_ponderhit() {
@@ -812,7 +811,7 @@ impl SearchWorker {
             }
 
             // フェーズ2: search_end 未設定 → maximum超過 or stop_on_ponderhit で設定
-            // ただし ponder 中は停止判定を行わない（YO準拠）
+            // ただし ponder 中は停止判定を行わない（YaneuraOu準拠）
             if !time_manager.is_pondering()
                 && time_manager.search_end() == 0
                 && limits.use_time_management()
@@ -826,6 +825,27 @@ impl SearchWorker {
         false
     }
 
+    /// Step 19: PV search で qsearch に落ちそうな場合、TT手なら newDepth を最低1に引き上げ。
+    /// YaneuraOu の `search<Root>` テンプレートでは PV search の直前に1箇所だけ存在するが、
+    /// 本エンジン では search_root / search_root_for_pv の各 PV search パスで個別に呼ぶ必要がある。
+    fn root_extend_new_depth(
+        &self,
+        mv: Move,
+        tt_move_root: Move,
+        tt_value_root: Value,
+        tt_depth: Depth,
+        new_depth: Depth,
+    ) -> Depth {
+        if mv == tt_move_root
+            && ((tt_value_root != Value::NONE && tt_value_root.is_mate_score() && tt_depth > 0)
+                || (tt_depth > 1 && self.state.root_depth > 8))
+        {
+            new_depth.max(1)
+        } else {
+            new_depth
+        }
+    }
+
     /// ルート探索
     pub(crate) fn search_root(
         &mut self,
@@ -836,7 +856,7 @@ impl SearchWorker {
         limits: &LimitsType,
         time_manager: &mut TimeManagement,
     ) -> Value {
-        // YaneuraOu準拠: 千日手評価値テーブルの初期化
+        // 千日手評価値テーブルの初期化
         self.init_draw_value_table(pos.side_to_move());
 
         self.state.root_delta = (beta.raw() - alpha.raw()).abs().max(1);
@@ -848,14 +868,14 @@ impl SearchWorker {
         self.state.stack[0].in_check = root_in_check;
         self.state.stack[0].cont_history_ptr = self.cont_history_sentinel;
         self.state.stack[0].cont_hist_key = None;
-        // YaneuraOu準拠: ss->statScore = 0
+        // ss->statScore = 0
         self.state.stack[0].stat_score = 0;
-        // YaneuraOu準拠: (ss+2)->cutoffCnt = 0
+        // (ss+2)->cutoffCnt = 0
         self.state.stack[2].cutoff_cnt = 0;
         let (root_unadjusted_static_eval, root_correction_value) =
             self.init_root_static_eval(pos, root_in_check);
 
-        // YaneuraOu準拠: improving の計算
+        // improving の計算
         // ply=0 では (ss-2)->staticEval = VALUE_NONE(sentinel) なので
         // 初期値 ss->staticEval > (ss-2)->staticEval は常に false。
         // その後 improving |= ss->staticEval >= beta で上書きされる。
@@ -867,7 +887,7 @@ impl SearchWorker {
             self.state.stack[0].static_eval >= beta
         };
 
-        // YaneuraOu準拠: ルートでもTTプローブを行う
+        // ルートでもTTプローブを行う
         let key = pos.key();
         let tt_result = self.tt.probe(key, pos);
         let tt_hit = tt_result.found;
@@ -891,10 +911,10 @@ impl SearchWorker {
         self.state.stack[0].pv.clear();
         self.state.stack[1].pv.clear();
 
-        // YaneuraOu準拠: quietsSearched, capturesSearched のトラッキング
+        // quietsSearched, capturesSearched のトラッキング
         let mut quiets_tried = SearchedMoveList::new();
         let mut captures_tried = SearchedMoveList::new();
-        // YaneuraOu準拠: MovePicker でムーブ反復順序を決定
+        // MovePicker でムーブ反復順序を決定
         // ply=0 では全 continuation history が sentinel
         let sentinel_ref: &PieceToHistory = unsafe { self.cont_history_sentinel.as_ref() };
         let cont_tables = [sentinel_ref; 6];
@@ -941,11 +961,11 @@ impl SearchWorker {
 
             // 探索
             do_move_and_push(&mut self.state, pos, mv, gives_check, self.tt.as_ref());
-            // YaneuraOu準拠: nodes_before は do_move 後に取得
+            // nodes_before は do_move 後に取得
             // (root move 自身の do_move ノードを effort に含めない)
             let nodes_before = self.state.nodes;
             self.state.stack[0].current_move = mv;
-            // YaneuraOu準拠: ss->moveCount = ++moveCount
+            // ss->moveCount = ++moveCount
             // 子ノード(ply 1)が(ss-1)->moveCountを参照するため設定必須
             self.state.stack[0].move_count = move_count;
 
@@ -964,13 +984,13 @@ impl SearchWorker {
                 );
             }
 
-            // PVS + LMR（YaneuraOu準拠: Step 17-19）
+            // PVS + LMR（Step 17-19）
             // YOではsearch<Root>内でLMRが適用される。rootのPvNode+ttPvでは
             // reductionが大きく負になるため、zero-window検証がnewDepthより深くなる。
             let mut new_depth = depth - 1;
-            // YaneuraOu準拠: rootでも全手で statScore を設定してから子ノードを探索する。
+            // rootでも全手で statScore を設定してから子ノードを探索する。
             // (moveCount==1 ではLMR補正には使われないが、子ノード側の統計参照で使われる)
-            // YaneuraOu準拠: statScore
+            // statScore
             let root_stat_score = if mv.is_pass() {
                 0
             } else if is_capture {
@@ -992,6 +1012,13 @@ impl SearchWorker {
             };
             self.state.stack[0].stat_score = root_stat_score;
             let value = if move_count == 1 {
+                new_depth = self.root_extend_new_depth(
+                    mv,
+                    tt_move_root,
+                    tt_value_root,
+                    tt_data.depth,
+                    new_depth,
+                );
                 // 第1手: full depth PV search (Step 19)
                 -self.search_node_wrapper::<{ NodeType::PV as u8 }>(
                     pos,
@@ -1004,13 +1031,13 @@ impl SearchWorker {
                     time_manager,
                 )
             } else if depth >= 2 && move_count >= 2 {
-                // YaneuraOu準拠: depth >= 2 && moveCount > 1
+                // depth >= 2 && moveCount > 1
                 // 第2手以降(depth>=2時): LMR (Step 17) + PV re-search (Step 19)
                 let (d, deeper_base, deeper_mul, shallower_thr) = {
                     let tune = &self.search_tune_params;
                     let delta = (beta.raw() - alpha.raw()).abs().max(1);
                     let root_delta = self.state.root_delta.max(1);
-                    // YaneuraOu準拠: improving を使用
+                    // improving を使用
                     let mut r =
                         reduction(tune, root_improving, depth, move_count, delta, root_delta);
 
@@ -1097,6 +1124,13 @@ impl SearchWorker {
 
                 // Step 19: PV re-search (value > alpha の場合のみ)
                 if value > alpha {
+                    new_depth = self.root_extend_new_depth(
+                        mv,
+                        tt_move_root,
+                        tt_value_root,
+                        tt_data.depth,
+                        new_depth,
+                    );
                     value = -self.search_node_wrapper::<{ NodeType::PV as u8 }>(
                         pos,
                         new_depth,
@@ -1111,7 +1145,7 @@ impl SearchWorker {
 
                 value
             } else {
-                // YaneuraOu準拠: LMR対象外 (depth < 2) — Step 18
+                // LMR対象外 (depth < 2) — Step 18
                 // r を使った深さ補正を適用
                 let step18_depth = {
                     let tune = &self.search_tune_params;
@@ -1184,13 +1218,13 @@ impl SearchWorker {
                 return Value::ZERO;
             }
 
-            // YaneuraOu準拠: averageScore/meanSquaredScoreは全rootムーブに対して更新
+            // averageScore/meanSquaredScoreは全rootムーブに対して更新
             {
                 let rm = &mut self.state.root_moves[rm_idx];
                 rm.accumulate_score_stats(value);
             }
 
-            // YaneuraOu準拠: Root move score/PV handling
+            // Root move score/PV handling
             // moveCount == 1 (第1手) || value > alpha の場合にスコアとPVを更新
             if move_count == 1 || value > alpha {
                 let rm = &mut self.state.root_moves[rm_idx];
@@ -1204,12 +1238,12 @@ impl SearchWorker {
                     self.state.best_move_changes += 1.0;
                 }
             } else {
-                // PV以外のすべての手は最低値に設定（YO準拠）
+                // PV以外のすべての手は最低値に設定
                 self.state.root_moves[rm_idx].score = Value::new(-Value::INFINITE.raw());
             }
 
-            // bestValue/alpha更新（YaneuraOu準拠）
-            // YaneuraOu準拠: Lazy SMP多様化のため、同点の手を確率的に昇格させる
+            // bestValue/alpha更新
+            // Lazy SMP多様化のため、同点の手を確率的に昇格させる
             let inc = Value::new(
                 if value == best_value
                     && 2 >= self.state.root_depth // ply(=0) + 2 >= root_depth
@@ -1232,19 +1266,19 @@ impl SearchWorker {
                         break;
                     }
 
-                    // YaneuraOu準拠: alpha改善後、以降の手の探索深さを削減する
+                    // alpha改善後、以降の手の探索深さを削減する
                     if depth > 2 && depth < 14 && !value.is_mate_score() {
                         depth -= 2;
                     }
 
-                    // YaneuraOu準拠: alpha更新はbeta判定・depth減算の後
+                    // alpha更新はbeta判定・depth減算の後
                     alpha = value;
                 }
             }
 
-            // YaneuraOu準拠: 非best手のトラッキング
+            // 非best手のトラッキング
             // bestMoveはループ中に更新されるため、alpha更新した手は除外される
-            // YaneuraOu準拠: moveCount <= SEARCHEDLIST_CAPACITY(32) の制限
+            // moveCount <= SEARCHEDLIST_CAPACITY(32) の制限
             if mv != best_move && !mv.is_pass() && move_count <= SEARCHED_MOVES_CAPACITY as i32 {
                 if is_capture {
                     captures_tried.push(mv);
@@ -1256,13 +1290,13 @@ impl SearchWorker {
 
         let root_move_count = move_count;
 
-        // YaneuraOu準拠: fail highの場合に最良値を調整する
+        // fail highの場合に最良値を調整する
         if best_value >= beta && !best_value.is_mate_score() && !alpha.is_mate_score() {
             best_value = Value::new((best_value.raw() * depth + beta.raw()) / (depth + 1).max(1));
         }
 
         // =================================================================
-        // History更新（YaneuraOu準拠: update_all_stats）
+        // History更新（update_all_stats）
         // =================================================================
         // alphaを超えるbestMoveが存在する場合のみhistoryを更新する
         // fail-low（bestMove == NONE）の場合はスキップ（YO準拠）
@@ -1308,7 +1342,7 @@ impl SearchWorker {
                         let pawn_bonus = pawn_history_bonus(scaled_bonus, &tune);
                         h.pawn_history.update(pawn_key_idx, best_cont_pc, best_to, pawn_bonus);
 
-                        // YaneuraOu準拠: quiets_triedはbestMove追加段階で除外済みのため
+                        // quiets_triedはbestMove追加段階で除外済みのため
                         // ペナルティループでの重複チェックは不要
                         for &m in quiets_tried.iter() {
                             h.main_history.update(us, m, -scaled_malus);
@@ -1345,7 +1379,7 @@ impl SearchWorker {
                     }
                 }
 
-                // YaneuraOu準拠: captures_triedはbestMove追加段階で除外済みのため
+                // captures_triedはbestMove追加段階で除外済みのため
                 // ペナルティループでの重複チェックは不要
                 if !captures_tried.is_empty() {
                     {
@@ -1372,11 +1406,11 @@ impl SearchWorker {
             }
         }
 
-        // YaneuraOu準拠: ルートでもTTに保存する
+        // ルートでもTTに保存する
         // rootNode && !pvIdx (single-PV) かつ excludedMove なし → 常に save
         // NOTE: ソートはiterative deepening loop側（engine.rs の stable_sort_range）で実行する
         // TT/CorrectionHistory: bestMoveはalphaを超えた手のみ（fail-low時はNONE）
-        // YaneuraOu準拠: bestMove == MOVE_NONE のとき TT bound は UPPER
+        // bestMove == MOVE_NONE のとき TT bound は UPPER
         if self.allow_tt_write {
             let bound = if best_value >= beta {
                 Bound::Lower
@@ -1402,7 +1436,7 @@ impl SearchWorker {
             );
         }
 
-        // YaneuraOu準拠: rootでもCorrectionHistoryを更新する
+        // rootでもCorrectionHistoryを更新する
         {
             let cond_check = !(root_in_check || best_move.is_some() && pos.is_capture(best_move));
             let cond_eval = (best_value > self.state.stack[0].static_eval) == best_move.is_some();
@@ -1454,11 +1488,11 @@ impl SearchWorker {
         limits: &LimitsType,
         time_manager: &mut TimeManagement,
     ) -> Value {
-        // YaneuraOu準拠: rootNode && pvIdx の経路のみこの関数が担当する。
+        // rootNode && pvIdx の経路のみこの関数が担当する。
         // pv_idx == 0 は search_root() を使い、root TT save はそちらでのみ実行する。
         debug_assert!(pv_idx > 0);
 
-        // YaneuraOu準拠: 千日手評価値テーブルの初期化
+        // 千日手評価値テーブルの初期化
         self.init_draw_value_table(pos.side_to_move());
 
         self.state.root_delta = (beta.raw() - alpha.raw()).abs().max(1);
@@ -1471,20 +1505,20 @@ impl SearchWorker {
         self.state.stack[0].in_check = root_in_check;
         self.state.stack[0].cont_history_ptr = self.cont_history_sentinel;
         self.state.stack[0].cont_hist_key = None;
-        // YaneuraOu準拠: root探索開始時の初期化
+        // root探索開始時の初期化
         self.state.stack[0].stat_score = 0;
         self.state.stack[2].cutoff_cnt = 0;
         let (_root_unadjusted_static_eval, root_correction_value) =
             self.init_root_static_eval(pos, root_in_check);
 
-        // YaneuraOu準拠: improving の計算
+        // improving の計算
         let root_improving = if root_in_check {
             false
         } else {
             self.state.stack[0].static_eval >= beta
         };
 
-        // YaneuraOu準拠: rootでもTT probeを行い、ttHit/ttPvを更新
+        // rootでもTT probeを行い、ttHit/ttPvを更新
         let key = pos.key();
         let tt_result = self.tt.probe(key, pos);
         let tt_hit = tt_result.found;
@@ -1518,11 +1552,11 @@ impl SearchWorker {
 
             // 探索
             do_move_and_push(&mut self.state, pos, mv, gives_check, self.tt.as_ref());
-            // YaneuraOu準拠: nodes_before は do_move 後に取得
+            // nodes_before は do_move 後に取得
             // (root move 自身の do_move ノードを effort に含めない)
             let nodes_before = self.state.nodes;
             self.state.stack[0].current_move = mv;
-            // YaneuraOu準拠: ss->moveCount = ++moveCount
+            // ss->moveCount = ++moveCount
             self.state.stack[0].move_count = (rm_idx + 1) as i32;
 
             // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う
@@ -1540,7 +1574,7 @@ impl SearchWorker {
                 );
             }
 
-            // YaneuraOu準拠: statScore
+            // statScore
             // do_move 後に計算する（captured_piece() / side_to_move() は do_move 後の状態を参照）
             self.state.stack[0].stat_score = if mv.is_pass() {
                 0
@@ -1566,6 +1600,13 @@ impl SearchWorker {
 
             // PVS: 最初の手（このPVラインの候補）はPV探索
             let value = if rm_idx == pv_idx {
+                new_depth = self.root_extend_new_depth(
+                    mv,
+                    tt_move_root,
+                    tt_value_root,
+                    tt_data.depth,
+                    new_depth,
+                );
                 -self.search_node_wrapper::<{ NodeType::PV as u8 }>(
                     pos,
                     new_depth,
@@ -1577,7 +1618,7 @@ impl SearchWorker {
                     time_manager,
                 )
             } else if depth >= 2 {
-                // YaneuraOu準拠: Step17 LMR (depth >= 2 && moveCount > 1)
+                // Step17 LMR (depth >= 2 && moveCount > 1)
                 let (d, deeper_base, deeper_mul, shallower_thr) = {
                     let tune = &self.search_tune_params;
                     let delta = (beta.raw() - alpha.raw()).abs().max(1);
@@ -1667,8 +1708,15 @@ impl SearchWorker {
                     }
                 }
 
-                // YaneuraOu準拠: PvNodeでalphaを超えたら再探索（value<beta条件は付けない）
+                // PvNodeでalphaを超えたら再探索（value<beta条件は付けない）
                 if value > alpha {
+                    new_depth = self.root_extend_new_depth(
+                        mv,
+                        tt_move_root,
+                        tt_value_root,
+                        tt_data.depth,
+                        new_depth,
+                    );
                     value = -self.search_node_wrapper::<{ NodeType::PV as u8 }>(
                         pos,
                         new_depth,
@@ -1683,7 +1731,7 @@ impl SearchWorker {
 
                 value
             } else {
-                // YaneuraOu準拠: Step18 LMR対象外 (depth < 2) — r深さ補正
+                // Step18 LMR対象外 (depth < 2) — r深さ補正
                 let step18_depth = {
                     let tune = &self.search_tune_params;
                     let delta = (beta.raw() - alpha.raw()).abs().max(1);
@@ -1803,7 +1851,7 @@ impl SearchWorker {
         // 最善手をpv_idxの位置に移動
         self.state.root_moves.move_to_index(best_rm_idx, pv_idx);
 
-        // YaneuraOu準拠: rootNode && pvIdx では TT 保存しない。
+        // rootNode && pvIdx では TT 保存しない。
         // save条件は search<Root>() 側の `!excludedMove && !(rootNode && pvIdx)` と等価。
         best_value
     }
@@ -1904,7 +1952,7 @@ impl SearchWorker {
         // =====================================================================
         // Step 2. Check for repetition (千日手チェック)
         // =====================================================================
-        // YaneuraOu準拠: TTプローブの前に千日手を判定する
+        // TTプローブの前に千日手を判定する
         if NT != NodeType::Root as u8 {
             let rep_state = pos.repetition_state(ply);
             if rep_state.is_repetition() || rep_state.is_superior_inferior() {
@@ -1947,7 +1995,7 @@ impl SearchWorker {
         st.stack[ply as usize].in_check = in_check;
         st.stack[ply as usize].move_count = 0;
         st.stack[ply as usize].stat_score = 0;
-        // YaneuraOu準拠: (ss+2)->cutoffCnt = 0（祖父ノードがリセット）
+        // (ss+2)->cutoffCnt = 0（祖父ノードがリセット）
         // 兄弟ノード間で cutoff_cnt が蓄積されるように ply+2 を初期化する
         st.stack[(ply + 2) as usize].cutoff_cnt = 0;
 
@@ -1964,7 +2012,7 @@ impl SearchWorker {
 
         // Singular Extension用の除外手を取得
         let excluded_move = st.stack[ply as usize].excluded_move;
-        // YaneuraOu準拠: priorCapture は「1手前が捕獲手か」を局面状態から判定
+        // priorCapture は「1手前が捕獲手か」を局面状態から判定
         let prior_capture = pos.captured_piece().is_some();
 
         // 置換表プローブ（即時カットオフ含む）
@@ -1989,7 +2037,7 @@ impl SearchWorker {
                 inc_stat!(st, tt_cutoff);
                 inc_stat_by_depth!(st, tt_cutoff_by_depth, depth);
 
-                // YaneuraOu準拠: TTカットオフ時のヒストリ更新
+                // TTカットオフ時のヒストリ更新
                 if cutoff_tt_move.is_some() && value.raw() >= beta.raw() {
                     // quiet ttMoveがfail-highした場合、quiet_historiesを更新
                     if !cutoff_tt_capture {
@@ -2054,7 +2102,7 @@ impl SearchWorker {
         let opponent_worsening = eval_ctx.opponent_worsening;
 
         // evalDiff によるヒストリ更新（YaneuraOu準拠）
-        // YaneuraOu準拠: in_check時はこのブロック自体がスキップされる
+        // in_check時はこのブロック自体がスキップされる
         // （YOではMOVES_LOOPにジャンプするため、ここに到達しない）
         // 条件: !in_check && (ss-1)->currentMove が有効 && !(ss-1)->inCheck && !priorCapture
         if !in_check && ply >= 1 {
@@ -2062,7 +2110,7 @@ impl SearchWorker {
             let prev_move = st.stack[prev_ply].current_move;
             let prev_in_check = st.stack[prev_ply].in_check;
 
-            // YaneuraOu準拠: VALUE_NONEチェックは不要（YOは行わない）
+            // VALUE_NONEチェックは不要（YOは行わない）
             // VALUE_NONEの場合はclampにより-200に制限されるため問題ない
             if prev_move.is_normal() && !prev_in_check && !prior_capture {
                 let prev_eval = st.stack[prev_ply].static_eval.raw();
@@ -2098,7 +2146,7 @@ impl SearchWorker {
         }
 
         // priorReduction に応じた深さ調整
-        // YaneuraOu準拠: in_check時はMOVES_LOOPにジャンプするため、このブロックは実行されない
+        // in_check時はMOVES_LOOPにジャンプするため、このブロックは実行されない
         if !in_check {
             if prior_reduction
                 >= if depth < ctx.tune_params.iir_depth_boundary {
@@ -2110,7 +2158,7 @@ impl SearchWorker {
             {
                 depth += 1;
             }
-            // YaneuraOu準拠: VALUE_NONEガードなし
+            // VALUE_NONEガードなし
             // 王手時 staticEval = VALUE_NONE(32002) → 合計 > 173 で depth-- が発動する
             if prior_reduction >= 2
                 && depth >= 2
@@ -2185,7 +2233,7 @@ impl SearchWorker {
         improving = improving_after_null;
 
         // Internal Iterative Reductions（improving再計算後に実施）
-        // YaneuraOu準拠: in_check時はMOVES_LOOPにジャンプするため、このブロックは実行されない
+        // in_check時はMOVES_LOOPにジャンプするため、このブロックは実行されない
         if !in_check && !all_node && depth >= 6 && tt_move.is_none() && prior_reduction <= 3 {
             depth -= 1;
         }
@@ -2198,7 +2246,11 @@ impl SearchWorker {
             improving,
             &tt_ctx,
             ply,
-            eval_ctx.static_eval,
+            // NMP verification searchが同一plyでsearch_nodeを呼び
+            // stack[ply].static_evalを上書きする。YOはss->staticEvalをポインタ経由で
+            // 参照するため上書き後の値が見える。eval_ctx.static_eval (snapshot) ではなく
+            // live stack値を使う。
+            st.stack[ply as usize].static_eval,
             eval_ctx.unadjusted_static_eval,
             in_check,
             cut_node,
@@ -2211,12 +2263,11 @@ impl SearchWorker {
         }
 
         // =================================================================
-        // Step 12. A small Probcut idea（YaneuraOu準拠: moves_loop直前）
+        // Step 12. A small Probcut idea（moves_loop直前）
         // =================================================================
         // TTのLower boundが十分深く、probCutBeta以上の値を持つなら即座にカット。
         // in_check時もこのステップは実行される（YOではgoto moves_loopの先で実行）。
         {
-            // YaneuraOu準拠定数値
             let small_probcut_beta = beta + Value::new(418);
             if tt_data.bound.is_lower_or_exact()
                 && tt_data.depth >= depth - 4
@@ -2251,7 +2302,7 @@ impl SearchWorker {
 
         // MovePickerを作成（lazy generation）
         let cont_tables = cont_history_tables(st, ctx, ply);
-        // YaneuraOu準拠: contHist[0], contHist[1] の参照元はノード先頭で固定する。
+        // contHist[0], contHist[1] の参照元はノード先頭で固定する。
         let cont_hist_ptr_1 = cont_history_ptr(st, ctx, ply, 1);
         let cont_hist_ptr_2 = cont_history_ptr(st, ctx, ply, 2);
         let mut mp =
@@ -2296,7 +2347,7 @@ impl SearchWorker {
 
             let mut new_depth = depth - 1;
             let mut extension = 0i32;
-            // YO準拠: reduction/LMP/Step14はSE前のdepthを使う（SE後のdepth++の影響を受けない）
+            // reduction/LMP/Step14はSE前のdepthを使う（SE後のdepth++の影響を受けない）
             let original_depth = depth;
 
             // =============================================================
@@ -2312,7 +2363,7 @@ impl SearchWorker {
                 st.root_delta.max(1),
             );
 
-            // YaneuraOu準拠: ttPv時にreductionを増やす
+            // ttPv時にreductionを増やす
             // SE前のtt_pvを使う必要がある（SE内のsearch_nodeがtt_pvを上書きする可能性がある）
             if st.stack[ply as usize].tt_pv {
                 r += ctx.tune_params.lmr_ttpv_add;
@@ -2321,9 +2372,9 @@ impl SearchWorker {
             let lmr_depth = new_depth - r / 1024;
 
             // =============================================================
-            // Step14 Pruning（YaneuraOu準拠: SEの前に実行）
+            // Step14 Pruning（SEの前に実行）
             // =============================================================
-            // YaneuraOu準拠: Step14 → SE の順序。
+            // Step14 → SE の順序。
             // SE内のsearch_nodeがtt_pvやstackを上書きする前にStep14の枝刈り判定を行う。
 
             // LMP: moveCount >= limitのとき、quiet手の生成をスキップ
@@ -2350,7 +2401,10 @@ impl SearchWorker {
                 cont_history_1: unsafe { cont_hist_ptr_1.as_ref() },
                 // SAFETY: cont_history_ptr() が返すポインタは探索中有効。
                 cont_history_2: unsafe { cont_hist_ptr_2.as_ref() },
-                static_eval: eval_ctx.static_eval,
+                // NMP verification searchが同一plyでsearch_nodeを再帰呼び出しし、
+                // compute_eval_contextがstack[ply].static_evalを上書きする。
+                // YOはss->staticEvalをポインタ経由で参照するため上書き後の値が見える。
+                static_eval: st.stack[ply as usize].static_eval,
                 alpha,
                 best_move,
                 pawn_history_index: pos.pawn_history_index(),
@@ -2370,7 +2424,7 @@ impl SearchWorker {
             }
 
             // =============================================================
-            // Singular Extension（YaneuraOu準拠: Step14の後に実行）
+            // Singular Extension（Step14の後に実行）
             // =============================================================
             // singular延長をするnodeであるか判定
             // 条件: !rootNode && move == ttMove && !excludedMove
@@ -2418,7 +2472,7 @@ impl SearchWorker {
                 );
                 st.stack[ply as usize].excluded_move = Move::NONE;
 
-                // YaneuraOu準拠: SE再帰呼び出し内の上方伝播により
+                // SE再帰呼び出し内の上方伝播により
                 // st.stack[ply].tt_pvが変更される可能性がある。YOではss->ttPvを直接参照するため
                 // 変更後の値が自動的に反映される。rshogiではローカル変数tt_pvの再読み込みが必要。
                 let tt_pv = st.stack[ply as usize].tt_pv;
@@ -2453,11 +2507,11 @@ impl SearchWorker {
                         + (singular_value < singular_beta - Value::new(double_margin)) as i32
                         + (singular_value < singular_beta - Value::new(triple_margin)) as i32;
 
-                    // YaneuraOu準拠: singular確定時にdepthを+1
+                    // singular確定時にdepthを+1
                     depth += 1;
                 } else if singular_value >= beta && !singular_value.is_mate_score() {
                     // Multi-Cut: 他の手もfail highする場合は枝刈り
-                    // YaneuraOu準拠: TTMoveHistoryを更新
+                    // TTMoveHistoryを更新
                     {
                         // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
                         let h = unsafe { ctx.history.as_mut_unchecked() };
@@ -2496,13 +2550,13 @@ impl SearchWorker {
                 );
             }
 
-            // 延長量をnew_depthに加算（YaneuraOu準拠: do_moveの後）
+            // 延長量をnew_depthに加算（do_moveの後）
             new_depth += extension;
 
             // =============================================================
             // Late Move Reduction (LMR)
             // =============================================================
-            // YaneuraOu準拠: ttPv大型補正
+            // ttPv大型補正
             // !ttHit時はtt_value=VALUE_NONE(32002)でほぼtrue、tt_data.depthはスロット残値
             let tt_value_higher = tt_value > alpha;
             let tt_depth_ge = tt_data.depth >= depth;
@@ -2516,35 +2570,35 @@ impl SearchWorker {
                             + (cut_node as i32) * ctx.tune_params.lmr_step16_ttpv_sub_cut_node);
             }
 
-            // YaneuraOu準拠: 基本調整群
+            // 基本調整群
             r += ctx.tune_params.lmr_step16_base_add;
             r -= move_count * ctx.tune_params.lmr_step16_move_count_mul;
             r -= eval_ctx.correction_value.abs() / ctx.tune_params.lmr_step16_correction_div.max(1);
 
-            // YaneuraOu準拠: cut_node
+            // cut_node
             if cut_node {
                 let no_tt_move = tt_move.is_none();
                 r += ctx.tune_params.lmr_step16_cut_node_add
                     + ctx.tune_params.lmr_step16_cut_node_no_tt_add * (no_tt_move as i32);
             }
 
-            // YaneuraOu準拠: ttCapture
+            // ttCapture
             if tt_capture {
                 r += ctx.tune_params.lmr_step16_tt_capture_add;
             }
 
-            // YaneuraOu準拠: cutoffCnt
+            // cutoffCnt
             if st.stack[(ply + 1) as usize].cutoff_cnt > 2 {
                 r += ctx.tune_params.lmr_step16_cutoff_count_add
                     + (all_node as i32) * ctx.tune_params.lmr_step16_cutoff_count_all_node_add;
             }
 
-            // YaneuraOu準拠: ttMove
+            // ttMove
             if mv == tt_move {
                 r -= ctx.tune_params.lmr_step16_tt_move_penalty;
             }
 
-            // YaneuraOu準拠: statScore
+            // statScore
             let stat_score = if mv.is_pass() {
                 0 // PASS は history がないので還元補正なし
             } else if is_capture {
@@ -2578,7 +2632,7 @@ impl SearchWorker {
             // =============================================================
             let mut value = if depth >= 2 && move_count > 1 {
                 inc_stat!(st, lmr_applied);
-                // YaneuraOu準拠: d = max(1, min(newDepth - r/1024, newDepth + 2)) + PvNode
+                // d = max(1, min(newDepth - r/1024, newDepth + 2)) + PvNode
                 // 内側のmax(1, ...)で1以上が保証され、pv_node(0or1)加算で減ることはない
                 let d = std::cmp::max(1, std::cmp::min(new_depth - r / 1024, new_depth + 2))
                     + pv_node as i32;
@@ -2660,7 +2714,7 @@ impl SearchWorker {
                         );
                     }
 
-                    // YaneuraOu準拠: fail high後にcontHistを更新
+                    // fail high後にcontHistを更新
                     // YO: update_continuation_histories(ss, movedPiece, move.to_sq(), 1365)
                     // PASS は履歴の対象外なのでスキップ
                     if !mv.is_pass() {
@@ -2701,7 +2755,7 @@ impl SearchWorker {
                 }
 
                 if pv_node && (move_count == 1 || value > alpha) {
-                    // YaneuraOu準拠: ttMove由来のnewDepth下限補正
+                    // ttMove由来のnewDepth下限補正
                     if mv == tt_move
                         && ((tt_value != Value::NONE
                             && tt_value.is_mate_score()
@@ -2754,7 +2808,7 @@ impl SearchWorker {
                 // YaneuraOu Step18準拠:
                 // PvNodeでは zero-window で alpha を超えたら full PV再探索する。
                 if pv_node && value > alpha {
-                    // YaneuraOu準拠: ttMove由来のnewDepth下限補正
+                    // ttMove由来のnewDepth下限補正
                     if mv == tt_move
                         && ((tt_value != Value::NONE
                             && tt_value.is_mate_score()
@@ -2782,7 +2836,7 @@ impl SearchWorker {
                 value
             } else {
                 // Full window search
-                // YaneuraOu準拠: ttMove由来のnewDepth下限補正
+                // ttMove由来のnewDepth下限補正
                 if mv == tt_move
                     && ((tt_value != Value::NONE && tt_value.is_mate_score() && tt_data.depth > 0)
                         || (tt_data.depth > 1 && st.root_depth > 8))
@@ -2826,7 +2880,7 @@ impl SearchWorker {
             // =============================================================
             // スコア更新
             // =============================================================
-            // YaneuraOu準拠: Lazy SMP多様化のため、リーフ付近で同点の手を確率的に昇格させる
+            // Lazy SMP多様化のため、リーフ付近で同点の手を確率的に昇格させる
             let inc = Value::new(
                 if value == best_value
                     && ply + 2 >= st.root_depth
@@ -2867,18 +2921,18 @@ impl SearchWorker {
                         }
                         break;
                     }
-                    // YaneuraOu準拠: fail-high しなかったとき、後続手に対して探索深さをやや下げる。
+                    // fail-high しなかったとき、後続手に対して探索深さをやや下げる。
                     if depth > 2 && depth < 14 && !value.is_mate_score() {
                         depth -= 2;
                     }
-                    // YaneuraOu準拠: fail-high しなかった場合のみ alpha を更新する。
+                    // fail-high しなかった場合のみ alpha を更新する。
                     alpha = value;
                 }
             }
 
-            // YaneuraOu準拠: 非best手のトラッキング
+            // 非best手のトラッキング
             // bestMoveはループ中に更新されるため、alpha更新した手は除外される
-            // YaneuraOu準拠: moveCount <= SEARCHEDLIST_CAPACITY(32) の制限
+            // moveCount <= SEARCHEDLIST_CAPACITY(32) の制限
             if mv != best_move && !mv.is_pass() && move_count <= SEARCHED_MOVES_CAPACITY as i32 {
                 if is_capture {
                     captures_tried.push(mv);
@@ -2888,7 +2942,7 @@ impl SearchWorker {
             }
         }
 
-        // YaneuraOu準拠: fail-high のときは lower bound の過大化を抑えるため
+        // fail-high のときは lower bound の過大化を抑えるため
         // best_value を beta 側へ寄せてから後段の更新に渡す。
         // 注: moveCount check の前に実行する（YO準拠）
         if best_value >= beta && !best_value.is_mate_score() && !alpha.is_mate_score() {
@@ -2898,13 +2952,13 @@ impl SearchWorker {
         // =================================================================
         // 詰み/ステイルメイト判定 + History更新
         // =================================================================
-        // YaneuraOu準拠: if-else チェイン
+        // if-else チェイン
         // moveCount == 0: bestValue を設定して関数末尾までフォールスルー
         //   → tt_pv 伝播・TT store が正しく実行されるようにする（早期 return 禁止）
         // else if bestMove: update_all_stats
         // else if: prior countermove bonus
         if move_count == 0 {
-            // YaneuraOu準拠: excludedMoveがある場合は単にalphaを返す（詰みとは判定しない）
+            // excludedMoveがある場合は単にalphaを返す（詰みとは判定しない）
             // 合法手なし（将棋では in_check == true なら詰み）
             best_value = if excluded_move.is_some() {
                 alpha
@@ -2916,15 +2970,15 @@ impl SearchWorker {
             };
         } else if best_move.is_some() && !best_move.is_pass() {
             // =================================================================
-            // History更新（YaneuraOu準拠: update_all_stats）
+            // History更新（update_all_stats）
             // =================================================================
             // YaneuraOu: bestMoveがある場合は常にupdate_all_statsを呼ぶ
             // PASS は history_index() が未定義のためスキップ
             let is_best_capture = pos.capture_stage(best_move);
             let is_tt_move = best_move == tt_move;
-            // YaneuraOu準拠: bonus = min(121*depth-77, 1633) + 375*(bestMove==ttMove)
+            // bonus = min(121*depth-77, 1633) + 375*(bestMove==ttMove)
             let bonus = stat_bonus(depth, is_tt_move, ctx.tune_params);
-            // YaneuraOu準拠: malus = min(825*depth-196, 2159) - 16*moveCount
+            // malus = min(825*depth-196, 2159) - 16*moveCount
             let malus = stat_malus(depth, move_count, ctx.tune_params);
             let us = pos.side_to_move();
             let pawn_key_idx = pos.pawn_history_index();
@@ -2943,7 +2997,7 @@ impl SearchWorker {
 
             if !is_best_capture {
                 // Quiet手がbest: update_quiet_histories(bestMove, bonus * 881 / 1024)相当
-                // YaneuraOu準拠: bonus * 881 / 1024をベースに各historyを更新
+                // bonus * 881 / 1024をベースに各historyを更新
                 let scaled_bonus =
                     bonus * ctx.tune_params.update_all_stats_quiet_bonus_scale_num / 1024;
 
@@ -2966,7 +3020,7 @@ impl SearchWorker {
                     }
 
                     // ContinuationHistory: (bonus * 955 / 1024) * weight / 1024 + 88*(i<2)
-                    // YaneuraOu準拠: update_quiet_histories → update_continuation_histories
+                    // update_quiet_histories → update_continuation_histories
                     let cont_scaled_bonus =
                         scaled_bonus * ctx.tune_params.continuation_history_multiplier / 1024;
                     update_continuation_histories(
@@ -2984,7 +3038,7 @@ impl SearchWorker {
                     let pawn_bonus = pawn_history_bonus(scaled_bonus, ctx.tune_params);
                     h.pawn_history.update(pawn_key_idx, best_cont_pc, best_to, pawn_bonus);
 
-                    // YaneuraOu準拠: quiets_triedはbestMove追加段階で除外済みのため
+                    // quiets_triedはbestMove追加段階で除外済みのため
                     // ペナルティループでの重複チェックは不要
                     for &m in quiets_tried.iter() {
                         // ContinuationHistory/PawnHistoryで使う駒情報
@@ -3007,7 +3061,7 @@ impl SearchWorker {
                         }
 
                         // ContinuationHistoryへのペナルティ
-                        // YaneuraOu準拠: -malus * 1083/1024 * 955/1024 * weight/1024 + 88*(i<2)
+                        // -malus * 1083/1024 * 955/1024 * weight/1024 + 88*(i<2)
                         let cont_scaled_malus =
                             -scaled_malus * ctx.tune_params.continuation_history_multiplier / 1024;
                         update_continuation_histories(
@@ -3029,7 +3083,7 @@ impl SearchWorker {
             } else {
                 // 捕獲手がbest: captureHistoryを更新
                 let captured_pt = pos.piece_on(best_to).piece_type();
-                // YaneuraOu準拠: captureHistory best moveにスケーリング適用
+                // captureHistory best moveにスケーリング適用
                 {
                     // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
                     let h = unsafe { ctx.history.as_mut_unchecked() };
@@ -3042,7 +3096,7 @@ impl SearchWorker {
                 }
             }
 
-            // YaneuraOu準拠: captures_triedはbestMove追加段階で除外済みのため
+            // captures_triedはbestMove追加段階で除外済みのため
             // ペナルティループでの重複チェックは不要
             {
                 // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
@@ -3078,7 +3132,7 @@ impl SearchWorker {
                     && pos.captured_piece() == Piece::NONE
                     && let Some(key) = st.stack[prev_ply].cont_hist_key
                 {
-                    // YO準拠: null move ply はスキップ (prevSq != SQ_NONE)
+                    // null move ply はスキップ (prevSq != SQ_NONE)
                     if !key.piece.is_none() {
                         let prev_sq = key.to;
                         let prev_piece = pos.piece_on(prev_sq);
@@ -3108,7 +3162,7 @@ impl SearchWorker {
                 }
             }
 
-            // TTMoveHistory更新（非PVノードのみ、YaneuraOu準拠）
+            // TTMoveHistory更新（非PVノードのみ）
             // YaneuraOu: ttMoveHistory << (bestMove == ttData.move ? 809 : -865)
             // tt_moveがNONEでも-865のmalusを適用する（YO準拠）
             if !pv_node {
@@ -3123,19 +3177,17 @@ impl SearchWorker {
         }
         // =================================================================
         // Prior Countermove Bonus（fail low時の前の手にボーナス）
-        // YaneuraOu準拠
         // =================================================================
         else if ply >= 1 {
             let prev_ply = (ply - 1) as usize;
             if let Some(prev_key) = st.stack[prev_ply].cont_hist_key {
-                // YO準拠: null move ply はスキップ (prevSq != SQ_NONE)
+                // null move ply はスキップ (prevSq != SQ_NONE)
                 if !prev_key.piece.is_none() {
                     let prior_capture = prev_key.capture;
                     let prev_sq = prev_key.to;
 
                     if !prior_capture {
                         // Prior quiet countermove bonus
-                        // YaneuraOu準拠
                         let parent_stat_score = st.stack[prev_ply].stat_score;
                         let parent_move_count = st.stack[prev_ply].move_count;
                         let parent_in_check = st.stack[prev_ply].in_check;
@@ -3151,7 +3203,7 @@ impl SearchWorker {
                             .min(ctx.tune_params.prior_quiet_countermove_depth_cap);
                         bonus_scale += ctx.tune_params.prior_quiet_countermove_move_count_bonus
                             * (parent_move_count > 8) as i32;
-                        // YaneuraOu準拠: VALUE_NONEガードなし
+                        // VALUE_NONEガードなし
                         // 王手時 staticEval = VALUE_NONE(32002) → in_check=true で条件自体が偽
                         bonus_scale += ctx.tune_params.prior_quiet_countermove_eval_bonus
                             * (!in_check
@@ -3234,7 +3286,6 @@ impl SearchWorker {
                         }
                     } else {
                         // Prior capture countermove bonus
-                        // YaneuraOu準拠
                         // 注: prev_sq は cont_hist_key.to（do_move後に設定）なので prev_piece は有効
                         let prev_piece = pos.piece_on(prev_sq);
                         let captured_piece = pos.captured_piece();

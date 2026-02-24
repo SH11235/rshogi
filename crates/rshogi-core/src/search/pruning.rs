@@ -168,10 +168,8 @@ pub(super) fn step14_pruning(
 
             // SEE pruning for quiet moves (YaneuraOu: -27 * lmrDepth * lmrDepth)
             let lmr_depth_clamped = lmr_depth.max(0);
-            if !step_ctx
-                .pos
-                .see_ge(step_ctx.mv, Value::new(-27 * lmr_depth_clamped * lmr_depth_clamped))
-            {
+            let see_thresh = -27 * lmr_depth_clamped * lmr_depth_clamped;
+            if !step_ctx.pos.see_ge(step_ctx.mv, Value::new(see_thresh)) {
                 return Step14Outcome::Skip { best_value: None };
             }
         }

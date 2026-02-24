@@ -41,7 +41,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -167,6 +167,73 @@ struct PositionResult {
     final_nodes_ratio: Option<f64>,
     /// 局面の処理時間（秒）
     elapsed_secs: f64,
+}
+
+/// 途中経過書き出し用の共有状態
+struct ProgressWriter {
+    /// 完了済み結果（サマリ生成用）
+    results: Vec<PositionResult>,
+    /// jsonl ファイルへの書き込み用
+    jsonl_writer: BufWriter<File>,
+    /// サマリ更新用のファイルパス
+    summary_path: PathBuf,
+    /// サマリ更新間隔（N局面ごと）
+    summary_interval: usize,
+    /// 全局面数
+    total_positions: usize,
+    /// 並列ワーカー数
+    workers: usize,
+}
+
+impl ProgressWriter {
+    fn new(
+        jsonl_path: &Path,
+        summary_path: PathBuf,
+        summary_interval: usize,
+        total_positions: usize,
+        workers: usize,
+    ) -> Result<Self> {
+        let jsonl_file = File::create(jsonl_path).with_context(|| "results.jsonl の作成に失敗")?;
+        Ok(Self {
+            results: Vec::with_capacity(total_positions),
+            jsonl_writer: BufWriter::new(jsonl_file),
+            summary_path,
+            summary_interval,
+            total_positions,
+            workers,
+        })
+    }
+
+    /// 1局面の結果を追記し、必要に応じてサマリを更新する
+    fn push(&mut self, result: PositionResult, cli: &Cli) {
+        // jsonl に即時追記
+        let write_ok = serde_json::to_writer(&mut self.jsonl_writer, &result)
+            .map_err(|e| e.into())
+            .and_then(|()| self.jsonl_writer.write_all(b"\n"))
+            .and_then(|()| self.jsonl_writer.flush());
+        if let Err(e) = write_ok {
+            eprintln!("jsonl 書き込みエラー: {e}");
+        }
+
+        self.results.push(result);
+
+        // N局面ごと、または最終局面でサマリを更新
+        let done = self.results.len();
+        if done == self.total_positions || done.is_multiple_of(self.summary_interval) {
+            self.update_summary(cli);
+        }
+    }
+
+    fn update_summary(&self, cli: &Cli) {
+        let done = self.results.len();
+        let total = self.total_positions;
+        if let Ok(file) = File::create(&self.summary_path) {
+            let mut w = BufWriter::new(file);
+            let _ = writeln!(w, "[途中経過: {done}/{total} 局面完了]");
+            let _ = writeln!(w);
+            let _ = write_summary(&mut w, &self.results, cli, None, self.workers);
+        }
+    }
 }
 
 /// メタデータ
@@ -583,7 +650,19 @@ fn process_positions_reuse(
 // サマリ出力
 // ---------------------------------------------------------------------------
 
-fn write_summary(writer: &mut dyn Write, results: &[PositionResult], cli: &Cli) -> Result<()> {
+fn write_summary(
+    writer: &mut dyn Write,
+    results: &[PositionResult],
+    cli: &Cli,
+    wall_clock_secs: Option<f64>,
+    workers: usize,
+) -> Result<()> {
+    if results.is_empty() {
+        writeln!(writer, "=== ノード数比較サマリ ===")?;
+        writeln!(writer, "--- 結果がありません ---")?;
+        return Ok(());
+    }
+
     writeln!(writer, "=== ノード数比較サマリ ===")?;
     writeln!(writer, "エンジンA: {}", cli.engine_a.display())?;
     if !cli.options_a.is_empty() {
@@ -610,13 +689,25 @@ fn write_summary(writer: &mut dyn Write, results: &[PositionResult], cli: &Cli) 
         writeln!(writer, "EvalDir(B): {}", eval.display())?;
     }
     writeln!(writer, "Hash: {} MB", cli.hash)?;
-    let total_secs: f64 = results.iter().map(|r| r.elapsed_secs).sum();
-    let avg_secs = if results.is_empty() {
-        0.0
+    if let Some(wc) = wall_clock_secs {
+        writeln!(writer, "経過時間: {:.1}s", wc)?;
+    }
+    let mut per_position: Vec<f64> = results.iter().map(|r| r.elapsed_secs).collect();
+    per_position.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let total_secs: f64 = per_position.iter().sum();
+    let min_secs = per_position.first().copied().unwrap_or(0.0);
+    let max_secs = per_position.last().copied().unwrap_or(0.0);
+    let median_secs = if per_position.len().is_multiple_of(2) {
+        let mid = per_position.len() / 2;
+        (per_position[mid - 1] + per_position[mid]) / 2.0
     } else {
-        total_secs / results.len() as f64
+        per_position[per_position.len() / 2]
     };
-    writeln!(writer, "所要時間: {:.1}s (平均 {:.1}s/局面)", total_secs, avg_secs)?;
+    writeln!(
+        writer,
+        "累計処理時間: {:.1}s (min={:.1}s, median={:.1}s, max={:.1}s, {} workers)",
+        total_secs, min_secs, median_secs, max_secs, workers
+    )?;
     writeln!(writer)?;
 
     // 深度別統計
@@ -672,6 +763,40 @@ fn write_summary(writer: &mut dyn Write, results: &[PositionResult], cli: &Cli) 
         results.len(),
         matches as f64 / results.len() as f64 * 100.0
     )?;
+    writeln!(writer)?;
+
+    // 全depth完全一致と乖離開始深度の分布
+    let mut all_depths_perfect = 0usize;
+    let mut first_diverge_depth: BTreeMap<u32, usize> = BTreeMap::new();
+    for r in results.iter() {
+        let min_len = r.a_depths.len().min(r.b_depths.len());
+        let mut diverged = false;
+        for i in 0..min_len {
+            if r.a_depths[i].nodes != r.b_depths[i].nodes {
+                let d = r.a_depths[i].depth;
+                *first_diverge_depth.entry(d).or_insert(0) += 1;
+                diverged = true;
+                break;
+            }
+        }
+        if !diverged {
+            all_depths_perfect += 1;
+        }
+    }
+    writeln!(
+        writer,
+        "--- 全depth完全一致: {}/{} ({:.1}%) ---",
+        all_depths_perfect,
+        results.len(),
+        all_depths_perfect as f64 / results.len() as f64 * 100.0
+    )?;
+    if !first_diverge_depth.is_empty() {
+        writeln!(writer)?;
+        writeln!(writer, "--- 乖離開始深度の分布 ---")?;
+        for (d, count) in &first_diverge_depth {
+            writeln!(writer, "  d{:<3}: {:>4} 局面", d, count)?;
+        }
+    }
     writeln!(writer)?;
 
     // 最終深度ノード数倍率の分布
@@ -874,53 +999,80 @@ fn main() -> Result<()> {
     });
     let depth = cli.depth;
 
-    let results: Vec<PositionResult> = if cli.reuse_engine {
+    // サマリ更新間隔: 全体の10%ごと（最低10局面ごと）
+    let summary_interval = (sfens.len() / 10).max(10).min(sfens.len()).max(1);
+    let run_start = std::time::Instant::now();
+    let progress_writer = Arc::new(Mutex::new(ProgressWriter::new(
+        &output_dir.join("results.jsonl"),
+        output_dir.join("summary.txt"),
+        summary_interval,
+        sfens.len(),
+        workers,
+    )?));
+
+    if cli.reuse_engine {
         // TT蓄積モード: エンジンを使い回して逐次処理（--reuse-engine）。
-        process_positions_reuse(&params_a, &params_b, &sfens, depth, &pb)
+        // 注意: 途中経過書き出しは process_positions_reuse 完了後にまとめて行われる。
+        let results = process_positions_reuse(&params_a, &params_b, &sfens, depth, &pb);
+        let mut pw = progress_writer.lock().unwrap();
+        for result in results {
+            pw.push(result, &cli);
+        }
     } else {
         // 通常モード: 局面ごとに新規プロセスを起動して並列処理。
         // 各局面は対局開始時（usinewgame + isready）と同等のクリーンな TT から探索する。
         rayon::ThreadPoolBuilder::new().num_threads(workers).build_global().ok();
-        sfens
-            .par_iter()
-            .filter_map(|(index, sfen)| {
-                match process_position(&params_a, &params_b, *index, sfen, depth) {
-                    Ok(result) => {
-                        pb.inc(1);
-                        Some(result)
-                    }
-                    Err(e) => {
-                        eprintln!("position {index} エラー: {e}");
-                        pb.inc(1);
-                        None
-                    }
+        sfens.par_iter().for_each(|(index, sfen)| {
+            match process_position(&params_a, &params_b, *index, sfen, depth) {
+                Ok(result) => {
+                    pb.inc(1);
+                    progress_writer.lock().unwrap().push(result, &cli);
                 }
-            })
-            .collect()
-    };
+                Err(e) => {
+                    eprintln!("position {index} エラー: {e}");
+                    pb.inc(1);
+                }
+            }
+        });
+    }
 
     pb.finish_with_message("完了");
     println!();
 
-    // results.jsonl 書き出し
-    {
-        let jsonl_file = File::create(output_dir.join("results.jsonl"))?;
-        let mut writer = BufWriter::new(jsonl_file);
-        for result in &results {
-            serde_json::to_writer(&mut writer, result)?;
-            writer.write_all(b"\n")?;
-        }
-    }
-
-    // summary.txt 書き出し + stdout表示
+    // 最終サマリをファイル + stdout に出力
+    let wall_clock_secs = run_start.elapsed().as_secs_f64();
+    let pw = progress_writer.lock().unwrap();
     {
         let summary_file = File::create(output_dir.join("summary.txt"))?;
         let mut file_writer = BufWriter::new(summary_file);
-        write_summary(&mut file_writer, &results, &cli)?;
+        write_summary(&mut file_writer, &pw.results, &cli, Some(wall_clock_secs), workers)?;
     }
+    write_summary(
+        &mut std::io::stdout().lock(),
+        &pw.results,
+        &cli,
+        Some(wall_clock_secs),
+        workers,
+    )?;
 
-    // stdoutにも表示
-    write_summary(&mut std::io::stdout().lock(), &results, &cli)?;
+    // 乖離があった局面の SFEN を書き出し（--sfens に再入力可能な形式）
+    let divergent: Vec<&PositionResult> = pw
+        .results
+        .iter()
+        .filter(|r| {
+            let min_len = r.a_depths.len().min(r.b_depths.len());
+            (0..min_len).any(|i| r.a_depths[i].nodes != r.b_depths[i].nodes)
+        })
+        .collect();
+    if !divergent.is_empty() {
+        let div_path = output_dir.join("divergent_sfens.txt");
+        let mut w = BufWriter::new(File::create(&div_path)?);
+        for r in &divergent {
+            writeln!(w, "{}", r.sfen)?;
+        }
+        println!();
+        println!("乖離局面: {}/{} → {}", divergent.len(), pw.results.len(), div_path.display());
+    }
 
     println!();
     println!("結果保存先: {}", output_dir.display());
