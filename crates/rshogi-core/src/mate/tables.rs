@@ -250,7 +250,7 @@ fn init_check_around_bb() -> [[[Bitboard; 2]; PieceType::NUM + 1]; 81] {
                     bb |= cand;
                 }
 
-                // YO準拠: 玉自身の升のみ除外
+                // 玉自身の升のみ除外
                 bb &= !Bitboard::from_square(sq_king);
                 table[sq_king.index()][pt.index()][c] = bb;
             }
@@ -325,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_check_cand_silver_includes_two_files_away_on_special_rank() {
-        // YO準拠: 4段目(先手)/6段目(後手)の特殊ケースで「2升隣」が含まれる。
+        // 4段目(先手)/6段目(後手)の特殊ケースで「2升隣」が含まれる。
         // 先手視点: 玉5四 → 基準升5三の2升隣(7三,3三)が候補に入る。
         let black_king = Square::new(File::File5, Rank::Rank4);
         let black_silver = CHECK_CAND_BB[black_king.index()][PieceTypeCheck::Silver as usize]

@@ -207,4 +207,14 @@ mod tests {
             mv
         );
     }
+
+    #[test]
+    fn test_lance_nopro_skewer_fallback_after_promote_escape() {
+        // 成り王手(成香)では玉に逃げられるが、不成り串刺しで詰む局面。
+        // 香7五→7七不成で7八玉に串刺し王手。
+        let sfen =
+            "l2+R3nl/3s1kg2/3pppsp1/p1p3p1p/2lS3P1/P4PP1P/1PNPP1N2/2K1g1SR1/+b4G2L w BGN2p 46";
+        let mv = mate_by_new(sfen);
+        assert!(mv.is_some(), "成香では玉に逃げられるが不成り串刺しで1手詰み: {:?}", mv);
+    }
 }

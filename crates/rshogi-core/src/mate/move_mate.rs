@@ -173,7 +173,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
         }
     }
 
-    // LANCE
+    // LANCE（成りで詰まない場合、不成り串刺しも試す）
     let mut bb =
         check_cand_bb(us, PieceTypeCheck::Lance, sq_king) & pos.pieces(us, PieceType::Lance);
     while bb.is_not_empty() {
@@ -184,48 +184,60 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
 
         while bb_check.is_not_empty() {
             let to = bb_check.pop();
+
             let bb_attacks = if can_promote(us, from, to) {
                 gold_effect(us, to)
             } else {
                 lance_step_effect(us, to)
             };
+
+            // 成り（または不成り）の利きが王を含むか
             if !bb_attacks.contains(sq_king) {
-                // 敵陣3段目の不成り串刺し
-                if (us == Color::Black && to.rank() == Rank::Rank3)
-                    || (us == Color::White && to.rank() == Rank::Rank7)
-                {
-                    let bb_skewer = lance_step_effect(us, to);
-                    if !bb_skewer.contains(sq_king) {
-                        continue;
-                    }
-                    if pos.discovered(from, to, our_king, our_pinned) {
-                        continue;
-                    }
-                    if can_king_escape_with_from(pos, them, from, to, bb_skewer, slide) {
-                        continue;
-                    }
-                    if can_piece_capture(pos, them, to, pinned, slide) {
-                        continue;
-                    }
-                    return Some(Move::new_move(from, to, false));
+                // 成りでは王手にならない場合、直接 LANCE_NO_PRO へ
+            } else {
+                // toに味方の利きがfrom以外にない場合はスキップ
+                // （toの駒が取られると王手が残らない）
+                let attackers_to_us = (pos.attackers_to_occ(to, slide) & pos.pieces_c(us))
+                    ^ Bitboard::from_square(from);
+                if attackers_to_us.is_empty() {
+                    // toが味方利きで守られていない → LANCE_NO_PRO へ
+                } else if pos.discovered(from, to, our_king, our_pinned) {
+                    // 自玉が素抜かれる → LANCE_NO_PRO へ
+                } else if can_king_escape_with_from(pos, them, from, to, bb_attacks, slide) {
+                    // 玉が逃げられる → LANCE_NO_PRO へ
+                } else if dc_candidates.contains(from) {
+                    // 成って角との両王手
+                } else if can_piece_capture(pos, them, to, pinned, slide) {
+                    // toの駒が取れる → LANCE_NO_PRO へ
+                } else {
+                    // 成りで詰み
+                    return Some(Move::new_move(from, to, can_promote(us, from, to)));
                 }
-                continue;
-            }
-            if pos.discovered(from, to, our_king, our_pinned) {
-                continue;
-            }
-            if can_king_escape_with_from(pos, them, from, to, bb_attacks, slide) {
-                continue;
-            }
-            if dc_candidates.contains(from) {
-                // 成って角との両王手
-            } else if can_piece_capture(pos, them, to, pinned, slide) {
-                continue;
             }
 
-            if can_promote(us, from, to) {
-                return Some(Move::new_move(from, to, true));
-            } else {
+            // LANCE_NO_PRO: 敵陣で不成りで串刺しにする王手
+            if (us == Color::Black && to.rank() == Rank::Rank3)
+                || (us == Color::White && to.rank() == Rank::Rank7)
+            {
+                let bb_skewer = lance_step_effect(us, to);
+                if !bb_skewer.contains(sq_king) {
+                    continue;
+                }
+                let attackers_to_us = (pos.attackers_to_occ(to, slide) & pos.pieces_c(us))
+                    ^ Bitboard::from_square(from);
+                if attackers_to_us.is_empty() {
+                    continue;
+                }
+                if pos.discovered(from, to, our_king, our_pinned) {
+                    continue;
+                }
+                if can_king_escape_with_from(pos, them, from, to, bb_skewer, slide) {
+                    continue;
+                }
+                // 串刺しでの両王手はありえない
+                if can_piece_capture(pos, them, to, pinned, slide) {
+                    continue;
+                }
                 return Some(Move::new_move(from, to, false));
             }
         }
