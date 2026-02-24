@@ -181,6 +181,8 @@ struct ProgressWriter {
     summary_interval: usize,
     /// 全局面数
     total_positions: usize,
+    /// 並列ワーカー数
+    workers: usize,
 }
 
 impl ProgressWriter {
@@ -189,6 +191,7 @@ impl ProgressWriter {
         summary_path: PathBuf,
         summary_interval: usize,
         total_positions: usize,
+        workers: usize,
     ) -> Result<Self> {
         let jsonl_file = File::create(jsonl_path).with_context(|| "results.jsonl の作成に失敗")?;
         Ok(Self {
@@ -197,6 +200,7 @@ impl ProgressWriter {
             summary_path,
             summary_interval,
             total_positions,
+            workers,
         })
     }
 
@@ -227,7 +231,7 @@ impl ProgressWriter {
             let mut w = BufWriter::new(file);
             let _ = writeln!(w, "[途中経過: {done}/{total} 局面完了]");
             let _ = writeln!(w);
-            let _ = write_summary(&mut w, &self.results, cli);
+            let _ = write_summary(&mut w, &self.results, cli, None, self.workers);
         }
     }
 }
@@ -646,7 +650,13 @@ fn process_positions_reuse(
 // サマリ出力
 // ---------------------------------------------------------------------------
 
-fn write_summary(writer: &mut dyn Write, results: &[PositionResult], cli: &Cli) -> Result<()> {
+fn write_summary(
+    writer: &mut dyn Write,
+    results: &[PositionResult],
+    cli: &Cli,
+    wall_clock_secs: Option<f64>,
+    workers: usize,
+) -> Result<()> {
     if results.is_empty() {
         writeln!(writer, "=== ノード数比較サマリ ===")?;
         writeln!(writer, "--- 結果がありません ---")?;
@@ -679,13 +689,25 @@ fn write_summary(writer: &mut dyn Write, results: &[PositionResult], cli: &Cli) 
         writeln!(writer, "EvalDir(B): {}", eval.display())?;
     }
     writeln!(writer, "Hash: {} MB", cli.hash)?;
-    let total_secs: f64 = results.iter().map(|r| r.elapsed_secs).sum();
-    let avg_secs = if results.is_empty() {
-        0.0
+    if let Some(wc) = wall_clock_secs {
+        writeln!(writer, "経過時間: {:.1}s", wc)?;
+    }
+    let mut per_position: Vec<f64> = results.iter().map(|r| r.elapsed_secs).collect();
+    per_position.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let total_secs: f64 = per_position.iter().sum();
+    let min_secs = per_position.first().copied().unwrap_or(0.0);
+    let max_secs = per_position.last().copied().unwrap_or(0.0);
+    let median_secs = if per_position.len().is_multiple_of(2) {
+        let mid = per_position.len() / 2;
+        (per_position[mid - 1] + per_position[mid]) / 2.0
     } else {
-        total_secs / results.len() as f64
+        per_position[per_position.len() / 2]
     };
-    writeln!(writer, "所要時間: {:.1}s (平均 {:.1}s/局面)", total_secs, avg_secs)?;
+    writeln!(
+        writer,
+        "累計処理時間: {:.1}s (min={:.1}s, median={:.1}s, max={:.1}s, {} workers)",
+        total_secs, min_secs, median_secs, max_secs, workers
+    )?;
     writeln!(writer)?;
 
     // 深度別統計
@@ -979,11 +1001,13 @@ fn main() -> Result<()> {
 
     // サマリ更新間隔: 全体の10%ごと（最低10局面ごと）
     let summary_interval = (sfens.len() / 10).max(10).min(sfens.len());
+    let run_start = std::time::Instant::now();
     let progress_writer = Arc::new(Mutex::new(ProgressWriter::new(
         &output_dir.join("results.jsonl"),
         output_dir.join("summary.txt"),
         summary_interval,
         sfens.len(),
+        workers,
     )?));
 
     if cli.reuse_engine {
@@ -1015,13 +1039,20 @@ fn main() -> Result<()> {
     println!();
 
     // 最終サマリをファイル + stdout に出力
+    let wall_clock_secs = run_start.elapsed().as_secs_f64();
     let pw = progress_writer.lock().unwrap();
     {
         let summary_file = File::create(output_dir.join("summary.txt"))?;
         let mut file_writer = BufWriter::new(summary_file);
-        write_summary(&mut file_writer, &pw.results, &cli)?;
+        write_summary(&mut file_writer, &pw.results, &cli, Some(wall_clock_secs), workers)?;
     }
-    write_summary(&mut std::io::stdout().lock(), &pw.results, &cli)?;
+    write_summary(
+        &mut std::io::stdout().lock(),
+        &pw.results,
+        &cli,
+        Some(wall_clock_secs),
+        workers,
+    )?;
 
     // 乖離があった局面の SFEN を書き出し（--sfens に再入力可能な形式）
     let divergent: Vec<&PositionResult> = pw
