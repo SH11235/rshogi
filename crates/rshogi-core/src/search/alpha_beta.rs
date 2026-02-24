@@ -2371,7 +2371,7 @@ impl SearchWorker {
                 cont_history_1: unsafe { cont_hist_ptr_1.as_ref() },
                 // SAFETY: cont_history_ptr() が返すポインタは探索中有効。
                 cont_history_2: unsafe { cont_hist_ptr_2.as_ref() },
-                static_eval: eval_ctx.static_eval,
+                static_eval: st.stack[ply as usize].static_eval,
                 alpha,
                 best_move,
                 pawn_history_index: pos.pawn_history_index(),
