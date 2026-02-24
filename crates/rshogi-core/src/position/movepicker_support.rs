@@ -267,7 +267,7 @@ impl Position {
     }
 
     /// 取る手または歩成りの手かどうか（ProbCut用）
-    /// YaneuraOu: capture_or_pawn_promotion
+    /// capture_or_pawn_promotion
     #[inline]
     pub fn capture_or_pawn_promotion(&self, m: Move) -> bool {
         self.is_capture(m)
@@ -338,10 +338,10 @@ impl Position {
     // SEE (Static Exchange Evaluation)
     // =========================================================================
 
-    /// SEE >= threshold かどうかを判定（YO準拠: swap/resアルゴリズム）
+    /// SEE >= threshold かどうかを判定（swap/resアルゴリズム）
     ///
     /// YaneuraOu/Stockfish と同じアルゴリズムで静的駒交換評価を判定する。
-    /// 成りボーナスは考慮しない（YO準拠）。
+    /// 成りボーナスは考慮しない。
     pub fn see_ge(&self, m: Move, threshold: Value) -> bool {
         // PASSは駒交換が発生しないので >= 0
         if m.is_pass() {
@@ -351,7 +351,8 @@ impl Position {
         let is_drop = m.is_drop();
         let to = m.to();
 
-        // YO: swap = PieceValue[piece_on(to)] - threshold
+        // swap = PieceValue[piece_on(to)] - threshold
+        // 取られる駒の価値（駒打ちは空きマスに打つので 0）
         let captured_value = if is_drop {
             0
         } else {
@@ -364,10 +365,13 @@ impl Position {
         };
         let mut swap = captured_value - threshold.raw();
 
+        // toの駒価値がthreshold未満 → 取り返されなくてもfalse
         if swap < 0 {
             return false;
         }
 
+        // swap = PieceValue[from_pt] - swap
+        // 動かす駒の価値（駒打ちは打つ駒種）
         let from_value = if is_drop {
             see_piece_value(m.drop_piece_type())
         } else {
@@ -375,10 +379,13 @@ impl Position {
         };
         swap = from_value - swap;
 
+        // 動かす駒を取り返されても閾値以上 → true
         if swap <= 0 {
             return true;
         }
 
+        // occupied = pieces() ^ from ^ to
+        // 駒打ちの場合は from を無効化（XORしない）
         let mut occupied = if is_drop {
             self.occupied() ^ Bitboard::from_square(to)
         } else {
@@ -397,9 +404,11 @@ impl Position {
                 break;
             }
 
-            // YO: ピン処理
-            let pinners_bb = self.state().pinners[stm.index()] & occupied;
-            if !pinners_bb.is_empty() {
+            // ピン処理 — ピンされた駒は攻撃に参加できない
+            // pinners(~stm): stmの玉をピンしている(!stm側の)駒
+            // rshogi の pinners[c] は「!c側の駒がc側の王をピンしている」という意味なので、
+            // stm の王をピンしている駒を取得するには pinners[stm] を使う（YOは pinners[~stm]）
+            if !(self.state().pinners[stm.index()] & occupied).is_empty() {
                 stm_attackers &= !self.blockers_for_king(stm);
                 if stm_attackers.is_empty() {
                     break;
@@ -408,15 +417,17 @@ impl Position {
 
             res ^= 1;
 
+            // 最も価値の低い攻撃駒を選択
             let (attacker_sq, attacker_value) =
                 self.least_valuable_attacker(stm_attackers, stm, to, occupied);
 
+            // swap = PieceValue[pt] - swap; if (swap < res) break;
             swap = attacker_value - swap;
-
             if swap < res {
                 break;
             }
 
+            // 玉で取る場合の特別処理
             if attacker_value == see_piece_value(PieceType::King) {
                 return if !(attackers & self.pieces_c(!stm)).is_empty() {
                     res ^ 1 != 0
@@ -425,8 +436,10 @@ impl Position {
                 };
             }
 
+            // 駒をoccupiedから取り除く
             occupied ^= Bitboard::from_square(attacker_sq);
 
+            // X-ray攻撃の追加: attacker_sqが遮っていた背後の駒を追加
             if let Some(dir) = direct_of(to, attacker_sq) {
                 let ray = ray_effect(dir, to, occupied);
                 let extras = match dir {
@@ -456,7 +469,7 @@ impl Position {
         res != 0
     }
 
-    /// 最も価値の低い攻撃駒を探す（YO準拠: 成りは考慮しない）
+    /// 最も価値の低い攻撃駒を探す（成りは考慮しない）
     fn least_valuable_attacker(
         &self,
         attackers: Bitboard,
@@ -464,11 +477,11 @@ impl Position {
         _to: Square,
         _occupied: Bitboard,
     ) -> (Square, i32) {
-        // YO準拠: 価値の低い順にチェック（成り考慮なし）
+        // 価値の低い順にチェック（成り考慮なし）
         // Pawn(90) → Lance(315) → Knight(405) → Silver(495)
         // → GOLDS(540): Gold,ProPawn,ProLance,ProKnight,ProSilver
         // → Bishop(855) → Rook(990) → Horse(945) → Dragon(1395) → King
-        // 注: Rook(990)がHorse(945)より先はYO準拠（価値昇順ではない）
+        // 注: Rook(990)がHorse(945)より先は（価値昇順ではない）
 
         // Pawn
         let bb = attackers & self.pieces(stm, PieceType::Pawn);
@@ -491,23 +504,24 @@ impl Position {
             return (bb.lsb().unwrap(), see_piece_value(PieceType::Silver));
         }
         // GOLDS (Gold, ProPawn, ProLance, ProKnight, ProSilver) — すべて540
-        // YO準拠: pieces(GOLDS)として結合bitboardのLSBを選択する
-        // 個別駒種ごとにチェックすると異なるマスが選ばれ、x-ray discoveryが変わる
-        let golds_bb = self.pieces_pt(PieceType::Gold)
-            | self.pieces_pt(PieceType::ProPawn)
-            | self.pieces_pt(PieceType::ProLance)
-            | self.pieces_pt(PieceType::ProKnight)
-            | self.pieces_pt(PieceType::ProSilver);
-        let bb = attackers & golds_bb & self.pieces_c(stm);
-        if !bb.is_empty() {
-            return (bb.lsb().unwrap(), see_piece_value(PieceType::Gold));
+        for pt in [
+            PieceType::Gold,
+            PieceType::ProPawn,
+            PieceType::ProLance,
+            PieceType::ProKnight,
+            PieceType::ProSilver,
+        ] {
+            let bb = attackers & self.pieces(stm, pt);
+            if !bb.is_empty() {
+                return (bb.lsb().unwrap(), see_piece_value(PieceType::Gold));
+            }
         }
         // Bishop (855)
         let bb = attackers & self.pieces(stm, PieceType::Bishop);
         if !bb.is_empty() {
             return (bb.lsb().unwrap(), see_piece_value(PieceType::Bishop));
         }
-        // YaneuraOu準拠: Rook(990) を Horse(945) より先に選択
+        // Rook(990) を Horse(945) より先に選択
         // 価値昇順ではないが、YOとのノード数一致のために順序を合わせる
         // Rook (990)
         let bb = attackers & self.pieces(stm, PieceType::Rook);
@@ -540,7 +554,7 @@ impl Position {
 // ヘルパー関数
 // =============================================================================
 
-/// SEE用の駒価値（YO準拠）
+/// SEE用の駒価値
 fn see_piece_value(pt: PieceType) -> i32 {
     use PieceType::*;
     match pt {

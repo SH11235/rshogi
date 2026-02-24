@@ -53,7 +53,7 @@ pub(super) fn try_futility_pruning(
         );
 
         if params.static_eval - futility_margin >= params.beta {
-            // YaneuraOu: return (2 * beta + eval) / 3
+            // return (2 * beta + eval) / 3
             return Some(Value::new((2 * params.beta.raw() + params.static_eval.raw()) / 3));
         }
     }
@@ -92,7 +92,7 @@ pub(super) fn step14_pruning(
             };
 
             // Futility pruning for captures (駒取り手に対するfutility枝刈り)
-            // YaneuraOu準拠: !in_check/static_eval!=NONEガードなし
+            // !in_check/static_eval!=NONEガードなし
             // (VALUE_NONE=32002によりfutilityValueが常にalpha超えのため暗黙的に安全)
             if !step_ctx.gives_check && lmr_depth < 7 {
                 use super::movepicker::piece_value;
@@ -108,7 +108,7 @@ pub(super) fn step14_pruning(
             }
 
             // SEE based pruning for captures (157 * depth + captHist / 29)
-            // YaneuraOu準拠: alpha >= VALUE_DRAW 条件を追加
+            // alpha >= VALUE_DRAW 条件を追加
             if step_ctx.alpha >= Value::DRAW {
                 let margin = (157 * step_ctx.depth + capt_hist / 29).max(0);
                 if !step_ctx.pos.see_ge(step_ctx.mv, Value::new(-margin)) {
@@ -129,15 +129,24 @@ pub(super) fn step14_pruning(
                 (mh, ph)
             };
 
-            // YaneuraOu準拠: Continuation history（mainHistoryを含まない）
+            // Continuation history（mainHistoryを含まない）
+            //
+            // 【実装メモ: df8d771d】
+            // 旧実装(00c06b7f)では hist_score = 2*main_hist + cont0 + cont1 + pawn_hist で判定していた。
+            // cont_hist のみに修正した結果:
+            // - ノード数: 1.3-2.2倍増加（枝刈りが緩くなった）
+            // - 自己対局: 48.25% vs 00c06b7f（200局, 秒読み2秒）
+            // mainHistoryは通常負（悪い手）のため、含めると過剰に枝刈りしていた。
+            // NPS改善後に再評価予定。
             let cont_history = cont_hist_0 + cont_hist_1 + pawn_hist;
 
-            // Continuation history based pruning (YaneuraOu: -4312 * depth)
+            // Continuation history based pruning (-4312 * depth)
             if cont_history < -4312 * step_ctx.depth {
                 return Step14Outcome::Skip { best_value: None };
             }
 
-            // YaneuraOu準拠: mainHistoryは pruning判定後に追加
+            // mainHistoryは pruning判定後に追加
+            // : history += 76 * mainHistory / 32
             let hist_score = cont_history + 76 * main_hist / 32;
 
             // lmrDepth調整 (枝刈りされなかった場合のみ実行)
@@ -151,9 +160,10 @@ pub(super) fn step14_pruning(
                 + 134 * lmr_depth
                 + 90 * (step_ctx.static_eval > step_ctx.alpha) as i32;
 
-            // YaneuraOu準拠: static_eval!=NONEガードなし（!in_check + VALUE_NONEで暗黙的に安全）
+            // static_eval!=NONEガードなし（!in_check + VALUE_NONEで暗黙的に安全）
             if !step_ctx.in_check && lmr_depth < 11 && futility_value <= step_ctx.alpha.raw() {
-                // YaneuraOu準拠: bestValueをfutilityValueで更新する条件
+                // bestValueをfutilityValueで更新する条件
+                // if (bestValue <= futilityValue && !is_decisive(bestValue) && !is_win(futilityValue))
                 let futility_val = Value::new(futility_value);
                 if step_ctx.best_value <= futility_val
                     && !step_ctx.best_value.is_mate_score()
@@ -166,7 +176,9 @@ pub(super) fn step14_pruning(
                 return Step14Outcome::Skip { best_value: None };
             }
 
-            // SEE pruning for quiet moves (YaneuraOu: -27 * lmrDepth * lmrDepth)
+            // SEE pruning for quiet moves (-27 * lmrDepth * lmrDepth)
+            // !in_check/lmrDepth>0ガードなし
+            // lmrDepth=0時はthreshold=0でSEE<0の手を枝刈り
             let lmr_depth_clamped = lmr_depth.max(0);
             let see_thresh = -27 * lmr_depth_clamped * lmr_depth_clamped;
             if !step_ctx.pos.see_ge(step_ctx.mv, Value::new(see_thresh)) {
@@ -201,7 +213,7 @@ pub(super) fn try_razoring<const NT: u8>(
     limits: &LimitsType,
     time_manager: &mut TimeManagement,
 ) -> Option<Value> {
-    // YaneuraOu準拠: 評価値が非常に低い場合、通常探索をスキップしてqsearch値を返す
+    // 評価値が非常に低い場合、通常探索をスキップしてqsearch値を返す
     if !pv_node
         && !in_check
         && static_eval
@@ -381,7 +393,7 @@ where
         }
     }
 
-    // YaneuraOu準拠: Step10直前の improving 再計算は VALUE_NONE を含めて評価する。
+    // Step10直前の improving 再計算は VALUE_NONE を含めて評価する。
     // in-check ノードは YO ではこの経路に入らないため、現実装では !in_check のみ維持する。
     if !in_check {
         improving |= static_eval >= beta;
@@ -440,7 +452,7 @@ where
             ctx.tune_params.probcut_beta_margin_base
                 - ctx.tune_params.probcut_beta_improving_sub * improving as i32,
         );
-    // YaneuraOu準拠: ttData.value が有効で probCutBeta 未満なら probCut を試さない。
+    // ttData.value が有効で probCutBeta 未満なら probCut を試さない。
     // hit フラグや mate 判定で追加ガードしない。
     if beta.is_mate_score() || (tt_ctx.value != Value::NONE && tt_ctx.value < prob_beta) {
         return None;
@@ -450,7 +462,7 @@ where
 
     let dynamic_reduction =
         (static_eval - beta).raw() / ctx.tune_params.probcut_dynamic_reduction_div.max(1);
-    // YaneuraOu準拠: std::clamp(depth - 5 - ..., 0, depth) で上限もクランプ
+    // std::clamp(depth - 5 - ..., 0, depth) で上限もクランプ
     let probcut_depth =
         (depth - ctx.tune_params.probcut_depth_base - dynamic_reduction).clamp(0, depth);
 
@@ -466,9 +478,9 @@ where
         ctx.generate_all_legal_moves,
     );
 
-    // YaneuraOu準拠: 逐次 next_move 方式。
-    // バッファに事前 collect すると TT手の探索前にスコアリングが行われてしまい、
-    // captureHistory が TT手探索後と異なる時点の値でソートされるため、手の順序が狂う。
+    // 逐次 next_move 方式（バッファ collect 禁止）。
+    // TT手の探索で captureHistory が更新されるため、
+    // 事前 collect するとスコアリング時点の値がずれて手順が狂う。
     loop {
         let mv = {
             // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
@@ -478,7 +490,6 @@ where
         if mv == Move::NONE {
             break;
         }
-
         if mv == excluded_move {
             continue;
         }

@@ -1,6 +1,6 @@
 //! Alpha-Beta探索の実装
 //!
-//! YaneuraOu準拠のAlpha-Beta探索。
+//! Alpha-Beta探索。
 //! - Principal Variation Search (PVS)
 //! - 静止探索 (Quiescence Search)
 //! - 各種枝刈り: NMP, LMR, Futility, Razoring, SEE, Singular Extension
@@ -21,7 +21,8 @@ use crate::types::{
 
 use super::history::{
     CORRECTION_HISTORY_LIMIT, HistoryCell, HistoryTables, LOW_PLY_HISTORY_SIZE,
-    continuation_history_weight, low_ply_history_bonus, pawn_history_bonus, stat_bonus, stat_malus,
+    continuation_history_bonus_with_offset, continuation_history_weight, low_ply_history_bonus,
+    pawn_history_bonus, stat_bonus, stat_malus,
 };
 use super::movepicker::piece_value;
 use super::types::{
@@ -76,13 +77,8 @@ pub(super) fn to_corrected_static_eval(unadjusted: Value, correction_value: i32)
 /// continuation historiesを更新
 ///
 /// `base_ply`手目から見た過去1-6手との continuation history を更新する。
-/// 王手中は最初の2手前のみ（YaneuraOu: `if (ss->inCheck && i > 2) break`）。
+/// 王手中は最初の2手前のみ（`if (ss->inCheck && i > 2) break`）。
 #[inline]
-/// continuation history を更新する（共通 weight テーブルを使用）。
-///
-/// YaneuraOu の `update_continuation_histories(ss, pc, to, bonus)` に相当。
-/// bonus は事前にスケーリング済みの値を渡す。
-/// 内部で `bonus * weight[i] / 1024 + offset(i)` を各 ply_back に適用する。
 fn update_continuation_histories(
     h: &mut HistoryTables,
     stack: &StackArray,
@@ -93,56 +89,29 @@ fn update_continuation_histories(
     to: Square,
     bonus: i32,
 ) {
-    update_continuation_histories_custom(
-        h,
-        stack,
-        base_ply,
-        in_check,
-        pc,
-        to,
-        bonus,
-        |ply_back| continuation_history_weight(tune_params, ply_back),
-        |ply_back| {
-            if ply_back < 2 {
-                tune_params.continuation_history_near_ply_offset
-            } else {
-                0
-            }
-        },
-    );
-}
-
-/// continuation history を更新する（カスタム weight/offset 関数を使用）。
-///
-/// fail-high 等で独自の重みテーブルを使いたい場合に使用する。
-fn update_continuation_histories_custom(
-    h: &mut HistoryTables,
-    stack: &StackArray,
-    base_ply: i32,
-    in_check: bool,
-    pc: Piece,
-    to: Square,
-    bonus: i32,
-    weight_fn: impl Fn(usize) -> i32,
-    offset_fn: impl Fn(usize) -> i32,
-) {
     let max_ply_back = if in_check { 2 } else { 6 };
     for ply_back in 1..=6 {
         if ply_back > max_ply_back {
             continue;
         }
-        let weight = weight_fn(ply_back);
+        let weight = continuation_history_weight(tune_params, ply_back);
         let target_ply = base_ply - ply_back as i32;
         if target_ply >= 0
             && let Some(key) = stack[target_ply as usize].cont_hist_key
         {
             // null move ply はスキップ
+            // if (((ss - i)->currentMove).is_ok())
+            // null move では cont_hist_key.piece == NONE（sentinel）
             if key.piece.is_none() {
                 continue;
             }
             let in_check_idx = key.in_check as usize;
             let capture_idx = key.capture as usize;
-            let weighted_bonus = bonus * weight / 1024 + offset_fn(ply_back);
+            let weighted_bonus = continuation_history_bonus_with_offset(
+                bonus * weight / 1024,
+                ply_back,
+                tune_params,
+            );
             h.continuation_history[in_check_idx][capture_idx].update(
                 key.piece,
                 key.to,
@@ -185,6 +154,7 @@ fn update_quiet_histories(
     let to = mv.to();
 
     // update_continuation_histories に渡す前に 955/1024 を適用
+    //)
     let cont_bonus = bonus * tune_params.continuation_history_multiplier / 1024;
     update_continuation_histories(h, stack, tune_params, ply, in_check, cont_pc, to, cont_bonus);
 
@@ -323,7 +293,7 @@ pub(super) struct Step14Context<'a> {
     pub(super) cont_history_2: &'a PieceToHistory,
     pub(super) static_eval: Value,
     pub(super) alpha: Value,
-    pub(super) best_move: Move,           // YO: !bestMove 判定用
+    pub(super) best_move: Move,           // !bestMove 判定用
     pub(super) pawn_history_index: usize, // pawnHistory用インデックス
 }
 
@@ -684,7 +654,7 @@ impl SearchWorker {
         self.history.clear();
     }
 
-    /// goで呼び出し：探索状態のリセット（履歴はクリアしない、YaneuraOu準拠）
+    /// goで呼び出し：探索状態のリセット（履歴はクリアしない）
     pub fn prepare_search(&mut self) {
         self.state.nodes = 0;
         self.state.sel_depth = 0;
@@ -756,7 +726,7 @@ impl SearchWorker {
             return true;
         }
 
-        // 頻度制御：512回に1回だけ実際のチェックを行う（YaneuraOu準拠）
+        // 頻度制御：512回に1回だけ実際のチェックを行う
         self.state.calls_cnt -= 1;
         if self.state.calls_cnt > 0 {
             return false;
@@ -811,7 +781,7 @@ impl SearchWorker {
             }
 
             // フェーズ2: search_end 未設定 → maximum超過 or stop_on_ponderhit で設定
-            // ただし ponder 中は停止判定を行わない（YaneuraOu準拠）
+            // ただし ponder 中は停止判定を行わない
             if !time_manager.is_pondering()
                 && time_manager.search_end() == 0
                 && limits.use_time_management()
@@ -944,7 +914,7 @@ impl SearchWorker {
                 continue;
             }
 
-            // rootMoves に含まれる手のみ処理
+            // rootMoves に含まれる手のみ処理 (YO: )
             let rm_idx = match self.state.root_moves.find_from(mv, 0) {
                 Some(idx) => idx,
                 None => continue,
@@ -985,12 +955,12 @@ impl SearchWorker {
             }
 
             // PVS + LMR（Step 17-19）
-            // YOではsearch<Root>内でLMRが適用される。rootのPvNode+ttPvでは
+            // search<Root>内でLMRが適用される。rootのPvNode+ttPvでは
             // reductionが大きく負になるため、zero-window検証がnewDepthより深くなる。
             let mut new_depth = depth - 1;
             // rootでも全手で statScore を設定してから子ノードを探索する。
             // (moveCount==1 ではLMR補正には使われないが、子ノード側の統計参照で使われる)
-            // statScore
+            // statScore（）
             let root_stat_score = if mv.is_pass() {
                 0
             } else if is_capture {
@@ -1111,7 +1081,7 @@ impl SearchWorker {
                             -alpha - Value::new(1),
                             -alpha,
                             1,
-                            true,
+                            false,
                             limits,
                             time_manager,
                         );
@@ -1119,7 +1089,7 @@ impl SearchWorker {
                 }
 
                 // Post LMR continuation history updates
-                // YO: update_continuation_histories(ss, movedPiece, move.to_sq(), 1365)
+                // update_continuation_histories(ss, movedPiece, move.to_sq(), 1365)
                 // ply=0では (ss-i)->currentMove が全て無効のため全イテレーションがスキップされる（no-op）
 
                 // Step 19: PV re-search (value > alpha の場合のみ)
@@ -1146,46 +1116,10 @@ impl SearchWorker {
                 value
             } else {
                 // LMR対象外 (depth < 2) — Step 18
-                // r を使った深さ補正を適用
-                let step18_depth = {
-                    let tune = &self.search_tune_params;
-                    let delta = (beta.raw() - alpha.raw()).abs().max(1);
-                    let root_delta = self.state.root_delta.max(1);
-                    let mut r =
-                        reduction(tune, root_improving, depth, move_count, delta, root_delta);
-                    r += tune.lmr_ttpv_add;
-                    let tt_value_higher = (tt_value_root > alpha) as i32;
-                    let tt_depth_ge = (tt_data.depth >= depth) as i32;
-                    r -= tune.lmr_step16_ttpv_sub_base
-                        + tune.lmr_step16_ttpv_sub_pv_node
-                        + tt_value_higher * tune.lmr_step16_ttpv_sub_tt_value
-                        + tt_depth_ge * tune.lmr_step16_ttpv_sub_tt_depth;
-                    r += tune.lmr_step16_base_add;
-                    r -= move_count * tune.lmr_step16_move_count_mul;
-                    r -= root_correction_value.abs() / tune.lmr_step16_correction_div.max(1);
-                    if tt_capture_root {
-                        r += tune.lmr_step16_tt_capture_add;
-                    }
-                    if self.state.stack[1].cutoff_cnt > 2 {
-                        r += tune.lmr_step16_cutoff_count_add;
-                    }
-                    if mv == tt_move_root {
-                        r -= tune.lmr_step16_tt_move_penalty;
-                    }
-                    let stat_score = self.state.stack[0].stat_score;
-                    r -= stat_score * tune.lmr_step16_stat_score_scale_num / 8192;
-                    // ttMoveがない場合にrを増加
-                    if tt_move_root.is_none() {
-                        r += tune.step18_no_tt_move_r_add;
-                    }
-                    new_depth
-                        - (r > tune.step18_depth_reduce_1_threshold) as i32
-                        - ((r > tune.step18_depth_reduce_2_threshold && new_depth > 2) as i32)
-                };
                 // PVS: zero-window search → PV re-search
                 let mut value = -self.search_node_wrapper::<{ NodeType::NonPV as u8 }>(
                     pos,
-                    step18_depth,
+                    new_depth,
                     -alpha - Value::new(1),
                     -alpha,
                     1,
@@ -1219,6 +1153,7 @@ impl SearchWorker {
             }
 
             // averageScore/meanSquaredScoreは全rootムーブに対して更新
+            //の外側)
             {
                 let rm = &mut self.state.root_moves[rm_idx];
                 rm.accumulate_score_stats(value);
@@ -1230,15 +1165,14 @@ impl SearchWorker {
                 let rm = &mut self.state.root_moves[rm_idx];
                 rm.score = value;
                 rm.sel_depth = self.state.sel_depth;
-                // PVを更新（第1手はfail lowでも常に更新 — YO準拠）
-                rm.pv.truncate(1);
+                // PVを更新（第1手はfail lowでも常に更新 —                 rm.pv.truncate(1);
                 rm.pv.extend_from_slice(&self.state.stack[1].pv);
                 // 2番目以降の手がalphaを更新した場合にカウント
                 if move_count > 1 {
                     self.state.best_move_changes += 1.0;
                 }
             } else {
-                // PV以外のすべての手は最低値に設定
+                // PV以外のすべての手は最低値に設定（）
                 self.state.root_moves[rm_idx].score = Value::new(-Value::INFINITE.raw());
             }
 
@@ -1261,18 +1195,16 @@ impl SearchWorker {
 
                 if value + inc > alpha {
                     best_move = mv;
+                    alpha = value;
 
                     if value >= beta {
                         break;
                     }
 
-                    // alpha改善後、以降の手の探索深さを削減する
+                    //                     // alpha改善後、以降の手の探索深さを削減する
                     if depth > 2 && depth < 14 && !value.is_mate_score() {
                         depth -= 2;
                     }
-
-                    // alpha更新はbeta判定・depth減算の後
-                    alpha = value;
                 }
             }
 
@@ -1290,16 +1222,16 @@ impl SearchWorker {
 
         let root_move_count = move_count;
 
-        // fail highの場合に最良値を調整する
+        //         // fail highの場合に最良値を調整する
         if best_value >= beta && !best_value.is_mate_score() && !alpha.is_mate_score() {
             best_value = Value::new((best_value.raw() * depth + beta.raw()) / (depth + 1).max(1));
         }
 
         // =================================================================
-        // History更新（update_all_stats）
+        // History更新（update_all_stats, ）
         // =================================================================
         // alphaを超えるbestMoveが存在する場合のみhistoryを更新する
-        // fail-low（bestMove == NONE）の場合はスキップ（YO準拠）
+        // fail-low（bestMove == NONE）の場合はスキップ
         // 注: ply=0のためcontinuation historyの更新はスキップされる（ply < ply_back）
         // 注: prevSq == SQ_NONEのためfail-low countermove bonus/early refutation penaltyもスキップ
         {
@@ -1574,7 +1506,7 @@ impl SearchWorker {
                 );
             }
 
-            // statScore
+            // statScore（）
             // do_move 後に計算する（captured_piece() / side_to_move() は do_move 後の状態を参照）
             self.state.stack[0].stat_score = if mv.is_pass() {
                 0
@@ -1617,12 +1549,13 @@ impl SearchWorker {
                     limits,
                     time_manager,
                 )
-            } else if depth >= 2 {
-                // Step17 LMR (depth >= 2 && moveCount > 1)
+            } else {
+                // rootNode && pvIdx 経路でも Step17/18 の LMR を適用する。
                 let (d, deeper_base, deeper_mul, shallower_thr) = {
                     let tune = &self.search_tune_params;
                     let delta = (beta.raw() - alpha.raw()).abs().max(1);
                     let root_delta = self.state.root_delta.max(1);
+                    // improving を使用
                     let mut r = reduction(
                         tune,
                         root_improving,
@@ -1701,7 +1634,7 @@ impl SearchWorker {
                             -alpha - Value::new(1),
                             -alpha,
                             1,
-                            true,
+                            false,
                             limits,
                             time_manager,
                         );
@@ -1730,73 +1663,6 @@ impl SearchWorker {
                 }
 
                 value
-            } else {
-                // Step18 LMR対象外 (depth < 2) — r深さ補正
-                let step18_depth = {
-                    let tune = &self.search_tune_params;
-                    let delta = (beta.raw() - alpha.raw()).abs().max(1);
-                    let root_delta = self.state.root_delta.max(1);
-                    let mut r = reduction(
-                        tune,
-                        root_improving,
-                        depth,
-                        (rm_idx + 1) as i32,
-                        delta,
-                        root_delta,
-                    );
-                    r += tune.lmr_ttpv_add;
-                    let tt_value_higher = (tt_value_root > alpha) as i32;
-                    let tt_depth_ge = (tt_data.depth >= depth) as i32;
-                    r -= tune.lmr_step16_ttpv_sub_base
-                        + tune.lmr_step16_ttpv_sub_pv_node
-                        + tt_value_higher * tune.lmr_step16_ttpv_sub_tt_value
-                        + tt_depth_ge * tune.lmr_step16_ttpv_sub_tt_depth;
-                    r += tune.lmr_step16_base_add;
-                    r -= (rm_idx + 1) as i32 * tune.lmr_step16_move_count_mul;
-                    r -= root_correction_value.abs() / tune.lmr_step16_correction_div.max(1);
-                    if tt_capture_root {
-                        r += tune.lmr_step16_tt_capture_add;
-                    }
-                    if self.state.stack[1].cutoff_cnt > 2 {
-                        r += tune.lmr_step16_cutoff_count_add;
-                    }
-                    if mv == tt_move_root {
-                        r -= tune.lmr_step16_tt_move_penalty;
-                    }
-                    let stat_score = self.state.stack[0].stat_score;
-                    r -= stat_score * tune.lmr_step16_stat_score_scale_num / 8192;
-                    // ttMoveがない場合にrを増加
-                    if tt_move_root.is_none() {
-                        r += tune.step18_no_tt_move_r_add;
-                    }
-                    new_depth
-                        - (r > tune.step18_depth_reduce_1_threshold) as i32
-                        - ((r > tune.step18_depth_reduce_2_threshold && new_depth > 2) as i32)
-                };
-                // PVS: zero-window search → PV re-search
-                let mut value = -self.search_node_wrapper::<{ NodeType::NonPV as u8 }>(
-                    pos,
-                    step18_depth,
-                    -alpha - Value::new(1),
-                    -alpha,
-                    1,
-                    true,
-                    limits,
-                    time_manager,
-                );
-                if value > alpha {
-                    value = -self.search_node_wrapper::<{ NodeType::PV as u8 }>(
-                        pos,
-                        new_depth,
-                        -beta,
-                        -alpha,
-                        1,
-                        false,
-                        limits,
-                        time_manager,
-                    );
-                }
-                value
             };
 
             self.nnue_pop();
@@ -1805,6 +1671,7 @@ impl SearchWorker {
             // この手に費やしたノード数をeffortに積算
             let nodes_delta = self.state.nodes.saturating_sub(nodes_before);
             self.state.root_moves[rm_idx].effort += nodes_delta as f64;
+
             if self.state.abort {
                 return Value::ZERO;
             }
@@ -1842,7 +1709,7 @@ impl SearchWorker {
                 }
             }
 
-            // α未更新の手は -INFINITE で前回順序を保持（YO準拠）
+            // α未更新の手は -INFINITE で前回順序を保持
             if !updated_alpha {
                 self.state.root_moves[rm_idx].score = Value::new(-Value::INFINITE.raw());
             }
@@ -1920,7 +1787,7 @@ impl SearchWorker {
         let pv_node = NT == NodeType::PV as u8 || NT == NodeType::Root as u8;
         let mut depth = depth;
         let in_check = pos.in_check();
-        // YaneuraOuのallNode定義: !(PvNode || cutNode)
+        // YaneuraOuのallNode定義: !(PvNode || cutNode)（付近）
         let all_node = !(pv_node || cut_node);
         let mut alpha = alpha;
         let mut beta = beta;
@@ -1959,15 +1826,15 @@ impl SearchWorker {
                 let v = draw_value(rep_state, pos.side_to_move(), &ctx.draw_value_table);
                 if v != Value::NONE {
                     if rep_state == RepetitionState::Draw {
-                        let jitter = draw_jitter(st.nodes, ctx.tune_params);
-                        return Value::new(v.raw() + jitter);
+                        let jittered = Value::new(v.raw() + draw_jitter(st.nodes, ctx.tune_params));
+                        return jittered;
                     }
                     return value_from_tt(v, ply);
                 }
             }
 
-            // 引き分け手数ルール（YaneuraOu準拠、MaxMovesToDrawオプション）
-            // YO: draw_value(REPETITION_DRAW, stm) + value_draw(nodes)
+            // 引き分け手数ルールMaxMovesToDrawオプション）
+            // draw_value(REPETITION_DRAW, stm) + value_draw(nodes)
             if ctx.max_moves_to_draw > 0 && pos.game_ply() > ctx.max_moves_to_draw {
                 return Value::new(
                     ctx.draw_value_table[pos.side_to_move() as usize].raw()
@@ -1991,7 +1858,7 @@ impl SearchWorker {
             }
         }
 
-        // スタック設定（YaneuraOu準拠）
+        // スタック設定（）
         st.stack[ply as usize].in_check = in_check;
         st.stack[ply as usize].move_count = 0;
         st.stack[ply as usize].stat_score = 0;
@@ -2037,7 +1904,7 @@ impl SearchWorker {
                 inc_stat!(st, tt_cutoff);
                 inc_stat_by_depth!(st, tt_cutoff_by_depth, depth);
 
-                // TTカットオフ時のヒストリ更新
+                // TTカットオフ時のヒストリ更新（）
                 if cutoff_tt_move.is_some() && value.raw() >= beta.raw() {
                     // quiet ttMoveがfail-highした場合、quiet_historiesを更新
                     if !cutoff_tt_capture {
@@ -2059,7 +1926,7 @@ impl SearchWorker {
                     }
 
                     // 1手前の早期quiet手へのペナルティ
-                    // YaneuraOu: prevSq != SQ_NONE && (ss-1)->moveCount <= 4 && !priorCapture
+                    // prevSq != SQ_NONE && (ss-1)->moveCount <= 4 && !priorCapture
                     if ply >= 1 {
                         let prev_ply = (ply - 1) as usize;
                         let prev_move_count = st.stack[prev_ply].move_count;
@@ -2101,7 +1968,7 @@ impl SearchWorker {
         let mut improving = eval_ctx.improving;
         let opponent_worsening = eval_ctx.opponent_worsening;
 
-        // evalDiff によるヒストリ更新（YaneuraOu準拠）
+        // evalDiff によるヒストリ更新（）
         // in_check時はこのブロック自体がスキップされる
         // （YOではMOVES_LOOPにジャンプするため、ここに到達しない）
         // 条件: !in_check && (ss-1)->currentMove が有効 && !(ss-1)->inCheck && !priorCapture
@@ -2115,7 +1982,6 @@ impl SearchWorker {
             if prev_move.is_normal() && !prev_in_check && !prior_capture {
                 let prev_eval = st.stack[prev_ply].static_eval.raw();
                 let curr_eval = eval_ctx.static_eval.raw();
-                // YaneuraOu/Stockfish準拠: 評価値の変化に基づくヒストリ更新
                 // -(prev + curr): 相手の手で自分の評価が良くなったかを測定
                 // clamp(-200, 156) + 58: 学習済みパラメータで正規化
                 let eval_diff = (-(prev_eval + curr_eval)).clamp(-200, 156) + 58;
@@ -2125,10 +1991,10 @@ impl SearchWorker {
                 {
                     // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
                     let h = unsafe { ctx.history.as_mut_unchecked() };
-                    // mainHistory 更新: evalDiff * 9 (YaneuraOu準拠)
+                    // mainHistory 更新: evalDiff * 9 ()
                     h.main_history.update(opponent, prev_move, eval_diff * 9);
 
-                    // pawnHistory 更新 (YaneuraOu準拠)
+                    // pawnHistory 更新 ()
                     // 条件:
                     // - !ttHit: TTヒット時はスキップ（既に十分な情報がある）
                     // - piece != Pawn: 「pawnHistory」は歩の配置に対する駒の評価履歴
@@ -2145,7 +2011,7 @@ impl SearchWorker {
             }
         }
 
-        // priorReduction に応じた深さ調整
+        // priorReduction に応じた深さ調整（）
         // in_check時はMOVES_LOOPにジャンプするため、このブロックは実行されない
         if !in_check {
             if prior_reduction
@@ -2351,7 +2217,7 @@ impl SearchWorker {
             let original_depth = depth;
 
             // =============================================================
-            // Reduction計算（YO準拠: SE前に計算。SE内でtt_pvが上書きされる前の値を使う）
+            // Reduction計算（SE前に計算。SE内でtt_pvが上書きされる前の値を使う）
             // =============================================================
             let delta = (beta.raw() - alpha.raw()).max(0);
             let mut r = reduction(
@@ -2372,59 +2238,7 @@ impl SearchWorker {
             let lmr_depth = new_depth - r / 1024;
 
             // =============================================================
-            // Step14 Pruning（SEの前に実行）
-            // =============================================================
-            // Step14 → SE の順序。
-            // SE内のsearch_nodeがtt_pvやstackを上書きする前にStep14の枝刈り判定を行う。
-
-            // LMP: moveCount >= limitのとき、quiet手の生成をスキップ
-            if !root_node && !best_value.is_loss() {
-                let lmp_limit = (3 + original_depth * original_depth) / (2 - improving as i32);
-                if move_count >= lmp_limit && !lmp_triggered {
-                    mp.skip_quiets();
-                    lmp_triggered = true;
-                }
-            }
-
-            let step14_ctx = Step14Context {
-                pos,
-                mv,
-                depth: original_depth,
-                ply,
-                best_value,
-                in_check,
-                gives_check,
-                is_capture,
-                lmr_depth,
-                mover,
-                // SAFETY: cont_history_ptr() が返すポインタは探索中有効。
-                cont_history_1: unsafe { cont_hist_ptr_1.as_ref() },
-                // SAFETY: cont_history_ptr() が返すポインタは探索中有効。
-                cont_history_2: unsafe { cont_hist_ptr_2.as_ref() },
-                // NMP verification searchが同一plyでsearch_nodeを再帰呼び出しし、
-                // compute_eval_contextがstack[ply].static_evalを上書きする。
-                // YOはss->staticEvalをポインタ経由で参照するため上書き後の値が見える。
-                static_eval: st.stack[ply as usize].static_eval,
-                alpha,
-                best_move,
-                pawn_history_index: pos.pawn_history_index(),
-            };
-
-            match step14_pruning(ctx, step14_ctx) {
-                Step14Outcome::Skip {
-                    best_value: updated,
-                } => {
-                    inc_stat!(st, move_loop_pruned);
-                    if let Some(v) = updated {
-                        best_value = v;
-                    }
-                    continue;
-                }
-                Step14Outcome::Continue => {}
-            }
-
-            // =============================================================
-            // Singular Extension（Step14の後に実行）
+            // Singular Extension
             // =============================================================
             // singular延長をするnodeであるか判定
             // 条件: !rootNode && move == ttMove && !excludedMove
@@ -2450,7 +2264,7 @@ impl SearchWorker {
                 let singular_depth = new_depth / ctx.tune_params.singular_depth_div;
 
                 // ttMoveを除外して浅い探索を実行
-                // 注: YaneuraOu準拠で同じplyで再帰呼び出しを行う（do_moveせず同一局面で探索）
+                // 注: 同じplyで再帰呼び出しを行う（do_moveせず同一局面で探索）
                 // これによりstack[ply]の一部フィールド（tt_hit, move_count等）が上書きされるが：
                 // - tt_pv: excludedMoveがある場合は保持される（probe_transposition内）
                 // - tt_hit: 同じ局面なので同じ値になる
@@ -2507,7 +2321,7 @@ impl SearchWorker {
                         + (singular_value < singular_beta - Value::new(double_margin)) as i32
                         + (singular_value < singular_beta - Value::new(triple_margin)) as i32;
 
-                    // singular確定時にdepthを+1
+                    // singular確定時にdepthを+1（）
                     depth += 1;
                 } else if singular_value >= beta && !singular_value.is_mate_score() {
                     // Multi-Cut: 他の手もfail highする場合は枝刈り
@@ -2526,6 +2340,54 @@ impl SearchWorker {
                 } else if cut_node {
                     extension = ctx.tune_params.singular_negative_extension_cut_node;
                 }
+            }
+
+            // =============================================================
+            // LMP（Step14の前）
+            // =============================================================
+            // moveCount >= limitのとき、quiet手の生成をスキップ
+            // skip_quiet_moves()のみ、continueしない。
+            // 現在の手はStep14の枝刈りで判定される。
+            if !root_node && !best_value.is_loss() {
+                let lmp_limit = (3 + original_depth * original_depth) / (2 - improving as i32);
+                if move_count >= lmp_limit && !lmp_triggered {
+                    mp.skip_quiets();
+                    lmp_triggered = true;
+                }
+            }
+
+            let step14_ctx = Step14Context {
+                pos,
+                mv,
+                depth: original_depth,
+                ply,
+                best_value,
+                in_check,
+                gives_check,
+                is_capture,
+                lmr_depth,
+                mover,
+                // SAFETY: cont_history_ptr() が返すポインタは探索中有効。
+                cont_history_1: unsafe { cont_hist_ptr_1.as_ref() },
+                // SAFETY: cont_history_ptr() が返すポインタは探索中有効。
+                cont_history_2: unsafe { cont_hist_ptr_2.as_ref() },
+                static_eval: eval_ctx.static_eval,
+                alpha,
+                best_move,
+                pawn_history_index: pos.pawn_history_index(),
+            };
+
+            match step14_pruning(ctx, step14_ctx) {
+                Step14Outcome::Skip {
+                    best_value: updated,
+                } => {
+                    inc_stat!(st, move_loop_pruned);
+                    if let Some(v) = updated {
+                        best_value = v;
+                    }
+                    continue;
+                }
+                Step14Outcome::Continue => {}
             }
 
             // 指し手を実行
@@ -2550,13 +2412,13 @@ impl SearchWorker {
                 );
             }
 
-            // 延長量をnew_depthに加算（do_moveの後）
+            // 延長量をnew_depthに加算（do_moveの後、）
             new_depth += extension;
 
             // =============================================================
             // Late Move Reduction (LMR)
             // =============================================================
-            // ttPv大型補正
+            // ttPv大型補正（）
             // !ttHit時はtt_value=VALUE_NONE(32002)でほぼtrue、tt_data.depthはスロット残値
             let tt_value_higher = tt_value > alpha;
             let tt_depth_ge = tt_data.depth >= depth;
@@ -2570,35 +2432,35 @@ impl SearchWorker {
                             + (cut_node as i32) * ctx.tune_params.lmr_step16_ttpv_sub_cut_node);
             }
 
-            // 基本調整群
+            // 基本調整群（）
             r += ctx.tune_params.lmr_step16_base_add;
             r -= move_count * ctx.tune_params.lmr_step16_move_count_mul;
             r -= eval_ctx.correction_value.abs() / ctx.tune_params.lmr_step16_correction_div.max(1);
 
-            // cut_node
+            // cut_node（）
             if cut_node {
-                let no_tt_move = tt_move.is_none();
+                let no_tt_move = !tt_hit || tt_move.is_none();
                 r += ctx.tune_params.lmr_step16_cut_node_add
                     + ctx.tune_params.lmr_step16_cut_node_no_tt_add * (no_tt_move as i32);
             }
 
-            // ttCapture
+            // ttCapture（）
             if tt_capture {
                 r += ctx.tune_params.lmr_step16_tt_capture_add;
             }
 
-            // cutoffCnt
+            // cutoffCnt（）
             if st.stack[(ply + 1) as usize].cutoff_cnt > 2 {
                 r += ctx.tune_params.lmr_step16_cutoff_count_add
                     + (all_node as i32) * ctx.tune_params.lmr_step16_cutoff_count_all_node_add;
             }
 
-            // ttMove
+            // ttMove（）
             if mv == tt_move {
                 r -= ctx.tune_params.lmr_step16_tt_move_penalty;
             }
 
-            // statScore
+            // statScore（）
             let stat_score = if mv.is_pass() {
                 0 // PASS は history がないので還元補正なし
             } else if is_capture {
@@ -2715,39 +2577,54 @@ impl SearchWorker {
                     }
 
                     // fail high後にcontHistを更新
-                    // YO: update_continuation_histories(ss, movedPiece, move.to_sq(), 1365)
                     // PASS は履歴の対象外なのでスキップ
                     if !mv.is_pass() {
                         let moved_piece = mv.moved_piece_after();
                         let to_sq = mv.to();
-                        let tune = ctx.tune_params;
-                        // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
-                        let h = unsafe { ctx.history.as_mut_unchecked() };
-                        update_continuation_histories_custom(
-                            h,
-                            &st.stack,
-                            ply,
-                            st.stack[ply as usize].in_check,
-                            moved_piece,
-                            to_sq,
-                            tune.fail_high_continuation_base_num,
-                            |ply_back| match ply_back {
-                                1 => tune.fail_high_continuation_weight_1,
-                                2 => tune.fail_high_continuation_weight_2,
-                                3 => tune.fail_high_continuation_weight_3,
-                                4 => tune.fail_high_continuation_weight_4,
-                                5 => tune.fail_high_continuation_weight_5,
-                                6 => tune.fail_high_continuation_weight_6,
+                        for offset in 1..=6 {
+                            if st.stack[ply as usize].in_check && offset > 2 {
+                                break;
+                            }
+                            let weight = match offset {
+                                1 => ctx.tune_params.fail_high_continuation_weight_1,
+                                2 => ctx.tune_params.fail_high_continuation_weight_2,
+                                3 => ctx.tune_params.fail_high_continuation_weight_3,
+                                4 => ctx.tune_params.fail_high_continuation_weight_4,
+                                5 => ctx.tune_params.fail_high_continuation_weight_5,
+                                6 => ctx.tune_params.fail_high_continuation_weight_6,
                                 _ => 0,
-                            },
-                            |ply_back| {
-                                if ply_back < 2 {
-                                    tune.fail_high_continuation_near_ply_offset
-                                } else {
-                                    0
+                            };
+                            let idx = ply - offset;
+                            if idx < 0 {
+                                break;
+                            }
+                            if let Some(key) = st.stack[idx as usize].cont_hist_key {
+                                // null move ply はスキップ
+                                if key.piece.is_none() {
+                                    continue;
                                 }
-                            },
-                        );
+                                let in_check_idx = key.in_check as usize;
+                                let capture_idx = key.capture as usize;
+                                let bonus =
+                                    ctx.tune_params.fail_high_continuation_base_num * weight / 1024
+                                        + if offset < 2 {
+                                            ctx.tune_params.fail_high_continuation_near_ply_offset
+                                        } else {
+                                            0
+                                        };
+                                {
+                                    // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
+                                    let h = unsafe { ctx.history.as_mut_unchecked() };
+                                    h.continuation_history[in_check_idx][capture_idx].update(
+                                        key.piece,
+                                        key.to,
+                                        moved_piece,
+                                        to_sq,
+                                        bonus,
+                                    );
+                                }
+                            }
+                        }
                     }
                     // beta cutoff 時の cutoff_cnt 更新は Step 20 のスコア更新で実施
                 } else if value > alpha && value < best_value + Value::new(9) {
@@ -2784,11 +2661,10 @@ impl SearchWorker {
                 // Zero window search
                 let mut non_lmr_depth = new_depth;
                 if tt_move.is_none() {
-                    r += ctx.tune_params.step18_no_tt_move_r_add;
+                    r += 1118;
                 }
-                non_lmr_depth -= (r > ctx.tune_params.step18_depth_reduce_1_threshold) as i32;
-                non_lmr_depth -=
-                    (r > ctx.tune_params.step18_depth_reduce_2_threshold && new_depth > 2) as i32;
+                non_lmr_depth -= (r > 3212) as i32;
+                non_lmr_depth -= (r > 4784 && new_depth > 2) as i32;
 
                 st.stack[ply as usize].reduction = 0;
                 let mut value = -Self::search_node::<{ NodeType::NonPV as u8 }>(
@@ -2880,7 +2756,7 @@ impl SearchWorker {
             // =============================================================
             // スコア更新
             // =============================================================
-            // Lazy SMP多様化のため、リーフ付近で同点の手を確率的に昇格させる
+            //             // Lazy SMP多様化のため、リーフ付近で同点の手を確率的に昇格させる
             let inc = Value::new(
                 if value == best_value
                     && ply + 2 >= st.root_depth
@@ -2944,7 +2820,7 @@ impl SearchWorker {
 
         // fail-high のときは lower bound の過大化を抑えるため
         // best_value を beta 側へ寄せてから後段の更新に渡す。
-        // 注: moveCount check の前に実行する（YO準拠）
+        // 注: moveCount check の前に実行する（）
         if best_value >= beta && !best_value.is_mate_score() && !alpha.is_mate_score() {
             best_value = Value::new((best_value.raw() * depth + beta.raw()) / (depth + 1).max(1));
         }
@@ -2952,7 +2828,7 @@ impl SearchWorker {
         // =================================================================
         // 詰み/ステイルメイト判定 + History更新
         // =================================================================
-        // if-else チェイン
+        // if-else チェイン（）
         // moveCount == 0: bestValue を設定して関数末尾までフォールスルー
         //   → tt_pv 伝播・TT store が正しく実行されるようにする（早期 return 禁止）
         // else if bestMove: update_all_stats
@@ -2972,9 +2848,9 @@ impl SearchWorker {
             // =================================================================
             // History更新（update_all_stats）
             // =================================================================
-            // YaneuraOu: bestMoveがある場合は常にupdate_all_statsを呼ぶ
+            // bestMoveがある場合は常にupdate_all_statsを呼ぶ
             // PASS は history_index() が未定義のためスキップ
-            let is_best_capture = pos.capture_stage(best_move);
+            let is_best_capture = pos.is_capture(best_move);
             let is_tt_move = best_move == tt_move;
             // bonus = min(121*depth-77, 1633) + 375*(bestMove==ttMove)
             let bonus = stat_bonus(depth, is_tt_move, ctx.tune_params);
@@ -2993,7 +2869,7 @@ impl SearchWorker {
             let best_to = best_move.to();
 
             // 王手中は1,2手前のみ
-            let _max_ply_back = if in_check { 2 } else { 6 };
+            let max_ply_back = if in_check { 2 } else { 6 };
 
             if !is_best_capture {
                 // Quiet手がbest: update_quiet_histories(bestMove, bonus * 881 / 1024)相当
@@ -3002,7 +2878,7 @@ impl SearchWorker {
                     bonus * ctx.tune_params.update_all_stats_quiet_bonus_scale_num / 1024;
 
                 // 他のquiet手にはペナルティ
-                // YaneuraOu: update_quiet_histories(move, -quietMalus * 1083 / 1024)
+                // update_quiet_histories(move, -quietMalus * 1083 / 1024)
                 let scaled_malus =
                     malus * ctx.tune_params.update_all_stats_quiet_malus_scale_num / 1024;
 
@@ -3023,16 +2899,35 @@ impl SearchWorker {
                     // update_quiet_histories → update_continuation_histories
                     let cont_scaled_bonus =
                         scaled_bonus * ctx.tune_params.continuation_history_multiplier / 1024;
-                    update_continuation_histories(
-                        h,
-                        &st.stack,
-                        ctx.tune_params,
-                        ply,
-                        in_check,
-                        best_cont_pc,
-                        best_to,
-                        cont_scaled_bonus,
-                    );
+                    for ply_back in 1..=6 {
+                        if ply_back > max_ply_back {
+                            continue;
+                        }
+                        let weight = continuation_history_weight(ctx.tune_params, ply_back);
+                        if ply >= ply_back as i32 {
+                            let prev_ply = (ply - ply_back as i32) as usize;
+                            if let Some(key) = st.stack[prev_ply].cont_hist_key {
+                                // null move ply はスキップ
+                                if key.piece.is_none() {
+                                    continue;
+                                }
+                                let in_check_idx = key.in_check as usize;
+                                let capture_idx = key.capture as usize;
+                                let weighted_bonus = continuation_history_bonus_with_offset(
+                                    cont_scaled_bonus * weight / 1024,
+                                    ply_back,
+                                    ctx.tune_params,
+                                );
+                                h.continuation_history[in_check_idx][capture_idx].update(
+                                    key.piece,
+                                    key.to,
+                                    best_cont_pc,
+                                    best_to,
+                                    weighted_bonus,
+                                );
+                            }
+                        }
+                    }
 
                     // PawnHistory: bonus * (pos ? 850 : 550) / 1024
                     let pawn_bonus = pawn_history_bonus(scaled_bonus, ctx.tune_params);
@@ -3041,15 +2936,6 @@ impl SearchWorker {
                     // quiets_triedはbestMove追加段階で除外済みのため
                     // ペナルティループでの重複チェックは不要
                     for &m in quiets_tried.iter() {
-                        // ContinuationHistory/PawnHistoryで使う駒情報
-                        let moved_pc = pos.moved_piece(m);
-                        let cont_pc = if m.is_promotion() {
-                            moved_pc.promote().unwrap_or(moved_pc)
-                        } else {
-                            moved_pc
-                        };
-                        let to = m.to();
-
                         // MainHistory
                         h.main_history.update(us, m, -scaled_malus);
 
@@ -3060,20 +2946,48 @@ impl SearchWorker {
                             h.low_ply_history.update(ply as usize, m, low_ply_malus);
                         }
 
+                        // ContinuationHistory/PawnHistoryへのペナルティで必要な情報
+                        let moved_pc = pos.moved_piece(m);
+                        let cont_pc = if m.is_promotion() {
+                            moved_pc.promote().unwrap_or(moved_pc)
+                        } else {
+                            moved_pc
+                        };
+                        let to = m.to();
+
                         // ContinuationHistoryへのペナルティ
                         // -malus * 1083/1024 * 955/1024 * weight/1024 + 88*(i<2)
                         let cont_scaled_malus =
                             -scaled_malus * ctx.tune_params.continuation_history_multiplier / 1024;
-                        update_continuation_histories(
-                            h,
-                            &st.stack,
-                            ctx.tune_params,
-                            ply,
-                            in_check,
-                            cont_pc,
-                            to,
-                            cont_scaled_malus,
-                        );
+                        for ply_back in 1..=6 {
+                            if ply_back > max_ply_back {
+                                continue;
+                            }
+                            let weight = continuation_history_weight(ctx.tune_params, ply_back);
+                            if ply >= ply_back as i32 {
+                                let prev_ply = (ply - ply_back as i32) as usize;
+                                if let Some(key) = st.stack[prev_ply].cont_hist_key {
+                                    // null move ply はスキップ
+                                    if key.piece.is_none() {
+                                        continue;
+                                    }
+                                    let in_check_idx = key.in_check as usize;
+                                    let capture_idx = key.capture as usize;
+                                    let weighted_malus = continuation_history_bonus_with_offset(
+                                        cont_scaled_malus * weight / 1024,
+                                        ply_back,
+                                        ctx.tune_params,
+                                    );
+                                    h.continuation_history[in_check_idx][capture_idx].update(
+                                        key.piece,
+                                        key.to,
+                                        cont_pc,
+                                        to,
+                                        weighted_malus,
+                                    );
+                                }
+                            }
+                        }
 
                         // PawnHistoryへのペナルティ
                         let pawn_malus = pawn_history_bonus(-scaled_malus, ctx.tune_params);
@@ -3083,7 +2997,7 @@ impl SearchWorker {
             } else {
                 // 捕獲手がbest: captureHistoryを更新
                 let captured_pt = pos.piece_on(best_to).piece_type();
-                // captureHistory best moveにスケーリング適用
+                // captureHistory best moveにスケーリング適用（）
                 {
                     // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
                     let h = unsafe { ctx.history.as_mut_unchecked() };
@@ -3110,7 +3024,7 @@ impl SearchWorker {
                     };
                     let to = m.to();
                     let captured_pt = pos.piece_on(to).piece_type();
-                    // YaneuraOu: captureHistory << -captureMalus * 1431 / 1024
+                    // captureHistory << -captureMalus * 1431 / 1024
                     h.capture_history.update(
                         cont_pc,
                         to,
@@ -3120,14 +3034,14 @@ impl SearchWorker {
                 }
             }
 
-            // YaneuraOu: quiet early refutationペナルティ
+            // quiet early refutationペナルティ
             // 条件: prevSq != SQ_NONE && (ss-1)->moveCount == 1 + (ss-1)->ttHit && !pos.captured_piece()
             // 処理: update_continuation_histories(ss - 1, pos.piece_on(prevSq), prevSq, -captureMalus * 622 / 1024)
             if ply >= 1 {
                 let prev_ply = (ply - 1) as usize;
                 let prev_move_count = st.stack[prev_ply].move_count;
                 let prev_tt_hit = st.stack[prev_ply].tt_hit;
-                // YaneuraOu: !pos.captured_piece() = 現在の局面で駒が取られていない
+                // !pos.captured_piece() = 現在の局面で駒が取られていない
                 if prev_move_count == 1 + (prev_tt_hit as i32)
                     && pos.captured_piece() == Piece::NONE
                     && let Some(key) = st.stack[prev_ply].cont_hist_key
@@ -3136,35 +3050,59 @@ impl SearchWorker {
                     if !key.piece.is_none() {
                         let prev_sq = key.to;
                         let prev_piece = pos.piece_on(prev_sq);
-                        // YaneuraOu: update_continuation_histories(ss - 1, ...)を呼ぶ
+                        // update_continuation_histories(ss - 1, ...)を呼ぶ
                         // = 過去1-6手分全てに weight と +80 オフセット付きで更新
                         let penalty_base = -malus
                             * ctx.tune_params.update_all_stats_early_refutation_penalty_scale_num
                             / 1024;
-                        // YaneuraOu: update_continuation_histories(ss - 1, ...) で (ss - 1)->inCheck を参照
+                        // update_continuation_histories(ss - 1, ...) で (ss - 1)->inCheck を参照
                         let prev_in_check = st.stack[prev_ply].in_check;
+                        let prev_max_ply_back = if prev_in_check { 2 } else { 6 };
 
                         {
                             // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
                             let h = unsafe { ctx.history.as_mut_unchecked() };
-                            update_continuation_histories(
-                                h,
-                                &st.stack,
-                                ctx.tune_params,
-                                ply - 1,
-                                prev_in_check,
-                                prev_piece,
-                                prev_sq,
-                                penalty_base,
-                            );
+                            for ply_back in 1..=6 {
+                                if ply_back > prev_max_ply_back {
+                                    continue;
+                                }
+                                let weight = continuation_history_weight(ctx.tune_params, ply_back);
+                                // ss - 1 からさらに ply_back 手前 = ply - 1 - ply_back
+                                let target_ply = ply - 1 - ply_back as i32;
+                                if target_ply >= 0
+                                    && let Some(target_key) =
+                                        st.stack[target_ply as usize].cont_hist_key
+                                {
+                                    // null move ply はスキップ
+                                    if target_key.piece.is_none() {
+                                        continue;
+                                    }
+                                    let in_check_idx = target_key.in_check as usize;
+                                    let capture_idx = target_key.capture as usize;
+                                    // 88 * (i < 2) → ply_back=1 のみ
+                                    let weighted_penalty = penalty_base * weight / 1024
+                                        + if ply_back < 2 {
+                                            ctx.tune_params.continuation_history_near_ply_offset
+                                        } else {
+                                            0
+                                        };
+                                    h.continuation_history[in_check_idx][capture_idx].update(
+                                        target_key.piece,
+                                        target_key.to,
+                                        prev_piece,
+                                        prev_sq,
+                                        weighted_penalty,
+                                    );
+                                }
+                            }
                         }
                     }
                 }
             }
 
             // TTMoveHistory更新（非PVノードのみ）
-            // YaneuraOu: ttMoveHistory << (bestMove == ttData.move ? 809 : -865)
-            // tt_moveがNONEでも-865のmalusを適用する（YO準拠）
+            // ttMoveHistory << (bestMove == ttData.move ? 809 : -865)
+            // tt_moveがNONEでも-865のmalusを適用する
             if !pv_node {
                 let bonus = if best_move == tt_move {
                     ctx.tune_params.tt_move_history_bonus
@@ -3194,7 +3132,7 @@ impl SearchWorker {
                         let parent_static_eval = st.stack[prev_ply].static_eval;
                         let static_eval = st.stack[ply as usize].static_eval;
 
-                        // bonusScale計算（YaneuraOu準拠）
+                        // bonusScale計算
                         let mut bonus_scale: i32 =
                             ctx.tune_params.prior_quiet_countermove_bonus_scale_base;
                         bonus_scale -= parent_stat_score
@@ -3232,16 +3170,17 @@ impl SearchWorker {
                                 * bonus_scale as i64;
 
                         // continuation history更新
-                        // YaneuraOu: update_continuation_histories(ss - 1, pos.piece_on(prevSq), prevSq, scaledBonus * 400 / 32768)
+                        // update_continuation_histories(ss - 1, pos.piece_on(prevSq), prevSq, scaledBonus * 400 / 32768)
                         // 注: prev_sq は cont_hist_key.to（do_move後に設定）なので、
                         //     この時点で prev_piece != NONE が保証される
                         let prev_piece = pos.piece_on(prev_sq);
+                        let prev_max_ply_back = if parent_in_check { 2 } else { 6 };
                         let cont_bonus = (scaled_bonus
                             * ctx.tune_params.prior_quiet_countermove_cont_scale_num as i64
                             / 32768) as i32;
 
                         // main history更新
-                        // YaneuraOu: mainHistory[~us][((ss - 1)->currentMove).raw()] << scaledBonus * 220 / 32768
+                        // mainHistory[~us][((ss - 1)->currentMove).raw()] << scaledBonus * 220 / 32768
                         let prev_move = st.stack[prev_ply].current_move;
                         let main_bonus = (scaled_bonus
                             * ctx.tune_params.prior_quiet_countermove_main_scale_num as i64
@@ -3250,7 +3189,7 @@ impl SearchWorker {
                         let opponent = !pos.side_to_move();
 
                         // pawn history更新（歩以外かつ成りでない場合）
-                        // YaneuraOu: if (type_of(pos.piece_on(prevSq)) != PAWN && ((ss - 1)->currentMove).type_of() != PROMOTION)
+                        // if (type_of(pos.piece_on(prevSq)) != PAWN && ((ss - 1)->currentMove).type_of() != PROMOTION)
                         let pawn_key_idx = pos.pawn_history_index();
                         let pawn_bonus = (scaled_bonus
                             * ctx.tune_params.prior_quiet_countermove_pawn_scale_num as i64
@@ -3261,17 +3200,39 @@ impl SearchWorker {
                         {
                             // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
                             let h = unsafe { ctx.history.as_mut_unchecked() };
-                            // YaneuraOu: update_continuation_histories(ss - 1, ..., scaledBonus * 400 / 32768)
-                            update_continuation_histories(
-                                h,
-                                &st.stack,
-                                ctx.tune_params,
-                                ply - 1,
-                                parent_in_check,
-                                prev_piece,
-                                prev_sq,
-                                cont_bonus,
-                            );
+                            for ply_back in 1..=6 {
+                                if ply_back > prev_max_ply_back {
+                                    continue;
+                                }
+                                let weight = continuation_history_weight(ctx.tune_params, ply_back);
+                                // ss - 1 からさらに ply_back 手前 = ply - 1 - ply_back
+                                let target_ply = ply - 1 - ply_back as i32;
+                                if target_ply >= 0
+                                    && let Some(target_key) =
+                                        st.stack[target_ply as usize].cont_hist_key
+                                {
+                                    // null move ply はスキップ
+                                    if target_key.piece.is_none() {
+                                        continue;
+                                    }
+                                    let in_check_idx = target_key.in_check as usize;
+                                    let capture_idx = target_key.capture as usize;
+                                    // 88 * (i < 2) → ply_back=1 のみ
+                                    let weighted_bonus = cont_bonus * weight / 1024
+                                        + if ply_back < 2 {
+                                            ctx.tune_params.continuation_history_near_ply_offset
+                                        } else {
+                                            0
+                                        };
+                                    h.continuation_history[in_check_idx][capture_idx].update(
+                                        target_key.piece,
+                                        target_key.to,
+                                        prev_piece,
+                                        prev_sq,
+                                        weighted_bonus,
+                                    );
+                                }
+                            }
 
                             h.main_history.update(opponent, prev_move, main_bonus);
 
@@ -3289,7 +3250,7 @@ impl SearchWorker {
                         // 注: prev_sq は cont_hist_key.to（do_move後に設定）なので prev_piece は有効
                         let prev_piece = pos.piece_on(prev_sq);
                         let captured_piece = pos.captured_piece();
-                        // YaneuraOu: assert(capturedPiece != NO_PIECE)
+                        // assert(capturedPiece != NO_PIECE)
                         debug_assert!(
                             captured_piece != Piece::NONE,
                             "prior_capture is true but captured_piece is NONE"
@@ -3309,7 +3270,7 @@ impl SearchWorker {
         }
 
         // =================================================================
-        // ttPv の上方伝播（YaneuraOu準拠）
+        // ttPv の上方伝播（）
         // =================================================================
         // fail low 時、親ノードが PV ライン上だったなら現ノードも PV ライン上として扱う。
         // これにより LMR の reduction 調整や Futility Pruning の抑制が適切に機能する。
@@ -3325,7 +3286,7 @@ impl SearchWorker {
         // =================================================================
         // 置換表更新
         // =================================================================
-        // excludedMoveがある場合は置換表に書き込まない（YaneuraOu準拠）
+        // excludedMoveがある場合は置換表に書き込まない
         // 同一局面で異なるexcludedMoveを持つ局面が同じhashkeyを持つため
         if excluded_move.is_none() {
             let bound = if best_value >= beta {
@@ -3379,7 +3340,7 @@ impl SearchWorker {
             }
         }
 
-        // CorrectionHistoryの更新（YaneuraOu準拠）
+        // CorrectionHistoryの更新（）
         // 条件: !inCheck && !(bestMove && capture(bestMove))
         //        && (bestValue > staticEval) == bool(bestMove)
         // bestMove有無で除数が異なる（有: /10, 無: /8）

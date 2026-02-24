@@ -3,8 +3,8 @@
 // YaneuraOu mate1ply_without_effect.cpp の移植（離し角・飛車は未対応）
 
 use crate::bitboard::{
-    Bitboard, bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect, knight_effect,
-    lance_effect, rook_effect, silver_effect,
+    Bitboard, FILE_BB, RANK_BB, bishop_effect, dragon_effect, gold_effect, horse_effect,
+    king_effect, knight_effect, lance_effect, rook_effect, silver_effect,
 };
 use crate::mate::helpers::{can_king_escape_with_from, can_piece_capture};
 use crate::mate::tables::{PieceTypeCheck, check_cand_bb};
@@ -176,6 +176,8 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
     // LANCE（成りで詰まない場合、不成り串刺しも試す）
     let mut bb =
         check_cand_bb(us, PieceTypeCheck::Lance, sq_king) & pos.pieces(us, PieceType::Lance);
+    // 串刺し特例のため、玉と同筋の香も候補に含めておく
+    bb |= pos.pieces(us, PieceType::Lance) & FILE_BB[sq_king.file().index()];
     while bb.is_not_empty() {
         let from = bb.pop();
         let slide = occupied ^ Bitboard::from_square(from);
@@ -240,6 +242,34 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
                 }
                 return Some(Move::new_move(from, to, false));
             }
+        }
+
+        // 敵陣3段目の不成り串刺し（成っても金では届かない場合のみ）
+        let rank_mask = if us == Color::Black {
+            RANK_BB[2]
+        } else {
+            RANK_BB[6]
+        };
+        let mut bb_skewer = bb_attacks_from & bb_move & rank_mask;
+        while bb_skewer.is_not_empty() {
+            let to = bb_skewer.pop();
+            if gold_effect(us, to).contains(sq_king) {
+                continue;
+            }
+            let bb_skewer_attacks = lance_step_effect(us, to);
+            if !bb_skewer_attacks.contains(sq_king) {
+                continue;
+            }
+            if pos.discovered(from, to, our_king, our_pinned) {
+                continue;
+            }
+            if can_king_escape_with_from(pos, them, from, to, bb_skewer_attacks, slide) {
+                continue;
+            }
+            if can_piece_capture(pos, them, to, pinned, slide) {
+                continue;
+            }
+            return Some(Move::new_move(from, to, false));
         }
     }
 
@@ -347,7 +377,6 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
             if can_promote(us, from, to) {
                 let bb_attacks_g = gold_effect(us, to);
                 if bb_attacks_g.contains(sq_king)
-                    && has_other_attacker(pos, us, from, to, slide)
                     && !pos.discovered(from, to, our_king, our_pinned)
                     && !can_king_escape_with_from(pos, them, from, to, bb_attacks_g, slide)
                     && (dc_candidates.contains(from)

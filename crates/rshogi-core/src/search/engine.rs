@@ -92,14 +92,18 @@ impl SearchInfo {
     }
 }
 
-/// YaneuraOu準拠のaspiration windowを計算
+/// aspiration windowを計算
 pub(crate) fn compute_aspiration_window(rm: &RootMove, thread_id: usize) -> (Value, Value, Value) {
-    // YO準拠: 未シード時は sentinel(-INFINITE^2) を保持し、abs()後に巨大deltaになる。
-    let mean_sq = rm.mean_squared_score.abs();
+    // mean_squared_score がない場合は巨大なdeltaでフルウィンドウにする
+    let fallback = {
+        let inf = Value::INFINITE.raw() as i64;
+        inf * inf
+    };
+    let mean_sq = rm.mean_squared_score.unwrap_or(fallback).abs();
     let mean_sq = mean_sq.min((Value::INFINITE.raw() as i64) * (Value::INFINITE.raw() as i64));
 
     let thread_offset = (thread_id % 8) as i32;
-    // YaneuraOu: delta = 5 + threadIdx % 8 + abs(meanSquaredScore) / 9000
+    // delta = 5 + threadIdx % 8 + abs(meanSquaredScore) / 9000
     let delta_raw = 5 + thread_offset + (mean_sq / 9000).min(i32::MAX as i64) as i32;
     let delta = Value::new(delta_raw);
     let alpha_raw = (rm.average_score.raw() - delta.raw()).max(-Value::INFINITE.raw());
@@ -108,7 +112,7 @@ pub(crate) fn compute_aspiration_window(rm: &RootMove, thread_id: usize) -> (Val
     (Value::new(alpha_raw), Value::new(beta_raw), delta)
 }
 
-/// YaneuraOu準拠の詰みスコアに対する深さ打ち切り判定
+/// 詰みスコアに対する深さ打ち切り判定
 #[inline]
 fn proven_mate_depth_exceeded(best_value: Value, depth: Depth) -> bool {
     if best_value.is_win() || best_value.is_loss() {
@@ -199,13 +203,13 @@ pub struct Search {
     /// 探索スレッドプール（helper threads）
     thread_pool: ThreadPool,
 
-    /// SearchWorker（YaneuraOu準拠: 長期保持して再利用）
+    /// SearchWorker（長期保持して再利用）
     /// 履歴統計を含み、usinewgameでクリア、goでは保持
     worker: Option<Box<SearchWorker>>,
 
-    /// 直前イテレーションのスコア（YaneuraOu準拠）
+    /// 直前イテレーションのスコア
     best_previous_score: Option<Value>,
-    /// 直前イテレーションの平均スコア（YaneuraOu準拠）
+    /// 直前イテレーションの平均スコア
     best_previous_average_score: Option<Value>,
     /// 直近のイテレーション値（YaneuraOuは4要素リングバッファ）
     iter_value: [Value; 4],
@@ -217,18 +221,18 @@ pub struct Search {
     last_best_move: Move,
     /// totBestMoveChanges（世代減衰込み）
     tot_best_move_changes: f64,
-    /// 直前の timeReduction（YO準拠で次手に持ち回る）
+    /// 直前の timeReduction次手に持ち回る）
     previous_time_reduction: f64,
     /// 直前の手数（手番反転の検出用）
     last_game_ply: Option<i32>,
-    /// 次のiterationで深さを伸ばすかどうか（YaneuraOu準拠）
+    /// 次のiterationで深さを伸ばすかどうか
     increase_depth: bool,
-    /// helperスレッドと共有するincrease_depthフラグ（YaneuraOu準拠: main_manager()->increaseDepth）
+    /// helperスレッドと共有するincrease_depthフラグ（main_manager()->increaseDepth）
     increase_depth_shared: Arc<AtomicBool>,
     /// 深さを伸ばせなかった回数（aspiration時の調整に使用）
     search_again_counter: i32,
 
-    /// 引き分けまでの最大手数（YaneuraOu準拠のエンジンオプション）
+    /// 引き分けまでの最大手数（エンジンオプション）
     max_moves_to_draw: i32,
     /// YaneuraOuオプション `DrawValueBlack`
     draw_value_black: i32,
@@ -470,8 +474,7 @@ fn collect_thread_summaries(
 }
 
 fn should_use_best_thread_selection(limits: &LimitsType, skill_enabled: bool) -> bool {
-    // YaneuraOu準拠:
-    // - MultiPV=1
+    //     // - MultiPV=1
     // - go depth/mate では使わない
     // - Skill有効時は使わない
     limits.multi_pv == 1 && limits.depth == 0 && limits.mate == 0 && !skill_enabled
@@ -611,7 +614,7 @@ impl Search {
             }
         }
 
-        // best_previous_score が番兵(INFINITE)のときは 0 初期化（YO準拠）
+        // best_previous_score が番兵(INFINITE)のときは 0 初期化
         if self.best_previous_score == Some(Value::INFINITE) {
             self.iter_value = [Value::ZERO; 4];
         } else {
@@ -663,7 +666,7 @@ impl Search {
             skill_options: SkillOptions::default(),
             num_threads: 1,
             thread_pool,
-            // YaneuraOu準拠: workerは遅延初期化（最初のgoで作成）
+            // workerは遅延初期化（最初のgoで作成）
             worker: None,
             best_previous_score: Some(Value::INFINITE),
             best_previous_average_score: Some(Value::INFINITE),
@@ -737,7 +740,7 @@ impl Search {
 
     /// 履歴統計をクリア（usinewgame時に呼び出し）
     ///
-    /// YaneuraOu準拠: Worker::clear()相当
+    /// Worker::clear()相当
     pub fn clear_histories(&mut self) {
         if let Some(worker) = &mut self.worker {
             worker.clear();
@@ -901,7 +904,7 @@ impl Search {
         // ponderhitフラグをリセット
         self.ponderhit_flag.store(false, Ordering::SeqCst);
         self.start_time = Some(Instant::now());
-        // 置換表の世代を進める（YaneuraOu準拠）
+        // 置換表の世代を進める
         self.tt.new_search();
         // ヘルパースレッドの結果をクリア
         // スレッド数が1の場合でも呼び出し、前回のマルチスレッド探索の結果が残らないようにする
@@ -912,10 +915,10 @@ impl Search {
             TimeManagement::new(Arc::clone(&self.stop), Arc::clone(&self.ponderhit_flag));
         time_manager.set_options(&self.time_options);
         time_manager.set_previous_time_reduction(self.previous_time_reduction);
-        // ply（現在の手数）は局面から取得、max_moves_to_drawはYaneuraOu準拠のデフォルトを使う
+        // ply（現在の手数）は局面から取得、max_moves_to_drawはデフォルトを使う
         time_manager.init(&limits, pos.side_to_move(), ply, self.max_moves_to_draw);
 
-        // YaneuraOu準拠: workerは遅延初期化、再利用する
+        // workerは遅延初期化、再利用する
         let tt_clone = Arc::clone(&self.tt);
         let eval_hash_clone = Arc::clone(&self.eval_hash);
         let max_moves = self.max_moves_to_draw;
@@ -932,32 +935,32 @@ impl Search {
         worker.draw_value_black = self.draw_value_black;
         worker.draw_value_white = self.draw_value_white;
 
-        // 探索状態のリセット（履歴はクリアしない、YaneuraOu準拠）
-        worker.prepare_search();
+        // 探索状態のリセット（履歴はクリアしない        worker.prepare_search();
         worker.allow_tt_write = true;
 
         // 探索深さを決定
         let max_depth = if limits.depth > 0 {
             limits.depth
         } else {
-            MAX_PLY // YaneuraOu準拠: 可能な限り深く探索
+            MAX_PLY // 可能な限り深く探索
         };
 
         // SkillLevel設定を構築（手加減）
         let mut skill = Skill::from_options(&self.skill_options);
         let skill_enabled = skill.enabled();
 
-        // YO準拠: helperスレッドは num_threads > 1 なら常に起動する。
-        // (MultiPV, go depth, go mate, Skill に関係なく起動)
-        // best-thread 選択の条件とは独立。
+        // デバッグ用の helper 有効化制御
+        // go depth/go mate を含め helper を有効化する。
         // 追加の切り分けは環境変数 RSHOGI_DISABLE_HELPER_SEARCH で行う。
         let helper_search_enabled = self.num_threads > 1 && !helper_search_disabled();
 
         if helper_search_enabled {
+            // helper は go depth 指定時も main の stop まで探索を継続する。
+            let helper_max_depth = if limits.depth > 0 { MAX_PLY } else { max_depth };
             self.thread_pool.start_thinking(
                 pos,
                 limits.clone(),
-                max_depth,
+                helper_max_depth,
                 self.time_options,
                 self.max_moves_to_draw,
                 draw_value_black,
@@ -1292,7 +1295,7 @@ where
         );
     }
 
-    // 合法手が1つの場合は500ms上限を適用（YaneuraOu準拠）
+    // 合法手が1つの場合は500ms上限を適用
     if worker.state.root_moves.len() == 1 {
         time_manager.apply_single_move_limit();
     }
@@ -1318,16 +1321,18 @@ where
         }
 
         // search_again_counter 更新
-        let inc_depth = if let Some(ref ms) = main_state {
-            ms.increase_depth
-        } else {
-            increase_depth_shared.load(Ordering::Relaxed)
-        };
-        if !inc_depth {
-            if let Some(ref mut ms) = main_state {
-                ms.search_again_counter += 1;
+        if depth > 1 {
+            let inc_depth = if let Some(ref ms) = main_state {
+                ms.increase_depth
             } else {
-                local_search_again_counter += 1;
+                increase_depth_shared.load(Ordering::Relaxed)
+            };
+            if !inc_depth {
+                if let Some(ref mut ms) = main_state {
+                    ms.search_again_counter += 1;
+                } else {
+                    local_search_again_counter += 1;
+                }
             }
         }
 
@@ -1354,7 +1359,7 @@ where
             );
         }
 
-        // YaneuraOu準拠: 詰みを読みきった場合の早期終了
+        // 詰みを読みきった場合の早期終了
         if effective_multi_pv == 1 && depth > 1 && !worker.state.root_moves.is_empty() {
             let best_value = worker.state.root_moves[0].score;
 
@@ -1388,7 +1393,7 @@ where
             local_search_again_counter
         };
 
-        // MultiPVループ（YaneuraOu準拠）
+        // MultiPVループ（）
         let mut processed_pv = 0;
         for pv_idx in 0..effective_multi_pv {
             if worker.state.abort {
@@ -1516,7 +1521,7 @@ where
             worker.state.completed_depth = search_depth;
             worker.state.best_move = worker.state.root_moves[0].mv();
 
-            // YaneuraOu準拠: previous_scoreを次のiterationのためにシード
+            // previous_scoreを次のiterationのためにシード
             // （YaneuraOu行1304-1305: rm.previousScore = rm.score）
             for rm in worker.state.root_moves.iter_mut() {
                 rm.previous_score = rm.score;
@@ -1532,7 +1537,7 @@ where
                     ms.last_best_move_depth = depth;
                 }
 
-                // 評価変動・timeReduction・最善手不安定性をまとめて適用（YaneuraOu準拠）
+                // 評価変動・timeReduction・最善手不安定性をまとめて適用
                 let best_value = if worker.state.root_moves.is_empty() {
                     Value::ZERO
                 } else {
@@ -1573,7 +1578,7 @@ where
                 #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
                 let (changes_sum, thread_count) = (best_move_changes, 1);
 
-                // YO準拠: totBestMoveChanges /= 2
+                // totBestMoveChanges /= 2
                 let tot_best_move_changes = ms.tot_best_move_changes / 2.0 + changes_sum;
 
                 if limits.use_time_management()
@@ -1609,7 +1614,7 @@ where
                         completed_depth,
                     );
 
-                    // YaneuraOu準拠: 次iterationで深さを伸ばすかの判定
+                    // 次iterationで深さを伸ばすかの判定
                     ms.increase_depth =
                         time_manager.is_pondering() || elapsed_time <= total_time * 0.503;
                     ms.increase_depth_shared.store(ms.increase_depth, Ordering::Relaxed);
@@ -1622,7 +1627,7 @@ where
                 on_progress(worker.state.nodes, best_move_changes);
             }
 
-            // PVが変わったときのみ last_best_* を更新（YO準拠）
+            // PVが変わったときのみ last_best_* を更新
             if !worker.state.root_moves[0].pv.is_empty()
                 && worker.state.root_moves[0].pv[0] != last_best_pv[0]
             {
@@ -1631,7 +1636,7 @@ where
                 last_best_move_depth = depth;
             }
 
-            // YaneuraOu準拠: 詰みスコアが見つかっていたら早期終了
+            // 詰みスコアが見つかっていたら早期終了
             if effective_multi_pv == 1 && depth > 1 && !worker.state.root_moves.is_empty() {
                 let best_value = worker.state.root_moves[0].score;
 
@@ -1654,7 +1659,7 @@ where
         }
     }
 
-    // 中断した探索で信頼できないPVになった場合のフォールバック（YO準拠）
+    // 中断した探索で信頼できないPVになった場合のフォールバック
     if worker.state.abort
         && !worker.state.root_moves.is_empty()
         && worker.state.root_moves[0].score.is_loss()

@@ -12,12 +12,32 @@
 #   3. プロファイルデータのマージ
 #   4. PGO適用ビルド (profile-use)
 #
-# 期待される効果: NPS +6-7% (NNUE), +14% (Material)
+# 期待される効果: NPS +6-7% (NNUE)
 # 使用プロファイル: production (Full LTO + PGO)
+# 注意: プロファイル収集はNNUE評価で実行（本番相当のコードパスを最適化するため）
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+# perf.conf からNNUEファイルパスを読み込み
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CONF_FILE="$SCRIPT_DIR/perf.conf"
+CONF_EXAMPLE="$SCRIPT_DIR/perf.conf.example"
+
+if [ ! -f "$CONF_FILE" ]; then
+    if [ -f "$CONF_EXAMPLE" ]; then
+        cp "$CONF_EXAMPLE" "$CONF_FILE"
+        echo "設定ファイルを作成しました: $CONF_FILE"
+        echo "       vim scripts/perf.conf"
+        echo "       NNUE_FILE のパスを環境に合わせて設定してください"
+        exit 1
+    else
+        echo "Error: $CONF_FILE も $CONF_EXAMPLE も見つかりません"
+        exit 1
+    fi
+fi
+source "$CONF_FILE"
 
 # 設定（ユーザー固有のディレクトリを使用）
 PGO_DATA_DIR="${TMPDIR:-/tmp}/pgo-data-${USER:-$(id -un)}"
@@ -51,12 +71,17 @@ while [[ $# -gt 0 ]]; do
             safe_rm_dir "$PGO_DATA_DIR"
             exit 0
             ;;
+        --nnue-file)
+            NNUE_FILE="$2"
+            shift 2
+            ;;
         -h|--help)
-            echo "Usage: $0 [--verify] [--clean]"
+            echo "Usage: $0 [--verify] [--clean] [--nnue-file <path>]"
             echo ""
             echo "Options:"
-            echo "  --verify  ビルド後にベンチマークで効果確認"
-            echo "  --clean   プロファイルデータを削除して終了"
+            echo "  --verify            ビルド後にベンチマークで効果確認"
+            echo "  --clean             プロファイルデータを削除して終了"
+            echo "  --nnue-file <path>  NNUEファイルのパス (default: perf.confの設定値)"
             exit 0
             ;;
         *)
@@ -65,6 +90,17 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# NNUEファイルの存在確認
+if [ -z "${NNUE_FILE:-}" ] || [ "$NNUE_FILE" = "./path/to/nn.bin" ]; then
+    echo "Error: NNUE_FILE が未設定です"
+    echo "       scripts/perf.conf を編集するか、--nnue-file で直接指定してください"
+    exit 1
+fi
+if [ ! -f "$NNUE_FILE" ] || [ ! -r "$NNUE_FILE" ]; then
+    echo "Error: NNUEファイルが見つからないか読み取れません: $NNUE_FILE"
+    exit 1
+fi
 
 # llvm-profdata のパスを検索
 find_llvm_profdata() {
@@ -103,6 +139,7 @@ echo "  PGO Build Script"
 echo "=============================================="
 echo ""
 echo "llvm-profdata: $LLVM_PROFDATA"
+echo "NNUE file:     $NNUE_FILE"
 echo "Profile dir:   $PGO_DATA_DIR"
 echo ""
 
@@ -134,8 +171,9 @@ if [ ! -x ./target/production/benchmark ]; then
     exit 1
 fi
 
-echo "Running benchmark to collect profile..."
-if ! ./target/production/benchmark 2>&1 | grep -E "(Threads|Avg NPS|---|^[0-9])"; then
+echo "Running NNUE benchmark to collect profile..."
+echo "  NNUE file: $NNUE_FILE"
+if ! ./target/production/benchmark --nnue-file "$NNUE_FILE" 2>&1 | grep -E "(Threads|Avg NPS|---|^[0-9])"; then
     echo "Error: Benchmark execution failed"
     echo "Profile data may be incomplete. Aborting PGO build."
     exit 1
@@ -186,8 +224,8 @@ echo ""
 
 # 効果確認（オプション）
 if [ "$VERIFY" = true ]; then
-    echo "=== Verification Benchmark ==="
-    ./target/production/benchmark 2>&1 | grep -E "(Threads|Avg NPS|---|^[0-9])"
+    echo "=== Verification Benchmark (NNUE) ==="
+    ./target/production/benchmark --nnue-file "$NNUE_FILE" 2>&1 | grep -E "(Threads|Avg NPS|---|^[0-9])"
     echo ""
 fi
 

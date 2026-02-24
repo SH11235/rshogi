@@ -68,18 +68,18 @@ pub(super) fn qsearch<const NT: u8>(
     if rep_state.is_repetition() || rep_state.is_superior_inferior() {
         let v = draw_value(rep_state, pos.side_to_move(), &ctx.draw_value_table);
         if v != Value::NONE {
-            // YaneuraOu準拠: REPETITION_DRAW は draw_value_table の値に関わらず
+            // REPETITION_DRAW は draw_value_table の値に関わらず
             // draw_jitter(value_draw(nodes)) を加える。
             if rep_state == crate::types::RepetitionState::Draw {
-                let jitter = draw_jitter(st.nodes, ctx.tune_params);
-                return Value::new(v.raw() + jitter);
+                let jittered = Value::new(v.raw() + draw_jitter(st.nodes, ctx.tune_params));
+                return jittered;
             }
             return value_from_tt(v, ply);
         }
     }
 
-    // 引き分け手数ルール（YaneuraOu準拠、MaxMovesToDrawオプション）
-    // YO: draw_value(REPETITION_DRAW, stm) + value_draw(nodes)
+    // 引き分け手数ルールMaxMovesToDrawオプション）
+    // draw_value(REPETITION_DRAW, stm) + value_draw(nodes)
     if ctx.max_moves_to_draw > 0 && pos.game_ply() > ctx.max_moves_to_draw {
         return Value::new(
             ctx.draw_value_table[pos.side_to_move() as usize].raw()
@@ -216,7 +216,7 @@ pub(super) fn qsearch<const NT: u8>(
                         key,
                         depth: DEPTH_QS,
                         bound: Bound::Exact,
-                        // YaneuraOu準拠: mate1ではss->ttPvを使用
+                        // mate1ではss->ttPvを使用
                         is_pv: st.stack[ply as usize].tt_pv,
                         tt_move: mate_move,
                         stored_value: mate_value,
@@ -227,7 +227,7 @@ pub(super) fn qsearch<const NT: u8>(
                             Move::NONE
                         },
                     });
-                    // YaneuraOu準拠: mate1ではss->ttPvを使用
+                    // mate1ではss->ttPvを使用
                     tt_result.write(
                         key,
                         mate_value,
@@ -267,7 +267,7 @@ pub(super) fn qsearch<const NT: u8>(
     };
 
     if !in_check && tt_hit && tt_value != Value::NONE && !tt_value.is_mate_score() {
-        // YO準拠: ttValue で補正するのは bestValue のみ。ss->staticEval は維持する。
+        // ttValue で補正するのは bestValue のみ。ss->staticEval は維持する。
         let bound_matches = if tt_value > best_value {
             tt_data.bound.is_lower_or_exact()
         } else {
@@ -285,7 +285,8 @@ pub(super) fn qsearch<const NT: u8>(
             v = Value::new((v.raw() + beta.raw()) / 2);
         }
         if !tt_hit {
-            // YaneuraOu準拠: stand pat cutoff 時は ttPv=false で保存
+            // stand pat cutoff 時は ttPv=false で保存
+            //
             #[cfg(feature = "tt-trace")]
             let allow_write = ctx.allow_tt_write
                 && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::Lower, DEPTH_UNSEARCHED);
@@ -336,7 +337,7 @@ pub(super) fn qsearch<const NT: u8>(
         static_eval + Value::new(ctx.tune_params.qsearch_futility_base)
     };
 
-    // YaneuraOu準拠: TT手のフィルタリングはMovePickerのpseudo_legalチェックに委ねる。
+    // TT手のフィルタリングはMovePickerのpseudo_legalチェックに委ねる。
     // 非capture非checkのTT手は moves loop の !capture → continue で除外される。
 
     let prev_move = if ply >= 1 {
@@ -382,7 +383,7 @@ pub(super) fn qsearch<const NT: u8>(
             }
         }
 
-        // YaneuraOu準拠: qsearchではquiet checksを生成しない
+        // qsearchではquiet checksを生成しない
         // YOのMovePicker qsearchステージは QSEARCH_TT → QCAPTURE_INIT → QCAPTURE のみ
         // (movepick.cpp line 69)
 
@@ -410,7 +411,7 @@ pub(super) fn qsearch<const NT: u8>(
         let gives_check = pos.gives_check(mv);
         let capture = pos.capture_stage(mv);
 
-        // YaneuraOu準拠: moveCount は pruning の前にインクリメント。
+        // moveCount は pruning の前にインクリメント。
         // 非捕獲・非王手の TT 手もカウントに含める。
         move_count += 1;
 
@@ -434,7 +435,7 @@ pub(super) fn qsearch<const NT: u8>(
 
                 if !pos.see_ge(mv, alpha - futility_base) {
                     inc_stat!(st, qs_futility_pruned);
-                    // YaneuraOu準拠: SEE で alpha - futility_base を下回った場合、
+                    // SEE で alpha - futility_base を下回った場合、
                     // best_value を futility_base（楽観的上限）で更新する。
                     // alpha.min() を取るのは、futility_base > alpha のケースで
                     // best_value が alpha を超えないようにするため。
@@ -442,7 +443,7 @@ pub(super) fn qsearch<const NT: u8>(
                     continue;
                 }
             }
-            // YaneuraOu準拠: qsearchでは非捕獲手をすべてスキップ
+            // qsearchでは非捕獲手をすべてスキップ
             if !capture {
                 continue;
             }
@@ -482,13 +483,13 @@ pub(super) fn qsearch<const NT: u8>(
             best_value = value;
 
             if value > alpha {
-                // YaneuraOu準拠: value > alpha のときのみ bestMove を更新
+                // value > alpha のときのみ bestMove を更新
                 best_move = mv;
 
                 if value >= beta {
                     break;
                 }
-                // YaneuraOu準拠: fail-high しなかった場合のみ alpha を更新する。
+                // fail-high しなかった場合のみ alpha を更新する。
                 alpha = value;
             }
         }
@@ -502,14 +503,14 @@ pub(super) fn qsearch<const NT: u8>(
         best_value = Value::new((best_value.raw() + beta.raw()) / 2);
     }
 
-    // YaneuraOu準拠: qsearchの結果は Exact としては保存しない。
+    // qsearchの結果は Exact としては保存しない。
     let bound = if best_value >= beta {
         Bound::Lower
     } else {
         Bound::Upper
     };
 
-    // YaneuraOu: pvHitを使用
+    // pvHitを使用
     #[cfg(feature = "tt-trace")]
     let allow_write =
         ctx.allow_tt_write && helper_tt_write_enabled_for_depth(ctx.thread_id, bound, DEPTH_QS);

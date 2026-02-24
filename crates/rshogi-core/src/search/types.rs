@@ -77,7 +77,7 @@ impl ContHistKey {
 
     /// null move 用の sentinel キーを返す。
     ///
-    /// YaneuraOu準拠: null move ply では `Piece::NONE` + `Square::SQ_11` を
+    /// null move ply では `Piece::NONE` + `Square::SQ_11` を
     /// sentinel として格納し、continuation history 更新時に `piece.is_none()` で
     /// スキップ判定する。
     #[inline]
@@ -218,7 +218,7 @@ pub fn init_stack_array() -> StackArray {
 
 /// 固定長の指し手リスト
 ///
-/// YaneuraOu準拠のSEARCHEDLIST_CAPACITY（32手）をベースに設計。
+/// SEARCHEDLIST_CAPACITY（32手）をベースに設計。
 /// ヒープ割り当てを避け、探索ホットパスでの性能を向上させる。
 ///
 /// 目的は「そのノードで試した全手の保存」ではなく、
@@ -242,7 +242,7 @@ impl<const N: usize> SmallMoveList<N> {
 
     /// 指し手を追加
     ///
-    /// 容量を超えた場合は無視する（YaneuraOu準拠: 32手を超える分は記録しない）
+    /// 容量を超えた場合は無視する（32手を超える分は記録しない）
     #[inline]
     pub fn push(&mut self, mv: Move) {
         if self.len < N {
@@ -305,7 +305,7 @@ pub const ORDERED_MOVES_CAPACITY: usize = 256;
 /// 指し手生成結果を保持する固定長バッファ
 ///
 /// generate_ordered_movesやqsearchで使用し、Vecのヒープ割り当てを回避する。
-/// MaybeUninitを使用して初期化コストをゼロにしている（YaneuraOu準拠）。
+/// MaybeUninitを使用して初期化コストをゼロにしている。
 pub struct OrderedMovesBuffer {
     buf: [MaybeUninit<Move>; ORDERED_MOVES_CAPACITY],
     len: usize,
@@ -425,8 +425,7 @@ pub struct RootMove {
     /// 平均スコア
     pub average_score: Value,
     /// 二乗平均スコア（aspiration window用）
-    /// YaneuraOu準拠: 未シード時は `-INFINITE^2` sentinel を保持する。
-    pub mean_squared_score: i64,
+    pub mean_squared_score: Option<i64>,
     /// スコアの下界フラグ
     pub score_lower_bound: bool,
     /// スコアの上界フラグ
@@ -441,17 +440,13 @@ pub struct RootMove {
 }
 
 impl RootMove {
-    /// mean_squared_score の未シード状態を表す sentinel 値（YO準拠）
-    pub const MEAN_SQUARED_SENTINEL: i64 =
-        -(Value::INFINITE.raw() as i64) * (Value::INFINITE.raw() as i64);
-
     /// 指し手から新しいRootMoveを作成
     pub fn new(mv: Move) -> Self {
         Self {
             score: Value::new(-32001), // MINUS_INFINITE相当
             previous_score: Value::new(-32001),
             average_score: Value::new(-32001),
-            mean_squared_score: Self::MEAN_SQUARED_SENTINEL,
+            mean_squared_score: None,
             score_lower_bound: false,
             score_upper_bound: false,
             sel_depth: 0,
@@ -491,11 +486,10 @@ impl RootMove {
 
         // mean_squared_score: |value| * value を平均
         let sample = (value.raw() as i64) * (value.raw().abs() as i64);
-        self.mean_squared_score = if self.mean_squared_score != Self::MEAN_SQUARED_SENTINEL {
-            (self.mean_squared_score + sample) / 2
-        } else {
-            sample
-        };
+        self.mean_squared_score = Some(match self.mean_squared_score {
+            Some(prev) => (prev + sample) / 2,
+            None => sample,
+        });
     }
 }
 
@@ -507,7 +501,7 @@ impl PartialEq for RootMove {
 
 impl Eq for RootMove {}
 
-/// スコアの降順でソート（YaneuraOu準拠: score優先、同点はprevious_score）
+/// スコアの降順でソート（score優先、同点はprevious_score）
 impl PartialOrd for RootMove {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
@@ -517,7 +511,7 @@ impl PartialOrd for RootMove {
 impl Ord for RootMove {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // 降順ソート: スコアが高い方が先
-        // YaneuraOu準拠: スコア同点時はprevious_scoreで比較
+        // スコア同点時はprevious_scoreで比較
         match other.score.raw().cmp(&self.score.raw()) {
             std::cmp::Ordering::Equal => other.previous_score.raw().cmp(&self.previous_score.raw()),
             ord => ord,
@@ -649,13 +643,27 @@ impl RootMoves {
             return;
         }
 
-        // YaneuraOu準拠:
-        //   std::stable_sort + RootMove::operator< (score, previousScore) と同型。
-        // Rustのslice::sort_byは安定ソートなので、両キー同値時は元順序を保持する。
-        self.moves[start..end].sort_by(|a, b| match b.score.cmp(&a.score) {
-            std::cmp::Ordering::Equal => b.previous_score.cmp(&a.previous_score),
+        // インデックス付きソート: (元のindex, スコア)でソート
+        let mut indexed: Vec<(usize, Value, Value)> = self.moves[start..end]
+            .iter()
+            .enumerate()
+            .map(|(i, rm)| (start + i, rm.score, rm.previous_score))
+            .collect();
+
+        // スコア降順、同点ならprevious_score降順、それでも同点なら元のインデックス昇順（安定性）
+        indexed.sort_by(|a, b| match b.1.cmp(&a.1) {
+            std::cmp::Ordering::Equal => match b.2.cmp(&a.2) {
+                std::cmp::Ordering::Equal => a.0.cmp(&b.0),
+                ord => ord,
+            },
             ord => ord,
         });
+
+        // ソート結果を適用
+        let sorted_moves: Vec<RootMove> =
+            indexed.iter().map(|(idx, _, _)| self.moves[*idx].clone()).collect();
+
+        self.moves[start..end].clone_from_slice(&sorted_moves);
     }
 
     /// 指定した手を含むか
@@ -741,7 +749,7 @@ pub fn value_from_tt(v: Value, ply: i32) -> Value {
     }
 }
 
-/// 千日手/優劣局面を評価値に変換（YaneuraOu準拠）
+/// 千日手/優劣局面を評価値に変換
 ///
 /// draw_value_table は SearchContext.draw_value_table を渡す。
 /// REPETITION_DRAW の場合、drawValueTable[stm] を返す。
@@ -755,7 +763,7 @@ pub fn draw_value(
         RepetitionState::Draw => draw_value_table[stm as usize],
         RepetitionState::Win => Value::MATE,
         RepetitionState::Lose => -Value::MATE,
-        // YaneuraOu準拠: VALUE_SUPERIOR = VALUE_TB_WIN_IN_MAX_PLY - 1
+        // VALUE_SUPERIOR = VALUE_TB_WIN_IN_MAX_PLY - 1
         // 詰みスコアの閾値より1小さい値を使い、is_win()/is_loss()に掛からないようにする。
         // これにより value_from_tt/value_to_tt でのply補正が適用されない。
         RepetitionState::Superior => Value::new(Value::MATE_IN_MAX_PLY.raw() - 1),
@@ -828,7 +836,7 @@ mod tests {
         // rm1(100) vs rm2(50): rm1 が先に来るので rm1 < rm2
         assert!(rm1 < rm2, "高スコアが先（小さい）になるべき");
 
-        // YaneuraOu準拠: スコア同点時はprevious_scoreでも比較
+        // スコア同点時はprevious_scoreでも比較
         rm1.score = Value::new(100);
         rm2.score = Value::new(100);
         rm1.previous_score = Value::new(80);
@@ -846,7 +854,7 @@ mod tests {
         assert_eq!(
             rm1.cmp(&rm2),
             std::cmp::Ordering::Equal,
-            "スコアもprevious_scoreも同じ場合はEqual（YaneuraOu準拠）"
+            "スコアもprevious_scoreも同じ場合はEqual"
         );
     }
 
@@ -967,13 +975,13 @@ mod tests {
         // 初回はそのまま反映
         rm.accumulate_score_stats(Value::new(100));
         assert_eq!(rm.average_score.raw(), 100);
-        assert_eq!(rm.mean_squared_score, 10_000);
+        assert_eq!(rm.mean_squared_score, Some(10_000));
 
         // 2回目以降は平均を取る
         rm.accumulate_score_stats(Value::new(-60));
         assert_eq!(rm.average_score.raw(), 20); // (100 + -60) / 2
         // mean_squared_score は value * |value| を平均するため符号を保持する
-        assert_eq!(rm.mean_squared_score, (10_000 - 3_600) / 2);
+        assert_eq!(rm.mean_squared_score, Some((10_000 - 3_600) / 2));
     }
 
     #[test]
