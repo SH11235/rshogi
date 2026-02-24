@@ -2198,7 +2198,11 @@ impl SearchWorker {
             improving,
             &tt_ctx,
             ply,
-            eval_ctx.static_eval,
+            // YO準拠: NMP verification searchが同一plyでsearch_nodeを呼び
+            // stack[ply].static_evalを上書きする。YOはss->staticEvalをポインタ経由で
+            // 参照するため上書き後の値が見える。eval_ctx.static_eval (snapshot) ではなく
+            // live stack値を使う。
+            st.stack[ply as usize].static_eval,
             eval_ctx.unadjusted_static_eval,
             in_check,
             cut_node,
@@ -2350,7 +2354,10 @@ impl SearchWorker {
                 cont_history_1: unsafe { cont_hist_ptr_1.as_ref() },
                 // SAFETY: cont_history_ptr() が返すポインタは探索中有効。
                 cont_history_2: unsafe { cont_hist_ptr_2.as_ref() },
-                static_eval: eval_ctx.static_eval,
+                // YO準拠: NMP verification searchが同一plyでsearch_nodeを再帰呼び出しし、
+                // compute_eval_contextがstack[ply].static_evalを上書きする。
+                // YOはss->staticEvalをポインタ経由で参照するため上書き後の値が見える。
+                static_eval: st.stack[ply as usize].static_eval,
                 alpha,
                 best_move,
                 pawn_history_index: pos.pawn_history_index(),
