@@ -260,6 +260,11 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
             if !bb_skewer_attacks.contains(sq_king) {
                 continue;
             }
+            let attackers_to_us =
+                (pos.attackers_to_occ(to, slide) & pos.pieces_c(us)) ^ Bitboard::from_square(from);
+            if attackers_to_us.is_empty() {
+                continue;
+            }
             if pos.discovered(from, to, our_king, our_pinned) {
                 continue;
             }
