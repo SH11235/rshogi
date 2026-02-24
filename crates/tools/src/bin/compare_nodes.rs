@@ -1000,7 +1000,7 @@ fn main() -> Result<()> {
     let depth = cli.depth;
 
     // サマリ更新間隔: 全体の10%ごと（最低10局面ごと）
-    let summary_interval = (sfens.len() / 10).max(10).min(sfens.len());
+    let summary_interval = (sfens.len() / 10).max(10).min(sfens.len()).max(1);
     let run_start = std::time::Instant::now();
     let progress_writer = Arc::new(Mutex::new(ProgressWriter::new(
         &output_dir.join("results.jsonl"),
@@ -1012,6 +1012,7 @@ fn main() -> Result<()> {
 
     if cli.reuse_engine {
         // TT蓄積モード: エンジンを使い回して逐次処理（--reuse-engine）。
+        // 注意: 途中経過書き出しは process_positions_reuse 完了後にまとめて行われる。
         let results = process_positions_reuse(&params_a, &params_b, &sfens, depth, &pb);
         let mut pw = progress_writer.lock().unwrap();
         for result in results {
