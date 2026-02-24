@@ -382,6 +382,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
             if can_promote(us, from, to) {
                 let bb_attacks_g = gold_effect(us, to);
                 if bb_attacks_g.contains(sq_king)
+                    && has_other_attacker(pos, us, from, to, slide)
                     && !pos.discovered(from, to, our_king, our_pinned)
                     && !can_king_escape_with_from(pos, them, from, to, bb_attacks_g, slide)
                     && (dc_candidates.contains(from)

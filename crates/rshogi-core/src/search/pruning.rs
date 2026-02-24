@@ -146,7 +146,7 @@ pub(super) fn step14_pruning(
             }
 
             // mainHistoryは pruning判定後に追加
-            // : history += 76 * mainHistory / 32
+            // history += 76 * mainHistory / 32
             let hist_score = cont_history + 76 * main_hist / 32;
 
             // lmrDepth調整 (枝刈りされなかった場合のみ実行)
