@@ -51,7 +51,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Parser)]
 #[command(
@@ -59,13 +59,17 @@ use serde::Serialize;
     about = "2つのUSIエンジン間でノード数を深度別に比較する"
 )]
 struct Cli {
+    /// コンフィグファイルのパス（デフォルト: compare_nodes.toml）
+    #[arg(long, default_value = "compare_nodes.toml")]
+    config: PathBuf,
+
     /// エンジンAのバイナリパス
     #[arg(long)]
-    engine_a: PathBuf,
+    engine_a: Option<PathBuf>,
 
     /// エンジンBのバイナリパス
     #[arg(long)]
-    engine_b: PathBuf,
+    engine_b: Option<PathBuf>,
 
     /// エンジンA固有のUSIオプション（カンマ区切り、例: "Threads=1,FV_SCALE=24"）
     #[arg(long, value_delimiter = ',')]
@@ -75,9 +79,9 @@ struct Cli {
     #[arg(long, value_delimiter = ',')]
     options_b: Vec<String>,
 
-    /// 置換表サイズ（MB）— 両エンジン共通
-    #[arg(long, default_value_t = 64)]
-    hash: u32,
+    /// 置換表サイズ（MB）
+    #[arg(long)]
+    hash: Option<u32>,
 
     /// エンジンAの評価関数パス（"EvalFile" として設定）
     #[arg(long)]
@@ -96,8 +100,8 @@ struct Cli {
     sfen: Option<String>,
 
     /// 探索深度
-    #[arg(long, default_value_t = 10)]
-    depth: u32,
+    #[arg(long)]
+    depth: Option<u32>,
 
     /// ランダムサンプル数（0=全件）
     #[arg(long, default_value_t = 0)]
@@ -108,28 +112,127 @@ struct Cli {
     workers: Option<usize>,
 
     /// 乱数シード
-    #[arg(long, default_value_t = 42)]
-    seed: u64,
+    #[arg(long)]
+    seed: Option<u64>,
 
     /// 出力ディレクトリの親（デフォルト: results/）
-    #[arg(long, default_value = "results")]
-    output_base: PathBuf,
+    #[arg(long)]
+    output_base: Option<PathBuf>,
 
     /// エンジンを局面間で使い回す（TT を蓄積させる対局内モードの再現）。
     /// 有効時は逐次処理（workers=1 相当）になる。
-    ///
-    /// # 背景
-    ///
-    /// 対局フレームワークは対局開始時にのみ `usinewgame + isready` を送り、
-    /// 着手間では TT をリセットしない。そのため対局中は TT が蓄積し続け、
-    /// クリーン TT 状態（新規プロセス）とは探索挙動が異なる。
-    ///
-    /// # 用途
-    ///
-    /// - 対局中の TT 蓄積が bestmove 選択に与える影響の定量的計測
-    /// - 新規局面（クリーン TT）と連続対局局面の探索差異の分析
     #[arg(long, default_value_t = false)]
     reuse_engine: bool,
+}
+
+/// コンフィグファイルの構造体。全フィールド Optional で CLI 引数が優先される。
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct Config {
+    engine_a: Option<PathBuf>,
+    engine_b: Option<PathBuf>,
+    options_a: Option<Vec<String>>,
+    options_b: Option<Vec<String>>,
+    hash: Option<u32>,
+    eval_a: Option<PathBuf>,
+    eval_b: Option<PathBuf>,
+    depth: Option<u32>,
+    seed: Option<u64>,
+    output_base: Option<PathBuf>,
+}
+
+/// CLI 引数とコンフィグファイルをマージした最終パラメータ
+struct ResolvedConfig {
+    engine_a: PathBuf,
+    engine_b: PathBuf,
+    options_a: Vec<String>,
+    options_b: Vec<String>,
+    hash: u32,
+    eval_a: Option<PathBuf>,
+    eval_b: Option<PathBuf>,
+    depth: u32,
+    sample: usize,
+    workers: Option<usize>,
+    seed: u64,
+    output_base: PathBuf,
+    reuse_engine: bool,
+}
+
+fn load_config(path: &Path) -> Option<Config> {
+    if !path.exists() {
+        return None;
+    }
+    match fs::read_to_string(path) {
+        Ok(content) => match toml::from_str::<Config>(&content) {
+            Ok(config) => {
+                eprintln!("コンフィグ読み込み: {}", path.display());
+                Some(config)
+            }
+            Err(e) => {
+                eprintln!("コンフィグ解析エラー ({}): {e}", path.display());
+                None
+            }
+        },
+        Err(e) => {
+            eprintln!("コンフィグ読み込みエラー ({}): {e}", path.display());
+            None
+        }
+    }
+}
+
+fn resolve_config(cli: Cli) -> Result<ResolvedConfig> {
+    let config = load_config(&cli.config).unwrap_or_default();
+
+    let engine_a = cli.engine_a.or(config.engine_a).ok_or_else(|| {
+        anyhow::anyhow!(
+            "engine_a が未指定です（CLI --engine-a またはコンフィグで指定してください）"
+        )
+    })?;
+
+    let engine_b = cli.engine_b.or(config.engine_b).ok_or_else(|| {
+        anyhow::anyhow!(
+            "engine_b が未指定です（CLI --engine-b またはコンフィグで指定してください）"
+        )
+    })?;
+
+    let options_a = if cli.options_a.is_empty() {
+        config.options_a.unwrap_or_default()
+    } else {
+        cli.options_a
+    };
+
+    let options_b = if cli.options_b.is_empty() {
+        config.options_b.unwrap_or_default()
+    } else {
+        cli.options_b
+    };
+
+    let hash = cli.hash.or(config.hash).unwrap_or(64);
+    let depth = cli.depth.or(config.depth).unwrap_or(10);
+    let seed = cli.seed.or(config.seed).unwrap_or(42);
+    let output_base = cli
+        .output_base
+        .or(config.output_base)
+        .unwrap_or_else(|| PathBuf::from("results"));
+
+    let eval_a = cli.eval_a.or(config.eval_a);
+    let eval_b = cli.eval_b.or(config.eval_b);
+
+    Ok(ResolvedConfig {
+        engine_a,
+        engine_b,
+        options_a,
+        options_b,
+        hash,
+        eval_a,
+        eval_b,
+        depth,
+        sample: cli.sample,
+        workers: cli.workers,
+        seed,
+        output_base,
+        reuse_engine: cli.reuse_engine,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -205,7 +308,7 @@ impl ProgressWriter {
     }
 
     /// 1局面の結果を追記し、必要に応じてサマリを更新する
-    fn push(&mut self, result: PositionResult, cli: &Cli) {
+    fn push(&mut self, result: PositionResult, rc: &ResolvedConfig) {
         // jsonl に即時追記
         let write_ok = serde_json::to_writer(&mut self.jsonl_writer, &result)
             .map_err(|e| e.into())
@@ -220,18 +323,18 @@ impl ProgressWriter {
         // N局面ごと、または最終局面でサマリを更新
         let done = self.results.len();
         if done == self.total_positions || done.is_multiple_of(self.summary_interval) {
-            self.update_summary(cli);
+            self.update_summary(rc);
         }
     }
 
-    fn update_summary(&self, cli: &Cli) {
+    fn update_summary(&self, rc: &ResolvedConfig) {
         let done = self.results.len();
         let total = self.total_positions;
         if let Ok(file) = File::create(&self.summary_path) {
             let mut w = BufWriter::new(file);
             let _ = writeln!(w, "[途中経過: {done}/{total} 局面完了]");
             let _ = writeln!(w);
-            let _ = write_summary(&mut w, &self.results, cli, None, self.workers);
+            let _ = write_summary(&mut w, &self.results, rc, None, self.workers);
         }
     }
 }
@@ -408,7 +511,12 @@ fn has_multipv_gt1(line: &str) -> bool {
 }
 
 /// info行から DepthInfo をパース。depth フィールドがない行は None を返す。
+/// "info string ..." はデバッグ出力なのでスキップする。
 fn parse_info_line(line: &str) -> Option<DepthInfo> {
+    // "info string" で始まる行はデバッグ出力なのでスキップ
+    if line.contains("info string") {
+        return None;
+    }
     let tokens: Vec<&str> = line.split_whitespace().collect();
     let mut depth: Option<u32> = None;
     let mut nodes: u64 = 0;
@@ -653,7 +761,7 @@ fn process_positions_reuse(
 fn write_summary(
     writer: &mut dyn Write,
     results: &[PositionResult],
-    cli: &Cli,
+    rc: &ResolvedConfig,
     wall_clock_secs: Option<f64>,
     workers: usize,
 ) -> Result<()> {
@@ -664,31 +772,31 @@ fn write_summary(
     }
 
     writeln!(writer, "=== ノード数比較サマリ ===")?;
-    writeln!(writer, "エンジンA: {}", cli.engine_a.display())?;
-    if !cli.options_a.is_empty() {
-        writeln!(writer, "  オプション: {}", cli.options_a.join(", "))?;
+    writeln!(writer, "エンジンA: {}", rc.engine_a.display())?;
+    if !rc.options_a.is_empty() {
+        writeln!(writer, "  オプション: {}", rc.options_a.join(", "))?;
     }
-    writeln!(writer, "エンジンB: {}", cli.engine_b.display())?;
-    if !cli.options_b.is_empty() {
-        writeln!(writer, "  オプション: {}", cli.options_b.join(", "))?;
+    writeln!(writer, "エンジンB: {}", rc.engine_b.display())?;
+    if !rc.options_b.is_empty() {
+        writeln!(writer, "  オプション: {}", rc.options_b.join(", "))?;
     }
-    writeln!(writer, "深度: {}, 局面数: {}", cli.depth, results.len())?;
+    writeln!(writer, "深度: {}, 局面数: {}", rc.depth, results.len())?;
     writeln!(
         writer,
         "モード: {}",
-        if cli.reuse_engine {
+        if rc.reuse_engine {
             "エンジン使い回し（TT蓄積・逐次）"
         } else {
             "局面ごと新規起動（TTリセット・並列）"
         }
     )?;
-    if let Some(eval) = &cli.eval_a {
+    if let Some(eval) = &rc.eval_a {
         writeln!(writer, "EvalFile(A): {}", eval.display())?;
     }
-    if let Some(eval) = &cli.eval_b {
+    if let Some(eval) = &rc.eval_b {
         writeln!(writer, "EvalDir(B): {}", eval.display())?;
     }
-    writeln!(writer, "Hash: {} MB", cli.hash)?;
+    writeln!(writer, "Hash: {} MB", rc.hash)?;
     if let Some(wc) = wall_clock_secs {
         writeln!(writer, "経過時間: {:.1}s", wc)?;
     }
@@ -719,7 +827,7 @@ fn write_summary(
     )?;
     writeln!(writer, "{}", "-".repeat(65))?;
 
-    for d in 1..=cli.depth {
+    for d in 1..=rc.depth {
         let mut a_total: u64 = 0;
         let mut b_total: u64 = 0;
         let mut count: u64 = 0;
@@ -889,16 +997,22 @@ fn write_summary(
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let workers = cli
+    // --sfen / --sfens は CLI のみで受け付ける（コンフィグ対象外）
+    let sfen_arg = cli.sfen.clone();
+    let sfens_arg = cli.sfens.clone();
+
+    let rc = resolve_config(cli)?;
+
+    let workers = rc
         .workers
         .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get() / 2).unwrap_or(1))
         .max(1);
 
     // SFEN読み込み（--sfen または --sfens のいずれか必須）
-    let (mut sfens, sfens_source) = if let Some(sfen_str) = &cli.sfen {
+    let (mut sfens, sfens_source) = if let Some(sfen_str) = &sfen_arg {
         let trimmed = sfen_str.trim().to_string();
         (vec![(1, trimmed)], "(直接指定)".to_string())
-    } else if let Some(sfens_path) = &cli.sfens {
+    } else if let Some(sfens_path) = &sfens_arg {
         let loaded = load_sfens(sfens_path)?;
         let source = format!("{} (ファイル内 {} 件中)", sfens_path.display(), loaded.len());
         (loaded, source)
@@ -908,63 +1022,62 @@ fn main() -> Result<()> {
     let total_loaded = sfens.len();
 
     // サンプリング
-    if cli.sample > 0 && cli.sample < sfens.len() {
-        let mut rng = ChaCha8Rng::seed_from_u64(cli.seed);
+    if rc.sample > 0 && rc.sample < sfens.len() {
+        let mut rng = ChaCha8Rng::seed_from_u64(rc.seed);
         sfens.shuffle(&mut rng);
-        sfens.truncate(cli.sample);
+        sfens.truncate(rc.sample);
         sfens.sort_by_key(|(idx, _)| *idx);
     }
 
     println!("=== compare_nodes ===");
-    println!("エンジンA: {}", cli.engine_a.display());
-    if !cli.options_a.is_empty() {
-        println!("  オプション: {}", cli.options_a.join(", "));
+    println!("エンジンA: {}", rc.engine_a.display());
+    if !rc.options_a.is_empty() {
+        println!("  オプション: {}", rc.options_a.join(", "));
     }
-    println!("エンジンB: {}", cli.engine_b.display());
-    if !cli.options_b.is_empty() {
-        println!("  オプション: {}", cli.options_b.join(", "));
+    println!("エンジンB: {}", rc.engine_b.display());
+    if !rc.options_b.is_empty() {
+        println!("  オプション: {}", rc.options_b.join(", "));
     }
     if total_loaded == 1 {
         println!("局面数: 1 {sfens_source}");
     } else {
         println!("局面数: {} {sfens_source}", sfens.len());
     }
-    println!("深度: {}, Hash: {} MB, ワーカー: {}", cli.depth, cli.hash, workers);
-    if let Some(eval) = &cli.eval_a {
+    println!("深度: {}, Hash: {} MB, ワーカー: {}", rc.depth, rc.hash, workers);
+    if let Some(eval) = &rc.eval_a {
         println!("EvalFile(A): {}", eval.display());
     }
-    if let Some(eval) = &cli.eval_b {
+    if let Some(eval) = &rc.eval_b {
         println!("EvalDir(B): {}", eval.display());
     }
     println!();
 
     // 出力ディレクトリ作成
     let timestamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
-    let output_dir = cli.output_base.join(&timestamp);
+    let output_dir = rc.output_base.join(&timestamp);
     fs::create_dir_all(&output_dir)
         .with_context(|| format!("出力ディレクトリ作成失敗: {}", output_dir.display()))?;
 
     // meta.json 書き出し
     let meta = Meta {
         timestamp: Local::now().to_rfc3339(),
-        engine_a: cli.engine_a.display().to_string(),
-        engine_b: cli.engine_b.display().to_string(),
-        options_a: cli.options_a.clone(),
-        options_b: cli.options_b.clone(),
-        hash_mb: cli.hash,
-        eval_a: cli.eval_a.as_ref().map(|p| p.display().to_string()),
-        eval_b: cli.eval_b.as_ref().map(|p| p.display().to_string()),
-        sfens_file: cli
-            .sfens
+        engine_a: rc.engine_a.display().to_string(),
+        engine_b: rc.engine_b.display().to_string(),
+        options_a: rc.options_a.clone(),
+        options_b: rc.options_b.clone(),
+        hash_mb: rc.hash,
+        eval_a: rc.eval_a.as_ref().map(|p| p.display().to_string()),
+        eval_b: rc.eval_b.as_ref().map(|p| p.display().to_string()),
+        sfens_file: sfens_arg
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "(直接指定)".to_string()),
-        depth: cli.depth,
+        depth: rc.depth,
         workers,
-        sample: cli.sample,
-        seed: cli.seed,
+        sample: rc.sample,
+        seed: rc.seed,
         total_positions: sfens.len(),
-        reuse_engine: cli.reuse_engine,
+        reuse_engine: rc.reuse_engine,
     };
     {
         let meta_file = File::create(output_dir.join("meta.json"))?;
@@ -984,20 +1097,20 @@ fn main() -> Result<()> {
     pb.set_message("探索中...");
 
     let params_a = Arc::new(EngineParams {
-        path: cli.engine_a.clone(),
-        hash: cli.hash,
+        path: rc.engine_a.clone(),
+        hash: rc.hash,
         eval_opt_name: "EvalFile",
-        eval_path: cli.eval_a.clone(),
-        options: cli.options_a.clone(),
+        eval_path: rc.eval_a.clone(),
+        options: rc.options_a.clone(),
     });
     let params_b = Arc::new(EngineParams {
-        path: cli.engine_b.clone(),
-        hash: cli.hash,
+        path: rc.engine_b.clone(),
+        hash: rc.hash,
         eval_opt_name: "EvalDir",
-        eval_path: cli.eval_b.clone(),
-        options: cli.options_b.clone(),
+        eval_path: rc.eval_b.clone(),
+        options: rc.options_b.clone(),
     });
-    let depth = cli.depth;
+    let depth = rc.depth;
 
     // サマリ更新間隔: 全体の10%ごと（最低10局面ごと）
     let summary_interval = (sfens.len() / 10).max(10).min(sfens.len()).max(1);
@@ -1010,23 +1123,24 @@ fn main() -> Result<()> {
         workers,
     )?));
 
-    if cli.reuse_engine {
+    let rc = Arc::new(rc);
+
+    if rc.reuse_engine {
         // TT蓄積モード: エンジンを使い回して逐次処理（--reuse-engine）。
-        // 注意: 途中経過書き出しは process_positions_reuse 完了後にまとめて行われる。
         let results = process_positions_reuse(&params_a, &params_b, &sfens, depth, &pb);
         let mut pw = progress_writer.lock().unwrap();
         for result in results {
-            pw.push(result, &cli);
+            pw.push(result, &rc);
         }
     } else {
         // 通常モード: 局面ごとに新規プロセスを起動して並列処理。
-        // 各局面は対局開始時（usinewgame + isready）と同等のクリーンな TT から探索する。
         rayon::ThreadPoolBuilder::new().num_threads(workers).build_global().ok();
+        let rc_clone = Arc::clone(&rc);
         sfens.par_iter().for_each(|(index, sfen)| {
             match process_position(&params_a, &params_b, *index, sfen, depth) {
                 Ok(result) => {
                     pb.inc(1);
-                    progress_writer.lock().unwrap().push(result, &cli);
+                    progress_writer.lock().unwrap().push(result, &rc_clone);
                 }
                 Err(e) => {
                     eprintln!("position {index} エラー: {e}");
@@ -1045,15 +1159,9 @@ fn main() -> Result<()> {
     {
         let summary_file = File::create(output_dir.join("summary.txt"))?;
         let mut file_writer = BufWriter::new(summary_file);
-        write_summary(&mut file_writer, &pw.results, &cli, Some(wall_clock_secs), workers)?;
+        write_summary(&mut file_writer, &pw.results, &rc, Some(wall_clock_secs), workers)?;
     }
-    write_summary(
-        &mut std::io::stdout().lock(),
-        &pw.results,
-        &cli,
-        Some(wall_clock_secs),
-        workers,
-    )?;
+    write_summary(&mut std::io::stdout().lock(), &pw.results, &rc, Some(wall_clock_secs), workers)?;
 
     // 乖離があった局面の SFEN を書き出し（--sfens に再入力可能な形式）
     let divergent: Vec<&PositionResult> = pw
