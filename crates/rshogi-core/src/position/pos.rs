@@ -578,11 +578,32 @@ impl Position {
 
     /// fromを取り除いた占有でのpin駒（やねうら王のpinned_pieces<Them>(from)相当）
     ///
-    /// avoid升の駒をoccupiedとpinner候補の両方から除外する
+    /// avoid升の駒をoccupiedとpinner候補の両方から除外する。
+    /// update_slider_blockers相当のcompute_blockers_and_pinnersとは異なり、
+    /// sniper同士の除外は行わない（YOのpinned_pieces<C>(avoid)に準拠）。
     pub fn pinned_pieces_excluding(&self, them: Color, avoid: Square) -> Bitboard {
         let avoid_bb = Bitboard::from_square(avoid);
-        let occ = self.occupied() & !avoid_bb;
-        self.pinned_pieces_with_occupancy(them, occ, avoid_bb)
+        let avoid_not = !avoid_bb;
+        let ksq = self.king_square[them.index()];
+        let enemy = !them;
+
+        let lance_bb = self.pieces(enemy, PieceType::Lance) & avoid_not;
+        let bishop_bb = (self.bishop_horse_bb & self.by_color[enemy.index()]) & avoid_not;
+        let rook_bb = (self.rook_dragon_bb & self.by_color[enemy.index()]) & avoid_not;
+
+        let pinners = (lance_effect(them, ksq, Bitboard::EMPTY) & lance_bb)
+            | (bishop_effect(ksq, Bitboard::EMPTY) & bishop_bb)
+            | (rook_effect(ksq, Bitboard::EMPTY) & rook_bb);
+
+        let pieces_without_avoid = self.occupied() & avoid_not;
+        let mut result = Bitboard::EMPTY;
+        for pinner_sq in pinners.iter() {
+            let between = crate::bitboard::between_bb(ksq, pinner_sq) & pieces_without_avoid;
+            if !between.is_empty() && !between.more_than_one() {
+                result |= between & self.pieces_c(them);
+            }
+        }
+        result
     }
 
     /// fromの駒を動かしたときに開き王手になるか（簡易判定）
@@ -1575,17 +1596,6 @@ impl Default for Position {
 }
 
 impl Position {
-    /// 占有を指定してpin駒を再計算（king_color側の玉に対するpin）
-    fn pinned_pieces_with_occupancy(
-        &self,
-        king_color: Color,
-        occupied: Bitboard,
-        enemy_removed: Bitboard,
-    ) -> Bitboard {
-        let (blockers, _) = self.compute_blockers_and_pinners(king_color, occupied, enemy_removed);
-        blockers & self.pieces_c(king_color)
-    }
-
     /// 占有を指定してpin候補とpinnerを再計算
     fn compute_blockers_and_pinners(
         &self,
