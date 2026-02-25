@@ -184,7 +184,7 @@ pub fn can_king_escape(
 ) -> bool {
     let king_sq = pos.king_square(us);
     let slide = slide | Bitboard::from_square(to);
-    // toには駒が打たれているため、王はtoに移動できない（除外する）
+    // toも逃げ先から除外（駒打ちの場合、toに打った駒があるため王は行けない）
     let escape = king_effect(king_sq) & !(bb_avoid | Bitboard::from_square(to) | pos.pieces_c(us));
 
     for dest in escape.iter() {
