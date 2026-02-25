@@ -11,6 +11,8 @@ use super::alpha_beta::{
     EvalContext, ProbeOutcome, SearchContext, SearchState, TTContext, to_corrected_static_eval,
 };
 use super::history::CORRECTION_HISTORY_SIZE;
+#[cfg(feature = "use-lazy-evaluate")]
+use super::search_helpers::ensure_nnue_accumulator;
 use super::search_helpers::nnue_evaluate;
 use super::stats::inc_stat_by_depth;
 #[cfg(feature = "tt-trace")]
@@ -48,25 +50,31 @@ pub(super) fn correction_value(
     let move_ok = prev_move.is_normal();
 
     // continuation correction 用キー: (ss-2) と (ss-4) の2段階
-    // plyが小さい場合はsentinel（NO_PIECE, SQ_ZERO）テーブルを参照
+    // cont_hist_key が未設定(None)でも sentinel にフォールバックして参照する。
     let sentinel_key = ContHistKey::null_sentinel();
     let cont_key_2 = if move_ok {
         if ply >= 2 {
-            st.stack[(ply - 2) as usize].cont_hist_key
+            match st.stack[(ply - 2) as usize].cont_hist_key {
+                Some(key) => key,
+                None => sentinel_key,
+            }
         } else {
-            Some(sentinel_key)
+            sentinel_key
         }
     } else {
-        None
+        sentinel_key
     };
     let cont_key_4 = if move_ok {
         if ply >= 4 {
-            st.stack[(ply - 4) as usize].cont_hist_key
+            match st.stack[(ply - 4) as usize].cont_hist_key {
+                Some(key) => key,
+                None => sentinel_key,
+            }
         } else {
-            Some(sentinel_key)
+            sentinel_key
         }
     } else {
-        None
+        sentinel_key
     };
 
     // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
@@ -78,20 +86,19 @@ pub(super) fn correction_value(
 
     // move無効の場合はcntcv全体が8（個別デフォルトの合計ではない）
     let cntcv = if move_ok {
-        let cv2 = cont_key_2
-            .map(|key| {
-                let pc = pos.piece_on(prev_move.to());
-                h.correction_history.continuation_value(key.piece, key.to, pc, prev_move.to())
-                    as i32
-            })
-            .unwrap_or(8);
-        let cv4 = cont_key_4
-            .map(|key| {
-                let pc = pos.piece_on(prev_move.to());
-                h.correction_history.continuation_value(key.piece, key.to, pc, prev_move.to())
-                    as i32
-            })
-            .unwrap_or(8);
+        let pc = pos.piece_on(prev_move.to());
+        let cv2 = h.correction_history.continuation_value(
+            cont_key_2.piece,
+            cont_key_2.to,
+            pc,
+            prev_move.to(),
+        ) as i32;
+        let cv4 = h.correction_history.continuation_value(
+            cont_key_4.piece,
+            cont_key_4.to,
+            pc,
+            prev_move.to(),
+        ) as i32;
         cv2 + cv4
     } else {
         8
@@ -123,34 +130,23 @@ pub(super) fn update_correction_history(
     };
     let move_ok = prev_move.is_normal();
 
-    // (ss-2) context — plyが小さい場合はsentinel（NO_PIECE, SQ_ZERO）テーブルを更新
+    // (ss-2)/(ss-4) context — cont_hist_key が未設定(None)でも sentinel へフォールバック
     let sentinel_key = ContHistKey::null_sentinel();
-    let cont_params_2 = if move_ok {
-        let key = if ply >= 2 {
-            st.stack[(ply - 2) as usize].cont_hist_key
-        } else {
-            Some(sentinel_key)
-        };
-        key.map(|k| {
-            let pc = pos.piece_on(prev_move.to());
-            (k.piece, k.to, pc, prev_move.to())
-        })
+    let cont_key_2 = if ply >= 2 {
+        match st.stack[(ply - 2) as usize].cont_hist_key {
+            Some(key) => key,
+            None => sentinel_key,
+        }
     } else {
-        None
+        sentinel_key
     };
-    // (ss-4) context
-    let cont_params_4 = if move_ok {
-        let key = if ply >= 4 {
-            st.stack[(ply - 4) as usize].cont_hist_key
-        } else {
-            Some(sentinel_key)
-        };
-        key.map(|k| {
-            let pc = pos.piece_on(prev_move.to());
-            (k.piece, k.to, pc, prev_move.to())
-        })
+    let cont_key_4 = if ply >= 4 {
+        match st.stack[(ply - 4) as usize].cont_hist_key {
+            Some(key) => key,
+            None => sentinel_key,
+        }
     } else {
-        None
+        sentinel_key
     };
 
     const NON_PAWN_WEIGHT: i32 = 165;
@@ -172,15 +168,25 @@ pub(super) fn update_correction_history(
         bonus * NON_PAWN_WEIGHT / 128,
     );
 
-    // continuation(ss-2) 重み 137/128
-    if let Some((piece, to, pc, prev_to)) = cont_params_2 {
-        h.correction_history
-            .update_continuation(piece, to, pc, prev_to, bonus * 137 / 128);
-    }
-    // continuation(ss-4) 重み 64/128
-    if let Some((piece, to, pc, prev_to)) = cont_params_4 {
-        h.correction_history
-            .update_continuation(piece, to, pc, prev_to, bonus * 64 / 128);
+    // continuation(ss-2) 重み 137/128, (ss-4) 重み 64/128
+    // m.is_ok()のときはcontinuation correctionを常に更新（sentinelテーブル含む）
+    if move_ok {
+        let pc = pos.piece_on(prev_move.to());
+        let prev_to = prev_move.to();
+        h.correction_history.update_continuation(
+            cont_key_2.piece,
+            cont_key_2.to,
+            pc,
+            prev_to,
+            bonus * 137 / 128,
+        );
+        h.correction_history.update_continuation(
+            cont_key_4.piece,
+            cont_key_4.to,
+            pc,
+            prev_to,
+            bonus * 64 / 128,
+        );
     }
 }
 
@@ -454,8 +460,18 @@ pub(super) fn compute_eval_context(
         }
     } else if tt_ctx.hit && tt_ctx.data.eval != Value::NONE && !pv_node {
         // TTヒット && eval有効 && 非PVノード
-        // TT eval 再利用による type-1 collision 伝播を避ける。
-        unadjusted_static_eval = nnue_evaluate(st, pos);
+        #[cfg(feature = "use-lazy-evaluate")]
+        {
+            // USE_LAZY_EVALUATE相当: TT eval を再利用する。
+            // 後続の差分更新に備え、アキュムレータだけは計算済みにしておく。
+            ensure_nnue_accumulator(st, pos);
+            unadjusted_static_eval = tt_ctx.data.eval;
+        }
+        #[cfg(not(feature = "use-lazy-evaluate"))]
+        {
+            // TT eval 再利用による type-1 collision 伝播を避けるため常に NNUE 再評価する。
+            unadjusted_static_eval = nnue_evaluate(st, pos);
+        }
         unadjusted_static_eval
     } else {
         // PVノード または TTミス/eval無効 → 常にNNUE評価

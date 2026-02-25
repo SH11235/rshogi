@@ -1582,8 +1582,8 @@ impl SearchWorker {
                     limits,
                     time_manager,
                 )
-            } else {
-                // rootNode && pvIdx 経路でも Step17/18 の LMR を適用する。
+            } else if depth >= 2 {
+                // Step 17: LMR (depth >= 2 && moveCount > 1)
                 let (d, deeper_base, deeper_mul, shallower_thr) = {
                     let tune = &self.search_tune_params;
                     let delta = (beta.raw() - alpha.raw()).abs().max(1);
@@ -1695,6 +1695,62 @@ impl SearchWorker {
                     );
                 }
 
+                value
+            } else {
+                // Step 18: LMR 対象外 (depth < 2)
+                let tune = &self.search_tune_params;
+                let delta = (beta.raw() - alpha.raw()).abs().max(1);
+                let root_delta = self.state.root_delta.max(1);
+                let mut r =
+                    reduction(tune, root_improving, depth, (rm_idx + 1) as i32, delta, root_delta);
+                r += tune.lmr_ttpv_add;
+                let tt_value_higher = (tt_value_root > alpha) as i32;
+                let tt_depth_ge = (tt_data.depth >= depth) as i32;
+                r -= tune.lmr_step16_ttpv_sub_base
+                    + tune.lmr_step16_ttpv_sub_pv_node
+                    + tt_value_higher * tune.lmr_step16_ttpv_sub_tt_value
+                    + tt_depth_ge * tune.lmr_step16_ttpv_sub_tt_depth;
+                r += tune.lmr_step16_base_add;
+                r -= (rm_idx + 1) as i32 * tune.lmr_step16_move_count_mul;
+                r -= root_correction_value.abs() / tune.lmr_step16_correction_div.max(1);
+                if tt_capture_root {
+                    r += tune.lmr_step16_tt_capture_add;
+                }
+                if self.state.stack[1].cutoff_cnt > 2 {
+                    r += tune.lmr_step16_cutoff_count_add;
+                }
+                if mv == tt_move_root {
+                    r -= tune.lmr_step16_tt_move_penalty;
+                }
+                let stat_score = self.state.stack[0].stat_score;
+                r -= stat_score * tune.lmr_step16_stat_score_scale_num / 8192;
+                if tt_move_root.is_none() {
+                    r += 1118;
+                }
+                let step18_depth =
+                    new_depth - (r > 3212) as i32 - ((r > 4784 && new_depth > 2) as i32);
+                let mut value = -self.search_node_wrapper::<{ NodeType::NonPV as u8 }>(
+                    pos,
+                    step18_depth,
+                    -alpha - Value::new(1),
+                    -alpha,
+                    1,
+                    true,
+                    limits,
+                    time_manager,
+                );
+                if value > alpha {
+                    value = -self.search_node_wrapper::<{ NodeType::PV as u8 }>(
+                        pos,
+                        new_depth,
+                        -beta,
+                        -alpha,
+                        1,
+                        false,
+                        limits,
+                        time_manager,
+                    );
+                }
                 value
             };
 

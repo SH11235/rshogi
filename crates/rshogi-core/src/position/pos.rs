@@ -319,14 +319,12 @@ impl Position {
         }
 
         if mv.is_drop() {
+            // 打ち駒の持ち駒有無はチェックしない。
+            // TT衝突で別局面のmoveが入っている場合でも、move自体は返す。
+            // 探索時のlegality checkで弾かれるため問題ない。
             let pt = mv.drop_piece_type();
-            if self.hand(self.side_to_move).has(pt) {
-                // 駒打ちの駒情報を付加（通常移動の moved_pc に相当）
-                let dropped_pc = Piece::make(self.side_to_move, pt);
-                Some(mv.with_piece(dropped_pc))
-            } else {
-                None
-            }
+            let dropped_pc = Piece::make(self.side_to_move, pt);
+            Some(mv.with_piece(dropped_pc))
         } else {
             let from = mv.from();
             let pc = self.piece_on(from);
