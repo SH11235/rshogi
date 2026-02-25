@@ -680,6 +680,48 @@ impl Position {
         }
     }
 
+    /// 占有を指定してpin候補とpinnerを再計算
+    fn compute_blockers_and_pinners(
+        &self,
+        king_color: Color,
+        occupied: Bitboard,
+        enemy_removed: Bitboard,
+    ) -> (Bitboard, Bitboard) {
+        let ksq = self.king_square[king_color.index()];
+        let enemy = !king_color;
+
+        let lance_bb = self.pieces(enemy, PieceType::Lance) & !enemy_removed;
+        // 事前計算済みのbishop_horse_bb/rook_dragon_bbを使用
+        let bishop_bb = (self.bishop_horse_bb & self.by_color[enemy.index()]) & !enemy_removed;
+        let rook_bb = (self.rook_dragon_bb & self.by_color[enemy.index()]) & !enemy_removed;
+
+        let snipers = (lance_effect(king_color, ksq, Bitboard::EMPTY) & lance_bb)
+            | (bishop_effect(ksq, Bitboard::EMPTY) & bishop_bb)
+            | (rook_effect(ksq, Bitboard::EMPTY) & rook_bb);
+
+        let mut blockers = Bitboard::EMPTY;
+        let mut pinners = Bitboard::EMPTY;
+        // sniper自身をoccupiedから除外して、一直線上に複数sniperがある場合
+        // （例: 王-歩-飛-飛）でも遠い方のsniperのblocker/pinnerを正しく認識する
+        let occ_without_snipers = occupied & !snipers;
+        for sniper_sq in snipers.iter() {
+            let between = crate::bitboard::between_bb(ksq, sniper_sq) & occ_without_snipers;
+            if between.is_empty() || between.more_than_one() {
+                continue;
+            }
+
+            // blockerが自駒のときのみpin対象
+            if (between & self.pieces_c(enemy)).is_empty() {
+                blockers |= between;
+                pinners.set(sniper_sq);
+            } else {
+                blockers |= between;
+            }
+        }
+
+        (blockers, pinners)
+    }
+
     /// 王手マスを更新
     pub(super) fn update_check_squares(&mut self) {
         let them = !self.side_to_move;
@@ -1580,9 +1622,7 @@ impl Position {
 
         false
     }
-}
 
-impl Position {
     /// 1手詰めを検出（該当手があれば返す。なければ Move::NONE）
     pub fn mate_1ply(&mut self) -> Move {
         crate::mate::mate_1ply(self).unwrap_or(Move::NONE)
@@ -1592,50 +1632,6 @@ impl Position {
 impl Default for Position {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl Position {
-    /// 占有を指定してpin候補とpinnerを再計算
-    fn compute_blockers_and_pinners(
-        &self,
-        king_color: Color,
-        occupied: Bitboard,
-        enemy_removed: Bitboard,
-    ) -> (Bitboard, Bitboard) {
-        let ksq = self.king_square[king_color.index()];
-        let enemy = !king_color;
-
-        let lance_bb = self.pieces(enemy, PieceType::Lance) & !enemy_removed;
-        // 事前計算済みのbishop_horse_bb/rook_dragon_bbを使用
-        let bishop_bb = (self.bishop_horse_bb & self.by_color[enemy.index()]) & !enemy_removed;
-        let rook_bb = (self.rook_dragon_bb & self.by_color[enemy.index()]) & !enemy_removed;
-
-        let snipers = (lance_effect(king_color, ksq, Bitboard::EMPTY) & lance_bb)
-            | (bishop_effect(ksq, Bitboard::EMPTY) & bishop_bb)
-            | (rook_effect(ksq, Bitboard::EMPTY) & rook_bb);
-
-        let mut blockers = Bitboard::EMPTY;
-        let mut pinners = Bitboard::EMPTY;
-        // sniper自身をoccupiedから除外して、一直線上に複数sniperがある場合
-        // （例: 王-歩-飛-飛）でも遠い方のsniperのblocker/pinnerを正しく認識する
-        let occ_without_snipers = occupied & !snipers;
-        for sniper_sq in snipers.iter() {
-            let between = crate::bitboard::between_bb(ksq, sniper_sq) & occ_without_snipers;
-            if between.is_empty() || between.more_than_one() {
-                continue;
-            }
-
-            // blockerが自駒のときのみpin対象
-            if (between & self.pieces_c(enemy)).is_empty() {
-                blockers |= between;
-                pinners.set(sniper_sq);
-            } else {
-                blockers |= between;
-            }
-        }
-
-        (blockers, pinners)
     }
 }
 
