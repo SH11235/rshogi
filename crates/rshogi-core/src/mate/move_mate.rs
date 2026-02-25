@@ -206,7 +206,8 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
                 } else if can_king_escape_with_from(pos, them, from, to, bb_attacks, slide) {
                     // 玉が逃げられる → LANCE_NO_PRO へ
                 } else if dc_candidates.contains(from) {
-                    // 成って角との両王手
+                    // 両王手なので合い利かず → 詰み
+                    return Some(Move::new_move(from, to, can_promote(us, from, to)));
                 } else if can_piece_capture(pos, them, to, pinned, slide) {
                     // toの駒が取れる → LANCE_NO_PRO へ
                 } else {
@@ -449,6 +450,21 @@ mod tests {
     #[test]
     fn test_move_mate_compile() {
         let _ = std::mem::size_of::<Option<crate::types::Move>>();
+    }
+
+    #[test]
+    fn test_lance_promo_mate_6f6g() {
+        // 後手番: 6fの後手香が6g成で詰み (成金が7gの先手玉に王手)
+        // RS の mate_1ply がこの詰みを検出できないバグの再現テスト
+        let sfen =
+            "1+B1g3nl/3r1kg2/1s2pp1p1/2p2bs1p/p4Np2/1SPl1P1PP/1GK1PS3/7R1/1N3G2L w NL3P3p 56";
+        let mut pos = Position::new();
+        pos.set_sfen(sfen).unwrap();
+
+        let mv = super::check_move_mate(&pos, crate::types::Color::White);
+        assert!(mv.is_some(), "mate_1ply should find 6f6g+ (lance promotion to gold)");
+        let mv = mv.unwrap();
+        assert_eq!(mv.to_usi(), "6f6g+", "expected move 6f6g+");
     }
 
     #[test]
