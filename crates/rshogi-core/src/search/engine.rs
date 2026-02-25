@@ -474,7 +474,7 @@ fn collect_thread_summaries(
 }
 
 fn should_use_best_thread_selection(limits: &LimitsType, skill_enabled: bool) -> bool {
-    //     // - MultiPV=1
+    // - MultiPV=1
     // - go depth/mate では使わない
     // - Skill有効時は使わない
     limits.multi_pv == 1 && limits.depth == 0 && limits.mate == 0 && !skill_enabled
@@ -935,7 +935,8 @@ impl Search {
         worker.draw_value_black = self.draw_value_black;
         worker.draw_value_white = self.draw_value_white;
 
-        // 探索状態のリセット（履歴はクリアしない        worker.prepare_search();
+        // 探索状態のリセット（履歴はクリアしない）
+        worker.prepare_search();
         worker.allow_tt_write = true;
 
         // 探索深さを決定
@@ -955,12 +956,10 @@ impl Search {
         let helper_search_enabled = self.num_threads > 1 && !helper_search_disabled();
 
         if helper_search_enabled {
-            // helper は go depth 指定時も main の stop まで探索を継続する。
-            let helper_max_depth = if limits.depth > 0 { MAX_PLY } else { max_depth };
             self.thread_pool.start_thinking(
                 pos,
                 limits.clone(),
-                helper_max_depth,
+                max_depth,
                 self.time_options,
                 self.max_moves_to_draw,
                 draw_value_black,
@@ -1321,18 +1320,16 @@ where
         }
 
         // search_again_counter 更新
-        if depth > 1 {
-            let inc_depth = if let Some(ref ms) = main_state {
-                ms.increase_depth
+        let inc_depth = if let Some(ref ms) = main_state {
+            ms.increase_depth
+        } else {
+            increase_depth_shared.load(Ordering::Relaxed)
+        };
+        if !inc_depth {
+            if let Some(ref mut ms) = main_state {
+                ms.search_again_counter += 1;
             } else {
-                increase_depth_shared.load(Ordering::Relaxed)
-            };
-            if !inc_depth {
-                if let Some(ref mut ms) = main_state {
-                    ms.search_again_counter += 1;
-                } else {
-                    local_search_again_counter += 1;
-                }
+                local_search_again_counter += 1;
             }
         }
 

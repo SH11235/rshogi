@@ -504,17 +504,16 @@ impl Position {
             return (bb.lsb().unwrap(), see_piece_value(PieceType::Silver));
         }
         // GOLDS (Gold, ProPawn, ProLance, ProKnight, ProSilver) — すべて540
-        for pt in [
-            PieceType::Gold,
-            PieceType::ProPawn,
-            PieceType::ProLance,
-            PieceType::ProKnight,
-            PieceType::ProSilver,
-        ] {
-            let bb = attackers & self.pieces(stm, pt);
-            if !bb.is_empty() {
-                return (bb.lsb().unwrap(), see_piece_value(PieceType::Gold));
-            }
+        // 結合bitboardのLSBを選択する（個別駒種ごとにチェックすると
+        // 異なるマスが選ばれ、x-ray discoveryが変わる）
+        let golds_bb = self.pieces_pt(PieceType::Gold)
+            | self.pieces_pt(PieceType::ProPawn)
+            | self.pieces_pt(PieceType::ProLance)
+            | self.pieces_pt(PieceType::ProKnight)
+            | self.pieces_pt(PieceType::ProSilver);
+        let bb = attackers & golds_bb & self.pieces_c(stm);
+        if !bb.is_empty() {
+            return (bb.lsb().unwrap(), see_piece_value(PieceType::Gold));
         }
         // Bishop (855)
         let bb = attackers & self.pieces(stm, PieceType::Bishop);
