@@ -1607,8 +1607,11 @@ impl Position {
 
         let mut blockers = Bitboard::EMPTY;
         let mut pinners = Bitboard::EMPTY;
+        // sniper自身をoccupiedから除外して、一直線上に複数sniperがある場合
+        // （例: 王-歩-飛-飛）でも遠い方のsniperのblocker/pinnerを正しく認識する
+        let occ_without_snipers = occupied & !snipers;
         for sniper_sq in snipers.iter() {
-            let between = crate::bitboard::between_bb(ksq, sniper_sq) & occupied;
+            let between = crate::bitboard::between_bb(ksq, sniper_sq) & occ_without_snipers;
             if between.is_empty() || between.more_than_one() {
                 continue;
             }
