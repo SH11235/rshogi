@@ -874,6 +874,67 @@ impl SearchWorker {
         // ttCapture (root LMRで使用)
         let tt_capture_root = tt_move_root.is_some() && pos.capture_stage(tt_move_root);
 
+        // Step 11. ProbCut（YO search<Root> と同一パス）
+        // root でも ProbCut は実行される。search_node と同じ条件・処理を行う。
+        let root_static_eval = self.state.stack[0].static_eval;
+        let tt_ctx_root = TTContext {
+            key,
+            result: tt_result,
+            data: tt_data,
+            hit: tt_hit,
+            mv: tt_move_root,
+            value: tt_value_root,
+            capture: tt_capture_root,
+        };
+        {
+            let ctx = SearchContext {
+                tt: &self.tt,
+                eval_hash: &self.eval_hash,
+                history: &self.history,
+                cont_history_sentinel: self.cont_history_sentinel,
+                generate_all_legal_moves: self.generate_all_legal_moves,
+                max_moves_to_draw: self.max_moves_to_draw,
+                thread_id: self.thread_id,
+                allow_tt_write: self.allow_tt_write,
+                tune_params: &self.search_tune_params,
+                draw_value_table: self.draw_value_table,
+            };
+            if let Some(v) = try_probcut(
+                &mut self.state,
+                &ctx,
+                pos,
+                depth,
+                beta,
+                root_improving,
+                &tt_ctx_root,
+                0, // ply
+                root_static_eval,
+                root_unadjusted_static_eval,
+                root_in_check,
+                false,      // cut_node (root is never cut_node)
+                Move::NONE, // excluded_move
+                limits,
+                time_manager,
+                Self::search_node::<{ NodeType::NonPV as u8 }>,
+            ) {
+                return v;
+            }
+        }
+
+        // Step 12. A small Probcut idea（YO search<Root> と同一パス）
+        {
+            let small_probcut_beta = beta + Value::new(418);
+            if tt_data.bound.is_lower_or_exact()
+                && tt_data.depth >= depth - 4
+                && tt_value_root != Value::NONE
+                && tt_value_root >= small_probcut_beta
+                && !beta.is_mate_score()
+                && !tt_value_root.is_mate_score()
+            {
+                return small_probcut_beta;
+            }
+        }
+
         // PVをクリアして前回探索の残留を防ぐ
         // NOTE: YaneuraOuでは (ss+1)->pv = pv でポインタを新配列に向け、ss->pv[0] = Move::none() でクリア
         //       Vecベースの実装では明示的なclear()で同等の効果を得る
@@ -1179,6 +1240,7 @@ impl SearchWorker {
             // この手に費やしたノード数をeffortに積算
             let nodes_delta = self.state.nodes.saturating_sub(nodes_before);
             self.state.root_moves[rm_idx].effort += nodes_delta as f64;
+
             if self.state.abort {
                 return Value::ZERO;
             }
@@ -1389,7 +1451,7 @@ impl SearchWorker {
             } else {
                 (depth + 6).min(MAX_PLY - 1)
             };
-            tt_result.write(
+            tt_ctx_root.result.write(
                 key,
                 value_to_tt(best_value, 0),
                 true, // PvNode
