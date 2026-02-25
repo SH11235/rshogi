@@ -544,18 +544,20 @@ impl SearchWorker {
             nnue_evaluate(&mut self.state, pos)
         };
 
-        let (static_eval, corr) = if root_in_check || unadjusted_static_eval == Value::NONE {
-            (Value::NONE, 0)
+        // correction_value は in_check に関わらず常に計算する。
+        // LMR の r 計算で abs(correctionValue) / 30450 として使用されるため。
+        let ctx = self.create_context();
+        let corr = correction_value(&self.state, &ctx, pos, 0);
+
+        let static_eval = if root_in_check || unadjusted_static_eval == Value::NONE {
+            Value::NONE
         } else {
-            let ctx = self.create_context();
-            let corr = correction_value(&self.state, &ctx, pos, 0);
             #[cfg(feature = "search-no-pass-rules")]
             let pass_rights_eval = Value::ZERO;
             #[cfg(not(feature = "search-no-pass-rules"))]
             let pass_rights_eval = evaluate_pass_rights(pos, pos.game_ply() as u16);
 
-            let eval = to_corrected_static_eval(unadjusted_static_eval, corr) + pass_rights_eval;
-            (eval, corr)
+            to_corrected_static_eval(unadjusted_static_eval, corr) + pass_rights_eval
         };
         self.state.stack[0].static_eval = static_eval;
         (unadjusted_static_eval, corr)
@@ -1104,6 +1106,7 @@ impl SearchWorker {
                     // d計算 (YO: max(1, min(newDepth - r/1024, newDepth + 2)) + PvNode)
                     let d =
                         std::cmp::max(1, std::cmp::min(new_depth - r / 1024, new_depth + 2)) + 1; // +1 for PvNode
+
                     (
                         d,
                         tune.lmr_research_deeper_base,
