@@ -43,6 +43,7 @@
 - **NNUE 評価値**: 同一局面で fresh NNUE eval は完全一致
 - **TT eval 信用問題**: RS は `eval_helpers.rs` で常に `nnue_evaluate()` を呼ぶよう修正済み（YO の `USE_LAZY_EVALUATE` 未定義動作に準拠）
 - **pinned_pieces_excluding**: avoid 駒を pinner 候補から除外するよう修正済み
+- **root correction_value**: in_check に関わらず常に計算するよう修正済み（LMR の r 計算で使用されるため）
 
 **再発パターン**:
 - `mate_1ply` の差異 → TT カスケード伝播 → 大規模ノード乖離。新しい乖離が見つかったら `mate_1ply` を最初に A/B テストまたは FEATURE_COUNT で確認すべき。
@@ -57,6 +58,7 @@ YO のコード順序（reduction → ttPv調整 → lmrDepth → Step14 → SE 
 1. **ログが出ない = 条件ミスではなくコードパスが異なる可能性を疑う**。main moves loop で出ないなら ProbCut/NullMove 等の pre-loop パスを確認。
 2. **PLY drill-down が深い（p>=4）場合は A/B テストを先に試す**。疑わしい機能を両エンジンで無効化→乖離消失の確認は O(1) で原因経路を絞れる。
 3. **静的コード比較で見つからない乖離は「実行タイミングの差」を疑う**。同一式でも history/TT の参照タイミングが異なるとスコアが変わる。
+4. **r が全 root move で同一の定数オフセット → root レベル変数を疑う**。correction_value, improving, delta 等の root 共通変数が原因。per-move 変数なら手ごとに値が異なるはず。
 
 ### YO乖離調査の最短導線（2026-02-23 追記）
 
