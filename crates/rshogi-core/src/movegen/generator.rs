@@ -1289,14 +1289,34 @@ pub fn generate_all(pos: &Position, buffer: &mut ExtMoveBuffer) -> usize {
 }
 
 /// 合法手を生成
+///
+/// YO 準拠の swap-erase フィルタを使用。pseudo-legal 手のリストを走査し、
+/// 非合法手を末尾の手で上書きして除去する。これにより末尾側の手が前方に
+/// 移動するため、YO と同一の手順序を再現できる。
 pub fn generate_legal(pos: &Position, list: &mut MoveList) {
     let mut buffer = ExtMoveBuffer::new();
     generate_all(pos, &mut buffer);
 
-    for ext in buffer.iter() {
-        if pos.is_legal(ext.mv) {
-            list.push(ext.mv);
+    // YO の swap-erase パターン:
+    //   while (mlist != last) {
+    //       if (!pos.legal(*mlist))
+    //           *mlist = *(--last);
+    //       else
+    //           ++mlist;
+    //   }
+    let mut i = 0;
+    let mut last = buffer.len();
+    while i < last {
+        if !pos.is_legal(buffer.get(i).mv) {
+            last -= 1;
+            buffer.set(i, buffer.get(last));
+        } else {
+            i += 1;
         }
+    }
+
+    for idx in 0..last {
+        list.push(buffer.get(idx).mv);
     }
 }
 
