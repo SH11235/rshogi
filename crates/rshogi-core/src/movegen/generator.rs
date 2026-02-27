@@ -1289,14 +1289,35 @@ pub fn generate_all(pos: &Position, buffer: &mut ExtMoveBuffer) -> usize {
 }
 
 /// 合法手を生成
+///
+/// YO 準拠の swap-erase フィルタを使用。pseudo-legal 手のリストを走査し、
+/// 非合法手を末尾の手で上書きして除去する。これにより末尾側の手が前方に
+/// 移動するため、YO と同一の手順序を再現できる。
 pub fn generate_legal(pos: &Position, list: &mut MoveList) {
     let mut buffer = ExtMoveBuffer::new();
     generate_all(pos, &mut buffer);
 
-    for ext in buffer.iter() {
-        if pos.is_legal(ext.mv) {
-            list.push(ext.mv);
+    // YO の swap-erase パターン:
+    //   while (mlist != last) {
+    //       if (!pos.legal(*mlist))
+    //           *mlist = *(--last);
+    //       else
+    //           ++mlist;
+    //   }
+    let slice = buffer.as_mut_slice();
+    let mut i = 0;
+    let mut last = slice.len();
+    while i < last {
+        if !pos.is_legal(slice[i].mv) {
+            last -= 1;
+            slice[i] = slice[last];
+        } else {
+            i += 1;
         }
+    }
+
+    for ext in &slice[..last] {
+        list.push(ext.mv);
     }
 }
 
@@ -1564,6 +1585,59 @@ mod tests {
         // すべての合法手がpiece情報を持つことを検証
         for mv in list.iter() {
             assert!(mv.has_piece_info(), "合法手はpiece情報を持つ必要がある: {:?}", mv);
+        }
+    }
+
+    /// swap-erase フィルタが非合法手を正しく除去し、
+    /// 合法手を漏れなく保持することを検証する。
+    /// 王手回避局面では pseudo-legal 手の多くが非合法になるため、
+    /// swap-erase の動作を効果的にテストできる。
+    #[test]
+    fn test_generate_legal_swap_erase_with_evasions() {
+        // 後手飛 5a から先手玉 5i に直射で王手がかかっている局面。
+        // 王手回避手のみが合法。generate_all は王手回避時も pseudo-legal 手を
+        // 生成するが、一部は is_legal で非合法と判定される → swap-erase で除去。
+        let sfen = "4r4/9/9/9/9/9/9/9/4K4 b - 1";
+        let mut pos = Position::new();
+        pos.set_sfen(sfen).unwrap();
+        assert!(pos.in_check(), "王手がかかっている局面であること");
+
+        let mut list = MoveList::new();
+        generate_legal(&pos, &mut list);
+
+        assert!(!list.is_empty(), "合法手が0件");
+
+        // 全手が実際に合法であることを検証
+        for mv in list.iter() {
+            assert!(pos.is_legal(*mv), "非合法手が含まれている: {}", mv.to_usi());
+        }
+
+        // 合法手の集合が正しいことを検証
+        let usi_set: std::collections::HashSet<String> = list.iter().map(|m| m.to_usi()).collect();
+        // 玉の逃げ先（5筋以外の隣接マス）は合法
+        for expected in &["5i4h", "5i6h", "5i4i", "5i6i"] {
+            assert!(usi_set.contains(*expected), "合法手 {} が欠落", expected);
+        }
+        // 5筋に留まる手は飛車の利きで非合法
+        assert!(!usi_set.contains("5i5h"), "5i5h は非合法（飛車の利き）");
+    }
+
+    /// 全手合法（非合法手なし）の場合、swap-erase で手が失われないことを検証。
+    #[test]
+    fn test_generate_legal_swap_erase_no_illegal() {
+        // 玉だけの局面: pseudo-legal 手 = 合法手（全手合法）
+        let sfen = "4k4/9/9/9/9/9/9/9/4K4 b - 1";
+        let mut pos = Position::new();
+        pos.set_sfen(sfen).unwrap();
+
+        let mut list = MoveList::new();
+        generate_legal(&pos, &mut list);
+
+        // 玉の移動可能マス: 4h, 5h, 6h, 4i, 6i = 5手
+        assert_eq!(list.len(), 5, "玉のみ局面の合法手数が不正: {}", list.len());
+
+        for mv in list.iter() {
+            assert!(pos.is_legal(*mv), "非合法手が含まれている: {}", mv.to_usi());
         }
     }
 
