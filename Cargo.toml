@@ -20,6 +20,7 @@ env_logger = "0.11"
 rand = "0.9"
 rand_xoshiro = "0.7"
 regex = "1.11.2"
+toml = "0.8"
 smallvec = "1.15"
 # getrandom with wasm_js feature for WebAssembly support
 getrandom = { version = "0.3", default-features = false, features = ["wasm_js"] }

@@ -669,7 +669,9 @@ ROOT/PLY ログは複数の depth/iteration が混在しやすい。次のキー
 
 ### r ブレークダウン（Step 7 の典型例）
 
-r が異なる場合、各調整項を個別出力して原因の項を特定する:
+r が異なる場合、各調整項を個別出力して原因の項を特定する。
+
+**診断パターン**: r の差が全 root move で同一の定数オフセットなら、per-move 変数（stat, mc 等）ではなく **root レベル変数**（correction_value, improving, delta 等）が原因。correction_value は root_in_check の条件分岐で計算がスキップされるバグがあった（2026-02-25 修正済み）。
 
 ```
 r_base      = reduction() の戻り値
@@ -824,6 +826,24 @@ avoid 駒（移動元の竜）が pinner 候補に残存し、相手の合駒可
 - 静的コード比較（yo-compare）では「同一式、異なるタイミング」のバグは発見不可能。計測データの差分が必須
 - PLY drill-down で main moves loop にログが出ない場合、**ProbCut/NullMove 等の pre-loop パス**を即座に確認すべき
 - PLY drill-down が p>=4 まで深い場合、A/B テスト（ProbCut 無効化）を先に試す方が効率的だった可能性あり
+
+### root_in_check correction_value バグ（2026-02-25 修正）
+
+**症状**: d=4 で -1、d=24 で -4,102,466 のノード数差。LMR の r 値が全 root move で一律 +12 高い
+**調査経路**:
+1. PLY1_ENTRY ログで depth が RS=2, YO=3 と異なることを発見（同一 key, 同一 aspiration window）
+2. ROOT_LMR ログで r 値が全手で一律 +12 高いことを発見
+3. r のブレークダウン（delta, improving, tvh, tdg, corr, ttcap）→ corr だけ RS=0, YO=378428
+4. `abs(378428) / 30450 = 12` で +12 の定数オフセットが説明される
+5. `init_root_static_eval` を確認 → `root_in_check` 時に `correction_value` を計算せず `corr=0` を返していた
+6. 局面を確認 → 7七角から2二後手玉への対角線上に遮蔽物なし → 実際に王手がかかっている局面
+7. YO では `correctionValue` は `ss->inCheck` 判定の前に常に計算される（line 2690）
+**原因**: RS の `init_root_static_eval` が `root_in_check` の場合に `correction_value()` を呼ばず `corr=0` を返していた。しかし YO では `correctionValue` は in_check に関わらず常に計算され、LMR の `r -= abs(correctionValue) / 30450` で使用される
+**修正**: `correction_value()` を `root_in_check` に関わらず常に計算するよう変更。`static_eval` のみ in_check 時は VALUE_NONE
+**教訓**:
+- **r が全 root move で定数オフセット → root レベル変数（correction_value, delta, improving 等）を疑う**。per-move 変数なら手ごとに値が異なるはず
+- **RS と YO で「値を計算するタイミング/条件」が異なるケースがある**。YO は search 関数内で in_check 判定前に correctionValue を計算するが、RS は init_root_static_eval で in_check ガードの内側に置いていた
+- r ブレークダウンは各項を個別出力するだけで高速に原因を特定できる（A/B テスト不要）
 
 ## エンジン起動方法（coproc 必須）
 

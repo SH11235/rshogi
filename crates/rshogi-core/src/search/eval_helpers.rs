@@ -41,7 +41,7 @@ pub(super) fn correction_value(
     let non_pawn_idx_w = (pos.non_pawn_key(Color::White) as usize) & (CORRECTION_HISTORY_SIZE - 1);
     let non_pawn_idx_b = (pos.non_pawn_key(Color::Black) as usize) & (CORRECTION_HISTORY_SIZE - 1);
 
-    // YO準拠: (ss-1)->currentMove を使って continuation correction を参照
+    // (ss-1)->currentMove を使って continuation correction を参照
     let prev_move = if ply >= 1 {
         st.stack[(ply - 1) as usize].current_move
     } else {
@@ -49,8 +49,8 @@ pub(super) fn correction_value(
     };
     let move_ok = prev_move.is_normal();
 
-    // continuation correction 用キー: (ss-2) と (ss-4) の2段階（YO準拠）
-    // YO準拠: cont_hist_key が未設定(None)でも sentinel にフォールバックして参照する。
+    // continuation correction 用キー: (ss-2) と (ss-4) の2段階
+    // cont_hist_key が未設定(None)でも sentinel にフォールバックして参照する。
     let sentinel_key = ContHistKey::null_sentinel();
     let cont_key_2 = if move_ok {
         if ply >= 2 {
@@ -76,6 +76,7 @@ pub(super) fn correction_value(
     } else {
         sentinel_key
     };
+
     // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
     let h = unsafe { ctx.history.as_ref_unchecked() };
     let pcv = h.correction_history.pawn_value(pawn_idx, us) as i32;
@@ -83,7 +84,7 @@ pub(super) fn correction_value(
     let wnpcv = h.correction_history.non_pawn_value(non_pawn_idx_w, Color::White, us) as i32;
     let bnpcv = h.correction_history.non_pawn_value(non_pawn_idx_b, Color::Black, us) as i32;
 
-    // YO準拠: move無効の場合はcntcv全体が8（個別デフォルトの合計ではない）
+    // move無効の場合はcntcv全体が8（個別デフォルトの合計ではない）
     let cntcv = if move_ok {
         let pc = pos.piece_on(prev_move.to());
         let cv2 = h.correction_history.continuation_value(
@@ -121,7 +122,7 @@ pub(super) fn update_correction_history(
     let non_pawn_idx_w = (pos.non_pawn_key(Color::White) as usize) & (CORRECTION_HISTORY_SIZE - 1);
     let non_pawn_idx_b = (pos.non_pawn_key(Color::Black) as usize) & (CORRECTION_HISTORY_SIZE - 1);
 
-    // YO準拠: (ss-1)->currentMove を使って continuation correction を更新
+    // (ss-1)->currentMove を使って continuation correction を更新
     let prev_move = if ply >= 1 {
         st.stack[(ply - 1) as usize].current_move
     } else {
@@ -129,7 +130,7 @@ pub(super) fn update_correction_history(
     };
     let move_ok = prev_move.is_normal();
 
-    // (ss-2)/(ss-4) context — YO準拠: cont_hist_key が未設定(None)でも sentinel へフォールバック
+    // (ss-2)/(ss-4) context — cont_hist_key が未設定(None)でも sentinel へフォールバック
     let sentinel_key = ContHistKey::null_sentinel();
     let cont_key_2 = if ply >= 2 {
         match st.stack[(ply - 2) as usize].cont_hist_key {
@@ -167,8 +168,8 @@ pub(super) fn update_correction_history(
         bonus * NON_PAWN_WEIGHT / 128,
     );
 
-    // YO準拠: continuation(ss-2) 重み 137/128, (ss-4) 重み 64/128
-    // YO準拠: m.is_ok()のときはcontinuation correctionを常に更新（sentinelテーブル含む）
+    // continuation(ss-2) 重み 137/128, (ss-4) 重み 64/128
+    // m.is_ok()のときはcontinuation correctionを常に更新（sentinelテーブル含む）
     if move_ok {
         let pc = pos.piece_on(prev_move.to());
         let prev_to = prev_move.to();
@@ -213,14 +214,14 @@ pub(super) fn probe_transposition<const NT: u8>(
     let mut tt_data = tt_result.data;
 
     st.stack[ply as usize].tt_hit = tt_hit;
-    // excludedMoveがある場合は前回のttPvを維持（YaneuraOu準拠）
+    // excludedMoveがある場合は前回のttPvを維持
     st.stack[ply as usize].tt_pv = if excluded_move.is_some() {
         st.stack[ply as usize].tt_pv
     } else {
         pv_node || (tt_hit && tt_data.is_pv)
     };
 
-    // YaneuraOu準拠: alpha-beta では ttHit で ttMove を潰さない。
+    // alpha-beta では ttHit で ttMove を潰さない。
     // probe() 側で to_move 変換に失敗した手は除外済み。
     let tt_move = tt_data.mv;
     let mut tt_value = if tt_hit {
@@ -289,7 +290,7 @@ pub(super) fn probe_transposition<const NT: u8>(
         inc_stat_by_depth!(st, tt_hit_by_depth, depth);
     }
 
-    // YaneuraOu準拠のTTカットオフ条件
+    // TTカットオフ条件
     // - fail-high時は tt_data.depth > depth を要求（fail-low時は >= depth）
     // - depth<=5ではcutNodeとTT値の方向が一致する場合のみカットオフ許可
     let tt_value_lte_beta = tt_value != Value::NONE && tt_value.raw() <= beta.raw();
@@ -405,7 +406,7 @@ pub(super) fn probe_transposition<const NT: u8>(
 /// 静的評価と補正値の計算
 ///
 /// # 引数
-/// - `pv_node`: PVノードかどうか。PVノードでは必ずNNUE評価を実行する（YaneuraOu準拠）
+/// - `pv_node`: PVノードかどうか。PVノードでは必ずNNUE評価を実行する
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compute_eval_context(
     st: &mut SearchState,
@@ -419,10 +420,10 @@ pub(super) fn compute_eval_context(
 ) -> EvalContext {
     let corr_value = correction_value(st, ctx, pos, ply);
 
-    // excludedMoveがある場合は、前回のstatic_evalをそのまま使用（YaneuraOu準拠）
+    // excludedMoveがある場合は、前回のstatic_evalをそのまま使用
     if excluded_move.is_some() {
         let static_eval = st.stack[ply as usize].static_eval;
-        // YaneuraOu準拠: improving/opponentWorsening は VALUE_NONE を含めた生比較で算出する。
+        // improving/opponentWorsening は VALUE_NONE を含めた生比較で算出する。
         let prev2_eval = if ply >= 2 {
             st.stack[(ply - 2) as usize].static_eval
         } else {
@@ -447,10 +448,10 @@ pub(super) fn compute_eval_context(
 
     let mut unadjusted_static_eval = Value::NONE;
 
-    // YaneuraOu準拠: TTからのeval取得 + PvNodeでは必ずevaluate()
+    // TTからのeval取得 + PvNodeでは必ずevaluate()
     // 「🌈 これ書かないとR70ぐらい弱くなる。」
     let mut static_eval = if in_check {
-        // YaneuraOu準拠: in-check では (ss-2)->staticEval を継承する。
+        // in-check では (ss-2)->staticEval を継承する。
         // root直下 (ply < 2) は参照先がないため VALUE_NONE を使う。
         if ply >= 2 {
             st.stack[(ply - 2) as usize].static_eval
@@ -468,8 +469,7 @@ pub(super) fn compute_eval_context(
         }
         #[cfg(not(feature = "use-lazy-evaluate"))]
         {
-            // YO現行ビルド整合モード: 常に NNUE 再評価する。
-            // TT eval 再利用による type-1 collision 伝播を避ける。
+            // TT eval 再利用による type-1 collision 伝播を避けるため常に NNUE 再評価する。
             unadjusted_static_eval = nnue_evaluate(st, pos);
         }
         unadjusted_static_eval
@@ -495,7 +495,7 @@ pub(super) fn compute_eval_context(
         static_eval += pass_rights_eval;
     }
 
-    // YO準拠: TTミス時は eval のみを BOUND_NONE/DEPTH_UNSEARCHED で保存する。
+    // TTミス時は eval のみを BOUND_NONE/DEPTH_UNSEARCHED で保存する。
     #[cfg(feature = "tt-trace")]
     let eval_allow_write = !in_check
         && !tt_ctx.hit
@@ -547,7 +547,7 @@ pub(super) fn compute_eval_context(
         eval = tt_ctx.value;
     }
 
-    // YO準拠: improving / opponentWorsening は ss->staticEval ベースで
+    // improving / opponentWorsening は ss->staticEval ベースで
     // VALUE_NONE を含めた生比較で計算する。
     st.stack[ply as usize].static_eval = static_eval;
 

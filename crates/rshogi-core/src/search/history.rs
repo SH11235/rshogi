@@ -28,7 +28,7 @@ use super::tune_params::SearchTuneParams;
 /// PawnHistoryのサイズ（2のべき乗）
 pub const PAWN_HISTORY_SIZE: usize = 8192;
 
-/// CorrectionHistoryのサイズ（2のべき乗、YaneuraOu準拠: uint16_t::MAX+1 = 65536）
+/// CorrectionHistoryのサイズ（2のべき乗、uint16_t::MAX+1 = 65536）
 pub const CORRECTION_HISTORY_SIZE: usize = 65536;
 
 /// CorrectionHistoryの値の制限
@@ -38,14 +38,14 @@ pub const CORRECTION_HISTORY_LIMIT: i32 = 1024;
 pub const LOW_PLY_HISTORY_SIZE: usize = 5;
 
 /// from_toインデックスのサイズ
-/// YaneuraOu準拠: Move の下位16bit (raw値) をそのまま使用するため 2^16 = 65536。
+/// Move の下位16bit (raw値) をそのまま使用するため 2^16 = 65536。
 /// bit 0-6: to, bit 7-13: from/駒種, bit 14: 打ちフラグ, bit 15: 成りフラグ
 pub const FROM_TO_SIZE: usize = 1 << 16;
 
 // =============================================================================
-// History初期値定数 (YaneuraOu準拠)
+// History初期値定数
 // =============================================================================
-// cf. YaneuraOu Worker::clear()
+// cf. Worker::clear()
 // 多くの履歴エントリは探索後に負の値になるため、
 // 開始値を「正しい」方向にシフトさせることでLMR/枝刈りの精度を上げる。
 
@@ -68,7 +68,7 @@ const PIECE_TYPE_NUM: usize = PieceType::NUM + 1; // None含む
 const PIECE_NUM: usize = Piece::NUM; // NONE含む
 
 // =============================================================================
-// YaneuraOu準拠定数
+// 定数
 // =============================================================================
 
 /// TTMoveHistory更新ボーナス（TT手がbest moveだった場合）
@@ -79,7 +79,7 @@ pub const TT_MOVE_HISTORY_MALUS: i32 = -848;
 
 /// ContinuationHistory更新の重み [(ply_back, weight)]
 ///
-/// YaneuraOu準拠: 1,2,3,4,5,6手前の指し手と現在の指し手のペアを更新。
+/// 1,2,3,4,5,6手前の指し手と現在の指し手のペアを更新。
 /// 王手中は1,2手前のみ更新。
 pub const CONTINUATION_HISTORY_WEIGHTS: [(usize, i32); 6] =
     [(1, 1157), (2, 648), (3, 288), (4, 576), (5, 140), (6, 441)];
@@ -97,10 +97,11 @@ pub const PAWN_HISTORY_POS_MULTIPLIER: i32 = 850;
 pub const PAWN_HISTORY_NEG_MULTIPLIER: i32 = 550;
 
 /// ContinuationHistory近接ply（1,2手前）へのオフセット
-/// YaneuraOu: update_continuation_histories で (bonus * weight / 1024) + 88 * (i < 2)
+/// update_continuation_histories で (bonus * weight / 1024) + 88 * (i < 2)
 pub const CONTINUATION_HISTORY_NEAR_PLY_OFFSET: i32 = 88;
 
 /// Prior Capture Countermove Bonus（fail low時の前の捕獲手へのボーナス）
+///
 pub const PRIOR_CAPTURE_COUNTERMOVE_BONUS: i32 = 964;
 
 // =============================================================================
@@ -189,7 +190,7 @@ impl ButterflyHistory {
         self.table[color.index()][mv.history_index()].update(bonus);
     }
 
-    /// クリア（YO準拠: 初期値68）
+    /// クリア（初期値68）
     pub fn clear(&mut self) {
         for color_table in &mut self.table {
             for entry in color_table.iter_mut() {
@@ -217,7 +218,7 @@ pub struct LowPlyHistory {
 }
 
 impl LowPlyHistory {
-    /// 新しいLowPlyHistoryを作成（YO準拠: 初期値97）
+    /// 新しいLowPlyHistoryを作成（初期値97）
     pub fn new() -> Self {
         let mut lph = Self {
             table: [[StatsEntry::default(); FROM_TO_SIZE]; LOW_PLY_HISTORY_SIZE],
@@ -244,7 +245,7 @@ impl LowPlyHistory {
         }
     }
 
-    /// クリア（YO準拠: 初期値97）
+    /// クリア（初期値97）
     pub fn clear(&mut self) {
         for ply_table in &mut self.table {
             for entry in ply_table.iter_mut() {
@@ -318,7 +319,7 @@ impl CapturePieceToHistory {
         self.table[pc.index()][to.index()][captured_pt as usize].update(bonus);
     }
 
-    /// クリア（YO準拠: 初期値-689）
+    /// クリア（初期値-689）
     pub fn clear(&mut self) {
         for pc_table in self.table.iter_mut() {
             for sq_table in pc_table.iter_mut() {
@@ -368,7 +369,7 @@ impl PieceToHistory {
         self.table[pc.index()][to.index()].update(bonus);
     }
 
-    /// クリア（YO準拠: 初期値-529）
+    /// クリア（初期値-529）
     pub fn clear(&mut self) {
         self.fill(CONTINUATION_HISTORY_INIT);
     }
@@ -512,7 +513,7 @@ impl PawnHistory {
         self.table[pawn_key_index][pc.index()][to.index()].update(bonus);
     }
 
-    /// クリア（YO準拠: 初期値-1238）
+    /// クリア（初期値-1238）
     pub fn clear(&mut self) {
         for pawn_table in self.table.iter_mut() {
             for pc_table in pawn_table.iter_mut() {
@@ -581,7 +582,7 @@ impl Default for CounterMoveHistory {
 // CorrectionHistory
 // =============================================================================
 
-/// CorrectionHistory (YaneuraOu準拠)
+/// CorrectionHistory ()
 ///
 /// - Pawn/Minor: [key_index][color] -> correction
 /// - NonPawn: [key_index][side_to_move][piece_color] -> correction
@@ -726,11 +727,11 @@ pub struct HistoryTables {
 impl HistoryTables {
     /// 新しいHistoryTablesを作成（ヒープ確保）
     ///
-    /// `Box::new_zeroed` で一括確保し、YO準拠の初期値を設定する。
+    /// `Box::new_zeroed` で一括確保しの初期値を設定する。
     pub fn new_boxed() -> Box<Self> {
         // SAFETY: 各テーブルは数値型のみで構成され、ゼロ初期化は常に有効。
         let mut history = unsafe { Box::<Self>::new_zeroed().assume_init() };
-        // YO準拠の初期値を全テーブルに設定
+        // の初期値を全テーブルに設定
         history.clear();
         history
     }
@@ -791,7 +792,7 @@ impl HistoryCell {
         // PhantomDataはサイズ0のマーカー型でゼロ初期化は無害
         // new_zeroedで直接ヒープに確保し、スタックオーバーフローを回避
         let cell = unsafe { Box::<Self>::new_zeroed().assume_init() };
-        // YO準拠の初期値を全テーブルに設定
+        // の初期値を全テーブルに設定
         // SAFETY: 初期化時のみ使用、他の参照と同時保持しない
         unsafe { cell.as_mut_unchecked() }.clear();
         cell
@@ -839,12 +840,12 @@ impl HistoryCell {
 }
 
 // =============================================================================
-// ボーナス計算（YaneuraOu準拠）
+// ボーナス計算
 // =============================================================================
 
 /// History更新用のボーナスを計算
 ///
-/// YaneuraOu準拠: `min(121*depth-77, 1633) + 375*(bestMove == ttMove)`
+/// `min(121*depth-77, 1633) + 375*(bestMove == ttMove)`
 /// - `is_tt_move`: bestMoveがTT手と一致する場合はtrue
 #[inline]
 pub fn stat_bonus(depth: i32, is_tt_move: bool, tune_params: &SearchTuneParams) -> i32 {
@@ -859,7 +860,7 @@ pub fn stat_bonus(depth: i32, is_tt_move: bool, tune_params: &SearchTuneParams) 
 
 /// マイナスボーナス（ペナルティ）を計算
 ///
-/// YaneuraOu準拠: `min(825*depth-196, 2159) - 16*moveCount`
+/// `min(825*depth-196, 2159) - 16*moveCount`
 /// quiet/capture 共通で使用。
 #[inline]
 pub fn stat_malus(depth: i32, move_count: i32, tune_params: &SearchTuneParams) -> i32 {
@@ -869,10 +870,10 @@ pub fn stat_malus(depth: i32, move_count: i32, tune_params: &SearchTuneParams) -
 }
 
 // =============================================================================
-// YaneuraOu準拠: 更新ヘルパー関数
+// 更新ヘルパー関数
 // =============================================================================
 
-/// LowPlyHistory用のボーナスを計算（YaneuraOu準拠）
+/// LowPlyHistory用のボーナスを計算
 #[inline]
 pub fn low_ply_history_bonus(bonus: i32, tune_params: &SearchTuneParams) -> i32 {
     bonus * tune_params.low_ply_history_multiplier / 1024 + tune_params.low_ply_history_offset
@@ -896,7 +897,7 @@ pub fn continuation_history_weight(tune_params: &SearchTuneParams, ply_back: usi
 
 /// ContinuationHistory近接ply（1手前）用のオフセット込みボーナスを計算
 ///
-/// YaneuraOu準拠: `(bonus * weight / 1024) + near_ply_offset * (i < 2)`
+/// `(bonus * weight / 1024) + near_ply_offset * (i < 2)`
 /// 955/1024 倍率は呼び出し元で適用済みの bonus を受け取る（YO は `update_quiet_histories`
 /// 内で `bonus * 955 / 1024` してから `update_continuation_histories` に渡す構造）。
 #[inline]
@@ -906,14 +907,14 @@ pub fn continuation_history_bonus_with_offset(
     tune_params: &SearchTuneParams,
 ) -> i32 {
     if ply_back < 2 {
-        // YaneuraOu準拠: 88 * (i < 2) → ply_back=1 のみ近接plyオフセットを加算
+        // 88 * (i < 2) → ply_back=1 のみ近接plyオフセットを加算
         bonus + tune_params.continuation_history_near_ply_offset
     } else {
         bonus
     }
 }
 
-/// PawnHistory用のボーナスを計算（YaneuraOu準拠）
+/// PawnHistory用のボーナスを計算
 ///
 /// `bonus * (bonus > 0 ? 850 : 550) / 1024`
 #[inline]
@@ -1011,7 +1012,7 @@ mod tests {
         let mut history = LowPlyHistory::new();
         let mv = Move::from_usi("7g7f").unwrap();
 
-        // YO準拠: 初期値97
+        // 初期値97
         assert_eq!(history.get(0, mv), 97);
 
         history.update(0, mv, 100);
@@ -1038,7 +1039,7 @@ mod tests {
     #[test]
     fn test_stat_bonus() {
         let tune = SearchTuneParams::default();
-        // YaneuraOu準拠: min(121*depth-77, 1633) + 375*(is_tt_move)
+        // min(121*depth-77, 1633) + 375*(is_tt_move)
         // depth=1, is_tt_move=false: 121*1-77 = 44
         assert_eq!(stat_bonus(1, false, &tune), 44);
         // depth=1, is_tt_move=true: 44 + 375 = 419
@@ -1051,7 +1052,7 @@ mod tests {
     #[test]
     fn test_stat_malus() {
         let tune = SearchTuneParams::default();
-        // YaneuraOu準拠: min(825*depth-196, 2159) - 16*moveCount
+        // min(825*depth-196, 2159) - 16*moveCount
         // depth=1, moveCount=0: 825*1-196 = 629
         assert_eq!(stat_malus(1, 0, &tune), 629);
         // depth=1, moveCount=10: 629 - 16*10 = 469
@@ -1118,7 +1119,7 @@ mod tests {
         // クリア
         cell.clear();
 
-        // クリア後はYO準拠の初期値に戻る
+        // クリア後はの初期値に戻る
         let value = unsafe { cell.as_ref_unchecked() }.main_history.get(Color::Black, mv);
         assert_eq!(value, MAIN_HISTORY_INIT);
     }

@@ -1,0 +1,18 @@
+# compare_nodes デフォルト設定
+# cp compare_nodes.toml.example compare_nodes.toml して環境に合わせて編集
+#
+# CLI 引数が指定された場合はそちらが優先される。
+# --sfens / --sfen / --workers / --sample はコンフィグ対象外（CLI のみ）。
+
+engine_a = "./target/release/rshogi-usi"
+engine_b = "/path/to/YaneuraOu/source/YaneuraOu-by-gcc"
+
+options_a = ["Threads=1"]
+options_b = ["FV_SCALE=24", "Threads=1", "PvInterval=0"]
+
+hash = 512
+
+eval_a = "/path/to/eval/halfkp_256x2-32-32_crelu/suisho5.bin"
+eval_b = "/path/to/eval/halfkp_256x2-32-32_crelu"
+
+depth = 25

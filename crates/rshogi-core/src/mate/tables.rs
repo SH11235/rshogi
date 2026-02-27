@@ -112,10 +112,9 @@ fn init_check_cand_bb() -> [[[Bitboard; 2]; PieceTypeCheck::NUM]; 81] {
             }
             table[idx][PieceTypeCheck::PawnWithPro as usize][c] = bb_pro;
 
-            // 香: 盤上の駒を無視した1歩利き + 敵陣での成りも候補に含める
+            // 香: 遮蔽物なしの直進利き + 敵陣での成り香（金相当）で王手できる隣接筋も候補に含める
             let mut lance_bb = lance_effect(!us, sq_king, Bitboard::EMPTY);
             if enemy_field.contains(sq_king) {
-                // 敵陣なら左右にずらした成り香の候補も足す
                 if let Some(s) = sq_king.offset(Square::DELTA_R) {
                     lance_bb |= lance_effect(!us, s, Bitboard::EMPTY);
                 }
@@ -167,11 +166,12 @@ fn init_check_cand_bb() -> [[[Bitboard; 2]; PieceTypeCheck::NUM]; 81] {
                 let base = Square::new(sq_king.file(), r3);
                 silver_bb |= Bitboard::from_square(base);
                 silver_bb |= cross45_step_effect(base);
+                // 2升隣
                 let file_idx = base.file().index() as i16;
                 if let Some(file_r) = File::from_u8((file_idx + 2) as u8) {
                     silver_bb |= Bitboard::from_square(Square::new(file_r, r3));
                 }
-                if file_idx > 1
+                if file_idx >= 2
                     && let Some(file_l) = File::from_u8((file_idx - 2) as u8)
                 {
                     silver_bb |= Bitboard::from_square(Square::new(file_l, r3));

@@ -46,6 +46,9 @@ results/
 # Perf script config (personal settings)
 scripts/perf.conf
 
+# compare_nodes config (personal settings)
+compare_nodes.toml
+
 # Local documents
 docs/experiment-archive/
 docs/bullet/

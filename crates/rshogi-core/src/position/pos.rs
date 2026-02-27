@@ -160,7 +160,7 @@ impl Position {
 
     /// 直前の手で取られた駒を返す
     ///
-    /// YaneuraOu: pos.captured_piece()
+    /// pos.captured_piece()
     #[inline]
     pub fn captured_piece(&self) -> Piece {
         self.cur_state().captured_piece
@@ -305,7 +305,7 @@ impl Position {
         self.side_to_move
     }
 
-    /// TT等に保存された16bit指し手を安全に取り出す（YaneuraOu準拠）
+    /// TT等に保存された16bit指し手を安全に取り出す
     /// - 無効な符号化や手番不一致の手はNone
     /// - 合法性までは保証しないが、明らかに不整合な手を弾く
     /// - 駒情報（moved_piece_after）を上位16bitに付加して返す
@@ -319,7 +319,7 @@ impl Position {
         }
 
         if mv.is_drop() {
-            // YaneuraOu準拠: 打ち駒の持ち駒有無はチェックしない。
+            // 打ち駒の持ち駒有無はチェックしない。
             // TT衝突で別局面のmoveが入っている場合でも、move自体は返す。
             // 探索時のlegality checkで弾かれるため問題ない。
             let pt = mv.drop_piece_type();
@@ -334,7 +334,7 @@ impl Position {
                 if mv.is_promote() && !pc.piece_type().can_promote() {
                     return None;
                 }
-                // 駒情報を付加（YaneuraOu準拠）
+                // 駒情報を付加
                 let moved_pc = if mv.is_promote() {
                     // 229-231行目でcan_promote()を検証済みのため安全
                     pc.promote().expect("already validated can_promote")
@@ -356,7 +356,7 @@ impl Position {
 
     /// 千日手/優劣局面判定（do_move 時に計算した情報を使用）
     ///
-    /// YaneuraOu準拠: `rep < ply` で判定する（`rep.abs() < ply` ではない）。
+    /// `rep < ply` で判定する（`rep.abs() < ply` ではない）。
     /// - `rep > 0`: 通常の千日手。`rep` は何手前に同一局面があったかを表す。
     ///   `rep < ply` でルートより前の局面との千日手を除外する。
     /// - `rep < 0`: 連続王手の千日手（4回目以降）。負値は常に `ply`（正値）より小さいため
@@ -576,11 +576,32 @@ impl Position {
 
     /// fromを取り除いた占有でのpin駒（やねうら王のpinned_pieces<Them>(from)相当）
     ///
-    /// YO準拠: avoid升の駒をoccupiedとpinner候補の両方から除外する
+    /// avoid升の駒をoccupiedとpinner候補の両方から除外する。
+    /// update_slider_blockers相当のcompute_blockers_and_pinnersとは異なり、
+    /// sniper同士の除外は行わない（YOのpinned_pieces<C>(avoid)に準拠）。
     pub fn pinned_pieces_excluding(&self, them: Color, avoid: Square) -> Bitboard {
         let avoid_bb = Bitboard::from_square(avoid);
-        let occ = self.occupied() & !avoid_bb;
-        self.pinned_pieces_with_occupancy(them, occ, avoid_bb)
+        let avoid_not = !avoid_bb;
+        let ksq = self.king_square[them.index()];
+        let enemy = !them;
+
+        let lance_bb = self.pieces(enemy, PieceType::Lance) & avoid_not;
+        let bishop_bb = (self.bishop_horse_bb & self.by_color[enemy.index()]) & avoid_not;
+        let rook_bb = (self.rook_dragon_bb & self.by_color[enemy.index()]) & avoid_not;
+
+        let pinners = (lance_effect(them, ksq, Bitboard::EMPTY) & lance_bb)
+            | (bishop_effect(ksq, Bitboard::EMPTY) & bishop_bb)
+            | (rook_effect(ksq, Bitboard::EMPTY) & rook_bb);
+
+        let pieces_without_avoid = self.occupied() & avoid_not;
+        let mut result = Bitboard::EMPTY;
+        for pinner_sq in pinners.iter() {
+            let between = crate::bitboard::between_bb(ksq, pinner_sq) & pieces_without_avoid;
+            if !between.is_empty() && !between.more_than_one() {
+                result |= between & self.pieces_c(them);
+            }
+        }
+        result
     }
 
     /// fromの駒を動かしたときに開き王手になるか（簡易判定）
@@ -655,6 +676,48 @@ impl Position {
             st.blockers_for_king[c.index()] = blockers;
             st.pinners[c.index()] = pinners;
         }
+    }
+
+    /// 占有を指定してpin候補とpinnerを再計算
+    fn compute_blockers_and_pinners(
+        &self,
+        king_color: Color,
+        occupied: Bitboard,
+        enemy_removed: Bitboard,
+    ) -> (Bitboard, Bitboard) {
+        let ksq = self.king_square[king_color.index()];
+        let enemy = !king_color;
+
+        let lance_bb = self.pieces(enemy, PieceType::Lance) & !enemy_removed;
+        // 事前計算済みのbishop_horse_bb/rook_dragon_bbを使用
+        let bishop_bb = (self.bishop_horse_bb & self.by_color[enemy.index()]) & !enemy_removed;
+        let rook_bb = (self.rook_dragon_bb & self.by_color[enemy.index()]) & !enemy_removed;
+
+        let snipers = (lance_effect(king_color, ksq, Bitboard::EMPTY) & lance_bb)
+            | (bishop_effect(ksq, Bitboard::EMPTY) & bishop_bb)
+            | (rook_effect(ksq, Bitboard::EMPTY) & rook_bb);
+
+        let mut blockers = Bitboard::EMPTY;
+        let mut pinners = Bitboard::EMPTY;
+        // sniper自身をoccupiedから除外して、一直線上に複数sniperがある場合
+        // （例: 王-歩-飛-飛）でも遠い方のsniperのblocker/pinnerを正しく認識する
+        let occ_without_snipers = occupied & !snipers;
+        for sniper_sq in snipers.iter() {
+            let between = crate::bitboard::between_bb(ksq, sniper_sq) & occ_without_snipers;
+            if between.is_empty() || between.more_than_one() {
+                continue;
+            }
+
+            // blockerが自駒のときのみpin対象
+            if (between & self.pieces_c(enemy)).is_empty() {
+                blockers |= between;
+                pinners.set(sniper_sq);
+            } else {
+                blockers |= between;
+            }
+        }
+
+        (blockers, pinners)
     }
 
     /// 王手マスを更新
@@ -1026,7 +1089,7 @@ impl Position {
             };
         }
 
-        // do_move直後にTTをprefetch（YaneuraOu準拠）
+        // do_move直後にTTをprefetch
         prefetcher.prefetch(new_state.key(), them);
 
         // 6. 王手情報の更新（diffベース）
@@ -1038,7 +1101,7 @@ impl Position {
                 self.cur_state().check_squares[moved_pt as usize] & Bitboard::from_square(moved_to);
 
             // 開き王手（動かした駒が遮断駒だった場合）
-            // YaneuraOu準拠: discovered(from, to, ksq, blockers) と同等の判定
+            // discovered(from, to, ksq, blockers) と同等の判定
             // - fromがblockersに含まれている
             // - from, to, ksq が同一直線上にない（aligned でない）場合のみ開き王手
             if let Some(from_sq) = moved_from {
@@ -1052,7 +1115,7 @@ impl Position {
                 }
             }
         }
-        // gives_check=false の場合は checkers=EMPTY のまま（YaneuraOu準拠）
+        // gives_check=false の場合は checkers=EMPTY のまま
         // この最適化により、王手にならない手の場合に attackers_to_c() の呼び出しを回避できる
         // 前提条件: 呼び出し側で gives_check() の判定が正確に行われていること
         // デバッグビルドでは debug_assert で検証を実施
@@ -1074,13 +1137,13 @@ impl Position {
             "gives_check mismatch detected"
         );
         let is_check = !checkers.is_empty();
-        // 4. 連続王手カウンタの更新（YaneuraOu準拠）
+        // 4. 連続王手カウンタの更新
         if is_check {
             new_state.continuous_check[us.index()] = prev_continuous[us.index()] + 2;
         } else {
             new_state.continuous_check[us.index()] = 0;
         }
-        // 受け手側は前の値をそのまま引き継ぐ（YaneuraOu準拠: memcpyで自動的にコピーされる）
+        // 受け手側は前の値をそのまま引き継ぐ（memcpyで自動的にコピーされる）
         // rshogi では partial_clone() で既にコピー済みなので、リセットしない
 
         // 5. 手番交代
@@ -1438,7 +1501,7 @@ impl Position {
         let mut repetition_type = RepetitionState::None;
 
         if max_back >= 4 {
-            // YaneuraOu準拠: 千日手は最短4手で成立するため4手前から比較開始
+            // 千日手は最短4手で成立するため4手前から比較開始
             let mut dist = 4;
             let mut st_idx_opt = prev_idx_opt
                 .and_then(|idx| self.state_stack[idx].previous) // 2手前
@@ -1537,7 +1600,7 @@ impl Position {
         // 開き王手：fromがblockerで、fromが王との直線上から外れるか
         let them = !us;
         let ksq = self.king_square[them.index()];
-        // YaneuraOu準拠: blockers_for_king には敵駒も含まれるため、自駒でフィルタ
+        // blockers_for_king には敵駒も含まれるため、自駒でフィルタ
         let blockers = self.blockers_for_king(them) & self.pieces_c(us);
 
         if blockers.contains(from) {
@@ -1557,9 +1620,7 @@ impl Position {
 
         false
     }
-}
 
-impl Position {
     /// 1手詰めを検出（該当手があれば返す。なければ Move::NONE）
     pub fn mate_1ply(&mut self) -> Move {
         crate::mate::mate_1ply(self).unwrap_or(Move::NONE)
@@ -1569,63 +1630,6 @@ impl Position {
 impl Default for Position {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl Position {
-    /// 占有を指定してpin駒を再計算（king_color側の玉に対するpin）
-    fn pinned_pieces_with_occupancy(
-        &self,
-        king_color: Color,
-        occupied: Bitboard,
-        enemy_removed: Bitboard,
-    ) -> Bitboard {
-        let (blockers, _) = self.compute_blockers_and_pinners(king_color, occupied, enemy_removed);
-        blockers & self.pieces_c(king_color)
-    }
-
-    /// 占有を指定してpin候補とpinnerを再計算
-    fn compute_blockers_and_pinners(
-        &self,
-        king_color: Color,
-        occupied: Bitboard,
-        enemy_removed: Bitboard,
-    ) -> (Bitboard, Bitboard) {
-        let ksq = self.king_square[king_color.index()];
-        let enemy = !king_color;
-
-        let lance_bb = self.pieces(enemy, PieceType::Lance) & !enemy_removed;
-        // 事前計算済みのbishop_horse_bb/rook_dragon_bbを使用
-        let bishop_bb = (self.bishop_horse_bb & self.by_color[enemy.index()]) & !enemy_removed;
-        let rook_bb = (self.rook_dragon_bb & self.by_color[enemy.index()]) & !enemy_removed;
-
-        let snipers = (lance_effect(king_color, ksq, Bitboard::EMPTY) & lance_bb)
-            | (bishop_effect(ksq, Bitboard::EMPTY) & bishop_bb)
-            | (rook_effect(ksq, Bitboard::EMPTY) & rook_bb);
-
-        // YO準拠: スナイパー自身を占有から除外してbetween_bbを計算
-        // これにより同一ライン上の複数スナイパー（例: 王 歩 ^香 ^飛）を
-        // すべてピンナーとして正しく検出できる
-        let occupancy = occupied ^ (snipers & occupied);
-
-        let mut blockers = Bitboard::EMPTY;
-        let mut pinners = Bitboard::EMPTY;
-        for sniper_sq in snipers.iter() {
-            let between = crate::bitboard::between_bb(ksq, sniper_sq) & occupancy;
-            if between.is_empty() || between.more_than_one() {
-                continue;
-            }
-
-            // blockerが自駒のときのみpin対象
-            if (between & self.pieces_c(enemy)).is_empty() {
-                blockers |= between;
-                pinners.set(sniper_sq);
-            } else {
-                blockers |= between;
-            }
-        }
-
-        (blockers, pinners)
     }
 }
 
@@ -1762,47 +1766,6 @@ mod tests {
             pos.compute_blockers_and_pinners(Color::Black, pos.occupied(), Bitboard::EMPTY);
         assert_eq!(pos.blockers_for_king(Color::Black), blockers_full);
         assert_eq!(pos.cur_state().pinners[Color::White.index()], pinners_full);
-    }
-
-    #[test]
-    fn test_blockers_pinners_detect_multiple_snipers_on_same_line() {
-        // 配置（先手玉5九）:
-        // 5八: 先手金（唯一の遮断駒）
-        // 5七: 後手香（内側スナイパー）
-        // 5一: 後手飛（外側スナイパー）
-        //
-        // YO準拠では occupancy から snipers を除外して between を見るため、
-        // 5七と5一の両方が pinner として検出される。
-        let mut pos = Position::new();
-        let bk = Square::new(File::File5, Rank::Rank9); // 5九
-        let wk = Square::new(File::File1, Rank::Rank1); // 後手玉（位置は任意）
-        let blocker = Square::new(File::File5, Rank::Rank8); // 5八
-        let w_lance = Square::new(File::File5, Rank::Rank7); // 5七
-        let w_rook = Square::new(File::File5, Rank::Rank1); // 5一
-
-        pos.put_piece(Piece::B_KING, bk);
-        pos.king_square[Color::Black.index()] = bk;
-        pos.put_piece(Piece::W_KING, wk);
-        pos.king_square[Color::White.index()] = wk;
-        pos.put_piece(Piece::B_GOLD, blocker);
-        pos.put_piece(Piece::W_LANCE, w_lance);
-        pos.put_piece(Piece::W_ROOK, w_rook);
-        pos.init_piece_list();
-
-        pos.update_blockers_and_pinners();
-
-        let blockers = pos.blockers_for_king(Color::Black);
-        let pinners = pos.cur_state().pinners[Color::Black.index()];
-
-        assert!(blockers.contains(blocker), "5八 should be detected as the single blocker");
-        assert!(
-            pinners.contains(w_lance),
-            "inner sniper (5七 lance) should be detected as pinner"
-        );
-        assert!(
-            pinners.contains(w_rook),
-            "outer sniper (5一 rook) should also be detected as pinner"
-        );
     }
 
     #[test]

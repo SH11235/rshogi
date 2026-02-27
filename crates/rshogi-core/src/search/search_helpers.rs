@@ -35,7 +35,7 @@ pub(super) fn check_abort(
         return true;
     }
 
-    // 頻度制御：512回に1回だけ実際のチェックを行う（YaneuraOu準拠）
+    // 頻度制御：512回に1回だけ実際のチェックを行う
     st.calls_cnt -= 1;
     if st.calls_cnt > 0 {
         return false;
@@ -64,7 +64,7 @@ pub(super) fn check_abort(
     }
 
     // 時間制限チェック（main threadのみ）
-    // YaneuraOu準拠の2フェーズロジック
+    // 2フェーズロジック
     if ctx.thread_id == 0 {
         // ponderhit フラグをポーリングし、検知したら通常探索へ切り替える
         if time_manager.take_ponderhit() {
@@ -87,7 +87,7 @@ pub(super) fn check_abort(
         }
 
         // フェーズ2: search_end 未設定 → maximum超過 or stop_on_ponderhit で設定
-        // ただし ponder 中は停止判定を行わない（YO準拠）
+        // ただし ponder 中は停止判定を行わない
         if !time_manager.is_pondering()
             && time_manager.search_end() == 0
             && limits.use_time_management()
@@ -121,7 +121,7 @@ pub(super) fn ensure_nnue_accumulator(st: &mut SearchState, pos: &Position) {
     ensure_accumulator_computed(pos, &mut st.nnue_stack)
 }
 
-/// YO準拠: do_move + nodes++ + nnue_push をまとめたラッパー
+/// do_move + nodes++ + nnue_push をまとめたラッパー
 ///
 /// YO では Worker::do_move() 内部で nodes++ と nnue push を行う。
 /// rshogi でも同等の一括処理を提供する。
@@ -229,7 +229,7 @@ pub(super) fn set_cont_history_for_move(
 }
 
 /// ContinuationHistory をクリア（null move用）
-/// YaneuraOu準拠: sentinelテーブル(NO_PIECE, SQ_ZERO)を参照するようにする。
+/// sentinelテーブル(NO_PIECE, SQ_ZERO)を参照するようにする。
 /// cont_hist_keyをNoneにするとcorrection historyのcontinuation更新がスキップされてしまうため、
 /// sentinel keyを設定してYOと同じsentinelテーブルへの読み書きが行われるようにする。
 #[inline]
