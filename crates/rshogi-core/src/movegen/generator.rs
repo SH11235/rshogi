@@ -1304,20 +1304,20 @@ pub fn generate_legal(pos: &Position, list: &mut MoveList) {
     //       else
     //           ++mlist;
     //   }
+    let slice = buffer.as_mut_slice();
     let mut i = 0;
-    let mut last = buffer.len();
+    let mut last = slice.len();
     while i < last {
-        if !pos.is_legal(buffer.get(i).mv) {
+        if !pos.is_legal(slice[i].mv) {
             last -= 1;
-            // i < last <= buffer.len() が常に成立するため set() の len 自動拡張は発動しない
-            buffer.set(i, buffer.get(last));
+            slice[i] = slice[last];
         } else {
             i += 1;
         }
     }
 
-    for idx in 0..last {
-        list.push(buffer.get(idx).mv);
+    for ext in &slice[..last] {
+        list.push(ext.mv);
     }
 }
 
