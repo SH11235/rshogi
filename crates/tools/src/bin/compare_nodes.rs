@@ -514,7 +514,7 @@ fn has_multipv_gt1(line: &str) -> bool {
 /// "info string ..." はデバッグ出力なのでスキップする。
 fn parse_info_line(line: &str) -> Option<DepthInfo> {
     // "info string" で始まる行はデバッグ出力なのでスキップ
-    if line.contains("info string") {
+    if line.starts_with("info string") {
         return None;
     }
     let tokens: Vec<&str> = line.split_whitespace().collect();

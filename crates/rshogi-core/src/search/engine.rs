@@ -1390,7 +1390,7 @@ where
             local_search_again_counter
         };
 
-        // MultiPVループ（）
+        // MultiPVループ
         let mut processed_pv = 0;
         for pv_idx in 0..effective_multi_pv {
             if worker.state.abort {
