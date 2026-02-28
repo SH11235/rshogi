@@ -9,7 +9,7 @@ use anyhow::{Result, anyhow, bail};
 
 use super::types::{InfoCallback, InfoSnapshot, SearchOutcome, SearchRequest, duration_to_millis};
 
-pub const ENGINE_READY_TIMEOUT: Duration = Duration::from_secs(30);
+pub const ENGINE_READY_TIMEOUT: Duration = Duration::from_secs(120);
 pub const ENGINE_QUIT_TIMEOUT: Duration = Duration::from_millis(300);
 pub const ENGINE_QUIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 

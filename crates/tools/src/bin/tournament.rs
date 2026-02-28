@@ -26,9 +26,6 @@
 ///   --usi-option "FV_SCALE=24" \
 ///   --engine-usi-option "0:EvalFile=eval/halfkp_256x2-32-32_crelu/suisho5.bin" \
 ///   --engine-usi-option "1:EvalDir=/mnt/nvme1/development/rshogi/eval/halfkp_256x2-32-32_crelu" \
-///   --engine-usi-option "1:BookFile=no_book" \
-///   --engine-usi-option "1:MinimumThinkingTime=0" \
-///   --engine-usi-option "1:NetworkDelay=0" \
 ///   --engine-usi-option "1:NetworkDelay2=0" \
 ///   --engine-usi-option "1:RoundUpToFullSecond=false" \
 ///   --out-dir "runs/selfplay/$(date +%Y%m%d_%H%M%S)-rshogi-vs-yaneuraou-suisho5"
@@ -485,8 +482,28 @@ fn main() -> Result<()> {
     }
 
     // エンジンごとの最終オプションリストを構築
+    //
+    // 公平な対局条件のため、NetworkDelay=0 と MinimumThinkingTime=byoyomi を
+    // デフォルトで注入する。ユーザーが明示的に指定した場合はそちらを優先。
+    // - NetworkDelay: 0 以外だと秒境界切り上げで思考時間が短縮され、
+    //   エンジン間で実質的な思考時間が不平等になる。
+    // - MinimumThinkingTime: byoyomi と一致させることで秒読み全体を使い切れる。
+    let time_defaults = [
+        ("NetworkDelay", "0"),
+        ("MinimumThinkingTime", &cli.byoyomi.to_string()),
+    ];
     let engine_usi_options: Vec<Vec<String>> = (0..n)
-        .map(|i| per_engine_usi.remove(&i).unwrap_or_else(|| common_usi_options.clone()))
+        .map(|i| {
+            let mut opts = per_engine_usi.remove(&i).unwrap_or_else(|| common_usi_options.clone());
+            for (name, default_value) in &time_defaults {
+                let already_set =
+                    opts.iter().any(|o| o.split_once('=').is_some_and(|(k, _)| k == *name));
+                if !already_set {
+                    opts.push(format!("{name}={default_value}"));
+                }
+            }
+            opts
+        })
         .collect();
     let timestamp = Local::now();
     let shutdown = Arc::new(AtomicBool::new(false));
