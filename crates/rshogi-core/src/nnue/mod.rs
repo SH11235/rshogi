@@ -73,7 +73,8 @@ pub use features::{
     HalfKPFeatureSet, TriggerEvent,
 };
 pub use layer_stacks::{
-    LayerStackBucket, LayerStacks, compute_bucket_index, sqr_clipped_relu_transform,
+    LayerStackBucket, LayerStacks, compute_bucket_index, compute_king_ranks,
+    sqr_clipped_relu_transform,
 };
 pub use layers::{AffineTransform, ClippedReLU};
 pub use network::{

@@ -8,7 +8,7 @@ use super::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES};
 use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLayerStacks};
 use super::constants::{HALFKA_HM_DIMENSIONS, NNUE_PYTORCH_L1};
 use super::features::{FeatureSet, HalfKA_hm_FeatureSet};
-use super::leb128::read_compressed_tensor_i16;
+use super::leb128::read_compressed_tensor_i16_all;
 use crate::position::Position;
 use crate::types::Color;
 use std::io::{self, Read};
@@ -58,24 +58,65 @@ impl FeatureTransformerLayerStacks {
 
     /// LEB128圧縮形式から読み込み（自動検出）
     ///
-    /// 圧縮/非圧縮を自動判定して読み込む。
-    /// "COMPRESSED_LEB128"マジックがあれば圧縮形式として読み込む。
+    /// 最初のブロックを全デコードし、要素数で形式を判別する:
+    /// - 要素数 == biases のみ → YO形式（2ブロック）: 続けて weights ブロックを読む
+    /// - 要素数 == biases + weights → 旧bullet-shogi形式（1ブロック）
     pub fn read_leb128<R: Read>(reader: &mut R) -> io::Result<Self> {
-        // バイアスを読み込み（圧縮形式を自動検出）
-        let bias_vec = read_compressed_tensor_i16(reader, NNUE_PYTORCH_L1)?;
-        let mut biases = [0i16; NNUE_PYTORCH_L1];
-        biases.copy_from_slice(&bias_vec);
-
-        // 重みを読み込み（圧縮形式を自動検出）
         let weight_size = HALFKA_HM_DIMENSIONS * NNUE_PYTORCH_L1;
-        let weight_vec = read_compressed_tensor_i16(reader, weight_size)?;
-        let mut weights = AlignedBox::new_zeroed(weight_size);
-        weights.copy_from_slice(&weight_vec);
+        let total_size = NNUE_PYTORCH_L1 + weight_size;
 
-        Ok(Self {
-            biases: Aligned(biases),
-            weights,
-        })
+        // 最初のブロックを全値デコードして要素数で判別
+        let first_block = read_compressed_tensor_i16_all(reader)?;
+
+        if first_block.len() == total_size {
+            // 旧bullet-shogi形式（1ブロック）: biases + weights が結合
+            let mut biases = [0i16; NNUE_PYTORCH_L1];
+            biases.copy_from_slice(&first_block[..NNUE_PYTORCH_L1]);
+
+            let mut weights = AlignedBox::new_zeroed(weight_size);
+            weights.copy_from_slice(&first_block[NNUE_PYTORCH_L1..]);
+
+            return Ok(Self {
+                biases: Aligned(biases),
+                weights,
+            });
+        }
+
+        if first_block.len() == NNUE_PYTORCH_L1 {
+            // YO形式（2ブロック）: 次に weights ブロックを読み込み
+            let weights_block = read_compressed_tensor_i16_all(reader)?;
+            if weights_block.len() != weight_size {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "FT weights block size mismatch: got {}, expected {}",
+                        weights_block.len(),
+                        weight_size
+                    ),
+                ));
+            }
+
+            let mut biases = [0i16; NNUE_PYTORCH_L1];
+            biases.copy_from_slice(&first_block);
+
+            let mut weights = AlignedBox::new_zeroed(weight_size);
+            weights.copy_from_slice(&weights_block);
+
+            return Ok(Self {
+                biases: Aligned(biases),
+                weights,
+            });
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Unexpected LEB128 tensor size: got {}, expected {} or {}",
+                first_block.len(),
+                NNUE_PYTORCH_L1,
+                total_size
+            ),
+        ))
     }
 
     /// 差分計算を使わずにAccumulatorを計算

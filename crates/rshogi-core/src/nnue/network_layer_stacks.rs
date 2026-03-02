@@ -25,9 +25,10 @@
 
 use super::accumulator::Aligned;
 use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLayerStacks};
-use super::constants::{MAX_ARCH_LEN, NNUE_PYTORCH_L1, NNUE_VERSION_HALFKA};
+use super::constants::{FV_SCALE_HALFKA, MAX_ARCH_LEN, NNUE_PYTORCH_L1};
 use super::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
 use super::layer_stacks::{LayerStacks, compute_bucket_index, sqr_clipped_relu_transform};
+use super::network::{get_fv_scale_override, parse_fv_scale_from_arch};
 use crate::position::Position;
 use crate::types::{Color, Value};
 #[cfg(feature = "diagnostics")]
@@ -44,6 +45,8 @@ pub struct NetworkLayerStacks {
     pub feature_transformer: FeatureTransformerLayerStacks,
     /// LayerStacks (9バケット)
     pub layer_stacks: LayerStacks,
+    /// 評価値スケーリング係数（アーキテクチャ文字列から取得、USIオプションでオーバーライド可）
+    pub fv_scale: i32,
 }
 
 impl NetworkLayerStacks {
@@ -56,23 +59,13 @@ impl NetworkLayerStacks {
 
     /// リーダーから読み込み
     pub fn read<R: Read + Seek>(reader: &mut R) -> io::Result<Self> {
-        // ヘッダを読み込み
         let mut buf4 = [0u8; 4];
-        reader.read_exact(&mut buf4)?;
-        let version = u32::from_le_bytes(buf4);
 
-        if version != NNUE_VERSION_HALFKA {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "Invalid NNUE version for nnue-pytorch: {version:#x}, expected {NNUE_VERSION_HALFKA:#x}"
-                ),
-            ));
-        }
-
-        // 構造ハッシュを読み込み
+        // version（呼び出し元で検証済み）
         reader.read_exact(&mut buf4)?;
-        let _hash = u32::from_le_bytes(buf4);
+
+        // 構造ハッシュ
+        reader.read_exact(&mut buf4)?;
 
         // アーキテクチャ文字列を読み込み
         reader.read_exact(&mut buf4)?;
@@ -88,6 +81,9 @@ impl NetworkLayerStacks {
 
         // アーキテクチャ文字列を解析
         let arch_str = String::from_utf8_lossy(&arch);
+
+        // FV_SCALE 検出
+        let fv_scale = parse_fv_scale_from_arch(&arch_str).unwrap_or(FV_SCALE_HALFKA);
 
         // Factorizedモデルの検出
         if arch_str.contains("Factorizer") {
@@ -151,6 +147,7 @@ impl NetworkLayerStacks {
         Ok(Self {
             feature_transformer,
             layer_stacks,
+            fv_scale,
         })
     }
 
@@ -207,9 +204,9 @@ impl NetworkLayerStacks {
         let bucket_index = compute_bucket_index(f_rank, e_rank);
 
         // LayerStacks で評価
-        let score = self.layer_stacks.evaluate(bucket_index, &transformed.0);
-
-        Value::new(score)
+        let raw_score = self.layer_stacks.evaluate_raw(bucket_index, &transformed.0);
+        let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
+        Value::new(raw_score / fv_scale)
     }
 
     /// 評価値を計算（詳細診断ログ付き）
@@ -268,8 +265,10 @@ impl NetworkLayerStacks {
         info!("[NNUE Eval] l1_skip: {l1_skip}");
         info!("[NNUE Eval] raw_score (with skip): {raw_score}");
 
-        let score = raw_score / super::constants::NNUE_PYTORCH_NNUE2SCORE;
-        let score_float = raw_score as f64 / super::constants::NNUE_PYTORCH_NNUE2SCORE as f64;
+        let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
+        let score = raw_score / fv_scale;
+        let score_float = raw_score as f64 / fv_scale as f64;
+        info!("[NNUE Eval] fv_scale: {fv_scale}");
         info!("[NNUE Eval] score: {score} (float: {score_float:.4})");
 
         Value::new(score)
@@ -305,13 +304,13 @@ impl NetworkLayerStacks {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nnue::constants::NNUE_PYTORCH_NNUE2SCORE;
+    use crate::nnue::constants::FV_SCALE_HALFKA;
     use crate::position::{Position, SFEN_HIRATE};
 
     #[test]
     fn test_network_dimensions() {
         assert_eq!(NNUE_PYTORCH_L1, 1536);
-        assert_eq!(NNUE_PYTORCH_NNUE2SCORE, 600);
+        assert_eq!(FV_SCALE_HALFKA, 16);
     }
 
     /// LayerStacks NNUEファイルの読み込みと評価テスト
@@ -454,7 +453,7 @@ mod tests {
 
         // LayerStacks の生スコアを計算
         let raw_score = network.layer_stacks.evaluate_raw(bucket_index, &transformed);
-        eprintln!("Raw score (before /600): {raw_score}");
+        eprintln!("Raw score (before /fv_scale): {raw_score}, fv_scale: {}", network.fv_scale);
 
         // 評価値を計算
         let value = network.evaluate(&pos, &acc);
@@ -491,14 +490,5 @@ mod tests {
             let val = network.evaluate(&pos, &acc);
             eprintln!("{:15}: {:6} (raw: {:6})", name, val.raw(), raw);
         }
-
-        // ファイル読み込みの検証
-        // - FT bias/weight の読み込みが正しい
-        // - LayerStacks の読み込みが正しい
-        // - 評価値計算が動作する
-        //
-        // 注意: epoch82.nnue は学習途中のモデルなので評価値が小さい
-        // Raw score: -51 → /600 = 0
-        // これは正常な動作
     }
 }

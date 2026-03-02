@@ -86,97 +86,45 @@ fn decode_single_leb128(data: &[u8]) -> io::Result<(i64, usize)> {
     Ok((result, pos))
 }
 
-/// 圧縮形式かどうかをチェックし、LEB128バッファを読み込む
+/// LEB128圧縮ブロックを読み込み、全値をデコードして返す
 ///
-/// nnue-pytorch形式:
-/// - "COMPRESSED_LEB128" (17バイト)
-/// - int32: 圧縮データのサイズ
-/// - 圧縮データ（LEB128エンコードされたバイト列）
-pub fn read_compressed_tensor_i16<R: Read>(reader: &mut R, count: usize) -> io::Result<Vec<i16>> {
-    // まず17バイトをpeek
+/// count を指定せず、圧縮データ内の全値をデコードする。
+/// ブロック内の要素数で形式（biases のみ / biases+weights 結合）を判別する用途に使う。
+pub fn read_compressed_tensor_i16_all<R: Read>(reader: &mut R) -> io::Result<Vec<i16>> {
     let mut magic_buf = [0u8; 17];
     reader.read_exact(&mut magic_buf)?;
 
-    if magic_buf == LEB128_MAGIC {
-        // LEB128圧縮形式
-        let mut size_buf = [0u8; 4];
-        reader.read_exact(&mut size_buf)?;
-        let compressed_size = u32::from_le_bytes(size_buf) as usize;
-
-        // サイズ上限チェック（DoS対策）
-        const MAX_COMPRESSED_SIZE: usize = 100 * 1024 * 1024; // 100MB
-        if compressed_size == 0 || compressed_size > MAX_COMPRESSED_SIZE {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Invalid compressed size: {compressed_size} (max: {MAX_COMPRESSED_SIZE})"),
-            ));
-        }
-
-        // 圧縮データを読み込み
-        let mut compressed_data = vec![0u8; compressed_size];
-        reader.read_exact(&mut compressed_data)?;
-
-        // LEB128デコード
-        decode_leb128_array_i16(&compressed_data, count)
-    } else {
-        // 非圧縮形式: magic_bufは実際のデータの一部
-        // i16として読み込む必要がある
-        // magic_bufの17バイト = 8個の i16 + 1バイト
-        // これは少し厄介なので、全体を読み直す方が簡単
-
-        // 既に読んだ17バイトから i16 を復元
-        let mut result = Vec::with_capacity(count);
-
-        // 17バイトから8個のi16を読む
-        let mut idx = 0;
-        while idx + 1 < magic_buf.len() && result.len() < count {
-            let val = i16::from_le_bytes([magic_buf[idx], magic_buf[idx + 1]]);
-            result.push(val);
-            idx += 2;
-        }
-
-        // 残りの byte がある場合は次のバイトと組み合わせる
-        let leftover: Option<u8> = if idx < magic_buf.len() {
-            Some(magic_buf[idx])
-        } else {
-            None
-        };
-
-        // 残りを読み込み
-        let remaining = count - result.len();
-        if remaining > 0 {
-            let mut buf = [0u8; 2];
-
-            if let Some(first_byte) = leftover {
-                // 1バイト残りがある場合
-                reader.read_exact(&mut buf[..1])?;
-                let val = i16::from_le_bytes([first_byte, buf[0]]);
-                result.push(val);
-            }
-
-            // 残りを2バイトずつ読む
-            let still_remaining = count - result.len();
-            for _ in 0..still_remaining {
-                reader.read_exact(&mut buf)?;
-                result.push(i16::from_le_bytes(buf));
-            }
-        }
-
-        Ok(result)
+    if magic_buf != LEB128_MAGIC {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Expected COMPRESSED_LEB128 magic"));
     }
+
+    let mut size_buf = [0u8; 4];
+    reader.read_exact(&mut size_buf)?;
+    let compressed_size = u32::from_le_bytes(size_buf) as usize;
+
+    const MAX_COMPRESSED_SIZE: usize = 256 * 1024 * 1024;
+    if compressed_size == 0 || compressed_size > MAX_COMPRESSED_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Invalid compressed size: {compressed_size} (max: {MAX_COMPRESSED_SIZE})"),
+        ));
+    }
+
+    let mut compressed_data = vec![0u8; compressed_size];
+    reader.read_exact(&mut compressed_data)?;
+
+    decode_leb128_all_i16(&compressed_data)
 }
 
-/// LEB128エンコードされたバイト列から i16 配列をデコード
-fn decode_leb128_array_i16(data: &[u8], count: usize) -> io::Result<Vec<i16>> {
-    let mut result = Vec::with_capacity(count);
+/// LEB128エンコードされたバイト列から全 i16 値をデコード
+fn decode_leb128_all_i16(data: &[u8]) -> io::Result<Vec<i16>> {
+    let mut result = Vec::new();
     let mut pos = 0;
-
-    for _ in 0..count {
+    while pos < data.len() {
         let (val, consumed) = decode_single_leb128(&data[pos..])?;
         result.push(val as i16);
         pos += consumed;
     }
-
     Ok(result)
 }
 
@@ -238,18 +186,18 @@ mod tests {
     }
 
     #[test]
-    fn test_read_compressed_tensor_i16_uncompressed() {
-        // 非圧縮形式のテスト: [1, 2, 3] をi16 little endianで
-        let data: Vec<u8> = vec![
-            0x01, 0x00, // 1
-            0x02, 0x00, // 2
-            0x03, 0x00, // 3
-            // 17バイトに達するまでパディング
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        ];
+    fn test_read_compressed_tensor_i16_all() {
+        // LEB128 圧縮形式: [1, -1, 127] をエンコード
+        // 1 → 0x01, -1 → 0x7F, 127 → 0xFF 0x00
+        let compressed = vec![0x01, 0x7F, 0xFF, 0x00];
+        let mut data = Vec::new();
+        data.extend_from_slice(b"COMPRESSED_LEB128");
+        data.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+        data.extend_from_slice(&compressed);
+
         let mut cursor = Cursor::new(data);
-        let result = read_compressed_tensor_i16(&mut cursor, 3).unwrap();
-        assert_eq!(result, vec![1, 2, 3]);
+        let result = read_compressed_tensor_i16_all(&mut cursor).unwrap();
+        assert_eq!(result, vec![1, -1, 127]);
     }
 
     #[test]
@@ -279,10 +227,10 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_leb128_array_count_mismatch() {
-        // 要求数より少ないデータ
-        let data = [0x00, 0x01]; // 2つの値
-        let result = decode_leb128_array_i16(&data, 10); // 10個要求
+    fn test_read_compressed_tensor_i16_all_invalid_magic() {
+        let data = vec![0x00; 21]; // マジックが一致しない
+        let mut cursor = Cursor::new(data);
+        let result = read_compressed_tensor_i16_all(&mut cursor);
         assert!(result.is_err());
     }
 

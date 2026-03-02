@@ -139,9 +139,6 @@ pub const LAYER_STACK_L1_OUT: usize = NNUE_PYTORCH_L2 + 1; // 16
 /// LayerStacks L2層の入力次元数（L2 * 2 = 30）
 pub const LAYER_STACK_L2_IN: usize = NNUE_PYTORCH_L2 * 2; // 30
 
-/// nnue-pytorch の評価値スケーリング
-pub const NNUE_PYTORCH_NNUE2SCORE: i32 = 600;
-
 /// nnue-pytorch の隠れ層重みスケール
 pub const NNUE_PYTORCH_WEIGHT_SCALE_HIDDEN: i32 = 64;
 

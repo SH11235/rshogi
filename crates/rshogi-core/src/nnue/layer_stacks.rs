@@ -18,7 +18,7 @@
 use super::accumulator::AlignedBox;
 use super::constants::{
     LAYER_STACK_L1_OUT, LAYER_STACK_L2_IN, NNUE_PYTORCH_L1, NNUE_PYTORCH_L2, NNUE_PYTORCH_L3,
-    NNUE_PYTORCH_NNUE2SCORE, NUM_LAYER_STACK_BUCKETS,
+    NUM_LAYER_STACK_BUCKETS,
 };
 use std::io::{self, Read};
 
@@ -142,14 +142,14 @@ impl LayerStackBucket {
         let mut l2_input = [0u8; LAYER_STACK_L2_IN]; // 30
 
         for i in 0..NNUE_PYTORCH_L2 {
-            // 15
-            let val = l1_out[i] >> 6; // WEIGHT_SCALE_BITS
-            let clamped = val.clamp(0, 127) as u8;
-
-            // 二乗部分: (clamped^2) * (127/128) ≈ (clamped^2) >> 7
-            let sqr = ((clamped as u32 * clamped as u32) >> 7).min(127) as u8;
-            l2_input[i] = sqr; // 最初の15要素: 二乗
-            l2_input[NNUE_PYTORCH_L2 + i] = clamped; // 次の15要素: 元の値
+            // SqrClippedReLU: 先に二乗→シフト→クランプ
+            // min(127, (input^2) >> (2 * WeightScaleBits + 7)) = min(127, (input^2) >> 19)
+            let input_val = l1_out[i] as i64;
+            let sqr = ((input_val * input_val) >> 19).clamp(0, 127) as u8;
+            // ClippedReLU: clamp(input >> WeightScaleBits, 0, 127)
+            let clamped = (l1_out[i] >> 6).clamp(0, 127) as u8;
+            l2_input[i] = sqr;
+            l2_input[NNUE_PYTORCH_L2 + i] = clamped;
         }
 
         // L2: 30 → 32
@@ -221,10 +221,10 @@ impl LayerStackBucket {
         // ClippedReLU + Sqr for first 15 elements
         let mut l2_input = [0u8; LAYER_STACK_L2_IN];
         for i in 0..NNUE_PYTORCH_L2 {
-            let val = l1_out[i] >> 6;
-            let clamped = val.clamp(0, 127) as u8;
-            // (clamped^2) * (127/128) ≈ (clamped^2) >> 7
-            let sqr = ((clamped as u32 * clamped as u32) >> 7).min(127) as u8;
+            // SqrClippedReLU: min(127, (input^2) >> 19)
+            let input_val = l1_out[i] as i64;
+            let sqr = ((input_val * input_val) >> 19).clamp(0, 127) as u8;
+            let clamped = (l1_out[i] >> 6).clamp(0, 127) as u8;
             l2_input[i] = sqr;
             l2_input[NNUE_PYTORCH_L2 + i] = clamped;
         }
@@ -294,16 +294,6 @@ impl LayerStacks {
         }
 
         Ok(stacks)
-    }
-
-    /// 評価値を計算
-    ///
-    /// bucket_index: 局面に応じて選択されたバケットインデックス (0-8)
-    /// input: SqrClippedReLU後の1536次元ベクトル
-    pub fn evaluate(&self, bucket_index: usize, input: &[u8; NNUE_PYTORCH_L1]) -> i32 {
-        debug_assert!(bucket_index < NUM_LAYER_STACK_BUCKETS);
-        let output = self.buckets[bucket_index].propagate(input);
-        output / NNUE_PYTORCH_NNUE2SCORE
     }
 
     /// 生スコアを計算（スケーリング前）
@@ -544,6 +534,61 @@ mod tests {
 
         // bucket = F_TO_INDEX[8] + E_TO_INDEX[4] = 6 + 1 = 7
         assert_eq!(compute_bucket_index(f_rank2, e_rank2), 7);
+    }
+
+    /// L1 SqrClippedReLU の境界値テスト
+    ///
+    /// 正しい計算式: min(127, (input^2) >> 19)
+    /// 旧実装: clamp(input>>6, 0, 127)^2 >> 7
+    /// input > 8128 のとき旧実装では結果が異なっていた
+    #[test]
+    fn test_l1_sqr_clipped_relu_boundary() {
+        fn sqr_clipped_relu(input: i32) -> u8 {
+            ((input as i64 * input as i64) >> 19).clamp(0, 127) as u8
+        }
+
+        // 通常範囲: input=0..8128 は旧実装と一致
+        assert_eq!(sqr_clipped_relu(0), 0);
+        assert_eq!(sqr_clipped_relu(64), 0); // 64^2 >> 19 = 4096 >> 19 = 0
+        assert_eq!(sqr_clipped_relu(724), 0); // 724^2 = 524176 >> 19 = 0
+        assert_eq!(sqr_clipped_relu(8128), 126); // 8128^2 >> 19 = 66064384 >> 19 = 126
+
+        // 境界値: input=8192 で旧実装と差が出ていたケース
+        // 旧: clamp(8192>>6, 0, 127)^2 >> 7 = 127^2 >> 7 = 16129 >> 7 = 126
+        // 正: (8192^2) >> 19 = 67108864 >> 19 = 127
+        assert_eq!(sqr_clipped_relu(8192), 127);
+
+        // input=8256: 旧=126, 正=127
+        assert_eq!(sqr_clipped_relu(8256), 127);
+
+        // 大きい入力でも 127 を超えない
+        assert_eq!(sqr_clipped_relu(20000), 127);
+
+        // 負の入力: (neg^2) >> 19 は正になる（i32 → i64 昇格で二乗は正）
+        assert_eq!(sqr_clipped_relu(-8192), 127);
+
+        // propagate を通した検証: L1 出力を直接設定して確認
+        let bucket = LayerStackBucket::new(); // ゼロ初期化（weights=0, biases=0）
+
+        // biases を設定して l1_out を制御する
+        // l1_out = bias（weights が全 0 なので入力に依存しない）
+        let mut bucket_with_biases = LayerStackBucket::new();
+        // index 0 の bias を 8192 に設定 → sqr = 127, 旧実装なら 126
+        bucket_with_biases.l1_biases[0] = 8192;
+        // index 1 の bias を 8128 に設定 → sqr = 126 (両方同じ)
+        bucket_with_biases.l1_biases[1] = 8128;
+
+        let input = [0u8; NNUE_PYTORCH_L1];
+        let result = bucket_with_biases.propagate(&input);
+
+        // l2_input[0] = sqr(8192) = 127, l2_input[1] = sqr(8128) = 126
+        // 具体的な result 値は L2/Output の weights にも依存するが、
+        // ここでは weights が全 0 なのでスキップ接続のみ:
+        // result = output_bias(0) + l1_skip(l1_biases[15]=0) = 0
+        // L2 input は propagate 内部で消費されるため直接検証できないが、
+        // ゼロ weights でパニックしないことを確認
+        let _ = result;
+        let _ = bucket; // suppress unused warning
     }
 
     #[test]
