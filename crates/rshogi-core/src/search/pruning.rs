@@ -96,12 +96,13 @@ pub(super) fn step14_pruning(
             // (VALUE_NONE=32002によりfutilityValueが常にalpha超えのため暗黙的に安全)
             if !step_ctx.gives_check && lmr_depth < 7 {
                 use super::movepicker::piece_value;
+                let tune = ctx.tune_params;
                 let captured_value = piece_value(captured);
                 let futility_value = step_ctx.static_eval.raw()
-                    + 231
-                    + 211 * lmr_depth
+                    + tune.step14_futility_base
+                    + tune.step14_futility_lmr_depth_mult * lmr_depth
                     + captured_value
-                    + 130 * capt_hist / 1024;
+                    + tune.step14_futility_capt_hist_scale * capt_hist / 1024;
                 if futility_value <= step_ctx.alpha.raw() {
                     return Step14Outcome::Skip { best_value: None };
                 }
@@ -140,25 +141,29 @@ pub(super) fn step14_pruning(
             // NPS改善後に再評価予定。
             let cont_history = cont_hist_0 + cont_hist_1 + pawn_hist;
 
-            // Continuation history based pruning (-4312 * depth)
-            if cont_history < -4312 * step_ctx.depth {
+            let tune = ctx.tune_params;
+
+            // Continuation history based pruning
+            if cont_history < tune.cont_history_pruning_threshold * step_ctx.depth {
                 return Step14Outcome::Skip { best_value: None };
             }
 
             // mainHistoryは pruning判定後に追加
-            // history += 76 * mainHistory / 32
-            let hist_score = cont_history + 76 * main_hist / 32;
+            let hist_score = cont_history
+                + tune.main_hist_pruning_add_num * main_hist
+                    / tune.main_hist_pruning_add_den.max(1);
 
             // lmrDepth調整 (枝刈りされなかった場合のみ実行)
-            let lmr_depth = lmr_depth + hist_score / 3220;
+            let lmr_depth = lmr_depth + hist_score / tune.lmr_depth_history_div.max(1);
 
             // Futility pruning for quiet moves (親ノードでの枝刈り)
             let no_best_move = step_ctx.best_move.is_none();
             let futility_value = step_ctx.static_eval.raw()
-                + 47
-                + 171 * no_best_move as i32
-                + 134 * lmr_depth
-                + 90 * (step_ctx.static_eval > step_ctx.alpha) as i32;
+                + tune.quiet_futility_base
+                + tune.quiet_futility_no_best_move * no_best_move as i32
+                + tune.quiet_futility_lmr_depth_mult * lmr_depth
+                + tune.quiet_futility_eval_gt_alpha
+                    * (step_ctx.static_eval > step_ctx.alpha) as i32;
 
             // static_eval!=NONEガードなし（!in_check + VALUE_NONEで暗黙的に安全）
             if !step_ctx.in_check && lmr_depth < 11 && futility_value <= step_ctx.alpha.raw() {
@@ -176,11 +181,12 @@ pub(super) fn step14_pruning(
                 return Step14Outcome::Skip { best_value: None };
             }
 
-            // SEE pruning for quiet moves (-27 * lmrDepth * lmrDepth)
+            // SEE pruning for quiet moves
             // !in_check/lmrDepth>0ガードなし
             // lmrDepth=0時はthreshold=0でSEE<0の手を枝刈り
             let lmr_depth_clamped = lmr_depth.max(0);
-            let see_thresh = -27 * lmr_depth_clamped * lmr_depth_clamped;
+            let see_thresh =
+                tune.see_pruning_threshold_mult * lmr_depth_clamped * lmr_depth_clamped;
             if !step_ctx.pos.see_ge(step_ctx.mv, Value::new(see_thresh)) {
                 return Step14Outcome::Skip { best_value: None };
             }

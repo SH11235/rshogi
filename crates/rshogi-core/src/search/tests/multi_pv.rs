@@ -1,7 +1,6 @@
 //! MultiPV（候補手複数探索）のテスト
-//!
-//! YaneuraOu準拠のMultiPV実装の単体テスト
 
+use crate::search::SearchTuneParams;
 use crate::search::engine::compute_aspiration_window;
 use crate::search::types::{RootMove, RootMoves};
 use crate::types::{Move, Value};
@@ -460,7 +459,7 @@ fn test_aspiration_window_uses_average_and_mean_squared() {
     rm.average_score = Value::new(120);
     rm.mean_squared_score = Some(11131 * 10); // abs(111310) / 9000 = 12, delta=5+0+12=17
 
-    let (alpha, beta, delta) = compute_aspiration_window(&rm, 0);
+    let (alpha, beta, delta) = compute_aspiration_window(&rm, 0, &SearchTuneParams::default());
     assert_eq!(delta.raw(), 17);
     assert_eq!(alpha.raw(), 103);
     assert_eq!(beta.raw(), 137);
@@ -470,7 +469,7 @@ fn test_aspiration_window_uses_average_and_mean_squared() {
 #[test]
 fn test_aspiration_window_defaults_to_full_window_when_unseeded() {
     let rm = RootMove::new(Move::from_usi("7g7f").unwrap());
-    let (alpha, beta, _) = compute_aspiration_window(&rm, 0);
+    let (alpha, beta, _) = compute_aspiration_window(&rm, 0, &SearchTuneParams::default());
 
     assert_eq!(alpha.raw(), -Value::INFINITE.raw());
     assert_eq!(beta, Value::INFINITE);

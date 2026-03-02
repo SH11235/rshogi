@@ -93,7 +93,11 @@ impl SearchInfo {
 }
 
 /// aspiration windowを計算
-pub(crate) fn compute_aspiration_window(rm: &RootMove, thread_id: usize) -> (Value, Value, Value) {
+pub(crate) fn compute_aspiration_window(
+    rm: &RootMove,
+    thread_id: usize,
+    tune_params: &SearchTuneParams,
+) -> (Value, Value, Value) {
     // mean_squared_score がない場合は巨大なdeltaでフルウィンドウにする
     let fallback = {
         let inf = Value::INFINITE.raw() as i64;
@@ -103,8 +107,10 @@ pub(crate) fn compute_aspiration_window(rm: &RootMove, thread_id: usize) -> (Val
     let mean_sq = mean_sq.min((Value::INFINITE.raw() as i64) * (Value::INFINITE.raw() as i64));
 
     let thread_offset = (thread_id % 8) as i32;
-    // delta = 5 + threadIdx % 8 + abs(meanSquaredScore) / 9000
-    let delta_raw = 5 + thread_offset + (mean_sq / 9000).min(i32::MAX as i64) as i32;
+    let divisor = tune_params.aspiration_mean_sq_div.max(1) as i64;
+    let delta_raw = tune_params.aspiration_delta_base
+        + thread_offset
+        + (mean_sq / divisor).min(i32::MAX as i64) as i32;
     let delta = Value::new(delta_raw);
     let alpha_raw = (rm.average_score.raw() - delta.raw()).max(-Value::INFINITE.raw());
     let beta_raw = (rm.average_score.raw() + delta.raw()).min(Value::INFINITE.raw());
@@ -1398,8 +1404,11 @@ where
             }
 
             // Aspiration Window（average/mean_squaredベース）
-            let (mut alpha, mut beta, mut delta) =
-                compute_aspiration_window(&worker.state.root_moves[pv_idx], worker.thread_id);
+            let (mut alpha, mut beta, mut delta) = compute_aspiration_window(
+                &worker.state.root_moves[pv_idx],
+                worker.thread_id,
+                &worker.search_tune_params,
+            );
             let mut failed_high_cnt = 0;
 
             // Aspiration Windowループ

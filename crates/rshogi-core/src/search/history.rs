@@ -198,6 +198,15 @@ impl ButterflyHistory {
             }
         }
     }
+
+    /// 指定初期値でクリア
+    pub fn clear_with_init(&mut self, init_val: i16) {
+        for color_table in &mut self.table {
+            for entry in color_table.iter_mut() {
+                entry.set(init_val);
+            }
+        }
+    }
 }
 
 impl Default for ButterflyHistory {
@@ -250,6 +259,15 @@ impl LowPlyHistory {
         for ply_table in &mut self.table {
             for entry in ply_table.iter_mut() {
                 entry.set(97);
+            }
+        }
+    }
+
+    /// 指定初期値でクリア
+    pub fn clear_with_init(&mut self, init_val: i16) {
+        for ply_table in &mut self.table {
+            for entry in ply_table.iter_mut() {
+                entry.set(init_val);
             }
         }
     }
@@ -325,6 +343,17 @@ impl CapturePieceToHistory {
             for sq_table in pc_table.iter_mut() {
                 for entry in sq_table.iter_mut() {
                     entry.set(CAPTURE_HISTORY_INIT);
+                }
+            }
+        }
+    }
+
+    /// 指定初期値でクリア
+    pub fn clear_with_init(&mut self, init_val: i16) {
+        for pc_table in self.table.iter_mut() {
+            for sq_table in pc_table.iter_mut() {
+                for entry in sq_table.iter_mut() {
+                    entry.set(init_val);
                 }
             }
         }
@@ -463,6 +492,15 @@ impl ContinuationHistory {
             }
         }
     }
+
+    /// 指定初期値でクリア
+    pub fn clear_with_init(&mut self, init_val: i16) {
+        for row in self.table.iter_mut() {
+            for entry in row.iter_mut() {
+                entry.fill(init_val);
+            }
+        }
+    }
 }
 
 impl Default for ContinuationHistory {
@@ -519,6 +557,17 @@ impl PawnHistory {
             for pc_table in pawn_table.iter_mut() {
                 for entry in pc_table.iter_mut() {
                     entry.set(PAWN_HISTORY_INIT);
+                }
+            }
+        }
+    }
+
+    /// 指定初期値でクリア
+    pub fn clear_with_init(&mut self, init_val: i16) {
+        for pawn_table in self.table.iter_mut() {
+            for pc_table in pawn_table.iter_mut() {
+                for entry in pc_table.iter_mut() {
+                    entry.set(init_val);
                 }
             }
         }
@@ -747,6 +796,21 @@ impl HistoryTables {
             }
         }
         self.pawn_history.clear();
+        self.correction_history.clear();
+        self.tt_move_history.clear();
+    }
+
+    /// SPSA パラメータに基づいた初期値ですべての履歴テーブルをクリア
+    pub fn clear_with_params(&mut self, tp: &SearchTuneParams) {
+        self.main_history.clear_with_init(tp.main_history_init as i16);
+        self.low_ply_history.clear_with_init(tp.low_ply_history_init as i16);
+        self.capture_history.clear_with_init(tp.capture_history_init as i16);
+        for row in &mut self.continuation_history {
+            for ch in row {
+                ch.clear_with_init(tp.continuation_history_init as i16);
+            }
+        }
+        self.pawn_history.clear_with_init(tp.pawn_history_init as i16);
         self.correction_history.clear();
         self.tt_move_history.clear();
     }
