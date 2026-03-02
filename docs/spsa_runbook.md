@@ -102,7 +102,8 @@ cargo run --release -p tools --bin spsa_stats_to_plot_csv -- \
 --active-only-regex '^SPSA_S14_'
 ```
 
-マッチしないパラメータは摂動されずデフォルト値で固定される。
+マッチしないパラメータは摂動されず `.params` ファイルの現在値で固定される。
+前回チューニング済みの値をベースに別グループをチューニングする段階的ワークフローに対応。
 
 ### 方法2: `.params` ファイルに `[[NOT USED]]` マーカー
 
