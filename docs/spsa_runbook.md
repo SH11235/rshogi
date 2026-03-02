@@ -91,19 +91,58 @@ cargo run --release -p tools --bin spsa_stats_to_plot_csv -- \
 
 `.params` ファイルを変更せず、実行時に対象を絞る。
 
-```bash
-# correction 系のみ
---active-only-regex '^SPSA_CORR'
-
-# LMR + futility + NMP をまとめて
---active-only-regex '^SPSA_(LMR|FUTILITY|NMP)_'
-
-# Step14 枝刈り系
---active-only-regex '^SPSA_S14_'
-```
-
 マッチしないパラメータは摂動されず `.params` ファイルの現在値で固定される。
 前回チューニング済みの値をベースに別グループをチューニングする段階的ワークフローに対応。
+
+指定可能な全パターン一覧:
+
+| regex | 対象グループ | 個数 | 説明 |
+|---|---|---|---|
+| `'^SPSA_LMR_'` | LMR | 25 | Late Move Reductions（テーブル係数、Step16 調整等） |
+| `'^SPSA_SINGULAR_'` | Singular Extension | 21 | SE 深さ・beta margin・double/triple extension |
+| `'^SPSA_PRIOR_'` | Prior Countermove | 16 | prior quiet/capture countermove bonus |
+| `'^SPSA_S14_'` | Step 14 枝刈り | 12 | capture futility, quiet futility, SEE, history pruning |
+| `'^SPSA_CONT_HIST'` | Continuation History | 9 | cont history 初期値 + bonus weight (ply 1〜6) |
+| `'^SPSA_CORR'` | Correction | 8 | correction value weight + history 更新係数 |
+| `'^SPSA_FAIL_HIGH_'` | Fail-High History | 8 | fail-high continuation bonus weight |
+| `'^SPSA_NMP_'` | Null Move Pruning | 7 | NMP margin, reduction, verification depth |
+| `'^SPSA_FUTILITY_'` | Futility Pruning | 5 | futility margin, improving/opp_worsening 調整 |
+| `'^SPSA_EVAL_DIFF_'` | evalDiff | 5 | static eval 差分の clamp, offset, history 係数 |
+| `'^SPSA_UPDATE_ALL_'` | History 更新スケール | 5 | quiet/capture bonus/malus, early refute |
+| `'^SPSA_STAT_BONUS_'` | Stat Bonus | 4 | stat bonus depth 係数, 上限, TT bonus |
+| `'^SPSA_STAT_MALUS_'` | Stat Malus | 4 | stat malus depth 係数, 上限, move count |
+| `'^SPSA_PROBCUT_'` | ProbCut | 4 | ProbCut beta margin, depth, dynamic 除算 |
+| `'^SPSA_IIR_'` | IIR | 4 | Internal Iterative Reductions 閾値 |
+| `'^SPSA_S18_'` | Step 18 Full Depth | 3 | full depth 判定閾値 |
+| `'^SPSA_PAWN_HIST'` | Pawn History | 3 | pawn history 初期値 + 正負乗算 |
+| `'^SPSA_LOW_PLY_HIST'` | Low Ply History | 3 | low ply history 初期値 + 乗算 + offset |
+| `'^SPSA_RAZORING_'` | Razoring | 2 | razoring 閾値 |
+| `'^SPSA_ASP_'` | Aspiration Window | 2 | aspiration delta, mean squared 除算 |
+| `'^SPSA_TT_MOVE_'` | TT Move | 2 | TT move bonus/malus |
+| `'^SPSA_DRAW_'` | Draw Jitter | 2 | 引き分けスコア揺らぎ |
+| `'^SPSA_QS_'` | QSearch | 1 | 静止探索 futility |
+| `'^SPSA_TT_CUTOFF_'` | TT Cutoff | 1 | TT cutoff cont history penalty |
+| `'^SPSA_MAIN_HIST'` | Main History Init | 1 | main history 初期値 |
+| `'^SPSA_CAPTURE_HIST'` | Capture History Init | 1 | capture history 初期値 |
+
+複合パターンの例:
+
+```bash
+# 枝刈り系をまとめて（39個）
+--active-only-regex '^SPSA_(LMR|FUTILITY|NMP|RAZORING)_'
+
+# correction + history 初期値（13個）
+--active-only-regex '^SPSA_(CORR|MAIN_HIST|CAPTURE_HIST|CONT_HIST_INIT|PAWN_HIST_INIT|LOW_PLY_HIST_INIT)'
+
+# Step14 + Step18（15個）
+--active-only-regex '^SPSA_S1[48]_'
+
+# history 更新系全般（30個）
+--active-only-regex '^SPSA_(STAT_|CONT_HISTORY_|LOW_PLY_HISTORY_|PAWN_HISTORY_|FAIL_HIGH_|UPDATE_ALL_)'
+
+# aspiration + TT + evalDiff（8個）
+--active-only-regex '^SPSA_(ASP_|TT_CUTOFF_|EVAL_DIFF_)'
+```
 
 ### 方法2: `.params` ファイルに `[[NOT USED]]` マーカー
 
