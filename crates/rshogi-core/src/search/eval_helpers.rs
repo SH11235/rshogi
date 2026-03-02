@@ -104,7 +104,11 @@ pub(super) fn correction_value(
         8
     };
 
-    9536 * pcv + 8494 * micv + 10_132 * (wnpcv + bnpcv) + 7156 * cntcv
+    let tp = ctx.tune_params;
+    tp.correction_value_pcv_weight * pcv
+        + tp.correction_value_micv_weight * micv
+        + tp.correction_value_nonpawn_weight * (wnpcv + bnpcv)
+        + tp.correction_value_cnt_weight * cntcv
 }
 
 /// 補正履歴の更新
@@ -149,26 +153,30 @@ pub(super) fn update_correction_history(
         sentinel_key
     };
 
-    const NON_PAWN_WEIGHT: i32 = 165;
+    let tp = ctx.tune_params;
 
     // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
     let h = unsafe { ctx.history.as_mut_unchecked() };
     h.correction_history.update_pawn(pawn_idx, us, bonus);
-    h.correction_history.update_minor(minor_idx, us, bonus * 156 / 128);
+    h.correction_history.update_minor(
+        minor_idx,
+        us,
+        bonus * tp.correction_history_minor_piece_mult / 128,
+    );
     h.correction_history.update_non_pawn(
         non_pawn_idx_w,
         Color::White,
         us,
-        bonus * NON_PAWN_WEIGHT / 128,
+        bonus * tp.correction_history_non_pawn_weight / 128,
     );
     h.correction_history.update_non_pawn(
         non_pawn_idx_b,
         Color::Black,
         us,
-        bonus * NON_PAWN_WEIGHT / 128,
+        bonus * tp.correction_history_non_pawn_weight / 128,
     );
 
-    // continuation(ss-2) 重み 137/128, (ss-4) 重み 64/128
+    // continuation(ss-2)/(ss-4) の重みをパラメータから取得
     // m.is_ok()のときはcontinuation correctionを常に更新（sentinelテーブル含む）
     if move_ok {
         let pc = pos.piece_on(prev_move.to());
@@ -178,14 +186,14 @@ pub(super) fn update_correction_history(
             cont_key_2.to,
             pc,
             prev_to,
-            bonus * 137 / 128,
+            bonus * tp.correction_history_cont_ss2_weight / 128,
         );
         h.correction_history.update_continuation(
             cont_key_4.piece,
             cont_key_4.to,
             pc,
             prev_to,
-            bonus * 64 / 128,
+            bonus * tp.correction_history_cont_ss4_weight / 128,
         );
     }
 }

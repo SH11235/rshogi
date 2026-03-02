@@ -280,7 +280,6 @@ struct SeedRunContext<'a> {
     seed_idx: usize,
     seed_count: usize,
     base_seed: u64,
-    active_only_regex: Option<&'a Regex>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -670,12 +669,8 @@ fn apply_parameter_vector(
     engine: &mut EngineProcess,
     params: &[SpsaParam],
     values: &[f64],
-    active_only_regex: Option<&Regex>,
 ) -> Result<()> {
     for (p, &v) in params.iter().zip(values.iter()) {
-        if !is_param_active(p, active_only_regex) {
-            continue;
-        }
         engine.set_option_if_available(&p.name, &option_value_string(p, v))?;
     }
     engine.sync_ready()?;
@@ -781,7 +776,6 @@ fn run_seed_games_parallel(ctx: SeedRunContext<'_>) -> Result<SeedGameStats> {
         seed_idx,
         seed_count,
         base_seed,
-        active_only_regex,
     } = ctx;
 
     let game_count = start_pos_indices.len();
@@ -823,31 +817,11 @@ fn run_seed_games_parallel(ctx: SeedRunContext<'_>) -> Result<SeedGameStats> {
                 for task in task_rx {
                     let result = (|| -> Result<GameTaskResult> {
                         if task.plus_is_black {
-                            apply_parameter_vector(
-                                &mut plus_engine,
-                                params,
-                                plus_values,
-                                active_only_regex,
-                            )?;
-                            apply_parameter_vector(
-                                &mut minus_engine,
-                                params,
-                                minus_values,
-                                active_only_regex,
-                            )?;
+                            apply_parameter_vector(&mut plus_engine, params, plus_values)?;
+                            apply_parameter_vector(&mut minus_engine, params, minus_values)?;
                         } else {
-                            apply_parameter_vector(
-                                &mut plus_engine,
-                                params,
-                                minus_values,
-                                active_only_regex,
-                            )?;
-                            apply_parameter_vector(
-                                &mut minus_engine,
-                                params,
-                                plus_values,
-                                active_only_regex,
-                            )?;
+                            apply_parameter_vector(&mut plus_engine, params, minus_values)?;
+                            apply_parameter_vector(&mut minus_engine, params, plus_values)?;
                         }
                         plus_engine.new_game()?;
                         minus_engine.new_game()?;
@@ -1214,7 +1188,6 @@ fn main() -> Result<()> {
                 seed_idx,
                 seed_count: seed_values.len(),
                 base_seed,
-                active_only_regex: active_only_regex.as_ref(),
             })?;
             total_games = total_games
                 .checked_add(cli.games_per_iteration as usize)

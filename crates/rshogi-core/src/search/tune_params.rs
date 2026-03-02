@@ -286,6 +286,124 @@ pub struct SearchTuneParams {
     pub tt_move_history_malus: i32,
     /// prior capture countermove 更新量
     pub prior_capture_countermove_bonus: i32,
+
+    // =========================================================================
+    // Group A: correction_value / correction_history
+    // =========================================================================
+    /// correction_value: pawn correction weight
+    pub correction_value_pcv_weight: i32,
+    /// correction_value: minor piece correction weight
+    pub correction_value_micv_weight: i32,
+    /// correction_value: non-pawn correction weight
+    pub correction_value_nonpawn_weight: i32,
+    /// correction_value: continuation correction weight
+    pub correction_value_cnt_weight: i32,
+    /// correction_history: non-pawn update weight (/128)
+    pub correction_history_non_pawn_weight: i32,
+    /// correction_history: minor piece update multiplier (/128)
+    pub correction_history_minor_piece_mult: i32,
+    /// correction_history: continuation (ss-2) update weight (/128)
+    pub correction_history_cont_ss2_weight: i32,
+    /// correction_history: continuation (ss-4) update weight (/128)
+    pub correction_history_cont_ss4_weight: i32,
+
+    // =========================================================================
+    // Group B: History 初期値
+    // =========================================================================
+    /// mainHistory 初期値
+    pub main_history_init: i32,
+    /// captureHistory 初期値
+    pub capture_history_init: i32,
+    /// continuationHistory 初期値
+    pub continuation_history_init: i32,
+    /// pawnHistory 初期値
+    pub pawn_history_init: i32,
+    /// lowPlyHistory 初期値
+    pub low_ply_history_init: i32,
+
+    // =========================================================================
+    // Group C: Aspiration Window
+    // =========================================================================
+    /// aspiration window: delta 基準値
+    pub aspiration_delta_base: i32,
+    /// aspiration window: mean squared score 除算値
+    pub aspiration_mean_sq_div: i32,
+
+    // =========================================================================
+    // Group D: Reductions テーブル
+    // =========================================================================
+    /// LMR テーブル生成係数 (/128)
+    pub lmr_table_coeff: i32,
+
+    // =========================================================================
+    // Group E: TT cutoff
+    // =========================================================================
+    /// TT cutoff 時の continuation history ペナルティ
+    pub tt_cutoff_cont_hist_penalty: i32,
+
+    // =========================================================================
+    // Group F: Step 6 static eval
+    // =========================================================================
+    /// evalDiff clamp 下限
+    pub eval_diff_clamp_min: i32,
+    /// evalDiff clamp 上限
+    pub eval_diff_clamp_max: i32,
+    /// evalDiff オフセット
+    pub eval_diff_offset: i32,
+    /// evalDiff mainHistory 倍率
+    pub eval_diff_main_hist_mult: i32,
+    /// evalDiff pawnHistory 倍率
+    pub eval_diff_pawn_hist_mult: i32,
+
+    // =========================================================================
+    // Group G: Step 14 futility capture
+    // =========================================================================
+    /// Step14 futility capture: ベース値
+    pub step14_futility_base: i32,
+    /// Step14 futility capture: lmrDepth 倍率
+    pub step14_futility_lmr_depth_mult: i32,
+    /// Step14 futility capture: captureHistory スケール (/1024)
+    pub step14_futility_capt_hist_scale: i32,
+
+    // =========================================================================
+    // Group H: Step 14 history pruning
+    // =========================================================================
+    /// Step14 cont history pruning しきい値
+    pub cont_history_pruning_threshold: i32,
+    /// Step14 mainHist pruning 分子
+    pub main_hist_pruning_add_num: i32,
+    /// Step14 mainHist pruning 分母
+    pub main_hist_pruning_add_den: i32,
+    /// Step14 lmrDepth history 除算
+    pub lmr_depth_history_div: i32,
+
+    // =========================================================================
+    // Group I: Step 14 quiet futility
+    // =========================================================================
+    /// Step14 quiet futility: ベース値
+    pub quiet_futility_base: i32,
+    /// Step14 quiet futility: best_move なし加算
+    pub quiet_futility_no_best_move: i32,
+    /// Step14 quiet futility: lmrDepth 倍率
+    pub quiet_futility_lmr_depth_mult: i32,
+    /// Step14 quiet futility: eval > alpha 加算
+    pub quiet_futility_eval_gt_alpha: i32,
+
+    // =========================================================================
+    // Group J: Step 14 SEE
+    // =========================================================================
+    /// Step14 SEE pruning: しきい値倍率
+    pub see_pruning_threshold_mult: i32,
+
+    // =========================================================================
+    // Group K: Step 18 full depth
+    // =========================================================================
+    /// Step18: TT手なし加算
+    pub full_depth_no_tt_add: i32,
+    /// Step18: r しきい値1
+    pub full_depth_r_threshold1: i32,
+    /// Step18: r しきい値2
+    pub full_depth_r_threshold2: i32,
 }
 
 const SPSA_OPTION_SPECS: &[SearchTuneOptionSpec] = &[
@@ -1015,6 +1133,239 @@ const SPSA_OPTION_SPECS: &[SearchTuneOptionSpec] = &[
         min: -8192,
         max: 8192,
     },
+    // Group A: correction_value / correction_history
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_CORR_PCV_WEIGHT",
+        default: 9536,
+        min: 0,
+        max: 32768,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_CORR_MICV_WEIGHT",
+        default: 8494,
+        min: 0,
+        max: 32768,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_CORR_NONPAWN_WEIGHT",
+        default: 10132,
+        min: 0,
+        max: 32768,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_CORR_CNT_WEIGHT",
+        default: 7156,
+        min: 0,
+        max: 32768,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_CORR_HIST_NONPAWN",
+        default: 165,
+        min: 0,
+        max: 1024,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_CORR_HIST_MINOR",
+        default: 156,
+        min: 0,
+        max: 1024,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_CORR_HIST_CONT_SS2",
+        default: 137,
+        min: 0,
+        max: 1024,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_CORR_HIST_CONT_SS4",
+        default: 64,
+        min: 0,
+        max: 1024,
+    },
+    // Group B: History 初期値
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_MAIN_HIST_INIT",
+        default: 68,
+        min: -2048,
+        max: 2048,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_CAPTURE_HIST_INIT",
+        default: -689,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_CONT_HIST_INIT",
+        default: -529,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_PAWN_HIST_INIT",
+        default: -1238,
+        min: -4096,
+        max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LOW_PLY_HIST_INIT",
+        default: 97,
+        min: -2048,
+        max: 2048,
+    },
+    // Group C: Aspiration Window
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_ASP_DELTA_BASE",
+        default: 5,
+        min: 1,
+        max: 64,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_ASP_MEAN_SQ_DIV",
+        default: 9000,
+        min: 1,
+        max: 100000,
+    },
+    // Group D: Reductions テーブル
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_LMR_TABLE_COEFF",
+        default: 2809,
+        min: 1024,
+        max: 8192,
+    },
+    // Group E: TT cutoff
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_TT_CUTOFF_CONT_PENALTY",
+        default: -2142,
+        min: -8192,
+        max: 0,
+    },
+    // Group F: Step 6 static eval
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_EVAL_DIFF_CLAMP_MIN",
+        default: -200,
+        min: -1024,
+        max: 0,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_EVAL_DIFF_CLAMP_MAX",
+        default: 156,
+        min: 0,
+        max: 1024,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_EVAL_DIFF_OFFSET",
+        default: 58,
+        min: -512,
+        max: 512,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_EVAL_DIFF_MAIN_HIST",
+        default: 9,
+        min: 0,
+        max: 64,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_EVAL_DIFF_PAWN_HIST",
+        default: 13,
+        min: 0,
+        max: 64,
+    },
+    // Group G: Step 14 futility capture
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_S14_FUT_BASE",
+        default: 231,
+        min: 0,
+        max: 1024,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_S14_FUT_LMR_MULT",
+        default: 211,
+        min: 0,
+        max: 1024,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_S14_FUT_CAPT_HIST",
+        default: 130,
+        min: 0,
+        max: 1024,
+    },
+    // Group H: Step 14 history pruning
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_S14_CONT_HIST_THRESH",
+        default: -4312,
+        min: -16384,
+        max: 0,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_S14_MAIN_HIST_NUM",
+        default: 76,
+        min: 0,
+        max: 512,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_S14_MAIN_HIST_DEN",
+        default: 32,
+        min: 1,
+        max: 512,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_S14_LMR_HIST_DIV",
+        default: 3220,
+        min: 1,
+        max: 16384,
+    },
+    // Group I: Step 14 quiet futility
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_S14_QFUT_BASE",
+        default: 47,
+        min: -512,
+        max: 512,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_S14_QFUT_NO_BEST",
+        default: 171,
+        min: 0,
+        max: 1024,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_S14_QFUT_LMR_MULT",
+        default: 134,
+        min: 0,
+        max: 1024,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_S14_QFUT_EVAL_ALPHA",
+        default: 90,
+        min: 0,
+        max: 512,
+    },
+    // Group J: Step 14 SEE
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_S14_SEE_MULT",
+        default: -27,
+        min: -256,
+        max: 0,
+    },
+    // Group K: Step 18 full depth
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_S18_NO_TT_ADD",
+        default: 1118,
+        min: -8192,
+        max: 8192,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_S18_R_THRESH1",
+        default: 3212,
+        min: 0,
+        max: 16384,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_S18_R_THRESH2",
+        default: 4784,
+        min: 0,
+        max: 16384,
+    },
 ];
 
 impl Default for SearchTuneParams {
@@ -1141,6 +1492,54 @@ impl Default for SearchTuneParams {
             tt_move_history_bonus: 809,
             tt_move_history_malus: -865,
             prior_capture_countermove_bonus: 964,
+            // Group A
+            correction_value_pcv_weight: 9536,
+            correction_value_micv_weight: 8494,
+            correction_value_nonpawn_weight: 10132,
+            correction_value_cnt_weight: 7156,
+            correction_history_non_pawn_weight: 165,
+            correction_history_minor_piece_mult: 156,
+            correction_history_cont_ss2_weight: 137,
+            correction_history_cont_ss4_weight: 64,
+            // Group B
+            main_history_init: 68,
+            capture_history_init: -689,
+            continuation_history_init: -529,
+            pawn_history_init: -1238,
+            low_ply_history_init: 97,
+            // Group C
+            aspiration_delta_base: 5,
+            aspiration_mean_sq_div: 9000,
+            // Group D
+            lmr_table_coeff: 2809,
+            // Group E
+            tt_cutoff_cont_hist_penalty: -2142,
+            // Group F
+            eval_diff_clamp_min: -200,
+            eval_diff_clamp_max: 156,
+            eval_diff_offset: 58,
+            eval_diff_main_hist_mult: 9,
+            eval_diff_pawn_hist_mult: 13,
+            // Group G
+            step14_futility_base: 231,
+            step14_futility_lmr_depth_mult: 211,
+            step14_futility_capt_hist_scale: 130,
+            // Group H
+            cont_history_pruning_threshold: -4312,
+            main_hist_pruning_add_num: 76,
+            main_hist_pruning_add_den: 32,
+            lmr_depth_history_div: 3220,
+            // Group I
+            quiet_futility_base: 47,
+            quiet_futility_no_best_move: 171,
+            quiet_futility_lmr_depth_mult: 134,
+            quiet_futility_eval_gt_alpha: 90,
+            // Group J
+            see_pruning_threshold_mult: -27,
+            // Group K
+            full_depth_no_tt_add: 1118,
+            full_depth_r_threshold1: 3212,
+            full_depth_r_threshold2: 4784,
         }
     }
 }
@@ -1465,6 +1864,54 @@ impl SearchTuneParams {
         try_apply!("SPSA_TT_MOVE_BONUS", tt_move_history_bonus, -8192, 8192);
         try_apply!("SPSA_TT_MOVE_MALUS", tt_move_history_malus, -8192, 8192);
         try_apply!("SPSA_PRIOR_CAPTURE_CM_BONUS", prior_capture_countermove_bonus, -8192, 8192);
+        // Group A
+        try_apply!("SPSA_CORR_PCV_WEIGHT", correction_value_pcv_weight, 0, 32768);
+        try_apply!("SPSA_CORR_MICV_WEIGHT", correction_value_micv_weight, 0, 32768);
+        try_apply!("SPSA_CORR_NONPAWN_WEIGHT", correction_value_nonpawn_weight, 0, 32768);
+        try_apply!("SPSA_CORR_CNT_WEIGHT", correction_value_cnt_weight, 0, 32768);
+        try_apply!("SPSA_CORR_HIST_NONPAWN", correction_history_non_pawn_weight, 0, 1024);
+        try_apply!("SPSA_CORR_HIST_MINOR", correction_history_minor_piece_mult, 0, 1024);
+        try_apply!("SPSA_CORR_HIST_CONT_SS2", correction_history_cont_ss2_weight, 0, 1024);
+        try_apply!("SPSA_CORR_HIST_CONT_SS4", correction_history_cont_ss4_weight, 0, 1024);
+        // Group B
+        try_apply!("SPSA_MAIN_HIST_INIT", main_history_init, -2048, 2048);
+        try_apply!("SPSA_CAPTURE_HIST_INIT", capture_history_init, -4096, 4096);
+        try_apply!("SPSA_CONT_HIST_INIT", continuation_history_init, -4096, 4096);
+        try_apply!("SPSA_PAWN_HIST_INIT", pawn_history_init, -4096, 4096);
+        try_apply!("SPSA_LOW_PLY_HIST_INIT", low_ply_history_init, -2048, 2048);
+        // Group C
+        try_apply!("SPSA_ASP_DELTA_BASE", aspiration_delta_base, 1, 64);
+        try_apply!("SPSA_ASP_MEAN_SQ_DIV", aspiration_mean_sq_div, 1, 100000);
+        // Group D
+        try_apply!("SPSA_LMR_TABLE_COEFF", lmr_table_coeff, 1024, 8192);
+        // Group E
+        try_apply!("SPSA_TT_CUTOFF_CONT_PENALTY", tt_cutoff_cont_hist_penalty, -8192, 0);
+        // Group F
+        try_apply!("SPSA_EVAL_DIFF_CLAMP_MIN", eval_diff_clamp_min, -1024, 0);
+        try_apply!("SPSA_EVAL_DIFF_CLAMP_MAX", eval_diff_clamp_max, 0, 1024);
+        try_apply!("SPSA_EVAL_DIFF_OFFSET", eval_diff_offset, -512, 512);
+        try_apply!("SPSA_EVAL_DIFF_MAIN_HIST", eval_diff_main_hist_mult, 0, 64);
+        try_apply!("SPSA_EVAL_DIFF_PAWN_HIST", eval_diff_pawn_hist_mult, 0, 64);
+        // Group G
+        try_apply!("SPSA_S14_FUT_BASE", step14_futility_base, 0, 1024);
+        try_apply!("SPSA_S14_FUT_LMR_MULT", step14_futility_lmr_depth_mult, 0, 1024);
+        try_apply!("SPSA_S14_FUT_CAPT_HIST", step14_futility_capt_hist_scale, 0, 1024);
+        // Group H
+        try_apply!("SPSA_S14_CONT_HIST_THRESH", cont_history_pruning_threshold, -16384, 0);
+        try_apply!("SPSA_S14_MAIN_HIST_NUM", main_hist_pruning_add_num, 0, 512);
+        try_apply!("SPSA_S14_MAIN_HIST_DEN", main_hist_pruning_add_den, 1, 512);
+        try_apply!("SPSA_S14_LMR_HIST_DIV", lmr_depth_history_div, 1, 16384);
+        // Group I
+        try_apply!("SPSA_S14_QFUT_BASE", quiet_futility_base, -512, 512);
+        try_apply!("SPSA_S14_QFUT_NO_BEST", quiet_futility_no_best_move, 0, 1024);
+        try_apply!("SPSA_S14_QFUT_LMR_MULT", quiet_futility_lmr_depth_mult, 0, 1024);
+        try_apply!("SPSA_S14_QFUT_EVAL_ALPHA", quiet_futility_eval_gt_alpha, 0, 512);
+        // Group J
+        try_apply!("SPSA_S14_SEE_MULT", see_pruning_threshold_mult, -256, 0);
+        // Group K
+        try_apply!("SPSA_S18_NO_TT_ADD", full_depth_no_tt_add, -8192, 8192);
+        try_apply!("SPSA_S18_R_THRESH1", full_depth_r_threshold1, 0, 16384);
+        try_apply!("SPSA_S18_R_THRESH2", full_depth_r_threshold2, 0, 16384);
 
         None
     }

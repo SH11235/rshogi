@@ -49,8 +49,6 @@ use super::tt_sanity::{TtWriteTrace, helper_tt_write_enabled_for_depth, maybe_tr
 // 定数
 // =============================================================================
 
-use std::sync::LazyLock;
-
 /// YaneuraOuオプション `DrawValueBlack` のデフォルト値。
 pub const DEFAULT_DRAW_VALUE_BLACK: i32 = -2;
 /// YaneuraOuオプション `DrawValueWhite` のデフォルト値。
@@ -167,21 +165,25 @@ fn update_quiet_histories(
 /// move_count が 64 を超える局面でも reduction が頭打ちにならないようにする。
 type Reductions = [i32; crate::movegen::MAX_MOVES];
 
-/// Reduction配列（LazyLockによる遅延初期化）
-/// 初回アクセス時に自動初期化されるため、get()呼び出しが不要
-static REDUCTIONS: LazyLock<Reductions> = LazyLock::new(|| {
-    let mut table: Reductions = [0; crate::movegen::MAX_MOVES];
+/// 指定係数で Reduction テーブルを構築する。
+///
+/// `coeff / 128.0 * ln(i)` で各エントリを計算。
+pub(crate) fn build_reductions(coeff: i32) -> Box<Reductions> {
+    let mut table: Box<Reductions> = vec![0i32; crate::movegen::MAX_MOVES]
+        .into_boxed_slice()
+        .try_into()
+        .expect("size mismatch");
+    let scale = coeff as f64 / 128.0;
     for (i, value) in table.iter_mut().enumerate().skip(1) {
-        *value = (2809.0 / 128.0 * (i as f64).ln()) as i32;
+        *value = (scale * (i as f64).ln()) as i32;
     }
     table
-});
+}
 
 /// Reductionを取得
-///
-/// LazyLockにより初回アクセス時に自動初期化されるため、panicしない。
 #[inline]
 pub(crate) fn reduction(
+    reductions: &Reductions,
     tune_params: &SearchTuneParams,
     imp: bool,
     depth: i32,
@@ -196,8 +198,7 @@ pub(crate) fn reduction(
     let max_idx = (crate::movegen::MAX_MOVES as i32) - 1;
     let d = depth.clamp(1, max_idx) as usize;
     let mc = move_count.clamp(1, max_idx) as usize;
-    // LazyLockにより直接アクセス可能（get()不要）
-    let reduction_scale = REDUCTIONS[d] * REDUCTIONS[mc];
+    let reduction_scale = reductions[d] * reductions[mc];
     let root_delta = root_delta.max(1);
     let delta = delta.max(0);
 
@@ -323,6 +324,8 @@ pub struct SearchContext<'a> {
     pub allow_tt_write: bool,
     /// SPSA向け探索係数
     pub tune_params: &'a SearchTuneParams,
+    /// LMR Reduction テーブルへの参照
+    pub reductions: &'a Reductions,
     /// 千日手評価値テーブル (YaneuraOu DrawValueBlack/DrawValueWhite 準拠)
     /// drawValueTable[REPETITION_DRAW][Color] に相当
     pub draw_value_table: [Value; 2],
@@ -435,6 +438,9 @@ pub struct SearchWorker {
     /// SPSA向け探索係数
     pub search_tune_params: SearchTuneParams,
 
+    /// LMR Reduction テーブル（per-worker）
+    pub reductions: Box<Reductions>,
+
     /// YaneuraOuオプション `DrawValueBlack`。
     pub draw_value_black: i32,
 
@@ -493,6 +499,7 @@ impl SearchWorker {
             NonNull::from(h.continuation_history[0][0].get_table(Piece::NONE, Square::SQ_11))
         };
 
+        let reductions = build_reductions(search_tune_params.lmr_table_coeff);
         let mut worker = Box::new(Self {
             tt,
             eval_hash,
@@ -503,6 +510,7 @@ impl SearchWorker {
             thread_id,
             allow_tt_write: true,
             search_tune_params,
+            reductions,
             draw_value_black: DEFAULT_DRAW_VALUE_BLACK,
             draw_value_white: DEFAULT_DRAW_VALUE_WHITE,
             draw_value_table: [Value::ZERO; 2],
@@ -527,6 +535,7 @@ impl SearchWorker {
             thread_id: self.thread_id,
             allow_tt_write: self.allow_tt_write,
             tune_params: &self.search_tune_params,
+            reductions: &self.reductions,
             draw_value_table: self.draw_value_table,
         }
     }
@@ -652,7 +661,9 @@ impl SearchWorker {
 
     /// usinewgameで呼び出し：全履歴をクリア（YaneuraOu Worker::clear()相当）
     pub fn clear(&mut self) {
-        self.history.clear();
+        // SAFETY: 探索開始前の初期化、他の参照と同時保持しない
+        unsafe { self.history.as_mut_unchecked() }.clear_with_params(&self.search_tune_params);
+        self.reductions = build_reductions(self.search_tune_params.lmr_table_coeff);
     }
 
     /// goで呼び出し：探索状態のリセット（履歴はクリアしない）
@@ -671,7 +682,9 @@ impl SearchWorker {
         self.reset_stats();
         // low_ply_historyのみクリア
         // SAFETY: 探索開始前の初期化、他の参照と同時保持しない
-        unsafe { self.history.as_mut_unchecked() }.low_ply_history.clear();
+        unsafe { self.history.as_mut_unchecked() }
+            .low_ply_history
+            .clear_with_init(self.search_tune_params.low_ply_history_init as i16);
         // NNUE AccumulatorStack: ネットワークに応じたバリアントに更新・リセット
         if let Some(network) = get_network() {
             // バリアントがネットワークと一致しない場合は再作成
@@ -899,6 +912,7 @@ impl SearchWorker {
                 thread_id: self.thread_id,
                 allow_tt_write: self.allow_tt_write,
                 tune_params: &self.search_tune_params,
+                reductions: &self.reductions,
                 draw_value_table: self.draw_value_table,
             };
             if let Some(v) = try_probcut(
@@ -1070,8 +1084,15 @@ impl SearchWorker {
                     let delta = (beta.raw() - alpha.raw()).abs().max(1);
                     let root_delta = self.state.root_delta.max(1);
                     // improving を使用
-                    let mut r =
-                        reduction(tune, root_improving, depth, move_count, delta, root_delta);
+                    let mut r = reduction(
+                        &self.reductions,
+                        tune,
+                        root_improving,
+                        depth,
+                        move_count,
+                        delta,
+                        root_delta,
+                    );
 
                     // Step 13: ttPv加算
                     // rootでは常にttPv=true
@@ -1183,8 +1204,15 @@ impl SearchWorker {
                     let tune = &self.search_tune_params;
                     let delta = (beta.raw() - alpha.raw()).abs().max(1);
                     let root_delta = self.state.root_delta.max(1);
-                    let mut r =
-                        reduction(tune, root_improving, depth, move_count, delta, root_delta);
+                    let mut r = reduction(
+                        &self.reductions,
+                        tune,
+                        root_improving,
+                        depth,
+                        move_count,
+                        delta,
+                        root_delta,
+                    );
                     r += tune.lmr_ttpv_add;
                     let tt_value_higher = (tt_value_root > alpha) as i32;
                     let tt_depth_ge = (tt_data.depth >= depth) as i32;
@@ -1207,9 +1235,11 @@ impl SearchWorker {
                     let stat_score = self.state.stack[0].stat_score;
                     r -= stat_score * tune.lmr_step16_stat_score_scale_num / 8192;
                     if tt_move_root.is_none() {
-                        r += 1118;
+                        r += tune.full_depth_no_tt_add;
                     }
-                    new_depth - (r > 3212) as i32 - ((r > 4784 && new_depth > 2) as i32)
+                    new_depth
+                        - (r > tune.full_depth_r_threshold1) as i32
+                        - ((r > tune.full_depth_r_threshold2 && new_depth > 2) as i32)
                 };
                 // PVS: zero-window search → PV re-search
                 let mut value = -self.search_node_wrapper::<{ NodeType::NonPV as u8 }>(
@@ -1486,6 +1516,7 @@ impl SearchWorker {
                     thread_id: self.thread_id,
                     allow_tt_write: self.allow_tt_write,
                     tune_params: &self.search_tune_params,
+                    reductions: &self.reductions,
                     draw_value_table: self.draw_value_table,
                 };
                 update_correction_history(&self.state, &ctx, pos, 0, bonus);
@@ -1655,6 +1686,7 @@ impl SearchWorker {
                     let root_delta = self.state.root_delta.max(1);
                     // improving を使用
                     let mut r = reduction(
+                        &self.reductions,
                         tune,
                         root_improving,
                         depth,
@@ -1766,8 +1798,15 @@ impl SearchWorker {
                 let tune = &self.search_tune_params;
                 let delta = (beta.raw() - alpha.raw()).abs().max(1);
                 let root_delta = self.state.root_delta.max(1);
-                let mut r =
-                    reduction(tune, root_improving, depth, (rm_idx + 1) as i32, delta, root_delta);
+                let mut r = reduction(
+                    &self.reductions,
+                    tune,
+                    root_improving,
+                    depth,
+                    (rm_idx + 1) as i32,
+                    delta,
+                    root_delta,
+                );
                 r += tune.lmr_ttpv_add;
                 let tt_value_higher = (tt_value_root > alpha) as i32;
                 let tt_depth_ge = (tt_data.depth >= depth) as i32;
@@ -1790,10 +1829,11 @@ impl SearchWorker {
                 let stat_score = self.state.stack[0].stat_score;
                 r -= stat_score * tune.lmr_step16_stat_score_scale_num / 8192;
                 if tt_move_root.is_none() {
-                    r += 1118;
+                    r += tune.full_depth_no_tt_add;
                 }
-                let step18_depth =
-                    new_depth - (r > 3212) as i32 - ((r > 4784 && new_depth > 2) as i32);
+                let step18_depth = new_depth
+                    - (r > tune.full_depth_r_threshold1) as i32
+                    - ((r > tune.full_depth_r_threshold2 && new_depth > 2) as i32);
                 let mut value = -self.search_node_wrapper::<{ NodeType::NonPV as u8 }>(
                     pos,
                     step18_depth,
@@ -1905,6 +1945,7 @@ impl SearchWorker {
             thread_id: self.thread_id,
             allow_tt_write: self.allow_tt_write,
             tune_params: &self.search_tune_params,
+            reductions: &self.reductions,
             draw_value_table: self.draw_value_table,
         };
         Self::search_node::<NT>(
@@ -2102,7 +2143,7 @@ impl SearchWorker {
                                     prev_in_check,
                                     prev_piece,
                                     prev_sq,
-                                    -2142,
+                                    ctx.tune_params.tt_cutoff_cont_hist_penalty,
                                 );
                             }
                         }
@@ -2139,16 +2180,22 @@ impl SearchWorker {
                 let prev_eval = st.stack[prev_ply].static_eval.raw();
                 let curr_eval = eval_ctx.static_eval.raw();
                 // -(prev + curr): 相手の手で自分の評価が良くなったかを測定
-                // clamp(-200, 156) + 58: 学習済みパラメータで正規化
-                let eval_diff = (-(prev_eval + curr_eval)).clamp(-200, 156) + 58;
+                let tune = ctx.tune_params;
+                let eval_diff = (-(prev_eval + curr_eval))
+                    .clamp(tune.eval_diff_clamp_min, tune.eval_diff_clamp_max)
+                    + tune.eval_diff_offset;
                 let opponent = !pos.side_to_move();
                 let prev_sq = prev_move.to();
 
                 {
                     // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
                     let h = unsafe { ctx.history.as_mut_unchecked() };
-                    // mainHistory 更新: evalDiff * 9
-                    h.main_history.update(opponent, prev_move, eval_diff * 9);
+                    // mainHistory 更新
+                    h.main_history.update(
+                        opponent,
+                        prev_move,
+                        eval_diff * tune.eval_diff_main_hist_mult,
+                    );
 
                     // pawnHistory 更新
                     // 条件:
@@ -2160,7 +2207,12 @@ impl SearchWorker {
                         let prev_piece = pos.piece_on(prev_sq);
                         if prev_piece.piece_type() != PieceType::Pawn && !prev_move.is_promotion() {
                             let pawn_idx = pos.pawn_history_index();
-                            h.pawn_history.update(pawn_idx, prev_piece, prev_sq, eval_diff * 13);
+                            h.pawn_history.update(
+                                pawn_idx,
+                                prev_piece,
+                                prev_sq,
+                                eval_diff * tune.eval_diff_pawn_hist_mult,
+                            );
                         }
                     }
                 }
@@ -2377,6 +2429,7 @@ impl SearchWorker {
             // =============================================================
             let delta = (beta.raw() - alpha.raw()).max(0);
             let mut r = reduction(
+                ctx.reductions,
                 ctx.tune_params,
                 improving,
                 original_depth,
@@ -2819,10 +2872,11 @@ impl SearchWorker {
                 // Zero window search
                 let mut non_lmr_depth = new_depth;
                 if tt_move.is_none() {
-                    r += 1118;
+                    r += ctx.tune_params.full_depth_no_tt_add;
                 }
-                non_lmr_depth -= (r > 3212) as i32;
-                non_lmr_depth -= (r > 4784 && new_depth > 2) as i32;
+                non_lmr_depth -= (r > ctx.tune_params.full_depth_r_threshold1) as i32;
+                non_lmr_depth -=
+                    (r > ctx.tune_params.full_depth_r_threshold2 && new_depth > 2) as i32;
 
                 st.stack[ply as usize].reduction = 0;
                 let mut value = -Self::search_node::<{ NodeType::NonPV as u8 }>(
