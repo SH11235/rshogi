@@ -169,7 +169,7 @@ impl NetworkLayerStacks {
         );
 
         // LayerStacks bucket0 の l1_biases
-        let l1_biases = &ls.buckets[0].l1_biases;
+        let l1_biases = &ls.buckets[0].l1.biases;
         info!("[NNUE Load] LayerStacks bucket0 l1_biases: {l1_biases:?}");
     }
 
@@ -373,7 +373,7 @@ mod tests {
         }
 
         // LayerStacks の重みの一部を確認
-        let l1_bias_sample: Vec<i32> = network.layer_stacks.buckets[0].l1_biases.to_vec();
+        let l1_bias_sample: Vec<i32> = network.layer_stacks.buckets[0].l1.biases.to_vec();
         eprintln!("L1 bias (bucket 0): {l1_bias_sample:?}");
 
         // 初期局面を評価

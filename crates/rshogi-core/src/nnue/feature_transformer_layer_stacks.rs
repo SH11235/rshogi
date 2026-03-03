@@ -250,7 +250,10 @@ impl FeatureTransformerLayerStacks {
         HalfKA_hm_FeatureSet::collect_active_indices(pos, perspective)
     }
 
-    /// 重みを累積値に加算
+    /// 重みを累積値に加算（SIMD最適化版）
+    ///
+    /// 1536 i16 要素を SIMD で加算。AVX512BW/AVX2/SSE2/WASM SIMD128 に対応。
+    /// weights と accumulation は 64 バイトアラインされている前提で aligned load/store を使用。
     #[inline]
     fn add_weights(&self, accumulation: &mut [i16; NNUE_PYTORCH_L1], index: usize) {
         // オーバーフロー安全なオフセット計算
@@ -266,13 +269,111 @@ impl FeatureTransformerLayerStacks {
 
         let weights = &self.weights[offset..offset + NNUE_PYTORCH_L1];
 
-        // スカラー実装（SIMD最適化は後で追加）
+        // AVX-512 BW: 512bit = 32 x i16, 1536/32 = 48 iterations
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
+        {
+            // SAFETY:
+            // - weights: AlignedBox で 64 バイトアライン、各行は 3072 バイト (64の倍数)
+            // - accumulation: Aligned<[i16; 1536]> で 64 バイトアライン
+            // - 1536 要素 = 32 要素 × 48 回のループで完全にカバー
+            unsafe {
+                use std::arch::x86_64::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let weight_ptr = weights.as_ptr();
+
+                for i in 0..48 {
+                    let acc_vec = _mm512_load_si512(acc_ptr.add(i * 32) as *const __m512i);
+                    let weight_vec = _mm512_load_si512(weight_ptr.add(i * 32) as *const __m512i);
+                    let result = _mm512_add_epi16(acc_vec, weight_vec);
+                    _mm512_store_si512(acc_ptr.add(i * 32) as *mut __m512i, result);
+                }
+            }
+            return;
+        }
+
+        // AVX2: 256bit = 16 x i16, 1536/16 = 96 iterations
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            not(target_feature = "avx512bw")
+        ))]
+        {
+            // SAFETY:
+            // - weights: AlignedBox で 64 バイトアライン、各行は 3072 バイト (64の倍数)
+            // - accumulation: Aligned<[i16; 1536]> で 64 バイトアライン
+            // - 1536 要素 = 16 要素 × 96 回のループで完全にカバー
+            unsafe {
+                use std::arch::x86_64::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let weight_ptr = weights.as_ptr();
+
+                for i in 0..96 {
+                    let acc_vec = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
+                    let weight_vec = _mm256_load_si256(weight_ptr.add(i * 16) as *const __m256i);
+                    let result = _mm256_add_epi16(acc_vec, weight_vec);
+                    _mm256_store_si256(acc_ptr.add(i * 16) as *mut __m256i, result);
+                }
+            }
+            return;
+        }
+
+        // SSE2: 128bit = 8 x i16, 1536/8 = 192 iterations
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "sse2",
+            not(target_feature = "avx2")
+        ))]
+        {
+            // SAFETY: 同上（16バイトアライン）
+            unsafe {
+                use std::arch::x86_64::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let weight_ptr = weights.as_ptr();
+
+                for i in 0..192 {
+                    let acc_vec = _mm_load_si128(acc_ptr.add(i * 8) as *const __m128i);
+                    let weight_vec = _mm_load_si128(weight_ptr.add(i * 8) as *const __m128i);
+                    let result = _mm_add_epi16(acc_vec, weight_vec);
+                    _mm_store_si128(acc_ptr.add(i * 8) as *mut __m128i, result);
+                }
+            }
+            return;
+        }
+
+        // WASM SIMD128: 128bit = 8 x i16, 1536/8 = 192 iterations
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        {
+            // SAFETY: WASM SIMD128 はアライメント不要
+            unsafe {
+                use std::arch::wasm32::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let weight_ptr = weights.as_ptr();
+
+                for i in 0..192 {
+                    let acc_vec = v128_load(acc_ptr.add(i * 8) as *const v128);
+                    let weight_vec = v128_load(weight_ptr.add(i * 8) as *const v128);
+                    let result = i16x8_add(acc_vec, weight_vec);
+                    v128_store(acc_ptr.add(i * 8) as *mut v128, result);
+                }
+            }
+            return;
+        }
+
+        // スカラーフォールバック（非飽和演算）
+        #[allow(unreachable_code)]
         for (acc, &weight) in accumulation.iter_mut().zip(weights) {
             *acc = acc.wrapping_add(weight);
         }
     }
 
-    /// 重みを累積値から減算
+    /// 重みを累積値から減算（SIMD最適化版）
+    ///
+    /// 1536 i16 要素を SIMD で減算。AVX512BW/AVX2/SSE2/WASM SIMD128 に対応。
+    /// weights と accumulation は 64 バイトアラインされている前提で aligned load/store を使用。
     #[inline]
     fn sub_weights(&self, accumulation: &mut [i16; NNUE_PYTORCH_L1], index: usize) {
         // オーバーフロー安全なオフセット計算
@@ -288,7 +389,96 @@ impl FeatureTransformerLayerStacks {
 
         let weights = &self.weights[offset..offset + NNUE_PYTORCH_L1];
 
-        // スカラー実装（SIMD最適化は後で追加）
+        // AVX-512 BW: 512bit = 32 x i16, 1536/32 = 48 iterations
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
+        {
+            // SAFETY: add_weights と同様
+            unsafe {
+                use std::arch::x86_64::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let weight_ptr = weights.as_ptr();
+
+                for i in 0..48 {
+                    let acc_vec = _mm512_load_si512(acc_ptr.add(i * 32) as *const __m512i);
+                    let weight_vec = _mm512_load_si512(weight_ptr.add(i * 32) as *const __m512i);
+                    let result = _mm512_sub_epi16(acc_vec, weight_vec);
+                    _mm512_store_si512(acc_ptr.add(i * 32) as *mut __m512i, result);
+                }
+            }
+            return;
+        }
+
+        // AVX2: 256bit = 16 x i16, 1536/16 = 96 iterations
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            not(target_feature = "avx512bw")
+        ))]
+        {
+            // SAFETY: add_weights と同様
+            unsafe {
+                use std::arch::x86_64::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let weight_ptr = weights.as_ptr();
+
+                for i in 0..96 {
+                    let acc_vec = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
+                    let weight_vec = _mm256_load_si256(weight_ptr.add(i * 16) as *const __m256i);
+                    let result = _mm256_sub_epi16(acc_vec, weight_vec);
+                    _mm256_store_si256(acc_ptr.add(i * 16) as *mut __m256i, result);
+                }
+            }
+            return;
+        }
+
+        // SSE2: 128bit = 8 x i16, 1536/8 = 192 iterations
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "sse2",
+            not(target_feature = "avx2")
+        ))]
+        {
+            // SAFETY: 同上（16バイトアライン）
+            unsafe {
+                use std::arch::x86_64::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let weight_ptr = weights.as_ptr();
+
+                for i in 0..192 {
+                    let acc_vec = _mm_load_si128(acc_ptr.add(i * 8) as *const __m128i);
+                    let weight_vec = _mm_load_si128(weight_ptr.add(i * 8) as *const __m128i);
+                    let result = _mm_sub_epi16(acc_vec, weight_vec);
+                    _mm_store_si128(acc_ptr.add(i * 8) as *mut __m128i, result);
+                }
+            }
+            return;
+        }
+
+        // WASM SIMD128: 128bit = 8 x i16, 1536/8 = 192 iterations
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        {
+            // SAFETY: WASM SIMD128 はアライメント不要
+            unsafe {
+                use std::arch::wasm32::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let weight_ptr = weights.as_ptr();
+
+                for i in 0..192 {
+                    let acc_vec = v128_load(acc_ptr.add(i * 8) as *const v128);
+                    let weight_vec = v128_load(weight_ptr.add(i * 8) as *const v128);
+                    let result = i16x8_sub(acc_vec, weight_vec);
+                    v128_store(acc_ptr.add(i * 8) as *mut v128, result);
+                }
+            }
+            return;
+        }
+
+        // スカラーフォールバック（非飽和演算）
+        #[allow(unreachable_code)]
         for (acc, &weight) in accumulation.iter_mut().zip(weights) {
             *acc = acc.wrapping_sub(weight);
         }

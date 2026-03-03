@@ -15,17 +15,19 @@
 //!   Output: 32 → 1 + skip
 //! ```
 
-use super::accumulator::AlignedBox;
+use super::accumulator::Aligned;
 use super::constants::{
     LAYER_STACK_L1_OUT, LAYER_STACK_L2_IN, NNUE_PYTORCH_L1, NNUE_PYTORCH_L2, NNUE_PYTORCH_L3,
     NUM_LAYER_STACK_BUCKETS,
 };
+use super::layers::AffineTransform;
 use std::io::{self, Read};
 
-/// パディング済み入力次元（SIMDアライメント用）
-const fn padded_input(input_dim: usize) -> usize {
-    input_dim.div_ceil(32) * 32
-}
+/// L2 入力のパディング済み次元数（padded_input(30) = 32）
+const L2_PADDED_INPUT: usize = super::layers::padded_input(LAYER_STACK_L2_IN);
+
+/// Output 入力のパディング済み次元数（padded_input(32) = 32）
+const OUTPUT_PADDED_INPUT: usize = super::layers::padded_input(NNUE_PYTORCH_L3);
 
 // =============================================================================
 // LayerStack 単一バケット
@@ -37,90 +39,33 @@ const fn padded_input(input_dim: usize) -> usize {
 /// - L1: 1536 → 16
 /// - L2: 30 → 32
 /// - Output: 32 → 1
+///
+/// 各層は `AffineTransform` を使用し、AVX512/AVX2/SSSE3/WASM SIMD128 に対応。
 pub struct LayerStackBucket {
     /// L1層: 1536 → 16
-    pub l1_biases: [i32; LAYER_STACK_L1_OUT],
-    pub l1_weights: AlignedBox<i8>,
-
+    pub l1: AffineTransform<NNUE_PYTORCH_L1, LAYER_STACK_L1_OUT>,
     /// L2層: 30 → 32
-    pub l2_biases: [i32; NNUE_PYTORCH_L3],
-    pub l2_weights: AlignedBox<i8>,
-
+    pub l2: AffineTransform<LAYER_STACK_L2_IN, NNUE_PYTORCH_L3>,
     /// 出力層: 32 → 1
-    pub output_bias: i32,
-    pub output_weights: AlignedBox<i8>,
+    pub output: AffineTransform<NNUE_PYTORCH_L3, 1>,
 }
 
 impl LayerStackBucket {
-    const L1_PADDED_INPUT: usize = padded_input(NNUE_PYTORCH_L1);
-    const L2_PADDED_INPUT: usize = padded_input(LAYER_STACK_L2_IN);
-    const OUTPUT_PADDED_INPUT: usize = padded_input(NNUE_PYTORCH_L3);
-
     /// 新規作成（ゼロ初期化）
     pub fn new() -> Self {
         Self {
-            l1_biases: [0; LAYER_STACK_L1_OUT],
-            l1_weights: AlignedBox::new_zeroed(LAYER_STACK_L1_OUT * Self::L1_PADDED_INPUT),
-            l2_biases: [0; NNUE_PYTORCH_L3],
-            l2_weights: AlignedBox::new_zeroed(NNUE_PYTORCH_L3 * Self::L2_PADDED_INPUT),
-            output_bias: 0,
-            output_weights: AlignedBox::new_zeroed(Self::OUTPUT_PADDED_INPUT),
+            l1: AffineTransform::new(),
+            l2: AffineTransform::new(),
+            output: AffineTransform::new(),
         }
     }
 
     /// ファイルから読み込み
     pub fn read<R: Read>(reader: &mut R) -> io::Result<Self> {
-        let mut bucket = Self::new();
-
-        // L1層: bias
-        let mut buf4 = [0u8; 4];
-        for bias in bucket.l1_biases.iter_mut() {
-            reader.read_exact(&mut buf4)?;
-            *bias = i32::from_le_bytes(buf4);
-        }
-
-        // L1層: weights（一括読み込みで I/O 呼び出しを削減）
-        {
-            let total_bytes = LAYER_STACK_L1_OUT * Self::L1_PADDED_INPUT;
-            let mut temp_buf = vec![0u8; total_bytes];
-            reader.read_exact(&mut temp_buf)?;
-            for (i, &byte) in temp_buf.iter().enumerate() {
-                bucket.l1_weights[i] = byte as i8;
-            }
-        }
-
-        // L2層: bias
-        for bias in bucket.l2_biases.iter_mut() {
-            reader.read_exact(&mut buf4)?;
-            *bias = i32::from_le_bytes(buf4);
-        }
-
-        // L2層: weights（一括読み込みで I/O 呼び出しを削減）
-        // nnue-pytorch は FC層の入力を32の倍数にパディングして保存するため、
-        // L2_PADDED_INPUT (32) で読み込む
-        {
-            let total_bytes = NNUE_PYTORCH_L3 * Self::L2_PADDED_INPUT;
-            let mut temp_buf = vec![0u8; total_bytes];
-            reader.read_exact(&mut temp_buf)?;
-            for (i, &byte) in temp_buf.iter().enumerate() {
-                bucket.l2_weights[i] = byte as i8;
-            }
-        }
-
-        // 出力層: bias
-        reader.read_exact(&mut buf4)?;
-        bucket.output_bias = i32::from_le_bytes(buf4);
-
-        // 出力層: weights（一括読み込みで I/O 呼び出しを削減）
-        {
-            let mut temp_buf = vec![0u8; Self::OUTPUT_PADDED_INPUT];
-            reader.read_exact(&mut temp_buf)?;
-            for (i, &byte) in temp_buf.iter().enumerate() {
-                bucket.output_weights[i] = byte as i8;
-            }
-        }
-
-        Ok(bucket)
+        let l1 = AffineTransform::read(reader)?;
+        let l2 = AffineTransform::read(reader)?;
+        let output = AffineTransform::read(reader)?;
+        Ok(Self { l1, l2, output })
     }
 
     /// 順伝播
@@ -130,77 +75,42 @@ impl LayerStackBucket {
     pub fn propagate(&self, input: &[u8; NNUE_PYTORCH_L1]) -> i32 {
         // L1: 1536 → 16
         let mut l1_out = [0i32; LAYER_STACK_L1_OUT];
-        self.propagate_l1(input, &mut l1_out);
+        self.l1.propagate(input, &mut l1_out);
 
         // Split: [15, 1]
         // l1_x: 最初の15要素、l1_skip: 最後の1要素
         let l1_skip = l1_out[NNUE_PYTORCH_L2]; // index 15
 
         // ClippedReLU + Sqr for first 15 elements, then concat with original
-        // l1x_ = clamp(cat([pow(l1x_, 2) * (127/128), l1x_]), 0, 1)
         // 量子化: i32 >> 6 → clamp(0, 127)
-        let mut l2_input = [0u8; LAYER_STACK_L2_IN]; // 30
+        let mut l2_input = Aligned([0u8; L2_PADDED_INPUT]);
 
-        for i in 0..NNUE_PYTORCH_L2 {
-            // SqrClippedReLU: 先に二乗→シフト→クランプ
-            // min(127, (input^2) >> (2 * WeightScaleBits + 7)) = min(127, (input^2) >> 19)
-            let input_val = l1_out[i] as i64;
+        for (i, &val) in l1_out.iter().enumerate().take(NNUE_PYTORCH_L2) {
+            // SqrClippedReLU: min(127, (input^2) >> 19)
+            let input_val = val as i64;
             let sqr = ((input_val * input_val) >> 19).clamp(0, 127) as u8;
             // ClippedReLU: clamp(input >> WeightScaleBits, 0, 127)
-            let clamped = (l1_out[i] >> 6).clamp(0, 127) as u8;
-            l2_input[i] = sqr;
-            l2_input[NNUE_PYTORCH_L2 + i] = clamped;
+            let clamped = (val >> 6).clamp(0, 127) as u8;
+            l2_input.0[i] = sqr;
+            l2_input.0[NNUE_PYTORCH_L2 + i] = clamped;
         }
 
         // L2: 30 → 32
         let mut l2_out = [0i32; NNUE_PYTORCH_L3];
-        self.propagate_l2(&l2_input, &mut l2_out);
+        self.l2.propagate(&l2_input.0, &mut l2_out);
 
         // ClippedReLU
-        let mut l2_relu = [0u8; NNUE_PYTORCH_L3];
-        for i in 0..NNUE_PYTORCH_L3 {
-            let val = l2_out[i] >> 6;
-            l2_relu[i] = val.clamp(0, 127) as u8;
+        let mut l2_relu = Aligned([0u8; OUTPUT_PADDED_INPUT]);
+        for (out, &val) in l2_relu.0.iter_mut().zip(l2_out.iter()) {
+            *out = (val >> 6).clamp(0, 127) as u8;
         }
 
         // Output: 32 → 1
-        let output = self.propagate_output(&l2_relu);
+        let mut output_arr = [0i32; 1];
+        self.output.propagate(&l2_relu.0, &mut output_arr);
 
         // Skip connection
-        output + l1_skip
-    }
-
-    #[inline]
-    fn propagate_l1(&self, input: &[u8; NNUE_PYTORCH_L1], output: &mut [i32; LAYER_STACK_L1_OUT]) {
-        output.copy_from_slice(&self.l1_biases);
-        for (i, &in_val) in input.iter().enumerate() {
-            let in_i32 = in_val as i32;
-            for (j, out) in output.iter_mut().enumerate() {
-                let weight_idx = j * Self::L1_PADDED_INPUT + i;
-                *out += self.l1_weights[weight_idx] as i32 * in_i32;
-            }
-        }
-    }
-
-    #[inline]
-    fn propagate_l2(&self, input: &[u8; LAYER_STACK_L2_IN], output: &mut [i32; NNUE_PYTORCH_L3]) {
-        output.copy_from_slice(&self.l2_biases);
-        for (i, &in_val) in input.iter().enumerate() {
-            let in_i32 = in_val as i32;
-            for (j, out) in output.iter_mut().enumerate() {
-                let weight_idx = j * Self::L2_PADDED_INPUT + i;
-                *out += self.l2_weights[weight_idx] as i32 * in_i32;
-            }
-        }
-    }
-
-    #[inline]
-    fn propagate_output(&self, input: &[u8; NNUE_PYTORCH_L3]) -> i32 {
-        let mut sum = self.output_bias;
-        for (i, &in_val) in input.iter().enumerate() {
-            sum += self.output_weights[i] as i32 * in_val as i32;
-        }
-        sum
+        output_arr[0] + l1_skip
     }
 
     /// 順伝播（診断情報付き）
@@ -213,38 +123,37 @@ impl LayerStackBucket {
     ) -> (i32, [i32; LAYER_STACK_L1_OUT], i32) {
         // L1: 1536 → 16
         let mut l1_out = [0i32; LAYER_STACK_L1_OUT];
-        self.propagate_l1(input, &mut l1_out);
+        self.l1.propagate(input, &mut l1_out);
 
         // Split: [15, 1]
         let l1_skip = l1_out[NNUE_PYTORCH_L2]; // index 15
 
         // ClippedReLU + Sqr for first 15 elements
-        let mut l2_input = [0u8; LAYER_STACK_L2_IN];
-        for i in 0..NNUE_PYTORCH_L2 {
-            // SqrClippedReLU: min(127, (input^2) >> 19)
-            let input_val = l1_out[i] as i64;
+        let mut l2_input = Aligned([0u8; L2_PADDED_INPUT]);
+        for (i, &val) in l1_out.iter().enumerate().take(NNUE_PYTORCH_L2) {
+            let input_val = val as i64;
             let sqr = ((input_val * input_val) >> 19).clamp(0, 127) as u8;
-            let clamped = (l1_out[i] >> 6).clamp(0, 127) as u8;
-            l2_input[i] = sqr;
-            l2_input[NNUE_PYTORCH_L2 + i] = clamped;
+            let clamped = (val >> 6).clamp(0, 127) as u8;
+            l2_input.0[i] = sqr;
+            l2_input.0[NNUE_PYTORCH_L2 + i] = clamped;
         }
 
         // L2: 30 → 32
         let mut l2_out = [0i32; NNUE_PYTORCH_L3];
-        self.propagate_l2(&l2_input, &mut l2_out);
+        self.l2.propagate(&l2_input.0, &mut l2_out);
 
         // ClippedReLU
-        let mut l2_relu = [0u8; NNUE_PYTORCH_L3];
-        for i in 0..NNUE_PYTORCH_L3 {
-            let val = l2_out[i] >> 6;
-            l2_relu[i] = val.clamp(0, 127) as u8;
+        let mut l2_relu = Aligned([0u8; OUTPUT_PADDED_INPUT]);
+        for (out, &val) in l2_relu.0.iter_mut().zip(l2_out.iter()) {
+            *out = (val >> 6).clamp(0, 127) as u8;
         }
 
         // Output: 32 → 1
-        let output = self.propagate_output(&l2_relu);
+        let mut output_arr = [0i32; 1];
+        self.output.propagate(&l2_relu.0, &mut output_arr);
 
         // Skip connection
-        let raw_score = output + l1_skip;
+        let raw_score = output_arr[0] + l1_skip;
 
         (raw_score, l1_out, l1_skip)
     }
@@ -326,7 +235,7 @@ impl Default for LayerStacks {
 // SqrClippedReLU 変換
 // =============================================================================
 
-/// SqrClippedReLU 変換
+/// SqrClippedReLU 変換（SIMD最適化版）
 ///
 /// nnue-pytorch の forward 処理:
 /// ```python
@@ -348,27 +257,208 @@ pub fn sqr_clipped_relu_transform(
     them_acc: &[i16; NNUE_PYTORCH_L1],
     output: &mut [u8; NNUE_PYTORCH_L1],
 ) {
-    // 両視点を連結して 3072次元に
-    // us視点: [us_acc, them_acc]
-    // → ClippedReLU → 4分割 → ペア乗算 → 1536次元
-
     let half = NNUE_PYTORCH_L1 / 2; // 768
 
-    // 前半768要素: us_acc[0..768] * us_acc[768..1536]
-    // 後半768要素: them_acc[0..768] * them_acc[768..1536]
-    for i in 0..half {
-        // us側
-        let us_a = (us_acc[i] as i32).clamp(0, 127) as u32;
-        let us_b = (us_acc[half + i] as i32).clamp(0, 127) as u32;
-        // (a * b) * (127/128) ≈ (a * b) >> 7
-        let us_prod = ((us_a * us_b) >> 7).min(127);
-        output[i] = us_prod as u8;
+    // AVX512BW: 512bit = 32 x i16、2セット同時処理で 64 i16 → 64 u8
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx512f",
+        target_feature = "avx512bw"
+    ))]
+    {
+        // SAFETY:
+        // - us_acc, them_acc: AccumulatorLayerStacks 内 Aligned<[i16; 1536]> で 64 バイトアライン
+        // - output: Aligned<[u8; 1536]> で 64 バイトアライン
+        // - half=768, 768/32=24 → 各ループ24回で全要素カバー
+        // - 乗算結果: max 127*127=16129 < i16::MAX(32767)、>>7 後は [0, 126] → packus で u8 に収まる
+        unsafe {
+            use std::arch::x86_64::*;
+            let zero = _mm512_setzero_si512();
+            let max127 = _mm512_set1_epi16(127);
 
-        // them側
-        let them_a = (them_acc[i] as i32).clamp(0, 127) as u32;
-        let them_b = (them_acc[half + i] as i32).clamp(0, 127) as u32;
-        let them_prod = ((them_a * them_b) >> 7).min(127);
-        output[half + i] = them_prod as u8;
+            // マクロで us/them を処理（出力オフセットが異なるだけ）
+            for (acc, out_offset) in [(us_acc.as_ptr(), 0usize), (them_acc.as_ptr(), half)] {
+                let acc_a = acc;
+                let acc_b = acc.add(half);
+                let out_ptr = output.as_mut_ptr().add(out_offset);
+
+                for i in 0..(half / 32) {
+                    let offset = i * 32;
+                    let va = _mm512_load_si512(acc_a.add(offset) as *const __m512i);
+                    let vb = _mm512_load_si512(acc_b.add(offset) as *const __m512i);
+
+                    let a = _mm512_min_epi16(_mm512_max_epi16(va, zero), max127);
+                    let b = _mm512_min_epi16(_mm512_max_epi16(vb, zero), max127);
+                    let prod = _mm512_mullo_epi16(a, b);
+                    let shifted = _mm512_srli_epi16(prod, 7);
+
+                    // i16→u8 パック: packus は 128-bit レーンごとに動作
+                    // packus(shifted, zero) → [s0..7,0*8, s8..15,0*8, s16..23,0*8, s24..31,0*8]
+                    let packed = _mm512_packus_epi16(shifted, zero);
+                    // レーン再配置: [0,2,4,6,1,3,5,7] → [s0..31, 0*32]
+                    let perm = _mm512_setr_epi64(0, 2, 4, 6, 1, 3, 5, 7);
+                    let fixed = _mm512_permutexvar_epi64(perm, packed);
+                    // 下位 256 bit (32 u8) を store
+                    _mm256_storeu_si256(
+                        out_ptr.add(offset) as *mut __m256i,
+                        _mm512_castsi512_si256(fixed),
+                    );
+                }
+            }
+        }
+        return;
+    }
+
+    // AVX2: 256bit = 16 x i16、2セット同時処理で 32 i16 → 32 u8
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        not(target_feature = "avx512bw")
+    ))]
+    {
+        // SAFETY:
+        // - us_acc, them_acc: AccumulatorLayerStacks 内 Aligned<[i16; 1536]> で 64 バイトアライン
+        // - output: Aligned<[u8; 1536]> で 64 バイトアライン
+        // - half=768, 768/32=24 → 各ループ24回で全要素カバー
+        // - 乗算結果: max 127*127=16129 < i16::MAX(32767)、>>7 後は [0, 126] → packus で u8 に収まる
+        unsafe {
+            use std::arch::x86_64::*;
+            let zero = _mm256_setzero_si256();
+            let max127 = _mm256_set1_epi16(127);
+
+            for (acc, out_offset) in [(us_acc.as_ptr(), 0usize), (them_acc.as_ptr(), half)] {
+                let acc_a = acc;
+                let acc_b = acc.add(half);
+                let out_ptr = output.as_mut_ptr().add(out_offset);
+
+                // 32要素ずつ処理（2 × 16 i16 → 32 u8）
+                for i in 0..(half / 32) {
+                    let offset = i * 32;
+
+                    let va0 = _mm256_load_si256(acc_a.add(offset) as *const __m256i);
+                    let vb0 = _mm256_load_si256(acc_b.add(offset) as *const __m256i);
+                    let a0 = _mm256_min_epi16(_mm256_max_epi16(va0, zero), max127);
+                    let b0 = _mm256_min_epi16(_mm256_max_epi16(vb0, zero), max127);
+                    let shifted0 = _mm256_srli_epi16(_mm256_mullo_epi16(a0, b0), 7);
+
+                    let va1 = _mm256_load_si256(acc_a.add(offset + 16) as *const __m256i);
+                    let vb1 = _mm256_load_si256(acc_b.add(offset + 16) as *const __m256i);
+                    let a1 = _mm256_min_epi16(_mm256_max_epi16(va1, zero), max127);
+                    let b1 = _mm256_min_epi16(_mm256_max_epi16(vb1, zero), max127);
+                    let shifted1 = _mm256_srli_epi16(_mm256_mullo_epi16(a1, b1), 7);
+
+                    // Pack 16+16 i16 → 32 u8
+                    // packus は 128-bit レーンごとに動作:
+                    // [s0[0..7],s1[0..7], s0[8..15],s1[8..15]]
+                    let packed = _mm256_packus_epi16(shifted0, shifted1);
+                    // レーン修正: 0xD8 = [0,2,1,3] → [s0[0..15], s1[0..15]]
+                    let fixed = _mm256_permute4x64_epi64(packed, 0xD8);
+                    _mm256_storeu_si256(out_ptr.add(offset) as *mut __m256i, fixed);
+                }
+            }
+        }
+        return;
+    }
+
+    // SSE2: 128bit = 8 x i16、2セット同時処理で 16 i16 → 16 u8
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "sse2",
+        not(target_feature = "avx2")
+    ))]
+    {
+        // SAFETY: 同上（16バイトアライン）
+        unsafe {
+            use std::arch::x86_64::*;
+            let zero = _mm_setzero_si128();
+            let max127 = _mm_set1_epi16(127);
+
+            for (acc, out_offset) in [(us_acc.as_ptr(), 0usize), (them_acc.as_ptr(), half)] {
+                let acc_a = acc;
+                let acc_b = acc.add(half);
+                let out_ptr = output.as_mut_ptr().add(out_offset);
+
+                // 16要素ずつ処理（2 × 8 i16 → 16 u8）
+                for i in 0..(half / 16) {
+                    let offset = i * 16;
+
+                    let va0 = _mm_load_si128(acc_a.add(offset) as *const __m128i);
+                    let vb0 = _mm_load_si128(acc_b.add(offset) as *const __m128i);
+                    let a0 = _mm_min_epi16(_mm_max_epi16(va0, zero), max127);
+                    let b0 = _mm_min_epi16(_mm_max_epi16(vb0, zero), max127);
+                    let shifted0 = _mm_srli_epi16(_mm_mullo_epi16(a0, b0), 7);
+
+                    let va1 = _mm_load_si128(acc_a.add(offset + 8) as *const __m128i);
+                    let vb1 = _mm_load_si128(acc_b.add(offset + 8) as *const __m128i);
+                    let a1 = _mm_min_epi16(_mm_max_epi16(va1, zero), max127);
+                    let b1 = _mm_min_epi16(_mm_max_epi16(vb1, zero), max127);
+                    let shifted1 = _mm_srli_epi16(_mm_mullo_epi16(a1, b1), 7);
+
+                    // Pack 8+8 i16 → 16 u8（SSE2 にはレーンクロスの問題なし）
+                    let packed = _mm_packus_epi16(shifted0, shifted1);
+                    _mm_storeu_si128(out_ptr.add(offset) as *mut __m128i, packed);
+                }
+            }
+        }
+        return;
+    }
+
+    // WASM SIMD128: 128bit = 8 x i16
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        // SAFETY: WASM SIMD128 はアライメント不要
+        unsafe {
+            use std::arch::wasm32::*;
+            let zero = i16x8_splat(0);
+            let max127 = i16x8_splat(127);
+
+            for (acc, out_offset) in [(us_acc.as_ptr(), 0usize), (them_acc.as_ptr(), half)] {
+                let acc_a = acc;
+                let acc_b = acc.add(half);
+                let out_ptr = output.as_mut_ptr().add(out_offset);
+
+                for i in 0..(half / 16) {
+                    let offset = i * 16;
+
+                    let va0 = v128_load(acc_a.add(offset) as *const v128);
+                    let vb0 = v128_load(acc_b.add(offset) as *const v128);
+                    let a0 = i16x8_min(i16x8_max(va0, zero), max127);
+                    let b0 = i16x8_min(i16x8_max(vb0, zero), max127);
+                    let shifted0 = u16x8_shr(i16x8_mul(a0, b0), 7);
+
+                    let va1 = v128_load(acc_a.add(offset + 8) as *const v128);
+                    let vb1 = v128_load(acc_b.add(offset + 8) as *const v128);
+                    let a1 = i16x8_min(i16x8_max(va1, zero), max127);
+                    let b1 = i16x8_min(i16x8_max(vb1, zero), max127);
+                    let shifted1 = u16x8_shr(i16x8_mul(a1, b1), 7);
+
+                    // Pack 8+8 i16 → 16 u8（符号なし飽和）
+                    let packed = u8x16_narrow_i16x8(shifted0, shifted1);
+                    v128_store(out_ptr.add(offset) as *mut v128, packed);
+                }
+            }
+        }
+        return;
+    }
+
+    // スカラーフォールバック
+    #[allow(unreachable_code)]
+    {
+        // 前半768要素: us_acc[0..768] * us_acc[768..1536]
+        // 後半768要素: them_acc[0..768] * them_acc[768..1536]
+        for i in 0..half {
+            // us側
+            let us_a = (us_acc[i] as i32).clamp(0, 127) as u32;
+            let us_b = (us_acc[half + i] as i32).clamp(0, 127) as u32;
+            let us_prod = ((us_a * us_b) >> 7).min(127);
+            output[i] = us_prod as u8;
+
+            // them側
+            let them_a = (them_acc[i] as i32).clamp(0, 127) as u32;
+            let them_b = (them_acc[half + i] as i32).clamp(0, 127) as u32;
+            let them_prod = ((them_a * them_b) >> 7).min(127);
+            output[half + i] = them_prod as u8;
+        }
     }
 }
 
@@ -431,8 +521,8 @@ mod tests {
     #[test]
     fn test_layer_stack_bucket_new() {
         let bucket = LayerStackBucket::new();
-        assert_eq!(bucket.l1_biases.len(), LAYER_STACK_L1_OUT);
-        assert_eq!(bucket.l2_biases.len(), NNUE_PYTORCH_L3);
+        assert_eq!(bucket.l1.biases.len(), LAYER_STACK_L1_OUT);
+        assert_eq!(bucket.l2.biases.len(), NNUE_PYTORCH_L3);
     }
 
     #[test]
@@ -574,9 +664,9 @@ mod tests {
         // l1_out = bias（weights が全 0 なので入力に依存しない）
         let mut bucket_with_biases = LayerStackBucket::new();
         // index 0 の bias を 8192 に設定 → sqr = 127, 旧実装なら 126
-        bucket_with_biases.l1_biases[0] = 8192;
+        bucket_with_biases.l1.biases[0] = 8192;
         // index 1 の bias を 8128 に設定 → sqr = 126 (両方同じ)
-        bucket_with_biases.l1_biases[1] = 8128;
+        bucket_with_biases.l1.biases[1] = 8128;
 
         let input = [0u8; NNUE_PYTORCH_L1];
         let result = bucket_with_biases.propagate(&input);

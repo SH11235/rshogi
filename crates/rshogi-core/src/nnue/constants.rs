@@ -36,16 +36,6 @@ pub const SCRELU_DEFAULT_QA: i32 = 127;
 /// キャッシュラインサイズ（バイト）
 pub const CACHE_LINE_SIZE: usize = 64;
 
-/// SIMD幅（バイト）
-#[cfg(target_feature = "avx2")]
-pub const SIMD_WIDTH: usize = 32;
-
-#[cfg(all(target_feature = "sse2", not(target_feature = "avx2")))]
-pub const SIMD_WIDTH: usize = 16;
-
-#[cfg(not(any(target_feature = "avx2", target_feature = "sse2")))]
-pub const SIMD_WIDTH: usize = 8;
-
 /// 変換後の次元数（片方の視点）
 pub const TRANSFORMED_FEATURE_DIMENSIONS: usize = 256;
 
