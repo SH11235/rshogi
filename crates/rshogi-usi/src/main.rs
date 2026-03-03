@@ -14,9 +14,11 @@ use rshogi_core::eval::{
 };
 use rshogi_core::nnue::{
     AccumulatorStackVariant, LAYER_STACK_PLY9_DEFAULT_BOUNDS, LayerStackBucketMode,
+    LayerStackProgressCoeff, SHOGI_PROGRESS8_FEATURE_ORDER, SHOGI_PROGRESS8_NUM_FEATURES,
     evaluate_dispatch, format_layer_stack_ply_bounds, get_network, init_nnue,
     parse_layer_stack_bucket_mode, parse_layer_stack_ply_bounds_csv, print_nnue_stats,
     set_fv_scale_override, set_layer_stack_bucket_mode, set_layer_stack_ply_bounds,
+    set_layer_stack_progress_coeff,
 };
 use rshogi_core::position::Position;
 use rshogi_core::search::{
@@ -24,6 +26,7 @@ use rshogi_core::search::{
     SearchResult, SearchTuneParams,
 };
 use rshogi_core::types::Move;
+use serde::Deserialize;
 use serde_json::json;
 
 /// エンジン名
@@ -34,6 +37,103 @@ const ENGINE_VERSION: &str = "0.1.0";
 const ENGINE_AUTHOR: &str = "sh11235";
 /// 探索スレッド用のスタックサイズ（SearchWorkerが大きいため増やす）
 const SEARCH_STACK_SIZE: usize = 64 * 1024 * 1024;
+
+#[derive(Debug, Deserialize)]
+struct ProgressCoeffV1 {
+    format: String,
+    model: String,
+    num_buckets: usize,
+    feature_order: Vec<String>,
+    standardization: ProgressStandardization,
+    weights: Vec<f32>,
+    bias: f32,
+    runtime: ProgressRuntime,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProgressStandardization {
+    mean: Vec<f32>,
+    std: Vec<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProgressRuntime {
+    z_clip: Vec<f32>,
+}
+
+fn load_progress_coeff_v1(path: &str) -> Result<LayerStackProgressCoeff, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read LS_PROGRESS_COEFF '{path}': {e}"))?;
+    let coeff: ProgressCoeffV1 = serde_json::from_str(&text)
+        .map_err(|e| format!("failed to parse LS_PROGRESS_COEFF JSON '{path}': {e}"))?;
+
+    if coeff.format != "rshogi.progress_coeff.v1" {
+        return Err(format!(
+            "invalid progress coeff format '{}', expected 'rshogi.progress_coeff.v1'",
+            coeff.format
+        ));
+    }
+    if coeff.model != "logistic_regression" {
+        return Err(format!(
+            "invalid progress coeff model '{}', expected 'logistic_regression'",
+            coeff.model
+        ));
+    }
+    if coeff.num_buckets != 8 {
+        return Err(format!("invalid num_buckets {}, expected 8", coeff.num_buckets));
+    }
+    if coeff.feature_order.len() != SHOGI_PROGRESS8_NUM_FEATURES {
+        return Err(format!(
+            "invalid feature_order length {}, expected {}",
+            coeff.feature_order.len(),
+            SHOGI_PROGRESS8_NUM_FEATURES
+        ));
+    }
+    for (idx, expected) in SHOGI_PROGRESS8_FEATURE_ORDER.iter().enumerate() {
+        if coeff.feature_order[idx] != *expected {
+            return Err(format!(
+                "feature_order mismatch at index {}: got '{}', expected '{}'",
+                idx, coeff.feature_order[idx], expected
+            ));
+        }
+    }
+    if coeff.standardization.mean.len() != SHOGI_PROGRESS8_NUM_FEATURES
+        || coeff.standardization.std.len() != SHOGI_PROGRESS8_NUM_FEATURES
+        || coeff.weights.len() != SHOGI_PROGRESS8_NUM_FEATURES
+    {
+        return Err(format!(
+            "mean/std/weights lengths must all be {} (got mean={}, std={}, weights={})",
+            SHOGI_PROGRESS8_NUM_FEATURES,
+            coeff.standardization.mean.len(),
+            coeff.standardization.std.len(),
+            coeff.weights.len()
+        ));
+    }
+    if coeff.runtime.z_clip.len() != 2 {
+        return Err(format!(
+            "runtime.z_clip must have exactly 2 values (got {})",
+            coeff.runtime.z_clip.len()
+        ));
+    }
+
+    let mean: [f32; SHOGI_PROGRESS8_NUM_FEATURES] = coeff
+        .standardization
+        .mean
+        .try_into()
+        .map_err(|_| "failed to convert mean to fixed array".to_string())?;
+    let std: [f32; SHOGI_PROGRESS8_NUM_FEATURES] = coeff
+        .standardization
+        .std
+        .try_into()
+        .map_err(|_| "failed to convert std to fixed array".to_string())?;
+    let weights: [f32; SHOGI_PROGRESS8_NUM_FEATURES] = coeff
+        .weights
+        .try_into()
+        .map_err(|_| "failed to convert weights to fixed array".to_string())?;
+    let z_clip = [coeff.runtime.z_clip[0], coeff.runtime.z_clip[1]];
+
+    Ok(LayerStackProgressCoeff::new(mean, std, weights, coeff.bias, z_clip))
+}
 
 /// USIエンジンの状態
 struct UsiEngine {
@@ -191,13 +291,14 @@ impl UsiEngine {
         // 水匠5等は24、YaneuraOuデフォルトは16
         println!("option name FV_SCALE type spin default 0 min 0 max 100");
         println!(
-            "option name LS_BUCKET_MODE type combo default {} var kingrank9 var ply9",
+            "option name LS_BUCKET_MODE type combo default {} var kingrank9 var ply9 var progress8",
             LayerStackBucketMode::KingRank9.as_str()
         );
         println!(
             "option name LS_PLY_BOUNDS type string default {}",
             format_layer_stack_ply_bounds(LAYER_STACK_PLY9_DEFAULT_BOUNDS)
         );
+        println!("option name LS_PROGRESS_COEFF type string default <empty>");
         // 有限パス権（Finite Pass Rights）オプション
         println!("option name PassRights type check default false");
         println!("option name InitialPassCount type spin default 2 min 0 max 10");
@@ -494,7 +595,7 @@ impl UsiEngine {
                 }
                 None => {
                     eprintln!(
-                        "info string Warning: invalid LS_BUCKET_MODE '{}', expected kingrank9 or ply9",
+                        "info string Warning: invalid LS_BUCKET_MODE '{}', expected kingrank9, ply9 or progress8",
                         value
                     );
                 }
@@ -511,6 +612,22 @@ impl UsiEngine {
                     eprintln!("info string Warning: {err}");
                 }
             },
+            "LS_PROGRESS_COEFF" => {
+                if value.is_empty() || value == "<empty>" {
+                    set_layer_stack_progress_coeff(LayerStackProgressCoeff::default());
+                    eprintln!("info string LS_PROGRESS_COEFF: reset to built-in default");
+                } else {
+                    match load_progress_coeff_v1(&value) {
+                        Ok(coeff) => {
+                            set_layer_stack_progress_coeff(coeff);
+                            eprintln!("info string LS_PROGRESS_COEFF loaded: {value}");
+                        }
+                        Err(err) => {
+                            eprintln!("info string Warning: {err}");
+                        }
+                    }
+                }
+            }
             "PassRights" => {
                 let v = value == "true" || value == "1";
                 self.pass_rights_enabled = v;
@@ -996,12 +1113,14 @@ mod tests {
                 use rshogi_core::nnue::{
                     LAYER_STACK_PLY9_DEFAULT_BOUNDS, LayerStackBucketMode,
                     get_layer_stack_bucket_mode, get_layer_stack_ply_bounds,
-                    set_layer_stack_bucket_mode, set_layer_stack_ply_bounds,
+                    get_layer_stack_progress_coeff, set_layer_stack_bucket_mode,
+                    set_layer_stack_ply_bounds, set_layer_stack_progress_coeff,
                 };
 
                 // テスト開始時に既定値へ戻す
                 set_layer_stack_bucket_mode(LayerStackBucketMode::KingRank9);
                 set_layer_stack_ply_bounds(LAYER_STACK_PLY9_DEFAULT_BOUNDS);
+                set_layer_stack_progress_coeff(Default::default());
 
                 let mut engine = UsiEngine::new();
                 engine.cmd_setoption(&["setoption", "name", "LS_BUCKET_MODE", "value", "ply9"]);
@@ -1015,10 +1134,57 @@ mod tests {
 
                 assert_eq!(get_layer_stack_bucket_mode(), LayerStackBucketMode::Ply9);
                 assert_eq!(get_layer_stack_ply_bounds(), [10, 20, 30, 40, 50, 60, 70, 80]);
+                engine.cmd_setoption(&[
+                    "setoption",
+                    "name",
+                    "LS_BUCKET_MODE",
+                    "value",
+                    "progress8",
+                ]);
+                assert_eq!(get_layer_stack_bucket_mode(), LayerStackBucketMode::Progress8);
+
+                // progress coeff の読み込み確認
+                let tmp_path = std::env::temp_dir().join("rshogi_progress_coeff_test.json");
+                let json = r#"{
+  "format": "rshogi.progress_coeff.v1",
+  "model": "logistic_regression",
+  "num_buckets": 8,
+  "feature_order": [
+    "x_board_non_king",
+    "x_hand_total",
+    "x_major_board",
+    "x_promoted_board",
+    "x_stm_king_rank_rel",
+    "x_ntm_king_rank_rel"
+  ],
+  "standardization": {
+    "mean": [1, 2, 3, 4, 5, 6],
+    "std": [1, 1, 1, 1, 1, 1]
+  },
+  "weights": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+  "bias": -0.5,
+  "runtime": { "z_clip": [-7.0, 7.0] }
+}"#;
+                std::fs::write(&tmp_path, json).unwrap();
+                engine.cmd_setoption(&[
+                    "setoption",
+                    "name",
+                    "LS_PROGRESS_COEFF",
+                    "value",
+                    tmp_path.to_str().unwrap(),
+                ]);
+                let coeff = get_layer_stack_progress_coeff();
+                assert_eq!(coeff.mean, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+                assert_eq!(coeff.std, [1.0; 6]);
+                assert_eq!(coeff.weights, [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]);
+                assert_eq!(coeff.bias, -0.5);
+                assert_eq!(coeff.z_clip, [-7.0, 7.0]);
+                let _ = std::fs::remove_file(tmp_path);
 
                 // 他テストへの影響を避けるため復元
                 set_layer_stack_bucket_mode(LayerStackBucketMode::KingRank9);
                 set_layer_stack_ply_bounds(LAYER_STACK_PLY9_DEFAULT_BOUNDS);
+                set_layer_stack_progress_coeff(Default::default());
             })
             .unwrap()
             .join()

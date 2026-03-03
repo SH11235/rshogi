@@ -30,12 +30,13 @@ use super::spec::{Activation, FeatureSet};
 use super::stats::{count_already_computed, count_refresh, count_update};
 use crate::eval::material;
 use crate::position::Position;
-use crate::types::Value;
+use crate::types::{Color, PieceType, Value};
+use once_cell::sync::Lazy;
 use std::fs::File;
 use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{OnceLock, RwLock};
 
 /// グローバルなNNUEネットワーク（HalfKP/HalfKA/HalfKA_hm^）
 static NETWORK: OnceLock<NNUENetwork> = OnceLock::new();
@@ -56,6 +57,8 @@ pub enum LayerStackBucketMode {
     KingRank9 = 0,
     /// 手数方式: game_ply を固定境界で 9 バケットに分割
     Ply9 = 1,
+    /// 進行度方式: logistic regression で 8 バケットへ分割（bucket8は未使用）
+    Progress8 = 2,
 }
 
 impl LayerStackBucketMode {
@@ -63,6 +66,7 @@ impl LayerStackBucketMode {
         match self {
             Self::KingRank9 => "kingrank9",
             Self::Ply9 => "ply9",
+            Self::Progress8 => "progress8",
         }
     }
 }
@@ -71,6 +75,63 @@ impl LayerStackBucketMode {
 ///
 /// bucket0: <=30, bucket1: <=44, ..., bucket7: <=138, bucket8: >=139
 pub const LAYER_STACK_PLY9_DEFAULT_BOUNDS: [u16; 8] = [30, 44, 58, 72, 86, 100, 116, 138];
+
+/// progress8 で使用する特徴量数
+pub const SHOGI_PROGRESS8_NUM_FEATURES: usize = 6;
+
+/// progress8 で使用するバケット数
+pub const SHOGI_PROGRESS8_NUM_BUCKETS: usize = 8;
+
+/// progress8 coeff_v1 の特徴量順序
+pub const SHOGI_PROGRESS8_FEATURE_ORDER: [&str; SHOGI_PROGRESS8_NUM_FEATURES] = [
+    "x_board_non_king",
+    "x_hand_total",
+    "x_major_board",
+    "x_promoted_board",
+    "x_stm_king_rank_rel",
+    "x_ntm_king_rank_rel",
+];
+
+/// progress8 (coeff_v1) の係数。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayerStackProgressCoeff {
+    pub mean: [f32; SHOGI_PROGRESS8_NUM_FEATURES],
+    pub std: [f32; SHOGI_PROGRESS8_NUM_FEATURES],
+    pub weights: [f32; SHOGI_PROGRESS8_NUM_FEATURES],
+    pub bias: f32,
+    pub z_clip: [f32; 2],
+}
+
+impl LayerStackProgressCoeff {
+    pub const fn new(
+        mean: [f32; SHOGI_PROGRESS8_NUM_FEATURES],
+        std: [f32; SHOGI_PROGRESS8_NUM_FEATURES],
+        weights: [f32; SHOGI_PROGRESS8_NUM_FEATURES],
+        bias: f32,
+        z_clip: [f32; 2],
+    ) -> Self {
+        Self {
+            mean,
+            std,
+            weights,
+            bias,
+            z_clip,
+        }
+    }
+}
+
+impl Default for LayerStackProgressCoeff {
+    fn default() -> Self {
+        // docs/coeff/progress_coeff_v1.default.json と同一の既定値。
+        Self {
+            mean: [30.12, 8.45, 2.18, 1.63, 6.71, 6.24],
+            std: [3.77, 4.02, 0.66, 1.40, 1.31, 1.27],
+            weights: [-0.81, 0.56, -0.32, 0.48, 0.11, -0.09],
+            bias: -0.15,
+            z_clip: [-8.0, 8.0],
+        }
+    }
+}
 
 /// LayerStacks bucket mode のグローバル設定
 static LAYER_STACK_BUCKET_MODE: AtomicI32 = AtomicI32::new(LayerStackBucketMode::KingRank9 as i32);
@@ -86,6 +147,10 @@ static LAYER_STACK_PLY_BOUNDS: [AtomicI32; 8] = [
     AtomicI32::new(LAYER_STACK_PLY9_DEFAULT_BOUNDS[6] as i32),
     AtomicI32::new(LAYER_STACK_PLY9_DEFAULT_BOUNDS[7] as i32),
 ];
+
+/// LayerStacks progress8 係数のグローバル設定
+static LAYER_STACK_PROGRESS_COEFF: Lazy<RwLock<LayerStackProgressCoeff>> =
+    Lazy::new(|| RwLock::new(LayerStackProgressCoeff::default()));
 
 /// FV_SCALE オーバーライドを取得
 ///
@@ -109,6 +174,7 @@ pub fn set_fv_scale_override(value: i32) {
 pub fn get_layer_stack_bucket_mode() -> LayerStackBucketMode {
     match LAYER_STACK_BUCKET_MODE.load(Ordering::Relaxed) {
         1 => LayerStackBucketMode::Ply9,
+        2 => LayerStackBucketMode::Progress8,
         _ => LayerStackBucketMode::KingRank9,
     }
 }
@@ -130,6 +196,22 @@ pub fn get_layer_stack_ply_bounds() -> [u16; 8] {
 pub fn set_layer_stack_ply_bounds(bounds: [u16; 8]) {
     for (slot, &value) in LAYER_STACK_PLY_BOUNDS.iter().zip(bounds.iter()) {
         slot.store(i32::from(value), Ordering::Relaxed);
+    }
+}
+
+/// LayerStacks progress8 係数を取得
+pub fn get_layer_stack_progress_coeff() -> LayerStackProgressCoeff {
+    match LAYER_STACK_PROGRESS_COEFF.read() {
+        Ok(guard) => *guard,
+        Err(poisoned) => *poisoned.into_inner(),
+    }
+}
+
+/// LayerStacks progress8 係数を設定
+pub fn set_layer_stack_progress_coeff(coeff: LayerStackProgressCoeff) {
+    match LAYER_STACK_PROGRESS_COEFF.write() {
+        Ok(mut guard) => *guard = coeff,
+        Err(poisoned) => *poisoned.into_inner() = coeff,
     }
 }
 
@@ -583,6 +665,7 @@ pub fn parse_layer_stack_bucket_mode(value: &str) -> Option<LayerStackBucketMode
     match value.trim().to_ascii_lowercase().as_str() {
         "kingrank9" => Some(LayerStackBucketMode::KingRank9),
         "ply9" => Some(LayerStackBucketMode::Ply9),
+        "progress8" => Some(LayerStackBucketMode::Progress8),
         _ => None,
     }
 }
@@ -634,6 +717,69 @@ pub fn compute_layer_stack_ply9_bucket_index(game_ply: i32, bounds: [u16; 8]) ->
     }
 
     8
+}
+
+/// progress8 係数に基づいて LayerStacks bucket index (0..=7) を計算
+pub fn compute_layer_stack_progress8_bucket_index(
+    pos: &Position,
+    side_to_move: Color,
+    coeff: LayerStackProgressCoeff,
+) -> usize {
+    let board_non_king = (pos.occupied().count() - pos.pieces_pt(PieceType::King).count()) as f32;
+
+    let hand_black = pos.hand(Color::Black);
+    let hand_white = pos.hand(Color::White);
+    let hand_total = PieceType::HAND_PIECES
+        .iter()
+        .map(|&pt| hand_black.count(pt) + hand_white.count(pt))
+        .sum::<u32>() as f32;
+
+    let major_board = (pos.pieces_pt(PieceType::Bishop).count()
+        + pos.pieces_pt(PieceType::Rook).count()
+        + pos.pieces_pt(PieceType::Horse).count()
+        + pos.pieces_pt(PieceType::Dragon).count()) as f32;
+
+    let promoted_board = (pos.pieces_pt(PieceType::ProPawn).count()
+        + pos.pieces_pt(PieceType::ProLance).count()
+        + pos.pieces_pt(PieceType::ProKnight).count()
+        + pos.pieces_pt(PieceType::ProSilver).count()
+        + pos.pieces_pt(PieceType::Horse).count()
+        + pos.pieces_pt(PieceType::Dragon).count()) as f32;
+
+    let f_king_rank = pos.king_square(side_to_move).rank().index() as f32;
+    let e_king_rank = pos.king_square(!side_to_move).rank().index() as f32;
+    let (stm_king_rank_rel, ntm_king_rank_rel) = match side_to_move {
+        Color::Black => (f_king_rank, 8.0 - e_king_rank),
+        Color::White => (8.0 - f_king_rank, e_king_rank),
+    };
+
+    let x = [
+        board_non_king,
+        hand_total,
+        major_board,
+        promoted_board,
+        stm_king_rank_rel,
+        ntm_king_rank_rel,
+    ];
+
+    let mut z = coeff.bias;
+    for (i, &feature) in x.iter().enumerate() {
+        let std = if coeff.std[i] > 0.0 {
+            coeff.std[i]
+        } else {
+            1.0
+        };
+        let x_norm = (feature - coeff.mean[i]) / std;
+        z += coeff.weights[i] * x_norm;
+    }
+
+    let z_min = coeff.z_clip[0].min(coeff.z_clip[1]);
+    let z_max = coeff.z_clip[0].max(coeff.z_clip[1]);
+    let z_clamped = z.clamp(z_min, z_max);
+    let p = (1.0 / (1.0 + (-z_clamped).exp())).clamp(0.0, 1.0);
+    let raw = (p * SHOGI_PROGRESS8_NUM_BUCKETS as f32).floor() as i32;
+
+    raw.clamp(0, (SHOGI_PROGRESS8_NUM_BUCKETS - 1) as i32) as usize
 }
 
 /// NNUEを初期化（バージョン自動判別）
@@ -1501,6 +1647,10 @@ mod tests {
         assert_eq!(parse_layer_stack_bucket_mode("ply9"), Some(LayerStackBucketMode::Ply9));
         assert_eq!(parse_layer_stack_bucket_mode("PLY9"), Some(LayerStackBucketMode::Ply9));
         assert_eq!(
+            parse_layer_stack_bucket_mode("progress8"),
+            Some(LayerStackBucketMode::Progress8)
+        );
+        assert_eq!(
             parse_layer_stack_bucket_mode(" kingrank9 "),
             Some(LayerStackBucketMode::KingRank9)
         );
@@ -1532,6 +1682,16 @@ mod tests {
         assert_eq!(compute_layer_stack_ply9_bucket_index(139, bounds), 8);
         assert_eq!(compute_layer_stack_ply9_bucket_index(400, bounds), 8);
         assert_eq!(compute_layer_stack_ply9_bucket_index(-5, bounds), 0);
+    }
+
+    #[test]
+    fn test_compute_layer_stack_progress8_bucket_index_range() {
+        let mut pos = Position::new();
+        pos.set_sfen(SFEN_HIRATE).unwrap();
+
+        let coeff = LayerStackProgressCoeff::default();
+        let b = compute_layer_stack_progress8_bucket_index(&pos, pos.side_to_move(), coeff);
+        assert!(b <= 7, "progress8 bucket must be in 0..=7, got {b}");
     }
 
     /// HalfKP 768x2-16-64 ファイルの読み込みテスト

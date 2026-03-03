@@ -78,15 +78,17 @@ pub use layer_stacks::{
 };
 pub use layers::{AffineTransform, ClippedReLU};
 pub use network::{
-    LAYER_STACK_PLY9_DEFAULT_BOUNDS, LayerStackBucketMode, NNUENetwork, NnueFormatInfo,
-    compute_layer_stack_ply9_bucket_index, detect_format, ensure_accumulator_computed,
-    evaluate_dispatch, evaluate_layer_stacks, format_layer_stack_ply_bounds, get_fv_scale_override,
-    get_layer_stack_bucket_mode, get_layer_stack_ply_bounds, get_network, init_nnue,
+    LAYER_STACK_PLY9_DEFAULT_BOUNDS, LayerStackBucketMode, LayerStackProgressCoeff, NNUENetwork,
+    NnueFormatInfo, SHOGI_PROGRESS8_FEATURE_ORDER, SHOGI_PROGRESS8_NUM_FEATURES,
+    compute_layer_stack_ply9_bucket_index, compute_layer_stack_progress8_bucket_index,
+    detect_format, ensure_accumulator_computed, evaluate_dispatch, evaluate_layer_stacks,
+    format_layer_stack_ply_bounds, get_fv_scale_override, get_layer_stack_bucket_mode,
+    get_layer_stack_ply_bounds, get_layer_stack_progress_coeff, get_network, init_nnue,
     init_nnue_from_bytes, is_halfka_256_loaded, is_halfka_512_loaded, is_halfka_1024_loaded,
     is_halfka_hm_256_loaded, is_halfka_hm_512_loaded, is_halfka_hm_1024_loaded,
     is_layer_stacks_loaded, is_nnue_initialized, parse_layer_stack_bucket_mode,
     parse_layer_stack_ply_bounds_csv, set_fv_scale_override, set_layer_stack_bucket_mode,
-    set_layer_stack_ply_bounds,
+    set_layer_stack_ply_bounds, set_layer_stack_progress_coeff,
 };
 pub use network_layer_stacks::NetworkLayerStacks;
 pub use piece_list::{PieceList, PieceNumber};

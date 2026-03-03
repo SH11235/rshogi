@@ -29,8 +29,9 @@ use super::constants::{FV_SCALE_HALFKA, MAX_ARCH_LEN, NNUE_PYTORCH_L1};
 use super::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
 use super::layer_stacks::{LayerStacks, compute_bucket_index, sqr_clipped_relu_transform};
 use super::network::{
-    LayerStackBucketMode, compute_layer_stack_ply9_bucket_index, get_fv_scale_override,
-    get_layer_stack_bucket_mode, get_layer_stack_ply_bounds, parse_fv_scale_from_arch,
+    LayerStackBucketMode, compute_layer_stack_ply9_bucket_index,
+    compute_layer_stack_progress8_bucket_index, get_fv_scale_override, get_layer_stack_bucket_mode,
+    get_layer_stack_ply_bounds, get_layer_stack_progress_coeff, parse_fv_scale_from_arch,
 };
 use crate::position::Position;
 use crate::types::{Color, Value};
@@ -53,6 +54,10 @@ fn compute_layer_stacks_bucket_index(pos: &Position, side_to_move: Color) -> usi
         LayerStackBucketMode::Ply9 => {
             let bounds = get_layer_stack_ply_bounds();
             compute_layer_stack_ply9_bucket_index(pos.game_ply(), bounds)
+        }
+        LayerStackBucketMode::Progress8 => {
+            let coeff = get_layer_stack_progress_coeff();
+            compute_layer_stack_progress8_bucket_index(pos, side_to_move, coeff)
         }
     }
 }
@@ -283,6 +288,12 @@ impl NetworkLayerStacks {
                 info!(
                     "[NNUE Eval] bucket_mode=ply9, game_ply={game_ply}, ply_bounds={bounds:?}, bucket_index={bucket}"
                 );
+                bucket
+            }
+            LayerStackBucketMode::Progress8 => {
+                let coeff = get_layer_stack_progress_coeff();
+                let bucket = compute_layer_stack_progress8_bucket_index(pos, side_to_move, coeff);
+                info!("[NNUE Eval] bucket_mode=progress8, bucket_index={bucket}");
                 bucket
             }
         };
