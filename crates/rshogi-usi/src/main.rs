@@ -13,8 +13,10 @@ use rshogi_core::eval::{
     set_eval_hash_enabled, set_material_level, set_pass_move_bonus, set_pass_right_value_phased,
 };
 use rshogi_core::nnue::{
-    AccumulatorStackVariant, evaluate_dispatch, get_network, init_nnue, print_nnue_stats,
-    set_fv_scale_override,
+    AccumulatorStackVariant, LAYER_STACK_PLY9_DEFAULT_BOUNDS, LayerStackBucketMode,
+    evaluate_dispatch, format_layer_stack_ply_bounds, get_network, init_nnue,
+    parse_layer_stack_bucket_mode, parse_layer_stack_ply_bounds_csv, print_nnue_stats,
+    set_fv_scale_override, set_layer_stack_bucket_mode, set_layer_stack_ply_bounds,
 };
 use rshogi_core::position::Position;
 use rshogi_core::search::{
@@ -188,6 +190,14 @@ impl UsiEngine {
         // FV_SCALE: 0=自動判定、1以上=指定値でオーバーライド
         // 水匠5等は24、YaneuraOuデフォルトは16
         println!("option name FV_SCALE type spin default 0 min 0 max 100");
+        println!(
+            "option name LS_BUCKET_MODE type combo default {} var kingrank9 var ply9",
+            LayerStackBucketMode::KingRank9.as_str()
+        );
+        println!(
+            "option name LS_PLY_BOUNDS type string default {}",
+            format_layer_stack_ply_bounds(LAYER_STACK_PLY9_DEFAULT_BOUNDS)
+        );
         // 有限パス権（Finite Pass Rights）オプション
         println!("option name PassRights type check default false");
         println!("option name InitialPassCount type spin default 2 min 0 max 10");
@@ -477,6 +487,30 @@ impl UsiEngine {
                     }
                 }
             }
+            "LS_BUCKET_MODE" => match parse_layer_stack_bucket_mode(&value) {
+                Some(mode) => {
+                    set_layer_stack_bucket_mode(mode);
+                    eprintln!("info string LS_BUCKET_MODE: {}", mode.as_str());
+                }
+                None => {
+                    eprintln!(
+                        "info string Warning: invalid LS_BUCKET_MODE '{}', expected kingrank9 or ply9",
+                        value
+                    );
+                }
+            },
+            "LS_PLY_BOUNDS" => match parse_layer_stack_ply_bounds_csv(&value) {
+                Ok(bounds) => {
+                    set_layer_stack_ply_bounds(bounds);
+                    eprintln!(
+                        "info string LS_PLY_BOUNDS: {}",
+                        format_layer_stack_ply_bounds(bounds)
+                    );
+                }
+                Err(err) => {
+                    eprintln!("info string Warning: {err}");
+                }
+            },
             "PassRights" => {
                 let v = value == "true" || value == "1";
                 self.pass_rights_enabled = v;
@@ -948,6 +982,43 @@ mod tests {
                 let search = engine.search.as_ref().expect("search exists");
                 assert_eq!(search.draw_value_black(), 123);
                 assert_eq!(search.draw_value_white(), -456);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn setoption_layerstack_bucket_updates_globals() {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                use rshogi_core::nnue::{
+                    LAYER_STACK_PLY9_DEFAULT_BOUNDS, LayerStackBucketMode,
+                    get_layer_stack_bucket_mode, get_layer_stack_ply_bounds,
+                    set_layer_stack_bucket_mode, set_layer_stack_ply_bounds,
+                };
+
+                // テスト開始時に既定値へ戻す
+                set_layer_stack_bucket_mode(LayerStackBucketMode::KingRank9);
+                set_layer_stack_ply_bounds(LAYER_STACK_PLY9_DEFAULT_BOUNDS);
+
+                let mut engine = UsiEngine::new();
+                engine.cmd_setoption(&["setoption", "name", "LS_BUCKET_MODE", "value", "ply9"]);
+                engine.cmd_setoption(&[
+                    "setoption",
+                    "name",
+                    "LS_PLY_BOUNDS",
+                    "value",
+                    "10,20,30,40,50,60,70,80",
+                ]);
+
+                assert_eq!(get_layer_stack_bucket_mode(), LayerStackBucketMode::Ply9);
+                assert_eq!(get_layer_stack_ply_bounds(), [10, 20, 30, 40, 50, 60, 70, 80]);
+
+                // 他テストへの影響を避けるため復元
+                set_layer_stack_bucket_mode(LayerStackBucketMode::KingRank9);
+                set_layer_stack_ply_bounds(LAYER_STACK_PLY9_DEFAULT_BOUNDS);
             })
             .unwrap()
             .join()

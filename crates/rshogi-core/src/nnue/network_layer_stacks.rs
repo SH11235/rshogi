@@ -28,7 +28,10 @@ use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLa
 use super::constants::{FV_SCALE_HALFKA, MAX_ARCH_LEN, NNUE_PYTORCH_L1};
 use super::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
 use super::layer_stacks::{LayerStacks, compute_bucket_index, sqr_clipped_relu_transform};
-use super::network::{get_fv_scale_override, parse_fv_scale_from_arch};
+use super::network::{
+    LayerStackBucketMode, compute_layer_stack_ply9_bucket_index, get_fv_scale_override,
+    get_layer_stack_bucket_mode, get_layer_stack_ply_bounds, parse_fv_scale_from_arch,
+};
 use crate::position::Position;
 use crate::types::{Color, Value};
 #[cfg(feature = "diagnostics")]
@@ -36,6 +39,23 @@ use log::info;
 use std::fs::File;
 use std::io::{self, BufReader, Cursor, Read, Seek};
 use std::path::Path;
+
+#[inline]
+fn compute_layer_stacks_bucket_index(pos: &Position, side_to_move: Color) -> usize {
+    match get_layer_stack_bucket_mode() {
+        LayerStackBucketMode::KingRank9 => {
+            let f_king = pos.king_square(side_to_move);
+            let e_king = pos.king_square(!side_to_move);
+            let (f_rank, e_rank) =
+                crate::nnue::layer_stacks::compute_king_ranks(side_to_move, f_king, e_king);
+            compute_bucket_index(f_rank, e_rank)
+        }
+        LayerStackBucketMode::Ply9 => {
+            let bounds = get_layer_stack_ply_bounds();
+            compute_layer_stack_ply9_bucket_index(pos.game_ply(), bounds)
+        }
+    }
+}
 
 /// LayerStacksアーキテクチャのNNUEネットワーク
 ///
@@ -196,12 +216,8 @@ impl NetworkLayerStacks {
         let mut transformed: Aligned<[u8; NNUE_PYTORCH_L1]> = unsafe { Aligned::new_uninit() };
         sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
 
-        // バケットインデックスを計算（両玉の段に基づく）
-        let f_king = pos.king_square(side_to_move);
-        let e_king = pos.king_square(!side_to_move);
-        let (f_rank, e_rank) =
-            crate::nnue::layer_stacks::compute_king_ranks(side_to_move, f_king, e_king);
-        let bucket_index = compute_bucket_index(f_rank, e_rank);
+        // バケットインデックスを計算
+        let bucket_index = compute_layer_stacks_bucket_index(pos, side_to_move);
 
         // LayerStacks で評価
         let raw_score = self.layer_stacks.evaluate_raw(bucket_index, &transformed.0);
@@ -247,15 +263,29 @@ impl NetworkLayerStacks {
         info!("[NNUE Eval] transformed: nonzero={transformed_nonzero}/1536, sum={transformed_sum}");
         info!("[NNUE Eval] transformed first 32: {:?}", &transformed[0..32]);
 
-        // バケットインデックスを計算（両玉の段に基づく）
-        let f_king = pos.king_square(side_to_move);
-        let e_king = pos.king_square(!side_to_move);
-        let (f_rank, e_rank) =
-            crate::nnue::layer_stacks::compute_king_ranks(side_to_move, f_king, e_king);
-        let bucket_index = compute_bucket_index(f_rank, e_rank);
-        info!(
-            "[NNUE Eval] f_king_rank={f_rank}, e_king_rank={e_rank}, bucket_index={bucket_index}"
-        );
+        // バケットインデックスを計算
+        let bucket_index = match get_layer_stack_bucket_mode() {
+            LayerStackBucketMode::KingRank9 => {
+                let f_king = pos.king_square(side_to_move);
+                let e_king = pos.king_square(!side_to_move);
+                let (f_rank, e_rank) =
+                    crate::nnue::layer_stacks::compute_king_ranks(side_to_move, f_king, e_king);
+                let bucket = compute_bucket_index(f_rank, e_rank);
+                info!(
+                    "[NNUE Eval] bucket_mode=kingrank9, f_king_rank={f_rank}, e_king_rank={e_rank}, bucket_index={bucket}"
+                );
+                bucket
+            }
+            LayerStackBucketMode::Ply9 => {
+                let bounds = get_layer_stack_ply_bounds();
+                let game_ply = pos.game_ply();
+                let bucket = compute_layer_stack_ply9_bucket_index(game_ply, bounds);
+                info!(
+                    "[NNUE Eval] bucket_mode=ply9, game_ply={game_ply}, ply_bounds={bounds:?}, bucket_index={bucket}"
+                );
+                bucket
+            }
+        };
 
         // LayerStacks で評価（詳細ログ付き）
         let (raw_score, l1_out, l1_skip) =

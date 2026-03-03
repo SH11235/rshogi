@@ -49,6 +49,44 @@ static NETWORK: OnceLock<NNUENetwork> = OnceLock::new();
 /// 評価関数によって異なる値が必要な場合に使用。
 static FV_SCALE_OVERRIDE: AtomicI32 = AtomicI32::new(0);
 
+/// LayerStacks の bucket 選択モード
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayerStackBucketMode {
+    /// 従来方式: 両玉の相対段で 9 バケットを選択
+    KingRank9 = 0,
+    /// 手数方式: game_ply を固定境界で 9 バケットに分割
+    Ply9 = 1,
+}
+
+impl LayerStackBucketMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::KingRank9 => "kingrank9",
+            Self::Ply9 => "ply9",
+        }
+    }
+}
+
+/// LayerStacks の ply9 バケットの既定境界。
+///
+/// bucket0: <=30, bucket1: <=44, ..., bucket7: <=138, bucket8: >=139
+pub const LAYER_STACK_PLY9_DEFAULT_BOUNDS: [u16; 8] = [30, 44, 58, 72, 86, 100, 116, 138];
+
+/// LayerStacks bucket mode のグローバル設定
+static LAYER_STACK_BUCKET_MODE: AtomicI32 = AtomicI32::new(LayerStackBucketMode::KingRank9 as i32);
+
+/// LayerStacks ply9 境界のグローバル設定
+static LAYER_STACK_PLY_BOUNDS: [AtomicI32; 8] = [
+    AtomicI32::new(LAYER_STACK_PLY9_DEFAULT_BOUNDS[0] as i32),
+    AtomicI32::new(LAYER_STACK_PLY9_DEFAULT_BOUNDS[1] as i32),
+    AtomicI32::new(LAYER_STACK_PLY9_DEFAULT_BOUNDS[2] as i32),
+    AtomicI32::new(LAYER_STACK_PLY9_DEFAULT_BOUNDS[3] as i32),
+    AtomicI32::new(LAYER_STACK_PLY9_DEFAULT_BOUNDS[4] as i32),
+    AtomicI32::new(LAYER_STACK_PLY9_DEFAULT_BOUNDS[5] as i32),
+    AtomicI32::new(LAYER_STACK_PLY9_DEFAULT_BOUNDS[6] as i32),
+    AtomicI32::new(LAYER_STACK_PLY9_DEFAULT_BOUNDS[7] as i32),
+];
+
 /// FV_SCALE オーバーライドを取得
 ///
 /// 戻り値:
@@ -65,6 +103,34 @@ pub fn get_fv_scale_override() -> Option<i32> {
 /// - `value`: 設定値（0 = 自動判定、1以上 = オーバーライド）
 pub fn set_fv_scale_override(value: i32) {
     FV_SCALE_OVERRIDE.store(value.max(0), Ordering::Relaxed);
+}
+
+/// LayerStacks bucket mode を取得
+pub fn get_layer_stack_bucket_mode() -> LayerStackBucketMode {
+    match LAYER_STACK_BUCKET_MODE.load(Ordering::Relaxed) {
+        1 => LayerStackBucketMode::Ply9,
+        _ => LayerStackBucketMode::KingRank9,
+    }
+}
+
+/// LayerStacks bucket mode を設定
+pub fn set_layer_stack_bucket_mode(mode: LayerStackBucketMode) {
+    LAYER_STACK_BUCKET_MODE.store(mode as i32, Ordering::Relaxed);
+}
+
+/// LayerStacks ply9 境界を取得
+pub fn get_layer_stack_ply_bounds() -> [u16; 8] {
+    std::array::from_fn(|i| {
+        let value = LAYER_STACK_PLY_BOUNDS[i].load(Ordering::Relaxed);
+        if value < 0 { 0 } else { value as u16 }
+    })
+}
+
+/// LayerStacks ply9 境界を設定
+pub fn set_layer_stack_ply_bounds(bounds: [u16; 8]) {
+    for (slot, &value) in LAYER_STACK_PLY_BOUNDS.iter().zip(bounds.iter()) {
+        slot.store(i32::from(value), Ordering::Relaxed);
+    }
 }
 
 // =============================================================================
@@ -510,6 +576,64 @@ pub fn parse_fv_scale_from_arch(arch_str: &str) -> Option<i32> {
         }
     }
     None
+}
+
+/// LayerStacks bucket mode をパース
+pub fn parse_layer_stack_bucket_mode(value: &str) -> Option<LayerStackBucketMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "kingrank9" => Some(LayerStackBucketMode::KingRank9),
+        "ply9" => Some(LayerStackBucketMode::Ply9),
+        _ => None,
+    }
+}
+
+/// `LS_PLY_BOUNDS` 文字列をパースする。
+///
+/// 形式: `30,44,58,72,86,100,116,138` （8要素）
+pub fn parse_layer_stack_ply_bounds_csv(text: &str) -> Result<[u16; 8], String> {
+    let mut values = Vec::new();
+    for token in text.split(',') {
+        let t = token.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let value: u16 =
+            t.parse().map_err(|e| format!("invalid LS_PLY_BOUNDS value '{t}': {e}"))?;
+        values.push(value);
+    }
+
+    if values.len() != 8 {
+        return Err(format!(
+            "LS_PLY_BOUNDS requires exactly 8 comma-separated values (got {})",
+            values.len()
+        ));
+    }
+
+    Ok([
+        values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7],
+    ])
+}
+
+/// LayerStacks ply9 境界を CSV 文字列へ変換
+pub fn format_layer_stack_ply_bounds(bounds: [u16; 8]) -> String {
+    bounds.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")
+}
+
+/// game_ply と境界から LayerStacks ply9 の bucket index (0..=8) を計算
+pub fn compute_layer_stack_ply9_bucket_index(game_ply: i32, bounds: [u16; 8]) -> usize {
+    let ply = if game_ply < 0 {
+        0
+    } else {
+        u16::try_from(game_ply).unwrap_or(u16::MAX)
+    };
+
+    for (i, &bound) in bounds.iter().enumerate() {
+        if ply <= bound {
+            return i;
+        }
+    }
+
+    8
 }
 
 /// NNUEを初期化（バージョン自動判別）
@@ -1366,6 +1490,48 @@ mod tests {
         // プレフィックスが部分一致する場合（マッチしない）
         assert_eq!(parse_fv_scale_from_arch("my_fv_scale=16"), None);
         assert_eq!(parse_fv_scale_from_arch("fv_scale_v2=16"), None);
+    }
+
+    #[test]
+    fn test_parse_layer_stack_bucket_mode() {
+        assert_eq!(
+            parse_layer_stack_bucket_mode("kingrank9"),
+            Some(LayerStackBucketMode::KingRank9)
+        );
+        assert_eq!(parse_layer_stack_bucket_mode("ply9"), Some(LayerStackBucketMode::Ply9));
+        assert_eq!(parse_layer_stack_bucket_mode("PLY9"), Some(LayerStackBucketMode::Ply9));
+        assert_eq!(
+            parse_layer_stack_bucket_mode(" kingrank9 "),
+            Some(LayerStackBucketMode::KingRank9)
+        );
+        assert_eq!(parse_layer_stack_bucket_mode("unknown"), None);
+    }
+
+    #[test]
+    fn test_parse_layer_stack_ply_bounds_csv() {
+        assert_eq!(
+            parse_layer_stack_ply_bounds_csv("30,44,58,72,86,100,116,138").unwrap(),
+            [30, 44, 58, 72, 86, 100, 116, 138]
+        );
+        assert_eq!(
+            parse_layer_stack_ply_bounds_csv(" 30, 44, 58, 72, 86, 100, 116, 138 ").unwrap(),
+            [30, 44, 58, 72, 86, 100, 116, 138]
+        );
+
+        assert!(parse_layer_stack_ply_bounds_csv("30,44,58").is_err());
+        assert!(parse_layer_stack_ply_bounds_csv("30,44,58,72,86,100,116,abc").is_err());
+    }
+
+    #[test]
+    fn test_compute_layer_stack_ply9_bucket_index() {
+        let bounds = LAYER_STACK_PLY9_DEFAULT_BOUNDS;
+        assert_eq!(compute_layer_stack_ply9_bucket_index(0, bounds), 0);
+        assert_eq!(compute_layer_stack_ply9_bucket_index(30, bounds), 0);
+        assert_eq!(compute_layer_stack_ply9_bucket_index(31, bounds), 1);
+        assert_eq!(compute_layer_stack_ply9_bucket_index(138, bounds), 7);
+        assert_eq!(compute_layer_stack_ply9_bucket_index(139, bounds), 8);
+        assert_eq!(compute_layer_stack_ply9_bucket_index(400, bounds), 8);
+        assert_eq!(compute_layer_stack_ply9_bucket_index(-5, bounds), 0);
     }
 
     /// HalfKP 768x2-16-64 ファイルの読み込みテスト
