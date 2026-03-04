@@ -560,9 +560,12 @@ fn main() -> Result<()> {
                     let (black_idx, white_idx) = if game_idx % 2 == 0 { (i, j) } else { (j, i) };
                     let startpos_idx = if start_defs.len() == 1 {
                         0
-                    } else {
-                        // ランダムに選択
+                    } else if game_idx % 2 == 0 {
+                        // 先後ペアの1局目: ランダムに選択
                         *((0..start_defs.len()).collect::<Vec<_>>()).choose(&mut rng).unwrap()
+                    } else {
+                        // 先後ペアの2局目: 同じ開始局面で先後入替
+                        tickets.last().unwrap().startpos_idx
                     };
                     tickets.push(MatchTicket {
                         id: ticket_id,

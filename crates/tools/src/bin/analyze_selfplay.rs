@@ -144,6 +144,12 @@ struct HeadToHeadStats {
     left_wins: u32,
     right_wins: u32,
     draws: u32,
+    /// left エンジンの先手決着局数・先手勝数
+    left_sente_games: u32,
+    left_sente_wins: u32,
+    /// left エンジンの後手決着局数・後手勝数
+    left_gote_games: u32,
+    left_gote_wins: u32,
 }
 
 /// JSON出力用
@@ -526,11 +532,25 @@ fn main() -> Result<()> {
         h.done += v.done;
         h.draws += v.draws;
         if b <= w {
+            // b=left, w=right
             h.left_wins += v.black_wins;
             h.right_wins += v.white_wins;
+            // a(=b=left)の先手データ
+            h.left_sente_games += v.a_sente_games;
+            h.left_sente_wins += v.a_sente_wins;
+            // a(=b=left)の後手データ: 相手(w)が先手の局
+            h.left_gote_games += v.b_sente_games;
+            h.left_gote_wins += v.black_wins - v.a_sente_wins;
         } else {
+            // b=right, w=left
             h.right_wins += v.black_wins;
             h.left_wins += v.white_wins;
+            // w(=left)の先手データ: b_sente は meta.white が先手の局
+            h.left_sente_games += v.b_sente_games;
+            h.left_sente_wins += v.b_sente_wins;
+            // w(=left)の後手データ: a(=b=right)が先手の局
+            h.left_gote_games += v.a_sente_games;
+            h.left_gote_wins += v.white_wins - v.b_sente_wins;
         }
     }
 
@@ -545,7 +565,7 @@ fn main() -> Result<()> {
             &labels,
         )?;
     } else {
-        print_text(valid_files, total_done, total_all, &matchups, &engines, &head_to_head, &labels);
+        print_text(valid_files, total_done, total_all, &engines, &head_to_head, &labels);
     }
 
     Ok(())
@@ -555,12 +575,10 @@ fn main() -> Result<()> {
 // テキスト出力
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
 fn print_text(
     file_count: u32,
     total_done: u32,
     total_all: u32,
-    matchups: &BTreeMap<(String, String), MatchupStats>,
     engines: &BTreeMap<String, EngineStats>,
     head_to_head: &BTreeMap<(String, String), HeadToHeadStats>,
     labels: &BTreeMap<String, String>,
@@ -575,18 +593,6 @@ fn print_text(
         file_count, total_done, total_all, pct
     );
     println!();
-
-    // 対戦カード別
-    println!("対戦カード別 合算（先手 vs 後手）");
-    println!("{}", "=".repeat(75));
-    for ((b, w), v) in matchups {
-        let bn = labels.get(b).map_or(b.as_str(), |s| s.as_str());
-        let wn = labels.get(w).map_or(w.as_str(), |s| s.as_str());
-        println!(
-            "  {:16}(先手) vs {:16}(後手) | {:3}/{:3}局 | 先手勝:{:3} 後手勝:{:3} 引分:{}",
-            bn, wn, v.done, v.total, v.black_wins, v.white_wins, v.draws
-        );
-    }
 
     // エンジン別（勝率降順でソート）
     println!();
@@ -629,7 +635,7 @@ fn print_text(
 
     // 直接対決
     println!();
-    println!("直接対決（先後合算）");
+    println!("直接対決");
     println!("{}", "=".repeat(75));
     for ((a, b), v) in head_to_head {
         let an = labels.get(a).map_or(a.as_str(), |s| s.as_str());
@@ -653,6 +659,38 @@ fn print_text(
             "  {:16} vs {:16} | {:3}局 | {}:{:3}勝 {}:{:3}勝 引分:{} | {}勝率:{:.1}%{}",
             an, bn, v.done, an, v.left_wins, bn, v.right_wins, v.draws, an, wr_a, elo_str
         );
+
+        // 先手/後手別勝率
+        if v.left_sente_games > 0 || v.left_gote_games > 0 {
+            let half = v.done / 2;
+            let half_up = half + v.done % 2;
+
+            let fmt_wr = |label: &str, wins: u32, decisive: u32, total_games: u32| -> String {
+                if decisive > 0 {
+                    format!(
+                        "{}:{:.1}%({}/{}局)",
+                        label,
+                        wins as f64 / decisive as f64 * 100.0,
+                        wins,
+                        total_games
+                    )
+                } else {
+                    format!("{}:-", label)
+                }
+            };
+
+            let a_sente = fmt_wr("先手", v.left_sente_wins, v.left_sente_games, half_up);
+            let a_gote = fmt_wr("後手", v.left_gote_wins, v.left_gote_games, half);
+            // right の先手 = left の後手局、right の後手 = left の先手局
+            let r_sente_decisive = v.left_gote_games;
+            let r_sente_wins = r_sente_decisive - v.left_gote_wins;
+            let r_gote_decisive = v.left_sente_games;
+            let r_gote_wins = r_gote_decisive - v.left_sente_wins;
+            let b_sente = fmt_wr("先手", r_sente_wins, r_sente_decisive, half);
+            let b_gote = fmt_wr("後手", r_gote_wins, r_gote_decisive, half_up);
+            println!("    {} {} {}", an, a_sente, a_gote);
+            println!("    {} {} {}", bn, b_sente, b_gote);
+        }
     }
 }
 
