@@ -129,11 +129,6 @@ impl TTEntry {
             self.gen_bound8 = generation8 | ((is_pv as u8) << 2) | bound as u8;
             self.value16 = value.raw() as i16;
             self.eval16 = eval.raw() as i16;
-        } else if self.depth8 as i32 + DEPTH_ENTRY_OFFSET >= 5
-            && Bound::from_u8(self.gen_bound8 & 0x3) != Some(Bound::Exact)
-        {
-            // 浅い置換を防ぐため、EXACT以外の深い項目はわずかに劣化させる
-            self.depth8 = self.depth8.saturating_sub(1);
         }
     }
 
@@ -235,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tt_entry_decay_non_exact() {
+    fn test_tt_entry_no_decay_non_exact() {
         let mut entry = TTEntry::new();
         let key = 0x123456789ABCDEFu64;
 
@@ -243,9 +238,9 @@ mod tests {
         entry.save(key, Value::ZERO, false, Bound::Lower, 8, Move::NONE, Value::ZERO, 0);
         let depth_before = entry.depth8();
 
-        // 同一世代・同一キー・浅いLowerを保存すると深さが1減衰する
+        // V9.21: 同一世代・同一キー・浅いLowerを保存しても減衰しない
         entry.save(key, Value::ZERO, false, Bound::Lower, 1, Move::NONE, Value::ZERO, 0);
-        assert_eq!(entry.depth8(), depth_before - 1);
+        assert_eq!(entry.depth8(), depth_before);
     }
 
     #[test]

@@ -437,9 +437,9 @@ pub(super) fn qsearch<const NT: u8>(
                     inc_stat!(st, qs_futility_pruned);
                     // SEE で alpha - futility_base を下回った場合、
                     // best_value を futility_base（楽観的上限）で更新する。
-                    // alpha.min() を取るのは、futility_base > alpha のケースで
-                    // best_value が alpha を超えないようにするため。
-                    best_value = alpha.min(futility_base);
+                    // best_value.max() で単調非減少を保証し、
+                    // alpha.min() で best_value が alpha を超えないようにする。
+                    best_value = best_value.max(alpha.min(futility_base));
                     continue;
                 }
             }
