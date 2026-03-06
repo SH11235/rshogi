@@ -59,6 +59,8 @@ pub enum LayerStackBucketMode {
     Ply9 = 1,
     /// 進行度方式: logistic regression で 8 バケットへ分割（bucket8は未使用）
     Progress8 = 2,
+    /// 進行度方式(gikou-lite): logistic regression(34特徴) で 8 バケットへ分割（bucket8は未使用）
+    Progress8Gikou = 3,
 }
 
 impl LayerStackBucketMode {
@@ -67,6 +69,7 @@ impl LayerStackBucketMode {
             Self::KingRank9 => "kingrank9",
             Self::Ply9 => "ply9",
             Self::Progress8 => "progress8",
+            Self::Progress8Gikou => "progress8gikou",
         }
     }
 }
@@ -92,6 +95,47 @@ pub const SHOGI_PROGRESS8_FEATURE_ORDER: [&str; SHOGI_PROGRESS8_NUM_FEATURES] = 
     "x_ntm_king_rank_rel",
 ];
 
+/// progress8gikou で使用する特徴量数
+pub const SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES: usize = 34;
+
+/// progress8gikou coeff_v2 の特徴量順序
+pub const SHOGI_PROGRESS_GIKOU_LITE_FEATURE_ORDER: [&str; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES] = [
+    "x_board_non_king",
+    "x_hand_total",
+    "x_major_board",
+    "x_promoted_board",
+    "x_stm_king_rank_rel",
+    "x_ntm_king_rank_rel",
+    "x_stm_all_to_own_king_d1",
+    "x_stm_all_to_own_king_d2",
+    "x_stm_all_to_own_king_d3p",
+    "x_stm_all_to_opp_king_d1",
+    "x_stm_all_to_opp_king_d2",
+    "x_stm_all_to_opp_king_d3p",
+    "x_ntm_all_to_own_king_d1",
+    "x_ntm_all_to_own_king_d2",
+    "x_ntm_all_to_own_king_d3p",
+    "x_ntm_all_to_opp_king_d1",
+    "x_ntm_all_to_opp_king_d2",
+    "x_ntm_all_to_opp_king_d3p",
+    "x_stm_major_to_own_king_d1",
+    "x_stm_major_to_own_king_d2",
+    "x_stm_major_to_own_king_d3p",
+    "x_stm_major_to_opp_king_d1",
+    "x_stm_major_to_opp_king_d2",
+    "x_stm_major_to_opp_king_d3p",
+    "x_ntm_major_to_own_king_d1",
+    "x_ntm_major_to_own_king_d2",
+    "x_ntm_major_to_own_king_d3p",
+    "x_ntm_major_to_opp_king_d1",
+    "x_ntm_major_to_opp_king_d2",
+    "x_ntm_major_to_opp_king_d3p",
+    "x_stm_hand_total",
+    "x_ntm_hand_total",
+    "x_stm_hand_major",
+    "x_ntm_hand_major",
+];
+
 /// progress8 (coeff_v1) の係数。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayerStackProgressCoeff {
@@ -100,6 +144,34 @@ pub struct LayerStackProgressCoeff {
     pub weights: [f32; SHOGI_PROGRESS8_NUM_FEATURES],
     pub bias: f32,
     pub z_clip: [f32; 2],
+}
+
+/// progress8gikou (coeff_v2) の係数。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayerStackProgressCoeffGikouLite {
+    pub mean: [f32; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES],
+    pub std: [f32; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES],
+    pub weights: [f32; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES],
+    pub bias: f32,
+    pub z_clip: [f32; 2],
+}
+
+impl LayerStackProgressCoeffGikouLite {
+    pub const fn new(
+        mean: [f32; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES],
+        std: [f32; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES],
+        weights: [f32; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES],
+        bias: f32,
+        z_clip: [f32; 2],
+    ) -> Self {
+        Self {
+            mean,
+            std,
+            weights,
+            bias,
+            z_clip,
+        }
+    }
 }
 
 impl LayerStackProgressCoeff {
@@ -133,6 +205,18 @@ impl Default for LayerStackProgressCoeff {
     }
 }
 
+impl Default for LayerStackProgressCoeffGikouLite {
+    fn default() -> Self {
+        Self {
+            mean: [0.0; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES],
+            std: [1.0; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES],
+            weights: [0.0; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES],
+            bias: 0.0,
+            z_clip: [-8.0, 8.0],
+        }
+    }
+}
+
 /// LayerStacks bucket mode のグローバル設定
 static LAYER_STACK_BUCKET_MODE: AtomicI32 = AtomicI32::new(LayerStackBucketMode::KingRank9 as i32);
 
@@ -151,6 +235,10 @@ static LAYER_STACK_PLY_BOUNDS: [AtomicI32; 8] = [
 /// LayerStacks progress8 係数のグローバル設定
 static LAYER_STACK_PROGRESS_COEFF: Lazy<RwLock<LayerStackProgressCoeff>> =
     Lazy::new(|| RwLock::new(LayerStackProgressCoeff::default()));
+
+/// LayerStacks progress8gikou 係数のグローバル設定
+static LAYER_STACK_PROGRESS_COEFF_GIKOU_LITE: Lazy<RwLock<LayerStackProgressCoeffGikouLite>> =
+    Lazy::new(|| RwLock::new(LayerStackProgressCoeffGikouLite::default()));
 
 /// FV_SCALE オーバーライドを取得
 ///
@@ -175,6 +263,7 @@ pub fn get_layer_stack_bucket_mode() -> LayerStackBucketMode {
     match LAYER_STACK_BUCKET_MODE.load(Ordering::Relaxed) {
         1 => LayerStackBucketMode::Ply9,
         2 => LayerStackBucketMode::Progress8,
+        3 => LayerStackBucketMode::Progress8Gikou,
         _ => LayerStackBucketMode::KingRank9,
     }
 }
@@ -210,6 +299,22 @@ pub fn get_layer_stack_progress_coeff() -> LayerStackProgressCoeff {
 /// LayerStacks progress8 係数を設定
 pub fn set_layer_stack_progress_coeff(coeff: LayerStackProgressCoeff) {
     match LAYER_STACK_PROGRESS_COEFF.write() {
+        Ok(mut guard) => *guard = coeff,
+        Err(poisoned) => *poisoned.into_inner() = coeff,
+    }
+}
+
+/// LayerStacks progress8gikou 係数を取得
+pub fn get_layer_stack_progress_coeff_gikou_lite() -> LayerStackProgressCoeffGikouLite {
+    match LAYER_STACK_PROGRESS_COEFF_GIKOU_LITE.read() {
+        Ok(guard) => *guard,
+        Err(poisoned) => *poisoned.into_inner(),
+    }
+}
+
+/// LayerStacks progress8gikou 係数を設定
+pub fn set_layer_stack_progress_coeff_gikou_lite(coeff: LayerStackProgressCoeffGikouLite) {
+    match LAYER_STACK_PROGRESS_COEFF_GIKOU_LITE.write() {
         Ok(mut guard) => *guard = coeff,
         Err(poisoned) => *poisoned.into_inner() = coeff,
     }
@@ -666,6 +771,7 @@ pub fn parse_layer_stack_bucket_mode(value: &str) -> Option<LayerStackBucketMode
         "kingrank9" => Some(LayerStackBucketMode::KingRank9),
         "ply9" => Some(LayerStackBucketMode::Ply9),
         "progress8" => Some(LayerStackBucketMode::Progress8),
+        "progress8gikou" => Some(LayerStackBucketMode::Progress8Gikou),
         _ => None,
     }
 }
@@ -779,6 +885,123 @@ pub fn compute_layer_stack_progress8_bucket_index(
     let p = (1.0 / (1.0 + (-z_clamped).exp())).clamp(0.0, 1.0);
     let raw = (p * SHOGI_PROGRESS8_NUM_BUCKETS as f32).floor() as i32;
 
+    raw.clamp(0, (SHOGI_PROGRESS8_NUM_BUCKETS - 1) as i32) as usize
+}
+
+#[inline]
+fn chebyshev_distance(a: crate::types::Square, b: crate::types::Square) -> u8 {
+    let df = a.file().index().abs_diff(b.file().index());
+    let dr = a.rank().index().abs_diff(b.rank().index());
+    df.max(dr) as u8
+}
+
+#[inline]
+fn distance_bin(d: u8) -> usize {
+    if d <= 1 {
+        0
+    } else if d == 2 {
+        1
+    } else {
+        2
+    }
+}
+
+#[inline]
+fn is_major_piece(pt: PieceType) -> bool {
+    matches!(pt, PieceType::Bishop | PieceType::Rook | PieceType::Horse | PieceType::Dragon)
+}
+
+/// progress8gikou 係数に基づいて LayerStacks bucket index (0..=7) を計算
+pub fn compute_layer_stack_progress8gikou_bucket_index(
+    pos: &Position,
+    side_to_move: Color,
+    coeff: LayerStackProgressCoeffGikouLite,
+) -> usize {
+    let mut x = [0.0f32; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES];
+
+    // v1 の6特徴を prefix として共有する。
+    let board_non_king = (pos.occupied().count() - pos.pieces_pt(PieceType::King).count()) as f32;
+    let hand_black = pos.hand(Color::Black);
+    let hand_white = pos.hand(Color::White);
+    let hand_total = PieceType::HAND_PIECES
+        .iter()
+        .map(|&pt| hand_black.count(pt) + hand_white.count(pt))
+        .sum::<u32>() as f32;
+    let major_board = (pos.pieces_pt(PieceType::Bishop).count()
+        + pos.pieces_pt(PieceType::Rook).count()
+        + pos.pieces_pt(PieceType::Horse).count()
+        + pos.pieces_pt(PieceType::Dragon).count()) as f32;
+    let promoted_board = (pos.pieces_pt(PieceType::ProPawn).count()
+        + pos.pieces_pt(PieceType::ProLance).count()
+        + pos.pieces_pt(PieceType::ProKnight).count()
+        + pos.pieces_pt(PieceType::ProSilver).count()
+        + pos.pieces_pt(PieceType::Horse).count()
+        + pos.pieces_pt(PieceType::Dragon).count()) as f32;
+    let f_king_rank = pos.king_square(side_to_move).rank().index() as f32;
+    let e_king_rank = pos.king_square(!side_to_move).rank().index() as f32;
+    let (stm_king_rank_rel, ntm_king_rank_rel) = match side_to_move {
+        Color::Black => (f_king_rank, 8.0 - e_king_rank),
+        Color::White => (8.0 - f_king_rank, e_king_rank),
+    };
+    x[0] = board_non_king;
+    x[1] = hand_total;
+    x[2] = major_board;
+    x[3] = promoted_board;
+    x[4] = stm_king_rank_rel;
+    x[5] = ntm_king_rank_rel;
+
+    let stm_king = pos.king_square(side_to_move);
+    let ntm_king = pos.king_square(!side_to_move);
+    for sq in pos.occupied().iter() {
+        let pc = pos.piece_on(sq);
+        if pc.is_none() {
+            continue;
+        }
+        let pt = pc.piece_type();
+        if pt == PieceType::King {
+            continue;
+        }
+
+        let is_stm_piece = pc.color() == side_to_move;
+        let side_offset = if is_stm_piece { 6usize } else { 12usize };
+        let major_offset = if is_stm_piece { 18usize } else { 24usize };
+        let own_king = if is_stm_piece { stm_king } else { ntm_king };
+        let opp_king = if is_stm_piece { ntm_king } else { stm_king };
+
+        let own_bin = distance_bin(chebyshev_distance(sq, own_king));
+        let opp_bin = distance_bin(chebyshev_distance(sq, opp_king));
+        x[side_offset + own_bin] += 1.0;
+        x[side_offset + 3 + opp_bin] += 1.0;
+
+        if is_major_piece(pt) {
+            x[major_offset + own_bin] += 1.0;
+            x[major_offset + 3 + opp_bin] += 1.0;
+        }
+    }
+
+    let stm_hand = pos.hand(side_to_move);
+    let ntm_hand = pos.hand(!side_to_move);
+    x[30] = PieceType::HAND_PIECES.iter().map(|&pt| stm_hand.count(pt)).sum::<u32>() as f32;
+    x[31] = PieceType::HAND_PIECES.iter().map(|&pt| ntm_hand.count(pt)).sum::<u32>() as f32;
+    x[32] = (stm_hand.count(PieceType::Bishop) + stm_hand.count(PieceType::Rook)) as f32;
+    x[33] = (ntm_hand.count(PieceType::Bishop) + ntm_hand.count(PieceType::Rook)) as f32;
+
+    let mut z = coeff.bias;
+    for (i, &feature) in x.iter().enumerate() {
+        let std = if coeff.std[i] > 0.0 {
+            coeff.std[i]
+        } else {
+            1.0
+        };
+        let x_norm = (feature - coeff.mean[i]) / std;
+        z += coeff.weights[i] * x_norm;
+    }
+
+    let z_min = coeff.z_clip[0].min(coeff.z_clip[1]);
+    let z_max = coeff.z_clip[0].max(coeff.z_clip[1]);
+    let z_clamped = z.clamp(z_min, z_max);
+    let p = (1.0 / (1.0 + (-z_clamped).exp())).clamp(0.0, 1.0);
+    let raw = (p * SHOGI_PROGRESS8_NUM_BUCKETS as f32).floor() as i32;
     raw.clamp(0, (SHOGI_PROGRESS8_NUM_BUCKETS - 1) as i32) as usize
 }
 
@@ -1651,6 +1874,10 @@ mod tests {
             Some(LayerStackBucketMode::Progress8)
         );
         assert_eq!(
+            parse_layer_stack_bucket_mode("progress8gikou"),
+            Some(LayerStackBucketMode::Progress8Gikou)
+        );
+        assert_eq!(
             parse_layer_stack_bucket_mode(" kingrank9 "),
             Some(LayerStackBucketMode::KingRank9)
         );
@@ -1692,6 +1919,16 @@ mod tests {
         let coeff = LayerStackProgressCoeff::default();
         let b = compute_layer_stack_progress8_bucket_index(&pos, pos.side_to_move(), coeff);
         assert!(b <= 7, "progress8 bucket must be in 0..=7, got {b}");
+    }
+
+    #[test]
+    fn test_compute_layer_stack_progress8gikou_bucket_index_range() {
+        let mut pos = Position::new();
+        pos.set_sfen(SFEN_HIRATE).unwrap();
+
+        let coeff = LayerStackProgressCoeffGikouLite::default();
+        let b = compute_layer_stack_progress8gikou_bucket_index(&pos, pos.side_to_move(), coeff);
+        assert!(b <= 7, "progress8gikou bucket must be in 0..=7, got {b}");
     }
 
     /// HalfKP 768x2-16-64 ファイルの読み込みテスト
