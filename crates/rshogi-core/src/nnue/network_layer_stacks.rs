@@ -31,8 +31,9 @@ use super::layer_stacks::{LayerStacks, compute_bucket_index, sqr_clipped_relu_tr
 use super::network::{
     LayerStackBucketMode, compute_layer_stack_ply9_bucket_index,
     compute_layer_stack_progress8_bucket_index, compute_layer_stack_progress8gikou_bucket_index,
-    get_fv_scale_override, get_layer_stack_bucket_mode, get_layer_stack_ply_bounds,
-    get_layer_stack_progress_coeff, get_layer_stack_progress_coeff_gikou_lite,
+    compute_layer_stack_progress8kpabs_bucket_index, get_fv_scale_override,
+    get_layer_stack_bucket_mode, get_layer_stack_ply_bounds, get_layer_stack_progress_coeff,
+    get_layer_stack_progress_coeff_gikou_lite, get_layer_stack_progress_kpabs_weights,
     parse_fv_scale_from_arch,
 };
 use crate::position::Position;
@@ -64,6 +65,10 @@ fn compute_layer_stacks_bucket_index(pos: &Position, side_to_move: Color) -> usi
         LayerStackBucketMode::Progress8Gikou => {
             let coeff = get_layer_stack_progress_coeff_gikou_lite();
             compute_layer_stack_progress8gikou_bucket_index(pos, side_to_move, coeff)
+        }
+        LayerStackBucketMode::Progress8KPAbs => {
+            let weights = get_layer_stack_progress_kpabs_weights();
+            compute_layer_stack_progress8kpabs_bucket_index(pos, side_to_move, weights)
         }
     }
 }

@@ -21,6 +21,8 @@
 use super::accumulator_layer_stacks::AccumulatorStackLayerStacks;
 use super::accumulator_stack_variant::AccumulatorStackVariant;
 use super::activation::detect_activation_from_arch;
+use super::bona_piece::BonaPiece;
+use super::bona_piece_halfka_hm::FE_OLD_END;
 use super::constants::{MAX_ARCH_LEN, NNUE_VERSION, NNUE_VERSION_HALFKA};
 use super::halfka::{HalfKANetwork, HalfKAStack};
 use super::halfka_hm::{HalfKA_hmNetwork, HalfKA_hmStack};
@@ -35,7 +37,7 @@ use once_cell::sync::Lazy;
 use std::fs::File;
 use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 use std::sync::{OnceLock, RwLock};
 
 /// グローバルなNNUEネットワーク（HalfKP/HalfKA/HalfKA_hm^）
@@ -61,6 +63,8 @@ pub enum LayerStackBucketMode {
     Progress8 = 2,
     /// 進行度方式(gikou-lite): logistic regression(34特徴) で 8 バケットへ分割（bucket8は未使用）
     Progress8Gikou = 3,
+    /// 進行度方式(KP-absolute): YaneuraOu 互換 progress.bin で 8 バケットへ分割（bucket8は未使用）
+    Progress8KPAbs = 4,
 }
 
 impl LayerStackBucketMode {
@@ -70,6 +74,7 @@ impl LayerStackBucketMode {
             Self::Ply9 => "ply9",
             Self::Progress8 => "progress8",
             Self::Progress8Gikou => "progress8gikou",
+            Self::Progress8KPAbs => "progress8kpabs",
         }
     }
 }
@@ -97,6 +102,9 @@ pub const SHOGI_PROGRESS8_FEATURE_ORDER: [&str; SHOGI_PROGRESS8_NUM_FEATURES] = 
 
 /// progress8gikou で使用する特徴量数
 pub const SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES: usize = 34;
+
+/// progress8kpabs で使用する重み数（81 king squares x FE_OLD_END BonaPiece）
+pub const SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS: usize = 81 * FE_OLD_END;
 
 /// progress8gikou coeff_v2 の特徴量順序
 pub const SHOGI_PROGRESS_GIKOU_LITE_FEATURE_ORDER: [&str; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES] = [
@@ -240,6 +248,16 @@ static LAYER_STACK_PROGRESS_COEFF: Lazy<RwLock<LayerStackProgressCoeff>> =
 static LAYER_STACK_PROGRESS_COEFF_GIKOU_LITE: Lazy<RwLock<LayerStackProgressCoeffGikouLite>> =
     Lazy::new(|| RwLock::new(LayerStackProgressCoeffGikouLite::default()));
 
+/// progress8kpabs 重みのデフォルト（未設定時は全ゼロ）
+static LAYER_STACK_PROGRESS_KP_ABS_ZERO_WEIGHTS: [f32; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS] =
+    [0.0; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS];
+
+/// progress8kpabs 重みのグローバル設定
+///
+/// `progress.bin` 読み込み時に Box を leak してポインタだけ差し替える。
+/// 設定は起動時の一度を想定し、評価ホットパスでは lock を取らない。
+static LAYER_STACK_PROGRESS_KP_ABS_PTR: AtomicPtr<f32> = AtomicPtr::new(std::ptr::null_mut());
+
 /// FV_SCALE オーバーライドを取得
 ///
 /// 戻り値:
@@ -264,6 +282,7 @@ pub fn get_layer_stack_bucket_mode() -> LayerStackBucketMode {
         1 => LayerStackBucketMode::Ply9,
         2 => LayerStackBucketMode::Progress8,
         3 => LayerStackBucketMode::Progress8Gikou,
+        4 => LayerStackBucketMode::Progress8KPAbs,
         _ => LayerStackBucketMode::KingRank9,
     }
 }
@@ -318,6 +337,37 @@ pub fn set_layer_stack_progress_coeff_gikou_lite(coeff: LayerStackProgressCoeffG
         Ok(mut guard) => *guard = coeff,
         Err(poisoned) => *poisoned.into_inner() = coeff,
     }
+}
+
+/// LayerStacks progress8kpabs 重みを取得
+pub fn get_layer_stack_progress_kpabs_weights() -> &'static [f32] {
+    let ptr = LAYER_STACK_PROGRESS_KP_ABS_PTR.load(Ordering::Relaxed);
+    if ptr.is_null() {
+        &LAYER_STACK_PROGRESS_KP_ABS_ZERO_WEIGHTS
+    } else {
+        // SAFETY: `set_layer_stack_progress_kpabs_weights()` で leaked Box の先頭ポインタを保存している。
+        unsafe { std::slice::from_raw_parts(ptr.cast_const(), SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS) }
+    }
+}
+
+/// LayerStacks progress8kpabs 重みを設定
+pub fn set_layer_stack_progress_kpabs_weights(weights: Box<[f32]>) -> Result<(), String> {
+    if weights.len() != SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS {
+        return Err(format!(
+            "progress8kpabs weights length mismatch: got {}, expected {}",
+            weights.len(),
+            SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS
+        ));
+    }
+
+    let leaked = Box::leak(weights);
+    LAYER_STACK_PROGRESS_KP_ABS_PTR.store(leaked.as_mut_ptr(), Ordering::Relaxed);
+    Ok(())
+}
+
+/// LayerStacks progress8kpabs 重みを既定値（全ゼロ）へ戻す
+pub fn reset_layer_stack_progress_kpabs_weights() {
+    LAYER_STACK_PROGRESS_KP_ABS_PTR.store(std::ptr::null_mut(), Ordering::Relaxed);
 }
 
 // =============================================================================
@@ -772,6 +822,7 @@ pub fn parse_layer_stack_bucket_mode(value: &str) -> Option<LayerStackBucketMode
         "ply9" => Some(LayerStackBucketMode::Ply9),
         "progress8" => Some(LayerStackBucketMode::Progress8),
         "progress8gikou" => Some(LayerStackBucketMode::Progress8Gikou),
+        "progress8kpabs" => Some(LayerStackBucketMode::Progress8KPAbs),
         _ => None,
     }
 }
@@ -1001,6 +1052,65 @@ pub fn compute_layer_stack_progress8gikou_bucket_index(
     let z_max = coeff.z_clip[0].max(coeff.z_clip[1]);
     let z_clamped = z.clamp(z_min, z_max);
     let p = (1.0 / (1.0 + (-z_clamped).exp())).clamp(0.0, 1.0);
+    let raw = (p * SHOGI_PROGRESS8_NUM_BUCKETS as f32).floor() as i32;
+    raw.clamp(0, (SHOGI_PROGRESS8_NUM_BUCKETS - 1) as i32) as usize
+}
+
+/// progress8kpabs 重みに基づいて LayerStacks bucket index (0..=7) を計算
+pub fn compute_layer_stack_progress8kpabs_bucket_index(
+    pos: &Position,
+    _side_to_move: Color,
+    weights: &[f32],
+) -> usize {
+    debug_assert_eq!(
+        weights.len(),
+        SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
+        "progress8kpabs weights length mismatch"
+    );
+
+    let sq_bk = pos.king_square(Color::Black).index();
+    let sq_wk = pos.king_square(Color::White).inverse().index();
+
+    let mut sum = 0.0f32;
+
+    for sq in pos.occupied().iter() {
+        let pc = pos.piece_on(sq);
+        if pc.is_none() || pc.piece_type() == PieceType::King {
+            continue;
+        }
+
+        let bp_b = BonaPiece::from_piece_square(pc, sq, Color::Black);
+        if bp_b != BonaPiece::ZERO {
+            sum += weights[sq_bk * FE_OLD_END + bp_b.value() as usize];
+        }
+
+        let bp_w = BonaPiece::from_piece_square(pc, sq, Color::White);
+        if bp_w != BonaPiece::ZERO {
+            sum += weights[sq_wk * FE_OLD_END + bp_w.value() as usize];
+        }
+    }
+
+    for owner in [Color::Black, Color::White] {
+        let hand = pos.hand(owner);
+        for &pt in &PieceType::HAND_PIECES {
+            let count = hand.count(pt);
+            for c in 1..=count {
+                let c_u8 = u8::try_from(c).expect("hand count fits in u8");
+
+                let bp_b = BonaPiece::from_hand_piece(Color::Black, owner, pt, c_u8);
+                if bp_b != BonaPiece::ZERO {
+                    sum += weights[sq_bk * FE_OLD_END + bp_b.value() as usize];
+                }
+
+                let bp_w = BonaPiece::from_hand_piece(Color::White, owner, pt, c_u8);
+                if bp_w != BonaPiece::ZERO {
+                    sum += weights[sq_wk * FE_OLD_END + bp_w.value() as usize];
+                }
+            }
+        }
+    }
+
+    let p = (1.0 / (1.0 + (-sum).exp())).clamp(0.0, 1.0);
     let raw = (p * SHOGI_PROGRESS8_NUM_BUCKETS as f32).floor() as i32;
     raw.clamp(0, (SHOGI_PROGRESS8_NUM_BUCKETS - 1) as i32) as usize
 }
@@ -1878,6 +1988,10 @@ mod tests {
             Some(LayerStackBucketMode::Progress8Gikou)
         );
         assert_eq!(
+            parse_layer_stack_bucket_mode("progress8kpabs"),
+            Some(LayerStackBucketMode::Progress8KPAbs)
+        );
+        assert_eq!(
             parse_layer_stack_bucket_mode(" kingrank9 "),
             Some(LayerStackBucketMode::KingRank9)
         );
@@ -1929,6 +2043,16 @@ mod tests {
         let coeff = LayerStackProgressCoeffGikouLite::default();
         let b = compute_layer_stack_progress8gikou_bucket_index(&pos, pos.side_to_move(), coeff);
         assert!(b <= 7, "progress8gikou bucket must be in 0..=7, got {b}");
+    }
+
+    #[test]
+    fn test_compute_layer_stack_progress8kpabs_bucket_index_range() {
+        let mut pos = Position::new();
+        pos.set_sfen(SFEN_HIRATE).unwrap();
+
+        let weights = vec![0.0f32; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS];
+        let b = compute_layer_stack_progress8kpabs_bucket_index(&pos, pos.side_to_move(), &weights);
+        assert_eq!(b, 4, "zero-weight progress8kpabs should map to the middle bucket");
     }
 
     /// HalfKP 768x2-16-64 ファイルの読み込みテスト
