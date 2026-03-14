@@ -207,9 +207,10 @@ pub fn make_input_features(pos: &Position, features1: &mut [f32], features2: &mu
             }
         }
 
-        // 手駒
-        let hand = pos.hand(board_color);
-        let board_c_idx = board_color as usize;
+        // 手駒: C++では position.hand(c) で論理色の手駒を読み、
+        // set_features2(features2, c2, ...) で盤面色のスロットに書く
+        let hand = pos.hand(colors[logical_c]); // 論理色で読む
+        let board_c_idx = board_color as usize; // 盤面色で書く
         let hand_piece_types = [
             PieceType::Pawn,
             PieceType::Lance,
