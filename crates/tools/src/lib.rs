@@ -40,6 +40,7 @@
 //! report.print_summary();
 //! ```
 
+pub mod aobazero_features;
 pub mod common;
 pub mod config;
 pub mod nnue_trainer;
