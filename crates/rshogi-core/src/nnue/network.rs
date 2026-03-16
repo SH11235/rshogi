@@ -384,13 +384,32 @@ pub fn set_layer_stack_progress_kpabs_weights(weights: Box<[f32]>) -> Result<(),
     }
 
     let leaked = Box::leak(weights);
-    LAYER_STACK_PROGRESS_KP_ABS_PTR.store(leaked.as_mut_ptr(), Ordering::Relaxed);
+    let old_ptr = LAYER_STACK_PROGRESS_KP_ABS_PTR.swap(leaked.as_mut_ptr(), Ordering::Relaxed);
+    // SAFETY: old_ptr は過去の同関数で Box::leak したスライスの先頭ポインタ（または null）。
+    // USI プロトコルにより設定変更中は評価パスが実行されないため、参照者は存在しない。
+    if !old_ptr.is_null() {
+        unsafe {
+            drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                old_ptr,
+                SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
+            )));
+        }
+    }
     Ok(())
 }
 
 /// LayerStacks progress8kpabs 重みを既定値（全ゼロ）へ戻す
 pub fn reset_layer_stack_progress_kpabs_weights() {
-    LAYER_STACK_PROGRESS_KP_ABS_PTR.store(std::ptr::null_mut(), Ordering::Relaxed);
+    let old_ptr = LAYER_STACK_PROGRESS_KP_ABS_PTR.swap(std::ptr::null_mut(), Ordering::Relaxed);
+    // SAFETY: 同上。old_ptr は Box::leak 由来のポインタ（または null）。
+    if !old_ptr.is_null() {
+        unsafe {
+            drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                old_ptr,
+                SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
+            )));
+        }
+    }
 }
 
 // =============================================================================
