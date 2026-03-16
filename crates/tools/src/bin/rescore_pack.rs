@@ -1,7 +1,7 @@
-//! rescore_pack - packファイルの評価値をNNUEで再評価
+//! rescore_pack - packファイルの評価値を再評価
 //!
-//! qsearch leaf置換後の局面に対して、指定したNNUEモデルで評価値を再計算する。
-//! これにより「入力局面とラベル（スコア）の整合性」を確保する。
+//! PackedSfenValueのスコアを別の評価関数やエンジンで再計算する。
+//! NNUEモデルによる内部評価と、外部USIエンジンによる評価の両方をサポート。
 //!
 //! # 使用例
 //!
@@ -33,6 +33,15 @@
 //!   --search-depth 8 \
 //!   --hash-mb 256 \
 //!   --threads 4
+//!
+//! # 外部USIエンジン（DLshogi系等）で再スコア（知識蒸留用）
+//! cargo run --release -p tools --bin rescore_pack -- \
+//!   --input data.pack --output-dir rescored/ \
+//!   --engine /path/to/dlshogi_aoba/usi/bin/usi \
+//!   --engine-nodes 1 \
+//!   --usi-option "DNN_Model=/path/to/model.onnx" \
+//!   --usi-option "UCT_Threads=1" \
+//!   --usi-option "DNN_Batch_Size=8"
 //! ```
 
 use anyhow::{Context, Result};
@@ -42,8 +51,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::cell::RefCell;
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
@@ -57,12 +67,12 @@ use tools::qsearch_pv::{NnueStacks, qsearch_with_pv_nnue};
 /// 探索用スタックサイズ（64MB）
 const SEARCH_STACK_SIZE: usize = 64 * 1024 * 1024;
 
-/// packファイルの評価値をNNUEで再評価
+/// packファイルの評価値を再評価
 #[derive(Parser)]
 #[command(
     name = "rescore_pack",
     version,
-    about = "packファイルの評価値をNNUEで再評価\n\n局面とスコアの整合性を確保するためのツール"
+    about = "packファイルの評価値を再評価\n\n内部NNUE評価または外部USIエンジンで局面を再評価するツール"
 )]
 struct Cli {
     /// 入力packファイル（複数指定可、globパターン対応）
@@ -75,9 +85,9 @@ struct Cli {
     #[arg(short, long)]
     output_dir: PathBuf,
 
-    /// NNUEモデルファイル（必須）
+    /// NNUEモデルファイル（--engine未使用時に必須）
     #[arg(long)]
-    nnue: PathBuf,
+    nnue: Option<PathBuf>,
 
     /// qsearch評価を使用（デフォルトは静的評価）
     #[arg(long)]
@@ -146,6 +156,60 @@ struct Cli {
     /// ディスク容量節約のため、各ファイルの処理完了後に入力を削除
     #[arg(long)]
     delete_input: bool,
+
+    // --- 外部USIエンジンモード ---
+    /// 外部USIエンジンのパス（DLshogi系等）
+    /// 指定すると内部NNUEの代わりに外部エンジンで評価
+    #[arg(long)]
+    engine: Option<PathBuf>,
+
+    /// エンジンの探索ノード数（--engine使用時、0=depth 1）
+    #[arg(long, default_value_t = 1)]
+    engine_nodes: u64,
+
+    /// USIオプション（"Name=Value"形式、複数指定可）
+    /// 例: --usi-option "DNN_Model=model.onnx" --usi-option "UCT_Threads=1"
+    #[arg(long = "usi-option")]
+    usi_options: Vec<String>,
+
+    /// エンジン応答のタイムアウト（秒）
+    /// DLエンジンの初回TensorRTビルド等に対応するため長めに設定
+    #[arg(long, default_value_t = 600)]
+    engine_timeout: u64,
+
+    /// 並列エンジンプロセス数（--engine使用時、デフォルト1）
+    /// DL系: 2-4程度（GPU VRAM制限）、NNUE系: CPUコア数まで
+    #[arg(long, default_value_t = 1)]
+    engine_threads: usize,
+
+    // --- AobaZero ONNX 直接推論モード ---
+    /// AobaZero ONNXモデルパス（USIを介さず直接GPU推論）
+    /// dlshogi_aoba のカスタム特徴量フォーマット専用。
+    /// 標準 dlshogi モデルには使用不可。
+    #[arg(long)]
+    onnx_model: Option<PathBuf>,
+
+    // --- 標準 dlshogi ONNX 直接推論モード ---
+    /// 標準dlshogi ONNXモデルパス（DL水匠等、57ch features2）
+    /// AobaZero モデルには使用不可。
+    #[arg(long)]
+    dlshogi_onnx_model: Option<PathBuf>,
+
+    /// ONNX推論バッチサイズ（--onnx-model/--dlshogi-onnx-model使用時）
+    #[arg(long, default_value_t = 256)]
+    onnx_batch_size: usize,
+
+    /// ONNX推論の GPU ID（-1=CPU）
+    #[arg(long, default_value_t = 0)]
+    onnx_gpu_id: i32,
+
+    /// 引き分け手数（--onnx-model使用時の手数特徴量調整、0=調整なし）
+    #[arg(long, default_value_t = 0)]
+    onnx_draw_ply: i32,
+
+    /// 勝率→cp変換のスケール（--onnx-model/--dlshogi-onnx-model使用時、bullet-shogiの--scaleと合わせる）
+    #[arg(long, default_value_t = 600.0)]
+    onnx_eval_scale: f32,
 }
 
 /// 処理中にCtrl-Cが押されたかを追跡
@@ -194,9 +258,46 @@ fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
 
-    // --use-qsearch と --search-depth は排他
+    let use_engine = cli.engine.is_some();
+    let use_onnx = cli.onnx_model.is_some();
+    let use_dlshogi_onnx = cli.dlshogi_onnx_model.is_some();
+
+    // 排他チェック
+    if use_onnx && (use_dlshogi_onnx || use_engine || cli.use_qsearch || cli.search_depth.is_some())
+    {
+        anyhow::bail!(
+            "--onnx-model is mutually exclusive with --dlshogi-onnx-model, --engine, --use-qsearch, --search-depth"
+        );
+    }
+    if use_dlshogi_onnx && (use_engine || cli.use_qsearch || cli.search_depth.is_some()) {
+        anyhow::bail!(
+            "--dlshogi-onnx-model is mutually exclusive with --engine, --use-qsearch, --search-depth"
+        );
+    }
+    if use_engine && (cli.use_qsearch || cli.search_depth.is_some()) {
+        anyhow::bail!("--engine is mutually exclusive with --use-qsearch and --search-depth");
+    }
     if cli.use_qsearch && cli.search_depth.is_some() {
         anyhow::bail!("--use-qsearch and --search-depth are mutually exclusive");
+    }
+    if !use_engine && !use_onnx && !use_dlshogi_onnx && cli.nnue.is_none() {
+        anyhow::bail!(
+            "--nnue is required when --engine/--onnx-model/--dlshogi-onnx-model is not specified"
+        );
+    }
+    #[cfg(not(feature = "aobazero-onnx"))]
+    if use_onnx {
+        anyhow::bail!(
+            "--onnx-model requires the 'aobazero-onnx' feature.\n\
+             Rebuild with: cargo build --release -p tools --features aobazero-onnx --bin rescore_pack"
+        );
+    }
+    #[cfg(not(feature = "dlshogi-onnx"))]
+    if use_dlshogi_onnx {
+        anyhow::bail!(
+            "--dlshogi-onnx-model requires the 'dlshogi-onnx' feature.\n\
+             Rebuild with: cargo build --release -p tools --features dlshogi-onnx --bin rescore_pack"
+        );
     }
 
     // --search-depth 指定時に --apply-qsearch-leaf が有効なら警告
@@ -219,12 +320,15 @@ fn main() -> Result<()> {
         })?;
     }
 
-    // NNUEモデルのロード
-    if !cli.nnue.exists() {
-        anyhow::bail!("NNUE model file not found: {}", cli.nnue.display());
+    // NNUEモデルのロード（NNUE内部評価モードのみ）
+    if !use_engine && !use_onnx && !use_dlshogi_onnx {
+        let nnue = cli.nnue.as_ref().unwrap();
+        if !nnue.exists() {
+            anyhow::bail!("NNUE model file not found: {}", nnue.display());
+        }
+        init_nnue(nnue).context("Failed to load NNUE model")?;
+        eprintln!("NNUE model loaded: {}", nnue.display());
     }
-    init_nnue(&cli.nnue).context("Failed to load NNUE model")?;
-    eprintln!("NNUE model loaded: {}", cli.nnue.display());
 
     // Ctrl-Cハンドラを設定
     ctrlc::set_handler(|| {
@@ -233,8 +337,8 @@ fn main() -> Result<()> {
     })
     .context("Failed to set Ctrl-C handler")?;
 
-    // rayon スレッドプール設定（process_file で使用、process_file_with_search では独自スレッド管理）
-    if cli.search_depth.is_none() && cli.threads > 0 {
+    // rayon スレッドプール設定（NNUE並列モードのみ）
+    if !use_engine && !use_onnx && cli.search_depth.is_none() && cli.threads > 0 {
         rayon::ThreadPoolBuilder::new()
             .num_threads(cli.threads)
             .build_global()
@@ -243,10 +347,33 @@ fn main() -> Result<()> {
             });
     }
 
+    // 外部USIエンジンの起動
+    let engine_threads = if use_engine {
+        cli.engine_threads.max(1)
+    } else {
+        0
+    };
+    let mut engines: Vec<UsiEngine> = Vec::new();
+    if use_engine {
+        let engine_path = cli.engine.as_ref().unwrap();
+        let timeout = std::time::Duration::from_secs(cli.engine_timeout);
+        for i in 0..engine_threads {
+            eprintln!("--- Engine instance {}/{} ---", i + 1, engine_threads);
+            engines.push(UsiEngine::new(engine_path, &cli.usi_options, timeout)?);
+        }
+    }
+
     // 処理設定の表示
     eprintln!(
         "Mode: {}",
-        if let Some(depth) = cli.search_depth {
+        if use_onnx {
+            format!(
+                "AobaZero ONNX direct inference (batch={}, gpu={})",
+                cli.onnx_batch_size, cli.onnx_gpu_id
+            )
+        } else if use_engine {
+            format!("external USI engine (nodes={}, threads={})", cli.engine_nodes, engine_threads)
+        } else if let Some(depth) = cli.search_depth {
             format!("depth {depth} search")
         } else if cli.use_qsearch {
             "qsearch evaluation".to_string()
@@ -267,14 +394,16 @@ fn main() -> Result<()> {
             eprintln!("Max time: unlimited");
         }
     }
-    eprintln!(
-        "qsearch leaf replacement: {}",
-        if cli.apply_qsearch_leaf && cli.search_depth.is_none() {
-            "enabled"
-        } else {
-            "disabled"
-        }
-    );
+    if !use_engine {
+        eprintln!(
+            "qsearch leaf replacement: {}",
+            if cli.apply_qsearch_leaf && cli.search_depth.is_none() {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+    }
     eprintln!("Score clip: ±{}", cli.score_clip);
     eprintln!("Skip in-check positions: {}", if cli.skip_in_check { "yes" } else { "no" });
     eprintln!(
@@ -348,10 +477,28 @@ fn main() -> Result<()> {
         }
 
         // 処理実行
-        if cli.search_depth.is_some() {
-            process_file_with_search(&cli, input_path, &output_path, process_count)?;
-        } else {
-            process_file(&cli, input_path, &output_path, process_count)?;
+        #[cfg(feature = "aobazero-onnx")]
+        if use_onnx {
+            process_file_with_onnx(&cli, input_path, &output_path, process_count)?;
+        }
+        #[cfg(feature = "dlshogi-onnx")]
+        if use_dlshogi_onnx {
+            process_file_with_dlshogi_onnx(&cli, input_path, &output_path, process_count)?;
+        }
+        if !use_onnx && !use_dlshogi_onnx {
+            if !engines.is_empty() {
+                process_file_with_engine(
+                    &cli,
+                    &mut engines,
+                    input_path,
+                    &output_path,
+                    process_count,
+                )?;
+            } else if cli.search_depth.is_some() {
+                process_file_with_search(&cli, input_path, &output_path, process_count)?;
+            } else {
+                process_file(&cli, input_path, &output_path, process_count)?;
+            }
         }
 
         if !INTERRUPTED.load(Ordering::SeqCst) {
@@ -374,6 +521,11 @@ fn main() -> Result<()> {
             }
         }
         eprintln!();
+    }
+
+    // エンジン終了
+    for mut eng in engines {
+        let _ = eng.quit();
     }
 
     if INTERRUPTED.load(Ordering::SeqCst) {
@@ -973,4 +1125,870 @@ fn process_record_with_search(
     };
 
     ProcessResult::Ok(new_psv.to_bytes(), clipped)
+}
+
+// ============================================================
+// 外部USIエンジンによるリスコア
+// ============================================================
+
+/// 外部USIエンジンの管理構造体
+struct UsiEngine {
+    child: Child,
+    stdin: BufWriter<std::process::ChildStdin>,
+    stdout: BufReader<std::process::ChildStdout>,
+}
+
+impl UsiEngine {
+    /// USIエンジンを起動し、初期化する
+    fn new(
+        engine_path: &std::path::Path,
+        usi_options: &[String],
+        _timeout: std::time::Duration,
+    ) -> Result<Self> {
+        eprintln!("Starting USI engine: {}", engine_path.display());
+
+        let mut child = Command::new(engine_path)
+            .current_dir(engine_path.parent().unwrap_or(std::path::Path::new(".")))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .with_context(|| format!("Failed to start engine: {}", engine_path.display()))?;
+
+        let stdin = BufWriter::new(child.stdin.take().expect("stdin"));
+        let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+
+        let mut engine = Self {
+            child,
+            stdin,
+            stdout,
+        };
+
+        // USIハンドシェイク
+        engine.send_command("usi")?;
+        engine.wait_for("usiok")?;
+
+        // USIオプション設定
+        for opt in usi_options {
+            if let Some((name, value)) = opt.split_once('=') {
+                engine.send_command(&format!("setoption name {name} value {value}"))?;
+            } else {
+                eprintln!("Warning: invalid USI option format (expected Name=Value): {opt}");
+            }
+        }
+
+        // isready/readyok（TensorRTビルド等で長時間かかる場合あり）
+        eprintln!("Waiting for engine ready (TensorRT build may take a while)...");
+        engine.send_command("isready")?;
+        engine.wait_for("readyok")?;
+        eprintln!("Engine ready.");
+
+        // ウォームアップ: 初期局面で評価して GPU/TRT ランタイムを安定させる
+        eprintln!("Warming up engine...");
+        engine.send_command("usinewgame")?;
+        engine.send_command(
+            "position sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+        )?;
+        engine.send_command("go nodes 1")?;
+        engine.wait_for_bestmove()?;
+        // 2回目: DLshogi系は初回goがスレッドプール初期化を含む場合がある
+        engine.send_command(
+            "position sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+        )?;
+        engine.send_command("go nodes 1")?;
+        engine.wait_for_bestmove()?;
+        eprintln!("Warmup complete.");
+
+        Ok(engine)
+    }
+
+    fn send_command(&mut self, cmd: &str) -> Result<()> {
+        writeln!(self.stdin, "{cmd}")?;
+        self.stdin.flush()?;
+        Ok(())
+    }
+
+    fn wait_for(&mut self, expected: &str) -> Result<()> {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = self.stdout.read_line(&mut line)?;
+            if n == 0 {
+                anyhow::bail!("Engine process closed stdout while waiting for '{expected}'");
+            }
+            if line.trim() == expected {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// bestmove行まで読み飛ばす
+    fn wait_for_bestmove(&mut self) -> Result<()> {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = self.stdout.read_line(&mut line)?;
+            if n == 0 {
+                anyhow::bail!("Engine process closed stdout while waiting for bestmove");
+            }
+            if line.trim().starts_with("bestmove") {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// 局面を評価し、score cp 値を返す
+    fn evaluate_position(&mut self, sfen: &str, nodes: u64) -> Result<Option<i32>> {
+        self.send_command(&format!("position sfen {sfen}"))?;
+        if nodes > 0 {
+            self.send_command(&format!("go nodes {nodes}"))?;
+        } else {
+            self.send_command("go depth 1")?;
+        }
+
+        let mut score: Option<i32> = None;
+        let mut line = String::new();
+
+        loop {
+            line.clear();
+            let n = self.stdout.read_line(&mut line)?;
+            if n == 0 {
+                anyhow::bail!("Engine process closed stdout during evaluation");
+            }
+            let trimmed = line.trim();
+
+            // score cp / score mate を抽出（最後のinfo行のものを採用）
+            if trimmed.starts_with("info") {
+                if let Some(cp_idx) = trimmed.find("score cp") {
+                    let rest = &trimmed[cp_idx + 9..];
+                    let end_idx = rest.find(' ').unwrap_or(rest.len());
+                    if let Ok(cp) = rest[..end_idx].parse::<i32>() {
+                        score = Some(cp);
+                    }
+                } else if let Some(mate_idx) = trimmed.find("score mate") {
+                    let rest = &trimmed[mate_idx + 11..];
+                    let end_idx = rest.find(' ').unwrap_or(rest.len());
+                    if let Ok(mate_in) = rest[..end_idx].parse::<i32>() {
+                        score = Some(if mate_in > 0 { 30000 } else { -30000 });
+                    }
+                }
+            }
+
+            if trimmed.starts_with("bestmove") {
+                if trimmed.contains("resign") && score.is_none() {
+                    score = Some(-30000);
+                }
+                break;
+            }
+        }
+
+        Ok(score)
+    }
+
+    fn quit(&mut self) -> Result<()> {
+        let _ = self.send_command("quit");
+        let _ = self.child.wait();
+        Ok(())
+    }
+}
+
+/// エンジン処理結果（インデックス付き）
+struct EngineProcessResult {
+    index: usize,
+    score: Option<i32>,
+    psv: PackedSfenValue,
+}
+
+/// 外部USIエンジンでファイルを処理（複数エンジン並列対応）
+fn process_file_with_engine(
+    cli: &Cli,
+    engines: &mut [UsiEngine],
+    input_path: &PathBuf,
+    output_path: &PathBuf,
+    process_count: u64,
+) -> Result<()> {
+    let num_engines = engines.len();
+
+    let progress = ProgressBar::new(process_count);
+    progress.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({per_sec}) {msg}")
+            .expect("valid template"),
+    );
+
+    // 入力ファイルを読み込み
+    let in_file = File::open(input_path)
+        .with_context(|| format!("Failed to open {}", input_path.display()))?;
+    let mut reader = BufReader::new(in_file);
+
+    // 全レコードを読み込み（SFEN展開・フィルタリング含む）
+    progress.set_message("Reading...");
+    let mut records: Vec<(usize, PackedSfenValue, String)> = Vec::new(); // (global_index, psv, sfen)
+    let mut buffer = [0u8; PackedSfenValue::SIZE];
+    let mut skipped_count: u64 = 0;
+    let mut read_errors: u64 = 0;
+
+    for global_idx in 0..process_count as usize {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            break;
+        }
+        match reader.read_exact(&mut buffer) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e.into()),
+        }
+        let psv = match PackedSfenValue::from_bytes(&buffer) {
+            Some(p) => p,
+            None => {
+                read_errors += 1;
+                progress.inc(1);
+                continue;
+            }
+        };
+        let sfen = match unpack_sfen(&psv.sfen) {
+            Ok(s) => s,
+            Err(_) => {
+                read_errors += 1;
+                progress.inc(1);
+                continue;
+            }
+        };
+        if cli.skip_in_check {
+            let mut pos = Position::new();
+            if pos.set_sfen(&sfen).is_ok() && pos.in_check() {
+                skipped_count += 1;
+                progress.inc(1);
+                continue;
+            }
+        }
+        records.push((global_idx, psv, sfen));
+    }
+
+    let actual_count = records.len();
+    eprintln!(
+        "Read {} records ({} skipped, {} errors)",
+        actual_count, skipped_count, read_errors
+    );
+
+    if actual_count == 0 {
+        progress.finish_with_message("Done (empty)");
+        File::create(output_path)?;
+        return Ok(());
+    }
+
+    // レコードをチャンクに分割
+    let chunk_size = actual_count.div_ceil(num_engines).max(1);
+    let chunks: Vec<Vec<(usize, PackedSfenValue, String)>> =
+        records.chunks(chunk_size).map(|c| c.to_vec()).collect();
+
+    eprintln!("Using {} engine process(es), chunk_size={}", chunks.len(), chunk_size);
+
+    // 各チャンクをワーカースレッドで処理
+    let score_clip = cli.score_clip;
+    let engine_nodes = cli.engine_nodes;
+    let verbose = cli.verbose;
+
+    let error_count = AtomicU64::new(read_errors);
+    let clipped_count = AtomicU64::new(0);
+
+    let (tx, rx) = mpsc::channel::<EngineProcessResult>();
+    let progress_arc = std::sync::Arc::new(progress);
+
+    progress_arc.set_message("Processing...");
+
+    std::thread::scope(|s| {
+        let mut handles = Vec::new();
+
+        for (engine, chunk) in engines.iter_mut().zip(chunks.into_iter()) {
+            let tx = tx.clone();
+            let progress = std::sync::Arc::clone(&progress_arc);
+            let error_count = &error_count;
+            let _clipped_count = &clipped_count;
+
+            handles.push(s.spawn(move || {
+                // usinewgame でリセット
+                let _ = engine.send_command("usinewgame");
+
+                for (global_idx, psv, sfen) in &chunk {
+                    if INTERRUPTED.load(Ordering::SeqCst) {
+                        break;
+                    }
+
+                    match engine.evaluate_position(sfen, engine_nodes) {
+                        Ok(score) => {
+                            if score.is_none() {
+                                error_count.fetch_add(1, Ordering::Relaxed);
+                                if verbose {
+                                    eprintln!("No score returned for: {sfen}");
+                                }
+                            }
+                            let _ = tx.send(EngineProcessResult {
+                                index: *global_idx,
+                                score,
+                                psv: *psv,
+                            });
+                        }
+                        Err(e) => {
+                            error_count.fetch_add(1, Ordering::Relaxed);
+                            if verbose {
+                                eprintln!("Engine error for {sfen}: {e}");
+                            }
+                            // スコアなしで送信（エンジン死亡時はループを抜ける）
+                            let _ = tx.send(EngineProcessResult {
+                                index: *global_idx,
+                                score: None,
+                                psv: *psv,
+                            });
+                            break;
+                        }
+                    }
+
+                    progress.inc(1);
+                }
+            }));
+        }
+
+        drop(tx); // 全ワーカーの送信側をドロップ
+
+        // 結果を収集
+        let mut results: Vec<EngineProcessResult> = rx.into_iter().collect();
+        results.sort_by_key(|r| r.index);
+
+        // 出力レコードを構築
+        let mut processed_records: Vec<[u8; PackedSfenValue::SIZE]> =
+            Vec::with_capacity(results.len());
+
+        for r in &results {
+            if let Some(raw_score) = r.score {
+                let clipped = raw_score.abs() > score_clip as i32;
+                let new_score = raw_score.clamp(-score_clip as i32, score_clip as i32) as i16;
+                if clipped {
+                    clipped_count.fetch_add(1, Ordering::Relaxed);
+                }
+                let new_psv = PackedSfenValue {
+                    sfen: r.psv.sfen,
+                    score: new_score,
+                    move16: 0,
+                    game_ply: r.psv.game_ply,
+                    game_result: r.psv.game_result,
+                    padding: 0,
+                };
+                processed_records.push(new_psv.to_bytes());
+            }
+        }
+
+        // ワーカースレッド完了待ち
+        for h in handles {
+            let _ = h.join();
+        }
+
+        progress_arc.finish_with_message("Done");
+
+        let final_errors = error_count.load(Ordering::SeqCst);
+        let final_clipped = clipped_count.load(Ordering::SeqCst);
+        let total = actual_count as u64 + skipped_count + read_errors;
+        if final_errors > 0 {
+            eprintln!("Note: {final_errors} positions had errors");
+        }
+        if skipped_count > 0 {
+            eprintln!(
+                "Skipped (in check): {skipped_count} ({:.2}%)",
+                skipped_count as f64 / total as f64 * 100.0
+            );
+        }
+        if total > 0 {
+            eprintln!(
+                "Clipped scores: {final_clipped} ({:.2}%)",
+                final_clipped as f64 / total as f64 * 100.0
+            );
+        }
+
+        // 出力ファイルに書き込み
+        eprintln!("Writing output...");
+        let out_file = File::create(output_path)
+            .with_context(|| format!("Failed to create {}", output_path.display()))
+            .unwrap();
+        let mut writer = BufWriter::new(out_file);
+
+        for record in &processed_records {
+            writer.write_all(record).unwrap();
+        }
+
+        writer.flush().unwrap();
+        eprintln!("Wrote {} records", processed_records.len());
+    });
+
+    Ok(())
+}
+
+// ============================================================
+// AobaZero ONNX 直接推論モード
+// ============================================================
+
+/// ort のエラーを anyhow に変換 (ort::Error は Send+Sync を満たさないため)
+#[cfg(feature = "aobazero-onnx")]
+fn ort_err(e: ort::Error) -> anyhow::Error {
+    anyhow::anyhow!("ONNX Runtime error: {e}")
+}
+
+#[cfg(feature = "aobazero-onnx")]
+fn process_file_with_onnx(
+    cli: &Cli,
+    input_path: &PathBuf,
+    output_path: &PathBuf,
+    process_count: u64,
+) -> Result<()> {
+    use ort::session::Session;
+    use ort::value::Tensor;
+    use tools::aobazero_features::{
+        FEATURES1_SIZE, FEATURES2_SIZE, INPUT1_CHANNELS, INPUT2_CHANNELS, make_input_features,
+        winrate_to_cp,
+    };
+
+    let onnx_path = cli.onnx_model.as_ref().unwrap();
+    let batch_size = cli.onnx_batch_size;
+    let score_clip = cli.score_clip;
+    let draw_ply = cli.onnx_draw_ply;
+    let eval_scale = cli.onnx_eval_scale;
+    let verbose = cli.verbose;
+    let skip_in_check = cli.skip_in_check;
+
+    // ONNX Runtime セッション初期化
+    eprintln!("Loading ONNX model: {}", onnx_path.display());
+
+    let mut builder = Session::builder()
+        .map_err(ort_err)?
+        .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level1)
+        .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?
+        .with_intra_threads(1)
+        .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?;
+
+    // GPU provider 設定
+    let mut session = if cli.onnx_gpu_id >= 0 {
+        eprintln!("Using CUDA GPU {}", cli.onnx_gpu_id);
+        builder
+            .with_execution_providers([ort::execution_providers::CUDAExecutionProvider::default()
+                .with_device_id(cli.onnx_gpu_id)
+                .build()])
+            .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?
+            .commit_from_file(onnx_path)
+            .map_err(ort_err)?
+    } else {
+        eprintln!("Using CPU");
+        builder.commit_from_file(onnx_path).map_err(ort_err)?
+    };
+
+    eprintln!("ONNX model loaded. Batch size: {}", batch_size);
+
+    // 進捗バー
+    let progress = ProgressBar::new(process_count);
+    progress.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({per_sec}) {msg}")
+            .expect("valid template"),
+    );
+
+    // 入力ファイルを読み込み
+    let in_file = File::open(input_path)
+        .with_context(|| format!("Failed to open {}", input_path.display()))?;
+    let mut reader = BufReader::new(in_file);
+
+    // 全レコードを先に読み込み（SFEN展開 + フィルタリング）
+    progress.set_message("Reading...");
+    let mut records: Vec<(PackedSfenValue, String)> = Vec::new();
+    let mut buffer = [0u8; PackedSfenValue::SIZE];
+    let mut skipped_count: u64 = 0;
+    let mut read_errors: u64 = 0;
+
+    for _ in 0..process_count {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            break;
+        }
+        match reader.read_exact(&mut buffer) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e.into()),
+        }
+        let psv = match PackedSfenValue::from_bytes(&buffer) {
+            Some(p) => p,
+            None => {
+                read_errors += 1;
+                continue;
+            }
+        };
+        let sfen = match unpack_sfen(&psv.sfen) {
+            Ok(s) => s,
+            Err(_) => {
+                read_errors += 1;
+                continue;
+            }
+        };
+        if skip_in_check {
+            let mut pos = Position::new();
+            if pos.set_sfen(&sfen).is_ok() && pos.in_check() {
+                skipped_count += 1;
+                progress.inc(1);
+                continue;
+            }
+        }
+        records.push((psv, sfen));
+    }
+
+    let actual_count = records.len();
+    eprintln!(
+        "Read {} records ({} skipped, {} errors)",
+        actual_count, skipped_count, read_errors
+    );
+
+    // バッチ処理
+    progress.set_message("Inferring...");
+    let mut processed_records: Vec<[u8; PackedSfenValue::SIZE]> = Vec::with_capacity(actual_count);
+    let mut error_count: u64 = read_errors;
+    let mut clipped_count: u64 = 0;
+
+    // 特徴量バッファ（再利用）
+    let mut f1_buf = vec![0.0f32; batch_size * FEATURES1_SIZE];
+    let mut f2_buf = vec![0.0f32; batch_size * FEATURES2_SIZE];
+
+    for chunk in records.chunks(batch_size) {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            break;
+        }
+
+        let actual_batch = chunk.len();
+
+        // ゼロクリア
+        f1_buf[..actual_batch * FEATURES1_SIZE].fill(0.0);
+        f2_buf[..actual_batch * FEATURES2_SIZE].fill(0.0);
+
+        // 特徴量構築
+        for (i, (psv, sfen)) in chunk.iter().enumerate() {
+            let mut pos = Position::new();
+            if pos.set_sfen(sfen).is_err() {
+                error_count += 1;
+                continue;
+            }
+            let f1_off = i * FEATURES1_SIZE;
+            let f2_off = i * FEATURES2_SIZE;
+            make_input_features(
+                &pos,
+                &mut f1_buf[f1_off..f1_off + FEATURES1_SIZE],
+                &mut f2_buf[f2_off..f2_off + FEATURES2_SIZE],
+                psv.game_ply as i32,
+                draw_ply,
+            );
+        }
+
+        // ONNX 推論
+        let shape1: [usize; 4] = [actual_batch, INPUT1_CHANNELS, 9, 9];
+        let input1 =
+            Tensor::<f32>::from_array((shape1, f1_buf[..actual_batch * FEATURES1_SIZE].to_vec()))
+                .map_err(ort_err)?;
+
+        let shape2: [usize; 4] = [actual_batch, INPUT2_CHANNELS, 9, 9];
+        let input2 =
+            Tensor::<f32>::from_array((shape2, f2_buf[..actual_batch * FEATURES2_SIZE].to_vec()))
+                .map_err(ort_err)?;
+
+        let outputs = session
+            .run(ort::inputs![
+                "input1" => input1,
+                "input2" => input2,
+            ])
+            .map_err(ort_err)?;
+
+        // output_value: [batch, 1] → flat slice of f32
+        let (_shape, values) =
+            outputs["output_value"].try_extract_tensor::<f32>().map_err(ort_err)?;
+
+        // 結果を PackedSfenValue に書き戻し
+        for (i, (psv, _sfen)) in chunk.iter().enumerate() {
+            let winrate = values[i];
+            let raw_score = winrate_to_cp(winrate, eval_scale);
+            let clipped = raw_score.abs() > score_clip as i32;
+            let new_score = raw_score.clamp(-score_clip as i32, score_clip as i32) as i16;
+            if clipped {
+                clipped_count += 1;
+            }
+
+            let new_psv = PackedSfenValue {
+                sfen: psv.sfen,
+                score: new_score,
+                move16: 0,
+                game_ply: psv.game_ply,
+                game_result: psv.game_result,
+                padding: 0,
+            };
+            processed_records.push(new_psv.to_bytes());
+        }
+
+        progress.inc(actual_batch as u64);
+    }
+
+    progress.finish_with_message("Done");
+
+    let total = actual_count as u64 + skipped_count + read_errors;
+    if error_count > 0 {
+        eprintln!("Note: {error_count} positions had errors");
+    }
+    if skipped_count > 0 && total > 0 {
+        eprintln!(
+            "Skipped (in check): {skipped_count} ({:.2}%)",
+            skipped_count as f64 / total as f64 * 100.0
+        );
+    }
+    if total > 0 {
+        eprintln!(
+            "Clipped scores: {clipped_count} ({:.2}%)",
+            clipped_count as f64 / total as f64 * 100.0
+        );
+    }
+
+    // 出力ファイルに書き込み
+    eprintln!("Writing output...");
+    let out_file = File::create(output_path)
+        .with_context(|| format!("Failed to create {}", output_path.display()))?;
+    let mut writer = BufWriter::new(out_file);
+    for record in &processed_records {
+        writer.write_all(record)?;
+    }
+    writer.flush()?;
+    eprintln!("Wrote {} records", processed_records.len());
+
+    Ok(())
+}
+
+// ============================================================
+// 標準 dlshogi ONNX 直接推論モード
+// ============================================================
+
+/// ort のエラーを anyhow に変換 (dlshogi-onnx 用)
+#[cfg(feature = "dlshogi-onnx")]
+fn dlshogi_ort_err(e: ort::Error) -> anyhow::Error {
+    anyhow::anyhow!("ONNX Runtime error: {e}")
+}
+
+#[cfg(feature = "dlshogi-onnx")]
+fn process_file_with_dlshogi_onnx(
+    cli: &Cli,
+    input_path: &PathBuf,
+    output_path: &PathBuf,
+    process_count: u64,
+) -> Result<()> {
+    use ort::session::Session;
+    use ort::value::Tensor;
+    use tools::dlshogi_features::{
+        FEATURES1_SIZE, FEATURES2_SIZE, INPUT1_CHANNELS, INPUT2_CHANNELS, make_input_features,
+        winrate_to_cp,
+    };
+
+    let onnx_path = cli.dlshogi_onnx_model.as_ref().unwrap();
+    let batch_size = cli.onnx_batch_size;
+    let score_clip = cli.score_clip;
+    let eval_scale = cli.onnx_eval_scale;
+    let skip_in_check = cli.skip_in_check;
+
+    // ONNX Runtime セッション初期化
+    eprintln!("Loading dlshogi ONNX model: {}", onnx_path.display());
+
+    let mut builder = Session::builder()
+        .map_err(dlshogi_ort_err)?
+        .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level1)
+        .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?
+        .with_intra_threads(1)
+        .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?;
+
+    // GPU provider 設定
+    let mut session = if cli.onnx_gpu_id >= 0 {
+        eprintln!("Using CUDA GPU {}", cli.onnx_gpu_id);
+        builder
+            .with_execution_providers([ort::execution_providers::CUDAExecutionProvider::default()
+                .with_device_id(cli.onnx_gpu_id)
+                .build()])
+            .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?
+            .commit_from_file(onnx_path)
+            .map_err(dlshogi_ort_err)?
+    } else {
+        eprintln!("Using CPU");
+        builder.commit_from_file(onnx_path).map_err(dlshogi_ort_err)?
+    };
+
+    eprintln!("dlshogi ONNX model loaded. Batch size: {}", batch_size);
+
+    // 進捗バー
+    let progress = ProgressBar::new(process_count);
+    progress.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({per_sec}) {msg}")
+            .expect("valid template"),
+    );
+
+    // 入力ファイルを読み込み
+    let in_file = File::open(input_path)
+        .with_context(|| format!("Failed to open {}", input_path.display()))?;
+    let mut reader = BufReader::new(in_file);
+
+    // 全レコードを先に読み込み（SFEN展開 + フィルタリング）
+    progress.set_message("Reading...");
+    let mut records: Vec<(PackedSfenValue, String)> = Vec::new();
+    let mut buffer = [0u8; PackedSfenValue::SIZE];
+    let mut skipped_count: u64 = 0;
+    let mut read_errors: u64 = 0;
+
+    for _ in 0..process_count {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            break;
+        }
+        match reader.read_exact(&mut buffer) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e.into()),
+        }
+        let psv = match PackedSfenValue::from_bytes(&buffer) {
+            Some(p) => p,
+            None => {
+                read_errors += 1;
+                continue;
+            }
+        };
+        let sfen = match unpack_sfen(&psv.sfen) {
+            Ok(s) => s,
+            Err(_) => {
+                read_errors += 1;
+                continue;
+            }
+        };
+        if skip_in_check {
+            let mut pos = Position::new();
+            if pos.set_sfen(&sfen).is_ok() && pos.in_check() {
+                skipped_count += 1;
+                progress.inc(1);
+                continue;
+            }
+        }
+        records.push((psv, sfen));
+    }
+
+    let actual_count = records.len();
+    eprintln!(
+        "Read {} records ({} skipped, {} errors)",
+        actual_count, skipped_count, read_errors
+    );
+
+    // バッチ処理
+    progress.set_message("Inferring...");
+    let mut processed_records: Vec<[u8; PackedSfenValue::SIZE]> = Vec::with_capacity(actual_count);
+    let mut error_count: u64 = read_errors;
+    let mut clipped_count: u64 = 0;
+
+    // 特徴量バッファ（再利用）
+    let mut f1_buf = vec![0.0f32; batch_size * FEATURES1_SIZE];
+    let mut f2_buf = vec![0.0f32; batch_size * FEATURES2_SIZE];
+
+    for chunk in records.chunks(batch_size) {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            break;
+        }
+
+        let actual_batch = chunk.len();
+
+        // ゼロクリア
+        f1_buf[..actual_batch * FEATURES1_SIZE].fill(0.0);
+        f2_buf[..actual_batch * FEATURES2_SIZE].fill(0.0);
+
+        // 特徴量構築
+        for (i, (_psv, sfen)) in chunk.iter().enumerate() {
+            let mut pos = Position::new();
+            if pos.set_sfen(sfen).is_err() {
+                error_count += 1;
+                continue;
+            }
+            let f1_off = i * FEATURES1_SIZE;
+            let f2_off = i * FEATURES2_SIZE;
+            make_input_features(
+                &pos,
+                &mut f1_buf[f1_off..f1_off + FEATURES1_SIZE],
+                &mut f2_buf[f2_off..f2_off + FEATURES2_SIZE],
+            );
+        }
+
+        // ONNX 推論
+        let shape1: [usize; 4] = [actual_batch, INPUT1_CHANNELS, 9, 9];
+        let input1 =
+            Tensor::<f32>::from_array((shape1, f1_buf[..actual_batch * FEATURES1_SIZE].to_vec()))
+                .map_err(dlshogi_ort_err)?;
+
+        let shape2: [usize; 4] = [actual_batch, INPUT2_CHANNELS, 9, 9];
+        let input2 =
+            Tensor::<f32>::from_array((shape2, f2_buf[..actual_batch * FEATURES2_SIZE].to_vec()))
+                .map_err(dlshogi_ort_err)?;
+
+        let outputs = session
+            .run(ort::inputs![
+                "input1" => input1,
+                "input2" => input2,
+            ])
+            .map_err(dlshogi_ort_err)?;
+
+        // output_value: [batch, 1] → flat slice of f32
+        let (_shape, values) =
+            outputs["output_value"].try_extract_tensor::<f32>().map_err(dlshogi_ort_err)?;
+
+        // 結果を PackedSfenValue に書き戻し
+        for (i, (psv, _sfen)) in chunk.iter().enumerate() {
+            let winrate = values[i];
+            let raw_score = winrate_to_cp(winrate, eval_scale);
+            let clipped = raw_score.abs() > score_clip as i32;
+            let new_score = raw_score.clamp(-score_clip as i32, score_clip as i32) as i16;
+            if clipped {
+                clipped_count += 1;
+            }
+
+            let new_psv = PackedSfenValue {
+                sfen: psv.sfen,
+                score: new_score,
+                move16: 0,
+                game_ply: psv.game_ply,
+                game_result: psv.game_result,
+                padding: 0,
+            };
+            processed_records.push(new_psv.to_bytes());
+        }
+
+        progress.inc(actual_batch as u64);
+    }
+
+    progress.finish_with_message("Done");
+
+    let total = actual_count as u64 + skipped_count + read_errors;
+    if error_count > 0 {
+        eprintln!("Note: {error_count} positions had errors");
+    }
+    if skipped_count > 0 && total > 0 {
+        eprintln!(
+            "Skipped (in check): {skipped_count} ({:.2}%)",
+            skipped_count as f64 / total as f64 * 100.0
+        );
+    }
+    if total > 0 {
+        eprintln!(
+            "Clipped scores: {clipped_count} ({:.2}%)",
+            clipped_count as f64 / total as f64 * 100.0
+        );
+    }
+
+    // 出力ファイルに書き込み
+    eprintln!("Writing output...");
+    let out_file = File::create(output_path)
+        .with_context(|| format!("Failed to create {}", output_path.display()))?;
+    let mut writer = BufWriter::new(out_file);
+    for record in &processed_records {
+        writer.write_all(record)?;
+    }
+    writer.flush()?;
+    eprintln!("Wrote {} records", processed_records.len());
+
+    Ok(())
 }

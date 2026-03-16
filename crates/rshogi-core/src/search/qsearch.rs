@@ -201,6 +201,16 @@ pub(super) fn qsearch<const NT: u8>(
         if !tt_hit {
             let mate_move = pos.mate_1ply();
             if mate_move.is_some() {
+                #[cfg(feature = "mate1-trace")]
+                {
+                    eprintln!(
+                        "RS_MATE1_QS: key={:016x} mv={} ply={} tt_pv={}",
+                        key,
+                        mate_move.to_usi(),
+                        ply,
+                        st.stack[ply as usize].tt_pv,
+                    );
+                }
                 let mate_value = Value::mate_in(ply + 1);
                 #[cfg(feature = "tt-trace")]
                 let allow_write = ctx.allow_tt_write

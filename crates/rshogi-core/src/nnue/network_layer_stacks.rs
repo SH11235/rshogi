@@ -25,9 +25,17 @@
 
 use super::accumulator::Aligned;
 use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLayerStacks};
-use super::constants::{MAX_ARCH_LEN, NNUE_PYTORCH_L1, NNUE_VERSION_HALFKA};
+use super::constants::{FV_SCALE_HALFKA, MAX_ARCH_LEN, NNUE_PYTORCH_L1};
 use super::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
 use super::layer_stacks::{LayerStacks, compute_bucket_index, sqr_clipped_relu_transform};
+use super::network::{
+    LayerStackBucketMode, compute_layer_stack_ply9_bucket_index,
+    compute_layer_stack_progress8_bucket_index, compute_layer_stack_progress8gikou_bucket_index,
+    compute_layer_stack_progress8kpabs_bucket_index, get_fv_scale_override,
+    get_layer_stack_bucket_mode, get_layer_stack_ply_bounds, get_layer_stack_progress_coeff,
+    get_layer_stack_progress_coeff_gikou_lite, get_layer_stack_progress_kpabs_weights,
+    parse_fv_scale_from_arch,
+};
 use crate::position::Position;
 use crate::types::{Color, Value};
 #[cfg(feature = "diagnostics")]
@@ -35,6 +43,35 @@ use log::info;
 use std::fs::File;
 use std::io::{self, BufReader, Cursor, Read, Seek};
 use std::path::Path;
+
+#[inline]
+fn compute_layer_stacks_bucket_index(pos: &Position, side_to_move: Color) -> usize {
+    match get_layer_stack_bucket_mode() {
+        LayerStackBucketMode::KingRank9 => {
+            let f_king = pos.king_square(side_to_move);
+            let e_king = pos.king_square(!side_to_move);
+            let (f_rank, e_rank) =
+                crate::nnue::layer_stacks::compute_king_ranks(side_to_move, f_king, e_king);
+            compute_bucket_index(f_rank, e_rank)
+        }
+        LayerStackBucketMode::Ply9 => {
+            let bounds = get_layer_stack_ply_bounds();
+            compute_layer_stack_ply9_bucket_index(pos.game_ply(), bounds)
+        }
+        LayerStackBucketMode::Progress8 => {
+            let coeff = get_layer_stack_progress_coeff();
+            compute_layer_stack_progress8_bucket_index(pos, side_to_move, coeff)
+        }
+        LayerStackBucketMode::Progress8Gikou => {
+            let coeff = get_layer_stack_progress_coeff_gikou_lite();
+            compute_layer_stack_progress8gikou_bucket_index(pos, side_to_move, coeff)
+        }
+        LayerStackBucketMode::Progress8KPAbs => {
+            let weights = get_layer_stack_progress_kpabs_weights();
+            compute_layer_stack_progress8kpabs_bucket_index(pos, side_to_move, weights)
+        }
+    }
+}
 
 /// LayerStacksアーキテクチャのNNUEネットワーク
 ///
@@ -44,6 +81,8 @@ pub struct NetworkLayerStacks {
     pub feature_transformer: FeatureTransformerLayerStacks,
     /// LayerStacks (9バケット)
     pub layer_stacks: LayerStacks,
+    /// 評価値スケーリング係数（アーキテクチャ文字列から取得、USIオプションでオーバーライド可）
+    pub fv_scale: i32,
 }
 
 impl NetworkLayerStacks {
@@ -56,23 +95,13 @@ impl NetworkLayerStacks {
 
     /// リーダーから読み込み
     pub fn read<R: Read + Seek>(reader: &mut R) -> io::Result<Self> {
-        // ヘッダを読み込み
         let mut buf4 = [0u8; 4];
-        reader.read_exact(&mut buf4)?;
-        let version = u32::from_le_bytes(buf4);
 
-        if version != NNUE_VERSION_HALFKA {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "Invalid NNUE version for nnue-pytorch: {version:#x}, expected {NNUE_VERSION_HALFKA:#x}"
-                ),
-            ));
-        }
-
-        // 構造ハッシュを読み込み
+        // version（呼び出し元で検証済み）
         reader.read_exact(&mut buf4)?;
-        let _hash = u32::from_le_bytes(buf4);
+
+        // 構造ハッシュ
+        reader.read_exact(&mut buf4)?;
 
         // アーキテクチャ文字列を読み込み
         reader.read_exact(&mut buf4)?;
@@ -88,6 +117,9 @@ impl NetworkLayerStacks {
 
         // アーキテクチャ文字列を解析
         let arch_str = String::from_utf8_lossy(&arch);
+
+        // FV_SCALE 検出
+        let fv_scale = parse_fv_scale_from_arch(&arch_str).unwrap_or(FV_SCALE_HALFKA);
 
         // Factorizedモデルの検出
         if arch_str.contains("Factorizer") {
@@ -151,6 +183,7 @@ impl NetworkLayerStacks {
         Ok(Self {
             feature_transformer,
             layer_stacks,
+            fv_scale,
         })
     }
 
@@ -172,7 +205,7 @@ impl NetworkLayerStacks {
         );
 
         // LayerStacks bucket0 の l1_biases
-        let l1_biases = &ls.buckets[0].l1_biases;
+        let l1_biases = &ls.buckets[0].l1.biases;
         info!("[NNUE Load] LayerStacks bucket0 l1_biases: {l1_biases:?}");
     }
 
@@ -187,6 +220,18 @@ impl NetworkLayerStacks {
     /// 配列はMaybeUninitで確保し、直後のsqr_clipped_relu_transformで全要素が上書きされる。
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorLayerStacks) -> Value {
         let side_to_move = pos.side_to_move();
+        let bucket_index = compute_layer_stacks_bucket_index(pos, side_to_move);
+        self.evaluate_with_bucket(pos, acc, bucket_index)
+    }
+
+    /// 評価値を計算（事前計算済み bucket index を使用）
+    pub fn evaluate_with_bucket(
+        &self,
+        pos: &Position,
+        acc: &AccumulatorLayerStacks,
+        bucket_index: usize,
+    ) -> Value {
+        let side_to_move = pos.side_to_move();
 
         // SqrClippedReLU変換
         let (us_acc, them_acc) = if side_to_move == Color::Black {
@@ -199,17 +244,10 @@ impl NetworkLayerStacks {
         let mut transformed: Aligned<[u8; NNUE_PYTORCH_L1]> = unsafe { Aligned::new_uninit() };
         sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
 
-        // バケットインデックスを計算（両玉の段に基づく）
-        let f_king = pos.king_square(side_to_move);
-        let e_king = pos.king_square(!side_to_move);
-        let (f_rank, e_rank) =
-            crate::nnue::layer_stacks::compute_king_ranks(side_to_move, f_king, e_king);
-        let bucket_index = compute_bucket_index(f_rank, e_rank);
-
         // LayerStacks で評価
-        let score = self.layer_stacks.evaluate(bucket_index, &transformed.0);
-
-        Value::new(score)
+        let raw_score = self.layer_stacks.evaluate_raw(bucket_index, &transformed.0);
+        let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
+        Value::new(raw_score / fv_scale)
     }
 
     /// 評価値を計算（詳細診断ログ付き）
@@ -250,15 +288,42 @@ impl NetworkLayerStacks {
         info!("[NNUE Eval] transformed: nonzero={transformed_nonzero}/1536, sum={transformed_sum}");
         info!("[NNUE Eval] transformed first 32: {:?}", &transformed[0..32]);
 
-        // バケットインデックスを計算（両玉の段に基づく）
-        let f_king = pos.king_square(side_to_move);
-        let e_king = pos.king_square(!side_to_move);
-        let (f_rank, e_rank) =
-            crate::nnue::layer_stacks::compute_king_ranks(side_to_move, f_king, e_king);
-        let bucket_index = compute_bucket_index(f_rank, e_rank);
-        info!(
-            "[NNUE Eval] f_king_rank={f_rank}, e_king_rank={e_rank}, bucket_index={bucket_index}"
-        );
+        // バケットインデックスを計算
+        let bucket_index = match get_layer_stack_bucket_mode() {
+            LayerStackBucketMode::KingRank9 => {
+                let f_king = pos.king_square(side_to_move);
+                let e_king = pos.king_square(!side_to_move);
+                let (f_rank, e_rank) =
+                    crate::nnue::layer_stacks::compute_king_ranks(side_to_move, f_king, e_king);
+                let bucket = compute_bucket_index(f_rank, e_rank);
+                info!(
+                    "[NNUE Eval] bucket_mode=kingrank9, f_king_rank={f_rank}, e_king_rank={e_rank}, bucket_index={bucket}"
+                );
+                bucket
+            }
+            LayerStackBucketMode::Ply9 => {
+                let bounds = get_layer_stack_ply_bounds();
+                let game_ply = pos.game_ply();
+                let bucket = compute_layer_stack_ply9_bucket_index(game_ply, bounds);
+                info!(
+                    "[NNUE Eval] bucket_mode=ply9, game_ply={game_ply}, ply_bounds={bounds:?}, bucket_index={bucket}"
+                );
+                bucket
+            }
+            LayerStackBucketMode::Progress8 => {
+                let coeff = get_layer_stack_progress_coeff();
+                let bucket = compute_layer_stack_progress8_bucket_index(pos, side_to_move, coeff);
+                info!("[NNUE Eval] bucket_mode=progress8, bucket_index={bucket}");
+                bucket
+            }
+            LayerStackBucketMode::Progress8Gikou => {
+                let coeff = get_layer_stack_progress_coeff_gikou_lite();
+                let bucket =
+                    compute_layer_stack_progress8gikou_bucket_index(pos, side_to_move, coeff);
+                info!("[NNUE Eval] bucket_mode=progress8gikou, bucket_index={bucket}");
+                bucket
+            }
+        };
 
         // LayerStacks で評価（詳細ログ付き）
         let (raw_score, l1_out, l1_skip) =
@@ -268,8 +333,10 @@ impl NetworkLayerStacks {
         info!("[NNUE Eval] l1_skip: {l1_skip}");
         info!("[NNUE Eval] raw_score (with skip): {raw_score}");
 
-        let score = raw_score / super::constants::NNUE_PYTORCH_NNUE2SCORE;
-        let score_float = raw_score as f64 / super::constants::NNUE_PYTORCH_NNUE2SCORE as f64;
+        let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
+        let score = raw_score / fv_scale;
+        let score_float = raw_score as f64 / fv_scale as f64;
+        info!("[NNUE Eval] fv_scale: {fv_scale}");
         info!("[NNUE Eval] score: {score} (float: {score_float:.4})");
 
         Value::new(score)
@@ -305,13 +372,13 @@ impl NetworkLayerStacks {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nnue::constants::NNUE_PYTORCH_NNUE2SCORE;
+    use crate::nnue::constants::FV_SCALE_HALFKA;
     use crate::position::{Position, SFEN_HIRATE};
 
     #[test]
     fn test_network_dimensions() {
         assert_eq!(NNUE_PYTORCH_L1, 1536);
-        assert_eq!(NNUE_PYTORCH_NNUE2SCORE, 600);
+        assert_eq!(FV_SCALE_HALFKA, 16);
     }
 
     /// LayerStacks NNUEファイルの読み込みと評価テスト
@@ -374,7 +441,7 @@ mod tests {
         }
 
         // LayerStacks の重みの一部を確認
-        let l1_bias_sample: Vec<i32> = network.layer_stacks.buckets[0].l1_biases.to_vec();
+        let l1_bias_sample: Vec<i32> = network.layer_stacks.buckets[0].l1.biases.to_vec();
         eprintln!("L1 bias (bucket 0): {l1_bias_sample:?}");
 
         // 初期局面を評価
@@ -454,7 +521,7 @@ mod tests {
 
         // LayerStacks の生スコアを計算
         let raw_score = network.layer_stacks.evaluate_raw(bucket_index, &transformed);
-        eprintln!("Raw score (before /600): {raw_score}");
+        eprintln!("Raw score (before /fv_scale): {raw_score}, fv_scale: {}", network.fv_scale);
 
         // 評価値を計算
         let value = network.evaluate(&pos, &acc);
@@ -491,14 +558,5 @@ mod tests {
             let val = network.evaluate(&pos, &acc);
             eprintln!("{:15}: {:6} (raw: {:6})", name, val.raw(), raw);
         }
-
-        // ファイル読み込みの検証
-        // - FT bias/weight の読み込みが正しい
-        // - LayerStacks の読み込みが正しい
-        // - 評価値計算が動作する
-        //
-        // 注意: epoch82.nnue は学習途中のモデルなので評価値が小さい
-        // Raw score: -51 → /600 = 0
-        // これは正常な動作
     }
 }

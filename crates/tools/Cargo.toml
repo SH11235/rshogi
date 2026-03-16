@@ -11,6 +11,10 @@ repository = "https://github.com/SH11235/rshogi"
 default = []
 # 診断ログ（EvalHashヒット率など）
 diagnostics = ["rshogi-core/diagnostics"]
+# AobaZero ONNX直接推論（ONNX Runtime + CUDA が必要）
+aobazero-onnx = ["dep:ort", "dep:ndarray"]
+# 標準dlshogi ONNX直接推論（DL水匠等、ONNX Runtime + CUDA が必要）
+dlshogi-onnx = ["dep:ort", "dep:ndarray"]
 
 [dependencies]
 # Workspace dependencies
@@ -42,3 +46,7 @@ tempfile = "3.20"
 glob = "0.3"
 regex.workspace = true
 toml.workspace = true
+
+# AobaZero ONNX direct inference (optional, behind "aobazero-onnx" feature)
+ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["load-dynamic"] }
+ndarray = { version = "0.16", optional = true }

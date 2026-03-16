@@ -9,7 +9,7 @@ use super::constants::WEIGHT_SCALE_BITS;
 use std::io::{self, Read};
 
 /// パディング済み入力次元（SIMDアライメント用）
-const fn padded_input(input_dim: usize) -> usize {
+pub(crate) const fn padded_input(input_dim: usize) -> usize {
     input_dim.div_ceil(32) * 32
 }
 
@@ -254,6 +254,14 @@ pub struct AffineTransform<const INPUT_DIM: usize, const OUTPUT_DIM: usize> {
     pub weights: AlignedBox<i8>,
 }
 
+impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> Default
+    for AffineTransform<INPUT_DIM, OUTPUT_DIM>
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM, OUTPUT_DIM> {
     const PADDED_INPUT: usize = padded_input(INPUT_DIM);
 
@@ -329,6 +337,14 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
             * Self::CHUNK_SIZE
             + i / Self::PADDED_INPUT * Self::CHUNK_SIZE
             + i % Self::CHUNK_SIZE
+    }
+
+    /// ゼロ初期化で新規作成
+    pub fn new() -> Self {
+        Self {
+            biases: [0i32; OUTPUT_DIM],
+            weights: AlignedBox::new_zeroed(OUTPUT_DIM * Self::PADDED_INPUT),
+        }
     }
 
     /// ファイルから読み込み

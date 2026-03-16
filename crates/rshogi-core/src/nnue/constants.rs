@@ -36,16 +36,6 @@ pub const SCRELU_DEFAULT_QA: i32 = 127;
 /// キャッシュラインサイズ（バイト）
 pub const CACHE_LINE_SIZE: usize = 64;
 
-/// SIMD幅（バイト）
-#[cfg(target_feature = "avx2")]
-pub const SIMD_WIDTH: usize = 32;
-
-#[cfg(all(target_feature = "sse2", not(target_feature = "avx2")))]
-pub const SIMD_WIDTH: usize = 16;
-
-#[cfg(not(any(target_feature = "avx2", target_feature = "sse2")))]
-pub const SIMD_WIDTH: usize = 8;
-
 /// 変換後の次元数（片方の視点）
 pub const TRANSFORMED_FEATURE_DIMENSIONS: usize = 256;
 
@@ -138,9 +128,6 @@ pub const LAYER_STACK_L1_OUT: usize = NNUE_PYTORCH_L2 + 1; // 16
 
 /// LayerStacks L2層の入力次元数（L2 * 2 = 30）
 pub const LAYER_STACK_L2_IN: usize = NNUE_PYTORCH_L2 * 2; // 30
-
-/// nnue-pytorch の評価値スケーリング
-pub const NNUE_PYTORCH_NNUE2SCORE: i32 = 600;
 
 /// nnue-pytorch の隠れ層重みスケール
 pub const NNUE_PYTORCH_WEIGHT_SCALE_HIDDEN: i32 = 64;

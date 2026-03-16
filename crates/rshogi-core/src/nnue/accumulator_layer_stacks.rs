@@ -69,6 +69,10 @@ pub struct StackEntryLayerStacks {
     pub dirty_piece: DirtyPiece,
     /// 直前のエントリインデックス（差分計算用）
     pub previous: Option<usize>,
+    /// progress8kpabs の重み付き和（差分更新用）
+    pub progress_sum: f32,
+    /// progress_sum 計算済みフラグ
+    pub computed_progress: bool,
 }
 
 impl StackEntryLayerStacks {
@@ -77,6 +81,8 @@ impl StackEntryLayerStacks {
             accumulator: AccumulatorLayerStacks::new(),
             dirty_piece: DirtyPiece::default(),
             previous: None,
+            progress_sum: 0.0,
+            computed_progress: false,
         }
     }
 }
@@ -153,6 +159,7 @@ impl AccumulatorStackLayerStacks {
         self.entries[self.current].accumulator.computed_accumulation = false;
         self.entries[self.current].accumulator.computed_score = false;
         self.entries[self.current].dirty_piece = DirtyPiece::default();
+        self.entries[self.current].computed_progress = false;
     }
 
     /// スタックをポップ
@@ -184,6 +191,7 @@ impl AccumulatorStackLayerStacks {
         self.entries[0].accumulator.computed_accumulation = false;
         self.entries[0].accumulator.computed_score = false;
         self.entries[0].previous = None;
+        self.entries[0].computed_progress = false;
     }
 
     /// 祖先を辿って使用可能なアキュムレータを探す

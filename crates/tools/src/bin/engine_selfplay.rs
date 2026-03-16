@@ -2,11 +2,15 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Local;
 use clap::Parser;
-use rand::prelude::IndexedRandom;
+use crossbeam_channel as chan;
+use rand::Rng;
 use rshogi_core::movegen::is_legal_with_pass;
 use rshogi_core::position::Position;
 use rshogi_core::types::{Color, Move, PieceType, Square};
@@ -14,8 +18,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tools::packed_sfen::{PackedSfenValue, move_to_move16, pack_position};
 use tools::selfplay::{
-    EngineConfig, EngineProcess, EvalLog, GameOutcome, SearchRequest, TimeControl, build_position,
-    load_start_positions, parse_position_line, side_label,
+    EngineConfig, EngineProcess, EvalLog, GameOutcome, ParsedPosition, SearchRequest, TimeControl,
+    build_position, load_start_positions, parse_position_line, side_label,
 };
 
 /// engine-usi 同士の自己対局ハーネス。時間管理と info ログ収集を最小限に実装する。
@@ -32,7 +36,7 @@ use tools::selfplay::{
 ///   `cargo run -p tools --bin engine_selfplay -- --games 1 --max-moves 300 --byoyomi 5000 --startpos-file sfen.txt --log-info`
 ///
 /// - 学習データを生成しながら対局:
-///   `cargo run -p tools --bin engine_selfplay -- --games 100 --byoyomi 1000 --output-training-data output.pack`
+///   `cargo run -p tools --bin engine_selfplay -- --games 100 --byoyomi 1000 --output-training-data output.psv`
 ///
 /// `--out` 未指定時は `runs/selfplay/<timestamp>-selfplay.jsonl` に書き出し、infoは同名 `.info.jsonl` を生成する。
 ///
@@ -189,7 +193,7 @@ struct Cli {
     emit_metrics: bool,
 
     /// 学習データ (PackedSfenValue形式) の出力先パス
-    /// 指定しない場合はデフォルトで <output>.pack に出力
+    /// 指定しない場合はデフォルトで <output>.psv に出力
     #[arg(long)]
     output_training_data: Option<PathBuf>,
 
@@ -216,6 +220,10 @@ struct Cli {
         help = "Skip positions where king is in check (use --skip-in-check=false to disable)"
     )]
     skip_in_check: bool,
+
+    /// Number of concurrent worker threads
+    #[arg(long, default_value_t = 1)]
+    concurrency: usize,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -655,6 +663,478 @@ impl InfoLogger {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Concurrency support
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct GameTicket {
+    game_idx: u32,
+    startpos_idx: usize,
+}
+
+struct WorkerGameResult {
+    game_idx: u32,
+    outcome: GameOutcome,
+    outcome_reason: String,
+}
+
+struct WorkerOutput {
+    training_stats: (u64, u64, u64, u64),
+}
+
+struct WorkerConfig {
+    worker_id: usize,
+    // Engine
+    engine_path_black: PathBuf,
+    engine_path_white: PathBuf,
+    black_args: Vec<String>,
+    white_args: Vec<String>,
+    threads_black: usize,
+    threads_white: usize,
+    hash_mb: u32,
+    network_delay: Option<i64>,
+    network_delay2: Option<i64>,
+    minimum_thinking_time: Option<i64>,
+    slowmover: Option<i32>,
+    ponder: bool,
+    black_usi_opts: Vec<String>,
+    white_usi_opts: Vec<String>,
+    // Game
+    max_moves: u32,
+    timeout_margin_ms: u64,
+    btime: u64,
+    wtime: u64,
+    binc: u64,
+    winc: u64,
+    byoyomi: u64,
+    // Pass rights
+    pass_rights_enabled: bool,
+    pass_black: Option<u8>,
+    pass_white: Option<u8>,
+    // Positions (shared across workers)
+    start_defs: Arc<Vec<ParsedPosition>>,
+    start_commands: Arc<Vec<String>>,
+    // Output (temp paths)
+    jsonl_path: PathBuf,
+    info_path: Option<PathBuf>,
+    eval_path: Option<PathBuf>,
+    metrics_path: Option<PathBuf>,
+    training_data_path: Option<PathBuf>,
+    // Output flags
+    flush_each_move: bool,
+    // Training
+    skip_initial_ply: u32,
+    skip_in_check: bool,
+}
+
+fn worker_main(
+    cfg: WorkerConfig,
+    rx: chan::Receiver<Option<GameTicket>>,
+    tx: chan::Sender<WorkerGameResult>,
+    shutdown: Arc<AtomicBool>,
+) -> WorkerOutput {
+    let run = || -> Result<WorkerOutput> {
+        // Spawn engines
+        let mut black = EngineProcess::spawn(
+            &EngineConfig {
+                path: cfg.engine_path_black.clone(),
+                args: cfg.black_args.clone(),
+                threads: cfg.threads_black,
+                hash_mb: cfg.hash_mb,
+                network_delay: cfg.network_delay,
+                network_delay2: cfg.network_delay2,
+                minimum_thinking_time: cfg.minimum_thinking_time,
+                slowmover: cfg.slowmover,
+                ponder: cfg.ponder,
+                usi_options: cfg.black_usi_opts.clone(),
+            },
+            format!("w{}-black", cfg.worker_id),
+        )?;
+        let mut white = EngineProcess::spawn(
+            &EngineConfig {
+                path: cfg.engine_path_white.clone(),
+                args: cfg.white_args.clone(),
+                threads: cfg.threads_white,
+                hash_mb: cfg.hash_mb,
+                network_delay: cfg.network_delay,
+                network_delay2: cfg.network_delay2,
+                minimum_thinking_time: cfg.minimum_thinking_time,
+                slowmover: cfg.slowmover,
+                ponder: cfg.ponder,
+                usi_options: cfg.white_usi_opts.clone(),
+            },
+            format!("w{}-white", cfg.worker_id),
+        )?;
+
+        // Open temp output files
+        let mut writer = BufWriter::new(File::create(&cfg.jsonl_path).with_context(|| {
+            format!("worker {}: failed to create {}", cfg.worker_id, cfg.jsonl_path.display())
+        })?);
+        let mut info_logger = if let Some(ref path) = cfg.info_path {
+            Some(InfoLogger::new(path)?)
+        } else {
+            None
+        };
+        let mut eval_writer = if let Some(ref path) = cfg.eval_path {
+            Some(BufWriter::new(File::create(path)?))
+        } else {
+            None
+        };
+        let mut metrics_writer = if let Some(ref path) = cfg.metrics_path {
+            Some(BufWriter::new(File::create(path)?))
+        } else {
+            None
+        };
+        let mut training_data_collector = if let Some(ref path) = cfg.training_data_path {
+            Some(TrainingDataCollector::new(path, cfg.skip_initial_ply, cfg.skip_in_check)?)
+        } else {
+            None
+        };
+
+        let usi_initial_pass_count = {
+            let parse = |opts: &[String]| -> Option<u8> {
+                for opt in opts {
+                    if let Some(val) = opt.strip_prefix("InitialPassCount=") {
+                        return val.trim().parse().ok();
+                    }
+                    if let Some(val) = opt.strip_prefix("InitialPassCount = ") {
+                        return val.trim().parse().ok();
+                    }
+                }
+                None
+            };
+            parse(&cfg.black_usi_opts).or_else(|| parse(&cfg.white_usi_opts)).unwrap_or(2)
+        };
+
+        // Game loop
+        while let Ok(Some(ticket)) = rx.recv() {
+            if shutdown.load(Ordering::Relaxed) {
+                break;
+            }
+
+            let game_idx = ticket.game_idx;
+            black.new_game()?;
+            white.new_game()?;
+
+            let parsed = &cfg.start_defs[ticket.startpos_idx];
+            let pass_b = if cfg.pass_rights_enabled {
+                Some(cfg.pass_black.unwrap_or(usi_initial_pass_count))
+            } else {
+                None
+            };
+            let pass_w = if cfg.pass_rights_enabled {
+                Some(cfg.pass_white.unwrap_or(usi_initial_pass_count))
+            } else {
+                None
+            };
+            let mut pos = build_position(parsed, pass_b, pass_w)?;
+            let mut tc = TimeControl::new(cfg.btime, cfg.wtime, cfg.binc, cfg.winc, cfg.byoyomi);
+            let mut outcome = GameOutcome::InProgress;
+            let mut outcome_reason = "max_moves";
+            let mut plies_played = 0u32;
+            let mut move_list: Vec<String> = Vec::new();
+            let mut eval_list: Vec<String> = Vec::new();
+            let mut metrics = MetricsCollector::default();
+
+            if let Some(ref mut collector) = training_data_collector {
+                collector.start_game();
+            }
+
+            for ply_idx in 0..cfg.max_moves {
+                plies_played = ply_idx + 1;
+                let side = pos.side_to_move();
+                let engine = if side == Color::Black {
+                    &mut black
+                } else {
+                    &mut white
+                };
+                let engine_label = if side == Color::Black {
+                    "black"
+                } else {
+                    "white"
+                };
+                let sfen_before = pos.to_sfen();
+                let think_limit_ms = tc.think_limit_ms(side);
+                let pass_rights = if cfg.pass_rights_enabled {
+                    Some((pos.pass_rights(Color::Black), pos.pass_rights(Color::White)))
+                } else {
+                    None
+                };
+                let req = SearchRequest {
+                    sfen: &sfen_before,
+                    time_args: tc.time_args(),
+                    think_limit_ms,
+                    timeout_margin_ms: cfg.timeout_margin_ms,
+                    game_id: game_idx + 1,
+                    ply: plies_played,
+                    side,
+                    engine_label: engine_label.to_string(),
+                    pass_rights,
+                    go_depth: None,
+                };
+                type InfoCb<'a> = Box<dyn FnMut(&str, &SearchRequest<'_>) + 'a>;
+                let mut info_cb: Option<InfoCb<'_>> = if info_logger.is_some() {
+                    Some(Box::new(|line: &str, req: &SearchRequest<'_>| {
+                        if let Some(ref mut logger) = info_logger {
+                            let _ = logger.log(InfoLogEntry {
+                                kind: "info",
+                                game_id: req.game_id,
+                                ply: req.ply,
+                                side_to_move: side_label(req.side),
+                                engine: &req.engine_label,
+                                line,
+                            });
+                        }
+                    }))
+                } else {
+                    None
+                };
+                let search = engine.search(
+                    &req,
+                    info_cb
+                        .as_mut()
+                        .map(|b| b.as_mut() as &mut dyn FnMut(&str, &SearchRequest<'_>)),
+                )?;
+
+                let timed_out = search.timed_out;
+                let mut move_usi = search.bestmove.clone().unwrap_or_else(|| "none".to_string());
+                let mut raw_move_usi = None;
+                let mut terminal = false;
+                let elapsed_ms = search.elapsed_ms;
+                let eval_log = search.eval.clone();
+
+                if timed_out {
+                    outcome = if side == Color::Black {
+                        GameOutcome::WhiteWin
+                    } else {
+                        GameOutcome::BlackWin
+                    };
+                    outcome_reason = "timeout";
+                    terminal = true;
+                    if search.bestmove.is_none() {
+                        move_usi = "timeout".to_string();
+                    }
+                } else if let Some(ref mv_str) = search.bestmove {
+                    raw_move_usi = Some(mv_str.clone());
+                    match mv_str.as_str() {
+                        "resign" => {
+                            move_usi = mv_str.clone();
+                            outcome = if side == Color::Black {
+                                GameOutcome::WhiteWin
+                            } else {
+                                GameOutcome::BlackWin
+                            };
+                            outcome_reason = "resign";
+                            terminal = true;
+                        }
+                        "win" => {
+                            move_usi = mv_str.clone();
+                            outcome = if side == Color::Black {
+                                GameOutcome::BlackWin
+                            } else {
+                                GameOutcome::WhiteWin
+                            };
+                            outcome_reason = "win";
+                            terminal = true;
+                        }
+                        _ => match Move::from_usi(mv_str) {
+                            Some(mv) if is_legal_with_pass(&pos, mv) => {
+                                if let Some(ref mut collector) = training_data_collector {
+                                    collector.record_position(
+                                        &pos,
+                                        eval_log.as_ref().and_then(|e| e.score_cp),
+                                        eval_log.as_ref().and_then(|e| e.score_mate),
+                                        Some(mv),
+                                    );
+                                }
+                                let gives_check = if mv.is_pass() {
+                                    false
+                                } else {
+                                    pos.gives_check(mv)
+                                };
+                                pos.do_move(mv, gives_check);
+                                tc.update_after_move(side, search.elapsed_ms);
+                                move_usi = mv_str.clone();
+                                raw_move_usi = None;
+                            }
+                            _ => {
+                                outcome = if side == Color::Black {
+                                    GameOutcome::WhiteWin
+                                } else {
+                                    GameOutcome::BlackWin
+                                };
+                                outcome_reason = "illegal_move";
+                                terminal = true;
+                                move_usi = "illegal".to_string();
+                            }
+                        },
+                    }
+                } else {
+                    outcome = if side == Color::Black {
+                        GameOutcome::WhiteWin
+                    } else {
+                        GameOutcome::BlackWin
+                    };
+                    outcome_reason = "no_bestmove";
+                    terminal = true;
+                }
+
+                if eval_writer.is_some() {
+                    eval_list.push(eval_label(eval_log.as_ref()));
+                    move_list.push(move_usi.clone());
+                }
+
+                if metrics_writer.is_some() {
+                    metrics.update(side, eval_log.as_ref(), plies_played);
+                }
+
+                let move_log = MoveLog {
+                    kind: "move",
+                    game_id: game_idx + 1,
+                    ply: plies_played,
+                    side_to_move: side_label(side),
+                    sfen_before,
+                    move_usi,
+                    raw_move_usi,
+                    engine: engine_label.to_string(),
+                    elapsed_ms,
+                    think_limit_ms,
+                    timed_out,
+                    eval: eval_log,
+                };
+                serde_json::to_writer(&mut writer, &move_log)?;
+                writer.write_all(b"\n")?;
+                if cfg.flush_each_move {
+                    writer.flush()?;
+                }
+
+                if terminal || outcome != GameOutcome::InProgress {
+                    break;
+                }
+            }
+
+            if outcome == GameOutcome::InProgress {
+                outcome = GameOutcome::Draw;
+                outcome_reason = "max_moves";
+            }
+            let result = ResultLog {
+                kind: "result",
+                game_id: game_idx + 1,
+                outcome: outcome.label(),
+                reason: outcome_reason,
+                plies: plies_played,
+            };
+            serde_json::to_writer(&mut writer, &result)?;
+            writer.write_all(b"\n")?;
+
+            if let Some(w) = eval_writer.as_mut() {
+                let start_cmd = &cfg.start_commands[ticket.startpos_idx];
+                let moves_text = if move_list.is_empty() {
+                    String::new()
+                } else {
+                    format!(" moves {}", move_list.join(" "))
+                };
+                writeln!(w, "game {}: {}{}", game_idx + 1, start_cmd, moves_text)?;
+                if !eval_list.is_empty() {
+                    writeln!(w, "eval {}", eval_list.join(" "))?;
+                } else {
+                    writeln!(w, "eval")?;
+                }
+                writeln!(w)?;
+            }
+
+            if let Some(w) = metrics_writer.as_mut() {
+                let metrics_log = MetricsLog {
+                    kind: "metrics",
+                    game_id: game_idx + 1,
+                    plies: plies_played,
+                    nodes_black: metrics.nodes_black,
+                    nodes_white: metrics.nodes_white,
+                    nodes_first60: metrics.nodes_first60,
+                    last_cp_black: metrics.last_cp_black,
+                    last_cp_white: metrics.last_cp_white,
+                    last_mate_black: metrics.last_mate_black,
+                    last_mate_white: metrics.last_mate_white,
+                    outcome: outcome.label().to_string(),
+                    reason: outcome_reason.to_string(),
+                };
+                serde_json::to_writer(&mut *w, &metrics_log)?;
+                w.write_all(b"\n")?;
+            }
+
+            if let Some(ref mut collector) = training_data_collector {
+                collector.finish_game(outcome)?;
+            }
+            writer.flush()?;
+
+            let _ = tx.send(WorkerGameResult {
+                game_idx,
+                outcome,
+                outcome_reason: outcome_reason.to_string(),
+            });
+        }
+
+        // Flush all temp files
+        writer.flush()?;
+        if let Some(logger) = info_logger.as_mut() {
+            logger.flush()?;
+        }
+        if let Some(w) = eval_writer.as_mut() {
+            w.flush()?;
+        }
+        if let Some(w) = metrics_writer.as_mut() {
+            w.flush()?;
+        }
+
+        let training_stats = if let Some(ref mut collector) = training_data_collector {
+            collector.flush()?;
+            collector.stats()
+        } else {
+            (0, 0, 0, 0)
+        };
+
+        Ok(WorkerOutput { training_stats })
+    };
+
+    match run() {
+        Ok(output) => output,
+        Err(e) => {
+            eprintln!("worker {}: error: {e}", cfg.worker_id);
+            shutdown.store(true, Ordering::Relaxed);
+            WorkerOutput {
+                training_stats: (0, 0, 0, 0),
+            }
+        }
+    }
+}
+
+/// Concatenate worker temp files.
+/// `append=true`: append to existing file (for JSONL with meta line).
+/// `append=false`: create new file.
+fn concatenate_temp_files(final_path: &Path, temp_paths: &[PathBuf], append: bool) -> Result<()> {
+    let mut out: File = if append {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(final_path)
+            .with_context(|| format!("failed to open {} for appending", final_path.display()))?
+    } else {
+        File::create(final_path)
+            .with_context(|| format!("failed to create {}", final_path.display()))?
+    };
+    for tmp in temp_paths {
+        match File::open(tmp) {
+            Ok(mut f) => {
+                std::io::copy(&mut f, &mut out)?;
+                std::fs::remove_file(tmp)?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let mut cli = Cli::parse();
 
@@ -726,46 +1206,6 @@ fn main() -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let mut writer = BufWriter::new(
-        File::create(&output_path)
-            .with_context(|| format!("failed to open {}", output_path.display()))?,
-    );
-    let mut info_logger = if cli.log_info {
-        Some(InfoLogger::new(&info_path)?)
-    } else {
-        None
-    };
-    let mut eval_writer = if cli.emit_eval_file {
-        let eval_path = default_eval_path(&output_path);
-        if let Some(parent) = eval_path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
-        Some(BufWriter::new(
-            File::create(&eval_path)
-                .with_context(|| format!("failed to create {}", eval_path.display()))?,
-        ))
-    } else {
-        None
-    };
-    let mut metrics_writer = if cli.emit_metrics {
-        let metrics_path = default_metrics_path(&output_path);
-        if let Some(parent) = metrics_path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
-        Some(BufWriter::new(
-            File::create(&metrics_path)
-                .with_context(|| format!("failed to create {}", metrics_path.display()))?,
-        ))
-    } else {
-        None
-    };
-
     // 学習データ出力の初期化（デフォルトで有効、--no-training-data で無効化）
     let training_data_path = match (cli.no_training_data, &cli.output_training_data) {
         (true, _) => None,
@@ -774,18 +1214,14 @@ fn main() -> Result<()> {
     };
     // パス権有効時は学習データ収集を抑止（PackedSfen形式がパス権をサポートしていないため）
     let pass_rights_active = pass_rights_cli_specified || pass_rights_via_usi_early;
-    let mut training_data_collector = if let Some(ref path) = training_data_path {
-        if pass_rights_active {
-            eprintln!(
-                "Warning: Training data collection is disabled when pass rights are enabled \
-                 (PackedSfen format does not support pass rights)"
-            );
-            None
-        } else {
-            Some(TrainingDataCollector::new(path, cli.skip_initial_ply, cli.skip_in_check)?)
-        }
+    let training_data_enabled = if training_data_path.is_some() && pass_rights_active {
+        eprintln!(
+            "Warning: Training data collection is disabled when pass rights are enabled \
+             (PackedSfen format does not support pass rights)"
+        );
+        false
     } else {
-        None
+        training_data_path.is_some()
     };
 
     let engine_paths = resolve_engine_paths(&cli);
@@ -811,6 +1247,9 @@ fn main() -> Result<()> {
         println!("threads: {threads_black}");
     } else {
         println!("threads: black={threads_black}, white={threads_white}");
+    }
+    if cli.concurrency > 1 {
+        println!("concurrency: {}", cli.concurrency);
     }
     let common_args = cli.engine_args.clone().unwrap_or_default();
     let black_args = cli.engine_args_black.clone().unwrap_or_else(|| common_args.clone());
@@ -860,49 +1299,162 @@ fn main() -> Result<()> {
     let pass_rights_enabled =
         cli.pass_rights_black.is_some() || cli.pass_rights_white.is_some() || pass_rights_via_usi;
 
-    let mut black = EngineProcess::spawn(
-        &EngineConfig {
-            path: engine_paths.black.path.clone(),
-            args: black_args.clone(),
-            threads: threads_black,
-            hash_mb: cli.hash_mb,
-            network_delay: cli.network_delay,
-            network_delay2: cli.network_delay2,
-            minimum_thinking_time: cli.minimum_thinking_time,
-            slowmover: cli.slowmover,
-            ponder: cli.ponder,
-            usi_options: black_usi_opts.clone(),
-        },
-        "black".to_string(),
-    )?;
-    let mut white = EngineProcess::spawn(
-        &EngineConfig {
-            path: engine_paths.white.path.clone(),
-            args: white_args.clone(),
-            threads: threads_white,
-            hash_mb: cli.hash_mb,
-            network_delay: cli.network_delay,
-            network_delay2: cli.network_delay2,
-            minimum_thinking_time: cli.minimum_thinking_time,
-            slowmover: cli.slowmover,
-            ponder: cli.ponder,
-            usi_options: white_usi_opts.clone(),
-        },
-        "white".to_string(),
-    )?;
-    let meta = MetaLog {
-        kind: "meta".to_string(),
-        timestamp: timestamp.to_rfc3339(),
-        settings: MetaSettings {
-            games: cli.games,
-            max_moves: cli.max_moves,
-            btime: cli.btime,
-            wtime: cli.wtime,
-            binc: cli.binc,
-            winc: cli.winc,
-            byoyomi: cli.byoyomi,
-            timeout_margin_ms: cli.timeout_margin_ms,
-            threads: cli.threads,
+    // Write meta line to final JSONL
+    {
+        let mut writer = BufWriter::new(
+            File::create(&output_path)
+                .with_context(|| format!("failed to open {}", output_path.display()))?,
+        );
+        let meta = MetaLog {
+            kind: "meta".to_string(),
+            timestamp: timestamp.to_rfc3339(),
+            settings: MetaSettings {
+                games: cli.games,
+                max_moves: cli.max_moves,
+                btime: cli.btime,
+                wtime: cli.wtime,
+                binc: cli.binc,
+                winc: cli.winc,
+                byoyomi: cli.byoyomi,
+                timeout_margin_ms: cli.timeout_margin_ms,
+                threads: cli.threads,
+                threads_black,
+                threads_white,
+                hash_mb: cli.hash_mb,
+                network_delay: cli.network_delay,
+                network_delay2: cli.network_delay2,
+                minimum_thinking_time: cli.minimum_thinking_time,
+                slowmover: cli.slowmover,
+                ponder: cli.ponder,
+                flush_each_move: cli.flush_each_move,
+                emit_eval_file: cli.emit_eval_file,
+                emit_metrics: cli.emit_metrics,
+                startpos_file: cli.startpos_file.as_ref().map(|p| p.display().to_string()),
+                sfen: cli.sfen.clone(),
+                random_startpos: cli.random_startpos,
+                output_training_data: training_data_path.as_ref().map(|p| p.display().to_string()),
+                skip_initial_ply: cli.skip_initial_ply,
+                skip_in_check: cli.skip_in_check,
+                initial_pass_count_black: if pass_rights_enabled {
+                    Some(cli.pass_rights_black.unwrap_or(usi_initial_pass_count))
+                } else {
+                    None
+                },
+                initial_pass_count_white: if pass_rights_enabled {
+                    Some(cli.pass_rights_white.unwrap_or(usi_initial_pass_count))
+                } else {
+                    None
+                },
+            },
+            engine_cmd: EngineCommandMeta {
+                path_black: engine_paths.black.path.display().to_string(),
+                path_white: engine_paths.white.path.display().to_string(),
+                source_black: engine_paths.black.source.to_string(),
+                source_white: engine_paths.white.source.to_string(),
+                args_black: black_args.clone(),
+                args_white: white_args.clone(),
+                usi_options_black: black_usi_opts.clone(),
+                usi_options_white: white_usi_opts.clone(),
+            },
+            start_positions: start_commands.clone(),
+            output: output_path.display().to_string(),
+            info_log: cli.log_info.then(|| info_path.display().to_string()),
+        };
+        serde_json::to_writer(&mut writer, &meta)?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+    }
+
+    // Pre-generate all game tickets with startpos indices
+    let mut rng = rand::rng();
+    let tickets: Vec<GameTicket> = (0..cli.games)
+        .map(|game_idx| {
+            let startpos_idx = if cli.random_startpos {
+                rng.random_range(0..start_defs.len())
+            } else {
+                (game_idx as usize) % start_defs.len()
+            };
+            GameTicket {
+                game_idx,
+                startpos_idx,
+            }
+        })
+        .collect();
+
+    // Compute temp file paths per worker
+    let output_stem = output_path.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+    let output_parent = output_path.parent().unwrap_or_else(|| Path::new("."));
+
+    // Create channels (small buffer to decouple dispatch from result collection)
+    let (ticket_tx, ticket_rx) = chan::bounded::<Option<GameTicket>>(cli.concurrency);
+    let (result_tx, result_rx) = chan::bounded::<WorkerGameResult>(cli.concurrency);
+
+    // Shutdown flag
+    let shutdown = Arc::new(AtomicBool::new(false));
+    {
+        let sd = shutdown.clone();
+        ctrlc::set_handler(move || {
+            eprintln!("\nShutting down gracefully...");
+            sd.store(true, Ordering::Relaxed);
+        })
+        .ok();
+    }
+
+    // Wrap shared data in Arc to avoid per-worker cloning
+    let shared_start_defs = Arc::new(start_defs);
+    let shared_start_commands = Arc::new(start_commands);
+
+    // Spawn worker threads
+    let mut handles = Vec::new();
+    let mut temp_jsonl_paths = Vec::new();
+    let mut temp_info_paths = Vec::new();
+    let mut temp_eval_paths = Vec::new();
+    let mut temp_metrics_paths = Vec::new();
+    let mut temp_pack_paths = Vec::new();
+
+    for w in 0..cli.concurrency {
+        let jsonl_path = output_parent.join(format!("{output_stem}.w{w}.jsonl"));
+        let w_info_path = if cli.log_info {
+            Some(output_parent.join(format!("{output_stem}.w{w}.info.jsonl")))
+        } else {
+            None
+        };
+        let w_eval_path = if cli.emit_eval_file {
+            Some(output_parent.join(format!("{output_stem}.w{w}.eval.txt")))
+        } else {
+            None
+        };
+        let w_metrics_path = if cli.emit_metrics {
+            Some(output_parent.join(format!("{output_stem}.w{w}.metrics.jsonl")))
+        } else {
+            None
+        };
+        let w_training_path = if training_data_enabled {
+            Some(output_parent.join(format!("{output_stem}.w{w}.psv")))
+        } else {
+            None
+        };
+
+        temp_jsonl_paths.push(jsonl_path.clone());
+        if let Some(ref p) = w_info_path {
+            temp_info_paths.push(p.clone());
+        }
+        if let Some(ref p) = w_eval_path {
+            temp_eval_paths.push(p.clone());
+        }
+        if let Some(ref p) = w_metrics_path {
+            temp_metrics_paths.push(p.clone());
+        }
+        if let Some(ref p) = w_training_path {
+            temp_pack_paths.push(p.clone());
+        }
+
+        let cfg = WorkerConfig {
+            worker_id: w,
+            engine_path_black: engine_paths.black.path.clone(),
+            engine_path_white: engine_paths.white.path.clone(),
+            black_args: black_args.clone(),
+            white_args: white_args.clone(),
             threads_black,
             threads_white,
             hash_mb: cli.hash_mb,
@@ -911,346 +1463,168 @@ fn main() -> Result<()> {
             minimum_thinking_time: cli.minimum_thinking_time,
             slowmover: cli.slowmover,
             ponder: cli.ponder,
-            flush_each_move: cli.flush_each_move,
-            emit_eval_file: cli.emit_eval_file,
-            emit_metrics: cli.emit_metrics,
-            startpos_file: cli.startpos_file.as_ref().map(|p| p.display().to_string()),
-            sfen: cli.sfen.clone(),
-            random_startpos: cli.random_startpos,
-            output_training_data: training_data_path.as_ref().map(|p| p.display().to_string()),
-            skip_initial_ply: cli.skip_initial_ply,
-            skip_in_check: cli.skip_in_check,
-            initial_pass_count_black: if pass_rights_enabled {
+            black_usi_opts: black_usi_opts.clone(),
+            white_usi_opts: white_usi_opts.clone(),
+            max_moves: cli.max_moves,
+            timeout_margin_ms: cli.timeout_margin_ms,
+            btime: cli.btime,
+            wtime: cli.wtime,
+            binc: cli.binc,
+            winc: cli.winc,
+            byoyomi: cli.byoyomi,
+            pass_rights_enabled,
+            pass_black: if pass_rights_enabled {
                 Some(cli.pass_rights_black.unwrap_or(usi_initial_pass_count))
             } else {
                 None
             },
-            initial_pass_count_white: if pass_rights_enabled {
+            pass_white: if pass_rights_enabled {
                 Some(cli.pass_rights_white.unwrap_or(usi_initial_pass_count))
             } else {
                 None
             },
-        },
-        engine_cmd: EngineCommandMeta {
-            path_black: engine_paths.black.path.display().to_string(),
-            path_white: engine_paths.white.path.display().to_string(),
-            source_black: engine_paths.black.source.to_string(),
-            source_white: engine_paths.white.source.to_string(),
-            args_black: black_args.clone(),
-            args_white: white_args.clone(),
-            usi_options_black: black_usi_opts.clone(),
-            usi_options_white: white_usi_opts.clone(),
-        },
-        start_positions: start_commands.clone(),
-        output: output_path.display().to_string(),
-        info_log: cli.log_info.then(|| info_path.display().to_string()),
-    };
-    serde_json::to_writer(&mut writer, &meta)?;
-    writer.write_all(b"\n")?;
+            start_defs: Arc::clone(&shared_start_defs),
+            start_commands: Arc::clone(&shared_start_commands),
+            jsonl_path,
+            info_path: w_info_path,
+            eval_path: w_eval_path,
+            metrics_path: w_metrics_path,
+            training_data_path: w_training_path,
+            flush_each_move: cli.flush_each_move,
+            skip_initial_ply: cli.skip_initial_ply,
+            skip_in_check: cli.skip_in_check,
+        };
 
-    // 勝敗カウンター
+        let rx = ticket_rx.clone();
+        let tx = result_tx.clone();
+        let sd = shutdown.clone();
+        handles.push(thread::spawn(move || worker_main(cfg, rx, tx, sd)));
+    }
+    // Main thread doesn't send results
+    drop(result_tx);
+
+    // Main loop: dispatch tickets and collect results
+    let mut ticket_iter = tickets.into_iter();
+    let mut next_ticket = ticket_iter.next();
+    let mut completed = 0u32;
     let mut black_wins = 0u32;
     let mut white_wins = 0u32;
     let mut draws = 0u32;
 
-    // 開始局面選択用のRNG
-    let mut rng = rand::rng();
-
-    for game_idx in 0..cli.games {
-        black.new_game()?;
-        white.new_game()?;
-        // 開始局面を選択（ランダムまたは順繰り）
-        let parsed = if cli.random_startpos {
-            start_defs.choose(&mut rng).unwrap()
-        } else {
-            &start_defs[(game_idx as usize) % start_defs.len()]
-        };
-        let pass_black = if pass_rights_enabled {
-            Some(cli.pass_rights_black.unwrap_or(usi_initial_pass_count))
-        } else {
-            None
-        };
-        let pass_white = if pass_rights_enabled {
-            Some(cli.pass_rights_white.unwrap_or(usi_initial_pass_count))
-        } else {
-            None
-        };
-        let mut pos = build_position(parsed, pass_black, pass_white)?;
-        let mut tc = TimeControl::new(cli.btime, cli.wtime, cli.binc, cli.winc, cli.byoyomi);
-        let mut outcome = GameOutcome::InProgress;
-        let mut outcome_reason = "max_moves";
-        let mut plies_played = 0u32;
-        let mut move_list: Vec<String> = Vec::new();
-        let mut eval_list: Vec<String> = Vec::new();
-        let mut metrics = MetricsCollector::default();
-
-        // 学習データ収集を開始
-        if let Some(ref mut collector) = training_data_collector {
-            collector.start_game();
-        }
-
-        for ply_idx in 0..cli.max_moves {
-            plies_played = ply_idx + 1;
-            let side = pos.side_to_move();
-            let engine = if side == Color::Black {
-                &mut black
-            } else {
-                &mut white
-            };
-            let engine_label = if side == Color::Black {
-                "black"
-            } else {
-                "white"
-            };
-            let sfen_before = pos.to_sfen();
-            let think_limit_ms = tc.think_limit_ms(side);
-            let pass_rights = if pass_rights_enabled {
-                Some((pos.pass_rights(Color::Black), pos.pass_rights(Color::White)))
-            } else {
-                None
-            };
-            let req = SearchRequest {
-                sfen: &sfen_before,
-                time_args: tc.time_args(),
-                think_limit_ms,
-                timeout_margin_ms: cli.timeout_margin_ms,
-                game_id: game_idx + 1,
-                ply: plies_played,
-                side,
-                engine_label: engine_label.to_string(),
-                pass_rights,
-                go_depth: None,
-            };
-            // InfoLogger をクロージャ経由で渡す
-            type InfoCb<'a> = Box<dyn FnMut(&str, &SearchRequest<'_>) + 'a>;
-            let mut info_cb: Option<InfoCb<'_>> = if info_logger.is_some() {
-                Some(Box::new(|line: &str, req: &SearchRequest<'_>| {
-                    if let Some(ref mut logger) = info_logger {
-                        let _ = logger.log(InfoLogEntry {
-                            kind: "info",
-                            game_id: req.game_id,
-                            ply: req.ply,
-                            side_to_move: side_label(req.side),
-                            engine: &req.engine_label,
-                            line,
-                        });
-                    }
-                }))
-            } else {
-                None
-            };
-            let search = engine.search(
-                &req,
-                info_cb.as_mut().map(|b| b.as_mut() as &mut dyn FnMut(&str, &SearchRequest<'_>)),
-            )?;
-
-            let timed_out = search.timed_out;
-            let mut move_usi = search.bestmove.clone().unwrap_or_else(|| "none".to_string());
-            let mut raw_move_usi = None;
-            let mut terminal = false;
-            let elapsed_ms = search.elapsed_ms;
-            let eval_log = search.eval.clone();
-
-            if timed_out {
-                outcome = if side == Color::Black {
-                    GameOutcome::WhiteWin
-                } else {
-                    GameOutcome::BlackWin
-                };
-                outcome_reason = "timeout";
-                terminal = true;
-                if search.bestmove.is_none() {
-                    move_usi = "timeout".to_string();
-                }
-            } else if let Some(ref mv_str) = search.bestmove {
-                raw_move_usi = Some(mv_str.clone());
-                match mv_str.as_str() {
-                    "resign" => {
-                        move_usi = mv_str.clone();
-                        outcome = if side == Color::Black {
-                            GameOutcome::WhiteWin
-                        } else {
-                            GameOutcome::BlackWin
-                        };
-                        outcome_reason = "resign";
-                        terminal = true;
-                    }
-                    "win" => {
-                        move_usi = mv_str.clone();
-                        outcome = if side == Color::Black {
-                            GameOutcome::BlackWin
-                        } else {
-                            GameOutcome::WhiteWin
-                        };
-                        outcome_reason = "win";
-                        terminal = true;
-                    }
-                    _ => match Move::from_usi(mv_str) {
-                        Some(mv) if is_legal_with_pass(&pos, mv) => {
-                            // 学習データを記録（do_move前に記録することが重要）
-                            if let Some(ref mut collector) = training_data_collector {
-                                collector.record_position(
-                                    &pos,
-                                    eval_log.as_ref().and_then(|e| e.score_cp),
-                                    eval_log.as_ref().and_then(|e| e.score_mate),
-                                    Some(mv),
-                                );
-                            }
-                            // パス手は王手にならない
-                            let gives_check = if mv.is_pass() {
-                                false
-                            } else {
-                                pos.gives_check(mv)
-                            };
-                            pos.do_move(mv, gives_check);
-                            tc.update_after_move(side, search.elapsed_ms);
-                            move_usi = mv_str.clone();
-                            raw_move_usi = None;
-                        }
-                        _ => {
-                            outcome = if side == Color::Black {
-                                GameOutcome::WhiteWin
-                            } else {
-                                GameOutcome::BlackWin
-                            };
-                            outcome_reason = "illegal_move";
-                            terminal = true;
-                            move_usi = "illegal".to_string();
-                        }
-                    },
-                }
-            } else {
-                outcome = if side == Color::Black {
-                    GameOutcome::WhiteWin
-                } else {
-                    GameOutcome::BlackWin
-                };
-                outcome_reason = "no_bestmove";
-                terminal = true;
-            }
-
-            if cli.emit_eval_file {
-                eval_list.push(eval_label(eval_log.as_ref()));
-                move_list.push(move_usi.clone());
-            }
-
-            if cli.emit_metrics {
-                metrics.update(side, eval_log.as_ref(), plies_played);
-            }
-
-            let move_log = MoveLog {
-                kind: "move",
-                game_id: game_idx + 1,
-                ply: plies_played,
-                side_to_move: side_label(side),
-                sfen_before,
-                move_usi,
-                raw_move_usi,
-                engine: engine_label.to_string(),
-                elapsed_ms,
-                think_limit_ms,
-                timed_out,
-                eval: eval_log,
-            };
-            serde_json::to_writer(&mut writer, &move_log)?;
-            writer.write_all(b"\n")?;
-            if cli.flush_each_move {
-                writer.flush()?;
-            }
-
-            if terminal || outcome != GameOutcome::InProgress {
-                break;
-            }
-        }
-
-        if outcome == GameOutcome::InProgress {
-            outcome = GameOutcome::Draw;
-            outcome_reason = "max_moves";
-        }
-        let result = ResultLog {
-            kind: "result",
-            game_id: game_idx + 1,
-            outcome: outcome.label(),
-            reason: outcome_reason,
-            plies: plies_played,
-        };
-        serde_json::to_writer(&mut writer, &result)?;
-        writer.write_all(b"\n")?;
-        if cli.emit_eval_file
-            && let Some(w) = eval_writer.as_mut()
-        {
-            let start_cmd = &start_commands[(game_idx as usize) % start_commands.len()];
-            let moves_text = if move_list.is_empty() {
-                String::new()
-            } else {
-                format!(" moves {}", move_list.join(" "))
-            };
-            writeln!(w, "game {}: {}{}", game_idx + 1, start_cmd, moves_text)?;
-            if !eval_list.is_empty() {
-                writeln!(w, "eval {}", eval_list.join(" "))?;
-            } else {
-                writeln!(w, "eval")?;
-            }
-            writeln!(w)?;
-        }
-        if cli.emit_metrics
-            && let Some(w) = metrics_writer.as_mut()
-        {
-            let metrics_log = MetricsLog {
-                kind: "metrics",
-                game_id: game_idx + 1,
-                plies: plies_played,
-                nodes_black: metrics.nodes_black,
-                nodes_white: metrics.nodes_white,
-                nodes_first60: metrics.nodes_first60,
-                last_cp_black: metrics.last_cp_black,
-                last_cp_white: metrics.last_cp_white,
-                last_mate_black: metrics.last_mate_black,
-                last_mate_white: metrics.last_mate_white,
-                outcome: outcome.label().to_string(),
-                reason: outcome_reason.to_string(),
-            };
-            serde_json::to_writer(&mut *w, &metrics_log)?;
-            w.write_all(b"\n")?;
-        }
-        // 学習データの書き出し（勝敗を設定してから書き出す）
-        if let Some(ref mut collector) = training_data_collector {
-            collector.finish_game(outcome)?;
-        }
-        writer.flush()?;
-
-        // 勝敗カウント更新
-        match outcome {
-            GameOutcome::BlackWin => black_wins += 1,
-            GameOutcome::WhiteWin => white_wins += 1,
-            GameOutcome::Draw => draws += 1,
+    let handle_result = |result: WorkerGameResult,
+                         black_wins: &mut u32,
+                         white_wins: &mut u32,
+                         draws: &mut u32,
+                         completed: &mut u32| {
+        match result.outcome {
+            GameOutcome::BlackWin => *black_wins += 1,
+            GameOutcome::WhiteWin => *white_wins += 1,
+            GameOutcome::Draw => *draws += 1,
             GameOutcome::InProgress => {}
         }
-
-        // 進捗表示
+        *completed += 1;
         println!(
             "game {}/{}: {} ({}) - black {} / white {} / draw {}",
-            game_idx + 1,
+            result.game_idx + 1,
             cli.games,
-            outcome.label(),
-            outcome_reason,
+            result.outcome.label(),
+            result.outcome_reason,
             black_wins,
             white_wins,
             draws
         );
+    };
+
+    while completed < cli.games && !shutdown.load(Ordering::Relaxed) {
+        match next_ticket.take() {
+            None => {
+                // All tickets dispatched, just wait for results
+                match result_rx.recv() {
+                    Ok(result) => {
+                        handle_result(
+                            result,
+                            &mut black_wins,
+                            &mut white_wins,
+                            &mut draws,
+                            &mut completed,
+                        );
+                    }
+                    Err(_) => break,
+                }
+            }
+            Some(t) => {
+                chan::select! {
+                    send(ticket_tx, Some(t.clone())) -> res => {
+                        if res.is_ok() {
+                            next_ticket = ticket_iter.next();
+                        }
+                    }
+                    recv(result_rx) -> result => {
+                        // Put the ticket back since we received a result instead of sending
+                        next_ticket = Some(t);
+                        if let Ok(result) = result {
+                            handle_result(result, &mut black_wins, &mut white_wins, &mut draws, &mut completed);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Signal workers to stop
+    for _ in 0..cli.concurrency {
+        let _ = ticket_tx.send(None);
+    }
+
+    // Join workers and collect training stats
+    let mut total_written = 0u64;
+    let mut total_skipped_initial = 0u64;
+    let mut total_skipped_in_check = 0u64;
+    let mut total_skipped_in_progress = 0u64;
+    for h in handles {
+        if let Ok(output) = h.join() {
+            let (tw, si, sic, sip) = output.training_stats;
+            total_written += tw;
+            total_skipped_initial += si;
+            total_skipped_in_check += sic;
+            total_skipped_in_progress += sip;
+        }
+    }
+
+    // Concatenate temp files into final outputs
+    concatenate_temp_files(&output_path, &temp_jsonl_paths, true)?;
+
+    if cli.log_info && !temp_info_paths.is_empty() {
+        concatenate_temp_files(&info_path, &temp_info_paths, false)?;
+    }
+    if cli.emit_eval_file && !temp_eval_paths.is_empty() {
+        let eval_path = default_eval_path(&output_path);
+        concatenate_temp_files(&eval_path, &temp_eval_paths, false)?;
+    }
+    if cli.emit_metrics && !temp_metrics_paths.is_empty() {
+        let metrics_path = default_metrics_path(&output_path);
+        concatenate_temp_files(&metrics_path, &temp_metrics_paths, false)?;
+    }
+    if training_data_enabled && !temp_pack_paths.is_empty() {
+        let pack_path = training_data_path
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| default_training_data_path(&output_path));
+        concatenate_temp_files(&pack_path, &temp_pack_paths, false)?;
     }
 
     // 最終サマリー
+    let actual_games = black_wins + white_wins + draws;
     println!();
     println!("=== Result Summary ===");
     println!(
         "Total: {} games | Black wins: {} | White wins: {} | Draws: {}",
-        cli.games, black_wins, white_wins, draws
+        actual_games, black_wins, white_wins, draws
     );
-    if cli.games > 0 {
-        let black_rate = (black_wins as f64 / cli.games as f64) * 100.0;
-        let white_rate = (white_wins as f64 / cli.games as f64) * 100.0;
-        let draw_rate = (draws as f64 / cli.games as f64) * 100.0;
+    if actual_games > 0 {
+        let black_rate = (black_wins as f64 / actual_games as f64) * 100.0;
+        let white_rate = (white_wins as f64 / actual_games as f64) * 100.0;
+        let draw_rate = (draws as f64 / actual_games as f64) * 100.0;
         println!(
             "Win rate: Black {:.1}% | White {:.1}% | Draw {:.1}%",
             black_rate, white_rate, draw_rate
@@ -1266,18 +1640,18 @@ fn main() -> Result<()> {
     // サマリファイル出力
     let summary_path = default_summary_path(&output_path);
     {
-        let black_rate = if cli.games > 0 {
-            (black_wins as f64 / cli.games as f64) * 100.0
+        let black_rate = if actual_games > 0 {
+            (black_wins as f64 / actual_games as f64) * 100.0
         } else {
             0.0
         };
-        let white_rate = if cli.games > 0 {
-            (white_wins as f64 / cli.games as f64) * 100.0
+        let white_rate = if actual_games > 0 {
+            (white_wins as f64 / actual_games as f64) * 100.0
         } else {
             0.0
         };
-        let draw_rate = if cli.games > 0 {
-            (draws as f64 / cli.games as f64) * 100.0
+        let draw_rate = if actual_games > 0 {
+            (draws as f64 / actual_games as f64) * 100.0
         } else {
             0.0
         };
@@ -1285,7 +1659,7 @@ fn main() -> Result<()> {
         let summary = SummaryLog {
             kind: "summary",
             timestamp: timestamp.to_rfc3339(),
-            total_games: cli.games,
+            total_games: actual_games,
             black_wins,
             white_wins,
             draws,
@@ -1334,28 +1708,17 @@ fn main() -> Result<()> {
         summary_writer.flush()?;
     }
 
-    if let Some(logger) = info_logger.as_mut() {
-        logger.flush()?;
-    }
-    if let Some(w) = eval_writer.as_mut() {
-        w.flush()?;
-    }
-    if let Some(w) = metrics_writer.as_mut() {
-        w.flush()?;
-    }
-    // 学習データのflushとサマリー出力
-    if let Some(ref mut collector) = training_data_collector {
-        collector.flush()?;
-        let (total, skipped_initial, skipped_in_check, skipped_in_progress) = collector.stats();
+    // 学習データサマリー出力
+    if training_data_enabled {
         println!();
         println!("--- Training Data ---");
-        println!("Total positions written: {total}");
-        println!("Skipped (initial ply 1-{}): {skipped_initial}", cli.skip_initial_ply);
+        println!("Total positions written: {total_written}");
+        println!("Skipped (initial ply 1-{}): {total_skipped_initial}", cli.skip_initial_ply);
         if cli.skip_in_check {
-            println!("Skipped (in check): {skipped_in_check}");
+            println!("Skipped (in check): {total_skipped_in_check}");
         }
-        if skipped_in_progress > 0 {
-            println!("Skipped (in progress games): {skipped_in_progress}");
+        if total_skipped_in_progress > 0 {
+            println!("Skipped (in progress games): {total_skipped_in_progress}");
         }
         println!(
             "Output: {}",
@@ -1363,7 +1726,6 @@ fn main() -> Result<()> {
         );
         println!("---------------------");
     }
-    writer.flush()?;
     println!("selfplay log written to {}", output_path.display());
     println!("summary written to {}", summary_path.display());
     if cli.log_info {
@@ -1420,7 +1782,7 @@ fn default_summary_path(jsonl: &Path) -> PathBuf {
 fn default_training_data_path(jsonl: &Path) -> PathBuf {
     let parent = jsonl.parent().unwrap_or_else(|| Path::new("."));
     let stem = jsonl.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
-    parent.join(format!("{stem}.pack"))
+    parent.join(format!("{stem}.psv"))
 }
 
 fn resolve_engine_paths(cli: &Cli) -> ResolvedEnginePaths {

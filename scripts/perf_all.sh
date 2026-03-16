@@ -169,11 +169,11 @@ if [ "$RUN_PERF_STAT" = true ]; then
     echo "=============================================="
     if [ "$SKIP_NNUE" = false ]; then
         echo "perf stat results will be saved under ./perf_results"
-        RUSTFLAGS="-C target-cpu=native" cargo build -p tools --bin benchmark --release
+        RUSTFLAGS="-C target-cpu=native" cargo build -p tools --bin benchmark --profile production
         STAT_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
         STAT_FILE="./perf_results/${STAT_TIMESTAMP}_perfstat_nnue.txt"
         sudo perf stat -e dTLB-load-misses,cache-misses,branch-misses \
-            ./target/release/benchmark --internal --nnue-file "$NNUE_FILE" \
+            ./target/production/benchmark --internal --nnue-file "$NNUE_FILE" \
             --limit-type movetime --limit 5000 --iterations 1 2>&1 | tee "$STAT_FILE"
     else
         echo "スキップ: NNUEファイルがありません"
@@ -185,11 +185,11 @@ if [ "$RUN_PERF_STAT" = true ]; then
     echo "  ${STEP}/${TOTAL_STEPS}: perf stat (Material評価)"
     echo "=============================================="
     echo "perf stat results will be saved under ./perf_results"
-    RUSTFLAGS="-C target-cpu=native" cargo build -p tools --bin benchmark --release
+    RUSTFLAGS="-C target-cpu=native" cargo build -p tools --bin benchmark --profile production
     STAT_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
     STAT_FILE="./perf_results/${STAT_TIMESTAMP}_perfstat_material.txt"
     sudo perf stat -e dTLB-load-misses,cache-misses,branch-misses \
-        ./target/release/benchmark --internal \
+        ./target/production/benchmark --internal \
         --limit-type movetime --limit 5000 --iterations 1 2>&1 | tee "$STAT_FILE"
     STEP=$((STEP + 1))
 fi
@@ -203,7 +203,7 @@ echo ""
 echo "=============================================="
 echo "  ベンチマーク用バイナリのビルド"
 echo "=============================================="
-RUSTFLAGS="-C target-cpu=native" cargo build -p tools --bin benchmark --release
+RUSTFLAGS="-C target-cpu=native" cargo build -p tools --bin benchmark --profile production
 
 echo ""
 echo "=============================================="
@@ -212,7 +212,7 @@ echo "=============================================="
 if [ "$SKIP_NNUE" = false ]; then
     for t in "${THREAD_LIST[@]}"; do
         echo "--- スレッド: $t ---"
-        OUTPUT=$(./target/release/benchmark \
+        OUTPUT=$(./target/production/benchmark \
             --internal --threads "$t" --limit-type movetime --limit "$BENCH_TIME" \
             --nnue-file "$NNUE_FILE" \
             --output-dir ./benchmark_results 2>&1)
@@ -234,7 +234,7 @@ echo "  ${STEP}/${TOTAL_STEPS}: benchmark (Material評価)"
 echo "=============================================="
 for t in "${THREAD_LIST[@]}"; do
     echo "--- スレッド: $t ---"
-    OUTPUT=$(./target/release/benchmark \
+    OUTPUT=$(./target/production/benchmark \
         --internal --threads "$t" --limit-type movetime --limit "$BENCH_TIME" \
         --output-dir ./benchmark_results 2>&1)
     echo "$OUTPUT"
