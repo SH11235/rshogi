@@ -198,6 +198,60 @@ fn sfen_piece_char(p: Piece) -> char {
     }
 }
 
+fn piece_from_csa_token(token: &str) -> Result<Option<Piece>> {
+    if token == "*" {
+        return Ok(None);
+    }
+    anyhow::ensure!(token.len() == 3, "invalid CSA board token: {token}");
+    let color = match token.as_bytes()[0] {
+        b'+' => Color::Black,
+        b'-' => Color::White,
+        _ => bail!("invalid CSA board token side: {token}"),
+    };
+    let (ty, promoted) = piece_from_csa_code(&token[1..3])?;
+    Ok(Some(Piece::new(ty, color, promoted)))
+}
+
+fn tokenize_csa_rank(payload: &str) -> Result<Vec<String>> {
+    let bytes = payload.as_bytes();
+    let mut i = 0usize;
+    let mut tokens = Vec::with_capacity(9);
+
+    while i < bytes.len() {
+        if bytes[i].is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        match bytes[i] {
+            b'*' => {
+                tokens.push("*".to_string());
+                i += 1;
+            }
+            b'+' | b'-' => {
+                anyhow::ensure!(i + 3 <= bytes.len(), "short CSA rank token: {payload}");
+                let token = std::str::from_utf8(&bytes[i..i + 3])
+                    .with_context(|| format!("invalid UTF-8 in CSA rank token: {payload}"))?;
+                tokens.push(token.to_string());
+                i += 3;
+            }
+            _ => bail!("invalid CSA rank payload: {payload}"),
+        }
+    }
+
+    anyhow::ensure!(tokens.len() == 9, "CSA rank must have 9 squares: {payload}");
+    Ok(tokens)
+}
+
+fn parse_csa_rank_line(pos: &mut Position, line: &str) -> Result<()> {
+    anyhow::ensure!(line.len() >= 2, "invalid CSA rank line: {line}");
+    let rank = csa_rank_to_y(line.as_bytes()[1] - b'0')?;
+    let tokens = tokenize_csa_rank(&line[2..])?;
+    for (x, token) in (1..=9).zip(tokens.iter()) {
+        pos.board[rank][x] = piece_from_csa_token(token)?;
+    }
+    Ok(())
+}
+
 impl Position {
     pub fn to_sfen(&self) -> String {
         // board strings from rank 1 (top) to 9 (bottom)
@@ -372,8 +426,10 @@ pub fn parse_csa(text: &str) -> Result<(Position, Vec<String>, GameInfo)> {
     let mut pos = None;
     let mut moves = Vec::new();
     let mut info = GameInfo::default();
+    let mut explicit_board = false;
     for line in text.lines() {
-        let s = line.trim();
+        let raw = line.trim_end_matches('\r');
+        let s = raw.trim();
         if s.is_empty() || s.starts_with('%') || s.starts_with('V') || s.starts_with('T') {
             continue;
         }
@@ -403,11 +459,34 @@ pub fn parse_csa(text: &str) -> Result<(Position, Vec<String>, GameInfo)> {
             continue;
         }
         // Skip other comments and headers
-        if s.starts_with('\'') || s.starts_with('$') || s.starts_with('P') {
-            if s == "PI" {
-                pos = Some(initial_position());
-            }
+        if s.starts_with('\'') || s.starts_with('$') {
             continue;
+        }
+        if s == "PI" {
+            pos = Some(initial_position());
+            explicit_board = false;
+            continue;
+        }
+        if s.starts_with("PI") {
+            bail!("unsupported CSA initial position shorthand: {s}");
+        }
+        if s.starts_with('P') && s.len() >= 2 && s.as_bytes()[1].is_ascii_digit() {
+            let pos_ref = if explicit_board {
+                pos.get_or_insert_with(Position::default)
+            } else {
+                explicit_board = true;
+                pos.insert(Position::default())
+            };
+            parse_csa_rank_line(pos_ref, raw)?;
+            continue;
+        }
+        if s == "+" || s == "-" {
+            let pos_ref = pos.get_or_insert_with(initial_position);
+            pos_ref.side_to_move = if s == "+" { Color::Black } else { Color::White };
+            continue;
+        }
+        if s.starts_with("P+") || s.starts_with("P-") {
+            bail!("unsupported CSA hand/setup line: {s}");
         }
         if s.starts_with('+') || s.starts_with('-') {
             if s.len() >= 7 {
@@ -499,7 +578,7 @@ PI
 
     #[test]
     fn test_parse_p1p9_format() {
-        // P1..P9 形式はスキップされ initial_position にフォールバック
+        // P1..P9 形式を明示盤面として解釈する
         let text = "\
 V2
 N+PlayerA
@@ -521,7 +600,42 @@ P9+KY+KE+GI+KI+OU+KI+GI+KE+KY
         let (pos, moves, info) = parse_csa(text).unwrap();
         assert_eq!(moves.len(), 1);
         assert!((info.black_rating.unwrap() - 3500.0).abs() < 0.01);
-        // P1..P9 は initial_position と同じ盤面にフォールバック
-        assert!(pos.to_sfen().starts_with("lnsgkgsnl/1r5b1/ppppppppp"));
+        assert_eq!(
+            pos.to_sfen(),
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1"
+        );
+    }
+
+    #[test]
+    fn test_parse_p1p9_white_to_move() {
+        let text = "\
+V2
+P1-KY-KE-GI-KI-OU-KI-GI-KE-KY
+P2 * -HI *  *  *  *  * -KA *
+P3-FU-FU-FU-FU-FU-FU-FU-FU-FU
+P4 *  *  *  *  *  *  *  *  *
+P5 *  *  *  *  *  *  *  *  *
+P6 *  *  *  *  *  *  *  *  *
+P7+FU+FU+FU+FU+FU+FU+FU+FU+FU
+P8 * +KA *  *  *  *  * +HI *
+P9+KY+KE+GI+KI+OU+KI+GI+KE+KY
+-
+";
+        let (pos, moves, _info) = parse_csa(text).unwrap();
+        assert!(moves.is_empty());
+        assert_eq!(
+            pos.to_sfen(),
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL w - 1"
+        );
+    }
+
+    #[test]
+    fn test_parse_csa_rejects_unsupported_pplus_setup() {
+        let text = "\
+V2
+P+00HI
+";
+        let err = parse_csa(text).expect_err("P+ setup line is unsupported");
+        assert!(err.to_string().contains("unsupported CSA hand/setup line"));
     }
 }
