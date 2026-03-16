@@ -164,12 +164,7 @@ fn load_progress_kpabs_weights(path: &PathBuf) -> Result<Box<[f32]>> {
 }
 
 /// progress8kpabs bucket 計算のマイクロベンチマーク
-fn bench_progress_bucket(
-    positions: &[Position],
-    weights: &[f32],
-    warmup: u64,
-    iterations: u64,
-) {
+fn bench_progress_bucket(positions: &[Position], weights: &[f32], warmup: u64, iterations: u64) {
     // ウォームアップ
     for i in 0..warmup {
         let pos = &positions[i as usize % positions.len()];
@@ -198,20 +193,14 @@ fn bench_progress_bucket(
     // 各局面の bucket 値を表示
     println!("=== progress8kpabs bucket ===");
     for (i, pos) in positions.iter().enumerate() {
-        let bucket = compute_layer_stack_progress8kpabs_bucket_index(
-            pos,
-            pos.side_to_move(),
-            weights,
-        );
+        let bucket =
+            compute_layer_stack_progress8kpabs_bucket_index(pos, pos.side_to_move(), weights);
         println!("  position[{i}]: bucket={bucket}");
     }
     println!("  {:.1} ns/op ({:.0} ops/sec)", ns_per_op, ops_per_sec);
     println!();
     println!("--- progress8kpabs JSON ---");
-    println!(
-        r#"{{"bucket_ns":{:.1},"bucket_ops_per_sec":{:.0}}}"#,
-        ns_per_op, ops_per_sec
-    );
+    println!(r#"{{"bucket_ns":{:.1},"bucket_ops_per_sec":{:.0}}}"#, ns_per_op, ops_per_sec);
     println!();
 }
 

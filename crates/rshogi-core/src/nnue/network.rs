@@ -2215,11 +2215,7 @@ mod tests {
         for &sum in &[
             -10.0, -5.0, -3.0, -2.5, -1.5, -0.8, -0.3, 0.0, 0.3, 0.8, 1.5, 2.5, 3.0, 5.0, 10.0,
         ] {
-            assert_eq!(
-                sigmoid_bucket(sum),
-                threshold_bucket(sum),
-                "mismatch at sum={sum}"
-            );
+            assert_eq!(sigmoid_bucket(sum), threshold_bucket(sum), "mismatch at sum={sum}");
         }
     }
 
@@ -2245,7 +2241,9 @@ mod tests {
         let sum0 = compute_progress8kpabs_sum(&pos, &weights);
 
         // いくつかの手を実行して差分更新と全計算を比較
-        let moves_usi = ["7g7f", "3c3d", "2g2f", "8c8d", "2f2e", "8d8e", "6i7h", "4a3b"];
+        let moves_usi = [
+            "7g7f", "3c3d", "2g2f", "8c8d", "2f2e", "8d8e", "6i7h", "4a3b",
+        ];
         let mut prev_sum = sum0;
 
         for &mv_str in &moves_usi {
@@ -2272,10 +2270,7 @@ mod tests {
                     (diff_sum - expected_sum).abs() < 1e-5,
                     "sum mismatch after {mv_str}: diff={diff_sum}, expected={expected_sum}"
                 );
-                assert_eq!(
-                    diff_bucket, expected_bucket,
-                    "bucket mismatch after {mv_str}"
-                );
+                assert_eq!(diff_bucket, expected_bucket, "bucket mismatch after {mv_str}");
 
                 prev_sum = diff_sum;
             }

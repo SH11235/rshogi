@@ -222,7 +222,6 @@ pub(super) fn probe_transposition<const NT: u8>(
     let tt_hit = tt_result.found;
     let mut tt_data = tt_result.data;
 
-
     st.stack[ply as usize].tt_hit = tt_hit;
     // excludedMoveがある場合は前回のttPvを維持
     st.stack[ply as usize].tt_pv = if excluded_move.is_some() {
@@ -304,7 +303,6 @@ pub(super) fn probe_transposition<const NT: u8>(
     // - fail-high時は tt_data.depth > depth を要求（fail-low時は >= depth）
     // - depth<=5ではcutNodeとTT値の方向が一致する場合のみカットオフ許可
     let tt_value_lte_beta = tt_value != Value::NONE && tt_value.raw() <= beta.raw();
-
 
     if !pv_node
         && excluded_move.is_none()
