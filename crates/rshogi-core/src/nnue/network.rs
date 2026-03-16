@@ -33,13 +33,12 @@ use super::stats::{count_already_computed, count_refresh, count_update};
 use crate::eval::material;
 use crate::position::Position;
 use crate::types::{Color, PieceType, Value};
-use once_cell::sync::Lazy;
 use std::cell::Cell;
 use std::fs::File;
 use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{LazyLock, OnceLock, RwLock};
 
 /// グローバルなNNUEネットワーク（HalfKP/HalfKA/HalfKA_hm^）
 static NETWORK: OnceLock<NNUENetwork> = OnceLock::new();
@@ -264,12 +263,12 @@ static LAYER_STACK_PLY_BOUNDS: [AtomicI32; 8] = [
 ];
 
 /// LayerStacks progress8 係数のグローバル設定
-static LAYER_STACK_PROGRESS_COEFF: Lazy<RwLock<LayerStackProgressCoeff>> =
-    Lazy::new(|| RwLock::new(LayerStackProgressCoeff::default()));
+static LAYER_STACK_PROGRESS_COEFF: LazyLock<RwLock<LayerStackProgressCoeff>> =
+    LazyLock::new(|| RwLock::new(LayerStackProgressCoeff::default()));
 
 /// LayerStacks progress8gikou 係数のグローバル設定
-static LAYER_STACK_PROGRESS_COEFF_GIKOU_LITE: Lazy<RwLock<LayerStackProgressCoeffGikouLite>> =
-    Lazy::new(|| RwLock::new(LayerStackProgressCoeffGikouLite::default()));
+static LAYER_STACK_PROGRESS_COEFF_GIKOU_LITE: LazyLock<RwLock<LayerStackProgressCoeffGikouLite>> =
+    LazyLock::new(|| RwLock::new(LayerStackProgressCoeffGikouLite::default()));
 
 /// progress8kpabs 重みのデフォルト（未設定時は全ゼロ）
 static LAYER_STACK_PROGRESS_KP_ABS_ZERO_WEIGHTS: [f32; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS] =

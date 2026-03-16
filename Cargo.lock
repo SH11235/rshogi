@@ -1452,7 +1452,6 @@ dependencies = [
  "getrandom 0.3.4",
  "libc",
  "log",
- "once_cell",
  "rand",
  "rand_xoshiro",
  "rayon",
