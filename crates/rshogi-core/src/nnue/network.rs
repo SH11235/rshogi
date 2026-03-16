@@ -106,6 +106,19 @@ pub const SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES: usize = 34;
 /// progress8kpabs で使用する重み数（81 king squares x FE_OLD_END BonaPiece）
 pub const SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS: usize = 81 * FE_OLD_END;
 
+/// sigmoid(x)*8 = k となる x の閾値 (k=1..7)。
+/// x = ln(k / (8-k)) で事前計算。
+/// sum との比較のみで bucket index を決定でき、exp() が不要になる。
+const PROGRESS_BUCKET_THRESHOLDS: [f32; 7] = [
+    -1.945_910_1, // k=1: ln(1/7)
+    -1.098_612_3, // k=2: ln(1/3)
+    -0.510_825_6, // k=3: ln(3/5)
+    0.0,          // k=4: ln(1)
+    0.510_825_6,  // k=5: ln(5/3)
+    1.098_612_3,  // k=6: ln(3)
+    1.945_910_1,  // k=7: ln(7)
+];
+
 /// progress8gikou coeff_v2 の特徴量順序
 pub const SHOGI_PROGRESS_GIKOU_LITE_FEATURE_ORDER: [&str; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES] = [
     "x_board_non_king",
@@ -1110,9 +1123,12 @@ pub fn compute_layer_stack_progress8kpabs_bucket_index(
         }
     }
 
-    let p = (1.0 / (1.0 + (-sum).exp())).clamp(0.0, 1.0);
-    let raw = (p * SHOGI_PROGRESS8_NUM_BUCKETS as f32).floor() as i32;
-    raw.clamp(0, (SHOGI_PROGRESS8_NUM_BUCKETS - 1) as i32) as usize
+    // テーブル引き: sigmoid + exp を閾値比較で置換
+    PROGRESS_BUCKET_THRESHOLDS
+        .iter()
+        .filter(|&&t| sum >= t)
+        .count()
+        .min(SHOGI_PROGRESS8_NUM_BUCKETS - 1)
 }
 
 /// NNUEを初期化（バージョン自動判別）
@@ -2053,6 +2069,34 @@ mod tests {
         let weights = vec![0.0f32; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS];
         let b = compute_layer_stack_progress8kpabs_bucket_index(&pos, pos.side_to_move(), &weights);
         assert_eq!(b, 4, "zero-weight progress8kpabs should map to the middle bucket");
+    }
+
+    #[test]
+    fn test_progress_bucket_thresholds_match_sigmoid() {
+        // テーブル引きが元の sigmoid 方式と一致することを確認
+        let sigmoid_bucket = |sum: f32| -> usize {
+            let p = (1.0 / (1.0 + (-sum).exp())).clamp(0.0, 1.0);
+            let raw = (p * SHOGI_PROGRESS8_NUM_BUCKETS as f32).floor() as i32;
+            raw.clamp(0, (SHOGI_PROGRESS8_NUM_BUCKETS - 1) as i32) as usize
+        };
+        let threshold_bucket = |sum: f32| -> usize {
+            PROGRESS_BUCKET_THRESHOLDS
+                .iter()
+                .filter(|&&t| sum >= t)
+                .count()
+                .min(SHOGI_PROGRESS8_NUM_BUCKETS - 1)
+        };
+
+        // 閾値から離れた値では完全一致すべき
+        for &sum in &[
+            -10.0, -5.0, -3.0, -2.5, -1.5, -0.8, -0.3, 0.0, 0.3, 0.8, 1.5, 2.5, 3.0, 5.0, 10.0,
+        ] {
+            assert_eq!(
+                sigmoid_bucket(sum),
+                threshold_bucket(sum),
+                "mismatch at sum={sum}"
+            );
+        }
     }
 
     /// HalfKP 768x2-16-64 ファイルの読み込みテスト
