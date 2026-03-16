@@ -349,6 +349,7 @@ fn worker_main(
             timeout_margin_ms,
             pass_rights: None,
             go_depth,
+            go_nodes: None,
         };
         let game_id = (ticket.id as u32) + 1;
 

@@ -83,6 +83,14 @@ struct Cli {
     #[arg(long, default_value_t = 0)]
     byoyomi: u64,
 
+    /// Search depth limit (go depth N)
+    #[arg(long)]
+    depth: Option<u32>,
+
+    /// Search nodes limit (go nodes N)
+    #[arg(long)]
+    nodes: Option<u64>,
+
     /// Safety margin used when detecting timeouts
     #[arg(long, default_value_t = 1000)]
     timeout_margin_ms: u64,
@@ -205,7 +213,7 @@ struct Cli {
     /// ランダム性確保のため、序盤の定跡手順をスキップする
     #[arg(
         long,
-        default_value_t = 8,
+        default_value_t = 0,
         help = "Skip initial N plies (1 to N) for training data"
     )]
     skip_initial_ply: u32,
@@ -247,6 +255,10 @@ struct MetaSettings {
     binc: u64,
     winc: u64,
     byoyomi: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    depth: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    nodes: Option<u64>,
     timeout_margin_ms: u64,
     threads: usize,
     threads_black: usize,
@@ -708,6 +720,9 @@ struct WorkerConfig {
     binc: u64,
     winc: u64,
     byoyomi: u64,
+    // Depth/nodes limits
+    go_depth: Option<u32>,
+    go_nodes: Option<u64>,
     // Pass rights
     pass_rights_enabled: bool,
     pass_black: Option<u8>,
@@ -871,7 +886,8 @@ fn worker_main(
                     side,
                     engine_label: engine_label.to_string(),
                     pass_rights,
-                    go_depth: None,
+                    go_depth: cfg.go_depth,
+                    go_nodes: cfg.go_nodes,
                 };
                 type InfoCb<'a> = Box<dyn FnMut(&str, &SearchRequest<'_>) + 'a>;
                 let mut info_cb: Option<InfoCb<'_>> = if info_logger.is_some() {
@@ -1138,8 +1154,15 @@ fn concatenate_temp_files(final_path: &Path, temp_paths: &[PathBuf], append: boo
 fn main() -> Result<()> {
     let mut cli = Cli::parse();
 
-    // 時間制限のバリデーション: すべて0の場合は無限思考モードになりタイムアウト問題が発生するため警告
-    if cli.btime == 0 && cli.wtime == 0 && cli.byoyomi == 0 && cli.binc == 0 && cli.winc == 0 {
+    // 時間制限のバリデーション: depth/nodes 指定がなく時間制御もない場合はデフォルト byoyomi を設定
+    let has_limit = cli.depth.is_some() || cli.nodes.is_some();
+    if !has_limit
+        && cli.btime == 0
+        && cli.wtime == 0
+        && cli.byoyomi == 0
+        && cli.binc == 0
+        && cli.winc == 0
+    {
         eprintln!(
             "Warning: No time control specified. Using default byoyomi=1000ms to prevent infinite thinking."
         );
@@ -1316,6 +1339,8 @@ fn main() -> Result<()> {
                 binc: cli.binc,
                 winc: cli.winc,
                 byoyomi: cli.byoyomi,
+                depth: cli.depth,
+                nodes: cli.nodes,
                 timeout_margin_ms: cli.timeout_margin_ms,
                 threads: cli.threads,
                 threads_black,
@@ -1472,6 +1497,8 @@ fn main() -> Result<()> {
             binc: cli.binc,
             winc: cli.winc,
             byoyomi: cli.byoyomi,
+            go_depth: cli.depth,
+            go_nodes: cli.nodes,
             pass_rights_enabled,
             pass_black: if pass_rights_enabled {
                 Some(cli.pass_rights_black.unwrap_or(usi_initial_pass_count))
