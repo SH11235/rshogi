@@ -3,14 +3,17 @@
 //! # 使用例
 //!
 //! ```bash
+//! # 0. 高レートプレイヤーリストを取得（ダウンロード事前フィルタ用）
+//! cargo run -p tools --bin floodgate_pipeline -- fetch-ratings --min-rating 3900 --out high_rated.txt
+//!
 //! # 1. インデックスファイルをダウンロード
 //! cargo run -p tools --bin floodgate_pipeline -- fetch-index --out 00LIST.floodgate
 //!
-//! # 2. CSAファイルをダウンロード
-//! cargo run -p tools --bin floodgate_pipeline -- download --index 00LIST.floodgate --out-dir logs/x --limit 100
+//! # 2. CSAファイルをダウンロード（年 + プレイヤーでフィルタ）
+//! cargo run -p tools --bin floodgate_pipeline -- download --year-from 2021 --player-file high_rated.txt
 //!
-//! # 3. SFENを抽出
-//! cargo run -p tools --bin floodgate_pipeline -- extract --root logs/x --out sfens.txt --mirror-dedup
+//! # 3. SFENを抽出（レーティングで精密フィルタ）
+//! cargo run -p tools --bin floodgate_pipeline -- extract --min-rating 3900 --max-ply 32
 //! ```
 
 use anyhow::{Context, Result};
@@ -38,6 +41,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Floodgateレーティングページから高レートプレイヤー名を取得
+    FetchRatings {
+        /// レーティングページ URL
+        #[arg(long, default_value = fg::RATING_PAGE_URL)]
+        url: String,
+        /// レーティング閾値（この値以上のプレイヤーを出力）
+        #[arg(long, default_value_t = 3900)]
+        min_rating: u32,
+        /// 出力ファイルパス（1行1プレイヤー名）
+        #[arg(long, default_value = "high_rated_players.txt")]
+        out: String,
+    },
     /// 00LIST.floodgateインデックスをダウンロード
     FetchIndex {
         /// Root URL (HTTP only)
@@ -61,6 +76,15 @@ enum Cmd {
         /// ダウンロード数の上限（テスト用）
         #[arg(long)]
         limit: Option<usize>,
+        /// この年以降のファイルのみダウンロード（例: 2021）
+        #[arg(long)]
+        year_from: Option<u16>,
+        /// この年以前のファイルのみダウンロード
+        #[arg(long)]
+        year_to: Option<u16>,
+        /// 高レートプレイヤー名ファイル（1行1名）。両対局者がリストに含まれるゲームのみDL
+        #[arg(long)]
+        player_file: Option<String>,
     },
     /// ローカルのCSAファイルからSFENを抽出
     Extract {
@@ -91,6 +115,9 @@ enum Cmd {
         /// 1棋譜あたりの最大抽出数（0=無制限）
         #[arg(long, default_value_t = 0)]
         per_game_cap: usize,
+        /// 両対局者のレーティング下限（0=フィルタなし）
+        #[arg(long, default_value_t = 0)]
+        min_rating: u32,
     },
 }
 
@@ -108,13 +135,23 @@ fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::FetchRatings {
+            url,
+            min_rating,
+            out,
+        } => run_fetch_ratings(&url, min_rating, &out),
         Cmd::FetchIndex { root, out } => run_fetch_index(&root, &out),
         Cmd::Download {
             index,
             root,
             out_dir,
             limit,
-        } => run_download(&index, &root, &out_dir, limit),
+            year_from,
+            year_to,
+            player_file,
+        } => {
+            run_download(&index, &root, &out_dir, limit, year_from, year_to, player_file.as_deref())
+        }
         Cmd::Extract {
             root,
             out,
@@ -125,6 +162,7 @@ fn main() -> Result<()> {
             min_ply,
             max_ply,
             per_game_cap,
+            min_rating,
         } => run_extract(
             &root,
             &out,
@@ -135,8 +173,28 @@ fn main() -> Result<()> {
             min_ply,
             max_ply,
             per_game_cap,
+            min_rating,
         ),
     }
+}
+
+fn run_fetch_ratings(url: &str, min_rating: u32, out: &str) -> Result<()> {
+    eprintln!("Fetching rating page from: {url}");
+    let client = Client::builder().build()?;
+    let html = fg::http_get_text(&client, url)?;
+    let all = fg::parse_rating_page(&html);
+    eprintln!("Found {} players on rating page", all.len());
+    let filtered: Vec<_> = all.iter().filter(|(_, r)| *r >= min_rating as f64).collect();
+    eprintln!("{} players with rating >= {min_rating}", filtered.len());
+    let mut f = fs::File::create(out).with_context(|| format!("create {out}"))?;
+    for (name, rating) in &filtered {
+        writeln!(f, "{name}\t{rating}")?;
+    }
+    eprintln!("Wrote player list to: {out}");
+    for (name, rating) in &filtered {
+        eprintln!("  {rating:.0}\t{name}");
+    }
+    Ok(())
 }
 
 fn run_fetch_index(root: &str, out: &str) -> Result<()> {
@@ -149,19 +207,76 @@ fn run_fetch_index(root: &str, out: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_download(index: &str, root: &str, out_dir: &str, limit: Option<usize>) -> Result<()> {
+fn year_of_path(rel: &str) -> Option<u16> {
+    rel.get(..4)?.parse::<u16>().ok()
+}
+
+fn run_download(
+    index: &str,
+    root: &str,
+    out_dir: &str,
+    limit: Option<usize>,
+    year_from: Option<u16>,
+    year_to: Option<u16>,
+    player_file: Option<&str>,
+) -> Result<()> {
     let client = Client::builder().build()?;
     let r = tools::common::io::open_reader(index)?;
-    let lines = fg::parse_index_lines(r)?;
-    let count = limit.unwrap_or(lines.len());
-    eprintln!("Downloading {} CSA files (total in index: {})", count, lines.len());
+    let all_lines = fg::parse_index_lines(r)?;
+    let total = all_lines.len();
+
+    // プレイヤーフィルタセットの読み込み
+    let player_set = if let Some(pf) = player_file {
+        let set = fg::load_player_set(Path::new(pf))?;
+        eprintln!("Loaded {} player names from {pf}", set.len());
+        Some(set)
+    } else {
+        None
+    };
+
+    // 年 + プレイヤーフィルタ
+    let lines: Vec<String> = all_lines
+        .into_iter()
+        .filter(|rel| {
+            let year = year_of_path(rel).unwrap_or(0);
+            if year_from.is_some_and(|yf| year < yf) || year_to.is_some_and(|yt| year > yt) {
+                return false;
+            }
+            if let Some(ref set) = player_set {
+                if let Some((a, b)) = fg::players_from_path(rel) {
+                    set.contains(a) && set.contains(b)
+                } else {
+                    false
+                }
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    let after_filter = lines.len();
+    let count = limit.unwrap_or(after_filter).min(after_filter);
+    eprintln!(
+        "Downloading {} CSA files (total in index: {}, after filter: {})",
+        count, total, after_filter
+    );
+    let mut downloaded = 0usize;
+    let mut skipped = 0usize;
     for (i, rel) in lines.into_iter().take(count).enumerate() {
         let url = fg::join_url(root, &rel)?;
         let out_path = fg::local_path_for(Path::new(out_dir), &rel);
+        if out_path.exists() {
+            skipped += 1;
+            continue;
+        }
         match fg::http_get_to_file_noclobber(&client, &url, &out_path) {
             Ok(_) => {
-                if (i + 1) % 100 == 0 {
-                    eprintln!("  Downloaded {}/{} files...", i + 1, count);
+                downloaded += 1;
+                if downloaded.is_multiple_of(500) {
+                    eprintln!(
+                        "  Downloaded {downloaded} new files ({}/{count} processed)...",
+                        i + 1
+                    );
                 }
             }
             Err(e) => {
@@ -169,7 +284,7 @@ fn run_download(index: &str, root: &str, out_dir: &str, limit: Option<usize>) ->
             }
         }
     }
-    eprintln!("Download complete. Files saved to: {out_dir}");
+    eprintln!("Download complete. {downloaded} new, {skipped} already existed. Dir: {out_dir}");
     Ok(())
 }
 
@@ -200,6 +315,7 @@ fn run_extract(
     min_ply: u32,
     max_ply: u32,
     per_game_cap: usize,
+    min_rating: u32,
 ) -> Result<()> {
     let root = Path::new(root);
     let files = visit_csa_files(root)?;
@@ -208,6 +324,9 @@ fn run_extract(
     let mut dedup = DedupSet::new(mirror_dedup);
     let mut wrote = 0usize;
     let mut errors = 0usize;
+    let mut rating_skipped = 0usize;
+    let mut no_rating = 0usize;
+    let mut games_used = 0usize;
     'games: for p in &files {
         let text = match fs::read_to_string(p) {
             Ok(t) => t,
@@ -217,7 +336,7 @@ fn run_extract(
                 continue;
             }
         };
-        let (mut pos, moves) = match parse_csa(&text) {
+        let (mut pos, moves, info) = match parse_csa(&text) {
             Ok(r) => r,
             Err(e) => {
                 errors += 1;
@@ -225,6 +344,18 @@ fn run_extract(
                 continue;
             }
         };
+        // レーティングフィルタ
+        if min_rating > 0 {
+            if info.black_rating.is_none() || info.white_rating.is_none() {
+                no_rating += 1;
+                continue 'games;
+            }
+            if !info.both_ratings_at_least(min_rating as f64) {
+                rating_skipped += 1;
+                continue 'games;
+            }
+        }
+        games_used += 1;
         let mut written_this_game = 0usize;
         match mode {
             Mode::Initial => {
@@ -309,9 +440,14 @@ fn run_extract(
         }
     }
     out_w.close()?;
-    eprintln!("Wrote {wrote} SFENs to {out}");
+    eprintln!("Wrote {wrote} SFENs from {games_used} games to {out}");
     if errors > 0 {
         eprintln!("  ({errors} files had errors and were skipped)");
+    }
+    if min_rating > 0 {
+        eprintln!(
+            "  ({rating_skipped} games below min_rating={min_rating}, {no_rating} games without rating info)"
+        );
     }
     if mirror_dedup {
         eprintln!("  (dedup set size: {})", dedup.len());

@@ -335,23 +335,65 @@ fn append_hand(out: &mut String, h: Hand, black: bool) {
     }
 }
 
-/// Parse a CSA text and return initial position and list of move tokens ("+7776FU" ...)
-pub fn parse_csa(text: &str) -> Result<(Position, Vec<String>)> {
-    // Start with either PI (initial) or explicit P1..P9 layout. We implement PI and ignore explicit layouts for now.
+/// CSA棋譜から抽出した対局メタデータ
+#[derive(Clone, Debug, Default)]
+pub struct GameInfo {
+    pub black_name: Option<String>,
+    pub white_name: Option<String>,
+    pub black_rating: Option<f64>,
+    pub white_rating: Option<f64>,
+}
+
+impl GameInfo {
+    /// 両対局者のレーティングが `min` 以上か判定。レーティング不明の場合は false。
+    pub fn both_ratings_at_least(&self, min: f64) -> bool {
+        match (self.black_rating, self.white_rating) {
+            (Some(br), Some(wr)) => br >= min && wr >= min,
+            _ => false,
+        }
+    }
+}
+
+/// Parse a CSA text and return initial position, list of move tokens, and game metadata.
+pub fn parse_csa(text: &str) -> Result<(Position, Vec<String>, GameInfo)> {
     let mut pos = None;
     let mut moves = Vec::new();
+    let mut info = GameInfo::default();
     for line in text.lines() {
         let s = line.trim();
-        if s.is_empty()
-            || s.starts_with('%')
-            || s.starts_with('N')
-            || s.starts_with('V')
-            || s.starts_with('T')
-        {
+        if s.is_empty() || s.starts_with('%') || s.starts_with('V') || s.starts_with('T') {
             continue;
         }
-        if s == "PI" {
-            pos = Some(initial_position());
+        // Player names
+        if let Some(name) = s.strip_prefix("N+") {
+            info.black_name = Some(name.to_string());
+            continue;
+        }
+        if let Some(name) = s.strip_prefix("N-") {
+            info.white_name = Some(name.to_string());
+            continue;
+        }
+        if s.starts_with('N') {
+            continue;
+        }
+        // Rating comments (floodgate format: 'black_rate:<player_id>:<rating>)
+        if let Some(rest) = s.strip_prefix("'black_rate:") {
+            if let Some(v) = parse_rate_value(rest) {
+                info.black_rating = Some(v);
+            }
+            continue;
+        }
+        if let Some(rest) = s.strip_prefix("'white_rate:") {
+            if let Some(v) = parse_rate_value(rest) {
+                info.white_rating = Some(v);
+            }
+            continue;
+        }
+        // Skip other comments and headers
+        if s.starts_with('\'') || s.starts_with('$') || s.starts_with('P') {
+            if s == "PI" {
+                pos = Some(initial_position());
+            }
             continue;
         }
         if s.starts_with('+') || s.starts_with('-') {
@@ -360,10 +402,15 @@ pub fn parse_csa(text: &str) -> Result<(Position, Vec<String>)> {
             }
             continue;
         }
-        // Other headers are ignored for now.
     }
     let pos = pos.unwrap_or_else(initial_position);
-    Ok((pos, moves))
+    Ok((pos, moves, info))
+}
+
+/// `<player_id>:<rating>` 形式からレーティング値を抽出
+fn parse_rate_value(s: &str) -> Option<f64> {
+    let val_str = s.rsplit(':').next()?;
+    val_str.parse::<f64>().ok()
 }
 
 #[cfg(test)]
@@ -378,7 +425,7 @@ mod tests {
     #[test]
     fn test_parse_and_apply_two_pawn_moves() {
         let text = "V2.2\nPI\n+7776FU\n-3334FU\n";
-        let (mut pos, moves) = parse_csa(text).unwrap();
+        let (mut pos, moves, _info) = parse_csa(text).unwrap();
         assert_eq!(moves.len(), 2);
         for m in &moves {
             pos.apply_csa_move(m).unwrap();
@@ -389,5 +436,55 @@ mod tests {
         // 7g pawn moved to 7f, 3c pawn to 3d
         // 下段2段は不変であることだけ確認（8,9段）
         assert!(s.contains("1B5R1/LNSGKGSNL")); // sanity of bottom two ranks
+    }
+
+    #[test]
+    fn test_parse_floodgate_ratings() {
+        let text = "\
+V2
+N+EngineA
+N-EngineB
+'black_rate:EngineA+abc123:4166.0
+'white_rate:EngineB+def456:4156.0
+PI
++7776FU
+-3334FU
+";
+        let (_pos, moves, info) = parse_csa(text).unwrap();
+        assert_eq!(moves.len(), 2);
+        assert_eq!(info.black_name.as_deref(), Some("EngineA"));
+        assert_eq!(info.white_name.as_deref(), Some("EngineB"));
+        assert!((info.black_rating.unwrap() - 4166.0).abs() < 0.01);
+        assert!((info.white_rating.unwrap() - 4156.0).abs() < 0.01);
+        assert!(info.both_ratings_at_least(4000.0));
+        assert!(!info.both_ratings_at_least(4200.0));
+    }
+
+    #[test]
+    fn test_parse_p1p9_format() {
+        // P1..P9 形式はスキップされ initial_position にフォールバック
+        let text = "\
+V2
+N+PlayerA
+N-PlayerB
+'black_rate:PlayerA+hash:3500.0
+'white_rate:PlayerB+hash:3200.0
+P1-KY-KE-GI-KI-OU-KI-GI-KE-KY
+P2 * -HI *  *  *  *  * -KA *
+P3-FU-FU-FU-FU-FU-FU-FU-FU-FU
+P4 *  *  *  *  *  *  *  *  *
+P5 *  *  *  *  *  *  *  *  *
+P6 *  *  *  *  *  *  *  *  *
+P7+FU+FU+FU+FU+FU+FU+FU+FU+FU
+P8 * +KA *  *  *  *  * +HI *
+P9+KY+KE+GI+KI+OU+KI+GI+KE+KY
++
++7776FU
+";
+        let (pos, moves, info) = parse_csa(text).unwrap();
+        assert_eq!(moves.len(), 1);
+        assert!((info.black_rating.unwrap() - 3500.0).abs() < 0.01);
+        // P1..P9 は initial_position と同じ盤面にフォールバック
+        assert!(pos.to_sfen().starts_with("lnsgkgsnl/1r5b1/ppppppppp"));
     }
 }
