@@ -158,7 +158,6 @@ struct Cli {
     delete_input: bool,
 
     // --- 外部USIエンジンモード ---
-
     /// 外部USIエンジンのパス（DLshogi系等）
     /// 指定すると内部NNUEの代わりに外部エンジンで評価
     #[arg(long)]
@@ -184,14 +183,19 @@ struct Cli {
     engine_threads: usize,
 
     // --- AobaZero ONNX 直接推論モード ---
-
     /// AobaZero ONNXモデルパス（USIを介さず直接GPU推論）
     /// dlshogi_aoba のカスタム特徴量フォーマット専用。
     /// 標準 dlshogi モデルには使用不可。
     #[arg(long)]
     onnx_model: Option<PathBuf>,
 
-    /// ONNX推論バッチサイズ（--onnx-model使用時）
+    // --- 標準 dlshogi ONNX 直接推論モード ---
+    /// 標準dlshogi ONNXモデルパス（DL水匠等、57ch features2）
+    /// AobaZero モデルには使用不可。
+    #[arg(long)]
+    dlshogi_onnx_model: Option<PathBuf>,
+
+    /// ONNX推論バッチサイズ（--onnx-model/--dlshogi-onnx-model使用時）
     #[arg(long, default_value_t = 256)]
     onnx_batch_size: usize,
 
@@ -203,7 +207,7 @@ struct Cli {
     #[arg(long, default_value_t = 0)]
     onnx_draw_ply: i32,
 
-    /// 勝率→cp変換のスケール（--onnx-model使用時、bullet-shogiの--scaleと合わせる）
+    /// 勝率→cp変換のスケール（--onnx-model/--dlshogi-onnx-model使用時、bullet-shogiの--scaleと合わせる）
     #[arg(long, default_value_t = 600.0)]
     onnx_eval_scale: f32,
 }
@@ -256,10 +260,19 @@ fn main() -> Result<()> {
 
     let use_engine = cli.engine.is_some();
     let use_onnx = cli.onnx_model.is_some();
+    let use_dlshogi_onnx = cli.dlshogi_onnx_model.is_some();
 
     // 排他チェック
-    if use_onnx && (use_engine || cli.use_qsearch || cli.search_depth.is_some()) {
-        anyhow::bail!("--onnx-model is mutually exclusive with --engine, --use-qsearch, --search-depth");
+    if use_onnx && (use_dlshogi_onnx || use_engine || cli.use_qsearch || cli.search_depth.is_some())
+    {
+        anyhow::bail!(
+            "--onnx-model is mutually exclusive with --dlshogi-onnx-model, --engine, --use-qsearch, --search-depth"
+        );
+    }
+    if use_dlshogi_onnx && (use_engine || cli.use_qsearch || cli.search_depth.is_some()) {
+        anyhow::bail!(
+            "--dlshogi-onnx-model is mutually exclusive with --engine, --use-qsearch, --search-depth"
+        );
     }
     if use_engine && (cli.use_qsearch || cli.search_depth.is_some()) {
         anyhow::bail!("--engine is mutually exclusive with --use-qsearch and --search-depth");
@@ -267,14 +280,23 @@ fn main() -> Result<()> {
     if cli.use_qsearch && cli.search_depth.is_some() {
         anyhow::bail!("--use-qsearch and --search-depth are mutually exclusive");
     }
-    if !use_engine && !use_onnx && cli.nnue.is_none() {
-        anyhow::bail!("--nnue is required when --engine/--onnx-model is not specified");
+    if !use_engine && !use_onnx && !use_dlshogi_onnx && cli.nnue.is_none() {
+        anyhow::bail!(
+            "--nnue is required when --engine/--onnx-model/--dlshogi-onnx-model is not specified"
+        );
     }
     #[cfg(not(feature = "aobazero-onnx"))]
     if use_onnx {
         anyhow::bail!(
             "--onnx-model requires the 'aobazero-onnx' feature.\n\
              Rebuild with: cargo build --release -p tools --features aobazero-onnx --bin rescore_pack"
+        );
+    }
+    #[cfg(not(feature = "dlshogi-onnx"))]
+    if use_dlshogi_onnx {
+        anyhow::bail!(
+            "--dlshogi-onnx-model requires the 'dlshogi-onnx' feature.\n\
+             Rebuild with: cargo build --release -p tools --features dlshogi-onnx --bin rescore_pack"
         );
     }
 
@@ -299,7 +321,7 @@ fn main() -> Result<()> {
     }
 
     // NNUEモデルのロード（NNUE内部評価モードのみ）
-    if !use_engine && !use_onnx {
+    if !use_engine && !use_onnx && !use_dlshogi_onnx {
         let nnue = cli.nnue.as_ref().unwrap();
         if !nnue.exists() {
             anyhow::bail!("NNUE model file not found: {}", nnue.display());
@@ -326,7 +348,11 @@ fn main() -> Result<()> {
     }
 
     // 外部USIエンジンの起動
-    let engine_threads = if use_engine { cli.engine_threads.max(1) } else { 0 };
+    let engine_threads = if use_engine {
+        cli.engine_threads.max(1)
+    } else {
+        0
+    };
     let mut engines: Vec<UsiEngine> = Vec::new();
     if use_engine {
         let engine_path = cli.engine.as_ref().unwrap();
@@ -341,7 +367,10 @@ fn main() -> Result<()> {
     eprintln!(
         "Mode: {}",
         if use_onnx {
-            format!("AobaZero ONNX direct inference (batch={}, gpu={})", cli.onnx_batch_size, cli.onnx_gpu_id)
+            format!(
+                "AobaZero ONNX direct inference (batch={}, gpu={})",
+                cli.onnx_batch_size, cli.onnx_gpu_id
+            )
         } else if use_engine {
             format!("external USI engine (nodes={}, threads={})", cli.engine_nodes, engine_threads)
         } else if let Some(depth) = cli.search_depth {
@@ -451,13 +480,25 @@ fn main() -> Result<()> {
         #[cfg(feature = "aobazero-onnx")]
         if use_onnx {
             process_file_with_onnx(&cli, input_path, &output_path, process_count)?;
-        } else
-        if !engines.is_empty() {
-            process_file_with_engine(&cli, &mut engines, input_path, &output_path, process_count)?;
-        } else if cli.search_depth.is_some() {
-            process_file_with_search(&cli, input_path, &output_path, process_count)?;
-        } else {
-            process_file(&cli, input_path, &output_path, process_count)?;
+        }
+        #[cfg(feature = "dlshogi-onnx")]
+        if use_dlshogi_onnx {
+            process_file_with_dlshogi_onnx(&cli, input_path, &output_path, process_count)?;
+        }
+        if !use_onnx && !use_dlshogi_onnx {
+            if !engines.is_empty() {
+                process_file_with_engine(
+                    &cli,
+                    &mut engines,
+                    input_path,
+                    &output_path,
+                    process_count,
+                )?;
+            } else if cli.search_depth.is_some() {
+                process_file_with_search(&cli, input_path, &output_path, process_count)?;
+            } else {
+                process_file(&cli, input_path, &output_path, process_count)?;
+            }
         }
 
         if !INTERRUPTED.load(Ordering::SeqCst) {
@@ -1107,11 +1148,7 @@ impl UsiEngine {
         eprintln!("Starting USI engine: {}", engine_path.display());
 
         let mut child = Command::new(engine_path)
-            .current_dir(
-                engine_path
-                    .parent()
-                    .unwrap_or(std::path::Path::new(".")),
-            )
+            .current_dir(engine_path.parent().unwrap_or(std::path::Path::new(".")))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -1346,11 +1383,7 @@ fn process_file_with_engine(
     let chunks: Vec<Vec<(usize, PackedSfenValue, String)>> =
         records.chunks(chunk_size).map(|c| c.to_vec()).collect();
 
-    eprintln!(
-        "Using {} engine process(es), chunk_size={}",
-        chunks.len(),
-        chunk_size
-    );
+    eprintln!("Using {} engine process(es), chunk_size={}", chunks.len(), chunk_size);
 
     // 各チャンクをワーカースレッドで処理
     let score_clip = cli.score_clip;
@@ -1372,7 +1405,7 @@ fn process_file_with_engine(
             let tx = tx.clone();
             let progress = std::sync::Arc::clone(&progress_arc);
             let error_count = &error_count;
-            let clipped_count = &clipped_count;
+            let _clipped_count = &clipped_count;
 
             handles.push(s.spawn(move || {
                 // usinewgame でリセット
@@ -1510,8 +1543,8 @@ fn process_file_with_onnx(
     use ort::session::Session;
     use ort::value::Tensor;
     use tools::aobazero_features::{
-        make_input_features, winrate_to_cp, FEATURES1_SIZE, FEATURES2_SIZE, INPUT1_CHANNELS,
-        INPUT2_CHANNELS,
+        FEATURES1_SIZE, FEATURES2_SIZE, INPUT1_CHANNELS, INPUT2_CHANNELS, make_input_features,
+        winrate_to_cp,
     };
 
     let onnx_path = cli.onnx_model.as_ref().unwrap();
@@ -1525,23 +1558,23 @@ fn process_file_with_onnx(
     // ONNX Runtime セッション初期化
     eprintln!("Loading ONNX model: {}", onnx_path.display());
 
-    let mut builder = Session::builder().map_err(ort_err)?
+    let mut builder = Session::builder()
+        .map_err(ort_err)?
         .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level1)
-            .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?
+        .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?
         .with_intra_threads(1)
-            .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?;
 
     // GPU provider 設定
     let mut session = if cli.onnx_gpu_id >= 0 {
         eprintln!("Using CUDA GPU {}", cli.onnx_gpu_id);
         builder
-            .with_execution_providers([
-                ort::execution_providers::CUDAExecutionProvider::default()
-                    .with_device_id(cli.onnx_gpu_id)
-                    .build(),
-            ])
+            .with_execution_providers([ort::execution_providers::CUDAExecutionProvider::default()
+                .with_device_id(cli.onnx_gpu_id)
+                .build()])
             .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?
-            .commit_from_file(onnx_path).map_err(ort_err)?
+            .commit_from_file(onnx_path)
+            .map_err(ort_err)?
     } else {
         eprintln!("Using CPU");
         builder.commit_from_file(onnx_path).map_err(ort_err)?
@@ -1650,26 +1683,258 @@ fn process_file_with_onnx(
 
         // ONNX 推論
         let shape1: [usize; 4] = [actual_batch, INPUT1_CHANNELS, 9, 9];
-        let input1 = Tensor::<f32>::from_array(
-            (shape1, f1_buf[..actual_batch * FEATURES1_SIZE].to_vec()),
-        )
-        .map_err(ort_err)?;
+        let input1 =
+            Tensor::<f32>::from_array((shape1, f1_buf[..actual_batch * FEATURES1_SIZE].to_vec()))
+                .map_err(ort_err)?;
 
         let shape2: [usize; 4] = [actual_batch, INPUT2_CHANNELS, 9, 9];
-        let input2 = Tensor::<f32>::from_array(
-            (shape2, f2_buf[..actual_batch * FEATURES2_SIZE].to_vec()),
-        )
-        .map_err(ort_err)?;
+        let input2 =
+            Tensor::<f32>::from_array((shape2, f2_buf[..actual_batch * FEATURES2_SIZE].to_vec()))
+                .map_err(ort_err)?;
 
-        let outputs = session.run(ort::inputs![
-            "input1" => input1,
-            "input2" => input2,
-        ]).map_err(ort_err)?;
+        let outputs = session
+            .run(ort::inputs![
+                "input1" => input1,
+                "input2" => input2,
+            ])
+            .map_err(ort_err)?;
 
         // output_value: [batch, 1] → flat slice of f32
-        let (_shape, values) = outputs["output_value"]
-            .try_extract_tensor::<f32>()
-            .map_err(ort_err)?;
+        let (_shape, values) =
+            outputs["output_value"].try_extract_tensor::<f32>().map_err(ort_err)?;
+
+        // 結果を PackedSfenValue に書き戻し
+        for (i, (psv, _sfen)) in chunk.iter().enumerate() {
+            let winrate = values[i];
+            let raw_score = winrate_to_cp(winrate, eval_scale);
+            let clipped = raw_score.abs() > score_clip as i32;
+            let new_score = raw_score.clamp(-score_clip as i32, score_clip as i32) as i16;
+            if clipped {
+                clipped_count += 1;
+            }
+
+            let new_psv = PackedSfenValue {
+                sfen: psv.sfen,
+                score: new_score,
+                move16: 0,
+                game_ply: psv.game_ply,
+                game_result: psv.game_result,
+                padding: 0,
+            };
+            processed_records.push(new_psv.to_bytes());
+        }
+
+        progress.inc(actual_batch as u64);
+    }
+
+    progress.finish_with_message("Done");
+
+    let total = actual_count as u64 + skipped_count + read_errors;
+    if error_count > 0 {
+        eprintln!("Note: {error_count} positions had errors");
+    }
+    if skipped_count > 0 && total > 0 {
+        eprintln!(
+            "Skipped (in check): {skipped_count} ({:.2}%)",
+            skipped_count as f64 / total as f64 * 100.0
+        );
+    }
+    if total > 0 {
+        eprintln!(
+            "Clipped scores: {clipped_count} ({:.2}%)",
+            clipped_count as f64 / total as f64 * 100.0
+        );
+    }
+
+    // 出力ファイルに書き込み
+    eprintln!("Writing output...");
+    let out_file = File::create(output_path)
+        .with_context(|| format!("Failed to create {}", output_path.display()))?;
+    let mut writer = BufWriter::new(out_file);
+    for record in &processed_records {
+        writer.write_all(record)?;
+    }
+    writer.flush()?;
+    eprintln!("Wrote {} records", processed_records.len());
+
+    Ok(())
+}
+
+// ============================================================
+// 標準 dlshogi ONNX 直接推論モード
+// ============================================================
+
+/// ort のエラーを anyhow に変換 (dlshogi-onnx 用)
+#[cfg(feature = "dlshogi-onnx")]
+fn dlshogi_ort_err(e: ort::Error) -> anyhow::Error {
+    anyhow::anyhow!("ONNX Runtime error: {e}")
+}
+
+#[cfg(feature = "dlshogi-onnx")]
+fn process_file_with_dlshogi_onnx(
+    cli: &Cli,
+    input_path: &PathBuf,
+    output_path: &PathBuf,
+    process_count: u64,
+) -> Result<()> {
+    use ort::session::Session;
+    use ort::value::Tensor;
+    use tools::dlshogi_features::{
+        FEATURES1_SIZE, FEATURES2_SIZE, INPUT1_CHANNELS, INPUT2_CHANNELS, make_input_features,
+        winrate_to_cp,
+    };
+
+    let onnx_path = cli.dlshogi_onnx_model.as_ref().unwrap();
+    let batch_size = cli.onnx_batch_size;
+    let score_clip = cli.score_clip;
+    let eval_scale = cli.onnx_eval_scale;
+    let skip_in_check = cli.skip_in_check;
+
+    // ONNX Runtime セッション初期化
+    eprintln!("Loading dlshogi ONNX model: {}", onnx_path.display());
+
+    let mut builder = Session::builder()
+        .map_err(dlshogi_ort_err)?
+        .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level1)
+        .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?
+        .with_intra_threads(1)
+        .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?;
+
+    // GPU provider 設定
+    let mut session = if cli.onnx_gpu_id >= 0 {
+        eprintln!("Using CUDA GPU {}", cli.onnx_gpu_id);
+        builder
+            .with_execution_providers([ort::execution_providers::CUDAExecutionProvider::default()
+                .with_device_id(cli.onnx_gpu_id)
+                .build()])
+            .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?
+            .commit_from_file(onnx_path)
+            .map_err(dlshogi_ort_err)?
+    } else {
+        eprintln!("Using CPU");
+        builder.commit_from_file(onnx_path).map_err(dlshogi_ort_err)?
+    };
+
+    eprintln!("dlshogi ONNX model loaded. Batch size: {}", batch_size);
+
+    // 進捗バー
+    let progress = ProgressBar::new(process_count);
+    progress.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({per_sec}) {msg}")
+            .expect("valid template"),
+    );
+
+    // 入力ファイルを読み込み
+    let in_file = File::open(input_path)
+        .with_context(|| format!("Failed to open {}", input_path.display()))?;
+    let mut reader = BufReader::new(in_file);
+
+    // 全レコードを先に読み込み（SFEN展開 + フィルタリング）
+    progress.set_message("Reading...");
+    let mut records: Vec<(PackedSfenValue, String)> = Vec::new();
+    let mut buffer = [0u8; PackedSfenValue::SIZE];
+    let mut skipped_count: u64 = 0;
+    let mut read_errors: u64 = 0;
+
+    for _ in 0..process_count {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            break;
+        }
+        match reader.read_exact(&mut buffer) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e.into()),
+        }
+        let psv = match PackedSfenValue::from_bytes(&buffer) {
+            Some(p) => p,
+            None => {
+                read_errors += 1;
+                continue;
+            }
+        };
+        let sfen = match unpack_sfen(&psv.sfen) {
+            Ok(s) => s,
+            Err(_) => {
+                read_errors += 1;
+                continue;
+            }
+        };
+        if skip_in_check {
+            let mut pos = Position::new();
+            if pos.set_sfen(&sfen).is_ok() && pos.in_check() {
+                skipped_count += 1;
+                progress.inc(1);
+                continue;
+            }
+        }
+        records.push((psv, sfen));
+    }
+
+    let actual_count = records.len();
+    eprintln!(
+        "Read {} records ({} skipped, {} errors)",
+        actual_count, skipped_count, read_errors
+    );
+
+    // バッチ処理
+    progress.set_message("Inferring...");
+    let mut processed_records: Vec<[u8; PackedSfenValue::SIZE]> = Vec::with_capacity(actual_count);
+    let mut error_count: u64 = read_errors;
+    let mut clipped_count: u64 = 0;
+
+    // 特徴量バッファ（再利用）
+    let mut f1_buf = vec![0.0f32; batch_size * FEATURES1_SIZE];
+    let mut f2_buf = vec![0.0f32; batch_size * FEATURES2_SIZE];
+
+    for chunk in records.chunks(batch_size) {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            break;
+        }
+
+        let actual_batch = chunk.len();
+
+        // ゼロクリア
+        f1_buf[..actual_batch * FEATURES1_SIZE].fill(0.0);
+        f2_buf[..actual_batch * FEATURES2_SIZE].fill(0.0);
+
+        // 特徴量構築
+        for (i, (_psv, sfen)) in chunk.iter().enumerate() {
+            let mut pos = Position::new();
+            if pos.set_sfen(sfen).is_err() {
+                error_count += 1;
+                continue;
+            }
+            let f1_off = i * FEATURES1_SIZE;
+            let f2_off = i * FEATURES2_SIZE;
+            make_input_features(
+                &pos,
+                &mut f1_buf[f1_off..f1_off + FEATURES1_SIZE],
+                &mut f2_buf[f2_off..f2_off + FEATURES2_SIZE],
+            );
+        }
+
+        // ONNX 推論
+        let shape1: [usize; 4] = [actual_batch, INPUT1_CHANNELS, 9, 9];
+        let input1 =
+            Tensor::<f32>::from_array((shape1, f1_buf[..actual_batch * FEATURES1_SIZE].to_vec()))
+                .map_err(dlshogi_ort_err)?;
+
+        let shape2: [usize; 4] = [actual_batch, INPUT2_CHANNELS, 9, 9];
+        let input2 =
+            Tensor::<f32>::from_array((shape2, f2_buf[..actual_batch * FEATURES2_SIZE].to_vec()))
+                .map_err(dlshogi_ort_err)?;
+
+        let outputs = session
+            .run(ort::inputs![
+                "input1" => input1,
+                "input2" => input2,
+            ])
+            .map_err(dlshogi_ort_err)?;
+
+        // output_value: [batch, 1] → flat slice of f32
+        let (_shape, values) =
+            outputs["output_value"].try_extract_tensor::<f32>().map_err(dlshogi_ort_err)?;
 
         // 結果を PackedSfenValue に書き戻し
         for (i, (psv, _sfen)) in chunk.iter().enumerate() {

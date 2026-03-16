@@ -43,6 +43,7 @@
 pub mod aobazero_features;
 pub mod common;
 pub mod config;
+pub mod dlshogi_features;
 pub mod nnue_trainer;
 pub mod packed_sfen;
 pub mod positions;

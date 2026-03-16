@@ -13,6 +13,8 @@ default = []
 diagnostics = ["rshogi-core/diagnostics"]
 # AobaZero ONNX直接推論（ONNX Runtime + CUDA が必要）
 aobazero-onnx = ["dep:ort", "dep:ndarray"]
+# 標準dlshogi ONNX直接推論（DL水匠等、ONNX Runtime + CUDA が必要）
+dlshogi-onnx = ["dep:ort", "dep:ndarray"]
 
 [dependencies]
 # Workspace dependencies
