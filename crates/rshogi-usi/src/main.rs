@@ -67,6 +67,7 @@ struct ProgressCoeffV2 {
     runtime: ProgressRuntime,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum LoadedProgressCoeff {
     V1(LayerStackProgressCoeff),
     V2(LayerStackProgressCoeffGikouLite),

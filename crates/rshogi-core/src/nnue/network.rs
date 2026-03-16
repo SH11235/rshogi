@@ -120,11 +120,11 @@ const PROGRESS_BUCKET_THRESHOLDS: [f32; 7] = [
     1.945_910_1,  // k=7: ln(7)
 ];
 
-/// progress8kpabs の差分計算済み bucket index キャッシュ（スレッドローカル）
-///
-/// `update_and_evaluate_layer_stacks` で差分計算した結果を格納し、
-/// `compute_layer_stack_progress8kpabs_bucket_index` 内で消費する。
-/// 一度消費されると None にリセットされる（1回限り）。
+// progress8kpabs の差分計算済み bucket index キャッシュ（スレッドローカル）
+//
+// `update_and_evaluate_layer_stacks` で差分計算した結果を格納し、
+// `compute_layer_stack_progress8kpabs_bucket_index` 内で消費する。
+// 一度消費されると None にリセットされる（1回限り）。
 thread_local! {
     static CACHED_PROGRESS_BUCKET: Cell<Option<usize>> = const { Cell::new(None) };
 }
@@ -1475,19 +1475,17 @@ fn ensure_progress_bucket(pos: &Position, stack: &mut AccumulatorStackLayerStack
         let dirty = &current_entry.dirty_piece;
         let king_moved = dirty.king_moved[0] || dirty.king_moved[1];
 
-        if !king_moved {
-            if let Some(prev_idx) = current_entry.previous {
-                if stack.entry_at(prev_idx).computed_progress {
-                    let prev_sum = stack.entry_at(prev_idx).progress_sum;
-                    let sq_bk = pos.king_square(Color::Black).index();
-                    let sq_wk = pos.king_square(Color::White).inverse().index();
-                    let new_sum =
-                        update_progress8kpabs_sum_diff(prev_sum, dirty, sq_bk, sq_wk, weights);
-                    let entry = stack.current_mut();
-                    entry.progress_sum = new_sum;
-                    entry.computed_progress = true;
-                }
-            }
+        if !king_moved
+            && let Some(prev_idx) = current_entry.previous
+            && stack.entry_at(prev_idx).computed_progress
+        {
+            let prev_sum = stack.entry_at(prev_idx).progress_sum;
+            let sq_bk = pos.king_square(Color::Black).index();
+            let sq_wk = pos.king_square(Color::White).inverse().index();
+            let new_sum = update_progress8kpabs_sum_diff(prev_sum, dirty, sq_bk, sq_wk, weights);
+            let entry = stack.current_mut();
+            entry.progress_sum = new_sum;
+            entry.computed_progress = true;
         }
 
         if !stack.current().computed_progress {
