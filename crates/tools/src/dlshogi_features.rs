@@ -324,8 +324,7 @@ mod tests {
     fn test_hand_pieces() {
         // 手駒がある局面で features2 が正しくセットされるか
         let mut pos = Position::new();
-        pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b 2P 1")
-            .unwrap();
+        pos.set_sfen("4k4/9/9/9/9/9/9/9/4K4 b 2P 1").unwrap();
 
         let mut f1 = vec![0.0f32; FEATURES1_SIZE];
         let mut f2 = vec![0.0f32; FEATURES2_SIZE];

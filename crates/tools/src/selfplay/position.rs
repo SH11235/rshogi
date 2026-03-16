@@ -43,7 +43,9 @@ pub fn load_start_positions(
                     .with_context(|| {
                         format!("invalid position syntax on line {}: {}", idx + 1, trimmed)
                     })?;
-                build_position(&parsed, pass_rights_black, pass_rights_white)?;
+                build_position(&parsed, pass_rights_black, pass_rights_white).with_context(
+                    || format!("invalid position on line {}: {}", idx + 1, trimmed),
+                )?;
                 let cmd = describe_position(&parsed);
                 positions.push(parsed);
                 commands.push(cmd);

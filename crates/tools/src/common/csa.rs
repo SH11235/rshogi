@@ -258,8 +258,8 @@ impl Position {
         };
         let fx = bytes[1] - b'0';
         let fy = bytes[2] - b'0';
-        let tx = bytes[3] - b'0';
-        let ty = bytes[4] - b'0';
+        let tx = csa_file_to_x(bytes[3] - b'0')?;
+        let ty = csa_rank_to_y(bytes[4] - b'0')?;
         let code = &mv[5..7];
         let (pty, promoted) = piece_from_csa_code(code)?;
         // validate turn
@@ -270,7 +270,8 @@ impl Position {
         );
 
         // capture if any
-        if let Some(dst) = self.board[ty as usize][tx as usize] {
+        if let Some(dst) = self.board[ty][tx] {
+            anyhow::ensure!(dst.color != side, "cannot capture own piece: {mv}");
             // captured piece moves to hand of mover, demoted
             let demoted_ty = dst.ty; // dst.promoted doesn't matter; demote
             match side {
@@ -285,15 +286,17 @@ impl Position {
                 Color::Black => self.hand_b.take_one(pty)?,
                 Color::White => self.hand_w.take_one(pty)?,
             }
-            self.board[ty as usize][tx as usize] = Some(Piece::new(pty, side, false));
+            self.board[ty][tx] = Some(Piece::new(pty, side, false));
         } else {
             // normal move
-            let _ = self.board[fy as usize][fx as usize]
-                .with_context(|| format!("no piece at source: {fx}{fy} for {mv}"))?;
+            let fx = csa_file_to_x(fx)?;
+            let fy = csa_rank_to_y(fy)?;
+            let src = self.board[fy][fx].with_context(|| format!("no piece at source for {mv}"))?;
+            anyhow::ensure!(src.color == side, "source piece color mismatch: {mv}");
             // remove src
-            self.board[fy as usize][fx as usize] = None;
+            self.board[fy][fx] = None;
             // place with promoted flag per destination code
-            self.board[ty as usize][tx as usize] = Some(Piece::new(pty, side, promoted));
+            self.board[ty][tx] = Some(Piece::new(pty, side, promoted));
         }
 
         self.side_to_move = match self.side_to_move {
@@ -303,6 +306,16 @@ impl Position {
         self.ply += 1;
         Ok(())
     }
+}
+
+fn csa_file_to_x(file: u8) -> Result<usize> {
+    anyhow::ensure!((1..=9).contains(&file), "bad CSA file: {file}");
+    Ok((10 - file) as usize)
+}
+
+fn csa_rank_to_y(rank: u8) -> Result<usize> {
+    anyhow::ensure!((1..=9).contains(&rank), "bad CSA rank: {rank}");
+    Ok(rank as usize)
 }
 
 fn append_hand(out: &mut String, h: Hand, black: bool) {
@@ -430,12 +443,36 @@ mod tests {
         for m in &moves {
             pos.apply_csa_move(m).unwrap();
         }
-        let s = pos.to_sfen();
-        // After 2 plies, side to move back to Black, ply=3
-        assert!(s.ends_with(" b - 3"), "{s}");
-        // 7g pawn moved to 7f, 3c pawn to 3d
-        // 下段2段は不変であることだけ確認（8,9段）
-        assert!(s.contains("1B5R1/LNSGKGSNL")); // sanity of bottom two ranks
+        assert_eq!(pos.side_to_move, Color::Black);
+        assert_eq!(pos.ply, 3);
+        assert_eq!(
+            pos.board[6][csa_file_to_x(7).unwrap()],
+            Some(Piece::new(PieceType::Pawn, Color::Black, false))
+        );
+        assert_eq!(pos.board[7][csa_file_to_x(7).unwrap()], None);
+        assert_eq!(
+            pos.board[4][csa_file_to_x(3).unwrap()],
+            Some(Piece::new(PieceType::Pawn, Color::White, false))
+        );
+        assert_eq!(pos.board[3][csa_file_to_x(3).unwrap()], None);
+    }
+
+    #[test]
+    fn test_apply_csa_move_uses_csa_file_coordinates() {
+        let text = "V2.2\nPI\n+8822UM\n";
+        let (mut pos, moves, _info) = parse_csa(text).unwrap();
+        pos.apply_csa_move(&moves[0]).unwrap();
+
+        assert_eq!(pos.hand_b.b, 1, "白角を取って先手の角持ちになるはず");
+        assert_eq!(pos.hand_b.r, 0, "飛車を取ってはいけない");
+        assert_eq!(
+            pos.board[2][csa_file_to_x(2).unwrap()],
+            Some(Piece::new(PieceType::Bishop, Color::Black, true))
+        );
+        assert_eq!(
+            pos.board[2][csa_file_to_x(8).unwrap()],
+            Some(Piece::new(PieceType::Rook, Color::White, false))
+        );
     }
 
     #[test]

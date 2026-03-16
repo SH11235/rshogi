@@ -78,6 +78,8 @@ impl Position {
             self.game_ply = 1;
         }
 
+        self.validate_piece_inventory()?;
+
         // PieceList の初期化
         self.init_piece_list();
 
@@ -303,6 +305,53 @@ impl Position {
         result
     }
 
+    /// 盤上と手駒を合わせた総駒数が初期枚数を超えていないことを検証する。
+    fn validate_piece_inventory(&self) -> Result<(), SfenError> {
+        let mut counts = [0u8; 8];
+
+        for sq_idx in 0..Square::NUM {
+            // SAFETY: sq_idx は 0..81 の範囲内
+            let sq = unsafe { Square::from_u8_unchecked(sq_idx as u8) };
+            let pc = self.piece_on(sq);
+            if pc.is_none() {
+                continue;
+            }
+
+            let raw_pt = pc.piece_type().unpromote() as u8;
+            let idx = pt_to_counter_index(raw_pt);
+            counts[idx] = counts[idx].saturating_add(1);
+        }
+
+        for color in [Color::Black, Color::White] {
+            for pt in PieceType::HAND_PIECES {
+                let idx = pt_to_counter_index(pt as u8);
+                counts[idx] = counts[idx].saturating_add(self.hand[color.index()].count(pt) as u8);
+            }
+        }
+
+        for (raw_pt, label) in [
+            (PieceType::Pawn as u8, "Pawn"),
+            (PieceType::Lance as u8, "Lance"),
+            (PieceType::Knight as u8, "Knight"),
+            (PieceType::Silver as u8, "Silver"),
+            (PieceType::Gold as u8, "Gold"),
+            (PieceType::Bishop as u8, "Bishop"),
+            (PieceType::Rook as u8, "Rook"),
+            (PieceType::King as u8, "King"),
+        ] {
+            let idx = pt_to_counter_index(raw_pt);
+            let total = counts[idx];
+            let max = piece_inventory_max(raw_pt);
+            if total > max {
+                return Err(SfenError::Board(format!(
+                    "Too many {label} in position: total {total}, max {max}"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
     /// PieceList を盤面と手駒から初期化
     ///
     /// 駒種ごとに PieceNumber カウンタを管理し、盤面走査 → 手駒走査の順で構築する。
@@ -328,6 +377,12 @@ impl Position {
             let base = piece_number_base(pt);
             let raw_pt = pt.unpromote() as u8;
             let base_idx = super::sfen::pt_to_counter_index(raw_pt);
+            assert!(
+                counters[base_idx] < piece_inventory_max(raw_pt),
+                "piece inventory overflow while initializing PieceList: pt={pt:?}, count={}, max={}",
+                counters[base_idx] + 1,
+                piece_inventory_max(raw_pt)
+            );
             let piece_no = PieceNumber(base + counters[base_idx]);
             counters[base_idx] += 1;
 
@@ -343,6 +398,12 @@ impl Position {
                     let base = piece_number_base(pt);
                     let raw_pt = pt as u8;
                     let base_idx = pt_to_counter_index(raw_pt);
+                    assert!(
+                        counters[base_idx] < piece_inventory_max(raw_pt),
+                        "piece inventory overflow while initializing PieceList: pt={pt:?}, count={}, max={}",
+                        counters[base_idx] + 1,
+                        piece_inventory_max(raw_pt)
+                    );
                     let piece_no = PieceNumber(base + counters[base_idx]);
                     counters[base_idx] += 1;
 
@@ -515,6 +576,21 @@ fn hand_max(pt: PieceType) -> u32 {
     }
 }
 
+/// 局面全体で存在しうる駒枚数の上限を返す。
+fn piece_inventory_max(raw_pt: u8) -> u8 {
+    match raw_pt {
+        x if x == PieceType::Pawn as u8 => 18,
+        x if x == PieceType::Lance as u8 => 4,
+        x if x == PieceType::Knight as u8 => 4,
+        x if x == PieceType::Silver as u8 => 4,
+        x if x == PieceType::Gold as u8 => 4,
+        x if x == PieceType::Bishop as u8 => 2,
+        x if x == PieceType::Rook as u8 => 2,
+        x if x == PieceType::King as u8 => 2,
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,7 +642,7 @@ mod tests {
 
     #[test]
     fn test_sfen_roundtrip_max_hands() {
-        let sfen = "4k4/9/9/9/9/9/9/9/4K4 b 2R2B4G4S4N4L18Prbgsnlp 37";
+        let sfen = "4k4/9/9/9/9/9/9/9/4K4 b 2R2B4G4S4N4L18P 37";
         let mut pos = Position::new();
         pos.set_sfen(sfen).unwrap();
         assert_eq!(pos.to_sfen(), sfen);
@@ -580,6 +656,28 @@ mod tests {
 
         assert_eq!(pos.hand(Color::Black).count(PieceType::Pawn), 2);
         assert_eq!(pos.hand(Color::White).count(PieceType::Pawn), 0);
+    }
+
+    #[test]
+    fn test_sfen_lowercase_bishop_is_white_hand() {
+        let sfen = "4k4/9/9/9/9/9/9/9/4K4 b b 1";
+        let mut pos = Position::new();
+        pos.set_sfen(sfen).unwrap();
+
+        assert_eq!(pos.hand(Color::Black).count(PieceType::Bishop), 0);
+        assert_eq!(pos.hand(Color::White).count(PieceType::Bishop), 1);
+    }
+
+    #[test]
+    fn test_sfen_rejects_piece_inventory_overflow() {
+        let sfen = "lnsgkg1nl/5s1b1/1p1pppp1p/p1p6/7p1/P5P2/1PPPPP+bPP/1R3S3/LNSGKG1NL b b 13";
+        let mut pos = Position::new();
+        let err = pos.set_sfen(sfen).expect_err("角系が3枚ある局面は不正");
+
+        assert!(
+            err.to_string().contains("Too many Bishop in position"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
