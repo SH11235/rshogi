@@ -220,6 +220,18 @@ impl NetworkLayerStacks {
     /// 配列はMaybeUninitで確保し、直後のsqr_clipped_relu_transformで全要素が上書きされる。
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorLayerStacks) -> Value {
         let side_to_move = pos.side_to_move();
+        let bucket_index = compute_layer_stacks_bucket_index(pos, side_to_move);
+        self.evaluate_with_bucket(pos, acc, bucket_index)
+    }
+
+    /// 評価値を計算（事前計算済み bucket index を使用）
+    pub fn evaluate_with_bucket(
+        &self,
+        pos: &Position,
+        acc: &AccumulatorLayerStacks,
+        bucket_index: usize,
+    ) -> Value {
+        let side_to_move = pos.side_to_move();
 
         // SqrClippedReLU変換
         let (us_acc, them_acc) = if side_to_move == Color::Black {
@@ -231,9 +243,6 @@ impl NetworkLayerStacks {
         // SAFETY: 直後のsqr_clipped_relu_transformで全要素が上書きされる
         let mut transformed: Aligned<[u8; NNUE_PYTORCH_L1]> = unsafe { Aligned::new_uninit() };
         sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
-
-        // バケットインデックスを計算
-        let bucket_index = compute_layer_stacks_bucket_index(pos, side_to_move);
 
         // LayerStacks で評価
         let raw_score = self.layer_stacks.evaluate_raw(bucket_index, &transformed.0);

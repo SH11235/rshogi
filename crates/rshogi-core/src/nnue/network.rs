@@ -34,6 +34,7 @@ use crate::eval::material;
 use crate::position::Position;
 use crate::types::{Color, PieceType, Value};
 use once_cell::sync::Lazy;
+use std::cell::Cell;
 use std::fs::File;
 use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -118,6 +119,15 @@ const PROGRESS_BUCKET_THRESHOLDS: [f32; 7] = [
     1.098_612_3,  // k=6: ln(3)
     1.945_910_1,  // k=7: ln(7)
 ];
+
+/// progress8kpabs の差分計算済み bucket index キャッシュ（スレッドローカル）
+///
+/// `update_and_evaluate_layer_stacks` で差分計算した結果を格納し、
+/// `compute_layer_stack_progress8kpabs_bucket_index` 内で消費する。
+/// 一度消費されると None にリセットされる（1回限り）。
+thread_local! {
+    static CACHED_PROGRESS_BUCKET: Cell<Option<usize>> = const { Cell::new(None) };
+}
 
 /// progress8gikou coeff_v2 の特徴量順序
 pub const SHOGI_PROGRESS_GIKOU_LITE_FEATURE_ORDER: [&str; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES] = [
@@ -662,6 +672,19 @@ impl NNUENetwork {
         }
     }
 
+    /// 評価値を計算（LayerStacks用、事前計算済み bucket index を使用）
+    pub fn evaluate_layer_stacks_with_bucket(
+        &self,
+        pos: &Position,
+        acc: &super::accumulator_layer_stacks::AccumulatorLayerStacks,
+        bucket_index: usize,
+    ) -> Value {
+        match self {
+            Self::LayerStacks(net) => net.evaluate_with_bucket(pos, acc, bucket_index),
+            _ => panic!("This method is only for LayerStacks architecture."),
+        }
+    }
+
     /// HalfKA_hm アキュムレータをフル再計算
     pub fn refresh_accumulator_halfka_hm(&self, pos: &Position, stack: &mut HalfKA_hmStack) {
         match self {
@@ -1070,11 +1093,25 @@ pub fn compute_layer_stack_progress8gikou_bucket_index(
 }
 
 /// progress8kpabs 重みに基づいて LayerStacks bucket index (0..=7) を計算
+///
+/// `CACHED_PROGRESS_BUCKET` にキャッシュされた値がある場合はそちらを消費する。
 pub fn compute_layer_stack_progress8kpabs_bucket_index(
     pos: &Position,
     _side_to_move: Color,
     weights: &[f32],
 ) -> usize {
+    // 差分計算済みキャッシュがあれば消費して返す
+    let cached = CACHED_PROGRESS_BUCKET.with(|c| c.replace(None));
+    if let Some(bucket) = cached {
+        return bucket;
+    }
+    // フォールバック: 全駒スキャン
+    let sum = compute_progress8kpabs_sum(pos, weights);
+    progress_sum_to_bucket(sum)
+}
+
+/// progress8kpabs の重み付き和を全駒スキャンで計算（refresh 用）
+pub fn compute_progress8kpabs_sum(pos: &Position, weights: &[f32]) -> f32 {
     debug_assert_eq!(
         weights.len(),
         SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
@@ -1123,7 +1160,51 @@ pub fn compute_layer_stack_progress8kpabs_bucket_index(
         }
     }
 
-    // テーブル引き: sigmoid + exp を閾値比較で置換
+    sum
+}
+
+/// progress_sum から DirtyPiece の変化分を差分更新
+///
+/// 玉が動いていない場合にのみ使用可能。
+/// DirtyPiece の ExtBonaPiece.fb/fw は progress8kpabs と同じ BonaPiece 体系。
+#[inline]
+pub fn update_progress8kpabs_sum_diff(
+    prev_sum: f32,
+    dirty_piece: &super::accumulator::DirtyPiece,
+    sq_bk: usize,
+    sq_wk: usize,
+    weights: &[f32],
+) -> f32 {
+    let mut sum = prev_sum;
+    for i in 0..dirty_piece.dirty_num as usize {
+        let changed = &dirty_piece.changed_piece[i];
+
+        // old の寄与を引く
+        let old_fb = changed.old_piece.fb;
+        if old_fb != BonaPiece::ZERO {
+            sum -= weights[sq_bk * FE_OLD_END + old_fb.value() as usize];
+        }
+        let old_fw = changed.old_piece.fw;
+        if old_fw != BonaPiece::ZERO {
+            sum -= weights[sq_wk * FE_OLD_END + old_fw.value() as usize];
+        }
+
+        // new の寄与を足す
+        let new_fb = changed.new_piece.fb;
+        if new_fb != BonaPiece::ZERO {
+            sum += weights[sq_bk * FE_OLD_END + new_fb.value() as usize];
+        }
+        let new_fw = changed.new_piece.fw;
+        if new_fw != BonaPiece::ZERO {
+            sum += weights[sq_wk * FE_OLD_END + new_fw.value() as usize];
+        }
+    }
+    sum
+}
+
+/// progress_sum から bucket index を計算（閾値比較のみ）
+#[inline]
+pub fn progress_sum_to_bucket(sum: f32) -> usize {
     PROGRESS_BUCKET_THRESHOLDS
         .iter()
         .filter(|&&t| sum >= t)
@@ -1371,9 +1452,52 @@ fn update_and_evaluate_layer_stacks(
         }
     }
 
+    // progress8kpabs: 差分更新を試み、結果を CACHED_PROGRESS_BUCKET に格納
+    if get_layer_stack_bucket_mode() == LayerStackBucketMode::Progress8KPAbs {
+        let bucket = ensure_progress_bucket(pos, stack);
+        CACHED_PROGRESS_BUCKET.with(|c| c.set(Some(bucket)));
+    }
+
     // 評価
     let acc_ref = &stack.current().accumulator;
     network.evaluate_layer_stacks(pos, acc_ref)
+}
+
+/// progress8kpabs の progress_sum を計算済みにして bucket index を返す
+///
+/// 差分更新が可能な場合（前局面が計算済み、玉移動なし）は DirtyPiece の差分で O(1) 更新。
+/// それ以外は全駒スキャンにフォールバック。
+#[inline]
+fn ensure_progress_bucket(pos: &Position, stack: &mut AccumulatorStackLayerStacks) -> usize {
+    if !stack.current().computed_progress {
+        let weights = get_layer_stack_progress_kpabs_weights();
+        let current_entry = stack.current();
+        let dirty = &current_entry.dirty_piece;
+        let king_moved = dirty.king_moved[0] || dirty.king_moved[1];
+
+        if !king_moved {
+            if let Some(prev_idx) = current_entry.previous {
+                if stack.entry_at(prev_idx).computed_progress {
+                    let prev_sum = stack.entry_at(prev_idx).progress_sum;
+                    let sq_bk = pos.king_square(Color::Black).index();
+                    let sq_wk = pos.king_square(Color::White).inverse().index();
+                    let new_sum =
+                        update_progress8kpabs_sum_diff(prev_sum, dirty, sq_bk, sq_wk, weights);
+                    let entry = stack.current_mut();
+                    entry.progress_sum = new_sum;
+                    entry.computed_progress = true;
+                }
+            }
+        }
+
+        if !stack.current().computed_progress {
+            let sum = compute_progress8kpabs_sum(pos, weights);
+            let entry = stack.current_mut();
+            entry.progress_sum = sum;
+            entry.computed_progress = true;
+        }
+    }
+    progress_sum_to_bucket(stack.current().progress_sum)
 }
 
 /// HalfKA_hm アキュムレータを更新して評価（内部実装）
@@ -2096,6 +2220,65 @@ mod tests {
                 threshold_bucket(sum),
                 "mismatch at sum={sum}"
             );
+        }
+    }
+
+    #[test]
+    fn test_progress8kpabs_diff_update() {
+        use crate::types::Move;
+
+        // ランダムな重みを生成（固定シード）
+        let mut weights = vec![0.0f32; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS];
+        let mut rng: u64 = 12345;
+        for w in weights.iter_mut() {
+            // 簡易 xorshift
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            *w = ((rng as i64 % 1000) as f32) / 1000.0;
+        }
+
+        let mut pos = Position::new();
+        pos.set_sfen(SFEN_HIRATE).unwrap();
+
+        // 初期局面での全駒スキャン sum
+        let sum0 = compute_progress8kpabs_sum(&pos, &weights);
+
+        // いくつかの手を実行して差分更新と全計算を比較
+        let moves_usi = ["7g7f", "3c3d", "2g2f", "8c8d", "2f2e", "8d8e", "6i7h", "4a3b"];
+        let mut prev_sum = sum0;
+
+        for &mv_str in &moves_usi {
+            let mv = Move::from_usi(mv_str).expect("valid move");
+            let gives_check = pos.gives_check(mv);
+            let dirty = pos.do_move(mv, gives_check);
+
+            // 全駒スキャンによる正解値
+            let expected_sum = compute_progress8kpabs_sum(&pos, &weights);
+            let expected_bucket = progress_sum_to_bucket(expected_sum);
+
+            if dirty.king_moved[0] || dirty.king_moved[1] {
+                // 玉が動いた場合は差分更新不可（全計算にフォールバック）
+                prev_sum = expected_sum;
+            } else {
+                // 差分更新
+                let sq_bk = pos.king_square(Color::Black).index();
+                let sq_wk = pos.king_square(Color::White).inverse().index();
+                let diff_sum =
+                    update_progress8kpabs_sum_diff(prev_sum, &dirty, sq_bk, sq_wk, &weights);
+                let diff_bucket = progress_sum_to_bucket(diff_sum);
+
+                assert!(
+                    (diff_sum - expected_sum).abs() < 1e-5,
+                    "sum mismatch after {mv_str}: diff={diff_sum}, expected={expected_sum}"
+                );
+                assert_eq!(
+                    diff_bucket, expected_bucket,
+                    "bucket mismatch after {mv_str}"
+                );
+
+                prev_sum = diff_sum;
+            }
         }
     }
 
