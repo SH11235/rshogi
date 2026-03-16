@@ -180,9 +180,10 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     random_startpos: bool,
 
-    /// Output path (defaults to runs/selfplay/<timestamp>-selfplay.jsonl)
+    /// 出力ディレクトリ（デフォルト: runs/selfplay/<timestamp>/）
+    /// 指定ディレクトリ内に selfplay.jsonl, selfplay.psv 等が出力される
     #[arg(long)]
-    out: Option<PathBuf>,
+    out_dir: Option<PathBuf>,
 
     /// Enable info log output
     #[arg(long, default_value_t = false)]
@@ -232,6 +233,16 @@ struct Cli {
     /// Number of concurrent worker threads
     #[arg(long, default_value_t = 1)]
     concurrency: usize,
+
+    /// KIF棋譜ファイルの出力を無効化する（大量対局時のディスク節約用）
+    #[arg(long, default_value_t = false)]
+    no_kif: bool,
+
+    /// 教師データ生成に特化したモードで実行する。
+    /// 以下を一括設定: KIF出力無効、summaryファイル無効、JSONLをresult行のみに簡素化。
+    /// 学習データ（.psv）出力は有効のまま。
+    #[arg(long, default_value_t = false)]
+    for_train: bool,
 
     /// 前回中断した自己対局セッションを再開する。
     /// --out で指定した出力ファイルが存在する場合、完了済み対局数を検出して続きから実行する。
@@ -691,7 +702,6 @@ struct GameTicket {
 }
 
 struct WorkerGameResult {
-    game_idx: u32,
     outcome: GameOutcome,
     outcome_reason: String,
 }
@@ -743,6 +753,8 @@ struct WorkerConfig {
     training_data_path: Option<PathBuf>,
     // Output flags
     flush_each_move: bool,
+    /// JSONLをresult行のみに簡素化（move行を省略）
+    minimal_log: bool,
     // Training
     skip_initial_ply: u32,
     skip_in_check: bool,
@@ -1010,22 +1022,24 @@ fn worker_main(
                     metrics.update(side, eval_log.as_ref(), plies_played);
                 }
 
-                let move_log = MoveLog {
-                    kind: "move",
-                    game_id: game_idx + 1,
-                    ply: plies_played,
-                    side_to_move: side_label(side),
-                    sfen_before,
-                    move_usi,
-                    raw_move_usi,
-                    engine: engine_label.to_string(),
-                    elapsed_ms,
-                    think_limit_ms,
-                    timed_out,
-                    eval: eval_log,
-                };
-                serde_json::to_writer(&mut writer, &move_log)?;
-                writer.write_all(b"\n")?;
+                if !cfg.minimal_log {
+                    let move_log = MoveLog {
+                        kind: "move",
+                        game_id: game_idx + 1,
+                        ply: plies_played,
+                        side_to_move: side_label(side),
+                        sfen_before,
+                        move_usi,
+                        raw_move_usi,
+                        engine: engine_label.to_string(),
+                        elapsed_ms,
+                        think_limit_ms,
+                        timed_out,
+                        eval: eval_log,
+                    };
+                    serde_json::to_writer(&mut writer, &move_log)?;
+                    writer.write_all(b"\n")?;
+                }
                 if cfg.flush_each_move {
                     writer.flush()?;
                 }
@@ -1090,7 +1104,6 @@ fn worker_main(
             writer.flush()?;
 
             let _ = tx.send(WorkerGameResult {
-                game_idx,
                 outcome,
                 outcome_reason: outcome_reason.to_string(),
             });
@@ -1295,14 +1308,14 @@ fn main() -> Result<()> {
         load_pass_white,
     )?;
     let timestamp = Local::now();
-    let output_path = resolve_output_path(cli.out.as_deref(), &timestamp);
+    let output_path = resolve_output_path(cli.out_dir.as_deref(), &timestamp);
     let info_path = output_path.with_extension("info.jsonl");
 
     // --resume バリデーションと進捗読み取り
     let resume_state = if cli.resume {
-        if cli.out.is_none() {
+        if cli.out_dir.is_none() {
             bail!(
-                "--resume には --out の指定が必要です（自動生成パスでは前回のファイルを特定できません）"
+                "--resume には --out-dir の指定が必要です（自動生成パスでは前回のディレクトリを特定できません）"
             );
         }
         if !output_path.exists() {
@@ -1522,7 +1535,12 @@ fn main() -> Result<()> {
     {
         let sd = shutdown.clone();
         ctrlc::set_handler(move || {
-            eprintln!("\nShutting down gracefully...");
+            if sd.load(Ordering::Relaxed) {
+                // 2回目以降: 強制終了
+                eprintln!("\nForce exit.");
+                std::process::exit(1);
+            }
+            eprintln!("\nShutting down gracefully... (press Ctrl-C again to force exit)");
             sd.store(true, Ordering::Relaxed);
         })
         .ok();
@@ -1621,6 +1639,7 @@ fn main() -> Result<()> {
             metrics_path: w_metrics_path,
             training_data_path: w_training_path,
             flush_each_move: cli.flush_each_move,
+            minimal_log: cli.for_train,
             skip_initial_ply: cli.skip_initial_ply,
             skip_in_check: cli.skip_in_check,
         };
@@ -1655,7 +1674,7 @@ fn main() -> Result<()> {
         *completed += 1;
         println!(
             "game {}/{}: {} ({}) - black {} / white {} / draw {}",
-            result.game_idx + 1,
+            completed,
             cli.games,
             result.outcome.label(),
             result.outcome_reason,
@@ -1769,9 +1788,9 @@ fn main() -> Result<()> {
     println!("=======================");
     println!();
 
-    // サマリファイル出力
+    // サマリファイル出力（--for-train 時はスキップ）
     let summary_path = default_summary_path(&output_path);
-    {
+    if !cli.for_train {
         let black_rate = if actual_games > 0 {
             (black_wins as f64 / actual_games as f64) * 100.0
         } else {
@@ -1859,30 +1878,36 @@ fn main() -> Result<()> {
         println!("---------------------");
     }
     println!("selfplay log written to {}", output_path.display());
-    println!("summary written to {}", summary_path.display());
+    if !cli.for_train {
+        println!("summary written to {}", summary_path.display());
+    }
     if cli.log_info {
         println!("info log written to {}", info_path.display());
     }
-    let kif_path = default_kif_path(&output_path);
-    match convert_jsonl_to_kif(&output_path, &kif_path) {
-        Ok(paths) if paths.is_empty() => eprintln!("failed to create KIF: no games found"),
-        Ok(paths) if paths.len() == 1 => println!("kif written to {}", paths[0].display()),
-        Ok(paths) => {
-            println!("kif written (per game):");
-            for p in paths {
-                println!("  {}", p.display());
+    let skip_kif = cli.no_kif || cli.for_train;
+    if !skip_kif {
+        let kif_path = default_kif_path(&output_path);
+        match convert_jsonl_to_kif(&output_path, &kif_path) {
+            Ok(paths) if paths.is_empty() => eprintln!("failed to create KIF: no games found"),
+            Ok(paths) if paths.len() == 1 => println!("kif written to {}", paths[0].display()),
+            Ok(paths) => {
+                println!("kif written (per game):");
+                for p in paths {
+                    println!("  {}", p.display());
+                }
             }
+            Err(err) => eprintln!("failed to create KIF: {}", err),
         }
-        Err(err) => eprintln!("failed to create KIF: {}", err),
     }
     Ok(())
 }
 
-fn resolve_output_path(out: Option<&Path>, timestamp: &chrono::DateTime<Local>) -> PathBuf {
-    if let Some(path) = out {
-        return path.to_path_buf();
-    }
-    let dir = PathBuf::from("runs/selfplay").join(timestamp.format("%Y%m%d-%H%M%S").to_string());
+/// 出力ディレクトリを確定し、その中の selfplay.jsonl パスを返す。
+fn resolve_output_path(out_dir: Option<&Path>, timestamp: &chrono::DateTime<Local>) -> PathBuf {
+    let dir = match out_dir {
+        Some(d) => d.to_path_buf(),
+        None => PathBuf::from("runs/selfplay").join(timestamp.format("%Y%m%d-%H%M%S").to_string()),
+    };
     dir.join("selfplay.jsonl")
 }
 

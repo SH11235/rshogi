@@ -1,6 +1,6 @@
 # engine_selfplay — 自己対局ハーネス
 
-engine-usi 同士の自己対局を実行し、棋譜ログ・学習データ・統計情報を出力するツール。
+USIエンジン同士の自己対局を実行し、棋譜ログ・学習データ・統計情報を出力するツール。
 
 ## ビルド
 
@@ -9,27 +9,30 @@ cargo build -p tools --bin engine_selfplay --release
 ```
 
 リリースビルドのバイナリは `target/release/engine_selfplay` に生成される。
-以降の例では `cargo run -p tools --bin engine_selfplay --` を使用するが、ビルド済みバイナリを直接実行しても同じ。
 
 ## クイックスタート
 
 ```bash
-# 10局・1秒秒読み（最も基本的な使い方）
-cargo run -p tools --bin engine_selfplay -- \
+# 任意のUSIエンジンで10局・1秒秒読み
+./target/release/engine_selfplay \
+  --engine-path /path/to/your/usi-engine \
   --games 10 --byoyomi 1000
 
 # 学習データを生成しながら100局
-cargo run -p tools --bin engine_selfplay -- \
+./target/release/engine_selfplay \
+  --engine-path /path/to/your/usi-engine \
   --games 100 --byoyomi 1000 --concurrency 4
 ```
 
+`--engine-path` を省略した場合は rshogi のエンジンバイナリ（`target/release/rshogi-usi`）が自動検出される。
+
 ## 出力ファイル
 
-`--out` を指定しない場合、タイムスタンプ付きディレクトリが自動生成される:
+`--out-dir` を指定しない場合、タイムスタンプ付きディレクトリが自動生成される:
 
 ```
 runs/selfplay/20260317-120000/
-  selfplay.jsonl          # メタ情報 + 全手順・結果ログ（JSONL形式）
+  selfplay.jsonl          # メタ情報 + 対局結果ログ（JSONL形式）
   selfplay.summary.jsonl  # 対局セッション全体のサマリ
   selfplay.psv            # 学習データ（PackedSfenValue, 40バイト/局面）
   selfplay.kif            # KIF形式の棋譜（複数局は selfplay_g01.kif ...）
@@ -38,7 +41,9 @@ runs/selfplay/20260317-120000/
   selfplay.metrics.jsonl  # 対局メトリクス（--emit-metrics 指定時のみ）
 ```
 
-`--out path/to/output.jsonl` を指定した場合は、指定パスの親ディレクトリに上記ファイルが生成される。
+`--out-dir path/to/dir` を指定した場合は、そのディレクトリ内に上記ファイルが生成される。
+
+`--for-train` 指定時は `.psv` と `.jsonl`（簡素化版）のみ出力される。詳細は[学習局面生成](#学習局面生成)を参照。
 
 ## CLI オプション一覧
 
@@ -105,23 +110,28 @@ position sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1
 
 | オプション | デフォルト | 説明 |
 |-----------|-----------|------|
-| `--out PATH` | 自動生成 | 出力JSONLのパス |
+| `--out-dir DIR` | 自動生成 | 出力ディレクトリ |
 | `--log-info` | false | エンジンのinfo出力をログに記録 |
 | `--flush-each-move` | false | 毎手フラッシュ（安全だが低速） |
 | `--emit-eval-file` | false | 評価値推移ファイルを出力 |
 | `--emit-metrics` | false | 対局メトリクスJSONLを出力 |
+| `--no-kif` | false | KIF棋譜ファイルの出力を無効化 |
 
 ### 学習データ
 
 | オプション | デフォルト | 説明 |
 |-----------|-----------|------|
-| `--output-training-data PATH` | `<output>.psv` | 学習データ出力先（PackedSfenValue形式） |
+| `--for-train` | false | 学習局面生成に特化したモード（後述） |
+| `--output-training-data PATH` | `<out-dir>/selfplay.psv` | 学習データ出力先（PackedSfenValue形式） |
 | `--no-training-data` | false | 学習データ出力を無効化 |
-| `--skip-initial-ply N` | 0 | 序盤N手をスキップ（定跡部分の除外） |
+| `--skip-initial-ply N` | 0 | 序盤N手をスキップ |
 | `--skip-in-check BOOL` | false | 王手局面をスキップ |
 
-学習データは PackedSfenValue 形式（40バイト/局面）で、Nodchip learner互換。
-手数制限やタイムアウトで終了した対局（InProgress）の局面は含まれない。
+### 中断・再開
+
+| オプション | 説明 |
+|-----------|------|
+| `--resume` | 前回中断したセッションを再開する |
 
 ### パス権（特殊ルール）
 
@@ -132,168 +142,95 @@ position sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1
 
 パス権有効時は学習データ出力が自動的に無効化される（PackedSfen形式がパス権非対応のため）。
 
-### 中断・再開
+## 学習局面生成
 
-| オプション | 説明 |
-|-----------|------|
-| `--resume` | 前回中断したセッションを再開する |
+NNUE等の学習に使う教師データ（PackedSfenValue形式）を大量生成するためのモード。
 
-## 中断・再開（Resume）
+### `--for-train` フラグ
 
-長時間実行を中断して後で再開できる。
+`--for-train` を指定すると、学習データ生成に不要なファイル出力を自動的に抑制し、ディスクI/Oとストレージを節約する。
 
-### 仕組み
+**`--for-train` が行うこと:**
 
-1. Ctrl-C で中断すると、実行中の対局を完了させてからグレースフルに終了する
-2. 完了済みの対局データはすべて出力ファイルに書き込まれる
-3. `--resume` 付きで同じコマンドを再実行すると、出力JSONLから完了済み対局数を自動検出して続きから実行する
+| 項目 | 通常モード | `--for-train` |
+|------|-----------|---------------|
+| 学習データ (.psv) | 出力 | 出力 |
+| JSONL (対局ログ) | 全手順を記録 | result行のみ（resume用の最小限） |
+| KIF (棋譜) | 出力 | **出力しない** |
+| summary (サマリ) | 出力 | **出力しない** |
 
-### 使い方
+大量対局（数万〜数十万局）では KIF だけで数GBに達するため、`--for-train` の使用を推奨する。
+
+### 学習データのオプション詳細
+
+#### `--skip-initial-ply N`（デフォルト: 0）
+
+序盤の手番1〜N手目の局面を学習データから除外する。開始局面ファイルで途中局面を使う場合（例: 32手目以降）はデフォルトの0で問題ない。平手初期局面から対局する場合は、定跡部分を除外するために適宜指定する。
+
+#### `--skip-in-check BOOL`（デフォルト: false）
+
+`true` を指定すると、王手がかかっている局面を学習データから除外する。デフォルトでは全局面を記録する。
+
+#### `--output-training-data PATH`
+
+学習データの出力先パスを指定する。省略時は出力ディレクトリ内の `selfplay.psv` に出力される。
+
+#### `--no-training-data`
+
+学習データの出力を完全に無効化する。対局結果のみが必要な場合に使用する。
+
+### 学習データ生成の例
 
 ```bash
-# 初回実行（途中でCtrl-Cで中断）
-cargo run -p tools --bin engine_selfplay -- \
-  --games 100000 --byoyomi 1000 --concurrency 30 \
-  --out runs/selfplay/large_run/selfplay.jsonl
+# 開始局面ファイルから10万局、10並列
+# 出力先は runs/selfplay/<timestamp>/ に自動生成される
+./target/release/engine_selfplay \
+  --engine-path ./target/release/rshogi-usi \
+  --games 100000 \
+  --byoyomi 100 \
+  --hash-mb 128 \
+  --usi-option "EvalFile=eval/model.bin" \
+  --startpos-file start_sfens_ply32.txt \
+  --random-startpos \
+  --concurrency 10 \
+  --for-train
+```
 
-# 再開（同じ引数 + --resume）
-cargo run -p tools --bin engine_selfplay -- \
-  --games 100000 --byoyomi 1000 --concurrency 30 \
-  --out runs/selfplay/large_run/selfplay.jsonl \
+中断・再開する場合は `--out-dir` を指定して同一ディレクトリを使う。
+resume 時は初回と同じ引数を再指定すること（設定の一致は自動検証されない）:
+
+```bash
+# 初回実行
+./target/release/engine_selfplay \
+  --engine-path ./target/release/rshogi-usi \
+  --games 100000 \
+  --byoyomi 100 \
+  --hash-mb 128 \
+  --usi-option "EvalFile=eval/model.bin" \
+  --startpos-file start_sfens_ply32.txt \
+  --random-startpos \
+  --concurrency 10 \
+  --for-train \
+  --out-dir data/selfplay/train
+
+# 中断後に再開（同じ引数 + --resume）
+./target/release/engine_selfplay \
+  --engine-path ./target/release/rshogi-usi \
+  --games 100000 \
+  --byoyomi 100 \
+  --hash-mb 128 \
+  --usi-option "EvalFile=eval/model.bin" \
+  --startpos-file start_sfens_ply32.txt \
+  --random-startpos \
+  --concurrency 10 \
+  --for-train \
+  --out-dir data/selfplay/train \
   --resume
 ```
 
-### 注意事項
+### 学習データの形式
 
-- `--resume` には `--out` の指定が必須（自動生成パスでは前回のファイルを特定できないため）
-- `--games` は合計の目標対局数を指定する（追加分ではない）
-- 設定の一致は検証されない。同じCLI引数で再実行すること
-- 学習データ（.psv）、info ログ、eval ファイルなどもすべて追記される
-
-## 使用例
-
-### 基本的な自己対局
-
-```bash
-# 1秒秒読み、300手制限で10局
-cargo run -p tools --bin engine_selfplay -- \
-  --games 10 --max-moves 300 --byoyomi 1000
-```
-
-### 学習データ生成（実用的なレシピ）
-
-```bash
-# depth 9 / nodes 50000 制限、10並列で1万局
-# 1手あたりの探索量を固定して安定した教師データを得る
-cargo run -p tools --bin engine_selfplay --release -- \
-  --games 10000 --depth 9 --nodes 50000 \
-  --threads 1 --concurrency 10 \
-  --skip-initial-ply 8 \
-  --out runs/selfplay/train_d9n50k/selfplay.jsonl
-
-# 中断後に再開する場合
-cargo run -p tools --bin engine_selfplay --release -- \
-  --games 10000 --depth 9 --nodes 50000 \
-  --threads 1 --concurrency 10 \
-  --skip-initial-ply 8 \
-  --out runs/selfplay/train_d9n50k/selfplay.jsonl \
-  --resume
-
-# nodes 制限のみで大量生成（depth なし）
-cargo run -p tools --bin engine_selfplay --release -- \
-  --games 100000 --nodes 10000 \
-  --threads 1 --concurrency 30 \
-  --skip-initial-ply 8 \
-  --out runs/selfplay/train_n10k/selfplay.jsonl
-
-# byoyomi ベースで品質重視（1手5秒、4スレッド）
-cargo run -p tools --bin engine_selfplay --release -- \
-  --games 10000 --byoyomi 5000 \
-  --threads 4 --concurrency 8 \
-  --skip-initial-ply 8 \
-  --out runs/selfplay/train_5s/selfplay.jsonl
-```
-
-**パラメータ選択の目安:**
-
-| 方式 | 速度 | 品質 | 用途 |
-|------|------|------|------|
-| `--depth 9 --nodes 50000` | 中 | 中〜高 | 汎用。探索量が安定し再現性が高い |
-| `--nodes 10000` | 高 | 中 | 大量局面の生成。浅い探索だが量でカバー |
-| `--byoyomi 1000` | 中 | 中 | 時間ベース。ハードウェア依存で品質が変動 |
-| `--byoyomi 5000 --threads 4` | 低 | 高 | 品質重視。少量だが深い探索 |
-
-- `--threads 1 --concurrency N` はCPUコア数に応じて N を調整（目安: コア数の80%程度）
-- `--threads T --concurrency N` では合計 `T × N × 2` プロセスが起動する点に注意
-- `--skip-initial-ply 8` は序盤の定跡手順をスキップする標準設定
-
-### 大規模学習データ生成
-
-```bash
-# 30並行で10万局、学習データを指定パスに出力
-cargo run -p tools --bin engine_selfplay --release -- \
-  --games 100000 --byoyomi 1000 --concurrency 30 \
-  --skip-initial-ply 8 \
-  --out runs/selfplay/train_100k/selfplay.jsonl \
-  --output-training-data runs/selfplay/train_100k/train.psv
-```
-
-### 異なるエンジン同士の対局
-
-```bash
-# エンジンAを先手、エンジンBを後手にして対局
-cargo run -p tools --bin engine_selfplay -- \
-  --games 100 --byoyomi 5000 \
-  --engine-path-black ./engine_a \
-  --engine-path-white ./engine_b \
-  --threads-black 4 --threads-white 4
-```
-
-### 深さ制限での対局（学習データ生成向け）
-
-```bash
-# depth 6 で高速に大量局面を生成
-cargo run -p tools --bin engine_selfplay -- \
-  --games 50000 --depth 6 --concurrency 30 \
-  --skip-initial-ply 8
-```
-
-### 特定局面からの対局
-
-```bash
-# SFENファイルの局面を順番に使用
-cargo run -p tools --bin engine_selfplay -- \
-  --games 1000 --byoyomi 1000 \
-  --startpos-file positions.txt
-
-# ランダムに選択
-cargo run -p tools --bin engine_selfplay -- \
-  --games 1000 --byoyomi 1000 \
-  --startpos-file positions.txt --random-startpos
-```
-
-### 詳細なデバッグ情報付き
-
-```bash
-# infoログ + 評価値推移 + メトリクス を全て出力
-cargo run -p tools --bin engine_selfplay -- \
-  --games 5 --byoyomi 5000 \
-  --log-info --emit-eval-file --emit-metrics --flush-each-move
-```
-
-## 出力形式の詳細
-
-### JSONL（selfplay.jsonl）
-
-各行が独立したJSONオブジェクト。`type` フィールドで種別を判別:
-
-- `"meta"`: セッション設定（1行目に1回のみ）
-- `"move"`: 各手の詳細（SFEN、指し手、評価値、消費時間など）
-- `"result"`: 対局結果（`outcome`: `"black_win"` / `"white_win"` / `"draw"`）
-
-### PackedSfenValue（.psv）
-
-バイナリ形式、1局面40バイト:
+PackedSfenValue 形式（40バイト/局面）で、Nodchip learner互換。
 
 | オフセット | サイズ | フィールド |
 |-----------|--------|-----------|
@@ -303,3 +240,60 @@ cargo run -p tools --bin engine_selfplay -- \
 | 36 | 2 | game_ply（手数） |
 | 38 | 1 | game_result（1=勝ち, 0=引き分け, -1=負け、手番視点） |
 | 39 | 1 | padding |
+
+手数制限やタイムアウトで終了した対局（InProgress）の局面は含まれない。
+
+## 中断・再開（Resume）
+
+長時間実行を中断して後で再開できる。
+
+### 仕組み
+
+1. Ctrl-C で中断すると、進行中の対局の完了を待ってからグレースフルに終了する
+2. 完了済みの対局データはすべて出力ファイルに書き込まれる
+3. `--resume` 付きで同じコマンドを再実行すると、出力JSONLから完了済み対局数を自動検出して続きから実行する
+
+### 注意事項
+
+- `--resume` には `--out-dir` の指定が必須（自動生成パスでは前回のディレクトリを特定できないため）
+- `--games` は合計の目標対局数を指定する（追加分ではない）
+- 設定の一致は検証されない。同じCLI引数で再実行すること
+- 学習データ（.psv）、info ログ、eval ファイルなどもすべて追記される
+- Ctrl-C を2回押すと強制終了する（進行中の対局は破棄される）
+
+## 使用例
+
+### 基本的な自己対局
+
+```bash
+./target/release/engine_selfplay \
+  --engine-path /path/to/usi-engine \
+  --games 10 --max-moves 300 --byoyomi 1000
+```
+
+### 異なるエンジン同士の対局
+
+```bash
+./target/release/engine_selfplay \
+  --games 100 --byoyomi 5000 \
+  --engine-path-black ./engine_a \
+  --engine-path-white ./engine_b \
+  --threads-black 4 --threads-white 4
+```
+
+### 特定局面からの対局
+
+```bash
+./target/release/engine_selfplay \
+  --engine-path /path/to/usi-engine \
+  --games 1000 --byoyomi 1000 \
+  --startpos-file positions.txt --random-startpos
+```
+
+## JSONL 出力形式
+
+各行が独立したJSONオブジェクト。`type` フィールドで種別を判別:
+
+- `"meta"`: セッション設定（1行目に1回のみ）
+- `"move"`: 各手の詳細（`--for-train` 時は出力されない）
+- `"result"`: 対局結果（`outcome`: `"black_win"` / `"white_win"` / `"draw"`）

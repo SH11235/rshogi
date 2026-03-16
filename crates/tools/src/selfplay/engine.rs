@@ -43,10 +43,25 @@ impl EngineProcess {
         if !cfg.args.is_empty() {
             cmd.args(&cfg.args);
         }
-        let mut child =
-            cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().with_context_display(
-                || format!("failed to spawn engine at {}", cfg.path.display()),
-            )?;
+        // 子プロセスを独立したプロセスグループで起動し、
+        // 親プロセスへの SIGINT が子に伝播しないようにする。
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // SAFETY: setpgid は async-signal-safe。fork 直後に呼ばれる。
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::setpgid(0, 0);
+                    Ok(())
+                });
+            }
+        }
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context_display(|| format!("failed to spawn engine at {}", cfg.path.display()))?;
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
         let (tx, rx) = mpsc::channel::<String>();
