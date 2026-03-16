@@ -223,7 +223,7 @@ struct Cli {
     /// 無効化するには --skip-in-check=false を指定
     #[arg(
         long,
-        default_value_t = true,
+        default_value_t = false,
         action = clap::ArgAction::Set,
         help = "Skip positions where king is in check (use --skip-in-check=false to disable)"
     )]
