@@ -30,8 +30,13 @@ const MAX_HBISHOP_NUM: usize = 2;
 const MAX_HROOK_NUM: usize = 2;
 
 /// 手駒の枚数合計 (片方の色): 18+4+4+4+4+2+2 = 38
-pub const MAX_PIECES_IN_HAND_SUM: usize =
-    MAX_HPAWN_NUM + MAX_HLANCE_NUM + MAX_HKNIGHT_NUM + MAX_HSILVER_NUM + MAX_HGOLD_NUM + MAX_HBISHOP_NUM + MAX_HROOK_NUM;
+pub const MAX_PIECES_IN_HAND_SUM: usize = MAX_HPAWN_NUM
+    + MAX_HLANCE_NUM
+    + MAX_HKNIGHT_NUM
+    + MAX_HSILVER_NUM
+    + MAX_HGOLD_NUM
+    + MAX_HBISHOP_NUM
+    + MAX_HROOK_NUM;
 
 /// 先後含めた手駒プレーン数: 38 * 2 = 76
 const MAX_FEATURES2_HAND_NUM: usize = 2 * MAX_PIECES_IN_HAND_SUM;
@@ -59,13 +64,18 @@ pub const INPUT2_CHANNELS: usize = MAX_FEATURES2_NUM;
 
 /// 手駒種別ごとのオフセット (features2 内)
 const HAND_OFFSETS: [usize; 7] = [
-    0,                                                                                         // Pawn
-    MAX_HPAWN_NUM,                                                                             // Lance
-    MAX_HPAWN_NUM + MAX_HLANCE_NUM,                                                            // Knight
-    MAX_HPAWN_NUM + MAX_HLANCE_NUM + MAX_HKNIGHT_NUM,                                          // Silver
-    MAX_HPAWN_NUM + MAX_HLANCE_NUM + MAX_HKNIGHT_NUM + MAX_HSILVER_NUM,                        // Gold
-    MAX_HPAWN_NUM + MAX_HLANCE_NUM + MAX_HKNIGHT_NUM + MAX_HSILVER_NUM + MAX_HGOLD_NUM,        // Bishop
-    MAX_HPAWN_NUM + MAX_HLANCE_NUM + MAX_HKNIGHT_NUM + MAX_HSILVER_NUM + MAX_HGOLD_NUM + MAX_HBISHOP_NUM, // Rook
+    0,                                                                                  // Pawn
+    MAX_HPAWN_NUM,                                                                      // Lance
+    MAX_HPAWN_NUM + MAX_HLANCE_NUM,                                                     // Knight
+    MAX_HPAWN_NUM + MAX_HLANCE_NUM + MAX_HKNIGHT_NUM,                                   // Silver
+    MAX_HPAWN_NUM + MAX_HLANCE_NUM + MAX_HKNIGHT_NUM + MAX_HSILVER_NUM,                 // Gold
+    MAX_HPAWN_NUM + MAX_HLANCE_NUM + MAX_HKNIGHT_NUM + MAX_HSILVER_NUM + MAX_HGOLD_NUM, // Bishop
+    MAX_HPAWN_NUM
+        + MAX_HLANCE_NUM
+        + MAX_HKNIGHT_NUM
+        + MAX_HSILVER_NUM
+        + MAX_HGOLD_NUM
+        + MAX_HBISHOP_NUM, // Rook
 ];
 
 const HAND_MAXES: [usize; 7] = [
@@ -113,9 +123,11 @@ fn piece_attacks(pt: PieceType, color: Color, sq: Square, occupied: Bitboard) ->
         PieceType::Lance => lance_effect(color, sq, occupied),
         PieceType::Knight => knight_effect(color, sq),
         PieceType::Silver => silver_effect(color, sq),
-        PieceType::Gold | PieceType::ProPawn | PieceType::ProLance | PieceType::ProKnight | PieceType::ProSilver => {
-            gold_effect(color, sq)
-        }
+        PieceType::Gold
+        | PieceType::ProPawn
+        | PieceType::ProLance
+        | PieceType::ProKnight
+        | PieceType::ProSilver => gold_effect(color, sq),
         PieceType::Bishop => bishop_effect(sq, occupied),
         PieceType::Rook => rook_effect(sq, occupied),
         PieceType::Horse => horse_effect(sq, occupied),
@@ -130,7 +142,13 @@ fn piece_attacks(pt: PieceType, color: Color, sq: Square, occupied: Bitboard) ->
 /// - `features2`: [86 * 81] = 6966 要素、事前にゼロクリアされていること
 /// - `game_ply`: 局面の手数 (PackedSfenValue.game_ply)
 /// - `draw_ply`: 引き分け手数 (0 = 調整なし)
-pub fn make_input_features(pos: &Position, features1: &mut [f32], features2: &mut [f32], game_ply: i32, draw_ply: i32) {
+pub fn make_input_features(
+    pos: &Position,
+    features1: &mut [f32],
+    features2: &mut [f32],
+    game_ply: i32,
+    draw_ply: i32,
+) {
     debug_assert!(features1.len() >= FEATURES1_SIZE);
     debug_assert!(features2.len() >= FEATURES2_SIZE);
 
@@ -164,7 +182,11 @@ pub fn make_input_features(pos: &Position, features1: &mut [f32], features2: &mu
 
         // 利き
         for to in attacks.iter() {
-            let out_to = if is_white_turn { to.inverse().index() } else { to.index() };
+            let out_to = if is_white_turn {
+                to.inverse().index()
+            } else {
+                to.index()
+            };
             set_f1(features1, c, PIECETYPE_NUM + pt_idx, out_to);
 
             let num = &mut attack_num[c][out_to];
@@ -179,19 +201,31 @@ pub fn make_input_features(pos: &Position, features1: &mut [f32], features2: &mu
     let colors = [Color::Black, Color::White];
     for logical_c in 0..2usize {
         // board_color: 実際の盤面上の色
-        let board_color = if is_white_turn { colors[1 - logical_c] } else { colors[logical_c] };
+        let board_color = if is_white_turn {
+            colors[1 - logical_c]
+        } else {
+            colors[logical_c]
+        };
 
         // 歩の配置と利き
         let my_pawns = pawns_bb & pos.pieces_c(board_color);
         for sq in my_pawns.iter() {
-            let out_sq = if is_white_turn { sq.inverse().index() } else { sq.index() };
+            let out_sq = if is_white_turn {
+                sq.inverse().index()
+            } else {
+                sq.index()
+            };
 
             // 配置 (Pawn = 1, index = 0)
             set_f1(features1, logical_c, 0, out_sq);
 
             // 歩の利き: logical_c==0 は北方向(先手歩)、logical_c==1 は南方向(後手歩)
             // 反転後のマスに対して pawn_effect を適用
-            let pawn_color = if logical_c == 0 { Color::Black } else { Color::White };
+            let pawn_color = if logical_c == 0 {
+                Color::Black
+            } else {
+                Color::White
+            };
             if let Some(out_sq_sq) = Square::from_u8(out_sq as u8) {
                 let effect = pawn_effect(pawn_color, out_sq_sq);
                 for to in effect.iter() {
@@ -200,7 +234,12 @@ pub fn make_input_features(pos: &Position, features1: &mut [f32], features2: &mu
 
                     let num = &mut attack_num[logical_c][out_to];
                     if (*num as usize) < MAX_ATTACK_NUM {
-                        set_f1(features1, logical_c, PIECETYPE_NUM + PIECETYPE_NUM + *num as usize, out_to);
+                        set_f1(
+                            features1,
+                            logical_c,
+                            PIECETYPE_NUM + PIECETYPE_NUM + *num as usize,
+                            out_to,
+                        );
                         *num += 1;
                     }
                 }
@@ -295,13 +334,15 @@ mod tests {
         assert_eq!(hand_planes, 0.0);
 
         // 王手でない → check plane = 0
-        let check_plane: f32 = f2[MAX_FEATURES2_HAND_NUM * SQUARE_NUM..(MAX_FEATURES2_HAND_NUM + 1) * SQUARE_NUM]
+        let check_plane: f32 = f2
+            [MAX_FEATURES2_HAND_NUM * SQUARE_NUM..(MAX_FEATURES2_HAND_NUM + 1) * SQUARE_NUM]
             .iter()
             .sum();
         assert_eq!(check_plane, 0.0);
 
         // 先手番 → 手番プレーンは 0
-        let turn_plane: f32 = f2[(MAX_FEATURES2_HAND_NUM + 1) * SQUARE_NUM..(MAX_FEATURES2_HAND_NUM + 2) * SQUARE_NUM]
+        let turn_plane: f32 = f2
+            [(MAX_FEATURES2_HAND_NUM + 1) * SQUARE_NUM..(MAX_FEATURES2_HAND_NUM + 2) * SQUARE_NUM]
             .iter()
             .sum();
         assert_eq!(turn_plane, 0.0);
@@ -313,7 +354,8 @@ mod tests {
 
         // 後手も同様
         let f1_white_start = MAX_FEATURES1_NUM * SQUARE_NUM;
-        let f1_white_placement: f32 = f1[f1_white_start..f1_white_start + PIECETYPE_NUM * SQUARE_NUM].iter().sum();
+        let f1_white_placement: f32 =
+            f1[f1_white_start..f1_white_start + PIECETYPE_NUM * SQUARE_NUM].iter().sum();
         assert_eq!(f1_white_placement, 20.0, "White should have 20 pieces in hirate");
     }
 

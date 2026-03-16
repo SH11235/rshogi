@@ -88,17 +88,17 @@ if [ ! -f "$NNUE_FILE" ] || [ ! -r "$NNUE_FILE" ]; then
 fi
 
 if [ "$BUILD_MODE" = "release" ]; then
-    echo "=== Building release binary (with symbols) ==="
-    # release buildでもシンボル情報を保持
+    echo "=== Building production binary (with symbols) ==="
+    # production buildでもシンボル情報を保持
     # - target-cpu=native: SIMD最適化を有効化
     # - force-frame-pointers=yes: perfでコールスタックを取得可能に
-    # - CARGO_PROFILE_RELEASE_STRIP=false: .cargo/config.tomlのstrip設定を上書き
-    # - CARGO_PROFILE_RELEASE_DEBUG=2: デバッグシンボルを含める
+    # - CARGO_PROFILE_PRODUCTION_STRIP=false: Cargo.tomlのstrip設定を上書き
+    # - CARGO_PROFILE_PRODUCTION_DEBUG=2: デバッグシンボルを含める
     RUSTFLAGS="-C target-cpu=native -C force-frame-pointers=yes" \
-    CARGO_PROFILE_RELEASE_STRIP=false \
-    CARGO_PROFILE_RELEASE_DEBUG=2 \
-        cargo build -p tools --bin benchmark --release
-    BINARY="./target/release/benchmark"
+    CARGO_PROFILE_PRODUCTION_STRIP=false \
+    CARGO_PROFILE_PRODUCTION_DEBUG=2 \
+        cargo build -p tools --bin benchmark --profile production
+    BINARY="./target/production/benchmark"
 else
     echo "=== Building debug binary ==="
     cargo build -p tools --bin benchmark

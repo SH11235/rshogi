@@ -41,17 +41,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-echo "=== Building release binary (with frame pointer + debug symbols) ==="
-# CARGO_PROFILE_RELEASE_* で Cargo.toml の設定を上書き
+echo "=== Building production binary (with frame pointer + debug symbols) ==="
+# CARGO_PROFILE_PRODUCTION_* で Cargo.toml の設定を上書き
 RUSTFLAGS="-C target-cpu=native -C force-frame-pointers=yes" \
-CARGO_PROFILE_RELEASE_STRIP=false \
-CARGO_PROFILE_RELEASE_DEBUG=2 \
-    cargo build --release -p tools --bin benchmark
+CARGO_PROFILE_PRODUCTION_STRIP=false \
+CARGO_PROFILE_PRODUCTION_DEBUG=2 \
+    cargo build --profile production -p tools --bin benchmark
 
 echo ""
 echo "=== Running perf record (${MOVETIME}ms × 4 positions, ${THREADS} threads) ==="
 sudo perf record -g --call-graph fp -o perf_release.data \
-    ./target/release/benchmark --internal --threads "$THREADS" \
+    ./target/production/benchmark --internal --threads "$THREADS" \
     --limit-type movetime --limit "$MOVETIME" --iterations 1
 
 # 結果をファイルに保存
