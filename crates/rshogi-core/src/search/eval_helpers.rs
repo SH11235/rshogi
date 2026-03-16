@@ -222,7 +222,6 @@ pub(super) fn probe_transposition<const NT: u8>(
     let tt_hit = tt_result.found;
     let mut tt_data = tt_result.data;
 
-
     st.stack[ply as usize].tt_hit = tt_hit;
     // excludedMoveがある場合は前回のttPvを維持
     st.stack[ply as usize].tt_pv = if excluded_move.is_some() {
@@ -305,7 +304,6 @@ pub(super) fn probe_transposition<const NT: u8>(
     // - depth<=5ではcutNodeとTT値の方向が一致する場合のみカットオフ許可
     let tt_value_lte_beta = tt_value != Value::NONE && tt_value.raw() <= beta.raw();
 
-
     if !pv_node
         && excluded_move.is_none()
         && tt_hit
@@ -353,23 +351,6 @@ pub(super) fn probe_transposition<const NT: u8>(
     if NT != NodeType::Root as u8 && !in_check && !tt_hit && excluded_move.is_none() {
         let mate_move = pos.mate_1ply();
         if mate_move.is_some() {
-            #[cfg(feature = "mate1-trace")]
-            {
-                use std::sync::atomic::{AtomicBool, Ordering};
-                static FIRST: AtomicBool = AtomicBool::new(false);
-                if !FIRST.swap(true, Ordering::Relaxed) {
-                    eprintln!("RS_MATE1_AB_SFEN: {}", pos.to_sfen());
-                }
-                eprintln!(
-                    "RS_MATE1_AB: key={:016x} mv={} ply={} depth={} tt_pv={} stored_depth={}",
-                    key,
-                    mate_move.to_usi(),
-                    ply,
-                    depth,
-                    st.stack[ply as usize].tt_pv,
-                    (depth + 6).min(MAX_PLY - 1),
-                );
-            }
             let value = Value::mate_in(ply + 1);
             let mate1_depth_boost = {
                 use std::sync::LazyLock;

@@ -148,41 +148,50 @@ impl EngineProcess {
         };
         self.write_line(&position_cmd)?;
         let time_args = &req.time_args;
-        match req.go_depth {
-            Some(depth) if time_args.byoyomi > 0 => {
-                // 組み合わせモード: depth 目標 + byoyomi 上限
-                self.write_line(&format!(
-                    "go btime {} wtime {} byoyomi {} binc {} winc {} depth {}",
-                    time_args.btime,
-                    time_args.wtime,
-                    time_args.byoyomi,
-                    time_args.binc,
-                    time_args.winc,
-                    depth
-                ))?;
+        // depth/nodes 制限の有無
+        let has_limit = req.go_depth.is_some() || req.go_nodes.is_some();
+        let has_time = time_args.byoyomi > 0
+            || time_args.btime > 0
+            || time_args.wtime > 0
+            || time_args.binc > 0
+            || time_args.winc > 0;
+
+        if has_limit && has_time {
+            // 組み合わせモード: depth/nodes 目標 + 時間上限
+            let mut cmd = format!(
+                "go btime {} wtime {} byoyomi {} binc {} winc {}",
+                time_args.btime, time_args.wtime, time_args.byoyomi, time_args.binc, time_args.winc
+            );
+            if let Some(depth) = req.go_depth {
+                cmd.push_str(&format!(" depth {depth}"));
             }
-            Some(depth) => {
-                // depth のみモード: タイムアウト無効
-                self.write_line(&format!("go depth {depth}"))?;
+            if let Some(nodes) = req.go_nodes {
+                cmd.push_str(&format!(" nodes {nodes}"));
             }
-            None => {
-                self.write_line(&format!(
-                    "go btime {} wtime {} byoyomi {} binc {} winc {}",
-                    time_args.btime,
-                    time_args.wtime,
-                    time_args.byoyomi,
-                    time_args.binc,
-                    time_args.winc
-                ))?;
+            self.write_line(&cmd)?;
+        } else if has_limit {
+            // depth/nodes のみモード: タイムアウト無効
+            let mut cmd = String::from("go");
+            if let Some(depth) = req.go_depth {
+                cmd.push_str(&format!(" depth {depth}"));
             }
+            if let Some(nodes) = req.go_nodes {
+                cmd.push_str(&format!(" nodes {nodes}"));
+            }
+            self.write_line(&cmd)?;
+        } else {
+            self.write_line(&format!(
+                "go btime {} wtime {} byoyomi {} binc {} winc {}",
+                time_args.btime, time_args.wtime, time_args.byoyomi, time_args.binc, time_args.winc
+            ))?;
         }
 
         let start = Instant::now();
-        // depth のみモード（byoyomi=0）ではタイムアウト無効、それ以外は byoyomi ベースで有効
+        // depth/nodes のみモード（時間制御なし）ではタイムアウト無効、それ以外は byoyomi ベースで有効
         // Duration::MAX は recv_timeout に渡すと timespec オーバーフローが起きるため、
         // 十分大きな有限値（24 時間）を使う。
         const NO_TIMEOUT: Duration = Duration::from_secs(86400);
-        let (soft_limit, hard_limit) = if req.go_depth.is_some() && time_args.byoyomi == 0 {
+        let (soft_limit, hard_limit) = if has_limit && !has_time {
             (NO_TIMEOUT, NO_TIMEOUT)
         } else {
             let s = Duration::from_millis(req.think_limit_ms.saturating_add(req.timeout_margin_ms));
@@ -224,8 +233,8 @@ impl EngineProcess {
                         let mut parts = rest.split_whitespace();
                         let mv = parts.next().unwrap_or_default().to_string();
                         let elapsed_ms = duration_to_millis(start.elapsed());
-                        // depth のみモード（byoyomi=0）ではタイムアウト判定を無効にする
-                        let timed_out = if req.go_depth.is_some() && time_args.byoyomi == 0 {
+                        // depth/nodes のみモード（時間制御なし）ではタイムアウト判定を無効にする
+                        let timed_out = if has_limit && !has_time {
                             false
                         } else {
                             elapsed_ms > req.think_limit_ms.saturating_add(req.timeout_margin_ms)

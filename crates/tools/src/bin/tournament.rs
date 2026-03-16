@@ -121,6 +121,10 @@ struct Cli {
     /// Depth limit per move. If specified, sends `go depth N` instead of `go byoyomi`.
     #[arg(long)]
     depth: Option<u32>,
+
+    /// Nodes limit per move. If specified, sends `go nodes N`.
+    #[arg(long)]
+    nodes: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -199,6 +203,8 @@ struct MetaSettings {
     hash_mb: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     depth: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nodes: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -276,6 +282,7 @@ struct WorkerConfig {
     timeout_margin_ms: u64,
     byoyomi: u64,
     go_depth: Option<u32>,
+    go_nodes: Option<u64>,
     start_positions: Vec<ParsedPosition>,
 }
 
@@ -295,6 +302,7 @@ fn worker_main(
         timeout_margin_ms,
         byoyomi,
         go_depth,
+        go_nodes,
         start_positions,
     } = cfg;
     // ワーカー内で全エンジンを起動
@@ -349,6 +357,7 @@ fn worker_main(
             timeout_margin_ms,
             pass_rights: None,
             go_depth,
+            go_nodes,
         };
         let game_id = (ticket.id as u32) + 1;
 
@@ -530,6 +539,7 @@ fn main() -> Result<()> {
                 threads: cli.threads,
                 hash_mb: cli.hash_mb,
                 depth: cli.depth,
+                nodes: cli.nodes,
             },
             engines: (0..n)
                 .map(|i| EngineMetaEntry {
@@ -613,6 +623,7 @@ fn main() -> Result<()> {
                     threads: cli.threads,
                     hash_mb: cli.hash_mb,
                     depth: cli.depth,
+                    nodes: cli.nodes,
                 },
                 engine_cmd: EngineCommandMeta {
                     path_black: cli.engines[i].display().to_string(),
@@ -649,6 +660,7 @@ fn main() -> Result<()> {
         let timeout_margin_ms = cli.timeout_margin_ms;
         let byoyomi = cli.byoyomi;
         let go_depth = cli.depth;
+        let go_nodes = cli.nodes;
         let start_positions: Vec<ParsedPosition> = start_defs
             .iter()
             .map(|p| ParsedPosition {
@@ -672,6 +684,7 @@ fn main() -> Result<()> {
                     timeout_margin_ms,
                     byoyomi,
                     go_depth,
+                    go_nodes,
                     start_positions,
                 },
                 rx,

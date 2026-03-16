@@ -2,8 +2,18 @@
 //!
 //! 3バリアント階層構造に対応したベンチマーク。
 //! 各ネットワークアーキテクチャの推論性能を測定する。
+//!
+//! ## progress8kpabs bucket 計算ベンチ
+//!
+//! `--ls-progress-coeff` を指定すると、bucket index 計算のマイクロベンチも実行:
+//! ```bash
+//! cargo run --release --bin bench_nnue_eval -- \
+//!   --nnue-file <path> \
+//!   --ls-progress-coeff <progress.bin>
+//! ```
 
 use std::hint::black_box;
+use std::mem::size_of;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -11,7 +21,10 @@ use std::time::Instant;
 use anyhow::Result;
 use clap::Parser;
 
-use rshogi_core::nnue::{NNUEEvaluator, NNUENetwork};
+use rshogi_core::nnue::{
+    NNUEEvaluator, NNUENetwork, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
+    compute_layer_stack_progress8kpabs_bucket_index,
+};
 use rshogi_core::position::Position;
 
 /// NNUE評価ベンチマーク
@@ -33,6 +46,11 @@ struct Cli {
     /// ウォームアップ回数（デフォルト: 1万回）
     #[arg(long, default_value = "10000")]
     warmup: u64,
+
+    /// progress8kpabs 重みファイル（progress.bin）
+    /// 指定時は bucket index 計算のマイクロベンチも実行
+    #[arg(long)]
+    ls_progress_coeff: Option<PathBuf>,
 }
 
 /// ベンチマーク用のテスト局面（SFEN形式）
@@ -128,6 +146,64 @@ fn bench_evaluator(
     }
 }
 
+/// progress.bin を読み込み f64 → f32 に変換
+fn load_progress_kpabs_weights(path: &PathBuf) -> Result<Box<[f32]>> {
+    let bytes = std::fs::read(path)?;
+    let expected = SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS * size_of::<f64>();
+    anyhow::ensure!(
+        bytes.len() == expected,
+        "progress.bin size mismatch: got {} bytes, expected {}",
+        bytes.len(),
+        expected
+    );
+    let weights: Vec<f32> = bytes
+        .chunks_exact(size_of::<f64>())
+        .map(|chunk| f64::from_le_bytes(chunk.try_into().unwrap()) as f32)
+        .collect();
+    Ok(weights.into_boxed_slice())
+}
+
+/// progress8kpabs bucket 計算のマイクロベンチマーク
+fn bench_progress_bucket(positions: &[Position], weights: &[f32], warmup: u64, iterations: u64) {
+    // ウォームアップ
+    for i in 0..warmup {
+        let pos = &positions[i as usize % positions.len()];
+        black_box(compute_layer_stack_progress8kpabs_bucket_index(
+            pos,
+            pos.side_to_move(),
+            weights,
+        ));
+    }
+
+    // 計測
+    let start = Instant::now();
+    for i in 0..iterations {
+        let pos = &positions[i as usize % positions.len()];
+        black_box(compute_layer_stack_progress8kpabs_bucket_index(
+            pos,
+            pos.side_to_move(),
+            weights,
+        ));
+    }
+    let duration = start.elapsed();
+
+    let ns_per_op = duration.as_nanos() as f64 / iterations as f64;
+    let ops_per_sec = 1_000_000_000.0 / ns_per_op;
+
+    // 各局面の bucket 値を表示
+    println!("=== progress8kpabs bucket ===");
+    for (i, pos) in positions.iter().enumerate() {
+        let bucket =
+            compute_layer_stack_progress8kpabs_bucket_index(pos, pos.side_to_move(), weights);
+        println!("  position[{i}]: bucket={bucket}");
+    }
+    println!("  {:.1} ns/op ({:.0} ops/sec)", ns_per_op, ops_per_sec);
+    println!();
+    println!("--- progress8kpabs JSON ---");
+    println!(r#"{{"bucket_ns":{:.1},"bucket_ops_per_sec":{:.0}}}"#, ns_per_op, ops_per_sec);
+    println!();
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -144,6 +220,16 @@ fn main() -> Result<()> {
     println!("Benchmark config: {} warmup, {} iterations", cli.warmup, cli.iterations);
     println!("Test positions: {}", positions.len());
     println!();
+
+    // progress8kpabs bucket ベンチマーク
+    if let Some(ref coeff_path) = cli.ls_progress_coeff {
+        println!("Loading progress8kpabs weights: {}", coeff_path.display());
+        let weights = load_progress_kpabs_weights(coeff_path)?;
+        println!("  weights: {} elements", weights.len());
+        println!();
+        bench_progress_bucket(&positions, &weights, cli.warmup, cli.iterations);
+    }
+
     println!("Loading NNUE file: {}", cli.nnue_file.display());
     let network = Arc::new(NNUENetwork::load(&cli.nnue_file)?);
     let arch_name = network.architecture_name();

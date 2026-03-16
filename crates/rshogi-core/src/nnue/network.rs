@@ -120,11 +120,11 @@ const PROGRESS_BUCKET_THRESHOLDS: [f32; 7] = [
     1.945_910_1,  // k=7: ln(7)
 ];
 
-/// progress8kpabs の差分計算済み bucket index キャッシュ（スレッドローカル）
-///
-/// `update_and_evaluate_layer_stacks` で差分計算した結果を格納し、
-/// `compute_layer_stack_progress8kpabs_bucket_index` 内で消費する。
-/// 一度消費されると None にリセットされる（1回限り）。
+// progress8kpabs の差分計算済み bucket index キャッシュ（スレッドローカル）
+//
+// `update_and_evaluate_layer_stacks` で差分計算した結果を格納し、
+// `compute_layer_stack_progress8kpabs_bucket_index` 内で消費する。
+// 一度消費されると None にリセットされる（1回限り）。
 thread_local! {
     static CACHED_PROGRESS_BUCKET: Cell<Option<usize>> = const { Cell::new(None) };
 }
@@ -1475,19 +1475,17 @@ fn ensure_progress_bucket(pos: &Position, stack: &mut AccumulatorStackLayerStack
         let dirty = &current_entry.dirty_piece;
         let king_moved = dirty.king_moved[0] || dirty.king_moved[1];
 
-        if !king_moved {
-            if let Some(prev_idx) = current_entry.previous {
-                if stack.entry_at(prev_idx).computed_progress {
-                    let prev_sum = stack.entry_at(prev_idx).progress_sum;
-                    let sq_bk = pos.king_square(Color::Black).index();
-                    let sq_wk = pos.king_square(Color::White).inverse().index();
-                    let new_sum =
-                        update_progress8kpabs_sum_diff(prev_sum, dirty, sq_bk, sq_wk, weights);
-                    let entry = stack.current_mut();
-                    entry.progress_sum = new_sum;
-                    entry.computed_progress = true;
-                }
-            }
+        if !king_moved
+            && let Some(prev_idx) = current_entry.previous
+            && stack.entry_at(prev_idx).computed_progress
+        {
+            let prev_sum = stack.entry_at(prev_idx).progress_sum;
+            let sq_bk = pos.king_square(Color::Black).index();
+            let sq_wk = pos.king_square(Color::White).inverse().index();
+            let new_sum = update_progress8kpabs_sum_diff(prev_sum, dirty, sq_bk, sq_wk, weights);
+            let entry = stack.current_mut();
+            entry.progress_sum = new_sum;
+            entry.computed_progress = true;
         }
 
         if !stack.current().computed_progress {
@@ -2215,11 +2213,7 @@ mod tests {
         for &sum in &[
             -10.0, -5.0, -3.0, -2.5, -1.5, -0.8, -0.3, 0.0, 0.3, 0.8, 1.5, 2.5, 3.0, 5.0, 10.0,
         ] {
-            assert_eq!(
-                sigmoid_bucket(sum),
-                threshold_bucket(sum),
-                "mismatch at sum={sum}"
-            );
+            assert_eq!(sigmoid_bucket(sum), threshold_bucket(sum), "mismatch at sum={sum}");
         }
     }
 
@@ -2245,7 +2239,9 @@ mod tests {
         let sum0 = compute_progress8kpabs_sum(&pos, &weights);
 
         // いくつかの手を実行して差分更新と全計算を比較
-        let moves_usi = ["7g7f", "3c3d", "2g2f", "8c8d", "2f2e", "8d8e", "6i7h", "4a3b"];
+        let moves_usi = [
+            "7g7f", "3c3d", "2g2f", "8c8d", "2f2e", "8d8e", "6i7h", "4a3b",
+        ];
         let mut prev_sum = sum0;
 
         for &mv_str in &moves_usi {
@@ -2272,10 +2268,7 @@ mod tests {
                     (diff_sum - expected_sum).abs() < 1e-5,
                     "sum mismatch after {mv_str}: diff={diff_sum}, expected={expected_sum}"
                 );
-                assert_eq!(
-                    diff_bucket, expected_bucket,
-                    "bucket mismatch after {mv_str}"
-                );
+                assert_eq!(diff_bucket, expected_bucket, "bucket mismatch after {mv_str}");
 
                 prev_sum = diff_sum;
             }

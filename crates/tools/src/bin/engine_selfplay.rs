@@ -83,6 +83,14 @@ struct Cli {
     #[arg(long, default_value_t = 0)]
     byoyomi: u64,
 
+    /// Search depth limit (go depth N)
+    #[arg(long)]
+    depth: Option<u32>,
+
+    /// Search nodes limit (go nodes N)
+    #[arg(long)]
+    nodes: Option<u64>,
+
     /// Safety margin used when detecting timeouts
     #[arg(long, default_value_t = 1000)]
     timeout_margin_ms: u64,
@@ -205,7 +213,7 @@ struct Cli {
     /// ランダム性確保のため、序盤の定跡手順をスキップする
     #[arg(
         long,
-        default_value_t = 8,
+        default_value_t = 0,
         help = "Skip initial N plies (1 to N) for training data"
     )]
     skip_initial_ply: u32,
@@ -224,6 +232,11 @@ struct Cli {
     /// Number of concurrent worker threads
     #[arg(long, default_value_t = 1)]
     concurrency: usize,
+
+    /// 前回中断した自己対局セッションを再開する。
+    /// --out で指定した出力ファイルが存在する場合、完了済み対局数を検出して続きから実行する。
+    #[arg(long, default_value_t = false)]
+    resume: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -247,6 +260,10 @@ struct MetaSettings {
     binc: u64,
     winc: u64,
     byoyomi: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    depth: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    nodes: Option<u64>,
     timeout_margin_ms: u64,
     threads: usize,
     threads_black: usize,
@@ -708,6 +725,9 @@ struct WorkerConfig {
     binc: u64,
     winc: u64,
     byoyomi: u64,
+    // Depth/nodes limits
+    go_depth: Option<u32>,
+    go_nodes: Option<u64>,
     // Pass rights
     pass_rights_enabled: bool,
     pass_black: Option<u8>,
@@ -871,7 +891,8 @@ fn worker_main(
                     side,
                     engine_label: engine_label.to_string(),
                     pass_rights,
-                    go_depth: None,
+                    go_depth: cfg.go_depth,
+                    go_nodes: cfg.go_nodes,
                 };
                 type InfoCb<'a> = Box<dyn FnMut(&str, &SearchRequest<'_>) + 'a>;
                 let mut info_cb: Option<InfoCb<'_>> = if info_logger.is_some() {
@@ -1109,12 +1130,82 @@ fn worker_main(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Resume support
+// ---------------------------------------------------------------------------
+
+/// 前回中断した自己対局セッションの進捗状態
+struct ResumeState {
+    /// 完了済み対局数（max game_id ベース）
+    completed_games: u32,
+    black_wins: u32,
+    white_wins: u32,
+    draws: u32,
+}
+
+/// 既存の JSONL 出力ファイルを解析し、完了済み対局数と勝敗を取得する。
+/// ワーカー並行実行で result 行の順序が保証されないため、game_id の最大値を
+/// completed_games とする。
+fn parse_resume_state(path: &Path) -> Result<ResumeState> {
+    let file = File::open(path)
+        .with_context(|| format!("failed to open {} for resume", path.display()))?;
+    let reader = BufReader::new(file);
+
+    let mut max_game_id: u32 = 0;
+    let mut black_wins: u32 = 0;
+    let mut white_wins: u32 = 0;
+    let mut draws: u32 = 0;
+    let mut last_parse_error = false;
+
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: Value = match serde_json::from_str(trimmed) {
+            Ok(v) => {
+                last_parse_error = false;
+                v
+            }
+            Err(_) => {
+                // 最終行の不完全な書き込みを許容
+                last_parse_error = true;
+                continue;
+            }
+        };
+        if value.get("type").and_then(|v| v.as_str()) != Some("result") {
+            continue;
+        }
+        if let Some(gid) = value.get("game_id").and_then(|v| v.as_u64()) {
+            max_game_id = max_game_id.max(gid as u32);
+        }
+        match value.get("outcome").and_then(|v| v.as_str()) {
+            Some("black_win") => black_wins += 1,
+            Some("white_win") => white_wins += 1,
+            Some("draw") => draws += 1,
+            _ => {}
+        }
+    }
+
+    // 最終行以外でパースエラーが起きた場合の警告は不要（last_parse_error は最終行のみ）
+    let _ = last_parse_error;
+
+    Ok(ResumeState {
+        completed_games: max_game_id,
+        black_wins,
+        white_wins,
+        draws,
+    })
+}
+
 /// Concatenate worker temp files.
 /// `append=true`: append to existing file (for JSONL with meta line).
 /// `append=false`: create new file.
 fn concatenate_temp_files(final_path: &Path, temp_paths: &[PathBuf], append: bool) -> Result<()> {
     let mut out: File = if append {
         std::fs::OpenOptions::new()
+            .create(true)
             .append(true)
             .open(final_path)
             .with_context(|| format!("failed to open {} for appending", final_path.display()))?
@@ -1138,8 +1229,15 @@ fn concatenate_temp_files(final_path: &Path, temp_paths: &[PathBuf], append: boo
 fn main() -> Result<()> {
     let mut cli = Cli::parse();
 
-    // 時間制限のバリデーション: すべて0の場合は無限思考モードになりタイムアウト問題が発生するため警告
-    if cli.btime == 0 && cli.wtime == 0 && cli.byoyomi == 0 && cli.binc == 0 && cli.winc == 0 {
+    // 時間制限のバリデーション: depth/nodes 指定がなく時間制御もない場合はデフォルト byoyomi を設定
+    let has_limit = cli.depth.is_some() || cli.nodes.is_some();
+    if !has_limit
+        && cli.btime == 0
+        && cli.wtime == 0
+        && cli.byoyomi == 0
+        && cli.binc == 0
+        && cli.winc == 0
+    {
         eprintln!(
             "Warning: No time control specified. Using default byoyomi=1000ms to prevent infinite thinking."
         );
@@ -1199,6 +1297,34 @@ fn main() -> Result<()> {
     let timestamp = Local::now();
     let output_path = resolve_output_path(cli.out.as_deref(), &timestamp);
     let info_path = output_path.with_extension("info.jsonl");
+
+    // --resume バリデーションと進捗読み取り
+    let resume_state = if cli.resume {
+        if cli.out.is_none() {
+            bail!(
+                "--resume には --out の指定が必要です（自動生成パスでは前回のファイルを特定できません）"
+            );
+        }
+        if !output_path.exists() {
+            bail!("--resume: 出力ファイルが見つかりません: {}", output_path.display());
+        }
+        let state = parse_resume_state(&output_path)?;
+        if state.completed_games >= cli.games {
+            println!(
+                "全{}局が完了済みです（black {} / white {} / draw {}）。再開は不要です。",
+                state.completed_games, state.black_wins, state.white_wins, state.draws,
+            );
+            return Ok(());
+        }
+        println!(
+            "Resuming: {}/{}局完了済み（black {} / white {} / draw {}）",
+            state.completed_games, cli.games, state.black_wins, state.white_wins, state.draws,
+        );
+        Some(state)
+    } else {
+        None
+    };
+    let resume_offset = resume_state.as_ref().map_or(0, |s| s.completed_games);
 
     if let Some(parent) = output_path.parent()
         && !parent.as_os_str().is_empty()
@@ -1299,8 +1425,8 @@ fn main() -> Result<()> {
     let pass_rights_enabled =
         cli.pass_rights_black.is_some() || cli.pass_rights_white.is_some() || pass_rights_via_usi;
 
-    // Write meta line to final JSONL
-    {
+    // Write meta line to final JSONL (resume時はスキップ: 既にメタ行が存在する)
+    if !cli.resume {
         let mut writer = BufWriter::new(
             File::create(&output_path)
                 .with_context(|| format!("failed to open {}", output_path.display()))?,
@@ -1316,6 +1442,8 @@ fn main() -> Result<()> {
                 binc: cli.binc,
                 winc: cli.winc,
                 byoyomi: cli.byoyomi,
+                depth: cli.depth,
+                nodes: cli.nodes,
                 timeout_margin_ms: cli.timeout_margin_ms,
                 threads: cli.threads,
                 threads_black,
@@ -1367,7 +1495,7 @@ fn main() -> Result<()> {
 
     // Pre-generate all game tickets with startpos indices
     let mut rng = rand::rng();
-    let tickets: Vec<GameTicket> = (0..cli.games)
+    let tickets: Vec<GameTicket> = (resume_offset..cli.games)
         .map(|game_idx| {
             let startpos_idx = if cli.random_startpos {
                 rng.random_range(0..start_defs.len())
@@ -1472,6 +1600,8 @@ fn main() -> Result<()> {
             binc: cli.binc,
             winc: cli.winc,
             byoyomi: cli.byoyomi,
+            go_depth: cli.depth,
+            go_nodes: cli.nodes,
             pass_rights_enabled,
             pass_black: if pass_rights_enabled {
                 Some(cli.pass_rights_black.unwrap_or(usi_initial_pass_count))
@@ -1506,10 +1636,10 @@ fn main() -> Result<()> {
     // Main loop: dispatch tickets and collect results
     let mut ticket_iter = tickets.into_iter();
     let mut next_ticket = ticket_iter.next();
-    let mut completed = 0u32;
-    let mut black_wins = 0u32;
-    let mut white_wins = 0u32;
-    let mut draws = 0u32;
+    let mut completed = resume_offset;
+    let mut black_wins = resume_state.as_ref().map_or(0, |s| s.black_wins);
+    let mut white_wins = resume_state.as_ref().map_or(0, |s| s.white_wins);
+    let mut draws = resume_state.as_ref().map_or(0, |s| s.draws);
 
     let handle_result = |result: WorkerGameResult,
                          black_wins: &mut u32,
@@ -1592,25 +1722,27 @@ fn main() -> Result<()> {
     }
 
     // Concatenate temp files into final outputs
+    // resume時は既存ファイルに追記する
+    let append_mode = cli.resume;
     concatenate_temp_files(&output_path, &temp_jsonl_paths, true)?;
 
     if cli.log_info && !temp_info_paths.is_empty() {
-        concatenate_temp_files(&info_path, &temp_info_paths, false)?;
+        concatenate_temp_files(&info_path, &temp_info_paths, append_mode)?;
     }
     if cli.emit_eval_file && !temp_eval_paths.is_empty() {
         let eval_path = default_eval_path(&output_path);
-        concatenate_temp_files(&eval_path, &temp_eval_paths, false)?;
+        concatenate_temp_files(&eval_path, &temp_eval_paths, append_mode)?;
     }
     if cli.emit_metrics && !temp_metrics_paths.is_empty() {
         let metrics_path = default_metrics_path(&output_path);
-        concatenate_temp_files(&metrics_path, &temp_metrics_paths, false)?;
+        concatenate_temp_files(&metrics_path, &temp_metrics_paths, append_mode)?;
     }
     if training_data_enabled && !temp_pack_paths.is_empty() {
         let pack_path = training_data_path
             .as_ref()
             .cloned()
             .unwrap_or_else(|| default_training_data_path(&output_path));
-        concatenate_temp_files(&pack_path, &temp_pack_paths, false)?;
+        concatenate_temp_files(&pack_path, &temp_pack_paths, append_mode)?;
     }
 
     // 最終サマリー
@@ -1750,9 +1882,8 @@ fn resolve_output_path(out: Option<&Path>, timestamp: &chrono::DateTime<Local>) 
     if let Some(path) = out {
         return path.to_path_buf();
     }
-    let dir = PathBuf::from("runs/selfplay");
-    let name = format!("{}-selfplay.jsonl", timestamp.format("%Y%m%d-%H%M%S"));
-    dir.join(name)
+    let dir = PathBuf::from("runs/selfplay").join(timestamp.format("%Y%m%d-%H%M%S").to_string());
+    dir.join("selfplay.jsonl")
 }
 
 fn default_kif_path(jsonl: &Path) -> PathBuf {
