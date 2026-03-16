@@ -129,22 +129,27 @@ pub fn parse_rating_page(html: &str) -> Vec<(String, f64)> {
     for line in html.lines() {
         let s = line.trim();
         // <a id="popupN" href="...">NAME</a>
-        if s.starts_with("<a id=\"popup") && s.ends_with("</a>")
-            && let Some(gt_pos) = s.rfind("\">") {
-                let name = &s[gt_pos + 2..s.len() - 4];
-                if !name.is_empty() {
-                    pending_name = Some(name.to_string());
-                }
+        if s.starts_with("<a id=\"popup")
+            && s.ends_with("</a>")
+            && let Some(gt_pos) = s.rfind("\">")
+        {
+            let name = &s[gt_pos + 2..s.len() - 4];
+            if !name.is_empty() {
+                pending_name = Some(name.to_string());
             }
+        }
         // <span id="popupN"> RATING</span>
-        if s.starts_with("<span id=\"popup") && s.ends_with("</span>")
-            && let Some(gt_pos) = s.find("\">") {
-                let val_str = &s[gt_pos + 2..s.len() - 7];
-                if let Ok(rating) = val_str.trim().parse::<f64>()
-                    && let Some(name) = pending_name.take() {
-                        results.push((name, rating));
-                    }
+        if s.starts_with("<span id=\"popup")
+            && s.ends_with("</span>")
+            && let Some(gt_pos) = s.find("\">")
+        {
+            let val_str = &s[gt_pos + 2..s.len() - 7];
+            if let Ok(rating) = val_str.trim().parse::<f64>()
+                && let Some(name) = pending_name.take()
+            {
+                results.push((name, rating));
             }
+        }
     }
     results
 }
