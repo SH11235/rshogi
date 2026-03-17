@@ -1294,24 +1294,7 @@ where
 
     if worker.state.root_moves.is_empty() {
         worker.state.best_move = Move::NONE;
-        #[cfg(debug_assertions)]
-        if is_main {
-            eprintln!(
-                "iterative_deepening: root_moves is empty (search_moves_len={}, side_to_move={:?})",
-                limits.search_moves.len(),
-                pos.side_to_move()
-            );
-        }
         return 0;
-    }
-
-    #[cfg(debug_assertions)]
-    if is_main {
-        eprintln!(
-            "iterative_deepening: root_moves_len={} first_move={}",
-            worker.state.root_moves.len(),
-            worker.state.root_moves.get(0).map(|rm| rm.mv().to_usi()).unwrap_or_default()
-        );
     }
 
     // 合法手が1つの場合は500ms上限を適用
