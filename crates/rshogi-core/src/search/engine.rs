@@ -1316,6 +1316,12 @@ where
     // ヘルパー用のローカル search_again_counter
     let mut local_search_again_counter: i32 = 0;
 
+    // 反復深化ループ開始前に best_move を初期化
+    // nodes 制限等で depth 1 完了前に abort された場合でも有効な手を返すため
+    if !worker.state.root_moves.is_empty() {
+        worker.state.best_move = worker.state.root_moves[0].mv();
+    }
+
     // 反復深化ループ
     for depth in 1..=max_depth {
         if worker.state.abort {
@@ -1345,18 +1351,6 @@ where
             if depth > 1 && !is_pondering && time_manager.should_stop(depth) {
                 break;
             }
-        }
-
-        #[cfg(debug_assertions)]
-        if is_main && depth <= 2 {
-            eprintln!(
-                "iterative_deepening: depth={} nodes={} search_end={} max_time={} stop_requested={}",
-                depth,
-                worker.state.nodes,
-                time_manager.search_end(),
-                time_manager.maximum(),
-                time_manager.stop_requested()
-            );
         }
 
         // 詰みを読みきった場合の早期終了
@@ -1430,7 +1424,15 @@ where
                 // aspiration loop 内ソート
                 worker.state.root_moves.stable_sort_range(pv_idx, worker.state.root_moves.len());
 
-                if worker.state.abort {
+                // nodes 制限等で探索が中断された場合の停止判定
+                // abort フラグに加え、nodes 制限超過も直接チェックする
+                // （check_abort は頻度制御で呼び出されるため、abort フラグが
+                //   立っていないまま search_root が返ることがある）
+                if worker.state.abort
+                    || (limits.nodes > 0 && worker.state.nodes >= limits.nodes)
+                    || time_manager.stop_requested()
+                {
+                    worker.state.abort = true;
                     break;
                 }
 
