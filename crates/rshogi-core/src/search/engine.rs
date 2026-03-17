@@ -182,7 +182,7 @@ pub struct SearchResult {
 ///
 /// USIプロトコルから呼び出すための主要インターフェース。
 /// デフォルトのEvalHashサイズ（MB）
-pub const DEFAULT_EVAL_HASH_SIZE_MB: usize = 256;
+pub const DEFAULT_EVAL_HASH_SIZE_MB: usize = 64;
 
 pub struct Search {
     /// 置換表
