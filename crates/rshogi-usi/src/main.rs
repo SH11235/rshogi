@@ -327,7 +327,10 @@ impl UsiEngine {
         set_eval_hash_enabled(use_eval_hash);
 
         Self {
-            search: Some(Search::new(tt_size_mb)), // デフォルト256MB
+            // EvalHash は最初の `go` 直前まで遅延確保する。
+            // selfplay のように起動直後に setoption でサイズを下げるケースで、
+            // 先に既定 256MB を確保してしまう無駄を避ける。
+            search: Some(Search::new_with_eval_hash(tt_size_mb, 0)),
             position: Position::new(),
             tt_size_mb,
             eval_hash_size_mb,
@@ -949,7 +952,13 @@ impl UsiEngine {
         // 探索を別スレッドで開始（千日手判定のため履歴ごと複製する）
         let mut pos = self.position.clone();
 
-        let mut search = self.search.take().unwrap_or_else(|| Search::new(self.tt_size_mb));
+        let mut search = self
+            .search
+            .take()
+            .unwrap_or_else(|| Search::new_with_eval_hash(self.tt_size_mb, self.eval_hash_size_mb));
+        if search.eval_hash_size_mb() != self.eval_hash_size_mb {
+            search.resize_eval_hash(self.eval_hash_size_mb);
+        }
         search.set_skill_options(self.skill_options);
         let stop_flag = search.stop_flag();
         let ponderhit_flag = search.ponderhit_flag();
@@ -1147,7 +1156,8 @@ impl UsiEngine {
                 }
                 Err(_) => {
                     eprintln!("info string search thread panicked, resetting Search");
-                    let mut search = Search::new(self.tt_size_mb);
+                    let mut search =
+                        Search::new_with_eval_hash(self.tt_size_mb, self.eval_hash_size_mb);
                     search.set_skill_options(self.skill_options);
                     self.search = Some(search);
                 }

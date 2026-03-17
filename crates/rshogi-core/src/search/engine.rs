@@ -642,8 +642,17 @@ impl Search {
     /// # Arguments
     /// * `tt_size_mb` - 置換表のサイズ（MB）
     pub fn new(tt_size_mb: usize) -> Self {
+        Self::new_with_eval_hash(tt_size_mb, DEFAULT_EVAL_HASH_SIZE_MB)
+    }
+
+    /// 新しいSearchを作成し、EvalHashサイズも同時に指定する。
+    ///
+    /// # Arguments
+    /// * `tt_size_mb` - 置換表のサイズ（MB）
+    /// * `eval_hash_size_mb` - EvalHash のサイズ（MB）
+    pub fn new_with_eval_hash(tt_size_mb: usize, eval_hash_size_mb: usize) -> Self {
         let tt = Arc::new(TranspositionTable::new(tt_size_mb));
-        let eval_hash = Arc::new(EvalHash::new(DEFAULT_EVAL_HASH_SIZE_MB));
+        let eval_hash = Arc::new(EvalHash::new(eval_hash_size_mb));
         let stop = Arc::new(AtomicBool::new(false));
         let ponderhit_flag = Arc::new(AtomicBool::new(false));
         let increase_depth_shared = Arc::new(AtomicBool::new(true));
@@ -664,7 +673,7 @@ impl Search {
             tt,
             eval_hash,
             tt_size_mb,
-            eval_hash_size_mb: DEFAULT_EVAL_HASH_SIZE_MB,
+            eval_hash_size_mb,
             stop,
             ponderhit_flag,
             start_time: None,
@@ -742,6 +751,11 @@ impl Search {
     /// EvalHashへの参照を取得
     pub fn eval_hash(&self) -> Arc<EvalHash> {
         Arc::clone(&self.eval_hash)
+    }
+
+    /// EvalHashの現在サイズ（MB）を返す。
+    pub fn eval_hash_size_mb(&self) -> usize {
+        self.eval_hash_size_mb
     }
 
     /// 履歴統計をクリア（usinewgame時に呼び出し）

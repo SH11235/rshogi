@@ -701,6 +701,23 @@ struct GameTicket {
     startpos_idx: usize,
 }
 
+fn make_game_ticket<R: Rng + ?Sized>(
+    game_idx: u32,
+    random_startpos: bool,
+    startpos_count: usize,
+    rng: &mut R,
+) -> GameTicket {
+    let startpos_idx = if random_startpos {
+        rng.random_range(0..startpos_count)
+    } else {
+        (game_idx as usize) % startpos_count
+    };
+    GameTicket {
+        game_idx,
+        startpos_idx,
+    }
+}
+
 struct WorkerGameResult {
     outcome: GameOutcome,
     outcome_reason: String,
@@ -1506,21 +1523,10 @@ fn main() -> Result<()> {
         writer.flush()?;
     }
 
-    // Pre-generate all game tickets with startpos indices
+    // ゲームチケットは逐次生成する。
+    // `--games` が極端に大きい場合でも O(1) メモリで dispatch できるようにする。
     let mut rng = rand::rng();
-    let tickets: Vec<GameTicket> = (resume_offset..cli.games)
-        .map(|game_idx| {
-            let startpos_idx = if cli.random_startpos {
-                rng.random_range(0..start_defs.len())
-            } else {
-                (game_idx as usize) % start_defs.len()
-            };
-            GameTicket {
-                game_idx,
-                startpos_idx,
-            }
-        })
-        .collect();
+    let startpos_count = start_defs.len();
 
     // Compute temp file paths per worker
     let output_stem = output_path.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
@@ -1653,8 +1659,9 @@ fn main() -> Result<()> {
     drop(result_tx);
 
     // Main loop: dispatch tickets and collect results
-    let mut ticket_iter = tickets.into_iter();
-    let mut next_ticket = ticket_iter.next();
+    let mut next_game_idx = resume_offset;
+    let mut next_ticket = (next_game_idx < cli.games)
+        .then(|| make_game_ticket(next_game_idx, cli.random_startpos, startpos_count, &mut rng));
     let mut completed = resume_offset;
     let mut black_wins = resume_state.as_ref().map_or(0, |s| s.black_wins);
     let mut white_wins = resume_state.as_ref().map_or(0, |s| s.white_wins);
@@ -1705,7 +1712,15 @@ fn main() -> Result<()> {
                 chan::select! {
                     send(ticket_tx, Some(t.clone())) -> res => {
                         if res.is_ok() {
-                            next_ticket = ticket_iter.next();
+                            next_game_idx += 1;
+                            next_ticket = (next_game_idx < cli.games).then(|| {
+                                make_game_ticket(
+                                    next_game_idx,
+                                    cli.random_startpos,
+                                    startpos_count,
+                                    &mut rng,
+                                )
+                            });
                         }
                     }
                     recv(result_rx) -> result => {
@@ -2432,6 +2447,7 @@ mod tests {
     use super::*;
 
     use clap::Parser;
+    use rand::{SeedableRng, rngs::StdRng};
     use std::path::PathBuf;
 
     #[test]
@@ -2462,5 +2478,23 @@ mod tests {
         assert_eq!(paths.white.path, PathBuf::from("/shared/path/engine-usi"));
         assert_eq!(paths.black.source, "cli");
         assert_eq!(paths.white.source, "cli");
+    }
+
+    #[test]
+    fn make_game_ticket_cycles_startpos_indices_when_not_random() {
+        let mut rng = StdRng::seed_from_u64(1);
+        let tickets: Vec<_> = (0..6)
+            .map(|game_idx| make_game_ticket(game_idx, false, 4, &mut rng).startpos_idx)
+            .collect();
+        assert_eq!(tickets, vec![0, 1, 2, 3, 0, 1]);
+    }
+
+    #[test]
+    fn make_game_ticket_random_startpos_stays_in_range() {
+        let mut rng = StdRng::seed_from_u64(1);
+        for game_idx in 0..128 {
+            let ticket = make_game_ticket(game_idx, true, 5, &mut rng);
+            assert!(ticket.startpos_idx < 5);
+        }
     }
 }
