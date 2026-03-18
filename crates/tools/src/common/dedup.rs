@@ -3,6 +3,70 @@
 use crate::common::sfen::normalize_4t;
 use crate::common::sfen_ops::canonicalize_4t_with_mirror;
 use std::collections::HashSet;
+use std::io;
+use std::path::PathBuf;
+
+/// PackedSfenValue のレコードサイズ（バイト）
+pub const PSV_SIZE: usize = 40;
+/// PackedSfen 部分のサイズ（バイト）
+pub const SFEN_SIZE: usize = 32;
+
+/// PackedSfen（32バイト）の FNV-1a 64bit ハッシュ
+pub fn hash_packed_sfen(sfen: &[u8; SFEN_SIZE]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in sfen.iter() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// PSV レコードから game_ply を取得（offset 36, u16 LE）
+pub fn game_ply_from_record(record: &[u8; PSV_SIZE]) -> u16 {
+    u16::from_le_bytes([record[36], record[37]])
+}
+
+/// `--input` (カンマ区切り) または `--input-dir` + `--pattern` からファイル一覧を収集する。
+pub fn collect_input_paths(
+    input: Option<&str>,
+    input_dir: Option<&PathBuf>,
+    pattern: &str,
+) -> io::Result<Vec<PathBuf>> {
+    match (input, input_dir) {
+        (Some(_), Some(_)) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--data/--input と --input-dir は同時に指定できません",
+        )),
+        (None, None) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--data/--input または --input-dir のいずれかを指定してください",
+        )),
+        (Some(data), None) => {
+            let paths: Vec<PathBuf> = data
+                .split(',')
+                .map(|s| PathBuf::from(s.trim()))
+                .filter(|p| p.exists())
+                .collect();
+            Ok(paths)
+        }
+        (None, Some(dir)) => {
+            let pat = glob::Pattern::new(pattern).map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidInput, format!("無効な glob パターン: {e}"))
+            })?;
+            let mut paths: Vec<PathBuf> = walkdir::WalkDir::new(dir)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+                .filter(|e| {
+                    e.path().file_name().and_then(|n| n.to_str()).is_some_and(|n| pat.matches(n))
+                })
+                .map(|e| e.into_path())
+                .collect();
+            paths.sort();
+            Ok(paths)
+        }
+    }
+}
 
 /// In-memory de-duplicator keyed by 4-token SFEN or mirror-canonicalized 4-token SFEN.
 pub struct DedupSet {
