@@ -22,6 +22,19 @@ pub struct EvalLog {
     pub pv: Option<Vec<String>>,
 }
 
+/// USI info 行から抽出した MultiPV 候補
+#[derive(Debug, Clone)]
+pub struct UsiMultiPvCandidate {
+    /// MultiPV 番号（1-indexed）
+    pub multipv: u32,
+    /// 評価値（centipawns）
+    pub score_cp: Option<i32>,
+    /// 詰みスコア（手数）
+    pub score_mate: Option<i32>,
+    /// PV の先頭手（USI 文字列）
+    pub first_move_usi: String,
+}
+
 #[derive(Default, Clone)]
 pub struct InfoSnapshot {
     pub score_cp: Option<i32>,
@@ -32,15 +45,22 @@ pub struct InfoSnapshot {
     pub time_ms: Option<u64>,
     pub nps: Option<u64>,
     pub pv: Vec<String>,
+    /// MultiPV 候補（multipv index で上書き）
+    pub multipv_candidates: Vec<UsiMultiPvCandidate>,
 }
 
 impl InfoSnapshot {
-    /// info 行を解析し、multipv=1 の情報を保持する。
+    /// info 行を解析する。
+    ///
+    /// - multipv=1 の情報はメインフィールドを更新する
+    /// - 全 multipv の候補を `multipv_candidates` に蓄積する（同一 multipv は上書き）
     pub fn update_from_line(&mut self, line: &str) {
         let tokens: Vec<&str> = line.split_whitespace().collect();
         if tokens.first().copied() != Some("info") {
             return;
         }
+
+        // multipv 番号を抽出
         let mut multipv = 1u32;
         let mut idx = 1;
         while idx + 1 < tokens.len() {
@@ -50,39 +70,47 @@ impl InfoSnapshot {
             }
             idx += 1;
         }
-        if multipv != 1 {
-            return;
-        }
+
+        // score と pv を抽出（全 multipv 共通のパース）
+        let mut score_cp: Option<i32> = None;
+        let mut score_mate: Option<i32> = None;
+        let mut depth: Option<u32> = None;
+        let mut seldepth: Option<u32> = None;
+        let mut nodes: Option<u64> = None;
+        let mut time_ms: Option<u64> = None;
+        let mut nps: Option<u64> = None;
+        let mut pv: Vec<String> = Vec::new();
+
         let mut i = 1;
         while i < tokens.len() {
             match tokens[i] {
                 "depth" => {
                     if i + 1 < tokens.len() {
-                        self.depth = tokens[i + 1].parse::<u32>().ok();
+                        depth = tokens[i + 1].parse::<u32>().ok();
                         i += 1;
                     }
                 }
                 "seldepth" => {
                     if i + 1 < tokens.len() {
-                        self.seldepth = tokens[i + 1].parse::<u32>().ok();
+                        seldepth = tokens[i + 1].parse::<u32>().ok();
                         i += 1;
                     }
                 }
                 "nodes" => {
                     if i + 1 < tokens.len() {
-                        self.nodes = tokens[i + 1].parse::<u64>().ok();
+                        nodes = tokens[i + 1].parse::<u64>().ok();
                         i += 1;
                     }
                 }
                 "time" => {
                     if i + 1 < tokens.len() {
-                        self.time_ms = tokens[i + 1].parse::<u64>().ok();
+                        time_ms = tokens[i + 1].parse::<u64>().ok();
                         i += 1;
                     }
                 }
                 "nps" => {
                     if i + 1 < tokens.len() {
-                        self.nps = tokens[i + 1].parse::<u64>().ok();
+                        nps = tokens[i + 1].parse::<u64>().ok();
                         i += 1;
                     }
                 }
@@ -90,13 +118,13 @@ impl InfoSnapshot {
                     if i + 2 < tokens.len() {
                         match tokens[i + 1] {
                             "cp" => {
-                                self.score_cp = tokens[i + 2].parse::<i32>().ok();
-                                self.score_mate = None;
+                                score_cp = tokens[i + 2].parse::<i32>().ok();
+                                score_mate = None;
                                 i += 2;
                             }
                             "mate" => {
-                                self.score_mate = tokens[i + 2].parse::<i32>().ok();
-                                self.score_cp = None;
+                                score_mate = tokens[i + 2].parse::<i32>().ok();
+                                score_cp = None;
                                 i += 2;
                             }
                             _ => {}
@@ -104,20 +132,59 @@ impl InfoSnapshot {
                     }
                 }
                 "pv" => {
-                    let mut pv = Vec::new();
                     let mut j = i + 1;
                     while j < tokens.len() {
                         pv.push(tokens[j].to_string());
                         j += 1;
-                    }
-                    if !pv.is_empty() {
-                        self.pv = pv;
                     }
                     break;
                 }
                 _ => {}
             }
             i += 1;
+        }
+
+        // multipv=1 はメインフィールドも更新
+        if multipv == 1 {
+            if depth.is_some() {
+                self.depth = depth;
+            }
+            if seldepth.is_some() {
+                self.seldepth = seldepth;
+            }
+            if nodes.is_some() {
+                self.nodes = nodes;
+            }
+            if time_ms.is_some() {
+                self.time_ms = time_ms;
+            }
+            if nps.is_some() {
+                self.nps = nps;
+            }
+            if score_cp.is_some() || score_mate.is_some() {
+                self.score_cp = score_cp;
+                self.score_mate = score_mate;
+            }
+            if !pv.is_empty() {
+                self.pv = pv.clone();
+            }
+        }
+
+        // MultiPV 候補として蓄積（PV がある場合のみ）
+        if !pv.is_empty() && (score_cp.is_some() || score_mate.is_some()) {
+            let candidate = UsiMultiPvCandidate {
+                multipv,
+                score_cp,
+                score_mate,
+                first_move_usi: pv[0].clone(),
+            };
+            if let Some(existing) =
+                self.multipv_candidates.iter_mut().find(|c| c.multipv == multipv)
+            {
+                *existing = candidate;
+            } else {
+                self.multipv_candidates.push(candidate);
+            }
         }
     }
 
@@ -232,8 +299,31 @@ mod tests {
         assert_eq!(snap.score_mate, None);
         assert_eq!(snap.pv, vec!["7g7f".to_string(), "3c3d".to_string()]);
 
-        // multipv != 1 は無視される
+        // multipv=1 は multipv_candidates にも入る
+        assert_eq!(snap.multipv_candidates.len(), 1);
+        assert_eq!(snap.multipv_candidates[0].multipv, 1);
+        assert_eq!(snap.multipv_candidates[0].score_cp, Some(34));
+        assert_eq!(snap.multipv_candidates[0].first_move_usi, "7g7f");
+
+        // multipv != 1 はメインフィールドを更新しないが候補には追加される
         snap.update_from_line("info multipv 2 depth 20 score cp 100 pv 2g2f");
-        assert_eq!(snap.depth, Some(10));
+        assert_eq!(snap.depth, Some(10)); // メインは変わらない
+        assert_eq!(snap.multipv_candidates.len(), 2);
+        assert_eq!(snap.multipv_candidates[1].multipv, 2);
+        assert_eq!(snap.multipv_candidates[1].score_cp, Some(100));
+        assert_eq!(snap.multipv_candidates[1].first_move_usi, "2g2f");
+    }
+
+    #[test]
+    fn info_snapshot_multipv_overwrites_same_index() {
+        let mut snap = InfoSnapshot::default();
+        snap.update_from_line("info multipv 1 depth 10 score cp 50 pv 7g7f");
+        snap.update_from_line("info multipv 2 depth 10 score cp 30 pv 2g2f");
+        snap.update_from_line("info multipv 1 depth 11 score cp 55 pv 7g7f 3c3d");
+        assert_eq!(snap.multipv_candidates.len(), 2);
+        // multipv=1 は上書きされている
+        assert_eq!(snap.multipv_candidates[0].score_cp, Some(55));
+        // multipv=2 は変わらない
+        assert_eq!(snap.multipv_candidates[1].score_cp, Some(30));
     }
 }

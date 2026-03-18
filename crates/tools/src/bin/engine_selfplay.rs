@@ -11,16 +11,21 @@ use chrono::Local;
 use clap::Parser;
 use crossbeam_channel as chan;
 use rand::Rng;
-use rshogi_core::movegen::is_legal_with_pass;
+use rand::seq::SliceRandom;
+use rshogi_core::movegen::{MoveList, generate_legal, is_legal_with_pass};
 use rshogi_core::position::Position;
 use rshogi_core::types::{Color, Move, PieceType, Square};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::atomic::AtomicU64;
 use tools::packed_sfen::{PackedSfenValue, move_to_move16, pack_position};
 use tools::selfplay::{
-    EngineConfig, EngineProcess, EvalLog, GameOutcome, ParsedPosition, SearchRequest, TimeControl,
-    build_position, load_start_positions, parse_position_line, side_label,
+    EngineConfig, EngineProcess, EvalLog, GameEngines, GameOutcome, NativeBackend, ParsedPosition,
+    SearchParams, TimeControl, UsiBackend, build_position, load_start_positions,
+    parse_position_line, side_label,
 };
+
+const DEFAULT_EVAL_HASH_SIZE_MB: usize = 64;
 
 /// engine-usi 同士の自己対局ハーネス。時間管理と info ログ収集を最小限に実装する。
 ///
@@ -239,7 +244,8 @@ struct Cli {
     no_kif: bool,
 
     /// 教師データ生成に特化したモードで実行する。
-    /// 以下を一括設定: KIF出力無効、summaryファイル無効、JSONLをresult行のみに簡素化。
+    /// 以下を一括設定: KIF出力無効、summaryファイル無効、JSONLをresult行のみに簡素化、
+    /// NativeBackend使用（rshogi-core直接呼び出し）。
     /// 学習データ（.psv）出力は有効のまま。
     #[arg(long, default_value_t = false)]
     for_train: bool,
@@ -248,6 +254,63 @@ struct Cli {
     /// --out で指定した出力ファイルが存在する場合、完了済み対局数を検出して続きから実行する。
     #[arg(long, default_value_t = false)]
     resume: bool,
+
+    // =========================================================================
+    // gensfen 重複回避オプション
+    // =========================================================================
+    /// rshogi-core を直接呼び出す NativeBackend を使用する（USI プロセスを起動しない）。
+    /// --for-train 時はデフォルト有効。--native=false で USI モードを強制。
+    /// --eval-file の指定が必要。
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    native: Option<bool>,
+
+    /// NNUE 評価関数ファイルのパス（NativeBackend で使用）
+    #[arg(long)]
+    eval_file: Option<PathBuf>,
+
+    /// 置換表を対局間で保持する（TT をクリアしない）。
+    /// tanuki- は毎対局クリアするため、デフォルト false。実験用。
+    /// --keep-tt=true で有効化、--keep-tt=false で明示的に無効化。
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    keep_tt: Option<bool>,
+
+    /// ハッシュベース重複検出のテーブルサイズ（エントリ数）。0 で無効。
+    /// --for-train 時のデフォルト: 67108864 (64M entries, 512MB)。
+    #[arg(long)]
+    dedup_hash_size: Option<u64>,
+
+    /// 開始局面を重複なしで消費する（シャッフル + pop 方式）。
+    /// --for-train 時はデフォルト有効。--startpos-no-repeat=false で無効化。
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    startpos_no_repeat: Option<bool>,
+
+    /// MultiPV ランダム選択の候補数。0 で無効。
+    /// デフォルト: 0（無効）。有効にするには --random-multi-pv 4 等を指定。
+    #[arg(long)]
+    random_multi_pv: Option<u32>,
+
+    /// MultiPV ランダム選択の評価値差閾値（centipawns）。
+    /// PV1 のスコアとの差がこの値以内の候補からランダム選択する。
+    #[arg(long, default_value_t = 32000)]
+    random_multi_pv_diff: i32,
+
+    /// ランダムムーブの回数。0 で無効。
+    /// 序盤の指定範囲内で N 回、合法手からランダムに選択する。
+    #[arg(long, default_value_t = 0)]
+    random_move_count: u32,
+
+    /// ランダムムーブ適用範囲の最小手数
+    #[arg(long, default_value_t = 1)]
+    random_move_min_ply: u32,
+
+    /// ランダムムーブ適用範囲の最大手数
+    #[arg(long, default_value_t = 24)]
+    random_move_max_ply: u32,
+
+    /// 開始局面シャッフルの乱数シード（--startpos-no-repeat 用）。
+    /// 省略時はランダム生成。resume 時は meta から復元される。
+    #[arg(long)]
+    shuffle_seed: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -307,6 +370,9 @@ struct MetaSettings {
     /// 後手の初期パス権数（パス権有効時のみ使用）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     initial_pass_count_white: Option<u8>,
+    /// 開始局面シャッフルの乱数シード（--startpos-no-repeat 用）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shuffle_seed: Option<u64>,
 }
 
 fn default_skip_in_check() -> bool {
@@ -528,6 +594,11 @@ impl TrainingDataCollector {
         self.entries.clear();
     }
 
+    /// 現在蓄積中のエントリ数
+    fn entries_len(&self) -> usize {
+        self.entries.len()
+    }
+
     /// 局面を記録（game_resultは後で設定）
     /// 注: game_plyとスキップ判定はpos.game_ply()を使用する
     /// （startpos+movesやSFEN手数指定のケースに対応するため）
@@ -646,6 +717,131 @@ impl TrainingDataCollector {
             self.skipped_in_progress,
         )
     }
+}
+
+// =============================================================================
+// gensfen ユーティリティ型
+// =============================================================================
+
+/// ハッシュベース重複検出テーブル（tanuki- section 2-1 と同方式）
+///
+/// Zobrist ハッシュを衝突時上書き方式で記録する。
+/// 重複検出時はそれまでの蓄積エントリをクリアし、対局は続行する。
+///
+/// tanuki- と同じく全スレッドで1つのテーブルを共有する（`Arc` で配布）。
+/// `AtomicU64` + `Relaxed` ordering でロックフリーアクセス。
+/// レース条件は許容: 最悪ケースは重複の見逃しだが、上書き方式なので致命的ではない。
+struct SharedDedupHash {
+    table: Vec<std::sync::atomic::AtomicU64>,
+    mask: u64,
+}
+
+impl SharedDedupHash {
+    fn new(size: u64) -> Self {
+        let size = size.next_power_of_two();
+        let table: Vec<_> = (0..size).map(|_| AtomicU64::new(0)).collect();
+        Self {
+            table,
+            mask: size - 1,
+        }
+    }
+
+    /// 重複なら true を返し、新規なら挿入して false を返す
+    fn check_and_insert(&self, key: u64) -> bool {
+        // key=0 は未使用エントリと区別できないので特殊扱い
+        let effective_key = if key == 0 { 1 } else { key };
+        let idx = (effective_key & self.mask) as usize;
+        let old = self.table[idx].load(Ordering::Relaxed);
+        if old == effective_key {
+            return true;
+        }
+        self.table[idx].store(effective_key, Ordering::Relaxed);
+        false
+    }
+}
+
+/// 開始局面を重複なしで消費するためのシャッフル済みインデックス列
+///
+/// 専用の `StdRng`（seed 固定）を使うため、同じ seed + count から
+/// 同一の順列を再構築でき、resume 時に completed_games 分だけ
+/// `next()` を呼び進めれば正確な位置を復元できる。
+struct ShuffledStartpos {
+    indices: Vec<usize>,
+    cursor: usize,
+    rng: rand::rngs::StdRng,
+}
+
+impl ShuffledStartpos {
+    fn new(count: usize, seed: u64) -> Self {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let mut indices: Vec<usize> = (0..count).collect();
+        indices.shuffle(&mut rng);
+        Self {
+            indices,
+            cursor: 0,
+            rng,
+        }
+    }
+
+    fn next(&mut self) -> usize {
+        if self.cursor >= self.indices.len() {
+            self.indices.shuffle(&mut self.rng);
+            self.cursor = 0;
+        }
+        let idx = self.indices[self.cursor];
+        self.cursor += 1;
+        idx
+    }
+}
+
+/// MultiPV 候補からランダムに1手を選択する
+///
+/// PV1 のスコアとの差が `diff_threshold` 以内の候補からランダムに選択する。
+/// 候補がない場合は None を返す。
+fn select_multipv_random(
+    candidates: &[tools::selfplay::MultiPvCandidate],
+    diff_threshold: i32,
+    rng: &mut impl Rng,
+) -> Option<Move> {
+    if candidates.is_empty() {
+        return None;
+    }
+    let best = candidates.iter().find(|c| c.multipv == 1)?;
+    let best_score = best.score_cp;
+    let eligible: Vec<_> = candidates
+        .iter()
+        .filter(|c| (best_score - c.score_cp).abs() <= diff_threshold)
+        .collect();
+    debug_assert!(!eligible.is_empty(), "eligible must contain at least PV1 (diff_threshold >= 0)");
+    let selected = eligible[rng.random_range(0..eligible.len())];
+    Some(selected.first_move)
+}
+
+/// 指定範囲から N 個の手数をサンプリングする（重複なし）
+fn sample_random_move_plies(
+    min_ply: u32,
+    max_ply: u32,
+    count: u32,
+    rng: &mut impl Rng,
+) -> std::collections::HashSet<u32> {
+    use std::collections::HashSet;
+    let range_size = max_ply.saturating_sub(min_ply) + 1;
+    let count = count.min(range_size);
+    let mut plies = HashSet::with_capacity(count as usize);
+    if range_size <= count * 2 {
+        // 範囲が小さい場合はシャッフルしてから先頭 N 個
+        let mut all: Vec<u32> = (min_ply..=max_ply).collect();
+        all.shuffle(rng);
+        for &p in all.iter().take(count as usize) {
+            plies.insert(p);
+        }
+    } else {
+        while plies.len() < count as usize {
+            plies.insert(rng.random_range(min_ply..=max_ply));
+        }
+    }
+    plies
 }
 
 #[derive(Serialize)]
@@ -775,6 +971,17 @@ struct WorkerConfig {
     // Training
     skip_initial_ply: u32,
     skip_in_check: bool,
+    // gensfen: NativeBackend モード
+    native_mode: bool,
+    eval_hash_size_mb: usize,
+    // gensfen: 重複回避
+    keep_tt: bool,
+    dedup_hash: Option<Arc<SharedDedupHash>>,
+    random_multi_pv: u32,
+    random_multi_pv_diff: i32,
+    random_move_count: u32,
+    random_move_min_ply: u32,
+    random_move_max_ply: u32,
 }
 
 fn worker_main(
@@ -784,37 +991,48 @@ fn worker_main(
     shutdown: Arc<AtomicBool>,
 ) -> WorkerOutput {
     let run = || -> Result<WorkerOutput> {
-        // Spawn engines
-        let mut black = EngineProcess::spawn(
-            &EngineConfig {
-                path: cfg.engine_path_black.clone(),
-                args: cfg.black_args.clone(),
-                threads: cfg.threads_black,
-                hash_mb: cfg.hash_mb,
-                network_delay: cfg.network_delay,
-                network_delay2: cfg.network_delay2,
-                minimum_thinking_time: cfg.minimum_thinking_time,
-                slowmover: cfg.slowmover,
-                ponder: cfg.ponder,
-                usi_options: cfg.black_usi_opts.clone(),
-            },
-            format!("w{}-black", cfg.worker_id),
-        )?;
-        let mut white = EngineProcess::spawn(
-            &EngineConfig {
-                path: cfg.engine_path_white.clone(),
-                args: cfg.white_args.clone(),
-                threads: cfg.threads_white,
-                hash_mb: cfg.hash_mb,
-                network_delay: cfg.network_delay,
-                network_delay2: cfg.network_delay2,
-                minimum_thinking_time: cfg.minimum_thinking_time,
-                slowmover: cfg.slowmover,
-                ponder: cfg.ponder,
-                usi_options: cfg.white_usi_opts.clone(),
-            },
-            format!("w{}-white", cfg.worker_id),
-        )?;
+        // Create game engines (NativeBackend or UsiBackend)
+        let mut engines = if cfg.native_mode {
+            GameEngines::Native(Box::new(NativeBackend::new(
+                cfg.hash_mb as usize,
+                cfg.eval_hash_size_mb,
+            )))
+        } else {
+            let spawn_usi = |side: &str, args: &[String], usi_opts: &[String], threads: usize| {
+                let mut engine = EngineProcess::spawn(
+                    &EngineConfig {
+                        path: if side == "black" {
+                            cfg.engine_path_black.clone()
+                        } else {
+                            cfg.engine_path_white.clone()
+                        },
+                        args: args.to_vec(),
+                        threads,
+                        hash_mb: cfg.hash_mb,
+                        network_delay: cfg.network_delay,
+                        network_delay2: cfg.network_delay2,
+                        minimum_thinking_time: cfg.minimum_thinking_time,
+                        slowmover: cfg.slowmover,
+                        ponder: cfg.ponder,
+                        usi_options: usi_opts.to_vec(),
+                    },
+                    format!("w{}-{}", cfg.worker_id, side),
+                )?;
+                // MultiPV 設定
+                if cfg.random_multi_pv > 1 {
+                    engine.set_option_if_available("MultiPV", &cfg.random_multi_pv.to_string())?;
+                }
+                Ok::<_, anyhow::Error>(engine)
+            };
+            let black =
+                spawn_usi("black", &cfg.black_args, &cfg.black_usi_opts, cfg.threads_black)?;
+            let white =
+                spawn_usi("white", &cfg.white_args, &cfg.white_usi_opts, cfg.threads_white)?;
+            GameEngines::Usi(Box::new(tools::selfplay::UsiEngines {
+                black: UsiBackend::new(black),
+                white: UsiBackend::new(white),
+            }))
+        };
 
         // Open temp output files
         let mut writer = BufWriter::new(File::create(&cfg.jsonl_path).with_context(|| {
@@ -856,6 +1074,13 @@ fn worker_main(
             parse(&cfg.black_usi_opts).or_else(|| parse(&cfg.white_usi_opts)).unwrap_or(2)
         };
 
+        let dedup_hash = cfg.dedup_hash.clone();
+        let mut rng = rand::rng();
+        let mut dedup_hits = 0u64;
+        let mut dedup_discarded = 0u64;
+        let mut multipv_diversions = 0u64;
+        let mut random_moves_played = 0u64;
+
         // Game loop
         while let Ok(Some(ticket)) = rx.recv() {
             if shutdown.load(Ordering::Relaxed) {
@@ -863,8 +1088,7 @@ fn worker_main(
             }
 
             let game_idx = ticket.game_idx;
-            black.new_game()?;
-            white.new_game()?;
+            engines.prepare_game(cfg.keep_tt)?;
 
             let parsed = &cfg.start_defs[ticket.startpos_idx];
             let pass_b = if cfg.pass_rights_enabled {
@@ -890,65 +1114,119 @@ fn worker_main(
                 collector.start_game();
             }
 
+            // gensfen: ランダムムーブ対象手数を決定
+            let random_move_plies = if cfg.random_move_count > 0 {
+                sample_random_move_plies(
+                    cfg.random_move_min_ply,
+                    cfg.random_move_max_ply,
+                    cfg.random_move_count,
+                    &mut rng,
+                )
+            } else {
+                std::collections::HashSet::new()
+            };
+
             for ply_idx in 0..cfg.max_moves {
                 plies_played = ply_idx + 1;
                 let side = pos.side_to_move();
-                let engine = if side == Color::Black {
-                    &mut black
-                } else {
-                    &mut white
-                };
                 let engine_label = if side == Color::Black {
                     "black"
                 } else {
                     "white"
                 };
                 let sfen_before = pos.to_sfen();
+
+                // --- gensfen: ランダムムーブ ---
+                if random_move_plies.contains(&plies_played) {
+                    let mut legal_moves = MoveList::new();
+                    generate_legal(&pos, &mut legal_moves);
+                    if legal_moves.is_empty() {
+                        outcome = if side == Color::Black {
+                            GameOutcome::WhiteWin
+                        } else {
+                            GameOutcome::BlackWin
+                        };
+                        outcome_reason = "mate";
+                        break;
+                    }
+                    let mv = legal_moves[rng.random_range(0..legal_moves.len())];
+                    // ランダムムーブ前のエントリをクリア（tanuki- 方式）
+                    if let Some(ref mut collector) = training_data_collector {
+                        collector.start_game();
+                    }
+                    random_moves_played += 1;
+                    let gives_check = if mv.is_pass() {
+                        false
+                    } else {
+                        pos.gives_check(mv)
+                    };
+                    pos.do_move(mv, gives_check);
+                    let rm_usi = mv.to_usi();
+                    if eval_writer.is_some() {
+                        eval_list.push("R".to_string());
+                        move_list.push(rm_usi.clone());
+                    }
+                    if !cfg.minimal_log {
+                        let move_log = MoveLog {
+                            kind: "move",
+                            game_id: game_idx + 1,
+                            ply: plies_played,
+                            side_to_move: side_label(side),
+                            sfen_before,
+                            move_usi: rm_usi,
+                            raw_move_usi: Some("random".to_string()),
+                            engine: engine_label.to_string(),
+                            elapsed_ms: 0,
+                            think_limit_ms: 0,
+                            timed_out: false,
+                            eval: None,
+                        };
+                        serde_json::to_writer(&mut writer, &move_log)?;
+                        writer.write_all(b"\n")?;
+                    }
+                    continue;
+                }
+
+                // --- 通常探索 ---
                 let think_limit_ms = tc.think_limit_ms(side);
                 let pass_rights = if cfg.pass_rights_enabled {
                     Some((pos.pass_rights(Color::Black), pos.pass_rights(Color::White)))
                 } else {
                     None
                 };
-                let req = SearchRequest {
-                    sfen: &sfen_before,
+                let params = SearchParams {
+                    sfen: sfen_before.clone(),
                     time_args: tc.time_args(),
                     think_limit_ms,
                     timeout_margin_ms: cfg.timeout_margin_ms,
-                    game_id: game_idx + 1,
-                    ply: plies_played,
-                    side,
-                    engine_label: engine_label.to_string(),
-                    pass_rights,
                     go_depth: cfg.go_depth,
                     go_nodes: cfg.go_nodes,
+                    multi_pv: cfg.random_multi_pv.max(1),
+                    pass_rights,
+                    side,
+                    game_id: game_idx + 1,
+                    ply: plies_played,
+                    collect_info_lines: info_logger.is_some(),
                 };
-                type InfoCb<'a> = Box<dyn FnMut(&str, &SearchRequest<'_>) + 'a>;
-                let mut info_cb: Option<InfoCb<'_>> = if info_logger.is_some() {
-                    Some(Box::new(|line: &str, req: &SearchRequest<'_>| {
-                        if let Some(ref mut logger) = info_logger {
-                            let _ = logger.log(InfoLogEntry {
-                                kind: "info",
-                                game_id: req.game_id,
-                                ply: req.ply,
-                                side_to_move: side_label(req.side),
-                                engine: &req.engine_label,
-                                line,
-                            });
-                        }
-                    }))
-                } else {
-                    None
-                };
-                let search = engine.search(
-                    &req,
-                    info_cb
-                        .as_mut()
-                        .map(|b| b.as_mut() as &mut dyn FnMut(&str, &SearchRequest<'_>)),
-                )?;
+                let search = engines.search(side, &pos, &params)?;
+
+                // info ログ
+                if let Some(ref mut logger) = info_logger {
+                    for line in &search.info_lines {
+                        let _ = logger.log(InfoLogEntry {
+                            kind: "info",
+                            game_id: game_idx + 1,
+                            ply: plies_played,
+                            side_to_move: side_label(side),
+                            engine: engine_label,
+                            line,
+                        });
+                    }
+                }
 
                 let timed_out = search.timed_out;
-                let mut move_usi = search.bestmove.clone().unwrap_or_else(|| "none".to_string());
+                let mut move_usi =
+                    search.best_move_usi.clone().unwrap_or_else(|| "none".to_string());
                 let mut raw_move_usi = None;
                 let mut terminal = false;
                 let elapsed_ms = search.elapsed_ms;
@@ -962,10 +1240,10 @@ fn worker_main(
                     };
                     outcome_reason = "timeout";
                     terminal = true;
-                    if search.bestmove.is_none() {
+                    if search.best_move_usi.is_none() {
                         move_usi = "timeout".to_string();
                     }
-                } else if let Some(ref mv_str) = search.bestmove {
+                } else if let Some(ref mv_str) = search.best_move_usi {
                     raw_move_usi = Some(mv_str.clone());
                     match mv_str.as_str() {
                         "resign" => {
@@ -988,37 +1266,96 @@ fn worker_main(
                             outcome_reason = "win";
                             terminal = true;
                         }
-                        _ => match Move::from_usi(mv_str) {
-                            Some(mv) if is_legal_with_pass(&pos, mv) => {
-                                if let Some(ref mut collector) = training_data_collector {
-                                    collector.record_position(
-                                        &pos,
-                                        eval_log.as_ref().and_then(|e| e.score_cp),
-                                        eval_log.as_ref().and_then(|e| e.score_mate),
-                                        Some(mv),
-                                    );
+                        _ => {
+                            // バックエンドがパース済み Move を返す場合はそれを使う
+                            let mv_opt = search
+                                .best_move
+                                .filter(|mv| is_legal_with_pass(&pos, *mv))
+                                .or_else(|| {
+                                    Move::from_usi(mv_str)
+                                        .filter(|mv| is_legal_with_pass(&pos, *mv))
+                                });
+                            match mv_opt {
+                                Some(mv) => {
+                                    // --- gensfen: ハッシュ重複検出 ---
+                                    // 全ワーカーで共有するテーブルで重複チェック（tanuki-と同じ構成）
+                                    let skip_record = if let Some(ref dh) = dedup_hash {
+                                        if dh.check_and_insert(pos.key()) {
+                                            dedup_hits += 1;
+                                            let discarded = training_data_collector
+                                                .as_ref()
+                                                .map_or(0, |c| c.entries_len() as u64);
+                                            dedup_discarded += discarded;
+                                            if let Some(ref mut collector) = training_data_collector
+                                            {
+                                                collector.start_game();
+                                            }
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    } else {
+                                        false
+                                    };
+
+                                    // 学習データには PV1 のスコアと PV1 の手を記録する。
+                                    // MultiPV ランダム選択で別の手がプレイされても、
+                                    // 教師ラベルとしては「この局面での最善手 = PV1」が正しい。
+                                    // （tanuki- の gensfen と同じ方式）
+                                    if !skip_record
+                                        && let Some(ref mut collector) = training_data_collector
+                                    {
+                                        collector.record_position(
+                                            &pos,
+                                            eval_log.as_ref().and_then(|e| e.score_cp),
+                                            eval_log.as_ref().and_then(|e| e.score_mate),
+                                            Some(mv),
+                                        );
+                                    }
+
+                                    // --- gensfen: MultiPV ランダム選択 ---
+                                    let played_mv = if cfg.random_multi_pv > 1 {
+                                        if let Some(selected) = select_multipv_random(
+                                            &search.multipv_candidates,
+                                            cfg.random_multi_pv_diff,
+                                            &mut rng,
+                                        ) {
+                                            if selected != mv {
+                                                multipv_diversions += 1;
+                                            }
+                                            selected
+                                        } else {
+                                            mv
+                                        }
+                                    } else {
+                                        mv
+                                    };
+
+                                    let gives_check = if played_mv.is_pass() {
+                                        false
+                                    } else {
+                                        pos.gives_check(played_mv)
+                                    };
+                                    pos.do_move(played_mv, gives_check);
+                                    tc.update_after_move(side, search.elapsed_ms);
+                                    move_usi = played_mv.to_usi();
+                                    if played_mv == mv {
+                                        raw_move_usi = None;
+                                    }
+                                    // MultiPV で別の手が選ばれた場合は raw に元の bestmove を記録
                                 }
-                                let gives_check = if mv.is_pass() {
-                                    false
-                                } else {
-                                    pos.gives_check(mv)
-                                };
-                                pos.do_move(mv, gives_check);
-                                tc.update_after_move(side, search.elapsed_ms);
-                                move_usi = mv_str.clone();
-                                raw_move_usi = None;
+                                None => {
+                                    outcome = if side == Color::Black {
+                                        GameOutcome::WhiteWin
+                                    } else {
+                                        GameOutcome::BlackWin
+                                    };
+                                    outcome_reason = "illegal_move";
+                                    terminal = true;
+                                    move_usi = "illegal".to_string();
+                                }
                             }
-                            _ => {
-                                outcome = if side == Color::Black {
-                                    GameOutcome::WhiteWin
-                                } else {
-                                    GameOutcome::BlackWin
-                                };
-                                outcome_reason = "illegal_move";
-                                terminal = true;
-                                move_usi = "illegal".to_string();
-                            }
-                        },
+                        }
                     }
                 } else {
                     outcome = if side == Color::Black {
@@ -1026,7 +1363,14 @@ fn worker_main(
                     } else {
                         GameOutcome::BlackWin
                     };
-                    outcome_reason = "no_bestmove";
+                    // 合法手ゼロなら mate、それ以外は no_bestmove
+                    let mut legal_moves = MoveList::new();
+                    generate_legal(&pos, &mut legal_moves);
+                    outcome_reason = if legal_moves.is_empty() {
+                        "mate"
+                    } else {
+                        "no_bestmove"
+                    };
                     terminal = true;
                 }
 
@@ -1138,6 +1482,14 @@ fn worker_main(
             w.flush()?;
         }
 
+        // gensfen 統計
+        if dedup_hits > 0 || random_moves_played > 0 || multipv_diversions > 0 {
+            eprintln!(
+                "worker {}: gensfen stats: dedup_hits={}, dedup_discarded={}, multipv_diversions={}, random_moves={}",
+                cfg.worker_id, dedup_hits, dedup_discarded, multipv_diversions, random_moves_played
+            );
+        }
+
         let training_stats = if let Some(ref mut collector) = training_data_collector {
             collector.flush()?;
             collector.stats()
@@ -1171,6 +1523,8 @@ struct ResumeState {
     black_wins: u32,
     white_wins: u32,
     draws: u32,
+    /// meta 行に保存された shuffle_seed（存在しない場合は None）
+    shuffle_seed: Option<u64>,
 }
 
 /// 既存の JSONL 出力ファイルを解析し、完了済み対局数と勝敗を取得する。
@@ -1185,6 +1539,7 @@ fn parse_resume_state(path: &Path) -> Result<ResumeState> {
     let mut black_wins: u32 = 0;
     let mut white_wins: u32 = 0;
     let mut draws: u32 = 0;
+    let mut shuffle_seed: Option<u64> = None;
     let mut last_parse_error = false;
 
     for line in reader.lines() {
@@ -1204,16 +1559,25 @@ fn parse_resume_state(path: &Path) -> Result<ResumeState> {
                 continue;
             }
         };
-        if value.get("type").and_then(|v| v.as_str()) != Some("result") {
-            continue;
-        }
-        if let Some(gid) = value.get("game_id").and_then(|v| v.as_u64()) {
-            max_game_id = max_game_id.max(gid as u32);
-        }
-        match value.get("outcome").and_then(|v| v.as_str()) {
-            Some("black_win") => black_wins += 1,
-            Some("white_win") => white_wins += 1,
-            Some("draw") => draws += 1,
+        match value.get("type").and_then(|v| v.as_str()) {
+            Some("meta") => {
+                // meta 行から shuffle_seed を復元
+                shuffle_seed = value
+                    .get("settings")
+                    .and_then(|s| s.get("shuffle_seed"))
+                    .and_then(|v| v.as_u64());
+            }
+            Some("result") => {
+                if let Some(gid) = value.get("game_id").and_then(|v| v.as_u64()) {
+                    max_game_id = max_game_id.max(gid as u32);
+                }
+                match value.get("outcome").and_then(|v| v.as_str()) {
+                    Some("black_win") => black_wins += 1,
+                    Some("white_win") => white_wins += 1,
+                    Some("draw") => draws += 1,
+                    _ => {}
+                }
+            }
             _ => {}
         }
     }
@@ -1226,6 +1590,7 @@ fn parse_resume_state(path: &Path) -> Result<ResumeState> {
         black_wins,
         white_wins,
         draws,
+        shuffle_seed,
     })
 }
 
@@ -1455,6 +1820,63 @@ fn main() -> Result<()> {
     let pass_rights_enabled =
         cli.pass_rights_black.is_some() || cli.pass_rights_white.is_some() || pass_rights_via_usi;
 
+    // gensfen オプションのデフォルト解決（meta 書き込みより前に解決する必要がある）
+    let native_mode = cli.native.unwrap_or(cli.for_train);
+    let startpos_no_repeat_resolved = cli.startpos_no_repeat.unwrap_or(cli.for_train);
+
+    if startpos_no_repeat_resolved && cli.random_startpos {
+        eprintln!("warning: --random-startpos is ignored when --startpos-no-repeat is active");
+    }
+
+    // depth/nodes 指定時は時間管理パラメータをデフォルト 0 にする。
+    // YO 等の USI エンジンでは MinimumThinkingTime/NetworkDelay のデフォルト値が
+    // nodes モードでも探索に影響するため、明示指定がない場合は干渉を防ぐ。
+    let has_fixed_limit = cli.depth.is_some() || cli.nodes.is_some();
+    if has_fixed_limit {
+        if cli.network_delay.is_none() {
+            cli.network_delay = Some(0);
+        }
+        if cli.network_delay2.is_none() {
+            cli.network_delay2 = Some(0);
+        }
+        if cli.minimum_thinking_time.is_none() {
+            cli.minimum_thinking_time = Some(0);
+        }
+    }
+
+    // shuffle_seed の解決: CLI 指定 > meta から復元 > ランダム生成
+    // resume 時は meta の seed と CLI の seed が不一致ならエラー（順列が変わるため）
+    let shuffle_seed_resolved: Option<u64> = if startpos_no_repeat_resolved {
+        if let Some(ref state) = resume_state {
+            // resume: meta から seed を復元
+            let meta_seed = state.shuffle_seed;
+            if let Some(cli_seed) = cli.shuffle_seed
+                && meta_seed != Some(cli_seed)
+            {
+                bail!(
+                    "--shuffle-seed {} does not match meta seed {:?}. \
+                         Resume requires the same seed to restore the startpos order.",
+                    cli_seed,
+                    meta_seed
+                );
+            }
+            if meta_seed.is_none() {
+                bail!(
+                    "Cannot resume with --startpos-no-repeat: \
+                     the original session did not save shuffle_seed in meta. \
+                     Re-run without --startpos-no-repeat or start a new session."
+                );
+            }
+            meta_seed
+        } else if let Some(seed) = cli.shuffle_seed {
+            Some(seed)
+        } else {
+            Some(rand::random::<u64>())
+        }
+    } else {
+        None
+    };
+
     // Write meta line to final JSONL (resume時はスキップ: 既にメタ行が存在する)
     if !cli.resume {
         let mut writer = BufWriter::new(
@@ -1503,6 +1925,7 @@ fn main() -> Result<()> {
                 } else {
                     None
                 },
+                shuffle_seed: shuffle_seed_resolved,
             },
             engine_cmd: EngineCommandMeta {
                 path_black: engine_paths.black.path.display().to_string(),
@@ -1521,6 +1944,31 @@ fn main() -> Result<()> {
         serde_json::to_writer(&mut writer, &meta)?;
         writer.write_all(b"\n")?;
         writer.flush()?;
+    }
+
+    let keep_tt_resolved = cli.keep_tt.unwrap_or(false);
+    let dedup_hash_size_resolved =
+        cli.dedup_hash_size.unwrap_or(if cli.for_train { 64 * 1024 * 1024 } else { 0 });
+    let random_multi_pv_resolved = cli.random_multi_pv.unwrap_or(0);
+
+    // gensfen: 共有ハッシュ重複検出テーブル（全ワーカーで1つ共有、tanuki-と同じ構成）
+    let shared_dedup_hash = if dedup_hash_size_resolved > 0 {
+        eprintln!(
+            "DedupHash: {} entries ({} MB)",
+            dedup_hash_size_resolved,
+            dedup_hash_size_resolved * 8 / (1024 * 1024)
+        );
+        Some(Arc::new(SharedDedupHash::new(dedup_hash_size_resolved)))
+    } else {
+        None
+    };
+
+    // NativeBackend 使用時に NNUE 評価関数の初期化
+    if native_mode {
+        let eval_file =
+            cli.eval_file.as_ref().ok_or_else(|| anyhow!("--native requires --eval-file"))?;
+        rshogi_core::nnue::init_nnue(eval_file).map_err(|e| anyhow!("NNUE init failed: {e}"))?;
+        eprintln!("NativeBackend: NNUE loaded from {}", eval_file.display());
     }
 
     // ゲームチケットは逐次生成する。
@@ -1648,20 +2096,80 @@ fn main() -> Result<()> {
             minimal_log: cli.for_train,
             skip_initial_ply: cli.skip_initial_ply,
             skip_in_check: cli.skip_in_check,
+            native_mode,
+            eval_hash_size_mb: DEFAULT_EVAL_HASH_SIZE_MB,
+            keep_tt: keep_tt_resolved,
+            dedup_hash: shared_dedup_hash.clone(),
+            random_multi_pv: random_multi_pv_resolved,
+            random_multi_pv_diff: cli.random_multi_pv_diff,
+            random_move_count: cli.random_move_count,
+            random_move_min_ply: cli.random_move_min_ply,
+            random_move_max_ply: cli.random_move_max_ply,
         };
 
         let rx = ticket_rx.clone();
         let tx = result_tx.clone();
         let sd = shutdown.clone();
-        handles.push(thread::spawn(move || worker_main(cfg, rx, tx, sd)));
+        if native_mode {
+            // NativeBackend は SearchWorker の再帰的 alpha-beta 探索で大きなスタックを使うため
+            // 64MB スタックが必要（rshogi-usi の SEARCH_STACK_SIZE と同じ値）
+            let builder = thread::Builder::new()
+                .name(format!("gensfen-worker-{w}"))
+                .stack_size(64 * 1024 * 1024);
+            handles.push(
+                builder
+                    .spawn(move || worker_main(cfg, rx, tx, sd))
+                    .expect("failed to spawn worker thread"),
+            );
+        } else {
+            handles.push(thread::spawn(move || worker_main(cfg, rx, tx, sd)));
+        }
     }
     // Main thread doesn't send results
     drop(result_tx);
 
     // Main loop: dispatch tickets and collect results
+    //
+    // --startpos-no-repeat: seed 固定の StdRng でシャッフルし、resume 時は
+    // 同じ seed + completed_games 回の next() で順列位置を復元する。
+    // seed は meta 行に shuffle_seed として保存される。
+    let mut shuffled_startpos = if startpos_no_repeat_resolved {
+        let seed = if let Some(s) = shuffle_seed_resolved {
+            s
+        } else {
+            // 新規セッションなのに seed が無い = バグ（上流で必ず設定される）
+            bail!("internal error: shuffle_seed not set for --startpos-no-repeat");
+        };
+        let mut s = ShuffledStartpos::new(startpos_count, seed);
+        // resume 時は完了済み対局分だけ消費して同一位置まで進める
+        for _ in 0..resume_offset {
+            s.next();
+        }
+        if resume_offset > 0 {
+            eprintln!(
+                "resume: restored startpos-no-repeat position (seed={}, skip={})",
+                seed, resume_offset
+            );
+        }
+        Some(s)
+    } else {
+        None
+    };
     let mut next_game_idx = resume_offset;
+    let make_ticket = |game_idx: u32,
+                       rng: &mut rand::rngs::ThreadRng,
+                       shuffled: &mut Option<ShuffledStartpos>| {
+        if let Some(s) = shuffled.as_mut() {
+            GameTicket {
+                game_idx,
+                startpos_idx: s.next(),
+            }
+        } else {
+            make_game_ticket(game_idx, cli.random_startpos, startpos_count, rng)
+        }
+    };
     let mut next_ticket = (next_game_idx < cli.games)
-        .then(|| make_game_ticket(next_game_idx, cli.random_startpos, startpos_count, &mut rng));
+        .then(|| make_ticket(next_game_idx, &mut rng, &mut shuffled_startpos));
     let mut completed = resume_offset;
     let mut black_wins = resume_state.as_ref().map_or(0, |s| s.black_wins);
     let mut white_wins = resume_state.as_ref().map_or(0, |s| s.white_wins);
@@ -1714,12 +2222,7 @@ fn main() -> Result<()> {
                         if res.is_ok() {
                             next_game_idx += 1;
                             next_ticket = (next_game_idx < cli.games).then(|| {
-                                make_game_ticket(
-                                    next_game_idx,
-                                    cli.random_startpos,
-                                    startpos_count,
-                                    &mut rng,
-                                )
+                                make_ticket(next_game_idx, &mut rng, &mut shuffled_startpos)
                             });
                         }
                     }
@@ -2496,5 +2999,151 @@ mod tests {
             let ticket = make_game_ticket(game_idx, true, 5, &mut rng);
             assert!(ticket.startpos_idx < 5);
         }
+    }
+
+    #[test]
+    fn shared_dedup_hash_detects_duplicates() {
+        let dh = SharedDedupHash::new(1024);
+        // 初回挿入は false
+        assert!(!dh.check_and_insert(12345));
+        // 2回目は重複検出で true
+        assert!(dh.check_and_insert(12345));
+        // 別のキーは false
+        assert!(!dh.check_and_insert(67890));
+        // key=0 の特殊扱い（内部で 1 に変換）
+        assert!(!dh.check_and_insert(0));
+        assert!(dh.check_and_insert(0));
+    }
+
+    #[test]
+    fn shared_dedup_hash_overwrites_on_collision() {
+        // サイズ 2 のテーブル（mask=1）で衝突を強制
+        let dh = SharedDedupHash::new(2);
+        // key=2 と key=4 は同じスロット（idx = key & 1 = 0）
+        assert!(!dh.check_and_insert(2));
+        // key=4 が上書き
+        assert!(!dh.check_and_insert(4));
+        // key=2 は上書きされているので false（新規扱い）
+        assert!(!dh.check_and_insert(2));
+    }
+
+    #[test]
+    fn shuffled_startpos_covers_all_indices() {
+        let mut s = ShuffledStartpos::new(5, 42);
+        let mut seen = std::collections::HashSet::new();
+        // 5 回取得すれば全インデックスが出る
+        for _ in 0..5 {
+            seen.insert(s.next());
+        }
+        assert_eq!(seen.len(), 5);
+        for i in 0..5 {
+            assert!(seen.contains(&i));
+        }
+    }
+
+    #[test]
+    fn shuffled_startpos_reshuffles_after_exhaustion() {
+        let mut s = ShuffledStartpos::new(3, 42);
+        // 1周目
+        let first_round: Vec<_> = (0..3).map(|_| s.next()).collect();
+        assert_eq!(first_round.iter().collect::<std::collections::HashSet<_>>().len(), 3);
+        // 2周目（リシャッフル後も全インデックスが出る）
+        let second_round: Vec<_> = (0..3).map(|_| s.next()).collect();
+        assert_eq!(second_round.iter().collect::<std::collections::HashSet<_>>().len(), 3);
+    }
+
+    #[test]
+    fn shuffled_startpos_is_reproducible_with_same_seed() {
+        // 同じ seed + count なら同一の順列が再構築できる
+        let mut s1 = ShuffledStartpos::new(100, 12345);
+        let mut s2 = ShuffledStartpos::new(100, 12345);
+        let seq1: Vec<_> = (0..200).map(|_| s1.next()).collect(); // 2周分
+        let seq2: Vec<_> = (0..200).map(|_| s2.next()).collect();
+        assert_eq!(seq1, seq2);
+    }
+
+    #[test]
+    fn shuffled_startpos_resume_skips_correctly() {
+        // resume: 同じ seed で構築し、completed 分だけ next() を呼び進めて
+        // 残りが元の続きと一致することを確認
+        let mut full = ShuffledStartpos::new(50, 99);
+        let first_30: Vec<_> = (0..30).map(|_| full.next()).collect();
+        let remaining_20: Vec<_> = (0..20).map(|_| full.next()).collect();
+
+        // resume: seed=99 で再構築、30 回スキップ
+        let mut resumed = ShuffledStartpos::new(50, 99);
+        for _ in 0..30 {
+            resumed.next();
+        }
+        let resumed_20: Vec<_> = (0..20).map(|_| resumed.next()).collect();
+        assert_eq!(remaining_20, resumed_20);
+
+        // first_30 に重複がないことも確認
+        let unique: std::collections::HashSet<_> = first_30.iter().collect();
+        assert_eq!(unique.len(), 30);
+    }
+
+    #[test]
+    fn select_multipv_random_filters_by_threshold() {
+        use rshogi_core::types::Move;
+        use tools::selfplay::MultiPvCandidate;
+
+        let mv1 = Move::from_usi("7g7f").unwrap();
+        let mv2 = Move::from_usi("2g2f").unwrap();
+        let mv3 = Move::from_usi("3g3f").unwrap();
+
+        let candidates = vec![
+            MultiPvCandidate {
+                multipv: 1,
+                score_cp: 100,
+                score_mate: None,
+                first_move: mv1,
+            },
+            MultiPvCandidate {
+                multipv: 2,
+                score_cp: 80,
+                score_mate: None,
+                first_move: mv2,
+            },
+            MultiPvCandidate {
+                multipv: 3,
+                score_cp: -200,
+                score_mate: None,
+                first_move: mv3,
+            },
+        ];
+
+        let mut rng = StdRng::seed_from_u64(42);
+        // 閾値 50 なら PV1(100) と PV2(80) のみ対象、PV3(-200) は除外
+        for _ in 0..20 {
+            let selected = select_multipv_random(&candidates, 50, &mut rng);
+            assert!(selected.is_some());
+            let mv = selected.unwrap();
+            assert!(mv == mv1 || mv == mv2);
+        }
+    }
+
+    #[test]
+    fn select_multipv_random_returns_none_for_empty() {
+        let mut rng = StdRng::seed_from_u64(42);
+        assert!(select_multipv_random(&[], 100, &mut rng).is_none());
+    }
+
+    #[test]
+    fn sample_random_move_plies_no_duplicates() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let plies = sample_random_move_plies(5, 20, 10, &mut rng);
+        assert_eq!(plies.len(), 10);
+        for &p in &plies {
+            assert!((5..=20).contains(&p));
+        }
+    }
+
+    #[test]
+    fn sample_random_move_plies_capped_by_range() {
+        let mut rng = StdRng::seed_from_u64(42);
+        // 範囲 3 に対して count 10 → 3 個に制限される
+        let plies = sample_random_move_plies(1, 3, 10, &mut rng);
+        assert_eq!(plies.len(), 3);
     }
 }

@@ -683,41 +683,43 @@ mod tests {
 
     #[test]
     fn test_sqr_clipped_relu_transform_basic() {
-        // 基本的な入出力テスト
-        let mut us_acc = [0i16; NNUE_PYTORCH_L1];
-        let mut them_acc = [0i16; NNUE_PYTORCH_L1];
-        let mut output = [0u8; NNUE_PYTORCH_L1];
+        use super::super::accumulator::Aligned;
+
+        // SIMD パス（AVX2/AVX512）は aligned load を使うため 64 バイトアラインが必要
+        let mut us_acc = Aligned([0i16; NNUE_PYTORCH_L1]);
+        let mut them_acc = Aligned([0i16; NNUE_PYTORCH_L1]);
+        let mut output = Aligned([0u8; NNUE_PYTORCH_L1]);
 
         // 入力が0の場合、出力も0
-        sqr_clipped_relu_transform(&us_acc, &them_acc, &mut output);
+        sqr_clipped_relu_transform(&us_acc.0, &them_acc.0, &mut output.0);
         assert!(
-            output.iter().all(|&x| x == 0),
+            output.0.iter().all(|&x| x == 0),
             "all zeros input should produce all zeros output"
         );
 
         // 最大値テスト: 127 * 127 >> 7 = 16129 >> 7 = 126
         let half = NNUE_PYTORCH_L1 / 2;
         for i in 0..half {
-            us_acc[i] = 127;
-            us_acc[half + i] = 127;
-            them_acc[i] = 127;
-            them_acc[half + i] = 127;
+            us_acc.0[i] = 127;
+            us_acc.0[half + i] = 127;
+            them_acc.0[i] = 127;
+            them_acc.0[half + i] = 127;
         }
 
-        sqr_clipped_relu_transform(&us_acc, &them_acc, &mut output);
+        sqr_clipped_relu_transform(&us_acc.0, &them_acc.0, &mut output.0);
 
         // 期待値: (127 * 127) >> 7 = 126
-        for (i, &val) in output.iter().enumerate().take(NNUE_PYTORCH_L1) {
+        for (i, &val) in output.0.iter().enumerate().take(NNUE_PYTORCH_L1) {
             assert_eq!(val, 126, "max input should produce 126 at index {i}");
         }
 
         // 負の値はクランプされて0になる
         for i in 0..NNUE_PYTORCH_L1 {
-            us_acc[i] = -100;
-            them_acc[i] = -100;
+            us_acc.0[i] = -100;
+            them_acc.0[i] = -100;
         }
 
-        sqr_clipped_relu_transform(&us_acc, &them_acc, &mut output);
-        assert!(output.iter().all(|&x| x == 0), "negative input should be clamped to 0");
+        sqr_clipped_relu_transform(&us_acc.0, &them_acc.0, &mut output.0);
+        assert!(output.0.iter().all(|&x| x == 0), "negative input should be clamped to 0");
     }
 }
