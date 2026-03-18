@@ -444,6 +444,34 @@ fn main() -> Result<()> {
             );
         }
 
+        // 出力ファイルが既に存在し、入力と同じレコード数ならスキップ（完了済み）
+        let input_file_size = fs::metadata(input_path)?.len();
+        let input_record_count = input_file_size / PackedSfenValue::SIZE as u64;
+        if output_path.exists() {
+            let out_size = fs::metadata(&output_path)?.len();
+            let out_records = out_size / PackedSfenValue::SIZE as u64;
+            if out_records >= input_record_count && out_size % PackedSfenValue::SIZE as u64 == 0 {
+                eprintln!(
+                    "=== [{}/{}] Skipping (complete: {} records): {} ===",
+                    file_idx + 1,
+                    total_files,
+                    out_records,
+                    output_path.display()
+                );
+                continue;
+            }
+            if out_records > 0 {
+                eprintln!(
+                    "=== [{}/{}] Resuming ({}/{} records): {} ===",
+                    file_idx + 1,
+                    total_files,
+                    out_records,
+                    input_record_count,
+                    input_path.display()
+                );
+            }
+        }
+
         eprintln!(
             "=== [{}/{}] Processing: {} ===",
             file_idx + 1,
@@ -451,9 +479,8 @@ fn main() -> Result<()> {
             input_path.display()
         );
 
-        // ファイルサイズからレコード数を計算
-        let file_size = fs::metadata(input_path)?.len();
-        let record_count = file_size / PackedSfenValue::SIZE as u64;
+        let file_size = input_file_size;
+        let record_count = input_record_count;
 
         if file_size % PackedSfenValue::SIZE as u64 != 0 {
             eprintln!(
@@ -1657,14 +1684,46 @@ where
     let in_file = File::open(input_path)
         .with_context(|| format!("Failed to open {}", input_path.display()))?;
     let mut reader = BufReader::new(in_file);
-    let out_file = File::create(output_path)
-        .with_context(|| format!("Failed to create {}", output_path.display()))?;
+
+    // レジューム対応: 出力ファイルに既存レコードがあればスキップして追記
+    let resume_count = if output_path.exists() {
+        let out_size = fs::metadata(output_path)?.len();
+        let records = out_size / PackedSfenValue::SIZE as u64;
+        // 不完全レコードがあれば切り捨て
+        let clean_size = records * PackedSfenValue::SIZE as u64;
+        if out_size != clean_size {
+            let f = File::options().write(true).open(output_path)?;
+            f.set_len(clean_size)?;
+        }
+        records
+    } else {
+        0
+    };
+
+    let out_file = File::options()
+        .create(true)
+        .append(true)
+        .open(output_path)
+        .with_context(|| format!("Failed to open {}", output_path.display()))?;
     let mut writer = BufWriter::new(out_file);
+
+    // 既存レコード分の入力をスキップ
+    let mut remaining = process_count;
+    if resume_count > 0 {
+        let skip = resume_count.min(remaining);
+        let mut skip_buf = [0u8; PackedSfenValue::SIZE];
+        for _ in 0..skip {
+            if reader.read_exact(&mut skip_buf).is_err() {
+                break;
+            }
+            remaining -= 1;
+        }
+        eprintln!("Resuming: skipped {skip} already-processed records");
+    }
 
     let mut f1_buf = vec![0.0f32; batch_size * f1_size];
     let mut f2_buf = vec![0.0f32; batch_size * f2_size];
     let mut buffer = [0u8; PackedSfenValue::SIZE];
-    let mut remaining = process_count;
     let mut skipped_count: u64 = 0;
     let mut error_count: u64 = 0;
     let mut clipped_count: u64 = 0;
