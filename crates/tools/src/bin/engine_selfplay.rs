@@ -1024,14 +1024,27 @@ fn worker_main(
                 }
                 Ok::<_, anyhow::Error>(engine)
             };
-            let black =
-                spawn_usi("black", &cfg.black_args, &cfg.black_usi_opts, cfg.threads_black)?;
-            let white =
-                spawn_usi("white", &cfg.white_args, &cfg.white_usi_opts, cfg.threads_white)?;
-            GameEngines::Usi(Box::new(tools::selfplay::UsiEngines {
-                black: UsiBackend::new(black),
-                white: UsiBackend::new(white),
-            }))
+
+            // 先後同一エンジンの場合は 1 プロセスで兼用（gensfen 最適化）
+            let same_engine = cfg.engine_path_black == cfg.engine_path_white
+                && cfg.black_args == cfg.white_args
+                && cfg.black_usi_opts == cfg.white_usi_opts
+                && cfg.threads_black == cfg.threads_white;
+
+            if same_engine {
+                let engine =
+                    spawn_usi("black", &cfg.black_args, &cfg.black_usi_opts, cfg.threads_black)?;
+                GameEngines::UsiSingle(Box::new(UsiBackend::new(engine)))
+            } else {
+                let black =
+                    spawn_usi("black", &cfg.black_args, &cfg.black_usi_opts, cfg.threads_black)?;
+                let white =
+                    spawn_usi("white", &cfg.white_args, &cfg.white_usi_opts, cfg.threads_white)?;
+                GameEngines::Usi(Box::new(tools::selfplay::UsiEngines {
+                    black: UsiBackend::new(black),
+                    white: UsiBackend::new(white),
+                }))
+            }
         };
 
         // Open temp output files
@@ -1822,6 +1835,22 @@ fn main() -> Result<()> {
 
     // gensfen オプションのデフォルト解決（meta 書き込みより前に解決する必要がある）
     let native_mode = cli.native.unwrap_or(cli.for_train);
+
+    // USI 単一エンジン最適化: 先後同一エンジンなら 1 プロセスで兼用
+    if !native_mode {
+        let usi_single_engine = engine_paths.black.path == engine_paths.white.path
+            && black_args == white_args
+            && black_usi_opts == white_usi_opts
+            && threads_black == threads_white;
+        if usi_single_engine {
+            eprintln!(
+                "USI single-engine mode: {} process{} (instead of {})",
+                cli.concurrency,
+                if cli.concurrency == 1 { "" } else { "es" },
+                cli.concurrency * 2
+            );
+        }
+    }
     let startpos_no_repeat_resolved = cli.startpos_no_repeat.unwrap_or(cli.for_train);
 
     if startpos_no_repeat_resolved && cli.random_startpos {
