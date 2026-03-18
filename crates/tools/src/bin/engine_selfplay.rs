@@ -2271,6 +2271,14 @@ fn main() -> Result<()> {
     for _ in 0..cli.concurrency {
         let _ = ticket_tx.send(None);
     }
+    drop(ticket_tx); // チャネル閉鎖でワーカーの recv が終了する
+
+    // グレースフルシャットダウン後、ワーカーが完了したゲームの結果を回収する。
+    // Ctrl-C 後もワーカーは進行中のゲームを完了させるため、
+    // メインスレッドのカウンタがずれないようここで drain する。
+    while let Ok(result) = result_rx.recv() {
+        handle_result(result, &mut black_wins, &mut white_wins, &mut draws, &mut completed);
+    }
 
     // Join workers and collect training stats
     let mut total_written = 0u64;
