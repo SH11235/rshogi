@@ -224,7 +224,7 @@ tanuki- の棋譜生成手法を参考にした重複局面回避機能。`--for
 
 #### dedup rate 警告（`--dedup-warn-interval`, `--dedup-warn-rate`）
 
-`--dedup-warn-interval N`（デフォルト: 1000）ゲームごとに直近区間の dedup rate をチェックし、`--dedup-warn-rate`（デフォルト: 0.1 = 10%）を超えると stderr に警告を出力する。長時間実行中に MultiPV の不足をリアルタイムで検知できる。
+`--dedup-warn-interval N`（デフォルト: 1000）ゲームごとに直近区間の dedup rate をチェックし、`--dedup-warn-rate`（デフォルト: 0.1 = 10%）を超えると stderr に警告を出力する。長時間実行中に MultiPV の不足をリアルタイムで検知できる。interval はワーカー数で自動分割されるため（`interval / concurrency`、最小 1）、concurrency を上げても総ゲーム数ベースでの検知タイミングは概ね一定。警告はワーカーごとに独立して出力されるため、同一タイミングで最大 concurrency 行の警告が表示されることがある。
 
 #### MultiPV 値の選定ガイド（実験結果）
 

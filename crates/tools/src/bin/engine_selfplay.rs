@@ -45,6 +45,14 @@ const DEFAULT_EVAL_HASH_SIZE_MB: usize = 64;
 ///
 /// `--out` 未指定時は `runs/selfplay/<timestamp>-selfplay.jsonl` に書き出し、infoは同名 `.info.jsonl` を生成する。
 ///
+fn parse_rate_0_1(s: &str) -> std::result::Result<f64, String> {
+    let v: f64 = s.parse().map_err(|e| format!("{e}"))?;
+    if !(0.0..=1.0).contains(&v) {
+        return Err(format!("value {v} is out of range 0.0..=1.0"));
+    }
+    Ok(v)
+}
+
 #[derive(Parser, Debug)]
 #[command(
     author,
@@ -319,7 +327,7 @@ struct Cli {
 
     /// dedup rate の警告閾値（0.0-1.0）。
     /// 直近区間の重複率がこの値を超えると stderr に警告を出力する。
-    #[arg(long, default_value_t = 0.1)]
+    #[arg(long, default_value_t = 0.1, value_parser = parse_rate_0_1)]
     dedup_warn_rate: f64,
 }
 
@@ -996,7 +1004,8 @@ struct WorkerConfig {
     random_move_count: u32,
     random_move_min_ply: u32,
     random_move_max_ply: u32,
-    dedup_warn_interval: u32,
+    /// ワーカーあたりの dedup rate チェック間隔（interval / concurrency で調整済み）
+    dedup_warn_interval_per_worker: u32,
     dedup_warn_rate: f64,
 }
 
@@ -1500,30 +1509,29 @@ fn worker_main(
                 outcome_reason: outcome_reason.to_string(),
             });
 
-            // dedup rate 監視
-            interval_games += 1;
-            if dedup_hash.is_some()
-                && cfg.dedup_warn_interval > 0
-                && interval_games >= cfg.dedup_warn_interval
-            {
-                if interval_positions_checked > 0 {
-                    let rate = interval_dedup_hits as f64 / interval_positions_checked as f64;
-                    if rate > cfg.dedup_warn_rate {
-                        eprintln!(
-                            "warning: worker {}: dedup rate {:.1}% in last {} games \
-                             ({} hits / {} checked). \
-                             Consider increasing --random-multi-pv or adding --random-move-count",
-                            cfg.worker_id,
-                            rate * 100.0,
-                            interval_games,
-                            interval_dedup_hits,
-                            interval_positions_checked,
-                        );
+            // dedup rate 監視（dedup 有効時のみカウント・チェック）
+            if dedup_hash.is_some() && cfg.dedup_warn_interval_per_worker > 0 {
+                interval_games += 1;
+                if interval_games >= cfg.dedup_warn_interval_per_worker {
+                    if interval_positions_checked > 0 {
+                        let rate = interval_dedup_hits as f64 / interval_positions_checked as f64;
+                        if rate > cfg.dedup_warn_rate {
+                            eprintln!(
+                                "warning: worker {}: dedup rate {:.1}% in last {} games \
+                                 ({} hits / {} checked). \
+                                 Consider increasing --random-multi-pv or adding --random-move-count",
+                                cfg.worker_id,
+                                rate * 100.0,
+                                interval_games,
+                                interval_dedup_hits,
+                                interval_positions_checked,
+                            );
+                        }
                     }
+                    interval_games = 0;
+                    interval_dedup_hits = 0;
+                    interval_positions_checked = 0;
                 }
-                interval_games = 0;
-                interval_dedup_hits = 0;
-                interval_positions_checked = 0;
             }
         }
 
@@ -2180,7 +2188,8 @@ fn main() -> Result<()> {
             random_move_count: cli.random_move_count,
             random_move_min_ply: cli.random_move_min_ply,
             random_move_max_ply: cli.random_move_max_ply,
-            dedup_warn_interval: cli.dedup_warn_interval,
+            dedup_warn_interval_per_worker: (cli.dedup_warn_interval / cli.concurrency as u32)
+                .max(1),
             dedup_warn_rate: cli.dedup_warn_rate,
         };
 
