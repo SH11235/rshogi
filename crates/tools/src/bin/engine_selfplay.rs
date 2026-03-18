@@ -2773,11 +2773,22 @@ fn start_position_for_game(
         (0, 0)
     };
 
-    // random_startpos の場合は moves[0].sfen_before を優先
-    let use_moves_first = meta.map(|m| m.settings.random_startpos).unwrap_or(false);
+    // 常に moves[0].sfen_before を優先する。
+    // game_id → startpos_idx のマッピングは startpos_no_repeat（シャッフル）や
+    // random_startpos で (game_id-1)%len と一致しないため、sfen_before が正確。
+    if let Some(first) = moves.first() {
+        let mut pos = Position::new();
+        if pos.set_sfen(&first.sfen_before).is_ok() {
+            if has_pass {
+                pos.enable_pass_rights(pass_black, pass_white);
+            }
+            let sfen = pos.to_sfen();
+            return Some((pos, sfen));
+        }
+    }
 
-    if !use_moves_first
-        && let Some(meta) = meta
+    // フォールバック: moves が空の場合のみ meta から復元
+    if let Some(meta) = meta
         && !meta.start_positions.is_empty()
     {
         let idx = ((game_id - 1) as usize) % meta.start_positions.len();
@@ -2789,15 +2800,7 @@ fn start_position_for_game(
             return Some((pos, sfen));
         }
     }
-    moves.first().and_then(|m| {
-        let mut pos = Position::new();
-        pos.set_sfen(&m.sfen_before).ok()?;
-        if has_pass {
-            pos.enable_pass_rights(pass_black, pass_white);
-        }
-        let sfen = pos.to_sfen();
-        Some((pos, sfen))
-    })
+    None
 }
 
 fn start_position_from_command(cmd: &str) -> Result<(Position, String)> {
