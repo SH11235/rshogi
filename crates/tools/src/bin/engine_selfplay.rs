@@ -45,6 +45,14 @@ const DEFAULT_EVAL_HASH_SIZE_MB: usize = 64;
 ///
 /// `--out` 未指定時は `runs/selfplay/<timestamp>-selfplay.jsonl` に書き出し、infoは同名 `.info.jsonl` を生成する。
 ///
+fn parse_rate_0_1(s: &str) -> std::result::Result<f64, String> {
+    let v: f64 = s.parse().map_err(|e| format!("{e}"))?;
+    if !(0.0..=1.0).contains(&v) {
+        return Err(format!("value {v} is out of range 0.0..=1.0"));
+    }
+    Ok(v)
+}
+
 #[derive(Parser, Debug)]
 #[command(
     author,
@@ -311,6 +319,16 @@ struct Cli {
     /// 省略時はランダム生成。resume 時は meta から復元される。
     #[arg(long)]
     shuffle_seed: Option<u64>,
+
+    /// dedup rate チェックの間隔（ゲーム数）。
+    /// N ゲームごとに直近区間の重複率を計算し、閾値超過で警告を出力する。
+    #[arg(long, default_value_t = 1000)]
+    dedup_warn_interval: u32,
+
+    /// dedup rate の警告閾値（0.0-1.0）。
+    /// 直近区間の重複率がこの値を超えると stderr に警告を出力する。
+    #[arg(long, default_value_t = 0.1, value_parser = parse_rate_0_1)]
+    dedup_warn_rate: f64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -986,6 +1004,12 @@ struct WorkerConfig {
     random_move_count: u32,
     random_move_min_ply: u32,
     random_move_max_ply: u32,
+    /// ワーカーあたりの dedup rate チェック間隔（interval / concurrency で調整済み）
+    dedup_warn_interval_per_worker: u32,
+    dedup_warn_rate: f64,
+    /// 直近 interval で既に警告済みかを示すフラグ（全ワーカー共有）。
+    /// 同一タイミングで複数ワーカーが重複警告を出すのを抑制する。
+    dedup_warn_emitted: Arc<AtomicBool>,
 }
 
 fn worker_main(
@@ -1093,6 +1117,10 @@ fn worker_main(
         let mut dedup_discarded = 0u64;
         let mut multipv_diversions = 0u64;
         let mut random_moves_played = 0u64;
+        // dedup rate 監視用（interval ごとにリセット）
+        let mut interval_games = 0u32;
+        let mut interval_dedup_hits = 0u64;
+        let mut interval_positions_checked = 0u64;
 
         // Game loop
         while let Ok(Some(ticket)) = rx.recv() {
@@ -1293,8 +1321,10 @@ fn worker_main(
                                     // --- gensfen: ハッシュ重複検出 ---
                                     // 全ワーカーで共有するテーブルで重複チェック（tanuki-と同じ構成）
                                     let skip_record = if let Some(ref dh) = dedup_hash {
+                                        interval_positions_checked += 1;
                                         if dh.check_and_insert(pos.key()) {
                                             dedup_hits += 1;
+                                            interval_dedup_hits += 1;
                                             let discarded = training_data_collector
                                                 .as_ref()
                                                 .map_or(0, |c| c.entries_len() as u64);
@@ -1481,6 +1511,43 @@ fn worker_main(
                 outcome,
                 outcome_reason: outcome_reason.to_string(),
             });
+
+            // dedup rate 監視（dedup 有効時のみカウント・チェック）
+            if dedup_hash.is_some() && cfg.dedup_warn_interval_per_worker > 0 {
+                interval_games += 1;
+                if interval_games >= cfg.dedup_warn_interval_per_worker {
+                    if interval_positions_checked > 0 {
+                        let rate = interval_dedup_hits as f64 / interval_positions_checked as f64;
+                        if rate > cfg.dedup_warn_rate {
+                            // 同一 interval で複数ワーカーが重複警告を出すのを抑制。
+                            // compare_exchange で「まだ誰も出していなければ自分が出す」。
+                            // Relaxed で十分（厳密な排他は不要、レースで 2-3 行出ても許容）。
+                            if cfg
+                                .dedup_warn_emitted
+                                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                                .is_ok()
+                            {
+                                eprintln!(
+                                    "warning: dedup rate {:.1}% in last ~{} games \
+                                     ({} hits / {} checked, worker {}). \
+                                     Consider increasing --random-multi-pv or adding --random-move-count",
+                                    rate * 100.0,
+                                    interval_games,
+                                    interval_dedup_hits,
+                                    interval_positions_checked,
+                                    cfg.worker_id,
+                                );
+                            }
+                        } else {
+                            // rate が閾値以下に戻った: 次の interval で再度警告可能にする
+                            cfg.dedup_warn_emitted.store(false, Ordering::Relaxed);
+                        }
+                    }
+                    interval_games = 0;
+                    interval_dedup_hits = 0;
+                    interval_positions_checked = 0;
+                }
+            }
         }
 
         // Flush all temp files
@@ -1993,6 +2060,9 @@ fn main() -> Result<()> {
         None
     };
 
+    // dedup 警告の重複抑制フラグ（全ワーカー共有）
+    let dedup_warn_emitted = Arc::new(AtomicBool::new(false));
+
     // NativeBackend 使用時に NNUE 評価関数の初期化
     if native_mode {
         let eval_file =
@@ -2136,6 +2206,10 @@ fn main() -> Result<()> {
             random_move_count: cli.random_move_count,
             random_move_min_ply: cli.random_move_min_ply,
             random_move_max_ply: cli.random_move_max_ply,
+            dedup_warn_interval_per_worker: (cli.dedup_warn_interval / cli.concurrency as u32)
+                .max(1),
+            dedup_warn_rate: cli.dedup_warn_rate,
+            dedup_warn_emitted: Arc::clone(&dedup_warn_emitted),
         };
 
         let rx = ticket_rx.clone();
