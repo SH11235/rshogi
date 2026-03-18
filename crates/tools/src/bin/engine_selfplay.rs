@@ -1827,11 +1827,31 @@ fn main() -> Result<()> {
     let startpos_no_repeat_resolved = cli.startpos_no_repeat.unwrap_or(cli.for_train);
 
     // shuffle_seed の解決: CLI 指定 > meta から復元 > ランダム生成
+    // resume 時は meta の seed と CLI の seed が不一致ならエラー（順列が変わるため）
     let shuffle_seed_resolved: Option<u64> = if startpos_no_repeat_resolved {
-        if let Some(seed) = cli.shuffle_seed {
+        if let Some(ref state) = resume_state {
+            // resume: meta から seed を復元
+            let meta_seed = state.shuffle_seed;
+            if let Some(cli_seed) = cli.shuffle_seed
+                && meta_seed != Some(cli_seed)
+            {
+                bail!(
+                    "--shuffle-seed {} does not match meta seed {:?}. \
+                         Resume requires the same seed to restore the startpos order.",
+                    cli_seed,
+                    meta_seed
+                );
+            }
+            if meta_seed.is_none() {
+                bail!(
+                    "Cannot resume with --startpos-no-repeat: \
+                     the original session did not save shuffle_seed in meta. \
+                     Re-run without --startpos-no-repeat or start a new session."
+                );
+            }
+            meta_seed
+        } else if let Some(seed) = cli.shuffle_seed {
             Some(seed)
-        } else if let Some(ref state) = resume_state {
-            state.shuffle_seed
         } else {
             Some(rand::random::<u64>())
         }
