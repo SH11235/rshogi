@@ -1828,6 +1828,22 @@ fn main() -> Result<()> {
         eprintln!("warning: --random-startpos is ignored when --startpos-no-repeat is active");
     }
 
+    // depth/nodes 指定時は時間管理パラメータをデフォルト 0 にする。
+    // YO 等の USI エンジンでは MinimumThinkingTime/NetworkDelay のデフォルト値が
+    // nodes モードでも探索に影響するため、明示指定がない場合は干渉を防ぐ。
+    let has_fixed_limit = cli.depth.is_some() || cli.nodes.is_some();
+    if has_fixed_limit {
+        if cli.network_delay.is_none() {
+            cli.network_delay = Some(0);
+        }
+        if cli.network_delay2.is_none() {
+            cli.network_delay2 = Some(0);
+        }
+        if cli.minimum_thinking_time.is_none() {
+            cli.minimum_thinking_time = Some(0);
+        }
+    }
+
     // shuffle_seed の解決: CLI 指定 > meta から復元 > ランダム生成
     // resume 時は meta の seed と CLI の seed が不一致ならエラー（順列が変わるため）
     let shuffle_seed_resolved: Option<u64> = if startpos_no_repeat_resolved {
