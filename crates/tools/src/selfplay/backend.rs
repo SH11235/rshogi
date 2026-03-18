@@ -351,11 +351,14 @@ impl SearchBackend for UsiBackend {
 ///
 /// NativeBackend は 1 インスタンスで両手番を処理、
 /// UsiBackend は先手・後手で別インスタンスを使用。
+/// UsiSingle は 1 インスタンスで両手番を処理（gensfen 用）。
 pub enum GameEngines {
     /// rshogi-core 直接呼び出し（1 インスタンスで両手番）
     Native(Box<NativeBackend>),
     /// USI プロトコル経由（先手・後手で別インスタンス）
     Usi(Box<UsiEngines>),
+    /// USI プロトコル経由（1 インスタンスで両手番、gensfen 用）
+    UsiSingle(Box<UsiBackend>),
 }
 
 /// USI モードの先手・後手エンジンペア
@@ -373,6 +376,7 @@ impl GameEngines {
                 engines.black.prepare_game(keep_tt)?;
                 engines.white.prepare_game(keep_tt)
             }
+            Self::UsiSingle(e) => e.prepare_game(keep_tt),
         }
     }
 
@@ -389,6 +393,10 @@ impl GameEngines {
                 Color::Black => engines.black.search(pos, params),
                 Color::White => engines.white.search(pos, params),
             },
+            // UsiSingle では side に関わらず同一エンジンインスタンスを使用する。
+            // USI プロトコルは `position` コマンドで局面を都度設定するため、
+            // 同一プロセスで先後両手番を処理しても安全。
+            Self::UsiSingle(e) => e.search(pos, params),
         }
     }
 }

@@ -973,6 +973,10 @@ struct WorkerConfig {
     skip_in_check: bool,
     // gensfen: NativeBackend モード
     native_mode: bool,
+    /// USI 単一エンジン最適化（先後同一エンジン時に 1 プロセスで兼用）。
+    /// TT/履歴が先後で共有されるため、Elo 評価に影響する。
+    /// --for-train 時のみ有効。通常の自己対局では無効。
+    usi_single: bool,
     eval_hash_size_mb: usize,
     // gensfen: 重複回避
     keep_tt: bool,
@@ -1024,14 +1028,23 @@ fn worker_main(
                 }
                 Ok::<_, anyhow::Error>(engine)
             };
-            let black =
-                spawn_usi("black", &cfg.black_args, &cfg.black_usi_opts, cfg.threads_black)?;
-            let white =
-                spawn_usi("white", &cfg.white_args, &cfg.white_usi_opts, cfg.threads_white)?;
-            GameEngines::Usi(Box::new(tools::selfplay::UsiEngines {
-                black: UsiBackend::new(black),
-                white: UsiBackend::new(white),
-            }))
+
+            // 先後同一エンジンかつ usi_single が有効なら 1 プロセスで兼用。
+            // TT/履歴が先後で共有されるため、--for-train 以外では無効。
+            if cfg.usi_single {
+                let engine =
+                    spawn_usi("single", &cfg.black_args, &cfg.black_usi_opts, cfg.threads_black)?;
+                GameEngines::UsiSingle(Box::new(UsiBackend::new(engine)))
+            } else {
+                let black =
+                    spawn_usi("black", &cfg.black_args, &cfg.black_usi_opts, cfg.threads_black)?;
+                let white =
+                    spawn_usi("white", &cfg.white_args, &cfg.white_usi_opts, cfg.threads_white)?;
+                GameEngines::Usi(Box::new(tools::selfplay::UsiEngines {
+                    black: UsiBackend::new(black),
+                    white: UsiBackend::new(white),
+                }))
+            }
         };
 
         // Open temp output files
@@ -1822,6 +1835,23 @@ fn main() -> Result<()> {
 
     // gensfen オプションのデフォルト解決（meta 書き込みより前に解決する必要がある）
     let native_mode = cli.native.unwrap_or(cli.for_train);
+
+    // USI 単一エンジン最適化: --for-train かつ先後同一エンジンなら 1 プロセスで兼用。
+    // TT/履歴が先後で共有されるため、通常の自己対局（Elo 評価）では無効。
+    let usi_single = !native_mode
+        && cli.for_train
+        && engine_paths.black.path == engine_paths.white.path
+        && black_args == white_args
+        && black_usi_opts == white_usi_opts
+        && threads_black == threads_white;
+    if usi_single {
+        eprintln!(
+            "USI single-engine mode: {} process{} (instead of {})",
+            cli.concurrency,
+            if cli.concurrency == 1 { "" } else { "es" },
+            cli.concurrency * 2
+        );
+    }
     let startpos_no_repeat_resolved = cli.startpos_no_repeat.unwrap_or(cli.for_train);
 
     if startpos_no_repeat_resolved && cli.random_startpos {
@@ -2097,6 +2127,7 @@ fn main() -> Result<()> {
             skip_initial_ply: cli.skip_initial_ply,
             skip_in_check: cli.skip_in_check,
             native_mode,
+            usi_single,
             eval_hash_size_mb: DEFAULT_EVAL_HASH_SIZE_MB,
             keep_tt: keep_tt_resolved,
             dedup_hash: shared_dedup_hash.clone(),
@@ -2241,6 +2272,14 @@ fn main() -> Result<()> {
     // Signal workers to stop
     for _ in 0..cli.concurrency {
         let _ = ticket_tx.send(None);
+    }
+    drop(ticket_tx); // チャネル閉鎖でワーカーの recv が終了する
+
+    // グレースフルシャットダウン後、ワーカーが完了したゲームの結果を回収する。
+    // Ctrl-C 後もワーカーは進行中のゲームを完了させるため、
+    // メインスレッドのカウンタがずれないようここで drain する。
+    while let Ok(result) = result_rx.recv() {
+        handle_result(result, &mut black_wins, &mut white_wins, &mut draws, &mut completed);
     }
 
     // Join workers and collect training stats
@@ -2744,11 +2783,28 @@ fn start_position_for_game(
         (0, 0)
     };
 
-    // random_startpos の場合は moves[0].sfen_before を優先
-    let use_moves_first = meta.map(|m| m.settings.random_startpos).unwrap_or(false);
+    // 常に moves[0].sfen_before を優先する。
+    // game_id → startpos_idx のマッピングは startpos_no_repeat（シャッフル）や
+    // random_startpos で (game_id-1)%len と一致しないため、sfen_before が正確。
+    if let Some(first) = moves.first() {
+        let mut pos = Position::new();
+        if pos.set_sfen(&first.sfen_before).is_ok() {
+            if has_pass {
+                pos.enable_pass_rights(pass_black, pass_white);
+            }
+            let sfen = pos.to_sfen();
+            return Some((pos, sfen));
+        }
+        // sfen_before のパースに失敗した場合は meta からのフォールバックを試みる。
+        // ファイル破損等で sfen_before が壊れている可能性があるため警告を出す。
+        eprintln!(
+            "warning: game {}: failed to parse sfen_before '{}', falling back to meta",
+            game_id, &first.sfen_before
+        );
+    }
 
-    if !use_moves_first
-        && let Some(meta) = meta
+    // フォールバック: moves が空の場合のみ meta から復元
+    if let Some(meta) = meta
         && !meta.start_positions.is_empty()
     {
         let idx = ((game_id - 1) as usize) % meta.start_positions.len();
@@ -2760,15 +2816,7 @@ fn start_position_for_game(
             return Some((pos, sfen));
         }
     }
-    moves.first().and_then(|m| {
-        let mut pos = Position::new();
-        pos.set_sfen(&m.sfen_before).ok()?;
-        if has_pass {
-            pos.enable_pass_rights(pass_black, pass_white);
-        }
-        let sfen = pos.to_sfen();
-        Some((pos, sfen))
-    })
+    None
 }
 
 fn start_position_from_command(cmd: &str) -> Result<(Position, String)> {
