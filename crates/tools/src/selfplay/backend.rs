@@ -72,6 +72,8 @@ pub struct SearchParams {
     pub game_id: u32,
     /// 手数（ログ用）
     pub ply: u32,
+    /// info 行をバッファに収集するか（ログ出力用）
+    pub collect_info_lines: bool,
 }
 
 // =============================================================================
@@ -87,6 +89,8 @@ pub trait SearchBackend {
     fn prepare_game(&mut self, keep_tt: bool) -> Result<()>;
 
     /// 探索を実行して結果を返す
+    ///
+    /// `pos` は NativeBackend が直接使用する。UsiBackend は `params.sfen` を参照する。
     fn search(&mut self, pos: &Position, params: &SearchParams) -> Result<BackendSearchResult>;
 }
 
@@ -288,10 +292,13 @@ impl SearchBackend for UsiBackend {
         };
 
         // info 行と MultiPV 候補を収集するコールバック
+        let collect_info_lines = params.collect_info_lines;
         let mut info_lines: Vec<String> = Vec::new();
         let mut snapshot = InfoSnapshot::default();
         let mut info_cb = |line: &str, _req: &SearchRequest<'_>| {
-            info_lines.push(line.to_string());
+            if collect_info_lines {
+                info_lines.push(line.to_string());
+            }
             snapshot.update_from_line(line);
         };
 
@@ -310,7 +317,11 @@ impl SearchBackend for UsiBackend {
             .filter_map(|c| {
                 Move::from_usi(&c.first_move_usi).map(|mv| MultiPvCandidate {
                     multipv: c.multipv,
-                    score_cp: c.score_cp.unwrap_or(0),
+                    score_cp: c.score_cp.unwrap_or(match c.score_mate {
+                        Some(m) if m > 0 => 30000,
+                        Some(m) if m < 0 => -30000,
+                        _ => 0,
+                    }),
                     score_mate: c.score_mate,
                     first_move: mv,
                 })

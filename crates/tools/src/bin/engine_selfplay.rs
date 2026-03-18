@@ -17,12 +17,15 @@ use rshogi_core::position::Position;
 use rshogi_core::types::{Color, Move, PieceType, Square};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::atomic::AtomicU64;
 use tools::packed_sfen::{PackedSfenValue, move_to_move16, pack_position};
 use tools::selfplay::{
     EngineConfig, EngineProcess, EvalLog, GameEngines, GameOutcome, NativeBackend, ParsedPosition,
     SearchParams, TimeControl, UsiBackend, build_position, load_start_positions,
     parse_position_line, side_label,
 };
+
+const DEFAULT_EVAL_HASH_SIZE_MB: usize = 64;
 
 /// engine-usi 同士の自己対局ハーネス。時間管理と info ログ収集を最小限に実装する。
 ///
@@ -735,12 +738,8 @@ struct SharedDedupHash {
 
 impl SharedDedupHash {
     fn new(size: u64) -> Self {
-        use std::sync::atomic::AtomicU64;
         let size = size.next_power_of_two();
-        let mut table = Vec::with_capacity(size as usize);
-        for _ in 0..size {
-            table.push(AtomicU64::new(0));
-        }
+        let table: Vec<_> = (0..size).map(|_| AtomicU64::new(0)).collect();
         Self {
             table,
             mask: size - 1,
@@ -814,9 +813,7 @@ fn select_multipv_random(
         .iter()
         .filter(|c| (best_score - c.score_cp).abs() <= diff_threshold)
         .collect();
-    if eligible.is_empty() {
-        return None;
-    }
+    debug_assert!(!eligible.is_empty(), "eligible must contain at least PV1 (diff_threshold >= 0)");
     let selected = eligible[rng.random_range(0..eligible.len())];
     Some(selected.first_move)
 }
@@ -1209,6 +1206,7 @@ fn worker_main(
                     side,
                     game_id: game_idx + 1,
                     ply: plies_played,
+                    collect_info_lines: info_logger.is_some(),
                 };
                 let search = engines.search(side, &pos, &params)?;
 
@@ -1826,6 +1824,10 @@ fn main() -> Result<()> {
     let native_mode = cli.native.unwrap_or(cli.for_train);
     let startpos_no_repeat_resolved = cli.startpos_no_repeat.unwrap_or(cli.for_train);
 
+    if startpos_no_repeat_resolved && cli.random_startpos {
+        eprintln!("warning: --random-startpos is ignored when --startpos-no-repeat is active");
+    }
+
     // shuffle_seed の解決: CLI 指定 > meta から復元 > ランダム生成
     // resume 時は meta の seed と CLI の seed が不一致ならエラー（順列が変わるため）
     let shuffle_seed_resolved: Option<u64> = if startpos_no_repeat_resolved {
@@ -2079,7 +2081,7 @@ fn main() -> Result<()> {
             skip_initial_ply: cli.skip_initial_ply,
             skip_in_check: cli.skip_in_check,
             native_mode,
-            eval_hash_size_mb: 64,
+            eval_hash_size_mb: DEFAULT_EVAL_HASH_SIZE_MB,
             keep_tt: keep_tt_resolved,
             dedup_hash: shared_dedup_hash.clone(),
             random_multi_pv: random_multi_pv_resolved,

@@ -188,11 +188,6 @@ impl InfoSnapshot {
         }
     }
 
-    /// MultiPV 候補をクリア（新しい探索開始時に呼ぶ）
-    pub fn clear_multipv(&mut self) {
-        self.multipv_candidates.clear();
-    }
-
     pub fn into_eval_log(self) -> Option<EvalLog> {
         if self.score_cp.is_none()
             && self.score_mate.is_none()
