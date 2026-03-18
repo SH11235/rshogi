@@ -973,6 +973,10 @@ struct WorkerConfig {
     skip_in_check: bool,
     // gensfen: NativeBackend モード
     native_mode: bool,
+    /// USI 単一エンジン最適化（先後同一エンジン時に 1 プロセスで兼用）。
+    /// TT/履歴が先後で共有されるため、Elo 評価に影響する。
+    /// --for-train 時のみ有効。通常の自己対局では無効。
+    usi_single: bool,
     eval_hash_size_mb: usize,
     // gensfen: 重複回避
     keep_tt: bool,
@@ -1025,15 +1029,11 @@ fn worker_main(
                 Ok::<_, anyhow::Error>(engine)
             };
 
-            // 先後同一エンジンの場合は 1 プロセスで兼用（gensfen 最適化）
-            let same_engine = cfg.engine_path_black == cfg.engine_path_white
-                && cfg.black_args == cfg.white_args
-                && cfg.black_usi_opts == cfg.white_usi_opts
-                && cfg.threads_black == cfg.threads_white;
-
-            if same_engine {
+            // 先後同一エンジンかつ usi_single が有効なら 1 プロセスで兼用。
+            // TT/履歴が先後で共有されるため、--for-train 以外では無効。
+            if cfg.usi_single {
                 let engine =
-                    spawn_usi("black", &cfg.black_args, &cfg.black_usi_opts, cfg.threads_black)?;
+                    spawn_usi("single", &cfg.black_args, &cfg.black_usi_opts, cfg.threads_black)?;
                 GameEngines::UsiSingle(Box::new(UsiBackend::new(engine)))
             } else {
                 let black =
@@ -1836,20 +1836,21 @@ fn main() -> Result<()> {
     // gensfen オプションのデフォルト解決（meta 書き込みより前に解決する必要がある）
     let native_mode = cli.native.unwrap_or(cli.for_train);
 
-    // USI 単一エンジン最適化: 先後同一エンジンなら 1 プロセスで兼用
-    if !native_mode {
-        let usi_single_engine = engine_paths.black.path == engine_paths.white.path
-            && black_args == white_args
-            && black_usi_opts == white_usi_opts
-            && threads_black == threads_white;
-        if usi_single_engine {
-            eprintln!(
-                "USI single-engine mode: {} process{} (instead of {})",
-                cli.concurrency,
-                if cli.concurrency == 1 { "" } else { "es" },
-                cli.concurrency * 2
-            );
-        }
+    // USI 単一エンジン最適化: --for-train かつ先後同一エンジンなら 1 プロセスで兼用。
+    // TT/履歴が先後で共有されるため、通常の自己対局（Elo 評価）では無効。
+    let usi_single = !native_mode
+        && cli.for_train
+        && engine_paths.black.path == engine_paths.white.path
+        && black_args == white_args
+        && black_usi_opts == white_usi_opts
+        && threads_black == threads_white;
+    if usi_single {
+        eprintln!(
+            "USI single-engine mode: {} process{} (instead of {})",
+            cli.concurrency,
+            if cli.concurrency == 1 { "" } else { "es" },
+            cli.concurrency * 2
+        );
     }
     let startpos_no_repeat_resolved = cli.startpos_no_repeat.unwrap_or(cli.for_train);
 
@@ -2126,6 +2127,7 @@ fn main() -> Result<()> {
             skip_initial_ply: cli.skip_initial_ply,
             skip_in_check: cli.skip_in_check,
             native_mode,
+            usi_single,
             eval_hash_size_mb: DEFAULT_EVAL_HASH_SIZE_MB,
             keep_tt: keep_tt_resolved,
             dedup_hash: shared_dedup_hash.clone(),
@@ -2793,6 +2795,12 @@ fn start_position_for_game(
             let sfen = pos.to_sfen();
             return Some((pos, sfen));
         }
+        // sfen_before のパースに失敗した場合は meta からのフォールバックを試みる。
+        // ファイル破損等で sfen_before が壊れている可能性があるため警告を出す。
+        eprintln!(
+            "warning: game {}: failed to parse sfen_before '{}', falling back to meta",
+            game_id, &first.sfen_before
+        );
     }
 
     // フォールバック: moves が空の場合のみ meta から復元

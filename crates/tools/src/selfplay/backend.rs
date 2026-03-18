@@ -393,6 +393,9 @@ impl GameEngines {
                 Color::Black => engines.black.search(pos, params),
                 Color::White => engines.white.search(pos, params),
             },
+            // UsiSingle では side に関わらず同一エンジンインスタンスを使用する。
+            // USI プロトコルは `position` コマンドで局面を都度設定するため、
+            // 同一プロセスで先後両手番を処理しても安全。
             Self::UsiSingle(e) => e.search(pos, params),
         }
     }
