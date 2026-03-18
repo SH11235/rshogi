@@ -311,6 +311,16 @@ struct Cli {
     /// 省略時はランダム生成。resume 時は meta から復元される。
     #[arg(long)]
     shuffle_seed: Option<u64>,
+
+    /// dedup rate チェックの間隔（ゲーム数）。
+    /// N ゲームごとに直近区間の重複率を計算し、閾値超過で警告を出力する。
+    #[arg(long, default_value_t = 1000)]
+    dedup_warn_interval: u32,
+
+    /// dedup rate の警告閾値（0.0-1.0）。
+    /// 直近区間の重複率がこの値を超えると stderr に警告を出力する。
+    #[arg(long, default_value_t = 0.1)]
+    dedup_warn_rate: f64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -986,6 +996,8 @@ struct WorkerConfig {
     random_move_count: u32,
     random_move_min_ply: u32,
     random_move_max_ply: u32,
+    dedup_warn_interval: u32,
+    dedup_warn_rate: f64,
 }
 
 fn worker_main(
@@ -1093,6 +1105,10 @@ fn worker_main(
         let mut dedup_discarded = 0u64;
         let mut multipv_diversions = 0u64;
         let mut random_moves_played = 0u64;
+        // dedup rate 監視用（interval ごとにリセット）
+        let mut interval_games = 0u32;
+        let mut interval_dedup_hits = 0u64;
+        let mut interval_positions_checked = 0u64;
 
         // Game loop
         while let Ok(Some(ticket)) = rx.recv() {
@@ -1293,8 +1309,10 @@ fn worker_main(
                                     // --- gensfen: ハッシュ重複検出 ---
                                     // 全ワーカーで共有するテーブルで重複チェック（tanuki-と同じ構成）
                                     let skip_record = if let Some(ref dh) = dedup_hash {
+                                        interval_positions_checked += 1;
                                         if dh.check_and_insert(pos.key()) {
                                             dedup_hits += 1;
+                                            interval_dedup_hits += 1;
                                             let discarded = training_data_collector
                                                 .as_ref()
                                                 .map_or(0, |c| c.entries_len() as u64);
@@ -1481,6 +1499,32 @@ fn worker_main(
                 outcome,
                 outcome_reason: outcome_reason.to_string(),
             });
+
+            // dedup rate 監視
+            interval_games += 1;
+            if dedup_hash.is_some()
+                && cfg.dedup_warn_interval > 0
+                && interval_games >= cfg.dedup_warn_interval
+            {
+                if interval_positions_checked > 0 {
+                    let rate = interval_dedup_hits as f64 / interval_positions_checked as f64;
+                    if rate > cfg.dedup_warn_rate {
+                        eprintln!(
+                            "warning: worker {}: dedup rate {:.1}% in last {} games \
+                             ({} hits / {} checked). \
+                             Consider increasing --random-multi-pv or adding --random-move-count",
+                            cfg.worker_id,
+                            rate * 100.0,
+                            interval_games,
+                            interval_dedup_hits,
+                            interval_positions_checked,
+                        );
+                    }
+                }
+                interval_games = 0;
+                interval_dedup_hits = 0;
+                interval_positions_checked = 0;
+            }
         }
 
         // Flush all temp files
@@ -2136,6 +2180,8 @@ fn main() -> Result<()> {
             random_move_count: cli.random_move_count,
             random_move_min_ply: cli.random_move_min_ply,
             random_move_max_ply: cli.random_move_max_ply,
+            dedup_warn_interval: cli.dedup_warn_interval,
+            dedup_warn_rate: cli.dedup_warn_rate,
         };
 
         let rx = ticket_rx.clone();
