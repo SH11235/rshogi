@@ -218,6 +218,44 @@ const HUFFMAN_TABLE: [HuffmanCode; 8] = [
     }, // GOLD (金)
 ];
 
+/// Apery/cshogi HuffmanCodedPos 形式のハフマンテーブル
+///
+/// YaneuraOu の PackedSfen とは KNIGHT と SILVER のコードが逆。
+const HCP_HUFFMAN_TABLE: [HuffmanCode; 8] = [
+    HuffmanCode {
+        code: 0x00,
+        bits: 1,
+    }, // NO_PIECE (空)
+    HuffmanCode {
+        code: 0x01,
+        bits: 2,
+    }, // PAWN (歩)
+    HuffmanCode {
+        code: 0x03,
+        bits: 4,
+    }, // LANCE (香)
+    HuffmanCode {
+        code: 0x07,
+        bits: 4,
+    }, // KNIGHT (桂) ← YO では 0x0b
+    HuffmanCode {
+        code: 0x0b,
+        bits: 4,
+    }, // SILVER (銀) ← YO では 0x07
+    HuffmanCode {
+        code: 0x1f,
+        bits: 6,
+    }, // BISHOP (角)
+    HuffmanCode {
+        code: 0x3f,
+        bits: 6,
+    }, // ROOK (飛)
+    HuffmanCode {
+        code: 0x0f,
+        bits: 5,
+    }, // GOLD (金)
+];
+
 /// ハフマン符号から駒種を復号する
 /// 戻り値: Some(駒種インデックス) または None=空きマス
 /// 駒種インデックス: 1=歩, 2=香, 3=桂, 4=銀, 5=角, 6=飛, 7=金
@@ -409,6 +447,327 @@ pub fn unpack_sfen(packed: &[u8; 32]) -> Result<String, String> {
 
     // SFEN文字列を生成
     Ok(generate_sfen(&board, &hands, side_to_move))
+}
+
+/// HuffmanCodedPos (Apery/cshogi 形式) をSFEN文字列に変換
+///
+/// cshogi の `to_hcp()` が出力する形式。YaneuraOu の PackedSfen とは
+/// 盤上駒・手駒の色ビットと成りビットの順序が逆:
+///   - PSfen (YaneuraOu): huffman → promotion → color
+///   - HCP   (Apery):     huffman → color → promotion
+pub fn unpack_hcp(packed: &[u8; 32]) -> Result<String, String> {
+    let mut stream = BitStream::new(packed);
+
+    // 手番 (1bit)
+    let side_to_move = if stream.read_one_bit() == 0 {
+        Color::Black
+    } else {
+        Color::White
+    };
+
+    let mut board = [Piece::NONE; 81];
+
+    // 先手玉位置 (7bit)
+    let black_king_sq = stream.read_n_bit(7) as u8;
+    if black_king_sq >= 81 {
+        return Err(format!("Invalid black king position: {black_king_sq}"));
+    }
+    board[black_king_sq as usize] = Piece::B_KING;
+
+    // 後手玉位置 (7bit)
+    let white_king_sq = stream.read_n_bit(7) as u8;
+    if white_king_sq >= 81 {
+        return Err(format!("Invalid white king position: {white_king_sq}"));
+    }
+    board[white_king_sq as usize] = Piece::W_KING;
+
+    // 盤上の駒 (ハフマン符号化, HCP bit order: color → promotion)
+    for (sq, cell) in board.iter_mut().enumerate() {
+        if cell.is_some() && cell.piece_type() == PieceType::King {
+            continue;
+        }
+
+        let piece_idx = decode_huffman_piece_with_table(&mut stream, &HCP_HUFFMAN_TABLE);
+
+        if let Some(idx) = piece_idx {
+            let pt = piece_type_from_index(idx).ok_or("Invalid piece type")?;
+
+            // HCP 形式: 先後フラグ → 成りフラグ（PSfen と逆順）
+            let color = if stream.read_one_bit() == 0 {
+                Color::Black
+            } else {
+                Color::White
+            };
+
+            let promoted = if pt != PieceType::Gold {
+                stream.read_one_bit() != 0
+            } else {
+                false
+            };
+
+            let piece = if promoted {
+                Piece::new(color, pt.promote().ok_or("Cannot promote")?)
+            } else {
+                Piece::new(color, pt)
+            };
+            *cell = piece;
+        }
+
+        if stream.cursor() > 256 {
+            return Err(format!("BitStream overflow at sq {sq}"));
+        }
+    }
+
+    // 手駒 (残りのビット)
+    // HCP では手駒・駒箱を独立した prefix-free コードでエンコードする。
+    // PSfen の「シフトハフマン + 成りフラグ + 色」方式とは完全に異なる。
+    let mut hands = [Hand::EMPTY; 2];
+
+    while stream.cursor() < 256 {
+        let entry = match decode_hcp_hand_entry(&mut stream) {
+            Some(e) => e,
+            None => return Err("Invalid HCP hand piece code".to_string()),
+        };
+
+        // 駒箱の駒はスキップ
+        if entry.is_piecebox {
+            continue;
+        }
+
+        let pt = piece_type_from_index(entry.piece_idx).ok_or("Invalid hand piece type")?;
+        let color = entry.color.ok_or("Hand piece without color")?;
+        hands[color.index()] = hands[color.index()].add(pt);
+    }
+
+    Ok(generate_sfen(&board, &hands, side_to_move))
+}
+
+/// HCP 手駒/駒箱の符号エントリ
+struct HcpHandCode {
+    code: u8,
+    bits: u8,
+    /// 駒種インデックス (1=歩..7=金)
+    piece_idx: usize,
+    /// 手駒の色 (Some=手駒, None は使わない — is_piecebox=true のとき)
+    color: Option<Color>,
+    /// 駒箱の駒か
+    is_piecebox: bool,
+}
+
+/// HCP 手駒/駒箱のデコード結果
+struct HcpHandEntry {
+    piece_idx: usize,
+    color: Option<Color>,
+    is_piecebox: bool,
+}
+
+/// cshogi/Apery HCP 形式の手駒＋駒箱 prefix-free コードテーブル
+///
+/// cshogi の boardCodeToPieceHash / handCodeToPieceHash から再構成。
+/// 盤上テーブルのシフト方式ではなく、独立したコード体系。
+const HCP_HAND_TABLE: [HcpHandCode; 21] = [
+    // 手駒 Black (色ビット=0 を最上位に持つ)
+    HcpHandCode {
+        code: 0x00,
+        bits: 3,
+        piece_idx: 1,
+        color: Some(Color::Black),
+        is_piecebox: false,
+    }, // 歩
+    HcpHandCode {
+        code: 0x01,
+        bits: 5,
+        piece_idx: 2,
+        color: Some(Color::Black),
+        is_piecebox: false,
+    }, // 香
+    HcpHandCode {
+        code: 0x03,
+        bits: 5,
+        piece_idx: 3,
+        color: Some(Color::Black),
+        is_piecebox: false,
+    }, // 桂
+    HcpHandCode {
+        code: 0x05,
+        bits: 5,
+        piece_idx: 4,
+        color: Some(Color::Black),
+        is_piecebox: false,
+    }, // 銀
+    HcpHandCode {
+        code: 0x07,
+        bits: 5,
+        piece_idx: 7,
+        color: Some(Color::Black),
+        is_piecebox: false,
+    }, // 金
+    HcpHandCode {
+        code: 0x1f,
+        bits: 7,
+        piece_idx: 5,
+        color: Some(Color::Black),
+        is_piecebox: false,
+    }, // 角
+    HcpHandCode {
+        code: 0x3f,
+        bits: 7,
+        piece_idx: 6,
+        color: Some(Color::Black),
+        is_piecebox: false,
+    }, // 飛
+    // 手駒 White (色ビット=1 を最上位に持つ)
+    HcpHandCode {
+        code: 0x04,
+        bits: 3,
+        piece_idx: 1,
+        color: Some(Color::White),
+        is_piecebox: false,
+    }, // 歩
+    HcpHandCode {
+        code: 0x11,
+        bits: 5,
+        piece_idx: 2,
+        color: Some(Color::White),
+        is_piecebox: false,
+    }, // 香
+    HcpHandCode {
+        code: 0x13,
+        bits: 5,
+        piece_idx: 3,
+        color: Some(Color::White),
+        is_piecebox: false,
+    }, // 桂
+    HcpHandCode {
+        code: 0x15,
+        bits: 5,
+        piece_idx: 4,
+        color: Some(Color::White),
+        is_piecebox: false,
+    }, // 銀
+    HcpHandCode {
+        code: 0x17,
+        bits: 5,
+        piece_idx: 7,
+        color: Some(Color::White),
+        is_piecebox: false,
+    }, // 金
+    HcpHandCode {
+        code: 0x5f,
+        bits: 7,
+        piece_idx: 5,
+        color: Some(Color::White),
+        is_piecebox: false,
+    }, // 角
+    HcpHandCode {
+        code: 0x7f,
+        bits: 7,
+        piece_idx: 6,
+        color: Some(Color::White),
+        is_piecebox: false,
+    }, // 飛
+    // 駒箱 (色なし)
+    HcpHandCode {
+        code: 0x02,
+        bits: 3,
+        piece_idx: 1,
+        color: None,
+        is_piecebox: true,
+    }, // 歩
+    HcpHandCode {
+        code: 0x09,
+        bits: 5,
+        piece_idx: 2,
+        color: None,
+        is_piecebox: true,
+    }, // 香
+    HcpHandCode {
+        code: 0x0b,
+        bits: 5,
+        piece_idx: 3,
+        color: None,
+        is_piecebox: true,
+    }, // 桂
+    HcpHandCode {
+        code: 0x0d,
+        bits: 5,
+        piece_idx: 4,
+        color: None,
+        is_piecebox: true,
+    }, // 銀
+    HcpHandCode {
+        code: 0x1d,
+        bits: 5,
+        piece_idx: 7,
+        color: None,
+        is_piecebox: true,
+    }, // 金
+    HcpHandCode {
+        code: 0x0f,
+        bits: 7,
+        piece_idx: 5,
+        color: None,
+        is_piecebox: true,
+    }, // 角
+    HcpHandCode {
+        code: 0x2f,
+        bits: 7,
+        piece_idx: 6,
+        color: None,
+        is_piecebox: true,
+    }, // 飛
+];
+
+/// HCP 手駒/駒箱の prefix-free コードを1エントリ読み取る
+fn decode_hcp_hand_entry(stream: &mut BitStream) -> Option<HcpHandEntry> {
+    let mut code = 0u8;
+    let mut bits = 0u8;
+
+    loop {
+        if stream.remaining() == 0 {
+            return None;
+        }
+        code |= stream.read_one_bit() << bits;
+        bits += 1;
+
+        if bits > 7 {
+            return None;
+        }
+
+        for entry in &HCP_HAND_TABLE {
+            if entry.code == code && entry.bits == bits {
+                return Some(HcpHandEntry {
+                    piece_idx: entry.piece_idx,
+                    color: entry.color,
+                    is_piecebox: entry.is_piecebox,
+                });
+            }
+        }
+    }
+}
+
+/// 指定テーブルでハフマン符号から駒種を復号する
+fn decode_huffman_piece_with_table(
+    stream: &mut BitStream,
+    table: &[HuffmanCode; 8],
+) -> Option<usize> {
+    let mut code = 0u8;
+    let mut bits = 0u8;
+
+    loop {
+        code |= stream.read_one_bit() << bits;
+        bits += 1;
+
+        if bits > 6 {
+            return None;
+        }
+
+        for (i, h) in table.iter().enumerate() {
+            if h.code == code && h.bits == bits {
+                return if i == 0 { None } else { Some(i) };
+            }
+        }
+    }
 }
 
 /// 盤面と手駒からSFEN文字列を生成
@@ -636,6 +995,49 @@ pub fn move16_to_move(move16: u16) -> Move {
             5 => PieceType::Bishop,
             6 => PieceType::Rook,
             7 => PieceType::Gold,
+            _ => return Move::NONE,
+        };
+
+        if let Some(to_sq) = Square::from_u8(to) {
+            Move::new_drop(pt, to_sq)
+        } else {
+            Move::NONE
+        }
+    } else {
+        // 通常の移動
+        if let (Some(from_sq), Some(to_sq)) = (Square::from_u8(from_or_pt), Square::from_u8(to)) {
+            Move::new_move(from_sq, to_sq, promote)
+        } else {
+            Move::NONE
+        }
+    }
+}
+
+/// cshogi/GenSfen の move16 を rshogi の Move に変換
+///
+/// cshogi の move16 は YaneuraOu とほぼ同じだが、ドロップの駒種が 0-indexed:
+///   - cshogi: from = 81 + hand_piece_type (PAWN=0, LANCE=1, ..., ROOK=6)
+///   - YaneuraOu: from = 81 + piece_type (PAWN=1, LANCE=2, ..., GOLD=7)
+///   - 成り: bit 14 (両方共通)
+pub fn cshogi_move16_to_move(move16: u16) -> Move {
+    if move16 == 0 {
+        return Move::NONE;
+    }
+
+    let to = (move16 & 0x7F) as u8;
+    let from_or_pt = ((move16 >> 7) & 0x7F) as u8;
+    let promote = (move16 & 0x4000) != 0;
+
+    if from_or_pt >= 81 {
+        // 打ち駒 (cshogi: HPAWN=0, HLANCE=1, HKNIGHT=2, HSILVER=3, HBISHOP=4, HROOK=5, HGOLD=6)
+        let pt = match from_or_pt - 81 {
+            0 => PieceType::Pawn,
+            1 => PieceType::Lance,
+            2 => PieceType::Knight,
+            3 => PieceType::Silver,
+            4 => PieceType::Bishop,
+            5 => PieceType::Rook,
+            6 => PieceType::Gold,
             _ => return Move::NONE,
         };
 
