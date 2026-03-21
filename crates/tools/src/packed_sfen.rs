@@ -1293,6 +1293,161 @@ pub fn move_to_move16(mv: Move) -> u16 {
     }
 }
 
+/// Move を cshogi の move16 形式に変換
+///
+/// cshogi の move16 は YaneuraOu とほぼ同じだが、ドロップの駒種が 0-indexed:
+///   - cshogi: `from = 81 + hand_piece_type` (Pawn=0, Lance=1, ..., Gold=6)
+///   - YaneuraOu: `from = 81 + piece_type` (Pawn=1, Lance=2, ..., Gold=7)
+///   - 成り: bit 14 (両方共通)
+pub fn move_to_cshogi_move16(mv: Move) -> u16 {
+    if mv == Move::NONE || mv == Move::NULL {
+        return 0;
+    }
+
+    let to = mv.to().index() as u16;
+
+    if mv.is_drop() {
+        // 駒打ち (cshogi: HPAWN=0, HLANCE=1, HKNIGHT=2, HSILVER=3, HBISHOP=4, HROOK=5, HGOLD=6)
+        let pt = mv.drop_piece_type();
+        let hand_piece_index: u16 = match pt {
+            PieceType::Pawn => 0,
+            PieceType::Lance => 1,
+            PieceType::Knight => 2,
+            PieceType::Silver => 3,
+            PieceType::Bishop => 4,
+            PieceType::Rook => 5,
+            PieceType::Gold => 6,
+            _ => return 0,
+        };
+        to | ((81 + hand_piece_index) << 7)
+    } else {
+        // 通常の移動
+        let from = mv.from().index() as u16;
+        let promote = if mv.is_promotion() { 0x4000 } else { 0 };
+        to | (from << 7) | promote
+    }
+}
+
+/// 盤上の駒を HCP 形式のハフマン符号化で書き込む
+///
+/// PSfen とはビット順序が異なる:
+///   - PSfen: huffman_code → promotion_flag → color_flag
+///   - HCP:   huffman_code → color_flag → promotion_flag
+fn write_board_piece_hcp(stream: &mut BitStreamWriter, piece: Piece) {
+    if piece.is_none() {
+        // 空升: 0 (1bit)
+        stream.write_one_bit(false);
+        return;
+    }
+
+    let pt = piece.piece_type();
+    let raw_pt = pt.unpromote();
+    let promoted = pt.is_promoted();
+    let color = piece.color();
+    let idx = piece_type_to_index(pt);
+
+    // HCP ハフマン符号を書き込み
+    let huff = &HCP_HUFFMAN_TABLE[idx];
+    stream.write_n_bit(huff.code as u32, huff.bits as usize);
+
+    // HCP 形式: 先後フラグ → 成りフラグ（PSfen と逆順）
+    stream.write_one_bit(color == Color::White);
+
+    // 金以外は成りフラグ
+    if raw_pt != PieceType::Gold {
+        stream.write_one_bit(promoted);
+    }
+}
+
+/// HCP 形式で手駒を書き込む
+///
+/// HCP_HAND_TABLE から該当エントリを検索し、そのコードを書き込む。
+fn write_hand_piece_hcp(stream: &mut BitStreamWriter, pt: PieceType, color: Color) {
+    let idx = piece_type_to_index(pt);
+
+    for entry in &HCP_HAND_TABLE {
+        if entry.piece_idx == idx && !entry.is_piecebox && entry.color == Some(color) {
+            stream.write_n_bit(entry.code as u32, entry.bits as usize);
+            return;
+        }
+    }
+}
+
+/// HCP 形式で駒箱パディングを書き込む
+///
+/// HCP_HAND_TABLE の歩(piece_idx=1)の駒箱エントリを使用する。
+fn write_piecebox_padding_hcp(stream: &mut BitStreamWriter) {
+    for entry in &HCP_HAND_TABLE {
+        if entry.piece_idx == 1 && entry.is_piecebox {
+            stream.write_n_bit(entry.code as u32, entry.bits as usize);
+            return;
+        }
+    }
+}
+
+/// Position から HCP (HuffmanCodedPos / Apery/cshogi) 形式の 32 バイトを生成
+///
+/// `pack_position` (PSfen/YaneuraOu 形式) との違い:
+///   - 盤上駒のビット順: HCP は `huffman → color → promotion`（PSfen は `huffman → promotion → color`）
+///   - ハフマンテーブル: HCP_HUFFMAN_TABLE を使用（KNIGHT=0x07, SILVER=0x0b で PSfen と逆）
+///   - 手駒: HCP_HAND_TABLE による独立した prefix-free コードを使用
+pub fn pack_position_hcp(pos: &Position) -> [u8; 32] {
+    let mut stream = BitStreamWriter::new();
+
+    // 1. 手番 (1bit): 0=先手, 1=後手
+    stream.write_one_bit(pos.side_to_move() == Color::White);
+
+    // 2. 先手玉位置 (7bit)
+    let black_king_sq = pos.king_square(Color::Black);
+    stream.write_n_bit(black_king_sq.index() as u32, 7);
+
+    // 3. 後手玉位置 (7bit)
+    let white_king_sq = pos.king_square(Color::White);
+    stream.write_n_bit(white_king_sq.index() as u32, 7);
+
+    // 4. 盤上の駒 (81マス、玉はスキップ)
+    for sq_idx in 0..81u8 {
+        let sq = Square::from_u8(sq_idx).expect("sq_idx should be in valid range 0-80");
+        let piece = pos.piece_on(sq);
+
+        // 玉はスキップ
+        if piece.is_some() && piece.piece_type() == PieceType::King {
+            continue;
+        }
+
+        write_board_piece_hcp(&mut stream, piece);
+    }
+
+    // 5. 手駒
+    let piece_order = [
+        PieceType::Rook,
+        PieceType::Bishop,
+        PieceType::Gold,
+        PieceType::Silver,
+        PieceType::Knight,
+        PieceType::Lance,
+        PieceType::Pawn,
+    ];
+
+    for &color in &[Color::Black, Color::White] {
+        let hand = pos.hand(color);
+        for &pt in &piece_order {
+            let count = hand.count(pt);
+            for _ in 0..count {
+                write_hand_piece_hcp(&mut stream, pt, color);
+            }
+        }
+    }
+
+    // 6. 駒箱パディング
+    // HCP の駒箱エントリ（歩）は 3 ビット
+    while stream.bit_position() + 3 <= 256 {
+        write_piecebox_padding_hcp(&mut stream);
+    }
+
+    stream.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

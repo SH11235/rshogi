@@ -18,7 +18,10 @@ use rshogi_core::types::{Color, Move, PieceType, Square};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::atomic::AtomicU64;
-use tools::packed_sfen::{PackedSfenValue, move_to_move16, pack_position};
+use tools::packed_sfen::{
+    PackedSfenValue, move_to_cshogi_move16, move_to_move16, move16_to_move, pack_position,
+    pack_position_hcp,
+};
 use tools::selfplay::{
     EngineConfig, EngineProcess, EvalLog, GameEngines, GameOutcome, NativeBackend, ParsedPosition,
     SearchParams, TimeControl, UsiBackend, build_position, load_start_positions,
@@ -242,6 +245,10 @@ struct Cli {
         help = "Skip positions where king is in check (use --skip-in-check=false to disable)"
     )]
     skip_in_check: bool,
+
+    /// 学習データの出力形式（psv または pack）
+    #[arg(long, default_value = "psv")]
+    training_data_format: String,
 
     /// Number of concurrent worker threads
     #[arg(long, default_value_t = 1)]
@@ -556,6 +563,15 @@ impl MetricsCollector {
     }
 }
 
+/// 学習データの出力形式
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TrainingFormat {
+    /// PackedSfenValue 40バイト固定長形式
+    Psv,
+    /// cshogi 可変長対局棋譜形式
+    Pack,
+}
+
 /// 学習データ出力用のエントリ（game_result未設定の一時データ）
 struct TrainingEntry {
     /// PackedSfen (32バイト)
@@ -575,6 +591,7 @@ struct TrainingEntry {
 struct TrainingDataCollector {
     entries: Vec<TrainingEntry>,
     writer: BufWriter<File>,
+    format: TrainingFormat,
     skip_initial_ply: u32,
     skip_in_check: bool,
     total_written: u64,
@@ -582,10 +599,19 @@ struct TrainingDataCollector {
     skipped_in_check: u64,
     /// InProgress（手数制限/タイムアウト）で終了した対局のスキップ数
     skipped_in_progress: u64,
+    /// .pack 形式用: 対局開始局面の HCP バイト列、手数、平手フラグ
+    start_hcp: Option<([u8; 32], u16, bool)>,
+    /// .pack 形式用: 平手局面の PackedSfen（平手判定の基準）
+    hirate_packed_sfen: [u8; 32],
 }
 
 impl TrainingDataCollector {
-    fn new(path: &Path, skip_initial_ply: u32, skip_in_check: bool) -> Result<Self> {
+    fn new(
+        path: &Path,
+        skip_initial_ply: u32,
+        skip_in_check: bool,
+        format: TrainingFormat,
+    ) -> Result<Self> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -595,21 +621,31 @@ impl TrainingDataCollector {
         }
         let file = File::create(path)
             .with_context(|| format!("failed to create training data file: {}", path.display()))?;
+
+        // 平手判定用の PackedSfen を事前計算
+        let mut hirate_pos = Position::new();
+        hirate_pos.set_hirate();
+        let hirate_packed_sfen = pack_position(&hirate_pos);
+
         Ok(Self {
             entries: Vec::new(),
             writer: BufWriter::new(file),
+            format,
             skip_initial_ply,
             skip_in_check,
             total_written: 0,
             skipped_initial: 0,
             skipped_in_check: 0,
             skipped_in_progress: 0,
+            start_hcp: None,
+            hirate_packed_sfen,
         })
     }
 
     /// 新しい対局を開始（エントリをクリア）
     fn start_game(&mut self) {
         self.entries.clear();
+        self.start_hcp = None;
     }
 
     /// 現在蓄積中のエントリ数
@@ -663,6 +699,14 @@ impl TrainingDataCollector {
         // PackedSfenを生成
         let packed_sfen = pack_position(pos);
 
+        // .pack 形式: 最初のエントリで開始局面の HCP を記録
+        if self.format == TrainingFormat::Pack && self.start_hcp.is_none() {
+            let is_hirate = packed_sfen == self.hirate_packed_sfen;
+            let hcp = pack_position_hcp(pos);
+            let ply = current_ply.clamp(0, u16::MAX as i32) as u16;
+            self.start_hcp = Some((hcp, ply, is_hirate));
+        }
+
         self.entries.push(TrainingEntry {
             sfen: packed_sfen,
             score,
@@ -682,6 +726,21 @@ impl TrainingDataCollector {
             return Ok(());
         }
 
+        if self.entries.is_empty() {
+            return Ok(());
+        }
+
+        match self.format {
+            TrainingFormat::Psv => self.finish_game_psv(outcome)?,
+            TrainingFormat::Pack => self.finish_game_pack(outcome)?,
+        }
+
+        self.entries.clear();
+        Ok(())
+    }
+
+    /// PSV 形式で書き出す（PackedSfenValue 40バイト固定長）
+    fn finish_game_psv(&mut self, outcome: GameOutcome) -> Result<()> {
         for (idx, entry) in self.entries.iter().enumerate() {
             // game_result: 手番側から見た勝敗
             // 1 = 勝ち, 0 = 引き分け, -1 = 負け
@@ -701,7 +760,7 @@ impl TrainingDataCollector {
                     }
                 }
                 GameOutcome::Draw => 0i8,
-                GameOutcome::InProgress => unreachable!(), // 上でreturn済み
+                GameOutcome::InProgress => unreachable!(),
             };
 
             let psv = PackedSfenValue {
@@ -718,7 +777,54 @@ impl TrainingDataCollector {
                 .with_context(|| format!("failed to write position {idx} of game"))?;
             self.total_written += 1;
         }
-        self.entries.clear();
+        Ok(())
+    }
+
+    /// .pack 形式で書き出す（cshogi 可変長対局棋譜）
+    ///
+    /// フォーマット:
+    ///   [開始局面フラグ: u8] — 1=平手, 0=任意局面
+    ///   0 の場合: [HuffmanCodedPos: 32byte][game_ply: u16 LE]
+    ///   繰り返し: [move16(cshogi): u16 LE][score: i16 LE]
+    ///   [終局マーカー: u16 LE (from==to)] [終局理由: u8]
+    fn finish_game_pack(&mut self, outcome: GameOutcome) -> Result<()> {
+        let (hcp, start_ply, is_hirate) =
+            self.start_hcp.ok_or_else(|| anyhow!("pack format: start_hcp not set"))?;
+
+        // 1. 開始局面ヘッダ
+        if is_hirate {
+            self.writer.write_all(&[1u8])?;
+        } else {
+            self.writer.write_all(&[0u8])?;
+            self.writer.write_all(&hcp)?;
+            self.writer.write_all(&start_ply.to_le_bytes())?;
+        }
+
+        // 2. 各エントリの指し手とスコア
+        for entry in &self.entries {
+            // YO move16 → Move → cshogi move16
+            let mv = move16_to_move(entry.move16);
+            let cshogi_move16 = move_to_cshogi_move16(mv);
+            self.writer.write_all(&cshogi_move16.to_le_bytes())?;
+            self.writer.write_all(&entry.score.to_le_bytes())?;
+            self.total_written += 1;
+        }
+
+        // 3. 終局マーカー: game_result を絶対値エンコード
+        //    0=draw, 1=black_win, 2=white_win
+        let result_val: u16 = match outcome {
+            GameOutcome::BlackWin => 1,
+            GameOutcome::WhiteWin => 2,
+            GameOutcome::Draw => 0,
+            GameOutcome::InProgress => unreachable!(),
+        };
+        // 終局マーカー: from==to となる u16 (result_val | (result_val << 7))
+        let end_marker = result_val | (result_val << 7);
+        self.writer.write_all(&end_marker.to_le_bytes())?;
+
+        // 4. 終局理由: 1 = 通常終了
+        self.writer.write_all(&[1u8])?;
+
         Ok(())
     }
 
@@ -989,6 +1095,7 @@ struct WorkerConfig {
     // Training
     skip_initial_ply: u32,
     skip_in_check: bool,
+    training_format: TrainingFormat,
     // gensfen: NativeBackend モード
     native_mode: bool,
     /// USI 単一エンジン最適化（先後同一エンジン時に 1 プロセスで兼用）。
@@ -1091,7 +1198,12 @@ fn worker_main(
             None
         };
         let mut training_data_collector = if let Some(ref path) = cfg.training_data_path {
-            Some(TrainingDataCollector::new(path, cfg.skip_initial_ply, cfg.skip_in_check)?)
+            Some(TrainingDataCollector::new(
+                path,
+                cfg.skip_initial_ply,
+                cfg.skip_in_check,
+                cfg.training_format,
+            )?)
         } else {
             None
         };
@@ -1807,11 +1919,22 @@ fn main() -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
+    // 学習データ出力形式のパース
+    let training_format = match cli.training_data_format.as_str() {
+        "psv" => TrainingFormat::Psv,
+        "pack" => TrainingFormat::Pack,
+        other => bail!("unknown training data format: '{}' (expected 'psv' or 'pack')", other),
+    };
+
     // 学習データ出力の初期化（デフォルトで有効、--no-training-data で無効化）
+    let training_data_ext = match training_format {
+        TrainingFormat::Psv => "psv",
+        TrainingFormat::Pack => "pack",
+    };
     let training_data_path = match (cli.no_training_data, &cli.output_training_data) {
         (true, _) => None,
         (false, Some(path)) => Some(path.clone()),
-        (false, None) => Some(default_training_data_path(&output_path)),
+        (false, None) => Some(default_training_data_path(&output_path, training_data_ext)),
     };
     // パス権有効時は学習データ収集を抑止（PackedSfen形式がパス権をサポートしていないため）
     let pass_rights_active = pass_rights_cli_specified || pass_rights_via_usi_early;
@@ -2130,7 +2253,7 @@ fn main() -> Result<()> {
             None
         };
         let w_training_path = if training_data_enabled {
-            Some(output_parent.join(format!("{output_stem}.w{w}.psv")))
+            Some(output_parent.join(format!("{output_stem}.w{w}.{training_data_ext}")))
         } else {
             None
         };
@@ -2196,6 +2319,7 @@ fn main() -> Result<()> {
             minimal_log: cli.for_train,
             skip_initial_ply: cli.skip_initial_ply,
             skip_in_check: cli.skip_in_check,
+            training_format,
             native_mode,
             usi_single,
             eval_hash_size_mb: DEFAULT_EVAL_HASH_SIZE_MB,
@@ -2391,7 +2515,7 @@ fn main() -> Result<()> {
         let pack_path = training_data_path
             .as_ref()
             .cloned()
-            .unwrap_or_else(|| default_training_data_path(&output_path));
+            .unwrap_or_else(|| default_training_data_path(&output_path, training_data_ext));
         concatenate_temp_files(&pack_path, &temp_pack_paths, append_mode)?;
     }
 
@@ -2566,10 +2690,10 @@ fn default_summary_path(jsonl: &Path) -> PathBuf {
     parent.join(format!("{stem}.summary.jsonl"))
 }
 
-fn default_training_data_path(jsonl: &Path) -> PathBuf {
+fn default_training_data_path(jsonl: &Path, ext: &str) -> PathBuf {
     let parent = jsonl.parent().unwrap_or_else(|| Path::new("."));
     let stem = jsonl.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
-    parent.join(format!("{stem}.psv"))
+    parent.join(format!("{stem}.{ext}"))
 }
 
 fn resolve_engine_paths(cli: &Cli) -> ResolvedEnginePaths {
