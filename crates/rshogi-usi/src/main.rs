@@ -774,11 +774,11 @@ impl UsiEngine {
                 }
             }
             "EvalFile" => {
-                if value.is_empty() || value == "<empty>" || value == "eval/nn.bin" {
-                    // デフォルト値または空 → 明示指定を解除し自動ロードに戻す
+                if value.is_empty() || value == "<empty>" {
+                    // 空 → 明示指定を解除し isready の自動ロードに戻す
                     self.eval_file_explicit = None;
                 } else {
-                    // 明示指定: ロード試行し、結果を記録
+                    // パス指定: ロード試行し、結果を記録
                     match init_nnue(&value) {
                         Ok(()) => {
                             self.eval_file_explicit = Some(true);
