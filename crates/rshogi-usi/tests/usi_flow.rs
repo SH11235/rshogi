@@ -92,3 +92,39 @@ fn ponderhit_outputs_bestmove() {
     assert!(stdout.contains("bestmove"), "stdout:\n{stdout}");
     assert!(output.status.success());
 }
+
+/// `Stochastic_Ponder` 有効時の `ponderhit` で通常探索へ切り替わって bestmove が返ること
+#[test]
+fn stochastic_ponderhit_restarts_search() {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("rshogi-usi"));
+    let mut child = cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn engine");
+
+    {
+        let stdin = child.stdin.as_mut().expect("stdin");
+        stdin
+            .write_all(
+                b"usi
+isready
+setoption name Stochastic_Ponder value true
+position startpos
+go ponder depth 2
+ponderhit
+quit
+",
+            )
+            .expect("write stdin");
+    }
+
+    let output = child.wait_with_output().expect("wait output");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("bestmove"),
+        "stdout:
+{stdout}"
+    );
+    assert!(output.status.success());
+}

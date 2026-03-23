@@ -302,6 +302,14 @@ struct UsiEngine {
     stop_flag: Option<Arc<AtomicBool>>,
     /// ponderhit通知フラグ
     ponderhit_flag: Option<Arc<AtomicBool>>,
+    /// bestmove出力抑制フラグ（cmd_go内部でcmd_stopする際に使用）
+    suppress_bestmove: Arc<AtomicBool>,
+    /// Stochastic_Ponder オプションのミラー
+    stochastic_ponder: bool,
+    /// 直近の position コマンド文字列（Stochastic_Ponder の再始動用）
+    last_position_cmd: Option<String>,
+    /// 直近の go コマンド文字列（Stochastic_Ponder の再始動用）
+    last_go_cmd: Option<String>,
     /// Large Pages使用メッセージの出力済みフラグ
     large_pages_reported: bool,
     // --- 有限パス権（Finite Pass Rights）関連 ---
@@ -340,6 +348,10 @@ impl UsiEngine {
             search_thread: None,
             stop_flag: None,
             ponderhit_flag: None,
+            suppress_bestmove: Arc::new(AtomicBool::new(false)),
+            stochastic_ponder: false,
+            last_position_cmd: None,
+            last_go_cmd: None,
             large_pages_reported: false,
             pass_rights_enabled: false,
             initial_pass_count: 2,
@@ -369,9 +381,11 @@ impl UsiEngine {
                 self.cmd_usinewgame();
             }
             "position" => {
+                self.last_position_cmd = Some(line.to_string());
                 self.cmd_position(&tokens);
             }
             "go" => {
+                self.last_go_cmd = Some(line.to_string());
                 self.cmd_go(&tokens);
             }
             "stop" => {
@@ -620,12 +634,13 @@ impl UsiEngine {
                 }
             }
             "Stochastic_Ponder" => {
-                if let Ok(v) = value.parse::<bool>()
-                    && let Some(search) = self.search.as_mut()
-                {
-                    let mut opts = search.time_options();
-                    opts.stochastic_ponder = v;
-                    search.set_time_options(opts);
+                if let Ok(v) = value.parse::<bool>() {
+                    self.stochastic_ponder = v;
+                    if let Some(search) = self.search.as_mut() {
+                        let mut opts = search.time_options();
+                        opts.stochastic_ponder = v;
+                        search.set_time_options(opts);
+                    }
                 }
             }
             "Skill Level" => {
@@ -943,8 +958,10 @@ impl UsiEngine {
 
     /// goコマンド: 探索開始
     fn cmd_go(&mut self, tokens: &[&str]) {
-        // 既存の探索を停止
-        self.cmd_stop();
+        // 既存の探索を停止（bestmove出力を抑制する）
+        // GUIがstopを送らずにposition+goを送ってきた場合、前のponder探索の
+        // bestmoveがstdoutに出力されるとGUIが混乱する（YaneuraOu準拠）
+        self.stop_search_silently();
 
         // 制限を解析
         let limits = self.parse_go_options(tokens);
@@ -960,11 +977,14 @@ impl UsiEngine {
             search.resize_eval_hash(self.eval_hash_size_mb);
         }
         search.set_skill_options(self.skill_options);
+        // stop/ponderhitフラグをリセット（スレッド生成前に行い、go()内での競合を防ぐ）
+        search.reset_flags();
         let stop_flag = search.stop_flag();
         let ponderhit_flag = search.ponderhit_flag();
         self.stop_flag = Some(stop_flag.clone());
         self.ponderhit_flag = Some(ponderhit_flag.clone());
 
+        let suppress_flag = Arc::clone(&self.suppress_bestmove);
         let builder = thread::Builder::new().stack_size(SEARCH_STACK_SIZE);
         self.search_thread = Some(
             builder
@@ -986,18 +1006,22 @@ impl UsiEngine {
                         std::io::stdout().flush().ok();
                     }
 
-                    let best_usi = if result.best_move != Move::NONE {
-                        result.best_move.to_usi()
-                    } else {
-                        "resign".to_string()
-                    };
+                    // bestmove出力（suppress_bestmoveが立っていない場合のみ）
+                    // cmd_goから内部的にstopされた場合は抑制される
+                    if !suppress_flag.load(Ordering::SeqCst) {
+                        let best_usi = if result.best_move != Move::NONE {
+                            result.best_move.to_usi()
+                        } else {
+                            "resign".to_string()
+                        };
 
-                    if result.ponder_move != Move::NONE {
-                        println!("bestmove {best_usi} ponder {}", result.ponder_move.to_usi());
-                    } else {
-                        println!("bestmove {best_usi}");
+                        if result.ponder_move != Move::NONE {
+                            println!("bestmove {best_usi} ponder {}", result.ponder_move.to_usi());
+                        } else {
+                            println!("bestmove {best_usi}");
+                        }
+                        std::io::stdout().flush().ok();
                     }
-                    std::io::stdout().flush().ok();
 
                     (search, result)
                 })
@@ -1132,7 +1156,7 @@ impl UsiEngine {
         limits
     }
 
-    /// stopコマンド: 探索停止
+    /// stopコマンド: 探索停止（GUIからの明示的stop — bestmoveは探索スレッドが出力）
     fn cmd_stop(&mut self) {
         if let Some(stop_flag) = &self.stop_flag {
             stop_flag.store(true, Ordering::SeqCst);
@@ -1140,10 +1164,50 @@ impl UsiEngine {
         self.wait_for_search();
     }
 
-    /// ponderhitコマンド: 先読みヒットを通知（現状は停止扱い）
+    /// 探索を停止するがbestmoveを出力しない（cmd_go内部で使用）
+    ///
+    /// GUIがstopを送らずにposition+goを送ってきた場合、前のponder探索の
+    /// bestmoveを出力するとGUIが混乱する（YaneuraOu準拠）
+    fn stop_search_silently(&mut self) {
+        self.suppress_bestmove.store(true, Ordering::SeqCst);
+        if let Some(stop_flag) = &self.stop_flag {
+            stop_flag.store(true, Ordering::SeqCst);
+        }
+        self.wait_for_search();
+        self.suppress_bestmove.store(false, Ordering::SeqCst);
+    }
+
+    /// ponderhitコマンド: 先読みヒットを通知
     fn cmd_ponderhit(&mut self) {
+        if self.stochastic_ponder {
+            self.restart_after_ponderhit();
+            return;
+        }
+
         if let Some(flag) = &self.ponderhit_flag {
             flag.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Stochastic_Ponder の ponderhit 後に通常探索へ切り替える
+    fn restart_after_ponderhit(&mut self) {
+        self.stop_search_silently();
+
+        if let Some(line) = self.last_position_cmd.clone() {
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            self.cmd_position(&tokens);
+        }
+
+        if let Some(line) = self.last_go_cmd.clone() {
+            let owned: Vec<String> = line
+                .split_whitespace()
+                .filter(|token| *token != "ponder")
+                .map(str::to_owned)
+                .collect();
+            let tokens: Vec<&str> = owned.iter().map(String::as_str).collect();
+            if !tokens.is_empty() {
+                self.cmd_go(&tokens);
+            }
         }
     }
 

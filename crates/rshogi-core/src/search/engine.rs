@@ -11,6 +11,8 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
 
 use super::time_manager::{
     DEFAULT_MAX_MOVES_TO_DRAW, calculate_falling_eval, calculate_time_reduction,
@@ -788,6 +790,15 @@ impl Search {
         self.stop.store(true, Ordering::SeqCst);
     }
 
+    /// stop/ponderhitフラグをリセット（go() 呼び出し前にUSI層から呼ぶ）
+    ///
+    /// go() 内部ではなくスレッド生成前に呼ぶことで、USI層で既にセットされた
+    /// フラグが競合で失われるのを防ぐ。
+    pub fn reset_flags(&self) {
+        self.stop.store(false, Ordering::SeqCst);
+        self.ponderhit_flag.store(false, Ordering::SeqCst);
+    }
+
     /// 時間オプションを設定（USI setoptionから呼び出す想定）
     pub fn set_time_options(&mut self, opts: super::TimeOptions) {
         self.time_options = opts;
@@ -919,10 +930,9 @@ impl Search {
     {
         let ply = pos.game_ply();
         self.prepare_time_metrics(ply);
-        // 停止フラグをリセット
-        self.stop.store(false, Ordering::SeqCst);
-        // ponderhitフラグをリセット
-        self.ponderhit_flag.store(false, Ordering::SeqCst);
+        // 注意: stop/ponderhitフラグのリセットは go() の呼び出し元
+        // (USI層の cmd_go) でスレッド生成前に行うこと。
+        // ここでリセットすると、USI層で既にセットされたフラグが失われる競合が発生する。
         self.start_time = Some(Instant::now());
         // 置換表の世代を進める
         self.tt.new_search();
@@ -1354,7 +1364,13 @@ where
         }
 
         // 詰みを読みきった場合の早期終了
-        if effective_multi_pv == 1 && depth > 1 && !worker.state.root_moves.is_empty() {
+        // ponder中は stop/ponderhit を待つ必要があるため早期終了しない（USI仕様準拠）
+        let is_pondering_now = main_state.as_ref().is_some_and(|_| time_manager.is_pondering());
+        if effective_multi_pv == 1
+            && depth > 1
+            && !is_pondering_now
+            && !worker.state.root_moves.is_empty()
+        {
             let best_value = worker.state.root_moves[0].score;
 
             if limits.mate == 0 {
@@ -1642,7 +1658,12 @@ where
             }
 
             // 詰みスコアが見つかっていたら早期終了
-            if effective_multi_pv == 1 && depth > 1 && !worker.state.root_moves.is_empty() {
+            // ponder中は stop/ponderhit を待つ必要があるためスキップ（USI仕様準拠）
+            if effective_multi_pv == 1
+                && depth > 1
+                && !is_pondering_now
+                && !worker.state.root_moves.is_empty()
+            {
                 let best_value = worker.state.root_moves[0].score;
 
                 if limits.mate == 0 {
@@ -1661,6 +1682,21 @@ where
                     break;
                 }
             }
+        }
+    }
+
+    // ponder中 / go infinite中はGUIからstop/ponderhitが来るまでbestmoveを出力してはならない（YaneuraOu準拠）
+    // 反復深化ループが自然に終了した場合（MAX_PLY到達や詰み確定）でもここで待機する
+    if let Some(ref ms) = main_state {
+        while !worker.state.abort
+            && !time_manager.stop_requested()
+            && (time_manager.is_pondering() || limits.infinite)
+        {
+            if ms.ponderhit_flag.swap(false, Ordering::Relaxed) {
+                time_manager.on_ponderhit();
+            }
+            // YaneuraOu 同様、探索終了後の待機では短時間 sleep して busy wait を避ける。
+            thread::sleep(Duration::from_millis(1));
         }
     }
 
