@@ -22,6 +22,7 @@
 //! println!("Score: {}, PV length: {}", result.value, result.pv.len());
 //! ```
 
+use rshogi_core::eval::is_material_enabled;
 use rshogi_core::eval::material::evaluate_material;
 use rshogi_core::movegen::{MoveList, generate_legal};
 use rshogi_core::nnue::{
@@ -68,7 +69,7 @@ impl NnueEvaluator {
     /// NNUEが初期化済みである必要がある。
     /// 初期化されていない場合はNoneを返す。
     pub fn new() -> Option<Self> {
-        if is_nnue_initialized() {
+        if is_nnue_initialized() || is_material_enabled() {
             Some(Self)
         } else {
             None
@@ -89,8 +90,8 @@ impl Evaluator for NnueEvaluator {
 
             // ネットワークに応じたスタックを作成/更新
             if let Some(network) = get_network() {
-                if acc.is_none() || !acc.as_ref().unwrap().matches_network(network) {
-                    *acc = Some(AccumulatorStackVariant::from_network(network));
+                if acc.is_none() || !acc.as_ref().unwrap().matches_network(&network) {
+                    *acc = Some(AccumulatorStackVariant::from_network(&network));
                 }
             } else {
                 // NNUEが初期化されていない場合はデフォルトを使用
@@ -127,7 +128,7 @@ impl NnueStacks {
     /// 新しいNnueStacksを作成
     pub fn new() -> Self {
         let stack = if let Some(network) = get_network() {
-            AccumulatorStackVariant::from_network(network)
+            AccumulatorStackVariant::from_network(&network)
         } else {
             AccumulatorStackVariant::new_default()
         };
@@ -142,8 +143,8 @@ impl NnueStacks {
         self.node_count = 0;
         // ネットワークが変わっている可能性があるので確認
         if let Some(network) = get_network() {
-            if !self.stack.matches_network(network) {
-                self.stack = AccumulatorStackVariant::from_network(network);
+            if !self.stack.matches_network(&network) {
+                self.stack = AccumulatorStackVariant::from_network(&network);
             } else {
                 self.stack.reset();
             }

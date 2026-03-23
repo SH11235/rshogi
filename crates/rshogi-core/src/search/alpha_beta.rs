@@ -688,8 +688,8 @@ impl SearchWorker {
         // NNUE AccumulatorStack: ネットワークに応じたバリアントに更新・リセット
         if let Some(network) = get_network() {
             // バリアントがネットワークと一致しない場合は再作成
-            if !self.state.nnue_stack.matches_network(network) {
-                self.state.nnue_stack = AccumulatorStackVariant::from_network(network);
+            if !self.state.nnue_stack.matches_network(&network) {
+                self.state.nnue_stack = AccumulatorStackVariant::from_network(&network);
             } else {
                 self.state.nnue_stack.reset();
             }

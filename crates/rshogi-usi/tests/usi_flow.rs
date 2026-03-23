@@ -1,6 +1,9 @@
 use std::io::Write;
 use std::process::Command;
 
+/// テスト用の共通USI初期化コマンド（Material評価で動作させる）
+const USI_INIT: &str = "usi\nsetoption name MaterialLevel value 9\nisready\n";
+
 /// `go`→`stop`→`quit` で bestmove が返って終了することを確認
 #[test]
 fn stop_then_quit_outputs_bestmove() {
@@ -13,9 +16,7 @@ fn stop_then_quit_outputs_bestmove() {
 
     {
         let stdin = child.stdin.as_mut().expect("stdin");
-        stdin
-            .write_all(b"usi\nisready\nposition startpos\ngo depth 1\nstop\nquit\n")
-            .expect("write stdin");
+        write!(stdin, "{USI_INIT}position startpos\ngo depth 1\nstop\nquit\n").expect("write");
     }
 
     let output = child.wait_with_output().expect("wait output");
@@ -36,9 +37,8 @@ fn gameover_outputs_bestmove() {
 
     {
         let stdin = child.stdin.as_mut().expect("stdin");
-        stdin
-            .write_all(b"usi\nisready\nposition startpos\ngo depth 1\ngameover lose\nquit\n")
-            .expect("write stdin");
+        write!(stdin, "{USI_INIT}position startpos\ngo depth 1\ngameover lose\nquit\n")
+            .expect("write");
     }
 
     let output = child.wait_with_output().expect("wait output");
@@ -59,9 +59,7 @@ fn quit_outputs_bestmove() {
 
     {
         let stdin = child.stdin.as_mut().expect("stdin");
-        stdin
-            .write_all(b"usi\nisready\nposition startpos\ngo depth 1\nquit\n")
-            .expect("write stdin");
+        write!(stdin, "{USI_INIT}position startpos\ngo depth 1\nquit\n").expect("write");
     }
 
     let output = child.wait_with_output().expect("wait output");
@@ -82,9 +80,8 @@ fn ponderhit_outputs_bestmove() {
 
     {
         let stdin = child.stdin.as_mut().expect("stdin");
-        stdin
-            .write_all(b"usi\nisready\nposition startpos\ngo ponder depth 2\nponderhit\nquit\n")
-            .expect("write stdin");
+        write!(stdin, "{USI_INIT}position startpos\ngo ponder depth 2\nponderhit\nquit\n")
+            .expect("write");
     }
 
     let output = child.wait_with_output().expect("wait output");
@@ -105,26 +102,15 @@ fn stochastic_ponderhit_restarts_search() {
 
     {
         let stdin = child.stdin.as_mut().expect("stdin");
-        stdin
-            .write_all(
-                b"usi
-isready
-setoption name Stochastic_Ponder value true
-position startpos
-go ponder depth 2
-ponderhit
-quit
-",
-            )
-            .expect("write stdin");
+        write!(
+            stdin,
+            "{USI_INIT}setoption name Stochastic_Ponder value true\nposition startpos\ngo ponder depth 2\nponderhit\nquit\n"
+        )
+        .expect("write");
     }
 
     let output = child.wait_with_output().expect("wait output");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("bestmove"),
-        "stdout:
-{stdout}"
-    );
+    assert!(stdout.contains("bestmove"), "stdout:\n{stdout}");
     assert!(output.status.success());
 }

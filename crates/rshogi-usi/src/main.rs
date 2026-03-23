@@ -10,8 +10,9 @@ use std::thread;
 
 use anyhow::Result;
 use rshogi_core::eval::{
-    DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE, MaterialLevel,
-    set_eval_hash_enabled, set_material_level, set_pass_move_bonus, set_pass_right_value_phased,
+    DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE, MaterialLevel, disable_material,
+    is_material_enabled, set_eval_hash_enabled, set_material_level, set_pass_move_bonus,
+    set_pass_right_value_phased,
 };
 use rshogi_core::nnue::{
     AccumulatorStackVariant, LAYER_STACK_PLY9_DEFAULT_BOUNDS, LayerStackBucketMode,
@@ -446,9 +447,9 @@ impl UsiEngine {
         println!("option name UCI_LimitStrength type check default false");
         println!("option name UCI_Elo type spin default 0 min 0 max 4000");
         println!(
-            "option name MaterialLevel type combo default 9 var 1 var 2 var 3 var 4 var 7 var 8 var 9"
+            "option name MaterialLevel type combo default none var none var 1 var 2 var 3 var 4 var 7 var 8 var 9"
         );
-        println!("option name EvalFile type string default <empty>");
+        println!("option name EvalFile type string default eval/nn.bin");
         // FV_SCALE: 0=自動判定、1以上=指定値でオーバーライド
         // 水匠5等は24、YaneuraOuデフォルトは16
         println!("option name FV_SCALE type spin default 0 min 0 max 100");
@@ -485,6 +486,28 @@ impl UsiEngine {
     fn cmd_isready(&mut self) {
         if let Some(search) = self.search.as_mut() {
             search.clear_tt();
+        }
+        // MaterialLevel 未指定時のみ、NNUE 未ロードなら eval/nn.bin を自動ロード
+        if !is_material_enabled() && get_network().is_none() {
+            const DEFAULT_EVAL_FILE: &str = "eval/nn.bin";
+            if std::path::Path::new(DEFAULT_EVAL_FILE).exists() {
+                match init_nnue(DEFAULT_EVAL_FILE) {
+                    Ok(()) => {
+                        let payload = json!({
+                            "type": "info",
+                            "message": format!("NNUE auto-loaded: {DEFAULT_EVAL_FILE}"),
+                        });
+                        eprintln!("info string {payload}");
+                    }
+                    Err(e) => {
+                        eprintln!("info string Error auto-loading NNUE file: {e}");
+                    }
+                }
+            } else {
+                eprintln!(
+                    "info string Warning: No NNUE file loaded and {DEFAULT_EVAL_FILE} not found. Use 'setoption name EvalFile value <path>' to load."
+                );
+            }
         }
         self.maybe_report_large_pages();
         println!("readyok");
@@ -713,7 +736,9 @@ impl UsiEngine {
                 }
             }
             "MaterialLevel" => {
-                if let Ok(v) = value.parse::<u8>() {
+                if value == "none" {
+                    disable_material();
+                } else if let Ok(v) = value.parse::<u8>() {
                     if let Some(level) = MaterialLevel::from_value(v) {
                         set_material_level(level);
                     } else {
@@ -1288,7 +1313,7 @@ impl UsiEngine {
         };
 
         // アーキテクチャに応じたアキュムレータスタックを作成
-        let mut stack = AccumulatorStackVariant::from_network(network);
+        let mut stack = AccumulatorStackVariant::from_network(&network);
 
         // 評価値を計算
         let value = evaluate_dispatch(&self.position, &mut stack);

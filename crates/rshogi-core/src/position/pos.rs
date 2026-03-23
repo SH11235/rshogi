@@ -421,7 +421,7 @@ impl Position {
 
     #[inline]
     fn should_update_board_effects() -> bool {
-        if crate::nnue::is_nnue_initialized() {
+        if !crate::eval::is_material_enabled() && crate::nnue::is_nnue_initialized() {
             return false;
         }
         material_needs_board_effects()

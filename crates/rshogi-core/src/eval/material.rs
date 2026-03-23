@@ -1,5 +1,5 @@
 use std::sync::LazyLock;
-use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 
 use crate::position::{BoardEffects, Position};
 use crate::types::{Color, Piece, PieceType, Square, Value};
@@ -180,6 +180,15 @@ pub const DEFAULT_MATERIAL_LEVEL: MaterialLevel = MaterialLevel::Lv9;
 /// 探索中に変更されることは想定していない。
 static MATERIAL_LEVEL: AtomicU8 = AtomicU8::new(9);
 
+/// Material評価が明示的に有効化されているか
+/// デフォルトは無効。`set_material_level` で有効化される。
+static MATERIAL_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Material評価が有効かどうかを取得
+pub fn is_material_enabled() -> bool {
+    MATERIAL_ENABLED.load(Ordering::Relaxed)
+}
+
 /// 現在のMaterial評価レベルを取得
 pub fn get_material_level() -> MaterialLevel {
     let v = MATERIAL_LEVEL.load(Ordering::Relaxed);
@@ -190,9 +199,15 @@ pub fn get_material_level() -> MaterialLevel {
     MaterialLevel::from_value(v).unwrap_or(DEFAULT_MATERIAL_LEVEL)
 }
 
-/// Material評価レベルを設定
+/// Material評価レベルを設定し、Material評価を有効化する
 pub fn set_material_level(level: MaterialLevel) {
     MATERIAL_LEVEL.store(level.value(), Ordering::Relaxed);
+    MATERIAL_ENABLED.store(true, Ordering::Relaxed);
+}
+
+/// Material評価を無効化する
+pub fn disable_material() {
+    MATERIAL_ENABLED.store(false, Ordering::Relaxed);
 }
 
 /// Material評価で盤面の利きを使うか
@@ -676,15 +691,22 @@ mod tests {
     #[test]
     fn test_get_set_material_level() {
         let original = get_material_level();
+        let original_enabled = is_material_enabled();
 
         set_material_level(MaterialLevel::Lv1);
         assert_eq!(get_material_level(), MaterialLevel::Lv1);
+        assert!(is_material_enabled());
 
         set_material_level(MaterialLevel::Lv9);
         assert_eq!(get_material_level(), MaterialLevel::Lv9);
+        assert!(is_material_enabled());
 
-        // 元に戻す
-        set_material_level(original);
+        disable_material();
+        assert!(!is_material_enabled());
+
+        if original_enabled {
+            set_material_level(original);
+        }
     }
 
     // =========================================================================

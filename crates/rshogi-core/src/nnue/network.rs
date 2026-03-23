@@ -38,10 +38,10 @@ use std::fs::File;
 use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
-use std::sync::{LazyLock, OnceLock, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 
 /// グローバルなNNUEネットワーク（HalfKP/HalfKA/HalfKA_hm^）
-static NETWORK: OnceLock<NNUENetwork> = OnceLock::new();
+static NETWORK: LazyLock<RwLock<Option<Arc<NNUENetwork>>>> = LazyLock::new(|| RwLock::new(None));
 
 /// FV_SCALE のグローバルオーバーライド設定
 ///
@@ -1232,23 +1232,21 @@ pub fn progress_sum_to_bucket(sum: f32) -> usize {
 
 /// NNUEを初期化（バージョン自動判別）
 pub fn init_nnue<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    let network = NNUENetwork::load(path)?;
-    NETWORK
-        .set(network)
-        .map_err(|_| io::Error::new(io::ErrorKind::AlreadyExists, "NNUE already initialized"))
+    let network = Arc::new(NNUENetwork::load(path)?);
+    *NETWORK.write().expect("NNUE lock poisoned") = Some(network);
+    Ok(())
 }
 
 /// バイト列からNNUEを初期化（バージョン自動判別）
 pub fn init_nnue_from_bytes(bytes: &[u8]) -> io::Result<()> {
-    let network = NNUENetwork::from_bytes(bytes)?;
-    NETWORK
-        .set(network)
-        .map_err(|_| io::Error::new(io::ErrorKind::AlreadyExists, "NNUE already initialized"))
+    let network = Arc::new(NNUENetwork::from_bytes(bytes)?);
+    *NETWORK.write().expect("NNUE lock poisoned") = Some(network);
+    Ok(())
 }
 
 /// NNUEが初期化済みかどうか
 pub fn is_nnue_initialized() -> bool {
-    NETWORK.get().is_some()
+    NETWORK.read().expect("NNUE lock poisoned").is_some()
 }
 
 // =============================================================================
@@ -1424,8 +1422,8 @@ pub fn detect_format(bytes: &[u8], file_size: u64) -> io::Result<NnueFormatInfo>
 /// NNUEネットワークへの参照を取得（初期化されていない場合はNone）
 ///
 /// AccumulatorStackVariant の初期化・更新に使用。
-pub fn get_network() -> Option<&'static NNUENetwork> {
-    NETWORK.get()
+pub fn get_network() -> Option<Arc<NNUENetwork>> {
+    NETWORK.read().expect("NNUE lock poisoned").clone()
 }
 
 // =============================================================================
@@ -1623,47 +1621,55 @@ fn update_and_evaluate_halfkp(
 
 /// ロードされたNNUEがLayerStacksアーキテクチャかどうか
 pub fn is_layer_stacks_loaded() -> bool {
-    NETWORK.get().map(|n| n.is_layer_stacks()).unwrap_or(false)
+    get_network().is_some_and(|n| n.is_layer_stacks())
 }
 
 /// ロードされたNNUEがHalfKA_hm256アーキテクチャかどうか
 pub fn is_halfka_hm_256_loaded() -> bool {
-    NETWORK.get().map(|n| n.is_halfka_hm() && n.l1_size() == 256).unwrap_or(false)
+    get_network().is_some_and(|n| n.is_halfka_hm() && n.l1_size() == 256)
 }
 
 /// ロードされたNNUEがHalfKA256アーキテクチャかどうか
 pub fn is_halfka_256_loaded() -> bool {
-    NETWORK.get().map(|n| n.is_halfka() && n.l1_size() == 256).unwrap_or(false)
+    get_network().is_some_and(|n| n.is_halfka() && n.l1_size() == 256)
 }
 
 /// ロードされたNNUEがHalfKA_hm512アーキテクチャかどうか
 pub fn is_halfka_hm_512_loaded() -> bool {
-    NETWORK.get().map(|n| n.is_halfka_hm() && n.l1_size() == 512).unwrap_or(false)
+    get_network().is_some_and(|n| n.is_halfka_hm() && n.l1_size() == 512)
 }
 
 /// ロードされたNNUEがHalfKA512アーキテクチャかどうか
 pub fn is_halfka_512_loaded() -> bool {
-    NETWORK.get().map(|n| n.is_halfka() && n.l1_size() == 512).unwrap_or(false)
+    get_network().is_some_and(|n| n.is_halfka() && n.l1_size() == 512)
 }
 
 /// ロードされたNNUEがHalfKA_hm1024アーキテクチャかどうか
 pub fn is_halfka_hm_1024_loaded() -> bool {
-    NETWORK.get().map(|n| n.is_halfka_hm() && n.l1_size() == 1024).unwrap_or(false)
+    get_network().is_some_and(|n| n.is_halfka_hm() && n.l1_size() == 1024)
 }
 
 /// ロードされたNNUEがHalfKA1024アーキテクチャかどうか
 pub fn is_halfka_1024_loaded() -> bool {
-    NETWORK.get().map(|n| n.is_halfka() && n.l1_size() == 1024).unwrap_or(false)
+    get_network().is_some_and(|n| n.is_halfka() && n.l1_size() == 1024)
 }
 
 /// 局面を評価（LayerStacks用）
 ///
 /// AccumulatorStackLayerStacks を使って差分更新し、計算済みなら再利用する。
-/// NNUEが初期化されていない場合は駒得評価にフォールバックする。
+///
+/// # Panics
+/// NNUEが未ロードかつMaterial評価も無効の場合はパニックする。
 pub fn evaluate_layer_stacks(pos: &Position, stack: &mut AccumulatorStackLayerStacks) -> Value {
-    // NNUEがなければMaterial評価にフォールバック
-    let Some(network) = NETWORK.get() else {
+    if material::is_material_enabled() {
         return material::evaluate_material(pos);
+    }
+
+    let Some(network) = get_network() else {
+        panic!(
+            "NNUE network not loaded and MaterialLevel not set. \
+             Use 'setoption name EvalFile' or 'setoption name MaterialLevel'."
+        );
     };
 
     // LayerStacks 以外はエラー
@@ -1672,28 +1678,36 @@ pub fn evaluate_layer_stacks(pos: &Position, stack: &mut AccumulatorStackLayerSt
     }
 
     // 内部ヘルパー関数を呼び出し
-    update_and_evaluate_layer_stacks(network, pos, stack)
+    update_and_evaluate_layer_stacks(&network, pos, stack)
 }
 
 /// アーキテクチャに応じて適切な評価関数を呼び出す
 ///
 /// AccumulatorStackVariant を受け取り、内部のバリアントに応じて
 /// 適切な評価関数を呼び出す。
-/// NNUEが初期化されていない場合は駒得評価にフォールバックする。
+///
+/// # Panics
+/// NNUEが未ロードかつMaterial評価も無効の場合はパニックする。
 pub fn evaluate_dispatch(pos: &Position, stack: &mut AccumulatorStackVariant) -> Value {
-    // NNUEがなければMaterial評価にフォールバック
-    let Some(network) = NETWORK.get() else {
+    if material::is_material_enabled() {
         return material::evaluate_material(pos);
+    }
+
+    let Some(network) = get_network() else {
+        panic!(
+            "NNUE network not loaded and MaterialLevel not set. \
+             Use 'setoption name EvalFile' or 'setoption name MaterialLevel'."
+        );
     };
 
     // バリアントに応じて適切な評価関数を呼び出し（4バリアント）
     match stack {
         AccumulatorStackVariant::LayerStacks(s) => {
-            update_and_evaluate_layer_stacks(network, pos, s)
+            update_and_evaluate_layer_stacks(&network, pos, s)
         }
-        AccumulatorStackVariant::HalfKA(s) => update_and_evaluate_halfka(network, pos, s),
-        AccumulatorStackVariant::HalfKA_hm(s) => update_and_evaluate_halfka_hm(network, pos, s),
-        AccumulatorStackVariant::HalfKP(s) => update_and_evaluate_halfkp(network, pos, s),
+        AccumulatorStackVariant::HalfKA(s) => update_and_evaluate_halfka(&network, pos, s),
+        AccumulatorStackVariant::HalfKA_hm(s) => update_and_evaluate_halfka_hm(&network, pos, s),
+        AccumulatorStackVariant::HalfKP(s) => update_and_evaluate_halfkp(&network, pos, s),
     }
 }
 
@@ -1704,23 +1718,23 @@ pub fn evaluate_dispatch(pos: &Position, stack: &mut AccumulatorStackVariant) ->
 /// YaneuraOu/Stockfish互換の動作を実現する。
 pub fn ensure_accumulator_computed(pos: &Position, stack: &mut AccumulatorStackVariant) {
     // NNUEがなければ何もしない
-    let Some(network) = NETWORK.get() else {
+    let Some(network) = get_network() else {
         return;
     };
 
     // バリアントに応じてアキュムレータを更新（評価はしない）
     match stack {
         AccumulatorStackVariant::LayerStacks(s) => {
-            update_accumulator_only_layer_stacks(network, pos, s);
+            update_accumulator_only_layer_stacks(&network, pos, s);
         }
         AccumulatorStackVariant::HalfKA(s) => {
-            update_accumulator_only_halfka(network, pos, s);
+            update_accumulator_only_halfka(&network, pos, s);
         }
         AccumulatorStackVariant::HalfKA_hm(s) => {
-            update_accumulator_only_halfka_hm(network, pos, s);
+            update_accumulator_only_halfka_hm(&network, pos, s);
         }
         AccumulatorStackVariant::HalfKP(s) => {
-            update_accumulator_only_halfkp(network, pos, s);
+            update_accumulator_only_halfkp(&network, pos, s);
         }
     }
 }
