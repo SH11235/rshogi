@@ -1,14 +1,6 @@
 ---
 description: rshogi と YaneuraOu の探索ノード数乖離を調査する（A/Bテスト、発火回数カウント、PLY drill-down、デバッグログ挿入）
 user-invocable: true
-allowed-tools:
-  - Read
-  - Edit
-  - Write
-  - Grep
-  - Glob
-  - Bash
-  - Task
 ---
 
 # YO 計測デバッグスキル

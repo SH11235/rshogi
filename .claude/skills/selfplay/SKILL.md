@@ -1,16 +1,6 @@
 ---
-description: 指定エンジン間の総当たり自己対局を実行し、結果を集計する
+description: NNUE モデルの棋力評価。指定エンジン間の総当たり自己対局を実行し、結果を集計する。「評価して」「対局させて」等の棋力比較リクエストに使用する。
 user-invocable: true
-allowed-tools:
-  - Bash
-  - Read
-  - Grep
-  - Glob
-  - TaskCreate
-  - TaskUpdate
-  - TaskList
-  - TaskOutput
-  - AskUserQuestion
 ---
 
 # 自己対局評価スキル
@@ -27,11 +17,13 @@ allowed-tools:
 - **確認ポイント**: 特に注目する比較（例: "E vs D: TT 16bit の棋力効果"）
 
 ### デフォルト値（指定がなければ以下を使用）
-- 秒読み: 2000ms
+- **開始局面**: `--startpos-file start_sfens_ply32.txt`（**必須**。平手からの対局は序盤の偏りで正確な棋力を測れないため、必ず開始局面集を使用すること）
+- 秒読み: 1000ms
 - スレッド: 1
 - ハッシュ: 256MB
 - 各方向の対局数: 100（双方向で200局/カード）
-- NNUE: `EvalFile=eval/halfkp_256x2-32-32_crelu/suisho5.bin`
+- 並列数: 20
+- NNUE: エンジンごとに `--engine-usi-option` で個別指定
 
 ## 実行手順
 
