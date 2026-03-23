@@ -3,7 +3,6 @@
 use anyhow::{Context, Result};
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT_ENCODING, HeaderValue};
-use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -169,18 +168,24 @@ pub fn players_from_path(rel: &str) -> Option<(&str, &str)> {
     }
 }
 
-/// プレイヤーファイルを読み込み HashSet として返す。
+/// プレイヤーファイルを読み込みパターンリストとして返す。
 /// 形式: 1行1名、または TSV (`name\trating`) の場合は最初のフィールドを名前として使用。
-pub fn load_player_set(path: &Path) -> Result<HashSet<String>> {
+/// 部分一致フィルタ用（[`player_matches`] と組み合わせて使う）。
+pub fn load_player_patterns(path: &Path) -> Result<Vec<String>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("read player file: {}", path.display()))?;
-    let set: HashSet<String> = text
+    let patterns: Vec<String> = text
         .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .map(|l| l.split('\t').next().unwrap_or(l).to_string())
         .collect();
-    Ok(set)
+    Ok(patterns)
+}
+
+/// プレイヤー名がパターンリストのいずれかに部分一致するか判定。
+pub fn player_matches(name: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|p| name.contains(p.as_str()))
 }
 
 #[cfg(test)]

@@ -9,8 +9,8 @@
 //! # 1. インデックスファイルをダウンロード
 //! cargo run -p tools --bin floodgate_pipeline -- fetch-index --out 00LIST.floodgate
 //!
-//! # 2. CSAファイルをダウンロード（年 + プレイヤーでフィルタ）
-//! cargo run -p tools --bin floodgate_pipeline -- download --year-from 2021 --player-file high_rated.txt
+//! # 2. CSAファイルをダウンロード（日付 + プレイヤーでフィルタ）
+//! cargo run -p tools --bin floodgate_pipeline -- download --date-from 2026-03-10 --player-file players.txt
 //!
 //! # 3. SFENを抽出（レーティングで精密フィルタ）
 //! cargo run -p tools --bin floodgate_pipeline -- extract --min-rating 3900 --max-ply 32
@@ -76,13 +76,13 @@ enum Cmd {
         /// ダウンロード数の上限（テスト用）
         #[arg(long)]
         limit: Option<usize>,
-        /// この年以降のファイルのみダウンロード（例: 2021）
+        /// この日付以降のファイルのみダウンロード（YYYY-MM-DD）
         #[arg(long)]
-        year_from: Option<u16>,
-        /// この年以前のファイルのみダウンロード
+        date_from: Option<String>,
+        /// この日付以前のファイルのみダウンロード（YYYY-MM-DD）
         #[arg(long)]
-        year_to: Option<u16>,
-        /// 高レートプレイヤー名ファイル（1行1名）。両対局者がリストに含まれるゲームのみDL
+        date_to: Option<String>,
+        /// プレイヤー名ファイル（1行1名）。いずれかの対局者がリストに含まれるゲームをDL
         #[arg(long)]
         player_file: Option<String>,
     },
@@ -146,12 +146,18 @@ fn main() -> Result<()> {
             root,
             out_dir,
             limit,
-            year_from,
-            year_to,
+            date_from,
+            date_to,
             player_file,
-        } => {
-            run_download(&index, &root, &out_dir, limit, year_from, year_to, player_file.as_deref())
-        }
+        } => run_download(
+            &index,
+            &root,
+            &out_dir,
+            limit,
+            date_from.as_deref(),
+            date_to.as_deref(),
+            player_file.as_deref(),
+        ),
         Cmd::Extract {
             root,
             out,
@@ -207,8 +213,27 @@ fn run_fetch_index(root: &str, out: &str) -> Result<()> {
     Ok(())
 }
 
-fn year_of_path(rel: &str) -> Option<u16> {
-    rel.get(..4)?.parse::<u16>().ok()
+/// パスから日付を YYYYMMDD 形式の整数で抽出。
+/// パス例: `2026/03/17/wdoor+...csa` → `20260317`
+fn date_of_path(rel: &str) -> Option<u32> {
+    if rel.len() < 10 {
+        return None;
+    }
+    let y: u32 = rel.get(..4)?.parse().ok()?;
+    let m: u32 = rel.get(5..7)?.parse().ok()?;
+    let d: u32 = rel.get(8..10)?.parse().ok()?;
+    Some(y * 10000 + m * 100 + d)
+}
+
+/// `YYYY-MM-DD` 形式の文字列を YYYYMMDD 整数にパース。
+fn parse_date_arg(s: &str) -> Result<u32> {
+    let parts: Vec<&str> = s.split('-').collect();
+    anyhow::ensure!(parts.len() == 3, "日付は YYYY-MM-DD 形式で指定してください: {s}");
+    let y: u32 = parts[0].parse().with_context(|| format!("年の解析に失敗: {s}"))?;
+    let m: u32 = parts[1].parse().with_context(|| format!("月の解析に失敗: {s}"))?;
+    let d: u32 = parts[2].parse().with_context(|| format!("日の解析に失敗: {s}"))?;
+    anyhow::ensure!((1..=12).contains(&m) && (1..=31).contains(&d), "無効な日付: {s}");
+    Ok(y * 10000 + m * 100 + d)
 }
 
 fn run_download(
@@ -216,8 +241,8 @@ fn run_download(
     root: &str,
     out_dir: &str,
     limit: Option<usize>,
-    year_from: Option<u16>,
-    year_to: Option<u16>,
+    date_from: Option<&str>,
+    date_to: Option<&str>,
     player_file: Option<&str>,
 ) -> Result<()> {
     let client = Client::builder().build()?;
@@ -225,26 +250,29 @@ fn run_download(
     let all_lines = fg::parse_index_lines(r)?;
     let total = all_lines.len();
 
-    // プレイヤーフィルタセットの読み込み
-    let player_set = if let Some(pf) = player_file {
-        let set = fg::load_player_set(Path::new(pf))?;
-        eprintln!("Loaded {} player names from {pf}", set.len());
-        Some(set)
+    let date_from = date_from.map(parse_date_arg).transpose()?;
+    let date_to = date_to.map(parse_date_arg).transpose()?;
+
+    // プレイヤーフィルタパターンの読み込み（部分一致）
+    let player_patterns = if let Some(pf) = player_file {
+        let patterns = fg::load_player_patterns(Path::new(pf))?;
+        eprintln!("Loaded {} player patterns from {pf}", patterns.len());
+        Some(patterns)
     } else {
         None
     };
 
-    // 年 + プレイヤーフィルタ
+    // 日付 + プレイヤーフィルタ
     let lines: Vec<String> = all_lines
         .into_iter()
         .filter(|rel| {
-            let year = year_of_path(rel).unwrap_or(0);
-            if year_from.is_some_and(|yf| year < yf) || year_to.is_some_and(|yt| year > yt) {
+            let date = date_of_path(rel).unwrap_or(0);
+            if date_from.is_some_and(|df| date < df) || date_to.is_some_and(|dt| date > dt) {
                 return false;
             }
-            if let Some(ref set) = player_set {
+            if let Some(ref patterns) = player_patterns {
                 if let Some((a, b)) = fg::players_from_path(rel) {
-                    set.contains(a) && set.contains(b)
+                    fg::player_matches(a, patterns) || fg::player_matches(b, patterns)
                 } else {
                     false
                 }
