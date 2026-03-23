@@ -775,8 +775,8 @@ impl UsiEngine {
             }
             "EvalFile" => {
                 if value.is_empty() || value == "<empty>" || value == "eval/nn.bin" {
-                    // デフォルト値または空の場合は明示指定扱いにしない
-                    // （isready 時の自動ロードに任せる）
+                    // デフォルト値または空 → 明示指定を解除し自動ロードに戻す
+                    self.eval_file_explicit = None;
                 } else {
                     // 明示指定: ロード試行し、結果を記録
                     match init_nnue(&value) {
