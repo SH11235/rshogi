@@ -311,6 +311,11 @@ struct UsiEngine {
     last_position_cmd: Option<String>,
     /// 直近の go コマンド文字列（Stochastic_Ponder の再始動用）
     last_go_cmd: Option<String>,
+    /// EvalFile の明示指定状態
+    /// None: 未指定（eval/nn.bin 自動ロード対象）
+    /// Some(true): 明示指定されロード成功
+    /// Some(false): 明示指定されたがロード失敗
+    eval_file_explicit: Option<bool>,
     /// Large Pages使用メッセージの出力済みフラグ
     large_pages_reported: bool,
     // --- 有限パス権（Finite Pass Rights）関連 ---
@@ -353,6 +358,7 @@ impl UsiEngine {
             stochastic_ponder: false,
             last_position_cmd: None,
             last_go_cmd: None,
+            eval_file_explicit: None,
             large_pages_reported: false,
             pass_rights_enabled: false,
             initial_pass_count: 2,
@@ -487,26 +493,45 @@ impl UsiEngine {
         if let Some(search) = self.search.as_mut() {
             search.clear_tt();
         }
-        // MaterialLevel 未指定時のみ、NNUE 未ロードなら eval/nn.bin を自動ロード
-        if !is_material_enabled() && get_network().is_none() {
-            const DEFAULT_EVAL_FILE: &str = "eval/nn.bin";
-            if std::path::Path::new(DEFAULT_EVAL_FILE).exists() {
-                match init_nnue(DEFAULT_EVAL_FILE) {
-                    Ok(()) => {
-                        let payload = json!({
-                            "type": "info",
-                            "message": format!("NNUE auto-loaded: {DEFAULT_EVAL_FILE}"),
-                        });
-                        eprintln!("info string {payload}");
-                    }
-                    Err(e) => {
-                        eprintln!("info string Error auto-loading NNUE file: {e}");
-                    }
-                }
-            } else {
-                eprintln!(
-                    "info string Warning: No NNUE file loaded and {DEFAULT_EVAL_FILE} not found. Use 'setoption name EvalFile value <path>' to load."
+        // EvalFile の状態を確認し、必要なら NNUE をロード
+        match self.eval_file_explicit {
+            Some(false) => {
+                // EvalFile が明示指定されたがロード失敗 → 致命的エラー
+                // eval/nn.bin への暗黙フォールバックはしない
+                panic!(
+                    "EvalFile was explicitly set but failed to load. \
+                     Fix the path or remove the setoption."
                 );
+            }
+            Some(true) => {
+                // EvalFile が明示指定されロード成功 → 何もしない
+            }
+            None if !is_material_enabled() && get_network().is_none() => {
+                // EvalFile 未指定 + Material 未指定 + NNUE 未ロード → eval/nn.bin を自動ロード
+                const DEFAULT_EVAL_FILE: &str = "eval/nn.bin";
+                if std::path::Path::new(DEFAULT_EVAL_FILE).exists() {
+                    match init_nnue(DEFAULT_EVAL_FILE) {
+                        Ok(()) => {
+                            let payload = json!({
+                                "type": "info",
+                                "message": format!("NNUE auto-loaded: {DEFAULT_EVAL_FILE}"),
+                            });
+                            eprintln!("info string {payload}");
+                        }
+                        Err(e) => {
+                            panic!("Failed to load default NNUE file {DEFAULT_EVAL_FILE}: {e}");
+                        }
+                    }
+                } else {
+                    panic!(
+                        "No NNUE file loaded and {DEFAULT_EVAL_FILE} not found. \
+                         Use 'setoption name EvalFile value <path>' or \
+                         'setoption name MaterialLevel value <n>'."
+                    );
+                }
+            }
+            None => {
+                // EvalFile 未指定だが Material 有効 or NNUE 既ロード → 何もしない
             }
         }
         self.maybe_report_large_pages();
@@ -749,11 +774,14 @@ impl UsiEngine {
                 }
             }
             "EvalFile" => {
-                if value.is_empty() || value == "<empty>" {
-                    // 空の場合は何もしない
+                if value.is_empty() || value == "<empty>" || value == "eval/nn.bin" {
+                    // デフォルト値または空の場合は明示指定扱いにしない
+                    // （isready 時の自動ロードに任せる）
                 } else {
+                    // 明示指定: ロード試行し、結果を記録
                     match init_nnue(&value) {
                         Ok(()) => {
+                            self.eval_file_explicit = Some(true);
                             let payload = json!({
                                 "type": "info",
                                 "message": format!("NNUE loaded: {value}"),
@@ -761,6 +789,7 @@ impl UsiEngine {
                             eprintln!("info string {payload}");
                         }
                         Err(e) => {
+                            self.eval_file_explicit = Some(false);
                             eprintln!("info string Error loading NNUE file: {e}");
                         }
                     }
