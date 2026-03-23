@@ -877,6 +877,20 @@ impl UsiEngine {
     ///
     /// 拡張形式: `position [sfen <sfen> | startpos] [passrights <black> <white>] [moves <move1> ...]`
     fn cmd_position(&mut self, tokens: &[&str]) {
+        Self::apply_position_tokens(
+            &mut self.position,
+            tokens,
+            self.pass_rights_enabled,
+            self.initial_pass_count,
+        );
+    }
+
+    fn apply_position_tokens(
+        position: &mut Position,
+        tokens: &[&str],
+        pass_rights_enabled: bool,
+        initial_pass_count: u8,
+    ) {
         // position [sfen <sfen> | startpos] [passrights <black> <white>] [moves <move1> <move2> ...]
         let mut idx = 1;
         if idx >= tokens.len() {
@@ -885,7 +899,7 @@ impl UsiEngine {
 
         // 局面の設定
         if tokens[idx] == "startpos" {
-            self.position.set_hirate();
+            position.set_hirate();
             idx += 1;
         } else if tokens[idx] == "sfen" {
             idx += 1;
@@ -896,7 +910,7 @@ impl UsiEngine {
                 idx += 1;
             }
             let sfen = sfen_parts.join(" ");
-            if let Err(e) = self.position.set_sfen(&sfen) {
+            if let Err(e) = position.set_sfen(&sfen) {
                 eprintln!("info string Error parsing SFEN: {e}");
                 return;
             }
@@ -906,33 +920,32 @@ impl UsiEngine {
         // 形式: passrights <black_count> <white_count>
         if idx < tokens.len() && tokens[idx] == "passrights" {
             idx += 1;
-            if self.pass_rights_enabled {
+            if pass_rights_enabled {
                 // 先手のパス権数
                 let black_pass = if idx < tokens.len() {
-                    tokens[idx].parse::<u8>().unwrap_or(self.initial_pass_count)
+                    tokens[idx].parse::<u8>().unwrap_or(initial_pass_count)
                 } else {
-                    self.initial_pass_count
+                    initial_pass_count
                 };
                 idx += 1;
 
                 // 後手のパス権数
                 let white_pass = if idx < tokens.len() {
-                    tokens[idx].parse::<u8>().unwrap_or(self.initial_pass_count)
+                    tokens[idx].parse::<u8>().unwrap_or(initial_pass_count)
                 } else {
-                    self.initial_pass_count
+                    initial_pass_count
                 };
                 idx += 1;
 
                 // パス権を設定
-                self.position.enable_pass_rights(black_pass, white_pass);
+                position.enable_pass_rights(black_pass, white_pass);
             } else {
                 // パス権が無効な場合は値を読み飛ばす
                 idx += 2;
             }
-        } else if self.pass_rights_enabled {
+        } else if pass_rights_enabled {
             // passrights キーワードがないがパス権が有効な場合、デフォルト値を設定
-            self.position
-                .enable_pass_rights(self.initial_pass_count, self.initial_pass_count);
+            position.enable_pass_rights(initial_pass_count, initial_pass_count);
         }
 
         // 指し手の適用
@@ -944,9 +957,9 @@ impl UsiEngine {
                     let gives_check = if mv.is_pass() {
                         false
                     } else {
-                        self.position.gives_check(mv)
+                        position.gives_check(mv)
                     };
-                    self.position.do_move(mv, gives_check);
+                    position.do_move(mv, gives_check);
                 } else {
                     eprintln!("info string Error parsing move: {token}", token = tokens[idx]);
                     break;
@@ -954,6 +967,31 @@ impl UsiEngine {
                 idx += 1;
             }
         }
+    }
+
+    fn stochastic_ponder_position(&self) -> Option<Position> {
+        let line = self.last_position_cmd.as_deref()?;
+        let mut owned: Vec<&str> = line.split_whitespace().collect();
+        if owned.len() < 3 {
+            return None;
+        }
+
+        if let Some(moves_idx) = owned.iter().position(|token| *token == "moves") {
+            if owned.len() > moves_idx + 1 {
+                owned.pop();
+            }
+        } else {
+            return None;
+        }
+
+        let mut position = Position::new();
+        Self::apply_position_tokens(
+            &mut position,
+            &owned,
+            self.pass_rights_enabled,
+            self.initial_pass_count,
+        );
+        Some(position)
     }
 
     /// goコマンド: 探索開始
@@ -966,8 +1004,12 @@ impl UsiEngine {
         // 制限を解析
         let limits = self.parse_go_options(tokens);
 
-        // 探索を別スレッドで開始（千日手判定のため履歴ごと複製する）
-        let mut pos = self.position.clone();
+        // Stochastic_Ponder では 1 手戻した局面から先読みする（YaneuraOu 準拠）
+        let mut pos = if self.stochastic_ponder && limits.ponder {
+            self.stochastic_ponder_position().unwrap_or_else(|| self.position.clone())
+        } else {
+            self.position.clone()
+        };
 
         let mut search = self
             .search
@@ -1327,6 +1369,25 @@ mod tests {
 
                 let limits = engine.parse_go_options(&tokens);
                 assert_eq!(limits.mate, i32::MAX);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn stochastic_ponder_position_rewinds_last_move() {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let mut engine = UsiEngine::new();
+                engine.last_position_cmd = Some("position startpos moves 7g7f 3c3d".to_string());
+
+                let pos = engine.stochastic_ponder_position().expect("stochastic ponder position");
+                assert_eq!(
+                    pos.to_sfen(),
+                    "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2"
+                );
             })
             .unwrap()
             .join()
