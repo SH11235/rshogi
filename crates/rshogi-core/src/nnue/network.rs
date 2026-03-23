@@ -1244,6 +1244,11 @@ pub fn init_nnue_from_bytes(bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// グローバル NNUE をクリアする
+pub fn clear_nnue() {
+    *NETWORK.write().expect("NNUE lock poisoned") = None;
+}
+
 /// NNUEが初期化済みかどうか
 pub fn is_nnue_initialized() -> bool {
     NETWORK.read().expect("NNUE lock poisoned").is_some()

@@ -110,6 +110,7 @@ pub use spec::{Activation, ArchitectureSpec, FeatureSet as SpecFeatureSet};
 
 // Phase 2: 外部 API 統一
 pub use evaluator::NNUEEvaluator;
+pub use network::clear_nnue;
 
 // 統計カウンタ（デバッグ・チューニング用）
 pub use stats::{NnueStatsSnapshot, get_nnue_stats, print_nnue_stats, reset_nnue_stats};

@@ -19,10 +19,10 @@ use rshogi_core::nnue::{
     LayerStackProgressCoeff, LayerStackProgressCoeffGikouLite,
     SHOGI_PROGRESS_GIKOU_LITE_FEATURE_ORDER, SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES,
     SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, SHOGI_PROGRESS8_FEATURE_ORDER, SHOGI_PROGRESS8_NUM_FEATURES,
-    evaluate_dispatch, format_layer_stack_ply_bounds, get_layer_stack_bucket_mode, get_network,
-    init_nnue, parse_layer_stack_bucket_mode, parse_layer_stack_ply_bounds_csv, print_nnue_stats,
-    reset_layer_stack_progress_kpabs_weights, set_fv_scale_override, set_layer_stack_bucket_mode,
-    set_layer_stack_ply_bounds, set_layer_stack_progress_coeff,
+    clear_nnue, evaluate_dispatch, format_layer_stack_ply_bounds, get_layer_stack_bucket_mode,
+    get_network, init_nnue, parse_layer_stack_bucket_mode, parse_layer_stack_ply_bounds_csv,
+    print_nnue_stats, reset_layer_stack_progress_kpabs_weights, set_fv_scale_override,
+    set_layer_stack_bucket_mode, set_layer_stack_ply_bounds, set_layer_stack_progress_coeff,
     set_layer_stack_progress_coeff_gikou_lite, set_layer_stack_progress_kpabs_weights,
 };
 use rshogi_core::position::Position;
@@ -776,6 +776,7 @@ impl UsiEngine {
             "EvalFile" => {
                 if value.is_empty() || value == "<empty>" {
                     // 空 → 明示指定を解除し isready の自動ロードに戻す
+                    clear_nnue();
                     self.eval_file_explicit = None;
                 } else {
                     // パス指定: ロード試行し、結果を記録
