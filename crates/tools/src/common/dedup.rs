@@ -4,7 +4,7 @@ use crate::common::sfen::normalize_4t;
 use crate::common::sfen_ops::canonicalize_4t_with_mirror;
 use std::collections::HashSet;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// PackedSfenValue のレコードサイズ（バイト）
 pub const PSV_SIZE: usize = 40;
@@ -42,14 +42,24 @@ pub fn collect_input_paths(
             "--data/--input または --input-dir のいずれかを指定してください",
         )),
         (Some(data), None) => {
-            let paths: Vec<PathBuf> = data
-                .split(',')
-                .map(|s| PathBuf::from(s.trim()))
-                .filter(|p| p.exists())
-                .collect();
+            let paths: Vec<PathBuf> = data.split(',').map(|s| PathBuf::from(s.trim())).collect();
+            for p in &paths {
+                if !p.exists() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("入力ファイルが存在しません: {}", p.display()),
+                    ));
+                }
+            }
             Ok(paths)
         }
         (None, Some(dir)) => {
+            if !dir.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("入力ディレクトリが存在しません: {}", dir.display()),
+                ));
+            }
             let pat = glob::Pattern::new(pattern).map_err(|e| {
                 io::Error::new(io::ErrorKind::InvalidInput, format!("無効な glob パターン: {e}"))
             })?;
@@ -66,6 +76,36 @@ pub fn collect_input_paths(
             Ok(paths)
         }
     }
+}
+
+/// まだ存在しないかもしれないパスを正規化する。
+/// `parent().canonicalize() / file_name()` で解決する。
+fn canonicalize_maybe_new(path: &Path) -> io::Result<PathBuf> {
+    if let Ok(c) = path.canonicalize() {
+        return Ok(c);
+    }
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "出力パスにファイル名がありません")
+    })?;
+    Ok(parent.canonicalize()?.join(name))
+}
+
+/// 出力パスが入力パスのいずれかと一致していないか検査する。
+/// 一致していればエラーを返す。出力ファイルがまだ存在しない場合でも正しく検出する。
+pub fn check_output_not_in_inputs(output: &Path, inputs: &[PathBuf]) -> io::Result<()> {
+    let out_canonical = canonicalize_maybe_new(output)?;
+    for p in inputs {
+        if let Ok(ic) = p.canonicalize()
+            && ic == out_canonical
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("出力ファイルが入力ファイルと同一です: {}", p.display()),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// In-memory de-duplicator keyed by 4-token SFEN or mirror-canonicalized 4-token SFEN.

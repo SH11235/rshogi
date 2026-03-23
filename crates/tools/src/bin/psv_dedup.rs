@@ -21,7 +21,9 @@ use std::{
 };
 
 use clap::Parser;
-use tools::common::dedup::{PSV_SIZE, SFEN_SIZE, collect_input_paths, hash_packed_sfen};
+use tools::common::dedup::{
+    PSV_SIZE, SFEN_SIZE, check_output_not_in_inputs, collect_input_paths, hash_packed_sfen,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "psv_dedup")]
@@ -56,18 +58,8 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
-    // 入力と出力が同一パスでないことを確認
-    let output_canonical = args.output.canonicalize().ok();
-    for p in &paths {
-        if let Ok(input_canonical) = p.canonicalize()
-            && Some(&input_canonical) == output_canonical.as_ref()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("出力ファイルが入力ファイルと同一です: {}", p.display()),
-            ));
-        }
-    }
+    // 入力と出力の重複チェック（出力ファイルが未作成でも検出可能）
+    check_output_not_in_inputs(&args.output, &paths)?;
 
     let out_file = File::create(&args.output)?;
     let mut writer = BufWriter::with_capacity(1 << 20, out_file);
