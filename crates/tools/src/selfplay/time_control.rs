@@ -38,6 +38,11 @@ impl TimeControl {
     }
 
     /// 残り時間を分割して1手あたりの思考上限を決める。
+    ///
+    /// byoyomi 時: 秒読み + 残り時間の按分を上限とする。
+    /// フィッシャー時: 残り時間 + 加算をそのまま上限とする。
+    /// エンジンは `go btime/wtime/binc/winc` で時間情報を受け取り自前で配分するため、
+    /// ツール側は残り時間全体をタイムアウト上限として信頼する。
     pub fn think_limit_ms(&self, side: Color) -> u64 {
         let remaining = self.remaining(side);
         let inc = self.increment_for(side);
@@ -48,10 +53,10 @@ impl TimeControl {
             let lower = self.byoyomi.max(MIN_THINK_MS.min(available));
             return candidate.clamp(lower, available);
         }
-        let per_move_budget = remaining / TIME_ALLOCATION_MOVES;
-        let candidate = per_move_budget.saturating_add(inc);
-        let lower = MIN_THINK_MS.min(remaining);
-        candidate.clamp(lower, remaining)
+        // フィッシャー: エンジンの時間管理を信頼し、残り時間 + 加算を上限とする。
+        // エンジンは重要局面で残り時間の大部分を1手に使うことがあるため、
+        // per-move budget で制限するとタイムアウト誤判定が発生する。
+        remaining.saturating_add(inc).max(MIN_THINK_MS)
     }
 
     pub fn remaining(&self, side: Color) -> u64 {
@@ -97,12 +102,14 @@ mod tests {
 
     #[test]
     fn time_control_allocates_fractional_budget() {
+        // byoyomi: per-move budget + byoyomi
         let tc = TimeControl::new(60_000, 60_000, 0, 0, 1_000);
         assert_eq!(tc.think_limit_ms(Color::Black), 2_500);
         assert_eq!(tc.updated_time(60_000, 0, 1_500), 59_500);
 
+        // フィッシャー: 残り時間 + 加算をそのまま返す
         let tc_inc = TimeControl::new(60_000, 60_000, 1_000, 0, 0);
-        assert_eq!(tc_inc.think_limit_ms(Color::Black), 2_500);
+        assert_eq!(tc_inc.think_limit_ms(Color::Black), 61_000);
         assert_eq!(tc_inc.updated_time(5_000, 1_000, 4_000), 2_000);
     }
 }

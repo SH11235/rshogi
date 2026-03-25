@@ -77,9 +77,17 @@ struct Cli {
     #[arg(long, default_value_t = 1)]
     concurrency: usize,
 
-    /// Byoyomi time per move in milliseconds
-    #[arg(long, default_value_t = 2000)]
+    /// Byoyomi time per move in milliseconds (mutually exclusive with --btime/--binc)
+    #[arg(long, default_value_t = 0)]
     byoyomi: u64,
+
+    /// Initial time per side in milliseconds (Fischer clock, mutually exclusive with --byoyomi)
+    #[arg(long, default_value_t = 0)]
+    btime: u64,
+
+    /// Increment per move in milliseconds (Fischer clock, mutually exclusive with --byoyomi)
+    #[arg(long, default_value_t = 0)]
+    binc: u64,
 
     /// Threads per engine
     #[arg(long, default_value_t = 1)]
@@ -198,6 +206,10 @@ struct MetaSettings {
     games: u32,
     max_moves: u32,
     byoyomi: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    btime: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    binc: u64,
     timeout_margin_ms: u64,
     threads: usize,
     hash_mb: u32,
@@ -205,6 +217,10 @@ struct MetaSettings {
     depth: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     nodes: Option<u64>,
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
 }
 
 #[derive(Serialize)]
@@ -281,6 +297,8 @@ struct WorkerConfig {
     max_moves: u32,
     timeout_margin_ms: u64,
     byoyomi: u64,
+    btime: u64,
+    binc: u64,
     go_depth: Option<u32>,
     go_nodes: Option<u64>,
     start_positions: Vec<ParsedPosition>,
@@ -301,6 +319,8 @@ fn worker_main(
         max_moves,
         timeout_margin_ms,
         byoyomi,
+        btime,
+        binc,
         go_depth,
         go_nodes,
         start_positions,
@@ -351,7 +371,7 @@ fn worker_main(
         let _ = white.new_game();
 
         let start_pos = &start_positions[ticket.startpos_idx];
-        let tc = TimeControl::new(0, 0, 0, 0, byoyomi);
+        let tc = TimeControl::new(btime, btime, binc, binc, byoyomi);
         let config = GameConfig {
             max_moves,
             timeout_margin_ms,
@@ -464,6 +484,20 @@ fn main() -> Result<()> {
         }
     }
 
+    // 時間管理のバリデーション
+    let use_byoyomi = cli.byoyomi > 0;
+    let use_fischer = cli.btime > 0 || cli.binc > 0;
+    let use_fixed = cli.depth.is_some() || cli.nodes.is_some();
+    if use_byoyomi && use_fischer {
+        bail!("--byoyomi と --btime/--binc は同時に指定できません");
+    }
+    if !use_byoyomi && !use_fischer && !use_fixed {
+        bail!("時間管理を指定してください: --byoyomi, --btime/--binc, --depth, --nodes のいずれか");
+    }
+    if use_fischer && cli.btime == 0 && cli.binc == 0 {
+        bail!("フィッシャー時計: --btime または --binc の少なくとも一方を正の値で指定してください");
+    }
+
     // 開始局面のロード
     let (start_defs, start_commands) =
         load_start_positions(cli.startpos_file.as_deref(), None, None, None)?;
@@ -492,14 +526,20 @@ fn main() -> Result<()> {
 
     // エンジンごとの最終オプションリストを構築
     //
-    // 公平な対局条件のため、NetworkDelay=0 と MinimumThinkingTime=byoyomi を
+    // 公平な対局条件のため、NetworkDelay=0 と MinimumThinkingTime を
     // デフォルトで注入する。ユーザーが明示的に指定した場合はそちらを優先。
     // - NetworkDelay: 0 以外だと秒境界切り上げで思考時間が短縮され、
     //   エンジン間で実質的な思考時間が不平等になる。
-    // - MinimumThinkingTime: byoyomi と一致させることで秒読み全体を使い切れる。
+    // - MinimumThinkingTime: byoyomi 時は byoyomi と一致させることで秒読み全体を使い切れる。
+    //   フィッシャー時は 0（エンジンの時間管理に委ねる）。
+    let min_think = if cli.byoyomi > 0 {
+        cli.byoyomi.to_string()
+    } else {
+        "0".to_string()
+    };
     let time_defaults = [
         ("NetworkDelay", "0"),
-        ("MinimumThinkingTime", &cli.byoyomi.to_string()),
+        ("MinimumThinkingTime", min_think.as_str()),
     ];
     let engine_usi_options: Vec<Vec<String>> = (0..n)
         .map(|i| {
@@ -535,6 +575,8 @@ fn main() -> Result<()> {
                 games: cli.games * 2,
                 max_moves: cli.max_moves,
                 byoyomi: cli.byoyomi,
+                btime: cli.btime,
+                binc: cli.binc,
                 timeout_margin_ms: cli.timeout_margin_ms,
                 threads: cli.threads,
                 hash_mb: cli.hash_mb,
@@ -619,6 +661,8 @@ fn main() -> Result<()> {
                     games: cli.games * 2, // 各方向 cli.games 局、双方向で合計
                     max_moves: cli.max_moves,
                     byoyomi: cli.byoyomi,
+                    btime: cli.btime,
+                    binc: cli.binc,
                     timeout_margin_ms: cli.timeout_margin_ms,
                     threads: cli.threads,
                     hash_mb: cli.hash_mb,
@@ -659,6 +703,8 @@ fn main() -> Result<()> {
         let max_moves = cli.max_moves;
         let timeout_margin_ms = cli.timeout_margin_ms;
         let byoyomi = cli.byoyomi;
+        let btime = cli.btime;
+        let binc = cli.binc;
         let go_depth = cli.depth;
         let go_nodes = cli.nodes;
         let start_positions: Vec<ParsedPosition> = start_defs
@@ -683,6 +729,8 @@ fn main() -> Result<()> {
                     max_moves,
                     timeout_margin_ms,
                     byoyomi,
+                    btime,
+                    binc,
                     go_depth,
                     go_nodes,
                     start_positions,
