@@ -347,6 +347,16 @@ impl NetworkLayerStacks {
         self.feature_transformer.refresh_accumulator(pos, acc);
     }
 
+    /// 差分計算を使わずにAccumulatorを計算（キャッシュ使用版）
+    pub fn refresh_accumulator_with_cache(
+        &self,
+        pos: &Position,
+        acc: &mut AccumulatorLayerStacks,
+        cache: &mut super::accumulator_layer_stacks::AccumulatorCacheLayerStacks,
+    ) {
+        self.feature_transformer.refresh_accumulator_with_cache(pos, acc, cache);
+    }
+
     /// 差分計算でAccumulatorを更新
     pub fn update_accumulator(
         &self,
@@ -356,6 +366,24 @@ impl NetworkLayerStacks {
         prev_acc: &AccumulatorLayerStacks,
     ) {
         self.feature_transformer.update_accumulator(pos, dirty_piece, acc, prev_acc);
+    }
+
+    /// 差分計算でAccumulatorを更新（キャッシュ使用版）
+    pub fn update_accumulator_with_cache(
+        &self,
+        pos: &Position,
+        dirty_piece: &super::accumulator::DirtyPiece,
+        acc: &mut AccumulatorLayerStacks,
+        prev_acc: &AccumulatorLayerStacks,
+        cache: &mut super::accumulator_layer_stacks::AccumulatorCacheLayerStacks,
+    ) {
+        self.feature_transformer.update_accumulator_with_cache(
+            pos,
+            dirty_piece,
+            acc,
+            prev_acc,
+            cache,
+        );
     }
 
     /// 複数手分の差分を適用してアキュムレータを更新
@@ -546,8 +574,7 @@ mod tests {
 
             // raw score（/600前）を計算
             let (us_acc, them_acc) = (acc.get(0), acc.get(1));
-            let mut transformed: Aligned<[u8; NNUE_PYTORCH_L1]> =
-                Aligned([0u8; NNUE_PYTORCH_L1]);
+            let mut transformed: Aligned<[u8; NNUE_PYTORCH_L1]> = Aligned([0u8; NNUE_PYTORCH_L1]);
             sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
             let stm = pos.side_to_move();
             let f_k = pos.king_square(stm);

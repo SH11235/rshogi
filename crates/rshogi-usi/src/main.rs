@@ -1346,7 +1346,7 @@ impl UsiEngine {
         let mut stack = AccumulatorStackVariant::from_network(&network);
 
         // 評価値を計算
-        let value = evaluate_dispatch(&self.position, &mut stack);
+        let value = evaluate_dispatch(&self.position, &mut stack, &mut None);
 
         println!("info string Static eval: {}", value.raw());
         println!("info string SFEN: {}", self.position.to_sfen());

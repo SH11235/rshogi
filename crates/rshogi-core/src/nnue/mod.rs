@@ -56,7 +56,8 @@ pub mod stats;
 
 pub use accumulator::{Accumulator, AccumulatorStack, ChangedBonaPiece, DirtyPiece, StackEntry};
 pub use accumulator_layer_stacks::{
-    AccumulatorLayerStacks, AccumulatorStackLayerStacks, StackEntryLayerStacks,
+    AccumulatorCacheLayerStacks, AccumulatorLayerStacks, AccumulatorStackLayerStacks,
+    StackEntryLayerStacks,
 };
 pub use accumulator_stack_variant::AccumulatorStackVariant;
 pub use bona_piece::{BonaPiece, ExtBonaPiece, FE_END, halfkp_index};

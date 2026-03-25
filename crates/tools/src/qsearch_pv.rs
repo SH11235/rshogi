@@ -104,7 +104,7 @@ impl Evaluator for NnueEvaluator {
             // AccumulatorStackをリセット（全計算を強制）
             stack.reset();
 
-            evaluate_dispatch(pos, stack).raw()
+            evaluate_dispatch(pos, stack, &mut None).raw()
         })
     }
 }
@@ -180,7 +180,7 @@ impl NnueStacks {
     /// 現在の局面を評価
     #[inline]
     pub fn evaluate(&mut self, pos: &Position) -> i32 {
-        evaluate_dispatch(pos, &mut self.stack).raw()
+        evaluate_dispatch(pos, &mut self.stack, &mut None).raw()
     }
 }
 

@@ -108,7 +108,7 @@ pub(super) fn check_abort(
 /// NNUE 評価
 #[inline]
 pub(super) fn nnue_evaluate(st: &mut SearchState, pos: &Position) -> Value {
-    evaluate_dispatch(pos, &mut st.nnue_stack)
+    evaluate_dispatch(pos, &mut st.nnue_stack, &mut st.acc_cache)
 }
 
 /// NNUE アキュムレータを計算済みにする（評価値の計算はしない）
@@ -118,7 +118,7 @@ pub(super) fn nnue_evaluate(st: &mut SearchState, pos: &Position) -> Value {
 #[cfg(feature = "use-lazy-evaluate")]
 #[inline]
 pub(super) fn ensure_nnue_accumulator(st: &mut SearchState, pos: &Position) {
-    ensure_accumulator_computed(pos, &mut st.nnue_stack)
+    ensure_accumulator_computed(pos, &mut st.nnue_stack, &mut st.acc_cache)
 }
 
 /// do_move + nodes++ + nnue_push をまとめたラッパー

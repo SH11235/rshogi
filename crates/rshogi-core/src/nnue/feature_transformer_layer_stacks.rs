@@ -5,7 +5,9 @@
 
 use super::accumulator::{Aligned, AlignedBox};
 use super::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES};
-use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLayerStacks};
+use super::accumulator_layer_stacks::{
+    AccumulatorCacheLayerStacks, AccumulatorLayerStacks, AccumulatorStackLayerStacks,
+};
 use super::constants::{HALFKA_HM_DIMENSIONS, NNUE_PYTORCH_L1};
 use super::features::{FeatureSet, HalfKA_hm_FeatureSet};
 use super::leb128::read_compressed_tensor_i16_all;
@@ -184,6 +186,102 @@ impl FeatureTransformerLayerStacks {
 
         acc.computed_accumulation = true;
         acc.computed_score = false;
+    }
+
+    /// 差分計算でAccumulatorを更新（キャッシュ使用版）
+    ///
+    /// 玉移動時に full refresh が必要な視点では、AccumulatorCaches（Finny Tables）
+    /// を参照して差分更新を行う。キャッシュにヒットした場合、全駒加算の代わりに
+    /// 前回のキャッシュ状態との差分のみを適用するため高速。
+    pub fn update_accumulator_with_cache(
+        &self,
+        pos: &Position,
+        dirty_piece: &DirtyPiece,
+        acc: &mut AccumulatorLayerStacks,
+        prev_acc: &AccumulatorLayerStacks,
+        cache: &mut AccumulatorCacheLayerStacks,
+    ) {
+        for perspective in [Color::Black, Color::White] {
+            let p = perspective as usize;
+            let reset = HalfKA_hm_FeatureSet::needs_refresh(dirty_piece, perspective);
+
+            if reset {
+                // 玉が移動した場合はキャッシュ経由で refresh
+                self.refresh_perspective_with_cache(pos, perspective, acc.get_mut(p), cache);
+            } else {
+                // 差分更新（キャッシュ不使用）
+                let (removed, added) = HalfKA_hm_FeatureSet::collect_changed_indices(
+                    dirty_piece,
+                    perspective,
+                    pos.king_square(perspective),
+                );
+
+                let prev = prev_acc.get(p);
+                let curr = acc.get_mut(p);
+                curr.copy_from_slice(prev);
+
+                for &index in removed.iter() {
+                    self.sub_weights(curr, index);
+                }
+
+                for &index in added.iter() {
+                    self.add_weights(curr, index);
+                }
+            }
+        }
+
+        acc.computed_accumulation = true;
+        acc.computed_score = false;
+    }
+
+    /// キャッシュ使用版の refresh（両視点）
+    pub fn refresh_accumulator_with_cache(
+        &self,
+        pos: &Position,
+        acc: &mut AccumulatorLayerStacks,
+        cache: &mut AccumulatorCacheLayerStacks,
+    ) {
+        for perspective in [Color::Black, Color::White] {
+            let p = perspective as usize;
+            self.refresh_perspective_with_cache(pos, perspective, acc.get_mut(p), cache);
+        }
+
+        acc.computed_accumulation = true;
+        acc.computed_score = false;
+    }
+
+    /// 単一視点のキャッシュ経由 refresh
+    ///
+    /// アクティブ特徴量をソートして u32 配列に変換し、
+    /// AccumulatorCacheLayerStacks::refresh_or_cache に委譲する。
+    fn refresh_perspective_with_cache(
+        &self,
+        pos: &Position,
+        perspective: Color,
+        accumulation: &mut [i16; NNUE_PYTORCH_L1],
+        cache: &mut AccumulatorCacheLayerStacks,
+    ) {
+        let king_sq = pos.king_square(perspective);
+        let active_indices = self.get_active_features(pos, perspective);
+
+        // IndexList を u32 のソート済み配列に変換（スタック上に確保）
+        let mut sorted_buf = [0u32; MAX_ACTIVE_FEATURES];
+        let len = active_indices.len();
+        for (i, &idx) in active_indices.iter().enumerate() {
+            sorted_buf[i] = idx as u32;
+        }
+        let sorted = &mut sorted_buf[..len];
+        sorted.sort_unstable();
+
+        cache.refresh_or_cache(
+            king_sq,
+            perspective,
+            sorted,
+            &self.biases.0,
+            accumulation,
+            |acc, idx| self.add_weights(acc, idx),
+            |acc, idx| self.sub_weights(acc, idx),
+        );
     }
 
     /// 複数手分の差分を適用してアキュムレータを更新

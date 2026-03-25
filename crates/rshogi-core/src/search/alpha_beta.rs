@@ -11,7 +11,7 @@ use std::sync::Arc;
 #[cfg(not(feature = "search-no-pass-rules"))]
 use crate::eval::evaluate_pass_rights;
 use crate::eval::{EvalHash, get_scaled_pass_move_bonus};
-use crate::nnue::{AccumulatorStackVariant, get_network};
+use crate::nnue::{AccumulatorCacheLayerStacks, AccumulatorStackVariant, get_network};
 use crate::position::Position;
 use crate::search::PieceToHistory;
 use crate::tt::{ProbeResult, TTData, TranspositionTable};
@@ -359,6 +359,9 @@ pub struct SearchState {
     pub root_moves: RootMoves,
     /// NNUE Accumulator スタック
     pub nnue_stack: AccumulatorStackVariant,
+    /// LayerStacks 用 AccumulatorCaches（Finny Tables）
+    /// LayerStacks アーキテクチャ以外では None
+    pub acc_cache: Option<AccumulatorCacheLayerStacks>,
     /// check_abort呼び出しカウンター
     pub calls_cnt: i32,
     /// 探索統計（search-stats feature有効時のみ）
@@ -382,6 +385,7 @@ impl SearchState {
             nmp_min_ply: 0,
             root_moves: RootMoves::new(),
             nnue_stack: AccumulatorStackVariant::new_default(),
+            acc_cache: None,
             calls_cnt: 0,
             #[cfg(feature = "search-stats")]
             stats: SearchStats::default(),
@@ -693,9 +697,22 @@ impl SearchWorker {
             } else {
                 self.state.nnue_stack.reset();
             }
+            // LayerStacks 用 AccumulatorCaches を初期化
+            if network.is_layer_stacks() {
+                if self.state.acc_cache.is_none() {
+                    self.state.acc_cache = Some(AccumulatorCacheLayerStacks::new());
+                }
+                // 新しいゲーム開始時にキャッシュを無効化（usinewgame 経由で呼ばれる）
+                if let Some(cache) = &mut self.state.acc_cache {
+                    cache.invalidate();
+                }
+            } else {
+                self.state.acc_cache = None;
+            }
         } else {
             // NNUE未初期化の場合はデフォルト（HalfKP）でリセット
             self.state.nnue_stack.reset();
+            self.state.acc_cache = None;
         }
         // check_abort頻度制御カウンターをリセット
         // これにより新しい探索開始時に即座に停止チェックが行われる
