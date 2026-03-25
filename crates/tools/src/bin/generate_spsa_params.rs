@@ -18,13 +18,15 @@ struct Cli {
     output: PathBuf,
 }
 
-fn int_step(min: i32, max: i32) -> i64 {
+/// Fishtest 互換の c_end（最終摂動幅）。`(max - min) / 20` で最低 1。
+fn c_end(min: i32, max: i32) -> i64 {
     let range = (max - min) as f64;
-    ((range / 200.0).round() as i64).max(1)
+    ((range / 20.0).round() as i64).max(1)
 }
 
-fn delta(min: i32, max: i32) -> f64 {
-    (max - min) as f64 / 20.0
+/// Fishtest 互換の r_end（最終学習率係数）。固定 0.002。
+fn r_end() -> f64 {
+    0.002
 }
 
 fn format_float(value: f64) -> String {
@@ -45,8 +47,8 @@ fn main() -> Result<()> {
     let mut writer = BufWriter::new(file);
 
     for spec in SearchTuneParams::option_specs() {
-        let step = int_step(spec.min, spec.max);
-        let delta = delta(spec.min, spec.max);
+        let c = c_end(spec.min, spec.max);
+        let r = r_end();
         writeln!(
             writer,
             "{},int,{},{},{},{},{}",
@@ -54,8 +56,8 @@ fn main() -> Result<()> {
             spec.default,
             spec.min,
             spec.max,
-            step,
-            format_float(delta)
+            c,
+            format_float(r)
         )?;
     }
     writer.flush()?;
@@ -67,22 +69,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn int_step_has_minimum_one() {
-        assert_eq!(int_step(0, 5), 1);
-        assert_eq!(int_step(-3, 3), 1);
+    fn c_end_has_minimum_one() {
+        assert_eq!(c_end(0, 5), 1);
+        assert_eq!(c_end(-3, 3), 1);
     }
 
     #[test]
-    fn int_step_rounds_range_div_200() {
-        assert_eq!(int_step(0, 1000), 5);
-        assert_eq!(int_step(0, 260), 1);
-        assert_eq!(int_step(0, 340), 2);
+    fn c_end_is_range_div_20() {
+        assert_eq!(c_end(0, 1000), 50);
+        assert_eq!(c_end(-1000, 1000), 100);
+        assert_eq!(c_end(0, 20), 1);
     }
 
     #[test]
-    fn delta_is_range_div_20() {
-        assert_eq!(delta(0, 100), 5.0);
-        assert_eq!(delta(-20, 20), 2.0);
+    fn r_end_is_constant() {
+        assert!((r_end() - 0.002).abs() < f64::EPSILON);
     }
 
     #[test]

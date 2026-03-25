@@ -18,12 +18,12 @@ use tools::selfplay::{
 };
 
 const PARAM_NOT_USED_MARKER: &str = "[[NOT USED]]";
-const META_FORMAT_VERSION: u32 = 1;
+const META_FORMAT_VERSION: u32 = 2;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "SPSA tuner for USI engines")]
 struct Cli {
-    /// SPSAパラメータファイル（name,type,v,min,max,step,delta）
+    /// SPSAパラメータファイル（name,type,v,min,max,c_end,r_end）
     #[arg(long)]
     params: PathBuf,
 
@@ -39,31 +39,19 @@ struct Cli {
     #[arg(long, default_value_t = 1)]
     concurrency: usize,
 
-    /// 摂動スケール
-    #[arg(long, default_value_t = 1.0)]
-    scale: f64,
-
     /// 更新移動量スケール
     #[arg(long, default_value_t = 1.0)]
     mobility: f64,
 
-    /// A系列の a（a_t = a / (A + t)^alpha）
-    #[arg(long, default_value_t = 0.2)]
-    a: f64,
+    /// Fishtest A ratio（A = a_ratio * iterations）
+    #[arg(long = "a-ratio", default_value_t = 0.1)]
+    a_ratio: f64,
 
-    /// A系列の A（a_t = a / (A + t)^alpha）
-    #[arg(long = "a-offset", default_value_t = 50.0)]
-    a_offset: f64,
-
-    /// A系列の alpha（a_t = a / (A + t)^alpha）
+    /// SPSA alpha（a_k 減衰指数）
     #[arg(long, default_value_t = 0.602)]
     alpha: f64,
 
-    /// c系列の c（c_t = c / t^gamma）
-    #[arg(long, default_value_t = 1.0)]
-    c: f64,
-
-    /// c系列の gamma（c_t = c / t^gamma）
+    /// SPSA gamma（c_k 減衰指数）
     #[arg(long, default_value_t = 0.101)]
     gamma: f64,
 
@@ -119,9 +107,17 @@ struct Cli {
     #[arg(long, default_value_t = 256)]
     hash_mb: u32,
 
-    /// 秒読み(ms)
+    /// 秒読み(ms)。--btime 指定時は無視される。
     #[arg(long, default_value_t = 1000)]
     byoyomi: u64,
+
+    /// フィッシャー: 持ち時間(ms)。指定時は byoyomi を無視しフィッシャーモードになる。
+    #[arg(long)]
+    btime: Option<u64>,
+
+    /// フィッシャー: 加算時間(ms)。--btime と併用する。
+    #[arg(long, default_value_t = 0)]
+    binc: u64,
 
     /// 1局あたり最大手数
     #[arg(long, default_value_t = 320)]
@@ -155,9 +151,9 @@ struct Cli {
     #[arg(long)]
     early_stop_avg_abs_update_threshold: Option<f64>,
 
-    /// 早期停止: grad_scale_variance の閾値（以下で条件成立）
+    /// 早期停止: result_variance の閾値（以下で条件成立）
     #[arg(long)]
-    early_stop_grad_scale_variance_threshold: Option<f64>,
+    early_stop_result_variance_threshold: Option<f64>,
 
     /// 早期停止: 条件連続成立回数（0で無効）
     #[arg(long, default_value_t = 0)]
@@ -172,21 +168,56 @@ struct SpsaParam {
     value: f64,
     min: f64,
     max: f64,
-    step: f64,
-    delta: f64,
+    /// Fishtest c_end: 最終摂動幅
+    c_end: f64,
+    /// Fishtest r_end: 最終学習率係数
+    r_end: f64,
     comment: String,
     not_used: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 struct ScheduleConfig {
-    a: f64,
-    a_offset: f64,
     alpha: f64,
-    c: f64,
     gamma: f64,
-    scale: f64,
+    a_ratio: f64,
     mobility: f64,
+    total_iterations: u32,
+}
+
+/// Fishtest 方式の per-param スケジュール定数。イテレーション開始前に一度だけ計算する。
+#[derive(Clone, Copy, Debug)]
+struct ParamScheduleConstants {
+    /// c_0 = c_end × N^γ
+    c_0: f64,
+    /// a_0 = r_end × c_end² × (A + N)^α
+    a_0: f64,
+}
+
+impl ParamScheduleConstants {
+    fn compute(
+        c_end: f64,
+        r_end: f64,
+        total_iter: u32,
+        a_ratio: f64,
+        alpha: f64,
+        gamma: f64,
+    ) -> Self {
+        let n = total_iter as f64;
+        let big_a = a_ratio * n;
+        let c_0 = c_end * n.powf(gamma);
+        let a_end = r_end * c_end * c_end;
+        let a_0 = a_end * (big_a + n).powf(alpha);
+        Self { c_0, a_0 }
+    }
+
+    /// イテレーション k (0-indexed) での (c_k, R_k) を返す。
+    fn at_iteration(&self, k: u32, big_a: f64, alpha: f64, gamma: f64) -> (f64, f64) {
+        let t = k as f64 + 1.0;
+        let c_k = self.c_0 / t.powf(gamma);
+        let r_k = self.a_0 / (big_a + t).powf(alpha) / (c_k * c_k);
+        (c_k, r_k)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -195,10 +226,8 @@ struct ResumeMetaData {
     params_file: String,
     completed_iterations: u32,
     total_games: usize,
-    last_step_sum: f64,
-    last_grad_scale: f64,
-    last_a_t: f64,
-    last_c_t: f64,
+    last_raw_result_mean: f64,
+    last_avg_abs_update: f64,
     updated_at_utc: String,
     schedule: ScheduleConfig,
 }
@@ -211,10 +240,7 @@ struct IterationStats {
     plus_wins: u32,
     minus_wins: u32,
     draws: u32,
-    step_sum: f64,
-    grad_scale: f64,
-    a_t: f64,
-    c_t: f64,
+    raw_result: f64,
     active_params: usize,
     avg_abs_shift: f64,
     updated_params: usize,
@@ -228,10 +254,8 @@ struct AggregateIterationStats {
     iteration: u32,
     seed_count: usize,
     games_per_seed: u32,
-    step_sum_mean: f64,
-    step_sum_variance: f64,
-    grad_scale_mean: f64,
-    grad_scale_variance: f64,
+    raw_result_mean: f64,
+    raw_result_variance: f64,
     plus_wins_mean: f64,
     plus_wins_variance: f64,
     minus_wins_mean: f64,
@@ -285,7 +309,7 @@ struct SeedRunContext<'a> {
 #[derive(Clone, Copy, Debug)]
 struct EarlyStopConfig {
     avg_abs_update_threshold: f64,
-    grad_scale_variance_threshold: f64,
+    result_variance_threshold: f64,
     patience: u32,
 }
 
@@ -295,13 +319,11 @@ fn default_meta_path(params_path: &Path) -> PathBuf {
 
 fn schedule_matches(lhs: ScheduleConfig, rhs: ScheduleConfig) -> bool {
     const EPS: f64 = 1e-12;
-    (lhs.a - rhs.a).abs() <= EPS
-        && (lhs.a_offset - rhs.a_offset).abs() <= EPS
-        && (lhs.alpha - rhs.alpha).abs() <= EPS
-        && (lhs.c - rhs.c).abs() <= EPS
+    (lhs.alpha - rhs.alpha).abs() <= EPS
         && (lhs.gamma - rhs.gamma).abs() <= EPS
-        && (lhs.scale - rhs.scale).abs() <= EPS
+        && (lhs.a_ratio - rhs.a_ratio).abs() <= EPS
         && (lhs.mobility - rhs.mobility).abs() <= EPS
+        && lhs.total_iterations == rhs.total_iterations
 }
 
 fn is_param_active(param: &SpsaParam, active_only_regex: Option<&Regex>) -> bool {
@@ -325,7 +347,7 @@ fn format_param_value_for_csv(param: &SpsaParam) -> String {
 fn write_stats_csv_header(writer: &mut BufWriter<File>) -> Result<()> {
     writeln!(
         writer,
-        "iteration,seed,games,plus_wins,minus_wins,draws,step_sum,grad_scale,a_t,c_t,active_params,\
+        "iteration,seed,games,plus_wins,minus_wins,draws,raw_result,active_params,\
          avg_abs_shift,updated_params,avg_abs_update,max_abs_update,total_games"
     )?;
     Ok(())
@@ -334,7 +356,7 @@ fn write_stats_csv_header(writer: &mut BufWriter<File>) -> Result<()> {
 fn write_stats_aggregate_csv_header(writer: &mut BufWriter<File>) -> Result<()> {
     writeln!(
         writer,
-        "iteration,seeds,games_per_seed,step_sum_mean,step_sum_variance,grad_scale_mean,grad_scale_variance,\
+        "iteration,seeds,games_per_seed,raw_result_mean,raw_result_variance,\
          plus_wins_mean,plus_wins_variance,minus_wins_mean,minus_wins_variance,draws_mean,draws_variance,total_games"
     )?;
     Ok(())
@@ -461,17 +483,14 @@ fn open_param_values_csv_writer(
 fn write_stats_csv_row(writer: &mut BufWriter<File>, stats: IterationStats) -> Result<()> {
     writeln!(
         writer,
-        "{},{},{},{},{},{},{:+.6},{:+.6},{:.6},{:.6},{},{:.6},{},{:.6},{:.6},{}",
+        "{},{},{},{},{},{},{:+.6},{},{:.6},{},{:.6},{:.6},{}",
         stats.iteration,
         stats.seed,
         stats.games,
         stats.plus_wins,
         stats.minus_wins,
         stats.draws,
-        stats.step_sum,
-        stats.grad_scale,
-        stats.a_t,
-        stats.c_t,
+        stats.raw_result,
         stats.active_params,
         stats.avg_abs_shift,
         stats.updated_params,
@@ -488,14 +507,12 @@ fn write_stats_aggregate_csv_row(
 ) -> Result<()> {
     writeln!(
         writer,
-        "{},{},{},{:+.6},{:.6},{:+.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{}",
+        "{},{},{},{:+.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{}",
         stats.iteration,
         stats.seed_count,
         stats.games_per_seed,
-        stats.step_sum_mean,
-        stats.step_sum_variance,
-        stats.grad_scale_mean,
-        stats.grad_scale_variance,
+        stats.raw_result_mean,
+        stats.raw_result_variance,
         stats.plus_wins_mean,
         stats.plus_wins_variance,
         stats.minus_wins_mean,
@@ -537,14 +554,6 @@ fn save_meta(path: &Path, meta: &ResumeMetaData) -> Result<()> {
     Ok(())
 }
 
-#[inline]
-fn schedule_values(config: ScheduleConfig, iteration_index: u32) -> (f64, f64) {
-    let t = iteration_index as f64 + 1.0;
-    let a_t = config.a / (config.a_offset + t).powf(config.alpha);
-    let c_t = config.c / t.powf(config.gamma);
-    (a_t, c_t)
-}
-
 fn parse_param_line(line: &str, line_no: usize) -> Result<Option<SpsaParam>> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -584,12 +593,12 @@ fn parse_param_line(line: &str, line_no: usize) -> Result<Option<SpsaParam>> {
         max: cols[4]
             .parse::<f64>()
             .with_context(|| format!("invalid max at line {}", line_no))?,
-        step: cols[5]
+        c_end: cols[5]
             .parse::<f64>()
-            .with_context(|| format!("invalid step at line {}", line_no))?,
-        delta: cols[6]
+            .with_context(|| format!("invalid c_end at line {}", line_no))?,
+        r_end: cols[6]
             .parse::<f64>()
-            .with_context(|| format!("invalid delta at line {}", line_no))?,
+            .with_context(|| format!("invalid r_end at line {}", line_no))?,
         comment,
         not_used,
     }))
@@ -623,7 +632,7 @@ fn write_params(path: &Path, params: &[SpsaParam]) -> Result<()> {
         };
         let mut line = format!(
             "{},{},{},{},{},{},{}",
-            p.name, p.type_name, v_str, p.min, p.max, p.step, p.delta
+            p.name, p.type_name, v_str, p.min, p.max, p.c_end, p.r_end
         );
         if !p.comment.is_empty() {
             line.push_str(" //");
@@ -937,44 +946,38 @@ fn main() -> Result<()> {
     if cli.concurrency == 0 {
         bail!("--concurrency must be >= 1");
     }
-    if cli.scale <= 0.0 {
-        bail!("--scale must be > 0");
-    }
-    if cli.a <= 0.0 || cli.c <= 0.0 {
-        bail!("--a and --c must be > 0");
-    }
     if cli.alpha <= 0.0 || cli.gamma <= 0.0 {
         bail!("--alpha and --gamma must be > 0");
     }
-    if cli.a_offset < 0.0 {
-        bail!("--a-offset must be >= 0");
+    if cli.a_ratio < 0.0 {
+        bail!("--a-ratio must be >= 0");
     }
     if let Some(v) = cli.early_stop_avg_abs_update_threshold
         && v < 0.0
     {
         bail!("--early-stop-avg-abs-update-threshold must be >= 0");
     }
-    if let Some(v) = cli.early_stop_grad_scale_variance_threshold
+    if let Some(v) = cli.early_stop_result_variance_threshold
         && v < 0.0
     {
-        bail!("--early-stop-grad-scale-variance-threshold must be >= 0");
+        bail!("--early-stop-result-variance-threshold must be >= 0");
     }
     let early_stop_config = match (
         cli.early_stop_avg_abs_update_threshold,
-        cli.early_stop_grad_scale_variance_threshold,
+        cli.early_stop_result_variance_threshold,
         cli.early_stop_patience,
     ) {
         (None, None, 0) => None,
         (Some(avg), Some(var), patience) if patience > 0 => Some(EarlyStopConfig {
             avg_abs_update_threshold: avg,
-            grad_scale_variance_threshold: var,
+            result_variance_threshold: var,
             patience,
         }),
         _ => {
             bail!(
                 "early stopを有効化するには \
                  --early-stop-avg-abs-update-threshold, \
-                 --early-stop-grad-scale-variance-threshold, \
+                 --early-stop-result-variance-threshold, \
                  --early-stop-patience(>0) を全て指定してください"
             );
         }
@@ -996,13 +999,11 @@ fn main() -> Result<()> {
     let engine_args = cli.engine_args.clone().unwrap_or_default();
     let mut params = read_params(&cli.params)?;
     let schedule = ScheduleConfig {
-        a: cli.a,
-        a_offset: cli.a_offset,
         alpha: cli.alpha,
-        c: cli.c,
         gamma: cli.gamma,
-        scale: cli.scale,
+        a_ratio: cli.a_ratio,
         mobility: cli.mobility,
+        total_iterations: cli.iterations,
     };
     let meta_path = cli.meta_file.clone().unwrap_or_else(|| default_meta_path(&cli.params));
     let (start_iteration, mut total_games) = if cli.resume {
@@ -1110,14 +1111,32 @@ fn main() -> Result<()> {
         go_depth: None,
         go_nodes: None,
     };
-    let tc = TimeControl::new(0, 0, 0, 0, cli.byoyomi);
+    let tc = if let Some(btime) = cli.btime {
+        TimeControl::new(btime, btime, cli.binc, cli.binc, 0)
+    } else {
+        TimeControl::new(0, 0, 0, 0, cli.byoyomi)
+    };
     let mut early_stop_consecutive = 0u32;
 
+    // Fishtest 方式: per-param スケジュール定数を初期化
+    let big_a = schedule.a_ratio * end_iteration as f64;
+    let param_schedules: Vec<ParamScheduleConstants> = params
+        .iter()
+        .map(|p| {
+            ParamScheduleConstants::compute(
+                p.c_end,
+                p.r_end,
+                end_iteration,
+                schedule.a_ratio,
+                schedule.alpha,
+                schedule.gamma,
+            )
+        })
+        .collect();
+
     for iter in start_iteration..end_iteration {
-        let (a_t, c_t) = schedule_values(schedule, iter);
-        let mut grad_sums = vec![0.0f64; params.len()];
-        let mut seed_step_sums = Vec::with_capacity(seed_values.len());
-        let mut seed_grad_scales = Vec::with_capacity(seed_values.len());
+        let mut update_sums = vec![0.0f64; params.len()];
+        let mut seed_raw_results = Vec::with_capacity(seed_values.len());
         let mut seed_plus_wins = Vec::with_capacity(seed_values.len());
         let mut seed_minus_wins = Vec::with_capacity(seed_values.len());
         let mut seed_draws = Vec::with_capacity(seed_values.len());
@@ -1126,15 +1145,31 @@ fn main() -> Result<()> {
         for (seed_idx, base_seed) in seed_values.iter().copied().enumerate() {
             let iter_seed = seed_for_iteration(base_seed, iter);
             let mut rng = ChaCha8Rng::seed_from_u64(iter_seed);
-            let shifts: Vec<f64> = params
+
+            // Per-param Fishtest 摂動: shift_j = c_k_j × flip_j
+            let flips: Vec<f64> = params
                 .iter()
                 .map(|p| {
                     if !is_param_active(p, active_only_regex.as_ref()) {
                         0.0
                     } else if rng.random_bool(0.5) {
-                        p.step * cli.scale * c_t
+                        1.0
                     } else {
-                        -p.step * cli.scale * c_t
+                        -1.0
+                    }
+                })
+                .collect();
+            let shifts: Vec<f64> = params
+                .iter()
+                .zip(param_schedules.iter())
+                .zip(flips.iter())
+                .map(|((p, sched), &flip)| {
+                    if !is_param_active(p, active_only_regex.as_ref()) {
+                        0.0
+                    } else {
+                        let (c_k, _) =
+                            sched.at_iteration(iter, big_a, schedule.alpha, schedule.gamma);
+                        c_k * flip
                     }
                 })
                 .collect();
@@ -1198,22 +1233,20 @@ fn main() -> Result<()> {
             let minus_wins = seed_game_stats.minus_wins;
             let draws = seed_game_stats.draws;
 
-            let grad_scale = step_sum / cli.games_per_iteration as f64;
-            if c_t > f64::EPSILON {
-                for (idx, (p, &shift)) in params.iter().zip(shifts.iter()).enumerate() {
-                    if !is_param_active(p, active_only_regex.as_ref())
-                        || p.step.abs() <= f64::EPSILON
-                    {
-                        continue;
-                    }
-                    let direction = if shift >= 0.0 { 1.0 } else { -1.0 };
-                    let grad = grad_scale * direction / (p.step.abs() * cli.scale * c_t);
-                    grad_sums[idx] += grad;
+            // Fishtest 更新: signal_j = R_k_j × c_k_j × result × flip_j
+            let raw_result = step_sum;
+            for (idx, (p, (&flip, sched))) in
+                params.iter().zip(flips.iter().zip(param_schedules.iter())).enumerate()
+            {
+                if !is_param_active(p, active_only_regex.as_ref()) || p.c_end.abs() <= f64::EPSILON
+                {
+                    continue;
                 }
+                let (c_k, r_k) = sched.at_iteration(iter, big_a, schedule.alpha, schedule.gamma);
+                update_sums[idx] += r_k * c_k * raw_result * flip;
             }
 
-            seed_step_sums.push(step_sum);
-            seed_grad_scales.push(grad_scale);
+            seed_raw_results.push(raw_result);
             seed_plus_wins.push(plus_wins as f64);
             seed_minus_wins.push(minus_wins as f64);
             seed_draws.push(draws as f64);
@@ -1225,10 +1258,7 @@ fn main() -> Result<()> {
                 plus_wins,
                 minus_wins,
                 draws,
-                step_sum,
-                grad_scale,
-                a_t,
-                c_t,
+                raw_result,
                 active_params,
                 avg_abs_shift,
                 updated_params: 0,
@@ -1238,24 +1268,17 @@ fn main() -> Result<()> {
             });
         }
 
-        let grad_scale = if seed_values.is_empty() {
-            0.0
-        } else {
-            seed_grad_scales.iter().copied().sum::<f64>() / seed_values.len() as f64
-        };
+        // Seed 平均後にパラメータ更新
         let mut updated_params = 0usize;
         let mut abs_update_sum = 0.0f64;
         let mut max_abs_update = 0.0f64;
         for (idx, p) in params.iter_mut().enumerate() {
-            if !is_param_active(p, active_only_regex.as_ref())
-                || p.step.abs() <= f64::EPSILON
-                || c_t <= f64::EPSILON
-            {
+            if !is_param_active(p, active_only_regex.as_ref()) || p.c_end.abs() <= f64::EPSILON {
                 continue;
             }
             let before = p.value;
-            let grad = grad_sums[idx] / seed_values.len() as f64;
-            let updated = clamped_value(p, p.value + a_t * p.delta * grad * cli.mobility);
+            let avg_signal = update_sums[idx] / seed_values.len() as f64;
+            let updated = clamped_value(p, p.value + avg_signal * cli.mobility);
             p.value = if p.is_int { updated.round() } else { updated };
             let abs_update = (p.value - before).abs();
             updated_params += 1;
@@ -1280,8 +1303,7 @@ fn main() -> Result<()> {
             writer.flush()?;
         }
 
-        let (step_sum_mean, step_sum_variance) = mean_and_variance(&seed_step_sums);
-        let (grad_scale_mean, grad_scale_variance) = mean_and_variance(&seed_grad_scales);
+        let (raw_result_mean, raw_result_variance) = mean_and_variance(&seed_raw_results);
         let (plus_wins_mean, plus_wins_variance) = mean_and_variance(&seed_plus_wins);
         let (minus_wins_mean, minus_wins_variance) = mean_and_variance(&seed_minus_wins);
         let (draws_mean, draws_variance) = mean_and_variance(&seed_draws);
@@ -1296,25 +1318,21 @@ fn main() -> Result<()> {
             params_file: cli.params.display().to_string(),
             completed_iterations: iter + 1,
             total_games,
-            last_step_sum: step_sum_mean,
-            last_grad_scale: grad_scale,
-            last_a_t: a_t,
-            last_c_t: c_t,
+            last_raw_result_mean: raw_result_mean,
+            last_avg_abs_update: avg_abs_update,
             updated_at_utc: Utc::now().to_rfc3339(),
             schedule,
         };
         save_meta(&meta_path, &meta)?;
         println!(
-            "iter={} seeds={} step_sum_mean={:+.3} step_sum_var={:.6} grad_scale_mean={:+.3} \
-             grad_scale_var={:.6} a_t={:.6} c_t={:.6} checkpoint={} meta={}",
+            "iter={} seeds={} raw_result_mean={:+.3} raw_result_var={:.6} \
+             avg_abs_update={:.6} max_abs_update={:.6} checkpoint={} meta={}",
             iter + 1,
             seed_values.len(),
-            step_sum_mean,
-            step_sum_variance,
-            grad_scale_mean,
-            grad_scale_variance,
-            a_t,
-            c_t,
+            raw_result_mean,
+            raw_result_variance,
+            avg_abs_update,
+            max_abs_update,
             cli.params.display(),
             meta_path.display()
         );
@@ -1325,10 +1343,8 @@ fn main() -> Result<()> {
                     iteration: iter + 1,
                     seed_count: seed_values.len(),
                     games_per_seed: cli.games_per_iteration,
-                    step_sum_mean,
-                    step_sum_variance,
-                    grad_scale_mean,
-                    grad_scale_variance,
+                    raw_result_mean,
+                    raw_result_variance,
                     plus_wins_mean,
                     plus_wins_variance,
                     minus_wins_mean,
@@ -1343,20 +1359,20 @@ fn main() -> Result<()> {
 
         if let Some(config) = early_stop_config {
             let early_stop_hit = avg_abs_update <= config.avg_abs_update_threshold
-                && grad_scale_variance <= config.grad_scale_variance_threshold;
+                && raw_result_variance <= config.result_variance_threshold;
             if early_stop_hit {
                 early_stop_consecutive = early_stop_consecutive.saturating_add(1);
             } else {
                 early_stop_consecutive = 0;
             }
             println!(
-                "iter={} early_stop_hit={} consecutive={}/{} thresholds(avg_abs_update<={:.6}, grad_scale_variance<={:.6})",
+                "iter={} early_stop_hit={} consecutive={}/{} thresholds(avg_abs_update<={:.6}, result_variance<={:.6})",
                 iter + 1,
                 early_stop_hit,
                 early_stop_consecutive,
                 config.patience,
                 config.avg_abs_update_threshold,
-                config.grad_scale_variance_threshold
+                config.result_variance_threshold
             );
             if early_stop_consecutive >= config.patience {
                 println!(
@@ -1370,4 +1386,72 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schedule_at_final_iteration_matches_end_values() {
+        let c_end = 50.0;
+        let r_end = 0.002;
+        let n = 200u32;
+        let a_ratio = 0.1;
+        let alpha = 0.602;
+        let gamma = 0.101;
+        let big_a = a_ratio * n as f64;
+
+        let sched = ParamScheduleConstants::compute(c_end, r_end, n, a_ratio, alpha, gamma);
+        let (c_k, r_k) = sched.at_iteration(n - 1, big_a, alpha, gamma);
+
+        assert!(
+            (c_k - c_end).abs() < 1e-6,
+            "c_k at final iter should equal c_end: got {c_k}, expected {c_end}"
+        );
+        assert!(
+            (r_k - r_end).abs() < 1e-6,
+            "R_k at final iter should equal r_end: got {r_k}, expected {r_end}"
+        );
+    }
+
+    #[test]
+    fn update_magnitude_is_nonzero_for_typical_params() {
+        let c_end = 50.0;
+        let r_end = 0.002;
+        let n = 200u32;
+        let a_ratio = 0.1;
+        let alpha = 0.602;
+        let gamma = 0.101;
+        let big_a = a_ratio * n as f64;
+
+        let sched = ParamScheduleConstants::compute(c_end, r_end, n, a_ratio, alpha, gamma);
+
+        // 初期イテレーション (iter=0) での更新量
+        let (c_k, r_k) = sched.at_iteration(0, big_a, alpha, gamma);
+        let result = 8.0; // 64局で期待される |W-L| ≈ √64
+        let update = r_k * c_k * result;
+        assert!(update.abs() > 0.5, "update at iter 0 should be significant: got {update}");
+
+        // 最終イテレーション (iter=199) での更新量
+        let (c_k, r_k) = sched.at_iteration(n - 1, big_a, alpha, gamma);
+        let update = r_k * c_k * result;
+        assert!(update.abs() > 0.1, "update at final iter should still be nonzero: got {update}");
+    }
+
+    #[test]
+    fn early_iterations_have_larger_perturbation() {
+        let c_end = 50.0;
+        let r_end = 0.002;
+        let n = 200u32;
+        let a_ratio = 0.1;
+        let alpha = 0.602;
+        let gamma = 0.101;
+        let big_a = a_ratio * n as f64;
+
+        let sched = ParamScheduleConstants::compute(c_end, r_end, n, a_ratio, alpha, gamma);
+        let (c_0, _) = sched.at_iteration(0, big_a, alpha, gamma);
+        let (c_last, _) = sched.at_iteration(n - 1, big_a, alpha, gamma);
+        assert!(c_0 > c_last, "c_k should decrease over iterations: c_0={c_0}, c_last={c_last}");
+    }
 }
