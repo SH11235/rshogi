@@ -280,13 +280,13 @@ impl NetworkLayerStacks {
         info!("[NNUE Eval] us_acc first 16: {:?}", &us_acc[0..16]);
 
         // SqrClippedReLU変換
-        let mut transformed = [0u8; NNUE_PYTORCH_L1];
-        sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed);
+        let mut transformed: Aligned<[u8; NNUE_PYTORCH_L1]> = Aligned([0u8; NNUE_PYTORCH_L1]);
+        sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
 
-        let transformed_nonzero: usize = transformed.iter().filter(|&&x| x > 0).count();
-        let transformed_sum: u64 = transformed.iter().map(|&x| x as u64).sum();
+        let transformed_nonzero: usize = transformed.0.iter().filter(|&&x| x > 0).count();
+        let transformed_sum: u64 = transformed.0.iter().map(|&x| x as u64).sum();
         info!("[NNUE Eval] transformed: nonzero={transformed_nonzero}/1536, sum={transformed_sum}");
-        info!("[NNUE Eval] transformed first 32: {:?}", &transformed[0..32]);
+        info!("[NNUE Eval] transformed first 32: {:?}", &transformed.0[0..32]);
 
         // バケットインデックスを計算
         let bucket_index = match get_layer_stack_bucket_mode() {
@@ -327,7 +327,7 @@ impl NetworkLayerStacks {
 
         // LayerStacks で評価（詳細ログ付き）
         let (raw_score, l1_out, l1_skip) =
-            self.layer_stacks.evaluate_raw_with_diagnostics(bucket_index, &transformed);
+            self.layer_stacks.evaluate_raw_with_diagnostics(bucket_index, &transformed.0);
 
         info!("[NNUE Eval] l1_out (16 elements): {l1_out:?}");
         info!("[NNUE Eval] l1_skip: {l1_skip}");
@@ -503,12 +503,12 @@ mod tests {
         eprintln!("Pairs where both halves > 0: {pairs_both_positive}/768");
 
         // SqrClippedReLU変換後の値を確認
-        let mut transformed = [0u8; NNUE_PYTORCH_L1];
-        sqr_clipped_relu_transform(black_acc, white_acc, &mut transformed);
-        let transformed_sum: u64 = transformed.iter().map(|&x| x as u64).sum();
-        let transformed_nonzero: usize = transformed.iter().filter(|&&x| x > 0).count();
+        let mut transformed: Aligned<[u8; NNUE_PYTORCH_L1]> = Aligned([0u8; NNUE_PYTORCH_L1]);
+        sqr_clipped_relu_transform(black_acc, white_acc, &mut transformed.0);
+        let transformed_sum: u64 = transformed.0.iter().map(|&x| x as u64).sum();
+        let transformed_nonzero: usize = transformed.0.iter().filter(|&&x| x > 0).count();
         eprintln!("Transformed sum: {transformed_sum}, nonzero count: {transformed_nonzero}");
-        eprintln!("Transformed sample (first 20): {:?}", &transformed[0..20]);
+        eprintln!("Transformed sample (first 20): {:?}", &transformed.0[0..20]);
 
         // バケットインデックスを計算（玉の段に基づく）
         let side_to_move = pos.side_to_move();
@@ -520,7 +520,7 @@ mod tests {
         eprintln!("King ranks: f={f_rank}, e={e_rank}, bucket index: {bucket_index}");
 
         // LayerStacks の生スコアを計算
-        let raw_score = network.layer_stacks.evaluate_raw(bucket_index, &transformed);
+        let raw_score = network.layer_stacks.evaluate_raw(bucket_index, &transformed.0);
         eprintln!("Raw score (before /fv_scale): {raw_score}, fv_scale: {}", network.fv_scale);
 
         // 評価値を計算
@@ -546,14 +546,15 @@ mod tests {
 
             // raw score（/600前）を計算
             let (us_acc, them_acc) = (acc.get(0), acc.get(1));
-            let mut transformed = [0u8; NNUE_PYTORCH_L1];
-            sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed);
+            let mut transformed: Aligned<[u8; NNUE_PYTORCH_L1]> =
+                Aligned([0u8; NNUE_PYTORCH_L1]);
+            sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
             let stm = pos.side_to_move();
             let f_k = pos.king_square(stm);
             let e_k = pos.king_square(!stm);
             let (f_r, e_r) = crate::nnue::layer_stacks::compute_king_ranks(stm, f_k, e_k);
             let bucket_idx = compute_bucket_index(f_r, e_r);
-            let raw = network.layer_stacks.evaluate_raw(bucket_idx, &transformed);
+            let raw = network.layer_stacks.evaluate_raw(bucket_idx, &transformed.0);
 
             let val = network.evaluate(&pos, &acc);
             eprintln!("{:15}: {:6} (raw: {:6})", name, val.raw(), raw);

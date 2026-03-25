@@ -668,8 +668,8 @@ mod tests {
         // index 1 の bias を 8128 に設定 → sqr = 126 (両方同じ)
         bucket_with_biases.l1.biases[1] = 8128;
 
-        let input = [0u8; NNUE_PYTORCH_L1];
-        let result = bucket_with_biases.propagate(&input);
+        let input = Aligned([0u8; NNUE_PYTORCH_L1]);
+        let result = bucket_with_biases.propagate(&input.0);
 
         // l2_input[0] = sqr(8192) = 127, l2_input[1] = sqr(8128) = 126
         // 具体的な result 値は L2/Output の weights にも依存するが、
