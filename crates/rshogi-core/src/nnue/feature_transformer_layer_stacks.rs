@@ -4,12 +4,12 @@
 //! 片側 1536 次元×両視点の中間表現を生成する。
 
 use super::accumulator::{Aligned, AlignedBox};
-use super::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES};
+use super::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES};
 use super::accumulator_layer_stacks::{
     AccumulatorCacheLayerStacks, AccumulatorLayerStacks, AccumulatorStackLayerStacks,
 };
 use super::constants::{HALFKA_HM_DIMENSIONS, NNUE_PYTORCH_L1};
-use super::features::{FeatureSet, HalfKA_hm_FeatureSet};
+use super::features::{Feature, FeatureSet, HalfKA_hm, HalfKA_hm_FeatureSet};
 use super::leb128::read_compressed_tensor_i16_all;
 use crate::position::Position;
 use crate::types::Color;
@@ -20,6 +20,23 @@ use std::io::{self, Read};
 #[inline(never)]
 fn feature_index_oob(index: usize, max: usize) -> ! {
     panic!("Feature index out of range: {index} (max: {max})")
+}
+
+#[inline]
+fn append_changed_indices(
+    dirty_piece: &DirtyPiece,
+    perspective: Color,
+    king_sq: crate::types::Square,
+    removed: &mut IndexList<MAX_CHANGED_FEATURES>,
+    added: &mut IndexList<MAX_CHANGED_FEATURES>,
+) {
+    <HalfKA_hm as Feature>::append_changed_indices(
+        dirty_piece,
+        perspective,
+        king_sq,
+        removed,
+        added,
+    );
 }
 
 /// nnue-pytorch用のFeatureTransformer（1536次元出力）
@@ -164,10 +181,14 @@ impl FeatureTransformerLayerStacks {
                 }
             } else {
                 // 差分更新
-                let (removed, added) = HalfKA_hm_FeatureSet::collect_changed_indices(
+                let mut removed = IndexList::new();
+                let mut added = IndexList::new();
+                append_changed_indices(
                     dirty_piece,
                     perspective,
                     pos.king_square(perspective),
+                    &mut removed,
+                    &mut added,
                 );
 
                 let prev = prev_acc.get(p);
@@ -210,10 +231,14 @@ impl FeatureTransformerLayerStacks {
                 self.refresh_perspective_with_cache(pos, perspective, acc.get_mut(p), cache);
             } else {
                 // 差分更新（キャッシュ不使用）
-                let (removed, added) = HalfKA_hm_FeatureSet::collect_changed_indices(
+                let mut removed = IndexList::new();
+                let mut added = IndexList::new();
+                append_changed_indices(
                     dirty_piece,
                     perspective,
                     pos.king_square(perspective),
+                    &mut removed,
+                    &mut added,
                 );
 
                 let prev = prev_acc.get(p);
@@ -315,10 +340,14 @@ impl FeatureTransformerLayerStacks {
                 );
 
                 let king_sq = pos.king_square(perspective);
-                let (removed, added) = HalfKA_hm_FeatureSet::collect_changed_indices(
+                let mut removed = IndexList::new();
+                let mut added = IndexList::new();
+                append_changed_indices(
                     &dirty_piece,
                     perspective,
                     king_sq,
+                    &mut removed,
+                    &mut added,
                 );
 
                 let p = perspective as usize;
