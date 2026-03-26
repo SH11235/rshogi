@@ -499,3 +499,74 @@ search-only の事実:
 
 - 採用
 - 探索順序を変えずに `MovePicker` 周辺の instruction/cycle を削れた
+
+## 2026-03-27 progress8kpabs index 計算軽量化候補
+
+`compute_progress8kpabs_sum()` と `update_progress8kpabs_sum_diff()` は、同じ king-square 行の重み参照に対して都度 `sq * FE_OLD_END + idx` を計算していた。加えて `progress_sum_to_bucket()` は iterator/filter/count ベースだったため、固定長比較へ寄せた。
+
+変更点:
+
+- `weights_b` / `weights_w` の行 slice を先に切って乗算を除去
+- diff update 側も同じ row slice を使用
+- `progress_sum_to_bucket()` を `partition_point()` ベースへ変更
+
+baseline バイナリは変更前の current tree からコピーした `/tmp/rshogi-usi-before-progress8kpabs-opt` を使用した。
+
+### 実施コマンド
+
+```bash
+cargo fmt && cargo clippy --fix --allow-dirty --tests && cargo test
+CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_STRIP=none cargo build --release --bin rshogi-usi
+```
+
+search-only A/B:
+
+```bash
+POS_LINE="$(head -1 /tmp/bench_positions.txt)"
+EVAL=/mnt/nvme1/development/bullet-shogi/checkpoints/v82/v82-300/quantised.bin
+PROGRESS=/mnt/nvme1/development/bullet-shogi/data/progress/nodchip_progress_e1_f1_cuda.bin
+
+# run_case <engine>
+# - Threads=1 / Hash=256 / LS_BUCKET_MODE=progress8kpabs
+# - fixed position + `go movetime 10000`
+# - `perf stat -p $ENGINE_PID -- sleep 10`
+```
+
+### search-only A/B
+
+| order | engine | final nps | cycles / node | instructions / node |
+| --- | --- | ---: | ---: | ---: |
+| 1 | baseline | `542,410` | `8,117.4` | `17,058.4` |
+| 1 | candidate | `545,682` | `8,049.5` | `17,027.2` |
+| 2 | candidate | `548,668` | `7,986.8` | `17,047.8` |
+| 2 | baseline | `533,187` | `8,211.9` | `17,063.8` |
+
+平均:
+
+| engine | avg nps | avg cycles / node | avg instructions / node |
+| --- | ---: | ---: | ---: |
+| baseline | `537,798.5` | `8,164.7` | `17,061.1` |
+| candidate | `547,175.0` | `8,018.2` | `17,037.5` |
+
+search-only の事実:
+
+- candidate は 2-order 平均で baseline 比 `+1.74%`
+- `cycles / node` は約 `-1.79%`
+- `instructions / node` は約 `-0.14%` と小さく、主因は address 計算と bucket 化の軽量化による cycle 減
+
+### 探索木一致検証
+
+検証コマンドは上の「探索木一致検証コマンド」と同型で、`before` に `/tmp/rshogi-usi-before-progress8kpabs-opt`、`after` に `target/release/rshogi-usi` を指定した。
+
+結果:
+
+- 10/10 局面で `bestmove` / `score cp` / `nodes` が完全一致
+- 代表例:
+  - `MATCH 1 bestmove P*7f ponder 7g8h | score cp 256|nodes 2074779|`
+  - `MATCH 6 bestmove P*4e ponder B*4g | score cp -510|nodes 4357156|`
+  - `MATCH 10 bestmove S*9d ponder 9c9b | score cp -3071|nodes 4839031|`
+
+判断:
+
+- 採用
+- `progress8kpabs` の軽量化は小さいが再現性のあるプラス
