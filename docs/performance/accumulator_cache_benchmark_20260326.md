@@ -138,3 +138,72 @@ EvalFile: `eval/halfkp_256x2-32-32_crelu/suisho5.bin`
 - 個別局面ではMAX_DEPTHを上げると悪化するケースがある（キャッシュミスコスト > refresh 節約）
 - 特に終盤の複雑な局面（Pos 14-15）では全アーキテクチャで NPS が低く、MAX_DEPTH の効果も不安定
 - 学習プロセス同時実行中のため、個別局面の値は ±5% 程度のブレを含む
+
+## 探索木一致検証コマンド
+
+変更前後で探索木が変わっていないことを確認するためのコマンド。
+before バイナリ (`/tmp/rshogi-usi-before`) は変更前のコミットでビルドしたもの。
+
+### before バイナリの準備
+
+```bash
+# 例: commit 683c3e5e (AccumulatorCaches 導入前) でビルド
+git stash
+git checkout 683c3e5e -- crates/
+cargo build --release -p rshogi-usi
+cp target/release/rshogi-usi /tmp/rshogi-usi-before
+git checkout HEAD -- crates/
+git stash pop
+```
+
+### 検証スクリプト
+
+```bash
+EVAL="/mnt/nvme1/development/bullet-shogi/checkpoints/v82/v82-300/quantised.bin"
+PROGRESS="/mnt/nvme1/development/bullet-shogi/data/progress/nodchip_progress_e1_f1_cuda.bin"
+
+head -10 /tmp/bench_positions.txt | while IFS= read -r pos_line; do
+    total=$((${total:-0} + 1))
+
+    # before
+    tmpout_b=$(mktemp); tmpfifo_b=$(mktemp -u); mkfifo "$tmpfifo_b"
+    (
+        printf "usi\nsetoption name Threads value 1\nsetoption name Hash value 256\nsetoption name EvalFile value %s\nsetoption name LS_BUCKET_MODE value progress8kpabs\nsetoption name LS_PROGRESS_COEFF value %s\nisready\n%s\ngo depth 20\n" "$EVAL" "$PROGRESS" "$pos_line"
+        while ! grep -q "^bestmove" "$tmpout_b" 2>/dev/null; do sleep 0.1; done
+        printf "quit\n"
+    ) > "$tmpfifo_b" &
+    timeout 120 /tmp/rshogi-usi-before < "$tmpfifo_b" > "$tmpout_b" 2>&1
+    wait $! 2>/dev/null || true
+
+    # after
+    tmpout_a=$(mktemp); tmpfifo_a=$(mktemp -u); mkfifo "$tmpfifo_a"
+    (
+        printf "usi\nsetoption name Threads value 1\nsetoption name Hash value 256\nsetoption name EvalFile value %s\nsetoption name LS_BUCKET_MODE value progress8kpabs\nsetoption name LS_PROGRESS_COEFF value %s\nisready\n%s\ngo depth 20\n" "$EVAL" "$PROGRESS" "$pos_line"
+        while ! grep -q "^bestmove" "$tmpout_a" 2>/dev/null; do sleep 0.1; done
+        printf "quit\n"
+    ) > "$tmpfifo_a" &
+    timeout 120 target/release/rshogi-usi < "$tmpfifo_a" > "$tmpout_a" 2>&1
+    wait $! 2>/dev/null || true
+
+    b_bm=$(grep "^bestmove" "$tmpout_b" | head -1)
+    a_bm=$(grep "^bestmove" "$tmpout_a" | head -1)
+    b_info=$(grep "info depth 20 " "$tmpout_b" | head -1 | grep -oP 'score cp [+-]?\d+|nodes \d+')
+    a_info=$(grep "info depth 20 " "$tmpout_a" | head -1 | grep -oP 'score cp [+-]?\d+|nodes \d+')
+
+    if [ "$b_bm" = "$a_bm" ] && [ "$b_info" = "$a_info" ]; then
+        echo "Position $total: MATCH ($b_bm, $b_info)"
+    else
+        echo "Position $total: MISMATCH"
+        echo "  before: $b_bm | $b_info"
+        echo "  after:  $a_bm | $a_info"
+    fi
+
+    rm -f "$tmpout_b" "$tmpfifo_b" "$tmpout_a" "$tmpfifo_a"
+done
+```
+
+### 検証ポイント
+
+- bestmove、score cp、nodes が全局面で完全一致すること
+- depth 20 で検証（浅い depth では偶然一致する可能性があるため）
+- 局面は `/tmp/bench_positions.txt`（実対局棋譜から ply 20/40/60/80/100 帯を各3局面抽出）
