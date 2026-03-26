@@ -613,59 +613,61 @@ impl Default for AccumulatorStack {
 // AccumulatorCacheGeneric - 汎用 Finny Tables（非LayerStacks用）
 // =============================================================================
 
-/// AccumulatorCaches のキャッシュエントリ（Finny Tables、汎用版）
-///
-/// 各玉位置×視点ごとに、最後に計算したアキュムレータ値とその時点のアクティブ特徴量を保持。
-/// refresh 時にキャッシュからの差分で更新することで、全駒加算を回避する。
-///
-/// LayerStacks版（`accumulator_layer_stacks.rs`）と同等の機能を、
-/// 可変L1サイズ（HalfKP/HalfKA/HalfKA_hm）に対応する動的配列で実現する。
-struct AccCacheEntryGeneric {
-    /// キャッシュされたアキュムレータ値
-    accumulation: AlignedBox<i16>,
-    /// キャッシュ時点のアクティブ特徴インデックス（ソート済み）
-    active_indices: [u32; MAX_ACTIVE_FEATURES],
-    /// active_indices の有効数
-    num_active: u16,
-    /// 有効フラグ
-    valid: bool,
-}
-
-impl AccCacheEntryGeneric {
-    /// 無効な初期状態で作成
-    fn new_invalid(l1: usize) -> Self {
-        Self {
-            accumulation: AlignedBox::new_zeroed(l1),
-            active_indices: [0; MAX_ACTIVE_FEATURES],
-            num_active: 0,
-            valid: false,
-        }
-    }
-}
-
 /// 玉位置×視点ごとのアキュムレータキャッシュ（Finny Tables、汎用版）
 ///
 /// 81マス × 2視点 = 162 エントリ。
 /// 非LayerStacks（HalfKP/HalfKA/HalfKA_hm）で使用する。
 /// L1サイズは実行時に決定される。
+///
+/// アキュムレータ値は1つの連続した AlignedBox に格納し、
+/// エントリごとにスライスで参照する（162個の個別ヒープ割り当てを回避）。
 pub struct AccumulatorCacheGeneric {
-    /// [king_sq * 2 + perspective] のキャッシュエントリ
-    entries: Vec<AccCacheEntryGeneric>,
+    /// 全エントリのアキュムレータ値を連続格納 [NUM_ENTRIES * l1]
+    accumulations: AlignedBox<i16>,
+    /// 各エントリのアクティブ特徴インデックス（ソート済み）
+    active_indices: Box<[[u32; MAX_ACTIVE_FEATURES]]>,
+    /// 各エントリの有効特徴数
+    num_active: Box<[u16]>,
+    /// 各エントリの有効フラグ
+    valid: Box<[bool]>,
+    /// L1 サイズ
+    l1: usize,
 }
+
+/// エントリ数: 81マス × 2視点
+const NUM_CACHE_ENTRIES: usize = Square::NUM * 2;
 
 impl AccumulatorCacheGeneric {
     /// 新規作成（全エントリ無効）
     pub fn new(l1: usize) -> Self {
-        let entries: Vec<AccCacheEntryGeneric> =
-            (0..Square::NUM * 2).map(|_| AccCacheEntryGeneric::new_invalid(l1)).collect();
-        Self { entries }
+        Self {
+            accumulations: AlignedBox::new_zeroed(NUM_CACHE_ENTRIES * l1),
+            active_indices: vec![[0u32; MAX_ACTIVE_FEATURES]; NUM_CACHE_ENTRIES].into_boxed_slice(),
+            num_active: vec![0u16; NUM_CACHE_ENTRIES].into_boxed_slice(),
+            valid: vec![false; NUM_CACHE_ENTRIES].into_boxed_slice(),
+            l1,
+        }
     }
 
     /// 全エントリを無効化
     pub fn invalidate(&mut self) {
-        for entry in self.entries.iter_mut() {
-            entry.valid = false;
+        for v in self.valid.iter_mut() {
+            *v = false;
         }
+    }
+
+    /// エントリのアキュムレータスライスを取得
+    #[inline]
+    fn acc_slice(&self, entry_idx: usize) -> &[i16] {
+        let start = entry_idx * self.l1;
+        &self.accumulations[start..start + self.l1]
+    }
+
+    /// エントリのアキュムレータスライスを取得（可変）
+    #[inline]
+    fn acc_slice_mut(&mut self, entry_idx: usize) -> &mut [i16] {
+        let start = entry_idx * self.l1;
+        &mut self.accumulations[start..start + self.l1]
     }
 
     /// キャッシュからの差分で refresh を実行
@@ -687,14 +689,13 @@ impl AccumulatorCacheGeneric {
         FS: Fn(&mut [i16], usize),
     {
         let entry_idx = king_sq.raw() as usize * 2 + perspective as usize;
-        let entry = &mut self.entries[entry_idx];
 
-        if entry.valid {
+        if self.valid[entry_idx] {
             // キャッシュが有効 → 差分更新
-            accumulation.copy_from_slice(&entry.accumulation);
+            accumulation.copy_from_slice(self.acc_slice(entry_idx));
 
             // ソート済み配列のマージベース差分（O(n)）
-            let cached = &entry.active_indices[..entry.num_active as usize];
+            let cached = &self.active_indices[entry_idx][..self.num_active[entry_idx] as usize];
             Self::apply_diff(cached, active, accumulation, &add_fn, &sub_fn);
         } else {
             // キャッシュ無効 → バイアスから full refresh
@@ -705,11 +706,11 @@ impl AccumulatorCacheGeneric {
         }
 
         // キャッシュを更新
-        entry.accumulation.copy_from_slice(accumulation);
+        self.acc_slice_mut(entry_idx).copy_from_slice(accumulation);
         let n = active.len().min(MAX_ACTIVE_FEATURES);
-        entry.active_indices[..n].copy_from_slice(&active[..n]);
-        entry.num_active = n as u16;
-        entry.valid = true;
+        self.active_indices[entry_idx][..n].copy_from_slice(&active[..n]);
+        self.num_active[entry_idx] = n as u16;
+        self.valid[entry_idx] = true;
     }
 
     /// ソート済み配列のマージベース差分を適用

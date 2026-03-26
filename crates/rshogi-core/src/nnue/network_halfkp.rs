@@ -640,9 +640,6 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
         let sorted = &mut sorted_buf[..len];
         sorted.sort_unstable();
 
-        // SAFETY: accumulation は &mut [i16; L1] から &mut [i16] にキャストされているが、
-        // cache 内部では同じ L1 サイズで操作される。add_fn/sub_fn 内で
-        // &mut [i16] → &mut [i16; L1] への変換は長さが一致するため安全。
         cache.refresh_or_cache(
             king_sq,
             perspective,
@@ -651,13 +648,15 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
             accumulation,
             |acc, idx| {
                 debug_assert_eq!(acc.len(), L1);
-                // SAFETY: acc の長さは L1 に等しいことが保証されている
+                // SAFETY: acc は呼び出し元で &mut [i16; L1] から作られたスライス。
+                // キャッシュ生成時も同じ L1 サイズで初期化されており、長さは常に一致する。
+                // 固定サイズ配列への変換により SIMD ループの L1/16 がコンパイル時定数になる。
                 let arr: &mut [i16; L1] = unsafe { &mut *(acc.as_mut_ptr() as *mut [i16; L1]) };
                 self.add_weights(arr, idx);
             },
             |acc, idx| {
                 debug_assert_eq!(acc.len(), L1);
-                // SAFETY: acc の長さは L1 に等しいことが保証されている
+                // SAFETY: 上記と同じ理由で安全
                 let arr: &mut [i16; L1] = unsafe { &mut *(acc.as_mut_ptr() as *mut [i16; L1]) };
                 self.sub_weights(arr, idx);
             },
