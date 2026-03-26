@@ -75,3 +75,4 @@ logs/
 *.njsproj
 *.sln
 *.sw?
+docs/performance/accumulator_cache_benchmark_20260326.md
