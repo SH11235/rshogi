@@ -316,7 +316,8 @@ impl<const L1: usize> AccumulatorStackHalfKA<L1> {
 
     /// 祖先を辿って使用可能なアキュムレータを探す
     pub fn find_usable_accumulator(&self) -> Option<(usize, usize)> {
-        const MAX_DEPTH: usize = 1;
+        // L1=512: MAX_DEPTH=3 で +5.3% NPS (2026-03-26, 15局面平均)
+        const MAX_DEPTH: usize = 3;
 
         let current = &self.entries[self.current_idx];
         if current.dirty_piece.king_moved[0] || current.dirty_piece.king_moved[1] {
