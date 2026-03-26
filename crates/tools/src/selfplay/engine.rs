@@ -171,12 +171,36 @@ impl EngineProcess {
             || time_args.binc > 0
             || time_args.winc > 0;
 
+        // 時間制御コマンドを構築
+        // byoyomi のみの場合は "go byoyomi N" だけを送る（btime 0 等を付けると
+        // 一部エンジンが btime=0 を「持ち時間なし」と解釈して即指しする）
+        let time_cmd = if time_args.byoyomi > 0
+            && time_args.btime == 0
+            && time_args.wtime == 0
+            && time_args.binc == 0
+            && time_args.winc == 0
+        {
+            // 純粋な秒読みモード
+            format!("go byoyomi {}", time_args.byoyomi)
+        } else if time_args.byoyomi > 0 {
+            // 持ち時間 + 秒読み
+            format!(
+                "go btime {} wtime {} byoyomi {}",
+                time_args.btime, time_args.wtime, time_args.byoyomi
+            )
+        } else if time_args.btime > 0 || time_args.binc > 0 {
+            // フィッシャー（btime/binc のみ、byoyomi なし）
+            format!(
+                "go btime {} wtime {} binc {} winc {}",
+                time_args.btime, time_args.wtime, time_args.binc, time_args.winc
+            )
+        } else {
+            String::from("go")
+        };
+
         if has_limit && has_time {
-            // 組み合わせモード: depth/nodes 目標 + 時間上限
-            let mut cmd = format!(
-                "go btime {} wtime {} byoyomi {} binc {} winc {}",
-                time_args.btime, time_args.wtime, time_args.byoyomi, time_args.binc, time_args.winc
-            );
+            // 組み合わせモード: 時間制御 + depth/nodes 目標
+            let mut cmd = time_cmd;
             if let Some(depth) = req.go_depth {
                 cmd.push_str(&format!(" depth {depth}"));
             }
@@ -195,10 +219,7 @@ impl EngineProcess {
             }
             self.write_line(&cmd)?;
         } else {
-            self.write_line(&format!(
-                "go btime {} wtime {} byoyomi {} binc {} winc {}",
-                time_args.btime, time_args.wtime, time_args.byoyomi, time_args.binc, time_args.winc
-            ))?;
+            self.write_line(&time_cmd)?;
         }
 
         let start = Instant::now();
