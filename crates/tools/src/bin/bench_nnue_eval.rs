@@ -18,14 +18,24 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 
+use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::nnue::{
-    NNUEEvaluator, NNUENetwork, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
-    compute_layer_stack_progress8kpabs_bucket_index,
+    AccumulatorCacheLayerStacks, AccumulatorLayerStacks, DirtyPiece,
+    LAYER_STACK_PLY9_DEFAULT_BOUNDS, LayerStackBucketMode, NNUE_PYTORCH_L1, NNUEEvaluator,
+    NNUENetwork, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, compute_bucket_index, compute_king_ranks,
+    compute_layer_stack_ply9_bucket_index, compute_layer_stack_progress8_bucket_index,
+    compute_layer_stack_progress8gikou_bucket_index,
+    compute_layer_stack_progress8kpabs_bucket_index, get_layer_stack_ply_bounds,
+    get_layer_stack_progress_coeff, get_layer_stack_progress_coeff_gikou_lite,
+    get_layer_stack_progress_kpabs_weights, parse_layer_stack_bucket_mode,
+    parse_layer_stack_ply_bounds_csv, set_layer_stack_bucket_mode, set_layer_stack_ply_bounds,
+    set_layer_stack_progress_kpabs_weights, sqr_clipped_relu_transform,
 };
 use rshogi_core::position::Position;
+use rshogi_core::types::{Color, PieceType};
 
 /// NNUE評価ベンチマーク
 #[derive(Parser, Debug)]
@@ -39,6 +49,10 @@ struct Cli {
     #[arg(long)]
     nnue_file: PathBuf,
 
+    /// ベンチモード
+    #[arg(long, default_value = "full")]
+    mode: String,
+
     /// 反復回数（デフォルト: 50万回）
     #[arg(long, default_value = "500000")]
     iterations: u64,
@@ -51,6 +65,49 @@ struct Cli {
     /// 指定時は bucket index 計算のマイクロベンチも実行
     #[arg(long)]
     ls_progress_coeff: Option<PathBuf>,
+
+    /// LayerStacks bucket モード
+    #[arg(long, default_value = "kingrank9")]
+    ls_bucket_mode: String,
+
+    /// LayerStacks ply9 バケット境界
+    #[arg(long)]
+    ls_ply_bounds: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BenchMode {
+    Full,
+    LayerStackPropagate,
+    LayerStackEval,
+    LayerStackRefreshCache,
+    LayerStackUpdateCache,
+}
+
+impl BenchMode {
+    fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "full" => Ok(Self::Full),
+            "layer-stack-propagate" => Ok(Self::LayerStackPropagate),
+            "layer-stack-eval" => Ok(Self::LayerStackEval),
+            "layer-stack-refresh-cache" => Ok(Self::LayerStackRefreshCache),
+            "layer-stack-update-cache" => Ok(Self::LayerStackUpdateCache),
+            _ => bail!(
+                "unknown --mode '{}'. expected one of: full, layer-stack-propagate, layer-stack-eval, layer-stack-refresh-cache, layer-stack-update-cache",
+                value
+            ),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::LayerStackPropagate => "layer-stack-propagate",
+            Self::LayerStackEval => "layer-stack-eval",
+            Self::LayerStackRefreshCache => "layer-stack-refresh-cache",
+            Self::LayerStackUpdateCache => "layer-stack-update-cache",
+        }
+    }
 }
 
 /// ベンチマーク用のテスト局面（SFEN形式）
@@ -64,7 +121,7 @@ const TEST_POSITIONS: &[&str] = &[
     // 終盤局面（駒が減った局面）
     "4k4/9/9/9/9/9/9/9/4K4 b 2r2b4g4s4n4l18p 1",
     // 複雑な中盤（駒の配置が多い）
-    "l3kgsnl/3r2gb1/p1np1p1pp/1pp1p1p2/9/2PP1P3/PPSPPBPPP/2G3SR1/LN2KG1NL w Pp 1",
+    "l6nl/5+P1gk/2np1S3/p1p4Pp/3P2Sp1/1PPb2P1P/P5GS1/R8/LN4bKL w RGgsn5p 1",
 ];
 
 /// ベンチマーク結果
@@ -79,6 +136,56 @@ struct BenchResult {
     total_ns_per_op: f64,
     /// 評価回数/秒
     evals_per_sec: f64,
+}
+
+struct LayerStackBenchResult {
+    bench_name: &'static str,
+    ns_per_op: f64,
+    ops_per_sec: f64,
+}
+
+impl LayerStackBenchResult {
+    fn print(
+        &self,
+        arch_name: &str,
+        bucket_mode: LayerStackBucketMode,
+        bucket_counts: &[usize; 9],
+    ) {
+        println!("=== {arch_name} / {} ===", self.bench_name);
+        println!("  bucket_mode:         {}", bucket_mode.as_str());
+        println!("  dataset buckets:     {}", format_bucket_counts(bucket_counts));
+        println!("  ns/op:               {:.1}", self.ns_per_op);
+        println!("  throughput:          {:.0} ops/sec", self.ops_per_sec);
+        println!();
+    }
+}
+
+#[derive(Clone)]
+struct LayerStackPropagateCase {
+    bucket_index: usize,
+    transformed: [u8; NNUE_PYTORCH_L1],
+}
+
+#[derive(Clone)]
+struct LayerStackEvalCase {
+    pos: Position,
+    bucket_index: usize,
+    accumulator: AccumulatorLayerStacks,
+}
+
+#[derive(Clone)]
+struct LayerStackUpdateCacheCase {
+    pos: Position,
+    dirty_piece: DirtyPiece,
+    prev_accumulator: AccumulatorLayerStacks,
+}
+
+struct LayerStackCases {
+    propagate_cases: Vec<LayerStackPropagateCase>,
+    eval_cases: Vec<LayerStackEvalCase>,
+    update_cache_cases: Vec<LayerStackUpdateCacheCase>,
+    bucket_counts: [usize; 9],
+    update_bucket_counts: [usize; 9],
 }
 
 impl BenchResult {
@@ -204,8 +311,306 @@ fn bench_progress_bucket(positions: &[Position], weights: &[f32], warmup: u64, i
     println!();
 }
 
+fn compute_layer_stack_bucket_index(pos: &Position, mode: LayerStackBucketMode) -> usize {
+    let side_to_move = pos.side_to_move();
+    match mode {
+        LayerStackBucketMode::KingRank9 => {
+            let f_king = pos.king_square(side_to_move);
+            let e_king = pos.king_square(!side_to_move);
+            let (f_rank, e_rank) = compute_king_ranks(side_to_move, f_king, e_king);
+            compute_bucket_index(f_rank, e_rank)
+        }
+        LayerStackBucketMode::Ply9 => {
+            compute_layer_stack_ply9_bucket_index(pos.game_ply(), get_layer_stack_ply_bounds())
+        }
+        LayerStackBucketMode::Progress8 => compute_layer_stack_progress8_bucket_index(
+            pos,
+            side_to_move,
+            get_layer_stack_progress_coeff(),
+        ),
+        LayerStackBucketMode::Progress8Gikou => compute_layer_stack_progress8gikou_bucket_index(
+            pos,
+            side_to_move,
+            get_layer_stack_progress_coeff_gikou_lite(),
+        ),
+        LayerStackBucketMode::Progress8KPAbs => compute_layer_stack_progress8kpabs_bucket_index(
+            pos,
+            side_to_move,
+            get_layer_stack_progress_kpabs_weights(),
+        ),
+    }
+}
+
+fn format_bucket_counts(bucket_counts: &[usize; 9]) -> String {
+    let parts: Vec<String> = bucket_counts
+        .iter()
+        .enumerate()
+        .filter(|(_, count)| **count > 0)
+        .map(|(bucket, count)| format!("{bucket}:{count}"))
+        .collect();
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
+fn configure_layer_stack_bucket(
+    cli: &Cli,
+    progress_weights: Option<&[f32]>,
+) -> Result<LayerStackBucketMode> {
+    let mode = parse_layer_stack_bucket_mode(&cli.ls_bucket_mode).ok_or_else(|| {
+        anyhow!(
+            "invalid --ls-bucket-mode '{}'. expected one of: kingrank9, ply9, progress8, progress8gikou, progress8kpabs",
+            cli.ls_bucket_mode
+        )
+    })?;
+    set_layer_stack_bucket_mode(mode);
+
+    if let Some(bounds_text) = &cli.ls_ply_bounds {
+        let bounds = parse_layer_stack_ply_bounds_csv(bounds_text)
+            .map_err(|e| anyhow!("invalid --ls-ply-bounds: {e}"))?;
+        set_layer_stack_ply_bounds(bounds);
+    } else {
+        set_layer_stack_ply_bounds(LAYER_STACK_PLY9_DEFAULT_BOUNDS);
+    }
+
+    if mode == LayerStackBucketMode::Progress8KPAbs {
+        let weights = progress_weights.context(
+            "--ls-bucket-mode progress8kpabs requires --ls-progress-coeff <progress.bin>",
+        )?;
+        set_layer_stack_progress_kpabs_weights(weights.to_vec().into_boxed_slice())
+            .map_err(|e| anyhow!("failed to set progress8kpabs weights: {e}"))?;
+    }
+
+    Ok(mode)
+}
+
+fn prepare_layer_stack_cases(
+    network: &NNUENetwork,
+    positions: &[Position],
+    bucket_mode: LayerStackBucketMode,
+) -> Result<LayerStackCases> {
+    if !network.is_layer_stacks() {
+        bail!("LayerStack 専用モードは LayerStacks NNUE のみ対応");
+    }
+
+    let mut propagate_cases = Vec::with_capacity(positions.len());
+    let mut eval_cases = Vec::with_capacity(positions.len());
+    let mut update_cache_cases = Vec::with_capacity(positions.len());
+    let mut bucket_counts = [0usize; 9];
+    let mut update_bucket_counts = [0usize; 9];
+
+    for pos in positions {
+        let mut accumulator = AccumulatorLayerStacks::new();
+        network.refresh_accumulator_layer_stacks(pos, &mut accumulator);
+
+        let bucket_index = compute_layer_stack_bucket_index(pos, bucket_mode);
+        bucket_counts[bucket_index] += 1;
+
+        let (us_acc, them_acc) = if pos.side_to_move() == Color::Black {
+            (accumulator.get(Color::Black as usize), accumulator.get(Color::White as usize))
+        } else {
+            (accumulator.get(Color::White as usize), accumulator.get(Color::Black as usize))
+        };
+
+        let mut transformed = [0u8; NNUE_PYTORCH_L1];
+        sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed);
+
+        propagate_cases.push(LayerStackPropagateCase {
+            bucket_index,
+            transformed,
+        });
+        eval_cases.push(LayerStackEvalCase {
+            pos: pos.clone(),
+            bucket_index,
+            accumulator: accumulator.clone(),
+        });
+
+        if let Some(mv) = select_non_king_legal_move(pos) {
+            let mut next_pos = pos.clone();
+            let dirty_piece = next_pos.do_move(mv, pos.gives_check(mv));
+            let next_bucket_index = compute_layer_stack_bucket_index(&next_pos, bucket_mode);
+            update_bucket_counts[next_bucket_index] += 1;
+
+            update_cache_cases.push(LayerStackUpdateCacheCase {
+                pos: next_pos,
+                dirty_piece,
+                prev_accumulator: accumulator,
+            });
+        }
+    }
+
+    Ok(LayerStackCases {
+        propagate_cases,
+        eval_cases,
+        update_cache_cases,
+        bucket_counts,
+        update_bucket_counts,
+    })
+}
+
+fn select_non_king_legal_move(pos: &Position) -> Option<rshogi_core::types::Move> {
+    let mut moves = MoveList::new();
+    generate_legal_all(pos, &mut moves);
+    moves
+        .iter()
+        .copied()
+        .find(|mv| mv.is_drop() || pos.piece_on(mv.from()).piece_type() != PieceType::King)
+}
+
+fn bench_layer_stack_propagate(
+    network: &NNUENetwork,
+    cases: &[LayerStackPropagateCase],
+    warmup: u64,
+    iterations: u64,
+) -> Result<LayerStackBenchResult> {
+    let NNUENetwork::LayerStacks(net) = network else {
+        bail!("LayerStack propagate ベンチは LayerStacks NNUE のみ対応");
+    };
+
+    for i in 0..warmup {
+        let case = &cases[i as usize % cases.len()];
+        black_box(net.layer_stacks.buckets[case.bucket_index].propagate(&case.transformed));
+    }
+
+    let start = Instant::now();
+    for i in 0..iterations {
+        let case = &cases[i as usize % cases.len()];
+        black_box(net.layer_stacks.buckets[case.bucket_index].propagate(&case.transformed));
+    }
+    let duration = start.elapsed();
+
+    let ns_per_op = duration.as_nanos() as f64 / iterations as f64;
+    Ok(LayerStackBenchResult {
+        bench_name: "layer_stack_propagate",
+        ns_per_op,
+        ops_per_sec: 1_000_000_000.0 / ns_per_op,
+    })
+}
+
+fn bench_layer_stack_eval(
+    network: &NNUENetwork,
+    cases: &[LayerStackEvalCase],
+    warmup: u64,
+    iterations: u64,
+) -> Result<LayerStackBenchResult> {
+    for i in 0..warmup {
+        let case = &cases[i as usize % cases.len()];
+        black_box(network.evaluate_layer_stacks_with_bucket(
+            &case.pos,
+            &case.accumulator,
+            case.bucket_index,
+        ));
+    }
+
+    let start = Instant::now();
+    for i in 0..iterations {
+        let case = &cases[i as usize % cases.len()];
+        black_box(network.evaluate_layer_stacks_with_bucket(
+            &case.pos,
+            &case.accumulator,
+            case.bucket_index,
+        ));
+    }
+    let duration = start.elapsed();
+
+    let ns_per_op = duration.as_nanos() as f64 / iterations as f64;
+    Ok(LayerStackBenchResult {
+        bench_name: "layer_stack_eval",
+        ns_per_op,
+        ops_per_sec: 1_000_000_000.0 / ns_per_op,
+    })
+}
+
+fn bench_layer_stack_refresh_cache(
+    network: &NNUENetwork,
+    positions: &[Position],
+    warmup: u64,
+    iterations: u64,
+) -> Result<LayerStackBenchResult> {
+    let NNUENetwork::LayerStacks(net) = network else {
+        bail!("LayerStack refresh-cache ベンチは LayerStacks NNUE のみ対応");
+    };
+
+    let mut cache = AccumulatorCacheLayerStacks::new();
+    let mut accumulator = AccumulatorLayerStacks::new();
+
+    for i in 0..warmup {
+        let pos = &positions[i as usize % positions.len()];
+        net.refresh_accumulator_with_cache(pos, &mut accumulator, &mut cache);
+        black_box(accumulator.get(0)[0]);
+    }
+
+    let start = Instant::now();
+    for i in 0..iterations {
+        let pos = &positions[i as usize % positions.len()];
+        net.refresh_accumulator_with_cache(pos, &mut accumulator, &mut cache);
+        black_box(accumulator.get(0)[0]);
+    }
+    let duration = start.elapsed();
+
+    let ns_per_op = duration.as_nanos() as f64 / iterations as f64;
+    Ok(LayerStackBenchResult {
+        bench_name: "layer_stack_refresh_cache",
+        ns_per_op,
+        ops_per_sec: 1_000_000_000.0 / ns_per_op,
+    })
+}
+
+fn bench_layer_stack_update_cache(
+    network: &NNUENetwork,
+    cases: &[LayerStackUpdateCacheCase],
+    warmup: u64,
+    iterations: u64,
+) -> Result<LayerStackBenchResult> {
+    let NNUENetwork::LayerStacks(net) = network else {
+        bail!("LayerStack update-cache ベンチは LayerStacks NNUE のみ対応");
+    };
+    if cases.is_empty() {
+        bail!("LayerStack update-cache ベンチ用の非玉合法手付き局面がない");
+    }
+
+    let mut cache = AccumulatorCacheLayerStacks::new();
+    let mut accumulator = AccumulatorLayerStacks::new();
+
+    for i in 0..warmup {
+        let case = &cases[i as usize % cases.len()];
+        net.update_accumulator_with_cache(
+            &case.pos,
+            &case.dirty_piece,
+            &mut accumulator,
+            &case.prev_accumulator,
+            &mut cache,
+        );
+        black_box(accumulator.get(0)[0]);
+    }
+
+    let start = Instant::now();
+    for i in 0..iterations {
+        let case = &cases[i as usize % cases.len()];
+        net.update_accumulator_with_cache(
+            &case.pos,
+            &case.dirty_piece,
+            &mut accumulator,
+            &case.prev_accumulator,
+            &mut cache,
+        );
+        black_box(accumulator.get(0)[0]);
+    }
+    let duration = start.elapsed();
+
+    let ns_per_op = duration.as_nanos() as f64 / iterations as f64;
+    Ok(LayerStackBenchResult {
+        bench_name: "layer_stack_update_cache",
+        ns_per_op,
+        ops_per_sec: 1_000_000_000.0 / ns_per_op,
+    })
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let mode = BenchMode::parse(&cli.mode)?;
 
     // テスト局面をパース
     let positions: Vec<Position> = TEST_POSITIONS
@@ -217,17 +622,28 @@ fn main() -> Result<()> {
         })
         .collect();
 
-    println!("Benchmark config: {} warmup, {} iterations", cli.warmup, cli.iterations);
+    println!(
+        "Benchmark config: mode={}, {} warmup, {} iterations",
+        mode.as_str(),
+        cli.warmup,
+        cli.iterations
+    );
     println!("Test positions: {}", positions.len());
     println!();
 
-    // progress8kpabs bucket ベンチマーク
-    if let Some(ref coeff_path) = cli.ls_progress_coeff {
+    let progress_weights = if let Some(ref coeff_path) = cli.ls_progress_coeff {
         println!("Loading progress8kpabs weights: {}", coeff_path.display());
         let weights = load_progress_kpabs_weights(coeff_path)?;
         println!("  weights: {} elements", weights.len());
         println!();
-        bench_progress_bucket(&positions, &weights, cli.warmup, cli.iterations);
+        Some(weights)
+    } else {
+        None
+    };
+
+    // progress8kpabs bucket ベンチマーク
+    if let Some(weights) = progress_weights.as_deref() {
+        bench_progress_bucket(&positions, weights, cli.warmup, cli.iterations);
     }
 
     println!("Loading NNUE file: {}", cli.nnue_file.display());
@@ -236,22 +652,79 @@ fn main() -> Result<()> {
     println!("Architecture: {arch_name}");
     println!();
 
-    // NNUEEvaluator を作成してベンチマーク実行
-    let mut evaluator = NNUEEvaluator::new_with_position(Arc::clone(&network), &positions[0]);
-    let result = bench_evaluator(&mut evaluator, &positions, cli.warmup, cli.iterations, arch_name);
+    match mode {
+        BenchMode::Full => {
+            let mut evaluator =
+                NNUEEvaluator::new_with_position(Arc::clone(&network), &positions[0]);
+            let result =
+                bench_evaluator(&mut evaluator, &positions, cli.warmup, cli.iterations, arch_name);
 
-    result.print();
+            result.print();
 
-    // JSON形式でも出力（後処理用）
-    println!("--- JSON ---");
-    println!(
-        r#"{{"arch":"{}","refresh_ns":{:.1},"eval_ns":{:.1},"total_ns":{:.1},"evals_per_sec":{:.0}}}"#,
-        result.arch_name,
-        result.refresh_ns_per_op,
-        result.eval_ns_per_op,
-        result.total_ns_per_op,
-        result.evals_per_sec
-    );
+            println!("--- JSON ---");
+            println!(
+                r#"{{"mode":"full","arch":"{}","refresh_ns":{:.1},"eval_ns":{:.1},"total_ns":{:.1},"evals_per_sec":{:.0}}}"#,
+                result.arch_name,
+                result.refresh_ns_per_op,
+                result.eval_ns_per_op,
+                result.total_ns_per_op,
+                result.evals_per_sec
+            );
+        }
+        BenchMode::LayerStackPropagate
+        | BenchMode::LayerStackEval
+        | BenchMode::LayerStackRefreshCache
+        | BenchMode::LayerStackUpdateCache => {
+            let bucket_mode = configure_layer_stack_bucket(&cli, progress_weights.as_deref())?;
+            let cases = prepare_layer_stack_cases(&network, &positions, bucket_mode)?;
+
+            let result = match mode {
+                BenchMode::LayerStackPropagate => bench_layer_stack_propagate(
+                    &network,
+                    &cases.propagate_cases,
+                    cli.warmup,
+                    cli.iterations,
+                )?,
+                BenchMode::LayerStackEval => {
+                    bench_layer_stack_eval(&network, &cases.eval_cases, cli.warmup, cli.iterations)?
+                }
+                BenchMode::LayerStackRefreshCache => bench_layer_stack_refresh_cache(
+                    &network,
+                    &positions,
+                    cli.warmup,
+                    cli.iterations,
+                )?,
+                BenchMode::LayerStackUpdateCache => bench_layer_stack_update_cache(
+                    &network,
+                    &cases.update_cache_cases,
+                    cli.warmup,
+                    cli.iterations,
+                )?,
+                BenchMode::Full => unreachable!(),
+            };
+
+            let bucket_counts = match mode {
+                BenchMode::LayerStackUpdateCache => &cases.update_bucket_counts,
+                BenchMode::LayerStackPropagate
+                | BenchMode::LayerStackEval
+                | BenchMode::LayerStackRefreshCache => &cases.bucket_counts,
+                BenchMode::Full => unreachable!(),
+            };
+
+            result.print(arch_name, bucket_mode, bucket_counts);
+
+            println!("--- JSON ---");
+            println!(
+                r#"{{"mode":"{}","arch":"{}","bucket_mode":"{}","bucket_counts":"{}","ns_per_op":{:.1},"ops_per_sec":{:.0}}}"#,
+                mode.as_str(),
+                arch_name,
+                bucket_mode.as_str(),
+                format_bucket_counts(bucket_counts),
+                result.ns_per_op,
+                result.ops_per_sec
+            );
+        }
+    }
 
     Ok(())
 }

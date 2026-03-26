@@ -441,19 +441,13 @@ impl MovePicker {
                     if !self.skip_quiets {
                         // 静かな手を生成
                         let count = if self.generate_all_legal_moves {
-                            let mut buf = ExtMoveBuffer::new();
                             crate::movegen::generate_with_type(
                                 pos,
                                 crate::movegen::GenType::QuietsAll,
-                                &mut buf,
+                                &mut self.moves,
                                 None,
                             );
-                            let mut c = 0;
-                            for ext in buf.iter() {
-                                self.moves.set(self.end_captures + c, ExtMove::new(ext.mv, 0));
-                                c += 1;
-                            }
-                            c
+                            self.moves.len() - self.end_captures
                         } else {
                             pos.generate_quiets(&mut self.moves, self.end_captures)
                         };
@@ -535,19 +529,14 @@ impl MovePicker {
                 Stage::EvasionInit => {
                     // 回避手を生成
                     let count = if self.generate_all_legal_moves {
-                        let mut buf = ExtMoveBuffer::new();
+                        self.moves.clear();
                         crate::movegen::generate_with_type(
                             pos,
                             crate::movegen::GenType::EvasionsAll,
-                            &mut buf,
+                            &mut self.moves,
                             None,
                         );
-                        let gen_count = buf.len();
-                        for (i, ext) in buf.iter().enumerate() {
-                            self.moves.set(i, ExtMove::new(ext.mv, 0));
-                        }
-                        self.moves.set_len(gen_count);
-                        gen_count
+                        self.moves.len()
                     } else {
                         pos.generate_evasions_ext(&mut self.moves)
                     };
