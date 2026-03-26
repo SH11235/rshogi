@@ -35,7 +35,7 @@ pub use l512::HalfKA_hm_L512;
 pub use l768::HalfKA_hm_L768;
 pub use l1024::HalfKA_hm_L1024;
 
-use crate::nnue::accumulator::DirtyPiece;
+use crate::nnue::accumulator::{AccumulatorCacheGeneric, DirtyPiece};
 use crate::nnue::network_halfka_hm::AccumulatorStackHalfKA_hm;
 use crate::nnue::spec::{Activation, ArchitectureSpec};
 use crate::position::Position;
@@ -77,6 +77,31 @@ impl HalfKA_hmNetwork {
         }
     }
 
+    /// Accumulator をフル再計算（キャッシュ使用版）
+    #[inline(always)]
+    pub fn refresh_accumulator_with_cache(
+        &self,
+        pos: &Position,
+        stack: &mut HalfKA_hmStack,
+        cache: &mut AccumulatorCacheGeneric,
+    ) {
+        match (self, stack) {
+            (Self::L256(net), HalfKA_hmStack::L256(st)) => {
+                net.refresh_accumulator_with_cache(pos, st, cache)
+            }
+            (Self::L512(net), HalfKA_hmStack::L512(st)) => {
+                net.refresh_accumulator_with_cache(pos, st, cache)
+            }
+            (Self::L768(net), HalfKA_hmStack::L768(st)) => {
+                net.refresh_accumulator_with_cache(pos, st, cache)
+            }
+            (Self::L1024(net), HalfKA_hmStack::L1024(st)) => {
+                net.refresh_accumulator_with_cache(pos, st, cache)
+            }
+            _ => unreachable!("L1 mismatch"),
+        }
+    }
+
     /// 差分更新（dirty piece ベース）
     #[inline(always)]
     pub fn update_accumulator(
@@ -98,6 +123,33 @@ impl HalfKA_hmNetwork {
             }
             (Self::L1024(net), HalfKA_hmStack::L1024(st)) => {
                 net.update_accumulator(pos, dirty, st, source_idx)
+            }
+            _ => unreachable!("L1 mismatch"),
+        }
+    }
+
+    /// 差分更新（dirty piece ベース、キャッシュ使用版）
+    #[inline(always)]
+    pub fn update_accumulator_with_cache(
+        &self,
+        pos: &Position,
+        dirty: &DirtyPiece,
+        stack: &mut HalfKA_hmStack,
+        source_idx: usize,
+        cache: &mut AccumulatorCacheGeneric,
+    ) {
+        match (self, stack) {
+            (Self::L256(net), HalfKA_hmStack::L256(st)) => {
+                net.update_accumulator_with_cache(pos, dirty, st, source_idx, cache)
+            }
+            (Self::L512(net), HalfKA_hmStack::L512(st)) => {
+                net.update_accumulator_with_cache(pos, dirty, st, source_idx, cache)
+            }
+            (Self::L768(net), HalfKA_hmStack::L768(st)) => {
+                net.update_accumulator_with_cache(pos, dirty, st, source_idx, cache)
+            }
+            (Self::L1024(net), HalfKA_hmStack::L1024(st)) => {
+                net.update_accumulator_with_cache(pos, dirty, st, source_idx, cache)
             }
             _ => unreachable!("L1 mismatch"),
         }

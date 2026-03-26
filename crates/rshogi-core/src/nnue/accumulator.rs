@@ -11,7 +11,7 @@
 use super::bona_piece::ExtBonaPiece;
 use super::constants::{NUM_REFRESH_TRIGGERS, TRANSFORMED_FEATURE_DIMENSIONS};
 use super::piece_list::PieceNumber;
-use crate::types::{Color, MAX_PLY, Value};
+use crate::types::{Color, MAX_PLY, Square, Value};
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
@@ -606,6 +606,151 @@ impl AccumulatorStack {
 impl Default for AccumulatorStack {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// =============================================================================
+// AccumulatorCacheGeneric - 汎用 Finny Tables（非LayerStacks用）
+// =============================================================================
+
+/// AccumulatorCaches のキャッシュエントリ（Finny Tables、汎用版）
+///
+/// 各玉位置×視点ごとに、最後に計算したアキュムレータ値とその時点のアクティブ特徴量を保持。
+/// refresh 時にキャッシュからの差分で更新することで、全駒加算を回避する。
+///
+/// LayerStacks版（`accumulator_layer_stacks.rs`）と同等の機能を、
+/// 可変L1サイズ（HalfKP/HalfKA/HalfKA_hm）に対応する動的配列で実現する。
+struct AccCacheEntryGeneric {
+    /// キャッシュされたアキュムレータ値
+    accumulation: AlignedBox<i16>,
+    /// キャッシュ時点のアクティブ特徴インデックス（ソート済み）
+    active_indices: [u32; MAX_ACTIVE_FEATURES],
+    /// active_indices の有効数
+    num_active: u16,
+    /// 有効フラグ
+    valid: bool,
+}
+
+impl AccCacheEntryGeneric {
+    /// 無効な初期状態で作成
+    fn new_invalid(l1: usize) -> Self {
+        Self {
+            accumulation: AlignedBox::new_zeroed(l1),
+            active_indices: [0; MAX_ACTIVE_FEATURES],
+            num_active: 0,
+            valid: false,
+        }
+    }
+}
+
+/// 玉位置×視点ごとのアキュムレータキャッシュ（Finny Tables、汎用版）
+///
+/// 81マス × 2視点 = 162 エントリ。
+/// 非LayerStacks（HalfKP/HalfKA/HalfKA_hm）で使用する。
+/// L1サイズは実行時に決定される。
+pub struct AccumulatorCacheGeneric {
+    /// [king_sq * 2 + perspective] のキャッシュエントリ
+    entries: Vec<AccCacheEntryGeneric>,
+}
+
+impl AccumulatorCacheGeneric {
+    /// 新規作成（全エントリ無効）
+    pub fn new(l1: usize) -> Self {
+        let entries: Vec<AccCacheEntryGeneric> =
+            (0..Square::NUM * 2).map(|_| AccCacheEntryGeneric::new_invalid(l1)).collect();
+        Self { entries }
+    }
+
+    /// 全エントリを無効化
+    pub fn invalidate(&mut self) {
+        for entry in self.entries.iter_mut() {
+            entry.valid = false;
+        }
+    }
+
+    /// キャッシュからの差分で refresh を実行
+    ///
+    /// キャッシュが有効な場合、現在のアクティブ特徴量との差分を計算し、
+    /// add/sub のみでアキュムレータを更新する。
+    /// キャッシュが無効な場合は通常の full refresh を行い、キャッシュを更新する。
+    pub(crate) fn refresh_or_cache<FA, FS>(
+        &mut self,
+        king_sq: Square,
+        perspective: Color,
+        active: &[u32],
+        biases: &[i16],
+        accumulation: &mut [i16],
+        add_fn: FA,
+        sub_fn: FS,
+    ) where
+        FA: Fn(&mut [i16], usize),
+        FS: Fn(&mut [i16], usize),
+    {
+        let entry_idx = king_sq.raw() as usize * 2 + perspective as usize;
+        let entry = &mut self.entries[entry_idx];
+
+        if entry.valid {
+            // キャッシュが有効 → 差分更新
+            accumulation.copy_from_slice(&entry.accumulation);
+
+            // ソート済み配列のマージベース差分（O(n)）
+            let cached = &entry.active_indices[..entry.num_active as usize];
+            Self::apply_diff(cached, active, accumulation, &add_fn, &sub_fn);
+        } else {
+            // キャッシュ無効 → バイアスから full refresh
+            accumulation.copy_from_slice(biases);
+            for &idx in active {
+                add_fn(accumulation, idx as usize);
+            }
+        }
+
+        // キャッシュを更新
+        entry.accumulation.copy_from_slice(accumulation);
+        let n = active.len().min(MAX_ACTIVE_FEATURES);
+        entry.active_indices[..n].copy_from_slice(&active[..n]);
+        entry.num_active = n as u16;
+        entry.valid = true;
+    }
+
+    /// ソート済み配列のマージベース差分を適用
+    #[inline]
+    fn apply_diff<FA, FS>(
+        cached: &[u32],
+        current: &[u32],
+        accumulation: &mut [i16],
+        add_fn: &FA,
+        sub_fn: &FS,
+    ) where
+        FA: Fn(&mut [i16], usize),
+        FS: Fn(&mut [i16], usize),
+    {
+        let mut ci = 0;
+        let mut ni = 0;
+
+        while ci < cached.len() && ni < current.len() {
+            let c = cached[ci];
+            let n = current[ni];
+            if c < n {
+                sub_fn(accumulation, c as usize);
+                ci += 1;
+            } else if c > n {
+                add_fn(accumulation, n as usize);
+                ni += 1;
+            } else {
+                ci += 1;
+                ni += 1;
+            }
+        }
+
+        while ci < cached.len() {
+            sub_fn(accumulation, cached[ci] as usize);
+            ci += 1;
+        }
+
+        while ni < current.len() {
+            add_fn(accumulation, current[ni] as usize);
+            ni += 1;
+        }
     }
 }
 

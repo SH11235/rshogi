@@ -29,7 +29,7 @@
 
 use std::sync::Arc;
 
-use super::accumulator::DirtyPiece;
+use super::accumulator::{AccumulatorCacheGeneric, DirtyPiece};
 use super::accumulator_layer_stacks::{AccumulatorCacheLayerStacks, AccumulatorStackLayerStacks};
 use super::accumulator_stack_variant::AccumulatorStackVariant;
 use super::halfka::HalfKAStack;
@@ -61,6 +61,9 @@ pub struct NNUEEvaluator {
     /// LayerStacks 用 AccumulatorCaches（Finny Tables）
     /// LayerStacks アーキテクチャ以外では None
     acc_cache: Option<AccumulatorCacheLayerStacks>,
+    /// 非LayerStacks用 AccumulatorCaches（Finny Tables）
+    /// HalfKP/HalfKA/HalfKA_hm で使用。LayerStacks では None
+    acc_cache_generic: Option<AccumulatorCacheGeneric>,
 }
 
 impl NNUEEvaluator {
@@ -81,10 +84,16 @@ impl NNUEEvaluator {
         } else {
             None
         };
+        let acc_cache_generic = if !matches!(*net, NNUENetwork::LayerStacks(_)) {
+            Some(AccumulatorCacheGeneric::new(net.l1_size()))
+        } else {
+            None
+        };
         let mut evaluator = Self {
             net,
             stack,
             acc_cache,
+            acc_cache_generic,
         };
         evaluator.reset(pos);
         evaluator
@@ -105,10 +114,16 @@ impl NNUEEvaluator {
         } else {
             None
         };
+        let acc_cache_generic = if !matches!(*self.net, NNUENetwork::LayerStacks(_)) {
+            Some(AccumulatorCacheGeneric::new(self.net.l1_size()))
+        } else {
+            None
+        };
         let mut evaluator = Self {
             net: Arc::clone(&self.net),
             stack: AccumulatorStackVariant::from_network(&self.net),
             acc_cache,
+            acc_cache_generic,
         };
         evaluator.reset(pos);
         evaluator
@@ -250,13 +265,25 @@ impl NNUEEvaluator {
     fn refresh_accumulator(&mut self, pos: &Position) {
         match (&*self.net, &mut self.stack) {
             (NNUENetwork::HalfKA(net), AccumulatorStackVariant::HalfKA(st)) => {
-                net.refresh_accumulator(pos, st);
+                if let Some(cache) = &mut self.acc_cache_generic {
+                    net.refresh_accumulator_with_cache(pos, st, cache);
+                } else {
+                    net.refresh_accumulator(pos, st);
+                }
             }
             (NNUENetwork::HalfKA_hm(net), AccumulatorStackVariant::HalfKA_hm(st)) => {
-                net.refresh_accumulator(pos, st);
+                if let Some(cache) = &mut self.acc_cache_generic {
+                    net.refresh_accumulator_with_cache(pos, st, cache);
+                } else {
+                    net.refresh_accumulator(pos, st);
+                }
             }
             (NNUENetwork::HalfKP(net), AccumulatorStackVariant::HalfKP(st)) => {
-                net.refresh_accumulator(pos, st);
+                if let Some(cache) = &mut self.acc_cache_generic {
+                    net.refresh_accumulator_with_cache(pos, st, cache);
+                } else {
+                    net.refresh_accumulator(pos, st);
+                }
             }
             (NNUENetwork::LayerStacks(net), AccumulatorStackVariant::LayerStacks(st)) => {
                 if let Some(cache) = &mut self.acc_cache {
@@ -277,13 +304,13 @@ impl NNUEEvaluator {
     fn ensure_accumulator_computed(&mut self, pos: &Position) {
         match (&*self.net, &mut self.stack) {
             (NNUENetwork::HalfKA(net), AccumulatorStackVariant::HalfKA(st)) => {
-                Self::update_halfka_accumulator(net, pos, st);
+                Self::update_halfka_accumulator(net, pos, st, &mut self.acc_cache_generic);
             }
             (NNUENetwork::HalfKA_hm(net), AccumulatorStackVariant::HalfKA_hm(st)) => {
-                Self::update_halfka_hm_accumulator(net, pos, st);
+                Self::update_halfka_hm_accumulator(net, pos, st, &mut self.acc_cache_generic);
             }
             (NNUENetwork::HalfKP(net), AccumulatorStackVariant::HalfKP(st)) => {
-                Self::update_halfkp_accumulator(net, pos, st);
+                Self::update_halfkp_accumulator(net, pos, st, &mut self.acc_cache_generic);
             }
             (NNUENetwork::LayerStacks(net), AccumulatorStackVariant::LayerStacks(st)) => {
                 Self::update_layer_stacks_accumulator(net, pos, st, &mut self.acc_cache);
@@ -298,6 +325,7 @@ impl NNUEEvaluator {
         net: &super::halfka::HalfKANetwork,
         pos: &Position,
         stack: &mut HalfKAStack,
+        cache: &mut Option<AccumulatorCacheGeneric>,
     ) {
         if stack.is_current_computed() {
             count_already_computed!();
@@ -311,14 +339,22 @@ impl NNUEEvaluator {
             && stack.is_entry_computed(prev_idx)
         {
             let dirty = stack.current_dirty_piece();
-            net.update_accumulator(pos, &dirty, stack, prev_idx);
+            if let Some(c) = cache {
+                net.update_accumulator_with_cache(pos, &dirty, stack, prev_idx, c);
+            } else {
+                net.update_accumulator(pos, &dirty, stack, prev_idx);
+            }
             count_update!();
             updated = true;
         }
 
         // 失敗なら全計算
         if !updated {
-            net.refresh_accumulator(pos, stack);
+            if let Some(c) = cache {
+                net.refresh_accumulator_with_cache(pos, stack, c);
+            } else {
+                net.refresh_accumulator(pos, stack);
+            }
             count_refresh!();
         }
     }
@@ -329,6 +365,7 @@ impl NNUEEvaluator {
         net: &super::halfka_hm::HalfKA_hmNetwork,
         pos: &Position,
         stack: &mut HalfKA_hmStack,
+        cache: &mut Option<AccumulatorCacheGeneric>,
     ) {
         if stack.is_current_computed() {
             count_already_computed!();
@@ -342,14 +379,22 @@ impl NNUEEvaluator {
             && stack.is_entry_computed(prev_idx)
         {
             let dirty = stack.current_dirty_piece();
-            net.update_accumulator(pos, &dirty, stack, prev_idx);
+            if let Some(c) = cache {
+                net.update_accumulator_with_cache(pos, &dirty, stack, prev_idx, c);
+            } else {
+                net.update_accumulator(pos, &dirty, stack, prev_idx);
+            }
             count_update!();
             updated = true;
         }
 
         // 失敗なら全計算
         if !updated {
-            net.refresh_accumulator(pos, stack);
+            if let Some(c) = cache {
+                net.refresh_accumulator_with_cache(pos, stack, c);
+            } else {
+                net.refresh_accumulator(pos, stack);
+            }
             count_refresh!();
         }
     }
@@ -360,6 +405,7 @@ impl NNUEEvaluator {
         net: &super::halfkp::HalfKPNetwork,
         pos: &Position,
         stack: &mut HalfKPStack,
+        cache: &mut Option<AccumulatorCacheGeneric>,
     ) {
         if stack.is_current_computed() {
             count_already_computed!();
@@ -373,14 +419,22 @@ impl NNUEEvaluator {
             && stack.is_entry_computed(prev_idx)
         {
             let dirty = stack.current_dirty_piece();
-            net.update_accumulator(pos, &dirty, stack, prev_idx);
+            if let Some(c) = cache {
+                net.update_accumulator_with_cache(pos, &dirty, stack, prev_idx, c);
+            } else {
+                net.update_accumulator(pos, &dirty, stack, prev_idx);
+            }
             count_update!();
             updated = true;
         }
 
         // 失敗なら全計算
         if !updated {
-            net.refresh_accumulator(pos, stack);
+            if let Some(c) = cache {
+                net.refresh_accumulator_with_cache(pos, stack, c);
+            } else {
+                net.refresh_accumulator(pos, stack);
+            }
             count_refresh!();
         }
     }
