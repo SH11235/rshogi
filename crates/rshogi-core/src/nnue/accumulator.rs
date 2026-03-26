@@ -707,6 +707,11 @@ impl AccumulatorCacheGeneric {
 
         // キャッシュを更新
         self.acc_slice_mut(entry_idx).copy_from_slice(accumulation);
+        debug_assert!(
+            active.len() <= MAX_ACTIVE_FEATURES,
+            "active features overflow: {}",
+            active.len()
+        );
         let n = active.len().min(MAX_ACTIVE_FEATURES);
         self.active_indices[entry_idx][..n].copy_from_slice(&active[..n]);
         self.num_active[entry_idx] = n as u16;
