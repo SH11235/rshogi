@@ -46,11 +46,11 @@ use std::sync::OnceLock;
 
 use super::accumulator::{
     AccumulatorCacheGeneric, Aligned, AlignedBox, DirtyPiece, IndexList, MAX_ACTIVE_FEATURES,
-    MAX_PATH_LENGTH,
+    MAX_CHANGED_FEATURES, MAX_PATH_LENGTH,
 };
 use super::activation::FtActivation;
 use super::constants::{FV_SCALE_HALFKA, HALFKA_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION_HALFKA};
-use super::features::{FeatureSet, HalfKAFeatureSet};
+use super::features::{Feature, FeatureSet, HalfKA, HalfKAFeatureSet};
 use super::network::{get_fv_scale_override, parse_fv_scale_from_arch};
 use crate::position::Position;
 use crate::types::{Color, Value};
@@ -472,10 +472,14 @@ impl<const L1: usize> FeatureTransformerHalfKA<L1> {
                     self.add_weights(&mut acc.accumulation[p], index);
                 }
             } else {
-                let (removed, added) = HalfKAFeatureSet::collect_changed_indices(
+                let mut removed = IndexList::<MAX_CHANGED_FEATURES>::new();
+                let mut added = IndexList::<MAX_CHANGED_FEATURES>::new();
+                <HalfKA as Feature>::append_changed_indices(
                     dirty_piece,
                     perspective,
                     pos.king_square(perspective),
+                    &mut removed,
+                    &mut added,
                 );
 
                 acc.accumulation[p].copy_from_slice(&prev_acc.accumulation[p]);
@@ -513,10 +517,14 @@ impl<const L1: usize> FeatureTransformerHalfKA<L1> {
                     cache,
                 );
             } else {
-                let (removed, added) = HalfKAFeatureSet::collect_changed_indices(
+                let mut removed = IndexList::<MAX_CHANGED_FEATURES>::new();
+                let mut added = IndexList::<MAX_CHANGED_FEATURES>::new();
+                <HalfKA as Feature>::append_changed_indices(
                     dirty_piece,
                     perspective,
                     pos.king_square(perspective),
+                    &mut removed,
+                    &mut added,
                 );
 
                 acc.accumulation[p].copy_from_slice(&prev_acc.accumulation[p]);
@@ -608,8 +616,15 @@ impl<const L1: usize> FeatureTransformerHalfKA<L1> {
                 );
 
                 let king_sq = pos.king_square(perspective);
-                let (removed, added) =
-                    HalfKAFeatureSet::collect_changed_indices(&dirty_piece, perspective, king_sq);
+                let mut removed = IndexList::<MAX_CHANGED_FEATURES>::new();
+                let mut added = IndexList::<MAX_CHANGED_FEATURES>::new();
+                <HalfKA as Feature>::append_changed_indices(
+                    &dirty_piece,
+                    perspective,
+                    king_sq,
+                    &mut removed,
+                    &mut added,
+                );
 
                 let p = perspective as usize;
                 let accumulation = &mut stack.entry_at_mut(current_idx).accumulator.accumulation[p];

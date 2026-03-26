@@ -40,11 +40,11 @@ use std::marker::PhantomData;
 
 use super::accumulator::{
     AccumulatorCacheGeneric, Aligned as AlignedGeneric, AlignedBox, DirtyPiece, IndexList,
-    MAX_ACTIVE_FEATURES, MAX_PATH_LENGTH,
+    MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES, MAX_PATH_LENGTH,
 };
 use super::activation::FtActivation;
 use super::constants::{FV_SCALE, HALFKP_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION};
-use super::features::{FeatureSet, HalfKPFeatureSet};
+use super::features::{Feature, FeatureSet, HalfKP, HalfKPFeatureSet};
 use super::network::get_fv_scale_override;
 use crate::position::Position;
 use crate::types::{Color, Value};
@@ -534,10 +534,14 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
                     self.add_weights(&mut acc.accumulation[p].0, index);
                 }
             } else {
-                let (removed, added) = HalfKPFeatureSet::collect_changed_indices(
+                let mut removed = IndexList::<MAX_CHANGED_FEATURES>::new();
+                let mut added = IndexList::<MAX_CHANGED_FEATURES>::new();
+                <HalfKP as Feature>::append_changed_indices(
                     dirty_piece,
                     perspective,
                     pos.king_square(perspective),
+                    &mut removed,
+                    &mut added,
                 );
 
                 acc.accumulation[p].0.copy_from_slice(&prev_acc.accumulation[p].0);
@@ -580,10 +584,14 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
                 );
             } else {
                 // 差分更新（キャッシュ不使用）
-                let (removed, added) = HalfKPFeatureSet::collect_changed_indices(
+                let mut removed = IndexList::<MAX_CHANGED_FEATURES>::new();
+                let mut added = IndexList::<MAX_CHANGED_FEATURES>::new();
+                <HalfKP as Feature>::append_changed_indices(
                     dirty_piece,
                     perspective,
                     pos.king_square(perspective),
+                    &mut removed,
+                    &mut added,
                 );
 
                 acc.accumulation[p].0.copy_from_slice(&prev_acc.accumulation[p].0);
@@ -693,8 +701,15 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
                 );
 
                 let king_sq = pos.king_square(perspective);
-                let (removed, added) =
-                    HalfKPFeatureSet::collect_changed_indices(&dirty_piece, perspective, king_sq);
+                let mut removed = IndexList::<MAX_CHANGED_FEATURES>::new();
+                let mut added = IndexList::<MAX_CHANGED_FEATURES>::new();
+                <HalfKP as Feature>::append_changed_indices(
+                    &dirty_piece,
+                    perspective,
+                    king_sq,
+                    &mut removed,
+                    &mut added,
+                );
 
                 let p = perspective as usize;
                 let accumulation =
