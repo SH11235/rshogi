@@ -581,17 +581,9 @@ impl MovePicker {
     // スコアリング
     // =========================================================================
 
-    /// ContinuationHistory参照を取得（unsafeだがMovePickerライフタイム中は有効）
-    #[inline]
-    fn cont_history(&self, idx: usize) -> &PieceToHistory {
-        // SAFETY: MovePickerのライフタイム中、continuation_historyポインタは有効
-        unsafe { &*self.continuation_history[idx] }
-    }
-
     /// 捕獲手のスコアを計算
     fn score_captures(&mut self, pos: &Position, history: &HistoryTables) {
-        for i in self.cur..self.end_cur {
-            let ext = self.moves.get(i);
+        for ext in &mut self.moves.as_mut_slice()[self.cur..self.end_cur] {
             let m = ext.mv;
             let to = m.to();
             let pc = m.moved_piece_after();
@@ -602,7 +594,7 @@ impl MovePicker {
             let mut value = history.capture_history.get(pc, to, captured_pt) as i32;
             value += 7 * piece_value(captured);
 
-            self.moves.set_value(i, value);
+            ext.value = value;
         }
     }
 
@@ -610,61 +602,79 @@ impl MovePicker {
     fn score_quiets(&mut self, pos: &Position, history: &HistoryTables) {
         let us = self.side_to_move;
         let pawn_idx = self.pawn_history_index;
+        let moves = &mut self.moves.as_mut_slice()[self.cur..self.end_cur];
+        // SAFETY:
+        // - continuation_history のポインタは MovePicker の寿命中有効。
+        // - ここでは読み取り専用でのみ参照する。
+        // - moves とは無関係な領域なのでエイリアスは発生しない。
+        let (ch0, ch1, ch2, ch3, ch5) = unsafe {
+            (
+                &*self.continuation_history[0],
+                &*self.continuation_history[1],
+                &*self.continuation_history[2],
+                &*self.continuation_history[3],
+                &*self.continuation_history[5],
+            )
+        };
 
-        for i in self.cur..self.end_cur {
-            let ext = self.moves.get(i);
-            let m = ext.mv;
-            let to = m.to();
-            let pc = m.moved_piece_after();
-            let pt = pc.piece_type();
-            let mut value = 0i32;
+        if self.ply < LOW_PLY_HISTORY_SIZE as i32 {
+            let low_ply_idx = self.ply as usize;
+            let low_ply_div = 1 + self.ply;
 
-            // ButterflyHistory (×2)
-            let main_h = 2 * history.main_history.get(us, m) as i32;
-            value += main_h;
+            for ext in moves {
+                let m = ext.mv;
+                let to = m.to();
+                let pc = m.moved_piece_after();
+                let pt = pc.piece_type();
 
-            // PawnHistory (×2)
-            let pawn_h = 2 * history.pawn_history.get(pawn_idx, pc, to) as i32;
-            value += pawn_h;
+                let mut value = 2 * history.main_history.get(us, m) as i32;
+                value += 2 * history.pawn_history.get(pawn_idx, pc, to) as i32;
+                value += ch0.get(pc, to) as i32;
+                value += ch1.get(pc, to) as i32;
+                value += ch2.get(pc, to) as i32;
+                value += ch3.get(pc, to) as i32;
+                value += ch5.get(pc, to) as i32;
 
-            // ContinuationHistory (6個のうち5個を使用)
-            // インデックス4 (ply-5) はスキップ: YaneuraOu準拠で、ply-5は統計的に有効性が低いため除外
-            // 参照: yaneuraou-search.cpp の continuationHistory 配列の使用箇所
-            let mut cont_h = 0i32;
-            for (idx, weight) in [(0, 1), (1, 1), (2, 1), (3, 1), (5, 1)] {
-                let ch = self.cont_history(idx);
-                cont_h += weight * ch.get(pc, to) as i32;
-            }
-            value += cont_h;
-
-            // 王手ボーナス
-            let check_bonus =
                 if pos.check_squares(pt).contains(to) && pos.see_ge(m, Value::new(-75)) {
-                    16384
-                } else {
-                    0
-                };
-            value += check_bonus;
+                    value += 16384;
+                }
 
-            // LowPlyHistory
-            let low_ply_h = if self.ply < LOW_PLY_HISTORY_SIZE as i32 {
-                let ply_idx = self.ply as usize;
-                8 * history.low_ply_history.get(ply_idx, m) as i32 / (1 + self.ply)
-            } else {
-                0
-            };
-            value += low_ply_h;
+                value += 8 * history.low_ply_history.get(low_ply_idx, m) as i32 / low_ply_div;
+                ext.value = value;
+            }
+        } else {
+            for ext in moves {
+                let m = ext.mv;
+                let to = m.to();
+                let pc = m.moved_piece_after();
+                let pt = pc.piece_type();
 
-            self.moves.set_value(i, value);
+                let mut value = 2 * history.main_history.get(us, m) as i32;
+                value += 2 * history.pawn_history.get(pawn_idx, pc, to) as i32;
+                value += ch0.get(pc, to) as i32;
+                value += ch1.get(pc, to) as i32;
+                value += ch2.get(pc, to) as i32;
+                value += ch3.get(pc, to) as i32;
+                value += ch5.get(pc, to) as i32;
+
+                if pos.check_squares(pt).contains(to) && pos.see_ge(m, Value::new(-75)) {
+                    value += 16384;
+                }
+
+                ext.value = value;
+            }
         }
     }
 
     /// 回避手のスコアを計算
     fn score_evasions(&mut self, pos: &Position, history: &HistoryTables) {
         let us = self.side_to_move;
+        // SAFETY:
+        // - continuation_history[0] は MovePicker の寿命中有効。
+        // - 読み取り専用でのみ使用し、moves とは無関係な領域を指す。
+        let ch = unsafe { &*self.continuation_history[0] };
 
-        for i in self.cur..self.end_cur {
-            let ext = self.moves.get(i);
+        for ext in &mut self.moves.as_mut_slice()[self.cur..self.end_cur] {
             let m = ext.mv;
             let to = m.to();
             let pc = m.moved_piece_after();
@@ -672,15 +682,12 @@ impl MovePicker {
             if pos.capture_stage(m) {
                 // 捕獲手は駒価値 + 大きなボーナス
                 let captured = pos.piece_on(to);
-                self.moves.set_value(i, piece_value(captured) + (1 << 28));
+                ext.value = piece_value(captured) + (1 << 28);
             } else {
                 // 静かな手はHistory
                 let mut value = history.main_history.get(us, m) as i32;
-
-                let ch = self.cont_history(0);
                 value += ch.get(pc, to) as i32;
-
-                self.moves.set_value(i, value);
+                ext.value = value;
             }
         }
     }
@@ -805,6 +812,7 @@ impl MovePicker {
 ///
 /// ## 計算量
 /// - 挿入ソート相当
+#[inline]
 fn partial_insertion_sort(moves: &mut [ExtMove], end: usize, limit: i32) -> usize {
     // YaneuraOu: movepick.cpp partial_insertion_sort()
     //   for (ExtMove *sortedEnd = begin, *p = begin + 1; p < end; ++p)
@@ -815,24 +823,38 @@ fn partial_insertion_sort(moves: &mut [ExtMove], end: usize, limit: i32) -> usiz
     //               *q = *(q - 1);
     //           *q = tmp;
     //       }
+    if end <= 1 {
+        return 0;
+    }
+
     let mut sorted_end: usize = 0;
+    let base = moves.as_mut_ptr();
     for p in 1..end {
-        if moves[p].value >= limit {
-            let tmp = moves[p];
-            sorted_end += 1;
-            moves[p] = moves[sorted_end];
-            let mut q = sorted_end;
-            while q > 0 && moves[q - 1].value < tmp.value {
-                moves[q] = moves[q - 1];
-                q -= 1;
+        // SAFETY:
+        // - p は常に 1..end の範囲で、end は呼び出し元が `moves.len()` 以下で渡す。
+        // - sorted_end は 0..p の範囲を保つため、add() でアクセスする要素は常に同一 slice 内。
+        // - ExtMove は Copy なので、要素の読み書き・シフトで drop 問題は発生しない。
+        unsafe {
+            let tmp = *base.add(p);
+            if tmp.value >= limit {
+                sorted_end += 1;
+                if p != sorted_end {
+                    *base.add(p) = *base.add(sorted_end);
+                }
+                let mut q = sorted_end;
+                while q > 0 && (*base.add(q - 1)).value < tmp.value {
+                    *base.add(q) = *base.add(q - 1);
+                    q -= 1;
+                }
+                *base.add(q) = tmp;
             }
-            moves[q] = tmp;
         }
     }
     sorted_end
 }
 
 /// 駒の価値（MVV用）
+#[inline]
 pub(crate) fn piece_value(pc: Piece) -> i32 {
     if pc.is_none() {
         return 0;
