@@ -1026,8 +1026,9 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKP<INPUT, OUTPU
             }
         }
 
-        // スカラー fallback
+        // スカラー fallback（avx2 は ssse3 を暗黙に含むが、意図を明示するため列挙）
         #[cfg(not(any(
+            all(target_arch = "x86_64", target_feature = "avx2"),
             all(target_arch = "x86_64", target_feature = "ssse3"),
             all(target_arch = "wasm32", target_feature = "simd128")
         )))]

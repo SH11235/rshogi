@@ -129,7 +129,8 @@ fn crelu_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16) {
             // SAFETY:
             // - input.len() >= 32 * num_chunks（num_chunks の定義より）
             // - output.len() >= input.len()（呼び出し側で保証）
-            // - clamped は [0, qa≤127] の範囲のため cvtsepi16_epi8 の飽和は発生しない
+            // - clamped は [0, qa] の範囲（qa=127 or 255）
+            // - cvtusepi16_epi8 は符号なし飽和のため [0, 255] → u8 で値が保存される
             unsafe {
                 use std::arch::x86_64::*;
                 let zero = _mm512_setzero_si512();
@@ -141,8 +142,8 @@ fn crelu_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16) {
                 for i in 0..num_chunks {
                     let v = _mm512_loadu_si512(in_ptr.add(i * 32) as *const __m512i);
                     let clamped = _mm512_min_epi16(_mm512_max_epi16(v, zero), max_val);
-                    // i16 → i8 符号付き飽和変換（値は [0,127] なので実質無飽和）
-                    let result = _mm512_cvtsepi16_epi8(clamped);
+                    // i16 → u8 符号なし飽和変換（qa=255 でも値が保存される）
+                    let result = _mm512_cvtusepi16_epi8(clamped);
                     _mm256_storeu_si256(out_ptr.add(i * 32) as *mut __m256i, result);
                 }
             }
@@ -153,15 +154,16 @@ fn crelu_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16) {
     // AVX2: 16要素ずつ処理
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {
-        let num_chunks = input.len() / 16;
+        let remaining = input.len() - processed;
+        let num_chunks = remaining / 16;
         if num_chunks > 0 {
             unsafe {
                 use std::arch::x86_64::*;
                 let zero = _mm256_setzero_si256();
                 let max_val = _mm256_set1_epi16(qa);
 
-                let in_ptr = input.as_ptr();
-                let out_ptr = output.as_mut_ptr();
+                let in_ptr = input.as_ptr().add(processed);
+                let out_ptr = output.as_mut_ptr().add(processed);
 
                 for i in 0..num_chunks {
                     let v = _mm256_loadu_si256(in_ptr.add(i * 16) as *const __m256i);
@@ -174,7 +176,7 @@ fn crelu_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16) {
                     );
                 }
             }
-            processed = num_chunks * 16;
+            processed += num_chunks * 16;
         }
     }
 
