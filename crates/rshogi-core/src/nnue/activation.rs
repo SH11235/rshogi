@@ -277,7 +277,7 @@ fn crelu_i32_to_u8(input: &[i32], output: &mut [u8]) {
 
                 for i in 0..num_chunks {
                     let v = _mm512_loadu_si512(in_ptr.add(i * 16) as *const __m512i);
-                    let shifted = _mm512_srai_epi32(v, WEIGHT_SCALE_BITS as i32);
+                    let shifted = _mm512_srai_epi32::<WEIGHT_SCALE_BITS>(v);
                     let clamped = _mm512_min_epi32(_mm512_max_epi32(shifted, zero), max_val);
                     // i32 → i8 符号付き飽和変換（値は [0,127] なので実質無飽和）
                     let result = _mm512_cvtsepi32_epi8(clamped);
@@ -550,7 +550,15 @@ fn pairwise_crelu_i16_to_u8_inner<const QA: i32, const SHIFT: i32, const MAX_OUT
                     let b_clamped = _mm512_min_epi32(_mm512_max_epi32(b, zero), max_clamp);
 
                     let product = _mm512_mullo_epi32(a_clamped, b_clamped);
-                    let result = _mm512_min_epi32(_mm512_srai_epi32(product, SHIFT), max_out);
+                    // SHIFT は i32 const generic だが _mm512_srai_epi32 は const u32 を要求する。
+                    // const generic 間の型変換は stable Rust で不可のため match で分岐
+                    // （SHIFT は 7 or 9 でコンパイル時に片方に解消される）
+                    let shifted = match SHIFT {
+                        7 => _mm512_srai_epi32::<7>(product),
+                        9 => _mm512_srai_epi32::<9>(product),
+                        _ => unreachable!(),
+                    };
+                    let result = _mm512_min_epi32(shifted, max_out);
 
                     let packed = _mm512_cvtsepi32_epi8(result);
                     _mm_storeu_si128(out_ptr.add(i * 16) as *mut __m128i, packed);
@@ -843,13 +851,13 @@ fn pairwise_crelu_i32_to_u8(input: &[i32], output: &mut [u8]) {
                     let a = _mm512_loadu_si512(a_ptr.add(i * 16) as *const __m512i);
                     let b = _mm512_loadu_si512(b_ptr.add(i * 16) as *const __m512i);
 
-                    let a_shifted = _mm512_srai_epi32(a, WEIGHT_SCALE_BITS as i32);
-                    let b_shifted = _mm512_srai_epi32(b, WEIGHT_SCALE_BITS as i32);
+                    let a_shifted = _mm512_srai_epi32::<WEIGHT_SCALE_BITS>(a);
+                    let b_shifted = _mm512_srai_epi32::<WEIGHT_SCALE_BITS>(b);
                     let a_clamped = _mm512_min_epi32(_mm512_max_epi32(a_shifted, zero), max_val);
                     let b_clamped = _mm512_min_epi32(_mm512_max_epi32(b_shifted, zero), max_val);
 
                     let product = _mm512_mullo_epi32(a_clamped, b_clamped);
-                    let result = _mm512_min_epi32(_mm512_srai_epi32(product, 7), max_val);
+                    let result = _mm512_min_epi32(_mm512_srai_epi32::<7>(product), max_val);
 
                     let packed = _mm512_cvtsepi32_epi8(result);
                     _mm_storeu_si128(out_ptr.add(i * 16) as *mut __m128i, packed);
@@ -1184,7 +1192,12 @@ fn screlu_i16_to_u8_inner<const QA: i32, const SHIFT: i32>(input: &[i16], output
 
                     let clamped = _mm512_min_epi32(_mm512_max_epi32(v, zero), max_clamp);
                     let squared = _mm512_mullo_epi32(clamped, clamped);
-                    let result = _mm512_min_epi32(_mm512_srai_epi32(squared, SHIFT), max_out);
+                    let shifted = match SHIFT {
+                        7 => _mm512_srai_epi32::<7>(squared),
+                        9 => _mm512_srai_epi32::<9>(squared),
+                        _ => unreachable!(),
+                    };
+                    let result = _mm512_min_epi32(shifted, max_out);
 
                     let packed = _mm512_cvtsepi32_epi8(result);
                     _mm_storeu_si128(out_ptr.add(i * 16) as *mut __m128i, packed);
