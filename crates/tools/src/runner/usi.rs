@@ -107,8 +107,6 @@ impl UsiEngine {
         engine.send(&format!("setoption name Threads value {threads}"))?;
 
         // 評価オプション設定
-        engine
-            .send(&format!("setoption name MaterialLevel value {}", eval_config.material_level))?;
         if let Some(nnue_path) = &eval_config.nnue_file {
             engine.send(&format!("setoption name EvalFile value {}", nnue_path.display()))?;
         }

@@ -25,24 +25,15 @@ impl LimitType {
 
 /// 評価関数設定
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct EvalConfig {
-    /// NNUEファイルのパス（`None` の場合は Material 評価を使用）
+    /// NNUEファイルのパス（指定時は `EvalFile` USI オプションとして送信）
     pub nnue_file: Option<PathBuf>,
-    /// Material評価レベル（1, 2, 3, 4, 7, 8, 9）
-    pub material_level: u8,
     /// 追加の USI オプション（"Name=Value" 形式）
+    /// Material 評価を使う場合は "MaterialLevel=9" 等をここで明示指定する
     pub usi_options: Vec<String>,
 }
 
-impl Default for EvalConfig {
-    fn default() -> Self {
-        EvalConfig {
-            nnue_file: None,
-            material_level: 9, // デフォルトはLv9
-            usi_options: Vec::new(),
-        }
-    }
-}
 
 /// ベンチマーク設定
 ///

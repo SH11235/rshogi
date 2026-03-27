@@ -28,10 +28,15 @@ pub struct EvalInfo {
 
 impl From<&EvalConfig> for EvalInfo {
     fn from(config: &EvalConfig) -> Self {
+        let material_level = config
+            .usi_options
+            .iter()
+            .find_map(|opt| opt.strip_prefix("MaterialLevel=").and_then(|v| v.parse::<u8>().ok()))
+            .unwrap_or(0);
         EvalInfo {
             nnue_enabled: config.nnue_file.is_some(),
             nnue_file: config.nnue_file.as_ref().map(|p| p.display().to_string()),
-            material_level: config.material_level,
+            material_level,
         }
     }
 }

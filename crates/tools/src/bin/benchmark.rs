@@ -63,10 +63,6 @@ struct Cli {
     #[arg(long)]
     nnue_file: Option<PathBuf>,
 
-    /// Material評価レベル（1, 2, 3, 4, 7, 8, 9）
-    #[arg(long, default_value = "9", value_parser = validate_material_level)]
-    material_level: u8,
-
     /// Searchインスタンスを再利用し、履歴統計の蓄積効果を測定
     #[arg(long)]
     reuse_search: bool,
@@ -86,17 +82,6 @@ struct Cli {
     /// 追加の USI オプション (format: "Name=Value", can be repeated)
     #[arg(long = "usi-option", num_args = 1..)]
     usi_options: Option<Vec<String>>,
-}
-
-/// Material評価レベルのバリデーション
-fn validate_material_level(s: &str) -> Result<u8, String> {
-    let v = s.parse::<u8>().map_err(|_| format!("'{s}' is not a valid number"))?;
-
-    if matches!(v, 1 | 2 | 3 | 4 | 7 | 8 | 9) {
-        Ok(v)
-    } else {
-        Err(format!("Material level must be one of: 1, 2, 3, 4, 7, 8, 9 (got {v})"))
-    }
 }
 
 /// CLI用の制限タイプ（clap ValueEnum対応）
@@ -130,7 +115,6 @@ impl Cli {
             verbose: self.verbose,
             eval_config: EvalConfig {
                 nnue_file: self.nnue_file.clone(),
-                material_level: self.material_level,
                 usi_options: self.usi_options.clone().unwrap_or_default(),
             },
             reuse_search: self.reuse_search,

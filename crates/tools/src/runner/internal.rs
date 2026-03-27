@@ -32,15 +32,14 @@ pub fn run_internal_benchmark(config: &BenchmarkConfig) -> Result<BenchmarkRepor
 
 /// 評価関数の初期化
 fn setup_eval(config: &BenchmarkConfig) -> Result<()> {
-    // MaterialLevelはNNUE初期化前に設定する必要がある
-    if let Some(level) = MaterialLevel::from_value(config.eval_config.material_level) {
-        set_material_level(level);
-        println!("MaterialLevel set to: {}", config.eval_config.material_level);
-    } else {
-        eprintln!(
-            "Warning: Invalid MaterialLevel {}, using default",
-            config.eval_config.material_level
-        );
+    // usi_options から MaterialLevel を探して設定
+    for opt in &config.eval_config.usi_options {
+        if let Some(value) = opt.strip_prefix("MaterialLevel=")
+            && let Ok(v) = value.parse::<u8>()
+                && let Some(level) = MaterialLevel::from_value(v) {
+                    set_material_level(level);
+                    println!("MaterialLevel set to: {v}");
+                }
     }
 
     // EvalHash設定
@@ -451,7 +450,7 @@ mod tests {
     #[test]
     fn test_material_level_configuration() {
         let mut config = test_config(LimitType::Nodes, 10000);
-        config.eval_config.material_level = 1;
+        config.eval_config.usi_options = vec!["MaterialLevel=1".to_string()];
 
         let result = run_internal_benchmark(&config);
         assert!(result.is_ok());
@@ -459,16 +458,6 @@ mod tests {
         let report = result.unwrap();
         assert!(report.eval_info.is_some());
         assert_eq!(report.eval_info.unwrap().material_level, 1);
-    }
-
-    #[test]
-    fn test_invalid_material_level_uses_default() {
-        let mut config = test_config(LimitType::Nodes, 10000);
-        config.eval_config.material_level = 99; // 不正な値
-
-        // 不正な値でも実行は成功し、デフォルト値が使用されるべき
-        let result = run_internal_benchmark(&config);
-        assert!(result.is_ok());
     }
 
     #[test]
