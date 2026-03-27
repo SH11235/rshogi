@@ -8,7 +8,8 @@
 |---|---|:---:|:---:|:---:|:---:|:---:|:---:|
 | `layers.rs` | `AffineTransform::propagate` | VNNI/BW | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `layer_stacks.rs` | `sqr_clipped_relu_transform` | BW | ✓ | — | ✓ | ✓ | ✓ |
-| `layer_stacks.rs` | `LayerStackBucket::propagate` 内 activation | — | — | — | — | — | ✓ |
+| `layer_stacks.rs` | `l1_sqr_clipped_relu_activation` (15要素) | — | ✓ | — | — | — | ✓ |
+| `layer_stacks.rs` | `clipped_relu_i32_to_u8` (32要素) | — | ✓ | — | — | — | ✓ |
 | `feature_transformer.rs` | `add_weights`/`sub_weights` | BW | ✓ | — | ✓ | ✓ | ✓ |
 | `feature_transformer_layer_stacks.rs` | `add_weights`/`sub_weights` | BW | ✓ | — | ✓ | ✓ | ✓ |
 | `activation.rs` | `crelu_i16_to_u8` | BW | ✓ | — | ✓ | ✓ | ✓ |
@@ -81,12 +82,13 @@ for (out, &val) in l2_relu.0.iter_mut().zip(l2_out.iter()) {
 }
 ```
 
-### SIMD 化しない理由
+### AVX2 で SIMD 化済み
 
-- **要素数が極めて小さい**: 15要素、32要素
-- **ボトルネックではない**: 直前の `AffineTransform::propagate`（1536→16 の行列積）が
-  支配的。activation は行列積に対して数%程度の計算量
-- **実測根拠**: NPS への影響は計測レベル以下と判断（TODO: 計測データへのリンク）
+当初スカラーのみだったが、デグレリスクが低いため AVX2 パスを追加。
+
+- 15要素: `l1_sqr_clipped_relu_activation` — 16要素分（LAYER_STACK_L1_OUT）を
+  AVX2 で処理。16番目はパディング領域に書かれるため無害
+- 32要素: `clipped_relu_i32_to_u8` — 8要素×4回で完全にアライン
 
 ---
 
