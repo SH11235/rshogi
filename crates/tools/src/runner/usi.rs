@@ -113,6 +113,13 @@ impl UsiEngine {
             engine.send(&format!("setoption name EvalFile value {}", nnue_path.display()))?;
         }
 
+        // 追加の USI オプション
+        for opt in &eval_config.usi_options {
+            if let Some((name, value)) = opt.split_once('=') {
+                engine.send(&format!("setoption name {name} value {value}"))?;
+            }
+        }
+
         engine.send("isready")?;
         engine.wait_for("readyok", Duration::from_secs(30))?;
 

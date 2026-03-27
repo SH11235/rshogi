@@ -589,6 +589,7 @@ fn main() -> Result<()> {
     };
     let time_defaults = [
         ("NetworkDelay", "0"),
+        ("NetworkDelay2", "0"),
         ("MinimumThinkingTime", min_think.as_str()),
     ];
     let engine_usi_options: Vec<Vec<String>> = (0..n)

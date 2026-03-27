@@ -30,6 +30,8 @@ pub struct EvalConfig {
     pub nnue_file: Option<PathBuf>,
     /// Material評価レベル（1, 2, 3, 4, 7, 8, 9）
     pub material_level: u8,
+    /// 追加の USI オプション（"Name=Value" 形式）
+    pub usi_options: Vec<String>,
 }
 
 impl Default for EvalConfig {
@@ -37,6 +39,7 @@ impl Default for EvalConfig {
         EvalConfig {
             nnue_file: None,
             material_level: 9, // デフォルトはLv9
+            usi_options: Vec::new(),
         }
     }
 }

@@ -1168,6 +1168,8 @@ pub fn compute_progress8kpabs_sum(pos: &Position, weights: &[f32]) -> f32 {
 
     let sq_bk = pos.king_square(Color::Black).index();
     let sq_wk = pos.king_square(Color::White).inverse().index();
+    let weights_b = &weights[sq_bk * FE_OLD_END..(sq_bk + 1) * FE_OLD_END];
+    let weights_w = &weights[sq_wk * FE_OLD_END..(sq_wk + 1) * FE_OLD_END];
 
     let mut sum = 0.0f32;
 
@@ -1179,12 +1181,12 @@ pub fn compute_progress8kpabs_sum(pos: &Position, weights: &[f32]) -> f32 {
 
         let bp_b = BonaPiece::from_piece_square(pc, sq, Color::Black);
         if bp_b != BonaPiece::ZERO {
-            sum += weights[sq_bk * FE_OLD_END + bp_b.value() as usize];
+            sum += weights_b[bp_b.value() as usize];
         }
 
         let bp_w = BonaPiece::from_piece_square(pc, sq, Color::White);
         if bp_w != BonaPiece::ZERO {
-            sum += weights[sq_wk * FE_OLD_END + bp_w.value() as usize];
+            sum += weights_w[bp_w.value() as usize];
         }
     }
 
@@ -1197,12 +1199,12 @@ pub fn compute_progress8kpabs_sum(pos: &Position, weights: &[f32]) -> f32 {
 
                 let bp_b = BonaPiece::from_hand_piece(Color::Black, owner, pt, c_u8);
                 if bp_b != BonaPiece::ZERO {
-                    sum += weights[sq_bk * FE_OLD_END + bp_b.value() as usize];
+                    sum += weights_b[bp_b.value() as usize];
                 }
 
                 let bp_w = BonaPiece::from_hand_piece(Color::White, owner, pt, c_u8);
                 if bp_w != BonaPiece::ZERO {
-                    sum += weights[sq_wk * FE_OLD_END + bp_w.value() as usize];
+                    sum += weights_w[bp_w.value() as usize];
                 }
             }
         }
@@ -1223,6 +1225,8 @@ pub fn update_progress8kpabs_sum_diff(
     sq_wk: usize,
     weights: &[f32],
 ) -> f32 {
+    let weights_b = &weights[sq_bk * FE_OLD_END..(sq_bk + 1) * FE_OLD_END];
+    let weights_w = &weights[sq_wk * FE_OLD_END..(sq_wk + 1) * FE_OLD_END];
     let mut sum = prev_sum;
     for i in 0..dirty_piece.dirty_num as usize {
         let changed = &dirty_piece.changed_piece[i];
@@ -1230,21 +1234,21 @@ pub fn update_progress8kpabs_sum_diff(
         // old の寄与を引く
         let old_fb = changed.old_piece.fb;
         if old_fb != BonaPiece::ZERO {
-            sum -= weights[sq_bk * FE_OLD_END + old_fb.value() as usize];
+            sum -= weights_b[old_fb.value() as usize];
         }
         let old_fw = changed.old_piece.fw;
         if old_fw != BonaPiece::ZERO {
-            sum -= weights[sq_wk * FE_OLD_END + old_fw.value() as usize];
+            sum -= weights_w[old_fw.value() as usize];
         }
 
         // new の寄与を足す
         let new_fb = changed.new_piece.fb;
         if new_fb != BonaPiece::ZERO {
-            sum += weights[sq_bk * FE_OLD_END + new_fb.value() as usize];
+            sum += weights_b[new_fb.value() as usize];
         }
         let new_fw = changed.new_piece.fw;
         if new_fw != BonaPiece::ZERO {
-            sum += weights[sq_wk * FE_OLD_END + new_fw.value() as usize];
+            sum += weights_w[new_fw.value() as usize];
         }
     }
     sum
@@ -1253,11 +1257,7 @@ pub fn update_progress8kpabs_sum_diff(
 /// progress_sum から bucket index を計算（閾値比較のみ）
 #[inline]
 pub fn progress_sum_to_bucket(sum: f32) -> usize {
-    PROGRESS_BUCKET_THRESHOLDS
-        .iter()
-        .filter(|&&t| sum >= t)
-        .count()
-        .min(SHOGI_PROGRESS8_NUM_BUCKETS - 1)
+    PROGRESS_BUCKET_THRESHOLDS.partition_point(|&threshold| sum >= threshold)
 }
 
 /// NNUEを初期化（バージョン自動判別）

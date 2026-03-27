@@ -41,10 +41,10 @@ pub struct StateInfo {
     pub hand_key: u64,
     /// 手駒スナップショット（千日手判定用）
     pub hand_snapshot: [Hand; Color::NUM],
+    /// 前の局面のインデックス（StateInfoプール内）
+    pub previous: usize,
     /// 王手している駒
     pub checkers: Bitboard,
-    /// 前の局面のインデックス（StateInfoプール内）
-    pub previous: Option<usize>,
     /// pin駒 [Color]（自玉へのピン）
     pub blockers_for_king: [Bitboard; Color::NUM],
     /// pinしている駒 [Color]
@@ -66,6 +66,9 @@ pub struct StateInfo {
 }
 
 impl StateInfo {
+    /// previous が未設定であることを表す sentinel
+    pub const NO_PREVIOUS: usize = usize::MAX;
+
     /// 空の状態を生成
     pub fn new() -> Self {
         StateInfo {
@@ -80,8 +83,8 @@ impl StateInfo {
             board_key: 0,
             hand_key: 0,
             hand_snapshot: [Hand::EMPTY; Color::NUM],
+            previous: Self::NO_PREVIOUS,
             checkers: Bitboard::EMPTY,
-            previous: None,
             blockers_for_king: [Bitboard::EMPTY; Color::NUM],
             pinners: [Bitboard::EMPTY; Color::NUM],
             check_squares: [Bitboard::EMPTY; PieceType::NUM + 1],
@@ -123,6 +126,22 @@ impl StateInfo {
         self.board_key ^ self.hand_key
     }
 
+    /// 直前局面が存在するか
+    #[inline]
+    pub const fn has_previous(&self) -> bool {
+        self.previous != Self::NO_PREVIOUS
+    }
+
+    /// 直前局面インデックスを取得
+    #[inline]
+    pub const fn previous_index(&self) -> Option<usize> {
+        if self.has_previous() {
+            Some(self.previous)
+        } else {
+            None
+        }
+    }
+
     /// do_move用に部分コピー
     ///
     /// NNUE関連（Accumulator/DirtyPiece）はAccumulatorStack側で管理するため、
@@ -141,8 +160,8 @@ impl StateInfo {
             board_key: self.board_key,
             hand_key: self.hand_key,
             hand_snapshot: self.hand_snapshot,
+            previous: Self::NO_PREVIOUS,
             checkers: Bitboard::EMPTY,
-            previous: None,
             blockers_for_king: [Bitboard::EMPTY; Color::NUM],
             pinners: [Bitboard::EMPTY; Color::NUM],
             check_squares: [Bitboard::EMPTY; PieceType::NUM + 1],
@@ -176,7 +195,7 @@ mod tests {
         assert_eq!(state.non_pawn_key, [0; Color::NUM]);
         assert_eq!(state.key(), 0);
         assert!(state.checkers.is_empty());
-        assert!(state.previous.is_none());
+        assert_eq!(state.previous, StateInfo::NO_PREVIOUS);
     }
 
     #[test]
@@ -202,7 +221,7 @@ mod tests {
         assert_eq!(cloned.continuous_check, [3, 2]);
         assert_eq!(cloned.minor_piece_key, 42);
         assert_eq!(cloned.non_pawn_key, [7, 11]);
-        assert!(cloned.previous.is_none());
+        assert_eq!(cloned.previous, StateInfo::NO_PREVIOUS);
     }
 
     // =========================================

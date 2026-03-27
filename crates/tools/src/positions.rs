@@ -66,7 +66,9 @@ fn load_positions_from_file(path: &Path) -> Result<Vec<(String, String)>> {
             positions.push((name.trim().to_string(), sfen.trim().to_string()));
         } else {
             // 区切り文字がない場合は、インデックスを名前として使用
-            positions.push((format!("position_{}", idx + 1), line.to_string()));
+            // "sfen " プレフィックスがあれば除去（start_sfens_ply32.txt 等の形式に対応）
+            let sfen = line.strip_prefix("sfen ").unwrap_or(line);
+            positions.push((format!("position_{}", idx + 1), sfen.to_string()));
         }
     }
 

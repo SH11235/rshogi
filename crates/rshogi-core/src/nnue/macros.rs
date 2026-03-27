@@ -80,6 +80,20 @@ macro_rules! define_l1_variants {
                 }
             }
 
+            /// Accumulator をフル再計算（キャッシュ使用版）
+            #[inline(always)]
+            pub fn refresh_accumulator_with_cache(
+                &self,
+                pos: &Position,
+                stack: &mut $Stack,
+                cache: &mut $crate::nnue::accumulator::AccumulatorCacheGeneric,
+            ) {
+                let acc = stack.top_mut();
+                match self {
+                    $(Self::$Var(net) => net.refresh_accumulator_with_cache(pos, acc, cache),)+
+                }
+            }
+
             /// 差分更新（dirty piece ベース）
             #[inline(always)]
             pub fn update_accumulator(
@@ -92,6 +106,22 @@ macro_rules! define_l1_variants {
                 let (acc, prev) = stack.top_and_source(source_idx);
                 match self {
                     $(Self::$Var(net) => net.update_accumulator(pos, dirty, acc, prev),)+
+                }
+            }
+
+            /// 差分更新（dirty piece ベース、キャッシュ使用版）
+            #[inline(always)]
+            pub fn update_accumulator_with_cache(
+                &self,
+                pos: &Position,
+                dirty: &DirtyPiece,
+                stack: &mut $Stack,
+                source_idx: usize,
+                cache: &mut $crate::nnue::accumulator::AccumulatorCacheGeneric,
+            ) {
+                let (acc, prev) = stack.top_and_source(source_idx);
+                match self {
+                    $(Self::$Var(net) => net.update_accumulator_with_cache(pos, dirty, acc, prev, cache),)+
                 }
             }
 

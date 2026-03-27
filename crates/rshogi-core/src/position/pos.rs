@@ -114,8 +114,8 @@ impl Position {
     /// 状態スタックに新しい StateInfo を積む（必要なら再利用）
     #[inline]
     fn push_state(&mut self, mut st: StateInfo) {
-        st.previous = Some(self.state_idx);
         let next_idx = self.state_idx + 1;
+        st.previous = self.state_idx;
         if self.state_stack.len() > next_idx {
             self.state_stack[next_idx] = st;
         } else {
@@ -378,7 +378,7 @@ impl Position {
 
     /// 直前の局面の状態（StateInfo）を取得
     pub fn previous_state(&self) -> Option<&StateInfo> {
-        self.cur_state().previous.map(|idx| &self.state_stack[idx])
+        self.cur_state().previous_index().map(|idx| &self.state_stack[idx])
     }
 
     /// 任意のインデックスのStateInfoを取得（NNUE祖先探索用）
@@ -1225,7 +1225,8 @@ impl Position {
         self.game_ply -= 1;
         let us = self.side_to_move;
         let captured = self.cur_state().captured_piece;
-        let prev_idx = self.cur_state().previous.expect("No previous state for undo");
+        let prev_idx = self.cur_state().previous;
+        assert_ne!(prev_idx, StateInfo::NO_PREVIOUS, "No previous state for undo");
         let update_board_effects = Self::should_update_board_effects();
         if update_board_effects {
             self.ensure_board_effects();
@@ -1384,7 +1385,8 @@ impl Position {
     /// null moveを戻す
     pub fn undo_null_move(&mut self) {
         self.side_to_move = !self.side_to_move;
-        let prev_idx = self.cur_state().previous.expect("No previous state for undo_null_move");
+        let prev_idx = self.cur_state().previous;
+        assert_ne!(prev_idx, StateInfo::NO_PREVIOUS, "No previous state for undo_null_move");
         self.state_idx = prev_idx;
     }
 
@@ -1475,7 +1477,8 @@ impl Position {
         self.side_to_move = !self.side_to_move;
         self.game_ply -= 1;
 
-        let prev_idx = self.cur_state().previous.expect("No previous state for undo_pass_move");
+        let prev_idx = self.cur_state().previous;
+        assert_ne!(prev_idx, StateInfo::NO_PREVIOUS, "No previous state for undo_pass_move");
         self.state_idx = prev_idx;
     }
 
@@ -1483,7 +1486,7 @@ impl Position {
     fn update_repetition_info(&mut self) {
         // 初期化
         let side = self.side_to_move;
-        let (plies_from_null, board_key, hand_snapshot, prev_idx_opt, cc_side, cc_opp) = {
+        let (plies_from_null, board_key, hand_snapshot, prev_idx, cc_side, cc_opp) = {
             let st = self.cur_state();
             (
                 st.plies_from_null,
@@ -1500,59 +1503,63 @@ impl Position {
         let mut repetition_times = 0;
         let mut repetition_type = RepetitionState::None;
 
-        if max_back >= 4 {
+        if max_back >= 4 && prev_idx != StateInfo::NO_PREVIOUS {
             // 千日手は最短4手で成立するため4手前から比較開始
             let mut dist = 4;
-            let mut st_idx_opt = prev_idx_opt
-                .and_then(|idx| self.state_stack[idx].previous) // 2手前
-                .and_then(|idx| self.state_stack[idx].previous) // 3手前
-                .and_then(|idx| self.state_stack[idx].previous); // 4手前
-
-            while dist <= max_back {
-                if let Some(st_idx) = st_idx_opt {
-                    let stp = &self.state_stack[st_idx];
-                    if stp.board_key == board_key {
-                        let prev_hand = stp.hand_snapshot[side.index()];
-                        let cur_hand = hand_snapshot[side.index()];
-
-                        if cur_hand == prev_hand {
-                            let times = stp.repetition_times + 1;
-                            repetition_times = times;
-                            repetition = if times >= 3 { -dist } else { dist };
-
-                            let mut rep_type = if dist <= cc_side {
-                                RepetitionState::Lose
-                            } else if dist <= cc_opp {
-                                RepetitionState::Win
-                            } else {
-                                RepetitionState::Draw
-                            };
-
-                            if stp.repetition_times > 0 && stp.repetition_type != rep_type {
-                                rep_type = RepetitionState::Draw;
-                            }
-
-                            repetition_type = rep_type;
-                            break;
-                        }
-
-                        if cur_hand.is_superior_or_equal(prev_hand) {
-                            repetition_type = RepetitionState::Superior;
-                            repetition = dist;
-                            break;
-                        }
-
-                        if prev_hand.is_superior_or_equal(cur_hand) {
-                            repetition_type = RepetitionState::Inferior;
-                            repetition = dist;
-                            break;
-                        }
-                    }
-                    st_idx_opt = stp.previous.and_then(|idx| self.state_stack[idx].previous);
-                    dist += 2;
-                } else {
+            let mut st_idx = prev_idx;
+            for _ in 0..3 {
+                st_idx = self.state_stack[st_idx].previous;
+                if st_idx == StateInfo::NO_PREVIOUS {
                     break;
                 }
+            }
+
+            while dist <= max_back && st_idx != StateInfo::NO_PREVIOUS {
+                let stp = &self.state_stack[st_idx];
+                if stp.board_key == board_key {
+                    let prev_hand = stp.hand_snapshot[side.index()];
+                    let cur_hand = hand_snapshot[side.index()];
+
+                    if cur_hand == prev_hand {
+                        let times = stp.repetition_times + 1;
+                        repetition_times = times;
+                        repetition = if times >= 3 { -dist } else { dist };
+
+                        let mut rep_type = if dist <= cc_side {
+                            RepetitionState::Lose
+                        } else if dist <= cc_opp {
+                            RepetitionState::Win
+                        } else {
+                            RepetitionState::Draw
+                        };
+
+                        if stp.repetition_times > 0 && stp.repetition_type != rep_type {
+                            rep_type = RepetitionState::Draw;
+                        }
+
+                        repetition_type = rep_type;
+                        break;
+                    }
+
+                    if cur_hand.is_superior_or_equal(prev_hand) {
+                        repetition_type = RepetitionState::Superior;
+                        repetition = dist;
+                        break;
+                    }
+
+                    if prev_hand.is_superior_or_equal(cur_hand) {
+                        repetition_type = RepetitionState::Inferior;
+                        repetition = dist;
+                        break;
+                    }
+                }
+
+                let prev_same_side = stp.previous;
+                if prev_same_side == StateInfo::NO_PREVIOUS {
+                    break;
+                }
+                st_idx = self.state_stack[prev_same_side].previous;
+                dist += 2;
             }
         }
 

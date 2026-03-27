@@ -11,7 +11,7 @@
 use super::bona_piece::ExtBonaPiece;
 use super::constants::{NUM_REFRESH_TRIGGERS, TRANSFORMED_FEATURE_DIMENSIONS};
 use super::piece_list::PieceNumber;
-use crate::types::{Color, MAX_PLY, Value};
+use crate::types::{Color, MAX_PLY, Square, Value};
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
@@ -606,6 +606,157 @@ impl AccumulatorStack {
 impl Default for AccumulatorStack {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// =============================================================================
+// AccumulatorCacheGeneric - 汎用 Finny Tables（非LayerStacks用）
+// =============================================================================
+
+/// 玉位置×視点ごとのアキュムレータキャッシュ（Finny Tables、汎用版）
+///
+/// 81マス × 2視点 = 162 エントリ。
+/// 非LayerStacks（HalfKP/HalfKA/HalfKA_hm）で使用する。
+/// L1サイズは実行時に決定される。
+///
+/// アキュムレータ値は1つの連続した AlignedBox に格納し、
+/// エントリごとにスライスで参照する（162個の個別ヒープ割り当てを回避）。
+pub struct AccumulatorCacheGeneric {
+    /// 全エントリのアキュムレータ値を連続格納 [NUM_ENTRIES * l1]
+    accumulations: AlignedBox<i16>,
+    /// 各エントリのアクティブ特徴インデックス（ソート済み）
+    active_indices: Box<[[u32; MAX_ACTIVE_FEATURES]]>,
+    /// 各エントリの有効特徴数
+    num_active: Box<[u16]>,
+    /// 各エントリの有効フラグ
+    valid: Box<[bool]>,
+    /// L1 サイズ
+    l1: usize,
+}
+
+/// エントリ数: 81マス × 2視点
+const NUM_CACHE_ENTRIES: usize = Square::NUM * 2;
+
+impl AccumulatorCacheGeneric {
+    /// 新規作成（全エントリ無効）
+    pub fn new(l1: usize) -> Self {
+        Self {
+            accumulations: AlignedBox::new_zeroed(NUM_CACHE_ENTRIES * l1),
+            active_indices: vec![[0u32; MAX_ACTIVE_FEATURES]; NUM_CACHE_ENTRIES].into_boxed_slice(),
+            num_active: vec![0u16; NUM_CACHE_ENTRIES].into_boxed_slice(),
+            valid: vec![false; NUM_CACHE_ENTRIES].into_boxed_slice(),
+            l1,
+        }
+    }
+
+    /// 全エントリを無効化
+    pub fn invalidate(&mut self) {
+        for v in self.valid.iter_mut() {
+            *v = false;
+        }
+    }
+
+    /// エントリのアキュムレータスライスを取得
+    #[inline]
+    fn acc_slice(&self, entry_idx: usize) -> &[i16] {
+        let start = entry_idx * self.l1;
+        &self.accumulations[start..start + self.l1]
+    }
+
+    /// エントリのアキュムレータスライスを取得（可変）
+    #[inline]
+    fn acc_slice_mut(&mut self, entry_idx: usize) -> &mut [i16] {
+        let start = entry_idx * self.l1;
+        &mut self.accumulations[start..start + self.l1]
+    }
+
+    /// キャッシュからの差分で refresh を実行
+    ///
+    /// キャッシュが有効な場合、現在のアクティブ特徴量との差分を計算し、
+    /// add/sub のみでアキュムレータを更新する。
+    /// キャッシュが無効な場合は通常の full refresh を行い、キャッシュを更新する。
+    pub(crate) fn refresh_or_cache<FA, FS>(
+        &mut self,
+        king_sq: Square,
+        perspective: Color,
+        active: &[u32],
+        biases: &[i16],
+        accumulation: &mut [i16],
+        add_fn: FA,
+        sub_fn: FS,
+    ) where
+        FA: Fn(&mut [i16], usize),
+        FS: Fn(&mut [i16], usize),
+    {
+        let entry_idx = king_sq.raw() as usize * 2 + perspective as usize;
+
+        if self.valid[entry_idx] {
+            // キャッシュが有効 → 差分更新
+            accumulation.copy_from_slice(self.acc_slice(entry_idx));
+
+            // ソート済み配列のマージベース差分（O(n)）
+            let cached = &self.active_indices[entry_idx][..self.num_active[entry_idx] as usize];
+            Self::apply_diff(cached, active, accumulation, &add_fn, &sub_fn);
+        } else {
+            // キャッシュ無効 → バイアスから full refresh
+            accumulation.copy_from_slice(biases);
+            for &idx in active {
+                add_fn(accumulation, idx as usize);
+            }
+        }
+
+        // キャッシュを更新
+        self.acc_slice_mut(entry_idx).copy_from_slice(accumulation);
+        debug_assert!(
+            active.len() <= MAX_ACTIVE_FEATURES,
+            "active features overflow: {}",
+            active.len()
+        );
+        let n = active.len().min(MAX_ACTIVE_FEATURES);
+        self.active_indices[entry_idx][..n].copy_from_slice(&active[..n]);
+        self.num_active[entry_idx] = n as u16;
+        self.valid[entry_idx] = true;
+    }
+
+    /// ソート済み配列のマージベース差分を適用
+    #[inline]
+    fn apply_diff<FA, FS>(
+        cached: &[u32],
+        current: &[u32],
+        accumulation: &mut [i16],
+        add_fn: &FA,
+        sub_fn: &FS,
+    ) where
+        FA: Fn(&mut [i16], usize),
+        FS: Fn(&mut [i16], usize),
+    {
+        let mut ci = 0;
+        let mut ni = 0;
+
+        while ci < cached.len() && ni < current.len() {
+            let c = cached[ci];
+            let n = current[ni];
+            if c < n {
+                sub_fn(accumulation, c as usize);
+                ci += 1;
+            } else if c > n {
+                add_fn(accumulation, n as usize);
+                ni += 1;
+            } else {
+                ci += 1;
+                ni += 1;
+            }
+        }
+
+        while ci < cached.len() {
+            sub_fn(accumulation, cached[ci] as usize);
+            ci += 1;
+        }
+
+        while ni < current.len() {
+            add_fn(accumulation, current[ni] as usize);
+            ni += 1;
+        }
     }
 }
 

@@ -4,22 +4,49 @@
 //! 片側 1536 次元×両視点の中間表現を生成する。
 
 use super::accumulator::{Aligned, AlignedBox};
-use super::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES};
+use super::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES};
 use super::accumulator_layer_stacks::{
     AccumulatorCacheLayerStacks, AccumulatorLayerStacks, AccumulatorStackLayerStacks,
 };
 use super::constants::{HALFKA_HM_DIMENSIONS, NNUE_PYTORCH_L1};
-use super::features::{FeatureSet, HalfKA_hm_FeatureSet};
+use super::features::{Feature, FeatureSet, HalfKA_hm, HalfKA_hm_FeatureSet};
 use super::leb128::read_compressed_tensor_i16_all;
 use crate::position::Position;
 use crate::types::Color;
 use std::io::{self, Read};
+use std::mem::MaybeUninit;
 
 /// 特徴インデックスの範囲外アクセス時のパニック
 #[cold]
 #[inline(never)]
 fn feature_index_oob(index: usize, max: usize) -> ! {
     panic!("Feature index out of range: {index} (max: {max})")
+}
+
+#[inline]
+fn append_changed_indices(
+    dirty_piece: &DirtyPiece,
+    perspective: Color,
+    king_sq: crate::types::Square,
+    removed: &mut IndexList<MAX_CHANGED_FEATURES>,
+    added: &mut IndexList<MAX_CHANGED_FEATURES>,
+) {
+    <HalfKA_hm as Feature>::append_changed_indices(
+        dirty_piece,
+        perspective,
+        king_sq,
+        removed,
+        added,
+    );
+}
+
+#[inline]
+fn append_active_indices(
+    pos: &Position,
+    perspective: Color,
+    active: &mut IndexList<MAX_ACTIVE_FEATURES>,
+) {
+    <HalfKA_hm as Feature>::append_active_indices(pos, perspective, active);
 }
 
 /// nnue-pytorch用のFeatureTransformer（1536次元出力）
@@ -131,7 +158,8 @@ impl FeatureTransformerLayerStacks {
             accumulation.copy_from_slice(&self.biases.0);
 
             // アクティブな特徴量の重みを加算
-            let active_indices = self.get_active_features(pos, perspective);
+            let mut active_indices = IndexList::new();
+            append_active_indices(pos, perspective, &mut active_indices);
             for &index in active_indices.iter() {
                 self.add_weights(accumulation, index);
             }
@@ -158,16 +186,21 @@ impl FeatureTransformerLayerStacks {
                 let accumulation = acc.get_mut(p);
                 accumulation.copy_from_slice(&self.biases.0);
 
-                let active_indices = self.get_active_features(pos, perspective);
+                let mut active_indices = IndexList::new();
+                append_active_indices(pos, perspective, &mut active_indices);
                 for &index in active_indices.iter() {
                     self.add_weights(accumulation, index);
                 }
             } else {
                 // 差分更新
-                let (removed, added) = HalfKA_hm_FeatureSet::collect_changed_indices(
+                let mut removed = IndexList::new();
+                let mut added = IndexList::new();
+                append_changed_indices(
                     dirty_piece,
                     perspective,
                     pos.king_square(perspective),
+                    &mut removed,
+                    &mut added,
                 );
 
                 let prev = prev_acc.get(p);
@@ -210,10 +243,14 @@ impl FeatureTransformerLayerStacks {
                 self.refresh_perspective_with_cache(pos, perspective, acc.get_mut(p), cache);
             } else {
                 // 差分更新（キャッシュ不使用）
-                let (removed, added) = HalfKA_hm_FeatureSet::collect_changed_indices(
+                let mut removed = IndexList::new();
+                let mut added = IndexList::new();
+                append_changed_indices(
                     dirty_piece,
                     perspective,
                     pos.king_square(perspective),
+                    &mut removed,
+                    &mut added,
                 );
 
                 let prev = prev_acc.get(p);
@@ -262,15 +299,21 @@ impl FeatureTransformerLayerStacks {
         cache: &mut AccumulatorCacheLayerStacks,
     ) {
         let king_sq = pos.king_square(perspective);
-        let active_indices = self.get_active_features(pos, perspective);
+        let mut active_indices = IndexList::new();
+        append_active_indices(pos, perspective, &mut active_indices);
 
-        // IndexList を u32 のソート済み配列に変換（スタック上に確保）
-        let mut sorted_buf = [0u32; MAX_ACTIVE_FEATURES];
+        // 使用領域だけ初期化して、全 zero fill を避ける。
+        let mut sorted_buf = [const { MaybeUninit::<u32>::uninit() }; MAX_ACTIVE_FEATURES];
         let len = active_indices.len();
-        for (i, &idx) in active_indices.iter().enumerate() {
-            sorted_buf[i] = idx as u32;
+        for (slot, &idx) in sorted_buf[..len].iter_mut().zip(active_indices.iter()) {
+            slot.write(idx as u32);
         }
-        let sorted = &mut sorted_buf[..len];
+        // SAFETY:
+        // - `sorted_buf[..len]` は直前のループで全要素を初期化済み。
+        // - `MaybeUninit<u32>` は `u32` と同じレイアウト・アライメントを持つ。
+        // - `len <= MAX_ACTIVE_FEATURES` は `IndexList` の不変条件から保証される。
+        let sorted =
+            unsafe { std::slice::from_raw_parts_mut(sorted_buf.as_mut_ptr() as *mut u32, len) };
         sorted.sort_unstable();
 
         cache.refresh_or_cache(
@@ -315,10 +358,14 @@ impl FeatureTransformerLayerStacks {
                 );
 
                 let king_sq = pos.king_square(perspective);
-                let (removed, added) = HalfKA_hm_FeatureSet::collect_changed_indices(
+                let mut removed = IndexList::new();
+                let mut added = IndexList::new();
+                append_changed_indices(
                     &dirty_piece,
                     perspective,
                     king_sq,
+                    &mut removed,
+                    &mut added,
                 );
 
                 let p = perspective as usize;
@@ -336,16 +383,6 @@ impl FeatureTransformerLayerStacks {
         stack.current_mut().accumulator.computed_accumulation = true;
         stack.current_mut().accumulator.computed_score = false;
         true
-    }
-
-    /// アクティブな特徴量のインデックスリストを取得
-    #[inline]
-    fn get_active_features(
-        &self,
-        pos: &Position,
-        perspective: Color,
-    ) -> IndexList<MAX_ACTIVE_FEATURES> {
-        HalfKA_hm_FeatureSet::collect_active_indices(pos, perspective)
     }
 
     /// 重みを累積値に加算（SIMD最適化版）

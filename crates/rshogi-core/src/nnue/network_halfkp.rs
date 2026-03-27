@@ -39,11 +39,12 @@ use std::io::{self, Read, Seek};
 use std::marker::PhantomData;
 
 use super::accumulator::{
-    Aligned as AlignedGeneric, AlignedBox, DirtyPiece, IndexList, MAX_PATH_LENGTH,
+    AccumulatorCacheGeneric, Aligned as AlignedGeneric, AlignedBox, DirtyPiece, IndexList,
+    MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES, MAX_PATH_LENGTH,
 };
 use super::activation::FtActivation;
 use super::constants::{FV_SCALE, HALFKP_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION};
-use super::features::{FeatureSet, HalfKPFeatureSet};
+use super::features::{Feature, FeatureSet, HalfKP, HalfKPFeatureSet};
 use super::network::get_fv_scale_override;
 use crate::position::Position;
 use crate::types::{Color, Value};
@@ -533,10 +534,14 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
                     self.add_weights(&mut acc.accumulation[p].0, index);
                 }
             } else {
-                let (removed, added) = HalfKPFeatureSet::collect_changed_indices(
+                let mut removed = IndexList::<MAX_CHANGED_FEATURES>::new();
+                let mut added = IndexList::<MAX_CHANGED_FEATURES>::new();
+                <HalfKP as Feature>::append_changed_indices(
                     dirty_piece,
                     perspective,
                     pos.king_square(perspective),
+                    &mut removed,
+                    &mut added,
                 );
 
                 acc.accumulation[p].0.copy_from_slice(&prev_acc.accumulation[p].0);
@@ -551,6 +556,119 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
         }
 
         acc.computed_accumulation = true;
+    }
+
+    /// 差分更新（キャッシュ使用版）
+    ///
+    /// 玉移動時に full refresh が必要な視点では、AccumulatorCacheGeneric（Finny Tables）
+    /// を参照して差分更新を行う。
+    pub fn update_accumulator_with_cache(
+        &self,
+        pos: &Position,
+        dirty_piece: &DirtyPiece,
+        acc: &mut AccumulatorHalfKP<L1>,
+        prev_acc: &AccumulatorHalfKP<L1>,
+        cache: &mut AccumulatorCacheGeneric,
+    ) {
+        for perspective in [Color::Black, Color::White] {
+            let p = perspective as usize;
+            let reset = HalfKPFeatureSet::needs_refresh(dirty_piece, perspective);
+
+            if reset {
+                // 玉が移動した場合はキャッシュ経由で refresh
+                self.refresh_perspective_with_cache(
+                    pos,
+                    perspective,
+                    &mut acc.accumulation[p].0,
+                    cache,
+                );
+            } else {
+                // 差分更新（キャッシュ不使用）
+                let mut removed = IndexList::<MAX_CHANGED_FEATURES>::new();
+                let mut added = IndexList::<MAX_CHANGED_FEATURES>::new();
+                <HalfKP as Feature>::append_changed_indices(
+                    dirty_piece,
+                    perspective,
+                    pos.king_square(perspective),
+                    &mut removed,
+                    &mut added,
+                );
+
+                acc.accumulation[p].0.copy_from_slice(&prev_acc.accumulation[p].0);
+
+                for &index in removed.iter() {
+                    self.sub_weights(&mut acc.accumulation[p].0, index);
+                }
+                for &index in added.iter() {
+                    self.add_weights(&mut acc.accumulation[p].0, index);
+                }
+            }
+        }
+
+        acc.computed_accumulation = true;
+    }
+
+    /// キャッシュ使用版の refresh（両視点）
+    pub fn refresh_accumulator_with_cache(
+        &self,
+        pos: &Position,
+        acc: &mut AccumulatorHalfKP<L1>,
+        cache: &mut AccumulatorCacheGeneric,
+    ) {
+        for perspective in [Color::Black, Color::White] {
+            let p = perspective as usize;
+            self.refresh_perspective_with_cache(
+                pos,
+                perspective,
+                &mut acc.accumulation[p].0,
+                cache,
+            );
+        }
+
+        acc.computed_accumulation = true;
+    }
+
+    /// 単一視点のキャッシュ経由 refresh
+    fn refresh_perspective_with_cache(
+        &self,
+        pos: &Position,
+        perspective: Color,
+        accumulation: &mut [i16; L1],
+        cache: &mut AccumulatorCacheGeneric,
+    ) {
+        let king_sq = pos.king_square(perspective);
+        let active_indices = HalfKPFeatureSet::collect_active_indices(pos, perspective);
+
+        // IndexList を u32 のソート済み配列に変換
+        let mut sorted_buf = [0u32; MAX_ACTIVE_FEATURES];
+        let len = active_indices.len();
+        for (i, &idx) in active_indices.iter().enumerate() {
+            sorted_buf[i] = idx as u32;
+        }
+        let sorted = &mut sorted_buf[..len];
+        sorted.sort_unstable();
+
+        cache.refresh_or_cache(
+            king_sq,
+            perspective,
+            sorted,
+            &self.biases.0,
+            accumulation,
+            |acc, idx| {
+                debug_assert_eq!(acc.len(), L1);
+                // SAFETY: acc は呼び出し元で &mut [i16; L1] から作られたスライス。
+                // キャッシュ生成時も同じ L1 サイズで初期化されており、長さは常に一致する。
+                // 固定サイズ配列への変換により SIMD ループの L1/16 がコンパイル時定数になる。
+                let arr: &mut [i16; L1] = unsafe { &mut *(acc.as_mut_ptr() as *mut [i16; L1]) };
+                self.add_weights(arr, idx);
+            },
+            |acc, idx| {
+                debug_assert_eq!(acc.len(), L1);
+                // SAFETY: 上記と同じ理由で安全
+                let arr: &mut [i16; L1] = unsafe { &mut *(acc.as_mut_ptr() as *mut [i16; L1]) };
+                self.sub_weights(arr, idx);
+            },
+        );
     }
 
     /// 複数手分の差分を適用してアキュムレータを更新
@@ -583,8 +701,15 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
                 );
 
                 let king_sq = pos.king_square(perspective);
-                let (removed, added) =
-                    HalfKPFeatureSet::collect_changed_indices(&dirty_piece, perspective, king_sq);
+                let mut removed = IndexList::<MAX_CHANGED_FEATURES>::new();
+                let mut added = IndexList::<MAX_CHANGED_FEATURES>::new();
+                <HalfKP as Feature>::append_changed_indices(
+                    &dirty_piece,
+                    perspective,
+                    king_sq,
+                    &mut removed,
+                    &mut added,
+                );
 
                 let p = perspective as usize;
                 let accumulation =
@@ -1162,6 +1287,16 @@ impl<
         self.feature_transformer.refresh_accumulator(pos, acc);
     }
 
+    /// Accumulator をリフレッシュ（キャッシュ使用版）
+    pub fn refresh_accumulator_with_cache(
+        &self,
+        pos: &Position,
+        acc: &mut AccumulatorHalfKP<L1>,
+        cache: &mut AccumulatorCacheGeneric,
+    ) {
+        self.feature_transformer.refresh_accumulator_with_cache(pos, acc, cache);
+    }
+
     /// Accumulator を差分更新
     pub fn update_accumulator(
         &self,
@@ -1171,6 +1306,24 @@ impl<
         prev_acc: &AccumulatorHalfKP<L1>,
     ) {
         self.feature_transformer.update_accumulator(pos, dirty_piece, acc, prev_acc);
+    }
+
+    /// Accumulator を差分更新（キャッシュ使用版）
+    pub fn update_accumulator_with_cache(
+        &self,
+        pos: &Position,
+        dirty_piece: &DirtyPiece,
+        acc: &mut AccumulatorHalfKP<L1>,
+        prev_acc: &AccumulatorHalfKP<L1>,
+        cache: &mut AccumulatorCacheGeneric,
+    ) {
+        self.feature_transformer.update_accumulator_with_cache(
+            pos,
+            dirty_piece,
+            acc,
+            prev_acc,
+            cache,
+        );
     }
 
     /// 複数手分の差分を適用

@@ -29,6 +29,13 @@ const L2_PADDED_INPUT: usize = super::layers::padded_input(LAYER_STACK_L2_IN);
 /// Output 入力のパディング済み次元数（padded_input(32) = 32）
 const OUTPUT_PADDED_INPUT: usize = super::layers::padded_input(NNUE_PYTORCH_L3);
 
+#[cfg(test)]
+fn sqr_clipped_relu_explicit<const DIM: usize>(input: &[i32; DIM], output: &mut [u8; DIM]) {
+    for i in 0..DIM {
+        output[i] = ((input[i] as i64 * input[i] as i64) >> 19).clamp(0, 127) as u8;
+    }
+}
+
 // =============================================================================
 // LayerStack 単一バケット
 // =============================================================================
@@ -73,8 +80,13 @@ impl LayerStackBucket {
     /// 入力: SqrClippedReLU後の1536次元 (u8)
     /// 出力: スケーリング前の生スコア (i32)
     pub fn propagate(&self, input: &[u8; NNUE_PYTORCH_L1]) -> i32 {
-        // L1: 1536 → 16
         let mut l1_out = [0i32; LAYER_STACK_L1_OUT];
+        let mut l2_input = Aligned([0u8; L2_PADDED_INPUT]);
+        let mut l2_out = [0i32; NNUE_PYTORCH_L3];
+        let mut l2_relu = Aligned([0u8; OUTPUT_PADDED_INPUT]);
+        let mut output_arr = [0i32; 1];
+
+        // L1: 1536 → 16
         self.l1.propagate(input, &mut l1_out);
 
         // Split: [15, 1]
@@ -82,31 +94,21 @@ impl LayerStackBucket {
         let l1_skip = l1_out[NNUE_PYTORCH_L2]; // index 15
 
         // ClippedReLU + Sqr for first 15 elements, then concat with original
-        // 量子化: i32 >> 6 → clamp(0, 127)
-        let mut l2_input = Aligned([0u8; L2_PADDED_INPUT]);
-
         for (i, &val) in l1_out.iter().enumerate().take(NNUE_PYTORCH_L2) {
-            // SqrClippedReLU: min(127, (input^2) >> 19)
             let input_val = val as i64;
             let sqr = ((input_val * input_val) >> 19).clamp(0, 127) as u8;
-            // ClippedReLU: clamp(input >> WeightScaleBits, 0, 127)
             let clamped = (val >> 6).clamp(0, 127) as u8;
             l2_input.0[i] = sqr;
             l2_input.0[NNUE_PYTORCH_L2 + i] = clamped;
         }
 
         // L2: 30 → 32
-        let mut l2_out = [0i32; NNUE_PYTORCH_L3];
         self.l2.propagate(&l2_input.0, &mut l2_out);
-
-        // ClippedReLU
-        let mut l2_relu = Aligned([0u8; OUTPUT_PADDED_INPUT]);
         for (out, &val) in l2_relu.0.iter_mut().zip(l2_out.iter()) {
             *out = (val >> 6).clamp(0, 127) as u8;
         }
 
         // Output: 32 → 1
-        let mut output_arr = [0i32; 1];
         self.output.propagate(&l2_relu.0, &mut output_arr);
 
         // Skip connection
@@ -121,15 +123,16 @@ impl LayerStackBucket {
         &self,
         input: &[u8; NNUE_PYTORCH_L1],
     ) -> (i32, [i32; LAYER_STACK_L1_OUT], i32) {
-        // L1: 1536 → 16
         let mut l1_out = [0i32; LAYER_STACK_L1_OUT];
+        let mut l2_input = Aligned([0u8; L2_PADDED_INPUT]);
+        let mut l2_out = [0i32; NNUE_PYTORCH_L3];
+        let mut l2_relu = Aligned([0u8; OUTPUT_PADDED_INPUT]);
+        let mut output_arr = [0i32; 1];
+
         self.l1.propagate(input, &mut l1_out);
 
         // Split: [15, 1]
         let l1_skip = l1_out[NNUE_PYTORCH_L2]; // index 15
-
-        // ClippedReLU + Sqr for first 15 elements
-        let mut l2_input = Aligned([0u8; L2_PADDED_INPUT]);
         for (i, &val) in l1_out.iter().enumerate().take(NNUE_PYTORCH_L2) {
             let input_val = val as i64;
             let sqr = ((input_val * input_val) >> 19).clamp(0, 127) as u8;
@@ -139,17 +142,12 @@ impl LayerStackBucket {
         }
 
         // L2: 30 → 32
-        let mut l2_out = [0i32; NNUE_PYTORCH_L3];
         self.l2.propagate(&l2_input.0, &mut l2_out);
-
-        // ClippedReLU
-        let mut l2_relu = Aligned([0u8; OUTPUT_PADDED_INPUT]);
         for (out, &val) in l2_relu.0.iter_mut().zip(l2_out.iter()) {
             *out = (val >> 6).clamp(0, 127) as u8;
         }
 
         // Output: 32 → 1
-        let mut output_arr = [0i32; 1];
         self.output.propagate(&l2_relu.0, &mut output_arr);
 
         // Skip connection
@@ -517,6 +515,8 @@ pub fn compute_king_ranks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nnue::accumulator::Aligned;
+    use crate::nnue::layers::ClippedReLU;
 
     #[test]
     fn test_layer_stack_bucket_new() {
@@ -721,5 +721,171 @@ mod tests {
 
         sqr_clipped_relu_transform(&us_acc.0, &them_acc.0, &mut output.0);
         assert!(output.0.iter().all(|&x| x == 0), "negative input should be clamped to 0");
+    }
+
+    #[test]
+    fn test_layer_stack_l2_input_matches_scalar_reference() {
+        let cases = [
+            [
+                -50000, -40000, -33000, -32768, -32000, -1000, 0, 64, 724, 8128, 8192, 8256, 20000,
+                32767, 40000, 50000,
+            ],
+            [
+                -1, 1, 63, 127, 128, 255, 256, 4096, 8191, 8192, 16384, 24576, 32768, 40000, 65535,
+                70000,
+            ],
+        ];
+
+        for l1_out in cases {
+            let mut l1_relu = [0u8; LAYER_STACK_L1_OUT];
+            let mut l2_input_opt = Aligned([0u8; L2_PADDED_INPUT]);
+            let mut l2_sqr = [0u8; LAYER_STACK_L1_OUT];
+
+            ClippedReLU::<LAYER_STACK_L1_OUT>::propagate(&l1_out, &mut l1_relu);
+            sqr_clipped_relu_explicit::<LAYER_STACK_L1_OUT>(&l1_out, &mut l2_sqr);
+            l2_input_opt.0[..LAYER_STACK_L1_OUT].copy_from_slice(&l2_sqr);
+            l2_input_opt.0[NNUE_PYTORCH_L2..NNUE_PYTORCH_L2 + NNUE_PYTORCH_L2]
+                .copy_from_slice(&l1_relu[..NNUE_PYTORCH_L2]);
+
+            let mut l2_input_ref = Aligned([0u8; L2_PADDED_INPUT]);
+            for (i, &val) in l1_out.iter().enumerate().take(NNUE_PYTORCH_L2) {
+                let input_val = i64::from(val);
+                l2_input_ref.0[i] = ((input_val * input_val) >> 19).clamp(0, 127) as u8;
+                l2_input_ref.0[NNUE_PYTORCH_L2 + i] = (val >> 6).clamp(0, 127) as u8;
+            }
+
+            assert_eq!(
+                l2_input_opt.0, l2_input_ref.0,
+                "optimized l2_input must match scalar reference for l1_out={l1_out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_layer_stack_l2_relu_matches_scalar_reference() {
+        let input = [
+            -50000, -40000, -33000, -32768, -32000, -1000, -1, 0, 1, 63, 64, 127, 128, 255, 256,
+            4096, 8191, 8192, 16384, 24576, 32767, 32768, 40000, 50000, 65535, 70000, 80000, 90000,
+            100000, 110000, 120000, 130000,
+        ];
+        let mut opt = [0u8; NNUE_PYTORCH_L3];
+        let mut reference = [0u8; NNUE_PYTORCH_L3];
+
+        ClippedReLU::<NNUE_PYTORCH_L3>::propagate(&input, &mut opt);
+        for (dst, &value) in reference.iter_mut().zip(input.iter()) {
+            *dst = (value >> 6).clamp(0, 127) as u8;
+        }
+
+        assert_eq!(opt, reference);
+    }
+
+    #[test]
+    fn test_layer_stack_bucket_propagate_matches_scalar_reference() {
+        fn affine_from_bytes<const INPUT_DIM: usize, const OUTPUT_DIM: usize>(
+            biases: [i32; OUTPUT_DIM],
+            weights: &[i8],
+        ) -> AffineTransform<INPUT_DIM, OUTPUT_DIM> {
+            let mut bytes = Vec::with_capacity(OUTPUT_DIM * 4 + weights.len());
+            for bias in biases {
+                bytes.extend_from_slice(&bias.to_le_bytes());
+            }
+            for &weight in weights {
+                bytes.push(weight as u8);
+            }
+            AffineTransform::<INPUT_DIM, OUTPUT_DIM>::read(&mut &bytes[..]).unwrap()
+        }
+
+        fn scalar_reference(bucket: &LayerStackBucket, input: &[u8; NNUE_PYTORCH_L1]) -> i32 {
+            let mut l1_out = [0i32; LAYER_STACK_L1_OUT];
+            bucket.l1.propagate(input, &mut l1_out);
+            let l1_skip = l1_out[NNUE_PYTORCH_L2];
+
+            let mut l2_input = Aligned([0u8; L2_PADDED_INPUT]);
+            for (i, &val) in l1_out.iter().enumerate().take(NNUE_PYTORCH_L2) {
+                let input_val = i64::from(val);
+                l2_input.0[i] = ((input_val * input_val) >> 19).clamp(0, 127) as u8;
+                l2_input.0[NNUE_PYTORCH_L2 + i] = (val >> 6).clamp(0, 127) as u8;
+            }
+
+            let mut l2_out = [0i32; NNUE_PYTORCH_L3];
+            bucket.l2.propagate(&l2_input.0, &mut l2_out);
+
+            let mut l2_relu = Aligned([0u8; OUTPUT_PADDED_INPUT]);
+            for (dst, &val) in l2_relu.0.iter_mut().zip(l2_out.iter()) {
+                *dst = (val >> 6).clamp(0, 127) as u8;
+            }
+
+            let mut output_arr = [0i32; 1];
+            bucket.output.propagate(&l2_relu.0, &mut output_arr);
+            output_arr[0] + l1_skip
+        }
+
+        let l1_biases = [
+            -50000, -40000, -33000, -32768, -32000, -1000, 0, 64, 724, 8128, 8192, 8256, 20000,
+            32767, 40000, 50000,
+        ];
+        let l1_weights = vec![0i8; LAYER_STACK_L1_OUT * NNUE_PYTORCH_L1];
+
+        let mut l2_biases = [0i32; NNUE_PYTORCH_L3];
+        for (i, bias) in l2_biases.iter_mut().enumerate() {
+            *bias = (i as i32 - 16) * 37;
+        }
+        let mut l2_weights = vec![0i8; NNUE_PYTORCH_L3 * L2_PADDED_INPUT];
+        for (i, weight) in l2_weights.iter_mut().enumerate() {
+            *weight = ((i as i32 % 7) - 3) as i8;
+        }
+
+        let output_biases = [123i32; 1];
+        let mut output_weights = vec![0i8; OUTPUT_PADDED_INPUT];
+        for (i, weight) in output_weights.iter_mut().enumerate() {
+            *weight = ((i as i32 % 5) - 2) as i8;
+        }
+
+        let bucket = LayerStackBucket {
+            l1: affine_from_bytes::<NNUE_PYTORCH_L1, LAYER_STACK_L1_OUT>(l1_biases, &l1_weights),
+            l2: affine_from_bytes::<LAYER_STACK_L2_IN, NNUE_PYTORCH_L3>(l2_biases, &l2_weights),
+            output: affine_from_bytes::<NNUE_PYTORCH_L3, 1>(output_biases, &output_weights),
+        };
+
+        let input = Aligned([0u8; NNUE_PYTORCH_L1]);
+        let mut l1_out = [0i32; LAYER_STACK_L1_OUT];
+        let mut l1_relu = [0u8; LAYER_STACK_L1_OUT];
+        let mut l2_input_opt = Aligned([0u8; L2_PADDED_INPUT]);
+        let mut l2_input_ref = Aligned([0u8; L2_PADDED_INPUT]);
+        let mut l2_sqr = [0u8; LAYER_STACK_L1_OUT];
+        let mut l2_out = [0i32; NNUE_PYTORCH_L3];
+        let mut l2_relu_opt = Aligned([0u8; OUTPUT_PADDED_INPUT]);
+        let mut l2_relu_ref = Aligned([0u8; OUTPUT_PADDED_INPUT]);
+
+        bucket.l1.propagate(&input.0, &mut l1_out);
+        ClippedReLU::<LAYER_STACK_L1_OUT>::propagate(&l1_out, &mut l1_relu);
+        sqr_clipped_relu_explicit::<LAYER_STACK_L1_OUT>(&l1_out, &mut l2_sqr);
+        l2_input_opt.0[..LAYER_STACK_L1_OUT].copy_from_slice(&l2_sqr);
+        l2_input_opt.0[NNUE_PYTORCH_L2..NNUE_PYTORCH_L2 + NNUE_PYTORCH_L2]
+            .copy_from_slice(&l1_relu[..NNUE_PYTORCH_L2]);
+
+        for (i, &val) in l1_out.iter().enumerate().take(NNUE_PYTORCH_L2) {
+            let input_val = i64::from(val);
+            l2_input_ref.0[i] = ((input_val * input_val) >> 19).clamp(0, 127) as u8;
+            l2_input_ref.0[NNUE_PYTORCH_L2 + i] = (val >> 6).clamp(0, 127) as u8;
+        }
+        assert_eq!(l2_input_opt.0, l2_input_ref.0);
+
+        bucket.l2.propagate(&l2_input_opt.0, &mut l2_out);
+        ClippedReLU::<NNUE_PYTORCH_L3>::propagate(&l2_out, &mut l2_relu_opt.0);
+        for (dst, &val) in l2_relu_ref.0.iter_mut().zip(l2_out.iter()) {
+            *dst = (val >> 6).clamp(0, 127) as u8;
+        }
+        assert_eq!(l2_relu_opt.0, l2_relu_ref.0);
+
+        let mut output_arr = [0i32; 1];
+        bucket.output.propagate(&l2_relu_opt.0, &mut output_arr);
+        let optimized_inline = output_arr[0] + l1_out[NNUE_PYTORCH_L2];
+
+        let optimized = bucket.propagate(&input.0);
+        let reference = scalar_reference(&bucket, &input.0);
+
+        assert_eq!(optimized_inline, reference);
+        assert_eq!(optimized, reference);
     }
 }
