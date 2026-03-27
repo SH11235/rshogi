@@ -891,7 +891,6 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKA_hm<INPUT, OU
             unsafe {
                 self.propagate_avx2_loop_inverted(input, output);
             }
-            return;
         }
 
         // SSSE3: ループ逆転最適化版
@@ -904,11 +903,42 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKA_hm<INPUT, OU
             unsafe {
                 self.propagate_ssse3_loop_inverted(input, output);
             }
-            return;
+        }
+
+        // WASM SIMD128: 標準形式の重みで内積
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        {
+            // SAFETY: WASM SIMD128 はアライメント不要
+            unsafe {
+                use crate::nnue::layers::{dot_i8x16_u8i8, hsum_i32x4};
+                use std::arch::wasm32::*;
+
+                let num_chunks = Self::PADDED_INPUT / 16;
+                let input_ptr = input.as_ptr();
+                let weights_ptr = self.weights.as_ptr();
+
+                output.copy_from_slice(&self.biases);
+                for (j, out) in output.iter_mut().enumerate() {
+                    let mut acc = i32x4_splat(0);
+                    let weight_row_offset = j * Self::PADDED_INPUT;
+
+                    for k in 0..num_chunks {
+                        let offset = k * 16;
+                        let in_vec = v128_load(input_ptr.add(offset) as *const v128);
+                        let w_vec =
+                            v128_load(weights_ptr.add(weight_row_offset + offset) as *const v128);
+                        acc = i32x4_add(acc, dot_i8x16_u8i8(in_vec, w_vec));
+                    }
+                    *out += hsum_i32x4(acc);
+                }
+            }
         }
 
         // スカラー fallback
-        #[allow(unreachable_code)]
+        #[cfg(not(any(
+            all(target_arch = "x86_64", target_feature = "ssse3"),
+            all(target_arch = "wasm32", target_feature = "simd128")
+        )))]
         {
             output.copy_from_slice(&self.biases);
             for (j, out) in output.iter_mut().enumerate() {

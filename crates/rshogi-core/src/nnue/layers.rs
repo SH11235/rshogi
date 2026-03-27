@@ -164,7 +164,7 @@ unsafe fn m128_add_dpbusd_epi32(
 /// WASM SIMD128: u8×i8 の16要素内積を i32x4 に集約
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline]
-unsafe fn dot_i8x16_u8i8_preexpanded(
+pub(crate) unsafe fn dot_i8x16_u8i8_preexpanded(
     in_lo: std::arch::wasm32::v128,
     in_hi: std::arch::wasm32::v128,
     w_vec: std::arch::wasm32::v128,
@@ -192,7 +192,7 @@ unsafe fn dot_i8x16_u8i8_preexpanded(
 /// WASM SIMD128: 入力ベクトルをu16拡張して内積を計算
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline]
-unsafe fn dot_i8x16_u8i8(
+pub(crate) unsafe fn dot_i8x16_u8i8(
     in_vec: std::arch::wasm32::v128,
     w_vec: std::arch::wasm32::v128,
 ) -> std::arch::wasm32::v128 {
@@ -208,7 +208,7 @@ unsafe fn dot_i8x16_u8i8(
 /// WASM SIMD128: i32x4 の水平加算
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline]
-unsafe fn hsum_i32x4(v: std::arch::wasm32::v128) -> i32 {
+pub(crate) unsafe fn hsum_i32x4(v: std::arch::wasm32::v128) -> i32 {
     // SAFETY: 呼び出し側が wasm32 simd128 フィーチャを保証する
     unsafe {
         use std::arch::wasm32::*;
@@ -222,7 +222,7 @@ unsafe fn hsum_i32x4(v: std::arch::wasm32::v128) -> i32 {
 /// WASM SIMD128: 2本のi32x4を水平加算（シャッフル + 加算）
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline]
-unsafe fn hadd_i32x4(
+pub(crate) unsafe fn hadd_i32x4(
     x0: std::arch::wasm32::v128,
     x1: std::arch::wasm32::v128,
 ) -> std::arch::wasm32::v128 {
@@ -236,7 +236,7 @@ unsafe fn hadd_i32x4(
 /// WASM SIMD128: 4本のi32x4を水平加算して1本のi32x4に詰める
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline]
-unsafe fn haddx4(
+pub(crate) unsafe fn haddx4(
     z0: std::arch::wasm32::v128,
     z1: std::arch::wasm32::v128,
     z2: std::arch::wasm32::v128,

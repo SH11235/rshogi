@@ -304,14 +304,13 @@ pub fn sqr_clipped_relu_transform(
                 }
             }
         }
-        return;
     }
 
     // AVX2: 256bit = 16 x i16、2セット同時処理で 32 i16 → 32 u8
     #[cfg(all(
         target_arch = "x86_64",
         target_feature = "avx2",
-        not(target_feature = "avx512bw")
+        not(all(target_feature = "avx512f", target_feature = "avx512bw"))
     ))]
     {
         // SAFETY:
@@ -355,7 +354,6 @@ pub fn sqr_clipped_relu_transform(
                 }
             }
         }
-        return;
     }
 
     // SSE2: 128bit = 8 x i16、2セット同時処理で 16 i16 → 16 u8
@@ -398,7 +396,6 @@ pub fn sqr_clipped_relu_transform(
                 }
             }
         }
-        return;
     }
 
     // WASM SIMD128: 128bit = 8 x i16
@@ -436,11 +433,13 @@ pub fn sqr_clipped_relu_transform(
                 }
             }
         }
-        return;
     }
 
     // スカラーフォールバック
-    #[allow(unreachable_code)]
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_feature = "sse2"),
+        all(target_arch = "wasm32", target_feature = "simd128")
+    )))]
     {
         // 前半768要素: us_acc[0..768] * us_acc[768..1536]
         // 後半768要素: them_acc[0..768] * them_acc[768..1536]
