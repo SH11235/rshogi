@@ -94,19 +94,13 @@ impl LayerStackBucket {
         let l1_skip = l1_out[NNUE_PYTORCH_L2]; // index 15
 
         // ClippedReLU + Sqr for first 15 elements, then concat with original
-        for (i, &val) in l1_out.iter().enumerate().take(NNUE_PYTORCH_L2) {
-            let input_val = val as i64;
-            let sqr = ((input_val * input_val) >> 19).clamp(0, 127) as u8;
-            let clamped = (val >> 6).clamp(0, 127) as u8;
-            l2_input.0[i] = sqr;
-            l2_input.0[NNUE_PYTORCH_L2 + i] = clamped;
-        }
+        // SqrClippedReLU: min(127, (input^2) >> 19)
+        // ClippedReLU:    clamp(input >> 6, 0, 127)
+        l1_sqr_clipped_relu_activation(&l1_out, &mut l2_input.0);
 
         // L2: 30 → 32
         self.l2.propagate(&l2_input.0, &mut l2_out);
-        for (out, &val) in l2_relu.0.iter_mut().zip(l2_out.iter()) {
-            *out = (val >> 6).clamp(0, 127) as u8;
-        }
+        clipped_relu_i32_to_u8(&l2_out, &mut l2_relu.0);
 
         // Output: 32 → 1
         self.output.propagate(&l2_relu.0, &mut output_arr);
@@ -133,19 +127,11 @@ impl LayerStackBucket {
 
         // Split: [15, 1]
         let l1_skip = l1_out[NNUE_PYTORCH_L2]; // index 15
-        for (i, &val) in l1_out.iter().enumerate().take(NNUE_PYTORCH_L2) {
-            let input_val = val as i64;
-            let sqr = ((input_val * input_val) >> 19).clamp(0, 127) as u8;
-            let clamped = (val >> 6).clamp(0, 127) as u8;
-            l2_input.0[i] = sqr;
-            l2_input.0[NNUE_PYTORCH_L2 + i] = clamped;
-        }
+        l1_sqr_clipped_relu_activation(&l1_out, &mut l2_input.0);
 
         // L2: 30 → 32
         self.l2.propagate(&l2_input.0, &mut l2_out);
-        for (out, &val) in l2_relu.0.iter_mut().zip(l2_out.iter()) {
-            *out = (val >> 6).clamp(0, 127) as u8;
-        }
+        clipped_relu_i32_to_u8(&l2_out, &mut l2_relu.0);
 
         // Output: 32 → 1
         self.output.propagate(&l2_relu.0, &mut output_arr);
@@ -248,6 +234,130 @@ impl Default for LayerStacks {
 /// 入力が [0, 127] の範囲なので、a * b の最大値は 127 * 127 = 16129。
 /// `16129 >> 7 = 126` なので出力も [0, 127] に収まる。
 ///
+/// L1→L2 activation: SqrClippedReLU + ClippedReLU（15要素 → 30 u8）
+///
+/// l1_out の最初の 15 要素 (NNUE_PYTORCH_L2) に対して:
+/// - SqrClippedReLU: min(127, (input^2) >> 19) → l2_input[0..15]
+/// - ClippedReLU:    clamp(input >> 6, 0, 127)  → l2_input[15..30]
+///
+/// 16番目の要素 (l1_skip) は呼び出し側で別途取得済み。
+#[inline]
+fn l1_sqr_clipped_relu_activation(l1_out: &[i32; LAYER_STACK_L1_OUT], l2_input: &mut [u8]) {
+    // AVX2: 16 i32 を一括処理（LAYER_STACK_L1_OUT=16 なので1回で完了）
+    // 16番目の結果は l2_input[15] と l2_input[30] に書かれるが、
+    // l2_input のパディング領域なので上書きされても問題ない。
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        // SAFETY:
+        // - l1_out は 16 要素（LAYER_STACK_L1_OUT）
+        // - l2_input は L2_PADDED_INPUT(=32) 要素で、index 30 までしか使われない
+        // - 16番目の要素が index 15, 30 に書かれるが、いずれもパディング領域
+        // - 二乗: max(127)^2 = 16129 < i32::MAX、>>19 後は [0, 127]
+        unsafe {
+            use std::arch::x86_64::*;
+            let zero = _mm256_setzero_si256();
+            let max127 = _mm256_set1_epi32(127);
+
+            let in_ptr = l1_out.as_ptr();
+            let out_ptr = l2_input.as_mut_ptr();
+
+            // 8要素ずつ2回 = 16要素
+            for chunk in 0..2 {
+                let offset = chunk * 8;
+                let v = _mm256_loadu_si256(in_ptr.add(offset) as *const __m256i);
+
+                // SqrClippedReLU: min(127, (v*v) >> 19)
+                let sqr = _mm256_mullo_epi32(v, v);
+                let sqr_shifted = _mm256_srai_epi32(sqr, 19);
+                let sqr_result = _mm256_min_epi32(_mm256_max_epi32(sqr_shifted, zero), max127);
+
+                // ClippedReLU: clamp(v >> 6, 0, 127)
+                let relu_shifted = _mm256_srai_epi32(v, 6);
+                let relu_result = _mm256_min_epi32(_mm256_max_epi32(relu_shifted, zero), max127);
+
+                // i32 → u8 パック（8 i32 → 8 u8）
+                // packs_epi32: i32 → i16 飽和パック
+                let sqr_16 = _mm256_packs_epi32(sqr_result, sqr_result); // [s0..3,s0..3, s4..7,s4..7]
+                let sqr_8 = _mm256_packus_epi16(sqr_16, sqr_16); // [s0..3,s0..3,s0..3,s0..3, s4..7,...]
+                // 下位4バイト + lane1の下位4バイト
+                let sqr_lo = _mm256_castsi256_si128(sqr_8);
+                let sqr_hi = _mm256_extracti128_si256(sqr_8, 1);
+                let sqr_combined = _mm_unpacklo_epi32(sqr_lo, sqr_hi);
+                _mm_storel_epi64(out_ptr.add(offset) as *mut __m128i, sqr_combined);
+
+                let relu_16 = _mm256_packs_epi32(relu_result, relu_result);
+                let relu_8 = _mm256_packus_epi16(relu_16, relu_16);
+                let relu_lo = _mm256_castsi256_si128(relu_8);
+                let relu_hi = _mm256_extracti128_si256(relu_8, 1);
+                let relu_combined = _mm_unpacklo_epi32(relu_lo, relu_hi);
+                _mm_storel_epi64(
+                    out_ptr.add(NNUE_PYTORCH_L2 + offset) as *mut __m128i,
+                    relu_combined,
+                );
+            }
+        }
+    }
+
+    // スカラーフォールバック
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+    {
+        for (i, &val) in l1_out.iter().enumerate().take(NNUE_PYTORCH_L2) {
+            let input_val = val as i64;
+            let sqr = ((input_val * input_val) >> 19).clamp(0, 127) as u8;
+            let clamped = (val >> 6).clamp(0, 127) as u8;
+            l2_input[i] = sqr;
+            l2_input[NNUE_PYTORCH_L2 + i] = clamped;
+        }
+    }
+}
+
+/// L2→Output activation: ClippedReLU（32要素 i32 → u8）
+///
+/// clamp(input >> 6, 0, 127)
+#[inline]
+fn clipped_relu_i32_to_u8(input: &[i32; NNUE_PYTORCH_L3], output: &mut [u8]) {
+    // AVX2: 32 i32 → 32 u8（8要素ずつ4回）
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        // SAFETY:
+        // - input は 32 要素（NNUE_PYTORCH_L3）
+        // - output は OUTPUT_PADDED_INPUT(=32) 要素
+        // - >>6 + clamp(0,127) の結果は [0, 127] → u8 に収まる
+        unsafe {
+            use std::arch::x86_64::*;
+            let zero = _mm256_setzero_si256();
+            let max127 = _mm256_set1_epi32(127);
+
+            let in_ptr = input.as_ptr();
+            let out_ptr = output.as_mut_ptr();
+
+            // 8要素ずつ4回 = 32要素
+            for chunk in 0..4 {
+                let offset = chunk * 8;
+                let v = _mm256_loadu_si256(in_ptr.add(offset) as *const __m256i);
+                let shifted = _mm256_srai_epi32(v, 6);
+                let clamped = _mm256_min_epi32(_mm256_max_epi32(shifted, zero), max127);
+
+                // i32 → u8 パック
+                let packed16 = _mm256_packs_epi32(clamped, clamped);
+                let packed8 = _mm256_packus_epi16(packed16, packed16);
+                let lo = _mm256_castsi256_si128(packed8);
+                let hi = _mm256_extracti128_si256(packed8, 1);
+                let combined = _mm_unpacklo_epi32(lo, hi);
+                _mm_storel_epi64(out_ptr.add(offset) as *mut __m128i, combined);
+            }
+        }
+    }
+
+    // スカラーフォールバック
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+    {
+        for (out, &val) in output.iter_mut().zip(input.iter()) {
+            *out = (val >> 6).clamp(0, 127) as u8;
+        }
+    }
+}
+
 /// 入力: 両視点のアキュムレータ (各1536次元, i16)
 /// 出力: SqrClippedReLU後の1536次元 (u8)
 pub fn sqr_clipped_relu_transform(
@@ -304,14 +414,13 @@ pub fn sqr_clipped_relu_transform(
                 }
             }
         }
-        return;
     }
 
     // AVX2: 256bit = 16 x i16、2セット同時処理で 32 i16 → 32 u8
     #[cfg(all(
         target_arch = "x86_64",
         target_feature = "avx2",
-        not(target_feature = "avx512bw")
+        not(all(target_feature = "avx512f", target_feature = "avx512bw"))
     ))]
     {
         // SAFETY:
@@ -355,7 +464,6 @@ pub fn sqr_clipped_relu_transform(
                 }
             }
         }
-        return;
     }
 
     // SSE2: 128bit = 8 x i16、2セット同時処理で 16 i16 → 16 u8
@@ -398,7 +506,6 @@ pub fn sqr_clipped_relu_transform(
                 }
             }
         }
-        return;
     }
 
     // WASM SIMD128: 128bit = 8 x i16
@@ -436,11 +543,13 @@ pub fn sqr_clipped_relu_transform(
                 }
             }
         }
-        return;
     }
 
     // スカラーフォールバック
-    #[allow(unreachable_code)]
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_feature = "sse2"),
+        all(target_arch = "wasm32", target_feature = "simd128")
+    )))]
     {
         // 前半768要素: us_acc[0..768] * us_acc[768..1536]
         // 後半768要素: them_acc[0..768] * them_acc[768..1536]

@@ -117,18 +117,53 @@ fn crelu_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16) {
     )))]
     let processed = 0;
 
-    // AVX2: 32要素ずつ処理
+    // AVX512BW: 32要素ずつ処理（i16→i8 直接変換）
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx512f",
+        target_feature = "avx512bw"
+    ))]
+    {
+        let num_chunks = input.len() / 32;
+        if num_chunks > 0 {
+            // SAFETY:
+            // - input.len() >= 32 * num_chunks（num_chunks の定義より）
+            // - output.len() >= input.len()（呼び出し側で保証）
+            // - clamped は [0, qa] の範囲（qa=127 or 255）
+            // - cvtusepi16_epi8 は符号なし飽和のため [0, 255] → u8 で値が保存される
+            unsafe {
+                use std::arch::x86_64::*;
+                let zero = _mm512_setzero_si512();
+                let max_val = _mm512_set1_epi16(qa);
+
+                let in_ptr = input.as_ptr();
+                let out_ptr = output.as_mut_ptr();
+
+                for i in 0..num_chunks {
+                    let v = _mm512_loadu_si512(in_ptr.add(i * 32) as *const __m512i);
+                    let clamped = _mm512_min_epi16(_mm512_max_epi16(v, zero), max_val);
+                    // i16 → u8 符号なし飽和変換（qa=255 でも値が保存される）
+                    let result = _mm512_cvtusepi16_epi8(clamped);
+                    _mm256_storeu_si256(out_ptr.add(i * 32) as *mut __m256i, result);
+                }
+            }
+            processed = num_chunks * 32;
+        }
+    }
+
+    // AVX2: 16要素ずつ処理
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {
-        let num_chunks = input.len() / 16;
+        let remaining = input.len() - processed;
+        let num_chunks = remaining / 16;
         if num_chunks > 0 {
             unsafe {
                 use std::arch::x86_64::*;
                 let zero = _mm256_setzero_si256();
                 let max_val = _mm256_set1_epi16(qa);
 
-                let in_ptr = input.as_ptr();
-                let out_ptr = output.as_mut_ptr();
+                let in_ptr = input.as_ptr().add(processed);
+                let out_ptr = output.as_mut_ptr().add(processed);
 
                 for i in 0..num_chunks {
                     let v = _mm256_loadu_si256(in_ptr.add(i * 16) as *const __m256i);
@@ -141,7 +176,7 @@ fn crelu_i16_to_u8(input: &[i16], output: &mut [u8], qa: i16) {
                     );
                 }
             }
-            processed = num_chunks * 16;
+            processed += num_chunks * 16;
         }
     }
 
@@ -223,17 +258,48 @@ fn crelu_i32_to_u8(input: &[i32], output: &mut [u8]) {
     )))]
     let processed = 0;
 
+    // AVX512F: 16要素ずつ処理（i32→i8 直接変換）
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+    {
+        let num_chunks = input.len() / 16;
+        if num_chunks > 0 {
+            // SAFETY:
+            // - input.len() >= 16 * num_chunks
+            // - output.len() >= input.len()（呼び出し側で保証）
+            // - shifted 後 clamped は [0, 127] のため cvtsepi32_epi8 の飽和は発生しない
+            unsafe {
+                use std::arch::x86_64::*;
+                let zero = _mm512_setzero_si512();
+                let max_val = _mm512_set1_epi32(127);
+
+                let in_ptr = input.as_ptr();
+                let out_ptr = output.as_mut_ptr();
+
+                for i in 0..num_chunks {
+                    let v = _mm512_loadu_si512(in_ptr.add(i * 16) as *const __m512i);
+                    let shifted = _mm512_srai_epi32::<WEIGHT_SCALE_BITS>(v);
+                    let clamped = _mm512_min_epi32(_mm512_max_epi32(shifted, zero), max_val);
+                    // i32 → i8 符号付き飽和変換（値は [0,127] なので実質無飽和）
+                    let result = _mm512_cvtsepi32_epi8(clamped);
+                    _mm_storeu_si128(out_ptr.add(i * 16) as *mut __m128i, result);
+                }
+            }
+            processed = num_chunks * 16;
+        }
+    }
+
     // AVX2: 32要素ずつ処理
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {
-        let num_chunks = input.len() / 32;
+        let remaining = input.len() - processed;
+        let num_chunks = remaining / 32;
         if num_chunks > 0 {
             unsafe {
                 use std::arch::x86_64::*;
                 let zero = _mm256_setzero_si256();
                 let offsets = _mm256_set_epi32(7, 3, 6, 2, 5, 1, 4, 0);
-                let in_ptr = input.as_ptr() as *const __m256i;
-                let out_ptr = output.as_mut_ptr() as *mut __m256i;
+                let in_ptr = input.as_ptr().add(processed) as *const __m256i;
+                let out_ptr = output.as_mut_ptr().add(processed) as *mut __m256i;
 
                 for i in 0..num_chunks {
                     let in0 = _mm256_loadu_si256(in_ptr.add(i * 4));
@@ -252,7 +318,7 @@ fn crelu_i32_to_u8(input: &[i32], output: &mut [u8]) {
                     _mm256_storeu_si256(out_ptr.add(i), result);
                 }
             }
-            processed = num_chunks * 32;
+            processed += num_chunks * 32;
         }
     }
 
@@ -454,10 +520,58 @@ fn pairwise_crelu_i16_to_u8_inner<const QA: i32, const SHIFT: i32, const MAX_OUT
     )))]
     let processed = 0usize;
 
+    // AVX512F: 16要素ずつ処理（i16→i32拡張 + i32→i8 直接変換）
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+    {
+        let num_chunks = half / 16;
+        if num_chunks > 0 {
+            // SAFETY:
+            // - half >= 16 * num_chunks
+            // - clamped は [0, QA] の範囲、product >> SHIFT は [0, MAX_OUT] のため
+            //   cvtsepi32_epi8 の飽和は発生しない
+            unsafe {
+                use std::arch::x86_64::*;
+                let zero = _mm512_setzero_si512();
+                let max_clamp = _mm512_set1_epi32(QA);
+                let max_out = _mm512_set1_epi32(MAX_OUT);
+
+                let a_ptr = input.as_ptr();
+                let b_ptr = input.as_ptr().add(half);
+                let out_ptr = output.as_mut_ptr();
+
+                for i in 0..num_chunks {
+                    // i16を16要素ロードしてi32に拡張
+                    let a_i16 = _mm256_loadu_si256(a_ptr.add(i * 16) as *const __m256i);
+                    let b_i16 = _mm256_loadu_si256(b_ptr.add(i * 16) as *const __m256i);
+                    let a = _mm512_cvtepi16_epi32(a_i16);
+                    let b = _mm512_cvtepi16_epi32(b_i16);
+
+                    let a_clamped = _mm512_min_epi32(_mm512_max_epi32(a, zero), max_clamp);
+                    let b_clamped = _mm512_min_epi32(_mm512_max_epi32(b, zero), max_clamp);
+
+                    let product = _mm512_mullo_epi32(a_clamped, b_clamped);
+                    // SHIFT は i32 const generic だが _mm512_srai_epi32 は const u32 を要求する。
+                    // const generic 間の型変換は stable Rust で不可のため match で分岐
+                    // （SHIFT は 7 or 9 でコンパイル時に片方に解消される）
+                    let shifted = match SHIFT {
+                        7 => _mm512_srai_epi32::<7>(product),
+                        9 => _mm512_srai_epi32::<9>(product),
+                        _ => unreachable!(),
+                    };
+                    let result = _mm512_min_epi32(shifted, max_out);
+
+                    let packed = _mm512_cvtsepi32_epi8(result);
+                    _mm_storeu_si128(out_ptr.add(i * 16) as *mut __m128i, packed);
+                }
+            }
+            processed = num_chunks * 16;
+        }
+    }
+
     // AVX2: 8要素ずつ処理（i16→i32拡張が必要なため）
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {
-        let num_chunks = half / 8;
+        let num_chunks = (half - processed) / 8;
         if num_chunks > 0 {
             unsafe {
                 use std::arch::x86_64::*;
@@ -465,9 +579,9 @@ fn pairwise_crelu_i16_to_u8_inner<const QA: i32, const SHIFT: i32, const MAX_OUT
                 let max_clamp = _mm256_set1_epi32(QA);
                 let max_out = _mm256_set1_epi32(MAX_OUT);
 
-                let a_ptr = input.as_ptr();
-                let b_ptr = input.as_ptr().add(half);
-                let out_ptr = output.as_mut_ptr();
+                let a_ptr = input.as_ptr().add(processed);
+                let b_ptr = input.as_ptr().add(half + processed);
+                let out_ptr = output.as_mut_ptr().add(processed);
 
                 for i in 0..num_chunks {
                     // i16を8要素ロードしてi32に拡張
@@ -494,7 +608,7 @@ fn pairwise_crelu_i16_to_u8_inner<const QA: i32, const SHIFT: i32, const MAX_OUT
                     _mm_storel_epi64(out_ptr.add(i * 8) as *mut __m128i, combined);
                 }
             }
-            processed = num_chunks * 8;
+            processed += num_chunks * 8;
         }
     }
 
@@ -715,50 +829,81 @@ fn pairwise_crelu_i32_to_u8(input: &[i32], output: &mut [u8]) {
     )))]
     let processed = 0usize;
 
-    // AVX2: 8要素ずつ処理
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    // AVX512F: 16要素ずつ処理（i32→i8 直接変換）
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
     {
-        let num_chunks = half / 8;
+        let num_chunks = half / 16;
         if num_chunks > 0 {
+            // SAFETY:
+            // - half >= 16 * num_chunks
+            // - clamped は [0, 127]、product >> 7 は [0, 127] のため
+            //   cvtsepi32_epi8 の飽和は発生しない
             unsafe {
                 use std::arch::x86_64::*;
-                let zero = _mm256_setzero_si256();
-                let max_val = _mm256_set1_epi32(127);
+                let zero = _mm512_setzero_si512();
+                let max_val = _mm512_set1_epi32(127);
 
                 let a_ptr = input.as_ptr();
                 let b_ptr = input.as_ptr().add(half);
                 let out_ptr = output.as_mut_ptr();
 
                 for i in 0..num_chunks {
-                    // 前半と後半をロード
+                    let a = _mm512_loadu_si512(a_ptr.add(i * 16) as *const __m512i);
+                    let b = _mm512_loadu_si512(b_ptr.add(i * 16) as *const __m512i);
+
+                    let a_shifted = _mm512_srai_epi32::<WEIGHT_SCALE_BITS>(a);
+                    let b_shifted = _mm512_srai_epi32::<WEIGHT_SCALE_BITS>(b);
+                    let a_clamped = _mm512_min_epi32(_mm512_max_epi32(a_shifted, zero), max_val);
+                    let b_clamped = _mm512_min_epi32(_mm512_max_epi32(b_shifted, zero), max_val);
+
+                    let product = _mm512_mullo_epi32(a_clamped, b_clamped);
+                    let result = _mm512_min_epi32(_mm512_srai_epi32::<7>(product), max_val);
+
+                    let packed = _mm512_cvtsepi32_epi8(result);
+                    _mm_storeu_si128(out_ptr.add(i * 16) as *mut __m128i, packed);
+                }
+            }
+            processed = num_chunks * 16;
+        }
+    }
+
+    // AVX2: 8要素ずつ処理
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        let remaining = half - processed;
+        let num_chunks = remaining / 8;
+        if num_chunks > 0 {
+            unsafe {
+                use std::arch::x86_64::*;
+                let zero = _mm256_setzero_si256();
+                let max_val = _mm256_set1_epi32(127);
+
+                let a_ptr = input.as_ptr().add(processed);
+                let b_ptr = input.as_ptr().add(half + processed);
+                let out_ptr = output.as_mut_ptr().add(processed);
+
+                for i in 0..num_chunks {
                     let a = _mm256_loadu_si256(a_ptr.add(i * 8) as *const __m256i);
                     let b = _mm256_loadu_si256(b_ptr.add(i * 8) as *const __m256i);
 
-                    // シフトしてクランプ
                     let a_shifted = _mm256_srai_epi32(a, WEIGHT_SCALE_BITS as i32);
                     let b_shifted = _mm256_srai_epi32(b, WEIGHT_SCALE_BITS as i32);
                     let a_clamped = _mm256_min_epi32(_mm256_max_epi32(a_shifted, zero), max_val);
                     let b_clamped = _mm256_min_epi32(_mm256_max_epi32(b_shifted, zero), max_val);
 
-                    // 乗算してシフト
                     let product = _mm256_mullo_epi32(a_clamped, b_clamped);
                     let result = _mm256_min_epi32(_mm256_srai_epi32(product, 7), max_val);
 
-                    // i32 → i16 → u8 にパック
-                    // packs_epi32は飽和パックなので、すでにクランプ済みなら問題なし
                     let packed16 = _mm256_packs_epi32(result, result);
                     let packed8 = _mm256_packus_epi16(packed16, packed16);
 
-                    // 結果は [0-3, 0-3, 4-7, 4-7, 0-3, 0-3, 4-7, 4-7] のような配置になる
-                    // 下位8バイトを取り出す
                     let lo = _mm256_castsi256_si128(packed8);
-                    // 下位4バイトと lane1の下位4バイトを結合
                     let hi = _mm256_extracti128_si256(packed8, 1);
                     let combined = _mm_unpacklo_epi32(lo, hi);
                     _mm_storel_epi64(out_ptr.add(i * 8) as *mut __m128i, combined);
                 }
             }
-            processed = num_chunks * 8;
+            processed += num_chunks * 8;
         }
     }
 
@@ -1023,10 +1168,50 @@ fn screlu_i16_to_u8_inner<const QA: i32, const SHIFT: i32>(input: &[i16], output
     )))]
     let processed = 0;
 
+    // AVX512F: 16要素ずつ処理（i16→i32拡張 + i32→i8 直接変換）
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+    {
+        let num_chunks = input.len() / 16;
+        if num_chunks > 0 {
+            // SAFETY:
+            // - input.len() >= 16 * num_chunks
+            // - clamped は [0, QA] の範囲、squared >> SHIFT は [0, 127] のため
+            //   cvtsepi32_epi8 の飽和は発生しない
+            unsafe {
+                use std::arch::x86_64::*;
+                let zero = _mm512_setzero_si512();
+                let max_clamp = _mm512_set1_epi32(QA);
+                let max_out = _mm512_set1_epi32(127);
+
+                let in_ptr = input.as_ptr();
+                let out_ptr = output.as_mut_ptr();
+
+                for i in 0..num_chunks {
+                    let v_i16 = _mm256_loadu_si256(in_ptr.add(i * 16) as *const __m256i);
+                    let v = _mm512_cvtepi16_epi32(v_i16);
+
+                    let clamped = _mm512_min_epi32(_mm512_max_epi32(v, zero), max_clamp);
+                    let squared = _mm512_mullo_epi32(clamped, clamped);
+                    let shifted = match SHIFT {
+                        7 => _mm512_srai_epi32::<7>(squared),
+                        9 => _mm512_srai_epi32::<9>(squared),
+                        _ => unreachable!(),
+                    };
+                    let result = _mm512_min_epi32(shifted, max_out);
+
+                    let packed = _mm512_cvtsepi32_epi8(result);
+                    _mm_storeu_si128(out_ptr.add(i * 16) as *mut __m128i, packed);
+                }
+            }
+            processed = num_chunks * 16;
+        }
+    }
+
     // AVX2: 8要素ずつ処理（i16→i32拡張が必要）
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {
-        let num_chunks = input.len() / 8;
+        let remaining = input.len() - processed;
+        let num_chunks = remaining / 8;
         if num_chunks > 0 {
             unsafe {
                 use std::arch::x86_64::*;
@@ -1034,35 +1219,27 @@ fn screlu_i16_to_u8_inner<const QA: i32, const SHIFT: i32>(input: &[i16], output
                 let max_clamp = _mm256_set1_epi32(QA);
                 let max_out = _mm256_set1_epi32(127);
 
-                let in_ptr = input.as_ptr();
-                let out_ptr = output.as_mut_ptr();
+                let in_ptr = input.as_ptr().add(processed);
+                let out_ptr = output.as_mut_ptr().add(processed);
 
                 for i in 0..num_chunks {
-                    // i16を8要素ロードしてi32に拡張
                     let v_i16 = _mm_loadu_si128(in_ptr.add(i * 8) as *const __m128i);
                     let v = _mm256_cvtepi16_epi32(v_i16);
 
-                    // クランプ
                     let clamped = _mm256_min_epi32(_mm256_max_epi32(v, zero), max_clamp);
-
-                    // 二乗
                     let squared = _mm256_mullo_epi32(clamped, clamped);
-
-                    // シフトしてクランプ
                     let result = _mm256_min_epi32(_mm256_srai_epi32(squared, SHIFT), max_out);
 
-                    // i32 → i16 → u8 にパック
                     let packed16 = _mm256_packs_epi32(result, result);
                     let packed8 = _mm256_packus_epi16(packed16, packed16);
 
-                    // 結果を取り出して書き込む
                     let lo = _mm256_castsi256_si128(packed8);
                     let hi = _mm256_extracti128_si256(packed8, 1);
                     let combined = _mm_unpacklo_epi32(lo, hi);
                     _mm_storel_epi64(out_ptr.add(i * 8) as *mut __m128i, combined);
                 }
             }
-            processed = num_chunks * 8;
+            processed += num_chunks * 8;
         }
     }
 
