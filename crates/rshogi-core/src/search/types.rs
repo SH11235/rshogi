@@ -101,6 +101,11 @@ pub struct Stack {
     /// PV（Principal Variation）
     pub pv: Vec<Move>,
 
+    /// 前回 iteration の PV ラインを追跡中か
+    ///
+    /// tree-changing な探索改善でのみ参照する。
+    pub follow_pv: bool,
+
     /// ContinuationHistoryへの参照インデックス（旧方式、互換性のため残す）
     pub cont_history_idx: usize,
 
@@ -159,6 +164,7 @@ impl Default for Stack {
     fn default() -> Self {
         Self {
             pv: Vec::new(),
+            follow_pv: false,
             cont_history_idx: 0,
             cont_history_ptr: NonNull::dangling(),
             cont_hist_key: None,

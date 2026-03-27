@@ -357,6 +357,8 @@ pub struct SearchState {
     pub nmp_min_ply: i32,
     /// ルート手
     pub root_moves: RootMoves,
+    /// 前回 iteration の PV ライン
+    pub previous_pv: Vec<Move>,
     /// NNUE Accumulator スタック
     pub nnue_stack: AccumulatorStackVariant,
     /// LayerStacks 用 AccumulatorCaches（Finny Tables）
@@ -384,6 +386,7 @@ impl SearchState {
             best_move_changes: 0.0,
             nmp_min_ply: 0,
             root_moves: RootMoves::new(),
+            previous_pv: Vec::new(),
             nnue_stack: AccumulatorStackVariant::new_default(),
             acc_cache: None,
             calls_cnt: 0,
@@ -396,6 +399,28 @@ impl SearchState {
 impl Default for SearchState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl SearchState {
+    #[inline]
+    pub fn set_previous_pv(&mut self, pv: &[Move]) {
+        self.previous_pv.clear();
+        self.previous_pv.extend_from_slice(pv);
+    }
+
+    #[inline]
+    pub fn set_root_follow_pv(&mut self) {
+        self.stack[0].follow_pv = true;
+    }
+
+    #[inline]
+    pub fn set_child_follow_pv(&mut self, parent_ply: i32, mv: Move) {
+        let parent_idx = parent_ply as usize;
+        let child_idx = parent_idx + 1;
+        let matches_previous =
+            self.previous_pv.get(parent_idx).copied().is_some_and(|prev| prev == mv);
+        self.stack[child_idx].follow_pv = self.stack[parent_idx].follow_pv && matches_previous;
     }
 }
 
@@ -867,6 +892,8 @@ impl SearchWorker {
         let root_in_check = pos.in_check();
 
         self.state.stack[0].in_check = root_in_check;
+        self.state.set_previous_pv(&self.state.root_moves[0].pv.clone());
+        self.state.set_root_follow_pv();
         self.state.stack[0].cont_history_ptr = self.cont_history_sentinel;
         self.state.stack[0].cont_hist_key = None;
         // ss->statScore = 0
@@ -1581,6 +1608,9 @@ impl SearchWorker {
         let root_in_check = pos.in_check();
 
         self.state.stack[0].in_check = root_in_check;
+        let previous_pv = self.state.root_moves[pv_idx].pv.clone();
+        self.state.set_previous_pv(&previous_pv);
+        self.state.set_root_follow_pv();
         self.state.stack[0].cont_history_ptr = self.cont_history_sentinel;
         self.state.stack[0].cont_hist_key = None;
         // root探索開始時の初期化
@@ -1951,6 +1981,11 @@ impl SearchWorker {
         limits: &LimitsType,
         time_manager: &mut TimeManagement,
     ) -> Value {
+        if ply >= 1 {
+            let parent_ply = ply - 1;
+            let parent_move = self.state.stack[parent_ply as usize].current_move;
+            self.state.set_child_follow_pv(parent_ply, parent_move);
+        }
         // SearchContext を直接構築して借用の競合を避ける
         let ctx = SearchContext {
             tt: &self.tt,
@@ -2325,7 +2360,13 @@ impl SearchWorker {
 
         // Internal Iterative Reductions（improving再計算後に実施）
         // in_check時はMOVES_LOOPにジャンプするため、このブロックは実行されない
-        if !in_check && !all_node && depth >= 6 && tt_move.is_none() && prior_reduction <= 3 {
+        if !in_check
+            && !all_node
+            && depth >= 6
+            && tt_move.is_none()
+            && prior_reduction <= 3
+            && !st.stack[ply as usize].follow_pv
+        {
             depth -= 1;
         }
         if let Some(v) = try_probcut(
@@ -2764,6 +2805,7 @@ impl SearchWorker {
 
                 let reduction_from_parent = new_depth - d;
                 st.stack[ply as usize].reduction = reduction_from_parent;
+                st.set_child_follow_pv(ply, mv);
                 let mut value = -Self::search_node::<{ NodeType::NonPV as u8 }>(
                     st,
                     ctx,
@@ -2790,6 +2832,7 @@ impl SearchWorker {
 
                     if new_depth > d {
                         inc_stat!(st, lmr_research);
+                        st.set_child_follow_pv(ply, mv);
                         value = -Self::search_node::<{ NodeType::NonPV as u8 }>(
                             st,
                             ctx,
@@ -2870,6 +2913,7 @@ impl SearchWorker {
                         new_depth = new_depth.max(1);
                     }
                     st.stack[ply as usize].reduction = 0;
+                    st.set_child_follow_pv(ply, mv);
                     -Self::search_node::<{ NodeType::PV as u8 }>(
                         st,
                         ctx,
@@ -2896,6 +2940,7 @@ impl SearchWorker {
                     (r > ctx.tune_params.full_depth_r_threshold2 && new_depth > 2) as i32;
 
                 st.stack[ply as usize].reduction = 0;
+                st.set_child_follow_pv(ply, mv);
                 let mut value = -Self::search_node::<{ NodeType::NonPV as u8 }>(
                     st,
                     ctx,
@@ -2923,6 +2968,7 @@ impl SearchWorker {
                         new_depth = new_depth.max(1);
                     }
                     st.stack[ply as usize].reduction = 0;
+                    st.set_child_follow_pv(ply, mv);
                     value = -Self::search_node::<{ NodeType::PV as u8 }>(
                         st,
                         ctx,
@@ -2950,6 +2996,7 @@ impl SearchWorker {
                 }
 
                 st.stack[ply as usize].reduction = 0;
+                st.set_child_follow_pv(ply, mv);
                 -Self::search_node::<{ NodeType::PV as u8 }>(
                     st,
                     ctx,
