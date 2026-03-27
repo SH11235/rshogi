@@ -24,8 +24,7 @@ impl LimitType {
 }
 
 /// 評価関数設定
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct EvalConfig {
     /// NNUEファイルのパス（指定時は `EvalFile` USI オプションとして送信）
     pub nnue_file: Option<PathBuf>,
@@ -33,7 +32,6 @@ pub struct EvalConfig {
     /// Material 評価を使う場合は "MaterialLevel=9" 等をここで明示指定する
     pub usi_options: Vec<String>,
 }
-
 
 /// ベンチマーク設定
 ///

@@ -36,10 +36,11 @@ fn setup_eval(config: &BenchmarkConfig) -> Result<()> {
     for opt in &config.eval_config.usi_options {
         if let Some(value) = opt.strip_prefix("MaterialLevel=")
             && let Ok(v) = value.parse::<u8>()
-                && let Some(level) = MaterialLevel::from_value(v) {
-                    set_material_level(level);
-                    println!("MaterialLevel set to: {v}");
-                }
+            && let Some(level) = MaterialLevel::from_value(v)
+        {
+            set_material_level(level);
+            println!("MaterialLevel set to: {v}");
+        }
     }
 
     // EvalHash設定
