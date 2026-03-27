@@ -894,3 +894,970 @@ search-only の事実:
 
 - 採用
 - `refresh_perspective_with_cache` の active 収集コピー除去は、局所ベンチ混在でも search-only では再現性のあるプラス
+
+## 2026-03-27 refresh_perspective_with_cache の sorted 直接生成
+
+前項の採用後、`refresh_perspective_with_cache()` に残っている
+`sort_unstable()` のコストを疑い、active 特徴量を最初から昇順 `u32` として
+直接収集する候補を試した。
+
+対象は [half_ka_hm.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/nnue/features/half_ka_hm.rs) と
+[feature_transformer_layer_stacks.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/nnue/feature_transformer_layer_stacks.rs)。
+
+変更意図:
+
+- `refresh_perspective_with_cache()` の `sorted.sort_unstable()` を除去
+- active 特徴量を `u32` のまま直接生成して、変換と sort をまとめて省く
+
+### 実装内容
+
+- `HalfKA_hm::collect_active_indices_sorted_u32()` を追加
+- `refresh_perspective_with_cache()` で `IndexList -> u32 変換 + sort_unstable()` をやめ、
+  上記 helper が返す昇順済み配列をそのまま `refresh_or_cache()` へ渡す
+
+### 実施コマンド
+
+```bash
+cargo fmt && cargo clippy --fix --allow-dirty --tests && cargo test
+cargo build --release --bin bench_nnue_eval
+CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_STRIP=none cargo build --release --bin rshogi-usi
+cp target/release/rshogi-usi /tmp/rshogi-usi-before-refresh-sorted-opt
+cp target/release/bench_nnue_eval /tmp/bench_nnue_eval-before-refresh-sorted-opt
+```
+
+### microbench
+
+```bash
+NNUE=/mnt/nvme1/development/bullet-shogi/checkpoints/v82/v82-300/quantised.bin
+PROGRESS=/mnt/nvme1/development/bullet-shogi/data/progress/nodchip_progress_e1_f1_cuda.bin
+
+for engine in /tmp/bench_nnue_eval-before-refresh-sorted-opt target/release/bench_nnue_eval; do
+  "$engine" --nnue-file "$NNUE" --ls-bucket-mode progress8kpabs --ls-progress-coeff "$PROGRESS" \
+    --mode layer-stack-refresh-cache --warmup 20000 --iterations 300000
+  "$engine" --nnue-file "$NNUE" --ls-bucket-mode progress8kpabs --ls-progress-coeff "$PROGRESS" \
+    --mode layer-stack-update-cache --warmup 20000 --iterations 300000
+done
+```
+
+結果:
+
+| bench | baseline ns/op | candidate ns/op | delta |
+| --- | ---: | ---: | ---: |
+| `layer-stack-refresh-cache` | `3073.0` | `2605.8` | `+15.20%` |
+| `layer-stack-update-cache` | `167.7` | `176.2` | `-5.07%` |
+
+microbench の事実:
+
+- refresh path 単体では前項よりさらに改善
+- ただし update path は引き続き悪化
+- 採否は search-only A/B で決める必要がある
+
+### search-only A/B
+
+baseline は `/tmp/rshogi-usi-before-refresh-sorted-opt`、candidate は `target/release/rshogi-usi`。
+
+```bash
+POS_LINE="$(head -1 /tmp/bench_positions.txt)"
+EVAL=/mnt/nvme1/development/bullet-shogi/checkpoints/v82/v82-300/quantised.bin
+PROGRESS=/mnt/nvme1/development/bullet-shogi/data/progress/nodchip_progress_e1_f1_cuda.bin
+
+# run_case <engine>
+# - Threads=1 / Hash=256 / LS_BUCKET_MODE=progress8kpabs
+# - fixed position + `go movetime 10000`
+# - `perf stat -p $ENGINE_PID -- sleep 10`
+```
+
+| order | engine | final nps | cycles / node | instructions / node |
+| --- | --- | ---: | ---: | ---: |
+| 1 | baseline | `632,013` | `7,422.9` | `16,942.0` |
+| 1 | candidate | `605,714` | `7,768.3` | `17,091.6` |
+| 2 | candidate | `620,149` | `7,562.3` | `17,060.3` |
+| 2 | baseline | `614,707` | `7,632.7` | `16,984.4` |
+
+平均:
+
+| engine | avg nps | avg cycles / node | avg instructions / node |
+| --- | ---: | ---: | ---: |
+| baseline | `623,360.0` | `7,527.8` | `16,963.2` |
+| candidate | `612,931.5` | `7,665.3` | `17,076.0` |
+
+search-only の事実:
+
+- candidate は 2-order 平均で baseline 比 `-1.67%`
+- `cycles / node` は `+1.83%` 悪化
+- `instructions / node` は `+0.67%` 悪化
+
+判断:
+
+- 不採用
+- `sort_unstable()` を消しても、収集側の挿入コストと codegen 悪化で探索全体は負けた
+- `refresh-cache` microbench の改善だけでは採用根拠にならない、という再確認になった
+
+## 2026-03-27 refresh_perspective_with_cache の小配列専用ソート
+
+`refresh_perspective_with_cache()` の `sort_unstable()` が `perf report` で
+`1.69%` 出ていたため、収集方法はそのままにして、長さ `MAX_ACTIVE_FEATURES <= 54`
+へ限定した挿入ソートへ置き換える候補を試した。
+
+対象は [feature_transformer_layer_stacks.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/nnue/feature_transformer_layer_stacks.rs)。
+
+変更意図:
+
+- `sort_unstable()` の汎用オーバーヘッドだけを削る
+- 前回負けた「収集しながら挿入」は避け、変換後の sort 部分だけを差し替える
+
+### 実装内容
+
+- `sort_small_u32()` を追加
+- `refresh_perspective_with_cache()` の `sorted.sort_unstable()` を `sort_small_u32(sorted)` に変更
+- `sort_unstable()` と同値の並びになることを確認する単体テストを追加
+
+### 実施コマンド
+
+```bash
+cargo fmt && cargo clippy --fix --allow-dirty --tests && cargo test
+cargo build --release --bin bench_nnue_eval
+CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_STRIP=none cargo build --release --bin rshogi-usi
+cp target/release/rshogi-usi /tmp/rshogi-usi-before-small-sort-opt
+cp target/release/bench_nnue_eval /tmp/bench_nnue_eval-before-small-sort-opt
+```
+
+### microbench
+
+```bash
+NNUE=/mnt/nvme1/development/bullet-shogi/checkpoints/v82/v82-300/quantised.bin
+PROGRESS=/mnt/nvme1/development/bullet-shogi/data/progress/nodchip_progress_e1_f1_cuda.bin
+
+for engine in /tmp/bench_nnue_eval-before-small-sort-opt target/release/bench_nnue_eval; do
+  "$engine" --nnue-file "$NNUE" --ls-bucket-mode progress8kpabs --ls-progress-coeff "$PROGRESS" \
+    --mode layer-stack-refresh-cache --warmup 20000 --iterations 300000
+  "$engine" --nnue-file "$NNUE" --ls-bucket-mode progress8kpabs --ls-progress-coeff "$PROGRESS" \
+    --mode layer-stack-update-cache --warmup 20000 --iterations 300000
+done
+```
+
+結果:
+
+| bench | baseline ns/op | candidate ns/op | delta |
+| --- | ---: | ---: | ---: |
+| `layer-stack-refresh-cache` | `2741.3` | `2626.7` | `+4.18%` |
+| `layer-stack-update-cache` | `178.3` | `179.8` | `-0.84%` |
+
+microbench の事実:
+
+- refresh path 単体では改善
+- update path はほぼ横ばい
+- 最終判断は search-only A/B が必要
+
+### search-only A/B
+
+baseline は `/tmp/rshogi-usi-before-small-sort-opt`、candidate は `target/release/rshogi-usi`。
+`go movetime 15000` で 15 秒探索し、`perf stat -x, -e cycles,instructions -p $ENGINE_PID -- sleep 10`
+で中間 10 秒の `cycles / instructions` を採取した。
+
+| order | engine | final nps | cycles / node | instructions / node |
+| --- | --- | ---: | ---: | ---: |
+| 1 | baseline | `605,162` | `7,684.9` | `17,256.6` |
+| 1 | candidate | `607,043` | `7,786.2` | `17,399.1` |
+| 2 | candidate | `581,715` | `7,997.6` | `17,296.3` |
+| 2 | baseline | `619,011` | `7,752.1` | `17,432.1` |
+
+平均:
+
+| engine | avg nps | avg cycles / node | avg instructions / node |
+| --- | ---: | ---: | ---: |
+| baseline | `612,086.5` | `7,718.5` | `17,344.4` |
+| candidate | `594,379.0` | `7,891.9` | `17,347.7` |
+
+search-only の事実:
+
+- candidate は 2-order 平均で baseline 比 `-2.89%`
+- `cycles / node` は `+2.25%` 悪化
+- `instructions / node` はほぼ横ばいで、主因は cycle 側
+
+判断:
+
+- 不採用
+- 小配列専用ソート単体では `sort_unstable()` の局所改善を探索全体へ持ち込めなかった
+- `refresh_perspective_with_cache` は依然ホットだが、次は sort より active 収集や cache 本体との相互作用を見るべき
+
+## 2026-03-27 refresh-cache の `u32` 直収集
+
+`refresh_perspective_with_cache()` では、active 特徴量を一度
+`IndexList<usize>` に集めてから `u32` 配列へ変換していた。
+この変換コストを消すため、refresh-cache 専用に `u32` バッファへ直接収集する候補を試した。
+
+対象は [feature_transformer_layer_stacks.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/nnue/feature_transformer_layer_stacks.rs)。
+
+変更意図:
+
+- `IndexList<usize> -> u32` の二段構えをなくす
+- 収集順は従来通り unsorted のままにして、`sort_unstable()` は維持する
+- 前回負けた「収集しながら挿入」とは切り分ける
+
+### 実装内容
+
+- `append_active_indices_u32()` を追加
+- `refresh_perspective_with_cache()` で `IndexList` を経由せず
+  `MaybeUninit<u32>` バッファへ直接書き込むよう変更
+- 既存の `append_active_indices()` 経路と同値になることを確認するテストを追加
+
+### 実施コマンド
+
+```bash
+cargo fmt && cargo clippy --fix --allow-dirty --tests && cargo test
+cargo build --release --bin bench_nnue_eval
+CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_STRIP=none cargo build --release --bin rshogi-usi
+```
+
+### microbench
+
+```bash
+NNUE=/mnt/nvme1/development/bullet-shogi/checkpoints/v82/v82-300/quantised.bin
+PROGRESS=/mnt/nvme1/development/bullet-shogi/data/progress/nodchip_progress_e1_f1_cuda.bin
+
+for engine in /tmp/bench_nnue_eval-before-small-sort-opt target/release/bench_nnue_eval; do
+  "$engine" --nnue-file "$NNUE" --ls-bucket-mode progress8kpabs --ls-progress-coeff "$PROGRESS" \
+    --mode layer-stack-refresh-cache --warmup 20000 --iterations 300000
+  "$engine" --nnue-file "$NNUE" --ls-bucket-mode progress8kpabs --ls-progress-coeff "$PROGRESS" \
+    --mode layer-stack-update-cache --warmup 20000 --iterations 300000
+done
+```
+
+結果:
+
+| bench | baseline ns/op | candidate ns/op | delta |
+| --- | ---: | ---: | ---: |
+| `layer-stack-refresh-cache` | `2754.2` | `2702.7` | `+1.87%` |
+| `layer-stack-update-cache` | `176.8` | `176.9` | `-0.06%` |
+
+microbench の事実:
+
+- refresh path 単体では小幅改善
+- update path は完全に横ばい
+- search-only で確認が必要
+
+### search-only A/B
+
+baseline は `/tmp/rshogi-usi-before-small-sort-opt`、candidate は `target/release/rshogi-usi`。
+`go movetime 15000` と `perf stat -x, -e cycles,instructions -p $ENGINE_PID -- sleep 10`
+で計測した。
+
+| order | engine | final nps | cycles / node | instructions / node |
+| --- | --- | ---: | ---: | ---: |
+| 1 | baseline | `591,362` | `7,746.5` | `17,376.4` |
+| 1 | candidate | `608,643` | `7,765.9` | `17,472.9` |
+| 2 | candidate | `582,228` | `7,864.3` | `17,169.1` |
+| 2 | baseline | `608,453` | `7,724.5` | `17,395.4` |
+
+平均:
+
+| engine | avg nps | avg cycles / node | avg instructions / node |
+| --- | ---: | ---: | ---: |
+| baseline | `599,907.5` | `7,735.5` | `17,385.9` |
+| candidate | `595,435.5` | `7,815.1` | `17,321.0` |
+
+search-only の事実:
+
+- candidate は 2-order 平均で baseline 比 `-0.75%`
+- `cycles / node` は `+1.03%` 悪化
+- `instructions / node` は `-0.37%` 改善だが、cycle 側悪化を打ち消せなかった
+
+判断:
+
+- 不採用
+- `u32` 直収集単体では refresh-cache 局所改善は出ても探索全体の勝ちに繋がらなかった
+- `refresh_perspective_with_cache` は、収集・sort・cache diff の単独改善より、複合的な codegen 差を疑うべき
+
+## 2026-03-27 sliders.rs の OnceLock fast path
+
+`attackers_to_occ()` の annotate では、`bishop_effect()` / `rook_effect()` 経由で
+`slider_attacks()` の `OnceLock::get_or_init()` チェックが複数回現れていた。
+初期化後の hot path を軽くするため、`get()` で取れる場合はそちらを先に返す候補を試した。
+
+対象は [sliders.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/bitboard/sliders.rs)。
+
+変更意図:
+
+- 初回初期化だけ `get_or_init()` を使い、以降は `get()` の軽い経路へ寄せる
+- `attackers_to_occ` / `see_ge` / slider effect 群に広く効く可能性を確認する
+
+### 実装内容
+
+- `slider_attacks()` を
+  - `SLIDER_ATTACKS.get()` が `Some` なら即返す
+  - `None` のときだけ `get_or_init(SliderTable::new)` を呼ぶ
+  形へ変更
+
+### 実施コマンド
+
+```bash
+cargo fmt && cargo clippy --fix --allow-dirty --tests && cargo test
+CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_STRIP=none cargo build --release --bin rshogi-usi
+```
+
+### search-only A/B
+
+baseline は `/tmp/rshogi-usi-before-small-sort-opt`、candidate は `target/release/rshogi-usi`。
+`go movetime 15000` と `perf stat -x, -e cycles,instructions -p $ENGINE_PID -- sleep 10`
+で計測した。
+
+| order | engine | final nps | cycles / node | instructions / node |
+| --- | --- | ---: | ---: | ---: |
+| 1 | baseline | `608,088` | `7,634.4` | `17,292.6` |
+| 1 | candidate | `569,502` | `8,055.4` | `17,406.9` |
+| 2 | candidate | `601,842` | `7,808.2` | `17,325.3` |
+| 2 | baseline | `625,187` | `7,684.6` | `17,426.3` |
+
+平均:
+
+| engine | avg nps | avg cycles / node | avg instructions / node |
+| --- | ---: | ---: | ---: |
+| baseline | `616,637.5` | `7,659.5` | `17,359.5` |
+| candidate | `585,672.0` | `7,931.8` | `17,366.1` |
+
+search-only の事実:
+
+- candidate は 2-order 平均で baseline 比 `-5.02%`
+- `cycles / node` は `+3.56%` 悪化
+- `instructions / node` はほぼ横ばい
+
+判断:
+
+- 不採用
+- `get_or_init()` を単純に `get()` fast path へ寄せても codegen は改善しなかった
+- slider 周辺は `OnceLock` 単体ではなく、`attackers_to_occ` 側の呼び出し構造ごと見直す必要がある
+
+## 2026-03-27 HalfKA_hm `pack_bonapiece` テーブル化
+
+`append_active_indices()` / `append_changed_indices()` は search-only `perf report`
+でも局所 1% 台後半ずつ残っていた。`pack_bonapiece()` は各特徴量ごとに
+`div/mod` と file ミラー計算を行っているため、ここを lookup table 化して
+NNUE 側の pure な命令数を削る候補を試した。
+
+対象は
+[bona_piece_halfka_hm.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/nnue/bona_piece_halfka_hm.rs)
+と
+[half_ka_hm.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/nnue/features/half_ka_hm.rs)。
+
+変更意図:
+
+- `pack_bonapiece()` の計算を事前構築テーブル参照へ置き換える
+- `append_active_indices()` / `append_changed_indices()` 側で
+  `kb * PIECE_INPUTS` を 1 回だけ計算し、各特徴量での乗算を避ける
+
+### 実装内容
+
+- `PACKED_BONAPIECE_TABLES[mirror][raw_bp] -> packed_bp` を追加
+- `pack_bonapiece()` を table lookup に変更
+- `HalfKA_hm::append_active_indices()` / `append_changed_indices()` で
+  `packed_bonapiece_table()` を 1 回取得し、各要素は `feature_base + packed` で push
+- table と scalar 計算が一致する回帰テストを追加
+
+### 実施コマンド
+
+```bash
+cargo fmt && cargo clippy --fix --allow-dirty --tests && cargo test
+cargo build --release --bin bench_nnue_eval
+CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_STRIP=none cargo build --release --bin rshogi-usi
+```
+
+### microbench
+
+baseline は `/tmp/bench_nnue_eval-before-small-sort-opt`、candidate は `target/release/bench_nnue_eval`。
+
+```bash
+NNUE=/mnt/nvme1/development/bullet-shogi/checkpoints/v82/v82-300/quantised.bin
+PROGRESS=/mnt/nvme1/development/bullet-shogi/data/progress/nodchip_progress_e1_f1_cuda.bin
+
+for engine in /tmp/bench_nnue_eval-before-small-sort-opt target/release/bench_nnue_eval; do
+  "$engine" --nnue-file "$NNUE" --ls-bucket-mode progress8kpabs --ls-progress-coeff "$PROGRESS" \
+    --mode layer-stack-refresh-cache --warmup 20000 --iterations 300000
+  "$engine" --nnue-file "$NNUE" --ls-bucket-mode progress8kpabs --ls-progress-coeff "$PROGRESS" \
+    --mode layer-stack-update-cache --warmup 20000 --iterations 300000
+done
+```
+
+結果:
+
+| bench | baseline ns/op | candidate ns/op | delta |
+| --- | ---: | ---: | ---: |
+| `layer-stack-refresh-cache` | `2644.2` | `2839.2` | `-7.37%` |
+| `layer-stack-update-cache` | `165.9` | `167.2` | `-0.78%` |
+
+microbench の事実:
+
+- `refresh-cache` ははっきり悪化
+- 算術削減より、追加された table load / code layout の悪化が勝った可能性が高い
+
+### search-only A/B
+
+microbench では悪化したが、局所ベンチと探索全体がずれるケースがあるため
+`go movetime 15000` と `perf stat -x, -e cycles,instructions -p $ENGINE_PID -- sleep 10`
+で 2-order を確認した。
+
+baseline は `/tmp/rshogi-usi-before-small-sort-opt`、candidate は `target/release/rshogi-usi`。
+
+| order | engine | final nps | cycles / node | instructions / node |
+| --- | --- | ---: | ---: | ---: |
+| 1 | baseline | `607,572` | `7,727.8` | `17,459.6` |
+| 1 | candidate | `608,934` | `7,673.5` | `17,200.8` |
+| 2 | candidate | `585,794` | `7,878.5` | `17,091.2` |
+| 2 | baseline | `606,427` | `7,851.8` | `17,707.1` |
+
+平均:
+
+| engine | avg nps | avg cycles / node | avg instructions / node |
+| --- | ---: | ---: | ---: |
+| baseline | `606,999.5` | `7,789.8` | `17,583.3` |
+| candidate | `597,364.0` | `7,776.0` | `17,146.0` |
+
+search-only の事実:
+
+- candidate は 2-order 平均で baseline 比 `-1.59%`
+- `instructions / node` は `-2.49%` 改善
+- `cycles / node` はほぼ横ばいで、結果として NPS は伸びなかった
+
+判断:
+
+- 不採用
+- `pack_bonapiece` の計算量だけを削っても、探索全体では勝ちに繋がらなかった
+- `append_active_indices` / `append_changed_indices` は算術量より、周辺の
+  メモリアクセスや code layout を含めて見ないと改善にならない
+
+## 2026-03-27 `attackers_to_occ()` の slider helper 化
+
+`Position::attackers_to_occ()` の annotate では、`bishop_effect()` / `rook_effect()` /
+`lance_step_effect()` がそれぞれ `slider_attacks()` を取りに行っていた。
+前回の `OnceLock` fast path 単体は負けたが、今回は `attackers_to_occ()` 専用 helper を足して
+slider table 参照回数そのものを 1 回へ減らす候補を試した。
+
+対象は
+[sliders.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/bitboard/sliders.rs)
+と
+[pos.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/position/pos.rs)。
+
+変更意図:
+
+- `bishop/rook/lanceStep` の個別呼び出しを `attackers_to_occ()` 用 helper にまとめる
+- `slider_attacks()` の repeated load と、周辺 codegen の改善余地を確認する
+
+### 実装内容
+
+- `sliders.rs` に table 参照を受け取る内部 helper を追加
+  - `rook_file_effect_with_table()`
+  - `rook_rank_effect_with_table()`
+  - `rook_effect_with_table()`
+  - `bishop_effect_with_table()`
+- `rook_bishop_lance_attackers()` を追加し、
+  `Position::attackers_to_occ()` からこれを使う形へ変更
+- 既存の合成式と一致する回帰テストを追加
+
+### 実施コマンド
+
+```bash
+cargo fmt && cargo clippy --fix --allow-dirty --tests && cargo test
+cargo build --release --bin bench_nnue_eval
+CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_STRIP=none cargo build --release --bin rshogi-usi
+```
+
+### search-only A/B
+
+baseline は `/tmp/rshogi-usi-before-small-sort-opt`、candidate は `target/release/rshogi-usi`。
+`go movetime 15000` と `perf stat -x, -e cycles,instructions -p $ENGINE_PID -- sleep 10`
+で計測した。
+
+| order | engine | final nps | cycles / node | instructions / node |
+| --- | --- | ---: | ---: | ---: |
+| 1 | baseline | `629,360` | `7,635.1` | `17,464.2` |
+| 1 | candidate | `582,651` | `7,868.2` | `17,444.0` |
+| 2 | candidate | `569,177` | `7,977.9` | `17,260.7` |
+| 2 | baseline | `572,516` | `7,933.6` | `17,554.5` |
+
+平均:
+
+| engine | avg nps | avg cycles / node | avg instructions / node |
+| --- | ---: | ---: | ---: |
+| baseline | `600,938.0` | `7,784.4` | `17,509.3` |
+| candidate | `575,914.0` | `7,923.0` | `17,352.3` |
+
+search-only の事実:
+
+- candidate は 2-order 平均で baseline 比 `-4.16%`
+- `instructions / node` は `-0.90%` 改善
+- しかし `cycles / node` は `+1.78%` 悪化し、NPS は明確に落ちた
+
+判断:
+
+- 不採用
+- `slider_attacks()` の取得回数を減らしても、register pressure / code layout 側の悪化が勝った
+- `attackers_to_occ` 周辺は helper 合成より、もっと限定的な hot block の形で見ないと難しい
+
+## 2026-03-27 `compute_progress8kpabs_sum()` の PieceList 化
+
+`progress8kpabs` の refresh 側は、現状でも盤上全駒スキャンと hand 展開を毎回やっている。
+一方で `Position` は既に `PieceList` に両視点 `BonaPiece` を保持しているため、
+ここを直接なめれば board/hand の再構築を省けるはずだと考えた。
+
+対象は
+[network.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/nnue/network.rs)。
+
+変更意図:
+
+- `compute_progress8kpabs_sum()` の full refresh を `PieceList` 走査へ置き換える
+- `piece_on()` / `from_piece_square()` / `from_hand_piece()` の再計算を省く
+- king-plane を除外したうえで、既存の scalar 実装と一致することを回帰テストで保証する
+
+### 実装内容
+
+- `compute_progress8kpabs_sum()` を `piece_list_fb()` / `piece_list_fw()` 反復へ変更
+- `ExtBonaPiece::from_board()` 由来の king-plane が混ざるため、
+  `FE_OLD_END` 未満だけを加算する条件を追加
+- 元の board/hand スキャン版と一致する slow path テストを追加して検証
+
+### 実施コマンド
+
+```bash
+cargo fmt && cargo clippy --fix --allow-dirty --tests && cargo test
+cargo build --release --bin bench_nnue_eval
+CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_STRIP=none cargo build --release --bin rshogi-usi
+```
+
+### microbench
+
+baseline は `/tmp/bench_nnue_eval-before-small-sort-opt`、
+candidate は `target/release/bench_nnue_eval`。
+
+```bash
+/tmp/bench_nnue_eval-before-small-sort-opt \
+  --nnue-file /mnt/nvme1/development/bullet-shogi/checkpoints/v82/v82-300/quantised.bin \
+  --mode layer-stack-refresh-cache \
+  --ls-bucket-mode progress8kpabs \
+  --ls-progress-coeff /mnt/nvme1/development/bullet-shogi/data/progress/nodchip_progress_e1_f1_cuda.bin \
+  --warmup 10000 --iterations 500000
+
+target/release/bench_nnue_eval \
+  --nnue-file /mnt/nvme1/development/bullet-shogi/checkpoints/v82/v82-300/quantised.bin \
+  --mode layer-stack-refresh-cache \
+  --ls-bucket-mode progress8kpabs \
+  --ls-progress-coeff /mnt/nvme1/development/bullet-shogi/data/progress/nodchip_progress_e1_f1_cuda.bin \
+  --warmup 10000 --iterations 500000
+```
+
+結果:
+
+| bench | baseline ns/op | candidate ns/op | delta |
+| --- | ---: | ---: | ---: |
+| progress8kpabs bucket | `137.8` | `80.4` | `-41.65%` |
+| layer-stack-refresh-cache | `2860.4` | `2635.8` | `-7.85%` |
+
+microbench の事実:
+
+- `progress8kpabs bucket` 単体は大幅改善
+- `refresh-cache` 全体でも `-7.85%` と明確に良化
+- ただし、この改善が探索全体へどこまで乗るかは別途 search-only で確認が必要
+
+### search-only A/B
+
+baseline は `/tmp/rshogi-usi-before-small-sort-opt`、candidate は `target/release/rshogi-usi`。
+`go movetime 15000` と `perf stat -x, -e cycles,instructions -p $ENGINE_PID -- sleep 10`
+で計測した。
+
+| order | engine | final nps | cycles / node | instructions / node |
+| --- | --- | ---: | ---: | ---: |
+| 1 | baseline | `627,393` | `4,920.2` | `11,393.5` |
+| 1 | candidate | `617,990` | `4,930.1` | `11,162.0` |
+| 2 | candidate | `666,279` | `4,802.8` | `11,332.1` |
+| 2 | baseline | `663,556` | `4,814.5` | `11,396.3` |
+
+平均:
+
+| engine | avg nps | avg cycles / node | avg instructions / node |
+| --- | ---: | ---: | ---: |
+| baseline | `645,474.5` | `4,867.4` | `11,394.9` |
+| candidate | `642,134.5` | `4,866.5` | `11,247.0` |
+
+search-only の事実:
+
+- candidate は 2-order 平均で baseline 比 `-0.52%`
+- `instructions / node` は `-1.30%` 改善
+- `cycles / node` もほぼ同等だが、NPS はノイズ込みでもプラスを確認できなかった
+
+判断:
+
+- 不採用
+- `compute_progress8kpabs_sum()` 自体は速くなったが、探索全体では寄与が小さすぎる
+- `progress8kpabs` は refresh 頻度依存なので、局所改善だけでは NPS に結びつきにくい
+
+## 2026-03-27 `pv.clone()` 除去 (`split_at_mut`)
+
+search-only `perf` では `__memmove_avx_unaligned_erms` がまだ 5% 前後残っている。
+`alpha_beta` の hot loop には `child_pv = st.stack[ply + 1].pv.clone()` があり、
+PV ノードで毎回 `Vec<Move>` を複製してから `update_pv()` していた。
+まずは tree-safe な範囲で、これを `split_at_mut()` による直接参照へ置き換える候補を試した。
+
+対象は
+[alpha_beta.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/search/alpha_beta.rs)。
+
+変更意図:
+
+- `Stack::pv` の clone をなくし、PV 更新時の余分な copy / memmove を減らす
+- 探索木を変えずに、親 stack と子 stack の disjoint borrow を取る
+
+### 実装内容
+
+- `st.stack[(ply + 1) as usize].pv.clone()` を削除
+- `st.stack.split_at_mut(child_idx)` で親と子の stack を同時借用し、
+  `parent_stack[ply].update_pv(mv, &child_stack[0].pv)` へ置換
+
+### 実施コマンド
+
+```bash
+cargo fmt && cargo clippy --fix --allow-dirty --tests && cargo test
+CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_STRIP=none cargo build --release --bin rshogi-usi
+```
+
+### search-only A/B
+
+baseline は `/tmp/rshogi-usi-before-small-sort-opt`、candidate は `target/release/rshogi-usi`。
+`go movetime 15000` と `perf stat -x, -e cycles,instructions -p $ENGINE_PID -- sleep 10`
+で計測した。
+
+| order | engine | final nps | cycles / node | instructions / node |
+| --- | --- | ---: | ---: | ---: |
+| 1 | baseline | `667,095` | `4,789.6` | `11,375.0` |
+| 1 | candidate | `658,515` | `4,853.2` | `11,447.2` |
+| 2 | candidate | `634,854` | `4,794.8` | `11,172.0` |
+| 2 | baseline | `664,544` | `4,799.8` | `11,363.9` |
+
+平均:
+
+| engine | avg nps | avg cycles / node | avg instructions / node |
+| --- | ---: | ---: | ---: |
+| baseline | `665,819.5` | `4,794.7` | `11,369.5` |
+| candidate | `646,684.5` | `4,824.0` | `11,309.6` |
+
+search-only の事実:
+
+- candidate は 2-order 平均で baseline 比 `-2.87%`
+- `instructions / node` は `-0.53%` 改善
+- しかし `cycles / node` は `+0.61%` 悪化し、NPS は明確に低下
+
+判断:
+
+- 不採用
+- `pv.clone()` を外しても `memmove` 残差の主因ではなかった
+- `split_at_mut()` 化で alias / code layout が変わり、むしろ cycle 側が悪化した可能性が高い
+
+## 2026-03-27 `piece_value()` の table 化
+
+`MovePicker::next_move()` の annotate では capture scoring ループに
+`piece_value(captured)` が残っていた。
+`match PieceType` を `[i32; Piece::NUM]` 参照に置き換えれば、
+分岐を減らして capture score 計算を軽くできる可能性がある。
+変更量が小さいため、まず search-only で素直に再計測した。
+
+対象は
+[movepicker.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/search/movepicker.rs)。
+
+### 実装内容
+
+- `piece_value()` を `match PieceType` から `PIECE_VALUE_TABLE[pc.index()]` に置換
+- `Piece::NONE` と空き番地は `0` にした
+
+### 実施コマンド
+
+```bash
+cargo fmt && cargo clippy --fix --allow-dirty --tests && cargo test
+CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_STRIP=none cargo build --release --bin rshogi-usi
+```
+
+### search-only A/B
+
+baseline は `/tmp/rshogi-usi-before-small-sort-opt`、candidate は `target/release/rshogi-usi`。
+`go movetime 15000` と `perf stat -x, -e cycles,instructions -p $ENGINE_PID -- sleep 10`
+で計測した。
+
+| order | engine | final nps | cycles / node | instructions / node |
+| --- | --- | ---: | ---: | ---: |
+| 1 | baseline | `638,361` | `4,884.7` | `11,408.5` |
+| 1 | candidate | `644,928` | `4,957.9` | `11,508.8` |
+| 2 | candidate | `607,838` | `5,016.6` | `11,396.8` |
+| 2 | baseline | `610,484` | `4,972.7` | `11,360.7` |
+
+平均:
+
+| engine | avg nps | avg cycles / node | avg instructions / node |
+| --- | ---: | ---: | ---: |
+| baseline | `624,422.5` | `4,928.7` | `11,384.6` |
+| candidate | `626,383.0` | `4,987.3` | `11,452.8` |
+
+search-only の事実:
+
+- candidate は 2-order 平均で baseline 比 `+0.31%`
+- ただし `cycles / node` は `+1.19%`、`instructions / node` は `+0.60%` と両方悪化
+- NPS の差はこの環境ノイズの範囲内で、改善根拠としては弱い
+
+判断:
+
+- 不採用
+- table 参照化は `MovePicker` 全体ではプラスが確認できなかった
+- 小差の NPS より、`cycles / node` と `instructions / node` の悪化を優先して棄却する
+
+## 2026-03-27 `HalfKA_hm` の「自玉移動でも no-refresh」案の事前検証
+
+`refresh_perspective_with_cache()` の重さを見て、
+`HalfKA_hm` なら自玉が動いても `king_bucket` と `hm_mirror` が不変なら
+差分更新に落とせるのではないか、という案を先に静的検証した。
+
+確認対象:
+
+- [features/mod.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/nnue/features/mod.rs)
+- [bona_piece_halfka_hm.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/nnue/bona_piece_halfka_hm.rs)
+- [feature_transformer_layer_stacks.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/nnue/feature_transformer_layer_stacks.rs)
+
+分かった事実:
+
+- `HalfKA_hm` の feature index は `king_bucket(ksq, perspective)` と
+  `is_hm_mirror(ksq, perspective)` の両方に依存する
+- `king_bucket = file_m * 9 + rank`、`hm_mirror = file >= 5` なので、
+  正規化後の `(king_bucket, hm_mirror)` の組は玉位置を一意に復元できる
+- 具体的には:
+  - `rank = king_bucket % 9`
+  - `file_m = king_bucket / 9`
+  - `hm_mirror == false` なら `file = file_m`
+  - `hm_mirror == true` なら `file = 8 - file_m`
+- つまり合法な自玉移動で `(king_bucket, hm_mirror)` が両方不変になるケースはない
+
+判断:
+
+- 実装しない
+- この案は `DirtyPiece` 復元や A/B 計測に進む前に、特徴量定義だけで否定できる
+- `HalfKA_hm` で自玉移動を no-refresh に落とすには、bucket/mirror 不変条件ではなく、
+  もっと別の表現変換が必要
+
+## 2026-03-27 `refresh_perspective_with_cache()` の small sort 化
+
+`refresh_perspective_with_cache()` では active index を `u32` に詰めた後、
+毎回 `sort_unstable()` してから Finny cache へ渡している。
+LayerStacks の active 数は実質 40 前後なので、
+汎用ソートより単純な挿入ソートの方が軽い可能性を microbench で先に確認した。
+
+対象は
+[feature_transformer_layer_stacks.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/nnue/feature_transformer_layer_stacks.rs)。
+
+### 実装内容
+
+- `sorted.sort_unstable()` を小配列向けの単純挿入ソートへ置換
+- correctness 用の単体テストを追加
+
+### 実施コマンド
+
+```bash
+cargo fmt && cargo clippy --fix --allow-dirty --tests && cargo test
+cargo build --release --bin bench_nnue_eval
+CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_STRIP=none cargo build --release --bin rshogi-usi
+
+/tmp/bench_nnue_eval-before-small-sort-opt \
+  --nnue-file /mnt/nvme1/development/bullet-shogi/checkpoints/v82/v82-300/quantised.bin \
+  --mode layer-stack-refresh-cache \
+  --ls-bucket-mode progress8kpabs \
+  --ls-progress-coeff /mnt/nvme1/development/bullet-shogi/data/progress/nodchip_progress_e1_f1_cuda.bin \
+  --warmup 10000 --iterations 500000
+
+target/release/bench_nnue_eval \
+  --nnue-file /mnt/nvme1/development/bullet-shogi/checkpoints/v82/v82-300/quantised.bin \
+  --mode layer-stack-refresh-cache \
+  --ls-bucket-mode progress8kpabs \
+  --ls-progress-coeff /mnt/nvme1/development/bullet-shogi/data/progress/nodchip_progress_e1_f1_cuda.bin \
+  --warmup 10000 --iterations 500000
+```
+
+結果:
+
+| bench | baseline ns/op | candidate ns/op | delta |
+| --- | ---: | ---: | ---: |
+| layer-stack-refresh-cache | `2790.6` | `2819.0` | `+1.02%` |
+
+microbench の事実:
+
+- `refresh-cache` 単体で悪化
+- active 数が小さくても、Rust 標準の `sort_unstable()` を置き換える根拠は得られなかった
+
+判断:
+
+- 不採用
+- microbench の時点で悪化しているため、search-only A/B には進めない
+
+## 2026-03-27 `do_move_with_prefetch()` の StateInfo 直書き候補
+
+`perf annotate` では
+[do_move_with_prefetch()](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/position/pos.rs#L856)
+の先頭に大きい stack frame と `partial_clone()` 起因らしい state materialization が見えていた。
+そこで `StateInfo` の一時値を stack 上に作らず、`state_stack[next_idx]` を直接初期化して
+`do_move` / `null move` / `pass` で再利用する候補を試した。
+
+対象:
+
+- [pos.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/position/pos.rs)
+- [state.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/position/state.rs)
+
+変更意図:
+
+- `let mut new_state = self.cur_state().partial_clone()` をやめる
+- 次の state slot を部分コピーで直接初期化し、`push_state(new_state)` の copy を消す
+- 探索木を変えずに `do_move_with_prefetch()` の stack traffic を減らす
+
+### 実施コマンド
+
+```bash
+cargo fmt && cargo clippy --fix --allow-dirty --tests && cargo test
+cp target/release/rshogi-usi /tmp/rshogi-usi-before-state-slot-opt
+CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_STRIP=none cargo build --release --bin rshogi-usi
+
+/tmp/run_state_slot_ab.sh
+/tmp/run_state_slot_ab_more.sh
+```
+
+search-only 条件:
+
+- baseline: `/tmp/rshogi-usi-before-state-slot-opt`
+- candidate: `target/release/rshogi-usi`
+- `position startpos moves 7g7f 3c3d 6g6f 8c8d 2g2f 4a3b 2f2e 8d8e 8h2b+`
+- `go movetime 15000`
+- `perf stat -x, -e cycles,instructions -p $ENGINE_PID -- sleep 10`
+
+### search-only A/B
+
+| order | engine | final nps | cycles / node | instructions / node |
+| --- | --- | ---: | ---: | ---: |
+| 1 | baseline | `650,682` | `4,803.9` | `11,177.1` |
+| 1 | candidate | `654,332` | `4,795.1` | `11,188.2` |
+| 2 | candidate | `636,996` | `4,796.7` | `11,181.0` |
+| 2 | baseline | `635,014` | `4,835.3` | `11,223.0` |
+| 3 | baseline | `663,639` | `4,821.1` | `11,136.8` |
+| 3 | candidate | `652,975` | `4,788.7` | `11,151.5` |
+| 4 | candidate | `628,935` | `4,874.0` | `11,203.2` |
+| 4 | baseline | `634,665` | `4,807.2` | `11,176.9` |
+
+平均:
+
+| engine | avg nps | avg cycles / node | avg instructions / node |
+| --- | ---: | ---: | ---: |
+| baseline | `646,000.0` | `4,816.9` | `11,178.5` |
+| candidate | `643,309.5` | `4,813.6` | `11,181.0` |
+
+search-only の事実:
+
+- candidate は 4-order 平均で baseline 比 `-0.42%`
+- `cycles / node` は `-0.07%` でほぼ同等
+- `instructions / node` は `+0.02%` で同等以下
+- 最初の 2-order だけ見ると微差プラスだが、4-order まで広げると改善は消えた
+
+判断:
+
+- 不採用
+- `partial_clone` の stack materialization は見えていたが、探索全体の NPS には結びつかなかった
+- `do_move_with_prefetch()` のコストは state copy より別の更新経路が支配的と見る
+
+## 2026-03-27 `StateInfo.previous` の sentinel 化
+
+`update_repetition_info()` の annotate では、
+`Option<usize>` の presence check と 4-ply 祖先までの `and_then()` 連鎖が
+そこそこ目立っていた。さらに `Option<usize>` 自体が `16 byte` なので、
+`StateInfo` の `previous` を sentinel `usize` に替えて field 配置を寄せれば、
+state stack の密度も少し改善できる。
+
+対象:
+
+- [state.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/position/state.rs)
+- [pos.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/position/pos.rs)
+
+変更意図:
+
+- `previous: Option<usize>` を `previous: usize` + `NO_PREVIOUS` sentinel に置換
+- `update_repetition_info()` の 4-ply / 2-ply ancestor 追跡から `Option` 連鎖を外す
+- undo 系と `previous_state()` も sentinel 判定へ寄せる
+
+事前確認:
+
+```bash
+cat >/tmp/option_usize_size.rs <<'RS'
+fn main() {
+    println!("option_usize={}", std::mem::size_of::<Option<usize>>());
+    println!("usize={}", std::mem::size_of::<usize>());
+}
+RS
+rustc /tmp/option_usize_size.rs -O -o /tmp/option_usize_size
+/tmp/option_usize_size
+```
+
+出力:
+
+```text
+option_usize=16
+usize=8
+```
+
+### 実施コマンド
+
+```bash
+cargo fmt && cargo clippy --fix --allow-dirty --tests && cargo test
+CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_STRIP=none cargo build --release --bin rshogi-usi
+
+/tmp/run_state_slot_ab.sh
+/tmp/run_state_slot_ab_more.sh
+```
+
+search-only 条件:
+
+- baseline: `/tmp/rshogi-usi-before-state-slot-opt`
+- candidate: `target/release/rshogi-usi`
+- `position startpos moves 7g7f 3c3d 6g6f 8c8d 2g2f 4a3b 2f2e 8d8e 8h2b+`
+- `go movetime 15000`
+- `perf stat -x, -e cycles,instructions -p $ENGINE_PID -- sleep 10`
+
+### search-only A/B
+
+| order | engine | final nps | cycles / node | instructions / node |
+| --- | --- | ---: | ---: | ---: |
+| 1 | baseline | `643,864` | `4,778.4` | `11,037.7` |
+| 1 | candidate | `649,575` | `4,769.7` | `11,100.6` |
+| 2 | candidate | `651,901` | `4,803.5` | `11,227.6` |
+| 2 | baseline | `620,903` | `4,880.1` | `11,187.4` |
+| 3 | baseline | `659,172` | `4,778.4` | `11,193.2` |
+| 3 | candidate | `644,718` | `4,847.2` | `11,167.5` |
+| 4 | candidate | `651,095` | `4,815.5` | `11,199.9` |
+| 4 | baseline | `641,387` | `4,850.3` | `11,193.6` |
+
+平均:
+
+| engine | avg nps | avg cycles / node | avg instructions / node |
+| --- | ---: | ---: | ---: |
+| baseline | `641,331.5` | `4,821.8` | `11,153.0` |
+| candidate | `649,322.2` | `4,809.0` | `11,173.9` |
+
+search-only の事実:
+
+- candidate は 4-order 平均で baseline 比 `+1.25%`
+- `cycles / node` は `-0.27%`
+- `instructions / node` は `+0.19%`
+- 改善の主因は instruction 削減ではなく、`StateInfo` 配置変更と ancestor 追跡の cycle 側軽量化とみる
+
+### 探索木一致検証
+
+検証コマンドは上の「探索木一致検証コマンド」と同型で、
+`before` に `/tmp/rshogi-usi-before-state-slot-opt`、`after` に `target/release/rshogi-usi` を指定した。
+
+結果:
+
+- 10/10 局面で `bestmove` / `score cp` / `nodes` が完全一致
+- 代表例:
+  - `MATCH 1 bestmove P*7f ponder 7g8h | score cp 256|nodes 2074779|`
+  - `MATCH 6 bestmove P*4e ponder B*4g | score cp -510|nodes 4357156|`
+  - `MATCH 10 bestmove S*9d ponder 9c9b | score cp -3071|nodes 4839031|`
+
+判断:
+
+- 採用
+- `update_repetition_info()` 自体は top hotspot ではないが、`StateInfo` のレイアウトと sentinel 化を合わせると search-only で再現性のあるプラスになった
