@@ -82,6 +82,10 @@ struct Cli {
     /// EvalHashを使用するか（true/false）
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     use_eval_hash: bool,
+
+    /// 追加の USI オプション (format: "Name=Value", can be repeated)
+    #[arg(long = "usi-option", num_args = 1..)]
+    usi_options: Option<Vec<String>>,
 }
 
 /// Material評価レベルのバリデーション
@@ -127,6 +131,7 @@ impl Cli {
             eval_config: EvalConfig {
                 nnue_file: self.nnue_file.clone(),
                 material_level: self.material_level,
+                usi_options: self.usi_options.clone().unwrap_or_default(),
             },
             reuse_search: self.reuse_search,
             warmup: self.warmup,
