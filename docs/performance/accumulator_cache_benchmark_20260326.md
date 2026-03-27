@@ -1924,3 +1924,228 @@ search-only の事実:
 
 - 不採用
 - `MovePicker` 選択ループの境界チェックは見えていたが、この形の unchecked 化は探索全体ではプラスにならなかった
+
+## 2026-03-27 `search_only_ab` 導入と代表局面 4 件への縮小
+
+`benchmark` は起動や USI 往復を含むため、`+1%` 級の差の採否判定には粗い。
+そこで、`readyok` 後にだけ `perf stat --control` を `enable` し、
+`bestmove` 後に `disable` する専用ツール
+[`search_only_ab.rs`](/mnt/nvme1/development/rshogi/crates/tools/src/bin/search_only_ab.rs)
+を追加した。
+
+このツールは以下を行う:
+
+- fresh process で 1 run ごとにエンジンを起動
+- `ABBA` 順で baseline / candidate を交互実行
+- `cycles / node` と `instructions / node` も同時に採取
+- `taskset` で CPU 固定
+- `--cpus 2,4` のように shard 並列を指定可能
+
+### shard 並列の安定性確認
+
+4 shard (`--cpus 2,4,6,8`) と 3 shard (`--cpus 2,4,6`) は、
+局面数を 4 件まで減らした最小条件でも
+`timeout waiting for perf ack for enable` で不安定だった。
+
+事実:
+
+- 4 局面・`movetime 1000ms` の smoke でも 4 shard は再現
+- 同条件で 3 shard も再現
+- 2 shard (`--cpus 2,4`) は安定
+
+現時点の判断:
+
+- この環境では `perf --control` を 3 本以上同時に走らせるのは不安定
+- 実運用の A/B は 2 shard までを前提にする
+
+### 20 局面固定ではなく、代表局面 4 件を inner loop に使う方針
+
+適当な 20 局面を毎回回すのは重い上に、局面依存の符号反転を見逃しやすい。
+特に `AccumulatorCaches` / `MAX_DEPTH` 周りは局面ごとに効き方が異なるため、
+採否判定の inner loop は「代表性のある少数局面」に切る方がよい。
+
+初期の代表セットとして、
+[`DEFAULT_POSITIONS`](/mnt/nvme1/development/rshogi/crates/tools/src/positions.rs#L11)
+から以下の 4 件を採用した:
+
+- `hirate-like`
+- `complex-middle`
+- `tactical`
+- `movegen-heavy`
+
+意図:
+
+- `hirate-like`: 開幕寄りで標準的な探索
+- `complex-middle`: 中盤の評価・更新経路
+- `tactical`: 分岐と fail-high/fail-low が出やすい tactical 系
+- `movegen-heavy`: move generation / legality / SEE 寄りの負荷
+
+方針:
+
+- inner loop: 上記 4 件で採否判定
+- mid gate: 8-10 件に拡張して再確認
+- final gate: 20+ 件または実戦系ベンチで最終確認
+
+### 実施コマンド
+
+```bash
+cat > /tmp/search_only_sentinel_4pos.txt <<'EOF'
+hirate-like | lnsgkgsnl/1r7/p1ppp1bpp/1p3pp2/7P1/2P6/PP1PPPP1P/1B3S1R1/LNSGKG1NL b - 9
+complex-middle | l4S2l/4g1gs1/5p1p1/pr2N1pkp/4Gn3/PP3PPPP/2GPP4/1K7/L3r+s2L w BS2N5Pb 1
+tactical | 6n1l/2+S1k4/2lp4p/1np1B2b1/3PP4/1N1S3rP/1P2+pPP+p1/1p1G5/3KG2r1 b GSN2L4Pgs2p 1
+movegen-heavy | l6nl/5+P1gk/2np1S3/p1p4Pp/3P2Sp1/1PPb2P1P/P5GS1/R8/LN4bKL w RGgsn5p 1
+EOF
+
+target/debug/search_only_ab \
+  --baseline /tmp/rshogi-usi-before \
+  --candidate target/release/rshogi-usi \
+  --positions /tmp/search_only_sentinel_4pos.txt \
+  --movetime-ms 10000 \
+  --pattern abba \
+  --rounds 1 \
+  --threads 1 \
+  --hash-mb 256 \
+  --cpus 2,4 \
+  --eval-file /mnt/nvme1/development/bullet-shogi/checkpoints/v82/v82-300/quantised.bin \
+  --usi-option MaterialLevel=none \
+  --usi-option LS_BUCKET_MODE=progress8kpabs \
+  --usi-option LS_PROGRESS_COEFF=/mnt/nvme1/development/bullet-shogi/data/progress/nodchip_progress_e1_f1_cuda.bin \
+  --json-out /tmp/search_only_ab_sentinel4.json
+```
+
+### 4 局面 sentinel での before/current 再計測
+
+baseline:
+
+- `/tmp/rshogi-usi-before`
+
+candidate:
+
+- `target/release/rshogi-usi`
+
+集計結果:
+
+| engine | runs | total nodes | total time | avg nps | cycles / node | instructions / node |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| baseline | `8` | `49,015,558` | `79,995ms` | `612,733` | `7,672.5` | `16,766.1` |
+| candidate | `8` | `48,763,702` | `79,997ms` | `609,569` | `7,722.6` | `16,483.4` |
+
+差分:
+
+- `NPS -0.52%`
+- `cycles / node +0.65%`
+- `instructions / node -1.69%`
+
+局面別の見え方:
+
+- `hirate-like`: current がややプラス
+- `complex-middle`: current がマイナス
+- `tactical`: current が明確にマイナス
+- `movegen-heavy`: current がややプラス
+
+考察:
+
+- 4 局面でも局面依存の符号反転が見える
+- したがって、採否判定を 1 局面や根拠の薄い 20 局面固定で行うのは危険
+- 一方で 4 局面だけだと tactical 偏重などの偏りもあり得るため、
+  inner loop としては有効だが最終判定には使わない
+- 以後は「代表 4 件でふるい、必要候補だけ 8-10 件、最後に 20+ 件」で進める
+
+## 2026-03-27 `MAX_DEPTH` チューニングの再計測
+
+PR #397 で入った `MAX_DEPTH` の tuned 値のうち、
+効果が未検証のものを見直した。
+
+対象:
+
+- LayerStacks: `MAX_DEPTH=4 -> 1` を一時的に戻して比較
+- HalfKA: `MAX_DEPTH=3 -> 1` に戻す
+- HalfKA_hm: `MAX_DEPTH=2 -> 1` に戻す
+
+方針:
+
+- v82 は LayerStacks なので、速度比較は LayerStacks だけで行う
+- HalfKA / HalfKA_hm は今回のモデルでは効果検証できないため、tuned 値は採用しない
+
+### 実施コマンド
+
+current (`MAX_DEPTH=4`) を退避:
+
+```bash
+CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_STRIP=none \
+  cargo build --release --bin rshogi-usi
+cp target/release/rshogi-usi /tmp/rshogi-usi-maxdepth-current
+```
+
+revert 版 (`LayerStacks=1`, `HalfKA=1`, `HalfKA_hm=1`) をビルド:
+
+```bash
+cargo fmt && cargo clippy --fix --allow-dirty --tests && cargo test
+CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_STRIP=none \
+  cargo build --release --bin rshogi-usi
+cp target/release/rshogi-usi /tmp/rshogi-usi-maxdepth1
+```
+
+search-only A/B:
+
+```bash
+target/debug/search_only_ab \
+  --baseline /tmp/rshogi-usi-maxdepth-current \
+  --candidate /tmp/rshogi-usi-maxdepth1 \
+  --positions /tmp/search_only_sentinel_4pos.txt \
+  --movetime-ms 10000 \
+  --pattern abba \
+  --rounds 2 \
+  --threads 1 \
+  --hash-mb 256 \
+  --cpus 2,4 \
+  --eval-file /mnt/nvme1/development/bullet-shogi/checkpoints/v82/v82-300/quantised.bin \
+  --usi-option MaterialLevel=none \
+  --usi-option LS_BUCKET_MODE=progress8kpabs \
+  --usi-option LS_PROGRESS_COEFF=/mnt/nvme1/development/bullet-shogi/data/progress/nodchip_progress_e1_f1_cuda.bin \
+  --json-out /tmp/search_only_ab_maxdepth_revert_sentinel4.json
+```
+
+### search-only A/B 結果
+
+| engine | runs | total nodes | total time | avg nps | cycles / node | instructions / node |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| baseline (`MAX_DEPTH=4`) | `16` | `97,071,911` | `159,993ms` | `606,726` | `7,643.5` | `16,560.9` |
+| candidate (`MAX_DEPTH=1`) | `16` | `94,981,566` | `159,994ms` | `593,657` | `7,819.2` | `16,946.4` |
+
+差分:
+
+- `MAX_DEPTH=1` は `NPS -2.15%`
+- `cycles / node +2.30%`
+- `instructions / node +2.33%`
+
+局面別:
+
+- `hirate-like`: `-0.02%`
+- `complex-middle`: `-2.01%`
+- `tactical`: `-2.11%`
+- `movegen-heavy`: `-4.66%`
+
+判断:
+
+- LayerStacks の `MAX_DEPTH=4` は維持
+- 少なくとも representative 4局面では、`1` に戻すと有意に悪化
+
+### 探索木一致検証
+
+4 件の representative 局面で `go depth 20` を比較した。
+
+結果:
+
+- 4/4 局面で `bestmove` / `score cp` / `nodes` が完全一致
+- 代表例:
+  - `MATCH 1 bestmove 3g3f ponder 3a3b | score cp 122 | nodes 657005`
+  - `MATCH 3 bestmove N*4d ponder 5b5c | score cp -1628 | nodes 27355641`
+  - `MATCH 4 bestmove N*3a ponder 4b3a | score cp -3825 | nodes 20640739`
+
+結論:
+
+- `MAX_DEPTH` は探索木を変えておらず、差は純粋に速度差と見てよい
+- 今回の整理としては、
+  - LayerStacks: `MAX_DEPTH=4` を維持
+  - HalfKA / HalfKA_hm: 効果未検証の tuned 値は戻す

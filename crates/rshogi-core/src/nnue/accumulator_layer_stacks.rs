@@ -389,8 +389,8 @@ impl AccumulatorStackLayerStacks {
     /// `Some((計算済みエントリのインデックス, 経由する局面数))` - 玉移動がない範囲で
     /// 計算済み祖先が見つかった場合。`None` - 使用可能な祖先が見つからない場合。
     pub fn find_usable_accumulator(&self) -> Option<(usize, usize)> {
-        // LayerStack L1=1536 では full refresh が重いため、4手分の祖先探索が有利。
-        // 計測: MAX_DEPTH=4 で +6.7% NPS (2026-03-26, 15局面平均)
+        // representative 4局面 x 2 rounds の search-only A/B では
+        // MAX_DEPTH=4 が MAX_DEPTH=1 比で +2.15% だったため維持する。
         const MAX_DEPTH: usize = 4;
 
         let current = &self.entries[self.current];
