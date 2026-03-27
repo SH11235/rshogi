@@ -290,7 +290,9 @@ where
         return (None, improving);
     }
 
-    let margin = ctx.tune_params.nmp_margin_depth_mult * depth + ctx.tune_params.nmp_margin_offset;
+    let margin = ctx.tune_params.nmp_margin_depth_mult * depth
+        + ctx.tune_params.nmp_margin_offset
+        + ctx.tune_params.nmp_margin_improving_bonus * improving as i32;
     let prev_move = st.stack[(ply - 1) as usize].current_move;
     let prev_is_pass = prev_move.is_pass();
 

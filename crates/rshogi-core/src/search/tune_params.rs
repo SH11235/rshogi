@@ -159,6 +159,8 @@ pub struct SearchTuneParams {
     pub nmp_margin_depth_mult: i32,
     /// NMP: margin の定数オフセット
     pub nmp_margin_offset: i32,
+    /// NMP: improving 時の追加マージン
+    pub nmp_margin_improving_bonus: i32,
     /// NMP: reduction のベース
     pub nmp_reduction_base: i32,
     /// NMP: reduction の depth 除算
@@ -766,6 +768,12 @@ const SPSA_OPTION_SPECS: &[SearchTuneOptionSpec] = &[
         default: -390,
         min: -4096,
         max: 4096,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_NMP_MARGIN_IMPROVING_BONUS",
+        default: 50,
+        min: 0,
+        max: 1024,
     },
     SearchTuneOptionSpec {
         usi_name: "SPSA_NMP_REDUCTION_BASE",
@@ -1431,6 +1439,7 @@ impl Default for SearchTuneParams {
             razoring_margin_depth2_coeff: 294,
             nmp_margin_depth_mult: 18,
             nmp_margin_offset: -390,
+            nmp_margin_improving_bonus: 50,
             nmp_reduction_base: 7,
             nmp_reduction_depth_div: 3,
             nmp_verification_depth_threshold: 16,
@@ -1713,6 +1722,7 @@ impl SearchTuneParams {
         try_apply!("SPSA_RAZORING_DEPTH2", razoring_margin_depth2_coeff, 0, 4096);
         try_apply!("SPSA_NMP_MARGIN_DEPTH_MULT", nmp_margin_depth_mult, 0, 256);
         try_apply!("SPSA_NMP_MARGIN_OFFSET", nmp_margin_offset, -4096, 4096);
+        try_apply!("SPSA_NMP_MARGIN_IMPROVING_BONUS", nmp_margin_improving_bonus, 0, 1024);
         try_apply!("SPSA_NMP_REDUCTION_BASE", nmp_reduction_base, 1, 32);
         try_apply!("SPSA_NMP_REDUCTION_DEPTH_DIV", nmp_reduction_depth_div, 1, 32);
         try_apply!("SPSA_NMP_VERIFICATION_DEPTH", nmp_verification_depth_threshold, 1, 128);
