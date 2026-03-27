@@ -908,10 +908,14 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKA<INPUT, OUTPU
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
             // SAFETY:
-            // - WASM SIMD128 はアライメント不要（v128_load は任意アドレスで動作）
+            // - WASM SIMD128 はアライメント不要（v128_load/v128_store は任意アドレスで動作。
+            //   biases は [i32; OUTPUT] でアライメント4バイトだが WASM では制約なし）
             // - input.len() >= PADDED_INPUT（propagate の呼び出し規約で保証）
             // - self.weights.len() == OUTPUT * PADDED_INPUT（構造体の不変条件）
-            // - OUTPUT % 4 == 0 のとき dot4 方式で入力ロードを4出力分再利用
+            // - dot4 パス: OUTPUT % 4 == 0 かつ j は 4 ステップで [0, OUTPUT) を走るため
+            //   biases[j..j+4] および output[j..j+4] は常に有効範囲内
+            // - OUTPUT > 0 ガード: OUTPUT=0 では while が即終了するが、
+            //   weights_ptr.add(3 * PADDED_INPUT) 等の無効オフセット計算を防ぐため明示
             unsafe {
                 use crate::nnue::layers::{
                     dot_i8x16_u8i8, dot_i8x16_u8i8_preexpanded, haddx4, hsum_i32x4,
@@ -931,7 +935,7 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKA<INPUT, OUTPU
                         let mut acc2 = i32x4_splat(0);
                         let mut acc3 = i32x4_splat(0);
 
-                        let row0 = weights_ptr.add((j + 0) * Self::PADDED_INPUT);
+                        let row0 = weights_ptr.add(j * Self::PADDED_INPUT);
                         let row1 = weights_ptr.add((j + 1) * Self::PADDED_INPUT);
                         let row2 = weights_ptr.add((j + 2) * Self::PADDED_INPUT);
                         let row3 = weights_ptr.add((j + 3) * Self::PADDED_INPUT);
