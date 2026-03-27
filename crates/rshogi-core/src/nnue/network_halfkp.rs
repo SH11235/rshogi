@@ -1000,7 +1000,10 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKP<INPUT, OUTPU
         // WASM SIMD128: 標準形式の重みで内積
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
-            // SAFETY: WASM SIMD128 はアライメント不要
+            // SAFETY:
+            // - WASM SIMD128 はアライメント不要（v128_load は任意アドレスで動作）
+            // - input.len() >= PADDED_INPUT（propagate の呼び出し規約で保証）
+            // - self.weights.len() == OUTPUT * PADDED_INPUT（構造体の不変条件）
             unsafe {
                 use crate::nnue::layers::{dot_i8x16_u8i8, hsum_i32x4};
                 use std::arch::wasm32::*;

@@ -316,8 +316,7 @@ impl<const L1: usize> AccumulatorStackHalfKA<L1> {
 
     /// 祖先を辿って使用可能なアキュムレータを探す
     pub fn find_usable_accumulator(&self) -> Option<(usize, usize)> {
-        // L1=512: MAX_DEPTH=3 で +5.3% NPS (2026-03-26, 15局面平均)
-        const MAX_DEPTH: usize = 3;
+        const MAX_DEPTH: usize = 1;
 
         let current = &self.entries[self.current_idx];
         if current.dirty_piece.king_moved[0] || current.dirty_piece.king_moved[1] {
@@ -908,7 +907,10 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKA<INPUT, OUTPU
         // WASM SIMD128: 標準形式の重みで内積
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
-            // SAFETY: WASM SIMD128 はアライメント不要
+            // SAFETY:
+            // - WASM SIMD128 はアライメント不要（v128_load は任意アドレスで動作）
+            // - input.len() >= PADDED_INPUT（propagate の呼び出し規約で保証）
+            // - self.weights.len() == OUTPUT * PADDED_INPUT（構造体の不変条件）
             unsafe {
                 use crate::nnue::layers::{dot_i8x16_u8i8, hsum_i32x4};
                 use std::arch::wasm32::*;
