@@ -208,6 +208,59 @@ done
 - depth 20 で検証（浅い depth では偶然一致する可能性があるため）
 - 局面は `/tmp/bench_positions.txt`（実対局棋譜から ply 20/40/60/80/100 帯を各3局面抽出）
 
+## rshogi vs YaneuraOu NPS 比較ベンチマーク
+
+### 局面準備
+
+```bash
+# start_sfens_ply32.txt の先頭 20 局面を使用
+head -20 start_sfens_ply32.txt > /tmp/bench_20pos.txt
+```
+
+### 計測コマンド
+
+```bash
+# rshogi
+cargo run -p tools --release --bin benchmark -- \
+  --engine target/release/rshogi-usi \
+  --usi-option "EvalFile=/mnt/nvme1/development/bullet-shogi/checkpoints/v82/v82-300/quantised.bin" \
+  --usi-option "LS_BUCKET_MODE=progress8kpabs" \
+  --usi-option "LS_PROGRESS_COEFF=/mnt/nvme1/development/bullet-shogi/data/progress/nodchip_progress_e1_f1_cuda.bin" \
+  --limit-type depth --limit 20 --tt-mb 256 \
+  --sfens /tmp/bench_20pos.txt --iterations 3 -v
+
+# YaneuraOu V2
+cargo run -p tools --release --bin benchmark -- \
+  --engine /mnt/nvme1/development/YaneuraOu/source/YaneuraOu-sfnnwop1536-v2 \
+  --usi-option "EvalDir=/mnt/nvme1/development/YaneuraOu/source/eval" \
+  --usi-option "FV_SCALE=28" \
+  --usi-option "LS_BUCKET_MODE=progress8kpabs" \
+  --usi-option "LS_PROGRESS_COEFF=/mnt/nvme1/development/bullet-shogi/data/progress/nodchip_progress_e1_f1_cuda.bin" \
+  --usi-option "BookFile=no_book" \
+  --limit-type depth --limit 20 --tt-mb 256 \
+  --sfens /tmp/bench_20pos.txt --iterations 3 -v
+```
+
+### 条件
+
+- 同一モデル: v82-300 (LayerStack 1536x16x32, progress8kpabs, FV_SCALE=28)
+- depth 20, Threads=1, Hash=256MB
+- 20 局面 × 3 iterations
+- `start_sfens_ply32.txt` の先頭 20 局面（sfen プレフィックス自動除去対応済み）
+- YO 側: `EvalDir` + `nn.bin` symlink、`BookFile=no_book`、`FV_SCALE=28` 明示指定
+- 学習プロセスなしのクリーン環境で実施すること
+
+### 計測結果 (2026-03-27, クリーン環境)
+
+| エンジン | Total Nodes | Total Time | Avg NPS | 対 rshogi 比 |
+|---------|------------|-----------|---------|-------------|
+| rshogi | 327,857,578 | 553,003ms | 592,867 | 基準 |
+| YO V2 | 124,008,003 | 195,580ms | 634,052 | **+6.9%** |
+
+- YO が rshogi より 6.9% 高速（perf stat 調査の 6.8% とほぼ一致）
+- ノード数の差は探索木の違い（同一 depth でも枝刈り判断が異なる）
+- 以前の計測で「rshogi が 34% 速い」は学習プロセス同時実行 + depth 20 到達の非対称性による誤計測だった
+
 ## 2026-03-27 LayerStack propagate explicit scratch 候補
 
 `LayerStackBucket::propagate()` を YO に寄せて、`fc_0 -> ClippedReLU / SqrClippedReLU -> fc_1 -> ClippedReLU -> fc_2` の中間を scratch buffer へ明示的に展開する候補を実装した。
@@ -570,3 +623,274 @@ search-only の事実:
 
 - 採用
 - `progress8kpabs` の軽量化は小さいが再現性のあるプラス
+
+## 2026-03-27 search_node PV clone 除去候補
+
+`perf` の `__memmove_avx_unaligned_erms` と [alpha_beta.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/search/alpha_beta.rs) の
+`st.stack[(ply + 1)].pv.clone()` が対応している可能性を疑い、PV 更新時の clone を
+`split_at_mut()` による disjoint borrow へ置き換えた。
+
+変更点:
+
+- `let child_pv = st.stack[(ply + 1) as usize].pv.clone();`
+- `st.stack[ply as usize].update_pv(mv, &child_pv);`
+
+を
+
+- `let (head, tail) = st.stack.split_at_mut(child_idx);`
+- `head[ply as usize].update_pv(mv, &tail[0].pv);`
+
+へ変更
+
+baseline バイナリは変更前の current tree からコピーした `/tmp/rshogi-usi-before-pvclone-opt` を使用した。
+
+### 実施コマンド
+
+```bash
+cargo fmt && cargo clippy --fix --allow-dirty --tests && cargo test
+CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_STRIP=none cargo build --release --bin rshogi-usi
+```
+
+search-only A/B:
+
+```bash
+POS_LINE="$(head -1 /tmp/bench_positions.txt)"
+EVAL=/mnt/nvme1/development/bullet-shogi/checkpoints/v82/v82-300/quantised.bin
+PROGRESS=/mnt/nvme1/development/bullet-shogi/data/progress/nodchip_progress_e1_f1_cuda.bin
+
+# run_case <engine>
+# - Threads=1 / Hash=256 / LS_BUCKET_MODE=progress8kpabs
+# - fixed position + `go movetime 10000`
+# - `perf stat -p $ENGINE_PID -- sleep 10`
+```
+
+### search-only A/B
+
+| order | engine | final nps | cycles / node | instructions / node |
+| --- | --- | ---: | ---: | ---: |
+| 1 | baseline | `621,379` | `7,549.8` | `16,979.1` |
+| 1 | candidate | `598,347` | `7,860.3` | `17,002.6` |
+| 2 | candidate | `601,012` | `7,828.5` | `17,010.3` |
+| 2 | baseline | `596,522` | `7,876.2` | `17,017.2` |
+
+平均:
+
+| engine | avg nps | avg cycles / node | avg instructions / node |
+| --- | ---: | ---: | ---: |
+| baseline | `608,950.5` | `7,713.0` | `16,998.2` |
+| candidate | `599,679.5` | `7,844.4` | `17,006.5` |
+
+search-only の事実:
+
+- candidate は 2-order 平均で baseline 比 `-1.52%`
+- `cycles / node` は悪化
+- `instructions / node` も微増で、`clone` 除去の期待には反した
+
+判断:
+
+- 不採用
+- 少なくともこの形の `split_at_mut()` 化は codegen が悪く、`pv.clone()` より遅い
+
+## 2026-03-27 search_node PV clone 除去候補 その2
+
+`split_at_mut()` 版の codegen 退化を避けるため、同じ目的を raw pointer で試した。
+対象は同じく [alpha_beta.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/search/alpha_beta.rs) の
+PV 更新部で、`child_pv` の一時 `clone()` を使わず
+`st.stack.as_mut_ptr()` から `stack[ply]` と `stack[ply + 1]` を直接参照した。
+
+変更意図:
+
+- `pv.clone()` が `__memmove_avx_unaligned_erms` の主因かを再確認
+- `split_at_mut()` より単純な codegen なら改善するかを確認
+
+baseline バイナリは同じく `/tmp/rshogi-usi-before-pvclone-opt` を使用した。
+
+### 実施コマンド
+
+```bash
+cargo fmt && cargo clippy --fix --allow-dirty --tests && cargo test
+CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_STRIP=none cargo build --release --bin rshogi-usi
+```
+
+search-only A/B:
+
+```bash
+POS_LINE="$(head -1 /tmp/bench_positions.txt)"
+EVAL=/mnt/nvme1/development/bullet-shogi/checkpoints/v82/v82-300/quantised.bin
+PROGRESS=/mnt/nvme1/development/bullet-shogi/data/progress/nodchip_progress_e1_f1_cuda.bin
+
+# run_case <engine>
+# - Threads=1 / Hash=256 / LS_BUCKET_MODE=progress8kpabs
+# - fixed position + `go movetime 10000`
+# - `perf stat -p $ENGINE_PID -- sleep 10`
+```
+
+### search-only A/B
+
+| order | engine | final nps | cycles / node | instructions / node |
+| --- | --- | ---: | ---: | ---: |
+| 1 | baseline | `625,849` | `7,502.4` | `16,989.3` |
+| 1 | candidate | `624,408` | `7,540.4` | `17,083.3` |
+| 2 | candidate | `622,445` | `7,555.0` | `17,065.9` |
+| 2 | baseline | `620,810` | `7,573.4` | `17,004.0` |
+
+平均:
+
+| engine | avg nps | avg cycles / node | avg instructions / node |
+| --- | ---: | ---: | ---: |
+| baseline | `623,329.5` | `7,537.9` | `16,996.7` |
+| candidate | `623,426.5` | `7,547.7` | `17,074.6` |
+
+search-only の事実:
+
+- candidate は 2-order 平均で baseline 比 `+0.02%` と実質ノイズ
+- `cycles / node` は微悪化
+- `instructions / node` は `+0.46%` 悪化
+
+判断:
+
+- 不採用
+- `pv.clone()` は現状の `__memmove` 主因とは言いにくい
+
+## 2026-03-27 refresh_perspective_with_cache の active 収集コピー除去
+
+`pv.clone()` 候補が外れたので、現行 baseline で search-only `perf record -g` を取り直した。
+この時点の上位は以下だった。
+
+- `LayerStackBucket::propagate` `11.63%`
+- `MovePicker::next_move` `9.37%`
+- `update_accumulator_with_cache` `8.67%`
+- `refresh_perspective_with_cache` `7.58%`
+- `SearchWorker::search_node` `5.85%`
+- `Position::attackers_to_occ` `4.98%`
+- `__memmove_avx_unaligned_erms` `4.78%`
+
+### 事実確認に使ったコマンド
+
+```bash
+POS_LINE="$(head -1 /tmp/bench_positions.txt)"
+EVAL=/mnt/nvme1/development/bullet-shogi/checkpoints/v82/v82-300/quantised.bin
+PROGRESS=/mnt/nvme1/development/bullet-shogi/data/progress/nodchip_progress_e1_f1_cuda.bin
+
+# search-only call graph
+perf record -g -F 999 -o /tmp/rshogi-search-only-callgraph.data -p "$ENGINE_PID" -- sleep 10
+perf report --stdio -i /tmp/rshogi-search-only-callgraph.data --no-children --percent-limit 0.5
+
+# annotate
+perf annotate --stdio -i /tmp/rshogi-search-only-callgraph.data \
+  'rshogi_core::nnue::feature_transformer_layer_stacks::FeatureTransformerLayerStacks::update_accumulator_with_cache'
+perf annotate --stdio -i /tmp/rshogi-search-only-callgraph.data \
+  '_ZN11rshogi_core4nnue32feature_transformer_layer_stacks29FeatureTransformerLayerStacks30refresh_perspective_with_cache17hadc67e55075560d6E.llvm.11645232554315537171'
+```
+
+### perf / annotate で分かった事実
+
+- `update_accumulator_with_cache` 内の `curr.copy_from_slice(prev)` は `memcpy(0xc00)` になっている
+- ただしこの経路は以前 explicit copy で負けているため、そのまま再挑戦する筋は弱い
+- `refresh_perspective_with_cache` では `get_active_features()` の戻り値 `IndexList` が `memcpy(0x1b8)` でローカルへコピーされている
+- 同じ関数で `sorted_buf = [0u32; MAX_ACTIVE_FEATURES]` の全 zero fill も入っている
+
+判断:
+
+- `refresh_perspective_with_cache` の active 収集まわりは、search-only hot path に対して筋が良い
+- 対策は 2 点に限定する
+  - `IndexList` 返却コピーをやめ、呼び出し側のローカルへ直接 `append_active_indices()`
+  - `sorted_buf` を `MaybeUninit<[u32; MAX_ACTIVE_FEATURES]>` 相当で使用領域だけ初期化
+
+### 実装内容
+
+[feature_transformer_layer_stacks.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/nnue/feature_transformer_layer_stacks.rs)
+
+- `append_active_indices()` ヘルパーを追加
+- `refresh_accumulator()` / `update_accumulator()` / `refresh_perspective_with_cache()` で `get_active_features()` 返却を廃止
+- `refresh_perspective_with_cache()` の `sorted_buf` を `MaybeUninit<u32>` 配列へ変更し、`len` 要素のみ初期化
+
+### 実施コマンド
+
+```bash
+cargo fmt && cargo clippy --fix --allow-dirty --tests && cargo test
+cargo build --release --bin bench_nnue_eval
+CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_STRIP=none cargo build --release --bin rshogi-usi
+cp target/release/rshogi-usi /tmp/rshogi-usi-before-refresh-active-opt
+cp target/release/bench_nnue_eval /tmp/bench_nnue_eval-before-refresh-active-opt
+```
+
+### microbench
+
+```bash
+NNUE=/mnt/nvme1/development/bullet-shogi/checkpoints/v82/v82-300/quantised.bin
+PROGRESS=/mnt/nvme1/development/bullet-shogi/data/progress/nodchip_progress_e1_f1_cuda.bin
+
+for engine in /tmp/bench_nnue_eval-before-refresh-active-opt target/release/bench_nnue_eval; do
+  "$engine" --nnue-file "$NNUE" --ls-bucket-mode progress8kpabs --ls-progress-coeff "$PROGRESS" \
+    --mode layer-stack-refresh-cache --warmup 20000 --iterations 300000
+  "$engine" --nnue-file "$NNUE" --ls-bucket-mode progress8kpabs --ls-progress-coeff "$PROGRESS" \
+    --mode layer-stack-update-cache --warmup 20000 --iterations 300000
+done
+```
+
+結果:
+
+| bench | baseline ns/op | candidate ns/op | delta |
+| --- | ---: | ---: | ---: |
+| `layer-stack-refresh-cache` | `2776.3` | `2440.4` | `+12.10%` |
+| `layer-stack-update-cache` | `167.8` | `178.6` | `-6.44%` |
+
+microbench の事実:
+
+- refresh path 単体では大幅改善
+- update path 単体では悪化
+- この時点では mixed なので、採否は search-only A/B で決める
+
+### search-only A/B
+
+baseline は `/tmp/rshogi-usi-before-refresh-active-opt`、candidate は `target/release/rshogi-usi`。
+
+```bash
+POS_LINE="$(head -1 /tmp/bench_positions.txt)"
+EVAL=/mnt/nvme1/development/bullet-shogi/checkpoints/v82/v82-300/quantised.bin
+PROGRESS=/mnt/nvme1/development/bullet-shogi/data/progress/nodchip_progress_e1_f1_cuda.bin
+
+# run_case <engine>
+# - Threads=1 / Hash=256 / LS_BUCKET_MODE=progress8kpabs
+# - fixed position + `go movetime 10000`
+# - `perf stat -p $ENGINE_PID -- sleep 10`
+```
+
+| order | engine | final nps | cycles / node | instructions / node |
+| --- | --- | ---: | ---: | ---: |
+| 1 | baseline | `592,090` | `7,942.9` | `17,046.7` |
+| 1 | candidate | `601,085` | `7,814.4` | `16,987.3` |
+| 2 | candidate | `604,878` | `7,762.2` | `16,987.9` |
+| 2 | baseline | `587,123` | `7,999.5` | `17,065.9` |
+
+平均:
+
+| engine | avg nps | avg cycles / node | avg instructions / node |
+| --- | ---: | ---: | ---: |
+| baseline | `589,606.5` | `7,971.2` | `17,056.3` |
+| candidate | `602,981.5` | `7,788.3` | `16,987.6` |
+
+search-only の事実:
+
+- candidate は 2-order 平均で baseline 比 `+2.27%`
+- `cycles / node` は `-2.29%`
+- `instructions / node` は `-0.40%`
+
+### 探索木一致検証
+
+検証コマンドは上の「探索木一致検証コマンド」と同型で、`before` に
+`/tmp/rshogi-usi-before-refresh-active-opt`、`after` に `target/release/rshogi-usi` を指定した。
+
+結果:
+
+- 10/10 局面で `bestmove` / `score cp` / `nodes` が完全一致
+- 例:
+  - `MATCH 1 bestmove P*7f ponder 7g8h | score cp 256|nodes 2074779|`
+  - `MATCH 6 bestmove P*4e ponder B*4g | score cp -510|nodes 4357156|`
+  - `MATCH 10 bestmove S*9d ponder 9c9b | score cp -3071|nodes 4839031|`
+
+判断:
+
+- 採用
+- `refresh_perspective_with_cache` の active 収集コピー除去は、局所ベンチ混在でも search-only では再現性のあるプラス
