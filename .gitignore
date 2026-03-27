@@ -54,6 +54,9 @@ docs/experiment-archive/
 docs/bullet/
 pr_summaries/
 
+# SPSA tuning results (personal, evaluation-function dependent)
+spsa_params/
+
 # Private memo
 memo/
 docs/archive/
