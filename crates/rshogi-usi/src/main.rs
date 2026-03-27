@@ -316,6 +316,10 @@ struct UsiEngine {
     /// Some(true): 明示指定されロード成功
     /// Some(false): 明示指定されたがロード失敗
     eval_file_explicit: Option<bool>,
+    /// SPSAParamsFile の明示指定パス（setoption で設定）
+    spsa_params_file: Option<String>,
+    /// SPSA params ファイルの読み込み済みフラグ
+    spsa_params_loaded: bool,
     /// Large Pages使用メッセージの出力済みフラグ
     large_pages_reported: bool,
     // --- 有限パス権（Finite Pass Rights）関連 ---
@@ -359,6 +363,8 @@ impl UsiEngine {
             last_position_cmd: None,
             last_go_cmd: None,
             eval_file_explicit: None,
+            spsa_params_file: None,
+            spsa_params_loaded: false,
             large_pages_reported: false,
             pass_rights_enabled: false,
             initial_pass_count: 2,
@@ -478,6 +484,7 @@ impl UsiEngine {
         println!(
             "option name PassRightValueLate type spin default {DEFAULT_PASS_RIGHT_VALUE_LATE} min 0 max 500"
         );
+        println!("option name SPSAParamsFile type string default <auto>");
         for spec in SearchTuneParams::option_specs() {
             println!(
                 "option name {} type spin default {} min {} max {}",
@@ -534,8 +541,94 @@ impl UsiEngine {
                 // EvalFile 未指定だが Material 有効 or NNUE 既ロード → 何もしない
             }
         }
+        self.maybe_load_spsa_params();
         self.maybe_report_large_pages();
         println!("readyok");
+    }
+
+    /// SPSA params ファイルの自動/明示読み込み。
+    /// 優先順位: 1. SPSAParamsFile で明示指定 2. バイナリ同ディレクトリの spsa.params 3. なし
+    fn maybe_load_spsa_params(&mut self) {
+        if self.spsa_params_loaded {
+            return;
+        }
+        self.spsa_params_loaded = true;
+
+        let path = if let Some(ref explicit) = self.spsa_params_file {
+            std::path::PathBuf::from(explicit)
+        } else {
+            // バイナリと同じディレクトリの spsa.params を探す
+            let exe_dir =
+                std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+            match exe_dir {
+                Some(dir) => dir.join("spsa.params"),
+                None => return,
+            }
+        };
+
+        if !path.exists() {
+            if self.spsa_params_file.is_some() {
+                eprintln!("info string Warning: SPSAParamsFile not found: {}", path.display());
+            }
+            return;
+        }
+
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("info string Warning: failed to read {}: {e}", path.display());
+                return;
+            }
+        };
+
+        let mut applied = 0usize;
+        let mut clamped = 0usize;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            // .params format: name,type,value,min,max,c_end,r_end [// comment] [[[NOT USED]]]
+            let val_part = trimmed.split("//").next().unwrap_or(trimmed);
+            let val_part = val_part.replace("[[NOT USED]]", "");
+            let cols: Vec<&str> = val_part.split(',').map(str::trim).collect();
+            if cols.len() < 3 {
+                continue;
+            }
+            let name = cols[0];
+            let type_name = cols[1];
+            let value_str = cols[2];
+
+            let parsed = if type_name.eq_ignore_ascii_case("int") {
+                match value_str.parse::<f64>() {
+                    Ok(v) => v.round() as i32,
+                    Err(_) => continue,
+                }
+            } else {
+                match value_str.parse::<i32>() {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                }
+            };
+
+            if let Some(search) = self.search.as_mut()
+                && let Some(result) = search.set_search_tune_option(name, parsed)
+            {
+                applied += 1;
+                if result.clamped {
+                    clamped += 1;
+                }
+            }
+        }
+
+        if applied > 0 {
+            eprintln!(
+                "info string SPSA params loaded: {} parameters from {} (clamped: {})",
+                applied,
+                path.display(),
+                clamped
+            );
+        }
     }
 
     fn maybe_report_large_pages(&mut self) {
@@ -620,6 +713,15 @@ impl UsiEngine {
         }
 
         match name.as_str() {
+            "SPSAParamsFile" => {
+                if value == "<auto>" || value == "<empty>" || value.is_empty() {
+                    self.spsa_params_file = None;
+                } else {
+                    self.spsa_params_file = Some(value.to_string());
+                }
+                // 明示指定時は再読み込みを強制
+                self.spsa_params_loaded = false;
+            }
             "USI_Hash" => {
                 if let Ok(size) = value.parse::<usize>() {
                     if let Some(search) = self.search.as_mut() {
