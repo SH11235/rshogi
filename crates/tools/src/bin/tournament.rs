@@ -106,6 +106,12 @@ struct Cli {
     #[arg(long = "engine-usi-option", num_args = 1..)]
     engine_usi_options: Option<Vec<String>>,
 
+    /// SPSA .params ファイルからUSIオプションを読み込む (format: "INDEX:path/to/file.params")。
+    /// ファイル内の各パラメータが Name=Value として該当エンジンに設定される。
+    /// --engine-usi-option と併用可。
+    #[arg(long = "engine-params-file", num_args = 1..)]
+    engine_params_files: Option<Vec<String>>,
+
     /// Maximum plies per game
     #[arg(long, default_value_t = 512)]
     max_moves: u32,
@@ -510,6 +516,50 @@ fn main() -> Result<()> {
 
     // per-engine オプションを解析: HashMap<usize, Vec<String>>
     let mut per_engine_usi: HashMap<usize, Vec<String>> = HashMap::new();
+
+    // --engine-params-file: SPSA .params ファイルから Name=Value を読み込む
+    if let Some(pfiles) = &cli.engine_params_files {
+        for entry in pfiles {
+            let (idx_str, path_str) = entry
+                .split_once(':')
+                .with_context(|| format!("invalid --engine-params-file format: {entry}"))?;
+            let idx: usize =
+                idx_str.parse().with_context(|| format!("invalid engine index: {idx_str}"))?;
+            if idx >= n {
+                bail!("--engine-params-file index {idx} out of range (0..{n})");
+            }
+            let path = std::path::Path::new(path_str);
+            let content = std::fs::read_to_string(path)
+                .with_context(|| format!("failed to read params file: {}", path.display()))?;
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                // .params format: name,type,value,min,max,c_end,r_end [// comment] [[[NOT USED]]]
+                let val_part = trimmed.split("//").next().unwrap_or(trimmed);
+                let val_part = val_part.replace("[[NOT USED]]", "");
+                let cols: Vec<&str> = val_part.split(',').map(str::trim).collect();
+                if cols.len() >= 3 {
+                    let name = cols[0];
+                    let type_name = cols[1];
+                    let value = cols[2];
+                    // 整数パラメータは小数点を除去
+                    let formatted = if type_name.eq_ignore_ascii_case("int") {
+                        if let Ok(v) = value.parse::<f64>() {
+                            format!("{name}={}", v.round() as i64)
+                        } else {
+                            format!("{name}={value}")
+                        }
+                    } else {
+                        format!("{name}={value}")
+                    };
+                    per_engine_usi.entry(idx).or_default().push(formatted);
+                }
+            }
+        }
+    }
+
     if let Some(opts) = &cli.engine_usi_options {
         for opt in opts {
             let (idx_str, kv) = opt
