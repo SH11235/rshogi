@@ -541,6 +541,22 @@ impl UsiEngine {
                 // EvalFile 未指定だが Material 有効 or NNUE 既ロード → 何もしない
             }
         }
+        // progress8kpabs モードで LS_PROGRESS_COEFF 未指定の場合はエラー
+        {
+            use rshogi_core::nnue::{
+                LayerStackBucketMode, get_layer_stack_bucket_mode,
+                get_layer_stack_progress_kpabs_weights,
+            };
+            if get_layer_stack_bucket_mode() == LayerStackBucketMode::Progress8KPAbs
+                && get_layer_stack_progress_kpabs_weights().iter().all(|&w| w == 0.0)
+            {
+                panic!(
+                    "LS_BUCKET_MODE=progress8kpabs requires LS_PROGRESS_COEFF to be set. \
+                     All weights are zero (progress.bin not loaded). \
+                     Use 'setoption name LS_PROGRESS_COEFF value <path>' before isready."
+                );
+            }
+        }
         self.maybe_load_spsa_params();
         self.maybe_report_large_pages();
         println!("readyok");
