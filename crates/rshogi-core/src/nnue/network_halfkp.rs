@@ -1001,30 +1001,100 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKP<INPUT, OUTPU
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
             // SAFETY:
-            // - WASM SIMD128 はアライメント不要（v128_load は任意アドレスで動作）
+            // - WASM SIMD128 はアライメント不要（v128_load/v128_store は任意アドレスで動作。
+            //   biases は [i32; OUTPUT] でアライメント4バイトだが WASM では制約なし）
             // - input.len() >= PADDED_INPUT（propagate の呼び出し規約で保証）
             // - self.weights.len() == OUTPUT * PADDED_INPUT（構造体の不変条件）
+            // - dot4 パス: OUTPUT % 4 == 0 かつ j は 4 ステップで [0, OUTPUT) を走るため
+            //   biases[j..j+4] および output[j..j+4] は常に有効範囲内
+            // - OUTPUT > 0 ガード: OUTPUT=0 では while が即終了するが、
+            //   weights_ptr.add(3 * PADDED_INPUT) 等の無効オフセット計算を防ぐため明示
             unsafe {
-                use crate::nnue::layers::{dot_i8x16_u8i8, hsum_i32x4};
+                use crate::nnue::layers::{
+                    dot_i8x16_u8i8, dot_i8x16_u8i8_preexpanded, haddx4, hsum_i32x4,
+                };
                 use std::arch::wasm32::*;
 
                 let num_chunks = Self::PADDED_INPUT / 16;
                 let input_ptr = input.as_ptr();
                 let weights_ptr = self.weights.as_ptr();
 
-                output.copy_from_slice(&self.biases);
-                for (j, out) in output.iter_mut().enumerate() {
-                    let mut acc = i32x4_splat(0);
-                    let weight_row_offset = j * Self::PADDED_INPUT;
+                if OUTPUT.is_multiple_of(4) && OUTPUT > 0 {
+                    let mut j = 0;
+                    while j < OUTPUT {
+                        let mut acc0 = i32x4_splat(0);
+                        let mut acc1 = i32x4_splat(0);
+                        let mut acc2 = i32x4_splat(0);
+                        let mut acc3 = i32x4_splat(0);
 
-                    for k in 0..num_chunks {
-                        let offset = k * 16;
-                        let in_vec = v128_load(input_ptr.add(offset) as *const v128);
-                        let w_vec =
-                            v128_load(weights_ptr.add(weight_row_offset + offset) as *const v128);
-                        acc = i32x4_add(acc, dot_i8x16_u8i8(in_vec, w_vec));
+                        let row0 = weights_ptr.add(j * Self::PADDED_INPUT);
+                        let row1 = weights_ptr.add((j + 1) * Self::PADDED_INPUT);
+                        let row2 = weights_ptr.add((j + 2) * Self::PADDED_INPUT);
+                        let row3 = weights_ptr.add((j + 3) * Self::PADDED_INPUT);
+
+                        for k in 0..num_chunks {
+                            let offset = k * 16;
+                            let in_vec = v128_load(input_ptr.add(offset) as *const v128);
+                            let in_lo = i16x8_extend_low_u8x16(in_vec);
+                            let in_hi = i16x8_extend_high_u8x16(in_vec);
+
+                            acc0 = i32x4_add(
+                                acc0,
+                                dot_i8x16_u8i8_preexpanded(
+                                    in_lo,
+                                    in_hi,
+                                    v128_load(row0.add(offset) as *const v128),
+                                ),
+                            );
+                            acc1 = i32x4_add(
+                                acc1,
+                                dot_i8x16_u8i8_preexpanded(
+                                    in_lo,
+                                    in_hi,
+                                    v128_load(row1.add(offset) as *const v128),
+                                ),
+                            );
+                            acc2 = i32x4_add(
+                                acc2,
+                                dot_i8x16_u8i8_preexpanded(
+                                    in_lo,
+                                    in_hi,
+                                    v128_load(row2.add(offset) as *const v128),
+                                ),
+                            );
+                            acc3 = i32x4_add(
+                                acc3,
+                                dot_i8x16_u8i8_preexpanded(
+                                    in_lo,
+                                    in_hi,
+                                    v128_load(row3.add(offset) as *const v128),
+                                ),
+                            );
+                        }
+
+                        let sum_vec = haddx4(acc0, acc1, acc2, acc3);
+                        let bias_vec = v128_load(self.biases.as_ptr().add(j) as *const v128);
+                        v128_store(
+                            output.as_mut_ptr().add(j) as *mut v128,
+                            i32x4_add(bias_vec, sum_vec),
+                        );
+                        j += 4;
                     }
-                    *out += hsum_i32x4(acc);
+                } else {
+                    output.copy_from_slice(&self.biases);
+                    for (j, out) in output.iter_mut().enumerate() {
+                        let mut acc = i32x4_splat(0);
+                        let weight_row_offset = j * Self::PADDED_INPUT;
+                        for k in 0..num_chunks {
+                            let offset = k * 16;
+                            let in_vec = v128_load(input_ptr.add(offset) as *const v128);
+                            let w_vec = v128_load(
+                                weights_ptr.add(weight_row_offset + offset) as *const v128
+                            );
+                            acc = i32x4_add(acc, dot_i8x16_u8i8(in_vec, w_vec));
+                        }
+                        *out += hsum_i32x4(acc);
+                    }
                 }
             }
         }
