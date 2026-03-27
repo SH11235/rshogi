@@ -1861,3 +1861,66 @@ search-only の事実:
 
 - 採用
 - `update_repetition_info()` 自体は top hotspot ではないが、`StateInfo` のレイアウトと sentinel 化を合わせると search-only で再現性のあるプラスになった
+
+## 2026-03-27 `ExtMoveBuffer::get_unchecked()` 候補
+
+`MovePicker::next_move()` の annotate では、各 `select_*` ループで
+`ExtMoveBuffer::get()` 由来の `cmp $0x257` 境界チェックが残っていた。
+`while self.cur < self.end_cur` が既にあるので、unchecked access に寄せれば
+選択ループの分岐を減らせる可能性がある。
+
+対象:
+
+- [movegen/types.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/movegen/types.rs)
+- [movepicker.rs](/mnt/nvme1/development/rshogi/crates/rshogi-core/src/search/movepicker.rs)
+
+変更意図:
+
+- `ExtMoveBuffer::get_unchecked()` を追加
+- `select_good_capture` / `select_good_quiet` / `select_bad_quiet` /
+  `select_simple` / `select_probcut` を unchecked access に切り替える
+- `self.cur < self.end_cur <= self.moves.len()` の保証下で境界チェックを省く
+
+### 実施コマンド
+
+```bash
+cargo fmt && cargo clippy --fix --allow-dirty --tests && cargo test
+CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_STRIP=none cargo build --release --bin rshogi-usi
+
+/tmp/run_next_ab.sh
+```
+
+search-only 条件:
+
+- baseline: `/tmp/rshogi-usi-before-next-opt`
+- candidate: `target/release/rshogi-usi`
+- `position startpos moves 7g7f 3c3d 6g6f 8c8d 2g2f 4a3b 2f2e 8d8e 8h2b+`
+- `go movetime 15000`
+- `perf stat -x, -e cycles,instructions -p $ENGINE_PID -- sleep 10`
+
+### search-only A/B
+
+| order | engine | final nps | cycles / node | instructions / node |
+| --- | --- | ---: | ---: | ---: |
+| 1 | baseline | `644,311` | `4,859.3` | `11,161.6` |
+| 1 | candidate | `638,333` | `4,764.5` | `11,024.5` |
+| 2 | candidate | `643,379` | `4,879.8` | `11,318.4` |
+| 2 | baseline | `633,540` | `4,780.2` | `11,119.9` |
+
+平均:
+
+| engine | avg nps | avg cycles / node | avg instructions / node |
+| --- | ---: | ---: | ---: |
+| baseline | `638,925.5` | `4,819.8` | `11,140.8` |
+| candidate | `640,856.0` | `4,822.2` | `11,171.5` |
+
+search-only の事実:
+
+- candidate は 2-order 平均で baseline 比 `+0.30%`
+- ただし `cycles / node` は `+0.05%`、`instructions / node` は `+0.28%` と悪化
+- NPS の差はこの環境ノイズの範囲内で、改善根拠としては弱い
+
+判断:
+
+- 不採用
+- `MovePicker` 選択ループの境界チェックは見えていたが、この形の unchecked 化は探索全体ではプラスにならなかった
