@@ -11,8 +11,4 @@ pub enum Event {
     ServerLine(String),
     /// サーバー切断
     ServerDisconnected,
-    /// エンジンから1行受信
-    EngineLine(String),
-    /// エンジンプロセス終了
-    EngineDisconnected,
 }

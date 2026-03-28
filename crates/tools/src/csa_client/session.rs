@@ -144,12 +144,11 @@ struct SessionState<'a> {
 }
 
 /// 探索結果の処理結果
-#[allow(clippy::large_enum_variant)]
 enum MoveAction {
     /// 対局継続（外側ループへ）
     Continue,
     /// 対局終了
-    GameEnd(GameResult, GameRecord),
+    GameEnd(GameResult, Box<GameRecord>),
 }
 
 impl SessionState<'_> {
@@ -169,7 +168,7 @@ impl SessionState<'_> {
                 log::info!("[CSA] サーバー終局割り込み: {:?}", game_result);
                 self.record.set_result(&record_result_with_reason(&game_result, &reason));
                 self.engine.gameover(&gameover_str(&game_result))?;
-                Ok(MoveAction::GameEnd(game_result, self.record.clone()))
+                Ok(MoveAction::GameEnd(game_result, Box::new(self.record.clone())))
             }
         }
     }
@@ -185,14 +184,14 @@ impl SessionState<'_> {
             self.record.set_result("resign");
             let (game_result, _) = wait_game_end_from_rx(self.server_rx)?;
             self.engine.gameover(&gameover_str(&game_result))?;
-            return Ok(MoveAction::GameEnd(game_result, self.record.clone()));
+            return Ok(MoveAction::GameEnd(game_result, Box::new(self.record.clone())));
         }
         if result.bestmove == "win" {
             self.conn.send_win()?;
             self.record.set_result("win_declaration");
             let (game_result, _) = wait_game_end_from_rx(self.server_rx)?;
             self.engine.gameover(&gameover_str(&game_result))?;
-            return Ok(MoveAction::GameEnd(game_result, self.record.clone()));
+            return Ok(MoveAction::GameEnd(game_result, Box::new(self.record.clone())));
         }
 
         let csa_move = usi_move_to_csa(&result.bestmove, &self.pos)?;
@@ -246,7 +245,10 @@ impl SessionState<'_> {
                             self.record
                                 .set_result(&record_result_with_reason(&game_result, &reason));
                             self.engine.gameover(&gameover_str(&game_result))?;
-                            return Ok(MoveAction::GameEnd(game_result, self.record.clone()));
+                            return Ok(MoveAction::GameEnd(
+                                game_result,
+                                Box::new(self.record.clone()),
+                            ));
                         }
                         // 中間行
                         self.conn.pending_end_reason = Some(line);
@@ -255,7 +257,10 @@ impl SessionState<'_> {
                 Ok(Event::ServerDisconnected) => {
                     cleanup_ponder(self.engine, &mut self.ponder_state)?;
                     self.engine.gameover("lose")?;
-                    return Ok(MoveAction::GameEnd(GameResult::Interrupted, self.record.clone()));
+                    return Ok(MoveAction::GameEnd(
+                        GameResult::Interrupted,
+                        Box::new(self.record.clone()),
+                    ));
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     self.conn
@@ -268,13 +273,12 @@ impl SessionState<'_> {
                             &mut self.record,
                             self.server_rx,
                         )?;
-                        return Ok(MoveAction::GameEnd(result, self.record.clone()));
+                        return Ok(MoveAction::GameEnd(result, Box::new(self.record.clone())));
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     anyhow::bail!("サーバー受信チャネル切断");
                 }
-                _ => {}
             }
         }
     }
@@ -337,7 +341,7 @@ pub fn run_game_session(
 
             match s.handle_search_outcome(outcome, turn_start)? {
                 MoveAction::Continue => {}
-                MoveAction::GameEnd(result, record) => return Ok((result, record)),
+                MoveAction::GameEnd(result, record_box) => return Ok((result, *record_box)),
             }
         }
 
@@ -364,8 +368,8 @@ pub fn run_game_session(
 
                                 match s.handle_search_outcome(outcome, ponderhit_start)? {
                                     MoveAction::Continue => break,
-                                    MoveAction::GameEnd(result, record) => {
-                                        return Ok((result, record));
+                                    MoveAction::GameEnd(result, record_box) => {
+                                        return Ok((result, *record_box));
                                     }
                                 }
                             } else {
@@ -427,7 +431,6 @@ pub fn run_game_session(
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     anyhow::bail!("サーバー受信チャネル切断");
                 }
-                _ => {}
             }
         }
     }
@@ -492,7 +495,6 @@ fn wait_game_end_from_rx(server_rx: &Receiver<Event>) -> Result<(GameResult, Opt
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return Ok((GameResult::Interrupted, None));
             }
-            _ => {}
         }
     }
 }

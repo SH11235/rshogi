@@ -327,7 +327,6 @@ impl UsiEngine {
                         server_lines.push("#DISCONNECTED".to_string());
                         return Ok(SearchOutcome::ServerInterrupt(server_lines));
                     }
-                    _ => {} // EngineLine/EngineDisconnected はここでは来ない
                 }
             }
 
