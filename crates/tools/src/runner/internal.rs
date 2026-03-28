@@ -390,7 +390,10 @@ mod tests {
             sfens: None,
             iterations: 1,
             verbose: false,
-            eval_config: EvalConfig::default(),
+            eval_config: EvalConfig {
+                nnue_file: None,
+                usi_options: vec!["MaterialLevel=1".to_string()],
+            },
             reuse_search: false,
             warmup: 0,
             eval_hash_mb: 16,
