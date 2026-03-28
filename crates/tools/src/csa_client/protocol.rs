@@ -166,7 +166,10 @@ impl CsaConnection {
 
         // 時間設定: 共通 / 先手別 / 後手別の3レイヤー
         // Time_Unit のデフォルトは秒 (1000ms)
-        let mut time_unit_ms: i64 = 1000;
+        // header_time_unit_ms: ヘッダレベルの Time_Unit（ブロック外・共通）
+        // block_time_unit_ms: 現在の Time ブロック内の Time_Unit
+        let mut header_time_unit_ms: i64 = 1000;
+        let mut block_time_unit_ms: i64 = 1000;
         let mut common_time = TimeConfig::default();
         let mut black_time: Option<TimeConfig> = None;
         let mut white_time: Option<TimeConfig> = None;
@@ -187,16 +190,18 @@ impl CsaConnection {
                 continue;
             }
             if line == "BEGIN Time" {
+                block_time_unit_ms = header_time_unit_ms;
                 time_target = Some(None); // 共通
                 continue;
             }
             if line == "BEGIN Time+" {
-                // 共通設定を継承した上で部分オーバーライド
+                block_time_unit_ms = header_time_unit_ms;
                 black_time = Some(common_time.clone());
                 time_target = Some(Some(Color::Black));
                 continue;
             }
             if line == "BEGIN Time-" {
+                block_time_unit_ms = header_time_unit_ms;
                 white_time = Some(common_time.clone());
                 time_target = Some(Some(Color::White));
                 continue;
@@ -218,24 +223,16 @@ impl CsaConnection {
                     Some(Color::White) => white_time.as_mut().unwrap(),
                 };
                 if let Some(val) = line.strip_prefix("Time_Unit:") {
-                    let v = val.trim();
-                    time_unit_ms = if v.contains("msec") || v.contains("ms") {
-                        1
-                    } else if v.contains("min") {
-                        60000
-                    } else {
-                        // "sec", "1sec", 数値のみ等 → 秒単位
-                        1000
-                    };
+                    block_time_unit_ms = parse_time_unit(val.trim());
                 } else if let Some(val) = line.strip_prefix("Total_Time:") {
                     let v: i64 = val.trim().parse().unwrap_or(0);
-                    tc.total_time_ms = v * time_unit_ms;
+                    tc.total_time_ms = v * block_time_unit_ms;
                 } else if let Some(val) = line.strip_prefix("Byoyomi:") {
                     let v: i64 = val.trim().parse().unwrap_or(0);
-                    tc.byoyomi_ms = v * time_unit_ms;
+                    tc.byoyomi_ms = v * block_time_unit_ms;
                 } else if let Some(val) = line.strip_prefix("Increment:") {
                     let v: i64 = val.trim().parse().unwrap_or(0);
-                    tc.increment_ms = v * time_unit_ms;
+                    tc.increment_ms = v * block_time_unit_ms;
                 }
                 continue;
             }
@@ -254,25 +251,16 @@ impl CsaConnection {
                     Color::White
                 };
             } else if let Some(val) = line.strip_prefix("Time_Unit:") {
-                // ヘッダレベルの Time_Unit（Time ブロック外）
-                let v = val.trim();
-                time_unit_ms = if v.contains("msec") || v.contains("ms") {
-                    1
-                } else if v.contains("min") {
-                    60000
-                } else {
-                    1000
-                };
+                header_time_unit_ms = parse_time_unit(val.trim());
             } else if let Some(val) = line.strip_prefix("Total_Time:") {
-                // ヘッダレベルの時間（Time ブロック外）— time_unit_ms を使用
                 let v: i64 = val.trim().parse().unwrap_or(0);
-                common_time.total_time_ms = v * time_unit_ms;
+                common_time.total_time_ms = v * header_time_unit_ms;
             } else if let Some(val) = line.strip_prefix("Byoyomi:") {
                 let v: i64 = val.trim().parse().unwrap_or(0);
-                common_time.byoyomi_ms = v * time_unit_ms;
+                common_time.byoyomi_ms = v * header_time_unit_ms;
             } else if let Some(val) = line.strip_prefix("Increment:") {
                 let v: i64 = val.trim().parse().unwrap_or(0);
-                common_time.increment_ms = v * time_unit_ms;
+                common_time.increment_ms = v * header_time_unit_ms;
             }
         }
 
@@ -504,14 +492,30 @@ pub enum RecvEvent {
 
 fn parse_server_move(line: &str) -> (String, u32) {
     // "+7776FU,T30" or "+7776FU"
+    // CSA 指し手は常に7文字。カンマ位置に関わらず7文字で切り出す。
     if let Some(comma_pos) = line.find(",T") {
-        let mv = line[..7.min(comma_pos)].to_string();
+        let mv_end = comma_pos.min(line.len());
+        let mv = if mv_end >= 7 {
+            line[..7].to_string()
+        } else {
+            line[..mv_end].to_string()
+        };
         let time_sec = line[comma_pos + 2..].parse::<u32>().unwrap_or(0);
         (mv, time_sec)
     } else if line.len() >= 7 {
         (line[..7].to_string(), 0)
     } else {
         (line.to_string(), 0)
+    }
+}
+
+fn parse_time_unit(v: &str) -> i64 {
+    if v.contains("msec") || v.contains("ms") {
+        1
+    } else if v.contains("min") {
+        60000
+    } else {
+        1000
     }
 }
 

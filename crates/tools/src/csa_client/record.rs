@@ -176,15 +176,21 @@ impl GameRecord {
         out
     }
 
-    /// SFEN局面列を生成する（学習データ用）
+    /// SFEN局面列を生成する（学習データ用）。
+    /// 形式: `<SFEN>\t<USI指し手>\t<先手視点評価値>`
     pub fn to_sfen_lines(&self) -> Result<String> {
+        use crate::common::csa::csa_move_to_usi;
+
         let mut pos = self.initial_position.clone();
         let mut out = String::new();
 
         for m in &self.moves {
             let sfen_before = pos.to_sfen();
             if let Some(score) = m.effective_score() {
-                writeln!(out, "{}\t{}\t{}", sfen_before, m.csa_move, score).unwrap();
+                // CSA→USI に変換して出力
+                if let Ok(usi_mv) = csa_move_to_usi(&m.csa_move, &pos) {
+                    writeln!(out, "{}\t{}\t{}", sfen_before, usi_mv, score).unwrap();
+                }
             }
             if pos.apply_csa_move(&m.csa_move).is_err() {
                 break;

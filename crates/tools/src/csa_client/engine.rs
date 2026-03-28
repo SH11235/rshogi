@@ -196,12 +196,18 @@ impl UsiEngine {
         self.wait_bestmove(shutdown)
     }
 
-    /// stop を送信し、bestmove を待つ（ponder 中断用）
+    /// stop を送信し、bestmove を待つ（ponder 中断用）。
+    /// ponder 中でない場合は空振りで安全に終了する。
     pub fn stop_and_wait(&mut self) -> Result<()> {
+        // stop 前にチャネルにある bestmove を消費（レース対策）
+        while let Ok(line) = self.rx.try_recv() {
+            if line.starts_with("bestmove") {
+                return Ok(());
+            }
+        }
         self.send("stop")?;
-        // bestmove を読み捨てる
-        loop {
-            let line = self.recv(Duration::from_secs(10))?;
+        // bestmove を読み捨てる（5秒タイムアウト。ponder 中でなければ即返る）
+        while let Ok(line) = self.rx.recv_timeout(Duration::from_secs(5)) {
             if line.starts_with("bestmove") {
                 break;
             }
@@ -307,7 +313,7 @@ impl UsiEngine {
         }
     }
 
-    pub fn send(&mut self, cmd: &str) -> Result<()> {
+    pub(crate) fn send(&mut self, cmd: &str) -> Result<()> {
         log::debug!("[USI] > {cmd}");
         self.writer.write_all(cmd.as_bytes())?;
         self.writer.write_all(b"\n")?;

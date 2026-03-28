@@ -229,6 +229,8 @@ fn run_one_game(
 
     // エラー時は投了を試みる（NF2: 対局中のエラーは投了してから再接続）
     if result.is_err() {
+        // ponder 中の場合は stop して bestmove を待ってからクリーンアップ
+        let _ = engine.stop_and_wait();
         let _ = conn.send_resign();
         let _ = engine.gameover("lose");
     }
@@ -322,10 +324,12 @@ fn init_logger(config: &CsaClientConfig) {
         _ => log::LevelFilter::Info,
     };
 
-    // ログファイル（設定されていれば）
-    let log_file = if !config.log.dir.as_os_str().is_empty() {
-        let _ = std::fs::create_dir_all(&config.log.dir);
-        let path = config.log.dir.join("csa_client.log");
+    // ログファイル（設定されていれば）— 日付ファイル名で日次ローテーション
+    let log_dir = config.log.dir.clone();
+    let log_file = if !log_dir.as_os_str().is_empty() {
+        let _ = std::fs::create_dir_all(&log_dir);
+        let date = chrono::Local::now().format("%Y-%m-%d");
+        let path = log_dir.join(format!("csa_client_{date}.log"));
         OpenOptions::new()
             .create(true)
             .append(true)

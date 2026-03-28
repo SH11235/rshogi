@@ -27,9 +27,10 @@ struct Clock {
 
 impl Clock {
     fn from_summary(summary: &GameSummary) -> Self {
+        // フィッシャー: 初期持ち時間に初回インクリメントを加算（shogihome 準拠）
         Self {
-            black_time_ms: summary.black_time.total_time_ms,
-            white_time_ms: summary.white_time.total_time_ms,
+            black_time_ms: summary.black_time.total_time_ms + summary.black_time.increment_ms,
+            white_time_ms: summary.white_time.total_time_ms + summary.white_time.increment_ms,
             black_byoyomi_ms: summary.black_time.byoyomi_ms,
             white_byoyomi_ms: summary.white_time.byoyomi_ms,
             black_increment_ms: summary.black_time.increment_ms,
@@ -200,7 +201,7 @@ pub fn run_game_session(
 
             // floodgate コメント
             let comment = if config.server.floodgate {
-                Some(build_floodgate_comment(&info, my_color, &pos, &usi_moves))
+                Some(build_floodgate_comment(&info, my_color, &pos, &result.bestmove))
             } else {
                 None
             };
@@ -294,7 +295,12 @@ pub fn run_game_session(
 
                             let csa_move = usi_move_to_csa(&result.bestmove, &pos)?;
                             let comment = if config.server.floodgate {
-                                Some(build_floodgate_comment(&info, my_color, &pos, &usi_moves))
+                                Some(build_floodgate_comment(
+                                    &info,
+                                    my_color,
+                                    &pos,
+                                    &result.bestmove,
+                                ))
                             } else {
                                 None
                             };
@@ -520,7 +526,7 @@ fn build_floodgate_comment(
     info: &SearchInfo,
     my_color: Color,
     pos: &Position,
-    _usi_moves: &[String],
+    last_bestmove: &str,
 ) -> String {
     // 評価値（先手視点に正規化）
     let score = if let Some(cp) = info.score_cp {
@@ -542,11 +548,14 @@ fn build_floodgate_comment(
 
     // PV を CSA に変換（ベストエフォート）
     if !info.pv.is_empty() {
-        // PV変換用に盤面を複製
         let mut pv_pos = pos.clone();
-        // 現在の手順を再現（posは既にcsa_moveで更新済みの状態だが、
-        // PVの変換には現在のposを使う）
-        for usi_mv in &info.pv {
+        // PV の先頭手が bestmove と同じ場合はスキップ（usiToCsa.rb 準拠）
+        let pv_start = if info.pv.first().map(|s| s.as_str()) == Some(last_bestmove) {
+            1
+        } else {
+            0
+        };
+        for usi_mv in &info.pv[pv_start..] {
             if let Ok(csa) = usi_move_to_csa(usi_mv, &pv_pos) {
                 write!(comment, " {csa}").unwrap();
                 if pv_pos.apply_csa_move(&csa).is_err() {
