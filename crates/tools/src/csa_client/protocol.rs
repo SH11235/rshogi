@@ -76,15 +76,37 @@ impl CsaConnection {
     pub fn connect(host: &str, port: u16, tcp_keepalive: bool) -> Result<Self> {
         let addr_str = format!("{host}:{port}");
         log::info!("[CSA] 接続中: {addr_str}");
-        // DNS名を解決してから connect_timeout する
+        // DNS名を解決し、解決済みアドレスを順に試す（IPv6/IPv4 両対応）
         use std::net::ToSocketAddrs;
-        let addr = addr_str
+        let addrs: Vec<_> = addr_str
             .to_socket_addrs()
             .with_context(|| format!("名前解決失敗: {addr_str}"))?
-            .next()
-            .with_context(|| format!("アドレスが見つかりません: {addr_str}"))?;
-        let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(15))
-            .with_context(|| format!("CSAサーバー接続失敗: {addr_str}"))?;
+            .collect();
+        if addrs.is_empty() {
+            bail!("アドレスが見つかりません: {addr_str}");
+        }
+        let mut last_err = None;
+        let mut stream_opt = None;
+        for addr in &addrs {
+            log::debug!("[CSA] 接続試行: {addr}");
+            match TcpStream::connect_timeout(addr, Duration::from_secs(15)) {
+                Ok(s) => {
+                    stream_opt = Some(s);
+                    break;
+                }
+                Err(e) => {
+                    log::debug!("[CSA] {addr} 接続失敗: {e}");
+                    last_err = Some(e);
+                }
+            }
+        }
+        let stream = stream_opt.ok_or_else(|| {
+            anyhow::anyhow!(
+                "CSAサーバー接続失敗: {addr_str} ({}アドレス試行済み): {}",
+                addrs.len(),
+                last_err.map_or("unknown".to_string(), |e| e.to_string())
+            )
+        })?;
 
         if tcp_keepalive {
             set_tcp_keepalive(&stream)?;

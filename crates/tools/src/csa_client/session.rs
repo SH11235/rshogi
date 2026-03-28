@@ -106,12 +106,18 @@ impl Clock {
                 btime, wtime, self.black_increment_ms, self.white_increment_ms
             )
         } else if self.black_byoyomi_ms > 0 || self.white_byoyomi_ms > 0 {
-            // ponder は自手番の秒読みを使う
+            // ponder は自手番の秒読みを使う。推定消費分を差し引く。
             let byoyomi_ms = match my_color {
                 Color::Black => self.black_byoyomi_ms,
                 Color::White => self.white_byoyomi_ms,
             };
-            let byoyomi = (byoyomi_ms - margin_msec as i64).max(0);
+            // 持ち時間が 0 なら秒読みから推定消費を差し引く
+            let my_time = match my_color {
+                Color::Black => btime,
+                Color::White => wtime,
+            };
+            let estimated_from_byoyomi = if my_time == 0 { my_estimated_ms } else { 0 };
+            let byoyomi = (byoyomi_ms - margin_msec as i64 - estimated_from_byoyomi).max(0);
             format!("btime {} wtime {} byoyomi {}", btime, wtime, byoyomi)
         } else {
             format!("btime {} wtime {}", btime, wtime)

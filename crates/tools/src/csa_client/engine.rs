@@ -1,6 +1,6 @@
 //! USIエンジン管理（ponder対応）
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -18,6 +18,7 @@ pub struct UsiEngine {
     writer: BufWriter<ChildStdin>,
     rx: Receiver<String>,
     pub engine_name: String,
+    opt_names: HashSet<String>,
     quit_sent: bool,
 }
 
@@ -87,6 +88,7 @@ impl UsiEngine {
             writer: BufWriter::new(stdin),
             rx,
             engine_name: String::new(),
+            opt_names: HashSet::new(),
             quit_sent: false,
         };
         engine.initialize(options, ponder, timeout)?;
@@ -100,11 +102,15 @@ impl UsiEngine {
         timeout: Duration,
     ) -> Result<()> {
         self.send("usi")?;
-        // usiok を待つ
+        // usiok を待つ。option 行からオプション名を収集。
         loop {
             let line = self.recv(timeout)?;
             if let Some(rest) = line.strip_prefix("id name ") {
                 self.engine_name = rest.to_string();
+            } else if let Some(rest) = line.strip_prefix("option ") {
+                if let Some(name) = parse_option_name(rest) {
+                    self.opt_names.insert(name);
+                }
             } else if line == "usiok" {
                 break;
             }
@@ -122,9 +128,13 @@ impl UsiEngine {
             self.send(&format!("setoption name {key} value {val_str}"))?;
         }
 
-        // Ponder 設定
+        // Ponder 設定（エンジンが対応するオプション名を使う）
         if ponder {
-            self.send("setoption name USI_Ponder value true")?;
+            if self.opt_names.contains("USI_Ponder") {
+                self.send("setoption name USI_Ponder value true")?;
+            } else if self.opt_names.contains("Ponder") {
+                self.send("setoption name Ponder value true")?;
+            }
         }
 
         // isready → readyok
@@ -335,6 +345,18 @@ impl Drop for UsiEngine {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+    }
+}
+
+/// `option name <NAME> type ...` からオプション名を抽出
+fn parse_option_name(rest: &str) -> Option<String> {
+    // "name <NAME> type ..." の形式
+    let rest = rest.strip_prefix("name ")?.trim_start();
+    // "type" の手前までがオプション名
+    if let Some(pos) = rest.find(" type ") {
+        Some(rest[..pos].trim().to_string())
+    } else {
+        Some(rest.trim().to_string())
     }
 }
 
