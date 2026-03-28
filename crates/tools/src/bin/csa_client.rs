@@ -61,11 +61,11 @@ struct Cli {
     hash: Option<i64>,
 
     /// Ponder 有効化
-    #[arg(long)]
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     ponder: Option<bool>,
 
     /// Floodgate モード
-    #[arg(long)]
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     floodgate: Option<bool>,
 
     /// Keep-alive 間隔 (秒)

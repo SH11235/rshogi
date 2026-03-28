@@ -169,12 +169,13 @@ impl CsaConnection {
                 continue;
             }
             if line == "BEGIN Time+" {
-                black_time = Some(TimeConfig::default());
+                // 共通設定を継承した上で部分オーバーライド
+                black_time = Some(common_time.clone());
                 time_target = Some(Some(Color::Black));
                 continue;
             }
             if line == "BEGIN Time-" {
-                white_time = Some(TimeConfig::default());
+                white_time = Some(common_time.clone());
                 time_target = Some(Some(Color::White));
                 continue;
             }
@@ -228,15 +229,15 @@ impl CsaConnection {
                     Color::White
                 };
             } else if let Some(val) = line.strip_prefix("Total_Time:") {
-                // ヘッダレベルの時間（Time ブロック外）
+                // ヘッダレベルの時間（Time ブロック外）— time_unit_ms を使用
                 let v: i64 = val.trim().parse().unwrap_or(0);
-                common_time.total_time_ms = v * 1000;
+                common_time.total_time_ms = v * time_unit_ms;
             } else if let Some(val) = line.strip_prefix("Byoyomi:") {
                 let v: i64 = val.trim().parse().unwrap_or(0);
-                common_time.byoyomi_ms = v * 1000;
+                common_time.byoyomi_ms = v * time_unit_ms;
             } else if let Some(val) = line.strip_prefix("Increment:") {
                 let v: i64 = val.trim().parse().unwrap_or(0);
-                common_time.increment_ms = v * 1000;
+                common_time.increment_ms = v * time_unit_ms;
             }
         }
 
