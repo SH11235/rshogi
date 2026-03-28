@@ -67,6 +67,8 @@ pub struct CsaConnection {
     last_activity_time: Instant,
     /// パスワードマスク用
     password: String,
+    /// 直前に受信した終局理由行（#TIME_UP 等）
+    pending_end_reason: Option<String>,
 }
 
 impl CsaConnection {
@@ -100,6 +102,7 @@ impl CsaConnection {
             writer,
             last_activity_time: Instant::now(),
             password: String::new(),
+            pending_end_reason: None,
         })
     }
 
@@ -305,10 +308,13 @@ impl CsaConnection {
                     // （直後に #WIN/#LOSE/#DRAW が来る）。
                     if line.starts_with('#') {
                         if let Some(result) = parse_game_result(&line) {
-                            return Ok(Some(RecvEvent::GameEnd(result, line)));
+                            let reason = self.pending_end_reason.take();
+                            return Ok(Some(RecvEvent::GameEnd(result, line, reason)));
                         }
+                        // 中間行（#TIME_UP 等）を保持して次の最終結果行を待つ
                         log::info!("[CSA] 終局理由: {line}");
-                        continue; // 次の行（#WIN等）を読む
+                        self.pending_end_reason = Some(line);
+                        continue;
                     }
                     // 指し手
                     if line.starts_with('+') || line.starts_with('-') {
@@ -456,7 +462,8 @@ impl CsaConnection {
 /// サーバーから受信したイベント
 pub enum RecvEvent {
     Move(ServerMove),
-    GameEnd(GameResult, String),
+    /// (最終結果, 結果行, 終局理由行（#TIME_UP等、あれば）)
+    GameEnd(GameResult, String, Option<String>),
 }
 
 fn parse_server_move(line: &str) -> (String, u32) {

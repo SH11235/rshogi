@@ -204,10 +204,20 @@ impl UsiEngine {
         self.send(&format!("gameover {result}"))
     }
 
-    /// quit を送信してプロセスを終了
+    /// quit を送信してプロセスを終了（タイムアウト付き）
     pub fn quit(&mut self) {
         if !self.quit_sent {
             let _ = self.send("quit");
+            // 3秒待ってまだ終了しなければ kill
+            for _ in 0..30 {
+                if let Ok(Some(_)) = self.child.try_wait() {
+                    self.quit_sent = true;
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            log::warn!("[USI] quit タイムアウト、kill します");
+            let _ = self.child.kill();
             let _ = self.child.wait();
             self.quit_sent = true;
         }

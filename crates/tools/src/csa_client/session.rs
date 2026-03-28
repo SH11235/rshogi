@@ -177,14 +177,14 @@ pub fn run_game_session(
             if result.bestmove == "resign" {
                 conn.send_resign()?;
                 record.set_result("resign");
-                let game_result = wait_game_end(conn)?;
+                let (game_result, _end_reason) = wait_game_end(conn)?;
                 engine.gameover(&gameover_str(&game_result))?;
                 return Ok((game_result, record));
             }
             if result.bestmove == "win" {
                 conn.send_win()?;
                 record.set_result("win_declaration");
-                let game_result = wait_game_end(conn)?;
+                let (game_result, _end_reason) = wait_game_end(conn)?;
                 engine.gameover(&gameover_str(&game_result))?;
                 return Ok((game_result, record));
             }
@@ -232,10 +232,10 @@ pub fn run_game_session(
                         record.update_last_time(sm.time_sec);
                         break;
                     }
-                    Some(RecvEvent::GameEnd(result, msg)) => {
+                    Some(RecvEvent::GameEnd(result, msg, reason)) => {
                         log::info!("[CSA] 対局終了(エコー待ち中): {msg}");
                         cleanup_ponder(engine, &mut ponder_state)?;
-                        record.set_result(record_result_str(&result));
+                        record.set_result(&record_result_with_reason(&result, &reason));
                         engine.gameover(&gameover_str(&result))?;
                         return Ok((result, record));
                     }
@@ -274,14 +274,14 @@ pub fn run_game_session(
                             if result.bestmove == "resign" {
                                 conn.send_resign()?;
                                 record.set_result("resign");
-                                let game_result = wait_game_end(conn)?;
+                                let (game_result, _end_reason) = wait_game_end(conn)?;
                                 engine.gameover(&gameover_str(&game_result))?;
                                 return Ok((game_result, record));
                             }
                             if result.bestmove == "win" {
                                 conn.send_win()?;
                                 record.set_result("win_declaration");
-                                let game_result = wait_game_end(conn)?;
+                                let (game_result, _end_reason) = wait_game_end(conn)?;
                                 engine.gameover(&gameover_str(&game_result))?;
                                 return Ok((game_result, record));
                             }
@@ -330,9 +330,12 @@ pub fn run_game_session(
                                         record.update_last_time(echo.time_sec);
                                         break;
                                     }
-                                    Some(RecvEvent::GameEnd(result, msg)) => {
+                                    Some(RecvEvent::GameEnd(result, msg, reason)) => {
                                         log::info!("[CSA] 対局終了(エコー待ち中): {msg}");
                                         cleanup_ponder(engine, &mut ponder_state)?;
+                                        record.set_result(&record_result_with_reason(
+                                            &result, &reason,
+                                        ));
                                         engine.gameover(&gameover_str(&result))?;
                                         return Ok((result, record));
                                     }
@@ -379,10 +382,10 @@ pub fn run_game_session(
                         break; // 外側ループに戻り、自手番の処理へ
                     }
                 }
-                Some(RecvEvent::GameEnd(result, msg)) => {
+                Some(RecvEvent::GameEnd(result, msg, reason)) => {
                     log::info!("[CSA] 対局終了: {msg}");
                     cleanup_ponder(engine, &mut ponder_state)?;
-                    record.set_result(record_result_str(&result));
+                    record.set_result(&record_result_with_reason(&result, &reason));
                     engine.gameover(&gameover_str(&result))?;
                     return Ok((result, record));
                 }
@@ -421,7 +424,7 @@ fn resign_and_wait(
     cleanup_ponder(engine, ponder_state)?;
     conn.send_resign()?;
     record.set_result("resign");
-    let result = wait_game_end(conn)?;
+    let (result, _) = wait_game_end(conn)?;
     engine.gameover(&gameover_str(&result))?;
     Ok(result)
 }
@@ -442,14 +445,34 @@ fn gameover_str(result: &GameResult) -> String {
     }
 }
 
-/// GameResult を棋譜の result 文字列に変換
-fn record_result_str(result: &GameResult) -> &'static str {
+/// GameResult + 終局理由から棋譜の result 文字列を決定。
+/// 理由行がある場合はそちらを優先（#TIME_UP → "time_up" 等）。
+fn record_result_with_reason(result: &GameResult, reason: &Option<String>) -> String {
+    // 終局理由行がある場合はそちらを使う
+    if let Some(r) = reason {
+        if r.contains("TIME_UP") {
+            return "time_up".to_string();
+        }
+        if r.contains("ILLEGAL") {
+            return "illegal_move".to_string();
+        }
+        if r.contains("MAX_MOVES") {
+            return "max_moves".to_string();
+        }
+        if r.contains("JISHOGI") {
+            return "jishogi".to_string();
+        }
+        if r.contains("SENNICHITE") {
+            return "sennichite".to_string();
+        }
+    }
+    // 理由行がない場合は GameResult から推定
     match result {
-        GameResult::Win => "win",
-        GameResult::Lose => "lose",
-        GameResult::Draw => "sennichite",
-        GameResult::Interrupted => "interrupted",
-        GameResult::Censored => "interrupted",
+        GameResult::Win => "win".to_string(),
+        GameResult::Lose => "lose".to_string(),
+        GameResult::Draw => "sennichite".to_string(),
+        GameResult::Interrupted => "interrupted".to_string(),
+        GameResult::Censored => "interrupted".to_string(),
     }
 }
 
@@ -532,18 +555,18 @@ fn build_floodgate_comment(
 }
 
 /// 対局終了を待つ
-fn wait_game_end(conn: &mut CsaConnection) -> Result<GameResult> {
+fn wait_game_end(conn: &mut CsaConnection) -> Result<(GameResult, Option<String>)> {
     let start = Instant::now();
     const TIMEOUT: Duration = Duration::from_secs(30);
     loop {
         if start.elapsed() >= TIMEOUT {
             log::warn!("[CSA] 終局結果の受信タイムアウト ({}秒)", TIMEOUT.as_secs());
-            return Ok(GameResult::Interrupted);
+            return Ok((GameResult::Interrupted, None));
         }
         match conn.recv_move()? {
-            Some(RecvEvent::GameEnd(result, msg)) => {
+            Some(RecvEvent::GameEnd(result, msg, reason)) => {
                 log::info!("[CSA] 対局終了: {msg}");
-                return Ok(result);
+                return Ok((result, reason));
             }
             Some(RecvEvent::Move(_)) => {
                 // 終局直前のエコー手は無視
