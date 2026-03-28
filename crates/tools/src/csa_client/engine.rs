@@ -214,10 +214,33 @@ impl UsiEngine {
     }
 
     fn wait_bestmove(&mut self, shutdown: &AtomicBool) -> Result<(BestMoveResult, SearchInfo)> {
+        use std::time::Instant;
+
+        const OVERALL_TIMEOUT: Duration = Duration::from_secs(3600);
+        const POST_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
         let mut info = SearchInfo::default();
         let mut stop_sent = false;
+        let start = Instant::now();
+        let mut stop_sent_at: Option<Instant> = None;
+
         loop {
-            // shutdown チェック: 短いタイムアウトでポーリング
+            // 全体タイムアウト: 通常時1時間、stop送信後10秒
+            let elapsed = start.elapsed();
+            if let Some(st) = stop_sent_at {
+                if st.elapsed() >= POST_STOP_TIMEOUT {
+                    bail!(
+                        "stop 送信後 {}秒以内に bestmove が返りませんでした",
+                        POST_STOP_TIMEOUT.as_secs()
+                    );
+                }
+            } else if elapsed >= OVERALL_TIMEOUT {
+                log::warn!("[USI] 全体タイムアウト ({}秒)、stop 送信", OVERALL_TIMEOUT.as_secs());
+                self.send("stop")?;
+                stop_sent = true;
+                stop_sent_at = Some(Instant::now());
+            }
+
             match self.rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(line) => {
                     log::trace!("[USI] < {line}");
@@ -254,6 +277,7 @@ impl UsiEngine {
                         log::info!("[USI] shutdown 要求により stop 送信");
                         self.send("stop")?;
                         stop_sent = true;
+                        stop_sent_at = Some(Instant::now());
                     }
                 }
                 Err(RecvTimeoutError::Disconnected) => {

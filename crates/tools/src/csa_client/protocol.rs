@@ -55,7 +55,7 @@ pub enum GameResult {
 pub struct CsaConnection {
     reader: BufReader<TcpStream>,
     writer: BufWriter<TcpStream>,
-    last_send_time: Instant,
+    last_activity_time: Instant,
     /// パスワードマスク用
     password: String,
 }
@@ -85,7 +85,7 @@ impl CsaConnection {
         Ok(Self {
             reader,
             writer,
-            last_send_time: Instant::now(),
+            last_activity_time: Instant::now(),
             password: String::new(),
         })
     }
@@ -293,9 +293,9 @@ impl CsaConnection {
         if interval_sec == 0 {
             return Ok(());
         }
-        if self.last_send_time.elapsed() >= Duration::from_secs(interval_sec) {
+        if self.last_activity_time.elapsed() >= Duration::from_secs(interval_sec) {
             self.send_raw(b"\n")?;
-            self.last_send_time = Instant::now();
+            self.last_activity_time = Instant::now();
         }
         Ok(())
     }
@@ -311,7 +311,7 @@ impl CsaConnection {
         self.writer.write_all(line.as_bytes())?;
         self.writer.write_all(b"\n")?;
         self.writer.flush()?;
-        self.last_send_time = Instant::now();
+        self.last_activity_time = Instant::now();
         Ok(())
     }
 
@@ -340,6 +340,7 @@ impl CsaConnection {
                     let trimmed = line.trim_end().to_string();
                     if !trimmed.is_empty() {
                         log::debug!("[CSA] < {trimmed}");
+                        self.last_activity_time = Instant::now();
                         return Ok(trimmed);
                     }
                 }
@@ -366,6 +367,7 @@ impl CsaConnection {
                     Ok(None)
                 } else {
                     log::debug!("[CSA] < {trimmed}");
+                    self.last_activity_time = Instant::now();
                     Ok(Some(trimmed))
                 }
             }

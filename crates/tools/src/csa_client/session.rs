@@ -4,6 +4,7 @@
 
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use anyhow::Result;
 
@@ -52,6 +53,38 @@ impl Clock {
 
         if self.increment_ms > 0 {
             // フィッシャー
+            format!(
+                "btime {} wtime {} binc {} winc {}",
+                btime, wtime, self.increment_ms, self.increment_ms
+            )
+        } else if self.byoyomi_ms > 0 {
+            let byoyomi = (self.byoyomi_ms - margin_msec as i64).max(0);
+            format!("btime {} wtime {} byoyomi {}", btime, wtime, byoyomi)
+        } else {
+            format!("btime {} wtime {}", btime, wtime)
+        }
+    }
+
+    /// ponder 用の時間引数を構築する。
+    /// 自手の推定消費時間 `my_estimated_ms` を自分側の持ち時間から差し引き、
+    /// increment を加算した値を使う（usiToCsa.rb 準拠）。
+    fn build_ponder_go_args(
+        &self,
+        margin_msec: u64,
+        my_color: Color,
+        my_estimated_ms: i64,
+    ) -> String {
+        let adjusted_consumption = (my_estimated_ms - self.increment_ms).max(0);
+        let (btime, wtime) = match my_color {
+            Color::Black => {
+                ((self.black_time_ms - adjusted_consumption).max(0), self.white_time_ms.max(0))
+            }
+            Color::White => {
+                (self.black_time_ms.max(0), (self.white_time_ms - adjusted_consumption).max(0))
+            }
+        };
+
+        if self.increment_ms > 0 {
             format!(
                 "btime {} wtime {} binc {} winc {}",
                 btime, wtime, self.increment_ms, self.increment_ms
@@ -112,6 +145,7 @@ pub fn run_game_session(
     loop {
         if is_my_turn(pos.side_to_move) {
             // 自手番: 探索して指す
+            let turn_start = Instant::now();
             let position_cmd = build_position_cmd(&initial_sfen, &usi_moves);
             let go_cmd = format!("go {}", clock.build_go_args(config.time.margin_msec));
 
@@ -148,14 +182,17 @@ pub fn run_game_session(
             usi_moves.push(result.bestmove.clone());
             record.add_move(&csa_move, 0, Some(&info)); // 消費時間はサーバーエコーで確定
 
-            // ponder 開始
+            // ponder 開始（自手の推定消費時間を差し引いた時間を使う）
             if config.game.ponder
                 && let Some(ref ponder_mv) = result.ponder_move
             {
+                let my_estimated_ms = turn_start.elapsed().as_millis() as i64;
                 let ponder_pos_cmd =
                     build_position_cmd_with_ponder(&initial_sfen, &usi_moves, ponder_mv);
-                let ponder_go =
-                    format!("go ponder {}", clock.build_go_args(config.time.margin_msec));
+                let ponder_go = format!(
+                    "go ponder {}",
+                    clock.build_ponder_go_args(config.time.margin_msec, my_color, my_estimated_ms)
+                );
                 engine.go_ponder(&ponder_pos_cmd, &ponder_go)?;
                 ponder_state = Some(PonderState {
                     expected_usi: ponder_mv.clone(),
@@ -206,6 +243,7 @@ pub fn run_game_session(
                             record.add_move(&sm.mv, sm.time_sec, None);
 
                             // ponderhit → bestmove を待つ
+                            let ponderhit_start = Instant::now();
                             let (result, info) = engine.ponderhit(shutdown)?;
 
                             if result.bestmove == "resign" {
@@ -233,10 +271,11 @@ pub fn run_game_session(
                             usi_moves.push(result.bestmove.clone());
                             record.add_move(&csa_move, 0, Some(&info));
 
-                            // 次の ponder
+                            // 次の ponder（ponderhit からの経過を推定消費とする）
                             if config.game.ponder
                                 && let Some(ref ponder_mv) = result.ponder_move
                             {
+                                let my_estimated_ms = ponderhit_start.elapsed().as_millis() as i64;
                                 let ponder_pos_cmd = build_position_cmd_with_ponder(
                                     &initial_sfen,
                                     &usi_moves,
@@ -244,7 +283,11 @@ pub fn run_game_session(
                                 );
                                 let ponder_go = format!(
                                     "go ponder {}",
-                                    clock.build_go_args(config.time.margin_msec)
+                                    clock.build_ponder_go_args(
+                                        config.time.margin_msec,
+                                        my_color,
+                                        my_estimated_ms
+                                    )
                                 );
                                 engine.go_ponder(&ponder_pos_cmd, &ponder_go)?;
                                 ponder_state = Some(PonderState {
