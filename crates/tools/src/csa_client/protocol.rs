@@ -253,6 +253,16 @@ impl CsaConnection {
                 } else {
                     Color::White
                 };
+            } else if let Some(val) = line.strip_prefix("Time_Unit:") {
+                // ヘッダレベルの Time_Unit（Time ブロック外）
+                let v = val.trim();
+                time_unit_ms = if v.contains("msec") || v.contains("ms") {
+                    1
+                } else if v.contains("min") {
+                    60000
+                } else {
+                    1000
+                };
             } else if let Some(val) = line.strip_prefix("Total_Time:") {
                 // ヘッダレベルの時間（Time ブロック外）— time_unit_ms を使用
                 let v: i64 = val.trim().parse().unwrap_or(0);

@@ -311,6 +311,9 @@ fn apply_env_overrides(config: &mut CsaClientConfig) {
 }
 
 fn init_logger(config: &CsaClientConfig) {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
     let level = match config.log.level.as_str() {
         "error" => log::LevelFilter::Error,
         "warn" => log::LevelFilter::Warn,
@@ -318,5 +321,41 @@ fn init_logger(config: &CsaClientConfig) {
         "trace" => log::LevelFilter::Trace,
         _ => log::LevelFilter::Info,
     };
-    env_logger::Builder::new().filter_level(level).format_timestamp_millis().init();
+
+    // ログファイル（設定されていれば）
+    let log_file = if !config.log.dir.as_os_str().is_empty() {
+        let _ = std::fs::create_dir_all(&config.log.dir);
+        let path = config.log.dir.join("csa_client.log");
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .ok()
+            .map(std::sync::Mutex::new)
+    } else {
+        None
+    };
+    let log_file = std::sync::Arc::new(log_file);
+    let write_stdout = config.log.stdout;
+
+    let mut builder = env_logger::Builder::new();
+    builder.filter_level(level);
+    builder.format(move |buf, record| {
+        let ts = buf.timestamp_millis();
+        let msg = format!("{ts} [{}] {}", record.level(), record.args());
+        // ファイルに書く
+        if let Some(ref file_mutex) = *log_file
+            && let Ok(mut f) = file_mutex.lock()
+        {
+            let _ = writeln!(f, "{msg}");
+        }
+        // stdout に書く（env_logger は buf への書き込みで stdout 出力を制御）
+        if write_stdout {
+            writeln!(buf, "{msg}")
+        } else {
+            // buf に空文字を書いて空行出力を抑制
+            write!(buf, "")
+        }
+    });
+    builder.init();
 }
