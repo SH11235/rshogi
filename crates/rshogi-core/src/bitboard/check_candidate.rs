@@ -29,6 +29,7 @@ static CHECK_CANDIDATE_TABLE_PTR: AtomicPtr<CheckCandidateArray> =
 /// テーブルの初期化を保証する。起動時に 1 回呼ぶこと。
 pub fn ensure_check_candidate_initialized() {
     let table = CHECK_CANDIDATE_TABLE_LOCK.get_or_init(init_check_candidate);
+    // AtomicPtr は *mut を要求するが、このポインタを経由した書き込みは行わない
     CHECK_CANDIDATE_TABLE_PTR.store(
         table as *const CheckCandidateArray as *mut CheckCandidateArray,
         Ordering::Release,
@@ -36,10 +37,14 @@ pub fn ensure_check_candidate_initialized() {
 }
 
 /// ホットパス用: 単純なポインタ load でテーブル参照を返す。
+/// `ensure_check_candidate_initialized()` が先に呼ばれていれば atomic load 1 回 + 予測ヒット分岐のみ。
+/// 未初期化（テスト等）の場合は OnceLock にフォールバック。
 #[inline(always)]
 fn check_candidate_table() -> &'static CheckCandidateArray {
     let ptr = CHECK_CANDIDATE_TABLE_PTR.load(Ordering::Acquire);
     if !ptr.is_null() {
+        // SAFETY: ensure_check_candidate_initialized() が ptr を有効なアドレスに設定済み。
+        // CheckCandidateArray は 'static で解放されない。
         unsafe { &*ptr }
     } else {
         CHECK_CANDIDATE_TABLE_LOCK.get_or_init(init_check_candidate)

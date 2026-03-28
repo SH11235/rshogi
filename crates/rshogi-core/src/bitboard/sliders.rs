@@ -54,11 +54,12 @@ static SLIDER_ATTACKS_PTR: AtomicPtr<SliderTable> = AtomicPtr::new(std::ptr::nul
 /// テーブルの初期化を保証する。起動時に 1 回呼ぶこと。
 pub fn ensure_slider_initialized() {
     let table = SLIDER_ATTACKS_LOCK.get_or_init(SliderTable::new);
+    // AtomicPtr は *mut を要求するが、このポインタを経由した書き込みは行わない
     SLIDER_ATTACKS_PTR.store(table as *const SliderTable as *mut SliderTable, Ordering::Release);
 }
 
 /// ホットパス用: 単純なポインタ load でテーブル参照を返す。
-/// `ensure_slider_initialized()` が先に呼ばれていれば atomic load 1 回（分岐なし）。
+/// `ensure_slider_initialized()` が先に呼ばれていれば atomic load 1 回 + 予測ヒット分岐のみ。
 /// 未初期化（テスト等）の場合は OnceLock にフォールバック。
 #[inline(always)]
 fn slider_attacks() -> &'static SliderTable {
