@@ -21,3 +21,10 @@ pub use core::BitboardIter;
 pub use sliders::*;
 pub use tables::*;
 pub use utils::*;
+
+/// 全ビットボードテーブルの初期化。エンジン起動時に 1 回呼ぶこと。
+/// これにより、ホットパスでの OnceLock atomic check を回避できる。
+pub fn init_bitboard_tables() {
+    sliders::ensure_slider_initialized();
+    check_candidate::ensure_check_candidate_initialized();
+}

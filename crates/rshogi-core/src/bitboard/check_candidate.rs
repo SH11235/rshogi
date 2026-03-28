@@ -6,6 +6,7 @@
 //! 全駒走査を回避して王手生成を高速化する。
 
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::types::{Color, PieceType, Square};
 
@@ -17,14 +18,37 @@ use super::{
 /// 王手候補テーブルの駒種数 (PAWN, LANCE, KNIGHT, SILVER, BISHOP, HORSE, GOLD)
 const CHECK_CANDIDATE_NUM: usize = 7;
 
-/// 王手候補テーブル [Color][PieceTypeIndex][KingSquare]
-static CHECK_CANDIDATE_TABLE: OnceLock<
-    [[[Bitboard; Square::NUM]; CHECK_CANDIDATE_NUM]; Color::NUM],
-> = OnceLock::new();
+type CheckCandidateArray = [[[Bitboard; Square::NUM]; CHECK_CANDIDATE_NUM]; Color::NUM];
 
-fn check_candidate_table() -> &'static [[[Bitboard; Square::NUM]; CHECK_CANDIDATE_NUM]; Color::NUM]
-{
-    CHECK_CANDIDATE_TABLE.get_or_init(init_check_candidate)
+/// 王手候補テーブル [Color][PieceTypeIndex][KingSquare]
+static CHECK_CANDIDATE_TABLE_LOCK: OnceLock<CheckCandidateArray> = OnceLock::new();
+
+static CHECK_CANDIDATE_TABLE_PTR: AtomicPtr<CheckCandidateArray> =
+    AtomicPtr::new(std::ptr::null_mut());
+
+/// テーブルの初期化を保証する。起動時に 1 回呼ぶこと。
+pub fn ensure_check_candidate_initialized() {
+    let table = CHECK_CANDIDATE_TABLE_LOCK.get_or_init(init_check_candidate);
+    // AtomicPtr は *mut を要求するが、このポインタを経由した書き込みは行わない
+    CHECK_CANDIDATE_TABLE_PTR.store(
+        table as *const CheckCandidateArray as *mut CheckCandidateArray,
+        Ordering::Release,
+    );
+}
+
+/// ホットパス用: 単純なポインタ load でテーブル参照を返す。
+/// `ensure_check_candidate_initialized()` が先に呼ばれていれば atomic load 1 回 + 予測ヒット分岐のみ。
+/// 未初期化（テスト等）の場合は OnceLock にフォールバック。
+#[inline(always)]
+fn check_candidate_table() -> &'static CheckCandidateArray {
+    let ptr = CHECK_CANDIDATE_TABLE_PTR.load(Ordering::Acquire);
+    if !ptr.is_null() {
+        // SAFETY: ensure_check_candidate_initialized() が ptr を有効なアドレスに設定済み。
+        // CheckCandidateArray は 'static で解放されない。
+        unsafe { &*ptr }
+    } else {
+        CHECK_CANDIDATE_TABLE_LOCK.get_or_init(init_check_candidate)
+    }
 }
 
 /// PieceType → テーブルインデックス変換
