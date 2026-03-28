@@ -66,6 +66,34 @@ struct ResultLog {
     /// 勝者のエンジンラベル（tournament.rs が出力、旧形式では None）
     #[serde(default)]
     winner: Option<String>,
+    #[serde(default)]
+    plies: u32,
+}
+
+/// 通常JSONLのmove行
+#[derive(Deserialize)]
+struct MoveLog {
+    game_id: u32,
+    ply: u32,
+    side_to_move: String,
+    engine: String,
+    elapsed_ms: u64,
+    think_limit_ms: u64,
+    timed_out: bool,
+    #[serde(default)]
+    eval: Option<MoveEval>,
+}
+
+#[derive(Deserialize)]
+struct MoveEval {
+    #[serde(default)]
+    nps: Option<u64>,
+    #[serde(default)]
+    depth: Option<u32>,
+    #[serde(default)]
+    seldepth: Option<u32>,
+    #[serde(default)]
+    nodes: Option<u64>,
 }
 
 /// summary JSONLの行
@@ -103,6 +131,7 @@ struct FileResult {
     /// meta.white エンジンが先手として対局した数・勝数
     b_sente_games: u32,
     b_sente_wins: u32,
+    extra: FileExtraStats,
 }
 
 /// 対戦カード（先手, 後手）ごとの集計
@@ -152,6 +181,50 @@ struct HeadToHeadStats {
     left_gote_wins: u32,
 }
 
+#[derive(Default)]
+struct FileExtraStats {
+    total_plies: u64,
+    completed_games: u32,
+    black_wins: u32,
+    white_wins: u32,
+    draws: u32,
+    engine_moves: BTreeMap<String, EngineMoveStats>,
+}
+
+#[derive(Default)]
+struct EngineMoveStats {
+    moves: u64,
+    elapsed_ms_sum: u64,
+    think_limit_ms_sum: u64,
+    timed_out: u32,
+    eval_nps_sum: u128,
+    eval_nps_count: u64,
+    eval_depth_sum: u64,
+    eval_depth_count: u64,
+    eval_seldepth_sum: u64,
+    eval_seldepth_count: u64,
+    eval_nodes_sum: u128,
+    eval_nodes_count: u64,
+    by_side: BTreeMap<String, MoveBucketStats>,
+    by_ply_band: BTreeMap<String, MoveBucketStats>,
+}
+
+#[derive(Default, Clone)]
+struct MoveBucketStats {
+    moves: u64,
+    elapsed_ms_sum: u64,
+}
+
+#[derive(Default)]
+struct AggregatedExtraStats {
+    total_plies: u64,
+    completed_games: u32,
+    black_wins: u32,
+    white_wins: u32,
+    draws: u32,
+    engine_moves: BTreeMap<String, EngineMoveStats>,
+}
+
 /// JSON出力用
 #[derive(Serialize)]
 struct JsonOutput {
@@ -160,6 +233,7 @@ struct JsonOutput {
     matchups: Vec<JsonMatchup>,
     engines: Vec<JsonEngine>,
     head_to_head: Vec<JsonHeadToHead>,
+    extra: JsonExtra,
 }
 
 #[derive(Serialize)]
@@ -204,6 +278,38 @@ struct JsonHeadToHead {
     elo_ci95: Option<f64>,
 }
 
+#[derive(Serialize)]
+struct JsonExtra {
+    average_plies: f64,
+    black_win_rate_decisive: f64,
+    white_win_rate_decisive: f64,
+    completed_games: u32,
+    draws: u32,
+    engine_timing: Vec<JsonEngineTiming>,
+}
+
+#[derive(Serialize)]
+struct JsonEngineTiming {
+    id: String,
+    moves: u64,
+    average_elapsed_ms: f64,
+    average_think_limit_ms: f64,
+    timed_out: u32,
+    average_nps: Option<f64>,
+    average_depth: Option<f64>,
+    average_seldepth: Option<f64>,
+    average_nodes: Option<f64>,
+    by_side: Vec<JsonTimingBucket>,
+    by_ply_band: Vec<JsonTimingBucket>,
+}
+
+#[derive(Serialize)]
+struct JsonTimingBucket {
+    label: String,
+    moves: u64,
+    average_elapsed_ms: f64,
+}
+
 // ---------------------------------------------------------------------------
 // エンジンID抽出
 // ---------------------------------------------------------------------------
@@ -221,6 +327,61 @@ fn extract_engine_id(path: &str) -> String {
         }
     }
     filename.to_string()
+}
+
+fn normalize_engine_name(name: &str, black: &str, white: &str, meta_parsed: bool) -> String {
+    if meta_parsed && (name == black || name == white) {
+        name.to_string()
+    } else {
+        extract_engine_id(name)
+    }
+}
+
+fn ply_band_label(ply: u32) -> &'static str {
+    match ply {
+        1..=40 => "1-40",
+        41..=80 => "41-80",
+        81..=120 => "81-120",
+        _ => "121+",
+    }
+}
+
+fn update_move_bucket(stats: &mut MoveBucketStats, elapsed_ms: u64) {
+    stats.moves += 1;
+    stats.elapsed_ms_sum += elapsed_ms;
+}
+
+fn merge_engine_move_stats(dst: &mut EngineMoveStats, src: &EngineMoveStats) {
+    dst.moves += src.moves;
+    dst.elapsed_ms_sum += src.elapsed_ms_sum;
+    dst.think_limit_ms_sum += src.think_limit_ms_sum;
+    dst.timed_out += src.timed_out;
+    dst.eval_nps_sum += src.eval_nps_sum;
+    dst.eval_nps_count += src.eval_nps_count;
+    dst.eval_depth_sum += src.eval_depth_sum;
+    dst.eval_depth_count += src.eval_depth_count;
+    dst.eval_seldepth_sum += src.eval_seldepth_sum;
+    dst.eval_seldepth_count += src.eval_seldepth_count;
+    dst.eval_nodes_sum += src.eval_nodes_sum;
+    dst.eval_nodes_count += src.eval_nodes_count;
+    for (label, bucket) in &src.by_side {
+        let dst_bucket = dst.by_side.entry(label.clone()).or_default();
+        dst_bucket.moves += bucket.moves;
+        dst_bucket.elapsed_ms_sum += bucket.elapsed_ms_sum;
+    }
+    for (label, bucket) in &src.by_ply_band {
+        let dst_bucket = dst.by_ply_band.entry(label.clone()).or_default();
+        dst_bucket.moves += bucket.moves;
+        dst_bucket.elapsed_ms_sum += bucket.elapsed_ms_sum;
+    }
+}
+
+fn average(sum: u64, count: u64) -> f64 {
+    if count == 0 {
+        0.0
+    } else {
+        sum as f64 / count as f64
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -254,6 +415,7 @@ fn parse_summary_file(path: &str) -> Result<FileResult> {
             a_sente_wins: 0,
             b_sente_games: 0,
             b_sente_wins: 0,
+            extra: FileExtraStats::default(),
         });
     }
     bail!("空のsummaryファイル: {path}");
@@ -276,6 +438,7 @@ fn parse_normal_file(path: &str) -> Result<FileResult> {
     let mut a_sente_wins: u32 = 0;
     let mut b_sente_games: u32 = 0;
     let mut b_sente_wins: u32 = 0;
+    let mut extra = FileExtraStats::default();
 
     for line in reader.lines() {
         let line = line?;
@@ -298,9 +461,49 @@ fn parse_normal_file(path: &str) -> Result<FileResult> {
                 .label_white
                 .unwrap_or_else(|| extract_engine_id(&meta.engine_cmd.path_white));
             meta_parsed = true;
+        } else if trimmed.contains("\"type\":\"move\"") {
+            let mv: MoveLog = serde_json::from_str(trimmed)
+                .with_context(|| format!("moveパースエラー: {path}"))?;
+            let _ = mv.game_id;
+            let engine_name = normalize_engine_name(&mv.engine, &black, &white, meta_parsed);
+            let engine_stats = extra.engine_moves.entry(engine_name).or_default();
+            engine_stats.moves += 1;
+            engine_stats.elapsed_ms_sum += mv.elapsed_ms;
+            engine_stats.think_limit_ms_sum += mv.think_limit_ms;
+            if mv.timed_out {
+                engine_stats.timed_out += 1;
+            }
+            if let Some(eval) = mv.eval {
+                if let Some(nps) = eval.nps {
+                    engine_stats.eval_nps_sum += nps as u128;
+                    engine_stats.eval_nps_count += 1;
+                }
+                if let Some(depth) = eval.depth {
+                    engine_stats.eval_depth_sum += depth as u64;
+                    engine_stats.eval_depth_count += 1;
+                }
+                if let Some(seldepth) = eval.seldepth {
+                    engine_stats.eval_seldepth_sum += seldepth as u64;
+                    engine_stats.eval_seldepth_count += 1;
+                }
+                if let Some(nodes) = eval.nodes {
+                    engine_stats.eval_nodes_sum += nodes as u128;
+                    engine_stats.eval_nodes_count += 1;
+                }
+            }
+            update_move_bucket(
+                engine_stats.by_side.entry(mv.side_to_move).or_default(),
+                mv.elapsed_ms,
+            );
+            update_move_bucket(
+                engine_stats.by_ply_band.entry(ply_band_label(mv.ply).to_string()).or_default(),
+                mv.elapsed_ms,
+            );
         } else if trimmed.contains("\"type\":\"result\"") {
             let result: ResultLog = serde_json::from_str(trimmed)
                 .with_context(|| format!("resultパースエラー: {path}"))?;
+            extra.completed_games += 1;
+            extra.total_plies += result.plies as u64;
             if let Some(ref winner) = result.winner {
                 // winner フィールドあり: エンジン名で集計（tournament.rs 形式）
                 // meta にラベルがある場合は winner もラベルそのままなので正規化不要。
@@ -320,6 +523,7 @@ fn parse_normal_file(path: &str) -> Result<FileResult> {
                 // outcome="white_win" → 後手が勝ち → winner が後手だった
                 match result.outcome.as_str() {
                     "black_win" => {
+                        extra.black_wins += 1;
                         // winner が先手
                         if winner_id == black {
                             a_sente_games += 1;
@@ -332,6 +536,7 @@ fn parse_normal_file(path: &str) -> Result<FileResult> {
                         // (後手 games は done - sente_games で算出)
                     }
                     "white_win" => {
+                        extra.white_wins += 1;
                         // winner が後手 → 敗者が先手
                         if winner_id == black {
                             // black engine が後手で勝ち → white engine が先手で負け
@@ -341,14 +546,26 @@ fn parse_normal_file(path: &str) -> Result<FileResult> {
                             a_sente_games += 1;
                         }
                     }
+                    "draw" => {
+                        extra.draws += 1;
+                    }
                     _ => {}
                 }
             } else {
                 // winner なし: 旧形式または引分
                 match result.outcome.as_str() {
-                    "black_win" => black_wins += 1,
-                    "white_win" => white_wins += 1,
-                    "draw" => draws += 1,
+                    "black_win" => {
+                        black_wins += 1;
+                        extra.black_wins += 1;
+                    }
+                    "white_win" => {
+                        white_wins += 1;
+                        extra.white_wins += 1;
+                    }
+                    "draw" => {
+                        draws += 1;
+                        extra.draws += 1;
+                    }
                     _ => {}
                 }
             }
@@ -369,6 +586,7 @@ fn parse_normal_file(path: &str) -> Result<FileResult> {
         a_sente_wins,
         b_sente_games,
         b_sente_wins,
+        extra,
     })
 }
 
@@ -446,6 +664,7 @@ fn main() -> Result<()> {
     let mut matchups: BTreeMap<(String, String), MatchupStats> = BTreeMap::new();
     let mut engine_ids: BTreeSet<String> = BTreeSet::new();
     let mut valid_files = 0u32;
+    let mut extra = AggregatedExtraStats::default();
 
     for path in &files {
         match parse_file(path) {
@@ -468,6 +687,17 @@ fn main() -> Result<()> {
                 stats.b_sente_wins += result.b_sente_wins;
                 engine_ids.insert(result.black);
                 engine_ids.insert(result.white);
+                extra.total_plies += result.extra.total_plies;
+                extra.completed_games += result.extra.completed_games;
+                extra.black_wins += result.extra.black_wins;
+                extra.white_wins += result.extra.white_wins;
+                extra.draws += result.extra.draws;
+                for (engine, move_stats) in result.extra.engine_moves {
+                    merge_engine_move_stats(
+                        extra.engine_moves.entry(engine).or_default(),
+                        &move_stats,
+                    );
+                }
                 valid_files += 1;
             }
             Err(e) => {
@@ -563,9 +793,10 @@ fn main() -> Result<()> {
             &engines,
             &head_to_head,
             &labels,
+            &extra,
         )?;
     } else {
-        print_text(valid_files, total_done, total_all, &engines, &head_to_head, &labels);
+        print_text(valid_files, total_done, total_all, &engines, &head_to_head, &labels, &extra);
     }
 
     Ok(())
@@ -582,6 +813,7 @@ fn print_text(
     engines: &BTreeMap<String, EngineStats>,
     head_to_head: &BTreeMap<(String, String), HeadToHeadStats>,
     labels: &BTreeMap<String, String>,
+    extra: &AggregatedExtraStats,
 ) {
     let pct = if total_all > 0 {
         total_done as f64 / total_all as f64 * 100.0
@@ -692,6 +924,100 @@ fn print_text(
             println!("    {} {} {}", bn, b_sente, b_gote);
         }
     }
+
+    if extra.completed_games > 0 {
+        println!();
+        println!("追加統計");
+        println!("{}", "=".repeat(75));
+        let decisive = extra.black_wins + extra.white_wins;
+        let black_wr = if decisive > 0 {
+            extra.black_wins as f64 / decisive as f64 * 100.0
+        } else {
+            0.0
+        };
+        let white_wr = if decisive > 0 {
+            extra.white_wins as f64 / decisive as f64 * 100.0
+        } else {
+            0.0
+        };
+        println!(
+            "  平均手数: {:.1} plies ({}局)",
+            extra.total_plies as f64 / extra.completed_games as f64,
+            extra.completed_games
+        );
+        println!(
+            "  先手勝率: {:.1}% ({}/{} 決着局), 後手勝率: {:.1}% ({}/{} 決着局), 引分: {}",
+            black_wr, extra.black_wins, decisive, white_wr, extra.white_wins, decisive, extra.draws
+        );
+        let mut move_stats: Vec<_> = extra.engine_moves.iter().collect();
+        move_stats.sort_by(|(id_a, _), (id_b, _)| {
+            let name_a = labels.get(*id_a).map_or(id_a.as_str(), |s| s.as_str());
+            let name_b = labels.get(*id_b).map_or(id_b.as_str(), |s| s.as_str());
+            name_a.cmp(name_b)
+        });
+        for (id, stats) in move_stats {
+            let name = labels.get(id).map_or(id.as_str(), |s| s.as_str());
+            let avg_elapsed = average(stats.elapsed_ms_sum, stats.moves);
+            let avg_limit = average(stats.think_limit_ms_sum, stats.moves);
+            let avg_nps = if stats.eval_nps_count > 0 {
+                Some(stats.eval_nps_sum as f64 / stats.eval_nps_count as f64)
+            } else {
+                None
+            };
+            let avg_depth = if stats.eval_depth_count > 0 {
+                Some(stats.eval_depth_sum as f64 / stats.eval_depth_count as f64)
+            } else {
+                None
+            };
+            let avg_seldepth = if stats.eval_seldepth_count > 0 {
+                Some(stats.eval_seldepth_sum as f64 / stats.eval_seldepth_count as f64)
+            } else {
+                None
+            };
+            let avg_nodes = if stats.eval_nodes_count > 0 {
+                Some(stats.eval_nodes_sum as f64 / stats.eval_nodes_count as f64)
+            } else {
+                None
+            };
+            print!(
+                "  {}: moves={} avg_elapsed={:.1}ms avg_limit={:.1}ms timed_out={}",
+                name, stats.moves, avg_elapsed, avg_limit, stats.timed_out
+            );
+            if let Some(avg_nps) = avg_nps {
+                print!(" avg_nps={:.0}", avg_nps);
+            }
+            if let Some(avg_depth) = avg_depth {
+                print!(" avg_depth={:.2}", avg_depth);
+            }
+            if let Some(avg_seldepth) = avg_seldepth {
+                print!(" avg_seldepth={:.2}", avg_seldepth);
+            }
+            if let Some(avg_nodes) = avg_nodes {
+                print!(" avg_nodes={:.0}", avg_nodes);
+            }
+            println!();
+            let mut sides: Vec<_> = stats.by_side.iter().collect();
+            sides.sort_by(|(a, _), (b, _)| a.cmp(b));
+            for (side, bucket) in sides {
+                println!(
+                    "    side {}: moves={} avg_elapsed={:.1}ms",
+                    side,
+                    bucket.moves,
+                    average(bucket.elapsed_ms_sum, bucket.moves)
+                );
+            }
+            for band in ["1-40", "41-80", "81-120", "121+"] {
+                if let Some(bucket) = stats.by_ply_band.get(band) {
+                    println!(
+                        "    ply {}: moves={} avg_elapsed={:.1}ms",
+                        band,
+                        bucket.moves,
+                        average(bucket.elapsed_ms_sum, bucket.moves)
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn win_rate(wins: u32, losses: u32, draws: u32) -> f64 {
@@ -715,6 +1041,7 @@ fn print_json(
     engines: &BTreeMap<String, EngineStats>,
     head_to_head: &BTreeMap<(String, String), HeadToHeadStats>,
     labels: &BTreeMap<String, String>,
+    extra: &AggregatedExtraStats,
 ) -> Result<()> {
     let pct = if total_all > 0 {
         total_done as f64 / total_all as f64 * 100.0
@@ -776,6 +1103,63 @@ fn print_json(
         })
         .collect();
 
+    let mut engine_timing: Vec<_> = extra.engine_moves.iter().collect();
+    engine_timing.sort_by(|(id_a, _), (id_b, _)| {
+        let name_a = labels.get(*id_a).map_or(id_a.as_str(), |s| s.as_str());
+        let name_b = labels.get(*id_b).map_or(id_b.as_str(), |s| s.as_str());
+        name_a.cmp(name_b)
+    });
+    let json_engine_timing: Vec<JsonEngineTiming> = engine_timing
+        .into_iter()
+        .map(|(id, stats)| JsonEngineTiming {
+            id: labels.get(id).cloned().unwrap_or_else(|| id.clone()),
+            moves: stats.moves,
+            average_elapsed_ms: average(stats.elapsed_ms_sum, stats.moves),
+            average_think_limit_ms: average(stats.think_limit_ms_sum, stats.moves),
+            timed_out: stats.timed_out,
+            average_nps: if stats.eval_nps_count > 0 {
+                Some(stats.eval_nps_sum as f64 / stats.eval_nps_count as f64)
+            } else {
+                None
+            },
+            average_depth: if stats.eval_depth_count > 0 {
+                Some(stats.eval_depth_sum as f64 / stats.eval_depth_count as f64)
+            } else {
+                None
+            },
+            average_seldepth: if stats.eval_seldepth_count > 0 {
+                Some(stats.eval_seldepth_sum as f64 / stats.eval_seldepth_count as f64)
+            } else {
+                None
+            },
+            average_nodes: if stats.eval_nodes_count > 0 {
+                Some(stats.eval_nodes_sum as f64 / stats.eval_nodes_count as f64)
+            } else {
+                None
+            },
+            by_side: stats
+                .by_side
+                .iter()
+                .map(|(label, bucket)| JsonTimingBucket {
+                    label: label.clone(),
+                    moves: bucket.moves,
+                    average_elapsed_ms: average(bucket.elapsed_ms_sum, bucket.moves),
+                })
+                .collect(),
+            by_ply_band: ["1-40", "41-80", "81-120", "121+"]
+                .into_iter()
+                .filter_map(|label| {
+                    stats.by_ply_band.get(label).map(|bucket| JsonTimingBucket {
+                        label: label.to_string(),
+                        moves: bucket.moves,
+                        average_elapsed_ms: average(bucket.elapsed_ms_sum, bucket.moves),
+                    })
+                })
+                .collect(),
+        })
+        .collect();
+    let decisive = extra.black_wins + extra.white_wins;
+
     let output = JsonOutput {
         files: file_count,
         progress: Progress {
@@ -786,6 +1170,26 @@ fn print_json(
         matchups: json_matchups,
         engines: json_engines,
         head_to_head: json_h2h,
+        extra: JsonExtra {
+            average_plies: if extra.completed_games > 0 {
+                extra.total_plies as f64 / extra.completed_games as f64
+            } else {
+                0.0
+            },
+            black_win_rate_decisive: if decisive > 0 {
+                extra.black_wins as f64 / decisive as f64 * 100.0
+            } else {
+                0.0
+            },
+            white_win_rate_decisive: if decisive > 0 {
+                extra.white_wins as f64 / decisive as f64 * 100.0
+            } else {
+                0.0
+            },
+            completed_games: extra.completed_games,
+            draws: extra.draws,
+            engine_timing: json_engine_timing,
+        },
     };
 
     println!("{}", serde_json::to_string_pretty(&output)?);
