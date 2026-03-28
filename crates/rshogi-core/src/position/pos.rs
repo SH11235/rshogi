@@ -501,13 +501,9 @@ impl Position {
         self.attackers_to_occ(sq, self.occupied())
     }
 
-    /// 指定マスに利いている駒（占有指定）
-    ///
-    /// Apery/YaneuraOu式: silverEffect で HDK の斜め近接利き、
-    /// goldEffect で HDK の直線近接利きを捕捉し、
-    /// 個別の king_effect / horse近接 / dragon近接 を不要にする。
-    /// また rook_effect を再利用して lance_effect の個別スライド計算を省略。
-    pub fn attackers_to_occ(&self, sq: Square, occupied: Bitboard) -> Bitboard {
+    #[cfg(any(test, not(target_arch = "x86_64")))]
+    #[inline]
+    fn attackers_to_occ_near_rust(&self, sq: Square) -> Bitboard {
         let silver_hdk = self.pieces_pt(PieceType::Silver) | self.hdk_bb;
         let golds_hdk = self.golds_bb | self.hdk_bb;
 
@@ -525,6 +521,112 @@ impl Position {
             | (gold_effect(Color::Black, sq) & golds_hdk))
             & self.pieces_c(Color::White);
 
+        black_attackers | white_attackers
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(test)))]
+    #[inline(always)]
+    fn attackers_to_occ_near_asm(&self, sq: Square) -> Bitboard {
+        use crate::bitboard::{GOLD_EFFECT, KNIGHT_EFFECT, PAWN_EFFECT, SILVER_EFFECT};
+        use core::arch::asm;
+
+        let mut out = Bitboard::EMPTY;
+        const BB_SIZE: usize = core::mem::size_of::<Bitboard>();
+        const EFFECT_STRIDE: usize = Square::NUM * BB_SIZE;
+        const PT_PAWN_OFFSET: usize = PieceType::Pawn as usize * BB_SIZE;
+        const PT_KNIGHT_OFFSET: usize = PieceType::Knight as usize * BB_SIZE;
+        const PT_SILVER_OFFSET: usize = PieceType::Silver as usize * BB_SIZE;
+        const BLACK_OFFSET: usize = Color::Black as usize * BB_SIZE;
+        const WHITE_OFFSET: usize = Color::White as usize * BB_SIZE;
+        let effect_black_offset = sq.index() * BB_SIZE;
+        let effect_white_offset = EFFECT_STRIDE + effect_black_offset;
+
+        // SAFETY:
+        // - x86_64 では SSE2 がベースラインであり、`movdqa/pand/por` は常に使用可能
+        // - Bitboard は `#[repr(C, align(16))]` で、static table・局面内フィールド・ローカル `out` は
+        //   16 バイト境界に整列しているため `movdqa` のアラインメント要件を満たす
+        // - 参照するメモリはすべて読み取り専用で、書き込み先はローカル `out` のみ
+        // - `sq.index()` は Square の不変条件により 0..80
+        // - asm ブロックはスタックを変更せず、xmm0..xmm7 以外のレジスタ状態を壊さない
+        unsafe {
+            asm!(
+                "movdqa xmm5, xmmword ptr [{by_type} + {pt_pawn_off}]",
+                "movdqa xmm6, xmmword ptr [{by_type} + {pt_knight_off}]",
+                "movdqa xmm7, xmmword ptr [{hdk}]",
+                "movdqa xmm3, xmmword ptr [{by_type} + {pt_silver_off}]",
+                "por xmm3, xmm7",
+                "movdqa xmm4, xmmword ptr [{golds}]",
+                "por xmm4, xmm7",
+                "movdqa xmm0, xmmword ptr [{pawn_base} + {eff_white_off}]",
+                "pand xmm0, xmm5",
+                "movdqa xmm1, xmmword ptr [{knight_base} + {eff_white_off}]",
+                "pand xmm1, xmm6",
+                "por xmm0, xmm1",
+                "movdqa xmm1, xmmword ptr [{silver_base} + {eff_white_off}]",
+                "pand xmm1, xmm3",
+                "por xmm0, xmm1",
+                "movdqa xmm1, xmmword ptr [{gold_base} + {eff_white_off}]",
+                "pand xmm1, xmm4",
+                "por xmm0, xmm1",
+                "pand xmm0, xmmword ptr [{by_color} + {black_off}]",
+                "movdqa xmm1, xmmword ptr [{pawn_base} + {eff_black_off}]",
+                "pand xmm1, xmm5",
+                "movdqa xmm2, xmmword ptr [{knight_base} + {eff_black_off}]",
+                "pand xmm2, xmm6",
+                "por xmm1, xmm2",
+                "movdqa xmm2, xmmword ptr [{silver_base} + {eff_black_off}]",
+                "pand xmm2, xmm3",
+                "por xmm1, xmm2",
+                "movdqa xmm2, xmmword ptr [{gold_base} + {eff_black_off}]",
+                "pand xmm2, xmm4",
+                "por xmm1, xmm2",
+                "pand xmm1, xmmword ptr [{by_color} + {white_off}]",
+                "por xmm0, xmm1",
+                "movdqa xmmword ptr [{out}], xmm0",
+                pawn_base = in(reg) PAWN_EFFECT.as_ptr(),
+                knight_base = in(reg) KNIGHT_EFFECT.as_ptr(),
+                silver_base = in(reg) SILVER_EFFECT.as_ptr(),
+                gold_base = in(reg) GOLD_EFFECT.as_ptr(),
+                by_type = in(reg) self.by_type.as_ptr(),
+                by_color = in(reg) self.by_color.as_ptr(),
+                hdk = in(reg) &self.hdk_bb,
+                golds = in(reg) &self.golds_bb,
+                eff_white_off = in(reg) effect_white_offset,
+                eff_black_off = in(reg) effect_black_offset,
+                pt_pawn_off = const PT_PAWN_OFFSET,
+                pt_knight_off = const PT_KNIGHT_OFFSET,
+                pt_silver_off = const PT_SILVER_OFFSET,
+                black_off = const BLACK_OFFSET,
+                white_off = const WHITE_OFFSET,
+                out = in(reg) &mut out,
+                lateout("xmm0") _,
+                lateout("xmm1") _,
+                lateout("xmm2") _,
+                lateout("xmm3") _,
+                lateout("xmm4") _,
+                lateout("xmm5") _,
+                lateout("xmm6") _,
+                lateout("xmm7") _,
+                options(nostack, preserves_flags),
+            );
+        }
+
+        out
+    }
+
+    /// 指定マスに利いている駒（占有指定）
+    ///
+    /// Apery/YaneuraOu式: silverEffect で HDK の斜め近接利き、
+    /// goldEffect で HDK の直線近接利きを捕捉し、
+    /// 個別の king_effect / horse近接 / dragon近接 を不要にする。
+    /// また rook_effect を再利用して lance_effect の個別スライド計算を省略。
+    pub fn attackers_to_occ(&self, sq: Square, occupied: Bitboard) -> Bitboard {
+        #[cfg(all(target_arch = "x86_64", not(test)))]
+        let near = self.attackers_to_occ_near_asm(sq);
+
+        #[cfg(any(test, not(target_arch = "x86_64")))]
+        let near = self.attackers_to_occ_near_rust(sq);
+
         // 角・馬のスライド利き
         let bishop = bishop_effect(sq, occupied) & self.bishop_horse_bb;
 
@@ -537,7 +639,7 @@ impl Position {
                 | (lance_step_effect(Color::Black, sq)
                     & self.pieces(Color::White, PieceType::Lance)));
 
-        black_attackers | white_attackers | bishop | rook_lance
+        near | bishop | rook_lance
     }
 
     /// 指定マスに利いている指定手番の駒
@@ -1834,6 +1936,7 @@ mod tests {
         assert!(attackers.contains(sq55));
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_do_move_drop() {
         let mut pos = Position::new();
