@@ -53,7 +53,9 @@ pub const MAX_PATH_LENGTH: usize = 8;
 #[derive(Clone, Copy)]
 pub struct IndexList<const N: usize> {
     /// 未初期化領域を許容する配列
-    indices: [MaybeUninit<usize>; N],
+    /// u32: feature index は最大 73,305 で u32 の範囲内。
+    /// usize (8 bytes) から u32 (4 bytes) に変更し、キャッシュ効率を改善。
+    indices: [MaybeUninit<u32>; N],
     /// 有効な要素数
     len: u8,
 }
@@ -91,16 +93,18 @@ impl<const N: usize> IndexList<N> {
             return false;
         }
         // SAFETY: pos < N なので範囲内。MaybeUninit への書き込みは常に安全
-        self.indices[pos].write(index);
+        self.indices[pos].write(index as u32);
         self.len += 1;
         true
     }
 
-    /// イテレータを返す
+    /// イテレータを返す（usize に変換して返す）
     #[inline]
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = &usize> + '_ {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = usize> + '_ {
         // SAFETY: 0..len の範囲は全て初期化済み
-        self.indices[..self.len as usize].iter().map(|v| unsafe { v.assume_init_ref() })
+        self.indices[..self.len as usize]
+            .iter()
+            .map(|v| unsafe { *v.assume_init_ref() } as usize)
     }
 
     /// 空かどうか

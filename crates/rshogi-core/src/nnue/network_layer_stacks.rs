@@ -481,11 +481,11 @@ mod tests {
         use crate::types::Color;
         let active_black = HalfKA_hm_FeatureSet::collect_active_indices(&pos, Color::Black);
         eprintln!("Active features for Black: {} features", active_black.len());
-        let first_5: Vec<usize> = active_black.iter().take(5).copied().collect();
+        let first_5: Vec<usize> = active_black.iter().take(5).collect();
         eprintln!("  First 5 indices: {first_5:?}");
 
         // 最初のアクティブ特徴量の重みを確認
-        if let Some(&first_idx) = active_black.iter().next() {
+        if let Some(first_idx) = active_black.iter().next() {
             let offset = first_idx * NNUE_PYTORCH_L1;
             eprintln!("  Weight offset for feature {first_idx}: {offset}");
             if offset + 10 <= weight_total {

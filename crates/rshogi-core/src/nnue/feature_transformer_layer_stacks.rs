@@ -174,7 +174,7 @@ impl FeatureTransformerLayerStacks {
             // アクティブな特徴量の重みを加算
             let mut active_indices = IndexList::new();
             append_active_indices(pos, perspective, &mut active_indices);
-            for &index in active_indices.iter() {
+            for index in active_indices.iter() {
                 self.add_weights(accumulation, index);
             }
         }
@@ -202,7 +202,7 @@ impl FeatureTransformerLayerStacks {
 
                 let mut active_indices = IndexList::new();
                 append_active_indices(pos, perspective, &mut active_indices);
-                for &index in active_indices.iter() {
+                for index in active_indices.iter() {
                     self.add_weights(accumulation, index);
                 }
             } else {
@@ -226,11 +226,11 @@ impl FeatureTransformerLayerStacks {
                     perspective,
                     pos.king_square(perspective),
                 ) {
-                    for &index in removed.iter() {
+                    for index in removed.iter() {
                         self.sub_weights(curr, index);
                     }
 
-                    for &index in added.iter() {
+                    for index in added.iter() {
                         self.add_weights(curr, index);
                     }
                 }
@@ -282,11 +282,11 @@ impl FeatureTransformerLayerStacks {
                     perspective,
                     pos.king_square(perspective),
                 ) {
-                    for &index in removed.iter() {
+                    for index in removed.iter() {
                         self.sub_weights(curr, index);
                     }
 
-                    for &index in added.iter() {
+                    for index in added.iter() {
                         self.add_weights(curr, index);
                     }
                 }
@@ -331,7 +331,7 @@ impl FeatureTransformerLayerStacks {
         // 使用領域だけ初期化して、全 zero fill を避ける。
         let mut sorted_buf = [const { MaybeUninit::<u32>::uninit() }; MAX_ACTIVE_FEATURES];
         let len = active_indices.len();
-        for (slot, &idx) in sorted_buf[..len].iter_mut().zip(active_indices.iter()) {
+        for (slot, idx) in sorted_buf[..len].iter_mut().zip(active_indices.iter()) {
             slot.write(idx as u32);
         }
         // SAFETY:
@@ -374,7 +374,7 @@ impl FeatureTransformerLayerStacks {
             }
         }
 
-        for &entry_idx in path.iter() {
+        for entry_idx in path.iter() {
             let dirty_piece = stack.entry_at(entry_idx).dirty_piece;
 
             for perspective in [Color::Black, Color::White] {
@@ -402,10 +402,10 @@ impl FeatureTransformerLayerStacks {
                     perspective,
                     king_sq,
                 ) {
-                    for &index in removed.iter() {
+                    for index in removed.iter() {
                         self.sub_weights(accumulation, index);
                     }
-                    for &index in added.iter() {
+                    for index in added.iter() {
                         self.add_weights(accumulation, index);
                     }
                 }
@@ -1024,10 +1024,10 @@ mod tests {
         let mut removed = IndexList::new();
         let mut added = IndexList::new();
         append_changed_indices(dirty_piece, perspective, king_sq, &mut removed, &mut added);
-        for &index in removed.iter() {
+        for index in removed.iter() {
             ft.sub_weights(accumulation, index);
         }
-        for &index in added.iter() {
+        for index in added.iter() {
             ft.add_weights(accumulation, index);
         }
     }
