@@ -74,6 +74,9 @@ use-lazy-evaluate = []
 deep = []
 # 探索経路限定で pass_rights を無効化（Position/MoveGen の pass 機能は保持）
 search-no-pass-rules = []
+# LayerStack 専用ビルド（大会向け production 用）
+# HalfKP/HalfKA/HalfKA_hm のコードを除去し、evaluate_dispatch の icache footprint を削減
+layerstack-only = []
 
 [lib]
 name = "rshogi_core"
