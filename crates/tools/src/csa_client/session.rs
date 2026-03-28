@@ -25,12 +25,11 @@ struct Clock {
 
 impl Clock {
     fn from_summary(summary: &GameSummary) -> Self {
-        let total_ms = summary.total_time_sec as i64 * 1000;
         Self {
-            black_time_ms: total_ms,
-            white_time_ms: total_ms,
-            byoyomi_ms: summary.byoyomi_sec as i64 * 1000,
-            increment_ms: summary.increment_sec as i64 * 1000,
+            black_time_ms: summary.black_time.total_time_ms,
+            white_time_ms: summary.white_time.total_time_ms,
+            byoyomi_ms: summary.black_time.byoyomi_ms, // go コマンドでは共通値を使用
+            increment_ms: summary.black_time.increment_ms,
         }
     }
 
@@ -109,7 +108,7 @@ pub fn run_game_session(
     shutdown: &AtomicBool,
 ) -> Result<(GameResult, GameRecord)> {
     // 対局情報受信
-    let summary = conn.recv_game_summary()?;
+    let summary = conn.recv_game_summary(config.server.keepalive.ping_interval_sec)?;
     conn.agree_and_wait_start(&summary.game_id)?;
 
     engine.new_game()?;
@@ -157,14 +156,15 @@ pub fn run_game_session(
             if result.bestmove == "resign" {
                 conn.send_resign()?;
                 record.set_result("resign");
-                // 終局を待つ
                 let game_result = wait_game_end(conn)?;
+                engine.gameover(&gameover_str(&game_result))?;
                 return Ok((game_result, record));
             }
             if result.bestmove == "win" {
                 conn.send_win()?;
                 record.set_result("win_declaration");
                 let game_result = wait_game_end(conn)?;
+                engine.gameover(&gameover_str(&game_result))?;
                 return Ok((game_result, record));
             }
 
@@ -253,12 +253,14 @@ pub fn run_game_session(
                                 conn.send_resign()?;
                                 record.set_result("resign");
                                 let game_result = wait_game_end(conn)?;
+                                engine.gameover(&gameover_str(&game_result))?;
                                 return Ok((game_result, record));
                             }
                             if result.bestmove == "win" {
                                 conn.send_win()?;
                                 record.set_result("win_declaration");
                                 let game_result = wait_game_end(conn)?;
+                                engine.gameover(&gameover_str(&game_result))?;
                                 return Ok((game_result, record));
                             }
 

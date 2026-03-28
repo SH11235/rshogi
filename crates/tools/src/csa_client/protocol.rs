@@ -10,6 +10,17 @@ use anyhow::{Context, Result, bail};
 
 use crate::common::csa::{Color, CsaMove, ParsedMove, Position, parse_csa_full};
 
+/// 先後共通または個別の時間設定
+#[derive(Clone, Debug, Default)]
+pub struct TimeConfig {
+    /// 持ち時間（ミリ秒）
+    pub total_time_ms: i64,
+    /// 秒読み（ミリ秒）
+    pub byoyomi_ms: i64,
+    /// フィッシャー increment（ミリ秒）
+    pub increment_ms: i64,
+}
+
 /// CSAサーバーから受信した対局情報
 #[derive(Clone, Debug)]
 pub struct GameSummary {
@@ -23,12 +34,10 @@ pub struct GameSummary {
     pub position: Position,
     /// 途中からの再開手順
     pub initial_moves: Vec<CsaMove>,
-    /// 持ち時間（秒）
-    pub total_time_sec: u32,
-    /// 秒読み（秒）
-    pub byoyomi_sec: u32,
-    /// フィッシャー increment（秒）
-    pub increment_sec: u32,
+    /// 先手の時間設定
+    pub black_time: TimeConfig,
+    /// 後手の時間設定
+    pub white_time: TimeConfig,
 }
 
 /// サーバーから受信した指し手
@@ -105,13 +114,17 @@ impl CsaConnection {
     }
 
     /// Game_Summary を受信して解析する
-    pub fn recv_game_summary(&mut self) -> Result<GameSummary> {
+    pub fn recv_game_summary(&mut self, keepalive_interval_sec: u64) -> Result<GameSummary> {
         log::info!("[CSA] 対局待機中...");
-        // "BEGIN Game_Summary" を待つ
+        // "BEGIN Game_Summary" を待つ（keep-alive 送信しながら）
         loop {
-            let line = self.recv_line_blocking(Duration::from_secs(3600))?;
-            if line == "BEGIN Game_Summary" {
-                break;
+            match self.recv_line_nonblocking() {
+                Ok(Some(line)) if line == "BEGIN Game_Summary" => break,
+                Ok(Some(_)) => {} // 他の行は無視
+                Ok(None) => {
+                    self.maybe_send_keepalive(keepalive_interval_sec)?;
+                }
+                Err(e) => return Err(e),
             }
         }
 
@@ -119,12 +132,17 @@ impl CsaConnection {
         let mut my_color = Color::Black;
         let mut sente_name = String::new();
         let mut gote_name = String::new();
-        let mut total_time_sec: u32 = 0;
-        let mut byoyomi_sec: u32 = 0;
-        let mut increment_sec: u32 = 0;
         let mut position_lines = Vec::new();
         let mut in_position = false;
-        let mut in_time = false;
+
+        // 時間設定: 共通 / 先手別 / 後手別の3レイヤー
+        // Time_Unit のデフォルトは秒 (1000ms)
+        let mut time_unit_ms: i64 = 1000;
+        let mut common_time = TimeConfig::default();
+        let mut black_time: Option<TimeConfig> = None;
+        let mut white_time: Option<TimeConfig> = None;
+        // 現在パース中の Time ブロックの対象 (None=共通, Some(Black/White)=個別)
+        let mut time_target: Option<Option<Color>> = None;
 
         loop {
             let line = self.recv_line_blocking(Duration::from_secs(30))?;
@@ -139,12 +157,22 @@ impl CsaConnection {
                 in_position = false;
                 continue;
             }
-            if line.starts_with("BEGIN Time") {
-                in_time = true;
+            if line == "BEGIN Time" {
+                time_target = Some(None); // 共通
+                continue;
+            }
+            if line == "BEGIN Time+" {
+                black_time = Some(TimeConfig::default());
+                time_target = Some(Some(Color::Black));
+                continue;
+            }
+            if line == "BEGIN Time-" {
+                white_time = Some(TimeConfig::default());
+                time_target = Some(Some(Color::White));
                 continue;
             }
             if line.starts_with("END Time") {
-                in_time = false;
+                time_target = None;
                 continue;
             }
 
@@ -153,13 +181,28 @@ impl CsaConnection {
                 continue;
             }
 
-            if in_time {
-                if let Some(val) = line.strip_prefix("Total_Time:") {
-                    total_time_sec = val.trim().parse().unwrap_or(0);
+            if let Some(target) = &time_target {
+                let tc = match target {
+                    None => &mut common_time,
+                    Some(Color::Black) => black_time.as_mut().unwrap(),
+                    Some(Color::White) => white_time.as_mut().unwrap(),
+                };
+                if let Some(val) = line.strip_prefix("Time_Unit:") {
+                    time_unit_ms = match val.trim() {
+                        "msec" => 1,
+                        "sec" => 1000,
+                        "min" => 60000,
+                        _ => 1000,
+                    };
+                } else if let Some(val) = line.strip_prefix("Total_Time:") {
+                    let v: i64 = val.trim().parse().unwrap_or(0);
+                    tc.total_time_ms = v * time_unit_ms;
                 } else if let Some(val) = line.strip_prefix("Byoyomi:") {
-                    byoyomi_sec = val.trim().parse().unwrap_or(0);
+                    let v: i64 = val.trim().parse().unwrap_or(0);
+                    tc.byoyomi_ms = v * time_unit_ms;
                 } else if let Some(val) = line.strip_prefix("Increment:") {
-                    increment_sec = val.trim().parse().unwrap_or(0);
+                    let v: i64 = val.trim().parse().unwrap_or(0);
+                    tc.increment_ms = v * time_unit_ms;
                 }
                 continue;
             }
@@ -178,13 +221,21 @@ impl CsaConnection {
                     Color::White
                 };
             } else if let Some(val) = line.strip_prefix("Total_Time:") {
-                total_time_sec = val.trim().parse().unwrap_or(0);
+                // ヘッダレベルの時間（Time ブロック外）
+                let v: i64 = val.trim().parse().unwrap_or(0);
+                common_time.total_time_ms = v * 1000;
             } else if let Some(val) = line.strip_prefix("Byoyomi:") {
-                byoyomi_sec = val.trim().parse().unwrap_or(0);
+                let v: i64 = val.trim().parse().unwrap_or(0);
+                common_time.byoyomi_ms = v * 1000;
             } else if let Some(val) = line.strip_prefix("Increment:") {
-                increment_sec = val.trim().parse().unwrap_or(0);
+                let v: i64 = val.trim().parse().unwrap_or(0);
+                common_time.increment_ms = v * 1000;
             }
         }
+
+        // 先後別設定がなければ共通設定をコピー
+        let final_black_time = black_time.unwrap_or_else(|| common_time.clone());
+        let final_white_time = white_time.unwrap_or(common_time);
 
         // Position ブロックをパース
         let pos_text = position_lines.join("\n");
@@ -204,19 +255,21 @@ impl CsaConnection {
             gote_name,
             position,
             initial_moves,
-            total_time_sec,
-            byoyomi_sec,
-            increment_sec,
+            black_time: final_black_time,
+            white_time: final_white_time,
         };
         log::info!(
-            "[CSA] 対局情報受信: {} ({}手目から) {}vs{} 持ち時間:{}秒 秒読み:{}秒 inc:{}秒",
+            "[CSA] 対局情報受信: {} ({}手目から) {}vs{} 先手:{}ms+{}ms+{}ms 後手:{}ms+{}ms+{}ms",
             summary.game_id,
             summary.initial_moves.len() + 1,
             summary.sente_name,
             summary.gote_name,
-            summary.total_time_sec,
-            summary.byoyomi_sec,
-            summary.increment_sec,
+            summary.black_time.total_time_ms,
+            summary.black_time.byoyomi_ms,
+            summary.black_time.increment_ms,
+            summary.white_time.total_time_ms,
+            summary.white_time.byoyomi_ms,
+            summary.white_time.increment_ms,
         );
         Ok(summary)
     }
@@ -239,23 +292,31 @@ impl CsaConnection {
     /// サーバーから指し手を受信する。
     /// タイムアウト時は Ok(None) を返す（keep-alive チェック用）。
     pub fn recv_move(&mut self) -> Result<Option<RecvEvent>> {
-        match self.recv_line_nonblocking() {
-            Ok(Some(line)) => {
-                // 終局判定
-                if line.starts_with('#') {
-                    let result = parse_game_result(&line);
-                    return Ok(Some(RecvEvent::GameEnd(result, line)));
+        // 中間行（#TIME_UP 等）をスキップするためループ
+        loop {
+            match self.recv_line_nonblocking() {
+                Ok(Some(line)) => {
+                    // 終局判定: #WIN/#LOSE/#DRAW/#CENSORED/#CHUDAN のみ GameEnd。
+                    // #TIME_UP, #ILLEGAL_MOVE, #MAX_MOVES 等は中間行なので無視
+                    // （直後に #WIN/#LOSE/#DRAW が来る）。
+                    if line.starts_with('#') {
+                        if let Some(result) = parse_game_result(&line) {
+                            return Ok(Some(RecvEvent::GameEnd(result, line)));
+                        }
+                        log::info!("[CSA] 終局理由: {line}");
+                        continue; // 次の行（#WIN等）を読む
+                    }
+                    // 指し手
+                    if line.starts_with('+') || line.starts_with('-') {
+                        let (mv, time_sec) = parse_server_move(&line);
+                        return Ok(Some(RecvEvent::Move(ServerMove { mv, time_sec })));
+                    }
+                    // その他（無視）
+                    return Ok(None);
                 }
-                // 指し手
-                if line.starts_with('+') || line.starts_with('-') {
-                    let (mv, time_sec) = parse_server_move(&line);
-                    return Ok(Some(RecvEvent::Move(ServerMove { mv, time_sec })));
-                }
-                // その他（無視）
-                Ok(None)
+                Ok(None) => return Ok(None), // タイムアウト
+                Err(e) => return Err(e),
             }
-            Ok(None) => Ok(None), // タイムアウト
-            Err(e) => Err(e),
         }
     }
 
@@ -264,12 +325,15 @@ impl CsaConnection {
         self.send_line(csa_move)
     }
 
-    /// 指し手 + floodgate コメント（評価値・PV）を送信する
+    /// 指し手 + floodgate コメント（評価値・PV）を送信する。
+    /// コメントは `+7776FU,'* 123 +7776FU -3334FU` のようにカンマ区切りで同一行に付加する。
     pub fn send_move_with_comment(&mut self, csa_move: &str, comment: Option<&str>) -> Result<()> {
         if let Some(c) = comment {
-            self.send_line(c)?;
+            let line = format!("{csa_move},{c}");
+            self.send_line(&line)
+        } else {
+            self.send_line(csa_move)
         }
-        self.send_line(csa_move)
     }
 
     /// 投了を送信
@@ -404,17 +468,20 @@ fn parse_server_move(line: &str) -> (String, u32) {
     }
 }
 
-fn parse_game_result(line: &str) -> GameResult {
-    if line.contains("WIN") {
-        GameResult::Win
-    } else if line.contains("LOSE") {
-        GameResult::Lose
-    } else if line.contains("DRAW") {
-        GameResult::Draw
-    } else if line.contains("CHUDAN") {
-        GameResult::Interrupted
+/// 最終結果行のみ Some を返す。中間行（#TIME_UP, #ILLEGAL_MOVE 等）は None。
+fn parse_game_result(line: &str) -> Option<GameResult> {
+    if line.contains("#WIN") {
+        Some(GameResult::Win)
+    } else if line.contains("#LOSE") {
+        Some(GameResult::Lose)
+    } else if line.contains("#DRAW") {
+        Some(GameResult::Draw)
+    } else if line.contains("#CHUDAN") {
+        Some(GameResult::Interrupted)
+    } else if line.contains("#CENSORED") {
+        Some(GameResult::Censored)
     } else {
-        GameResult::Censored
+        None // #TIME_UP, #ILLEGAL_MOVE, #SENNICHITE 等は中間行
     }
 }
 
