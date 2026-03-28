@@ -3,6 +3,7 @@
 //! 1回の対局（ログイン〜対局〜終局）を管理する。
 
 use std::fmt::Write as _;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 
@@ -69,6 +70,7 @@ pub fn run_game_session(
     conn: &mut CsaConnection,
     engine: &mut UsiEngine,
     config: &CsaClientConfig,
+    shutdown: &AtomicBool,
 ) -> Result<(GameResult, GameRecord)> {
     // 対局情報受信
     let summary = conn.recv_game_summary()?;
@@ -177,6 +179,11 @@ pub fn run_game_session(
                     }
                     None => {
                         conn.maybe_send_keepalive(config.server.keepalive.ping_interval_sec)?;
+                        if shutdown.load(Ordering::SeqCst) {
+                            let result =
+                                resign_and_wait(conn, engine, &mut ponder_state, &mut record)?;
+                            return Ok((result, record));
+                        }
                     }
                 }
             }
@@ -263,6 +270,15 @@ pub fn run_game_session(
                                         conn.maybe_send_keepalive(
                                             config.server.keepalive.ping_interval_sec,
                                         )?;
+                                        if shutdown.load(Ordering::SeqCst) {
+                                            let result = resign_and_wait(
+                                                conn,
+                                                engine,
+                                                &mut ponder_state,
+                                                &mut record,
+                                            )?;
+                                            return Ok((result, record));
+                                        }
                                     }
                                 }
                             }
@@ -302,6 +318,10 @@ pub fn run_game_session(
                 None => {
                     // タイムアウト: keep-alive チェック
                     conn.maybe_send_keepalive(config.server.keepalive.ping_interval_sec)?;
+                    if shutdown.load(Ordering::SeqCst) {
+                        let result = resign_and_wait(conn, engine, &mut ponder_state, &mut record)?;
+                        return Ok((result, record));
+                    }
                 }
             }
         }
@@ -317,6 +337,22 @@ fn cleanup_ponder(engine: &mut UsiEngine, ponder_state: &mut Option<PonderState>
         engine.stop_and_wait()?;
     }
     Ok(())
+}
+
+/// シャットダウン時に投了して対局終了を待つ
+fn resign_and_wait(
+    conn: &mut CsaConnection,
+    engine: &mut UsiEngine,
+    ponder_state: &mut Option<PonderState>,
+    record: &mut GameRecord,
+) -> Result<GameResult> {
+    log::info!("シャットダウン: 投了して終了します...");
+    cleanup_ponder(engine, ponder_state)?;
+    conn.send_resign()?;
+    record.set_result("resign");
+    let result = wait_game_end(conn)?;
+    engine.gameover(&gameover_str(&result))?;
+    Ok(result)
 }
 
 fn opposite(color: Color) -> Color {

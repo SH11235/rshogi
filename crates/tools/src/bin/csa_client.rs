@@ -104,11 +104,11 @@ fn main() -> Result<()> {
         CsaClientConfig::default()
     };
 
-    // CLI オプションでオーバーライド
-    apply_cli_overrides(&mut config, &cli);
-
     // 環境変数でオーバーライド
     apply_env_overrides(&mut config);
+
+    // CLI オプションでオーバーライド（最優先）
+    apply_cli_overrides(&mut config, &cli);
 
     config.validate()?;
 
@@ -132,6 +132,9 @@ fn main() -> Result<()> {
         shutdown_clone.store(true, Ordering::SeqCst);
     })?;
 
+    // エンジン起動（ループ外で保持し再利用する）
+    let mut engine = spawn_engine(&config)?;
+
     // メイン対局ループ
     let mut games_played: u32 = 0;
     let mut wins: u32 = 0;
@@ -149,7 +152,7 @@ fn main() -> Result<()> {
             break;
         }
 
-        match run_one_game(&config) {
+        match run_one_game(&config, &mut engine, &shutdown) {
             Ok((result, record)) => {
                 // 棋譜保存
                 if let Err(e) = save_record(&record, &config.record) {
@@ -170,28 +173,48 @@ fn main() -> Result<()> {
 
                 // 成功したのでリトライ間隔をリセット
                 retry_delay = Duration::from_secs(config.retry.initial_delay_sec);
+
+                // 毎局再起動が有効なら再起動
+                if config.game.restart_engine_every_game {
+                    engine.quit();
+                    engine = spawn_engine(&config)?;
+                }
             }
             Err(e) => {
                 log::error!("対局エラー: {e}");
                 if shutdown.load(Ordering::SeqCst) {
                     break;
                 }
+                // エラー後はエンジンを再起動（不整合な状態の可能性）
+                engine.quit();
                 log::info!("{}秒後にリトライ...", retry_delay.as_secs());
                 std::thread::sleep(retry_delay);
-                // 指数バックオフ
                 retry_delay =
                     (retry_delay * 2).min(Duration::from_secs(config.retry.max_delay_sec));
+                engine = spawn_engine(&config)?;
             }
         }
     }
 
+    engine.quit();
     log::info!("終了。合計 {games_played} 局: {wins}勝 {losses}敗 {draws}分");
     Ok(())
+}
+
+fn spawn_engine(config: &CsaClientConfig) -> Result<UsiEngine> {
+    UsiEngine::spawn(
+        &config.engine.path,
+        &config.engine.options,
+        config.game.ponder,
+        Duration::from_secs(config.engine.startup_timeout_sec),
+    )
 }
 
 /// 1回のゲームを実行する（接続〜対局〜切断）
 fn run_one_game(
     config: &CsaClientConfig,
+    engine: &mut UsiEngine,
+    shutdown: &AtomicBool,
 ) -> Result<(GameResult, tools::csa_client::record::GameRecord)> {
     // サーバー接続
     let mut conn = CsaConnection::connect(
@@ -201,21 +224,16 @@ fn run_one_game(
     )?;
     conn.login(&config.server.id, &config.server.password)?;
 
-    // エンジン起動
-    let mut engine = UsiEngine::spawn(
-        &config.engine.path,
-        &config.engine.options,
-        config.game.ponder,
-        Duration::from_secs(config.engine.startup_timeout_sec),
-    )?;
-
     // 対局実行
-    let result = run_game_session(&mut conn, &mut engine, config);
+    let result = run_game_session(&mut conn, engine, config, shutdown);
 
-    // クリーンアップ
-    conn.logout()?;
-    engine.quit();
+    // エラー時は投了を試みる（NF2: 対局中のエラーは投了してから再接続）
+    if result.is_err() {
+        let _ = conn.send_resign();
+        let _ = engine.gameover("lose");
+    }
 
+    let _ = conn.logout();
     result
 }
 

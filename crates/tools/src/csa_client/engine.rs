@@ -17,6 +17,7 @@ pub struct UsiEngine {
     writer: BufWriter<ChildStdin>,
     rx: Receiver<String>,
     pub engine_name: String,
+    quit_sent: bool,
 }
 
 /// bestmove の解析結果
@@ -85,6 +86,7 @@ impl UsiEngine {
             writer: BufWriter::new(stdin),
             rx,
             engine_name: String::new(),
+            quit_sent: false,
         };
         engine.initialize(options, ponder, timeout)?;
         Ok(engine)
@@ -195,9 +197,12 @@ impl UsiEngine {
     }
 
     /// quit を送信してプロセスを終了
-    pub fn quit(mut self) {
-        let _ = self.send("quit");
-        let _ = self.child.wait();
+    pub fn quit(&mut self) {
+        if !self.quit_sent {
+            let _ = self.send("quit");
+            let _ = self.child.wait();
+            self.quit_sent = true;
+        }
     }
 
     fn wait_bestmove(&mut self) -> Result<(BestMoveResult, SearchInfo)> {
@@ -258,11 +263,13 @@ impl UsiEngine {
 
 impl Drop for UsiEngine {
     fn drop(&mut self) {
-        let _ = self.send("quit");
-        // 少し待ってからプロセスを kill
-        std::thread::sleep(Duration::from_millis(100));
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if !self.quit_sent {
+            let _ = self.send("quit");
+            // 少し待ってからプロセスを kill
+            std::thread::sleep(Duration::from_millis(100));
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
     }
 }
 

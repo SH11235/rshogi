@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use anyhow::Result;
 use chrono::Local;
 
-use crate::common::csa::Position;
+use crate::common::csa::{Position, usi_move_to_csa};
 
 use super::config::RecordConfig;
 use super::engine::SearchInfo;
@@ -97,17 +97,31 @@ impl GameRecord {
         write!(out, "{}", self.initial_position.to_csa_board()).unwrap();
         writeln!(out).unwrap();
 
+        // 盤面追跡（PV の USI→CSA 変換に使用）
+        let mut pos = self.initial_position.clone();
+
         for m in &self.moves {
-            // 評価値コメント
+            // floodgate 形式コメント（評価値 + PV）
             if let Some(cp) = m.eval_cp {
                 write!(out, "'** {cp}").unwrap();
-                if let Some(d) = m.depth {
-                    write!(out, " d{d}").unwrap();
+                if !m.pv.is_empty() {
+                    let mut pv_pos = pos.clone();
+                    for usi_mv in &m.pv {
+                        if let Ok(csa) = usi_move_to_csa(usi_mv, &pv_pos) {
+                            write!(out, " {csa}").unwrap();
+                            if pv_pos.apply_csa_move(&csa).is_err() {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
                 }
                 writeln!(out).unwrap();
             }
             writeln!(out, "{}", m.csa_move).unwrap();
             writeln!(out, "T{}", m.time_sec).unwrap();
+            let _ = pos.apply_csa_move(&m.csa_move);
         }
 
         if self.result == "resign" {
