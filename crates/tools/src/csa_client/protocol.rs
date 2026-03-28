@@ -336,14 +336,16 @@ impl CsaConnection {
             let mut line = String::new();
             match self.reader.read_line(&mut line) {
                 Ok(0) => bail!("サーバー切断"),
-                Ok(_) => {
+                Ok(n) if n > 0 => {
+                    // 空行でもデータ受信なので activity 更新（相手の blank ping 等）
+                    self.last_activity_time = Instant::now();
                     let trimmed = line.trim_end().to_string();
                     if !trimmed.is_empty() {
                         log::debug!("[CSA] < {trimmed}");
-                        self.last_activity_time = Instant::now();
                         return Ok(trimmed);
                     }
                 }
+                Ok(_) => bail!("サーバー切断"),
                 Err(ref e)
                     if e.kind() == std::io::ErrorKind::WouldBlock
                         || e.kind() == std::io::ErrorKind::TimedOut =>
@@ -362,12 +364,13 @@ impl CsaConnection {
         match self.reader.read_line(&mut line) {
             Ok(0) => bail!("サーバー切断"),
             Ok(_) => {
+                // 空行でもデータ受信なので activity 更新
+                self.last_activity_time = Instant::now();
                 let trimmed = line.trim_end().to_string();
                 if trimmed.is_empty() {
                     Ok(None)
                 } else {
                     log::debug!("[CSA] < {trimmed}");
-                    self.last_activity_time = Instant::now();
                     Ok(Some(trimmed))
                 }
             }

@@ -74,14 +74,17 @@ impl Clock {
         my_color: Color,
         my_estimated_ms: i64,
     ) -> String {
-        let adjusted_consumption = (my_estimated_ms - self.increment_ms).max(0);
+        // usiToCsa.rb 準拠: 残り時間 + increment - estimated
+        // 短考なら increment > estimated で持ち時間が増える
         let (btime, wtime) = match my_color {
-            Color::Black => {
-                ((self.black_time_ms - adjusted_consumption).max(0), self.white_time_ms.max(0))
-            }
-            Color::White => {
-                (self.black_time_ms.max(0), (self.white_time_ms - adjusted_consumption).max(0))
-            }
+            Color::Black => (
+                (self.black_time_ms + self.increment_ms - my_estimated_ms).max(0),
+                self.white_time_ms.max(0),
+            ),
+            Color::White => (
+                self.black_time_ms.max(0),
+                (self.white_time_ms + self.increment_ms - my_estimated_ms).max(0),
+            ),
         };
 
         if self.increment_ms > 0 {
