@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::Duration;
 
@@ -158,11 +159,17 @@ impl UsiEngine {
         Ok(())
     }
 
-    /// 探索を開始し、bestmove を待つ
-    pub fn go(&mut self, position_cmd: &str, go_cmd: &str) -> Result<(BestMoveResult, SearchInfo)> {
+    /// 探索を開始し、bestmove を待つ。
+    /// `shutdown` がセットされたら stop を送信し、bestmove を "resign" として返す。
+    pub fn go(
+        &mut self,
+        position_cmd: &str,
+        go_cmd: &str,
+        shutdown: &AtomicBool,
+    ) -> Result<(BestMoveResult, SearchInfo)> {
         self.send(position_cmd)?;
         self.send(go_cmd)?;
-        self.wait_bestmove()
+        self.wait_bestmove(shutdown)
     }
 
     /// ponder 探索を開始（bestmove を待たない）
@@ -172,10 +179,11 @@ impl UsiEngine {
         Ok(())
     }
 
-    /// ponderhit を送信し、bestmove を待つ
-    pub fn ponderhit(&mut self) -> Result<(BestMoveResult, SearchInfo)> {
+    /// ponderhit を送信し、bestmove を待つ。
+    /// `shutdown` がセットされたら stop を送信し、bestmove を "resign" として返す。
+    pub fn ponderhit(&mut self, shutdown: &AtomicBool) -> Result<(BestMoveResult, SearchInfo)> {
         self.send("ponderhit")?;
-        self.wait_bestmove()
+        self.wait_bestmove(shutdown)
     }
 
     /// stop を送信し、bestmove を待つ（ponder 中断用）
@@ -205,29 +213,52 @@ impl UsiEngine {
         }
     }
 
-    fn wait_bestmove(&mut self) -> Result<(BestMoveResult, SearchInfo)> {
+    fn wait_bestmove(&mut self, shutdown: &AtomicBool) -> Result<(BestMoveResult, SearchInfo)> {
         let mut info = SearchInfo::default();
+        let mut stop_sent = false;
         loop {
-            let line = self.recv(Duration::from_secs(3600))?;
-            if line.starts_with("info") {
-                update_search_info(&mut info, &line);
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix("bestmove ") {
-                let mut parts = rest.split_whitespace();
-                let bestmove = parts.next().unwrap_or("resign").to_string();
-                let ponder_move = if parts.next() == Some("ponder") {
-                    parts.next().map(|s| s.to_string())
-                } else {
-                    None
-                };
-                return Ok((
-                    BestMoveResult {
-                        bestmove,
-                        ponder_move,
-                    },
-                    info,
-                ));
+            // shutdown チェック: 短いタイムアウトでポーリング
+            match self.rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(line) => {
+                    log::trace!("[USI] < {line}");
+                    if line.starts_with("info") {
+                        update_search_info(&mut info, &line);
+                        continue;
+                    }
+                    if let Some(rest) = line.strip_prefix("bestmove ") {
+                        let mut parts = rest.split_whitespace();
+                        let bestmove = parts.next().unwrap_or("resign").to_string();
+                        // shutdown で stop を送った場合は bestmove を resign に差し替え
+                        let bestmove = if stop_sent {
+                            "resign".to_string()
+                        } else {
+                            bestmove
+                        };
+                        let ponder_move = if !stop_sent && parts.next() == Some("ponder") {
+                            parts.next().map(|s| s.to_string())
+                        } else {
+                            None
+                        };
+                        return Ok((
+                            BestMoveResult {
+                                bestmove,
+                                ponder_move,
+                            },
+                            info,
+                        ));
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    // shutdown が要求されたら stop を送信
+                    if !stop_sent && shutdown.load(Ordering::SeqCst) {
+                        log::info!("[USI] shutdown 要求により stop 送信");
+                        self.send("stop")?;
+                        stop_sent = true;
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    bail!("エンジンプロセスが終了しました");
+                }
             }
         }
     }

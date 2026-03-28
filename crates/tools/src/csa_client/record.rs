@@ -32,8 +32,20 @@ pub struct RecordedMove {
     pub csa_move: String,
     pub time_sec: u32,
     pub eval_cp: Option<i32>,
+    pub eval_mate: Option<i32>,
     pub depth: Option<u32>,
     pub pv: Vec<String>,
+}
+
+impl RecordedMove {
+    /// 評価値を統一的に取得する。cp があればそのまま、mate なら ±100000 に変換。
+    pub fn effective_score(&self) -> Option<i32> {
+        if let Some(cp) = self.eval_cp {
+            Some(cp)
+        } else {
+            self.eval_mate.map(|m| if m > 0 { 100000 } else { -100000 })
+        }
+    }
 }
 
 impl GameRecord {
@@ -53,14 +65,15 @@ impl GameRecord {
     }
 
     pub fn add_move(&mut self, csa_move: &str, time_sec: u32, info: Option<&SearchInfo>) {
-        let (eval_cp, depth, pv) = match info {
-            Some(i) => (i.score_cp, i.depth, i.pv.clone()),
-            None => (None, None, Vec::new()),
+        let (eval_cp, eval_mate, depth, pv) = match info {
+            Some(i) => (i.score_cp, i.score_mate, i.depth, i.pv.clone()),
+            None => (None, None, None, Vec::new()),
         };
         self.moves.push(RecordedMove {
             csa_move: csa_move.to_string(),
             time_sec,
             eval_cp,
+            eval_mate,
             depth,
             pv,
         });
@@ -102,8 +115,8 @@ impl GameRecord {
 
         for m in &self.moves {
             // floodgate 形式コメント（評価値 + PV）
-            if let Some(cp) = m.eval_cp {
-                write!(out, "'** {cp}").unwrap();
+            if let Some(score) = m.effective_score() {
+                write!(out, "'** {score}").unwrap();
                 if !m.pv.is_empty() {
                     let mut pv_pos = pos.clone();
                     for usi_mv in &m.pv {
@@ -139,8 +152,8 @@ impl GameRecord {
 
         for m in &self.moves {
             let sfen_before = pos.to_sfen();
-            if let Some(cp) = m.eval_cp {
-                writeln!(out, "{}\t{}\t{}", sfen_before, m.csa_move, cp).unwrap();
+            if let Some(score) = m.effective_score() {
+                writeln!(out, "{}\t{}\t{}", sfen_before, m.csa_move, score).unwrap();
             }
             if pos.apply_csa_move(&m.csa_move).is_err() {
                 break;

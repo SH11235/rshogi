@@ -115,7 +115,7 @@ pub fn run_game_session(
             let position_cmd = build_position_cmd(&initial_sfen, &usi_moves);
             let go_cmd = format!("go {}", clock.build_go_args(config.time.margin_msec));
 
-            let (result, info) = engine.go(&position_cmd, &go_cmd)?;
+            let (result, info) = engine.go(&position_cmd, &go_cmd, shutdown)?;
 
             if result.bestmove == "resign" {
                 conn.send_resign()?;
@@ -206,7 +206,7 @@ pub fn run_game_session(
                             record.add_move(&sm.mv, sm.time_sec, None);
 
                             // ponderhit → bestmove を待つ
-                            let (result, info) = engine.ponderhit()?;
+                            let (result, info) = engine.ponderhit(shutdown)?;
 
                             if result.bestmove == "resign" {
                                 conn.send_resign()?;
