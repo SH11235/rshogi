@@ -78,22 +78,20 @@ pub fn run_game_session(
 
     // 内部盤面の構築
     let mut pos = summary.position.clone();
+    let initial_sfen = pos.to_sfen();
     let mut usi_moves: Vec<String> = Vec::new();
     let mut clock = Clock::from_summary(&summary);
 
-    // 途中局面の手順を適用
+    // 途中局面の手順を適用（手番は初期局面の side_to_move から追跡）
+    let mut move_color = summary.position.side_to_move;
     for cm in &summary.initial_moves {
         let usi = csa_move_to_usi(&cm.mv, &pos)?;
         pos.apply_csa_move(&cm.mv)?;
         usi_moves.push(usi);
         if let Some(t) = cm.time_sec {
-            let move_color = if usi_moves.len() % 2 == 1 {
-                Color::Black
-            } else {
-                Color::White
-            };
             clock.consume(move_color, t);
         }
+        move_color = opposite(move_color);
     }
 
     // 棋譜記録
@@ -112,7 +110,7 @@ pub fn run_game_session(
     loop {
         if is_my_turn(pos.side_to_move) {
             // 自手番: 探索して指す
-            let position_cmd = build_position_cmd(&usi_moves);
+            let position_cmd = build_position_cmd(&initial_sfen, &usi_moves);
             let go_cmd = format!("go {}", clock.build_go_args(config.time.margin_msec));
 
             let (result, info) = engine.go(&position_cmd, &go_cmd)?;
@@ -152,7 +150,8 @@ pub fn run_game_session(
             if config.game.ponder
                 && let Some(ref ponder_mv) = result.ponder_move
             {
-                let ponder_pos_cmd = build_position_cmd_with_ponder(&usi_moves, ponder_mv);
+                let ponder_pos_cmd =
+                    build_position_cmd_with_ponder(&initial_sfen, &usi_moves, ponder_mv);
                 let ponder_go =
                     format!("go ponder {}", clock.build_go_args(config.time.margin_msec));
                 engine.go_ponder(&ponder_pos_cmd, &ponder_go)?;
@@ -231,8 +230,11 @@ pub fn run_game_session(
                             if config.game.ponder
                                 && let Some(ref ponder_mv) = result.ponder_move
                             {
-                                let ponder_pos_cmd =
-                                    build_position_cmd_with_ponder(&usi_moves, ponder_mv);
+                                let ponder_pos_cmd = build_position_cmd_with_ponder(
+                                    &initial_sfen,
+                                    &usi_moves,
+                                    ponder_mv,
+                                );
                                 let ponder_go = format!(
                                     "go ponder {}",
                                     clock.build_go_args(config.time.margin_msec)
@@ -333,19 +335,35 @@ fn gameover_str(result: &GameResult) -> String {
     }
 }
 
-fn build_position_cmd(usi_moves: &[String]) -> String {
-    if usi_moves.is_empty() {
+const HIRATE_SFEN: &str = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+
+fn build_position_cmd(initial_sfen: &str, usi_moves: &[String]) -> String {
+    let base = if initial_sfen == HIRATE_SFEN {
         "position startpos".to_string()
     } else {
-        format!("position startpos moves {}", usi_moves.join(" "))
+        format!("position sfen {initial_sfen}")
+    };
+    if usi_moves.is_empty() {
+        base
+    } else {
+        format!("{base} moves {}", usi_moves.join(" "))
     }
 }
 
-fn build_position_cmd_with_ponder(usi_moves: &[String], ponder_move: &str) -> String {
-    if usi_moves.is_empty() {
-        format!("position startpos moves {ponder_move}")
+fn build_position_cmd_with_ponder(
+    initial_sfen: &str,
+    usi_moves: &[String],
+    ponder_move: &str,
+) -> String {
+    let base = if initial_sfen == HIRATE_SFEN {
+        "position startpos".to_string()
     } else {
-        format!("position startpos moves {} {ponder_move}", usi_moves.join(" "))
+        format!("position sfen {initial_sfen}")
+    };
+    if usi_moves.is_empty() {
+        format!("{base} moves {ponder_move}")
+    } else {
+        format!("{base} moves {} {ponder_move}", usi_moves.join(" "))
     }
 }
 

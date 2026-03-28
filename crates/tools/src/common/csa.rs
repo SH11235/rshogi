@@ -301,6 +301,62 @@ impl Position {
         out
     }
 
+    /// CSA形式の盤面文字列を生成する（P1-P9 + P+/P- + 手番行）。
+    pub fn to_csa_board(&self) -> String {
+        let mut out = String::new();
+        // P1-P9
+        for y in 1..=9 {
+            write!(out, "P{y}").unwrap();
+            // CSA の P1 行は 9筋(左) → 1筋(右) の順。内部 x=1 が9筋。
+            for x in 1..=9 {
+                if let Some(pc) = self.board[y][x] {
+                    let side = match pc.color {
+                        Color::Black => '+',
+                        Color::White => '-',
+                    };
+                    let code = if pc.promoted {
+                        promoted_csa_code_static(pc.ty)
+                    } else {
+                        base_csa_code(pc.ty)
+                    };
+                    write!(out, "{side}{code}").unwrap();
+                } else {
+                    out.push_str(" * ");
+                }
+            }
+            out.push('\n');
+        }
+        // 持ち駒
+        let mut write_hand = |prefix: &str, h: &Hand| {
+            let pieces: &[(PieceType, u8)] = &[
+                (PieceType::Rook, h.r),
+                (PieceType::Bishop, h.b),
+                (PieceType::Gold, h.g),
+                (PieceType::Silver, h.s),
+                (PieceType::Knight, h.n),
+                (PieceType::Lance, h.l),
+                (PieceType::Pawn, h.p),
+            ];
+            let mut hand_str = String::new();
+            for &(pt, count) in pieces {
+                for _ in 0..count {
+                    write!(hand_str, "00{}", base_csa_code(pt)).unwrap();
+                }
+            }
+            if !hand_str.is_empty() {
+                writeln!(out, "{prefix}{hand_str}").unwrap();
+            }
+        };
+        write_hand("P+", &self.hand_b);
+        write_hand("P-", &self.hand_w);
+        // 手番
+        match self.side_to_move {
+            Color::Black => out.push('+'),
+            Color::White => out.push('-'),
+        }
+        out
+    }
+
     /// Apply a CSA move like "+7776FU" or "-0055KA".
     pub fn apply_csa_move(&mut self, mv: &str) -> Result<()> {
         anyhow::ensure!(mv.len() >= 7, "invalid CSA move format: {mv}");
@@ -811,6 +867,20 @@ fn promoted_csa_code(pt: PieceType) -> Result<&'static str> {
     }
 }
 
+/// Result を返さない版（盤面出力用。Gold/King は成れないため base code にフォールバック）
+fn promoted_csa_code_static(pt: PieceType) -> &'static str {
+    use PieceType::*;
+    match pt {
+        Pawn => "TO",
+        Lance => "NY",
+        Knight => "NK",
+        Silver => "NG",
+        Bishop => "UM",
+        Rook => "RY",
+        Gold | King => base_csa_code(pt),
+    }
+}
+
 /// `<player_id>:<rating>` 形式からレーティング値を抽出
 fn parse_rate_value(s: &str) -> Option<f64> {
     let val_str = s.rsplit(':').next()?;
@@ -1021,6 +1091,40 @@ P-00KA
         let (pos, _, _) = parse_csa(text).unwrap();
         let sfen = pos.to_sfen();
         assert_eq!(sfen, "lnsgkgsnl/9/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1");
+    }
+
+    #[test]
+    fn test_to_csa_board_roundtrip() {
+        // 平手初期局面 → to_csa_board → parse_csa → to_sfen で一致確認
+        let pos = initial_position();
+        let csa_board = pos.to_csa_board();
+        let (parsed, _, _) = parse_csa(&csa_board).unwrap();
+        assert_eq!(parsed.to_sfen(), pos.to_sfen());
+    }
+
+    #[test]
+    fn test_to_csa_board_with_hand() {
+        // 持ち駒ありの局面
+        let text = "\
+P1-KY-KE-GI-KI-OU-KI-GI-KE-KY
+P2 * -HI *  *  *  *  * -KA *
+P3-FU-FU-FU-FU-FU-FU-FU-FU-FU
+P4 *  *  *  *  *  *  *  *  *
+P5 *  *  *  *  *  *  *  *  *
+P6 *  *  *  *  *  *  *  *  *
+P7+FU+FU+FU+FU+FU+FU+FU+FU+FU
+P8 * +KA *  *  *  *  * +HI *
+P9+KY+KE+GI+KI+OU+KI+GI+KE+KY
+P+00FU00FU
+P-00KA
++
+";
+        let (pos, _, _) = parse_csa(text).unwrap();
+        let csa_board = pos.to_csa_board();
+        let (reparsed, _, _) = parse_csa(&csa_board).unwrap();
+        assert_eq!(reparsed.to_sfen(), pos.to_sfen());
+        assert_eq!(reparsed.hand_b.p, 2);
+        assert_eq!(reparsed.hand_w.b, 1);
     }
 
     #[test]

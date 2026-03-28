@@ -5,6 +5,8 @@ use std::fmt::Write as _;
 use anyhow::Result;
 use chrono::Local;
 
+use crate::common::csa::Position;
+
 use super::config::RecordConfig;
 use super::engine::SearchInfo;
 use super::protocol::GameSummary;
@@ -18,6 +20,8 @@ pub struct GameRecord {
     pub total_time_sec: u32,
     pub byoyomi_sec: u32,
     pub increment_sec: u32,
+    /// 対局開始時の局面
+    pub initial_position: Position,
     pub moves: Vec<RecordedMove>,
     pub result: String,
     pub start_time: chrono::DateTime<Local>,
@@ -41,6 +45,7 @@ impl GameRecord {
             total_time_sec: summary.total_time_sec,
             byoyomi_sec: summary.byoyomi_sec,
             increment_sec: summary.increment_sec,
+            initial_position: summary.position.clone(),
             moves: Vec::new(),
             result: String::new(),
             start_time: Local::now(),
@@ -88,8 +93,9 @@ impl GameRecord {
             self.byoyomi_sec
         )
         .unwrap();
-        writeln!(out, "PI").unwrap();
-        writeln!(out, "+").unwrap();
+        // 初期局面出力
+        write!(out, "{}", self.initial_position.to_csa_board()).unwrap();
+        writeln!(out).unwrap();
 
         for m in &self.moves {
             // 評価値コメント
@@ -114,8 +120,7 @@ impl GameRecord {
 
     /// SFEN局面列を生成する（学習データ用）
     pub fn to_sfen_lines(&self) -> Result<String> {
-        use crate::common::csa::initial_position;
-        let mut pos = initial_position();
+        let mut pos = self.initial_position.clone();
         let mut out = String::new();
 
         for m in &self.moves {

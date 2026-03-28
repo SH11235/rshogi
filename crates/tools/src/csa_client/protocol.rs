@@ -72,9 +72,10 @@ impl CsaConnection {
         .with_context(|| format!("CSAサーバー接続失敗: {addr}"))?;
 
         if tcp_keepalive {
-            // SO_KEEPALIVE を有効化
-            let _ = stream.set_nodelay(true);
+            set_tcp_keepalive(&stream)?;
         }
+        // Nagle 無効化（低遅延のため）
+        let _ = stream.set_nodelay(true);
         // 読み取りタイムアウト: keep-alive チェック用に30秒
         stream.set_read_timeout(Some(Duration::from_secs(30)))?;
 
@@ -410,4 +411,31 @@ fn parse_game_result(line: &str) -> GameResult {
     } else {
         GameResult::Censored
     }
+}
+
+/// TCP SO_KEEPALIVE を有効化する
+#[cfg(unix)]
+fn set_tcp_keepalive(stream: &TcpStream) -> Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let fd = stream.as_raw_fd();
+    let optval: libc::c_int = 1;
+    // SAFETY: fd は有効なソケット。optval は有効なポインタ。
+    let ret = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_KEEPALIVE,
+            &optval as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if ret != 0 {
+        log::warn!("SO_KEEPALIVE 設定失敗: {}", std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_tcp_keepalive(_stream: &TcpStream) -> Result<()> {
+    Ok(())
 }
