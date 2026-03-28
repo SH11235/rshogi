@@ -423,18 +423,7 @@ impl FeatureTransformerLayerStacks {
     /// weights と accumulation は 64 バイトアラインされている前提で aligned load/store を使用。
     #[inline]
     fn add_weights(&self, accumulation: &mut [i16; NNUE_PYTORCH_L1], index: usize) {
-        // オーバーフロー安全なオフセット計算
-        let Some(offset) = index.checked_mul(NNUE_PYTORCH_L1) else {
-            feature_index_oob(index, self.weights.len() / NNUE_PYTORCH_L1);
-        };
-        let Some(end) = offset.checked_add(NNUE_PYTORCH_L1) else {
-            feature_index_oob(index, self.weights.len() / NNUE_PYTORCH_L1);
-        };
-        if end > self.weights.len() {
-            feature_index_oob(index, self.weights.len() / NNUE_PYTORCH_L1);
-        }
-
-        let weights = &self.weights[offset..offset + NNUE_PYTORCH_L1];
+        let weights = self.weight_row(index);
 
         // AVX-512 BW: 512bit = 32 x i16, 1536/32 = 48 iterations
         #[cfg(all(
@@ -575,6 +564,10 @@ impl FeatureTransformerLayerStacks {
             (old_bp, new_bp)
         };
 
+        // dirty_num==1: 駒の移動（非捕獲）。打ち駒は old_bp==ZERO のためフォールバック。
+        // dirty_num==2: 駒を取る指し手のみ。全 BonaPiece は非 ZERO のはずだが、
+        //               ZERO チェックでフォールバックを保証する。
+        // dirty_num==0: パス手（盤面変化なし）。_ => false でフォールバック。
         match dirty_piece.dirty_num as usize {
             1 => {
                 let (old_bp, new_bp) = old_new(0);
@@ -631,7 +624,9 @@ impl FeatureTransformerLayerStacks {
         {
             // SAFETY:
             // - accumulation は Aligned<[i16; 1536]> 由来で 64 バイトアライン。
-            // - 各 weight row も 64 バイトアライン。
+            // - weight row: AlignedBox の先頭が 64 バイトアライン、各行は
+            //   NNUE_PYTORCH_L1(1536) × sizeof(i16)(2) = 3072 バイト = 64 × 48 なので
+            //   全行の先頭も 64 バイト境界に揃う。
             // - 1536 要素を 32 要素ずつ 48 回で完全に走査する。
             unsafe {
                 use std::arch::x86_64::*;
@@ -657,7 +652,7 @@ impl FeatureTransformerLayerStacks {
         ))]
         {
             // SAFETY:
-            // - accumulation / weight row はともに 32 バイトアライン。
+            // - accumulation / weight row はともに 32 バイトアライン（3072 = 32 × 96）。
             // - 1536 要素を 16 要素ずつ 96 回で完全に走査する。
             unsafe {
                 use std::arch::x86_64::*;
@@ -753,7 +748,10 @@ impl FeatureTransformerLayerStacks {
         ))]
         {
             // SAFETY:
-            // - accumulation / 4 本の weight row はすべて 64 バイトアライン。
+            // - accumulation は Aligned<[i16; 1536]> 由来で 64 バイトアライン。
+            // - weight row: AlignedBox の先頭が 64 バイトアライン、各行は
+            //   NNUE_PYTORCH_L1(1536) × sizeof(i16)(2) = 3072 バイト = 64 × 48 なので
+            //   全行の先頭も 64 バイト境界に揃う。
             // - 1536 要素を 32 要素ずつ 48 回で完全に走査する。
             unsafe {
                 use std::arch::x86_64::*;
@@ -786,7 +784,7 @@ impl FeatureTransformerLayerStacks {
         ))]
         {
             // SAFETY:
-            // - accumulation / 4 本の weight row は 32 バイトアライン。
+            // - accumulation / 4 本の weight row はともに 32 バイトアライン（3072 = 32 × 96）。
             // - 1536 要素を 16 要素ずつ 96 回で完全に走査する。
             unsafe {
                 use std::arch::x86_64::*;
@@ -896,18 +894,7 @@ impl FeatureTransformerLayerStacks {
     /// weights と accumulation は 64 バイトアラインされている前提で aligned load/store を使用。
     #[inline]
     fn sub_weights(&self, accumulation: &mut [i16; NNUE_PYTORCH_L1], index: usize) {
-        // オーバーフロー安全なオフセット計算
-        let Some(offset) = index.checked_mul(NNUE_PYTORCH_L1) else {
-            feature_index_oob(index, self.weights.len() / NNUE_PYTORCH_L1);
-        };
-        let Some(end) = offset.checked_add(NNUE_PYTORCH_L1) else {
-            feature_index_oob(index, self.weights.len() / NNUE_PYTORCH_L1);
-        };
-        if end > self.weights.len() {
-            feature_index_oob(index, self.weights.len() / NNUE_PYTORCH_L1);
-        }
-
-        let weights = &self.weights[offset..offset + NNUE_PYTORCH_L1];
+        let weights = self.weight_row(index);
 
         // AVX-512 BW: 512bit = 32 x i16, 1536/32 = 48 iterations
         #[cfg(all(
@@ -1146,6 +1133,106 @@ mod tests {
         let mut fast = Aligned([7i16; NNUE_PYTORCH_L1]);
         apply_generic(&ft, &mut generic.0, &dirty_piece, Color::Black, king_sq);
         assert!(ft.try_apply_dirty_piece_fast(&mut fast.0, &dirty_piece, Color::Black, king_sq));
+        assert_eq!(generic.0, fast.0);
+    }
+
+    #[test]
+    fn test_try_apply_dirty_piece_fast_matches_generic_single_move_white() {
+        // 後手視点: fw / king_sq.inverse() の分岐をカバー
+        let king_sq = Square::new(File::File5, Rank::Rank1);
+        let mut ft = make_test_transformer();
+        let mut dirty_piece = DirtyPiece::new();
+        dirty_piece.dirty_num = 1;
+        dirty_piece.piece_no[0] = PieceNumber(0);
+        dirty_piece.changed_piece[0] = ChangedBonaPiece {
+            old_piece: ExtBonaPiece::from_board(
+                Piece::W_PAWN,
+                Square::new(File::File3, Rank::Rank3),
+            ),
+            new_piece: ExtBonaPiece::from_board(
+                Piece::W_PAWN,
+                Square::new(File::File3, Rank::Rank4),
+            ),
+        };
+
+        let old_index = feature_index_from_bona_piece(
+            dirty_piece.changed_piece[0].old_piece.fw,
+            Color::White,
+            king_sq,
+        );
+        let new_index = feature_index_from_bona_piece(
+            dirty_piece.changed_piece[0].new_piece.fw,
+            Color::White,
+            king_sq,
+        );
+        fill_weight_row(&mut ft, old_index, 19);
+        fill_weight_row(&mut ft, new_index, 53);
+
+        let mut generic = Aligned([5i16; NNUE_PYTORCH_L1]);
+        let mut fast = Aligned([5i16; NNUE_PYTORCH_L1]);
+        apply_generic(&ft, &mut generic.0, &dirty_piece, Color::White, king_sq);
+        assert!(ft.try_apply_dirty_piece_fast(&mut fast.0, &dirty_piece, Color::White, king_sq));
+        assert_eq!(generic.0, fast.0);
+    }
+
+    #[test]
+    fn test_try_apply_dirty_piece_fast_matches_generic_capture_white() {
+        // 後手視点: dirty_num==2 の fw 分岐をカバー
+        // 後手の角が先手の歩を取る想定
+        let king_sq = Square::new(File::File5, Rank::Rank1);
+        let mut ft = make_test_transformer();
+        let mut dirty_piece = DirtyPiece::new();
+        dirty_piece.dirty_num = 2;
+        dirty_piece.piece_no[0] = PieceNumber(0);
+        dirty_piece.changed_piece[0] = ChangedBonaPiece {
+            old_piece: ExtBonaPiece::from_board(
+                Piece::W_BISHOP,
+                Square::new(File::File8, Rank::Rank2),
+            ),
+            new_piece: ExtBonaPiece::from_board(
+                Piece::W_BISHOP,
+                Square::new(File::File3, Rank::Rank7),
+            ),
+        };
+        dirty_piece.piece_no[1] = PieceNumber(1);
+        dirty_piece.changed_piece[1] = ChangedBonaPiece {
+            old_piece: ExtBonaPiece::from_board(
+                Piece::B_PAWN,
+                Square::new(File::File3, Rank::Rank7),
+            ),
+            new_piece: ExtBonaPiece::from_hand(Color::White, PieceType::Pawn, 1),
+        };
+
+        let indices = [
+            feature_index_from_bona_piece(
+                dirty_piece.changed_piece[0].old_piece.fw,
+                Color::White,
+                king_sq,
+            ),
+            feature_index_from_bona_piece(
+                dirty_piece.changed_piece[0].new_piece.fw,
+                Color::White,
+                king_sq,
+            ),
+            feature_index_from_bona_piece(
+                dirty_piece.changed_piece[1].old_piece.fw,
+                Color::White,
+                king_sq,
+            ),
+            feature_index_from_bona_piece(
+                dirty_piece.changed_piece[1].new_piece.fw,
+                Color::White,
+                king_sq,
+            ),
+        ];
+        for (seed, &index) in [17i16, 31, 47, 67].iter().zip(indices.iter()) {
+            fill_weight_row(&mut ft, index, *seed);
+        }
+
+        let mut generic = Aligned([7i16; NNUE_PYTORCH_L1]);
+        let mut fast = Aligned([7i16; NNUE_PYTORCH_L1]);
+        apply_generic(&ft, &mut generic.0, &dirty_piece, Color::White, king_sq);
+        assert!(ft.try_apply_dirty_piece_fast(&mut fast.0, &dirty_piece, Color::White, king_sq));
         assert_eq!(generic.0, fast.0);
     }
 
