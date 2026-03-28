@@ -301,6 +301,62 @@ impl Position {
         out
     }
 
+    /// CSA形式の盤面文字列を生成する（P1-P9 + P+/P- + 手番行）。
+    pub fn to_csa_board(&self) -> String {
+        let mut out = String::new();
+        // P1-P9
+        for y in 1..=9 {
+            write!(out, "P{y}").unwrap();
+            // CSA の P1 行は 9筋(左) → 1筋(右) の順。内部 x=1 が9筋。
+            for x in 1..=9 {
+                if let Some(pc) = self.board[y][x] {
+                    let side = match pc.color {
+                        Color::Black => '+',
+                        Color::White => '-',
+                    };
+                    let code = if pc.promoted {
+                        promoted_csa_code_static(pc.ty)
+                    } else {
+                        base_csa_code(pc.ty)
+                    };
+                    write!(out, "{side}{code}").unwrap();
+                } else {
+                    out.push_str(" * ");
+                }
+            }
+            out.push('\n');
+        }
+        // 持ち駒
+        let mut write_hand = |prefix: &str, h: &Hand| {
+            let pieces: &[(PieceType, u8)] = &[
+                (PieceType::Rook, h.r),
+                (PieceType::Bishop, h.b),
+                (PieceType::Gold, h.g),
+                (PieceType::Silver, h.s),
+                (PieceType::Knight, h.n),
+                (PieceType::Lance, h.l),
+                (PieceType::Pawn, h.p),
+            ];
+            let mut hand_str = String::new();
+            for &(pt, count) in pieces {
+                for _ in 0..count {
+                    write!(hand_str, "00{}", base_csa_code(pt)).unwrap();
+                }
+            }
+            if !hand_str.is_empty() {
+                writeln!(out, "{prefix}{hand_str}").unwrap();
+            }
+        };
+        write_hand("P+", &self.hand_b);
+        write_hand("P-", &self.hand_w);
+        // 手番
+        match self.side_to_move {
+            Color::Black => out.push('+'),
+            Color::White => out.push('-'),
+        }
+        out
+    }
+
     /// Apply a CSA move like "+7776FU" or "-0055KA".
     pub fn apply_csa_move(&mut self, mv: &str) -> Result<()> {
         anyhow::ensure!(mv.len() >= 7, "invalid CSA move format: {mv}");
@@ -362,6 +418,40 @@ impl Position {
     }
 }
 
+/// P+/P- 行のペイロード（先頭 "P+" / "P-" を除いた部分）をパースする。
+/// `00FU` = 持ち駒追加、`76FU` = 盤上に駒配置。4文字ずつ消費。
+fn parse_hand_setup(pos: &mut Position, color: Color, payload: &str) -> Result<()> {
+    let bytes = payload.as_bytes();
+    anyhow::ensure!(
+        bytes.len().is_multiple_of(4),
+        "P+/P- payload length must be multiple of 4: {payload}"
+    );
+    let mut i = 0;
+    while i + 4 <= bytes.len() {
+        let file = bytes[i] - b'0';
+        let rank = bytes[i + 1] - b'0';
+        let code = std::str::from_utf8(&bytes[i + 2..i + 4])
+            .with_context(|| format!("invalid UTF-8 in P+/P- payload: {payload}"))?;
+        let (pt, promoted) = piece_from_csa_code(code)?;
+        if file == 0 && rank == 0 {
+            // 持ち駒追加
+            anyhow::ensure!(!promoted, "promoted piece in hand: {payload}");
+            let hand = match color {
+                Color::Black => &mut pos.hand_b,
+                Color::White => &mut pos.hand_w,
+            };
+            hand.add_demoted(pt);
+        } else {
+            // 盤上配置
+            let x = csa_file_to_x(file)?;
+            let y = csa_rank_to_y(rank)?;
+            pos.board[y][x] = Some(Piece::new(pt, color, promoted));
+        }
+        i += 4;
+    }
+    Ok(())
+}
+
 fn csa_file_to_x(file: u8) -> Result<usize> {
     anyhow::ensure!((1..=9).contains(&file), "bad CSA file: {file}");
     Ok((10 - file) as usize)
@@ -402,6 +492,36 @@ fn append_hand(out: &mut String, h: Hand, black: bool) {
     }
 }
 
+/// CSAの指し手と消費時間
+#[derive(Clone, Debug, PartialEq)]
+pub struct CsaMove {
+    /// CSA形式の指し手文字列 (例: "+7776FU")
+    pub mv: String,
+    /// 消費時間（秒）。`,T30` のように指し手行に含まれる場合に Some
+    pub time_sec: Option<u32>,
+}
+
+/// CSA特殊手
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SpecialMove {
+    Resign,      // %TORYO
+    Win,         // %KACHI (入玉宣言勝ち)
+    Draw,        // %HIKIWAKE
+    Sennichite,  // %SENNICHITE
+    Interrupt,   // %CHUDAN
+    TimeUp,      // %TIME_UP
+    IllegalMove, // %ILLEGAL_MOVE
+    Jishogi,     // %JISHOGI
+    MaxMoves,    // %MAX_MOVES
+}
+
+/// パース結果の指し手（通常手 or 特殊手）
+#[derive(Clone, Debug, PartialEq)]
+pub enum ParsedMove {
+    Normal(CsaMove),
+    Special(SpecialMove),
+}
+
 /// CSA棋譜から抽出した対局メタデータ
 #[derive(Clone, Debug, Default)]
 pub struct GameInfo {
@@ -423,6 +543,19 @@ impl GameInfo {
 
 /// Parse a CSA text and return initial position, list of move tokens, and game metadata.
 pub fn parse_csa(text: &str) -> Result<(Position, Vec<String>, GameInfo)> {
+    let (pos, moves, info) = parse_csa_full(text)?;
+    let simple_moves = moves
+        .into_iter()
+        .filter_map(|m| match m {
+            ParsedMove::Normal(cm) => Some(cm.mv),
+            ParsedMove::Special(_) => None,
+        })
+        .collect();
+    Ok((pos, simple_moves, info))
+}
+
+/// CSA棋譜を完全パース。指し手は消費時間・特殊手を含む `ParsedMove` で返す。
+pub fn parse_csa_full(text: &str) -> Result<(Position, Vec<ParsedMove>, GameInfo)> {
     let mut pos = None;
     let mut moves = Vec::new();
     let mut info = GameInfo::default();
@@ -430,7 +563,24 @@ pub fn parse_csa(text: &str) -> Result<(Position, Vec<String>, GameInfo)> {
     for line in text.lines() {
         let raw = line.trim_end_matches('\r');
         let s = raw.trim();
-        if s.is_empty() || s.starts_with('%') || s.starts_with('V') || s.starts_with('T') {
+        if s.is_empty() || s.starts_with('V') {
+            continue;
+        }
+        // 消費時間行（独立した T 行）: 直前の指し手に付与
+        if s.starts_with('T') && s.len() >= 2 && s.as_bytes()[1].is_ascii_digit() {
+            if let Some(ParsedMove::Normal(last)) = moves.last_mut()
+                && last.time_sec.is_none()
+                && let Ok(sec) = s[1..].parse::<u32>()
+            {
+                last.time_sec = Some(sec);
+            }
+            continue;
+        }
+        // 特殊手 (%TORYO 等)
+        if s.starts_with('%') {
+            if let Some(sp) = parse_special_move(s) {
+                moves.push(ParsedMove::Special(sp));
+            }
             continue;
         }
         // Player names
@@ -462,13 +612,17 @@ pub fn parse_csa(text: &str) -> Result<(Position, Vec<String>, GameInfo)> {
         if s.starts_with('\'') || s.starts_with('$') {
             continue;
         }
-        if s == "PI" {
-            pos = Some(initial_position());
+        if let Some(removal) = s.strip_prefix("PI") {
+            if removal.is_empty() {
+                pos = Some(initial_position());
+            } else {
+                // PI + 駒除去形式: PI82HI22KA ...
+                let mut p = initial_position();
+                parse_pi_removal(&mut p, removal)?;
+                pos = Some(p);
+            }
             explicit_board = false;
             continue;
-        }
-        if s.starts_with("PI") {
-            bail!("unsupported CSA initial position shorthand: {s}");
         }
         if s.starts_with('P') && s.len() >= 2 && s.as_bytes()[1].is_ascii_digit() {
             let pos_ref = if explicit_board {
@@ -486,17 +640,245 @@ pub fn parse_csa(text: &str) -> Result<(Position, Vec<String>, GameInfo)> {
             continue;
         }
         if s.starts_with("P+") || s.starts_with("P-") {
-            bail!("unsupported CSA hand/setup line: {s}");
+            let color = if s.starts_with("P+") {
+                Color::Black
+            } else {
+                Color::White
+            };
+            let pos_ref = pos.get_or_insert_with(Position::default);
+            parse_hand_setup(pos_ref, color, &s[2..])?;
+            continue;
         }
         if s.starts_with('+') || s.starts_with('-') {
             if s.len() >= 7 {
-                moves.push(s[..7].to_string());
+                let mv = s[..7].to_string();
+                // インライン消費時間: +7776FU,T30
+                let time_sec = s
+                    .get(7..)
+                    .and_then(|rest| rest.strip_prefix(",T").and_then(|t| t.parse::<u32>().ok()));
+                moves.push(ParsedMove::Normal(CsaMove { mv, time_sec }));
             }
             continue;
         }
     }
     let pos = pos.unwrap_or_else(initial_position);
     Ok((pos, moves, info))
+}
+
+fn parse_special_move(s: &str) -> Option<SpecialMove> {
+    // `%+ILLEGAL_ACTION` / `%-ILLEGAL_ACTION` のような手番付き形式も考慮
+    let cmd = s.trim_start_matches('%').trim_start_matches(['+', '-']);
+    match cmd {
+        "TORYO" => Some(SpecialMove::Resign),
+        "KACHI" => Some(SpecialMove::Win),
+        "HIKIWAKE" => Some(SpecialMove::Draw),
+        "SENNICHITE" => Some(SpecialMove::Sennichite),
+        "CHUDAN" => Some(SpecialMove::Interrupt),
+        "TIME_UP" => Some(SpecialMove::TimeUp),
+        "ILLEGAL_MOVE" | "ILLEGAL_ACTION" => Some(SpecialMove::IllegalMove),
+        "JISHOGI" => Some(SpecialMove::Jishogi),
+        "MAX_MOVES" => Some(SpecialMove::MaxMoves),
+        _ => None,
+    }
+}
+
+/// PI行の駒除去部分をパース。4文字ずつ `<筋><段><駒名>` を消費して平手配置から除去する。
+fn parse_pi_removal(pos: &mut Position, payload: &str) -> Result<()> {
+    let bytes = payload.as_bytes();
+    anyhow::ensure!(
+        bytes.len().is_multiple_of(4),
+        "PI removal payload length must be multiple of 4: {payload}"
+    );
+    let mut i = 0;
+    while i + 4 <= bytes.len() {
+        let file = bytes[i] - b'0';
+        let rank = bytes[i + 1] - b'0';
+        let x = csa_file_to_x(file)?;
+        let y = csa_rank_to_y(rank)?;
+        // 対象マスの駒を除去
+        anyhow::ensure!(pos.board[y][x].is_some(), "PI removal: no piece at {}{}", file, rank);
+        pos.board[y][x] = None;
+        i += 4;
+    }
+    Ok(())
+}
+
+// ────────────────────────────────────────────
+// CSA ⇔ USI 手変換
+// ────────────────────────────────────────────
+
+/// CSA段番号(1-9) → USIアルファベット(a-i)
+fn rank_to_usi(rank: u8) -> char {
+    (b'a' + rank - 1) as char
+}
+
+/// USIアルファベット(a-i) → CSA段番号(1-9)
+fn usi_rank_to_num(c: u8) -> Result<u8> {
+    anyhow::ensure!((b'a'..=b'i').contains(&c), "invalid USI rank char: {}", c as char);
+    Ok(c - b'a' + 1)
+}
+
+/// CSA形式の駒種 → USI駒打ち文字（大文字）
+fn piece_type_to_usi_drop(pt: PieceType) -> Result<char> {
+    use PieceType::*;
+    match pt {
+        Pawn => Ok('P'),
+        Lance => Ok('L'),
+        Knight => Ok('N'),
+        Silver => Ok('S'),
+        Gold => Ok('G'),
+        Bishop => Ok('B'),
+        Rook => Ok('R'),
+        King => bail!("cannot drop king"),
+    }
+}
+
+/// USI駒打ち文字（大文字）→ CSA駒種コード
+fn usi_drop_to_csa_code(c: u8) -> Result<&'static str> {
+    match c {
+        b'P' => Ok("FU"),
+        b'L' => Ok("KY"),
+        b'N' => Ok("KE"),
+        b'S' => Ok("GI"),
+        b'G' => Ok("KI"),
+        b'B' => Ok("KA"),
+        b'R' => Ok("HI"),
+        _ => bail!("invalid USI drop piece: {}", c as char),
+    }
+}
+
+/// CSA指し手 → USI指し手に変換。
+///
+/// 例: `+7776FU` → `7g7f`, `+0076FU` → `P*7f`, `+8822UM` → `8h2b+`
+///
+/// `pos` は変換前の局面（成り判定に使用）。この関数は局面を変更しない。
+pub fn csa_move_to_usi(mv: &str, pos: &Position) -> Result<String> {
+    anyhow::ensure!(mv.len() >= 7, "invalid CSA move: {mv}");
+    let bytes = mv.as_bytes();
+    let fx = bytes[1] - b'0';
+    let fy = bytes[2] - b'0';
+    let tx = bytes[3] - b'0';
+    let ty = bytes[4] - b'0';
+    let code = &mv[5..7];
+    let (dst_pt, dst_promoted) = piece_from_csa_code(code)?;
+
+    let mut out = String::with_capacity(5);
+    if fx == 0 && fy == 0 {
+        // 駒打ち: P*7f
+        let drop_char = piece_type_to_usi_drop(dst_pt)?;
+        out.push(drop_char);
+        out.push('*');
+    } else {
+        // 通常手: 7g7f
+        out.push((b'0' + fx) as char);
+        out.push(rank_to_usi(fy));
+    }
+    out.push((b'0' + tx) as char);
+    out.push(rank_to_usi(ty));
+
+    // 成り判定: 移動元の駒が未成りで、移動先の駒が成り駒なら成り
+    if fx != 0 && fy != 0 && dst_promoted {
+        let src_x = csa_file_to_x(fx)?;
+        let src_y = csa_rank_to_y(fy)?;
+        if let Some(src_piece) = pos.board[src_y][src_x] {
+            if !src_piece.promoted {
+                out.push('+');
+            }
+        } else {
+            // 移動元に駒がない場合でもCSA指し手が成り駒を指定していれば成り
+            out.push('+');
+        }
+    }
+    Ok(out)
+}
+
+/// USI指し手 → CSA指し手に変換。
+///
+/// 例: `7g7f` → `+7776FU`, `P*7f` → `+0076FU`, `8h2b+` → `+8822UM`
+///
+/// `pos` は変換前の局面（駒種解決・手番判定に使用）。この関数は局面を変更しない。
+pub fn usi_move_to_csa(mv: &str, pos: &Position) -> Result<String> {
+    let bytes = mv.as_bytes();
+    anyhow::ensure!(bytes.len() >= 4, "invalid USI move: {mv}");
+
+    let side_char = match pos.side_to_move {
+        Color::Black => '+',
+        Color::White => '-',
+    };
+
+    let mut out = String::with_capacity(7);
+    out.push(side_char);
+
+    if bytes.len() >= 4 && bytes[1] == b'*' {
+        // 駒打ち: P*7f → +0076FU
+        let csa_code = usi_drop_to_csa_code(bytes[0])?;
+        let to_file = bytes[2] - b'0';
+        let to_rank = usi_rank_to_num(bytes[3])?;
+        write!(out, "00{}{}{}", to_file, to_rank, csa_code).unwrap();
+    } else {
+        // 通常手: 7g7f → +7776FU
+        let from_file = bytes[0] - b'0';
+        let from_rank = usi_rank_to_num(bytes[1])?;
+        let to_file = bytes[2] - b'0';
+        let to_rank = usi_rank_to_num(bytes[3])?;
+        let promote = bytes.len() >= 5 && bytes[4] == b'+';
+
+        // 移動元の駒種を盤面から取得
+        let src_x = csa_file_to_x(from_file)?;
+        let src_y = csa_rank_to_y(from_rank)?;
+        let src_piece = pos.board[src_y][src_x]
+            .with_context(|| format!("no piece at source for USI move: {mv}"))?;
+
+        let csa_code = if promote || src_piece.promoted {
+            promoted_csa_code(src_piece.ty)?
+        } else {
+            base_csa_code(src_piece.ty)
+        };
+
+        write!(out, "{}{}{}{}{}", from_file, from_rank, to_file, to_rank, csa_code).unwrap();
+    }
+    Ok(out)
+}
+
+fn base_csa_code(pt: PieceType) -> &'static str {
+    use PieceType::*;
+    match pt {
+        Pawn => "FU",
+        Lance => "KY",
+        Knight => "KE",
+        Silver => "GI",
+        Gold => "KI",
+        Bishop => "KA",
+        Rook => "HI",
+        King => "OU",
+    }
+}
+
+fn promoted_csa_code(pt: PieceType) -> Result<&'static str> {
+    use PieceType::*;
+    match pt {
+        Pawn => Ok("TO"),
+        Lance => Ok("NY"),
+        Knight => Ok("NK"),
+        Silver => Ok("NG"),
+        Bishop => Ok("UM"),
+        Rook => Ok("RY"),
+        _ => bail!("piece {:?} cannot promote", pt),
+    }
+}
+
+/// Result を返さない版（盤面出力用。Gold/King は成れないため base code にフォールバック）
+fn promoted_csa_code_static(pt: PieceType) -> &'static str {
+    use PieceType::*;
+    match pt {
+        Pawn => "TO",
+        Lance => "NY",
+        Knight => "NK",
+        Silver => "NG",
+        Bishop => "UM",
+        Rook => "RY",
+        Gold | King => base_csa_code(pt),
+    }
 }
 
 /// `<player_id>:<rating>` 形式からレーティング値を抽出
@@ -630,12 +1012,182 @@ P9+KY+KE+GI+KI+OU+KI+GI+KE+KY
     }
 
     #[test]
-    fn test_parse_csa_rejects_unsupported_pplus_setup() {
+    fn test_parse_hand_setup() {
+        // P+ で先手持ち駒（歩2枚・金1枚）と盤上配置を同時に設定
         let text = "\
-V2
-P+00HI
+P1-KY-KE-GI-KI-OU-KI-GI-KE-KY
+P2 * -HI *  *  *  *  * -KA *
+P3-FU-FU-FU-FU-FU-FU-FU-FU-FU
+P4 *  *  *  *  *  *  *  *  *
+P5 *  *  *  *  *  *  *  *  *
+P6 *  *  *  *  *  *  *  *  *
+P7+FU+FU+FU+FU+FU+FU+FU+FU+FU
+P8 * +KA *  *  *  *  * +HI *
+P9+KY+KE+GI+KI+OU+KI+GI+KE+KY
+P+00FU00FU00KI
+P-00KA
++
 ";
-        let err = parse_csa(text).expect_err("P+ setup line is unsupported");
-        assert!(err.to_string().contains("unsupported CSA hand/setup line"));
+        let (pos, _, _) = parse_csa(text).unwrap();
+        assert_eq!(pos.hand_b.p, 2);
+        assert_eq!(pos.hand_b.g, 1);
+        assert_eq!(pos.hand_w.b, 1);
+        assert_eq!(pos.side_to_move, Color::Black);
+    }
+
+    #[test]
+    fn test_parse_time_inline() {
+        let text = "PI\n+7776FU,T5\n-3334FU,T10\n%TORYO\n";
+        let (_, moves, _) = parse_csa_full(text).unwrap();
+        assert_eq!(moves.len(), 3);
+        match &moves[0] {
+            ParsedMove::Normal(cm) => {
+                assert_eq!(cm.mv, "+7776FU");
+                assert_eq!(cm.time_sec, Some(5));
+            }
+            _ => panic!("expected normal move"),
+        }
+        match &moves[1] {
+            ParsedMove::Normal(cm) => {
+                assert_eq!(cm.mv, "-3334FU");
+                assert_eq!(cm.time_sec, Some(10));
+            }
+            _ => panic!("expected normal move"),
+        }
+        assert_eq!(moves[2], ParsedMove::Special(SpecialMove::Resign));
+    }
+
+    #[test]
+    fn test_parse_time_standalone_t_line() {
+        let text = "PI\n+7776FU\nT5\n-3334FU\nT10\n";
+        let (_, moves, _) = parse_csa_full(text).unwrap();
+        assert_eq!(moves.len(), 2);
+        match &moves[0] {
+            ParsedMove::Normal(cm) => {
+                assert_eq!(cm.time_sec, Some(5));
+            }
+            _ => panic!("expected normal move"),
+        }
+        match &moves[1] {
+            ParsedMove::Normal(cm) => {
+                assert_eq!(cm.time_sec, Some(10));
+            }
+            _ => panic!("expected normal move"),
+        }
+    }
+
+    #[test]
+    fn test_parse_special_moves() {
+        let text = "PI\n+7776FU\n%KACHI\n";
+        let (_, moves, _) = parse_csa_full(text).unwrap();
+        assert_eq!(moves.len(), 2);
+        assert_eq!(moves[1], ParsedMove::Special(SpecialMove::Win));
+    }
+
+    #[test]
+    fn test_parse_pi_removal() {
+        // 二枚落ち: 8二飛・2二角を除去
+        let text = "PI82HI22KA\n+\n";
+        let (pos, _, _) = parse_csa(text).unwrap();
+        let sfen = pos.to_sfen();
+        assert_eq!(sfen, "lnsgkgsnl/9/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1");
+    }
+
+    #[test]
+    fn test_to_csa_board_roundtrip() {
+        // 平手初期局面 → to_csa_board → parse_csa → to_sfen で一致確認
+        let pos = initial_position();
+        let csa_board = pos.to_csa_board();
+        let (parsed, _, _) = parse_csa(&csa_board).unwrap();
+        assert_eq!(parsed.to_sfen(), pos.to_sfen());
+    }
+
+    #[test]
+    fn test_to_csa_board_with_hand() {
+        // 持ち駒ありの局面
+        let text = "\
+P1-KY-KE-GI-KI-OU-KI-GI-KE-KY
+P2 * -HI *  *  *  *  * -KA *
+P3-FU-FU-FU-FU-FU-FU-FU-FU-FU
+P4 *  *  *  *  *  *  *  *  *
+P5 *  *  *  *  *  *  *  *  *
+P6 *  *  *  *  *  *  *  *  *
+P7+FU+FU+FU+FU+FU+FU+FU+FU+FU
+P8 * +KA *  *  *  *  * +HI *
+P9+KY+KE+GI+KI+OU+KI+GI+KE+KY
+P+00FU00FU
+P-00KA
++
+";
+        let (pos, _, _) = parse_csa(text).unwrap();
+        let csa_board = pos.to_csa_board();
+        let (reparsed, _, _) = parse_csa(&csa_board).unwrap();
+        assert_eq!(reparsed.to_sfen(), pos.to_sfen());
+        assert_eq!(reparsed.hand_b.p, 2);
+        assert_eq!(reparsed.hand_w.b, 1);
+    }
+
+    #[test]
+    fn test_csa_to_usi_normal() {
+        let pos = initial_position();
+        assert_eq!(csa_move_to_usi("+7776FU", &pos).unwrap(), "7g7f");
+        assert_eq!(csa_move_to_usi("-3334FU", &pos).unwrap(), "3c3d");
+    }
+
+    #[test]
+    fn test_csa_to_usi_promote() {
+        let pos = initial_position();
+        // 8八角 → 2二角成
+        assert_eq!(csa_move_to_usi("+8822UM", &pos).unwrap(), "8h2b+");
+    }
+
+    #[test]
+    fn test_csa_to_usi_drop() {
+        let pos = initial_position();
+        assert_eq!(csa_move_to_usi("+0055FU", &pos).unwrap(), "P*5e");
+    }
+
+    #[test]
+    fn test_usi_to_csa_normal() {
+        let pos = initial_position();
+        assert_eq!(usi_move_to_csa("7g7f", &pos).unwrap(), "+7776FU");
+    }
+
+    #[test]
+    fn test_usi_to_csa_promote() {
+        let pos = initial_position();
+        assert_eq!(usi_move_to_csa("8h2b+", &pos).unwrap(), "+8822UM");
+    }
+
+    #[test]
+    fn test_usi_to_csa_drop() {
+        // 先手持ち駒ありの局面を作る
+        let text = "P+55OU\nP-51OU\nP+00FU\n+\n";
+        let (pos, _, _) = parse_csa(text).unwrap();
+        assert_eq!(usi_move_to_csa("P*7f", &pos).unwrap(), "+0076FU");
+    }
+
+    #[test]
+    fn test_csa_usi_roundtrip() {
+        let pos = initial_position();
+        // 通常手のラウンドトリップ
+        let csa = "+7776FU";
+        let usi = csa_move_to_usi(csa, &pos).unwrap();
+        let back = usi_move_to_csa(&usi, &pos).unwrap();
+        assert_eq!(back, csa);
+    }
+
+    #[test]
+    fn test_parse_hand_setup_board_placement() {
+        // P+ で盤上に駒を配置
+        let text = "\
+P+55OU
+P-51OU
++
+";
+        let (pos, _, _) = parse_csa(text).unwrap();
+        let x5 = csa_file_to_x(5).unwrap();
+        assert_eq!(pos.board[5][x5], Some(Piece::new(PieceType::King, Color::Black, false)));
+        assert_eq!(pos.board[1][x5], Some(Piece::new(PieceType::King, Color::White, false)));
     }
 }
