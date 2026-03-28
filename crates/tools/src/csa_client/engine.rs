@@ -291,11 +291,12 @@ fn update_search_info(info: &mut SearchInfo, line: &str) {
                             tokens.next();
                         }
                     } else if kind == "mate"
-                        && let Some(v) = tokens.peek().and_then(|s| s.parse().ok()) {
-                            info.score_mate = Some(v);
-                            info.score_cp = None;
-                            tokens.next();
-                        }
+                        && let Some(v) = tokens.peek().and_then(|s| s.parse().ok())
+                    {
+                        info.score_mate = Some(v);
+                        info.score_cp = None;
+                        tokens.next();
+                    }
                 }
             }
             "pv" => {

@@ -20,7 +20,6 @@ pub struct CsaClientConfig {
     pub log: LogConfig,
 }
 
-
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {

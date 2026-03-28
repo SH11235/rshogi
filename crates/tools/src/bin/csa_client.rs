@@ -280,9 +280,10 @@ fn apply_env_overrides(config: &mut CsaClientConfig) {
         config.server.host = v;
     }
     if let Ok(v) = std::env::var("CSA_PORT")
-        && let Ok(p) = v.parse() {
-            config.server.port = p;
-        }
+        && let Ok(p) = v.parse()
+    {
+        config.server.port = p;
+    }
     if let Ok(v) = std::env::var("CSA_ID") {
         config.server.id = v;
     }

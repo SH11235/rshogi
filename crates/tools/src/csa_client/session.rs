@@ -150,15 +150,16 @@ pub fn run_game_session(
 
             // ponder 開始
             if config.game.ponder
-                && let Some(ref ponder_mv) = result.ponder_move {
-                    let ponder_pos_cmd = build_position_cmd_with_ponder(&usi_moves, ponder_mv);
-                    let ponder_go =
-                        format!("go ponder {}", clock.build_go_args(config.time.margin_msec));
-                    engine.go_ponder(&ponder_pos_cmd, &ponder_go)?;
-                    ponder_state = Some(PonderState {
-                        expected_usi: ponder_mv.clone(),
-                    });
-                }
+                && let Some(ref ponder_mv) = result.ponder_move
+            {
+                let ponder_pos_cmd = build_position_cmd_with_ponder(&usi_moves, ponder_mv);
+                let ponder_go =
+                    format!("go ponder {}", clock.build_go_args(config.time.margin_msec));
+                engine.go_ponder(&ponder_pos_cmd, &ponder_go)?;
+                ponder_state = Some(PonderState {
+                    expected_usi: ponder_mv.clone(),
+                });
+            }
 
             // サーバーからのエコー（自分の手）を受信
             loop {
@@ -228,18 +229,19 @@ pub fn run_game_session(
 
                             // 次の ponder
                             if config.game.ponder
-                                && let Some(ref ponder_mv) = result.ponder_move {
-                                    let ponder_pos_cmd =
-                                        build_position_cmd_with_ponder(&usi_moves, ponder_mv);
-                                    let ponder_go = format!(
-                                        "go ponder {}",
-                                        clock.build_go_args(config.time.margin_msec)
-                                    );
-                                    engine.go_ponder(&ponder_pos_cmd, &ponder_go)?;
-                                    ponder_state = Some(PonderState {
-                                        expected_usi: ponder_mv.clone(),
-                                    });
-                                }
+                                && let Some(ref ponder_mv) = result.ponder_move
+                            {
+                                let ponder_pos_cmd =
+                                    build_position_cmd_with_ponder(&usi_moves, ponder_mv);
+                                let ponder_go = format!(
+                                    "go ponder {}",
+                                    clock.build_go_args(config.time.margin_msec)
+                                );
+                                engine.go_ponder(&ponder_pos_cmd, &ponder_go)?;
+                                ponder_state = Some(PonderState {
+                                    expected_usi: ponder_mv.clone(),
+                                });
+                            }
 
                             // 自手エコーを受信
                             loop {
