@@ -1445,6 +1445,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rshogi-bitboard-kernel"
+version = "0.1.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "rshogi-core"
 version = "0.2.3"
 dependencies = [
@@ -1455,6 +1462,7 @@ dependencies = [
  "rand",
  "rand_xoshiro",
  "rayon",
+ "rshogi-bitboard-kernel",
  "serde",
  "web-time",
  "windows-sys 0.60.2",

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/rshogi-bitboard-kernel",
     "crates/rshogi-core",
     "crates/rshogi-usi",
     "crates/tools",

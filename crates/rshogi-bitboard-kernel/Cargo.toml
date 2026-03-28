@@ -1,0 +1,10 @@
+[package]
+name = "rshogi-bitboard-kernel"
+version = "0.1.0"
+edition = "2021"
+description = "SSE2-only bitboard kernels for rshogi (AVX disabled to avoid register spill)"
+
+[dependencies]
+
+[build-dependencies]
+cc = "1.0"

@@ -508,27 +508,65 @@ impl Position {
     /// 個別の king_effect / horse近接 / dragon近接 を不要にする。
     /// また rook_effect を再利用して lance_effect の個別スライド計算を省略。
     pub fn attackers_to_occ(&self, sq: Square, occupied: Bitboard) -> Bitboard {
-        let silver_hdk = self.pieces_pt(PieceType::Silver) | self.hdk_bb;
-        let golds_hdk = self.golds_bb | self.hdk_bb;
+        // 近接駒部分を SSE2-only kernel で計算（AVX レジスタ spill を回避）
+        #[cfg(target_arch = "x86_64")]
+        let near = {
+            use crate::bitboard::{GOLD_EFFECT, KNIGHT_EFFECT, PAWN_EFFECT, SILVER_EFFECT};
+            use rshogi_bitboard_kernel::{BB128, NearCtx};
 
-        // 先手の攻め駒: 後手方向の effect で逆引き → pieces_c(Black) でフィルタ
-        let black_attackers = ((pawn_effect(Color::White, sq) & self.pieces_pt(PieceType::Pawn))
-            | (knight_effect(Color::White, sq) & self.pieces_pt(PieceType::Knight))
-            | (silver_effect(Color::White, sq) & silver_hdk)
-            | (gold_effect(Color::White, sq) & golds_hdk))
-            & self.pieces_c(Color::Black);
+            // SAFETY:
+            // - Bitboard と BB128 は同一レイアウト (#[repr(C, align(16))], [u64; 2])
+            // - lookup table は pub static で常に有効、16 バイトアライン済み
+            // - Position フィールドは &self 経由で借用中、16 バイトアライン済み
+            // - kernel は SSE2 の pand/por/movdqa のみ使用し、値の不変条件を破壊しない
+            // - sq.index() は 0..80 の範囲（Square の不変条件）
+            let near_bb: BB128 = unsafe {
+                let ctx = NearCtx {
+                    pawn_effect: PAWN_EFFECT.as_ptr() as *const BB128,
+                    knight_effect: KNIGHT_EFFECT.as_ptr() as *const BB128,
+                    silver_effect: SILVER_EFFECT.as_ptr() as *const BB128,
+                    gold_effect: GOLD_EFFECT.as_ptr() as *const BB128,
+                    by_type: self.by_type.as_ptr() as *const BB128,
+                    by_color: self.by_color.as_ptr() as *const BB128,
+                    golds_bb: &self.golds_bb as *const Bitboard as *const BB128,
+                    hdk_bb: &self.hdk_bb as *const Bitboard as *const BB128,
+                };
+                let mut out = BB128 { p: [0, 0] };
+                rshogi_bitboard_kernel::attackers_near_pieces_sse2(
+                    &ctx,
+                    sq.index() as u8,
+                    &mut out,
+                );
+                out
+            };
+            Bitboard::from_u64_pair(near_bb.p[0], near_bb.p[1])
+        };
 
-        // 後手の攻め駒: 先手方向の effect で逆引き → pieces_c(White) でフィルタ
-        let white_attackers = ((pawn_effect(Color::Black, sq) & self.pieces_pt(PieceType::Pawn))
-            | (knight_effect(Color::Black, sq) & self.pieces_pt(PieceType::Knight))
-            | (silver_effect(Color::Black, sq) & silver_hdk)
-            | (gold_effect(Color::Black, sq) & golds_hdk))
-            & self.pieces_c(Color::White);
+        #[cfg(not(target_arch = "x86_64"))]
+        let near = {
+            let silver_hdk = self.pieces_pt(PieceType::Silver) | self.hdk_bb;
+            let golds_hdk = self.golds_bb | self.hdk_bb;
 
-        // 角・馬のスライド利き
+            let black_attackers = ((pawn_effect(Color::White, sq)
+                & self.pieces_pt(PieceType::Pawn))
+                | (knight_effect(Color::White, sq) & self.pieces_pt(PieceType::Knight))
+                | (silver_effect(Color::White, sq) & silver_hdk)
+                | (gold_effect(Color::White, sq) & golds_hdk))
+                & self.pieces_c(Color::Black);
+
+            let white_attackers = ((pawn_effect(Color::Black, sq)
+                & self.pieces_pt(PieceType::Pawn))
+                | (knight_effect(Color::Black, sq) & self.pieces_pt(PieceType::Knight))
+                | (silver_effect(Color::Black, sq) & silver_hdk)
+                | (gold_effect(Color::Black, sq) & golds_hdk))
+                & self.pieces_c(Color::White);
+
+            black_attackers | white_attackers
+        };
+
+        // スライダー部分（Qugiy アルゴリズムは複雑なため現状維持）
         let bishop = bishop_effect(sq, occupied) & self.bishop_horse_bb;
 
-        // 飛・龍 + 香: rookEffect を再利用して lance_effect の個別計算を省略
         let rook_eff = rook_effect(sq, occupied);
         let rook_lance = rook_eff
             & (self.rook_dragon_bb
@@ -537,7 +575,7 @@ impl Position {
                 | (lance_step_effect(Color::Black, sq)
                     & self.pieces(Color::White, PieceType::Lance)));
 
-        black_attackers | white_attackers | bishop | rook_lance
+        near | bishop | rook_lance
     }
 
     /// 指定マスに利いている指定手番の駒
