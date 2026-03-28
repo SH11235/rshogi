@@ -92,7 +92,12 @@ impl<const N: usize> IndexList<N> {
             debug_assert!(false, "IndexList overflow: capacity={N}, len={pos}");
             return false;
         }
-        // SAFETY: pos < N なので範囲内。MaybeUninit への書き込みは常に安全
+        // SAFETY: pos < N なので範囲内。MaybeUninit への書き込みは常に安全。
+        // feature index は最大でも 138,509 (HalfKA) で u32 の範囲内。
+        debug_assert!(
+            index <= u32::MAX as usize,
+            "IndexList::push: index {index} exceeds u32::MAX"
+        );
         self.indices[pos].write(index as u32);
         self.len += 1;
         true
