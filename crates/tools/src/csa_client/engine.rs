@@ -10,6 +10,8 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 
+use super::event::Event;
+
 const READY_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// USIエンジンプロセス
@@ -27,6 +29,14 @@ pub struct UsiEngine {
 pub struct BestMoveResult {
     pub bestmove: String,
     pub ponder_move: Option<String>,
+}
+
+/// 探索の終了理由
+pub enum SearchOutcome {
+    /// エンジンが bestmove を返した
+    BestMove(BestMoveResult, SearchInfo),
+    /// サーバーから終局通知が来たため探索を中断した
+    ServerInterrupt(Vec<String>),
 }
 
 /// info 行から抽出した探索情報
@@ -170,16 +180,17 @@ impl UsiEngine {
     }
 
     /// 探索を開始し、bestmove を待つ。
-    /// `shutdown` がセットされたら stop を送信し、bestmove を "resign" として返す。
+    /// サーバーから終局通知が来た場合は探索を中断して `ServerInterrupt` を返す。
     pub fn go(
         &mut self,
         position_cmd: &str,
         go_cmd: &str,
         shutdown: &AtomicBool,
-    ) -> Result<(BestMoveResult, SearchInfo)> {
+        server_rx: &Receiver<Event>,
+    ) -> Result<SearchOutcome> {
         self.send(position_cmd)?;
         self.send(go_cmd)?;
-        self.wait_bestmove(shutdown)
+        self.wait_bestmove(shutdown, server_rx)
     }
 
     /// ponder 探索を開始（bestmove を待たない）
@@ -190,10 +201,14 @@ impl UsiEngine {
     }
 
     /// ponderhit を送信し、bestmove を待つ。
-    /// `shutdown` がセットされたら stop を送信し、bestmove を "resign" として返す。
-    pub fn ponderhit(&mut self, shutdown: &AtomicBool) -> Result<(BestMoveResult, SearchInfo)> {
+    /// サーバーから終局通知が来た場合は探索を中断して `ServerInterrupt` を返す。
+    pub fn ponderhit(
+        &mut self,
+        shutdown: &AtomicBool,
+        server_rx: &Receiver<Event>,
+    ) -> Result<SearchOutcome> {
         self.send("ponderhit")?;
-        self.wait_bestmove(shutdown)
+        self.wait_bestmove(shutdown, server_rx)
     }
 
     /// stop を送信し、bestmove を待つ（ponder 中断用）。
@@ -239,7 +254,11 @@ impl UsiEngine {
         }
     }
 
-    fn wait_bestmove(&mut self, shutdown: &AtomicBool) -> Result<(BestMoveResult, SearchInfo)> {
+    fn wait_bestmove(
+        &mut self,
+        shutdown: &AtomicBool,
+        server_rx: &Receiver<Event>,
+    ) -> Result<SearchOutcome> {
         use std::time::Instant;
 
         const OVERALL_TIMEOUT: Duration = Duration::from_secs(3600);
@@ -249,9 +268,11 @@ impl UsiEngine {
         let mut stop_sent = false;
         let start = Instant::now();
         let mut stop_sent_at: Option<Instant> = None;
+        // サーバーから受信した行をバッファ（終局検出時に呼び出し元へ返す）
+        let mut server_lines: Vec<String> = Vec::new();
 
         loop {
-            // 全体タイムアウト: 通常時1時間、stop送信後10秒
+            // 全体タイムアウト
             let elapsed = start.elapsed();
             if let Some(st) = stop_sent_at {
                 if st.elapsed() >= POST_STOP_TIMEOUT {
@@ -267,6 +288,50 @@ impl UsiEngine {
                 stop_sent_at = Some(Instant::now());
             }
 
+            // サーバーイベントをチェック（ノンブロッキング）
+            while let Ok(event) = server_rx.try_recv() {
+                match event {
+                    Event::ServerLine(ref line) => {
+                        server_lines.push(line.clone());
+                        // 最終結果行 (#WIN/#LOSE/#DRAW 等) を検出したら探索中断
+                        if line.starts_with('#')
+                            && (line.contains("#WIN")
+                                || line.contains("#LOSE")
+                                || line.contains("#DRAW")
+                                || line.contains("#CHUDAN")
+                                || line.contains("#CENSORED"))
+                        {
+                            log::info!("[USI] サーバー終局検出、探索中断: {line}");
+                            if !stop_sent {
+                                let _ = self.send("stop");
+                            }
+                            // bestmove を読み捨てる
+                            while let Ok(eline) = self.rx.recv_timeout(Duration::from_secs(5)) {
+                                if eline.starts_with("bestmove") {
+                                    break;
+                                }
+                            }
+                            return Ok(SearchOutcome::ServerInterrupt(server_lines));
+                        }
+                    }
+                    Event::ServerDisconnected => {
+                        log::warn!("[USI] サーバー切断検出、探索中断");
+                        if !stop_sent {
+                            let _ = self.send("stop");
+                        }
+                        while let Ok(eline) = self.rx.recv_timeout(Duration::from_secs(5)) {
+                            if eline.starts_with("bestmove") {
+                                break;
+                            }
+                        }
+                        server_lines.push("#DISCONNECTED".to_string());
+                        return Ok(SearchOutcome::ServerInterrupt(server_lines));
+                    }
+                    _ => {} // EngineLine/EngineDisconnected はここでは来ない
+                }
+            }
+
+            // エンジンからの応答
             match self.rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(line) => {
                     log::trace!("[USI] < {line}");
@@ -277,7 +342,6 @@ impl UsiEngine {
                     if let Some(rest) = line.strip_prefix("bestmove ") {
                         let mut parts = rest.split_whitespace();
                         let bestmove = parts.next().unwrap_or("resign").to_string();
-                        // shutdown で stop を送った場合は bestmove を resign に差し替え
                         let bestmove = if stop_sent {
                             "resign".to_string()
                         } else {
@@ -288,7 +352,7 @@ impl UsiEngine {
                         } else {
                             None
                         };
-                        return Ok((
+                        return Ok(SearchOutcome::BestMove(
                             BestMoveResult {
                                 bestmove,
                                 ponder_move,
@@ -298,7 +362,6 @@ impl UsiEngine {
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    // shutdown が要求されたら stop を送信
                     if !stop_sent && shutdown.load(Ordering::SeqCst) {
                         log::info!("[USI] shutdown 要求により stop 送信");
                         self.send("stop")?;

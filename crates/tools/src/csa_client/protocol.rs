@@ -4,11 +4,14 @@
 
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::net::TcpStream;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
 use crate::common::csa::{Color, CsaMove, ParsedMove, Position, parse_csa_full};
+
+use super::event::Event;
 
 /// 先後共通または個別の時間設定
 #[derive(Clone, Debug, Default)]
@@ -62,13 +65,14 @@ pub enum GameResult {
 
 /// CSAプロトコルクライアント
 pub struct CsaConnection {
-    reader: BufReader<TcpStream>,
+    /// 対局開始前はブロッキング読み取りに使用。`start_reader_thread` 後は None。
+    reader: Option<BufReader<TcpStream>>,
     writer: BufWriter<TcpStream>,
     last_activity_time: Instant,
     /// パスワードマスク用
     password: String,
     /// 直前に受信した終局理由行（#TIME_UP 等）
-    pending_end_reason: Option<String>,
+    pub pending_end_reason: Option<String>,
 }
 
 impl CsaConnection {
@@ -120,7 +124,7 @@ impl CsaConnection {
         let writer = BufWriter::new(stream);
 
         Ok(Self {
-            reader,
+            reader: Some(reader),
             writer,
             last_activity_time: Instant::now(),
             password: String::new(),
@@ -419,7 +423,57 @@ impl CsaConnection {
         Ok(())
     }
 
-    /// ブロッキング読み取り（タイムアウト付き）
+    /// reader への可変参照を取得。start_reader_thread 後は使用不可。
+    fn reader_mut(&mut self) -> Result<&mut BufReader<TcpStream>> {
+        self.reader
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("reader は start_reader_thread で移動済み"))
+    }
+
+    /// サーバー受信を別スレッドに移し、共通チャネルに `Event::ServerLine` を送信する。
+    /// 対局開始後に呼ぶ。以降、`recv_move` / `recv_line_*` は使用不可。
+    pub fn start_reader_thread(&mut self, tx: mpsc::Sender<Event>) -> Result<()> {
+        let mut reader =
+            self.reader.take().ok_or_else(|| anyhow::anyhow!("reader は既に移動済み"))?;
+        // 読み取りタイムアウトを短くして keep-alive のタイミングを確保
+        reader.get_ref().set_read_timeout(Some(Duration::from_millis(500)))?;
+        std::thread::Builder::new()
+            .name("csa-server-reader".to_string())
+            .spawn(move || {
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) => {
+                            let _ = tx.send(Event::ServerDisconnected);
+                            break;
+                        }
+                        Ok(_) => {
+                            let trimmed = line.trim_end().to_string();
+                            if !trimmed.is_empty() {
+                                log::debug!("[CSA] < {trimmed}");
+                                if tx.send(Event::ServerLine(trimmed)).is_err() {
+                                    break;
+                                }
+                            }
+                            // 空行: keep-alive ping — チャネルには送らない
+                        }
+                        Err(ref e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                || e.kind() == std::io::ErrorKind::TimedOut =>
+                        {
+                            // タイムアウト: 正常、次のループへ
+                        }
+                        Err(_) => {
+                            let _ = tx.send(Event::ServerDisconnected);
+                            break;
+                        }
+                    }
+                }
+            })?;
+        Ok(())
+    }
+
+    /// ブロッキング読み取り（タイムアウト付き）。start_reader_thread 前のみ使用可。
     fn recv_line_blocking(&mut self, timeout: Duration) -> Result<String> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -428,11 +482,10 @@ impl CsaConnection {
             if remaining.is_zero() {
                 bail!("サーバー応答タイムアウト");
             }
-            self.reader
-                .get_ref()
-                .set_read_timeout(Some(remaining.min(Duration::from_secs(5))))?;
+            let reader = self.reader_mut()?;
+            reader.get_ref().set_read_timeout(Some(remaining.min(Duration::from_secs(5))))?;
             let mut line = String::new();
-            match self.reader.read_line(&mut line) {
+            match reader.read_line(&mut line) {
                 Ok(0) => bail!("サーバー切断"),
                 Ok(n) if n > 0 => {
                     // 空行でもデータ受信なので activity 更新（相手の blank ping 等）
@@ -455,11 +508,12 @@ impl CsaConnection {
         }
     }
 
-    /// ノンブロッキング読み取り。データがなければ Ok(None)
+    /// ノンブロッキング読み取り。データがなければ Ok(None)。start_reader_thread 前のみ。
     fn recv_line_nonblocking(&mut self) -> Result<Option<String>> {
-        self.reader.get_ref().set_read_timeout(Some(Duration::from_millis(100)))?;
+        let reader = self.reader_mut()?;
+        reader.get_ref().set_read_timeout(Some(Duration::from_millis(100)))?;
         let mut line = String::new();
-        match self.reader.read_line(&mut line) {
+        match reader.read_line(&mut line) {
             Ok(0) => bail!("サーバー切断"),
             Ok(_) => {
                 // 空行でもデータ受信なので activity 更新

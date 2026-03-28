@@ -1,9 +1,12 @@
 //! CSA対局セッション管理
 //!
 //! 1回の対局（ログイン〜対局〜終局）を管理する。
+//! サーバー受信スレッドとエンジン受信を共通チャネル経由で同時監視し、
+//! ponderhit 中にサーバーから終局通知が来ても即座に検出できる。
 
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -11,11 +14,15 @@ use anyhow::Result;
 use crate::common::csa::{Color, Position, csa_move_to_usi, usi_move_to_csa};
 
 use super::config::CsaClientConfig;
-use super::engine::{BestMoveResult, SearchInfo, UsiEngine};
-use super::protocol::{CsaConnection, GameResult, GameSummary, RecvEvent};
+use super::engine::{BestMoveResult, SearchInfo, SearchOutcome, UsiEngine};
+use super::event::Event;
+use super::protocol::{CsaConnection, GameResult};
 use super::record::GameRecord;
 
-/// 対局中の時間管理（先後別に byoyomi/increment を保持）
+// ────────────────────────────────────────────
+// Clock
+// ────────────────────────────────────────────
+
 struct Clock {
     black_time_ms: i64,
     white_time_ms: i64,
@@ -26,8 +33,7 @@ struct Clock {
 }
 
 impl Clock {
-    fn from_summary(summary: &GameSummary) -> Self {
-        // フィッシャー: 初期持ち時間に初回インクリメントを加算（shogihome 準拠）
+    fn from_summary(summary: &super::protocol::GameSummary) -> Self {
         Self {
             black_time_ms: summary.black_time.total_time_ms + summary.black_time.increment_ms,
             white_time_ms: summary.white_time.total_time_ms + summary.white_time.increment_ms,
@@ -61,7 +67,6 @@ impl Clock {
     fn build_go_args(&self, margin_msec: u64, side_to_move: Color) -> String {
         let btime = self.black_time_ms.max(0);
         let wtime = self.white_time_ms.max(0);
-
         if self.black_increment_ms > 0 || self.white_increment_ms > 0 {
             format!(
                 "btime {} wtime {} binc {} winc {}",
@@ -96,7 +101,6 @@ impl Clock {
                 (self.white_time_ms + my_inc - my_estimated_ms).max(0),
             ),
         };
-
         if self.black_increment_ms > 0 || self.white_increment_ms > 0 {
             format!(
                 "btime {} wtime {} binc {} winc {}",
@@ -120,13 +124,16 @@ impl Clock {
     }
 }
 
-/// 対局セッションの可変状態をまとめた構造体。
-/// ヘルパーメソッドへの引数を減らすために使用。
+// ────────────────────────────────────────────
+// SessionState
+// ────────────────────────────────────────────
+
 struct SessionState<'a> {
     conn: &'a mut CsaConnection,
     engine: &'a mut UsiEngine,
     config: &'a CsaClientConfig,
     shutdown: &'a AtomicBool,
+    server_rx: &'a Receiver<Event>,
     pos: Position,
     usi_moves: Vec<String>,
     clock: Clock,
@@ -136,44 +143,66 @@ struct SessionState<'a> {
     initial_sfen: String,
 }
 
+/// 探索結果の処理結果
+#[allow(clippy::large_enum_variant)]
+enum MoveAction {
+    /// 対局継続（外側ループへ）
+    Continue,
+    /// 対局終了
+    GameEnd(GameResult, GameRecord),
+}
+
 impl SessionState<'_> {
-    /// 探索結果の bestmove を送信し、エコーを待ち、ponder を開始する。
-    /// resign/win の場合は対局終了結果を返す。
+    /// SearchOutcome を処理する。BestMove なら送信+エコー待ち、ServerInterrupt なら終局。
+    fn handle_search_outcome(
+        &mut self,
+        outcome: SearchOutcome,
+        turn_start: Instant,
+    ) -> Result<MoveAction> {
+        match outcome {
+            SearchOutcome::BestMove(result, info) => {
+                self.send_bestmove_and_wait_echo(&result, &info, turn_start)
+            }
+            SearchOutcome::ServerInterrupt(lines) => {
+                // サーバーから終局が来た（ponderhit 中等）
+                let (game_result, reason) = parse_server_interrupt_lines(&lines);
+                log::info!("[CSA] サーバー終局割り込み: {:?}", game_result);
+                self.record.set_result(&record_result_with_reason(&game_result, &reason));
+                self.engine.gameover(&gameover_str(&game_result))?;
+                Ok(MoveAction::GameEnd(game_result, self.record.clone()))
+            }
+        }
+    }
+
     fn send_bestmove_and_wait_echo(
         &mut self,
         result: &BestMoveResult,
         info: &SearchInfo,
         turn_start: Instant,
-    ) -> Result<Option<(GameResult, GameRecord)>> {
-        // resign / win 判定
+    ) -> Result<MoveAction> {
         if result.bestmove == "resign" {
             self.conn.send_resign()?;
             self.record.set_result("resign");
-            let (game_result, _) = wait_game_end(self.conn)?;
+            let (game_result, _) = wait_game_end_from_rx(self.server_rx)?;
             self.engine.gameover(&gameover_str(&game_result))?;
-            return Ok(Some((game_result, self.record.clone())));
+            return Ok(MoveAction::GameEnd(game_result, self.record.clone()));
         }
         if result.bestmove == "win" {
             self.conn.send_win()?;
             self.record.set_result("win_declaration");
-            let (game_result, _) = wait_game_end(self.conn)?;
+            let (game_result, _) = wait_game_end_from_rx(self.server_rx)?;
             self.engine.gameover(&gameover_str(&game_result))?;
-            return Ok(Some((game_result, self.record.clone())));
+            return Ok(MoveAction::GameEnd(game_result, self.record.clone()));
         }
 
-        // USI手 → CSA手
         let csa_move = usi_move_to_csa(&result.bestmove, &self.pos)?;
-
-        // floodgate コメント
         let comment = if self.config.server.floodgate {
             Some(build_floodgate_comment(info, self.my_color, &self.pos, &result.bestmove))
         } else {
             None
         };
-
         self.conn.send_move_with_comment(&csa_move, comment.as_deref())?;
 
-        // 盤面更新
         self.pos.apply_csa_move(&csa_move)?;
         self.usi_moves.push(result.bestmove.clone());
         self.record.add_move(&csa_move, 0, Some(info), self.my_color);
@@ -190,7 +219,7 @@ impl SessionState<'_> {
                 self.clock.build_ponder_go_args(
                     self.config.time.margin_msec,
                     self.my_color,
-                    my_estimated_ms
+                    my_estimated_ms,
                 )
             );
             self.engine.go_ponder(&ponder_pos_cmd, &ponder_go)?;
@@ -199,40 +228,62 @@ impl SessionState<'_> {
             });
         }
 
-        // サーバーからのエコー（自分の手）を受信
+        // サーバーエコー待ち（server_rx から受信）
         loop {
-            match self.conn.recv_move()? {
-                Some(RecvEvent::Move(sm)) => {
-                    self.clock.consume(self.my_color, sm.time_sec);
-                    self.record.update_last_time(sm.time_sec);
-                    return Ok(None); // 正常: 外側ループへ戻る
+            match self.server_rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(Event::ServerLine(line)) => {
+                    if line.starts_with('+') || line.starts_with('-') {
+                        let (_, time_sec) = parse_server_move(&line);
+                        self.clock.consume(self.my_color, time_sec);
+                        self.record.update_last_time(time_sec);
+                        return Ok(MoveAction::Continue);
+                    }
+                    if line.starts_with('#') {
+                        if let Some(game_result) = parse_game_result_final(&line) {
+                            log::info!("[CSA] 対局終了(エコー待ち中): {line}");
+                            cleanup_ponder(self.engine, &mut self.ponder_state)?;
+                            let reason = self.conn.pending_end_reason.take();
+                            self.record
+                                .set_result(&record_result_with_reason(&game_result, &reason));
+                            self.engine.gameover(&gameover_str(&game_result))?;
+                            return Ok(MoveAction::GameEnd(game_result, self.record.clone()));
+                        }
+                        // 中間行
+                        self.conn.pending_end_reason = Some(line);
+                    }
                 }
-                Some(RecvEvent::GameEnd(result, msg, reason)) => {
-                    log::info!("[CSA] 対局終了(エコー待ち中): {msg}");
+                Ok(Event::ServerDisconnected) => {
                     cleanup_ponder(self.engine, &mut self.ponder_state)?;
-                    self.record.set_result(&record_result_with_reason(&result, &reason));
-                    self.engine.gameover(&gameover_str(&result))?;
-                    return Ok(Some((result, self.record.clone())));
+                    self.engine.gameover("lose")?;
+                    return Ok(MoveAction::GameEnd(GameResult::Interrupted, self.record.clone()));
                 }
-                None => {
+                Err(mpsc::RecvTimeoutError::Timeout) => {
                     self.conn
                         .maybe_send_keepalive(self.config.server.keepalive.ping_interval_sec)?;
                     if self.shutdown.load(Ordering::SeqCst) {
-                        let result = resign_and_wait(
+                        let result = resign_and_wait_rx(
                             self.conn,
                             self.engine,
                             &mut self.ponder_state,
                             &mut self.record,
+                            self.server_rx,
                         )?;
-                        return Ok(Some((result, self.record.clone())));
+                        return Ok(MoveAction::GameEnd(result, self.record.clone()));
                     }
                 }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    anyhow::bail!("サーバー受信チャネル切断");
+                }
+                _ => {}
             }
         }
     }
 }
 
-/// 1回の対局セッションを実行する
+// ────────────────────────────────────────────
+// run_game_session
+// ────────────────────────────────────────────
+
 pub fn run_game_session(
     conn: &mut CsaConnection,
     engine: &mut UsiEngine,
@@ -242,6 +293,10 @@ pub fn run_game_session(
     let summary = conn.recv_game_summary(config.server.keepalive.ping_interval_sec)?;
     conn.agree_and_wait_start(&summary.game_id)?;
     engine.new_game()?;
+
+    // サーバー受信スレッドを起動
+    let (server_tx, server_rx) = mpsc::channel();
+    conn.start_reader_thread(server_tx)?;
 
     let mut s = SessionState {
         pos: summary.position.clone(),
@@ -255,6 +310,7 @@ pub fn run_game_session(
         engine,
         config,
         shutdown,
+        server_rx: &server_rx,
     };
 
     // 途中局面の手順を適用
@@ -273,84 +329,113 @@ pub fn run_game_session(
     // 対局メインループ
     loop {
         if s.pos.side_to_move == s.my_color {
-            // 自手番: 探索して指す
             let turn_start = Instant::now();
             let position_cmd = build_position_cmd(&s.initial_sfen, &s.usi_moves);
             let go_cmd =
                 format!("go {}", s.clock.build_go_args(s.config.time.margin_msec, s.my_color));
-            let (result, info) = s.engine.go(&position_cmd, &go_cmd, s.shutdown)?;
+            let outcome = s.engine.go(&position_cmd, &go_cmd, s.shutdown, s.server_rx)?;
 
-            if let Some(end) = s.send_bestmove_and_wait_echo(&result, &info, turn_start)? {
-                return Ok(end);
+            match s.handle_search_outcome(outcome, turn_start)? {
+                MoveAction::Continue => {}
+                MoveAction::GameEnd(result, record) => return Ok((result, record)),
             }
         }
 
-        // 相手の手番: サーバーから指し手を待つ
+        // 相手の手番: server_rx から指し手を待つ
         loop {
-            match s.conn.recv_move()? {
-                Some(RecvEvent::Move(sm)) => {
-                    if let Some(ps) = s.ponder_state.take() {
-                        let opponent_usi = csa_move_to_usi(&sm.mv, &s.pos)?;
-                        if opponent_usi == ps.expected_usi {
-                            // ponderhit
-                            log::debug!("[PONDER] ponderhit: {}", opponent_usi);
-                            s.pos.apply_csa_move(&sm.mv)?;
-                            s.usi_moves.push(opponent_usi);
-                            s.clock.consume(opposite(s.my_color), sm.time_sec);
-                            s.record.add_move(&sm.mv, sm.time_sec, None, opposite(s.my_color));
+            match s.server_rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(Event::ServerLine(line)) => {
+                    // 指し手
+                    if line.starts_with('+') || line.starts_with('-') {
+                        let (mv, time_sec) = parse_server_move(&line);
 
-                            let ponderhit_start = Instant::now();
-                            let (result, info) = s.engine.ponderhit(s.shutdown)?;
+                        if let Some(ps) = s.ponder_state.take() {
+                            let opponent_usi = csa_move_to_usi(&mv, &s.pos)?;
+                            if opponent_usi == ps.expected_usi {
+                                // ponderhit
+                                log::debug!("[PONDER] ponderhit: {}", opponent_usi);
+                                s.pos.apply_csa_move(&mv)?;
+                                s.usi_moves.push(opponent_usi);
+                                s.clock.consume(opposite(s.my_color), time_sec);
+                                s.record.add_move(&mv, time_sec, None, opposite(s.my_color));
 
-                            if let Some(end) =
-                                s.send_bestmove_and_wait_echo(&result, &info, ponderhit_start)?
-                            {
-                                return Ok(end);
+                                let ponderhit_start = Instant::now();
+                                let outcome = s.engine.ponderhit(s.shutdown, s.server_rx)?;
+
+                                match s.handle_search_outcome(outcome, ponderhit_start)? {
+                                    MoveAction::Continue => break,
+                                    MoveAction::GameEnd(result, record) => {
+                                        return Ok((result, record));
+                                    }
+                                }
+                            } else {
+                                // ponder 外れ
+                                log::debug!(
+                                    "[PONDER] miss: expected={} actual={}",
+                                    ps.expected_usi,
+                                    opponent_usi
+                                );
+                                s.engine.stop_and_wait()?;
+                                s.pos.apply_csa_move(&mv)?;
+                                s.usi_moves.push(opponent_usi);
+                                s.clock.consume(opposite(s.my_color), time_sec);
+                                s.record.add_move(&mv, time_sec, None, opposite(s.my_color));
+                                break;
                             }
-                            break; // 外側ループへ
                         } else {
-                            // ponder 外れ
-                            log::debug!(
-                                "[PONDER] miss: expected={} actual={}",
-                                ps.expected_usi,
-                                opponent_usi
-                            );
-                            s.engine.stop_and_wait()?;
-                            s.pos.apply_csa_move(&sm.mv)?;
+                            // ponder なし
+                            let opponent_usi = csa_move_to_usi(&mv, &s.pos)?;
+                            s.pos.apply_csa_move(&mv)?;
                             s.usi_moves.push(opponent_usi);
-                            s.clock.consume(opposite(s.my_color), sm.time_sec);
-                            s.record.add_move(&sm.mv, sm.time_sec, None, opposite(s.my_color));
+                            s.clock.consume(opposite(s.my_color), time_sec);
+                            s.record.add_move(&mv, time_sec, None, opposite(s.my_color));
                             break;
                         }
-                    } else {
-                        // ponder なし
-                        let opponent_usi = csa_move_to_usi(&sm.mv, &s.pos)?;
-                        s.pos.apply_csa_move(&sm.mv)?;
-                        s.usi_moves.push(opponent_usi);
-                        s.clock.consume(opposite(s.my_color), sm.time_sec);
-                        s.record.add_move(&sm.mv, sm.time_sec, None, opposite(s.my_color));
-                        break;
+                    }
+                    // 終局
+                    if line.starts_with('#') {
+                        if let Some(game_result) = parse_game_result_final(&line) {
+                            log::info!("[CSA] 対局終了: {line}");
+                            cleanup_ponder(s.engine, &mut s.ponder_state)?;
+                            let reason = s.conn.pending_end_reason.take();
+                            s.record.set_result(&record_result_with_reason(&game_result, &reason));
+                            s.engine.gameover(&gameover_str(&game_result))?;
+                            return Ok((game_result, s.record));
+                        }
+                        // 中間行
+                        s.conn.pending_end_reason = Some(line);
                     }
                 }
-                Some(RecvEvent::GameEnd(result, msg, reason)) => {
-                    log::info!("[CSA] 対局終了: {msg}");
+                Ok(Event::ServerDisconnected) => {
                     cleanup_ponder(s.engine, &mut s.ponder_state)?;
-                    s.record.set_result(&record_result_with_reason(&result, &reason));
-                    s.engine.gameover(&gameover_str(&result))?;
-                    return Ok((result, s.record));
+                    s.engine.gameover("lose")?;
+                    return Ok((GameResult::Interrupted, s.record));
                 }
-                None => {
+                Err(mpsc::RecvTimeoutError::Timeout) => {
                     s.conn.maybe_send_keepalive(s.config.server.keepalive.ping_interval_sec)?;
                     if s.shutdown.load(Ordering::SeqCst) {
-                        let result =
-                            resign_and_wait(s.conn, s.engine, &mut s.ponder_state, &mut s.record)?;
+                        let result = resign_and_wait_rx(
+                            s.conn,
+                            s.engine,
+                            &mut s.ponder_state,
+                            &mut s.record,
+                            s.server_rx,
+                        )?;
                         return Ok((result, s.record));
                     }
                 }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    anyhow::bail!("サーバー受信チャネル切断");
+                }
+                _ => {}
             }
         }
     }
 }
+
+// ────────────────────────────────────────────
+// ヘルパー関数
+// ────────────────────────────────────────────
 
 struct PonderState {
     expected_usi: String,
@@ -363,19 +448,69 @@ fn cleanup_ponder(engine: &mut UsiEngine, ponder_state: &mut Option<PonderState>
     Ok(())
 }
 
-fn resign_and_wait(
+fn resign_and_wait_rx(
     conn: &mut CsaConnection,
     engine: &mut UsiEngine,
     ponder_state: &mut Option<PonderState>,
     record: &mut GameRecord,
+    server_rx: &Receiver<Event>,
 ) -> Result<GameResult> {
     log::info!("シャットダウン: 投了して終了します...");
     cleanup_ponder(engine, ponder_state)?;
     conn.send_resign()?;
     record.set_result("resign");
-    let (result, _) = wait_game_end(conn)?;
+    let (result, _) = wait_game_end_from_rx(server_rx)?;
     engine.gameover(&gameover_str(&result))?;
     Ok(result)
+}
+
+/// server_rx から終局結果を待つ
+fn wait_game_end_from_rx(server_rx: &Receiver<Event>) -> Result<(GameResult, Option<String>)> {
+    let start = Instant::now();
+    const TIMEOUT: Duration = Duration::from_secs(30);
+    let mut pending_reason: Option<String> = None;
+    loop {
+        if start.elapsed() >= TIMEOUT {
+            log::warn!("[CSA] 終局結果の受信タイムアウト ({}秒)", TIMEOUT.as_secs());
+            return Ok((GameResult::Interrupted, None));
+        }
+        match server_rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(Event::ServerLine(line)) => {
+                if line.starts_with('#') {
+                    if let Some(result) = parse_game_result_final(&line) {
+                        log::info!("[CSA] 対局終了: {line}");
+                        return Ok((result, pending_reason));
+                    }
+                    pending_reason = Some(line);
+                }
+                // 指し手等は無視
+            }
+            Ok(Event::ServerDisconnected) => {
+                return Ok((GameResult::Interrupted, None));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Ok((GameResult::Interrupted, None));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// ServerInterrupt の行バッファから GameResult と理由を抽出
+fn parse_server_interrupt_lines(lines: &[String]) -> (GameResult, Option<String>) {
+    let mut reason = None;
+    let mut result = GameResult::Interrupted;
+    for line in lines {
+        if line.starts_with('#') {
+            if let Some(r) = parse_game_result_final(line) {
+                result = r;
+            } else {
+                reason = Some(line.clone());
+            }
+        }
+    }
+    (result, reason)
 }
 
 fn opposite(color: Color) -> Color {
@@ -418,6 +553,40 @@ fn record_result_with_reason(result: &GameResult, reason: &Option<String>) -> St
         GameResult::Draw => "sennichite".to_string(),
         GameResult::Interrupted => "interrupted".to_string(),
         GameResult::Censored => "interrupted".to_string(),
+    }
+}
+
+/// 最終結果行のみ Some を返す
+fn parse_game_result_final(line: &str) -> Option<GameResult> {
+    if line.contains("#WIN") {
+        Some(GameResult::Win)
+    } else if line.contains("#LOSE") {
+        Some(GameResult::Lose)
+    } else if line.contains("#DRAW") {
+        Some(GameResult::Draw)
+    } else if line.contains("#CHUDAN") {
+        Some(GameResult::Interrupted)
+    } else if line.contains("#CENSORED") {
+        Some(GameResult::Censored)
+    } else {
+        None
+    }
+}
+
+fn parse_server_move(line: &str) -> (String, u32) {
+    if let Some(comma_pos) = line.find(",T") {
+        let mv_end = comma_pos.min(line.len());
+        let mv = if mv_end >= 7 {
+            line[..7].to_string()
+        } else {
+            line[..mv_end].to_string()
+        };
+        let time_sec = line[comma_pos + 2..].parse::<u32>().unwrap_or(0);
+        (mv, time_sec)
+    } else if line.len() >= 7 {
+        (line[..7].to_string(), 0)
+    } else {
+        (line.to_string(), 0)
     }
 }
 
@@ -475,7 +644,6 @@ fn build_floodgate_comment(
     };
 
     let mut comment = format!("'* {score}");
-
     if !info.pv.is_empty() {
         let mut pv_pos = pos.clone();
         let pv_start = if info.pv.first().map(|s| s.as_str()) == Some(last_bestmove) {
@@ -495,23 +663,4 @@ fn build_floodgate_comment(
         }
     }
     comment
-}
-
-fn wait_game_end(conn: &mut CsaConnection) -> Result<(GameResult, Option<String>)> {
-    let start = Instant::now();
-    const TIMEOUT: Duration = Duration::from_secs(30);
-    loop {
-        if start.elapsed() >= TIMEOUT {
-            log::warn!("[CSA] 終局結果の受信タイムアウト ({}秒)", TIMEOUT.as_secs());
-            return Ok((GameResult::Interrupted, None));
-        }
-        match conn.recv_move()? {
-            Some(RecvEvent::GameEnd(result, msg, reason)) => {
-                log::info!("[CSA] 対局終了: {msg}");
-                return Ok((result, reason));
-            }
-            Some(RecvEvent::Move(_)) => {}
-            None => {}
-        }
-    }
 }
