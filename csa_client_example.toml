@@ -1,0 +1,49 @@
+# CSA対局クライアント設定例
+# 使い方: cargo run -p tools --bin csa_client --release -- csa_client_example.toml
+
+[server]
+host = "wdoor.c.u-tokyo.ac.jp"
+port = 4081
+id = "rshogi_v1"
+password = "your_password_here"
+floodgate = true
+
+[server.keepalive]
+tcp = true
+ping_interval_sec = 60
+
+[engine]
+path = "./target/release/rshogi-usi"
+startup_timeout_sec = 30
+
+[engine.options]
+USI_Hash = 1024
+Threads = 4
+# USI_Ponder は [game] の ponder=true で自動設定されます
+# その他のエンジン固有オプション:
+# EvalFile = "/path/to/nn.bin"
+# BookFile = "no_book"
+
+[time]
+margin_msec = 2500
+
+[game]
+max_games = 0              # 0 = 無制限
+restart_engine_every_game = false
+ponder = true
+
+[retry]
+initial_delay_sec = 10
+max_delay_sec = 900
+
+[record]
+enabled = true
+dir = "./records"
+filename_template = "{datetime}_{sente}_vs_{gote}"
+save_csa = true
+save_sfen = true
+
+[log]
+level = "info"
+dir = "./logs"
+stdout = true
