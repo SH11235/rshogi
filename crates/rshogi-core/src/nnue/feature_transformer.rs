@@ -70,7 +70,7 @@ impl FeatureTransformer {
 
                 // アクティブな特徴量の重みを加算
                 let active_indices = self.get_active_features(pos, perspective);
-                for &index in active_indices.iter() {
+                for index in active_indices.iter() {
                     self.add_weights(accumulation, index);
                 }
             }
@@ -108,7 +108,7 @@ impl FeatureTransformer {
 
                     // アクティブな特徴量の重みを加算
                     let active_indices = self.get_active_features(pos, perspective);
-                    for &index in active_indices.iter() {
+                    for index in active_indices.iter() {
                         self.add_weights(accumulation, index);
                     }
                 } else {
@@ -129,12 +129,12 @@ impl FeatureTransformer {
                     curr.copy_from_slice(prev);
 
                     // 削除された特徴量の重みを減算
-                    for &index in removed.iter() {
+                    for index in removed.iter() {
                         self.sub_weights(curr, index);
                     }
 
                     // 追加された特徴量の重みを加算
-                    for &index in added.iter() {
+                    for index in added.iter() {
                         self.add_weights(curr, index);
                     }
                 }
@@ -179,7 +179,7 @@ impl FeatureTransformer {
         }
 
         // 3. 各手の差分を順番に適用
-        for &entry_idx in path.iter() {
+        for entry_idx in path.iter() {
             let dirty_piece = stack.entry_at(entry_idx).dirty_piece;
 
             // トリガーごとにループ（現在は trigger=0 のみ）
@@ -207,10 +207,10 @@ impl FeatureTransformer {
                     let p = perspective as usize;
                     let accumulation = stack.current_mut().accumulator.get_mut(p, trigger);
 
-                    for &index in removed.iter() {
+                    for index in removed.iter() {
                         self.sub_weights(accumulation, index);
                     }
-                    for &index in added.iter() {
+                    for index in added.iter() {
                         self.add_weights(accumulation, index);
                     }
                 }

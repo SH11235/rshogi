@@ -460,7 +460,7 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
             self.copy_biases_to_accumulation(accumulation);
 
             let active_indices = HalfKPFeatureSet::collect_active_indices(pos, perspective);
-            for &index in active_indices.iter() {
+            for index in active_indices.iter() {
                 self.add_weights(accumulation, index);
             }
         }
@@ -530,7 +530,7 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
             if reset {
                 self.copy_biases_to_accumulation(&mut acc.accumulation[p].0);
                 let active_indices = HalfKPFeatureSet::collect_active_indices(pos, perspective);
-                for &index in active_indices.iter() {
+                for index in active_indices.iter() {
                     self.add_weights(&mut acc.accumulation[p].0, index);
                 }
             } else {
@@ -546,10 +546,10 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
 
                 acc.accumulation[p].0.copy_from_slice(&prev_acc.accumulation[p].0);
 
-                for &index in removed.iter() {
+                for index in removed.iter() {
                     self.sub_weights(&mut acc.accumulation[p].0, index);
                 }
-                for &index in added.iter() {
+                for index in added.iter() {
                     self.add_weights(&mut acc.accumulation[p].0, index);
                 }
             }
@@ -596,10 +596,10 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
 
                 acc.accumulation[p].0.copy_from_slice(&prev_acc.accumulation[p].0);
 
-                for &index in removed.iter() {
+                for index in removed.iter() {
                     self.sub_weights(&mut acc.accumulation[p].0, index);
                 }
-                for &index in added.iter() {
+                for index in added.iter() {
                     self.add_weights(&mut acc.accumulation[p].0, index);
                 }
             }
@@ -642,7 +642,7 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
         // IndexList を u32 のソート済み配列に変換
         let mut sorted_buf = [0u32; MAX_ACTIVE_FEATURES];
         let len = active_indices.len();
-        for (i, &idx) in active_indices.iter().enumerate() {
+        for (i, idx) in active_indices.iter().enumerate() {
             sorted_buf[i] = idx as u32;
         }
         let sorted = &mut sorted_buf[..len];
@@ -691,7 +691,7 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
         }
 
         let current_idx = stack.current_index();
-        for &entry_idx in path.iter() {
+        for entry_idx in path.iter() {
             let dirty_piece = stack.entry_at(entry_idx).dirty_piece;
 
             for perspective in [Color::Black, Color::White] {
@@ -715,10 +715,10 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
                 let accumulation =
                     &mut stack.entry_at_mut(current_idx).accumulator.accumulation[p].0;
 
-                for &index in removed.iter() {
+                for index in removed.iter() {
                     self.sub_weights(accumulation, index);
                 }
-                for &index in added.iter() {
+                for index in added.iter() {
                     self.add_weights(accumulation, index);
                 }
             }

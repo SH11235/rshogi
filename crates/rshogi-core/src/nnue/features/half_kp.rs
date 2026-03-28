@@ -150,7 +150,7 @@ mod tests {
             HalfKP::append_active_indices(&pos, perspective, &mut active);
 
             let max_valid_index = 81 * FE_END - 1;
-            for (i, &index) in active.iter().enumerate() {
+            for (i, index) in active.iter().enumerate() {
                 assert!(
                     index <= max_valid_index,
                     "Feature index {} at position {} exceeds max {} for perspective {:?}",
@@ -217,8 +217,8 @@ mod tests {
         assert_eq!(added.len(), 1);
 
         // removed と added のインデックスは異なるはず
-        let removed_idx: Vec<_> = removed.iter().copied().collect();
-        let added_idx: Vec<_> = added.iter().copied().collect();
+        let removed_idx: Vec<_> = removed.iter().collect();
+        let added_idx: Vec<_> = added.iter().collect();
         assert_ne!(removed_idx[0], added_idx[0]);
     }
 
@@ -418,8 +418,8 @@ mod tests {
         eprintln!("White perspective: {} features", active_w.len());
 
         // インデックスの範囲確認
-        let max_b = active_b.iter().max().copied().unwrap_or(0);
-        let max_w = active_w.iter().max().copied().unwrap_or(0);
+        let max_b = active_b.iter().max().unwrap_or(0);
+        let max_w = active_w.iter().max().unwrap_or(0);
         let max_valid = 81 * FE_END - 1;
         eprintln!("Max index (Black): {}", max_b);
         eprintln!("Max index (White): {}", max_w);
