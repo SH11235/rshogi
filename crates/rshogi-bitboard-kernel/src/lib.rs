@@ -20,7 +20,7 @@ pub struct BB256 {
     pub p: [u64; 4],
 }
 
-/// `attackers_to_occ` に必要な lookup table と Position フィールドをまとめた構造体。
+/// `attackers_to_occ` / `see_ge` に必要な lookup table と Position フィールドをまとめた構造体。
 /// C kernel に渡す。
 #[repr(C)]
 pub struct AttackersCtx {
@@ -32,6 +32,12 @@ pub struct AttackersCtx {
     pub silver_effect: *const BB128,
     /// gold_effect[2][81]
     pub gold_effect: *const BB128,
+    /// lance_step_effect[2][81]
+    pub lance_step_effect: *const BB128,
+    /// qugiy_rook_mask[81][2]
+    pub qugiy_rook_mask: *const BB128,
+    /// qugiy_bishop_mask[81][2]
+    pub qugiy_bishop_mask: *const BB256,
     /// by_type[PieceType::NUM + 1]
     pub by_type: *const BB128,
     /// by_color[2]
@@ -44,12 +50,8 @@ pub struct AttackersCtx {
     pub bishop_horse_bb: *const BB128,
     /// rook_dragon_bb
     pub rook_dragon_bb: *const BB128,
-    /// lance_step_effect[2][81]
-    pub lance_step_effect: *const BB128,
-    /// qugiy_rook_mask[81][2]
-    pub qugiy_rook_mask: *const BB128,
-    /// qugiy_bishop_mask[81][2]
-    pub qugiy_bishop_mask: *const BB256,
+    /// qugiy_step_effect[6][81]
+    pub qugiy_step_effect: *const BB128,
 }
 
 extern "C" {
@@ -66,4 +68,25 @@ extern "C" {
         sq: u8,
         out: *mut BB128,
     );
+
+    /// `see_ge` 全体を no-AVX kernel 内で計算する。
+    ///
+    /// # Safety
+    /// - `ctx` の全ポインタが有効で 16/32 バイトアラインされていること
+    /// - `occupied` が有効な BB128 を指し 16 バイトアラインされていること
+    /// - `blockers_for_king` / `pinners` は `[BB128; 2]` を指すこと
+    /// - square / piece type 引数は Rust 側の不変条件により有効範囲であること
+    pub fn see_ge_sse2(
+        ctx: *const AttackersCtx,
+        occupied: *const BB128,
+        side_to_move: u8,
+        from_sq: u8,
+        to_sq: u8,
+        from_pt: u8,
+        captured_pt: u8,
+        drop_pt: u8,
+        blockers_for_king: *const BB128,
+        pinners: *const BB128,
+        threshold: i32,
+    ) -> bool;
 }

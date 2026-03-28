@@ -502,7 +502,7 @@ impl Position {
     }
 
     #[cfg(any(test, not(target_arch = "x86_64")))]
-    fn attackers_to_occ_rust(&self, sq: Square, occupied: Bitboard) -> Bitboard {
+    pub(super) fn attackers_to_occ_rust(&self, sq: Square, occupied: Bitboard) -> Bitboard {
         let silver_hdk = self.pieces_pt(PieceType::Silver) | self.hdk_bb;
         let golds_hdk = self.golds_bb | self.hdk_bb;
 
@@ -531,13 +531,36 @@ impl Position {
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn attackers_to_occ_kernel(&self, sq: Square, occupied: Bitboard) -> Bitboard {
+    pub(super) fn attackers_kernel_ctx(&self) -> rshogi_bitboard_kernel::AttackersCtx {
         use crate::bitboard::{
             GOLD_EFFECT, KNIGHT_EFFECT, PAWN_EFFECT, SILVER_EFFECT, slider_kernel_tables,
         };
         use rshogi_bitboard_kernel::{AttackersCtx, BB128, BB256};
 
         let slider_tables = slider_kernel_tables();
+
+        AttackersCtx {
+            pawn_effect: PAWN_EFFECT.as_ptr() as *const BB128,
+            knight_effect: KNIGHT_EFFECT.as_ptr() as *const BB128,
+            silver_effect: SILVER_EFFECT.as_ptr() as *const BB128,
+            gold_effect: GOLD_EFFECT.as_ptr() as *const BB128,
+            by_type: self.by_type.as_ptr() as *const BB128,
+            by_color: self.by_color.as_ptr() as *const BB128,
+            golds_bb: &self.golds_bb as *const Bitboard as *const BB128,
+            hdk_bb: &self.hdk_bb as *const Bitboard as *const BB128,
+            bishop_horse_bb: &self.bishop_horse_bb as *const Bitboard as *const BB128,
+            rook_dragon_bb: &self.rook_dragon_bb as *const Bitboard as *const BB128,
+            lance_step_effect: slider_tables.lance_step_effect as *const BB128,
+            qugiy_rook_mask: slider_tables.qugiy_rook_mask as *const BB128,
+            qugiy_bishop_mask: slider_tables.qugiy_bishop_mask as *const BB256,
+            qugiy_step_effect: slider_tables.qugiy_step_effect as *const BB128,
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn attackers_to_occ_kernel(&self, sq: Square, occupied: Bitboard) -> Bitboard {
+        use rshogi_bitboard_kernel::BB128;
+
         let occupied_bb = BB128 {
             p: [occupied.p0(), occupied.p1()],
         };
@@ -550,21 +573,7 @@ impl Position {
         // - `sq.index()` は Square の不変条件により 0..80 の範囲
         // - C kernel は no-AVX 境界内で読み取り専用に計算し、Rust 側データを変更しない
         let out = unsafe {
-            let ctx = AttackersCtx {
-                pawn_effect: PAWN_EFFECT.as_ptr() as *const BB128,
-                knight_effect: KNIGHT_EFFECT.as_ptr() as *const BB128,
-                silver_effect: SILVER_EFFECT.as_ptr() as *const BB128,
-                gold_effect: GOLD_EFFECT.as_ptr() as *const BB128,
-                by_type: self.by_type.as_ptr() as *const BB128,
-                by_color: self.by_color.as_ptr() as *const BB128,
-                golds_bb: &self.golds_bb as *const Bitboard as *const BB128,
-                hdk_bb: &self.hdk_bb as *const Bitboard as *const BB128,
-                bishop_horse_bb: &self.bishop_horse_bb as *const Bitboard as *const BB128,
-                rook_dragon_bb: &self.rook_dragon_bb as *const Bitboard as *const BB128,
-                lance_step_effect: slider_tables.lance_step_effect as *const BB128,
-                qugiy_rook_mask: slider_tables.qugiy_rook_mask as *const BB128,
-                qugiy_bishop_mask: slider_tables.qugiy_bishop_mask as *const BB256,
-            };
+            let ctx = self.attackers_kernel_ctx();
             let mut out = BB128 { p: [0, 0] };
             rshogi_bitboard_kernel::attackers_to_occ_sse2(
                 &ctx,

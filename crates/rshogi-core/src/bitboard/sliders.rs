@@ -51,6 +51,7 @@ pub struct SliderKernelTables {
     pub lance_step_effect: *const Bitboard,
     pub qugiy_rook_mask: *const Bitboard,
     pub qugiy_bishop_mask: *const Bitboard256,
+    pub qugiy_step_effect: *const Bitboard,
 }
 
 /// OnceLock はテスト・初回アクセスのフォールバック用に保持
@@ -89,6 +90,7 @@ pub fn slider_kernel_tables() -> SliderKernelTables {
         lance_step_effect: table.lance_step_effect.as_ptr() as *const Bitboard,
         qugiy_rook_mask: table.qugiy_rook_mask.as_ptr() as *const Bitboard,
         qugiy_bishop_mask: table.qugiy_bishop_mask.as_ptr() as *const Bitboard256,
+        qugiy_step_effect: table.qugiy_step_effect.as_ptr() as *const Bitboard,
     }
 }
 

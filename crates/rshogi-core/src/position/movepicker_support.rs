@@ -4,11 +4,13 @@
 
 use super::Position;
 use crate::bitboard::{
-    Bitboard, Direct, between_bb, bishop_effect, direct_of, gold_effect, king_effect,
-    knight_effect, lance_effect, pawn_effect, ray_effect, rook_effect, silver_effect,
+    Bitboard, between_bb, bishop_effect, gold_effect, king_effect, knight_effect, lance_effect,
+    pawn_effect, rook_effect, silver_effect,
 };
 use crate::movegen::{ExtMoveBuffer, GenType, generate_evasions, generate_with_type};
-use crate::types::{Color, Move, Piece, PieceType, Square, Value};
+#[cfg(any(test, not(target_arch = "x86_64")))]
+use crate::types::Square;
+use crate::types::{Color, Move, Piece, PieceType, Value};
 
 impl Position {
     // =========================================================================
@@ -342,7 +344,10 @@ impl Position {
     ///
     /// YaneuraOu/Stockfish と同じアルゴリズムで静的駒交換評価を判定する。
     /// 成りボーナスは考慮しない。
-    pub fn see_ge(&self, m: Move, threshold: Value) -> bool {
+    #[cfg(any(test, not(target_arch = "x86_64")))]
+    fn see_ge_rust(&self, m: Move, threshold: Value) -> bool {
+        use crate::bitboard::{Direct, direct_of, ray_effect};
+
         // PASSは駒交換が発生しないので >= 0
         if m.is_pass() {
             return threshold.raw() <= 0;
@@ -392,7 +397,7 @@ impl Position {
             self.occupied() ^ Bitboard::from_square(m.from()) ^ Bitboard::from_square(to)
         };
         let mut stm = self.side_to_move();
-        let mut attackers = self.attackers_to_occ(to, occupied);
+        let mut attackers = self.attackers_to_occ_rust(to, occupied);
         let mut res = 1i32;
 
         loop {
@@ -469,7 +474,90 @@ impl Position {
         res != 0
     }
 
+    #[cfg(target_arch = "x86_64")]
+    fn see_ge_kernel(&self, m: Move, threshold: Value) -> bool {
+        use rshogi_bitboard_kernel::BB128;
+
+        if m.is_pass() {
+            return threshold.raw() <= 0;
+        }
+
+        let is_drop = m.is_drop();
+        let to = m.to();
+        let occupied = if is_drop {
+            self.occupied() ^ Bitboard::from_square(to)
+        } else {
+            self.occupied() ^ Bitboard::from_square(m.from()) ^ Bitboard::from_square(to)
+        };
+        let occupied_bb = BB128 {
+            p: [occupied.p0(), occupied.p1()],
+        };
+        let from_sq = if is_drop {
+            u8::MAX
+        } else {
+            m.from().index() as u8
+        };
+        let from_pt = if is_drop {
+            0
+        } else {
+            self.piece_on(m.from()).piece_type() as u8
+        };
+        let captured_pt = if is_drop {
+            0
+        } else {
+            let captured = self.piece_on(to);
+            if captured.is_some() {
+                captured.piece_type() as u8
+            } else {
+                0
+            }
+        };
+        let drop_pt = if is_drop {
+            m.drop_piece_type() as u8
+        } else {
+            0
+        };
+
+        // SAFETY:
+        // - Bitboard/Bitboard256 と BB128/BB256 は同一レイアウト
+        //   (`#[repr(C, align(16/32))]`, `[u64; 2/4]`)
+        // - lookup table / slider table は `static` または OnceLock 管理で生存期間はプログラム全体
+        // - Position と StateInfo の Bitboard 配列/フィールドは `&self` 参照中で有効かつ不変
+        // - square / piece type 引数は Move / Square / PieceType の不変条件により有効範囲
+        // - C kernel は読み取り専用で、Rust 側メモリを書き換えるのは `out` 相当の戻り値だけ
+        unsafe {
+            let ctx = self.attackers_kernel_ctx();
+
+            rshogi_bitboard_kernel::see_ge_sse2(
+                &ctx,
+                &occupied_bb,
+                self.side_to_move() as u8,
+                from_sq,
+                to.index() as u8,
+                from_pt,
+                captured_pt,
+                drop_pt,
+                self.state().blockers_for_king.as_ptr() as *const BB128,
+                self.state().pinners.as_ptr() as *const BB128,
+                threshold.raw(),
+            )
+        }
+    }
+
+    pub fn see_ge(&self, m: Move, threshold: Value) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.see_ge_kernel(m, threshold)
+        }
+
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            self.see_ge_rust(m, threshold)
+        }
+    }
+
     /// 最も価値の低い攻撃駒を探す（成りは考慮しない）
+    #[cfg(any(test, not(target_arch = "x86_64")))]
     fn least_valuable_attacker(
         &self,
         attackers: Bitboard,
@@ -554,6 +642,7 @@ impl Position {
 // =============================================================================
 
 /// SEE用の駒価値
+#[cfg(any(test, not(target_arch = "x86_64")))]
 fn see_piece_value(pt: PieceType) -> i32 {
     use PieceType::*;
     match pt {
@@ -598,7 +687,8 @@ fn see_piece_value(pt: PieceType) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{File, Rank};
+    use crate::movegen::{MoveList, generate_legal_all};
+    use crate::types::{File, Rank, Square};
 
     #[test]
     fn test_moved_piece() {
@@ -616,6 +706,61 @@ mod tests {
         pos.hand[Color::Black.index()] = pos.hand[Color::Black.index()].add(PieceType::Pawn);
         let pc_drop = pos.moved_piece(drop);
         assert_eq!(pc_drop, Piece::B_PAWN);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_see_ge_kernel_matches_rust() {
+        let mut positions = Vec::new();
+
+        let mut hirate = Position::new();
+        hirate.set_hirate();
+        positions.push(hirate);
+
+        let mut opening = Position::new();
+        opening.set_hirate();
+        for mv_str in ["7g7f", "3c3d", "2g2f", "8c8d", "2f2e", "8d8e", "8h2b+"] {
+            let mv = Move::from_usi(mv_str).expect("valid test move");
+            let gives_check = opening.gives_check(mv);
+            opening.do_move(mv, gives_check);
+        }
+        positions.push(opening);
+
+        let mut tactical = Position::new();
+        tactical
+            .set_sfen("ln2k1+L1+R/2s2s3/p1pl1p3/1+r2p1p1p/9/4B4/5PPPP/4Gg3/2+b2GKNL w S2NPgs7p 107")
+            .expect("valid tactical sfen");
+        positions.push(tactical);
+
+        for (index, pos) in positions.iter().enumerate() {
+            let mut moves = MoveList::new();
+            generate_legal_all(pos, &mut moves);
+
+            for &mv in &moves {
+                for threshold in [-200, -75, 0, 100, 400] {
+                    let kernel = pos.see_ge(mv, Value::new(threshold));
+                    let rust = pos.see_ge_rust(mv, Value::new(threshold));
+                    assert_eq!(
+                        kernel,
+                        rust,
+                        "see_ge mismatch at position {index}, move={}, threshold={threshold}, sfen={}",
+                        mv.to_usi(),
+                        pos.to_sfen()
+                    );
+                }
+            }
+
+            for threshold in [-1, 1] {
+                let kernel = pos.see_ge(Move::PASS, Value::new(threshold));
+                let rust = pos.see_ge_rust(Move::PASS, Value::new(threshold));
+                assert_eq!(
+                    kernel,
+                    rust,
+                    "see_ge PASS mismatch at position {index}, threshold={threshold}, sfen={}",
+                    pos.to_sfen()
+                );
+            }
+        }
     }
 
     #[test]
