@@ -1826,7 +1826,11 @@ pub fn evaluate_dispatch(
         #[cfg(not(feature = "layerstack-only"))]
         AccumulatorStackVariant::HalfKP(s) => update_and_evaluate_halfkp(&network, pos, s),
         #[cfg(feature = "layerstack-only")]
-        _ => unreachable!("layerstack-only build: only LayerStacks variant is supported"),
+        AccumulatorStackVariant::HalfKA(_)
+        | AccumulatorStackVariant::HalfKA_hm(_)
+        | AccumulatorStackVariant::HalfKP(_) => {
+            unreachable!("layerstack-only build: only LayerStacks variant is supported")
+        }
     }
 }
 
@@ -1865,7 +1869,11 @@ pub fn ensure_accumulator_computed(
             update_accumulator_only_halfkp(&network, pos, s);
         }
         #[cfg(feature = "layerstack-only")]
-        _ => unreachable!("layerstack-only build: only LayerStacks variant is supported"),
+        AccumulatorStackVariant::HalfKA(_)
+        | AccumulatorStackVariant::HalfKA_hm(_)
+        | AccumulatorStackVariant::HalfKP(_) => {
+            unreachable!("layerstack-only build: only LayerStacks variant is supported")
+        }
     }
 }
 

@@ -31,6 +31,8 @@ search-stats = ["rshogi-core/search-stats"]
 nnue-stats = ["rshogi-core/nnue-stats"]
 # TT書き込みトレースおよびhelper bound/depthフィルタ
 tt-trace = ["rshogi-core/tt-trace"]
+# LayerStack 専用ビルド（大会向け production 用）
+layerstack-only = ["rshogi-core/layerstack-only"]
 
 [[bin]]
 name = "rshogi-usi"
