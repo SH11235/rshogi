@@ -9,7 +9,7 @@ use super::state::StateInfo;
 use super::zobrist::{zobrist_hand, zobrist_pass_rights, zobrist_psq, zobrist_side};
 use crate::bitboard::{
     Bitboard, bishop_effect, dragon_effect, gold_effect, horse_effect, knight_effect, lance_effect,
-    lance_step_effect, pawn_effect, rook_effect, silver_effect,
+    pawn_effect, rook_effect, silver_effect,
 };
 use crate::eval::material::{hand_piece_value, material_needs_board_effects, signed_piece_value};
 use crate::nnue::piece_list::PieceList;
@@ -501,6 +501,83 @@ impl Position {
         self.attackers_to_occ(sq, self.occupied())
     }
 
+    #[cfg(any(test, not(target_arch = "x86_64")))]
+    fn attackers_to_occ_rust(&self, sq: Square, occupied: Bitboard) -> Bitboard {
+        let silver_hdk = self.pieces_pt(PieceType::Silver) | self.hdk_bb;
+        let golds_hdk = self.golds_bb | self.hdk_bb;
+
+        let black_attackers = ((pawn_effect(Color::White, sq) & self.pieces_pt(PieceType::Pawn))
+            | (knight_effect(Color::White, sq) & self.pieces_pt(PieceType::Knight))
+            | (silver_effect(Color::White, sq) & silver_hdk)
+            | (gold_effect(Color::White, sq) & golds_hdk))
+            & self.pieces_c(Color::Black);
+
+        let white_attackers = ((pawn_effect(Color::Black, sq) & self.pieces_pt(PieceType::Pawn))
+            | (knight_effect(Color::Black, sq) & self.pieces_pt(PieceType::Knight))
+            | (silver_effect(Color::Black, sq) & silver_hdk)
+            | (gold_effect(Color::Black, sq) & golds_hdk))
+            & self.pieces_c(Color::White);
+
+        let bishop = bishop_effect(sq, occupied) & self.bishop_horse_bb;
+        let rook_eff = rook_effect(sq, occupied);
+        let rook_lance = rook_eff
+            & (self.rook_dragon_bb
+                | (crate::bitboard::lance_step_effect(Color::White, sq)
+                    & self.pieces(Color::Black, PieceType::Lance))
+                | (crate::bitboard::lance_step_effect(Color::Black, sq)
+                    & self.pieces(Color::White, PieceType::Lance)));
+
+        black_attackers | white_attackers | bishop | rook_lance
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn attackers_to_occ_kernel(&self, sq: Square, occupied: Bitboard) -> Bitboard {
+        use crate::bitboard::{
+            GOLD_EFFECT, KNIGHT_EFFECT, PAWN_EFFECT, SILVER_EFFECT, slider_kernel_tables,
+        };
+        use rshogi_bitboard_kernel::{AttackersCtx, BB128, BB256};
+
+        let slider_tables = slider_kernel_tables();
+        let occupied_bb = BB128 {
+            p: [occupied.p0(), occupied.p1()],
+        };
+
+        // SAFETY:
+        // - Bitboard/Bitboard256 と BB128/BB256 は同一レイアウト
+        //   (`#[repr(C, align(16/32))]`, `[u64; 2/4]`)
+        // - lookup table と slider table は `static` / OnceLock 管理で、生存期間はプログラム全体
+        // - Position 内の Bitboard フィールドは `&self` 参照中で有効、かつ元型のアラインメントを満たす
+        // - `sq.index()` は Square の不変条件により 0..80 の範囲
+        // - C kernel は no-AVX 境界内で読み取り専用に計算し、Rust 側データを変更しない
+        let out = unsafe {
+            let ctx = AttackersCtx {
+                pawn_effect: PAWN_EFFECT.as_ptr() as *const BB128,
+                knight_effect: KNIGHT_EFFECT.as_ptr() as *const BB128,
+                silver_effect: SILVER_EFFECT.as_ptr() as *const BB128,
+                gold_effect: GOLD_EFFECT.as_ptr() as *const BB128,
+                by_type: self.by_type.as_ptr() as *const BB128,
+                by_color: self.by_color.as_ptr() as *const BB128,
+                golds_bb: &self.golds_bb as *const Bitboard as *const BB128,
+                hdk_bb: &self.hdk_bb as *const Bitboard as *const BB128,
+                bishop_horse_bb: &self.bishop_horse_bb as *const Bitboard as *const BB128,
+                rook_dragon_bb: &self.rook_dragon_bb as *const Bitboard as *const BB128,
+                lance_step_effect: slider_tables.lance_step_effect as *const BB128,
+                qugiy_rook_mask: slider_tables.qugiy_rook_mask as *const BB128,
+                qugiy_bishop_mask: slider_tables.qugiy_bishop_mask as *const BB256,
+            };
+            let mut out = BB128 { p: [0, 0] };
+            rshogi_bitboard_kernel::attackers_to_occ_sse2(
+                &ctx,
+                &occupied_bb,
+                sq.index() as u8,
+                &mut out,
+            );
+            out
+        };
+
+        Bitboard::from_u64_pair(out.p[0], out.p[1])
+    }
+
     /// 指定マスに利いている駒（占有指定）
     ///
     /// Apery/YaneuraOu式: silverEffect で HDK の斜め近接利き、
@@ -508,74 +585,15 @@ impl Position {
     /// 個別の king_effect / horse近接 / dragon近接 を不要にする。
     /// また rook_effect を再利用して lance_effect の個別スライド計算を省略。
     pub fn attackers_to_occ(&self, sq: Square, occupied: Bitboard) -> Bitboard {
-        // 近接駒部分を SSE2-only kernel で計算（AVX レジスタ spill を回避）
         #[cfg(target_arch = "x86_64")]
-        let near = {
-            use crate::bitboard::{GOLD_EFFECT, KNIGHT_EFFECT, PAWN_EFFECT, SILVER_EFFECT};
-            use rshogi_bitboard_kernel::{BB128, NearCtx};
-
-            // SAFETY:
-            // - Bitboard と BB128 は同一レイアウト (#[repr(C, align(16))], [u64; 2])
-            // - lookup table は pub static で常に有効、16 バイトアライン済み
-            // - Position フィールドは &self 経由で借用中、16 バイトアライン済み
-            // - kernel は SSE2 の pand/por/movdqa のみ使用し、値の不変条件を破壊しない
-            // - sq.index() は 0..80 の範囲（Square の不変条件）
-            let near_bb: BB128 = unsafe {
-                let ctx = NearCtx {
-                    pawn_effect: PAWN_EFFECT.as_ptr() as *const BB128,
-                    knight_effect: KNIGHT_EFFECT.as_ptr() as *const BB128,
-                    silver_effect: SILVER_EFFECT.as_ptr() as *const BB128,
-                    gold_effect: GOLD_EFFECT.as_ptr() as *const BB128,
-                    by_type: self.by_type.as_ptr() as *const BB128,
-                    by_color: self.by_color.as_ptr() as *const BB128,
-                    golds_bb: &self.golds_bb as *const Bitboard as *const BB128,
-                    hdk_bb: &self.hdk_bb as *const Bitboard as *const BB128,
-                };
-                let mut out = BB128 { p: [0, 0] };
-                rshogi_bitboard_kernel::attackers_near_pieces_sse2(
-                    &ctx,
-                    sq.index() as u8,
-                    &mut out,
-                );
-                out
-            };
-            Bitboard::from_u64_pair(near_bb.p[0], near_bb.p[1])
-        };
+        {
+            self.attackers_to_occ_kernel(sq, occupied)
+        }
 
         #[cfg(not(target_arch = "x86_64"))]
-        let near = {
-            let silver_hdk = self.pieces_pt(PieceType::Silver) | self.hdk_bb;
-            let golds_hdk = self.golds_bb | self.hdk_bb;
-
-            let black_attackers = ((pawn_effect(Color::White, sq)
-                & self.pieces_pt(PieceType::Pawn))
-                | (knight_effect(Color::White, sq) & self.pieces_pt(PieceType::Knight))
-                | (silver_effect(Color::White, sq) & silver_hdk)
-                | (gold_effect(Color::White, sq) & golds_hdk))
-                & self.pieces_c(Color::Black);
-
-            let white_attackers = ((pawn_effect(Color::Black, sq)
-                & self.pieces_pt(PieceType::Pawn))
-                | (knight_effect(Color::Black, sq) & self.pieces_pt(PieceType::Knight))
-                | (silver_effect(Color::Black, sq) & silver_hdk)
-                | (gold_effect(Color::Black, sq) & golds_hdk))
-                & self.pieces_c(Color::White);
-
-            black_attackers | white_attackers
-        };
-
-        // スライダー部分（Qugiy アルゴリズムは複雑なため現状維持）
-        let bishop = bishop_effect(sq, occupied) & self.bishop_horse_bb;
-
-        let rook_eff = rook_effect(sq, occupied);
-        let rook_lance = rook_eff
-            & (self.rook_dragon_bb
-                | (lance_step_effect(Color::White, sq)
-                    & self.pieces(Color::Black, PieceType::Lance))
-                | (lance_step_effect(Color::Black, sq)
-                    & self.pieces(Color::White, PieceType::Lance)));
-
-        near | bishop | rook_lance
+        {
+            self.attackers_to_occ_rust(sq, occupied)
+        }
     }
 
     /// 指定マスに利いている指定手番の駒
@@ -1870,6 +1888,55 @@ mod tests {
         // 5四への利き
         let attackers = pos.attackers_to(sq54);
         assert!(attackers.contains(sq55));
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_attackers_to_occ_kernel_matches_rust() {
+        let mut positions = Vec::new();
+
+        let mut hirate = Position::new();
+        hirate.set_hirate();
+        positions.push(hirate);
+
+        let mut opening = Position::new();
+        opening.set_hirate();
+        for mv_str in ["7g7f", "3c3d", "2g2f", "8c8d", "2f2e", "8d8e", "8h2b+"] {
+            let mv = Move::from_usi(mv_str).expect("valid test move");
+            let gives_check = opening.gives_check(mv);
+            opening.do_move(mv, gives_check);
+        }
+        positions.push(opening);
+
+        let mut tactical = Position::new();
+        tactical
+            .set_sfen("ln2k1+L1+R/2s2s3/p1pl1p3/1+r2p1p1p/9/4B4/5PPPP/4Gg3/2+b2GKNL w S2NPgs7p 107")
+            .expect("valid tactical sfen");
+        positions.push(tactical);
+
+        for (index, pos) in positions.iter().enumerate() {
+            let occupied = pos.occupied();
+            for sq in Square::all() {
+                let kernel = pos.attackers_to_occ(sq, occupied);
+                let rust = pos.attackers_to_occ_rust(sq, occupied);
+                assert_eq!(
+                    kernel,
+                    rust,
+                    "occupied mismatch at position {index}, sq={sq:?}, sfen={}",
+                    pos.to_sfen()
+                );
+
+                let occupied_without_sq = occupied & !Bitboard::from_square(sq);
+                let kernel = pos.attackers_to_occ(sq, occupied_without_sq);
+                let rust = pos.attackers_to_occ_rust(sq, occupied_without_sq);
+                assert_eq!(
+                    kernel,
+                    rust,
+                    "occupied_without_sq mismatch at position {index}, sq={sq:?}, sfen={}",
+                    pos.to_sfen()
+                );
+            }
+        }
     }
 
     #[test]

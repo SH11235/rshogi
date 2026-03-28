@@ -45,6 +45,14 @@ struct SliderTable {
     qugiy_step_effect: [[Bitboard; Square::NUM]; 6],
 }
 
+/// no-AVX kernel から参照する slider table 群の生ポインタ。
+#[derive(Clone, Copy)]
+pub struct SliderKernelTables {
+    pub lance_step_effect: *const Bitboard,
+    pub qugiy_rook_mask: *const Bitboard,
+    pub qugiy_bishop_mask: *const Bitboard256,
+}
+
 /// OnceLock はテスト・初回アクセスのフォールバック用に保持
 static SLIDER_ATTACKS_LOCK: OnceLock<SliderTable> = OnceLock::new();
 
@@ -70,6 +78,17 @@ fn slider_attacks() -> &'static SliderTable {
         unsafe { &*ptr }
     } else {
         SLIDER_ATTACKS_LOCK.get_or_init(SliderTable::new)
+    }
+}
+
+/// no-AVX kernel 向けに slider table の先頭ポインタを返す。
+#[inline]
+pub fn slider_kernel_tables() -> SliderKernelTables {
+    let table = slider_attacks();
+    SliderKernelTables {
+        lance_step_effect: table.lance_step_effect.as_ptr() as *const Bitboard,
+        qugiy_rook_mask: table.qugiy_rook_mask.as_ptr() as *const Bitboard,
+        qugiy_bishop_mask: table.qugiy_bishop_mask.as_ptr() as *const Bitboard256,
     }
 }
 

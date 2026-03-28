@@ -1,4 +1,6 @@
 fn main() {
+    println!("cargo:rerun-if-changed=kernel.c");
+
     cc::Build::new()
         .file("kernel.c")
         .opt_level(3)
