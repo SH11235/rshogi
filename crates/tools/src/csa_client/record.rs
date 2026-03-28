@@ -9,7 +9,7 @@ use crate::common::csa::{Color, Position, usi_move_to_csa};
 
 use super::config::RecordConfig;
 use super::engine::SearchInfo;
-use super::protocol::GameSummary;
+use super::protocol::{GameSummary, TimeConfig};
 
 /// 対局中に蓄積する棋譜データ
 #[derive(Clone, Debug)]
@@ -17,10 +17,8 @@ pub struct GameRecord {
     pub game_id: String,
     pub sente_name: String,
     pub gote_name: String,
-    /// 先手の持ち時間（ミリ秒）
-    pub black_total_time_ms: i64,
-    /// 秒読み（ミリ秒）
-    pub byoyomi_ms: i64,
+    pub black_time: TimeConfig,
+    pub white_time: TimeConfig,
     /// 対局開始時の局面
     pub initial_position: Position,
     pub moves: Vec<RecordedMove>,
@@ -62,8 +60,8 @@ impl GameRecord {
             game_id: summary.game_id.clone(),
             sente_name: summary.sente_name.clone(),
             gote_name: summary.gote_name.clone(),
-            black_total_time_ms: summary.black_time.total_time_ms,
-            byoyomi_ms: summary.black_time.byoyomi_ms,
+            black_time: summary.black_time.clone(),
+            white_time: summary.white_time.clone(),
             initial_position: summary.position.clone(),
             moves: Vec::new(),
             result: String::new(),
@@ -112,10 +110,23 @@ impl GameRecord {
         writeln!(out, "N-{}", self.gote_name).unwrap();
         writeln!(out, "$EVENT:{}", self.game_id).unwrap();
         writeln!(out, "$START_TIME:{}", self.start_time.format("%Y/%m/%d %H:%M:%S")).unwrap();
-        let total_sec = (self.black_total_time_ms / 1000) as u32;
-        let byoyomi_sec = (self.byoyomi_ms / 1000) as u32;
-        writeln!(out, "$TIME_LIMIT:{}:{}+{:02}", total_sec / 60, total_sec % 60, byoyomi_sec)
+        // 先手の時間設定を $TIME_LIMIT に出力（CSA標準）
+        let total_sec = (self.black_time.total_time_ms / 1000) as u32;
+        let byoyomi_sec = (self.black_time.byoyomi_ms / 1000) as u32;
+        let inc_sec = (self.black_time.increment_ms / 1000) as u32;
+        if inc_sec > 0 {
+            writeln!(out, "$TIME_LIMIT:{}:{:02}+{:02}F", total_sec / 60, total_sec % 60, inc_sec)
+                .unwrap();
+        } else {
+            writeln!(
+                out,
+                "$TIME_LIMIT:{}:{:02}+{:02}",
+                total_sec / 60,
+                total_sec % 60,
+                byoyomi_sec
+            )
             .unwrap();
+        }
         // 初期局面出力
         write!(out, "{}", self.initial_position.to_csa_board()).unwrap();
         writeln!(out).unwrap();
@@ -126,7 +137,7 @@ impl GameRecord {
         for m in &self.moves {
             // floodgate 形式コメント（評価値 + PV）
             if let Some(score) = m.effective_score() {
-                write!(out, "'** {score}").unwrap();
+                write!(out, "'* {score}").unwrap();
                 if !m.pv.is_empty() {
                     let mut pv_pos = pos.clone();
                     for usi_mv in &m.pv {

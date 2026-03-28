@@ -196,11 +196,14 @@ impl CsaConnection {
                     Some(Color::White) => white_time.as_mut().unwrap(),
                 };
                 if let Some(val) = line.strip_prefix("Time_Unit:") {
-                    time_unit_ms = match val.trim() {
-                        "msec" => 1,
-                        "sec" => 1000,
-                        "min" => 60000,
-                        _ => 1000,
+                    let v = val.trim();
+                    time_unit_ms = if v.contains("msec") || v.contains("ms") {
+                        1
+                    } else if v.contains("min") {
+                        60000
+                    } else {
+                        // "sec", "1sec", 数値のみ等 → 秒単位
+                        1000
                     };
                 } else if let Some(val) = line.strip_prefix("Total_Time:") {
                     let v: i64 = val.trim().parse().unwrap_or(0);
