@@ -1,6 +1,7 @@
 //! 遠方駒（香・角・飛）の利きをYaneuraOu互換のQugiyアルゴリズムで計算する
 
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::types::{Color, Square};
 
@@ -44,10 +45,31 @@ struct SliderTable {
     qugiy_step_effect: [[Bitboard; Square::NUM]; 6],
 }
 
-static SLIDER_ATTACKS: OnceLock<SliderTable> = OnceLock::new();
+/// OnceLock はテスト・初回アクセスのフォールバック用に保持
+static SLIDER_ATTACKS_LOCK: OnceLock<SliderTable> = OnceLock::new();
 
+/// ホットパス用のキャッシュポインタ。初期化後は non-null。
+static SLIDER_ATTACKS_PTR: AtomicPtr<SliderTable> = AtomicPtr::new(std::ptr::null_mut());
+
+/// テーブルの初期化を保証する。起動時に 1 回呼ぶこと。
+pub fn ensure_slider_initialized() {
+    let table = SLIDER_ATTACKS_LOCK.get_or_init(SliderTable::new);
+    SLIDER_ATTACKS_PTR.store(table as *const SliderTable as *mut SliderTable, Ordering::Release);
+}
+
+/// ホットパス用: 単純なポインタ load でテーブル参照を返す。
+/// `ensure_slider_initialized()` が先に呼ばれていれば atomic load 1 回（分岐なし）。
+/// 未初期化（テスト等）の場合は OnceLock にフォールバック。
+#[inline(always)]
 fn slider_attacks() -> &'static SliderTable {
-    SLIDER_ATTACKS.get_or_init(SliderTable::new)
+    let ptr = SLIDER_ATTACKS_PTR.load(Ordering::Acquire);
+    if !ptr.is_null() {
+        // SAFETY: ensure_slider_initialized() が ptr を有効なアドレスに設定済み。
+        // SliderTable は 'static で解放されない。
+        unsafe { &*ptr }
+    } else {
+        SLIDER_ATTACKS_LOCK.get_or_init(SliderTable::new)
+    }
 }
 
 impl SliderTable {

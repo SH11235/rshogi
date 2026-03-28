@@ -1477,6 +1477,9 @@ fn main() -> Result<()> {
         .target(env_logger::Target::Stderr)
         .init();
 
+    // ビットボードテーブルの初期化（ホットパスでの OnceLock atomic check 回避）
+    rshogi_core::bitboard::init_bitboard_tables();
+
     let mut engine = UsiEngine::new();
     let stdin = io::stdin();
 
