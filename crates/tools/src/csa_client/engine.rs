@@ -11,6 +11,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 
 use super::event::Event;
+use super::protocol::parse_game_result;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -230,6 +231,19 @@ impl UsiEngine {
         Ok(())
     }
 
+    /// stop を送信（未送信なら）し、bestmove を読み捨てる。
+    /// wait_bestmove 内のサーバー割り込み用。
+    fn stop_and_drain_bestmove(&mut self, already_stopped: bool) {
+        if !already_stopped {
+            let _ = self.send("stop");
+        }
+        while let Ok(line) = self.rx.recv_timeout(Duration::from_secs(5)) {
+            if line.starts_with("bestmove") {
+                break;
+            }
+        }
+    }
+
     /// gameover を送信
     pub fn gameover(&mut self, result: &str) -> Result<()> {
         self.send(&format!("gameover {result}"))
@@ -293,37 +307,15 @@ impl UsiEngine {
                 match event {
                     Event::ServerLine(ref line) => {
                         server_lines.push(line.clone());
-                        // 最終結果行 (#WIN/#LOSE/#DRAW 等) を検出したら探索中断
-                        if line.starts_with('#')
-                            && (line.contains("#WIN")
-                                || line.contains("#LOSE")
-                                || line.contains("#DRAW")
-                                || line.contains("#CHUDAN")
-                                || line.contains("#CENSORED"))
-                        {
+                        if line.starts_with('#') && parse_game_result(line).is_some() {
                             log::info!("[USI] サーバー終局検出、探索中断: {line}");
-                            if !stop_sent {
-                                let _ = self.send("stop");
-                            }
-                            // bestmove を読み捨てる
-                            while let Ok(eline) = self.rx.recv_timeout(Duration::from_secs(5)) {
-                                if eline.starts_with("bestmove") {
-                                    break;
-                                }
-                            }
+                            self.stop_and_drain_bestmove(stop_sent);
                             return Ok(SearchOutcome::ServerInterrupt(server_lines));
                         }
                     }
                     Event::ServerDisconnected => {
                         log::warn!("[USI] サーバー切断検出、探索中断");
-                        if !stop_sent {
-                            let _ = self.send("stop");
-                        }
-                        while let Ok(eline) = self.rx.recv_timeout(Duration::from_secs(5)) {
-                            if eline.starts_with("bestmove") {
-                                break;
-                            }
-                        }
+                        self.stop_and_drain_bestmove(stop_sent);
                         server_lines.push("#DISCONNECTED".to_string());
                         return Ok(SearchOutcome::ServerInterrupt(server_lines));
                     }

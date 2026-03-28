@@ -403,13 +403,13 @@ impl CsaConnection {
     }
 
     fn send_line(&mut self, line: &str) -> Result<()> {
-        // パスワードをマスクしてログ出力
-        let masked = if line.contains(&self.password) && !self.password.is_empty() {
-            line.replace(&self.password, "*****")
+        // パスワードをマスクしてログ出力（非パスワード行ではアロケーション不要）
+        if !self.password.is_empty() && line.contains(&self.password) {
+            let masked = line.replace(&self.password, "*****");
+            log::debug!("[CSA] > {masked}");
         } else {
-            line.to_string()
-        };
-        log::debug!("[CSA] > {masked}");
+            log::debug!("[CSA] > {line}");
+        }
         self.writer.write_all(line.as_bytes())?;
         self.writer.write_all(b"\n")?;
         self.writer.flush()?;
@@ -544,22 +544,15 @@ pub enum RecvEvent {
     GameEnd(GameResult, String, Option<String>),
 }
 
-fn parse_server_move(line: &str) -> (String, u32) {
+pub(crate) fn parse_server_move(line: &str) -> (String, u32) {
     // "+7776FU,T30" or "+7776FU"
-    // CSA 指し手は常に7文字。カンマ位置に関わらず7文字で切り出す。
     if let Some(comma_pos) = line.find(",T") {
-        let mv_end = comma_pos.min(line.len());
-        let mv = if mv_end >= 7 {
-            line[..7].to_string()
-        } else {
-            line[..mv_end].to_string()
-        };
+        let mv = line.get(..7.min(comma_pos)).unwrap_or(line).to_string();
         let time_sec = line[comma_pos + 2..].parse::<u32>().unwrap_or(0);
         (mv, time_sec)
-    } else if line.len() >= 7 {
-        (line[..7].to_string(), 0)
     } else {
-        (line.to_string(), 0)
+        let mv = line.get(..7).unwrap_or(line).to_string();
+        (mv, 0)
     }
 }
 
@@ -574,7 +567,7 @@ fn parse_time_unit(v: &str) -> i64 {
 }
 
 /// 最終結果行のみ Some を返す。中間行（#TIME_UP, #ILLEGAL_MOVE 等）は None。
-fn parse_game_result(line: &str) -> Option<GameResult> {
+pub(crate) fn parse_game_result(line: &str) -> Option<GameResult> {
     if line.contains("#WIN") {
         Some(GameResult::Win)
     } else if line.contains("#LOSE") {

@@ -16,7 +16,7 @@ use crate::common::csa::{Color, Position, csa_move_to_usi, usi_move_to_csa};
 use super::config::CsaClientConfig;
 use super::engine::{BestMoveResult, SearchInfo, SearchOutcome, UsiEngine};
 use super::event::Event;
-use super::protocol::{CsaConnection, GameResult};
+use super::protocol::{CsaConnection, GameResult, parse_game_result, parse_server_move};
 use super::record::GameRecord;
 
 // ────────────────────────────────────────────
@@ -164,10 +164,10 @@ impl SessionState<'_> {
             }
             SearchOutcome::ServerInterrupt(lines) => {
                 // サーバーから終局が来た（ponderhit 中等）
-                let (game_result, reason) = parse_server_interrupt_lines(&lines);
+                let (game_result, reason) = parse_server_interrupt_lines(lines);
                 log::info!("[CSA] サーバー終局割り込み: {:?}", game_result);
-                self.record.set_result(&record_result_with_reason(&game_result, &reason));
-                self.engine.gameover(&gameover_str(&game_result))?;
+                self.record.set_result(record_result_with_reason(&game_result, &reason));
+                self.engine.gameover(gameover_str(&game_result))?;
                 Ok(MoveAction::GameEnd(game_result, Box::new(self.record.clone())))
             }
         }
@@ -183,14 +183,14 @@ impl SessionState<'_> {
             self.conn.send_resign()?;
             self.record.set_result("resign");
             let (game_result, _) = wait_game_end_from_rx(self.server_rx)?;
-            self.engine.gameover(&gameover_str(&game_result))?;
+            self.engine.gameover(gameover_str(&game_result))?;
             return Ok(MoveAction::GameEnd(game_result, Box::new(self.record.clone())));
         }
         if result.bestmove == "win" {
             self.conn.send_win()?;
             self.record.set_result("win_declaration");
             let (game_result, _) = wait_game_end_from_rx(self.server_rx)?;
-            self.engine.gameover(&gameover_str(&game_result))?;
+            self.engine.gameover(gameover_str(&game_result))?;
             return Ok(MoveAction::GameEnd(game_result, Box::new(self.record.clone())));
         }
 
@@ -238,13 +238,13 @@ impl SessionState<'_> {
                         return Ok(MoveAction::Continue);
                     }
                     if line.starts_with('#') {
-                        if let Some(game_result) = parse_game_result_final(&line) {
+                        if let Some(game_result) = parse_game_result(&line) {
                             log::info!("[CSA] 対局終了(エコー待ち中): {line}");
                             cleanup_ponder(self.engine, &mut self.ponder_state)?;
                             let reason = self.conn.pending_end_reason.take();
                             self.record
-                                .set_result(&record_result_with_reason(&game_result, &reason));
-                            self.engine.gameover(&gameover_str(&game_result))?;
+                                .set_result(record_result_with_reason(&game_result, &reason));
+                            self.engine.gameover(gameover_str(&game_result))?;
                             return Ok(MoveAction::GameEnd(
                                 game_result,
                                 Box::new(self.record.clone()),
@@ -398,12 +398,12 @@ pub fn run_game_session(
                     }
                     // 終局
                     if line.starts_with('#') {
-                        if let Some(game_result) = parse_game_result_final(&line) {
+                        if let Some(game_result) = parse_game_result(&line) {
                             log::info!("[CSA] 対局終了: {line}");
                             cleanup_ponder(s.engine, &mut s.ponder_state)?;
                             let reason = s.conn.pending_end_reason.take();
-                            s.record.set_result(&record_result_with_reason(&game_result, &reason));
-                            s.engine.gameover(&gameover_str(&game_result))?;
+                            s.record.set_result(record_result_with_reason(&game_result, &reason));
+                            s.engine.gameover(gameover_str(&game_result))?;
                             return Ok((game_result, s.record));
                         }
                         // 中間行
@@ -463,7 +463,7 @@ fn resign_and_wait_rx(
     conn.send_resign()?;
     record.set_result("resign");
     let (result, _) = wait_game_end_from_rx(server_rx)?;
-    engine.gameover(&gameover_str(&result))?;
+    engine.gameover(gameover_str(&result))?;
     Ok(result)
 }
 
@@ -480,7 +480,7 @@ fn wait_game_end_from_rx(server_rx: &Receiver<Event>) -> Result<(GameResult, Opt
         match server_rx.recv_timeout(Duration::from_millis(200)) {
             Ok(Event::ServerLine(line)) => {
                 if line.starts_with('#') {
-                    if let Some(result) = parse_game_result_final(&line) {
+                    if let Some(result) = parse_game_result(&line) {
                         log::info!("[CSA] 対局終了: {line}");
                         return Ok((result, pending_reason));
                     }
@@ -500,15 +500,15 @@ fn wait_game_end_from_rx(server_rx: &Receiver<Event>) -> Result<(GameResult, Opt
 }
 
 /// ServerInterrupt の行バッファから GameResult と理由を抽出
-fn parse_server_interrupt_lines(lines: &[String]) -> (GameResult, Option<String>) {
+fn parse_server_interrupt_lines(lines: Vec<String>) -> (GameResult, Option<String>) {
     let mut reason = None;
     let mut result = GameResult::Interrupted;
     for line in lines {
         if line.starts_with('#') {
-            if let Some(r) = parse_game_result_final(line) {
+            if let Some(r) = parse_game_result(&line) {
                 result = r;
             } else {
-                reason = Some(line.clone());
+                reason = Some(line);
             }
         }
     }
@@ -522,73 +522,39 @@ fn opposite(color: Color) -> Color {
     }
 }
 
-fn gameover_str(result: &GameResult) -> String {
+fn gameover_str(result: &GameResult) -> &'static str {
     match result {
-        GameResult::Win => "win".to_string(),
-        GameResult::Lose => "lose".to_string(),
-        GameResult::Draw => "draw".to_string(),
-        _ => "draw".to_string(),
+        GameResult::Win => "win",
+        GameResult::Lose => "lose",
+        GameResult::Draw => "draw",
+        _ => "draw",
     }
 }
 
-fn record_result_with_reason(result: &GameResult, reason: &Option<String>) -> String {
+fn record_result_with_reason(result: &GameResult, reason: &Option<String>) -> &'static str {
     if let Some(r) = reason {
         if r.contains("TIME_UP") {
-            return "time_up".to_string();
+            return "time_up";
         }
         if r.contains("ILLEGAL") {
-            return "illegal_move".to_string();
+            return "illegal_move";
         }
         if r.contains("MAX_MOVES") {
-            return "max_moves".to_string();
+            return "max_moves";
         }
         if r.contains("JISHOGI") {
-            return "jishogi".to_string();
+            return "jishogi";
         }
         if r.contains("SENNICHITE") {
-            return "sennichite".to_string();
+            return "sennichite";
         }
     }
     match result {
-        GameResult::Win => "win".to_string(),
-        GameResult::Lose => "lose".to_string(),
-        GameResult::Draw => "sennichite".to_string(),
-        GameResult::Interrupted => "interrupted".to_string(),
-        GameResult::Censored => "interrupted".to_string(),
-    }
-}
-
-/// 最終結果行のみ Some を返す
-fn parse_game_result_final(line: &str) -> Option<GameResult> {
-    if line.contains("#WIN") {
-        Some(GameResult::Win)
-    } else if line.contains("#LOSE") {
-        Some(GameResult::Lose)
-    } else if line.contains("#DRAW") {
-        Some(GameResult::Draw)
-    } else if line.contains("#CHUDAN") {
-        Some(GameResult::Interrupted)
-    } else if line.contains("#CENSORED") {
-        Some(GameResult::Censored)
-    } else {
-        None
-    }
-}
-
-fn parse_server_move(line: &str) -> (String, u32) {
-    if let Some(comma_pos) = line.find(",T") {
-        let mv_end = comma_pos.min(line.len());
-        let mv = if mv_end >= 7 {
-            line[..7].to_string()
-        } else {
-            line[..mv_end].to_string()
-        };
-        let time_sec = line[comma_pos + 2..].parse::<u32>().unwrap_or(0);
-        (mv, time_sec)
-    } else if line.len() >= 7 {
-        (line[..7].to_string(), 0)
-    } else {
-        (line.to_string(), 0)
+        GameResult::Win => "win",
+        GameResult::Lose => "lose",
+        GameResult::Draw => "sennichite",
+        GameResult::Interrupted => "interrupted",
+        GameResult::Censored => "interrupted",
     }
 }
 
@@ -612,16 +578,13 @@ fn build_position_cmd_with_ponder(
     usi_moves: &[String],
     ponder_move: &str,
 ) -> String {
-    let base = if initial_sfen == HIRATE_SFEN {
-        "position startpos".to_string()
-    } else {
-        format!("position sfen {initial_sfen}")
-    };
+    let mut cmd = build_position_cmd(initial_sfen, usi_moves);
     if usi_moves.is_empty() {
-        format!("{base} moves {ponder_move}")
+        write!(cmd, " moves {ponder_move}").unwrap();
     } else {
-        format!("{base} moves {} {ponder_move}", usi_moves.join(" "))
+        write!(cmd, " {ponder_move}").unwrap();
     }
+    cmd
 }
 
 fn build_floodgate_comment(
