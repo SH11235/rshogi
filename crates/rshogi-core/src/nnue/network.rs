@@ -1619,6 +1619,7 @@ fn ensure_progress_bucket(pos: &Position, stack: &mut AccumulatorStackLayerStack
 }
 
 /// HalfKA_hm アキュムレータを更新して評価（内部実装）
+#[cfg(not(feature = "layerstack-only"))]
 #[inline]
 fn update_and_evaluate_halfka_hm(
     network: &NNUENetwork,
@@ -1654,6 +1655,7 @@ fn update_and_evaluate_halfka_hm(
 }
 
 /// HalfKA アキュムレータを更新して評価（内部実装）
+#[cfg(not(feature = "layerstack-only"))]
 #[inline]
 fn update_and_evaluate_halfka(
     network: &NNUENetwork,
@@ -1689,6 +1691,7 @@ fn update_and_evaluate_halfka(
 }
 
 /// HalfKP アキュムレータを更新して評価（内部実装）
+#[cfg(not(feature = "layerstack-only"))]
 #[inline]
 fn update_and_evaluate_halfkp(
     network: &NNUENetwork,
@@ -1811,14 +1814,23 @@ pub fn evaluate_dispatch(
         );
     };
 
-    // バリアントに応じて適切な評価関数を呼び出し（4バリアント）
+    // バリアントに応じて適切な評価関数を呼び出し
     match stack {
         AccumulatorStackVariant::LayerStacks(s) => {
             update_and_evaluate_layer_stacks_cached(&network, pos, s, acc_cache)
         }
+        #[cfg(not(feature = "layerstack-only"))]
         AccumulatorStackVariant::HalfKA(s) => update_and_evaluate_halfka(&network, pos, s),
+        #[cfg(not(feature = "layerstack-only"))]
         AccumulatorStackVariant::HalfKA_hm(s) => update_and_evaluate_halfka_hm(&network, pos, s),
+        #[cfg(not(feature = "layerstack-only"))]
         AccumulatorStackVariant::HalfKP(s) => update_and_evaluate_halfkp(&network, pos, s),
+        #[cfg(feature = "layerstack-only")]
+        AccumulatorStackVariant::HalfKA(_)
+        | AccumulatorStackVariant::HalfKA_hm(_)
+        | AccumulatorStackVariant::HalfKP(_) => {
+            unreachable!("layerstack-only build: only LayerStacks variant is supported")
+        }
     }
 }
 
@@ -1844,14 +1856,23 @@ pub fn ensure_accumulator_computed(
         AccumulatorStackVariant::LayerStacks(s) => {
             update_accumulator_only_layer_stacks_cached(&network, pos, s, acc_cache);
         }
+        #[cfg(not(feature = "layerstack-only"))]
         AccumulatorStackVariant::HalfKA(s) => {
             update_accumulator_only_halfka(&network, pos, s);
         }
+        #[cfg(not(feature = "layerstack-only"))]
         AccumulatorStackVariant::HalfKA_hm(s) => {
             update_accumulator_only_halfka_hm(&network, pos, s);
         }
+        #[cfg(not(feature = "layerstack-only"))]
         AccumulatorStackVariant::HalfKP(s) => {
             update_accumulator_only_halfkp(&network, pos, s);
+        }
+        #[cfg(feature = "layerstack-only")]
+        AccumulatorStackVariant::HalfKA(_)
+        | AccumulatorStackVariant::HalfKA_hm(_)
+        | AccumulatorStackVariant::HalfKP(_) => {
+            unreachable!("layerstack-only build: only LayerStacks variant is supported")
         }
     }
 }
@@ -1907,6 +1928,7 @@ fn update_accumulator_only_layer_stacks_cached(
 }
 
 /// HalfKA_hm アキュムレータを更新のみ（評価なし）
+#[cfg(not(feature = "layerstack-only"))]
 #[inline]
 fn update_accumulator_only_halfka_hm(
     network: &NNUENetwork,
@@ -1938,6 +1960,7 @@ fn update_accumulator_only_halfka_hm(
 }
 
 /// HalfKA アキュムレータを更新のみ（評価なし）
+#[cfg(not(feature = "layerstack-only"))]
 #[inline]
 fn update_accumulator_only_halfka(network: &NNUENetwork, pos: &Position, stack: &mut HalfKAStack) {
     if stack.is_current_computed() {
@@ -1965,6 +1988,7 @@ fn update_accumulator_only_halfka(network: &NNUENetwork, pos: &Position, stack: 
 }
 
 /// HalfKP アキュムレータを更新のみ（評価なし）
+#[cfg(not(feature = "layerstack-only"))]
 #[inline]
 fn update_accumulator_only_halfkp(network: &NNUENetwork, pos: &Position, stack: &mut HalfKPStack) {
     if stack.is_current_computed() {
