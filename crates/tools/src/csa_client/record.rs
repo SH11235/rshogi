@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use anyhow::Result;
 use chrono::Local;
 
-use crate::common::csa::{Position, usi_move_to_csa};
+use crate::common::csa::{Color, Position, usi_move_to_csa};
 
 use super::config::RecordConfig;
 use super::engine::SearchInfo;
@@ -36,16 +36,23 @@ pub struct RecordedMove {
     pub eval_mate: Option<i32>,
     pub depth: Option<u32>,
     pub pv: Vec<String>,
+    /// この手を指した側の手番（評価値の先手視点正規化に使用）
+    pub side_to_move: Color,
 }
 
 impl RecordedMove {
-    /// 評価値を統一的に取得する。cp があればそのまま、mate なら ±100000 に変換。
+    /// 評価値を先手視点に正規化して返す。
+    /// USI の score cp/mate は手番側視点なので、後手番なら符号を反転する。
     pub fn effective_score(&self) -> Option<i32> {
-        if let Some(cp) = self.eval_cp {
+        let raw = if let Some(cp) = self.eval_cp {
             Some(cp)
         } else {
             self.eval_mate.map(|m| if m > 0 { 100000 } else { -100000 })
-        }
+        };
+        raw.map(|v| match self.side_to_move {
+            Color::Black => v,
+            Color::White => -v,
+        })
     }
 }
 
@@ -64,7 +71,13 @@ impl GameRecord {
         }
     }
 
-    pub fn add_move(&mut self, csa_move: &str, time_sec: u32, info: Option<&SearchInfo>) {
+    pub fn add_move(
+        &mut self,
+        csa_move: &str,
+        time_sec: u32,
+        info: Option<&SearchInfo>,
+        side_to_move: Color,
+    ) {
         let (eval_cp, eval_mate, depth, pv) = match info {
             Some(i) => (i.score_cp, i.score_mate, i.depth, i.pv.clone()),
             None => (None, None, None, Vec::new()),
@@ -76,6 +89,7 @@ impl GameRecord {
             eval_mate,
             depth,
             pv,
+            side_to_move,
         });
     }
 
@@ -133,10 +147,17 @@ impl GameRecord {
             let _ = pos.apply_csa_move(&m.csa_move);
         }
 
-        if self.result == "resign" {
-            writeln!(out, "%TORYO").unwrap();
-        } else if self.result == "win_declaration" {
-            writeln!(out, "%KACHI").unwrap();
+        // 終局コマンド
+        match self.result.as_str() {
+            "resign" => writeln!(out, "%TORYO").unwrap(),
+            "win_declaration" => writeln!(out, "%KACHI").unwrap(),
+            "sennichite" => writeln!(out, "%SENNICHITE").unwrap(),
+            "time_up" => writeln!(out, "%TIME_UP").unwrap(),
+            "illegal_move" => writeln!(out, "%ILLEGAL_MOVE").unwrap(),
+            "jishogi" => writeln!(out, "%JISHOGI").unwrap(),
+            "max_moves" => writeln!(out, "%MAX_MOVES").unwrap(),
+            "interrupted" => writeln!(out, "%CHUDAN").unwrap(),
+            _ => {} // 不明な結果はスキップ
         }
         out
     }

@@ -4,7 +4,7 @@
 
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
@@ -15,12 +15,14 @@ use super::engine::{SearchInfo, UsiEngine};
 use super::protocol::{CsaConnection, GameResult, GameSummary, RecvEvent};
 use super::record::GameRecord;
 
-/// 対局中の時間管理
+/// 対局中の時間管理（先後別に byoyomi/increment を保持）
 struct Clock {
     black_time_ms: i64,
     white_time_ms: i64,
-    byoyomi_ms: i64,
-    increment_ms: i64,
+    black_byoyomi_ms: i64,
+    white_byoyomi_ms: i64,
+    black_increment_ms: i64,
+    white_increment_ms: i64,
 }
 
 impl Clock {
@@ -28,19 +30,29 @@ impl Clock {
         Self {
             black_time_ms: summary.black_time.total_time_ms,
             white_time_ms: summary.white_time.total_time_ms,
-            byoyomi_ms: summary.black_time.byoyomi_ms, // go コマンドでは共通値を使用
-            increment_ms: summary.black_time.increment_ms,
+            black_byoyomi_ms: summary.black_time.byoyomi_ms,
+            white_byoyomi_ms: summary.white_time.byoyomi_ms,
+            black_increment_ms: summary.black_time.increment_ms,
+            white_increment_ms: summary.white_time.increment_ms,
+        }
+    }
+
+    fn increment_ms(&self, color: Color) -> i64 {
+        match color {
+            Color::Black => self.black_increment_ms,
+            Color::White => self.white_increment_ms,
         }
     }
 
     fn consume(&mut self, color: Color, time_sec: u32) {
         let consumed_ms = time_sec as i64 * 1000;
+        let inc = self.increment_ms(color);
         match color {
             Color::Black => {
-                self.black_time_ms = (self.black_time_ms - consumed_ms + self.increment_ms).max(0);
+                self.black_time_ms = (self.black_time_ms - consumed_ms + inc).max(0);
             }
             Color::White => {
-                self.white_time_ms = (self.white_time_ms - consumed_ms + self.increment_ms).max(0);
+                self.white_time_ms = (self.white_time_ms - consumed_ms + inc).max(0);
             }
         }
     }
@@ -50,14 +62,15 @@ impl Clock {
         let btime = self.black_time_ms.max(0);
         let wtime = self.white_time_ms.max(0);
 
-        if self.increment_ms > 0 {
-            // フィッシャー
+        if self.black_increment_ms > 0 || self.white_increment_ms > 0 {
             format!(
                 "btime {} wtime {} binc {} winc {}",
-                btime, wtime, self.increment_ms, self.increment_ms
+                btime, wtime, self.black_increment_ms, self.white_increment_ms
             )
-        } else if self.byoyomi_ms > 0 {
-            let byoyomi = (self.byoyomi_ms - margin_msec as i64).max(0);
+        } else if self.black_byoyomi_ms > 0 || self.white_byoyomi_ms > 0 {
+            // USI の byoyomi は共通値のみ対応。手番側の値を使う。
+            let byoyomi =
+                (self.black_byoyomi_ms.max(self.white_byoyomi_ms) - margin_msec as i64).max(0);
             format!("btime {} wtime {} byoyomi {}", btime, wtime, byoyomi)
         } else {
             format!("btime {} wtime {}", btime, wtime)
@@ -73,26 +86,26 @@ impl Clock {
         my_color: Color,
         my_estimated_ms: i64,
     ) -> String {
-        // usiToCsa.rb 準拠: 残り時間 + increment - estimated
-        // 短考なら increment > estimated で持ち時間が増える
+        let my_inc = self.increment_ms(my_color);
         let (btime, wtime) = match my_color {
             Color::Black => (
-                (self.black_time_ms + self.increment_ms - my_estimated_ms).max(0),
+                (self.black_time_ms + my_inc - my_estimated_ms).max(0),
                 self.white_time_ms.max(0),
             ),
             Color::White => (
                 self.black_time_ms.max(0),
-                (self.white_time_ms + self.increment_ms - my_estimated_ms).max(0),
+                (self.white_time_ms + my_inc - my_estimated_ms).max(0),
             ),
         };
 
-        if self.increment_ms > 0 {
+        if self.black_increment_ms > 0 || self.white_increment_ms > 0 {
             format!(
                 "btime {} wtime {} binc {} winc {}",
-                btime, wtime, self.increment_ms, self.increment_ms
+                btime, wtime, self.black_increment_ms, self.white_increment_ms
             )
-        } else if self.byoyomi_ms > 0 {
-            let byoyomi = (self.byoyomi_ms - margin_msec as i64).max(0);
+        } else if self.black_byoyomi_ms > 0 || self.white_byoyomi_ms > 0 {
+            let byoyomi =
+                (self.black_byoyomi_ms.max(self.white_byoyomi_ms) - margin_msec as i64).max(0);
             format!("btime {} wtime {} byoyomi {}", btime, wtime, byoyomi)
         } else {
             format!("btime {} wtime {}", btime, wtime)
@@ -133,8 +146,10 @@ pub fn run_game_session(
 
     // 棋譜記録
     let mut record = GameRecord::new(&summary);
+    let mut init_color = summary.position.side_to_move;
     for cm in &summary.initial_moves {
-        record.add_move(&cm.mv, cm.time_sec.unwrap_or(0), None);
+        record.add_move(&cm.mv, cm.time_sec.unwrap_or(0), None, init_color);
+        init_color = opposite(init_color);
     }
 
     let my_color = summary.my_color;
@@ -183,7 +198,7 @@ pub fn run_game_session(
             // 盤面更新
             pos.apply_csa_move(&csa_move)?;
             usi_moves.push(result.bestmove.clone());
-            record.add_move(&csa_move, 0, Some(&info)); // 消費時間はサーバーエコーで確定
+            record.add_move(&csa_move, 0, Some(&info), my_color); // 消費時間はサーバーエコーで確定
 
             // ponder 開始（自手の推定消費時間を差し引いた時間を使う）
             if config.game.ponder
@@ -214,6 +229,7 @@ pub fn run_game_session(
                     Some(RecvEvent::GameEnd(result, msg)) => {
                         log::info!("[CSA] 対局終了(エコー待ち中): {msg}");
                         cleanup_ponder(engine, &mut ponder_state)?;
+                        record.set_result(record_result_str(&result));
                         engine.gameover(&gameover_str(&result))?;
                         return Ok((result, record));
                     }
@@ -243,7 +259,7 @@ pub fn run_game_session(
                             pos.apply_csa_move(&sm.mv)?;
                             usi_moves.push(opponent_usi);
                             clock.consume(opposite(my_color), sm.time_sec);
-                            record.add_move(&sm.mv, sm.time_sec, None);
+                            record.add_move(&sm.mv, sm.time_sec, None, opposite(my_color));
 
                             // ponderhit → bestmove を待つ
                             let ponderhit_start = Instant::now();
@@ -274,7 +290,7 @@ pub fn run_game_session(
 
                             pos.apply_csa_move(&csa_move)?;
                             usi_moves.push(result.bestmove.clone());
-                            record.add_move(&csa_move, 0, Some(&info));
+                            record.add_move(&csa_move, 0, Some(&info), my_color);
 
                             // 次の ponder（ponderhit からの経過を推定消費とする）
                             if config.game.ponder
@@ -344,7 +360,7 @@ pub fn run_game_session(
                             pos.apply_csa_move(&sm.mv)?;
                             usi_moves.push(opponent_usi);
                             clock.consume(opposite(my_color), sm.time_sec);
-                            record.add_move(&sm.mv, sm.time_sec, None);
+                            record.add_move(&sm.mv, sm.time_sec, None, opposite(my_color));
                             break; // 外側ループに戻り、自手番の処理へ
                         }
                     } else {
@@ -353,7 +369,7 @@ pub fn run_game_session(
                         pos.apply_csa_move(&sm.mv)?;
                         usi_moves.push(opponent_usi);
                         clock.consume(opposite(my_color), sm.time_sec);
-                        record.add_move(&sm.mv, sm.time_sec, None);
+                        record.add_move(&sm.mv, sm.time_sec, None, opposite(my_color));
                         break; // 外側ループに戻り、自手番の処理へ
                     }
                 }
@@ -416,6 +432,17 @@ fn gameover_str(result: &GameResult) -> String {
         GameResult::Lose => "lose".to_string(),
         GameResult::Draw => "draw".to_string(),
         _ => "draw".to_string(),
+    }
+}
+
+/// GameResult を棋譜の result 文字列に変換
+fn record_result_str(result: &GameResult) -> &'static str {
+    match result {
+        GameResult::Win => "win",
+        GameResult::Lose => "lose",
+        GameResult::Draw => "sennichite",
+        GameResult::Interrupted => "interrupted",
+        GameResult::Censored => "interrupted",
     }
 }
 
@@ -499,7 +526,13 @@ fn build_floodgate_comment(
 
 /// 対局終了を待つ
 fn wait_game_end(conn: &mut CsaConnection) -> Result<GameResult> {
+    let start = Instant::now();
+    const TIMEOUT: Duration = Duration::from_secs(30);
     loop {
+        if start.elapsed() >= TIMEOUT {
+            log::warn!("[CSA] 終局結果の受信タイムアウト ({}秒)", TIMEOUT.as_secs());
+            return Ok(GameResult::Interrupted);
+        }
         match conn.recv_move()? {
             Some(RecvEvent::GameEnd(result, msg)) => {
                 log::info!("[CSA] 対局終了: {msg}");
@@ -509,7 +542,7 @@ fn wait_game_end(conn: &mut CsaConnection) -> Result<GameResult> {
                 // 終局直前のエコー手は無視
             }
             None => {
-                // タイムアウト: 少し待つ
+                // タイムアウト: 次の recv_move で再試行
             }
         }
     }
