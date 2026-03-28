@@ -72,13 +72,17 @@ pub struct CsaConnection {
 impl CsaConnection {
     /// CSAサーバーに接続する
     pub fn connect(host: &str, port: u16, tcp_keepalive: bool) -> Result<Self> {
-        let addr = format!("{host}:{port}");
-        log::info!("[CSA] 接続中: {addr}");
-        let stream = TcpStream::connect_timeout(
-            &addr.parse().context("invalid server address")?,
-            Duration::from_secs(15),
-        )
-        .with_context(|| format!("CSAサーバー接続失敗: {addr}"))?;
+        let addr_str = format!("{host}:{port}");
+        log::info!("[CSA] 接続中: {addr_str}");
+        // DNS名を解決してから connect_timeout する
+        use std::net::ToSocketAddrs;
+        let addr = addr_str
+            .to_socket_addrs()
+            .with_context(|| format!("名前解決失敗: {addr_str}"))?
+            .next()
+            .with_context(|| format!("アドレスが見つかりません: {addr_str}"))?;
+        let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(15))
+            .with_context(|| format!("CSAサーバー接続失敗: {addr_str}"))?;
 
         if tcp_keepalive {
             set_tcp_keepalive(&stream)?;

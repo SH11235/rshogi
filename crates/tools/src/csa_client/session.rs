@@ -58,7 +58,7 @@ impl Clock {
     }
 
     /// USI go コマンドの時間引数を構築する
-    fn build_go_args(&self, margin_msec: u64) -> String {
+    fn build_go_args(&self, margin_msec: u64, side_to_move: Color) -> String {
         let btime = self.black_time_ms.max(0);
         let wtime = self.white_time_ms.max(0);
 
@@ -68,9 +68,11 @@ impl Clock {
                 btime, wtime, self.black_increment_ms, self.white_increment_ms
             )
         } else if self.black_byoyomi_ms > 0 || self.white_byoyomi_ms > 0 {
-            // USI の byoyomi は共通値のみ対応。手番側の値を使う。
-            let byoyomi =
-                (self.black_byoyomi_ms.max(self.white_byoyomi_ms) - margin_msec as i64).max(0);
+            let byoyomi_ms = match side_to_move {
+                Color::Black => self.black_byoyomi_ms,
+                Color::White => self.white_byoyomi_ms,
+            };
+            let byoyomi = (byoyomi_ms - margin_msec as i64).max(0);
             format!("btime {} wtime {} byoyomi {}", btime, wtime, byoyomi)
         } else {
             format!("btime {} wtime {}", btime, wtime)
@@ -104,8 +106,12 @@ impl Clock {
                 btime, wtime, self.black_increment_ms, self.white_increment_ms
             )
         } else if self.black_byoyomi_ms > 0 || self.white_byoyomi_ms > 0 {
-            let byoyomi =
-                (self.black_byoyomi_ms.max(self.white_byoyomi_ms) - margin_msec as i64).max(0);
+            // ponder は自手番の秒読みを使う
+            let byoyomi_ms = match my_color {
+                Color::Black => self.black_byoyomi_ms,
+                Color::White => self.white_byoyomi_ms,
+            };
+            let byoyomi = (byoyomi_ms - margin_msec as i64).max(0);
             format!("btime {} wtime {} byoyomi {}", btime, wtime, byoyomi)
         } else {
             format!("btime {} wtime {}", btime, wtime)
@@ -164,7 +170,7 @@ pub fn run_game_session(
             // 自手番: 探索して指す
             let turn_start = Instant::now();
             let position_cmd = build_position_cmd(&initial_sfen, &usi_moves);
-            let go_cmd = format!("go {}", clock.build_go_args(config.time.margin_msec));
+            let go_cmd = format!("go {}", clock.build_go_args(config.time.margin_msec, my_color));
 
             let (result, info) = engine.go(&position_cmd, &go_cmd, shutdown)?;
 
@@ -376,6 +382,7 @@ pub fn run_game_session(
                 Some(RecvEvent::GameEnd(result, msg)) => {
                     log::info!("[CSA] 対局終了: {msg}");
                     cleanup_ponder(engine, &mut ponder_state)?;
+                    record.set_result(record_result_str(&result));
                     engine.gameover(&gameover_str(&result))?;
                     return Ok((result, record));
                 }

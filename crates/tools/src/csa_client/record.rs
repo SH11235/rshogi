@@ -157,7 +157,10 @@ impl GameRecord {
             "jishogi" => writeln!(out, "%JISHOGI").unwrap(),
             "max_moves" => writeln!(out, "%MAX_MOVES").unwrap(),
             "interrupted" => writeln!(out, "%CHUDAN").unwrap(),
-            _ => {} // 不明な結果はスキップ
+            // サーバーからの #WIN/#LOSE 結果（相手投了等で終局理由が不明な場合）
+            "win" => writeln!(out, "'** result: win").unwrap(),
+            "lose" => writeln!(out, "%TORYO").unwrap(), // 相手の勝ち = こちらの投了相当
+            _ => {}
         }
         out
     }
