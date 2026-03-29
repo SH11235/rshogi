@@ -356,31 +356,37 @@ const fn bb_or_const(a: Bitboard, b: Bitboard) -> Bitboard {
 /// 歩の利きを取得
 #[inline]
 pub fn pawn_effect(color: Color, sq: Square) -> Bitboard {
-    PAWN_EFFECT[color.index()][sq.index()]
+    // SAFETY: Color::index() は 0..=1、Square::index() は 0..=80。
+    //         PAWN_EFFECT は [Color::NUM][Square::NUM] の固定長配列。
+    unsafe { *PAWN_EFFECT.get_unchecked(color.index()).get_unchecked(sq.index()) }
 }
 
 /// 桂の利きを取得
 #[inline]
 pub fn knight_effect(color: Color, sq: Square) -> Bitboard {
-    KNIGHT_EFFECT[color.index()][sq.index()]
+    // SAFETY: Color::index() は 0..=1、Square::index() は 0..=80。
+    unsafe { *KNIGHT_EFFECT.get_unchecked(color.index()).get_unchecked(sq.index()) }
 }
 
 /// 銀の利きを取得
 #[inline]
 pub fn silver_effect(color: Color, sq: Square) -> Bitboard {
-    SILVER_EFFECT[color.index()][sq.index()]
+    // SAFETY: Color::index() は 0..=1、Square::index() は 0..=80。
+    unsafe { *SILVER_EFFECT.get_unchecked(color.index()).get_unchecked(sq.index()) }
 }
 
 /// 金の利きを取得
 #[inline]
 pub fn gold_effect(color: Color, sq: Square) -> Bitboard {
-    GOLD_EFFECT[color.index()][sq.index()]
+    // SAFETY: Color::index() は 0..=1、Square::index() は 0..=80。
+    unsafe { *GOLD_EFFECT.get_unchecked(color.index()).get_unchecked(sq.index()) }
 }
 
 /// 王の利きを取得
 #[inline]
 pub fn king_effect(sq: Square) -> Bitboard {
-    KING_EFFECT[sq.index()]
+    // SAFETY: Square::index() は 0..=80、KING_EFFECT の長さは Square::NUM=81。
+    unsafe { *KING_EFFECT.get_unchecked(sq.index()) }
 }
 
 /// 駒種に応じた利きを取得（近接駒のみ）

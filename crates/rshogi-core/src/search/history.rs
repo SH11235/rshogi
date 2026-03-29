@@ -328,13 +328,28 @@ impl CapturePieceToHistory {
     /// 値を取得
     #[inline]
     pub fn get(&self, pc: Piece, to: Square, captured_pt: PieceType) -> i16 {
-        self.table[pc.index()][to.index()][captured_pt as usize].get()
+        // SAFETY: Piece::index() < PIECE_NUM=31、Square::index() < Square::NUM=81、
+        //         PieceType as usize < PIECE_TYPE_NUM=15。
+        unsafe {
+            self.table
+                .get_unchecked(pc.index())
+                .get_unchecked(to.index())
+                .get_unchecked(captured_pt as usize)
+                .get()
+        }
     }
 
     /// 値を更新
     #[inline]
     pub fn update(&mut self, pc: Piece, to: Square, captured_pt: PieceType, bonus: i32) {
-        self.table[pc.index()][to.index()][captured_pt as usize].update(bonus);
+        // SAFETY: 同上。
+        unsafe {
+            self.table
+                .get_unchecked_mut(pc.index())
+                .get_unchecked_mut(to.index())
+                .get_unchecked_mut(captured_pt as usize)
+                .update(bonus);
+        }
     }
 
     /// クリア（初期値-689）
@@ -389,13 +404,20 @@ impl PieceToHistory {
     /// 値を取得
     #[inline]
     pub fn get(&self, pc: Piece, to: Square) -> i16 {
-        self.table[pc.index()][to.index()].get()
+        // SAFETY: Piece::index() < PIECE_NUM=31、Square::index() < Square::NUM=81。
+        unsafe { self.table.get_unchecked(pc.index()).get_unchecked(to.index()).get() }
     }
 
     /// 値を更新
     #[inline]
     pub fn update(&mut self, pc: Piece, to: Square, bonus: i32) {
-        self.table[pc.index()][to.index()].update(bonus);
+        // SAFETY: 同上。
+        unsafe {
+            self.table
+                .get_unchecked_mut(pc.index())
+                .get_unchecked_mut(to.index())
+                .update(bonus);
+        }
     }
 
     /// クリア（初期値-529）
@@ -443,13 +465,15 @@ impl ContinuationHistory {
 
     #[inline]
     pub fn get_table(&self, prev_pc: Piece, prev_to: Square) -> &PieceToHistory {
-        &self.table[prev_pc.index()][prev_to.index()]
+        // SAFETY: Piece::index() < PIECE_NUM=31、Square::index() < Square::NUM=81。
+        unsafe { self.table.get_unchecked(prev_pc.index()).get_unchecked(prev_to.index()) }
     }
 
     /// 内部テーブルへの可変参照を取得
     #[inline]
     pub fn get_table_mut(&mut self, prev_pc: Piece, prev_to: Square) -> &mut PieceToHistory {
-        &mut self.table[prev_pc.index()][prev_to.index()]
+        // SAFETY: 同上。
+        unsafe { self.table.get_unchecked_mut(prev_pc.index()).get_unchecked_mut(prev_to.index()) }
     }
 
     /// 新しいContinuationHistoryを作成（ヒープ確保）
@@ -542,13 +566,30 @@ impl PawnHistory {
     /// 値を取得
     #[inline]
     pub fn get(&self, pawn_key_index: usize, pc: Piece, to: Square) -> i16 {
-        self.table[pawn_key_index][pc.index()][to.index()].get()
+        debug_assert!(pawn_key_index < PAWN_HISTORY_SIZE);
+        // SAFETY: pawn_key_index は呼び出し側でマスク済み (< PAWN_HISTORY_SIZE=8192)。
+        //         Piece::index() < PIECE_NUM=31、Square::index() < Square::NUM=81。
+        unsafe {
+            self.table
+                .get_unchecked(pawn_key_index)
+                .get_unchecked(pc.index())
+                .get_unchecked(to.index())
+                .get()
+        }
     }
 
     /// 値を更新
     #[inline]
     pub fn update(&mut self, pawn_key_index: usize, pc: Piece, to: Square, bonus: i32) {
-        self.table[pawn_key_index][pc.index()][to.index()].update(bonus);
+        debug_assert!(pawn_key_index < PAWN_HISTORY_SIZE);
+        // SAFETY: 同上。
+        unsafe {
+            self.table
+                .get_unchecked_mut(pawn_key_index)
+                .get_unchecked_mut(pc.index())
+                .get_unchecked_mut(to.index())
+                .update(bonus);
+        }
     }
 
     /// クリア（初期値-1238）

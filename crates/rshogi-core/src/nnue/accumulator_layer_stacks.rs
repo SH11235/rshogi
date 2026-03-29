@@ -298,13 +298,17 @@ impl AccumulatorStackLayerStacks {
     /// 現在のエントリを取得
     #[inline]
     pub fn current(&self) -> &StackEntryLayerStacks {
-        &self.entries[self.current]
+        debug_assert!(self.current < self.entries.len());
+        // SAFETY: current は push/pop で管理され、常に entries.len() 未満。
+        unsafe { self.entries.get_unchecked(self.current) }
     }
 
     /// 現在のエントリを取得（可変）
     #[inline]
     pub fn current_mut(&mut self) -> &mut StackEntryLayerStacks {
-        &mut self.entries[self.current]
+        debug_assert!(self.current < self.entries.len());
+        // SAFETY: 同上。
+        unsafe { self.entries.get_unchecked_mut(self.current) }
     }
 
     /// 現在のインデックスを取得
@@ -331,11 +335,15 @@ impl AccumulatorStackLayerStacks {
         let prev = self.current;
         self.current += 1;
         debug_assert!(self.current < Self::STACK_SIZE);
-        self.entries[self.current].previous = Some(prev);
-        self.entries[self.current].accumulator.computed_accumulation = false;
-        self.entries[self.current].accumulator.computed_score = false;
-        self.entries[self.current].dirty_piece = DirtyPiece::default();
-        self.entries[self.current].computed_progress = false;
+        // SAFETY: current < STACK_SIZE は上の debug_assert で検証。
+        //         push は do_move ごとに 1 回呼ばれ、pop と対になるため
+        //         current は常に STACK_SIZE 未満。
+        let entry = unsafe { self.entries.get_unchecked_mut(self.current) };
+        entry.previous = Some(prev);
+        entry.accumulator.computed_accumulation = false;
+        entry.accumulator.computed_score = false;
+        entry.dirty_piece = DirtyPiece::default();
+        entry.computed_progress = false;
     }
 
     /// スタックをポップ

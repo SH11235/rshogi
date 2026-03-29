@@ -224,8 +224,10 @@ pub(super) fn set_cont_history_for_move(
         let h = unsafe { ctx.history.as_ref_unchecked() };
         NonNull::from(h.continuation_history[in_check_idx][capture_idx].get_table(piece, to))
     };
-    st.stack[ply as usize].cont_history_ptr = table;
-    st.stack[ply as usize].cont_hist_key = Some(ContHistKey::new(in_check, capture, piece, to));
+    // SAFETY: ply < MAX_PLY < STACK_SIZE は上の debug_assert で検証済み。
+    let ss = unsafe { st.stack.get_unchecked_mut(ply as usize) };
+    ss.cont_history_ptr = table;
+    ss.cont_hist_key = Some(ContHistKey::new(in_check, capture, piece, to));
 }
 
 /// ContinuationHistory をクリア（null move用）
@@ -234,8 +236,10 @@ pub(super) fn set_cont_history_for_move(
 /// sentinel keyを設定してYOと同じsentinelテーブルへの読み書きが行われるようにする。
 #[inline]
 pub(super) fn clear_cont_history_for_null(st: &mut SearchState, ctx: &SearchContext<'_>, ply: i32) {
-    st.stack[ply as usize].cont_history_ptr = ctx.cont_history_sentinel;
-    st.stack[ply as usize].cont_hist_key = Some(ContHistKey::null_sentinel());
+    // SAFETY: ply < MAX_PLY < STACK_SIZE。
+    let ss = unsafe { st.stack.get_unchecked_mut(ply as usize) };
+    ss.cont_history_ptr = ctx.cont_history_sentinel;
+    ss.cont_hist_key = Some(ContHistKey::null_sentinel());
 }
 
 // =============================================================================
@@ -247,8 +251,10 @@ pub(super) fn clear_cont_history_for_null(st: &mut SearchState, ctx: &SearchCont
 pub(super) fn take_prior_reduction(st: &mut SearchState, ply: i32) -> i32 {
     if ply >= 1 {
         let parent_idx = (ply - 1) as usize;
-        let pr = st.stack[parent_idx].reduction;
-        st.stack[parent_idx].reduction = 0;
+        // SAFETY: ply >= 1 なので parent_idx >= 0。ply < MAX_PLY < STACK_SIZE。
+        let ss = unsafe { st.stack.get_unchecked_mut(parent_idx) };
+        let pr = ss.reduction;
+        ss.reduction = 0;
         pr
     } else {
         0
