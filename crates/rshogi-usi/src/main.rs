@@ -30,7 +30,7 @@ use rshogi_core::search::{
     DEFAULT_DRAW_VALUE_BLACK, DEFAULT_DRAW_VALUE_WHITE, LimitsType, Search, SearchInfo,
     SearchResult, SearchTuneParams,
 };
-use rshogi_core::types::Move;
+use rshogi_core::types::{EnteringKingRule, Move};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -462,6 +462,9 @@ impl UsiEngine {
             "option name MaterialLevel type combo default none var none var 1 var 2 var 3 var 4 var 7 var 8 var 9"
         );
         println!("option name EvalFile type string default eval/nn.bin");
+        println!(
+            "option name EnteringKingRule type combo default CSARule27 var NoEnteringKing var CSARule24 var CSARule24H var CSARule27 var CSARule27H var TryRule"
+        );
         // FV_SCALE: 0=自動判定、1以上=指定値でオーバーライド
         // 水匠5等は24、YaneuraOuデフォルトは16
         println!("option name FV_SCALE type spin default 0 min 0 max 100");
@@ -889,6 +892,15 @@ impl UsiEngine {
                     }
                 } else {
                     eprintln!("info string Warning: MaterialLevel parse error for '{value}'");
+                }
+            }
+            "EnteringKingRule" => {
+                if let Some(rule) = EnteringKingRule::from_usi(&value) {
+                    if let Some(search) = self.search.as_mut() {
+                        search.set_entering_king_rule(rule);
+                    }
+                } else {
+                    eprintln!("info string Warning: unknown EnteringKingRule '{value}'");
                 }
             }
             "EvalFile" => {

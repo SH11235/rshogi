@@ -24,7 +24,7 @@ use super::{
 };
 use crate::position::Position;
 use crate::tt::TranspositionTable;
-use crate::types::{Depth, MAX_PLY, Move, Value};
+use crate::types::{Depth, EnteringKingRule, MAX_PLY, Move, Value};
 
 // =============================================================================
 // SearchInfo - 探索情報（USI info出力用）
@@ -248,6 +248,8 @@ pub struct Search {
     draw_value_white: i32,
     /// SPSA向け探索係数
     search_tune_params: SearchTuneParams,
+    /// 入玉宣言勝ちルール
+    entering_king_rule: EnteringKingRule,
 }
 
 /// best_move_changes を集約する（並列探索対応のためのヘルパー）
@@ -701,6 +703,7 @@ impl Search {
             draw_value_black: DEFAULT_DRAW_VALUE_BLACK,
             draw_value_white: DEFAULT_DRAW_VALUE_WHITE,
             search_tune_params,
+            entering_king_rule: EnteringKingRule::default(),
         }
     }
 
@@ -859,6 +862,16 @@ impl Search {
         self.draw_value_white
     }
 
+    /// 入玉宣言勝ちルールを設定する。
+    pub fn set_entering_king_rule(&mut self, rule: EnteringKingRule) {
+        self.entering_king_rule = rule;
+    }
+
+    /// 現在の入玉宣言勝ちルールを取得する。
+    pub fn entering_king_rule(&self) -> EnteringKingRule {
+        self.entering_king_rule
+    }
+
     /// 探索スレッド数を設定
     pub fn set_num_threads(&mut self, num: usize) {
         // WASM builds without wasm-threads feature use single-threaded search only.
@@ -964,6 +977,7 @@ impl Search {
         worker.search_tune_params = self.search_tune_params;
         worker.draw_value_black = self.draw_value_black;
         worker.draw_value_white = self.draw_value_white;
+        worker.entering_king_rule = self.entering_king_rule;
 
         // 探索状態のリセット（履歴はクリアしない）
         worker.prepare_search();
@@ -994,6 +1008,7 @@ impl Search {
                 self.max_moves_to_draw,
                 draw_value_black,
                 draw_value_white,
+                self.entering_king_rule,
                 skill_enabled,
             );
         }
@@ -1301,6 +1316,23 @@ where
 
     // ルート手を初期化
     worker.state.root_moves = super::RootMoves::from_legal_moves(pos, &limits.search_moves);
+
+    // 入玉宣言勝ちチェック（YO準拠: root のみ）
+    let decl_move = pos.declaration_win(worker.entering_king_rule);
+    if decl_move != Move::NONE {
+        // 宣言勝ち可能: root_moves に追加してスコア MATE を設定
+        // searchmoves に関係なく追加する（YO準拠）
+        if worker.state.root_moves.find(decl_move).is_none() {
+            worker.state.root_moves.push(super::RootMove::new(decl_move));
+        }
+        if let Some(idx) = worker.state.root_moves.find(decl_move) {
+            worker.state.root_moves[idx].score = Value::MATE;
+            worker.state.root_moves.move_to_front(idx);
+        }
+        worker.state.best_move = decl_move;
+        worker.state.completed_depth = 1;
+        return 0;
+    }
 
     if worker.state.root_moves.is_empty() {
         worker.state.best_move = Move::NONE;

@@ -657,6 +657,11 @@ impl RootMoves {
         });
     }
 
+    /// RootMoveを末尾に追加
+    pub fn push(&mut self, rm: RootMove) {
+        self.moves.push(rm);
+    }
+
     /// 指定した手を含むか
     pub fn contains(&self, mv: Move) -> bool {
         self.moves.iter().any(|rm| rm.mv() == mv)

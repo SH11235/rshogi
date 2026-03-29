@@ -23,6 +23,7 @@
 mod bound;
 mod color;
 mod depth;
+mod entering_king;
 mod file;
 mod hand;
 pub mod json;
@@ -37,6 +38,7 @@ mod value;
 pub use bound::Bound;
 pub use color::Color;
 pub use depth::*;
+pub use entering_king::EnteringKingRule;
 pub use file::File;
 pub use hand::Hand;
 pub use json::*;
