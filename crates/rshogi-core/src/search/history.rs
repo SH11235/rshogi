@@ -181,13 +181,21 @@ impl ButterflyHistory {
     /// 値を取得
     #[inline]
     pub fn get(&self, color: Color, mv: Move) -> i16 {
-        self.table[color.index()][mv.history_index()].get()
+        // SAFETY: Color::index() は 0 or 1 で Color::NUM=2 の範囲内。
+        //         Move::history_index() < FROM_TO_SIZE。
+        unsafe { self.table.get_unchecked(color.index()).get_unchecked(mv.history_index()).get() }
     }
 
     /// 値を更新
     #[inline]
     pub fn update(&mut self, color: Color, mv: Move, bonus: i32) {
-        self.table[color.index()][mv.history_index()].update(bonus);
+        // SAFETY: 同上。
+        unsafe {
+            self.table
+                .get_unchecked_mut(color.index())
+                .get_unchecked_mut(mv.history_index())
+                .update(bonus);
+        }
     }
 
     /// クリア（初期値68）
@@ -322,7 +330,16 @@ impl CapturePieceToHistory {
             captured_idx,
             PIECE_TYPE_NUM
         );
-        self.table[pc.index()][to.index()][captured_idx].get()
+        // SAFETY: Piece::index() < PIECE_NUM=31、Square::index() < Square::NUM=81、
+        //         captured は有効な Piece であり、下位4bit は PieceType(0..=14) なので
+        //         captured_idx < PIECE_TYPE_NUM=15。
+        unsafe {
+            self.table
+                .get_unchecked(pc.index())
+                .get_unchecked(to.index())
+                .get_unchecked(captured_idx)
+                .get()
+        }
     }
 
     /// 値を取得
@@ -738,33 +755,69 @@ impl CorrectionHistory {
 
     #[inline]
     pub fn pawn_value(&self, idx: usize, color: Color) -> i16 {
-        self.pawn[idx % CORRECTION_HISTORY_SIZE][color.index()].get()
+        let masked = idx % CORRECTION_HISTORY_SIZE;
+        // SAFETY: masked < CORRECTION_HISTORY_SIZE（剰余演算で保証）。
+        //         Color::index() は 0 or 1 で Color::NUM=2 の範囲内。
+        unsafe { self.pawn.get_unchecked(masked).get_unchecked(color.index()).get() }
     }
 
     #[inline]
     pub fn update_pawn(&mut self, idx: usize, color: Color, bonus: i32) {
-        self.pawn[idx % CORRECTION_HISTORY_SIZE][color.index()].update(bonus);
+        let masked = idx % CORRECTION_HISTORY_SIZE;
+        // SAFETY: 同上。
+        unsafe {
+            self.pawn
+                .get_unchecked_mut(masked)
+                .get_unchecked_mut(color.index())
+                .update(bonus);
+        }
     }
 
     #[inline]
     pub fn minor_value(&self, idx: usize, color: Color) -> i16 {
-        self.minor[idx % CORRECTION_HISTORY_SIZE][color.index()].get()
+        let masked = idx % CORRECTION_HISTORY_SIZE;
+        // SAFETY: masked < CORRECTION_HISTORY_SIZE（剰余演算で保証）。
+        //         Color::index() は 0 or 1 で Color::NUM=2 の範囲内。
+        unsafe { self.minor.get_unchecked(masked).get_unchecked(color.index()).get() }
     }
 
     #[inline]
     pub fn update_minor(&mut self, idx: usize, color: Color, bonus: i32) {
-        self.minor[idx % CORRECTION_HISTORY_SIZE][color.index()].update(bonus);
+        let masked = idx % CORRECTION_HISTORY_SIZE;
+        // SAFETY: 同上。
+        unsafe {
+            self.minor
+                .get_unchecked_mut(masked)
+                .get_unchecked_mut(color.index())
+                .update(bonus);
+        }
     }
 
     #[inline]
     pub fn non_pawn_value(&self, idx: usize, board_color: Color, stm: Color) -> i16 {
-        self.non_pawn[idx % CORRECTION_HISTORY_SIZE][board_color.index()][stm.index()].get()
+        let masked = idx % CORRECTION_HISTORY_SIZE;
+        // SAFETY: masked < CORRECTION_HISTORY_SIZE（剰余演算で保証）。
+        //         Color::index() は 0 or 1 で Color::NUM=2 の範囲内。
+        unsafe {
+            self.non_pawn
+                .get_unchecked(masked)
+                .get_unchecked(board_color.index())
+                .get_unchecked(stm.index())
+                .get()
+        }
     }
 
     #[inline]
     pub fn update_non_pawn(&mut self, idx: usize, board_color: Color, stm: Color, bonus: i32) {
-        self.non_pawn[idx % CORRECTION_HISTORY_SIZE][board_color.index()][stm.index()]
-            .update(bonus);
+        let masked = idx % CORRECTION_HISTORY_SIZE;
+        // SAFETY: 同上。
+        unsafe {
+            self.non_pawn
+                .get_unchecked_mut(masked)
+                .get_unchecked_mut(board_color.index())
+                .get_unchecked_mut(stm.index())
+                .update(bonus);
+        }
     }
 
     #[inline]
@@ -775,7 +828,15 @@ impl CorrectionHistory {
         pc: Piece,
         to: Square,
     ) -> i16 {
-        self.continuation[prev_pc.index()][prev_to.index()][pc.index()][to.index()].get()
+        // SAFETY: Piece::index() < Piece::NUM=31、Square::index() < Square::NUM=81。
+        unsafe {
+            self.continuation
+                .get_unchecked(prev_pc.index())
+                .get_unchecked(prev_to.index())
+                .get_unchecked(pc.index())
+                .get_unchecked(to.index())
+                .get()
+        }
     }
 
     #[inline]
@@ -787,7 +848,15 @@ impl CorrectionHistory {
         to: Square,
         bonus: i32,
     ) {
-        self.continuation[prev_pc.index()][prev_to.index()][pc.index()][to.index()].update(bonus);
+        // SAFETY: Piece::index() < Piece::NUM=31、Square::index() < Square::NUM=81。
+        unsafe {
+            self.continuation
+                .get_unchecked_mut(prev_pc.index())
+                .get_unchecked_mut(prev_to.index())
+                .get_unchecked_mut(pc.index())
+                .get_unchecked_mut(to.index())
+                .update(bonus);
+        }
     }
 }
 

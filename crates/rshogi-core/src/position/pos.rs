@@ -1298,9 +1298,12 @@ impl Position {
             // 盤上から除去
             self.remove_piece_internal(to);
             // 手駒に戻す
-            self.hand[us.index()] = self.hand[us.index()].add(pt);
+            debug_assert!(us.index() < Color::NUM);
+            // SAFETY: Color::index() は 0 or 1 で hand は [Hand; Color::NUM=2]。
+            let hand_ref = unsafe { self.hand.get_unchecked_mut(us.index()) };
+            *hand_ref = hand_ref.add(pt);
 
-            let new_count = self.hand[us.index()].count(pt) as u8;
+            let new_count = unsafe { self.hand.get_unchecked(us.index()) }.count(pt) as u8;
             let hand_bp = ExtBonaPiece::from_hand(us, pt, new_count);
             self.piece_list.put_piece_on_hand(piece_no, hand_bp);
 
@@ -1332,7 +1335,8 @@ impl Position {
                 let cap_pt = captured.piece_type().unpromote();
 
                 // PieceList: 手駒から取られた駒を盤上に復元
-                let hand_count = self.hand[us.index()].count(cap_pt) as u8;
+                // SAFETY: Color::index() は 0 or 1 で hand は [Hand; Color::NUM=2]。
+                let hand_count = unsafe { self.hand.get_unchecked(us.index()) }.count(cap_pt) as u8;
                 let hand_bp_fb =
                     crate::nnue::BonaPiece::from_hand_piece(Color::Black, us, cap_pt, hand_count);
                 let piece_no_cap = self.piece_list.piece_no_of_hand(hand_bp_fb);
@@ -1342,7 +1346,9 @@ impl Position {
                 self.remove_piece_internal(to);
                 self.put_piece_internal(captured, to);
                 // 手駒から除去
-                self.hand[us.index()] = self.hand[us.index()].sub(cap_pt);
+                // SAFETY: Color::index() は 0 or 1 で hand は [Hand; Color::NUM=2]。
+                let hand_ref = unsafe { self.hand.get_unchecked_mut(us.index()) };
+                *hand_ref = hand_ref.sub(cap_pt);
 
                 self.put_piece_internal(original_pc, from);
 
@@ -1667,7 +1673,9 @@ impl Position {
 
         // 開き王手：fromがblockerで、fromが王との直線上から外れるか
         let them = !us;
-        let ksq = self.king_square[them.index()];
+        debug_assert!(them.index() < Color::NUM);
+        // SAFETY: Color::index() は 0 or 1 で king_square は [Square; 2]。
+        let ksq = unsafe { *self.king_square.get_unchecked(them.index()) };
         // blockers_for_king には敵駒も含まれるため、自駒でフィルタ
         let blockers = self.blockers_for_king(them) & self.pieces_c(us);
 

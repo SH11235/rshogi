@@ -192,7 +192,9 @@ impl LayerStacks {
     /// 生スコアを計算（スケーリング前）
     pub fn evaluate_raw(&self, bucket_index: usize, input: &[u8; NNUE_PYTORCH_L1]) -> i32 {
         debug_assert!(bucket_index < NUM_LAYER_STACK_BUCKETS);
-        self.buckets[bucket_index].propagate(input)
+        // SAFETY: bucket_index は progress_sum_to_bucket() または clamp(0, NUM-1) 由来で
+        //         常に NUM_LAYER_STACK_BUCKETS 未満。
+        unsafe { self.buckets.get_unchecked(bucket_index) }.propagate(input)
     }
 
     /// 生スコアを計算（診断情報付き）
