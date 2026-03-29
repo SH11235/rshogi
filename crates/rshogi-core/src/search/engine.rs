@@ -1332,6 +1332,10 @@ where
         worker.state.best_move = decl_move;
         worker.state.completed_depth = 1;
 
+        if is_main {
+            eprintln!("info string declaration win: {}", decl_move.to_usi());
+        }
+
         // ponder/infinite 待機: bestmove を早出ししない（USI仕様準拠）
         if let Some(ref ms) = main_state {
             while !worker.state.abort

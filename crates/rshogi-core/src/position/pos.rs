@@ -1730,6 +1730,10 @@ impl Position {
     }
 
     /// トライルール: 玉が敵の初期玉位置に移動できるか判定
+    ///
+    /// 玉が既にトライ升にいる場合は `Move::NONE` を返す（YO 準拠）。
+    /// king_effect に自マスは含まれないため、隣接判定で除外される。
+    /// この場合、前の手番でトライ升への移動が成立しておりサーバーが終局を判定するはず。
     fn try_rule_move(&self, us: Color) -> Move {
         let ksq = self.king_square(us);
         let try_sq = match us {
@@ -1739,7 +1743,7 @@ impl Position {
             Color::White => Square::new(File::File5, Rank::Rank9),
         };
 
-        // (1) 玉がトライ升に隣接しているか
+        // (1) 玉がトライ升に隣接しているか（ksq == try_sq の場合も false → YO 準拠）
         if !king_effect(ksq).contains(try_sq) {
             return Move::NONE;
         }
