@@ -763,7 +763,8 @@ impl Position {
         let st = self.cur_state_mut();
 
         // 各駒種で王手となるマス
-        // SAFETY: 全 PieceType 定数は 0..=14、check_squares の長さは PieceType::NUM+1=15。
+        // SAFETY: 全 PieceType 定数は 1..=14 (Pawn=1, Dragon=14)、
+        //         check_squares の長さは PieceType::NUM+1=15 なので全インデックスが範囲内。
         unsafe {
             *st.check_squares.get_unchecked_mut(PieceType::Pawn as usize) = pawn_effect(them, ksq);
             *st.check_squares.get_unchecked_mut(PieceType::Knight as usize) =
@@ -1560,8 +1561,10 @@ impl Position {
             let mut st_idx = prev_idx;
             for _ in 0..3 {
                 debug_assert!(st_idx < self.state_stack.len());
-                // SAFETY: st_idx は .previous チェーンで辿られ、push_state で設定された
-                //         有効なインデックスのみを保持する。NO_PREVIOUS は上のガード条件で除外済み。
+                // SAFETY: ループ不変条件: st_idx はループ先頭時点で常に有効なインデックス。
+                //   - 1回目: prev_idx は関数先頭で NO_PREVIOUS チェック済み。
+                //   - 2・3回目: 前の反復で NO_PREVIOUS なら break するため無効値では到達しない。
+                //   push_state で設定された .previous は常に有効なインデックスか NO_PREVIOUS。
                 st_idx = unsafe { self.state_stack.get_unchecked(st_idx) }.previous;
                 if st_idx == StateInfo::NO_PREVIOUS {
                     break;

@@ -299,7 +299,8 @@ impl AccumulatorStackLayerStacks {
     #[inline]
     pub fn current(&self) -> &StackEntryLayerStacks {
         debug_assert!(self.current < self.entries.len());
-        // SAFETY: current は push/pop で管理され、常に entries.len() 未満。
+        // SAFETY: current は push/pop の対でインクリメント/デクリメントされ、
+        //         do_move と undo_move の対称呼び出しにより 0 <= current < STACK_SIZE が保証される。
         unsafe { self.entries.get_unchecked(self.current) }
     }
 
@@ -307,7 +308,7 @@ impl AccumulatorStackLayerStacks {
     #[inline]
     pub fn current_mut(&mut self) -> &mut StackEntryLayerStacks {
         debug_assert!(self.current < self.entries.len());
-        // SAFETY: 同上。
+        // SAFETY: 同上。do_move/undo_move の対称呼び出しで current は常に範囲内。
         unsafe { self.entries.get_unchecked_mut(self.current) }
     }
 
