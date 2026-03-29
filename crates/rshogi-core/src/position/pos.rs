@@ -104,12 +104,17 @@ impl Position {
 
     #[inline]
     fn cur_state(&self) -> &StateInfo {
-        &self.state_stack[self.state_idx]
+        debug_assert!(self.state_idx < self.state_stack.len());
+        // SAFETY: state_idx は push_state で設定され、常に state_stack.len() 未満。
+        //         state_stack は do_move で push / undo_move で pop され、不変条件を維持する。
+        unsafe { self.state_stack.get_unchecked(self.state_idx) }
     }
 
     #[inline]
     fn cur_state_mut(&mut self) -> &mut StateInfo {
-        &mut self.state_stack[self.state_idx]
+        debug_assert!(self.state_idx < self.state_stack.len());
+        // SAFETY: state_idx は push_state で設定され、常に state_stack.len() 未満。
+        unsafe { self.state_stack.get_unchecked_mut(self.state_idx) }
     }
 
     /// 状態スタックに新しい StateInfo を積む（必要なら再利用）
@@ -118,7 +123,8 @@ impl Position {
         let next_idx = self.state_idx + 1;
         st.previous = self.state_idx;
         if self.state_stack.len() > next_idx {
-            self.state_stack[next_idx] = st;
+            // SAFETY: 上の条件で next_idx < state_stack.len() を保証済み。
+            unsafe { *self.state_stack.get_unchecked_mut(next_idx) = st };
         } else {
             self.state_stack.push(st);
         }
@@ -156,7 +162,9 @@ impl Position {
     /// 指定マスの駒を取得
     #[inline]
     pub fn piece_on(&self, sq: Square) -> Piece {
-        self.board[sq.index()]
+        debug_assert!(sq.index() < Square::NUM);
+        // SAFETY: Square::index() は 0..=80 (Square::NUM=81)、board の長さは Square::NUM。
+        unsafe { *self.board.get_unchecked(sq.index()) }
     }
 
     /// 直前の手で取られた駒を返す
@@ -170,25 +178,39 @@ impl Position {
     /// 全駒のBitboard（占有）
     #[inline]
     pub fn occupied(&self) -> Bitboard {
-        self.by_color[Color::Black.index()] | self.by_color[Color::White.index()]
+        // SAFETY: Color::Black.index()=0, Color::White.index()=1、by_color の長さは Color::NUM=2。
+        unsafe {
+            *self.by_color.get_unchecked(Color::Black.index())
+                | *self.by_color.get_unchecked(Color::White.index())
+        }
     }
 
     /// 指定駒種のBitboard
     #[inline]
     pub fn pieces_pt(&self, pt: PieceType) -> Bitboard {
-        self.by_type[pt as usize]
+        debug_assert!((pt as usize) < self.by_type.len());
+        // SAFETY: PieceType は 0..=14、by_type の長さは PieceType::NUM+1=15。
+        unsafe { *self.by_type.get_unchecked(pt as usize) }
     }
 
     /// 指定手番の駒のBitboard
     #[inline]
     pub fn pieces_c(&self, c: Color) -> Bitboard {
-        self.by_color[c.index()]
+        debug_assert!(c.index() < Color::NUM);
+        // SAFETY: Color::index() は 0..=1、by_color の長さは Color::NUM=2。
+        unsafe { *self.by_color.get_unchecked(c.index()) }
     }
 
     /// 指定手番・駒種のBitboard
     #[inline]
     pub fn pieces(&self, c: Color, pt: PieceType) -> Bitboard {
-        self.by_color[c.index()] & self.by_type[pt as usize]
+        debug_assert!(c.index() < Color::NUM);
+        debug_assert!((pt as usize) < self.by_type.len());
+        // SAFETY: Color::index() は 0..=1、by_color の長さは Color::NUM=2。
+        //         PieceType は 0..=14、by_type の長さは PieceType::NUM+1=15。
+        unsafe {
+            *self.by_color.get_unchecked(c.index()) & *self.by_type.get_unchecked(pt as usize)
+        }
     }
 
     /// 駒種集合のBitboard（先後無視）
@@ -619,12 +641,18 @@ impl Position {
     }
 
     fn put_piece_internal(&mut self, pc: Piece, sq: Square) {
+        debug_assert!(sq.index() < Square::NUM);
         debug_assert!(self.board[sq.index()].is_none());
         let pt = pc.piece_type();
 
-        self.board[sq.index()] = pc;
-        self.by_type[pt as usize].set(sq);
-        self.by_color[pc.color().index()].set(sq);
+        // SAFETY: Square::index() は 0..=80 (Square::NUM=81)、board の長さは Square::NUM。
+        unsafe { *self.board.get_unchecked_mut(sq.index()) = pc };
+        debug_assert!((pt as usize) < self.by_type.len());
+        debug_assert!(pc.color().index() < Color::NUM);
+        // SAFETY: PieceType は 0..=14、by_type の長さは PieceType::NUM+1=15。
+        //         Color::index() は 0..=1、by_color の長さは Color::NUM=2。
+        unsafe { self.by_type.get_unchecked_mut(pt as usize) }.set(sq);
+        unsafe { self.by_color.get_unchecked_mut(pc.color().index()) }.set(sq);
 
         // 合成Bitboardの差分更新
         if Self::is_gold_like(pt) {
@@ -647,13 +675,19 @@ impl Position {
     }
 
     fn remove_piece_internal(&mut self, sq: Square) {
-        let pc = self.board[sq.index()];
+        debug_assert!(sq.index() < Square::NUM);
+        // SAFETY: Square::index() は 0..=80 (Square::NUM=81)、board の長さは Square::NUM。
+        let pc = unsafe { *self.board.get_unchecked(sq.index()) };
         debug_assert!(pc.is_some());
         let pt = pc.piece_type();
 
-        self.board[sq.index()] = Piece::NONE;
-        self.by_type[pt as usize].clear(sq);
-        self.by_color[pc.color().index()].clear(sq);
+        unsafe { *self.board.get_unchecked_mut(sq.index()) = Piece::NONE };
+        debug_assert!((pt as usize) < self.by_type.len());
+        debug_assert!(pc.color().index() < Color::NUM);
+        // SAFETY: PieceType は 0..=14、by_type の長さは PieceType::NUM+1=15。
+        //         Color::index() は 0..=1、by_color の長さは Color::NUM=2。
+        unsafe { self.by_type.get_unchecked_mut(pt as usize) }.clear(sq);
+        unsafe { self.by_color.get_unchecked_mut(pc.color().index()) }.clear(sq);
 
         // 合成Bitboardの差分更新
         if Self::is_gold_like(pt) {
@@ -1098,8 +1132,10 @@ impl Position {
         if gives_check {
             let ksq = self.king_square[them.index()];
             // 直接王手
-            checkers |=
-                self.cur_state().check_squares[moved_pt as usize] & Bitboard::from_square(moved_to);
+            debug_assert!((moved_pt as usize) < PieceType::NUM + 1);
+            // SAFETY: moved_pt は PieceType (0..=14)、check_squares の長さは PieceType::NUM+1=15。
+            checkers |= unsafe { *self.cur_state().check_squares.get_unchecked(moved_pt as usize) }
+                & Bitboard::from_square(moved_to);
 
             // 開き王手（動かした駒が遮断駒だった場合）
             // discovered(from, to, ksq, blockers) と同等の判定
