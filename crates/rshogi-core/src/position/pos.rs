@@ -763,22 +763,37 @@ impl Position {
         let st = self.cur_state_mut();
 
         // 各駒種で王手となるマス
-        st.check_squares[PieceType::Pawn as usize] = pawn_effect(them, ksq);
-        st.check_squares[PieceType::Knight as usize] = knight_effect(them, ksq);
-        st.check_squares[PieceType::Silver as usize] = silver_effect(them, ksq);
-        st.check_squares[PieceType::Gold as usize] = gold_effect(them, ksq);
-        st.check_squares[PieceType::King as usize] = Bitboard::EMPTY; // 玉で王手はない
-        st.check_squares[PieceType::Lance as usize] = lance_effect(them, ksq, occupied);
-        st.check_squares[PieceType::Bishop as usize] = bishop_effect(ksq, occupied);
-        st.check_squares[PieceType::Rook as usize] = rook_effect(ksq, occupied);
+        // SAFETY: 全 PieceType 定数は 1..=14 (Pawn=1, Dragon=14)、
+        //         check_squares の長さは PieceType::NUM+1=15 なので全インデックスが範囲内。
+        unsafe {
+            *st.check_squares.get_unchecked_mut(PieceType::Pawn as usize) = pawn_effect(them, ksq);
+            *st.check_squares.get_unchecked_mut(PieceType::Knight as usize) =
+                knight_effect(them, ksq);
+            *st.check_squares.get_unchecked_mut(PieceType::Silver as usize) =
+                silver_effect(them, ksq);
+            *st.check_squares.get_unchecked_mut(PieceType::Gold as usize) = gold_effect(them, ksq);
+            *st.check_squares.get_unchecked_mut(PieceType::King as usize) = Bitboard::EMPTY;
+            *st.check_squares.get_unchecked_mut(PieceType::Lance as usize) =
+                lance_effect(them, ksq, occupied);
+            *st.check_squares.get_unchecked_mut(PieceType::Bishop as usize) =
+                bishop_effect(ksq, occupied);
+            *st.check_squares.get_unchecked_mut(PieceType::Rook as usize) =
+                rook_effect(ksq, occupied);
 
-        // 成駒
-        st.check_squares[PieceType::ProPawn as usize] = gold_effect(them, ksq);
-        st.check_squares[PieceType::ProLance as usize] = gold_effect(them, ksq);
-        st.check_squares[PieceType::ProKnight as usize] = gold_effect(them, ksq);
-        st.check_squares[PieceType::ProSilver as usize] = gold_effect(them, ksq);
-        st.check_squares[PieceType::Horse as usize] = horse_effect(ksq, occupied);
-        st.check_squares[PieceType::Dragon as usize] = dragon_effect(ksq, occupied);
+            // 成駒
+            *st.check_squares.get_unchecked_mut(PieceType::ProPawn as usize) =
+                gold_effect(them, ksq);
+            *st.check_squares.get_unchecked_mut(PieceType::ProLance as usize) =
+                gold_effect(them, ksq);
+            *st.check_squares.get_unchecked_mut(PieceType::ProKnight as usize) =
+                gold_effect(them, ksq);
+            *st.check_squares.get_unchecked_mut(PieceType::ProSilver as usize) =
+                gold_effect(them, ksq);
+            *st.check_squares.get_unchecked_mut(PieceType::Horse as usize) =
+                horse_effect(ksq, occupied);
+            *st.check_squares.get_unchecked_mut(PieceType::Dragon as usize) =
+                dragon_effect(ksq, occupied);
+        }
     }
 
     // ========== パス権 ==========
@@ -1545,14 +1560,21 @@ impl Position {
             let mut dist = 4;
             let mut st_idx = prev_idx;
             for _ in 0..3 {
-                st_idx = self.state_stack[st_idx].previous;
+                debug_assert!(st_idx < self.state_stack.len());
+                // SAFETY: ループ不変条件: st_idx はループ先頭時点で常に有効なインデックス。
+                //   - 1回目: prev_idx は関数先頭で NO_PREVIOUS チェック済み。
+                //   - 2・3回目: 前の反復で NO_PREVIOUS なら break するため無効値では到達しない。
+                //   push_state で設定された .previous は常に有効なインデックスか NO_PREVIOUS。
+                st_idx = unsafe { self.state_stack.get_unchecked(st_idx) }.previous;
                 if st_idx == StateInfo::NO_PREVIOUS {
                     break;
                 }
             }
 
             while dist <= max_back && st_idx != StateInfo::NO_PREVIOUS {
-                let stp = &self.state_stack[st_idx];
+                debug_assert!(st_idx < self.state_stack.len());
+                // SAFETY: 同上。
+                let stp = unsafe { self.state_stack.get_unchecked(st_idx) };
                 if stp.board_key == board_key {
                     let prev_hand = stp.hand_snapshot[side.index()];
                     let cur_hand = hand_snapshot[side.index()];
@@ -1595,7 +1617,9 @@ impl Position {
                 if prev_same_side == StateInfo::NO_PREVIOUS {
                     break;
                 }
-                st_idx = self.state_stack[prev_same_side].previous;
+                debug_assert!(prev_same_side < self.state_stack.len());
+                // SAFETY: prev_same_side は .previous チェーンの有効なインデックス。
+                st_idx = unsafe { self.state_stack.get_unchecked(prev_same_side) }.previous;
                 dist += 2;
             }
         }

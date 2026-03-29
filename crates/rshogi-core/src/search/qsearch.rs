@@ -92,7 +92,8 @@ pub(super) fn qsearch<const NT: u8>(
     let tt_hit = tt_result.found;
     let mut tt_data = tt_result.data;
     let pv_hit = tt_hit && tt_data.is_pv;
-    st.stack[ply as usize].tt_hit = tt_hit;
+    // SAFETY: ply < MAX_PLY は上のガードで保証。STACK_SIZE = MAX_PLY + 10。
+    unsafe { st.stack.get_unchecked_mut(ply as usize) }.tt_hit = tt_hit;
     // probe() で to_move 変換に失敗した手は除外済み。
     // qsearch 側で pseudo-legal で再度潰さず、そのまま使用する。
     let tt_move = if tt_hit { tt_data.mv } else { Move::NONE };
@@ -217,7 +218,8 @@ pub(super) fn qsearch<const NT: u8>(
                         depth: DEPTH_QS,
                         bound: Bound::Exact,
                         // mate1ではss->ttPvを使用
-                        is_pv: st.stack[ply as usize].tt_pv,
+                        // SAFETY: ply < MAX_PLY < STACK_SIZE。
+                        is_pv: unsafe { st.stack.get_unchecked(ply as usize) }.tt_pv,
                         tt_move: mate_move,
                         stored_value: mate_value,
                         eval: unadjusted_static_eval,
@@ -231,7 +233,7 @@ pub(super) fn qsearch<const NT: u8>(
                     tt_result.write(
                         key,
                         mate_value,
-                        st.stack[ply as usize].tt_pv,
+                        unsafe { st.stack.get_unchecked(ply as usize) }.tt_pv,
                         Bound::Exact,
                         DEPTH_QS,
                         mate_move,
@@ -256,7 +258,8 @@ pub(super) fn qsearch<const NT: u8>(
         }
     }
 
-    st.stack[ply as usize].static_eval = static_eval;
+    // SAFETY: ply < MAX_PLY < STACK_SIZE。
+    unsafe { st.stack.get_unchecked_mut(ply as usize) }.static_eval = static_eval;
 
     let mut alpha = alpha;
     // in_check時は-VALUE_INFINITEで初期化
@@ -341,7 +344,8 @@ pub(super) fn qsearch<const NT: u8>(
     // 非capture非checkのTT手は moves loop の !capture → continue で除外される。
 
     let prev_move = if ply >= 1 {
-        st.stack[(ply - 1) as usize].current_move
+        // SAFETY: ply >= 1 なので ply-1 >= 0。ply < MAX_PLY < STACK_SIZE。
+        unsafe { st.stack.get_unchecked((ply - 1) as usize) }.current_move
     } else {
         Move::NONE
     };
@@ -454,7 +458,8 @@ pub(super) fn qsearch<const NT: u8>(
             }
         }
 
-        st.stack[ply as usize].current_move = mv;
+        // SAFETY: ply < MAX_PLY < STACK_SIZE。
+        unsafe { st.stack.get_unchecked_mut(ply as usize) }.current_move = mv;
 
         // 実際に探索された手をカウント
         inc_stat!(st, qs_moves_searched);

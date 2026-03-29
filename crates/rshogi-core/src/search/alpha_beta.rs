@@ -2113,12 +2113,15 @@ impl SearchWorker {
         }
 
         // スタック設定
-        st.stack[ply as usize].in_check = in_check;
-        st.stack[ply as usize].move_count = 0;
-        st.stack[ply as usize].stat_score = 0;
+        // SAFETY: ply < MAX_PLY (246) は上のガードで保証。STACK_SIZE = MAX_PLY + 10 = 256。
+        //         ply+2 < 248 < STACK_SIZE。
+        let ss = unsafe { st.stack.get_unchecked_mut(ply as usize) };
+        ss.in_check = in_check;
+        ss.move_count = 0;
+        ss.stat_score = 0;
         // (ss+2)->cutoffCnt = 0（祖父ノードがリセット）
         // 兄弟ノード間で cutoff_cnt が蓄積されるように ply+2 を初期化する
-        st.stack[(ply + 2) as usize].cutoff_cnt = 0;
+        unsafe { st.stack.get_unchecked_mut((ply + 2) as usize) }.cutoff_cnt = 0;
 
         // PVノードの場合、PVをクリアして前回探索の残留を防ぐ
         // NOTE: YaneuraOuでは (ss+1)->pv = pv でポインタを新配列に向け、ss->pv[0] = Move::none() でクリア
@@ -2129,10 +2132,11 @@ impl SearchWorker {
         }
 
         let prior_reduction = take_prior_reduction(st, ply);
-        st.stack[ply as usize].reduction = 0;
+        // SAFETY: ply < MAX_PLY < STACK_SIZE。
+        unsafe { st.stack.get_unchecked_mut(ply as usize) }.reduction = 0;
 
         // Singular Extension用の除外手を取得
-        let excluded_move = st.stack[ply as usize].excluded_move;
+        let excluded_move = unsafe { st.stack.get_unchecked(ply as usize) }.excluded_move;
         // priorCapture は「1手前が捕獲手か」を局面状態から判定
         let prior_capture = pos.captured_piece().is_some();
 
@@ -2874,7 +2878,10 @@ impl SearchWorker {
                             if idx < 0 {
                                 break;
                             }
-                            if let Some(key) = st.stack[idx as usize].cont_hist_key {
+                            // SAFETY: idx >= 0 は上のガードで保証。idx < ply < MAX_PLY < STACK_SIZE。
+                            if let Some(key) =
+                                unsafe { st.stack.get_unchecked(idx as usize) }.cont_hist_key
+                            {
                                 // null move ply はスキップ
                                 if key.piece.is_none() {
                                     continue;
@@ -3187,7 +3194,11 @@ impl SearchWorker {
                         let weight = continuation_history_weight(ctx.tune_params, ply_back);
                         if ply >= ply_back as i32 {
                             let prev_ply = (ply - ply_back as i32) as usize;
-                            if let Some(key) = st.stack[prev_ply].cont_hist_key {
+                            // SAFETY: prev_ply = ply - ply_back。ply < MAX_PLY かつ ply_back >= 1
+                            //         なので prev_ply < MAX_PLY - 1 < STACK_SIZE。
+                            if let Some(key) =
+                                unsafe { st.stack.get_unchecked(prev_ply) }.cont_hist_key
+                            {
                                 // null move ply はスキップ
                                 if key.piece.is_none() {
                                     continue;
@@ -3247,7 +3258,10 @@ impl SearchWorker {
                             let weight = continuation_history_weight(ctx.tune_params, ply_back);
                             if ply >= ply_back as i32 {
                                 let prev_ply = (ply - ply_back as i32) as usize;
-                                if let Some(key) = st.stack[prev_ply].cont_hist_key {
+                                // SAFETY: prev_ply = ply - ply_back < MAX_PLY < STACK_SIZE。
+                                if let Some(key) =
+                                    unsafe { st.stack.get_unchecked(prev_ply) }.cont_hist_key
+                                {
                                     // null move ply はスキップ
                                     if key.piece.is_none() {
                                         continue;

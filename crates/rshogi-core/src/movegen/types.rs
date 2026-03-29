@@ -219,15 +219,19 @@ impl ExtMoveBuffer {
     #[inline]
     pub fn get(&self, idx: usize) -> ExtMove {
         debug_assert!(idx < self.len, "index out of bounds: {idx} >= {}", self.len);
-        // SAFETY: idx < len であれば初期化済み
-        unsafe { self.buf[idx].assume_init() }
+        // SAFETY: idx < len <= MAX_MOVES であれば初期化済み。
+        //         buf の長さは MAX_MOVES。
+        unsafe { self.buf.get_unchecked(idx).assume_init() }
     }
 
     /// 指定インデックスに値を設定
     #[inline]
     pub fn set(&mut self, idx: usize, ext: ExtMove) {
         debug_assert!(idx < MAX_MOVES, "index out of bounds: {idx} >= {MAX_MOVES}");
-        self.buf[idx].write(ext);
+        // SAFETY: idx は生成手数の上限 MAX_MOVES=600 を超えない。
+        //         手生成器は最大 MAX_MOVES 手までしか生成しないため、
+        //         呼び出し元から範囲外インデックスは渡されない。buf の長さは MAX_MOVES。
+        unsafe { self.buf.get_unchecked_mut(idx) }.write(ext);
         if idx >= self.len {
             self.len = idx + 1;
         }
