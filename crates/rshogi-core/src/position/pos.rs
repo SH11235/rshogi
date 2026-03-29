@@ -641,7 +641,7 @@ impl Position {
 
     fn put_piece_internal(&mut self, pc: Piece, sq: Square) {
         debug_assert!(sq.index() < Square::NUM);
-        debug_assert!(unsafe { self.board.get_unchecked(sq.index()) }.is_none());
+        debug_assert!(self.board[sq.index()].is_none());
         let pt = pc.piece_type();
 
         // SAFETY: Square::index() は 0..=80 (Square::NUM=81)、board の長さは Square::NUM。

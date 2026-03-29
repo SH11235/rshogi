@@ -313,28 +313,31 @@ pub fn lance_effect(color: Color, sq: Square, occupied: Bitboard) -> Bitboard {
 pub fn rook_file_effect(sq: Square, occupied: Bitboard) -> Bitboard {
     let table = slider_attacks();
     // SAFETY: Square::index() は 0..=80、lance_step_effect は [Color::NUM][Square::NUM] の固定長配列。
-    //         Color::White.index()=1, Color::Black.index()=0。
     let sq_idx = sq.index();
+    let white_idx = Color::White.index(); // = 1
+    let black_idx = Color::Black.index(); // = 0
 
     if Bitboard::part(sq) == 0 {
-        let mask = unsafe { table.lance_step_effect.get_unchecked(1).get_unchecked(sq_idx) }
-            .extract64::<0>();
+        let mask =
+            unsafe { table.lance_step_effect.get_unchecked(white_idx).get_unchecked(sq_idx) }
+                .extract64::<0>();
         let em = occupied.extract64::<0>() & mask;
         let t = em.wrapping_sub(1);
 
-        let se = unsafe { table.lance_step_effect.get_unchecked(0).get_unchecked(sq_idx) }
+        let se = unsafe { table.lance_step_effect.get_unchecked(black_idx).get_unchecked(sq_idx) }
             .extract64::<0>();
         let mocc = se & occupied.extract64::<0>();
         let mocc = !0u64 << msb64(mocc | 1);
 
         Bitboard::from_u64_pair(((em ^ t) & mask) | (mocc & se), 0)
     } else {
-        let mask = unsafe { table.lance_step_effect.get_unchecked(1).get_unchecked(sq_idx) }
-            .extract64::<1>();
+        let mask =
+            unsafe { table.lance_step_effect.get_unchecked(white_idx).get_unchecked(sq_idx) }
+                .extract64::<1>();
         let em = occupied.extract64::<1>() & mask;
         let t = em.wrapping_sub(1);
 
-        let se = unsafe { table.lance_step_effect.get_unchecked(0).get_unchecked(sq_idx) }
+        let se = unsafe { table.lance_step_effect.get_unchecked(black_idx).get_unchecked(sq_idx) }
             .extract64::<1>();
         let mocc = se & occupied.extract64::<1>();
         let mocc = !0u64 << msb64(mocc | 1);

@@ -97,7 +97,8 @@ impl PieceList {
         debug_assert!((piece_no.0 as usize) < PieceNumber::NB);
         debug_assert!(sq.index() < Square::NUM + 1);
         // SAFETY: PieceNumber は 0..=39 (NB=40)、piece_list_fb/fw の長さは NB。
-        //         Square::index() は 0..=80、piece_no_on_board の長さは Square::NUM+1=82。
+        //         Square::index() は 0..=80、piece_no_on_board の長さは Square::NUM+1=82
+        //         （盤外マス用の番兵スロットを含む）。
         unsafe {
             *self.piece_list_fb.get_unchecked_mut(piece_no.0 as usize) = bp.fb;
             *self.piece_list_fw.get_unchecked_mut(piece_no.0 as usize) = bp.fw;

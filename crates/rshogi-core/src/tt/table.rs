@@ -256,8 +256,10 @@ impl TranspositionTable {
     fn first_entry(&self, key: u64, side_to_move: Color) -> &Cluster {
         let index = self.cluster_index(key, side_to_move);
         debug_assert!(index < self.cluster_count);
-        // SAFETY: cluster_index は key * cluster_count / 2^64 で計算され、
-        //         結果は常に 0..cluster_count の範囲内。table の長さは cluster_count。
+        // SAFETY: cluster_index は (key * cluster_count >> 64) & !1 | bit0 で計算され、
+        //         結果は常に 0..cluster_count の範囲内。
+        //         cluster_count は new/resize で `& !1` により常に偶数が保証されるため、
+        //         bit0 OR 後も cluster_count を超えない。table の長さは cluster_count。
         unsafe { self.table.get_unchecked(index) }
     }
 

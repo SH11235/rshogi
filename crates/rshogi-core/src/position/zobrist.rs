@@ -124,7 +124,8 @@ pub fn zobrist_hand(color: Color, pt: PieceType) -> u64 {
     debug_assert!(color.index() < Color::NUM);
     debug_assert!(pt.index() < 8);
     // SAFETY: Color::index() は 0..=1 (Color::NUM=2)、hand の長さは Color::NUM=2。
-    //         PieceType::index() は 1..=7 (手駒に使う駒種のみ)、hand[i] の長さは 8。
+    //         呼び出し側が手駒駒種（PieceType::index() 1..=7）のみを渡す責任を持つ。
+    //         hand[i] の長さは 8。
     unsafe { *ZOBRIST.hand.get_unchecked(color.index()).get_unchecked(pt.index()) }
 }
 
