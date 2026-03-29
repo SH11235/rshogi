@@ -255,7 +255,10 @@ impl TranspositionTable {
     #[inline]
     fn first_entry(&self, key: u64, side_to_move: Color) -> &Cluster {
         let index = self.cluster_index(key, side_to_move);
-        &self.table[index]
+        debug_assert!(index < self.cluster_count);
+        // SAFETY: cluster_index は key * cluster_count / 2^64 で計算され、
+        //         結果は常に 0..cluster_count の範囲内。table の長さは cluster_count。
+        unsafe { self.table.get_unchecked(index) }
     }
 
     /// 指定キーのクラスターをプリフェッチ

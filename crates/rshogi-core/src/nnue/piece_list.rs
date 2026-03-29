@@ -94,29 +94,42 @@ impl PieceList {
     /// 盤上駒を設定し逆引きテーブルを更新
     #[inline]
     pub fn put_piece_on_board(&mut self, piece_no: PieceNumber, bp: ExtBonaPiece, sq: Square) {
-        self.piece_list_fb[piece_no.0 as usize] = bp.fb;
-        self.piece_list_fw[piece_no.0 as usize] = bp.fw;
-        self.piece_no_on_board[sq.index()] = piece_no;
+        debug_assert!((piece_no.0 as usize) < PieceNumber::NB);
+        debug_assert!(sq.index() < Square::NUM + 1);
+        // SAFETY: PieceNumber は 0..=39 (NB=40)、piece_list_fb/fw の長さは NB。
+        //         Square::index() は 0..=80、piece_no_on_board の長さは Square::NUM+1=82。
+        unsafe {
+            *self.piece_list_fb.get_unchecked_mut(piece_no.0 as usize) = bp.fb;
+            *self.piece_list_fw.get_unchecked_mut(piece_no.0 as usize) = bp.fw;
+            *self.piece_no_on_board.get_unchecked_mut(sq.index()) = piece_no;
+        }
     }
 
     /// 手駒を設定し逆引きテーブルを更新
     #[inline]
     pub fn put_piece_on_hand(&mut self, piece_no: PieceNumber, bp: ExtBonaPiece) {
-        self.piece_list_fb[piece_no.0 as usize] = bp.fb;
-        self.piece_list_fw[piece_no.0 as usize] = bp.fw;
+        debug_assert!((piece_no.0 as usize) < PieceNumber::NB);
         debug_assert!(
             (bp.fb.value() as usize) < FE_HAND_END,
             "fb ({}) out of hand range (< {})",
             bp.fb.value(),
             FE_HAND_END
         );
-        self.piece_no_on_hand[bp.fb.value() as usize] = piece_no;
+        // SAFETY: PieceNumber は 0..=39 (NB=40)、piece_list_fb/fw の長さは NB。
+        //         BonaPiece(fb) は手駒範囲内 (< FE_HAND_END)、piece_no_on_hand の長さは FE_HAND_END。
+        unsafe {
+            *self.piece_list_fb.get_unchecked_mut(piece_no.0 as usize) = bp.fb;
+            *self.piece_list_fw.get_unchecked_mut(piece_no.0 as usize) = bp.fw;
+            *self.piece_no_on_hand.get_unchecked_mut(bp.fb.value() as usize) = piece_no;
+        }
     }
 
     /// 盤上逆引き: Square → PieceNumber
     #[inline]
     pub fn piece_no_of_board(&self, sq: Square) -> PieceNumber {
-        self.piece_no_on_board[sq.index()]
+        debug_assert!(sq.index() < Square::NUM + 1);
+        // SAFETY: Square::index() は 0..=80、piece_no_on_board の長さは Square::NUM+1=82。
+        unsafe { *self.piece_no_on_board.get_unchecked(sq.index()) }
     }
 
     /// 手駒逆引き: BonaPiece(fb) → PieceNumber
@@ -128,15 +141,20 @@ impl PieceList {
             fb.value(),
             FE_HAND_END
         );
-        self.piece_no_on_hand[fb.value() as usize]
+        // SAFETY: BonaPiece(fb) は手駒範囲内 (< FE_HAND_END)、piece_no_on_hand の長さは FE_HAND_END。
+        unsafe { *self.piece_no_on_hand.get_unchecked(fb.value() as usize) }
     }
 
     /// PieceNumber → ExtBonaPiece 取得
     #[inline]
     pub fn bona_piece(&self, piece_no: PieceNumber) -> ExtBonaPiece {
-        ExtBonaPiece {
-            fb: self.piece_list_fb[piece_no.0 as usize],
-            fw: self.piece_list_fw[piece_no.0 as usize],
+        debug_assert!((piece_no.0 as usize) < PieceNumber::NB);
+        // SAFETY: PieceNumber は 0..=39 (NB=40)、piece_list_fb/fw の長さは NB。
+        unsafe {
+            ExtBonaPiece {
+                fb: *self.piece_list_fb.get_unchecked(piece_no.0 as usize),
+                fw: *self.piece_list_fw.get_unchecked(piece_no.0 as usize),
+            }
         }
     }
 

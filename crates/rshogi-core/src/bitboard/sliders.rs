@@ -249,7 +249,12 @@ fn init_qugiy_step_effect() -> [[Bitboard; Square::NUM]; 6] {
 /// YaneuraOu の lanceStepEffect 相当
 #[inline]
 pub fn lance_step_effect(color: Color, sq: Square) -> Bitboard {
-    slider_attacks().lance_step_effect[color.index()][sq.index()]
+    let table = slider_attacks();
+    debug_assert!(color.index() < Color::NUM);
+    debug_assert!(sq.index() < Square::NUM);
+    // SAFETY: Color::index() は 0..=1 (Color::NUM=2)、lance_step_effect の第1次元は Color::NUM。
+    //         Square::index() は 0..=80 (Square::NUM=81)、lance_step_effect の第2次元は Square::NUM。
+    unsafe { *table.lance_step_effect.get_unchecked(color.index()).get_unchecked(sq.index()) }
 }
 
 /// 香の利きを計算（Qugiyアルゴリズム）
@@ -257,7 +262,10 @@ pub fn lance_step_effect(color: Color, sq: Square) -> Bitboard {
 pub fn lance_effect(color: Color, sq: Square, occupied: Bitboard) -> Bitboard {
     let table = slider_attacks();
     let part = Bitboard::part(sq);
-    let se = table.lance_step_effect[color.index()][sq.index()];
+    // SAFETY: Color::index() は 0..=1、Square::index() は 0..=80。
+    //         lance_step_effect は [Color::NUM][Square::NUM] の固定長配列。
+    let se =
+        unsafe { *table.lance_step_effect.get_unchecked(color.index()).get_unchecked(sq.index()) };
 
     match color {
         Color::White => {
@@ -304,23 +312,30 @@ pub fn lance_effect(color: Color, sq: Square, occupied: Bitboard) -> Bitboard {
 #[inline]
 pub fn rook_file_effect(sq: Square, occupied: Bitboard) -> Bitboard {
     let table = slider_attacks();
+    // SAFETY: Square::index() は 0..=80、lance_step_effect は [Color::NUM][Square::NUM] の固定長配列。
+    //         Color::White.index()=1, Color::Black.index()=0。
+    let sq_idx = sq.index();
 
     if Bitboard::part(sq) == 0 {
-        let mask = table.lance_step_effect[Color::White.index()][sq.index()].extract64::<0>();
+        let mask = unsafe { table.lance_step_effect.get_unchecked(1).get_unchecked(sq_idx) }
+            .extract64::<0>();
         let em = occupied.extract64::<0>() & mask;
         let t = em.wrapping_sub(1);
 
-        let se = table.lance_step_effect[Color::Black.index()][sq.index()].extract64::<0>();
+        let se = unsafe { table.lance_step_effect.get_unchecked(0).get_unchecked(sq_idx) }
+            .extract64::<0>();
         let mocc = se & occupied.extract64::<0>();
         let mocc = !0u64 << msb64(mocc | 1);
 
         Bitboard::from_u64_pair(((em ^ t) & mask) | (mocc & se), 0)
     } else {
-        let mask = table.lance_step_effect[Color::White.index()][sq.index()].extract64::<1>();
+        let mask = unsafe { table.lance_step_effect.get_unchecked(1).get_unchecked(sq_idx) }
+            .extract64::<1>();
         let em = occupied.extract64::<1>() & mask;
         let t = em.wrapping_sub(1);
 
-        let se = table.lance_step_effect[Color::Black.index()][sq.index()].extract64::<1>();
+        let se = unsafe { table.lance_step_effect.get_unchecked(0).get_unchecked(sq_idx) }
+            .extract64::<1>();
         let mocc = se & occupied.extract64::<1>();
         let mocc = !0u64 << msb64(mocc | 1);
 
@@ -332,8 +347,10 @@ pub fn rook_file_effect(sq: Square, occupied: Bitboard) -> Bitboard {
 #[inline]
 pub fn rook_rank_effect(sq: Square, occupied: Bitboard) -> Bitboard {
     let table = slider_attacks();
-    let mask_lo = table.qugiy_rook_mask[sq.index()][0];
-    let mask_hi = table.qugiy_rook_mask[sq.index()][1];
+    // SAFETY: Square::index() は 0..=80、qugiy_rook_mask は [Square::NUM][2] の固定長配列。
+    let rook_mask = unsafe { table.qugiy_rook_mask.get_unchecked(sq.index()) };
+    let mask_lo = rook_mask[0];
+    let mask_hi = rook_mask[1];
 
     let rocc = occupied.byte_reverse();
     let (hi, lo) = Bitboard::unpack(rocc, occupied);
@@ -373,7 +390,11 @@ pub fn ray_effect(dir: Direct, sq: Square, occupied: Bitboard) -> Bitboard {
                 Direct::LD => 5,
                 Direct::U | Direct::D => unreachable!(),
             };
-            let mask = slider_attacks().qugiy_step_effect[idx][sq.index()];
+            // SAFETY: idx は 0..=5、qugiy_step_effect は [6][Square::NUM] の固定長配列。
+            //         Square::index() は 0..=80。
+            let mask = unsafe {
+                *slider_attacks().qugiy_step_effect.get_unchecked(idx).get_unchecked(sq.index())
+            };
             let reverse = matches!(dir, Direct::RU | Direct::R | Direct::RD);
 
             let mut bb = occupied;
@@ -400,8 +421,10 @@ pub fn direct_effect(sq: Square, dir: Direct, occupied: Bitboard) -> Bitboard {
 #[inline]
 pub fn bishop_effect(sq: Square, occupied: Bitboard) -> Bitboard {
     let table = slider_attacks();
-    let mask_lo = table.qugiy_bishop_mask[sq.index()][0];
-    let mask_hi = table.qugiy_bishop_mask[sq.index()][1];
+    // SAFETY: Square::index() は 0..=80、qugiy_bishop_mask は [Square::NUM][2] の固定長配列。
+    let bishop_mask = unsafe { table.qugiy_bishop_mask.get_unchecked(sq.index()) };
+    let mask_lo = bishop_mask[0];
+    let mask_hi = bishop_mask[1];
 
     let occ2 = Bitboard256::new(occupied);
     let rocc2 = Bitboard256::new(occupied.byte_reverse());
@@ -588,7 +611,11 @@ pub fn direct_of(sq1: Square, sq2: Square) -> Option<Direct> {
 
     static DIRECT_TABLE: [[u8; Square::NUM]; Square::NUM] = build_direct_table();
 
-    Direct::from_u8(DIRECT_TABLE[sq1.index()][sq2.index()])
+    debug_assert!(sq1.index() < Square::NUM);
+    debug_assert!(sq2.index() < Square::NUM);
+    // SAFETY: Square::index() は 0..=80 (Square::NUM=81) で保証されており、
+    //         DIRECT_TABLE は [Square::NUM][Square::NUM] の固定長配列。
+    unsafe { Direct::from_u8(*DIRECT_TABLE.get_unchecked(sq1.index()).get_unchecked(sq2.index())) }
 }
 
 #[cfg(test)]
