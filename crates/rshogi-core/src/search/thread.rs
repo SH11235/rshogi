@@ -14,6 +14,7 @@ mod imp {
 
     use crate::search::engine::{SearchProgress, search_helper};
     use crate::search::{LimitsType, SearchTuneParams, SearchWorker, TimeManagement, TimeOptions};
+    use crate::types::EnteringKingRule;
 
     const SEARCH_STACK_SIZE: usize = 64 * 1024 * 1024;
 
@@ -92,6 +93,7 @@ mod imp {
             max_moves_to_draw: i32,
             draw_value_black: i32,
             draw_value_white: i32,
+            entering_king_rule: EnteringKingRule,
             skill_enabled: bool,
         ) {
             if self.threads.is_empty() {
@@ -107,6 +109,7 @@ mod imp {
                     max_moves_to_draw,
                     draw_value_black,
                     draw_value_white,
+                    entering_king_rule,
                     search_tune_params: self.search_tune_params,
                     skill_enabled,
                 });
@@ -195,6 +198,7 @@ mod imp {
         max_moves_to_draw: i32,
         draw_value_black: i32,
         draw_value_white: i32,
+        entering_king_rule: EnteringKingRule,
         search_tune_params: SearchTuneParams,
         skill_enabled: bool,
     }
@@ -334,6 +338,7 @@ mod imp {
                     worker.search_tune_params = task.search_tune_params;
                     worker.draw_value_black = task.draw_value_black;
                     worker.draw_value_white = task.draw_value_white;
+                    worker.entering_king_rule = task.entering_king_rule;
                     worker.prepare_search();
 
                     let mut pos = task.pos;
@@ -436,6 +441,7 @@ mod imp {
             _max_moves_to_draw: i32,
             _draw_value_black: i32,
             _draw_value_white: i32,
+            _entering_king_rule: crate::types::EnteringKingRule,
             _skill_enabled: bool,
         ) {
             // No-op: no helper threads to start
@@ -717,6 +723,7 @@ mod imp {
             max_moves_to_draw: i32,
             draw_value_black: i32,
             draw_value_white: i32,
+            entering_king_rule: crate::types::EnteringKingRule,
             skill_enabled: bool,
         ) {
             // Clear previous results before starting new search
@@ -796,6 +803,7 @@ mod imp {
                         worker.max_moves_to_draw = max_moves_to_draw;
                         worker.draw_value_black = draw_value_black;
                         worker.draw_value_white = draw_value_white;
+                        worker.entering_king_rule = entering_king_rule;
                         worker.search_tune_params = search_tune_params;
                         worker.prepare_search();
 

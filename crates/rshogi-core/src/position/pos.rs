@@ -8,15 +8,16 @@ use super::board_effect::{
 use super::state::StateInfo;
 use super::zobrist::{zobrist_hand, zobrist_pass_rights, zobrist_psq, zobrist_side};
 use crate::bitboard::{
-    Bitboard, bishop_effect, dragon_effect, gold_effect, horse_effect, knight_effect, lance_effect,
-    lance_step_effect, pawn_effect, rook_effect, silver_effect,
+    Bitboard, RANK_BB, bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect,
+    knight_effect, lance_effect, lance_step_effect, pawn_effect, rook_effect, silver_effect,
 };
 use crate::eval::material::{hand_piece_value, material_needs_board_effects, signed_piece_value};
 use crate::nnue::piece_list::PieceList;
 use crate::nnue::{ChangedBonaPiece, DirtyPiece, ExtBonaPiece};
 use crate::prefetch::{NoPrefetch, TtPrefetch};
 use crate::types::{
-    Color, Hand, Move, Piece, PieceType, PieceTypeSet, RepetitionState, Square, Value,
+    Color, EnteringKingRule, File, Hand, Move, Piece, PieceType, PieceTypeSet, Rank,
+    RepetitionState, Square, Value,
 };
 
 /// 小駒（香・桂・銀・金とその成り駒）かどうか
@@ -1632,6 +1633,166 @@ impl Position {
     pub fn mate_1ply(&mut self) -> Move {
         crate::mate::mate_1ply(self).unwrap_or(Move::NONE)
     }
+
+    // =========================================================================
+    // 入玉宣言勝ち（YaneuraOu DeclarationWin 準拠）
+    // =========================================================================
+
+    /// 敵陣のBitboard（先手なら1-3段目、後手なら7-9段目）
+    pub(crate) fn enemy_field(us: Color) -> Bitboard {
+        match us {
+            Color::Black => RANK_BB[0] | RANK_BB[1] | RANK_BB[2],
+            Color::White => RANK_BB[6] | RANK_BB[7] | RANK_BB[8],
+        }
+    }
+
+    /// 入玉宣言勝ちの判定（YaneuraOu `Position::DeclarationWin()` 準拠）
+    ///
+    /// 条件を満たしていれば `Move::WIN`（24/27点法）または玉の移動手（トライルール）を返す。
+    /// 条件を満たさなければ `Move::NONE` を返す。
+    pub fn declaration_win(&self, rule: EnteringKingRule) -> Move {
+        if rule == EnteringKingRule::None {
+            return Move::NONE;
+        }
+
+        let us = self.side_to_move();
+
+        // トライルール: 別ロジック
+        if rule == EnteringKingRule::TryRule {
+            return self.try_rule_move(us);
+        }
+
+        // --- 24/27 点法の宣言勝ち判定 ---
+
+        let ksq = self.king_square(us);
+        let ef = Self::enemy_field(us);
+
+        // (b) 宣言側の玉が敵陣三段目以内に入っている
+        if !ef.contains(ksq) {
+            return Move::NONE;
+        }
+
+        // (e) 宣言側の玉に王手がかかっていない
+        if self.in_check() {
+            return Move::NONE;
+        }
+
+        // (d) 宣言側の敵陣三段目以内の駒は、玉を除いて10枚以上存在する
+        let our_in_enemy = self.pieces_c(us) & ef;
+        // our_in_enemy には玉も含まれるので 11枚以上必要
+        if our_in_enemy.count() < 11 {
+            return Move::NONE;
+        }
+
+        // (c) 駒点計算
+        // 大駒（角・馬・飛・龍）= 5点、小駒 = 1点
+        let big_set = PieceTypeSet::bishop_horse() | PieceTypeSet::rook_dragon();
+        let big_in_enemy = (self.pieces_c_by_types(us, big_set) & ef).count();
+
+        // 小駒1点、大駒5点、玉除く
+        // = 敵陣の自駒数 + 敵陣の自駒の大駒×4 - 1(玉)
+        let h = self.hand(us);
+        let score = our_in_enemy.count() + big_in_enemy * 4 - 1
+            + h.count(PieceType::Pawn)
+            + h.count(PieceType::Lance)
+            + h.count(PieceType::Knight)
+            + h.count(PieceType::Silver)
+            + h.count(PieceType::Gold)
+            + (h.count(PieceType::Bishop) + h.count(PieceType::Rook)) * 5;
+
+        // 必要点を計算（None / TryRule は上部で除外済み）
+        let mut required = match rule {
+            EnteringKingRule::Point24 | EnteringKingRule::Point24H => 31u32,
+            EnteringKingRule::Point27 | EnteringKingRule::Point27H => match us {
+                Color::Black => 28,
+                Color::White => 27,
+            },
+            EnteringKingRule::None | EnteringKingRule::TryRule => unreachable!(),
+        };
+
+        // 駒落ち補正（_H バリアント）
+        if matches!(rule, EnteringKingRule::Point24H | EnteringKingRule::Point27H) {
+            let total = self.count_total_piece_points();
+            // 56 - total が駒落ちの分。後手の必要点を減算（YO 準拠: 上手=後手）
+            if total < 56 {
+                let deficit = 56 - total;
+                if us == Color::White {
+                    required = required.saturating_sub(deficit);
+                }
+            }
+        }
+
+        if score >= required {
+            Move::WIN
+        } else {
+            Move::NONE
+        }
+    }
+
+    /// トライルール: 玉が敵の初期玉位置に移動できるか判定
+    ///
+    /// 玉が既にトライ升にいる場合は `Move::NONE` を返す（YO 準拠）。
+    /// king_effect に自マスは含まれないため、隣接判定で除外される。
+    /// この場合、前の手番でトライ升への移動が成立しておりサーバーが終局を判定するはず。
+    fn try_rule_move(&self, us: Color) -> Move {
+        let ksq = self.king_square(us);
+        let try_sq = match us {
+            // 先手: 敵(後手)の初期玉位置 = 5一
+            Color::Black => Square::new(File::File5, Rank::Rank1),
+            // 後手: 敵(先手)の初期玉位置 = 5九
+            Color::White => Square::new(File::File5, Rank::Rank9),
+        };
+
+        // (1) 玉がトライ升に隣接しているか（ksq == try_sq の場合も false → YO 準拠）
+        if !king_effect(ksq).contains(try_sq) {
+            return Move::NONE;
+        }
+
+        // (2) トライ升に自駒がないか
+        if self.pieces_c(us).contains(try_sq) {
+            return Move::NONE;
+        }
+
+        // (3) トライ升に移動したとき相手に取られないか
+        // 自玉を除いた occupied で判定（玉が移動するため）
+        let occ_without_king = self.occupied() ^ Bitboard::from_square(ksq);
+        let enemy_attackers =
+            self.attackers_to_occ(try_sq, occ_without_king) & self.pieces_c(us.opponent());
+        if !enemy_attackers.is_empty() {
+            return Move::NONE;
+        }
+
+        // 玉の移動手を返す（成りなし）
+        let king_piece = Piece::new(us, PieceType::King);
+        Move::new_move(ksq, try_sq, false).with_piece(king_piece)
+    }
+
+    /// 全駒の合計点数（駒落ち判定用）
+    ///
+    /// YO 準拠: 盤上の全駒数(玉含む) + 大駒数×4 + 手駒の合計。
+    /// 大駒 = 5点、その他(玉含む) = 1点。平手の場合は 56。
+    fn count_total_piece_points(&self) -> u32 {
+        let big_set = PieceTypeSet::bishop_horse() | PieceTypeSet::rook_dragon();
+
+        // 盤上: YO の p1 + p2 * 4（玉も1点として計上）
+        let all_count = self.occupied().count();
+        let big_count = self.pieces_by_types(big_set).count();
+        let board_score = all_count + big_count * 4;
+
+        // 手駒
+        let mut hand_score = 0u32;
+        for c in [Color::Black, Color::White] {
+            let h = self.hand(c);
+            hand_score += h.count(PieceType::Pawn)
+                + h.count(PieceType::Lance)
+                + h.count(PieceType::Knight)
+                + h.count(PieceType::Silver)
+                + h.count(PieceType::Gold)
+                + (h.count(PieceType::Bishop) + h.count(PieceType::Rook)) * 5;
+        }
+
+        board_score + hand_score
+    }
 }
 
 impl Default for Position {
@@ -1643,7 +1804,7 @@ impl Default for Position {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{File, Rank};
+    use crate::types::{EnteringKingRule, File, Rank};
 
     #[test]
     fn test_position_new() {
@@ -2703,5 +2864,134 @@ mod tests {
         pos.set_pass_rights_pair(2, 3);
         let key4 = pos.state().key();
         assert_eq!(key1, key4, "Restoring original pass rights should restore key");
+    }
+
+    // =========================================
+    // 入玉宣言勝ちのテスト
+    // =========================================
+
+    fn make_pos(sfen: &str) -> Position {
+        let mut pos = Position::new();
+        pos.set_sfen(sfen).unwrap();
+        pos
+    }
+
+    #[test]
+    fn test_declaration_win_none_rule() {
+        let pos = make_pos("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1");
+        assert_eq!(pos.declaration_win(EnteringKingRule::None), Move::NONE);
+    }
+
+    #[test]
+    fn test_declaration_win_startpos() {
+        let pos = make_pos("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1");
+        assert_eq!(pos.declaration_win(EnteringKingRule::Point27), Move::NONE);
+    }
+
+    #[test]
+    fn test_declaration_win_27point_success() {
+        // 先手玉1一 + 敵陣に金2銀2歩6=10枚、王手なし
+        // 盤上小駒10点 + 持駒 飛2(10点) + 角2(10点) = 30点 >= 28
+        // 後手: 玉9九、敵陣外に香2桂2金2銀2歩3+手駒なし
+        let sfen = "KGG6/SS7/PPPPPP3/9/9/9/2pppppp1/1ss1gg1nl/4k2nl b 2R2B3p 1";
+        let pos = make_pos(sfen);
+        let result = pos.declaration_win(EnteringKingRule::Point27);
+        assert_eq!(result, Move::WIN, "先手28点以上で宣言勝ち");
+    }
+
+    #[test]
+    fn test_declaration_win_king_not_in_enemy() {
+        // 先手玉が自陣(9九)にいる → 宣言勝ち不可
+        let pos = make_pos("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1");
+        assert_eq!(pos.declaration_win(EnteringKingRule::Point27), Move::NONE);
+    }
+
+    #[test]
+    fn test_declaration_win_in_check() {
+        // 先手玉1一が敵陣だが、後手の飛車9一で王手されている
+        let sfen = "K7r/GG7/SSPPPPPP1/9/9/9/2pppppp1/1ss1gg1nl/4k2nl b 2B3p 1";
+        let pos = make_pos(sfen);
+        assert_eq!(pos.declaration_win(EnteringKingRule::Point27), Move::NONE);
+    }
+
+    #[test]
+    fn test_declaration_win_insufficient_pieces() {
+        // 先手玉が敵陣だが、敵陣の自駒が10枚未満(6枚のみ: K+GG+SS+P)
+        let sfen = "KGGSS1rnl/P8/9/9/9/pp1pppppp/1ss1gg2l/1r5b1/4k2n1 b BNP 1";
+        let pos = make_pos(sfen);
+        assert_eq!(pos.declaration_win(EnteringKingRule::Point27), Move::NONE);
+    }
+
+    #[test]
+    fn test_declaration_win_insufficient_points() {
+        // 敵陣に10枚あるが、点数が足りない（小駒10枚=10点+持駒0点=10点 < 28）
+        let sfen = "KGGSS4/PPPPPP3/PPPP5/9/9/pp1pppppp/1ss1gg1nl/1r5b1/4k2nl b - 1";
+        let pos = make_pos(sfen);
+        assert_eq!(pos.declaration_win(EnteringKingRule::Point27), Move::NONE);
+    }
+
+    #[test]
+    fn test_count_total_piece_points_startpos() {
+        let pos = make_pos("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1");
+        assert_eq!(pos.count_total_piece_points(), 56);
+    }
+
+    #[test]
+    fn test_enemy_field() {
+        let ef_black = Position::enemy_field(Color::Black);
+        assert!(ef_black.contains(Square::new(File::File5, Rank::Rank1)));
+        assert!(ef_black.contains(Square::new(File::File5, Rank::Rank3)));
+        assert!(!ef_black.contains(Square::new(File::File5, Rank::Rank4)));
+
+        let ef_white = Position::enemy_field(Color::White);
+        assert!(ef_white.contains(Square::new(File::File5, Rank::Rank7)));
+        assert!(ef_white.contains(Square::new(File::File5, Rank::Rank9)));
+        assert!(!ef_white.contains(Square::new(File::File5, Rank::Rank6)));
+    }
+
+    // =========================================
+    // トライルールのテスト
+    // =========================================
+
+    #[test]
+    fn test_try_rule_success() {
+        // 先手玉6一(File6,Rank1)がトライ升5一に隣接、5一が空で敵の利きもない
+        let pos = make_pos("3K5/9/9/9/9/9/9/9/4k4 b 2r2b4g4s4n4l18p 1");
+        let result = pos.declaration_win(EnteringKingRule::TryRule);
+        assert!(result.is_normal(), "トライ成功時は玉の移動手を返す");
+        assert_eq!(result.to(), Square::new(File::File5, Rank::Rank1));
+    }
+
+    #[test]
+    fn test_try_rule_not_adjacent() {
+        // 先手玉3一がトライ升5一に隣接していない（2マス離れている）
+        let pos = make_pos("2K6/9/9/9/9/9/9/9/4k4 b 2r2b4g4s4n4l18p 1");
+        assert_eq!(
+            pos.declaration_win(EnteringKingRule::TryRule),
+            Move::NONE,
+            "トライ升に隣接していなければ NONE"
+        );
+    }
+
+    #[test]
+    fn test_try_rule_own_piece_on_target() {
+        // 先手玉4一がトライ升5一に隣接しているが、5一に自駒（金）がある
+        let pos = make_pos("3GK4/9/9/9/9/9/9/9/4k4 b 2r2b3g4s4n4l18p 1");
+        assert_eq!(
+            pos.declaration_win(EnteringKingRule::TryRule),
+            Move::NONE,
+            "トライ升に自駒があれば NONE"
+        );
+    }
+
+    #[test]
+    fn test_try_rule_enemy_attacks_target() {
+        // 先手玉4一がトライ升5一に隣接、5一は空だが後手の飛車5九が利いている
+        let pos = make_pos("4K4/9/9/9/9/9/9/9/4kr3 b 2b4g4s4n4l18p 1");
+        assert_eq!(
+            pos.declaration_win(EnteringKingRule::TryRule),
+            Move::NONE,
+            "トライ升に敵の利きがあれば NONE"
+        );
     }
 }

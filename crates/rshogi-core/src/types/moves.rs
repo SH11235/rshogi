@@ -27,6 +27,10 @@ impl Move {
     /// - 通常手では bit14(DROP) と bit15(PROMOTE) が同時に立つことはない
     /// - この不可能な組み合わせを PASS のマーカーとして使用
     pub const PASS: Move = Move(0xC000);
+    /// 入玉宣言勝ち（USI: `bestmove win`）
+    /// エンコード: bit14=1, bit15=1, bit0=1 (0xC001)
+    /// - PASS(0xC000)と同じ DROP+PROMOTE 同時立ちだが、to=1 で区別
+    pub const WIN: Move = Move(0xC001);
 
     // 下位16bitのマスク（YaneuraOu互換）
     const TO_MASK: u32 = 0x007F; // bit 0-6
@@ -98,7 +102,7 @@ impl Move {
     /// - 呼び出し側で PASS でないことを保証する必要がある
     #[inline]
     pub const fn to(self) -> Square {
-        debug_assert!(!self.is_pass(), "to() called on PASS move");
+        debug_assert!(!self.is_pass() && !self.is_win(), "to() called on PASS/WIN move");
         // SAFETY: to は 0-80 の範囲（7bit）
         unsafe { Square::from_u8_unchecked((self.0 & Self::TO_MASK) as u8) }
     }
@@ -109,8 +113,8 @@ impl Move {
     #[inline]
     pub const fn from(self) -> Square {
         debug_assert!(
-            !self.is_pass() && !self.is_drop(),
-            "from() called on invalid move (PASS or drop)"
+            !self.is_pass() && !self.is_win() && !self.is_drop(),
+            "from() called on invalid move (PASS/WIN or drop)"
         );
         // SAFETY: from は 0-80 の範囲（7bit）
         unsafe { Square::from_u8_unchecked(((self.0 & Self::FROM_MASK) >> Self::FROM_SHIFT) as u8) }
@@ -144,20 +148,20 @@ impl Move {
         Move((self.0 & Self::LOWER_16BIT_MASK) | ((piece.raw() as u32) << Self::PIECE_SHIFT))
     }
 
-    /// 駒打ちかどうか（PASS除外）
+    /// 駒打ちかどうか（PASS/WIN除外）
     ///
-    /// 【重要】PASSは bit14=1 だが駒打ちではない
+    /// 【重要】PASS/WINは bit14=1 だが駒打ちではない
     #[inline]
     pub const fn is_drop(self) -> bool {
-        (self.0 & Self::DROP_FLAG) != 0 && !self.is_pass()
+        (self.0 & Self::DROP_FLAG) != 0 && !self.is_pass() && !self.is_win()
     }
 
-    /// 成りかどうか（PASS除外）
+    /// 成りかどうか（PASS/WIN除外）
     ///
-    /// 【重要】PASSは bit15=1 だが成りではない
+    /// 【重要】PASS/WINは bit15=1 だが成りではない
     #[inline]
     pub const fn is_promote(self) -> bool {
-        (self.0 & Self::PROMOTE_FLAG) != 0 && !self.is_pass()
+        (self.0 & Self::PROMOTE_FLAG) != 0 && !self.is_pass() && !self.is_win()
     }
 
     /// 無効な指し手かどうか
@@ -188,10 +192,16 @@ impl Move {
         self.0 == Self::PASS.0
     }
 
-    /// 通常の着手か（パスでもNULLでもNONEでもない）
+    /// 入玉宣言勝ちかどうか
+    #[inline]
+    pub const fn is_win(self) -> bool {
+        self.0 == Self::WIN.0
+    }
+
+    /// 通常の着手か（パスでもNULLでもNONEでもWINでもない）
     #[inline]
     pub const fn is_normal(self) -> bool {
-        self.0 != 0 && !self.is_null() && !self.is_pass()
+        self.0 != 0 && !self.is_null() && !self.is_pass() && !self.is_win()
     }
 
     /// History用インデックス
@@ -233,9 +243,12 @@ impl Move {
     pub const fn from_u16_checked(value: u16) -> Option<Move> {
         let value32 = value as u32;
 
-        // PASS は特殊値なので先にチェック
+        // PASS/WIN は特殊値なので先にチェック
         if value32 == Self::PASS.0 {
             return Some(Self::PASS);
+        }
+        if value32 == Self::WIN.0 {
+            return Some(Self::WIN);
         }
 
         let to = value32 & Self::TO_MASK;
@@ -274,13 +287,16 @@ impl Move {
         Move(value)
     }
 
-    /// USI形式の文字列に変換（パス対応）
+    /// USI形式の文字列に変換（パス・宣言勝ち対応）
     pub fn to_usi(self) -> String {
         if self.is_none() {
             return "none".to_string();
         }
         if self.is_pass() {
             return "pass".to_string();
+        }
+        if self.is_win() {
+            return "win".to_string();
         }
         if self.is_drop() {
             let pt_char = match self.drop_piece_type() {
@@ -308,6 +324,11 @@ impl Move {
     /// # パス手の形式
     /// - `"pass"`: 独自形式
     /// - `"0000"`: UCI（チェス）由来のnull move形式
+    ///
+    /// # 注意
+    /// `"win"` は受理しない。`bestmove win` は終局トークンであり、
+    /// `position ... moves` の指し手列で使用されると不正な局面更新を引き起こすため、
+    /// 上位レイヤー（USI bestmove 解析等）で文字列として処理する。
     pub fn from_usi(s: &str) -> Option<Move> {
         if s == "none" {
             return Some(Move::NONE);
@@ -545,6 +566,7 @@ mod tests {
         assert!(Move::PASS.is_pass());
         assert!(!Move::NONE.is_pass());
         assert!(!Move::NULL.is_pass());
+        assert!(!Move::WIN.is_pass());
     }
 
     #[test]
@@ -565,6 +587,7 @@ mod tests {
         assert!(!Move::PASS.is_normal());
         assert!(!Move::NONE.is_normal());
         assert!(!Move::NULL.is_normal());
+        assert!(!Move::WIN.is_normal());
 
         // 通常の手は is_normal() = true
         let from = Square::new(File::File1, Rank::Rank1);
@@ -605,9 +628,8 @@ mod tests {
 
     #[test]
     #[cfg(debug_assertions)]
-    #[should_panic(expected = "to() called on PASS move")]
+    #[should_panic(expected = "to() called on PASS/WIN move")]
     fn test_move_pass_to_panics_in_debug() {
-        // PASSに対して to() を呼ぶとパニック（debug のみ）
         let _ = Move::PASS.to();
     }
 
@@ -615,7 +637,55 @@ mod tests {
     #[cfg(debug_assertions)]
     #[should_panic(expected = "from() called on invalid move")]
     fn test_move_pass_from_panics_in_debug() {
-        // PASSに対して from() を呼ぶとパニック（debug のみ）
         let _ = Move::PASS.from();
+    }
+
+    // =========================================
+    // 入玉宣言勝ち（WIN）関連のテスト
+    // =========================================
+
+    #[test]
+    fn test_move_win_encoding() {
+        assert_eq!(Move::WIN.0, 0xC001);
+        assert!(Move::WIN.is_win());
+        assert!(!Move::NONE.is_win());
+        assert!(!Move::NULL.is_win());
+        assert!(!Move::PASS.is_win());
+    }
+
+    #[test]
+    fn test_move_win_not_drop_not_promote() {
+        assert!(!Move::WIN.is_drop());
+        assert!(!Move::WIN.is_promote());
+    }
+
+    #[test]
+    fn test_move_win_usi() {
+        assert_eq!(Move::WIN.to_usi(), "win");
+        // from_usi("win") は受理しない（position moves 経路での誤用防止）
+        assert_eq!(Move::from_usi("win"), None);
+    }
+
+    #[test]
+    fn test_move_win_from_u16_checked() {
+        let win_u16 = Move::WIN.to_u16();
+        assert_eq!(win_u16, 0xC001);
+        let restored = Move::from_u16_checked(win_u16);
+        assert_eq!(restored, Some(Move::WIN));
+        assert!(restored.unwrap().is_win());
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "to() called on PASS/WIN move")]
+    fn test_move_win_to_panics_in_debug() {
+        let _ = Move::WIN.to();
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "from() called on invalid move")]
+    fn test_move_win_from_panics_in_debug() {
+        let _ = Move::WIN.from();
     }
 }

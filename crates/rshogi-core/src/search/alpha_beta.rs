@@ -16,7 +16,8 @@ use crate::position::Position;
 use crate::search::PieceToHistory;
 use crate::tt::{ProbeResult, TTData, TranspositionTable};
 use crate::types::{
-    Bound, Color, DEPTH_QS, Depth, MAX_PLY, Move, Piece, PieceType, RepetitionState, Square, Value,
+    Bound, Color, DEPTH_QS, Depth, EnteringKingRule, MAX_PLY, Move, Piece, PieceType,
+    RepetitionState, Square, Value,
 };
 
 use super::history::{
@@ -481,6 +482,9 @@ pub struct SearchWorker {
     /// Color::Black = 0, Color::White = 1
     pub draw_value_table: [Value; 2],
 
+    /// 入玉宣言勝ちルール
+    pub entering_king_rule: EnteringKingRule,
+
     // =========================================================================
     // 探索状態（SearchState）
     // =========================================================================
@@ -543,6 +547,7 @@ impl SearchWorker {
             draw_value_black: DEFAULT_DRAW_VALUE_BLACK,
             draw_value_white: DEFAULT_DRAW_VALUE_WHITE,
             draw_value_table: [Value::ZERO; 2],
+            entering_king_rule: EnteringKingRule::default(),
             state: SearchState::new(),
         });
         worker.reset_cont_history_ptrs();
