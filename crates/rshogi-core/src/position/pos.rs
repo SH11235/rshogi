@@ -1639,7 +1639,7 @@ impl Position {
     // =========================================================================
 
     /// 敵陣のBitboard（先手なら1-3段目、後手なら7-9段目）
-    pub fn enemy_field(us: Color) -> Bitboard {
+    pub(crate) fn enemy_field(us: Color) -> Bitboard {
         match us {
             Color::Black => RANK_BB[0] | RANK_BB[1] | RANK_BB[2],
             Color::White => RANK_BB[6] | RANK_BB[7] | RANK_BB[8],
@@ -1700,17 +1700,14 @@ impl Position {
             + h.count(PieceType::Gold)
             + (h.count(PieceType::Bishop) + h.count(PieceType::Rook)) * 5;
 
-        // 必要点を計算
+        // 必要点を計算（None / TryRule は上部で除外済み）
         let mut required = match rule {
-            EnteringKingRule::Point24 | EnteringKingRule::Point24H => match us {
-                Color::Black => 31u32,
-                Color::White => 31,
-            },
+            EnteringKingRule::Point24 | EnteringKingRule::Point24H => 31u32,
             EnteringKingRule::Point27 | EnteringKingRule::Point27H => match us {
                 Color::Black => 28,
                 Color::White => 27,
             },
-            _ => unreachable!(),
+            EnteringKingRule::None | EnteringKingRule::TryRule => unreachable!(),
         };
 
         // 駒落ち補正（_H バリアント）
@@ -2946,5 +2943,51 @@ mod tests {
         assert!(ef_white.contains(Square::new(File::File5, Rank::Rank7)));
         assert!(ef_white.contains(Square::new(File::File5, Rank::Rank9)));
         assert!(!ef_white.contains(Square::new(File::File5, Rank::Rank6)));
+    }
+
+    // =========================================
+    // トライルールのテスト
+    // =========================================
+
+    #[test]
+    fn test_try_rule_success() {
+        // 先手玉6一(File6,Rank1)がトライ升5一に隣接、5一が空で敵の利きもない
+        let pos = make_pos("3K5/9/9/9/9/9/9/9/4k4 b 2r2b4g4s4n4l18p 1");
+        let result = pos.declaration_win(EnteringKingRule::TryRule);
+        assert!(result.is_normal(), "トライ成功時は玉の移動手を返す");
+        assert_eq!(result.to(), Square::new(File::File5, Rank::Rank1));
+    }
+
+    #[test]
+    fn test_try_rule_not_adjacent() {
+        // 先手玉3一がトライ升5一に隣接していない（2マス離れている）
+        let pos = make_pos("2K6/9/9/9/9/9/9/9/4k4 b 2r2b4g4s4n4l18p 1");
+        assert_eq!(
+            pos.declaration_win(EnteringKingRule::TryRule),
+            Move::NONE,
+            "トライ升に隣接していなければ NONE"
+        );
+    }
+
+    #[test]
+    fn test_try_rule_own_piece_on_target() {
+        // 先手玉4一がトライ升5一に隣接しているが、5一に自駒（金）がある
+        let pos = make_pos("3GK4/9/9/9/9/9/9/9/4k4 b 2r2b3g4s4n4l18p 1");
+        assert_eq!(
+            pos.declaration_win(EnteringKingRule::TryRule),
+            Move::NONE,
+            "トライ升に自駒があれば NONE"
+        );
+    }
+
+    #[test]
+    fn test_try_rule_enemy_attacks_target() {
+        // 先手玉4一がトライ升5一に隣接、5一は空だが後手の飛車5九が利いている
+        let pos = make_pos("4K4/9/9/9/9/9/9/9/4kr3 b 2b4g4s4n4l18p 1");
+        assert_eq!(
+            pos.declaration_win(EnteringKingRule::TryRule),
+            Move::NONE,
+            "トライ升に敵の利きがあれば NONE"
+        );
     }
 }

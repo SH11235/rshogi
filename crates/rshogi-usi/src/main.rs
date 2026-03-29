@@ -896,6 +896,7 @@ impl UsiEngine {
             }
             "EnteringKingRule" => {
                 if let Some(rule) = EnteringKingRule::from_usi(&value) {
+                    // search は new() で常に Some だが、既存パターンに合わせて防御的にチェック
                     if let Some(search) = self.search.as_mut() {
                         search.set_entering_king_rule(rule);
                     }

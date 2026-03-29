@@ -324,12 +324,14 @@ impl Move {
     /// # パス手の形式
     /// - `"pass"`: 独自形式
     /// - `"0000"`: UCI（チェス）由来のnull move形式
+    ///
+    /// # 注意
+    /// `"win"` は受理しない。`bestmove win` は終局トークンであり、
+    /// `position ... moves` の指し手列で使用されると不正な局面更新を引き起こすため、
+    /// 上位レイヤー（USI bestmove 解析等）で文字列として処理する。
     pub fn from_usi(s: &str) -> Option<Move> {
         if s == "none" {
             return Some(Move::NONE);
-        }
-        if s == "win" {
-            return Some(Move::WIN);
         }
         // パス手: "pass" または "0000" 形式をサポート
         if s == "pass" || s == "0000" {
@@ -546,7 +548,7 @@ mod tests {
     #[test]
     fn test_move_roundtrip() {
         // USI形式の往復変換テスト
-        let test_cases = ["7g7f", "2c2b+", "P*5e", "G*1a", "none", "pass", "win"];
+        let test_cases = ["7g7f", "2c2b+", "P*5e", "G*1a", "none", "pass"];
         for s in test_cases {
             let m = Move::from_usi(s).unwrap();
             assert_eq!(m.to_usi(), s);
@@ -660,7 +662,8 @@ mod tests {
     #[test]
     fn test_move_win_usi() {
         assert_eq!(Move::WIN.to_usi(), "win");
-        assert_eq!(Move::from_usi("win"), Some(Move::WIN));
+        // from_usi("win") は受理しない（position moves 経路での誤用防止）
+        assert_eq!(Move::from_usi("win"), None);
     }
 
     #[test]

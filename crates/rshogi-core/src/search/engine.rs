@@ -1331,6 +1331,19 @@ where
         }
         worker.state.best_move = decl_move;
         worker.state.completed_depth = 1;
+
+        // ponder/infinite 待機: bestmove を早出ししない（USI仕様準拠）
+        if let Some(ref ms) = main_state {
+            while !worker.state.abort
+                && !time_manager.stop_requested()
+                && (time_manager.is_pondering() || limits.infinite)
+            {
+                if ms.ponderhit_flag.swap(false, Ordering::Relaxed) {
+                    time_manager.on_ponderhit();
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
         return 0;
     }
 
