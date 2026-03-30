@@ -272,7 +272,8 @@ impl<const N: usize> SmallMoveList<N> {
     /// イテレータを返す
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = &Move> {
-        self.buf[..self.len].iter()
+        // SAFETY: self.len <= N は push() で保証。buf は N 要素で初期化済み。
+        unsafe { self.buf.get_unchecked(..self.len) }.iter()
     }
 }
 

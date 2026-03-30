@@ -722,7 +722,9 @@ impl NNUENetwork {
     ) -> Value {
         match self {
             Self::LayerStacks(net) => net.evaluate(pos, acc),
-            _ => panic!("This method is only for LayerStacks architecture."),
+            // SAFETY: layerstack-only ビルドでは LayerStacks 以外のバリアントは生成されない。
+            //         非 layerstack-only ビルドでは呼び出し元が LayerStacks であることを保証する。
+            _ => unsafe { core::hint::unreachable_unchecked() },
         }
     }
 
@@ -735,7 +737,8 @@ impl NNUENetwork {
     ) -> Value {
         match self {
             Self::LayerStacks(net) => net.evaluate_with_bucket(pos, acc, bucket_index),
-            _ => panic!("This method is only for LayerStacks architecture."),
+            // SAFETY: evaluate_layer_stacks と同様。
+            _ => unsafe { core::hint::unreachable_unchecked() },
         }
     }
 
