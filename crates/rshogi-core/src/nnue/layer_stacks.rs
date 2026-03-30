@@ -246,7 +246,9 @@ impl Default for LayerStacks {
 #[inline]
 fn l1_sqr_clipped_relu_activation(l1_out: &[i32; LAYER_STACK_L1_OUT], l2_input: &mut [u8]) {
     // 16要素のみなので SIMD 化のメリットが小さく、スカラーで十分。
-    // 注意: 二乗は i64 で計算する必要がある（i32 ではオーバーフローする）。
+    // 注意: 二乗は i64 で計算する必要がある。
+    // i32 乗算は |val| > ~46340 (sqrt(i32::MAX)) でオーバーフローし、
+    // 中盤局面の L1 出力は数万〜数十万に達するため i64 が必須。
     for (i, &val) in l1_out.iter().enumerate().take(NNUE_PYTORCH_L2) {
         let input_val = val as i64;
         let sqr = ((input_val * input_val) >> 19).clamp(0, 127) as u8;
@@ -941,5 +943,19 @@ mod tests {
 
         assert_eq!(optimized_inline, reference);
         assert_eq!(optimized, reference);
+    }
+
+    /// l1_out の値が大きい場合（i32 乗算でオーバーフローするケース）の回帰テスト。
+    /// PR #416 で修正した AVX2 パスの i32 オーバーフローが再発しないことを確認。
+    #[test]
+    fn test_l1_sqr_clipped_relu_activation_large_values() {
+        // |val| = 50000 のとき i32 乗算は 2_500_000_000 > i32::MAX でオーバーフローする
+        let l1_out = [50_000i32; LAYER_STACK_L1_OUT];
+        let mut l2_input = [0u8; L2_PADDED_INPUT];
+        l1_sqr_clipped_relu_activation(&l1_out, &mut l2_input);
+        // SqrClippedReLU: (50000^2 >> 19) = 4768 → clamp → 127
+        assert_eq!(l2_input[0], 127, "SqrClippedReLU should saturate to 127");
+        // ClippedReLU: 50000 >> 6 = 781 → clamp → 127
+        assert_eq!(l2_input[NNUE_PYTORCH_L2], 127, "ClippedReLU should saturate to 127");
     }
 }
