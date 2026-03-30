@@ -11,6 +11,8 @@ use std::sync::Arc;
 #[cfg(not(feature = "search-no-pass-rules"))]
 use crate::eval::evaluate_pass_rights;
 use crate::eval::{EvalHash, get_scaled_pass_move_bonus};
+#[cfg(feature = "layerstack-only")]
+use crate::nnue::NNUENetwork;
 use crate::nnue::{AccumulatorCacheLayerStacks, AccumulatorStackVariant, get_network};
 use crate::position::Position;
 use crate::search::PieceToHistory;
@@ -360,6 +362,12 @@ pub struct SearchState {
     pub root_moves: RootMoves,
     /// 前回 iteration の PV ライン
     pub previous_pv: Vec<Move>,
+    /// NNUE ネットワークへの raw pointer（探索中の get_network() RwLock 回避用）
+    ///
+    /// `reset()` 時に `Arc::as_ptr()` で設定する。対応する Arc は NETWORK の
+    /// RwLock 内に保持されており、探索中に drop されることはない。
+    #[cfg(feature = "layerstack-only")]
+    pub network_ptr: *const NNUENetwork,
     /// NNUE Accumulator スタック
     pub nnue_stack: AccumulatorStackVariant,
     /// LayerStacks 用 AccumulatorCaches（Finny Tables）
@@ -388,6 +396,8 @@ impl SearchState {
             nmp_min_ply: 0,
             root_moves: RootMoves::new(),
             previous_pv: Vec::new(),
+            #[cfg(feature = "layerstack-only")]
+            network_ptr: std::ptr::null(),
             nnue_stack: AccumulatorStackVariant::new_default(),
             acc_cache: None,
             calls_cnt: 0,
@@ -720,7 +730,18 @@ impl SearchWorker {
             .low_ply_history
             .clear_with_init(self.search_tune_params.low_ply_history_init as i16);
         // NNUE AccumulatorStack: ネットワークに応じたバリアントに更新・リセット
+        #[cfg(feature = "layerstack-only")]
+        {
+            self.state.network_ptr = std::ptr::null();
+        }
         if let Some(network) = get_network() {
+            // 探索中の get_network() RwLock + Arc::clone 回避用に raw pointer をキャッシュ。
+            // Arc は NETWORK (RwLock<Option<Arc<NNUENetwork>>>) 内に保持され、
+            // 次の reset() / clear_nnue() まで drop されない。
+            #[cfg(feature = "layerstack-only")]
+            {
+                self.state.network_ptr = Arc::as_ptr(&network);
+            }
             // バリアントがネットワークと一致しない場合は再作成
             if !self.state.nnue_stack.matches_network(&network) {
                 self.state.nnue_stack = AccumulatorStackVariant::from_network(&network);
@@ -3655,8 +3676,15 @@ impl SearchWorker {
 }
 
 // SAFETY: SearchWorkerは単一スレッドで使用される前提。
-// StackArray内の各Stackが持つ `cont_history_ptr: NonNull<PieceToHistory>` は
-// `self.history.continuation_history` 内のテーブルへの参照である。
-// SearchWorkerがスレッド間でmoveされても、history フィールドも一緒にmoveされるため、
-// ポインタの参照先は常に有効であり、データ競合も発生しない。
+//
+// 1. `cont_history_ptr: NonNull<PieceToHistory>`（StackArray内の各Stack）:
+//    `self.history.continuation_history` 内のテーブルへの参照である。
+//    SearchWorkerがスレッド間でmoveされても、history フィールドも一緒にmoveされるため、
+//    ポインタの参照先は常に有効であり、データ競合も発生しない。
+//
+// 2. `network_ptr: *const NNUENetwork`（SearchState、layerstack-only feature時のみ）:
+//    グローバル NETWORK (RwLock<Option<Arc<NNUENetwork>>>) 内の Arc が指す
+//    NNUENetwork への読み取り専用ポインタ。NNUENetwork は Arc 経由で保持されるため
+//    Sync であり、探索中に重みデータが変更されることはない。
+//    各ワーカーが独立した reset() で設定し、探索中は読み取りのみ行う。
 unsafe impl Send for SearchWorker {}

@@ -1543,8 +1543,8 @@ fn update_and_evaluate_layer_stacks(
 ///
 /// `update_and_evaluate_layer_stacks` と同じロジックだが、
 /// AccumulatorCaches（Finny Tables）を使用して refresh を高速化する。
-#[inline]
-fn update_and_evaluate_layer_stacks_cached(
+#[inline(always)]
+pub(crate) fn update_and_evaluate_layer_stacks_cached(
     network: &NNUENetwork,
     pos: &Position,
     stack: &mut AccumulatorStackLayerStacks,
