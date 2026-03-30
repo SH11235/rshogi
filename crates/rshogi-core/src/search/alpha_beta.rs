@@ -2585,9 +2585,9 @@ impl SearchWorker {
                     + ctx.tune_params.singular_beta_margin_tt_pv_non_pv_add
                         * (tt_pv && !pv_node) as i32)
                     * depth
-                    / ctx.tune_params.singular_beta_margin_div;
+                    / ctx.tune_params.singular_beta_margin_div.max(1);
                 let singular_beta = tt_value - Value::new(singular_beta_margin);
-                let singular_depth = new_depth / ctx.tune_params.singular_depth_div;
+                let singular_depth = new_depth / ctx.tune_params.singular_depth_div.max(1);
 
                 // ttMoveを除外して浅い探索を実行
                 // 注: 同じplyで再帰呼び出しを行う（do_moveせず同一局面で探索）
@@ -2620,8 +2620,8 @@ impl SearchWorker {
                 if singular_value < singular_beta {
                     inc_stat!(st, singular_extension);
                     // Singular確定 → 延長量を計算
-                    let corr_val_adj =
-                        eval_ctx.correction_value.abs() / ctx.tune_params.singular_corr_val_adj_div;
+                    let corr_val_adj = eval_ctx.correction_value.abs()
+                        / ctx.tune_params.singular_corr_val_adj_div.max(1);
                     // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
                     let tt_move_hist =
                         unsafe { ctx.history.as_ref_unchecked() }.tt_move_history.get() as i32;
@@ -2631,7 +2631,7 @@ impl SearchWorker {
                             * !tt_capture as i32
                         - corr_val_adj
                         + ctx.tune_params.singular_double_margin_tt_move_hist_mult * tt_move_hist
-                            / ctx.tune_params.singular_double_margin_tt_move_hist_div
+                            / ctx.tune_params.singular_double_margin_tt_move_hist_div.max(1)
                         - (ply > st.root_depth) as i32
                             * ctx.tune_params.singular_double_margin_late_ply_penalty;
                     let triple_margin = ctx.tune_params.singular_triple_margin_base
