@@ -78,6 +78,8 @@ pub use layer_stacks::{
     sqr_clipped_relu_transform,
 };
 pub use layers::{AffineTransform, ClippedReLU};
+#[cfg(feature = "layerstack-only")]
+pub(crate) use network::update_and_evaluate_layer_stacks_cached;
 pub use network::{
     LAYER_STACK_PLY9_DEFAULT_BOUNDS, LayerStackBucketMode, LayerStackProgressCoeff,
     LayerStackProgressCoeffGikouLite, NNUENetwork, NnueFormatInfo,

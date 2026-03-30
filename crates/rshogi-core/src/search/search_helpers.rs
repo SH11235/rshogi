@@ -122,6 +122,10 @@ pub(super) fn nnue_evaluate(st: &mut SearchState, pos: &Position) -> Value {
             // Arc は NETWORK の RwLock 内に保持され、探索中に drop されない。
             let network = unsafe { &*ptr };
             let AccumulatorStackVariant::LayerStacks(ref mut s) = st.nnue_stack else {
+                // SAFETY: `layerstack-only` feature が有効なとき、`from_network()` は
+                // 常に `LayerStacks` 変数体を返し、`nnue_stack` は `reset()` 以降
+                // 変更されない。よって `network_ptr` が非 null であれば `LayerStacks`
+                // 以外のアームに到達することはない。
                 unsafe { std::hint::unreachable_unchecked() }
             };
             return update_and_evaluate_layer_stacks_cached(network, pos, s, &mut st.acc_cache);
