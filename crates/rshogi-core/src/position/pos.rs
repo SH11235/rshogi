@@ -11,7 +11,9 @@ use crate::bitboard::{
     Bitboard, RANK_BB, bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect,
     knight_effect, lance_effect, lance_step_effect, pawn_effect, rook_effect, silver_effect,
 };
-use crate::eval::material::{hand_piece_value, material_needs_board_effects, signed_piece_value};
+#[cfg(not(feature = "layerstack-only"))]
+use crate::eval::material::material_needs_board_effects;
+use crate::eval::material::{hand_piece_value, signed_piece_value};
 use crate::nnue::piece_list::PieceList;
 use crate::nnue::{ChangedBonaPiece, DirtyPiece, ExtBonaPiece};
 use crate::prefetch::{NoPrefetch, TtPrefetch};
@@ -444,10 +446,20 @@ impl Position {
 
     #[inline]
     fn should_update_board_effects() -> bool {
-        if !crate::eval::is_material_enabled() && crate::nnue::is_nnue_initialized() {
-            return false;
+        // layerstack-only ビルドでは NNUE が常に使用されるため board_effects は不要。
+        // コンパイル時に false が確定し、do_move/undo_move 内の board_effects
+        // 関連コード（5+2 call、条件分岐、is_nnue_initialized の RwLock）が全て除去される。
+        #[cfg(feature = "layerstack-only")]
+        {
+            false
         }
-        material_needs_board_effects()
+        #[cfg(not(feature = "layerstack-only"))]
+        {
+            if !crate::eval::is_material_enabled() && crate::nnue::is_nnue_initialized() {
+                return false;
+            }
+            material_needs_board_effects()
+        }
     }
 
     #[inline]
