@@ -1309,6 +1309,9 @@ pub fn init_nnue_from_bytes(bytes: &[u8]) -> io::Result<()> {
 
 /// グローバル NNUE をクリアする
 pub fn clear_nnue() {
+    // Safety: false を先に書いてから NETWORK をクリアすること。
+    // 逆順にすると is_nnue_initialized() == true の直後に get_network() が None を返す
+    // 短い窓が生じる。false-negative（ロード済みなのに false に見える瞬間）は安全。
     NNUE_INITIALIZED.store(false, Ordering::Release);
     *NETWORK.write().expect("NNUE lock poisoned") = None;
 }
