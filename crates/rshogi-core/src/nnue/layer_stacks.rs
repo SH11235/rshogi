@@ -245,71 +245,14 @@ impl Default for LayerStacks {
 /// 16番目の要素 (l1_skip) は呼び出し側で別途取得済み。
 #[inline]
 fn l1_sqr_clipped_relu_activation(l1_out: &[i32; LAYER_STACK_L1_OUT], l2_input: &mut [u8]) {
-    // AVX2: 16 i32 を一括処理（LAYER_STACK_L1_OUT=16 なので1回で完了）
-    // 16番目の結果は l2_input[15] と l2_input[30] に書かれるが、
-    // l2_input のパディング領域なので上書きされても問題ない。
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    {
-        // SAFETY:
-        // - l1_out は 16 要素（LAYER_STACK_L1_OUT）
-        // - l2_input は L2_PADDED_INPUT(=32) 要素で、index 30 までしか使われない
-        // - 16番目の要素が index 15, 30 に書かれるが、いずれもパディング領域
-        // - 二乗: max(127)^2 = 16129 < i32::MAX、>>19 後は [0, 127]
-        unsafe {
-            use std::arch::x86_64::*;
-            let zero = _mm256_setzero_si256();
-            let max127 = _mm256_set1_epi32(127);
-
-            let in_ptr = l1_out.as_ptr();
-            let out_ptr = l2_input.as_mut_ptr();
-
-            // 8要素ずつ2回 = 16要素
-            for chunk in 0..2 {
-                let offset = chunk * 8;
-                let v = _mm256_loadu_si256(in_ptr.add(offset) as *const __m256i);
-
-                // SqrClippedReLU: min(127, (v*v) >> 19)
-                let sqr = _mm256_mullo_epi32(v, v);
-                let sqr_shifted = _mm256_srai_epi32(sqr, 19);
-                let sqr_result = _mm256_min_epi32(_mm256_max_epi32(sqr_shifted, zero), max127);
-
-                // ClippedReLU: clamp(v >> 6, 0, 127)
-                let relu_shifted = _mm256_srai_epi32(v, 6);
-                let relu_result = _mm256_min_epi32(_mm256_max_epi32(relu_shifted, zero), max127);
-
-                // i32 → u8 パック（8 i32 → 8 u8）
-                // packs_epi32: i32 → i16 飽和パック
-                let sqr_16 = _mm256_packs_epi32(sqr_result, sqr_result); // [s0..3,s0..3, s4..7,s4..7]
-                let sqr_8 = _mm256_packus_epi16(sqr_16, sqr_16); // [s0..3,s0..3,s0..3,s0..3, s4..7,...]
-                // 下位4バイト + lane1の下位4バイト
-                let sqr_lo = _mm256_castsi256_si128(sqr_8);
-                let sqr_hi = _mm256_extracti128_si256(sqr_8, 1);
-                let sqr_combined = _mm_unpacklo_epi32(sqr_lo, sqr_hi);
-                _mm_storel_epi64(out_ptr.add(offset) as *mut __m128i, sqr_combined);
-
-                let relu_16 = _mm256_packs_epi32(relu_result, relu_result);
-                let relu_8 = _mm256_packus_epi16(relu_16, relu_16);
-                let relu_lo = _mm256_castsi256_si128(relu_8);
-                let relu_hi = _mm256_extracti128_si256(relu_8, 1);
-                let relu_combined = _mm_unpacklo_epi32(relu_lo, relu_hi);
-                _mm_storel_epi64(
-                    out_ptr.add(NNUE_PYTORCH_L2 + offset) as *mut __m128i,
-                    relu_combined,
-                );
-            }
-        }
-    }
-
-    // スカラーフォールバック
-    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-    {
-        for (i, &val) in l1_out.iter().enumerate().take(NNUE_PYTORCH_L2) {
-            let input_val = val as i64;
-            let sqr = ((input_val * input_val) >> 19).clamp(0, 127) as u8;
-            let clamped = (val >> 6).clamp(0, 127) as u8;
-            l2_input[i] = sqr;
-            l2_input[NNUE_PYTORCH_L2 + i] = clamped;
-        }
+    // 16要素のみなので SIMD 化のメリットが小さく、スカラーで十分。
+    // 注意: 二乗は i64 で計算する必要がある（i32 ではオーバーフローする）。
+    for (i, &val) in l1_out.iter().enumerate().take(NNUE_PYTORCH_L2) {
+        let input_val = val as i64;
+        let sqr = ((input_val * input_val) >> 19).clamp(0, 127) as u8;
+        let clamped = (val >> 6).clamp(0, 127) as u8;
+        l2_input[i] = sqr;
+        l2_input[NNUE_PYTORCH_L2 + i] = clamped;
     }
 }
 
