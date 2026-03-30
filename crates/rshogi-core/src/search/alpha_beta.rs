@@ -2148,7 +2148,7 @@ impl SearchWorker {
         // NOTE: YaneuraOuでは (ss+1)->pv = pv でポインタを新配列に向け、ss->pv[0] = Move::none() でクリア
         //       Vecベースの実装では明示的なclear()で同等の効果を得る
         if pv_node {
-            // SAFETY: ply < MAX_PLY < STACK_SIZE, ply + 1 < STACK_SIZE。
+            // SAFETY: ply <= MAX_PLY(246) → ply+1 <= 247 < STACK_SIZE(256)。
             unsafe { st.stack.get_unchecked_mut(ply as usize) }.pv.clear();
             unsafe { st.stack.get_unchecked_mut((ply + 1) as usize) }.pv.clear();
         }

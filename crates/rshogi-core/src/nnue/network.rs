@@ -737,7 +737,8 @@ impl NNUENetwork {
     ) -> Value {
         match self {
             Self::LayerStacks(net) => net.evaluate_with_bucket(pos, acc, bucket_index),
-            _ => panic!("This method is only for LayerStacks architecture."),
+            // SAFETY: evaluate_layer_stacks と同様。
+            _ => unsafe { core::hint::unreachable_unchecked() },
         }
     }
 
