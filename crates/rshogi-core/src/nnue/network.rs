@@ -1168,8 +1168,10 @@ pub fn compute_progress8kpabs_sum(pos: &Position, weights: &[f32]) -> f32 {
 
     let sq_bk = pos.king_square(Color::Black).index();
     let sq_wk = pos.king_square(Color::White).inverse().index();
-    let weights_b = &weights[sq_bk * FE_OLD_END..(sq_bk + 1) * FE_OLD_END];
-    let weights_w = &weights[sq_wk * FE_OLD_END..(sq_wk + 1) * FE_OLD_END];
+    // SAFETY: sq_bk, sq_wk は king_square().index() で 0..81 の範囲。
+    // weights の長さは 81 * FE_OLD_END であり、(sq + 1) * FE_OLD_END <= weights.len()。
+    let weights_b = unsafe { weights.get_unchecked(sq_bk * FE_OLD_END..(sq_bk + 1) * FE_OLD_END) };
+    let weights_w = unsafe { weights.get_unchecked(sq_wk * FE_OLD_END..(sq_wk + 1) * FE_OLD_END) };
 
     let mut sum = 0.0f32;
 
@@ -1225,8 +1227,17 @@ pub fn update_progress8kpabs_sum_diff(
     sq_wk: usize,
     weights: &[f32],
 ) -> f32 {
-    let weights_b = &weights[sq_bk * FE_OLD_END..(sq_bk + 1) * FE_OLD_END];
-    let weights_w = &weights[sq_wk * FE_OLD_END..(sq_wk + 1) * FE_OLD_END];
+    // SAFETY: sq_bk, sq_wk は king_square().index() で 0..81 の範囲。
+    // weights の長さは 81 * FE_OLD_END であり、(sq + 1) * FE_OLD_END <= weights.len()。
+    debug_assert!(sq_bk < 81, "sq_bk out of range: {sq_bk}");
+    debug_assert!(sq_wk < 81, "sq_wk out of range: {sq_wk}");
+    debug_assert_eq!(
+        weights.len(),
+        SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
+        "progress8kpabs weights length mismatch"
+    );
+    let weights_b = unsafe { weights.get_unchecked(sq_bk * FE_OLD_END..(sq_bk + 1) * FE_OLD_END) };
+    let weights_w = unsafe { weights.get_unchecked(sq_wk * FE_OLD_END..(sq_wk + 1) * FE_OLD_END) };
     let mut sum = prev_sum;
     for i in 0..dirty_piece.dirty_num as usize {
         debug_assert!(i < dirty_piece.changed_piece.len());
