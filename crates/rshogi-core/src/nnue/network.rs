@@ -37,11 +37,17 @@ use std::cell::Cell;
 use std::fs::File;
 use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
-use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
 use std::sync::{Arc, LazyLock, RwLock};
 
 /// グローバルなNNUEネットワーク（HalfKP/HalfKA/HalfKA_hm^）
 static NETWORK: LazyLock<RwLock<Option<Arc<NNUENetwork>>>> = LazyLock::new(|| RwLock::new(None));
+
+/// `is_nnue_initialized()` の高速パス用 AtomicBool キャッシュ
+///
+/// NNUE ロード時に true、クリア時に false に設定する。
+/// `should_update_board_effects()` 等のホットパスから RwLock::read を回避するため。
+static NNUE_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// FV_SCALE のグローバルオーバーライド設定
 ///
@@ -1289,6 +1295,7 @@ pub fn progress_sum_to_bucket(sum: f32) -> usize {
 pub fn init_nnue<P: AsRef<Path>>(path: P) -> io::Result<()> {
     let network = Arc::new(NNUENetwork::load(path)?);
     *NETWORK.write().expect("NNUE lock poisoned") = Some(network);
+    NNUE_INITIALIZED.store(true, Ordering::Release);
     Ok(())
 }
 
@@ -1296,17 +1303,23 @@ pub fn init_nnue<P: AsRef<Path>>(path: P) -> io::Result<()> {
 pub fn init_nnue_from_bytes(bytes: &[u8]) -> io::Result<()> {
     let network = Arc::new(NNUENetwork::from_bytes(bytes)?);
     *NETWORK.write().expect("NNUE lock poisoned") = Some(network);
+    NNUE_INITIALIZED.store(true, Ordering::Release);
     Ok(())
 }
 
 /// グローバル NNUE をクリアする
 pub fn clear_nnue() {
+    NNUE_INITIALIZED.store(false, Ordering::Release);
     *NETWORK.write().expect("NNUE lock poisoned") = None;
 }
 
 /// NNUEが初期化済みかどうか
+///
+/// AtomicBool キャッシュにより RwLock::read を回避する。
+/// `init_nnue()` / `clear_nnue()` で更新される。
+#[inline]
 pub fn is_nnue_initialized() -> bool {
-    NETWORK.read().expect("NNUE lock poisoned").is_some()
+    NNUE_INITIALIZED.load(Ordering::Acquire)
 }
 
 // =============================================================================
