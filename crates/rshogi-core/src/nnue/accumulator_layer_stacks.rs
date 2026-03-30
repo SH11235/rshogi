@@ -325,19 +325,11 @@ impl AccumulatorStackLayerStacks {
 
     /// 指定インデックスのエントリを取得
     #[inline]
-    pub fn entry_at(&self, index: usize) -> &StackEntryLayerStacks {
+    pub(crate) fn entry_at(&self, index: usize) -> &StackEntryLayerStacks {
         debug_assert!(index < self.entries.len());
         // SAFETY: index は previous チェーンまたは find_usable_accumulator 由来で常に
         //         current 以下の有効なインデックス（STACK_SIZE 未満）。
         unsafe { self.entries.get_unchecked(index) }
-    }
-
-    /// 指定インデックスのエントリを取得（可変）
-    #[inline]
-    pub fn entry_at_mut(&mut self, index: usize) -> &mut StackEntryLayerStacks {
-        debug_assert!(index < self.entries.len());
-        // SAFETY: 同上。
-        unsafe { self.entries.get_unchecked_mut(index) }
     }
 
     /// スタックをプッシュ

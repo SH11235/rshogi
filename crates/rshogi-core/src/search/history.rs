@@ -181,6 +181,8 @@ impl ButterflyHistory {
     /// 値を取得
     #[inline]
     pub fn get(&self, color: Color, mv: Move) -> i16 {
+        debug_assert!(color.index() < Color::NUM);
+        debug_assert!(mv.history_index() < FROM_TO_SIZE);
         // SAFETY: Color::index() は 0 or 1 で Color::NUM=2 の範囲内。
         //         Move::history_index() < FROM_TO_SIZE。
         unsafe { self.table.get_unchecked(color.index()).get_unchecked(mv.history_index()).get() }
@@ -189,6 +191,8 @@ impl ButterflyHistory {
     /// 値を更新
     #[inline]
     pub fn update(&mut self, color: Color, mv: Move, bonus: i32) {
+        debug_assert!(color.index() < Color::NUM);
+        debug_assert!(mv.history_index() < FROM_TO_SIZE);
         // SAFETY: 同上。
         unsafe {
             self.table
