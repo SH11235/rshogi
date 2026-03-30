@@ -35,13 +35,18 @@ impl AccumulatorLayerStacks {
     /// 指定視点の累積値を取得
     #[inline]
     pub fn get(&self, perspective: usize) -> &[i16; NNUE_PYTORCH_L1] {
-        &self.accumulation[perspective]
+        debug_assert!(perspective < 2);
+        // SAFETY: perspective は Color::Black(0) または Color::White(1) であり、
+        //         accumulation は [_; 2] なので常に範囲内。
+        unsafe { self.accumulation.get_unchecked(perspective) }
     }
 
     /// 指定視点の累積値を取得（可変）
     #[inline]
     pub fn get_mut(&mut self, perspective: usize) -> &mut [i16; NNUE_PYTORCH_L1] {
-        &mut self.accumulation[perspective]
+        debug_assert!(perspective < 2);
+        // SAFETY: 同上。
+        unsafe { self.accumulation.get_unchecked_mut(perspective) }
     }
 }
 
@@ -320,14 +325,11 @@ impl AccumulatorStackLayerStacks {
 
     /// 指定インデックスのエントリを取得
     #[inline]
-    pub fn entry_at(&self, index: usize) -> &StackEntryLayerStacks {
-        &self.entries[index]
-    }
-
-    /// 指定インデックスのエントリを取得（可変）
-    #[inline]
-    pub fn entry_at_mut(&mut self, index: usize) -> &mut StackEntryLayerStacks {
-        &mut self.entries[index]
+    pub(crate) fn entry_at(&self, index: usize) -> &StackEntryLayerStacks {
+        debug_assert!(index < self.entries.len());
+        // SAFETY: index は previous チェーンまたは find_usable_accumulator 由来で常に
+        //         current 以下の有効なインデックス（STACK_SIZE 未満）。
+        unsafe { self.entries.get_unchecked(index) }
     }
 
     /// スタックをプッシュ
@@ -365,8 +367,16 @@ impl AccumulatorStackLayerStacks {
     ) -> (&AccumulatorLayerStacks, &mut AccumulatorLayerStacks) {
         let cur_idx = self.current;
         debug_assert!(prev_idx < cur_idx, "prev_idx ({prev_idx}) must be < cur_idx ({cur_idx})");
+        debug_assert!(cur_idx < self.entries.len());
         let (left, right) = self.entries.split_at_mut(cur_idx);
-        (&left[prev_idx].accumulator, &mut right[0].accumulator)
+        // SAFETY: prev_idx < cur_idx（上の debug_assert で検証）かつ left の長さは cur_idx。
+        //         right は少なくとも 1 要素を持つ（cur_idx < entries.len() を保証）。
+        unsafe {
+            (
+                &left.get_unchecked(prev_idx).accumulator,
+                &mut right.get_unchecked_mut(0).accumulator,
+            )
+        }
     }
 
     /// スタックをリセット
@@ -402,7 +412,9 @@ impl AccumulatorStackLayerStacks {
         // MAX_DEPTH=4 が MAX_DEPTH=1 比で +2.15% だったため維持する。
         const MAX_DEPTH: usize = 4;
 
-        let current = &self.entries[self.current];
+        debug_assert!(self.current < self.entries.len());
+        // SAFETY: current は do_move/undo_move の対称呼び出しで常に範囲内。
+        let current = unsafe { self.entries.get_unchecked(self.current) };
 
         // 現局面で玉が動いていたら差分更新不可
         if current.dirty_piece.king_moved[0] || current.dirty_piece.king_moved[1] {
@@ -414,7 +426,9 @@ impl AccumulatorStackLayerStacks {
         let mut depth = 1;
 
         loop {
-            let prev = &self.entries[prev_idx];
+            debug_assert!(prev_idx < self.entries.len());
+            // SAFETY: prev_idx は previous チェーンを辿った有効なインデックス（STACK_SIZE 未満）。
+            let prev = unsafe { self.entries.get_unchecked(prev_idx) };
 
             // 計算済みなら成功
             if prev.accumulator.computed_accumulation {

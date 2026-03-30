@@ -43,7 +43,9 @@ pub(super) fn correction_value(
 
     // (ss-1)->currentMove を使って continuation correction を参照
     let prev_move = if ply >= 1 {
-        st.stack[(ply - 1) as usize].current_move
+        debug_assert!(((ply - 1) as usize) < st.stack.len());
+        // SAFETY: ply >= 1 かつ ply <= MAX_PLY なので (ply-1) は StackArray の範囲内。
+        unsafe { st.stack.get_unchecked((ply - 1) as usize) }.current_move
     } else {
         Move::NONE
     };
@@ -54,7 +56,9 @@ pub(super) fn correction_value(
     let sentinel_key = ContHistKey::null_sentinel();
     let cont_key_2 = if move_ok {
         if ply >= 2 {
-            match st.stack[(ply - 2) as usize].cont_hist_key {
+            debug_assert!(((ply - 2) as usize) < st.stack.len());
+            // SAFETY: ply >= 2 かつ ply <= MAX_PLY なので (ply-2) は StackArray の範囲内。
+            match unsafe { st.stack.get_unchecked((ply - 2) as usize) }.cont_hist_key {
                 Some(key) => key,
                 None => sentinel_key,
             }
@@ -66,7 +70,9 @@ pub(super) fn correction_value(
     };
     let cont_key_4 = if move_ok {
         if ply >= 4 {
-            match st.stack[(ply - 4) as usize].cont_hist_key {
+            debug_assert!(((ply - 4) as usize) < st.stack.len());
+            // SAFETY: ply >= 4 かつ ply <= MAX_PLY なので (ply-4) は StackArray の範囲内。
+            match unsafe { st.stack.get_unchecked((ply - 4) as usize) }.cont_hist_key {
                 Some(key) => key,
                 None => sentinel_key,
             }
@@ -128,7 +134,9 @@ pub(super) fn update_correction_history(
 
     // (ss-1)->currentMove を使って continuation correction を更新
     let prev_move = if ply >= 1 {
-        st.stack[(ply - 1) as usize].current_move
+        debug_assert!(((ply - 1) as usize) < st.stack.len());
+        // SAFETY: ply >= 1 かつ ply <= MAX_PLY なので (ply-1) は StackArray の範囲内。
+        unsafe { st.stack.get_unchecked((ply - 1) as usize) }.current_move
     } else {
         Move::NONE
     };
@@ -137,7 +145,9 @@ pub(super) fn update_correction_history(
     // (ss-2)/(ss-4) context — cont_hist_key が未設定(None)でも sentinel へフォールバック
     let sentinel_key = ContHistKey::null_sentinel();
     let cont_key_2 = if ply >= 2 {
-        match st.stack[(ply - 2) as usize].cont_hist_key {
+        debug_assert!(((ply - 2) as usize) < st.stack.len());
+        // SAFETY: ply >= 2 かつ ply <= MAX_PLY なので (ply-2) は StackArray の範囲内。
+        match unsafe { st.stack.get_unchecked((ply - 2) as usize) }.cont_hist_key {
             Some(key) => key,
             None => sentinel_key,
         }
@@ -145,7 +155,9 @@ pub(super) fn update_correction_history(
         sentinel_key
     };
     let cont_key_4 = if ply >= 4 {
-        match st.stack[(ply - 4) as usize].cont_hist_key {
+        debug_assert!(((ply - 4) as usize) < st.stack.len());
+        // SAFETY: ply >= 4 かつ ply <= MAX_PLY なので (ply-4) は StackArray の範囲内。
+        match unsafe { st.stack.get_unchecked((ply - 4) as usize) }.cont_hist_key {
             Some(key) => key,
             None => sentinel_key,
         }

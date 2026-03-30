@@ -1229,26 +1229,40 @@ pub fn update_progress8kpabs_sum_diff(
     let weights_w = &weights[sq_wk * FE_OLD_END..(sq_wk + 1) * FE_OLD_END];
     let mut sum = prev_sum;
     for i in 0..dirty_piece.dirty_num as usize {
-        let changed = &dirty_piece.changed_piece[i];
+        debug_assert!(i < dirty_piece.changed_piece.len());
+        // SAFETY: dirty_num は最大 2 であり、changed_piece は [ChangedBonaPiece; 2]。
+        let changed = unsafe { dirty_piece.changed_piece.get_unchecked(i) };
 
         // old の寄与を引く
         let old_fb = changed.old_piece.fb;
         if old_fb != BonaPiece::ZERO {
-            sum -= weights_b[old_fb.value() as usize];
+            let idx = old_fb.value() as usize;
+            debug_assert!(idx < weights_b.len());
+            // SAFETY: BonaPiece の値は FE_OLD_END 未満であり、weights_b の長さは FE_OLD_END。
+            sum -= unsafe { *weights_b.get_unchecked(idx) };
         }
         let old_fw = changed.old_piece.fw;
         if old_fw != BonaPiece::ZERO {
-            sum -= weights_w[old_fw.value() as usize];
+            let idx = old_fw.value() as usize;
+            debug_assert!(idx < weights_w.len());
+            // SAFETY: BonaPiece の値は FE_OLD_END 未満であり、weights_w の長さは FE_OLD_END。
+            sum -= unsafe { *weights_w.get_unchecked(idx) };
         }
 
         // new の寄与を足す
         let new_fb = changed.new_piece.fb;
         if new_fb != BonaPiece::ZERO {
-            sum += weights_b[new_fb.value() as usize];
+            let idx = new_fb.value() as usize;
+            debug_assert!(idx < weights_b.len());
+            // SAFETY: BonaPiece の値は FE_OLD_END 未満であり、weights_b の長さは FE_OLD_END。
+            sum += unsafe { *weights_b.get_unchecked(idx) };
         }
         let new_fw = changed.new_piece.fw;
         if new_fw != BonaPiece::ZERO {
-            sum += weights_w[new_fw.value() as usize];
+            let idx = new_fw.value() as usize;
+            debug_assert!(idx < weights_w.len());
+            // SAFETY: BonaPiece の値は FE_OLD_END 未満であり、weights_w の長さは FE_OLD_END。
+            sum += unsafe { *weights_w.get_unchecked(idx) };
         }
     }
     sum
