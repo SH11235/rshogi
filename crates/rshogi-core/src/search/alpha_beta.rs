@@ -11,7 +11,7 @@ use std::sync::Arc;
 #[cfg(not(feature = "search-no-pass-rules"))]
 use crate::eval::evaluate_pass_rights;
 use crate::eval::{EvalHash, get_scaled_pass_move_bonus};
-use crate::nnue::{AccumulatorCacheLayerStacks, AccumulatorStackVariant, get_network};
+use crate::nnue::{AccumulatorCacheLayerStacks, AccumulatorStackVariant, NNUENetwork, get_network};
 use crate::position::Position;
 use crate::search::PieceToHistory;
 use crate::tt::{ProbeResult, TTData, TranspositionTable};
@@ -360,6 +360,11 @@ pub struct SearchState {
     pub root_moves: RootMoves,
     /// 前回 iteration の PV ライン
     pub previous_pv: Vec<Move>,
+    /// NNUE ネットワークへの raw pointer（探索中の get_network() RwLock 回避用）
+    ///
+    /// `reset()` 時に `Arc::as_ptr()` で設定する。対応する Arc は NETWORK の
+    /// RwLock 内に保持されており、探索中に drop されることはない。
+    pub network_ptr: *const NNUENetwork,
     /// NNUE Accumulator スタック
     pub nnue_stack: AccumulatorStackVariant,
     /// LayerStacks 用 AccumulatorCaches（Finny Tables）
@@ -388,6 +393,7 @@ impl SearchState {
             nmp_min_ply: 0,
             root_moves: RootMoves::new(),
             previous_pv: Vec::new(),
+            network_ptr: std::ptr::null(),
             nnue_stack: AccumulatorStackVariant::new_default(),
             acc_cache: None,
             calls_cnt: 0,
@@ -720,7 +726,12 @@ impl SearchWorker {
             .low_ply_history
             .clear_with_init(self.search_tune_params.low_ply_history_init as i16);
         // NNUE AccumulatorStack: ネットワークに応じたバリアントに更新・リセット
+        self.state.network_ptr = std::ptr::null();
         if let Some(network) = get_network() {
+            // 探索中の get_network() RwLock + Arc::clone 回避用に raw pointer をキャッシュ。
+            // Arc は NETWORK (RwLock<Option<Arc<NNUENetwork>>>) 内に保持され、
+            // 次の reset() / clear_nnue() まで drop されない。
+            self.state.network_ptr = Arc::as_ptr(&network);
             // バリアントがネットワークと一致しない場合は再作成
             if !self.state.nnue_stack.matches_network(&network) {
                 self.state.nnue_stack = AccumulatorStackVariant::from_network(&network);

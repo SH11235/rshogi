@@ -6,6 +6,8 @@ use std::ptr::NonNull;
 
 #[cfg(feature = "use-lazy-evaluate")]
 use crate::nnue::ensure_accumulator_computed;
+#[cfg(feature = "layerstack-only")]
+use crate::nnue::{AccumulatorStackVariant, update_and_evaluate_layer_stacks_cached};
 use crate::nnue::{DirtyPiece, evaluate_dispatch};
 use crate::position::Position;
 use crate::prefetch::TtPrefetch;
@@ -106,8 +108,25 @@ pub(super) fn check_abort(
 // =============================================================================
 
 /// NNUE 評価
+///
+/// `layerstack-only` feature 時は `evaluate_dispatch` をバイパスし、
+/// `network_ptr` から直接 LayerStacks 評価を呼ぶ。
+/// これにより `get_network()` の RwLock::read + Arc::clone を完全回避する。
 #[inline]
 pub(super) fn nnue_evaluate(st: &mut SearchState, pos: &Position) -> Value {
+    #[cfg(feature = "layerstack-only")]
+    {
+        let ptr = st.network_ptr;
+        if !ptr.is_null() {
+            // SAFETY: network_ptr は reset() で Arc::as_ptr() から設定。
+            // Arc は NETWORK の RwLock 内に保持され、探索中に drop されない。
+            let network = unsafe { &*ptr };
+            let AccumulatorStackVariant::LayerStacks(ref mut s) = st.nnue_stack else {
+                unsafe { std::hint::unreachable_unchecked() }
+            };
+            return update_and_evaluate_layer_stacks_cached(network, pos, s, &mut st.acc_cache);
+        }
+    }
     evaluate_dispatch(pos, &mut st.nnue_stack, &mut st.acc_cache)
 }
 
