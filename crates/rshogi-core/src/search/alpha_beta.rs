@@ -3676,8 +3676,15 @@ impl SearchWorker {
 }
 
 // SAFETY: SearchWorkerは単一スレッドで使用される前提。
-// StackArray内の各Stackが持つ `cont_history_ptr: NonNull<PieceToHistory>` は
-// `self.history.continuation_history` 内のテーブルへの参照である。
-// SearchWorkerがスレッド間でmoveされても、history フィールドも一緒にmoveされるため、
-// ポインタの参照先は常に有効であり、データ競合も発生しない。
+//
+// 1. `cont_history_ptr: NonNull<PieceToHistory>`（StackArray内の各Stack）:
+//    `self.history.continuation_history` 内のテーブルへの参照である。
+//    SearchWorkerがスレッド間でmoveされても、history フィールドも一緒にmoveされるため、
+//    ポインタの参照先は常に有効であり、データ競合も発生しない。
+//
+// 2. `network_ptr: *const NNUENetwork`（SearchState、layerstack-only feature時のみ）:
+//    グローバル NETWORK (RwLock<Option<Arc<NNUENetwork>>>) 内の Arc が指す
+//    NNUENetwork への読み取り専用ポインタ。NNUENetwork は Arc 経由で保持されるため
+//    Sync であり、探索中に重みデータが変更されることはない。
+//    各ワーカーが独立した reset() で設定し、探索中は読み取りのみ行う。
 unsafe impl Send for SearchWorker {}
