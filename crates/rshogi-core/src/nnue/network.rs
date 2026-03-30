@@ -1229,6 +1229,13 @@ pub fn update_progress8kpabs_sum_diff(
 ) -> f32 {
     // SAFETY: sq_bk, sq_wk は king_square().index() で 0..81 の範囲。
     // weights の長さは 81 * FE_OLD_END であり、(sq + 1) * FE_OLD_END <= weights.len()。
+    debug_assert!(sq_bk < 81, "sq_bk out of range: {sq_bk}");
+    debug_assert!(sq_wk < 81, "sq_wk out of range: {sq_wk}");
+    debug_assert_eq!(
+        weights.len(),
+        SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
+        "progress8kpabs weights length mismatch"
+    );
     let weights_b = unsafe { weights.get_unchecked(sq_bk * FE_OLD_END..(sq_bk + 1) * FE_OLD_END) };
     let weights_w = unsafe { weights.get_unchecked(sq_wk * FE_OLD_END..(sq_wk + 1) * FE_OLD_END) };
     let mut sum = prev_sum;
