@@ -463,8 +463,11 @@ impl MovePicker {
                         // -3560 * depth で depth が浅いほど閾値が高く、多くの手がソート対象
                         let limit = -3560 * self.depth;
                         let quiet_count = self.end_cur - self.end_captures;
+                        // SAFETY: end_captures <= moves.len() は MovePicker の不変条件。
                         let sorted_end = partial_insertion_sort(
-                            &mut self.moves.as_mut_slice()[self.end_captures..],
+                            unsafe {
+                                self.moves.as_mut_slice().get_unchecked_mut(self.end_captures..)
+                            },
                             quiet_count,
                             limit,
                         );
@@ -583,7 +586,8 @@ impl MovePicker {
 
     /// 捕獲手のスコアを計算
     fn score_captures(&mut self, pos: &Position, history: &HistoryTables) {
-        for ext in &mut self.moves.as_mut_slice()[self.cur..self.end_cur] {
+        // SAFETY: cur <= end_cur <= moves.len() は MovePicker の不変条件。
+        for ext in unsafe { self.moves.as_mut_slice().get_unchecked_mut(self.cur..self.end_cur) } {
             let m = ext.mv;
             let to = m.to();
             let pc = m.moved_piece_after();
@@ -602,7 +606,8 @@ impl MovePicker {
     fn score_quiets(&mut self, pos: &Position, history: &HistoryTables) {
         let us = self.side_to_move;
         let pawn_idx = self.pawn_history_index;
-        let moves = &mut self.moves.as_mut_slice()[self.cur..self.end_cur];
+        // SAFETY: cur <= end_cur <= moves.len() は MovePicker の不変条件。
+        let moves = unsafe { self.moves.as_mut_slice().get_unchecked_mut(self.cur..self.end_cur) };
         // SAFETY:
         // - continuation_history のポインタは MovePicker の寿命中有効。
         // - ここでは読み取り専用でのみ参照する。
@@ -639,7 +644,8 @@ impl MovePicker {
                     value += 16384;
                 }
 
-                value += 8 * history.low_ply_history.get(low_ply_idx, m) as i32 / low_ply_div;
+                value +=
+                    8 * history.low_ply_history.get(low_ply_idx, m) as i32 / low_ply_div.max(1);
                 ext.value = value;
             }
         } else {
@@ -674,7 +680,8 @@ impl MovePicker {
         // - 読み取り専用でのみ使用し、moves とは無関係な領域を指す。
         let ch = unsafe { &*self.continuation_history[0] };
 
-        for ext in &mut self.moves.as_mut_slice()[self.cur..self.end_cur] {
+        // SAFETY: cur <= end_cur <= moves.len() は MovePicker の不変条件。
+        for ext in unsafe { self.moves.as_mut_slice().get_unchecked_mut(self.cur..self.end_cur) } {
             let m = ext.mv;
             let to = m.to();
             let pc = m.moved_piece_after();
