@@ -2788,16 +2788,16 @@ impl SearchWorker {
             r -= stat_score * ctx.tune_params.lmr_step16_stat_score_scale_num / 8192;
 
             // 打ち駒の LMR 調整（stoat 由来）
-            // 相手玉近くへの打ち駒は reduction を減らす
+            // 相手玉近く（Chebyshev 距離 < 3）かつ手番側の駒がその升に利いている場合、
+            // reduction を 1 減らす。玉周辺の争点への打ち込みを重視する。
             if mv.is_drop() {
                 let to = mv.to();
                 let opp_king = pos.king_square(!mover);
-                let file_dist = (to.file() as i32 - opp_king.file() as i32).unsigned_abs() as i32;
-                let rank_dist = (to.rank() as i32 - opp_king.rank() as i32).unsigned_abs() as i32;
+                let file_dist = (to.file() as i32 - opp_king.file() as i32).abs();
+                let rank_dist = (to.rank() as i32 - opp_king.rank() as i32).abs();
                 let chebyshev = file_dist.max(rank_dist);
-                // 相手玉近く（距離<3）かつ利きがある場合に reduction を 1 減らす
-                if chebyshev < 3 && !pos.attackers_to(to).is_empty() {
-                    r -= 1024; // 1024倍スケール
+                if chebyshev < 3 && !(pos.attackers_to(to) & pos.pieces_c(mover)).is_empty() {
+                    r -= 1024; // 1024倍スケール（1 ply 相当）
                 }
             }
 
