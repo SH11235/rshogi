@@ -2789,9 +2789,11 @@ impl SearchWorker {
             st.stack[ply as usize].stat_score = stat_score;
             r -= stat_score * ctx.tune_params.lmr_step16_stat_score_scale_num / 8192;
 
-            // allNode スケーリング（Stockfish 由来）
-            // allNode では r を depth 依存の比率でスケールアップ。
-            // 浅い depth ほど効果が大きい。
+            // allNode スケーリング（Stockfish search.cpp:1247-1248 由来）
+            // allNode（PV でも cutNode でもないノード）では r を depth 依存の比率で
+            // スケールアップ。浅い depth ほど効果が大きい。
+            // r が負の場合は更に負方向に補正されるが、後続の max(1, ...) で
+            // 最終的な探索深度は 1 以上に保証される。
             if all_node {
                 r += r * 273 / (256 * depth + 260);
             }
