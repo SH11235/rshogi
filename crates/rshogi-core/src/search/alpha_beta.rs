@@ -2691,6 +2691,10 @@ impl SearchWorker {
             }
 
             // Check Extension: SE で延長されなかった王手手に +1 延長（stoat 由来）
+            // root ノードでも適用（stoat と同様）。SE は !root_node で発動するため
+            // root では extension は常に 0 であり、gives_check なら延長される。
+            // Negative Extension が 0 の場合にも check extension が適用されるが、
+            // これは意図的（SE で特別でないと判定された手でも王手なら延長する）。
             if extension == 0 && gives_check {
                 extension = 1;
             }
