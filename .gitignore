@@ -1,6 +1,4 @@
 # Rust
-.cargo/config.toml
-.cargo/config.local.toml
 .cargo/registry/
 target/
 
