@@ -2690,6 +2690,11 @@ impl SearchWorker {
                 }
             }
 
+            // Check Extension: SE で延長されなかった王手手に +1 延長（stoat 由来）
+            if extension == 0 && gives_check {
+                extension = 1;
+            }
+
             // 指し手を実行
             st.stack[ply as usize].current_move = mv;
             do_move_and_push(st, pos, mv, gives_check, ctx.tt);
