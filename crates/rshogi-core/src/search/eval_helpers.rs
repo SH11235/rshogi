@@ -10,7 +10,7 @@ use crate::types::{Bound, Color, DEPTH_UNSEARCHED, Depth, MAX_PLY, Move, Value};
 use super::alpha_beta::{
     EvalContext, ProbeOutcome, SearchContext, SearchState, TTContext, to_corrected_static_eval,
 };
-use super::history::CORRECTION_HISTORY_SIZE;
+use super::history::{CORRECTION_HISTORY_LIMIT, CORRECTION_HISTORY_SIZE};
 #[cfg(feature = "use-lazy-evaluate")]
 use super::search_helpers::ensure_nnue_accumulator;
 use super::search_helpers::nnue_evaluate;
@@ -128,7 +128,8 @@ pub(super) fn update_correction_history(
     bonus: i32,
     complexity: i32,
 ) {
-    // complexity factor: 1.0 + log2(complexity + 1) / 10.0 を整数近似
+    // complexity factor: 1.0 + log2(complexity + 1) / 10.0 を整数近似（stoat 由来）
+    // ilog2 による離散近似は意図的。連続 log2 との微差は棋力に影響しない。
     // 1024 スケール: factor = 1024 + ilog2(complexity + 1) * 102
     let log2_val = if complexity > 0 {
         (complexity as u32 + 1).ilog2() as i32
@@ -136,7 +137,9 @@ pub(super) fn update_correction_history(
         0
     };
     let factor = 1024 + log2_val * 102;
-    let bonus = bonus * factor / 1024;
+    // stoat 準拠: factor 適用後に再クランプ（factor でスケール後に上限を超えないようにする）
+    let bonus =
+        (bonus * factor / 1024).clamp(-CORRECTION_HISTORY_LIMIT / 4, CORRECTION_HISTORY_LIMIT / 4);
     let us = pos.side_to_move();
     let pawn_idx = (pos.pawn_key() as usize) & (CORRECTION_HISTORY_SIZE - 1);
     let minor_idx = (pos.minor_piece_key() as usize) & (CORRECTION_HISTORY_SIZE - 1);

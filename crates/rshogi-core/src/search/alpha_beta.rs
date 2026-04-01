@@ -1589,6 +1589,7 @@ impl SearchWorker {
                     reductions: &self.reductions,
                     draw_value_table: self.draw_value_table,
                 };
+                // complexity=0: root では TT データ未参照のためスケールなし
                 update_correction_history(&self.state, &ctx, pos, 0, bonus, 0);
             }
         }
