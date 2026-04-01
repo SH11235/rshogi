@@ -66,7 +66,12 @@ pub(super) fn draw_jitter(nodes: u64, tune_params: &SearchTuneParams) -> i32 {
 
 #[inline]
 /// 補正履歴を適用した静的評価に変換（詰みスコア領域に入り込まないようにクリップ）
-/// ply スケーリング: 深い探索ほど評価値を微増させ、千日手回避バイアスをかける（stoat 由来）
+///
+/// ply スケーリング（stoat 由来）: `rawEval * (1024 + ply) / 1024`
+/// negamax の手番側視点で符号に関わらず絶対値を拡大する。
+/// 正の評価値（有利）がより大きくなることで千日手回避の動機を生み、
+/// 負の評価値（不利）がより小さくなることで相手にも打開動機を与える。
+/// ply=0（root）では無変化。
 pub(super) fn to_corrected_static_eval(
     unadjusted: Value,
     correction_value: i32,
