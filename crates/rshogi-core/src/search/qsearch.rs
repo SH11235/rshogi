@@ -401,6 +401,7 @@ pub(super) fn qsearch<const NT: u8>(
     }
 
     let mut move_count = 0;
+    let mut searched_moves = 0;
 
     for mv in ordered_moves.iter() {
         // 静止探索では PASS は対象外（TT手として来る可能性があるため明示的にスキップ）
@@ -456,6 +457,12 @@ pub(super) fn qsearch<const NT: u8>(
                 inc_stat!(st, qs_see_margin_pruned);
                 continue;
             }
+        }
+
+        // QSearch 合法手数制限（stoat 由来）: 探索する手を 2 手までに制限
+        searched_moves += 1;
+        if searched_moves > 2 {
+            break;
         }
 
         // SAFETY: ply < MAX_PLY < STACK_SIZE。
