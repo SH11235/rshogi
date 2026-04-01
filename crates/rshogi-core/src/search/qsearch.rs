@@ -459,10 +459,13 @@ pub(super) fn qsearch<const NT: u8>(
             }
         }
 
-        // QSearch 合法手数制限（stoat 由来）: 探索する手を 2 手までに制限
-        searched_moves += 1;
-        if searched_moves > 2 {
-            break;
+        // QSearch 合法手数制限（stoat 由来）: 非王手局面で探索する手を 2 手までに制限
+        // in_check 時は全回避手を探索する必要があるため制限しない
+        if !in_check {
+            searched_moves += 1;
+            if searched_moves > 2 {
+                break;
+            }
         }
 
         // SAFETY: ply < MAX_PLY < STACK_SIZE。
