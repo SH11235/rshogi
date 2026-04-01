@@ -2362,9 +2362,10 @@ impl SearchWorker {
                 eval_ctx.eval,
                 limits,
                 time_manager,
-            ) {
-                return v;
-            }
+            )
+        {
+            return v;
+        }
 
         // TT の手が駒取りかどうか判定
         let tt_capture = tt_move.is_some() && pos.capture_stage(tt_move);
@@ -2385,11 +2386,12 @@ impl SearchWorker {
                     in_check,
                 },
                 ctx.tune_params,
-            ) {
-                inc_stat!(st, futility_pruned);
-                inc_stat_by_depth!(st, futility_by_depth, depth);
-                return v;
-            }
+            )
+        {
+            inc_stat!(st, futility_pruned);
+            inc_stat_by_depth!(st, futility_by_depth, depth);
+            return v;
+        }
 
         let (null_value, improving_after_null) = if low_complexity {
             try_null_move_pruning::<NT, _>(
