@@ -211,6 +211,17 @@ impl ButterflyHistory {
         }
     }
 
+    /// イテレーション間 decay（Stockfish 由来）
+    /// 全エントリを numerator/denominator にスケールダウンする。
+    pub fn decay(&mut self, numerator: i32, denominator: i32) {
+        for color_table in &mut self.table {
+            for entry in color_table.iter_mut() {
+                let v = entry.get() as i32;
+                entry.set((v * numerator / denominator) as i16);
+            }
+        }
+    }
+
     /// 指定初期値でクリア
     pub fn clear_with_init(&mut self, init_val: i16) {
         for color_table in &mut self.table {
