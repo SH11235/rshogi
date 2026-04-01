@@ -66,8 +66,14 @@ pub(super) fn draw_jitter(nodes: u64, tune_params: &SearchTuneParams) -> i32 {
 
 #[inline]
 /// 補正履歴を適用した静的評価に変換（詰みスコア領域に入り込まないようにクリップ）
-pub(super) fn to_corrected_static_eval(unadjusted: Value, correction_value: i32) -> Value {
-    let corrected = unadjusted.raw() + correction_value / 131_072;
+/// ply スケーリング: 深い探索ほど評価値を微増させ、千日手回避バイアスをかける（stoat 由来）
+pub(super) fn to_corrected_static_eval(
+    unadjusted: Value,
+    correction_value: i32,
+    ply: i32,
+) -> Value {
+    let scaled = unadjusted.raw() as i64 * (1024 + ply as i64) / 1024;
+    let corrected = scaled as i32 + correction_value / 131_072;
     Value::new(corrected.clamp(Value::MATED_IN_MAX_PLY.raw() + 1, Value::MATE_IN_MAX_PLY.raw() - 1))
 }
 
@@ -610,7 +616,7 @@ impl SearchWorker {
             #[cfg(not(feature = "search-no-pass-rules"))]
             let pass_rights_eval = evaluate_pass_rights(pos, pos.game_ply() as u16);
 
-            to_corrected_static_eval(unadjusted_static_eval, corr) + pass_rights_eval
+            to_corrected_static_eval(unadjusted_static_eval, corr, 0) + pass_rights_eval
         };
         self.state.stack[0].static_eval = static_eval;
         (unadjusted_static_eval, corr)

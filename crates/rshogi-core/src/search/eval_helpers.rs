@@ -512,7 +512,7 @@ pub(super) fn compute_eval_context(
     };
 
     if !in_check && unadjusted_static_eval != Value::NONE {
-        static_eval = to_corrected_static_eval(unadjusted_static_eval, corr_value);
+        static_eval = to_corrected_static_eval(unadjusted_static_eval, corr_value, ply);
         // パス権評価を動的に追加（TTには保存されないので手数依存でもOK）
         let pass_rights_eval = {
             #[cfg(feature = "search-no-pass-rules")]
