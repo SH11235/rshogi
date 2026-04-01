@@ -1442,10 +1442,15 @@ where
 
         // メインのみ: if (!mainThread) continue; に対応する部分はループ末尾で処理
 
-        // mainHistory のイテレーション間 decay（Stockfish 由来）
-        // 古い history 値の蓄積を防ぎ move ordering の鮮度を保つ
+        // mainHistory のイテレーション間 decay（Stockfish 由来: search.cpp:316-318）
+        // 古い history 値の蓄積を防ぎ move ordering の鮮度を保つ。
+        // 未更新エントリ（MAIN_HISTORY_INIT=68）も decay されるが影響は微小。
         // SAFETY: 単一スレッド内で使用、探索ループ外なので排他保証
-        unsafe { worker.history.as_mut_unchecked() }.main_history.decay(820, 1024);
+        const HISTORY_DECAY_NUM: i32 = 820;
+        const HISTORY_DECAY_DEN: i32 = 1024;
+        unsafe { worker.history.as_mut_unchecked() }
+            .main_history
+            .decay(HISTORY_DECAY_NUM, HISTORY_DECAY_DEN);
 
         let search_depth = depth;
         worker.state.root_depth = search_depth;

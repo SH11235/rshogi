@@ -213,7 +213,9 @@ impl ButterflyHistory {
 
     /// イテレーション間 decay（Stockfish 由来）
     /// 全エントリを numerator/denominator にスケールダウンする。
+    /// StatsEntry<7183> の値域 (-7183..7183) × 820/1024 は i16 範囲内。
     pub fn decay(&mut self, numerator: i32, denominator: i32) {
+        debug_assert!(denominator > 0, "denominator must be positive");
         for color_table in &mut self.table {
             for entry in color_table.iter_mut() {
                 let v = entry.get() as i32;
