@@ -2248,6 +2248,24 @@ impl SearchWorker {
         let mut improving = eval_ctx.improving;
         let opponent_worsening = eval_ctx.opponent_worsening;
 
+        // Complexity: TT スコアと静的評価の乖離度（stoat 由来）
+        // 枝刈り（RFP, NMP, razoring）を不確実な局面でゲートするために使用
+        let complexity = if tt_hit && eval_ctx.static_eval != Value::NONE {
+            let se = eval_ctx.static_eval.raw();
+            let tv = tt_value.raw();
+            let bound = tt_data.bound;
+            if bound == Bound::Exact
+                || (bound == Bound::Upper && tv <= se)
+                || (bound == Bound::Lower && tv >= se)
+            {
+                (se - tv).unsigned_abs() as i32
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
         // evalDiff によるヒストリ更新
         // in_check時はこのブロック自体がスキップされる
         // （YOではMOVES_LOOPにジャンプするため、ここに到達しない）
@@ -2327,63 +2345,72 @@ impl SearchWorker {
             }
         }
 
-        if let Some(v) = try_razoring::<NT>(
-            st,
-            ctx,
-            pos,
-            depth,
-            alpha,
-            beta,
-            ply,
-            pv_node,
-            in_check,
-            eval_ctx.eval,
-            limits,
-            time_manager,
-        ) {
-            return v;
-        }
+        // Complexity ゲート: TT スコアと静的評価の乖離が小さい局面でのみ枝刈りを許可
+        let low_complexity = complexity <= 20;
+
+        if low_complexity
+            && let Some(v) = try_razoring::<NT>(
+                st,
+                ctx,
+                pos,
+                depth,
+                alpha,
+                beta,
+                ply,
+                pv_node,
+                in_check,
+                eval_ctx.eval,
+                limits,
+                time_manager,
+            ) {
+                return v;
+            }
 
         // TT の手が駒取りかどうか判定
         let tt_capture = tt_move.is_some() && pos.capture_stage(tt_move);
 
-        if let Some(v) = try_futility_pruning(
-            FutilityParams {
+        if low_complexity
+            && let Some(v) = try_futility_pruning(
+                FutilityParams {
+                    depth,
+                    beta,
+                    static_eval: eval_ctx.eval,
+                    correction_value: eval_ctx.correction_value,
+                    improving,
+                    opponent_worsening,
+                    tt_hit,
+                    tt_move_exists: tt_move.is_some(),
+                    tt_capture,
+                    tt_pv: st.stack[ply as usize].tt_pv,
+                    in_check,
+                },
+                ctx.tune_params,
+            ) {
+                inc_stat!(st, futility_pruned);
+                inc_stat_by_depth!(st, futility_by_depth, depth);
+                return v;
+            }
+
+        let (null_value, improving_after_null) = if low_complexity {
+            try_null_move_pruning::<NT, _>(
+                st,
+                ctx,
+                pos,
                 depth,
                 beta,
-                static_eval: eval_ctx.eval,
-                correction_value: eval_ctx.correction_value,
-                improving,
-                opponent_worsening,
-                tt_hit,
-                tt_move_exists: tt_move.is_some(),
-                tt_capture,
-                tt_pv: st.stack[ply as usize].tt_pv,
+                ply,
+                cut_node,
                 in_check,
-            },
-            ctx.tune_params,
-        ) {
-            inc_stat!(st, futility_pruned);
-            inc_stat_by_depth!(st, futility_by_depth, depth);
-            return v;
-        }
-
-        let (null_value, improving_after_null) = try_null_move_pruning::<NT, _>(
-            st,
-            ctx,
-            pos,
-            depth,
-            beta,
-            ply,
-            cut_node,
-            in_check,
-            eval_ctx.static_eval,
-            improving,
-            excluded_move,
-            limits,
-            time_manager,
-            Self::search_node::<{ NodeType::NonPV as u8 }>,
-        );
+                eval_ctx.static_eval,
+                improving,
+                excluded_move,
+                limits,
+                time_manager,
+                Self::search_node::<{ NodeType::NonPV as u8 }>,
+            )
+        } else {
+            (None, improving)
+        };
         if let Some(v) = null_value {
             return v;
         }
