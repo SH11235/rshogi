@@ -1589,7 +1589,7 @@ impl SearchWorker {
                     reductions: &self.reductions,
                     draw_value_table: self.draw_value_table,
                 };
-                update_correction_history(&self.state, &ctx, pos, 0, bonus);
+                update_correction_history(&self.state, &ctx, pos, 0, bonus, 0);
             }
         }
 
@@ -3669,7 +3669,23 @@ impl SearchWorker {
             let divisor = if best_move.is_some() { 10 } else { 8 };
             let bonus = ((best_value.raw() - static_eval.raw()) * depth / divisor)
                 .clamp(-CORRECTION_HISTORY_LIMIT / 4, CORRECTION_HISTORY_LIMIT / 4);
-            update_correction_history(st, ctx, pos, ply, bonus);
+            // complexity: TT スコアと静的評価の乖離度（stoat 由来）
+            let complexity = if tt_hit && static_eval != Value::NONE && tt_value != Value::NONE {
+                let se = static_eval.raw();
+                let tv = tt_value.raw();
+                let bound = tt_data.bound;
+                if bound == Bound::Exact
+                    || (bound == Bound::Upper && tv <= se)
+                    || (bound == Bound::Lower && tv >= se)
+                {
+                    (se - tv).unsigned_abs() as i32
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            update_correction_history(st, ctx, pos, ply, bonus, complexity);
         }
 
         best_value

@@ -118,6 +118,7 @@ pub(super) fn correction_value(
 }
 
 /// 補正履歴の更新
+/// complexity: TT スコアと静的評価の乖離度。大きいほど bonus を強く更新する（stoat 由来）。
 #[inline]
 pub(super) fn update_correction_history(
     st: &SearchState,
@@ -125,7 +126,17 @@ pub(super) fn update_correction_history(
     pos: &Position,
     ply: i32,
     bonus: i32,
+    complexity: i32,
 ) {
+    // complexity factor: 1.0 + log2(complexity + 1) / 10.0 を整数近似
+    // 1024 スケール: factor = 1024 + ilog2(complexity + 1) * 102
+    let log2_val = if complexity > 0 {
+        (complexity as u32 + 1).ilog2() as i32
+    } else {
+        0
+    };
+    let factor = 1024 + log2_val * 102;
+    let bonus = bonus * factor / 1024;
     let us = pos.side_to_move();
     let pawn_idx = (pos.pawn_key() as usize) & (CORRECTION_HISTORY_SIZE - 1);
     let minor_idx = (pos.minor_piece_key() as usize) & (CORRECTION_HISTORY_SIZE - 1);
