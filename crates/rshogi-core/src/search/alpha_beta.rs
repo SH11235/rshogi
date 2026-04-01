@@ -2789,6 +2789,13 @@ impl SearchWorker {
             st.stack[ply as usize].stat_score = stat_score;
             r -= stat_score * ctx.tune_params.lmr_step16_stat_score_scale_num / 8192;
 
+            // allNode スケーリング（Stockfish 由来）
+            // allNode では r を depth 依存の比率でスケールアップ。
+            // 浅い depth ほど効果が大きい。
+            if all_node {
+                r += r * 273 / (256 * depth + 260);
+            }
+
             // =============================================================
             // 探索
             // =============================================================
