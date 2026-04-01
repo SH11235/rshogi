@@ -2789,6 +2789,11 @@ impl SearchWorker {
             st.stack[ply as usize].stat_score = stat_score;
             r -= stat_score * ctx.tune_params.lmr_step16_stat_score_scale_num / 8192;
 
+            // givesCheck: 王手を掛ける手は reduction を 1 減らす（stoat 由来）
+            if gives_check {
+                r -= 1024; // 1024倍スケール
+            }
+
             // =============================================================
             // 探索
             // =============================================================
