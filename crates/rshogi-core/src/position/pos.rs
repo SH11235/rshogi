@@ -164,9 +164,7 @@ impl Position {
     /// 指定マスの駒を取得
     #[inline]
     pub fn piece_on(&self, sq: Square) -> Piece {
-        debug_assert!(sq.index() < Square::NUM);
-        // SAFETY: Square::index() は 0..=80 (Square::NUM=81)、board の長さは Square::NUM。
-        unsafe { *self.board.get_unchecked(sq.index()) }
+        self.board[sq]
     }
 
     /// 直前の手で取られた駒を返す
@@ -180,11 +178,7 @@ impl Position {
     /// 全駒のBitboard（占有）
     #[inline]
     pub fn occupied(&self) -> Bitboard {
-        // SAFETY: Color::Black.index()=0, Color::White.index()=1、by_color の長さは Color::NUM=2。
-        unsafe {
-            *self.by_color.get_unchecked(Color::Black.index())
-                | *self.by_color.get_unchecked(Color::White.index())
-        }
+        self.by_color[Color::Black] | self.by_color[Color::White]
     }
 
     /// 指定駒種のBitboard
@@ -198,21 +192,15 @@ impl Position {
     /// 指定手番の駒のBitboard
     #[inline]
     pub fn pieces_c(&self, c: Color) -> Bitboard {
-        debug_assert!(c.index() < Color::NUM);
-        // SAFETY: Color::index() は 0..=1、by_color の長さは Color::NUM=2。
-        unsafe { *self.by_color.get_unchecked(c.index()) }
+        self.by_color[c]
     }
 
     /// 指定手番・駒種のBitboard
     #[inline]
     pub fn pieces(&self, c: Color, pt: PieceType) -> Bitboard {
-        debug_assert!(c.index() < Color::NUM);
         debug_assert!((pt as usize) < self.by_type.len());
-        // SAFETY: Color::index() は 0..=1、by_color の長さは Color::NUM=2。
-        //         PieceType は 0..=14、by_type の長さは PieceType::NUM+1=15。
-        unsafe {
-            *self.by_color.get_unchecked(c.index()) & *self.by_type.get_unchecked(pt as usize)
-        }
+        // SAFETY: PieceType は 0..=14、by_type の長さは PieceType::NUM+1=15。
+        self.by_color[c] & unsafe { *self.by_type.get_unchecked(pt as usize) }
     }
 
     /// 駒種集合のBitboard（先後無視）
@@ -653,18 +641,14 @@ impl Position {
     }
 
     fn put_piece_internal(&mut self, pc: Piece, sq: Square) {
-        debug_assert!(sq.index() < Square::NUM);
-        debug_assert!(self.board[sq.index()].is_none());
+        debug_assert!(self.board[sq].is_none());
         let pt = pc.piece_type();
 
-        // SAFETY: Square::index() は 0..=80 (Square::NUM=81)、board の長さは Square::NUM。
-        unsafe { *self.board.get_unchecked_mut(sq.index()) = pc };
+        self.board[sq] = pc;
         debug_assert!((pt as usize) < self.by_type.len());
-        debug_assert!(pc.color().index() < Color::NUM);
         // SAFETY: PieceType は 0..=14、by_type の長さは PieceType::NUM+1=15。
-        //         Color::index() は 0..=1、by_color の長さは Color::NUM=2。
         unsafe { self.by_type.get_unchecked_mut(pt as usize) }.set(sq);
-        unsafe { self.by_color.get_unchecked_mut(pc.color().index()) }.set(sq);
+        self.by_color[pc.color()].set(sq);
 
         // 合成Bitboardの差分更新
         if Self::is_gold_like(pt) {
@@ -687,19 +671,15 @@ impl Position {
     }
 
     fn remove_piece_internal(&mut self, sq: Square) {
-        debug_assert!(sq.index() < Square::NUM);
-        // SAFETY: Square::index() は 0..=80 (Square::NUM=81)、board の長さは Square::NUM。
-        let pc = unsafe { *self.board.get_unchecked(sq.index()) };
+        let pc = self.board[sq];
         debug_assert!(pc.is_some());
         let pt = pc.piece_type();
 
-        unsafe { *self.board.get_unchecked_mut(sq.index()) = Piece::NONE };
+        self.board[sq] = Piece::NONE;
         debug_assert!((pt as usize) < self.by_type.len());
-        debug_assert!(pc.color().index() < Color::NUM);
         // SAFETY: PieceType は 0..=14、by_type の長さは PieceType::NUM+1=15。
-        //         Color::index() は 0..=1、by_color の長さは Color::NUM=2。
         unsafe { self.by_type.get_unchecked_mut(pt as usize) }.clear(sq);
-        unsafe { self.by_color.get_unchecked_mut(pc.color().index()) }.clear(sq);
+        self.by_color[pc.color()].clear(sq);
 
         // 合成Bitboardの差分更新
         if Self::is_gold_like(pt) {
@@ -1310,12 +1290,9 @@ impl Position {
             // 盤上から除去
             self.remove_piece_internal(to);
             // 手駒に戻す
-            debug_assert!(us.index() < Color::NUM);
-            // SAFETY: Color::index() は 0 or 1 で hand は [Hand; Color::NUM=2]。
-            let hand_ref = unsafe { self.hand.get_unchecked_mut(us.index()) };
-            *hand_ref = hand_ref.add(pt);
+            self.hand[us] = self.hand[us].add(pt);
 
-            let new_count = unsafe { self.hand.get_unchecked(us.index()) }.count(pt) as u8;
+            let new_count = self.hand[us].count(pt) as u8;
             let hand_bp = ExtBonaPiece::from_hand(us, pt, new_count);
             self.piece_list.put_piece_on_hand(piece_no, hand_bp);
 
@@ -1347,8 +1324,7 @@ impl Position {
                 let cap_pt = captured.piece_type().unpromote();
 
                 // PieceList: 手駒から取られた駒を盤上に復元
-                // SAFETY: Color::index() は 0 or 1 で hand は [Hand; Color::NUM=2]。
-                let hand_count = unsafe { self.hand.get_unchecked(us.index()) }.count(cap_pt) as u8;
+                let hand_count = self.hand[us].count(cap_pt) as u8;
                 let hand_bp_fb =
                     crate::nnue::BonaPiece::from_hand_piece(Color::Black, us, cap_pt, hand_count);
                 let piece_no_cap = self.piece_list.piece_no_of_hand(hand_bp_fb);
@@ -1358,9 +1334,7 @@ impl Position {
                 self.remove_piece_internal(to);
                 self.put_piece_internal(captured, to);
                 // 手駒から除去
-                // SAFETY: Color::index() は 0 or 1 で hand は [Hand; Color::NUM=2]。
-                let hand_ref = unsafe { self.hand.get_unchecked_mut(us.index()) };
-                *hand_ref = hand_ref.sub(cap_pt);
+                self.hand[us] = self.hand[us].sub(cap_pt);
 
                 self.put_piece_internal(original_pc, from);
 
@@ -1685,9 +1659,7 @@ impl Position {
 
         // 開き王手：fromがblockerで、fromが王との直線上から外れるか
         let them = !us;
-        debug_assert!(them.index() < Color::NUM);
-        // SAFETY: Color::index() は 0 or 1 で king_square は [Square; 2]。
-        let ksq = unsafe { *self.king_square.get_unchecked(them.index()) };
+        let ksq = self.king_square[them];
         // blockers_for_king には敵駒も含まれるため、自駒でフィルタ
         let blockers = self.blockers_for_king(them) & self.pieces_c(us);
 

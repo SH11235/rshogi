@@ -1,5 +1,7 @@
 //! 升目（Square）
 
+use std::ops::{Index, IndexMut};
+
 use super::{File, Rank};
 
 /// 升目（0-80）
@@ -165,6 +167,46 @@ impl Square {
     /// 全ての升を返すイテレータ
     pub fn all() -> impl Iterator<Item = Square> {
         (0..81).map(Square)
+    }
+}
+
+// =============================================================================
+// Index trait による境界チェック除去（Reckless 由来）
+//
+// Square(0..=80) は [T; Square::NUM] の有効なインデックスであることが
+// Square の構築時に保証される（new, from_index 等）。
+// この不変条件に依拠して全インデックスアクセスから境界チェックを除去する。
+// =============================================================================
+
+impl<T> Index<Square> for [T] {
+    type Output = T;
+
+    #[inline]
+    fn index(&self, sq: Square) -> &T {
+        debug_assert!(
+            sq.index() < self.len(),
+            "Square index {} out of bounds for slice of length {}",
+            sq.index(),
+            self.len()
+        );
+        // SAFETY: Square の値域は 0..=80。Square::NUM (81) 以上のサイズの
+        // 配列に対してのみ使用される（呼び出し側の配列サイズで保証）。
+        unsafe { self.get_unchecked(sq.index()) }
+    }
+}
+
+impl<T> IndexMut<Square> for [T] {
+    #[inline]
+    fn index_mut(&mut self, sq: Square) -> &mut T {
+        debug_assert!(
+            sq.index() < self.len(),
+            "Square index {} out of bounds for slice of length {}",
+            sq.index(),
+            self.len()
+        );
+        // SAFETY: Square の値域は 0..=80。Square::NUM (81) 以上のサイズの
+        // 配列に対してのみ使用される（呼び出し側の配列サイズで保証）。
+        unsafe { self.get_unchecked_mut(sq.index()) }
     }
 }
 
