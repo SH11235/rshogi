@@ -134,13 +134,14 @@ impl Default for Piece {
     }
 }
 
-// SAFETY: Piece(0..=30) は [T; Piece::NUM] (31要素) の有効なインデックス。
 impl<T> Index<Piece> for [T] {
     type Output = T;
 
     #[inline]
     fn index(&self, pc: Piece) -> &T {
-        debug_assert!((pc.index()) < self.len());
+        debug_assert!(pc.index() < self.len());
+        // SAFETY: Piece(0..=30) は [T; Piece::NUM] (31要素) の有効なインデックス。
+        // Piece の構築時に値域が保証されている。
         unsafe { self.get_unchecked(pc.index()) }
     }
 }
@@ -148,7 +149,9 @@ impl<T> Index<Piece> for [T] {
 impl<T> IndexMut<Piece> for [T] {
     #[inline]
     fn index_mut(&mut self, pc: Piece) -> &mut T {
-        debug_assert!((pc.index()) < self.len());
+        debug_assert!(pc.index() < self.len());
+        // SAFETY: Piece(0..=30) は [T; Piece::NUM] (31要素) の有効なインデックス。
+        // Piece の構築時に値域が保証されている。
         unsafe { self.get_unchecked_mut(pc.index()) }
     }
 }

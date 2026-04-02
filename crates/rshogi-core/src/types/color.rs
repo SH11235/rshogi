@@ -39,13 +39,15 @@ impl std::ops::Not for Color {
     }
 }
 
-// SAFETY: Color は #[repr(u8)] で値域 0..=1。Color::NUM (2) 以上の配列に対して安全。
 impl<T> Index<Color> for [T] {
     type Output = T;
 
     #[inline]
     fn index(&self, c: Color) -> &T {
-        debug_assert!((c as usize) < self.len());
+        debug_assert!(c as usize <= 1 && (c as usize) < self.len());
+        // SAFETY: Color は #[repr(u8)] で値域 0..=1。
+        // このクレート内では Color でインデックスする配列は全て
+        // [T; Color::NUM] (2要素) 以上のサイズで定義されている。
         unsafe { self.get_unchecked(c as usize) }
     }
 }
@@ -53,7 +55,10 @@ impl<T> Index<Color> for [T] {
 impl<T> IndexMut<Color> for [T] {
     #[inline]
     fn index_mut(&mut self, c: Color) -> &mut T {
-        debug_assert!((c as usize) < self.len());
+        debug_assert!(c as usize <= 1 && (c as usize) < self.len());
+        // SAFETY: Color は #[repr(u8)] で値域 0..=1。
+        // このクレート内では Color でインデックスする配列は全て
+        // [T; Color::NUM] (2要素) 以上のサイズで定義されている。
         unsafe { self.get_unchecked_mut(c as usize) }
     }
 }

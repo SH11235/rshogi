@@ -184,7 +184,7 @@ impl<T> Index<Square> for [T] {
     #[inline]
     fn index(&self, sq: Square) -> &T {
         debug_assert!(
-            (sq.index()) < self.len(),
+            sq.index() < self.len(),
             "Square index {} out of bounds for slice of length {}",
             sq.index(),
             self.len()
@@ -199,12 +199,13 @@ impl<T> IndexMut<Square> for [T] {
     #[inline]
     fn index_mut(&mut self, sq: Square) -> &mut T {
         debug_assert!(
-            (sq.index()) < self.len(),
+            sq.index() < self.len(),
             "Square index {} out of bounds for slice of length {}",
             sq.index(),
             self.len()
         );
-        // SAFETY: 同上
+        // SAFETY: Square の値域は 0..=80。Square::NUM (81) 以上のサイズの
+        // 配列に対してのみ使用される（呼び出し側の配列サイズで保証）。
         unsafe { self.get_unchecked_mut(sq.index()) }
     }
 }
