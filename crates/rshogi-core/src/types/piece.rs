@@ -7,6 +7,8 @@
 //! `Piece::NONE` 以外の値は常に有効な `PieceType` / `Color` の組み合わせであることを前提とする。
 //! `piece_type()` を呼び出す前に `is_none()` を避けるのが契約。
 
+use std::ops::{Index, IndexMut};
+
 use super::{Color, PieceType};
 
 /// 駒（先後の区別あり）
@@ -129,6 +131,25 @@ impl Piece {
 impl Default for Piece {
     fn default() -> Self {
         Piece::NONE
+    }
+}
+
+// SAFETY: Piece(0..=30) は [T; Piece::NUM] (31要素) の有効なインデックス。
+impl<T> Index<Piece> for [T] {
+    type Output = T;
+
+    #[inline]
+    fn index(&self, pc: Piece) -> &T {
+        debug_assert!((pc.index()) < self.len());
+        unsafe { self.get_unchecked(pc.index()) }
+    }
+}
+
+impl<T> IndexMut<Piece> for [T] {
+    #[inline]
+    fn index_mut(&mut self, pc: Piece) -> &mut T {
+        debug_assert!((pc.index()) < self.len());
+        unsafe { self.get_unchecked_mut(pc.index()) }
     }
 }
 
