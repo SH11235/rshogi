@@ -29,8 +29,8 @@ use super::history::{
 };
 use super::movepicker::piece_value;
 use super::types::{
-    ContHistKey, NodeType, RootMoves, SEARCHED_MOVES_CAPACITY, STACK_SIZE, SearchedMoveList,
-    StackArray, draw_value, init_stack_array, value_from_tt, value_to_tt,
+    ContHistKey, NodeType, PvTable, RootMoves, SEARCHED_MOVES_CAPACITY, STACK_SIZE,
+    SearchedMoveList, StackArray, draw_value, init_stack_array, value_from_tt, value_to_tt,
 };
 use super::{LimitsType, MovePicker, SearchTuneParams, TimeManagement};
 
@@ -360,6 +360,8 @@ pub struct SearchState {
     pub nmp_min_ply: i32,
     /// ルート手
     pub root_moves: RootMoves,
+    /// PV 三角配列（Reckless 由来、Vec<Move> のヒープ割り当て回避）
+    pub pv_table: PvTable,
     /// 前回 iteration の PV ライン
     pub previous_pv: Vec<Move>,
     /// NNUE ネットワークへの raw pointer（探索中の get_network() RwLock 回避用）
@@ -395,6 +397,7 @@ impl SearchState {
             best_move_changes: 0.0,
             nmp_min_ply: 0,
             root_moves: RootMoves::new(),
+            pv_table: PvTable::new(),
             previous_pv: Vec::new(),
             #[cfg(feature = "layerstack-only")]
             network_ptr: std::ptr::null(),
@@ -1022,10 +1025,8 @@ impl SearchWorker {
         }
 
         // PVをクリアして前回探索の残留を防ぐ
-        // NOTE: YaneuraOuでは (ss+1)->pv = pv でポインタを新配列に向け、ss->pv[0] = Move::none() でクリア
-        //       Vecベースの実装では明示的なclear()で同等の効果を得る
-        self.state.stack[0].pv.clear();
-        self.state.stack[1].pv.clear();
+        self.state.pv_table.clear(0);
+        self.state.pv_table.clear(1);
 
         // quietsSearched, capturesSearched のトラッキング
         let mut quiets_tried = SearchedMoveList::new();
@@ -1362,7 +1363,7 @@ impl SearchWorker {
                 rm.sel_depth = self.state.sel_depth;
                 // PVを更新（第1手はfail lowでも常に更新）
                 rm.pv.truncate(1);
-                rm.pv.extend_from_slice(&self.state.stack[1].pv);
+                rm.pv.extend_from_slice(self.state.pv_table.line(1));
                 // 2番目以降の手がalphaを更新した場合にカウント
                 if move_count > 1 {
                     self.state.best_move_changes += 1.0;
@@ -1669,10 +1670,8 @@ impl SearchWorker {
         self.state.stack[0].tt_pv = true;
 
         // PVをクリアして前回探索の残留を防ぐ
-        // NOTE: YaneuraOuでは (ss+1)->pv = pv でポインタを新配列に向け、ss->pv[0] = Move::none() でクリア
-        //       Vecベースの実装では明示的なclear()で同等の効果を得る
-        self.state.stack[0].pv.clear();
-        self.state.stack[1].pv.clear();
+        self.state.pv_table.clear(0);
+        self.state.pv_table.clear(1);
 
         // pv_idx以降の手のみを探索
         for rm_idx in pv_idx..self.state.root_moves.len() {
@@ -1967,7 +1966,7 @@ impl SearchWorker {
 
                     // PVを更新
                     self.state.root_moves[rm_idx].pv.truncate(1);
-                    self.state.root_moves[rm_idx].pv.extend_from_slice(&self.state.stack[1].pv);
+                    self.state.root_moves[rm_idx].pv.extend_from_slice(self.state.pv_table.line(1));
 
                     if value >= beta {
                         break;
@@ -2148,9 +2147,8 @@ impl SearchWorker {
         // NOTE: YaneuraOuでは (ss+1)->pv = pv でポインタを新配列に向け、ss->pv[0] = Move::none() でクリア
         //       Vecベースの実装では明示的なclear()で同等の効果を得る
         if pv_node {
-            // SAFETY: ply <= MAX_PLY(246) → ply+1 <= 247 < STACK_SIZE(256)。
-            unsafe { st.stack.get_unchecked_mut(ply as usize) }.pv.clear();
-            unsafe { st.stack.get_unchecked_mut((ply + 1) as usize) }.pv.clear();
+            st.pv_table.clear(ply as usize);
+            st.pv_table.clear((ply + 1) as usize);
         }
 
         let prior_reduction = take_prior_reduction(st, ply);
@@ -3086,9 +3084,7 @@ impl SearchWorker {
                     best_move = mv;
                     // PV更新
                     if pv_node {
-                        // 借用チェッカーの制約を避けるためクローン
-                        let child_pv = st.stack[(ply + 1) as usize].pv.clone();
-                        st.stack[ply as usize].update_pv(mv, &child_pv);
+                        st.pv_table.update(ply as usize, mv);
                     }
 
                     if value >= beta {
