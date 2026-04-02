@@ -5,7 +5,10 @@ use super::board_effect::{
     rewind_by_dropping_piece, rewind_by_no_capturing_piece, update_by_capturing_piece,
     update_by_dropping_piece, update_by_no_capturing_piece,
 };
-use super::state::{StateInfo, check_sq_index};
+use super::state::{
+    CS_IDX_BISHOP, CS_IDX_DRAGON, CS_IDX_GOLD, CS_IDX_HORSE, CS_IDX_KNIGHT, CS_IDX_LANCE,
+    CS_IDX_PAWN, CS_IDX_ROOK, CS_IDX_SILVER, StateInfo, check_sq_index,
+};
 use super::zobrist::{zobrist_hand, zobrist_pass_rights, zobrist_psq, zobrist_side};
 use crate::bitboard::{
     Bitboard, RANK_BB, bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect,
@@ -766,16 +769,18 @@ impl Position {
 
         // 各駒種で王手となるマス（圧縮インデックス 0..8）
         // SAFETY: インデックス 0..8 は CHECK_SQUARES_SIZE(=9) の範囲内。
+        // SAFETY: CS_IDX_* 定数は全て 0..CHECK_SQUARES_SIZE(=9) の範囲内。
+        // 定数と CHECK_SQ_INDEX テーブルは state.rs で一元管理。
         unsafe {
-            *st.check_squares.get_unchecked_mut(0) = pawn_effect(them, ksq); // Pawn
-            *st.check_squares.get_unchecked_mut(1) = lance_effect(them, ksq, occupied); // Lance
-            *st.check_squares.get_unchecked_mut(2) = knight_effect(them, ksq); // Knight
-            *st.check_squares.get_unchecked_mut(3) = silver_effect(them, ksq); // Silver
-            *st.check_squares.get_unchecked_mut(4) = bishop_effect(ksq, occupied); // Bishop
-            *st.check_squares.get_unchecked_mut(5) = rook_effect(ksq, occupied); // Rook
-            *st.check_squares.get_unchecked_mut(6) = gold_bb; // Gold + 成小駒
-            *st.check_squares.get_unchecked_mut(7) = horse_effect(ksq, occupied); // Horse
-            *st.check_squares.get_unchecked_mut(8) = dragon_effect(ksq, occupied); // Dragon
+            *st.check_squares.get_unchecked_mut(CS_IDX_PAWN) = pawn_effect(them, ksq);
+            *st.check_squares.get_unchecked_mut(CS_IDX_LANCE) = lance_effect(them, ksq, occupied);
+            *st.check_squares.get_unchecked_mut(CS_IDX_KNIGHT) = knight_effect(them, ksq);
+            *st.check_squares.get_unchecked_mut(CS_IDX_SILVER) = silver_effect(them, ksq);
+            *st.check_squares.get_unchecked_mut(CS_IDX_BISHOP) = bishop_effect(ksq, occupied);
+            *st.check_squares.get_unchecked_mut(CS_IDX_ROOK) = rook_effect(ksq, occupied);
+            *st.check_squares.get_unchecked_mut(CS_IDX_GOLD) = gold_bb;
+            *st.check_squares.get_unchecked_mut(CS_IDX_HORSE) = horse_effect(ksq, occupied);
+            *st.check_squares.get_unchecked_mut(CS_IDX_DRAGON) = dragon_effect(ksq, occupied);
         }
     }
 
@@ -1132,7 +1137,8 @@ impl Position {
             // 直接王手
             // SAFETY: moved_pt は King 以外（King で gives_check=true にはならない）。
             //         check_sq_index は 0..CHECK_SQUARES_SIZE-1 を返す。
-            let cs_idx = check_sq_index(moved_pt).unwrap_or(0);
+            debug_assert_ne!(moved_pt, PieceType::King, "King は gives_check にならない");
+            let cs_idx = unsafe { check_sq_index(moved_pt).unwrap_unchecked() };
             checkers |= unsafe { *self.cur_state().check_squares.get_unchecked(cs_idx) }
                 & Bitboard::from_square(moved_to);
 
