@@ -5,7 +5,7 @@ use super::board_effect::{
     rewind_by_dropping_piece, rewind_by_no_capturing_piece, update_by_capturing_piece,
     update_by_dropping_piece, update_by_no_capturing_piece,
 };
-use super::state::StateInfo;
+use super::state::{StateInfo, check_sq_index};
 use super::zobrist::{zobrist_hand, zobrist_pass_rights, zobrist_psq, zobrist_side};
 use crate::bitboard::{
     Bitboard, RANK_BB, bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect,
@@ -589,7 +589,13 @@ impl Position {
     /// 指定駒種で王手となる升
     #[inline]
     pub fn check_squares(&self, pt: PieceType) -> Bitboard {
-        self.cur_state().check_squares[pt as usize]
+        match check_sq_index(pt) {
+            Some(idx) => {
+                // SAFETY: check_sq_index は 0..CHECK_SQUARES_SIZE-1 を返す。
+                unsafe { *self.cur_state().check_squares.get_unchecked(idx) }
+            }
+            None => Bitboard::EMPTY, // King
+        }
     }
 
     /// 現在のpin状態（指定升を除外）
@@ -755,36 +761,21 @@ impl Position {
         let st = self.cur_state_mut();
 
         // gold_effect は Gold + 成小駒4種（ProPawn, ProLance, ProKnight, ProSilver）で共通。
-        // 1回だけ計算して結果を共有する。
+        // 圧縮配列ではインデックス 6 に統合済み。
         let gold_bb = gold_effect(them, ksq);
 
-        // 各駒種で王手となるマス
-        // SAFETY: 全 PieceType 定数は 1..=14 (Pawn=1, Dragon=14)、
-        //         check_squares の長さは PieceType::NUM+1=15 なので全インデックスが範囲内。
+        // 各駒種で王手となるマス（圧縮インデックス 0..8）
+        // SAFETY: インデックス 0..8 は CHECK_SQUARES_SIZE(=9) の範囲内。
         unsafe {
-            *st.check_squares.get_unchecked_mut(PieceType::Pawn as usize) = pawn_effect(them, ksq);
-            *st.check_squares.get_unchecked_mut(PieceType::Knight as usize) =
-                knight_effect(them, ksq);
-            *st.check_squares.get_unchecked_mut(PieceType::Silver as usize) =
-                silver_effect(them, ksq);
-            *st.check_squares.get_unchecked_mut(PieceType::Gold as usize) = gold_bb;
-            *st.check_squares.get_unchecked_mut(PieceType::King as usize) = Bitboard::EMPTY;
-            *st.check_squares.get_unchecked_mut(PieceType::Lance as usize) =
-                lance_effect(them, ksq, occupied);
-            *st.check_squares.get_unchecked_mut(PieceType::Bishop as usize) =
-                bishop_effect(ksq, occupied);
-            *st.check_squares.get_unchecked_mut(PieceType::Rook as usize) =
-                rook_effect(ksq, occupied);
-
-            // 成駒（gold_bb を共有）
-            *st.check_squares.get_unchecked_mut(PieceType::ProPawn as usize) = gold_bb;
-            *st.check_squares.get_unchecked_mut(PieceType::ProLance as usize) = gold_bb;
-            *st.check_squares.get_unchecked_mut(PieceType::ProKnight as usize) = gold_bb;
-            *st.check_squares.get_unchecked_mut(PieceType::ProSilver as usize) = gold_bb;
-            *st.check_squares.get_unchecked_mut(PieceType::Horse as usize) =
-                horse_effect(ksq, occupied);
-            *st.check_squares.get_unchecked_mut(PieceType::Dragon as usize) =
-                dragon_effect(ksq, occupied);
+            *st.check_squares.get_unchecked_mut(0) = pawn_effect(them, ksq); // Pawn
+            *st.check_squares.get_unchecked_mut(1) = lance_effect(them, ksq, occupied); // Lance
+            *st.check_squares.get_unchecked_mut(2) = knight_effect(them, ksq); // Knight
+            *st.check_squares.get_unchecked_mut(3) = silver_effect(them, ksq); // Silver
+            *st.check_squares.get_unchecked_mut(4) = bishop_effect(ksq, occupied); // Bishop
+            *st.check_squares.get_unchecked_mut(5) = rook_effect(ksq, occupied); // Rook
+            *st.check_squares.get_unchecked_mut(6) = gold_bb; // Gold + 成小駒
+            *st.check_squares.get_unchecked_mut(7) = horse_effect(ksq, occupied); // Horse
+            *st.check_squares.get_unchecked_mut(8) = dragon_effect(ksq, occupied); // Dragon
         }
     }
 
@@ -1139,9 +1130,10 @@ impl Position {
         if gives_check {
             let ksq = self.king_square[them.index()];
             // 直接王手
-            debug_assert!((moved_pt as usize) < PieceType::NUM + 1);
-            // SAFETY: moved_pt は PieceType (0..=14)、check_squares の長さは PieceType::NUM+1=15。
-            checkers |= unsafe { *self.cur_state().check_squares.get_unchecked(moved_pt as usize) }
+            // SAFETY: moved_pt は King 以外（King で gives_check=true にはならない）。
+            //         check_sq_index は 0..CHECK_SQUARES_SIZE-1 を返す。
+            let cs_idx = check_sq_index(moved_pt).unwrap_or(0);
+            checkers |= unsafe { *self.cur_state().check_squares.get_unchecked(cs_idx) }
                 & Bitboard::from_square(moved_to);
 
             // 開き王手（動かした駒が遮断駒だった場合）

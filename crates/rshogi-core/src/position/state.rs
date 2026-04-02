@@ -7,6 +7,47 @@ use super::zobrist::zobrist_no_pawns;
 use crate::bitboard::Bitboard;
 use crate::types::{Color, Hand, Move, Piece, PieceType, RepetitionState, Value};
 
+/// check_squares の圧縮配列サイズ
+///
+/// 成小駒 4 種を Gold に統合、King を省略して 15 → 9 エントリ。
+/// StateInfo のサイズを 96B 削減（432B → 336B）。
+pub const CHECK_SQUARES_SIZE: usize = 9;
+
+/// PieceType → check_squares 圧縮インデックスの変換テーブル
+///
+/// King(8) は常に EMPTY なので配列に含めない（アクセス時に分岐で処理）。
+/// ProPawn(9)/ProLance(10)/ProKnight(11)/ProSilver(12) は Gold(7) と同一なのでインデックス 6 を共有。
+const CHECK_SQ_INDEX: [u8; PieceType::NUM + 1] = [
+    0, // 0: unused (PieceType は 1 始まり)
+    0, // Pawn(1)
+    1, // Lance(2)
+    2, // Knight(3)
+    3, // Silver(4)
+    4, // Bishop(5)
+    5, // Rook(6)
+    6, // Gold(7)
+    0, // King(8) → ダミー（呼び出し側で EMPTY を返す）
+    6, // ProPawn(9) → Gold
+    6, // ProLance(10) → Gold
+    6, // ProKnight(11) → Gold
+    6, // ProSilver(12) → Gold
+    7, // Horse(13)
+    8, // Dragon(14)
+];
+
+/// PieceType を check_squares の圧縮インデックスに変換
+///
+/// King の場合は None を返す（check_squares に King は含まれない）。
+#[inline]
+pub fn check_sq_index(pt: PieceType) -> Option<usize> {
+    if pt == PieceType::King {
+        None
+    } else {
+        // SAFETY: pt は 1..=14、CHECK_SQ_INDEX の長さは PieceType::NUM+1=15。
+        Some(unsafe { *CHECK_SQ_INDEX.get_unchecked(pt as usize) } as usize)
+    }
+}
+
 /// 局面状態
 ///
 /// do_move時に前の状態を保存し、undo_move時に復元するための情報を保持する。
@@ -49,8 +90,12 @@ pub struct StateInfo {
     pub blockers_for_king: [Bitboard; Color::NUM],
     /// pinしている駒 [Color]
     pub pinners: [Bitboard; Color::NUM],
-    /// 王手となる升 [PieceType]
-    pub check_squares: [Bitboard; PieceType::NUM + 1],
+    /// 王手となる升（圧縮配列）
+    ///
+    /// 成小駒（ProPawn, ProLance, ProKnight, ProSilver）は Gold と同一なので
+    /// 統合し、King は常に EMPTY なので省略。15 → 9 エントリに削減。
+    /// アクセスは `check_sq_index(pt)` でインデックス変換する。
+    pub check_squares: [Bitboard; CHECK_SQUARES_SIZE],
     /// 捕獲した駒
     pub captured_piece: Piece,
     /// 千日手判定用カウンタ
@@ -87,7 +132,7 @@ impl StateInfo {
             checkers: Bitboard::EMPTY,
             blockers_for_king: [Bitboard::EMPTY; Color::NUM],
             pinners: [Bitboard::EMPTY; Color::NUM],
-            check_squares: [Bitboard::EMPTY; PieceType::NUM + 1],
+            check_squares: [Bitboard::EMPTY; CHECK_SQUARES_SIZE],
             captured_piece: Piece::NONE,
             repetition: 0,
             repetition_times: 0,
@@ -164,7 +209,7 @@ impl StateInfo {
             checkers: Bitboard::EMPTY,
             blockers_for_king: [Bitboard::EMPTY; Color::NUM],
             pinners: [Bitboard::EMPTY; Color::NUM],
-            check_squares: [Bitboard::EMPTY; PieceType::NUM + 1],
+            check_squares: [Bitboard::EMPTY; CHECK_SQUARES_SIZE],
             captured_piece: Piece::NONE,
             repetition: 0,
             repetition_times: 0,
