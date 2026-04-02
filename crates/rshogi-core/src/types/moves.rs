@@ -283,12 +283,6 @@ impl Move {
         self.0
     }
 
-    /// u32からMoveを生成
-    #[inline]
-    pub const fn from_u32(value: u32) -> Move {
-        Move(value)
-    }
-
     /// USI形式の文字列に変換（パス・宣言勝ち対応）
     pub fn to_usi(self) -> String {
         if self.is_none() {

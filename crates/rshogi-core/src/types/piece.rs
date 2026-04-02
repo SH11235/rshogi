@@ -124,11 +124,13 @@ impl Piece {
     /// 内部値からPieceを生成
     ///
     /// # Safety
-    /// `value` は有効な Piece 値（0..=30）でなければならない。
-    /// Index trait の安全性がこの不変条件に依拠する。
+    /// `value` は正規エンコードの Piece 値でなければならない:
+    /// `{0, 1..=14, 17..=30}`。15 と 16 は未使用（PieceType/Color の
+    /// ビットレイアウトに対応する有効な駒が存在しない）。
+    /// Index trait および `piece_type()` の transmute の安全性がこの不変条件に依拠する。
     #[inline]
     pub const unsafe fn from_raw(value: u8) -> Piece {
-        debug_assert!(value < Self::NUM as u8);
+        debug_assert!(value < Self::NUM as u8 && value != 15 && value != 16);
         Piece(value)
     }
 }
