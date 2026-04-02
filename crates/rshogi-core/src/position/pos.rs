@@ -1134,13 +1134,13 @@ impl Position {
         let mut checkers = Bitboard::EMPTY;
         if gives_check {
             let ksq = self.king_square[them.index()];
-            // 直接王手
-            // SAFETY: moved_pt は King 以外（King で gives_check=true にはならない）。
-            //         check_sq_index は 0..CHECK_SQUARES_SIZE-1 を返す。
-            debug_assert_ne!(moved_pt, PieceType::King, "King は gives_check にならない");
-            let cs_idx = unsafe { check_sq_index(moved_pt).unwrap_unchecked() };
-            checkers |= unsafe { *self.cur_state().check_squares.get_unchecked(cs_idx) }
-                & Bitboard::from_square(moved_to);
+            // 直接王手: King 以外の駒が check_squares 上にいるかチェック。
+            // King の場合は直接王手はない（開き王手のみ）のでスキップ。
+            if let Some(cs_idx) = check_sq_index(moved_pt) {
+                // SAFETY: check_sq_index は 0..CHECK_SQUARES_SIZE-1 を返す。
+                checkers |= unsafe { *self.cur_state().check_squares.get_unchecked(cs_idx) }
+                    & Bitboard::from_square(moved_to);
+            }
 
             // 開き王手（動かした駒が遮断駒だった場合）
             // discovered(from, to, ksq, blockers) と同等の判定
