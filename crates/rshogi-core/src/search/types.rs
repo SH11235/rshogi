@@ -61,18 +61,11 @@ impl PvTable {
     #[inline]
     pub fn update(&mut self, ply: usize, mv: Move) {
         debug_assert!(ply + 1 < PV_SIZE);
-        self.table[ply][0] = mv;
         let child_len = self.len[ply + 1].min(PV_SIZE - 1);
-        // SAFETY: ply, ply+1 < PV_SIZE、child_len < PV_SIZE - 1 なので
-        //         table[ply][1..1+child_len] と table[ply+1][0..child_len] は範囲内。
-        //         ply != ply+1 なので src/dst は重ならない。
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                self.table[ply + 1].as_ptr(),
-                self.table[ply].as_mut_ptr().add(1),
-                child_len,
-            );
-        }
+        // split_at_mut で安全に別行を同時に参照（unsafe 回避）
+        let (lo, hi) = self.table.split_at_mut(ply + 1);
+        lo[ply][0] = mv;
+        lo[ply][1..1 + child_len].copy_from_slice(&hi[0][..child_len]);
         self.len[ply] = child_len + 1;
     }
 
@@ -81,12 +74,6 @@ impl PvTable {
     pub fn line(&self, ply: usize) -> &[Move] {
         debug_assert!(ply < PV_SIZE);
         &self.table[ply][..self.len[ply]]
-    }
-
-    /// 指定 ply の PV ラインの長さ
-    #[inline]
-    pub fn pv_len(&self, ply: usize) -> usize {
-        self.len[ply]
     }
 }
 
@@ -871,10 +858,43 @@ mod tests {
 
         // ply=0 に [mv1, mv2, mv3] をセット
         pv.update(0, mv1);
-        assert_eq!(pv.pv_len(0), 3);
+        assert_eq!(pv.line(0).len(), 3);
         assert_eq!(pv.line(0)[0], mv1);
         assert_eq!(pv.line(0)[1], mv2);
         assert_eq!(pv.line(0)[2], mv3);
+    }
+
+    #[test]
+    fn test_pv_table_clear_then_reupdate() {
+        let mut pv = PvTable::new();
+        let mv1 = Move::from_usi("7g7f").unwrap();
+        let mv2 = Move::from_usi("3c3d").unwrap();
+
+        // セット → クリア → 再セットで古い len が残らないこと
+        pv.clear(1);
+        pv.update(0, mv1);
+        assert_eq!(pv.line(0), &[mv1]);
+
+        pv.clear(0);
+        assert_eq!(pv.line(0).len(), 0);
+
+        pv.clear(1);
+        pv.update(1, mv2);
+        pv.update(0, mv1);
+        assert_eq!(pv.line(0), &[mv1, mv2]);
+    }
+
+    #[test]
+    fn test_pv_table_max_ply_boundary() {
+        use crate::types::MAX_PLY;
+        let mut pv = PvTable::new();
+        let mv = Move::from_usi("7g7f").unwrap();
+
+        // ply = MAX_PLY - 1 での update（最大値付近）
+        let max_ply = MAX_PLY as usize;
+        pv.clear(max_ply);
+        pv.update(max_ply - 1, mv);
+        assert_eq!(pv.line(max_ply - 1), &[mv]);
     }
 
     #[test]
