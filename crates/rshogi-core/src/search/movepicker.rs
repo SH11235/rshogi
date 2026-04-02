@@ -644,7 +644,7 @@ impl MovePicker {
                 value += ch3.get(pc, to) as i32;
                 value += ch5.get(pc, to) as i32;
 
-                if pos.check_squares(pt).contains(to) && pos.see_ge(m, Value::new(-75)) {
+                if pos.check_squares(pt).contains(to) {
                     value += 16384;
                 }
 
@@ -669,7 +669,7 @@ impl MovePicker {
                 value += ch3.get(pc, to) as i32;
                 value += ch5.get(pc, to) as i32;
 
-                if pos.check_squares(pt).contains(to) && pos.see_ge(m, Value::new(-75)) {
+                if pos.check_squares(pt).contains(to) {
                     value += 16384;
                 }
 
