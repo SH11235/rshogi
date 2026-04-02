@@ -754,6 +754,10 @@ impl Position {
         let occupied = self.occupied();
         let st = self.cur_state_mut();
 
+        // gold_effect は Gold + 成小駒4種（ProPawn, ProLance, ProKnight, ProSilver）で共通。
+        // 1回だけ計算して結果を共有する。
+        let gold_sq = gold_effect(them, ksq);
+
         // 各駒種で王手となるマス
         // SAFETY: 全 PieceType 定数は 1..=14 (Pawn=1, Dragon=14)、
         //         check_squares の長さは PieceType::NUM+1=15 なので全インデックスが範囲内。
@@ -763,7 +767,7 @@ impl Position {
                 knight_effect(them, ksq);
             *st.check_squares.get_unchecked_mut(PieceType::Silver as usize) =
                 silver_effect(them, ksq);
-            *st.check_squares.get_unchecked_mut(PieceType::Gold as usize) = gold_effect(them, ksq);
+            *st.check_squares.get_unchecked_mut(PieceType::Gold as usize) = gold_sq;
             *st.check_squares.get_unchecked_mut(PieceType::King as usize) = Bitboard::EMPTY;
             *st.check_squares.get_unchecked_mut(PieceType::Lance as usize) =
                 lance_effect(them, ksq, occupied);
@@ -772,15 +776,11 @@ impl Position {
             *st.check_squares.get_unchecked_mut(PieceType::Rook as usize) =
                 rook_effect(ksq, occupied);
 
-            // 成駒
-            *st.check_squares.get_unchecked_mut(PieceType::ProPawn as usize) =
-                gold_effect(them, ksq);
-            *st.check_squares.get_unchecked_mut(PieceType::ProLance as usize) =
-                gold_effect(them, ksq);
-            *st.check_squares.get_unchecked_mut(PieceType::ProKnight as usize) =
-                gold_effect(them, ksq);
-            *st.check_squares.get_unchecked_mut(PieceType::ProSilver as usize) =
-                gold_effect(them, ksq);
+            // 成駒（gold_sq を共有）
+            *st.check_squares.get_unchecked_mut(PieceType::ProPawn as usize) = gold_sq;
+            *st.check_squares.get_unchecked_mut(PieceType::ProLance as usize) = gold_sq;
+            *st.check_squares.get_unchecked_mut(PieceType::ProKnight as usize) = gold_sq;
+            *st.check_squares.get_unchecked_mut(PieceType::ProSilver as usize) = gold_sq;
             *st.check_squares.get_unchecked_mut(PieceType::Horse as usize) =
                 horse_effect(ksq, occupied);
             *st.check_squares.get_unchecked_mut(PieceType::Dragon as usize) =
