@@ -7,6 +7,59 @@ use super::zobrist::zobrist_no_pawns;
 use crate::bitboard::Bitboard;
 use crate::types::{Color, Hand, Move, Piece, PieceType, RepetitionState, Value};
 
+/// check_squares の圧縮配列サイズ
+///
+/// 成小駒 4 種を Gold に統合、King を省略して 15 → 9 エントリ。
+/// StateInfo のサイズを 96B 削減（432B → 336B）。
+pub(crate) const CHECK_SQUARES_SIZE: usize = 9;
+
+/// 圧縮インデックス定数（CHECK_SQ_INDEX テーブルと一致させること）
+pub(crate) const CS_IDX_PAWN: usize = 0;
+pub(crate) const CS_IDX_LANCE: usize = 1;
+pub(crate) const CS_IDX_KNIGHT: usize = 2;
+pub(crate) const CS_IDX_SILVER: usize = 3;
+pub(crate) const CS_IDX_BISHOP: usize = 4;
+pub(crate) const CS_IDX_ROOK: usize = 5;
+pub(crate) const CS_IDX_GOLD: usize = 6; // Gold + 成小駒
+pub(crate) const CS_IDX_HORSE: usize = 7;
+pub(crate) const CS_IDX_DRAGON: usize = 8;
+
+/// PieceType → check_squares 圧縮インデックスの変換テーブル
+///
+/// King(8) は常に EMPTY なので配列に含めない（アクセス時に None で処理）。
+/// ProPawn(9)/ProLance(10)/ProKnight(11)/ProSilver(12) は Gold(7) と同一なのでインデックス 6 を共有。
+/// King のスロットは u8::MAX（無効値）。直接参照禁止（check_sq_index で None を返す）。
+const CHECK_SQ_INDEX: [u8; PieceType::NUM + 1] = [
+    0,                   // 0: unused (PieceType は 1 始まり)
+    CS_IDX_PAWN as u8,   // Pawn(1)
+    CS_IDX_LANCE as u8,  // Lance(2)
+    CS_IDX_KNIGHT as u8, // Knight(3)
+    CS_IDX_SILVER as u8, // Silver(4)
+    CS_IDX_BISHOP as u8, // Bishop(5)
+    CS_IDX_ROOK as u8,   // Rook(6)
+    CS_IDX_GOLD as u8,   // Gold(7)
+    u8::MAX,             // King(8) → 無効（check_sq_index で None を返すため直接参照禁止）
+    CS_IDX_GOLD as u8,   // ProPawn(9) → Gold
+    CS_IDX_GOLD as u8,   // ProLance(10) → Gold
+    CS_IDX_GOLD as u8,   // ProKnight(11) → Gold
+    CS_IDX_GOLD as u8,   // ProSilver(12) → Gold
+    CS_IDX_HORSE as u8,  // Horse(13)
+    CS_IDX_DRAGON as u8, // Dragon(14)
+];
+
+/// PieceType を check_squares の圧縮インデックスに変換
+///
+/// King の場合は None を返す（check_squares に King は含まれない）。
+#[inline]
+pub(crate) fn check_sq_index(pt: PieceType) -> Option<usize> {
+    if pt == PieceType::King {
+        None
+    } else {
+        // SAFETY: pt は 1..=14、CHECK_SQ_INDEX の長さは PieceType::NUM+1=15。
+        Some(unsafe { *CHECK_SQ_INDEX.get_unchecked(pt as usize) } as usize)
+    }
+}
+
 /// 局面状態
 ///
 /// do_move時に前の状態を保存し、undo_move時に復元するための情報を保持する。
@@ -49,8 +102,12 @@ pub struct StateInfo {
     pub blockers_for_king: [Bitboard; Color::NUM],
     /// pinしている駒 [Color]
     pub pinners: [Bitboard; Color::NUM],
-    /// 王手となる升 [PieceType]
-    pub check_squares: [Bitboard; PieceType::NUM + 1],
+    /// 王手となる升（圧縮配列）
+    ///
+    /// 成小駒（ProPawn, ProLance, ProKnight, ProSilver）は Gold と同一なので
+    /// 統合し、King は常に EMPTY なので省略。15 → 9 エントリに削減。
+    /// アクセスは `check_sq_index(pt)` でインデックス変換する。
+    pub check_squares: [Bitboard; CHECK_SQUARES_SIZE],
     /// 捕獲した駒
     pub captured_piece: Piece,
     /// 千日手判定用カウンタ
@@ -87,7 +144,7 @@ impl StateInfo {
             checkers: Bitboard::EMPTY,
             blockers_for_king: [Bitboard::EMPTY; Color::NUM],
             pinners: [Bitboard::EMPTY; Color::NUM],
-            check_squares: [Bitboard::EMPTY; PieceType::NUM + 1],
+            check_squares: [Bitboard::EMPTY; CHECK_SQUARES_SIZE],
             captured_piece: Piece::NONE,
             repetition: 0,
             repetition_times: 0,
@@ -164,7 +221,7 @@ impl StateInfo {
             checkers: Bitboard::EMPTY,
             blockers_for_king: [Bitboard::EMPTY; Color::NUM],
             pinners: [Bitboard::EMPTY; Color::NUM],
-            check_squares: [Bitboard::EMPTY; PieceType::NUM + 1],
+            check_squares: [Bitboard::EMPTY; CHECK_SQUARES_SIZE],
             captured_piece: Piece::NONE,
             repetition: 0,
             repetition_times: 0,
