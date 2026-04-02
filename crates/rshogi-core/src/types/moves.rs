@@ -133,7 +133,9 @@ impl Move {
     /// 駒情報が設定されていない場合はPiece::NONEを返す
     #[inline]
     pub const fn moved_piece_after(self) -> Piece {
-        Piece::from_raw((self.0 >> Self::PIECE_SHIFT) as u8)
+        // SAFETY: Move の PIECE_SHIFT 以上のビットには有効な Piece 値（0..=30）が
+        // with_piece() で設定される。PASS/WIN は別経路で処理されるため問題ない。
+        unsafe { Piece::from_raw((self.0 >> Self::PIECE_SHIFT) as u8) }
     }
 
     /// 駒情報が設定されているかどうか

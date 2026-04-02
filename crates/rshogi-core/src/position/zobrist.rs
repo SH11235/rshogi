@@ -105,11 +105,7 @@ pub static ZOBRIST: Zobrist = Zobrist::init();
 /// 駒と升のハッシュを取得
 #[inline]
 pub fn zobrist_psq(pc: Piece, sq: Square) -> u64 {
-    debug_assert!(pc.index() < 32);
-    debug_assert!(sq.index() < Square::NUM + 1);
-    // SAFETY: Piece::index() は 0..=30 (Piece::NUM=31)、psq の長さは 32。
-    //         Square::index() は 0..=80 (Square::NUM=81)、psq[i] の長さは Square::NUM+1=82。
-    unsafe { *ZOBRIST.psq.get_unchecked(pc.index()).get_unchecked(sq.index()) }
+    ZOBRIST.psq[pc][sq]
 }
 
 /// 盤上に歩が無い状態のハッシュを取得
@@ -121,12 +117,10 @@ pub fn zobrist_no_pawns() -> u64 {
 /// 手駒のハッシュを取得
 #[inline]
 pub fn zobrist_hand(color: Color, pt: PieceType) -> u64 {
-    debug_assert!(color.index() < Color::NUM);
     debug_assert!(pt.index() < 8);
-    // SAFETY: Color::index() は 0..=1 (Color::NUM=2)、hand の長さは Color::NUM=2。
-    //         呼び出し側が手駒駒種（PieceType::index() 1..=7）のみを渡す責任を持つ。
-    //         hand[i] の長さは 8。
-    unsafe { *ZOBRIST.hand.get_unchecked(color.index()).get_unchecked(pt.index()) }
+    // SAFETY: 呼び出し側が手駒駒種（PieceType::index() 1..=7）のみを渡す責任を持つ。
+    //         hand[color] の長さは 8。
+    unsafe { *ZOBRIST.hand[color].get_unchecked(pt.index()) }
 }
 
 /// 手番のハッシュを取得

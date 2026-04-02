@@ -122,8 +122,13 @@ impl Piece {
     }
 
     /// 内部値からPieceを生成
+    ///
+    /// # Safety
+    /// `value` は有効な Piece 値（0..=30）でなければならない。
+    /// Index trait の安全性がこの不変条件に依拠する。
     #[inline]
-    pub const fn from_raw(value: u8) -> Piece {
+    pub const unsafe fn from_raw(value: u8) -> Piece {
+        debug_assert!(value < Self::NUM as u8);
         Piece(value)
     }
 }
