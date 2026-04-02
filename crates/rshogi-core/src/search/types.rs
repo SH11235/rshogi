@@ -2,6 +2,7 @@
 //!
 //! - `NodeType`: ノードの種類（Root, PV, NonPV）
 //! - `Stack`: 探索スタック
+//! - `PvTable`: PV 三角配列（Reckless 由来のヒープ割り当てなし方式）
 //! - `RootMove`: ルート手の情報
 //! - `RootMoves`: ルート手のリスト
 
@@ -13,6 +14,81 @@ use crate::types::{MAX_PLY, Move, Piece, RepetitionState, Square, Value};
 
 use super::history::PieceToHistory;
 use std::ptr::NonNull;
+
+// =============================================================================
+// PvTable（PV 三角配列）
+// =============================================================================
+
+/// PV サイズ上限（MAX_PLY + 1）
+const PV_SIZE: usize = MAX_PLY as usize + 1;
+
+/// PV 三角配列（Reckless 由来）
+///
+/// 各 ply の PV を固定長配列で保持し、Vec<Move> のヒープ割り当てを回避する。
+/// `table[ply][0..len[ply]]` が ply の PV ライン。
+/// `update(ply, mv)` で `table[ply] = [mv] + table[ply+1]` にコピー。
+pub struct PvTable {
+    table: Box<[[Move; PV_SIZE]; PV_SIZE]>,
+    len: [usize; PV_SIZE],
+}
+
+impl Default for PvTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PvTable {
+    /// 新しい PvTable を作成（ヒープ確保）
+    pub fn new() -> Self {
+        Self {
+            table: vec![[Move::NONE; PV_SIZE]; PV_SIZE]
+                .into_boxed_slice()
+                .try_into()
+                .unwrap_or_else(|_| unreachable!()),
+            len: [0; PV_SIZE],
+        }
+    }
+
+    /// 指定 ply の PV をクリア
+    #[inline]
+    pub fn clear(&mut self, ply: usize) {
+        debug_assert!(ply < PV_SIZE);
+        self.len[ply] = 0;
+    }
+
+    /// 指定 ply の PV を更新（best_move を先頭に、ply+1 の PV を続ける）
+    #[inline]
+    pub fn update(&mut self, ply: usize, mv: Move) {
+        debug_assert!(ply + 1 < PV_SIZE);
+        self.table[ply][0] = mv;
+        let child_len = self.len[ply + 1].min(PV_SIZE - 1);
+        // SAFETY: ply, ply+1 < PV_SIZE、child_len < PV_SIZE - 1 なので
+        //         table[ply][1..1+child_len] と table[ply+1][0..child_len] は範囲内。
+        //         ply != ply+1 なので src/dst は重ならない。
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                self.table[ply + 1].as_ptr(),
+                self.table[ply].as_mut_ptr().add(1),
+                child_len,
+            );
+        }
+        self.len[ply] = child_len + 1;
+    }
+
+    /// 指定 ply の PV ラインを取得
+    #[inline]
+    pub fn line(&self, ply: usize) -> &[Move] {
+        debug_assert!(ply < PV_SIZE);
+        &self.table[ply][..self.len[ply]]
+    }
+
+    /// 指定 ply の PV ラインの長さ
+    #[inline]
+    pub fn pv_len(&self, ply: usize) -> usize {
+        self.len[ply]
+    }
+}
 
 // =============================================================================
 // 定数
@@ -98,9 +174,6 @@ impl ContHistKey {
 /// 探索時の各ノードの状態
 #[derive(Clone)]
 pub struct Stack {
-    /// PV（Principal Variation）
-    pub pv: Vec<Move>,
-
     /// 前回 iteration の PV ラインを追跡中か
     ///
     /// tree-changing な探索改善でのみ参照する。
@@ -163,7 +236,6 @@ pub struct Stack {
 impl Default for Stack {
     fn default() -> Self {
         Self {
-            pv: Vec::new(),
             follow_pv: false,
             cont_history_idx: 0,
             cont_history_ptr: NonNull::dangling(),
@@ -195,18 +267,6 @@ impl Stack {
             ply,
             ..Self::default()
         }
-    }
-
-    /// PVをクリア
-    pub fn clear_pv(&mut self) {
-        self.pv.clear();
-    }
-
-    /// PVを更新（best_moveを先頭に、child_pvを続ける）
-    pub fn update_pv(&mut self, best_move: Move, child_pv: &[Move]) {
-        self.pv.clear();
-        self.pv.push(best_move);
-        self.pv.extend_from_slice(child_pv);
     }
 }
 
@@ -787,25 +847,34 @@ mod tests {
     #[test]
     fn test_stack_default() {
         let stack = Stack::default();
-        assert!(stack.pv.is_empty());
         assert_eq!(stack.ply, 0);
         assert!(stack.current_move.is_none());
         assert!(!stack.in_check);
     }
 
     #[test]
-    fn test_stack_update_pv() {
-        let mut stack = Stack::default();
+    fn test_pv_table_update() {
+        let mut pv = PvTable::new();
         let mv1 = Move::from_usi("7g7f").unwrap();
         let mv2 = Move::from_usi("3c3d").unwrap();
         let mv3 = Move::from_usi("2g2f").unwrap();
 
-        stack.update_pv(mv1, &[mv2, mv3]);
+        // ply=2 に [mv3] をセット
+        pv.clear(2);
+        pv.clear(3);
+        pv.update(2, mv3);
+        assert_eq!(pv.line(2), &[mv3]);
 
-        assert_eq!(stack.pv.len(), 3);
-        assert_eq!(stack.pv[0], mv1);
-        assert_eq!(stack.pv[1], mv2);
-        assert_eq!(stack.pv[2], mv3);
+        // ply=1 に [mv2, mv3] をセット
+        pv.update(1, mv2);
+        assert_eq!(pv.line(1), &[mv2, mv3]);
+
+        // ply=0 に [mv1, mv2, mv3] をセット
+        pv.update(0, mv1);
+        assert_eq!(pv.pv_len(0), 3);
+        assert_eq!(pv.line(0)[0], mv1);
+        assert_eq!(pv.line(0)[1], mv2);
+        assert_eq!(pv.line(0)[2], mv3);
     }
 
     #[test]
