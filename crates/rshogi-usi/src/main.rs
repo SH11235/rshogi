@@ -21,9 +21,10 @@ use rshogi_core::nnue::{
     SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, SHOGI_PROGRESS8_FEATURE_ORDER, SHOGI_PROGRESS8_NUM_FEATURES,
     clear_nnue, evaluate_dispatch, format_layer_stack_ply_bounds, get_layer_stack_bucket_mode,
     get_network, init_nnue, parse_layer_stack_bucket_mode, parse_layer_stack_ply_bounds_csv,
-    print_nnue_stats, reset_layer_stack_progress_kpabs_weights, set_fv_scale_override,
-    set_layer_stack_bucket_mode, set_layer_stack_ply_bounds, set_layer_stack_progress_coeff,
-    set_layer_stack_progress_coeff_gikou_lite, set_layer_stack_progress_kpabs_weights,
+    parse_nnue_architecture, print_nnue_stats, reset_layer_stack_progress_kpabs_weights,
+    set_fv_scale_override, set_layer_stack_bucket_mode, set_layer_stack_ply_bounds,
+    set_layer_stack_progress_coeff, set_layer_stack_progress_coeff_gikou_lite,
+    set_layer_stack_progress_kpabs_weights, set_nnue_architecture_override,
 };
 use rshogi_core::position::Position;
 use rshogi_core::search::{
@@ -316,6 +317,8 @@ struct UsiEngine {
     /// Some(true): 明示指定されロード成功
     /// Some(false): 明示指定されたがロード失敗
     eval_file_explicit: Option<bool>,
+    /// 最後に指定された EvalFile パス（NNUE_ARCHITECTURE 変更時の再読込用）
+    eval_file_path: Option<String>,
     /// SPSAParamsFile の明示指定パス（setoption で設定）
     spsa_params_file: Option<String>,
     /// SPSA params ファイルの読み込み済みフラグ
@@ -363,6 +366,7 @@ impl UsiEngine {
             last_position_cmd: None,
             last_go_cmd: None,
             eval_file_explicit: None,
+            eval_file_path: None,
             spsa_params_file: None,
             spsa_params_loaded: false,
             large_pages_reported: false,
@@ -478,6 +482,9 @@ impl UsiEngine {
             format_layer_stack_ply_bounds(LAYER_STACK_PLY9_DEFAULT_BOUNDS)
         );
         println!("option name LS_PROGRESS_COEFF type string default <empty>");
+        println!(
+            "option name NNUE_ARCHITECTURE type combo default auto var auto var halfkp var halfka_hm var halfka var layerstacks var layerstacks-psqt"
+        );
         // 有限パス権（Finite Pass Rights）オプション
         println!("option name PassRights type check default false");
         println!("option name InitialPassCount type spin default 2 min 0 max 10");
@@ -910,8 +917,10 @@ impl UsiEngine {
                     // 空 → 明示指定を解除し isready の自動ロードに戻す
                     clear_nnue();
                     self.eval_file_explicit = None;
+                    self.eval_file_path = None;
                 } else {
                     // パス指定: ロード試行し、結果を記録
+                    self.eval_file_path = Some(value.to_string());
                     match init_nnue(&value) {
                         Ok(()) => {
                             self.eval_file_explicit = Some(true);
@@ -938,6 +947,60 @@ impl UsiEngine {
                     }
                 }
             }
+            "NNUE_ARCHITECTURE" => match parse_nnue_architecture(&value) {
+                Some(mode) => {
+                    set_nnue_architecture_override(mode);
+                    // EvalFile が指定済みなら、現在ロード済みか失敗済みかに関係なく再試行する。
+                    // arch_str 不整合が原因でロード失敗していた場合、architecture override
+                    // 変更後の再試行で成功する可能性がある。再試行しても失敗した場合は
+                    // Some(false) のまま維持され、isready の panic 安全策は保持される。
+                    if let Some(ref path) = self.eval_file_path {
+                        let was_loaded = get_network().is_some();
+                        match init_nnue(path) {
+                            Ok(()) => {
+                                self.eval_file_explicit = Some(true);
+                                let action = if was_loaded {
+                                    "reloaded"
+                                } else {
+                                    "retried and loaded"
+                                };
+                                eprintln!(
+                                    "info string NNUE_ARCHITECTURE: {} ({} {})",
+                                    value, action, path
+                                );
+                            }
+                            Err(e) => {
+                                self.eval_file_explicit = Some(false);
+                                let action = if was_loaded {
+                                    "reload failed"
+                                } else {
+                                    "retry failed"
+                                };
+                                eprintln!(
+                                    "info string NNUE_ARCHITECTURE: {} ({}: {})",
+                                    value, action, e
+                                );
+                            }
+                        }
+                    } else if get_network().is_some() {
+                        // EvalFile 未指定で自動ロード済み → クリアして isready に任せる
+                        clear_nnue();
+                        self.eval_file_explicit = None;
+                        eprintln!(
+                            "info string NNUE_ARCHITECTURE: {} (NNUE cleared, will reload on isready)",
+                            value
+                        );
+                    } else {
+                        eprintln!("info string NNUE_ARCHITECTURE: {}", value);
+                    }
+                }
+                None => {
+                    eprintln!(
+                        "info string Warning: invalid NNUE_ARCHITECTURE '{}', expected auto, halfkp, halfka_hm, halfka, layerstacks or layerstacks-psqt",
+                        value
+                    );
+                }
+            },
             "LS_BUCKET_MODE" => match parse_layer_stack_bucket_mode(&value) {
                 Some(mode) => {
                     set_layer_stack_bucket_mode(mode);
