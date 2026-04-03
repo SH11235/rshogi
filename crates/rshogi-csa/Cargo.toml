@@ -1,0 +1,11 @@
+[package]
+name = "rshogi-csa"
+version = "0.1.0"
+edition = "2024"
+authors = ["sh11235"]
+description = "CSA protocol format parser and USI conversion utilities for shogi"
+license = "GPL-3.0-only"
+repository = "https://github.com/SH11235/rshogi"
+
+[dependencies]
+anyhow.workspace = true

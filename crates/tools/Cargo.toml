@@ -29,6 +29,7 @@ log.workspace = true
 
 # Local dependencies
 rshogi-core = { path = "../rshogi-core" }
+rshogi-csa = { path = "../rshogi-csa" }
 
 # Additional dependencies
 sysinfo = "0.37"

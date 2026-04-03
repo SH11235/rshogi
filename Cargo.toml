@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/rshogi-core",
+    "crates/rshogi-csa",
     "crates/rshogi-usi",
     "crates/tools",
 ]
