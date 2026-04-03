@@ -290,9 +290,7 @@ where
         return (None, improving);
     }
 
-    let margin = ctx.tune_params.nmp_margin_depth_mult * depth
-        + ctx.tune_params.nmp_margin_offset
-        + ctx.tune_params.nmp_margin_improving_bonus * improving as i32;
+    let margin = ctx.tune_params.nmp_margin_depth_mult * depth + ctx.tune_params.nmp_margin_offset;
     let prev_move = st.stack[(ply - 1) as usize].current_move;
     let prev_is_pass = prev_move.is_pass();
 
@@ -348,8 +346,6 @@ where
             pos.do_null_move_with_prefetch(ctx.tt);
         }
         nnue_push(st, DirtyPiece::new());
-        let null_move = st.stack[ply as usize].current_move;
-        st.set_child_follow_pv(ply, null_move);
         let null_value = -search_node(
             st,
             ctx,
@@ -535,7 +531,6 @@ where
         );
 
         if value >= prob_beta && probcut_depth > 0 {
-            st.set_child_follow_pv(ply, mv);
             value = -search_node(
                 st,
                 ctx,

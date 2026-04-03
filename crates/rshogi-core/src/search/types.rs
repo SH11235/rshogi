@@ -161,11 +161,6 @@ impl ContHistKey {
 /// 探索時の各ノードの状態
 #[derive(Clone)]
 pub struct Stack {
-    /// 前回 iteration の PV ラインを追跡中か
-    ///
-    /// tree-changing な探索改善でのみ参照する。
-    pub follow_pv: bool,
-
     /// ContinuationHistoryへの参照インデックス（旧方式、互換性のため残す）
     pub cont_history_idx: usize,
 
@@ -223,7 +218,6 @@ pub struct Stack {
 impl Default for Stack {
     fn default() -> Self {
         Self {
-            follow_pv: false,
             cont_history_idx: 0,
             cont_history_ptr: NonNull::dangling(),
             cont_hist_key: None,
