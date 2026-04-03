@@ -950,35 +950,33 @@ impl UsiEngine {
             "NNUE_ARCHITECTURE" => match parse_nnue_architecture(&value) {
                 Some(mode) => {
                     set_nnue_architecture_override(mode);
-                    // NNUE が既にロード済みなら再読込が必要
-                    if get_network().is_some() {
-                        if let Some(ref path) = self.eval_file_path {
-                            // 保存済みパスで再読込
-                            match init_nnue(path) {
-                                Ok(()) => {
-                                    self.eval_file_explicit = Some(true);
-                                    eprintln!(
-                                        "info string NNUE_ARCHITECTURE: {} (reloaded {})",
-                                        value, path
-                                    );
-                                }
-                                Err(e) => {
-                                    self.eval_file_explicit = Some(false);
-                                    eprintln!(
-                                        "info string NNUE_ARCHITECTURE: {} (reload failed: {})",
-                                        value, e
-                                    );
-                                }
+                    // EvalFile が指定済みなら再読込を試行
+                    // (ロード失敗済みの場合も、arch override 変更で成功する可能性がある)
+                    if let Some(ref path) = self.eval_file_path {
+                        match init_nnue(path) {
+                            Ok(()) => {
+                                self.eval_file_explicit = Some(true);
+                                eprintln!(
+                                    "info string NNUE_ARCHITECTURE: {} (reloaded {})",
+                                    value, path
+                                );
                             }
-                        } else {
-                            // EvalFile 未指定（自動ロード）の場合はクリアして isready に任せる
-                            clear_nnue();
-                            self.eval_file_explicit = None;
-                            eprintln!(
-                                "info string NNUE_ARCHITECTURE: {} (NNUE cleared, will reload on isready)",
-                                value
-                            );
+                            Err(e) => {
+                                self.eval_file_explicit = Some(false);
+                                eprintln!(
+                                    "info string NNUE_ARCHITECTURE: {} (reload failed: {})",
+                                    value, e
+                                );
+                            }
                         }
+                    } else if get_network().is_some() {
+                        // EvalFile 未指定で自動ロード済み → クリアして isready に任せる
+                        clear_nnue();
+                        self.eval_file_explicit = None;
+                        eprintln!(
+                            "info string NNUE_ARCHITECTURE: {} (NNUE cleared, will reload on isready)",
+                            value
+                        );
                     } else {
                         eprintln!("info string NNUE_ARCHITECTURE: {}", value);
                     }
