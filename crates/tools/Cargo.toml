@@ -2,7 +2,7 @@
 name = "tools"
 version = "0.1.0"
 edition = "2024"
-authors = ["sh11235"]
+authors = ["SH11235"]
 description = "Performance benchmarking and analysis tools for shogi engine"
 license = "GPL-3.0-only"
 repository = "https://github.com/SH11235/rshogi"
