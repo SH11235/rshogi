@@ -74,14 +74,14 @@ pub struct FeatureTransformerLayerStacks {
     pub weights: AlignedBox<i16>,
 
     /// PSQT バイアス [NUM_LAYER_STACK_BUCKETS]
-    pub psqt_biases: [i32; NUM_LAYER_STACK_BUCKETS],
+    pub(crate) psqt_biases: [i32; NUM_LAYER_STACK_BUCKETS],
 
     /// PSQT 重み [HALFKA_HM_DIMENSIONS × NUM_LAYER_STACK_BUCKETS]
     /// レイアウト: psqt_weights[feature_idx * 9 + bucket]
-    pub psqt_weights: AlignedBox<i32>,
+    pub(crate) psqt_weights: AlignedBox<i32>,
 
     /// PSQT が有効か（アーキテクチャ文字列で判定）
-    pub has_psqt: bool,
+    pub(crate) has_psqt: bool,
 }
 
 impl FeatureTransformerLayerStacks {
@@ -199,6 +199,8 @@ impl FeatureTransformerLayerStacks {
             *w = i32::from_le_bytes(buf4);
         }
 
+        // 注意: 読み込みが途中で失敗した場合、psqt_biases だけが更新された
+        // 中途半端な状態になるが、呼び出し元でエラーが伝播し Self は破棄されるため問題ない。
         self.has_psqt = true;
         Ok(())
     }
@@ -219,6 +221,11 @@ impl FeatureTransformerLayerStacks {
     #[inline]
     fn add_psqt_weights(&self, psqt_acc: &mut [i32; NUM_LAYER_STACK_BUCKETS], index: usize) {
         let offset = index * NUM_LAYER_STACK_BUCKETS;
+        debug_assert!(
+            offset + NUM_LAYER_STACK_BUCKETS <= self.psqt_weights.len(),
+            "psqt_weights index out of bounds: offset={offset}, len={}",
+            self.psqt_weights.len()
+        );
         for (bucket, acc) in psqt_acc.iter_mut().enumerate() {
             *acc += self.psqt_weights[offset + bucket];
         }
@@ -228,6 +235,11 @@ impl FeatureTransformerLayerStacks {
     #[inline]
     fn sub_psqt_weights(&self, psqt_acc: &mut [i32; NUM_LAYER_STACK_BUCKETS], index: usize) {
         let offset = index * NUM_LAYER_STACK_BUCKETS;
+        debug_assert!(
+            offset + NUM_LAYER_STACK_BUCKETS <= self.psqt_weights.len(),
+            "psqt_weights index out of bounds: offset={offset}, len={}",
+            self.psqt_weights.len()
+        );
         for (bucket, acc) in psqt_acc.iter_mut().enumerate() {
             *acc -= self.psqt_weights[offset + bucket];
         }
@@ -1389,5 +1401,85 @@ mod tests {
             Color::Black,
             king_sq,
         ));
+    }
+
+    // =========================================================================
+    // PSQT テスト
+    // =========================================================================
+
+    fn make_test_transformer_with_psqt() -> FeatureTransformerLayerStacks {
+        let psqt_weight_count = HALFKA_HM_DIMENSIONS * NUM_LAYER_STACK_BUCKETS;
+        let mut psqt_weights = AlignedBox::new_zeroed(psqt_weight_count);
+        // 既知のパターンを設定: weight[feat][bucket] = (feat * 7 + bucket * 3) as i32
+        for feat in 0..HALFKA_HM_DIMENSIONS {
+            for bucket in 0..NUM_LAYER_STACK_BUCKETS {
+                psqt_weights[feat * NUM_LAYER_STACK_BUCKETS + bucket] =
+                    (feat as i32 * 7 + bucket as i32 * 3) % 1000 - 500;
+            }
+        }
+
+        FeatureTransformerLayerStacks {
+            biases: Aligned([0; NNUE_PYTORCH_L1]),
+            weights: AlignedBox::new_zeroed(HALFKA_HM_DIMENSIONS * NNUE_PYTORCH_L1),
+            psqt_biases: [10, 20, 30, 40, 50, 60, 70, 80, 90],
+            psqt_weights,
+            has_psqt: true,
+        }
+    }
+
+    /// refresh_psqt と add/sub_psqt_weights による差分更新が一致することを確認
+    #[test]
+    fn test_psqt_refresh_matches_incremental() {
+        let ft = make_test_transformer_with_psqt();
+
+        // 初期特徴量: [100, 200, 300]
+        let mut active_initial = IndexList::new();
+        let _ = active_initial.push(100);
+        let _ = active_initial.push(200);
+        let _ = active_initial.push(300);
+
+        // フル計算
+        let mut full_acc = [0i32; NUM_LAYER_STACK_BUCKETS];
+        ft.refresh_psqt(&active_initial, &mut full_acc);
+
+        // 差分: 200 を削除、400 を追加 → [100, 300, 400]
+        let mut incr_acc = full_acc;
+        ft.sub_psqt_weights(&mut incr_acc, 200);
+        ft.add_psqt_weights(&mut incr_acc, 400);
+
+        // フル計算（[100, 300, 400]）
+        let mut active_updated = IndexList::new();
+        let _ = active_updated.push(100);
+        let _ = active_updated.push(300);
+        let _ = active_updated.push(400);
+        let mut full_updated = [0i32; NUM_LAYER_STACK_BUCKETS];
+        ft.refresh_psqt(&active_updated, &mut full_updated);
+
+        assert_eq!(incr_acc, full_updated, "差分更新とフル計算の結果が不一致");
+    }
+
+    /// PSQT 有効モデルで既知の入力に対して期待値を確認
+    #[test]
+    fn test_psqt_known_values() {
+        let ft = make_test_transformer_with_psqt();
+
+        let mut active = IndexList::new();
+        let _ = active.push(0);
+        let _ = active.push(1);
+
+        let mut acc = [0i32; NUM_LAYER_STACK_BUCKETS];
+        ft.refresh_psqt(&active, &mut acc);
+
+        // feat=0: (0*7 + b*3) % 1000 - 500 = b*3 - 500
+        // feat=1: (1*7 + b*3) % 1000 - 500 = 7 + b*3 - 500
+        // bias + feat0 + feat1
+        for (bucket, val) in acc.iter().enumerate() {
+            let b = bucket as i32;
+            let bias = (b + 1) * 10; // [10, 20, ..., 90]
+            let w0 = b * 3 - 500;
+            let w1 = 7 + b * 3 - 500;
+            let expected = bias + w0 + w1;
+            assert_eq!(*val, expected, "bucket {bucket}: expected {expected}, got {val}");
+        }
     }
 }
