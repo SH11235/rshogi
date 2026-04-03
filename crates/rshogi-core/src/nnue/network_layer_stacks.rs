@@ -352,11 +352,36 @@ impl NetworkLayerStacks {
         info!("[NNUE Eval] l1_skip: {l1_skip}");
         info!("[NNUE Eval] raw_score (with skip): {raw_score}");
 
+        // PSQT ショートカット
+        let psqt_value = if self.feature_transformer.has_psqt {
+            let stm = side_to_move as usize;
+            let nstm = (!side_to_move) as usize;
+            let v = (acc.psqt_accumulation[stm][bucket_index]
+                - acc.psqt_accumulation[nstm][bucket_index])
+                / 2;
+            info!(
+                "[NNUE Eval] psqt_acc[stm][{bucket_index}]: {}",
+                acc.psqt_accumulation[stm][bucket_index]
+            );
+            info!(
+                "[NNUE Eval] psqt_acc[nstm][{bucket_index}]: {}",
+                acc.psqt_accumulation[nstm][bucket_index]
+            );
+            info!("[NNUE Eval] psqt_value: {v}");
+            v
+        } else {
+            info!("[NNUE Eval] PSQT: disabled");
+            0
+        };
+
         let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
-        let score = raw_score / fv_scale;
-        let score_float = raw_score as f64 / fv_scale as f64;
+        let combined = raw_score + psqt_value;
+        let score = combined / fv_scale;
+        let score_float = combined as f64 / fv_scale as f64;
         info!("[NNUE Eval] fv_scale: {fv_scale}");
-        info!("[NNUE Eval] score: {score} (float: {score_float:.4})");
+        info!(
+            "[NNUE Eval] score: {score} (raw_score={raw_score} + psqt={psqt_value} = {combined}, float: {score_float:.4})"
+        );
 
         Value::new(score)
     }
