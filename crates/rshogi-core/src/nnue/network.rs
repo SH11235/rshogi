@@ -58,6 +58,60 @@ static NNUE_INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// 評価関数によって異なる値が必要な場合に使用。
 static FV_SCALE_OVERRIDE: AtomicI32 = AtomicI32::new(0);
 
+/// NNUE アーキテクチャの明示指定
+///
+/// `auto` (デフォルト) では既存の自動検出を使用。
+/// 外部モデルで arch_str が不正確な場合に明示指定で上書きする。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NNUEArchitectureOverride {
+    /// 自動検出（デフォルト）
+    Auto = 0,
+    /// HalfKP
+    HalfKP = 1,
+    /// HalfKA_hm
+    #[allow(non_camel_case_types)]
+    HalfKA_hm = 2,
+    /// HalfKA
+    HalfKA = 3,
+    /// LayerStacks (PSQT なし)
+    LayerStacks = 4,
+    /// LayerStacks + PSQT
+    LayerStacksPSQT = 5,
+}
+
+static NNUE_ARCHITECTURE_OVERRIDE: AtomicI32 =
+    AtomicI32::new(NNUEArchitectureOverride::Auto as i32);
+
+/// NNUE アーキテクチャの明示指定を取得
+pub fn get_nnue_architecture_override() -> NNUEArchitectureOverride {
+    match NNUE_ARCHITECTURE_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => NNUEArchitectureOverride::HalfKP,
+        2 => NNUEArchitectureOverride::HalfKA_hm,
+        3 => NNUEArchitectureOverride::HalfKA,
+        4 => NNUEArchitectureOverride::LayerStacks,
+        5 => NNUEArchitectureOverride::LayerStacksPSQT,
+        _ => NNUEArchitectureOverride::Auto,
+    }
+}
+
+/// NNUE アーキテクチャの明示指定を設定
+pub fn set_nnue_architecture_override(mode: NNUEArchitectureOverride) {
+    NNUE_ARCHITECTURE_OVERRIDE.store(mode as i32, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// USI オプション文字列から NNUEArchitectureOverride をパース
+pub fn parse_nnue_architecture(value: &str) -> Option<NNUEArchitectureOverride> {
+    match value.to_ascii_lowercase().as_str() {
+        "auto" => Some(NNUEArchitectureOverride::Auto),
+        "halfkp" => Some(NNUEArchitectureOverride::HalfKP),
+        "halfka_hm" => Some(NNUEArchitectureOverride::HalfKA_hm),
+        "halfka" => Some(NNUEArchitectureOverride::HalfKA),
+        "layerstacks" => Some(NNUEArchitectureOverride::LayerStacks),
+        "layerstacks-psqt" | "layerstacks_psqt" => Some(NNUEArchitectureOverride::LayerStacksPSQT),
+        _ => None,
+    }
+}
+
 /// LayerStacks の bucket 選択モード
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayerStackBucketMode {
@@ -506,22 +560,40 @@ impl NNUENetwork {
                     _ => Activation::CReLU,
                 };
 
-                // ヘッダーから FeatureSet を取得（検出のヒントに使用）
-                let parsed = super::spec::parse_architecture(&arch_str)
-                    .map_err(|msg| io::Error::new(io::ErrorKind::InvalidData, msg))?;
+                // FeatureSet を決定: USI オプションが明示指定されていればそちらを優先
+                let arch_override = get_nnue_architecture_override();
+                let effective_feature_set = match arch_override {
+                    NNUEArchitectureOverride::Auto => {
+                        // 自動検出: ヘッダーから FeatureSet を取得
+                        let parsed = super::spec::parse_architecture(&arch_str)
+                            .map_err(|msg| io::Error::new(io::ErrorKind::InvalidData, msg))?;
+                        parsed.feature_set
+                    }
+                    NNUEArchitectureOverride::HalfKP => FeatureSet::HalfKP,
+                    NNUEArchitectureOverride::HalfKA_hm => FeatureSet::HalfKA_hm,
+                    NNUEArchitectureOverride::HalfKA => FeatureSet::HalfKA,
+                    NNUEArchitectureOverride::LayerStacks
+                    | NNUEArchitectureOverride::LayerStacksPSQT => FeatureSet::LayerStacks,
+                };
 
-                // LayerStacks は特殊処理（ファイルサイズ検出の対象外）
-                if parsed.feature_set == FeatureSet::LayerStacks {
+                let force_psqt = arch_override == NNUEArchitectureOverride::LayerStacksPSQT;
+
+                // LayerStacks は特殊処理（FT が LEB128 圧縮のためファイルサイズ検出の対象外）
+                if effective_feature_set == FeatureSet::LayerStacks {
                     reader.seek(SeekFrom::Start(0))?;
-                    let network = NetworkLayerStacks::read(reader)?;
+                    let network = NetworkLayerStacks::read_with_options(reader, force_psqt)?;
                     return Ok(Self::LayerStacks(Box::new(network)));
                 }
 
                 // 4. ファイルサイズからアーキテクチャを検出
+                let feature_set_hint = match arch_override {
+                    NNUEArchitectureOverride::Auto => Some(effective_feature_set),
+                    _ => Some(effective_feature_set),
+                };
                 let detection = super::spec::detect_architecture_from_size(
                     file_size,
                     arch_len,
-                    Some(parsed.feature_set),
+                    feature_set_hint,
                 )
                 .ok_or_else(|| {
                     // 検出失敗時は候補を表示
@@ -539,7 +611,7 @@ impl NNUENetwork {
                              Closest candidates: [{}]",
                             file_size,
                             arch_len,
-                            parsed.feature_set,
+                            effective_feature_set,
                             candidates_str.join(", ")
                         ),
                     )

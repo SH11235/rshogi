@@ -21,9 +21,10 @@ use rshogi_core::nnue::{
     SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, SHOGI_PROGRESS8_FEATURE_ORDER, SHOGI_PROGRESS8_NUM_FEATURES,
     clear_nnue, evaluate_dispatch, format_layer_stack_ply_bounds, get_layer_stack_bucket_mode,
     get_network, init_nnue, parse_layer_stack_bucket_mode, parse_layer_stack_ply_bounds_csv,
-    print_nnue_stats, reset_layer_stack_progress_kpabs_weights, set_fv_scale_override,
-    set_layer_stack_bucket_mode, set_layer_stack_ply_bounds, set_layer_stack_progress_coeff,
-    set_layer_stack_progress_coeff_gikou_lite, set_layer_stack_progress_kpabs_weights,
+    parse_nnue_architecture, print_nnue_stats, reset_layer_stack_progress_kpabs_weights,
+    set_fv_scale_override, set_layer_stack_bucket_mode, set_layer_stack_ply_bounds,
+    set_layer_stack_progress_coeff, set_layer_stack_progress_coeff_gikou_lite,
+    set_layer_stack_progress_kpabs_weights, set_nnue_architecture_override,
 };
 use rshogi_core::position::Position;
 use rshogi_core::search::{
@@ -938,6 +939,18 @@ impl UsiEngine {
                     }
                 }
             }
+            "NNUE_ARCHITECTURE" => match parse_nnue_architecture(&value) {
+                Some(mode) => {
+                    set_nnue_architecture_override(mode);
+                    eprintln!("info string NNUE_ARCHITECTURE: {:?}", mode);
+                }
+                None => {
+                    eprintln!(
+                        "info string Warning: invalid NNUE_ARCHITECTURE '{}', expected auto, halfkp, halfka_hm, halfka, layerstacks or layerstacks-psqt",
+                        value
+                    );
+                }
+            },
             "LS_BUCKET_MODE" => match parse_layer_stack_bucket_mode(&value) {
                 Some(mode) => {
                     set_layer_stack_bucket_mode(mode);
