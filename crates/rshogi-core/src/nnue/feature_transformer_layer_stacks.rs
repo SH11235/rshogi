@@ -10,7 +10,7 @@ use super::accumulator_layer_stacks::{
 };
 use super::bona_piece::BonaPiece;
 use super::bona_piece_halfka_hm::{halfka_index, is_hm_mirror, king_bucket, pack_bonapiece};
-use super::constants::{HALFKA_HM_DIMENSIONS, NNUE_PYTORCH_L1};
+use super::constants::{HALFKA_HM_DIMENSIONS, NNUE_PYTORCH_L1, NUM_LAYER_STACK_BUCKETS};
 use super::features::{Feature, FeatureSet, HalfKA_hm, HalfKA_hm_FeatureSet};
 use super::leb128::read_compressed_tensor_i16_all;
 use crate::position::Position;
@@ -72,6 +72,16 @@ pub struct FeatureTransformerLayerStacks {
     /// 重み [input_dimensions][L1]
     /// 64バイトアラインメントで確保
     pub weights: AlignedBox<i16>,
+
+    /// PSQT バイアス [NUM_LAYER_STACK_BUCKETS]
+    pub psqt_biases: [i32; NUM_LAYER_STACK_BUCKETS],
+
+    /// PSQT 重み [HALFKA_HM_DIMENSIONS × NUM_LAYER_STACK_BUCKETS]
+    /// レイアウト: psqt_weights[feature_idx * 9 + bucket]
+    pub psqt_weights: AlignedBox<i32>,
+
+    /// PSQT が有効か（アーキテクチャ文字列で判定）
+    pub has_psqt: bool,
 }
 
 impl FeatureTransformerLayerStacks {
@@ -96,6 +106,9 @@ impl FeatureTransformerLayerStacks {
         Ok(Self {
             biases: Aligned(biases),
             weights,
+            psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
+            psqt_weights: AlignedBox::new_zeroed(0),
+            has_psqt: false,
         })
     }
 
@@ -122,6 +135,9 @@ impl FeatureTransformerLayerStacks {
             return Ok(Self {
                 biases: Aligned(biases),
                 weights,
+                psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
+                psqt_weights: AlignedBox::new_zeroed(0),
+                has_psqt: false,
             });
         }
 
@@ -148,6 +164,9 @@ impl FeatureTransformerLayerStacks {
             return Ok(Self {
                 biases: Aligned(biases),
                 weights,
+                psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
+                psqt_weights: AlignedBox::new_zeroed(0),
+                has_psqt: false,
             });
         }
 
@@ -160,6 +179,58 @@ impl FeatureTransformerLayerStacks {
                 total_size
             ),
         ))
+    }
+
+    /// PSQT 重み/バイアスをファイルから読み込み
+    pub fn read_psqt<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
+        let mut buf4 = [0u8; 4];
+
+        // Biases: i32[NUM_LAYER_STACK_BUCKETS]
+        for bias in self.psqt_biases.iter_mut() {
+            reader.read_exact(&mut buf4)?;
+            *bias = i32::from_le_bytes(buf4);
+        }
+
+        // Weights: i32[HALFKA_HM_DIMENSIONS × NUM_LAYER_STACK_BUCKETS]
+        let weight_count = HALFKA_HM_DIMENSIONS * NUM_LAYER_STACK_BUCKETS;
+        self.psqt_weights = AlignedBox::new_zeroed(weight_count);
+        for w in self.psqt_weights.iter_mut() {
+            reader.read_exact(&mut buf4)?;
+            *w = i32::from_le_bytes(buf4);
+        }
+
+        self.has_psqt = true;
+        Ok(())
+    }
+
+    /// PSQT アキュムレータのフル計算
+    fn refresh_psqt(
+        &self,
+        active_indices: &IndexList<MAX_ACTIVE_FEATURES>,
+        psqt_acc: &mut [i32; NUM_LAYER_STACK_BUCKETS],
+    ) {
+        *psqt_acc = self.psqt_biases;
+        for index in active_indices.iter() {
+            self.add_psqt_weights(psqt_acc, index);
+        }
+    }
+
+    /// PSQT 重みを加算
+    #[inline]
+    fn add_psqt_weights(&self, psqt_acc: &mut [i32; NUM_LAYER_STACK_BUCKETS], index: usize) {
+        let offset = index * NUM_LAYER_STACK_BUCKETS;
+        for (bucket, acc) in psqt_acc.iter_mut().enumerate() {
+            *acc += self.psqt_weights[offset + bucket];
+        }
+    }
+
+    /// PSQT 重みを減算
+    #[inline]
+    fn sub_psqt_weights(&self, psqt_acc: &mut [i32; NUM_LAYER_STACK_BUCKETS], index: usize) {
+        let offset = index * NUM_LAYER_STACK_BUCKETS;
+        for (bucket, acc) in psqt_acc.iter_mut().enumerate() {
+            *acc -= self.psqt_weights[offset + bucket];
+        }
     }
 
     /// 差分計算を使わずにAccumulatorを計算
@@ -176,6 +247,11 @@ impl FeatureTransformerLayerStacks {
             append_active_indices(pos, perspective, &mut active_indices);
             for index in active_indices.iter() {
                 self.add_weights(accumulation, index);
+            }
+
+            // PSQT アキュムレータ
+            if self.has_psqt {
+                self.refresh_psqt(&active_indices, &mut acc.psqt_accumulation[p]);
             }
         }
 
@@ -204,6 +280,10 @@ impl FeatureTransformerLayerStacks {
                 append_active_indices(pos, perspective, &mut active_indices);
                 for index in active_indices.iter() {
                     self.add_weights(accumulation, index);
+                }
+
+                if self.has_psqt {
+                    self.refresh_psqt(&active_indices, &mut acc.psqt_accumulation[p]);
                 }
             } else {
                 // 差分更新
@@ -234,6 +314,17 @@ impl FeatureTransformerLayerStacks {
                         self.add_weights(curr, index);
                     }
                 }
+
+                // PSQT 差分更新
+                if self.has_psqt {
+                    acc.psqt_accumulation[p] = prev_acc.psqt_accumulation[p];
+                    for index in removed.iter() {
+                        self.sub_psqt_weights(&mut acc.psqt_accumulation[p], index);
+                    }
+                    for index in added.iter() {
+                        self.add_psqt_weights(&mut acc.psqt_accumulation[p], index);
+                    }
+                }
             }
         }
 
@@ -261,6 +352,13 @@ impl FeatureTransformerLayerStacks {
             if reset {
                 // 玉が移動した場合はキャッシュ経由で refresh
                 self.refresh_perspective_with_cache(pos, perspective, acc.get_mut(p), cache);
+
+                // PSQT はキャッシュ非対象なのでフル再計算
+                if self.has_psqt {
+                    let mut active_indices = IndexList::new();
+                    append_active_indices(pos, perspective, &mut active_indices);
+                    self.refresh_psqt(&active_indices, &mut acc.psqt_accumulation[p]);
+                }
             } else {
                 // 差分更新（キャッシュ不使用）
                 let mut removed = IndexList::new();
@@ -290,6 +388,17 @@ impl FeatureTransformerLayerStacks {
                         self.add_weights(curr, index);
                     }
                 }
+
+                // PSQT 差分更新
+                if self.has_psqt {
+                    acc.psqt_accumulation[p] = prev_acc.psqt_accumulation[p];
+                    for index in removed.iter() {
+                        self.sub_psqt_weights(&mut acc.psqt_accumulation[p], index);
+                    }
+                    for index in added.iter() {
+                        self.add_psqt_weights(&mut acc.psqt_accumulation[p], index);
+                    }
+                }
             }
         }
 
@@ -307,6 +416,13 @@ impl FeatureTransformerLayerStacks {
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
             self.refresh_perspective_with_cache(pos, perspective, acc.get_mut(p), cache);
+
+            // PSQT はキャッシュ非対象なのでフル再計算
+            if self.has_psqt {
+                let mut active_indices = IndexList::new();
+                append_active_indices(pos, perspective, &mut active_indices);
+                self.refresh_psqt(&active_indices, &mut acc.psqt_accumulation[p]);
+            }
         }
 
         acc.computed_accumulation = true;
@@ -365,12 +481,14 @@ impl FeatureTransformerLayerStacks {
             return false;
         };
 
+        // source_acc から main + psqt の両方をコピー
         let source_acc = stack.entry_at(source_idx).accumulator.clone();
         {
             let current_acc = &mut stack.current_mut().accumulator;
             for perspective in [Color::Black, Color::White] {
                 let p = perspective as usize;
                 current_acc.get_mut(p).copy_from_slice(source_acc.get(p));
+                current_acc.psqt_accumulation[p] = source_acc.psqt_accumulation[p];
             }
         }
 
@@ -407,6 +525,19 @@ impl FeatureTransformerLayerStacks {
                     }
                     for index in added.iter() {
                         self.add_weights(accumulation, index);
+                    }
+                }
+
+                // PSQT 差分更新
+                // try_apply_dirty_piece_fast は main path 専用なので、
+                // PSQT は removed/added を必ず明示的に適用する。
+                if self.has_psqt {
+                    let psqt_acc = &mut stack.current_mut().accumulator.psqt_accumulation[p];
+                    for index in removed.iter() {
+                        self.sub_psqt_weights(psqt_acc, index);
+                    }
+                    for index in added.iter() {
+                        self.add_psqt_weights(psqt_acc, index);
                     }
                 }
             }
@@ -1004,6 +1135,9 @@ mod tests {
         FeatureTransformerLayerStacks {
             biases: Aligned([0; NNUE_PYTORCH_L1]),
             weights: AlignedBox::new_zeroed(HALFKA_HM_DIMENSIONS * NNUE_PYTORCH_L1),
+            psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
+            psqt_weights: AlignedBox::new_zeroed(0),
+            has_psqt: false,
         }
     }
 

@@ -140,7 +140,13 @@ impl NetworkLayerStacks {
         let _ft_hash = u32::from_le_bytes(buf4);
 
         // Feature Transformer を読み込み（圧縮形式を自動検出）
-        let feature_transformer = FeatureTransformerLayerStacks::read_leb128(reader)?;
+        let mut feature_transformer = FeatureTransformerLayerStacks::read_leb128(reader)?;
+
+        // PSQT 読み込み（アーキテクチャ文字列に "PSQT=" が含まれる場合のみ）
+        let has_psqt = arch_str.contains("PSQT=");
+        if has_psqt {
+            feature_transformer.read_psqt(reader)?;
+        }
 
         // LayerStacks を読み込み（FC層は常に非圧縮）
         let layer_stacks = LayerStacks::read(reader)?;
@@ -246,8 +252,21 @@ impl NetworkLayerStacks {
 
         // LayerStacks で評価
         let raw_score = self.layer_stacks.evaluate_raw(bucket_index, &transformed.0);
+
+        // PSQT ショートカット (Stockfish 準拠: (stm - nstm) / 2)
+        // 各駒は両視点に逆符号で寄与するため、stm - nstm は正味の配置価値を
+        // 約2倍にカウントする。/2 はこの二重カウントを補正する正規化。
+        let psqt_value = if self.feature_transformer.has_psqt {
+            let stm = side_to_move as usize;
+            let nstm = (!side_to_move) as usize;
+            (acc.psqt_accumulation[stm][bucket_index] - acc.psqt_accumulation[nstm][bucket_index])
+                / 2
+        } else {
+            0
+        };
+
         let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
-        Value::new(raw_score / fv_scale)
+        Value::new((raw_score + psqt_value) / fv_scale)
     }
 
     /// 評価値を計算（詳細診断ログ付き）

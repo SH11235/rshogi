@@ -4,7 +4,7 @@
 //! 既存の Accumulator（256次元、HalfKP用）とは別に管理する。
 
 use super::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_PATH_LENGTH};
-use super::constants::NNUE_PYTORCH_L1;
+use super::constants::{NNUE_PYTORCH_L1, NUM_LAYER_STACK_BUCKETS};
 use crate::types::{Color, MAX_PLY, Square};
 
 /// LayerStacks用アキュムレータ（1536次元）
@@ -14,6 +14,11 @@ pub struct AccumulatorLayerStacks {
     /// 各視点の累積値 [perspective][dimension]
     /// perspective: 0 = Black, 1 = White
     pub accumulation: [[i16; NNUE_PYTORCH_L1]; 2],
+
+    /// PSQT アキュムレータ [perspective][bucket]
+    /// 各駒の PSQT 重みを視点ごとに累積する。
+    /// has_psqt == false の場合はゼロのまま使用されない。
+    pub psqt_accumulation: [[i32; NUM_LAYER_STACK_BUCKETS]; 2],
 
     /// 計算済みフラグ
     pub computed_accumulation: bool,
@@ -27,6 +32,7 @@ impl AccumulatorLayerStacks {
     pub fn new() -> Self {
         Self {
             accumulation: [[0; NNUE_PYTORCH_L1]; 2],
+            psqt_accumulation: [[0; NUM_LAYER_STACK_BUCKETS]; 2],
             computed_accumulation: false,
             computed_score: false,
         }
