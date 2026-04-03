@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use anyhow::Result;
 use chrono::Local;
 
-use crate::common::csa::{Color, Position, usi_move_to_csa};
+use rshogi_csa::{Color, Position, usi_move_to_csa};
 
 use super::config::RecordConfig;
 use super::engine::SearchInfo;
@@ -179,7 +179,7 @@ impl GameRecord {
     /// SFEN局面列を生成する（学習データ用）。
     /// 形式: `<SFEN>\t<USI指し手>\t<先手視点評価値>`
     pub fn to_sfen_lines(&self) -> Result<String> {
-        use crate::common::csa::csa_move_to_usi;
+        use rshogi_csa::csa_move_to_usi;
 
         let mut pos = self.initial_position.clone();
         let mut out = String::new();

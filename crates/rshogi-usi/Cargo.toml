@@ -2,7 +2,7 @@
 name = "rshogi-usi"
 version = "0.1.0"
 edition = "2024"
-authors = ["sh11235"]
+authors = ["SH11235"]
 description = "USI protocol implementation for rshogi engine"
 license = "GPL-3.0-only"
 repository = "https://github.com/sh11235/rshogi"

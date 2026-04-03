@@ -19,10 +19,10 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::blocking::Client;
+use rshogi_csa::parse_csa;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use tools::common::csa::parse_csa;
 use tools::common::dedup::DedupSet;
 use tools::common::floodgate as fg;
 use tools::common::io::{Writer, open_writer};

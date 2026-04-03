@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use crate::common::csa::{Color, Position, csa_move_to_usi, usi_move_to_csa};
+use rshogi_csa::{Color, Position, csa_move_to_usi, usi_move_to_csa};
 
 use super::config::CsaClientConfig;
 use super::engine::{BestMoveResult, SearchInfo, SearchOutcome, UsiEngine};

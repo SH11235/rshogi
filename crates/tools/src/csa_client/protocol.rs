@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
-use crate::common::csa::{Color, CsaMove, ParsedMove, Position, parse_csa_full};
+use rshogi_csa::{Color, CsaMove, ParsedMove, Position, parse_csa_full};
 
 use super::event::Event;
 
