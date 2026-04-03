@@ -317,6 +317,8 @@ struct UsiEngine {
     /// Some(true): 明示指定されロード成功
     /// Some(false): 明示指定されたがロード失敗
     eval_file_explicit: Option<bool>,
+    /// 最後に指定された EvalFile パス（NNUE_ARCHITECTURE 変更時の再読込用）
+    eval_file_path: Option<String>,
     /// SPSAParamsFile の明示指定パス（setoption で設定）
     spsa_params_file: Option<String>,
     /// SPSA params ファイルの読み込み済みフラグ
@@ -364,6 +366,7 @@ impl UsiEngine {
             last_position_cmd: None,
             last_go_cmd: None,
             eval_file_explicit: None,
+            eval_file_path: None,
             spsa_params_file: None,
             spsa_params_loaded: false,
             large_pages_reported: false,
@@ -479,6 +482,9 @@ impl UsiEngine {
             format_layer_stack_ply_bounds(LAYER_STACK_PLY9_DEFAULT_BOUNDS)
         );
         println!("option name LS_PROGRESS_COEFF type string default <empty>");
+        println!(
+            "option name NNUE_ARCHITECTURE type combo default auto var auto var halfkp var halfka_hm var halfka var layerstacks var layerstacks-psqt"
+        );
         // 有限パス権（Finite Pass Rights）オプション
         println!("option name PassRights type check default false");
         println!("option name InitialPassCount type spin default 2 min 0 max 10");
@@ -911,8 +917,10 @@ impl UsiEngine {
                     // 空 → 明示指定を解除し isready の自動ロードに戻す
                     clear_nnue();
                     self.eval_file_explicit = None;
+                    self.eval_file_path = None;
                 } else {
                     // パス指定: ロード試行し、結果を記録
+                    self.eval_file_path = Some(value.to_string());
                     match init_nnue(&value) {
                         Ok(()) => {
                             self.eval_file_explicit = Some(true);
@@ -942,7 +950,38 @@ impl UsiEngine {
             "NNUE_ARCHITECTURE" => match parse_nnue_architecture(&value) {
                 Some(mode) => {
                     set_nnue_architecture_override(mode);
-                    eprintln!("info string NNUE_ARCHITECTURE: {:?}", mode);
+                    // NNUE が既にロード済みなら再読込が必要
+                    if get_network().is_some() {
+                        if let Some(ref path) = self.eval_file_path {
+                            // 保存済みパスで再読込
+                            match init_nnue(path) {
+                                Ok(()) => {
+                                    self.eval_file_explicit = Some(true);
+                                    eprintln!(
+                                        "info string NNUE_ARCHITECTURE: {:?} (reloaded {})",
+                                        mode, path
+                                    );
+                                }
+                                Err(e) => {
+                                    self.eval_file_explicit = Some(false);
+                                    eprintln!(
+                                        "info string NNUE_ARCHITECTURE: {:?} (reload failed: {})",
+                                        mode, e
+                                    );
+                                }
+                            }
+                        } else {
+                            // EvalFile 未指定（自動ロード）の場合はクリアして isready に任せる
+                            clear_nnue();
+                            self.eval_file_explicit = None;
+                            eprintln!(
+                                "info string NNUE_ARCHITECTURE: {:?} (NNUE cleared, will reload on isready)",
+                                mode
+                            );
+                        }
+                    } else {
+                        eprintln!("info string NNUE_ARCHITECTURE: {:?}", mode);
+                    }
                 }
                 None => {
                     eprintln!(

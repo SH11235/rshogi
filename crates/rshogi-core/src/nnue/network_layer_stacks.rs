@@ -95,13 +95,19 @@ impl NetworkLayerStacks {
 
     /// リーダーから読み込み（PSQT は arch_str から自動検出）
     pub fn read<R: Read + Seek>(reader: &mut R) -> io::Result<Self> {
-        Self::read_with_options(reader, false)
+        Self::read_with_options(reader, None)
     }
 
-    /// リーダーから読み込み（PSQT 強制オプション付き）
+    /// リーダーから読み込み（PSQT オーバーライドオプション付き）
     ///
-    /// `force_psqt`: true の場合、arch_str に "PSQT=" がなくても PSQT ブロックを読む
-    pub fn read_with_options<R: Read + Seek>(reader: &mut R, force_psqt: bool) -> io::Result<Self> {
+    /// `psqt_override`:
+    /// - `None`: arch_str から自動検出（デフォルト）
+    /// - `Some(true)`: arch_str を無視して PSQT ブロックを読む
+    /// - `Some(false)`: arch_str を無視して PSQT ブロックを読まない
+    pub fn read_with_options<R: Read + Seek>(
+        reader: &mut R,
+        psqt_override: Option<bool>,
+    ) -> io::Result<Self> {
         let mut buf4 = [0u8; 4];
 
         // version（呼び出し元で検証済み）
@@ -150,9 +156,10 @@ impl NetworkLayerStacks {
         let mut feature_transformer = FeatureTransformerLayerStacks::read_leb128(reader)?;
 
         // PSQT 読み込み:
-        // - force_psqt == true: USI オプションで明示指定（arch_str を無視）
-        // - arch_str に "PSQT=" が含まれる: 自動検出
-        let has_psqt = force_psqt || arch_str.contains("PSQT=");
+        // - psqt_override == Some(true): USI オプションで PSQT 強制 ON（arch_str を無視）
+        // - psqt_override == Some(false): USI オプションで PSQT 強制 OFF（arch_str を無視）
+        // - psqt_override == None: arch_str から自動検出
+        let has_psqt = psqt_override.unwrap_or_else(|| arch_str.contains("PSQT="));
         if has_psqt {
             feature_transformer.read_psqt(reader)?;
         }

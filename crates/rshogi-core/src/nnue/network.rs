@@ -576,12 +576,20 @@ impl NNUENetwork {
                     | NNUEArchitectureOverride::LayerStacksPSQT => FeatureSet::LayerStacks,
                 };
 
-                let force_psqt = arch_override == NNUEArchitectureOverride::LayerStacksPSQT;
+                // PSQT オーバーライド:
+                // LayerStacks → Some(false) (PSQT 強制 OFF)
+                // LayerStacksPSQT → Some(true) (PSQT 強制 ON)
+                // Auto → None (arch_str から自動検出)
+                let psqt_override = match arch_override {
+                    NNUEArchitectureOverride::LayerStacks => Some(false),
+                    NNUEArchitectureOverride::LayerStacksPSQT => Some(true),
+                    _ => None,
+                };
 
                 // LayerStacks は特殊処理（FT が LEB128 圧縮のためファイルサイズ検出の対象外）
                 if effective_feature_set == FeatureSet::LayerStacks {
                     reader.seek(SeekFrom::Start(0))?;
-                    let network = NetworkLayerStacks::read_with_options(reader, force_psqt)?;
+                    let network = NetworkLayerStacks::read_with_options(reader, psqt_override)?;
                     return Ok(Self::LayerStacks(Box::new(network)));
                 }
 
