@@ -950,22 +950,35 @@ impl UsiEngine {
             "NNUE_ARCHITECTURE" => match parse_nnue_architecture(&value) {
                 Some(mode) => {
                     set_nnue_architecture_override(mode);
-                    // EvalFile が指定済みなら再読込を試行
-                    // (ロード失敗済みの場合も、arch override 変更で成功する可能性がある)
+                    // EvalFile が指定済みなら、現在ロード済みか失敗済みかに関係なく再試行する。
+                    // arch_str 不整合が原因でロード失敗していた場合、architecture override
+                    // 変更後の再試行で成功する可能性がある。再試行しても失敗した場合は
+                    // Some(false) のまま維持され、isready の panic 安全策は保持される。
                     if let Some(ref path) = self.eval_file_path {
+                        let was_loaded = get_network().is_some();
                         match init_nnue(path) {
                             Ok(()) => {
                                 self.eval_file_explicit = Some(true);
+                                let action = if was_loaded {
+                                    "reloaded"
+                                } else {
+                                    "retried and loaded"
+                                };
                                 eprintln!(
-                                    "info string NNUE_ARCHITECTURE: {} (reloaded {})",
-                                    value, path
+                                    "info string NNUE_ARCHITECTURE: {} ({} {})",
+                                    value, action, path
                                 );
                             }
                             Err(e) => {
                                 self.eval_file_explicit = Some(false);
+                                let action = if was_loaded {
+                                    "reload failed"
+                                } else {
+                                    "retry failed"
+                                };
                                 eprintln!(
-                                    "info string NNUE_ARCHITECTURE: {} (reload failed: {})",
-                                    value, e
+                                    "info string NNUE_ARCHITECTURE: {} ({}: {})",
+                                    value, action, e
                                 );
                             }
                         }
