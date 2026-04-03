@@ -298,6 +298,8 @@ pub(super) struct Step14Context<'a> {
     pub(super) alpha: Value,
     pub(super) best_move: Move,           // !bestMove 判定用
     pub(super) pawn_history_index: usize, // pawnHistory用インデックス
+    pub(super) follow_pv: bool,           // PV ライン追跡中か
+    pub(super) pv_node: bool,             // PV ノードか
 }
 
 // =============================================================================
@@ -2568,6 +2570,8 @@ impl SearchWorker {
                 alpha,
                 best_move,
                 pawn_history_index: pos.pawn_history_index(),
+                follow_pv: st.stack[ply as usize].follow_pv,
+                pv_node,
             };
 
             match step14_pruning(ctx, step14_ctx) {

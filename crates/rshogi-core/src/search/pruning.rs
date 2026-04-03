@@ -116,8 +116,8 @@ pub(super) fn step14_pruning(
                     return Step14Outcome::Skip { best_value: None };
                 }
             }
-        } else {
-            // Quiet moves
+        } else if !step_ctx.follow_pv || !step_ctx.pv_node {
+            // Quiet moves — PV ライン上の PV ノードでは pruning をスキップ（Stockfish 準拠）
             let moved_piece = step_ctx.mv.moved_piece_after();
             let to_sq = step_ctx.mv.to();
             let cont_hist_0 = step_ctx.cont_history_1.get(moved_piece, to_sq) as i32;
