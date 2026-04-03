@@ -83,7 +83,7 @@ static NNUE_ARCHITECTURE_OVERRIDE: AtomicI32 =
     AtomicI32::new(NNUEArchitectureOverride::Auto as i32);
 
 /// NNUE アーキテクチャの明示指定を取得
-pub fn get_nnue_architecture_override() -> NNUEArchitectureOverride {
+pub(crate) fn get_nnue_architecture_override() -> NNUEArchitectureOverride {
     match NNUE_ARCHITECTURE_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed) {
         1 => NNUEArchitectureOverride::HalfKP,
         2 => NNUEArchitectureOverride::HalfKA_hm,
@@ -594,14 +594,10 @@ impl NNUENetwork {
                 }
 
                 // 4. ファイルサイズからアーキテクチャを検出
-                let feature_set_hint = match arch_override {
-                    NNUEArchitectureOverride::Auto => Some(effective_feature_set),
-                    _ => Some(effective_feature_set),
-                };
                 let detection = super::spec::detect_architecture_from_size(
                     file_size,
                     arch_len,
-                    feature_set_hint,
+                    Some(effective_feature_set),
                 )
                 .ok_or_else(|| {
                     // 検出失敗時は候補を表示
@@ -2446,6 +2442,30 @@ mod tests {
             Some(LayerStackBucketMode::KingRank9)
         );
         assert_eq!(parse_layer_stack_bucket_mode("unknown"), None);
+    }
+
+    #[test]
+    fn test_parse_nnue_architecture() {
+        assert_eq!(parse_nnue_architecture("auto"), Some(NNUEArchitectureOverride::Auto));
+        assert_eq!(parse_nnue_architecture("AUTO"), Some(NNUEArchitectureOverride::Auto));
+        assert_eq!(parse_nnue_architecture("Auto"), Some(NNUEArchitectureOverride::Auto));
+        assert_eq!(parse_nnue_architecture("halfkp"), Some(NNUEArchitectureOverride::HalfKP));
+        assert_eq!(parse_nnue_architecture("halfka_hm"), Some(NNUEArchitectureOverride::HalfKA_hm));
+        assert_eq!(parse_nnue_architecture("halfka"), Some(NNUEArchitectureOverride::HalfKA));
+        assert_eq!(
+            parse_nnue_architecture("layerstacks"),
+            Some(NNUEArchitectureOverride::LayerStacks)
+        );
+        assert_eq!(
+            parse_nnue_architecture("layerstacks-psqt"),
+            Some(NNUEArchitectureOverride::LayerStacksPSQT)
+        );
+        assert_eq!(
+            parse_nnue_architecture("layerstacks_psqt"),
+            Some(NNUEArchitectureOverride::LayerStacksPSQT)
+        );
+        assert_eq!(parse_nnue_architecture("unknown"), None);
+        assert_eq!(parse_nnue_architecture(""), None);
     }
 
     #[test]

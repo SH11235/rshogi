@@ -958,15 +958,15 @@ impl UsiEngine {
                                 Ok(()) => {
                                     self.eval_file_explicit = Some(true);
                                     eprintln!(
-                                        "info string NNUE_ARCHITECTURE: {:?} (reloaded {})",
-                                        mode, path
+                                        "info string NNUE_ARCHITECTURE: {} (reloaded {})",
+                                        value, path
                                     );
                                 }
                                 Err(e) => {
                                     self.eval_file_explicit = Some(false);
                                     eprintln!(
-                                        "info string NNUE_ARCHITECTURE: {:?} (reload failed: {})",
-                                        mode, e
+                                        "info string NNUE_ARCHITECTURE: {} (reload failed: {})",
+                                        value, e
                                     );
                                 }
                             }
@@ -975,12 +975,12 @@ impl UsiEngine {
                             clear_nnue();
                             self.eval_file_explicit = None;
                             eprintln!(
-                                "info string NNUE_ARCHITECTURE: {:?} (NNUE cleared, will reload on isready)",
-                                mode
+                                "info string NNUE_ARCHITECTURE: {} (NNUE cleared, will reload on isready)",
+                                value
                             );
                         }
                     } else {
-                        eprintln!("info string NNUE_ARCHITECTURE: {:?}", mode);
+                        eprintln!("info string NNUE_ARCHITECTURE: {}", value);
                     }
                 }
                 None => {
