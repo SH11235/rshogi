@@ -117,7 +117,9 @@ pub(super) fn step14_pruning(
                 }
             }
         } else if !step_ctx.follow_pv || !step_ctx.pv_node {
-            // Quiet moves — PV ライン上の PV ノードでは pruning をスキップ（Stockfish 準拠）
+            // Quiet moves — followPV かつ PV ノードの場合は pruning をスキップ（Stockfish 準拠）
+            // ※ スキップ時は continuation history pruning / futility pruning / SEE pruning の
+            //    全 3 チェックを通過する
             let moved_piece = step_ctx.mv.moved_piece_after();
             let to_sq = step_ctx.mv.to();
             let cont_hist_0 = step_ctx.cont_history_1.get(moved_piece, to_sq) as i32;

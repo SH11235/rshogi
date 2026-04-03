@@ -2570,6 +2570,7 @@ impl SearchWorker {
                 alpha,
                 best_move,
                 pawn_history_index: pos.pawn_history_index(),
+                // SE 前に取得（SE の再帰 search_node が同一 ply の stack を上書きするため）
                 follow_pv: st.stack[ply as usize].follow_pv,
                 pv_node,
             };
