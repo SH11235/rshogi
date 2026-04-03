@@ -342,6 +342,13 @@ impl NetworkLayerStacks {
                 info!("[NNUE Eval] bucket_mode=progress8gikou, bucket_index={bucket}");
                 bucket
             }
+            LayerStackBucketMode::Progress8KPAbs => {
+                let weights = get_layer_stack_progress_kpabs_weights();
+                let bucket =
+                    compute_layer_stack_progress8kpabs_bucket_index(pos, side_to_move, weights);
+                info!("[NNUE Eval] bucket_mode=progress8kpabs, bucket_index={bucket}");
+                bucket
+            }
         };
 
         // LayerStacks で評価（詳細ログ付き）
