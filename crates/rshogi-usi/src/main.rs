@@ -421,7 +421,8 @@ impl UsiEngine {
                 self.cmd_display();
             }
             "eval" => {
-                self.cmd_eval();
+                let diagnostics = tokens.get(1).is_some_and(|s| *s == "diag");
+                self.cmd_eval(diagnostics);
             }
             _ => {
                 // 未知のコマンドは無視
@@ -1467,7 +1468,9 @@ impl UsiEngine {
     }
 
     /// evalコマンド: 現在の局面の静的評価値を表示（デバッグ用）
-    fn cmd_eval(&self) {
+    ///
+    /// `eval diag` で diagnostics 付き評価（PSQT 含む中間値をログ出力）
+    fn cmd_eval(&self, diagnostics: bool) {
         let Some(network) = get_network() else {
             println!("info string Error: No NNUE network loaded");
             return;
@@ -1476,10 +1479,29 @@ impl UsiEngine {
         // アーキテクチャに応じたアキュムレータスタックを作成
         let mut stack = AccumulatorStackVariant::from_network(&network);
 
-        // 評価値を計算
-        let value = evaluate_dispatch(&self.position, &mut stack, &mut None);
-
-        println!("info string Static eval: {}", value.raw());
+        if diagnostics {
+            #[cfg(feature = "diagnostics")]
+            {
+                use rshogi_core::nnue::NNUENetwork;
+                // diagnostics モード: LayerStacks のみ対応
+                if let NNUENetwork::LayerStacks(ref net) = *network {
+                    // アキュムレータをフル計算
+                    let mut acc = rshogi_core::nnue::AccumulatorLayerStacks::new();
+                    net.refresh_accumulator(&self.position, &mut acc);
+                    let value = net.evaluate_with_diagnostics(&self.position, &acc);
+                    println!("info string Static eval (diagnostics): {}", value.raw());
+                } else {
+                    println!("info string Error: diagnostics is only supported for LayerStacks");
+                }
+            }
+            #[cfg(not(feature = "diagnostics"))]
+            {
+                println!("info string Error: build with --features diagnostics to use 'eval diag'");
+            }
+        } else {
+            let value = evaluate_dispatch(&self.position, &mut stack, &mut None);
+            println!("info string Static eval: {}", value.raw());
+        }
         println!("info string SFEN: {}", self.position.to_sfen());
     }
 }

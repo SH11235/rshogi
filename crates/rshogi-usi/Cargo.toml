@@ -33,6 +33,8 @@ nnue-stats = ["rshogi-core/nnue-stats"]
 tt-trace = ["rshogi-core/tt-trace"]
 # LayerStack 専用ビルド（大会向け production 用）
 layerstack-only = ["rshogi-core/layerstack-only"]
+# NNUE 詳細診断ログ（Golden Forward テスト用）
+diagnostics = ["rshogi-core/diagnostics"]
 
 [[bin]]
 name = "rshogi-usi"

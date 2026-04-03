@@ -140,7 +140,12 @@ impl NetworkLayerStacks {
         let _ft_hash = u32::from_le_bytes(buf4);
 
         // Feature Transformer を読み込み（圧縮形式を自動検出）
-        let feature_transformer = FeatureTransformerLayerStacks::read_leb128(reader)?;
+        let mut feature_transformer = FeatureTransformerLayerStacks::read_leb128(reader)?;
+
+        // PSQT 読み込み（アーキテクチャ文字列に "PSQT=" が含まれる場合のみ）
+        if arch_str.contains("PSQT=") {
+            feature_transformer.read_psqt(reader)?;
+        }
 
         // LayerStacks を読み込み（FC層は常に非圧縮）
         let layer_stacks = LayerStacks::read(reader)?;
@@ -246,8 +251,21 @@ impl NetworkLayerStacks {
 
         // LayerStacks で評価
         let raw_score = self.layer_stacks.evaluate_raw(bucket_index, &transformed.0);
+
+        // PSQT ショートカット (Stockfish 準拠: (stm - nstm) / 2)
+        // 各駒は両視点に逆符号で寄与するため、stm - nstm は正味の配置価値を
+        // 約2倍にカウントする。/2 はこの二重カウントを補正する正規化。
+        let psqt_value = if self.feature_transformer.has_psqt {
+            let stm = side_to_move as usize;
+            let nstm = (!side_to_move) as usize;
+            (acc.psqt_accumulation[stm][bucket_index] - acc.psqt_accumulation[nstm][bucket_index])
+                / 2
+        } else {
+            0
+        };
+
         let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
-        Value::new(raw_score / fv_scale)
+        Value::new(raw_score.saturating_add(psqt_value) / fv_scale)
     }
 
     /// 評価値を計算（詳細診断ログ付き）
@@ -288,42 +306,12 @@ impl NetworkLayerStacks {
         info!("[NNUE Eval] transformed: nonzero={transformed_nonzero}/1536, sum={transformed_sum}");
         info!("[NNUE Eval] transformed first 32: {:?}", &transformed.0[0..32]);
 
-        // バケットインデックスを計算
-        let bucket_index = match get_layer_stack_bucket_mode() {
-            LayerStackBucketMode::KingRank9 => {
-                let f_king = pos.king_square(side_to_move);
-                let e_king = pos.king_square(!side_to_move);
-                let (f_rank, e_rank) =
-                    crate::nnue::layer_stacks::compute_king_ranks(side_to_move, f_king, e_king);
-                let bucket = compute_bucket_index(f_rank, e_rank);
-                info!(
-                    "[NNUE Eval] bucket_mode=kingrank9, f_king_rank={f_rank}, e_king_rank={e_rank}, bucket_index={bucket}"
-                );
-                bucket
-            }
-            LayerStackBucketMode::Ply9 => {
-                let bounds = get_layer_stack_ply_bounds();
-                let game_ply = pos.game_ply();
-                let bucket = compute_layer_stack_ply9_bucket_index(game_ply, bounds);
-                info!(
-                    "[NNUE Eval] bucket_mode=ply9, game_ply={game_ply}, ply_bounds={bounds:?}, bucket_index={bucket}"
-                );
-                bucket
-            }
-            LayerStackBucketMode::Progress8 => {
-                let coeff = get_layer_stack_progress_coeff();
-                let bucket = compute_layer_stack_progress8_bucket_index(pos, side_to_move, coeff);
-                info!("[NNUE Eval] bucket_mode=progress8, bucket_index={bucket}");
-                bucket
-            }
-            LayerStackBucketMode::Progress8Gikou => {
-                let coeff = get_layer_stack_progress_coeff_gikou_lite();
-                let bucket =
-                    compute_layer_stack_progress8gikou_bucket_index(pos, side_to_move, coeff);
-                info!("[NNUE Eval] bucket_mode=progress8gikou, bucket_index={bucket}");
-                bucket
-            }
-        };
+        // バケットインデックスを計算（通常パスと同じ共通関数を使用）
+        let bucket_index = compute_layer_stacks_bucket_index(pos, side_to_move);
+        info!(
+            "[NNUE Eval] bucket_mode={:?}, bucket_index={bucket_index}",
+            get_layer_stack_bucket_mode()
+        );
 
         // LayerStacks で評価（詳細ログ付き）
         let (raw_score, l1_out, l1_skip) =
@@ -333,11 +321,36 @@ impl NetworkLayerStacks {
         info!("[NNUE Eval] l1_skip: {l1_skip}");
         info!("[NNUE Eval] raw_score (with skip): {raw_score}");
 
+        // PSQT ショートカット
+        let psqt_value = if self.feature_transformer.has_psqt {
+            let stm = side_to_move as usize;
+            let nstm = (!side_to_move) as usize;
+            let v = (acc.psqt_accumulation[stm][bucket_index]
+                - acc.psqt_accumulation[nstm][bucket_index])
+                / 2;
+            info!(
+                "[NNUE Eval] psqt_acc[stm][{bucket_index}]: {}",
+                acc.psqt_accumulation[stm][bucket_index]
+            );
+            info!(
+                "[NNUE Eval] psqt_acc[nstm][{bucket_index}]: {}",
+                acc.psqt_accumulation[nstm][bucket_index]
+            );
+            info!("[NNUE Eval] psqt_value: {v}");
+            v
+        } else {
+            info!("[NNUE Eval] PSQT: disabled");
+            0
+        };
+
         let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
-        let score = raw_score / fv_scale;
-        let score_float = raw_score as f64 / fv_scale as f64;
+        let combined = raw_score.saturating_add(psqt_value);
+        let score = combined / fv_scale;
+        let score_float = combined as f64 / fv_scale as f64;
         info!("[NNUE Eval] fv_scale: {fv_scale}");
-        info!("[NNUE Eval] score: {score} (float: {score_float:.4})");
+        info!(
+            "[NNUE Eval] score: {score} (raw_score={raw_score} + psqt={psqt_value} = {combined}, float: {score_float:.4})"
+        );
 
         Value::new(score)
     }
