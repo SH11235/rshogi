@@ -76,13 +76,13 @@ threat_index =
 
 ```
 raw = file * 9 + rank
-file: 0=9筋, 1=8筋, ..., 8=1筋
+file: 0=1筋, 1=2筋, ..., 8=9筋  (File1=0, File9=8)
 rank: 0=1段, 1=2段, ..., 8=9段
 
 例:
-  raw  0 = 9一 (file=0, rank=0)
-  raw 40 = 5五 (file=4, rank=4)
-  raw 80 = 1九 (file=8, rank=8)
+  raw  0 = 1一 (file=0, rank=0)  = SQ_11
+  raw 40 = 5五 (file=4, rank=4)  = SQ_55
+  raw 80 = 9九 (file=8, rank=8)  = SQ_99
 ```
 
 rshogi の `Square::raw()` と bullet-shogi の `ShogiBoard` 座標系で一致すること。
@@ -142,15 +142,17 @@ pair_base[i] = 前の pair までの累積和。
 
 ### from_offset テーブル
 
-`from_offset[attacker_class][sq]` = sq=0 から sq-1 までの各マスの攻撃数の累積和。
+`from_offset[attack_pattern][sq]` = sq=0 から sq-1 までの各マスの攻撃数の累積和。
 
-空盤面上で、先手基準の攻撃利きを数える。
-方向は PieceType ごとの standard effect で、盤端で制限される。
+`attack_pattern` は `attack_pattern_id(attacker_class, oriented_color)` で決定する
+（方向性駒は色別、非方向性駒は色不問。index 式の先頭定義を参照）。
+
+空盤面上の攻撃利きを数える。方向性駒は `oriented_color` に応じた方向で計算する。
 
 ### attack_order テーブル
 
-`attack_order[attacker_class][from_sq][to_sq]` = 
-空盤面上で from_sq の attacker_class 駒が to_sq を攻撃するときの、
+`attack_order[attack_pattern][from_sq][to_sq]` = 
+空盤面上で from_sq の attacker_class 駒（oriented_color 方向）が to_sq を攻撃するときの、
 その pair 内でのローカル index。
 
 **順序**: from_sq の駒が攻撃できる全マスを Square raw 値の昇順で列挙し、
