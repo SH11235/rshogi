@@ -51,6 +51,19 @@ pub enum ThreatClass {
     Dragon = 8,
 }
 
+/// 全 ThreatClass を index 順に列挙した配列
+const ALL_THREAT_CLASSES: [ThreatClass; NUM_THREAT_CLASSES] = [
+    ThreatClass::Pawn,
+    ThreatClass::Lance,
+    ThreatClass::Knight,
+    ThreatClass::Silver,
+    ThreatClass::GoldLike,
+    ThreatClass::Bishop,
+    ThreatClass::Rook,
+    ThreatClass::Horse,
+    ThreatClass::Dragon,
+];
+
 impl ThreatClass {
     /// PieceType から ThreatClass への変換。King は None。
     #[inline]
@@ -190,7 +203,7 @@ fn compute_from_offset_colored(class: ThreatClass, color: Color) -> [usize; 81] 
     let mut cumulative = 0usize;
     for sq_raw in 0..81u8 {
         offsets[sq_raw as usize] = cumulative;
-        let sq = unsafe { Square::from_u8_unchecked(sq_raw) };
+        let sq = Square::from_u8(sq_raw).expect("sq_raw is in 0..81");
         cumulative += attacks_bb_colored(class, color, sq).count() as usize;
     }
     offsets
@@ -218,8 +231,7 @@ struct FromOffsetTable {
 impl FromOffsetTable {
     fn new() -> Self {
         let mut data = [[0usize; 81]; NUM_ATTACK_PATTERNS];
-        for class_id in 0..NUM_THREAT_CLASSES {
-            let class = unsafe { std::mem::transmute::<u8, ThreatClass>(class_id as u8) };
+        for (class_id, &class) in ALL_THREAT_CLASSES.iter().enumerate() {
             // Black (先手) の from_offset
             data[class_id] = compute_from_offset_colored(class, Color::Black);
             // White (後手) の方向性駒は別エントリ
@@ -461,7 +473,7 @@ mod tests {
         assert_eq!(offsets[2], 1); // sq=1 has 1 attack, cumulative=1
         // Total: 72
         let total: usize = (0..81u8)
-            .map(|sq| attacks_count(ThreatClass::Pawn, unsafe { Square::from_u8_unchecked(sq) }))
+            .map(|sq| attacks_count(ThreatClass::Pawn, Square::from_u8(sq).unwrap()))
             .sum();
         assert_eq!(total, 72);
     }
@@ -474,7 +486,7 @@ mod tests {
             assert_eq!(ofs, 16 * sq);
         }
         let total: usize = (0..81u8)
-            .map(|sq| attacks_count(ThreatClass::Rook, unsafe { Square::from_u8_unchecked(sq) }))
+            .map(|sq| attacks_count(ThreatClass::Rook, Square::from_u8(sq).unwrap()))
             .sum();
         assert_eq!(total, 1296);
     }
@@ -482,10 +494,9 @@ mod tests {
     #[test]
     fn test_attacks_per_color_totals() {
         for (class_id, &expected) in ATTACKS_PER_COLOR.iter().enumerate() {
-            let class = unsafe { std::mem::transmute::<u8, ThreatClass>(class_id as u8) };
-            let total: usize = (0..81u8)
-                .map(|sq| attacks_count(class, unsafe { Square::from_u8_unchecked(sq) }))
-                .sum();
+            let class = ALL_THREAT_CLASSES[class_id];
+            let total: usize =
+                (0..81u8).map(|sq| attacks_count(class, Square::from_u8(sq).unwrap())).sum();
             assert_eq!(
                 total, expected,
                 "ThreatClass {:?}: expected {expected}, got {total}",
@@ -494,10 +505,59 @@ mod tests {
         }
     }
 
+    /// White 方向性駒の from_offset が Black と異なることを検証
+    #[test]
+    fn test_white_directional_lut_differs_from_black() {
+        for class in &ALL_THREAT_CLASSES {
+            if !is_directional(*class) {
+                // 非方向性駒は色不問で同一
+                let b = compute_from_offset_colored(*class, Color::Black);
+                let w = compute_from_offset_colored(*class, Color::White);
+                assert_eq!(b, w, "{class:?} is non-directional but offsets differ");
+                continue;
+            }
+            let b = compute_from_offset_colored(*class, Color::Black);
+            let w = compute_from_offset_colored(*class, Color::White);
+            assert_ne!(b, w, "{class:?} is directional but Black == White offsets");
+
+            // 合計攻撃数は同じ（対称性）
+            let total_b: usize = (0..81u8)
+                .map(|sq| {
+                    attacks_bb_colored(*class, Color::Black, Square::from_u8(sq).unwrap()).count()
+                        as usize
+                })
+                .sum();
+            let total_w: usize = (0..81u8)
+                .map(|sq| {
+                    attacks_bb_colored(*class, Color::White, Square::from_u8(sq).unwrap()).count()
+                        as usize
+                })
+                .sum();
+            assert_eq!(
+                total_b, total_w,
+                "{class:?}: Black total {total_b} != White total {total_w}"
+            );
+        }
+    }
+
+    /// White Pawn の from_offset 固定値テスト
+    #[test]
+    fn test_from_offset_white_pawn() {
+        let offsets = compute_from_offset_colored(ThreatClass::Pawn, Color::White);
+        // White Pawn: rank=8 → 0 attacks, rank<8 → 1 attack（後手歩は rank 増加方向）
+        // sq=0 (file=0, rank=0): attacks=1 (rank 0→1 に攻撃)
+        // sq=8 (file=0, rank=8): attacks=0 (最奥段)
+        assert_eq!(offsets[0], 0);
+        assert_eq!(offsets[1], 1); // sq=0 has 1 attack
+        assert_eq!(offsets[8], 8); // sq=0..7 で 8 attacks 累積 (各 rank 0..7 が 1 attack)
+        // sq=8 (rank=8) has 0 attacks
+        assert_eq!(offsets[9], 8); // sq=8 は 0 attack なので累積変わらず
+    }
+
     #[test]
     fn test_attack_order_rook_center() {
         // Rook at sq=40 (5五): 攻撃先を raw 昇順で列挙
-        let sq = unsafe { Square::from_u8_unchecked(40) };
+        let sq = Square::from_u8(40).unwrap();
         let bb = attacks_bb(ThreatClass::Rook, sq);
         assert_eq!(bb.count(), 16);
 
@@ -513,20 +573,17 @@ mod tests {
         let from_offset_table = FromOffsetTable::new();
         // 全クラスの全マスの全攻撃先について index が範囲内であることを確認
         // 先手基準 (oriented_color=Black) と後手基準 (oriented_color=White) の両方をテスト
-        for class_id in 0..NUM_THREAT_CLASSES {
-            let class = unsafe { std::mem::transmute::<u8, ThreatClass>(class_id as u8) };
+        for &class in &ALL_THREAT_CLASSES {
             for &oriented_color in &[Color::Black, Color::White] {
                 for sq_raw in 0..81u8 {
-                    let sq = unsafe { Square::from_u8_unchecked(sq_raw) };
+                    let sq = Square::from_u8(sq_raw).unwrap();
                     let bb = attacks_bb_colored(class, oriented_color, sq);
                     let mut iter = bb;
                     while !iter.is_empty() {
                         let to = iter.pop();
                         for as_ in 0..2 {
                             for ds in 0..2 {
-                                for dc in 0..NUM_THREAT_CLASSES {
-                                    let dc_class =
-                                        unsafe { std::mem::transmute::<u8, ThreatClass>(dc as u8) };
+                                for &dc_class in &ALL_THREAT_CLASSES {
                                     let idx = threat_index(
                                         as_,
                                         class,
