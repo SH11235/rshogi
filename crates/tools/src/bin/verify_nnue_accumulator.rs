@@ -1,15 +1,17 @@
-//! Golden Forward テスト: Threat モデルの refresh vs update 一致検証
+//! NNUE accumulator 検証ツール (refresh vs differential update 一致テスト)
 //!
-//! Threat 付き quantised.bin を読み込み、複数局面で:
+//! quantised.bin を読み込み、startpos から手を進めながら:
 //! 1. move 前の局面で refresh → accumulator を保存
 //! 2. do_move + update (differential) → evaluate
 //! 3. do_move 後に refresh → evaluate
 //! 4. (2) と (3) の評価値が完全一致することを検証
 //!
+//! PSQT / Threat / PSQT+Threat / 素の LayerStacks 全てに対応。
+//!
 //! ```bash
-//! cargo run --release --bin golden_forward_threat -- \
-//!   --nnue-file /tmp/threat_golden_test/threat-golden-2/quantised.bin \
-//!   --ls-progress-coeff /path/to/nodchip_progress_e1_f1_cuda.bin
+//! cargo run --release --bin verify_nnue_accumulator -- \
+//!   --nnue-file path/to/quantised.bin \
+//!   --ls-progress-coeff path/to/nodchip_progress_e1_f1_cuda.bin
 //! ```
 
 use anyhow::{Context, Result};
@@ -18,14 +20,16 @@ use std::path::PathBuf;
 
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::nnue::{
-    AccumulatorLayerStacks, LayerStackBucketMode, NNUENetwork,
-    SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, set_layer_stack_bucket_mode,
-    set_layer_stack_progress_kpabs_weights,
+    AccumulatorLayerStacks, LayerStackBucketMode, NNUENetwork, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
+    set_layer_stack_bucket_mode, set_layer_stack_progress_kpabs_weights,
 };
 use rshogi_core::position::Position;
 
 #[derive(Parser, Debug)]
-#[command(name = "golden_forward_threat", about = "Threat モデル Golden Forward テスト")]
+#[command(
+    name = "verify_nnue_accumulator",
+    about = "NNUE accumulator 検証 (refresh vs differential update 一致テスト)"
+)]
 struct Cli {
     #[arg(long)]
     nnue_file: PathBuf,
@@ -69,9 +73,7 @@ fn main() -> Result<()> {
     println!("Model loaded successfully.");
 
     // テスト SFEN
-    let sfens = [
-        "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
-    ];
+    let sfens = ["lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1"];
 
     let mut total_tests = 0;
     let mut fail = 0;
