@@ -119,6 +119,10 @@ struct Cli {
     #[arg(long, default_value_t = 0)]
     binc: u64,
 
+    /// ノード数制限。指定時は時間制御の代わりに `go nodes N` を使用する。
+    #[arg(long)]
+    nodes: Option<u64>,
+
     /// 1局あたり最大手数
     #[arg(long, default_value_t = 320)]
     max_moves: u32,
@@ -1109,9 +1113,12 @@ fn main() -> Result<()> {
         timeout_margin_ms: cli.timeout_margin_ms,
         pass_rights: None,
         go_depth: None,
-        go_nodes: None,
+        go_nodes: cli.nodes,
     };
-    let tc = if let Some(btime) = cli.btime {
+    let tc = if cli.nodes.is_some() {
+        // ノード数指定時は時間制御不要だが、タイムアウト検出用に十分大きな値を設定
+        TimeControl::new(0, 0, 0, 0, 0)
+    } else if let Some(btime) = cli.btime {
         TimeControl::new(btime, btime, cli.binc, cli.binc, 0)
     } else {
         TimeControl::new(0, 0, 0, 0, cli.byoyomi)
