@@ -583,4 +583,37 @@ mod tests {
             assert!(idx < THREAT2A_DIMENSIONS);
         }
     }
+
+    /// Canonical test vector: 初期局面の sorted threat index を固定値と比較
+    /// bullet-shogi 側のテストと一致することを確認するためのテスト
+    #[test]
+    fn test_canonical_startpos_threat_indices() {
+        let mut pos = Position::new();
+        pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
+            .expect("Failed to parse startpos");
+
+        let king_sq_b = pos.king_square(Color::Black);
+        let mut indices_b = Vec::new();
+        append_active_threat_indices(&pos, Color::Black, king_sq_b, &mut indices_b);
+        indices_b.sort();
+
+        let king_sq_w = pos.king_square(Color::White);
+        let mut indices_w = Vec::new();
+        append_active_threat_indices(&pos, Color::White, king_sq_w, &mut indices_w);
+        indices_w.sort();
+
+        // Canonical test vector: この値は bullet-shogi と一致すること
+        // 変更がある場合は両方のリポジトリで同時に更新すること
+        #[rustfmt::skip]
+        let expected: &[usize] = &[
+            1330, 1618, 7147, 7148, 7231, 7232, 11047, 11213,
+            16475, 16578, 23268, 23270, 24087, 25717, 37487, 40080,
+            43974, 112573, 112861, 116503, 116504, 116587, 116588,
+            122160, 122650, 128533, 128636, 138321, 138323, 139136,
+            140770, 158280, 160871, 164753,
+        ];
+
+        assert_eq!(indices_b, expected, "Black perspective canonical mismatch");
+        assert_eq!(indices_w, expected, "White perspective canonical mismatch (symmetric pos)");
+    }
 }
