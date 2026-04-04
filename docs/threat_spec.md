@@ -1,4 +1,4 @@
-# Threat 2a 仕様固定メモ
+# Threat 仕様固定メモ
 
 bullet-shogi と rshogi で共有する定数・index 構造の確定版。
 実装前にこのメモの内容を両リポジトリで完全一致させること。
@@ -37,7 +37,7 @@ bullet-shogi と rshogi で共有する定数・index 構造の確定版。
 | 8 | Dragon | 1552 |
 | **合計** | | **6020** |
 
-## THREAT2A_DIMENSIONS
+## THREAT_DIMENSIONS
 
 ```
 2(attacker_side) × 9(attacker_class) × 2(attacked_side) × 9(attacked_class) × attacks_per_color[ac]
@@ -121,7 +121,7 @@ Stockfish はこの問題を **色別の attack LUT** で解決している:
 - 方向性駒: Pawn, Lance, Knight, Silver, GoldLike — 色別 LUT (5 × 2 = 10 エントリ)
 - 合計: 14 attack pattern エントリ（LUT サイズ増加は数 KiB で無視できる）
 
-**THREAT2A_DIMENSIONS は変わらない**（index 空間は同じ、LUT の引き方だけが変わる）。
+**THREAT_DIMENSIONS は変わらない**（index 空間は同じ、LUT の引き方だけが変わる）。
 
 **重要**:
 - from_sq と to_sq の両方に同じ perspective 変換を適用する（相対位置が保存される）
@@ -171,7 +171,7 @@ pair_base[i] = 前の pair までの累積和。
 ## アーキテクチャ文字列
 
 ```
-Threat2A=216720
+Threat=216720
 ```
 
 ## ファイルフォーマットのブロック順
@@ -180,11 +180,11 @@ Threat2A=216720
 FT biases (i16, LEB128)
 FT weights (i16, LEB128)
 [PSQT biases + weights (i32, raw)]    ← PSQT ありの場合のみ
-Threat weights (i8, raw)               ← Threat2A ありの場合のみ
+Threat weights (i8, raw)               ← Threat ありの場合のみ
 LayerStack per-bucket data
 ```
 
-Threat weights レイアウト: `i8[THREAT2A_DIMENSIONS × NNUE_PYTORCH_L1]`
+Threat weights レイアウト: `i8[THREAT_DIMENSIONS × NNUE_PYTORCH_L1]`
 (feature-major, 各特徴の 1536 i8 重みが連続)
 
 ## refresh 条件

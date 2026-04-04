@@ -1,11 +1,11 @@
-//! Threat 2a 特徴量
+//! Threat 特徴量
 //!
 //! 盤上の駒の攻撃関係（threat pair）を NNUE 特徴量として列挙する。
 //! 各 pair は (attacker_side, attacker_class, attacked_side, attacked_class, from_sq, to_sq) で一意に決まる。
 //!
 //! ## 仕様
 //!
-//! - 仕様固定メモ: `docs/threat2a_spec.md`
+//! - 仕様固定メモ: `docs/threat_spec.md`
 //! - 設計書: `docs/nnue_architecture_research.md` Phase 3
 
 use crate::bitboard::{
@@ -21,8 +21,8 @@ use super::bona_piece_halfka_hm::is_hm_mirror;
 // 定数
 // =============================================================================
 
-/// Threat 2a の総特徴量次元数
-pub const THREAT2A_DIMENSIONS: usize = 216_720;
+/// Threat の総特徴量次元数
+pub const THREAT_DIMENSIONS: usize = 216_720;
 
 /// ThreatClass の数（King 除外）
 pub const NUM_THREAT_CLASSES: usize = 9;
@@ -36,7 +36,7 @@ pub const MAX_ACTIVE_THREAT_FEATURES: usize = 320;
 
 /// Threat 駒種分類（King 除外、9 family）
 ///
-/// 順序は仕様固定（`docs/threat2a_spec.md`）。変更禁止。
+/// 順序は仕様固定（`docs/threat_spec.md`）。変更禁止。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ThreatClass {
@@ -395,8 +395,8 @@ pub fn append_active_threat_indices(
                 );
 
                 debug_assert!(
-                    idx < THREAT2A_DIMENSIONS,
-                    "threat index out of range: {idx} >= {THREAT2A_DIMENSIONS}"
+                    idx < THREAT_DIMENSIONS,
+                    "threat index out of range: {idx} >= {THREAT_DIMENSIONS}"
                 );
 
                 indices.push(idx);
@@ -444,13 +444,10 @@ mod tests {
 
     #[test]
     fn test_pair_base_dimensions() {
-        // 最後の pair の末尾が THREAT2A_DIMENSIONS と一致
+        // 最後の pair の末尾が THREAT_DIMENSIONS と一致
         let last_idx = 162 + 8 * 18 + 9 + 8; // as=1, ac=Dragon, ds=1, dc=Dragon
         let last_base = PAIR_BASE[last_idx];
-        assert_eq!(
-            last_base + ATTACKS_PER_COLOR[ThreatClass::Dragon as usize],
-            THREAT2A_DIMENSIONS
-        );
+        assert_eq!(last_base + ATTACKS_PER_COLOR[ThreatClass::Dragon as usize], THREAT_DIMENSIONS);
     }
 
     #[test]
@@ -541,7 +538,7 @@ mod tests {
                                         &from_offset_table,
                                     );
                                     assert!(
-                                        idx < THREAT2A_DIMENSIONS,
+                                        idx < THREAT_DIMENSIONS,
                                         "index {idx} out of range for class={class:?} color={oriented_color:?} sq={} to={}",
                                         sq.raw(),
                                         to.raw()
@@ -577,10 +574,10 @@ mod tests {
 
         // 全 index が範囲内
         for &idx in &indices_b {
-            assert!(idx < THREAT2A_DIMENSIONS);
+            assert!(idx < THREAT_DIMENSIONS);
         }
         for &idx in &indices_w {
-            assert!(idx < THREAT2A_DIMENSIONS);
+            assert!(idx < THREAT_DIMENSIONS);
         }
     }
 
