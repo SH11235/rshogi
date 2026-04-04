@@ -15,7 +15,11 @@ use crate::bitboard::{
 use crate::position::Position;
 use crate::types::{Color, PieceType, Square};
 
+use super::accumulator::{DirtyPiece, IndexList};
+use super::bona_piece::BonaPiece;
 use super::bona_piece_halfka_hm::is_hm_mirror;
+
+use std::sync::LazyLock;
 
 // =============================================================================
 // 定数
@@ -29,6 +33,9 @@ pub const NUM_THREAT_CLASSES: usize = 9;
 
 /// active threat features の最大数
 pub const MAX_ACTIVE_THREAT_FEATURES: usize = 320;
+
+/// changed threat features の最大数（差分更新用）
+pub const MAX_CHANGED_THREAT_FEATURES: usize = 192;
 
 // =============================================================================
 // ThreatClass
@@ -215,6 +222,9 @@ fn compute_from_offset_colored(class: ThreatClass, color: Color) -> [usize; 81] 
 /// 9..13: White (後手) の方向性駒 (Pawn=9, Lance=10, Knight=11, Silver=12, GoldLike=13)
 const NUM_ATTACK_PATTERNS: usize = 14;
 
+/// FromOffsetTable の LazyLock キャッシュ
+static FROM_OFFSET_TABLE: LazyLock<FromOffsetTable> = LazyLock::new(FromOffsetTable::new);
+
 fn attack_pattern_id(class: ThreatClass, oriented_color: Color) -> usize {
     if oriented_color == Color::White && is_directional(class) {
         NUM_THREAT_CLASSES + class as usize // 9..13
@@ -346,7 +356,7 @@ pub fn append_active_threat_indices(
 ) {
     let hm = is_hm_mirror(king_sq, perspective);
     let occupied = pos.occupied();
-    let from_offset_table = FromOffsetTable::new();
+    let from_offset_table = &*FROM_OFFSET_TABLE;
 
     // perspective から見た friend/enemy
     let friend_color = perspective;
@@ -403,7 +413,7 @@ pub fn append_active_threat_indices(
                     attacked_class,
                     from_sq_n,
                     to_sq_n,
-                    &from_offset_table,
+                    from_offset_table,
                 );
 
                 debug_assert!(
@@ -435,6 +445,387 @@ fn attacks_from_piece(pt: PieceType, color: Color, sq: Square, occupied: Bitboar
         PieceType::Dragon => dragon_effect(sq, occupied),
         PieceType::King => Bitboard::EMPTY,
     }
+}
+
+// =============================================================================
+// BonaPiece デコード（差分更新用）
+// =============================================================================
+
+/// BonaPiece (fb perspective) から盤上駒のマスを抽出する。
+/// 手駒・ZERO は None。King も含む（占有ビット再構成用）。
+fn decode_board_square_fb(bp: BonaPiece) -> Option<Square> {
+    use super::bona_piece::{FE_END, FE_HAND_END};
+    use super::bona_piece_halfka_hm::{E_KING, F_KING};
+
+    let v = bp.value() as usize;
+    if v == 0 {
+        return None; // ZERO
+    }
+    // 通常盤上駒: FE_HAND_END (90) .. FE_END (1548)
+    if (FE_HAND_END..FE_END).contains(&v) {
+        let sq_raw = ((v - FE_HAND_END) % 81) as u8;
+        return Square::from_u8(sq_raw);
+    }
+    // King: F_KING (1548) .. F_KING+81, E_KING (1629) .. E_KING+81
+    if (F_KING..F_KING + 81).contains(&v) {
+        return Square::from_u8((v - F_KING) as u8);
+    }
+    if (E_KING..E_KING + 81).contains(&v) {
+        return Square::from_u8((v - E_KING) as u8);
+    }
+    // 手駒 (1..89)
+    None
+}
+
+/// BonaPiece (fb perspective) から Threat 駒情報をデコードする。
+/// King・手駒・ZERO は None。
+fn decode_board_threat_info_fb(bp: BonaPiece) -> Option<(Color, ThreatClass, PieceType, Square)> {
+    use super::bona_piece::{FE_END, FE_HAND_END};
+
+    let v = bp.value() as usize;
+    if !(FE_HAND_END..FE_END).contains(&v) {
+        return None; // 手駒・ZERO・King
+    }
+
+    let offset = v - FE_HAND_END;
+    let pair_index = offset / 81;
+    let sq_raw = (offset % 81) as u8;
+    let piece_type_idx = pair_index / 2;
+    let is_enemy = pair_index % 2 == 1;
+
+    /// BonaPiece pair index → ThreatClass のマッピング
+    /// 順序: Pawn, Lance, Knight, Silver, Gold(Like), Bishop, Horse, Rook, Dragon
+    const BP_TO_CLASS: [ThreatClass; 9] = [
+        ThreatClass::Pawn,
+        ThreatClass::Lance,
+        ThreatClass::Knight,
+        ThreatClass::Silver,
+        ThreatClass::GoldLike,
+        ThreatClass::Bishop,
+        ThreatClass::Horse,
+        ThreatClass::Rook,
+        ThreatClass::Dragon,
+    ];
+
+    /// BonaPiece pair index → PieceType のマッピング（attack 計算用）
+    /// Gold は ProPawn/ProLance 等と同じ gold_effect を使うので PieceType::Gold で統一
+    const BP_TO_PT: [PieceType; 9] = [
+        PieceType::Pawn,
+        PieceType::Lance,
+        PieceType::Knight,
+        PieceType::Silver,
+        PieceType::Gold,
+        PieceType::Bishop,
+        PieceType::Horse,
+        PieceType::Rook,
+        PieceType::Dragon,
+    ];
+
+    let class = BP_TO_CLASS[piece_type_idx];
+    let pt = BP_TO_PT[piece_type_idx];
+    // fb perspective: even pair = friend (Black), odd pair = enemy (White)
+    let color = if is_enemy { Color::White } else { Color::Black };
+    let sq = Square::from_u8(sq_raw)?;
+    Some((color, class, pt, sq))
+}
+
+// =============================================================================
+// append_changed_indices（Threat 差分生成）
+// =============================================================================
+
+/// 差分更新の dirty piece エントリ（before 状態の駒情報）
+struct ThreatEntry {
+    sq: Square,
+    color: Color,
+    class: ThreatClass,
+    pt: PieceType,
+}
+
+/// Threat 差分の中間バッファサイズ
+///
+/// source squares (典型 10-30) × targets per source (典型 2-8) の上限。
+/// debug build で実測し、オーバーフローが無いことを確認する。
+const MAX_INTERMEDIATE_THREATS: usize = 512;
+
+/// DirtyPiece から Threat 特徴量の差分（removed / added）を計算する。
+///
+/// ## アルゴリズム概要
+///
+/// 1. DirtyPiece から changed squares を抽出し、before_occ を再構成
+/// 2. changed squares の attackers_to_occ で source squares を収集
+///    （開き利きで変化した遠方駒も捕捉）
+/// 3. 各 source square の before/after threat pair を列挙
+/// 4. ソート + マージで set difference → removed / added
+pub fn append_changed_threat_indices(
+    pos: &Position,
+    dirty_piece: &DirtyPiece,
+    perspective: Color,
+    king_sq: Square,
+    removed: &mut IndexList<MAX_CHANGED_THREAT_FEATURES>,
+    added: &mut IndexList<MAX_CHANGED_THREAT_FEATURES>,
+) {
+    if dirty_piece.dirty_num == 0 {
+        return;
+    }
+
+    let hm = is_hm_mirror(king_sq, perspective);
+    let from_offset_table = &*FROM_OFFSET_TABLE;
+    let friend_color = perspective;
+    let after_occ = pos.occupied();
+
+    // ---------------------------------------------------------------
+    // Step 1: DirtyPiece デコード → changed_bb, before_occ, 駒情報
+    // ---------------------------------------------------------------
+
+    // old/new の threat 駒情報（最大 dirty_num=2 なので固定長配列）
+    let mut old_entries: [Option<ThreatEntry>; 2] = [None, None];
+    let mut new_entries: [Option<ThreatEntry>; 2] = [None, None];
+    let mut old_count = 0usize;
+    let mut new_count = 0usize;
+
+    let mut before_occ = after_occ;
+    let mut changed_bb = Bitboard::EMPTY;
+
+    for i in 0..dirty_piece.dirty_num as usize {
+        let cp = &dirty_piece.changed_piece[i];
+
+        // old square: King を含めて占有復元、Threat 情報は非 King のみ
+        if let Some(old_sq) = decode_board_square_fb(cp.old_piece.fb) {
+            before_occ |= Bitboard::from_square(old_sq);
+            changed_bb |= Bitboard::from_square(old_sq);
+        }
+        if let Some((color, class, pt, sq)) = decode_board_threat_info_fb(cp.old_piece.fb) {
+            old_entries[old_count] = Some(ThreatEntry {
+                sq,
+                color,
+                class,
+                pt,
+            });
+            old_count += 1;
+        }
+
+        // new square: King を含めて占有復元、Threat 情報は非 King のみ
+        if let Some(new_sq) = decode_board_square_fb(cp.new_piece.fb) {
+            before_occ &= !Bitboard::from_square(new_sq);
+            changed_bb |= Bitboard::from_square(new_sq);
+        }
+        if let Some((color, class, pt, sq)) = decode_board_threat_info_fb(cp.new_piece.fb) {
+            new_entries[new_count] = Some(ThreatEntry {
+                sq,
+                color,
+                class,
+                pt,
+            });
+            new_count += 1;
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Step 2: Source squares 収集
+    // ---------------------------------------------------------------
+
+    let mut source_bb = changed_bb;
+    let mut ch_iter = changed_bb;
+    while !ch_iter.is_empty() {
+        let sq = ch_iter.pop();
+        source_bb |= pos.attackers_to_occ(sq, before_occ);
+        source_bb |= pos.attackers_to_occ(sq, after_occ);
+    }
+
+    // ---------------------------------------------------------------
+    // Step 3: Before / After の threat index 列挙
+    // ---------------------------------------------------------------
+
+    let mut before_buf = [0u32; MAX_INTERMEDIATE_THREATS];
+    let mut after_buf = [0u32; MAX_INTERMEDIATE_THREATS];
+    let mut before_len = 0usize;
+    let mut after_len = 0usize;
+
+    let mut src_iter = source_bb;
+    while !src_iter.is_empty() {
+        let sq_s = src_iter.pop();
+
+        // --- Before 状態の threat 列挙 ---
+        if let Some(info) =
+            lookup_piece_before(sq_s, &old_entries, old_count, &new_entries, new_count, pos)
+        {
+            let attacker_side = if info.color == friend_color { 0 } else { 1 };
+            let oriented_color = if perspective == Color::Black {
+                info.color
+            } else {
+                !info.color
+            };
+            let attacks = attacks_from_piece(info.pt, info.color, sq_s, before_occ);
+            let mut targets = attacks & before_occ;
+            while !targets.is_empty() {
+                let to_sq = targets.pop();
+                if let Some(t) = lookup_piece_before(
+                    to_sq,
+                    &old_entries,
+                    old_count,
+                    &new_entries,
+                    new_count,
+                    pos,
+                ) {
+                    let attacked_side = if t.color == friend_color { 0 } else { 1 };
+                    let from_sq_n = normalize_sq(sq_s, perspective, hm);
+                    let to_sq_n = normalize_sq(to_sq, perspective, hm);
+                    let idx = threat_index(
+                        attacker_side,
+                        info.class,
+                        oriented_color,
+                        attacked_side,
+                        t.class,
+                        from_sq_n,
+                        to_sq_n,
+                        from_offset_table,
+                    );
+                    debug_assert!(
+                        before_len < MAX_INTERMEDIATE_THREATS,
+                        "before_buf overflow: {before_len}"
+                    );
+                    if before_len < MAX_INTERMEDIATE_THREATS {
+                        before_buf[before_len] = idx as u32;
+                        before_len += 1;
+                    }
+                }
+            }
+        }
+
+        // --- After 状態の threat 列挙 ---
+        let pc = pos.piece_on(sq_s);
+        if !pc.is_none() {
+            let pt = pc.piece_type();
+            if let Some(class) = ThreatClass::from_piece_type(pt) {
+                let color = pc.color();
+                let attacker_side = if color == friend_color { 0 } else { 1 };
+                let oriented_color = if perspective == Color::Black {
+                    color
+                } else {
+                    !color
+                };
+                let attacks = attacks_from_piece(pt, color, sq_s, after_occ);
+                let mut targets = attacks & after_occ;
+                while !targets.is_empty() {
+                    let to_sq = targets.pop();
+                    let target_pc = pos.piece_on(to_sq);
+                    if target_pc.is_none() {
+                        continue;
+                    }
+                    let target_pt = target_pc.piece_type();
+                    if let Some(target_class) = ThreatClass::from_piece_type(target_pt) {
+                        let target_color = target_pc.color();
+                        let attacked_side = if target_color == friend_color { 0 } else { 1 };
+                        let from_sq_n = normalize_sq(sq_s, perspective, hm);
+                        let to_sq_n = normalize_sq(to_sq, perspective, hm);
+                        let idx = threat_index(
+                            attacker_side,
+                            class,
+                            oriented_color,
+                            attacked_side,
+                            target_class,
+                            from_sq_n,
+                            to_sq_n,
+                            from_offset_table,
+                        );
+                        debug_assert!(
+                            after_len < MAX_INTERMEDIATE_THREATS,
+                            "after_buf overflow: {after_len}"
+                        );
+                        if after_len < MAX_INTERMEDIATE_THREATS {
+                            after_buf[after_len] = idx as u32;
+                            after_len += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Step 4: ソート + マージで set difference → removed / added
+    // ---------------------------------------------------------------
+
+    before_buf[..before_len].sort_unstable();
+    after_buf[..after_len].sort_unstable();
+
+    let mut bi = 0;
+    let mut ai = 0;
+    while bi < before_len && ai < after_len {
+        let bv = before_buf[bi];
+        let av = after_buf[ai];
+        if bv < av {
+            let _ = removed.push(bv as usize);
+            bi += 1;
+        } else if bv > av {
+            let _ = added.push(av as usize);
+            ai += 1;
+        } else {
+            // 同一 index: 変化なし
+            bi += 1;
+            ai += 1;
+        }
+    }
+    while bi < before_len {
+        let _ = removed.push(before_buf[bi] as usize);
+        bi += 1;
+    }
+    while ai < after_len {
+        let _ = added.push(after_buf[ai] as usize);
+        ai += 1;
+    }
+}
+
+/// before 状態でのマス sq の駒情報を返す。
+///
+/// 優先順位:
+/// 1. old_entries に sq がある → before 状態の駒情報
+/// 2. new_entries に sq がある → before 状態では空（駒が移動してきた場所）
+/// 3. いずれでもない → current Position から取得（変化なし）
+struct PieceInfoBefore {
+    color: Color,
+    class: ThreatClass,
+    pt: PieceType,
+}
+
+#[inline]
+fn lookup_piece_before(
+    sq: Square,
+    old_entries: &[Option<ThreatEntry>; 2],
+    old_count: usize,
+    new_entries: &[Option<ThreatEntry>; 2],
+    new_count: usize,
+    pos: &Position,
+) -> Option<PieceInfoBefore> {
+    // old_entries に sq がある → before 状態の駒
+    for i in 0..old_count {
+        if let Some(ref e) = old_entries[i]
+            && e.sq == sq {
+                return Some(PieceInfoBefore {
+                    color: e.color,
+                    class: e.class,
+                    pt: e.pt,
+                });
+            }
+    }
+    // new_entries に sq がある → before 状態では空
+    for i in 0..new_count {
+        if let Some(ref e) = new_entries[i]
+            && e.sq == sq {
+                return None;
+            }
+    }
+    // 変化なし → current Position から取得
+    let pc = pos.piece_on(sq);
+    if pc.is_none() {
+        return None;
+    }
+    let pt = pc.piece_type();
+    ThreatClass::from_piece_type(pt).map(|class| PieceInfoBefore {
+        color: pc.color(),
+        class,
+        pt,
+    })
 }
 
 // =============================================================================
@@ -669,5 +1060,213 @@ mod tests {
 
         assert_eq!(indices_b, expected, "Black perspective canonical mismatch");
         assert_eq!(indices_w, expected, "White perspective canonical mismatch (symmetric pos)");
+    }
+
+    // =========================================================================
+    // 差分更新テスト
+    // =========================================================================
+
+    use super::super::accumulator::IndexList;
+    use crate::types::Move;
+
+    /// 差分更新の結果が full refresh と一致することを検証するヘルパー。
+    ///
+    /// 1. before の局面で active indices を取得
+    /// 2. 指し手を実行し、DirtyPiece を取得
+    /// 3. append_changed_threat_indices で removed/added を取得
+    /// 4. before_set - removed + added = after_set であることを検証
+    fn verify_incremental(pos: &mut Position, m: Move) {
+        for &perspective in &[Color::Black, Color::White] {
+            let king_sq_before = pos.king_square(perspective);
+
+            // HM mirror 境界を跨ぐ場合は full refresh が必要なのでスキップ
+            let hm_before = is_hm_mirror(king_sq_before, perspective);
+
+            let mut before_indices = Vec::new();
+            append_active_threat_indices(pos, perspective, king_sq_before, &mut before_indices);
+            before_indices.sort();
+
+            let gc = pos.gives_check(m);
+            let dirty = pos.do_move(m, gc);
+
+            let king_sq_after = pos.king_square(perspective);
+            let hm_after = is_hm_mirror(king_sq_after, perspective);
+
+            if hm_before != hm_after {
+                // HM boundary crossed → full refresh needed, skip incremental test
+                pos.undo_move(m);
+                return;
+            }
+
+            let mut after_indices = Vec::new();
+            append_active_threat_indices(pos, perspective, king_sq_after, &mut after_indices);
+            after_indices.sort();
+
+            let mut removed = IndexList::<MAX_CHANGED_THREAT_FEATURES>::new();
+            let mut added = IndexList::<MAX_CHANGED_THREAT_FEATURES>::new();
+            append_changed_threat_indices(
+                pos,
+                &dirty,
+                perspective,
+                king_sq_after,
+                &mut removed,
+                &mut added,
+            );
+
+            // before_set - removed + added = after_set
+            let removed_set: Vec<usize> = removed.iter().collect();
+            let added_set: Vec<usize> = added.iter().collect();
+
+            let mut computed = before_indices.clone();
+            for &r in &removed_set {
+                let pos_found = computed.iter().position(|&x| x == r);
+                assert!(
+                    pos_found.is_some(),
+                    "removed index {r} not found in before_set (perspective={perspective:?}, move={m:?})"
+                );
+                computed.remove(pos_found.unwrap());
+            }
+            for &a in &added_set {
+                computed.push(a);
+            }
+            computed.sort();
+
+            assert_eq!(
+                computed, after_indices,
+                "Incremental mismatch for perspective={perspective:?}, move={m:?}\n\
+                 before={before_indices:?}\n\
+                 removed={removed_set:?}\n\
+                 added={added_set:?}\n\
+                 computed={computed:?}\n\
+                 expected={after_indices:?}"
+            );
+
+            pos.undo_move(m);
+        }
+    }
+
+    /// 初手 7六歩（通常手）の差分更新テスト
+    #[test]
+    fn test_changed_indices_pawn_push() {
+        let mut pos = Position::new();
+        pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
+            .expect("startpos");
+        let m = Move::from_usi("7g7f").expect("7g7f");
+        verify_incremental(&mut pos, m);
+    }
+
+    /// 角道を開けた後の角交換（取る手）の差分更新テスト
+    #[test]
+    fn test_changed_indices_capture() {
+        let mut pos = Position::new();
+        pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
+            .expect("startpos");
+        // 7六歩 → 3四歩 → 8八角から2二角成（角交換）
+        for mv_str in &["7g7f", "3c3d"] {
+            let m = Move::from_usi(mv_str).unwrap();
+            let gc = pos.gives_check(m);
+            pos.do_move(m, gc);
+        }
+        let m = Move::from_usi("8h2b+").expect("8h2b+");
+        verify_incremental(&mut pos, m);
+    }
+
+    /// 駒打ち（手駒から打つ手）の差分更新テスト
+    #[test]
+    fn test_changed_indices_drop() {
+        let mut pos = Position::new();
+        pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
+            .expect("startpos");
+        // 角交換で手駒を作る: 7六歩 → 3四歩 → 8八角から2二角成 → 同銀
+        for mv_str in &["7g7f", "3c3d", "8h2b+", "3a2b"] {
+            let m = Move::from_usi(mv_str).unwrap();
+            let gc = pos.gives_check(m);
+            pos.do_move(m, gc);
+        }
+        // 先手の手駒に角がある状態。角を打つ。
+        let m = Move::from_usi("B*5e").expect("B*5e");
+        verify_incremental(&mut pos, m);
+    }
+
+    /// 玉が動く手（開き利き変化）の差分更新テスト
+    #[test]
+    fn test_changed_indices_king_move() {
+        let mut pos = Position::new();
+        // 玉が動ける局面（5九の王が 4八 or 6八 に移動可能）
+        pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1BK4R1/LNSG1GSNL b - 1")
+            .expect("sfen");
+        let m = Move::from_usi("7h6h").expect("7h6h");
+        verify_incremental(&mut pos, m);
+    }
+
+    /// 複数手を連続で差分更新して正当性を検証
+    #[test]
+    fn test_changed_indices_sequence() {
+        let mut pos = Position::new();
+        pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
+            .expect("startpos");
+
+        let move_sequence = ["7g7f", "3c3d", "2g2f", "8c8d", "2f2e", "8d8e"];
+        for mv_str in &move_sequence {
+            let m = Move::from_usi(mv_str).expect(mv_str);
+            verify_incremental(&mut pos, m);
+            let gc = pos.gives_check(m);
+            pos.do_move(m, gc);
+        }
+    }
+
+    /// BonaPiece デコードのテス��
+    #[test]
+    fn test_decode_board_square_fb() {
+        use super::super::bona_piece::{E_PAWN, F_PAWN};
+        use super::super::bona_piece_halfka_hm::F_KING;
+
+        // ZERO → None
+        assert!(decode_board_square_fb(BonaPiece::ZERO).is_none());
+
+        // 手駒 → None
+        assert!(decode_board_square_fb(BonaPiece::new(1)).is_none());
+
+        // F_PAWN + 0 = sq=0
+        let bp = BonaPiece::new(F_PAWN);
+        assert_eq!(decode_board_square_fb(bp), Some(Square::from_u8(0).unwrap()));
+
+        // E_PAWN + 40 = sq=40
+        let bp = BonaPiece::new(E_PAWN + 40);
+        assert_eq!(decode_board_square_fb(bp), Some(Square::from_u8(40).unwrap()));
+
+        // King: F_KING + 10
+        let bp = BonaPiece::new(F_KING as u16 + 10);
+        assert_eq!(decode_board_square_fb(bp), Some(Square::from_u8(10).unwrap()));
+    }
+
+    /// BonaPiece から Threat 情報デコードのテスト
+    #[test]
+    fn test_decode_board_threat_info_fb() {
+        use super::super::bona_piece::{E_ROOK, F_PAWN};
+        use super::super::bona_piece_halfka_hm::F_KING;
+
+        // F_PAWN + 40: Black Pawn at sq=40
+        let bp = BonaPiece::new(F_PAWN + 40);
+        let (color, class, pt, sq) = decode_board_threat_info_fb(bp).unwrap();
+        assert_eq!(color, Color::Black);
+        assert_eq!(class, ThreatClass::Pawn);
+        assert_eq!(pt, PieceType::Pawn);
+        assert_eq!(sq.raw(), 40);
+
+        // E_ROOK + 0: White Rook at sq=0
+        let bp = BonaPiece::new(E_ROOK);
+        let (color, class, pt, sq) = decode_board_threat_info_fb(bp).unwrap();
+        assert_eq!(color, Color::White);
+        assert_eq!(class, ThreatClass::Rook);
+        assert_eq!(pt, PieceType::Rook);
+        assert_eq!(sq.raw(), 0);
+
+        // King → None
+        let bp = BonaPiece::new(F_KING as u16);
+        assert!(decode_board_threat_info_fb(bp).is_none());
+
+        // ZERO → None
+        assert!(decode_board_threat_info_fb(BonaPiece::ZERO).is_none());
     }
 }
