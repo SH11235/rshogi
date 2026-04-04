@@ -335,11 +335,29 @@ impl NetworkLayerStacks {
         info!(
             "[NNUE Eval] us_acc positive: first_half={us_first_half_positive}/768, second_half={us_second_half_positive}/768"
         );
-        info!("[NNUE Eval] us_acc first 16: {:?}", &us_acc[0..16]);
+        info!("[NNUE Eval] us_acc (piece) first 16: {:?}", &us_acc[0..16]);
 
-        // SqrClippedReLU変換
+        // Threat 結合 (evaluate_with_bucket と同一ロジック)
         let mut transformed: Aligned<[u8; NNUE_PYTORCH_L1]> = Aligned([0u8; NNUE_PYTORCH_L1]);
-        sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
+        if self.feature_transformer.has_threat {
+            let (us_threat, them_threat) = if side_to_move == Color::Black {
+                (acc.get_threat(Color::Black as usize), acc.get_threat(Color::White as usize))
+            } else {
+                (acc.get_threat(Color::White as usize), acc.get_threat(Color::Black as usize))
+            };
+            let mut us_combined = [0i16; NNUE_PYTORCH_L1];
+            let mut them_combined = [0i16; NNUE_PYTORCH_L1];
+            for i in 0..NNUE_PYTORCH_L1 {
+                us_combined[i] = us_acc[i].wrapping_add(us_threat[i]);
+                them_combined[i] = them_acc[i].wrapping_add(them_threat[i]);
+            }
+            info!("[NNUE Eval] us_threat first 16: {:?}", &us_threat[0..16]);
+            info!("[NNUE Eval] us_combined (piece+threat) first 16: {:?}", &us_combined[0..16]);
+            sqr_clipped_relu_transform(&us_combined, &them_combined, &mut transformed.0);
+        } else {
+            // SqrClippedReLU変換
+            sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
+        }
 
         let transformed_nonzero: usize = transformed.0.iter().filter(|&&x| x > 0).count();
         let transformed_sum: u64 = transformed.0.iter().map(|&x| x as u64).sum();
