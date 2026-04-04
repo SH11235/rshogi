@@ -735,40 +735,22 @@ impl FeatureTransformerLayerStacks {
                         self.add_psqt_weights(psqt_acc, index);
                     }
                 }
+            }
+        }
 
-                // Threat 差分更新
-                if self.has_threat {
-                    let mut t_removed = IndexList::<MAX_CHANGED_THREAT_FEATURES>::new();
-                    let mut t_added = IndexList::<MAX_CHANGED_THREAT_FEATURES>::new();
-                    let ok = threat_features::append_changed_threat_indices(
-                        pos,
-                        &dirty_piece,
-                        perspective,
-                        king_sq,
-                        &mut t_removed,
-                        &mut t_added,
-                    );
-                    let threat_acc = stack.current_mut().accumulator.get_threat_mut(p);
-                    if ok {
-                        for idx in t_removed.iter() {
-                            self.sub_threat_weights(threat_acc, idx);
-                        }
-                        for idx in t_added.iter() {
-                            self.add_threat_weights(threat_acc, idx);
-                        }
-                    } else {
-                        // overflow → full refresh for this perspective
-                        threat_acc.fill(0);
-                        threat_features::for_each_active_threat_index(
-                            pos,
-                            perspective,
-                            king_sq,
-                            |idx| {
-                                self.add_threat_weights(threat_acc, idx);
-                            },
-                        );
-                    }
-                }
+        // Threat: forward_update_incremental では中間局面を再構成できないため、
+        // 最終局面 (pos) で full refresh する。
+        // append_changed_threat_indices は pos (after state) を参照するため、
+        // 複数手パスで中間手の差分を正しく計算できない。
+        if self.has_threat {
+            for perspective in [Color::Black, Color::White] {
+                let p = perspective as usize;
+                let king_sq = pos.king_square(perspective);
+                let threat_acc = stack.current_mut().accumulator.get_threat_mut(p);
+                threat_acc.fill(0);
+                threat_features::for_each_active_threat_index(pos, perspective, king_sq, |idx| {
+                    self.add_threat_weights(threat_acc, idx);
+                });
             }
         }
 
