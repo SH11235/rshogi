@@ -505,6 +505,76 @@ fn attacks_from_piece(pt: PieceType, color: Color, sq: Square, occupied: Bitboar
 }
 
 // =============================================================================
+// for_each_active_threat_index（ヒープ不要のコールバック版）
+// =============================================================================
+
+/// 現局面の全 threat pair を列挙し、コールバック `f` に index を渡す。
+///
+/// `append_active_threat_indices` と同一ロジックだが、Vec 不要でホットパスで使用可能。
+#[inline]
+pub fn for_each_active_threat_index<F: FnMut(usize)>(
+    pos: &Position,
+    perspective: Color,
+    king_sq: Square,
+    mut f: F,
+) {
+    let hm = is_hm_mirror(king_sq, perspective);
+    let occupied = pos.occupied();
+    let from_offset_table = &*FROM_OFFSET_TABLE;
+    let friend_color = perspective;
+
+    for &attacker_color in &[friend_color, !friend_color] {
+        let attacker_side = if attacker_color == friend_color { 0 } else { 1 };
+
+        let mut attacker_bb = pos.pieces_c(attacker_color);
+        while !attacker_bb.is_empty() {
+            let from_sq = attacker_bb.pop();
+            let pc = pos.piece_on(from_sq);
+            let pt = pc.piece_type();
+
+            let Some(attacker_class) = ThreatClass::from_piece_type(pt) else {
+                continue;
+            };
+
+            let attack_bb = attacks_from_piece(pt, attacker_color, from_sq, occupied);
+            let mut targets = attack_bb & occupied;
+            while !targets.is_empty() {
+                let to_sq = targets.pop();
+                let target_pc = pos.piece_on(to_sq);
+                let target_pt = target_pc.piece_type();
+
+                let Some(attacked_class) = ThreatClass::from_piece_type(target_pt) else {
+                    continue;
+                };
+
+                let target_color = target_pc.color();
+                let attacked_side = if target_color == friend_color { 0 } else { 1 };
+                let from_sq_n = normalize_sq(from_sq, perspective, hm);
+                let to_sq_n = normalize_sq(to_sq, perspective, hm);
+                let oriented_color = if perspective == Color::Black {
+                    attacker_color
+                } else {
+                    !attacker_color
+                };
+
+                let idx = threat_index(
+                    attacker_side,
+                    attacker_class,
+                    oriented_color,
+                    attacked_side,
+                    attacked_class,
+                    from_sq_n,
+                    to_sq_n,
+                    from_offset_table,
+                );
+                debug_assert!(idx < THREAT_DIMENSIONS);
+                f(idx);
+            }
+        }
+    }
+}
+
+// =============================================================================
 // BonaPiece デコード（差分更新用）
 // =============================================================================
 

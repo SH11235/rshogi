@@ -164,6 +164,12 @@ impl NetworkLayerStacks {
             feature_transformer.read_psqt(reader)?;
         }
 
+        // Threat 読み込み（arch_str に "Threat=" があれば）
+        let has_threat = arch_str.contains("Threat=");
+        if has_threat {
+            feature_transformer.read_threat_weights(reader)?;
+        }
+
         // LayerStacks を読み込み（FC層は常に非圧縮）
         let layer_stacks = LayerStacks::read(reader)?;
 
@@ -264,7 +270,24 @@ impl NetworkLayerStacks {
 
         // SAFETY: 直後のsqr_clipped_relu_transformで全要素が上書きされる
         let mut transformed: Aligned<[u8; NNUE_PYTORCH_L1]> = unsafe { Aligned::new_uninit() };
-        sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
+
+        if self.feature_transformer.has_threat {
+            // piece_acc + threat_acc を結合してから SCReLU
+            let (us_threat, them_threat) = if side_to_move == Color::Black {
+                (acc.get_threat(Color::Black as usize), acc.get_threat(Color::White as usize))
+            } else {
+                (acc.get_threat(Color::White as usize), acc.get_threat(Color::Black as usize))
+            };
+            let mut us_combined = [0i16; NNUE_PYTORCH_L1];
+            let mut them_combined = [0i16; NNUE_PYTORCH_L1];
+            for i in 0..NNUE_PYTORCH_L1 {
+                us_combined[i] = us_acc[i].wrapping_add(us_threat[i]);
+                them_combined[i] = them_acc[i].wrapping_add(them_threat[i]);
+            }
+            sqr_clipped_relu_transform(&us_combined, &them_combined, &mut transformed.0);
+        } else {
+            sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
+        }
 
         // LayerStacks で評価
         let raw_score = self.layer_stacks.evaluate_raw(bucket_index, &transformed.0);

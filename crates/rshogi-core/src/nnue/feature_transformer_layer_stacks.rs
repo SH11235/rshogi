@@ -13,6 +13,7 @@ use super::bona_piece_halfka_hm::{halfka_index, is_hm_mirror, king_bucket, pack_
 use super::constants::{HALFKA_HM_DIMENSIONS, NNUE_PYTORCH_L1, NUM_LAYER_STACK_BUCKETS};
 use super::features::{Feature, FeatureSet, HalfKA_hm, HalfKA_hm_FeatureSet};
 use super::leb128::read_compressed_tensor_i16_all;
+use super::threat_features::{self, MAX_CHANGED_THREAT_FEATURES, THREAT_DIMENSIONS};
 use crate::position::Position;
 use crate::types::Color;
 use std::io::{self, Read};
@@ -82,6 +83,14 @@ pub struct FeatureTransformerLayerStacks {
 
     /// PSQT が有効か（アーキテクチャ文字列で判定）
     pub(crate) has_psqt: bool,
+
+    /// Threat 重み [THREAT_DIMENSIONS × NNUE_PYTORCH_L1]
+    /// レイアウト: threat_weights[feature_idx * L1 + neuron] (i8, feature-major)
+    /// 64バイトアラインメントで確保
+    pub(crate) threat_weights: AlignedBox<i8>,
+
+    /// Threat が有効か（アーキテクチャ文字列で判定）
+    pub(crate) has_threat: bool,
 }
 
 impl FeatureTransformerLayerStacks {
@@ -109,6 +118,8 @@ impl FeatureTransformerLayerStacks {
             psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
             psqt_weights: AlignedBox::new_zeroed(0),
             has_psqt: false,
+            threat_weights: AlignedBox::new_zeroed(0),
+            has_threat: false,
         })
     }
 
@@ -138,6 +149,8 @@ impl FeatureTransformerLayerStacks {
                 psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
                 psqt_weights: AlignedBox::new_zeroed(0),
                 has_psqt: false,
+                threat_weights: AlignedBox::new_zeroed(0),
+                has_threat: false,
             });
         }
 
@@ -167,6 +180,8 @@ impl FeatureTransformerLayerStacks {
                 psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
                 psqt_weights: AlignedBox::new_zeroed(0),
                 has_psqt: false,
+                threat_weights: AlignedBox::new_zeroed(0),
+                has_threat: false,
             });
         }
 
@@ -203,6 +218,48 @@ impl FeatureTransformerLayerStacks {
         // 中途半端な状態になるが、呼び出し元でエラーが伝播し Self は破棄されるため問題ない。
         self.has_psqt = true;
         Ok(())
+    }
+
+    /// Threat 重みをファイルから読み込み (i8, raw)
+    pub fn read_threat_weights<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
+        let weight_count = THREAT_DIMENSIONS * NNUE_PYTORCH_L1;
+        self.threat_weights = AlignedBox::new_zeroed(weight_count);
+        let slice = unsafe {
+            std::slice::from_raw_parts_mut(
+                self.threat_weights.as_mut_ptr() as *mut u8,
+                weight_count,
+            )
+        };
+        reader.read_exact(slice)?;
+        self.has_threat = true;
+        Ok(())
+    }
+
+    /// Threat 重みの行を取得（i8[L1]）
+    #[inline]
+    fn threat_weight_row(&self, index: usize) -> &[i8] {
+        let offset = index * NNUE_PYTORCH_L1;
+        let end = offset + NNUE_PYTORCH_L1;
+        debug_assert!(end <= self.threat_weights.len(), "threat index out of range: {index}");
+        &self.threat_weights[offset..end]
+    }
+
+    /// Threat 重み (i8) を i16 アキュムレータに加算（スカラー版）
+    #[inline]
+    fn add_threat_weights(&self, accumulation: &mut [i16; NNUE_PYTORCH_L1], index: usize) {
+        let weights = self.threat_weight_row(index);
+        for (a, &w) in accumulation.iter_mut().zip(weights) {
+            *a = a.wrapping_add(w as i16);
+        }
+    }
+
+    /// Threat 重み (i8) を i16 アキュムレータから減算（スカラー版）
+    #[inline]
+    fn sub_threat_weights(&self, accumulation: &mut [i16; NNUE_PYTORCH_L1], index: usize) {
+        let weights = self.threat_weight_row(index);
+        for (a, &w) in accumulation.iter_mut().zip(weights) {
+            *a = a.wrapping_sub(w as i16);
+        }
     }
 
     /// PSQT アキュムレータのフル計算
@@ -264,6 +321,16 @@ impl FeatureTransformerLayerStacks {
             // PSQT アキュムレータ
             if self.has_psqt {
                 self.refresh_psqt(&active_indices, &mut acc.psqt_accumulation[p]);
+            }
+
+            // Threat アキュムレータ（bias なし: piece FT と bias を共有）
+            if self.has_threat {
+                let king_sq = pos.king_square(perspective);
+                let threat_acc = acc.get_threat_mut(p);
+                threat_acc.fill(0);
+                threat_features::for_each_active_threat_index(pos, perspective, king_sq, |idx| {
+                    self.add_threat_weights(threat_acc, idx);
+                });
             }
         }
 
@@ -335,6 +402,59 @@ impl FeatureTransformerLayerStacks {
                     }
                     for index in added.iter() {
                         self.add_psqt_weights(&mut acc.psqt_accumulation[p], index);
+                    }
+                }
+            }
+
+            // Threat 更新
+            if self.has_threat {
+                let king_sq = pos.king_square(perspective);
+                if reset {
+                    // 玉が移動した場合は全計算
+                    let threat_acc = acc.get_threat_mut(p);
+                    threat_acc.fill(0);
+                    threat_features::for_each_active_threat_index(
+                        pos,
+                        perspective,
+                        king_sq,
+                        |idx| {
+                            self.add_threat_weights(threat_acc, idx);
+                        },
+                    );
+                } else {
+                    // Threat 差分更新
+                    let prev_threat = prev_acc.get_threat(p);
+                    let curr_threat = acc.get_threat_mut(p);
+                    curr_threat.copy_from_slice(prev_threat);
+
+                    let mut t_removed = IndexList::<MAX_CHANGED_THREAT_FEATURES>::new();
+                    let mut t_added = IndexList::<MAX_CHANGED_THREAT_FEATURES>::new();
+                    let ok = threat_features::append_changed_threat_indices(
+                        pos,
+                        dirty_piece,
+                        perspective,
+                        king_sq,
+                        &mut t_removed,
+                        &mut t_added,
+                    );
+                    if ok {
+                        for idx in t_removed.iter() {
+                            self.sub_threat_weights(curr_threat, idx);
+                        }
+                        for idx in t_added.iter() {
+                            self.add_threat_weights(curr_threat, idx);
+                        }
+                    } else {
+                        // overflow → full refresh
+                        curr_threat.fill(0);
+                        threat_features::for_each_active_threat_index(
+                            pos,
+                            perspective,
+                            king_sq,
+                            |idx| {
+                                self.add_threat_weights(curr_threat, idx);
+                            },
+                        );
                     }
                 }
             }
@@ -412,6 +532,56 @@ impl FeatureTransformerLayerStacks {
                     }
                 }
             }
+
+            // Threat 更新（キャッシュ版も非キャッシュ版と同じロジック）
+            if self.has_threat {
+                let king_sq = pos.king_square(perspective);
+                if reset {
+                    let threat_acc = acc.get_threat_mut(p);
+                    threat_acc.fill(0);
+                    threat_features::for_each_active_threat_index(
+                        pos,
+                        perspective,
+                        king_sq,
+                        |idx| {
+                            self.add_threat_weights(threat_acc, idx);
+                        },
+                    );
+                } else {
+                    let prev_threat = prev_acc.get_threat(p);
+                    let curr_threat = acc.get_threat_mut(p);
+                    curr_threat.copy_from_slice(prev_threat);
+
+                    let mut t_removed = IndexList::<MAX_CHANGED_THREAT_FEATURES>::new();
+                    let mut t_added = IndexList::<MAX_CHANGED_THREAT_FEATURES>::new();
+                    let ok = threat_features::append_changed_threat_indices(
+                        pos,
+                        dirty_piece,
+                        perspective,
+                        king_sq,
+                        &mut t_removed,
+                        &mut t_added,
+                    );
+                    if ok {
+                        for idx in t_removed.iter() {
+                            self.sub_threat_weights(curr_threat, idx);
+                        }
+                        for idx in t_added.iter() {
+                            self.add_threat_weights(curr_threat, idx);
+                        }
+                    } else {
+                        curr_threat.fill(0);
+                        threat_features::for_each_active_threat_index(
+                            pos,
+                            perspective,
+                            king_sq,
+                            |idx| {
+                                self.add_threat_weights(curr_threat, idx);
+                            },
+                        );
+                    }
+                }
+            }
         }
 
         acc.computed_accumulation = true;
@@ -434,6 +604,16 @@ impl FeatureTransformerLayerStacks {
                 let mut active_indices = IndexList::new();
                 append_active_indices(pos, perspective, &mut active_indices);
                 self.refresh_psqt(&active_indices, &mut acc.psqt_accumulation[p]);
+            }
+
+            // Threat はキャッシュ非対象なのでフル再計算
+            if self.has_threat {
+                let king_sq = pos.king_square(perspective);
+                let threat_acc = acc.get_threat_mut(p);
+                threat_acc.fill(0);
+                threat_features::for_each_active_threat_index(pos, perspective, king_sq, |idx| {
+                    self.add_threat_weights(threat_acc, idx);
+                });
             }
         }
 
@@ -493,7 +673,7 @@ impl FeatureTransformerLayerStacks {
             return false;
         };
 
-        // source_acc から main + psqt の両方をコピー
+        // source_acc から main + psqt + threat の全てをコピー
         let source_acc = stack.entry_at(source_idx).accumulator.clone();
         {
             let current_acc = &mut stack.current_mut().accumulator;
@@ -501,6 +681,9 @@ impl FeatureTransformerLayerStacks {
                 let p = perspective as usize;
                 current_acc.get_mut(p).copy_from_slice(source_acc.get(p));
                 current_acc.psqt_accumulation[p] = source_acc.psqt_accumulation[p];
+                if self.has_threat {
+                    current_acc.get_threat_mut(p).copy_from_slice(source_acc.get_threat(p));
+                }
             }
         }
 
@@ -550,6 +733,40 @@ impl FeatureTransformerLayerStacks {
                     }
                     for index in added.iter() {
                         self.add_psqt_weights(psqt_acc, index);
+                    }
+                }
+
+                // Threat 差分更新
+                if self.has_threat {
+                    let mut t_removed = IndexList::<MAX_CHANGED_THREAT_FEATURES>::new();
+                    let mut t_added = IndexList::<MAX_CHANGED_THREAT_FEATURES>::new();
+                    let ok = threat_features::append_changed_threat_indices(
+                        pos,
+                        &dirty_piece,
+                        perspective,
+                        king_sq,
+                        &mut t_removed,
+                        &mut t_added,
+                    );
+                    let threat_acc = stack.current_mut().accumulator.get_threat_mut(p);
+                    if ok {
+                        for idx in t_removed.iter() {
+                            self.sub_threat_weights(threat_acc, idx);
+                        }
+                        for idx in t_added.iter() {
+                            self.add_threat_weights(threat_acc, idx);
+                        }
+                    } else {
+                        // overflow → full refresh for this perspective
+                        threat_acc.fill(0);
+                        threat_features::for_each_active_threat_index(
+                            pos,
+                            perspective,
+                            king_sq,
+                            |idx| {
+                                self.add_threat_weights(threat_acc, idx);
+                            },
+                        );
                     }
                 }
             }
@@ -1150,6 +1367,8 @@ mod tests {
             psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
             psqt_weights: AlignedBox::new_zeroed(0),
             has_psqt: false,
+            threat_weights: AlignedBox::new_zeroed(0),
+            has_threat: false,
         }
     }
 
@@ -1424,6 +1643,8 @@ mod tests {
             psqt_biases: [10, 20, 30, 40, 50, 60, 70, 80, 90],
             psqt_weights,
             has_psqt: true,
+            threat_weights: AlignedBox::new_zeroed(0),
+            has_threat: false,
         }
     }
 

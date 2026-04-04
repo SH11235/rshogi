@@ -15,6 +15,11 @@ pub struct AccumulatorLayerStacks {
     /// perspective: 0 = Black, 1 = White
     pub accumulation: [[i16; NNUE_PYTORCH_L1]; 2],
 
+    /// Threat アキュムレータ [perspective][dimension]
+    /// Threat weights (i8) の累積値。has_threat == false の場合はゼロのまま使用されない。
+    /// 評価時に piece accumulation と加算して SCReLU に入力する。
+    pub threat_accumulation: [[i16; NNUE_PYTORCH_L1]; 2],
+
     /// PSQT アキュムレータ [perspective][bucket]
     /// 各駒の PSQT 重みを視点ごとに累積する。
     /// has_psqt == false の場合はゼロのまま使用されない。
@@ -32,6 +37,7 @@ impl AccumulatorLayerStacks {
     pub fn new() -> Self {
         Self {
             accumulation: [[0; NNUE_PYTORCH_L1]; 2],
+            threat_accumulation: [[0; NNUE_PYTORCH_L1]; 2],
             psqt_accumulation: [[0; NUM_LAYER_STACK_BUCKETS]; 2],
             computed_accumulation: false,
             computed_score: false,
@@ -53,6 +59,20 @@ impl AccumulatorLayerStacks {
         debug_assert!(perspective < 2);
         // SAFETY: 同上。
         unsafe { self.accumulation.get_unchecked_mut(perspective) }
+    }
+
+    /// 指定視点の Threat 累積値を取得
+    #[inline]
+    pub fn get_threat(&self, perspective: usize) -> &[i16; NNUE_PYTORCH_L1] {
+        debug_assert!(perspective < 2);
+        unsafe { self.threat_accumulation.get_unchecked(perspective) }
+    }
+
+    /// 指定視点の Threat 累積値を取得（可変）
+    #[inline]
+    pub fn get_threat_mut(&mut self, perspective: usize) -> &mut [i16; NNUE_PYTORCH_L1] {
+        debug_assert!(perspective < 2);
+        unsafe { self.threat_accumulation.get_unchecked_mut(perspective) }
     }
 }
 
