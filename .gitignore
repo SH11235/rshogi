@@ -76,4 +76,3 @@ logs/
 *.njsproj
 *.sln
 *.sw?
-docs/threat_spec.md
