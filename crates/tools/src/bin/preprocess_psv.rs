@@ -1,22 +1,22 @@
-//! preprocess_pack - packファイルにqsearch leaf置換を適用
+//! preprocess_psv - PSVファイルにqsearch leaf置換を適用
 //!
-//! PackedSfenValue形式（40バイト/レコード）のpackファイルに対して
+//! PackedSfenValue形式（40バイト/レコード）のPSVファイルに対して
 //! qsearch leaf置換を適用する。
 //!
 //! # 使用例
 //!
 //! ```bash
 //! # 基本的な使用法（Material評価）
-//! cargo run -p tools --bin preprocess_pack -- \
-//!   --input data.pack --output processed.pack
+//! cargo run -p tools --bin preprocess_psv -- \
+//!   --input data.psv --output processed.psv
 //!
 //! # NNUEモデルを使用
-//! cargo run -p tools --bin preprocess_pack -- \
-//!   --input data.pack --output processed.pack --nnue model.nnue
+//! cargo run -p tools --bin preprocess_psv -- \
+//!   --input data.psv --output processed.psv --nnue model.nnue
 //!
 //! # 並列処理（4スレッド）
-//! cargo run -p tools --bin preprocess_pack -- \
-//!   --input data.pack --output processed.pack --threads 4
+//! cargo run -p tools --bin preprocess_psv -- \
+//!   --input data.psv --output processed.psv --threads 4
 //! ```
 
 use anyhow::{Context, Result};
@@ -37,19 +37,19 @@ use tools::qsearch_pv::{
     MaterialEvaluator, NnueStacks, QsearchResult, qsearch_with_pv, qsearch_with_pv_nnue,
 };
 
-/// PackedSfenValue形式のpackファイルにqsearch leaf置換を適用
+/// PackedSfenValue形式のPSVファイルにqsearch leaf置換を適用
 #[derive(Parser)]
 #[command(
-    name = "preprocess_pack",
+    name = "preprocess_psv",
     version,
-    about = "packファイルにqsearch leaf置換を適用\n\n各局面をqsearchのPV末端局面に置換して出力"
+    about = "PSVファイルにqsearch leaf置換を適用\n\n各局面をqsearchのPV末端局面に置換して出力"
 )]
 struct Cli {
-    /// 入力packファイル
+    /// 入力PSVファイル
     #[arg(short, long)]
     input: PathBuf,
 
-    /// 出力packファイル
+    /// 出力PSVファイル
     #[arg(short, long)]
     output: PathBuf,
 

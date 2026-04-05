@@ -1,21 +1,21 @@
-//! shuffle_pack - packファイル内のレコードをシャッフル
+//! shuffle_psv - PSVファイル内のレコードをシャッフル
 //!
-//! PackedSfenValue形式（40バイト/レコード）のpackファイルをシャッフルする。
+//! PackedSfenValue形式（40バイト/レコード）のPSVファイルをシャッフルする。
 //!
 //! # 使用例
 //!
 //! ```bash
 //! # 基本的な使用法
-//! cargo run -p tools --bin shuffle_pack -- \
-//!   --input data.pack --output shuffled.pack
+//! cargo run -p tools --bin shuffle_psv -- \
+//!   --input data.psv --output shuffled.psv
 //!
 //! # シード指定（再現性のため）
-//! cargo run -p tools --bin shuffle_pack -- \
-//!   --input data.pack --output shuffled.pack --seed 42
+//! cargo run -p tools --bin shuffle_psv -- \
+//!   --input data.psv --output shuffled.psv --seed 42
 //!
 //! # チャンク方式（大規模ファイル用、メモリ使用量を制限）
-//! cargo run -p tools --bin shuffle_pack -- \
-//!   --input large.pack --output shuffled.pack --chunk-size 10000000
+//! cargo run -p tools --bin shuffle_psv -- \
+//!   --input large.psv --output shuffled.psv --chunk-size 10000000
 //! ```
 
 use anyhow::{Context, Result};
@@ -30,19 +30,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tools::packed_sfen::PackedSfenValue;
 
-/// PackedSfenValue形式のpackファイルをシャッフル
+/// PackedSfenValue形式のPSVファイルをシャッフル
 #[derive(Parser)]
 #[command(
-    name = "shuffle_pack",
+    name = "shuffle_psv",
     version,
-    about = "packファイル内のレコードをシャッフル\n\nPackedSfenValue形式（40バイト/レコード）のファイルをシャッフルして出力"
+    about = "PSVファイル内のレコードをシャッフル\n\nPackedSfenValue形式（40バイト/レコード）のファイルをシャッフルして出力"
 )]
 struct Cli {
-    /// 入力packファイル
+    /// 入力PSVファイル
     #[arg(short, long)]
     input: PathBuf,
 
-    /// 出力packファイル
+    /// 出力PSVファイル
     #[arg(short, long)]
     output: PathBuf,
 
