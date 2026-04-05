@@ -34,13 +34,13 @@ crates/tools/src/bin/ 配下の全31バイナリの一覧と解説。
 
 | ツール | 説明 |
 |--------|------|
-| `shuffle_pack` | pack ファイル内のレコード（40バイト単位）をシャッフル |
-| `rescore_pack` | pack ファイルの評価値を NNUE または外部エンジンで再計算 |
-| `preprocess_pack` | pack ファイルに qsearch leaf 置換を適用 |
+| `shuffle_psv` | PSV ファイル内のレコード（40バイト単位）をシャッフル |
+| `rescore_psv` | PSV ファイルの評価値を NNUE または外部エンジンで再計算 |
+| `preprocess_psv` | PSV ファイルに qsearch leaf 置換を適用。チャンクストリーミング処理対応 |
 | `filter_teacher_data` | 王手除外・スコアフィルタ・クリップなどの前処理を適用 |
 | `fix_scores` | preprocess で上書きされたスコアを元ファイルから復元 |
-| `pack_to_jsonl` | YaneuraOu pack 形式を JSONL 形式に変換 |
-| `pack_to_psv` | GenSfen .pack を PackedSfenValue 形式に展開 |
+| `psv_to_jsonl` | PSV 形式を JSONL 形式に変換 |
+| `pack_to_psv` | GenSfen .pack を PackedSfenValue (PSV) 形式に展開 |
 
 ## 重複除去・検証
 
@@ -72,8 +72,8 @@ crates/tools/src/bin/ 配下の全31バイナリの一覧と解説。
 
 ```
 教師データ生成 (engine_selfplay)
-  → シャッフル (shuffle_pack)
-  → 前処理 (preprocess_pack)
+  → シャッフル (shuffle_psv)
+  → 前処理 (preprocess_psv)
   → 学習 (train_nnue)
   → 対局評価 (tournament → analyze_selfplay)
   → SPSA チューニング (spsa)
