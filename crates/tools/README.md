@@ -16,10 +16,10 @@
 
 | ツール | 説明 |
 |--------|------|
-| `shuffle_pack` | PackedSfenValue ファイルのシャッフル |
-| `rescore_pack` | 局面の再評価（探索スコア付与） |
-| `preprocess_pack` | pack ファイルの前処理（フィルタリング等） |
-| `pack_to_jsonl` | pack 形式 → JSONL 変換（デバッグ・確認用） |
+| `shuffle_psv` | PSV ファイルのシャッフル |
+| `rescore_psv` | 局面の再評価（探索スコア付与） |
+| `preprocess_psv` | PSV ファイルの前処理（qsearch leaf置換等） |
+| `psv_to_jsonl` | PSV 形式 → JSONL 変換（デバッグ・確認用） |
 | `fix_scores` | スコアの補正 |
 
 ### ベンチマーク・分析
@@ -42,7 +42,7 @@ cargo run -p tools --release --bin engine_selfplay -- \
 ### 学習データのシャッフル
 
 ```bash
-cargo run -p tools --release --bin shuffle_pack -- \
+cargo run -p tools --release --bin shuffle_psv -- \
   --input data.pack --output shuffled.pack
 ```
 

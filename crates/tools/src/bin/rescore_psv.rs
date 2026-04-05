@@ -1,4 +1,4 @@
-//! rescore_pack - packファイルの評価値を再評価
+//! rescore_psv - PSVファイルの評価値を再評価
 //!
 //! PackedSfenValueのスコアを別の評価関数やエンジンで再計算する。
 //! NNUEモデルによる内部評価と、外部USIエンジンによる評価の両方をサポート。
@@ -7,27 +7,27 @@
 //!
 //! ```bash
 //! # NNUE静的評価で再スコア（高速）
-//! cargo run --release -p tools --bin rescore_pack -- \
-//!   --input data.pack --output-dir rescored/ \
+//! cargo run --release -p tools --bin rescore_psv -- \
+//!   --input data.psv --output-dir rescored/ \
 //!   --nnue path/to/nn.bin
 //!
 //! # 複数ファイルを処理（glob パターン）
-//! cargo run --release -p tools --bin rescore_pack -- \
+//! cargo run --release -p tools --bin rescore_psv -- \
 //!   --input "data/*.bin" --output-dir rescored/ \
 //!   --nnue path/to/nn.bin
 //!
 //! # qsearch評価で再スコア（より正確）
-//! cargo run --release -p tools --bin rescore_pack -- \
-//!   --input data.pack --output-dir rescored/ \
+//! cargo run --release -p tools --bin rescore_psv -- \
+//!   --input data.psv --output-dir rescored/ \
 //!   --nnue path/to/nn.bin --use-qsearch
 //!
 //! # qsearch leaf置換も同時に実行
-//! cargo run --release -p tools --bin rescore_pack -- \
-//!   --input data.pack --output-dir rescored/ \
+//! cargo run --release -p tools --bin rescore_psv -- \
+//!   --input data.psv --output-dir rescored/ \
 //!   --nnue path/to/nn.bin --apply-qsearch-leaf
 //!
 //! # 深さ指定探索で再スコア（最も正確だが低速）
-//! cargo run --release -p tools --bin rescore_pack -- \
+//! cargo run --release -p tools --bin rescore_psv -- \
 //!   --input "data/*.bin" --output-dir rescored/ \
 //!   --nnue path/to/nn.bin \
 //!   --search-depth 8 \
@@ -35,8 +35,8 @@
 //!   --threads 4
 //!
 //! # 外部USIエンジン（DLshogi系等）で再スコア（知識蒸留用）
-//! cargo run --release -p tools --bin rescore_pack -- \
-//!   --input data.pack --output-dir rescored/ \
+//! cargo run --release -p tools --bin rescore_psv -- \
+//!   --input data.psv --output-dir rescored/ \
 //!   --engine /path/to/dlshogi_aoba/usi/bin/usi \
 //!   --engine-nodes 1 \
 //!   --usi-option "DNN_Model=/path/to/model.onnx" \
@@ -67,15 +67,15 @@ use tools::qsearch_pv::{NnueStacks, qsearch_with_pv_nnue};
 /// 探索用スタックサイズ（64MB）
 const SEARCH_STACK_SIZE: usize = 64 * 1024 * 1024;
 
-/// packファイルの評価値を再評価
+/// PSVファイルの評価値を再評価
 #[derive(Parser)]
 #[command(
-    name = "rescore_pack",
+    name = "rescore_psv",
     version,
-    about = "packファイルの評価値を再評価\n\n内部NNUE評価または外部USIエンジンで局面を再評価するツール"
+    about = "PSVファイルの評価値を再評価\n\n内部NNUE評価または外部USIエンジンで局面を再評価するツール"
 )]
 struct Cli {
-    /// 入力packファイル（複数指定可、globパターン対応）
+    /// 入力PSVファイル（複数指定可、globパターン対応）
     /// 例: --input file1.bin --input file2.bin
     /// 例: --input "data/*.bin"
     #[arg(short, long, required = true, num_args = 1..)]
@@ -293,14 +293,14 @@ fn main() -> Result<()> {
     if use_onnx {
         anyhow::bail!(
             "--onnx-model requires the 'aobazero-onnx' feature.\n\
-             Rebuild with: cargo build --release -p tools --features aobazero-onnx --bin rescore_pack"
+             Rebuild with: cargo build --release -p tools --features aobazero-onnx --bin rescore_psv"
         );
     }
     #[cfg(not(feature = "dlshogi-onnx"))]
     if use_dlshogi_onnx {
         anyhow::bail!(
             "--dlshogi-onnx-model requires the 'dlshogi-onnx' feature.\n\
-             Rebuild with: cargo build --release -p tools --features dlshogi-onnx --bin rescore_pack"
+             Rebuild with: cargo build --release -p tools --features dlshogi-onnx --bin rescore_psv"
         );
     }
 
