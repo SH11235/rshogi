@@ -254,7 +254,7 @@ fn shuffle_chunked(
     // チャンクファイルを開く
     let mut chunk_writers: Vec<BufWriter<File>> = (0..num_chunks)
         .map(|i| {
-            let path = temp_dir.path().join(format!("chunk_{i}.pack"));
+            let path = temp_dir.path().join(format!("chunk_{i}.tmp"));
             File::create(&path)
                 .map(BufWriter::new)
                 .with_context(|| format!("Failed to create chunk file: {}", path.display()))
@@ -311,7 +311,7 @@ fn shuffle_chunked(
             return Ok(());
         }
 
-        let chunk_path = temp_dir.path().join(format!("chunk_{i}.pack"));
+        let chunk_path = temp_dir.path().join(format!("chunk_{i}.tmp"));
 
         // チャンクファイルを読み込み
         let chunk_size = std::fs::metadata(&chunk_path)?.len();
