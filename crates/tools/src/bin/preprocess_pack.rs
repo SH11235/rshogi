@@ -26,7 +26,7 @@ use rayon::prelude::*;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use std::cell::RefCell;
 
@@ -101,7 +101,7 @@ const QSEARCH_ALPHA_INIT: i32 = -30000;
 /// qsearchの初期beta値
 const QSEARCH_BETA_INIT: i32 = 30000;
 
-/// チャンクサイズ（レコード数）。約40MB/チャンク。
+/// チャンクサイズ（レコード数）。chunk バッファ約40MB + results バッファ約40MB = ピーク約80MB/チャンク。
 const CHUNK_SIZE: usize = 1_000_000;
 
 /// I/Oバッファサイズ（8MB）
@@ -156,7 +156,7 @@ fn main() -> Result<()> {
     // Ctrl-Cハンドラを設定
     ctrlc::set_handler(|| {
         eprintln!("\nInterrupted!");
-        INTERRUPTED.store(true, Ordering::Relaxed);
+        INTERRUPTED.store(true, Ordering::Release);
     })
     .context("Failed to set Ctrl-C handler")?;
 
@@ -215,7 +215,7 @@ fn main() -> Result<()> {
     // 処理実行
     process_file(&cli, process_count, use_nnue, opts)?;
 
-    if INTERRUPTED.load(Ordering::Relaxed) {
+    if INTERRUPTED.load(Ordering::Acquire) {
         eprintln!("Note: Processing was interrupted, output may be incomplete");
     } else {
         eprintln!("Output: {}", cli.output.display());
@@ -257,6 +257,26 @@ fn collect_results(
 
 /// ファイルをチャンクストリーミングで処理
 fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, opts: ProcessOptions) -> Result<()> {
+    // 入出力が同一パスならデータ消失を防ぐためエラーにする
+    let in_canonical = cli
+        .input
+        .canonicalize()
+        .with_context(|| format!("Failed to canonicalize input path: {}", cli.input.display()))?;
+    let out_canonical = if cli.output.exists() {
+        Some(cli.output.canonicalize().with_context(|| {
+            format!("Failed to canonicalize output path: {}", cli.output.display())
+        })?)
+    } else {
+        None
+    };
+    if let Some(ref out_path) = out_canonical
+        && in_canonical == *out_path {
+            anyhow::bail!(
+                "Input and output paths resolve to the same file: {}",
+                in_canonical.display()
+            );
+        }
+
     // 進捗バー設定
     let progress = ProgressBar::new(process_count);
     progress.set_style(
@@ -270,9 +290,10 @@ fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, opts: ProcessOpti
         .with_context(|| format!("Failed to open {}", cli.input.display()))?;
     let mut reader = BufReader::with_capacity(IO_BUF_SIZE, in_file);
 
-    // 出力ファイルを開く
-    let out_file = File::create(&cli.output)
-        .with_context(|| format!("Failed to create {}", cli.output.display()))?;
+    // 一時ファイルに書き込み、正常完了時のみ最終出力パスに rename する
+    let tmp_output = cli.output.with_extension("tmp");
+    let out_file = File::create(&tmp_output)
+        .with_context(|| format!("Failed to create {}", tmp_output.display()))?;
     let mut writer = BufWriter::with_capacity(IO_BUF_SIZE, out_file);
 
     if use_nnue {
@@ -281,9 +302,9 @@ fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, opts: ProcessOpti
         eprintln!("Using Material evaluation");
     }
 
-    // カウンタ
-    let error_count = AtomicU64::new(0);
-    let skipped_count = AtomicU64::new(0);
+    // カウンタ（メインスレッドのみで加算するため通常の u64）
+    let mut error_count = 0u64;
+    let mut skipped_count = 0u64;
 
     let verbose = cli.verbose;
     let mut remaining = process_count as usize;
@@ -295,9 +316,11 @@ fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, opts: ProcessOpti
 
     // チャンク単位でストリーミング処理
     while remaining > 0 {
-        if INTERRUPTED.load(Ordering::Relaxed) {
+        if INTERRUPTED.load(Ordering::Acquire) {
             progress.abandon_with_message("Interrupted");
-            writer.flush()?;
+            drop(writer);
+            // 中断時は不完全な一時ファイルを削除
+            let _ = std::fs::remove_file(&tmp_output);
             return Ok(());
         }
 
@@ -324,7 +347,7 @@ fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, opts: ProcessOpti
             chunk
                 .par_iter()
                 .map(|record| {
-                    if INTERRUPTED.load(Ordering::Relaxed) {
+                    if INTERRUPTED.load(Ordering::Acquire) {
                         return ProcessResult::Ok(*record);
                     }
 
@@ -345,7 +368,7 @@ fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, opts: ProcessOpti
             chunk
                 .par_iter()
                 .map(|record| {
-                    if INTERRUPTED.load(Ordering::Relaxed) {
+                    if INTERRUPTED.load(Ordering::Acquire) {
                         return ProcessResult::Ok(*record);
                     }
                     process_record_material(record, &evaluator, opts)
@@ -356,18 +379,23 @@ fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, opts: ProcessOpti
         // 結果を集計・書き出し
         let (ok, skip, err) = collect_results(&results, &mut writer, verbose)?;
         total_written += ok;
-        error_count.fetch_add(err, Ordering::Relaxed);
-        skipped_count.fetch_add(skip, Ordering::Relaxed);
+        error_count += err;
+        skipped_count += skip;
 
         // チャンク処理完了後にまとめて進捗更新
         progress.inc(results.len() as u64);
     }
 
     writer.flush()?;
+    drop(writer);
+    // 正常完了: 一時ファイルを最終出力パスに移動
+    std::fs::rename(&tmp_output, &cli.output).with_context(|| {
+        format!("Failed to rename {} -> {}", tmp_output.display(), cli.output.display())
+    })?;
     progress.finish_with_message("Done");
 
-    let final_errors = error_count.load(Ordering::Relaxed);
-    let final_skipped = skipped_count.load(Ordering::Relaxed);
+    let final_errors = error_count;
+    let final_skipped = skipped_count;
     if final_errors > 0 {
         eprintln!("Note: {final_errors} positions had errors");
     }
