@@ -161,14 +161,14 @@ cargo run -p tools --release --bin engine_selfplay -- \
 
 ```bash
 cargo run -p tools --release --bin shuffle_psv -- \
-  --input data.pack --output shuffled.pack
+  --input data.psv --output shuffled.psv
 ```
 
 ### 再評価（rescore）
 
 ```bash
 cargo run -p tools --release --bin rescore_psv -- \
-  --input data.pack --output rescored.pack \
+  --input data.psv --output rescored.psv \
   --nnue model.nnue --use-qsearch --threads 8
 ```
 
@@ -176,7 +176,7 @@ cargo run -p tools --release --bin rescore_psv -- \
 
 ```bash
 cargo run -p tools --release --bin psv_to_jsonl -- \
-  --input data.pack --output data.jsonl --limit 100
+  --input data.psv --output data.jsonl --limit 100
 ```
 
 ## ベンチマーク

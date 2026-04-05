@@ -23,7 +23,7 @@ NNUE学習用の PackedSfenValue 形式データを処理するツール群。
 
 ```bash
 cargo run -p tools --release --bin shuffle_psv -- \
-  --input data.pack --output shuffled.pack
+  --input data.psv --output shuffled.psv
 ```
 
 | オプション | 説明 | デフォルト |
@@ -39,7 +39,7 @@ cargo run -p tools --release --bin shuffle_psv -- \
 
 ```bash
 cargo run -p tools --release --bin rescore_psv -- \
-  --input data.pack --output rescored.pack \
+  --input data.psv --output rescored.psv \
   --nnue model.nnue --use-qsearch
 ```
 
@@ -61,7 +61,7 @@ qsearch leaf置換を適用。局面をqsearchのPV末端に置換。
 
 ```bash
 cargo run -p tools --release --bin preprocess_psv -- \
-  --input data.pack --output processed.pack \
+  --input data.psv --output processed.psv \
   --nnue model.nnue --rescore
 ```
 
@@ -76,11 +76,11 @@ cargo run -p tools --release --bin preprocess_psv -- \
 
 ### psv_to_jsonl
 
-pack形式をJSONLに変換。デバッグ・内容確認用。
+PSV形式をJSONLに変換。デバッグ・内容確認用。
 
 ```bash
 cargo run -p tools --release --bin psv_to_jsonl -- \
-  --input data.pack --output data.jsonl
+  --input data.psv --output data.jsonl
 ```
 
 出力例：
@@ -105,7 +105,7 @@ cargo run -p tools --release --bin engine_selfplay -- \
 
 # 2. シャッフル
 cargo run -p tools --release --bin shuffle_psv -- \
-  --input runs/selfplay/*.pack --output training_shuffled.pack
+  --input runs/selfplay/*.psv --output training_shuffled.psv
 ```
 
 ### 既存の棋譜から生成した場合
@@ -117,12 +117,12 @@ cargo run -p tools --release --bin shuffle_psv -- \
 
 # 2. スコア付与
 cargo run -p tools --release --bin rescore_psv -- \
-  --input data.pack --output rescored.pack \
+  --input data.psv --output rescored.psv \
   --nnue model.nnue --use-qsearch --threads 8
 
 # 3. シャッフル
 cargo run -p tools --release --bin shuffle_psv -- \
-  --input rescored.pack --output training_shuffled.pack
+  --input rescored.psv --output training_shuffled.psv
 ```
 
 ### qsearch leaf置換を適用する場合
@@ -131,7 +131,7 @@ cargo run -p tools --release --bin shuffle_psv -- \
 
 ```bash
 cargo run -p tools --release --bin preprocess_psv -- \
-  --input data.pack --output processed.pack \
+  --input data.psv --output processed.psv \
   --nnue model.nnue --rescore --skip-in-check
 ```
 

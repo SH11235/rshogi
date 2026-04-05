@@ -43,7 +43,7 @@ cargo run -p tools --release --bin engine_selfplay -- \
 
 ```bash
 cargo run -p tools --release --bin shuffle_psv -- \
-  --input data.pack --output shuffled.pack
+  --input data.psv --output shuffled.psv
 ```
 
 ### ベンチマーク実行
