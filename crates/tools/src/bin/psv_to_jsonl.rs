@@ -1,21 +1,21 @@
-//! pack_to_jsonl - PackedSfenValue形式をJSONL形式に変換
+//! psv_to_jsonl - PackedSfenValue形式をJSONL形式に変換
 //!
-//! YaneuraOuのpack形式（PackedSfenValue）を読み込み、JSONL形式に変換する。
+//! PackedSfenValue（PSV）形式を読み込み、JSONL形式に変換する。
 //!
 //! # 使用例
 //!
 //! ```bash
 //! # 基本的な使用法
-//! cargo run -p tools --bin pack_to_jsonl -- \
-//!   --input data.pack --output train.jsonl
+//! cargo run -p tools --bin psv_to_jsonl -- \
+//!   --input data.psv --output train.jsonl
 //!
 //! # 処理数を制限
-//! cargo run -p tools --bin pack_to_jsonl -- \
-//!   --input data.pack --output train.jsonl --limit 10000
+//! cargo run -p tools --bin psv_to_jsonl -- \
+//!   --input data.psv --output train.jsonl --limit 10000
 //!
 //! # 詳細出力
-//! cargo run -p tools --bin pack_to_jsonl -- \
-//!   --input data.pack --output train.jsonl --verbose
+//! cargo run -p tools --bin psv_to_jsonl -- \
+//!   --input data.psv --output train.jsonl --verbose
 //! ```
 
 use anyhow::{Context, Result};
@@ -31,12 +31,12 @@ use tools::packed_sfen::{PackedSfenValue, move16_to_usi, unpack_sfen};
 
 #[derive(Parser)]
 #[command(
-    name = "pack_to_jsonl",
+    name = "psv_to_jsonl",
     version,
-    about = "PackedSfenValue形式をJSONL形式に変換\n\nYaneuraOuのpack形式を読み込み、SFEN + 評価値のJSONLを出力"
+    about = "PackedSfenValue形式をJSONL形式に変換\n\nPSV形式を読み込み、SFEN + 評価値のJSONLを出力"
 )]
 struct Cli {
-    /// 入力packファイル
+    /// 入力PSVファイル
     #[arg(short, long)]
     input: PathBuf,
 

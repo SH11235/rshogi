@@ -160,14 +160,14 @@ cargo run -p tools --release --bin engine_selfplay -- \
 ### シャッフル
 
 ```bash
-cargo run -p tools --release --bin shuffle_pack -- \
+cargo run -p tools --release --bin shuffle_psv -- \
   --input data.pack --output shuffled.pack
 ```
 
 ### 再評価（rescore）
 
 ```bash
-cargo run -p tools --release --bin rescore_pack -- \
+cargo run -p tools --release --bin rescore_psv -- \
   --input data.pack --output rescored.pack \
   --nnue model.nnue --use-qsearch --threads 8
 ```
@@ -175,7 +175,7 @@ cargo run -p tools --release --bin rescore_pack -- \
 ### 内容確認（JSONL変換）
 
 ```bash
-cargo run -p tools --release --bin pack_to_jsonl -- \
+cargo run -p tools --release --bin psv_to_jsonl -- \
   --input data.pack --output data.jsonl --limit 100
 ```
 

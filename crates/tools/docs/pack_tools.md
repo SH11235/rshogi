@@ -17,12 +17,12 @@ NNUE学習用の PackedSfenValue 形式データを処理するツール群。
 
 ## ツール一覧
 
-### shuffle_pack
+### shuffle_psv
 
 学習データをシャッフル。学習時のバイアスを防ぐために必須。
 
 ```bash
-cargo run -p tools --release --bin shuffle_pack -- \
+cargo run -p tools --release --bin shuffle_psv -- \
   --input data.pack --output shuffled.pack
 ```
 
@@ -33,12 +33,12 @@ cargo run -p tools --release --bin shuffle_pack -- \
 | `--seed` | 乱数シード（再現性） | ランダム |
 | `--chunk-size` | チャンクサイズ（大規模ファイル用） | 0（全読み込み） |
 
-### rescore_pack
+### rescore_psv
 
 局面に探索スコアを付与。既存データの再評価に使用。
 
 ```bash
-cargo run -p tools --release --bin rescore_pack -- \
+cargo run -p tools --release --bin rescore_psv -- \
   --input data.pack --output rescored.pack \
   --nnue model.nnue --use-qsearch
 ```
@@ -55,12 +55,12 @@ cargo run -p tools --release --bin rescore_pack -- \
 | `-t, --threads` | スレッド数（0=自動） | 0 |
 | `--delete-input` | 処理後に入力を削除 | false |
 
-### preprocess_pack
+### preprocess_psv
 
 qsearch leaf置換を適用。局面をqsearchのPV末端に置換。
 
 ```bash
-cargo run -p tools --release --bin preprocess_pack -- \
+cargo run -p tools --release --bin preprocess_psv -- \
   --input data.pack --output processed.pack \
   --nnue model.nnue --rescore
 ```
@@ -74,12 +74,12 @@ cargo run -p tools --release --bin preprocess_pack -- \
 | `--skip-in-check` | 王手局面をスキップ | false |
 | `-t, --threads` | スレッド数（0=自動） | 1 |
 
-### pack_to_jsonl
+### psv_to_jsonl
 
 pack形式をJSONLに変換。デバッグ・内容確認用。
 
 ```bash
-cargo run -p tools --release --bin pack_to_jsonl -- \
+cargo run -p tools --release --bin psv_to_jsonl -- \
   --input data.pack --output data.jsonl
 ```
 
@@ -104,7 +104,7 @@ cargo run -p tools --release --bin engine_selfplay -- \
   --games 1000 --byoyomi 1000
 
 # 2. シャッフル
-cargo run -p tools --release --bin shuffle_pack -- \
+cargo run -p tools --release --bin shuffle_psv -- \
   --input runs/selfplay/*.pack --output training_shuffled.pack
 ```
 
@@ -116,12 +116,12 @@ cargo run -p tools --release --bin shuffle_pack -- \
 # 1. 棋譜から学習データ生成（別途 generate_training_data 等で）
 
 # 2. スコア付与
-cargo run -p tools --release --bin rescore_pack -- \
+cargo run -p tools --release --bin rescore_psv -- \
   --input data.pack --output rescored.pack \
   --nnue model.nnue --use-qsearch --threads 8
 
 # 3. シャッフル
-cargo run -p tools --release --bin shuffle_pack -- \
+cargo run -p tools --release --bin shuffle_psv -- \
   --input rescored.pack --output training_shuffled.pack
 ```
 
@@ -130,7 +130,7 @@ cargo run -p tools --release --bin shuffle_pack -- \
 学習データの質を向上させる前処理：
 
 ```bash
-cargo run -p tools --release --bin preprocess_pack -- \
+cargo run -p tools --release --bin preprocess_psv -- \
   --input data.pack --output processed.pack \
   --nnue model.nnue --rescore --skip-in-check
 ```
