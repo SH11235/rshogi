@@ -1014,7 +1014,8 @@ impl SearchWorker {
 
         // Step 12. A small Probcut idea（YO search<Root> と同一パス）
         {
-            let small_probcut_beta = beta + Value::new(418);
+            let small_probcut_beta =
+                beta + Value::new(self.search_tune_params.small_probcut_beta_margin);
             if tt_data.bound.is_lower_or_exact()
                 && tt_data.depth >= depth - 4
                 && tt_value_root != Value::NONE
@@ -2188,7 +2189,9 @@ impl SearchWorker {
                 if cutoff_tt_move.is_some() && value.raw() >= beta.raw() {
                     // quiet ttMoveがfail-highした場合、quiet_historiesを更新
                     if !cutoff_tt_capture {
-                        let bonus = (130 * depth - 71).min(1043);
+                        let bonus = (ctx.tune_params.tt_cutoff_quiet_bonus_depth_mult * depth
+                            + ctx.tune_params.tt_cutoff_quiet_bonus_offset)
+                            .min(ctx.tune_params.tt_cutoff_quiet_bonus_max);
                         {
                             // SAFETY: 単一スレッド内で使用、他の参照と同時保持しない
                             let h = unsafe { ctx.history.as_mut_unchecked() };
@@ -2431,7 +2434,7 @@ impl SearchWorker {
         // TTのLower boundが十分深く、probCutBeta以上の値を持つなら即座にカット。
         // in_check時もこのステップは実行される（YOではgoto moves_loopの先で実行）。
         {
-            let small_probcut_beta = beta + Value::new(418);
+            let small_probcut_beta = beta + Value::new(ctx.tune_params.small_probcut_beta_margin);
             if tt_data.bound.is_lower_or_exact()
                 && tt_data.depth >= depth - 4
                 && tt_value != Value::NONE

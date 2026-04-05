@@ -342,6 +342,18 @@ pub struct SearchTuneParams {
     // =========================================================================
     /// TT cutoff 時の continuation history ペナルティ
     pub tt_cutoff_cont_hist_penalty: i32,
+    /// TT cutoff quiet bonus: depth 係数
+    pub tt_cutoff_quiet_bonus_depth_mult: i32,
+    /// TT cutoff quiet bonus: オフセット
+    pub tt_cutoff_quiet_bonus_offset: i32,
+    /// TT cutoff quiet bonus: 上限値
+    pub tt_cutoff_quiet_bonus_max: i32,
+
+    // =========================================================================
+    // Group E2: Small ProbCut
+    // =========================================================================
+    /// Small ProbCut: beta マージン
+    pub small_probcut_beta_margin: i32,
 
     // =========================================================================
     // Group F: Step 6 static eval
@@ -1248,6 +1260,31 @@ const SPSA_OPTION_SPECS: &[SearchTuneOptionSpec] = &[
         min: -8192,
         max: 0,
     },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_TT_CUTOFF_QUIET_BONUS_DEPTH_MULT",
+        default: 130,
+        min: 0,
+        max: 1024,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_TT_CUTOFF_QUIET_BONUS_OFFSET",
+        default: -71,
+        min: -512,
+        max: 512,
+    },
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_TT_CUTOFF_QUIET_BONUS_MAX",
+        default: 1043,
+        min: 0,
+        max: 8192,
+    },
+    // Group E2: Small ProbCut
+    SearchTuneOptionSpec {
+        usi_name: "SPSA_SMALL_PROBCUT_BETA_MARGIN",
+        default: 418,
+        min: 0,
+        max: 2048,
+    },
     // Group F: Step 6 static eval
     SearchTuneOptionSpec {
         usi_name: "SPSA_EVAL_DIFF_CLAMP_MIN",
@@ -1523,6 +1560,11 @@ impl Default for SearchTuneParams {
             lmr_table_coeff: 2809,
             // Group E
             tt_cutoff_cont_hist_penalty: -2142,
+            tt_cutoff_quiet_bonus_depth_mult: 130,
+            tt_cutoff_quiet_bonus_offset: -71,
+            tt_cutoff_quiet_bonus_max: 1043,
+            // Group E2
+            small_probcut_beta_margin: 418,
             // Group F
             eval_diff_clamp_min: -200,
             eval_diff_clamp_max: 156,
@@ -1896,6 +1938,16 @@ impl SearchTuneParams {
         try_apply!("SPSA_LMR_TABLE_COEFF", lmr_table_coeff, 1024, 8192);
         // Group E
         try_apply!("SPSA_TT_CUTOFF_CONT_PENALTY", tt_cutoff_cont_hist_penalty, -8192, 0);
+        try_apply!(
+            "SPSA_TT_CUTOFF_QUIET_BONUS_DEPTH_MULT",
+            tt_cutoff_quiet_bonus_depth_mult,
+            0,
+            1024
+        );
+        try_apply!("SPSA_TT_CUTOFF_QUIET_BONUS_OFFSET", tt_cutoff_quiet_bonus_offset, -512, 512);
+        try_apply!("SPSA_TT_CUTOFF_QUIET_BONUS_MAX", tt_cutoff_quiet_bonus_max, 0, 8192);
+        // Group E2
+        try_apply!("SPSA_SMALL_PROBCUT_BETA_MARGIN", small_probcut_beta_margin, 0, 2048);
         // Group F
         try_apply!("SPSA_EVAL_DIFF_CLAMP_MIN", eval_diff_clamp_min, -1024, 0);
         try_apply!("SPSA_EVAL_DIFF_CLAMP_MAX", eval_diff_clamp_max, 0, 1024);
