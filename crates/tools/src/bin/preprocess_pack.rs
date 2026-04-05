@@ -270,12 +270,13 @@ fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, opts: ProcessOpti
         None
     };
     if let Some(ref out_path) = out_canonical
-        && in_canonical == *out_path {
-            anyhow::bail!(
-                "Input and output paths resolve to the same file: {}",
-                in_canonical.display()
-            );
-        }
+        && in_canonical == *out_path
+    {
+        anyhow::bail!(
+            "Input and output paths resolve to the same file: {}",
+            in_canonical.display()
+        );
+    }
 
     // 進捗バー設定
     let progress = ProgressBar::new(process_count);
@@ -310,6 +311,7 @@ fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, opts: ProcessOpti
     let mut remaining = process_count as usize;
     let mut chunk: Vec<[u8; PackedSfenValue::SIZE]> = Vec::with_capacity(CHUNK_SIZE);
     let mut total_written = 0u64;
+    let mut total_processed = 0u64;
     let mut buffer = [0u8; PackedSfenValue::SIZE];
 
     progress.set_message("Processing...");
@@ -377,13 +379,15 @@ fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, opts: ProcessOpti
         };
 
         // 結果を集計・書き出し
+        let chunk_count = results.len() as u64;
         let (ok, skip, err) = collect_results(&results, &mut writer, verbose)?;
         total_written += ok;
         error_count += err;
         skipped_count += skip;
+        total_processed += chunk_count;
 
         // チャンク処理完了後にまとめて進捗更新
-        progress.inc(results.len() as u64);
+        progress.inc(chunk_count);
     }
 
     writer.flush()?;
@@ -392,7 +396,13 @@ fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, opts: ProcessOpti
     std::fs::rename(&tmp_output, &cli.output).with_context(|| {
         format!("Failed to rename {} -> {}", tmp_output.display(), cli.output.display())
     })?;
+    // EOF で早期終了した場合でも進捗バーが100%になるよう実処理件数に合わせる
+    progress.set_length(total_processed);
     progress.finish_with_message("Done");
+
+    if total_processed != process_count {
+        eprintln!("Note: processed {} records (expected {})", total_processed, process_count);
+    }
 
     let final_errors = error_count;
     let final_skipped = skipped_count;
@@ -400,8 +410,15 @@ fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, opts: ProcessOpti
         eprintln!("Note: {final_errors} positions had errors");
     }
     if final_skipped > 0 {
-        let total = process_count as f64;
-        eprintln!("Skipped: {} ({:.2}%)", final_skipped, final_skipped as f64 / total * 100.0);
+        if total_processed > 0 {
+            eprintln!(
+                "Skipped: {} ({:.2}%)",
+                final_skipped,
+                final_skipped as f64 / total_processed as f64 * 100.0
+            );
+        } else {
+            eprintln!("Skipped: {}", final_skipped);
+        }
     }
 
     eprintln!("Wrote {} records", total_written);
