@@ -26,7 +26,7 @@ use rayon::prelude::*;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use std::cell::RefCell;
 
@@ -101,6 +101,12 @@ const QSEARCH_ALPHA_INIT: i32 = -30000;
 /// qsearchの初期beta値
 const QSEARCH_BETA_INIT: i32 = 30000;
 
+/// チャンクサイズ（レコード数）。chunk バッファ約40MB + results バッファ約40MB = ピーク約80MB/チャンク。
+const CHUNK_SIZE: usize = 1_000_000;
+
+/// I/Oバッファサイズ（8MB）
+const IO_BUF_SIZE: usize = 8 * 1024 * 1024;
+
 /// 処理結果
 enum ProcessResult {
     /// 正常に処理完了
@@ -150,7 +156,7 @@ fn main() -> Result<()> {
     // Ctrl-Cハンドラを設定
     ctrlc::set_handler(|| {
         eprintln!("\nInterrupted!");
-        INTERRUPTED.store(true, Ordering::SeqCst);
+        INTERRUPTED.store(true, Ordering::Release);
     })
     .context("Failed to set Ctrl-C handler")?;
 
@@ -209,7 +215,7 @@ fn main() -> Result<()> {
     // 処理実行
     process_file(&cli, process_count, use_nnue, opts)?;
 
-    if INTERRUPTED.load(Ordering::SeqCst) {
+    if INTERRUPTED.load(Ordering::Acquire) {
         eprintln!("Note: Processing was interrupted, output may be incomplete");
     } else {
         eprintln!("Output: {}", cli.output.display());
@@ -218,8 +224,60 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// ファイルを処理
+/// ProcessResult を集計し、出力バッファに書き込む共通ハンドラ
+///
+/// 戻り値: (ok_count, skip_count, error_count)
+fn collect_results(
+    results: &[ProcessResult],
+    writer: &mut BufWriter<File>,
+    verbose: bool,
+) -> Result<(u64, u64, u64)> {
+    let mut ok_count = 0u64;
+    let mut skip_count = 0u64;
+    let mut err_count = 0u64;
+    for result in results {
+        match result {
+            ProcessResult::Ok(new_record) => {
+                writer.write_all(new_record)?;
+                ok_count += 1;
+            }
+            ProcessResult::Skip => {
+                skip_count += 1;
+            }
+            ProcessResult::Error(e) => {
+                err_count += 1;
+                if verbose {
+                    eprintln!("Error processing record: {e}");
+                }
+            }
+        }
+    }
+    Ok((ok_count, skip_count, err_count))
+}
+
+/// ファイルをチャンクストリーミングで処理
 fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, opts: ProcessOptions) -> Result<()> {
+    // 入出力が同一パスならデータ消失を防ぐためエラーにする
+    let in_canonical = cli
+        .input
+        .canonicalize()
+        .with_context(|| format!("Failed to canonicalize input path: {}", cli.input.display()))?;
+    let out_canonical = if cli.output.exists() {
+        Some(cli.output.canonicalize().with_context(|| {
+            format!("Failed to canonicalize output path: {}", cli.output.display())
+        })?)
+    } else {
+        None
+    };
+    if let Some(ref out_path) = out_canonical
+        && in_canonical == *out_path
+    {
+        anyhow::bail!(
+            "Input and output paths resolve to the same file: {}",
+            in_canonical.display()
+        );
+    }
+
     // 進捗バー設定
     let progress = ProgressBar::new(process_count);
     progress.set_style(
@@ -231,149 +289,139 @@ fn process_file(cli: &Cli, process_count: u64, use_nnue: bool, opts: ProcessOpti
     // 入力ファイルを読み込み
     let in_file = File::open(&cli.input)
         .with_context(|| format!("Failed to open {}", cli.input.display()))?;
-    let mut reader = BufReader::new(in_file);
+    let mut reader = BufReader::with_capacity(IO_BUF_SIZE, in_file);
 
-    // 全レコードを読み込み
-    let mut records: Vec<[u8; PackedSfenValue::SIZE]> = Vec::with_capacity(process_count as usize);
+    // 一時ファイルに書き込み、正常完了時のみ最終出力パスに rename する
+    let tmp_output = cli.output.with_extension("tmp");
+    let out_file = File::create(&tmp_output)
+        .with_context(|| format!("Failed to create {}", tmp_output.display()))?;
+    let mut writer = BufWriter::with_capacity(IO_BUF_SIZE, out_file);
+
+    if use_nnue {
+        eprintln!("Using NNUE evaluation (with incremental updates)");
+    } else {
+        eprintln!("Using Material evaluation");
+    }
+
+    // カウンタ（メインスレッドのみで加算するため通常の u64）
+    let mut error_count = 0u64;
+    let mut skipped_count = 0u64;
+
+    let verbose = cli.verbose;
+    let mut remaining = process_count as usize;
+    let mut chunk: Vec<[u8; PackedSfenValue::SIZE]> = Vec::with_capacity(CHUNK_SIZE);
+    let mut total_written = 0u64;
+    let mut total_processed = 0u64;
     let mut buffer = [0u8; PackedSfenValue::SIZE];
 
-    progress.set_message("Reading...");
-    for _ in 0..process_count {
-        if INTERRUPTED.load(Ordering::SeqCst) {
+    progress.set_message("Processing...");
+
+    // チャンク単位でストリーミング処理
+    while remaining > 0 {
+        if INTERRUPTED.load(Ordering::Acquire) {
             progress.abandon_with_message("Interrupted");
+            drop(writer);
+            // 中断時は不完全な一時ファイルを削除
+            let _ = std::fs::remove_file(&tmp_output);
             return Ok(());
         }
 
-        match reader.read_exact(&mut buffer) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(e.into()),
+        // チャンクを読み込み
+        chunk.clear();
+        let chunk_target = remaining.min(CHUNK_SIZE);
+        for _ in 0..chunk_target {
+            match reader.read_exact(&mut buffer) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e.into()),
+            }
+            chunk.push(buffer);
         }
 
-        records.push(buffer);
+        if chunk.is_empty() {
+            break;
+        }
+
+        remaining -= chunk.len();
+
+        // 並列処理
+        let results: Vec<ProcessResult> = if use_nnue {
+            chunk
+                .par_iter()
+                .map(|record| {
+                    if INTERRUPTED.load(Ordering::Acquire) {
+                        return ProcessResult::Ok(*record);
+                    }
+
+                    // スレッドローカルでNnueStacksを管理
+                    thread_local! {
+                        static NNUE_STACKS: RefCell<NnueStacks> = RefCell::new(NnueStacks::new());
+                    }
+
+                    NNUE_STACKS.with(|stacks| {
+                        let mut stacks = stacks.borrow_mut();
+                        stacks.reset();
+                        process_record_nnue(record, &mut stacks, opts)
+                    })
+                })
+                .collect()
+        } else {
+            let evaluator = MaterialEvaluator;
+            chunk
+                .par_iter()
+                .map(|record| {
+                    if INTERRUPTED.load(Ordering::Acquire) {
+                        return ProcessResult::Ok(*record);
+                    }
+                    process_record_material(record, &evaluator, opts)
+                })
+                .collect()
+        };
+
+        // 結果を集計・書き出し
+        let chunk_count = results.len() as u64;
+        let (ok, skip, err) = collect_results(&results, &mut writer, verbose)?;
+        total_written += ok;
+        error_count += err;
+        skipped_count += skip;
+        total_processed += chunk_count;
+
+        // チャンク処理完了後にまとめて進捗更新
+        progress.inc(chunk_count);
     }
 
-    let actual_count = records.len();
-    eprintln!("Read {actual_count} records");
-
-    // カウンタ
-    let error_count = AtomicU64::new(0);
-    let processed_count = AtomicU64::new(0);
-    let skipped_count = AtomicU64::new(0);
-
-    // qsearch leaf置換を並列で適用
-    progress.set_message("Processing...");
-    let verbose = cli.verbose;
-
-    // 処理関数を選択
-    let processed_records: Vec<[u8; PackedSfenValue::SIZE]> = if use_nnue {
-        eprintln!("Using NNUE evaluation (with incremental updates)");
-        records
-            .par_iter()
-            .filter_map(|record| {
-                if INTERRUPTED.load(Ordering::SeqCst) {
-                    return Some(*record);
-                }
-
-                // スレッドローカルでNnueStacksを管理
-                thread_local! {
-                    static NNUE_STACKS: RefCell<NnueStacks> = RefCell::new(NnueStacks::new());
-                }
-
-                let result = NNUE_STACKS.with(|stacks| {
-                    let mut stacks = stacks.borrow_mut();
-                    stacks.reset();
-                    process_record_nnue(record, &mut stacks, opts)
-                });
-
-                match result {
-                    ProcessResult::Ok(new_record) => {
-                        processed_count.fetch_add(1, Ordering::Relaxed);
-                        progress.inc(1);
-                        Some(new_record)
-                    }
-                    ProcessResult::Skip => {
-                        skipped_count.fetch_add(1, Ordering::Relaxed);
-                        progress.inc(1);
-                        None
-                    }
-                    ProcessResult::Error(e) => {
-                        error_count.fetch_add(1, Ordering::Relaxed);
-                        if verbose {
-                            eprintln!("Error processing record: {e}");
-                        }
-                        progress.inc(1);
-                        None
-                    }
-                }
-            })
-            .collect()
-    } else {
-        eprintln!("Using Material evaluation");
-        let evaluator = MaterialEvaluator;
-        records
-            .par_iter()
-            .filter_map(|record| {
-                if INTERRUPTED.load(Ordering::SeqCst) {
-                    return Some(*record);
-                }
-
-                let result = process_record_material(record, &evaluator, opts);
-
-                match result {
-                    ProcessResult::Ok(new_record) => {
-                        processed_count.fetch_add(1, Ordering::Relaxed);
-                        progress.inc(1);
-                        Some(new_record)
-                    }
-                    ProcessResult::Skip => {
-                        skipped_count.fetch_add(1, Ordering::Relaxed);
-                        progress.inc(1);
-                        None
-                    }
-                    ProcessResult::Error(e) => {
-                        error_count.fetch_add(1, Ordering::Relaxed);
-                        if verbose {
-                            eprintln!("Error processing record: {e}");
-                        }
-                        progress.inc(1);
-                        None
-                    }
-                }
-            })
-            .collect()
-    };
-
+    writer.flush()?;
+    drop(writer);
+    // 正常完了: 一時ファイルを最終出力パスに移動
+    std::fs::rename(&tmp_output, &cli.output).with_context(|| {
+        format!("Failed to rename {} -> {}", tmp_output.display(), cli.output.display())
+    })?;
+    // EOF で早期終了した場合でも進捗バーが100%になるよう実処理件数に合わせる
+    progress.set_length(total_processed);
     progress.finish_with_message("Done");
 
-    let final_errors = error_count.load(Ordering::SeqCst);
-    let final_skipped = skipped_count.load(Ordering::SeqCst);
+    if total_processed != process_count {
+        eprintln!("Note: processed {} records (expected {})", total_processed, process_count);
+    }
+
+    let final_errors = error_count;
+    let final_skipped = skipped_count;
     if final_errors > 0 {
         eprintln!("Note: {final_errors} positions had errors");
     }
     if final_skipped > 0 {
-        eprintln!(
-            "Skipped: {} ({:.2}%)",
-            final_skipped,
-            final_skipped as f64 / actual_count as f64 * 100.0
-        );
-    }
-
-    // 出力ファイルに書き込み
-    eprintln!("Writing output...");
-    let out_file = File::create(&cli.output)
-        .with_context(|| format!("Failed to create {}", cli.output.display()))?;
-    let mut writer = BufWriter::new(out_file);
-
-    for record in &processed_records {
-        if INTERRUPTED.load(Ordering::SeqCst) {
-            break;
+        if total_processed > 0 {
+            eprintln!(
+                "Skipped: {} ({:.2}%)",
+                final_skipped,
+                final_skipped as f64 / total_processed as f64 * 100.0
+            );
+        } else {
+            eprintln!("Skipped: {}", final_skipped);
         }
-        writer.write_all(record)?;
     }
 
-    writer.flush()?;
-    eprintln!("Wrote {} records", processed_records.len());
+    eprintln!("Wrote {} records", total_written);
 
     Ok(())
 }
