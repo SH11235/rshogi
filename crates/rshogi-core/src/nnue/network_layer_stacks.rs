@@ -153,21 +153,45 @@ impl NetworkLayerStacks {
         let _ft_hash = u32::from_le_bytes(buf4);
 
         // Feature Transformer を読み込み（圧縮形式を自動検出）
+        // nnue-psqt/nnue-threat feature 有効時は read_psqt/read_threat_weights で変更するため mut
+        #[cfg(any(feature = "nnue-psqt", feature = "nnue-threat"))]
         let mut feature_transformer = FeatureTransformerLayerStacks::read_leb128(reader)?;
+        #[cfg(not(any(feature = "nnue-psqt", feature = "nnue-threat")))]
+        let feature_transformer = FeatureTransformerLayerStacks::read_leb128(reader)?;
 
         // PSQT 読み込み:
         // - psqt_override == Some(true): USI オプションで PSQT 強制 ON（arch_str を無視）
         // - psqt_override == Some(false): USI オプションで PSQT 強制 OFF（arch_str を無視）
         // - psqt_override == None: arch_str から自動検出
-        let has_psqt = psqt_override.unwrap_or_else(|| arch_str.contains("PSQT="));
-        if has_psqt {
-            feature_transformer.read_psqt(reader)?;
+        #[cfg(feature = "nnue-psqt")]
+        {
+            let has_psqt = psqt_override.unwrap_or_else(|| arch_str.contains("PSQT="));
+            if has_psqt {
+                feature_transformer.read_psqt(reader)?;
+            }
+        }
+        #[cfg(not(feature = "nnue-psqt"))]
+        if psqt_override.unwrap_or_else(|| arch_str.contains("PSQT=")) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "PSQT model requires nnue-psqt feature",
+            ));
         }
 
         // Threat 読み込み（arch_str に "Threat=" があれば）
-        let has_threat = arch_str.contains("Threat=");
-        if has_threat {
-            feature_transformer.read_threat_weights(reader)?;
+        #[cfg(feature = "nnue-threat")]
+        {
+            let has_threat = arch_str.contains("Threat=");
+            if has_threat {
+                feature_transformer.read_threat_weights(reader)?;
+            }
+        }
+        #[cfg(not(feature = "nnue-threat"))]
+        if arch_str.contains("Threat=") {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Threat model requires nnue-threat feature",
+            ));
         }
 
         // LayerStacks を読み込み（FC層は常に非圧縮）
@@ -271,6 +295,7 @@ impl NetworkLayerStacks {
         // SAFETY: 直後のsqr_clipped_relu_transformで全要素が上書きされる
         let mut transformed: Aligned<[u8; NNUE_PYTORCH_L1]> = unsafe { Aligned::new_uninit() };
 
+        #[cfg(feature = "nnue-threat")]
         if self.feature_transformer.has_threat {
             // piece_acc + threat_acc を結合してから SCReLU
             let (us_threat, them_threat) = if side_to_move == Color::Black {
@@ -288,6 +313,10 @@ impl NetworkLayerStacks {
         } else {
             sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
         }
+        #[cfg(not(feature = "nnue-threat"))]
+        {
+            sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
+        }
 
         // LayerStacks で評価
         let raw_score = self.layer_stacks.evaluate_raw(bucket_index, &transformed.0);
@@ -295,6 +324,7 @@ impl NetworkLayerStacks {
         // PSQT ショートカット (Stockfish 準拠: (stm - nstm) / 2)
         // 各駒は両視点に逆符号で寄与するため、stm - nstm は正味の配置価値を
         // 約2倍にカウントする。/2 はこの二重カウントを補正する正規化。
+        #[cfg(feature = "nnue-psqt")]
         let psqt_value = if self.feature_transformer.has_psqt {
             let stm = side_to_move as usize;
             let nstm = (!side_to_move) as usize;
@@ -303,6 +333,8 @@ impl NetworkLayerStacks {
         } else {
             0
         };
+        #[cfg(not(feature = "nnue-psqt"))]
+        let psqt_value = 0;
 
         let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
         Value::new(raw_score.saturating_add(psqt_value) / fv_scale)
@@ -339,6 +371,7 @@ impl NetworkLayerStacks {
 
         // Threat 結合 (evaluate_with_bucket と同一ロジック)
         let mut transformed: Aligned<[u8; NNUE_PYTORCH_L1]> = Aligned([0u8; NNUE_PYTORCH_L1]);
+        #[cfg(feature = "nnue-threat")]
         if self.feature_transformer.has_threat {
             let (us_threat, them_threat) = if side_to_move == Color::Black {
                 (acc.get_threat(Color::Black as usize), acc.get_threat(Color::White as usize))
@@ -356,6 +389,10 @@ impl NetworkLayerStacks {
             sqr_clipped_relu_transform(&us_combined, &them_combined, &mut transformed.0);
         } else {
             // SqrClippedReLU変換
+            sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
+        }
+        #[cfg(not(feature = "nnue-threat"))]
+        {
             sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
         }
 
@@ -380,6 +417,7 @@ impl NetworkLayerStacks {
         info!("[NNUE Eval] raw_score (with skip): {raw_score}");
 
         // PSQT ショートカット
+        #[cfg(feature = "nnue-psqt")]
         let psqt_value = if self.feature_transformer.has_psqt {
             let stm = side_to_move as usize;
             let nstm = (!side_to_move) as usize;
@@ -398,6 +436,11 @@ impl NetworkLayerStacks {
             v
         } else {
             info!("[NNUE Eval] PSQT: disabled");
+            0
+        };
+        #[cfg(not(feature = "nnue-psqt"))]
+        let psqt_value = {
+            info!("[NNUE Eval] PSQT: disabled (feature not enabled)");
             0
         };
 

@@ -53,6 +53,7 @@ pub mod piece_list;
 pub mod prelude;
 pub mod spec;
 pub mod stats;
+#[cfg(feature = "nnue-threat")]
 pub(crate) mod threat_features;
 
 pub use accumulator::{Accumulator, AccumulatorStack, ChangedBonaPiece, DirtyPiece, StackEntry};

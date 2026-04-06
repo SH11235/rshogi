@@ -4,7 +4,9 @@
 //! 既存の Accumulator（256次元、HalfKP用）とは別に管理する。
 
 use super::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_PATH_LENGTH};
-use super::constants::{NNUE_PYTORCH_L1, NUM_LAYER_STACK_BUCKETS};
+use super::constants::NNUE_PYTORCH_L1;
+#[cfg(feature = "nnue-psqt")]
+use super::constants::NUM_LAYER_STACK_BUCKETS;
 use crate::types::{Color, MAX_PLY, Square};
 
 /// LayerStacks用アキュムレータ（1536次元）
@@ -16,13 +18,13 @@ pub struct AccumulatorLayerStacks {
     pub accumulation: [[i16; NNUE_PYTORCH_L1]; 2],
 
     /// Threat アキュムレータ [perspective][dimension]
-    /// Threat weights (i8) の累積値。has_threat == false の場合はゼロのまま使用されない。
-    /// 評価時に piece accumulation と加算して SCReLU に入力する。
+    /// Threat weights (i8) の累積値。評価時に piece accumulation と加算して SCReLU に入力する。
+    #[cfg(feature = "nnue-threat")]
     pub threat_accumulation: [[i16; NNUE_PYTORCH_L1]; 2],
 
     /// PSQT アキュムレータ [perspective][bucket]
     /// 各駒の PSQT 重みを視点ごとに累積する。
-    /// has_psqt == false の場合はゼロのまま使用されない。
+    #[cfg(feature = "nnue-psqt")]
     pub psqt_accumulation: [[i32; NUM_LAYER_STACK_BUCKETS]; 2],
 
     /// 計算済みフラグ
@@ -37,7 +39,9 @@ impl AccumulatorLayerStacks {
     pub fn new() -> Self {
         Self {
             accumulation: [[0; NNUE_PYTORCH_L1]; 2],
+            #[cfg(feature = "nnue-threat")]
             threat_accumulation: [[0; NNUE_PYTORCH_L1]; 2],
+            #[cfg(feature = "nnue-psqt")]
             psqt_accumulation: [[0; NUM_LAYER_STACK_BUCKETS]; 2],
             computed_accumulation: false,
             computed_score: false,
@@ -62,6 +66,7 @@ impl AccumulatorLayerStacks {
     }
 
     /// 指定視点の Threat 累積値を取得
+    #[cfg(feature = "nnue-threat")]
     #[inline]
     pub fn get_threat(&self, perspective: usize) -> &[i16; NNUE_PYTORCH_L1] {
         debug_assert!(perspective < 2);
@@ -69,6 +74,7 @@ impl AccumulatorLayerStacks {
     }
 
     /// 指定視点の Threat 累積値を取得（可変）
+    #[cfg(feature = "nnue-threat")]
     #[inline]
     pub fn get_threat_mut(&mut self, perspective: usize) -> &mut [i16; NNUE_PYTORCH_L1] {
         debug_assert!(perspective < 2);

@@ -35,6 +35,10 @@ tt-trace = ["rshogi-core/tt-trace"]
 layerstack-only = ["rshogi-core/layerstack-only"]
 # NNUE 詳細診断ログ（Golden Forward テスト用）
 diagnostics = ["rshogi-core/diagnostics"]
+# NNUE PSQT ショートカット対応
+nnue-psqt = ["rshogi-core/nnue-psqt"]
+# NNUE Threat 特徴量対応
+nnue-threat = ["rshogi-core/nnue-threat"]
 
 [[bin]]
 name = "rshogi-usi"

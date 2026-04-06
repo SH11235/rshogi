@@ -76,3 +76,6 @@ logs/
 *.njsproj
 *.sln
 *.sw?
+
+slides
+

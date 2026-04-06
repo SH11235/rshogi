@@ -77,6 +77,12 @@ search-no-pass-rules = []
 # LayerStack 専用ビルド（大会向け production 用）
 # HalfKP/HalfKA/HalfKA_hm のコードを除去し、evaluate_dispatch の icache footprint を削減
 layerstack-only = []
+# NNUE PSQT ショートカット対応
+# 無効時: AccumulatorLayerStacks から psqt_accumulation を除去、PSQT モデル読み込み不可
+nnue-psqt = []
+# NNUE Threat 特徴量対応
+# 無効時: AccumulatorLayerStacks から threat_accumulation を除去 (-6KB/entry)、Threat モデル読み込み不可
+nnue-threat = []
 
 [lib]
 name = "rshogi_core"

@@ -130,11 +130,15 @@ fn main() -> Result<()> {
                     if diffs > 0 {
                         eprintln!("  piece_acc[{p}]: {diffs}/1536 differ");
                     }
-                    let rt = acc_refresh.get_threat(p);
-                    let ut = acc_update.get_threat(p);
-                    let tdiffs: usize = rt.iter().zip(ut.iter()).filter(|(a, b)| a != b).count();
-                    if tdiffs > 0 {
-                        eprintln!("  threat_acc[{p}]: {tdiffs}/1536 differ");
+                    #[cfg(feature = "nnue-threat")]
+                    {
+                        let rt = acc_refresh.get_threat(p);
+                        let ut = acc_update.get_threat(p);
+                        let tdiffs: usize =
+                            rt.iter().zip(ut.iter()).filter(|(a, b)| a != b).count();
+                        if tdiffs > 0 {
+                            eprintln!("  threat_acc[{p}]: {tdiffs}/1536 differ");
+                        }
                     }
                 }
 
