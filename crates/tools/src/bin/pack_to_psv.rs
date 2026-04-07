@@ -27,11 +27,11 @@
 ///   --input-dir data/suisho11ab_50k_100k_nodes --output train.psv
 /// ```
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use clap::Parser;
+use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::position::Position;
@@ -143,6 +143,7 @@ fn convert_game_result(pack_result: u8, stm: Color) -> i8 {
     }
 }
 
+#[derive(Default)]
 struct FileStats {
     games: u64,
     positions: u64,
@@ -205,6 +206,7 @@ fn process_game(
 
         if is_end_marker(move16) {
             pack_game_result = (move16 & 0x7F) as u8;
+            // 終局理由 (u8) はフォーマット上存在するが PSV には不要のため読み飛ばす
             let _reason = reader.read_u8()?;
             break;
         }
@@ -272,41 +274,68 @@ fn process_game(
 }
 
 /// 1ファイル全体を処理し、PSV バイト列と統計を返す
-fn process_file(
-    path: &Path,
-    max_games: u64,
-    global_games: &AtomicU64,
-) -> io::Result<(Vec<u8>, FileStats)> {
-    let mut file = BufReader::new(File::open(path)?);
+fn process_file(path: &Path) -> io::Result<(Vec<u8>, FileStats)> {
     let mut data = Vec::new();
-    file.read_to_end(&mut data)?;
+    File::open(path)?.read_to_end(&mut data)?;
 
     let mut reader = PackReader::new(data);
     let mut output = Vec::new();
-    let mut stats = FileStats {
-        games: 0,
-        positions: 0,
-        move_errors: 0,
-        file_errors: 0,
-    };
+    let mut stats = FileStats::default();
 
     while !reader.eof() {
-        if max_games > 0 && global_games.load(Ordering::Relaxed) >= max_games {
-            break;
-        }
-
         if let Err(e) = process_game(&mut reader, &mut output, &mut stats) {
             eprintln!("  対局パースエラー ({}): {e}", path.display());
             stats.file_errors += 1;
             break;
         }
-
-        if max_games > 0 {
-            global_games.fetch_add(1, Ordering::Relaxed);
-        }
     }
 
     Ok((output, stats))
+}
+
+/// 1ファイルをストリーミング処理（max_games 制限あり用）
+fn process_file_streaming(
+    path: &Path,
+    writer: &mut BufWriter<File>,
+    max_games: u64,
+    current_games: &mut u64,
+) -> io::Result<FileStats> {
+    eprintln!("Reading: {}", path.display());
+
+    let mut data = Vec::new();
+    File::open(path)?.read_to_end(&mut data)?;
+
+    let mut reader = PackReader::new(data);
+    let mut output = Vec::new();
+    let mut stats = FileStats::default();
+    let start = std::time::Instant::now();
+
+    while !reader.eof() {
+        if max_games > 0 && *current_games >= max_games {
+            break;
+        }
+
+        output.clear();
+        if let Err(e) = process_game(&mut reader, &mut output, &mut stats) {
+            eprintln!("  対局パースエラー (game {}): {e}", *current_games + stats.file_errors + 1);
+            stats.file_errors += 1;
+            break;
+        }
+
+        if !output.is_empty() {
+            writer.write_all(&output)?;
+        }
+
+        // stats.games が増えた場合のみカウント（move_errors で早期終了した対局は数えない）
+        *current_games = stats.games;
+
+        if stats.games.is_multiple_of(10000) && stats.games > 0 {
+            let elapsed = start.elapsed().as_secs_f64();
+            eprintln!("  {} games, {} positions, {:.1} sec", stats.games, stats.positions, elapsed,);
+        }
+    }
+
+    Ok(stats)
 }
 
 fn main() -> io::Result<()> {
@@ -332,17 +361,7 @@ fn main() -> io::Result<()> {
     }
 
     let start = std::time::Instant::now();
-    let global_games = AtomicU64::new(0);
 
-    eprintln!("Processing {} files...", paths.len());
-
-    // ファイル単位で rayon 並列処理
-    let results: Vec<io::Result<(Vec<u8>, FileStats)>> = paths
-        .par_iter()
-        .map(|path| process_file(path, args.max_games, &global_games))
-        .collect();
-
-    // 順次書き出し + 統計集約
     let out_file = File::create(&args.output)?;
     let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, out_file);
 
@@ -351,15 +370,50 @@ fn main() -> io::Result<()> {
     let mut total_move_errors = 0u64;
     let mut total_file_errors = 0u64;
 
-    for result in results {
-        let (output, stats) = result?;
-        if !output.is_empty() {
-            writer.write_all(&output)?;
+    if args.max_games > 0 {
+        // max_games 指定時: ストリーミング逐次処理（早期終了とメモリ制限のため）
+        eprintln!(
+            "Processing {} files (max_games={}, sequential mode)...",
+            paths.len(),
+            args.max_games
+        );
+        let mut current_games = 0u64;
+        for path in &paths {
+            if current_games >= args.max_games {
+                break;
+            }
+            let stats =
+                process_file_streaming(path, &mut writer, args.max_games, &mut current_games)?;
+            total_games += stats.games;
+            total_positions += stats.positions;
+            total_move_errors += stats.move_errors;
+            total_file_errors += stats.file_errors;
         }
-        total_games += stats.games;
-        total_positions += stats.positions;
-        total_move_errors += stats.move_errors;
-        total_file_errors += stats.file_errors;
+    } else {
+        // 全件処理: ファイル単位で rayon 並列
+        eprintln!("Processing {} files (parallel mode)...", paths.len());
+        let progress = ProgressBar::new(paths.len() as u64);
+        progress.set_style(
+            ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} files")
+                .expect("valid template"),
+        );
+
+        let results: Vec<io::Result<(Vec<u8>, FileStats)>> =
+            paths.par_iter().map(|path| process_file(path)).collect();
+
+        for result in results {
+            let (output, stats) = result?;
+            if !output.is_empty() {
+                writer.write_all(&output)?;
+            }
+            total_games += stats.games;
+            total_positions += stats.positions;
+            total_move_errors += stats.move_errors;
+            total_file_errors += stats.file_errors;
+            progress.inc(1);
+        }
+        progress.finish();
     }
 
     writer.flush()?;
