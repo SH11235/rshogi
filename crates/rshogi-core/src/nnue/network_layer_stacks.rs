@@ -73,6 +73,39 @@ fn compute_layer_stacks_bucket_index(pos: &Position, side_to_move: Color) -> usi
     }
 }
 
+/// i16 配列の要素和: dst[i] = a[i] + b[i] (SIMD 最適化)
+#[cfg(feature = "nnue-threat")]
+#[inline]
+fn add_i16_arrays(
+    dst: &mut [i16; NNUE_PYTORCH_L1],
+    a: &[i16; NNUE_PYTORCH_L1],
+    b: &[i16; NNUE_PYTORCH_L1],
+) {
+    // AVX2: 256bit = 16 x i16, 1536/16 = 96 iterations
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        unsafe {
+            use std::arch::x86_64::*;
+            let dst_ptr = dst.as_mut_ptr();
+            let a_ptr = a.as_ptr();
+            let b_ptr = b.as_ptr();
+            for i in 0..96 {
+                let va = _mm256_load_si256(a_ptr.add(i * 16) as *const __m256i);
+                let vb = _mm256_load_si256(b_ptr.add(i * 16) as *const __m256i);
+                let result = _mm256_add_epi16(va, vb);
+                _mm256_store_si256(dst_ptr.add(i * 16) as *mut __m256i, result);
+            }
+        }
+        return;
+    }
+
+    // スカラーフォールバック
+    #[allow(unreachable_code)]
+    for i in 0..NNUE_PYTORCH_L1 {
+        dst[i] = a[i].wrapping_add(b[i]);
+    }
+}
+
 /// LayerStacksアーキテクチャのNNUEネットワーク
 ///
 /// HalfKA_hm^ 特徴量（73,305次元）+ 1536次元 Feature Transformer + 9バケット LayerStacks
@@ -303,13 +336,11 @@ impl NetworkLayerStacks {
             } else {
                 (acc.get_threat(Color::White as usize), acc.get_threat(Color::Black as usize))
             };
-            let mut us_combined = [0i16; NNUE_PYTORCH_L1];
-            let mut them_combined = [0i16; NNUE_PYTORCH_L1];
-            for i in 0..NNUE_PYTORCH_L1 {
-                us_combined[i] = us_acc[i].wrapping_add(us_threat[i]);
-                them_combined[i] = them_acc[i].wrapping_add(them_threat[i]);
-            }
-            sqr_clipped_relu_transform(&us_combined, &them_combined, &mut transformed.0);
+            let mut us_combined = Aligned([0i16; NNUE_PYTORCH_L1]);
+            let mut them_combined = Aligned([0i16; NNUE_PYTORCH_L1]);
+            add_i16_arrays(&mut us_combined.0, us_acc, us_threat);
+            add_i16_arrays(&mut them_combined.0, them_acc, them_threat);
+            sqr_clipped_relu_transform(&us_combined.0, &them_combined.0, &mut transformed.0);
         } else {
             sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
         }
