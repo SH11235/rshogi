@@ -687,10 +687,16 @@ fn process_file_parallel(cli: &Cli, process_count: u64, opts: FilterOptions) -> 
         }
 
         // チャンクをバルク読み込み（1回の read でまとめて取得）
-        let want = CHUNK_SIZE.min((process_count - total_read) as usize);
+        let want = (CHUNK_SIZE as u64).min(process_count - total_read) as usize;
         let want_bytes = want * PackedSfenValue::SIZE;
         let read_bytes = read_up_to(&mut reader, &mut bulk_buf[..want_bytes])?;
         let complete_records = read_bytes / PackedSfenValue::SIZE;
+        if read_bytes % PackedSfenValue::SIZE != 0 {
+            eprintln!(
+                "Warning: incomplete trailing record ({} bytes) detected, skipping.",
+                read_bytes % PackedSfenValue::SIZE
+            );
+        }
 
         chunk.clear();
         for i in 0..complete_records {
