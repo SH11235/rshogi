@@ -30,7 +30,7 @@
 
 ### NNUE 学習
 
-NNUE モデルの学習には [bullet-shogi](https://github.com/SH11235/bullet-shogi) を使用しています。
+NNUE モデルの学習には [bullet-shogi](https://github.com/SH11235/bullet-shogi/tree/shogi-support) を使用しています。
 教師データは上記の PSV ツール群で生成・前処理し、bullet-shogi で学習を行います。
 
 ## クイックスタート
