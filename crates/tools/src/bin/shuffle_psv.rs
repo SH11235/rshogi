@@ -113,6 +113,7 @@ fn main() -> Result<()> {
         shuffle_chunked(&cli.input, &cli.output, record_count, cli.chunk_size, &mut rng)?;
     } else {
         eprintln!("Using in-memory shuffle");
+        // Note: 巨大ファイルでは一括 I/O のため、Ctrl-C の応答に時間がかかる場合がある
         shuffle_in_memory(&cli.input, &cli.output, record_count, &mut rng)?;
     }
 
@@ -136,6 +137,15 @@ fn bytes_as_records_mut(buf: &mut [u8]) -> &mut [[u8; RECORD_SIZE]] {
     unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast(), buf.len() / RECORD_SIZE) }
 }
 
+/// 進捗バーのスタイル
+fn progress_style(suffix: &str) -> ProgressStyle {
+    ProgressStyle::default_bar()
+        .template(&format!(
+            "[{{elapsed_precise}}] {{bar:40.cyan/blue}} {{pos}}/{{len}} ({{per_sec}}) {suffix}"
+        ))
+        .expect("valid template")
+}
+
 /// インメモリ方式でシャッフル
 ///
 /// 全レコードをバイト列として一括読み込みし、Fisher-Yates で in-place シャッフル。
@@ -157,44 +167,60 @@ fn shuffle_in_memory(
         );
     }
 
-    let progress = ProgressBar::new(3);
-    progress.set_style(
-        ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
-            .expect("valid template"),
-    );
+    // 読み込み（レコード単位の進捗表示）
+    let progress = ProgressBar::new(record_count);
+    progress.set_style(progress_style("Reading..."));
 
-    // 一括読み込み
-    progress.set_message("Reading...");
     let mut buf = vec![0u8; data_size];
     {
         let file = File::open(input_path)
             .with_context(|| format!("Failed to open {}", input_path.display()))?;
         let mut reader = BufReader::with_capacity(BUF_SIZE, file);
-        reader.read_exact(&mut buf)?;
+        // チャンク単位で読み込みつつ進捗更新
+        let mut offset = 0;
+        while offset < data_size {
+            if INTERRUPTED.load(Ordering::SeqCst) {
+                progress.abandon_with_message("Interrupted");
+                return Ok(());
+            }
+            let end = (offset + BUF_SIZE).min(data_size);
+            reader.read_exact(&mut buf[offset..end])?;
+            let records_read = (end - offset) / RECORD_SIZE;
+            progress.inc(records_read as u64);
+            offset = end;
+        }
     }
-    progress.inc(1);
+    progress.finish_with_message("Read complete");
 
     // Fisher-Yates in-place シャッフル（インデックス配列不要）
-    progress.set_message("Shuffling...");
+    eprintln!("Shuffling...");
     let records = bytes_as_records_mut(&mut buf);
     records.shuffle(rng);
-    progress.inc(1);
 
-    // 一括書き出し
-    progress.set_message("Writing...");
+    // 書き出し（レコード単位の進捗表示）
+    let progress = ProgressBar::new(record_count);
+    progress.set_style(progress_style("Writing..."));
     {
         let file = File::create(output_path)
             .with_context(|| format!("Failed to create {}", output_path.display()))?;
         let mut writer = BufWriter::with_capacity(BUF_SIZE, file);
-        writer.write_all(&buf)?;
+        let mut offset = 0;
+        while offset < buf.len() {
+            if INTERRUPTED.load(Ordering::SeqCst) {
+                progress.abandon_with_message("Interrupted");
+                return Ok(());
+            }
+            let end = (offset + BUF_SIZE).min(buf.len());
+            writer.write_all(&buf[offset..end])?;
+            let records_written = (end - offset) / RECORD_SIZE;
+            progress.inc(records_written as u64);
+            offset = end;
+        }
         writer.flush()?;
     }
-    progress.inc(1);
-
     progress.finish_with_message("Done");
-    eprintln!("Shuffled {} records", record_count);
 
+    eprintln!("Shuffled {} records", record_count);
     Ok(())
 }
 
@@ -202,7 +228,8 @@ fn shuffle_in_memory(
 ///
 /// 大規模ファイル用。2パス方式:
 /// 1. 各レコードをランダムなチャンクファイルに振り分け
-/// 2. 各チャンクを rayon で並列に読み込み・シャッフルし、順次出力に書き出し
+/// 2. チャンクをバッチ（コア数単位）で並列に読み込み・シャッフル → 即座に書き出し
+///    メモリ使用量はバッチサイズ分に制限される
 fn shuffle_chunked(
     input_path: &PathBuf,
     output_path: &PathBuf,
@@ -231,12 +258,10 @@ fn shuffle_chunked(
     // Pass 1: 各レコードをランダムなチャンクに振り分け
     eprintln!("Pass 1: Distributing records to chunks...");
     let progress = ProgressBar::new(record_count);
-    progress.set_style(
-        ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({per_sec}) Pass 1")
-            .expect("valid template"),
-    );
+    progress.set_style(progress_style("Pass 1"));
 
+    // チャンクライターのバッファサイズ: 合計 BUF_SIZE を上限にチャンク数で按分
+    // num_chunks > 64 の場合、個別バッファは 128KB まで縮小（合計は最大 125MB）
     let mut chunk_writers: Vec<BufWriter<File>> = (0..num_chunks)
         .map(|i| {
             let path = temp_dir.path().join(format!("chunk_{i}.tmp"));
@@ -274,67 +299,69 @@ fn shuffle_chunked(
     drop(chunk_writers);
     progress.finish();
 
-    // Pass 2: 各チャンクを rayon で並列に読み込み・シャッフル → 順次書き出し
-    eprintln!("Pass 2: Shuffling chunks in parallel and writing...");
+    // Pass 2: チャンクをバッチ並列でシャッフル → 即座に書き出し
+    // メモリ使用量 = バッチサイズ（コア数）× チャンクサイズ に制限
+    eprintln!("Pass 2: Shuffling chunks in batches and writing...");
     let progress = ProgressBar::new(num_chunks as u64);
-    progress.set_style(
-        ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({per_sec}) Pass 2")
-            .expect("valid template"),
-    );
+    progress.set_style(progress_style("Pass 2"));
 
-    // チャンクごとに独立した RNG シードを事前生成（再現性のため）
     let chunk_seeds: Vec<u64> = (0..num_chunks).map(|_| rng.random()).collect();
 
     let chunk_paths: Vec<PathBuf> = (0..num_chunks)
         .map(|i| temp_dir.path().join(format!("chunk_{i}.tmp")))
         .collect();
 
-    // 各チャンクを並列に読み込み＋シャッフル
-    let shuffled_chunks: Vec<Result<Vec<u8>>> = chunk_paths
-        .par_iter()
-        .zip(chunk_seeds.par_iter())
-        .map(|(path, &seed)| {
-            let file_size = std::fs::metadata(path)?.len() as usize;
-            if file_size == 0 {
-                return Ok(Vec::new());
-            }
-
-            let mut buf = vec![0u8; file_size];
-            let file = File::open(path)?;
-            let mut reader = BufReader::with_capacity(BUF_SIZE, file);
-            reader.read_exact(&mut buf)?;
-
-            let records = bytes_as_records_mut(&mut buf);
-            let mut chunk_rng = ChaCha8Rng::seed_from_u64(seed);
-            records.shuffle(&mut chunk_rng);
-
-            Ok(buf)
-        })
-        .collect();
-
-    // 順次書き出し
     let out_file = File::create(output_path)
         .with_context(|| format!("Failed to create {}", output_path.display()))?;
     let mut writer = BufWriter::with_capacity(BUF_SIZE, out_file);
 
-    for chunk_result in shuffled_chunks {
+    let batch_size = rayon::current_num_threads();
+    for batch_start in (0..num_chunks).step_by(batch_size) {
         if INTERRUPTED.load(Ordering::SeqCst) {
             progress.abandon_with_message("Interrupted");
             return Ok(());
         }
 
-        let buf = chunk_result?;
-        if !buf.is_empty() {
-            writer.write_all(&buf)?;
+        let batch_end = (batch_start + batch_size).min(num_chunks);
+        let batch_paths = &chunk_paths[batch_start..batch_end];
+        let batch_seeds = &chunk_seeds[batch_start..batch_end];
+
+        // バッチ内を並列に読み込み + シャッフル
+        let shuffled: Vec<Result<Vec<u8>>> = batch_paths
+            .par_iter()
+            .zip(batch_seeds.par_iter())
+            .map(|(path, &seed)| {
+                let file_size = std::fs::metadata(path)?.len() as usize;
+                if file_size == 0 {
+                    return Ok(Vec::new());
+                }
+
+                let mut buf = vec![0u8; file_size];
+                let file = File::open(path)?;
+                let mut r = BufReader::with_capacity(BUF_SIZE, file);
+                r.read_exact(&mut buf)?;
+
+                let records = bytes_as_records_mut(&mut buf);
+                let mut chunk_rng = ChaCha8Rng::seed_from_u64(seed);
+                records.shuffle(&mut chunk_rng);
+
+                Ok(buf)
+            })
+            .collect();
+
+        // バッチ結果を即座に書き出し（メモリ解放）
+        for chunk_result in shuffled {
+            let buf = chunk_result?;
+            if !buf.is_empty() {
+                writer.write_all(&buf)?;
+            }
+            progress.inc(1);
         }
-        progress.inc(1);
     }
 
     writer.flush()?;
     progress.finish();
 
     eprintln!("Shuffling complete");
-
     Ok(())
 }
