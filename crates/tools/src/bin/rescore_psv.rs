@@ -583,48 +583,23 @@ fn process_file(
             .expect("valid template"),
     );
 
-    // 入力ファイルを読み込み
+    // チャンクストリーミング: 読み込み → rayon 並列処理 → 書き出しをチャンク単位で繰り返す
+    // 全レコードをメモリに溜めず、ピークメモリ = チャンクサイズ分のみ
+    const CHUNK_SIZE: usize = 1_000_000;
+
     let in_file = File::open(input_path)
         .with_context(|| format!("Failed to open {}", input_path.display()))?;
-    let mut reader = BufReader::new(in_file);
+    let mut reader = BufReader::with_capacity(8 * 1024 * 1024, in_file);
 
-    // 全レコードを読み込み
-    let mut records: Vec<[u8; PackedSfenValue::SIZE]> = Vec::with_capacity(process_count as usize);
-    let mut buffer = [0u8; PackedSfenValue::SIZE];
+    let out_file = File::create(output_path)
+        .with_context(|| format!("Failed to create {}", output_path.display()))?;
+    let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, out_file);
 
-    progress.set_message("Reading...");
-    for _ in 0..process_count {
-        if INTERRUPTED.load(Ordering::SeqCst) {
-            progress.abandon_with_message("Interrupted");
-            return Ok(());
-        }
-
-        match reader.read_exact(&mut buffer) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(e.into()),
-        }
-
-        records.push(buffer);
-    }
-
-    let actual_count = records.len();
-    eprintln!("Read {actual_count} records");
-
-    if actual_count == 0 {
-        eprintln!("Warning: No records to process, creating empty output file");
-        progress.finish_with_message("Done (empty)");
-        File::create(output_path)?;
-        return Ok(());
-    }
-
-    // エラーカウンタ
     let error_count = AtomicU64::new(0);
     let processed_count = AtomicU64::new(0);
     let clipped_count = AtomicU64::new(0);
+    let skipped_count = AtomicU64::new(0);
 
-    // 処理
-    progress.set_message("Processing...");
     let max_ply = cli.max_ply;
     let use_qsearch = cli.use_qsearch;
     let apply_leaf = cli.apply_qsearch_leaf;
@@ -634,63 +609,94 @@ fn process_file(
     let target_fv_scale = cli.target_fv_scale;
     let verbose = cli.verbose;
 
-    // スキップカウンタ
-    let skipped_count = AtomicU64::new(0);
+    progress.set_message("Processing...");
+    let mut total_read = 0u64;
+    let mut total_written = 0u64;
 
-    let processed_records: Vec<[u8; PackedSfenValue::SIZE]> = records
-        .par_iter()
-        .filter_map(|record| {
-            if INTERRUPTED.load(Ordering::SeqCst) {
-                return Some(*record);
+    loop {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            progress.abandon_with_message("Interrupted");
+            break;
+        }
+
+        // チャンク読み込み
+        let want = CHUNK_SIZE.min((process_count - total_read) as usize);
+        let mut chunk: Vec<[u8; PackedSfenValue::SIZE]> = Vec::with_capacity(want);
+        let mut buffer = [0u8; PackedSfenValue::SIZE];
+
+        for _ in 0..want {
+            match reader.read_exact(&mut buffer) {
+                Ok(()) => chunk.push(buffer),
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e.into()),
             }
+        }
 
-            // スレッドローカルでNnueStacksを管理
-            thread_local! {
-                static NNUE_STACKS: RefCell<NnueStacks> = RefCell::new(NnueStacks::new());
-            }
+        if chunk.is_empty() {
+            break;
+        }
+        total_read += chunk.len() as u64;
 
-            let result = NNUE_STACKS.with(|stacks| {
-                let mut stacks = stacks.borrow_mut();
-                stacks.reset();
-                process_record(
-                    record,
-                    &mut stacks,
-                    max_ply,
-                    use_qsearch,
-                    apply_leaf,
-                    score_clip,
-                    skip_in_check,
-                    source_fv_scale,
-                    target_fv_scale,
-                )
-            });
+        // rayon 並列処理 → 即座に書き出し
+        let results: Vec<Option<[u8; PackedSfenValue::SIZE]>> = chunk
+            .par_iter()
+            .map(|record| {
+                if INTERRUPTED.load(Ordering::SeqCst) {
+                    return Some(*record);
+                }
 
-            match result {
-                ProcessResult::Ok(new_record, clipped) => {
-                    processed_count.fetch_add(1, Ordering::Relaxed);
-                    if clipped {
-                        clipped_count.fetch_add(1, Ordering::Relaxed);
+                thread_local! {
+                    static NNUE_STACKS: RefCell<NnueStacks> = RefCell::new(NnueStacks::new());
+                }
+
+                let result = NNUE_STACKS.with(|stacks| {
+                    let mut stacks = stacks.borrow_mut();
+                    stacks.reset();
+                    process_record(
+                        record,
+                        &mut stacks,
+                        max_ply,
+                        use_qsearch,
+                        apply_leaf,
+                        score_clip,
+                        skip_in_check,
+                        source_fv_scale,
+                        target_fv_scale,
+                    )
+                });
+
+                match result {
+                    ProcessResult::Ok(new_record, clipped) => {
+                        processed_count.fetch_add(1, Ordering::Relaxed);
+                        if clipped {
+                            clipped_count.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Some(new_record)
                     }
-                    progress.inc(1);
-                    Some(new_record)
-                }
-                ProcessResult::Skip => {
-                    skipped_count.fetch_add(1, Ordering::Relaxed);
-                    progress.inc(1);
-                    None
-                }
-                ProcessResult::Error(e) => {
-                    error_count.fetch_add(1, Ordering::Relaxed);
-                    if verbose {
-                        eprintln!("Error processing record: {e}");
+                    ProcessResult::Skip => {
+                        skipped_count.fetch_add(1, Ordering::Relaxed);
+                        None
                     }
-                    progress.inc(1);
-                    None
+                    ProcessResult::Error(e) => {
+                        error_count.fetch_add(1, Ordering::Relaxed);
+                        if verbose {
+                            eprintln!("Error processing record: {e}");
+                        }
+                        None
+                    }
                 }
-            }
-        })
-        .collect();
+            })
+            .collect();
 
+        // チャンク結果を即座に書き出し
+        for record in results.iter().flatten() {
+            writer.write_all(record)?;
+            total_written += 1;
+        }
+        progress.inc(results.len() as u64);
+    }
+
+    writer.flush()?;
     progress.finish_with_message("Done");
 
     let final_errors = error_count.load(Ordering::SeqCst);
@@ -699,34 +705,22 @@ fn process_file(
     if final_errors > 0 {
         eprintln!("Note: {final_errors} positions had errors");
     }
-    if final_skipped > 0 {
+    if final_skipped > 0 && total_read > 0 {
         eprintln!(
             "Skipped (in check): {} ({:.2}%)",
             final_skipped,
-            final_skipped as f64 / actual_count as f64 * 100.0
+            final_skipped as f64 / total_read as f64 * 100.0
         );
     }
-    eprintln!(
-        "Clipped scores: {} ({:.2}%)",
-        final_clipped,
-        final_clipped as f64 / actual_count as f64 * 100.0
-    );
-
-    // 出力ファイルに書き込み
-    eprintln!("Writing output...");
-    let out_file = File::create(output_path)
-        .with_context(|| format!("Failed to create {}", output_path.display()))?;
-    let mut writer = BufWriter::new(out_file);
-
-    for record in &processed_records {
-        if INTERRUPTED.load(Ordering::SeqCst) {
-            break;
-        }
-        writer.write_all(record)?;
+    if total_read > 0 {
+        eprintln!(
+            "Clipped scores: {} ({:.2}%)",
+            final_clipped,
+            final_clipped as f64 / total_read as f64 * 100.0
+        );
     }
 
-    writer.flush()?;
-    eprintln!("Wrote {} records", processed_records.len());
+    eprintln!("Wrote {total_written} records");
 
     Ok(())
 }
@@ -1017,15 +1011,28 @@ fn process_file_with_search(
     // インデックスでソート
     results_with_index.sort_by_key(|(idx, _)| *idx);
 
-    // 結果を処理
-    let mut processed_records: Vec<[u8; PackedSfenValue::SIZE]> = Vec::with_capacity(actual_count);
+    // ワーカースレッドの終了を待機
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    progress_arc.finish_with_message("Done");
+
+    // ソート済み結果から直接書き出し（中間 Vec を排除）
+    eprintln!("Writing output...");
+    let out_file = File::create(output_path)
+        .with_context(|| format!("Failed to create {}", output_path.display()))?;
+    let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, out_file);
+
+    let mut written = 0u64;
     for (_, result) in results_with_index {
         match result {
             ProcessResult::Ok(record, clipped) => {
                 if clipped {
                     clipped_count.fetch_add(1, Ordering::Relaxed);
                 }
-                processed_records.push(record);
+                writer.write_all(&record)?;
+                written += 1;
             }
             ProcessResult::Skip => {
                 skipped_count.fetch_add(1, Ordering::Relaxed);
@@ -1039,12 +1046,7 @@ fn process_file_with_search(
         }
     }
 
-    // ワーカースレッドの終了を待機
-    for handle in handles {
-        let _ = handle.join();
-    }
-
-    progress_arc.finish_with_message("Done");
+    writer.flush()?;
 
     let final_errors = error_count.load(Ordering::SeqCst);
     let final_clipped = clipped_count.load(Ordering::SeqCst);
@@ -1062,22 +1064,7 @@ fn process_file_with_search(
         "Clipped scores: {final_clipped} ({:.2}%)",
         final_clipped as f64 / actual_count as f64 * 100.0
     );
-
-    // 出力ファイルに書き込み
-    eprintln!("Writing output...");
-    let out_file = File::create(output_path)
-        .with_context(|| format!("Failed to create {}", output_path.display()))?;
-    let mut writer = BufWriter::new(out_file);
-
-    for record in &processed_records {
-        if INTERRUPTED.load(Ordering::SeqCst) {
-            break;
-        }
-        writer.write_all(record)?;
-    }
-
-    writer.flush()?;
-    eprintln!("Wrote {} records", processed_records.len());
+    eprintln!("Wrote {written} records");
 
     Ok(())
 }
@@ -1648,7 +1635,8 @@ where
 
     // GPU 推論スレッドとのパイプライン (ダブルバッファリング)
     // バッチ N の GPU 推論中にバッチ N+1 の特徴量構築を並行実行
-    let (tx_work, rx_work) = mpsc::sync_channel::<OnnxBatch>(1);
+    // work チャネル容量 2: メインスレッドが次バッチの特徴量構築を GPU 推論と並行して実行可能に
+    let (tx_work, rx_work) = mpsc::sync_channel::<OnnxBatch>(2);
     let (tx_result, rx_result) = mpsc::sync_channel::<Result<Vec<f32>>>(1);
 
     let gpu_handle = thread::spawn(move || -> Session {
