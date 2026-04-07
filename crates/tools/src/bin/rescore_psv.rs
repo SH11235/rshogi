@@ -620,7 +620,7 @@ fn process_file(
         }
 
         // チャンク読み込み
-        let want = CHUNK_SIZE.min((process_count - total_read) as usize);
+        let want = (CHUNK_SIZE as u64).min(process_count.saturating_sub(total_read)) as usize;
         let mut chunk: Vec<[u8; PackedSfenValue::SIZE]> = Vec::with_capacity(want);
         let mut buffer = [0u8; PackedSfenValue::SIZE];
 
@@ -642,7 +642,7 @@ fn process_file(
             .par_iter()
             .map(|record| {
                 if INTERRUPTED.load(Ordering::SeqCst) {
-                    return Some(*record);
+                    return None;
                 }
 
                 thread_local! {
@@ -1011,7 +1011,7 @@ fn process_file_with_search(
     // インデックスでソート
     results_with_index.sort_by_key(|(idx, _)| *idx);
 
-    // ワーカースレッドの終了を待機
+    // rx のドレインが完了した時点でワーカーは既に終了しているため、join は即座に返る
     for handle in handles {
         let _ = handle.join();
     }
