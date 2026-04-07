@@ -267,6 +267,29 @@ impl FeatureTransformerLayerStacks {
         &self.threat_weights[offset..end]
     }
 
+    /// Threat 重み行のプリフェッチ
+    ///
+    /// 次にアクセスする threat_weight_row をキャッシュに先読みする。
+    /// add/sub_threat_weights の前に呼ぶことでメモリレイテンシを隠蔽。
+    #[cfg(feature = "nnue-threat")]
+    #[inline]
+    fn prefetch_threat_weights(&self, index: usize) {
+        let offset = index * NNUE_PYTORCH_L1;
+        if offset < self.threat_weights.len() {
+            let ptr = unsafe { self.threat_weights.as_ptr().add(offset) };
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                use std::arch::x86_64::_mm_prefetch;
+                // T0: 全キャッシュレベルにプリフェッチ
+                // 1536 bytes = 24 cache lines (64B each), 先頭数本を prefetch
+                _mm_prefetch(ptr as *const i8, std::arch::x86_64::_MM_HINT_T0);
+                _mm_prefetch(ptr.add(64) as *const i8, std::arch::x86_64::_MM_HINT_T0);
+                _mm_prefetch(ptr.add(128) as *const i8, std::arch::x86_64::_MM_HINT_T0);
+                _mm_prefetch(ptr.add(192) as *const i8, std::arch::x86_64::_MM_HINT_T0);
+            }
+        }
+    }
+
     /// Threat 重み (i8) を i16 アキュムレータに加算（SIMD 最適化）
     ///
     /// i8 重みを i16 に sign-extend してから加算。
@@ -279,17 +302,20 @@ impl FeatureTransformerLayerStacks {
         // AVX2: 128bit i8 → 256bit i16 sign-extend + add, 1536/16 = 96 iterations
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         {
-            // SAFETY:
-            // - accumulation: 64 バイトアライン
-            // - weights (i8): AlignedBox で 64 バイトアライン
-            // - 1536 要素 = 16 要素 × 96 回で完全カバー
             unsafe {
                 use std::arch::x86_64::*;
                 let acc_ptr = accumulation.as_mut_ptr();
                 let w_ptr = weights.as_ptr();
+
+                // 行内プリフェッチ: 後半の cache lines を先読み
+                // 1536 bytes = 24 cache lines (64B), 先頭は触れた時点で fetch される
+                _mm_prefetch(w_ptr.add(512) as *const i8, _MM_HINT_T0);
+                _mm_prefetch(w_ptr.add(768) as *const i8, _MM_HINT_T0);
+                _mm_prefetch(w_ptr.add(1024) as *const i8, _MM_HINT_T0);
+                _mm_prefetch(w_ptr.add(1280) as *const i8, _MM_HINT_T0);
+
                 for i in 0..96 {
                     let acc_vec = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
-                    // 16 i8 → 16 i16 sign-extend
                     let w8 = _mm_loadu_si128(w_ptr.add(i * 16) as *const __m128i);
                     let w16 = _mm256_cvtepi8_epi16(w8);
                     let result = _mm256_add_epi16(acc_vec, w16);
@@ -317,6 +343,13 @@ impl FeatureTransformerLayerStacks {
         {
             unsafe {
                 use std::arch::x86_64::*;
+
+                // 行内プリフェッチ
+                let w_ptr = weights.as_ptr();
+                _mm_prefetch(w_ptr.add(512) as *const i8, _MM_HINT_T0);
+                _mm_prefetch(w_ptr.add(768) as *const i8, _MM_HINT_T0);
+                _mm_prefetch(w_ptr.add(1024) as *const i8, _MM_HINT_T0);
+                _mm_prefetch(w_ptr.add(1280) as *const i8, _MM_HINT_T0);
                 let acc_ptr = accumulation.as_mut_ptr();
                 let w_ptr = weights.as_ptr();
                 for i in 0..96 {

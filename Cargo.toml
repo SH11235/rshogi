@@ -41,6 +41,13 @@ codegen-units = 4         # 並列ビルド
 panic = "unwind"
 strip = "symbols"
 
+# Profiling build - perf 計測用（release + debug info）
+# 使用方法: cargo build --profile profiling
+[profile.profiling]
+inherits = "release"
+debug = true              # DWARF debug info
+strip = "none"            # シンボル保持
+
 # Production build - 本番デプロイ用（最大最適化）
 # 使用方法: cargo build --profile production
 [profile.production]
