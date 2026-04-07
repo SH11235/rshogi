@@ -87,7 +87,7 @@ enum Cmd {
         /// プレイヤー名ファイル（1行1名）。いずれかの対局者がリストに含まれるゲームをDL
         #[arg(long)]
         player_file: Option<String>,
-        /// 並列ダウンロード数
+        /// 並列ダウンロード数（0 = CPU コア数に自動設定）
         #[arg(long, default_value_t = 8)]
         concurrency: usize,
     },
@@ -117,7 +117,7 @@ enum Cmd {
         /// この手数以下の局面のみ抽出（0=制限なし）
         #[arg(long, default_value_t = 0)]
         max_ply: u32,
-        /// 1棋譜あたりの最大抽出数（0=無制限）
+        /// 1棋譜あたりの最大抽出数（0=無制限）。dedup 後の実書き出し数でカウント
         #[arg(long, default_value_t = 0)]
         per_game_cap: usize,
         /// 両対局者のレーティング下限（0=フィルタなし）
@@ -134,6 +134,18 @@ enum Mode {
     All,
     /// 指定した手数の局面のみ
     Nth,
+}
+
+/// extract サブコマンドのオプション
+struct ExtractOptions<'a> {
+    mode: Mode,
+    nth: &'a [u32],
+    mirror_dedup: bool,
+    emit_mirror: bool,
+    min_ply: u32,
+    max_ply: u32,
+    per_game_cap: usize,
+    min_rating: u32,
 }
 
 fn main() -> Result<()> {
@@ -176,18 +188,19 @@ fn main() -> Result<()> {
             max_ply,
             per_game_cap,
             min_rating,
-        } => run_extract(
-            &root,
-            &out,
-            mode,
-            &nth,
-            mirror_dedup,
-            emit_mirror,
-            min_ply,
-            max_ply,
-            per_game_cap,
-            min_rating,
-        ),
+        } => {
+            let opts = ExtractOptions {
+                mode,
+                nth: &nth,
+                mirror_dedup,
+                emit_mirror,
+                min_ply,
+                max_ply,
+                per_game_cap,
+                min_rating,
+            };
+            run_extract(&root, &out, &opts)
+        }
     }
 }
 
@@ -221,7 +234,6 @@ fn run_fetch_index(root: &str, out: &str) -> Result<()> {
 }
 
 /// パスから日付を YYYYMMDD 形式の整数で抽出。
-/// パス例: `2026/03/17/wdoor+...csa` → `20260317`
 fn date_of_path(rel: &str) -> Option<u32> {
     if rel.len() < 10 {
         return None;
@@ -232,7 +244,6 @@ fn date_of_path(rel: &str) -> Option<u32> {
     Some(y * 10000 + m * 100 + d)
 }
 
-/// `YYYY-MM-DD` 形式の文字列を YYYYMMDD 整数にパース。
 fn parse_date_arg(s: &str) -> Result<u32> {
     let parts: Vec<&str> = s.split('-').collect();
     anyhow::ensure!(parts.len() == 3, "日付は YYYY-MM-DD 形式で指定してください: {s}");
@@ -243,7 +254,6 @@ fn parse_date_arg(s: &str) -> Result<u32> {
     Ok(y * 10000 + m * 100 + d)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_download(
     index: &str,
     root: &str,
@@ -269,7 +279,6 @@ fn run_download(
         None
     };
 
-    // 日付 + プレイヤーフィルタ
     let lines: Vec<String> = all_lines
         .into_iter()
         .filter(|rel| {
@@ -296,7 +305,6 @@ fn run_download(
         count, total, after_filter, concurrency
     );
 
-    // 既存ファイルをスキップしつつ、ダウンロード対象を絞る
     let out_dir_path = Path::new(out_dir);
     let to_download: Vec<&str> = lines
         .iter()
@@ -312,7 +320,6 @@ fn run_download(
         return Ok(());
     }
 
-    // rayon スレッドプールを並列度に合わせて構築
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(concurrency)
         .build()
@@ -322,6 +329,11 @@ fn run_download(
     let errors = AtomicUsize::new(0);
 
     pool.install(|| {
+        // thread_local! で Client を再利用し TCP コネクションプールの恩恵を得る
+        thread_local! {
+            static CLIENT: Client = Client::builder().build().expect("reqwest client");
+        }
+
         to_download.par_iter().for_each(|rel| {
             let url = match fg::join_url(root, rel) {
                 Ok(u) => u,
@@ -332,16 +344,7 @@ fn run_download(
                 }
             };
             let out_path = fg::local_path_for(out_dir_path, rel);
-            // スレッドごとに Client を作成（コネクションプール分離）
-            let client = match Client::builder().build() {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("  Warning: client creation failed: {e}");
-                    errors.fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
-            };
-            match fg::http_get_to_file_noclobber(&client, &url, &out_path) {
+            CLIENT.with(|client| match fg::http_get_to_file_noclobber(client, &url, &out_path) {
                 Ok(_) => {
                     let n = downloaded.fetch_add(1, Ordering::Relaxed) + 1;
                     if n.is_multiple_of(500) {
@@ -352,7 +355,7 @@ fn run_download(
                     eprintln!("  Warning: failed to download {rel}: {e}");
                     errors.fetch_add(1, Ordering::Relaxed);
                 }
-            }
+            });
         });
     });
 
@@ -390,17 +393,9 @@ struct GameResult {
 }
 
 /// 1棋譜の CSA パース → SFEN 抽出（純粋関数、副作用なし）
-fn extract_sfens_from_game(
-    path: &Path,
-    mode: Mode,
-    nth: &[u32],
-    mirror_dedup: bool,
-    emit_mirror: bool,
-    min_ply: u32,
-    max_ply: u32,
-    per_game_cap: usize,
-    min_rating: u32,
-) -> GameResult {
+///
+/// per_game_cap は dedup 前の上限（dedup 後のカウントは呼び出し側で行う）
+fn extract_sfens_from_game(path: &Path, opts: &ExtractOptions) -> GameResult {
     let text = match fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => {
@@ -426,8 +421,7 @@ fn extract_sfens_from_game(
         }
     };
 
-    // レーティングフィルタ
-    if min_rating > 0 {
+    if opts.min_rating > 0 {
         if info.black_rating.is_none() || info.white_rating.is_none() {
             return GameResult {
                 sfens: Vec::new(),
@@ -436,7 +430,7 @@ fn extract_sfens_from_game(
                 no_rating: true,
             };
         }
-        if !info.both_ratings_at_least(min_rating as f64) {
+        if !info.both_ratings_at_least(opts.min_rating as f64) {
             return GameResult {
                 sfens: Vec::new(),
                 error: false,
@@ -447,54 +441,44 @@ fn extract_sfens_from_game(
     }
 
     let mut sfens = Vec::new();
-    let cap = if per_game_cap > 0 {
-        per_game_cap
-    } else {
-        usize::MAX
-    };
 
-    match mode {
+    match opts.mode {
         Mode::Initial => {
-            if in_ply_range(1, min_ply, max_ply) {
-                collect_sfen(&pos.to_sfen(), mirror_dedup, emit_mirror, &mut sfens);
+            if in_ply_range(1, opts.min_ply, opts.max_ply) {
+                collect_sfen(&pos.to_sfen(), opts.mirror_dedup, opts.emit_mirror, &mut sfens);
             }
         }
         Mode::All => {
-            if in_ply_range(1, min_ply, max_ply) {
-                collect_sfen(&pos.to_sfen(), mirror_dedup, emit_mirror, &mut sfens);
+            if in_ply_range(1, opts.min_ply, opts.max_ply) {
+                collect_sfen(&pos.to_sfen(), opts.mirror_dedup, opts.emit_mirror, &mut sfens);
             }
-            if sfens.len() < cap {
-                for (i, m) in moves.iter().enumerate() {
-                    if pos.apply_csa_move(m).is_err() {
-                        break;
-                    }
-                    let ply = (i as u32) + 2;
-                    if in_ply_range(ply, min_ply, max_ply) {
-                        collect_sfen(&pos.to_sfen(), mirror_dedup, emit_mirror, &mut sfens);
-                        if sfens.len() >= cap {
-                            break;
-                        }
-                    }
+            for (i, m) in moves.iter().enumerate() {
+                if pos.apply_csa_move(m).is_err() {
+                    break;
+                }
+                let ply = (i as u32) + 2;
+                if in_ply_range(ply, opts.min_ply, opts.max_ply) {
+                    collect_sfen(&pos.to_sfen(), opts.mirror_dedup, opts.emit_mirror, &mut sfens);
                 }
             }
         }
         Mode::Nth => {
-            if !nth.is_empty() {
-                if nth.contains(&1) && in_ply_range(1, min_ply, max_ply) {
-                    collect_sfen(&pos.to_sfen(), mirror_dedup, emit_mirror, &mut sfens);
+            if !opts.nth.is_empty() {
+                if opts.nth.contains(&1) && in_ply_range(1, opts.min_ply, opts.max_ply) {
+                    collect_sfen(&pos.to_sfen(), opts.mirror_dedup, opts.emit_mirror, &mut sfens);
                 }
-                if sfens.len() < cap {
-                    for (i, m) in moves.iter().enumerate() {
-                        let ply = (i as u32) + 2;
-                        if pos.apply_csa_move(m).is_err() {
-                            break;
-                        }
-                        if nth.contains(&ply) && in_ply_range(ply, min_ply, max_ply) {
-                            collect_sfen(&pos.to_sfen(), mirror_dedup, emit_mirror, &mut sfens);
-                            if sfens.len() >= cap {
-                                break;
-                            }
-                        }
+                for (i, m) in moves.iter().enumerate() {
+                    let ply = (i as u32) + 2;
+                    if pos.apply_csa_move(m).is_err() {
+                        break;
+                    }
+                    if opts.nth.contains(&ply) && in_ply_range(ply, opts.min_ply, opts.max_ply) {
+                        collect_sfen(
+                            &pos.to_sfen(),
+                            opts.mirror_dedup,
+                            opts.emit_mirror,
+                            &mut sfens,
+                        );
                     }
                 }
             }
@@ -509,7 +493,7 @@ fn extract_sfens_from_game(
     }
 }
 
-/// SFEN を（mirror_dedup 時は正規化して）収集する。dedup は呼び出し側で行う。
+/// SFEN を収集。mirror_dedup 時は canonical 形式で格納（dedup キーも canonical になる）
 fn collect_sfen(sfen: &str, mirror_dedup: bool, emit_mirror: bool, out: &mut Vec<String>) {
     if mirror_dedup {
         let s = canonicalize_4t_with_mirror(sfen).unwrap_or_else(|| sfen.to_string());
@@ -523,45 +507,19 @@ fn collect_sfen(sfen: &str, mirror_dedup: bool, emit_mirror: bool, out: &mut Vec
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_extract(
-    root: &str,
-    out: &str,
-    mode: Mode,
-    nth: &[u32],
-    mirror_dedup: bool,
-    emit_mirror: bool,
-    min_ply: u32,
-    max_ply: u32,
-    per_game_cap: usize,
-    min_rating: u32,
-) -> Result<()> {
+fn run_extract(root: &str, out: &str, opts: &ExtractOptions) -> Result<()> {
     let root = Path::new(root);
     let files = visit_csa_files(root)?;
     let num_files = files.len();
     eprintln!("Found {num_files} CSA files in {root:?}");
 
     // rayon で並列パース → 各ゲームの SFEN リストを収集
-    let results: Vec<GameResult> = files
-        .par_iter()
-        .map(|p| {
-            extract_sfens_from_game(
-                p,
-                mode,
-                nth,
-                mirror_dedup,
-                emit_mirror,
-                min_ply,
-                max_ply,
-                per_game_cap,
-                min_rating,
-            )
-        })
-        .collect();
+    let results: Vec<GameResult> =
+        files.par_iter().map(|p| extract_sfens_from_game(p, opts)).collect();
 
-    // 逐次で dedup + 書き出し
+    // 逐次で dedup + 書き出し（per_game_cap は dedup 後の書き出し数でカウント）
     let mut out_w = open_writer(out)?;
-    let mut dedup = DedupSet::new(mirror_dedup);
+    let mut dedup = DedupSet::new(opts.mirror_dedup);
     let mut wrote = 0usize;
     let mut errors = 0usize;
     let mut rating_skipped = 0usize;
@@ -585,10 +543,15 @@ fn run_extract(
             continue;
         }
         games_used += 1;
+        let mut written_this_game = 0usize;
         for sfen in &gr.sfens {
-            if !mirror_dedup || dedup.insert(sfen) {
+            if !opts.mirror_dedup || dedup.insert(sfen) {
                 writeln!(out_w, "{sfen}")?;
                 wrote += 1;
+                written_this_game += 1;
+                if opts.per_game_cap > 0 && written_this_game >= opts.per_game_cap {
+                    break;
+                }
             }
         }
     }
@@ -598,12 +561,13 @@ fn run_extract(
     if errors > 0 {
         eprintln!("  ({errors} files had errors and were skipped)");
     }
-    if min_rating > 0 {
+    if opts.min_rating > 0 {
         eprintln!(
-            "  ({rating_skipped} games below min_rating={min_rating}, {no_rating} games without rating info)"
+            "  ({rating_skipped} games below min_rating={}, {no_rating} games without rating info)",
+            opts.min_rating
         );
     }
-    if mirror_dedup {
+    if opts.mirror_dedup {
         eprintln!("  (dedup set size: {})", dedup.len());
     }
     Ok(())
