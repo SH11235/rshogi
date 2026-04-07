@@ -439,6 +439,20 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// バッファがいっぱいになるか EOF まで読み込む。read_exact と異なり部分読み込みを許容する。
+fn read_up_to(reader: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(filled)
+}
+
 /// チャンクサイズ（レコード数）
 /// 1M records = 40MB: メモリ効率と並列化のバランスを考慮
 const CHUNK_SIZE: usize = 1_000_000;
@@ -660,7 +674,7 @@ fn process_file_parallel(cli: &Cli, process_count: u64, opts: FilterOptions) -> 
     let mut total_written = 0u64;
 
     let mut chunk: Vec<[u8; PackedSfenValue::SIZE]> = Vec::with_capacity(CHUNK_SIZE);
-    let mut buffer = [0u8; PackedSfenValue::SIZE];
+    let mut bulk_buf = vec![0u8; CHUNK_SIZE * PackedSfenValue::SIZE];
 
     let collect_outputs = writer.is_some();
 
@@ -672,22 +686,20 @@ fn process_file_parallel(cli: &Cli, process_count: u64, opts: FilterOptions) -> 
             break;
         }
 
-        // チャンクを読み込み
-        chunk.clear();
-        for _ in 0..CHUNK_SIZE {
-            if total_read >= process_count {
-                break;
-            }
+        // チャンクをバルク読み込み（1回の read でまとめて取得）
+        let want = CHUNK_SIZE.min((process_count - total_read) as usize);
+        let want_bytes = want * PackedSfenValue::SIZE;
+        let read_bytes = read_up_to(&mut reader, &mut bulk_buf[..want_bytes])?;
+        let complete_records = read_bytes / PackedSfenValue::SIZE;
 
-            match reader.read_exact(&mut buffer) {
-                Ok(()) => {
-                    chunk.push(buffer);
-                    total_read += 1;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e.into()),
-            }
+        chunk.clear();
+        for i in 0..complete_records {
+            let offset = i * PackedSfenValue::SIZE;
+            let mut record = [0u8; PackedSfenValue::SIZE];
+            record.copy_from_slice(&bulk_buf[offset..offset + PackedSfenValue::SIZE]);
+            chunk.push(record);
         }
+        total_read += complete_records as u64;
 
         if chunk.is_empty() {
             break;
