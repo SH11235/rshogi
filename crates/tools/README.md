@@ -9,7 +9,6 @@
 | ツール | 説明 |
 |--------|------|
 | `engine_selfplay` | USIエンジン同士の自己対局、学習データ（PackedSfenValue）生成 |
-| `generate_training_data` | 棋譜ファイルから学習データを生成 |
 | `floodgate_pipeline` | Floodgate棋譜のダウンロード・変換 |
 
 ### 学習データ処理
@@ -29,6 +28,11 @@
 | `benchmark` | エンジン性能ベンチマーク |
 | `compare_eval_nnue` | NNUE評価値の比較 |
 
+### NNUE 学習
+
+NNUE モデルの学習には [bullet-shogi](https://github.com/SH11235/bullet-shogi) を使用しています。
+教師データは上記の PSV ツール群で生成・前処理し、bullet-shogi で学習を行います。
+
 ## クイックスタート
 
 ### 自己対局で学習データ生成
@@ -36,7 +40,7 @@
 ```bash
 cargo run -p tools --release --bin engine_selfplay -- \
   --games 100 --byoyomi 1000
-# → runs/selfplay/<timestamp>-selfplay.pack
+# → runs/selfplay/<timestamp>-selfplay.psv
 ```
 
 ### 学習データのシャッフル
