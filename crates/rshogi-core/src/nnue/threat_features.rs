@@ -31,9 +31,6 @@ pub const THREAT_DIMENSIONS: usize = 216_720;
 /// ThreatClass の数（King 除外）
 pub const NUM_THREAT_CLASSES: usize = 9;
 
-/// active threat features の最大数
-pub const MAX_ACTIVE_THREAT_FEATURES: usize = 320;
-
 /// changed threat features の最大数（差分更新用）
 pub const MAX_CHANGED_THREAT_FEATURES: usize = 192;
 
@@ -195,11 +192,13 @@ fn attacks_bb_colored(class: ThreatClass, color: Color, sq: Square) -> Bitboard 
 }
 
 /// 空盤面上の攻撃先 Bitboard を取得（先手基準、テスト用）
+#[cfg(test)]
 fn attacks_bb(class: ThreatClass, sq: Square) -> Bitboard {
     attacks_bb_colored(class, Color::Black, sq)
 }
 
-/// 各クラスの各マスの空盤面攻撃数
+/// 各クラスの各マスの空盤面攻撃数（テスト用）
+#[cfg(test)]
 fn attacks_count(class: ThreatClass, sq: Square) -> usize {
     attacks_bb(class, sq).count() as usize
 }
@@ -262,6 +261,7 @@ impl FromOffsetTable {
 /// attack_order: from_sq の攻撃先を raw 昇順で列挙したときの to_sq の順位（色別）
 ///
 /// テスト用。ホットパスでは `AttackOrderTable` の LUT を使用する。
+#[cfg(test)]
 fn compute_attack_order_colored(
     class: ThreatClass,
     color: Color,
@@ -399,12 +399,10 @@ fn normalize_sq(sq: Square, perspective: Color, hm_mirror: bool) -> Square {
 // append_active_indices
 // =============================================================================
 
-/// 現局面の全 threat pair を列挙し、indices に追加する。
+/// 現局面の全 threat pair を列挙し、indices に追加する（テスト用）。
 ///
-/// 列挙方法:
-/// 1. 盤上の各駒について、その駒が攻撃しているマスを実盤面 occupied で列挙
-/// 2. 攻撃先マスに駒がいれば threat pair を生成
-/// 3. attacker/attacked とも King は除外
+/// ホットパスでは `for_each_active_threat_index` を使用する。
+#[cfg(test)]
 pub fn append_active_threat_indices(
     pos: &Position,
     perspective: Color,
