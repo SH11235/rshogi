@@ -23,12 +23,17 @@ use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
+use rayon::prelude::*;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tools::packed_sfen::PackedSfenValue;
+
+const RECORD_SIZE: usize = PackedSfenValue::SIZE;
+/// I/O バッファサイズ（8 MB）
+const BUF_SIZE: usize = 8 * 1024 * 1024;
 
 /// PackedSfenValue形式のPSVファイルをシャッフル
 #[derive(Parser)]
@@ -78,12 +83,12 @@ fn main() -> Result<()> {
 
     // 入力ファイルサイズからレコード数を計算
     let file_size = std::fs::metadata(&cli.input)?.len();
-    let record_count = file_size / PackedSfenValue::SIZE as u64;
+    let record_count = file_size / RECORD_SIZE as u64;
 
-    if file_size % PackedSfenValue::SIZE as u64 != 0 {
+    if file_size % RECORD_SIZE as u64 != 0 {
         eprintln!(
-            "Warning: File size ({file_size}) is not a multiple of record size ({}). Trailing bytes will be ignored.",
-            PackedSfenValue::SIZE
+            "Warning: File size ({file_size}) is not a multiple of record size ({RECORD_SIZE}). \
+             Trailing bytes will be ignored.",
         );
     }
 
@@ -120,101 +125,84 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// バイト列を `[u8; RECORD_SIZE]` のミュータブルスライスとして再解釈する。
+///
+/// # Safety
+/// - `buf` の長さは `RECORD_SIZE` の倍数でなければならない。
+/// - `[u8; RECORD_SIZE]` のアラインメントは 1 なので、アラインメント条件は自明に満たされる。
+fn bytes_as_records_mut(buf: &mut [u8]) -> &mut [[u8; RECORD_SIZE]] {
+    assert!(buf.len().is_multiple_of(RECORD_SIZE));
+    // Safety: u8 配列のアラインメントは 1 で、長さは RECORD_SIZE の倍数を事前確認済み
+    unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast(), buf.len() / RECORD_SIZE) }
+}
+
 /// インメモリ方式でシャッフル
-/// レコード全体をメモリに読み込み、インデックス配列をシャッフルして書き出す
+///
+/// 全レコードをバイト列として一括読み込みし、Fisher-Yates で in-place シャッフル。
+/// インデックス配列を使わないため、メモリ使用量 = データサイズのみ。
 fn shuffle_in_memory(
     input_path: &PathBuf,
     output_path: &PathBuf,
     record_count: u64,
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
-    // メモリ使用量の見積もり
-    let data_size = record_count * PackedSfenValue::SIZE as u64;
-    let index_size = record_count * std::mem::size_of::<usize>() as u64;
-    let total_mb = (data_size + index_size) / 1_000_000;
-    eprintln!(
-        "Estimated memory usage: {} MB (data) + {} MB (indices) = {} MB total",
-        data_size / 1_000_000,
-        index_size / 1_000_000,
-        total_mb
-    );
+    let data_size = record_count as usize * RECORD_SIZE;
+    let data_mb = data_size / 1_000_000;
+    eprintln!("Estimated memory usage: {data_mb} MB");
 
-    // 大規模ファイルの場合は警告
-    const LARGE_FILE_THRESHOLD_MB: u64 = 4000; // 4GB
-    if total_mb > LARGE_FILE_THRESHOLD_MB {
+    const LARGE_FILE_THRESHOLD_MB: usize = 4000;
+    if data_mb > LARGE_FILE_THRESHOLD_MB {
         eprintln!(
-            "Warning: Large memory allocation ({} MB). Consider using --chunk-size option.",
-            total_mb
+            "Warning: Large memory allocation ({data_mb} MB). Consider using --chunk-size option.",
         );
     }
 
-    // 進捗バー設定
-    let progress = ProgressBar::new(record_count * 2); // 読み込み + 書き出し
+    let progress = ProgressBar::new(3);
     progress.set_style(
         ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({per_sec}) {msg}")
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
             .expect("valid template"),
     );
+
+    // 一括読み込み
     progress.set_message("Reading...");
-
-    // 全レコードを読み込み
-    let mut data = Vec::with_capacity(record_count as usize);
-    let in_file = File::open(input_path)
-        .with_context(|| format!("Failed to open {}", input_path.display()))?;
-    let mut reader = BufReader::new(in_file);
-    let mut buffer = [0u8; PackedSfenValue::SIZE];
-
-    for _ in 0..record_count {
-        if INTERRUPTED.load(Ordering::SeqCst) {
-            progress.abandon_with_message("Interrupted");
-            return Ok(());
-        }
-
-        match reader.read_exact(&mut buffer) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(e.into()),
-        }
-
-        data.push(buffer);
-        progress.inc(1);
+    let mut buf = vec![0u8; data_size];
+    {
+        let file = File::open(input_path)
+            .with_context(|| format!("Failed to open {}", input_path.display()))?;
+        let mut reader = BufReader::with_capacity(BUF_SIZE, file);
+        reader.read_exact(&mut buf)?;
     }
+    progress.inc(1);
 
-    let actual_count = data.len();
-    eprintln!("Read {} records", actual_count);
-
-    // インデックス配列をシャッフル
+    // Fisher-Yates in-place シャッフル（インデックス配列不要）
     progress.set_message("Shuffling...");
-    let mut indices: Vec<usize> = (0..actual_count).collect();
-    indices.shuffle(rng);
+    let records = bytes_as_records_mut(&mut buf);
+    records.shuffle(rng);
+    progress.inc(1);
 
-    // シャッフルされた順序で書き出し
+    // 一括書き出し
     progress.set_message("Writing...");
-    let out_file = File::create(output_path)
-        .with_context(|| format!("Failed to create {}", output_path.display()))?;
-    let mut writer = BufWriter::new(out_file);
-
-    for &idx in &indices {
-        if INTERRUPTED.load(Ordering::SeqCst) {
-            progress.abandon_with_message("Interrupted");
-            return Ok(());
-        }
-
-        writer.write_all(&data[idx])?;
-        progress.inc(1);
+    {
+        let file = File::create(output_path)
+            .with_context(|| format!("Failed to create {}", output_path.display()))?;
+        let mut writer = BufWriter::with_capacity(BUF_SIZE, file);
+        writer.write_all(&buf)?;
+        writer.flush()?;
     }
+    progress.inc(1);
 
-    writer.flush()?;
     progress.finish_with_message("Done");
-    eprintln!("Shuffled {} records", actual_count);
+    eprintln!("Shuffled {} records", record_count);
 
     Ok(())
 }
 
 /// チャンク方式でシャッフル
-/// 大規模ファイル用。2パス方式でシャッフル:
+///
+/// 大規模ファイル用。2パス方式:
 /// 1. 各レコードをランダムなチャンクファイルに振り分け
-/// 2. 各チャンクファイルを読み込み、シャッフルして出力に追記
+/// 2. 各チャンクを rayon で並列に読み込み・シャッフルし、順次出力に書き出し
 fn shuffle_chunked(
     input_path: &PathBuf,
     output_path: &PathBuf,
@@ -224,7 +212,6 @@ fn shuffle_chunked(
 ) -> Result<()> {
     let num_chunks = (record_count as usize).div_ceil(chunk_size);
 
-    // チャンク数のバリデーション
     if num_chunks == 0 {
         anyhow::bail!("Invalid chunk configuration: num_chunks is 0");
     }
@@ -239,7 +226,6 @@ fn shuffle_chunked(
 
     eprintln!("Creating {num_chunks} temporary chunks");
 
-    // 一時ディレクトリを作成
     let temp_dir = tempfile::tempdir().context("Failed to create temp directory")?;
 
     // Pass 1: 各レコードをランダムなチャンクに振り分け
@@ -251,21 +237,19 @@ fn shuffle_chunked(
             .expect("valid template"),
     );
 
-    // チャンクファイルを開く
     let mut chunk_writers: Vec<BufWriter<File>> = (0..num_chunks)
         .map(|i| {
             let path = temp_dir.path().join(format!("chunk_{i}.tmp"));
             File::create(&path)
-                .map(BufWriter::new)
+                .map(|f| BufWriter::with_capacity(BUF_SIZE / num_chunks.clamp(1, 64), f))
                 .with_context(|| format!("Failed to create chunk file: {}", path.display()))
         })
         .collect::<Result<Vec<_>>>()?;
 
-    // 入力ファイルを読み込み、ランダムにチャンクに振り分け
     let in_file = File::open(input_path)
         .with_context(|| format!("Failed to open {}", input_path.display()))?;
-    let mut reader = BufReader::new(in_file);
-    let mut buffer = [0u8; PackedSfenValue::SIZE];
+    let mut reader = BufReader::with_capacity(BUF_SIZE, in_file);
+    let mut buffer = [0u8; RECORD_SIZE];
 
     for _ in 0..record_count {
         if INTERRUPTED.load(Ordering::SeqCst) {
@@ -279,21 +263,19 @@ fn shuffle_chunked(
             Err(e) => return Err(e.into()),
         }
 
-        // ランダムなチャンクに書き込み
         let chunk_idx = rng.random_range(0..num_chunks);
         chunk_writers[chunk_idx].write_all(&buffer)?;
         progress.inc(1);
     }
 
-    // チャンクファイルをフラッシュ
     for writer in &mut chunk_writers {
         writer.flush()?;
     }
     drop(chunk_writers);
     progress.finish();
 
-    // Pass 2: 各チャンクをシャッフルして出力に追記
-    eprintln!("Pass 2: Shuffling and writing chunks...");
+    // Pass 2: 各チャンクを rayon で並列に読み込み・シャッフル → 順次書き出し
+    eprintln!("Pass 2: Shuffling chunks in parallel and writing...");
     let progress = ProgressBar::new(num_chunks as u64);
     progress.set_style(
         ProgressStyle::default_bar()
@@ -301,52 +283,57 @@ fn shuffle_chunked(
             .expect("valid template"),
     );
 
+    // チャンクごとに独立した RNG シードを事前生成（再現性のため）
+    let chunk_seeds: Vec<u64> = (0..num_chunks).map(|_| rng.random()).collect();
+
+    let chunk_paths: Vec<PathBuf> = (0..num_chunks)
+        .map(|i| temp_dir.path().join(format!("chunk_{i}.tmp")))
+        .collect();
+
+    // 各チャンクを並列に読み込み＋シャッフル
+    let shuffled_chunks: Vec<Result<Vec<u8>>> = chunk_paths
+        .par_iter()
+        .zip(chunk_seeds.par_iter())
+        .map(|(path, &seed)| {
+            let file_size = std::fs::metadata(path)?.len() as usize;
+            if file_size == 0 {
+                return Ok(Vec::new());
+            }
+
+            let mut buf = vec![0u8; file_size];
+            let file = File::open(path)?;
+            let mut reader = BufReader::with_capacity(BUF_SIZE, file);
+            reader.read_exact(&mut buf)?;
+
+            let records = bytes_as_records_mut(&mut buf);
+            let mut chunk_rng = ChaCha8Rng::seed_from_u64(seed);
+            records.shuffle(&mut chunk_rng);
+
+            Ok(buf)
+        })
+        .collect();
+
+    // 順次書き出し
     let out_file = File::create(output_path)
         .with_context(|| format!("Failed to create {}", output_path.display()))?;
-    let mut writer = BufWriter::new(out_file);
+    let mut writer = BufWriter::with_capacity(BUF_SIZE, out_file);
 
-    for i in 0..num_chunks {
+    for chunk_result in shuffled_chunks {
         if INTERRUPTED.load(Ordering::SeqCst) {
             progress.abandon_with_message("Interrupted");
             return Ok(());
         }
 
-        let chunk_path = temp_dir.path().join(format!("chunk_{i}.tmp"));
-
-        // チャンクファイルを読み込み
-        let chunk_size = std::fs::metadata(&chunk_path)?.len();
-        let chunk_records = chunk_size / PackedSfenValue::SIZE as u64;
-
-        let chunk_file = File::open(&chunk_path)?;
-        let mut chunk_reader = BufReader::new(chunk_file);
-
-        let mut chunk_data: Vec<[u8; PackedSfenValue::SIZE]> =
-            Vec::with_capacity(chunk_records as usize);
-        let mut buf = [0u8; PackedSfenValue::SIZE];
-
-        loop {
-            match chunk_reader.read_exact(&mut buf) {
-                Ok(()) => chunk_data.push(buf),
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e.into()),
-            }
+        let buf = chunk_result?;
+        if !buf.is_empty() {
+            writer.write_all(&buf)?;
         }
-
-        // チャンク内をシャッフル
-        chunk_data.shuffle(rng);
-
-        // 出力ファイルに書き込み
-        for record in &chunk_data {
-            writer.write_all(record)?;
-        }
-
         progress.inc(1);
     }
 
     writer.flush()?;
     progress.finish();
 
-    // 一時ディレクトリは自動的にクリーンアップされる
     eprintln!("Shuffling complete");
 
     Ok(())
