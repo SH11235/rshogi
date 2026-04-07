@@ -267,21 +267,70 @@ impl FeatureTransformerLayerStacks {
         &self.threat_weights[offset..end]
     }
 
-    /// Threat 重み (i8) を i16 アキュムレータに加算（スカラー版）
+    /// Threat 重み (i8) を i16 アキュムレータに加算（SIMD 最適化）
+    ///
+    /// i8 重みを i16 に sign-extend してから加算。
+    /// AVX2: `_mm256_cvtepi8_epi16` で 16 要素ずつ変換 + `_mm256_add_epi16`。
     #[cfg(feature = "nnue-threat")]
     #[inline]
     fn add_threat_weights(&self, accumulation: &mut [i16; NNUE_PYTORCH_L1], index: usize) {
         let weights = self.threat_weight_row(index);
+
+        // AVX2: 128bit i8 → 256bit i16 sign-extend + add, 1536/16 = 96 iterations
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        {
+            // SAFETY:
+            // - accumulation: 64 バイトアライン
+            // - weights (i8): AlignedBox で 64 バイトアライン
+            // - 1536 要素 = 16 要素 × 96 回で完全カバー
+            unsafe {
+                use std::arch::x86_64::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let w_ptr = weights.as_ptr();
+                for i in 0..96 {
+                    let acc_vec = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
+                    // 16 i8 → 16 i16 sign-extend
+                    let w8 = _mm_loadu_si128(w_ptr.add(i * 16) as *const __m128i);
+                    let w16 = _mm256_cvtepi8_epi16(w8);
+                    let result = _mm256_add_epi16(acc_vec, w16);
+                    _mm256_store_si256(acc_ptr.add(i * 16) as *mut __m256i, result);
+                }
+            }
+            return;
+        }
+
+        // スカラーフォールバック
+        #[allow(unreachable_code)]
         for (a, &w) in accumulation.iter_mut().zip(weights) {
             *a = a.wrapping_add(w as i16);
         }
     }
 
-    /// Threat 重み (i8) を i16 アキュムレータから減算（スカラー版）
+    /// Threat 重み (i8) を i16 アキュムレータから減算（SIMD 最適化）
     #[cfg(feature = "nnue-threat")]
     #[inline]
     fn sub_threat_weights(&self, accumulation: &mut [i16; NNUE_PYTORCH_L1], index: usize) {
         let weights = self.threat_weight_row(index);
+
+        // AVX2: 128bit i8 → 256bit i16 sign-extend + sub
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        {
+            unsafe {
+                use std::arch::x86_64::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let w_ptr = weights.as_ptr();
+                for i in 0..96 {
+                    let acc_vec = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
+                    let w8 = _mm_loadu_si128(w_ptr.add(i * 16) as *const __m128i);
+                    let w16 = _mm256_cvtepi8_epi16(w8);
+                    let result = _mm256_sub_epi16(acc_vec, w16);
+                    _mm256_store_si256(acc_ptr.add(i * 16) as *mut __m256i, result);
+                }
+            }
+            return;
+        }
+
+        #[allow(unreachable_code)]
         for (a, &w) in accumulation.iter_mut().zip(weights) {
             *a = a.wrapping_sub(w as i16);
         }
