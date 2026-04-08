@@ -17,6 +17,10 @@
 //! # 不正レコードを除去して出力
 //! cargo run --release -p tools --bin validate_psv -- \
 //!   --data /path/to/data.psv --output /path/to/clean.psv
+//!
+//! # 並列処理（8スレッド）
+//! cargo run --release -p tools --bin validate_psv -- \
+//!   --data /path/to/data.psv --threads 8
 //! ```
 //!
 //! # チェック項目
@@ -37,12 +41,16 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use rayon::prelude::*;
 
 use rshogi_core::bitboard::{FILE_BB, RANK_BB};
 use rshogi_core::position::Position;
 use rshogi_core::types::{Color, PieceType};
 use tools::common::dedup::{PSV_SIZE, SFEN_SIZE, collect_input_paths};
 use tools::packed_sfen::{PackedSfenValue, unpack_sfen};
+
+/// チャンクサイズ（レコード数）
+const CHUNK_SIZE: usize = 64 * 1024;
 
 #[derive(Parser)]
 #[command(
@@ -69,6 +77,10 @@ struct Cli {
     /// 不正レコードの詳細を表示する最大件数
     #[arg(long, default_value_t = 100)]
     max_errors: usize,
+
+    /// スレッド数（0 = 自動）
+    #[arg(short = 't', long, default_value_t = 0)]
+    threads: usize,
 }
 
 /// 不正理由の分類
@@ -95,6 +107,17 @@ impl ErrorStats {
             + self.enemy_in_check
             + self.bad_game_result
     }
+}
+
+/// レコード単位の検証結果
+enum ValidateResult {
+    /// 正常レコード（output 用にバイト列を保持）
+    Valid([u8; PSV_SIZE]),
+    /// 不正レコード
+    Invalid {
+        category: &'static str,
+        message: String,
+    },
 }
 
 /// 局面のルール違反を検出し、最初に見つかった理由を返す
@@ -198,8 +221,69 @@ fn validate_position(pos: &Position) -> Option<(&'static str, String)> {
     None
 }
 
+/// 1レコードを検証する（スレッドセーフ）
+fn validate_record(record: &[u8; PSV_SIZE]) -> ValidateResult {
+    // game_result チェック
+    let psv = PackedSfenValue::from_bytes(record).unwrap();
+    if !(-1..=1).contains(&psv.game_result) {
+        return ValidateResult::Invalid {
+            category: "bad_game_result",
+            message: format!("game_result が不正: {}", psv.game_result),
+        };
+    }
+
+    // PackedSfen → SFEN 文字列
+    let sfen_bytes: &[u8; SFEN_SIZE] = record[..SFEN_SIZE].try_into().unwrap();
+    let sfen = match unpack_sfen(sfen_bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            return ValidateResult::Invalid {
+                category: "unpack_failed",
+                message: format!("unpack 失敗: {e}"),
+            };
+        }
+    };
+
+    // SFEN → Position
+    let mut pos = Position::new();
+    if let Err(e) = pos.set_sfen(&sfen) {
+        return ValidateResult::Invalid {
+            category: "parse_failed",
+            message: format!("パースエラー: {e} | {sfen}"),
+        };
+    }
+
+    // ルール違反チェック
+    if let Some((category, reason)) = validate_position(&pos) {
+        return ValidateResult::Invalid {
+            category,
+            message: format!("{reason} | {sfen}"),
+        };
+    }
+
+    ValidateResult::Valid(*record)
+}
+
+/// reader から最大 buf.len() バイト読み込み、実際に読んだバイト数を返す
+fn read_up_to(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
+    let mut total = 0;
+    while total < buf.len() {
+        match reader.read(&mut buf[total..]) {
+            Ok(0) => break,
+            Ok(n) => total += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(total)
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if cli.threads > 0 {
+        rayon::ThreadPoolBuilder::new().num_threads(cli.threads).build_global().ok();
+    }
 
     let paths = collect_input_paths(cli.data.as_deref(), cli.input_dir.as_ref(), &cli.pattern)
         .context("入力パスの収集に失敗")?;
@@ -209,22 +293,26 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    eprintln!("{} ファイルを処理します", paths.len());
+    let num_threads = rayon::current_num_threads();
+    eprintln!("{} ファイルを処理します（{} スレッド）", paths.len(), num_threads);
 
     let mut writer = cli.output.as_ref().map(|path| {
         let f = File::create(path).unwrap_or_else(|e| {
             panic!("出力ファイルを作成できません: {:?}: {e}", path);
         });
-        BufWriter::new(f)
+        BufWriter::with_capacity(64 * 1024 * 1024, f)
     });
 
-    let mut pos = Position::new();
     let mut total_records = 0u64;
     let mut valid_records = 0u64;
     let mut trailing_bytes_total = 0u64;
     let mut errors = ErrorStats::default();
     let mut errors_shown = 0usize;
-    let mut buf = [0u8; PSV_SIZE];
+
+    let collect_output = writer.is_some();
+
+    let mut chunk: Vec<[u8; PSV_SIZE]> = Vec::with_capacity(CHUNK_SIZE);
+    let mut bulk_buf = vec![0u8; CHUNK_SIZE * PSV_SIZE];
 
     let start = std::time::Instant::now();
 
@@ -246,80 +334,83 @@ fn main() -> Result<()> {
         eprintln!("Reading: {}", path.display());
         let file = File::open(path)
             .with_context(|| format!("ファイルを開けません: {}", path.display()))?;
-        let mut reader = BufReader::with_capacity(1 << 20, file);
+        let mut reader = BufReader::with_capacity(64 * 1024 * 1024, file);
 
         loop {
-            match reader.read_exact(&mut buf) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e).context("読み込みエラー"),
+            // バルク読み込み
+            let read_bytes = read_up_to(&mut reader, &mut bulk_buf)?;
+            let complete_records = read_bytes / PSV_SIZE;
+            if read_bytes % PSV_SIZE != 0 {
+                eprintln!(
+                    "Warning: 不完全なレコード（{} バイト）をスキップ",
+                    read_bytes % PSV_SIZE
+                );
             }
 
-            total_records += 1;
-
-            // PSV メタデータチェック
-            let psv = PackedSfenValue::from_bytes(&buf).unwrap();
-            if !(-1..=1).contains(&psv.game_result) {
-                errors.bad_game_result += 1;
-                if errors_shown < cli.max_errors {
-                    eprintln!("[レコード#{total_records}] game_result が不正: {}", psv.game_result);
-                    errors_shown += 1;
-                }
-                continue;
+            if complete_records == 0 {
+                break;
             }
 
-            // PackedSfen → SFEN 文字列
-            let sfen_bytes: &[u8; SFEN_SIZE] = buf[..SFEN_SIZE].try_into().unwrap();
-            let sfen = match unpack_sfen(sfen_bytes) {
-                Ok(s) => s,
-                Err(e) => {
-                    errors.unpack_failed += 1;
-                    if errors_shown < cli.max_errors {
-                        eprintln!("[レコード#{total_records}] unpack 失敗: {e}");
-                        errors_shown += 1;
+            // チャンクにコピー
+            chunk.clear();
+            for i in 0..complete_records {
+                let offset = i * PSV_SIZE;
+                let mut record = [0u8; PSV_SIZE];
+                record.copy_from_slice(&bulk_buf[offset..offset + PSV_SIZE]);
+                chunk.push(record);
+            }
+
+            // チャンク内を並列検証
+            let results: Vec<ValidateResult> = chunk.par_iter().map(validate_record).collect();
+
+            // 結果を集計（逐次、書き込み順序を保持）
+            let chunk_base = total_records;
+            for (i, result) in results.into_iter().enumerate() {
+                let record_no = chunk_base + i as u64 + 1;
+                match result {
+                    ValidateResult::Valid(record) => {
+                        valid_records += 1;
+                        if let Some(ref mut w) = writer {
+                            w.write_all(&record)?;
+                        }
                     }
-                    continue;
+                    ValidateResult::Invalid { category, message } => {
+                        match category {
+                            "unpack_failed" => errors.unpack_failed += 1,
+                            "parse_failed" => errors.parse_failed += 1,
+                            "no_king" => errors.no_king += 1,
+                            "piece_overflow" => errors.piece_overflow += 1,
+                            "dead_piece" => errors.dead_piece += 1,
+                            "double_pawn" => errors.double_pawn += 1,
+                            "enemy_in_check" => errors.enemy_in_check += 1,
+                            "bad_game_result" => errors.bad_game_result += 1,
+                            _ => {}
+                        }
+                        if errors_shown < cli.max_errors {
+                            eprintln!("[レコード#{record_no}] {message}");
+                            errors_shown += 1;
+                        }
+                    }
                 }
-            };
-
-            // SFEN → Position
-            if let Err(e) = pos.set_sfen(&sfen) {
-                errors.parse_failed += 1;
-                if errors_shown < cli.max_errors {
-                    eprintln!("[レコード#{total_records}] パースエラー: {e} | {sfen}");
-                    errors_shown += 1;
-                }
-                continue;
             }
-
-            // ルール違反チェック
-            if let Some((category, reason)) = validate_position(&pos) {
-                match category {
-                    "no_king" => errors.no_king += 1,
-                    "piece_overflow" => errors.piece_overflow += 1,
-                    "dead_piece" => errors.dead_piece += 1,
-                    "double_pawn" => errors.double_pawn += 1,
-                    "enemy_in_check" => errors.enemy_in_check += 1,
-                    _ => {}
-                }
-                if errors_shown < cli.max_errors {
-                    eprintln!("[レコード#{total_records}] {reason} | {sfen}");
-                    errors_shown += 1;
-                }
-                continue;
-            }
-
-            valid_records += 1;
-            if let Some(ref mut w) = writer {
-                w.write_all(&buf)?;
-            }
+            total_records += complete_records as u64;
 
             if total_records.is_multiple_of(10_000_000) {
                 let elapsed = start.elapsed().as_secs_f64();
-                eprintln!("  {} M レコード処理, {:.1} sec", total_records / 1_000_000, elapsed,);
+                let rps = total_records as f64 / elapsed;
+                eprintln!(
+                    "  {} M レコード処理, {:.1} sec ({:.1} M rec/s)",
+                    total_records / 1_000_000,
+                    elapsed,
+                    rps / 1_000_000.0,
+                );
             }
         }
     }
+
+    // output 用バイト列は collect_output=false なら ValidateResult::Valid に空配列を渡せるが、
+    // 現在は常にコピーしている。大規模データで出力不要の場合はメモリ効率に影響なし（スタック配列のため）。
+    let _ = collect_output;
 
     let elapsed = start.elapsed().as_secs_f64();
     let invalid = errors.total();
@@ -371,7 +462,14 @@ fn main() -> Result<()> {
     }
 
     println!();
-    println!("処理時間:           {elapsed:.1} sec");
+    if elapsed > 0.0 {
+        println!(
+            "処理時間:           {elapsed:.1} sec ({:.1} M rec/s)",
+            total_records as f64 / elapsed / 1_000_000.0
+        );
+    } else {
+        println!("処理時間:           {elapsed:.1} sec");
+    }
     if let Some(ref path) = cli.output {
         println!("出力先:             {}", path.display());
         println!("出力レコード数:     {valid_records}");

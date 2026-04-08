@@ -107,6 +107,7 @@ cargo run -p tools --release --bin validate_psv -- \
 | `--pattern` | `--input-dir` 使用時の glob パターン | `*.bin` |
 | `--output` | 出力ファイル（正常レコードのみ書き出し） | - |
 | `--max-errors` | 不正レコードの詳細表示件数 | 100 |
+| `-t, --threads` | スレッド数（0=自動） | 0 |
 
 ### psv_to_jsonl
 
