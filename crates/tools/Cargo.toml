@@ -8,12 +8,15 @@ license = "GPL-3.0-only"
 repository = "https://github.com/SH11235/rshogi"
 
 [features]
-default = []
+default = ["layerstacks-1536"]
 # 診断ログ（EvalHashヒット率など）
 diagnostics = ["rshogi-core/diagnostics"]
 # NNUE PSQT / Threat 対応
 nnue-psqt = ["rshogi-core/nnue-psqt"]
 nnue-threat = ["rshogi-core/nnue-threat"]
+# LayerStacks L1 サイズ
+layerstacks-1536 = ["rshogi-core/layerstacks-1536"]
+layerstacks-768 = ["rshogi-core/layerstacks-768"]
 # AobaZero ONNX直接推論（ONNX Runtime + CUDA が必要）
 aobazero-onnx = ["dep:ort", "dep:ndarray"]
 # 標準dlshogi ONNX直接推論（DL水匠等、ONNX Runtime + CUDA が必要）

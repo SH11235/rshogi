@@ -534,6 +534,23 @@ pub enum LayerStacksAccStack {
     L768(AccumulatorStackLayerStacks<768>),
 }
 
+/// LayerStacks dispatch match の網羅性を確保するマクロ
+///
+/// 両 feature が無効の場合（WASM ビルド等）は空 enum のためインスタンスが存在しないが、
+/// コンパイルを通すために wildcard arm を生成する。
+macro_rules! ls_match {
+    ($val:expr, $pat:ident => $body:expr) => {
+        match $val {
+            #[cfg(feature = "layerstacks-1536")]
+            Self::L1536($pat) => $body,
+            #[cfg(feature = "layerstacks-768")]
+            Self::L768($pat) => $body,
+            #[cfg(not(any(feature = "layerstacks-1536", feature = "layerstacks-768")))]
+            _ => unreachable!("no LayerStacks variant enabled"),
+        }
+    };
+}
+
 impl LayerStacksAccStack {
     /// L1 サイズを取得
     pub fn l1_size(&self) -> usize {
@@ -542,51 +559,33 @@ impl LayerStacksAccStack {
             Self::L1536(_) => 1536,
             #[cfg(feature = "layerstacks-768")]
             Self::L768(_) => 768,
+            #[cfg(not(any(feature = "layerstacks-1536", feature = "layerstacks-768")))]
+            _ => unreachable!("no LayerStacks variant enabled"),
         }
     }
 
     /// スタックをリセット
     #[inline]
     pub fn reset(&mut self) {
-        match self {
-            #[cfg(feature = "layerstacks-1536")]
-            Self::L1536(s) => s.reset(),
-            #[cfg(feature = "layerstacks-768")]
-            Self::L768(s) => s.reset(),
-        }
+        ls_match!(self, s => s.reset());
     }
 
     /// do_move 時にスタックをプッシュ
     #[inline]
     pub fn push(&mut self) {
-        match self {
-            #[cfg(feature = "layerstacks-1536")]
-            Self::L1536(s) => s.push(),
-            #[cfg(feature = "layerstacks-768")]
-            Self::L768(s) => s.push(),
-        }
+        ls_match!(self, s => s.push());
     }
 
     /// undo_move 時にスタックをポップ
     #[inline]
     pub fn pop(&mut self) {
-        match self {
-            #[cfg(feature = "layerstacks-1536")]
-            Self::L1536(s) => s.pop(),
-            #[cfg(feature = "layerstacks-768")]
-            Self::L768(s) => s.pop(),
-        }
+        ls_match!(self, s => s.pop());
     }
 
     /// 現在のエントリの dirty_piece を設定
     #[inline]
     pub fn set_current_dirty_piece(&mut self, dirty: DirtyPiece) {
-        match self {
-            #[cfg(feature = "layerstacks-1536")]
-            Self::L1536(s) => s.current_mut().dirty_piece = dirty,
-            #[cfg(feature = "layerstacks-768")]
-            Self::L768(s) => s.current_mut().dirty_piece = dirty,
-        }
+        ls_match!(self, s => s.current_mut().dirty_piece = dirty);
     }
 }
 
@@ -610,6 +609,8 @@ impl LayerStacksAccCache {
             Self::L1536(c) => c.invalidate(),
             #[cfg(feature = "layerstacks-768")]
             Self::L768(c) => c.invalidate(),
+            #[cfg(not(any(feature = "layerstacks-1536", feature = "layerstacks-768")))]
+            _ => unreachable!("no LayerStacks variant enabled"),
         }
     }
 }

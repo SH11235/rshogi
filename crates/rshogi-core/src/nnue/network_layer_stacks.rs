@@ -565,6 +565,8 @@ impl LayerStacksNetwork {
             Self::L1536(_) => 1536,
             #[cfg(feature = "layerstacks-768")]
             Self::L768(_) => 768,
+            #[cfg(not(any(feature = "layerstacks-1536", feature = "layerstacks-768")))]
+            _ => unreachable!("no LayerStacks variant enabled"),
         }
     }
 
@@ -586,6 +588,8 @@ impl LayerStacksNetwork {
             Self::L1536(net) => net.fv_scale,
             #[cfg(feature = "layerstacks-768")]
             Self::L768(net) => net.fv_scale,
+            #[cfg(not(any(feature = "layerstacks-1536", feature = "layerstacks-768")))]
+            _ => unreachable!("no LayerStacks variant enabled"),
         }
     }
 
@@ -711,6 +715,8 @@ impl LayerStacksNetwork {
             Self::L768(_) => super::accumulator_layer_stacks::LayerStacksAccStack::L768(
                 super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<768>::new(),
             ),
+            #[cfg(not(any(feature = "layerstacks-1536", feature = "layerstacks-768")))]
+            _ => unreachable!("no LayerStacks variant enabled"),
         }
     }
 
@@ -725,6 +731,8 @@ impl LayerStacksNetwork {
             Self::L768(_) => super::accumulator_layer_stacks::LayerStacksAccCache::L768(
                 super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<768>::new(),
             ),
+            #[cfg(not(any(feature = "layerstacks-1536", feature = "layerstacks-768")))]
+            _ => unreachable!("no LayerStacks variant enabled"),
         }
     }
 }
