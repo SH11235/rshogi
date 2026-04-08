@@ -500,10 +500,9 @@ fn collect_sfen(sfen: &str, mirror_dedup: bool, emit_mirror: bool, out: &mut Vec
         out.push(s);
     } else {
         out.push(sfen.to_string());
-        if emit_mirror
-            && let Some(ms) = mirror_horizontal(sfen) {
-                out.push(ms);
-            }
+        if emit_mirror && let Some(ms) = mirror_horizontal(sfen) {
+            out.push(ms);
+        }
     }
 }
 
