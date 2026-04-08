@@ -113,7 +113,7 @@ cargo run -p tools --release --bin shuffle_psv -- \
 スコアがない場合は rescore が必要：
 
 ```bash
-# 1. 棋譜から学習データ生成（別途 generate_training_data 等で）
+# 1. 棋譜から学習データ生成（engine_selfplay で PSV 出力、または floodgate_pipeline で SFEN 抽出後に変換）
 
 # 2. スコア付与
 cargo run -p tools --release --bin rescore_psv -- \
