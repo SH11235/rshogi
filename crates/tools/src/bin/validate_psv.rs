@@ -47,7 +47,7 @@ use rayon::prelude::*;
 use rshogi_core::bitboard::{FILE_BB, RANK_BB};
 use rshogi_core::position::Position;
 use rshogi_core::types::{Color, PieceType};
-use tools::common::dedup::{PSV_SIZE, SFEN_SIZE, collect_input_paths};
+use tools::common::dedup::{PSV_SIZE, check_output_not_in_inputs, collect_input_paths};
 use tools::packed_sfen::{PackedSfenValue, unpack_sfen};
 
 /// チャンクサイズ（レコード数）
@@ -60,11 +60,11 @@ const CHUNK_SIZE: usize = 64 * 1024;
 )]
 struct Cli {
     /// PSV ファイル（カンマ区切りで複数指定可）
-    #[arg(long)]
+    #[arg(long, conflicts_with = "input_dir")]
     data: Option<String>,
 
     /// 入力ディレクトリ。--pattern と組み合わせて使用。--data と排他
-    #[arg(long)]
+    #[arg(long, conflicts_with = "data")]
     input_dir: Option<PathBuf>,
 
     /// --input-dir 使用時の glob パターン
@@ -206,7 +206,7 @@ fn validate_position(pos: &Position) -> Option<(&'static str, String)> {
 
         for (file_idx, file_bb) in FILE_BB.iter().enumerate() {
             if (pawns & *file_bb).count() >= 2 {
-                return Some(("double_pawn", format!("{side}の二歩（{file_idx}筋）")));
+                return Some(("double_pawn", format!("{side}の二歩（{}筋）", file_idx + 1)));
             }
         }
     }
@@ -225,7 +225,8 @@ fn validate_position(pos: &Position) -> Option<(&'static str, String)> {
 /// 1レコードを検証する（スレッドセーフ）
 fn validate_record(record: &[u8; PSV_SIZE]) -> ValidateResult {
     // game_result チェック
-    let psv = PackedSfenValue::from_bytes(record).unwrap();
+    // SAFETY: record は常に PSV_SIZE バイトの配列なので from_bytes は必ず Some を返す
+    let psv = PackedSfenValue::from_bytes(record).expect("PSV_SIZE バイトのバッファ");
     if !(-1..=1).contains(&psv.game_result) {
         return ValidateResult::Invalid {
             category: "bad_game_result",
@@ -234,8 +235,7 @@ fn validate_record(record: &[u8; PSV_SIZE]) -> ValidateResult {
     }
 
     // PackedSfen → SFEN 文字列
-    let sfen_bytes: &[u8; SFEN_SIZE] = record[..SFEN_SIZE].try_into().unwrap();
-    let sfen = match unpack_sfen(sfen_bytes) {
+    let sfen = match unpack_sfen(&psv.sfen) {
         Ok(s) => s,
         Err(e) => {
             return ValidateResult::Invalid {
@@ -325,12 +325,21 @@ fn main() -> Result<()> {
             .expect("valid template"),
     );
 
-    let mut writer = cli.output.as_ref().map(|path| {
-        let f = File::create(path).unwrap_or_else(|e| {
-            panic!("出力ファイルを作成できません: {:?}: {e}", path);
-        });
-        BufWriter::with_capacity(64 * 1024 * 1024, f)
-    });
+    // 出力先と入力ファイルの重複チェック
+    if let Some(ref output_path) = cli.output {
+        check_output_not_in_inputs(output_path, &paths)
+            .context("出力先が入力ファイルと重複しています")?;
+    }
+
+    let mut writer = cli
+        .output
+        .as_ref()
+        .map(|path| {
+            File::create(path)
+                .with_context(|| format!("出力ファイルを作成できません: {}", path.display()))
+                .map(|f| BufWriter::with_capacity(64 * 1024 * 1024, f))
+        })
+        .transpose()?;
 
     let mut total_records = 0u64;
     let mut valid_records = 0u64;
@@ -396,7 +405,7 @@ fn main() -> Result<()> {
                             "double_pawn" => errors.double_pawn += 1,
                             "enemy_in_check" => errors.enemy_in_check += 1,
                             "bad_game_result" => errors.bad_game_result += 1,
-                            _ => {}
+                            _ => unreachable!("未知のカテゴリ: {category}"),
                         }
                         if errors_shown < cli.max_errors {
                             progress.suspend(|| {
