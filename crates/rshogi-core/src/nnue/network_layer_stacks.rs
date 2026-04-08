@@ -6,11 +6,11 @@
 //! ## アーキテクチャ
 //!
 //! ```text
-//! Feature Transformer (HalfKA_hm^): 73,305 → 1536 (各視点)
-//! 視点結合: 両視点を連結 → 3072
-//! SqrClippedReLU: 3072 → 1536
+//! Feature Transformer (HalfKA_hm^): 73,305 → L1 (各視点)
+//! 視点結合: 両視点を連結 → L1*2
+//! SqrClippedReLU: L1*2 → L1
 //! LayerStacks (両玉の相対段ベースの9バケット選択後):
-//!   L1: 1536 → 16
+//!   L1: L1 → 16
 //!   SqrReLU + concat: 30
 //!   L2: 30 → 32
 //!   Output: 32 → 1 + skip
@@ -25,7 +25,7 @@
 
 use super::accumulator::Aligned;
 use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLayerStacks};
-use super::constants::{FV_SCALE_HALFKA, MAX_ARCH_LEN, NNUE_PYTORCH_L1};
+use super::constants::{FV_SCALE_HALFKA, MAX_ARCH_LEN};
 use super::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
 use super::layer_stacks::{LayerStacks, compute_bucket_index, sqr_clipped_relu_transform};
 use super::network::{
@@ -76,12 +76,8 @@ fn compute_layer_stacks_bucket_index(pos: &Position, side_to_move: Color) -> usi
 /// i16 配列の要素和: dst[i] = a[i] + b[i] (SIMD 最適化)
 #[cfg(feature = "nnue-threat")]
 #[inline]
-fn add_i16_arrays(
-    dst: &mut [i16; NNUE_PYTORCH_L1],
-    a: &[i16; NNUE_PYTORCH_L1],
-    b: &[i16; NNUE_PYTORCH_L1],
-) {
-    // AVX2: 256bit = 16 x i16, 1536/16 = 96 iterations
+fn add_i16_arrays<const L1: usize>(dst: &mut [i16; L1], a: &[i16; L1], b: &[i16; L1]) {
+    // AVX2: 256bit = 16 x i16, L1/16 iterations
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {
         unsafe {
@@ -89,7 +85,7 @@ fn add_i16_arrays(
             let dst_ptr = dst.as_mut_ptr();
             let a_ptr = a.as_ptr();
             let b_ptr = b.as_ptr();
-            for i in 0..96 {
+            for i in 0..(L1 / 16) {
                 let va = _mm256_load_si256(a_ptr.add(i * 16) as *const __m256i);
                 let vb = _mm256_load_si256(b_ptr.add(i * 16) as *const __m256i);
                 let result = _mm256_add_epi16(va, vb);
@@ -101,24 +97,24 @@ fn add_i16_arrays(
 
     // スカラーフォールバック
     #[allow(unreachable_code)]
-    for i in 0..NNUE_PYTORCH_L1 {
+    for i in 0..L1 {
         dst[i] = a[i].wrapping_add(b[i]);
     }
 }
 
 /// LayerStacksアーキテクチャのNNUEネットワーク
 ///
-/// HalfKA_hm^ 特徴量（73,305次元）+ 1536次元 Feature Transformer + 9バケット LayerStacks
-pub struct NetworkLayerStacks {
-    /// Feature Transformer (73,305 → 1536)
-    pub feature_transformer: FeatureTransformerLayerStacks,
+/// HalfKA_hm^ 特徴量（73,305次元）+ L1次元 Feature Transformer + 9バケット LayerStacks
+pub struct NetworkLayerStacks<const L1: usize> {
+    /// Feature Transformer (73,305 → L1)
+    pub feature_transformer: FeatureTransformerLayerStacks<L1>,
     /// LayerStacks (9バケット)
-    pub layer_stacks: LayerStacks,
+    pub layer_stacks: LayerStacks<L1>,
     /// 評価値スケーリング係数（アーキテクチャ文字列から取得、USIオプションでオーバーライド可）
     pub fv_scale: i32,
 }
 
-impl NetworkLayerStacks {
+impl<const L1: usize> NetworkLayerStacks<L1> {
     /// ファイルから読み込み
     pub fn load<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let file = File::open(path)?;
@@ -274,7 +270,7 @@ impl NetworkLayerStacks {
 
     /// 読み込み時の診断ログを出力
     #[cfg(feature = "diagnostics")]
-    fn log_load_diagnostics(ft: &FeatureTransformerLayerStacks, ls: &LayerStacks) {
+    fn log_load_diagnostics(ft: &FeatureTransformerLayerStacks<L1>, ls: &LayerStacks<L1>) {
         // FT統計
         let bias_sum: i64 = ft.biases.0.iter().map(|&x| x as i64).sum();
         let weight_min = ft.weights.iter().copied().min().unwrap_or(0);
@@ -303,7 +299,7 @@ impl NetworkLayerStacks {
     /// 評価値を計算
     ///
     /// 配列はMaybeUninitで確保し、直後のsqr_clipped_relu_transformで全要素が上書きされる。
-    pub fn evaluate(&self, pos: &Position, acc: &AccumulatorLayerStacks) -> Value {
+    pub fn evaluate(&self, pos: &Position, acc: &AccumulatorLayerStacks<L1>) -> Value {
         let side_to_move = pos.side_to_move();
         let bucket_index = compute_layer_stacks_bucket_index(pos, side_to_move);
         self.evaluate_with_bucket(pos, acc, bucket_index)
@@ -313,7 +309,7 @@ impl NetworkLayerStacks {
     pub fn evaluate_with_bucket(
         &self,
         pos: &Position,
-        acc: &AccumulatorLayerStacks,
+        acc: &AccumulatorLayerStacks<L1>,
         bucket_index: usize,
     ) -> Value {
         let side_to_move = pos.side_to_move();
@@ -326,7 +322,7 @@ impl NetworkLayerStacks {
         };
 
         // SAFETY: 直後のsqr_clipped_relu_transformで全要素が上書きされる
-        let mut transformed: Aligned<[u8; NNUE_PYTORCH_L1]> = unsafe { Aligned::new_uninit() };
+        let mut transformed: Aligned<[u8; L1]> = unsafe { Aligned::new_uninit() };
 
         #[cfg(feature = "nnue-threat")]
         if self.feature_transformer.has_threat {
@@ -336,10 +332,10 @@ impl NetworkLayerStacks {
             } else {
                 (acc.get_threat(Color::White as usize), acc.get_threat(Color::Black as usize))
             };
-            let mut us_combined = Aligned([0i16; NNUE_PYTORCH_L1]);
-            let mut them_combined = Aligned([0i16; NNUE_PYTORCH_L1]);
-            add_i16_arrays(&mut us_combined.0, us_acc, us_threat);
-            add_i16_arrays(&mut them_combined.0, them_acc, them_threat);
+            let mut us_combined = Aligned([0i16; L1]);
+            let mut them_combined = Aligned([0i16; L1]);
+            add_i16_arrays::<L1>(&mut us_combined.0, us_acc, us_threat);
+            add_i16_arrays::<L1>(&mut them_combined.0, them_acc, them_threat);
             sqr_clipped_relu_transform(&us_combined.0, &them_combined.0, &mut transformed.0);
         } else {
             sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
@@ -376,7 +372,11 @@ impl NetworkLayerStacks {
     /// Python (nnue-pytorch) との比較検証用。
     /// 各中間値をログ出力する。
     #[cfg(feature = "diagnostics")]
-    pub fn evaluate_with_diagnostics(&self, pos: &Position, acc: &AccumulatorLayerStacks) -> Value {
+    pub fn evaluate_with_diagnostics(
+        &self,
+        pos: &Position,
+        acc: &AccumulatorLayerStacks<L1>,
+    ) -> Value {
         use log::info;
 
         let side_to_move = pos.side_to_move();
@@ -391,17 +391,18 @@ impl NetworkLayerStacks {
         // us_acc の統計
         let us_min = us_acc.iter().copied().min().unwrap_or(0);
         let us_max = us_acc.iter().copied().max().unwrap_or(0);
-        let us_first_half_positive: usize = us_acc[0..768].iter().filter(|&&x| x > 0).count();
-        let us_second_half_positive: usize = us_acc[768..1536].iter().filter(|&&x| x > 0).count();
+        let us_first_half_positive: usize = us_acc[0..L1 / 2].iter().filter(|&&x| x > 0).count();
+        let us_second_half_positive: usize = us_acc[L1 / 2..L1].iter().filter(|&&x| x > 0).count();
 
         info!("[NNUE Eval] us_acc: min={us_min}, max={us_max}");
+        let half = L1 / 2;
         info!(
-            "[NNUE Eval] us_acc positive: first_half={us_first_half_positive}/768, second_half={us_second_half_positive}/768"
+            "[NNUE Eval] us_acc positive: first_half={us_first_half_positive}/{half}, second_half={us_second_half_positive}/{half}"
         );
         info!("[NNUE Eval] us_acc (piece) first 16: {:?}", &us_acc[0..16]);
 
         // Threat 結合 (evaluate_with_bucket と同一ロジック)
-        let mut transformed: Aligned<[u8; NNUE_PYTORCH_L1]> = Aligned([0u8; NNUE_PYTORCH_L1]);
+        let mut transformed: Aligned<[u8; L1]> = Aligned([0u8; L1]);
         #[cfg(feature = "nnue-threat")]
         if self.feature_transformer.has_threat {
             let (us_threat, them_threat) = if side_to_move == Color::Black {
@@ -409,9 +410,9 @@ impl NetworkLayerStacks {
             } else {
                 (acc.get_threat(Color::White as usize), acc.get_threat(Color::Black as usize))
             };
-            let mut us_combined = [0i16; NNUE_PYTORCH_L1];
-            let mut them_combined = [0i16; NNUE_PYTORCH_L1];
-            for i in 0..NNUE_PYTORCH_L1 {
+            let mut us_combined = [0i16; L1];
+            let mut them_combined = [0i16; L1];
+            for i in 0..L1 {
                 us_combined[i] = us_acc[i].wrapping_add(us_threat[i]);
                 them_combined[i] = them_acc[i].wrapping_add(them_threat[i]);
             }
@@ -429,7 +430,7 @@ impl NetworkLayerStacks {
 
         let transformed_nonzero: usize = transformed.0.iter().filter(|&&x| x > 0).count();
         let transformed_sum: u64 = transformed.0.iter().map(|&x| x as u64).sum();
-        info!("[NNUE Eval] transformed: nonzero={transformed_nonzero}/1536, sum={transformed_sum}");
+        info!("[NNUE Eval] transformed: nonzero={transformed_nonzero}/{L1}, sum={transformed_sum}");
         info!("[NNUE Eval] transformed first 32: {:?}", &transformed.0[0..32]);
 
         // バケットインデックスを計算（通常パスと同じ共通関数を使用）
@@ -488,7 +489,7 @@ impl NetworkLayerStacks {
     }
 
     /// 差分計算を使わずにAccumulatorを計算
-    pub fn refresh_accumulator(&self, pos: &Position, acc: &mut AccumulatorLayerStacks) {
+    pub fn refresh_accumulator(&self, pos: &Position, acc: &mut AccumulatorLayerStacks<L1>) {
         self.feature_transformer.refresh_accumulator(pos, acc);
     }
 
@@ -496,8 +497,8 @@ impl NetworkLayerStacks {
     pub fn refresh_accumulator_with_cache(
         &self,
         pos: &Position,
-        acc: &mut AccumulatorLayerStacks,
-        cache: &mut super::accumulator_layer_stacks::AccumulatorCacheLayerStacks,
+        acc: &mut AccumulatorLayerStacks<L1>,
+        cache: &mut super::accumulator_layer_stacks::AccumulatorCacheLayerStacks<L1>,
     ) {
         self.feature_transformer.refresh_accumulator_with_cache(pos, acc, cache);
     }
@@ -507,8 +508,8 @@ impl NetworkLayerStacks {
         &self,
         pos: &Position,
         dirty_piece: &super::accumulator::DirtyPiece,
-        acc: &mut AccumulatorLayerStacks,
-        prev_acc: &AccumulatorLayerStacks,
+        acc: &mut AccumulatorLayerStacks<L1>,
+        prev_acc: &AccumulatorLayerStacks<L1>,
     ) {
         self.feature_transformer.update_accumulator(pos, dirty_piece, acc, prev_acc);
     }
@@ -518,9 +519,9 @@ impl NetworkLayerStacks {
         &self,
         pos: &Position,
         dirty_piece: &super::accumulator::DirtyPiece,
-        acc: &mut AccumulatorLayerStacks,
-        prev_acc: &AccumulatorLayerStacks,
-        cache: &mut super::accumulator_layer_stacks::AccumulatorCacheLayerStacks,
+        acc: &mut AccumulatorLayerStacks<L1>,
+        prev_acc: &AccumulatorLayerStacks<L1>,
+        cache: &mut super::accumulator_layer_stacks::AccumulatorCacheLayerStacks<L1>,
     ) {
         self.feature_transformer.update_accumulator_with_cache(
             pos,
@@ -535,22 +536,210 @@ impl NetworkLayerStacks {
     pub fn forward_update_incremental(
         &self,
         pos: &Position,
-        stack: &mut AccumulatorStackLayerStacks,
+        stack: &mut AccumulatorStackLayerStacks<L1>,
         source_idx: usize,
     ) -> bool {
         self.feature_transformer.forward_update_incremental(pos, stack, source_idx)
     }
 }
 
+// =============================================================================
+// LayerStacksNetwork - L1 サイズ dispatch enum
+// =============================================================================
+
+/// LayerStacks ネットワークの L1 サイズ dispatch enum
+///
+/// Cargo feature `layerstacks-1536` / `layerstacks-768` で有効なバリアントが制御される。
+pub enum LayerStacksNetwork {
+    #[cfg(feature = "layerstacks-1536")]
+    L1536(Box<NetworkLayerStacks<1536>>),
+    #[cfg(feature = "layerstacks-768")]
+    L768(Box<NetworkLayerStacks<768>>),
+}
+
+impl LayerStacksNetwork {
+    /// L1 サイズを取得
+    pub fn l1_size(&self) -> usize {
+        match self {
+            #[cfg(feature = "layerstacks-1536")]
+            Self::L1536(_) => 1536,
+            #[cfg(feature = "layerstacks-768")]
+            Self::L768(_) => 768,
+        }
+    }
+
+    /// アーキテクチャ仕様を取得
+    pub fn architecture_spec(&self) -> super::spec::ArchitectureSpec {
+        super::spec::ArchitectureSpec::new(
+            super::spec::FeatureSet::LayerStacks,
+            self.l1_size(),
+            0,
+            0,
+            super::spec::Activation::CReLU,
+        )
+    }
+
+    /// FV_SCALE を取得
+    pub fn fv_scale(&self) -> i32 {
+        match self {
+            #[cfg(feature = "layerstacks-1536")]
+            Self::L1536(net) => net.fv_scale,
+            #[cfg(feature = "layerstacks-768")]
+            Self::L768(net) => net.fv_scale,
+        }
+    }
+
+    /// ファイルから読み込み（L1 サイズで dispatch）
+    pub fn read_with_options<R: Read + Seek>(
+        reader: &mut R,
+        l1: usize,
+        psqt_override: Option<bool>,
+    ) -> io::Result<Self> {
+        match l1 {
+            #[cfg(feature = "layerstacks-1536")]
+            1536 => {
+                let net = NetworkLayerStacks::<1536>::read_with_options(reader, psqt_override)?;
+                Ok(Self::L1536(Box::new(net)))
+            }
+            #[cfg(feature = "layerstacks-768")]
+            768 => {
+                let net = NetworkLayerStacks::<768>::read_with_options(reader, psqt_override)?;
+                Ok(Self::L768(Box::new(net)))
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Unsupported LayerStacks L1 size: {l1}"),
+            )),
+        }
+    }
+
+    /// 評価値を計算
+    pub fn evaluate(
+        &self,
+        pos: &Position,
+        stack: &super::accumulator_layer_stacks::LayerStacksAccStack,
+    ) -> Value {
+        match (self, stack) {
+            #[cfg(feature = "layerstacks-1536")]
+            (Self::L1536(net), super::accumulator_layer_stacks::LayerStacksAccStack::L1536(st)) => {
+                net.evaluate(pos, &st.current().accumulator)
+            }
+            #[cfg(feature = "layerstacks-768")]
+            (Self::L768(net), super::accumulator_layer_stacks::LayerStacksAccStack::L768(st)) => {
+                net.evaluate(pos, &st.current().accumulator)
+            }
+            #[allow(unreachable_patterns)]
+            _ => panic!("LayerStacksNetwork/LayerStacksAccStack L1 size mismatch"),
+        }
+    }
+
+    /// アキュムレータを更新（キャッシュ対応）
+    pub fn update_accumulator(
+        &self,
+        pos: &Position,
+        stack: &mut super::accumulator_layer_stacks::LayerStacksAccStack,
+        cache: &mut Option<super::accumulator_layer_stacks::LayerStacksAccCache>,
+    ) {
+        macro_rules! do_update {
+            ($net:expr, $stack:expr, $cache_variant:ident) => {{
+                let current_entry = $stack.current();
+                if current_entry.accumulator.computed_accumulation {
+                    return;
+                }
+
+                let mut updated = false;
+                if let Some(prev_idx) = current_entry.previous {
+                    let prev_computed = $stack.entry_at(prev_idx).accumulator.computed_accumulation;
+                    if prev_computed {
+                        let dirty_piece = $stack.current().dirty_piece;
+                        let (prev_acc, current_acc) =
+                            $stack.get_prev_and_current_accumulators(prev_idx);
+                        if let Some(
+                            super::accumulator_layer_stacks::LayerStacksAccCache::$cache_variant(c),
+                        ) = cache
+                        {
+                            $net.update_accumulator_with_cache(
+                                pos,
+                                &dirty_piece,
+                                current_acc,
+                                prev_acc,
+                                c,
+                            );
+                        } else {
+                            $net.update_accumulator(pos, &dirty_piece, current_acc, prev_acc);
+                        }
+                        updated = true;
+                    }
+                }
+
+                if !updated {
+                    let acc = &mut $stack.current_mut().accumulator;
+                    if let Some(
+                        super::accumulator_layer_stacks::LayerStacksAccCache::$cache_variant(c),
+                    ) = cache
+                    {
+                        $net.refresh_accumulator_with_cache(pos, acc, c);
+                    } else {
+                        $net.refresh_accumulator(pos, acc);
+                    }
+                }
+            }};
+        }
+
+        match (self, stack) {
+            #[cfg(feature = "layerstacks-1536")]
+            (Self::L1536(net), super::accumulator_layer_stacks::LayerStacksAccStack::L1536(st)) => {
+                do_update!(net, st, L1536);
+            }
+            #[cfg(feature = "layerstacks-768")]
+            (Self::L768(net), super::accumulator_layer_stacks::LayerStacksAccStack::L768(st)) => {
+                do_update!(net, st, L768);
+            }
+            #[allow(unreachable_patterns)]
+            _ => panic!("LayerStacksNetwork/LayerStacksAccStack L1 size mismatch"),
+        }
+    }
+
+    /// 新しい L1 サイズに対応する AccStack を作成
+    pub fn new_acc_stack(&self) -> super::accumulator_layer_stacks::LayerStacksAccStack {
+        match self {
+            #[cfg(feature = "layerstacks-1536")]
+            Self::L1536(_) => super::accumulator_layer_stacks::LayerStacksAccStack::L1536(
+                super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<1536>::new(),
+            ),
+            #[cfg(feature = "layerstacks-768")]
+            Self::L768(_) => super::accumulator_layer_stacks::LayerStacksAccStack::L768(
+                super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<768>::new(),
+            ),
+        }
+    }
+
+    /// 新しい L1 サイズに対応する AccCache を作成
+    pub fn new_acc_cache(&self) -> super::accumulator_layer_stacks::LayerStacksAccCache {
+        match self {
+            #[cfg(feature = "layerstacks-1536")]
+            Self::L1536(_) => super::accumulator_layer_stacks::LayerStacksAccCache::L1536(
+                super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<1536>::new(),
+            ),
+            #[cfg(feature = "layerstacks-768")]
+            Self::L768(_) => super::accumulator_layer_stacks::LayerStacksAccCache::L768(
+                super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<768>::new(),
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nnue::constants::FV_SCALE_HALFKA;
+    use crate::nnue::constants::{FV_SCALE_HALFKA, NNUE_PYTORCH_L1};
     use crate::position::{Position, SFEN_HIRATE};
+
+    const TEST_L1: usize = NNUE_PYTORCH_L1;
 
     #[test]
     fn test_network_dimensions() {
-        assert_eq!(NNUE_PYTORCH_L1, 1536);
+        assert_eq!(TEST_L1, 1536);
         assert_eq!(FV_SCALE_HALFKA, 16);
     }
 
@@ -573,7 +762,7 @@ mod tests {
         let path = std::env::var("NNUE_TEST_FILE")
             .unwrap_or_else(|_| "/path/to/your/layer_stacks.nnue".to_string());
 
-        let network = match NetworkLayerStacks::load(path) {
+        let network = match NetworkLayerStacks::<TEST_L1>::load(path) {
             Ok(n) => n,
             Err(e) => {
                 eprintln!("Skipping test: {e}");
@@ -609,7 +798,7 @@ mod tests {
                 network.feature_transformer.weights[pos..sample_end].to_vec();
             eprintln!("First nonzero at position {pos}, sample: {first_nonzero_sample:?}");
             // 特徴インデックスを計算 (weight layout: [feature_index][output_dim])
-            let feature_idx = pos / NNUE_PYTORCH_L1;
+            let feature_idx = pos / TEST_L1;
             eprintln!("  -> Feature index: {feature_idx}");
         }
 
@@ -631,7 +820,7 @@ mod tests {
 
         // 最初のアクティブ特徴量の重みを確認
         if let Some(first_idx) = active_black.iter().next() {
-            let offset = first_idx * NNUE_PYTORCH_L1;
+            let offset = first_idx * TEST_L1;
             eprintln!("  Weight offset for feature {first_idx}: {offset}");
             if offset + 10 <= weight_total {
                 let active_weight_sample: Vec<i16> =
@@ -640,7 +829,7 @@ mod tests {
             }
         }
 
-        let mut acc = AccumulatorLayerStacks::new();
+        let mut acc = AccumulatorLayerStacks::<TEST_L1>::new();
         network.refresh_accumulator(&pos, &mut acc);
 
         // Accumulatorの値を確認
@@ -655,28 +844,31 @@ mod tests {
         let black_min = black_acc.iter().copied().min().unwrap_or(0);
         let black_max = black_acc.iter().copied().max().unwrap_or(0);
         let black_positive: usize = black_acc.iter().filter(|&&x| x > 0).count();
-        eprintln!("Black acc: min={black_min}, max={black_max}, positive={black_positive}/1536");
+        eprintln!(
+            "Black acc: min={black_min}, max={black_max}, positive={black_positive}/{TEST_L1}"
+        );
 
-        // 前半768と後半768の統計（SqrClippedReLUでペア乗算される）
-        let first_half = &black_acc[0..768];
-        let second_half = &black_acc[768..1536];
+        // 前半と後半の統計（SqrClippedReLUでペア乗算される）
+        let half = TEST_L1 / 2;
+        let first_half = &black_acc[0..half];
+        let second_half = &black_acc[half..TEST_L1];
         let first_positive: usize = first_half.iter().filter(|&&x| x > 0).count();
         let second_positive: usize = second_half.iter().filter(|&&x| x > 0).count();
         eprintln!(
-            "First half positive: {first_positive}/768, Second half positive: {second_positive}/768"
+            "First half positive: {first_positive}/{half}, Second half positive: {second_positive}/{half}"
         );
 
         // ペア乗算で非ゼロになるペアの数
         let mut pairs_both_positive = 0usize;
-        for i in 0..768 {
+        for i in 0..half {
             if first_half[i] > 0 && second_half[i] > 0 {
                 pairs_both_positive += 1;
             }
         }
-        eprintln!("Pairs where both halves > 0: {pairs_both_positive}/768");
+        eprintln!("Pairs where both halves > 0: {pairs_both_positive}/{half}");
 
         // SqrClippedReLU変換後の値を確認
-        let mut transformed: Aligned<[u8; NNUE_PYTORCH_L1]> = Aligned([0u8; NNUE_PYTORCH_L1]);
+        let mut transformed: Aligned<[u8; TEST_L1]> = Aligned([0u8; TEST_L1]);
         sqr_clipped_relu_transform(black_acc, white_acc, &mut transformed.0);
         let transformed_sum: u64 = transformed.0.iter().map(|&x| x as u64).sum();
         let transformed_nonzero: usize = transformed.0.iter().filter(|&&x| x > 0).count();
@@ -719,7 +911,7 @@ mod tests {
 
             // raw score（/600前）を計算
             let (us_acc, them_acc) = (acc.get(0), acc.get(1));
-            let mut transformed: Aligned<[u8; NNUE_PYTORCH_L1]> = Aligned([0u8; NNUE_PYTORCH_L1]);
+            let mut transformed: Aligned<[u8; TEST_L1]> = Aligned([0u8; TEST_L1]);
             sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
             let stm = pos.side_to_move();
             let f_k = pos.king_square(stm);

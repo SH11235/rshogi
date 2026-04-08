@@ -166,7 +166,10 @@ pub fn parse_feature_input_dimensions(arch_str: &str) -> Option<usize> {
 pub fn parse_feature_set_from_arch(arch_str: &str) -> Result<FeatureSet, String> {
     use super::constants::{HALFKA_DIMENSIONS, HALFKA_HM_DIMENSIONS};
 
-    if arch_str.contains("LayerStacks") || arch_str.contains("->1536x2]") {
+    if arch_str.contains("LayerStacks")
+        || arch_str.contains("->1536x2]")
+        || arch_str.contains("->768x2]")
+    {
         return Ok(FeatureSet::LayerStacks);
     }
     if arch_str.contains("HalfKP") {

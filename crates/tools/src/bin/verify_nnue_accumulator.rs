@@ -20,8 +20,9 @@ use std::path::PathBuf;
 
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::nnue::{
-    AccumulatorLayerStacks, LayerStackBucketMode, NNUENetwork, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
-    set_layer_stack_bucket_mode, set_layer_stack_progress_kpabs_weights,
+    AccumulatorLayerStacks, LayerStackBucketMode, LayerStacksNetwork, NNUENetwork,
+    SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, set_layer_stack_bucket_mode,
+    set_layer_stack_progress_kpabs_weights,
 };
 use rshogi_core::position::Position;
 
@@ -72,6 +73,12 @@ fn main() -> Result<()> {
 
     println!("Model loaded successfully.");
 
+    let concrete_net = match net {
+        LayerStacksNetwork::L1536(inner) => inner,
+        #[allow(unreachable_patterns)]
+        _ => anyhow::bail!("この検証ツールは LayerStacks L1=1536 のみ対応"),
+    };
+
     // テスト SFEN
     let sfens = ["lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1"];
 
@@ -92,43 +99,38 @@ fn main() -> Result<()> {
             }
 
             // 決定的に最初の合法手を選択
-            let m = moves[0].into();
+            let m = moves[0];
             let gc = pos.gives_check(m);
 
             // Before move: refresh accumulator
             let mut acc_before = AccumulatorLayerStacks::new();
-            net.refresh_accumulator(&pos, &mut acc_before);
+            concrete_net.refresh_accumulator(&pos, &mut acc_before);
 
             // Do move
             let dirty = pos.do_move(m, gc);
 
             // After move: refresh (golden truth)
             let mut acc_refresh = AccumulatorLayerStacks::new();
-            net.refresh_accumulator(&pos, &mut acc_refresh);
-            let eval_refresh = net.evaluate(&pos, &acc_refresh);
+            concrete_net.refresh_accumulator(&pos, &mut acc_refresh);
+            let eval_refresh = concrete_net.evaluate(&pos, &acc_refresh);
 
             // After move: update (differential from acc_before)
             let mut acc_update = AccumulatorLayerStacks::new();
-            net.update_accumulator(&pos, &dirty, &mut acc_update, &acc_before);
-            let eval_update = net.evaluate(&pos, &acc_update);
+            concrete_net.update_accumulator(&pos, &dirty, &mut acc_update, &acc_before);
+            let eval_update = concrete_net.evaluate(&pos, &acc_update);
 
-            total_tests += 1;
-
-            if eval_refresh != eval_update {
-                fail += 1;
+            let mismatch = if eval_refresh != eval_update {
                 eprintln!(
                     "MISMATCH step={step} move={m:?}: refresh={} update={}",
                     eval_refresh.raw(),
                     eval_update.raw()
                 );
-
-                // Accumulator 差分をデバッグ出力
                 for p in 0..2 {
                     let r = acc_refresh.get(p);
                     let u = acc_update.get(p);
                     let diffs: usize = r.iter().zip(u.iter()).filter(|(a, b)| a != b).count();
                     if diffs > 0 {
-                        eprintln!("  piece_acc[{p}]: {diffs}/1536 differ");
+                        eprintln!("  piece_acc[{p}]: {diffs}/{} differ", r.len());
                     }
                     #[cfg(feature = "nnue-threat")]
                     {
@@ -137,11 +139,19 @@ fn main() -> Result<()> {
                         let tdiffs: usize =
                             rt.iter().zip(ut.iter()).filter(|(a, b)| a != b).count();
                         if tdiffs > 0 {
-                            eprintln!("  threat_acc[{p}]: {tdiffs}/1536 differ");
+                            eprintln!("  threat_acc[{p}]: {tdiffs}/{} differ", rt.len());
                         }
                     }
                 }
+                true
+            } else {
+                false
+            };
 
+            total_tests += 1;
+
+            if mismatch {
+                fail += 1;
                 if fail >= 10 {
                     eprintln!("Too many failures, stopping.");
                     break;

@@ -18,7 +18,7 @@
 //! **「Accumulator は L1 だけで決まる」** を活用し、L2/L3/活性化の追加時に
 //! このファイルの変更は最小限で済む。
 
-use super::accumulator_layer_stacks::{AccumulatorCacheLayerStacks, AccumulatorStackLayerStacks};
+use super::accumulator_layer_stacks::{LayerStacksAccCache, LayerStacksAccStack};
 use super::accumulator_stack_variant::AccumulatorStackVariant;
 use super::activation::detect_activation_from_arch;
 use super::bona_piece::BonaPiece;
@@ -27,7 +27,7 @@ use super::constants::{MAX_ARCH_LEN, NNUE_VERSION, NNUE_VERSION_HALFKA};
 use super::halfka::{HalfKANetwork, HalfKAStack};
 use super::halfka_hm::{HalfKA_hmNetwork, HalfKA_hmStack};
 use super::halfkp::{HalfKPNetwork, HalfKPStack};
-use super::network_layer_stacks::NetworkLayerStacks;
+use super::network_layer_stacks::LayerStacksNetwork;
 use super::spec::{Activation, FeatureSet};
 use super::stats::{count_already_computed, count_refresh, count_update};
 use crate::eval::material;
@@ -493,8 +493,8 @@ pub enum NNUENetwork {
     HalfKA_hm(HalfKA_hmNetwork),
     /// HalfKP 特徴量セット（L256/L512）
     HalfKP(HalfKPNetwork),
-    /// LayerStacks（1536次元 + 9バケット）
-    LayerStacks(Box<NetworkLayerStacks>),
+    /// LayerStacks（L1=1536/768 + 9バケット）
+    LayerStacks(LayerStacksNetwork),
 }
 
 impl NNUENetwork {
@@ -589,8 +589,15 @@ impl NNUENetwork {
                 // LayerStacks は特殊処理（FT が LEB128 圧縮のためファイルサイズ検出の対象外）
                 if effective_feature_set == FeatureSet::LayerStacks {
                     reader.seek(SeekFrom::Start(0))?;
-                    let network = NetworkLayerStacks::read_with_options(reader, psqt_override)?;
-                    return Ok(Self::LayerStacks(Box::new(network)));
+                    // L1 サイズをアーキテクチャ文字列から取得（デフォルト 1536）
+                    let (l1_from_arch, _, _) = super::spec::parse_arch_dimensions(&arch_str);
+                    let l1 = if l1_from_arch == 0 {
+                        1536
+                    } else {
+                        l1_from_arch
+                    };
+                    let network = LayerStacksNetwork::read_with_options(reader, l1, psqt_override)?;
+                    return Ok(Self::LayerStacks(network));
                 }
 
                 // 4. ファイルサイズからアーキテクチャを検出
@@ -689,7 +696,7 @@ impl NNUENetwork {
             Self::HalfKA(net) => net.l1_size(),
             Self::HalfKA_hm(net) => net.l1_size(),
             Self::HalfKP(net) => net.l1_size(),
-            Self::LayerStacks(_) => 1536,
+            Self::LayerStacks(net) => net.l1_size(),
         }
     }
 
@@ -709,112 +716,17 @@ impl NNUENetwork {
             Self::HalfKA(net) => net.architecture_spec(),
             Self::HalfKA_hm(net) => net.architecture_spec(),
             Self::HalfKP(net) => net.architecture_spec(),
-            Self::LayerStacks(_) => super::spec::ArchitectureSpec::new(
-                super::spec::FeatureSet::LayerStacks,
-                1536,
-                0,
-                0,
-                Activation::CReLU,
-            ),
+            Self::LayerStacks(net) => net.architecture_spec(),
         }
     }
 
-    // LayerStacks 用のメソッド（LayerStacks のみ維持）
-
-    /// 差分計算を使わずにAccumulatorを計算（LayerStacks用）
-    pub fn refresh_accumulator_layer_stacks(
-        &self,
-        pos: &Position,
-        acc: &mut super::accumulator_layer_stacks::AccumulatorLayerStacks,
-    ) {
+    /// LayerStacksNetwork への参照を取得
+    ///
+    /// LayerStacks アーキテクチャでない場合は panic。
+    pub fn as_layer_stacks(&self) -> &LayerStacksNetwork {
         match self {
-            Self::LayerStacks(net) => net.refresh_accumulator(pos, acc),
+            Self::LayerStacks(net) => net,
             _ => panic!("This method is only for LayerStacks architecture."),
-        }
-    }
-
-    /// 差分計算でAccumulatorを更新（LayerStacks用）
-    pub fn update_accumulator_layer_stacks(
-        &self,
-        pos: &Position,
-        dirty_piece: &super::accumulator::DirtyPiece,
-        acc: &mut super::accumulator_layer_stacks::AccumulatorLayerStacks,
-        prev_acc: &super::accumulator_layer_stacks::AccumulatorLayerStacks,
-    ) {
-        match self {
-            Self::LayerStacks(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
-            _ => panic!("This method is only for LayerStacks architecture."),
-        }
-    }
-
-    /// 差分計算を使わずにAccumulatorを計算（LayerStacks用、キャッシュ対応）
-    pub fn refresh_accumulator_layer_stacks_with_cache(
-        &self,
-        pos: &Position,
-        acc: &mut super::accumulator_layer_stacks::AccumulatorLayerStacks,
-        cache: &mut AccumulatorCacheLayerStacks,
-    ) {
-        match self {
-            Self::LayerStacks(net) => net.refresh_accumulator_with_cache(pos, acc, cache),
-            _ => panic!("This method is only for LayerStacks architecture."),
-        }
-    }
-
-    /// 差分計算でAccumulatorを更新（LayerStacks用、キャッシュ対応）
-    pub fn update_accumulator_layer_stacks_with_cache(
-        &self,
-        pos: &Position,
-        dirty_piece: &super::accumulator::DirtyPiece,
-        acc: &mut super::accumulator_layer_stacks::AccumulatorLayerStacks,
-        prev_acc: &super::accumulator_layer_stacks::AccumulatorLayerStacks,
-        cache: &mut AccumulatorCacheLayerStacks,
-    ) {
-        match self {
-            Self::LayerStacks(net) => {
-                net.update_accumulator_with_cache(pos, dirty_piece, acc, prev_acc, cache)
-            }
-            _ => panic!("This method is only for LayerStacks architecture."),
-        }
-    }
-
-    /// 複数手分の差分を適用してアキュムレータを更新（LayerStacks用）
-    pub fn forward_update_incremental_layer_stacks(
-        &self,
-        pos: &Position,
-        stack: &mut AccumulatorStackLayerStacks,
-        source_idx: usize,
-    ) -> bool {
-        match self {
-            Self::LayerStacks(net) => net.forward_update_incremental(pos, stack, source_idx),
-            _ => panic!("This method is only for LayerStacks architecture."),
-        }
-    }
-
-    /// 評価値を計算（LayerStacks用）
-    pub fn evaluate_layer_stacks(
-        &self,
-        pos: &Position,
-        acc: &super::accumulator_layer_stacks::AccumulatorLayerStacks,
-    ) -> Value {
-        match self {
-            Self::LayerStacks(net) => net.evaluate(pos, acc),
-            // SAFETY: layerstack-only ビルドでは LayerStacks 以外のバリアントは生成されない。
-            //         非 layerstack-only ビルドでは呼び出し元が LayerStacks であることを保証する。
-            _ => unsafe { core::hint::unreachable_unchecked() },
-        }
-    }
-
-    /// 評価値を計算（LayerStacks用、事前計算済み bucket index を使用）
-    pub fn evaluate_layer_stacks_with_bucket(
-        &self,
-        pos: &Position,
-        acc: &super::accumulator_layer_stacks::AccumulatorLayerStacks,
-        bucket_index: usize,
-    ) -> Value {
-        match self {
-            Self::LayerStacks(net) => net.evaluate_with_bucket(pos, acc, bucket_index),
-            // SAFETY: evaluate_layer_stacks と同様。
-            _ => unsafe { core::hint::unreachable_unchecked() },
         }
     }
 
@@ -1585,122 +1497,25 @@ pub fn get_network() -> Option<Arc<NNUENetwork>> {
 // 内部ヘルパー関数（ロジック集約用）
 // =============================================================================
 
-/// LayerStacks アキュムレータを更新して評価（内部実装）
-///
-/// `evaluate_layer_stacks` と `evaluate_dispatch` から呼び出される共通ロジック。
-/// network は既に取得済みで、アーキテクチャチェックも完了していることが前提。
-#[inline]
-fn update_and_evaluate_layer_stacks(
-    network: &NNUENetwork,
-    pos: &Position,
-    stack: &mut AccumulatorStackLayerStacks,
-) -> Value {
-    // アキュムレータの更新
-    let current_entry = stack.current();
-    if !current_entry.accumulator.computed_accumulation {
-        let mut updated = false;
-
-        // 1. 直前局面で差分更新を試行
-        if let Some(prev_idx) = current_entry.previous {
-            let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
-            if prev_computed {
-                let dirty_piece = stack.current().dirty_piece;
-                let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
-                network.update_accumulator_layer_stacks(pos, &dirty_piece, current_acc, prev_acc);
-                updated = true;
-            }
-        }
-
-        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
-        if !updated && let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
-            updated = network.forward_update_incremental_layer_stacks(pos, stack, source_idx);
-        }
-
-        // 3. それでも失敗なら全計算
-        if !updated {
-            let acc = &mut stack.current_mut().accumulator;
-            network.refresh_accumulator_layer_stacks(pos, acc);
-        }
-    }
-
-    // progress8kpabs: 差分更新を試み、結果を CACHED_PROGRESS_BUCKET に格納
-    if get_layer_stack_bucket_mode() == LayerStackBucketMode::Progress8KPAbs {
-        let bucket = ensure_progress_bucket(pos, stack);
-        CACHED_PROGRESS_BUCKET.with(|c| c.set(Some(bucket)));
-    }
-
-    // 評価
-    let acc_ref = &stack.current().accumulator;
-    network.evaluate_layer_stacks(pos, acc_ref)
-}
-
 /// LayerStacks アキュムレータを更新して評価（キャッシュ対応版）
 ///
-/// `update_and_evaluate_layer_stacks` と同じロジックだが、
+/// `LayerStacksNetwork::update_accumulator()` と `evaluate()` に委譲する。
 /// AccumulatorCaches（Finny Tables）を使用して refresh を高速化する。
 #[inline(always)]
 pub(crate) fn update_and_evaluate_layer_stacks_cached(
-    network: &NNUENetwork,
+    net: &LayerStacksNetwork,
     pos: &Position,
-    stack: &mut AccumulatorStackLayerStacks,
-    acc_cache: &mut Option<AccumulatorCacheLayerStacks>,
+    stack: &mut LayerStacksAccStack,
+    acc_cache: &mut Option<LayerStacksAccCache>,
 ) -> Value {
     // アキュムレータの更新
-    let current_entry = stack.current();
-    if !current_entry.accumulator.computed_accumulation {
-        let mut updated = false;
-
-        // 1. 直前局面で差分更新を試行
-        if let Some(prev_idx) = current_entry.previous {
-            let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
-            if prev_computed {
-                let dirty_piece = stack.current().dirty_piece;
-                let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
-                if let Some(cache) = acc_cache {
-                    network.update_accumulator_layer_stacks_with_cache(
-                        pos,
-                        &dirty_piece,
-                        current_acc,
-                        prev_acc,
-                        cache,
-                    );
-                } else {
-                    network.update_accumulator_layer_stacks(
-                        pos,
-                        &dirty_piece,
-                        current_acc,
-                        prev_acc,
-                    );
-                }
-                updated = true;
-            }
-        }
-
-        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
-        if !updated && let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
-            updated = network.forward_update_incremental_layer_stacks(pos, stack, source_idx);
-        }
-
-        // 3. それでも失敗なら全計算（キャッシュ経由）
-        if !updated {
-            let acc = &mut stack.current_mut().accumulator;
-            if let Some(cache) = acc_cache {
-                network.refresh_accumulator_layer_stacks_with_cache(pos, acc, cache);
-            } else {
-                network.refresh_accumulator_layer_stacks(pos, acc);
-            }
-        }
-    }
+    net.update_accumulator(pos, stack, acc_cache);
 
     // progress8kpabs: 差分更新を試み、結果を CACHED_PROGRESS_BUCKET に格納
-    if get_layer_stack_bucket_mode() == LayerStackBucketMode::Progress8KPAbs {
-        let bucket = ensure_progress_bucket(pos, stack);
-        CACHED_PROGRESS_BUCKET.with(|c| c.set(Some(bucket)));
-    }
+    // TODO: progress8kpabs は LayerStacksAccStack 対応が別途必要（将来対応）
 
     // 評価
-    let acc_ref = &stack.current().accumulator;
-    network.evaluate_layer_stacks(pos, acc_ref)
+    net.evaluate(pos, stack)
 }
 
 /// progress8kpabs の progress_sum を計算済みにして bucket index を返す
@@ -1708,7 +1523,10 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
 /// 差分更新が可能な場合（前局面が計算済み、玉移動なし）は DirtyPiece の差分で O(1) 更新。
 /// それ以外は全駒スキャンにフォールバック。
 #[inline]
-fn ensure_progress_bucket(pos: &Position, stack: &mut AccumulatorStackLayerStacks) -> usize {
+fn ensure_progress_bucket(
+    pos: &Position,
+    stack: &mut super::accumulator_layer_stacks::AccumulatorStackLayerStacks<1536>,
+) -> usize {
     if !stack.current().computed_progress {
         let weights = get_layer_stack_progress_kpabs_weights();
         let current_entry = stack.current();
@@ -1883,11 +1701,11 @@ pub fn is_halfka_1024_loaded() -> bool {
 
 /// 局面を評価（LayerStacks用）
 ///
-/// AccumulatorStackLayerStacks を使って差分更新し、計算済みなら再利用する。
+/// LayerStacksAccStack を使って差分更新し、計算済みなら再利用する。
 ///
 /// # Panics
 /// NNUEが未ロードかつMaterial評価も無効の場合はパニックする。
-pub fn evaluate_layer_stacks(pos: &Position, stack: &mut AccumulatorStackLayerStacks) -> Value {
+pub fn evaluate_layer_stacks(pos: &Position, stack: &mut LayerStacksAccStack) -> Value {
     if material::is_material_enabled() {
         return material::evaluate_material(pos);
     }
@@ -1899,13 +1717,8 @@ pub fn evaluate_layer_stacks(pos: &Position, stack: &mut AccumulatorStackLayerSt
         );
     };
 
-    // LayerStacks 以外はエラー
-    if !network.is_layer_stacks() {
-        panic!("Non-LayerStacks architecture detected. Use evaluate() with AccumulatorStack.");
-    }
-
-    // 内部ヘルパー関数を呼び出し
-    update_and_evaluate_layer_stacks(&network, pos, stack)
+    let net = network.as_layer_stacks();
+    update_and_evaluate_layer_stacks_cached(net, pos, stack, &mut None)
 }
 
 /// アーキテクチャに応じて適切な評価関数を呼び出す
@@ -1921,7 +1734,7 @@ pub fn evaluate_layer_stacks(pos: &Position, stack: &mut AccumulatorStackLayerSt
 pub fn evaluate_dispatch(
     pos: &Position,
     stack: &mut AccumulatorStackVariant,
-    acc_cache: &mut Option<AccumulatorCacheLayerStacks>,
+    acc_cache: &mut Option<LayerStacksAccCache>,
 ) -> Value {
     if material::is_material_enabled() {
         return material::evaluate_material(pos);
@@ -1937,7 +1750,8 @@ pub fn evaluate_dispatch(
     // バリアントに応じて適切な評価関数を呼び出し
     match stack {
         AccumulatorStackVariant::LayerStacks(s) => {
-            update_and_evaluate_layer_stacks_cached(&network, pos, s, acc_cache)
+            let net = network.as_layer_stacks();
+            update_and_evaluate_layer_stacks_cached(net, pos, s, acc_cache)
         }
         #[cfg(not(feature = "layerstack-only"))]
         AccumulatorStackVariant::HalfKA(s) => update_and_evaluate_halfka(&network, pos, s),
@@ -1964,7 +1778,7 @@ pub fn evaluate_dispatch(
 pub fn ensure_accumulator_computed(
     pos: &Position,
     stack: &mut AccumulatorStackVariant,
-    acc_cache: &mut Option<AccumulatorCacheLayerStacks>,
+    acc_cache: &mut Option<LayerStacksAccCache>,
 ) {
     // NNUEがなければ何もしない
     let Some(network) = get_network() else {
@@ -1974,7 +1788,8 @@ pub fn ensure_accumulator_computed(
     // バリアントに応じてアキュムレータを更新（評価はしない）
     match stack {
         AccumulatorStackVariant::LayerStacks(s) => {
-            update_accumulator_only_layer_stacks_cached(&network, pos, s, acc_cache);
+            let net = network.as_layer_stacks();
+            net.update_accumulator(pos, s, acc_cache);
         }
         #[cfg(not(feature = "layerstack-only"))]
         AccumulatorStackVariant::HalfKA(s) => {
@@ -1994,56 +1809,6 @@ pub fn ensure_accumulator_computed(
         | AccumulatorStackVariant::HalfKP(_) => {
             unreachable!("layerstack-only build: only LayerStacks variant is supported")
         }
-    }
-}
-
-/// LayerStacks アキュムレータを更新のみ（キャッシュ対応版、評価なし）
-#[inline]
-fn update_accumulator_only_layer_stacks_cached(
-    network: &NNUENetwork,
-    pos: &Position,
-    stack: &mut AccumulatorStackLayerStacks,
-    acc_cache: &mut Option<AccumulatorCacheLayerStacks>,
-) {
-    let current_entry = stack.current();
-    if current_entry.accumulator.computed_accumulation {
-        count_already_computed!();
-        return;
-    }
-
-    let mut updated = false;
-
-    // 直前局面で差分更新を試行
-    if let Some(prev_idx) = current_entry.previous {
-        let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
-        if prev_computed {
-            let dirty_piece = stack.current().dirty_piece;
-            let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
-            if let Some(cache) = acc_cache {
-                network.update_accumulator_layer_stacks_with_cache(
-                    pos,
-                    &dirty_piece,
-                    current_acc,
-                    prev_acc,
-                    cache,
-                );
-            } else {
-                network.update_accumulator_layer_stacks(pos, &dirty_piece, current_acc, prev_acc);
-            }
-            count_update!();
-            updated = true;
-        }
-    }
-
-    // 失敗なら全計算（キャッシュ経由）
-    if !updated {
-        let acc = &mut stack.current_mut().accumulator;
-        if let Some(cache) = acc_cache {
-            network.refresh_accumulator_layer_stacks_with_cache(pos, acc, cache);
-        } else {
-            network.refresh_accumulator_layer_stacks(pos, acc);
-        }
-        count_refresh!();
     }
 }
 
@@ -2202,10 +1967,11 @@ mod tests {
         let mut pos = crate::position::Position::new();
         pos.set_sfen(SFEN_HIRATE).unwrap();
 
-        let mut acc = crate::nnue::AccumulatorLayerStacks::new();
-        network.refresh_accumulator_layer_stacks(&pos, &mut acc);
-
-        let value = network.evaluate_layer_stacks(&pos, &acc);
+        let ls_net = network.as_layer_stacks();
+        let mut stack = ls_net.new_acc_stack();
+        let mut acc_cache = Some(ls_net.new_acc_cache());
+        ls_net.update_accumulator(&pos, &mut stack, &mut acc_cache);
+        let value = ls_net.evaluate(&pos, &stack);
         eprintln!("LayerStacks evaluate: {}", value.raw());
 
         // 評価値が妥当な範囲内

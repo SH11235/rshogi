@@ -1,7 +1,7 @@
-//! FeatureTransformerLayerStacks - LayerStacksアーキテクチャ用の1536次元Feature Transformer
+//! FeatureTransformerLayerStacks - LayerStacksアーキテクチャ用のL1次元Feature Transformer
 //!
 //! HalfKA_hm^ 特徴量（キングバケット×BonaPiece）から、
-//! 片側 1536 次元×両視点の中間表現を生成する。
+//! 片側 L1 次元×両視点の中間表現を生成する。
 
 use super::accumulator::{Aligned, AlignedBox};
 use super::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES};
@@ -10,9 +10,9 @@ use super::accumulator_layer_stacks::{
 };
 use super::bona_piece::BonaPiece;
 use super::bona_piece_halfka_hm::{halfka_index, is_hm_mirror, king_bucket, pack_bonapiece};
+use super::constants::HALFKA_HM_DIMENSIONS;
 #[cfg(feature = "nnue-psqt")]
 use super::constants::NUM_LAYER_STACK_BUCKETS;
-use super::constants::{HALFKA_HM_DIMENSIONS, NNUE_PYTORCH_L1};
 use super::features::{Feature, FeatureSet, HalfKA_hm, HalfKA_hm_FeatureSet};
 use super::leb128::read_compressed_tensor_i16_all;
 #[cfg(feature = "nnue-threat")]
@@ -67,11 +67,11 @@ fn feature_index_from_bona_piece(
     halfka_index(kb, packed)
 }
 
-/// nnue-pytorch用のFeatureTransformer（1536次元出力）
+/// nnue-pytorch用のFeatureTransformer（L1次元出力）
 #[repr(C, align(64))]
-pub struct FeatureTransformerLayerStacks {
+pub struct FeatureTransformerLayerStacks<const L1: usize> {
     /// バイアス [L1]
-    pub biases: Aligned<[i16; NNUE_PYTORCH_L1]>,
+    pub biases: Aligned<[i16; L1]>,
 
     /// 重み [input_dimensions][L1]
     /// 64バイトアラインメントで確保
@@ -89,7 +89,7 @@ pub struct FeatureTransformerLayerStacks {
     #[cfg(feature = "nnue-psqt")]
     pub(crate) has_psqt: bool,
 
-    /// Threat 重み [THREAT_DIMENSIONS × NNUE_PYTORCH_L1]
+    /// Threat 重み [THREAT_DIMENSIONS × L1]
     #[cfg(feature = "nnue-threat")]
     pub(crate) threat_weights: AlignedBox<i8>,
 
@@ -98,11 +98,11 @@ pub struct FeatureTransformerLayerStacks {
     pub(crate) has_threat: bool,
 }
 
-impl FeatureTransformerLayerStacks {
+impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
     /// ファイルから読み込み（非圧縮形式）
     pub fn read<R: Read>(reader: &mut R) -> io::Result<Self> {
         // バイアスを読み込み
-        let mut biases = [0i16; NNUE_PYTORCH_L1];
+        let mut biases = [0i16; L1];
         let mut buf = [0u8; 2];
         for bias in biases.iter_mut() {
             reader.read_exact(&mut buf)?;
@@ -110,7 +110,7 @@ impl FeatureTransformerLayerStacks {
         }
 
         // 重みを読み込み
-        let weight_size = HALFKA_HM_DIMENSIONS * NNUE_PYTORCH_L1;
+        let weight_size = HALFKA_HM_DIMENSIONS * L1;
         let mut weights = AlignedBox::new_zeroed(weight_size);
         for weight in weights.iter_mut() {
             reader.read_exact(&mut buf)?;
@@ -139,19 +139,19 @@ impl FeatureTransformerLayerStacks {
     /// - 要素数 == biases のみ → YO形式（2ブロック）: 続けて weights ブロックを読む
     /// - 要素数 == biases + weights → 旧bullet-shogi形式（1ブロック）
     pub fn read_leb128<R: Read>(reader: &mut R) -> io::Result<Self> {
-        let weight_size = HALFKA_HM_DIMENSIONS * NNUE_PYTORCH_L1;
-        let total_size = NNUE_PYTORCH_L1 + weight_size;
+        let weight_size = HALFKA_HM_DIMENSIONS * L1;
+        let total_size = L1 + weight_size;
 
         // 最初のブロックを全値デコードして要素数で判別
         let first_block = read_compressed_tensor_i16_all(reader)?;
 
         if first_block.len() == total_size {
             // 旧bullet-shogi形式（1ブロック）: biases + weights が結合
-            let mut biases = [0i16; NNUE_PYTORCH_L1];
-            biases.copy_from_slice(&first_block[..NNUE_PYTORCH_L1]);
+            let mut biases = [0i16; L1];
+            biases.copy_from_slice(&first_block[..L1]);
 
             let mut weights = AlignedBox::new_zeroed(weight_size);
-            weights.copy_from_slice(&first_block[NNUE_PYTORCH_L1..]);
+            weights.copy_from_slice(&first_block[L1..]);
 
             return Ok(Self {
                 biases: Aligned(biases),
@@ -169,7 +169,7 @@ impl FeatureTransformerLayerStacks {
             });
         }
 
-        if first_block.len() == NNUE_PYTORCH_L1 {
+        if first_block.len() == L1 {
             // YO形式（2ブロック）: 次に weights ブロックを読み込み
             let weights_block = read_compressed_tensor_i16_all(reader)?;
             if weights_block.len() != weight_size {
@@ -183,7 +183,7 @@ impl FeatureTransformerLayerStacks {
                 ));
             }
 
-            let mut biases = [0i16; NNUE_PYTORCH_L1];
+            let mut biases = [0i16; L1];
             biases.copy_from_slice(&first_block);
 
             let mut weights = AlignedBox::new_zeroed(weight_size);
@@ -210,7 +210,7 @@ impl FeatureTransformerLayerStacks {
             format!(
                 "Unexpected LEB128 tensor size: got {}, expected {} or {}",
                 first_block.len(),
-                NNUE_PYTORCH_L1,
+                L1,
                 total_size
             ),
         ))
@@ -244,7 +244,7 @@ impl FeatureTransformerLayerStacks {
     /// Threat 重みをファイルから読み込み (i8, raw)
     #[cfg(feature = "nnue-threat")]
     pub fn read_threat_weights<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
-        let weight_count = THREAT_DIMENSIONS * NNUE_PYTORCH_L1;
+        let weight_count = THREAT_DIMENSIONS * L1;
         self.threat_weights = AlignedBox::new_zeroed(weight_count);
         let slice = unsafe {
             std::slice::from_raw_parts_mut(
@@ -261,8 +261,8 @@ impl FeatureTransformerLayerStacks {
     #[cfg(feature = "nnue-threat")]
     #[inline]
     fn threat_weight_row(&self, index: usize) -> &[i8] {
-        let offset = index * NNUE_PYTORCH_L1;
-        let end = offset + NNUE_PYTORCH_L1;
+        let offset = index * L1;
+        let end = offset + L1;
         debug_assert!(end <= self.threat_weights.len(), "threat index out of range: {index}");
         &self.threat_weights[offset..end]
     }
@@ -274,14 +274,14 @@ impl FeatureTransformerLayerStacks {
     #[cfg(feature = "nnue-threat")]
     #[inline]
     fn prefetch_threat_weights(&self, index: usize) {
-        let offset = index * NNUE_PYTORCH_L1;
+        let offset = index * L1;
         if offset < self.threat_weights.len() {
             let ptr = unsafe { self.threat_weights.as_ptr().add(offset) };
             #[cfg(target_arch = "x86_64")]
             unsafe {
                 use std::arch::x86_64::_mm_prefetch;
                 // T0: 全キャッシュレベルにプリフェッチ
-                // 1536 bytes = 24 cache lines (64B each), 先頭数本を prefetch
+                // L1 bytes = L1/64 cache lines (64B each), 先頭数本を prefetch
                 _mm_prefetch(ptr as *const i8, std::arch::x86_64::_MM_HINT_T0);
                 _mm_prefetch(ptr.add(64) as *const i8, std::arch::x86_64::_MM_HINT_T0);
                 _mm_prefetch(ptr.add(128) as *const i8, std::arch::x86_64::_MM_HINT_T0);
@@ -296,10 +296,10 @@ impl FeatureTransformerLayerStacks {
     /// AVX2: `_mm256_cvtepi8_epi16` で 16 要素ずつ変換 + `_mm256_add_epi16`。
     #[cfg(feature = "nnue-threat")]
     #[inline]
-    fn add_threat_weights(&self, accumulation: &mut [i16; NNUE_PYTORCH_L1], index: usize) {
+    fn add_threat_weights(&self, accumulation: &mut [i16; L1], index: usize) {
         let weights = self.threat_weight_row(index);
 
-        // AVX2: 128bit i8 → 256bit i16 sign-extend + add, 1536/16 = 96 iterations
+        // AVX2: 128bit i8 → 256bit i16 sign-extend + add, L1/16 iterations
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         {
             unsafe {
@@ -308,13 +308,21 @@ impl FeatureTransformerLayerStacks {
                 let w_ptr = weights.as_ptr();
 
                 // 行内プリフェッチ: 後半の cache lines を先読み
-                // 1536 bytes = 24 cache lines (64B), 先頭は触れた時点で fetch される
-                _mm_prefetch(w_ptr.add(512) as *const i8, _MM_HINT_T0);
-                _mm_prefetch(w_ptr.add(768) as *const i8, _MM_HINT_T0);
-                _mm_prefetch(w_ptr.add(1024) as *const i8, _MM_HINT_T0);
-                _mm_prefetch(w_ptr.add(1280) as *const i8, _MM_HINT_T0);
+                // L1 bytes = L1/64 cache lines (64B), 先頭は触れた時点で fetch される
+                if L1 > 512 {
+                    _mm_prefetch(w_ptr.add(512) as *const i8, _MM_HINT_T0);
+                }
+                if L1 > 768 {
+                    _mm_prefetch(w_ptr.add(768) as *const i8, _MM_HINT_T0);
+                }
+                if L1 > 1024 {
+                    _mm_prefetch(w_ptr.add(1024) as *const i8, _MM_HINT_T0);
+                }
+                if L1 > 1280 {
+                    _mm_prefetch(w_ptr.add(1280) as *const i8, _MM_HINT_T0);
+                }
 
-                for i in 0..96 {
+                for i in 0..(L1 / 16) {
                     let acc_vec = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
                     let w8 = _mm_loadu_si128(w_ptr.add(i * 16) as *const __m128i);
                     let w16 = _mm256_cvtepi8_epi16(w8);
@@ -335,7 +343,7 @@ impl FeatureTransformerLayerStacks {
     /// Threat 重み (i8) を i16 アキュムレータから減算（SIMD 最適化）
     #[cfg(feature = "nnue-threat")]
     #[inline]
-    fn sub_threat_weights(&self, accumulation: &mut [i16; NNUE_PYTORCH_L1], index: usize) {
+    fn sub_threat_weights(&self, accumulation: &mut [i16; L1], index: usize) {
         let weights = self.threat_weight_row(index);
 
         // AVX2: 128bit i8 → 256bit i16 sign-extend + sub
@@ -346,13 +354,21 @@ impl FeatureTransformerLayerStacks {
 
                 // 行内プリフェッチ
                 let w_ptr = weights.as_ptr();
-                _mm_prefetch(w_ptr.add(512) as *const i8, _MM_HINT_T0);
-                _mm_prefetch(w_ptr.add(768) as *const i8, _MM_HINT_T0);
-                _mm_prefetch(w_ptr.add(1024) as *const i8, _MM_HINT_T0);
-                _mm_prefetch(w_ptr.add(1280) as *const i8, _MM_HINT_T0);
+                if L1 > 512 {
+                    _mm_prefetch(w_ptr.add(512) as *const i8, _MM_HINT_T0);
+                }
+                if L1 > 768 {
+                    _mm_prefetch(w_ptr.add(768) as *const i8, _MM_HINT_T0);
+                }
+                if L1 > 1024 {
+                    _mm_prefetch(w_ptr.add(1024) as *const i8, _MM_HINT_T0);
+                }
+                if L1 > 1280 {
+                    _mm_prefetch(w_ptr.add(1280) as *const i8, _MM_HINT_T0);
+                }
                 let acc_ptr = accumulation.as_mut_ptr();
                 let w_ptr = weights.as_ptr();
-                for i in 0..96 {
+                for i in 0..(L1 / 16) {
                     let acc_vec = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
                     let w8 = _mm_loadu_si128(w_ptr.add(i * 16) as *const __m128i);
                     let w16 = _mm256_cvtepi8_epi16(w8);
@@ -413,7 +429,7 @@ impl FeatureTransformerLayerStacks {
     }
 
     /// 差分計算を使わずにAccumulatorを計算
-    pub fn refresh_accumulator(&self, pos: &Position, acc: &mut AccumulatorLayerStacks) {
+    pub fn refresh_accumulator(&self, pos: &Position, acc: &mut AccumulatorLayerStacks<L1>) {
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
             let accumulation = acc.get_mut(p);
@@ -455,8 +471,8 @@ impl FeatureTransformerLayerStacks {
         &self,
         pos: &Position,
         dirty_piece: &DirtyPiece,
-        acc: &mut AccumulatorLayerStacks,
-        prev_acc: &AccumulatorLayerStacks,
+        acc: &mut AccumulatorLayerStacks<L1>,
+        prev_acc: &AccumulatorLayerStacks<L1>,
     ) {
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
@@ -588,9 +604,9 @@ impl FeatureTransformerLayerStacks {
         &self,
         pos: &Position,
         dirty_piece: &DirtyPiece,
-        acc: &mut AccumulatorLayerStacks,
-        prev_acc: &AccumulatorLayerStacks,
-        cache: &mut AccumulatorCacheLayerStacks,
+        acc: &mut AccumulatorLayerStacks<L1>,
+        prev_acc: &AccumulatorLayerStacks<L1>,
+        cache: &mut AccumulatorCacheLayerStacks<L1>,
     ) {
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
@@ -710,8 +726,8 @@ impl FeatureTransformerLayerStacks {
     pub fn refresh_accumulator_with_cache(
         &self,
         pos: &Position,
-        acc: &mut AccumulatorLayerStacks,
-        cache: &mut AccumulatorCacheLayerStacks,
+        acc: &mut AccumulatorLayerStacks<L1>,
+        cache: &mut AccumulatorCacheLayerStacks<L1>,
     ) {
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
@@ -749,8 +765,8 @@ impl FeatureTransformerLayerStacks {
         &self,
         pos: &Position,
         perspective: Color,
-        accumulation: &mut [i16; NNUE_PYTORCH_L1],
-        cache: &mut AccumulatorCacheLayerStacks,
+        accumulation: &mut [i16; L1],
+        cache: &mut AccumulatorCacheLayerStacks<L1>,
     ) {
         let king_sq = pos.king_square(perspective);
         let mut active_indices = IndexList::new();
@@ -785,7 +801,7 @@ impl FeatureTransformerLayerStacks {
     pub fn forward_update_incremental(
         &self,
         pos: &Position,
-        stack: &mut AccumulatorStackLayerStacks,
+        stack: &mut AccumulatorStackLayerStacks<L1>,
         source_idx: usize,
     ) -> bool {
         let Some(path) = stack.collect_path(source_idx) else {
@@ -931,13 +947,13 @@ impl FeatureTransformerLayerStacks {
 
     /// 重みを累積値に加算（SIMD最適化版）
     ///
-    /// 1536 i16 要素を SIMD で加算。AVX512BW/AVX2/SSE2/WASM SIMD128 に対応。
+    /// L1 個の i16 要素を SIMD で加算。AVX512BW/AVX2/SSE2/WASM SIMD128 に対応。
     /// weights と accumulation は 64 バイトアラインされている前提で aligned load/store を使用。
     #[inline]
-    fn add_weights(&self, accumulation: &mut [i16; NNUE_PYTORCH_L1], index: usize) {
+    fn add_weights(&self, accumulation: &mut [i16; L1], index: usize) {
         let weights = self.weight_row(index);
 
-        // AVX-512 BW: 512bit = 32 x i16, 1536/32 = 48 iterations
+        // AVX-512 BW: 512bit = 32 x i16, L1/32 iterations
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "avx512f",
@@ -946,14 +962,14 @@ impl FeatureTransformerLayerStacks {
         {
             // SAFETY:
             // - weights: AlignedBox で 64 バイトアライン、各行は 3072 バイト (64の倍数)
-            // - accumulation: Aligned<[i16; 1536]> で 64 バイトアライン
-            // - 1536 要素 = 32 要素 × 48 回のループで完全にカバー
+            // - accumulation: Aligned<[i16; L1]> で 64 バイトアライン
+            // - L1 要素 = 32 要素 × L1/32 回のループで完全にカバー
             unsafe {
                 use std::arch::x86_64::*;
                 let acc_ptr = accumulation.as_mut_ptr();
                 let weight_ptr = weights.as_ptr();
 
-                for i in 0..48 {
+                for i in 0..(L1 / 32) {
                     let acc_vec = _mm512_load_si512(acc_ptr.add(i * 32) as *const __m512i);
                     let weight_vec = _mm512_load_si512(weight_ptr.add(i * 32) as *const __m512i);
                     let result = _mm512_add_epi16(acc_vec, weight_vec);
@@ -963,7 +979,7 @@ impl FeatureTransformerLayerStacks {
             return;
         }
 
-        // AVX2: 256bit = 16 x i16, 1536/16 = 96 iterations
+        // AVX2: 256bit = 16 x i16, L1/16 iterations
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "avx2",
@@ -972,14 +988,14 @@ impl FeatureTransformerLayerStacks {
         {
             // SAFETY:
             // - weights: AlignedBox で 64 バイトアライン、各行は 3072 バイト (64の倍数)
-            // - accumulation: Aligned<[i16; 1536]> で 64 バイトアライン
-            // - 1536 要素 = 16 要素 × 96 回のループで完全にカバー
+            // - accumulation: Aligned<[i16; L1]> で 64 バイトアライン
+            // - L1 要素 = 16 要素 × L1/16 回のループで完全にカバー
             unsafe {
                 use std::arch::x86_64::*;
                 let acc_ptr = accumulation.as_mut_ptr();
                 let weight_ptr = weights.as_ptr();
 
-                for i in 0..96 {
+                for i in 0..(L1 / 16) {
                     let acc_vec = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
                     let weight_vec = _mm256_load_si256(weight_ptr.add(i * 16) as *const __m256i);
                     let result = _mm256_add_epi16(acc_vec, weight_vec);
@@ -989,7 +1005,7 @@ impl FeatureTransformerLayerStacks {
             return;
         }
 
-        // SSE2: 128bit = 8 x i16, 1536/8 = 192 iterations
+        // SSE2: 128bit = 8 x i16, L1/8 iterations
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "sse2",
@@ -1002,7 +1018,7 @@ impl FeatureTransformerLayerStacks {
                 let acc_ptr = accumulation.as_mut_ptr();
                 let weight_ptr = weights.as_ptr();
 
-                for i in 0..192 {
+                for i in 0..(L1 / 8) {
                     let acc_vec = _mm_load_si128(acc_ptr.add(i * 8) as *const __m128i);
                     let weight_vec = _mm_load_si128(weight_ptr.add(i * 8) as *const __m128i);
                     let result = _mm_add_epi16(acc_vec, weight_vec);
@@ -1012,7 +1028,7 @@ impl FeatureTransformerLayerStacks {
             return;
         }
 
-        // WASM SIMD128: 128bit = 8 x i16, 1536/8 = 192 iterations
+        // WASM SIMD128: 128bit = 8 x i16, L1/8 iterations
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
             // SAFETY: WASM SIMD128 はアライメント不要
@@ -1021,7 +1037,7 @@ impl FeatureTransformerLayerStacks {
                 let acc_ptr = accumulation.as_mut_ptr();
                 let weight_ptr = weights.as_ptr();
 
-                for i in 0..192 {
+                for i in 0..(L1 / 8) {
                     let acc_vec = v128_load(acc_ptr.add(i * 8) as *const v128);
                     let weight_vec = v128_load(weight_ptr.add(i * 8) as *const v128);
                     let result = i16x8_add(acc_vec, weight_vec);
@@ -1040,14 +1056,14 @@ impl FeatureTransformerLayerStacks {
 
     #[inline]
     fn weight_row(&self, index: usize) -> &[i16] {
-        let Some(offset) = index.checked_mul(NNUE_PYTORCH_L1) else {
-            feature_index_oob(index, self.weights.len() / NNUE_PYTORCH_L1);
+        let Some(offset) = index.checked_mul(L1) else {
+            feature_index_oob(index, self.weights.len() / L1);
         };
-        let Some(end) = offset.checked_add(NNUE_PYTORCH_L1) else {
-            feature_index_oob(index, self.weights.len() / NNUE_PYTORCH_L1);
+        let Some(end) = offset.checked_add(L1) else {
+            feature_index_oob(index, self.weights.len() / L1);
         };
         if end > self.weights.len() {
-            feature_index_oob(index, self.weights.len() / NNUE_PYTORCH_L1);
+            feature_index_oob(index, self.weights.len() / L1);
         }
         &self.weights[offset..end]
     }
@@ -1055,7 +1071,7 @@ impl FeatureTransformerLayerStacks {
     #[inline]
     fn try_apply_dirty_piece_fast(
         &self,
-        accumulation: &mut [i16; NNUE_PYTORCH_L1],
+        accumulation: &mut [i16; L1],
         dirty_piece: &DirtyPiece,
         perspective: Color,
         king_sq: crate::types::Square,
@@ -1121,7 +1137,7 @@ impl FeatureTransformerLayerStacks {
     #[inline]
     fn apply_sub_add_fused(
         &self,
-        accumulation: &mut [i16; NNUE_PYTORCH_L1],
+        accumulation: &mut [i16; L1],
         sub_index: usize,
         add_index: usize,
     ) {
@@ -1135,18 +1151,18 @@ impl FeatureTransformerLayerStacks {
         ))]
         {
             // SAFETY:
-            // - accumulation は Aligned<[i16; 1536]> 由来で 64 バイトアライン。
+            // - accumulation は Aligned<[i16; L1]> 由来で 64 バイトアライン。
             // - weight row: AlignedBox の先頭が 64 バイトアライン、各行は
-            //   NNUE_PYTORCH_L1(1536) × sizeof(i16)(2) = 3072 バイト = 64 × 48 なので
+            //   L1 × sizeof(i16)(2) バイトなので
             //   全行の先頭も 64 バイト境界に揃う。
-            // - 1536 要素を 32 要素ずつ 48 回で完全に走査する。
+            // - L1 要素を 32 要素ずつ L1/32 回で完全に走査する。
             unsafe {
                 use std::arch::x86_64::*;
                 let acc_ptr = accumulation.as_mut_ptr();
                 let sub_ptr = sub_weights.as_ptr();
                 let add_ptr = add_weights.as_ptr();
 
-                for i in 0..48 {
+                for i in 0..(L1 / 32) {
                     let acc_vec = _mm512_load_si512(acc_ptr.add(i * 32) as *const __m512i);
                     let sub_vec = _mm512_load_si512(sub_ptr.add(i * 32) as *const __m512i);
                     let add_vec = _mm512_load_si512(add_ptr.add(i * 32) as *const __m512i);
@@ -1165,14 +1181,14 @@ impl FeatureTransformerLayerStacks {
         {
             // SAFETY:
             // - accumulation / weight row はともに 32 バイトアライン（3072 = 32 × 96）。
-            // - 1536 要素を 16 要素ずつ 96 回で完全に走査する。
+            // - L1 要素を 16 要素ずつ L1/16 回で完全に走査する。
             unsafe {
                 use std::arch::x86_64::*;
                 let acc_ptr = accumulation.as_mut_ptr();
                 let sub_ptr = sub_weights.as_ptr();
                 let add_ptr = add_weights.as_ptr();
 
-                for i in 0..96 {
+                for i in 0..(L1 / 16) {
                     let acc_vec = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
                     let sub_vec = _mm256_load_si256(sub_ptr.add(i * 16) as *const __m256i);
                     let add_vec = _mm256_load_si256(add_ptr.add(i * 16) as *const __m256i);
@@ -1191,14 +1207,14 @@ impl FeatureTransformerLayerStacks {
         {
             // SAFETY:
             // - accumulation / weight row は 16 バイト境界にある。
-            // - 1536 要素を 8 要素ずつ 192 回で完全に走査する。
+            // - L1 要素を 8 要素ずつ L1/8 回で完全に走査する。
             unsafe {
                 use std::arch::x86_64::*;
                 let acc_ptr = accumulation.as_mut_ptr();
                 let sub_ptr = sub_weights.as_ptr();
                 let add_ptr = add_weights.as_ptr();
 
-                for i in 0..192 {
+                for i in 0..(L1 / 8) {
                     let acc_vec = _mm_load_si128(acc_ptr.add(i * 8) as *const __m128i);
                     let sub_vec = _mm_load_si128(sub_ptr.add(i * 8) as *const __m128i);
                     let add_vec = _mm_load_si128(add_ptr.add(i * 8) as *const __m128i);
@@ -1213,14 +1229,14 @@ impl FeatureTransformerLayerStacks {
         {
             // SAFETY:
             // - WASM SIMD は unaligned load/store を許容する。
-            // - 1536 要素を 8 要素ずつ 192 回で完全に走査する。
+            // - L1 要素を 8 要素ずつ L1/8 回で完全に走査する。
             unsafe {
                 use std::arch::wasm32::*;
                 let acc_ptr = accumulation.as_mut_ptr();
                 let sub_ptr = sub_weights.as_ptr();
                 let add_ptr = add_weights.as_ptr();
 
-                for i in 0..192 {
+                for i in 0..(L1 / 8) {
                     let acc_vec = v128_load(acc_ptr.add(i * 8) as *const v128);
                     let sub_vec = v128_load(sub_ptr.add(i * 8) as *const v128);
                     let add_vec = v128_load(add_ptr.add(i * 8) as *const v128);
@@ -1242,7 +1258,7 @@ impl FeatureTransformerLayerStacks {
     #[inline]
     fn apply_double_sub_add_fused(
         &self,
-        accumulation: &mut [i16; NNUE_PYTORCH_L1],
+        accumulation: &mut [i16; L1],
         sub_index0: usize,
         add_index0: usize,
         sub_index1: usize,
@@ -1260,11 +1276,11 @@ impl FeatureTransformerLayerStacks {
         ))]
         {
             // SAFETY:
-            // - accumulation は Aligned<[i16; 1536]> 由来で 64 バイトアライン。
+            // - accumulation は Aligned<[i16; L1]> 由来で 64 バイトアライン。
             // - weight row: AlignedBox の先頭が 64 バイトアライン、各行は
-            //   NNUE_PYTORCH_L1(1536) × sizeof(i16)(2) = 3072 バイト = 64 × 48 なので
+            //   L1 × sizeof(i16)(2) バイトなので
             //   全行の先頭も 64 バイト境界に揃う。
-            // - 1536 要素を 32 要素ずつ 48 回で完全に走査する。
+            // - L1 要素を 32 要素ずつ L1/32 回で完全に走査する。
             unsafe {
                 use std::arch::x86_64::*;
                 let acc_ptr = accumulation.as_mut_ptr();
@@ -1273,7 +1289,7 @@ impl FeatureTransformerLayerStacks {
                 let sub_ptr1 = sub_weights1.as_ptr();
                 let add_ptr1 = add_weights1.as_ptr();
 
-                for i in 0..48 {
+                for i in 0..(L1 / 32) {
                     let acc_vec = _mm512_load_si512(acc_ptr.add(i * 32) as *const __m512i);
                     let sub_vec0 = _mm512_load_si512(sub_ptr0.add(i * 32) as *const __m512i);
                     let add_vec0 = _mm512_load_si512(add_ptr0.add(i * 32) as *const __m512i);
@@ -1297,7 +1313,7 @@ impl FeatureTransformerLayerStacks {
         {
             // SAFETY:
             // - accumulation / 4 本の weight row はともに 32 バイトアライン（3072 = 32 × 96）。
-            // - 1536 要素を 16 要素ずつ 96 回で完全に走査する。
+            // - L1 要素を 16 要素ずつ L1/16 回で完全に走査する。
             unsafe {
                 use std::arch::x86_64::*;
                 let acc_ptr = accumulation.as_mut_ptr();
@@ -1306,7 +1322,7 @@ impl FeatureTransformerLayerStacks {
                 let sub_ptr1 = sub_weights1.as_ptr();
                 let add_ptr1 = add_weights1.as_ptr();
 
-                for i in 0..96 {
+                for i in 0..(L1 / 16) {
                     let acc_vec = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
                     let sub_vec0 = _mm256_load_si256(sub_ptr0.add(i * 16) as *const __m256i);
                     let add_vec0 = _mm256_load_si256(add_ptr0.add(i * 16) as *const __m256i);
@@ -1330,7 +1346,7 @@ impl FeatureTransformerLayerStacks {
         {
             // SAFETY:
             // - accumulation / 4 本の weight row は 16 バイト境界にある。
-            // - 1536 要素を 8 要素ずつ 192 回で完全に走査する。
+            // - L1 要素を 8 要素ずつ L1/8 回で完全に走査する。
             unsafe {
                 use std::arch::x86_64::*;
                 let acc_ptr = accumulation.as_mut_ptr();
@@ -1339,7 +1355,7 @@ impl FeatureTransformerLayerStacks {
                 let sub_ptr1 = sub_weights1.as_ptr();
                 let add_ptr1 = add_weights1.as_ptr();
 
-                for i in 0..192 {
+                for i in 0..(L1 / 8) {
                     let acc_vec = _mm_load_si128(acc_ptr.add(i * 8) as *const __m128i);
                     let sub_vec0 = _mm_load_si128(sub_ptr0.add(i * 8) as *const __m128i);
                     let add_vec0 = _mm_load_si128(add_ptr0.add(i * 8) as *const __m128i);
@@ -1359,7 +1375,7 @@ impl FeatureTransformerLayerStacks {
         {
             // SAFETY:
             // - WASM SIMD は unaligned load/store を許容する。
-            // - 1536 要素を 8 要素ずつ 192 回で完全に走査する。
+            // - L1 要素を 8 要素ずつ L1/8 回で完全に走査する。
             unsafe {
                 use std::arch::wasm32::*;
                 let acc_ptr = accumulation.as_mut_ptr();
@@ -1368,7 +1384,7 @@ impl FeatureTransformerLayerStacks {
                 let sub_ptr1 = sub_weights1.as_ptr();
                 let add_ptr1 = add_weights1.as_ptr();
 
-                for i in 0..192 {
+                for i in 0..(L1 / 8) {
                     let acc_vec = v128_load(acc_ptr.add(i * 8) as *const v128);
                     let sub_vec0 = v128_load(sub_ptr0.add(i * 8) as *const v128);
                     let add_vec0 = v128_load(add_ptr0.add(i * 8) as *const v128);
@@ -1402,13 +1418,13 @@ impl FeatureTransformerLayerStacks {
 
     /// 重みを累積値から減算（SIMD最適化版）
     ///
-    /// 1536 i16 要素を SIMD で減算。AVX512BW/AVX2/SSE2/WASM SIMD128 に対応。
+    /// L1 個の i16 要素を SIMD で減算。AVX512BW/AVX2/SSE2/WASM SIMD128 に対応。
     /// weights と accumulation は 64 バイトアラインされている前提で aligned load/store を使用。
     #[inline]
-    fn sub_weights(&self, accumulation: &mut [i16; NNUE_PYTORCH_L1], index: usize) {
+    fn sub_weights(&self, accumulation: &mut [i16; L1], index: usize) {
         let weights = self.weight_row(index);
 
-        // AVX-512 BW: 512bit = 32 x i16, 1536/32 = 48 iterations
+        // AVX-512 BW: 512bit = 32 x i16, L1/32 iterations
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "avx512f",
@@ -1421,7 +1437,7 @@ impl FeatureTransformerLayerStacks {
                 let acc_ptr = accumulation.as_mut_ptr();
                 let weight_ptr = weights.as_ptr();
 
-                for i in 0..48 {
+                for i in 0..(L1 / 32) {
                     let acc_vec = _mm512_load_si512(acc_ptr.add(i * 32) as *const __m512i);
                     let weight_vec = _mm512_load_si512(weight_ptr.add(i * 32) as *const __m512i);
                     let result = _mm512_sub_epi16(acc_vec, weight_vec);
@@ -1431,7 +1447,7 @@ impl FeatureTransformerLayerStacks {
             return;
         }
 
-        // AVX2: 256bit = 16 x i16, 1536/16 = 96 iterations
+        // AVX2: 256bit = 16 x i16, L1/16 iterations
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "avx2",
@@ -1444,7 +1460,7 @@ impl FeatureTransformerLayerStacks {
                 let acc_ptr = accumulation.as_mut_ptr();
                 let weight_ptr = weights.as_ptr();
 
-                for i in 0..96 {
+                for i in 0..(L1 / 16) {
                     let acc_vec = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
                     let weight_vec = _mm256_load_si256(weight_ptr.add(i * 16) as *const __m256i);
                     let result = _mm256_sub_epi16(acc_vec, weight_vec);
@@ -1454,7 +1470,7 @@ impl FeatureTransformerLayerStacks {
             return;
         }
 
-        // SSE2: 128bit = 8 x i16, 1536/8 = 192 iterations
+        // SSE2: 128bit = 8 x i16, L1/8 iterations
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "sse2",
@@ -1467,7 +1483,7 @@ impl FeatureTransformerLayerStacks {
                 let acc_ptr = accumulation.as_mut_ptr();
                 let weight_ptr = weights.as_ptr();
 
-                for i in 0..192 {
+                for i in 0..(L1 / 8) {
                     let acc_vec = _mm_load_si128(acc_ptr.add(i * 8) as *const __m128i);
                     let weight_vec = _mm_load_si128(weight_ptr.add(i * 8) as *const __m128i);
                     let result = _mm_sub_epi16(acc_vec, weight_vec);
@@ -1477,7 +1493,7 @@ impl FeatureTransformerLayerStacks {
             return;
         }
 
-        // WASM SIMD128: 128bit = 8 x i16, 1536/8 = 192 iterations
+        // WASM SIMD128: 128bit = 8 x i16, L1/8 iterations
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
             // SAFETY: WASM SIMD128 はアライメント不要
@@ -1486,7 +1502,7 @@ impl FeatureTransformerLayerStacks {
                 let acc_ptr = accumulation.as_mut_ptr();
                 let weight_ptr = weights.as_ptr();
 
-                for i in 0..192 {
+                for i in 0..(L1 / 8) {
                     let acc_vec = v128_load(acc_ptr.add(i * 8) as *const v128);
                     let weight_vec = v128_load(weight_ptr.add(i * 8) as *const v128);
                     let result = i16x8_sub(acc_vec, weight_vec);
@@ -1509,13 +1525,16 @@ mod tests {
     use super::*;
     use crate::nnue::accumulator::ChangedBonaPiece;
     use crate::nnue::bona_piece::ExtBonaPiece;
+    use crate::nnue::constants::NNUE_PYTORCH_L1;
     use crate::nnue::piece_list::PieceNumber;
     use crate::types::{File, Piece, PieceType, Rank, Square};
 
-    fn make_test_transformer() -> FeatureTransformerLayerStacks {
-        FeatureTransformerLayerStacks {
-            biases: Aligned([0; NNUE_PYTORCH_L1]),
-            weights: AlignedBox::new_zeroed(HALFKA_HM_DIMENSIONS * NNUE_PYTORCH_L1),
+    const TEST_L1: usize = NNUE_PYTORCH_L1;
+
+    fn make_test_transformer() -> FeatureTransformerLayerStacks<TEST_L1> {
+        FeatureTransformerLayerStacks::<TEST_L1> {
+            biases: Aligned([0; TEST_L1]),
+            weights: AlignedBox::new_zeroed(HALFKA_HM_DIMENSIONS * TEST_L1),
             #[cfg(feature = "nnue-psqt")]
             psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
             #[cfg(feature = "nnue-psqt")]
@@ -1529,16 +1548,16 @@ mod tests {
         }
     }
 
-    fn fill_weight_row(ft: &mut FeatureTransformerLayerStacks, index: usize, seed: i16) {
-        let start = index * NNUE_PYTORCH_L1;
-        for (i, slot) in ft.weights[start..start + NNUE_PYTORCH_L1].iter_mut().enumerate() {
+    fn fill_weight_row(ft: &mut FeatureTransformerLayerStacks<TEST_L1>, index: usize, seed: i16) {
+        let start = index * TEST_L1;
+        for (i, slot) in ft.weights[start..start + TEST_L1].iter_mut().enumerate() {
             *slot = seed.wrapping_add((i % 29) as i16);
         }
     }
 
     fn apply_generic(
-        ft: &FeatureTransformerLayerStacks,
-        accumulation: &mut [i16; NNUE_PYTORCH_L1],
+        ft: &FeatureTransformerLayerStacks<TEST_L1>,
+        accumulation: &mut [i16; TEST_L1],
         dirty_piece: &DirtyPiece,
         perspective: Color,
         king_sq: Square,
@@ -1557,7 +1576,7 @@ mod tests {
     #[test]
     fn test_feature_transformer_dimensions() {
         // 次元数の確認
-        assert_eq!(NNUE_PYTORCH_L1, 1536);
+        assert_eq!(TEST_L1, 1536);
         assert_eq!(HALFKA_HM_DIMENSIONS, 73305);
     }
 
@@ -1592,8 +1611,8 @@ mod tests {
         fill_weight_row(&mut ft, old_index, 11);
         fill_weight_row(&mut ft, new_index, 37);
 
-        let mut generic = Aligned([5i16; NNUE_PYTORCH_L1]);
-        let mut fast = Aligned([5i16; NNUE_PYTORCH_L1]);
+        let mut generic = Aligned([5i16; TEST_L1]);
+        let mut fast = Aligned([5i16; TEST_L1]);
         apply_generic(&ft, &mut generic.0, &dirty_piece, Color::Black, king_sq);
         assert!(ft.try_apply_dirty_piece_fast(&mut fast.0, &dirty_piece, Color::Black, king_sq));
         assert_eq!(generic.0, fast.0);
@@ -1651,8 +1670,8 @@ mod tests {
             fill_weight_row(&mut ft, index, *seed);
         }
 
-        let mut generic = Aligned([7i16; NNUE_PYTORCH_L1]);
-        let mut fast = Aligned([7i16; NNUE_PYTORCH_L1]);
+        let mut generic = Aligned([7i16; TEST_L1]);
+        let mut fast = Aligned([7i16; TEST_L1]);
         apply_generic(&ft, &mut generic.0, &dirty_piece, Color::Black, king_sq);
         assert!(ft.try_apply_dirty_piece_fast(&mut fast.0, &dirty_piece, Color::Black, king_sq));
         assert_eq!(generic.0, fast.0);
@@ -1690,8 +1709,8 @@ mod tests {
         fill_weight_row(&mut ft, old_index, 19);
         fill_weight_row(&mut ft, new_index, 53);
 
-        let mut generic = Aligned([5i16; NNUE_PYTORCH_L1]);
-        let mut fast = Aligned([5i16; NNUE_PYTORCH_L1]);
+        let mut generic = Aligned([5i16; TEST_L1]);
+        let mut fast = Aligned([5i16; TEST_L1]);
         apply_generic(&ft, &mut generic.0, &dirty_piece, Color::White, king_sq);
         assert!(ft.try_apply_dirty_piece_fast(&mut fast.0, &dirty_piece, Color::White, king_sq));
         assert_eq!(generic.0, fast.0);
@@ -1751,8 +1770,8 @@ mod tests {
             fill_weight_row(&mut ft, index, *seed);
         }
 
-        let mut generic = Aligned([7i16; NNUE_PYTORCH_L1]);
-        let mut fast = Aligned([7i16; NNUE_PYTORCH_L1]);
+        let mut generic = Aligned([7i16; TEST_L1]);
+        let mut fast = Aligned([7i16; TEST_L1]);
         apply_generic(&ft, &mut generic.0, &dirty_piece, Color::White, king_sq);
         assert!(ft.try_apply_dirty_piece_fast(&mut fast.0, &dirty_piece, Color::White, king_sq));
         assert_eq!(generic.0, fast.0);
@@ -1770,7 +1789,7 @@ mod tests {
             new_piece: ExtBonaPiece::from_hand(Color::Black, PieceType::Pawn, 1),
         };
 
-        let mut accumulation = Aligned([0i16; NNUE_PYTORCH_L1]);
+        let mut accumulation = Aligned([0i16; TEST_L1]);
         assert!(!ft.try_apply_dirty_piece_fast(
             &mut accumulation.0,
             &dirty_piece,
@@ -1784,7 +1803,7 @@ mod tests {
     // =========================================================================
 
     #[cfg(feature = "nnue-psqt")]
-    fn make_test_transformer_with_psqt() -> FeatureTransformerLayerStacks {
+    fn make_test_transformer_with_psqt() -> FeatureTransformerLayerStacks<TEST_L1> {
         let psqt_weight_count = HALFKA_HM_DIMENSIONS * NUM_LAYER_STACK_BUCKETS;
         let mut psqt_weights = AlignedBox::new_zeroed(psqt_weight_count);
         // 既知のパターンを設定: weight[feat][bucket] = (feat * 7 + bucket * 3) as i32
@@ -1795,9 +1814,9 @@ mod tests {
             }
         }
 
-        FeatureTransformerLayerStacks {
-            biases: Aligned([0; NNUE_PYTORCH_L1]),
-            weights: AlignedBox::new_zeroed(HALFKA_HM_DIMENSIONS * NNUE_PYTORCH_L1),
+        FeatureTransformerLayerStacks::<TEST_L1> {
+            biases: Aligned([0; TEST_L1]),
+            weights: AlignedBox::new_zeroed(HALFKA_HM_DIMENSIONS * TEST_L1),
             psqt_biases: [10, 20, 30, 40, 50, 60, 70, 80, 90],
             psqt_weights,
             has_psqt: true,

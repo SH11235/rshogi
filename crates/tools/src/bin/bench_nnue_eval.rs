@@ -24,10 +24,10 @@ use clap::Parser;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::nnue::{
     AccumulatorCacheLayerStacks, AccumulatorLayerStacks, DirtyPiece,
-    LAYER_STACK_PLY9_DEFAULT_BOUNDS, LayerStackBucketMode, NNUE_PYTORCH_L1, NNUEEvaluator,
-    NNUENetwork, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, compute_bucket_index, compute_king_ranks,
-    compute_layer_stack_ply9_bucket_index, compute_layer_stack_progress8_bucket_index,
-    compute_layer_stack_progress8gikou_bucket_index,
+    LAYER_STACK_PLY9_DEFAULT_BOUNDS, LayerStackBucketMode, LayerStacksNetwork, NNUE_PYTORCH_L1,
+    NNUEEvaluator, NNUENetwork, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, compute_bucket_index,
+    compute_king_ranks, compute_layer_stack_ply9_bucket_index,
+    compute_layer_stack_progress8_bucket_index, compute_layer_stack_progress8gikou_bucket_index,
     compute_layer_stack_progress8kpabs_bucket_index, get_layer_stack_ply_bounds,
     get_layer_stack_progress_coeff, get_layer_stack_progress_coeff_gikou_lite,
     get_layer_stack_progress_kpabs_weights, parse_layer_stack_bucket_mode,
@@ -170,14 +170,14 @@ struct LayerStackPropagateCase {
 struct LayerStackEvalCase {
     pos: Position,
     bucket_index: usize,
-    accumulator: AccumulatorLayerStacks,
+    accumulator: AccumulatorLayerStacks<NNUE_PYTORCH_L1>,
 }
 
 #[derive(Clone)]
 struct LayerStackUpdateCacheCase {
     pos: Position,
     dirty_piece: DirtyPiece,
-    prev_accumulator: AccumulatorLayerStacks,
+    prev_accumulator: AccumulatorLayerStacks<NNUE_PYTORCH_L1>,
 }
 
 struct LayerStackCases {
@@ -402,8 +402,11 @@ fn prepare_layer_stack_cases(
     let mut update_bucket_counts = [0usize; 9];
 
     for pos in positions {
-        let mut accumulator = AccumulatorLayerStacks::new();
-        network.refresh_accumulator_layer_stacks(pos, &mut accumulator);
+        let mut accumulator = AccumulatorLayerStacks::<NNUE_PYTORCH_L1>::new();
+        let NNUENetwork::LayerStacks(LayerStacksNetwork::L1536(ls_net)) = network else {
+            bail!("LayerStacks L1=1536 のみ対応");
+        };
+        ls_net.refresh_accumulator(pos, &mut accumulator);
 
         let bucket_index = compute_layer_stack_bucket_index(pos, bucket_mode);
         bucket_counts[bucket_index] += 1;
@@ -465,8 +468,8 @@ fn bench_layer_stack_propagate(
     warmup: u64,
     iterations: u64,
 ) -> Result<LayerStackBenchResult> {
-    let NNUENetwork::LayerStacks(net) = network else {
-        bail!("LayerStack propagate ベンチは LayerStacks NNUE のみ対応");
+    let NNUENetwork::LayerStacks(LayerStacksNetwork::L1536(net)) = network else {
+        bail!("LayerStack propagate ベンチは LayerStacks L1=1536 NNUE のみ対応");
     };
 
     for i in 0..warmup {
@@ -495,23 +498,19 @@ fn bench_layer_stack_eval(
     warmup: u64,
     iterations: u64,
 ) -> Result<LayerStackBenchResult> {
+    let NNUENetwork::LayerStacks(LayerStacksNetwork::L1536(net)) = network else {
+        bail!("LayerStack eval ベンチは LayerStacks L1=1536 NNUE のみ対応");
+    };
+
     for i in 0..warmup {
         let case = &cases[i as usize % cases.len()];
-        black_box(network.evaluate_layer_stacks_with_bucket(
-            &case.pos,
-            &case.accumulator,
-            case.bucket_index,
-        ));
+        black_box(net.evaluate_with_bucket(&case.pos, &case.accumulator, case.bucket_index));
     }
 
     let start = Instant::now();
     for i in 0..iterations {
         let case = &cases[i as usize % cases.len()];
-        black_box(network.evaluate_layer_stacks_with_bucket(
-            &case.pos,
-            &case.accumulator,
-            case.bucket_index,
-        ));
+        black_box(net.evaluate_with_bucket(&case.pos, &case.accumulator, case.bucket_index));
     }
     let duration = start.elapsed();
 
@@ -529,12 +528,12 @@ fn bench_layer_stack_refresh_cache(
     warmup: u64,
     iterations: u64,
 ) -> Result<LayerStackBenchResult> {
-    let NNUENetwork::LayerStacks(net) = network else {
-        bail!("LayerStack refresh-cache ベンチは LayerStacks NNUE のみ対応");
+    let NNUENetwork::LayerStacks(LayerStacksNetwork::L1536(net)) = network else {
+        bail!("LayerStack refresh-cache ベンチは LayerStacks L1=1536 NNUE のみ対応");
     };
 
-    let mut cache = AccumulatorCacheLayerStacks::new();
-    let mut accumulator = AccumulatorLayerStacks::new();
+    let mut cache = AccumulatorCacheLayerStacks::<NNUE_PYTORCH_L1>::new();
+    let mut accumulator = AccumulatorLayerStacks::<NNUE_PYTORCH_L1>::new();
 
     for i in 0..warmup {
         let pos = &positions[i as usize % positions.len()];
@@ -564,15 +563,15 @@ fn bench_layer_stack_update_cache(
     warmup: u64,
     iterations: u64,
 ) -> Result<LayerStackBenchResult> {
-    let NNUENetwork::LayerStacks(net) = network else {
-        bail!("LayerStack update-cache ベンチは LayerStacks NNUE のみ対応");
+    let NNUENetwork::LayerStacks(LayerStacksNetwork::L1536(net)) = network else {
+        bail!("LayerStack update-cache ベンチは LayerStacks L1=1536 NNUE のみ対応");
     };
     if cases.is_empty() {
         bail!("LayerStack update-cache ベンチ用の非玉合法手付き局面がない");
     }
 
-    let mut cache = AccumulatorCacheLayerStacks::new();
-    let mut accumulator = AccumulatorLayerStacks::new();
+    let mut cache = AccumulatorCacheLayerStacks::<NNUE_PYTORCH_L1>::new();
+    let mut accumulator = AccumulatorLayerStacks::<NNUE_PYTORCH_L1>::new();
 
     for i in 0..warmup {
         let case = &cases[i as usize % cases.len()];

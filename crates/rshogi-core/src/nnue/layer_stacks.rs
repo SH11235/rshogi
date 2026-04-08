@@ -6,10 +6,10 @@
 //! ## アーキテクチャ
 //!
 //! ```text
-//! Feature Transformer: 73,305 → 1536
-//! SqrClippedReLU: 3072 → 1536
+//! Feature Transformer: 73,305 → L1 (1536 or 768)
+//! SqrClippedReLU: L1*2 → L1
 //! LayerStacks (bucket選択後):
-//!   L1: 1536 → 16, split [15, 1]
+//!   L1: L1 → 16, split [15, 1]
 //!   Sqr(15) → 30
 //!   L2: 30 → 32, ReLU
 //!   Output: 32 → 1 + skip
@@ -17,7 +17,7 @@
 
 use super::accumulator::Aligned;
 use super::constants::{
-    LAYER_STACK_L1_OUT, LAYER_STACK_L2_IN, NNUE_PYTORCH_L1, NNUE_PYTORCH_L2, NNUE_PYTORCH_L3,
+    LAYER_STACK_L1_OUT, LAYER_STACK_L2_IN, NNUE_PYTORCH_L2, NNUE_PYTORCH_L3,
     NUM_LAYER_STACK_BUCKETS,
 };
 use super::layers::AffineTransform;
@@ -43,21 +43,21 @@ fn sqr_clipped_relu_explicit<const DIM: usize>(input: &[i32; DIM], output: &mut 
 /// LayerStack 単一バケットの層
 ///
 /// 各バケットは以下の構造を持つ:
-/// - L1: 1536 → 16
+/// - L1: L1 → 16
 /// - L2: 30 → 32
 /// - Output: 32 → 1
 ///
 /// 各層は `AffineTransform` を使用し、AVX512/AVX2/SSSE3/WASM SIMD128 に対応。
-pub struct LayerStackBucket {
-    /// L1層: 1536 → 16
-    pub l1: AffineTransform<NNUE_PYTORCH_L1, LAYER_STACK_L1_OUT>,
+pub struct LayerStackBucket<const L1: usize> {
+    /// L1層: L1 → 16
+    pub l1: AffineTransform<L1, LAYER_STACK_L1_OUT>,
     /// L2層: 30 → 32
     pub l2: AffineTransform<LAYER_STACK_L2_IN, NNUE_PYTORCH_L3>,
     /// 出力層: 32 → 1
     pub output: AffineTransform<NNUE_PYTORCH_L3, 1>,
 }
 
-impl LayerStackBucket {
+impl<const L1: usize> LayerStackBucket<L1> {
     /// 新規作成（ゼロ初期化）
     pub fn new() -> Self {
         Self {
@@ -77,9 +77,9 @@ impl LayerStackBucket {
 
     /// 順伝播
     ///
-    /// 入力: SqrClippedReLU後の1536次元 (u8)
+    /// 入力: SqrClippedReLU後のL1次元 (u8)
     /// 出力: スケーリング前の生スコア (i32)
-    pub fn propagate(&self, input: &[u8; NNUE_PYTORCH_L1]) -> i32 {
+    pub fn propagate(&self, input: &[u8; L1]) -> i32 {
         let mut l1_out = [0i32; LAYER_STACK_L1_OUT];
         let mut l2_input = Aligned([0u8; L2_PADDED_INPUT]);
         let mut l2_out = [0i32; NNUE_PYTORCH_L3];
@@ -115,7 +115,7 @@ impl LayerStackBucket {
     #[cfg(feature = "diagnostics")]
     pub fn propagate_with_diagnostics(
         &self,
-        input: &[u8; NNUE_PYTORCH_L1],
+        input: &[u8; L1],
     ) -> (i32, [i32; LAYER_STACK_L1_OUT], i32) {
         let mut l1_out = [0i32; LAYER_STACK_L1_OUT];
         let mut l2_input = Aligned([0u8; L2_PADDED_INPUT]);
@@ -143,7 +143,7 @@ impl LayerStackBucket {
     }
 }
 
-impl Default for LayerStackBucket {
+impl<const L1: usize> Default for LayerStackBucket<L1> {
     fn default() -> Self {
         Self::new()
     }
@@ -154,12 +154,12 @@ impl Default for LayerStackBucket {
 // =============================================================================
 
 /// LayerStacks: 9個のバケットを持つ構造
-pub struct LayerStacks {
+pub struct LayerStacks<const L1: usize> {
     /// 9個のバケット
-    pub buckets: [LayerStackBucket; NUM_LAYER_STACK_BUCKETS],
+    pub buckets: [LayerStackBucket<L1>; NUM_LAYER_STACK_BUCKETS],
 }
 
-impl LayerStacks {
+impl<const L1: usize> LayerStacks<L1> {
     /// 新規作成
     pub fn new() -> Self {
         Self {
@@ -190,7 +190,7 @@ impl LayerStacks {
     }
 
     /// 生スコアを計算（スケーリング前）
-    pub fn evaluate_raw(&self, bucket_index: usize, input: &[u8; NNUE_PYTORCH_L1]) -> i32 {
+    pub fn evaluate_raw(&self, bucket_index: usize, input: &[u8; L1]) -> i32 {
         debug_assert!(bucket_index < NUM_LAYER_STACK_BUCKETS);
         // SAFETY: bucket_index は progress_sum_to_bucket() または clamp(0, NUM-1) 由来で
         //         常に NUM_LAYER_STACK_BUCKETS 未満。
@@ -204,14 +204,14 @@ impl LayerStacks {
     pub fn evaluate_raw_with_diagnostics(
         &self,
         bucket_index: usize,
-        input: &[u8; NNUE_PYTORCH_L1],
+        input: &[u8; L1],
     ) -> (i32, [i32; LAYER_STACK_L1_OUT], i32) {
         debug_assert!(bucket_index < NUM_LAYER_STACK_BUCKETS);
         self.buckets[bucket_index].propagate_with_diagnostics(input)
     }
 }
 
-impl Default for LayerStacks {
+impl<const L1: usize> Default for LayerStacks<L1> {
     fn default() -> Self {
         Self::new()
     }
@@ -305,14 +305,14 @@ fn clipped_relu_i32_to_u8(input: &[i32; NNUE_PYTORCH_L3], output: &mut [u8]) {
     }
 }
 
-/// 入力: 両視点のアキュムレータ (各1536次元, i16)
-/// 出力: SqrClippedReLU後の1536次元 (u8)
-pub fn sqr_clipped_relu_transform(
-    us_acc: &[i16; NNUE_PYTORCH_L1],
-    them_acc: &[i16; NNUE_PYTORCH_L1],
-    output: &mut [u8; NNUE_PYTORCH_L1],
+/// 入力: 両視点のアキュムレータ (各L1次元, i16)
+/// 出力: SqrClippedReLU後のL1次元 (u8)
+pub fn sqr_clipped_relu_transform<const L1: usize>(
+    us_acc: &[i16; L1],
+    them_acc: &[i16; L1],
+    output: &mut [u8; L1],
 ) {
-    let half = NNUE_PYTORCH_L1 / 2; // 768
+    let half = L1 / 2;
 
     // AVX512BW: 512bit = 32 x i16、2セット同時処理で 64 i16 → 64 u8
     #[cfg(all(
@@ -322,9 +322,9 @@ pub fn sqr_clipped_relu_transform(
     ))]
     {
         // SAFETY:
-        // - us_acc, them_acc: AccumulatorLayerStacks 内 Aligned<[i16; 1536]> で 64 バイトアライン
-        // - output: Aligned<[u8; 1536]> で 64 バイトアライン
-        // - half=768, 768/32=24 → 各ループ24回で全要素カバー
+        // - us_acc, them_acc: AccumulatorLayerStacks 内 Aligned<[i16; L1]> で 64 バイトアライン
+        // - output: Aligned<[u8; L1]> で 64 バイトアライン
+        // - half=L1/2, half/32 → 各ループで全要素カバー
         // - 乗算結果: max 127*127=16129 < i16::MAX(32767)、>>7 後は [0, 126] → packus で u8 に収まる
         unsafe {
             use std::arch::x86_64::*;
@@ -371,9 +371,9 @@ pub fn sqr_clipped_relu_transform(
     ))]
     {
         // SAFETY:
-        // - us_acc, them_acc: AccumulatorLayerStacks 内 Aligned<[i16; 1536]> で 64 バイトアライン
-        // - output: Aligned<[u8; 1536]> で 64 バイトアライン
-        // - half=768, 768/32=24 → 各ループ24回で全要素カバー
+        // - us_acc, them_acc: AccumulatorLayerStacks 内 Aligned<[i16; L1]> で 64 バイトアライン
+        // - output: Aligned<[u8; L1]> で 64 バイトアライン
+        // - half=L1/2, half/32 → 各ループで全要素カバー
         // - 乗算結果: max 127*127=16129 < i16::MAX(32767)、>>7 後は [0, 126] → packus で u8 に収まる
         unsafe {
             use std::arch::x86_64::*;
@@ -498,8 +498,8 @@ pub fn sqr_clipped_relu_transform(
         all(target_arch = "wasm32", target_feature = "simd128")
     )))]
     {
-        // 前半768要素: us_acc[0..768] * us_acc[768..1536]
-        // 後半768要素: them_acc[0..768] * them_acc[768..1536]
+        // 前半 half 要素: us_acc[0..half] * us_acc[half..L1]
+        // 後半 half 要素: them_acc[0..half] * them_acc[half..L1]
         for i in 0..half {
             // us側
             let us_a = (us_acc[i] as i32).clamp(0, 127) as u32;
@@ -572,18 +572,22 @@ pub fn compute_king_ranks(
 mod tests {
     use super::*;
     use crate::nnue::accumulator::Aligned;
+    use crate::nnue::constants::NNUE_PYTORCH_L1;
     use crate::nnue::layers::ClippedReLU;
+
+    /// テスト用の具体的な L1 サイズ
+    const TEST_L1: usize = NNUE_PYTORCH_L1; // 1536
 
     #[test]
     fn test_layer_stack_bucket_new() {
-        let bucket = LayerStackBucket::new();
+        let bucket = LayerStackBucket::<TEST_L1>::new();
         assert_eq!(bucket.l1.biases.len(), LAYER_STACK_L1_OUT);
         assert_eq!(bucket.l2.biases.len(), NNUE_PYTORCH_L3);
     }
 
     #[test]
     fn test_layer_stacks_new() {
-        let stacks = LayerStacks::new();
+        let stacks = LayerStacks::<TEST_L1>::new();
         assert_eq!(stacks.buckets.len(), NUM_LAYER_STACK_BUCKETS);
     }
 
@@ -714,17 +718,17 @@ mod tests {
         assert_eq!(sqr_clipped_relu(-8192), 127);
 
         // propagate を通した検証: L1 出力を直接設定して確認
-        let bucket = LayerStackBucket::new(); // ゼロ初期化（weights=0, biases=0）
+        let bucket = LayerStackBucket::<TEST_L1>::new(); // ゼロ初期化（weights=0, biases=0）
 
         // biases を設定して l1_out を制御する
         // l1_out = bias（weights が全 0 なので入力に依存しない）
-        let mut bucket_with_biases = LayerStackBucket::new();
+        let mut bucket_with_biases = LayerStackBucket::<TEST_L1>::new();
         // index 0 の bias を 8192 に設定 → sqr = 127, 旧実装なら 126
         bucket_with_biases.l1.biases[0] = 8192;
         // index 1 の bias を 8128 に設定 → sqr = 126 (両方同じ)
         bucket_with_biases.l1.biases[1] = 8128;
 
-        let input = Aligned([0u8; NNUE_PYTORCH_L1]);
+        let input = Aligned([0u8; TEST_L1]);
         let result = bucket_with_biases.propagate(&input.0);
 
         // l2_input[0] = sqr(8192) = 127, l2_input[1] = sqr(8128) = 126
@@ -742,9 +746,9 @@ mod tests {
         use super::super::accumulator::Aligned;
 
         // SIMD パス（AVX2/AVX512）は aligned load を使うため 64 バイトアラインが必要
-        let mut us_acc = Aligned([0i16; NNUE_PYTORCH_L1]);
-        let mut them_acc = Aligned([0i16; NNUE_PYTORCH_L1]);
-        let mut output = Aligned([0u8; NNUE_PYTORCH_L1]);
+        let mut us_acc = Aligned([0i16; TEST_L1]);
+        let mut them_acc = Aligned([0i16; TEST_L1]);
+        let mut output = Aligned([0u8; TEST_L1]);
 
         // 入力が0の場合、出力も0
         sqr_clipped_relu_transform(&us_acc.0, &them_acc.0, &mut output.0);
@@ -754,7 +758,7 @@ mod tests {
         );
 
         // 最大値テスト: 127 * 127 >> 7 = 16129 >> 7 = 126
-        let half = NNUE_PYTORCH_L1 / 2;
+        let half = TEST_L1 / 2;
         for i in 0..half {
             us_acc.0[i] = 127;
             us_acc.0[half + i] = 127;
@@ -765,12 +769,12 @@ mod tests {
         sqr_clipped_relu_transform(&us_acc.0, &them_acc.0, &mut output.0);
 
         // 期待値: (127 * 127) >> 7 = 126
-        for (i, &val) in output.0.iter().enumerate().take(NNUE_PYTORCH_L1) {
+        for (i, &val) in output.0.iter().enumerate().take(TEST_L1) {
             assert_eq!(val, 126, "max input should produce 126 at index {i}");
         }
 
         // 負の値はクランプされて0になる
-        for i in 0..NNUE_PYTORCH_L1 {
+        for i in 0..TEST_L1 {
             us_acc.0[i] = -100;
             them_acc.0[i] = -100;
         }
@@ -851,7 +855,7 @@ mod tests {
             AffineTransform::<INPUT_DIM, OUTPUT_DIM>::read(&mut &bytes[..]).unwrap()
         }
 
-        fn scalar_reference(bucket: &LayerStackBucket, input: &[u8; NNUE_PYTORCH_L1]) -> i32 {
+        fn scalar_reference(bucket: &LayerStackBucket<TEST_L1>, input: &[u8; TEST_L1]) -> i32 {
             let mut l1_out = [0i32; LAYER_STACK_L1_OUT];
             bucket.l1.propagate(input, &mut l1_out);
             let l1_skip = l1_out[NNUE_PYTORCH_L2];
@@ -880,7 +884,7 @@ mod tests {
             -50000, -40000, -33000, -32768, -32000, -1000, 0, 64, 724, 8128, 8192, 8256, 20000,
             32767, 40000, 50000,
         ];
-        let l1_weights = vec![0i8; LAYER_STACK_L1_OUT * NNUE_PYTORCH_L1];
+        let l1_weights = vec![0i8; LAYER_STACK_L1_OUT * TEST_L1];
 
         let mut l2_biases = [0i32; NNUE_PYTORCH_L3];
         for (i, bias) in l2_biases.iter_mut().enumerate() {
@@ -898,12 +902,12 @@ mod tests {
         }
 
         let bucket = LayerStackBucket {
-            l1: affine_from_bytes::<NNUE_PYTORCH_L1, LAYER_STACK_L1_OUT>(l1_biases, &l1_weights),
+            l1: affine_from_bytes::<TEST_L1, LAYER_STACK_L1_OUT>(l1_biases, &l1_weights),
             l2: affine_from_bytes::<LAYER_STACK_L2_IN, NNUE_PYTORCH_L3>(l2_biases, &l2_weights),
             output: affine_from_bytes::<NNUE_PYTORCH_L3, 1>(output_biases, &output_weights),
         };
 
-        let input = Aligned([0u8; NNUE_PYTORCH_L1]);
+        let input = Aligned([0u8; TEST_L1]);
         let mut l1_out = [0i32; LAYER_STACK_L1_OUT];
         let mut l1_relu = [0u8; LAYER_STACK_L1_OUT];
         let mut l2_input_opt = Aligned([0u8; L2_PADDED_INPUT]);

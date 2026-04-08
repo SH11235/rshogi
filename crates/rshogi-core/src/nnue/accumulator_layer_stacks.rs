@@ -1,26 +1,26 @@
-//! AccumulatorLayerStacks - LayerStacksアーキテクチャ用の1536次元アキュムレータ
+//! AccumulatorLayerStacks - LayerStacksアーキテクチャ用アキュムレータ
 //!
-//! LayerStacks の Feature Transformer は各視点で 1536 次元を出力する。
+//! LayerStacks の Feature Transformer は各視点で L1 次元を出力する。
+//! L1 は const generics で 1536 / 768 等を切り替え可能。
 //! 既存の Accumulator（256次元、HalfKP用）とは別に管理する。
 
 use super::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_PATH_LENGTH};
-use super::constants::NNUE_PYTORCH_L1;
 #[cfg(feature = "nnue-psqt")]
 use super::constants::NUM_LAYER_STACK_BUCKETS;
 use crate::types::{Color, MAX_PLY, Square};
 
-/// LayerStacks用アキュムレータ（1536次元）
+/// LayerStacks用アキュムレータ（L1次元）
 #[repr(C, align(64))]
 #[derive(Clone)]
-pub struct AccumulatorLayerStacks {
+pub struct AccumulatorLayerStacks<const L1: usize> {
     /// 各視点の累積値 [perspective][dimension]
     /// perspective: 0 = Black, 1 = White
-    pub accumulation: [[i16; NNUE_PYTORCH_L1]; 2],
+    pub accumulation: [[i16; L1]; 2],
 
     /// Threat アキュムレータ [perspective][dimension]
     /// Threat weights (i8) の累積値。評価時に piece accumulation と加算して SCReLU に入力する。
     #[cfg(feature = "nnue-threat")]
-    pub threat_accumulation: [[i16; NNUE_PYTORCH_L1]; 2],
+    pub threat_accumulation: [[i16; L1]; 2],
 
     /// PSQT アキュムレータ [perspective][bucket]
     /// 各駒の PSQT 重みを視点ごとに累積する。
@@ -34,13 +34,13 @@ pub struct AccumulatorLayerStacks {
     pub computed_score: bool,
 }
 
-impl AccumulatorLayerStacks {
+impl<const L1: usize> AccumulatorLayerStacks<L1> {
     /// 新規作成
     pub fn new() -> Self {
         Self {
-            accumulation: [[0; NNUE_PYTORCH_L1]; 2],
+            accumulation: [[0; L1]; 2],
             #[cfg(feature = "nnue-threat")]
-            threat_accumulation: [[0; NNUE_PYTORCH_L1]; 2],
+            threat_accumulation: [[0; L1]; 2],
             #[cfg(feature = "nnue-psqt")]
             psqt_accumulation: [[0; NUM_LAYER_STACK_BUCKETS]; 2],
             computed_accumulation: false,
@@ -50,7 +50,7 @@ impl AccumulatorLayerStacks {
 
     /// 指定視点の累積値を取得
     #[inline]
-    pub fn get(&self, perspective: usize) -> &[i16; NNUE_PYTORCH_L1] {
+    pub fn get(&self, perspective: usize) -> &[i16; L1] {
         debug_assert!(perspective < 2);
         // SAFETY: perspective は Color::Black(0) または Color::White(1) であり、
         //         accumulation は [_; 2] なので常に範囲内。
@@ -59,7 +59,7 @@ impl AccumulatorLayerStacks {
 
     /// 指定視点の累積値を取得（可変）
     #[inline]
-    pub fn get_mut(&mut self, perspective: usize) -> &mut [i16; NNUE_PYTORCH_L1] {
+    pub fn get_mut(&mut self, perspective: usize) -> &mut [i16; L1] {
         debug_assert!(perspective < 2);
         // SAFETY: 同上。
         unsafe { self.accumulation.get_unchecked_mut(perspective) }
@@ -68,7 +68,7 @@ impl AccumulatorLayerStacks {
     /// 指定視点の Threat 累積値を取得
     #[cfg(feature = "nnue-threat")]
     #[inline]
-    pub fn get_threat(&self, perspective: usize) -> &[i16; NNUE_PYTORCH_L1] {
+    pub fn get_threat(&self, perspective: usize) -> &[i16; L1] {
         debug_assert!(perspective < 2);
         unsafe { self.threat_accumulation.get_unchecked(perspective) }
     }
@@ -76,13 +76,13 @@ impl AccumulatorLayerStacks {
     /// 指定視点の Threat 累積値を取得（可変）
     #[cfg(feature = "nnue-threat")]
     #[inline]
-    pub fn get_threat_mut(&mut self, perspective: usize) -> &mut [i16; NNUE_PYTORCH_L1] {
+    pub fn get_threat_mut(&mut self, perspective: usize) -> &mut [i16; L1] {
         debug_assert!(perspective < 2);
         unsafe { self.threat_accumulation.get_unchecked_mut(perspective) }
     }
 }
 
-impl Default for AccumulatorLayerStacks {
+impl<const L1: usize> Default for AccumulatorLayerStacks<L1> {
     fn default() -> Self {
         Self::new()
     }
@@ -97,9 +97,9 @@ impl Default for AccumulatorLayerStacks {
 /// 各玉位置×視点ごとに、最後に計算したアキュムレータ値とその時点のアクティブ特徴量を保持。
 /// refresh 時にキャッシュからの差分で更新することで、全駒加算を回避する。
 #[repr(C, align(64))]
-struct AccCacheEntry {
+struct AccCacheEntry<const L1: usize> {
     /// キャッシュされたアキュムレータ値
-    accumulation: [i16; NNUE_PYTORCH_L1],
+    accumulation: [i16; L1],
     /// キャッシュ時点のアクティブ特徴インデックス（ソート済み）
     active_indices: [u32; MAX_ACTIVE_FEATURES],
     /// active_indices の有効数
@@ -108,11 +108,11 @@ struct AccCacheEntry {
     valid: bool,
 }
 
-impl AccCacheEntry {
+impl<const L1: usize> AccCacheEntry<L1> {
     /// 無効な初期状態で作成
     fn new_invalid() -> Self {
         Self {
-            accumulation: [0; NNUE_PYTORCH_L1],
+            accumulation: [0; L1],
             active_indices: [0; MAX_ACTIVE_FEATURES],
             num_active: 0,
             valid: false,
@@ -125,22 +125,22 @@ impl AccCacheEntry {
 /// 81マス × 2視点 = 162 エントリ。
 /// 玉が移動して full refresh が必要な場合に、前回同じ玉位置で計算した
 /// アキュムレータとの差分のみを適用することで高速化する。
-pub struct AccumulatorCacheLayerStacks {
+pub struct AccumulatorCacheLayerStacks<const L1: usize> {
     /// [king_sq][perspective] のキャッシュエントリ
-    entries: Box<[[AccCacheEntry; 2]; Square::NUM]>,
+    entries: Box<[[AccCacheEntry<L1>; 2]; Square::NUM]>,
 }
 
-impl AccumulatorCacheLayerStacks {
+impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
     /// 新規作成（全エントリ無効）
     pub fn new() -> Self {
         // Box で確保（162 × エントリサイズはスタックに収まらないため）
-        let entries: Vec<[AccCacheEntry; 2]> = (0..Square::NUM)
+        let entries: Vec<[AccCacheEntry<L1>; 2]> = (0..Square::NUM)
             .map(|_| [AccCacheEntry::new_invalid(), AccCacheEntry::new_invalid()])
             .collect();
         // SAFETY: Vec の長さが Square::NUM であることを保証
-        let boxed: Box<[[AccCacheEntry; 2]]> = entries.into_boxed_slice();
+        let boxed: Box<[[AccCacheEntry<L1>; 2]]> = entries.into_boxed_slice();
         // SAFETY: Square::NUM == 81 なので配列サイズと一致する
-        let ptr = Box::into_raw(boxed) as *mut [[AccCacheEntry; 2]; Square::NUM];
+        let ptr = Box::into_raw(boxed) as *mut [[AccCacheEntry<L1>; 2]; Square::NUM];
         let entries = unsafe { Box::from_raw(ptr) };
         Self { entries }
     }
@@ -174,13 +174,13 @@ impl AccumulatorCacheLayerStacks {
         king_sq: Square,
         perspective: Color,
         active: &[u32],
-        biases: &[i16; NNUE_PYTORCH_L1],
-        accumulation: &mut [i16; NNUE_PYTORCH_L1],
+        biases: &[i16; L1],
+        accumulation: &mut [i16; L1],
         add_fn: FA,
         sub_fn: FS,
     ) where
-        FA: Fn(&mut [i16; NNUE_PYTORCH_L1], usize),
-        FS: Fn(&mut [i16; NNUE_PYTORCH_L1], usize),
+        FA: Fn(&mut [i16; L1], usize),
+        FS: Fn(&mut [i16; L1], usize),
     {
         let entry = &mut self.entries[king_sq.raw() as usize][perspective as usize];
 
@@ -216,12 +216,12 @@ impl AccumulatorCacheLayerStacks {
     fn apply_diff<FA, FS>(
         cached: &[u32],
         current: &[u32],
-        accumulation: &mut [i16; NNUE_PYTORCH_L1],
+        accumulation: &mut [i16; L1],
         add_fn: &FA,
         sub_fn: &FS,
     ) where
-        FA: Fn(&mut [i16; NNUE_PYTORCH_L1], usize),
-        FS: Fn(&mut [i16; NNUE_PYTORCH_L1], usize),
+        FA: Fn(&mut [i16; L1], usize),
+        FS: Fn(&mut [i16; L1], usize),
     {
         let mut ci = 0;
         let mut ni = 0;
@@ -258,7 +258,7 @@ impl AccumulatorCacheLayerStacks {
     }
 }
 
-impl Default for AccumulatorCacheLayerStacks {
+impl<const L1: usize> Default for AccumulatorCacheLayerStacks<L1> {
     fn default() -> Self {
         Self::new()
     }
@@ -275,9 +275,9 @@ impl Default for AccumulatorCacheLayerStacks {
 // =============================================================================
 
 /// スタックエントリ（LayerStacks用）
-pub struct StackEntryLayerStacks {
+pub struct StackEntryLayerStacks<const L1: usize> {
     /// アキュムレータ
-    pub accumulator: AccumulatorLayerStacks,
+    pub accumulator: AccumulatorLayerStacks<L1>,
     /// 変更された駒の情報
     pub dirty_piece: DirtyPiece,
     /// 直前のエントリインデックス（差分計算用）
@@ -288,7 +288,7 @@ pub struct StackEntryLayerStacks {
     pub computed_progress: bool,
 }
 
-impl StackEntryLayerStacks {
+impl<const L1: usize> StackEntryLayerStacks<L1> {
     pub fn new() -> Self {
         Self {
             accumulator: AccumulatorLayerStacks::new(),
@@ -300,7 +300,7 @@ impl StackEntryLayerStacks {
     }
 }
 
-impl Default for StackEntryLayerStacks {
+impl<const L1: usize> Default for StackEntryLayerStacks<L1> {
     fn default() -> Self {
         Self::new()
     }
@@ -311,19 +311,19 @@ impl Default for StackEntryLayerStacks {
 // =============================================================================
 
 /// アキュムレータスタック（LayerStacks用）
-pub struct AccumulatorStackLayerStacks {
+pub struct AccumulatorStackLayerStacks<const L1: usize> {
     /// スタックエントリ
-    entries: Box<[StackEntryLayerStacks]>,
+    entries: Box<[StackEntryLayerStacks<L1>]>,
     /// 現在のインデックス
     current: usize,
 }
 
-impl AccumulatorStackLayerStacks {
+impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
     const STACK_SIZE: usize = (MAX_PLY as usize) + 16;
 
     /// 新規作成
     pub fn new() -> Self {
-        let entries: Vec<StackEntryLayerStacks> =
+        let entries: Vec<StackEntryLayerStacks<L1>> =
             (0..Self::STACK_SIZE).map(|_| StackEntryLayerStacks::new()).collect();
 
         Self {
@@ -334,7 +334,7 @@ impl AccumulatorStackLayerStacks {
 
     /// 現在のエントリを取得
     #[inline]
-    pub fn current(&self) -> &StackEntryLayerStacks {
+    pub fn current(&self) -> &StackEntryLayerStacks<L1> {
         debug_assert!(self.current < self.entries.len());
         // SAFETY: current は push/pop の対でインクリメント/デクリメントされ、
         //         do_move と undo_move の対称呼び出しにより 0 <= current < STACK_SIZE が保証される。
@@ -343,7 +343,7 @@ impl AccumulatorStackLayerStacks {
 
     /// 現在のエントリを取得（可変）
     #[inline]
-    pub fn current_mut(&mut self) -> &mut StackEntryLayerStacks {
+    pub fn current_mut(&mut self) -> &mut StackEntryLayerStacks<L1> {
         debug_assert!(self.current < self.entries.len());
         // SAFETY: 同上。do_move/undo_move の対称呼び出しで current は常に範囲内。
         unsafe { self.entries.get_unchecked_mut(self.current) }
@@ -357,7 +357,7 @@ impl AccumulatorStackLayerStacks {
 
     /// 指定インデックスのエントリを取得
     #[inline]
-    pub(crate) fn entry_at(&self, index: usize) -> &StackEntryLayerStacks {
+    pub(crate) fn entry_at(&self, index: usize) -> &StackEntryLayerStacks<L1> {
         debug_assert!(index < self.entries.len());
         // SAFETY: index は previous チェーンまたは find_usable_accumulator 由来で常に
         //         current 以下の有効なインデックス（STACK_SIZE 未満）。
@@ -396,7 +396,7 @@ impl AccumulatorStackLayerStacks {
     pub fn get_prev_and_current_accumulators(
         &mut self,
         prev_idx: usize,
-    ) -> (&AccumulatorLayerStacks, &mut AccumulatorLayerStacks) {
+    ) -> (&AccumulatorLayerStacks<L1>, &mut AccumulatorLayerStacks<L1>) {
         let cur_idx = self.current;
         debug_assert!(prev_idx < cur_idx, "prev_idx ({prev_idx}) must be < cur_idx ({cur_idx})");
         debug_assert!(cur_idx < self.entries.len());
@@ -514,26 +514,124 @@ impl AccumulatorStackLayerStacks {
     }
 }
 
-impl Default for AccumulatorStackLayerStacks {
+impl<const L1: usize> Default for AccumulatorStackLayerStacks<L1> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// =============================================================================
+// LayerStacksAccStack - L1 サイズ dispatch enum
+// =============================================================================
+
+/// LayerStacks アキュムレータスタックの L1 サイズ dispatch enum
+///
+/// Cargo feature `layerstacks-1536` / `layerstacks-768` で有効なバリアントが制御される。
+pub enum LayerStacksAccStack {
+    #[cfg(feature = "layerstacks-1536")]
+    L1536(AccumulatorStackLayerStacks<1536>),
+    #[cfg(feature = "layerstacks-768")]
+    L768(AccumulatorStackLayerStacks<768>),
+}
+
+impl LayerStacksAccStack {
+    /// L1 サイズを取得
+    pub fn l1_size(&self) -> usize {
+        match self {
+            #[cfg(feature = "layerstacks-1536")]
+            Self::L1536(_) => 1536,
+            #[cfg(feature = "layerstacks-768")]
+            Self::L768(_) => 768,
+        }
+    }
+
+    /// スタックをリセット
+    #[inline]
+    pub fn reset(&mut self) {
+        match self {
+            #[cfg(feature = "layerstacks-1536")]
+            Self::L1536(s) => s.reset(),
+            #[cfg(feature = "layerstacks-768")]
+            Self::L768(s) => s.reset(),
+        }
+    }
+
+    /// do_move 時にスタックをプッシュ
+    #[inline]
+    pub fn push(&mut self) {
+        match self {
+            #[cfg(feature = "layerstacks-1536")]
+            Self::L1536(s) => s.push(),
+            #[cfg(feature = "layerstacks-768")]
+            Self::L768(s) => s.push(),
+        }
+    }
+
+    /// undo_move 時にスタックをポップ
+    #[inline]
+    pub fn pop(&mut self) {
+        match self {
+            #[cfg(feature = "layerstacks-1536")]
+            Self::L1536(s) => s.pop(),
+            #[cfg(feature = "layerstacks-768")]
+            Self::L768(s) => s.pop(),
+        }
+    }
+
+    /// 現在のエントリの dirty_piece を設定
+    #[inline]
+    pub fn set_current_dirty_piece(&mut self, dirty: DirtyPiece) {
+        match self {
+            #[cfg(feature = "layerstacks-1536")]
+            Self::L1536(s) => s.current_mut().dirty_piece = dirty,
+            #[cfg(feature = "layerstacks-768")]
+            Self::L768(s) => s.current_mut().dirty_piece = dirty,
+        }
+    }
+}
+
+// =============================================================================
+// LayerStacksAccCache - L1 サイズ dispatch enum
+// =============================================================================
+
+/// LayerStacks アキュムレータキャッシュの L1 サイズ dispatch enum
+pub enum LayerStacksAccCache {
+    #[cfg(feature = "layerstacks-1536")]
+    L1536(AccumulatorCacheLayerStacks<1536>),
+    #[cfg(feature = "layerstacks-768")]
+    L768(AccumulatorCacheLayerStacks<768>),
+}
+
+impl LayerStacksAccCache {
+    /// 全エントリを無効化
+    pub fn invalidate(&mut self) {
+        match self {
+            #[cfg(feature = "layerstacks-1536")]
+            Self::L1536(c) => c.invalidate(),
+            #[cfg(feature = "layerstacks-768")]
+            Self::L768(c) => c.invalidate(),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nnue::constants::NNUE_PYTORCH_L1;
+
+    /// テスト用の具体的な L1 サイズ
+    const TEST_L1: usize = NNUE_PYTORCH_L1; // 1536
 
     #[test]
     fn test_accumulator_new() {
-        let acc = AccumulatorLayerStacks::new();
+        let acc = AccumulatorLayerStacks::<TEST_L1>::new();
         assert!(!acc.computed_accumulation);
-        assert_eq!(acc.accumulation[0].len(), NNUE_PYTORCH_L1);
+        assert_eq!(acc.accumulation[0].len(), TEST_L1);
     }
 
     #[test]
     fn test_stack_push_pop() {
-        let mut stack = AccumulatorStackLayerStacks::new();
+        let mut stack = AccumulatorStackLayerStacks::<TEST_L1>::new();
         assert_eq!(stack.current_index(), 0);
 
         stack.push();
@@ -546,7 +644,7 @@ mod tests {
 
     #[test]
     fn test_cache_new_is_invalid() {
-        let cache = AccumulatorCacheLayerStacks::new();
+        let cache = AccumulatorCacheLayerStacks::<TEST_L1>::new();
         // 全エントリが無効であることを確認
         for sq in 0..Square::NUM {
             // SAFETY: sq は 0..81 の範囲内であることが Square::NUM により保証
@@ -560,7 +658,7 @@ mod tests {
 
     #[test]
     fn test_cache_invalidate() {
-        let mut cache = AccumulatorCacheLayerStacks::new();
+        let mut cache = AccumulatorCacheLayerStacks::<TEST_L1>::new();
         // エントリを有効にする
         cache.entries[0][0].valid = true;
         cache.entries[40][1].valid = true;
@@ -578,7 +676,7 @@ mod tests {
     /// これにより acc[0] の最終値で差分の正しさを検証する。
     #[test]
     fn test_apply_diff_basic() {
-        let mut acc = [0i16; NNUE_PYTORCH_L1];
+        let mut acc = [0i16; TEST_L1];
         // 初期値を設定（cached の重み合計 = 1+3+5 = 9）
         acc[0] = 9;
 
@@ -587,7 +685,7 @@ mod tests {
         let cached = [1u32, 3, 5];
         let current = [2u32, 3, 4];
 
-        AccumulatorCacheLayerStacks::apply_diff(
+        AccumulatorCacheLayerStacks::<TEST_L1>::apply_diff(
             &cached,
             &current,
             &mut acc,
@@ -603,12 +701,12 @@ mod tests {
     /// apply_diff: cached が空の場合（全て追加）
     #[test]
     fn test_apply_diff_all_added() {
-        let mut acc = [0i16; NNUE_PYTORCH_L1];
+        let mut acc = [0i16; TEST_L1];
 
         let cached: [u32; 0] = [];
         let current = [10u32, 20, 30];
 
-        AccumulatorCacheLayerStacks::apply_diff(
+        AccumulatorCacheLayerStacks::<TEST_L1>::apply_diff(
             &cached,
             &current,
             &mut acc,
@@ -623,13 +721,13 @@ mod tests {
     /// apply_diff: current が空の場合（全て削除）
     #[test]
     fn test_apply_diff_all_removed() {
-        let mut acc = [0i16; NNUE_PYTORCH_L1];
+        let mut acc = [0i16; TEST_L1];
         acc[0] = 60; // 初期値 = cached の合計
 
         let cached = [10u32, 20, 30];
         let current: [u32; 0] = [];
 
-        AccumulatorCacheLayerStacks::apply_diff(
+        AccumulatorCacheLayerStacks::<TEST_L1>::apply_diff(
             &cached,
             &current,
             &mut acc,
@@ -644,13 +742,13 @@ mod tests {
     /// apply_diff: 完全一致の場合（変化なし）
     #[test]
     fn test_apply_diff_identical() {
-        let mut acc = [0i16; NNUE_PYTORCH_L1];
+        let mut acc = [0i16; TEST_L1];
         acc[0] = 42;
 
         let cached = [1u32, 2, 3, 4, 5];
         let current = [1u32, 2, 3, 4, 5];
 
-        AccumulatorCacheLayerStacks::apply_diff(
+        AccumulatorCacheLayerStacks::<TEST_L1>::apply_diff(
             &cached,
             &current,
             &mut acc,
@@ -665,16 +763,16 @@ mod tests {
     /// refresh_or_cache: 最初のキャッシュミス → full refresh → キャッシュ保存
     #[test]
     fn test_refresh_or_cache_cold_start() {
-        let mut cache = AccumulatorCacheLayerStacks::new();
+        let mut cache = AccumulatorCacheLayerStacks::<TEST_L1>::new();
         let king_sq = Square::SQ_55; // 5五
         let perspective = Color::Black;
 
-        let mut biases = [0i16; NNUE_PYTORCH_L1];
+        let mut biases = [0i16; TEST_L1];
         biases[0] = 100;
         biases[1] = 200;
 
         let active = [5u32, 10, 15]; // ダミーの特徴量
-        let mut accumulation = [0i16; NNUE_PYTORCH_L1];
+        let mut accumulation = [0i16; TEST_L1];
 
         // 加算関数: index を accumulation[0] に加算（テスト用簡略化）
         cache.refresh_or_cache(
@@ -701,15 +799,15 @@ mod tests {
     /// refresh_or_cache: 2回目のキャッシュヒット → 差分更新
     #[test]
     fn test_refresh_or_cache_hit() {
-        let mut cache = AccumulatorCacheLayerStacks::new();
+        let mut cache = AccumulatorCacheLayerStacks::<TEST_L1>::new();
         let king_sq = Square::SQ_55;
         let perspective = Color::Black;
 
-        let biases = [0i16; NNUE_PYTORCH_L1];
+        let biases = [0i16; TEST_L1];
 
         // 1回目: active = [5, 10, 15]
         let active1 = [5u32, 10, 15];
-        let mut acc1 = [0i16; NNUE_PYTORCH_L1];
+        let mut acc1 = [0i16; TEST_L1];
         cache.refresh_or_cache(
             king_sq,
             perspective,
@@ -724,7 +822,7 @@ mod tests {
 
         // 2回目: active = [5, 10, 20] （15→20 に変化）
         let active2 = [5u32, 10, 20];
-        let mut acc2 = [0i16; NNUE_PYTORCH_L1];
+        let mut acc2 = [0i16; TEST_L1];
         cache.refresh_or_cache(
             king_sq,
             perspective,

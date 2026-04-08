@@ -59,7 +59,7 @@ pub(crate) mod threat_features;
 pub use accumulator::{Accumulator, AccumulatorStack, ChangedBonaPiece, DirtyPiece, StackEntry};
 pub use accumulator_layer_stacks::{
     AccumulatorCacheLayerStacks, AccumulatorLayerStacks, AccumulatorStackLayerStacks,
-    StackEntryLayerStacks,
+    LayerStacksAccCache, LayerStacksAccStack, StackEntryLayerStacks,
 };
 pub use accumulator_stack_variant::AccumulatorStackVariant;
 pub use bona_piece::{BonaPiece, ExtBonaPiece, FE_END, halfkp_index};
@@ -103,7 +103,7 @@ pub use network::{
     set_layer_stack_progress_coeff_gikou_lite, set_layer_stack_progress_kpabs_weights,
     set_nnue_architecture_override,
 };
-pub use network_layer_stacks::NetworkLayerStacks;
+pub use network_layer_stacks::{LayerStacksNetwork, NetworkLayerStacks};
 pub use piece_list::{PieceList, PieceNumber};
 
 // const generics 版統一実装（内部型は pub(crate) に隠蔽）

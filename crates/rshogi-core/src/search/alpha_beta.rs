@@ -13,7 +13,7 @@ use crate::eval::evaluate_pass_rights;
 use crate::eval::{EvalHash, get_scaled_pass_move_bonus};
 #[cfg(feature = "layerstack-only")]
 use crate::nnue::NNUENetwork;
-use crate::nnue::{AccumulatorCacheLayerStacks, AccumulatorStackVariant, get_network};
+use crate::nnue::{AccumulatorStackVariant, LayerStacksAccCache, get_network};
 use crate::position::Position;
 use crate::search::PieceToHistory;
 use crate::tt::{ProbeResult, TTData, TranspositionTable};
@@ -376,7 +376,7 @@ pub struct SearchState {
     pub nnue_stack: AccumulatorStackVariant,
     /// LayerStacks 用 AccumulatorCaches（Finny Tables）
     /// LayerStacks アーキテクチャ以外では None
-    pub acc_cache: Option<AccumulatorCacheLayerStacks>,
+    pub acc_cache: Option<LayerStacksAccCache>,
     /// check_abort呼び出しカウンター
     pub calls_cnt: i32,
     /// 探索統計（search-stats feature有効時のみ）
@@ -755,8 +755,10 @@ impl SearchWorker {
             }
             // LayerStacks 用 AccumulatorCaches を初期化
             if network.is_layer_stacks() {
-                if self.state.acc_cache.is_none() {
-                    self.state.acc_cache = Some(AccumulatorCacheLayerStacks::new());
+                if self.state.acc_cache.is_none()
+                    && let crate::nnue::NNUENetwork::LayerStacks(ls_net) = &*network
+                {
+                    self.state.acc_cache = Some(ls_net.new_acc_cache());
                 }
                 // 新しいゲーム開始時にキャッシュを無効化（usinewgame 経由で呼ばれる）
                 if let Some(cache) = &mut self.state.acc_cache {
