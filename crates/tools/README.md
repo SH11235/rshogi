@@ -18,6 +18,7 @@
 | `shuffle_psv` | PSV ファイルのシャッフル |
 | `rescore_psv` | 局面の再評価（探索スコア付与） |
 | `preprocess_psv` | PSV ファイルの前処理（qsearch leaf置換等） |
+| `validate_psv` | PSV ファイルの不正局面検出・除去 |
 | `psv_to_jsonl` | PSV 形式 → JSONL 変換（デバッグ・確認用） |
 | `fix_scores` | スコアの補正 |
 

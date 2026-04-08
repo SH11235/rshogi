@@ -74,6 +74,40 @@ cargo run -p tools --release --bin preprocess_psv -- \
 | `--skip-in-check` | 王手局面をスキップ | false |
 | `-t, --threads` | スレッド数（0=自動） | 1 |
 
+### validate_psv
+
+PSV ファイルの不正局面を検出・除去。学習データの品質チェックに使用。
+
+```bash
+# 検出のみ
+cargo run -p tools --release --bin validate_psv -- \
+  --data data.psv
+
+# ディレクトリ内の全ファイルをチェック
+cargo run -p tools --release --bin validate_psv -- \
+  --input-dir /path/to/dir --pattern "*.bin"
+
+# 不正レコードを除去して出力
+cargo run -p tools --release --bin validate_psv -- \
+  --data data.psv --output clean.psv
+```
+
+チェック項目：
+- PackedSfen の unpack 失敗（ハフマン符号破損等）
+- SFEN パースエラー
+- 玉の不在、駒数超過、行き所のない駒、二歩
+- 手番でない側の玉に王手
+- `game_result` が {-1, 0, 1} 以外
+- ファイルサイズが 40 バイトの倍数でない（末尾端数）
+
+| オプション | 説明 | デフォルト |
+|------------|------|------------|
+| `--data` | 入力ファイル（カンマ区切りで複数可） | - |
+| `--input-dir` | 入力ディレクトリ（`--data` と排他） | - |
+| `--pattern` | `--input-dir` 使用時の glob パターン | `*.bin` |
+| `--output` | 出力ファイル（正常レコードのみ書き出し） | - |
+| `--max-errors` | 不正レコードの詳細表示件数 | 100 |
+
 ### psv_to_jsonl
 
 PSV形式をJSONLに変換。デバッグ・内容確認用。
