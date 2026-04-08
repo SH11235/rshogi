@@ -41,6 +41,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
 use rshogi_core::bitboard::{FILE_BB, RANK_BB};
@@ -296,28 +297,10 @@ fn main() -> Result<()> {
     let num_threads = rayon::current_num_threads();
     eprintln!("{} ファイルを処理します（{} スレッド）", paths.len(), num_threads);
 
-    let mut writer = cli.output.as_ref().map(|path| {
-        let f = File::create(path).unwrap_or_else(|e| {
-            panic!("出力ファイルを作成できません: {:?}: {e}", path);
-        });
-        BufWriter::with_capacity(64 * 1024 * 1024, f)
-    });
-
-    let mut total_records = 0u64;
-    let mut valid_records = 0u64;
+    // 全ファイルの総レコード数を事前計算（プログレスバー用）
+    let mut total_expected = 0u64;
     let mut trailing_bytes_total = 0u64;
-    let mut errors = ErrorStats::default();
-    let mut errors_shown = 0usize;
-
-    let collect_output = writer.is_some();
-
-    let mut chunk: Vec<[u8; PSV_SIZE]> = Vec::with_capacity(CHUNK_SIZE);
-    let mut bulk_buf = vec![0u8; CHUNK_SIZE * PSV_SIZE];
-
-    let start = std::time::Instant::now();
-
     for path in &paths {
-        // ファイルサイズチェック
         let file_size = std::fs::metadata(path)
             .with_context(|| format!("ファイル情報の取得に失敗: {}", path.display()))?
             .len();
@@ -330,8 +313,35 @@ fn main() -> Result<()> {
             );
             trailing_bytes_total += trailing;
         }
+        total_expected += file_size / PSV_SIZE as u64;
+    }
 
-        eprintln!("Reading: {}", path.display());
+    let progress = ProgressBar::new(total_expected);
+    progress.set_style(
+        ProgressStyle::default_bar()
+            .template(
+                "[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({per_sec}, ETA {eta}) {msg}",
+            )
+            .expect("valid template"),
+    );
+
+    let mut writer = cli.output.as_ref().map(|path| {
+        let f = File::create(path).unwrap_or_else(|e| {
+            panic!("出力ファイルを作成できません: {:?}: {e}", path);
+        });
+        BufWriter::with_capacity(64 * 1024 * 1024, f)
+    });
+
+    let mut total_records = 0u64;
+    let mut valid_records = 0u64;
+    let mut errors = ErrorStats::default();
+    let mut errors_shown = 0usize;
+
+    let mut chunk: Vec<[u8; PSV_SIZE]> = Vec::with_capacity(CHUNK_SIZE);
+    let mut bulk_buf = vec![0u8; CHUNK_SIZE * PSV_SIZE];
+
+    for path in &paths {
+        progress.set_message(format!("{}", path.file_name().unwrap_or_default().to_string_lossy()));
         let file = File::open(path)
             .with_context(|| format!("ファイルを開けません: {}", path.display()))?;
         let mut reader = BufReader::with_capacity(64 * 1024 * 1024, file);
@@ -341,10 +351,12 @@ fn main() -> Result<()> {
             let read_bytes = read_up_to(&mut reader, &mut bulk_buf)?;
             let complete_records = read_bytes / PSV_SIZE;
             if read_bytes % PSV_SIZE != 0 {
-                eprintln!(
-                    "Warning: 不完全なレコード（{} バイト）をスキップ",
-                    read_bytes % PSV_SIZE
-                );
+                progress.suspend(|| {
+                    eprintln!(
+                        "Warning: 不完全なレコード（{} バイト）をスキップ",
+                        read_bytes % PSV_SIZE
+                    );
+                });
             }
 
             if complete_records == 0 {
@@ -387,32 +399,22 @@ fn main() -> Result<()> {
                             _ => {}
                         }
                         if errors_shown < cli.max_errors {
-                            eprintln!("[レコード#{record_no}] {message}");
+                            progress.suspend(|| {
+                                eprintln!("[レコード#{record_no}] {message}");
+                            });
                             errors_shown += 1;
                         }
                     }
                 }
             }
             total_records += complete_records as u64;
-
-            if total_records.is_multiple_of(10_000_000) {
-                let elapsed = start.elapsed().as_secs_f64();
-                let rps = total_records as f64 / elapsed;
-                eprintln!(
-                    "  {} M レコード処理, {:.1} sec ({:.1} M rec/s)",
-                    total_records / 1_000_000,
-                    elapsed,
-                    rps / 1_000_000.0,
-                );
-            }
+            progress.set_position(total_records);
         }
     }
 
-    // output 用バイト列は collect_output=false なら ValidateResult::Valid に空配列を渡せるが、
-    // 現在は常にコピーしている。大規模データで出力不要の場合はメモリ効率に影響なし（スタック配列のため）。
-    let _ = collect_output;
+    progress.finish_and_clear();
 
-    let elapsed = start.elapsed().as_secs_f64();
+    let elapsed = progress.elapsed().as_secs_f64();
     let invalid = errors.total();
 
     eprintln!();
