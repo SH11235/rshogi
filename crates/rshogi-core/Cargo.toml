@@ -81,6 +81,8 @@ layerstack-only = []
 layerstacks-1536 = []
 # LayerStacks L1=768 バリアント（v91 モデル用）
 layerstacks-768 = []
+# LayerStacks L1=512 バリアント
+layerstacks-512 = []
 # NNUE PSQT ショートカット対応
 # 無効時: AccumulatorLayerStacks から psqt_accumulation を除去、PSQT モデル読み込み不可
 nnue-psqt = []

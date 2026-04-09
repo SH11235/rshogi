@@ -549,12 +549,18 @@ impl<const L1: usize> NetworkLayerStacks<L1> {
 
 /// LayerStacks ネットワークの L1 サイズ dispatch enum
 ///
-/// Cargo feature `layerstacks-1536` / `layerstacks-768` で有効なバリアントが制御される。
+/// Cargo feature `layerstacks-1536` / `layerstacks-768` / `layerstacks-512` で
+/// 有効なバリアントが制御される。
+///
+/// **重要**: 大会ビルドでは必ず単一バリアントのみを有効化すること。複数バリアントを
+/// 同時有効にすると dispatch match の overhead で約 5% NPS 退行する（実測値）。
 pub enum LayerStacksNetwork {
     #[cfg(feature = "layerstacks-1536")]
     L1536(Box<NetworkLayerStacks<1536>>),
     #[cfg(feature = "layerstacks-768")]
     L768(Box<NetworkLayerStacks<768>>),
+    #[cfg(feature = "layerstacks-512")]
+    L512(Box<NetworkLayerStacks<512>>),
 }
 
 impl LayerStacksNetwork {
@@ -565,7 +571,13 @@ impl LayerStacksNetwork {
             Self::L1536(_) => 1536,
             #[cfg(feature = "layerstacks-768")]
             Self::L768(_) => 768,
-            #[cfg(not(any(feature = "layerstacks-1536", feature = "layerstacks-768")))]
+            #[cfg(feature = "layerstacks-512")]
+            Self::L512(_) => 512,
+            #[cfg(not(any(
+                feature = "layerstacks-1536",
+                feature = "layerstacks-768",
+                feature = "layerstacks-512"
+            )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         }
     }
@@ -588,7 +600,13 @@ impl LayerStacksNetwork {
             Self::L1536(net) => net.fv_scale,
             #[cfg(feature = "layerstacks-768")]
             Self::L768(net) => net.fv_scale,
-            #[cfg(not(any(feature = "layerstacks-1536", feature = "layerstacks-768")))]
+            #[cfg(feature = "layerstacks-512")]
+            Self::L512(net) => net.fv_scale,
+            #[cfg(not(any(
+                feature = "layerstacks-1536",
+                feature = "layerstacks-768",
+                feature = "layerstacks-512"
+            )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         }
     }
@@ -610,6 +628,11 @@ impl LayerStacksNetwork {
                 let net = NetworkLayerStacks::<768>::read_with_options(reader, psqt_override)?;
                 Ok(Self::L768(Box::new(net)))
             }
+            #[cfg(feature = "layerstacks-512")]
+            512 => {
+                let net = NetworkLayerStacks::<512>::read_with_options(reader, psqt_override)?;
+                Ok(Self::L512(Box::new(net)))
+            }
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unsupported LayerStacks L1 size: {l1}"),
@@ -630,6 +653,10 @@ impl LayerStacksNetwork {
             }
             #[cfg(feature = "layerstacks-768")]
             (Self::L768(net), super::accumulator_layer_stacks::LayerStacksAccStack::L768(st)) => {
+                net.evaluate(pos, &st.current().accumulator)
+            }
+            #[cfg(feature = "layerstacks-512")]
+            (Self::L512(net), super::accumulator_layer_stacks::LayerStacksAccStack::L512(st)) => {
                 net.evaluate(pos, &st.current().accumulator)
             }
             #[allow(unreachable_patterns)]
@@ -699,6 +726,10 @@ impl LayerStacksNetwork {
             (Self::L768(net), super::accumulator_layer_stacks::LayerStacksAccStack::L768(st)) => {
                 do_update!(net, st, L768);
             }
+            #[cfg(feature = "layerstacks-512")]
+            (Self::L512(net), super::accumulator_layer_stacks::LayerStacksAccStack::L512(st)) => {
+                do_update!(net, st, L512);
+            }
             #[allow(unreachable_patterns)]
             _ => panic!("LayerStacksNetwork/LayerStacksAccStack L1 size mismatch"),
         }
@@ -715,7 +746,15 @@ impl LayerStacksNetwork {
             Self::L768(_) => super::accumulator_layer_stacks::LayerStacksAccStack::L768(
                 super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<768>::new(),
             ),
-            #[cfg(not(any(feature = "layerstacks-1536", feature = "layerstacks-768")))]
+            #[cfg(feature = "layerstacks-512")]
+            Self::L512(_) => super::accumulator_layer_stacks::LayerStacksAccStack::L512(
+                super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<512>::new(),
+            ),
+            #[cfg(not(any(
+                feature = "layerstacks-1536",
+                feature = "layerstacks-768",
+                feature = "layerstacks-512"
+            )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         }
     }
@@ -731,7 +770,15 @@ impl LayerStacksNetwork {
             Self::L768(_) => super::accumulator_layer_stacks::LayerStacksAccCache::L768(
                 super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<768>::new(),
             ),
-            #[cfg(not(any(feature = "layerstacks-1536", feature = "layerstacks-768")))]
+            #[cfg(feature = "layerstacks-512")]
+            Self::L512(_) => super::accumulator_layer_stacks::LayerStacksAccCache::L512(
+                super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<512>::new(),
+            ),
+            #[cfg(not(any(
+                feature = "layerstacks-1536",
+                feature = "layerstacks-768",
+                feature = "layerstacks-512"
+            )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         }
     }

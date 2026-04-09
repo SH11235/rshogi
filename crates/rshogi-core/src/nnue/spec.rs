@@ -166,12 +166,11 @@ pub fn parse_feature_input_dimensions(arch_str: &str) -> Option<usize> {
 pub fn parse_feature_set_from_arch(arch_str: &str) -> Result<FeatureSet, String> {
     use super::constants::{HALFKA_DIMENSIONS, HALFKA_HM_DIMENSIONS};
 
-    if arch_str.contains("LayerStacks")
-        || arch_str.contains("->1536x2]")
-        || arch_str.contains("->768x2]")
-    {
+    // 明示的な "LayerStacks" キーワードがあれば確定
+    if arch_str.contains("LayerStacks") {
         return Ok(FeatureSet::LayerStacks);
     }
+    // HalfKP/HalfKA_hm/HalfKA のキーワードを先に判定（FT_OUT が LayerStacks と衝突するため）
     if arch_str.contains("HalfKP") {
         return Ok(FeatureSet::HalfKP);
     }
@@ -187,6 +186,13 @@ pub fn parse_feature_set_from_arch(arch_str: &str) -> Result<FeatureSet, String>
             HALFKA_DIMENSIONS => Ok(FeatureSet::HalfKA),
             _ => Err(format!("Unknown HalfKA input dimensions: {input_dim}")),
         };
+    }
+    // キーワードが無い LayerStacks モデル（bullet-shogi 形式）: FT_OUT パターンで判定
+    if arch_str.contains("->1536x2]")
+        || arch_str.contains("->768x2]")
+        || arch_str.contains("->512x2]")
+    {
+        return Ok(FeatureSet::LayerStacks);
     }
 
     Err("Unknown feature set in arch string.".to_string())

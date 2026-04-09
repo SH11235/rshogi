@@ -1526,7 +1526,13 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
             LayerStacksAccStack::L1536(s) => ensure_progress_bucket(pos, s),
             #[cfg(feature = "layerstacks-768")]
             LayerStacksAccStack::L768(s) => ensure_progress_bucket(pos, s),
-            #[cfg(not(any(feature = "layerstacks-1536", feature = "layerstacks-768")))]
+            #[cfg(feature = "layerstacks-512")]
+            LayerStacksAccStack::L512(s) => ensure_progress_bucket(pos, s),
+            #[cfg(not(any(
+                feature = "layerstacks-1536",
+                feature = "layerstacks-768",
+                feature = "layerstacks-512"
+            )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         };
         CACHED_PROGRESS_BUCKET.with(|c| c.set(Some(bucket)));
