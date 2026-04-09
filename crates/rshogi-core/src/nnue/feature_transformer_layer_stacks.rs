@@ -267,29 +267,6 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
         &self.threat_weights[offset..end]
     }
 
-    /// Threat 重み行のプリフェッチ
-    ///
-    /// 次にアクセスする threat_weight_row をキャッシュに先読みする。
-    /// add/sub_threat_weights の前に呼ぶことでメモリレイテンシを隠蔽。
-    #[cfg(feature = "nnue-threat")]
-    #[inline]
-    fn prefetch_threat_weights(&self, index: usize) {
-        let offset = index * L1;
-        if offset < self.threat_weights.len() {
-            let ptr = unsafe { self.threat_weights.as_ptr().add(offset) };
-            #[cfg(target_arch = "x86_64")]
-            unsafe {
-                use std::arch::x86_64::_mm_prefetch;
-                // T0: 全キャッシュレベルにプリフェッチ
-                // L1 bytes = L1/64 cache lines (64B each), 先頭数本を prefetch
-                _mm_prefetch(ptr as *const i8, std::arch::x86_64::_MM_HINT_T0);
-                _mm_prefetch(ptr.add(64) as *const i8, std::arch::x86_64::_MM_HINT_T0);
-                _mm_prefetch(ptr.add(128) as *const i8, std::arch::x86_64::_MM_HINT_T0);
-                _mm_prefetch(ptr.add(192) as *const i8, std::arch::x86_64::_MM_HINT_T0);
-            }
-        }
-    }
-
     /// Threat 重み (i8) を i16 アキュムレータに加算（SIMD 最適化）
     ///
     /// i8 重みを i16 に sign-extend してから加算。
