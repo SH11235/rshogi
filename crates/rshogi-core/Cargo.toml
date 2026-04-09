@@ -87,6 +87,13 @@ nnue-psqt = []
 # NNUE Threat 特徴量対応
 # 無効時: AccumulatorLayerStacks から threat_accumulation を除去 (-6KB/entry)、Threat モデル読み込み不可
 nnue-threat = []
+# NNUE progress8kpabs バケットの差分更新最適化
+# - 有効時: StackEntry に progress_sum/computed_progress フィールド追加、
+#   ensure_progress_bucket で DirtyPiece 差分から O(1) 更新
+# - Threat なし環境 (v87 等): +3〜4% NPS（有効）
+# - Threat あり環境 (v91 等): -2% NPS（cache 圧迫で退行）
+# default では無効。運用モデルの特性に応じてビルド時に明示指定する。
+nnue-progress-diff = []
 
 [lib]
 name = "rshogi_core"

@@ -283,8 +283,10 @@ pub struct StackEntryLayerStacks<const L1: usize> {
     /// 直前のエントリインデックス（差分計算用）
     pub previous: Option<usize>,
     /// progress8kpabs の重み付き和（差分更新用）
+    #[cfg(feature = "nnue-progress-diff")]
     pub progress_sum: f32,
     /// progress_sum 計算済みフラグ
+    #[cfg(feature = "nnue-progress-diff")]
     pub computed_progress: bool,
 }
 
@@ -294,7 +296,9 @@ impl<const L1: usize> StackEntryLayerStacks<L1> {
             accumulator: AccumulatorLayerStacks::new(),
             dirty_piece: DirtyPiece::default(),
             previous: None,
+            #[cfg(feature = "nnue-progress-diff")]
             progress_sum: 0.0,
+            #[cfg(feature = "nnue-progress-diff")]
             computed_progress: false,
         }
     }
@@ -378,7 +382,10 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
         entry.accumulator.computed_accumulation = false;
         entry.accumulator.computed_score = false;
         entry.dirty_piece = DirtyPiece::default();
-        entry.computed_progress = false;
+        #[cfg(feature = "nnue-progress-diff")]
+        {
+            entry.computed_progress = false;
+        }
     }
 
     /// スタックをポップ
@@ -418,7 +425,10 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
         self.entries[0].accumulator.computed_accumulation = false;
         self.entries[0].accumulator.computed_score = false;
         self.entries[0].previous = None;
-        self.entries[0].computed_progress = false;
+        #[cfg(feature = "nnue-progress-diff")]
+        {
+            self.entries[0].computed_progress = false;
+        }
     }
 
     /// 祖先を辿って使用可能なアキュムレータを探す

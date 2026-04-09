@@ -1216,6 +1216,7 @@ pub fn compute_progress8kpabs_sum(pos: &Position, weights: &[f32]) -> f32 {
 ///
 /// 玉が動いていない場合にのみ使用可能。
 /// DirtyPiece の ExtBonaPiece.fb/fw は progress8kpabs と同じ BonaPiece 体系。
+#[cfg(feature = "nnue-progress-diff")]
 #[inline]
 pub fn update_progress8kpabs_sum_diff(
     prev_sum: f32,
@@ -1501,6 +1502,11 @@ pub fn get_network() -> Option<Arc<NNUENetwork>> {
 ///
 /// `LayerStacksNetwork::update_accumulator()` と `evaluate()` に委譲する。
 /// AccumulatorCaches（Finny Tables）を使用して refresh を高速化する。
+///
+/// `nnue-progress-diff` feature 有効時は progress8kpabs モードで差分更新を試み、
+/// 結果を `CACHED_PROGRESS_BUCKET` に格納して `evaluate()` 内の全駒スキャンを回避する。
+/// Threat なし環境では +3〜4% NPS、Threat あり環境では cache 圧迫で退行するため
+/// 運用モデルに応じて明示指定する。
 #[inline(always)]
 pub(crate) fn update_and_evaluate_layer_stacks_cached(
     net: &LayerStacksNetwork,
@@ -1512,7 +1518,18 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
     net.update_accumulator(pos, stack, acc_cache);
 
     // progress8kpabs: 差分更新を試み、結果を CACHED_PROGRESS_BUCKET に格納
-    // TODO: progress8kpabs は LayerStacksAccStack 対応が別途必要（将来対応）
+    #[cfg(feature = "nnue-progress-diff")]
+    if matches!(get_layer_stack_bucket_mode(), LayerStackBucketMode::Progress8KPAbs) {
+        let bucket = match stack {
+            #[cfg(feature = "layerstacks-1536")]
+            LayerStacksAccStack::L1536(s) => ensure_progress_bucket(pos, s),
+            #[cfg(feature = "layerstacks-768")]
+            LayerStacksAccStack::L768(s) => ensure_progress_bucket(pos, s),
+            #[cfg(not(any(feature = "layerstacks-1536", feature = "layerstacks-768")))]
+            _ => unreachable!("no LayerStacks variant enabled"),
+        };
+        CACHED_PROGRESS_BUCKET.with(|c| c.set(Some(bucket)));
+    }
 
     // 評価
     net.evaluate(pos, stack)
@@ -1522,10 +1539,11 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
 ///
 /// 差分更新が可能な場合（前局面が計算済み、玉移動なし）は DirtyPiece の差分で O(1) 更新。
 /// それ以外は全駒スキャンにフォールバック。
+#[cfg(feature = "nnue-progress-diff")]
 #[inline]
-fn ensure_progress_bucket(
+fn ensure_progress_bucket<const L1: usize>(
     pos: &Position,
-    stack: &mut super::accumulator_layer_stacks::AccumulatorStackLayerStacks<1536>,
+    stack: &mut super::accumulator_layer_stacks::AccumulatorStackLayerStacks<L1>,
 ) -> usize {
     if !stack.current().computed_progress {
         let weights = get_layer_stack_progress_kpabs_weights();
@@ -2315,6 +2333,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "nnue-progress-diff")]
     #[test]
     fn test_progress8kpabs_diff_update() {
         use crate::types::Move;
