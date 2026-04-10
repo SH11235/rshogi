@@ -170,6 +170,13 @@ pub fn parse_feature_set_from_arch(arch_str: &str) -> Result<FeatureSet, String>
     if arch_str.contains("LayerStacks") {
         return Ok(FeatureSet::LayerStacks);
     }
+    // bullet-shogi LayerStacks 形式の判定:
+    // - Threat= を含むモデルは必ず LayerStacks
+    // - SqrClippedReLU を含むモデルは bullet-shogi LayerStacks（L2 活性化が SCReLU）
+    //   nnue-pytorch 単体モデルは ClippedReLU のみ使用
+    if arch_str.contains("Threat=") || arch_str.contains("SqrClippedReLU") {
+        return Ok(FeatureSet::LayerStacks);
+    }
     // HalfKP/HalfKA_hm/HalfKA のキーワードを先に判定（FT_OUT が LayerStacks と衝突するため）
     if arch_str.contains("HalfKP") {
         return Ok(FeatureSet::HalfKP);
