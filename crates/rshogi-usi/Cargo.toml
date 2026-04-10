@@ -39,6 +39,9 @@ diagnostics = ["rshogi-core/diagnostics"]
 nnue-psqt = ["rshogi-core/nnue-psqt"]
 # NNUE Threat 特徴量対応
 nnue-threat = ["rshogi-core/nnue-threat"]
+# Threat exclusion profiles
+threat-profile-same-class = ["rshogi-core/threat-profile-same-class"]
+threat-profile-same-class-major-pawn = ["rshogi-core/threat-profile-same-class-major-pawn"]
 # LayerStacks L1 バリアント
 layerstacks-1536 = ["rshogi-core/layerstacks-1536"]
 layerstacks-768 = ["rshogi-core/layerstacks-768"]

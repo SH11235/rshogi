@@ -29,8 +29,8 @@ use std::sync::LazyLock;
 /// Threat の総特徴量次元数 (profile 依存)
 ///
 /// Profile 0 (full): 216,720
-/// Profile 1 (exclude-a): 192,640
-/// Profile 2 (exclude-ac): ~173,568
+/// Profile 1 (same-class): 192,640
+/// Profile 2 (same-class-major-pawn): 173,568
 pub const THREAT_DIMENSIONS: usize = PAIR_DATA.1;
 
 /// ThreatClass の数（King 除外）
@@ -1063,18 +1063,16 @@ mod tests {
     fn test_threat_dimensions_profile() {
         // Profile ごとの THREAT_DIMENSIONS が仕様と一致することを確認
         #[cfg(not(any(
-            feature = "threat-profile-exclude-a",
-            feature = "threat-profile-exclude-ac",
-            feature = "threat-profile-exclude-acb-conservative",
-            feature = "threat-profile-exclude-acb-aggressive",
+            feature = "threat-profile-same-class",
+            feature = "threat-profile-same-class-major-pawn",
         )))]
         assert_eq!(THREAT_DIMENSIONS, 216_720, "profile 0 (full)");
 
-        #[cfg(feature = "threat-profile-exclude-a")]
-        assert_eq!(THREAT_DIMENSIONS, 192_640, "profile 1 (exclude-a)");
+        #[cfg(feature = "threat-profile-same-class")]
+        assert_eq!(THREAT_DIMENSIONS, 192_640, "profile 1 (same-class)");
 
-        #[cfg(feature = "threat-profile-exclude-ac")]
-        assert_eq!(THREAT_DIMENSIONS, 173_568, "profile 2 (exclude-ac)");
+        #[cfg(feature = "threat-profile-same-class-major-pawn")]
+        assert_eq!(THREAT_DIMENSIONS, 173_568, "profile 2 (same-class-major-pawn)");
     }
 
     #[test]
@@ -1298,10 +1296,8 @@ mod tests {
     /// Profile 0 (full) のみ有効（他の profile では index が変わる）。
     #[test]
     #[cfg(not(any(
-        feature = "threat-profile-exclude-a",
-        feature = "threat-profile-exclude-ac",
-        feature = "threat-profile-exclude-acb-conservative",
-        feature = "threat-profile-exclude-acb-aggressive",
+        feature = "threat-profile-same-class",
+        feature = "threat-profile-same-class-major-pawn",
     )))]
     fn test_canonical_startpos_threat_indices() {
         let mut pos = Position::new();
