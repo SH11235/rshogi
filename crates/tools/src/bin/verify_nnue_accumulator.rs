@@ -81,6 +81,8 @@ fn main() -> Result<()> {
                 LayerStacksNetwork::L1536($inner) => $body,
                 #[cfg(feature = "layerstacks-768")]
                 LayerStacksNetwork::L768($inner) => $body,
+                #[cfg(feature = "layerstacks-512")]
+                LayerStacksNetwork::L512($inner) => $body,
                 #[allow(unreachable_patterns)]
                 _ => anyhow::bail!("有効な LayerStacks バリアントがありません"),
             }

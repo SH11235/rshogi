@@ -18,6 +18,7 @@ use crate::types::{Color, PieceType, Square};
 use super::accumulator::{DirtyPiece, IndexList};
 use super::bona_piece::BonaPiece;
 use super::bona_piece_halfka_hm::is_hm_mirror;
+use super::threat_exclusion;
 
 use std::sync::LazyLock;
 
@@ -25,8 +26,12 @@ use std::sync::LazyLock;
 // 定数
 // =============================================================================
 
-/// Threat の総特徴量次元数
-pub const THREAT_DIMENSIONS: usize = 216_720;
+/// Threat の総特徴量次元数 (profile 依存)
+///
+/// Profile 0 (full): 216,720
+/// Profile 1 (exclude-a): 192,640
+/// Profile 2 (exclude-ac): ~173,568
+pub const THREAT_DIMENSIONS: usize = PAIR_DATA.1;
 
 /// ThreatClass の数（King 除外）
 pub const NUM_THREAT_CLASSES: usize = 9;
@@ -116,8 +121,14 @@ const ATTACKS_PER_COLOR: [usize; NUM_THREAT_CLASSES] = [
 /// flat index: as * 162 + ac * 18 + ds * 9 + dc
 const NUM_PAIRS: usize = 2 * NUM_THREAT_CLASSES * 2 * NUM_THREAT_CLASSES; // 324
 
-/// pair_base テーブルを構築
-const fn build_pair_base() -> [usize; NUM_PAIRS] {
+/// 除外された pair の sentinel 値
+const EXCLUDED_PAIR_BASE: usize = usize::MAX;
+
+/// pair_base テーブルと THREAT_DIMENSIONS を構築
+///
+/// 除外された pair は `EXCLUDED_PAIR_BASE` (sentinel) が格納され、
+/// 累積和からスキップされる。戻り値の .1 が THREAT_DIMENSIONS。
+const fn build_pair_base() -> ([usize; NUM_PAIRS], usize) {
     let mut table = [0usize; NUM_PAIRS];
     let mut cumulative = 0usize;
     let mut attacker_side = 0usize;
@@ -129,8 +140,12 @@ const fn build_pair_base() -> [usize; NUM_PAIRS] {
                 let mut dc = 0usize;
                 while dc < NUM_THREAT_CLASSES {
                     let idx = attacker_side * 162 + ac * 18 + ds * 9 + dc;
-                    table[idx] = cumulative;
-                    cumulative += ATTACKS_PER_COLOR[ac];
+                    if threat_exclusion::is_excluded(attacker_side, ac, ds, dc) {
+                        table[idx] = EXCLUDED_PAIR_BASE;
+                    } else {
+                        table[idx] = cumulative;
+                        cumulative += ATTACKS_PER_COLOR[ac];
+                    }
                     dc += 1;
                 }
                 ds += 1;
@@ -139,21 +154,29 @@ const fn build_pair_base() -> [usize; NUM_PAIRS] {
         }
         attacker_side += 1;
     }
-    table
+    (table, cumulative)
 }
 
-static PAIR_BASE: [usize; NUM_PAIRS] = build_pair_base();
+/// pair_base テーブルと THREAT_DIMENSIONS (compile-time 計算)
+const PAIR_DATA: ([usize; NUM_PAIRS], usize) = build_pair_base();
 
-/// pair_base を取得
+static PAIR_BASE: [usize; NUM_PAIRS] = PAIR_DATA.0;
+
+/// pair_base を取得。除外された pair は None を返す。
 #[inline]
 fn pair_base(
     attacker_side: usize,
     ac: ThreatClass,
     attacked_side: usize,
     dc: ThreatClass,
-) -> usize {
+) -> Option<usize> {
     let idx = attacker_side * 162 + (ac as usize) * 18 + attacked_side * 9 + dc as usize;
-    PAIR_BASE[idx]
+    let base = PAIR_BASE[idx];
+    if base == EXCLUDED_PAIR_BASE {
+        None
+    } else {
+        Some(base)
+    }
 }
 
 // =============================================================================
@@ -343,6 +366,8 @@ static ATTACK_ORDER_TABLE: LazyLock<AttackOrderTable> = LazyLock::new(AttackOrde
 
 /// Threat index を計算する（Stockfish 準拠: perspective 基準 + 色別 LUT）
 ///
+/// 除外された pair の場合は `None` を返す。
+///
 /// # 引数
 /// - `attacker_side`: 0 = perspective side (friend), 1 = opposite side (enemy)
 /// - `attacker_class`: 攻撃駒の ThreatClass
@@ -362,8 +387,8 @@ fn threat_index(
     from_sq_n: Square,
     to_sq_n: Square,
     from_offset_table: &FromOffsetTable,
-) -> usize {
-    let base = pair_base(attacker_side, attacker_class, attacked_side, attacked_class);
+) -> Option<usize> {
+    let base = pair_base(attacker_side, attacker_class, attacked_side, attacked_class)?;
     let pattern = attack_pattern_id(attacker_class, oriented_color);
     let from_off = from_offset_table.get(pattern, from_sq_n);
     let attack_ord = ATTACK_ORDER_TABLE.get(pattern, from_sq_n, to_sq_n);
@@ -374,7 +399,7 @@ fn threat_index(
         to_sq_n.raw(),
         from_sq_n.raw()
     );
-    base + from_off + attack_ord as usize
+    Some(base + from_off + attack_ord as usize)
 }
 
 // =============================================================================
@@ -460,7 +485,7 @@ pub fn append_active_threat_indices(
                     !attacker_color
                 };
 
-                let idx = threat_index(
+                let Some(idx) = threat_index(
                     attacker_side,
                     attacker_class,
                     oriented_color,
@@ -469,7 +494,9 @@ pub fn append_active_threat_indices(
                     from_sq_n,
                     to_sq_n,
                     from_offset_table,
-                );
+                ) else {
+                    continue; // excluded pair
+                };
 
                 debug_assert!(
                     idx < THREAT_DIMENSIONS,
@@ -555,7 +582,7 @@ pub fn for_each_active_threat_index<F: FnMut(usize)>(
                     !attacker_color
                 };
 
-                let idx = threat_index(
+                let Some(idx) = threat_index(
                     attacker_side,
                     attacker_class,
                     oriented_color,
@@ -564,7 +591,9 @@ pub fn for_each_active_threat_index<F: FnMut(usize)>(
                     from_sq_n,
                     to_sq_n,
                     from_offset_table,
-                );
+                ) else {
+                    continue; // excluded pair
+                };
                 debug_assert!(idx < THREAT_DIMENSIONS);
                 f(idx);
             }
@@ -814,7 +843,7 @@ pub fn append_changed_threat_indices(
                     let attacked_side = if t.color == friend_color { 0 } else { 1 };
                     let from_sq_n = normalize_sq(sq_s, perspective, hm);
                     let to_sq_n = normalize_sq(to_sq, perspective, hm);
-                    let idx = threat_index(
+                    if let Some(idx) = threat_index(
                         attacker_side,
                         info.class,
                         oriented_color,
@@ -823,13 +852,14 @@ pub fn append_changed_threat_indices(
                         from_sq_n,
                         to_sq_n,
                         from_offset_table,
-                    );
-                    if before_len >= MAX_INTERMEDIATE_THREATS {
-                        overflow = true;
-                        break;
+                    ) {
+                        if before_len >= MAX_INTERMEDIATE_THREATS {
+                            overflow = true;
+                            break;
+                        }
+                        before_buf[before_len] = idx as u32;
+                        before_len += 1;
                     }
-                    before_buf[before_len] = idx as u32;
-                    before_len += 1;
                 }
             }
         }
@@ -863,7 +893,7 @@ pub fn append_changed_threat_indices(
                         let attacked_side = if target_color == friend_color { 0 } else { 1 };
                         let from_sq_n = normalize_sq(sq_s, perspective, hm);
                         let to_sq_n = normalize_sq(to_sq, perspective, hm);
-                        let idx = threat_index(
+                        if let Some(idx) = threat_index(
                             attacker_side,
                             class,
                             oriented_color,
@@ -872,13 +902,14 @@ pub fn append_changed_threat_indices(
                             from_sq_n,
                             to_sq_n,
                             from_offset_table,
-                        );
-                        if after_len >= MAX_INTERMEDIATE_THREATS {
-                            overflow = true;
-                            break;
+                        ) {
+                            if after_len >= MAX_INTERMEDIATE_THREATS {
+                                overflow = true;
+                                break;
+                            }
+                            after_buf[after_len] = idx as u32;
+                            after_len += 1;
                         }
-                        after_buf[after_len] = idx as u32;
-                        after_len += 1;
                     }
                 }
             }
@@ -1010,10 +1041,62 @@ mod tests {
 
     #[test]
     fn test_pair_base_dimensions() {
-        // 最後の pair の末尾が THREAT_DIMENSIONS と一致
-        let last_idx = 162 + 8 * 18 + 9 + 8; // as=1, ac=Dragon, ds=1, dc=Dragon
-        let last_base = PAIR_BASE[last_idx];
-        assert_eq!(last_base + ATTACKS_PER_COLOR[ThreatClass::Dragon as usize], THREAT_DIMENSIONS);
+        // 最後の non-excluded pair の base + attacks_per_color == THREAT_DIMENSIONS
+        let mut last_base = 0usize;
+        let mut last_ac = 0usize;
+        for (i, &base) in PAIR_BASE.iter().enumerate() {
+            if base != EXCLUDED_PAIR_BASE && base >= last_base {
+                last_base = base;
+                // ac は flat index の中間桁: idx = as*162 + ac*18 + ds*9 + dc
+                last_ac = (i % 162) / 18;
+            }
+        }
+        assert_eq!(
+            last_base + ATTACKS_PER_COLOR[last_ac],
+            THREAT_DIMENSIONS,
+            "last pair base({last_base}) + attacks({}) != THREAT_DIMENSIONS({THREAT_DIMENSIONS})",
+            ATTACKS_PER_COLOR[last_ac]
+        );
+    }
+
+    #[test]
+    fn test_threat_dimensions_profile() {
+        // Profile ごとの THREAT_DIMENSIONS が仕様と一致することを確認
+        #[cfg(not(any(
+            feature = "threat-profile-exclude-a",
+            feature = "threat-profile-exclude-ac",
+            feature = "threat-profile-exclude-acb-conservative",
+            feature = "threat-profile-exclude-acb-aggressive",
+        )))]
+        assert_eq!(THREAT_DIMENSIONS, 216_720, "profile 0 (full)");
+
+        #[cfg(feature = "threat-profile-exclude-a")]
+        assert_eq!(THREAT_DIMENSIONS, 192_640, "profile 1 (exclude-a)");
+
+        #[cfg(feature = "threat-profile-exclude-ac")]
+        assert_eq!(THREAT_DIMENSIONS, 173_568, "profile 2 (exclude-ac)");
+    }
+
+    #[test]
+    fn test_excluded_pairs_sentinel() {
+        // 除外された pair は EXCLUDED_PAIR_BASE sentinel を持つ
+        for (i, &base) in PAIR_BASE.iter().enumerate() {
+            let as_ = i / 162;
+            let ac = (i % 162) / 18;
+            let ds = (i % 18) / 9;
+            let dc = i % 9;
+            if threat_exclusion::is_excluded(as_, ac, ds, dc) {
+                assert_eq!(
+                    base, EXCLUDED_PAIR_BASE,
+                    "pair ({as_},{ac},{ds},{dc}) should be excluded"
+                );
+            } else {
+                assert_ne!(
+                    base, EXCLUDED_PAIR_BASE,
+                    "pair ({as_},{ac},{ds},{dc}) should not be excluded"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1125,8 +1208,10 @@ mod tests {
     #[test]
     fn test_threat_index_range() {
         let from_offset_table = FromOffsetTable::new();
-        // 全クラスの全マスの全攻撃先について index が範囲内であることを確認
+        // 全クラスの全マスの全攻撃先について、non-excluded pair の index が範囲内であることを確認
         // 先手基準 (oriented_color=Black) と後手基準 (oriented_color=White) の両方をテスト
+        let mut non_excluded_count = 0u64;
+        let mut excluded_count = 0u64;
         for &class in &ALL_THREAT_CLASSES {
             for &oriented_color in &[Color::Black, Color::White] {
                 for sq_raw in 0..81u8 {
@@ -1148,18 +1233,34 @@ mod tests {
                                         to,
                                         &from_offset_table,
                                     );
-                                    assert!(
-                                        idx < THREAT_DIMENSIONS,
-                                        "index {idx} out of range for class={class:?} color={oriented_color:?} sq={} to={}",
-                                        sq.raw(),
-                                        to.raw()
-                                    );
+                                    if let Some(idx) = idx {
+                                        assert!(
+                                            idx < THREAT_DIMENSIONS,
+                                            "index {idx} out of range for class={class:?} color={oriented_color:?} sq={} to={}",
+                                            sq.raw(),
+                                            to.raw()
+                                        );
+                                        non_excluded_count += 1;
+                                    } else {
+                                        excluded_count += 1;
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
+        }
+        assert!(non_excluded_count > 0, "should have some non-excluded pairs");
+        // Profile 0 では除外なし、他の profile では除外あり
+        if threat_exclusion::THREAT_PROFILE_ID == 0 {
+            assert_eq!(excluded_count, 0);
+        } else {
+            assert!(
+                excluded_count > 0,
+                "profile {} should have excluded pairs",
+                threat_exclusion::THREAT_PROFILE_ID
+            );
         }
     }
 
@@ -1193,8 +1294,15 @@ mod tests {
     }
 
     /// Canonical test vector: 初期局面の sorted threat index を固定値と比較
-    /// bullet-shogi 側のテストと一致することを確認するためのテスト
+    /// bullet-shogi 側のテストと一致することを確認するためのテスト。
+    /// Profile 0 (full) のみ有効（他の profile では index が変わる）。
     #[test]
+    #[cfg(not(any(
+        feature = "threat-profile-exclude-a",
+        feature = "threat-profile-exclude-ac",
+        feature = "threat-profile-exclude-acb-conservative",
+        feature = "threat-profile-exclude-acb-aggressive",
+    )))]
     fn test_canonical_startpos_threat_indices() {
         let mut pos = Position::new();
         pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")

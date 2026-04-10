@@ -212,6 +212,35 @@ impl<const L1: usize> NetworkLayerStacks<L1> {
         {
             let has_threat = arch_str.contains("Threat=");
             if has_threat {
+                // ThreatProfile= が arch_str にあれば profile id を読み込み検証
+                // なければ旧モデル (v91 以前): profile 0 と見なす
+                let has_profile_field = arch_str.contains("ThreatProfile=");
+                if has_profile_field {
+                    reader.read_exact(&mut buf4)?;
+                    let model_profile_id = u32::from_le_bytes(buf4);
+                    let engine_profile_id = super::threat_exclusion::THREAT_PROFILE_ID;
+                    if model_profile_id != engine_profile_id {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "Threat profile mismatch: model={model_profile_id}, engine={engine_profile_id}"
+                            ),
+                        ));
+                    }
+                } else {
+                    // 旧モデル: profile id フィールドなし → profile 0 と見なす
+                    let engine_profile_id = super::threat_exclusion::THREAT_PROFILE_ID;
+                    if engine_profile_id != 0 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "Old model (no ThreatProfile) requires engine profile 0, \
+                                 but engine has profile {engine_profile_id}. \
+                                 Use a model trained with the matching exclusion profile."
+                            ),
+                        ));
+                    }
+                }
                 feature_transformer.read_threat_weights(reader)?;
             }
         }
