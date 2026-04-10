@@ -375,6 +375,11 @@ fn main() -> Result<()> {
                 "AobaZero ONNX direct inference (batch={}, gpu={})",
                 cli.onnx_batch_size, cli.onnx_gpu_id
             )
+        } else if use_dlshogi_onnx {
+            format!(
+                "dlshogi ONNX direct inference (batch={}, gpu={})",
+                cli.onnx_batch_size, cli.onnx_gpu_id
+            )
         } else if use_engine {
             format!("external USI engine (nodes={}, threads={})", cli.engine_nodes, engine_threads)
         } else if let Some(depth) = cli.search_depth {
@@ -1610,11 +1615,32 @@ where
 
     let mut session = if gpu_id >= 0 {
         eprintln!("Using CUDA GPU {gpu_id}");
+
+        // CUDA EP が ORT ライブラリに含まれているか事前チェック
+        use ort::ep::ExecutionProvider;
+        let cuda_ep = ort::execution_providers::CUDAExecutionProvider::default();
+        match cuda_ep.is_available() {
+            Ok(true) => eprintln!("CUDA execution provider: available"),
+            Ok(false) => {
+                eprintln!("WARNING: CUDAExecutionProvider is NOT available in the loaded ONNX Runtime library.");
+                eprintln!("  The library may be a CPU-only build.");
+                eprintln!("  Check ORT_DYLIB_PATH points to a GPU-enabled onnxruntime.");
+                eprintln!("  Falling back to CPU inference (this will be extremely slow).");
+            }
+            Err(e) => {
+                eprintln!("WARNING: Failed to check CUDA EP availability: {e}");
+            }
+        }
+
+        // error_on_failure() により CUDA EP 登録失敗時はエラーを返す（サイレント CPU フォールバック防止）
+        let ep = ort::execution_providers::CUDAExecutionProvider::default()
+            .with_device_id(gpu_id)
+            .build()
+            .error_on_failure();
+
         builder
-            .with_execution_providers([ort::execution_providers::CUDAExecutionProvider::default()
-                .with_device_id(gpu_id)
-                .build()])
-            .map_err(|e| anyhow::anyhow!("ORT builder error: {e}"))?
+            .with_execution_providers([ep])
+            .map_err(|e| anyhow::anyhow!("ORT builder error (CUDA EP registration failed — is onnxruntime-gpu installed?): {e}"))?
             .commit_from_file(onnx_path)
             .map_err(onnx_ort_err)?
     } else {
