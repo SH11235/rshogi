@@ -1821,6 +1821,15 @@ where
 
         // IoBinding で推論（Python の run_with_iobinding に対応）
         // session.run() より ORT 内部のメモリ管理が効率的
+        //
+        // 最適化の検証ログ (PR #451):
+        // - create_binding() のループ外化（再利用）は逆効果（4.6〜36% 悪化）。
+        //   rebind 時に ORT 内部で前回バインドのクリーンアップコストが発生するため、
+        //   毎回新規作成の方が速い。
+        // - output_policy のバインド省略も逆効果（10% 悪化）。
+        //   ORT が未バインド出力の処理にオーバーヘッドを生じる。
+        // - ボトルネックは cudaMemcpyAsync（CPU→GPU 転送）で全体の 96.1%（nsys 計測）。
+        //   転送量削減（FP16 化等）以外での大幅改善は困難。
         let shape1: [usize; 4] = [actual_batch, input1_channels, 9, 9];
         let input1 = TensorRef::<f32>::from_array_view((shape1, &f1_buf[..actual_batch * f1_size]))
             .map_err(onnx_ort_err)?;
