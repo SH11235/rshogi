@@ -286,6 +286,9 @@ fn main() -> Result<()> {
             "--dlshogi-onnx-model is mutually exclusive with --engine, --use-qsearch, --search-depth"
         );
     }
+    if cli.onnx_tensorrt && cli.onnx_gpu_id < 0 {
+        anyhow::bail!("--onnx-tensorrt requires a GPU (--onnx-gpu-id >= 0)");
+    }
     if use_engine && (cli.use_qsearch || cli.search_depth.is_some()) {
         anyhow::bail!("--engine is mutually exclusive with --use-qsearch and --search-depth");
     }
@@ -378,25 +381,16 @@ fn main() -> Result<()> {
     // 処理設定の表示
     eprintln!(
         "Mode: {}",
-        if use_onnx {
+        if use_onnx || use_dlshogi_onnx {
             let ep = if cli.onnx_tensorrt {
                 "TensorRT+FP16"
             } else {
                 "CUDA"
             };
+            let model = if use_onnx { "AobaZero" } else { "dlshogi" };
             format!(
-                "AobaZero ONNX direct inference (batch={}, gpu={}, ep={})",
-                cli.onnx_batch_size, cli.onnx_gpu_id, ep
-            )
-        } else if use_dlshogi_onnx {
-            let ep = if cli.onnx_tensorrt {
-                "TensorRT+FP16"
-            } else {
-                "CUDA"
-            };
-            format!(
-                "dlshogi ONNX direct inference (batch={}, gpu={}, ep={})",
-                cli.onnx_batch_size, cli.onnx_gpu_id, ep
+                "{model} ONNX direct inference (batch={}, gpu={}, ep={ep})",
+                cli.onnx_batch_size, cli.onnx_gpu_id
             )
         } else if use_engine {
             format!("external USI engine (nodes={}, threads={})", cli.engine_nodes, engine_threads)
@@ -1677,11 +1671,18 @@ where
             let trt_ep = ort::execution_providers::TensorRTExecutionProvider::default()
                 .with_device_id(gpu_id)
                 .with_fp16(true)
-                .with_engine_cache(true);
+                .with_engine_cache(tensorrt_cache.is_some());
             let trt_ep = if let Some(cache_path) = tensorrt_cache {
+                let cache_str = cache_path.to_str().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "TensorRT cache path contains non-UTF-8 characters: {}",
+                        cache_path.display()
+                    )
+                })?;
                 eprintln!("TensorRT engine cache: {}", cache_path.display());
-                trt_ep.with_engine_cache_path(cache_path.to_string_lossy())
+                trt_ep.with_engine_cache_path(cache_str)
             } else {
+                eprintln!("TensorRT engine cache: disabled (use --onnx-tensorrt-cache to enable)");
                 trt_ep
             };
 
