@@ -998,8 +998,8 @@ fn lookup_piece_before(
     pos: &Position,
 ) -> Option<PieceInfoBefore> {
     // old_entries に sq がある → before 状態の駒
-    for i in 0..old_count {
-        if let Some(ref e) = old_entries[i]
+    for entry in old_entries.iter().take(old_count) {
+        if let Some(e) = entry
             && e.sq == sq
         {
             return Some(PieceInfoBefore {
@@ -1010,8 +1010,8 @@ fn lookup_piece_before(
         }
     }
     // new_entries に sq がある → before 状態では空
-    for i in 0..new_count {
-        if let Some(ref e) = new_entries[i]
+    for entry in new_entries.iter().take(new_count) {
+        if let Some(e) = entry
             && e.sq == sq
         {
             return None;

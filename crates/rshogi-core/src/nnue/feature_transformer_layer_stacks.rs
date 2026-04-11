@@ -287,16 +287,16 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                 // 行内プリフェッチ: 後半の cache lines を先読み
                 // L1 bytes = L1/64 cache lines (64B), 先頭は触れた時点で fetch される
                 if L1 > 512 {
-                    _mm_prefetch(w_ptr.add(512) as *const i8, _MM_HINT_T0);
+                    _mm_prefetch(w_ptr.add(512), _MM_HINT_T0);
                 }
                 if L1 > 768 {
-                    _mm_prefetch(w_ptr.add(768) as *const i8, _MM_HINT_T0);
+                    _mm_prefetch(w_ptr.add(768), _MM_HINT_T0);
                 }
                 if L1 > 1024 {
-                    _mm_prefetch(w_ptr.add(1024) as *const i8, _MM_HINT_T0);
+                    _mm_prefetch(w_ptr.add(1024), _MM_HINT_T0);
                 }
                 if L1 > 1280 {
-                    _mm_prefetch(w_ptr.add(1280) as *const i8, _MM_HINT_T0);
+                    _mm_prefetch(w_ptr.add(1280), _MM_HINT_T0);
                 }
 
                 for i in 0..(L1 / 16) {
@@ -332,16 +332,16 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                 // 行内プリフェッチ
                 let w_ptr = weights.as_ptr();
                 if L1 > 512 {
-                    _mm_prefetch(w_ptr.add(512) as *const i8, _MM_HINT_T0);
+                    _mm_prefetch(w_ptr.add(512), _MM_HINT_T0);
                 }
                 if L1 > 768 {
-                    _mm_prefetch(w_ptr.add(768) as *const i8, _MM_HINT_T0);
+                    _mm_prefetch(w_ptr.add(768), _MM_HINT_T0);
                 }
                 if L1 > 1024 {
-                    _mm_prefetch(w_ptr.add(1024) as *const i8, _MM_HINT_T0);
+                    _mm_prefetch(w_ptr.add(1024), _MM_HINT_T0);
                 }
                 if L1 > 1280 {
-                    _mm_prefetch(w_ptr.add(1280) as *const i8, _MM_HINT_T0);
+                    _mm_prefetch(w_ptr.add(1280), _MM_HINT_T0);
                 }
                 let acc_ptr = accumulation.as_mut_ptr();
                 let w_ptr = weights.as_ptr();
