@@ -25,12 +25,112 @@ user-invocable: true
 - 並列数: 20
 - NNUE: エンジンごとに `--engine-usi-option` で個別指定
 
+## ビルドの注意
+
+### Build profile
+
+NPS 比較を含む評価では、**全エンジンを同一の build profile でビルドすること**。
+
+- `--release` (release profile): `lto=thin`, `codegen-units=4`, `overflow-checks=true`
+- `--profile production` (production profile): `lto=fat`, `codegen-units=1`, `overflow-checks=false`
+
+production は release より約 1.5% 低い instruction/node を達成する。異なる profile のバイナリを比較すると、コード変更に起因しない NPS 差が発生し、評価結果にバイアスが生じる。
+
+**`/tmp/` に保存された過去のバイナリを基準に使う場合は、どの profile でビルドされたかを必ず確認すること。** 不明なら再ビルドして揃える。
+
+### Cargo feature（NNUE モデル別）
+
+各モデルに対して**必要十分な feature を指定**してビルドすること。feature が不足するとモデル読み込み失敗、過剰だと不要なコードパスや accumulator フィールドが残り NPS にバイアスが生じる。
+
+**モデル → feature 対応表**:
+
+feature は以下の4カテゴリの組み合わせで構成する:
+
+1. **dispatch 除去**: `layerstack-only`（LayerStack モデルでは常に指定）
+2. **L1 サイズ**: `layerstacks-1536` / `layerstacks-768` / `layerstacks-512`（**必ず1つだけ**。複数同時有効は cycles +5.5% 退行）
+3. **アーキテクチャ拡張**: `nnue-psqt`, `nnue-threat`（モデルに応じて）
+4. **最適化**: `nnue-progress-diff`（L1=1536 で有効。L1=768 では cache pressure 増加により cycles +2〜6% 退行するため指定しない）
+
+| モデル種別 | 例 | 必須 feature |
+|---|---|---|
+| LayerStack 1536 | v87 | `layerstack-only,layerstacks-1536,nnue-progress-diff` |
+| LayerStack 1536 + PSQT | v88 | `layerstack-only,layerstacks-1536,nnue-psqt,nnue-progress-diff` |
+| LayerStack 1536 + Threat | v89, v91-1536 | `layerstack-only,layerstacks-1536,nnue-threat` |
+| LayerStack 1536 + PSQT + Threat | v90 | `layerstack-only,layerstacks-1536,nnue-psqt,nnue-threat` |
+| LayerStack 768 + Threat | v91-768 系 | `layerstack-only,layerstacks-768,nnue-threat` |
+| LayerStack 512 | | `layerstack-only,layerstacks-512` |
+| HalfKA_HM | danbo-v20 等 | (feature 指定なし、デフォルトで可) |
+
+**注意**:
+- `layerstacks-1536` はデフォルト feature に含まれる。768/512 モデル用にビルドする際は
+  `--no-default-features` で外す。その場合 `search-no-pass-rules`（デフォルトに含まれる）も
+  明示的に再指定すること。
+- `nnue-progress-diff` は L1=1536 限定の最適化。L1=768 では `StackEntryLayerStacks` の cache pressure 増加で退行する。
+
+```bash
+# 768 + Threat モデル用の例
+cargo build --profile production -p rshogi-usi \
+  --no-default-features \
+  --features search-no-pass-rules,layerstack-only,layerstacks-768,nnue-threat
+```
+
+**`layerstack-only` の効果**: HalfKP/HalfKA/HalfKA_HM のコードを除去し、`evaluate_dispatch` を直接呼び出しにバイパスする。LayerStack モデル同士の比較では常に指定すべき。
+
+**ビルド例**:
+```bash
+# v87 用（LayerStack 1536, PSQT なし）
+cargo build --profile production -p rshogi-usi --features layerstack-only
+cp target/production/rshogi-usi target/production/rshogi-usi-ls1536
+
+# v88 用（LayerStack 1536 + PSQT）
+cargo build --profile production -p rshogi-usi --features layerstack-only,nnue-psqt
+cp target/production/rshogi-usi target/production/rshogi-usi-ls1536-psqt
+```
+
+**重要**: `cargo build` は同一 profile で feature が異なっても同じ出力パスに書き出す。異なる feature のバイナリが必要な場合は、ビルド直後に別名にコピーすること。2つ目のビルドで1つ目が上書きされる。
+
 ## 実行手順
 
-### 1. バイナリ存在確認
+### 1. ビルド条件の決定とバイナリ準備
 
-各エンジンのバイナリパスが存在するか確認する。
-存在しないバイナリがあればユーザーに報告し、ビルド方法を提案する。
+#### 1a. 各エンジンの必要 feature を決定
+
+NNUE モデル比較の場合、モデルごとに必要な Cargo feature が異なる。
+上記「モデル → feature 対応表」を参照し、各エンジンに必要十分な feature セットを決定する。
+
+**判断基準**: モデルのアーキテクチャ（LayerStack サイズ、PSQT 有無、Threat 有無）から feature を特定する。不明な場合はモデルの実験ドキュメント（`bullet-shogi/docs/experiments/`）を参照。
+
+#### 1b. ビルドと退避
+
+feature が異なるバイナリが複数必要な場合、**ビルド → 即座に別名コピー** を繰り返す。
+`cargo build` は同一 profile・同一 crate で feature が異なっても同じ出力パスに書き出すため、
+コピーしないと次のビルドで上書きされる。
+
+```bash
+# 例: v87 用と v88 用を順番にビルド
+cargo build --profile production -p rshogi-usi --features layerstack-only,layerstacks-1536,nnue-progress-diff
+cp target/production/rshogi-usi target/production/rshogi-usi-ls1536
+
+cargo build --profile production -p rshogi-usi --features layerstack-only,layerstacks-1536,nnue-psqt,nnue-progress-diff
+cp target/production/rshogi-usi target/production/rshogi-usi-ls1536-psqt
+```
+
+#### 1c. ビルド後の検証（必須）
+
+1. **ビルドコマンドの feature 確認**: 各バイナリが対応表どおりの feature でビルドされたことを、ビルドログ（`cargo build` の出力）で確認する。feature が不足していればモデル読み込み時にエラーになるが、**過剰な feature は readyok を通過してしまい検出できない**。ビルドコマンド自体が正しいことを確認するのが唯一の手段。
+
+2. **モデル読み込み確認**: 各バイナリに対象モデルを読み込ませて `readyok` を確認する（feature 不足の検出）。
+   ```bash
+   echo -e "usi\nsetoption name EvalFile value {MODEL_PATH}\n{OTHER_OPTIONS}\nisready\nquit" \
+     | timeout 10 {BINARY_PATH} 2>&1 | grep -E 'readyok|Error|panic'
+   ```
+
+#### 1d. 既存バイナリの利用
+
+事前ビルド済みバイナリを使う場合は、以下を確認する:
+- どの profile (`release` / `production`) でビルドされたか
+- どの feature でビルドされたか
+- 不明なら再ビルドして揃える
 
 ### 2. 出力ディレクトリの作成
 
