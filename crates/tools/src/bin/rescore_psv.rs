@@ -1744,6 +1744,11 @@ where
     let mut clipped_count: u64 = 0;
     let mut total_processed: u64 = 0;
 
+    // MemoryInfo はバッチサイズに依存しないのでループ外で1回だけ作成
+    let output_mem =
+        MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::CPUOutput)
+            .map_err(onnx_ort_err)?;
+
     loop {
         // バッチ分のレコードをストリーム読み込み
         let mut batch_records: Vec<(PackedSfenValue, String)> = Vec::with_capacity(batch_size);
@@ -1827,9 +1832,8 @@ where
         let mut binding = session.create_binding().map_err(onnx_ort_err)?;
         binding.bind_input("input1", &input1).map_err(onnx_ort_err)?;
         binding.bind_input("input2", &input2).map_err(onnx_ort_err)?;
-        let output_mem =
-            MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::CPUOutput)
-                .map_err(onnx_ort_err)?;
+        // output_policy: スコアリングには不使用だが、省略すると ORT 内部処理で
+        // オーバーヘッドが増加するため全出力をバインドする
         binding
             .bind_output_to_device("output_policy", &output_mem)
             .map_err(onnx_ort_err)?;
