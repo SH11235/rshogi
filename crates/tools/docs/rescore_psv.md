@@ -1,0 +1,149 @@
+# rescore_psv — PSV 評価値の再スコアリング
+
+PSV（PackedSfenValue）ファイルの評価値を ONNX モデルで再スコアリングするツール。
+GPU 推論による高速処理に対応。
+
+## 前提条件
+
+- NVIDIA GPU + CUDA Toolkit（12.x 以上）
+- ONNX Runtime 1.24.2 GPU 版
+- cuDNN 9
+
+## セットアップ
+
+### 1. ONNX Runtime GPU 版
+
+[ONNX Runtime Releases](https://github.com/microsoft/onnxruntime/releases) から
+`onnxruntime-linux-x64-gpu-1.24.2.tgz`（Linux）または
+`onnxruntime-win-x64-gpu-1.24.2.zip`（Windows）をダウンロード。
+
+```bash
+wget https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-gpu-1.24.2.tgz
+tar xzf onnxruntime-linux-x64-gpu-1.24.2.tgz -C ~/lib/
+```
+
+> ort 2.0.0-rc.12（Release Candidate）は ONNX Runtime 1.24.2 向け。バージョンを合わせること。
+> ort の安定版リリース後はバージョン対応表を要確認。
+
+### 2. cuDNN 9
+
+ONNX Runtime GPU 版は cuDNN 9 に依存する。
+
+```bash
+wget https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/cudnn-linux-x86_64-9.8.0.87_cuda12-archive.tar.xz
+tar xf cudnn-linux-x86_64-9.8.0.87_cuda12-archive.tar.xz -C ~/lib/
+```
+
+### 3. 環境変数
+
+以下を `.bashrc` 等に追加する。
+
+```bash
+export ORT_DYLIB_PATH=~/lib/onnxruntime-linux-x64-gpu-1.24.2/lib/libonnxruntime.so
+export LD_LIBRARY_PATH=~/lib/cudnn-linux-x86_64-9.8.0.87_cuda12-archive/lib:~/lib/onnxruntime-linux-x64-gpu-1.24.2/lib:/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+```
+
+| 環境変数 | 役割 |
+|---|---|
+| `ORT_DYLIB_PATH` | ONNX Runtime ライブラリ本体のパス（必須） |
+| `LD_LIBRARY_PATH` | cuDNN・CUDA 等の依存ライブラリの検索パス |
+
+**Windows の場合**: `LD_LIBRARY_PATH` の代わりにシステムの `PATH` を使う。
+
+```powershell
+$env:ORT_DYLIB_PATH = "C:\path\to\onnxruntime-win-x64-gpu-1.24.2\lib\onnxruntime.dll"
+$env:PATH = "C:\path\to\onnxruntime-win-x64-gpu-1.24.2\lib;C:\path\to\cudnn\bin;" + $env:PATH
+```
+
+## 使い方
+
+### ビルド
+
+モデル形式に応じた feature フラグを指定する。
+
+| feature | 対象モデル |
+|---|---|
+| `aobazero-onnx` | AobaZero 系 ONNX モデル |
+| `dlshogi-onnx` | 標準 dlshogi 系 ONNX モデル（DL水匠等） |
+
+```bash
+cargo build --release -p tools --features aobazero-onnx --bin rescore_psv
+# または
+cargo build --release -p tools --features dlshogi-onnx --bin rescore_psv
+```
+
+### 実行例
+
+```bash
+# AobaZero ONNX モデル（GPU）
+cargo run --release -p tools --features aobazero-onnx --bin rescore_psv -- \
+  --input data/train.psv \
+  --output-dir data/rescored/ \
+  --onnx-model model.onnx \
+  --onnx-batch-size 1024 \
+  --onnx-gpu-id 0 \
+  --onnx-eval-scale 600 \
+  --threads 12
+
+# 標準 dlshogi ONNX モデル（GPU）
+cargo run --release -p tools --features dlshogi-onnx --bin rescore_psv -- \
+  --input data/train.psv \
+  --output-dir data/rescored/ \
+  --dlshogi-onnx-model DL_suisho.onnx \
+  --onnx-batch-size 1024 \
+  --onnx-gpu-id 0 \
+  --onnx-eval-scale 600 \
+  --threads 12
+
+# CPU 推論
+cargo run --release -p tools --features aobazero-onnx --bin rescore_psv -- \
+  --input data/train.psv \
+  --output-dir data/rescored/ \
+  --onnx-model model.onnx \
+  --onnx-gpu-id=-1 \
+  --threads 12
+```
+
+### 主要オプション
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--input` | （必須） | 入力 PSV ファイル（カンマ区切りで複数可） |
+| `--output-dir` | （必須） | 出力ディレクトリ |
+| `--onnx-model` | — | AobaZero ONNX モデルパス（`aobazero-onnx` feature 時） |
+| `--dlshogi-onnx-model` | — | dlshogi ONNX モデルパス（`dlshogi-onnx` feature 時） |
+| `--onnx-batch-size` | 256 | 推論バッチサイズ |
+| `--onnx-gpu-id` | 0 | GPU ID（`-1` で CPU 推論） |
+| `--onnx-eval-scale` | 600.0 | 勝率→cp 変換スケール |
+| `--threads` | 1 | 処理スレッド数 |
+
+## 動作確認
+
+正常時の出力:
+
+```
+ORT_DYLIB_PATH: /home/user/lib/.../libonnxruntime.so
+Loading AobaZero ONNX model: model.onnx
+Using CUDA GPU 0
+CUDA execution provider: available
+AobaZero ONNX model loaded. Batch size: 1024
+[00:00:05] ████████████████████ 6693/6693 (1234 rec/s) Processing...
+```
+
+## トラブルシューティング
+
+| エラーメッセージ | 原因 | 対処 |
+|---|---|---|
+| `ORT_DYLIB_PATH environment variable is not set` | 環境変数未設定 | `ORT_DYLIB_PATH` に `libonnxruntime.so` のパスを設定 |
+| `ORT_DYLIB_PATH is set to '...' but the file does not exist` | パスが間違っている | ファイルパスを確認 |
+| `CUDAExecutionProvider is NOT available` | CPU 版ランタイムを使っている | GPU 版ランタイムをダウンロードして `ORT_DYLIB_PATH` を修正 |
+| `libcudnn.so.9: cannot open shared object file` | cuDNN が見つからない | cuDNN 9 をインストールし `LD_LIBRARY_PATH` に追加 |
+| `CUDA EP registration failed` | CUDA/cuDNN のバージョン不一致等 | CUDA Toolkit・cuDNN のバージョンを確認 |
+
+## 技術的背景
+
+本ツールは ONNX Runtime をバイナリに同梱せず、実行時に外部ライブラリとして読み込む。
+このため `ORT_DYLIB_PATH` でライブラリの場所を明示的に指定する必要がある。
+
+- `ORT_DYLIB_PATH` 未設定時はエラーを返す（未設定のまま実行するとハングするため）
+- GPU モードでは起動時に CUDA が利用可能かチェックし、CPU への暗黙フォールバックを防止する
