@@ -1556,15 +1556,7 @@ fn onnx_ort_err(e: ort::Error) -> anyhow::Error {
     anyhow::anyhow!("ONNX Runtime error: {e}")
 }
 
-/// GPU パイプラインに送信するバッチデータ
-#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
-struct OnnxBatch {
-    f1_data: Vec<f32>,
-    f2_data: Vec<f32>,
-    actual_batch: usize,
-}
-
-/// ストリーミング読み込み + rayon 並列特徴量構築 + GPU パイプライン推論
+/// ストリーミング読み込み + rayon 並列特徴量構築 + ゼロコピー GPU 推論
 ///
 /// AobaZero / 標準 dlshogi の両方で共通のパイプライン処理。
 /// `build_features` クロージャで特徴量構築の差異を吸収する。
@@ -1592,8 +1584,9 @@ where
     F: Fn(&Position, &mut [f32], &mut [f32], &PackedSfenValue) + Send + Sync,
 {
     use ort::ep::ExecutionProvider;
+    use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
     use ort::session::Session;
-    use ort::value::Tensor;
+    use ort::value::TensorRef;
 
     // ORT_DYLIB_PATH 事前検証（load-dynamic feature）
     //
@@ -1702,41 +1695,6 @@ where
     );
     progress.set_message("Processing...");
 
-    // GPU 推論スレッドとのパイプライン (ダブルバッファリング)
-    // バッチ N の GPU 推論中にバッチ N+1 の特徴量構築を並行実行
-    // work チャネル容量 2: メインスレッドが次バッチの特徴量構築を GPU 推論と並行して実行可能に
-    let (tx_work, rx_work) = mpsc::sync_channel::<OnnxBatch>(2);
-    let (tx_result, rx_result) = mpsc::sync_channel::<Result<Vec<f32>>>(1);
-
-    let gpu_handle = thread::spawn(move || -> Session {
-        while let Ok(batch) = rx_work.recv() {
-            let result = (|| -> Result<Vec<f32>> {
-                let shape1: [usize; 4] = [batch.actual_batch, input1_channels, 9, 9];
-                let input1 =
-                    Tensor::<f32>::from_array((shape1, batch.f1_data)).map_err(onnx_ort_err)?;
-
-                let shape2: [usize; 4] = [batch.actual_batch, input2_channels, 9, 9];
-                let input2 =
-                    Tensor::<f32>::from_array((shape2, batch.f2_data)).map_err(onnx_ort_err)?;
-
-                let outputs = session
-                    .run(ort::inputs![
-                        "input1" => input1,
-                        "input2" => input2,
-                    ])
-                    .map_err(onnx_ort_err)?;
-
-                let (_, values) =
-                    outputs["output_value"].try_extract_tensor::<f32>().map_err(onnx_ort_err)?;
-                Ok(values.to_vec())
-            })();
-            if tx_result.send(result).is_err() {
-                break;
-            }
-        }
-        session
-    });
-
     // ストリーミング読み込み + バッチ処理
     let in_file = File::open(input_path)
         .with_context(|| format!("Failed to open {}", input_path.display()))?;
@@ -1786,8 +1744,10 @@ where
     let mut clipped_count: u64 = 0;
     let mut total_processed: u64 = 0;
 
-    let mut prev_batch: Vec<(PackedSfenValue, String)> = Vec::new();
-    let mut gpu_pending = false;
+    // MemoryInfo はバッチサイズに依存しないのでループ外で1回だけ作成
+    let output_mem =
+        MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::CPUOutput)
+            .map_err(onnx_ort_err)?;
 
     loop {
         // バッチ分のレコードをストリーム読み込み
@@ -1832,78 +1792,93 @@ where
         }
 
         let actual_batch = batch_records.len();
-        if actual_batch > 0 {
-            f1_buf[..actual_batch * f1_size].fill(0.0);
-            f2_buf[..actual_batch * f2_size].fill(0.0);
-
-            let batch_errors = AtomicU64::new(0);
-            let f1_slices: Vec<&mut [f32]> =
-                f1_buf[..actual_batch * f1_size].chunks_mut(f1_size).collect();
-            let f2_slices: Vec<&mut [f32]> =
-                f2_buf[..actual_batch * f2_size].chunks_mut(f2_size).collect();
-
-            f1_slices.into_par_iter().zip(f2_slices).zip(batch_records.par_iter()).for_each(
-                |((f1, f2), (psv, sfen))| {
-                    let mut pos = Position::new();
-                    if pos.set_sfen(sfen).is_err() {
-                        batch_errors.fetch_add(1, Ordering::Relaxed);
-                        return;
-                    }
-                    build_features(&pos, f1, f2, psv);
-                },
-            );
-
-            error_count += batch_errors.load(Ordering::Relaxed);
-        }
-
-        // 前回の GPU 結果を受信 + 書き出し
-        if gpu_pending {
-            let values = rx_result
-                .recv()
-                .map_err(|_| anyhow::anyhow!("GPU thread terminated unexpectedly"))??;
-            for (i, (psv, _)) in prev_batch.iter().enumerate() {
-                let winrate = values[i];
-                let clamped = winrate.clamp(0.001, 0.999);
-                let logit = (clamped / (1.0 - clamped)).ln();
-                let raw_score = (logit * eval_scale) as i32;
-                let clipped = raw_score.abs() > score_clip as i32;
-                let new_score = raw_score.clamp(-(score_clip as i32), score_clip as i32) as i16;
-                if clipped {
-                    clipped_count += 1;
-                }
-                let new_psv = PackedSfenValue {
-                    sfen: psv.sfen,
-                    score: new_score,
-                    move16: 0,
-                    game_ply: psv.game_ply,
-                    game_result: psv.game_result,
-                    padding: 0,
-                };
-                writer.write_all(&new_psv.to_bytes())?;
-            }
-            total_processed += prev_batch.len() as u64;
-            progress.inc(prev_batch.len() as u64);
-        }
-
         if actual_batch == 0 {
             break;
         }
 
-        // 現在のバッチを GPU に送信
-        tx_work
-            .send(OnnxBatch {
-                f1_data: f1_buf[..actual_batch * f1_size].to_vec(),
-                f2_data: f2_buf[..actual_batch * f2_size].to_vec(),
-                actual_batch,
-            })
-            .map_err(|_| anyhow::anyhow!("GPU thread terminated unexpectedly"))?;
-        gpu_pending = true;
-        prev_batch = batch_records;
-    }
+        // rayon 並列で特徴量構築
+        f1_buf[..actual_batch * f1_size].fill(0.0);
+        f2_buf[..actual_batch * f2_size].fill(0.0);
 
-    // GPU スレッド終了
-    drop(tx_work);
-    let mut session = gpu_handle.join().map_err(|_| anyhow::anyhow!("GPU thread panicked"))?;
+        let batch_errors = AtomicU64::new(0);
+        let f1_slices: Vec<&mut [f32]> =
+            f1_buf[..actual_batch * f1_size].chunks_mut(f1_size).collect();
+        let f2_slices: Vec<&mut [f32]> =
+            f2_buf[..actual_batch * f2_size].chunks_mut(f2_size).collect();
+
+        f1_slices.into_par_iter().zip(f2_slices).zip(batch_records.par_iter()).for_each(
+            |((f1, f2), (psv, sfen))| {
+                let mut pos = Position::new();
+                if pos.set_sfen(sfen).is_err() {
+                    batch_errors.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                build_features(&pos, f1, f2, psv);
+            },
+        );
+
+        error_count += batch_errors.load(Ordering::Relaxed);
+
+        // IoBinding で推論（Python の run_with_iobinding に対応）
+        // session.run() より ORT 内部のメモリ管理が効率的
+        //
+        // 最適化の検証ログ (PR #451):
+        // - create_binding() のループ外化（再利用）は逆効果（4.6〜36% 悪化）。
+        //   rebind 時に ORT 内部で前回バインドのクリーンアップコストが発生するため、
+        //   毎回新規作成の方が速い。
+        // - output_policy のバインド省略も逆効果（10% 悪化）。
+        //   ORT が未バインド出力の処理にオーバーヘッドを生じる。
+        // - ボトルネックは cudaMemcpyAsync（CPU→GPU 転送）で全体の 96.1%（nsys 計測）。
+        //   転送量削減（FP16 化等）以外での大幅改善は困難。
+        let shape1: [usize; 4] = [actual_batch, input1_channels, 9, 9];
+        let input1 = TensorRef::<f32>::from_array_view((shape1, &f1_buf[..actual_batch * f1_size]))
+            .map_err(onnx_ort_err)?;
+
+        let shape2: [usize; 4] = [actual_batch, input2_channels, 9, 9];
+        let input2 = TensorRef::<f32>::from_array_view((shape2, &f2_buf[..actual_batch * f2_size]))
+            .map_err(onnx_ort_err)?;
+
+        let mut binding = session.create_binding().map_err(onnx_ort_err)?;
+        binding.bind_input("input1", &input1).map_err(onnx_ort_err)?;
+        binding.bind_input("input2", &input2).map_err(onnx_ort_err)?;
+        // output_policy: スコアリングには不使用だが、省略すると ORT 内部処理で
+        // オーバーヘッドが増加するため全出力をバインドする
+        binding
+            .bind_output_to_device("output_policy", &output_mem)
+            .map_err(onnx_ort_err)?;
+        binding
+            .bind_output_to_device("output_value", &output_mem)
+            .map_err(onnx_ort_err)?;
+
+        let outputs = session.run_binding(&binding).map_err(onnx_ort_err)?;
+
+        let (_, values) =
+            outputs["output_value"].try_extract_tensor::<f32>().map_err(onnx_ort_err)?;
+
+        // 結果を書き出し（テンソルから直接読み取り、to_vec() コピーを排除）
+        for (i, (psv, _)) in batch_records.iter().enumerate() {
+            let winrate = values[i];
+            let clamped = winrate.clamp(0.001, 0.999);
+            let logit = (clamped / (1.0 - clamped)).ln();
+            let raw_score = (logit * eval_scale) as i32;
+            let clipped = raw_score.abs() > score_clip as i32;
+            let new_score = raw_score.clamp(-(score_clip as i32), score_clip as i32) as i16;
+            if clipped {
+                clipped_count += 1;
+            }
+            let new_psv = PackedSfenValue {
+                sfen: psv.sfen,
+                score: new_score,
+                move16: 0,
+                game_ply: psv.game_ply,
+                game_result: psv.game_result,
+                padding: 0,
+            };
+            writer.write_all(&new_psv.to_bytes())?;
+        }
+        total_processed += actual_batch as u64;
+        progress.inc(actual_batch as u64);
+    }
 
     if profile_path.is_some() {
         match session.end_profiling() {
