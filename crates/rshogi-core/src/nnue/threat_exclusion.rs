@@ -10,8 +10,14 @@
 //! | 0 | (default) | なし (Baseline) |
 //! | 1 | `threat-profile-same-class` | 同種ペア全除外 |
 //! | 2 | `threat-profile-same-class-major-pawn` | 同種 + 大駒→歩除外 |
-//! | 10 | `threat-profile-cross-side` | cross-side 異種ペアのみ (両方向) |
-//! | 11 | `threat-profile-enemy-only` | enemy→friend 異種ペアのみ |
+//! | 10 | `threat-profile-cross-side` | cross-side 異種ペアのみ |
+//!
+//! ## 制約: profile は STM/NSTM 対称であること
+//!
+//! bullet-shogi の `SparseInputType::map_features` は `f(stm_idx, nstm_idx)` で
+//! STM/NSTM ペアを同時に列挙する設計のため、STM perspective で active な pair は
+//! NSTM perspective でも active である必要がある。
+//! enemy→friend のみ (enemy-only) のような非対称 profile は学習に使えない。
 //!
 //! 仕様: `docs/threat_spec.md` Exclusion profiles セクション
 
@@ -19,8 +25,7 @@
 const _PROFILE_EXCLUSIVITY: () = {
     let count = cfg!(feature = "threat-profile-same-class") as usize
         + cfg!(feature = "threat-profile-same-class-major-pawn") as usize
-        + cfg!(feature = "threat-profile-cross-side") as usize
-        + cfg!(feature = "threat-profile-enemy-only") as usize;
+        + cfg!(feature = "threat-profile-cross-side") as usize;
     assert!(count <= 1, "Multiple threat profiles selected. Choose at most one.");
 };
 
@@ -29,9 +34,7 @@ const _PROFILE_EXCLUSIVITY: () = {
 /// quantised.bin に書き込まれる profile 識別子。
 /// engine と model の profile が一致しなければ読み込みエラー。
 pub const THREAT_PROFILE_ID: u32 = {
-    if cfg!(feature = "threat-profile-enemy-only") {
-        11
-    } else if cfg!(feature = "threat-profile-cross-side") {
+    if cfg!(feature = "threat-profile-cross-side") {
         10
     } else if cfg!(feature = "threat-profile-same-class-major-pawn") {
         2
@@ -56,13 +59,8 @@ pub const THREAT_PROFILE_ID: u32 = {
 /// 0=Pawn, 1=Lance, 2=Knight, 3=Silver, 4=GoldLike,
 /// 5=Bishop, 6=Rook, 7=Horse, 8=Dragon
 pub const fn is_excluded(as_: usize, ac: usize, ds: usize, dc: usize) -> bool {
-    // Enemy-only profile: enemy→friend 異種ペアのみ含める
-    // as_=1 (enemy), ds=0 (friend), ac != dc のみ通す
-    if cfg!(feature = "threat-profile-enemy-only") {
-        return !(as_ == 1 && ds == 0 && ac != dc);
-    }
-
     // Cross-side profile: cross-side 異種ペアのみ含める
+    // same-side (味方→味方, 敵→敵) または同種ペアは全て除外
     if cfg!(feature = "threat-profile-cross-side") {
         return as_ == ds || ac == dc;
     }
@@ -94,7 +92,6 @@ mod tests {
             feature = "threat-profile-same-class",
             feature = "threat-profile-same-class-major-pawn",
             feature = "threat-profile-cross-side",
-            feature = "threat-profile-enemy-only",
         )))]
         assert_eq!(THREAT_PROFILE_ID, 0);
     }
@@ -105,7 +102,6 @@ mod tests {
             feature = "threat-profile-same-class",
             feature = "threat-profile-same-class-major-pawn",
             feature = "threat-profile-cross-side",
-            feature = "threat-profile-enemy-only",
         )))]
         {
             assert!(!is_excluded(0, 0, 0, 0));
@@ -115,30 +111,17 @@ mod tests {
     }
 
     #[test]
-    fn test_enemy_only_profile() {
-        #[cfg(feature = "threat-profile-enemy-only")]
+    fn test_cross_side_profile() {
+        #[cfg(feature = "threat-profile-cross-side")]
         {
-            // enemy→friend 異種: 含める
-            assert!(!is_excluded(1, 2, 0, 5)); // enemy_Knight → friend_Bishop
-            assert!(!is_excluded(1, 0, 0, 5)); // enemy_Pawn → friend_Bishop
-            // friend→enemy: 除外
-            assert!(is_excluded(0, 2, 1, 5)); // friend_Knight → enemy_Bishop
+            // cross-side 異種: 含める
+            assert!(!is_excluded(1, 2, 0, 5)); // enemy→friend 異種
+            assert!(!is_excluded(0, 0, 1, 5)); // friend→enemy 異種
             // same-side: 除外
             assert!(is_excluded(0, 2, 0, 5)); // friend→friend
             assert!(is_excluded(1, 2, 1, 5)); // enemy→enemy
             // same-class (cross-side でも): 除外
             assert!(is_excluded(1, 5, 0, 5)); // enemy_Bishop → friend_Bishop
-        }
-    }
-
-    #[test]
-    fn test_cross_side_profile() {
-        #[cfg(feature = "threat-profile-cross-side")]
-        {
-            assert!(!is_excluded(1, 2, 0, 5)); // enemy→friend 異種
-            assert!(!is_excluded(0, 0, 1, 5)); // friend→enemy 異種
-            assert!(is_excluded(0, 2, 0, 5)); // same-side
-            assert!(is_excluded(1, 5, 0, 5)); // same-class
         }
     }
 
