@@ -22,7 +22,8 @@ wget https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxrunt
 tar xzf onnxruntime-linux-x64-gpu-1.24.2.tgz -C ~/lib/
 ```
 
-> ort 2.0.0-rc.12 は ONNX Runtime 1.24.2 向け。バージョンを合わせること。
+> ort 2.0.0-rc.12（Release Candidate）は ONNX Runtime 1.24.2 向け。バージョンを合わせること。
+> ort の安定版リリース後はバージョン対応表を要確認。
 
 ### 2. cuDNN 9
 
@@ -39,7 +40,7 @@ tar xf cudnn-linux-x86_64-9.8.0.87_cuda12-archive.tar.xz -C ~/lib/
 
 ```bash
 export ORT_DYLIB_PATH=~/lib/onnxruntime-linux-x64-gpu-1.24.2/lib/libonnxruntime.so
-export LD_LIBRARY_PATH=~/lib/cudnn-linux-x86_64-9.8.0.87_cuda12-archive/lib:~/lib/onnxruntime-linux-x64-gpu-1.24.2/lib:/usr/local/cuda-12.9/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+export LD_LIBRARY_PATH=~/lib/cudnn-linux-x86_64-9.8.0.87_cuda12-archive/lib:~/lib/onnxruntime-linux-x64-gpu-1.24.2/lib:/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 ```
 
 | 環境変数 | 役割 |

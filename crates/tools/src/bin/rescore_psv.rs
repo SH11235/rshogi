@@ -1612,9 +1612,10 @@ where
     // 未設定時に ort がシステムパスから探すとハングするため。
     match std::env::var("ORT_DYLIB_PATH") {
         Ok(path) if !path.is_empty() => {
-            if !std::path::Path::new(&path).exists() {
+            if !std::path::Path::new(&path).is_file() {
                 anyhow::bail!(
-                    "ORT_DYLIB_PATH is set to '{path}' but the file does not exist.\n\
+                    "ORT_DYLIB_PATH is set to '{path}' but the file does not exist \
+                     (or is not a regular file).\n\
                      Download ONNX Runtime from:\n  \
                      https://github.com/microsoft/onnxruntime/releases"
                 );
