@@ -18,6 +18,9 @@ user-invocable: true
 ### オプション
 - **checkpoint_dir**: bullet クロス検証用。省略時は quantised.bin の親ディレクトリ
 - **--threat**: Threat モデルの場合に bullet 側 `shogi_layerstack_eval` に渡す
+- **threat-profile**: Threat 次元削減プロファイル。bullet/rshogi 両方のビルドに同一 feature を指定する必要がある
+  - `threat-profile-same-class` (profile 1): 同種ペア全除外 (192,640 dims)
+  - `threat-profile-same-class-major-pawn` (profile 2): 同種 + 大駒→歩除外 (173,568 dims)
 
 ### デフォルト値（変更不要なら省略可）
 - **progress.bin**: `/home/sh11235/development/bullet-shogi/data/progress/nodchip_progress_e1_f1_cuda.bin`
@@ -155,6 +158,41 @@ cargo run --release --example shogi_layerstack_eval -- \
   --progress-coeff data/progress/nodchip_progress_e1_f1_cuda.bin
 ```
 
+### Case E: Threat + 次元削減プロファイル (v93 等)
+
+Threat profile を使うモデルは **bullet/rshogi 両方のビルドで同一 profile feature を指定**する必要がある。
+profile が不一致だと THREAT_DIMENSIONS が異なり、weight 読み込みが破壊的にずれる。
+
+```bash
+# Step 1: rshogi を profile 付きでビルド（初回のみ）
+# ※ verify_nnue_accumulator は tools crate なのでそちらの feature も指定
+cargo build --release -p tools --no-default-features \
+  --features layerstacks-768,nnue-threat,threat-profile-same-class
+cargo run --release --bin verify_nnue_accumulator -- \
+  --nnue-file /home/sh11235/development/bullet-shogi/checkpoints/v93/v93-20/quantised.bin \
+  --ls-progress-coeff /home/sh11235/development/bullet-shogi/data/progress/nodchip_progress_e1_f1_cuda.bin \
+  --moves 100
+
+# Step 2a (bullet): --threat 必須、profile feature でビルド
+cd /home/sh11235/development/bullet-shogi
+cargo run --release --no-default-features --features cpu,threat-profile-same-class \
+  --example shogi_layerstack_eval -- \
+  --checkpoint checkpoints/v93/v93-20 \
+  --pack data/DLSuisho15b_deduped_shuffled.bin \
+  --integer-forward --samples 32 \
+  --bucket-mode progress8kpabs \
+  --progress-coeff data/progress/nodchip_progress_e1_f1_cuda.bin \
+  --threat
+
+# Step 2b (rshogi): diagnostics + profile 付きでビルド
+cargo build --release -p rshogi-usi --no-default-features \
+  --features rshogi-core/layerstack-only,rshogi-core/layerstacks-768,rshogi-core/nnue-threat,rshogi-core/threat-profile-same-class,rshogi-core/search-no-pass-rules,rshogi-usi/layerstack-only,rshogi-usi/nnue-threat,rshogi-usi/threat-profile-same-class,rshogi-usi/diagnostics
+
+# 以降は Case B と同様に eval diag で比較
+```
+
+**⚠️ 重要**: profile 2 (`threat-profile-same-class-major-pawn`) の場合は上記の `threat-profile-same-class` を `threat-profile-same-class-major-pawn` に全て置き換えること。
+
 ---
 
 ## 不一致時のデバッグ
@@ -185,3 +223,4 @@ cargo run --release --example shogi_layerstack_eval -- \
 - `NNUE_ARCHITECTURE` USI オプションは**指定しない**（arch_str から自動検出させる）
 - bullet 側 `--threat` は Threat モデル時に必須（`get_active_features` の入力型分岐に必要）
 - PSQT の有無は bullet/rshogi 両方で arch_str から自動検出される
+- **Threat profile は bullet/rshogi 両方のビルドで必ず同一 feature を指定すること**。不一致だと THREAT_DIMENSIONS が異なり weight 読み込みが破壊的にずれる。profile 0 (全ペア) はデフォルトで feature 指定不要
