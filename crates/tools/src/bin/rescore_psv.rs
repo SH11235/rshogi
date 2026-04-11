@@ -1595,6 +1595,48 @@ where
     use ort::session::Session;
     use ort::value::Tensor;
 
+    // ORT_DYLIB_PATH 事前検証（load-dynamic feature）
+    //
+    // ort クレートは load-dynamic feature 有効時、ORT_DYLIB_PATH 環境変数で指定された
+    // ライブラリを dlopen する。未設定時はシステムパスから "libonnxruntime.so" を探すが、
+    // 見つからない場合にハングする（エラーではなくブロックする）。
+    //
+    // ort の default features には download-binaries（ビルド時に CPU 版ランタイムを
+    // 自動ダウンロード）が含まれるが、load-dynamic とは #[cfg] で排他のため共存不可。
+    // また download-binaries で取得されるのは CPU 版のみで GPU 版は提供されない。
+    //
+    // したがって load-dynamic を使い、ランタイムはユーザーが自前で用意する設計とする。
+    // GPU 推論がデフォルト。暗黙の CPU フォールバックは CUDA EP チェックで防止する。
+    //
+    // ORT_DYLIB_PATH は GPU/CPU どちらのモードでも必須。
+    // 未設定時に ort がシステムパスから探すとハングするため。
+    match std::env::var("ORT_DYLIB_PATH") {
+        Ok(path) if !path.is_empty() => {
+            if !std::path::Path::new(&path).exists() {
+                anyhow::bail!(
+                    "ORT_DYLIB_PATH is set to '{path}' but the file does not exist.\n\
+                     Download ONNX Runtime from:\n  \
+                     https://github.com/microsoft/onnxruntime/releases"
+                );
+            }
+            eprintln!("ORT_DYLIB_PATH: {path}");
+        }
+        _ => {
+            let mode_hint = if gpu_id >= 0 {
+                "GPU inference requires a GPU-enabled ONNX Runtime (onnxruntime-linux-x64-gpu-*)."
+            } else {
+                "CPU inference requires an ONNX Runtime library (GPU or CPU build)."
+            };
+            anyhow::bail!(
+                "ORT_DYLIB_PATH environment variable is not set.\n\
+                 {mode_hint}\n\
+                 Download from: https://github.com/microsoft/onnxruntime/releases\n\
+                 Example:\n  \
+                 ORT_DYLIB_PATH=/path/to/libonnxruntime.so cargo run ..."
+            );
+        }
+    }
+
     // ONNX Runtime セッション初期化
     eprintln!("Loading {model_name} ONNX model: {}", onnx_path.display());
 
