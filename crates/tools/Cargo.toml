@@ -50,5 +50,5 @@ regex.workspace = true
 toml.workspace = true
 
 # AobaZero ONNX direct inference (optional, behind "aobazero-onnx" feature)
-ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["load-dynamic"] }
+ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["load-dynamic", "api-24"] }
 ndarray = { version = "0.16", optional = true }
