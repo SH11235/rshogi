@@ -203,6 +203,14 @@ struct Cli {
     #[arg(long, default_value_t = 0)]
     onnx_gpu_id: i32,
 
+    /// TensorRT ExecutionProvider を使用（FP16推論、初回はエンジンコンパイルに時間がかかる）
+    #[arg(long)]
+    onnx_tensorrt: bool,
+
+    /// TensorRT エンジンキャッシュの保存先ディレクトリ
+    #[arg(long)]
+    onnx_tensorrt_cache: Option<PathBuf>,
+
     /// 引き分け手数（--onnx-model使用時の手数特徴量調整、0=調整なし）
     #[arg(long, default_value_t = 0)]
     onnx_draw_ply: i32,
@@ -277,6 +285,9 @@ fn main() -> Result<()> {
         anyhow::bail!(
             "--dlshogi-onnx-model is mutually exclusive with --engine, --use-qsearch, --search-depth"
         );
+    }
+    if cli.onnx_tensorrt && cli.onnx_gpu_id < 0 {
+        anyhow::bail!("--onnx-tensorrt requires a GPU (--onnx-gpu-id >= 0)");
     }
     if use_engine && (cli.use_qsearch || cli.search_depth.is_some()) {
         anyhow::bail!("--engine is mutually exclusive with --use-qsearch and --search-depth");
@@ -370,14 +381,15 @@ fn main() -> Result<()> {
     // 処理設定の表示
     eprintln!(
         "Mode: {}",
-        if use_onnx {
+        if use_onnx || use_dlshogi_onnx {
+            let ep = if cli.onnx_tensorrt {
+                "TensorRT+FP16"
+            } else {
+                "CUDA"
+            };
+            let model = if use_onnx { "AobaZero" } else { "dlshogi" };
             format!(
-                "AobaZero ONNX direct inference (batch={}, gpu={})",
-                cli.onnx_batch_size, cli.onnx_gpu_id
-            )
-        } else if use_dlshogi_onnx {
-            format!(
-                "dlshogi ONNX direct inference (batch={}, gpu={})",
+                "{model} ONNX direct inference (batch={}, gpu={}, ep={ep})",
                 cli.onnx_batch_size, cli.onnx_gpu_id
             )
         } else if use_engine {
@@ -1570,6 +1582,8 @@ fn process_file_with_onnx_pipeline<F>(
     process_count: u64,
     batch_size: usize,
     gpu_id: i32,
+    use_tensorrt: bool,
+    tensorrt_cache: Option<&std::path::Path>,
     score_clip: i16,
     eval_scale: f32,
     skip_in_check: bool,
@@ -1651,34 +1665,84 @@ where
     };
 
     let mut session = if gpu_id >= 0 {
-        eprintln!("Using CUDA GPU {gpu_id}");
+        if use_tensorrt {
+            eprintln!("Using TensorRT (FP16) on GPU {gpu_id}");
 
-        // CUDA EP が ORT ライブラリに含まれているか事前チェック（サイレント CPU フォールバック防止）
-        let cuda_ep =
-            ort::execution_providers::CUDAExecutionProvider::default().with_device_id(gpu_id);
-        match cuda_ep.is_available() {
-            Ok(true) => eprintln!("CUDA execution provider: available"),
-            Ok(false) => {
-                anyhow::bail!(
-                    "CUDAExecutionProvider is NOT available in the loaded ONNX Runtime library.\n\
-                     The library may be a CPU-only build.\n\
-                     Check ORT_DYLIB_PATH points to a GPU-enabled onnxruntime.\n\
-                     To use CPU inference instead, omit --onnx-gpu-id."
-                );
+            let trt_ep = ort::execution_providers::TensorRTExecutionProvider::default()
+                .with_device_id(gpu_id)
+                .with_fp16(true)
+                .with_engine_cache(tensorrt_cache.is_some());
+            let trt_ep = if let Some(cache_path) = tensorrt_cache {
+                let cache_str = cache_path.to_str().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "TensorRT cache path contains non-UTF-8 characters: {}",
+                        cache_path.display()
+                    )
+                })?;
+                eprintln!("TensorRT engine cache: {}", cache_path.display());
+                trt_ep.with_engine_cache_path(cache_str)
+            } else {
+                eprintln!("TensorRT engine cache: disabled (use --onnx-tensorrt-cache to enable)");
+                trt_ep
+            };
+
+            match trt_ep.is_available() {
+                Ok(true) => eprintln!("TensorRT execution provider: available"),
+                Ok(false) => {
+                    anyhow::bail!(
+                        "TensorRTExecutionProvider is NOT available.\n\
+                         Ensure TensorRT (libnvinfer.so.10) is in LD_LIBRARY_PATH.\n\
+                         To use CUDA EP instead, omit --onnx-tensorrt."
+                    );
+                }
+                Err(e) => {
+                    eprintln!("WARNING: Failed to check TensorRT EP availability: {e}");
+                }
             }
-            Err(e) => {
-                eprintln!("WARNING: Failed to check CUDA EP availability: {e}");
+
+            // TensorRT EP + CUDA EP をフォールバックとして登録
+            let cuda_ep = ort::execution_providers::CUDAExecutionProvider::default()
+                .with_device_id(gpu_id)
+                .build()
+                .error_on_failure();
+            let trt_ep = trt_ep.build().error_on_failure();
+
+            builder
+                .with_execution_providers([trt_ep, cuda_ep])
+                .map_err(|e| anyhow::anyhow!("TensorRT/CUDA EP registration failed: {e}"))?
+                .commit_from_file(onnx_path)
+                .map_err(onnx_ort_err)?
+        } else {
+            eprintln!("Using CUDA GPU {gpu_id}");
+
+            let cuda_ep =
+                ort::execution_providers::CUDAExecutionProvider::default().with_device_id(gpu_id);
+            match cuda_ep.is_available() {
+                Ok(true) => eprintln!("CUDA execution provider: available"),
+                Ok(false) => {
+                    anyhow::bail!(
+                        "CUDAExecutionProvider is NOT available in the loaded ONNX Runtime library.\n\
+                         The library may be a CPU-only build.\n\
+                         Check ORT_DYLIB_PATH points to a GPU-enabled onnxruntime.\n\
+                         To use CPU inference instead, omit --onnx-gpu-id."
+                    );
+                }
+                Err(e) => {
+                    eprintln!("WARNING: Failed to check CUDA EP availability: {e}");
+                }
             }
+
+            let ep = cuda_ep.build().error_on_failure();
+            builder
+                .with_execution_providers([ep])
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "CUDA EP registration failed (is onnxruntime-gpu installed?): {e}"
+                    )
+                })?
+                .commit_from_file(onnx_path)
+                .map_err(onnx_ort_err)?
         }
-
-        let ep = cuda_ep.build().error_on_failure();
-        builder
-            .with_execution_providers([ep])
-            .map_err(|e| {
-                anyhow::anyhow!("CUDA EP registration failed (is onnxruntime-gpu installed?): {e}")
-            })?
-            .commit_from_file(onnx_path)
-            .map_err(onnx_ort_err)?
     } else {
         eprintln!("Using CPU");
         builder.commit_from_file(onnx_path).map_err(onnx_ort_err)?
@@ -1936,6 +2000,8 @@ fn process_file_with_onnx(
         process_count,
         cli.onnx_batch_size,
         cli.onnx_gpu_id,
+        cli.onnx_tensorrt,
+        cli.onnx_tensorrt_cache.as_deref(),
         cli.score_clip,
         cli.onnx_eval_scale,
         cli.skip_in_check,
@@ -1973,6 +2039,8 @@ fn process_file_with_dlshogi_onnx(
         process_count,
         cli.onnx_batch_size,
         cli.onnx_gpu_id,
+        cli.onnx_tensorrt,
+        cli.onnx_tensorrt_cache.as_deref(),
         cli.score_clip,
         cli.onnx_eval_scale,
         cli.skip_in_check,
