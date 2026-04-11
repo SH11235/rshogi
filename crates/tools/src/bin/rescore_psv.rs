@@ -1584,6 +1584,7 @@ where
     F: Fn(&Position, &mut [f32], &mut [f32], &PackedSfenValue) + Send + Sync,
 {
     use ort::ep::ExecutionProvider;
+    use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
     use ort::session::Session;
     use ort::value::TensorRef;
 
@@ -1813,7 +1814,8 @@ where
 
         error_count += batch_errors.load(Ordering::Relaxed);
 
-        // ゼロコピーでテンソル参照を作成し推論（CPU→ORT のメモリコピーを排除）
+        // IoBinding で推論（Python の run_with_iobinding に対応）
+        // session.run() より ORT 内部のメモリ管理が効率的
         let shape1: [usize; 4] = [actual_batch, input1_channels, 9, 9];
         let input1 = TensorRef::<f32>::from_array_view((shape1, &f1_buf[..actual_batch * f1_size]))
             .map_err(onnx_ort_err)?;
@@ -1822,12 +1824,20 @@ where
         let input2 = TensorRef::<f32>::from_array_view((shape2, &f2_buf[..actual_batch * f2_size]))
             .map_err(onnx_ort_err)?;
 
-        let outputs = session
-            .run(ort::inputs![
-                "input1" => input1,
-                "input2" => input2,
-            ])
+        let mut binding = session.create_binding().map_err(onnx_ort_err)?;
+        binding.bind_input("input1", &input1).map_err(onnx_ort_err)?;
+        binding.bind_input("input2", &input2).map_err(onnx_ort_err)?;
+        let output_mem =
+            MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::CPUOutput)
+                .map_err(onnx_ort_err)?;
+        binding
+            .bind_output_to_device("output_policy", &output_mem)
             .map_err(onnx_ort_err)?;
+        binding
+            .bind_output_to_device("output_value", &output_mem)
+            .map_err(onnx_ort_err)?;
+
+        let outputs = session.run_binding(&binding).map_err(onnx_ort_err)?;
 
         let (_, values) =
             outputs["output_value"].try_extract_tensor::<f32>().map_err(onnx_ort_err)?;
