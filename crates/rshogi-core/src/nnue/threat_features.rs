@@ -177,7 +177,8 @@ fn pair_base(
     let base = PAIR_BASE[idx];
     if cfg!(any(
         feature = "threat-profile-same-class",
-        feature = "threat-profile-same-class-major-pawn"
+        feature = "threat-profile-same-class-major-pawn",
+        feature = "threat-profile-cross-side",
     )) && base == EXCLUDED_PAIR_BASE
     {
         None
@@ -1072,6 +1073,7 @@ mod tests {
         #[cfg(not(any(
             feature = "threat-profile-same-class",
             feature = "threat-profile-same-class-major-pawn",
+            feature = "threat-profile-cross-side",
         )))]
         assert_eq!(THREAT_DIMENSIONS, 216_720, "profile 0 (full)");
 
@@ -1080,6 +1082,9 @@ mod tests {
 
         #[cfg(feature = "threat-profile-same-class-major-pawn")]
         assert_eq!(THREAT_DIMENSIONS, 173_568, "profile 2 (same-class-major-pawn)");
+
+        #[cfg(feature = "threat-profile-cross-side")]
+        assert_eq!(THREAT_DIMENSIONS, 96_320, "profile 10 (cross-side)");
     }
 
     #[test]
@@ -1285,9 +1290,13 @@ mod tests {
         append_active_threat_indices(&pos, Color::White, king_sq_w, &mut indices_w);
 
         // 初期局面では threat pair は限定的（歩同士の対面等）
-        // 具体的な数は仕様依存だが、0 ではないはず
-        assert!(!indices_b.is_empty(), "Black perspective should have threats");
-        assert!(!indices_w.is_empty(), "White perspective should have threats");
+        // cross-side profile では歩-歩 (同種) が除外され、かつ実盤面で
+        // 遠方駒も歩に遮られるため threat が 0 になりうる
+        #[cfg(not(feature = "threat-profile-cross-side"))]
+        {
+            assert!(!indices_b.is_empty(), "Black perspective should have threats");
+            assert!(!indices_w.is_empty(), "White perspective should have threats");
+        }
 
         // 全 index が範囲内
         for &idx in &indices_b {
@@ -1305,6 +1314,7 @@ mod tests {
     #[cfg(not(any(
         feature = "threat-profile-same-class",
         feature = "threat-profile-same-class-major-pawn",
+        feature = "threat-profile-cross-side",
     )))]
     fn test_canonical_startpos_threat_indices() {
         let mut pos = Position::new();
