@@ -163,6 +163,9 @@ const PAIR_DATA: ([usize; NUM_PAIRS], usize) = build_pair_base();
 static PAIR_BASE: [usize; NUM_PAIRS] = PAIR_DATA.0;
 
 /// pair_base を取得。除外された pair は None を返す。
+///
+/// Profile 0 (除外なし) では `EXCLUDED_PAIR_BASE` が存在しないため、
+/// `cfg!()` でチェック自体をコンパイル時に除去し、Option の unwrap 分岐を LLVM に消させる。
 #[inline]
 fn pair_base(
     attacker_side: usize,
@@ -172,7 +175,11 @@ fn pair_base(
 ) -> Option<usize> {
     let idx = attacker_side * 162 + (ac as usize) * 18 + attacked_side * 9 + dc as usize;
     let base = PAIR_BASE[idx];
-    if base == EXCLUDED_PAIR_BASE {
+    if cfg!(any(
+        feature = "threat-profile-same-class",
+        feature = "threat-profile-same-class-major-pawn"
+    )) && base == EXCLUDED_PAIR_BASE
+    {
         None
     } else {
         Some(base)
