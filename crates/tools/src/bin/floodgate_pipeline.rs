@@ -9,23 +9,25 @@
 //! # 1. インデックスファイルをダウンロード
 //! cargo run -p tools --bin floodgate_pipeline -- fetch-index --out 00LIST.floodgate
 //!
-//! # 2. CSAファイルをダウンロード（日付 + プレイヤーでフィルタ）
-//! cargo run -p tools --bin floodgate_pipeline -- download --date-from 2026-03-10 --player-file players.txt
+//! # 2. CSAファイルをダウンロード（日付 + プレイヤーでフィルタ、並列DL）
+//! cargo run -p tools --bin floodgate_pipeline -- download --date-from 2026-03-10 --player-file players.txt --concurrency 16
 //!
-//! # 3. SFENを抽出（レーティングで精密フィルタ）
+//! # 3. SFENを抽出（レーティングで精密フィルタ、並列パース）
 //! cargo run -p tools --bin floodgate_pipeline -- extract --min-rating 3900 --max-ply 32
 //! ```
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use rayon::prelude::*;
 use reqwest::blocking::Client;
 use rshogi_csa::parse_csa;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tools::common::dedup::DedupSet;
 use tools::common::floodgate as fg;
-use tools::common::io::{Writer, open_writer};
+use tools::common::io::open_writer;
 use tools::common::sfen_ops::{canonicalize_4t_with_mirror, mirror_horizontal};
 
 #[derive(Parser)]
@@ -85,6 +87,9 @@ enum Cmd {
         /// プレイヤー名ファイル（1行1名）。いずれかの対局者がリストに含まれるゲームをDL
         #[arg(long)]
         player_file: Option<String>,
+        /// 並列ダウンロード数（0 = CPU コア数に自動設定）
+        #[arg(long, default_value_t = 8)]
+        concurrency: usize,
     },
     /// ローカルのCSAファイルからSFENを抽出
     Extract {
@@ -112,7 +117,7 @@ enum Cmd {
         /// この手数以下の局面のみ抽出（0=制限なし）
         #[arg(long, default_value_t = 0)]
         max_ply: u32,
-        /// 1棋譜あたりの最大抽出数（0=無制限）
+        /// 1棋譜あたりの最大抽出数（0=無制限）。dedup 後の実書き出し数でカウント
         #[arg(long, default_value_t = 0)]
         per_game_cap: usize,
         /// 両対局者のレーティング下限（0=フィルタなし）
@@ -129,6 +134,18 @@ enum Mode {
     All,
     /// 指定した手数の局面のみ
     Nth,
+}
+
+/// extract サブコマンドのオプション
+struct ExtractOptions<'a> {
+    mode: Mode,
+    nth: &'a [u32],
+    mirror_dedup: bool,
+    emit_mirror: bool,
+    min_ply: u32,
+    max_ply: u32,
+    per_game_cap: usize,
+    min_rating: u32,
 }
 
 fn main() -> Result<()> {
@@ -149,6 +166,7 @@ fn main() -> Result<()> {
             date_from,
             date_to,
             player_file,
+            concurrency,
         } => run_download(
             &index,
             &root,
@@ -157,6 +175,7 @@ fn main() -> Result<()> {
             date_from.as_deref(),
             date_to.as_deref(),
             player_file.as_deref(),
+            concurrency,
         ),
         Cmd::Extract {
             root,
@@ -169,18 +188,19 @@ fn main() -> Result<()> {
             max_ply,
             per_game_cap,
             min_rating,
-        } => run_extract(
-            &root,
-            &out,
-            mode,
-            &nth,
-            mirror_dedup,
-            emit_mirror,
-            min_ply,
-            max_ply,
-            per_game_cap,
-            min_rating,
-        ),
+        } => {
+            let opts = ExtractOptions {
+                mode,
+                nth: &nth,
+                mirror_dedup,
+                emit_mirror,
+                min_ply,
+                max_ply,
+                per_game_cap,
+                min_rating,
+            };
+            run_extract(&root, &out, &opts)
+        }
     }
 }
 
@@ -214,7 +234,6 @@ fn run_fetch_index(root: &str, out: &str) -> Result<()> {
 }
 
 /// パスから日付を YYYYMMDD 形式の整数で抽出。
-/// パス例: `2026/03/17/wdoor+...csa` → `20260317`
 fn date_of_path(rel: &str) -> Option<u32> {
     if rel.len() < 10 {
         return None;
@@ -225,7 +244,6 @@ fn date_of_path(rel: &str) -> Option<u32> {
     Some(y * 10000 + m * 100 + d)
 }
 
-/// `YYYY-MM-DD` 形式の文字列を YYYYMMDD 整数にパース。
 fn parse_date_arg(s: &str) -> Result<u32> {
     let parts: Vec<&str> = s.split('-').collect();
     anyhow::ensure!(parts.len() == 3, "日付は YYYY-MM-DD 形式で指定してください: {s}");
@@ -244,8 +262,8 @@ fn run_download(
     date_from: Option<&str>,
     date_to: Option<&str>,
     player_file: Option<&str>,
+    concurrency: usize,
 ) -> Result<()> {
-    let client = Client::builder().build()?;
     let r = tools::common::io::open_reader(index)?;
     let all_lines = fg::parse_index_lines(r)?;
     let total = all_lines.len();
@@ -253,7 +271,6 @@ fn run_download(
     let date_from = date_from.map(parse_date_arg).transpose()?;
     let date_to = date_to.map(parse_date_arg).transpose()?;
 
-    // プレイヤーフィルタパターンの読み込み（部分一致）
     let player_patterns = if let Some(pf) = player_file {
         let patterns = fg::load_player_patterns(Path::new(pf))?;
         eprintln!("Loaded {} player patterns from {pf}", patterns.len());
@@ -262,7 +279,6 @@ fn run_download(
         None
     };
 
-    // 日付 + プレイヤーフィルタ
     let lines: Vec<String> = all_lines
         .into_iter()
         .filter(|rel| {
@@ -285,34 +301,70 @@ fn run_download(
     let after_filter = lines.len();
     let count = limit.unwrap_or(after_filter).min(after_filter);
     eprintln!(
-        "Downloading {} CSA files (total in index: {}, after filter: {})",
-        count, total, after_filter
+        "Downloading {} CSA files (total in index: {}, after filter: {}, concurrency: {})",
+        count, total, after_filter, concurrency
     );
-    let mut downloaded = 0usize;
-    let mut skipped = 0usize;
-    for (i, rel) in lines.into_iter().take(count).enumerate() {
-        let url = fg::join_url(root, &rel)?;
-        let out_path = fg::local_path_for(Path::new(out_dir), &rel);
-        if out_path.exists() {
-            skipped += 1;
-            continue;
-        }
-        match fg::http_get_to_file_noclobber(&client, &url, &out_path) {
-            Ok(_) => {
-                downloaded += 1;
-                if downloaded.is_multiple_of(500) {
-                    eprintln!(
-                        "  Downloaded {downloaded} new files ({}/{count} processed)...",
-                        i + 1
-                    );
-                }
-            }
-            Err(e) => {
-                eprintln!("  Warning: failed to download {rel}: {e}");
-            }
-        }
+
+    let out_dir_path = Path::new(out_dir);
+    let to_download: Vec<&str> = lines
+        .iter()
+        .take(count)
+        .filter(|rel| !fg::local_path_for(out_dir_path, rel).exists())
+        .map(|s| s.as_str())
+        .collect();
+    let skipped = count - to_download.len();
+    eprintln!("{} files to download ({skipped} already exist)", to_download.len());
+
+    if to_download.is_empty() {
+        eprintln!("Download complete. 0 new, {skipped} already existed. Dir: {out_dir}");
+        return Ok(());
     }
-    eprintln!("Download complete. {downloaded} new, {skipped} already existed. Dir: {out_dir}");
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(concurrency)
+        .build()
+        .context("Failed to create thread pool")?;
+
+    let downloaded = AtomicUsize::new(0);
+    let errors = AtomicUsize::new(0);
+
+    pool.install(|| {
+        // thread_local! で Client を再利用し TCP コネクションプールの恩恵を得る
+        thread_local! {
+            static CLIENT: Client = Client::builder().build().expect("reqwest client");
+        }
+
+        to_download.par_iter().for_each(|rel| {
+            let url = match fg::join_url(root, rel) {
+                Ok(u) => u,
+                Err(e) => {
+                    eprintln!("  Warning: invalid URL for {rel}: {e}");
+                    errors.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+            };
+            let out_path = fg::local_path_for(out_dir_path, rel);
+            CLIENT.with(|client| match fg::http_get_to_file_noclobber(client, &url, &out_path) {
+                Ok(_) => {
+                    let n = downloaded.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n.is_multiple_of(500) {
+                        eprintln!("  Downloaded {n} new files...");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  Warning: failed to download {rel}: {e}");
+                    errors.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+        });
+    });
+
+    let dl = downloaded.load(Ordering::Relaxed);
+    let err = errors.load(Ordering::Relaxed);
+    eprintln!("Download complete. {dl} new, {skipped} already existed. Dir: {out_dir}");
+    if err > 0 {
+        eprintln!("  ({err} download errors)");
+    }
     Ok(())
 }
 
@@ -332,152 +384,189 @@ fn visit_csa_files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_extract(
-    root: &str,
-    out: &str,
-    mode: Mode,
-    nth: &[u32],
-    mirror_dedup: bool,
-    emit_mirror: bool,
-    min_ply: u32,
-    max_ply: u32,
-    per_game_cap: usize,
-    min_rating: u32,
-) -> Result<()> {
+/// 1棋譜から抽出した SFEN のリスト
+struct GameResult {
+    sfens: Vec<String>,
+    error: bool,
+    rating_skipped: bool,
+    no_rating: bool,
+}
+
+/// 1棋譜の CSA パース → SFEN 抽出（純粋関数、副作用なし）
+///
+/// per_game_cap は dedup 前の上限（dedup 後のカウントは呼び出し側で行う）
+fn extract_sfens_from_game(path: &Path, opts: &ExtractOptions) -> GameResult {
+    let text = match fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => {
+            log::warn!("Failed to read {}: {e}", path.display());
+            return GameResult {
+                sfens: Vec::new(),
+                error: true,
+                rating_skipped: false,
+                no_rating: false,
+            };
+        }
+    };
+    let (mut pos, moves, info) = match parse_csa(&text) {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("Failed to parse {}: {e}", path.display());
+            return GameResult {
+                sfens: Vec::new(),
+                error: true,
+                rating_skipped: false,
+                no_rating: false,
+            };
+        }
+    };
+
+    if opts.min_rating > 0 {
+        if info.black_rating.is_none() || info.white_rating.is_none() {
+            return GameResult {
+                sfens: Vec::new(),
+                error: false,
+                rating_skipped: false,
+                no_rating: true,
+            };
+        }
+        if !info.both_ratings_at_least(opts.min_rating as f64) {
+            return GameResult {
+                sfens: Vec::new(),
+                error: false,
+                rating_skipped: true,
+                no_rating: false,
+            };
+        }
+    }
+
+    let mut sfens = Vec::new();
+
+    match opts.mode {
+        Mode::Initial => {
+            if in_ply_range(1, opts.min_ply, opts.max_ply) {
+                collect_sfen(&pos.to_sfen(), opts.mirror_dedup, opts.emit_mirror, &mut sfens);
+            }
+        }
+        Mode::All => {
+            if in_ply_range(1, opts.min_ply, opts.max_ply) {
+                collect_sfen(&pos.to_sfen(), opts.mirror_dedup, opts.emit_mirror, &mut sfens);
+            }
+            for (i, m) in moves.iter().enumerate() {
+                if pos.apply_csa_move(m).is_err() {
+                    break;
+                }
+                let ply = (i as u32) + 2;
+                if in_ply_range(ply, opts.min_ply, opts.max_ply) {
+                    collect_sfen(&pos.to_sfen(), opts.mirror_dedup, opts.emit_mirror, &mut sfens);
+                }
+            }
+        }
+        Mode::Nth => {
+            if !opts.nth.is_empty() {
+                if opts.nth.contains(&1) && in_ply_range(1, opts.min_ply, opts.max_ply) {
+                    collect_sfen(&pos.to_sfen(), opts.mirror_dedup, opts.emit_mirror, &mut sfens);
+                }
+                for (i, m) in moves.iter().enumerate() {
+                    let ply = (i as u32) + 2;
+                    if pos.apply_csa_move(m).is_err() {
+                        break;
+                    }
+                    if opts.nth.contains(&ply) && in_ply_range(ply, opts.min_ply, opts.max_ply) {
+                        collect_sfen(
+                            &pos.to_sfen(),
+                            opts.mirror_dedup,
+                            opts.emit_mirror,
+                            &mut sfens,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    GameResult {
+        sfens,
+        error: false,
+        rating_skipped: false,
+        no_rating: false,
+    }
+}
+
+/// SFEN を収集。mirror_dedup 時は canonical 形式で格納（dedup キーも canonical になる）
+fn collect_sfen(sfen: &str, mirror_dedup: bool, emit_mirror: bool, out: &mut Vec<String>) {
+    if mirror_dedup {
+        let s = canonicalize_4t_with_mirror(sfen).unwrap_or_else(|| sfen.to_string());
+        out.push(s);
+    } else {
+        out.push(sfen.to_string());
+        if emit_mirror && let Some(ms) = mirror_horizontal(sfen) {
+            out.push(ms);
+        }
+    }
+}
+
+fn run_extract(root: &str, out: &str, opts: &ExtractOptions) -> Result<()> {
     let root = Path::new(root);
     let files = visit_csa_files(root)?;
-    eprintln!("Found {} CSA files in {:?}", files.len(), root);
+    let num_files = files.len();
+    eprintln!("Found {num_files} CSA files in {root:?}");
+
+    // rayon で並列パース → 各ゲームの SFEN リストを収集
+    let results: Vec<GameResult> =
+        files.par_iter().map(|p| extract_sfens_from_game(p, opts)).collect();
+
+    // 逐次で dedup + 書き出し（per_game_cap は dedup 後の書き出し数でカウント）
     let mut out_w = open_writer(out)?;
-    let mut dedup = DedupSet::new(mirror_dedup);
+    let mut dedup = DedupSet::new(opts.mirror_dedup);
     let mut wrote = 0usize;
     let mut errors = 0usize;
     let mut rating_skipped = 0usize;
     let mut no_rating = 0usize;
     let mut games_used = 0usize;
-    'games: for p in &files {
-        let text = match fs::read_to_string(p) {
-            Ok(t) => t,
-            Err(e) => {
-                errors += 1;
-                log::warn!("Failed to read {}: {e}", p.display());
-                continue;
-            }
-        };
-        let (mut pos, moves, info) = match parse_csa(&text) {
-            Ok(r) => r,
-            Err(e) => {
-                errors += 1;
-                log::warn!("Failed to parse {}: {e}", p.display());
-                continue;
-            }
-        };
-        // レーティングフィルタ
-        if min_rating > 0 {
-            if info.black_rating.is_none() || info.white_rating.is_none() {
-                no_rating += 1;
-                continue 'games;
-            }
-            if !info.both_ratings_at_least(min_rating as f64) {
-                rating_skipped += 1;
-                continue 'games;
-            }
+
+    for gr in &results {
+        if gr.error {
+            errors += 1;
+            continue;
+        }
+        if gr.no_rating {
+            no_rating += 1;
+            continue;
+        }
+        if gr.rating_skipped {
+            rating_skipped += 1;
+            continue;
+        }
+        if gr.sfens.is_empty() {
+            continue;
         }
         games_used += 1;
         let mut written_this_game = 0usize;
-        match mode {
-            Mode::Initial => {
-                let sfen = pos.to_sfen();
-                if in_ply_range(1, min_ply, max_ply) {
-                    let w = maybe_write(&mut out_w, &mut dedup, &sfen, mirror_dedup, emit_mirror)?;
-                    wrote += w;
-                    if per_game_cap > 0 && w > 0 {
-                        written_this_game += w;
-                        if written_this_game >= per_game_cap {
-                            continue 'games;
-                        }
-                    }
-                }
-            }
-            Mode::All => {
-                // include initial position if range covers ply 1
-                if in_ply_range(1, min_ply, max_ply) {
-                    let sfen = pos.to_sfen();
-                    let w = maybe_write(&mut out_w, &mut dedup, &sfen, mirror_dedup, emit_mirror)?;
-                    wrote += w;
-                    if per_game_cap > 0 && w > 0 {
-                        written_this_game += w;
-                        if written_this_game >= per_game_cap {
-                            continue 'games;
-                        }
-                    }
-                }
-                for (i, m) in moves.iter().enumerate() {
-                    if pos.apply_csa_move(m).is_err() {
-                        break;
-                    }
-                    let sfen = pos.to_sfen();
-                    let ply = (i as u32) + 2;
-                    if in_ply_range(ply, min_ply, max_ply) {
-                        let w =
-                            maybe_write(&mut out_w, &mut dedup, &sfen, mirror_dedup, emit_mirror)?;
-                        wrote += w;
-                        if per_game_cap > 0 && w > 0 {
-                            written_this_game += w;
-                            if written_this_game >= per_game_cap {
-                                continue 'games;
-                            }
-                        }
-                    }
-                }
-            }
-            Mode::Nth => {
-                if nth.is_empty() {
-                    continue;
-                }
-                if nth.contains(&1) && in_ply_range(1, min_ply, max_ply) {
-                    let sfen = pos.to_sfen();
-                    let w = maybe_write(&mut out_w, &mut dedup, &sfen, mirror_dedup, emit_mirror)?;
-                    wrote += w;
-                    if per_game_cap > 0 && w > 0 {
-                        written_this_game += w;
-                        if written_this_game >= per_game_cap {
-                            continue 'games;
-                        }
-                    }
-                }
-                for (i, m) in moves.iter().enumerate() {
-                    let ply = (i as u32) + 2;
-                    if pos.apply_csa_move(m).is_err() {
-                        break;
-                    }
-                    if nth.contains(&ply) && in_ply_range(ply, min_ply, max_ply) {
-                        let sfen = pos.to_sfen();
-                        let w =
-                            maybe_write(&mut out_w, &mut dedup, &sfen, mirror_dedup, emit_mirror)?;
-                        wrote += w;
-                        if per_game_cap > 0 && w > 0 {
-                            written_this_game += w;
-                            if written_this_game >= per_game_cap {
-                                continue 'games;
-                            }
-                        }
-                    }
+        for sfen in &gr.sfens {
+            if !opts.mirror_dedup || dedup.insert(sfen) {
+                writeln!(out_w, "{sfen}")?;
+                wrote += 1;
+                written_this_game += 1;
+                if opts.per_game_cap > 0 && written_this_game >= opts.per_game_cap {
+                    break;
                 }
             }
         }
     }
+
     out_w.close()?;
     eprintln!("Wrote {wrote} SFENs from {games_used} games to {out}");
     if errors > 0 {
         eprintln!("  ({errors} files had errors and were skipped)");
     }
-    if min_rating > 0 {
+    if opts.min_rating > 0 {
         eprintln!(
-            "  ({rating_skipped} games below min_rating={min_rating}, {no_rating} games without rating info)"
+            "  ({rating_skipped} games below min_rating={}, {no_rating} games without rating info)",
+            opts.min_rating
         );
     }
-    if mirror_dedup {
+    if opts.mirror_dedup {
         eprintln!("  (dedup set size: {})", dedup.len());
     }
     Ok(())
@@ -492,34 +581,4 @@ fn in_ply_range(ply: u32, min_ply: u32, max_ply: u32) -> bool {
         return false;
     }
     true
-}
-
-fn maybe_write(
-    out_w: &mut Writer,
-    dedup: &mut DedupSet,
-    sfen: &str,
-    mirror_dedup: bool,
-    emit_mirror: bool,
-) -> Result<usize> {
-    let mut written = 0usize;
-    if !mirror_dedup || dedup.insert(sfen) {
-        // write original (or canonicalized when mirror_dedup)
-        let s = if mirror_dedup {
-            canonicalize_4t_with_mirror(sfen).unwrap_or_else(|| sfen.to_string())
-        } else {
-            sfen.to_string()
-        };
-        writeln!(out_w, "{s}")?;
-        written += 1;
-
-        // optionally emit mirror as a separate line when not deduping-by-mirror
-        if emit_mirror
-            && !mirror_dedup
-            && let Some(ms) = mirror_horizontal(sfen)
-        {
-            writeln!(out_w, "{ms}")?;
-            written += 1;
-        }
-    }
-    Ok(written)
 }

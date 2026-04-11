@@ -1596,11 +1596,14 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     // 履歴統計の初期化がスタックを大量に消費するため、別スレッドで実行
+    // UsiEngine::new() が NNUE グローバル状態に依存するため、全テストを #[serial] で逐次実行
     const STACK_SIZE: usize = 64 * 1024 * 1024;
 
     #[test]
+    #[serial]
     fn parse_go_mate_sets_limits() {
         std::thread::Builder::new()
             .stack_size(STACK_SIZE)
@@ -1618,6 +1621,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn parse_go_mate_without_value_defaults_to_infinite() {
         std::thread::Builder::new()
             .stack_size(STACK_SIZE)
@@ -1634,6 +1638,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn parse_go_mate_infinite_defaults_to_max() {
         std::thread::Builder::new()
             .stack_size(STACK_SIZE)
@@ -1650,6 +1655,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn stochastic_ponder_position_rewinds_last_move() {
         std::thread::Builder::new()
             .stack_size(STACK_SIZE)
@@ -1669,6 +1675,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn setoption_draw_value_updates_search() {
         std::thread::Builder::new()
             .stack_size(STACK_SIZE)
@@ -1687,6 +1694,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn setoption_layerstack_bucket_updates_globals() {
         std::thread::Builder::new()
             .stack_size(STACK_SIZE)
