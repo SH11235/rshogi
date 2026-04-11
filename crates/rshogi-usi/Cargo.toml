@@ -43,6 +43,7 @@ nnue-threat = ["rshogi-core/nnue-threat"]
 threat-profile-same-class = ["rshogi-core/threat-profile-same-class"]
 threat-profile-same-class-major-pawn = ["rshogi-core/threat-profile-same-class-major-pawn"]
 threat-profile-cross-side = ["rshogi-core/threat-profile-cross-side"]
+threat-profile-enemy-only = ["rshogi-core/threat-profile-enemy-only"]
 # NNUE progress8kpabs 差分更新最適化（L1=1536 で有効、L1=768 で退行）
 nnue-progress-diff = ["rshogi-core/nnue-progress-diff"]
 # LayerStacks L1 バリアント

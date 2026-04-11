@@ -94,7 +94,8 @@ nnue-threat = []
 # 仕様: docs/threat_spec.md Exclusion profiles
 threat-profile-same-class = []               # profile 1: 同種ペア全除外
 threat-profile-same-class-major-pawn = []   # profile 2: 同種 + 大駒→歩除外
-threat-profile-cross-side = []              # profile 10: cross-side 異種ペアのみ
+threat-profile-cross-side = []              # profile 10: cross-side 異種ペアのみ (両方向)
+threat-profile-enemy-only = []             # profile 11: enemy→friend 異種ペアのみ
 # NNUE progress8kpabs バケットの差分更新最適化
 # - 有効時: StackEntry に progress_sum/computed_progress フィールド追加、
 #   ensure_progress_bucket で DirtyPiece 差分から O(1) 更新

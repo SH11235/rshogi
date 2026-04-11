@@ -179,6 +179,7 @@ fn pair_base(
         feature = "threat-profile-same-class",
         feature = "threat-profile-same-class-major-pawn",
         feature = "threat-profile-cross-side",
+        feature = "threat-profile-enemy-only",
     )) && base == EXCLUDED_PAIR_BASE
     {
         None
@@ -1074,6 +1075,7 @@ mod tests {
             feature = "threat-profile-same-class",
             feature = "threat-profile-same-class-major-pawn",
             feature = "threat-profile-cross-side",
+            feature = "threat-profile-enemy-only",
         )))]
         assert_eq!(THREAT_DIMENSIONS, 216_720, "profile 0 (full)");
 
@@ -1085,6 +1087,9 @@ mod tests {
 
         #[cfg(feature = "threat-profile-cross-side")]
         assert_eq!(THREAT_DIMENSIONS, 96_320, "profile 10 (cross-side)");
+
+        #[cfg(feature = "threat-profile-enemy-only")]
+        assert_eq!(THREAT_DIMENSIONS, 48_160, "profile 11 (enemy-only)");
     }
 
     #[test]
@@ -1292,7 +1297,10 @@ mod tests {
         // 初期局面では threat pair は限定的（歩同士の対面等）
         // cross-side profile では歩-歩 (同種) が除外され、かつ実盤面で
         // 遠方駒も歩に遮られるため threat が 0 になりうる
-        #[cfg(not(feature = "threat-profile-cross-side"))]
+        #[cfg(not(any(
+            feature = "threat-profile-cross-side",
+            feature = "threat-profile-enemy-only"
+        )))]
         {
             assert!(!indices_b.is_empty(), "Black perspective should have threats");
             assert!(!indices_w.is_empty(), "White perspective should have threats");
@@ -1315,6 +1323,7 @@ mod tests {
         feature = "threat-profile-same-class",
         feature = "threat-profile-same-class-major-pawn",
         feature = "threat-profile-cross-side",
+        feature = "threat-profile-enemy-only",
     )))]
     fn test_canonical_startpos_threat_indices() {
         let mut pos = Position::new();
