@@ -177,7 +177,12 @@ AobaZero ONNX model loaded. Batch size: 1024
 
 - `ORT_DYLIB_PATH` 未設定時はエラーを返す（未設定のまま実行するとハングするため）
 - GPU モードでは起動時に CUDA が利用可能かチェックし、CPU への暗黙フォールバックを防止する
-- `--onnx-tensorrt` で TensorRT ExecutionProvider を使用可能。FP16 推論により約 2.5 倍高速化されるが、
+- `--onnx-tensorrt` で TensorRT ExecutionProvider (FP16) を使用可能
+- TensorRT は常に FP16 で推論する。FP32 モード（`--onnx-tensorrt` なし）と比較して約 2.8 倍高速化されるが、
   評価値に平均 12cp 程度の差が出る（FP16 の方が系統的にやや高く出る傾向）
+- TensorRT FP32 は計測の結果 CUDA EP より遅いため（カーネル最適化の効果よりセッション初期化コストが大きい）、
+  FP32 で推論する場合は `--onnx-tensorrt` を指定せず CUDA EP を使うこと
 - TensorRT は初回実行時にモデルを GPU 固有にコンパイルする（数十秒〜数分）。
   `--onnx-tensorrt-cache` でキャッシュを保存すると 2 回目以降は高速起動する
+- このツールのボトルネックは CPU→GPU のデータ転送（全処理時間の 96%、nsys 計測）であり、
+  FP16 による高速化は主に転送量の半減と Tensor Core 活用に起因する
