@@ -29,6 +29,10 @@ pub struct NnueStats {
     pub cache_hit_count: AtomicU64,
     /// Finny Tables (AccumulatorCache) ミス回数（cache valid=false で full rebuild）
     pub cache_miss_count: AtomicU64,
+    /// refresh のうち `refresh_accumulator_with_cache` 経由 (stack 再構築系)
+    pub refresh_full_count: AtomicU64,
+    /// refresh のうち `update_accumulator_with_cache` の reset path 経由 (玉移動)
+    pub refresh_reset_count: AtomicU64,
     /// refresh cache hit 時の差分駒数ヒストグラム
     /// [0]=0個, [1]=1-2, [2]=3-5, [3]=6-10, [4]=11-20, [5]=21-40, [6]=41-80, [7]=81+
     pub refresh_diff_histogram: [AtomicU64; 8],
@@ -48,6 +52,8 @@ impl NnueStats {
             already_computed_count: AtomicU64::new(0),
             cache_hit_count: AtomicU64::new(0),
             cache_miss_count: AtomicU64::new(0),
+            refresh_full_count: AtomicU64::new(0),
+            refresh_reset_count: AtomicU64::new(0),
             refresh_diff_histogram: [
                 AtomicU64::new(0),
                 AtomicU64::new(0),
@@ -71,6 +77,8 @@ impl NnueStats {
         self.already_computed_count.store(0, Ordering::Relaxed);
         self.cache_hit_count.store(0, Ordering::Relaxed);
         self.cache_miss_count.store(0, Ordering::Relaxed);
+        self.refresh_full_count.store(0, Ordering::Relaxed);
+        self.refresh_reset_count.store(0, Ordering::Relaxed);
         for bin in &self.refresh_diff_histogram {
             bin.store(0, Ordering::Relaxed);
         }
@@ -119,6 +127,18 @@ impl NnueStats {
         self.cache_miss_count.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// `refresh_accumulator_with_cache` 経由の refresh をカウント
+    #[inline]
+    pub fn count_refresh_full(&self) {
+        self.refresh_full_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `update_accumulator_with_cache` の reset path 経由の refresh をカウント
+    #[inline]
+    pub fn count_refresh_reset(&self) {
+        self.refresh_reset_count.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// refresh cache hit 時の差分駒数を histogram に記録
     #[inline]
     pub fn count_refresh_diff(&self, diff: usize) {
@@ -150,6 +170,8 @@ impl NnueStats {
             already_computed_count: self.already_computed_count.load(Ordering::Relaxed),
             cache_hit_count: self.cache_hit_count.load(Ordering::Relaxed),
             cache_miss_count: self.cache_miss_count.load(Ordering::Relaxed),
+            refresh_full_count: self.refresh_full_count.load(Ordering::Relaxed),
+            refresh_reset_count: self.refresh_reset_count.load(Ordering::Relaxed),
             refresh_diff_histogram: hist,
             refresh_diff_sum: self.refresh_diff_sum.load(Ordering::Relaxed),
         }
@@ -166,6 +188,8 @@ pub struct NnueStatsSnapshot {
     pub already_computed_count: u64,
     pub cache_hit_count: u64,
     pub cache_miss_count: u64,
+    pub refresh_full_count: u64,
+    pub refresh_reset_count: u64,
     pub refresh_diff_histogram: [u64; 8],
     pub refresh_diff_sum: u64,
 }
@@ -238,6 +262,8 @@ impl NnueStatsSnapshot {
             self.refresh_count,
             self.refresh_rate()
         );
+        eprintln!("    full (stack):      {:>12}", self.refresh_full_count);
+        eprintln!("    reset (king mv):   {:>12}", self.refresh_reset_count);
         eprintln!(
             "  update (1-step):     {:>12} ({:>5.1}%)",
             self.update_count,
@@ -357,6 +383,20 @@ macro_rules! count_update {
     () => {};
 }
 
+/// forward_update カウント（feature有効時のみ）
+#[cfg(feature = "nnue-stats")]
+macro_rules! count_forward_update {
+    () => {
+        $crate::nnue::stats::NNUE_STATS.count_forward_update()
+    };
+}
+
+/// forward_update カウント（no-op）
+#[cfg(not(feature = "nnue-stats"))]
+macro_rules! count_forward_update {
+    () => {};
+}
+
 /// already_computed カウント（feature有効時のみ）
 #[cfg(feature = "nnue-stats")]
 macro_rules! count_already_computed {
@@ -415,9 +455,38 @@ macro_rules! count_refresh_diff {
     };
 }
 
+/// refresh_accumulator_with_cache 経由のカウント（feature有効時のみ）
+#[cfg(feature = "nnue-stats")]
+macro_rules! count_refresh_full {
+    () => {
+        $crate::nnue::stats::NNUE_STATS.count_refresh_full()
+    };
+}
+
+#[cfg(not(feature = "nnue-stats"))]
+macro_rules! count_refresh_full {
+    () => {};
+}
+
+/// update_accumulator_with_cache の reset path カウント（feature有効時のみ）
+#[cfg(feature = "nnue-stats")]
+macro_rules! count_refresh_reset {
+    () => {
+        $crate::nnue::stats::NNUE_STATS.count_refresh_reset()
+    };
+}
+
+#[cfg(not(feature = "nnue-stats"))]
+macro_rules! count_refresh_reset {
+    () => {};
+}
+
 pub(crate) use count_already_computed;
 pub(crate) use count_cache_hit;
 pub(crate) use count_cache_miss;
+pub(crate) use count_forward_update;
 pub(crate) use count_refresh;
 pub(crate) use count_refresh_diff;
+pub(crate) use count_refresh_full;
+pub(crate) use count_refresh_reset;
 pub(crate) use count_update;
