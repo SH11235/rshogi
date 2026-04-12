@@ -4,9 +4,11 @@
 //! L1 は const generics で 1536 / 768 等を切り替え可能。
 //! 既存の Accumulator（256次元、HalfKP用）とは別に管理する。
 
-use super::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_PATH_LENGTH};
+use super::accumulator::{DirtyPiece, IndexList, MAX_PATH_LENGTH};
+use super::bona_piece::BonaPiece;
 #[cfg(feature = "nnue-psqt")]
 use super::constants::NUM_LAYER_STACK_BUCKETS;
+use super::piece_list::PieceNumber;
 use crate::types::{Color, MAX_PLY, Square};
 
 /// LayerStacks用アキュムレータ（L1次元）
@@ -94,16 +96,19 @@ impl<const L1: usize> Default for AccumulatorLayerStacks<L1> {
 
 /// AccumulatorCaches のキャッシュエントリ（Finny Tables）
 ///
-/// 各玉位置×視点ごとに、最後に計算したアキュムレータ値とその時点のアクティブ特徴量を保持。
-/// refresh 時にキャッシュからの差分で更新することで、全駒加算を回避する。
+/// 各玉位置×視点ごとに、最後に計算したアキュムレータ値とその時点の PieceList を保持。
+/// refresh 時にキャッシュの PieceList と現在の PieceList を 40 要素比較し、
+/// 差分 BonaPiece だけに対して add/sub_weights を実行することで、全駒加算と
+/// active_indices の再集計・ソート・対称差計算を回避する。
+///
+/// PieceList の特性により、盤上駒と持ち駒の両方が一つの配列で管理されるため、
+/// 個別の hand 配列は不要。
 #[repr(C, align(64))]
 struct AccCacheEntry<const L1: usize> {
     /// キャッシュされたアキュムレータ値
     accumulation: [i16; L1],
-    /// キャッシュ時点のアクティブ特徴インデックス（ソート済み）
-    active_indices: [u32; MAX_ACTIVE_FEATURES],
-    /// active_indices の有効数
-    num_active: u16,
+    /// キャッシュ時点の PieceList (該当 perspective 視点の BonaPiece 配列)
+    piece_list: [BonaPiece; PieceNumber::NB],
     /// 有効フラグ
     valid: bool,
 }
@@ -113,8 +118,7 @@ impl<const L1: usize> AccCacheEntry<L1> {
     fn new_invalid() -> Self {
         Self {
             accumulation: [0; L1],
-            active_indices: [0; MAX_ACTIVE_FEATURES],
-            num_active: 0,
+            piece_list: [BonaPiece::ZERO; PieceNumber::NB],
             valid: false,
         }
     }
@@ -154,107 +158,74 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
         }
     }
 
-    /// キャッシュからの差分で refresh を実行
+    /// キャッシュからの差分で refresh を実行（PieceList ベース）
     ///
-    /// キャッシュが有効な場合、現在のアクティブ特徴量との差分を計算し、
-    /// add/sub のみでアキュムレータを更新する。
-    /// キャッシュが無効な場合は通常の full refresh を行い、キャッシュを更新する。
+    /// キャッシュが有効な場合、キャッシュ時点の PieceList と現在の PieceList を
+    /// 40 要素比較し、差分 BonaPiece のみに対して add/sub_by_bp を呼ぶ。
+    /// `append_active_indices` の全再集計・`sort_unstable`・対称差スキャンを回避する。
+    ///
+    /// キャッシュが無効な場合はバイアスから full refresh を行い、キャッシュを初期化する。
     ///
     /// # 引数
     ///
     /// - `king_sq`: この視点の玉位置
     /// - `perspective`: 視点（先手/後手）
-    /// - `active`: 現在のアクティブ特徴インデックス（ソート済み）
+    /// - `current_piece_list`: 現在の PieceList (該当 perspective の `piece_list_fb/fw`)
     /// - `biases`: Feature Transformer のバイアス
     /// - `accumulation`: 更新先のアキュムレータ値
-    /// - `add_fn`: 重み加算関数
-    /// - `sub_fn`: 重み減算関数
+    /// - `add_by_bp`: BonaPiece を受け取り重みを加算するクロージャ
+    /// - `sub_by_bp`: BonaPiece を受け取り重みを減算するクロージャ
     pub(crate) fn refresh_or_cache<FA, FS>(
         &mut self,
         king_sq: Square,
         perspective: Color,
-        active: &[u32],
+        current_piece_list: &[BonaPiece; PieceNumber::NB],
         biases: &[i16; L1],
         accumulation: &mut [i16; L1],
-        add_fn: FA,
-        sub_fn: FS,
+        add_by_bp: FA,
+        sub_by_bp: FS,
     ) where
-        FA: Fn(&mut [i16; L1], usize),
-        FS: Fn(&mut [i16; L1], usize),
+        FA: Fn(&mut [i16; L1], BonaPiece),
+        FS: Fn(&mut [i16; L1], BonaPiece),
     {
         let entry = &mut self.entries[king_sq.raw() as usize][perspective as usize];
 
         if entry.valid {
+            crate::nnue::stats::count_cache_hit!();
             // キャッシュが有効 → 差分更新
             // キャッシュのアキュムレータ値をコピー
             accumulation.copy_from_slice(&entry.accumulation);
 
-            // ソート済み配列のマージベース差分（O(n)）
-            let cached = &entry.active_indices[..entry.num_active as usize];
-            Self::apply_diff(cached, active, accumulation, &add_fn, &sub_fn);
+            // PieceList の差分を線形スキャン（O(PieceNumber::NB) = O(40)）
+            let mut diff_count = 0usize;
+            for (&cached_bp, &current_bp) in entry.piece_list.iter().zip(current_piece_list.iter())
+            {
+                if cached_bp != current_bp {
+                    diff_count += 1;
+                    if cached_bp != BonaPiece::ZERO {
+                        sub_by_bp(accumulation, cached_bp);
+                    }
+                    if current_bp != BonaPiece::ZERO {
+                        add_by_bp(accumulation, current_bp);
+                    }
+                }
+            }
+            crate::nnue::stats::count_refresh_diff!(diff_count);
         } else {
+            crate::nnue::stats::count_cache_miss!();
             // キャッシュ無効 → バイアスから full refresh
             accumulation.copy_from_slice(biases);
-            for &idx in active {
-                add_fn(accumulation, idx as usize);
+            for &bp in current_piece_list.iter() {
+                if bp != BonaPiece::ZERO {
+                    add_by_bp(accumulation, bp);
+                }
             }
         }
 
         // キャッシュを更新
         entry.accumulation.copy_from_slice(accumulation);
-        let n = active.len().min(MAX_ACTIVE_FEATURES);
-        entry.active_indices[..n].copy_from_slice(&active[..n]);
-        entry.num_active = n as u16;
+        entry.piece_list.copy_from_slice(current_piece_list);
         entry.valid = true;
-    }
-
-    /// ソート済み配列のマージベース差分を適用
-    ///
-    /// cached と current を同時に走査し、差分（add/sub）のみを適用する。
-    /// 両配列はソート済みであるため O(n+m) で完了する。
-    #[inline]
-    fn apply_diff<FA, FS>(
-        cached: &[u32],
-        current: &[u32],
-        accumulation: &mut [i16; L1],
-        add_fn: &FA,
-        sub_fn: &FS,
-    ) where
-        FA: Fn(&mut [i16; L1], usize),
-        FS: Fn(&mut [i16; L1], usize),
-    {
-        let mut ci = 0;
-        let mut ni = 0;
-
-        while ci < cached.len() && ni < current.len() {
-            let c = cached[ci];
-            let n = current[ni];
-            if c < n {
-                // cached にあって current にない → 削除
-                sub_fn(accumulation, c as usize);
-                ci += 1;
-            } else if c > n {
-                // current にあって cached にない → 追加
-                add_fn(accumulation, n as usize);
-                ni += 1;
-            } else {
-                // 両方にある → 変化なし
-                ci += 1;
-                ni += 1;
-            }
-        }
-
-        // 残りの cached（削除）
-        while ci < cached.len() {
-            sub_fn(accumulation, cached[ci] as usize);
-            ci += 1;
-        }
-
-        // 残りの current（追加）
-        while ni < current.len() {
-            add_fn(accumulation, current[ni] as usize);
-            ni += 1;
-        }
     }
 }
 
@@ -704,95 +675,6 @@ mod tests {
     }
 
     /// AccumulatorCaches の apply_diff がソート済み配列の差分を正しく適用することを確認
-    ///
-    /// add_fn: idx を acc[0] に加算、sub_fn: idx を acc[0] から減算。
-    /// これにより acc[0] の最終値で差分の正しさを検証する。
-    #[test]
-    fn test_apply_diff_basic() {
-        let mut acc = [0i16; TEST_L1];
-        // 初期値を設定（cached の重み合計 = 1+3+5 = 9）
-        acc[0] = 9;
-
-        // cached = [1, 3, 5], current = [2, 3, 4]
-        // → remove 1,5 (-6)、add 2,4 (+6)（3 は共通で変化なし）
-        let cached = [1u32, 3, 5];
-        let current = [2u32, 3, 4];
-
-        AccumulatorCacheLayerStacks::<TEST_L1>::apply_diff(
-            &cached,
-            &current,
-            &mut acc,
-            &|a, idx| a[0] = a[0].wrapping_add(idx as i16),
-            &|a, idx| a[0] = a[0].wrapping_sub(idx as i16),
-        );
-
-        // 9 - 1 - 5 + 2 + 4 = 9 (差分は対称のためたまたま同じ)
-        // current の合計 = 2+3+4 = 9
-        assert_eq!(acc[0], 9);
-    }
-
-    /// apply_diff: cached が空の場合（全て追加）
-    #[test]
-    fn test_apply_diff_all_added() {
-        let mut acc = [0i16; TEST_L1];
-
-        let cached: [u32; 0] = [];
-        let current = [10u32, 20, 30];
-
-        AccumulatorCacheLayerStacks::<TEST_L1>::apply_diff(
-            &cached,
-            &current,
-            &mut acc,
-            &|a, idx| a[0] = a[0].wrapping_add(idx as i16),
-            &|a, idx| a[0] = a[0].wrapping_sub(idx as i16),
-        );
-
-        // 0 + 10 + 20 + 30 = 60
-        assert_eq!(acc[0], 60);
-    }
-
-    /// apply_diff: current が空の場合（全て削除）
-    #[test]
-    fn test_apply_diff_all_removed() {
-        let mut acc = [0i16; TEST_L1];
-        acc[0] = 60; // 初期値 = cached の合計
-
-        let cached = [10u32, 20, 30];
-        let current: [u32; 0] = [];
-
-        AccumulatorCacheLayerStacks::<TEST_L1>::apply_diff(
-            &cached,
-            &current,
-            &mut acc,
-            &|a, idx| a[0] = a[0].wrapping_add(idx as i16),
-            &|a, idx| a[0] = a[0].wrapping_sub(idx as i16),
-        );
-
-        // 60 - 10 - 20 - 30 = 0
-        assert_eq!(acc[0], 0);
-    }
-
-    /// apply_diff: 完全一致の場合（変化なし）
-    #[test]
-    fn test_apply_diff_identical() {
-        let mut acc = [0i16; TEST_L1];
-        acc[0] = 42;
-
-        let cached = [1u32, 2, 3, 4, 5];
-        let current = [1u32, 2, 3, 4, 5];
-
-        AccumulatorCacheLayerStacks::<TEST_L1>::apply_diff(
-            &cached,
-            &current,
-            &mut acc,
-            &|a, idx| a[0] = a[0].wrapping_add(idx as i16),
-            &|a, idx| a[0] = a[0].wrapping_sub(idx as i16),
-        );
-
-        // 変化なしなので 42 のまま
-        assert_eq!(acc[0], 42);
-    }
-
     /// refresh_or_cache: 最初のキャッシュミス → full refresh → キャッシュ保存
     #[test]
     fn test_refresh_or_cache_cold_start() {
@@ -804,18 +686,23 @@ mod tests {
         biases[0] = 100;
         biases[1] = 200;
 
-        let active = [5u32, 10, 15]; // ダミーの特徴量
+        // 3 個の BonaPiece を配置 (残りは ZERO)
+        let mut piece_list = [BonaPiece::ZERO; PieceNumber::NB];
+        piece_list[0] = BonaPiece::new(5);
+        piece_list[1] = BonaPiece::new(10);
+        piece_list[2] = BonaPiece::new(15);
+
         let mut accumulation = [0i16; TEST_L1];
 
-        // 加算関数: index を accumulation[0] に加算（テスト用簡略化）
+        // BonaPiece の生値を acc[0] に加算するテスト用簡略化
         cache.refresh_or_cache(
             king_sq,
             perspective,
-            &active,
+            &piece_list,
             &biases,
             &mut accumulation,
-            |acc, idx| acc[0] = acc[0].wrapping_add(idx as i16),
-            |acc, idx| acc[0] = acc[0].wrapping_sub(idx as i16),
+            |acc, bp| acc[0] = acc[0].wrapping_add(bp.value() as i16),
+            |acc, bp| acc[0] = acc[0].wrapping_sub(bp.value() as i16),
         );
 
         // biases[0] + 5 + 10 + 15 = 130
@@ -826,10 +713,11 @@ mod tests {
         // キャッシュが有効になっていることを確認
         let entry = &cache.entries[king_sq.raw() as usize][perspective as usize];
         assert!(entry.valid);
-        assert_eq!(entry.num_active, 3);
+        assert_eq!(entry.piece_list[0], BonaPiece::new(5));
+        assert_eq!(entry.piece_list[2], BonaPiece::new(15));
     }
 
-    /// refresh_or_cache: 2回目のキャッシュヒット → 差分更新
+    /// refresh_or_cache: 2回目のキャッシュヒット → PieceList 差分で差分更新
     #[test]
     fn test_refresh_or_cache_hit() {
         let mut cache = AccumulatorCacheLayerStacks::<TEST_L1>::new();
@@ -838,32 +726,38 @@ mod tests {
 
         let biases = [0i16; TEST_L1];
 
-        // 1回目: active = [5, 10, 15]
-        let active1 = [5u32, 10, 15];
+        // 1回目: piece_list[0..3] = [5, 10, 15]
+        let mut piece_list1 = [BonaPiece::ZERO; PieceNumber::NB];
+        piece_list1[0] = BonaPiece::new(5);
+        piece_list1[1] = BonaPiece::new(10);
+        piece_list1[2] = BonaPiece::new(15);
+
         let mut acc1 = [0i16; TEST_L1];
         cache.refresh_or_cache(
             king_sq,
             perspective,
-            &active1,
+            &piece_list1,
             &biases,
             &mut acc1,
-            |acc, idx| acc[0] = acc[0].wrapping_add(idx as i16),
-            |acc, idx| acc[0] = acc[0].wrapping_sub(idx as i16),
+            |acc, bp| acc[0] = acc[0].wrapping_add(bp.value() as i16),
+            |acc, bp| acc[0] = acc[0].wrapping_sub(bp.value() as i16),
         );
         // acc1[0] = 0 + 5 + 10 + 15 = 30
         assert_eq!(acc1[0], 30);
 
-        // 2回目: active = [5, 10, 20] （15→20 に変化）
-        let active2 = [5u32, 10, 20];
+        // 2回目: piece_list[2] が 15 → 20 に変化
+        let mut piece_list2 = piece_list1;
+        piece_list2[2] = BonaPiece::new(20);
+
         let mut acc2 = [0i16; TEST_L1];
         cache.refresh_or_cache(
             king_sq,
             perspective,
-            &active2,
+            &piece_list2,
             &biases,
             &mut acc2,
-            |acc, idx| acc[0] = acc[0].wrapping_add(idx as i16),
-            |acc, idx| acc[0] = acc[0].wrapping_sub(idx as i16),
+            |acc, bp| acc[0] = acc[0].wrapping_add(bp.value() as i16),
+            |acc, bp| acc[0] = acc[0].wrapping_sub(bp.value() as i16),
         );
         // キャッシュヒット: acc1[0] - 15 + 20 = 30 - 15 + 20 = 35
         assert_eq!(acc2[0], 35);

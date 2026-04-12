@@ -25,6 +25,15 @@ pub struct NnueStats {
     pub evaluate_count: AtomicU64,
     /// 既に計算済みでスキップされた回数
     pub already_computed_count: AtomicU64,
+    /// Finny Tables (AccumulatorCache) ヒット回数（cache valid=true で入った）
+    pub cache_hit_count: AtomicU64,
+    /// Finny Tables (AccumulatorCache) ミス回数（cache valid=false で full rebuild）
+    pub cache_miss_count: AtomicU64,
+    /// refresh cache hit 時の差分駒数ヒストグラム
+    /// [0]=0個, [1]=1-2, [2]=3-5, [3]=6-10, [4]=11-20, [5]=21-40, [6]=41-80, [7]=81+
+    pub refresh_diff_histogram: [AtomicU64; 8],
+    /// refresh cache hit 時の差分駒数の累積合計（平均計算用）
+    pub refresh_diff_sum: AtomicU64,
 }
 
 #[cfg(feature = "nnue-stats")]
@@ -37,6 +46,19 @@ impl NnueStats {
             forward_update_count: AtomicU64::new(0),
             evaluate_count: AtomicU64::new(0),
             already_computed_count: AtomicU64::new(0),
+            cache_hit_count: AtomicU64::new(0),
+            cache_miss_count: AtomicU64::new(0),
+            refresh_diff_histogram: [
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+            ],
+            refresh_diff_sum: AtomicU64::new(0),
         }
     }
 
@@ -47,6 +69,12 @@ impl NnueStats {
         self.forward_update_count.store(0, Ordering::Relaxed);
         self.evaluate_count.store(0, Ordering::Relaxed);
         self.already_computed_count.store(0, Ordering::Relaxed);
+        self.cache_hit_count.store(0, Ordering::Relaxed);
+        self.cache_miss_count.store(0, Ordering::Relaxed);
+        for bin in &self.refresh_diff_histogram {
+            bin.store(0, Ordering::Relaxed);
+        }
+        self.refresh_diff_sum.store(0, Ordering::Relaxed);
     }
 
     /// refresh_accumulator 呼び出しをカウント
@@ -79,14 +107,51 @@ impl NnueStats {
         self.already_computed_count.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Finny Tables cache hit をカウント
+    #[inline]
+    pub fn count_cache_hit(&self) {
+        self.cache_hit_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Finny Tables cache miss をカウント
+    #[inline]
+    pub fn count_cache_miss(&self) {
+        self.cache_miss_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// refresh cache hit 時の差分駒数を histogram に記録
+    #[inline]
+    pub fn count_refresh_diff(&self, diff: usize) {
+        let bin = match diff {
+            0 => 0,
+            1..=2 => 1,
+            3..=5 => 2,
+            6..=10 => 3,
+            11..=20 => 4,
+            21..=40 => 5,
+            41..=80 => 6,
+            _ => 7,
+        };
+        self.refresh_diff_histogram[bin].fetch_add(1, Ordering::Relaxed);
+        self.refresh_diff_sum.fetch_add(diff as u64, Ordering::Relaxed);
+    }
+
     /// 統計情報を取得
     pub fn snapshot(&self) -> NnueStatsSnapshot {
+        let mut hist = [0u64; 8];
+        for (i, bin) in self.refresh_diff_histogram.iter().enumerate() {
+            hist[i] = bin.load(Ordering::Relaxed);
+        }
         NnueStatsSnapshot {
             refresh_count: self.refresh_count.load(Ordering::Relaxed),
             update_count: self.update_count.load(Ordering::Relaxed),
             forward_update_count: self.forward_update_count.load(Ordering::Relaxed),
             evaluate_count: self.evaluate_count.load(Ordering::Relaxed),
             already_computed_count: self.already_computed_count.load(Ordering::Relaxed),
+            cache_hit_count: self.cache_hit_count.load(Ordering::Relaxed),
+            cache_miss_count: self.cache_miss_count.load(Ordering::Relaxed),
+            refresh_diff_histogram: hist,
+            refresh_diff_sum: self.refresh_diff_sum.load(Ordering::Relaxed),
         }
     }
 }
@@ -99,6 +164,10 @@ pub struct NnueStatsSnapshot {
     pub forward_update_count: u64,
     pub evaluate_count: u64,
     pub already_computed_count: u64,
+    pub cache_hit_count: u64,
+    pub cache_miss_count: u64,
+    pub refresh_diff_histogram: [u64; 8],
+    pub refresh_diff_sum: u64,
 }
 
 impl NnueStatsSnapshot {
@@ -142,6 +211,21 @@ impl NnueStatsSnapshot {
         100.0 - self.refresh_rate()
     }
 
+    /// Finny Tables cache の合計アクセス数
+    pub fn total_cache_accesses(&self) -> u64 {
+        self.cache_hit_count + self.cache_miss_count
+    }
+
+    /// Finny Tables cache hit 率（%）
+    pub fn cache_hit_rate(&self) -> f64 {
+        let total = self.total_cache_accesses();
+        if total == 0 {
+            0.0
+        } else {
+            self.cache_hit_count as f64 / total as f64 * 100.0
+        }
+    }
+
     /// レポートを出力
     pub fn print_report(&self) {
         let total = self.total_accumulator_updates();
@@ -165,6 +249,32 @@ impl NnueStatsSnapshot {
             self.forward_update_rate()
         );
         eprintln!("incremental rate:      {:>11.1}%", self.incremental_rate());
+        let cache_total = self.total_cache_accesses();
+        eprintln!("finny cache accesses:  {:>12}", cache_total);
+        eprintln!(
+            "  cache hit:           {:>12} ({:>5.1}%)",
+            self.cache_hit_count,
+            self.cache_hit_rate()
+        );
+        eprintln!(
+            "  cache miss:          {:>12} ({:>5.1}%)",
+            self.cache_miss_count,
+            100.0 - self.cache_hit_rate()
+        );
+        if self.cache_hit_count > 0 {
+            let avg = self.refresh_diff_sum as f64 / self.cache_hit_count as f64;
+            eprintln!("refresh diff avg:      {:>11.2} pieces/call", avg);
+            let labels = ["0", "1-2", "3-5", "6-10", "11-20", "21-40", "41-80", "81+"];
+            eprintln!("refresh diff histogram:");
+            for (i, &cnt) in self.refresh_diff_histogram.iter().enumerate() {
+                let pct = if self.cache_hit_count > 0 {
+                    cnt as f64 / self.cache_hit_count as f64 * 100.0
+                } else {
+                    0.0
+                };
+                eprintln!("  diff {:>5}:  {:>12} ({:>5.1}%)", labels[i], cnt, pct);
+            }
+        }
         eprintln!("==============================");
     }
 }
@@ -261,6 +371,53 @@ macro_rules! count_already_computed {
     () => {};
 }
 
+/// Finny Tables cache hit カウント（feature有効時のみ）
+#[cfg(feature = "nnue-stats")]
+macro_rules! count_cache_hit {
+    () => {
+        $crate::nnue::stats::NNUE_STATS.count_cache_hit()
+    };
+}
+
+/// Finny Tables cache hit カウント（no-op）
+#[cfg(not(feature = "nnue-stats"))]
+macro_rules! count_cache_hit {
+    () => {};
+}
+
+/// Finny Tables cache miss カウント（feature有効時のみ）
+#[cfg(feature = "nnue-stats")]
+macro_rules! count_cache_miss {
+    () => {
+        $crate::nnue::stats::NNUE_STATS.count_cache_miss()
+    };
+}
+
+/// Finny Tables cache miss カウント（no-op）
+#[cfg(not(feature = "nnue-stats"))]
+macro_rules! count_cache_miss {
+    () => {};
+}
+
+/// refresh diff 記録（feature有効時のみ）
+#[cfg(feature = "nnue-stats")]
+macro_rules! count_refresh_diff {
+    ($diff:expr) => {
+        $crate::nnue::stats::NNUE_STATS.count_refresh_diff($diff)
+    };
+}
+
+/// refresh diff 記録（no-op）
+#[cfg(not(feature = "nnue-stats"))]
+macro_rules! count_refresh_diff {
+    ($diff:expr) => {
+        let _ = $diff;
+    };
+}
+
 pub(crate) use count_already_computed;
+pub(crate) use count_cache_hit;
+pub(crate) use count_cache_miss;
 pub(crate) use count_refresh;
+pub(crate) use count_refresh_diff;
 pub(crate) use count_update;
