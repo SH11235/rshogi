@@ -607,6 +607,90 @@ while (addedBB) {
 4. **Step 4**: 回帰チェック (Golden Forward、YO alignment)
 5. **Step 5**: マージ判断
 
+## refresh 経路分離計測 (2026-04-12 追加)
+
+当初「refresh の 12% は玉移動 (`update_accumulator_with_cache` の reset path)
+による Threat full refresh」と仮定して Threat Finny Tables 導入を検討していたが、
+refresh の発生元を 2 経路に分けて計測したところ、**想定が完全に覆る結果**が出た。
+
+### 計測方法
+
+`stats.rs` に `refresh_full_count` / `refresh_reset_count` を追加:
+
+- `count_refresh_full!()`: `refresh_accumulator_with_cache` の loop 内
+  (LayerStacks の `do_update!` で prev が未計算のときに呼ばれる経路)
+- `count_refresh_reset!()`: `update_accumulator_with_cache` 内で
+  `HalfKA_hm_FeatureSet::needs_refresh` (king_moved) が true のときの経路
+
+どちらも既存の `count_refresh!()` に加えて並行カウント。
+
+### 結果 (v92, complex-middle, movetime 10s)
+
+```
+refresh:            2,176,100 (38.1%)
+  full (stack):     2,127,900 (97.8%)  ← refresh_accumulator_with_cache 経由
+  reset (king mv):     48,200 ( 2.2%)  ← update の玉移動経由
+```
+
+**refresh の 97.8% が `refresh_accumulator_with_cache` 経由で、update の reset path
+(玉移動由来) は全体のわずか 2.2%**。
+
+### 原因: pruning 後の accumulator chain 途切れ
+
+LayerStacks の `update_accumulator` (`network_layer_stacks.rs::do_update!`) の
+ロジック:
+
+```rust
+if current.computed_accumulation { return; }  // 既に計算済み
+if let Some(prev_idx) = current.previous {
+    if prev.computed_accumulation {
+        // update 経路（差分更新）
+    }
+}
+// update しなかった場合のフォールバック
+$net.refresh_accumulator_with_cache(...);  // ← ここが self 12% の正体
+```
+
+つまり **prev が computed でないケースで必ず `refresh_accumulator_with_cache` に
+フォールバック** する。
+
+典型的な発生パターン:
+1. do_move → push (entry[N+1] 未計算、prev=N)
+2. pruning で eval せず即 undo_move → pop (current=N)
+3. 別の手 do_move → push (entry[N+1] 上書き、prev=N)
+4. eval を試みる → **entry[N+1] の accumulator は前の branch の残骸で未計算**
+5. prev=N が computed なら update 経路で済むが、`current.computed_accumulation`
+   自体は push 時に false 化されるので、勝手に computed にはならない
+
+**ただし上記は勘違いで、実際には push 時の entry[N+1] は computed=false、prev=N は
+computed=true のはず**。それでも refresh_full が 97.8% というのは別の原因がある。
+
+候補:
+- pruning で chain の中間 entry の eval が発生せず、遠い ancestor だけが computed
+- `compute_eval_context` が呼ばれないノード (in_check 時の static_eval 継承など)
+- quiescence search での jump で stack の整合性が崩れる
+
+### Stockfish の対策 (find_usable_accumulator)
+
+Stockfish は `find_usable_accumulator` を実装しており、prev が未計算の場合に
+**さらに上位 ancestor を遡って computed な accumulator を探す** 仕組みがある。
+見つかったら、そこから current までの dirty_piece chain を forward で差分累積
+(`update_accumulator_incremental<Forward>`) する。逆方向にも対応。
+
+rshogi にはこの機構がなく、prev 未計算 → 即 refresh にフォールバックしている。
+
+### 改修の優先順位 (見直し)
+
+先の PoC (HalfKA_hm の refresh_perspective_with_cache PieceList 化) と
+Threat Finny Tables 導入の前に、**更に上流の問題がある**:
+
+1. **最優先**: Stockfish 風 `find_usable_accumulator` の実装
+   - ancestor を遡って computed な entry を見つける
+   - forward または backward で dirty_piece chain を差分累積
+   - 期待効果: refresh 発生率 38% → 数% に削減、NPS +10〜20% 相当
+2. **次**: Threat Finny Tables (refresh 頻度が下がっても full refresh を更に減らす)
+3. **後回し**: refresh_perspective_with_cache の PieceList 最適化 (効果 0% 確認済み)
+
 ## 実験方針への示唆
 
 1. **refresh_accumulator の頻度と cache ヒット率の実測が最優先** — NPS +5〜9% 相当の余地

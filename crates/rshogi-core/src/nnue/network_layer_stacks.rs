@@ -708,6 +708,8 @@ impl LayerStacksNetwork {
                 }
 
                 let mut updated = false;
+
+                // 1. 直前 (prev_idx) が computed なら 1-step update (最速)
                 if let Some(prev_idx) = current_entry.previous {
                     let prev_computed = $stack.entry_at(prev_idx).accumulator.computed_accumulation;
                     if prev_computed {
@@ -732,6 +734,18 @@ impl LayerStacksNetwork {
                     }
                 }
 
+                // 2. 直前が未計算でも find_usable_accumulator で ancestor を探し
+                //    forward_update_incremental で chain 差分更新を試みる。
+                //    (king_moved=true を含まない範囲で computed な ancestor を探す)
+                if !updated {
+                    if let Some((src_idx, _depth)) = $stack.find_usable_accumulator() {
+                        if $net.forward_update_incremental(pos, $stack, src_idx) {
+                            updated = true;
+                        }
+                    }
+                }
+
+                // 3. いずれも失敗 → full refresh (最後のフォールバック)
                 if !updated {
                     let acc = &mut $stack.current_mut().accumulator;
                     if let Some(
