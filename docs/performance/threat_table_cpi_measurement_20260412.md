@@ -1059,6 +1059,78 @@ PoC と同じ「instructions 削減 + CPI 悪化で NPS 効果なし」パター
 
 JSON: `/tmp/perf_measure_20260413/threat_fusedprev.json`
 
+## v87 vs v92 gap の再計測 (2026-04-13, 全改修後)
+
+sfcache 導入で HalfKA refresh が軽くなり、fastpath/forward_update/fused_prev
+のマイクロ最適化が全て効果なしに収束したため、v87 と v92 を同じコード
+(sfcache 導入済) で直接 A/B 測定して gap の性質を確認した。
+
+### ビルド
+
+- baseline: `/tmp/rshogi-1536-nothreat-progdiff-sfcache-prod`
+  - `--features layerstack-only,layerstacks-1536,nnue-progress-diff` (Threat 無し)
+  - eval: `v87-400`
+- candidate: `/tmp/rshogi-512-threat-p0-progdiff-sfcache-prod`
+  - `--features layerstack-only,layerstacks-512,nnue-threat,nnue-progress-diff`
+  - eval: `v92-60`
+
+### 計測
+
+| 項目 | v87 (baseline) | v92 (candidate) | Δ |
+|---|---:|---:|---:|
+| avg_nps | 621,939 | 497,058 | **-20.08%** |
+| cycles/node | 7,059.6 | 8,829.2 | **+25.07%** |
+| instructions/node | 14,870.2 | 17,423.7 | **+17.17%** |
+| CPI | 0.475 | 0.507 | +6.7% |
+
+### 解釈
+
+- **instructions/node +17.17% が Threat の純粋計算コスト**
+  - v87 は Threat 無し、v92 は Threat full refresh/update を含む
+  - Δ instructions ≈ 2,553/node がそのまま Threat 寄与分
+- **CPI も +6.7% 悪化**
+  - Threat weight table (106MB) へのランダムアクセスで memory subsystem に
+    圧力がかかっている
+- sfcache は v87/v92 両方に効いているため、**相対 gap は変わらない**
+  - 改修前 (7833c1ce): v92/v87 ≈ 469K/590K ≈ 79.5% (gap 20.5%)
+  - 改修後 (28a79233): v92/v87 ≈ 497K/622K ≈ 79.9% (gap 20.1%)
+
+### 含意: v87 NPS 追いつきは inference 最適化のみでは困難
+
+Threat 関連コストが instructions 側で 17% / cycles 側で 25% を占めており、
+これを完全に削るには **Threat 自体の計算量を減らす** しかない:
+
+1. **Task D: 学習側で Threat dims 削減**
+   - 現 216,720 dims (profile 0) → 130k-160k 程度に削減
+   - 期待効果: 3-4% NPS (過去 docs 試算)、instructions 側の Threat 分を ~20% 削減
+
+2. **Threat 用 Finny Tables (Stockfish 風)**
+   - 現行 sfcache に `threat_accumulation` を追加し、cached 状態からの
+     piece_list 差分で threat 増分を計算
+   - 複雑度: 300+ 行、correctness 検証が困難
+   - 期待効果: Threat full rebuild path (9.5% cycles) の半分を削減 → NPS +4-5%
+
+3. **Threat weight 量子化 (i8 → i4)**
+   - weight table 半減 → cache pressure 軽減
+   - 学習側変更、棋力低下リスク
+
+4. **L0 縮小 (512 → 384)**
+   - accumulator size 縮小 → memory traffic 軽減
+   - 学習側変更
+
+inference 単独では +5% 程度が天井。学習側の dims 削減と組み合わせて
+累積 +8-10% 程度。それでも v87 の NPS には届かない (-10% 程度残る)。
+
+### 代替戦略: eval 品質で勝負
+
+NPS で v87 に勝てなくても、**Threat モデルの eval 品質が高ければ
+少ない nodes で良い手を見つけられる**可能性がある。selfplay による
+playing strength 評価が本質的な指標。
+
+次の検証: 現状の v92-60 vs v87-400 selfplay (同一バイナリ sfcache 版)。
+
+JSON: `/tmp/perf_measure_20260413/v87_vs_v92_sfcache.json`
+
 ## 実験方針への示唆
 
 1. **refresh_accumulator の頻度と cache ヒット率の実測が最優先** — NPS +5〜9% 相当の余地
