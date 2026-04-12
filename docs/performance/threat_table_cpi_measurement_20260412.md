@@ -691,6 +691,72 @@ Threat Finny Tables 導入の前に、**更に上流の問題がある**:
 2. **次**: Threat Finny Tables (refresh 頻度が下がっても full refresh を更に減らす)
 3. **後回し**: refresh_perspective_with_cache の PieceList 最適化 (効果 0% 確認済み)
 
+## find_usable_accumulator 活用 PoC (2026-04-12)
+
+既存の `find_usable_accumulator` + `forward_update_incremental` は実装済み
+だったが、`network_layer_stacks.rs::do_update!` から呼ばれていなかった。
+これを段階的フォールバック (1-step → find_usable + forward → refresh) に
+改修した (`7ea08166`, `82f54b03`)。
+
+### nnue-stats (profiling build, complex-middle)
+
+```
+refresh 率     : 38.1% → 29.5% (-22.6 pp)
+refresh_full   : 2,127,900 → 1,521,898 (-28%)
+forward_update : 0 → 287,524 (5.4%)
+incremental率  : 61.9% → 70.5% (+8.6 pp)
+```
+
+**設計通り refresh を 28% 削減**。forward_update_incremental 経由で
+ancestor からの chain 差分更新に置き換わった。
+
+### production build での NPS 計測 (search_only_ab, 4局面, abba × 2 rounds)
+
+旧 v92 (`c5e4e057`, 改修前) vs 新 v92 (`82f54b03`, find_usable + clone 削除):
+
+| 項目 | baseline (c5e4e057) | candidate (82f54b03) | Δ |
+|---|---:|---:|---:|
+| avg_nps | 462,145 | 462,182 | **+0.01%** |
+| cycles/node | 9,502.5 | 9,501.5 | −0.01% |
+| instructions/node | 19,650.1 | 19,385.0 | **−1.35%** |
+| CPI | 0.4835 | 0.4902 | +1.4% |
+
+**production build では NPS 変化なし (+0.01% = 誤差)**。
+
+### 中間経過: 7ea08166 単独の計測
+
+`forward_update_incremental` の `source_acc.clone()` を残したままの
+`7ea08166` 時点では NPS **-0.91%** まで退行していた:
+
+| 項目 | baseline (c5e4e057) | candidate (7ea08166) | Δ |
+|---|---:|---:|---:|
+| avg_nps | 458,674 | 454,490 | -0.91% |
+| cycles/node | 9,576.7 | 9,655.8 | +0.83% |
+| instructions/node | 19,645.6 | 19,384.3 | -1.33% |
+
+退行の主因は `source_acc.clone()` による 2 段 memcpy
+(source → stack clone → current)。`82f54b03` で
+`split_at_mut` 経由の直接コピーに変更したところ、退行は解消したが
+NPS 改善には至らず誤差範囲に収束した。
+
+### 考察
+
+- **命令数削減は実測** (instructions/node -1.35%): refresh → forward_update 置換の計算量削減効果は発揮されている
+- **CPI が +1.4% 悪化**: 関数呼び出し overhead、branch mispredict、または
+  multi-step chain の cache 動作の違いにより、削減した命令数分の cycles が
+  他の stall で相殺されている
+- **profiling build で観測した +4.4% は LTO なしの副作用**: LTO なし
+  では既存 1-step update path が遅く、改修効果が相対的に大きく見えた。
+  LTO=fat の production build では既存 path が十分高速で、新 path の
+  overhead が勝ってしまう
+
+### 判断: 改修を revert
+
+NPS 改善なし (+0.01% = 誤差) で、CLAUDE.md の「早すぎる最適化禁止・
+測定なしの最適化禁止」方針に従い本改修は revert する。計測結果は
+docs に残し、将来の改良の足場 (特に CPI 悪化の原因特定、
+forward_update_incremental の更なる最適化) とする。
+
 ## 実験方針への示唆
 
 1. **refresh_accumulator の頻度と cache ヒット率の実測が最優先** — NPS +5〜9% 相当の余地
