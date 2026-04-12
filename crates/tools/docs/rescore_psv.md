@@ -147,12 +147,17 @@ cargo run --release -p tools --features aobazero-onnx --bin rescore_psv -- \
 
 ### `--threads` の推奨値
 
-特徴量構築を rayon で並列化するスレッド数。GPU 推論の速度に応じて有効な設定が異なる。
+特徴量構築を rayon で並列化するスレッド数。CPU 側の特徴量構築と GPU 推論の
+バランスによって有効な設定が変わる。
+
+- 本ツールは「特徴量構築（CPU）」と「推論（GPU）」をバッチ単位で進める
+- `--threads N` は特徴量構築の並列度を決める。N が増えるほど特徴量構築は速く終わる
+- 全体の処理時間は `max(特徴量構築時間, GPU 推論時間)` で決まる
 
 | 構成 | 推奨 | 理由 |
 |---|---|---|
-| CUDA EP (FP32) | **`--threads 4`** 程度 | GPU 推論が律速（~370ms/batch）で、CPU 側の特徴量構築を GPU 待ち時間に重ねられるため並列化が有効 |
-| TensorRT EP (FP16) | **`--threads 1`** でよい | GPU 推論が速すぎる（~100ms/batch）ため CPU 並列化の効果がほぼない（計測で確認済み、差 0.3%） |
+| CUDA EP (FP32) | **`--threads 4`** 程度 | GPU 推論が遅い（~370ms/batch）。1 スレッドでも CPU 側は GPU 待ちになるが、並列化で特徴量構築をさらに速く終わらせると GPU 推論と重なる時間が増え、全体時間を短縮できる |
+| TensorRT EP (FP16) | **`--threads 1`** で十分 | GPU 推論が速い（~100ms/batch）が、1 スレッドの CPU でも特徴量構築がこれに間に合うため、並列化で CPU を速くしても `max(CPU, GPU)` の最大側（GPU）が変わらず全体時間は短縮できない |
 
 ### 計測例（DL_suisho.onnx, BS=1024, RTX 2070 Super）
 
@@ -205,7 +210,9 @@ AobaZero ONNX model loaded. Batch size: 1024
   `--onnx-tensorrt-cache` でキャッシュを保存すると 2 回目以降は高速起動する
 - このツールのボトルネックは CPU→GPU のデータ転送（全処理時間の 96%、nsys 計測）であり、
   FP16 による高速化は主に転送量の半減と Tensor Core 活用に起因する
-- `--threads` による CPU 並列化の効果は GPU 推論速度に依存する。CUDA EP (FP32) では GPU 待ち時間が
-  長いため並列化が効くが、TensorRT EP (FP16) では GPU が速すぎて効果がほぼない
+- `--threads` による CPU 並列化の効果は CPU 特徴量構築と GPU 推論のバランスに依存する。
+  CUDA EP (FP32) では GPU 推論が遅いため、並列化で CPU 処理を速く済ませると GPU と重なる時間が増え全体が短縮する。
+  TensorRT EP (FP16) では 1 スレッドでも CPU が GPU 推論時間に間に合うため、並列化で CPU を速くしても
+  全体は `max(CPU, GPU)` の大きい方（GPU）で決まり短縮できない
 - 参考: 同等の Python ツール [psv-utils](https://github.com/KazApps/psv-utils) と比較して、
   本ツールは CUDA EP / TensorRT EP どちらでも約 6〜9% 速い（1,051,780 records, 温度管理付き計測）
