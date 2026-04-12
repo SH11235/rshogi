@@ -937,6 +937,63 @@ find_usable_accumulator PoC と同じ「計算量は減るが CPI 微悪化で c
 
 JSON: `/tmp/perf_measure_20260413/threat_fastpath_v1.json`
 
+## LayerStacks cache の Stockfish 風 piece_list 差分化 (2026-04-13, `72842680`)
+
+`threat_table_cpi_measurement_20260412.md` の
+「refresh 経路分離計測」「Stockfish Finny Tables 実装との比較」の知見に基づき、
+`AccumulatorCacheLayerStacks` を Stockfish 風の差分方式に置換した。
+
+### 設計
+
+- 旧: cache entry に `active_indices: [u32; MAX_ACTIVE_FEATURES]` (sort 済)
+- 新: cache entry に `piece_list: [BonaPiece; PieceNumber::NB]` (40 slot 固定長)
+
+refresh 処理:
+- 旧: 呼び出し側で `append_active_indices` → sorted u32 配列 → マージ差分
+- 新: `piece_list` を直接 cache に渡し、40 slot を slot-wise 比較、変化 slot のみ
+  `idx_fn(bp)` で feature index を算出して add/sub
+
+Stockfish と異なり Bitboard XOR を使わないのは、rshogi の `PieceList` が
+perspective-specific に常時 `piece_list_fb` / `piece_list_fw` として維持され、
+40 entry 固定長で比較コストが最小のため。
+
+### 計測 (production + nnue-progress-diff, search_only_ab)
+
+baseline (`7833c1ce`, 旧 cache) vs candidate (`72842680`, Stockfish 風 cache):
+
+| 項目 | baseline | candidate | Δ |
+|---|---:|---:|---:|
+| avg_nps | 454,125 | 490,171 | **+7.94%** |
+| cycles/node | 9,650.6 | 8,941.7 | **-7.35%** |
+| instructions/node | 19,111.9 | 17,422.9 | **-8.84%** |
+
+(fastpath PoC `1fe24736` と cumulative。fastpath 単独は +0.20%、sfcache 単独は +7.58%)
+
+### 正しさ検証
+
+`go nodes 200000` で baseline/candidate 両者とも startpos で:
+- depth=15, seldepth=24, nodes=111185, score=cp 105
+- pv = `7g7f 4a3b 2g2f 8c8d ...` 完全一致
+- bestmove `7g7f`
+
+完全一致なので eval 値に差異がないことを確認。
+
+### 考察
+
+- **failed PoC (Threat Finny Tables, `59157c79`) との本質的な差**: 
+  - 旧 PoC は cache entry を 8KB 拡張 (sorted indices 配列) → cache pressure 悪化
+  - 本改修は 160 bytes → 80 bytes に縮小 + sort 完全除去
+- **期待通り refresh path の fixed overhead (~320 ops/call) が消えた**: 
+  `append_active_indices` (40 ops) + `sort_unstable` (~200 ops) + マージ scan (~80 ops) の
+  ~320 ops が、40 slot 比較 + 差分 slot の idx 計算 (~40 + 2×diff ops ≈ 50 ops) に置換。
+  削減量 ≈ 270 ops/call × refresh 頻度 38% ≈ 削減期待 +7% と整合。
+- v87 との gap: 590K vs 490K → 17% (改善前は 26%)
+
+### JSON
+
+- `/tmp/perf_measure_20260413/threat_sfcache_v1.json` (vs fastpath)
+- `/tmp/perf_measure_20260413/threat_sfcache_vs_base.json` (vs original 7833c1ce)
+
 ## 実験方針への示唆
 
 1. **refresh_accumulator の頻度と cache ヒット率の実測が最優先** — NPS +5〜9% 相当の余地
