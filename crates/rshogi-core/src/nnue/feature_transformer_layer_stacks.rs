@@ -795,10 +795,9 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
         };
         count_forward_update!();
 
-        // source_acc から main + psqt + threat の全てをコピー
-        let source_acc = stack.entry_at(source_idx).accumulator.clone();
+        // source → current へ直接コピー (clone を経由せず split_at_mut で分離)
         {
-            let current_acc = &mut stack.current_mut().accumulator;
+            let (source_acc, current_acc) = stack.get_prev_and_current_accumulators(source_idx);
             for perspective in [Color::Black, Color::White] {
                 let p = perspective as usize;
                 current_acc.get_mut(p).copy_from_slice(source_acc.get(p));
