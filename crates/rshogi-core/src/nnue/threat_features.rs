@@ -537,6 +537,25 @@ fn attacks_from_piece(pt: PieceType, color: Color, sq: Square, occupied: Bitboar
     }
 }
 
+/// Threat 列挙可能かつ occupied 非依存な駒種（leaper + step mover）
+///
+/// このグループの attack_bb は `occupied` 引数を無視するため、
+/// before/after で盤面が変わっても同一結果を返せる。
+#[inline]
+fn is_occupied_independent_threat(pt: PieceType) -> bool {
+    matches!(
+        pt,
+        PieceType::Pawn
+            | PieceType::Knight
+            | PieceType::Silver
+            | PieceType::Gold
+            | PieceType::ProPawn
+            | PieceType::ProLance
+            | PieceType::ProKnight
+            | PieceType::ProSilver
+    )
+}
+
 // =============================================================================
 // for_each_active_threat_index（ヒープ不要のコールバック版）
 // =============================================================================
@@ -825,6 +844,122 @@ pub fn append_changed_threat_indices(
     let mut src_iter = source_bb;
     while !src_iter.is_empty() {
         let sq_s = src_iter.pop();
+
+        // --- Fast path: source が changed_bb 外かつ occupied 非依存な駒種 ---
+        //
+        // 前提:
+        // - `attackers_to_occ` は after-state の piece bitboards を参照するため、
+        //   source_bb に含まれかつ changed_bb 外の sq は必ず after-state で駒あり、
+        //   かつ before でも同じ駒 (駒自体は動いていない)。
+        // - Pawn/Knight/Silver/Gold 系は attack_bb が occupied 非依存なので、
+        //   before/after で attack_bb が完全に同一。
+        // - よって source 駒情報と attack_bb は before/after で共通。
+        //   changed_bb 外の target は before/after で駒情報も不変
+        //   → pair index も同一 → 最終 set diff で相殺される。
+        // - Fast path ではこれを予め認識し、target loop を
+        //   `attacks & changed_bb` に絞る (changed_bb 外 target は push スキップ)。
+        if !changed_bb.contains(sq_s) {
+            let pc = pos.piece_on(sq_s);
+            // source_bb は attackers_to_occ の結果と changed_bb の union。
+            // changed_bb 外の source は attackers_to_occ 経由で必ず after-state の
+            // 盤上駒 (pc.is_some()) が保証されるはずだが、defensive に is_none を確認する。
+            if pc.is_none() {
+                continue;
+            }
+            let pt = pc.piece_type();
+            if is_occupied_independent_threat(pt) {
+                // King は is_occupied_independent_threat で弾かれるので
+                // from_piece_type は必ず Some。
+                let class = ThreatClass::from_piece_type(pt).expect("leaper class");
+                let color = pc.color();
+                let attacker_side = if color == friend_color { 0 } else { 1 };
+                let oriented_color = if perspective == Color::Black {
+                    color
+                } else {
+                    !color
+                };
+                // occupied 非依存なので EMPTY を渡す
+                let attack_bb = attacks_from_piece(pt, color, sq_s, Bitboard::EMPTY);
+                let candidate_targets = attack_bb & changed_bb;
+                let from_sq_n = normalize_sq(sq_s, perspective, hm);
+
+                // --- Before 側: candidate ∩ before_occ ---
+                let mut bt = candidate_targets & before_occ;
+                while !bt.is_empty() {
+                    let to_sq = bt.pop();
+                    if let Some(t) = lookup_piece_before(
+                        to_sq,
+                        &old_entries,
+                        old_count,
+                        &new_entries,
+                        new_count,
+                        pos,
+                    ) {
+                        let attacked_side = if t.color == friend_color { 0 } else { 1 };
+                        let to_sq_n = normalize_sq(to_sq, perspective, hm);
+                        if let Some(idx) = threat_index(
+                            attacker_side,
+                            class,
+                            oriented_color,
+                            attacked_side,
+                            t.class,
+                            from_sq_n,
+                            to_sq_n,
+                            from_offset_table,
+                        ) {
+                            if before_len >= MAX_INTERMEDIATE_THREATS {
+                                overflow = true;
+                                break;
+                            }
+                            before_buf[before_len] = idx as u32;
+                            before_len += 1;
+                        }
+                    }
+                }
+                if overflow {
+                    break;
+                }
+
+                // --- After 側: candidate ∩ after_occ ---
+                let mut at = candidate_targets & after_occ;
+                while !at.is_empty() {
+                    let to_sq = at.pop();
+                    let target_pc = pos.piece_on(to_sq);
+                    if target_pc.is_none() {
+                        continue;
+                    }
+                    let target_pt = target_pc.piece_type();
+                    if let Some(target_class) = ThreatClass::from_piece_type(target_pt) {
+                        let target_color = target_pc.color();
+                        let attacked_side = if target_color == friend_color { 0 } else { 1 };
+                        let to_sq_n = normalize_sq(to_sq, perspective, hm);
+                        if let Some(idx) = threat_index(
+                            attacker_side,
+                            class,
+                            oriented_color,
+                            attacked_side,
+                            target_class,
+                            from_sq_n,
+                            to_sq_n,
+                            from_offset_table,
+                        ) {
+                            if after_len >= MAX_INTERMEDIATE_THREATS {
+                                overflow = true;
+                                break;
+                            }
+                            after_buf[after_len] = idx as u32;
+                            after_len += 1;
+                        }
+                    }
+                }
+                if overflow {
+                    break;
+                }
+                continue;
+            }
+        }
+
+        // --- Slow path: slider or changed source ---
 
         // --- Before 状態の threat 列挙 ---
         if let Some(info) =
