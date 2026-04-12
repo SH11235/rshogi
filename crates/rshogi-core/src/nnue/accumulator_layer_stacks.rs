@@ -92,19 +92,10 @@ impl<const L1: usize> Default for AccumulatorLayerStacks<L1> {
 // AccumulatorCacheLayerStacks - Finny Tables（玉位置×視点キャッシュ）
 // =============================================================================
 
-/// Threat Finny Tables の active indices 保持上限。
-/// 局面あたりの最大 active Threat 数は 1000 程度と推定されるため、
-/// 保守的に 1024 とし overflow 時は full refresh にフォールバックする。
-#[cfg(feature = "nnue-threat")]
-pub(crate) const MAX_THREAT_ACTIVE: usize = 1024;
-
 /// AccumulatorCaches のキャッシュエントリ（Finny Tables）
 ///
 /// 各玉位置×視点ごとに、最後に計算したアキュムレータ値とその時点のアクティブ特徴量を保持。
 /// refresh 時にキャッシュからの差分で更新することで、全駒加算を回避する。
-///
-/// `nnue-threat` 有効時は同 entry 内に Threat 用の accumulation / indices も保持し、
-/// HalfKA_hm と独立に差分更新できるようにする。
 #[repr(C, align(64))]
 struct AccCacheEntry<const L1: usize> {
     /// キャッシュされたアキュムレータ値
@@ -113,20 +104,8 @@ struct AccCacheEntry<const L1: usize> {
     active_indices: [u32; MAX_ACTIVE_FEATURES],
     /// active_indices の有効数
     num_active: u16,
-    /// 有効フラグ (HalfKA_hm 用)
+    /// 有効フラグ
     valid: bool,
-    /// キャッシュされた Threat アキュムレータ値（Threat は bias なしなので 0 初期化）
-    #[cfg(feature = "nnue-threat")]
-    threat_accumulation: [i16; L1],
-    /// Threat キャッシュ時点のアクティブ特徴インデックス（ソート済み）
-    #[cfg(feature = "nnue-threat")]
-    threat_active_indices: [u32; MAX_THREAT_ACTIVE],
-    /// threat_active_indices の有効数
-    #[cfg(feature = "nnue-threat")]
-    threat_num_active: u16,
-    /// Threat キャッシュの有効フラグ (HalfKA_hm と独立)
-    #[cfg(feature = "nnue-threat")]
-    threat_valid: bool,
 }
 
 impl<const L1: usize> AccCacheEntry<L1> {
@@ -137,14 +116,6 @@ impl<const L1: usize> AccCacheEntry<L1> {
             active_indices: [0; MAX_ACTIVE_FEATURES],
             num_active: 0,
             valid: false,
-            #[cfg(feature = "nnue-threat")]
-            threat_accumulation: [0; L1],
-            #[cfg(feature = "nnue-threat")]
-            threat_active_indices: [0; MAX_THREAT_ACTIVE],
-            #[cfg(feature = "nnue-threat")]
-            threat_num_active: 0,
-            #[cfg(feature = "nnue-threat")]
-            threat_valid: false,
         }
     }
 }
@@ -179,54 +150,8 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
         for sq_entries in self.entries.iter_mut() {
             for entry in sq_entries.iter_mut() {
                 entry.valid = false;
-                #[cfg(feature = "nnue-threat")]
-                {
-                    entry.threat_valid = false;
-                }
             }
         }
-    }
-
-    /// Threat 用キャッシュからの差分で refresh を実行
-    ///
-    /// HalfKA_hm 用の `refresh_or_cache` と同じロジックだが、bias なし
-    /// (Threat は piece FT と bias を共有するため 0 初期化する)。
-    /// 現在の active Threat feature indices (ソート済み) と cache の
-    /// 対称差を計算し、add/sub のみで accumulation を更新する。
-    #[cfg(feature = "nnue-threat")]
-    pub(crate) fn refresh_or_cache_threat<FA, FS>(
-        &mut self,
-        king_sq: Square,
-        perspective: Color,
-        active: &[u32],
-        accumulation: &mut [i16; L1],
-        add_fn: FA,
-        sub_fn: FS,
-    ) where
-        FA: Fn(&mut [i16; L1], usize),
-        FS: Fn(&mut [i16; L1], usize),
-    {
-        let entry = &mut self.entries[king_sq.raw() as usize][perspective as usize];
-
-        if entry.threat_valid {
-            // キャッシュ有効 → 前回 cache から現在の active との差分を apply
-            accumulation.copy_from_slice(&entry.threat_accumulation);
-            let cached = &entry.threat_active_indices[..entry.threat_num_active as usize];
-            Self::apply_diff(cached, active, accumulation, &add_fn, &sub_fn);
-        } else {
-            // cache miss → Threat は bias なしなのでゼロから full rebuild
-            accumulation.fill(0);
-            for &idx in active {
-                add_fn(accumulation, idx as usize);
-            }
-        }
-
-        // cache を更新
-        entry.threat_accumulation.copy_from_slice(accumulation);
-        let n = active.len().min(MAX_THREAT_ACTIVE);
-        entry.threat_active_indices[..n].copy_from_slice(&active[..n]);
-        entry.threat_num_active = n as u16;
-        entry.threat_valid = true;
     }
 
     /// キャッシュからの差分で refresh を実行
