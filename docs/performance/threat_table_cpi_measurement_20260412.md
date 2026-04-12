@@ -811,8 +811,43 @@ cargo build --profile production -p rshogi-usi --bin rshogi-usi \
 運用バイナリ (v92, v94 等 L1=512 モデル) は今後 `nnue-progress-diff` を
 有効にするのが推奨。
 
-L1=768 (v91, v93) では退行するため、必ず L1 サイズごとに
-build features を切り替える必要がある。
+### L1=768 の再評価 (同日追加)
+
+過去の記録「L1=768 で退行」の信頼性を確認するため、**同じ HEAD で
+L1=768 版 baseline と candidate を build し直して再計測** した。
+
+build:
+```bash
+# baseline
+cargo build --profile production -p rshogi-usi --bin rshogi-usi \
+  --features layerstack-only,layerstacks-768,nnue-threat
+
+# candidate
+cargo build --profile production -p rshogi-usi --bin rshogi-usi \
+  --features layerstack-only,layerstacks-768,nnue-threat,nnue-progress-diff
+```
+
+計測 (v91 モデル, search_only_ab 4 局面, abba × 2 rounds):
+
+| 項目 | baseline | candidate (progress-diff) | Δ |
+|---|---:|---:|---:|
+| avg_nps | 402,837 | 415,788 | **+3.21%** |
+| cycles/node | 10,887.4 | 10,547.6 | -3.12% |
+| instructions/node | 22,126.1 | 21,384.9 | -3.35% |
+
+**L1=768 でも NPS +3.21% の改善**。過去の「L1=768 で退行」評価は
+同一 HEAD 比較でない測定環境で行われた可能性が高く、**撤回**する。
+
+### 結論: 全 L1 サイズで nnue-progress-diff を有効化すべき
+
+| L1 | モデル | NPS 改善 |
+|---|---|---:|
+| 1536 | v87 | (過去: cycles -3〜-4%) |
+| 768 | v91 | **+3.21%** |
+| 512 | v92 | **+2.99%** |
+
+全ての運用 build で `nnue-progress-diff` を feature に追加するのが
+推奨。`memory/feature_nnue_progress_diff.md` も全 L1 で有効と更新済み。
 
 ## 実験方針への示唆
 
