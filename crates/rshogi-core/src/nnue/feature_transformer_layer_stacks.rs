@@ -15,9 +15,7 @@ use super::constants::HALFKA_HM_DIMENSIONS;
 use super::constants::NUM_LAYER_STACK_BUCKETS;
 use super::features::{Feature, FeatureSet, HalfKA_hm, HalfKA_hm_FeatureSet};
 use super::leb128::read_compressed_tensor_i16_all;
-use super::stats::{
-    count_forward_update, count_refresh, count_refresh_full, count_refresh_reset, count_update,
-};
+use super::stats::{count_refresh, count_update};
 #[cfg(feature = "nnue-threat")]
 use super::threat_features::{self, MAX_CHANGED_THREAT_FEATURES, THREAT_DIMENSIONS};
 use crate::position::Position;
@@ -593,7 +591,6 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
 
             if reset {
                 count_refresh!();
-                count_refresh_reset!();
                 // 玉が移動した場合はキャッシュ経由で refresh
                 self.refresh_perspective_with_cache(pos, perspective, acc.get_mut(p), cache);
 
@@ -713,7 +710,6 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
     ) {
         for perspective in [Color::Black, Color::White] {
             count_refresh!();
-            count_refresh_full!();
             let p = perspective as usize;
             self.refresh_perspective_with_cache(pos, perspective, acc.get_mut(p), cache);
 
@@ -786,7 +782,6 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             // パスが途切れた場合、または MAX_PATH_LENGTH を超えた場合
             return false;
         };
-        count_forward_update!();
 
         // source_acc から main + psqt + threat の全てをコピー
         let source_acc = stack.entry_at(source_idx).accumulator.clone();
