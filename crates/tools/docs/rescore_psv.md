@@ -148,8 +148,8 @@ cargo run --release -p tools --features aobazero-onnx --bin rescore_psv -- \
 ### `--threads` について
 
 特徴量構築（CPU 処理）を rayon で並列化するスレッド数。
-実測した範囲では、いずれの構成でも `--threads 1` と `--threads 4` で有意な差は
-観測されていない（下表参照）。**デフォルトの `--threads 1` で問題ない**。
+**本ツールのボトルネックは CPU→GPU のデータ転送（全処理時間の 96%、nsys 計測）であり、
+CPU 側の特徴量構築を並列化しても全体時間は短縮されない**。デフォルトの `--threads 1` で問題ない。
 
 ### 計測例（DL_suisho.onnx, BS=1024, RTX 2070 Super）
 
@@ -203,8 +203,8 @@ AobaZero ONNX model loaded. Batch size: 1024
   `--onnx-tensorrt-cache` でキャッシュを保存すると 2 回目以降は高速起動する
 - このツールのボトルネックは CPU→GPU のデータ転送（全処理時間の 96%、nsys 計測）であり、
   FP16 による高速化は主に転送量の半減と Tensor Core 活用に起因する
-- `--threads` による特徴量構築の並列化は、実測した範囲（CUDA FP32 / TensorRT FP16、
-  90k / 1.05M records）で有意な差が観測されていない。CPU 側の特徴量構築が元々十分速く、
-  並列化による短縮幅が計測ノイズに埋もれていると推定される
+- `--threads` による特徴量構築の並列化は、ボトルネックが CPU→GPU 転送（96%）に
+  あるため原理的に全体時間への影響がない。計測でもいずれの構成 (CUDA FP32 / TensorRT FP16、
+  90k / 1.05M records) で有意な差は観測されなかった
 - 参考: 同等の Python ツール [psv-utils](https://github.com/KazApps/psv-utils) と比較して、
   本ツールは CUDA EP / TensorRT EP どちらでも約 6〜9% 速い（1,051,780 records, 温度管理付き計測）
