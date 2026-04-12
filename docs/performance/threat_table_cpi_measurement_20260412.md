@@ -849,6 +849,56 @@ cargo build --profile production -p rshogi-usi --bin rshogi-usi \
 全ての運用 build で `nnue-progress-diff` を feature に追加するのが
 推奨。`memory/feature_nnue_progress_diff.md` も全 L1 で有効と更新済み。
 
+## Threat Finny Tables PoC (2026-04-12, `59157c79`)
+
+perf profile で `refresh_accumulator_with_cache` self 11% の主因は
+Threat の full refresh (vpmovsxbw + vpaddw SIMD loop) と判明していた。
+これを HalfKA_hm の Finny Tables と同じ sorted 対称差方式で差分更新する
+PoC を実装した。
+
+### 実装
+
+- `AccCacheEntry` に `nnue-threat` feature gate で Threat 用 field 追加
+  (threat_accumulation / threat_active_indices / threat_num_active /
+  threat_valid)
+- `MAX_THREAT_ACTIVE = 1024` で overflow 時は full refresh fallback
+- `refresh_or_cache_threat` method で既存の `apply_diff` を流用
+- `refresh_accumulator_with_cache` と `update_accumulator_with_cache` の
+  reset path の Threat 部分を cache 経由に差し替え
+
+### 計測 (search_only_ab, v92 model, nnue-progress-diff 付き production build)
+
+baseline (`0d2fa593`, progdiff のみ) vs candidate (`59157c79`, threat cache 追加):
+
+| 項目 | baseline | candidate | Δ |
+|---|---:|---:|---:|
+| avg_nps | 469,466 | 465,846 | **-0.77%** |
+| cycles/node | 9,350.8 | 9,423.4 | +0.78% |
+| instructions/node | 19,110.6 | 19,199.2 | +0.46% |
+
+**NPS -0.77% で微減**。HalfKA_hm PoC (PieceList 方式、find_usable 方式)
+と同じパターンで、production build では効果が出ない。
+
+### 失敗の原因
+
+1. **`for_each_active_threat_index` のコスト自体が高い**: sort buf に
+   収集するコストが refresh_or_cache_threat の節約分を上回る
+2. **追加コード path の branch/function call overhead**: LTO=fat でも
+   cache management の overhead が相対的に大きい
+3. **threat_active_indices 配列 (8KB/entry) が L1d / TLB を圧迫**:
+   cache entry サイズが従来の 5 倍近くに膨らみ、メモリ階層効率が悪化
+
+### 判断: revert
+
+NPS 改善なし (むしろ -0.77%) で、HalfKA_hm PoC と同様「計測で効果のない
+最適化は残さない」方針に従い revert する。
+
+今後 Threat refresh の削減を試みるなら:
+- **sorted 対称差方式ではない** 別のアプローチが必要 (例: 駒配置差分から
+  直接 threat 差分を計算、`append_changed_threat_indices` を refresh 時
+  にも流用できる機構)
+- あるいは Threat 自体の計算量削減 (dims 削減や SIMD 改善)
+
 ## 実験方針への示唆
 
 1. **refresh_accumulator の頻度と cache ヒット率の実測が最優先** — NPS +5〜9% 相当の余地
