@@ -145,26 +145,19 @@ cargo run --release -p tools --features aobazero-onnx --bin rescore_psv -- \
 | `--onnx-eval-scale` | 600.0 | 勝率→cp 変換スケール |
 | `--threads` | 1 | 処理スレッド数（rayon による特徴量構築の並列化） |
 
-### `--threads` の推奨値
+### `--threads` について
 
-特徴量構築を rayon で並列化するスレッド数。CPU 側の特徴量構築と GPU 推論の
-バランスによって有効な設定が変わる。
-
-- 本ツールは「特徴量構築（CPU）」と「推論（GPU）」をバッチ単位で進める
-- `--threads N` は特徴量構築の並列度を決める。N が増えるほど特徴量構築は速く終わる
-- 全体の処理時間は `max(特徴量構築時間, GPU 推論時間)` で決まる
-
-| 構成 | 推奨 | 理由 |
-|---|---|---|
-| CUDA EP (FP32) | **`--threads 4`** 程度 | GPU 推論が遅い（~370ms/batch）。1 スレッドでも CPU 側は GPU 待ちになるが、並列化で特徴量構築をさらに速く終わらせると GPU 推論と重なる時間が増え、全体時間を短縮できる |
-| TensorRT EP (FP16) | **`--threads 1`** で十分 | GPU 推論が速い（~100ms/batch）が、1 スレッドの CPU でも特徴量構築がこれに間に合うため、並列化で CPU を速くしても `max(CPU, GPU)` の最大側（GPU）が変わらず全体時間は短縮できない |
+特徴量構築（CPU 処理）を rayon で並列化するスレッド数。
+実測した範囲では、いずれの構成でも `--threads 1` と `--threads 4` で有意な差は
+観測されていない（下表参照）。**デフォルトの `--threads 1` で問題ない**。
 
 ### 計測例（DL_suisho.onnx, BS=1024, RTX 2070 Super）
 
 | 構成 | --threads 4 | --threads 1 | 差 |
 |---|---|---|---|
-| CUDA FP32 (90k records) | 31.7 s | 33.4 s | -5% |
-| TensorRT FP16 (1.05M records) | 97.2 s | 96.9 s | +0.3% |
+| CUDA FP32 (90,724 records) | 31.7 s | 33.4 s | 5%（計測ノイズ範囲） |
+| TensorRT FP16 (90,724 records) | 11.6 s | 11.4 s | -2% |
+| TensorRT FP16 (1,051,780 records, 温度管理付き) | 97.2 s | 96.9 s | 0.3% |
 
 > 注: GPU のサーマルスロットリングが計測に大きく影響するため、
 > 連続計測時は GPU 温度を 60℃ 以下に冷却してから実行すること。
@@ -210,9 +203,8 @@ AobaZero ONNX model loaded. Batch size: 1024
   `--onnx-tensorrt-cache` でキャッシュを保存すると 2 回目以降は高速起動する
 - このツールのボトルネックは CPU→GPU のデータ転送（全処理時間の 96%、nsys 計測）であり、
   FP16 による高速化は主に転送量の半減と Tensor Core 活用に起因する
-- `--threads` による CPU 並列化の効果は CPU 特徴量構築と GPU 推論のバランスに依存する。
-  CUDA EP (FP32) では GPU 推論が遅いため、並列化で CPU 処理を速く済ませると GPU と重なる時間が増え全体が短縮する。
-  TensorRT EP (FP16) では 1 スレッドでも CPU が GPU 推論時間に間に合うため、並列化で CPU を速くしても
-  全体は `max(CPU, GPU)` の大きい方（GPU）で決まり短縮できない
+- `--threads` による特徴量構築の並列化は、実測した範囲（CUDA FP32 / TensorRT FP16、
+  90k / 1.05M records）で有意な差が観測されていない。CPU 側の特徴量構築が元々十分速く、
+  並列化による短縮幅が計測ノイズに埋もれていると推定される
 - 参考: 同等の Python ツール [psv-utils](https://github.com/KazApps/psv-utils) と比較して、
   本ツールは CUDA EP / TensorRT EP どちらでも約 6〜9% 速い（1,051,780 records, 温度管理付き計測）
