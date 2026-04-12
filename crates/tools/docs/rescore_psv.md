@@ -143,7 +143,26 @@ cargo run --release -p tools --features aobazero-onnx --bin rescore_psv -- \
 | `--onnx-tensorrt` | false | TensorRT EP を使用（FP16 推論） |
 | `--onnx-tensorrt-cache` | — | TensorRT エンジンキャッシュの保存先 |
 | `--onnx-eval-scale` | 600.0 | 勝率→cp 変換スケール |
-| `--threads` | 1 | 処理スレッド数 |
+| `--threads` | 1 | 処理スレッド数（rayon による特徴量構築の並列化） |
+
+### `--threads` の推奨値
+
+特徴量構築を rayon で並列化するスレッド数。GPU 推論の速度に応じて有効な設定が異なる。
+
+| 構成 | 推奨 | 理由 |
+|---|---|---|
+| CUDA EP (FP32) | **`--threads 4`** 程度 | GPU 推論が律速（~370ms/batch）で、CPU 側の特徴量構築を GPU 待ち時間に重ねられるため並列化が有効 |
+| TensorRT EP (FP16) | **`--threads 1`** でよい | GPU 推論が速すぎる（~100ms/batch）ため CPU 並列化の効果がほぼない（計測で確認済み、差 0.3%） |
+
+### 計測例（DL_suisho.onnx, BS=1024, RTX 2070 Super）
+
+| 構成 | --threads 4 | --threads 1 | 差 |
+|---|---|---|---|
+| CUDA FP32 (90k records) | 31.7 s | 33.4 s | -5% |
+| TensorRT FP16 (1.05M records) | 97.2 s | 96.9 s | +0.3% |
+
+> 注: GPU のサーマルスロットリングが計測に大きく影響するため、
+> 連続計測時は GPU 温度を 60℃ 以下に冷却してから実行すること。
 
 ## 動作確認
 
@@ -186,3 +205,7 @@ AobaZero ONNX model loaded. Batch size: 1024
   `--onnx-tensorrt-cache` でキャッシュを保存すると 2 回目以降は高速起動する
 - このツールのボトルネックは CPU→GPU のデータ転送（全処理時間の 96%、nsys 計測）であり、
   FP16 による高速化は主に転送量の半減と Tensor Core 活用に起因する
+- `--threads` による CPU 並列化の効果は GPU 推論速度に依存する。CUDA EP (FP32) では GPU 待ち時間が
+  長いため並列化が効くが、TensorRT EP (FP16) では GPU が速すぎて効果がほぼない
+- 参考: 同等の Python ツール [psv-utils](https://github.com/KazApps/psv-utils) と比較して、
+  本ツールは CUDA EP / TensorRT EP どちらでも約 6〜9% 速い（1,051,780 records, 温度管理付き計測）
