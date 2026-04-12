@@ -899,6 +899,44 @@ NPS 改善なし (むしろ -0.77%) で、HalfKA_hm PoC と同様「計測で効
   にも流用できる機構)
 - あるいは Threat 自体の計算量削減 (dims 削減や SIMD 改善)
 
+## Threat changed indices leaper source fast path PoC (2026-04-13, `1fe24736`)
+
+`append_changed_threat_indices` self 5.81% の削減を狙い、Step 3 の source loop に
+fast path を追加。
+
+### 実装
+
+- **Fast path 条件**: source sq が changed_bb 外かつ occupied 非依存駒種
+  (Pawn/Knight/Silver/Gold 系)
+- **前提**: `attackers_to_occ` は after-state の piece bitboards を参照するため、
+  source_bb 内かつ changed_bb 外の sq は必ず駒情報が before/after で同一
+- **処理**: attacks_from_piece を 1 回のみ計算 (occupied 非依存)、target loop を
+  `attacks & changed_bb` に限定
+- **理由**: changed_bb 外の target は before/after で駒情報も attack visibility も
+  不変 → pair index も同一 → 最終 set diff で相殺されるので push をスキップ可能
+
+### 計測 (v92, production + nnue-progress-diff, search_only_ab)
+
+baseline (`7833c1ce`) vs candidate (`1fe24736`):
+
+| 項目 | baseline | candidate | Δ |
+|---|---:|---:|---:|
+| avg_nps | 461,100 | 462,000 | **+0.20%** |
+| cycles/node | 9,507.5 | 9,489.1 | -0.19% |
+| instructions/node | 19,115.9 | 18,841.3 | **-1.44%** |
+
+**instructions -1.44% は明確**、cycles 反映は誤差範囲。
+find_usable_accumulator PoC と同じ「計算量は減るが CPI 微悪化で cycles 反映薄」パターン。
+
+### 判断: 採用 (計算量削減の事実を残す)
+
+- NPS 効果は誤差範囲だが instructions 削減は本質的
+- slider 側拡張は ray blocking 判定の overhead が勝ちやすく複雑
+- 累積改善の前提として leaper fast path は残し、次の最適化を重ねる
+- 最終的に他改善との累積でも cycles 反映がなければ revert 判断
+
+JSON: `/tmp/perf_measure_20260413/threat_fastpath_v1.json`
+
 ## 実験方針への示唆
 
 1. **refresh_accumulator の頻度と cache ヒット率の実測が最優先** — NPS +5〜9% 相当の余地
