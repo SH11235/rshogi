@@ -15,13 +15,13 @@ use super::constants::HALFKA_HM_DIMENSIONS;
 use super::constants::NUM_LAYER_STACK_BUCKETS;
 use super::features::{Feature, FeatureSet, HalfKA_hm, HalfKA_hm_FeatureSet};
 use super::leb128::read_compressed_tensor_i16_all;
-use super::piece_list::PieceNumber;
 use super::stats::{count_refresh, count_update};
 #[cfg(feature = "nnue-threat")]
 use super::threat_features::{self, MAX_CHANGED_THREAT_FEATURES, THREAT_DIMENSIONS};
 use crate::position::Position;
 use crate::types::Color;
 use std::io::{self, Read};
+use std::mem::MaybeUninit;
 
 /// 特徴インデックスの範囲外アクセス時のパニック
 #[cold]
@@ -738,11 +738,10 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
         acc.computed_score = false;
     }
 
-    /// 単一視点のキャッシュ経由 refresh (PieceList ベース)
+    /// 単一視点のキャッシュ経由 refresh
     ///
-    /// 現在の PieceList を cache に渡し、cache 内で BonaPiece 差分を計算して
-    /// add/sub_weights を呼ぶ。`append_active_indices` + `sort_unstable` +
-    /// 対称差スキャンを回避する。
+    /// アクティブ特徴量をソートして u32 配列に変換し、
+    /// AccumulatorCacheLayerStacks::refresh_or_cache に委譲する。
     fn refresh_perspective_with_cache(
         &self,
         pos: &Position,
@@ -751,31 +750,31 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
         cache: &mut AccumulatorCacheLayerStacks<L1>,
     ) {
         let king_sq = pos.king_square(perspective);
-        let kb = king_bucket(king_sq, perspective);
-        let hm_mirror = is_hm_mirror(king_sq, perspective);
+        let mut active_indices = IndexList::new();
+        append_active_indices(pos, perspective, &mut active_indices);
 
-        let current_piece_list: &[BonaPiece; PieceNumber::NB] = if perspective == Color::Black {
-            pos.piece_list().piece_list_fb()
-        } else {
-            pos.piece_list().piece_list_fw()
-        };
+        // 使用領域だけ初期化して、全 zero fill を避ける。
+        let mut sorted_buf = [const { MaybeUninit::<u32>::uninit() }; MAX_ACTIVE_FEATURES];
+        let len = active_indices.len();
+        for (slot, idx) in sorted_buf[..len].iter_mut().zip(active_indices.iter()) {
+            slot.write(idx as u32);
+        }
+        // SAFETY:
+        // - `sorted_buf[..len]` は直前のループで全要素を初期化済み。
+        // - `MaybeUninit<u32>` は `u32` と同じレイアウト・アライメントを持つ。
+        // - `len <= MAX_ACTIVE_FEATURES` は `IndexList` の不変条件から保証される。
+        let sorted =
+            unsafe { std::slice::from_raw_parts_mut(sorted_buf.as_mut_ptr() as *mut u32, len) };
+        sorted.sort_unstable();
 
         cache.refresh_or_cache(
             king_sq,
             perspective,
-            current_piece_list,
+            sorted,
             &self.biases.0,
             accumulation,
-            |acc, bp| {
-                let packed = pack_bonapiece(bp, hm_mirror);
-                let idx = halfka_index(kb, packed);
-                self.add_weights(acc, idx);
-            },
-            |acc, bp| {
-                let packed = pack_bonapiece(bp, hm_mirror);
-                let idx = halfka_index(kb, packed);
-                self.sub_weights(acc, idx);
-            },
+            |acc, idx| self.add_weights(acc, idx),
+            |acc, idx| self.sub_weights(acc, idx),
         );
     }
 
