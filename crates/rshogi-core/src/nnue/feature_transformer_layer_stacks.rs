@@ -651,16 +651,47 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             if self.has_threat {
                 let king_sq = pos.king_square(perspective);
                 if reset {
-                    let threat_acc = acc.get_threat_mut(p);
-                    threat_acc.fill(0);
+                    // reset path: Threat Finny Tables 経由で差分更新
+                    use super::accumulator_layer_stacks::MAX_THREAT_ACTIVE;
+                    let mut sorted = [0u32; MAX_THREAT_ACTIVE];
+                    let mut len = 0usize;
+                    let mut overflow = false;
                     threat_features::for_each_active_threat_index(
                         pos,
                         perspective,
                         king_sq,
                         |idx| {
-                            self.add_threat_weights(threat_acc, idx);
+                            if len < MAX_THREAT_ACTIVE {
+                                sorted[len] = idx as u32;
+                                len += 1;
+                            } else {
+                                overflow = true;
+                            }
                         },
                     );
+                    if overflow {
+                        let threat_acc = acc.get_threat_mut(p);
+                        threat_acc.fill(0);
+                        threat_features::for_each_active_threat_index(
+                            pos,
+                            perspective,
+                            king_sq,
+                            |idx| {
+                                self.add_threat_weights(threat_acc, idx);
+                            },
+                        );
+                    } else {
+                        sorted[..len].sort_unstable();
+                        let threat_acc = acc.get_threat_mut(p);
+                        cache.refresh_or_cache_threat(
+                            king_sq,
+                            perspective,
+                            &sorted[..len],
+                            threat_acc,
+                            |a, idx| self.add_threat_weights(a, idx),
+                            |a, idx| self.sub_threat_weights(a, idx),
+                        );
+                    }
                 } else {
                     let prev_threat = prev_acc.get_threat(p);
                     let curr_threat = acc.get_threat_mut(p);
@@ -722,15 +753,46 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                 self.refresh_psqt(&active_indices, &mut acc.psqt_accumulation[p]);
             }
 
-            // Threat はキャッシュ非対象なのでフル再計算
+            // Threat は Finny Tables (threat_valid) 経由で差分更新
             #[cfg(feature = "nnue-threat")]
             if self.has_threat {
                 let king_sq = pos.king_square(perspective);
-                let threat_acc = acc.get_threat_mut(p);
-                threat_acc.fill(0);
+                use super::accumulator_layer_stacks::MAX_THREAT_ACTIVE;
+                let mut sorted = [0u32; MAX_THREAT_ACTIVE];
+                let mut len = 0usize;
+                let mut overflow = false;
                 threat_features::for_each_active_threat_index(pos, perspective, king_sq, |idx| {
-                    self.add_threat_weights(threat_acc, idx);
+                    if len < MAX_THREAT_ACTIVE {
+                        sorted[len] = idx as u32;
+                        len += 1;
+                    } else {
+                        overflow = true;
+                    }
                 });
+                if overflow {
+                    // cache bypass full refresh
+                    let threat_acc = acc.get_threat_mut(p);
+                    threat_acc.fill(0);
+                    threat_features::for_each_active_threat_index(
+                        pos,
+                        perspective,
+                        king_sq,
+                        |idx| {
+                            self.add_threat_weights(threat_acc, idx);
+                        },
+                    );
+                } else {
+                    sorted[..len].sort_unstable();
+                    let threat_acc = acc.get_threat_mut(p);
+                    cache.refresh_or_cache_threat(
+                        king_sq,
+                        perspective,
+                        &sorted[..len],
+                        threat_acc,
+                        |a, idx| self.add_threat_weights(a, idx),
+                        |a, idx| self.sub_threat_weights(a, idx),
+                    );
+                }
             }
         }
 
