@@ -21,7 +21,6 @@ use super::threat_features::{self, MAX_CHANGED_THREAT_FEATURES, THREAT_DIMENSION
 use crate::position::Position;
 use crate::types::Color;
 use std::io::{self, Read};
-use std::mem::MaybeUninit;
 
 /// 特徴インデックスの範囲外アクセス時のパニック
 #[cold]
@@ -738,10 +737,11 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
         acc.computed_score = false;
     }
 
-    /// 単一視点のキャッシュ経由 refresh
+    /// 単一視点のキャッシュ経由 refresh (Stockfish 風 piece_list 差分方式)
     ///
-    /// アクティブ特徴量をソートして u32 配列に変換し、
-    /// AccumulatorCacheLayerStacks::refresh_or_cache に委譲する。
+    /// 現在の `PieceList` を直接 cache に渡し、cache 内で slot-wise 差分
+    /// を取って add/sub を適用する。`append_active_indices` + `sort_unstable`
+    /// のオーバーヘッドを回避する。
     fn refresh_perspective_with_cache(
         &self,
         pos: &Position,
@@ -750,29 +750,22 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
         cache: &mut AccumulatorCacheLayerStacks<L1>,
     ) {
         let king_sq = pos.king_square(perspective);
-        let mut active_indices = IndexList::new();
-        append_active_indices(pos, perspective, &mut active_indices);
+        let kb = king_bucket(king_sq, perspective);
+        let hm = is_hm_mirror(king_sq, perspective);
 
-        // 使用領域だけ初期化して、全 zero fill を避ける。
-        let mut sorted_buf = [const { MaybeUninit::<u32>::uninit() }; MAX_ACTIVE_FEATURES];
-        let len = active_indices.len();
-        for (slot, idx) in sorted_buf[..len].iter_mut().zip(active_indices.iter()) {
-            slot.write(idx as u32);
-        }
-        // SAFETY:
-        // - `sorted_buf[..len]` は直前のループで全要素を初期化済み。
-        // - `MaybeUninit<u32>` は `u32` と同じレイアウト・アライメントを持つ。
-        // - `len <= MAX_ACTIVE_FEATURES` は `IndexList` の不変条件から保証される。
-        let sorted =
-            unsafe { std::slice::from_raw_parts_mut(sorted_buf.as_mut_ptr() as *mut u32, len) };
-        sorted.sort_unstable();
+        let piece_list = if perspective == Color::Black {
+            pos.piece_list().piece_list_fb()
+        } else {
+            pos.piece_list().piece_list_fw()
+        };
 
         cache.refresh_or_cache(
             king_sq,
             perspective,
-            sorted,
+            piece_list,
             &self.biases.0,
             accumulation,
+            move |bp| halfka_index(kb, pack_bonapiece(bp, hm)),
             |acc, idx| self.add_weights(acc, idx),
             |acc, idx| self.sub_weights(acc, idx),
         );
