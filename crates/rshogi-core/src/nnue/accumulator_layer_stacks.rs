@@ -199,7 +199,8 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
 
             // 40 slot 比較して変化した slot のみ差分適用
             let mut diff_count = 0usize;
-            for (cached_bp, &current_bp) in entry.piece_list.iter().copied().zip(piece_list.iter())
+            for (cached_bp, &current_bp) in
+                entry.piece_list.iter().copied().zip(piece_list.iter())
             {
                 if cached_bp != current_bp {
                     if cached_bp != BonaPiece::ZERO {

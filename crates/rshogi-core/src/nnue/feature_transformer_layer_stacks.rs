@@ -484,16 +484,13 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
 
                 let prev = prev_acc.get(p);
                 let curr = acc.get_mut(p);
-                // fast path: curr[i] = prev[i] - sub + add を 1 回の SIMD loop で実行。
-                // 成功時は 8KB の copy_from_slice を回避。
-                if !self.try_apply_dirty_piece_fast_prev_to_curr(
+                curr.copy_from_slice(prev);
+                if !self.try_apply_dirty_piece_fast(
                     curr,
-                    prev,
                     dirty_piece,
                     perspective,
                     pos.king_square(perspective),
                 ) {
-                    curr.copy_from_slice(prev);
                     for index in removed.iter() {
                         self.sub_weights(curr, index);
                     }
@@ -619,15 +616,13 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
 
                 let prev = prev_acc.get(p);
                 let curr = acc.get_mut(p);
-                // fast path: curr = prev - sub + add を 1 回の SIMD loop で実行
-                if !self.try_apply_dirty_piece_fast_prev_to_curr(
+                curr.copy_from_slice(prev);
+                if !self.try_apply_dirty_piece_fast(
                     curr,
-                    prev,
                     dirty_piece,
                     perspective,
                     pos.king_square(perspective),
                 ) {
-                    curr.copy_from_slice(prev);
                     for index in removed.iter() {
                         self.sub_weights(curr, index);
                     }
@@ -1113,76 +1108,6 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
         }
     }
 
-    /// `try_apply_dirty_piece_fast` の prev → curr 版
-    ///
-    /// 呼び出し側で `curr.copy_from_slice(prev)` を事前に行う必要がない。
-    /// 成功時は `curr` に差分適用後の accumulation が書き込まれる。
-    /// 失敗時 (dirty_num == 0 or ZERO を含む) は `curr` は触らず、呼び出し側で
-    /// コピー + 明示的 sub/add を行う必要がある。
-    fn try_apply_dirty_piece_fast_prev_to_curr(
-        &self,
-        curr: &mut [i16; L1],
-        prev: &[i16; L1],
-        dirty_piece: &DirtyPiece,
-        perspective: Color,
-        king_sq: crate::types::Square,
-    ) -> bool {
-        let changed = &dirty_piece.changed_piece;
-        let old_new = |idx: usize| {
-            let entry = &changed[idx];
-            let old_bp = if perspective == Color::Black {
-                entry.old_piece.fb
-            } else {
-                entry.old_piece.fw
-            };
-            let new_bp = if perspective == Color::Black {
-                entry.new_piece.fb
-            } else {
-                entry.new_piece.fw
-            };
-            (old_bp, new_bp)
-        };
-
-        match dirty_piece.dirty_num as usize {
-            1 => {
-                let (old_bp, new_bp) = old_new(0);
-                if old_bp != BonaPiece::ZERO && new_bp != BonaPiece::ZERO {
-                    self.apply_sub_add_fused_prev_to_curr(
-                        curr,
-                        prev,
-                        feature_index_from_bona_piece(old_bp, perspective, king_sq),
-                        feature_index_from_bona_piece(new_bp, perspective, king_sq),
-                    );
-                    true
-                } else {
-                    false
-                }
-            }
-            2 => {
-                let (old_bp0, new_bp0) = old_new(0);
-                let (old_bp1, new_bp1) = old_new(1);
-                if old_bp0 != BonaPiece::ZERO
-                    && new_bp0 != BonaPiece::ZERO
-                    && old_bp1 != BonaPiece::ZERO
-                    && new_bp1 != BonaPiece::ZERO
-                {
-                    self.apply_double_sub_add_fused_prev_to_curr(
-                        curr,
-                        prev,
-                        feature_index_from_bona_piece(old_bp0, perspective, king_sq),
-                        feature_index_from_bona_piece(new_bp0, perspective, king_sq),
-                        feature_index_from_bona_piece(old_bp1, perspective, king_sq),
-                        feature_index_from_bona_piece(new_bp1, perspective, king_sq),
-                    );
-                    true
-                } else {
-                    false
-                }
-            }
-            _ => false,
-        }
-    }
-
     #[inline]
     fn apply_sub_add_fused(
         &self,
@@ -1463,169 +1388,6 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                 .wrapping_sub(sub_weight1)
                 .wrapping_add(add_weight1);
         }
-    }
-
-    /// sub/add fused: `curr[i] = prev[i] - sub_weights[i] + add_weights[i]`
-    ///
-    /// `apply_sub_add_fused` と同じ計算を **prev → curr の片方向 copy 込み**
-    /// で実行する。呼び出し側で `curr.copy_from_slice(prev)` する必要がなくなり、
-    /// 8KB 程度の memcpy を排除できる。
-    #[inline]
-    #[allow(unreachable_code)]
-    fn apply_sub_add_fused_prev_to_curr(
-        &self,
-        curr: &mut [i16; L1],
-        prev: &[i16; L1],
-        sub_index: usize,
-        add_index: usize,
-    ) {
-        let sub_weights = self.weight_row(sub_index);
-        let add_weights = self.weight_row(add_index);
-
-        #[cfg(all(
-            target_arch = "x86_64",
-            target_feature = "avx512f",
-            target_feature = "avx512bw"
-        ))]
-        {
-            // SAFETY:
-            // - curr / prev は Aligned<[i16; L1]> 由来で 64 バイトアライン。
-            // - weight row の各行も 64 バイト境界に揃う。
-            // - L1 要素を 32 要素ずつ L1/32 回で完全に走査する。
-            unsafe {
-                use std::arch::x86_64::*;
-                let curr_ptr = curr.as_mut_ptr();
-                let prev_ptr = prev.as_ptr();
-                let sub_ptr = sub_weights.as_ptr();
-                let add_ptr = add_weights.as_ptr();
-
-                for i in 0..(L1 / 32) {
-                    let prev_vec = _mm512_load_si512(prev_ptr.add(i * 32) as *const __m512i);
-                    let sub_vec = _mm512_load_si512(sub_ptr.add(i * 32) as *const __m512i);
-                    let add_vec = _mm512_load_si512(add_ptr.add(i * 32) as *const __m512i);
-                    let result = _mm512_add_epi16(_mm512_sub_epi16(prev_vec, sub_vec), add_vec);
-                    _mm512_store_si512(curr_ptr.add(i * 32) as *mut __m512i, result);
-                }
-            }
-            return;
-        }
-
-        #[cfg(all(
-            target_arch = "x86_64",
-            target_feature = "avx2",
-            not(target_feature = "avx512bw")
-        ))]
-        {
-            // SAFETY:
-            // - curr / prev / weight row はともに 32 バイトアライン (L1 は 16 の倍数)。
-            // - L1 要素を 16 要素ずつ L1/16 回で完全に走査する。
-            unsafe {
-                use std::arch::x86_64::*;
-                let curr_ptr = curr.as_mut_ptr();
-                let prev_ptr = prev.as_ptr();
-                let sub_ptr = sub_weights.as_ptr();
-                let add_ptr = add_weights.as_ptr();
-
-                for i in 0..(L1 / 16) {
-                    let prev_vec = _mm256_load_si256(prev_ptr.add(i * 16) as *const __m256i);
-                    let sub_vec = _mm256_load_si256(sub_ptr.add(i * 16) as *const __m256i);
-                    let add_vec = _mm256_load_si256(add_ptr.add(i * 16) as *const __m256i);
-                    let result = _mm256_add_epi16(_mm256_sub_epi16(prev_vec, sub_vec), add_vec);
-                    _mm256_store_si256(curr_ptr.add(i * 16) as *mut __m256i, result);
-                }
-            }
-            return;
-        }
-
-        // 非 AVX2 系のフォールバック: 現状の copy + in-place apply に委譲
-        curr.copy_from_slice(prev);
-        self.apply_sub_add_fused(curr, sub_index, add_index);
-    }
-
-    /// `apply_double_sub_add_fused` の prev → curr 版
-    #[inline]
-    #[allow(unreachable_code)]
-    fn apply_double_sub_add_fused_prev_to_curr(
-        &self,
-        curr: &mut [i16; L1],
-        prev: &[i16; L1],
-        sub_index0: usize,
-        add_index0: usize,
-        sub_index1: usize,
-        add_index1: usize,
-    ) {
-        let sub_weights0 = self.weight_row(sub_index0);
-        let add_weights0 = self.weight_row(add_index0);
-        let sub_weights1 = self.weight_row(sub_index1);
-        let add_weights1 = self.weight_row(add_index1);
-
-        #[cfg(all(
-            target_arch = "x86_64",
-            target_feature = "avx512f",
-            target_feature = "avx512bw"
-        ))]
-        {
-            // SAFETY: 同上
-            unsafe {
-                use std::arch::x86_64::*;
-                let curr_ptr = curr.as_mut_ptr();
-                let prev_ptr = prev.as_ptr();
-                let sub_ptr0 = sub_weights0.as_ptr();
-                let add_ptr0 = add_weights0.as_ptr();
-                let sub_ptr1 = sub_weights1.as_ptr();
-                let add_ptr1 = add_weights1.as_ptr();
-
-                for i in 0..(L1 / 32) {
-                    let prev_vec = _mm512_load_si512(prev_ptr.add(i * 32) as *const __m512i);
-                    let sub_vec0 = _mm512_load_si512(sub_ptr0.add(i * 32) as *const __m512i);
-                    let add_vec0 = _mm512_load_si512(add_ptr0.add(i * 32) as *const __m512i);
-                    let sub_vec1 = _mm512_load_si512(sub_ptr1.add(i * 32) as *const __m512i);
-                    let add_vec1 = _mm512_load_si512(add_ptr1.add(i * 32) as *const __m512i);
-                    let result = _mm512_add_epi16(
-                        _mm512_add_epi16(_mm512_sub_epi16(prev_vec, sub_vec0), add_vec0),
-                        _mm512_sub_epi16(add_vec1, sub_vec1),
-                    );
-                    _mm512_store_si512(curr_ptr.add(i * 32) as *mut __m512i, result);
-                }
-            }
-            return;
-        }
-
-        #[cfg(all(
-            target_arch = "x86_64",
-            target_feature = "avx2",
-            not(target_feature = "avx512bw")
-        ))]
-        {
-            // SAFETY: 同上
-            unsafe {
-                use std::arch::x86_64::*;
-                let curr_ptr = curr.as_mut_ptr();
-                let prev_ptr = prev.as_ptr();
-                let sub_ptr0 = sub_weights0.as_ptr();
-                let add_ptr0 = add_weights0.as_ptr();
-                let sub_ptr1 = sub_weights1.as_ptr();
-                let add_ptr1 = add_weights1.as_ptr();
-
-                for i in 0..(L1 / 16) {
-                    let prev_vec = _mm256_load_si256(prev_ptr.add(i * 16) as *const __m256i);
-                    let sub_vec0 = _mm256_load_si256(sub_ptr0.add(i * 16) as *const __m256i);
-                    let add_vec0 = _mm256_load_si256(add_ptr0.add(i * 16) as *const __m256i);
-                    let sub_vec1 = _mm256_load_si256(sub_ptr1.add(i * 16) as *const __m256i);
-                    let add_vec1 = _mm256_load_si256(add_ptr1.add(i * 16) as *const __m256i);
-                    let result = _mm256_add_epi16(
-                        _mm256_add_epi16(_mm256_sub_epi16(prev_vec, sub_vec0), add_vec0),
-                        _mm256_sub_epi16(add_vec1, sub_vec1),
-                    );
-                    _mm256_store_si256(curr_ptr.add(i * 16) as *mut __m256i, result);
-                }
-            }
-            return;
-        }
-
-        // 非 AVX2 系のフォールバック
-        curr.copy_from_slice(prev);
-        self.apply_double_sub_add_fused(curr, sub_index0, add_index0, sub_index1, add_index1);
     }
 
     /// 重みを累積値から減算（SIMD最適化版）
