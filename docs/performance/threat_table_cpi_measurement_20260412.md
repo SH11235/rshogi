@@ -994,6 +994,37 @@ baseline (`7833c1ce`, 旧 cache) vs candidate (`72842680`, Stockfish 風 cache):
 - `/tmp/perf_measure_20260413/threat_sfcache_v1.json` (vs fastpath)
 - `/tmp/perf_measure_20260413/threat_sfcache_vs_base.json` (vs original 7833c1ce)
 
+## forward_update_incremental を sfcache 上で再評価 (2026-04-13)
+
+sfcache 導入後に perf profile を再取得したところ、
+`refresh_accumulator_with_cache` children 13.83% のうち
+`refresh_perspective_with_cache` 4.32% を差し引いた **~9.5% が
+inline Threat full rebuild** と判明。
+
+refresh 経路自体を `forward_update_incremental` で置き換えれば
+Threat full rebuild も回避できるはず、という仮説で `7ea08166`, `82f54b03`
+を cherry-pick して再評価した。
+
+### 計測 (sfcache baseline vs sfcache + fwd candidate)
+
+| 項目 | baseline (sfcache) | candidate (sfcache + fwd) | Δ |
+|---|---:|---:|---:|
+| avg_nps | 484,707 | 475,459 | **-1.91%** |
+| cycles/node | 9,045.1 | 9,222.2 | **+1.96%** |
+| instructions/node | 17,432.9 | 17,428.3 | -0.03% |
+
+**cycles 悪化**。instructions/node はほぼ不変なので、命令数は変わらず CPI だけ
+悪化している。forward_update_incremental の walk ancestor + chain apply の
+overhead (source_acc copy 等) が Threat rebuild 節約分を上回る。
+
+### 判断: revert (`9cc3dcbd`, `7eee31b6`)
+
+sfcache によって refresh の HalfKA 部分が軽くなったため、
+refresh → forward_update の置換メリットが小さくなり、CPI 悪化分を
+上回らなくなった。Threat full rebuild 削減は別のアプローチが必要。
+
+JSON: `/tmp/perf_measure_20260413/threat_sfcache_fwd_v1.json`
+
 ## 実験方針への示唆
 
 1. **refresh_accumulator の頻度と cache ヒット率の実測が最優先** — NPS +5〜9% 相当の余地
