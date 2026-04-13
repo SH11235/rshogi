@@ -248,6 +248,21 @@ impl HandThreatClass {
     }
 }
 
+/// `PieceType` から `HandThreatClass` に変換する (手駒にできる駒のみ)
+#[inline]
+pub(crate) fn piece_type_to_hand_threat_class(pt: PieceType) -> Option<HandThreatClass> {
+    match pt {
+        PieceType::Pawn => Some(HandThreatClass::Pawn),
+        PieceType::Lance => Some(HandThreatClass::Lance),
+        PieceType::Knight => Some(HandThreatClass::Knight),
+        PieceType::Silver => Some(HandThreatClass::Silver),
+        PieceType::Gold => Some(HandThreatClass::Gold),
+        PieceType::Bishop => Some(HandThreatClass::Bishop),
+        PieceType::Rook => Some(HandThreatClass::Rook),
+        _ => None,
+    }
+}
+
 // =============================================================================
 // hand_pair_base テーブル
 // =============================================================================
@@ -603,6 +618,8 @@ pub fn append_changed_hand_threat_indices(
 
     // Drop 判定: old が盤上駒でない場合は手駒側 BonaPiece のはず
     let is_drop = old_info_board.is_none();
+    // drop 1→0 transition 情報 (is_drop 時に drop 先 block が空になるケース)
+    let mut is_drop_1to0_transition = false;
     let (old_color, old_pt, from_sq) = if let Some((oc, _, op, fs)) = old_info_board {
         (oc, op, fs)
     } else {
@@ -612,15 +629,14 @@ pub fn append_changed_hand_threat_indices(
             bump!(FALLBACK_OTHER);
             return false;
         };
-        // Phase 3: Pawn drop は fallback (pawn file state 変化)
+        // Pawn drop は fallback (pawn file state 変化)
         if dropped_pt == PieceType::Pawn || new_pt == PieceType::Pawn {
             bump!(FALLBACK_PAWN_INVOLVED);
             return false;
         }
-        // 新 hand count が 0 なら 1→0 transition → Phase 4 で対応
+        // Phase 4: hand count が 0 になれば 1→0 transition として後段で direct-push
         if pos.hand(dropper).count(dropped_pt) == 0 {
-            bump!(FALLBACK_DROP);
-            return false;
+            is_drop_1to0_transition = true;
         }
         if dirty_piece.dirty_num != 1 {
             // Drop なのに dirty_num=2 は想定外
@@ -677,12 +693,18 @@ pub fn append_changed_hand_threat_indices(
     // 捕獲の場合: dirty_piece[1] から captured piece 情報を取得。
     // 制限:
     // - 両駒ともに非 Pawn (pawn file 不変)
-    // - us の hand[cap_pt_hand] >= 2 (after count; before は >=1、block 非遷移)
     //
     // 重要: cp1.old_piece.fb は盤上駒 → decode_board_threat_info_fb は成駒を Gold に
     // 正規化して返すため、手駒 block の識別には cp1.new_piece.fb (手駒 BonaPiece) から
     // decode_hand_piece_fb で実手駒種を取得する。
-    let cap_before_piece_at_to: Option<(Color, PieceType)> = if dirty_piece.dirty_num == 2 {
+    //
+    // Phase 4: 0↔1 transition も直接 push 方式で対応。
+    //  - `cap_before_piece_at_to`: before 状態の to_sq 駒情報 (source_set path 用)
+    //  - `capture_transition_block`: (drop_color, HandThreatClass) が transition する場合 Some
+    let (cap_before_piece_at_to, capture_transition_block): (
+        Option<(Color, PieceType)>,
+        Option<(Color, HandThreatClass)>,
+    ) = if dirty_piece.dirty_num == 2 {
         let cp1 = &dirty_piece.changed_piece[1];
         // cp1.old_piece = before 状態の盤上駒 (captured 駒)、threat info を取得
         let cap_old = decode_board_threat_info_fb(cp1.old_piece.fb);
@@ -709,7 +731,6 @@ pub fn append_changed_hand_threat_indices(
             return false;
         }
         // Pawn 関与は pawn file state 変化の可能性あり
-        // (moved piece Pawn / captured board piece 生歩 / captured 後の hand Pawn)
         if old_pt == PieceType::Pawn
             || cap_pt_board == PieceType::Pawn
             || cap_pt_hand_base == PieceType::Pawn
@@ -717,13 +738,24 @@ pub fn append_changed_hand_threat_indices(
             bump!(FALLBACK_PAWN_INVOLVED);
             return false;
         }
-        // 0↔1 transition があれば fallback (Phase 4 で対応予定)
-        // 実手駒種 cap_pt_hand_base を使って判定
-        if pos.hand(old_color).count(cap_pt_hand_base) < 2 {
-            bump!(FALLBACK_CAPTURE_0_1_TRANSITION);
-            return false;
-        }
-        Some((cap_color, cap_pt_board))
+        // transition 検出: after_count == 1 なら before=0 で 0→1 transition
+        let after_count = pos.hand(old_color).count(cap_pt_hand_base);
+        let trans_block = if after_count == 1 {
+            let hc = piece_type_to_hand_threat_class(cap_pt_hand_base)
+                .expect("non-Pawn cap_pt_hand_base");
+            Some((old_color, hc))
+        } else {
+            None
+        };
+        (Some((cap_color, cap_pt_board)), trans_block)
+    } else {
+        (None, None)
+    };
+
+    // Drop 1→0 transition block: is_drop_1to0_transition が立っていれば (dropper, dropped_pt)
+    let drop_transition_block: Option<(Color, HandThreatClass)> = if is_drop_1to0_transition {
+        // old_pt は dropped_pt と等しい (sentinel で設定済)
+        piece_type_to_hand_threat_class(old_pt).map(|hc| (old_color, hc))
     } else {
         None
     };
@@ -760,6 +792,129 @@ pub fn append_changed_hand_threat_indices(
         let hand = pos.hand(drop_color);
 
         for &hand_class in &ALL_HAND_THREAT_CLASSES {
+            let is_cap_trans = capture_transition_block == Some((drop_color, hand_class));
+            let is_drop_trans = drop_transition_block == Some((drop_color, hand_class));
+
+            let oriented_color = if perspective == Color::Black {
+                drop_color
+            } else {
+                !drop_color
+            };
+
+            // --- Phase 4: Transition block の直接 push 処理 ---
+            if is_cap_trans {
+                // 0→1 transition: block 全体の after features を added に直接 push
+                for drop_raw in 0..81u8 {
+                    let drop_sq = Square::from_u8(drop_raw).unwrap();
+                    if after_occ.contains(drop_sq) {
+                        continue;
+                    }
+                    if !is_legal_drop_rank(hand_class, drop_color, drop_sq) {
+                        continue;
+                    }
+                    if hand_class == HandThreatClass::Pawn
+                        && has_pawn_on_file(pos, drop_color, drop_sq)
+                    {
+                        continue;
+                    }
+                    let attack_bb =
+                        attacks_from_dropped(hand_class, drop_color, drop_sq, after_occ);
+                    let mut targets = attack_bb & after_occ;
+                    let drop_sq_n = normalize_sq(drop_sq, perspective, hm);
+                    while !targets.is_empty() {
+                        let to_target = targets.pop();
+                        let target_pc = pos.piece_on(to_target);
+                        if target_pc.is_none() {
+                            continue;
+                        }
+                        let target_pt = target_pc.piece_type();
+                        let Some(attacked_class) = ThreatClass::from_piece_type(target_pt) else {
+                            continue;
+                        };
+                        let attacked_side = if target_pc.color() == friend_color {
+                            0
+                        } else {
+                            1
+                        };
+                        let to_sq_n = normalize_sq(to_target, perspective, hm);
+                        let idx = hand_threat_index(
+                            drop_owner,
+                            hand_class,
+                            oriented_color,
+                            attacked_side,
+                            attacked_class,
+                            drop_sq_n,
+                            to_sq_n,
+                        );
+                        if !added.push(idx) {
+                            bump!(FALLBACK_BUFFER_OVERFLOW);
+                            return false;
+                        }
+                    }
+                }
+                continue; // sort-merge 経路を skip
+            }
+
+            if is_drop_trans {
+                // 1→0 transition: block 全体の before features を removed に直接 push
+                for drop_raw in 0..81u8 {
+                    let drop_sq = Square::from_u8(drop_raw).unwrap();
+                    if before_occ.contains(drop_sq) {
+                        continue;
+                    }
+                    if !is_legal_drop_rank(hand_class, drop_color, drop_sq) {
+                        continue;
+                    }
+                    if hand_class == HandThreatClass::Pawn
+                        && has_pawn_on_file(pos, drop_color, drop_sq)
+                    {
+                        continue;
+                    }
+                    let attack_bb =
+                        attacks_from_dropped(hand_class, drop_color, drop_sq, before_occ);
+                    let mut targets = attack_bb & before_occ;
+                    let drop_sq_n = normalize_sq(drop_sq, perspective, hm);
+                    while !targets.is_empty() {
+                        let to_target = targets.pop();
+                        let (target_color, target_pt) = if !is_drop && to_target == from_sq {
+                            (old_color, old_pt)
+                        } else if to_target == to_sq {
+                            if let Some((cc, cp)) = cap_before_piece_at_to {
+                                (cc, cp)
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            let pc = pos.piece_on(to_target);
+                            if pc.is_none() {
+                                continue;
+                            }
+                            (pc.color(), pc.piece_type())
+                        };
+                        let Some(attacked_class) = ThreatClass::from_piece_type(target_pt) else {
+                            continue;
+                        };
+                        let attacked_side = if target_color == friend_color { 0 } else { 1 };
+                        let to_sq_n = normalize_sq(to_target, perspective, hm);
+                        let idx = hand_threat_index(
+                            drop_owner,
+                            hand_class,
+                            oriented_color,
+                            attacked_side,
+                            attacked_class,
+                            drop_sq_n,
+                            to_sq_n,
+                        );
+                        if !removed.push(idx) {
+                            bump!(FALLBACK_BUFFER_OVERFLOW);
+                            return false;
+                        }
+                    }
+                }
+                continue; // sort-merge 経路を skip
+            }
+
+            // --- 非 transition block: source_set 制限列挙 + sort-merge ---
             if hand.count(hand_class.as_piece_type()) == 0 {
                 continue;
             }
@@ -772,12 +927,6 @@ pub fn append_changed_hand_threat_indices(
 
             let before_range = source_set;
             let after_range = source_set;
-
-            let oriented_color = if perspective == Color::Black {
-                drop_color
-            } else {
-                !drop_color
-            };
 
             // --- After 側列挙 ---
             let mut after_drops = after_range & !after_occ;
@@ -1412,6 +1561,46 @@ mod tests {
         // 3c3b (non-promoting capture of promoted silver) - wait, Silver capturing ProSilver
         // from=3c (file 3 rank 2), to=3b (file 3 rank 1)
         let m = Move::from_usi("3c3b").expect("3c3b");
+        verify_incremental_hand_threat(&mut pos, m);
+    }
+
+    /// Phase 4: Capture 0→1 transition (us captures non-Pawn piece, gains first of type)
+    #[test]
+    fn test_hand_threat_incremental_capture_0_1_transition() {
+        // Black Silver at 3c captures White Silver at 3b.
+        // Black initially has NO Silver in hand, gains 1 after capture.
+        // rank 2 (b): "6s2" = 6 empty, s at file 3, 2 empty
+        // rank 3 (c): "6S2" = 6 empty, S at file 3, 2 empty
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/6s2/6S2/9/9/9/9/9/4K4 b - 1")
+            .expect("silver capture 0->1 sfen");
+        let m = Move::from_usi("3c3b").expect("3c3b");
+        verify_incremental_hand_threat(&mut pos, m);
+    }
+
+    /// Phase 4: Capture 0→1 transition (Bishop, slider with many features)
+    #[test]
+    fn test_hand_threat_incremental_capture_0_1_bishop() {
+        // Black Bishop at 5e captures White Bishop at 1a.
+        // Bishop diagonal: 5e → 4d → 3c → 2b → 1a (if all empty)
+        // Black gains first Bishop.
+        let mut pos = Position::new();
+        pos.set_sfen("8b/9/9/9/4B4/9/9/9/4K4 b - 1").expect("bishop capture 0->1 sfen");
+        // 白キングがないと違反になるかも; k を追加
+        pos.set_sfen("3k4b/9/9/9/4B4/9/9/9/4K4 b - 1")
+            .expect("bishop capture 0->1 sfen with kings");
+        let m = Move::from_usi("5e1a").expect("5e1a");
+        verify_incremental_hand_threat(&mut pos, m);
+    }
+
+    /// Phase 4: Drop 1→0 transition (dropper has exactly 1 piece before drop)
+    #[test]
+    fn test_hand_threat_incremental_drop_1_0_transition() {
+        // Black has exactly 1 Silver in hand, drops it at 5e.
+        // This causes hand[Silver] 1→0 transition.
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/9/9/9/9/9/4K4 b S 1").expect("silver drop 1->0 sfen");
+        let m = Move::from_usi("S*5e").expect("S*5e");
         verify_incremental_hand_threat(&mut pos, m);
     }
 
