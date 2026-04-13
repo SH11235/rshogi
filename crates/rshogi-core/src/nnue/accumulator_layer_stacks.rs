@@ -101,32 +101,16 @@ impl<const L1: usize> Default for AccumulatorLayerStacks<L1> {
 /// refresh 時に現在の `PieceList` との slot-wise 比較で差分駒を抽出し、
 /// 差分のみ add/sub でアキュムレータを更新することで、
 /// `append_active_indices` + `sort_unstable` のオーバーヘッドを回避する。
-///
-/// `nnue-threat` 有効時は Threat accumulation と fb encoding 固定の
-/// `threat_piece_list_fb` を追加で保持し、Threat 側も差分更新する
-/// (Stage 1: cache に書き込むだけ、Stage 2: hit 時に差分適用)。
 #[repr(C, align(64))]
 struct AccCacheEntry<const L1: usize> {
     /// キャッシュされたアキュムレータ値
     accumulation: [i16; L1],
-    /// Threat accumulation cache (Threat 側の差分更新用)
-    ///
-    /// HalfKA と異なり fb encoding で decode する必要があるため、
-    /// 独立した `threat_piece_list_fb` で管理する。
-    #[cfg(feature = "nnue-threat")]
-    threat_accumulation: [i16; L1],
     /// キャッシュ時点の `PieceList`（perspective 固有の fb または fw 配列）
     ///
     /// `PieceNumber::NB = 40` 固定長。BonaPiece::ZERO は slot 未使用を表す。
     piece_list: [BonaPiece; PieceNumber::NB],
-    /// キャッシュ時点の `piece_list_fb` (perspective 非依存、Threat 差分用)
-    #[cfg(feature = "nnue-threat")]
-    threat_piece_list_fb: [BonaPiece; PieceNumber::NB],
-    /// HalfKA accumulation 有効フラグ
+    /// 有効フラグ
     valid: bool,
-    /// Threat accumulation 有効フラグ (独立管理)
-    #[cfg(feature = "nnue-threat")]
-    threat_valid: bool,
 }
 
 impl<const L1: usize> AccCacheEntry<L1> {
@@ -134,14 +118,8 @@ impl<const L1: usize> AccCacheEntry<L1> {
     fn new_invalid() -> Self {
         Self {
             accumulation: [0; L1],
-            #[cfg(feature = "nnue-threat")]
-            threat_accumulation: [0; L1],
             piece_list: [BonaPiece::ZERO; PieceNumber::NB],
-            #[cfg(feature = "nnue-threat")]
-            threat_piece_list_fb: [BonaPiece::ZERO; PieceNumber::NB],
             valid: false,
-            #[cfg(feature = "nnue-threat")]
-            threat_valid: false,
         }
     }
 }
@@ -176,10 +154,6 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
         for sq_entries in self.entries.iter_mut() {
             for entry in sq_entries.iter_mut() {
                 entry.valid = false;
-                #[cfg(feature = "nnue-threat")]
-                {
-                    entry.threat_valid = false;
-                }
             }
         }
     }
@@ -225,7 +199,8 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
 
             // 40 slot 比較して変化した slot のみ差分適用
             let mut diff_count = 0usize;
-            for (cached_bp, &current_bp) in entry.piece_list.iter().copied().zip(piece_list.iter())
+            for (cached_bp, &current_bp) in
+                entry.piece_list.iter().copied().zip(piece_list.iter())
             {
                 if cached_bp != current_bp {
                     if cached_bp != BonaPiece::ZERO {
@@ -254,42 +229,6 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
         entry.accumulation.copy_from_slice(accumulation);
         entry.piece_list.copy_from_slice(piece_list);
         entry.valid = true;
-    }
-
-    /// Threat accumulation を cache 経由で refresh する (Stage 1: 常に full rebuild)
-    ///
-    /// # Stage 1 挙動
-    ///
-    /// - 呼び出し側の `full_rebuild` を実行して `threat_accumulation` を再構築
-    /// - 再構築結果を cache entry に書き込む (後続 Stage 2 で hit 判定に使用)
-    ///
-    /// # 引数
-    ///
-    /// - `king_sq`: 玉位置 (cache key)
-    /// - `perspective`: 視点 (cache key)
-    /// - `threat_piece_list_fb`: 現在の `piece_list_fb` (fb encoding、Threat 差分用)
-    /// - `threat_accumulation`: 更新先の Threat accumulation
-    /// - `full_rebuild`: full refresh のコールバック (threat_accumulation を完全再計算)
-    #[cfg(feature = "nnue-threat")]
-    pub(crate) fn refresh_threat_or_cache<F>(
-        &mut self,
-        king_sq: Square,
-        perspective: Color,
-        threat_piece_list_fb: &[BonaPiece; PieceNumber::NB],
-        threat_accumulation: &mut [i16; L1],
-        full_rebuild: F,
-    ) where
-        F: FnOnce(&mut [i16; L1]),
-    {
-        let entry = &mut self.entries[king_sq.raw() as usize][perspective as usize];
-
-        // Stage 1: 常に full rebuild (cache 読み出しなし)
-        full_rebuild(threat_accumulation);
-
-        // cache 更新: Stage 2 で hit 判定・差分適用に使用する
-        entry.threat_accumulation.copy_from_slice(threat_accumulation);
-        entry.threat_piece_list_fb.copy_from_slice(threat_piece_list_fb);
-        entry.threat_valid = true;
     }
 }
 

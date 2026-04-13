@@ -650,22 +650,14 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             if self.has_threat {
                 let king_sq = pos.king_square(perspective);
                 if reset {
-                    // 玉移動時は Threat Cache v2 経由で refresh (Stage 1: 常に full rebuild)
                     let threat_acc = acc.get_threat_mut(p);
-                    let threat_pl_fb = pos.piece_list().piece_list_fb();
-                    cache.refresh_threat_or_cache(
-                        king_sq,
+                    threat_acc.fill(0);
+                    threat_features::for_each_active_threat_index(
+                        pos,
                         perspective,
-                        threat_pl_fb,
-                        threat_acc,
-                        |ta| {
-                            ta.fill(0);
-                            threat_features::for_each_active_threat_index(
-                                pos,
-                                perspective,
-                                king_sq,
-                                |idx| self.add_threat_weights(ta, idx),
-                            );
+                        king_sq,
+                        |idx| {
+                            self.add_threat_weights(threat_acc, idx);
                         },
                     );
                 } else {
@@ -729,27 +721,15 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                 self.refresh_psqt(&active_indices, &mut acc.psqt_accumulation[p]);
             }
 
-            // Threat は Threat Cache v2 経由で refresh (Stage 1: 常に full rebuild)
+            // Threat はキャッシュ非対象なのでフル再計算
             #[cfg(feature = "nnue-threat")]
             if self.has_threat {
                 let king_sq = pos.king_square(perspective);
                 let threat_acc = acc.get_threat_mut(p);
-                let threat_pl_fb = pos.piece_list().piece_list_fb();
-                cache.refresh_threat_or_cache(
-                    king_sq,
-                    perspective,
-                    threat_pl_fb,
-                    threat_acc,
-                    |ta| {
-                        ta.fill(0);
-                        threat_features::for_each_active_threat_index(
-                            pos,
-                            perspective,
-                            king_sq,
-                            |idx| self.add_threat_weights(ta, idx),
-                        );
-                    },
-                );
+                threat_acc.fill(0);
+                threat_features::for_each_active_threat_index(pos, perspective, king_sq, |idx| {
+                    self.add_threat_weights(threat_acc, idx);
+                });
             }
         }
 
