@@ -514,11 +514,18 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             }
 
             // Threat 更新
+            //
+            // Threat は HalfKA とは独立な index 空間を持ち、king_sq に依存するのは
+            // `is_hm_mirror` のみ。玉移動があっても HM mirror 境界を跨がなければ
+            // 差分更新で正しく計算できる。HalfKA 用の `reset = king_moved` を流用
+            // せず、Threat 専用の `needs_threat_refresh` を使う。
             #[cfg(feature = "nnue-threat")]
             if self.has_threat {
                 let king_sq = pos.king_square(perspective);
-                if reset {
-                    // 玉が移動した場合は全計算
+                let reset_threat =
+                    threat_features::needs_threat_refresh(dirty_piece, king_sq, perspective);
+                if reset_threat {
+                    // HM mirror 境界を跨いだ場合のみ全計算
                     let threat_acc = acc.get_threat_mut(p);
                     threat_acc.fill(0);
                     threat_features::for_each_active_threat_index(
@@ -646,10 +653,16 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             }
 
             // Threat 更新（キャッシュ版も非キャッシュ版と同じロジック）
+            //
+            // HalfKA 用の `reset = king_moved` ではなく、Threat 専用の
+            // `needs_threat_refresh` (is_hm_mirror 境界跨ぎのみ true) を使う。
+            // 詳細: `threat_features::needs_threat_refresh` doc 参照。
             #[cfg(feature = "nnue-threat")]
             if self.has_threat {
                 let king_sq = pos.king_square(perspective);
-                if reset {
+                let reset_threat =
+                    threat_features::needs_threat_refresh(dirty_piece, king_sq, perspective);
+                if reset_threat {
                     let threat_acc = acc.get_threat_mut(p);
                     threat_acc.fill(0);
                     threat_features::for_each_active_threat_index(

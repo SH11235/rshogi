@@ -17,7 +17,7 @@ use crate::types::{Color, PieceType, Square};
 
 use super::accumulator::{DirtyPiece, IndexList};
 use super::bona_piece::BonaPiece;
-use super::bona_piece_halfka_hm::is_hm_mirror;
+use super::bona_piece_halfka_hm::{E_KING, F_KING, is_hm_mirror};
 use super::threat_exclusion;
 
 use std::sync::LazyLock;
@@ -38,6 +38,76 @@ pub const NUM_THREAT_CLASSES: usize = 9;
 
 /// changed threat features の最大数（差分更新用）
 pub const MAX_CHANGED_THREAT_FEATURES: usize = 192;
+
+// =============================================================================
+// Refresh 判定 (is_hm_mirror ベース)
+// =============================================================================
+
+/// Threat 差分更新を諦めて full rebuild すべきかを判定する
+///
+/// 仕様 (`docs/threat_spec.md`):
+/// ```text
+/// needs_threat_refresh(perspective) =
+///     is_hm_mirror(prev_king_sq[perspective], perspective)
+///  != is_hm_mirror(curr_king_sq[perspective], perspective)
+/// ```
+///
+/// `append_changed_threat_indices` は king_sq を `is_hm_mirror` 判定にしか使わない
+/// ため、HM mirror 境界を跨がない限り king 移動があっても差分更新で正しく計算できる。
+///
+/// 玉が HM mirror 境界（5筋側 ↔ 6-9筋側）を跨いだ場合のみ true を返す。
+///
+/// # 引数
+/// - `dirty_piece`: 直前の do_move で発生した DirtyPiece
+/// - `curr_king_sq`: 現在 (after) の perspective 側の玉位置
+/// - `perspective`: 視点
+///
+/// # 戻り値
+/// - true: refresh (full rebuild) が必要
+/// - false: append_changed_threat_indices で差分更新可能
+pub fn needs_threat_refresh(
+    dirty_piece: &DirtyPiece,
+    curr_king_sq: Square,
+    perspective: Color,
+) -> bool {
+    // 玉が動いていなければ HM mirror は不変 → refresh 不要
+    if !dirty_piece.king_moved[perspective as usize] {
+        return false;
+    }
+    // 玉が動いた場合、dirty_piece から prev king sq を取り出す
+    let prev_king_sq = match extract_prev_king_sq(dirty_piece, perspective) {
+        Some(sq) => sq,
+        // 予期しないケース: king_moved=true だが dirty_piece から prev king sq を
+        // 取り出せなかった。安全側で refresh する (correctness 優先)。
+        None => return true,
+    };
+    // HM mirror 境界を跨いだかどうかを判定
+    is_hm_mirror(prev_king_sq, perspective) != is_hm_mirror(curr_king_sq, perspective)
+}
+
+/// `DirtyPiece` から perspective 側の玉の移動前 sq を抽出する
+///
+/// `changed_piece` の `old_piece.fb` を走査し、F_KING (perspective=Black) または
+/// E_KING (perspective=White) 範囲にある駒を探す。
+///
+/// # 補足
+/// `fb` は Black 視点の BonaPiece encoding で、king は絶対 sq で格納される
+/// (`F_KING + sq.index()` または `E_KING + sq.index()`)。
+/// - perspective=Black → 自玉 = 先手玉 = F_KING 範囲
+/// - perspective=White → 自玉 = 後手玉 = E_KING 範囲 (Black 視点で enemy)
+fn extract_prev_king_sq(dirty_piece: &DirtyPiece, perspective: Color) -> Option<Square> {
+    let king_base = match perspective {
+        Color::Black => F_KING,
+        Color::White => E_KING,
+    };
+    for i in 0..dirty_piece.dirty_num as usize {
+        let v = dirty_piece.changed_piece[i].old_piece.fb.value() as usize;
+        if (king_base..king_base + 81).contains(&v) {
+            return Square::from_u8((v - king_base) as u8);
+        }
+    }
+    None
+}
 
 // =============================================================================
 // ThreatClass
@@ -1834,5 +1904,146 @@ mod tests {
                 }
             }
         }
+    }
+
+    // =========================================================================
+    // needs_threat_refresh テスト (Phase 0: HM mirror ベースの refresh 判定)
+    // =========================================================================
+
+    use super::super::accumulator::{ChangedBonaPiece, DirtyPiece};
+    use super::super::bona_piece::ExtBonaPiece;
+    use super::super::bona_piece_halfka_hm::{E_KING, F_KING};
+
+    /// DirtyPiece を king move で組み立てるヘルパー
+    fn make_king_move_dirty(king_color: Color, from_sq: Square, to_sq: Square) -> DirtyPiece {
+        let (base_fb, base_fw) = match king_color {
+            Color::Black => (F_KING, E_KING),
+            Color::White => (E_KING, F_KING),
+        };
+        let old_fb = BonaPiece::new(base_fb as u16 + from_sq.index() as u16);
+        let new_fb = BonaPiece::new(base_fb as u16 + to_sq.index() as u16);
+        let old_fw = BonaPiece::new(base_fw as u16 + from_sq.inverse().index() as u16);
+        let new_fw = BonaPiece::new(base_fw as u16 + to_sq.inverse().index() as u16);
+
+        let mut dp = DirtyPiece::new();
+        dp.dirty_num = 1;
+        dp.changed_piece[0] = ChangedBonaPiece {
+            old_piece: ExtBonaPiece {
+                fb: old_fb,
+                fw: old_fw,
+            },
+            new_piece: ExtBonaPiece {
+                fb: new_fb,
+                fw: new_fw,
+            },
+        };
+        dp.king_moved[king_color as usize] = true;
+        dp
+    }
+
+    /// 玉が動いていない → refresh 不要
+    #[test]
+    fn test_needs_threat_refresh_no_king_move() {
+        let dp = DirtyPiece::new(); // king_moved = [false, false]
+        let king_sq = Square::from_u8(40).unwrap(); // 5五
+        assert!(!needs_threat_refresh(&dp, king_sq, Color::Black));
+        assert!(!needs_threat_refresh(&dp, king_sq, Color::White));
+    }
+
+    /// 先手玉が同じ HM zone 内で動いた → refresh 不要
+    ///
+    /// HM zone は file >= 5 (perspective 基準) で判定。
+    /// 先手玉が 5九 (file=4, rank=8, raw=44) → 4九 (file=3, rank=8, raw=35)
+    /// file 4 → file 3 は両方とも同じ zone (file < 5 → !is_hm_mirror)
+    #[test]
+    fn test_needs_threat_refresh_black_same_zone() {
+        let from = Square::from_u8(44).unwrap(); // 5九 (file=4)
+        let to = Square::from_u8(35).unwrap(); // 4九 (file=3)
+        let dp = make_king_move_dirty(Color::Black, from, to);
+        assert!(!is_hm_mirror(from, Color::Black));
+        assert!(!is_hm_mirror(to, Color::Black));
+        assert!(!needs_threat_refresh(&dp, to, Color::Black));
+    }
+
+    /// 先手玉が HM mirror 境界を跨いだ → refresh 必要
+    ///
+    /// 5九 (file=4, !mirror) → 6九 (file=5, mirror)
+    #[test]
+    fn test_needs_threat_refresh_black_cross_boundary() {
+        let from = Square::from_u8(44).unwrap(); // 5九 (file=4)
+        let to = Square::from_u8(53).unwrap(); // 6九 (file=5)
+        let dp = make_king_move_dirty(Color::Black, from, to);
+        assert!(!is_hm_mirror(from, Color::Black));
+        assert!(is_hm_mirror(to, Color::Black));
+        assert!(needs_threat_refresh(&dp, to, Color::Black));
+    }
+
+    /// 後手玉が同じ HM zone 内で動いた → refresh 不要
+    ///
+    /// White perspective では `is_hm_mirror` 内部で sq.inverse() が適用される。
+    /// absolute file 4 → inverted file 4 (!mirror)
+    /// absolute file 5 → inverted file 3 (!mirror)
+    /// よって absolute file 4→5 (5一→6一) は両方 !mirror で同じ zone
+    #[test]
+    fn test_needs_threat_refresh_white_same_zone() {
+        let from = Square::from_u8(36).unwrap(); // 5一 (file=4)
+        let to = Square::from_u8(45).unwrap(); // 6一 (file=5)
+        let dp = make_king_move_dirty(Color::White, from, to);
+        assert!(!is_hm_mirror(from, Color::White));
+        assert!(!is_hm_mirror(to, Color::White));
+        assert!(!needs_threat_refresh(&dp, to, Color::White));
+    }
+
+    /// 後手玉が HM mirror 境界を跨いだ → refresh 必要
+    ///
+    /// absolute file 4 → inverted file 4 (!mirror)
+    /// absolute file 3 → inverted file 5 (mirror)
+    /// よって absolute file 4→3 (5一→4一) は境界跨ぎ
+    #[test]
+    fn test_needs_threat_refresh_white_cross_boundary() {
+        let from = Square::from_u8(36).unwrap(); // 5一 (file=4)
+        let to = Square::from_u8(27).unwrap(); // 4一 (file=3)
+        let dp = make_king_move_dirty(Color::White, from, to);
+        assert!(!is_hm_mirror(from, Color::White));
+        assert!(is_hm_mirror(to, Color::White));
+        assert!(needs_threat_refresh(&dp, to, Color::White));
+    }
+
+    /// 先手玉が動いたが、perspective=White の needs_threat_refresh は false
+    ///
+    /// 先手玉の移動は White perspective の king_moved[White] を変えない
+    #[test]
+    fn test_needs_threat_refresh_other_perspective_unaffected() {
+        let from = Square::from_u8(44).unwrap();
+        let to = Square::from_u8(53).unwrap();
+        let dp = make_king_move_dirty(Color::Black, from, to);
+
+        // Black の king_moved = true, White の king_moved = false
+        assert!(dp.king_moved[Color::Black as usize]);
+        assert!(!dp.king_moved[Color::White as usize]);
+
+        // White perspective から見ると King は動いていない
+        let white_king_sq = Square::from_u8(36).unwrap();
+        assert!(!needs_threat_refresh(&dp, white_king_sq, Color::White));
+    }
+
+    /// extract_prev_king_sq が dirty_piece から正しく prev king sq を取り出せるか
+    #[test]
+    fn test_extract_prev_king_sq() {
+        // 先手玉: 5九 → 6九
+        let dp = make_king_move_dirty(
+            Color::Black,
+            Square::from_u8(44).unwrap(),
+            Square::from_u8(53).unwrap(),
+        );
+        assert_eq!(extract_prev_king_sq(&dp, Color::Black), Some(Square::from_u8(44).unwrap()));
+
+        // 後手玉: 5一 → 6一
+        let dp = make_king_move_dirty(
+            Color::White,
+            Square::from_u8(36).unwrap(),
+            Square::from_u8(45).unwrap(),
+        );
+        assert_eq!(extract_prev_king_sq(&dp, Color::White), Some(Square::from_u8(36).unwrap()));
     }
 }
