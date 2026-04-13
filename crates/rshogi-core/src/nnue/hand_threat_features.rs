@@ -420,6 +420,103 @@ pub(crate) fn hand_threat_index(
 }
 
 // =============================================================================
+// 手駒 BonaPiece decode (差分更新 helper)
+// =============================================================================
+
+/// 手駒 BonaPiece (`fb` perspective) から `(owner_color, piece_type)` を復元する。
+///
+/// 盤上駒・ZERO の場合は `None`。返される `PieceType` は Pawn/Lance/Knight/Silver/
+/// Gold/Bishop/Rook のいずれかで、成駒は含まれない (手駒に成駒は存在しない)。
+///
+/// ## 目的
+///
+/// `dirty_piece[1].new_piece.fb` から実際に手駒側に増減した駒種を取得するために使う。
+/// `decode_board_threat_info_fb` は盤上駒の Threat 情報を返すが、成駒を GoldLike
+/// クラスに正規化 (Gold/ProPawn/ProLance/ProKnight/ProSilver → `PieceType::Gold`)
+/// してしまうため、手駒側 transition の判定には使えない。
+///
+/// 本 helper は `bona_piece.rs` の手駒レイアウトに従って range 判定で decode する:
+///
+/// ```text
+/// Black Pawn   : 1..=18   (F_HAND_PAWN=1,   max count 18)
+/// White Pawn   : 20..=37  (E_HAND_PAWN=20)
+/// Black Lance  : 39..=42  (F_HAND_LANCE=39, max count 4)
+/// White Lance  : 44..=47
+/// Black Knight : 49..=52  (F_HAND_KNIGHT=49)
+/// White Knight : 54..=57
+/// Black Silver : 59..=62  (F_HAND_SILVER=59)
+/// White Silver : 64..=67
+/// Black Gold   : 69..=72  (F_HAND_GOLD=69)
+/// White Gold   : 74..=77
+/// Black Bishop : 79..=80  (F_HAND_BISHOP=79, max count 2)
+/// White Bishop : 82..=83
+/// Black Rook   : 85..=86  (F_HAND_ROOK=85)
+/// White Rook   : 88..=89
+/// ```
+#[inline]
+pub(crate) fn decode_hand_piece_fb(bp: super::bona_piece::BonaPiece) -> Option<(Color, PieceType)> {
+    use super::bona_piece::{
+        E_HAND_BISHOP, E_HAND_GOLD, E_HAND_KNIGHT, E_HAND_LANCE, E_HAND_PAWN, E_HAND_ROOK,
+        E_HAND_SILVER, F_HAND_BISHOP, F_HAND_GOLD, F_HAND_KNIGHT, F_HAND_LANCE, F_HAND_PAWN,
+        F_HAND_ROOK, F_HAND_SILVER, FE_HAND_END,
+    };
+    let v = bp.value();
+    if v == 0 || (v as usize) >= FE_HAND_END {
+        return None;
+    }
+    // Pawn (18 slots per color)
+    if (F_HAND_PAWN..F_HAND_PAWN + 18).contains(&v) {
+        return Some((Color::Black, PieceType::Pawn));
+    }
+    if (E_HAND_PAWN..E_HAND_PAWN + 18).contains(&v) {
+        return Some((Color::White, PieceType::Pawn));
+    }
+    // Lance (4 slots per color)
+    if (F_HAND_LANCE..F_HAND_LANCE + 4).contains(&v) {
+        return Some((Color::Black, PieceType::Lance));
+    }
+    if (E_HAND_LANCE..E_HAND_LANCE + 4).contains(&v) {
+        return Some((Color::White, PieceType::Lance));
+    }
+    // Knight
+    if (F_HAND_KNIGHT..F_HAND_KNIGHT + 4).contains(&v) {
+        return Some((Color::Black, PieceType::Knight));
+    }
+    if (E_HAND_KNIGHT..E_HAND_KNIGHT + 4).contains(&v) {
+        return Some((Color::White, PieceType::Knight));
+    }
+    // Silver
+    if (F_HAND_SILVER..F_HAND_SILVER + 4).contains(&v) {
+        return Some((Color::Black, PieceType::Silver));
+    }
+    if (E_HAND_SILVER..E_HAND_SILVER + 4).contains(&v) {
+        return Some((Color::White, PieceType::Silver));
+    }
+    // Gold
+    if (F_HAND_GOLD..F_HAND_GOLD + 4).contains(&v) {
+        return Some((Color::Black, PieceType::Gold));
+    }
+    if (E_HAND_GOLD..E_HAND_GOLD + 4).contains(&v) {
+        return Some((Color::White, PieceType::Gold));
+    }
+    // Bishop (2 slots per color)
+    if (F_HAND_BISHOP..F_HAND_BISHOP + 2).contains(&v) {
+        return Some((Color::Black, PieceType::Bishop));
+    }
+    if (E_HAND_BISHOP..E_HAND_BISHOP + 2).contains(&v) {
+        return Some((Color::White, PieceType::Bishop));
+    }
+    // Rook
+    if (F_HAND_ROOK..F_HAND_ROOK + 2).contains(&v) {
+        return Some((Color::Black, PieceType::Rook));
+    }
+    if (E_HAND_ROOK..E_HAND_ROOK + 2).contains(&v) {
+        return Some((Color::White, PieceType::Rook));
+    }
+    None
+}
+
+// =============================================================================
 // append_changed_hand_threat_indices (差分更新)
 // =============================================================================
 
@@ -548,8 +645,13 @@ pub fn append_changed_hand_threat_indices(
     // 制限:
     // - 両駒ともに非 Pawn (pawn file 不変)
     // - us の hand[cap_pt_hand] >= 2 (after count; before は >=1、block 非遷移)
+    //
+    // 重要: cp1.old_piece.fb は盤上駒 → decode_board_threat_info_fb は成駒を Gold に
+    // 正規化して返すため、手駒 block の識別には cp1.new_piece.fb (手駒 BonaPiece) から
+    // decode_hand_piece_fb で実手駒種を取得する。
     let cap_before_piece_at_to: Option<(Color, PieceType)> = if dirty_piece.dirty_num == 2 {
         let cp1 = &dirty_piece.changed_piece[1];
+        // cp1.old_piece = before 状態の盤上駒 (captured 駒)、threat info を取得
         let cap_old = decode_board_threat_info_fb(cp1.old_piece.fb);
         let Some((cap_color, _cap_class, cap_pt_board, cap_sq)) = cap_old else {
             bump!(FALLBACK_CAPTURE_OTHER);
@@ -559,7 +661,13 @@ pub fn append_changed_hand_threat_indices(
             bump!(FALLBACK_CAPTURE_OTHER);
             return false;
         }
-        if decode_board_threat_info_fb(cp1.new_piece.fb).is_some() {
+        // cp1.new_piece = after 状態の手駒 BonaPiece、実手駒種を decode
+        let Some((new_hand_color, cap_pt_hand_base)) = decode_hand_piece_fb(cp1.new_piece.fb)
+        else {
+            bump!(FALLBACK_CAPTURE_OTHER);
+            return false;
+        };
+        if new_hand_color != old_color {
             bump!(FALLBACK_CAPTURE_OTHER);
             return false;
         }
@@ -567,16 +675,17 @@ pub fn append_changed_hand_threat_indices(
             bump!(FALLBACK_CAPTURE_OTHER);
             return false;
         }
-        if old_pt == PieceType::Pawn || cap_pt_board == PieceType::Pawn {
+        // Pawn 関与は pawn file state 変化の可能性あり
+        // (moved piece Pawn / captured board piece 生歩 / captured 後の hand Pawn)
+        if old_pt == PieceType::Pawn
+            || cap_pt_board == PieceType::Pawn
+            || cap_pt_hand_base == PieceType::Pawn
+        {
             bump!(FALLBACK_PAWN_INVOLVED);
             return false;
         }
-        let cap_pt_hand_base = cap_pt_board.unpromote();
-        if cap_pt_hand_base == PieceType::Pawn {
-            bump!(FALLBACK_PAWN_INVOLVED);
-            return false;
-        }
-        // 0↔1 transition があれば fallback (未対応)
+        // 0↔1 transition があれば fallback (Phase 4 で対応予定)
+        // 実手駒種 cap_pt_hand_base を使って判定
         if pos.hand(old_color).count(cap_pt_hand_base) < 2 {
             bump!(FALLBACK_CAPTURE_0_1_TRANSITION);
             return false;
@@ -1152,6 +1261,66 @@ mod tests {
         verify_incremental_hand_threat(&mut pos, m);
     }
 
+    /// Phase 2: decode_hand_piece_fb が手駒 BonaPiece から実手駒種を正しく復元する
+    #[test]
+    fn test_decode_hand_piece_fb_basic() {
+        use super::super::bona_piece::{BonaPiece, ExtBonaPiece};
+
+        // Black Silver 1 枚
+        let bp = ExtBonaPiece::from_hand(Color::Black, PieceType::Silver, 1);
+        assert_eq!(decode_hand_piece_fb(bp.fb), Some((Color::Black, PieceType::Silver)));
+
+        // White Gold 3 枚
+        let bp = ExtBonaPiece::from_hand(Color::White, PieceType::Gold, 3);
+        assert_eq!(decode_hand_piece_fb(bp.fb), Some((Color::White, PieceType::Gold)));
+
+        // Black Pawn 18 枚 (最大)
+        let bp = ExtBonaPiece::from_hand(Color::Black, PieceType::Pawn, 18);
+        assert_eq!(decode_hand_piece_fb(bp.fb), Some((Color::Black, PieceType::Pawn)));
+
+        // ZERO
+        assert_eq!(decode_hand_piece_fb(BonaPiece::ZERO), None);
+    }
+
+    /// Phase 2: 全手駒種 × 両色 × 各 count を round-trip 検証
+    #[test]
+    fn test_decode_hand_piece_fb_exhaustive() {
+        use super::super::bona_piece::ExtBonaPiece;
+        let cases = [
+            (PieceType::Pawn, 18),
+            (PieceType::Lance, 4),
+            (PieceType::Knight, 4),
+            (PieceType::Silver, 4),
+            (PieceType::Gold, 4),
+            (PieceType::Bishop, 2),
+            (PieceType::Rook, 2),
+        ];
+        for &(pt, max_count) in &cases {
+            for color in [Color::Black, Color::White] {
+                for count in 1..=max_count {
+                    let bp = ExtBonaPiece::from_hand(color, pt, count);
+                    assert_eq!(
+                        decode_hand_piece_fb(bp.fb),
+                        Some((color, pt)),
+                        "round-trip failed: color={color:?} pt={pt:?} count={count}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Phase 2: 盤上駒 BonaPiece は decode_hand_piece_fb で None を返すべき
+    #[test]
+    fn test_decode_hand_piece_fb_rejects_board() {
+        use super::super::bona_piece::BonaPiece;
+        use super::super::bona_piece::FE_HAND_END;
+        // FE_HAND_END 以降は盤上駒 → None
+        let bp = BonaPiece::new(FE_HAND_END as u16);
+        assert_eq!(decode_hand_piece_fb(bp), None);
+        let bp = BonaPiece::new((FE_HAND_END + 100) as u16);
+        assert_eq!(decode_hand_piece_fb(bp), None);
+    }
+
     /// Phase 1: 非捕獲・非 Pawn promotion (Silver → ProSilver) で差分更新が一致
     ///
     /// 非 Pawn 成りは:
@@ -1180,6 +1349,43 @@ mod tests {
         let mut pos = Position::new();
         pos.set_sfen("4k4/9/7N1/9/9/9/9/9/4K4 b R 1").expect("knight promotion sfen");
         let m = Move::from_usi("2c1a+").expect("2c1a+");
+        verify_incremental_hand_threat(&mut pos, m);
+    }
+
+    /// Phase 2: 成駒捕獲 (ProSilver → 手駒 Silver) のシナリオで hand transition 判定が正しい
+    ///
+    /// 旧実装の `cap_pt_board.unpromote()` では `decode_board_threat_info_fb` が返す
+    /// `PieceType::Gold` をそのまま Gold として扱い、本来更新すべき hand[Silver] が
+    /// 無視されていた。`decode_hand_piece_fb` への切替で正しく Silver block の
+    /// transition を判定できることを verify_incremental_hand_threat で確認する。
+    #[test]
+    fn test_hand_threat_incremental_capture_promoted_silver() {
+        // Black Silver at 3三 (file 3 rank 2 zero-indexed), captures promoted White Silver at 3二
+        // rank 2: 6 empties (f9..f4), +s at f3, 1 empty f2, 1 empty f1 = "6+s2"
+        // rank 3: 6 empties (f9..f4), S at f3, 2 empties = "6S2"
+        // Black already has Silver in hand (count=2 so capture keeps >=2)
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/6+s2/6S2/9/9/9/9/9/4K4 b 2S 1")
+            .expect("promoted silver capture sfen");
+        // 3c3b (non-promoting capture of promoted silver) - wait, Silver capturing ProSilver
+        // from=3c (file 3 rank 2), to=3b (file 3 rank 1)
+        let m = Move::from_usi("3c3b").expect("3c3b");
+        verify_incremental_hand_threat(&mut pos, m);
+    }
+
+    /// Phase 2: 成桂捕獲 (ProKnight → 手駒 Knight)
+    #[test]
+    fn test_hand_threat_incremental_capture_promoted_knight() {
+        // Black Silver at 3b captures ProKnight at 2a (knight promoted to gold-class)
+        // Wait, use Gold capturing ProKnight for simplicity
+        // rank 1 (a): "4k3+n" = 4 empty, k, 3 empty, +n at f1
+        // rank 2 (b): "8G" = 8 empty, G at f1
+        // Black already has Knight count = 2
+        let mut pos = Position::new();
+        pos.set_sfen("4k3+n/8G/9/9/9/9/9/9/4K4 b 2N 1")
+            .expect("promoted knight capture sfen");
+        // Gold at 1b captures ProKnight at 1a
+        let m = Move::from_usi("1b1a").expect("1b1a");
         verify_incremental_hand_threat(&mut pos, m);
     }
 
