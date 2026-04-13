@@ -80,6 +80,11 @@ pub mod stats {
         FALLBACK_PROMOTION_CAPTURE_PAWN_OR_CAPTURED_PAWN,
         FALLBACK_PROMOTION_CAPTURE_HAND_TRANSITION,
         FALLBACK_PAWN_INVOLVED,
+        // PAWN_INVOLVED 分解
+        FALLBACK_PAWN_CAP_OLD_PAWN,
+        FALLBACK_PAWN_CAP_BOARD_PAWN,
+        FALLBACK_PAWN_CAP_HAND_PAWN,
+        FALLBACK_PAWN_DROP,
         FALLBACK_CAPTURE_0_1_TRANSITION,
         FALLBACK_CAPTURE_OTHER,
         FALLBACK_BUFFER_OVERFLOW,
@@ -684,6 +689,7 @@ pub fn append_changed_hand_threat_indices(
         // Pawn drop は fallback (pawn file state 変化)
         if dropped_pt == PieceType::Pawn || new_pt == PieceType::Pawn {
             bump!(FALLBACK_PAWN_INVOLVED);
+            bump!(FALLBACK_PAWN_DROP);
             return false;
         }
         // Phase 4: hand count が 0 になれば 1→0 transition として後段で direct-push
@@ -783,11 +789,19 @@ pub fn append_changed_hand_threat_indices(
             return false;
         }
         // Pawn 関与は pawn file state 変化の可能性あり
-        if old_pt == PieceType::Pawn
-            || cap_pt_board == PieceType::Pawn
-            || cap_pt_hand_base == PieceType::Pawn
-        {
+        if old_pt == PieceType::Pawn {
             bump!(FALLBACK_PAWN_INVOLVED);
+            bump!(FALLBACK_PAWN_CAP_OLD_PAWN);
+            return false;
+        }
+        if cap_pt_board == PieceType::Pawn {
+            bump!(FALLBACK_PAWN_INVOLVED);
+            bump!(FALLBACK_PAWN_CAP_BOARD_PAWN);
+            return false;
+        }
+        if cap_pt_hand_base == PieceType::Pawn {
+            bump!(FALLBACK_PAWN_INVOLVED);
+            bump!(FALLBACK_PAWN_CAP_HAND_PAWN);
             return false;
         }
         // transition 検出: after_count == 1 なら before=0 で 0→1 transition
