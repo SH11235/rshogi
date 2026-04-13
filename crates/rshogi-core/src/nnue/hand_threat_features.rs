@@ -592,15 +592,45 @@ pub fn append_changed_hand_threat_indices(
     }
 
     let cp0 = &dirty_piece.changed_piece[0];
-    let old_info = decode_board_threat_info_fb(cp0.old_piece.fb);
+    let old_info_board = decode_board_threat_info_fb(cp0.old_piece.fb);
     let new_info = decode_board_threat_info_fb(cp0.new_piece.fb);
-    let (Some(old_info), Some(new_info)) = (old_info, new_info) else {
-        // old/new いずれかが盤上駒でない → drop (old が手駒)
-        bump!(FALLBACK_DROP);
+    let Some(new_info) = new_info else {
+        // new が盤上駒でない → 異常 (drop でも new は盤上のはず)
+        bump!(FALLBACK_OTHER);
         return false;
     };
-    let (old_color, _old_class, old_pt, from_sq) = old_info;
     let (new_color, _new_class, new_pt, to_sq) = new_info;
+
+    // Drop 判定: old が盤上駒でない場合は手駒側 BonaPiece のはず
+    let is_drop = old_info_board.is_none();
+    let (old_color, old_pt, from_sq) = if let Some((oc, _, op, fs)) = old_info_board {
+        (oc, op, fs)
+    } else {
+        // Drop: cp0.old_piece.fb は手駒 BonaPiece → decode
+        let Some((dropper, dropped_pt)) = decode_hand_piece_fb(cp0.old_piece.fb) else {
+            // 想定外 (old が ZERO 等)
+            bump!(FALLBACK_OTHER);
+            return false;
+        };
+        // Phase 3: Pawn drop は fallback (pawn file state 変化)
+        if dropped_pt == PieceType::Pawn || new_pt == PieceType::Pawn {
+            bump!(FALLBACK_PAWN_INVOLVED);
+            return false;
+        }
+        // 新 hand count が 0 なら 1→0 transition → Phase 4 で対応
+        if pos.hand(dropper).count(dropped_pt) == 0 {
+            bump!(FALLBACK_DROP);
+            return false;
+        }
+        if dirty_piece.dirty_num != 1 {
+            // Drop なのに dirty_num=2 は想定外
+            bump!(FALLBACK_OTHER);
+            return false;
+        }
+        // Sentinel: from_sq = to_sq にする (drops では from_sq は存在しないが、
+        // 後段の Bitboard 演算 ({from}∪{to}) と rev_from 計算を簡略化できる)
+        (dropper, dropped_pt, to_sq)
+    };
     if old_color != new_color {
         bump!(FALLBACK_OTHER);
         return false;
@@ -611,7 +641,10 @@ pub fn append_changed_hand_threat_indices(
     //           自然に吸収される。pawn file state も非 Pawn 駒の成りなら不変)
     //   Pawn → ProPawn: pawn file count が 1 減少 → pawn drop legality 変化 → fallback
     //   成りあり capture: Phase 2 (decode fix) + Phase 4 (0↔1 transition) 後に対応
-    let is_promotion = old_pt != new_pt;
+    //
+    // Drop の場合は old_pt と new_pt が同じ (dropper side sets old_pt := new_pt) なので
+    // is_promotion は false。
+    let is_promotion = !is_drop && old_pt != new_pt;
     if is_promotion {
         if dirty_piece.dirty_num == 2 {
             // capture 付き promotion: 現時点では fallback
@@ -697,12 +730,19 @@ pub fn append_changed_hand_threat_indices(
 
     // === Step 2: 占有状態の before/after 再構成 ===
     let after_occ = pos.occupied();
-    // from_sq: before occupied (moved piece), after empty
-    // to_sq: capture なら before/after 両方 occupied (piece が変わるだけ)
-    //        non-capture なら before empty, after occupied
-    let before_occ = if cap_before_piece_at_to.is_some() {
+    // Board move: from_sq occupied before → empty after
+    //             to_sq empty before → occupied after (non-capture)
+    //                  occupied before → occupied after with different piece (capture)
+    // Drop:       from_sq は存在しない (sentinel = to_sq)
+    //             to_sq empty before → occupied after
+    let before_occ = if is_drop {
+        // Drop: to_sq was empty before, from_sq doesn't exist
+        after_occ & !Bitboard::from_square(to_sq)
+    } else if cap_before_piece_at_to.is_some() {
+        // Capture: from_sq occupied before, to_sq occupied in both
         after_occ | Bitboard::from_square(from_sq)
     } else {
+        // Non-capture move: from_sq occupied before, to_sq empty before
         (after_occ | Bitboard::from_square(from_sq)) & !Bitboard::from_square(to_sq)
     };
 
@@ -807,14 +847,16 @@ pub fn append_changed_hand_threat_indices(
                 while !targets.is_empty() {
                     let to_target = targets.pop();
                     // target の before 状態 piece info
-                    let (target_color, target_pt) = if to_target == from_sq {
+                    // Drop の場合 from_sq = to_sq (sentinel) で、to_sq は before で空
+                    // (before_occ に含まれないので通常 to_sq が target にならない)。
+                    // to_target == from_sq 分岐は drop で無効化する。
+                    let (target_color, target_pt) = if !is_drop && to_target == from_sq {
                         (old_color, old_pt)
                     } else if to_target == to_sq {
                         if let Some((cap_color, cap_pt)) = cap_before_piece_at_to {
                             (cap_color, cap_pt)
                         } else {
-                            // non-capture: to_sq was empty → skip
-                            // (ただし before_occ & to_sq が空なので通常ここには来ないはず)
+                            // non-capture / drop: to_sq was empty → skip
                             continue;
                         }
                     } else {
@@ -1370,6 +1412,40 @@ mod tests {
         // 3c3b (non-promoting capture of promoted silver) - wait, Silver capturing ProSilver
         // from=3c (file 3 rank 2), to=3b (file 3 rank 1)
         let m = Move::from_usi("3c3b").expect("3c3b");
+        verify_incremental_hand_threat(&mut pos, m);
+    }
+
+    /// Phase 3: 非 Pawn drop (Silver drop) 非遷移 (before hand count >= 2)
+    #[test]
+    fn test_hand_threat_incremental_noncap_silver_drop() {
+        // Black has 2 Silver in hand, drops one at 5五 (5e, empty sq)
+        // White King at 5一, Black King at 5九, nothing else on board
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/9/9/9/9/9/4K4 b 2S 1").expect("silver drop sfen");
+        let m = Move::from_usi("S*5e").expect("S*5e");
+        verify_incremental_hand_threat(&mut pos, m);
+    }
+
+    /// Phase 3: Rook drop (slider, non-transition) が正しく動作する
+    #[test]
+    fn test_hand_threat_incremental_noncap_rook_drop() {
+        // Black has 2 Rook in hand, drops one at 5e
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/9/9/9/9/9/4K4 b 2R 1").expect("rook drop sfen");
+        let m = Move::from_usi("R*5e").expect("R*5e");
+        verify_incremental_hand_threat(&mut pos, m);
+    }
+
+    /// Phase 3: Silver drop が実際に attack pair を発生させるケース (target 駒あり)
+    #[test]
+    fn test_hand_threat_incremental_drop_with_targets() {
+        // Black has 2 Silver in hand, drops at 3三.
+        // 3三 Silver attacks 2二, 4二, 2四, 4四. Put White knight at 2二 for an attack target.
+        // rank 1 = "4k4", rank 2 = "7n1" (n at file 2), rank 9 = "4K4"
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/7n1/9/9/9/9/9/9/4K4 b 2S 1")
+            .expect("silver drop with target sfen");
+        let m = Move::from_usi("S*3c").expect("S*3c");
         verify_incremental_hand_threat(&mut pos, m);
     }
 
