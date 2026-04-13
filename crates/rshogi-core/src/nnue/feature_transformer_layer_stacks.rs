@@ -606,6 +606,9 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             if self.has_hand_threat {
                 let hand_threat_acc = acc.get_hand_threat_mut(p);
                 self.rebuild_hand_threat(pos, perspective, hand_threat_acc);
+                #[cfg(feature = "hand-threat-stats")]
+                hand_threat_features::stats::REBUILD_FROM_REFRESH_ACCUMULATOR
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
 
@@ -761,6 +764,9 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                 if reset_hand_threat {
                     let hand_threat_acc = acc.get_hand_threat_mut(p);
                     self.rebuild_hand_threat(pos, perspective, hand_threat_acc);
+                    #[cfg(feature = "hand-threat-stats")]
+                    hand_threat_features::stats::REBUILD_FROM_UPDATE_RESET
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 } else {
                     let prev_hand_threat = prev_acc.get_hand_threat(p);
                     let curr_hand_threat = acc.get_hand_threat_mut(p);
@@ -790,6 +796,9 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                     } else {
                         // overflow or 未対応 → full rebuild fallback
                         self.rebuild_hand_threat(pos, perspective, curr_hand_threat);
+                        #[cfg(feature = "hand-threat-stats")]
+                        hand_threat_features::stats::REBUILD_FROM_UPDATE_DIFF_FALLBACK
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
             }
@@ -944,6 +953,9 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                 if reset_hand_threat {
                     let hand_threat_acc = acc.get_hand_threat_mut(p);
                     self.rebuild_hand_threat(pos, perspective, hand_threat_acc);
+                    #[cfg(feature = "hand-threat-stats")]
+                    hand_threat_features::stats::REBUILD_FROM_UPDATE_CACHE_RESET
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 } else {
                     let prev_hand_threat = prev_acc.get_hand_threat(p);
                     let curr_hand_threat = acc.get_hand_threat_mut(p);
@@ -972,6 +984,9 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                         }
                     } else {
                         self.rebuild_hand_threat(pos, perspective, curr_hand_threat);
+                        #[cfg(feature = "hand-threat-stats")]
+                        hand_threat_features::stats::REBUILD_FROM_UPDATE_CACHE_DIFF_FALLBACK
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
             }
@@ -1017,6 +1032,9 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             if self.has_hand_threat {
                 let hand_threat_acc = acc.get_hand_threat_mut(p);
                 self.rebuild_hand_threat(pos, perspective, hand_threat_acc);
+                #[cfg(feature = "hand-threat-stats")]
+                hand_threat_features::stats::REBUILD_FROM_REFRESH_ACCUMULATOR_WITH_CACHE
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
 
@@ -1234,6 +1252,9 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                         }
                     } else {
                         self.rebuild_hand_threat(pos, perspective, hand_threat_acc);
+                        #[cfg(feature = "hand-threat-stats")]
+                        hand_threat_features::stats::REBUILD_FROM_FORWARD_UPDATE_DIFF_FALLBACK
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
             } else {
@@ -1242,6 +1263,9 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                     let p = perspective as usize;
                     let hand_threat_acc = stack.current_mut().accumulator.get_hand_threat_mut(p);
                     self.rebuild_hand_threat(pos, perspective, hand_threat_acc);
+                    #[cfg(feature = "hand-threat-stats")]
+                    hand_threat_features::stats::REBUILD_FROM_FORWARD_UPDATE_PATH_LONG
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         }

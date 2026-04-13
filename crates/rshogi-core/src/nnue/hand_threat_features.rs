@@ -70,10 +70,10 @@ pub mod stats {
     }
 
     define_counters! {
+        // --- diff 関数 (append_changed_hand_threat_indices) の return path ---
         INCREMENTAL_OK,
         FALLBACK_KING_MOVE,
         FALLBACK_DROP,
-        // PROMOTION 分解
         FALLBACK_PROMOTION_NONCAP_NONPAWN,
         FALLBACK_PROMOTION_NONCAP_PAWN,
         FALLBACK_PROMOTION_CAPTURE_NONPAWN,
@@ -84,20 +84,72 @@ pub mod stats {
         FALLBACK_CAPTURE_OTHER,
         FALLBACK_BUFFER_OVERFLOW,
         FALLBACK_OTHER,
+        // --- rebuild_hand_threat の呼び出し元 call site ---
+        // refresh path (diff が根本的に使えない):
+        REBUILD_FROM_REFRESH_ACCUMULATOR,
+        REBUILD_FROM_REFRESH_ACCUMULATOR_WITH_CACHE,
+        // update path の reset (HM mirror 跨ぎなど):
+        REBUILD_FROM_UPDATE_RESET,
+        REBUILD_FROM_UPDATE_CACHE_RESET,
+        // update path の diff fallback (上の FALLBACK_* counter と対応):
+        REBUILD_FROM_UPDATE_DIFF_FALLBACK,
+        REBUILD_FROM_UPDATE_CACHE_DIFF_FALLBACK,
+        // forward_update_incremental:
+        REBUILD_FROM_FORWARD_UPDATE_DIFF_FALLBACK,
+        REBUILD_FROM_FORWARD_UPDATE_PATH_LONG,
+    }
+
+    /// diff カウンタのみの合計 (update 呼び出し総数)
+    fn diff_total() -> u64 {
+        INCREMENTAL_OK.load(Ordering::Relaxed)
+            + FALLBACK_KING_MOVE.load(Ordering::Relaxed)
+            + FALLBACK_DROP.load(Ordering::Relaxed)
+            + FALLBACK_PROMOTION_NONCAP_NONPAWN.load(Ordering::Relaxed)
+            + FALLBACK_PROMOTION_NONCAP_PAWN.load(Ordering::Relaxed)
+            + FALLBACK_PROMOTION_CAPTURE_NONPAWN.load(Ordering::Relaxed)
+            + FALLBACK_PROMOTION_CAPTURE_PAWN_OR_CAPTURED_PAWN.load(Ordering::Relaxed)
+            + FALLBACK_PROMOTION_CAPTURE_HAND_TRANSITION.load(Ordering::Relaxed)
+            + FALLBACK_PAWN_INVOLVED.load(Ordering::Relaxed)
+            + FALLBACK_CAPTURE_0_1_TRANSITION.load(Ordering::Relaxed)
+            + FALLBACK_CAPTURE_OTHER.load(Ordering::Relaxed)
+            + FALLBACK_BUFFER_OVERFLOW.load(Ordering::Relaxed)
+            + FALLBACK_OTHER.load(Ordering::Relaxed)
     }
 
     /// stderr に内訳を出力する
     pub fn dump() {
         let entries = snapshot();
-        let total: u64 = entries.iter().map(|(_, v)| *v).sum();
+        let diff_total = diff_total();
         eprintln!("=== HandThreat update stats ===");
-        eprintln!("  total updates: {total}");
-        if total == 0 {
-            return;
-        }
+        eprintln!("  diff call total: {diff_total}");
         for (name, count) in &entries {
-            let pct = (*count as f64) * 100.0 / (total as f64);
-            eprintln!("  {name:40}  {count:>12}  {pct:6.2}%");
+            let is_rebuild = name.starts_with("REBUILD_FROM_");
+            if is_rebuild {
+                continue;
+            }
+            if diff_total == 0 {
+                continue;
+            }
+            let pct = (*count as f64) * 100.0 / (diff_total as f64);
+            eprintln!("  {name:50}  {count:>12}  {pct:6.2}%");
+        }
+        eprintln!();
+        // REBUILD 内訳
+        let rebuild_total: u64 = entries
+            .iter()
+            .filter(|(n, _)| n.starts_with("REBUILD_FROM_"))
+            .map(|(_, v)| *v)
+            .sum();
+        eprintln!("  rebuild call total: {rebuild_total}");
+        for (name, count) in &entries {
+            if !name.starts_with("REBUILD_FROM_") {
+                continue;
+            }
+            if rebuild_total == 0 {
+                continue;
+            }
+            let pct = (*count as f64) * 100.0 / (rebuild_total as f64);
+            eprintln!("  {name:50}  {count:>12}  {pct:6.2}%");
         }
     }
 }
