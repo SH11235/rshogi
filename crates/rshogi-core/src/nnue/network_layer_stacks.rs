@@ -531,29 +531,79 @@ impl<const L1: usize> NetworkLayerStacks<L1> {
         );
         info!("[NNUE Eval] us_acc (piece) first 16: {:?}", &us_acc[0..16]);
 
-        // Threat 結合 (evaluate_with_bucket と同一ロジック)
+        // Threat / HandThreat 結合 (evaluate_with_bucket と同一ロジック)
         let mut transformed: Aligned<[u8; L1]> = Aligned([0u8; L1]);
-        #[cfg(feature = "nnue-threat")]
-        if self.feature_transformer.has_threat {
-            let (us_threat, them_threat) = if side_to_move == Color::Black {
-                (acc.get_threat(Color::Black as usize), acc.get_threat(Color::White as usize))
-            } else {
-                (acc.get_threat(Color::White as usize), acc.get_threat(Color::Black as usize))
+        #[cfg(any(feature = "nnue-threat", feature = "nnue-hand-threat"))]
+        {
+            let has_threat_contribution = {
+                #[allow(unused_mut)]
+                let mut b = false;
+                #[cfg(feature = "nnue-threat")]
+                {
+                    b |= self.feature_transformer.has_threat;
+                }
+                #[cfg(feature = "nnue-hand-threat")]
+                {
+                    b |= self.feature_transformer.has_hand_threat;
+                }
+                b
             };
-            let mut us_combined = [0i16; L1];
-            let mut them_combined = [0i16; L1];
-            for i in 0..L1 {
-                us_combined[i] = us_acc[i].wrapping_add(us_threat[i]);
-                them_combined[i] = them_acc[i].wrapping_add(them_threat[i]);
+            if has_threat_contribution {
+                let mut us_combined = [0i16; L1];
+                let mut them_combined = [0i16; L1];
+                us_combined.copy_from_slice(us_acc);
+                them_combined.copy_from_slice(them_acc);
+
+                #[cfg(feature = "nnue-threat")]
+                if self.feature_transformer.has_threat {
+                    let (us_t, them_t) = if side_to_move == Color::Black {
+                        (
+                            acc.get_threat(Color::Black as usize),
+                            acc.get_threat(Color::White as usize),
+                        )
+                    } else {
+                        (
+                            acc.get_threat(Color::White as usize),
+                            acc.get_threat(Color::Black as usize),
+                        )
+                    };
+                    info!("[NNUE Eval] us_threat first 16: {:?}", &us_t[0..16]);
+                    for i in 0..L1 {
+                        us_combined[i] = us_combined[i].wrapping_add(us_t[i]);
+                        them_combined[i] = them_combined[i].wrapping_add(them_t[i]);
+                    }
+                }
+
+                #[cfg(feature = "nnue-hand-threat")]
+                if self.feature_transformer.has_hand_threat {
+                    let (us_ht, them_ht) = if side_to_move == Color::Black {
+                        (
+                            acc.get_hand_threat(Color::Black as usize),
+                            acc.get_hand_threat(Color::White as usize),
+                        )
+                    } else {
+                        (
+                            acc.get_hand_threat(Color::White as usize),
+                            acc.get_hand_threat(Color::Black as usize),
+                        )
+                    };
+                    info!("[NNUE Eval] us_hand_threat first 16: {:?}", &us_ht[0..16]);
+                    for i in 0..L1 {
+                        us_combined[i] = us_combined[i].wrapping_add(us_ht[i]);
+                        them_combined[i] = them_combined[i].wrapping_add(them_ht[i]);
+                    }
+                }
+
+                info!(
+                    "[NNUE Eval] us_combined (piece+threat+handthreat) first 16: {:?}",
+                    &us_combined[0..16]
+                );
+                sqr_clipped_relu_transform(&us_combined, &them_combined, &mut transformed.0);
+            } else {
+                sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
             }
-            info!("[NNUE Eval] us_threat first 16: {:?}", &us_threat[0..16]);
-            info!("[NNUE Eval] us_combined (piece+threat) first 16: {:?}", &us_combined[0..16]);
-            sqr_clipped_relu_transform(&us_combined, &them_combined, &mut transformed.0);
-        } else {
-            // SqrClippedReLU変換
-            sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
         }
-        #[cfg(not(feature = "nnue-threat"))]
+        #[cfg(not(any(feature = "nnue-threat", feature = "nnue-hand-threat")))]
         {
             sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
         }

@@ -1545,14 +1545,35 @@ impl UsiEngine {
         if diagnostics {
             #[cfg(feature = "diagnostics")]
             {
-                use rshogi_core::nnue::NNUENetwork;
+                use rshogi_core::nnue::{LayerStacksNetwork, NNUENetwork};
                 // diagnostics モード: LayerStacks のみ対応
                 if let NNUENetwork::LayerStacks(ref net) = *network {
-                    // アキュムレータをフル計算
-                    let mut acc = rshogi_core::nnue::AccumulatorLayerStacks::new();
-                    net.refresh_accumulator(&self.position, &mut acc);
-                    let value = net.evaluate_with_diagnostics(&self.position, &acc);
-                    println!("info string Static eval (diagnostics): {}", value.raw());
+                    // L1 variant に dispatch し、refresh + evaluate_with_diagnostics を実行
+                    match net {
+                        #[cfg(feature = "layerstacks-1536")]
+                        LayerStacksNetwork::L1536(inner) => {
+                            let mut acc = rshogi_core::nnue::AccumulatorLayerStacks::<1536>::new();
+                            inner.refresh_accumulator(&self.position, &mut acc);
+                            let value = inner.evaluate_with_diagnostics(&self.position, &acc);
+                            println!("info string Static eval (diagnostics): {}", value.raw());
+                        }
+                        #[cfg(feature = "layerstacks-768")]
+                        LayerStacksNetwork::L768(inner) => {
+                            let mut acc = rshogi_core::nnue::AccumulatorLayerStacks::<768>::new();
+                            inner.refresh_accumulator(&self.position, &mut acc);
+                            let value = inner.evaluate_with_diagnostics(&self.position, &acc);
+                            println!("info string Static eval (diagnostics): {}", value.raw());
+                        }
+                        #[cfg(feature = "layerstacks-512")]
+                        LayerStacksNetwork::L512(inner) => {
+                            let mut acc = rshogi_core::nnue::AccumulatorLayerStacks::<512>::new();
+                            inner.refresh_accumulator(&self.position, &mut acc);
+                            let value = inner.evaluate_with_diagnostics(&self.position, &acc);
+                            println!("info string Static eval (diagnostics): {}", value.raw());
+                        }
+                        #[allow(unreachable_patterns)]
+                        _ => println!("info string Error: no matching LayerStacks L1 variant compiled"),
+                    }
                 } else {
                     println!("info string Error: diagnostics is only supported for LayerStacks");
                 }
