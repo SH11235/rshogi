@@ -41,7 +41,7 @@
 
 - **TT 実装**: エントリサイズ、クラスタ構造、probe/save/replacement policy、generation — 全て YO と完全一致確認済み
 - **NNUE 評価値**: 同一局面で fresh NNUE eval は完全一致
-- **TT eval 信用問題**: RS は `eval_helpers.rs` で常に `nnue_evaluate()` を呼ぶよう修正済み（YO の `USE_LAZY_EVALUATE` 未定義動作に準拠）
+- **TT eval 信用問題**: `use-lazy-evaluate` feature で eager/lazy 切り替え可能 (default: eager、`eval_helpers.rs` で常に `nnue_evaluate()` を呼ぶ)。lazy 有効時は TT hit && !PvNode で `ttData.eval` を再利用し NPS +2.41% (2026-04-13 計測、v92+sfcache 基準、instructions/cycles 同方向で CPI 回帰なし)。ただし TT key16 衝突による偽 hit の eval が伝播し探索木が変わる (startpos は一致、複雑な中盤局面では nodes/pv divergent)。棋力検証 (selfplay) 未実施のため default は eager 維持
 - **pinned_pieces_excluding**: avoid 駒を pinner 候補から除外するよう修正済み
 - **root correction_value**: in_check に関わらず常に計算するよう修正済み（LMR の r 計算で使用されるため）
 
