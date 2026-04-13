@@ -1109,6 +1109,235 @@ pub fn append_changed_threat_indices(
     true
 }
 
+/// `PieceList` (perspective 非依存、fb encoding) の diff から Threat 差分を計算する。
+///
+/// Stockfish 風 Finny Tables 相当。cache entry に保存された
+/// `cached_pl_fb` と現在の `current_pl_fb` の slot-wise 差分から、
+/// 変化した source squares を抽出して before/after の threat pair を列挙する。
+///
+/// ## 戻り値
+///
+/// - `true`: 差分計算成功
+/// - `false`: 中間バッファまたは出力リストがオーバーフロー → 呼び出し元で full refresh が必要
+///
+/// ## 前提
+///
+/// - `current_pl_fb` は `pos.piece_list().piece_list_fb()` と完全一致していること
+/// - `cached_pl_fb` は過去のいずれかの時点で `piece_list_fb()` だったもの
+pub fn append_changed_threat_indices_from_piecelist_diff(
+    pos: &Position,
+    cached_pl_fb: &[BonaPiece; crate::nnue::piece_list::PieceNumber::NB],
+    current_pl_fb: &[BonaPiece; crate::nnue::piece_list::PieceNumber::NB],
+    perspective: Color,
+    king_sq: Square,
+    removed: &mut IndexList<MAX_CHANGED_THREAT_FEATURES>,
+    added: &mut IndexList<MAX_CHANGED_THREAT_FEATURES>,
+) -> bool {
+    let hm = is_hm_mirror(king_sq, perspective);
+    let from_offset_table = &*FROM_OFFSET_TABLE;
+    let friend_color = perspective;
+    let after_occ = pos.occupied();
+
+    // ---------------------------------------------------------------
+    // Step 1: cached state の駒配置を復元
+    // ---------------------------------------------------------------
+    // cached_by_sq[sq] = cached 時点の BonaPiece (fb、ZERO は空)
+    // King も含むため attackers_to_occ の ray 整合性を保てる。
+    let mut cached_by_sq = [BonaPiece::ZERO; 81];
+    let mut cached_occ = Bitboard::EMPTY;
+    for &bp in cached_pl_fb.iter() {
+        if let Some(sq) = decode_board_square_fb(bp) {
+            cached_occ |= Bitboard::from_square(sq);
+            cached_by_sq[sq.raw() as usize] = bp;
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Step 2: 変化した slot から changed_bb を構築
+    // ---------------------------------------------------------------
+    let mut changed_bb = Bitboard::EMPTY;
+    for (old_bp, new_bp) in cached_pl_fb.iter().copied().zip(current_pl_fb.iter().copied()) {
+        if old_bp != new_bp {
+            if let Some(old_sq) = decode_board_square_fb(old_bp) {
+                changed_bb |= Bitboard::from_square(old_sq);
+            }
+            if let Some(new_sq) = decode_board_square_fb(new_bp) {
+                changed_bb |= Bitboard::from_square(new_sq);
+            }
+        }
+    }
+
+    if changed_bb.is_empty() {
+        return true; // 変化なし
+    }
+
+    // ---------------------------------------------------------------
+    // Step 3: Source squares 収集
+    // ---------------------------------------------------------------
+    // `attackers_to_occ` は after-state の piece bitboards を参照するため、
+    // cached state で存在したが current で消えた駒 (captured 等) は
+    // 直接 attackers として返らない。それらは changed_bb に含まれるので
+    // 初期値 source_bb = changed_bb で捕捉される。
+    let mut source_bb = changed_bb;
+    let mut ch_iter = changed_bb;
+    while !ch_iter.is_empty() {
+        let sq = ch_iter.pop();
+        source_bb |= pos.attackers_to_occ(sq, cached_occ);
+        source_bb |= pos.attackers_to_occ(sq, after_occ);
+    }
+
+    // ---------------------------------------------------------------
+    // Step 4: Before / After の threat index 列挙
+    // ---------------------------------------------------------------
+    let mut before_buf = [0u32; MAX_INTERMEDIATE_THREATS];
+    let mut after_buf = [0u32; MAX_INTERMEDIATE_THREATS];
+    let mut before_len = 0usize;
+    let mut after_len = 0usize;
+    let mut overflow = false;
+
+    let mut src_iter = source_bb;
+    while !src_iter.is_empty() {
+        let sq_s = src_iter.pop();
+
+        // --- Before (cached state) ---
+        let cached_bp = cached_by_sq[sq_s.raw() as usize];
+        if let Some((info_color, info_class, info_pt, _)) = decode_board_threat_info_fb(cached_bp) {
+            let attacker_side = if info_color == friend_color { 0 } else { 1 };
+            let oriented_color = if perspective == Color::Black {
+                info_color
+            } else {
+                !info_color
+            };
+            let attacks = attacks_from_piece(info_pt, info_color, sq_s, cached_occ);
+            let mut targets = attacks & cached_occ;
+            let from_sq_n = normalize_sq(sq_s, perspective, hm);
+            while !targets.is_empty() {
+                let to_sq = targets.pop();
+                let t_bp = cached_by_sq[to_sq.raw() as usize];
+                if let Some((t_color, t_class, _, _)) = decode_board_threat_info_fb(t_bp) {
+                    let attacked_side = if t_color == friend_color { 0 } else { 1 };
+                    let to_sq_n = normalize_sq(to_sq, perspective, hm);
+                    if let Some(idx) = threat_index(
+                        attacker_side,
+                        info_class,
+                        oriented_color,
+                        attacked_side,
+                        t_class,
+                        from_sq_n,
+                        to_sq_n,
+                        from_offset_table,
+                    ) {
+                        if before_len >= MAX_INTERMEDIATE_THREATS {
+                            overflow = true;
+                            break;
+                        }
+                        before_buf[before_len] = idx as u32;
+                        before_len += 1;
+                    }
+                }
+            }
+        }
+        if overflow {
+            break;
+        }
+
+        // --- After (current state) ---
+        let pc = pos.piece_on(sq_s);
+        if !pc.is_none() {
+            let pt = pc.piece_type();
+            if let Some(class) = ThreatClass::from_piece_type(pt) {
+                let color = pc.color();
+                let attacker_side = if color == friend_color { 0 } else { 1 };
+                let oriented_color = if perspective == Color::Black {
+                    color
+                } else {
+                    !color
+                };
+                let attacks = attacks_from_piece(pt, color, sq_s, after_occ);
+                let mut targets = attacks & after_occ;
+                let from_sq_n = normalize_sq(sq_s, perspective, hm);
+                while !targets.is_empty() {
+                    let to_sq = targets.pop();
+                    let target_pc = pos.piece_on(to_sq);
+                    if target_pc.is_none() {
+                        continue;
+                    }
+                    let target_pt = target_pc.piece_type();
+                    if let Some(target_class) = ThreatClass::from_piece_type(target_pt) {
+                        let target_color = target_pc.color();
+                        let attacked_side = if target_color == friend_color { 0 } else { 1 };
+                        let to_sq_n = normalize_sq(to_sq, perspective, hm);
+                        if let Some(idx) = threat_index(
+                            attacker_side,
+                            class,
+                            oriented_color,
+                            attacked_side,
+                            target_class,
+                            from_sq_n,
+                            to_sq_n,
+                            from_offset_table,
+                        ) {
+                            if after_len >= MAX_INTERMEDIATE_THREATS {
+                                overflow = true;
+                                break;
+                            }
+                            after_buf[after_len] = idx as u32;
+                            after_len += 1;
+                        }
+                    }
+                }
+            }
+        }
+        if overflow {
+            break;
+        }
+    }
+
+    if overflow {
+        return false;
+    }
+
+    // ---------------------------------------------------------------
+    // Step 5: sort + merge → removed / added
+    // ---------------------------------------------------------------
+    before_buf[..before_len].sort_unstable();
+    after_buf[..after_len].sort_unstable();
+
+    let mut bi = 0;
+    let mut ai = 0;
+    while bi < before_len && ai < after_len {
+        let bv = before_buf[bi];
+        let av = after_buf[ai];
+        if bv < av {
+            if !removed.push(bv as usize) {
+                return false;
+            }
+            bi += 1;
+        } else if bv > av {
+            if !added.push(av as usize) {
+                return false;
+            }
+            ai += 1;
+        } else {
+            bi += 1;
+            ai += 1;
+        }
+    }
+    while bi < before_len {
+        if !removed.push(before_buf[bi] as usize) {
+            return false;
+        }
+        bi += 1;
+    }
+    while ai < after_len {
+        if !added.push(after_buf[ai] as usize) {
+            return false;
+        }
+        ai += 1;
+    }
+    true
+}
+
 /// before 状態でのマス sq の駒情報を返す。
 ///
 /// King は Threat 対象外のため、King のマスでは常に None を返す。
