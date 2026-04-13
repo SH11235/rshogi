@@ -106,6 +106,10 @@ nnue-hand-threat = []
 # - Threat あり環境 (v91 等): -2% NPS（cache 圧迫で退行）
 # default では無効。運用モデルの特性に応じてビルド時に明示指定する。
 nnue-progress-diff = []
+# HandThreat 差分更新の fallback reason counter
+# 有効時: append_changed_hand_threat_indices の各 return path を AtomicU64 で集計。
+# profiling 用途で default 無効。
+hand-threat-stats = []
 
 [lib]
 name = "rshogi_core"

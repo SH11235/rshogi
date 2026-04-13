@@ -36,9 +36,85 @@ use crate::types::{Color, PieceType, Square};
 use super::accumulator::{DirtyPiece, IndexList};
 use super::bona_piece_halfka_hm::is_hm_mirror;
 use super::threat_features::{
-    ATTACKS_PER_COLOR, NUM_THREAT_CLASSES, ThreatClass, extract_prev_king_sq,
-    lookup_attack_feature_offset, normalize_sq,
+    ATTACKS_PER_COLOR, NUM_THREAT_CLASSES, ThreatClass, decode_board_threat_info_fb,
+    extract_prev_king_sq, lookup_attack_feature_offset, normalize_sq,
 };
+
+// =============================================================================
+// Fallback reason counters (hand-threat-stats feature)
+// =============================================================================
+
+#[cfg(feature = "hand-threat-stats")]
+pub mod stats {
+    //! HandThreat 差分更新の fallback 内訳集計
+    //!
+    //! `hand-threat-stats` feature 有効時のみ存在する。
+    //! `append_changed_hand_threat_indices` の各 return path で AtomicU64 を increment し、
+    //! `dump()` で stderr に内訳を出力する。
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    macro_rules! define_counters {
+        ($($name:ident),* $(,)?) => {
+            $(pub static $name: AtomicU64 = AtomicU64::new(0);)*
+
+            pub fn reset() {
+                $($name.store(0, Ordering::Relaxed);)*
+            }
+
+            pub fn snapshot() -> Vec<(&'static str, u64)> {
+                vec![
+                    $((stringify!($name), $name.load(Ordering::Relaxed)),)*
+                ]
+            }
+        };
+    }
+
+    define_counters! {
+        INCREMENTAL_OK,
+        FALLBACK_KING_MOVE,
+        FALLBACK_DROP,
+        // PROMOTION 分解
+        FALLBACK_PROMOTION_NONCAP_NONPAWN,
+        FALLBACK_PROMOTION_NONCAP_PAWN,
+        FALLBACK_PROMOTION_CAPTURE_NONPAWN,
+        FALLBACK_PROMOTION_CAPTURE_PAWN_OR_CAPTURED_PAWN,
+        FALLBACK_PROMOTION_CAPTURE_HAND_TRANSITION,
+        FALLBACK_PAWN_INVOLVED,
+        FALLBACK_CAPTURE_0_1_TRANSITION,
+        FALLBACK_CAPTURE_OTHER,
+        FALLBACK_BUFFER_OVERFLOW,
+        FALLBACK_OTHER,
+    }
+
+    /// stderr に内訳を出力する
+    pub fn dump() {
+        let entries = snapshot();
+        let total: u64 = entries.iter().map(|(_, v)| *v).sum();
+        eprintln!("=== HandThreat update stats ===");
+        eprintln!("  total updates: {total}");
+        if total == 0 {
+            return;
+        }
+        for (name, count) in &entries {
+            let pct = (*count as f64) * 100.0 / (total as f64);
+            eprintln!("  {name:40}  {count:>12}  {pct:6.2}%");
+        }
+    }
+}
+
+/// Counter increment ヘルパー (feature 無効時は no-op)
+#[cfg(feature = "hand-threat-stats")]
+macro_rules! bump {
+    ($counter:ident) => {
+        stats::$counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    };
+}
+#[cfg(not(feature = "hand-threat-stats"))]
+macro_rules! bump {
+    ($counter:ident) => {
+        ()
+    };
+}
 
 // =============================================================================
 // 定数
@@ -224,10 +300,7 @@ pub const HAND_THREAT_DIMENSIONS: usize = HAND_PAIR_DATA.1;
 
 /// コンパイル時 assertion: HAND_THREAT_DIMENSIONS が期待値と一致すること
 const _HAND_THREAT_DIMENSIONS_CHECK: () = {
-    assert!(
-        HAND_THREAT_DIMENSIONS == 121_104,
-        "HAND_THREAT_DIMENSIONS must be 121,104"
-    );
+    assert!(HAND_THREAT_DIMENSIONS == 121_104, "HAND_THREAT_DIMENSIONS must be 121,104");
 };
 
 /// hand_pair_base を取得 (除外なしなので常に Some)
@@ -347,56 +420,366 @@ pub(crate) fn hand_threat_index(
 }
 
 // =============================================================================
-// append_changed_hand_threat_indices (差分更新、Option 6B hybrid)
+// append_changed_hand_threat_indices (差分更新)
 // =============================================================================
+
+/// 差分計算で使う中間バッファの上限
+///
+/// 1 ブロック (drop_owner, hand_class) あたり source_set ≤ 16 sq、
+/// 各 source drop から target ≤ 20 (slider 含む最悪ケース)、
+/// 最大 2×7 ブロックで約 4,480。余裕を見て 8,192。
+const MAX_INTERMEDIATE_HAND_THREATS: usize = 8_192;
 
 /// DirtyPiece から HandThreat 特徴量の差分 (removed / added) を計算する
 ///
-/// ## 戦略 (Option 6B hybrid)
+/// ## 対応ケース
 ///
-/// 1. king が HM mirror 境界を跨いだ場合 → 呼び出し元で先に判定済み (needs_hand_threat_refresh)
-/// 2. dirty_piece を解析して以下のケースを判別:
-///    - (a) **持ち駒 count 変化** (capture/drop/promotion): `return false` で full rebuild fallback
-///    - (b) **通常 board move** (非取り、非成り、非打ち):
-///         - α: drop@A 新規 features を added に追加 (A が空になる)
-///         - β: drop@B 消失 features を removed に追加 (B が occupied になる)
-///         - γ: target@A 変化 features を処理 (moved piece at A → empty)
-///         - δ: target@B 変化 features を処理 (empty at B → moved piece)
-///         - ε: slider 経由の attack pattern 変化 (最も複雑)
-///    - (c) 安全性のため: slider (Lance/Bishop/Rook/Horse/Dragon) が
-///         絡む手、もしくは α/β/γ/δ の volume が大きい場合は full rebuild fallback
+/// 以下の条件で差分更新する。他ケースは `false` を返して full rebuild にフォールバック:
 ///
-/// ## 初期版 (correctness first)
+/// - `dirty_num == 1` (非取り board move): 玉移動なし、成りなし
+/// - `dirty_num == 2` (capture): 玉移動なし、成りなし、両駒とも非 Pawn、
+///   かつ us の hand[cap_pt_unpromote] が after で >= 2 (0↔1 遷移なし)
 ///
-/// slider 経由 ε の正確な実装は次の最適化 pass に回す。このバージョンでは
-/// **全ケースで `false` を返し** full rebuild にフォールバックする。
-/// これは Task #19 で実装済みの rebuild_hand_threat と同じ correctness を保つ。
+/// 上記条件下では:
+/// - 持ち駒 count の 0/nonzero 状態が不変 → (drop_owner, hand_class) ブロック集合は不変
+/// - 二歩 state 不変 (Pawn 関与を除外しているため)
+/// - 占有変化は `{from_sq, to_sq}` のみ
 ///
-/// 本関数のシグネチャは将来の inline diff 実装時にそのまま使える形に固定しておく。
+/// 各ブロックの影響 drop_sq 集合（source_set）は以下で過剰包含する:
 ///
-/// # 戻り値
+/// - `{from_sq, to_sq}` (占有変化、drop 候補自体)
+/// - `attacks_from_dropped(hc, !drop_color, from_sq, EMPTY)` (非 slider は reverse_attackers、
+///   slider は空盤上 ray で「from_sq を経由する」Y も含む)
+/// - 同様に `to_sq` 版
+///
+/// Slider block では Y の実 attack_bb は Y ∉ source_set でも変化しうるが、その Y の feature は
+/// 必ず attack_to_sq ∈ {from, to} または ray 上にある。前者は source_set で捕捉、後者は Y 自身が
+/// ray_set で拾われるため、ソート+マージ diff で正しく計算できる。
+///
+/// attack_bb 計算は before では `before_occ`、after では `after_occ` を使う
+/// (slider の場合の ray 遮断を正確に反映するため)。
+///
+/// ## 未対応ケース (full rebuild fallback)
+///
+/// - 玉移動
+/// - 成り
+/// - 打ち (drop)
+/// - Pawn 関与 (二歩 state 変化のリスク)
+/// - Capture の 0↔1 hand block 遷移 (新規ブロック追加は full 列挙が必要)
+///
+/// ## 戻り値
 /// - `true`: 差分計算成功、`removed` / `added` に diff が格納された
-/// - `false`: 複雑ケースや overflow → 呼び出し元で full rebuild が必要
+/// - `false`: 対応外ケースまたは overflow → 呼び出し元で full rebuild が必要
 pub fn append_changed_hand_threat_indices(
-    _pos: &Position,
-    _dirty_piece: &DirtyPiece,
-    _perspective: Color,
-    _king_sq: Square,
-    _removed: &mut IndexList<MAX_CHANGED_HAND_THREAT_FEATURES>,
-    _added: &mut IndexList<MAX_CHANGED_HAND_THREAT_FEATURES>,
+    pos: &Position,
+    dirty_piece: &DirtyPiece,
+    perspective: Color,
+    king_sq: Square,
+    removed: &mut IndexList<MAX_CHANGED_HAND_THREAT_FEATURES>,
+    added: &mut IndexList<MAX_CHANGED_HAND_THREAT_FEATURES>,
 ) -> bool {
-    // 初期版: 常に full rebuild fallback を返す。
-    //
-    // 理由: HandThreat の差分更新は board Threat より構造的に複雑で、
-    // 特に以下の component を正確に実装するには慎重な case analysis が必要:
-    // - ε (slider 経由 attack pattern 変化): 移動 sq を通るスライダー drop の attack_bb 変化
-    // - ζ (二歩 state 変化): pawn 取りや pawn 成りで file 単位の drop legality が変わる
-    // - η (持ち駒 count 変化): capture/drop/promote で当該 (drop_owner, hand_class) block 全体が再計算
-    //
-    // Phase 1 PoC では correctness 優先で full rebuild のみを使用し、
-    // 差分更新ロジックは Task #23 フォローアップ最適化として実装する。
-    // Golden Forward テスト (Task #26) はこの fallback 経路でも correctness を保つ。
-    false
+    // === Step 1: 対応可能ケースの判定 ===
+    if dirty_piece.dirty_num == 0 {
+        bump!(INCREMENTAL_OK);
+        return true;
+    }
+    if dirty_piece.king_moved[Color::Black as usize]
+        || dirty_piece.king_moved[Color::White as usize]
+    {
+        bump!(FALLBACK_KING_MOVE);
+        return false;
+    }
+    if dirty_piece.dirty_num > 2 {
+        bump!(FALLBACK_OTHER);
+        return false;
+    }
+
+    let cp0 = &dirty_piece.changed_piece[0];
+    let old_info = decode_board_threat_info_fb(cp0.old_piece.fb);
+    let new_info = decode_board_threat_info_fb(cp0.new_piece.fb);
+    let (Some(old_info), Some(new_info)) = (old_info, new_info) else {
+        // old/new いずれかが盤上駒でない → drop (old が手駒)
+        bump!(FALLBACK_DROP);
+        return false;
+    };
+    let (old_color, _old_class, old_pt, from_sq) = old_info;
+    let (new_color, _new_class, new_pt, to_sq) = new_info;
+    if old_color != new_color {
+        bump!(FALLBACK_OTHER);
+        return false;
+    }
+    // Promotion 判定: old_pt != new_pt の場合、分類してカウンタに計上してから fallback。
+    // (Phase 1 で非捕獲・非 Pawn promotion のみ incremental 対応予定)
+    let is_promotion = old_pt != new_pt;
+    if is_promotion {
+        // capture / non-capture と Pawn 関与の有無でサブ分類
+        if dirty_piece.dirty_num == 2 {
+            // capture 付き promotion: cp1 から captured 情報を取得して分類
+            let cp1_promo = &dirty_piece.changed_piece[1];
+            let cap_info = decode_board_threat_info_fb(cp1_promo.old_piece.fb);
+            match cap_info {
+                Some((_, _, cap_pt, _)) => {
+                    if old_pt == PieceType::Pawn || cap_pt == PieceType::Pawn {
+                        bump!(FALLBACK_PROMOTION_CAPTURE_PAWN_OR_CAPTURED_PAWN);
+                    } else {
+                        // 0↔1 transition かどうかは decode bug の影響を受けるので
+                        // 正確な区別は Phase 2 後。ここでは CAPTURE_NONPAWN 相当として計上。
+                        // (CAPTURE_HAND_TRANSITION の分離は Phase 2 以降)
+                        bump!(FALLBACK_PROMOTION_CAPTURE_NONPAWN);
+                    }
+                }
+                None => {
+                    // cp1 が decode できない = 異常 (defensive)
+                    bump!(FALLBACK_PROMOTION_CAPTURE_NONPAWN);
+                }
+            }
+        } else if old_pt == PieceType::Pawn {
+            bump!(FALLBACK_PROMOTION_NONCAP_PAWN);
+        } else {
+            bump!(FALLBACK_PROMOTION_NONCAP_NONPAWN);
+        }
+        return false;
+    }
+
+    // 捕獲の場合: dirty_piece[1] から captured piece 情報を取得。
+    // 制限:
+    // - 両駒ともに非 Pawn (pawn file 不変)
+    // - us の hand[cap_pt_hand] >= 2 (after count; before は >=1、block 非遷移)
+    let cap_before_piece_at_to: Option<(Color, PieceType)> = if dirty_piece.dirty_num == 2 {
+        let cp1 = &dirty_piece.changed_piece[1];
+        let cap_old = decode_board_threat_info_fb(cp1.old_piece.fb);
+        let Some((cap_color, _cap_class, cap_pt_board, cap_sq)) = cap_old else {
+            bump!(FALLBACK_CAPTURE_OTHER);
+            return false;
+        };
+        if cap_sq != to_sq {
+            bump!(FALLBACK_CAPTURE_OTHER);
+            return false;
+        }
+        if decode_board_threat_info_fb(cp1.new_piece.fb).is_some() {
+            bump!(FALLBACK_CAPTURE_OTHER);
+            return false;
+        }
+        if cap_color == old_color {
+            bump!(FALLBACK_CAPTURE_OTHER);
+            return false;
+        }
+        if old_pt == PieceType::Pawn || cap_pt_board == PieceType::Pawn {
+            bump!(FALLBACK_PAWN_INVOLVED);
+            return false;
+        }
+        let cap_pt_hand_base = cap_pt_board.unpromote();
+        if cap_pt_hand_base == PieceType::Pawn {
+            bump!(FALLBACK_PAWN_INVOLVED);
+            return false;
+        }
+        // 0↔1 transition があれば fallback (未対応)
+        if pos.hand(old_color).count(cap_pt_hand_base) < 2 {
+            bump!(FALLBACK_CAPTURE_0_1_TRANSITION);
+            return false;
+        }
+        Some((cap_color, cap_pt_board))
+    } else {
+        None
+    };
+
+    // === Step 2: 占有状態の before/after 再構成 ===
+    let after_occ = pos.occupied();
+    // from_sq: before occupied (moved piece), after empty
+    // to_sq: capture なら before/after 両方 occupied (piece が変わるだけ)
+    //        non-capture なら before empty, after occupied
+    let before_occ = if cap_before_piece_at_to.is_some() {
+        after_occ | Bitboard::from_square(from_sq)
+    } else {
+        (after_occ | Bitboard::from_square(from_sq)) & !Bitboard::from_square(to_sq)
+    };
+
+    let hm = is_hm_mirror(king_sq, perspective);
+    let friend_color = perspective;
+
+    // === Step 3: ブロック単位で before/after を制限列挙 ===
+    let mut before_buf = [0u32; MAX_INTERMEDIATE_HAND_THREATS];
+    let mut after_buf = [0u32; MAX_INTERMEDIATE_HAND_THREATS];
+    let mut before_len = 0usize;
+    let mut after_len = 0usize;
+
+    for &drop_color in &[friend_color, !friend_color] {
+        let drop_owner = if drop_color == friend_color { 0 } else { 1 };
+        let hand = pos.hand(drop_color);
+
+        for &hand_class in &ALL_HAND_THREAT_CLASSES {
+            if hand.count(hand_class.as_piece_type()) == 0 {
+                continue;
+            }
+
+            // source_set (from/to + 逆方向 attack)
+            let rev_from = attacks_from_dropped(hand_class, !drop_color, from_sq, Bitboard::EMPTY);
+            let rev_to = attacks_from_dropped(hand_class, !drop_color, to_sq, Bitboard::EMPTY);
+            let source_set =
+                Bitboard::from_square(from_sq) | Bitboard::from_square(to_sq) | rev_from | rev_to;
+
+            let before_range = source_set;
+            let after_range = source_set;
+
+            let oriented_color = if perspective == Color::Black {
+                drop_color
+            } else {
+                !drop_color
+            };
+
+            // --- After 側列挙 ---
+            let mut after_drops = after_range & !after_occ;
+            while !after_drops.is_empty() {
+                let drop_sq = after_drops.pop();
+                if !is_legal_drop_rank(hand_class, drop_color, drop_sq) {
+                    continue;
+                }
+                if hand_class == HandThreatClass::Pawn && has_pawn_on_file(pos, drop_color, drop_sq)
+                {
+                    continue;
+                }
+                let attack_bb = attacks_from_dropped(hand_class, drop_color, drop_sq, after_occ);
+                let mut targets = attack_bb & after_occ;
+                let drop_sq_n = normalize_sq(drop_sq, perspective, hm);
+                while !targets.is_empty() {
+                    let to_target = targets.pop();
+                    let target_pc = pos.piece_on(to_target);
+                    if target_pc.is_none() {
+                        continue;
+                    }
+                    let target_pt = target_pc.piece_type();
+                    let Some(attacked_class) = ThreatClass::from_piece_type(target_pt) else {
+                        continue;
+                    };
+                    let attacked_side = if target_pc.color() == friend_color {
+                        0
+                    } else {
+                        1
+                    };
+                    let to_sq_n = normalize_sq(to_target, perspective, hm);
+                    let idx = hand_threat_index(
+                        drop_owner,
+                        hand_class,
+                        oriented_color,
+                        attacked_side,
+                        attacked_class,
+                        drop_sq_n,
+                        to_sq_n,
+                    );
+                    if after_len >= MAX_INTERMEDIATE_HAND_THREATS {
+                        bump!(FALLBACK_BUFFER_OVERFLOW);
+                        return false;
+                    }
+                    after_buf[after_len] = idx as u32;
+                    after_len += 1;
+                }
+            }
+
+            // --- Before 側列挙 ---
+            // 注意: Pawn 二歩判定は pawn file 不変なので pos のまま使える。
+            //       target piece info は from_sq のみ before = (old_color, old_pt)、
+            //       他のマスは pos のまま (非取り・非成りなので変化なし)。
+            let mut before_drops = before_range & !before_occ;
+            while !before_drops.is_empty() {
+                let drop_sq = before_drops.pop();
+                if !is_legal_drop_rank(hand_class, drop_color, drop_sq) {
+                    continue;
+                }
+                if hand_class == HandThreatClass::Pawn && has_pawn_on_file(pos, drop_color, drop_sq)
+                {
+                    continue;
+                }
+                let attack_bb = attacks_from_dropped(hand_class, drop_color, drop_sq, before_occ);
+                let mut targets = attack_bb & before_occ;
+                let drop_sq_n = normalize_sq(drop_sq, perspective, hm);
+                while !targets.is_empty() {
+                    let to_target = targets.pop();
+                    // target の before 状態 piece info
+                    let (target_color, target_pt) = if to_target == from_sq {
+                        (old_color, old_pt)
+                    } else if to_target == to_sq {
+                        if let Some((cap_color, cap_pt)) = cap_before_piece_at_to {
+                            (cap_color, cap_pt)
+                        } else {
+                            // non-capture: to_sq was empty → skip
+                            // (ただし before_occ & to_sq が空なので通常ここには来ないはず)
+                            continue;
+                        }
+                    } else {
+                        let pc = pos.piece_on(to_target);
+                        if pc.is_none() {
+                            continue;
+                        }
+                        (pc.color(), pc.piece_type())
+                    };
+                    let Some(attacked_class) = ThreatClass::from_piece_type(target_pt) else {
+                        continue;
+                    };
+                    let attacked_side = if target_color == friend_color { 0 } else { 1 };
+                    let to_sq_n = normalize_sq(to_target, perspective, hm);
+                    let idx = hand_threat_index(
+                        drop_owner,
+                        hand_class,
+                        oriented_color,
+                        attacked_side,
+                        attacked_class,
+                        drop_sq_n,
+                        to_sq_n,
+                    );
+                    if before_len >= MAX_INTERMEDIATE_HAND_THREATS {
+                        bump!(FALLBACK_BUFFER_OVERFLOW);
+                        return false;
+                    }
+                    before_buf[before_len] = idx as u32;
+                    before_len += 1;
+                }
+            }
+        }
+    }
+
+    // === Step 4: ソート + マージで set difference ===
+    before_buf[..before_len].sort_unstable();
+    after_buf[..after_len].sort_unstable();
+
+    let mut bi = 0usize;
+    let mut ai = 0usize;
+    while bi < before_len && ai < after_len {
+        let bv = before_buf[bi];
+        let av = after_buf[ai];
+        if bv < av {
+            if !removed.push(bv as usize) {
+                bump!(FALLBACK_BUFFER_OVERFLOW);
+                return false;
+            }
+            bi += 1;
+        } else if bv > av {
+            if !added.push(av as usize) {
+                bump!(FALLBACK_BUFFER_OVERFLOW);
+                return false;
+            }
+            ai += 1;
+        } else {
+            bi += 1;
+            ai += 1;
+        }
+    }
+    while bi < before_len {
+        if !removed.push(before_buf[bi] as usize) {
+            bump!(FALLBACK_BUFFER_OVERFLOW);
+            return false;
+        }
+        bi += 1;
+    }
+    while ai < after_len {
+        if !added.push(after_buf[ai] as usize) {
+            bump!(FALLBACK_BUFFER_OVERFLOW);
+            return false;
+        }
+        ai += 1;
+    }
+
+    bump!(INCREMENTAL_OK);
+    true
 }
 
 // =============================================================================
@@ -443,8 +826,7 @@ pub fn append_active_hand_threat_indices(
                     continue;
                 }
                 // (3) 二歩 (Pawn のみ)
-                if hand_class == HandThreatClass::Pawn
-                    && has_pawn_on_file(pos, drop_color, drop_sq)
+                if hand_class == HandThreatClass::Pawn && has_pawn_on_file(pos, drop_color, drop_sq)
                 {
                     continue;
                 }
@@ -461,7 +843,11 @@ pub fn append_active_hand_threat_indices(
                         continue; // King は除外
                     };
 
-                    let attacked_side = if target_pc.color() == friend_color { 0 } else { 1 };
+                    let attacked_side = if target_pc.color() == friend_color {
+                        0
+                    } else {
+                        1
+                    };
 
                     // 正規化
                     let drop_sq_n = normalize_sq(drop_sq, perspective, hm);
@@ -517,18 +903,9 @@ mod tests {
 
     #[test]
     fn test_hand_to_board_class_mapping() {
-        assert_eq!(
-            HandThreatClass::Pawn.as_board_class() as usize,
-            ThreatClass::Pawn as usize
-        );
-        assert_eq!(
-            HandThreatClass::Gold.as_board_class() as usize,
-            ThreatClass::GoldLike as usize
-        );
-        assert_eq!(
-            HandThreatClass::Rook.as_board_class() as usize,
-            ThreatClass::Rook as usize
-        );
+        assert_eq!(HandThreatClass::Pawn.as_board_class() as usize, ThreatClass::Pawn as usize);
+        assert_eq!(HandThreatClass::Gold.as_board_class() as usize, ThreatClass::GoldLike as usize);
+        assert_eq!(HandThreatClass::Rook.as_board_class() as usize, ThreatClass::Rook as usize);
     }
 
     #[test]
@@ -668,8 +1045,7 @@ mod tests {
 
             // HM mirror 境界を跨ぐ場合 needs_hand_threat_refresh は true を返すので
             // 差分更新は呼ばれない (呼び出し元で full rebuild に分岐する)
-            let should_refresh =
-                needs_hand_threat_refresh(&dirty, king_sq_after, perspective);
+            let should_refresh = needs_hand_threat_refresh(&dirty, king_sq_after, perspective);
 
             let mut after_indices = Vec::new();
             append_active_hand_threat_indices(pos, perspective, king_sq_after, &mut after_indices);
@@ -810,8 +1186,7 @@ mod tests {
         // 4R4: 5五に先手飛
         // 4K4: 5九に先手玉
         // 先手の持ち駒: Pawn×1 (`b P 1` で `P` が 1 枚の Pawn を意味する)
-        pos.set_sfen("4k4/9/9/9/4R4/9/9/9/4K4 b P 1")
-            .expect("minimal test sfen");
+        pos.set_sfen("4k4/9/9/9/4R4/9/9/9/4K4 b P 1").expect("minimal test sfen");
 
         // STM (Black) perspective
         let king_b = pos.king_square(Color::Black);

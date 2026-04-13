@@ -19,11 +19,11 @@ use crate::types::{Color, PieceType, Square};
 use super::accumulator::DirtyPiece;
 #[cfg(feature = "nnue-threat")]
 use super::accumulator::IndexList;
-#[cfg(feature = "nnue-threat")]
+#[cfg(any(feature = "nnue-threat", feature = "nnue-hand-threat"))]
 use super::bona_piece::BonaPiece;
-use super::bona_piece_halfka_hm::{E_KING, F_KING};
 #[cfg(feature = "nnue-threat")]
 use super::bona_piece_halfka_hm::is_hm_mirror;
+use super::bona_piece_halfka_hm::{E_KING, F_KING};
 #[cfg(feature = "nnue-threat")]
 use super::threat_exclusion;
 
@@ -785,8 +785,10 @@ fn decode_board_square_fb(bp: BonaPiece) -> Option<Square> {
 
 /// BonaPiece (fb perspective) から Threat 駒情報をデコードする。
 /// King・手駒・ZERO は None。
-#[cfg(feature = "nnue-threat")]
-fn decode_board_threat_info_fb(bp: BonaPiece) -> Option<(Color, ThreatClass, PieceType, Square)> {
+#[cfg(any(feature = "nnue-threat", feature = "nnue-hand-threat"))]
+pub(crate) fn decode_board_threat_info_fb(
+    bp: BonaPiece,
+) -> Option<(Color, ThreatClass, PieceType, Square)> {
     use super::bona_piece::{FE_END, FE_HAND_END};
 
     let v = bp.value() as usize;

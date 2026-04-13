@@ -44,6 +44,8 @@ mod layers;
 mod leb128;
 #[macro_use]
 pub mod macros;
+#[cfg(feature = "nnue-hand-threat")]
+pub mod hand_threat_features;
 mod network;
 pub(crate) mod network_halfka;
 pub(crate) mod network_halfka_hm;
@@ -57,8 +59,6 @@ pub mod stats;
 pub(crate) mod threat_exclusion;
 #[cfg(any(feature = "nnue-threat", feature = "nnue-hand-threat"))]
 pub(crate) mod threat_features;
-#[cfg(feature = "nnue-hand-threat")]
-pub(crate) mod hand_threat_features;
 
 pub use accumulator::{Accumulator, AccumulatorStack, ChangedBonaPiece, DirtyPiece, StackEntry};
 pub use accumulator_layer_stacks::{

@@ -415,6 +415,8 @@ impl UsiEngine {
                 self.cmd_stop();
                 // NNUE統計を出力（nnue-stats feature有効時のみ実際に出力）
                 print_nnue_stats();
+                #[cfg(feature = "hand-threat-stats")]
+                rshogi_core::nnue::hand_threat_features::stats::dump();
                 return Ok(false);
             }
             "gameover" => {
@@ -1572,7 +1574,9 @@ impl UsiEngine {
                             println!("info string Static eval (diagnostics): {}", value.raw());
                         }
                         #[allow(unreachable_patterns)]
-                        _ => println!("info string Error: no matching LayerStacks L1 variant compiled"),
+                        _ => println!(
+                            "info string Error: no matching LayerStacks L1 variant compiled"
+                        ),
                     }
                 } else {
                     println!("info string Error: diagnostics is only supported for LayerStacks");

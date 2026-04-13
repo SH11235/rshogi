@@ -277,8 +277,7 @@ impl<const L1: usize> NetworkLayerStacks<L1> {
             if has_hand_threat {
                 reader.read_exact(&mut buf4)?;
                 let model_hand_threat_dims = u32::from_le_bytes(buf4) as usize;
-                let engine_hand_threat_dims =
-                    super::hand_threat_features::HAND_THREAT_DIMENSIONS;
+                let engine_hand_threat_dims = super::hand_threat_features::HAND_THREAT_DIMENSIONS;
                 if model_hand_threat_dims != engine_hand_threat_dims {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,

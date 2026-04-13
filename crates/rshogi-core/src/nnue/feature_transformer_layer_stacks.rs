@@ -14,10 +14,10 @@ use super::constants::HALFKA_HM_DIMENSIONS;
 #[cfg(feature = "nnue-psqt")]
 use super::constants::NUM_LAYER_STACK_BUCKETS;
 use super::features::{Feature, FeatureSet, HalfKA_hm, HalfKA_hm_FeatureSet};
-use super::leb128::read_compressed_tensor_i16_all;
-use super::stats::{count_refresh, count_update};
 #[cfg(feature = "nnue-hand-threat")]
 use super::hand_threat_features;
+use super::leb128::read_compressed_tensor_i16_all;
+use super::stats::{count_refresh, count_update};
 #[cfg(feature = "nnue-threat")]
 use super::threat_features::{self, MAX_CHANGED_THREAT_FEATURES, THREAT_DIMENSIONS};
 use crate::position::Position;
@@ -1201,14 +1201,48 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             }
         }
 
-        // HandThreat: forward_update_incremental の経路では常に full refresh
-        // (初期版。差分更新は Task #24 で実装予定)
+        // HandThreat: path 長 1 なら差分更新、それ以外は full refresh
         #[cfg(feature = "nnue-hand-threat")]
         if self.has_hand_threat {
-            for perspective in [Color::Black, Color::White] {
-                let p = perspective as usize;
-                let hand_threat_acc = stack.current_mut().accumulator.get_hand_threat_mut(p);
-                self.rebuild_hand_threat(pos, perspective, hand_threat_acc);
+            if path.len() == 1 {
+                let entry_idx = path.iter().next().unwrap();
+                let dirty_piece = stack.entry_at(entry_idx).dirty_piece;
+                for perspective in [Color::Black, Color::White] {
+                    let p = perspective as usize;
+                    let king_sq = pos.king_square(perspective);
+                    let mut ht_removed = IndexList::<
+                        { hand_threat_features::MAX_CHANGED_HAND_THREAT_FEATURES },
+                    >::new();
+                    let mut ht_added = IndexList::<
+                        { hand_threat_features::MAX_CHANGED_HAND_THREAT_FEATURES },
+                    >::new();
+                    let ok = hand_threat_features::append_changed_hand_threat_indices(
+                        pos,
+                        &dirty_piece,
+                        perspective,
+                        king_sq,
+                        &mut ht_removed,
+                        &mut ht_added,
+                    );
+                    let hand_threat_acc = stack.current_mut().accumulator.get_hand_threat_mut(p);
+                    if ok {
+                        for idx in ht_removed.iter() {
+                            self.sub_hand_threat_weights(hand_threat_acc, idx);
+                        }
+                        for idx in ht_added.iter() {
+                            self.add_hand_threat_weights(hand_threat_acc, idx);
+                        }
+                    } else {
+                        self.rebuild_hand_threat(pos, perspective, hand_threat_acc);
+                    }
+                }
+            } else {
+                // 2+ plies: full refresh (中間局面が不明)
+                for perspective in [Color::Black, Color::White] {
+                    let p = perspective as usize;
+                    let hand_threat_acc = stack.current_mut().accumulator.get_hand_threat_mut(p);
+                    self.rebuild_hand_threat(pos, perspective, hand_threat_acc);
+                }
             }
         }
 
