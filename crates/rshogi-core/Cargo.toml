@@ -95,6 +95,10 @@ nnue-threat = []
 threat-profile-same-class = []               # profile 1: 同種ペア全除外
 threat-profile-same-class-major-pawn = []   # profile 2: 同種 + 大駒→歩除外
 threat-profile-cross-side = []              # profile 10: cross-side 異種ペアのみ
+# NNUE HandThreat 特徴量対応 (持ち駒を打つことによる potential attack pair)
+# 案 A (full drop-attack pair): dims = 121,104
+# 仕様: docs/performance/hand_threat_design_20260413.md
+nnue-hand-threat = []
 # NNUE progress8kpabs バケットの差分更新最適化
 # - 有効時: StackEntry に progress_sum/computed_progress フィールド追加、
 #   ensure_progress_bucket で DirtyPiece 差分から O(1) 更新

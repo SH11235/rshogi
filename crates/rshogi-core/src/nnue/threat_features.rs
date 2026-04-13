@@ -12,12 +12,19 @@ use crate::bitboard::{
     Bitboard, bishop_effect, dragon_effect, gold_effect, horse_effect, knight_effect, lance_effect,
     pawn_effect, rook_effect, silver_effect,
 };
+#[cfg(feature = "nnue-threat")]
 use crate::position::Position;
 use crate::types::{Color, PieceType, Square};
 
-use super::accumulator::{DirtyPiece, IndexList};
+use super::accumulator::DirtyPiece;
+#[cfg(feature = "nnue-threat")]
+use super::accumulator::IndexList;
+#[cfg(feature = "nnue-threat")]
 use super::bona_piece::BonaPiece;
-use super::bona_piece_halfka_hm::{E_KING, F_KING, is_hm_mirror};
+use super::bona_piece_halfka_hm::{E_KING, F_KING};
+#[cfg(feature = "nnue-threat")]
+use super::bona_piece_halfka_hm::is_hm_mirror;
+#[cfg(feature = "nnue-threat")]
 use super::threat_exclusion;
 
 use std::sync::LazyLock;
@@ -31,12 +38,14 @@ use std::sync::LazyLock;
 /// Profile 0 (full): 216,720
 /// Profile 1 (same-class): 192,640
 /// Profile 2 (same-class-major-pawn): 173,568
+#[cfg(feature = "nnue-threat")]
 pub const THREAT_DIMENSIONS: usize = PAIR_DATA.1;
 
 /// ThreatClass の数（King 除外）
 pub const NUM_THREAT_CLASSES: usize = 9;
 
 /// changed threat features の最大数（差分更新用）
+#[cfg(feature = "nnue-threat")]
 pub const MAX_CHANGED_THREAT_FEATURES: usize = 192;
 
 // =============================================================================
@@ -65,6 +74,7 @@ pub const MAX_CHANGED_THREAT_FEATURES: usize = 192;
 /// # 戻り値
 /// - true: refresh (full rebuild) が必要
 /// - false: append_changed_threat_indices で差分更新可能
+#[cfg(feature = "nnue-threat")]
 pub fn needs_threat_refresh(
     dirty_piece: &DirtyPiece,
     curr_king_sq: Square,
@@ -95,7 +105,7 @@ pub fn needs_threat_refresh(
 /// (`F_KING + sq.index()` または `E_KING + sq.index()`)。
 /// - perspective=Black → 自玉 = 先手玉 = F_KING 範囲
 /// - perspective=White → 自玉 = 後手玉 = E_KING 範囲 (Black 視点で enemy)
-fn extract_prev_king_sq(dirty_piece: &DirtyPiece, perspective: Color) -> Option<Square> {
+pub(crate) fn extract_prev_king_sq(dirty_piece: &DirtyPiece, perspective: Color) -> Option<Square> {
     let king_base = match perspective {
         Color::Black => F_KING,
         Color::White => E_KING,
@@ -171,7 +181,7 @@ impl ThreatClass {
 // =============================================================================
 
 /// 各 ThreatClass の attacks_per_color
-const ATTACKS_PER_COLOR: [usize; NUM_THREAT_CLASSES] = [
+pub(crate) const ATTACKS_PER_COLOR: [usize; NUM_THREAT_CLASSES] = [
     72,   // Pawn
     324,  // Lance
     112,  // Knight
@@ -184,20 +194,23 @@ const ATTACKS_PER_COLOR: [usize; NUM_THREAT_CLASSES] = [
 ];
 
 // =============================================================================
-// pair_base テーブル
+// pair_base テーブル (board Threat 専用)
 // =============================================================================
 
 /// pair_base[attacker_side][attacker_class][attacked_side][attacked_class]
 /// flat index: as * 162 + ac * 18 + ds * 9 + dc
+#[cfg(feature = "nnue-threat")]
 const NUM_PAIRS: usize = 2 * NUM_THREAT_CLASSES * 2 * NUM_THREAT_CLASSES; // 324
 
 /// 除外された pair の sentinel 値
+#[cfg(feature = "nnue-threat")]
 const EXCLUDED_PAIR_BASE: usize = usize::MAX;
 
 /// pair_base テーブルと THREAT_DIMENSIONS を構築
 ///
 /// 除外された pair は `EXCLUDED_PAIR_BASE` (sentinel) が格納され、
 /// 累積和からスキップされる。戻り値の .1 が THREAT_DIMENSIONS。
+#[cfg(feature = "nnue-threat")]
 const fn build_pair_base() -> ([usize; NUM_PAIRS], usize) {
     let mut table = [0usize; NUM_PAIRS];
     let mut cumulative = 0usize;
@@ -228,14 +241,17 @@ const fn build_pair_base() -> ([usize; NUM_PAIRS], usize) {
 }
 
 /// pair_base テーブルと THREAT_DIMENSIONS (compile-time 計算)
+#[cfg(feature = "nnue-threat")]
 const PAIR_DATA: ([usize; NUM_PAIRS], usize) = build_pair_base();
 
+#[cfg(feature = "nnue-threat")]
 static PAIR_BASE: [usize; NUM_PAIRS] = PAIR_DATA.0;
 
 /// pair_base を取得。除外された pair は None を返す。
 ///
 /// Profile 0 (除外なし) では `EXCLUDED_PAIR_BASE` が存在しないため、
 /// `cfg!()` でチェック自体をコンパイル時に除去し、Option の unwrap 分岐を LLVM に消させる。
+#[cfg(feature = "nnue-threat")]
 #[inline]
 fn pair_base(
     attacker_side: usize,
@@ -439,6 +455,40 @@ impl AttackOrderTable {
 static ATTACK_ORDER_TABLE: LazyLock<AttackOrderTable> = LazyLock::new(AttackOrderTable::new);
 
 // =============================================================================
+// 共通ヘルパ (HandThreat 等で流用)
+// =============================================================================
+
+/// 指定 (board_class, oriented_color, from_sq_n, to_sq_n) の attack offset を計算
+///
+/// 戻り値 = `from_offset_table[pattern][from_sq_n] + attack_order_table[pattern][from_sq_n][to_sq_n]`
+///
+/// ここで pattern は `attack_pattern_id(board_class, oriented_color)`。
+///
+/// HandThreat が board Threat の attack pattern LUT を流用するための pub(crate) エントリポイント。
+/// `from_sq_n` / `to_sq_n` は正規化 (perspective + HM mirror) 済みの Square を想定。
+#[cfg(feature = "nnue-hand-threat")]
+#[inline]
+pub(crate) fn lookup_attack_feature_offset(
+    board_class: ThreatClass,
+    oriented_color: Color,
+    from_sq_n: Square,
+    to_sq_n: Square,
+) -> usize {
+    let from_offset_table = &*FROM_OFFSET_TABLE;
+    let pattern = attack_pattern_id(board_class, oriented_color);
+    let from_off = from_offset_table.get(pattern, from_sq_n);
+    let attack_ord = ATTACK_ORDER_TABLE.get(pattern, from_sq_n, to_sq_n);
+    debug_assert_ne!(
+        attack_ord,
+        AttackOrderTable::INVALID,
+        "attack_order: to_sq {} is not attacked by pattern {pattern} at {}",
+        to_sq_n.raw(),
+        from_sq_n.raw()
+    );
+    from_off + attack_ord as usize
+}
+
+// =============================================================================
 // Threat index 計算
 // =============================================================================
 
@@ -455,6 +505,7 @@ static ATTACK_ORDER_TABLE: LazyLock<AttackOrderTable> = LazyLock::new(AttackOrde
 /// - `from_sq_n`: 正規化後の攻撃駒のマス
 /// - `to_sq_n`: 正規化後の被攻撃駒のマス
 /// - `from_offset_table`: 事前計算された from_offset テーブル
+#[cfg(feature = "nnue-threat")]
 #[inline]
 fn threat_index(
     attacker_side: usize,
@@ -489,7 +540,7 @@ fn threat_index(
 /// HalfKA_hm と同じ perspective 基準。
 /// 方向性駒の利き方向の整合は、色別 attack LUT で解決する。
 #[inline]
-fn normalize_sq(sq: Square, perspective: Color, hm_mirror: bool) -> Square {
+pub(crate) fn normalize_sq(sq: Square, perspective: Color, hm_mirror: bool) -> Square {
     let sq_n = if perspective == Color::Black {
         sq
     } else {
@@ -505,7 +556,7 @@ fn normalize_sq(sq: Square, perspective: Color, hm_mirror: bool) -> Square {
 /// 現局面の全 threat pair を列挙し、indices に追加する（テスト用）。
 ///
 /// ホットパスでは `for_each_active_threat_index` を使用する。
-#[cfg(test)]
+#[cfg(all(test, feature = "nnue-threat"))]
 pub fn append_active_threat_indices(
     pos: &Position,
     perspective: Color,
@@ -588,6 +639,7 @@ pub fn append_active_threat_indices(
 }
 
 /// 駒種・色・マス・occupied から実盤面上の攻撃先 Bitboard を取得
+#[cfg(feature = "nnue-threat")]
 fn attacks_from_piece(pt: PieceType, color: Color, sq: Square, occupied: Bitboard) -> Bitboard {
     match pt {
         PieceType::Pawn => pawn_effect(color, sq),
@@ -611,6 +663,7 @@ fn attacks_from_piece(pt: PieceType, color: Color, sq: Square, occupied: Bitboar
 ///
 /// このグループの attack_bb は `occupied` 引数を無視するため、
 /// before/after で盤面が変わっても同一結果を返せる。
+#[cfg(feature = "nnue-threat")]
 #[inline]
 fn is_occupied_independent_threat(pt: PieceType) -> bool {
     matches!(
@@ -633,6 +686,7 @@ fn is_occupied_independent_threat(pt: PieceType) -> bool {
 /// 現局面の全 threat pair を列挙し、コールバック `f` に index を渡す。
 ///
 /// `append_active_threat_indices` と同一ロジックだが、Vec 不要でホットパスで使用可能。
+#[cfg(feature = "nnue-threat")]
 #[inline]
 pub fn for_each_active_threat_index<F: FnMut(usize)>(
     pos: &Position,
@@ -704,6 +758,7 @@ pub fn for_each_active_threat_index<F: FnMut(usize)>(
 
 /// BonaPiece (fb perspective) から盤上駒のマスを抽出する。
 /// 手駒・ZERO は None。King も含む（占有ビット再構成用）。
+#[cfg(feature = "nnue-threat")]
 fn decode_board_square_fb(bp: BonaPiece) -> Option<Square> {
     use super::bona_piece::{FE_END, FE_HAND_END};
     use super::bona_piece_halfka_hm::{E_KING, F_KING};
@@ -730,6 +785,7 @@ fn decode_board_square_fb(bp: BonaPiece) -> Option<Square> {
 
 /// BonaPiece (fb perspective) から Threat 駒情報をデコードする。
 /// King・手駒・ZERO は None。
+#[cfg(feature = "nnue-threat")]
 fn decode_board_threat_info_fb(bp: BonaPiece) -> Option<(Color, ThreatClass, PieceType, Square)> {
     use super::bona_piece::{FE_END, FE_HAND_END};
 
@@ -785,6 +841,7 @@ fn decode_board_threat_info_fb(bp: BonaPiece) -> Option<(Color, ThreatClass, Pie
 // =============================================================================
 
 /// 差分更新の dirty piece エントリ（before 状態の駒情報）
+#[cfg(feature = "nnue-threat")]
 struct ThreatEntry {
     sq: Square,
     color: Color,
@@ -796,6 +853,7 @@ struct ThreatEntry {
 ///
 /// source squares (典型 10-30) × targets per source (典型 2-8) の上限。
 /// debug build で実測し、オーバーフローが無いことを確認する。
+#[cfg(feature = "nnue-threat")]
 const MAX_INTERMEDIATE_THREATS: usize = 512;
 
 /// DirtyPiece から Threat 特徴量の差分（removed / added）を計算する。
@@ -814,6 +872,7 @@ const MAX_INTERMEDIATE_THREATS: usize = 512;
 ///    moved/captured 駒は changed_bb に含まれるため実害なし。）
 /// 3. 各 source square の before/after threat pair を列挙
 /// 4. ソート + マージで set difference → removed / added
+#[cfg(feature = "nnue-threat")]
 pub fn append_changed_threat_indices(
     pos: &Position,
     dirty_piece: &DirtyPiece,
@@ -1187,12 +1246,14 @@ pub fn append_changed_threat_indices(
 /// 1. old_entries に sq がある → before 状態の駒情報（捕獲された駒等）
 /// 2. new_entries に sq がある → before 状態では空（駒が移動してきた場所）
 /// 3. いずれでもない → current Position から取得（変化していない駒）
+#[cfg(feature = "nnue-threat")]
 struct PieceInfoBefore {
     color: Color,
     class: ThreatClass,
     pt: PieceType,
 }
 
+#[cfg(feature = "nnue-threat")]
 #[inline]
 fn lookup_piece_before(
     sq: Square,
@@ -1239,7 +1300,7 @@ fn lookup_piece_before(
 // テスト
 // =============================================================================
 
-#[cfg(test)]
+#[cfg(all(test, feature = "nnue-threat"))]
 mod tests {
     use super::*;
 

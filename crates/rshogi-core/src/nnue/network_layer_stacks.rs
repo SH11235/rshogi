@@ -74,7 +74,7 @@ fn compute_layer_stacks_bucket_index(pos: &Position, side_to_move: Color) -> usi
 }
 
 /// i16 配列の要素和: dst[i] = a[i] + b[i] (SIMD 最適化)
-#[cfg(feature = "nnue-threat")]
+#[cfg(any(feature = "nnue-threat", feature = "nnue-hand-threat"))]
 #[inline]
 fn add_i16_arrays<const L1: usize>(dst: &mut [i16; L1], a: &[i16; L1], b: &[i16; L1]) {
     // AVX2: 256bit = 16 x i16, L1/16 iterations
@@ -182,10 +182,19 @@ impl<const L1: usize> NetworkLayerStacks<L1> {
         let _ft_hash = u32::from_le_bytes(buf4);
 
         // Feature Transformer を読み込み（圧縮形式を自動検出）
-        // nnue-psqt/nnue-threat feature 有効時は read_psqt/read_threat_weights で変更するため mut
-        #[cfg(any(feature = "nnue-psqt", feature = "nnue-threat"))]
+        // nnue-psqt/nnue-threat/nnue-hand-threat feature 有効時は
+        // read_psqt/read_threat_weights/read_hand_threat_weights で変更するため mut
+        #[cfg(any(
+            feature = "nnue-psqt",
+            feature = "nnue-threat",
+            feature = "nnue-hand-threat"
+        ))]
         let mut feature_transformer = FeatureTransformerLayerStacks::read_leb128(reader)?;
-        #[cfg(not(any(feature = "nnue-psqt", feature = "nnue-threat")))]
+        #[cfg(not(any(
+            feature = "nnue-psqt",
+            feature = "nnue-threat",
+            feature = "nnue-hand-threat"
+        )))]
         let feature_transformer = FeatureTransformerLayerStacks::read_leb128(reader)?;
 
         // PSQT 読み込み:
@@ -245,10 +254,48 @@ impl<const L1: usize> NetworkLayerStacks<L1> {
             }
         }
         #[cfg(not(feature = "nnue-threat"))]
-        if arch_str.contains("Threat=") {
+        if arch_str.contains("Threat=") && !arch_str.contains("HandThreat=") {
+            // "Threat=" が単独で含まれる (= board Threat) 場合のみエラー。
+            // "HandThreat=" が含まれる場合は substring で "Threat=" もマッチするので除外。
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "Threat model requires nnue-threat feature",
+            ));
+        }
+
+        // HandThreat 読み込み（arch_str に "HandThreat=" があれば）
+        //
+        // file layout:
+        //   [HandThreat dims (u32, LE raw)]
+        //   [HandThreat weights (i8, raw) : dims × L1 bytes]
+        //
+        // 現状 profile なしで dims は固定 121,104。dims 値を書き込むのは将来の
+        // profile 拡張に備えた予約。読み込み時は HAND_THREAT_DIMENSIONS と一致することを検証する。
+        #[cfg(feature = "nnue-hand-threat")]
+        {
+            let has_hand_threat = arch_str.contains("HandThreat=");
+            if has_hand_threat {
+                reader.read_exact(&mut buf4)?;
+                let model_hand_threat_dims = u32::from_le_bytes(buf4) as usize;
+                let engine_hand_threat_dims =
+                    super::hand_threat_features::HAND_THREAT_DIMENSIONS;
+                if model_hand_threat_dims != engine_hand_threat_dims {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "HandThreat dims mismatch: model={model_hand_threat_dims}, \
+                             engine={engine_hand_threat_dims}"
+                        ),
+                    ));
+                }
+                feature_transformer.read_hand_threat_weights(reader)?;
+            }
+        }
+        #[cfg(not(feature = "nnue-hand-threat"))]
+        if arch_str.contains("HandThreat=") {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "HandThreat model requires nnue-hand-threat feature",
             ));
         }
 
@@ -353,23 +400,77 @@ impl<const L1: usize> NetworkLayerStacks<L1> {
         // SAFETY: 直後のsqr_clipped_relu_transformで全要素が上書きされる
         let mut transformed: Aligned<[u8; L1]> = unsafe { Aligned::new_uninit() };
 
-        #[cfg(feature = "nnue-threat")]
-        if self.feature_transformer.has_threat {
-            // piece_acc + threat_acc を結合してから SCReLU
-            let (us_threat, them_threat) = if side_to_move == Color::Black {
-                (acc.get_threat(Color::Black as usize), acc.get_threat(Color::White as usize))
-            } else {
-                (acc.get_threat(Color::White as usize), acc.get_threat(Color::Black as usize))
+        // Threat/HandThreat の寄与を含めて combined accumulator を構築する。
+        // どちらも有効でなければ piece_acc を直接 SCReLU に渡す。
+        #[cfg(any(feature = "nnue-threat", feature = "nnue-hand-threat"))]
+        {
+            let has_threat_contribution = {
+                #[allow(unused_mut)]
+                let mut b = false;
+                #[cfg(feature = "nnue-threat")]
+                {
+                    b |= self.feature_transformer.has_threat;
+                }
+                #[cfg(feature = "nnue-hand-threat")]
+                {
+                    b |= self.feature_transformer.has_hand_threat;
+                }
+                b
             };
-            let mut us_combined = Aligned([0i16; L1]);
-            let mut them_combined = Aligned([0i16; L1]);
-            add_i16_arrays::<L1>(&mut us_combined.0, us_acc, us_threat);
-            add_i16_arrays::<L1>(&mut them_combined.0, them_acc, them_threat);
-            sqr_clipped_relu_transform(&us_combined.0, &them_combined.0, &mut transformed.0);
-        } else {
-            sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
+            if has_threat_contribution {
+                let mut us_combined = Aligned([0i16; L1]);
+                let mut them_combined = Aligned([0i16; L1]);
+                us_combined.0.copy_from_slice(us_acc);
+                them_combined.0.copy_from_slice(them_acc);
+
+                #[cfg(feature = "nnue-threat")]
+                if self.feature_transformer.has_threat {
+                    let (us_t, them_t) = if side_to_move == Color::Black {
+                        (
+                            acc.get_threat(Color::Black as usize),
+                            acc.get_threat(Color::White as usize),
+                        )
+                    } else {
+                        (
+                            acc.get_threat(Color::White as usize),
+                            acc.get_threat(Color::Black as usize),
+                        )
+                    };
+                    let mut tmp_us = Aligned([0i16; L1]);
+                    let mut tmp_them = Aligned([0i16; L1]);
+                    add_i16_arrays::<L1>(&mut tmp_us.0, &us_combined.0, us_t);
+                    add_i16_arrays::<L1>(&mut tmp_them.0, &them_combined.0, them_t);
+                    us_combined = tmp_us;
+                    them_combined = tmp_them;
+                }
+
+                #[cfg(feature = "nnue-hand-threat")]
+                if self.feature_transformer.has_hand_threat {
+                    let (us_ht, them_ht) = if side_to_move == Color::Black {
+                        (
+                            acc.get_hand_threat(Color::Black as usize),
+                            acc.get_hand_threat(Color::White as usize),
+                        )
+                    } else {
+                        (
+                            acc.get_hand_threat(Color::White as usize),
+                            acc.get_hand_threat(Color::Black as usize),
+                        )
+                    };
+                    let mut tmp_us = Aligned([0i16; L1]);
+                    let mut tmp_them = Aligned([0i16; L1]);
+                    add_i16_arrays::<L1>(&mut tmp_us.0, &us_combined.0, us_ht);
+                    add_i16_arrays::<L1>(&mut tmp_them.0, &them_combined.0, them_ht);
+                    us_combined = tmp_us;
+                    them_combined = tmp_them;
+                }
+
+                sqr_clipped_relu_transform(&us_combined.0, &them_combined.0, &mut transformed.0);
+            } else {
+                sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
+            }
         }
-        #[cfg(not(feature = "nnue-threat"))]
+        #[cfg(not(any(feature = "nnue-threat", feature = "nnue-hand-threat")))]
         {
             sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
         }

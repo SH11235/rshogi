@@ -24,6 +24,12 @@ pub struct AccumulatorLayerStacks<const L1: usize> {
     #[cfg(feature = "nnue-threat")]
     pub threat_accumulation: [[i16; L1]; 2],
 
+    /// HandThreat アキュムレータ [perspective][dimension]
+    /// HandThreat weights (i8) の累積値。board Threat と独立に管理し、
+    /// forward 時に piece accumulation と両方を要素和する。
+    #[cfg(feature = "nnue-hand-threat")]
+    pub hand_threat_accumulation: [[i16; L1]; 2],
+
     /// PSQT アキュムレータ [perspective][bucket]
     /// 各駒の PSQT 重みを視点ごとに累積する。
     #[cfg(feature = "nnue-psqt")]
@@ -43,6 +49,8 @@ impl<const L1: usize> AccumulatorLayerStacks<L1> {
             accumulation: [[0; L1]; 2],
             #[cfg(feature = "nnue-threat")]
             threat_accumulation: [[0; L1]; 2],
+            #[cfg(feature = "nnue-hand-threat")]
+            hand_threat_accumulation: [[0; L1]; 2],
             #[cfg(feature = "nnue-psqt")]
             psqt_accumulation: [[0; NUM_LAYER_STACK_BUCKETS]; 2],
             computed_accumulation: false,
@@ -81,6 +89,22 @@ impl<const L1: usize> AccumulatorLayerStacks<L1> {
     pub fn get_threat_mut(&mut self, perspective: usize) -> &mut [i16; L1] {
         debug_assert!(perspective < 2);
         unsafe { self.threat_accumulation.get_unchecked_mut(perspective) }
+    }
+
+    /// 指定視点の HandThreat 累積値を取得
+    #[cfg(feature = "nnue-hand-threat")]
+    #[inline]
+    pub fn get_hand_threat(&self, perspective: usize) -> &[i16; L1] {
+        debug_assert!(perspective < 2);
+        unsafe { self.hand_threat_accumulation.get_unchecked(perspective) }
+    }
+
+    /// 指定視点の HandThreat 累積値を取得（可変）
+    #[cfg(feature = "nnue-hand-threat")]
+    #[inline]
+    pub fn get_hand_threat_mut(&mut self, perspective: usize) -> &mut [i16; L1] {
+        debug_assert!(perspective < 2);
+        unsafe { self.hand_threat_accumulation.get_unchecked_mut(perspective) }
     }
 }
 

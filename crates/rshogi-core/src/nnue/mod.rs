@@ -55,8 +55,10 @@ pub mod spec;
 pub mod stats;
 #[cfg(feature = "nnue-threat")]
 pub(crate) mod threat_exclusion;
-#[cfg(feature = "nnue-threat")]
+#[cfg(any(feature = "nnue-threat", feature = "nnue-hand-threat"))]
 pub(crate) mod threat_features;
+#[cfg(feature = "nnue-hand-threat")]
+pub(crate) mod hand_threat_features;
 
 pub use accumulator::{Accumulator, AccumulatorStack, ChangedBonaPiece, DirtyPiece, StackEntry};
 pub use accumulator_layer_stacks::{
