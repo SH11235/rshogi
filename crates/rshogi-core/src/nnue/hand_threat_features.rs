@@ -508,13 +508,16 @@ pub fn append_changed_hand_threat_indices(
         bump!(FALLBACK_OTHER);
         return false;
     }
-    // Promotion 判定: old_pt != new_pt の場合、分類してカウンタに計上してから fallback。
-    // (Phase 1 で非捕獲・非 Pawn promotion のみ incremental 対応予定)
+    // Promotion 分類と incremental 可否判定:
+    // Phase 1: 非捕獲・非 Pawn promotion のみ incremental 対応
+    //          (to_sq の piece class 変化は既存 source_set + before/after 列挙で
+    //           自然に吸収される。pawn file state も非 Pawn 駒の成りなら不変)
+    //   Pawn → ProPawn: pawn file count が 1 減少 → pawn drop legality 変化 → fallback
+    //   成りあり capture: Phase 2 (decode fix) + Phase 4 (0↔1 transition) 後に対応
     let is_promotion = old_pt != new_pt;
     if is_promotion {
-        // capture / non-capture と Pawn 関与の有無でサブ分類
         if dirty_piece.dirty_num == 2 {
-            // capture 付き promotion: cp1 から captured 情報を取得して分類
+            // capture 付き promotion: 現時点では fallback
             let cp1_promo = &dirty_piece.changed_piece[1];
             let cap_info = decode_board_threat_info_fb(cp1_promo.old_piece.fb);
             match cap_info {
@@ -522,23 +525,23 @@ pub fn append_changed_hand_threat_indices(
                     if old_pt == PieceType::Pawn || cap_pt == PieceType::Pawn {
                         bump!(FALLBACK_PROMOTION_CAPTURE_PAWN_OR_CAPTURED_PAWN);
                     } else {
-                        // 0↔1 transition かどうかは decode bug の影響を受けるので
-                        // 正確な区別は Phase 2 後。ここでは CAPTURE_NONPAWN 相当として計上。
-                        // (CAPTURE_HAND_TRANSITION の分離は Phase 2 以降)
                         bump!(FALLBACK_PROMOTION_CAPTURE_NONPAWN);
                     }
                 }
                 None => {
-                    // cp1 が decode できない = 異常 (defensive)
                     bump!(FALLBACK_PROMOTION_CAPTURE_NONPAWN);
                 }
             }
-        } else if old_pt == PieceType::Pawn {
-            bump!(FALLBACK_PROMOTION_NONCAP_PAWN);
-        } else {
-            bump!(FALLBACK_PROMOTION_NONCAP_NONPAWN);
+            return false;
         }
-        return false;
+        // 非捕獲 promotion
+        if old_pt == PieceType::Pawn {
+            // Pawn 成り: pawn file state 変化 → Phase 5 で対応
+            bump!(FALLBACK_PROMOTION_NONCAP_PAWN);
+            return false;
+        }
+        // 非捕獲・非 Pawn promotion: incremental path へ fall-through
+        // (後段の enumeration が old_pt/new_pt の違いを正しく扱う)
     }
 
     // 捕獲の場合: dirty_piece[1] から captured piece 情報を取得。
@@ -1146,6 +1149,48 @@ mod tests {
         }
         // 先手番、持ち駒に角あり、非取り歩突き
         let m = Move::from_usi("2g2f").expect("2g2f");
+        verify_incremental_hand_threat(&mut pos, m);
+    }
+
+    /// Phase 1: 非捕獲・非 Pawn promotion (Silver → ProSilver) で差分更新が一致
+    ///
+    /// 非 Pawn 成りは:
+    /// - 持ち駒 state 不変 (非捕獲)
+    /// - pawn file state 不変 (Pawn でない)
+    /// - to_sq の piece class だけ変化 (Silver → GoldLike)
+    ///
+    /// 既存の source_set 列挙が before/after で正しい piece class を取得できることを確認。
+    ///
+    /// sfen file 順序: 文字列の左端が file 9、右端が file 1。
+    #[test]
+    fn test_hand_threat_incremental_noncap_nonpawn_promotion() {
+        // 先手銀が 2三 → 2二+ (成り、敵駒なし、持ち駒あり)
+        // rank 3 に Silver を file 2 に置く: "7S1" = 7 empty (files 9..3), S at file 2, 1 empty at file 1
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/7S1/9/9/9/9/9/4K4 b R 1").expect("silver promotion sfen");
+        let m = Move::from_usi("2c2b+").expect("2c2b+");
+        verify_incremental_hand_threat(&mut pos, m);
+    }
+
+    /// Phase 1: Knight promotion (Knight → ProKnight / GoldLike) 非捕獲
+    #[test]
+    fn test_hand_threat_incremental_noncap_knight_promotion() {
+        // 2c の Knight を 1a+ に動かす (2→1 file, 3→1 rank の knight jump)
+        // rank 3 file 2 に N: "7N1"
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/7N1/9/9/9/9/9/4K4 b R 1").expect("knight promotion sfen");
+        let m = Move::from_usi("2c1a+").expect("2c1a+");
+        verify_incremental_hand_threat(&mut pos, m);
+    }
+
+    /// Phase 1: Bishop promotion (Bishop → Horse) 非捕獲、slider の attack 変化あり
+    #[test]
+    fn test_hand_threat_incremental_noncap_bishop_promotion() {
+        // Black Bishop at 5五 → 2二+ (対角移動、非捕獲、成り)
+        // 持ち駒に Rook (slider) 持たせて、slider drop の ray 変化も exercise
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/9/4B4/9/9/9/4K4 b R 1").expect("bishop promotion sfen");
+        let m = Move::from_usi("5e2b+").expect("5e2b+");
         verify_incremental_hand_threat(&mut pos, m);
     }
 
