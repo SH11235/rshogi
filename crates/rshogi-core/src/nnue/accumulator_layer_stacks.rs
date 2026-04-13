@@ -256,58 +256,39 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
         entry.valid = true;
     }
 
-    /// Threat accumulation を cache 経由で refresh する (Stage 2: hit 時 incremental)
+    /// Threat accumulation を cache 経由で refresh する (Stage 1: 常に full rebuild)
     ///
-    /// # 挙動
+    /// # Stage 1 挙動
     ///
-    /// 1. cache entry が有効 (`threat_valid == true`) なら:
-    ///    - `threat_accumulation` に cached 値をコピー
-    ///    - `incremental_apply(cached_pl_fb, threat_accumulation)` を呼び、
-    ///      piece_list 差分から差分更新。`true` で成功、`false` で overflow
-    /// 2. cache entry が無効 or incremental 失敗なら `full_rebuild` にフォールバック
-    /// 3. 最終結果を cache entry に書き戻す
+    /// - 呼び出し側の `full_rebuild` を実行して `threat_accumulation` を再構築
+    /// - 再構築結果を cache entry に書き込む (後続 Stage 2 で hit 判定に使用)
     ///
     /// # 引数
     ///
     /// - `king_sq`: 玉位置 (cache key)
     /// - `perspective`: 視点 (cache key)
-    /// - `current_threat_pl_fb`: 現在の `piece_list_fb` (書き戻し用)
+    /// - `threat_piece_list_fb`: 現在の `piece_list_fb` (fb encoding、Threat 差分用)
     /// - `threat_accumulation`: 更新先の Threat accumulation
-    /// - `full_rebuild`: miss / overflow 時の full refresh コールバック
-    /// - `incremental_apply`: hit 時の差分適用コールバック
-    ///   - 第 1 引数: cache 時点の piece_list_fb
-    ///   - 第 2 引数: threat_accumulation (既に cached 値コピー済)
-    ///   - 戻り値: `true` で差分適用成功、`false` で overflow → full rebuild fallback
+    /// - `full_rebuild`: full refresh のコールバック (threat_accumulation を完全再計算)
     #[cfg(feature = "nnue-threat")]
-    pub(crate) fn refresh_threat_or_cache<FR, FI>(
+    pub(crate) fn refresh_threat_or_cache<F>(
         &mut self,
         king_sq: Square,
         perspective: Color,
-        current_threat_pl_fb: &[BonaPiece; PieceNumber::NB],
+        threat_piece_list_fb: &[BonaPiece; PieceNumber::NB],
         threat_accumulation: &mut [i16; L1],
-        full_rebuild: FR,
-        incremental_apply: FI,
+        full_rebuild: F,
     ) where
-        FR: FnOnce(&mut [i16; L1]),
-        FI: FnOnce(&[BonaPiece; PieceNumber::NB], &mut [i16; L1]) -> bool,
+        F: FnOnce(&mut [i16; L1]),
     {
         let entry = &mut self.entries[king_sq.raw() as usize][perspective as usize];
 
-        let mut success = false;
-        if entry.threat_valid {
-            // hit: cached threat_accumulation を copy してから diff apply
-            threat_accumulation.copy_from_slice(&entry.threat_accumulation);
-            success = incremental_apply(&entry.threat_piece_list_fb, threat_accumulation);
-        }
+        // Stage 1: 常に full rebuild (cache 読み出しなし)
+        full_rebuild(threat_accumulation);
 
-        if !success {
-            // miss or overflow: full rebuild
-            full_rebuild(threat_accumulation);
-        }
-
-        // cache 更新
+        // cache 更新: Stage 2 で hit 判定・差分適用に使用する
         entry.threat_accumulation.copy_from_slice(threat_accumulation);
-        entry.threat_piece_list_fb.copy_from_slice(current_threat_pl_fb);
+        entry.threat_piece_list_fb.copy_from_slice(threat_piece_list_fb);
         entry.threat_valid = true;
     }
 }

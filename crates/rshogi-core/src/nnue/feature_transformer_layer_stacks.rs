@@ -650,7 +650,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             if self.has_threat {
                 let king_sq = pos.king_square(perspective);
                 if reset {
-                    // 玉移動時は Threat Cache v2 経由で refresh (Stage 2: hit 時 incremental)
+                    // 玉移動時は Threat Cache v2 経由で refresh (Stage 1: 常に full rebuild)
                     let threat_acc = acc.get_threat_mut(p);
                     let threat_pl_fb = pos.piece_list().piece_list_fb();
                     cache.refresh_threat_or_cache(
@@ -666,30 +666,6 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                                 king_sq,
                                 |idx| self.add_threat_weights(ta, idx),
                             );
-                        },
-                        |cached_pl_fb, ta| {
-                            let mut t_removed = IndexList::<MAX_CHANGED_THREAT_FEATURES>::new();
-                            let mut t_added = IndexList::<MAX_CHANGED_THREAT_FEATURES>::new();
-                            let ok =
-                                threat_features::append_changed_threat_indices_from_piecelist_diff(
-                                    pos,
-                                    cached_pl_fb,
-                                    threat_pl_fb,
-                                    perspective,
-                                    king_sq,
-                                    &mut t_removed,
-                                    &mut t_added,
-                                );
-                            if !ok {
-                                return false;
-                            }
-                            for idx in t_removed.iter() {
-                                self.sub_threat_weights(ta, idx);
-                            }
-                            for idx in t_added.iter() {
-                                self.add_threat_weights(ta, idx);
-                            }
-                            true
                         },
                     );
                 } else {
@@ -753,7 +729,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                 self.refresh_psqt(&active_indices, &mut acc.psqt_accumulation[p]);
             }
 
-            // Threat は Threat Cache v2 経由で refresh (Stage 2: hit 時 incremental)
+            // Threat は Threat Cache v2 経由で refresh (Stage 1: 常に full rebuild)
             #[cfg(feature = "nnue-threat")]
             if self.has_threat {
                 let king_sq = pos.king_square(perspective);
@@ -772,29 +748,6 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                             king_sq,
                             |idx| self.add_threat_weights(ta, idx),
                         );
-                    },
-                    |cached_pl_fb, ta| {
-                        let mut t_removed = IndexList::<MAX_CHANGED_THREAT_FEATURES>::new();
-                        let mut t_added = IndexList::<MAX_CHANGED_THREAT_FEATURES>::new();
-                        let ok = threat_features::append_changed_threat_indices_from_piecelist_diff(
-                            pos,
-                            cached_pl_fb,
-                            threat_pl_fb,
-                            perspective,
-                            king_sq,
-                            &mut t_removed,
-                            &mut t_added,
-                        );
-                        if !ok {
-                            return false;
-                        }
-                        for idx in t_removed.iter() {
-                            self.sub_threat_weights(ta, idx);
-                        }
-                        for idx in t_added.iter() {
-                            self.add_threat_weights(ta, idx);
-                        }
-                        true
                     },
                 );
             }
