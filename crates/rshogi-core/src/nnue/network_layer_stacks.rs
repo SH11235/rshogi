@@ -858,6 +858,8 @@ impl LayerStacksNetwork {
                 }
 
                 let mut updated = false;
+
+                // --- Tier 1: 直前局面 (depth=1) で差分更新 ---
                 if let Some(prev_idx) = current_entry.previous {
                     let prev_computed = $stack.entry_at(prev_idx).accumulator.computed_accumulation;
                     if prev_computed {
@@ -882,6 +884,18 @@ impl LayerStacksNetwork {
                     }
                 }
 
+                // --- Tier 2: 祖先探索 + forward_update_incremental ---
+                // Tier 1 で失敗しても、MAX_DEPTH=4 以内の computed 祖先があれば
+                // そこから forward 方向に dirty_piece を適用して更新できる。
+                // HalfKA_hm / HalfKA / HalfKP では既に有効だが LayerStacks では
+                // 未使用だった。
+                if !updated {
+                    if let Some((source_idx, _depth)) = $stack.find_usable_accumulator() {
+                        updated = $net.forward_update_incremental(pos, $stack, source_idx);
+                    }
+                }
+
+                // --- Tier 3: 全計算 (cache 経由) ---
                 if !updated {
                     let acc = &mut $stack.current_mut().accumulator;
                     if let Some(
