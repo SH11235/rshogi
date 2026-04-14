@@ -997,6 +997,115 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
         acc: &mut AccumulatorLayerStacks<L1>,
         cache: &mut AccumulatorCacheLayerStacks<L1>,
     ) {
+        self.refresh_accumulator_with_cache_inner(pos, acc, cache, false);
+    }
+
+    /// `refresh_accumulator_with_cache` の inner: HandThreat 部分を skip するか選択可能。
+    ///
+    /// `skip_hand_threat = true` のときは HandThreat acc は更新しない (呼び出し側で
+    /// HandThreat-specific Tier 2 経由で incremental に適用するため)。
+    /// HandThreat-specific Tier 2: king move を許容する find_usable で見つけた source から
+    /// multi-ply walk で HandThreat acc を incremental に組み立てる。
+    ///
+    /// `sources[0]` = Black perspective, `sources[1]` = White perspective。
+    /// 両者が Some かつ source_idx が一致する場合のみ成功する (snapshot を共有するため)。
+    /// 戻り値: true なら成功 (current_acc の hand_threat_acc を更新済み)、false なら fallback。
+    #[cfg(feature = "nnue-hand-threat")]
+    pub fn try_apply_hand_threat_tier2(
+        &self,
+        pos: &Position,
+        stack: &mut AccumulatorStackLayerStacks<L1>,
+        sources: &[Option<(usize, usize)>; 2],
+    ) -> bool {
+        let (Some((src_b, depth_b)), Some((src_w, depth_w))) = (sources[0], sources[1]) else {
+            return false;
+        };
+        // 両 perspective で同じ source_idx が必要 (snapshot を共有して効率化)
+        if src_b != src_w {
+            return false;
+        }
+        let source_idx = src_b;
+        let depth = depth_b.max(depth_w);
+        if depth == 0 || depth > 8 {
+            return false;
+        }
+
+        // path 収集 (source → current 順)
+        let path = stack.collect_path(source_idx);
+        let Some(path) = path else {
+            return false;
+        };
+        if path.len() != depth {
+            // path 長 mismatch (king move filtering で path collect が短くなる場合等)
+            return false;
+        }
+
+        // current_acc の hand_threat acc を source から copy
+        let source_acc_clone = stack.entry_at(source_idx).accumulator.clone();
+        {
+            let current_acc = &mut stack.current_mut().accumulator;
+            for p in 0..2 {
+                current_acc
+                    .get_hand_threat_mut(p)
+                    .copy_from_slice(source_acc_clone.get_hand_threat(p));
+            }
+        }
+
+        // snapshot を current pos から構築し、reverse walk で source 状態に戻す
+        let mut snapshot = hand_threat_features::HandThreatPosSnapshot::from_pos(pos);
+        // path は source → current 順、逆順で reverse-apply
+        let mut path_entries: [usize; 8] = [0; 8];
+        let path_len = path.len();
+        for (i, idx) in path.iter().enumerate() {
+            path_entries[i] = idx;
+        }
+        for i in (0..path_len).rev() {
+            let dp = stack.entry_at(path_entries[i]).dirty_piece;
+            snapshot.apply_dirty_reverse(&dp);
+        }
+
+        // forward walk で各 step に対し HandThreat diff を適用
+        for &entry_idx in &path_entries[..path_len] {
+            let dp = stack.entry_at(entry_idx).dirty_piece;
+            snapshot.apply_dirty_forward(&dp);
+            for perspective in [Color::Black, Color::White] {
+                let p = perspective as usize;
+                let king_sq = snapshot.king_square(perspective);
+                let mut ht_removed =
+                    IndexList::<{ hand_threat_features::MAX_CHANGED_HAND_THREAT_FEATURES }>::new();
+                let mut ht_added =
+                    IndexList::<{ hand_threat_features::MAX_CHANGED_HAND_THREAT_FEATURES }>::new();
+                let ok = hand_threat_features::append_changed_hand_threat_indices(
+                    &snapshot,
+                    &dp,
+                    perspective,
+                    king_sq,
+                    &mut ht_removed,
+                    &mut ht_added,
+                );
+                if !ok {
+                    return false;
+                }
+                let hand_threat_acc = stack.current_mut().accumulator.get_hand_threat_mut(p);
+                for idx in ht_removed.iter() {
+                    self.sub_hand_threat_weights(hand_threat_acc, idx);
+                }
+                for idx in ht_added.iter() {
+                    self.add_hand_threat_weights(hand_threat_acc, idx);
+                }
+            }
+        }
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn refresh_accumulator_with_cache_inner(
+        &self,
+        pos: &Position,
+        acc: &mut AccumulatorLayerStacks<L1>,
+        cache: &mut AccumulatorCacheLayerStacks<L1>,
+        skip_hand_threat: bool,
+    ) {
         for perspective in [Color::Black, Color::White] {
             count_refresh!();
             let p = perspective as usize;
@@ -1021,9 +1130,9 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                 });
             }
 
-            // HandThreat もキャッシュ非対象なのでフル再計算
+            // HandThreat もキャッシュ非対象なのでフル再計算 (skip_hand_threat=true で省略)
             #[cfg(feature = "nnue-hand-threat")]
-            if self.has_hand_threat {
+            if self.has_hand_threat && !skip_hand_threat {
                 let hand_threat_acc = acc.get_hand_threat_mut(p);
                 self.rebuild_hand_threat(pos, perspective, hand_threat_acc);
                 #[cfg(feature = "hand-threat-stats")]

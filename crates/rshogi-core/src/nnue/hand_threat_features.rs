@@ -111,6 +111,14 @@ pub mod stats {
         REFRESH_DIAG_CURRENT_KING_MOVED,
         REFRESH_DIAG_ANCESTOR_KING_MOVED,
         REFRESH_DIAG_CHAIN_ENDED,
+        // --- King move を許容して walk した時の depth 分布 ---
+        // (Fix B の path length 見積もり; 現状の find_usable では届かない祖先の深さ)
+        REFRESH_DIAG_KOK_DEPTH_1,
+        REFRESH_DIAG_KOK_DEPTH_2,
+        REFRESH_DIAG_KOK_DEPTH_3_4,
+        REFRESH_DIAG_KOK_DEPTH_5_8,
+        REFRESH_DIAG_KOK_DEPTH_9_PLUS,
+        REFRESH_DIAG_KOK_NO_ANCESTOR,
     }
 
     /// diff カウンタのみの合計 (update 呼び出し総数)
@@ -462,7 +470,7 @@ static LEGAL_DROP_RANK_BB: std::sync::LazyLock<[[Bitboard; 2]; HAND_NUM_CLASSES]
                     if let Some(sq) = Square::from_u8(raw)
                         && is_legal_drop_rank(hc, color, sq)
                     {
-                        bb = bb | Bitboard::from_square(sq);
+                        bb |= Bitboard::from_square(sq);
                     }
                 }
                 tbl[hc as usize][color as usize] = bb;
@@ -485,7 +493,7 @@ pub(crate) fn pawn_files_bb(pawn_bb: Bitboard) -> Bitboard {
     let mut iter = pawn_bb;
     while !iter.is_empty() {
         let sq = iter.pop();
-        result = result | FILE_BB[sq.file() as usize];
+        result |= FILE_BB[sq.file() as usize];
     }
     result
 }
@@ -506,13 +514,13 @@ pub(crate) fn has_pawn_on_file(pos: &Position, color: Color, sq: Square) -> bool
 /// ペアに対しては `pos` の返す値を反転 (二歩 state が flip しているため)。
 /// それ以外は `pos` の値と同じ。
 #[inline]
-pub(crate) fn has_pawn_on_file_before(
-    pos: &Position,
+pub(crate) fn has_pawn_on_file_before<P: HandThreatPosLike>(
+    pos: &P,
     color: Color,
     sq: Square,
     flip: Option<(Color, u8)>,
 ) -> bool {
-    let after = has_pawn_on_file(pos, color, sq);
+    let after = pos.has_pawn_on_file(color, sq);
     if let Some((fc, ff)) = flip
         && color == fc
         && sq.file() as u8 == ff
@@ -544,6 +552,243 @@ pub(crate) fn attacks_from_dropped(
         HandThreatClass::Gold => gold_effect(color, sq),
         HandThreatClass::Bishop => bishop_effect(sq, occupied),
         HandThreatClass::Rook => rook_effect(sq, occupied),
+    }
+}
+
+// =============================================================================
+// HandThreatPosLike trait (Fix B: Position と Snapshot を統一的に扱う)
+// =============================================================================
+
+/// `append_changed_hand_threat_indices` から見える Position のサブセット。
+/// `Position` 本体と HandThreat-specific Tier 2 用 `HandThreatPosSnapshot`
+/// の両方で実装する。
+pub trait HandThreatPosLike {
+    fn occupied(&self) -> Bitboard;
+    fn piece_at(&self, sq: Square) -> crate::types::Piece;
+    fn hand_count(&self, color: Color, pt: PieceType) -> u32;
+    fn has_pawn_on_file(&self, color: Color, sq: Square) -> bool;
+}
+
+impl HandThreatPosLike for Position {
+    #[inline]
+    fn occupied(&self) -> Bitboard {
+        Position::occupied(self)
+    }
+    #[inline]
+    fn piece_at(&self, sq: Square) -> crate::types::Piece {
+        self.piece_on(sq)
+    }
+    #[inline]
+    fn hand_count(&self, color: Color, pt: PieceType) -> u32 {
+        self.hand(color).count(pt)
+    }
+    #[inline]
+    fn has_pawn_on_file(&self, color: Color, sq: Square) -> bool {
+        has_pawn_on_file(self, color, sq)
+    }
+}
+
+// =============================================================================
+// HandThreatPosSnapshot (Fix B: HandThreat-specific multi-ply forward 用)
+// =============================================================================
+
+/// HandThreat 差分計算に必要な最小限の状態を保持するスナップショット。
+///
+/// 用途: HandThreat-specific Tier 2 経路で、Tier 3 refresh path から
+/// king move chain を walk して computed 祖先まで戻り、そこから forward 方向に
+/// 各 step ごとに HandThreat diff を適用するため。
+///
+/// 通常の `Position` の代わりに `HandThreatPosLike` trait 経由で
+/// `append_changed_hand_threat_indices` に渡される。
+#[derive(Clone)]
+pub struct HandThreatPosSnapshot {
+    pub occupied: Bitboard,
+    /// 各マスの駒 (King 含む)
+    pub piece_at: [crate::types::Piece; 81],
+    /// `[color][pt_idx]` の手駒カウント。pt_idx は `pt_to_hand_idx` で計算
+    pub hand_count: [[u32; 8]; 2],
+    /// 通常 Pawn (非成駒) の bitboard、二歩判定用
+    pub pawn_bb: [Bitboard; 2],
+    /// 各色の玉位置 (king move を含む multi-ply walk で king_sq を追跡するため)
+    pub king_sq: [Square; 2],
+}
+
+#[inline]
+fn pt_to_hand_idx(pt: PieceType) -> usize {
+    match pt {
+        PieceType::Pawn => 0,
+        PieceType::Lance => 1,
+        PieceType::Knight => 2,
+        PieceType::Silver => 3,
+        PieceType::Gold => 4,
+        PieceType::Bishop => 5,
+        PieceType::Rook => 6,
+        _ => 7, // dummy
+    }
+}
+
+impl HandThreatPosSnapshot {
+    /// `Position` から初期スナップショットを構築する
+    pub fn from_pos(pos: &Position) -> Self {
+        let mut piece_at = [crate::types::Piece::NONE; 81];
+        for raw in 0..81u8 {
+            if let Some(sq) = Square::from_u8(raw) {
+                piece_at[raw as usize] = pos.piece_on(sq);
+            }
+        }
+        let mut hand_count = [[0u32; 8]; 2];
+        for color in [Color::Black, Color::White] {
+            let h = pos.hand(color);
+            for pt in [
+                PieceType::Pawn,
+                PieceType::Lance,
+                PieceType::Knight,
+                PieceType::Silver,
+                PieceType::Gold,
+                PieceType::Bishop,
+                PieceType::Rook,
+            ] {
+                hand_count[color as usize][pt_to_hand_idx(pt)] = h.count(pt);
+            }
+        }
+        let pawn_bb = [
+            pos.pieces(Color::Black, PieceType::Pawn),
+            pos.pieces(Color::White, PieceType::Pawn),
+        ];
+        let king_sq = [pos.king_square(Color::Black), pos.king_square(Color::White)];
+        Self {
+            occupied: pos.occupied(),
+            piece_at,
+            hand_count,
+            pawn_bb,
+            king_sq,
+        }
+    }
+
+    #[inline]
+    pub fn king_square(&self, color: Color) -> Square {
+        self.king_sq[color as usize]
+    }
+
+    /// `dirty_piece` を順方向に適用してスナップショットを次の状態に進める。
+    ///
+    /// 2-pass: まず全 changed_piece の old_piece を remove し、その後で new_piece を add する。
+    /// 1-pass だと capture 時に cp[0]=attacker (from→to) を処理後、cp[1]=captured
+    /// (old=to, new=hand) の old_remove で to を消してしまう。
+    pub fn apply_dirty_forward(&mut self, dirty: &DirtyPiece) {
+        for i in 0..dirty.dirty_num as usize {
+            let cp = &dirty.changed_piece[i];
+            self.apply_old_remove(&cp.old_piece, dirty.king_moved, i);
+        }
+        for i in 0..dirty.dirty_num as usize {
+            let cp = &dirty.changed_piece[i];
+            self.apply_new_add(&cp.new_piece, dirty.king_moved, i);
+        }
+    }
+
+    /// `dirty_piece` を逆方向に適用してスナップショットを前の状態に戻す。
+    ///
+    /// 2-pass: まず全 changed_piece の new_piece を remove し、その後で old_piece を add する。
+    pub fn apply_dirty_reverse(&mut self, dirty: &DirtyPiece) {
+        for i in 0..dirty.dirty_num as usize {
+            let cp = &dirty.changed_piece[i];
+            self.apply_old_remove(&cp.new_piece, dirty.king_moved, i);
+        }
+        for i in 0..dirty.dirty_num as usize {
+            let cp = &dirty.changed_piece[i];
+            self.apply_new_add(&cp.old_piece, dirty.king_moved, i);
+        }
+    }
+
+    /// `bp` が表す駒・手駒を snapshot から除去する
+    ///
+    /// `king_moved`/`cp_index` は king 判定用 (decode_board_threat_info_fb は King を
+    /// None にするため、king move の場合は decode_board_square_fb + king_moved 情報で
+    /// king 駒を識別)。
+    fn apply_old_remove(
+        &mut self,
+        bp: &super::bona_piece::ExtBonaPiece,
+        king_moved: [bool; 2],
+        cp_index: usize,
+    ) {
+        // まず通常駒として decode を試みる
+        if let Some((color, _, pt, sq)) = decode_board_threat_info_fb(bp.fb) {
+            self.occupied &= !Bitboard::from_square(sq);
+            self.piece_at[sq.index()] = crate::types::Piece::NONE;
+            if pt == PieceType::Pawn {
+                self.pawn_bb[color as usize] &= !Bitboard::from_square(sq);
+            }
+            return;
+        }
+        // 手駒 BonaPiece として decode
+        if let Some((color, pt)) = decode_hand_piece_fb(bp.fb) {
+            self.hand_count[color as usize][pt_to_hand_idx(pt)] -= 1;
+            return;
+        }
+        // どちらでもない → King の可能性 (king_moved && cp_index == 0 のとき)
+        // King は board_threat_info_fb で None になるので decode_board_square_fb で sq を取る
+        if cp_index == 0 && (king_moved[0] || king_moved[1]) {
+            use super::threat_features::decode_board_square_fb;
+            if let Some(sq) = decode_board_square_fb(bp.fb) {
+                self.occupied &= !Bitboard::from_square(sq);
+                self.piece_at[sq.index()] = crate::types::Piece::NONE;
+            }
+        }
+    }
+
+    #[inline]
+    fn apply_new_add(
+        &mut self,
+        bp: &super::bona_piece::ExtBonaPiece,
+        king_moved: [bool; 2],
+        cp_index: usize,
+    ) {
+        if let Some((color, _, pt, sq)) = decode_board_threat_info_fb(bp.fb) {
+            self.occupied |= Bitboard::from_square(sq);
+            self.piece_at[sq.index()] = crate::types::Piece::new(color, pt);
+            if pt == PieceType::Pawn {
+                self.pawn_bb[color as usize] |= Bitboard::from_square(sq);
+            }
+            return;
+        }
+        if let Some((color, pt)) = decode_hand_piece_fb(bp.fb) {
+            self.hand_count[color as usize][pt_to_hand_idx(pt)] += 1;
+            return;
+        }
+        // King の可能性
+        if cp_index == 0 && (king_moved[0] || king_moved[1]) {
+            use super::threat_features::decode_board_square_fb;
+            if let Some(sq) = decode_board_square_fb(bp.fb) {
+                let king_color = if king_moved[0] {
+                    Color::Black
+                } else {
+                    Color::White
+                };
+                self.occupied |= Bitboard::from_square(sq);
+                self.piece_at[sq.index()] = crate::types::Piece::new(king_color, PieceType::King);
+                self.king_sq[king_color as usize] = sq;
+            }
+        }
+    }
+}
+
+impl HandThreatPosLike for HandThreatPosSnapshot {
+    #[inline]
+    fn occupied(&self) -> Bitboard {
+        self.occupied
+    }
+    #[inline]
+    fn piece_at(&self, sq: Square) -> crate::types::Piece {
+        self.piece_at[sq.index()]
+    }
+    #[inline]
+    fn hand_count(&self, color: Color, pt: PieceType) -> u32 {
+        self.hand_count[color as usize][pt_to_hand_idx(pt)]
+    }
+    #[inline]
+    fn has_pawn_on_file(&self, color: Color, sq: Square) -> bool {
+        let file_bb = FILE_BB[sq.file() as usize];
+        !(self.pawn_bb[color as usize] & file_bb).is_empty()
     }
 }
 
@@ -738,8 +983,8 @@ const MAX_INTERMEDIATE_HAND_THREATS: usize = 8_192;
 /// ## 戻り値
 /// - `true`: 差分計算成功、`removed` / `added` に diff が格納された
 /// - `false`: 対応外ケースまたは overflow → 呼び出し元で full rebuild が必要
-pub fn append_changed_hand_threat_indices(
-    pos: &Position,
+pub fn append_changed_hand_threat_indices<P: HandThreatPosLike>(
+    pos: &P,
     dirty_piece: &DirtyPiece,
     perspective: Color,
     king_sq: Square,
@@ -824,7 +1069,7 @@ pub fn append_changed_hand_threat_indices(
             if dropped_pt == PieceType::Pawn {
                 pawn_file_flip = Some((dropper, to_sq.file() as u8));
             }
-            if pos.hand(dropper).count(dropped_pt) == 0 {
+            if pos.hand_count(dropper, dropped_pt) == 0 {
                 is_drop_1to0_transition = true;
             }
             if dirty_piece.dirty_num != 1 {
@@ -929,7 +1174,7 @@ pub fn append_changed_hand_threat_indices(
             return false;
         }
         // transition 検出: after_count == 1 なら before=0 で 0→1 transition
-        let after_count = pos.hand(old_color).count(cap_pt_hand_base);
+        let after_count = pos.hand_count(old_color, cap_pt_hand_base);
         let trans_block = if after_count == 1 {
             let hc = piece_type_to_hand_threat_class(cap_pt_hand_base)
                 .expect("cap_pt_hand_base covers all 7 hand classes");
@@ -1002,7 +1247,7 @@ pub fn append_changed_hand_threat_indices(
                         continue;
                     }
                     if hand_class == HandThreatClass::Pawn
-                        && has_pawn_on_file(pos, drop_color, drop_sq)
+                        && pos.has_pawn_on_file(drop_color, drop_sq)
                     {
                         continue;
                     }
@@ -1012,7 +1257,7 @@ pub fn append_changed_hand_threat_indices(
                     let drop_sq_n = normalize_sq(drop_sq, perspective, hm);
                     while !targets.is_empty() {
                         let to_target = targets.pop();
-                        let target_pc = pos.piece_on(to_target);
+                        let target_pc = pos.piece_at(to_target);
                         if target_pc.is_none() {
                             continue;
                         }
@@ -1075,7 +1320,7 @@ pub fn append_changed_hand_threat_indices(
                                 continue;
                             }
                         } else {
-                            let pc = pos.piece_on(to_target);
+                            let pc = pos.piece_at(to_target);
                             if pc.is_none() {
                                 continue;
                             }
@@ -1105,7 +1350,7 @@ pub fn append_changed_hand_threat_indices(
             }
 
             // --- 非 transition block: source_set 制限列挙 + sort-merge ---
-            if pos.hand(drop_color).count(hand_class.as_piece_type()) == 0 {
+            if pos.hand_count(drop_color, hand_class.as_piece_type()) == 0 {
                 continue;
             }
 
@@ -1122,7 +1367,7 @@ pub fn append_changed_hand_threat_indices(
                 && fc == drop_color
                 && hand_class == HandThreatClass::Pawn
             {
-                source_set = source_set | FILE_BB[ff as usize];
+                source_set |= FILE_BB[ff as usize];
             }
 
             let before_range = source_set;
@@ -1135,7 +1380,7 @@ pub fn append_changed_hand_threat_indices(
                 if !is_legal_drop_rank(hand_class, drop_color, drop_sq) {
                     continue;
                 }
-                if hand_class == HandThreatClass::Pawn && has_pawn_on_file(pos, drop_color, drop_sq)
+                if hand_class == HandThreatClass::Pawn && pos.has_pawn_on_file(drop_color, drop_sq)
                 {
                     continue;
                 }
@@ -1144,7 +1389,7 @@ pub fn append_changed_hand_threat_indices(
                 let drop_sq_n = normalize_sq(drop_sq, perspective, hm);
                 while !targets.is_empty() {
                     let to_target = targets.pop();
-                    let target_pc = pos.piece_on(to_target);
+                    let target_pc = pos.piece_at(to_target);
                     if target_pc.is_none() {
                         continue;
                     }
@@ -1211,7 +1456,7 @@ pub fn append_changed_hand_threat_indices(
                             continue;
                         }
                     } else {
-                        let pc = pos.piece_on(to_target);
+                        let pc = pos.piece_at(to_target);
                         if pc.is_none() {
                             continue;
                         }
@@ -1328,7 +1573,7 @@ pub fn for_each_active_hand_threat_index<F: FnMut(usize)>(
             // Pawn の場合、自色 pawn が既に乗っている file 全体を除外
             if hand_class == HandThreatClass::Pawn {
                 let pawn_files = pawn_files_bb(pos.pieces(drop_color, PieceType::Pawn));
-                candidates = candidates & !pawn_files;
+                candidates &= !pawn_files;
             }
             while !candidates.is_empty() {
                 let drop_sq = candidates.pop();

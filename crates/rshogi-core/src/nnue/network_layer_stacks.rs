@@ -682,6 +682,44 @@ impl<const L1: usize> NetworkLayerStacks<L1> {
         self.feature_transformer.refresh_accumulator_with_cache(pos, acc, cache);
     }
 
+    /// `refresh_accumulator_with_cache` + HandThreat skip フラグ版
+    #[cfg(feature = "nnue-hand-threat")]
+    pub fn refresh_accumulator_with_cache_inner(
+        &self,
+        pos: &Position,
+        acc: &mut AccumulatorLayerStacks<L1>,
+        cache: &mut super::accumulator_layer_stacks::AccumulatorCacheLayerStacks<L1>,
+        skip_hand_threat: bool,
+    ) {
+        self.feature_transformer.refresh_accumulator_with_cache_inner(
+            pos,
+            acc,
+            cache,
+            skip_hand_threat,
+        );
+    }
+
+    /// has_hand_threat の query
+    #[cfg(feature = "nnue-hand-threat")]
+    pub fn has_hand_threat(&self) -> bool {
+        self.feature_transformer.has_hand_threat
+    }
+
+    /// HandThreat-specific Tier 2: source idx から multi-ply walk で HandThreat acc を
+    /// incremental に組み立てる。両 perspective 共通の source_idx が必要。
+    ///
+    /// 戻り値: true なら成功 (current_acc.hand_threat が更新済み)、false なら
+    /// fallback (caller が rebuild する)。
+    #[cfg(feature = "nnue-hand-threat")]
+    pub fn try_apply_hand_threat_tier2(
+        &self,
+        pos: &Position,
+        stack: &mut super::accumulator_layer_stacks::AccumulatorStackLayerStacks<L1>,
+        sources: &[Option<(usize, usize)>; 2],
+    ) -> bool {
+        self.feature_transformer.try_apply_hand_threat_tier2(pos, stack, sources)
+    }
+
     /// 差分計算でAccumulatorを更新
     pub fn update_accumulator(
         &self,
@@ -937,12 +975,92 @@ impl LayerStacksNetwork {
                                     .fetch_add(1, Ordering::Relaxed);
                             }
                         }
+                        // King-move-allowed walk: HandThreat-specific Tier 2 を実装した場合の
+                        // path length 分布を記録する
+                        let kok = $stack.diagnose_refresh_depth_allowing_king();
+                        match kok {
+                            RefreshDiagResult::Found(d) if d == 1 => {
+                                super::hand_threat_features::stats::REFRESH_DIAG_KOK_DEPTH_1
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            RefreshDiagResult::Found(d) if d == 2 => {
+                                super::hand_threat_features::stats::REFRESH_DIAG_KOK_DEPTH_2
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            RefreshDiagResult::Found(d) if d <= 4 => {
+                                super::hand_threat_features::stats::REFRESH_DIAG_KOK_DEPTH_3_4
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            RefreshDiagResult::Found(d) if d <= 8 => {
+                                super::hand_threat_features::stats::REFRESH_DIAG_KOK_DEPTH_5_8
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            RefreshDiagResult::Found(_) => {
+                                super::hand_threat_features::stats::REFRESH_DIAG_KOK_DEPTH_9_PLUS
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            _ => {
+                                super::hand_threat_features::stats::REFRESH_DIAG_KOK_NO_ANCESTOR
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
                     }
+                    // --- HandThreat-specific Tier 2 ---
+                    // king move を許容して computed 祖先を探し、見つかったら multi-ply
+                    // walk で HandThreat だけ incremental 適用する。
+                    // HalfKA/PSQT/Threat は通常の refresh で処理 (skip_hand_threat=true)。
+                    #[cfg(feature = "nnue-hand-threat")]
+                    let mut hand_threat_done_via_tier2 = false;
+                    #[cfg(feature = "nnue-hand-threat")]
+                    let hand_threat_tier2_source: [Option<(usize, usize)>; 2] = if $net
+                        .feature_transformer
+                        .has_hand_threat
+                    {
+                        let black_src = $stack.find_usable_for_hand_threat(
+                            super::super::types::Color::Black,
+                            pos.king_square(super::super::types::Color::Black),
+                        );
+                        let white_src = $stack.find_usable_for_hand_threat(
+                            super::super::types::Color::White,
+                            pos.king_square(super::super::types::Color::White),
+                        );
+                        [black_src, white_src]
+                    } else {
+                        [None, None]
+                    };
+                    #[cfg(feature = "nnue-hand-threat")]
+                    {
+                        // 両 perspective に対して source が見つかった場合のみ Tier 2 を試行
+                        if hand_threat_tier2_source[0].is_some()
+                            && hand_threat_tier2_source[1].is_some()
+                            && $net.feature_transformer.has_hand_threat
+                        {
+                            // 各 perspective に対して source acc から HandThreat acc を copy →
+                            // path forward walk で snapshot ベース incremental
+                            let success = $net.feature_transformer.try_apply_hand_threat_tier2(
+                                pos,
+                                $stack,
+                                &hand_threat_tier2_source,
+                            );
+                            if success {
+                                hand_threat_done_via_tier2 = true;
+                            }
+                        }
+                    }
+
                     let acc = &mut $stack.current_mut().accumulator;
                     if let Some(
                         super::accumulator_layer_stacks::LayerStacksAccCache::$cache_variant(c),
                     ) = cache
                     {
+                        #[cfg(feature = "nnue-hand-threat")]
+                        $net.refresh_accumulator_with_cache_inner(
+                            pos,
+                            acc,
+                            c,
+                            hand_threat_done_via_tier2,
+                        );
+                        #[cfg(not(feature = "nnue-hand-threat"))]
                         $net.refresh_accumulator_with_cache(pos, acc, c);
                     } else {
                         $net.refresh_accumulator(pos, acc);

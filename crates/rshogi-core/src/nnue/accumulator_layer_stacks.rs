@@ -6,9 +6,13 @@
 
 use super::accumulator::{DirtyPiece, IndexList, MAX_PATH_LENGTH};
 use super::bona_piece::BonaPiece;
+#[cfg(feature = "nnue-hand-threat")]
+use super::bona_piece_halfka_hm::is_hm_mirror;
 #[cfg(feature = "nnue-psqt")]
 use super::constants::NUM_LAYER_STACK_BUCKETS;
 use super::piece_list::PieceNumber;
+#[cfg(feature = "nnue-hand-threat")]
+use super::threat_features::extract_prev_king_sq;
 use crate::types::{Color, MAX_PLY, Square};
 
 /// `diagnose_refresh_depth` の戻り値: refresh が fire する原因の内訳
@@ -512,6 +516,101 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
     /// - None: パスが途切れた場合、または MAX_PATH_LENGTH を超えた場合
     pub fn collect_path(&self, source_idx: usize) -> Option<IndexList<MAX_PATH_LENGTH>> {
         self.collect_path_internal(source_idx)
+    }
+
+    /// HandThreat-specific find_usable: king move を許容するが HM mirror 跨ぎを検出。
+    #[cfg(feature = "nnue-hand-threat")]
+    ///
+    /// HalfKA は king move = refresh 必須だが、HandThreat は HM mirror 跨ぎでない
+    /// king move なら incremental 可能。この関数は HandThreat 用の専用 walk で、
+    /// 各 step ごとに HM mirror 跨ぎを判定し、跨いでいたら None を返す。
+    ///
+    /// 戻り値: `Some((source_idx, depth))` で computed 祖先が見つかった場合。
+    ///         depth は source からのステップ数 (1 以上)。
+    pub fn find_usable_for_hand_threat(
+        &self,
+        perspective: Color,
+        current_king_sq: Square,
+    ) -> Option<(usize, usize)> {
+        // 期待 path length は 99% が depth=2 なので MAX_DEPTH = 4 で十分
+        const MAX_DEPTH: usize = 4;
+
+        debug_assert!(self.current < self.entries.len());
+        let current = unsafe { self.entries.get_unchecked(self.current) };
+        let mut last_king_sq = current_king_sq;
+        let last_hm = is_hm_mirror(current_king_sq, perspective);
+
+        // 現局面の king move を許容する: dirty_piece に king move があれば HM 判定
+        // (current.dirty_piece が king move を含む可能性あり)
+        if current.dirty_piece.king_moved[perspective.index()] {
+            // 現局面の king move を逆引き: dirty_piece の old_piece から prev king sq を取る
+            let prev_king_sq = extract_prev_king_sq(&current.dirty_piece, perspective)?;
+            if is_hm_mirror(prev_king_sq, perspective) != last_hm {
+                return None;
+            }
+            last_king_sq = prev_king_sq;
+        }
+
+        let mut prev_idx = current.previous?;
+        let mut depth = 1usize;
+        loop {
+            debug_assert!(prev_idx < self.entries.len());
+            let prev = unsafe { self.entries.get_unchecked(prev_idx) };
+            if prev.accumulator.computed_accumulation {
+                return Some((prev_idx, depth));
+            }
+            if depth >= MAX_DEPTH {
+                return None;
+            }
+            // king move があれば HM mirror 跨ぎを判定
+            if prev.dirty_piece.king_moved[perspective.index()] {
+                let prev_prev_king_sq = extract_prev_king_sq(&prev.dirty_piece, perspective)?;
+                if is_hm_mirror(prev_prev_king_sq, perspective)
+                    != is_hm_mirror(last_king_sq, perspective)
+                {
+                    return None;
+                }
+                last_king_sq = prev_prev_king_sq;
+            }
+            let next_prev_idx = prev.previous?;
+            prev_idx = next_prev_idx;
+            depth += 1;
+        }
+    }
+
+    /// HandThreat-aware 診断: king move を chain で許容して computed 祖先を探す。
+    ///
+    /// HalfKA 用 `find_usable_accumulator` は king move があると即 None を返すが、
+    /// HandThreat は HM mirror 跨ぎでない king move なら incremental 可能。
+    /// この診断版は MAX_DEPTH 制限なしで walk し、king move があっても続行する。
+    /// HM mirror 跨ぎは検出できないが、king move chain での depth 分布を測るのに
+    /// 使える (Fix B の path length 見積もり用)。
+    pub fn diagnose_refresh_depth_allowing_king(&self) -> RefreshDiagResult {
+        debug_assert!(self.current < self.entries.len());
+        let current = unsafe { self.entries.get_unchecked(self.current) };
+        // 現局面の king move は許容 (call sites がそれを意図している)
+        let mut prev_idx = match current.previous {
+            Some(p) => p,
+            None => return RefreshDiagResult::ChainEnded(0),
+        };
+        let mut depth = 1usize;
+        loop {
+            debug_assert!(prev_idx < self.entries.len());
+            let prev = unsafe { self.entries.get_unchecked(prev_idx) };
+            if prev.accumulator.computed_accumulation {
+                return RefreshDiagResult::Found(depth);
+            }
+            if depth >= 256 {
+                return RefreshDiagResult::ChainEnded(depth);
+            }
+            let next_prev_idx = match prev.previous {
+                Some(p) => p,
+                None => return RefreshDiagResult::ChainEnded(depth),
+            };
+            // 祖先 chain の king move は許容 (continue walking)
+            prev_idx = next_prev_idx;
+            depth += 1;
+        }
     }
 
     /// `find_usable_accumulator` 診断版: MAX_DEPTH 制限なしで computed 祖先を探す。
