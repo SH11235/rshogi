@@ -6,27 +6,10 @@
 
 use super::accumulator::{DirtyPiece, IndexList, MAX_PATH_LENGTH};
 use super::bona_piece::BonaPiece;
-#[cfg(feature = "nnue-hand-threat")]
-use super::bona_piece_halfka_hm::is_hm_mirror;
 #[cfg(feature = "nnue-psqt")]
 use super::constants::NUM_LAYER_STACK_BUCKETS;
 use super::piece_list::PieceNumber;
-#[cfg(feature = "nnue-hand-threat")]
-use super::threat_features::extract_prev_king_sq;
 use crate::types::{Color, MAX_PLY, Square};
-
-/// `diagnose_refresh_depth` の戻り値: refresh が fire する原因の内訳
-#[derive(Debug, Clone, Copy)]
-pub enum RefreshDiagResult {
-    /// computed 祖先が見つかった (king move chain なし)
-    Found(usize),
-    /// 現局面で king が動いている (HalfKA 視点での refresh 必須)
-    CurrentKingMoved,
-    /// 祖先 chain 途中に king move があり打ち切り
-    AncestorKingMoved(usize),
-    /// chain がルートに到達 (root が computed でない)
-    ChainEnded(usize),
-}
 
 /// LayerStacks用アキュムレータ（L1次元）
 #[repr(C, align(64))]
@@ -40,12 +23,6 @@ pub struct AccumulatorLayerStacks<const L1: usize> {
     /// Threat weights (i8) の累積値。評価時に piece accumulation と加算して SCReLU に入力する。
     #[cfg(feature = "nnue-threat")]
     pub threat_accumulation: [[i16; L1]; 2],
-
-    /// HandThreat アキュムレータ [perspective][dimension]
-    /// HandThreat weights (i8) の累積値。board Threat と独立に管理し、
-    /// forward 時に piece accumulation と両方を要素和する。
-    #[cfg(feature = "nnue-hand-threat")]
-    pub hand_threat_accumulation: [[i16; L1]; 2],
 
     /// PSQT アキュムレータ [perspective][bucket]
     /// 各駒の PSQT 重みを視点ごとに累積する。
@@ -66,8 +43,6 @@ impl<const L1: usize> AccumulatorLayerStacks<L1> {
             accumulation: [[0; L1]; 2],
             #[cfg(feature = "nnue-threat")]
             threat_accumulation: [[0; L1]; 2],
-            #[cfg(feature = "nnue-hand-threat")]
-            hand_threat_accumulation: [[0; L1]; 2],
             #[cfg(feature = "nnue-psqt")]
             psqt_accumulation: [[0; NUM_LAYER_STACK_BUCKETS]; 2],
             computed_accumulation: false,
@@ -106,22 +81,6 @@ impl<const L1: usize> AccumulatorLayerStacks<L1> {
     pub fn get_threat_mut(&mut self, perspective: usize) -> &mut [i16; L1] {
         debug_assert!(perspective < 2);
         unsafe { self.threat_accumulation.get_unchecked_mut(perspective) }
-    }
-
-    /// 指定視点の HandThreat 累積値を取得
-    #[cfg(feature = "nnue-hand-threat")]
-    #[inline]
-    pub fn get_hand_threat(&self, perspective: usize) -> &[i16; L1] {
-        debug_assert!(perspective < 2);
-        unsafe { self.hand_threat_accumulation.get_unchecked(perspective) }
-    }
-
-    /// 指定視点の HandThreat 累積値を取得（可変）
-    #[cfg(feature = "nnue-hand-threat")]
-    #[inline]
-    pub fn get_hand_threat_mut(&mut self, perspective: usize) -> &mut [i16; L1] {
-        debug_assert!(perspective < 2);
-        unsafe { self.hand_threat_accumulation.get_unchecked_mut(perspective) }
     }
 }
 
@@ -516,176 +475,6 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
     /// - None: パスが途切れた場合、または MAX_PATH_LENGTH を超えた場合
     pub fn collect_path(&self, source_idx: usize) -> Option<IndexList<MAX_PATH_LENGTH>> {
         self.collect_path_internal(source_idx)
-    }
-
-    /// HandThreat-specific find_usable: king move を許容するが HM mirror 跨ぎを検出。
-    #[cfg(feature = "nnue-hand-threat")]
-    ///
-    /// HalfKA は king move = refresh 必須だが、HandThreat は HM mirror 跨ぎでない
-    /// king move なら incremental 可能。この関数は HandThreat 用の専用 walk で、
-    /// 各 step ごとに HM mirror 跨ぎを判定し、跨いでいたら None を返す。
-    ///
-    /// 戻り値: `Some((source_idx, depth))` で computed 祖先が見つかった場合。
-    ///         depth は source からのステップ数 (1 以上)。
-    pub fn find_usable_for_hand_threat(
-        &self,
-        perspective: Color,
-        current_king_sq: Square,
-    ) -> Option<(usize, usize)> {
-        // MAX_DEPTH は counter 計測 (FIXB_FIND_HIT_DEPTH_*, FIXB_FIND_MISS_MAX_DEPTH)
-        // を見て調整する。現状は 4 で 99% カバー見込み。
-        const MAX_DEPTH: usize = 4;
-
-        #[cfg(feature = "hand-threat-stats")]
-        use super::hand_threat_features::stats;
-        #[cfg(feature = "hand-threat-stats")]
-        use std::sync::atomic::Ordering;
-
-        debug_assert!(self.current < self.entries.len());
-        let current = unsafe { self.entries.get_unchecked(self.current) };
-        let mut last_king_sq = current_king_sq;
-        let last_hm = is_hm_mirror(current_king_sq, perspective);
-
-        // 現局面の king move を許容する: dirty_piece に king move があれば HM 判定
-        if current.dirty_piece.king_moved[perspective.index()] {
-            let Some(prev_king_sq) = extract_prev_king_sq(&current.dirty_piece, perspective) else {
-                #[cfg(feature = "hand-threat-stats")]
-                stats::FIXB_FIND_MISS_MIRROR_MISMATCH.fetch_add(1, Ordering::Relaxed);
-                return None;
-            };
-            if is_hm_mirror(prev_king_sq, perspective) != last_hm {
-                #[cfg(feature = "hand-threat-stats")]
-                stats::FIXB_FIND_MISS_MIRROR_MISMATCH.fetch_add(1, Ordering::Relaxed);
-                return None;
-            }
-            last_king_sq = prev_king_sq;
-        }
-
-        let Some(mut prev_idx) = current.previous else {
-            #[cfg(feature = "hand-threat-stats")]
-            stats::FIXB_FIND_MISS_CHAIN_END.fetch_add(1, Ordering::Relaxed);
-            return None;
-        };
-        let mut depth = 1usize;
-        loop {
-            debug_assert!(prev_idx < self.entries.len());
-            let prev = unsafe { self.entries.get_unchecked(prev_idx) };
-            if prev.accumulator.computed_accumulation {
-                #[cfg(feature = "hand-threat-stats")]
-                {
-                    let counter = match depth {
-                        1 => &stats::FIXB_FIND_HIT_DEPTH_1,
-                        2 => &stats::FIXB_FIND_HIT_DEPTH_2,
-                        3..=4 => &stats::FIXB_FIND_HIT_DEPTH_3_4,
-                        5..=8 => &stats::FIXB_FIND_HIT_DEPTH_5_8,
-                        9..=16 => &stats::FIXB_FIND_HIT_DEPTH_9_16,
-                        _ => &stats::FIXB_FIND_HIT_DEPTH_17_PLUS,
-                    };
-                    counter.fetch_add(1, Ordering::Relaxed);
-                }
-                return Some((prev_idx, depth));
-            }
-            if depth >= MAX_DEPTH {
-                #[cfg(feature = "hand-threat-stats")]
-                stats::FIXB_FIND_MISS_MAX_DEPTH.fetch_add(1, Ordering::Relaxed);
-                return None;
-            }
-            if prev.dirty_piece.king_moved[perspective.index()] {
-                let Some(prev_prev_king_sq) = extract_prev_king_sq(&prev.dirty_piece, perspective)
-                else {
-                    #[cfg(feature = "hand-threat-stats")]
-                    stats::FIXB_FIND_MISS_MIRROR_MISMATCH.fetch_add(1, Ordering::Relaxed);
-                    return None;
-                };
-                if is_hm_mirror(prev_prev_king_sq, perspective)
-                    != is_hm_mirror(last_king_sq, perspective)
-                {
-                    #[cfg(feature = "hand-threat-stats")]
-                    stats::FIXB_FIND_MISS_MIRROR_MISMATCH.fetch_add(1, Ordering::Relaxed);
-                    return None;
-                }
-                last_king_sq = prev_prev_king_sq;
-            }
-            let Some(next_prev_idx) = prev.previous else {
-                #[cfg(feature = "hand-threat-stats")]
-                stats::FIXB_FIND_MISS_CHAIN_END.fetch_add(1, Ordering::Relaxed);
-                return None;
-            };
-            prev_idx = next_prev_idx;
-            depth += 1;
-        }
-    }
-
-    /// HandThreat-aware 診断: king move を chain で許容して computed 祖先を探す。
-    ///
-    /// HalfKA 用 `find_usable_accumulator` は king move があると即 None を返すが、
-    /// HandThreat は HM mirror 跨ぎでない king move なら incremental 可能。
-    /// この診断版は MAX_DEPTH 制限なしで walk し、king move があっても続行する。
-    /// HM mirror 跨ぎは検出できないが、king move chain での depth 分布を測るのに
-    /// 使える (Fix B の path length 見積もり用)。
-    pub fn diagnose_refresh_depth_allowing_king(&self) -> RefreshDiagResult {
-        debug_assert!(self.current < self.entries.len());
-        let current = unsafe { self.entries.get_unchecked(self.current) };
-        // 現局面の king move は許容 (call sites がそれを意図している)
-        let mut prev_idx = match current.previous {
-            Some(p) => p,
-            None => return RefreshDiagResult::ChainEnded(0),
-        };
-        let mut depth = 1usize;
-        loop {
-            debug_assert!(prev_idx < self.entries.len());
-            let prev = unsafe { self.entries.get_unchecked(prev_idx) };
-            if prev.accumulator.computed_accumulation {
-                return RefreshDiagResult::Found(depth);
-            }
-            if depth >= 256 {
-                return RefreshDiagResult::ChainEnded(depth);
-            }
-            let next_prev_idx = match prev.previous {
-                Some(p) => p,
-                None => return RefreshDiagResult::ChainEnded(depth),
-            };
-            // 祖先 chain の king move は許容 (continue walking)
-            prev_idx = next_prev_idx;
-            depth += 1;
-        }
-    }
-
-    /// `find_usable_accumulator` 診断版: MAX_DEPTH 制限なしで computed 祖先を探す。
-    ///
-    /// 用途: refresh_accumulator_with_cache が fire する原因の内訳を測る。
-    /// 「king move blocking が支配的か / depth 上限が支配的か / root 到達か」を
-    /// 区別できる。
-    pub fn diagnose_refresh_depth(&self) -> RefreshDiagResult {
-        debug_assert!(self.current < self.entries.len());
-        let current = unsafe { self.entries.get_unchecked(self.current) };
-        if current.dirty_piece.king_moved[0] || current.dirty_piece.king_moved[1] {
-            return RefreshDiagResult::CurrentKingMoved;
-        }
-        let mut prev_idx = match current.previous {
-            Some(p) => p,
-            None => return RefreshDiagResult::ChainEnded(0),
-        };
-        let mut depth = 1usize;
-        loop {
-            debug_assert!(prev_idx < self.entries.len());
-            let prev = unsafe { self.entries.get_unchecked(prev_idx) };
-            if prev.accumulator.computed_accumulation {
-                return RefreshDiagResult::Found(depth);
-            }
-            if depth >= 256 {
-                return RefreshDiagResult::ChainEnded(depth);
-            }
-            let next_prev_idx = match prev.previous {
-                Some(p) => p,
-                None => return RefreshDiagResult::ChainEnded(depth),
-            };
-            if prev.dirty_piece.king_moved[0] || prev.dirty_piece.king_moved[1] {
-                return RefreshDiagResult::AncestorKingMoved(depth);
-            }
-            prev_idx = next_prev_idx;
-            depth += 1;
-        }
     }
 
     fn collect_path_internal(&self, source_idx: usize) -> Option<IndexList<MAX_PATH_LENGTH>> {

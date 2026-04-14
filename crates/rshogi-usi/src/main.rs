@@ -15,16 +15,15 @@ use rshogi_core::eval::{
     set_pass_right_value_phased,
 };
 use rshogi_core::nnue::{
-    AccumulatorStackVariant, LAYER_STACK_PLY9_DEFAULT_BOUNDS, LayerStackBucketMode,
-    LayerStackProgressCoeff, LayerStackProgressCoeffGikouLite,
-    SHOGI_PROGRESS_GIKOU_LITE_FEATURE_ORDER, SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES,
-    SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, SHOGI_PROGRESS8_FEATURE_ORDER, SHOGI_PROGRESS8_NUM_FEATURES,
-    clear_nnue, evaluate_dispatch, format_layer_stack_ply_bounds, get_layer_stack_bucket_mode,
-    get_network, init_nnue, parse_layer_stack_bucket_mode, parse_layer_stack_ply_bounds_csv,
+    AccumulatorStackVariant, LayerStackBucketMode, LayerStackProgressCoeff,
+    LayerStackProgressCoeffGikouLite, SHOGI_PROGRESS_GIKOU_LITE_FEATURE_ORDER,
+    SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
+    SHOGI_PROGRESS8_FEATURE_ORDER, SHOGI_PROGRESS8_NUM_FEATURES, clear_nnue, evaluate_dispatch,
+    get_layer_stack_bucket_mode, get_network, init_nnue, parse_layer_stack_bucket_mode,
     parse_nnue_architecture, print_nnue_stats, reset_layer_stack_progress_kpabs_weights,
-    set_fv_scale_override, set_layer_stack_bucket_mode, set_layer_stack_ply_bounds,
-    set_layer_stack_progress_coeff, set_layer_stack_progress_coeff_gikou_lite,
-    set_layer_stack_progress_kpabs_weights, set_nnue_architecture_override,
+    set_fv_scale_override, set_layer_stack_bucket_mode, set_layer_stack_progress_coeff,
+    set_layer_stack_progress_coeff_gikou_lite, set_layer_stack_progress_kpabs_weights,
+    set_nnue_architecture_override,
 };
 use rshogi_core::position::Position;
 use rshogi_core::search::{
@@ -415,8 +414,6 @@ impl UsiEngine {
                 self.cmd_stop();
                 // NNUE統計を出力（nnue-stats feature有効時のみ実際に出力）
                 print_nnue_stats();
-                #[cfg(feature = "hand-threat-stats")]
-                rshogi_core::nnue::hand_threat_features::stats::dump();
                 return Ok(false);
             }
             "gameover" => {
@@ -476,12 +473,8 @@ impl UsiEngine {
         // 水匠5等は24、YaneuraOuデフォルトは16
         println!("option name FV_SCALE type spin default 0 min 0 max 100");
         println!(
-            "option name LS_BUCKET_MODE type combo default {} var kingrank9 var ply9 var progress8 var progress8gikou var progress8kpabs",
-            LayerStackBucketMode::KingRank9.as_str()
-        );
-        println!(
-            "option name LS_PLY_BOUNDS type string default {}",
-            format_layer_stack_ply_bounds(LAYER_STACK_PLY9_DEFAULT_BOUNDS)
+            "option name LS_BUCKET_MODE type combo default {} var progress8 var progress8gikou var progress8kpabs",
+            LayerStackBucketMode::Progress8KPAbs.as_str()
         );
         println!("option name LS_PROGRESS_COEFF type string default <empty>");
         println!(
@@ -555,7 +548,8 @@ impl UsiEngine {
             }
         }
         // progress8kpabs モードで LS_PROGRESS_COEFF 未指定の場合はエラー
-        {
+        // NNUE が未ロード（Material 評価）の場合は bucket mode は使われないのでスキップ
+        if get_network().is_some() {
             use rshogi_core::nnue::{
                 LayerStackBucketMode, get_layer_stack_bucket_mode,
                 get_layer_stack_progress_kpabs_weights,
@@ -1010,21 +1004,9 @@ impl UsiEngine {
                 }
                 None => {
                     eprintln!(
-                        "info string Warning: invalid LS_BUCKET_MODE '{}', expected kingrank9, ply9, progress8, progress8gikou or progress8kpabs",
+                        "info string Warning: invalid LS_BUCKET_MODE '{}', expected progress8, progress8gikou or progress8kpabs",
                         value
                     );
-                }
-            },
-            "LS_PLY_BOUNDS" => match parse_layer_stack_ply_bounds_csv(&value) {
-                Ok(bounds) => {
-                    set_layer_stack_ply_bounds(bounds);
-                    eprintln!(
-                        "info string LS_PLY_BOUNDS: {}",
-                        format_layer_stack_ply_bounds(bounds)
-                    );
-                }
-                Err(err) => {
-                    eprintln!("info string Warning: {err}");
                 }
             },
             "LS_PROGRESS_COEFF" => {
@@ -1725,35 +1707,21 @@ mod tests {
             .stack_size(STACK_SIZE)
             .spawn(|| {
                 use rshogi_core::nnue::{
-                    LAYER_STACK_PLY9_DEFAULT_BOUNDS, LayerStackBucketMode,
-                    SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, get_layer_stack_bucket_mode,
-                    get_layer_stack_ply_bounds, get_layer_stack_progress_coeff,
+                    LayerStackBucketMode, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
+                    get_layer_stack_bucket_mode, get_layer_stack_progress_coeff,
                     get_layer_stack_progress_coeff_gikou_lite,
                     get_layer_stack_progress_kpabs_weights,
                     reset_layer_stack_progress_kpabs_weights, set_layer_stack_bucket_mode,
-                    set_layer_stack_ply_bounds, set_layer_stack_progress_coeff,
-                    set_layer_stack_progress_coeff_gikou_lite,
+                    set_layer_stack_progress_coeff, set_layer_stack_progress_coeff_gikou_lite,
                 };
 
                 // テスト開始時に既定値へ戻す
-                set_layer_stack_bucket_mode(LayerStackBucketMode::KingRank9);
-                set_layer_stack_ply_bounds(LAYER_STACK_PLY9_DEFAULT_BOUNDS);
+                set_layer_stack_bucket_mode(LayerStackBucketMode::Progress8KPAbs);
                 set_layer_stack_progress_coeff(Default::default());
                 set_layer_stack_progress_coeff_gikou_lite(Default::default());
                 reset_layer_stack_progress_kpabs_weights();
 
                 let mut engine = UsiEngine::new();
-                engine.cmd_setoption(&["setoption", "name", "LS_BUCKET_MODE", "value", "ply9"]);
-                engine.cmd_setoption(&[
-                    "setoption",
-                    "name",
-                    "LS_PLY_BOUNDS",
-                    "value",
-                    "10,20,30,40,50,60,70,80",
-                ]);
-
-                assert_eq!(get_layer_stack_bucket_mode(), LayerStackBucketMode::Ply9);
-                assert_eq!(get_layer_stack_ply_bounds(), [10, 20, 30, 40, 50, 60, 70, 80]);
                 engine.cmd_setoption(&[
                     "setoption",
                     "name",
@@ -1897,8 +1865,7 @@ mod tests {
                 let _ = std::fs::remove_file(tmp_path_bin);
 
                 // 他テストへの影響を避けるため復元
-                set_layer_stack_bucket_mode(LayerStackBucketMode::KingRank9);
-                set_layer_stack_ply_bounds(LAYER_STACK_PLY9_DEFAULT_BOUNDS);
+                set_layer_stack_bucket_mode(LayerStackBucketMode::Progress8KPAbs);
                 set_layer_stack_progress_coeff(Default::default());
                 set_layer_stack_progress_coeff_gikou_lite(Default::default());
                 reset_layer_stack_progress_kpabs_weights();

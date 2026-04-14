@@ -17,9 +17,6 @@ nnue-threat = ["rshogi-core/nnue-threat"]
 # Threat exclusion profiles
 threat-profile-same-class = ["rshogi-core/threat-profile-same-class"]
 threat-profile-same-class-major-pawn = ["rshogi-core/threat-profile-same-class-major-pawn"]
-threat-profile-cross-side = ["rshogi-core/threat-profile-cross-side"]
-nnue-hand-threat = ["rshogi-core/nnue-hand-threat"]
-hand-threat-defensive = ["rshogi-core/hand-threat-defensive"]
 # LayerStacks L1 サイズ
 layerstacks-1536 = ["rshogi-core/layerstacks-1536"]
 layerstacks-768 = ["rshogi-core/layerstacks-768"]

@@ -44,8 +44,6 @@ mod layers;
 mod leb128;
 #[macro_use]
 pub mod macros;
-#[cfg(feature = "nnue-hand-threat")]
-pub mod hand_threat_features;
 mod network;
 pub(crate) mod network_halfka;
 pub(crate) mod network_halfka_hm;
@@ -57,7 +55,7 @@ pub mod spec;
 pub mod stats;
 #[cfg(feature = "nnue-threat")]
 pub(crate) mod threat_exclusion;
-#[cfg(any(feature = "nnue-threat", feature = "nnue-hand-threat"))]
+#[cfg(feature = "nnue-threat")]
 pub(crate) mod threat_features;
 
 pub use accumulator::{Accumulator, AccumulatorStack, ChangedBonaPiece, DirtyPiece, StackEntry};
@@ -87,25 +85,22 @@ pub use layers::{AffineTransform, ClippedReLU};
 #[cfg(feature = "layerstack-only")]
 pub(crate) use network::update_and_evaluate_layer_stacks_cached;
 pub use network::{
-    LAYER_STACK_PLY9_DEFAULT_BOUNDS, LayerStackBucketMode, LayerStackProgressCoeff,
-    LayerStackProgressCoeffGikouLite, NNUENetwork, NnueFormatInfo,
-    SHOGI_PROGRESS_GIKOU_LITE_FEATURE_ORDER, SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES,
-    SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, SHOGI_PROGRESS8_FEATURE_ORDER, SHOGI_PROGRESS8_NUM_FEATURES,
-    compute_layer_stack_ply9_bucket_index, compute_layer_stack_progress8_bucket_index,
-    compute_layer_stack_progress8gikou_bucket_index,
+    LayerStackBucketMode, LayerStackProgressCoeff, LayerStackProgressCoeffGikouLite, NNUENetwork,
+    NnueFormatInfo, SHOGI_PROGRESS_GIKOU_LITE_FEATURE_ORDER,
+    SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
+    SHOGI_PROGRESS8_FEATURE_ORDER, SHOGI_PROGRESS8_NUM_FEATURES,
+    compute_layer_stack_progress8_bucket_index, compute_layer_stack_progress8gikou_bucket_index,
     compute_layer_stack_progress8kpabs_bucket_index, compute_progress8kpabs_sum, detect_format,
-    ensure_accumulator_computed, evaluate_dispatch, evaluate_layer_stacks,
-    format_layer_stack_ply_bounds, get_fv_scale_override, get_layer_stack_bucket_mode,
-    get_layer_stack_ply_bounds, get_layer_stack_progress_coeff,
+    ensure_accumulator_computed, evaluate_dispatch, evaluate_layer_stacks, get_fv_scale_override,
+    get_layer_stack_bucket_mode, get_layer_stack_progress_coeff,
     get_layer_stack_progress_coeff_gikou_lite, get_layer_stack_progress_kpabs_weights, get_network,
     init_nnue, init_nnue_from_bytes, is_halfka_256_loaded, is_halfka_512_loaded,
     is_halfka_1024_loaded, is_halfka_hm_256_loaded, is_halfka_hm_512_loaded,
     is_halfka_hm_1024_loaded, is_layer_stacks_loaded, is_nnue_initialized,
-    parse_layer_stack_bucket_mode, parse_layer_stack_ply_bounds_csv, parse_nnue_architecture,
-    progress_sum_to_bucket, reset_layer_stack_progress_kpabs_weights, set_fv_scale_override,
-    set_layer_stack_bucket_mode, set_layer_stack_ply_bounds, set_layer_stack_progress_coeff,
-    set_layer_stack_progress_coeff_gikou_lite, set_layer_stack_progress_kpabs_weights,
-    set_nnue_architecture_override,
+    parse_layer_stack_bucket_mode, parse_nnue_architecture, progress_sum_to_bucket,
+    reset_layer_stack_progress_kpabs_weights, set_fv_scale_override, set_layer_stack_bucket_mode,
+    set_layer_stack_progress_coeff, set_layer_stack_progress_coeff_gikou_lite,
+    set_layer_stack_progress_kpabs_weights, set_nnue_architecture_override,
 };
 pub use network_layer_stacks::{LayerStacksNetwork, NetworkLayerStacks};
 pub use piece_list::{PieceList, PieceNumber};

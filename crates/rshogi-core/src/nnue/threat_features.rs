@@ -19,7 +19,7 @@ use crate::types::{Color, PieceType, Square};
 use super::accumulator::DirtyPiece;
 #[cfg(feature = "nnue-threat")]
 use super::accumulator::IndexList;
-#[cfg(any(feature = "nnue-threat", feature = "nnue-hand-threat"))]
+#[cfg(feature = "nnue-threat")]
 use super::bona_piece::BonaPiece;
 #[cfg(feature = "nnue-threat")]
 use super::bona_piece_halfka_hm::is_hm_mirror;
@@ -264,7 +264,6 @@ fn pair_base(
     if cfg!(any(
         feature = "threat-profile-same-class",
         feature = "threat-profile-same-class-major-pawn",
-        feature = "threat-profile-cross-side",
     )) && base == EXCLUDED_PAIR_BASE
     {
         None
@@ -462,32 +461,6 @@ static ATTACK_ORDER_TABLE: LazyLock<AttackOrderTable> = LazyLock::new(AttackOrde
 ///
 /// 戻り値 = `from_offset_table[pattern][from_sq_n] + attack_order_table[pattern][from_sq_n][to_sq_n]`
 ///
-/// ここで pattern は `attack_pattern_id(board_class, oriented_color)`。
-///
-/// HandThreat が board Threat の attack pattern LUT を流用するための pub(crate) エントリポイント。
-/// `from_sq_n` / `to_sq_n` は正規化 (perspective + HM mirror) 済みの Square を想定。
-#[cfg(feature = "nnue-hand-threat")]
-#[inline]
-pub(crate) fn lookup_attack_feature_offset(
-    board_class: ThreatClass,
-    oriented_color: Color,
-    from_sq_n: Square,
-    to_sq_n: Square,
-) -> usize {
-    let from_offset_table = &*FROM_OFFSET_TABLE;
-    let pattern = attack_pattern_id(board_class, oriented_color);
-    let from_off = from_offset_table.get(pattern, from_sq_n);
-    let attack_ord = ATTACK_ORDER_TABLE.get(pattern, from_sq_n, to_sq_n);
-    debug_assert_ne!(
-        attack_ord,
-        AttackOrderTable::INVALID,
-        "attack_order: to_sq {} is not attacked by pattern {pattern} at {}",
-        to_sq_n.raw(),
-        from_sq_n.raw()
-    );
-    from_off + attack_ord as usize
-}
-
 // =============================================================================
 // Threat index 計算
 // =============================================================================
@@ -757,8 +730,8 @@ pub fn for_each_active_threat_index<F: FnMut(usize)>(
 // =============================================================================
 
 /// BonaPiece (fb perspective) から盤上駒のマスを抽出する。
-/// 手駒・ZERO は None。King も含む（占有ビット再構成用 / hand_threat の king move 対応）。
-#[cfg(any(feature = "nnue-threat", feature = "nnue-hand-threat"))]
+/// 手駒・ZERO は None。King も含む（占有ビット再構成用）。
+#[cfg(feature = "nnue-threat")]
 pub(crate) fn decode_board_square_fb(bp: BonaPiece) -> Option<Square> {
     use super::bona_piece::{FE_END, FE_HAND_END};
     use super::bona_piece_halfka_hm::{E_KING, F_KING};
@@ -785,7 +758,7 @@ pub(crate) fn decode_board_square_fb(bp: BonaPiece) -> Option<Square> {
 
 /// BonaPiece (fb perspective) から Threat 駒情報をデコードする。
 /// King・手駒・ZERO は None。
-#[cfg(any(feature = "nnue-threat", feature = "nnue-hand-threat"))]
+#[cfg(feature = "nnue-threat")]
 pub(crate) fn decode_board_threat_info_fb(
     bp: BonaPiece,
 ) -> Option<(Color, ThreatClass, PieceType, Square)> {
@@ -1341,7 +1314,6 @@ mod tests {
         #[cfg(not(any(
             feature = "threat-profile-same-class",
             feature = "threat-profile-same-class-major-pawn",
-            feature = "threat-profile-cross-side",
         )))]
         assert_eq!(THREAT_DIMENSIONS, 216_720, "profile 0 (full)");
 
@@ -1350,9 +1322,6 @@ mod tests {
 
         #[cfg(feature = "threat-profile-same-class-major-pawn")]
         assert_eq!(THREAT_DIMENSIONS, 173_568, "profile 2 (same-class-major-pawn)");
-
-        #[cfg(feature = "threat-profile-cross-side")]
-        assert_eq!(THREAT_DIMENSIONS, 96_320, "profile 10 (cross-side)");
     }
 
     #[test]
@@ -1557,14 +1526,9 @@ mod tests {
         let mut indices_w = Vec::new();
         append_active_threat_indices(&pos, Color::White, king_sq_w, &mut indices_w);
 
-        // 初期局面では threat pair は限定的（歩同士の対面等）
-        // cross-side profile では歩-歩 (同種) が除外され、かつ実盤面で
-        // 遠方駒も歩に遮られるため threat が 0 になりうる
-        #[cfg(not(any(feature = "threat-profile-cross-side",)))]
-        {
-            assert!(!indices_b.is_empty(), "Black perspective should have threats");
-            assert!(!indices_w.is_empty(), "White perspective should have threats");
-        }
+        // 初期局面では threat pair が最低限含まれることを確認
+        assert!(!indices_b.is_empty(), "Black perspective should have threats");
+        assert!(!indices_w.is_empty(), "White perspective should have threats");
 
         // 全 index が範囲内
         for &idx in &indices_b {
@@ -1582,7 +1546,6 @@ mod tests {
     #[cfg(not(any(
         feature = "threat-profile-same-class",
         feature = "threat-profile-same-class-major-pawn",
-        feature = "threat-profile-cross-side",
     )))]
     fn test_canonical_startpos_threat_indices() {
         let mut pos = Position::new();

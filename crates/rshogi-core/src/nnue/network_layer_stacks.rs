@@ -27,12 +27,12 @@ use super::accumulator::Aligned;
 use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLayerStacks};
 use super::constants::{FV_SCALE_HALFKA, MAX_ARCH_LEN};
 use super::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
-use super::layer_stacks::{LayerStacks, compute_bucket_index, sqr_clipped_relu_transform};
+use super::layer_stacks::{LayerStacks, sqr_clipped_relu_transform};
 use super::network::{
-    LayerStackBucketMode, compute_layer_stack_ply9_bucket_index,
-    compute_layer_stack_progress8_bucket_index, compute_layer_stack_progress8gikou_bucket_index,
+    LayerStackBucketMode, compute_layer_stack_progress8_bucket_index,
+    compute_layer_stack_progress8gikou_bucket_index,
     compute_layer_stack_progress8kpabs_bucket_index, get_fv_scale_override,
-    get_layer_stack_bucket_mode, get_layer_stack_ply_bounds, get_layer_stack_progress_coeff,
+    get_layer_stack_bucket_mode, get_layer_stack_progress_coeff,
     get_layer_stack_progress_coeff_gikou_lite, get_layer_stack_progress_kpabs_weights,
     parse_fv_scale_from_arch,
 };
@@ -47,17 +47,6 @@ use std::path::Path;
 #[inline]
 fn compute_layer_stacks_bucket_index(pos: &Position, side_to_move: Color) -> usize {
     match get_layer_stack_bucket_mode() {
-        LayerStackBucketMode::KingRank9 => {
-            let f_king = pos.king_square(side_to_move);
-            let e_king = pos.king_square(!side_to_move);
-            let (f_rank, e_rank) =
-                crate::nnue::layer_stacks::compute_king_ranks(side_to_move, f_king, e_king);
-            compute_bucket_index(f_rank, e_rank)
-        }
-        LayerStackBucketMode::Ply9 => {
-            let bounds = get_layer_stack_ply_bounds();
-            compute_layer_stack_ply9_bucket_index(pos.game_ply(), bounds)
-        }
         LayerStackBucketMode::Progress8 => {
             let coeff = get_layer_stack_progress_coeff();
             compute_layer_stack_progress8_bucket_index(pos, side_to_move, coeff)
@@ -74,7 +63,7 @@ fn compute_layer_stacks_bucket_index(pos: &Position, side_to_move: Color) -> usi
 }
 
 /// i16 配列の要素和: dst[i] = a[i] + b[i] (SIMD 最適化)
-#[cfg(any(feature = "nnue-threat", feature = "nnue-hand-threat"))]
+#[cfg(feature = "nnue-threat")]
 #[inline]
 fn add_i16_arrays<const L1: usize>(dst: &mut [i16; L1], a: &[i16; L1], b: &[i16; L1]) {
     // AVX2: 256bit = 16 x i16, L1/16 iterations
@@ -182,19 +171,11 @@ impl<const L1: usize> NetworkLayerStacks<L1> {
         let _ft_hash = u32::from_le_bytes(buf4);
 
         // Feature Transformer を読み込み（圧縮形式を自動検出）
-        // nnue-psqt/nnue-threat/nnue-hand-threat feature 有効時は
-        // read_psqt/read_threat_weights/read_hand_threat_weights で変更するため mut
-        #[cfg(any(
-            feature = "nnue-psqt",
-            feature = "nnue-threat",
-            feature = "nnue-hand-threat"
-        ))]
+        // nnue-psqt/nnue-threat feature 有効時は
+        // read_psqt/read_threat_weights で変更するため mut
+        #[cfg(any(feature = "nnue-psqt", feature = "nnue-threat"))]
         let mut feature_transformer = FeatureTransformerLayerStacks::read_leb128(reader)?;
-        #[cfg(not(any(
-            feature = "nnue-psqt",
-            feature = "nnue-threat",
-            feature = "nnue-hand-threat"
-        )))]
+        #[cfg(not(any(feature = "nnue-psqt", feature = "nnue-threat")))]
         let feature_transformer = FeatureTransformerLayerStacks::read_leb128(reader)?;
 
         // PSQT 読み込み:
@@ -254,47 +235,10 @@ impl<const L1: usize> NetworkLayerStacks<L1> {
             }
         }
         #[cfg(not(feature = "nnue-threat"))]
-        if arch_str.contains("Threat=") && !arch_str.contains("HandThreat=") {
-            // "Threat=" が単独で含まれる (= board Threat) 場合のみエラー。
-            // "HandThreat=" が含まれる場合は substring で "Threat=" もマッチするので除外。
+        if arch_str.contains("Threat=") {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "Threat model requires nnue-threat feature",
-            ));
-        }
-
-        // HandThreat 読み込み（arch_str に "HandThreat=" があれば）
-        //
-        // file layout:
-        //   [HandThreat dims (u32, LE raw)]
-        //   [HandThreat weights (i8, raw) : dims × L1 bytes]
-        //
-        // 現状 profile なしで dims は固定 121,104。dims 値を書き込むのは将来の
-        // profile 拡張に備えた予約。読み込み時は HAND_THREAT_DIMENSIONS と一致することを検証する。
-        #[cfg(feature = "nnue-hand-threat")]
-        {
-            let has_hand_threat = arch_str.contains("HandThreat=");
-            if has_hand_threat {
-                reader.read_exact(&mut buf4)?;
-                let model_hand_threat_dims = u32::from_le_bytes(buf4) as usize;
-                let engine_hand_threat_dims = super::hand_threat_features::HAND_THREAT_DIMENSIONS;
-                if model_hand_threat_dims != engine_hand_threat_dims {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "HandThreat dims mismatch: model={model_hand_threat_dims}, \
-                             engine={engine_hand_threat_dims}"
-                        ),
-                    ));
-                }
-                feature_transformer.read_hand_threat_weights(reader)?;
-            }
-        }
-        #[cfg(not(feature = "nnue-hand-threat"))]
-        if arch_str.contains("HandThreat=") {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "HandThreat model requires nnue-hand-threat feature",
             ));
         }
 
@@ -399,77 +343,34 @@ impl<const L1: usize> NetworkLayerStacks<L1> {
         // SAFETY: 直後のsqr_clipped_relu_transformで全要素が上書きされる
         let mut transformed: Aligned<[u8; L1]> = unsafe { Aligned::new_uninit() };
 
-        // Threat/HandThreat の寄与を含めて combined accumulator を構築する。
-        // どちらも有効でなければ piece_acc を直接 SCReLU に渡す。
-        #[cfg(any(feature = "nnue-threat", feature = "nnue-hand-threat"))]
+        // Threat の寄与を含めて combined accumulator を構築する。
+        // 無効なら piece_acc を直接 SCReLU に渡す。
+        #[cfg(feature = "nnue-threat")]
         {
-            let has_threat_contribution = {
-                #[allow(unused_mut)]
-                let mut b = false;
-                #[cfg(feature = "nnue-threat")]
-                {
-                    b |= self.feature_transformer.has_threat;
-                }
-                #[cfg(feature = "nnue-hand-threat")]
-                {
-                    b |= self.feature_transformer.has_hand_threat;
-                }
-                b
-            };
-            if has_threat_contribution {
+            if self.feature_transformer.has_threat {
                 let mut us_combined = Aligned([0i16; L1]);
                 let mut them_combined = Aligned([0i16; L1]);
                 us_combined.0.copy_from_slice(us_acc);
                 them_combined.0.copy_from_slice(them_acc);
 
-                #[cfg(feature = "nnue-threat")]
-                if self.feature_transformer.has_threat {
-                    let (us_t, them_t) = if side_to_move == Color::Black {
-                        (
-                            acc.get_threat(Color::Black as usize),
-                            acc.get_threat(Color::White as usize),
-                        )
-                    } else {
-                        (
-                            acc.get_threat(Color::White as usize),
-                            acc.get_threat(Color::Black as usize),
-                        )
-                    };
-                    let mut tmp_us = Aligned([0i16; L1]);
-                    let mut tmp_them = Aligned([0i16; L1]);
-                    add_i16_arrays::<L1>(&mut tmp_us.0, &us_combined.0, us_t);
-                    add_i16_arrays::<L1>(&mut tmp_them.0, &them_combined.0, them_t);
-                    us_combined = tmp_us;
-                    them_combined = tmp_them;
-                }
-
-                #[cfg(feature = "nnue-hand-threat")]
-                if self.feature_transformer.has_hand_threat {
-                    let (us_ht, them_ht) = if side_to_move == Color::Black {
-                        (
-                            acc.get_hand_threat(Color::Black as usize),
-                            acc.get_hand_threat(Color::White as usize),
-                        )
-                    } else {
-                        (
-                            acc.get_hand_threat(Color::White as usize),
-                            acc.get_hand_threat(Color::Black as usize),
-                        )
-                    };
-                    let mut tmp_us = Aligned([0i16; L1]);
-                    let mut tmp_them = Aligned([0i16; L1]);
-                    add_i16_arrays::<L1>(&mut tmp_us.0, &us_combined.0, us_ht);
-                    add_i16_arrays::<L1>(&mut tmp_them.0, &them_combined.0, them_ht);
-                    us_combined = tmp_us;
-                    them_combined = tmp_them;
-                }
+                let (us_t, them_t) = if side_to_move == Color::Black {
+                    (acc.get_threat(Color::Black as usize), acc.get_threat(Color::White as usize))
+                } else {
+                    (acc.get_threat(Color::White as usize), acc.get_threat(Color::Black as usize))
+                };
+                let mut tmp_us = Aligned([0i16; L1]);
+                let mut tmp_them = Aligned([0i16; L1]);
+                add_i16_arrays::<L1>(&mut tmp_us.0, &us_combined.0, us_t);
+                add_i16_arrays::<L1>(&mut tmp_them.0, &them_combined.0, them_t);
+                us_combined = tmp_us;
+                them_combined = tmp_them;
 
                 sqr_clipped_relu_transform(&us_combined.0, &them_combined.0, &mut transformed.0);
             } else {
                 sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
             }
         }
-        #[cfg(not(any(feature = "nnue-threat", feature = "nnue-hand-threat")))]
+        #[cfg(not(feature = "nnue-threat"))]
         {
             sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
         }
@@ -530,79 +431,34 @@ impl<const L1: usize> NetworkLayerStacks<L1> {
         );
         info!("[NNUE Eval] us_acc (piece) first 16: {:?}", &us_acc[0..16]);
 
-        // Threat / HandThreat 結合 (evaluate_with_bucket と同一ロジック)
+        // Threat 結合 (evaluate_with_bucket と同一ロジック)
         let mut transformed: Aligned<[u8; L1]> = Aligned([0u8; L1]);
-        #[cfg(any(feature = "nnue-threat", feature = "nnue-hand-threat"))]
+        #[cfg(feature = "nnue-threat")]
         {
-            let has_threat_contribution = {
-                #[allow(unused_mut)]
-                let mut b = false;
-                #[cfg(feature = "nnue-threat")]
-                {
-                    b |= self.feature_transformer.has_threat;
-                }
-                #[cfg(feature = "nnue-hand-threat")]
-                {
-                    b |= self.feature_transformer.has_hand_threat;
-                }
-                b
-            };
-            if has_threat_contribution {
+            if self.feature_transformer.has_threat {
                 let mut us_combined = [0i16; L1];
                 let mut them_combined = [0i16; L1];
                 us_combined.copy_from_slice(us_acc);
                 them_combined.copy_from_slice(them_acc);
 
-                #[cfg(feature = "nnue-threat")]
-                if self.feature_transformer.has_threat {
-                    let (us_t, them_t) = if side_to_move == Color::Black {
-                        (
-                            acc.get_threat(Color::Black as usize),
-                            acc.get_threat(Color::White as usize),
-                        )
-                    } else {
-                        (
-                            acc.get_threat(Color::White as usize),
-                            acc.get_threat(Color::Black as usize),
-                        )
-                    };
-                    info!("[NNUE Eval] us_threat first 16: {:?}", &us_t[0..16]);
-                    for i in 0..L1 {
-                        us_combined[i] = us_combined[i].wrapping_add(us_t[i]);
-                        them_combined[i] = them_combined[i].wrapping_add(them_t[i]);
-                    }
+                let (us_t, them_t) = if side_to_move == Color::Black {
+                    (acc.get_threat(Color::Black as usize), acc.get_threat(Color::White as usize))
+                } else {
+                    (acc.get_threat(Color::White as usize), acc.get_threat(Color::Black as usize))
+                };
+                info!("[NNUE Eval] us_threat first 16: {:?}", &us_t[0..16]);
+                for i in 0..L1 {
+                    us_combined[i] = us_combined[i].wrapping_add(us_t[i]);
+                    them_combined[i] = them_combined[i].wrapping_add(them_t[i]);
                 }
 
-                #[cfg(feature = "nnue-hand-threat")]
-                if self.feature_transformer.has_hand_threat {
-                    let (us_ht, them_ht) = if side_to_move == Color::Black {
-                        (
-                            acc.get_hand_threat(Color::Black as usize),
-                            acc.get_hand_threat(Color::White as usize),
-                        )
-                    } else {
-                        (
-                            acc.get_hand_threat(Color::White as usize),
-                            acc.get_hand_threat(Color::Black as usize),
-                        )
-                    };
-                    info!("[NNUE Eval] us_hand_threat first 16: {:?}", &us_ht[0..16]);
-                    for i in 0..L1 {
-                        us_combined[i] = us_combined[i].wrapping_add(us_ht[i]);
-                        them_combined[i] = them_combined[i].wrapping_add(them_ht[i]);
-                    }
-                }
-
-                info!(
-                    "[NNUE Eval] us_combined (piece+threat+handthreat) first 16: {:?}",
-                    &us_combined[0..16]
-                );
+                info!("[NNUE Eval] us_combined (piece+threat) first 16: {:?}", &us_combined[0..16]);
                 sqr_clipped_relu_transform(&us_combined, &them_combined, &mut transformed.0);
             } else {
                 sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
             }
         }
-        #[cfg(not(any(feature = "nnue-threat", feature = "nnue-hand-threat")))]
+        #[cfg(not(feature = "nnue-threat"))]
         {
             sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
         }
@@ -680,44 +536,6 @@ impl<const L1: usize> NetworkLayerStacks<L1> {
         cache: &mut super::accumulator_layer_stacks::AccumulatorCacheLayerStacks<L1>,
     ) {
         self.feature_transformer.refresh_accumulator_with_cache(pos, acc, cache);
-    }
-
-    /// `refresh_accumulator_with_cache` + HandThreat skip フラグ版
-    #[cfg(feature = "nnue-hand-threat")]
-    pub fn refresh_accumulator_with_cache_inner(
-        &self,
-        pos: &Position,
-        acc: &mut AccumulatorLayerStacks<L1>,
-        cache: &mut super::accumulator_layer_stacks::AccumulatorCacheLayerStacks<L1>,
-        skip_hand_threat: bool,
-    ) {
-        self.feature_transformer.refresh_accumulator_with_cache_inner(
-            pos,
-            acc,
-            cache,
-            skip_hand_threat,
-        );
-    }
-
-    /// has_hand_threat の query
-    #[cfg(feature = "nnue-hand-threat")]
-    pub fn has_hand_threat(&self) -> bool {
-        self.feature_transformer.has_hand_threat
-    }
-
-    /// HandThreat-specific Tier 2: source idx から multi-ply walk で HandThreat acc を
-    /// incremental に組み立てる。両 perspective 共通の source_idx が必要。
-    ///
-    /// 戻り値: true なら成功 (current_acc.hand_threat が更新済み)、false なら
-    /// fallback (caller が rebuild する)。
-    #[cfg(feature = "nnue-hand-threat")]
-    pub fn try_apply_hand_threat_tier2(
-        &self,
-        pos: &Position,
-        stack: &mut super::accumulator_layer_stacks::AccumulatorStackLayerStacks<L1>,
-        sources: &[Option<(usize, usize)>; 2],
-    ) -> bool {
-        self.feature_transformer.try_apply_hand_threat_tier2(pos, stack, sources)
     }
 
     /// 差分計算でAccumulatorを更新
@@ -935,132 +753,11 @@ impl LayerStacksNetwork {
 
                 // --- Tier 3: 全計算 (cache 経由) ---
                 if !updated {
-                    // Diagnostic: refresh が fire する原因 (find_usable=None の理由) を記録
-                    #[cfg(feature = "hand-threat-stats")]
-                    {
-                        use super::accumulator_layer_stacks::RefreshDiagResult;
-                        use std::sync::atomic::Ordering;
-                        let diag = $stack.diagnose_refresh_depth();
-                        match diag {
-                            RefreshDiagResult::Found(d) if d <= 4 => {
-                                super::hand_threat_features::stats::REFRESH_DIAG_DEPTH_1_4
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
-                            RefreshDiagResult::Found(d) if d <= 8 => {
-                                super::hand_threat_features::stats::REFRESH_DIAG_DEPTH_5_8
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
-                            RefreshDiagResult::Found(d) if d <= 16 => {
-                                super::hand_threat_features::stats::REFRESH_DIAG_DEPTH_9_16
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
-                            RefreshDiagResult::Found(d) if d <= 32 => {
-                                super::hand_threat_features::stats::REFRESH_DIAG_DEPTH_17_32
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
-                            RefreshDiagResult::Found(_) => {
-                                super::hand_threat_features::stats::REFRESH_DIAG_DEPTH_33_PLUS
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
-                            RefreshDiagResult::CurrentKingMoved => {
-                                super::hand_threat_features::stats::REFRESH_DIAG_CURRENT_KING_MOVED
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
-                            RefreshDiagResult::AncestorKingMoved(_) => {
-                                super::hand_threat_features::stats::REFRESH_DIAG_ANCESTOR_KING_MOVED
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
-                            RefreshDiagResult::ChainEnded(_) => {
-                                super::hand_threat_features::stats::REFRESH_DIAG_CHAIN_ENDED
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                        // King-move-allowed walk: HandThreat-specific Tier 2 を実装した場合の
-                        // path length 分布を記録する
-                        let kok = $stack.diagnose_refresh_depth_allowing_king();
-                        match kok {
-                            RefreshDiagResult::Found(d) if d == 1 => {
-                                super::hand_threat_features::stats::REFRESH_DIAG_KOK_DEPTH_1
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
-                            RefreshDiagResult::Found(d) if d == 2 => {
-                                super::hand_threat_features::stats::REFRESH_DIAG_KOK_DEPTH_2
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
-                            RefreshDiagResult::Found(d) if d <= 4 => {
-                                super::hand_threat_features::stats::REFRESH_DIAG_KOK_DEPTH_3_4
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
-                            RefreshDiagResult::Found(d) if d <= 8 => {
-                                super::hand_threat_features::stats::REFRESH_DIAG_KOK_DEPTH_5_8
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
-                            RefreshDiagResult::Found(_) => {
-                                super::hand_threat_features::stats::REFRESH_DIAG_KOK_DEPTH_9_PLUS
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
-                            _ => {
-                                super::hand_threat_features::stats::REFRESH_DIAG_KOK_NO_ANCESTOR
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                    }
-                    // --- HandThreat-specific Tier 2 ---
-                    // king move を許容して computed 祖先を探し、見つかったら multi-ply
-                    // walk で HandThreat だけ incremental 適用する。
-                    // HalfKA/PSQT/Threat は通常の refresh で処理 (skip_hand_threat=true)。
-                    #[cfg(feature = "nnue-hand-threat")]
-                    let mut hand_threat_done_via_tier2 = false;
-                    #[cfg(feature = "nnue-hand-threat")]
-                    let hand_threat_tier2_source: [Option<(usize, usize)>; 2] = if $net
-                        .feature_transformer
-                        .has_hand_threat
-                    {
-                        let black_src = $stack.find_usable_for_hand_threat(
-                            super::super::types::Color::Black,
-                            pos.king_square(super::super::types::Color::Black),
-                        );
-                        let white_src = $stack.find_usable_for_hand_threat(
-                            super::super::types::Color::White,
-                            pos.king_square(super::super::types::Color::White),
-                        );
-                        [black_src, white_src]
-                    } else {
-                        [None, None]
-                    };
-                    #[cfg(feature = "nnue-hand-threat")]
-                    {
-                        // 両 perspective に対して source が見つかった場合のみ Tier 2 を試行
-                        if hand_threat_tier2_source[0].is_some()
-                            && hand_threat_tier2_source[1].is_some()
-                            && $net.feature_transformer.has_hand_threat
-                        {
-                            // 各 perspective に対して source acc から HandThreat acc を copy →
-                            // path forward walk で snapshot ベース incremental
-                            let success = $net.feature_transformer.try_apply_hand_threat_tier2(
-                                pos,
-                                $stack,
-                                &hand_threat_tier2_source,
-                            );
-                            if success {
-                                hand_threat_done_via_tier2 = true;
-                            }
-                        }
-                    }
-
                     let acc = &mut $stack.current_mut().accumulator;
                     if let Some(
                         super::accumulator_layer_stacks::LayerStacksAccCache::$cache_variant(c),
                     ) = cache
                     {
-                        #[cfg(feature = "nnue-hand-threat")]
-                        $net.refresh_accumulator_with_cache_inner(
-                            pos,
-                            acc,
-                            c,
-                            hand_threat_done_via_tier2,
-                        );
-                        #[cfg(not(feature = "nnue-hand-threat"))]
                         $net.refresh_accumulator_with_cache(pos, acc, c);
                     } else {
                         $net.refresh_accumulator(pos, acc);

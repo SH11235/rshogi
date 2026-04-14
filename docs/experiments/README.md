@@ -23,7 +23,7 @@
 
 | Date | Doc | 概要 | 関連 archive tag |
 |---|---|---|---|
-| 2026-04-15 | [20260415_nnue_threat_experiments_retrospective](./20260415_nnue_threat_experiments_retrospective.md) | NNUE Threat / HandThreat 系特徴量実験の横断的回顧。Baseline (HalfKA_hm L1=1536) が依然最良、全派生は byoyomi 実戦棋力で超えられず | `archive/hand-threat-defensive` (rshogi, bullet-shogi 両方) |
+| 2026-04-15 | [20260415_nnue_threat_experiments_retrospective](./20260415_nnue_threat_experiments_retrospective.md) | NNUE Threat / HandThreat 系特徴量実験の横断的回顧。Baseline (HalfKA_hm L1=1536) が依然最良、全派生は byoyomi 実戦棋力で超えられず | rshogi: `archive/nnue-unadopted-features-20260415`、bullet-shogi: `archive/hand-threat-defensive` |
 
 ## 過去 archive の参照方法
 
@@ -31,11 +31,11 @@
 # rshogi
 git fetch --tags
 git tag -l 'archive/*'            # archive tag 一覧
-git checkout archive/hand-threat-defensive
+git checkout archive/nnue-unadopted-features-20260415
 # → 該当時点の state に移動。ファイル内容確認後、元ブランチへ戻る
 git checkout feat/threat-2a  # もしくは main 等
 
-# bullet-shogi (別リポジトリ)
+# bullet-shogi (別リポジトリ、HandThreat defensive 実装固有の tag)
 cd /path/to/bullet-shogi
 git fetch --tags
 git checkout archive/hand-threat-defensive

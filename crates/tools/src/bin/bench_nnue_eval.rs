@@ -23,15 +23,13 @@ use clap::Parser;
 
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::nnue::{
-    AccumulatorCacheLayerStacks, AccumulatorLayerStacks, DirtyPiece,
-    LAYER_STACK_PLY9_DEFAULT_BOUNDS, LayerStackBucketMode, LayerStacksNetwork, NNUEEvaluator,
-    NNUENetwork, NetworkLayerStacks, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, compute_bucket_index,
-    compute_king_ranks, compute_layer_stack_ply9_bucket_index,
-    compute_layer_stack_progress8_bucket_index, compute_layer_stack_progress8gikou_bucket_index,
-    compute_layer_stack_progress8kpabs_bucket_index, get_layer_stack_ply_bounds,
-    get_layer_stack_progress_coeff, get_layer_stack_progress_coeff_gikou_lite,
-    get_layer_stack_progress_kpabs_weights, parse_layer_stack_bucket_mode,
-    parse_layer_stack_ply_bounds_csv, set_layer_stack_bucket_mode, set_layer_stack_ply_bounds,
+    AccumulatorCacheLayerStacks, AccumulatorLayerStacks, DirtyPiece, LayerStackBucketMode,
+    LayerStacksNetwork, NNUEEvaluator, NNUENetwork, NetworkLayerStacks,
+    SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, compute_layer_stack_progress8_bucket_index,
+    compute_layer_stack_progress8gikou_bucket_index,
+    compute_layer_stack_progress8kpabs_bucket_index, get_layer_stack_progress_coeff,
+    get_layer_stack_progress_coeff_gikou_lite, get_layer_stack_progress_kpabs_weights,
+    parse_layer_stack_bucket_mode, set_layer_stack_bucket_mode,
     set_layer_stack_progress_kpabs_weights, sqr_clipped_relu_transform,
 };
 use rshogi_core::position::Position;
@@ -67,12 +65,8 @@ struct Cli {
     ls_progress_coeff: Option<PathBuf>,
 
     /// LayerStacks bucket モード
-    #[arg(long, default_value = "kingrank9")]
+    #[arg(long, default_value = "progress8kpabs")]
     ls_bucket_mode: String,
-
-    /// LayerStacks ply9 バケット境界
-    #[arg(long)]
-    ls_ply_bounds: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -314,15 +308,6 @@ fn bench_progress_bucket(positions: &[Position], weights: &[f32], warmup: u64, i
 fn compute_layer_stack_bucket_index(pos: &Position, mode: LayerStackBucketMode) -> usize {
     let side_to_move = pos.side_to_move();
     match mode {
-        LayerStackBucketMode::KingRank9 => {
-            let f_king = pos.king_square(side_to_move);
-            let e_king = pos.king_square(!side_to_move);
-            let (f_rank, e_rank) = compute_king_ranks(side_to_move, f_king, e_king);
-            compute_bucket_index(f_rank, e_rank)
-        }
-        LayerStackBucketMode::Ply9 => {
-            compute_layer_stack_ply9_bucket_index(pos.game_ply(), get_layer_stack_ply_bounds())
-        }
         LayerStackBucketMode::Progress8 => compute_layer_stack_progress8_bucket_index(
             pos,
             side_to_move,
@@ -361,19 +346,11 @@ fn configure_layer_stack_bucket(
 ) -> Result<LayerStackBucketMode> {
     let mode = parse_layer_stack_bucket_mode(&cli.ls_bucket_mode).ok_or_else(|| {
         anyhow!(
-            "invalid --ls-bucket-mode '{}'. expected one of: kingrank9, ply9, progress8, progress8gikou, progress8kpabs",
+            "invalid --ls-bucket-mode '{}'. expected one of: progress8, progress8gikou, progress8kpabs",
             cli.ls_bucket_mode
         )
     })?;
     set_layer_stack_bucket_mode(mode);
-
-    if let Some(bounds_text) = &cli.ls_ply_bounds {
-        let bounds = parse_layer_stack_ply_bounds_csv(bounds_text)
-            .map_err(|e| anyhow!("invalid --ls-ply-bounds: {e}"))?;
-        set_layer_stack_ply_bounds(bounds);
-    } else {
-        set_layer_stack_ply_bounds(LAYER_STACK_PLY9_DEFAULT_BOUNDS);
-    }
 
     if mode == LayerStackBucketMode::Progress8KPAbs {
         let weights = progress_weights.context(

@@ -14,8 +14,6 @@ use super::constants::HALFKA_HM_DIMENSIONS;
 #[cfg(feature = "nnue-psqt")]
 use super::constants::NUM_LAYER_STACK_BUCKETS;
 use super::features::{Feature, FeatureSet, HalfKA_hm, HalfKA_hm_FeatureSet};
-#[cfg(feature = "nnue-hand-threat")]
-use super::hand_threat_features;
 use super::leb128::read_compressed_tensor_i16_all;
 use super::stats::{count_refresh, count_update};
 #[cfg(feature = "nnue-threat")]
@@ -98,14 +96,6 @@ pub struct FeatureTransformerLayerStacks<const L1: usize> {
     /// Threat が有効か（アーキテクチャ文字列で判定）
     #[cfg(feature = "nnue-threat")]
     pub(crate) has_threat: bool,
-
-    /// HandThreat 重み [HAND_THREAT_DIMENSIONS × L1]
-    #[cfg(feature = "nnue-hand-threat")]
-    pub(crate) hand_threat_weights: AlignedBox<i8>,
-
-    /// HandThreat が有効か（アーキテクチャ文字列で判定）
-    #[cfg(feature = "nnue-hand-threat")]
-    pub(crate) has_hand_threat: bool,
 }
 
 impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
@@ -140,10 +130,6 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             threat_weights: AlignedBox::new_zeroed(0),
             #[cfg(feature = "nnue-threat")]
             has_threat: false,
-            #[cfg(feature = "nnue-hand-threat")]
-            hand_threat_weights: AlignedBox::new_zeroed(0),
-            #[cfg(feature = "nnue-hand-threat")]
-            has_hand_threat: false,
         })
     }
 
@@ -180,10 +166,6 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                 threat_weights: AlignedBox::new_zeroed(0),
                 #[cfg(feature = "nnue-threat")]
                 has_threat: false,
-                #[cfg(feature = "nnue-hand-threat")]
-                hand_threat_weights: AlignedBox::new_zeroed(0),
-                #[cfg(feature = "nnue-hand-threat")]
-                has_hand_threat: false,
             });
         }
 
@@ -220,10 +202,6 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                 threat_weights: AlignedBox::new_zeroed(0),
                 #[cfg(feature = "nnue-threat")]
                 has_threat: false,
-                #[cfg(feature = "nnue-hand-threat")]
-                hand_threat_weights: AlignedBox::new_zeroed(0),
-                #[cfg(feature = "nnue-hand-threat")]
-                has_hand_threat: false,
             });
         }
 
@@ -384,141 +362,6 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
         }
     }
 
-    /// HandThreat 重みをファイルから読み込み (i8, raw)
-    #[cfg(feature = "nnue-hand-threat")]
-    pub fn read_hand_threat_weights<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
-        use super::hand_threat_features::HAND_THREAT_DIMENSIONS;
-        let weight_count = HAND_THREAT_DIMENSIONS * L1;
-        self.hand_threat_weights = AlignedBox::new_zeroed(weight_count);
-        let slice = unsafe {
-            std::slice::from_raw_parts_mut(
-                self.hand_threat_weights.as_mut_ptr() as *mut u8,
-                weight_count,
-            )
-        };
-        reader.read_exact(slice)?;
-        self.has_hand_threat = true;
-        Ok(())
-    }
-
-    /// HandThreat 重みの行を取得（i8[L1]）
-    #[cfg(feature = "nnue-hand-threat")]
-    #[inline]
-    fn hand_threat_weight_row(&self, index: usize) -> &[i8] {
-        let offset = index * L1;
-        let end = offset + L1;
-        debug_assert!(
-            end <= self.hand_threat_weights.len(),
-            "hand_threat index out of range: {index}"
-        );
-        &self.hand_threat_weights[offset..end]
-    }
-
-    /// HandThreat 重み (i8) を i16 アキュムレータに加算（SIMD 最適化、board Threat と同実装）
-    #[cfg(feature = "nnue-hand-threat")]
-    #[inline]
-    fn add_hand_threat_weights(&self, accumulation: &mut [i16; L1], index: usize) {
-        let weights = self.hand_threat_weight_row(index);
-
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-        {
-            unsafe {
-                use std::arch::x86_64::*;
-                let acc_ptr = accumulation.as_mut_ptr();
-                let w_ptr = weights.as_ptr();
-
-                if L1 > 512 {
-                    _mm_prefetch(w_ptr.add(512), _MM_HINT_T0);
-                }
-                if L1 > 768 {
-                    _mm_prefetch(w_ptr.add(768), _MM_HINT_T0);
-                }
-                if L1 > 1024 {
-                    _mm_prefetch(w_ptr.add(1024), _MM_HINT_T0);
-                }
-                if L1 > 1280 {
-                    _mm_prefetch(w_ptr.add(1280), _MM_HINT_T0);
-                }
-
-                for i in 0..(L1 / 16) {
-                    let acc_vec = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
-                    let w8 = _mm_loadu_si128(w_ptr.add(i * 16) as *const __m128i);
-                    let w16 = _mm256_cvtepi8_epi16(w8);
-                    let result = _mm256_add_epi16(acc_vec, w16);
-                    _mm256_store_si256(acc_ptr.add(i * 16) as *mut __m256i, result);
-                }
-            }
-            return;
-        }
-
-        #[allow(unreachable_code)]
-        for (a, &w) in accumulation.iter_mut().zip(weights) {
-            *a = a.wrapping_add(w as i16);
-        }
-    }
-
-    /// HandThreat 重み (i8) を i16 アキュムレータから減算（SIMD 最適化）
-    #[cfg(feature = "nnue-hand-threat")]
-    #[inline]
-    fn sub_hand_threat_weights(&self, accumulation: &mut [i16; L1], index: usize) {
-        let weights = self.hand_threat_weight_row(index);
-
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-        {
-            unsafe {
-                use std::arch::x86_64::*;
-                let w_ptr = weights.as_ptr();
-                if L1 > 512 {
-                    _mm_prefetch(w_ptr.add(512), _MM_HINT_T0);
-                }
-                if L1 > 768 {
-                    _mm_prefetch(w_ptr.add(768), _MM_HINT_T0);
-                }
-                if L1 > 1024 {
-                    _mm_prefetch(w_ptr.add(1024), _MM_HINT_T0);
-                }
-                if L1 > 1280 {
-                    _mm_prefetch(w_ptr.add(1280), _MM_HINT_T0);
-                }
-                let acc_ptr = accumulation.as_mut_ptr();
-                for i in 0..(L1 / 16) {
-                    let acc_vec = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
-                    let w8 = _mm_loadu_si128(w_ptr.add(i * 16) as *const __m128i);
-                    let w16 = _mm256_cvtepi8_epi16(w8);
-                    let result = _mm256_sub_epi16(acc_vec, w16);
-                    _mm256_store_si256(acc_ptr.add(i * 16) as *mut __m256i, result);
-                }
-            }
-            return;
-        }
-
-        #[allow(unreachable_code)]
-        for (a, &w) in accumulation.iter_mut().zip(weights) {
-            *a = a.wrapping_sub(w as i16);
-        }
-    }
-
-    /// HandThreat アキュムレータの full rebuild
-    ///
-    /// 持ち駒を打つことによる potential attack pair を現局面で列挙し、
-    /// accumulator を 0 クリアしてから全 active indices を加算する。
-    ///
-    /// 初期版: 差分更新なし、常にこの関数を呼ぶ。
-    #[cfg(feature = "nnue-hand-threat")]
-    fn rebuild_hand_threat(
-        &self,
-        pos: &Position,
-        perspective: Color,
-        hand_threat_acc: &mut [i16; L1],
-    ) {
-        let king_sq = pos.king_square(perspective);
-        hand_threat_acc.fill(0);
-        // クロージャ版で Vec 割り当てを回避し、enumerate と weight 加算を融合
-        hand_threat_features::for_each_active_hand_threat_index(pos, perspective, king_sq, |idx| {
-            self.add_hand_threat_weights(hand_threat_acc, idx);
-        });
-    }
-
     /// PSQT アキュムレータのフル計算
     #[cfg(feature = "nnue-psqt")]
     fn refresh_psqt(
@@ -593,16 +436,6 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                 threat_features::for_each_active_threat_index(pos, perspective, king_sq, |idx| {
                     self.add_threat_weights(threat_acc, idx);
                 });
-            }
-
-            // HandThreat アキュムレータ（bias なし）
-            #[cfg(feature = "nnue-hand-threat")]
-            if self.has_hand_threat {
-                let hand_threat_acc = acc.get_hand_threat_mut(p);
-                self.rebuild_hand_threat(pos, perspective, hand_threat_acc);
-                #[cfg(feature = "hand-threat-stats")]
-                hand_threat_features::stats::REBUILD_FROM_REFRESH_ACCUMULATOR
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
 
@@ -737,62 +570,6 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                                 self.add_threat_weights(curr_threat, idx);
                             },
                         );
-                    }
-                }
-            }
-
-            // HandThreat 更新
-            //
-            // Phase 0 の Threat 更新と同じパターン:
-            // - needs_hand_threat_refresh が true (HM mirror 跨ぎ) → full rebuild
-            // - それ以外 → append_changed_hand_threat_indices で差分計算
-            //   差分計算が false を返した場合 (overflow や未対応ケース) → full rebuild fallback
-            #[cfg(feature = "nnue-hand-threat")]
-            if self.has_hand_threat {
-                let king_sq = pos.king_square(perspective);
-                let reset_hand_threat = hand_threat_features::needs_hand_threat_refresh(
-                    dirty_piece,
-                    king_sq,
-                    perspective,
-                );
-                if reset_hand_threat {
-                    let hand_threat_acc = acc.get_hand_threat_mut(p);
-                    self.rebuild_hand_threat(pos, perspective, hand_threat_acc);
-                    #[cfg(feature = "hand-threat-stats")]
-                    hand_threat_features::stats::REBUILD_FROM_UPDATE_RESET
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                } else {
-                    let prev_hand_threat = prev_acc.get_hand_threat(p);
-                    let curr_hand_threat = acc.get_hand_threat_mut(p);
-                    curr_hand_threat.copy_from_slice(prev_hand_threat);
-
-                    let mut h_removed = IndexList::<
-                        { hand_threat_features::MAX_CHANGED_HAND_THREAT_FEATURES },
-                    >::new();
-                    let mut h_added = IndexList::<
-                        { hand_threat_features::MAX_CHANGED_HAND_THREAT_FEATURES },
-                    >::new();
-                    let ok = hand_threat_features::append_changed_hand_threat_indices(
-                        pos,
-                        dirty_piece,
-                        perspective,
-                        king_sq,
-                        &mut h_removed,
-                        &mut h_added,
-                    );
-                    if ok {
-                        for idx in h_removed.iter() {
-                            self.sub_hand_threat_weights(curr_hand_threat, idx);
-                        }
-                        for idx in h_added.iter() {
-                            self.add_hand_threat_weights(curr_hand_threat, idx);
-                        }
-                    } else {
-                        // overflow or 未対応 → full rebuild fallback
-                        self.rebuild_hand_threat(pos, perspective, curr_hand_threat);
-                        #[cfg(feature = "hand-threat-stats")]
-                        hand_threat_features::stats::REBUILD_FROM_UPDATE_DIFF_FALLBACK
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
             }
@@ -931,59 +708,6 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                     }
                 }
             }
-
-            // HandThreat 更新 (キャッシュ版)
-            //
-            // 非キャッシュ版と同じロジック: needs_hand_threat_refresh で判定し、
-            // 差分更新 or full rebuild fallback。
-            #[cfg(feature = "nnue-hand-threat")]
-            if self.has_hand_threat {
-                let king_sq = pos.king_square(perspective);
-                let reset_hand_threat = hand_threat_features::needs_hand_threat_refresh(
-                    dirty_piece,
-                    king_sq,
-                    perspective,
-                );
-                if reset_hand_threat {
-                    let hand_threat_acc = acc.get_hand_threat_mut(p);
-                    self.rebuild_hand_threat(pos, perspective, hand_threat_acc);
-                    #[cfg(feature = "hand-threat-stats")]
-                    hand_threat_features::stats::REBUILD_FROM_UPDATE_CACHE_RESET
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                } else {
-                    let prev_hand_threat = prev_acc.get_hand_threat(p);
-                    let curr_hand_threat = acc.get_hand_threat_mut(p);
-                    curr_hand_threat.copy_from_slice(prev_hand_threat);
-
-                    let mut h_removed = IndexList::<
-                        { hand_threat_features::MAX_CHANGED_HAND_THREAT_FEATURES },
-                    >::new();
-                    let mut h_added = IndexList::<
-                        { hand_threat_features::MAX_CHANGED_HAND_THREAT_FEATURES },
-                    >::new();
-                    let ok = hand_threat_features::append_changed_hand_threat_indices(
-                        pos,
-                        dirty_piece,
-                        perspective,
-                        king_sq,
-                        &mut h_removed,
-                        &mut h_added,
-                    );
-                    if ok {
-                        for idx in h_removed.iter() {
-                            self.sub_hand_threat_weights(curr_hand_threat, idx);
-                        }
-                        for idx in h_added.iter() {
-                            self.add_hand_threat_weights(curr_hand_threat, idx);
-                        }
-                    } else {
-                        self.rebuild_hand_threat(pos, perspective, curr_hand_threat);
-                        #[cfg(feature = "hand-threat-stats")]
-                        hand_threat_features::stats::REBUILD_FROM_UPDATE_CACHE_DIFF_FALLBACK
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                }
-            }
         }
 
         acc.computed_accumulation = true;
@@ -996,134 +720,6 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
         pos: &Position,
         acc: &mut AccumulatorLayerStacks<L1>,
         cache: &mut AccumulatorCacheLayerStacks<L1>,
-    ) {
-        self.refresh_accumulator_with_cache_inner(pos, acc, cache, false);
-    }
-
-    /// `refresh_accumulator_with_cache` の inner: HandThreat 部分を skip するか選択可能。
-    ///
-    /// `skip_hand_threat = true` のときは HandThreat acc は更新しない (呼び出し側で
-    /// HandThreat-specific Tier 2 経由で incremental に適用するため)。
-    /// HandThreat-specific Tier 2: king move を許容する find_usable で見つけた source から
-    /// multi-ply walk で HandThreat acc を incremental に組み立てる。
-    ///
-    /// `sources[0]` = Black perspective, `sources[1]` = White perspective。
-    /// 両者が Some かつ source_idx が一致する場合のみ成功する (snapshot を共有するため)。
-    /// 戻り値: true なら成功 (current_acc の hand_threat_acc を更新済み)、false なら fallback。
-    #[cfg(feature = "nnue-hand-threat")]
-    pub fn try_apply_hand_threat_tier2(
-        &self,
-        pos: &Position,
-        stack: &mut AccumulatorStackLayerStacks<L1>,
-        sources: &[Option<(usize, usize)>; 2],
-    ) -> bool {
-        #[cfg(feature = "hand-threat-stats")]
-        use hand_threat_features::stats;
-        #[cfg(feature = "hand-threat-stats")]
-        use std::sync::atomic::Ordering;
-
-        let (Some((src_b, depth_b)), Some((src_w, depth_w))) = (sources[0], sources[1]) else {
-            #[cfg(feature = "hand-threat-stats")]
-            stats::FIXB_APPLY_SKIP_ONE_PERSPECTIVE_MISS.fetch_add(1, Ordering::Relaxed);
-            return false;
-        };
-        // 両 perspective で同じ source_idx が必要 (snapshot を共有して効率化)
-        if src_b != src_w {
-            #[cfg(feature = "hand-threat-stats")]
-            stats::FIXB_APPLY_SKIP_SRC_IDX_MISMATCH.fetch_add(1, Ordering::Relaxed);
-            return false;
-        }
-        let source_idx = src_b;
-        let depth = depth_b.max(depth_w);
-        if depth == 0 || depth > 8 {
-            #[cfg(feature = "hand-threat-stats")]
-            stats::FIXB_APPLY_SKIP_DEPTH_TOO_DEEP.fetch_add(1, Ordering::Relaxed);
-            return false;
-        }
-
-        // path 収集 (source → current 順)
-        let path = stack.collect_path(source_idx);
-        let Some(path) = path else {
-            #[cfg(feature = "hand-threat-stats")]
-            stats::FIXB_APPLY_SKIP_PATH_COLLECT_FAIL.fetch_add(1, Ordering::Relaxed);
-            return false;
-        };
-        if path.len() != depth {
-            // path 長 mismatch (king move filtering で path collect が短くなる場合等)
-            #[cfg(feature = "hand-threat-stats")]
-            stats::FIXB_APPLY_SKIP_PATH_LEN_MISMATCH.fetch_add(1, Ordering::Relaxed);
-            return false;
-        }
-
-        // current_acc の hand_threat acc を source から copy
-        let source_acc_clone = stack.entry_at(source_idx).accumulator.clone();
-        {
-            let current_acc = &mut stack.current_mut().accumulator;
-            for p in 0..2 {
-                current_acc
-                    .get_hand_threat_mut(p)
-                    .copy_from_slice(source_acc_clone.get_hand_threat(p));
-            }
-        }
-
-        // snapshot を current pos から構築し、reverse walk で source 状態に戻す
-        let mut snapshot = hand_threat_features::HandThreatPosSnapshot::from_pos(pos);
-        // path は source → current 順、逆順で reverse-apply
-        let mut path_entries: [usize; 8] = [0; 8];
-        let path_len = path.len();
-        for (i, idx) in path.iter().enumerate() {
-            path_entries[i] = idx;
-        }
-        for i in (0..path_len).rev() {
-            let dp = stack.entry_at(path_entries[i]).dirty_piece;
-            snapshot.apply_dirty_reverse(&dp);
-        }
-
-        // forward walk で各 step に対し HandThreat diff を適用
-        for &entry_idx in &path_entries[..path_len] {
-            let dp = stack.entry_at(entry_idx).dirty_piece;
-            snapshot.apply_dirty_forward(&dp);
-            for perspective in [Color::Black, Color::White] {
-                let p = perspective as usize;
-                let king_sq = snapshot.king_square(perspective);
-                let mut ht_removed =
-                    IndexList::<{ hand_threat_features::MAX_CHANGED_HAND_THREAT_FEATURES }>::new();
-                let mut ht_added =
-                    IndexList::<{ hand_threat_features::MAX_CHANGED_HAND_THREAT_FEATURES }>::new();
-                let ok = hand_threat_features::append_changed_hand_threat_indices(
-                    &snapshot,
-                    &dp,
-                    perspective,
-                    king_sq,
-                    &mut ht_removed,
-                    &mut ht_added,
-                );
-                if !ok {
-                    #[cfg(feature = "hand-threat-stats")]
-                    stats::FIXB_APPLY_FAIL_DIFF_FALLBACK.fetch_add(1, Ordering::Relaxed);
-                    return false;
-                }
-                let hand_threat_acc = stack.current_mut().accumulator.get_hand_threat_mut(p);
-                for idx in ht_removed.iter() {
-                    self.sub_hand_threat_weights(hand_threat_acc, idx);
-                }
-                for idx in ht_added.iter() {
-                    self.add_hand_threat_weights(hand_threat_acc, idx);
-                }
-            }
-        }
-        #[cfg(feature = "hand-threat-stats")]
-        stats::FIXB_APPLY_SUCCESS.fetch_add(1, Ordering::Relaxed);
-        true
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn refresh_accumulator_with_cache_inner(
-        &self,
-        pos: &Position,
-        acc: &mut AccumulatorLayerStacks<L1>,
-        cache: &mut AccumulatorCacheLayerStacks<L1>,
-        skip_hand_threat: bool,
     ) {
         for perspective in [Color::Black, Color::White] {
             count_refresh!();
@@ -1147,16 +743,6 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                 threat_features::for_each_active_threat_index(pos, perspective, king_sq, |idx| {
                     self.add_threat_weights(threat_acc, idx);
                 });
-            }
-
-            // HandThreat もキャッシュ非対象なのでフル再計算 (skip_hand_threat=true で省略)
-            #[cfg(feature = "nnue-hand-threat")]
-            if self.has_hand_threat && !skip_hand_threat {
-                let hand_threat_acc = acc.get_hand_threat_mut(p);
-                self.rebuild_hand_threat(pos, perspective, hand_threat_acc);
-                #[cfg(feature = "hand-threat-stats")]
-                hand_threat_features::stats::REBUILD_FROM_REFRESH_ACCUMULATOR_WITH_CACHE
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
 
@@ -1211,8 +797,6 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
         };
 
         // source_acc から main + psqt + threat をコピー。
-        // HandThreat は path.len==1 の fast path は pos 直接で rebuild せず、
-        // path.len>=2 の multi-ply walk 内で source→current のコピーを行う。
         let source_acc = stack.entry_at(source_idx).accumulator.clone();
         {
             let current_acc = &mut stack.current_mut().accumulator;
@@ -1339,74 +923,6 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                             self.add_threat_weights(threat_acc, idx);
                         },
                     );
-                }
-            }
-        }
-
-        // HandThreat: path.len == 1 は pos を直接使う fast path、
-        //             path.len > 1 は rebuild fallback。
-        // (multi-ply snapshot walk は 2026-04-14 に試行したが、rebuild_hand_threat が
-        //  十分高速 [acc.fill + bitboard iter + LUT] で、4 diff calls > 2 rebuilds だった
-        //  ため neutral / -3% 退行で採用せず。counter のみ残す。)
-        #[cfg(feature = "nnue-hand-threat")]
-        if self.has_hand_threat {
-            #[cfg(feature = "hand-threat-stats")]
-            {
-                use hand_threat_features::stats;
-                use std::sync::atomic::Ordering;
-                let counter = match path.len() {
-                    1 => &stats::TIERD_PATH_LEN_1,
-                    2 => &stats::TIERD_PATH_LEN_2,
-                    3 => &stats::TIERD_PATH_LEN_3,
-                    _ => &stats::TIERD_PATH_LEN_4_PLUS,
-                };
-                counter.fetch_add(1, Ordering::Relaxed);
-            }
-            if path.len() == 1 {
-                // Fast path: single-ply、pos そのまま使う
-                let entry_idx = path.iter().next().unwrap();
-                let dirty_piece = stack.entry_at(entry_idx).dirty_piece;
-                for perspective in [Color::Black, Color::White] {
-                    let p = perspective as usize;
-                    let king_sq = pos.king_square(perspective);
-                    let mut ht_removed = IndexList::<
-                        { hand_threat_features::MAX_CHANGED_HAND_THREAT_FEATURES },
-                    >::new();
-                    let mut ht_added = IndexList::<
-                        { hand_threat_features::MAX_CHANGED_HAND_THREAT_FEATURES },
-                    >::new();
-                    let ok = hand_threat_features::append_changed_hand_threat_indices(
-                        pos,
-                        &dirty_piece,
-                        perspective,
-                        king_sq,
-                        &mut ht_removed,
-                        &mut ht_added,
-                    );
-                    let hand_threat_acc = stack.current_mut().accumulator.get_hand_threat_mut(p);
-                    if ok {
-                        for idx in ht_removed.iter() {
-                            self.sub_hand_threat_weights(hand_threat_acc, idx);
-                        }
-                        for idx in ht_added.iter() {
-                            self.add_hand_threat_weights(hand_threat_acc, idx);
-                        }
-                    } else {
-                        self.rebuild_hand_threat(pos, perspective, hand_threat_acc);
-                        #[cfg(feature = "hand-threat-stats")]
-                        hand_threat_features::stats::REBUILD_FROM_FORWARD_UPDATE_DIFF_FALLBACK
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                }
-            } else {
-                // Multi-ply: rebuild fallback
-                for perspective in [Color::Black, Color::White] {
-                    let p = perspective as usize;
-                    let hand_threat_acc = stack.current_mut().accumulator.get_hand_threat_mut(p);
-                    self.rebuild_hand_threat(pos, perspective, hand_threat_acc);
-                    #[cfg(feature = "hand-threat-stats")]
-                    hand_threat_features::stats::REBUILD_FROM_FORWARD_UPDATE_PATH_LONG
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         }
@@ -2016,10 +1532,6 @@ mod tests {
             threat_weights: AlignedBox::new_zeroed(0),
             #[cfg(feature = "nnue-threat")]
             has_threat: false,
-            #[cfg(feature = "nnue-hand-threat")]
-            hand_threat_weights: AlignedBox::new_zeroed(0),
-            #[cfg(feature = "nnue-hand-threat")]
-            has_hand_threat: false,
         }
     }
 
