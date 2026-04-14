@@ -751,72 +751,97 @@ pub fn append_changed_hand_threat_indices(
         bump!(INCREMENTAL_OK);
         return true;
     }
-    if dirty_piece.king_moved[Color::Black as usize]
-        || dirty_piece.king_moved[Color::White as usize]
-    {
-        bump!(FALLBACK_KING_MOVE);
-        return false;
-    }
     if dirty_piece.dirty_num > 2 {
         bump!(FALLBACK_OTHER);
         return false;
     }
 
+    // 玉移動の検出。HM mirror 跨ぎは外側 needs_hand_threat_refresh で fallback 済み。
+    // 残るのは within-mirror king move のみ → King を board piece として扱う。
+    // King は ThreatClass に含まれないので attack target からは自動 filter される。
+    let is_king_move = dirty_piece.king_moved[0] || dirty_piece.king_moved[1];
+
     let cp0 = &dirty_piece.changed_piece[0];
-    let old_info_board = decode_board_threat_info_fb(cp0.old_piece.fb);
-    let new_info = decode_board_threat_info_fb(cp0.new_piece.fb);
-    let Some(new_info) = new_info else {
-        // new が盤上駒でない → 異常 (drop でも new は盤上のはず)
-        bump!(FALLBACK_OTHER);
-        return false;
-    };
-    let (new_color, _new_class, new_pt, to_sq) = new_info;
 
     // 二歩 state が flip した (color, file)。capture / drop の両方で設定される可能性。
-    // 非 Pawn が生歩を捕獲: (cap_color, to_sq.file)  pawn count 1→0
-    // Pawn drop:           (dropper,  to_sq.file)  pawn count 0→1
     let mut pawn_file_flip: Option<(Color, u8)> = None;
-
-    // Drop 判定: old が盤上駒でない場合は手駒側 BonaPiece のはず
-    let is_drop = old_info_board.is_none();
-    // drop 1→0 transition 情報 (is_drop 時に drop 先 block が空になるケース)
     let mut is_drop_1to0_transition = false;
-    let (old_color, old_pt, from_sq) = if let Some((oc, _, op, fs)) = old_info_board {
-        (oc, op, fs)
-    } else {
-        // Drop: cp0.old_piece.fb は手駒 BonaPiece → decode
-        let Some((dropper, dropped_pt)) = decode_hand_piece_fb(cp0.old_piece.fb) else {
-            // 想定外 (old が ZERO 等)
+    let is_drop;
+    let old_color: Color;
+    let old_pt: PieceType;
+    let from_sq: Square;
+    let new_pt: PieceType;
+    let to_sq: Square;
+
+    if is_king_move {
+        // King 移動 (within-mirror)。decode_board_square_fb で from/to を抽出。
+        // King 捕獲も可能 (dirty_num=2)。capture 側は後段の通常経路で処理。
+        use super::threat_features::decode_board_square_fb;
+        let king_color = if dirty_piece.king_moved[0] {
+            Color::Black
+        } else {
+            Color::White
+        };
+        let from = decode_board_square_fb(cp0.old_piece.fb);
+        let to = decode_board_square_fb(cp0.new_piece.fb);
+        let (Some(from), Some(to)) = (from, to) else {
             bump!(FALLBACK_OTHER);
             return false;
         };
-        // dropped_pt と new_pt の整合性チェック (drop は成り不可なので一致するはず)
-        if dropped_pt != new_pt {
+        is_drop = false;
+        from_sq = from;
+        to_sq = to;
+        old_color = king_color;
+        old_pt = PieceType::King;
+        new_pt = PieceType::King;
+    } else {
+        // 通常の board move / capture / drop
+        let old_info_board = decode_board_threat_info_fb(cp0.old_piece.fb);
+        let new_info = decode_board_threat_info_fb(cp0.new_piece.fb);
+        let Some((nc, _new_class, npt, nto)) = new_info else {
+            bump!(FALLBACK_OTHER);
+            return false;
+        };
+        new_pt = npt;
+        to_sq = nto;
+        let new_color_local = nc;
+
+        if let Some((oc, _, op, fs)) = old_info_board {
+            is_drop = false;
+            old_color = oc;
+            old_pt = op;
+            from_sq = fs;
+        } else {
+            // Drop: cp0.old_piece.fb は手駒 BonaPiece → decode
+            let Some((dropper, dropped_pt)) = decode_hand_piece_fb(cp0.old_piece.fb) else {
+                bump!(FALLBACK_OTHER);
+                return false;
+            };
+            if dropped_pt != new_pt {
+                bump!(FALLBACK_OTHER);
+                return false;
+            }
+            if dropped_pt == PieceType::Pawn {
+                pawn_file_flip = Some((dropper, to_sq.file() as u8));
+            }
+            if pos.hand(dropper).count(dropped_pt) == 0 {
+                is_drop_1to0_transition = true;
+            }
+            if dirty_piece.dirty_num != 1 {
+                bump!(FALLBACK_OTHER);
+                return false;
+            }
+            is_drop = true;
+            old_color = dropper;
+            old_pt = dropped_pt;
+            from_sq = to_sq; // sentinel
+        }
+        if old_color != new_color_local {
             bump!(FALLBACK_OTHER);
             return false;
         }
-        // Pawn drop: dropper の file(to_sq) が 0→1 で flip
-        // (二歩ルールにより drop 前は必ず file に 0 枚)
-        if dropped_pt == PieceType::Pawn {
-            pawn_file_flip = Some((dropper, to_sq.file() as u8));
-        }
-        // hand count が 0 になれば 1→0 transition として後段で direct-push
-        if pos.hand(dropper).count(dropped_pt) == 0 {
-            is_drop_1to0_transition = true;
-        }
-        if dirty_piece.dirty_num != 1 {
-            // Drop なのに dirty_num=2 は想定外
-            bump!(FALLBACK_OTHER);
-            return false;
-        }
-        // Sentinel: from_sq = to_sq にする (drops では from_sq は存在しないが、
-        // 後段の Bitboard 演算 ({from}∪{to}) と rev_from 計算を簡略化できる)
-        (dropper, dropped_pt, to_sq)
-    };
-    if old_color != new_color {
-        bump!(FALLBACK_OTHER);
-        return false;
     }
+
     // Promotion 分類と incremental 可否判定:
     // Promotion 可否判定:
     //  - 成り対象が Pawn (Pawn → ProPawn) は動 player 側の pawn file count が
@@ -2029,6 +2054,30 @@ mod tests {
         let mut pos = Position::new();
         pos.set_sfen("4k4/9/9/9/4B4/9/9/9/4K4 b R 1").expect("bishop promotion sfen");
         let m = Move::from_usi("5e2b+").expect("5e2b+");
+        verify_incremental_hand_threat(&mut pos, m);
+    }
+
+    /// King move within HM mirror (capture なし)
+    /// king は ThreatClass に含まれないため target としては filter されるが、
+    /// from_sq/to_sq の occupancy 変化は通常の board move と同じく diff される。
+    #[test]
+    fn test_hand_threat_incremental_king_move_within_mirror() {
+        // Black King at 5h, moves to 5g. White king at 5a.
+        // Both kings in file 5 (mid file), within HM mirror zone.
+        // hand に Silver と Pawn を持たせて diff の中身が空でないようにする
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/9/9/9/9/4K4/9 b SP 1").expect("king move sfen");
+        let m = Move::from_usi("5h5g").expect("5h5g");
+        verify_incremental_hand_threat(&mut pos, m);
+    }
+
+    /// King move with capture (within mirror)
+    #[test]
+    fn test_hand_threat_incremental_king_capture_within_mirror() {
+        // Black King at 5h captures white pawn at 5g.
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/9/9/9/4p4/4K4/9 b S 1").expect("king capture sfen");
+        let m = Move::from_usi("5h5g").expect("5h5g");
         verify_incremental_hand_threat(&mut pos, m);
     }
 

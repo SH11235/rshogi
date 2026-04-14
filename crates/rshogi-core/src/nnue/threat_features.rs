@@ -757,9 +757,9 @@ pub fn for_each_active_threat_index<F: FnMut(usize)>(
 // =============================================================================
 
 /// BonaPiece (fb perspective) から盤上駒のマスを抽出する。
-/// 手駒・ZERO は None。King も含む（占有ビット再構成用）。
-#[cfg(feature = "nnue-threat")]
-fn decode_board_square_fb(bp: BonaPiece) -> Option<Square> {
+/// 手駒・ZERO は None。King も含む（占有ビット再構成用 / hand_threat の king move 対応）。
+#[cfg(any(feature = "nnue-threat", feature = "nnue-hand-threat"))]
+pub(crate) fn decode_board_square_fb(bp: BonaPiece) -> Option<Square> {
     use super::bona_piece::{FE_END, FE_HAND_END};
     use super::bona_piece_halfka_hm::{E_KING, F_KING};
 
